@@ -136,6 +136,18 @@ describe('parseArtifact', () => {
   })
 })
 
+describe('parseArtifact — publisher', () => {
+  it('keeps a string publisher', () => {
+    expect(parseArtifact(makeArtifact({ publisher: 'cfgms' }))?.publisher).toBe('cfgms')
+  })
+
+  it('drops a non-string publisher', () => {
+    expect(parseArtifact(makeArtifact({ publisher: 42 }))?.publisher).toBeUndefined()
+    expect(parseArtifact(makeArtifact({ publisher: { name: 'x' } }))?.publisher).toBeUndefined()
+    expect(parseArtifact(makeArtifact())?.publisher).toBeUndefined()
+  })
+})
+
 describe('parseArtifactList', () => {
   it('throws for non-arrays', () => {
     expect(() => parseArtifactList(null)).toThrow('unexpected response shape')
@@ -408,6 +420,20 @@ describe('InstallerPage — artifact table columns', () => {
     expect(screen.getByRole('columnheader', { name: /size/i })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: /checksum/i })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: /download/i })).toBeInTheDocument()
+  })
+
+  it('shows the publisher, or Unsigned when absent, in the Publisher column', async () => {
+    fetchMock.mockResolvedValue(makeArtifactListResponse([
+      makeArtifact({ platform: 'linux', publisher: 'cfgms' }),
+      makeArtifact({ platform: 'windows' }),
+    ]))
+    renderPage()
+    await waitFor(() => screen.getByTestId('artifact-table'))
+    expect(screen.getByRole('columnheader', { name: /publisher/i })).toBeInTheDocument()
+    const rows = screen.getAllByTestId('artifact-row')
+    expect(within(rows[0]).getByText('cfgms')).toBeInTheDocument()
+    expect(within(rows[0]).queryByText('Unsigned')).not.toBeInTheDocument()
+    expect(within(rows[1]).getByText('Unsigned')).toBeInTheDocument()
   })
 
   it('renders platform and arch as text in the table row', async () => {

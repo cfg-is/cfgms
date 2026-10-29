@@ -27,6 +27,12 @@
 // base64 signature is printed, ready to redirect into the --signature file:
 //
 //	go run ./scripts/sign-steward-binary --installer <file> <platform> <arch> > installer.sig
+//
+// Release use: --require-publisher-seed (leading flag, either mode) refuses to run when
+// CFGMS_PUBLISHER_SEED is empty instead of falling back to the zero-seed dev key, so a
+// misconfigured release job fails closed rather than signing with a public key:
+//
+//	go run ./scripts/sign-steward-binary --require-publisher-seed --installer <file> <platform> <arch>
 package main
 
 import (
@@ -44,6 +50,9 @@ import (
 // publisherSeedEnv optionally supplies the 32-byte Ed25519 seed (standard base64).
 const publisherSeedEnv = "CFGMS_PUBLISHER_SEED"
 
+// requireSeedFlag makes a missing CFGMS_PUBLISHER_SEED an error rather than a dev-key fallback.
+const requireSeedFlag = "--require-publisher-seed"
+
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -52,6 +61,19 @@ func main() {
 }
 
 func run(args []string, out io.Writer) error {
+	// The flag may precede or follow --installer; both are leading flags.
+	requireSeed := false
+	for i := 0; i < len(args) && i < 2; i++ {
+		if args[i] == requireSeedFlag {
+			requireSeed = true
+			args = append(append([]string{}, args[:i]...), args[i+1:]...)
+			break
+		}
+	}
+	if requireSeed && os.Getenv(publisherSeedEnv) == "" {
+		return fmt.Errorf("%s is required by %s and is not set; refusing to fall back to the dev key",
+			publisherSeedEnv, requireSeedFlag)
+	}
 	if len(args) > 0 && args[0] == "--installer" {
 		return runInstaller(args[1:], out)
 	}

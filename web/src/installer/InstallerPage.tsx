@@ -6,7 +6,7 @@
  *
  * Lists available installer artifacts from GET /api/v1/installer/artifacts
  * ({data:[...]} envelope — served by handleListInstallerArtifacts). Fixed
- * column set: Platform, Arch, Size, Checksum, Download.
+ * column set: Platform, Arch, Size, Checksum, Publisher, Download.
  *
  * Scope mismatch between the two columns, labelled rather than hidden:
  * the rows are tenant-scoped (handleListInstallerArtifacts lists the caller's
@@ -66,6 +66,9 @@ interface ArtifactInfo {
   size: number
   checksum: string
   content_type: string
+  // Publisher that signed the artifact; absent for artifacts stored before
+  // publisher signatures were required.
+  publisher?: string
 }
 
 interface FetchOutcome {
@@ -88,6 +91,7 @@ export function parseArtifact(value: unknown): ArtifactInfo | null {
     size: typeof r.size === 'number' ? r.size : 0,
     checksum: typeof r.checksum === 'string' ? r.checksum : '',
     content_type: typeof r.content_type === 'string' ? r.content_type : '',
+    ...(typeof r.publisher === 'string' && r.publisher !== '' ? { publisher: r.publisher } : {}),
   }
 }
 
@@ -244,6 +248,7 @@ function ArtifactTable({
             <th>Arch</th>
             <th>Size</th>
             <th>Checksum</th>
+            <th>Publisher</th>
             <th>Download</th>
             <th>Actions</th>
             <th className="c-spacer" aria-hidden="true" />
@@ -267,6 +272,7 @@ function ArtifactTable({
                     {truncated}
                   </span>
                 </td>
+                <td><span className="mut">{a.publisher ?? 'Unsigned'}</span></td>
                 <td>
                   <a
                     href={downloadHref}
