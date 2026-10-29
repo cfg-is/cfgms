@@ -302,3 +302,76 @@ func TestRun_InstallerMode_Errors(t *testing.T) {
 	assert.ErrorIs(t, run([]string{"--installer", writeBinary(t, []byte("x")), "li|nux", "amd64"}, &out),
 		trust.ErrInvalidSignatureMessage)
 }
+
+func TestRun_RequirePublisherSeed_FailsClosedWhenSeedUnset(t *testing.T) {
+	t.Setenv(publisherSeedEnv, "")
+	path := writeBinary(t, []byte("installer-bytes"))
+
+	for name, args := range map[string][]string{
+		"installer": {"--require-publisher-seed", "--installer", path, "windows", "amd64"},
+		"binary":    {"--require-publisher-seed", path, "v0.9.41", "windows", "amd64"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := run(args, &out)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), publisherSeedEnv)
+			assert.Empty(t, out.String(), "no signature may reach stdout without a seed")
+			assert.NoFileExists(t, path+".sig")
+		})
+	}
+}
+
+func TestRun_RequirePublisherSeed_SignsWithSuppliedSeed(t *testing.T) {
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(0x30 + i)
+	}
+	encoded := base64.StdEncoding.EncodeToString(seed)
+	t.Setenv(publisherSeedEnv, encoded)
+	content := []byte("installer-bytes")
+	path := writeBinary(t, content)
+
+	var out bytes.Buffer
+	require.NoError(t, run([]string{"--installer", "--require-publisher-seed", path, "linux", "arm64"}, &out))
+	sigBytes, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(out.String()))
+	require.NoError(t, err)
+
+	priv := ed25519.NewKeyFromSeed(seed)
+	sum := sha256.Sum256(content)
+	message, err := trust.InstallerMessage(hex.EncodeToString(sum[:]), "linux", "arm64")
+	require.NoError(t, err)
+	assert.True(t, ed25519.Verify(priv.Public().(ed25519.PublicKey), []byte(message), sigBytes))
+
+	dev := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	assert.False(t, ed25519.Verify(dev.Public().(ed25519.PublicKey), []byte(message), sigBytes),
+		"the signature must come from the supplied seed, not the dev key")
+}
+
+func TestRun_RequirePublisherSeed_NeverEchoesSeed(t *testing.T) {
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(0xB0 + i)
+	}
+	encoded := base64.StdEncoding.EncodeToString(seed)
+	t.Setenv(publisherSeedEnv, encoded)
+	path := writeBinary(t, []byte("installer-bytes"))
+
+	var out bytes.Buffer
+	require.NoError(t, run([]string{"--require-publisher-seed", "--installer", path, "windows", "amd64"}, &out))
+	assert.NotContains(t, out.String(), encoded)
+	assert.False(t, bytes.Contains(out.Bytes(), seed))
+
+	t.Setenv(publisherSeedEnv, "not base64!!")
+	out.Reset()
+	err := run([]string{"--require-publisher-seed", "--installer", path, "windows", "amd64"}, &out)
+	require.Error(t, err)
+	assert.Empty(t, out.String())
+}
+
+func TestPublisherKey_DefaultStillAllowedWithoutFlag(t *testing.T) {
+	t.Setenv(publisherSeedEnv, "")
+	path := writeBinary(t, []byte("installer-bytes"))
+	var out bytes.Buffer
+	require.NoError(t, run([]string{"--installer", path, "windows", "amd64"}, &out))
+}
