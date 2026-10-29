@@ -155,7 +155,7 @@ func (e *Executor) Execute(ctx context.Context) (*ExecutionResult, error) {
 	// this goroutine, plus the steward's per-device execution slot — blocked forever
 	// after a top-level-only cmd.Process.Kill().
 	tree := newProcessTree(e.logger)
-	tree.prepare()
+	tree.prepare(cmd)
 	defer tree.close()
 
 	// Start the command

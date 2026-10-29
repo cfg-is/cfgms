@@ -308,8 +308,11 @@ func TestExecute_Windows_TimeoutKillsProcessTree(t *testing.T) {
 	// the grandchild fails it exactly as before; only the false failure from
 	// racing PowerShell's own cold start has been removed.
 	require.NotZero(t, pid, "grandchild must have recorded its PID before the timeout")
+	// The grandchild sleeps at least reapGracePeriod+30s past the timeout, so a
+	// 20s window tolerates a loaded runner (slow tasklist, delayed process
+	// teardown) yet still fails when the tree-kill misses the grandchild.
 	assert.Eventually(t, func() bool { return !isProcessAlive(pid) },
-		5*time.Second, 100*time.Millisecond,
+		20*time.Second, 200*time.Millisecond,
 		"grandchild process (pid %d) must be terminated with the tree", pid)
 }
 

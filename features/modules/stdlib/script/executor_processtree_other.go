@@ -28,7 +28,7 @@ func newProcessTree(logger logging.Logger) *processTree {
 }
 
 // prepare is a no-op on non-Windows platforms.
-func (p *processTree) prepare() {}
+func (p *processTree) prepare(_ *exec.Cmd) {}
 
 // track is a no-op on non-Windows platforms.
 func (p *processTree) track(_ *exec.Cmd) {}
