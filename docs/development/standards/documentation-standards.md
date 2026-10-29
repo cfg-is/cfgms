@@ -8,6 +8,12 @@ These standards ensure that documentation is clear, consistent, and maintainable
 
 ## Documentation Principles
 
+The [documentation currency contract](../product-planning.md#documentation-currency)
+governs retention: current behavior and approved future direction must be
+distinguished; superseded guidance is updated, consolidated or deleted with
+references repaired. Git history retains old versions. A historical label alone
+does not make an obsolete document useful.
+
 - **Clarity**: Documentation should be clear and easy to understand.
 - **Consistency**: Documentation should be consistent in style and format.
 - **Completeness**: Documentation should cover all necessary information.

@@ -186,4 +186,4 @@ Let a module own some fields of an object while osquery contributes the rest.
 - [ADR-006](006-module-packaging-and-distribution.md) — Module Packaging and Distribution (this ADR extends it)
 - ADR-017 — DNA Composition & Sync (forthcoming; depends on clauses 4 and 5)
 - `CLAUDE.md` — Modules section, four execution paths, banned patterns
-- `docs/product/roadmap.md` — Captured Backlog (module foundation, OSquery, controller baseline DNA)
+- `docs/product/roadmap.md` — current delivery coverage and unscheduled candidates (module, OSquery and DNA contracts live in their accepted ADRs)

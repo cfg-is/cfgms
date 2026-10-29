@@ -183,7 +183,7 @@ Read everything — even managed objects — from osquery.
 - [ADR-006](006-module-packaging-and-distribution.md) — Module Packaging and Distribution
 - `features/steward/dna/dna.go` — current `Collector`, `ComputeHash` (redefined by this ADR)
 - `features/steward/dna/drift` — drift subsystem gated by the managed/observe-only class
-- `docs/product/roadmap.md` — Captured Backlog (OSquery, controller baseline DNA) + [Digital Twin & DEX — Tiered Rollout](../../product/roadmap.md#digital-twin--digital-employee-experience-dex--tiered-rollout) (the Tier-1 commitments this amendment lands)
+- `docs/product/roadmap.md` — existing-work coverage and [Deferred capability direction](../../product/roadmap.md#deferred-capability-direction) (the Tier-1 commitments this amendment lands)
 
 **Flat-DNA-surface consumers to re-home on the fragment model.** Two shipped
 consumers read/write today's flat attribute map directly and must be migrated

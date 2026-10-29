@@ -33,6 +33,11 @@ ITEM_ID=$(echo "$ARGUMENTS" | sed -n 's/.*--project-item[[:space:]]\+\([^[:space
 
 ## Pre-Checks
 
+Apply `docs/development/product-planning.md`. Read the product vision and active
+SaaS priorities, reconcile existing implementation and issue coverage, and map
+each epic success criterion to stories and verification evidence. Preserve
+existing story-body headings and queue/security rules.
+
 Before decomposing, gather context in parallel:
 
 1. **Epic body** — extract Goal, Success Criteria, Non-Goals, Constraints, PM Notes
