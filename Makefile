@@ -1837,7 +1837,7 @@ security-gosec:
 		echo "❌ Error: gosec is not installed"; \
 		echo ""; \
 		echo "Install gosec using Go:"; \
-		echo "  go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0"; \
+		echo "  go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0"; \
 		echo ""; \
 		echo "For more info: https://github.com/securego/gosec"; \
 		exit 1; \

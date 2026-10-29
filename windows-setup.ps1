@@ -126,7 +126,7 @@ if ($goBinDir) {
     # from source ties its build Go to the Go on this box, which the same bump
     # already moved. See the comment in .devcontainer/Dockerfile (Issue #3627).
     $goTools = @(
-        @{ Name = 'gosec';         Package = 'github.com/securego/gosec/v2/cmd/gosec@v2.29.0' },
+        @{ Name = 'gosec';         Package = 'github.com/securego/gosec/v2/cmd/gosec@v2.30.0' },
         @{ Name = 'staticcheck';   Package = 'honnef.co/go/tools/cmd/staticcheck@2026.2.2' },
         @{ Name = 'gitleaks';      Package = 'github.com/zricethezav/gitleaks/v8@v8.30.1' },
         @{ Name = 'go-licenses';   Package = 'github.com/google/go-licenses/v2@v2.0.1' },

@@ -4,6 +4,7 @@ package auth
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -148,4 +149,15 @@ func TestCallbackHandler_handleCallback_rendersVisibleText(t *testing.T) {
 		assert.Contains(t, body, "Missing authorization code. Please close this window and try again.")
 		assert.Contains(t, body, "<strong>Error:</strong> invalid_request")
 	})
+}
+
+func TestCallbackHandler_StartCallbackServer_bindsLoopbackOnly(t *testing.T) {
+	h := NewCallbackHandler()
+	ctx := context.Background()
+	require.NoError(t, h.StartCallbackServer(ctx, "0"))
+	defer func() { _ = h.StopCallbackServer(ctx) }()
+
+	addr, ok := h.listener.Addr().(*net.TCPAddr)
+	require.True(t, ok)
+	assert.True(t, addr.IP.IsLoopback(), "callback listener must bind loopback, got %s", addr.IP)
 }
