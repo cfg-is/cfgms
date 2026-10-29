@@ -28,7 +28,7 @@ require (
 	github.com/lib/pq v1.12.3
 	github.com/mattn/go-isatty v0.0.24
 	github.com/openbao/openbao/api/v2 v2.7.1
-	github.com/quic-go/quic-go v0.63.0
+	github.com/quic-go/quic-go v0.64.1
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
