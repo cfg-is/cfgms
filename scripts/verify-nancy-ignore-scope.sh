@@ -5,7 +5,7 @@
 # verify-nancy-ignore-scope.sh — Proves .nancy-ignore cannot suppress a CVE it
 # does not literally list, without requiring network access or a GUIDE_TOKEN.
 #
-# nancy v2.1.0 parses each line with two regexes (internal/cmd/root.go):
+# nancy v2.1.1 parses each line with two regexes (internal/cmd/root.go):
 #   unixComments = `#.*$`        strips a trailing comment
 #   untilComment = `(until=)(.*)` strips a trailing "until=<date>"
 # what remains, trimmed, is matched against each reported vulnerability with
@@ -14,7 +14,7 @@
 # There is no wildcard, prefix, or regex matching on that side — an entry
 # excludes exactly the literal id it names and nothing else. This script
 # replicates both regexes and the equality check verbatim (verified against
-# nancy tag v2.1.0, commit 410f73d14f5cf35300b2695dc1a74fb560b70a85) so CI
+# nancy tag v2.1.1, commit 8fde7f5dde1cf4b0f6443a60c9f87d6eaa1b980f) so CI
 # fails if a future edit ever makes the suppression file broader than a list
 # of exact CVE/OSS-Index IDs, and so the "a second unrelated CVE still fails
 # the gate" property has machine-checked evidence instead of a design claim.
@@ -48,7 +48,7 @@ if [ ! -f "$IGNORE_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Parse exactly like nancy v2.1.0's determineIfLineIsExclusion.
+# Parse exactly like nancy v2.1.1's determineIfLineIsExclusion.
 # ---------------------------------------------------------------------------
 declare -a ENTRIES=()
 line_num=0
@@ -137,5 +137,5 @@ if is_excluded "$SYNTHETIC_UNRELATED_CVE"; then
 fi
 
 echo -e "${GREEN}✅ $IGNORE_FILE is a well-formed exact-match allowlist (${#ENTRIES[@]} entr$([ "${#ENTRIES[@]}" -eq 1 ] && echo y || echo ies))${NC}"
-echo "   Verified: nancy v2.1.0 matches by strict equality only (internal/ossindex/types.go maybeExclude)."
+echo "   Verified: nancy v2.1.1 matches by strict equality only (internal/ossindex/types.go maybeExclude)."
 echo "   A synthetic unrelated CVE ('$SYNTHETIC_UNRELATED_CVE') does not match any entry, so it would still fail the gate."
