@@ -7,7 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,6 +21,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -244,4 +247,60 @@ func TestDomainRegistry_RemovalReleasesDomain(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	assert.Equal(t, "tenant-b", owner)
+}
+
+// errorRecordingLogger records every Error and Warn call, which CapturingLogger drops.
+type errorRecordingLogger struct {
+	logging.Logger
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *errorRecordingLogger) record(msg string, kv []interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprint(append([]interface{}{msg}, kv...)...))
+}
+func (l *errorRecordingLogger) Error(msg string, kv ...interface{}) { l.record(msg, kv) }
+func (l *errorRecordingLogger) Warn(msg string, kv ...interface{})  { l.record(msg, kv) }
+
+// leakyStore fails every read and delete with an error that echoes the directory
+// config, as a store or decoder error can.
+type leakyStore struct {
+	cfgconfig.ConfigStore
+	secret string
+}
+
+func (s *leakyStore) GetConfig(context.Context, *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
+	return nil, fmt.Errorf("decode failed for {password:%s}", s.secret)
+}
+func (s *leakyStore) DeleteConfig(context.Context, *cfgconfig.ConfigKey) error {
+	return fmt.Errorf("delete failed for {password:%s}", s.secret)
+}
+
+func TestDirectoryConfig_StoreErrorPasswordNeverLogged(t *testing.T) {
+	const secret = "S3cr3t-Pa55w0rd-Marker"
+	svc := newDirectoryTestService(t, "tenant-a")
+	rec := &errorRecordingLogger{Logger: logging.NewNoopLogger()}
+	svc.logger = rec
+	svc.domainRegistry = NewDirectoryDomainRegistry(&leakyStore{ConfigStore: svc.domainRegistry.store, secret: secret})
+	ctx := ctxkeys.WithSystem(context.Background())
+
+	t.Run("registry failure at validation", func(t *testing.T) {
+		cfg := domainCfg("dc-1", "corp.example.com")
+		cfg.Resources[0].Config["password"] = secret
+		res := svc.validateConfiguration(ctx, "tenant-a", "dc-1", cfg)
+		require.NotNil(t, res)
+	})
+	t.Run("release failure", func(t *testing.T) {
+		svc.releaseDirectoryDomains(ctx, "tenant-a", "dc-1", []string{"corp.example.com"})
+	})
+	t.Run("undo claim failure", func(t *testing.T) {
+		svc.undoClaim(ctx, &domainClaim{tenantID: "tenant-a", stewardID: "dc-1", added: []string{"corp.example.com"}})
+	})
+
+	require.NotEmpty(t, rec.lines, "the failure paths must have logged")
+	for _, l := range rec.lines {
+		assert.NotContains(t, l, secret)
+	}
 }

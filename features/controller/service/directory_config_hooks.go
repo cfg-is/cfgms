@@ -83,7 +83,7 @@ func (s *ConfigurationServiceV2) domainErrorFor(resourceIdx int, err error, tena
 	s.logger.Error("Directory domain registry failure",
 		"tenant_id", logging.SanitizeLogValue(tenantID),
 		"steward_id", logging.SanitizeLogValue(stewardID),
-		"error", logging.SanitizeLogValue(err.Error()))
+		"error", directoryErrorKind(err))
 	return config.ValidationError{
 		Field: field, Code: CodeDirectoryRegistryFailure, Level: "error",
 		Message: "directory domain registry is unavailable",
@@ -153,7 +153,7 @@ func (s *ConfigurationServiceV2) undoClaim(ctx context.Context, claim *domainCla
 		if _, err := s.domainRegistry.Release(ctx, d, claim.tenantID, claim.stewardID); err != nil {
 			s.logger.Warn("Failed to undo directory domain claim",
 				"tenant_id", logging.SanitizeLogValue(claim.tenantID),
-				"error", logging.SanitizeLogValue(err.Error()))
+				"error", directoryErrorKind(err))
 		}
 	}
 }
@@ -196,7 +196,7 @@ func (s *ConfigurationServiceV2) releaseDirectoryDomains(ctx context.Context, te
 			s.logger.Error("Failed to release directory domain",
 				"tenant_id", logging.SanitizeLogValue(tenantID),
 				"steward_id", logging.SanitizeLogValue(stewardID),
-				"error", logging.SanitizeLogValue(err.Error()))
+				"error", directoryErrorKind(err))
 		}
 	}
 }
@@ -214,4 +214,23 @@ func domainsRemoved(prev []string, cfg *stewardtypes.StewardConfig) []string {
 		}
 	}
 	return out
+}
+
+// directoryErrorKind describes err for a log line without ever formatting err's text.
+// Errors from the config store, the decoder and the release handler can echo the
+// directory config they were handling, and that config carries password fields, so
+// the log gets a fixed label chosen by error identity, never err.Error().
+func directoryErrorKind(err error) string {
+	switch {
+	case err == nil:
+		return "none"
+	case errors.Is(err, context.Canceled):
+		return "context canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline exceeded"
+	case errors.Is(err, cfgconfig.ErrConfigNotFound):
+		return "registry entry not found"
+	default:
+		return "directory domain registry operation failed"
+	}
 }
