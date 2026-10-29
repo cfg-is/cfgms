@@ -590,6 +590,19 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(ctx context.Context,
 		effective.Config.Steward.DriftMode = config.Steward.DriftMode
 		effective.Sources["steward.drift_mode"] = source
 	}
+	// ModuleDriftModes merge per key: a child overrides only the modules it names.
+	if len(config.Steward.ModuleDriftModes) > 0 {
+		// Copy before writing so the merge never mutates a map owned by an earlier level.
+		merged := make(map[string]stewardconfig.DriftMode, len(effective.Config.Steward.ModuleDriftModes)+len(config.Steward.ModuleDriftModes))
+		for module, mode := range effective.Config.Steward.ModuleDriftModes {
+			merged[module] = mode
+		}
+		effective.Config.Steward.ModuleDriftModes = merged
+	}
+	for module, mode := range config.Steward.ModuleDriftModes {
+		effective.Config.Steward.ModuleDriftModes[module] = mode
+		effective.Sources["steward.module_drift_modes."+module] = source
+	}
 
 	// Upgrade settings — carry desired_version and allow_downgrade through the
 	// tenant hierarchy so MSP-level upgrade policy propagates to child stewards.

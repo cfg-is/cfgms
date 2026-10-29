@@ -242,6 +242,7 @@ func loadFromPath(configPath string) (StewardConfig, error) {
 	// Clear any local-file value so a tampered hostname.cfg cannot flip a
 	// controller-connected steward into monitor mode.
 	config.Steward.DriftMode = ""
+	config.Steward.ModuleDriftModes = nil
 
 	// Apply defaults
 	applyDefaults(&config)

@@ -774,8 +774,14 @@ type StewardSettings struct {
 	// desired_version is the ring-resolved target steward binary version (Issue #2271).
 	// When set, the steward convergence loop upgrades or downgrades to this version.
 	DesiredVersion string `protobuf:"bytes,9,opt,name=desired_version,json=desiredVersion,proto3" json:"desired_version,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// drift_mode is the steward-wide drift response: "apply" or "monitor".
+	// Empty means apply. Delivered by the controller only; never read from a local file.
+	DriftMode string `protobuf:"bytes,10,opt,name=drift_mode,json=driftMode,proto3" json:"drift_mode,omitempty"`
+	// module_drift_modes overrides drift_mode per module bundle name
+	// (the part of a module reference before the first '.'), e.g. {"activedirectory": "monitor"}.
+	ModuleDriftModes map[string]string `protobuf:"bytes,11,rep,name=module_drift_modes,json=moduleDriftModes,proto3" json:"module_drift_modes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *StewardSettings) Reset() {
@@ -865,6 +871,20 @@ func (x *StewardSettings) GetDesiredVersion() string {
 }
 
 // ScriptSigningConfig defines the steward-level script signing policy and trust configuration.
+func (x *StewardSettings) GetDriftMode() string {
+	if x != nil {
+		return x.DriftMode
+	}
+	return ""
+}
+
+func (x *StewardSettings) GetModuleDriftModes() map[string]string {
+	if x != nil {
+		return x.ModuleDriftModes
+	}
+	return nil
+}
+
 type ScriptSigningConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// policy sets the enforcement level: none, optional, or required.
@@ -1363,7 +1383,7 @@ const file_controller_config_proto_rawDesc = "" +
 	"\amodules\x18\x03 \x03(\v20.cfgms.api.controller.StewardConfig.ModulesEntryR\amodules\x1a:\n" +
 	"\fModulesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xae\x04\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xfd\x05\n" +
 	"\x0fStewardSettings\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12!\n" +
 	"\fmodule_paths\x18\x03 \x03(\tR\vmodulePaths\x12=\n" +
@@ -1372,8 +1392,15 @@ const file_controller_config_proto_rawDesc = "" +
 	"\asecrets\x18\x06 \x03(\v22.cfgms.api.controller.StewardSettings.SecretsEntryR\asecrets\x12F\n" +
 	"\x11converge_interval\x18\a \x01(\v2\x19.google.protobuf.DurationR\x10convergeInterval\x12P\n" +
 	"\x0escript_signing\x18\b \x01(\v2).cfgms.api.controller.ScriptSigningConfigR\rscriptSigning\x12'\n" +
-	"\x0fdesired_version\x18\t \x01(\tR\x0edesiredVersion\x1a:\n" +
+	"\x0fdesired_version\x18\t \x01(\tR\x0edesiredVersion\x12\x1d\n" +
+	"\n" +
+	"drift_mode\x18\n" +
+	" \x01(\tR\tdriftMode\x12i\n" +
+	"\x12module_drift_modes\x18\v \x03(\v2;.cfgms.api.controller.StewardSettings.ModuleDriftModesEntryR\x10moduleDriftModes\x1a:\n" +
 	"\fSecretsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aC\n" +
+	"\x15ModuleDriftModesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x02\x10\x03R\x04mode\"\xd3\x01\n" +
 	"\x13ScriptSigningConfig\x12\x16\n" +
@@ -1420,7 +1447,7 @@ func file_controller_config_proto_rawDescGZIP() []byte {
 }
 
 var file_controller_config_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_controller_config_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_controller_config_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_controller_config_proto_goTypes = []any{
 	(ValidationError_Level)(0),          // 0: cfgms.api.controller.ValidationError.Level
 	(ConfigurationUpdate_UpdateType)(0), // 1: cfgms.api.controller.ConfigurationUpdate.UpdateType
@@ -1445,23 +1472,24 @@ var file_controller_config_proto_goTypes = []any{
 	nil,                                 // 20: cfgms.api.controller.ConfigValidationResponse.MetadataEntry
 	nil,                                 // 21: cfgms.api.controller.StewardConfig.ModulesEntry
 	nil,                                 // 22: cfgms.api.controller.StewardSettings.SecretsEntry
-	(*common.Status)(nil),               // 23: cfgms.api.common.Status
-	(*timestamppb.Timestamp)(nil),       // 24: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),         // 25: google.protobuf.Duration
-	(*structpb.Struct)(nil),             // 26: google.protobuf.Struct
+	nil,                                 // 23: cfgms.api.controller.StewardSettings.ModuleDriftModesEntry
+	(*common.Status)(nil),               // 24: cfgms.api.common.Status
+	(*timestamppb.Timestamp)(nil),       // 25: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),         // 26: google.protobuf.Duration
+	(*structpb.Struct)(nil),             // 27: google.protobuf.Struct
 }
 var file_controller_config_proto_depIdxs = []int32{
-	23, // 0: cfgms.api.controller.ConfigResponse.status:type_name -> cfgms.api.common.Status
+	24, // 0: cfgms.api.controller.ConfigResponse.status:type_name -> cfgms.api.common.Status
 	19, // 1: cfgms.api.controller.ConfigResponse.config:type_name -> cfgms.api.controller.SignedConfig
-	23, // 2: cfgms.api.controller.ConfigStatusReport.status:type_name -> cfgms.api.common.Status
+	24, // 2: cfgms.api.controller.ConfigStatusReport.status:type_name -> cfgms.api.common.Status
 	5,  // 3: cfgms.api.controller.ConfigStatusReport.modules:type_name -> cfgms.api.controller.ModuleStatus
-	23, // 4: cfgms.api.controller.ModuleStatus.status:type_name -> cfgms.api.common.Status
-	24, // 5: cfgms.api.controller.ModuleStatus.timestamp:type_name -> google.protobuf.Timestamp
-	23, // 6: cfgms.api.controller.ConfigValidationResponse.status:type_name -> cfgms.api.common.Status
+	24, // 4: cfgms.api.controller.ModuleStatus.status:type_name -> cfgms.api.common.Status
+	25, // 5: cfgms.api.controller.ModuleStatus.timestamp:type_name -> google.protobuf.Timestamp
+	24, // 6: cfgms.api.controller.ConfigValidationResponse.status:type_name -> cfgms.api.common.Status
 	8,  // 7: cfgms.api.controller.ConfigValidationResponse.errors:type_name -> cfgms.api.controller.ValidationError
 	20, // 8: cfgms.api.controller.ConfigValidationResponse.metadata:type_name -> cfgms.api.controller.ConfigValidationResponse.MetadataEntry
 	0,  // 9: cfgms.api.controller.ValidationError.level:type_name -> cfgms.api.controller.ValidationError.Level
-	24, // 10: cfgms.api.controller.ConfigurationUpdate.timestamp:type_name -> google.protobuf.Timestamp
+	25, // 10: cfgms.api.controller.ConfigurationUpdate.timestamp:type_name -> google.protobuf.Timestamp
 	1,  // 11: cfgms.api.controller.ConfigurationUpdate.update_type:type_name -> cfgms.api.controller.ConfigurationUpdate.UpdateType
 	12, // 12: cfgms.api.controller.StewardConfig.steward:type_name -> cfgms.api.controller.StewardSettings
 	17, // 13: cfgms.api.controller.StewardConfig.resources:type_name -> cfgms.api.controller.ResourceConfig
@@ -1469,17 +1497,18 @@ var file_controller_config_proto_depIdxs = []int32{
 	15, // 15: cfgms.api.controller.StewardSettings.logging:type_name -> cfgms.api.controller.LoggingConfig
 	16, // 16: cfgms.api.controller.StewardSettings.error_handling:type_name -> cfgms.api.controller.ErrorHandlingConfig
 	22, // 17: cfgms.api.controller.StewardSettings.secrets:type_name -> cfgms.api.controller.StewardSettings.SecretsEntry
-	25, // 18: cfgms.api.controller.StewardSettings.converge_interval:type_name -> google.protobuf.Duration
+	26, // 18: cfgms.api.controller.StewardSettings.converge_interval:type_name -> google.protobuf.Duration
 	13, // 19: cfgms.api.controller.StewardSettings.script_signing:type_name -> cfgms.api.controller.ScriptSigningConfig
-	14, // 20: cfgms.api.controller.ScriptSigningConfig.trusted_keys:type_name -> cfgms.api.controller.TrustedKeyRef
-	26, // 21: cfgms.api.controller.ResourceConfig.config:type_name -> google.protobuf.Struct
-	11, // 22: cfgms.api.controller.SignedConfig.config:type_name -> cfgms.api.controller.StewardConfig
-	18, // 23: cfgms.api.controller.SignedConfig.signature:type_name -> cfgms.api.controller.ConfigSignature
-	24, // [24:24] is the sub-list for method output_type
-	24, // [24:24] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	23, // 20: cfgms.api.controller.StewardSettings.module_drift_modes:type_name -> cfgms.api.controller.StewardSettings.ModuleDriftModesEntry
+	14, // 21: cfgms.api.controller.ScriptSigningConfig.trusted_keys:type_name -> cfgms.api.controller.TrustedKeyRef
+	27, // 22: cfgms.api.controller.ResourceConfig.config:type_name -> google.protobuf.Struct
+	11, // 23: cfgms.api.controller.SignedConfig.config:type_name -> cfgms.api.controller.StewardConfig
+	18, // 24: cfgms.api.controller.SignedConfig.signature:type_name -> cfgms.api.controller.ConfigSignature
+	25, // [25:25] is the sub-list for method output_type
+	25, // [25:25] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_controller_config_proto_init() }
@@ -1493,7 +1522,7 @@ func file_controller_config_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_controller_config_proto_rawDesc), len(file_controller_config_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   21,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

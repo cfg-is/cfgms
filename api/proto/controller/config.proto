@@ -109,6 +109,14 @@ message StewardSettings {
   // When set, the steward convergence loop upgrades or downgrades to this version.
   string desired_version = 9;
 
+  // drift_mode is the steward-wide drift response: "apply" or "monitor".
+  // Empty means apply. Delivered by the controller only; never read from a local file.
+  string drift_mode = 10;
+
+  // module_drift_modes overrides drift_mode per module bundle name
+  // (the part of a module reference before the first '.'), e.g. {"activedirectory": "monitor"}.
+  map<string, string> module_drift_modes = 11;
+
   reserved 2;
   reserved "mode";
 }

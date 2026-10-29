@@ -241,11 +241,17 @@ The `drift_mode` field in the controller-delivered cfg selects how the steward r
 - **`apply` mode** (default — matches current behavior when `drift_mode` is absent): the steward attempts local convergence and reports the outcome. The controller sees the drift and its resolution together.
 - **`monitor` mode**: the steward detects drift but does not act. Emits a `drift.detected.monitor` event upstream with `ResourceResult.Status = StatusNonCompliant`; operator action (or a separate `apply` workflow) decides whether to correct.
 
-`drift_mode` is set exclusively from the controller-delivered cfg. A single steward operates in one drift mode at a time across all its managed resources. Per-resource override is not in scope for v1.
+**Wire path.** `drift_mode` and `module_drift_modes` are fields of `StewardSettings` in `api/proto/controller/config.proto`. Both converters (`features/config/stewardtypes/proto_converter.go` and `features/steward/config/proto_converter.go`) map them in `ToProto` and `FromProto`, so a cfg built on the controller reaches the steward's executor intact. Inheritance merges `drift_mode` like any scalar (child wins) and `module_drift_modes` per key (a child overrides only the modules it names).
 
-**Security invariant**: `drift_mode` is sourced from the authenticated controller-delivered cfg only. The local-file loading path (`loadFromPath` in `features/steward/config/config.go`) clears the field after parsing so a tampered `hostname.cfg` cannot flip a controller-connected steward into monitor mode.
+**Per-module override.** `module_drift_modes` maps a module bundle name (the part of a module reference before the first `.`, so `hyperv` for `hyperv.vm`) to a mode, e.g. `module_drift_modes: {activedirectory: monitor}`. The executor resolves the mode for each resource, so one steward can report on one module while enforcing the rest. There is no per-resource override.
 
-**Distinguishable event type**: in monitor mode the executor sets `StateDiff.EventType = "drift.detected.monitor"` before invoking the `DriftEventHandler`. This lets the controller distinguish monitor-mode stewards (which simply haven't drifted) from apply-mode stewards via fleet-wide telemetry. Handler ordering is preserved: `DriftEventHandler` always fires before any mode-specific branch.
+**Precedence and fail-safe.** `stewardtypes.EffectiveDriftMode(settings, moduleBundle)` is the single resolver (the executor and the controller-side M365 loop both call it): the module override if present, else the steward-wide `drift_mode`, else `apply`. A value that is not `apply` or `monitor` resolves to `monitor`, which reports and never corrects. Validation rejects an unknown mode and a malformed key with an error naming the field.
+
+**Who can change it.** Anyone who can write the cfg can flip a module from `monitor` to `apply`: a config push or a steward config write (both strongly authenticated). For git-synced tenants, git write access carries that power.
+
+**Security invariant**: `drift_mode` and `module_drift_modes` are sourced from the authenticated controller-delivered cfg only. `LoadConfiguration` in `features/steward/config/config.go` clears both after parsing, so a tampered `hostname.cfg` cannot flip a controller-connected steward into monitor mode.
+
+**Distinguishable event type**: for a resource whose effective mode is monitor the executor sets `StateDiff.EventType = "drift.detected.monitor"` before invoking the `DriftEventHandler`. This lets the controller distinguish monitor-mode stewards (which simply haven't drifted) from apply-mode stewards via fleet-wide telemetry. Handler ordering is preserved: `DriftEventHandler` always fires before any mode-specific branch.
 
 Controller-side logging captures both the drift event and convergence result regardless of mode, enabling flapping detection (a future enhancement) without wire-protocol changes.
 

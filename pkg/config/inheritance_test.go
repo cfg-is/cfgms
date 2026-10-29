@@ -275,6 +275,52 @@ func TestResolveConfiguration_PropagatesDriftModeFromParent(t *testing.T) {
 		"inheritance source for drift_mode must be recorded")
 }
 
+// TestInheritance_ModuleDriftModesMerge verifies module_drift_modes merges per
+// key: a child overrides only the modules it names and keeps the rest.
+func TestInheritance_ModuleDriftModesMerge(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NotNil(t, cs)
+
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ModuleDriftModes: map[string]stewardconfig.DriftMode{
+					"activedirectory": stewardconfig.DriftModeMonitor,
+					"file":            stewardconfig.DriftModeMonitor,
+				},
+			},
+		}),
+	}))
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ModuleDriftModes: map[string]stewardconfig.DriftMode{
+					"file":    stewardconfig.DriftModeApply,
+					"service": stewardconfig.DriftModeMonitor,
+				},
+			},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]stewardconfig.DriftMode{
+		"activedirectory": stewardconfig.DriftModeMonitor, // inherited untouched
+		"file":            stewardconfig.DriftModeApply,   // child override wins
+		"service":         stewardconfig.DriftModeMonitor, // child addition
+	}, effective.Config.Steward.ModuleDriftModes)
+	assert.NotNil(t, effective.Sources["steward.module_drift_modes.file"])
+}
+
 func resourceNames(resources []stewardconfig.ResourceConfig) []string {
 	names := make([]string, len(resources))
 	for i, r := range resources {

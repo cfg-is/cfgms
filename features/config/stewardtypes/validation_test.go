@@ -4,6 +4,7 @@
 package stewardtypes
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -57,4 +58,38 @@ func TestValidateScriptSigningConfig_PublicKeyRefEmptyAllowedWithThumbprint(t *t
 		},
 	}
 	require.NoError(t, ValidateScriptSigningConfig(cfg))
+}
+
+func TestValidate_ModuleDriftModes_RejectsUnknownMode(t *testing.T) {
+	base := func(settings StewardSettings) StewardConfig {
+		settings.ID = "s1"
+		return StewardConfig{Steward: settings}
+	}
+
+	if err := ValidateConfiguration(base(StewardSettings{
+		DriftMode:        DriftModeApply,
+		ModuleDriftModes: map[string]DriftMode{"activedirectory": DriftModeMonitor, "file": DriftModeApply},
+	})); err != nil {
+		t.Fatalf("valid drift modes rejected: %v", err)
+	}
+
+	cases := []struct {
+		name     string
+		settings StewardSettings
+		wantIn   string
+	}{
+		{"unknown module mode", StewardSettings{ModuleDriftModes: map[string]DriftMode{"file": "enforce"}}, "module_drift_modes[file]"},
+		{"empty module mode", StewardSettings{ModuleDriftModes: map[string]DriftMode{"file": ""}}, "module_drift_modes[file]"},
+		{"key with dot", StewardSettings{ModuleDriftModes: map[string]DriftMode{"hyperv.vm": DriftModeMonitor}}, "module_drift_modes: malformed key"},
+		{"empty key", StewardSettings{ModuleDriftModes: map[string]DriftMode{"": DriftModeMonitor}}, "module_drift_modes: malformed key"},
+		{"unknown steward mode", StewardSettings{DriftMode: "enforce"}, "drift_mode"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateConfiguration(base(tc.settings))
+			if err == nil || !strings.Contains(err.Error(), tc.wantIn) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantIn)
+			}
+		})
+	}
 }

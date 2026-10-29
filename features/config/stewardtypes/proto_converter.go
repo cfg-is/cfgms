@@ -49,6 +49,14 @@ func ToProto(config *StewardConfig) (*controller.StewardConfig, error) {
 
 	stewardSettings.DesiredVersion = config.Steward.Upgrade.DesiredVersion
 
+	stewardSettings.DriftMode = string(config.Steward.DriftMode)
+	if len(config.Steward.ModuleDriftModes) > 0 {
+		stewardSettings.ModuleDriftModes = make(map[string]string, len(config.Steward.ModuleDriftModes))
+		for module, mode := range config.Steward.ModuleDriftModes {
+			stewardSettings.ModuleDriftModes[module] = string(mode)
+		}
+	}
+
 	ss := config.Steward.ScriptSigning
 	protoSS := &controller.ScriptSigningConfig{
 		Policy:        string(ss.Policy),
@@ -99,6 +107,14 @@ func FromProto(proto *controller.StewardConfig) (*StewardConfig, error) {
 			},
 		},
 		Modules: proto.Modules,
+	}
+
+	config.Steward.DriftMode = DriftMode(proto.Steward.DriftMode)
+	if len(proto.Steward.ModuleDriftModes) > 0 {
+		config.Steward.ModuleDriftModes = make(map[string]DriftMode, len(proto.Steward.ModuleDriftModes))
+		for module, mode := range proto.Steward.ModuleDriftModes {
+			config.Steward.ModuleDriftModes[module] = DriftMode(mode)
+		}
 	}
 
 	if proto.Steward.Logging != nil {

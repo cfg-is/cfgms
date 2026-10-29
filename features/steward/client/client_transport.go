@@ -1907,6 +1907,7 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 	// This is the only authorised source of DriftMode — local steward.cfg
 	// cannot set it (the local-file loading path clears the field).
 	executor.SetDriftMode(applyDriftModeDefault(goConfig.Steward.DriftMode))
+	executor.SetModuleDriftModes(goConfig.Steward.ModuleDriftModes)
 
 	// Let the executor pull required_modules that are not installed (Issue #4987).
 	// Built per sync from the current transport client, the configured
@@ -2298,8 +2299,7 @@ func (c *TransportClient) ValidateConfiguration(
 }
 
 // applyDriftModeDefault returns DriftModeApply when mode is empty.
-// The proto does not carry drift_mode, so FromProto always returns "".
-// Apply is the fleet default; this makes the intent explicit and testable.
+// An unset drift_mode on the wire decodes to "". Apply is the fleet default; this makes the intent explicit and testable.
 func applyDriftModeDefault(mode stewardconfig.DriftMode) stewardconfig.DriftMode {
 	if mode == "" {
 		return stewardconfig.DriftModeApply

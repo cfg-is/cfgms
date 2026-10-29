@@ -71,6 +71,16 @@ func ToProto(config *StewardConfig) (*controller.StewardConfig, error) {
 	// The proto has no allow_downgrade field, so AllowDowngrade is not serialised here.
 	stewardSettings.DesiredVersion = config.Steward.Upgrade.DesiredVersion
 
+	// Drift mode and per-module overrides ride the wire so a controller-delivered
+	// cfg can put a steward (or one module) in monitor mode.
+	stewardSettings.DriftMode = string(config.Steward.DriftMode)
+	if len(config.Steward.ModuleDriftModes) > 0 {
+		stewardSettings.ModuleDriftModes = make(map[string]string, len(config.Steward.ModuleDriftModes))
+		for module, mode := range config.Steward.ModuleDriftModes {
+			stewardSettings.ModuleDriftModes[module] = string(mode)
+		}
+	}
+
 	// Convert resources
 	resources := make([]*controller.ResourceConfig, len(config.Resources))
 	for i, res := range config.Resources {
@@ -116,6 +126,14 @@ func FromProto(proto *controller.StewardConfig) (*StewardConfig, error) {
 			},
 		},
 		Modules: proto.Modules,
+	}
+
+	config.Steward.DriftMode = DriftMode(proto.Steward.DriftMode)
+	if len(proto.Steward.ModuleDriftModes) > 0 {
+		config.Steward.ModuleDriftModes = make(map[string]DriftMode, len(proto.Steward.ModuleDriftModes))
+		for module, mode := range proto.Steward.ModuleDriftModes {
+			config.Steward.ModuleDriftModes[module] = DriftMode(mode)
+		}
 	}
 
 	// Convert logging settings

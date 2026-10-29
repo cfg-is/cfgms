@@ -56,6 +56,11 @@ type StewardSettings struct {
 	// Must be sourced exclusively from the controller-delivered cfg.
 	DriftMode DriftMode `yaml:"drift_mode,omitempty" json:"drift_mode,omitempty"`
 
+	// ModuleDriftModes overrides DriftMode per module bundle name (the part of a
+	// module reference before the first "."), e.g. {"activedirectory": "monitor"}.
+	// Like DriftMode, it is sourced exclusively from the controller-delivered cfg.
+	ModuleDriftModes map[string]DriftMode `yaml:"module_drift_modes,omitempty" json:"module_drift_modes,omitempty"`
+
 	// Upgrade configures the steward upgrade policy. (Issue #1943)
 	Upgrade UpgradeConfig `yaml:"upgrade,omitempty" json:"upgrade,omitempty"`
 
@@ -162,6 +167,27 @@ const (
 	DriftModeApply   DriftMode = "apply"
 	DriftModeMonitor DriftMode = "monitor"
 )
+
+// EffectiveDriftMode resolves the drift mode for a module bundle. A per-module
+// override wins over the steward-wide mode, which defaults to apply when unset.
+// It fails safe: an override or steward-wide value that is not a known mode
+// (including an empty override) yields monitor, which reports without correcting.
+func EffectiveDriftMode(settings StewardSettings, moduleBundle string) DriftMode {
+	if mode, ok := settings.ModuleDriftModes[moduleBundle]; ok {
+		return knownDriftModeOrMonitor(mode)
+	}
+	if settings.DriftMode == "" {
+		return DriftModeApply
+	}
+	return knownDriftModeOrMonitor(settings.DriftMode)
+}
+
+func knownDriftModeOrMonitor(mode DriftMode) DriftMode {
+	if mode == DriftModeApply {
+		return DriftModeApply
+	}
+	return DriftModeMonitor
+}
 
 // LoggingConfig defines logging output settings.
 type LoggingConfig struct {

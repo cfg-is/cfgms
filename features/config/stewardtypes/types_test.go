@@ -143,3 +143,28 @@ func TestValidateConfiguration_RejectsInvalidTimezoneInRebootWindow(t *testing.T
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "reboot_window")
 }
+
+func TestEffectiveDriftMode_UnknownValueIsMonitor(t *testing.T) {
+	cases := []struct {
+		name     string
+		settings StewardSettings
+		bundle   string
+		want     DriftMode
+	}{
+		{"unset everywhere is apply", StewardSettings{}, "file", DriftModeApply},
+		{"steward-wide monitor", StewardSettings{DriftMode: DriftModeMonitor}, "file", DriftModeMonitor},
+		{"override monitor beats global apply", StewardSettings{DriftMode: DriftModeApply, ModuleDriftModes: map[string]DriftMode{"file": DriftModeMonitor}}, "file", DriftModeMonitor},
+		{"override apply beats global monitor", StewardSettings{DriftMode: DriftModeMonitor, ModuleDriftModes: map[string]DriftMode{"file": DriftModeApply}}, "file", DriftModeApply},
+		{"override for other module is ignored", StewardSettings{ModuleDriftModes: map[string]DriftMode{"service": DriftModeMonitor}}, "file", DriftModeApply},
+		{"unknown override is monitor", StewardSettings{ModuleDriftModes: map[string]DriftMode{"file": "enforce"}}, "file", DriftModeMonitor},
+		{"empty override is monitor", StewardSettings{DriftMode: DriftModeApply, ModuleDriftModes: map[string]DriftMode{"file": ""}}, "file", DriftModeMonitor},
+		{"unknown steward-wide is monitor", StewardSettings{DriftMode: "enforce"}, "file", DriftModeMonitor},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EffectiveDriftMode(tc.settings, tc.bundle); got != tc.want {
+				t.Fatalf("EffectiveDriftMode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
