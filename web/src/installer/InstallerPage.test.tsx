@@ -430,10 +430,10 @@ describe('InstallerPage — artifact table columns', () => {
     renderPage()
     await waitFor(() => screen.getByTestId('artifact-table'))
     expect(screen.getByRole('columnheader', { name: /publisher/i })).toBeInTheDocument()
-    const rows = screen.getAllByTestId('artifact-row')
-    expect(within(rows[0]).getByText('cfgms')).toBeInTheDocument()
-    expect(within(rows[0]).queryByText('Unsigned')).not.toBeInTheDocument()
-    expect(within(rows[1]).getByText('Unsigned')).toBeInTheDocument()
+    const [signed, unsigned] = screen.getAllByTestId('artifact-row') as [HTMLElement, HTMLElement]
+    expect(within(signed).getByText('cfgms')).toBeInTheDocument()
+    expect(within(signed).queryByText('Unsigned')).not.toBeInTheDocument()
+    expect(within(unsigned).getByText('Unsigned')).toBeInTheDocument()
   })
 
   it('renders platform and arch as text in the table row', async () => {
