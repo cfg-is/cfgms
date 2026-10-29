@@ -221,7 +221,7 @@ jobs:
         # osquery: the bundled binary version shipped in the publisher-signed module
         # bundle (features/modules/extended/osquery/module.go pinnedVersion). A bump
         # here must also update pinnedVersion — the two must stay in lockstep.
-        check_version "osquery"     "osquery/osquery"                         "5.23.1"
+        check_version "osquery"     "osquery/osquery"                         "5.24.0"
 
         # Claude Code CLI is deliberately NOT checked here. Founder decision
         # 2026-10-01 (Issue #4473): it is exempt from the pin-and-cooldown
