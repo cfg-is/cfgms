@@ -12,8 +12,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-
-	"github.com/cfgis/cfgms/pkg/testutil"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -25,6 +23,7 @@ import (
 	stewardprovider "github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // requireGit skips the test if the git binary is not found in PATH.
