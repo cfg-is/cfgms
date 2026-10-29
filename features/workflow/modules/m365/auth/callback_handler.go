@@ -59,7 +59,10 @@ func (h *CallbackHandler) StartCallbackServer(ctx context.Context, port string) 
 	mux.HandleFunc("/health", h.handleHealth)
 
 	// Create listener to get actual port when using "0"
-	listener, err := net.Listen("tcp", ":"+h.serverPort)
+	// Bind loopback only: the redirect URI is http://localhost:<port>, so the
+	// browser completing the OAuth2 flow runs on this host and the callback
+	// listener must not be reachable from the network.
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", h.serverPort))
 	if err != nil {
 		return fmt.Errorf("failed to create listener: %w", err)
 	}

@@ -76,6 +76,7 @@ func secureTLSConfig() *tls.Config {
 // VULNERABLE EXAMPLE 4: Subprocess with Variable (G204)
 func vulnerableSubprocess(userCommand string) error {
 	// VULNERABLE: Launching subprocess with user input
+	// #nosec G204 -- intentionally vulnerable teaching example; never built into a product binary.
 	cmd := exec.Command("sh", "-c", userCommand) // This will trigger G204
 	return cmd.Run()
 }

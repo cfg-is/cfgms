@@ -210,6 +210,8 @@ func ensureSecureRecordingDir(path string) error {
 	// Windows permission bits are synthetic and Chmod there only toggles the
 	// read-only attribute, so the comparison would never converge.
 	if runtime.GOOS != "windows" && info.Mode().Perm() != recordingDirMode {
+		// #nosec G302 -- path is verified to be a directory above (info.IsDir) and
+		// recordingDirMode is 0o700; a directory needs the owner execute bit.
 		if err := os.Chmod(path, recordingDirMode); err != nil {
 			return fmt.Errorf("failed to restrict permissions on storage directory: %w", err)
 		}
