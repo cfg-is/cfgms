@@ -39,7 +39,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/g
     -ldflags="-s -w" -o controller ./cmd/controller
 
 # Final stage
-FROM ghcr.io/cfg-is/ci-mirror/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM ghcr.io/cfg-is/ci-mirror/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
 # Apply pending Alpine security updates, then install the runtime trust store and
 # the full wget client used by the verified-TLS healthcheck below (Alpine's
