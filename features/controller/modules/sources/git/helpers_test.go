@@ -3,12 +3,13 @@
 package git_test
 
 import (
-	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 func currentPlatform() string { return runtime.GOOS + "-" + runtime.GOARCH }
@@ -17,7 +18,7 @@ func currentPlatform() string { return runtime.GOOS + "-" + runtime.GOARCH }
 func runGitInput(t *testing.T, dir, stdin string, args ...string) string {
 	t.Helper()
 	// #nosec G204 -- fixed git binary; arguments are test-controlled.
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd := testutil.GitCommand(t, "", append([]string{"-C", dir}, args...)...)
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.Output()
 	require.NoError(t, err, "git %s", strings.Join(args, " "))

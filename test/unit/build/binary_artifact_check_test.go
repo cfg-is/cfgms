@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/cfgis/cfgms/pkg/testutil"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,8 +25,7 @@ func newArtifactRepo(t *testing.T, files map[string][]byte) string {
 		{"config", "user.email", "test@example.com"},
 		{"config", "user.name", "test"},
 	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
+		cmd := testutil.GitCommand(t, dir, args...)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
 	}
@@ -35,8 +36,7 @@ func newArtifactRepo(t *testing.T, files map[string][]byte) string {
 		require.NoError(t, os.WriteFile(path, content, 0o644))
 	}
 
-	add := exec.Command("git", "add", "--all")
-	add.Dir = dir
+	add := testutil.GitCommand(t, dir, "add", "--all")
 	out, err := add.CombinedOutput()
 	require.NoError(t, err, "git add: %s", out)
 

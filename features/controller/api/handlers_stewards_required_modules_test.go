@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -77,7 +76,7 @@ func serveModule(t *testing.T, publisher, name, version string) (string, ed25519
 	repo := filepath.Join(root, name)
 	sb.CommitToRepo(t, repo)
 	// #nosec G204 -- fixed git binary; arguments are test-controlled.
-	out, err := exec.Command("git", "-C", repo, "tag", version).CombinedOutput()
+	out, err := testutil.GitCommand(t, "", "-C", repo, "tag", version).CombinedOutput()
 	require.NoError(t, err, string(out))
 	baseURL, caFile := testutil.NewGitServer(t, root)
 	t.Setenv("GIT_SSL_CAINFO", caFile)
@@ -208,7 +207,7 @@ func serveModuleWith(t *testing.T, publisher, name, version string, mutate func(
 	repo := filepath.Join(root, name)
 	sb.CommitToRepo(t, repo)
 	// #nosec G204 -- fixed git binary; arguments are test-controlled.
-	out, err := exec.Command("git", "-C", repo, "tag", version).CombinedOutput()
+	out, err := testutil.GitCommand(t, "", "-C", repo, "tag", version).CombinedOutput()
 	require.NoError(t, err, string(out))
 	baseURL, caFile := testutil.NewGitServer(t, root)
 	t.Setenv("GIT_SSL_CAINFO", caFile)

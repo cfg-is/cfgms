@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/cfgis/cfgms/pkg/testutil"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,8 +27,7 @@ func newTrackedFixture(t *testing.T, files map[string][]byte) string {
 
 	run := func(args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = root
+		cmd := testutil.GitCommand(t, root, args...)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v failed: %s", args, out)
 	}

@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -146,7 +145,7 @@ func (s *SignedBundle) CommitToRepo(t testing.TB, repoDir string) string {
 			"-c", "user.name=cfgms-test", "-c", "user.email=test@example.invalid",
 			"-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"}, args...)
 		// #nosec G204 -- fixed git binary; arguments are test-controlled constants and file names.
-		out, err := exec.Command("git", full...).CombinedOutput()
+		out, err := GitCommand(t, "", full...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 		}

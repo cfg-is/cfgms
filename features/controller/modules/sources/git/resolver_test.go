@@ -5,7 +5,6 @@ package git_test
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,7 +26,7 @@ func runGit(t *testing.T, dir string, args ...string) string {
 		"-c", "user.name=cfgms-test", "-c", "user.email=test@example.invalid",
 		"-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", "-c", "protocol.file.allow=always"}, args...)
 	// #nosec G204 -- fixed git binary; arguments are test-controlled.
-	out, err := exec.Command("git", full...).CombinedOutput()
+	out, err := testutil.GitCommand(t, "", full...).CombinedOutput()
 	require.NoError(t, err, "git %s: %s", strings.Join(args, " "), out)
 	return strings.TrimSpace(string(out))
 }

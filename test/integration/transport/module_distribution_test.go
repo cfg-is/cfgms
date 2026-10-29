@@ -234,7 +234,7 @@ func distGit(t *testing.T, dir string, args ...string) string {
 		"-c", "user.name=cfgms-test", "-c", "user.email=test@example.invalid",
 		"-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", "-c", "init.defaultBranch=main"}, args...)
 	// #nosec G204 -- fixed git binary; arguments are test-controlled constants and test-owned paths.
-	out, err := exec.Command("git", full...).CombinedOutput()
+	out, err := testutil.GitCommand(t, "", full...).CombinedOutput()
 	require.NoError(t, err, "git %s: %s", strings.Join(args, " "), out)
 	return strings.TrimSpace(string(out))
 }

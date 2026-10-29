@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cfgis/cfgms/pkg/testutil"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -28,6 +30,7 @@ import (
 // requireGit skips the test if the git binary is not found in PATH.
 func requireGit(t *testing.T) {
 	t.Helper()
+	testutil.IsolateGitEnv(t)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git binary not found in PATH; skipping test that requires real git")
 	}
@@ -36,10 +39,7 @@ func requireGit(t *testing.T) {
 // runGit runs a git command, failing the test on error. It returns stdout+stderr.
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...) // #nosec G204 - controlled test command with validated args
-	if dir != "" {
-		cmd.Dir = dir
-	}
+	cmd := testutil.GitCommand(t, dir, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v in %q failed: %v\n%s", args, dir, err, out)

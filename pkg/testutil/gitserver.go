@@ -25,6 +25,7 @@ import (
 // It fails the test, never skips, if git or its http-backend is unavailable.
 func NewGitServer(t testing.TB, reposRoot string) (baseURL, caFile string) {
 	t.Helper()
+	IsolateGitEnv(t)
 
 	gitBin, err := exec.LookPath("git")
 	if err != nil {

@@ -5,10 +5,11 @@ package git
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cfgis/cfgms/pkg/testutil"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -22,6 +23,7 @@ import (
 // invoke those interfaces.
 func newTestMRM(t *testing.T) *ModuleRepositoryManager {
 	t.Helper()
+	testutil.IsolateGitEnv(t)
 	mrm := NewModuleRepositoryManager(nil, nil, logging.NewNoopLogger())
 	mrm.cacheDir = t.TempDir()
 	return mrm
@@ -30,7 +32,7 @@ func newTestMRM(t *testing.T) *ModuleRepositoryManager {
 func initBareRepo(t *testing.T) string {
 	t.Helper()
 	barePath := t.TempDir()
-	cmd := exec.Command("git", "init", "--bare", barePath)
+	cmd := testutil.GitCommand(t, "", "init", "--bare", barePath)
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "failed to init bare repo: %s", string(out))
 	return barePath
