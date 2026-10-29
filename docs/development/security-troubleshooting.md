@@ -88,7 +88,7 @@ trivy fs ./features --timeout 5m
 make install-nancy
 
 # Solution 2: Manual installation
-curl -sSfL https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-linux-amd64 \
+curl -sSfL https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.1/nancy-v2.1.1-linux-amd64 \
   -o /usr/local/bin/nancy && chmod +x /usr/local/bin/nancy
 ```
 

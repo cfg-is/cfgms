@@ -39,7 +39,7 @@ The CFGMS security workflow integrates four complementary security scanning tool
 When a CVE cannot be remediated because no patched upstream release exists, suppress it
 in `.nancy-ignore` at the repository root rather than silencing the entire scan.
 
-**Format** (nancy v2.1.0):
+**Format** (nancy v2.1.1):
 
 ```
 # Comment lines start with #
@@ -93,14 +93,14 @@ before invoking nancy, and fails closed on:
 - any entry containing a wildcard character (`*`, `?`, `[`) — nancy has no glob
   matching, so a wildcard is either a no-op or a mistaken attempt at a blanket
   ignore, and either way it is rejected;
-- a missing or malformed `until=YYYY-MM-DD` expiry — nancy v2.1.0 aborts parsing
+- a missing or malformed `until=YYYY-MM-DD` expiry — nancy v2.1.1 aborts parsing
   the *rest of the file* on the first bad date (the error is swallowed by its
   caller, `internal/cmd/root.go`), so a broken second entry would silently drop
   every entry after it, including ones that were previously working;
 - duplicate entries for the same CVE.
 
-This was verified directly against nancy's source (tag `v2.1.0`, commit
-`410f73d14f5cf35300b2695dc1a74fb560b70a85`): `internal/ossindex/types.go`
+This was verified directly against nancy's source (tag `v2.1.1`, commit
+`8fde7f5dde1cf4b0f6443a60c9f87d6eaa1b980f`): `internal/ossindex/types.go`
 `maybeExclude` matches with `v.Cve == ex || v.ID == ex` — plain string equality,
 no prefix or pattern matching. `scripts/verify-nancy-ignore-scope.sh` replicates
 that exact check (and nancy's two parsing regexes, `unixComments` and

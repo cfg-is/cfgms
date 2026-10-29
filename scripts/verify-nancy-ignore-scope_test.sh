@@ -105,7 +105,7 @@ assert_fail "malformed-date-not-zero-padded" "CVE-2026-56860 until=2026-1-1"
 assert_fail "duplicate-entry" "CVE-2026-56860 until=2026-11-15
 CVE-2026-56860 until=2026-11-16"
 
-# A malformed second entry must be caught explicitly: nancy v2.1.0 itself
+# A malformed second entry must be caught explicitly: nancy v2.1.1 itself
 # aborts parsing the rest of the file on a bad `until=` date (the error is
 # swallowed by its caller), which would silently stop the FIRST entry from
 # being honoured too. The gate must reject this before nancy ever sees it.
@@ -115,7 +115,7 @@ CVE-2027-00001 until=not-a-date"
 # ---------------------------------------------------------------------------
 # The core scoping proof: a synthetic CVE not present in the file must never
 # be reported as excluded, replicating nancy's `v.Cve == ex || v.ID == ex`
-# equality check (internal/ossindex/types.go, maybeExclude, nancy v2.1.0).
+# equality check (internal/ossindex/types.go, maybeExclude, nancy v2.1.1).
 # ---------------------------------------------------------------------------
 output="$(bash "$GATE" "$REPO_ROOT/.nancy-ignore" 2>&1)"
 if echo "$output" | grep -q "does not match any entry, so it would still fail the gate"; then

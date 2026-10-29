@@ -228,8 +228,8 @@ if ($goBinDir) {
         },
         @{
             Name   = 'nancy'
-            Url    = 'https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-windows-amd64.exe'
-            Sha256 = '77ecff35d3772794d4119b98b6405170d7b480bdc92076871ead4f52f574a0cf'
+            Url    = 'https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.1/nancy-v2.1.1-windows-amd64.exe'
+            Sha256 = '5709c4e5ae42e383c091fcc2160f4501f6ad5859f7a572471cfa9d1d2acd54f6'
             Member = $null
         }
     )

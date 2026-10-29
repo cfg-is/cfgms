@@ -82,7 +82,7 @@ Nancy scans Go dependencies for known vulnerabilities.
 # Cross-platform automatic installation
 make install-nancy
 
-# This automatically detects your platform and installs Nancy v2.1.0
+# This automatically detects your platform and installs Nancy v2.1.1
 # to your Go bin directory (already in PATH)
 ```
 
@@ -97,7 +97,7 @@ configure the same `GUIDE_TOKEN` secret for the hosted security workflow.
 
 ```bash
 # Binary download to Go bin directory
-curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-linux-amd64 -o ~/nancy
+curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.1/nancy-v2.1.1-linux-amd64 -o ~/nancy
 chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 ```
 
@@ -108,7 +108,7 @@ chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 brew install nancy
 
 # Binary download to Go bin directory
-curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-darwin-amd64 -o ~/nancy
+curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.1/nancy-v2.1.1-darwin-amd64 -o ~/nancy
 chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 ```
 
@@ -116,7 +116,7 @@ chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 
 ```bash
 # Binary download to Go bin directory
-curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-darwin-arm64 -o ~/nancy
+curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.1/nancy-v2.1.1-darwin-arm64 -o ~/nancy
 chmod +x ~/nancy && mv ~/nancy $(go env GOPATH)/bin/nancy
 ```
 
@@ -131,7 +131,7 @@ yay -S nancy-bin
 
 ```powershell
 # Binary download to Go bin directory
-Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-windows-amd64.exe' -OutFile 'nancy.exe'
+Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.1/nancy-v2.1.1-windows-amd64.exe' -OutFile 'nancy.exe'
 Move-Item nancy.exe $(go env GOPATH)\bin\nancy.exe
 ```
 
@@ -426,7 +426,7 @@ make security-check      # Quick security validation for development
 Current tool versions (as of v0.3.1):
 
 - **Trivy**: v0.76.1 (pinned — v0.69.4-v0.69.6 compromised per CVE-2026-33634; v0.76.1 is the post-incident clean release. Install via `./.github/scripts/install-trivy.sh`. NEVER use @latest, NEVER use `go install`.)
-- **Nancy**: v2.1.0
+- **Nancy**: v2.1.1
 - **gosec**: v2.28.0 (pinned — avoid @latest)
 - **staticcheck**: 2026.2.2 (pinned — avoid @latest)
 
