@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/cfgis/cfgms/pkg/testutil"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -271,13 +273,11 @@ func stageFiles(t *testing.T, files map[string][]byte) string {
 	for name, content := range files {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, name), content, 0o644))
 	}
-	init := exec.Command("git", "init", "--quiet", ".")
-	init.Dir = dir
+	init := testutil.GitCommand(t, dir, "init", "--quiet", ".")
 	out, err := init.CombinedOutput()
 	require.NoError(t, err, string(out))
 
-	add := exec.Command("git", "add", "--all")
-	add.Dir = dir
+	add := testutil.GitCommand(t, dir, "add", "--all")
 	out, err = add.CombinedOutput()
 	require.NoError(t, err, string(out))
 	return dir
