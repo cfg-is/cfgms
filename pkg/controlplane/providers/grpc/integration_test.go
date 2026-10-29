@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -614,13 +615,24 @@ func TestModeValidation(t *testing.T) {
 // it, returning an address string that nothing is listening on. Used to
 // force a client's initial dial (see Provider.dialInitial) into a real,
 // non-simulated connection failure instead of racing a real listener.
+//
+// Callers only need an address nothing answers on: if another socket takes
+// the port afterwards it is not a QUIC server, so the dial still fails.
+// Callers that must bind the address themselves use holdUnusedUDPAddr.
 func reserveUnusedUDPAddr(t *testing.T) string {
+	t.Helper()
+	conn, addr := holdUnusedUDPAddr(t)
+	require.NoError(t, conn.Close())
+	return addr
+}
+
+// holdUnusedUDPAddr binds an ephemeral UDP port and returns the open socket
+// with its address. The caller closes it immediately before binding the port.
+func holdUnusedUDPAddr(t *testing.T) (*net.UDPConn, string) {
 	t.Helper()
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
 	require.NoError(t, err)
-	addr := conn.LocalAddr().String()
-	require.NoError(t, conn.Close())
-	return addr
+	return conn, conn.LocalAddr().String()
 }
 
 // TestClientStart_RetriesInitialDialUntilServerIsReady is a regression test
@@ -636,33 +648,65 @@ func reserveUnusedUDPAddr(t *testing.T) string {
 // would already have failed by the time the server came up.
 func TestClientStart_RetriesInitialDialUntilServerIsReady(t *testing.T) {
 	serverTLS, clientTLS := newTestTLSConfigs(t, "steward-late-server-test")
-	addr := reserveUnusedUDPAddr(t)
 
-	client := New(ModeClient)
-	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
-		"mode":       "client",
-		"addr":       addr,
-		"tls_config": clientTLS,
-		"steward_id": "steward-late-server-test",
-	}))
+	// The reserved port is only a reservation: between releasing it and the
+	// server binding it, another socket in this process or on the host can
+	// take it. The client is pinned to the address at Initialize, so when the
+	// late bind loses that race the whole attempt restarts on a fresh port.
+	const maxAttempts = 10
+	var (
+		client   *Provider
+		server   *Provider
+		reg      registry.Registry
+		startErr chan error
+	)
+	for attempt := 1; ; attempt++ {
+		held, addr := holdUnusedUDPAddr(t)
 
-	startErr := make(chan error, 1)
-	go func() { startErr <- client.Start(context.Background()) }()
-	t.Cleanup(func() { _ = client.Stop(context.Background()) })
+		client = New(ModeClient)
+		require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
+			"mode":       "client",
+			"addr":       addr,
+			"tls_config": clientTLS,
+			"steward_id": "steward-late-server-test",
+		}))
 
-	// Give the client's first dial attempt(s) time to fail against the
-	// not-yet-bound address before the server binds it.
-	time.Sleep(100 * time.Millisecond)
+		startErr = make(chan error, 1)
+		go func(c *Provider, ch chan error) { ch <- c.Start(context.Background()) }(client, startErr)
+		t.Cleanup(func(c *Provider) func() {
+			return func() { _ = c.Stop(context.Background()) }
+		}(client))
 
-	reg := registry.NewRegistry()
-	server := New(ModeServer)
-	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
-		"mode":       "server",
-		"addr":       addr,
-		"tls_config": serverTLS,
-		"registry":   reg,
-	}))
-	require.NoError(t, server.Start(context.Background()))
+		// Give the client's first dial attempt(s) time to fail against the
+		// not-yet-bound address before the server binds it.
+		time.Sleep(100 * time.Millisecond)
+
+		reg = registry.NewRegistry()
+		server = New(ModeServer)
+		require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+			"mode":       "server",
+			"addr":       addr,
+			"tls_config": serverTLS,
+			"registry":   reg,
+		}))
+		// Keep the port held until the instant before the server binds it.
+		require.NoError(t, held.Close())
+		err := server.Start(context.Background())
+		if err == nil {
+			break
+		}
+		if attempt >= maxAttempts || !strings.Contains(err.Error(), "address already in use") {
+			require.NoError(t, err)
+		}
+		t.Logf("attempt %d: late bind lost port %s, retrying on a new port: %v", attempt, addr, err)
+		require.NoError(t, client.Stop(context.Background()))
+		select {
+		case stopped := <-startErr:
+			t.Logf("abandoned client Start returned: %v", stopped)
+		case <-time.After(5 * time.Second):
+			t.Fatal("client.Start did not return after Stop")
+		}
+	}
 	t.Cleanup(server.ForceStop)
 
 	select {
