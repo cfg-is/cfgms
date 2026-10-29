@@ -5,6 +5,7 @@ package stewardtypes
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -129,6 +130,10 @@ func ValidateConfiguration(config StewardConfig) error {
 
 	if config.Steward.ObserveSweepN != nil && *config.Steward.ObserveSweepN < 0 {
 		return fmt.Errorf("observe_sweep_n must be 0 (disabled) or a positive cycle count, got %d", *config.Steward.ObserveSweepN)
+	}
+
+	if err := validateDriftModes(config.Steward); err != nil {
+		return err
 	}
 
 	if err := ValidateScriptSigningConfig(config.Steward.ScriptSigning); err != nil {
@@ -306,4 +311,25 @@ func GetConfiguredModules(config StewardConfig) []string {
 		modules = append(modules, module)
 	}
 	return modules
+}
+
+// moduleBundleKeyPattern matches a module bundle name: the part of a module
+// reference before the first ".", so it can never contain a dot.
+var moduleBundleKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+
+// validateDriftModes rejects an unknown steward-wide drift mode, an unknown
+// per-module mode, and a malformed module key.
+func validateDriftModes(s StewardSettings) error {
+	if s.DriftMode != "" && s.DriftMode != DriftModeApply && s.DriftMode != DriftModeMonitor {
+		return fmt.Errorf("drift_mode: unknown mode %q: must be %q or %q", s.DriftMode, DriftModeApply, DriftModeMonitor)
+	}
+	for key, mode := range s.ModuleDriftModes {
+		if !moduleBundleKeyPattern.MatchString(key) {
+			return fmt.Errorf("module_drift_modes: malformed key %q: must be a module bundle name (letters, digits, '_' or '-', no '.')", key)
+		}
+		if mode != DriftModeApply && mode != DriftModeMonitor {
+			return fmt.Errorf("module_drift_modes[%s]: unknown mode %q: must be %q or %q", key, mode, DriftModeApply, DriftModeMonitor)
+		}
+	}
+	return nil
 }

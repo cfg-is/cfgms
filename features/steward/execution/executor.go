@@ -114,6 +114,8 @@ type Executor struct {
 	mu           sync.RWMutex
 	driftHandler DriftEventHandler
 	driftMode    config.DriftMode
+	// moduleDriftModes overrides driftMode per module bundle name.
+	moduleDriftModes map[string]config.DriftMode
 
 	// moduleInstaller, when non-nil, pulls required_modules that are not installed
 	// (Issue #4987). securityFailures remembers strict-mode verification refusals
@@ -232,6 +234,22 @@ func (e *Executor) SetDriftMode(mode config.DriftMode) {
 	e.mu.Unlock()
 }
 
+// SetModuleDriftModes replaces the per-module drift mode overrides, keyed by
+// module bundle name. Resolution goes through config.EffectiveDriftMode, so an
+// unknown override value fails safe to monitor. Controller-delivered cfg only.
+func (e *Executor) SetModuleDriftModes(modes map[string]config.DriftMode) {
+	var copied map[string]config.DriftMode
+	if len(modes) > 0 {
+		copied = make(map[string]config.DriftMode, len(modes))
+		for module, mode := range modes {
+			copied[module] = mode
+		}
+	}
+	e.mu.Lock()
+	e.moduleDriftModes = copied
+	e.mu.Unlock()
+}
+
 // ExecuteConfiguration executes the complete configuration for all resources.
 func (e *Executor) ExecuteConfiguration(ctx context.Context, cfg config.StewardConfig) ExecutionReport {
 	return e.executeConfiguration(ctx, cfg, nil)
@@ -339,7 +357,10 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	// Snapshot drift mode and handler once for this resource's execution.
 	// Both may be updated concurrently while the monitor event loop dispatches calls.
 	e.mu.RLock()
-	driftMode := e.driftMode
+	driftMode := stewardtypes.EffectiveDriftMode(stewardtypes.StewardSettings{
+		DriftMode:        e.driftMode,
+		ModuleDriftModes: e.moduleDriftModes,
+	}, bundle)
 	driftHandler := e.driftHandler
 	e.mu.RUnlock()
 

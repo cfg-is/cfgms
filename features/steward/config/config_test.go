@@ -1351,6 +1351,33 @@ resources:
 		"DriftMode must be cleared after loading from local file (security invariant)")
 }
 
+// TestStewardConfig_LocalModuleDriftModesCleared asserts module_drift_modes, like
+// drift_mode, is never honoured from a local file, even when its value is one
+// validation would reject.
+func TestStewardConfig_LocalModuleDriftModesCleared(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  module_drift_modes:
+    file: monitor
+    bad.key: nonsense
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	cfg, err := LoadConfiguration(configFile)
+	require.NoError(t, err, "config with module_drift_modes must load without error")
+	assert.Empty(t, cfg.Steward.ModuleDriftModes,
+		"ModuleDriftModes must be cleared after loading from local file (security invariant)")
+}
+
 // --- observe_sweep_n (Issue #3104, ADR-024 Amendment 1 §3) ---
 
 func TestLoadConfiguration_ObserveSweepN_ParsesExplicitValue(t *testing.T) {
