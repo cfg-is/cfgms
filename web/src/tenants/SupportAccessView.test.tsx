@@ -491,8 +491,8 @@ describe('SupportAccessView — break-glass second approval', () => {
     fireEvent.click(await screen.findByTestId('step-up-verify-btn'))
     await waitFor(() => expect(approvePosts()).toHaveLength(2))
     expect(new Headers((approvePosts()[1]![1] as RequestInit).headers).get('X-Presence-Token')).toBe('tap-token-1')
-    await waitFor(() => expect(screen.queryByTestId('approve-btn')).not.toBeInTheDocument())
-    expect(screen.getByTestId('crossing-row')).toHaveTextContent('Active')
+    await waitFor(() => expect(screen.getByTestId('crossing-row')).toHaveTextContent('Active'))
+    expect(screen.queryByTestId('approve-btn')).not.toBeInTheDocument()
   })
 
   it('approve cancelled tap shows a message and sends no second request', async () => {
