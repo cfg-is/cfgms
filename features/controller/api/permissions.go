@@ -221,6 +221,8 @@ var knownPermissions = map[string]bool{
 	// generation.
 	"report:read":     true,
 	"report:generate": true,
+	// report:manage gates custom report template writes (create, delete, share).
+	"report:manage": true,
 	// Case intake assist (Issue #3604): gates POST /api/v1/cases/intake-assist, the
 	// technician-facing device-claim lookup. It must be listed here so a scoped API
 	// key or a web account can actually hold it — otherwise handleCreateAPIKey and the

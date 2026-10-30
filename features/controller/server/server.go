@@ -71,6 +71,7 @@ import (
 	workflowruntime "github.com/cfgis/cfgms/features/workflow/runtime"
 	workflowtrigger "github.com/cfgis/cfgms/features/workflow/trigger"
 	"github.com/cfgis/cfgms/pkg/audit"
+	reportcachepkg "github.com/cfgis/cfgms/pkg/cache"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/configrouting"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
@@ -2183,7 +2184,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// storage manager. The controller server owns the manager's lifecycle
 	// (closed on Stop).
 	srv.dnaStorageManager = dnaStorageManager
-	reportsHandler, reportsDataProvider := initializeReportsHandler(egProvider, controllerService, tenantManager.IsTenantAncestor, storageManager.GetAlertStore(), logger)
+	// The template manager and report builder are kept for the scheduled-report runner's wiring.
+	reportsHandler, reportsDataProvider, reportTemplateManager, reportBuilder := initializeReportsHandler(egProvider, controllerService, tenantManager.IsTenantAncestor, storageManager.GetAlertStore(), storageManager.GetReportTemplateStore(), tenantManager.GetTenantPath, rootTenantID, logger)
+	_, _ = reportTemplateManager, reportBuilder
 	if reportsHandler != nil {
 		httpServer.SetReportsHandler(reportsHandler)
 		httpServer.SetDataProvider(reportsDataProvider)
@@ -2550,16 +2553,21 @@ func initializeRollbackManager(storageManager *interfaces.StorageManager, logger
 }
 
 // initializeReportsHandler creates the reports API handler backed by the entity
-// graph central provider (Issue #3328). Returns nil, nil when egProvider is nil.
+// graph central provider (Issue #3328). Returns nils when egProvider is nil.
 // controllerService supplies device→tenant ownership so tenant-scoped callers
 // cannot select another tenant's devices.
 // alertStore supplies alert acknowledgement and silence state for the dashboard
 // alerts feed (Issue #3267); nil disables ack/silence annotation gracefully.
 // The DataProvider is returned alongside the Handler so callers can wire it into
 // the compliance endpoints for drift-based compliance derivation (Issue #3265).
-func initializeReportsHandler(egProvider eginterfaces.EntityGraphProvider, controllerService *service.ControllerService, tenantAncestry reportapi.TenantAncestryFunc, alertStore business.AlertStore, logger logging.Logger) (*reportapi.Handler, reportinterfaces.DataProvider) {
+// templateStore backs the custom template manager; when it is nil the custom routes
+// answer 503 and the manager return is nil. tenantPath resolves a tenant's root-first
+// path and rootTenantID is the deployment root: an empty root makes every share deny
+// and the builder unconstructable, both failing closed (Issue #5686). The template
+// manager and report builder are returned for the scheduled-report runner.
+func initializeReportsHandler(egProvider eginterfaces.EntityGraphProvider, controllerService *service.ControllerService, tenantAncestry reportapi.TenantAncestryFunc, alertStore business.AlertStore, templateStore business.ReportTemplateStore, tenantPath func(ctx context.Context, tenantID string) ([]string, error), rootTenantID string, logger logging.Logger) (*reportapi.Handler, reportinterfaces.DataProvider, reportinterfaces.CustomTemplateManager, reportinterfaces.CustomReportBuilder) {
 	if egProvider == nil {
-		return nil, nil
+		return nil, nil, nil, nil
 	}
 
 	// Build the reports engine from its components
@@ -2574,7 +2582,56 @@ func initializeReportsHandler(egProvider eginterfaces.EntityGraphProvider, contr
 	// endpoints; a report device ID is a steward ID.
 	reportsHandler := reportapi.New(reportEngine, exporter, controllerService, alertStore, logger)
 	reportsHandler.SetTenantAncestry(tenantAncestry)
-	return reportsHandler, dataProvider
+
+	var templateManager reportinterfaces.CustomTemplateManager
+	if templateStore != nil {
+		mgr, err := reportsengine.NewCustomTemplateManager(templateStore, time.Now, reportShareScope(tenantPath, rootTenantID))
+		if err != nil {
+			logger.Error("Custom report template manager unavailable", "error", logging.SanitizeLogValue(err.Error()))
+		} else {
+			templateManager = mgr
+		}
+	} else {
+		logger.Warn("Report template store unavailable; custom template routes answer 503")
+	}
+
+	var builder reportinterfaces.CustomReportBuilder
+	pageCache := reportcachepkg.NewCache(reportcachepkg.CacheConfig{
+		Name:            "custom-report-pages",
+		MaxRuntimeItems: 1000,
+		DefaultTTL:      time.Hour,
+		CleanupInterval: time.Minute,
+	})
+	b, err := reportsengine.NewCustomReportBuilder(dataProvider, reportinterfaces.CustomReportConfig{}, pageCache, controllerService, reportsengine.TenantAncestryFunc(tenantAncestry), rootTenantID)
+	if err != nil {
+		pageCache.Close()
+		logger.Error("Custom report builder unavailable", "error", logging.SanitizeLogValue(err.Error()))
+	} else {
+		builder = b
+	}
+
+	reportsHandler.SetCustomReports(templateManager, builder)
+	return reportsHandler, dataProvider, templateManager, builder
+}
+
+// reportShareScope builds the template manager's ShareScopeFunc: a share is allowed only
+// when both tenants resolve, differ, the owner is not the root, and both sit under the
+// same tenant directly below the root. Any error or an empty root denies.
+func reportShareScope(tenantPath func(ctx context.Context, tenantID string) ([]string, error), rootTenantID string) reportsengine.ShareScopeFunc {
+	return func(ctx context.Context, owner, target string) (bool, error) {
+		if tenantPath == nil || rootTenantID == "" || owner == "" || target == "" || owner == target || owner == rootTenantID {
+			return false, nil
+		}
+		ownerPath, err := tenantPath(ctx, owner)
+		if err != nil || len(ownerPath) < 2 {
+			return false, nil
+		}
+		targetPath, err := tenantPath(ctx, target)
+		if err != nil || len(targetPath) < 2 {
+			return false, nil
+		}
+		return ownerPath[1] == targetPath[1], nil
+	}
 }
 
 // initializeWorkflowHandler creates the workflow engine, trigger manager, and API handler.
