@@ -460,6 +460,34 @@ resources:
 
 **Domain release.** When the registry entry is released, the controller retracts the owning tenant's `directory:<domain>/...` entities, so the stale inventory is no longer visible and another tenant can then declare the domain and own new entities. A release whose retraction did not finish is completed before any new claim of that domain.
 
+### Directory Membership Store and Change Log (Issue #5553)
+
+`features/controller/directory` keeps every direct group membership (Active Directory and Microsoft 365) and logs every change. Membership is the `member_of` attribute of user and group fragments; it is not stored as graph edges. State is derived on the controller from verified AD fragments (`MembershipSink.ApplyBatch`) and from the M365 collector (`MembershipSink.ApplyGroup`) and is durable through `ConfigStore`, whichever provider backs it.
+
+**Nothing is dropped.** Every change is logged for every group, managed or not: there is no filter, sampling or cap. A batch that changes more than 10,000 memberships still applies and logs all of them, and also emits a warning event naming the tenant and peer (counts only). A source object whose `member_of` was cut off (`member_of_truncated`) is stored with that flag and a warning event; its missing entries are never treated as removals. Members that are not users or groups (computers, contacts, foreign security principals, devices, service principals, other) are stored and logged with their type, bare object id and display name; they are never managed objects.
+
+**Layout.** All names are flat hashes, so they pass every provider's key validation; the real ids live in each value.
+
+| Namespace | Name | Value |
+|-----------|------|-------|
+| `directory-membership` | `<h>-<NN>`: `h` is the first 32 hex of SHA-256 of `<authority>\|<group id>`, `NN` one of 64 shards chosen by a hash of the member id | the group's members in that shard |
+| `directory-membership-by-member` | first 32 hex of SHA-256 of `<authority>\|<member id>` | that member's direct groups |
+| `directory-membership-log` | `<h>-<sequence>`, tagged `group:<id>` and a month bucket `m:YYYY-MM` | up to 500 events; a full entry is immutable |
+| `directory-membership-seq` | `<h>` | the group's current log sequence; its existence marks the group as observed |
+| `directory-membership-peer` | first 32 hex of SHA-256 of the peer id | the peer's last verified authority |
+
+Every update goes through `config.AtomicUpdate`. A batch groups its changes per shard and per by-member entry, so each touched entry is read and written once per batch; the write count is bounded by touched entries, not by members.
+
+**Input validation.** Each `member_of` entry must be a bare object id (at most 64 characters of `[A-Za-z0-9._-]`) and is always joined to the peer's verified authority. An entry carrying an authority prefix, a `/`, a `:` or a control character is rejected and counted; the object's other entries still apply. The authority is supplied by the caller (the directory-authority verifier's answer for the peer) and is never recomputed from fragment contents.
+
+**Tenant scoping.** The owning tenant of every key and log entry is the domain-registry owner of the verified authority. Removals use the registry owner of the peer's stored last-known authority, not the peer's current tenant, so a steward that moved tenant cannot write removals into another tenant's keys. Reads take the owning tenant of a group entity the caller has already authorised, and list cursors are opaque, stable, and bound to that tenant and subject.
+
+**Change log.** An event records tenant, group and member entity ids, member type, `added` or `removed`, observed and recorded time, source (`directory:<domain>` or `m365:<guid>`) and, for AD, `reported_by` (the reporting steward). The first observation of a group is logged with `baseline: true`; `ListChanges` excludes baseline events unless asked. For AD, `observed_at` is the controller receipt time, or the steward-supplied time clamped to the 24 hours before receipt and never after it, so a compromised steward cannot backdate events.
+
+**Retention.** A sweep under `lease.SingletonJob.RunIfLeader` (a background job, not a write serializer) deletes log entries whose newest event is older than 400 days (configurable). It lists only the month-bucket tags at or before the cutoff month, never the whole log namespace, then deletes the counters of groups left with no log entries and the last-known-authority entry of every deregistered peer.
+
+**Multi-node.** Membership writes need a store that is atomic across controller nodes. In a multi-node cluster with a store that is not (anything but the database provider), every membership write fails closed with `ErrNotClusterAtomic` and nothing is written. There is no lease fallback; multi-node deployments use the database provider.
+
 ## Deployment Rings
 
 Deployment rings are a fleet-wide governance mechanism that controls which steward binary version reaches which stewards, in what order. The controller declares an ordered, named ring set; ring membership is declared in controller config only (no write path exists for stewards or operators to self-assign rings); and config delivery applies the ring's `desired_version` to stewards per their controller-config membership.
