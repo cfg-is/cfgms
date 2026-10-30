@@ -260,14 +260,16 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Println("Deployment Examples:")
 	fmt.Println()
+	fmt.Println("Store the printed token in a root- or administrator-only file and delete it after install.")
+	fmt.Println()
 	fmt.Println("Windows MSI:")
-	fmt.Printf("  msiexec /i cfgms-steward.msi /quiet REGTOKEN=\"%s\"\n", token.Token)
+	fmt.Println("  msiexec /i cfgms-steward.msi /quiet REGTOKEN_FILE=\"<path-to-token-file>\"")
 	fmt.Println()
 	fmt.Println("Linux/macOS:")
-	fmt.Printf("  ./cfgms-steward-install --regtoken=\"%s\"\n", token.Token)
+	fmt.Println("  sudo ./cfgms-steward install --regtoken-file <token-file>")
 	fmt.Println()
 	fmt.Println("Direct execution:")
-	fmt.Printf("  cfgms-steward --regtoken=%s\n", token.Token)
+	fmt.Println("  cfgms-steward --regtoken-file <token-file>")
 
 	return nil
 }

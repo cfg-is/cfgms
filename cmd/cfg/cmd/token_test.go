@@ -194,6 +194,12 @@ func TestRunTokenCreate_TextOutput(t *testing.T) {
 	assert.Contains(t, output, "abc123testtoken")
 	assert.Contains(t, output, "Deployment Examples:")
 
+	// The token is shown once (the labelled line); examples use file-based forms
+	assert.Equal(t, 1, strings.Count(output, "abc123testtoken"), "token must appear exactly once")
+	assert.Contains(t, output, "--regtoken-file")
+	assert.Contains(t, output, "REGTOKEN_FILE=")
+	assert.NotContains(t, output, "--regtoken=")
+
 	// Must not be bare JSON
 	assert.False(t, json.Valid([]byte(strings.TrimSpace(output))), "text output must not be valid JSON")
 }
