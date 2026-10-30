@@ -13,7 +13,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
+
+	"github.com/cfgis/cfgms/pkg/security"
+	"github.com/cfgis/cfgms/pkg/testutil/winacct"
 )
 
 // TestMSIInstallWindowsService verifies that build-msi.ps1 produces a valid MSI
@@ -56,8 +60,17 @@ func TestMSIInstallWindowsService(t *testing.T) {
 		_ = os.Remove(`C:\Program Files\CFGMS\cfgms-steward.exe`)
 	})
 
-	// Step 2: install silently.
-	// tok_test123 passes the token format validator (see service/token.go).
+	// Step 2: install silently. The token is passed by file (REGTOKEN_FILE), never
+	// as an MSI property. tok_test123 passes the token format validator (see
+	// service/token.go). service.ReadTokenFile accepts only a file owned by SYSTEM
+	// or Administrators whose DACL grants access to those two alone, so the file
+	// is written into an admin-only directory (its ACEs are inherited) and owned
+	// by Administrators. The deferred install action runs as SYSTEM.
+	tokenDir := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, security.EnsureAdminOnlyDir(tokenDir))
+	tokenFile := filepath.Join(tokenDir, "registration-token.txt")
+	require.NoError(t, os.WriteFile(tokenFile, []byte("tok_test123"), 0o600))
+	winacct.SetOwner(t, tokenFile, winacct.LocalAccountSID(t, windows.WinBuiltinAdministratorsSid))
 	// The service start will fail because no controller is running, but the service
 	// registration (WriteServiceConfig in SCM) happens before Start() is called.
 	// msiexec exit code may be non-zero if the custom action fails on service start;
@@ -66,7 +79,7 @@ func TestMSIInstallWindowsService(t *testing.T) {
 	msiCmd := exec.Command("msiexec",
 		"/qn",
 		"/i", msiPath,
-		"REGTOKEN=tok_test123",
+		"REGTOKEN_FILE="+tokenFile,
 		"CA_FINGERPRINT=",
 	)
 	msiOut, msiErr := msiCmd.CombinedOutput()
