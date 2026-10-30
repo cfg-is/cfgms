@@ -35,6 +35,7 @@ type fakeGraphClient struct {
 	users map[string]*graph.User // keyed by UserPrincipalName
 
 	updates        []*graph.UpdateUserRequest
+	creates        []*graph.CreateUserRequest
 	licenseCalls   int
 	groupAddCalls  int
 	groupDelCalls  int
@@ -81,6 +82,7 @@ func (f *fakeGraphClient) GetUser(_ context.Context, token *auth.AccessToken, up
 
 func (f *fakeGraphClient) CreateUser(_ context.Context, token *auth.AccessToken, req *graph.CreateUserRequest) (*graph.User, error) {
 	f.tokensUsed = append(f.tokensUsed, token.Token)
+	f.creates = append(f.creates, req)
 	u := &graph.User{
 		ID:                "id-" + req.UserPrincipalName,
 		UserPrincipalName: req.UserPrincipalName,
@@ -344,3 +346,86 @@ type mapState struct {
 }
 
 func (s *mapState) AsMap() map[string]interface{} { return s.m }
+
+// containsString walks v through nested maps and slices looking for needle.
+func containsString(v interface{}, needle string) bool {
+	switch x := v.(type) {
+	case string:
+		return x == needle
+	case map[string]interface{}:
+		for k, e := range x {
+			if k == needle || containsString(e, needle) {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, e := range x {
+			if containsString(e, needle) {
+				return true
+			}
+		}
+	case []string:
+		for _, e := range x {
+			if e == needle {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// [REQUIRED TEST] Issue #5620: AsMap feeds workflow variables and must never carry the password.
+func TestEntraUserConfig_AsMap_OmitsPassword(t *testing.T) {
+	const pw = "known-S3cret-Value!"
+	cfg := existingUserConfig()
+	cfg.PasswordProfile = &PasswordProfile{Password: pw, ForceChangePasswordNextSignIn: true}
+
+	m := cfg.AsMap()
+	assert.False(t, containsString(m, pw), "password must not appear anywhere in AsMap output")
+
+	pp, ok := m["password_profile"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, true, pp["force_change_password_next_signin"])
+}
+
+// [REQUIRED TEST] Issue #5620: typed config reaches Graph without AsMap.
+func TestEntraUserModule_Set_TypedConfig_SendsPassword(t *testing.T) {
+	mod, credStore, fakeGraph := newTestModule(t)
+	seedTenant(t, credStore, "tenant-a", "m365-org-a", "tok-a")
+
+	cfg := &EntraUserConfig{
+		UserPrincipalName: "typed@org-a.example",
+		DisplayName:       "Typed",
+		MailNickname:      "typed",
+		AccountEnabled:    true,
+		TenantID:          "m365-org-a",
+		PasswordProfile:   &PasswordProfile{Password: "typed-Pw-1!", ForceChangePasswordNextSignIn: true},
+	}
+	require.NoError(t, mod.Set(ctxForTenant("tenant-a"), "r", cfg))
+	require.Len(t, fakeGraph.creates, 1)
+	require.NotNil(t, fakeGraph.creates[0].PasswordProfile)
+	assert.Equal(t, "typed-Pw-1!", fakeGraph.creates[0].PasswordProfile.Password)
+	assert.True(t, fakeGraph.creates[0].PasswordProfile.ForceChangePasswordNextSignIn)
+}
+
+// [REQUIRED TEST] Issue #5620: the raw step map (non-typed ConfigState) still supplies the password.
+func TestEntraUserModule_Set_MapConfig_SendsPassword(t *testing.T) {
+	mod, credStore, fakeGraph := newTestModule(t)
+	seedTenant(t, credStore, "tenant-a", "m365-org-a", "tok-a")
+
+	state := &mapState{m: map[string]interface{}{
+		"user_principal_name": "mapped@org-a.example",
+		"display_name":        "Mapped",
+		"mail_nickname":       "mapped",
+		"account_enabled":     true,
+		"tenant_id":           "m365-org-a",
+		"password_profile": map[string]interface{}{
+			"password":                          "mapped-Pw-1!",
+			"force_change_password_next_signin": true,
+		},
+	}}
+	require.NoError(t, mod.Set(ctxForTenant("tenant-a"), "r", state))
+	require.Len(t, fakeGraph.creates, 1)
+	require.NotNil(t, fakeGraph.creates[0].PasswordProfile)
+	assert.Equal(t, "mapped-Pw-1!", fakeGraph.creates[0].PasswordProfile.Password)
+}
