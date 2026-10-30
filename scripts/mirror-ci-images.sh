@@ -97,6 +97,18 @@ tag_of() {
     case "$last" in *:*) printf '%s\n' "${last##*:}" ;; *) printf 'latest\n' ;; esac
 }
 
+# dockerfiles lists every Dockerfile* the repo tracks. In a git checkout it reads
+# `git ls-files` so untracked trees (.cache/go-mod/, .claude/worktrees/) cannot
+# change the result and a local run matches CI; outside git it falls back to find.
+dockerfiles() {
+    if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git -C "$ROOT" ls-files -z -- 'Dockerfile*' '**/Dockerfile*' \
+            | tr '\0' '\n' | awk -v root="$ROOT" -F/ '$NF ~ /^Dockerfile/ {print root "/" $0}' | sort
+    else
+        find "$ROOT" \( -name .git -o -name node_modules \) -prune -o -type f -name 'Dockerfile*' -print | sort
+    fi
+}
+
 # repo_refs prints "<file>:<line>\t<ref>" for every image reference CI consumes.
 repo_refs() {
     local f
@@ -118,7 +130,7 @@ repo_refs() {
                 if (ref in stages || ref == "scratch" || ref ~ /\$/) next
                 print f ":" NR "\t" ref
             }' "$f"
-    done < <(find "$ROOT" \( -name .git -o -name node_modules \) -prune -o -type f -name 'Dockerfile*' -print | sort)
+    done < <(dockerfiles)
     for f in "$ROOT"/.github/workflows/*.yml; do
         [ -f "$f" ] || continue
         awk -v f="${f#"$ROOT"/}" '

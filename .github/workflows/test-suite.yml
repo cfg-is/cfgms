@@ -208,6 +208,34 @@ jobs:
               ;;
           esac
 
+  # Architecture gate (Issue #5603): `make check-architecture` runs on every
+  # pull_request and merge_group, so a central-provider or import violation
+  # cannot merge. No `changes` gate and no docs-only skip: the target is fast
+  # and a skipped run would satisfy a required context (CLAUDE.md "Stub
+  # exclusivity"), so it fails closed for any PR with a .go change by simply
+  # always running. On pull_request the `unit-tests` aggregator `needs:` it;
+  # the context `architecture-check` is also posted on merge_group.
+  architecture-check:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    - name: Install dependencies
+      run: go mod download
+
+    - name: Check architecture
+      run: make check-architecture
+
   # Fast unit tests - runs on every push/PR
   #
   # Split into 5 group legs + an aggregator (Issue #4151), each its own runner.
@@ -547,6 +575,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - changes
+      - architecture-check
       - unit-tests-controller-core
       - unit-tests-heavy-providers
       - unit-tests-rest
@@ -558,6 +587,7 @@ jobs:
         run: |
           echo "changes.code:     ${{ needs.changes.outputs.code }}"
           echo "changes.no_python_ok: ${{ needs.changes.outputs.no_python_ok }}"
+          echo "architecture:     ${{ needs.architecture-check.result }}"
           echo "controller-core:  ${{ needs.unit-tests-controller-core.result }}"
           echo "heavy-providers:  ${{ needs.unit-tests-heavy-providers.result }}"
           echo "rest:             ${{ needs.unit-tests-rest.result }}"
@@ -571,6 +601,12 @@ jobs:
           # unaffected.
           if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ needs.changes.outputs.no_python_ok }}" != "true" ]; then
             echo "❌ core product (cmd/, pkg/, features/, api/, web/, test/) contains a tracked .py file"
+            exit 1
+          fi
+
+          # Issue #5603: checked before the docs-only exit so it never skips.
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ needs.architecture-check.result }}" != "success" ]; then
+            echo "❌ make check-architecture did not succeed"
             exit 1
           fi
 

@@ -141,6 +141,18 @@ sed -i "s#image: $M/redis:7-alpine@sha256:$D1#image: $M/redis:7-alpine@sha256:$D
 out="$("$SCRIPT" --root "$fx" --check 2>&1)"; rc=$?
 if [ "$rc" -ne 0 ] && grep -q 'ci-mirror/redis:7-alpine@sha256:'"$D4"' digest differs' <<<"$out"; then pass "mirror consumer whose digest does not match the list fails"; else fail "mirror digest mismatch ($rc: $out)"; fi
 
+fx="$(make_fixture)"
+(
+    cd "$fx" && git init -q . \
+        && git add .github cmd docker-compose.test.yml \
+        && git -c user.name=t -c user.email=t@example.test commit -q -m fixture
+) >/dev/null 2>&1
+mkdir -p "$fx/.cache/go-mod/dep"
+printf 'FROM docker.io/library/untracked:1@sha256:%s\n' "$D1" > "$fx/.cache/go-mod/dep/Dockerfile"
+if "$SCRIPT" --root "$fx" --check >/dev/null 2>&1; then pass "an untracked Dockerfile is ignored in a git checkout"; else fail "an untracked Dockerfile is ignored in a git checkout"; fi
+(cd "$fx" && git add -f .cache/go-mod/dep/Dockerfile) >/dev/null 2>&1
+if ! "$SCRIPT" --root "$fx" --check >/dev/null 2>&1; then pass "the same Dockerfile is checked once it is tracked"; else fail "the same Dockerfile is checked once it is tracked"; fi
+
 echo "dry-run"
 fx="$(make_fixture)"
 # Empty PATH entries for docker: prove no docker and no credentials are needed.

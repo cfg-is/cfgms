@@ -97,6 +97,18 @@ awk -v pre="$MODPATH/" -v mod="$MODPATH" \
     '(index($0, pre) == 1 || $0 == mod) && $0 !~ /(^|\/)node_modules(\/|$)/' \
     "$workdir/all_raw.txt" | sort -u >"$workdir/all.txt"
 
+# Scan tracked files only: an untracked .go file (a stray generated
+# steward/steward.pb.go, say) makes `go list` see a package CI never sees. Drop
+# packages whose directory has no tracked .go file. Skipped outside a git
+# checkout, where there is no tracked set to compare against.
+if git ls-files --error-unmatch go.mod >/dev/null 2>&1; then
+    git ls-files -- '*.go' | sed -E 's|/?[^/]+$||; s|^$|.|' | sort -u >"$workdir/tracked_dirs.txt"
+    awk -v mod="$MODPATH" 'NR==FNR{t[$0]=1; next}
+        { d = ($0 == mod) ? "." : substr($0, length(mod) + 2); if (d in t) print }' \
+        "$workdir/tracked_dirs.txt" "$workdir/all.txt" >"$workdir/all_tracked.txt"
+    mv "$workdir/all_tracked.txt" "$workdir/all.txt"
+fi
+
 # --- 2. every `main` package: the set of binaries this module ships --------
 go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./... 2>"$workdir/mains.err" \
     | grep . >"$workdir/mains.txt" || true
