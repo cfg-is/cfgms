@@ -1649,3 +1649,70 @@ func TestManager_CommandTerm_ColdCacheConcurrentCallersAllStamp(t *testing.T) {
 		assert.Equal(t, want, got, "caller %d stamped the current token", i)
 	}
 }
+
+// stallingFailoverHandler parks OnFailoverStarted — which the failover manager
+// invokes while holding its own lock — until the test releases it.
+type stallingFailoverHandler struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h *stallingFailoverHandler) OnFailoverStarted(*FailoverEvent) error {
+	close(h.entered)
+	<-h.release
+	return nil
+}
+func (h *stallingFailoverHandler) OnFailoverCompleted(*FailoverEvent) error { return nil }
+func (h *stallingFailoverHandler) OnFailoverFailed(*FailoverEvent, error) error {
+	return nil
+}
+
+// TestManager_Stop_ReturnsWithFailoverInFlight is the REQUIRED regression test
+// for Issue #5579. A failover holds the failover manager's lock while it calls
+// back into Manager (GetLeader takes Manager.mu.RLock); Manager.Stop used to
+// hold Manager.mu while waiting for that lock, a lock-order inversion that
+// hung Stop forever. The test parks a failover mid-flight, starts Stop, and
+// only then lets the failover proceed into the Manager.
+func TestManager_Stop_ReturnsWithFailoverInFlight(t *testing.T) {
+	store := newTestLeaseStore(t)
+	m := newLeaseBackedClusterManager(t, "stop-inflight-failover", store)
+	require.True(t, m.cfg.Failover.Enabled, "failover must be enabled for this test")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	require.NoError(t, m.Start(ctx))
+	require.True(t, m.WaitForLeadership(ctx))
+
+	h := &stallingFailoverHandler{entered: make(chan struct{}), release: make(chan struct{})}
+	m.failover.RegisterFailoverHandler(h)
+
+	failoverDone := make(chan struct{})
+	go func() {
+		defer close(failoverDone)
+		_ = m.failover.TriggerFailover(context.Background(), "test")
+	}()
+	<-h.entered
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- m.Stop(context.Background()) }()
+
+	// Wait until Stop has begun (it cancels the manager context first), then
+	// give it time to reach the failover manager's lock, and only then let the
+	// failover call back into the Manager.
+	require.Eventually(t, func() bool { return m.ctx.Err() != nil },
+		5*time.Second, time.Millisecond, "Stop must begin")
+	time.Sleep(200 * time.Millisecond)
+	close(h.release)
+
+	select {
+	case err := <-stopDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Manager.Stop did not return while a failover was in flight")
+	}
+	select {
+	case <-failoverDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight failover did not finish")
+	}
+}

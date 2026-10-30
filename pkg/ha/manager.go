@@ -412,7 +412,16 @@ func (m *Manager) Stop(ctx context.Context) error {
 	}
 
 	if m.failover != nil {
-		if err := m.failover.Stop(ctx); err != nil {
+		// An in-flight automatic failover holds the failover manager's lock
+		// while calling back into this Manager (GetLeader takes m.mu.RLock).
+		// failover.Stop waits for that goroutine, so m.mu must be released
+		// for the wait or the two deadlock. isStarted stays true meanwhile,
+		// so a concurrent Start is still rejected.
+		failover := m.failover
+		m.mu.Unlock()
+		err := failover.Stop(ctx)
+		m.mu.Lock()
+		if err != nil {
 			stopErrors = append(stopErrors, fmt.Errorf("failover stop: %w", err))
 		}
 	}
