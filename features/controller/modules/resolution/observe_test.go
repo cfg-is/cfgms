@@ -239,6 +239,34 @@ func TestResolveObserveModules_HypervEnabledDNAFact(t *testing.T) {
 	})
 }
 
+func TestResolveObserveModules_PDCEmulatorEquals(t *testing.T) {
+	// The steward emits ad_pdc_emulator via strconv.FormatBool: "true" only on
+	// the domain's PDC-emulator role holder (Issue #5545).
+	adModule := makeObserveManifest("activedirectory", []modules.ObservePredicate{
+		{Fact: "ad_pdc_emulator", Equals: "true"},
+	})
+
+	t.Run("matches_on_role_holder", func(t *testing.T) {
+		dna := map[string]string{"ad_pdc_emulator": "true", "os": "windows"}
+		got := resolution.ResolveObserveModules(dna, []*modules.ModuleMetadata{adModule})
+		require.Len(t, got, 1)
+		assert.Equal(t, "activedirectory", got[0])
+	})
+
+	t.Run("no_match_on_other_dc", func(t *testing.T) {
+		dna := map[string]string{"ad_pdc_emulator": "false", "os": "windows"}
+		got := resolution.ResolveObserveModules(dna, []*modules.ModuleMetadata{adModule})
+		assert.Empty(t, got)
+	})
+
+	t.Run("no_match_when_absent", func(t *testing.T) {
+		// Non-Windows stewards do not emit the fact.
+		dna := map[string]string{"os": "linux"}
+		got := resolution.ResolveObserveModules(dna, []*modules.ModuleMetadata{adModule})
+		assert.Empty(t, got)
+	})
+}
+
 // ---------------------------------------------------------------------------
 // AlwaysPull tests (ADR-024 Amendment 2, Issue #3563)
 // ---------------------------------------------------------------------------
