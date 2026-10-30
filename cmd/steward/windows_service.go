@@ -7,7 +7,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -36,15 +35,11 @@ func checkAndRunAsWindowsService() bool {
 }
 
 // serviceRegToken returns the registration token from the service arguments:
-// the --regtoken value, or the content of the --regtoken-file file read with
-// service.ReadTokenFile, which refuses a file that SYSTEM and Administrators do
-// not exclusively control. Giving both flags is an error.
-func serviceRegToken(regToken, regTokenFile string) (string, error) {
-	if regToken != "" && regTokenFile != "" {
-		return "", errors.New("--regtoken and --regtoken-file cannot be used together")
-	}
+// the content of the --regtoken-file file read with service.ReadTokenFile, which
+// refuses a file that SYSTEM and Administrators do not exclusively control.
+func serviceRegToken(regTokenFile string) (string, error) {
 	if regTokenFile == "" {
-		return regToken, nil
+		return "", nil
 	}
 	return service.ReadTokenFile(regTokenFile)
 }
@@ -56,13 +51,13 @@ const winServiceName = "CFGMSSteward"
 // as a Windows service. The SCM starts the binary with the full command line
 // stored during service registration, e.g.:
 //
-//	cfgms-steward.exe --regtoken TOKEN
+//	cfgms-steward.exe --regtoken-file PATH
 //
-// These appear in os.Args so normal flag parsing extracts the token.
+// These appear in os.Args so normal flag parsing extracts the token file path.
 type stewardServiceHandler struct{}
 
 // Execute is called by the Windows SCM when the service starts. It parses
-// os.Args to extract --regtoken, starts the steward, and handles stop/shutdown
+// os.Args to extract --regtoken-file, starts the steward, and handles stop/shutdown
 // signals from the SCM.
 func (h *stewardServiceHandler) Execute(
 	_ []string,
@@ -72,9 +67,8 @@ func (h *stewardServiceHandler) Execute(
 	status <- svc.Status{State: svc.StartPending}
 
 	// Parse the flags directly from os.Args so the service handler can read
-	// --regtoken, --controller-url etc. that were stored in the service definition.
+	// --regtoken-file, --controller-url etc. that were stored in the service definition.
 	flags := pflag.NewFlagSet("steward-service", pflag.ContinueOnError)
-	regToken := flags.String("regtoken", "", "registration token")
 	regTokenFile := flags.String("regtoken-file", "", "path to a file holding the registration token")
 	controllerURL := flags.String("controller-url", "", "controller URL")
 	configPath := flags.String("config", "", "config path")
@@ -83,7 +77,7 @@ func (h *stewardServiceHandler) Execute(
 	flags.ParseErrorsAllowlist.UnknownFlags = true
 	_ = flags.Parse(os.Args[1:])
 
-	token, err := serviceRegToken(*regToken, *regTokenFile)
+	token, err := serviceRegToken(*regTokenFile)
 	if err != nil {
 		// The error names the file, never the token. A non-zero exit lets the
 		// SCM apply recovery actions.

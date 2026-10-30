@@ -146,7 +146,7 @@ func prepareImage(opts prepareImageOptions, svc imageService, in io.Reader, out 
 	}
 	if !hasToken {
 		return fmt.Errorf("the registration token file is missing or empty; nothing was removed\n" +
-			"  a clone could not enroll without one: run 'cfgms-steward install --regtoken TOKEN' first")
+			"  a clone could not enroll without one: run 'cfgms-steward install --regtoken-file PATH' first")
 	}
 
 	dir := opts.CertStoreDir

@@ -130,8 +130,11 @@ func startLauncherSupervised(t *testing.T, container, regtoken string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := fmt.Sprintf("exec %s run --root %s --child-args '--regtoken %s' >>%s 2>&1",
-		launcherBin, launcherRoot, regtoken, launcherLogPath)
+	// The token goes into a 0600 file owned by the user that runs the steward;
+	// the launcher forwards only the file path.
+	const tokenFile = "/tmp/regtoken"
+	cmd := fmt.Sprintf("umask 077; printf %%s '%s' > %s && exec %s run --root %s --child-args '--regtoken-file %s' >>%s 2>&1",
+		regtoken, tokenFile, launcherBin, launcherRoot, tokenFile, launcherLogPath)
 	out, err := exec.CommandContext(ctx, "docker", "exec",
 		"-d", "--user", "cfgms",
 		container,

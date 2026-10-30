@@ -67,6 +67,14 @@ MOCK
     chmod +x "$dir/cfgms-steward"
 }
 
+# make_token_file DIR writes a 0600 registration token file owned by the current
+# user into DIR and prints its path.
+make_token_file() {
+    local path="$1/regtoken"
+    (umask 077 && printf '%s' "tok-test" > "$path")
+    echo "$path"
+}
+
 # run_install executes install.sh from DIR with CFGMS_INSTALL_PREFIX set to
 # PREFIX. Additional positional arguments are forwarded to install.sh.
 # After the call, LAST_EXIT and LAST_OUTPUT are set.
@@ -81,7 +89,7 @@ run_install() {
         || LAST_EXIT=$?
 }
 
-# ── Test 1: Missing --regtoken exits 1 with usage message ────────────────────
+# ── Test 1: Missing --regtoken-file exits 1 with usage message ────────────────────
 
 T1="$(mktemp -d)"
 make_install_dir "$T1"
@@ -89,7 +97,7 @@ make_install_dir "$T1"
 run_install "$T1" ""
 
 if [[ $LAST_EXIT -eq 1 ]] && echo "$LAST_OUTPUT" | grep -qi "regtoken"; then
-    pass "test1: missing --regtoken exits 1 with usage message"
+    pass "test1: missing --regtoken-file exits 1 with usage message"
 else
     fail "test1: expected exit 1 and 'regtoken' in output (exit=$LAST_EXIT output='$LAST_OUTPUT')"
 fi
@@ -103,7 +111,7 @@ make_install_dir "$T2"
 cp "$CERT_DIR/ca.crt" "$T2/ca.crt"
 
 WRONG_FP="0000000000000000000000000000000000000000000000000000000000000000"
-run_install "$T2" "$T2_PREFIX" --regtoken "tok-test" --fingerprint "$WRONG_FP"
+run_install "$T2" "$T2_PREFIX" --regtoken-file "$(make_token_file "$T2")" --fingerprint "$WRONG_FP"
 
 T2_CERT="$T2_PREFIX/etc/cfgms/controller-ca.crt"
 if [[ $LAST_EXIT -eq 1 ]] && [[ ! -f "$T2_CERT" ]]; then
@@ -120,7 +128,7 @@ T3_PREFIX="$(mktemp -d)"
 make_install_dir "$T3"
 cp "$CERT_DIR/ca.crt" "$T3/ca.crt"
 
-run_install "$T3" "$T3_PREFIX" --regtoken "tok-test" --fingerprint "$CORRECT_FP"
+run_install "$T3" "$T3_PREFIX" --regtoken-file "$(make_token_file "$T3")" --fingerprint "$CORRECT_FP"
 
 T3_CERT="$T3_PREFIX/etc/cfgms/controller-ca.crt"
 if [[ $LAST_EXIT -eq 0 ]] && [[ -f "$T3_CERT" ]]; then
@@ -139,7 +147,7 @@ cp "$CERT_DIR/ca.crt" "$T4/ca.crt"
 
 LAST_EXIT=0
 LAST_OUTPUT="$(echo "y" | CFGMS_INSTALL_PREFIX="$T4_PREFIX" bash "$T4/install.sh" \
-    --regtoken "tok-test" 2>&1)" || LAST_EXIT=$?
+    --regtoken-file "$(make_token_file "$T4")" 2>&1)" || LAST_EXIT=$?
 
 if [[ $LAST_EXIT -eq 0 ]]; then
     pass "test4: interactive 'y' exits 0"
@@ -157,7 +165,7 @@ cp "$CERT_DIR/ca.crt" "$T5/ca.crt"
 
 LAST_EXIT=0
 LAST_OUTPUT="$(echo "N" | CFGMS_INSTALL_PREFIX="$T5_PREFIX" bash "$T5/install.sh" \
-    --regtoken "tok-test" 2>&1)" || LAST_EXIT=$?
+    --regtoken-file "$(make_token_file "$T5")" 2>&1)" || LAST_EXIT=$?
 
 if [[ $LAST_EXIT -eq 1 ]] && echo "$LAST_OUTPUT" | grep -q "aborted"; then
     pass "test5: interactive 'N' exits 1 with abort message"
@@ -175,7 +183,7 @@ cp "$CERT_DIR/ca.crt" "$T6/ca.crt"
 
 LAST_EXIT=0
 LAST_OUTPUT="$(echo "" | CFGMS_INSTALL_PREFIX="$T6_PREFIX" bash "$T6/install.sh" \
-    --regtoken "tok-test" 2>&1)" || LAST_EXIT=$?
+    --regtoken-file "$(make_token_file "$T6")" 2>&1)" || LAST_EXIT=$?
 
 if [[ $LAST_EXIT -eq 1 ]] && echo "$LAST_OUTPUT" | grep -q "aborted"; then
     pass "test6: interactive empty input exits 1 with abort message"
@@ -192,7 +200,7 @@ make_install_dir "$T7"
 # No ca.crt in $T7 — pass --controller-ca explicitly.
 
 run_install "$T7" "$T7_PREFIX" \
-    --regtoken "tok-test" \
+    --regtoken-file "$(make_token_file "$T7")" \
     --fingerprint "$CORRECT_FP" \
     --controller-ca "$CERT_DIR/ca.crt"
 
@@ -277,7 +285,7 @@ else
             --os linux --arch amd64 \
             --out "$T10/modules/$m" >/dev/null 2>&1 || T10_ASSEMBLED=0
     done
-    run_install "$T10" "$T10_PREFIX" --regtoken "tok-test"
+    run_install "$T10" "$T10_PREFIX" --regtoken-file "$(make_token_file "$T10")"
     T10_OK=1
     T10_UID="$(id -u)"
     T10_ROOT="$T10_PREFIX/usr/local/lib/cfgms/modules"
@@ -334,21 +342,21 @@ STUB
 
 TOKEN_FIXTURE="fixture-value-for-argv-test"
 
-# Test 11: --regtoken is handed over by file; token not in steward argv; tmp file gone.
+# Test 11: --regtoken is refused with a message naming --regtoken-file; the stub never runs.
 T11="$(mktemp -d)"; T11_PREFIX="$(mktemp -d)"
 make_recording_dir "$T11"
 run_install "$T11" "$T11_PREFIX" --regtoken "$TOKEN_FIXTURE"
-T11_PATH="$(cat "$T11/token-path.txt" 2>/dev/null || true)"
-if [[ $LAST_EXIT -eq 0 ]] \
-    && grep -qx -- "--regtoken-file" "$T11/args.txt" \
-    && ! grep -q -- "$TOKEN_FIXTURE" "$T11/args.txt" \
-    && ! grep -qx -- "--regtoken" "$T11/args.txt" \
-    && [[ "$(cat "$T11/token-seen.txt")" == "$TOKEN_FIXTURE" ]] \
-    && [[ "$(cat "$T11/token-mode.txt")" == "600" ]] \
-    && [[ -n "$T11_PATH" && ! -e "$T11_PATH" && ! -e "$(dirname "$T11_PATH")" ]]; then
-    pass "test11: --regtoken passed via temp file, not argv; temp file removed"
+T11_EQ_OK=0
+run_install "$T11" "$T11_PREFIX" "--regtoken=$TOKEN_FIXTURE"
+[[ $LAST_EXIT -eq 1 ]] && T11_EQ_OK=1
+run_install "$T11" "$T11_PREFIX" --regtoken "$TOKEN_FIXTURE"
+if [[ $LAST_EXIT -eq 1 && $T11_EQ_OK -eq 1 ]] \
+    && echo "$LAST_OUTPUT" | grep -q -- "--regtoken-file" \
+    && ! echo "$LAST_OUTPUT" | grep -q -- "$TOKEN_FIXTURE" \
+    && [[ ! -e "$T11/args.txt" ]]; then
+    pass "test11: --regtoken exits 1 naming --regtoken-file; steward never invoked"
 else
-    fail "test11: --regtoken file hand-off wrong (exit=$LAST_EXIT args='$(cat "$T11/args.txt" 2>/dev/null | tr '\n' ' ')' path=$T11_PATH)"
+    fail "test11: --regtoken not refused (exit=$LAST_EXIT output='$LAST_OUTPUT')"
 fi
 rm -rf "$T11" "$T11_PREFIX"
 

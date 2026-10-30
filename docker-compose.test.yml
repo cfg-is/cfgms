@@ -562,7 +562,7 @@ services:
     # identity key store is skipped, and registration is rejected with
     # "device_id is required and must be a 64-character lowercase hex string".
     user: root
-    command: ["sh", "-c", "./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && (umask 077; printf %s \"$$CFGMS_REGISTRATION_TOKEN\" > /tmp/cfgms/regtoken) && ./steward --regtoken-file /tmp/cfgms/regtoken"]
     volumes:
       - ha_ca_public:/app/controller-certs/ca:ro
     depends_on:
@@ -614,7 +614,7 @@ services:
     # identity key store is skipped, and registration is rejected with
     # "device_id is required and must be a 64-character lowercase hex string".
     user: root
-    command: ["sh", "-c", "./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && (umask 077; printf %s \"$$CFGMS_REGISTRATION_TOKEN\" > /tmp/cfgms/regtoken) && ./steward --regtoken-file /tmp/cfgms/regtoken"]
     volumes:
       - ha_ca_public:/app/controller-certs/ca:ro
     depends_on:
@@ -662,7 +662,7 @@ services:
     # identity key store is skipped, and registration is rejected with
     # "device_id is required and must be a 64-character lowercase hex string".
     user: root
-    command: ["sh", "-c", "./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && (umask 077; printf %s \"$$CFGMS_REGISTRATION_TOKEN\" > /tmp/cfgms/regtoken) && ./steward --regtoken-file /tmp/cfgms/regtoken"]
     volumes:
       - ha_ca_public:/app/controller-certs/ca:ro
     depends_on:
@@ -842,7 +842,7 @@ services:
     # registered — which is what the controller suite's steward assertions were
     # really failing on.
     user: root
-    command: ["sh", "-c", "./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && (umask 077; printf %s \"$$CFGMS_REGISTRATION_TOKEN\" > /tmp/cfgms/regtoken) && ./steward --regtoken-file /tmp/cfgms/regtoken"]
     volumes:
       - steward_standalone_data:/app/data
       - controller_standalone_certs:/app/controller-certs:ro
@@ -882,7 +882,7 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    command: ["sh", "-c", "./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && (umask 077; printf %s \"$$CFGMS_REGISTRATION_TOKEN\" > /tmp/cfgms/regtoken) && ./steward --regtoken-file /tmp/cfgms/regtoken"]
     volumes:
       - steward_tenant1_data:/app/data
       - ./test/module-execution:/test-workspace:rw
@@ -909,7 +909,7 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    command: ["sh", "-c", "./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && (umask 077; printf %s \"$$CFGMS_REGISTRATION_TOKEN\" > /tmp/cfgms/regtoken) && ./steward --regtoken-file /tmp/cfgms/regtoken"]
     volumes:
       - steward_tenant2_data:/app/data
       - ./test/module-execution:/test-workspace:rw
@@ -936,7 +936,7 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    command: ["sh", "-c", "./steward --regtoken $$CFGMS_REGISTRATION_TOKEN"]
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && (umask 077; printf %s \"$$CFGMS_REGISTRATION_TOKEN\" > /tmp/cfgms/regtoken) && ./steward --regtoken-file /tmp/cfgms/regtoken"]
     volumes:
       - steward_tenant3_data:/app/data
       - ./test/module-execution:/test-workspace:rw
@@ -1100,7 +1100,7 @@ services:
     # so it holds off restarting ./steward while /tmp/cfgms-bare-hold exists. The
     # launcher E2E tests create the hold to run a launcher-supervised steward alone
     # and remove it to restore the bare steward (Issue #4680).
-    command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do if [ -e /tmp/cfgms-bare-hold ]; then sleep 1; continue; fi; ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && (umask 077; printf %s \"$$CFGMS_REGISTRATION_TOKEN\" > /tmp/cfgms/regtoken) && while true; do if [ -e /tmp/cfgms-bare-hold ]; then sleep 1; continue; fi; ./steward --regtoken-file /tmp/cfgms/regtoken && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
     volumes:
       - fleet_steward1_data:/app/data
     # Fixed MAC so a container restart keeps its NIC set; host provenance
@@ -1143,7 +1143,7 @@ services:
     # so it holds off restarting ./steward while /tmp/cfgms-bare-hold exists. The
     # launcher E2E tests create the hold to run a launcher-supervised steward alone
     # and remove it to restore the bare steward (Issue #4680).
-    command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do if [ -e /tmp/cfgms-bare-hold ]; then sleep 1; continue; fi; ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && (umask 077; printf %s \"$$CFGMS_REGISTRATION_TOKEN\" > /tmp/cfgms/regtoken) && while true; do if [ -e /tmp/cfgms-bare-hold ]; then sleep 1; continue; fi; ./steward --regtoken-file /tmp/cfgms/regtoken && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
     volumes:
       - fleet_steward2_data:/app/data
     # Fixed MAC so a container restart keeps its NIC set; host provenance

@@ -125,7 +125,7 @@ func TestRepairServiceRegistration_RecreatesService(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 
-	args := []string{"run", "--root", `C:\Program Files\CFGMS`, "--child-args", "--regtoken abc"}
+	args := []string{"run", "--root", `C:\Program Files\CFGMS`, "--child-args", `--regtoken-file C:\token`}
 	require.NoError(t, repairServiceRegistration(name, testRepairExePath, args))
 
 	// Now present with the expected config.
@@ -143,7 +143,7 @@ func TestRepairServiceRegistration_RecreatesService(t *testing.T) {
 	assert.Equal(t, launcherServiceDescription, cfg.Description)
 	assert.Contains(t, cfg.BinaryPathName, testRepairExePath,
 		"repaired service must point at the launcher install path")
-	assert.Contains(t, cfg.BinaryPathName, "--regtoken abc",
+	assert.Contains(t, cfg.BinaryPathName, `--regtoken-file C:\token`,
 		"repaired service must carry the original launcher args")
 
 	recovery, err := s.RecoveryActions()
@@ -157,6 +157,23 @@ func TestRepairServiceRegistration_RecreatesService(t *testing.T) {
 	assert.Equal(t, 10*time.Second, recovery[0].Delay)
 	assert.Equal(t, 30*time.Second, recovery[1].Delay)
 	assert.Equal(t, 60*time.Second, recovery[2].Delay)
+}
+
+// TestRepairServiceRegistration_RefusesRegtokenValue: arguments carrying a
+// token value are refused and no service is created.
+func TestRepairServiceRegistration_RefusesRegtokenValue(t *testing.T) {
+	requireSCM(t)
+	name := uniqueTestServiceName(t)
+
+	args := []string{"run", "--root", `C:\Program Files\CFGMS`, "--child-args", "--regtoken abc"}
+	err := repairServiceRegistration(name, testRepairExePath, args)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--regtoken-file")
+	assert.NotContains(t, err.Error(), "abc")
+
+	ok, err := serviceRegistrationOK(name)
+	require.NoError(t, err)
+	assert.False(t, ok, "no service may be created for arguments carrying a token value")
 }
 
 // TestRepairServiceIfMissing_CarriesTokenFilePathOnly (REQUIRED, #5623) is a

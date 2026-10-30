@@ -360,7 +360,7 @@ Even in development.") and must not be carried into any further cutover.
 
 Post-cutover verification (steward round-trip, since no fleet is yet
 enrolled to this HA-validation controller instance): a throwaway steward was
-installed (`cfg token create` → `cfgms-steward install --regtoken ...
+installed (`cfg token create` → `cfgms-steward install --regtoken-file ...
 --controller-ca ... --fingerprint ...`), quarantined, approved
 (`cfg registration approve`), reached `active` status with a live
 heartbeat, received a `cfg config upload`'d test config (`file` module, a
@@ -1078,7 +1078,7 @@ restart (F3).
    steward with the controller CA pinned:
    ```bash
    CFGMS_HTTP_CA_CERT_PATH=/path/to/controller-ca.crt \
-     cfgms-steward --regtoken <token> --controller-url https://<any-node>:9080
+     cfgms-steward --regtoken-file <token-file> --controller-url https://<any-node>:9080
    ```
    Any node works — leader or follower.
 3. Reverse with `DELETE /api/v1/registration/ip-trust/<tenant>/<cidr>` (verified
@@ -1399,7 +1399,7 @@ for ip in 103 104 106; do curl -s --cert admin.crt --key admin.key --cacert ca.c
    ```powershell
    $key = 'HKLM:\SYSTEM\CurrentControlSet\Services\CFGMSSteward'
    $exe = '"C:\Program Files\CFGMS\cfgms-steward.exe"'
-   Set-ItemProperty $key ImagePath "$exe --regtoken <TOKEN> --controller-url https://<leader>:9080"
+   Set-ItemProperty $key ImagePath "$exe --regtoken-file <TOKEN-FILE> --controller-url https://<leader>:9080"
    (Get-ItemProperty $key).ImagePath      # verify — do not assume
    ```
 4. **Start the service**, then approve the quarantined registration. Approval

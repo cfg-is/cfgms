@@ -170,6 +170,34 @@ func envForChild(t *testing.T, knobs map[string]string) {
 	}
 }
 
+func TestSupervise_RejectsRegtokenChildArg(t *testing.T) {
+	for _, extra := range [][]string{
+		{"--regtoken", "abc"},
+		{"--regtoken=abc"},
+		{"--regtoken abc"},
+	} {
+		l := newLayout(t)
+		var stdout bytes.Buffer
+		s := &Supervisor{Layout: l, Stdout: &stdout, Stderr: &bytes.Buffer{}, ExtraArgs: extra}
+		err := runSupervisor(t, s, 2*time.Second)
+		if err == nil || !strings.Contains(err.Error(), "--regtoken-file") {
+			t.Fatalf("ExtraArgs %q: want error naming --regtoken-file, got %v", extra, err)
+		}
+		if strings.Contains(err.Error(), "abc") {
+			t.Fatalf("ExtraArgs %q: error echoed the value: %v", extra, err)
+		}
+	}
+
+	// The file form is accepted: it gets past the check and fails later on the
+	// missing current.txt, not on the argument.
+	s := &Supervisor{Layout: newLayout(t), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+		ExtraArgs: []string{"--regtoken-file", "/p"}}
+	err := runSupervisor(t, s, 2*time.Second)
+	if err != nil && strings.Contains(err.Error(), "--regtoken") {
+		t.Fatalf("--regtoken-file must be accepted, got %v", err)
+	}
+}
+
 func TestSupervise_NoCurrentVersion_ReturnsError(t *testing.T) {
 	l := newLayout(t)
 	s := &Supervisor{

@@ -609,7 +609,7 @@ The controller channel is an **additive overlay** on top of the convergence loop
 
 If the controller connection is lost, the steward continues converging on schedule against its last-received cfg and queues reports locally until reconnection.
 
-The `--regtoken` flag establishes the controller channel — it does not change the steward's fundamental convergence behaviour.
+The `--regtoken-file` flag establishes the controller channel — it does not change the steward's fundamental convergence behaviour.
 
 ### Host Attributes (Issue #4949, ADR-034 §2)
 
@@ -696,13 +696,12 @@ The steward binary supports these entry paths:
 
 | Invocation | Mode | Description |
 |------------|------|-------------|
-| `cfgms-steward --regtoken TOKEN` | Controller-connected (foreground) | Registers with the controller via HTTP REST API, receives mTLS certificates, then establishes a gRPC-over-QUIC transport connection. Registration is called on every invocation — there is no stored-certificate resume path. |
-| `cfgms-steward --regtoken-file PATH` | Controller-connected (foreground) | Same as `--regtoken`, but the token is read at start from the file at `PATH`. On Linux and macOS the file must be a regular file owned by the running user with no group or other permission bits (mode 0600); a missing, unreadable or empty file is a start-up error that never prints the token. The token is held in memory only. On Windows the file must be owned by SYSTEM or `BUILTIN\\Administrators` and grant access to those two principals only; the installed Windows service carries `--regtoken-file <path>` to `%ProgramData%\\cfgms\\registration-token` (the data directory is locked down to SYSTEM and Administrators before the file is written, with or without a staged CA certificate), never the token itself. |
+| `cfgms-steward --regtoken-file PATH` | Controller-connected (foreground) | Registers with the controller via HTTP REST API, receives mTLS certificates, then establishes a gRPC-over-QUIC transport connection. Registration is called on every invocation — there is no stored-certificate resume path. The token is read at start from the file at `PATH`. On Linux and macOS the file must be a regular file owned by the running user with no group or other permission bits (mode 0600); a missing, unreadable or empty file is a start-up error that never prints the token. The token is held in memory only. On Windows the file must be owned by SYSTEM or `BUILTIN\\Administrators` and grant access to those two principals only; the installed Windows service carries `--regtoken-file <path>` to `%ProgramData%\\cfgms\\registration-token` (the data directory is locked down to SYSTEM and Administrators before the file is written, with or without a staged CA certificate), never the token itself. |
 | `cfgms-steward --config path.cfg` | Standalone (foreground) | Loads cfg from the specified local file. No controller connection is established. All convergence, DNA, health, and local logging operate as normal. |
-| `cfgms-steward install --regtoken TOKEN` | Controller-connected (service) | Installs the steward as a native OS service (systemd on Linux, SCM on Windows, launchd on macOS) and starts it. |
+| `cfgms-steward install --regtoken-file PATH` | Controller-connected (service) | Installs the steward as a native OS service (systemd on Linux, SCM on Windows, launchd on macOS) and starts it. |
 | `cfgms-steward` (no arguments) | Interactive | Prompts for a registration token, then presents a menu: [1] Install as service, [2] Run once in foreground, [3] Exit. |
 
-When both `--regtoken` and `--config` are supplied, the `--regtoken` path takes precedence and `--config` is ignored. Supplying both `--regtoken` and `--regtoken-file` is an error.
+When both `--regtoken-file` and `--config` are supplied, the `--regtoken-file` path takes precedence and `--config` is ignored. The token is never accepted as a command-line value, because a value on the command line is visible to other local users in the process list; `--regtoken` is rejected with an error naming `--regtoken-file`.
 
 ## Logging
 
@@ -1093,12 +1092,12 @@ Two credential flavors, both flow through the same registration API:
 1. **Perennial registration tokens** — generated on the controller via `cfg token create --expires=<duration>`. Suitable for manual onboarding, small fleets, or time-bounded provisioning windows. Tokens survive multiple registrations (never consumed on use); rotate with `cfg token rotate --tenant-id <id>` to atomically invalidate all prior tokens and issue a new one. Expiry enforces time bounds.
 2. **Long-lived tenant/group registration codes** — durable random opaque strings stored as a join field on the controller's tenant/group record. Suitable for RMM/GPO mass deployment where the same code is baked into a deployment script and reused by many devices. On registration the controller looks up the code in its records and assigns the steward to the matching tenant/group; the code itself carries no meaning, so renames of the tenant/group don't break previously issued codes.
 
-The administrator chooses which flavor fits the deployment workflow. Both arrive at the steward as a plain string passed via `--regtoken <token>` (or `cfgms-steward install --regtoken <token>` for the OS-service install).
+The administrator chooses which flavor fits the deployment workflow. Both arrive at the steward as a plain string in a root/admin-only file passed via `--regtoken-file <path>` (or `cfgms-steward install --regtoken-file <path>` for the OS-service install).
 
 ### Registration Flow
 
 1. Administrator creates a registration token or code on the controller.
-2. Steward is started with `--regtoken <token>`.
+2. Steward is started with `--regtoken-file <path>` naming a root/admin-only file that holds the token.
 3. Steward contacts its compile-time controller URL (HTTPS), submits the token.
 4. The steward generates its mTLS keypair locally and submits the registration request with a `csr_pem` — a PEM-encoded certificate signing request over that keypair's public half; the private key never crosses the wire (Issue #3780). Controller validates the token (perennial token: check expiry and revocation; long-lived code: look up the matching tenant/group record), validates the CSR (rejects a request with no `csr_pem` or one carrying embedded private-key material), and applies the registration approval workflow:
    - **Approved** (HTTP 200): controller signs the submitted CSR into an mTLS certificate scoped to the steward's tenant/group identity and returns the full `RegistrationResponse` with `client_cert` and `ca_cert`. When the controller's cert manager is backed by an imported regional intermediate rather than a root CA, the response also carries `issuer_chain` — the PEM-concatenated chain from `client_cert`'s direct issuer up to (but not including) `ca_cert` (Issue #3778). Self-hosted, root-only controllers omit the field; `ca_cert` is always the ultimate trust root, never an intermediate.

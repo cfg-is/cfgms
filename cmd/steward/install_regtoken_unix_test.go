@@ -25,7 +25,7 @@ func TestRunInstallReadsTokenFileBeforeElevation(t *testing.T) {
 		require.NoError(t, os.WriteFile(path, []byte(token), 0o600))
 		require.NoError(t, os.Chmod(path, 0o644))
 
-		err := runInstall("", path, "", "", "")
+		err := runInstall(path, "", "", "")
 		require.Error(t, err)
 		assert.NotContains(t, err.Error(), "elevated privileges")
 		assert.NotContains(t, err.Error(), token)
@@ -38,7 +38,7 @@ func TestRunInstallReadsTokenFileBeforeElevation(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "token")
 		require.NoError(t, os.WriteFile(path, []byte(token), 0o600))
 
-		err := runInstall("", path, "", "", "")
+		err := runInstall(path, "", "", "")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "elevated privileges")
 		assert.NotContains(t, err.Error(), token)
@@ -46,14 +46,13 @@ func TestRunInstallReadsTokenFileBeforeElevation(t *testing.T) {
 }
 
 // TestInstallCommandRegtokenFileAlone asserts install accepts --regtoken-file
-// without --regtoken: it gets past flag validation and fails on the missing CA file.
+// alone: it gets past flag validation and fails on the missing CA file.
 func TestInstallCommandRegtokenFileAlone(t *testing.T) {
 	valid := filepath.Join(t.TempDir(), "token")
 	require.NoError(t, os.WriteFile(valid, []byte("tok_file_abc123"), 0o600))
 
-	err := runInstall("", valid, "", filepath.Join(t.TempDir(), "no-ca.crt"), "")
+	err := runInstall(valid, "", filepath.Join(t.TempDir(), "no-ca.crt"), "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no-ca.crt", "--regtoken-file alone must pass flag validation")
 	assert.NotContains(t, err.Error(), "is required")
-	assert.NotContains(t, err.Error(), "cannot be used together")
 }

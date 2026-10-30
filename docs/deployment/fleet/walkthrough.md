@@ -228,13 +228,13 @@ Token Details:
 Deployment Examples:
 
 Linux/macOS:
-  ./cfgms-steward-install --regtoken="abcdefghijklmnopqrstuvwxyz123456"
+  ./cfgms-steward-install --regtoken-file /path/to/token-file
 
 Direct execution:
-  cfgms-steward --regtoken=abcdefghijklmnopqrstuvwxyz123456
+  cfgms-steward --regtoken-file /path/to/token-file
 ```
 
-Save the token string — you'll use it in Phase 4.
+Save the token string into a root/admin-only file (mode 0600 on Linux/macOS) — you'll use it in Phase 4.
 
 List all active tokens at any time:
 
