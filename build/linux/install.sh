@@ -223,7 +223,7 @@ for module in "${STDLIB_MODULES[@]}"; do
         # created by this (root) process, so they are root-owned regardless of
         # who extracted the archive — a root steward must never execute a
         # binary an unprivileged user can rewrite. Only the permission bits the
-        # assembler set (binary 755, manifest 644, sidecar 600) are carried
+        # assembler set (binary 755, manifest 644, sidecar 644) are carried
         # over; setuid/setgid/sticky bits are masked off. The bytes are copied
         # verbatim, so the installed content is exactly the signed content.
         while IFS= read -r -d '' entry; do

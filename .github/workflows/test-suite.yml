@@ -511,6 +511,15 @@ jobs:
         CFGMS_TEST_SCRIPTS_GROUPS: ${{ needs.changes.outputs.groups }}
       run: make test-scripts
 
+    # build/linux/install_test.sh builds scripts/sign-module-bundle, assembles
+    # every stdlib module into a signed bundle root and runs install.sh against
+    # it (Issue #5597). This job runs on every pull_request that changes code,
+    # which covers build/linux/, features/modules/stdlib/ and the bundle signer;
+    # a non-zero exit from the script fails the step and the `unit-tests`
+    # aggregator.
+    - name: Run Linux installer tests
+      run: make test-install-sh
+
   # Aggregator: re-creates the single `unit-tests` required-context name so
   # branch protection and integration-tests's `needs: unit-tests` are
   # unaffected by the group split (AC4). `if: always()` is required, not
