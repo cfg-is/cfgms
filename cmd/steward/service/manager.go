@@ -26,8 +26,11 @@ type ServiceStatus struct {
 // Manager manages the steward OS service lifecycle.
 // Each platform provides its own implementation via the newManager factory.
 type Manager interface {
-	// Install copies the binary to the platform-standard location and registers
-	// the OS service configured to start automatically with --regtoken token.
+	// Install copies the binary to the platform-standard location, writes the
+	// registration token to the root/Administrators-only token file, and
+	// registers the OS service to start automatically with --regtoken-file
+	// pointing at that file. The token itself never appears in the service
+	// definition.
 	// Install is idempotent: if the service already exists it is stopped, the
 	// binary replaced, and the service restarted.
 	// Requires elevated privileges (root on Linux/macOS, Administrator on Windows).
@@ -54,9 +57,9 @@ type Manager interface {
 	// installed but not running succeeds. Requires elevated privileges.
 	Stop() error
 
-	// RegistrationTokenConfigured reports whether the installed service
-	// definition carries a --regtoken argument. It never returns the token.
-	// A service that is not installed reports false.
+	// RegistrationTokenConfigured reports whether the registration token file
+	// exists and is non-empty. It never returns the token, and it does not read
+	// the service definition, which carries only the file path.
 	RegistrationTokenConfigured() (bool, error)
 
 	// Status returns the current state of the OS service.

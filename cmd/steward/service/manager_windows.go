@@ -546,31 +546,11 @@ func (m *windowsManager) Stop() error {
 	return waitForStop(existing, 30*time.Second)
 }
 
-// RegistrationTokenConfigured reports whether a registration token file exists
-// and is non-empty, or, for a legacy install, whether the service's launcher
-// command line carries --regtoken. Neither the file content nor the command
-// line is returned.
+// RegistrationTokenConfigured reports whether the registration token file exists
+// and is non-empty. The file content is never returned. The service command
+// line is not consulted: it carries only the token file path.
 func (m *windowsManager) RegistrationTokenConfigured() (bool, error) {
-	if ok, err := tokenFileConfigured(platformTokenFilePath()); err != nil || ok {
-		return ok, err
-	}
-	scm, err := mgr.Connect()
-	if err != nil {
-		return false, fmt.Errorf("failed to connect to Windows Service Control Manager: %w", err)
-	}
-	defer func() { _ = scm.Disconnect() }()
-
-	existing, err := scm.OpenService(windowsServiceName)
-	if err != nil {
-		return false, nil
-	}
-	defer func() { _ = existing.Close() }()
-
-	cfg, err := existing.Config()
-	if err != nil {
-		return false, fmt.Errorf("failed to read service configuration: %w", err)
-	}
-	return commandLineHasRegToken(cfg.BinaryPathName), nil
+	return tokenFileConfigured(platformTokenFilePath())
 }
 
 // Status returns the current service state without requiring elevated privileges.

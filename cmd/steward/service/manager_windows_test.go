@@ -170,6 +170,31 @@ func TestWindowsInstallLauncherMissing(t *testing.T) {
 		"launcher presence is checked before the elevation gate")
 }
 
+// TestRegistrationTokenConfigured_ReadsTokenFileOnly (REQUIRED, #5623):
+// RegistrationTokenConfigured reports only whether the token file exists and is
+// non-empty. It no longer falls back to the service command line.
+func TestRegistrationTokenConfigured_ReadsTokenFileOnly(t *testing.T) {
+	requireElevatedToken(t)
+	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
+	path := tokenPathInExistingDir(t)
+	m := &windowsManager{}
+
+	ok, err := m.RegistrationTokenConfigured()
+	require.NoError(t, err)
+	assert.False(t, ok, "a missing token file is not configured")
+
+	require.NoError(t, os.WriteFile(path, nil, 0o600))
+	ok, err = m.RegistrationTokenConfigured()
+	require.NoError(t, err)
+	assert.False(t, ok, "an empty token file is not configured")
+	require.NoError(t, os.Remove(path))
+
+	require.NoError(t, writeTokenFile(path, "tok_configured_check"))
+	ok, err = m.RegistrationTokenConfigured()
+	require.NoError(t, err)
+	assert.True(t, ok, "a token file written by writeTokenFile is configured")
+}
+
 // TestBuildLauncherServiceArgs is the REQUIRED launcher-target TEST for
 // #2379: the Windows service must be registered to invoke the launcher
 // (`run --root ... --child-args "..."`), never the bare steward binary —
@@ -194,7 +219,6 @@ func TestBuildLauncherServiceArgs(t *testing.T) {
 	assert.NotContains(t, joined, token)
 	assert.NotContains(t, joined, "--regtoken ", "the legacy --regtoken flag must not come back")
 	assert.Equal(t, 1, strings.Count(joined, "--regtoken-file"))
-	assert.True(t, commandLineHasRegToken(joined), "a token-file service definition counts as configured")
 }
 
 // TestWindowsLauncherUnderProgramFilesACL is the REQUIRED LPE-hardening TEST

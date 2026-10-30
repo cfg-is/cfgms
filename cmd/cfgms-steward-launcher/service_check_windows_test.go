@@ -6,8 +6,10 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,6 +157,40 @@ func TestRepairServiceRegistration_RecreatesService(t *testing.T) {
 	assert.Equal(t, 10*time.Second, recovery[0].Delay)
 	assert.Equal(t, 30*time.Second, recovery[1].Delay)
 	assert.Equal(t, 60*time.Second, recovery[2].Delay)
+}
+
+// TestRepairServiceIfMissing_CarriesTokenFilePathOnly (REQUIRED, #5623) is a
+// regression guard on the launcher's service-repair path: the repair copies its
+// own arguments, so a service re-created from arguments carrying
+// --regtoken-file <path> must hold that path and no token value.
+func TestRepairServiceIfMissing_CarriesTokenFilePathOnly(t *testing.T) {
+	requireSCM(t)
+	name := uniqueTestServiceName(t)
+
+	tokenPath := `C:\ProgramData\cfgms\registration-token`
+	args := []string{"run", "--root", `C:\Program Files\CFGMS`, "--child-args",
+		"--regtoken-file " + tokenPath + " --controller-url https://ctrl.example.com:8443"}
+
+	var out bytes.Buffer
+	repairServiceIfMissing(&out, name, testRepairExePath, args)
+	assert.Contains(t, out.String(), "service_registration_repaired",
+		"the repair must run and log success for a missing service")
+
+	scm, err := mgr.Connect()
+	require.NoError(t, err)
+	defer func() { _ = scm.Disconnect() }()
+	s, err := scm.OpenService(name)
+	require.NoError(t, err, "repaired service must exist")
+	defer func() { _ = s.Close() }()
+
+	cfg, err := s.Config()
+	require.NoError(t, err)
+	assert.Contains(t, cfg.BinaryPathName, "--regtoken-file "+tokenPath,
+		"repaired service must carry the token file path")
+	assert.NotContains(t, cfg.BinaryPathName, "--regtoken ",
+		"repaired service must not carry a token value via the legacy flag")
+	assert.Equal(t, 1, strings.Count(cfg.BinaryPathName, "--regtoken"),
+		"the only token-related argument is --regtoken-file")
 }
 
 // TestRepairServiceRegistration_ErrorsOnConflict (#2465): repairServiceRegistration

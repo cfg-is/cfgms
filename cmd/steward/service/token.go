@@ -24,34 +24,6 @@ func validateToken(token string) error {
 	return nil
 }
 
-// regTokenFlag is the launcher child argument carrying the registration token.
-const regTokenFlag = "--regtoken"
-
-// regTokenFileFlag is the launcher child argument carrying the path of the
-// registration token file.
-const regTokenFileFlag = "--regtoken-file"
-
-// commandLineHasRegToken reports whether a service command line or definition
-// carries a non-empty --regtoken or --regtoken-file argument. It never returns
-// the value.
-func commandLineHasRegToken(definition string) bool {
-	return commandLineHasFlagValue(definition, regTokenFlag) ||
-		commandLineHasFlagValue(definition, regTokenFileFlag)
-}
-
-func commandLineHasFlagValue(definition, flag string) bool {
-	_, rest, found := strings.Cut(definition, flag+" ")
-	if !found {
-		return false
-	}
-	fields := strings.Fields(rest)
-	if len(fields) == 0 {
-		return false
-	}
-	// The value must not be the next flag or a closing quote.
-	return !strings.HasPrefix(fields[0], "-") && !strings.HasPrefix(fields[0], `"`)
-}
-
 // tokenFileName is the name of the root-only registration token file. It lives
 // beside the installed CA certificate.
 const tokenFileName = "registration-token"
