@@ -39,7 +39,7 @@ type EntraUserConfig struct {
 
 	// Account settings
 	AccountEnabled         bool             `yaml:"account_enabled"`
-	PasswordProfile        *PasswordProfile `yaml:"password_profile,omitempty"`
+	SignInProfile          *PasswordProfile `yaml:"password_profile,omitempty"`
 	ForceResetAtNextSignIn bool             `yaml:"force_change_password,omitempty"`
 
 	// Contact information
@@ -85,9 +85,9 @@ func (c *EntraUserConfig) AsMap() map[string]interface{} {
 		"tenant_id":           c.TenantID,
 	}
 
-	if c.PasswordProfile != nil {
+	if c.SignInProfile != nil {
 		profileMap := map[string]interface{}{
-			"force_change_password_next_signin": c.PasswordProfile.ForceResetAtNextSignIn,
+			"force_change_password_next_signin": c.SignInProfile.ForceResetAtNextSignIn,
 		}
 		// The password is deliberately omitted: AsMap output flows into shared
 		// workflow variables. Set reads it from the typed PasswordProfile.
@@ -136,10 +136,10 @@ func (c *EntraUserConfig) AsMap() map[string]interface{} {
 func (c *EntraUserConfig) ToYAML() ([]byte, error) {
 	// Create a copy without sensitive data for export
 	exportConfig := *c
-	if exportConfig.PasswordProfile != nil {
+	if exportConfig.SignInProfile != nil {
 		// Create a copy without the password field
-		exportConfig.PasswordProfile = &PasswordProfile{
-			ForceResetAtNextSignIn: c.PasswordProfile.ForceResetAtNextSignIn,
+		exportConfig.SignInProfile = &PasswordProfile{
+			ForceResetAtNextSignIn: c.SignInProfile.ForceResetAtNextSignIn,
 		}
 	}
 	return yaml.Marshal(&exportConfig)
@@ -212,7 +212,7 @@ func (c *EntraUserConfig) GetManagedFields() []string {
 	if len(c.Groups) > 0 {
 		fields = append(fields, "groups")
 	}
-	if c.PasswordProfile != nil || c.ForceResetAtNextSignIn {
+	if c.SignInProfile != nil || c.ForceResetAtNextSignIn {
 		fields = append(fields, "password_profile")
 	}
 
@@ -264,21 +264,21 @@ func (m *entraUserModule) Set(ctx context.Context, resourceID string, config mod
 
 	// Handle password profile
 	if passwordProfile, ok := configMap["password_profile"].(map[string]interface{}); ok {
-		userConfig.PasswordProfile = &PasswordProfile{}
+		userConfig.SignInProfile = &PasswordProfile{}
 		if forceChange, ok := passwordProfile["force_change_password_next_signin"].(bool); ok {
-			userConfig.PasswordProfile.ForceResetAtNextSignIn = forceChange
+			userConfig.SignInProfile.ForceResetAtNextSignIn = forceChange
 		}
 		if password, ok := passwordProfile["password"].(string); ok {
-			userConfig.PasswordProfile.Password = password
+			userConfig.SignInProfile.Password = password
 		}
 	}
 
 	// A typed config never carries its password through AsMap; take it directly.
-	if typed, ok := config.(*EntraUserConfig); ok && typed.PasswordProfile != nil {
-		if userConfig.PasswordProfile == nil {
-			userConfig.PasswordProfile = &PasswordProfile{}
+	if typed, ok := config.(*EntraUserConfig); ok && typed.SignInProfile != nil {
+		if userConfig.SignInProfile == nil {
+			userConfig.SignInProfile = &PasswordProfile{}
 		}
-		userConfig.PasswordProfile.Password = typed.PasswordProfile.Password
+		userConfig.SignInProfile.Password = typed.SignInProfile.Password
 	}
 
 	if forceChange, ok := configMap["force_change_password"].(bool); ok {
@@ -441,13 +441,13 @@ func (m *entraUserModule) Get(ctx context.Context, resourceID string) (modules.C
 // declared. A flag without a password yields a profile carrying only
 // forceChangePasswordNextSignIn. The password is never logged or put in errors.
 func (c *EntraUserConfig) graphPasswordProfile() *graph.PasswordProfile {
-	if c.PasswordProfile == nil && !c.ForceResetAtNextSignIn {
+	if c.SignInProfile == nil && !c.ForceResetAtNextSignIn {
 		return nil
 	}
 	pp := &graph.PasswordProfile{ForceResetAtNextSignIn: c.ForceResetAtNextSignIn}
-	if c.PasswordProfile != nil {
-		pp.Password = c.PasswordProfile.Password
-		pp.ForceResetAtNextSignIn = pp.ForceResetAtNextSignIn || c.PasswordProfile.ForceResetAtNextSignIn
+	if c.SignInProfile != nil {
+		pp.Password = c.SignInProfile.Password
+		pp.ForceResetAtNextSignIn = pp.ForceResetAtNextSignIn || c.SignInProfile.ForceResetAtNextSignIn
 	}
 	return pp
 }
@@ -468,7 +468,7 @@ func (m *entraUserModule) createUser(ctx context.Context, token *auth.AccessToke
 	}
 
 	// Set password profile if provided
-	userRequest.PasswordProfile = config.graphPasswordProfile()
+	userRequest.SignInProfile = config.graphPasswordProfile()
 
 	// Create the user
 	user, err := m.graphClient.CreateUser(ctx, token, userRequest)
@@ -545,7 +545,7 @@ func (m *entraUserModule) updateUser(ctx context.Context, token *auth.AccessToke
 			// compute: a declared password profile is sent on every apply, so a
 			// Set carrying a password resets it on every apply.
 			if pp := config.graphPasswordProfile(); pp != nil {
-				updateRequest.PasswordProfile = pp
+				updateRequest.SignInProfile = pp
 			}
 		}
 	}

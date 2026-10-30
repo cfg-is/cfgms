@@ -107,7 +107,7 @@ func TestEntraUser_Integration_FullCRUD(t *testing.T) {
 		DisplayName:       fmt.Sprintf("CFGMS Test User %s", timestamp),
 		MailNickname:      testUsername,
 		AccountEnabled:    true,
-		PasswordProfile: &PasswordProfile{
+		SignInProfile: &PasswordProfile{
 			Password:               "TempPass123!",
 			ForceResetAtNextSignIn: true,
 		},
