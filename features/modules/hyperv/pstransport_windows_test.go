@@ -426,8 +426,28 @@ func moveSystemTemp(t *testing.T) {
 
 // isUnderDir reports whether path lies inside dir, ignoring case.
 func isUnderDir(path, dir string) bool {
-	return strings.HasPrefix(strings.ToLower(filepath.Clean(path)),
-		strings.ToLower(filepath.Clean(dir))+string(filepath.Separator))
+	return strings.HasPrefix(strings.ToLower(resolvePath(path)),
+		strings.ToLower(resolvePath(dir))+string(filepath.Separator))
+}
+
+// resolvePath returns the long-form, symlink-free form of p so an 8.3 short
+// name (C:\Users\RUNNER~1) and its long form compare equal. A path that cannot
+// be resolved falls back to its cleaned form.
+func resolvePath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return filepath.Clean(resolved)
+	}
+	// The leaf may already be removed; resolve the parent and re-attach it.
+	if parent, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		return filepath.Join(parent, filepath.Base(p))
+	}
+	return filepath.Clean(p)
+}
+
+// isDirectlyIn reports whether path's parent directory is dir, ignoring case
+// and short/long name forms. A file in a subfolder or elsewhere is false.
+func isDirectlyIn(path, dir string) bool {
+	return strings.EqualFold(resolvePath(filepath.Dir(path)), resolvePath(dir))
 }
 
 // TestRunFresh_StagesScriptInSecuredBase (REQUIRED, #5635): the script
@@ -444,7 +464,7 @@ func TestRunFresh_StagesScriptInSecuredBase(t *testing.T) {
 
 	path := strings.TrimSpace(out)
 	require.NotEmpty(t, path)
-	assert.True(t, strings.EqualFold(filepath.Dir(path), base),
+	assert.True(t, isDirectlyIn(path, base),
 		"staged script %q must be directly in the staging base %q", path, base)
 	assert.False(t, isUnderDir(path, os.TempDir()),
 		"staged script %q must not be under the system temporary directory", path)
@@ -481,7 +501,7 @@ func TestRunDetached_StagesScriptInSecuredBase(t *testing.T) {
 	}
 	require.NoError(t, err, "the detached script must record its path")
 	path := strings.TrimSpace(string(recorded))
-	assert.True(t, strings.EqualFold(filepath.Dir(path), base),
+	assert.True(t, isDirectlyIn(path, base),
 		"detached script %q must be directly in the staging base %q", path, base)
 	assert.False(t, isUnderDir(path, os.TempDir()),
 		"detached script %q must not be under the system temporary directory", path)
@@ -497,7 +517,7 @@ func TestWriteArgsFile_StagesInSecuredBase(t *testing.T) {
 
 	path, remove, err := writeArgsFile(psCall{Verb: "GetVM"})
 	require.NoError(t, err)
-	assert.True(t, strings.EqualFold(filepath.Dir(path), base),
+	assert.True(t, isDirectlyIn(path, base),
 		"args file %q must be directly in the staging base %q", path, base)
 	assert.False(t, isUnderDir(path, os.TempDir()),
 		"args file %q must not be under the system temporary directory", path)
