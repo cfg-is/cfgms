@@ -14,6 +14,7 @@ import (
 	channelBus "github.com/cfgis/cfgms/pkg/eventbus/providers/channel"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging/subscribers/syslog"
+	"github.com/cfgis/cfgms/pkg/logging/subscribers/systemlog"
 )
 
 // LoggingManager manages the global logging provider and subscribers
@@ -606,6 +607,8 @@ func (m *LoggingManager) createSubscriber(subscriberType string) (interfaces.Log
 	switch subscriberType {
 	case "syslog":
 		return syslog.NewSyslogSubscriber(), nil
+	case "systemlog":
+		return systemlog.NewSubscriber(), nil
 	default:
 		return nil, fmt.Errorf("unknown subscriber type: %s", subscriberType)
 	}
