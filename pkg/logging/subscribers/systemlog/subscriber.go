@@ -132,9 +132,16 @@ func (s *Subscriber) Initialize(config map[string]interface{}) error {
 
 func parseConfig(cfg *Config, config map[string]interface{}) error {
 	if v, ok := config["tag"].(string); ok && v != "" {
+		if !tagRE.MatchString(v) {
+			return errors.New("tag must match [A-Za-z0-9_.-]{1,64}")
+		}
 		cfg.Tag = v
 	}
 	if v, ok := config["network"].(string); ok {
+		// Local sink only: never send to a remote host.
+		if v != "" && v != "unix" && v != "unixgram" {
+			return fmt.Errorf("network %q not allowed; systemlog is local only", v)
+		}
 		cfg.Network = v
 	}
 	if v, ok := config["address"].(string); ok {
@@ -240,6 +247,7 @@ func (s *Subscriber) WriteOnce(level Level, key, message string) error {
 }
 
 var (
+	tagRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 	// key=value / key: value pairs whose key names a credential.
 	secretPairRE = regexp.MustCompile(`(?i)\b([a-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key|credential|private[_-]?key|bearer)[a-z0-9_.-]*)\s*[=:]\s*\S+`)
 	// Authorization-style "Bearer xyz".

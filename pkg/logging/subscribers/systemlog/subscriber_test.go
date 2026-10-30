@@ -48,3 +48,8 @@ func TestInitializeFailureReportsUnavailable(t *testing.T) {
 	assert.Error(t, s.WriteOnce(LevelError, "k", "m"))
 	assert.False(t, s.ShouldHandle(interfaces.LogEntry{Level: "ERROR"}))
 }
+
+func TestInitializeRejectsRemoteNetworkAndBadTag(t *testing.T) {
+	require.Error(t, NewSubscriber().Initialize(map[string]interface{}{"network": "udp", "address": "127.0.0.1:514"}))
+	require.Error(t, NewSubscriber().Initialize(map[string]interface{}{"tag": `a\b`}))
+}
