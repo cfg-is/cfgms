@@ -535,6 +535,7 @@ func hostileValue(i int) string {
 // expression must be exactly the fixed form, neither text may hold any value,
 // and the args JSON must carry every value unchanged and typed.
 func TestDispatch_NoValueReachesScriptText(t *testing.T) {
+	useTestStagingBase(t) // writeArgsFile stages in the secured base (#5635)
 	type row struct {
 		cmd  string
 		spec psVerbSpec
@@ -643,10 +644,9 @@ func TestDispatch_FailsClosed(t *testing.T) {
 		"unicode quote in args path": "o\u2019q",
 	} {
 		t.Run(name, func(t *testing.T) {
-			tmp := filepath.Join(t.TempDir(), dir)
-			require.NoError(t, os.Mkdir(tmp, 0o700))
-			t.Setenv("TMP", tmp)
-			t.Setenv("TEMP", tmp)
+			// The args file is staged in the secured base (#5635), so the
+			// quote goes in the base's own name.
+			tmp := stagingBaseAt(t, filepath.Join(t.TempDir(), dir), "O:BA")
 			for _, cmd := range []string{psGetVM, psMountSeedVHD, psMoveVMStorage} {
 				_, err := tr.ExecutePS(ctx, cmd, map[string]string{"Name": "web-01", "Path": `C:\s.vhdx`})
 				require.Error(t, err)
