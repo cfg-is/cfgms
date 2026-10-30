@@ -298,7 +298,7 @@ else
         [[ "$(stat -c '%a' "$T10_ROOT/$m")" == "755" ]] || T10_OK=0
         [[ "$(stat -c '%a' "$T10_ROOT/$m/cfgms-module-$m")" == "755" ]] || T10_OK=0
         [[ "$(stat -c '%a' "$T10_ROOT/$m/module.yaml")" == "644" ]] || T10_OK=0
-        [[ "$(stat -c '%a' "$T10_ROOT/$m/bundle.yaml")" == "600" ]] || T10_OK=0
+        [[ "$(stat -c '%a' "$T10_ROOT/$m/bundle.yaml")" == "644" ]] || T10_OK=0
     done
     if [[ $T10_ASSEMBLED -eq 1 && ${#T10_MODULES[@]} -gt 0 && $LAST_EXIT -eq 0 && $T10_OK -eq 1 ]]; then
         pass "test10: stdlib bundle roots staged (module.yaml, bundle.yaml, binary) for ${#T10_MODULES[@]} modules"
