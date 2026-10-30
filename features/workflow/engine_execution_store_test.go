@@ -174,9 +174,13 @@ func TestExecutionRetentionBoundsTerminalRecords(t *testing.T) {
 		last = runToCompletion(t, e, execStoreCtx(executionTestTenant), twoStepWorkflow("retained-wf"))
 		time.Sleep(2 * time.Millisecond) // distinct start times
 	}
-	recs, err := store.List(context.Background(), executionTestTenant, "", 0)
-	require.NoError(t, err)
-	assert.Len(t, recs, 2, "only the newest two terminal executions are retained")
+	// Pruning runs just after Done closes, so retention is eventual.
+	var recs []*business.WorkflowExecutionRecord
+	require.Eventually(t, func() bool {
+		var err error
+		recs, err = store.List(context.Background(), executionTestTenant, "", 0)
+		return err == nil && len(recs) == 2
+	}, 5*time.Second, 10*time.Millisecond, "only the newest two terminal executions are retained")
 	assert.Equal(t, last.ID, recs[0].ExecutionID)
 }
 
@@ -292,4 +296,55 @@ func TestExecutionShutdownStopsStoreWrites(t *testing.T) {
 	after := store.writes.Load()
 	time.Sleep(100 * time.Millisecond)
 	assert.Equal(t, after, store.writes.Load(), "no store write may happen after Shutdown")
+}
+
+// slowTerminalStore wraps a real execution store and delays the terminal Save and
+// every Prune, recording when the terminal Save finished.
+type slowTerminalStore struct {
+	business.WorkflowExecutionStore
+	saveDelay     time.Duration
+	pruneDelay    time.Duration
+	terminalSaved atomic.Bool
+}
+
+func (s *slowTerminalStore) Save(ctx context.Context, rec *business.WorkflowExecutionRecord) error {
+	if !business.IsTerminalWorkflowExecutionStatus(rec.Status) {
+		return s.WorkflowExecutionStore.Save(ctx, rec)
+	}
+	time.Sleep(s.saveDelay)
+	err := s.WorkflowExecutionStore.Save(ctx, rec)
+	s.terminalSaved.Store(err == nil)
+	return err
+}
+
+func (s *slowTerminalStore) Prune(ctx context.Context, tenantID string, keep int) (int, error) {
+	time.Sleep(s.pruneDelay)
+	return s.WorkflowExecutionStore.Prune(ctx, tenantID, keep)
+}
+
+func TestDoneClosesAfterDurableTerminalWriteNotAfterPrune(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cfgms.db")
+	slow := &slowTerminalStore{
+		WorkflowExecutionStore: openSQLiteExecutionStore(t, path),
+		saveDelay:              300 * time.Millisecond,
+		pruneDelay:             1500 * time.Millisecond,
+	}
+	engine := newExecutionStoreEngine(t, slow)
+
+	start := time.Now()
+	exec, err := engine.ExecuteWorkflow(execStoreCtx(executionTestTenant), twoStepWorkflow("slow-wf"), nil)
+	require.NoError(t, err)
+
+	select {
+	case <-exec.Done:
+	case <-time.After(1200 * time.Millisecond):
+		t.Fatalf("Done still open after the terminal write finished, status: %s", exec.GetStatus())
+	}
+	assert.GreaterOrEqual(t, time.Since(start), slow.saveDelay, "Done closed before the slowed store write")
+	assert.True(t, slow.terminalSaved.Load(), "Done closed before the terminal write was durable")
+
+	fresh := newExecutionStoreEngine(t, openSQLiteExecutionStore(t, path))
+	got, err := fresh.GetExecution(context.Background(), executionTestTenant, exec.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, got.GetStatus())
 }
