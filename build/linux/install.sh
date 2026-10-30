@@ -64,7 +64,7 @@ CA_CERT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --regtoken|--regtoken\=*)
+        --regtoken|--regtoken\=*)  # use --regtoken-file
             echo "Error: --regtoken is not supported: pass the token in a root-only file with --regtoken-file PATH" >&2
             exit 1 ;;
         --regtoken-file)   REGTOKEN_FILE="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
