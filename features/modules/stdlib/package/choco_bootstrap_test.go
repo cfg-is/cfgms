@@ -368,6 +368,7 @@ func TestBootstrapChocoReal_FullBootstrap(t *testing.T) {
 		chocoExeExists:       func() bool { return false },
 		chocoTrust:           func(string) error { return nil },
 		runCommand:           rec.run,
+		chocoStagingBase:     newTestChocoStagingBase(t),
 	}
 
 	require.NoError(t, m.bootstrapChocoReal(context.Background()))

@@ -18,6 +18,8 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // chocoExePath is the fixed install location chocolatey uses on Windows.
@@ -286,6 +288,25 @@ func extractZipFile(f *zip.File, destPath string, maxBytes int64) (int64, error)
 	return written, out.Close()
 }
 
+// chocoStagingDir returns the directory the chocolatey bootstrap package is
+// extracted under: the injected chocoStagingBase when set, else
+// %ProgramData%\cfgms\choco-staging (C:\ProgramData when ProgramData is
+// unset). bootstrapChocoReal secures it with security.EnsureAdminOnlyDir
+// before every bootstrap, so only SYSTEM and Administrators can write it,
+// unlike the system temporary directory. It is a sibling of cert_trust's
+// staging directory, not inside it, so the two packages' tree walks never
+// share a tree.
+func (m *PackageModule) chocoStagingDir() string {
+	if m.chocoStagingBase != "" {
+		return m.chocoStagingBase
+	}
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	return filepath.Join(programData, "cfgms", "choco-staging")
+}
+
 // runner returns the commandRunner this module uses: the injected test seam
 // when set, else execCommandRunner. Callers must hold m.mu.
 func (m *PackageModule) runner() commandRunner {
@@ -420,9 +441,13 @@ func (m *PackageModule) bootstrapChocoReal(ctx context.Context) error {
 		return fmt.Errorf("failed to fetch chocolatey bootstrap package: %w", err)
 	}
 
-	tmpDir, err := os.MkdirTemp("", "cfgms-choco-bootstrap-*")
+	base := m.chocoStagingDir()
+	if err := security.EnsureAdminOnlyDir(base); err != nil {
+		return fmt.Errorf("failed to secure chocolatey staging directory: %w", err)
+	}
+	tmpDir, err := os.MkdirTemp(base, "bootstrap-*")
 	if err != nil {
-		return fmt.Errorf("failed to create temp dir for chocolatey bootstrap: %w", err)
+		return fmt.Errorf("failed to create chocolatey bootstrap staging directory: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 

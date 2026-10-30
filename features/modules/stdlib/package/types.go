@@ -336,6 +336,11 @@ type PackageModule struct {
 	// is invoked (and with what host state) without extracting a real nupkg
 	// or spawning powershell.exe.
 	chocoBootstrap func(ctx context.Context) error
+	// chocoStagingBase is the directory bootstrapChocoReal secures with
+	// security.EnsureAdminOnlyDir and extracts the bootstrap package under.
+	// Empty means the default, %ProgramData%\cfgms\choco-staging; tests set
+	// an admin-owned temporary directory.
+	chocoStagingBase string
 	// runCommand executes an external command for chocolatey bootstrap/source
 	// configuration. nil means use execCommandRunner (os/exec); tests inject
 	// a fake recording runner so command argument vectors can be asserted
