@@ -24,8 +24,15 @@ Run in an **elevated Administrator** shell on the Hyper-V host.
 
 ### Standard (public CA controller)
 
+Write the token to a file only SYSTEM and Administrators can read, then install
+from it (the steward rejects a token file that is readable by other users):
+
 ```powershell
-cfgms-steward.exe install --regtoken <token>
+$tokenFile = Join-Path $env:SystemRoot 'Temp\cfgms-regtoken'
+Set-Content -LiteralPath $tokenFile -Value '<token>' -NoNewline
+icacls $tokenFile /inheritance:r /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)'
+cfgms-steward.exe install --regtoken-file $tokenFile
+Remove-Item -LiteralPath $tokenFile -Force
 ```
 
 (Omitting `--controller-url` uses the binary's compile-time-baked controller
@@ -43,9 +50,11 @@ tar -xzf installer.tar.gz
 # extracts to installer\ca.crt, installer\ca.fingerprint, installer\windows-amd64\cfgms-steward.exe
 ```
 
+(Create `$tokenFile` as in the standard example above.)
+
 ```powershell
 cfgms-steward.exe install `
-    --regtoken <token> `
+    --regtoken-file $tokenFile `
     --controller-url <host:port> `
     --controller-ca .\installer\ca.crt `
     --fingerprint (Get-Content .\installer\ca.fingerprint)

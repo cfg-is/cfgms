@@ -46,6 +46,9 @@ type recordedPSCall struct {
 	scriptBlock string
 	// args holds psArgs values in sorted key order.
 	args []interface{}
+	// named maps each arg name to its value, so tests can assert which
+	// parameter carried a value.
+	named map[string]string
 }
 
 func (t *testPSTransport) ExecutePS(_ context.Context, psCommand string, psArgs map[string]string) (string, error) {
@@ -64,7 +67,7 @@ func (t *testPSTransport) ExecutePS(_ context.Context, psCommand string, psArgs 
 	}
 
 	callIdx := len(t.calls)
-	t.calls = append(t.calls, recordedPSCall{scriptBlock: psCommand, args: args})
+	t.calls = append(t.calls, recordedPSCall{scriptBlock: psCommand, args: args, named: psArgs})
 
 	out := t.output
 	err := t.execErr

@@ -361,7 +361,10 @@ function Cfgms-DismountAndVerify {
 # user-data and meta-data). It optionally stages the steward binary ($StewardSrc →
 # $StewardDest, default cfgms-steward.exe; the linux cloud-init path passes
 # cfgms-steward) and the controller CA ($CASrc → controller-ca.crt) so the guest
-# can self-install + enroll offline (ADR-010), then dismounts.
+# can self-install + enroll offline (ADR-010), then dismounts. When $TokenContent
+# is supplied it is written to the fixed file name regtoken at the seed root (the
+# guest installer reads it with --regtoken-file); the name is a literal here so a
+# caller cannot choose the path, and the token travels only as a typed parameter.
 function Cfgms-CopyToSeedVHD {
     param(
         [Parameter(Mandatory)][string]$SeedPath,
@@ -370,6 +373,7 @@ function Cfgms-CopyToSeedVHD {
         [string]$Label = 'CFGMS_SEED',
         [string]$FileName2 = '',
         [string]$Content2 = '',
+        [string]$TokenContent = '',
         [string]$StewardSrc = '',
         [string]$StewardDest = 'cfgms-steward.exe',
         [string]$LauncherSrc = '',
@@ -392,6 +396,7 @@ function Cfgms-CopyToSeedVHD {
         if (-not $letter) { throw ('seed volume with label ' + $Label + ' not found after mount: ' + $SeedPath) }
         Set-Content -LiteralPath ($letter + ':\' + $FileName) -Value $Content -NoNewline
         if ($FileName2) { Set-Content -LiteralPath ($letter + ':\' + $FileName2) -Value $Content2 -NoNewline }
+        if ($TokenContent) { Set-Content -LiteralPath ($letter + ':\regtoken') -Value $TokenContent -NoNewline }
         if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination ($letter + ':\' + $StewardDest) -Force }
         if ($LauncherSrc -and (Test-Path -LiteralPath $LauncherSrc)) { Copy-Item -LiteralPath $LauncherSrc -Destination ($letter + ':\' + $LauncherDest) -Force }
         if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination ($letter + ':\controller-ca.crt') -Force }
@@ -576,7 +581,7 @@ function Cfgms-SetHddFirstBoot {
 
 # Cfgms-BuildAnswerIso builds a small ISO ($IsoPath) carrying the rendered
 # answer file ($FileName/$Content) plus, when supplied, the steward binary and
-# controller CA, so the new Windows Server 2025 Setup auto-applies the answer
+# controller CA (and the enrollment token as the root file regtoken), so the new Windows Server 2025 Setup auto-applies the answer
 # file (the redesigned Setup scans DVD roots but NOT data disks). Built natively
 # via IMAPI2 — no oscdimg/ADK/WSL needed. The IMAPI image IStream is copied to
 # the file by a C# helper because the equivalent PowerShell IStream.Read interop
@@ -587,6 +592,7 @@ function Cfgms-BuildAnswerIso {
         [Parameter(Mandatory)][string]$IsoPath,
         [Parameter(Mandatory)][string]$FileName,
         [Parameter(Mandatory)][string]$Content,
+        [string]$TokenContent = '',
         [string]$StewardSrc = '',
         [string]$CASrc = ''
     )
@@ -608,6 +614,7 @@ public static class CfgmsIsoWriter {
     [void][System.IO.Directory]::CreateDirectory($tmp)
     try {
         Set-Content -LiteralPath (Join-Path $tmp $FileName) -Value $Content -NoNewline
+        if ($TokenContent) { Set-Content -LiteralPath (Join-Path $tmp 'regtoken') -Value $TokenContent -NoNewline }
         if ($StewardSrc -and (Test-Path -LiteralPath $StewardSrc)) { Copy-Item -LiteralPath $StewardSrc -Destination (Join-Path $tmp 'cfgms-steward.exe') -Force }
         if ($CASrc -and (Test-Path -LiteralPath $CASrc)) { Copy-Item -LiteralPath $CASrc -Destination (Join-Path $tmp 'controller-ca.crt') -Force }
         Remove-Item -LiteralPath $IsoPath -Force -ErrorAction SilentlyContinue

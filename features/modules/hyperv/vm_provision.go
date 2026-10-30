@@ -239,8 +239,11 @@ func (m *hypervModule) renderSeedAnswerFile(ctx context.Context, vmName string, 
 		// The default Windows/Linux profiles reference {{ .EnrollToken }} /
 		// {{ .CAFingerprint }} directly so render no longer depends on the
 		// (operator-unwritable) SecretStore for the token (#2077 fix).
-		EnrollToken:   m.enrollToken,
-		CAFingerprint: m.enrollCAFingerprint,
+		EnrollToken: m.enrollToken,
+		// Token-file path the guest installer reads (--regtoken-file); the token
+		// itself reaches the guest as the regtoken file on the seed volume.
+		EnrollTokenFile: enrollTokenFilePath(src.OSFamily),
+		CAFingerprint:   m.enrollCAFingerprint,
 		// Optional operator-provided debug SSH public key (diagnose failed enroll).
 		DebugSSHKey: m.debugSSHAuthorizedKey,
 	}
@@ -484,11 +487,12 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 			return m.failProvision(ctx, cfg, vmName, record, err)
 		}
 		if _, psErr := m.transport.ExecutePS(ctx, psBuildAnswerIso, map[string]string{
-			"IsoPath":    isoPath,
-			"FileName":   seedAnswerFileName("windows"),
-			"Content":    answerContent,
-			"StewardSrc": m.enrollStewardPath,
-			"CASrc":      m.enrollCAPath,
+			"IsoPath":      isoPath,
+			"FileName":     seedAnswerFileName("windows"),
+			"Content":      answerContent,
+			"TokenContent": m.enrollToken,
+			"StewardSrc":   m.enrollStewardPath,
+			"CASrc":        m.enrollCAPath,
 		}); psErr != nil {
 			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Cfgms-BuildAnswerIso", cfgResourceID, nil, nil, psErr)
 			return m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: build answer ISO for VM %q: %w", vmName, psErr))
@@ -521,11 +525,12 @@ func (m *hypervModule) provisionVM(ctx context.Context, vmName, hostName string,
 		}
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Format-Volume", cfgResourceID, nil, nil, nil)
 		if _, psErr := m.transport.ExecutePS(ctx, psCopyToSeedVHD, map[string]string{
-			"SeedPath":   seedPath,
-			"FileName":   seedAnswerFileName("linux"),
-			"Content":    answerContent,
-			"StewardSrc": "",
-			"CASrc":      "",
+			"SeedPath":     seedPath,
+			"FileName":     seedAnswerFileName("linux"),
+			"Content":      answerContent,
+			"TokenContent": m.enrollToken,
+			"StewardSrc":   "",
+			"CASrc":        "",
 		}); psErr != nil {
 			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname, "Set-Content", cfgResourceID, nil, nil, psErr)
 			return m.failProvision(ctx, cfg, vmName, record, fmt.Errorf("hyperv: write answer file to seed for VM %q: %w", vmName, psErr))
@@ -717,6 +722,7 @@ func (m *hypervModule) provisionCloudInit(ctx context.Context, vmName, hostName 
 		"Content":      userData,
 		"FileName2":    "meta-data",
 		"Content2":     metaData,
+		"TokenContent": m.enrollToken,
 		"StewardSrc":   m.enrollStewardPath,
 		"StewardDest":  "cfgms-steward",
 		"LauncherSrc":  m.enrollLauncherPath,
@@ -1132,4 +1138,13 @@ func checkCertificatePEM(r io.Reader) bool {
 		blocks++
 	}
 	return blocks > 0 && len(bytes.TrimSpace(data)) == 0
+}
+
+// enrollTokenFilePath is the guest path the first-boot commands stage the seed's
+// regtoken file to before running the installer with --regtoken-file.
+func enrollTokenFilePath(osFamily string) string {
+	if osFamily == "windows" {
+		return `%SystemRoot%\Temp\cfgms-regtoken`
+	}
+	return "/root/.cfgms-regtoken"
 }

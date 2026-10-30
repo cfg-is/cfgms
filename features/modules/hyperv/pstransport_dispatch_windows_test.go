@@ -105,12 +105,13 @@ func TestPSDispatch_VMVerbs(t *testing.T) {
 			name:      "Copy seed answer file",
 			psCommand: psCopyToSeedVHD,
 			psArgs: map[string]string{
-				"SeedPath": "C:\\VMs\\cfgms-seed-web-01.vhdx",
-				"FileName": "autounattend.xml",
-				"Content":  "<!-- placeholder autounattend -->",
+				"SeedPath":     "C:\\VMs\\cfgms-seed-web-01.vhdx",
+				"FileName":     "autounattend.xml",
+				"Content":      "<!-- placeholder autounattend -->",
+				"TokenContent": "tok-abc.123",
 			},
 			wantVerb: "CopyToSeedVHD",
-			wantJSON: `{"SeedPath":"C:\\VMs\\cfgms-seed-web-01.vhdx","FileName":"autounattend.xml","Content":"\u003c!-- placeholder autounattend --\u003e","StewardSrc":"","CASrc":""}`,
+			wantJSON: `{"SeedPath":"C:\\VMs\\cfgms-seed-web-01.vhdx","FileName":"autounattend.xml","Content":"\u003c!-- placeholder autounattend --\u003e","TokenContent":"tok-abc.123","StewardSrc":"","CASrc":""}`,
 		},
 		{
 			name:      "Attach seed disk",
@@ -894,4 +895,15 @@ func TestPreamble_CopyToSeedVHDFailsLoudlyOnMissingVolume(t *testing.T) {
 		"Cfgms-CopyToSeedVHD must check the drive letter was resolved")
 	assert.Contains(t, body, "throw",
 		"a missing labelled seed volume must throw a named error, not fail obscurely on a null path")
+}
+
+// TestPreamble_SeedFunctionsWriteTokenFile asserts both seed-writing functions
+// accept the typed TokenContent parameter and write it to the literal file name
+// regtoken (never a caller-chosen path).
+func TestPreamble_SeedFunctionsWriteTokenFile(t *testing.T) {
+	for _, fn := range []string{"Cfgms-CopyToSeedVHD", "Cfgms-BuildAnswerIso"} {
+		body := preambleFunctionBody(t, fn)
+		assert.Contains(t, body, "$TokenContent", "%s must declare $TokenContent", fn)
+		assert.Contains(t, body, "regtoken'", "%s must write the literal file name regtoken", fn)
+	}
 }

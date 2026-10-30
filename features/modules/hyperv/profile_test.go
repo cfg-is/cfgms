@@ -228,3 +228,57 @@ func TestMemProfileStore_GetProfile(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrProfileNotFound))
 }
+
+// TestRenderedProfiles_NoTokenValue asserts no built-in profile renders the
+// enrollment token value; each installs from the staged token file.
+func TestRenderedProfiles_NoTokenValue(t *testing.T) {
+	const token = "tok-must-not-render-9f3"
+	cases := []struct {
+		name    string
+		profile *UnattendProfile
+		vars    ProfileVars
+		want    []string
+	}{
+		{"windows", defaultWindowsProfile(), ProfileVars{
+			VMName: "WIN-01", OSFamily: "windows", CorrelationID: "c1", ProductEdition: defaultWindowsEdition,
+			EnrollTokenFile: enrollTokenFilePath("windows"), CAFingerprint: "FP",
+		}, []string{"copy /y", "icacls", "del /f /q", `--regtoken-file "%SystemRoot%\Temp\cfgms-regtoken"`}},
+		{"preseed", defaultLinuxProfile(), ProfileVars{
+			VMName: "lin-01", OSFamily: "linux", CorrelationID: "c1", BundleURL: "https://controller.example/x.deb",
+			EnrollTokenFile: enrollTokenFilePath("linux"), AdminPassword: "pw",
+		}, []string{"cp /mnt/cfgms-seed/regtoken /target/root/.cfgms-regtoken", "chmod 0600", "rm -f /target/root/.cfgms-regtoken", "--regtoken-file /root/.cfgms-regtoken"}},
+		{"cloud-init", defaultLinuxCloudInitProfile(), ProfileVars{
+			VMName: "lin-01", OSFamily: "linux", CorrelationID: "c1",
+			EnrollTokenFile: enrollTokenFilePath("linux"), CAFingerprint: "FP", AdminPassword: "pw",
+		}, []string{"cp, /mnt/cidata/regtoken", `chmod, "0600"`, "rm, -f", "--regtoken-file"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.vars.EnrollToken = token
+			store := newInlineStore("hyperv/enroll/user-password-crypted", "$6$x$y")
+			out, err := NewProfileRenderer().Render(context.Background(), tc.profile, tc.vars, store)
+			require.NoError(t, err)
+			rendered := string(out)
+			assert.NotContains(t, rendered, token)
+			assert.Contains(t, rendered, "--regtoken-file")
+			assert.NotRegexp(t, `--regtoken(\s|")`, rendered)
+			for _, w := range tc.want {
+				assert.Contains(t, rendered, w)
+			}
+		})
+	}
+}
+
+// TestRender_EnrollTokenStillResolvesForCustomProfiles keeps custom profiles
+// that reference {{ .EnrollToken }} rendering, and exposes {{ .EnrollTokenFile }}.
+func TestRender_EnrollTokenStillResolvesForCustomProfiles(t *testing.T) {
+	p := &UnattendProfile{Name: "custom", AnswerFormat: AnswerFormatPreseed, Template: "t={{ .EnrollToken }} f={{ .EnrollTokenFile }}"}
+	out, err := NewProfileRenderer().Render(context.Background(), p,
+		ProfileVars{EnrollToken: "abc", EnrollTokenFile: "/root/.cfgms-regtoken"}, newInlineStore())
+	require.NoError(t, err)
+	assert.Equal(t, "t=abc f=/root/.cfgms-regtoken", string(out))
+
+	_, err = NewProfileRenderer().Render(context.Background(), p,
+		ProfileVars{EnrollToken: "abc", EnrollTokenFile: "/root/x\ny"}, newInlineStore())
+	require.Error(t, err, "control characters in EnrollTokenFile must be rejected")
+}

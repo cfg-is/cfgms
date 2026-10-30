@@ -143,8 +143,8 @@ func TestAutounattend_NoBannedPatterns(t *testing.T) {
 
 	// Positive assertions: the declared-path self-install enrollment command is
 	// present (locate the seed volume, run cfgms-steward install).
-	assert.Contains(t, rendered, `cfgms-steward.exe" install --regtoken`,
-		"enrollment must self-install the steward via install --regtoken")
+	assert.Contains(t, rendered, `cfgms-steward.exe" install --regtoken-file`,
+		"enrollment must self-install the steward via install --regtoken-file")
 	assert.Contains(t, rendered, "--controller-ca",
 		"enrollment must pass the staged controller CA via --controller-ca (the real steward install flag)")
 	assert.NotContains(t, rendered, "--ca-cert",
@@ -215,20 +215,22 @@ func TestAutounattend_AutoLogonAndAdminPassword(t *testing.T) {
 // rendered output.
 func TestAutounattend_SubstitutesCorrelationAndEnrollVars(t *testing.T) {
 	rendered := renderWindowsAutounattend(t, ProfileVars{
-		VMName:         "WIN-03",
-		OSFamily:       "windows",
-		CorrelationID:  "stw-win-03",
-		ProductEdition: defaultWindowsEdition,
-		EnrollToken:    "join-tok-77",
-		CAFingerprint:  "DEADBEEF",
+		VMName:          "WIN-03",
+		OSFamily:        "windows",
+		CorrelationID:   "stw-win-03",
+		ProductEdition:  defaultWindowsEdition,
+		EnrollToken:     "join-tok-77",
+		EnrollTokenFile: `%SystemRoot%\Temp\cfgms-regtoken`,
+		CAFingerprint:   "DEADBEEF",
 	})
 
 	assert.Contains(t, rendered, "<ComputerName>WIN-03</ComputerName>",
 		"VMName must render as the guest ComputerName")
 	assert.Contains(t, rendered, "stw-win-03",
 		"CorrelationID must appear (RegisteredOrganization/Organization) for controller-side matching")
-	assert.Contains(t, rendered, `--regtoken "join-tok-77"`,
-		"join token must be substituted from controller-supplied config")
+	assert.Contains(t, rendered, `--regtoken-file "%SystemRoot%\Temp\cfgms-regtoken"`,
+		"token file path must be substituted into the install command")
+	assert.NotContains(t, rendered, "join-tok-77", "the token value must not be rendered")
 	assert.Contains(t, rendered, `--fingerprint "DEADBEEF"`,
 		"CA fingerprint must be substituted")
 	assert.Contains(t, rendered, defaultWindowsEdition,
