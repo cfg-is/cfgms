@@ -10,6 +10,7 @@ package directory
 import (
 	"testing"
 
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )
@@ -20,5 +21,15 @@ func newFlatStore(t *testing.T) cfgconfig.ConfigStore {
 	if err != nil {
 		t.Fatalf("flatfile store: %v", err)
 	}
+	return s
+}
+
+func newLeaseStore(t *testing.T) business.LeaseStore {
+	t.Helper()
+	s, err := flatfile.NewFlatFileLeaseStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("flatfile lease store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }

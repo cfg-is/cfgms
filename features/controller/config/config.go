@@ -549,6 +549,10 @@ type Config struct {
 	// TenantAdmin holds global tenant-administration policy (ADR-027 Decisions 3-4, Issue #3182).
 	TenantAdmin *TenantAdminConfig `yaml:"tenant_admin,omitempty"`
 
+	// Directory configures controller-run directory inventory (Issue #5561). Absent
+	// uses the defaults.
+	Directory *DirectoryConfig `yaml:"directory,omitempty"`
+
 	// WebAuthn configures the browser passkey relying party (Issue #3713). Absent by
 	// default — browser passkey login and passkey step-up answer 503 until an operator
 	// explicitly sets rp_id and rp_origins.
@@ -1052,6 +1056,13 @@ type LoggingConfig struct {
 }
 
 // SubscriberConfig holds configuration for event subscribers
+// DirectoryConfig holds controller-run directory inventory settings.
+type DirectoryConfig struct {
+	// M365InventoryInterval is how often each M365-connected tenant's users and
+	// groups are re-read. Defaults to 60m when zero.
+	M365InventoryInterval Duration `yaml:"m365_inventory_interval,omitempty"`
+}
+
 type SubscriberConfig struct {
 	Type    string                 `yaml:"type"`    // Subscriber type (e.g., "syslog", "webhook")
 	Config  map[string]interface{} `yaml:"config"`  // Subscriber-specific configuration

@@ -488,6 +488,17 @@ Every update goes through `config.AtomicUpdate`. A batch groups its changes per 
 
 **Multi-node.** Membership writes need a store that is atomic across controller nodes. In a multi-node cluster with a store that is not (anything but the database provider), every membership write fails closed with `ErrNotClusterAtomic` and nothing is written. There is no lease fallback; multi-node deployments use the database provider.
 
+### M365 Tenant Inventory (Issue #5561)
+
+The controller records each M365-connected tenant's users and groups in the entity graph without any steward involved. A collector (`features/controller/directory/m365_inventory.go`) runs under the `m365-inventory` background-loop lease (`lease.SingletonJob.RunIfLeader`, ADR-031 Decision 4), so in a cluster only the lease holder reads Graph; a follower's cycle does nothing.
+
+- **Schedule.** Every `directory.m365_inventory_interval` (default 60m) per tenant. A tenant's first run after a start is offset by a stable per-tenant jitter of up to a quarter of the interval (at most 15 minutes).
+- **Reads.** Through `DirectoryProviderManager.ExecuteProviderOp` over the registered Entra provider, with the tenant in the context so a run uses only that tenant's credential. Users, groups and each group's members are read page by page (999 per page, `@odata.nextLink`); one members call per page per group, and Graph's per-user `memberOf` is never called.
+- **Writes.** One fragment per object (`directory_user:<id>`, `directory_group:<id>`), canonicalized and hashed exactly like steward DNA, written with `ReportObservations` under source `m365:<entra-tenant-guid>`, subject `m365:<guid>/user:<id>` or `/group:<id>`, no authenticated peer, and `owning_tenant` set by the controller to the CFGMS tenant being collected. Membership is not written as edges: each group's complete member set goes to the membership sink (`ApplyGroup`, Issue #5553), which logs added and removed members.
+- **Manifest.** A per-tenant manifest of fragment id to hash, sharded into the 256 DNA buckets, is kept in the config store. A run writes only new or changed objects and retracts objects absent from a complete enumeration; an unchanged tenant, or a restarted controller, writes nothing.
+- **Failure.** A Graph or authentication failure for one tenant records a bounded, sanitized error and flags the tenant stale; its previous inventory stays and nothing is retracted. Other tenants still run.
+- **Shared Entra tenant.** If two CFGMS tenants name the same Entra tenant id, it is collected for neither and a security event naming both goes to the root admin audit stream. The owning tenant of an existing `m365` subject never changes on ingest (Issue #5551).
+
 ## Deployment Rings
 
 Deployment rings are a fleet-wide governance mechanism that controls which steward binary version reaches which stewards, in what order. The controller declares an ordered, named ring set; ring membership is declared in controller config only (no write path exists for stewards or operators to self-assign rings); and config delivery applies the ring's `desired_version` to stewards per their controller-config membership.

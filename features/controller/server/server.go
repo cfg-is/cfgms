@@ -34,6 +34,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/clusterregistry"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/directory"
 	"github.com/cfgis/cfgms/features/controller/dispatcher"
 	controllerFleet "github.com/cfgis/cfgms/features/controller/fleet"
 	dnaStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
@@ -225,6 +226,7 @@ type Server struct {
 	egTenantSyncSweeper             *entityGraphPeriodicSweeper              // Issue #4413: stopped in Stop() before egProvider closes
 	egCorrelatorSweeper             *entityGraphPeriodicSweeper              // Issue #4413: stopped in Stop() before egProvider closes
 	egTenantSyncLeaseJob            lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the tenant-sync sweep (ADR-031 Decision 4)
+	m365Inventory                   *directory.M365Inventory                 // Issue #5561: lease-gated M365 tenant inventory; stopped in Stop() before egProvider closes
 	egCorrelatorLeaseJob            lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the correlator sweep (ADR-031 Decision 4)
 }
 
@@ -1920,6 +1922,31 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, fmt.Errorf("failed to construct entity graph correlator sweep lease job: %w", egCorrelatorLeaseErr)
 	}
 
+	// Issue #5561: scheduled M365 tenant inventory, recorded in the entity graph.
+	// Gated on its own cluster-singleton lease so one node reads Graph per cycle.
+	m365InventoryLeaseJob, m365InventoryLeaseErr := haManager.NewBackgroundLoopLease("m365-inventory", logger)
+	if m365InventoryLeaseErr != nil {
+		return nil, fmt.Errorf("failed to construct m365 inventory lease job: %w", m365InventoryLeaseErr)
+	}
+	var m365InventoryInterval time.Duration
+	if cfg.Directory != nil {
+		m365InventoryInterval = cfg.Directory.M365InventoryInterval.AsDuration()
+	}
+	m365Inventory, m365InventoryErr := newM365Inventory(m365InventoryDeps{
+		Providers:   directoryManager,
+		Store:       routerSecretStore,
+		Tenants:     tenantManager,
+		Writer:      egProvider,
+		ConfigStore: storageManager.GetConfigStore(),
+		Job:         m365InventoryLeaseJob,
+		Interval:    m365InventoryInterval,
+		Audit:       auditManager,
+		Logger:      logger,
+	})
+	if m365InventoryErr != nil {
+		return nil, fmt.Errorf("failed to initialize m365 inventory: %w", m365InventoryErr)
+	}
+
 	// Issue #2098: Wire registration-refresh stores into the HTTP API server so the
 	// challenge/complete endpoints and the admin approve/reject/policy endpoints are
 	// operational. GetStewardStore is always non-nil for the OSS composite (flatfile
@@ -2135,6 +2162,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		configSyncService:       configSyncService,    // Issue #4408: Run() started in Start(), Stop()ped in Stop()
 		routerSecretStore:       routerSecretStore,    // Issue #4408: closed in Stop()
 		directoryManager:        directoryManager,     // Issue #5431: closed in Stop()
+		m365Inventory:           m365Inventory,        // Issue #5561: Start()ed in Start(), Stop()ped before egProvider closes
 		egTenantSyncWriter:      egTenantSyncWriter,   // Issue #4413: periodic sweep started in Start()
 		egCorrelatorWriter:      egCorrelatorWriter,   // Issue #4413: periodic sweep started in Start()
 		egTenantSyncLeaseJob:    egTenantSyncLeaseJob, // Issue #4413: gates the tenant-sync sweep (ADR-031 Decision 4)
@@ -3039,6 +3067,13 @@ func (s *Server) Start() error {
 			"interval", entityGraphCorrelatorSweepInterval)
 	}
 
+	// Start the M365 tenant inventory (Issue #5561). It only reads Graph on the
+	// node holding its cluster-singleton lease.
+	if s.m365Inventory != nil {
+		s.m365Inventory.Start(ctxkeys.WithSystem(context.Background()))
+		s.logger.Info("M365 tenant inventory started (Issue #5561)")
+	}
+
 	// Start health collector and alert manager (Story #417)
 	if s.healthCollector != nil {
 		if err := s.healthCollector.Start(ctxkeys.WithSystem(context.Background()), 30*time.Second); err != nil {
@@ -3313,6 +3348,12 @@ func (s *Server) Stop() error {
 		if err := s.tagStore.Close(); err != nil {
 			s.logger.Warn("Failed to close tag store", "error", err)
 		}
+	}
+
+	// Stop the M365 inventory (Issue #5561) before the entity graph and the directory
+	// manager it writes through and reads from close.
+	if s.m365Inventory != nil {
+		s.m365Inventory.Stop()
 	}
 
 	// Stop entity-graph periodic writer sweeps (Issue #4413) before the provider
