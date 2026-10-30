@@ -531,6 +531,7 @@ Collected in the background via `collectSecurityInfo()` → `CollectUsers`. Linu
 | `root_account_locked` | Whether root account is locked | `checkRootLocked` (linux) | Background | public | GREEN | N/A | N/A |
 | `domain_joined` | Whether host is domain-joined | `collectDomainMembership` | Background | public | GREEN | GREEN | N/A |
 | `domain_name` | AD/LDAP domain name, sanitized | `collectDomainMembership` | Background | pii | GREEN | GREEN | N/A |
+| `ad_pdc_emulator` | `"true"` only on the domain controller holding the PDC-emulator role (resolved with `DsGetDcNameW` + `DS_PDC_REQUIRED`); `"false"` on every other host, and on every host when the role holder cannot be resolved. Not cached, so a new role holder reports after a FSMO transfer. Gates the AD module's `observe_when` | `collectDirectoryRoleInfo` | Fast | public | N/A | GREEN | N/A |
 | `user_info` | Stub (generic/unsupported platforms) | `GenericSecurityCollector.CollectUsers` | Background | public | N/A | N/A | N/A |
 
 ---

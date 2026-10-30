@@ -82,6 +82,16 @@ func WithSecurityCollector(s SecurityCollector) CollectorOption {
 	return func(c *Collector) { c.security = s }
 }
 
+// WithPDCEmulatorResolver returns an option that selects the PDCEmulatorResolver
+// collectDirectoryRoleInfo uses for ad_pdc_emulator, in place of the platform
+// default (the DsGetDcNameW resolver on Windows, none elsewhere).
+func WithPDCEmulatorResolver(r PDCEmulatorResolver) CollectorOption {
+	return func(c *Collector) {
+		c.pdcResolver = r
+		c.pdcResolverSet = true
+	}
+}
+
 // Collector collects system DNA (attributes) for identification and targeting.
 //
 // The collector gathers hardware, software, and network information to create
@@ -110,6 +120,11 @@ type Collector struct {
 	software SoftwareCollector
 	network  NetworkCollector
 	security SecurityCollector
+
+	// pdcResolver feeds ad_pdc_emulator. pdcResolverSet records that
+	// WithPDCEmulatorResolver chose it; otherwise the platform default is used.
+	pdcResolver    PDCEmulatorResolver
+	pdcResolverSet bool
 
 	// Hardware cache — static hardware data collected once and reused.
 	hwCacheOnce sync.Once
@@ -175,6 +190,11 @@ func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 	netStart := time.Now()
 	c.collectNetworkInfo(ctx, attributes)
 	c.logger.Debug("Network info collected", "duration", time.Since(netStart))
+
+	// Collect directory-role facts (not cached: the PDC-emulator role can move)
+	dirStart := time.Now()
+	c.collectDirectoryRoleInfo(ctx, attributes)
+	c.logger.Debug("Directory role info collected", "duration", time.Since(dirStart))
 
 	// Collect environment information (always fast)
 	envStart := time.Now()
@@ -340,6 +360,7 @@ func (c *Collector) RawAttributes(ctx context.Context) map[string]string {
 	c.collectBasicInfo(attributes)
 	c.collectHardwareInfo(ctx, attributes)
 	c.collectNetworkInfo(ctx, attributes)
+	c.collectDirectoryRoleInfo(ctx, attributes)
 	c.collectEnvironmentInfo(attributes)
 	// Merge slow background data if already completed.
 	select {
@@ -518,6 +539,20 @@ func (c *Collector) collectNetworkInfo(ctx context.Context, attributes map[strin
 	// Collect firewall configuration
 	if err := netCollector.CollectFirewall(ctx, attributes); err != nil {
 		c.logger.Error("Failed to collect firewall information", "error", err)
+	}
+}
+
+// collectDirectoryRoleInfo collects ad_pdc_emulator on the baseline fast path, so
+// the observe sweep sees it. It is collected every cycle, never cached: after a
+// FSMO transfer the new role holder must report on its next sweep.
+func (c *Collector) collectDirectoryRoleInfo(ctx context.Context, attributes map[string]string) {
+	resolver := c.pdcResolver
+	if !c.pdcResolverSet {
+		resolver = newPlatformPDCEmulatorResolver()
+	}
+	if err := collectPDCEmulator(ctx, resolver, attributes); err != nil {
+		c.logger.Warn("Could not resolve the PDC emulator; reporting ad_pdc_emulator=false",
+			"error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
