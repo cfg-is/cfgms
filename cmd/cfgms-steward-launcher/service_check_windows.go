@@ -129,7 +129,8 @@ func repairServiceRegistration(name, exePath string, args []string) error {
 // CFGMSSteward registration and the launcher's own known install path, and
 // re-creates the service from the currently-running process's own arguments
 // (os.Args[1:]) so a repaired service starts with the same
-// --root/--child-args/--regtoken the operator originally configured.
+// --root/--child-args the operator originally configured. Those child args carry
+// only the registration token file path (--regtoken-file), never the token.
 //
 // It acts ONLY when this process is actually running AS the CFGMSSteward SCM
 // service. An interactive `launcher run` or a unit-test binary is not the
