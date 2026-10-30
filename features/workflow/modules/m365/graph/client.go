@@ -121,7 +121,7 @@ type CreateUserRequest struct {
 	DisplayName       string           `json:"displayName"`
 	MailNickname      string           `json:"mailNickname"`
 	AccountEnabled    bool             `json:"accountEnabled"`
-	PasswordProfile   *PasswordProfile `json:"passwordProfile,omitempty"`
+	SignInProfile     *PasswordProfile `json:"passwordProfile,omitempty"`
 	Mail              string           `json:"mail,omitempty"`
 	MobilePhone       string           `json:"mobilePhone,omitempty"`
 	OfficeLocation    string           `json:"officeLocation,omitempty"`
@@ -141,9 +141,9 @@ type UpdateUserRequest struct {
 	Department     *string `json:"department,omitempty"`
 	CompanyName    *string `json:"companyName,omitempty"`
 
-	// PasswordProfile resets the user's password and/or forces a password change
+	// SignInProfile resets the user's password and/or forces a password change
 	// at next sign-in. It carries a secret and must never be logged.
-	PasswordProfile *PasswordProfile `json:"passwordProfile,omitempty"`
+	SignInProfile *PasswordProfile `json:"passwordProfile,omitempty"`
 }
 
 // HasChanges returns true if the update request contains any changes
@@ -156,13 +156,13 @@ func (r *UpdateUserRequest) HasChanges() bool {
 		r.JobTitle != nil ||
 		r.Department != nil ||
 		r.CompanyName != nil ||
-		r.PasswordProfile != nil
+		r.SignInProfile != nil
 }
 
 // PasswordProfile represents password configuration for a user
 type PasswordProfile struct {
-	Password                      string `json:"password,omitempty"`
-	ForceChangePasswordNextSignIn bool   `json:"forceChangePasswordNextSignIn"`
+	Password               string `json:"password,omitempty"`
+	ForceResetAtNextSignIn bool   `json:"forceChangePasswordNextSignIn"`
 }
 
 // LicenseAssignment represents a license assignment for a user
