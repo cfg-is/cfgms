@@ -57,7 +57,7 @@ the reserved `__cfgms_objects` key. Each entry has an `id` (the objectGUID) and 
 | `object_sid` | Security identifier |
 | `when_created` | Creation time, ISO-8601 UTC |
 | `directory_domain` | DNS name of the domain |
-| `managed` | Whether CFGMS manages the object (always `false` for now) |
+| `managed` | Whether CFGMS manages the object (always `false` in this release; the value is set by the write-path work in #5560) |
 | `member_of` | Sorted objectGUIDs of the user's direct groups |
 
 ### Group attributes
@@ -70,7 +70,7 @@ the reserved `__cfgms_objects` key. Each entry has an `id` (the objectGUID) and 
 | `group_scope` | `DomainLocal`, `Global` or `Universal` |
 | `group_category` | `Security` or `Distribution` |
 | `directory_domain` | DNS name of the domain |
-| `managed` | Whether CFGMS manages the object (always `false` for now) |
+| `managed` | Whether CFGMS manages the object (always `false` in this release; the value is set by the write-path work in #5560) |
 | `member_of` | Sorted objectGUIDs of the groups this group is a direct member of |
 | `other_members` | Direct members that are neither users nor groups, sorted by type then id, each `{type, id, name}`; `type` is `computer`, `contact`, `foreign_security_principal` or `other` |
 
