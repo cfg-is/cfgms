@@ -213,3 +213,11 @@ func TestResolveExecutionUID_LoggedInUser_UnknownUser(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "lookup logged-in user")
 }
+
+// newTestStagingBase returns a staging base for tests that build Windows
+// commands. EnsureAdminOnlyDir does nothing off Windows, so a plain temporary
+// directory is enough here.
+func newTestStagingBase(t *testing.T) string {
+	t.Helper()
+	return t.TempDir()
+}

@@ -11,10 +11,12 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // reapGracePeriod bounds how long Execute waits for cmd.Wait to return after it
@@ -31,6 +33,12 @@ type Executor struct {
 	logger         logging.Logger
 	secretStore    interfaces.SecretStore
 	secretBindings []ParamBinding
+
+	// stagingBase is the directory scripts are staged in before they run. Empty
+	// means the platform default (platformScriptStagingBase): the system
+	// temporary directory on Unix, %ProgramData%\cfgms\script-staging on
+	// Windows. Tests set it.
+	stagingBase string
 }
 
 // NewExecutor creates a new script executor with the given configuration
@@ -246,11 +254,50 @@ func (e *Executor) buildCommand(ctx context.Context) (*exec.Cmd, func(), error) 
 	}
 }
 
-// writeTempScript writes content to a temp file with the given name pattern and
-// returns the path and a cleanup function that removes the file.
-func writeTempScript(pattern, content string) (string, func(), error) {
+// windowsStagingMu serializes securing the Windows staging base and creating a
+// script in it, and removing a staged script: EnsureAdminOnlyDir walks the
+// whole tree below the base, and a concurrent removal would race that walk.
+var windowsStagingMu sync.Mutex
+
+// scriptStagingBase returns the directory this executor stages scripts in.
+func (e *Executor) scriptStagingBase() string {
+	if e.stagingBase != "" {
+		return e.stagingBase
+	}
+	return platformScriptStagingBase()
+}
+
+// stageWindowsScript secures the staging base with security.EnsureAdminOnlyDir,
+// so only SYSTEM and Administrators can write it, and then stages the script
+// content in it. If the base cannot be secured nothing is staged and an error
+// is returned.
+func (e *Executor) stageWindowsScript(pattern string) (string, func(), error) {
 	noop := func() {}
-	f, err := os.CreateTemp("", pattern)
+	base := e.scriptStagingBase()
+
+	windowsStagingMu.Lock()
+	defer windowsStagingMu.Unlock()
+	if err := security.EnsureAdminOnlyDir(base); err != nil {
+		return "", noop, fmt.Errorf("secure script staging directory: %w", err)
+	}
+	path, remove, err := writeTempScript(base, pattern, e.config.Content)
+	if err != nil {
+		return "", noop, err
+	}
+	cleanup := func() {
+		windowsStagingMu.Lock()
+		defer windowsStagingMu.Unlock()
+		remove()
+	}
+	return path, cleanup, nil
+}
+
+// writeTempScript writes content to a new file in base, created exclusively
+// from the name pattern, and returns the path and a cleanup function that
+// removes the file.
+func writeTempScript(base, pattern, content string) (string, func(), error) {
+	noop := func() {}
+	f, err := os.CreateTemp(base, pattern)
 	if err != nil {
 		return "", noop, fmt.Errorf("create temp script: %w", err)
 	}
@@ -269,14 +316,14 @@ func writeTempScript(pattern, content string) (string, func(), error) {
 }
 
 // buildWindowsCommand creates commands for Windows platforms.
-// Scripts are staged to a temp file and executed by file path — no inline content
-// is passed to the interpreter, eliminating -ExecutionPolicy Bypass, -Command <string>,
+// Scripts are staged in the secured staging base (stageWindowsScript) and executed
+// by file path — no inline content is passed to the interpreter, eliminating -ExecutionPolicy Bypass, -Command <string>,
 // and python -c <string> injection vectors.
 func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, func(), error) {
 	noop := func() {}
 	switch e.config.Shell {
 	case ShellPowerShell:
-		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.ps1", e.config.Content)
+		tmpPath, cleanup, err := e.stageWindowsScript("cfgms-script-*.ps1")
 		if err != nil {
 			return nil, noop, err
 		}
@@ -284,7 +331,7 @@ func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, func(), 
 		return exec.CommandContext(ctx, "powershell.exe", "-NonInteractive", "-File", tmpPath), cleanup, nil
 
 	case ShellPwsh:
-		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.ps1", e.config.Content)
+		tmpPath, cleanup, err := e.stageWindowsScript("cfgms-script-*.ps1")
 		if err != nil {
 			return nil, noop, err
 		}
@@ -294,7 +341,7 @@ func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, func(), 
 		return exec.CommandContext(ctx, "pwsh.exe", "-NonInteractive", "-File", tmpPath), cleanup, nil
 
 	case ShellCmd:
-		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.cmd", e.config.Content)
+		tmpPath, cleanup, err := e.stageWindowsScript("cfgms-script-*.cmd")
 		if err != nil {
 			return nil, noop, err
 		}
@@ -304,7 +351,7 @@ func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, func(), 
 		return buildCmdExeCommand(ctx, tmpPath), cleanup, nil
 
 	case ShellPython:
-		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.py", e.config.Content)
+		tmpPath, cleanup, err := e.stageWindowsScript("cfgms-script-*.py")
 		if err != nil {
 			return nil, noop, err
 		}
@@ -312,7 +359,7 @@ func (e *Executor) buildWindowsCommand(ctx context.Context) (*exec.Cmd, func(), 
 		return exec.CommandContext(ctx, "python.exe", tmpPath), cleanup, nil
 
 	case ShellPython3:
-		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.py", e.config.Content)
+		tmpPath, cleanup, err := e.stageWindowsScript("cfgms-script-*.py")
 		if err != nil {
 			return nil, noop, err
 		}
@@ -331,7 +378,7 @@ func (e *Executor) buildUnixCommand(ctx context.Context) (*exec.Cmd, func(), err
 	noop := func() {}
 
 	writeExec := func(pattern string) (string, func(), error) {
-		tmpPath, cleanup, err := writeTempScript(pattern, e.config.Content)
+		tmpPath, cleanup, err := writeTempScript(e.scriptStagingBase(), pattern, e.config.Content)
 		if err != nil {
 			return "", noop, err
 		}
@@ -374,7 +421,7 @@ func (e *Executor) buildUnixCommand(ctx context.Context) (*exec.Cmd, func(), err
 		// pattern as on Windows — no -Command string, no inline composition
 		// (CLAUDE.md banned patterns). Resolved via PATH since the install location
 		// varies across distributions.
-		tmpPath, cleanup, err := writeTempScript("cfgms-script-*.ps1", e.config.Content)
+		tmpPath, cleanup, err := writeTempScript(e.scriptStagingBase(), "cfgms-script-*.ps1", e.config.Content)
 		if err != nil {
 			return nil, noop, err
 		}
@@ -382,7 +429,7 @@ func (e *Executor) buildUnixCommand(ctx context.Context) (*exec.Cmd, func(), err
 		return exec.CommandContext(ctx, "pwsh", "-NonInteractive", "-File", tmpPath), cleanup, nil
 
 	case ShellPython:
-		tmpPath, cleanup, err := writeTempScript("cfgms-script-*", e.config.Content)
+		tmpPath, cleanup, err := writeTempScript(e.scriptStagingBase(), "cfgms-script-*", e.config.Content)
 		if err != nil {
 			return nil, noop, err
 		}
@@ -390,7 +437,7 @@ func (e *Executor) buildUnixCommand(ctx context.Context) (*exec.Cmd, func(), err
 		return exec.CommandContext(ctx, "/usr/bin/python", tmpPath), cleanup, nil
 
 	case ShellPython3:
-		tmpPath, cleanup, err := writeTempScript("cfgms-script-*", e.config.Content)
+		tmpPath, cleanup, err := writeTempScript(e.scriptStagingBase(), "cfgms-script-*", e.config.Content)
 		if err != nil {
 			return nil, noop, err
 		}

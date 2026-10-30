@@ -18,6 +18,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/windows"
+
+	"github.com/cfgis/cfgms/pkg/security"
+	"github.com/cfgis/cfgms/pkg/testutil/winacct"
 )
 
 // TestWTSGetActiveConsoleSessionId_FindsInKernel32 verifies that
@@ -516,4 +520,155 @@ func TestBuildCmdExeCommand_ContentNotInline(t *testing.T) {
 		"CmdLine must not contain inline script content")
 	assert.Contains(t, cmd.SysProcAttr.CmdLine, "cfgms-script-",
 		"CmdLine must reference the temp script file path")
+}
+
+// requireElevated skips t unless the test runs elevated. Securing the script
+// staging base assigns BUILTIN\Administrators as owner, and the tests hand
+// directories to other principals; both need an elevated administrator, as
+// the steward (a SYSTEM service) and the native Windows CI runners are.
+func requireElevated(t *testing.T) {
+	t.Helper()
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("needs an elevated administrator: securing the script staging base assigns BUILTIN\\Administrators as owner")
+	}
+}
+
+// stagingBaseOwnedBy creates a staging base under t.TempDir() owned by the
+// owner in sddl (e.g. "O:BA").
+func stagingBaseOwnedBy(t *testing.T, sddl string) string {
+	t.Helper()
+	requireElevated(t)
+	base := filepath.Join(t.TempDir(), "script-staging")
+	require.NoError(t, os.Mkdir(base, 0o700))
+	sd, err := windows.SecurityDescriptorFromString(sddl)
+	require.NoError(t, err)
+	owner, _, err := sd.Owner()
+	require.NoError(t, err)
+	winacct.SetOwner(t, base, owner)
+	return base
+}
+
+// newTestStagingBase returns an admin-owned staging base for tests that build
+// Windows commands, so they never write under the real %ProgramData%.
+func newTestStagingBase(t *testing.T) string {
+	t.Helper()
+	return stagingBaseOwnedBy(t, "O:BA")
+}
+
+// stagedScriptPath returns the script path a built Windows command runs: the
+// -File argument for PowerShell, the last argument for Python, and the path
+// in cmd.exe's raw command line.
+func stagedScriptPath(t *testing.T, shell ShellType, cmd *exec.Cmd) string {
+	t.Helper()
+	switch shell {
+	case ShellPowerShell, ShellPwsh:
+		for i, a := range cmd.Args {
+			if a == "-File" && i+1 < len(cmd.Args) {
+				return cmd.Args[i+1]
+			}
+		}
+		t.Fatalf("no -File argument in %v", cmd.Args)
+	case ShellCmd:
+		require.NotNil(t, cmd.SysProcAttr)
+		_, path, ok := strings.Cut(cmd.SysProcAttr.CmdLine, "/c ")
+		require.True(t, ok, "cmd.exe command line %q has no /c", cmd.SysProcAttr.CmdLine)
+		return strings.Trim(path, `"`)
+	case ShellPython, ShellPython3:
+		return cmd.Args[len(cmd.Args)-1]
+	}
+	t.Fatalf("unexpected shell %q", shell)
+	return ""
+}
+
+// isUnderDir reports whether path lies inside dir, ignoring case.
+func isUnderDir(path, dir string) bool {
+	return strings.HasPrefix(strings.ToLower(filepath.Clean(path)),
+		strings.ToLower(filepath.Clean(dir))+string(filepath.Separator))
+}
+
+var windowsStagedShells = []ShellType{ShellPowerShell, ShellPwsh, ShellCmd, ShellPython, ShellPython3}
+
+// TestBuildWindowsCommand_StagesInSecuredBase (REQUIRED, #5633): for each
+// Windows shell the staged script's parent is the configured base and the
+// script is not under os.TempDir().
+func TestBuildWindowsCommand_StagesInSecuredBase(t *testing.T) {
+	base := stagingBaseOwnedBy(t, "O:BA")
+	// Move the system temporary directory elsewhere so a regression to
+	// os.CreateTemp("", ...) would stage there and fail the assertions.
+	fakeTemp := filepath.Join(t.TempDir(), "system-temp")
+	require.NoError(t, os.Mkdir(fakeTemp, 0o700))
+	t.Setenv("TMP", fakeTemp)
+	t.Setenv("TEMP", fakeTemp)
+	require.True(t, strings.EqualFold(filepath.Clean(os.TempDir()), filepath.Clean(fakeTemp)))
+
+	for _, shell := range windowsStagedShells {
+		t.Run(string(shell), func(t *testing.T) {
+			e := &Executor{config: &ScriptConfig{Content: "echo hi", Shell: shell, Timeout: 5 * time.Second}, stagingBase: base}
+			cmd, cleanup, err := e.buildWindowsCommand(context.Background())
+			require.NoError(t, err)
+			defer cleanup()
+
+			path := stagedScriptPath(t, shell, cmd)
+			assert.True(t, strings.EqualFold(filepath.Dir(path), base),
+				"staged script %q must be directly in the staging base %q", path, base)
+			assert.False(t, isUnderDir(path, os.TempDir()),
+				"staged script %q must not be under the system temporary directory", path)
+			content, err := os.ReadFile(path) // #nosec G304 - test reads the script it staged
+			require.NoError(t, err)
+			assert.Equal(t, "echo hi", string(content))
+		})
+	}
+}
+
+// TestBuildWindowsCommand_RefusesBaseOwnedByUsers (REQUIRED, #5633): with a
+// staging base owned by BUILTIN\Users, buildWindowsCommand returns an error,
+// no command, and leaves nothing in the base.
+func TestBuildWindowsCommand_RefusesBaseOwnedByUsers(t *testing.T) {
+	base := stagingBaseOwnedBy(t, "O:BU")
+
+	for _, shell := range windowsStagedShells {
+		t.Run(string(shell), func(t *testing.T) {
+			e := &Executor{config: &ScriptConfig{Content: "echo hi", Shell: shell, Timeout: 5 * time.Second}, stagingBase: base}
+			cmd, cleanup, err := e.buildWindowsCommand(context.Background())
+			if cleanup != nil {
+				cleanup()
+			}
+			require.Error(t, err)
+			assert.ErrorIs(t, err, security.ErrUntrustedDirOwner)
+			assert.Nil(t, cmd, "no command may be returned for a refused base")
+		})
+	}
+	entries, err := os.ReadDir(base)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "nothing may be staged in a refused base")
+}
+
+// TestBuildWindowsCommand_CleanupRemovesStagedScript (REQUIRED, #5633): the
+// returned cleanup removes the staged file.
+func TestBuildWindowsCommand_CleanupRemovesStagedScript(t *testing.T) {
+	base := stagingBaseOwnedBy(t, "O:BA")
+
+	for _, shell := range windowsStagedShells {
+		t.Run(string(shell), func(t *testing.T) {
+			e := &Executor{config: &ScriptConfig{Content: "echo hi", Shell: shell, Timeout: 5 * time.Second}, stagingBase: base}
+			cmd, cleanup, err := e.buildWindowsCommand(context.Background())
+			require.NoError(t, err)
+			path := stagedScriptPath(t, shell, cmd)
+			require.FileExists(t, path)
+
+			cleanup()
+			_, err = os.Stat(path)
+			assert.True(t, os.IsNotExist(err), "cleanup must remove the staged script %q", path)
+		})
+	}
+	entries, err := os.ReadDir(base)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "the staging base must be empty after cleanup")
+}
+
+func TestPlatformScriptStagingBase(t *testing.T) {
+	t.Setenv("ProgramData", `D:\PD`)
+	assert.Equal(t, `D:\PD\cfgms\script-staging`, platformScriptStagingBase())
+	t.Setenv("ProgramData", "")
+	assert.Equal(t, `C:\ProgramData\cfgms\script-staging`, platformScriptStagingBase())
 }

@@ -8,7 +8,9 @@ package script
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"unsafe"
 
@@ -191,4 +193,18 @@ func buildCmdExeCommand(ctx context.Context, tmpPath string) *exec.Cmd {
 // signals the relay layer to skip UID-based ownership changes.
 func ResolveExecutionUID(_ ExecutionContext) (int, error) {
 	return -1, nil
+}
+
+// platformScriptStagingBase returns %ProgramData%\cfgms\script-staging,
+// falling back to C:\ProgramData when the ProgramData environment variable is
+// unset. stageWindowsScript secures it with security.EnsureAdminOnlyDir before
+// every stage, so only SYSTEM and Administrators can write it, unlike the
+// system temporary directory. It is a sibling of cert_trust's staging
+// directory, not inside it, so the two packages' tree walks never share a tree.
+func platformScriptStagingBase() string {
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	return filepath.Join(programData, "cfgms", "script-staging")
 }
