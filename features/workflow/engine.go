@@ -258,10 +258,18 @@ func (e *Engine) runWorkflowSteps(execution *WorkflowExecution, workflow Workflo
 	// Close Done channel after all work (including logging) completes.
 	// This is the first defer so it runs last (LIFO), after the panic recovery
 	// defer below finishes its logging.
+	// Retention pruning is the only store work after the terminal write; it runs
+	// after Done closes so it never holds up a waiter.
+	storedTerminal := false
+	defer func() {
+		if storedTerminal {
+			e.pruneExecutions(execution)
+		}
+	}()
 	defer close(execution.Done)
 	// Runs after the panic recovery below and before Done closes, so a waiter
 	// released by Done sees the terminal state already written through.
-	defer e.persistExecution(execution)
+	defer func() { storedTerminal = e.saveExecution(execution) }()
 
 	execution.SetStatus(StatusRunning)
 	e.persistExecution(execution)

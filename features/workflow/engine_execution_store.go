@@ -160,8 +160,17 @@ func executionFromRecord(rec *business.WorkflowExecutionRecord) (*WorkflowExecut
 // and write are serialized per execution so an older snapshot cannot land after a
 // newer one.
 func (e *Engine) persistExecution(execution *WorkflowExecution) {
+	if e.saveExecution(execution) {
+		e.pruneExecutions(execution)
+	}
+}
+
+// saveExecution writes the execution's current snapshot through to the store and
+// reports whether it stored a terminal snapshot, so the caller can prune. It is the
+// only part of a terminal write a Done waiter depends on.
+func (e *Engine) saveExecution(execution *WorkflowExecution) bool {
 	if e.executionStore == nil || execution == nil {
-		return
+		return false
 	}
 	execution.persistMu.Lock()
 	defer execution.persistMu.Unlock()
@@ -169,18 +178,24 @@ func (e *Engine) persistExecution(execution *WorkflowExecution) {
 	rec, err := buildExecutionRecord(execution)
 	if err != nil {
 		e.logExecutionStoreFailure("snapshot", execution.ID, err)
-		return
+		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), executionStoreTimeout)
 	defer cancel()
 	if err := e.executionStore.Save(ctx, rec); err != nil {
 		e.logExecutionStoreFailure("save", execution.ID, err)
-		return
+		return false
 	}
-	if business.IsTerminalWorkflowExecutionStatus(rec.Status) {
-		if _, err := e.executionStore.Prune(ctx, rec.TenantID, e.executionRetention); err != nil {
-			e.logExecutionStoreFailure("prune", execution.ID, err)
-		}
+	return business.IsTerminalWorkflowExecutionStatus(rec.Status)
+}
+
+// pruneExecutions trims the tenant's retained terminal executions. Retention is
+// housekeeping: it is kept off the path between a terminal Save and Done closing.
+func (e *Engine) pruneExecutions(execution *WorkflowExecution) {
+	ctx, cancel := context.WithTimeout(context.Background(), executionStoreTimeout)
+	defer cancel()
+	if _, err := e.executionStore.Prune(ctx, execution.TenantID, e.executionRetention); err != nil {
+		e.logExecutionStoreFailure("prune", execution.ID, err)
 	}
 }
 
