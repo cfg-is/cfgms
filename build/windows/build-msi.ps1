@@ -69,10 +69,103 @@ param(
     # placeholder-key build cannot verify genuine signed upgrades (fail-closed dev
     # behavior). The real key is supplied by the code-signing pipeline (ADR-013 §5).
     [Parameter(Mandatory = $false)]
-    [string]$PublisherKey = ""
+    [string]$PublisherKey = "",
+
+    # Path to an already-built MSI. When set, the script only runs
+    # Test-MsiRegistrationTokenHandling against it and exits; nothing is built.
+    [Parameter(Mandatory = $false)]
+    [string]$VerifyMsiPath = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+# Test-MsiRegistrationTokenHandling inspects a built MSI's Property and
+# CustomAction tables and throws when the registration token could reach a
+# Windows Installer property or a command line: a REGTOKEN property row, any
+# CustomAction Target that references [REGTOKEN], or a RunInstallNoCert /
+# RunInstallWithCert Target without --regtoken-file. It runs after `wix build`
+# and before signing, so a failing MSI is never signed.
+function Test-MsiRegistrationTokenHandling([string]$MsiPath) {
+    if (-not (Test-Path -LiteralPath $MsiPath -PathType Leaf)) {
+        throw "MSI not found: $MsiPath"
+    }
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    $db = $null
+    $failures = [System.Collections.Generic.List[string]]::new()
+    try {
+        # 0 = msiOpenDatabaseModeReadOnly
+        $db = $installer.OpenDatabase((Resolve-Path -LiteralPath $MsiPath).Path, 0)
+
+        $props = @{}
+        $view = $db.OpenView('SELECT `Property`, `Value` FROM `Property`')
+        try {
+            $view.Execute()
+            while ($null -ne ($rec = $view.Fetch())) { $props[$rec.StringData(1)] = $rec.StringData(2) }
+        } finally {
+            $view.Close()
+        }
+        if ($props.ContainsKey("REGTOKEN")) {
+            $failures.Add("Property table has a REGTOKEN row; the token must not be an MSI property")
+        }
+        # A property declared without a value gets no Property row; a Secure one
+        # is listed in SecureCustomProperties instead.
+        $secure = @("$($props['SecureCustomProperties'])".Split(";"))
+        if ($secure -contains "REGTOKEN") {
+            $failures.Add("SecureCustomProperties lists REGTOKEN")
+        }
+        if ($secure -notcontains "REGTOKEN_FILE") {
+            $failures.Add("SecureCustomProperties does not list REGTOKEN_FILE")
+        }
+
+        $conditions = @()
+        $view = $db.OpenView('SELECT `Condition` FROM `LaunchCondition`')
+        try {
+            $view.Execute()
+            while ($null -ne ($rec = $view.Fetch())) { $conditions += $rec.StringData(1) }
+        } finally {
+            $view.Close()
+        }
+        if (-not ($conditions | Where-Object { $_ -like "*REGTOKEN_FILE*" })) {
+            $failures.Add("no LaunchCondition requires REGTOKEN_FILE; a new install would not fail closed")
+        }
+
+        $targets = @{}
+        $view = $db.OpenView('SELECT `Action`, `Target` FROM `CustomAction`')
+        try {
+            $view.Execute()
+            while ($null -ne ($rec = $view.Fetch())) {
+                $action = $rec.StringData(1)
+                $target = $rec.StringData(2)
+                if ($target -like "*``[REGTOKEN``]*") {
+                    $failures.Add("CustomAction $action Target references [REGTOKEN]")
+                }
+                $targets[$action] = $target
+            }
+        } finally {
+            $view.Close()
+        }
+        foreach ($action in @("RunInstallNoCert", "RunInstallWithCert")) {
+            if (-not $targets.ContainsKey($action)) {
+                $failures.Add("CustomAction $action is missing")
+            } elseif ($targets[$action] -notlike "*--regtoken-file*") {
+                $failures.Add("CustomAction $action Target does not pass --regtoken-file")
+            }
+        }
+    } finally {
+        if ($null -ne $db) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($db) }
+        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($installer)
+    }
+
+    if ($failures.Count -gt 0) {
+        throw ("MSI registration token check FAILED for ${MsiPath}:`n  - " + ($failures -join "`n  - "))
+    }
+    Write-Host "  MSI registration token check passed: no REGTOKEN property, no [REGTOKEN] reference, install actions pass --regtoken-file." -ForegroundColor Green
+}
+
+if ($VerifyMsiPath -ne "") {
+    Test-MsiRegistrationTokenHandling $VerifyMsiPath
+    exit 0
+}
 
 $ScriptDir = $PSScriptRoot
 $RepoRoot  = Resolve-Path (Join-Path $ScriptDir ".." "..")
@@ -413,6 +506,12 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "  MSI built: $OutputMsi" -ForegroundColor Green
 
+# ── Step 3b: Verify registration token handling (before signing) ─────────────
+
+Write-Host ""
+Write-Host "Verifying MSI registration token handling..." -ForegroundColor Yellow
+Test-MsiRegistrationTokenHandling $OutputMsi
+
 # ── Step 4: Code signing (optional) ──────────────────────────────────────────
 
 if ($SigningCertThumbprint -ne "") {
@@ -437,9 +536,12 @@ Write-Host "=== Build Complete ===" -ForegroundColor Green
 Write-Host "MSI: $OutputMsi"
 $MsiLeaf = Split-Path $OutputMsi -Leaf
 Write-Host ""
+Write-Host "Write the registration token to a file readable only by SYSTEM and Administrators,"
+Write-Host "pass its path as REGTOKEN_FILE, and delete the file once the install has finished."
+Write-Host ""
 Write-Host "Deploy with RMM (public CA):"
-Write-Host "  msiexec /qn /i `"$MsiLeaf`" REGTOKEN=`"<token>`" CA_FINGERPRINT=`"<hex>`""
+Write-Host "  msiexec /qn /i `"$MsiLeaf`" REGTOKEN_FILE=`"C:\path\token.txt`" CA_FINGERPRINT=`"<hex>`""
 Write-Host ""
 Write-Host "Deploy with install package (private CA, ca.crt alongside MSI):"
 Write-Host "  # Extract the install package tar.gz; ca.crt is auto-detected from the same directory."
-Write-Host "  msiexec /qn /i `"$MsiLeaf`" REGTOKEN=`"<token>`" CA_FINGERPRINT=`"<hex>`""
+Write-Host "  msiexec /qn /i `"$MsiLeaf`" REGTOKEN_FILE=`"C:\path\token.txt`" CA_FINGERPRINT=`"<hex>`""

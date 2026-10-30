@@ -349,12 +349,34 @@ your RMM tool:
 curl -O https://<CONTROLLER_IP>:9080/api/v1/installer/download/windows/amd64
 ```
 
+The MSI takes the registration token by file (`REGTOKEN_FILE`), never as an MSI
+property, so the token does not appear on the `msiexec` command line or in the MSI log.
+The install fails closed when `REGTOKEN_FILE` is not set. The steward accepts the token
+file only when it is owned by SYSTEM or Administrators and its access list grants access
+to those two alone; the install custom action runs as SYSTEM. Run the following as an
+administrator (or as SYSTEM from the RMM agent), and delete the token once the install
+has finished:
+
 ```powershell
-# Extract and install silently
+# Extract the package
 Expand-Archive cfgms-steward-windows-amd64.zip -DestinationPath C:\cfgms-install
+
+# Admin-only folder for the token: protected access list, SYSTEM + Administrators only
+$tokenDir = "C:\cfgms-token"
+New-Item -ItemType Directory -Path $tokenDir -Force | Out-Null
+icacls $tokenDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
+icacls $tokenDir /setowner "*S-1-5-32-544"
+
+# Write the token; the file inherits the folder's access list
+$tokenFile = Join-Path $tokenDir "registration-token.txt"
+Set-Content -Path $tokenFile -Value "<registration-token>" -NoNewline
+icacls $tokenFile /setowner "*S-1-5-32-544"
+
+# Install silently, then remove the token
 msiexec /qn /i C:\cfgms-install\cfgms-steward-amd64.msi `
-  REGTOKEN="<registration-token>" `
+  REGTOKEN_FILE="$tokenFile" `
   CA_FINGERPRINT="<sha256-hex>"
+Remove-Item -Recurse -Force $tokenDir
 ```
 
 > **Windows E2E validation** requires real Windows runners and is not exercised by the
