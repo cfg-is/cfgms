@@ -6,8 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
+	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -15,7 +16,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
-	"github.com/cfgis/cfgms/pkg/directory/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -39,6 +39,9 @@ func (c *ADModuleConfig) Validate() error {
 	}
 	if c.PageSize < 0 {
 		return fmt.Errorf("page_size must be non-negative")
+	}
+	if c.PageSize > maxPageSize {
+		return fmt.Errorf("page_size must not exceed %d", maxPageSize)
 	}
 	if c.RequestTimeout < 0 {
 		return fmt.Errorf("request_timeout must be non-negative")
@@ -127,117 +130,6 @@ func (s *ADSystemStatus) Validate() error {
 	return nil // Status objects don't need validation
 }
 
-// ADQueryResult represents the result of an AD query operation
-type ADQueryResult struct {
-	QueryType    string                          `json:"query_type"`
-	ObjectID     string                          `json:"object_id,omitempty"`
-	ExecutedAt   time.Time                       `json:"executed_at"`
-	ResponseTime time.Duration                   `json:"response_time"`
-	Success      bool                            `json:"success"`
-	Error        string                          `json:"error,omitempty"`
-	TotalCount   int                             `json:"total_count,omitempty"`
-	User         *interfaces.DirectoryUser       `json:"user,omitempty"`
-	Users        []interfaces.DirectoryUser      `json:"users,omitempty"`
-	Group        *interfaces.DirectoryGroup      `json:"group,omitempty"`
-	Groups       []interfaces.DirectoryGroup     `json:"groups,omitempty"`
-	OU           *interfaces.OrganizationalUnit  `json:"ou,omitempty"`
-	OUs          []interfaces.OrganizationalUnit `json:"ous,omitempty"`
-}
-
-// AsMap implements the ConfigState interface
-func (r *ADQueryResult) AsMap() map[string]interface{} {
-	result := map[string]interface{}{
-		"query_type":    r.QueryType,
-		"object_id":     r.ObjectID,
-		"executed_at":   r.ExecutedAt,
-		"response_time": r.ResponseTime,
-		"success":       r.Success,
-		"error":         r.Error,
-		"total_count":   r.TotalCount,
-	}
-
-	if r.User != nil {
-		result["user"] = r.User
-	}
-	if len(r.Users) > 0 {
-		result["users"] = r.Users
-	}
-	if r.Group != nil {
-		result["group"] = r.Group
-	}
-	if len(r.Groups) > 0 {
-		result["groups"] = r.Groups
-	}
-	if r.OU != nil {
-		result["ou"] = r.OU
-	}
-	if len(r.OUs) > 0 {
-		result["ous"] = r.OUs
-	}
-
-	return result
-}
-
-// GetManagedFields returns the fields that this result object tracks
-func (r *ADQueryResult) GetManagedFields() []string {
-	return []string{"query_type", "object_id", "executed_at", "response_time", "success", "error", "total_count", "user", "users", "group", "groups", "ou", "ous"}
-}
-
-// ToYAML serializes the query result to YAML
-func (r *ADQueryResult) ToYAML() ([]byte, error) {
-	return yaml.Marshal(r)
-}
-
-// FromYAML deserializes YAML data into the query result
-func (r *ADQueryResult) FromYAML(data []byte) error {
-	return yaml.Unmarshal(data, r)
-}
-
-// Validate validates the query result
-func (r *ADQueryResult) Validate() error {
-	return nil // Query results don't need validation
-}
-
-// ADDirectoryDNA represents comprehensive AD directory DNA collection
-type ADDirectoryDNA struct {
-	CollectionTime time.Time              `json:"collection_time"`
-	Success        bool                   `json:"success"`
-	Error          string                 `json:"error,omitempty"`
-	Source         string                 `json:"source"`
-	DNA            map[string]interface{} `json:"dna"`
-}
-
-// AsMap implements the ConfigState interface
-func (d *ADDirectoryDNA) AsMap() map[string]interface{} {
-	return map[string]interface{}{
-		"collection_time": d.CollectionTime,
-		"success":         d.Success,
-		"error":           d.Error,
-		"source":          d.Source,
-		"dna":             d.DNA,
-	}
-}
-
-// GetManagedFields returns the fields that this DNA object tracks
-func (d *ADDirectoryDNA) GetManagedFields() []string {
-	return []string{"collection_time", "success", "error", "source", "dna"}
-}
-
-// ToYAML serializes the DNA result to YAML
-func (d *ADDirectoryDNA) ToYAML() ([]byte, error) {
-	return yaml.Marshal(d)
-}
-
-// FromYAML deserializes YAML data into the DNA result
-func (d *ADDirectoryDNA) FromYAML(data []byte) error {
-	return yaml.Unmarshal(data, d)
-}
-
-// Validate validates the DNA result
-func (d *ADDirectoryDNA) Validate() error {
-	return nil // DNA results don't need validation
-}
-
 // DomainInfo represents basic domain information
 type DomainInfo struct {
 	Domain           string `json:"domain"`
@@ -246,22 +138,164 @@ type DomainInfo struct {
 	NetBIOSName      string `json:"netbios_name"`
 }
 
-// objectIDPattern accepts SAM account names, UPNs, and GUIDs; rejects raw DNs and shell metacharacters.
-var objectIDPattern = regexp.MustCompile(`^[a-zA-Z0-9._@\-]+$`)
+// Inventory resource IDs. Get on these IDs returns per-object directory
+// inventory (one DNA fragment per object, kind "<id>:<objectGUID>"). They are
+// reserved: a declared resource may not use either name.
+const (
+	kindDirectoryUser  = "directory_user"
+	kindDirectoryGroup = "directory_group"
+)
 
-// validateObjectID rejects any objectID containing characters outside the strict allowlist before
-// interpolation into PowerShell scripts, preventing command injection.
-func validateObjectID(objectID string) error {
-	if !objectIDPattern.MatchString(objectID) {
-		return fmt.Errorf("invalid objectID %q: must match [a-zA-Z0-9._@-]+ (SAM account names, UPNs, and GUIDs only)", objectID)
+const (
+	// maxListEntries bounds member_of and other_members per object. A longer
+	// list keeps its first maxListEntries entries in sorted order and is
+	// flagged with the matching *_truncated attribute.
+	maxListEntries = 10000
+
+	// maxInventoryObjects bounds one Get. It matches the per-kind bound of the
+	// steward's DNA assembler; one Get holds up to this many objects (about
+	// 1 KB each) in memory once.
+	maxInventoryObjects = 200000
+
+	// defaultPageSize is the AD paging size used when none is configured.
+	defaultPageSize = 1000
+
+	// maxPageSize is the largest page size the read script accepts.
+	maxPageSize = 5000
+)
+
+// otherMemberTypes are the member types reported in a group's other_members.
+var otherMemberTypes = map[string]bool{
+	"computer":                   true,
+	"contact":                    true,
+	"foreign_security_principal": true,
+	"other":                      true,
+}
+
+// objectGUIDPattern matches the canonical lowercase objectGUID form the read
+// script emits.
+var objectGUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// scriptRunner runs the module's fixed read script with request (a JSON
+// document) on stdin and calls onLine for every line the script writes to
+// stdout. On Windows it is the hash-checked PowerShell runner in
+// scripts_windows.go; tests supply their own implementation.
+type scriptRunner interface {
+	Run(ctx context.Context, request []byte, onLine func(line []byte) error) error
+}
+
+// readRequest is the request document the read script validates.
+type readRequest struct {
+	Operation string `json:"operation"`
+	PageSize  int    `json:"page_size"`
+	Domain    string `json:"domain"`
+}
+
+// readRecord is one line of read script output.
+type readRecord struct {
+	Type   string `json:"type"`
+	Code   string `json:"code"`
+	Detail string `json:"detail"`
+
+	ID                    string       `json:"id"`
+	SamAccountName        string       `json:"sam_account_name"`
+	UserPrincipalName     string       `json:"user_principal_name"`
+	DisplayName           string       `json:"display_name"`
+	Mail                  string       `json:"mail"`
+	Enabled               bool         `json:"enabled"`
+	DistinguishedName     string       `json:"distinguished_name"`
+	ObjectSID             string       `json:"object_sid"`
+	WhenCreated           string       `json:"when_created"`
+	DirectoryDomain       string       `json:"directory_domain"`
+	GroupScope            string       `json:"group_scope"`
+	GroupCategory         string       `json:"group_category"`
+	MemberOf              stringList   `json:"member_of"`
+	MemberOfTruncated     bool         `json:"member_of_truncated"`
+	OtherMembers          otherMembers `json:"other_members"`
+	OtherMembersTruncated bool         `json:"other_members_truncated"`
+
+	Domain           string `json:"domain"`
+	DomainController string `json:"domain_controller"`
+	ForestRoot       string `json:"forest_root"`
+	NetBIOSName      string `json:"netbios_name"`
+}
+
+// stringList decodes a JSON string array, a single string or null. Windows
+// PowerShell's ConvertTo-Json can render a one-element array as a scalar.
+type stringList []string
+
+func (l *stringList) UnmarshalJSON(data []byte) error {
+	var list []string
+	if err := json.Unmarshal(data, &list); err == nil {
+		*l = list
+		return nil
+	}
+	var one *string
+	if err := json.Unmarshal(data, &one); err != nil {
+		return err
+	}
+	*l = nil
+	if one != nil {
+		*l = []string{*one}
 	}
 	return nil
 }
 
-// activeDirectoryModule implements the Module interface for local Active Directory management
-// using Windows system context and native AD APIs
+// otherMember is a direct group member that is neither a user nor a group.
+type otherMember struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// otherMembers decodes a JSON array of otherMember, a single object or null.
+type otherMembers []otherMember
+
+func (l *otherMembers) UnmarshalJSON(data []byte) error {
+	var list []otherMember
+	if err := json.Unmarshal(data, &list); err == nil {
+		*l = list
+		return nil
+	}
+	var one *otherMember
+	if err := json.Unmarshal(data, &one); err != nil {
+		return err
+	}
+	*l = nil
+	if one != nil {
+		*l = []otherMember{*one}
+	}
+	return nil
+}
+
+// inventoryState is the per-object ConfigState Get returns for
+// directory_user and directory_group: the object list under
+// modules.PerObjectKey, sorted by id.
+type inventoryState struct {
+	objects []interface{}
+}
+
+func (s *inventoryState) AsMap() map[string]interface{} {
+	return map[string]interface{}{modules.PerObjectKey: s.objects}
+}
+
+func (s *inventoryState) ToYAML() ([]byte, error) { return yaml.Marshal(s.AsMap()) }
+
+func (s *inventoryState) FromYAML([]byte) error {
+	return fmt.Errorf("directory inventory state is read-only")
+}
+
+func (s *inventoryState) Validate() error { return nil }
+
+func (s *inventoryState) GetManagedFields() []string { return nil }
+
+// activeDirectoryModule implements the Module interface for local Active
+// Directory management using the Windows system context.
 type activeDirectoryModule struct {
 	logger logging.Logger
+
+	// runner runs the fixed read script.
+	runner scriptRunner
 
 	// Configuration management
 	config    *ADModuleConfig
@@ -280,53 +314,54 @@ type activeDirectoryModule struct {
 
 // New creates a new instance of the system-context Active Directory module
 func New(logger logging.Logger) modules.Module {
+	return newWithRunner(logger, newPlatformRunner())
+}
+
+// newWithRunner creates the module with the given script runner.
+func newWithRunner(logger logging.Logger, runner scriptRunner) *activeDirectoryModule {
 	if logger == nil {
 		logger = logging.NewNoopLogger()
 	}
-
 	return &activeDirectoryModule{
 		logger: logger,
+		runner: runner,
 	}
 }
 
-// Get retrieves the current state of Active Directory objects using system context
-func (m *activeDirectoryModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
-	m.logger.Debug("Getting local AD object", "resource_id", resourceID)
-
-	// Parse resourceID to determine operation type
-	parts := strings.Split(resourceID, ":")
-	if len(parts) < 1 {
-		return nil, fmt.Errorf("invalid resource ID format: %s", resourceID)
+// validateDeclaredResourceID rejects a declared resource that uses one of the
+// reserved inventory IDs.
+func validateDeclaredResourceID(resourceID string) error {
+	switch resourceID {
+	case kindDirectoryUser, kindDirectoryGroup:
+		return fmt.Errorf("resource ID %q is reserved for directory inventory and cannot be declared", resourceID)
 	}
+	return nil
+}
 
-	operation := parts[0]
+// Get returns the AD system status ("status") or the per-object directory
+// inventory ("directory_user", "directory_group").
+func (m *activeDirectoryModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
+	m.logger.Debug("Getting local AD object", "resource_id", logging.SanitizeLogValue(resourceID))
 
-	switch operation {
+	switch resourceID {
 	case "status":
 		return m.getSystemStatus(ctx)
-	case "query":
-		if len(parts) < 3 {
-			return nil, fmt.Errorf("query requires format 'query:type:id', got: %s", resourceID)
-		}
-		objectType := parts[1]
-		objectID := parts[2]
-		return m.queryADObjectSystem(ctx, objectType, objectID)
-	case "list":
-		if len(parts) < 2 {
-			return nil, fmt.Errorf("list requires format 'list:type', got: %s", resourceID)
-		}
-		objectType := parts[1]
-		return m.listADObjectsSystem(ctx, objectType)
-	case "dna_collection":
-		return m.collectDirectoryDNA(ctx)
+	case kindDirectoryUser:
+		return m.getInventory(ctx, kindDirectoryUser, "users", "user")
+	case kindDirectoryGroup:
+		return m.getInventory(ctx, kindDirectoryGroup, "groups", "group")
 	default:
-		return nil, fmt.Errorf("unsupported operation: %s", operation)
+		return nil, fmt.Errorf("unsupported operation: %s", resourceID)
 	}
 }
 
 // Set configures the system-context Active Directory module
 func (m *activeDirectoryModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
-	m.logger.Debug("Setting local AD module configuration", "resource_id", resourceID)
+	m.logger.Debug("Setting local AD module configuration", "resource_id", logging.SanitizeLogValue(resourceID))
+
+	if err := validateDeclaredResourceID(resourceID); err != nil {
+		return err
+	}
 
 	// Convert ConfigState to ADModuleConfig
 	configMap := config.AsMap()
@@ -354,7 +389,7 @@ func (m *activeDirectoryModule) Set(ctx context.Context, resourceID string, conf
 
 	// Set defaults
 	if adConfig.PageSize == 0 {
-		adConfig.PageSize = 100
+		adConfig.PageSize = defaultPageSize
 	}
 	if adConfig.RequestTimeout == 0 {
 		adConfig.RequestTimeout = 30 * time.Second
@@ -379,15 +414,14 @@ func (m *activeDirectoryModule) Set(ctx context.Context, resourceID string, conf
 	}
 
 	m.logger.Info("Local AD module configured successfully using system context",
-		"operation_type", adConfig.OperationType,
+		"operation_type", logging.SanitizeLogValue(adConfig.OperationType),
 		"dna_collection", adConfig.EnableDNACollection)
 
 	return nil
 }
 
-// Test validates the current configuration matches the desired state
+// Test validates that the module is configured and can read the directory.
 func (m *activeDirectoryModule) Test(ctx context.Context, resourceID string, config modules.ConfigState) (bool, error) {
-	// For system context AD, test validates system access and configuration
 	m.configMux.RLock()
 	currentConfig := m.config
 	m.configMux.RUnlock()
@@ -396,18 +430,9 @@ func (m *activeDirectoryModule) Test(ctx context.Context, resourceID string, con
 		return false, fmt.Errorf("module not configured")
 	}
 
-	// Test system AD access
 	if err := m.verifySystemAccess(ctx); err != nil {
 		return false, fmt.Errorf("system AD access test failed: %w", err)
 	}
-
-	// Test basic AD query capability
-	_, err := m.queryADObjectSystem(ctx, "user", "Administrator")
-	if err != nil {
-		m.logger.Warn("AD query test failed", "error", err)
-		return false, nil
-	}
-
 	return true, nil
 }
 
@@ -441,739 +466,252 @@ func (m *activeDirectoryModule) getSystemStatus(ctx context.Context) (modules.Co
 	return status, nil
 }
 
-// queryADObjectSystem queries AD objects using Windows system context
-func (m *activeDirectoryModule) queryADObjectSystem(ctx context.Context, objectType, objectID string) (modules.ConfigState, error) {
-	if err := validateObjectID(objectID); err != nil {
+// verifySystemAccess verifies that the module can read the local domain.
+func (m *activeDirectoryModule) verifySystemAccess(ctx context.Context) error {
+	info, err := m.getDomainInfo(ctx)
+	if err != nil {
+		return fmt.Errorf("system context verification failed: %w", err)
+	}
+	m.logger.Debug("System AD access verified successfully",
+		"domain", logging.SanitizeLogValue(info.Domain))
+	return nil
+}
+
+// getDomainInfo reads the domain summary through the read script's status
+// operation.
+func (m *activeDirectoryModule) getDomainInfo(ctx context.Context) (*DomainInfo, error) {
+	var info *DomainInfo
+	err := m.runRead(ctx, "status", func(rec *readRecord) error {
+		if rec.Type != "status" {
+			return fmt.Errorf("unexpected %q record from the status read", rec.Type)
+		}
+		info = &DomainInfo{
+			Domain:           rec.Domain,
+			DomainController: rec.DomainController,
+			ForestRoot:       rec.ForestRoot,
+			NetBIOSName:      rec.NetBIOSName,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get domain info: %w", err)
+	}
+	if info == nil {
+		return nil, fmt.Errorf("failed to get domain info: the status read returned no record")
+	}
+	return info, nil
+}
+
+// pageSize returns the configured AD paging size, or the default.
+func (m *activeDirectoryModule) pageSize() int {
+	m.configMux.RLock()
+	defer m.configMux.RUnlock()
+	if m.config != nil && m.config.PageSize > 0 && m.config.PageSize <= maxPageSize {
+		return m.config.PageSize
+	}
+	return defaultPageSize
+}
+
+// runRead runs the read script for operation and calls handle for every data
+// record. A script error record ends the read with an error carrying only the
+// script's fixed error code.
+func (m *activeDirectoryModule) runRead(ctx context.Context, operation string, handle func(rec *readRecord) error) error {
+	if m.runner == nil {
+		return fmt.Errorf("activedirectory: no script runner")
+	}
+	request, err := json.Marshal(readRequest{Operation: operation, PageSize: m.pageSize()})
+	if err != nil {
+		return fmt.Errorf("activedirectory: encode read request: %w", err)
+	}
+	m.updateStats(true)
+	err = m.runner.Run(ctx, request, func(line []byte) error {
+		var rec readRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			return fmt.Errorf("activedirectory: decode read script output: %w", err)
+		}
+		if rec.Type == "error" {
+			return fmt.Errorf("activedirectory: read script reported %s (%s)", rec.Code, rec.Detail)
+		}
+		return handle(&rec)
+	})
+	if err != nil {
+		m.updateStats(false)
+	}
+	return err
+}
+
+// getInventory reads every object of one kind and returns it as per-object
+// state sorted by objectGUID.
+func (m *activeDirectoryModule) getInventory(ctx context.Context, kind, operation, recordType string) (modules.ConfigState, error) {
+	byID := make(map[string]map[string]interface{})
+	var skipped, duplicates, truncated int
+	err := m.runRead(ctx, operation, func(rec *readRecord) error {
+		if rec.Type != recordType {
+			return fmt.Errorf("activedirectory: unexpected %q record in the %s read", rec.Type, operation)
+		}
+		if !objectGUIDPattern.MatchString(rec.ID) {
+			skipped++
+			return nil
+		}
+		if _, seen := byID[rec.ID]; seen {
+			duplicates++
+			return nil
+		}
+		if len(byID) >= maxInventoryObjects {
+			return fmt.Errorf("activedirectory: %s read exceeds the %d-object bound", operation, maxInventoryObjects)
+		}
+		attrs, cut := objectAttrs(kind, rec)
+		if cut {
+			truncated++
+		}
+		byID[rec.ID] = attrs
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 
-	m.updateStats(true)
-	startTime := time.Now()
-
-	result := &ADQueryResult{
-		QueryType:  objectType,
-		ObjectID:   objectID,
-		ExecutedAt: startTime,
+	if skipped > 0 || duplicates > 0 {
+		m.logger.Warn("AD inventory read skipped unusable objects",
+			"kind", kind, "invalid_id_count", skipped, "duplicate_count", duplicates)
+	}
+	if truncated > 0 {
+		m.logger.Warn("AD inventory membership lists truncated",
+			"kind", kind, "object_count", truncated, "max_entries", maxListEntries)
 	}
 
-	// Use PowerShell with system context to query AD
-	var psScript string
-	switch objectType {
-	case "user":
-		psScript = fmt.Sprintf(`
-			try {
-				Import-Module ActiveDirectory -ErrorAction Stop
-				$user = Get-ADUser -Identity '%s' -Properties * -ErrorAction Stop
-				$result = @{
-					success = $true
-					user = @{
-						id = $user.DistinguishedName
-						sam_account_name = $user.SamAccountName
-						user_principal_name = $user.UserPrincipalName
-						display_name = $user.DisplayName
-						email_address = $user.EmailAddress
-						account_enabled = $user.Enabled
-						distinguished_name = $user.DistinguishedName
-						source = "activedirectory_system"
-						object_guid = $user.ObjectGUID.ToString()
-						when_created = $user.WhenCreated.ToString("yyyy-MM-ddTHH:mm:ssZ")
-						when_changed = $user.WhenChanged.ToString("yyyy-MM-ddTHH:mm:ssZ")
-						member_of = $user.MemberOf
-					}
-				}
-				ConvertTo-Json $result -Depth 10
-			} catch {
-				$error = @{
-					success = $false
-					error = $_.Exception.Message
-				}
-				ConvertTo-Json $error
-			}
-		`, objectID)
-
-	case "group":
-		psScript = fmt.Sprintf(`
-			try {
-				Import-Module ActiveDirectory -ErrorAction Stop
-				$group = Get-ADGroup -Identity '%s' -Properties * -ErrorAction Stop
-				$result = @{
-					success = $true
-					group = @{
-						id = $group.DistinguishedName
-						sam_account_name = $group.SamAccountName
-						display_name = $group.Name
-						description = $group.Description
-						distinguished_name = $group.DistinguishedName
-						source = "activedirectory_system"
-						object_guid = $group.ObjectGUID.ToString()
-						group_scope = $group.GroupScope
-						group_category = $group.GroupCategory
-						members = $group.Members
-					}
-				}
-				ConvertTo-Json $result -Depth 10
-			} catch {
-				$error = @{
-					success = $false
-					error = $_.Exception.Message
-				}
-				ConvertTo-Json $error
-			}
-		`, objectID)
-
-	case "organizational_unit", "ou":
-		psScript = fmt.Sprintf(`
-			try {
-				Import-Module ActiveDirectory -ErrorAction Stop
-				$ou = Get-ADOrganizationalUnit -Identity '%s' -Properties * -ErrorAction Stop
-				$result = @{
-					success = $true
-					ou = @{
-						id = $ou.DistinguishedName
-						name = $ou.Name
-						display_name = $ou.DisplayName
-						description = $ou.Description
-						distinguished_name = $ou.DistinguishedName
-						source = "activedirectory_system"
-						object_guid = $ou.ObjectGUID.ToString()
-						managed_by = $ou.ManagedBy
-					}
-				}
-				ConvertTo-Json $result -Depth 10
-			} catch {
-				$error = @{
-					success = $false
-					error = $_.Exception.Message
-				}
-				ConvertTo-Json $error
-			}
-		`, objectID)
-
-	case "computer":
-		psScript = fmt.Sprintf(`
-			try {
-				Import-Module ActiveDirectory -ErrorAction Stop
-				$computer = Get-ADComputer -Identity '%s' -Properties * -ErrorAction Stop
-				$result = @{
-					success = $true
-					user = @{
-						id = $computer.DistinguishedName
-						sam_account_name = $computer.SamAccountName
-						display_name = $computer.Name
-						distinguished_name = $computer.DistinguishedName
-						source = "activedirectory_system"
-						object_guid = $computer.ObjectGUID.ToString()
-						object_type = "computer"
-						operating_system = $computer.OperatingSystem
-						operating_system_version = $computer.OperatingSystemVersion
-						last_logon_date = if($computer.LastLogonDate) { $computer.LastLogonDate.ToString("yyyy-MM-ddTHH:mm:ssZ") } else { $null }
-						dns_host_name = $computer.DNSHostName
-						service_principal_names = $computer.ServicePrincipalNames
-					}
-				}
-				ConvertTo-Json $result -Depth 10
-			} catch {
-				$error = @{
-					success = $false
-					error = $_.Exception.Message
-				}
-				ConvertTo-Json $error
-			}
-		`, objectID)
-
-	default:
-		result.Success = false
-		result.Error = fmt.Sprintf("unsupported object type: %s", objectType)
-		result.ResponseTime = time.Since(startTime)
-		m.updateStats(false)
-		return result, nil
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	objects := make([]interface{}, 0, len(ids))
+	for _, id := range ids {
+		objects = append(objects, map[string]interface{}{"id": id, "attrs": byID[id]})
 	}
 
-	// Execute PowerShell script with system context
-	output, err := m.executePowerShellWithSystemContext(ctx, psScript)
-	if err != nil {
-		result.Success = false
-		result.Error = fmt.Sprintf("PowerShell execution failed: %v", err)
-		result.ResponseTime = time.Since(startTime)
-		m.updateStats(false)
-		return result, nil
-	}
-
-	// Parse JSON response
-	var psResult map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &psResult); err != nil {
-		result.Success = false
-		result.Error = fmt.Sprintf("failed to parse PowerShell output: %v", err)
-		result.ResponseTime = time.Since(startTime)
-		m.updateStats(false)
-		return result, nil
-	}
-
-	// Check if PowerShell operation succeeded
-	if success, ok := psResult["success"].(bool); !ok || !success {
-		result.Success = false
-		if errorMsg, ok := psResult["error"].(string); ok {
-			result.Error = errorMsg
-		} else {
-			result.Error = "unknown PowerShell error"
-		}
-		result.ResponseTime = time.Since(startTime)
-		m.updateStats(false)
-		return result, nil
-	}
-
-	// Convert PowerShell result to CFGMS directory objects
-	result.Success = true
-	result.ResponseTime = time.Since(startTime)
-
-	switch objectType {
-	case "user", "computer":
-		if userObj, ok := psResult["user"].(map[string]interface{}); ok {
-			user := m.convertPSObjectToDirectoryUser(userObj)
-			result.User = user
-		}
-	case "group":
-		if groupObj, ok := psResult["group"].(map[string]interface{}); ok {
-			group := m.convertPSObjectToDirectoryGroup(groupObj)
-			result.Group = group
-		}
-	case "organizational_unit", "ou":
-		if ouObj, ok := psResult["ou"].(map[string]interface{}); ok {
-			ou := m.convertPSObjectToOrganizationalUnit(ouObj)
-			result.OU = ou
-		}
-	}
-
-	m.logger.Debug("Local AD query completed successfully",
-		"object_type", objectType,
-		"object_id", objectID,
-		"response_time", result.ResponseTime)
-
-	return result, nil
-}
-
-// listADObjectsSystem lists AD objects using Windows system context
-func (m *activeDirectoryModule) listADObjectsSystem(ctx context.Context, objectType string) (modules.ConfigState, error) {
-	m.updateStats(true)
-	startTime := time.Now()
-
-	result := &ADQueryResult{
-		QueryType:  "list_" + objectType,
-		ExecutedAt: startTime,
-	}
-
-	m.configMux.RLock()
-	config := m.config
-	m.configMux.RUnlock()
-
-	pageSize := 100
-	if config != nil && config.PageSize > 0 {
-		pageSize = config.PageSize
-	}
-
-	// Build PowerShell script for listing objects
-	var psScript string
-	switch objectType {
-	case "user":
-		psScript = fmt.Sprintf(`
-			try {
-				Import-Module ActiveDirectory -ErrorAction Stop
-				$users = Get-ADUser -Filter * -Properties SamAccountName,UserPrincipalName,DisplayName,EmailAddress,Enabled,DistinguishedName,ObjectGUID -ResultSetSize %d
-				$result = @{
-					success = $true
-					total_count = $users.Count
-					users = @()
-				}
-				foreach ($user in $users) {
-					$result.users += @{
-						id = $user.DistinguishedName
-						sam_account_name = $user.SamAccountName
-						user_principal_name = $user.UserPrincipalName
-						display_name = $user.DisplayName
-						email_address = $user.EmailAddress
-						account_enabled = $user.Enabled
-						distinguished_name = $user.DistinguishedName
-						source = "activedirectory_system"
-						object_guid = $user.ObjectGUID.ToString()
-					}
-				}
-				ConvertTo-Json $result -Depth 10
-			} catch {
-				$error = @{
-					success = $false
-					error = $_.Exception.Message
-				}
-				ConvertTo-Json $error
-			}
-		`, pageSize)
-
-	case "group":
-		psScript = fmt.Sprintf(`
-			try {
-				Import-Module ActiveDirectory -ErrorAction Stop
-				$groups = Get-ADGroup -Filter * -Properties SamAccountName,Name,Description,DistinguishedName,ObjectGUID,GroupScope,GroupCategory -ResultSetSize %d
-				$result = @{
-					success = $true
-					total_count = $groups.Count
-					groups = @()
-				}
-				foreach ($group in $groups) {
-					$result.groups += @{
-						id = $group.DistinguishedName
-						sam_account_name = $group.SamAccountName
-						display_name = $group.Name
-						description = $group.Description
-						distinguished_name = $group.DistinguishedName
-						source = "activedirectory_system"
-						object_guid = $group.ObjectGUID.ToString()
-						group_scope = $group.GroupScope
-						group_category = $group.GroupCategory
-					}
-				}
-				ConvertTo-Json $result -Depth 10
-			} catch {
-				$error = @{
-					success = $false
-					error = $_.Exception.Message
-				}
-				ConvertTo-Json $error
-			}
-		`, pageSize)
-
-	case "computer":
-		psScript = fmt.Sprintf(`
-			try {
-				Import-Module ActiveDirectory -ErrorAction Stop
-				$computers = Get-ADComputer -Filter * -Properties SamAccountName,Name,DistinguishedName,ObjectGUID,OperatingSystem,DNSHostName -ResultSetSize %d
-				$result = @{
-					success = $true
-					total_count = $computers.Count
-					users = @()  # Computers represented as users for interface compatibility
-				}
-				foreach ($computer in $computers) {
-					$result.users += @{
-						id = $computer.DistinguishedName
-						sam_account_name = $computer.SamAccountName
-						display_name = $computer.Name
-						distinguished_name = $computer.DistinguishedName
-						source = "activedirectory_system"
-						object_guid = $computer.ObjectGUID.ToString()
-						object_type = "computer"
-						operating_system = $computer.OperatingSystem
-						dns_host_name = $computer.DNSHostName
-					}
-				}
-				ConvertTo-Json $result -Depth 10
-			} catch {
-				$error = @{
-					success = $false
-					error = $_.Exception.Message
-				}
-				ConvertTo-Json $error
-			}
-		`, pageSize)
-
-	case "organizational_unit", "ou":
-		psScript = fmt.Sprintf(`
-			try {
-				Import-Module ActiveDirectory -ErrorAction Stop
-				$ous = Get-ADOrganizationalUnit -Filter * -Properties Name,DisplayName,Description,DistinguishedName,ObjectGUID,ManagedBy -ResultSetSize %d
-				$result = @{
-					success = $true
-					total_count = $ous.Count
-					ous = @()
-				}
-				foreach ($ou in $ous) {
-					$result.ous += @{
-						id = $ou.DistinguishedName
-						name = $ou.Name
-						display_name = $ou.DisplayName
-						description = $ou.Description
-						distinguished_name = $ou.DistinguishedName
-						source = "activedirectory_system"
-						object_guid = $ou.ObjectGUID.ToString()
-						managed_by = $ou.ManagedBy
-					}
-				}
-				ConvertTo-Json $result -Depth 10
-			} catch {
-				$error = @{
-					success = $false
-					error = $_.Exception.Message
-				}
-				ConvertTo-Json $error
-			}
-		`, pageSize)
-
-	default:
-		result.Success = false
-		result.Error = fmt.Sprintf("unsupported object type: %s", objectType)
-		result.ResponseTime = time.Since(startTime)
-		m.updateStats(false)
-		return result, nil
-	}
-
-	// Execute PowerShell script
-	output, err := m.executePowerShellWithSystemContext(ctx, psScript)
-	if err != nil {
-		result.Success = false
-		result.Error = fmt.Sprintf("PowerShell execution failed: %v", err)
-		result.ResponseTime = time.Since(startTime)
-		m.updateStats(false)
-		return result, nil
-	}
-
-	// Parse JSON response
-	var psResult map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &psResult); err != nil {
-		result.Success = false
-		result.Error = fmt.Sprintf("failed to parse PowerShell output: %v", err)
-		result.ResponseTime = time.Since(startTime)
-		m.updateStats(false)
-		return result, nil
-	}
-
-	// Check if operation succeeded
-	if success, ok := psResult["success"].(bool); !ok || !success {
-		result.Success = false
-		if errorMsg, ok := psResult["error"].(string); ok {
-			result.Error = errorMsg
-		}
-		result.ResponseTime = time.Since(startTime)
-		m.updateStats(false)
-		return result, nil
-	}
-
-	// Extract results
-	result.Success = true
-	result.ResponseTime = time.Since(startTime)
-
-	if totalCount, ok := psResult["total_count"].(float64); ok {
-		result.TotalCount = int(totalCount)
-	}
-
-	// Convert PowerShell objects to CFGMS directory objects
-	switch objectType {
-	case "user", "computer":
-		if users, ok := psResult["users"].([]interface{}); ok {
-			result.Users = make([]interfaces.DirectoryUser, len(users))
-			for i, userInterface := range users {
-				if userObj, ok := userInterface.(map[string]interface{}); ok {
-					user := m.convertPSObjectToDirectoryUser(userObj)
-					result.Users[i] = *user
-				}
-			}
-		}
-	case "group":
-		if groups, ok := psResult["groups"].([]interface{}); ok {
-			result.Groups = make([]interfaces.DirectoryGroup, len(groups))
-			for i, groupInterface := range groups {
-				if groupObj, ok := groupInterface.(map[string]interface{}); ok {
-					group := m.convertPSObjectToDirectoryGroup(groupObj)
-					result.Groups[i] = *group
-				}
-			}
-		}
-	case "organizational_unit", "ou":
-		if ous, ok := psResult["ous"].([]interface{}); ok {
-			result.OUs = make([]interfaces.OrganizationalUnit, len(ous))
-			for i, ouInterface := range ous {
-				if ouObj, ok := ouInterface.(map[string]interface{}); ok {
-					ou := m.convertPSObjectToOrganizationalUnit(ouObj)
-					result.OUs[i] = *ou
-				}
-			}
-		}
-	}
-
-	m.logger.Debug("Local AD list completed successfully",
-		"object_type", objectType,
-		"count", result.TotalCount,
-		"response_time", result.ResponseTime)
-
-	return result, nil
-}
-
-// collectDirectoryDNA collects comprehensive AD DNA data using system context
-func (m *activeDirectoryModule) collectDirectoryDNA(ctx context.Context) (modules.ConfigState, error) {
 	m.stats.Lock()
 	m.stats.dnaCollectionCount++
 	m.stats.lastDNACollection = time.Now()
 	m.stats.Unlock()
 
-	startTime := time.Now()
-
-	// PowerShell script to collect comprehensive AD DNA
-	psScript := `
-		try {
-			Import-Module ActiveDirectory -ErrorAction Stop
-			
-			# Get domain information
-			$domain = Get-ADDomain
-			$forest = Get-ADForest
-			$domainControllers = Get-ADDomainController -Filter *
-			
-			# Get user statistics
-			$totalUsers = (Get-ADUser -Filter *).Count
-			$enabledUsers = (Get-ADUser -Filter {Enabled -eq $true}).Count
-			$disabledUsers = $totalUsers - $enabledUsers
-			
-			# Get group statistics
-			$totalGroups = (Get-ADGroup -Filter *).Count
-			$securityGroups = (Get-ADGroup -Filter {GroupCategory -eq "Security"}).Count
-			$distributionGroups = $totalGroups - $securityGroups
-			
-			# Get computer statistics
-			$totalComputers = (Get-ADComputer -Filter *).Count
-			$enabledComputers = (Get-ADComputer -Filter {Enabled -eq $true}).Count
-			
-			# Get organizational units
-			$totalOUs = (Get-ADOrganizationalUnit -Filter *).Count
-			
-			# Get Group Policy Objects
-			$gpos = Get-GPO -All
-			$totalGPOs = $gpos.Count
-			
-			# Build DNA result
-			$dna = @{
-				success = $true
-				collection_time = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssZ")
-				domain_info = @{
-					domain_name = $domain.DNSRoot
-					netbios_name = $domain.NetBIOSName
-					domain_mode = $domain.DomainMode
-					forest_name = $forest.Name
-					forest_mode = $forest.ForestMode
-					schema_master = $forest.SchemaMaster
-					domain_naming_master = $forest.DomainNamingMaster
-					pdc_emulator = $domain.PDCEmulator
-					rid_master = $domain.RIDMaster
-					infrastructure_master = $domain.InfrastructureMaster
-				}
-				domain_controllers = @()
-				statistics = @{
-					total_users = $totalUsers
-					enabled_users = $enabledUsers
-					disabled_users = $disabledUsers
-					total_groups = $totalGroups
-					security_groups = $securityGroups
-					distribution_groups = $distributionGroups
-					total_computers = $totalComputers
-					enabled_computers = $enabledComputers
-					total_ous = $totalOUs
-					total_gpos = $totalGPOs
-				}
-				gpos = @()
-			}
-			
-			# Add domain controller information
-			foreach ($dc in $domainControllers) {
-				$dna.domain_controllers += @{
-					name = $dc.Name
-					hostname = $dc.HostName
-					ipv4_address = $dc.IPv4Address
-					site = $dc.Site
-					operating_system = $dc.OperatingSystem
-					is_global_catalog = $dc.IsGlobalCatalog
-					is_read_only = $dc.IsReadOnly
-				}
-			}
-			
-			# Add GPO information
-			foreach ($gpo in $gpos) {
-				$dna.gpos += @{
-					display_name = $gpo.DisplayName
-					id = $gpo.Id.ToString()
-					creation_time = $gpo.CreationTime.ToString("yyyy-MM-ddTHH:mm:ssZ")
-					modification_time = $gpo.ModificationTime.ToString("yyyy-MM-ddTHH:mm:ssZ")
-					user_version = $gpo.UserVersion
-					computer_version = $gpo.ComputerVersion
-				}
-			}
-			
-			ConvertTo-Json $dna -Depth 10
-		} catch {
-			$error = @{
-				success = $false
-				error = $_.Exception.Message
-			}
-			ConvertTo-Json $error
-		}
-	`
-
-	// Execute DNA collection script
-	output, err := m.executePowerShellWithSystemContext(ctx, psScript)
-	if err != nil {
-		return nil, fmt.Errorf("DNA collection failed: %w", err)
-	}
-
-	// Parse DNA result
-	var dnaResult map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &dnaResult); err != nil {
-		return nil, fmt.Errorf("failed to parse DNA collection output: %w", err)
-	}
-
-	if success, ok := dnaResult["success"].(bool); !ok || !success {
-		errorMsg := "unknown DNA collection error"
-		if err, ok := dnaResult["error"].(string); ok {
-			errorMsg = err
-		}
-		return nil, fmt.Errorf("DNA collection failed: %s", errorMsg)
-	}
-
-	// Create DNA result structure
-	dna := &ADDirectoryDNA{
-		CollectionTime: time.Now(),
-		Success:        true,
-		Source:         "activedirectory_system",
-		DNA:            dnaResult,
-	}
-
-	m.logger.Info("AD DNA collection completed successfully",
-		"collection_time", time.Since(startTime),
-		"total_users", m.extractStatInt(dnaResult, "statistics", "total_users"),
-		"total_groups", m.extractStatInt(dnaResult, "statistics", "total_groups"),
-		"total_computers", m.extractStatInt(dnaResult, "statistics", "total_computers"))
-
-	return dna, nil
+	return &inventoryState{objects: objects}, nil
 }
 
-// verifySystemAccess verifies that the module can access AD using system context
-func (m *activeDirectoryModule) verifySystemAccess(ctx context.Context) error {
-	// Simple test to verify AD module availability and system context
-	psScript := `
-		try {
-			Import-Module ActiveDirectory -ErrorAction Stop
-			$domain = Get-ADDomain -ErrorAction Stop
-			$result = @{
-				success = $true
-				domain = $domain.DNSRoot
-				access_level = "system_context"
-			}
-			ConvertTo-Json $result
-		} catch {
-			$error = @{
-				success = $false
-				error = $_.Exception.Message
-			}
-			ConvertTo-Json $error
+// objectAttrs builds an object's DNA attributes. It reports whether any
+// membership list was truncated.
+func objectAttrs(kind string, rec *readRecord) (map[string]interface{}, bool) {
+	memberOf, memberOfCut := boundedSortedIDs(rec.MemberOf)
+	memberOfCut = memberOfCut || rec.MemberOfTruncated
+
+	var attrs map[string]interface{}
+	cut := memberOfCut
+	switch kind {
+	case kindDirectoryUser:
+		attrs = map[string]interface{}{
+			"sam_account_name":    rec.SamAccountName,
+			"user_principal_name": rec.UserPrincipalName,
+			"display_name":        rec.DisplayName,
+			"mail":                rec.Mail,
+			"enabled":             rec.Enabled,
+			"distinguished_name":  rec.DistinguishedName,
+			"object_sid":          rec.ObjectSID,
+			"when_created":        rec.WhenCreated,
+			"directory_domain":    rec.DirectoryDomain,
+			"managed":             false,
+			"member_of":           memberOf,
 		}
-	`
-
-	output, err := m.executePowerShellWithSystemContext(ctx, psScript)
-	if err != nil {
-		return fmt.Errorf("system context verification failed: %w", err)
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		return fmt.Errorf("failed to parse verification result: %w", err)
-	}
-
-	if success, ok := result["success"].(bool); !ok || !success {
-		errorMsg := "unknown verification error"
-		if err, ok := result["error"].(string); ok {
-			errorMsg = err
+	default:
+		others, othersCut := boundedOtherMembers(rec.OtherMembers)
+		othersCut = othersCut || rec.OtherMembersTruncated
+		cut = cut || othersCut
+		attrs = map[string]interface{}{
+			"sam_account_name":   rec.SamAccountName,
+			"display_name":       rec.DisplayName,
+			"distinguished_name": rec.DistinguishedName,
+			"group_scope":        rec.GroupScope,
+			"group_category":     rec.GroupCategory,
+			"directory_domain":   rec.DirectoryDomain,
+			"managed":            false,
+			"member_of":          memberOf,
+			"other_members":      others,
 		}
-		return fmt.Errorf("system AD access verification failed: %s", errorMsg)
+		if othersCut {
+			attrs["other_members_truncated"] = true
+		}
 	}
-
-	m.logger.Debug("System AD access verified successfully",
-		"domain", result["domain"],
-		"access_level", result["access_level"])
-
-	return nil
+	if memberOfCut {
+		attrs["member_of_truncated"] = true
+	}
+	return attrs, cut
 }
 
-// executePowerShellWithSystemContext executes PowerShell with system context
-func (m *activeDirectoryModule) executePowerShellWithSystemContext(ctx context.Context, script string) (string, error) {
-	// Create PowerShell command that runs with current system context
-	// The steward should already be running as SYSTEM, so this inherits those permissions
-	// #nosec G204 -- callers use module-owned templates; the only interpolated
-	// values are validateObjectID's strict [A-Za-z0-9._@-] token or a decimal
-	// PageSize integer, so PowerShell metacharacters cannot reach -Command.
-	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
-
-	// Execute command
-	output, err := cmd.Output()
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("PowerShell script failed: %s", string(exitErr.Stderr))
+// boundedSortedIDs returns the valid objectGUIDs in ids, deduplicated and
+// sorted, cut to maxListEntries. It reports whether it cut the list.
+func boundedSortedIDs(ids []string) ([]string, bool) {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.ToLower(id)
+		if !objectGUIDPattern.MatchString(id) || seen[id] {
+			continue
 		}
-		return "", fmt.Errorf("failed to execute PowerShell: %w", err)
+		seen[id] = true
+		out = append(out, id)
 	}
-
-	return string(output), nil
+	sort.Strings(out)
+	if len(out) > maxListEntries {
+		return out[:maxListEntries], true
+	}
+	return out, false
 }
 
-// getDomainInfo gets basic domain information using system context
-func (m *activeDirectoryModule) getDomainInfo(ctx context.Context) (*DomainInfo, error) {
-	psScript := `
-		try {
-			Import-Module ActiveDirectory -ErrorAction Stop
-			$domain = Get-ADDomain
-			$forest = Get-ADForest
-			$dc = Get-ADDomainController -Discover
-			$result = @{
-				success = $true
-				domain = $domain.DNSRoot
-				domain_controller = $dc.HostName[0]
-				forest_root = $forest.Name
-				netbios_name = $domain.NetBIOSName
-			}
-			ConvertTo-Json $result
-		} catch {
-			$error = @{
-				success = $false
-				error = $_.Exception.Message
-			}
-			ConvertTo-Json $error
+// boundedOtherMembers returns members sorted by (type, id), deduplicated and
+// cut to maxListEntries, as a list of {type, id, name} maps. Unknown types are
+// reported as "other". It reports whether it cut the list.
+func boundedOtherMembers(members []otherMember) ([]interface{}, bool) {
+	seen := make(map[string]bool, len(members))
+	list := make([]otherMember, 0, len(members))
+	for _, om := range members {
+		om.ID = strings.ToLower(om.ID)
+		if !objectGUIDPattern.MatchString(om.ID) {
+			continue
 		}
-	`
-
-	output, err := m.executePowerShellWithSystemContext(ctx, psScript)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get domain info: %w", err)
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse domain info: %w", err)
-	}
-
-	if success, ok := result["success"].(bool); !ok || !success {
-		errorMsg := "unknown error"
-		if err, ok := result["error"].(string); ok {
-			errorMsg = err
+		if !otherMemberTypes[om.Type] {
+			om.Type = "other"
 		}
-		return nil, fmt.Errorf("domain info query failed: %s", errorMsg)
+		key := om.Type + "\x00" + om.ID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		list = append(list, om)
 	}
-
-	domainInfo := &DomainInfo{}
-	if domain, ok := result["domain"].(string); ok {
-		domainInfo.Domain = domain
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].Type != list[j].Type {
+			return list[i].Type < list[j].Type
+		}
+		return list[i].ID < list[j].ID
+	})
+	cut := false
+	if len(list) > maxListEntries {
+		list = list[:maxListEntries]
+		cut = true
 	}
-	if dc, ok := result["domain_controller"].(string); ok {
-		domainInfo.DomainController = dc
+	out := make([]interface{}, 0, len(list))
+	for _, om := range list {
+		out = append(out, map[string]interface{}{"type": om.Type, "id": om.ID, "name": om.Name})
 	}
-	if forest, ok := result["forest_root"].(string); ok {
-		domainInfo.ForestRoot = forest
-	}
-	if netbios, ok := result["netbios_name"].(string); ok {
-		domainInfo.NetBIOSName = netbios
-	}
-
-	return domainInfo, nil
+	return out, cut
 }
 
 // getHostname returns the current hostname
 func (m *activeDirectoryModule) getHostname() string {
-	cmd := exec.Command("hostname")
-	output, err := cmd.Output()
+	name, err := os.Hostname()
 	if err != nil {
 		return "unknown"
 	}
-	return strings.TrimSpace(string(output))
+	return name
 }
 
 // Helper methods for updating statistics
@@ -1189,221 +727,21 @@ func (m *activeDirectoryModule) updateStats(isRequest bool) {
 	}
 }
 
-// extractStatInt safely extracts integer statistics from nested maps
-func (m *activeDirectoryModule) extractStatInt(data map[string]interface{}, keys ...string) int {
-	current := data
-	for i, key := range keys {
-		if i == len(keys)-1 {
-			if val, ok := current[key].(float64); ok {
-				return int(val)
-			}
-			return 0
-		}
-		if next, ok := current[key].(map[string]interface{}); ok {
-			current = next
-		} else {
-			return 0
-		}
-	}
-	return 0
-}
-
 // GetCapabilities returns the capabilities of this system-context module
 func (m *activeDirectoryModule) GetCapabilities() map[string]interface{} {
 	return map[string]interface{}{
 		"supports_read":      true,
-		"supports_write":     true,
+		"supports_write":     false,
 		"supports_monitor":   false, // Not yet implemented
 		"supports_bulk":      true,
-		"object_types":       []string{"user", "group", "organizational_unit", "computer", "gpo", "group_policy", "domain_trust", "trust"},
+		"object_types":       []string{"user", "group"},
+		"inventory_kinds":    []string{kindDirectoryUser, kindDirectoryGroup},
 		"auth_methods":       []string{"system_context"},
 		"platforms":          []string{"windows"},
 		"requires_domain":    false, // Auto-discovers local domain
 		"supports_discovery": true,
 		"system_context":     true,
 		"credential_free":    true,
-		"advanced_features":  []string{"system_context_access", "dna_collection", "computer_objects", "group_policies", "domain_info"},
+		"advanced_features":  []string{"system_context_access", "per_object_inventory", "domain_info"},
 	}
-}
-
-// convertPSObjectToDirectoryUser converts PowerShell AD user object to CFGMS DirectoryUser
-func (m *activeDirectoryModule) convertPSObjectToDirectoryUser(psObj map[string]interface{}) *interfaces.DirectoryUser {
-	user := &interfaces.DirectoryUser{
-		Source: "activedirectory_system",
-	}
-
-	if id, ok := psObj["id"].(string); ok {
-		user.ID = id
-	}
-	if sam, ok := psObj["sam_account_name"].(string); ok {
-		user.SAMAccountName = sam
-	}
-	if upn, ok := psObj["user_principal_name"].(string); ok {
-		user.UserPrincipalName = upn
-	}
-	if displayName, ok := psObj["display_name"].(string); ok {
-		user.DisplayName = displayName
-	}
-	if email, ok := psObj["email_address"].(string); ok {
-		user.EmailAddress = email
-	}
-	if enabled, ok := psObj["account_enabled"].(bool); ok {
-		user.AccountEnabled = enabled
-	}
-	if dn, ok := psObj["distinguished_name"].(string); ok {
-		user.DistinguishedName = dn
-	}
-	if created, ok := psObj["when_created"].(string); ok {
-		if parsedTime, err := time.Parse("2006-01-02T15:04:05Z", created); err == nil {
-			user.Created = &parsedTime
-		}
-	}
-	if changed, ok := psObj["when_changed"].(string); ok {
-		if parsedTime, err := time.Parse("2006-01-02T15:04:05Z", changed); err == nil {
-			user.Modified = &parsedTime
-		}
-	}
-	if memberOf, ok := psObj["member_of"].([]interface{}); ok {
-		user.Groups = make([]string, len(memberOf))
-		for i, group := range memberOf {
-			if groupStr, ok := group.(string); ok {
-				user.Groups[i] = groupStr
-			}
-		}
-	}
-	if lastLogon, ok := psObj["last_logon_date"].(string); ok && lastLogon != "" {
-		if parsedTime, err := time.Parse("2006-01-02T15:04:05Z", lastLogon); err == nil {
-			user.LastLogon = &parsedTime
-		}
-	}
-
-	// Store AD-specific attributes in ProviderAttributes
-	if user.ProviderAttributes == nil {
-		user.ProviderAttributes = make(map[string]interface{})
-	}
-
-	if guid, ok := psObj["object_guid"].(string); ok {
-		user.ProviderAttributes["object_guid"] = guid
-	}
-	if objectType, ok := psObj["object_type"].(string); ok {
-		user.ProviderAttributes["object_type"] = objectType
-	} else {
-		user.ProviderAttributes["object_type"] = "user"
-	}
-	if os, ok := psObj["operating_system"].(string); ok {
-		user.ProviderAttributes["operating_system"] = os
-	}
-	if osVersion, ok := psObj["operating_system_version"].(string); ok {
-		user.ProviderAttributes["operating_system_version"] = osVersion
-	}
-	if dnsHost, ok := psObj["dns_host_name"].(string); ok {
-		user.ProviderAttributes["dns_host_name"] = dnsHost
-	}
-	if spns, ok := psObj["service_principal_names"].([]interface{}); ok {
-		user.ProviderAttributes["service_principal_names"] = spns
-	}
-
-	return user
-}
-
-// convertPSObjectToDirectoryGroup converts PowerShell AD group object to CFGMS DirectoryGroup
-func (m *activeDirectoryModule) convertPSObjectToDirectoryGroup(psObj map[string]interface{}) *interfaces.DirectoryGroup {
-	group := &interfaces.DirectoryGroup{
-		Source: "activedirectory_system",
-	}
-
-	if id, ok := psObj["id"].(string); ok {
-		group.ID = id
-	}
-	if displayName, ok := psObj["display_name"].(string); ok {
-		group.DisplayName = displayName
-		group.Name = displayName // Use display name as name
-	}
-	if description, ok := psObj["description"].(string); ok {
-		group.Description = description
-	}
-	if dn, ok := psObj["distinguished_name"].(string); ok {
-		group.DistinguishedName = dn
-	}
-	if members, ok := psObj["members"].([]interface{}); ok {
-		group.Members = make([]string, len(members))
-		for i, member := range members {
-			if memberStr, ok := member.(string); ok {
-				group.Members[i] = memberStr
-			}
-		}
-	}
-
-	// Store AD-specific attributes in ProviderAttributes
-	if group.ProviderAttributes == nil {
-		group.ProviderAttributes = make(map[string]interface{})
-	}
-
-	if sam, ok := psObj["sam_account_name"].(string); ok {
-		group.ProviderAttributes["sam_account_name"] = sam
-	}
-	if guid, ok := psObj["object_guid"].(string); ok {
-		group.ProviderAttributes["object_guid"] = guid
-	}
-	if scope, ok := psObj["group_scope"].(string); ok {
-		group.ProviderAttributes["group_scope"] = scope
-		// Map to normalized GroupScope
-		switch strings.ToLower(scope) {
-		case "domainlocal":
-			group.GroupScope = interfaces.GroupScopeDomainLocal
-		case "global":
-			group.GroupScope = interfaces.GroupScopeGlobal
-		case "universal":
-			group.GroupScope = interfaces.GroupScopeUniversal
-		}
-	}
-	if category, ok := psObj["group_category"].(string); ok {
-		group.ProviderAttributes["group_category"] = category
-		// Map to normalized GroupType
-		switch strings.ToLower(category) {
-		case "security":
-			group.GroupType = interfaces.GroupTypeSecurity
-		case "distribution":
-			group.GroupType = interfaces.GroupTypeDistribution
-		}
-	}
-
-	return group
-}
-
-// convertPSObjectToOrganizationalUnit converts PowerShell AD OU object to CFGMS OrganizationalUnit
-func (m *activeDirectoryModule) convertPSObjectToOrganizationalUnit(psObj map[string]interface{}) *interfaces.OrganizationalUnit {
-	ou := &interfaces.OrganizationalUnit{
-		Source: "activedirectory_system",
-	}
-
-	if id, ok := psObj["id"].(string); ok {
-		ou.ID = id
-	}
-	if name, ok := psObj["name"].(string); ok {
-		ou.Name = name
-	}
-	if displayName, ok := psObj["display_name"].(string); ok {
-		ou.DisplayName = displayName
-	}
-	if description, ok := psObj["description"].(string); ok {
-		ou.Description = description
-	}
-	if dn, ok := psObj["distinguished_name"].(string); ok {
-		ou.DistinguishedName = dn
-	}
-
-	// Store AD-specific attributes in ProviderAttributes
-	if ou.ProviderAttributes == nil {
-		ou.ProviderAttributes = make(map[string]interface{})
-	}
-
-	if guid, ok := psObj["object_guid"].(string); ok {
-		ou.ProviderAttributes["object_guid"] = guid
-	}
-	if managedBy, ok := psObj["managed_by"].(string); ok {
-		ou.ProviderAttributes["managed_by"] = managedBy
-	}
-
-	return ou
 }

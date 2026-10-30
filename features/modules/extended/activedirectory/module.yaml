@@ -14,20 +14,30 @@ interfaces:
   - Set
   - Test
 
-# Platform support - Windows only for system context APIs
+# Platform support - Windows only
 platforms:
-  - windows  # Required - uses Windows ADSI/DirectoryServices APIs
+  - windows  # Required - reads the directory through Windows PowerShell's ActiveDirectory cmdlets
 
 # Resource type this module manages
 resource_types:
   - activedirectory_local
   - activedirectory_system
 
-# Required permissions
+# Per-object directory inventory. Get("directory_user") and
+# Get("directory_group") return one object per user / group under the reserved
+# __cfgms_objects key; the steward emits one DNA fragment per object. Both IDs
+# are reserved: a declared resource may not use them.
+owns:
+  - kind: directory_user
+    per_object: true
+  - kind: directory_group
+    per_object: true
+
+# Required permissions. The steward runs as SYSTEM on the domain controller,
+# which can read the directory without further rights.
 permissions:
   windows:
     - "Log on as a service"
-    - "Act as part of operating system" # For system context access
     - "Local system account context"
 
 # Configuration schema - minimal due to system context
@@ -44,7 +54,7 @@ configuration:
 
 # Default configuration values
 defaults:
-  page_size: 100
+  page_size: 1000
   request_timeout: "30s"
   operation_type: "read"
   enable_dna_collection: true
@@ -53,27 +63,13 @@ defaults:
 supported_object_types:
   - user
   - group
-  - organizational_unit
-  - computer
-  - gpo
-  - group_policy
-  - domain_trust
-  - trust
 
-# Supported operations
+# Supported operations. Write operations are added only as they are
+# implemented. Besides status, Get serves the inventory IDs directory_user and
+# directory_group (see owns).
 supported_operations:
   read:
-    - query
-    - list
     - status
-    - dna_collection
-  write:
-    - create_user
-    - update_user
-    - delete_user
-    - create_group
-    - update_group
-    - delete_group
 
 # Health checks
 health_checks:
@@ -92,20 +88,37 @@ monitoring:
     - "ad_local_errors_total"
     - "ad_dna_collection_status"
 
-# Bounded, inventory-worthy domain (local AD objects via ADSI/DirectoryServices).
-# Windows-only — the in-process ADSI API is a Windows-exclusive interface.
+# Activate the inventory observe pass on exactly one domain controller per
+# domain: the holder of the PDC-emulator role (steward DNA fact
+# ad_pdc_emulator).
 observe_when:
-  - fact: os
-    equals: windows
+  - fact: ad_pdc_emulator
+    equals: "true"
+
+behavioral_envelope:
+  shells_out_to:
+    - "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" # absolute path under %SystemRoot%, never PATH; runs the fixed, embedded read script with -File
+  reads_paths:
+    - "%ProgramData%\\cfgms\\activedirectory-scripts" # staged read script, read back for its hash check before every run
+  writes_paths:
+    - "%ProgramData%\\cfgms\\activedirectory-scripts" # the embedded read script is staged here (admin-only directory)
+  lolbin_usage_justification: |
+    The module reads Active Directory through the ActiveDirectory PowerShell
+    cmdlets, which have no in-process Go equivalent. Every run is
+    `powershell.exe -NoProfile -NonInteractive -File <staged read script>`: the
+    script is a fixed file embedded in the steward binary, staged in an
+    admin-only directory (security.EnsureAdminOnlyDir), and its SHA-256 is
+    compared with the embedded constant before every run; a mismatch refuses to
+    run. No inline command string, encoded command or runtime script composition
+    is used, and the execution policy is not changed. The operation and its
+    parameters go in
+    as one JSON document on stdin, validated by the script and used only as
+    typed cmdlet parameters; nothing user-derived reaches argv or script text.
+    Hosts that enforce the AllSigned execution policy need the script
+    Authenticode-signed, which is a release-signing concern.
 
 # Security considerations
 security:
   sensitive_fields: []  # No stored credentials
   encryption_required: []  # No credential storage
-  audit_operations:
-    - create_user
-    - update_user
-    - delete_user
-    - create_group
-    - update_group
-    - delete_group
+  audit_operations: []  # No write operations are implemented
