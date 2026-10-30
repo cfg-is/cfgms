@@ -221,7 +221,8 @@ func TestScriptExecutorNoBannedPatterns(t *testing.T) {
 					Shell:   tc.shell,
 					Timeout: 5 * time.Second,
 				},
-				logger: logging.NewNoopLogger(),
+				logger:      logging.NewNoopLogger(),
+				stagingBase: newTestStagingBase(t),
 			}
 
 			cmd, cleanup, err := e.buildCommand(context.Background())

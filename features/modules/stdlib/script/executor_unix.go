@@ -168,3 +168,9 @@ func applyExecutionContext(ctx context.Context, config *ScriptConfig, cmd *exec.
 
 	return newCmd, user, noCleanup, nil
 }
+
+// platformScriptStagingBase returns the system temporary directory: Unix
+// staging is unchanged.
+func platformScriptStagingBase() string {
+	return os.TempDir()
+}

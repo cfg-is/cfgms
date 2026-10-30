@@ -44,7 +44,7 @@ func TestBuildWindowsCommand_ShellTaxonomy(t *testing.T) {
 				Content: "echo hi",
 				Shell:   tc.shell,
 				Timeout: 5 * time.Second,
-			}}
+			}, stagingBase: newTestStagingBase(t)}
 
 			cmd, cleanup, err := e.buildWindowsCommand(context.Background())
 			if cleanup != nil {
@@ -110,7 +110,7 @@ func TestExecutorHandlesEveryControllerAllowedShell(t *testing.T) {
 			require.True(t, windowsShells[sh] || unixShells[sh],
 				"controller-allowed shell %q must be valid on at least one platform", sh)
 
-			e := &Executor{config: &ScriptConfig{Content: "echo hi", Shell: sh, Timeout: 5 * time.Second}}
+			e := &Executor{config: &ScriptConfig{Content: "echo hi", Shell: sh, Timeout: 5 * time.Second}, stagingBase: newTestStagingBase(t)}
 
 			if windowsShells[sh] {
 				_, cleanup, err := e.buildWindowsCommand(context.Background())
