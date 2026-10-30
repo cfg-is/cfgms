@@ -7,6 +7,7 @@ package systemlog
 
 import (
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -20,7 +21,11 @@ import (
 // listen starts a real unix datagram listener standing in for /dev/log.
 func listen(t *testing.T) (*net.UnixConn, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "log.sock")
+	// macOS limits a unix socket path to 104 bytes; t.TempDir() is too long there.
+	dir, err := os.MkdirTemp("/tmp", "sl")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "log.sock")
 	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
