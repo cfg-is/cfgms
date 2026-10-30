@@ -144,3 +144,6 @@ packages:
   # features/controller/server.Server directly, matching
   # cmd/controller/main.go's own wiring, and all four packages are gone from
   # the tree.
+
+  - path: features/controller/directory
+    reason: "Directory membership store and change log (Issue #5553). Its callers are the AD fragment ingest wiring in features/controller/server (Issue #5554) and the REST/CLI read surfaces (Issues #5557, #5558); remove this entry when #5554 imports it."
