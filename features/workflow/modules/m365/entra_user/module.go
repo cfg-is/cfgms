@@ -89,10 +89,8 @@ func (c *EntraUserConfig) AsMap() map[string]interface{} {
 		passwordMap := map[string]interface{}{
 			"force_change_password_next_signin": c.PasswordProfile.ForceChangePasswordNextSignIn,
 		}
-		// Include password if set (needed for user creation)
-		if c.PasswordProfile.Password != "" {
-			passwordMap["password"] = c.PasswordProfile.Password
-		}
+		// The password is deliberately omitted: AsMap output flows into shared
+		// workflow variables. Set reads it from the typed PasswordProfile.
 		result["password_profile"] = passwordMap
 	}
 
@@ -273,6 +271,14 @@ func (m *entraUserModule) Set(ctx context.Context, resourceID string, config mod
 		if password, ok := passwordProfile["password"].(string); ok {
 			userConfig.PasswordProfile.Password = password
 		}
+	}
+
+	// A typed config never carries its password through AsMap; take it directly.
+	if typed, ok := config.(*EntraUserConfig); ok && typed.PasswordProfile != nil {
+		if userConfig.PasswordProfile == nil {
+			userConfig.PasswordProfile = &PasswordProfile{}
+		}
+		userConfig.PasswordProfile.Password = typed.PasswordProfile.Password
 	}
 
 	if forceChange, ok := configMap["force_change_password"].(bool); ok {
