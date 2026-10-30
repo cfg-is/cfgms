@@ -321,6 +321,42 @@ case "$STDOUT$STDERR" in
 esac
 rm -rf "$repo"
 
+# --- 9. In a git checkout, an untracked package is ignored (Issue #5603) ---
+#        The fixture is committed; a later untracked .go file in a new
+#        package dir is unreachable but must not be reported.
+repo="$(make_fixture)"
+write_allowlist "$repo/allow.yaml" \
+    "deadparent" "chaina" "chainb" "chainc"
+(
+    cd "$repo" && git init -q . \
+        && git add go.mod cmd live deadparent chaina chainb chainc testsupport allow.yaml \
+        && git -c user.name=t -c user.email=t@example.test commit -q -m fixture
+) >/dev/null 2>&1
+mkdir -p "$repo/stray"
+cat >"$repo/stray/stray.go" <<'EOF'
+package stray
+
+func Stray() {}
+EOF
+run_checker "$repo" "allow.yaml"
+if [ "$RC" -eq 0 ]; then
+    pass "untracked package does not fail the gate in a git checkout"
+else
+    fail "untracked package must be ignored (rc=$RC, stdout: $STDOUT, stderr: $STDERR)"
+fi
+case "$STDOUT$STDERR" in
+    *"fixture.test/app/stray"*) fail "untracked package must not be named (stdout: $STDOUT, stderr: $STDERR)" ;;
+    *) pass "untracked package is absent from every bucket" ;;
+esac
+(cd "$repo" && git add stray/stray.go) >/dev/null 2>&1
+run_checker "$repo" "allow.yaml"
+if [ "$RC" -eq 1 ]; then
+    pass "the same package is reported once it is tracked"
+else
+    fail "tracked dead package must fail the gate (rc=$RC, stdout: $STDOUT, stderr: $STDERR)"
+fi
+rm -rf "$repo"
+
 echo ""
 echo "Passed: $PASS  Failed: $FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
