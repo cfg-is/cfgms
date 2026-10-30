@@ -142,6 +142,9 @@ type ProfileVars struct {
 	// VALUES referenced via {{ secret "key" }} are resolved separately from the
 	// SecretStore at render time.
 	EnrollToken string
+	// EnrollTokenFile is the guest path at which the installer reads the token
+	// (install --regtoken-file). Prefer it over EnrollToken in new profiles.
+	EnrollTokenFile string
 	// CorrelationID ties the rendered answer file back to the VM's provisioning
 	// record (ADR-009 §8). The controller-side completion reconciler (#2050)
 	// matches a registered steward's mTLS CN against this value to flip the
@@ -236,25 +239,27 @@ func (r *ProfileRenderer) Render(ctx context.Context, profile *UnattendProfile, 
 	}
 
 	data := struct {
-		VMName         string
-		OSFamily       string
-		EnrollToken    string
-		CorrelationID  string
-		ProductEdition string
-		BundleURL      string
-		CAFingerprint  string
-		AdminPassword  string
-		DebugSSHKey    string
+		VMName          string
+		OSFamily        string
+		EnrollToken     string
+		EnrollTokenFile string
+		CorrelationID   string
+		ProductEdition  string
+		BundleURL       string
+		CAFingerprint   string
+		AdminPassword   string
+		DebugSSHKey     string
 	}{
-		VMName:         vars.VMName,
-		OSFamily:       vars.OSFamily,
-		EnrollToken:    vars.EnrollToken,
-		CorrelationID:  vars.CorrelationID,
-		ProductEdition: vars.ProductEdition,
-		BundleURL:      vars.BundleURL,
-		CAFingerprint:  vars.CAFingerprint,
-		AdminPassword:  vars.AdminPassword,
-		DebugSSHKey:    vars.DebugSSHKey,
+		VMName:          vars.VMName,
+		OSFamily:        vars.OSFamily,
+		EnrollToken:     vars.EnrollToken,
+		EnrollTokenFile: vars.EnrollTokenFile,
+		CorrelationID:   vars.CorrelationID,
+		ProductEdition:  vars.ProductEdition,
+		BundleURL:       vars.BundleURL,
+		CAFingerprint:   vars.CAFingerprint,
+		AdminPassword:   vars.AdminPassword,
+		DebugSSHKey:     vars.DebugSSHKey,
 	}
 
 	var buf bytes.Buffer
@@ -292,6 +297,7 @@ func validateProfileVarsNoControlChars(v ProfileVars) error {
 		{"VMName", v.VMName},
 		{"OSFamily", v.OSFamily},
 		{"EnrollToken", v.EnrollToken},
+		{"EnrollTokenFile", v.EnrollTokenFile},
 		{"CorrelationID", v.CorrelationID},
 		{"ProductEdition", v.ProductEdition},
 		{"BundleURL", v.BundleURL},

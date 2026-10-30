@@ -62,14 +62,14 @@ func randomAdminPassword() (string, error) {
 //   - {{ .AdminPassword }}  per-VM random Administrator password (generated at
 //     render time) used only for the one-shot AutoLogon that runs enrollment;
 //     never persisted or surfaced
-//   - {{ .EnrollToken }}    tenant join token (controller-supplied via config,
+//   - {{ .EnrollToken }}    tenant join token (prefer {{ .EnrollTokenFile }}) (controller-supplied via config,
 //     ADR-010 §2 — NOT a SecretStore lookup; the #2077 fix)
 //   - {{ .CAFingerprint }}  controller CA SHA-256 for guest-side TOFU
 //
 // Enrollment runs first-boot via <FirstLogonCommands>: an AutoLogon of the local
 // Administrator triggers a single cmd.exe /c command that locates the FAT32
 // CFGMS_SEED volume (staged with cfgms-steward.exe + controller-ca.crt next to
-// autounattend.xml) and runs `cfgms-steward install --regtoken … --controller-ca …
+// autounattend.xml) and runs `cfgms-steward install --regtoken-file … --controller-ca …
 // --fingerprint …`, which self-copies the binary to the platform path and
 // registers as a service. The steward's controller URL is baked in at build
 // time (ldflags). A fixed argument list with declared paths — no iex /
@@ -188,7 +188,7 @@ const autounattendTemplate = `<?xml version="1.0" encoding="utf-8"?>
         <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
           <Order>1</Order>
           <Description>Install and enroll the CFGMS steward from the seed volume</Description>
-          <CommandLine>cmd.exe /c for %i in (D E F G H I J K) do @if exist "%i:\cfgms-steward.exe" "%i:\cfgms-steward.exe" install --regtoken "{{ .EnrollToken }}" --controller-ca "%i:\controller-ca.crt" --fingerprint "{{ .CAFingerprint }}"</CommandLine>
+          <CommandLine>cmd.exe /c for %i in (D E F G H I J K) do @if exist "%i:\cfgms-steward.exe" (copy /y "%i:\regtoken" "{{ .EnrollTokenFile }}" &gt;nul &amp; icacls "{{ .EnrollTokenFile }}" /inheritance:r /grant:r "*S-1-5-18:(F)" "*S-1-5-32-544:(F)" &gt;nul &amp; "%i:\cfgms-steward.exe" install --regtoken-file "{{ .EnrollTokenFile }}" --controller-ca "%i:\controller-ca.crt" --fingerprint "{{ .CAFingerprint }}" &amp; del /f /q "{{ .EnrollTokenFile }}")</CommandLine>
         </SynchronousCommand>
       </FirstLogonCommands>
     </component>

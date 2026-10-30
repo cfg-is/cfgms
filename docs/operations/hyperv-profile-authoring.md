@@ -93,7 +93,8 @@ provision time — never stored in the profile):
 | `{{ .OSFamily }}` | The installer family (`linux` or `windows`). |
 | `{{ .CorrelationID }}` | The correlation identity baked into the answer file. The controller-side completion reconciler matches a registered steward's mTLS CN against this value to flip the provisioning record to `ready`. Use it as the guest hostname / enrollment label. |
 | `{{ .BundleURL }}` | The enrollment-bundle URL from the profile's `enroll.bundle_url`. |
-| `{{ .EnrollToken }}` | The tenant join token. The controller supplies it to the Hyper-V steward through config sync as the `hyperv` module's `enroll_token` config value (ADR-010 §2). Both built-in profiles pass it to `cfgms-steward install --regtoken`. Empty when the module has no `enroll_token`. |
+| `{{ .EnrollToken }}` | The tenant join token. The controller supplies it to the Hyper-V steward through config sync as the `hyperv` module's `enroll_token` config value (ADR-010 §2). Still available to existing custom profiles, but not recommended: rendering it puts the token in the answer file and on the installer command line. Prefer `{{ .EnrollTokenFile }}`. Empty when the module has no `enroll_token`. |
+| `{{ .EnrollTokenFile }}` | The guest path at which the installer reads the token: `%SystemRoot%\Temp\cfgms-regtoken` for Windows, `/root/.cfgms-regtoken` for Linux. The token is written to a `regtoken` file on the seed volume; the first-boot command copies it to this path, restricts it to admin-only, runs `cfgms-steward install --regtoken-file {{ .EnrollTokenFile }}`, then removes it. All built-in profiles use this form. |
 | `{{ .CAFingerprint }}` | The controller CA's SHA-256 fingerprint (hex), from the `hyperv` module's `enroll_ca_fingerprint` config value. Passed to `cfgms-steward install --fingerprint`. Not a secret. Empty when not applicable. |
 | `{{ .AdminPassword }}` | A per-VM random local password generated at render time. Windows uses it for the one-shot AutoLogon that runs enrollment; Linux uses it for the local `cfgms` user. It is never persisted or surfaced. |
 | `{{ .ProductEdition }}` | Windows only. The Windows Server image/edition name selected in the autounattend image-install step. Ignored by Linux profiles. |
@@ -156,7 +157,13 @@ template: |
   d-i preseed/late_command string \
     in-target wget -q {{ .BundleURL }} -O /tmp/cfgms-steward.deb ; \
     in-target dpkg -i /tmp/cfgms-steward.deb ; \
-    in-target cfgms-steward install --regtoken {{ .EnrollToken }}
+    mkdir -p /mnt/cfgms-seed ; \
+    mount -t vfat -o ro /dev/disk/by-label/CFGMS_SEED /mnt/cfgms-seed ; \
+    cp /mnt/cfgms-seed/regtoken /target{{ .EnrollTokenFile }} ; \
+    chmod 0600 /target{{ .EnrollTokenFile }} ; \
+    umount /mnt/cfgms-seed ; \
+    in-target cfgms-steward install --regtoken-file {{ .EnrollTokenFile }} ; \
+    rm -f /target{{ .EnrollTokenFile }}
 ```
 
 Store it with `cfg hyperv profile create`:
@@ -309,13 +316,22 @@ There are two ways a profile pulls a secret:
    `{{ secret "ppkg-path-key" }}`.
 2. **`enroll.registration_token_secret_key`** — profile metadata naming the
    secrets-provider key for the registration token. The built-in profiles do not
-   read it: they take the token from `{{ .EnrollToken }}` (below).
+   read it: they install from the token file at `{{ .EnrollTokenFile }}` (below).
 
 The tenant join token itself is **not** a `{{ secret }}` lookup. ADR-010 §2
 routes it through the existing controller-to-steward config sync: the controller
 sets the `hyperv` module's `enroll_token` config value (and, for a private CA,
 `enroll_ca_fingerprint`), and the renderer exposes them as `{{ .EnrollToken }}`
 and `{{ .CAFingerprint }}`. Mint the token with `cfg token create`.
+
+The token reaches the guest as a file, not as text in the answer file: seed
+rendering writes it to `regtoken` at the root of the seed volume (the
+`CFGMS_SEED` VHDX, the `CIDATA` VHDX, or the Windows answer ISO), and the
+first-boot command copies it to `{{ .EnrollTokenFile }}`, restricts it to
+root/admin, installs with `--regtoken-file`, and removes it. The steward
+refuses a token file that is not root/admin-only, which is why the installer
+does not read it straight off the seed. `{{ .EnrollToken }}` still resolves for
+existing custom profiles; prefer `{{ .EnrollTokenFile }}` in new ones.
 
 Resolution flow:
 

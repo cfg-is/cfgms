@@ -617,7 +617,8 @@ func TestProvision_CloudInitUserDataRenderedToSeed(t *testing.T) {
 	assert.Contains(t, userData, "cfgms-steward", "user-data must install the steward")
 	assert.Contains(t, userData, "/opt/cfgms-steward-launcher", "user-data must stage the launcher for a launcher-managed install")
 	assert.Contains(t, userData, "install", "user-data must run the steward install command")
-	assert.Contains(t, userData, "reg-token-stub-value", "controller-supplied token must be rendered into user-data")
+	assert.Contains(t, userData, "--regtoken-file", "user-data must install with the token file")
+	assert.NotContains(t, userData, "reg-token-stub-value", "token value must not be rendered into user-data")
 	assert.Contains(t, userData, "abc123fingerprint", "CA fingerprint must be rendered into user-data")
 	assert.Contains(t, userData, "stw-01", "CorrelationID must appear in the user-data")
 	// runcmd must be list/exec form (argv arrays), never shell-string composition.
@@ -751,7 +752,8 @@ func TestProvision_RealPreseedRenderedToSeed(t *testing.T) {
 	require.NotEmpty(t, content, "preseed content must be present in the copy args")
 	assert.NotContains(t, content, "placeholder preseed", "linux path must render the REAL preseed, not the placeholder")
 	assert.Contains(t, content, "d-i partman", "rendered preseed must carry partitioning directives")
-	assert.Contains(t, content, "reg-token-stub-value", "registration token secret must be resolved into the preseed")
+	assert.Contains(t, content, "--regtoken-file", "preseed must install with the token file")
+	assert.NotContains(t, content, "reg-token-stub-value", "token value must not be rendered into the preseed")
 	assert.Contains(t, content, "stw-01", "CorrelationID must appear in the preseed")
 	// The per-VM admin password is random data, not code: a generated value can
 	// contain "iex"/"eval" as a substring. Redact it before scanning so the
@@ -1345,6 +1347,46 @@ func TestProvisionVM_EnrollSource_ContentRejected(t *testing.T) {
 			assert.Contains(t, err.Error(), strings.Fields(name)[0])
 			assert.NotContains(t, err.Error(), "secret")
 			requireNoSeedCopy(t, transport)
+		})
+	}
+}
+
+// TestProvisionVM_TokenTravelsAsSeedParam asserts the enrollment token reaches
+// the seed media only as the typed TokenContent parameter of the answer-ISO /
+// seed-copy calls, and never leaks into any other arg (answer content included).
+func TestProvisionVM_TokenTravelsAsSeedParam(t *testing.T) {
+	const token = "reg-token-stub-value"
+	cases := []struct {
+		name  string
+		cfg   func() map[string]interface{}
+		psCmd string
+		setup bool
+	}{
+		{"windows", func() map[string]interface{} { return sourceVMConfigMap(2, "windows") }, psBuildAnswerIso, false},
+		{"linux-preseed", func() map[string]interface{} { return sourceVMConfigMap(2, "linux") }, psCopyToSeedVHD, false},
+		{"linux-cloud-init", func() map[string]interface{} { return cloudInitVMConfigMap(2) }, psCopyToSeedVHD, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := &testPSTransport{perCallOutputs: []string{`{"found":false}`}}
+			m := provisionModuleWithTransport(t, transport)
+			if tc.setup {
+				setEnrollAssets(t, m)
+			}
+			require.NoError(t, m.Set(context.Background(), "vm:stw-01", rawConfigState{m: tc.cfg()}))
+
+			transport.mu.Lock()
+			calls := callsContaining(transport.calls, tc.psCmd)
+			transport.mu.Unlock()
+			require.Len(t, calls, 1)
+
+			assert.Equal(t, token, calls[0].named["TokenContent"])
+			for k, v := range calls[0].named {
+				if k == "TokenContent" {
+					continue
+				}
+				assert.NotContains(t, v, token, "token must not leak into arg %q", k)
+			}
 		})
 	}
 }

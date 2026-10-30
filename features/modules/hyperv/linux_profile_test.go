@@ -26,12 +26,13 @@ func preseedTestStore() *inlineSecretStore {
 func TestLinuxPreseed_TemplateRendersValidSyntax(t *testing.T) {
 	profile := defaultLinuxProfile()
 	out, err := NewProfileRenderer().Render(context.Background(), profile, ProfileVars{
-		VMName:        "stw-lin-01",
-		OSFamily:      "linux",
-		CorrelationID: "stw-lin-01",
-		EnrollToken:   "reg-token-stub-value",
-		AdminPassword: "Aa3-Bb4-Cc5-Dd6-Ee7",
-		BundleURL:     profile.Enroll.BundleURL,
+		VMName:          "stw-lin-01",
+		OSFamily:        "linux",
+		CorrelationID:   "stw-lin-01",
+		EnrollToken:     "reg-token-stub-value",
+		EnrollTokenFile: "/root/.cfgms-regtoken",
+		AdminPassword:   "Aa3-Bb4-Cc5-Dd6-Ee7",
+		BundleURL:       profile.Enroll.BundleURL,
 	}, preseedTestStore())
 	require.NoError(t, err, "preseed template must render without errors")
 
@@ -47,8 +48,9 @@ func TestLinuxPreseed_TemplateRendersValidSyntax(t *testing.T) {
 	}
 
 	// The controller-supplied join token lands in the install command.
-	assert.Contains(t, rendered, "install --regtoken reg-token-stub-value",
-		"join token must be substituted into the real registration command")
+	assert.Contains(t, rendered, "install --regtoken-file /root/.cfgms-regtoken",
+		"token file path must be substituted into the real registration command")
+	assert.NotContains(t, rendered, "reg-token-stub-value", "the token value must not be rendered")
 	assert.NotContains(t, rendered, "cfgms-steward enroll",
 		"the non-existent 'enroll' subcommand must not appear")
 }

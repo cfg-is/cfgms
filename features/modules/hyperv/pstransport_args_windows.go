@@ -123,7 +123,7 @@ var psDispatchTable = map[string]psVerbSpec{
 	// path (PS defaults), present for the cloud-init CIDATA seed.
 	psCopyToSeedVHD: {"CopyToSeedVHD", psModeFresh, []psParamSpec{
 		psStr("SeedPath"), psStr("FileName"), psStr("Content"),
-		psOptStr("Label"), psOptStr("FileName2"), psOptStr("Content2"), psOptStr("StewardDest"),
+		psOptStr("Label"), psOptStr("FileName2"), psOptStr("Content2"), psOptStr("TokenContent"), psOptStr("StewardDest"),
 		psOptStr("LauncherSrc"), psOptStr("LauncherDest"),
 		psStr("StewardSrc"), psStr("CASrc"),
 	}},
@@ -136,7 +136,7 @@ var psDispatchTable = map[string]psVerbSpec{
 	psSetDVDFirstBoot:             {"SetDVDFirstBoot", psModeFresh, []psParamSpec{psStr("Name"), psStr("ISOPath")}},
 	// Fresh process: IMAPI2 COM + file I/O; heavy, must not run in the persistent host.
 	psBuildAnswerIso: {"BuildAnswerIso", psModeFresh, []psParamSpec{
-		psStr("IsoPath"), psStr("FileName"), psStr("Content"), psStr("StewardSrc"), psStr("CASrc"),
+		psStr("IsoPath"), psStr("FileName"), psStr("Content"), psOptStr("TokenContent"), psStr("StewardSrc"), psStr("CASrc"),
 	}},
 	// Fresh process: blocks ~40s driving the VM keyboard.
 	psBootKeypress: {"BootKeypress", psModeFresh, []psParamSpec{psStr("Name")}},

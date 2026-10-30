@@ -509,7 +509,8 @@ tool added to the host):
    controller CA) is attached as a data disk. cloud-init **auto-detects the
    `CIDATA` volume by label on first boot — no kernel command line, no boot-media
    repack.** Its `user-data` `runcmd` (list/exec form only — no shell-string
-   composition) runs `cfgms-steward install --regtoken … --controller-ca … --fingerprint
+   composition) copies the `regtoken` file from the seed volume to a root-only path and runs
+   `cfgms-steward install --regtoken-file … --controller-ca … --fingerprint
    …`, which on a live system stages the binary (launcher-managed), writes the
    systemd unit, and starts enrollment.
 3. The seed is detached at `finalizing`; the OS disk is the first boot device.
