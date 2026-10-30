@@ -1,4 +1,4 @@
-.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-rest test-go-group-macos-api test-go-group-macos-providers test-go-group-macos-controller test-go-group-macos-steward test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
+.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-rest test-go-group-macos-api test-go-group-macos-providers test-go-group-macos-controller test-go-group-macos-steward test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection complexity-report clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -2150,6 +2150,14 @@ lint:
 # paths as args (the pre-commit hook does this) to limit scope to staged files.
 lint-log-injection:
 	@go run ./scripts/lint-log-injection $(LINT_LOG_FILES)
+
+# Complexity report (report-only, no gate). The metric file is written on every
+# run, pass or fail. Regenerate the committed inventory with:
+#   make complexity-report COMPLEXITY_OUT=scripts/complexity/baselines/inventory.json COMPLEXITY_FLAGS=-compact-baseline
+COMPLEXITY_OUT ?= bin/complexity/metrics.json
+COMPLEXITY_FLAGS ?=
+complexity-report:
+	@go run ./scripts/complexity report -root . -manifest scripts/complexity/manifest.json -out $(COMPLEXITY_OUT) $(COMPLEXITY_FLAGS)
 
 # Performance optimization and metrics collection (Story #100)
 security-workflow-metrics:

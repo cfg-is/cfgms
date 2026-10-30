@@ -2,10 +2,14 @@
 // Copyright 2026 Jordan Ritz
 
 // Package main is the CFGMS complexity command. It measures cyclomatic
-// complexity and Halstead metrics per production function and prints the
-// record count followed by one JSON line per function.
+// complexity and Halstead metrics per production function.
 //
-// Exit codes: 0 = ok, 2 = usage or analysis error.
+// With no subcommand it prints the record count followed by one JSON line per
+// function. The report subcommand partitions the measured population into the
+// manifest's segments and writes the versioned metric file.
+//
+// Exit codes: 0 = ok, 1 = partition or duplicate-identity violation,
+// 2 = usage, IO or parse error.
 package main
 
 import (
@@ -19,6 +23,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "report" {
+		os.Exit(reportCmd(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	root := flag.String("root", ".", "repository root to analyse")
 	flag.Parse()
 	if err := run(*root, os.Stdout); err != nil {
