@@ -9,15 +9,79 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/security"
 )
+
+// dnaStagingBase is the directory the security collectors stage their static
+// PowerShell scripts in before running them with -File. It is secured with
+// security.EnsureAdminOnlyDir before every stage, so only SYSTEM and
+// Administrators can write it, unlike the system temporary directory.
+// Overridable for testing.
+var dnaStagingBase = defaultDNAStagingBase()
+
+// runSecurityCommand runs the collectors' PowerShell invocations. Tests replace
+// it to observe the -File argument without running PowerShell.
+var runSecurityCommand = runCommand
+
+// stagingMu serializes staging and cleanup: EnsureAdminOnlyDir walks the whole
+// tree below dnaStagingBase, and a concurrent cleanup removing an entry would
+// race that walk.
+var stagingMu sync.Mutex
+
+// defaultDNAStagingBase returns %ProgramData%\cfgms\dna-staging, falling back to
+// C:\ProgramData when the ProgramData environment variable is unset. It is a
+// sibling of cert_trust's staging directory, not inside it, so the two
+// packages' tree walks never share a tree.
+func defaultDNAStagingBase() string {
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	return filepath.Join(programData, "cfgms", "dna-staging")
+}
+
+// stageScript secures dnaStagingBase and writes script to a new file in it,
+// created exclusively from pattern. It returns the file's path and a cleanup
+// that removes it. If the base cannot be secured, nothing is staged.
+func stageScript(pattern, script string) (string, func(), error) {
+	stagingMu.Lock()
+	defer stagingMu.Unlock()
+
+	base := dnaStagingBase
+	if err := security.EnsureAdminOnlyDir(base); err != nil {
+		return "", nil, fmt.Errorf("secure DNA staging directory: %w", err)
+	}
+	f, err := os.CreateTemp(base, pattern)
+	if err != nil {
+		return "", nil, fmt.Errorf("create staged script: %w", err)
+	}
+	path := f.Name()
+	cleanup := func() {
+		stagingMu.Lock()
+		defer stagingMu.Unlock()
+		_ = os.Remove(path)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", nil, fmt.Errorf("write staged script: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", nil, fmt.Errorf("close staged script: %w", err)
+	}
+	return path, cleanup, nil
+}
 
 // Windows crypt32.dll lazy handles for certificate store enumeration.
 // Defined at package level to avoid repeated DLL resolution on each call.
@@ -148,29 +212,21 @@ func (w *WindowsSecurityCollector) collectBitLockerState(ctx context.Context, at
 }
 
 // collectAVProducts detects installed AV products via the SecurityCenter2 WMI namespace.
-// A static PS1 script is written to a temp file and executed with -File (never -Command).
+// A static PS1 script is staged in dnaStagingBase and executed with -File (never -Command).
 // Root/SecurityCenter2 is Windows client SKU only; returns "none" on Server SKU.
 // Best-effort — absence does not imply absence of AV.
 func (w *WindowsSecurityCollector) collectAVProducts(ctx context.Context, attributes map[string]string) {
-	tmpFile, err := os.CreateTemp("", "dna-av-*.ps1")
+	// Static script — no user input, no runtime code composition
+	const script = `(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue | Select-Object -ExpandProperty displayName) -join ','`
+	scriptPath, cleanup, err := stageScript("dna-av-*.ps1", script)
 	if err != nil {
 		attributes["av_products_detected"] = "none"
 		return
 	}
-	tmpPath := tmpFile.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
+	defer cleanup()
 
-	// Static script — no user input, no runtime code composition
-	const script = `(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue | Select-Object -ExpandProperty displayName) -join ','`
-	if _, err := tmpFile.WriteString(script); err != nil {
-		_ = tmpFile.Close()
-		attributes["av_products_detected"] = "none"
-		return
-	}
-	_ = tmpFile.Close()
-
-	output, err := runCommand(ctx, "powershell.exe",
-		"-NoProfile", "-NonInteractive", "-File", tmpPath,
+	output, err := runSecurityCommand(ctx, "powershell.exe",
+		"-NoProfile", "-NonInteractive", "-File", scriptPath,
 	)
 	if err != nil {
 		attributes["av_products_detected"] = "none"
@@ -212,7 +268,7 @@ func winCountLocalUsers(ctx context.Context) int {
 		}
 	}
 	// Fallback: PowerShell Get-LocalUser (Windows 10+ / Server 2016+).
-	// Uses -File with a static temp script per the argv-only invocation rule.
+	// Uses -File with a static staged script per the argv-only invocation rule.
 	return winPowerShellCount(ctx, "dna-users-*.ps1",
 		`(Get-LocalUser -ErrorAction SilentlyContinue | Measure-Object).Count`)
 }
@@ -235,21 +291,17 @@ func winCountLocalGroups(ctx context.Context) int {
 		`(Get-LocalGroup -ErrorAction SilentlyContinue | Measure-Object).Count`)
 }
 
-// winPowerShellCount runs a static PowerShell one-liner (via a temp -File) that
-// emits a single integer and returns that integer. Returns 0 on any error.
+// winPowerShellCount runs a static PowerShell one-liner (staged in
+// dnaStagingBase and run with -File) that emits a single integer and returns
+// that integer. Returns 0 on any error, including a staging base that cannot be
+// secured.
 func winPowerShellCount(ctx context.Context, tmpPattern, script string) int {
-	tmpFile, err := os.CreateTemp("", tmpPattern)
+	scriptPath, cleanup, err := stageScript(tmpPattern, script)
 	if err != nil {
 		return 0
 	}
-	tmpPath := tmpFile.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-	if _, err := tmpFile.WriteString(script); err != nil {
-		_ = tmpFile.Close()
-		return 0
-	}
-	_ = tmpFile.Close()
-	psOut, err := runCommand(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-File", tmpPath)
+	defer cleanup()
+	psOut, err := runSecurityCommand(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-File", scriptPath)
 	if err != nil {
 		return 0
 	}
