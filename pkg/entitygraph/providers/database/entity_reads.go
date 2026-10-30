@@ -224,6 +224,20 @@ func (p *DatabaseEntityGraphProvider) QueryEntities(ctx context.Context, filter 
 		n += 2
 	}
 
+	if err := interfaces.ValidateAuthorityTypes(filter.AuthorityTypes); err != nil {
+		return nil, fmt.Errorf("entitygraph/database: query entities: %w", err)
+	}
+	if len(filter.AuthorityTypes) > 0 {
+		// Exact match on the authority type: the subject begins "<type>:".
+		var alts []string
+		for _, at := range filter.AuthorityTypes {
+			alts = append(alts, fmt.Sprintf("substr(subject, 1, $%d) = $%d", n, n+1))
+			args = append(args, len(at)+1, at+":")
+			n += 2
+		}
+		conds = append(conds, "("+strings.Join(alts, " OR ")+")")
+	}
+
 	query := "SELECT subject FROM eg_entity_index"
 	if len(conds) > 0 {
 		query += " WHERE " + strings.Join(conds, " AND ")

@@ -20,6 +20,12 @@ var registeredAuthorityTypes = map[string]struct{}{
 	"cfgms":     {},
 }
 
+// IsRegisteredAuthorityType reports whether t is a registered authority type.
+func IsRegisteredAuthorityType(t string) bool {
+	_, ok := registeredAuthorityTypes[t]
+	return ok
+}
+
 // EID is a fleet-global entity identifier with the form:
 //
 //	authority_type:authority_name[/local_id]

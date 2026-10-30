@@ -123,6 +123,18 @@ func (p *SQLiteEntityGraphProvider) QueryEntities(ctx context.Context, filter in
 	if cut := interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs); cut.Active() {
 		conds = append(conds, tenantSubtreeCond("owning_tenant", cut, &args))
 	}
+	if err := interfaces.ValidateAuthorityTypes(filter.AuthorityTypes); err != nil {
+		return nil, fmt.Errorf("entitygraph/sqlite: query entities: %w", err)
+	}
+	if len(filter.AuthorityTypes) > 0 {
+		// Exact match on the authority type: the subject begins "<type>:".
+		var alts []string
+		for _, at := range filter.AuthorityTypes {
+			alts = append(alts, "substr(subject, 1, ?) = ?")
+			args = append(args, len(at)+1, at+":")
+		}
+		conds = append(conds, "("+strings.Join(alts, " OR ")+")")
+	}
 	if filter.SubjectPrefix != "" {
 		conds = append(conds, "substr(subject, 1, ?) = ?")
 		args = append(args, utf8.RuneCountInString(filter.SubjectPrefix), filter.SubjectPrefix)

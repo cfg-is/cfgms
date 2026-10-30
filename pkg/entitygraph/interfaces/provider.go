@@ -101,6 +101,27 @@ type EntityFilter struct {
 	// SubjectPrefix, when non-empty, restricts results to subjects that begin with
 	// it, matched literally (no wildcard characters).
 	SubjectPrefix string
+	// AuthorityTypes, when non-empty, restricts results to entities whose EID
+	// authority type exactly equals one of the values (e.g. "directory", "m365"
+	// to exclude host-local entities). Every value must be a registered authority
+	// type, else QueryEntities returns ErrUnknownAuthorityType. Composes with Kind,
+	// the tenant cut and SubjectPrefix.
+	AuthorityTypes []string
+}
+
+// ErrUnknownAuthorityType is returned by QueryEntities when
+// EntityFilter.AuthorityTypes names a value that is not a registered authority type.
+var ErrUnknownAuthorityType = errors.New("entitygraph: unknown authority type")
+
+// ValidateAuthorityTypes returns an error wrapping ErrUnknownAuthorityType if any
+// value is not a registered authority type.
+func ValidateAuthorityTypes(authorityTypes []string) error {
+	for _, t := range authorityTypes {
+		if !types.IsRegisteredAuthorityType(t) {
+			return fmt.Errorf("%w: %q", ErrUnknownAuthorityType, t)
+		}
+	}
+	return nil
 }
 
 // PageToken is a cursor for paginated queries.
