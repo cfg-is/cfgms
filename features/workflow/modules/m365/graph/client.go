@@ -161,8 +161,8 @@ func (r *UpdateUserRequest) HasChanges() bool {
 
 // PasswordProfile represents password configuration for a user
 type PasswordProfile struct {
-	Password                      string `json:"password,omitempty"`
-	ForceChangePasswordNextSignIn bool   `json:"forceChangePasswordNextSignIn"`
+	Password               string `json:"password,omitempty"`
+	ForceResetAtNextSignIn bool   `json:"forceChangePasswordNextSignIn"`
 }
 
 // LicenseAssignment represents a license assignment for a user

@@ -108,8 +108,8 @@ func TestEntraUser_Integration_FullCRUD(t *testing.T) {
 		MailNickname:      testUsername,
 		AccountEnabled:    true,
 		PasswordProfile: &PasswordProfile{
-			Password:                      "TempPass123!",
-			ForceChangePasswordNextSignIn: true,
+			Password:               "TempPass123!",
+			ForceResetAtNextSignIn: true,
 		},
 		JobTitle:       "Test User",
 		Department:     "IT Testing",

@@ -263,7 +263,7 @@ func existingUserConfig() *EntraUserConfig {
 func TestEntraUserModule_Set_ExistingUser_PasswordReset(t *testing.T) {
 	mod, fakeGraph := seedExistingUser(t)
 	cfg := existingUserConfig()
-	cfg.PasswordProfile = &PasswordProfile{Password: "s3cret-Value!", ForceChangePasswordNextSignIn: true}
+	cfg.PasswordProfile = &PasswordProfile{Password: "s3cret-Value!", ForceResetAtNextSignIn: true}
 
 	err := mod.Set(ctxForTenant("tenant-a"), "r", cfg)
 	require.NoError(t, err)
@@ -271,29 +271,29 @@ func TestEntraUserModule_Set_ExistingUser_PasswordReset(t *testing.T) {
 	pp := fakeGraph.updates[0].PasswordProfile
 	require.NotNil(t, pp)
 	assert.Equal(t, "s3cret-Value!", pp.Password)
-	assert.True(t, pp.ForceChangePasswordNextSignIn)
+	assert.True(t, pp.ForceResetAtNextSignIn)
 }
 
-func TestEntraUserModule_Set_ExistingUser_ForceChangePasswordOnly(t *testing.T) {
+func TestEntraUserModule_Set_ExistingUser_ForceResetAtNextSignInOnly(t *testing.T) {
 	mod, fakeGraph := seedExistingUser(t)
 	cfg := existingUserConfig()
-	cfg.ForceChangePassword = true
+	cfg.ForceResetAtNextSignIn = true
 
 	require.NoError(t, mod.Set(ctxForTenant("tenant-a"), "r", cfg))
 	require.Len(t, fakeGraph.updates, 1)
 	pp := fakeGraph.updates[0].PasswordProfile
 	require.NotNil(t, pp)
 	assert.Empty(t, pp.Password)
-	assert.True(t, pp.ForceChangePasswordNextSignIn)
+	assert.True(t, pp.ForceResetAtNextSignIn)
 }
 
-func TestEntraUserModule_Set_CreateUser_ForceChangePassword(t *testing.T) {
+func TestEntraUserModule_Set_CreateUser_ForceResetAtNextSignIn(t *testing.T) {
 	cfg := existingUserConfig()
-	cfg.ForceChangePassword = true
+	cfg.ForceResetAtNextSignIn = true
 	cfg.PasswordProfile = &PasswordProfile{Password: "pw"}
 	pp := cfg.graphPasswordProfile()
 	require.NotNil(t, pp)
-	assert.True(t, pp.ForceChangePasswordNextSignIn)
+	assert.True(t, pp.ForceResetAtNextSignIn)
 	assert.Equal(t, "pw", pp.Password)
 }
 
@@ -378,7 +378,7 @@ func containsString(v interface{}, needle string) bool {
 func TestEntraUserConfig_AsMap_OmitsPassword(t *testing.T) {
 	const pw = "known-S3cret-Value!"
 	cfg := existingUserConfig()
-	cfg.PasswordProfile = &PasswordProfile{Password: pw, ForceChangePasswordNextSignIn: true}
+	cfg.PasswordProfile = &PasswordProfile{Password: pw, ForceResetAtNextSignIn: true}
 
 	m := cfg.AsMap()
 	assert.False(t, containsString(m, pw), "password must not appear anywhere in AsMap output")
@@ -399,13 +399,13 @@ func TestEntraUserModule_Set_TypedConfig_SendsPassword(t *testing.T) {
 		MailNickname:      "typed",
 		AccountEnabled:    true,
 		TenantID:          "m365-org-a",
-		PasswordProfile:   &PasswordProfile{Password: "typed-Pw-1!", ForceChangePasswordNextSignIn: true},
+		PasswordProfile:   &PasswordProfile{Password: "typed-Pw-1!", ForceResetAtNextSignIn: true},
 	}
 	require.NoError(t, mod.Set(ctxForTenant("tenant-a"), "r", cfg))
 	require.Len(t, fakeGraph.creates, 1)
 	require.NotNil(t, fakeGraph.creates[0].PasswordProfile)
 	assert.Equal(t, "typed-Pw-1!", fakeGraph.creates[0].PasswordProfile.Password)
-	assert.True(t, fakeGraph.creates[0].PasswordProfile.ForceChangePasswordNextSignIn)
+	assert.True(t, fakeGraph.creates[0].PasswordProfile.ForceResetAtNextSignIn)
 }
 
 // [REQUIRED TEST] Issue #5620: the raw step map (non-typed ConfigState) still supplies the password.
@@ -428,4 +428,17 @@ func TestEntraUserModule_Set_MapConfig_SendsPassword(t *testing.T) {
 	require.Len(t, fakeGraph.creates, 1)
 	require.NotNil(t, fakeGraph.creates[0].PasswordProfile)
 	assert.Equal(t, "mapped-Pw-1!", fakeGraph.creates[0].PasswordProfile.Password)
+}
+
+func TestEntraUserConfig_AsMap_KeysUnchanged(t *testing.T) {
+	cfg := &EntraUserConfig{
+		UserPrincipalName:      "user@example.com",
+		ForceResetAtNextSignIn: true,
+		PasswordProfile:        &PasswordProfile{ForceResetAtNextSignIn: true},
+	}
+	m := cfg.AsMap()
+	require.Equal(t, true, m["force_change_password"])
+	profile, ok := m["password_profile"].(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, true, profile["force_change_password_next_signin"])
 }

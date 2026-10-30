@@ -38,9 +38,9 @@ type EntraUserConfig struct {
 	MailNickname      string `yaml:"mail_nickname"`
 
 	// Account settings
-	AccountEnabled      bool             `yaml:"account_enabled"`
-	PasswordProfile     *PasswordProfile `yaml:"password_profile,omitempty"`
-	ForceChangePassword bool             `yaml:"force_change_password,omitempty"`
+	AccountEnabled         bool             `yaml:"account_enabled"`
+	PasswordProfile        *PasswordProfile `yaml:"password_profile,omitempty"`
+	ForceResetAtNextSignIn bool             `yaml:"force_change_password,omitempty"`
 
 	// Contact information
 	Mail           string `yaml:"mail,omitempty"`
@@ -65,8 +65,8 @@ type EntraUserConfig struct {
 
 // PasswordProfile represents password configuration for a user
 type PasswordProfile struct {
-	Password                      string `yaml:"password,omitempty"`
-	ForceChangePasswordNextSignIn bool   `yaml:"force_change_password_next_signin"`
+	Password               string `yaml:"password,omitempty"`
+	ForceResetAtNextSignIn bool   `yaml:"force_change_password_next_signin"`
 }
 
 // LicenseAssignment represents a license assignment for a user
@@ -86,16 +86,16 @@ func (c *EntraUserConfig) AsMap() map[string]interface{} {
 	}
 
 	if c.PasswordProfile != nil {
-		passwordMap := map[string]interface{}{
-			"force_change_password_next_signin": c.PasswordProfile.ForceChangePasswordNextSignIn,
+		profileMap := map[string]interface{}{
+			"force_change_password_next_signin": c.PasswordProfile.ForceResetAtNextSignIn,
 		}
 		// The password is deliberately omitted: AsMap output flows into shared
 		// workflow variables. Set reads it from the typed PasswordProfile.
-		result["password_profile"] = passwordMap
+		result["password_profile"] = profileMap
 	}
 
-	if c.ForceChangePassword {
-		result["force_change_password"] = c.ForceChangePassword
+	if c.ForceResetAtNextSignIn {
+		result["force_change_password"] = c.ForceResetAtNextSignIn
 	}
 
 	if c.Mail != "" {
@@ -139,7 +139,7 @@ func (c *EntraUserConfig) ToYAML() ([]byte, error) {
 	if exportConfig.PasswordProfile != nil {
 		// Create a copy without the password field
 		exportConfig.PasswordProfile = &PasswordProfile{
-			ForceChangePasswordNextSignIn: c.PasswordProfile.ForceChangePasswordNextSignIn,
+			ForceResetAtNextSignIn: c.PasswordProfile.ForceResetAtNextSignIn,
 		}
 	}
 	return yaml.Marshal(&exportConfig)
@@ -212,7 +212,7 @@ func (c *EntraUserConfig) GetManagedFields() []string {
 	if len(c.Groups) > 0 {
 		fields = append(fields, "groups")
 	}
-	if c.PasswordProfile != nil || c.ForceChangePassword {
+	if c.PasswordProfile != nil || c.ForceResetAtNextSignIn {
 		fields = append(fields, "password_profile")
 	}
 
@@ -266,7 +266,7 @@ func (m *entraUserModule) Set(ctx context.Context, resourceID string, config mod
 	if passwordProfile, ok := configMap["password_profile"].(map[string]interface{}); ok {
 		userConfig.PasswordProfile = &PasswordProfile{}
 		if forceChange, ok := passwordProfile["force_change_password_next_signin"].(bool); ok {
-			userConfig.PasswordProfile.ForceChangePasswordNextSignIn = forceChange
+			userConfig.PasswordProfile.ForceResetAtNextSignIn = forceChange
 		}
 		if password, ok := passwordProfile["password"].(string); ok {
 			userConfig.PasswordProfile.Password = password
@@ -282,7 +282,7 @@ func (m *entraUserModule) Set(ctx context.Context, resourceID string, config mod
 	}
 
 	if forceChange, ok := configMap["force_change_password"].(bool); ok {
-		userConfig.ForceChangePassword = forceChange
+		userConfig.ForceResetAtNextSignIn = forceChange
 	}
 
 	// Handle managed_fields (arrives as []string or []interface{})
@@ -441,13 +441,13 @@ func (m *entraUserModule) Get(ctx context.Context, resourceID string) (modules.C
 // declared. A flag without a password yields a profile carrying only
 // forceChangePasswordNextSignIn. The password is never logged or put in errors.
 func (c *EntraUserConfig) graphPasswordProfile() *graph.PasswordProfile {
-	if c.PasswordProfile == nil && !c.ForceChangePassword {
+	if c.PasswordProfile == nil && !c.ForceResetAtNextSignIn {
 		return nil
 	}
-	pp := &graph.PasswordProfile{ForceChangePasswordNextSignIn: c.ForceChangePassword}
+	pp := &graph.PasswordProfile{ForceResetAtNextSignIn: c.ForceResetAtNextSignIn}
 	if c.PasswordProfile != nil {
 		pp.Password = c.PasswordProfile.Password
-		pp.ForceChangePasswordNextSignIn = pp.ForceChangePasswordNextSignIn || c.PasswordProfile.ForceChangePasswordNextSignIn
+		pp.ForceResetAtNextSignIn = pp.ForceResetAtNextSignIn || c.PasswordProfile.ForceResetAtNextSignIn
 	}
 	return pp
 }
