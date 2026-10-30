@@ -122,6 +122,9 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	// Issue #5551: directory and m365 subjects never change owning tenant.
 	t.Run("OwnerImmutability", func(t *testing.T) { testEGOwnerImmutability(t, factory) })
 	t.Run("SubjectPrefixFilter", func(t *testing.T) { testEGSubjectPrefixFilter(t, factory) })
+	t.Run("QueryEntities_AuthorityFilter_DirectoryOnly", func(t *testing.T) { testEGAuthorityFilterDirectoryOnly(t, factory) })
+	t.Run("QueryEntities_AuthorityFilter_RespectsTenantCut", func(t *testing.T) { testEGAuthorityFilterTenantCut(t, factory) })
+	t.Run("QueryEntities_AuthorityFilter_UnknownTypeErrors", func(t *testing.T) { testEGAuthorityFilterUnknown(t, factory) })
 }
 
 // --- Contract test helpers ---
@@ -3619,4 +3622,81 @@ func testEGSubjectPrefixFilter(t *testing.T, factory EntityGraphProviderFactory)
 	}
 	sort.Strings(got)
 	assert.Equal(t, []string{"directory:pfx-a.example.com/group:2", "directory:pfx-a.example.com/user:1"}, got)
+}
+
+// egSubjects returns the sorted EID strings of a page.
+func egSubjects(page *interfaces.EntityPage) []string {
+	var got []string
+	for _, e := range page.Entities {
+		got = append(got, e.Entity.EID.String())
+	}
+	sort.Strings(got)
+	return got
+}
+
+// testEGAuthorityFilterDirectoryOnly verifies AuthorityTypes selects by exact
+// authority type, composes with Kind, and paginates stably.
+func testEGAuthorityFilterDirectoryOnly(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+	for s, kind := range map[string]string{
+		"host:a/user:x": "user", "directory:d/user:y": "user", "m365:t/user:z": "user", "directory:d/group:g": "group",
+	} {
+		egReport(ctx, t, p, "observer:ad", s, map[string]interface{}{"owning_tenant": "root/auth", "entity_kind": kind})
+	}
+	base := interfaces.EntityFilter{TenantFilter: "root/auth", Kind: "user"}
+
+	f := base
+	f.AuthorityTypes = []string{"directory"}
+	page, err := p.QueryEntities(ctx, f, interfaces.PageToken{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"directory:d/user:y"}, egSubjects(page))
+
+	f.AuthorityTypes = []string{"directory", "m365"}
+	page, err = p.QueryEntities(ctx, f, interfaces.PageToken{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"directory:d/user:y", "m365:t/user:z"}, egSubjects(page))
+
+	// Stable pagination under the filter.
+	p1, err := p.QueryEntities(ctx, f, interfaces.PageToken{PageSize: 1})
+	require.NoError(t, err)
+	require.Len(t, p1.Entities, 1)
+	require.NotEmpty(t, p1.NextToken)
+	p2, err := p.QueryEntities(ctx, f, interfaces.PageToken{PageSize: 1, Token: p1.NextToken})
+	require.NoError(t, err)
+	require.Len(t, p2.Entities, 1)
+	assert.Empty(t, p2.NextToken)
+	assert.NotEqual(t, p1.Entities[0].Entity.EID.String(), p2.Entities[0].Entity.EID.String())
+
+	f.AuthorityTypes = nil
+	page, err = p.QueryEntities(ctx, f, interfaces.PageToken{})
+	require.NoError(t, err)
+	assert.Len(t, page.Entities, 3, "empty AuthorityTypes applies no filter")
+}
+
+// testEGAuthorityFilterTenantCut verifies the authority filter never widens the tenant cut.
+func testEGAuthorityFilterTenantCut(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+	egReport(ctx, t, p, "observer:ad", "directory:d/user:a", map[string]interface{}{"owning_tenant": "root/auth-a"})
+	egReport(ctx, t, p, "observer:ad", "directory:d/user:b", map[string]interface{}{"owning_tenant": "root/auth-b"})
+
+	page, err := p.QueryEntities(ctx, interfaces.EntityFilter{
+		TenantFilter: "root/auth-a", AuthorityTypes: []string{"directory"},
+	}, interfaces.PageToken{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"directory:d/user:a"}, egSubjects(page))
+}
+
+// testEGAuthorityFilterUnknown verifies an unregistered authority type is a typed error.
+func testEGAuthorityFilterUnknown(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	_, err := p.QueryEntities(context.Background(), interfaces.EntityFilter{
+		TenantFilter: "root/auth", AuthorityTypes: []string{"directory", "bogus"},
+	}, interfaces.PageToken{})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, interfaces.ErrUnknownAuthorityType)
 }
