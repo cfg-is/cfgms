@@ -4298,7 +4298,10 @@ func (a *dnaClusterMembershipAdapter) IsClusterMember(peerHostAuthority, cluster
 // rather than a raw s.egClusterMembership snapshot — see that type's doc comment for
 // why a snapshot would be wrong here.
 func (s *Server) buildDNAEntityGraphWriter() (*dnasync.Writer, error) {
-	return dnasync.New(s.egProvider, dnasync.WithClusterMembership(&dnaClusterMembershipAdapter{server: s}))
+	s.wireDirectoryDomainEffects()
+	return dnasync.New(s.egProvider,
+		dnasync.WithClusterMembership(&dnaClusterMembershipAdapter{server: s}),
+		dnasync.WithDirectoryAuthority(s.directoryAuthorityVerifier()))
 }
 
 // wireDNAEntityGraph chains the DNA-sync entity-graph write path onto dnaHandler
@@ -4416,7 +4419,7 @@ func (r *applyOutcomeEIDResolver) resolveApplyOutcomeEID(ctx context.Context, re
 		}
 	}
 
-	eid, _, _, err := dnasync.ResolveSubjectEID(kind, r.peerHostAuthority, resourceID, payload, r.taxonomy, r.membership)
+	eid, _, _, err := dnasync.ResolveSubjectEID(kind, r.peerHostAuthority, resourceID, payload, r.taxonomy, r.membership, nil)
 	if err != nil {
 		return egtypes.EID{}, err
 	}

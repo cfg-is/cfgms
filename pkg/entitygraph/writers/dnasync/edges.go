@@ -201,7 +201,7 @@ func decodeEdgeDeclarations(
 				toKind = toStr[:idx]
 			}
 			var err error
-			toEID, _, _, err = ResolveSubjectEID(toKind, peerHostAuthority, toStr, nil, taxonomy, membership)
+			toEID, _, _, err = ResolveSubjectEID(toKind, peerHostAuthority, toStr, nil, taxonomy, membership, nil)
 			if err != nil {
 				// Skip unresolvable endpoints rather than failing the ingest.
 				continue

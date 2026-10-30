@@ -111,6 +111,31 @@ func TestHandleCreateRoleConfig_InvalidSelector(t *testing.T) {
 	assert.Equal(t, "INVALID_SELECTOR", errResp.Error.Code)
 }
 
+// TestHandleCreateRoleConfig_DirectoryResourceRejected verifies a role document, which
+// is inherited by every matching steward and so is not device-level, cannot declare
+// an activedirectory.* resource (Issue #5551).
+func TestHandleCreateRoleConfig_DirectoryResourceRejected(t *testing.T) {
+	server := setupRoleConfigServer(t)
+	apiKey := NewEphemeralTestKey(t, server, []string{"role:write"}, "test-tenant", 5*time.Minute)
+
+	body, _ := json.Marshal(createRoleConfigRequest{
+		Name:     "dir-role",
+		Selector: "os:windows",
+		Fragment: stewardtypes.StewardConfig{Resources: []stewardtypes.ResourceConfig{{
+			Name: "corp", Module: "activedirectory.domain",
+			Config: map[string]interface{}{"domain": "corp.example.com"},
+		}}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/roles", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "resources[0].module")
+}
+
 // TestHandleCreateRoleConfig_EmptySelector verifies that an empty selector returns 400.
 func TestHandleCreateRoleConfig_EmptySelector(t *testing.T) {
 	server := setupRoleConfigServer(t)

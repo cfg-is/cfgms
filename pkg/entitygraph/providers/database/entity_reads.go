@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
@@ -215,6 +216,12 @@ func (p *DatabaseEntityGraphProvider) QueryEntities(ctx context.Context, filter 
 	}
 	if filter.TenantFilter != "" {
 		conds = append(conds, tenantSubtreeCond("owning_tenant", interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs), &n, &args))
+	}
+
+	if filter.SubjectPrefix != "" {
+		conds = append(conds, fmt.Sprintf("substr(subject, 1, $%d) = $%d", n, n+1))
+		args = append(args, utf8.RuneCountInString(filter.SubjectPrefix), filter.SubjectPrefix)
+		n += 2
 	}
 
 	query := "SELECT subject FROM eg_entity_index"

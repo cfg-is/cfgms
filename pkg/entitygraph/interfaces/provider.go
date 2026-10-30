@@ -98,6 +98,9 @@ type EntityFilter struct {
 	AsOf             *time.Time
 	TextQuery        string
 	Attributes       map[string]interface{}
+	// SubjectPrefix, when non-empty, restricts results to subjects that begin with
+	// it, matched literally (no wildcard characters).
+	SubjectPrefix string
 }
 
 // PageToken is a cursor for paginated queries.

@@ -119,6 +119,9 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("TenantSubtreeIDs", func(t *testing.T) {
 		testEGTenantSubtreeIDs(t, factory)
 	})
+	// Issue #5551: directory and m365 subjects never change owning tenant.
+	t.Run("OwnerImmutability", func(t *testing.T) { testEGOwnerImmutability(t, factory) })
+	t.Run("SubjectPrefixFilter", func(t *testing.T) { testEGSubjectPrefixFilter(t, factory) })
 }
 
 // --- Contract test helpers ---
@@ -3544,4 +3547,76 @@ func testEGListDriftedPaging(t *testing.T, factory EntityGraphProviderFactory) {
 		after = page[len(page)-1].EID.String()
 	}
 	assert.Equal(t, allSubjects, got, "paging must neither overlap nor skip rows")
+}
+
+// testEGOwnerImmutability verifies that the owning tenant of an existing directory
+// or m365 subject never changes on ingest, while host subjects keep the move
+// semantics the rest of the suite relies on (Issue #5551).
+func testEGOwnerImmutability(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+
+	for _, subject := range []string{
+		"directory:owner-imm.example.com/user:u-1",
+		"m365:owner-imm-tenant/user:u-1",
+	} {
+		egReport(ctx, t, p, "observer:ad", subject, map[string]interface{}{
+			"entity_kind": "user", "owning_tenant": "root/owner-a", "marker": "original",
+		})
+
+		// A write naming another tenant is rejected without failing the batch.
+		egReport(ctx, t, p, "observer:ad", subject, map[string]interface{}{
+			"entity_kind": "user", "owning_tenant": "root/owner-b", "marker": "hijacked",
+		})
+
+		view, err := p.GetEntity(ctx, egEID(t, subject), interfaces.GetEntityOpts{TenantFilter: "root/owner-a"})
+		require.NoError(t, err, "%s must stay visible to its owner", subject)
+		assert.Equal(t, "root/owner-a", view.Entity.OwningTenant)
+		assert.Equal(t, "original", view.Entity.Attributes["marker"], "a rejected write must not change attributes")
+
+		if other, err := p.GetEntity(ctx, egEID(t, subject), interfaces.GetEntityOpts{TenantFilter: "root/owner-b"}); err == nil {
+			assert.Nil(t, other, "%s must not become visible to the rejected tenant", subject)
+		}
+
+		// The owner itself may keep updating.
+		egReport(ctx, t, p, "observer:ad", subject, map[string]interface{}{
+			"entity_kind": "user", "owning_tenant": "root/owner-a", "marker": "updated",
+		})
+		view, err = p.GetEntity(ctx, egEID(t, subject), interfaces.GetEntityOpts{TenantFilter: "root/owner-a"})
+		require.NoError(t, err)
+		assert.Equal(t, "updated", view.Entity.Attributes["marker"])
+	}
+
+	// Host subjects are unchanged: ownership follows the latest write.
+	const host = "host:owner-imm-auth/host1"
+	egReport(ctx, t, p, "observer:test", host, map[string]interface{}{"entity_kind": "host", "owning_tenant": "root/owner-a"})
+	egReport(ctx, t, p, "observer:test", host, map[string]interface{}{"entity_kind": "host", "owning_tenant": "root/owner-b"})
+	view, err := p.GetEntity(ctx, egEID(t, host), interfaces.GetEntityOpts{TenantFilter: "root/owner-b"})
+	require.NoError(t, err, "host ownership must still move")
+	assert.Equal(t, "root/owner-b", view.Entity.OwningTenant)
+}
+
+// testEGSubjectPrefixFilter verifies EntityFilter.SubjectPrefix selects exactly the
+// subjects under a literal prefix, with LIKE metacharacters treated literally.
+func testEGSubjectPrefixFilter(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+	for _, s := range []string{
+		"directory:pfx-a.example.com/user:1", "directory:pfx-a.example.com/group:2",
+		"directory:pfx-axexample.com/user:3", "directory:pfx-b.example.com/user:4",
+	} {
+		egReport(ctx, t, p, "observer:ad", s, map[string]interface{}{"owning_tenant": "root/pfx"})
+	}
+	page, err := p.QueryEntities(ctx, interfaces.EntityFilter{
+		TenantFilter: "root/pfx", SubjectPrefix: "directory:pfx-a.example.com/",
+	}, interfaces.PageToken{})
+	require.NoError(t, err)
+	var got []string
+	for _, e := range page.Entities {
+		got = append(got, e.Entity.EID.String())
+	}
+	sort.Strings(got)
+	assert.Equal(t, []string{"directory:pfx-a.example.com/group:2", "directory:pfx-a.example.com/user:1"}, got)
 }

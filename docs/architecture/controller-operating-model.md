@@ -427,6 +427,39 @@ ConfigKey{TenantID: "<tenant>", Namespace: "role-policies", Name: "<roleName>"}
 
 **Resolution:** `InheritanceResolver.ResolveConfiguration()` applies matching role fragments between cluster-policies and device-level config (Issue #2546). The `roleConfigAdapter` in `config_service_v2.go` lists all `role-policies` entries for the tenant, parses each selector via `pkg/fleet/selector.Parse`, and returns the matching fragments sorted alphabetically by name. Multiple matching roles merge in that order; later names override earlier ones for the same resource. A role-provider error is non-fatal: resolution continues without role fragments and a WARN is emitted.
 
+### Directory Authority, Domain Registry and Owner Immutability (Issue #5551)
+
+Per-object directory fragments (`directory_user:<guid>`, `directory_group:<guid>`) become entities named `directory:<domain>/user:<guid>` and `directory:<domain>/group:<guid>`. The domain is a claim made by the steward in the fragment payload (`directory_domain`), so it is honoured only for the one steward entitled to make it.
+
+**Declaration shape.** A domain controller declares its domain in its **own device-level cfg**:
+
+```yaml
+resources:
+  - name: corp-domain
+    module: activedirectory.domain
+    config:
+      domain: corp.example.com   # DNS name; normalized to lowercase, no trailing dot
+```
+
+**Config validation (one shared check).** `ConfigurationServiceV2` runs the same validation on `SetConfiguration` (which the config push handler calls), `BatchSetConfigurations` and `ValidateConfig`, and the role-config create handler runs the static part for role documents. Errors name the field and never name another tenant. It rejects:
+
+- an `activedirectory.*` resource at any non-device level (tenant, group, role): `resources[i].module`;
+- a `password`, `password_profile` or `initial_password` field, at any depth, in an `activedirectory.*` or `m365-entra-*` resource: `resources[i].config.<path>`;
+- a resource named `directory_user` or `directory_group` (reserved for the fragment kinds);
+- a malformed `domain` (not a DNS name), and a domain another tenant already owns.
+
+**Domain registry.** Saving a device cfg that declares a domain records the owning tenant in the config store under namespace `directory-domains`, name `<normalized domain>` (tenant segment `_global`, because config stores reject an empty tenant). The first tenant creates the entry with `CreateIfAbsent`; later declarations by the same tenant add a declarer; a different tenant's save is rejected. The entry lists the stewards that declare the domain and is released when the last one drops it (cfg edited or deleted). Atomicity is the shared config-store helper's: cluster-atomic only on a store that supports conditional writes.
+
+**Resolving a rejected declaration.** The first save wins. A tenant whose declaration is rejected with `DIRECTORY_DOMAIN_CONFLICT` must ask the owning tenant to remove its declaration (releasing the domain), or contact support. The error deliberately does not say who owns it.
+
+**Verifier.** `DirectoryAuthority.IsDirectoryAuthority(peer, domain)` is true only if (a) the registry owner of the domain is the tenant the peer is registered under (from the mTLS-verified peer identity), and (b) the domain is declared in the peer's **own effective cfg** (resolved by the same function that serves the steward its cfg). A same-tenant steward that does not declare the domain is denied. The writer asks once per peer and domain per delta batch. The `ad_pdc_emulator` fact only activates observation on a steward; it is never used for authorisation.
+
+**Drop, never host fallback.** A directory fragment with no verifier, a denied peer, a malformed domain or a kind outside the taxonomy is **dropped**: counted, logged once per batch with sanitized values, and never written under `host:<peer>`. A steward fragment can only ever produce a `directory` authority, never `m365`. A directory fragment's `__entitygraph_edges` key is ignored (membership is the `member_of` attribute).
+
+**Owner immutability.** For `directory` and `m365` subjects the owning tenant never changes on ingest, in both entity-graph providers. A write from a different tenant is rejected, logged as a security event naming both tenants, and recorded in the root (system tenant) audit stream as `entity_owner_conflict_rejected`. Host subjects are unchanged (a steward move still moves its entities).
+
+**Domain release.** When the registry entry is released, the controller retracts the owning tenant's `directory:<domain>/...` entities, so the stale inventory is no longer visible and another tenant can then declare the domain and own new entities. A release whose retraction did not finish is completed before any new claim of that domain.
+
 ## Deployment Rings
 
 Deployment rings are a fleet-wide governance mechanism that controls which steward binary version reaches which stewards, in what order. The controller declares an ordered, named ring set; ring membership is declared in controller config only (no write path exists for stewards or operators to self-assign rings); and config delivery applies the ring's `desired_version` to stewards per their controller-config membership.

@@ -35,7 +35,7 @@ func TestResolve_ClusteredVM(t *testing.T) {
 		"module_authority": "observer:hyperv",
 		"state":            "running",
 	}
-	eid, src, cs, err := dnasync.ResolveSubjectEID("vm", "node-1", "vm:prod-vm1", payload, types.DefaultTaxonomy(), verified("prod-cluster", "node-1", "node-2"))
+	eid, src, cs, err := dnasync.ResolveSubjectEID("vm", "node-1", "vm:prod-vm1", payload, types.DefaultTaxonomy(), verified("prod-cluster", "node-1", "node-2"), nil)
 	require.NoError(t, err)
 	require.Equal(t, "cluster:prod-cluster/vm:prod-vm1", eid.String())
 	require.Equal(t, "node-1/observer:hyperv", src)
@@ -48,7 +48,7 @@ func TestResolve_ClusteredVM_NoModuleAuthority(t *testing.T) {
 	payload := map[string]interface{}{
 		"ha_role": map[string]interface{}{"cluster_name": "failover-cluster"},
 	}
-	eid, src, cs, err := dnasync.ResolveSubjectEID("vm", "node-42", "vm:vm01", payload, types.DefaultTaxonomy(), verified("failover-cluster", "node-42"))
+	eid, src, cs, err := dnasync.ResolveSubjectEID("vm", "node-42", "vm:vm01", payload, types.DefaultTaxonomy(), verified("failover-cluster", "node-42"), nil)
 	require.NoError(t, err)
 	require.Equal(t, "cluster:failover-cluster/vm:vm01", eid.String())
 	require.Equal(t, "node-42", src)
@@ -62,7 +62,7 @@ func TestResolve_StandaloneVM(t *testing.T) {
 		"module_authority": "observer:hyperv",
 		"state":            "running",
 	}
-	eid, src, cs, err := dnasync.ResolveSubjectEID("vm", "node-1", "vm:standalone", payload, types.DefaultTaxonomy(), verified("prod-cluster", "node-1"))
+	eid, src, cs, err := dnasync.ResolveSubjectEID("vm", "node-1", "vm:standalone", payload, types.DefaultTaxonomy(), verified("prod-cluster", "node-1"), nil)
 	require.NoError(t, err)
 	require.Equal(t, "host:node-1/vm:standalone", eid.String())
 	require.Equal(t, "node-1", src)
@@ -77,7 +77,7 @@ func TestResolve_VMEmptyClusterName(t *testing.T) {
 	payload := map[string]interface{}{
 		"ha_role": map[string]interface{}{"cluster_name": ""},
 	}
-	eid, src, cs, err := dnasync.ResolveSubjectEID("vm", "node-x", "vm:noname", payload, types.DefaultTaxonomy(), verified("", "node-x"))
+	eid, src, cs, err := dnasync.ResolveSubjectEID("vm", "node-x", "vm:noname", payload, types.DefaultTaxonomy(), verified("", "node-x"), nil)
 	require.NoError(t, err)
 	require.Equal(t, "host:node-x/vm:noname", eid.String())
 	require.Equal(t, "node-x", src)
@@ -90,7 +90,7 @@ func TestResolve_VMHARoleNotAMap(t *testing.T) {
 	payload := map[string]interface{}{
 		"ha_role": "not-a-map",
 	}
-	eid, _, cs, err := dnasync.ResolveSubjectEID("vm", "node-x", "vm:noname", payload, types.DefaultTaxonomy(), verified("not-a-map", "node-x"))
+	eid, _, cs, err := dnasync.ResolveSubjectEID("vm", "node-x", "vm:noname", payload, types.DefaultTaxonomy(), verified("not-a-map", "node-x"), nil)
 	require.NoError(t, err)
 	require.Equal(t, "host:node-x/vm:noname", eid.String())
 	require.NotNil(t, cs)
@@ -102,7 +102,7 @@ func TestResolve_ClusterKind(t *testing.T) {
 	payload := map[string]interface{}{
 		"module_authority": "observer:hyperv",
 	}
-	eid, src, cs, err := dnasync.ResolveSubjectEID("cluster", "steward-A", "cluster:mycluster", payload, types.DefaultTaxonomy(), nil)
+	eid, src, cs, err := dnasync.ResolveSubjectEID("cluster", "steward-A", "cluster:mycluster", payload, types.DefaultTaxonomy(), nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, "cluster:mycluster", eid.String())
 	require.Equal(t, "steward-A/observer:hyperv", src)
@@ -116,7 +116,7 @@ func TestResolve_FileKind(t *testing.T) {
 		"module_authority": "enforcing-module:file",
 		"ha_role":          map[string]interface{}{"cluster_name": "should-be-ignored"},
 	}
-	eid, src, cs, err := dnasync.ResolveSubjectEID("file", "steward-B", "file:/etc/hosts", payload, types.DefaultTaxonomy(), verified("should-be-ignored", "steward-B"))
+	eid, src, cs, err := dnasync.ResolveSubjectEID("file", "steward-B", "file:/etc/hosts", payload, types.DefaultTaxonomy(), verified("should-be-ignored", "steward-B"), nil)
 	require.NoError(t, err)
 	require.Equal(t, "host:steward-B/file:/etc/hosts", eid.String())
 	require.Equal(t, "steward-B", src)
@@ -126,7 +126,7 @@ func TestResolve_FileKind(t *testing.T) {
 // TestResolve_UnknownKindDefaultsToHostScoped verifies that an unregistered kind
 // defaults to host-scoped (the safe fallback).
 func TestResolve_UnknownKindDefaultsToHostScoped(t *testing.T) {
-	eid, src, cs, err := dnasync.ResolveSubjectEID("unknown-kind", "steward-C", "unknown-kind:foo", nil, types.DefaultTaxonomy(), nil)
+	eid, src, cs, err := dnasync.ResolveSubjectEID("unknown-kind", "steward-C", "unknown-kind:foo", nil, types.DefaultTaxonomy(), nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, "host:steward-C/unknown-kind:foo", eid.String())
 	require.Equal(t, "steward-C", src)
@@ -136,7 +136,7 @@ func TestResolve_UnknownKindDefaultsToHostScoped(t *testing.T) {
 // TestResolve_ClaimScopeAsOfIsZero verifies that the returned ClaimScope's AsOf
 // is the zero value — callers must populate it before adding to a batch.
 func TestResolve_ClaimScopeAsOfIsZero(t *testing.T) {
-	_, _, cs, err := dnasync.ResolveSubjectEID("file", "steward-D", "file:/tmp/x", nil, types.DefaultTaxonomy(), nil)
+	_, _, cs, err := dnasync.ResolveSubjectEID("file", "steward-D", "file:/tmp/x", nil, types.DefaultTaxonomy(), nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, cs)
 	require.True(t, cs.AsOf.IsZero(), "ClaimScope.AsOf must be zero; caller sets it")
@@ -153,9 +153,9 @@ func TestResolve_ClusteredVMSource_TwoStewards(t *testing.T) {
 	}
 	shared := verified("shared-cluster", "node-a", "node-b")
 
-	eid1, src1, _, err := dnasync.ResolveSubjectEID("vm", "node-a", "vm:shared-vm", payload("node-a"), types.DefaultTaxonomy(), shared)
+	eid1, src1, _, err := dnasync.ResolveSubjectEID("vm", "node-a", "vm:shared-vm", payload("node-a"), types.DefaultTaxonomy(), shared, nil)
 	require.NoError(t, err)
-	eid2, src2, _, err := dnasync.ResolveSubjectEID("vm", "node-b", "vm:shared-vm", payload("node-b"), types.DefaultTaxonomy(), shared)
+	eid2, src2, _, err := dnasync.ResolveSubjectEID("vm", "node-b", "vm:shared-vm", payload("node-b"), types.DefaultTaxonomy(), shared, nil)
 	require.NoError(t, err)
 
 	require.Equal(t, eid1.String(), eid2.String(), "both nodes must produce the same cluster-scoped EID")
@@ -177,7 +177,7 @@ func TestResolve_UnverifiedClusterClaimIsHostScoped(t *testing.T) {
 	}
 	// evil-node is a verified member of attacker-cluster only.
 	eid, src, cs, err := dnasync.ResolveSubjectEID("vm", "evil-node", "vm:critical-db", payload,
-		types.DefaultTaxonomy(), verified("attacker-cluster", "evil-node"))
+		types.DefaultTaxonomy(), verified("attacker-cluster", "evil-node"), nil)
 	require.NoError(t, err)
 	require.Equal(t, "host:evil-node/vm:critical-db", eid.String(),
 		"an unverified cluster claim must not reach the eid authority segment")
@@ -193,7 +193,7 @@ func TestResolve_NilMembershipDeniesClusterClaim(t *testing.T) {
 		"ha_role": map[string]interface{}{"cluster_name": "prod-cluster"},
 	}
 	eid, _, cs, err := dnasync.ResolveSubjectEID("vm", "node-1", "vm:app1", payload,
-		types.DefaultTaxonomy(), nil)
+		types.DefaultTaxonomy(), nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, "host:node-1/vm:app1", eid.String())
 	require.NotNil(t, cs)
@@ -219,7 +219,7 @@ func TestResolve_MalformedClusterNamesRejected(t *testing.T) {
 				"ha_role": map[string]interface{}{"cluster_name": clusterName},
 			}
 			eid, _, cs, err := dnasync.ResolveSubjectEID("vm", "node-1", "vm:app1", payload,
-				types.DefaultTaxonomy(), verified(clusterName, "node-1"))
+				types.DefaultTaxonomy(), verified(clusterName, "node-1"), nil)
 			require.NoError(t, err)
 			require.Equal(t, "host:node-1/vm:app1", eid.String(),
 				"a malformed cluster name must never become an authority segment")
@@ -236,7 +236,7 @@ func TestResolve_LongestValidClusterNameAccepted(t *testing.T) {
 		"ha_role": map[string]interface{}{"cluster_name": clusterName},
 	}
 	eid, _, cs, err := dnasync.ResolveSubjectEID("vm", "node-1", "vm:app1", payload,
-		types.DefaultTaxonomy(), verified(clusterName, "node-1"))
+		types.DefaultTaxonomy(), verified(clusterName, "node-1"), nil)
 	require.NoError(t, err)
 	require.Equal(t, "cluster:"+clusterName+"/vm:app1", eid.String())
 	require.Nil(t, cs)

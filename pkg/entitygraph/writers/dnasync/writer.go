@@ -50,6 +50,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -83,6 +84,7 @@ const maxEdgesPerSubject = 1024
 type Writer struct {
 	provider   interfaces.EntityGraphProvider
 	membership ClusterMembership
+	dirAuth    DirectoryAuthority
 }
 
 // Option configures a Writer at construction time.
@@ -99,6 +101,32 @@ type Option func(*Writer)
 // create one.
 func WithClusterMembership(m ClusterMembership) Option {
 	return func(w *Writer) { w.membership = m }
+}
+
+// WithDirectoryAuthority supplies the controller-side verifier that decides whether
+// a peer may write directory:<domain>/... entities (see DirectoryAuthority in
+// resolve.go). A Writer built without it, or with a nil verifier, drops every
+// directory fragment: it is counted and logged, never written under a host scope.
+func WithDirectoryAuthority(d DirectoryAuthority) Option {
+	return func(w *Writer) { w.dirAuth = d }
+}
+
+// batchDirectoryAuthority memoizes a DirectoryAuthority per (peer, domain) for the
+// duration of one delta batch, so a batch of thousands of objects costs one
+// verifier lookup per domain rather than one per object.
+type batchDirectoryAuthority struct {
+	inner DirectoryAuthority
+	cache map[[2]string]bool
+}
+
+func (b *batchDirectoryAuthority) IsDirectoryAuthority(peer, domain string) bool {
+	k := [2]string{peer, domain}
+	if v, ok := b.cache[k]; ok {
+		return v
+	}
+	v := b.inner.IsDirectoryAuthority(peer, domain)
+	b.cache[k] = v
+	return v
 }
 
 // New returns a Writer backed by provider. provider must not be nil.
@@ -191,6 +219,14 @@ func (w *Writer) writeFragments(
 	subjectCapFragments := 0               // fragments whose declarations maxEdgesPerSubject dropped
 	lastSubjectCapFragID := ""
 	lastDroppedFragID := ""
+	directoryDrops := map[DirectoryDropReason]int{} // directory fragments dropped, by reason
+	lastDirectoryDropFragID := ""
+
+	// One answer per (peer, domain) for the whole batch.
+	var dirAuth DirectoryAuthority
+	if w.dirAuth != nil {
+		dirAuth = &batchDirectoryAuthority{inner: w.dirAuth, cache: map[[2]string]bool{}}
+	}
 
 	for _, frag := range fragments {
 		fragID := frag.GetFragmentId()
@@ -235,9 +271,34 @@ func (w *Writer) writeFragments(
 		// This is the sole authority for eid construction (authority-boundary rule),
 		// and w.membership is the only channel by which steward-supplied payload data
 		// can influence an authority segment.
-		eid, src, cs, err := ResolveSubjectEID(kind, peerHostAuthority, fragID, payload, taxonomy, w.membership)
+		eid, src, cs, err := ResolveSubjectEID(kind, peerHostAuthority, fragID, payload, taxonomy, w.membership, dirAuth)
 		if err != nil {
+			// An unverified directory fragment is skipped and counted. It is never
+			// written, and never re-homed under host:<peer>.
+			var drop *DirectoryDropError
+			if errors.As(err, &drop) {
+				directoryDrops[drop.Reason]++
+				lastDirectoryDropFragID = fragID
+				continue
+			}
 			return fmt.Errorf("dnasync/writer: %w", err)
+		}
+
+		// Directory membership is the member_of attribute, not graph edges, so a
+		// directory fragment's edge declarations are discarded unread. The key is
+		// still removed so it is never stored as an entity attribute.
+		if eid.AuthorityType() == "directory" {
+			delete(payload, edgesKey)
+			allObs = append(allObs, types.Observation{
+				Source:     src,
+				ObservedAt: observedAt,
+				RecordedAt: now,
+				Subject:    eid.String(),
+				Kind:       types.ObservationKindState,
+				Confidence: confidence,
+				Payload:    payload,
+			})
+			continue
 		}
 
 		// Decode edge declarations. This strips __entitygraph_edges from payload
@@ -295,6 +356,15 @@ func (w *Writer) writeFragments(
 			"dropped_fragments", subjectCapFragments,
 			"last_dropped_fragment_id", logging.SanitizeLogValue(lastSubjectCapFragID),
 			"limit", maxEdgesPerSubject,
+		)
+	}
+
+	for reason, n := range directoryDrops {
+		slog.Warn("dnasync: directory fragments dropped, not verified as directory authority",
+			"peer", logging.SanitizeLogValue(peerHostAuthority),
+			"reason", string(reason),
+			"dropped_fragments", n,
+			"last_dropped_fragment_id", logging.SanitizeLogValue(lastDirectoryDropFragID),
 		)
 	}
 

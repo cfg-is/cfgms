@@ -114,8 +114,13 @@ func (w *Writer) WriteDriftDiffs(
 		// ha_role.cluster_name out of that payload) cannot fire and resolution falls
 		// through to the host-scoped branch. That is the fail-closed direction — the
 		// EID authority is then the mTLS-verified peer, never a steward-supplied name.
-		eid, src, _, err := ResolveSubjectEID(kind, peerHostAuthority, fragID, nil, taxonomy, w.membership)
+		eid, src, _, err := ResolveSubjectEID(kind, peerHostAuthority, fragID, nil, taxonomy, w.membership, nil)
 		if err != nil {
+			// A directory fragment carries no drift: it has no host-scoped EID to record
+			// against, so it is skipped rather than failing the batch.
+			if IsDirectoryDrop(err) {
+				continue
+			}
 			return fmt.Errorf("dnasync/driftdiff: %w", err)
 		}
 
