@@ -12,7 +12,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
-	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // THROWAWAY: proves architecture-check fails (Issue #5603)
 )
 
 // newTestCertManagerForProvisioning creates a real cert.Manager with a CA and a
