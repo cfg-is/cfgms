@@ -414,7 +414,7 @@ by a steward) and have no steward-pull DNA observation path (see Workflow module
 | `user` | stdlib | `os=windows\|linux\|darwin` | Bounded: local-user inventory; every platform has a local user database |
 | `hyperv` | extended (steward) | `hyperv_enabled=true` | Bounded: VM + cluster inventory; activates on Hyper-V hosts via the already-shipped `hyperv_enabled` DNA fact |
 | `acme` | extended (steward) | `os=linux\|darwin\|windows` | Bounded: ACME cert-store enumeration; applicable on any steward OS |
-| `activedirectory` | extended (steward) | `os=windows` | Bounded: local AD objects via ADSI; Windows-exclusive interface |
+| `activedirectory` | extended (steward) | `ad_pdc_emulator=true` | Bounded: per-object user and group inventory (`directory_user`, `directory_group`, direct membership); activates on exactly one domain controller per domain, the PDC-emulator role holder, via the `ad_pdc_emulator` DNA fact; reads through a fixed, hash-checked embedded PowerShell script run with `-File` |
 | `github_runner` | extended (steward) | `os=linux\|windows` | Bounded: runner install state + service state; active on supported platforms |
 | `osquery` | extended (steward) | omitted (pending) | Bounded, inventory-worthy domain via curated osquery queries (host:cpu/memory/os/bios); observe_when predicate will be added by the ADR-024 epic |
 

@@ -4,266 +4,207 @@
 
 ## Purpose and scope
 
-The Active Directory module provides secure, credential-free integration with local Active Directory domains using Windows system context APIs. This module is designed to run on Windows stewards that are members of an Active Directory domain, leveraging the system service account for authentication and authorization.
+The Active Directory module reads a local Active Directory domain from a Windows
+domain controller through the steward's system context. It needs no stored
+credentials: the steward runs as SYSTEM on the domain controller, which can read
+the directory.
 
-## Overview
+The module reports every user and group of the domain, with direct group
+membership, as per-object DNA. It activates on exactly one domain controller per
+domain: the holder of the PDC-emulator role.
 
-The Active Directory module provides secure, credential-free integration with local Active Directory domains using Windows system context APIs. This module is designed to run on Windows stewards that are members of an Active Directory domain, leveraging the system service account for authentication and authorization.
+## Activation
 
-## Key Features
+```yaml
+observe_when:
+  - fact: ad_pdc_emulator
+    equals: "true"
+```
 
-- **System Context Authentication**: Uses Windows system context (typically SYSTEM account) instead of stored credentials
-- **PowerShell Integration**: Leverages the Windows Active Directory PowerShell module for robust AD operations
-- **Directory DNA Collection**: Comprehensive AD domain statistics and metadata collection for drift detection
-- **Multi-Object Support**: Supports users, groups, computers, and organizational units
-- **Zero Credential Storage**: No credential storage or management required - relies on Windows authentication
+`ad_pdc_emulator` is a baseline steward DNA fact. It is `"true"` only on the
+domain controller that holds the PDC-emulator role, so one host per domain
+reports the inventory. When the role holder cannot be resolved, no host reports
+for that cycle and the previously reported inventory stays in place.
 
-## Architecture
+## Per-object inventory
 
-### Execution Environment
-- **Executor Type**: `steward` - Runs locally on Windows steward systems
-- **Platform Support**: Windows only (requires Windows Active Directory PowerShell module)
-- **Authentication**: Windows system context (service account permissions)
+The module owns two per-object kinds:
 
-### System Requirements
-- Windows Server 2012 R2+ or Windows 10/11
-- Active Directory PowerShell module installed
-- Steward running as service with system-level privileges
-- Domain membership (steward must be domain-joined)
+```yaml
+owns:
+  - kind: directory_user
+    per_object: true
+  - kind: directory_group
+    per_object: true
+```
+
+`Get("directory_user")` and `Get("directory_group")` return the object list under
+the reserved `__cfgms_objects` key. Each entry has an `id` (the objectGUID) and an
+`attrs` map. The steward emits one DNA fragment per object, with fragment ID
+`<kind>:<objectGUID>`. Both IDs are reserved: a declared resource named
+`directory_user` or `directory_group` is rejected.
+
+### User attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `sam_account_name` | SAM account name |
+| `user_principal_name` | User principal name |
+| `display_name` | Display name |
+| `mail` | Mail address |
+| `enabled` | Whether the account is enabled |
+| `distinguished_name` | Distinguished name |
+| `object_sid` | Security identifier |
+| `when_created` | Creation time, ISO-8601 UTC |
+| `directory_domain` | DNS name of the domain |
+| `managed` | Whether CFGMS manages the object (always `false` for now) |
+| `member_of` | Sorted objectGUIDs of the user's direct groups |
+
+### Group attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `sam_account_name` | SAM account name |
+| `display_name` | Display name |
+| `distinguished_name` | Distinguished name |
+| `group_scope` | `DomainLocal`, `Global` or `Universal` |
+| `group_category` | `Security` or `Distribution` |
+| `directory_domain` | DNS name of the domain |
+| `managed` | Whether CFGMS manages the object (always `false` for now) |
+| `member_of` | Sorted objectGUIDs of the groups this group is a direct member of |
+| `other_members` | Direct members that are neither users nor groups, sorted by type then id, each `{type, id, name}`; `type` is `computer`, `contact`, `foreign_security_principal` or `other` |
+
+These other members do not become inventory objects of their own.
+
+### How membership is read
+
+A group's own member list is never read. AD Web Services returns at most
+`MaxGroupOrMemberEntries` values of a membership attribute per object (5,000 by
+default), so reading a large group's members would silently drop some of them.
+Membership comes from the `memberOf` back-link instead:
+
+- A user's and a group's direct memberships are their own `member_of`. A large
+  group's membership is therefore carried on its members' `member_of`, not on
+  the group.
+- `other_members` is built from one paged query per member class (computers,
+  contacts and foreign security principals, then any other non-user, non-group
+  object) for objects that are members of something; each such object is listed
+  under every group in its `memberOf`.
+- The same limit can cap a single object's `memberOf`. When a `memberOf` list
+  reaches 5,000 values it may be incomplete, so the object's
+  `member_of_truncated` is set. When a contributing object's `memberOf` reached
+  the limit, the groups it lists get `other_members_truncated`. A possibly
+  incomplete list is always flagged, never reported as complete.
+
+### Bounds
+
+- `member_of` and `other_members` hold at most 10,000 entries per object. A
+  longer list keeps its first 10,000 entries in sorted order and sets
+  `member_of_truncated: true` or `other_members_truncated: true`; the module logs
+  the number of truncated objects, never names.
+- One read holds at most 200,000 objects. A larger domain fails the read rather
+  than reporting a partial inventory. One `Get` holds up to that many objects
+  (about 1 KB each) in memory once.
+- No volatile attributes (no last-changed or last-logon times) are reported, so
+  an unchanged directory produces unchanged fragment hashes.
+
+## Fixed read script
+
+All PowerShell runs as:
+
+```text
+powershell.exe -NoProfile -NonInteractive -File <staged read script>
+```
+
+- The read script (`scripts/read.ps1`) is embedded in the steward binary. Nothing
+  is composed at runtime: there is no inline command string, no encoded command
+  and no string formatting of PowerShell.
+- The script is staged in `%ProgramData%\cfgms\activedirectory-scripts`, which is
+  secured to SYSTEM and Administrators before every stage. Its SHA-256 is compared
+  with the embedded constant before every run, and a mismatch refuses to run.
+- The operation and its parameters (operation, page size, domain) go in as one
+  JSON document on stdin. The script validates them and uses them only as typed
+  cmdlet parameters; nothing user-derived reaches argv or script text.
+- The script writes one JSON object per line. On failure it writes a fixed error
+  code and never echoes request values. The module's errors carry at most a
+  bounded stderr tail with every request value removed.
+- Reads page through the directory (default page size 1000).
+- The execution policy is not changed. Hosts that enforce `AllSigned` need the
+  script Authenticode-signed, which is a release-signing concern.
 
 ## Configuration options
-
-### Minimal Configuration
-The module requires minimal configuration due to system context authentication:
 
 ```yaml
 operation_type: read
 object_types:
   - user
   - group
-  - computer
-  - organizational_unit
-enable_dna_collection: true
 ```
-
-### Configuration Fields
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `operation_type` | string | Yes | "read" | Type of operations (read/write) |
-| `object_types` | array | Yes | - | AD object types to manage |
-| `search_base` | string | No | Auto-detected | Search base DN (auto-discovers if not specified) |
-| `page_size` | integer | No | 100 | Number of objects to retrieve per page |
-| `request_timeout` | duration | No | 30s | Timeout for PowerShell operations |
-| `enable_dna_collection` | boolean | No | true | Enable directory DNA collection |
+| `operation_type` | string | Yes | "read" | Type of operations |
+| `object_types` | array | Yes | - | AD object types |
+| `search_base` | string | No | Auto-detected | Search base DN |
+| `page_size` | integer | No | 1000 | Directory paging size (1-5000) |
+| `request_timeout` | duration | No | 30s | Timeout for reads |
+| `enable_dna_collection` | boolean | No | true | Enable directory inventory |
 
-## Supported Operations
+## Supported operations
 
-### Read Operations
-- `status` - Get system and domain status
-- `query:type:id` - Query specific AD object by ID
-- `list:type` - List AD objects by type
-- `dna_collection` - Collect comprehensive directory DNA
+| Resource ID | Description |
+|-------------|-------------|
+| `status` | Domain, domain controller and forest summary, plus module counters |
+| `directory_user` | Per-object user inventory |
+| `directory_group` | Per-object group inventory |
 
-### Supported Object Types
-- `user` - AD user accounts (including computer accounts)
-- `group` - AD groups (security and distribution)
-- `computer` - AD computer objects
-- `organizational_unit` / `ou` - Organizational units
-- `gpo` / `group_policy` - Group Policy Objects (read-only)
-
-## Usage examples
-
-### Query Specific User
-```bash
-cfg steward get-config steward-id "query:user:Administrator"
-```
-
-### List All Groups
-```bash
-cfg steward get-config steward-id "list:group"
-```
-
-### Get System Status
-```bash
-cfg steward get-config steward-id "status"
-```
-
-### Collect Directory DNA
-```bash
-cfg steward get-config steward-id "dna_collection"
-```
+No write operations are implemented.
 
 ## Security considerations
 
-### Zero-Credential Design
-- **No Stored Credentials**: Module does not store or manage any AD credentials
-- **System Context**: Leverages Windows service account security context
-- **Automatic Authentication**: Uses Kerberos/NTLM through Windows subsystem
-- **Minimal Attack Surface**: No credential exposure risk
+- **No stored credentials**: the module relies on the steward's SYSTEM context.
+- **Required permissions**: "Log on as a service" and the local system account
+  context. SYSTEM on a domain controller needs no further rights to read the
+  directory.
+- **Behavioral envelope**: the module shells out only to `powershell.exe`, and
+  reads and writes only its script directory.
 
-### Required Permissions
-The steward service account requires:
-- **Log on as a service** - Standard service account permission
-- **Act as part of operating system** - For system context access
-- **Domain membership** - Computer must be domain-joined
+## Requirements
 
-### Audit and Compliance
-- All operations are logged with security event correlation
-- Sensitive operations (create/update/delete) are audited
-- No credential information is logged or stored
+- Windows Server domain controller with the Active Directory PowerShell module
+- Steward running as a service under SYSTEM
 
-## Directory DNA Integration
+## Development and testing
 
-The module integrates with the DirectoryDNA framework to provide:
+Unit tests drive the module through a test implementation of the script runner
+that serves canned and generated script output:
 
-### Collected Metrics
-- **Domain Statistics**: Total users, groups, computers, OUs
-- **Domain Controller Information**: DC names, roles, health status
-- **Group Policy Data**: GPO count, names, versions
-- **Forest Information**: Forest mode, schema master, naming contexts
-- **Security Metrics**: Enabled/disabled accounts, group types
-
-### DNA Data Structure
-```json
-{
-  "collection_time": "2023-01-01T12:00:00Z",
-  "success": true,
-  "source": "activedirectory_system",
-  "dna": {
-    "domain_info": {
-      "domain_name": "example.com",
-      "forest_name": "example.com",
-      "domain_mode": "WinThreshold",
-      "forest_mode": "WinThreshold"
-    },
-    "statistics": {
-      "total_users": 150,
-      "enabled_users": 145,
-      "disabled_users": 5,
-      "total_groups": 75,
-      "security_groups": 65,
-      "distribution_groups": 10
-    }
-  }
-}
-```
-
-## Error Handling
-
-### Common Error Scenarios
-- **Module Not Available**: Active Directory PowerShell module not installed
-- **Domain Access**: System cannot access domain controller
-- **Permission Denied**: Insufficient system permissions
-- **PowerShell Execution**: PowerShell script execution failures
-
-### Error Response Format
-```json
-{
-  "success": false,
-  "error": "PowerShell execution failed: Access denied",
-  "response_time": "1.5s"
-}
-```
-
-## Performance Considerations
-
-### Optimization Features
-- **Configurable Page Size**: Control memory usage for large result sets
-- **Request Timeouts**: Prevent hung operations
-- **Efficient Queries**: Uses PowerShell filters for server-side filtering
-- **Minimal Data Transfer**: Returns only requested fields
-
-### Monitoring Metrics
-- `ad_local_requests_total` - Total requests processed
-- `ad_local_request_duration_seconds` - Request processing time
-- `ad_local_errors_total` - Total errors encountered
-- `ad_dna_collection_status` - DNA collection health status
-
-## Comparison with Network AD Module
-
-| Feature | System Context Module | Network AD Module |
-|---------|----------------------|-------------------|
-| **Executor** | Steward (local) | Outpost (network) |
-| **Authentication** | System context | LDAP credentials |
-| **Credential Storage** | None | Encrypted storage |
-| **Performance** | High (local APIs) | Medium (network LDAP) |
-| **Security** | Windows integrated | mTLS + credentials |
-| **Use Case** | Domain controllers | Remote management |
-
-## Development and Testing
-
-### Unit Tests
-The module includes comprehensive unit tests for:
-- Configuration validation
-- Object conversion methods
-- Error handling scenarios
-- Statistics tracking
-- YAML serialization
-
-### Integration Tests
-Integration tests are provided but require a Windows AD environment:
-- System access verification
-- Real AD object queries
-- Directory DNA collection
-- Performance benchmarks
-
-Run tests with:
 ```bash
-go test -v ./features/modules/extended/activedirectory
+go test -v ./features/modules/extended/activedirectory/...
 ```
+
+The runner tests (fixed argv, no request values in errors, script integrity)
+run on Windows. The staging test needs an elevated administrator. The
+integration tests under `tests/` need a domain controller and skip elsewhere.
 
 ## Troubleshooting
 
-### Common Issues
+**`read script reported ad_module_unavailable`**
+- The Active Directory PowerShell module is not installed:
+  `Get-Module -ListAvailable ActiveDirectory`
 
-**"PowerShell execution failed"**
-- Verify PowerShell execution policy allows script execution
-- Check if Active Directory module is installed: `Get-Module -ListAvailable ActiveDirectory`
+**`secure script directory`**
+- The steward could not secure `%ProgramData%\cfgms\activedirectory-scripts`;
+  it must run as SYSTEM or an elevated administrator.
 
-**"System AD access verification failed"**
-- Verify computer is domain-joined: `Test-ComputerSecureChannel`
-- Check steward service account permissions
-- Verify domain controller connectivity
-
-**"Module not configured"**
-- Ensure module configuration is applied before use
-- Verify all required fields are provided in configuration
-
-### Debug Logging
-Enable debug logging to troubleshoot issues:
-```yaml
-logging:
-  level: debug
-  components:
-    - activedirectory
-```
+**`staged read script does not match the embedded script`**
+- The staged script was changed after staging. The module refuses to run it and
+  leaves the file in place for investigation.
 
 ## Known limitations
 
-### Platform Restrictions
-- **Windows Only**: Requires Windows platform with Active Directory PowerShell module
-- **Domain Membership Required**: Steward must be domain-joined for system context access
-- **Service Account Privileges**: Requires elevated service account permissions
-
-### Functional Limitations
-- **Read-Heavy Operations**: Optimized for read operations; write operations may have higher latency
-- **PowerShell Dependency**: Requires PowerShell and AD module availability
-- **Local Domain Only**: Cannot query remote domains without trust relationships
-
-### Performance Considerations
-- **PowerShell Overhead**: PowerShell execution adds processing overhead compared to native LDAP
-- **Large Result Sets**: Memory usage scales with query result size
-- **Concurrent Limits**: Limited by PowerShell's concurrent execution capabilities
-
-## Version History
-
-- **v1.0.0** - Initial system-context implementation with PowerShell integration
-- **v1.0.0** - DirectoryDNA integration and comprehensive testing
-- **v1.0.0** - Support for users, groups, computers, and organizational units
-
-## Related Modules
-
-- **directory** - Generic directory operations and provider abstraction
-- **entra_user** - Azure AD/Entra ID user management
-- **conditional_access** - Azure AD conditional access policies
+- Windows domain controllers only.
+- Users and groups only; computers, OUs and GPOs are not inventoried.
+- Group membership is direct membership; nested membership is not expanded.
+- `member_of` lists only groups of the domain being read; membership in a group
+  of another domain is not listed.

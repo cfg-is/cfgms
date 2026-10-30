@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/extended/activedirectory"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -34,24 +35,36 @@ func TestWindowsActiveDirectoryIntegration(t *testing.T) {
 		}
 	})
 
-	t.Run("UserQuery", func(t *testing.T) {
-		result, err := module.Get(ctx, "query:user:Administrator")
-		if err != nil {
-			t.Logf("User query test failed (expected in non-AD environment): %v", err)
-			t.Skip("Requires AD environment")
+	// Per-object inventory: one object per user / group under the reserved
+	// per-object key, each with an objectGUID id and an attrs map.
+	for _, kind := range []string{"directory_user", "directory_group"} {
+		kind := kind
+		t.Run("Inventory_"+kind, func(t *testing.T) {
+			result, err := module.Get(ctx, kind)
+			if err != nil {
+				t.Logf("Inventory read failed (expected without a domain controller): %v", err)
+				t.Skip("Requires AD environment")
+			}
+
+			objects, ok := result.AsMap()[modules.PerObjectKey].([]interface{})
+			assert.True(t, ok, "inventory must be returned under %s", modules.PerObjectKey)
+			for _, entry := range objects {
+				obj, ok := entry.(map[string]interface{})
+				assert.True(t, ok)
+				assert.NotEmpty(t, obj["id"])
+				attrs, ok := obj["attrs"].(map[string]interface{})
+				assert.True(t, ok)
+				assert.Contains(t, attrs, "member_of")
+				assert.Equal(t, false, attrs["managed"])
+			}
+		})
+	}
+
+	t.Run("RemovedOperationsRejected", func(t *testing.T) {
+		for _, op := range []string{"query:user:Administrator", "list:user", "dna_collection"} {
+			_, err := module.Get(ctx, op)
+			assert.Error(t, err, "operation %q was removed", op)
 		}
-
-		assert.NotNil(t, result)
-	})
-
-	t.Run("DirectoryDNACollection", func(t *testing.T) {
-		result, err := module.Get(ctx, "dna_collection")
-		if err != nil {
-			t.Logf("DNA collection test failed (expected in non-AD environment): %v", err)
-			t.Skip("Requires AD environment")
-		}
-
-		assert.NotNil(t, result)
 	})
 }
 
