@@ -2615,6 +2615,26 @@ Get a specific report template.
 
 **Authentication:** Required
 
+#### Custom reports and custom templates
+
+Custom reports are caller-defined queries over the caller's own tenant data; custom templates are reusable, durable definitions of them. They live under `/api/v1/reports/custom` and `/api/v1/reports/custom-templates`; the built-in `/templates` routes are unchanged.
+
+| Method and path | Permission | Purpose |
+|---|---|---|
+| `POST /api/v1/reports/custom/generate` | `report:generate` | Generate a custom report from a query; large results return `is_streamed`, `stream_token` and `total_pages` |
+| `GET /api/v1/reports/custom/data` | `report:read` | One page of a streamed report: query parameters `stream_token`, `page` (default 1), `page_size`; the `X-Has-More` response header reports whether more pages follow |
+| `GET /api/v1/reports/custom-templates` | `report:read` | Templates owned by or shared with the caller's tenant |
+| `GET /api/v1/reports/custom-templates/{id}` | `report:read` | One template |
+| `POST /api/v1/reports/custom-templates` | `report:manage` | Create or update a template |
+| `DELETE /api/v1/reports/custom-templates/{id}` | `report:manage` | Delete a template the caller's tenant owns |
+| `POST /api/v1/reports/custom-templates/{id}/share` | `report:manage` | Share a template (`shared_with_tenants`, `permissions` of `read`, `execute`, `modify`, optional `expires_at`) with tenants under the same MSP |
+
+`report:manage` requires strong assurance; API keys cannot hold it.
+
+**Tenant scope:** The tenant for every custom route is the caller's own tenant from the authenticated session. `tenant_id`, `created_by` and `shared_by` in a request body, and `template_id` in a share body, are overwritten and never used as input. A request with no tenant in the session is refused with 403. A root-scoped caller is refused with 403 on `POST /custom/generate` and `GET /custom/data`: custom reports cover only the caller's own non-root tenant, and cross-tenant reports stay on the built-in routes.
+
+**Errors:** a template that does not exist and one owned by another tenant both return 404 with the same body; an unknown, expired or foreign `stream_token` returns 404; validation and query errors return 400; a refused share target returns 400 with a message that names no tenant; other errors return 500 with a generic message. When the managers are not wired the routes return 503 `custom reports not available`. The `stream_token` is a bearer for a cached page and is never logged or echoed.
+
 #### GET /api/v1/reports/dashboard/overview
 
 Dashboard overview report.

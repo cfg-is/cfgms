@@ -8,7 +8,8 @@ dashboards, and drift analysis, with multi-format export and REST API access.
 ```
 features/reports/
 ├── api/                  # REST API endpoints
-│   └── handlers.go       # Dashboard and report HTTP handlers
+│   ├── handlers.go       # Dashboard and report HTTP handlers
+│   └── custom_handlers.go # Custom report and custom template routes
 ├── engine/               # Report generation engine
 │   ├── engine.go         # Core report generation logic
 │   ├── advanced.go       # Audit-integrated, multi-tenant report generation (not yet wired to an API endpoint)
@@ -72,6 +73,9 @@ through `features/reports/api`, which imports `features/reports/interfaces`, wit
 - `GET /api/v1/reports/dashboard/alerts` — active drift alerts, with acknowledge/silence state
 - `GET /api/v1/reports/compliance/status` — compliance score and summary
 - `GET /api/v1/reports/drift/summary` — drift event summary
+- `POST /api/v1/reports/custom/generate` — generate a custom report for the caller's own tenant (`report:generate`)
+- `GET /api/v1/reports/custom/data` — one page of a streamed custom report (`report:read`)
+- `GET|POST /api/v1/reports/custom-templates`, `GET|DELETE /api/v1/reports/custom-templates/{id}`, `POST /api/v1/reports/custom-templates/{id}/share` — custom templates (`report:read`; writes need `report:manage`)
 
 ## Integration
 

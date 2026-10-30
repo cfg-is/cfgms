@@ -530,3 +530,37 @@ func TestStartupScan_NoWarnForWorkflowWriteExecuteKey(t *testing.T) {
 	assert.Nil(t, capLog.kvValue("overlapping_permissions"),
 		"a key holding only workflow:write/execute must not be flagged")
 }
+
+// TestPermissionAssurance_ReportManage_FloorEnforced drives the real requirePermission
+// middleware on POST /api/v1/reports/custom-templates (Issue #5686).
+func TestPermissionAssurance_ReportManage_FloorEnforced(t *testing.T) {
+	req, found := permissionAssurance["report:manage"]
+	require.True(t, found, "report:manage must be in permissionAssurance")
+	assert.Equal(t, session.AssuranceStrong, req.Min)
+	assert.True(t, knownPermissions["report:manage"], "report:manage must be a known permission")
+
+	server := setupTestServer(t)
+	reached := false
+	probe := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := server.requirePermission("report", "manage")(probe)
+
+	serve := func(p *Principal) *httptest.ResponseRecorder {
+		reached = false
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/reports/custom-templates", nil)
+		r = r.WithContext(context.WithValue(r.Context(), principalContextKey, p))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+		return rec
+	}
+
+	rec := serve(&Principal{ID: "api-key", Assurance: session.AssuranceMachine, Permissions: []string{"report:manage"}})
+	assert.NotEqual(t, http.StatusOK, rec.Code, "a machine-assurance principal must be refused")
+	assert.False(t, reached)
+
+	rec = serve(&Principal{ID: "strong-user", Assurance: session.AssuranceStrong, Permissions: []string{"report:manage"}})
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, reached)
+}

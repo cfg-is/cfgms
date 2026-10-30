@@ -133,6 +133,9 @@ type Handler struct {
 	// readScope is the controller's tenant read decision for root callers. Nil
 	// fails closed (failClosedScope).
 	readScope TenantReadScopeFunc
+	// customTemplates and customBuilder serve the /custom routes; either nil answers 503.
+	customTemplates interfaces.CustomTemplateManager
+	customBuilder   interfaces.CustomReportBuilder
 }
 
 // TenantAncestryFunc reports whether descendant is a descendant of ancestor in
@@ -218,6 +221,16 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 	router.Handle("/dashboard/alerts", wrap("read", h.getDashboardAlerts)).Methods("GET")
 	router.Handle("/compliance/status", wrap("read", h.getComplianceStatus)).Methods("GET")
 	router.Handle("/drift/summary", wrap("read", h.getDriftSummary)).Methods("GET")
+
+	// Custom reports and templates. Registered unconditionally; the injected managers are
+	// checked per request so SetCustomReports order does not matter.
+	router.Handle("/custom/generate", wrap("generate", h.generateCustomReport)).Methods("POST")
+	router.Handle("/custom/data", wrap("read", h.getCustomReportData)).Methods("GET")
+	router.Handle("/custom-templates", wrap("read", h.listCustomTemplates)).Methods("GET")
+	router.Handle("/custom-templates", wrap("manage", h.createCustomTemplate)).Methods("POST")
+	router.Handle("/custom-templates/{id}", wrap("read", h.getCustomTemplate)).Methods("GET")
+	router.Handle("/custom-templates/{id}", wrap("manage", h.deleteCustomTemplate)).Methods("DELETE")
+	router.Handle("/custom-templates/{id}/share", wrap("manage", h.shareCustomTemplate)).Methods("POST")
 
 	h.logger.Info("registered reports API routes")
 }

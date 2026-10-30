@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	reportapi "github.com/cfgis/cfgms/features/reports/api"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 )
@@ -93,6 +94,7 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"POST", "/api/v1/stewards/test-steward-id/identity/move", "steward:move-identity"},              // ADR-034 §5
 	{"POST", "/api/v1/stewards/test-steward-id/services/spooler/actions", "steward:service-control"}, // Issue #4628
 	{"POST", "/api/v1/stewards/test-steward-id/processes/4242/actions", "steward:process-control"},   // Issue #4628
+	{"POST", "/api/v1/reports/custom-templates", "report:manage"},                                    // Issue #5686: custom template writes
 	{"DELETE", "/api/v1/stewards/test-steward-id", "steward:decommission"},
 	{"POST", "/api/v1/accounts", "account:create"},
 	{"PUT", "/api/v1/accounts/test-user", "account:update"}, // Issue #3126: update permissions/disabled (Tier-3: can disable accounts)
@@ -244,6 +246,8 @@ func TestF2_AssuranceGate_ParityWithPermissionRegistry(t *testing.T) {
 	server := setupTestServer(t)
 	// The workflow routes only exist once a workflow handler is wired (Issue #4610).
 	server.SetWorkflowHandler(NewWorkflowHandler(nil, nil, nil, logging.NewNoopLogger()))
+	// The report routes only exist once a reports handler is wired (Issue #5686).
+	server.SetReportsHandler(reportapi.New(nil, nil, nil, nil, logging.NewNoopLogger()))
 
 	// Part (a): verify each table entry has a permissionAssurance entry with Min > Machine.
 	for _, entry := range strongAssuranceRouteTable {
