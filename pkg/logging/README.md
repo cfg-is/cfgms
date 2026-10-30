@@ -69,3 +69,31 @@ if cfg.Debug {
 ```
 
 Never set `UnredactedSensitiveValues: true` in production code paths or as a default value.
+
+## Local System Log Subscriber (`systemlog`)
+
+`pkg/logging/subscribers/systemlog` writes to the local system log so a steward
+that cannot reach the controller (for example, no usable identity) still leaves
+its reason where a local admin looks. It is registered in the manager as
+subscriber type `systemlog`, separate from the remote-network `syslog` subscriber.
+
+| Platform | Backend |
+|----------|---------|
+| Windows | Event Log via `golang.org/x/sys/windows/svc/eventlog`; the source is registered on first use (needs SYSTEM/elevation) |
+| Linux | Local syslog socket via `log/syslog` (daemon facility) |
+| macOS | Local syslog socket via `log/syslog`; the socket feeds the unified log (surfacing there is not asserted by tests) |
+
+Configuration keys: `tag` (syslog tag / Event Log source, default `cfgms-steward`),
+`collapse_window` (duration, default `1h`), `levels` (entry levels forwarded by
+`HandleLogEntry`, default `WARN`, `ERROR`, `FATAL`), and `network`/`address`
+(Unix only, a non-default syslog socket).
+
+`Initialize` returns an error, never panics, when the backend cannot be opened;
+`Available()` then reports `false` with the reason so callers can fall back to stderr.
+
+`WriteOnce(level, key, message)` writes at `LevelInfo`, `LevelWarning` or
+`LevelError` and drops a message identical to the previous one (same key) inside
+the collapse window, so a retry loop does not flood the log. Messages are
+sanitized: control characters are replaced, length is bounded, and values that
+look like secrets (`password=`, `token=`, bearer values, PEM blocks, long opaque
+strings) are replaced with `[REDACTED]`. Pass fixed text plus a short reason, never credentials.
