@@ -20,6 +20,7 @@ type failoverManager struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	started bool
+	wg      sync.WaitGroup // monitor loop and in-flight automatic failovers
 
 	// Failover state
 	handlers       []FailoverHandler
@@ -66,7 +67,11 @@ func (fm *failoverManager) Start(ctx context.Context) error {
 	fm.started = true
 
 	// Start monitoring
-	go fm.monitorClusterHealth()
+	fm.wg.Add(1)
+	go func() {
+		defer fm.wg.Done()
+		fm.monitorClusterHealth()
+	}()
 
 	fm.logger.Info("Failover manager started",
 		"timeout", fm.cfg.Timeout,
@@ -77,11 +82,16 @@ func (fm *failoverManager) Start(ctx context.Context) error {
 }
 
 // Stop stops failover monitoring
+//
+// Stop cancels the monitor and any in-flight automatic failover, then waits for
+// those goroutines to exit. The wait happens with fm.mu released because an
+// in-flight failover holds fm.mu while it calls back into the Manager. The
+// caller must therefore not hold the Manager's mu either (Manager.Stop releases
+// it around this call), or the failover goroutine would block on it forever.
 func (fm *failoverManager) Stop(ctx context.Context) error {
 	fm.mu.Lock()
-	defer fm.mu.Unlock()
-
 	if !fm.started {
+		fm.mu.Unlock()
 		return nil
 	}
 
@@ -90,6 +100,9 @@ func (fm *failoverManager) Stop(ctx context.Context) error {
 	}
 
 	fm.started = false
+	fm.mu.Unlock()
+
+	fm.wg.Wait()
 	fm.logger.Info("Failover manager stopped")
 
 	return nil
@@ -236,9 +249,15 @@ func (fm *failoverManager) triggerAutomaticFailover(reason string) {
 		return
 	}
 
+	if fm.ctx != nil && fm.ctx.Err() != nil {
+		return
+	}
+
 	fm.logger.Info("Automatic failover triggered", "reason", reason)
 
+	fm.wg.Add(1)
 	go func() {
+		defer fm.wg.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), fm.cfg.MaxDuration)
 		defer cancel()
 
@@ -249,7 +268,7 @@ func (fm *failoverManager) triggerAutomaticFailover(reason string) {
 		fm.mu.Lock()
 		defer fm.mu.Unlock()
 
-		if fm.isFailingOver || time.Since(fm.lastFailover) < fm.cfg.GracePeriod {
+		if (fm.ctx != nil && fm.ctx.Err() != nil) || fm.isFailingOver || time.Since(fm.lastFailover) < fm.cfg.GracePeriod {
 			return
 		}
 
