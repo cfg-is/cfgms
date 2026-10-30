@@ -17,6 +17,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/windows"
+
+	"github.com/cfgis/cfgms/pkg/security"
+	"github.com/cfgis/cfgms/pkg/testutil/winacct"
 )
 
 // TestRunFresh_DeadlineKillProducesDistinguishableError is the [REQUIRED TEST]
@@ -30,6 +34,7 @@ import (
 // psHostTransport field, so a zero-value transport exercises the real path
 // without standing up the persistent PS host.
 func TestRunFresh_DeadlineKillProducesDistinguishableError(t *testing.T) {
+	useTestStagingBase(t)
 	tr := &psHostTransport{}
 
 	// A deliberately slow seed op against a short deadline: CommandContext kills
@@ -72,6 +77,7 @@ func TestRunFresh_DeadlineKillProducesDistinguishableError(t *testing.T) {
 // deadline involved) still takes the generic "fresh seed op failed" path and is
 // NOT mislabeled as a deadline kill.
 func TestRunFresh_NonZeroExitUsesGenericError(t *testing.T) {
+	useTestStagingBase(t)
 	tr := &psHostTransport{}
 
 	// Ample deadline; the script exits non-zero on its own via `exit 1`.
@@ -213,6 +219,7 @@ func funcSourceTextPS(t *testing.T, name string) string {
 // that fail before, or never reach, a Hyper-V cmdlet.
 func newTestPSHost(t *testing.T) *psHostTransport {
 	t.Helper()
+	useTestStagingBase(t) // calls stage their args files (#5635)
 	tr, err := newPSHostTransport(context.Background())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tr.Close() })
@@ -359,4 +366,173 @@ func TestPSHost_ClusterAccessHintQuotesClusterName(t *testing.T) {
 		`$ClusterName = 'lab''hv; Stop-Computer'; $me = 'LAB\NODE1$'; `+hint)
 	require.NoError(t, err)
 	assert.Equal(t, `Grant-ClusterAccess -Cluster 'lab''hv; Stop-Computer' -User 'LAB\NODE1$' -Full`, strings.TrimSpace(out))
+}
+
+// ── #5635: staging in a steward-only directory ───────────────────────────
+
+// requireElevated skips t unless the test runs elevated. Securing the Hyper-V
+// staging base assigns BUILTIN\Administrators as owner, and the tests hand
+// directories to other principals; both need an elevated administrator, as
+// the steward (a SYSTEM service) and the native Windows CI runners are.
+func requireElevated(t *testing.T) {
+	t.Helper()
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("needs an elevated administrator: securing the Hyper-V staging base assigns BUILTIN\\Administrators as owner")
+	}
+}
+
+// stagingBaseOwnedBy creates a staging base under t.TempDir() owned by the
+// owner in sddl (e.g. "O:BA") and points hypervStagingBase at it for the test.
+func stagingBaseOwnedBy(t *testing.T, sddl string) string {
+	t.Helper()
+	return stagingBaseAt(t, filepath.Join(t.TempDir(), "hyperv-staging"), sddl)
+}
+
+// stagingBaseAt creates the staging base at base, owned by the owner in sddl,
+// and points hypervStagingBase at it for the test.
+func stagingBaseAt(t *testing.T, base, sddl string) string {
+	t.Helper()
+	requireElevated(t)
+	require.NoError(t, os.Mkdir(base, 0o700))
+	sd, err := windows.SecurityDescriptorFromString(sddl)
+	require.NoError(t, err)
+	owner, _, err := sd.Owner()
+	require.NoError(t, err)
+	winacct.SetOwner(t, base, owner)
+
+	prev := hypervStagingBase
+	hypervStagingBase = base
+	t.Cleanup(func() { hypervStagingBase = prev })
+	return base
+}
+
+// useTestStagingBase points hypervStagingBase at an admin-owned temporary
+// directory, so tests that stage never write under the real %ProgramData%.
+func useTestStagingBase(t *testing.T) string {
+	t.Helper()
+	return stagingBaseOwnedBy(t, "O:BA")
+}
+
+// moveSystemTemp points the system temporary directory at a fresh directory,
+// so a regression to os.CreateTemp("", ...) would stage there.
+func moveSystemTemp(t *testing.T) {
+	t.Helper()
+	fakeTemp := filepath.Join(t.TempDir(), "system-temp")
+	require.NoError(t, os.Mkdir(fakeTemp, 0o700))
+	t.Setenv("TMP", fakeTemp)
+	t.Setenv("TEMP", fakeTemp)
+	require.True(t, strings.EqualFold(filepath.Clean(os.TempDir()), filepath.Clean(fakeTemp)))
+}
+
+// isUnderDir reports whether path lies inside dir, ignoring case.
+func isUnderDir(path, dir string) bool {
+	return strings.HasPrefix(strings.ToLower(filepath.Clean(path)),
+		strings.ToLower(filepath.Clean(dir))+string(filepath.Separator))
+}
+
+// TestRunFresh_StagesScriptInSecuredBase (REQUIRED, #5635): the script
+// runFresh hands to powershell.exe lives directly in the configured base and
+// not under os.TempDir().
+func TestRunFresh_StagesScriptInSecuredBase(t *testing.T) {
+	base := useTestStagingBase(t)
+	moveSystemTemp(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	out, err := (&psHostTransport{}).runFresh(ctx, "ScriptPath", "Write-Output $PSCommandPath", nil)
+	require.NoError(t, err)
+
+	path := strings.TrimSpace(out)
+	require.NotEmpty(t, path)
+	assert.True(t, strings.EqualFold(filepath.Dir(path), base),
+		"staged script %q must be directly in the staging base %q", path, base)
+	assert.False(t, isUnderDir(path, os.TempDir()),
+		"staged script %q must not be under the system temporary directory", path)
+	_, statErr := os.Stat(path)
+	assert.True(t, os.IsNotExist(statErr), "runFresh must remove its staged script")
+}
+
+// TestRunDetached_StagesScriptInSecuredBase (REQUIRED, #5635): the detached
+// move script lives in the configured base, and its self-delete and the reaper
+// still remove it.
+func TestRunDetached_StagesScriptInSecuredBase(t *testing.T) {
+	base := useTestStagingBase(t)
+	moveSystemTemp(t)
+
+	record := filepath.Join(t.TempDir(), "detached-path.txt")
+	expression := "Set-Content -LiteralPath '" + record + "' -Value $PSCommandPath -NoNewline"
+	exited := make(chan struct{})
+	_, err := (&psHostTransport{}).runDetached(expression, func() { close(exited) })
+	require.NoError(t, err)
+
+	select {
+	case <-exited:
+	case <-time.After(60 * time.Second):
+		t.Fatal("detached PowerShell process did not exit within 60s")
+	}
+
+	var recorded []byte
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if recorded, err = os.ReadFile(record); err == nil && len(recorded) > 0 { // #nosec G304 - test reads the file it named
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.NoError(t, err, "the detached script must record its path")
+	path := strings.TrimSpace(string(recorded))
+	assert.True(t, strings.EqualFold(filepath.Dir(path), base),
+		"detached script %q must be directly in the staging base %q", path, base)
+	assert.False(t, isUnderDir(path, os.TempDir()),
+		"detached script %q must not be under the system temporary directory", path)
+	_, statErr := os.Stat(path)
+	assert.True(t, os.IsNotExist(statErr), "the detached script must be removed after it exits")
+}
+
+// TestWriteArgsFile_StagesInSecuredBase (REQUIRED, #5635): the call-arguments
+// file lives directly in the configured base and not under os.TempDir().
+func TestWriteArgsFile_StagesInSecuredBase(t *testing.T) {
+	base := useTestStagingBase(t)
+	moveSystemTemp(t)
+
+	path, remove, err := writeArgsFile(psCall{Verb: "GetVM"})
+	require.NoError(t, err)
+	assert.True(t, strings.EqualFold(filepath.Dir(path), base),
+		"args file %q must be directly in the staging base %q", path, base)
+	assert.False(t, isUnderDir(path, os.TempDir()),
+		"args file %q must not be under the system temporary directory", path)
+
+	remove()
+	_, statErr := os.Stat(path)
+	assert.True(t, os.IsNotExist(statErr), "remove must delete the args file")
+	remove() // a second remove is a no-op
+}
+
+// TestRunFresh_RefusesBaseOwnedByUsers (REQUIRED, #5635): with a staging base
+// owned by BUILTIN\Users, runFresh returns an error naming the staging step,
+// runs no PowerShell, and leaves the base empty.
+func TestRunFresh_RefusesBaseOwnedByUsers(t *testing.T) {
+	base := stagingBaseOwnedBy(t, "O:BU")
+
+	marker := filepath.Join(t.TempDir(), "ran.txt")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := (&psHostTransport{}).runFresh(ctx, "Marker",
+		"Set-Content -LiteralPath '"+marker+"' -Value ran", nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, security.ErrUntrustedDirOwner)
+	assert.Contains(t, err.Error(), "secure staging directory")
+
+	_, statErr := os.Stat(marker)
+	assert.True(t, os.IsNotExist(statErr), "PowerShell must not run when the staging base cannot be secured")
+	entries, rerr := os.ReadDir(base)
+	require.NoError(t, rerr)
+	assert.Empty(t, entries, "nothing may be staged in a refused base")
+}
+
+func TestDefaultHypervStagingBase(t *testing.T) {
+	t.Setenv("ProgramData", `D:\PD`)
+	assert.Equal(t, `D:\PD\cfgms\hyperv-staging`, defaultHypervStagingBase())
+	t.Setenv("ProgramData", "")
+	assert.Equal(t, `C:\ProgramData\cfgms\hyperv-staging`, defaultHypervStagingBase())
 }

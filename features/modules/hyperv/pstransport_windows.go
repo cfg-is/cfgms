@@ -15,9 +15,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // psHostTransport is the post-#1894 in-host transport for the Hyper-V module.
@@ -103,6 +106,79 @@ type psHostTransport struct {
 	// closed is set true once Close has been called. Subsequent Run calls
 	// return errSessionClosed without touching stdin/stdout.
 	closed bool
+}
+
+// hypervStagingBase is the directory every file handed to an elevated
+// powershell.exe is staged in: the runFresh / runFreshNoCleanup / runDetached
+// scripts and the writeArgsFile call-arguments file. stageFile secures it with
+// security.EnsureAdminOnlyDir before every stage, so only SYSTEM and
+// Administrators can write it, unlike the system temporary directory.
+// Overridable for testing.
+var hypervStagingBase = defaultHypervStagingBase()
+
+// stagingMu serializes securing the base, creating a file in it, and the
+// Go-side removal of staged files: EnsureAdminOnlyDir walks the whole tree
+// below the base, and a concurrent removal would race that walk.
+var stagingMu sync.Mutex
+
+// stagingVanishedRetries bounds how often stageFile re-runs EnsureAdminOnlyDir
+// when its walk failed because an entry disappeared. A detached move script
+// deletes itself from its own powershell.exe process, which stagingMu cannot
+// serialize; re-running the full check after such a removal does not weaken it.
+const stagingVanishedRetries = 3
+
+// defaultHypervStagingBase returns %ProgramData%\cfgms\hyperv-staging, falling
+// back to C:\ProgramData when the ProgramData environment variable is unset. It
+// is a sibling of cert_trust's staging directory, not inside it, so the two
+// packages' tree walks never share a tree.
+func defaultHypervStagingBase() string {
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	return filepath.Join(programData, "cfgms", "hyperv-staging")
+}
+
+// stageFile secures hypervStagingBase and writes body to a new file in it,
+// created exclusively from pattern. It returns the path and a remove function
+// that is safe to call more than once. If the base cannot be secured nothing
+// is staged and the error names the staging step.
+func stageFile(pattern string, body []byte) (string, func(), error) {
+	noop := func() {}
+	stagingMu.Lock()
+	defer stagingMu.Unlock()
+
+	base := hypervStagingBase
+	var err error
+	for attempt := 0; attempt <= stagingVanishedRetries; attempt++ {
+		if err = security.EnsureAdminOnlyDir(base); err == nil || !errors.Is(err, os.ErrNotExist) {
+			break
+		}
+	}
+	if err != nil {
+		return "", noop, fmt.Errorf("hyperv-ps-host: secure staging directory: %w", err)
+	}
+
+	f, err := os.CreateTemp(base, pattern)
+	if err != nil {
+		return "", noop, fmt.Errorf("hyperv-ps-host: create staged file: %w", err)
+	}
+	path := f.Name()
+	if _, werr := f.Write(body); werr != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", noop, fmt.Errorf("hyperv-ps-host: write staged file: %w", werr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(path)
+		return "", noop, fmt.Errorf("hyperv-ps-host: close staged file: %w", cerr)
+	}
+	remove := func() {
+		stagingMu.Lock()
+		defer stagingMu.Unlock()
+		_ = os.Remove(path)
+	}
+	return path, remove, nil
 }
 
 // errSessionClosed is returned when Run is called after Close.
@@ -244,19 +320,11 @@ func (t *psHostTransport) loadPreamble() error {
 // verb names the Cfgms-* verb for the failure message. onKill, when non-nil,
 // runs after a deadline kill, before the error returns.
 func (t *psHostTransport) runFresh(ctx context.Context, verb, expression string, onKill func()) (string, error) {
-	f, err := os.CreateTemp("", "cfgms-seedop-*.ps1")
+	tmpPath, removeScript, err := stageFile("cfgms-seedop-*.ps1", []byte(freshScriptBody(expression)))
 	if err != nil {
-		return "", fmt.Errorf("hyperv-ps-host: create temp seed script: %w", err)
+		return "", fmt.Errorf("stage seed script: %w", err)
 	}
-	tmpPath := f.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-	if _, werr := io.WriteString(f, freshScriptBody(expression)); werr != nil {
-		_ = f.Close()
-		return "", fmt.Errorf("hyperv-ps-host: write temp seed script: %w", werr)
-	}
-	if cerr := f.Close(); cerr != nil {
-		return "", fmt.Errorf("hyperv-ps-host: close temp seed script: %w", cerr)
-	}
+	defer removeScript()
 
 	cmd := exec.CommandContext(ctx, "powershell.exe",
 		"-NoProfile", "-NonInteractive", "-File", tmpPath,
@@ -370,19 +438,11 @@ func (t *psHostTransport) runFreshNoCleanup(ctx context.Context, call psCall) (s
 	if err != nil {
 		return "", err
 	}
-	f, err := os.CreateTemp("", "cfgms-seedcleanup-*.ps1")
+	tmpPath, removeScript, err := stageFile("cfgms-seedcleanup-*.ps1", []byte(freshScriptBody(expression)))
 	if err != nil {
-		return "", fmt.Errorf("hyperv-ps-host: create temp cleanup script: %w", err)
+		return "", fmt.Errorf("stage cleanup script: %w", err)
 	}
-	tmpPath := f.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-	if _, werr := io.WriteString(f, freshScriptBody(expression)); werr != nil {
-		_ = f.Close()
-		return "", fmt.Errorf("hyperv-ps-host: write temp cleanup script: %w", werr)
-	}
-	if cerr := f.Close(); cerr != nil {
-		return "", fmt.Errorf("hyperv-ps-host: close temp cleanup script: %w", cerr)
-	}
+	defer removeScript()
 	cmd := exec.CommandContext(ctx, "powershell.exe",
 		"-NoProfile", "-NonInteractive", "-File", tmpPath,
 	) //#nosec G204 -- fixed flags; the temp script path is generated, not user-supplied
@@ -439,33 +499,23 @@ func freshSeedOpError(runErr error, combined, verb string, elapsed time.Duration
 // caller uses it to remove the call's args file. It does not run when the
 // process fails to start.
 func (t *psHostTransport) runDetached(expression string, onExit func()) (string, error) {
-	f, err := os.CreateTemp("", "cfgms-moveop-*.ps1")
-	if err != nil {
-		return "", fmt.Errorf("hyperv-ps-host: create temp move script: %w", err)
-	}
-	tmpPath := f.Name()
 	body := freshScriptBody(expression) +
 		"Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
-	if _, werr := io.WriteString(f, body); werr != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("hyperv-ps-host: write temp move script: %w", werr)
-	}
-	if cerr := f.Close(); cerr != nil {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("hyperv-ps-host: close temp move script: %w", cerr)
+	tmpPath, removeScript, err := stageFile("cfgms-moveop-*.ps1", []byte(body))
+	if err != nil {
+		return "", fmt.Errorf("stage move script: %w", err)
 	}
 
 	cmd := exec.Command("powershell.exe",
 		"-NoProfile", "-NonInteractive", "-File", tmpPath,
 	) //#nosec G204 -- fixed flags; the temp script path is generated, not user-supplied
 	if serr := cmd.Start(); serr != nil {
-		_ = os.Remove(tmpPath)
+		removeScript()
 		return "", fmt.Errorf("hyperv-ps-host: start detached move process: %w", serr)
 	}
 	go func() {
 		_ = cmd.Wait()
-		_ = os.Remove(tmpPath) // no-op when the script already self-deleted
+		removeScript() // no-op when the script already self-deleted
 		if onExit != nil {
 			onExit()
 		}

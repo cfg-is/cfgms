@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"unicode"
@@ -299,35 +298,25 @@ func (c psCall) argsJSON() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// writeArgsFile writes the call's values to a new temp JSON file (UTF-8, no
-// BOM) and returns its path and a remove function. The caller must run remove
-// on every exit path; a remove of an already-removed file is a no-op.
+// writeArgsFile writes the call's values to a new JSON file (UTF-8, no BOM) in
+// the secured staging base (stageFile) and returns its path and a remove
+// function. The caller must run remove on every exit path; a remove of an
+// already-removed file is a no-op.
 func writeArgsFile(call psCall) (path string, remove func(), err error) {
 	body, err := call.argsJSON()
 	if err != nil {
 		return "", func() {}, fmt.Errorf("hyperv-ps-host: encode args: %w", err)
 	}
-	f, err := os.CreateTemp("", "cfgms-args-*.json")
+	path, remove, err = stageFile("cfgms-args-*.json", body)
 	if err != nil {
-		return "", func() {}, fmt.Errorf("hyperv-ps-host: create args file: %w", err)
-	}
-	path = f.Name()
-	remove = func() { _ = os.Remove(path) }
-	if _, werr := f.Write(body); werr != nil {
-		_ = f.Close()
-		remove()
-		return "", func() {}, fmt.Errorf("hyperv-ps-host: write args file: %w", werr)
-	}
-	if cerr := f.Close(); cerr != nil {
-		remove()
-		return "", func() {}, fmt.Errorf("hyperv-ps-host: close args file: %w", cerr)
+		return "", func() {}, fmt.Errorf("stage args file: %w", err)
 	}
 	return path, remove, nil
 }
 
 // invokeExpression returns the only script text a dispatched call sends to
 // PowerShell: `Cfgms-Invoke -Verb '<verb>' -ArgsFile '<path>'`. The verb is a
-// table constant and the path comes from os.CreateTemp, never from config.
+// table constant and the path comes from stageFile, never from config.
 // Both are still checked: a verb must be letters only, and a path holding an
 // ASCII or Unicode single quote (U+0027, U+2018 to U+201B) or a control
 // character is refused, so neither can end the single-quoted literal.
