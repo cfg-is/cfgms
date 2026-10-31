@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "segments": [
+    {
+      "name": "controller",
+      "paths": ["features/controller/"],
+      "covers": "Controller-private feature logic: fleet management, orchestration and the controller services under features/controller.",
+      "cannot_see": "Shared packages under pkg/, steward-side logic, and cross-component feature packages (features-shared)."
+    },
+    {
+      "name": "steward",
+      "paths": ["features/steward/"],
+      "covers": "Steward-private feature logic: the convergence loop and endpoint-side operations under features/steward.",
+      "cannot_see": "Shared packages under pkg/, controller-side logic, and cross-component feature packages (features-shared)."
+    },
+    {
+      "name": "workflow",
+      "paths": ["features/workflow/"],
+      "covers": "The workflow engine and its execution logic under features/workflow.",
+      "cannot_see": "Modules the engine invokes, shared packages under pkg/, and controller services that host the engine."
+    },
+    {
+      "name": "modules",
+      "paths": ["features/modules/"],
+      "covers": "Module implementations under features/modules, including stdlib and extended modules.",
+      "cannot_see": "The module runtime and packaging in pkg/, and the steward or controller code that invokes modules."
+    },
+    {
+      "name": "pkg",
+      "paths": ["pkg/", "api/"],
+      "covers": "Shared packages and central providers under pkg/, plus non-generated Go under api/.",
+      "cannot_see": "Feature logic under features/, command wiring under cmd/, and generated protobuf code (excluded from measurement)."
+    },
+    {
+      "name": "cmd",
+      "paths": ["cmd/"],
+      "covers": "Command entry points under cmd/: controller, steward, cfg and the other binaries.",
+      "cannot_see": "The logic these commands call into under pkg/ and features/."
+    },
+    {
+      "name": "features-shared",
+      "paths": [
+        "features/config/",
+        "features/monitoring/",
+        "features/rbac/",
+        "features/reports/",
+        "features/tenant/",
+        "features/terminal/"
+      ],
+      "covers": "Cross-component feature packages shared by controller and steward.",
+      "cannot_see": "Component-private logic in features/controller and features/steward."
+    }
+  ]
+}

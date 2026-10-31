@@ -32,6 +32,7 @@ This directory contains detailed development guides, standards, and workflows fo
 - [Autonomous Dev Team](autonomous-dev-team.md) - How the agent pipeline turns ideas into code
 - [Agent Dispatch Reference](agent-dispatch.md) - Container infrastructure, credentials, troubleshooting
 - [Acceptance Reviewer Verification](acceptance-reviewer-verification.md) - Code-reference verification model for acceptance checking
+- [Complexity Report](complexity-gate.md) - `make complexity-report`: segments, metric file contract, baseline inventory
 - [Code Navigation Tooling](code-navigation-tooling.md) - grep + Read navigation workflow and its measured failure modes
 - [Documentation Boundaries](documentation-boundaries.md) - Product docs vs private-deployment docs
 - [Guides](guides/README.md) - Longer implementation guides
