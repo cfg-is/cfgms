@@ -9,5 +9,6 @@ package transport
 // pkg/storage/providers/*.
 
 import (
+	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )

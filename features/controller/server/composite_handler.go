@@ -27,16 +27,17 @@ import (
 type compositeTransportServer struct {
 	transportpb.UnimplementedStewardTransportServer
 
-	cpHandler        transportpb.StewardTransportServer       // Register, Ping, ControlChannel
-	configHandler    *controllerTransport.ConfigHandler       // SyncConfig (direct handling)
-	dnaHandler       *controllerTransport.DNAHandler          // SyncDNA (direct handling)
-	bulkHandler      *controllerTransport.BulkHandler         // BulkTransfer (direct handling)
-	moduleBundle     *controllerTransport.ModuleBundleHandler // FetchModuleBundle (direct handling)
-	logStreamHandler *controllerTransport.LogStreamHandler    // LogStream (direct handling)
-	telemetryHandler *controllerTransport.TelemetryHandler    // TelemetryStream (direct handling)
-	terminalHandler  *controllerTransport.TerminalHandler     // Terminal (direct handling)
-	osqueryHandler   *stewardosquery.OsqueryHandler           // OsqueryQuery (direct handling)
-	logger           logging.Logger
+	cpHandler         transportpb.StewardTransportServer       // Register, Ping, ControlChannel
+	configHandler     *controllerTransport.ConfigHandler       // SyncConfig (direct handling)
+	dnaHandler        *controllerTransport.DNAHandler          // SyncDNA (direct handling)
+	bulkHandler       *controllerTransport.BulkHandler         // BulkTransfer (direct handling)
+	moduleBundle      *controllerTransport.ModuleBundleHandler // FetchModuleBundle (direct handling)
+	logStreamHandler  *controllerTransport.LogStreamHandler    // LogStream (direct handling)
+	telemetryHandler  *controllerTransport.TelemetryHandler    // TelemetryStream (direct handling)
+	terminalHandler   *controllerTransport.TerminalHandler     // Terminal (direct handling)
+	osqueryHandler    *stewardosquery.OsqueryHandler           // OsqueryQuery (direct handling)
+	credentialHandler *controllerTransport.CredentialHandler   // IssueInitialCredential (direct handling)
+	logger            logging.Logger
 }
 
 // newCompositeTransportServer creates a composite handler with the always-required
@@ -92,6 +93,11 @@ func (c *compositeTransportServer) SetOsqueryHandler(h *stewardosquery.OsqueryHa
 	c.osqueryHandler = h
 }
 
+// SetCredentialHandler sets the IssueInitialCredential handler. Call after newCompositeTransportServer.
+func (c *compositeTransportServer) SetCredentialHandler(h *controllerTransport.CredentialHandler) {
+	c.credentialHandler = h
+}
+
 // --- Control Plane RPCs (delegated to CP handler) ---
 
 func (c *compositeTransportServer) Register(ctx context.Context, req *controllerpb.RegisterRequest) (*controllerpb.RegisterResponse, error) {
@@ -129,6 +135,16 @@ func (c *compositeTransportServer) FetchModuleBundle(req *transportpb.FetchModul
 		return c.moduleBundle.HandleGRPC(stream.Context(), req, stream)
 	}
 	return c.UnimplementedStewardTransportServer.FetchModuleBundle(req, stream)
+}
+
+// IssueInitialCredential is handled directly by the credential handler. It is a
+// unary RPC so the password never passes through the steward offline queue; when
+// no handler is wired (no secret store) the RPC is Unimplemented.
+func (c *compositeTransportServer) IssueInitialCredential(ctx context.Context, req *transportpb.IssueInitialCredentialRequest) (*transportpb.IssueInitialCredentialResponse, error) {
+	if c.credentialHandler != nil {
+		return c.credentialHandler.HandleGRPC(ctx, req)
+	}
+	return c.UnimplementedStewardTransportServer.IssueInitialCredential(ctx, req)
 }
 
 // SyncDNA is handled directly by the DNA handler.

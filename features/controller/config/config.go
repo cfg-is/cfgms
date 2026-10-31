@@ -1061,6 +1061,10 @@ type DirectoryConfig struct {
 	// M365InventoryInterval is how often each M365-connected tenant's users and
 	// groups are re-read. Defaults to 60m when zero.
 	M365InventoryInterval Duration `yaml:"m365_inventory_interval,omitempty"`
+
+	// InitialCredentialTTL is how long a controller-issued initial account
+	// password stays retrievable (Issue #5555). Defaults to 72h when zero.
+	InitialCredentialTTL Duration `yaml:"initial_credential_ttl,omitempty"`
 }
 
 type SubscriberConfig struct {

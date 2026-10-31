@@ -866,3 +866,33 @@ func TestModuleTrustCascade_RefusedDowngradeReachesLoadGate(t *testing.T) {
 	require.Error(t, err, "the refused strict->controller downgrade must still block an unsigned bundle reaching Start")
 	assert.ErrorIs(t, err, pkgtrust.ErrPublisherNotTrusted)
 }
+
+// fixedCredentialClient is a CredentialClient that returns a fixed password.
+type fixedCredentialClient struct{}
+
+func (fixedCredentialClient) IssueInitialCredential(context.Context, string, string) (string, error) {
+	return "pw", nil
+}
+
+// TestActiveDirectory_CredentialClientInjected proves the factory injects the
+// controller credential client beside the AD constructor (Issue #5555), and that
+// a factory without a client leaves the module with none.
+func TestActiveDirectory_CredentialClientInjected(t *testing.T) {
+	errCfg := config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}
+
+	withClient := New(discovery.ModuleRegistry{}, errCfg, logging.NewNoopLogger())
+	withClient.SetCredentialClient(fixedCredentialClient{})
+	mod, err := withClient.LoadModule("activedirectory")
+	require.NoError(t, err)
+	inj, ok := mod.(modules.CredentialClientInjectable)
+	require.True(t, ok, "the activedirectory module must accept a credential client")
+	got, injected := inj.GetCredentialClient()
+	require.True(t, injected)
+	assert.Equal(t, fixedCredentialClient{}, got)
+
+	without := New(discovery.ModuleRegistry{}, errCfg, logging.NewNoopLogger())
+	mod, err = without.LoadModule("activedirectory")
+	require.NoError(t, err)
+	_, injected = mod.(modules.CredentialClientInjectable).GetCredentialClient()
+	assert.False(t, injected)
+}

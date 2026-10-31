@@ -23,18 +23,19 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	StewardTransport_Register_FullMethodName          = "/cfgms.transport.StewardTransport/Register"
-	StewardTransport_Ping_FullMethodName              = "/cfgms.transport.StewardTransport/Ping"
-	StewardTransport_ControlChannel_FullMethodName    = "/cfgms.transport.StewardTransport/ControlChannel"
-	StewardTransport_SyncConfig_FullMethodName        = "/cfgms.transport.StewardTransport/SyncConfig"
-	StewardTransport_FetchModuleBundle_FullMethodName = "/cfgms.transport.StewardTransport/FetchModuleBundle"
-	StewardTransport_SyncDNA_FullMethodName           = "/cfgms.transport.StewardTransport/SyncDNA"
-	StewardTransport_BulkTransfer_FullMethodName      = "/cfgms.transport.StewardTransport/BulkTransfer"
-	StewardTransport_TaskStream_FullMethodName        = "/cfgms.transport.StewardTransport/TaskStream"
-	StewardTransport_Terminal_FullMethodName          = "/cfgms.transport.StewardTransport/Terminal"
-	StewardTransport_LogStream_FullMethodName         = "/cfgms.transport.StewardTransport/LogStream"
-	StewardTransport_TelemetryStream_FullMethodName   = "/cfgms.transport.StewardTransport/TelemetryStream"
-	StewardTransport_OsqueryQuery_FullMethodName      = "/cfgms.transport.StewardTransport/OsqueryQuery"
+	StewardTransport_Register_FullMethodName               = "/cfgms.transport.StewardTransport/Register"
+	StewardTransport_Ping_FullMethodName                   = "/cfgms.transport.StewardTransport/Ping"
+	StewardTransport_ControlChannel_FullMethodName         = "/cfgms.transport.StewardTransport/ControlChannel"
+	StewardTransport_SyncConfig_FullMethodName             = "/cfgms.transport.StewardTransport/SyncConfig"
+	StewardTransport_FetchModuleBundle_FullMethodName      = "/cfgms.transport.StewardTransport/FetchModuleBundle"
+	StewardTransport_SyncDNA_FullMethodName                = "/cfgms.transport.StewardTransport/SyncDNA"
+	StewardTransport_BulkTransfer_FullMethodName           = "/cfgms.transport.StewardTransport/BulkTransfer"
+	StewardTransport_TaskStream_FullMethodName             = "/cfgms.transport.StewardTransport/TaskStream"
+	StewardTransport_Terminal_FullMethodName               = "/cfgms.transport.StewardTransport/Terminal"
+	StewardTransport_LogStream_FullMethodName              = "/cfgms.transport.StewardTransport/LogStream"
+	StewardTransport_TelemetryStream_FullMethodName        = "/cfgms.transport.StewardTransport/TelemetryStream"
+	StewardTransport_OsqueryQuery_FullMethodName           = "/cfgms.transport.StewardTransport/OsqueryQuery"
+	StewardTransport_IssueInitialCredential_FullMethodName = "/cfgms.transport.StewardTransport/IssueInitialCredential"
 )
 
 // StewardTransportClient is the client API for StewardTransport service.
@@ -84,6 +85,7 @@ type StewardTransportClient interface {
 	// execution of a catalog query on the steward. Query text is never sent on the
 	// wire — the steward resolves SQL from the catalog ID after front-door admission.
 	OsqueryQuery(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[OsqueryQueryResponse, OsqueryQueryRequest], error)
+	IssueInitialCredential(ctx context.Context, in *IssueInitialCredentialRequest, opts ...grpc.CallOption) (*IssueInitialCredentialResponse, error)
 }
 
 type stewardTransportClient struct {
@@ -256,6 +258,16 @@ func (c *stewardTransportClient) OsqueryQuery(ctx context.Context, opts ...grpc.
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type StewardTransport_OsqueryQueryClient = grpc.BidiStreamingClient[OsqueryQueryResponse, OsqueryQueryRequest]
 
+func (c *stewardTransportClient) IssueInitialCredential(ctx context.Context, in *IssueInitialCredentialRequest, opts ...grpc.CallOption) (*IssueInitialCredentialResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IssueInitialCredentialResponse)
+	err := c.cc.Invoke(ctx, StewardTransport_IssueInitialCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StewardTransportServer is the server API for StewardTransport service.
 // All implementations must embed UnimplementedStewardTransportServer
 // for forward compatibility.
@@ -303,6 +315,7 @@ type StewardTransportServer interface {
 	// execution of a catalog query on the steward. Query text is never sent on the
 	// wire — the steward resolves SQL from the catalog ID after front-door admission.
 	OsqueryQuery(grpc.BidiStreamingServer[OsqueryQueryResponse, OsqueryQueryRequest]) error
+	IssueInitialCredential(context.Context, *IssueInitialCredentialRequest) (*IssueInitialCredentialResponse, error)
 	mustEmbedUnimplementedStewardTransportServer()
 }
 
@@ -348,6 +361,9 @@ func (UnimplementedStewardTransportServer) TelemetryStream(grpc.BidiStreamingSer
 }
 func (UnimplementedStewardTransportServer) OsqueryQuery(grpc.BidiStreamingServer[OsqueryQueryResponse, OsqueryQueryRequest]) error {
 	return status.Error(codes.Unimplemented, "method OsqueryQuery not implemented")
+}
+func (UnimplementedStewardTransportServer) IssueInitialCredential(context.Context, *IssueInitialCredentialRequest) (*IssueInitialCredentialResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method IssueInitialCredential not implemented")
 }
 func (UnimplementedStewardTransportServer) mustEmbedUnimplementedStewardTransportServer() {}
 func (UnimplementedStewardTransportServer) testEmbeddedByValue()                          {}
@@ -484,6 +500,24 @@ func _StewardTransport_OsqueryQuery_Handler(srv interface{}, stream grpc.ServerS
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type StewardTransport_OsqueryQueryServer = grpc.BidiStreamingServer[OsqueryQueryResponse, OsqueryQueryRequest]
 
+func _StewardTransport_IssueInitialCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IssueInitialCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StewardTransportServer).IssueInitialCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StewardTransport_IssueInitialCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StewardTransportServer).IssueInitialCredential(ctx, req.(*IssueInitialCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StewardTransport_ServiceDesc is the grpc.ServiceDesc for StewardTransport service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -498,6 +532,10 @@ var StewardTransport_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Ping",
 			Handler:    _StewardTransport_Ping_Handler,
+		},
+		{
+			MethodName: "IssueInitialCredential",
+			Handler:    _StewardTransport_IssueInitialCredential_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

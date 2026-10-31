@@ -9,6 +9,8 @@
 package modules
 
 import (
+	"context"
+
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
@@ -54,4 +56,48 @@ func (d *DefaultSecretStoreSupport) GetSecretStore() (secretsif.SecretStore, boo
 // HasInjectedSecretStore returns true if a secret store has been successfully injected.
 func (d *DefaultSecretStoreSupport) HasInjectedSecretStore() bool {
 	return d.injectedSecretStore != nil
+}
+
+// CredentialClient requests a controller-issued one-time initial password for a
+// declared resource (Issue #5555). The password is returned to the caller in
+// memory only: implementations must not queue it, retry it from disk, or place it
+// in an error.
+type CredentialClient interface {
+	// IssueInitialCredential asks the controller for the password of the
+	// resource named resourceID of the given kind (e.g. "activedirectory.user").
+	IssueInitialCredential(ctx context.Context, resourceID, kind string) (string, error)
+}
+
+// CredentialClientInjectable is implemented by in-process modules that create
+// accounts and need an initial password. The steward injects the client after
+// module creation, so module constructors and binary signatures are unchanged.
+type CredentialClientInjectable interface {
+	// SetCredentialClient injects the client.
+	SetCredentialClient(client CredentialClient) error
+
+	// GetCredentialClient returns the injected client, if any.
+	GetCredentialClient() (client CredentialClient, injected bool)
+}
+
+// DefaultCredentialClientSupport provides a default CredentialClientInjectable
+// that modules can embed.
+type DefaultCredentialClientSupport struct {
+	injectedCredentialClient CredentialClient
+}
+
+// SetCredentialClient implements CredentialClientInjectable.
+func (d *DefaultCredentialClientSupport) SetCredentialClient(client CredentialClient) error {
+	if client == nil {
+		return ErrInvalidInput
+	}
+	d.injectedCredentialClient = client
+	return nil
+}
+
+// GetCredentialClient implements CredentialClientInjectable.
+func (d *DefaultCredentialClientSupport) GetCredentialClient() (CredentialClient, bool) {
+	if d.injectedCredentialClient == nil {
+		return nil, false
+	}
+	return d.injectedCredentialClient, true
 }

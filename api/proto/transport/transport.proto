@@ -72,6 +72,14 @@ service StewardTransport {
   // execution of a catalog query on the steward. Query text is never sent on the
   // wire — the steward resolves SQL from the catalog ID after front-door admission.
   rpc OsqueryQuery(stream OsqueryQueryResponse) returns (stream OsqueryQueryRequest);
+
+  // IssueInitialCredential returns the controller-generated one-time initial
+  // password for one declared resource (Issue #5555). It is unary on purpose: a
+  // control-plane event would pass through the steward offline queue, which
+  // persists to disk, and a secret must never take that path. The caller is the
+  // verified mTLS peer; its tenant comes from the fleet registry, never the
+  // request. The RPC is excluded from payload logging and span attributes.
+  rpc IssueInitialCredential(IssueInitialCredentialRequest) returns (IssueInitialCredentialResponse);
 }
 
 // PingRequest is a lightweight health check.
@@ -84,4 +92,17 @@ message PingRequest {
 message PingResponse {
   int64 request_timestamp_ns = 1;
   int64 response_timestamp_ns = 2;
+}
+
+// IssueInitialCredentialRequest names the resource a password is wanted for. It
+// carries no steward id and no tenant: both come from the mTLS peer.
+message IssueInitialCredentialRequest {
+  string resource_id = 1;  // name of an activedirectory.user resource in the caller's own cfg
+  string kind = 2;         // resource module kind; only "activedirectory.user" is accepted
+}
+
+// IssueInitialCredentialResponse carries the one-time password. It is a secret:
+// never log, trace, queue or persist it.
+message IssueInitialCredentialResponse {
+  string password = 1;
 }

@@ -488,6 +488,86 @@ Every update goes through `config.AtomicUpdate`. A batch groups its changes per 
 
 **Multi-node.** Membership writes need a store that is atomic across controller nodes. In a multi-node cluster with a store that is not (anything but the database provider), every membership write fails closed with `ErrNotClusterAtomic` and nothing is written. There is no lease fallback; multi-node deployments use the database provider.
 
+### Initial Credential Issue (Issue #5555)
+
+The controller generates a one-time initial password for a declared
+`activedirectory.user` resource and returns it to the requesting steward at the
+moment the steward is about to create the account. The admin reveals it later
+through the reveal API.
+
+**RPC.** `IssueInitialCredential` is a unary RPC on the `StewardTransport`
+service taking `resource_id` and `kind` (only `activedirectory.user`) and
+returning `password`. It is unary on purpose: control-plane events pass through
+the steward's offline queue, which persists to disk, and a secret must never take
+that path. The RPC is excluded from payload logging (the unary access-log
+interceptor records method, status code and duration only, and omits even the
+error text for secret-bearing methods) and from tracing span attributes
+(`IsSecretBearingMethod`).
+
+**Revocation.** Before the handler runs, the unary revocation interceptor
+installed in `Server.Start` looks up the peer certificate serial through
+`cert.Manager.IsRevoked`: a revoked serial is refused with
+`codes.PermissionDenied`, a lookup error with `codes.Unavailable` (fail closed),
+and a call with no peer certificate with `codes.Unauthenticated`. A steward whose
+certificate was revoked (for example by credential rotation after a compromise)
+therefore cannot collect a pending password, even though the credential service
+returns the same pending password to that identity for the whole TTL. The
+credential handler is wired only when a certificate manager is present; without
+one the interceptor is not installed and the RPC is `Unimplemented`.
+
+**Authorization.** The steward is the verified mTLS peer; its tenant comes from
+the fleet registry, never the request. The request is accepted only when
+`resource_id` names an `activedirectory.user` resource in that steward's OWN
+effective cfg, so another steward in the same tenant is refused. Every record is
+keyed by (tenant, steward, resource), so a pending record can be replaced or
+re-issued only to the peer that owns it. A refusal carries a fixed message; the
+reason is logged server-side.
+
+**Password.** `credentials.GeneratePassword` produces 24 characters from
+`crypto/rand`, with at least one upper-case letter, lower-case letter, digit and
+symbol, each chosen uniformly within its class. It is the one generator; the
+in-process account path uses it too.
+
+**Lifecycle (once per steward and resource id).**
+
+| State of the record | Request outcome |
+|---------------------|-----------------|
+| none, or `expired`, or `pending` past its expiry | a new password is issued |
+| `pending` | the same password is returned |
+| `revealing` | refused: `already issued` |
+| `revealed`, resource has a GUID binding (the account exists) | refused: `already issued` |
+| `revealed`, no GUID binding (the create failed after reveal) | the old record is voided, a new password is issued, and a `credential_reissued` audit event is written |
+
+**Storage.** The password lives in the secrets provider (SOPS), under the record's
+tenant, in a secret named `credentials-initial_<steward id>_<resource id>_<record id>`.
+The record (random 128-bit id, tenant, steward id, resource id, created, expires,
+state `pending|revealing|revealed|expired`) is a config-store entry in the
+`credentials` namespace. The password is never in the config store, DNA, logs,
+audit events or error text. `features/controller/credentials.CredentialStore`
+(`Put`, `Get`, `List`, `Claim`, `Delete`, plus `DeleteSecret`) is the interface the
+reveal API and the in-process account path import; it does not depend on the RPC
+handler. The GUID binding is read from the `credential-bindings` config namespace,
+written by the account-creation path once the account has a GUID.
+
+**Caps and rate limit.** At most 1,000 pending records per steward and per tenant;
+over the cap the request is rejected. Each node admits at most 60 requests per
+steward per minute, counted in memory.
+
+**Expiry.** The TTL defaults to 72 hours (`directory.initial_credential_ttl`). A
+sweep every five minutes runs under `pkg/lease.SingletonJob.RunIfLeader`
+(`credential-expiry`). It moves a `pending` or `revealing` record past its expiry
+to `expired`, deletes its secret, and writes a `credential_expired_unrevealed`
+audit event (the account then exists with an unknown password). A `revealed`
+record keeps its record, which is what refuses a second issue, and loses only its
+secret.
+
+**Cluster.** The RPC lands on whichever node holds the steward's stream; the
+secrets and config stores are shared and there is no cross-node command. The first
+issue uses `CreateIfAbsent` and every state move (re-issue, void, expiry, claim)
+uses `AtomicUpdate`, so two concurrent issues return one password. In a multi-node
+cluster with a config store that is not cluster-atomic the RPC fails closed with
+`ErrNotClusterAtomic` (`Unavailable`) and writes nothing.
+
 ### M365 Tenant Inventory (Issue #5561)
 
 The controller records each M365-connected tenant's users and groups in the entity graph without any steward involved. A collector (`features/controller/directory/m365_inventory.go`) runs under the `m365-inventory` background-loop lease (`lease.SingletonJob.RunIfLeader`, ADR-031 Decision 4), so in a cluster only the lease holder reads Graph; a follower's cycle does nothing.
@@ -703,6 +783,8 @@ The security invariant is unchanged by the backing store: `session.Manager` alwa
 Revocation therefore takes effect at admission even while the steward record stays `active`. An already-open ControlChannel re-checks its serial every 30 seconds (`WithRevocationRecheckInterval`) and is closed with `PermissionDenied` once the serial is revoked, so a revoked identity is cut off within one re-check interval (30s plus store propagation delay). A transient lookup error during a re-check keeps the stream open and is retried on the next tick; new admissions still fail closed.
 
 Every other steward stream on the shared gRPC server (SyncConfig, FetchModuleBundle, SyncDNA, BulkTransfer, LogStream, TelemetryStream, Terminal, OsqueryQuery) is covered by a stream interceptor installed in `Server.Start` (Issue #5370). It checks the peer certificate serial through `cert.Manager.IsRevoked` at admission: a revoked serial is refused with `codes.PermissionDenied`, a lookup error with `codes.Unavailable` (fail closed), and a stream with no peer certificate with `codes.Unauthenticated`. While the stream is open the interceptor re-checks the serial every 30 seconds and cancels the stream context once it is revoked, so the handler returns and the client sees `PermissionDenied`. A transient lookup error during a re-check keeps the stream open and is retried on the next tick. ControlChannel is skipped by the interceptor because the provider already checks it.
+
+Unary steward RPCs other than `Register` (which the provider already checks) — `Ping` and the secret-bearing `IssueInitialCredential` (Issue #5555) — are covered by a unary interceptor installed alongside the stream interceptor. It applies the same admission check before the handler runs: a revoked serial is refused with `codes.PermissionDenied`, a lookup error with `codes.Unavailable` (fail closed), and a call with no peer certificate with `codes.Unauthenticated`. Unary calls are short-lived, so there is no re-check.
 
 ### Host Provenance at Admission (Issue #4949, ADR-034 §2)
 

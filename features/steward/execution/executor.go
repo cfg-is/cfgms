@@ -67,6 +67,11 @@ type ExecutorConfig struct {
 	// responsible for injecting the secret store themselves.
 	SecretStore secretsif.SecretStore
 
+	// CredentialClient, when non-nil, is handed to the factory NewExecutor creates
+	// so modules implementing CredentialClientInjectable can request controller-
+	// issued initial passwords (Issue #5555).
+	CredentialClient modules.CredentialClient
+
 	// EventEmitter, when non-nil, receives convergence detection and outcome events.
 	// Enqueue must never block the caller; the concrete implementation drops when full.
 	EventEmitter EventEmitter
@@ -163,6 +168,9 @@ func NewExecutor(cfg *ExecutorConfig) (*Executor, error) {
 		// Empty registry — all 7 built-in modules are loaded on demand by the factory
 		f = factory.New(discovery.ModuleRegistry{}, defaultErrCfg, cfg.Logger)
 		errCfg = defaultErrCfg
+		if cfg.CredentialClient != nil {
+			f.SetCredentialClient(cfg.CredentialClient)
+		}
 		// Wire the secret store into the auto-created factory so modules that
 		// implement SecretStoreInjectable (e.g. hyperv) receive it before
 		// Configure runs. Without this, controller-connected stewards see

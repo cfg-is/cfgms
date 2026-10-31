@@ -131,6 +131,102 @@ func (x *PingResponse) GetResponseTimestampNs() int64 {
 	return 0
 }
 
+type IssueInitialCredentialRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ResourceId    string                 `protobuf:"bytes,1,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
+	Kind          string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IssueInitialCredentialRequest) Reset() {
+	*x = IssueInitialCredentialRequest{}
+	mi := &file_transport_transport_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IssueInitialCredentialRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IssueInitialCredentialRequest) ProtoMessage() {}
+
+func (x *IssueInitialCredentialRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_transport_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IssueInitialCredentialRequest.ProtoReflect.Descriptor instead.
+func (*IssueInitialCredentialRequest) Descriptor() ([]byte, []int) {
+	return file_transport_transport_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *IssueInitialCredentialRequest) GetResourceId() string {
+	if x != nil {
+		return x.ResourceId
+	}
+	return ""
+}
+
+func (x *IssueInitialCredentialRequest) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+type IssueInitialCredentialResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Password      string                 `protobuf:"bytes,1,opt,name=password,proto3" json:"password,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IssueInitialCredentialResponse) Reset() {
+	*x = IssueInitialCredentialResponse{}
+	mi := &file_transport_transport_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IssueInitialCredentialResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IssueInitialCredentialResponse) ProtoMessage() {}
+
+func (x *IssueInitialCredentialResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_transport_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IssueInitialCredentialResponse.ProtoReflect.Descriptor instead.
+func (*IssueInitialCredentialResponse) Descriptor() ([]byte, []int) {
+	return file_transport_transport_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *IssueInitialCredentialResponse) GetPassword() string {
+	if x != nil {
+		return x.Password
+	}
+	return ""
+}
+
 var File_transport_transport_proto protoreflect.FileDescriptor
 
 const file_transport_transport_proto_rawDesc = "" +
@@ -142,7 +238,13 @@ const file_transport_transport_proto_rawDesc = "" +
 	"\ftimestamp_ns\x18\x02 \x01(\x03R\vtimestampNs\"t\n" +
 	"\fPingResponse\x120\n" +
 	"\x14request_timestamp_ns\x18\x01 \x01(\x03R\x12requestTimestampNs\x122\n" +
-	"\x15response_timestamp_ns\x18\x02 \x01(\x03R\x13responseTimestampNs2\x81\b\n" +
+	"\x15response_timestamp_ns\x18\x02 \x01(\x03R\x13responseTimestampNs\"T\n" +
+	"\x1dIssueInitialCredentialRequest\x12\x1f\n" +
+	"\vresource_id\x18\x01 \x01(\tR\n" +
+	"resourceId\x12\x12\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\"<\n" +
+	"\x1eIssueInitialCredentialResponse\x12\x1a\n" +
+	"\bpassword\x18\x01 \x01(\tR\bpassword2\xfc\b\n" +
 	"\x10StewardTransport\x12Y\n" +
 	"\bRegister\x12%.cfgms.api.controller.RegisterRequest\x1a&.cfgms.api.controller.RegisterResponse\x12C\n" +
 	"\x04Ping\x12\x1c.cfgms.transport.PingRequest\x1a\x1d.cfgms.transport.PingResponse\x12V\n" +
@@ -157,7 +259,8 @@ const file_transport_transport_proto_rawDesc = "" +
 	"\bTerminal\x12\x1d.cfgms.transport.TerminalData\x1a\x1d.cfgms.transport.TerminalData(\x010\x01\x12L\n" +
 	"\tLogStream\x12\x19.cfgms.transport.LogEntry\x1a\".cfgms.transport.LogStreamResponse(\x01\x12\\\n" +
 	"\x0fTelemetryStream\x12\".cfgms.transport.TelemetrySnapshot\x1a!.cfgms.transport.TelemetryRequest(\x010\x01\x12_\n" +
-	"\fOsqueryQuery\x12%.cfgms.transport.OsqueryQueryResponse\x1a$.cfgms.transport.OsqueryQueryRequest(\x010\x01B,Z*github.com/cfgis/cfgms/api/proto/transportb\x06proto3"
+	"\fOsqueryQuery\x12%.cfgms.transport.OsqueryQueryResponse\x1a$.cfgms.transport.OsqueryQueryRequest(\x010\x01\x12y\n" +
+	"\x16IssueInitialCredential\x12..cfgms.transport.IssueInitialCredentialRequest\x1a/.cfgms.transport.IssueInitialCredentialResponseB,Z*github.com/cfgis/cfgms/api/proto/transportb\x06proto3"
 
 var (
 	file_transport_transport_proto_rawDescOnce sync.Once
@@ -171,56 +274,60 @@ func file_transport_transport_proto_rawDescGZIP() []byte {
 	return file_transport_transport_proto_rawDescData
 }
 
-var file_transport_transport_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_transport_transport_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_transport_transport_proto_goTypes = []any{
-	(*PingRequest)(nil),                 // 0: cfgms.transport.PingRequest
-	(*PingResponse)(nil),                // 1: cfgms.transport.PingResponse
-	(*controller.RegisterRequest)(nil),  // 2: cfgms.api.controller.RegisterRequest
-	(*ControlMessage)(nil),              // 3: cfgms.transport.ControlMessage
-	(*ConfigSyncRequest)(nil),           // 4: cfgms.transport.ConfigSyncRequest
-	(*FetchModuleBundleRequest)(nil),    // 5: cfgms.transport.FetchModuleBundleRequest
-	(*DNAChunk)(nil),                    // 6: cfgms.transport.DNAChunk
-	(*BulkChunk)(nil),                   // 7: cfgms.transport.BulkChunk
-	(*TaskMessage)(nil),                 // 8: cfgms.transport.TaskMessage
-	(*TerminalData)(nil),                // 9: cfgms.transport.TerminalData
-	(*LogEntry)(nil),                    // 10: cfgms.transport.LogEntry
-	(*TelemetrySnapshot)(nil),           // 11: cfgms.transport.TelemetrySnapshot
-	(*OsqueryQueryResponse)(nil),        // 12: cfgms.transport.OsqueryQueryResponse
-	(*controller.RegisterResponse)(nil), // 13: cfgms.api.controller.RegisterResponse
-	(*ConfigChunk)(nil),                 // 14: cfgms.transport.ConfigChunk
-	(*ModuleBundleChunk)(nil),           // 15: cfgms.transport.ModuleBundleChunk
-	(*DNASyncResponse)(nil),             // 16: cfgms.transport.DNASyncResponse
-	(*LogStreamResponse)(nil),           // 17: cfgms.transport.LogStreamResponse
-	(*TelemetryRequest)(nil),            // 18: cfgms.transport.TelemetryRequest
-	(*OsqueryQueryRequest)(nil),         // 19: cfgms.transport.OsqueryQueryRequest
+	(*PingRequest)(nil),                    // 0: cfgms.transport.PingRequest
+	(*PingResponse)(nil),                   // 1: cfgms.transport.PingResponse
+	(*IssueInitialCredentialRequest)(nil),  // 2: cfgms.transport.IssueInitialCredentialRequest
+	(*IssueInitialCredentialResponse)(nil), // 3: cfgms.transport.IssueInitialCredentialResponse
+	(*controller.RegisterRequest)(nil),     // 4: cfgms.api.controller.RegisterRequest
+	(*ControlMessage)(nil),                 // 5: cfgms.transport.ControlMessage
+	(*ConfigSyncRequest)(nil),              // 6: cfgms.transport.ConfigSyncRequest
+	(*FetchModuleBundleRequest)(nil),       // 7: cfgms.transport.FetchModuleBundleRequest
+	(*DNAChunk)(nil),                       // 8: cfgms.transport.DNAChunk
+	(*BulkChunk)(nil),                      // 9: cfgms.transport.BulkChunk
+	(*TaskMessage)(nil),                    // 10: cfgms.transport.TaskMessage
+	(*TerminalData)(nil),                   // 11: cfgms.transport.TerminalData
+	(*LogEntry)(nil),                       // 12: cfgms.transport.LogEntry
+	(*TelemetrySnapshot)(nil),              // 13: cfgms.transport.TelemetrySnapshot
+	(*OsqueryQueryResponse)(nil),           // 14: cfgms.transport.OsqueryQueryResponse
+	(*controller.RegisterResponse)(nil),    // 15: cfgms.api.controller.RegisterResponse
+	(*ConfigChunk)(nil),                    // 16: cfgms.transport.ConfigChunk
+	(*ModuleBundleChunk)(nil),              // 17: cfgms.transport.ModuleBundleChunk
+	(*DNASyncResponse)(nil),                // 18: cfgms.transport.DNASyncResponse
+	(*LogStreamResponse)(nil),              // 19: cfgms.transport.LogStreamResponse
+	(*TelemetryRequest)(nil),               // 20: cfgms.transport.TelemetryRequest
+	(*OsqueryQueryRequest)(nil),            // 21: cfgms.transport.OsqueryQueryRequest
 }
 var file_transport_transport_proto_depIdxs = []int32{
-	2,  // 0: cfgms.transport.StewardTransport.Register:input_type -> cfgms.api.controller.RegisterRequest
+	4,  // 0: cfgms.transport.StewardTransport.Register:input_type -> cfgms.api.controller.RegisterRequest
 	0,  // 1: cfgms.transport.StewardTransport.Ping:input_type -> cfgms.transport.PingRequest
-	3,  // 2: cfgms.transport.StewardTransport.ControlChannel:input_type -> cfgms.transport.ControlMessage
-	4,  // 3: cfgms.transport.StewardTransport.SyncConfig:input_type -> cfgms.transport.ConfigSyncRequest
-	5,  // 4: cfgms.transport.StewardTransport.FetchModuleBundle:input_type -> cfgms.transport.FetchModuleBundleRequest
-	6,  // 5: cfgms.transport.StewardTransport.SyncDNA:input_type -> cfgms.transport.DNAChunk
-	7,  // 6: cfgms.transport.StewardTransport.BulkTransfer:input_type -> cfgms.transport.BulkChunk
-	8,  // 7: cfgms.transport.StewardTransport.TaskStream:input_type -> cfgms.transport.TaskMessage
-	9,  // 8: cfgms.transport.StewardTransport.Terminal:input_type -> cfgms.transport.TerminalData
-	10, // 9: cfgms.transport.StewardTransport.LogStream:input_type -> cfgms.transport.LogEntry
-	11, // 10: cfgms.transport.StewardTransport.TelemetryStream:input_type -> cfgms.transport.TelemetrySnapshot
-	12, // 11: cfgms.transport.StewardTransport.OsqueryQuery:input_type -> cfgms.transport.OsqueryQueryResponse
-	13, // 12: cfgms.transport.StewardTransport.Register:output_type -> cfgms.api.controller.RegisterResponse
-	1,  // 13: cfgms.transport.StewardTransport.Ping:output_type -> cfgms.transport.PingResponse
-	3,  // 14: cfgms.transport.StewardTransport.ControlChannel:output_type -> cfgms.transport.ControlMessage
-	14, // 15: cfgms.transport.StewardTransport.SyncConfig:output_type -> cfgms.transport.ConfigChunk
-	15, // 16: cfgms.transport.StewardTransport.FetchModuleBundle:output_type -> cfgms.transport.ModuleBundleChunk
-	16, // 17: cfgms.transport.StewardTransport.SyncDNA:output_type -> cfgms.transport.DNASyncResponse
-	7,  // 18: cfgms.transport.StewardTransport.BulkTransfer:output_type -> cfgms.transport.BulkChunk
-	8,  // 19: cfgms.transport.StewardTransport.TaskStream:output_type -> cfgms.transport.TaskMessage
-	9,  // 20: cfgms.transport.StewardTransport.Terminal:output_type -> cfgms.transport.TerminalData
-	17, // 21: cfgms.transport.StewardTransport.LogStream:output_type -> cfgms.transport.LogStreamResponse
-	18, // 22: cfgms.transport.StewardTransport.TelemetryStream:output_type -> cfgms.transport.TelemetryRequest
-	19, // 23: cfgms.transport.StewardTransport.OsqueryQuery:output_type -> cfgms.transport.OsqueryQueryRequest
-	12, // [12:24] is the sub-list for method output_type
-	0,  // [0:12] is the sub-list for method input_type
+	5,  // 2: cfgms.transport.StewardTransport.ControlChannel:input_type -> cfgms.transport.ControlMessage
+	6,  // 3: cfgms.transport.StewardTransport.SyncConfig:input_type -> cfgms.transport.ConfigSyncRequest
+	7,  // 4: cfgms.transport.StewardTransport.FetchModuleBundle:input_type -> cfgms.transport.FetchModuleBundleRequest
+	8,  // 5: cfgms.transport.StewardTransport.SyncDNA:input_type -> cfgms.transport.DNAChunk
+	9,  // 6: cfgms.transport.StewardTransport.BulkTransfer:input_type -> cfgms.transport.BulkChunk
+	10, // 7: cfgms.transport.StewardTransport.TaskStream:input_type -> cfgms.transport.TaskMessage
+	11, // 8: cfgms.transport.StewardTransport.Terminal:input_type -> cfgms.transport.TerminalData
+	12, // 9: cfgms.transport.StewardTransport.LogStream:input_type -> cfgms.transport.LogEntry
+	13, // 10: cfgms.transport.StewardTransport.TelemetryStream:input_type -> cfgms.transport.TelemetrySnapshot
+	14, // 11: cfgms.transport.StewardTransport.OsqueryQuery:input_type -> cfgms.transport.OsqueryQueryResponse
+	2,  // 12: cfgms.transport.StewardTransport.IssueInitialCredential:input_type -> cfgms.transport.IssueInitialCredentialRequest
+	15, // 13: cfgms.transport.StewardTransport.Register:output_type -> cfgms.api.controller.RegisterResponse
+	1,  // 14: cfgms.transport.StewardTransport.Ping:output_type -> cfgms.transport.PingResponse
+	5,  // 15: cfgms.transport.StewardTransport.ControlChannel:output_type -> cfgms.transport.ControlMessage
+	16, // 16: cfgms.transport.StewardTransport.SyncConfig:output_type -> cfgms.transport.ConfigChunk
+	17, // 17: cfgms.transport.StewardTransport.FetchModuleBundle:output_type -> cfgms.transport.ModuleBundleChunk
+	18, // 18: cfgms.transport.StewardTransport.SyncDNA:output_type -> cfgms.transport.DNASyncResponse
+	9,  // 19: cfgms.transport.StewardTransport.BulkTransfer:output_type -> cfgms.transport.BulkChunk
+	10, // 20: cfgms.transport.StewardTransport.TaskStream:output_type -> cfgms.transport.TaskMessage
+	11, // 21: cfgms.transport.StewardTransport.Terminal:output_type -> cfgms.transport.TerminalData
+	19, // 22: cfgms.transport.StewardTransport.LogStream:output_type -> cfgms.transport.LogStreamResponse
+	20, // 23: cfgms.transport.StewardTransport.TelemetryStream:output_type -> cfgms.transport.TelemetryRequest
+	21, // 24: cfgms.transport.StewardTransport.OsqueryQuery:output_type -> cfgms.transport.OsqueryQueryRequest
+	3,  // 25: cfgms.transport.StewardTransport.IssueInitialCredential:output_type -> cfgms.transport.IssueInitialCredentialResponse
+	13, // [13:26] is the sub-list for method output_type
+	0,  // [0:13] is the sub-list for method input_type
 	0,  // [0:0] is the sub-list for extension type_name
 	0,  // [0:0] is the sub-list for extension extendee
 	0,  // [0:0] is the sub-list for field type_name
@@ -239,7 +346,7 @@ func file_transport_transport_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transport_transport_proto_rawDesc), len(file_transport_transport_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
