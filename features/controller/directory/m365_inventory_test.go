@@ -598,7 +598,17 @@ func TestM365Inventory_OnlyLeaderCollects(t *testing.T) {
 func TestM365Inventory_50000Users_OneChange_WritesOneObject(t *testing.T) {
 	e := newInvEnv(t)
 	td := e.fg.tenant("client-a")
-	for i := 0; i < 50000; i++ {
+	total := 50000
+	if testing.Short() {
+		// Every first-run user is one SQLite entity-graph observation, and under
+		// -race that costs about 5ms each: the full 50,000 took about 290s alone,
+		// which pushed this package past `make test`'s 10m -short hang detector
+		// on a loaded host. -short collects 2,000 users, which still proves the
+		// property under test (one changed user out of many writes exactly one
+		// object); a plain `go test` runs the full 50,000.
+		total = 2000
+	}
+	for i := 0; i < total; i++ {
 		td.users = append(td.users, gUser{objID("u", i), fmt.Sprintf("u%d@a.test", i), "User " + strconv.Itoa(i)})
 	}
 	e.conns.set(e.connect("root/tenant-a", "client-a", guidA))
@@ -607,11 +617,11 @@ func TestM365Inventory_50000Users_OneChange_WritesOneObject(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
 	defer cancel()
 	require.True(t, c.RunOnce(ctx))
-	require.EqualValues(t, 50000, e.writer.obs.Load())
+	require.EqualValues(t, total, e.writer.obs.Load())
 	e.writer.reset()
 
 	e.fg.mu.Lock()
-	td.users[12345].Name = "Changed"
+	td.users[total/2+345].Name = "Changed"
 	e.fg.mu.Unlock()
 	require.True(t, c.RunOnce(ctx))
 	assert.EqualValues(t, 1, e.writer.obs.Load())
