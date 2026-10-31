@@ -131,3 +131,40 @@ func newStreamRevocationInterceptor(checker streamRevocationChecker, logger logg
 		return herr
 	}
 }
+
+// newUnaryRevocationInterceptor returns a unary interceptor that refuses a peer
+// whose certificate serial is revoked (PermissionDenied), whose status cannot be
+// determined (Unavailable, fail closed) or that presents no certificate
+// (Unauthenticated), before the handler runs. It is the unary counterpart of
+// newStreamRevocationInterceptor and guards IssueInitialCredential, which
+// returns plaintext initial passwords and must never be served to a revoked
+// identity. Register is skipped: the control-plane provider already checks it.
+func newUnaryRevocationInterceptor(checker streamRevocationChecker, logger logging.Logger) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		if info.FullMethod == transportpb.StewardTransport_Register_FullMethodName {
+			return handler(ctx, req)
+		}
+
+		serial, stewardID, err := streamPeerIdentity(ctx)
+		if err != nil {
+			return nil, status.Error(codes.Unauthenticated, "failed to read peer certificate")
+		}
+		revoked, err := checker.IsRevoked(serial)
+		if err != nil {
+			logger.Error("certificate revocation check error, rejecting call (fail-closed)",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"serial", logging.SanitizeLogValue(serial),
+				"method", logging.SanitizeLogValue(info.FullMethod),
+				"error", logging.SanitizeLogValue(err.Error()))
+			return nil, status.Error(codes.Unavailable, "certificate revocation service unavailable")
+		}
+		if revoked {
+			logger.Warn("steward call rejected: client certificate revoked",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"serial", logging.SanitizeLogValue(serial),
+				"method", logging.SanitizeLogValue(info.FullMethod))
+			return nil, status.Error(codes.PermissionDenied, "client certificate revoked")
+		}
+		return handler(ctx, req)
+	}
+}

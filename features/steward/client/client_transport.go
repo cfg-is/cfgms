@@ -903,6 +903,14 @@ func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 		// for slower hosts while still bounding a wedged module.
 		ModuleCallTimeoutSec: 120,
 	}
+	// Controller-issued initial passwords (Issue #5555) are requested over the
+	// unary IssueInitialCredential RPC on the shared transport connection, never as
+	// a control-plane event: events pass through the offline queue, which persists
+	// to disk. The client resolves the gRPC client per call, so it follows
+	// reconnects.
+	if cp, ok := controlPlane.(*grpcCP.Provider); ok {
+		execCfg.CredentialClient = NewCredentialClient(cp.TransportClient)
+	}
 	// Assign the emitter only when one was built. ExecutorConfig.EventEmitter is an
 	// interface, so assigning a nil *EventEmitter unconditionally would store a
 	// typed-nil: the executor's `if e.eventEmitter != nil` guard passes and the first

@@ -35,6 +35,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/clusterregistry"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/credentials"
 	"github.com/cfgis/cfgms/features/controller/directory"
 	"github.com/cfgis/cfgms/features/controller/dispatcher"
 	controllerFleet "github.com/cfgis/cfgms/features/controller/fleet"
@@ -261,6 +262,9 @@ type Server struct {
 	egTenantSyncLeaseJob            lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the tenant-sync sweep (ADR-031 Decision 4)
 	m365Inventory                   *directory.M365Inventory                 // Issue #5561: lease-gated M365 tenant inventory; stopped in Stop() before egProvider closes
 	egCorrelatorLeaseJob            lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the correlator sweep (ADR-031 Decision 4)
+	credentialService               *credentials.Service                     // Issue #5555: controller-issued initial passwords; nil when the secret store is unavailable
+	credentialLeaseJob              lease.SingletonJob                       // Issue #5555: cluster-singleton claim for the credential expiry sweep
+	credentialSweeper               *entityGraphPeriodicSweeper              // Issue #5555: stopped in Stop()
 }
 
 // egServerProvider is the combined interface the controller server needs for
@@ -281,6 +285,10 @@ type egServerProvider interface {
 const (
 	entityGraphTenantSyncSweepInterval = 5 * time.Minute
 	entityGraphCorrelatorSweepInterval = 15 * time.Minute
+
+	// credentialSweepInterval is how often initial credentials past their expiry
+	// are expired and their secrets deleted (Issue #5555).
+	credentialSweepInterval = 5 * time.Minute
 )
 
 // entityGraphPeriodicSweeper runs a bound sweep function on a fixed interval
@@ -1955,6 +1963,30 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, fmt.Errorf("failed to construct entity graph correlator sweep lease job: %w", egCorrelatorLeaseErr)
 	}
 
+	// Issue #5555: controller-issued one-time initial passwords. The password is
+	// held by the secrets provider and the record by the config store; the expiry
+	// sweep is a cluster singleton (ADR-031 Decision 4).
+	credentialLeaseJob, credentialLeaseErr := haManager.NewBackgroundLoopLease("credential-expiry", logger)
+	if credentialLeaseErr != nil {
+		return nil, fmt.Errorf("failed to construct credential expiry lease job: %w", credentialLeaseErr)
+	}
+	var credentialService *credentials.Service
+	if cs := storageManager.GetConfigStore(); cs != nil && routerSecretStore != nil {
+		credStore, credStoreErr := credentials.NewStore(cs, routerSecretStore)
+		if credStoreErr != nil {
+			return nil, fmt.Errorf("failed to construct credential store: %w", credStoreErr)
+		}
+		credOpts := []credentials.ServiceOption{credentials.WithAudit(auditManager)}
+		if cfg.Directory != nil {
+			credOpts = append(credOpts, credentials.WithTTL(cfg.Directory.InitialCredentialTTL.AsDuration()))
+		}
+		var credSvcErr error
+		credentialService, credSvcErr = credentials.NewService(credStore, credentials.ConfigBindingChecker{Store: cs}, logger, credOpts...)
+		if credSvcErr != nil {
+			return nil, fmt.Errorf("failed to construct credential service: %w", credSvcErr)
+		}
+	}
+
 	// Issue #5561: scheduled M365 tenant inventory, recorded in the entity graph.
 	// Gated on its own cluster-singleton lease so one node reads Graph per cycle.
 	m365InventoryLeaseJob, m365InventoryLeaseErr := haManager.NewBackgroundLoopLease("m365-inventory", logger)
@@ -2200,6 +2232,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		egCorrelatorWriter:      egCorrelatorWriter,   // Issue #4413: periodic sweep started in Start()
 		egTenantSyncLeaseJob:    egTenantSyncLeaseJob, // Issue #4413: gates the tenant-sync sweep (ADR-031 Decision 4)
 		egCorrelatorLeaseJob:    egCorrelatorLeaseJob, // Issue #4413: gates the correlator sweep (ADR-031 Decision 4)
+		credentialService:       credentialService,    // Issue #5555
+		credentialLeaseJob:      credentialLeaseJob,   // Issue #5555
 	}
 
 	// Issue #4444: build the DNA-sync -> entity-graph writer against the same
@@ -2861,12 +2895,19 @@ func (s *Server) Start() error {
 
 		// Create fresh shared gRPC server + QUIC listener per Start() cycle.
 		// grpc.Server is not reusable after Stop(), so we create a new one each time.
-		grpcOpts := []grpc.ServerOption{grpc.Creds(quictransport.TransportCredentials())}
+		grpcOpts := []grpc.ServerOption{
+			grpc.Creds(quictransport.TransportCredentials()),
+			// Issue #5555: unary calls are logged by method, code and duration only;
+			// IssueInitialCredential never reaches a payload log or a span attribute.
+			grpc.ChainUnaryInterceptor(controllerTransport.NewUnaryAccessLogInterceptor(s.logger)),
+		}
 		if s.certManager != nil {
-			grpcOpts = append(grpcOpts, grpc.ChainStreamInterceptor(
-				newStreamRevocationInterceptor(s.certManager, s.logger, s.streamRevocationRecheckInterval)))
+			grpcOpts = append(grpcOpts,
+				grpc.ChainUnaryInterceptor(newUnaryRevocationInterceptor(s.certManager, s.logger)),
+				grpc.ChainStreamInterceptor(
+					newStreamRevocationInterceptor(s.certManager, s.logger, s.streamRevocationRecheckInterval)))
 		} else {
-			s.logger.Warn("no certificate manager; steward stream revocation checks are not installed")
+			s.logger.Warn("no certificate manager; steward unary and stream revocation checks are not installed, IssueInitialCredential is disabled")
 		}
 		s.grpcServer = grpc.NewServer(append(grpcOpts, dataplaneGRPC.ServerOptions()...)...)
 		ql, err := quictransport.ListenWithLimits(
@@ -2965,6 +3006,15 @@ func (s *Server) Start() error {
 		if s.moduleCache != nil && s.configService != nil && s.controllerService != nil {
 			composite.SetModuleBundleHandler(controllerTransport.NewModuleBundleHandler(
 				s.moduleCache, s.configService, s.controllerService, tenantQueue, s.logger))
+		}
+		// Issue #5555: IssueInitialCredential is a unary RPC so a password never
+		// passes through the steward offline queue (which persists to disk). It is
+		// wired only with a certificate manager: without one the unary revocation
+		// interceptor is not installed, and a revoked steward must never be able
+		// to collect a plaintext initial password.
+		if s.certManager != nil && s.credentialService != nil && s.configService != nil && s.controllerService != nil {
+			composite.SetCredentialHandler(controllerTransport.NewCredentialHandler(
+				s.credentialService, s.configService, s.controllerService, s.logger))
 		}
 		composite.SetLogStreamHandler(logStreamHandler)
 		composite.SetTelemetryHandler(telemetryHandler)
@@ -3140,6 +3190,18 @@ func (s *Server) Start() error {
 		s.egTenantSyncSweeper.Start(ctxkeys.WithSystem(context.Background()))
 		s.logger.Info("Entity graph tenant-sync periodic sweep started (Issue #4413)",
 			"interval", entityGraphTenantSyncSweepInterval)
+	}
+
+	// Issue #5555: expire initial credentials and delete their secrets. Gated on
+	// the sweep's own cluster-singleton lease so one node sweeps per tick.
+	if s.credentialService != nil {
+		s.credentialSweeper = newEntityGraphPeriodicSweeper("credential-expiry", credentialSweepInterval,
+			func(ctx context.Context) error {
+				_, err := s.credentialService.Sweep(ctx)
+				return err
+			}, s.credentialLeaseJob, s.logger)
+		s.credentialSweeper.Start(ctxkeys.WithSystem(context.Background()))
+		s.logger.Info("Credential expiry sweep started (Issue #5555)", "interval", credentialSweepInterval)
 	}
 
 	// Start the MAC-identity correlator's periodic sweep (Issue #4413, ADR-022
@@ -3449,6 +3511,13 @@ func (s *Server) Stop() error {
 	// Stop entity-graph periodic writer sweeps (Issue #4413) before the provider
 	// they write through closes below. Each Stop cancels its sweep loop's context
 	// and waits (bounded) for the goroutine to drain.
+	if s.credentialSweeper != nil {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.credentialSweeper.Stop(stopCtx); err != nil {
+			s.logger.Warn("Failed to stop credential expiry sweep", "error", err)
+		}
+		stopCancel()
+	}
 	if s.egTenantSyncSweeper != nil {
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := s.egTenantSyncSweeper.Stop(stopCtx); err != nil {

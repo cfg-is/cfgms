@@ -106,6 +106,10 @@ type ModuleFactory struct {
 	// Guarded by mu.
 	secretStore secretsif.SecretStore
 
+	// credentialClient is injected into modules that implement
+	// CredentialClientInjectable (Issue #5555).
+	credentialClient modules.CredentialClient
+
 	// gate is the maintenance gate injected into the patch module for reboot-window
 	// enforcement. When nil, the patch module uses the fail-closed default (nil manager → deny).
 	// Guarded by mu.
@@ -454,7 +458,34 @@ func (f *ModuleFactory) newPatchModule() modules.Module {
 //
 // Callers must hold f.mu (it reads f.logger).
 func (f *ModuleFactory) newActiveDirectoryModule() modules.Module {
-	return activedirectory_module.New(f.logger)
+	m := activedirectory_module.New(f.logger)
+	f.attemptCredentialClientInjection(m, "activedirectory")
+	return m
+}
+
+// SetCredentialClient sets the controller credential client injected into
+// modules that implement modules.CredentialClientInjectable (Issue #5555). Must
+// be called before the first LoadModule("activedirectory"). Parallels
+// SetSecretStore.
+func (f *ModuleFactory) SetCredentialClient(client modules.CredentialClient) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.credentialClient = client
+}
+
+// attemptCredentialClientInjection injects the credential client into a module
+// that supports it. A module without the interface, or a factory without a
+// client, is left untouched.
+//
+// Callers must hold f.mu (it reads f.credentialClient).
+func (f *ModuleFactory) attemptCredentialClientInjection(instance modules.Module, moduleName string) {
+	injectable, ok := instance.(modules.CredentialClientInjectable)
+	if !ok || f.credentialClient == nil {
+		return
+	}
+	if err := injectable.SetCredentialClient(f.credentialClient); err != nil {
+		f.logger.Warn("failed to inject credential client into module", "module", moduleName)
+	}
 }
 
 // SetMaintenanceGate sets the maintenance gate used by the patch module for

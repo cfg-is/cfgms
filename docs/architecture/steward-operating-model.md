@@ -345,6 +345,26 @@ Every installed-bundle handle the factory started is tracked and stopped the sam
 
 Trust verification (in `strict` mode) is performed **before** fork/exec. If the bundle fails trust verification, `Start()` returns `ErrPublisherNotTrusted` and no process is started.
 
+### Credential Client (Issue #5555)
+
+A module that creates accounts asks the controller for the initial password
+through `modules.CredentialClientInjectable`. The factory injects a
+`CredentialClient` beside the `activedirectory` constructor, the same way it
+injects the secret store; a module without the interface gets nothing.
+
+The client (`features/steward/client.CredentialClient`) calls the unary
+`IssueInitialCredential` RPC on the steward's `StewardTransport` connection (the
+control-plane provider's gRPC client, resolved per call so it follows
+reconnects), under a 15-second deadline. The password is returned in memory only.
+
+**Why secrets bypass the event queue.** Control-plane events go through
+`publishEventWithQueue`, which persists to the offline queue on disk so they
+survive a disconnect. A password must never reach disk, so it travels by RPC, and
+the client has no queue, no retry file and no cache: on any failure nothing is
+written and the caller tries again on its next convergence run. Errors carry a
+fixed sentinel (`ErrCredentialUnavailable`, `ErrCredentialRefused`,
+`ErrCredentialAlreadyIssued`) and never the server's message text.
+
 ### Four Execution Paths
 
 Every byte of code that runs on a steward arrives through exactly one of these paths (see ADR-006 for full details):

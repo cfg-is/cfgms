@@ -292,6 +292,10 @@ func (s *inventoryState) GetManagedFields() []string { return nil }
 // activeDirectoryModule implements the Module interface for local Active
 // Directory management using the Windows system context.
 type activeDirectoryModule struct {
+	// DefaultCredentialClientSupport lets the steward inject the controller
+	// credential client (Issue #5555); account creation uses it (#5563).
+	modules.DefaultCredentialClientSupport
+
 	logger logging.Logger
 
 	// runner runs the fixed read script.
