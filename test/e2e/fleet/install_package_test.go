@@ -314,6 +314,12 @@ func runInstallScriptInContainer(t *testing.T, container string, archiveData []b
 
 	// install.sh requires the token file to be owned by the invoking user, so it
 	// is written by the same user docker exec runs install.sh as (not root).
+	// workDir was created by root, so hand it to that user first.
+	idOut, idErr := exec.CommandContext(ctx, "docker", "exec", container,
+		"sh", "-c", "echo $(id -u):$(id -g)").CombinedOutput()
+	require.NoError(t, idErr, "resolving the exec user failed: %s", string(idOut))
+	dockerExecRoot(t, container, "chown", strings.TrimSpace(string(idOut)), workDir)
+
 	tokenFile := workDir + "/regtoken"
 	writeOut, writeErr := exec.CommandContext(ctx, "docker", "exec", container,
 		"sh", "-c", "umask 077; printf %s dockertest_fleet_child_a > "+tokenFile,
