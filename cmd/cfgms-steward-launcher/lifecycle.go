@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,13 +25,14 @@ import (
 //     stopped the steward intentionally, or the service manager sent stop;
 //     normal restart in either case).
 //   - Exit code != 0 or any exit BEFORE StartupWindow elapsed → consider
-//     the current version "broken." If a previous version is recorded,
-//     roll back and exec from there. If no previous, exit non-zero and let
-//     the OS service manager retry per its recovery actions.
+//     the current version "broken." A known-good version is restarted in
+//     place and never rolled back. Otherwise, if a previous version is
+//     recorded and rollback budget remains, roll back and exec from there;
+//     if not, keep restarting the current version with capped backoff.
 //
-// The launcher itself never panics on these branches. Edge cases (missing
-// binary, version-file pointing at nothing on disk) surface as errors
-// returned from Supervise; main() translates them to non-zero exits.
+// The launcher never gives up supervising. Edge cases (missing binary,
+// version-file pointing at nothing on disk, rollback failure) are written to
+// Stderr and retried with capped exponential backoff until they heal.
 type Supervisor struct {
 	// Layout describes the on-disk binary layout.
 	Layout Layout
@@ -60,6 +62,11 @@ type Supervisor struct {
 
 	// clock is injectable for tests; production uses time.Now / time.Since.
 	clock clock
+
+	// sleep waits for d or until ctx is done, whichever comes first. Tests
+	// inject a recorder so backoff runs without wall-clock sleeps; nil uses
+	// sleepWithJitter.
+	sleep func(ctx context.Context, d time.Duration)
 
 	// CertStoreDir is the directory where upgrade flag files (upgrade-committed,
 	// upgrade-rolled-back) are written so the steward process can emit the
@@ -102,6 +109,26 @@ const defaultServiceRepairInterval = 10 * time.Second
 // silent, unattended downgrade of a perfectly healthy install.
 var errChildNeverStarted = errors.New("launcher: child never started (context cancelled before exec)")
 
+const (
+	// initialRestartBackoff is the first delay before a failed launch is
+	// retried; it doubles per consecutive failure up to maxRestartBackoff.
+	initialRestartBackoff = time.Second
+	maxRestartBackoff     = 5 * time.Minute
+)
+
+// sleepWithJitter waits d plus up to 10% jitter, returning early if ctx is done.
+func sleepWithJitter(ctx context.Context, d time.Duration) {
+	if j := int64(d / 10); j > 0 {
+		d += time.Duration(rand.Int63n(j)) //#nosec G404 -- retry jitter, not security-sensitive
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
+}
+
 type clock interface {
 	Now() time.Time
 	Since(time.Time) time.Duration
@@ -136,12 +163,12 @@ func (s *Supervisor) runServiceRegistrationRepair(ctx context.Context, interval 
 	}
 }
 
-// Supervise runs the supervision loop until ctx is cancelled, the child
-// exits normally without triggering rollback, or all rollback attempts are
-// exhausted.
+// Supervise runs the supervision loop until ctx is cancelled. Every fault
+// (unreadable or missing layout, missing binary, rollback failure, a child
+// that keeps failing) is written to Stderr and retried with capped backoff.
 //
-// Returns nil if the child completed normally; an error describing the
-// final fault otherwise.
+// Returns nil on context cancellation. The only error returned is an
+// invalid ExtraArgs value, rejected before the loop starts.
 func (s *Supervisor) Supervise(ctx context.Context) error {
 	if err := rejectRegtokenValue(s.ExtraArgs); err != nil {
 		return err
@@ -177,6 +204,21 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 	defer cancelRepair()
 	go s.runServiceRegistrationRepair(repairCtx, repairInterval, maybeRepairServiceRegistration)
 
+	if s.sleep == nil {
+		s.sleep = sleepWithJitter
+	}
+	backoff := initialRestartBackoff
+	// retryAfter waits out the current backoff (honouring ctx) and doubles it.
+	retryAfter := func() {
+		s.sleep(ctx, backoff)
+		backoff = min(backoff*2, maxRestartBackoff)
+	}
+	// fault reports a supervision fault to Stderr and backs off before retrying.
+	fault := func(err error) {
+		_, _ = fmt.Fprintln(s.Stderr, err.Error())
+		retryAfter()
+	}
+
 	rollbacksRemaining := s.MaxRollbackCycles
 	for {
 		// Never begin (or re-begin) a child launch once shutdown has been
@@ -194,18 +236,22 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 
 		current, err := s.Layout.ReadCurrent()
 		if err != nil {
-			return fmt.Errorf("launcher: read current version: %w", err)
+			fault(fmt.Errorf("launcher: read current version: %w", err))
+			continue
 		}
 		if current == "" {
-			return errors.New("launcher: no current version recorded — install layout is missing or corrupt")
+			fault(errors.New("launcher: no current version recorded — install layout is missing or corrupt"))
+			continue
 		}
 
 		exe, err := s.Layout.StewardExeFor(current)
 		if err != nil {
-			return fmt.Errorf("launcher: resolve steward exe for %q: %w", current, err)
+			fault(fmt.Errorf("launcher: resolve steward exe for %q: %w", current, err))
+			continue
 		}
 		if _, statErr := os.Stat(exe); statErr != nil {
-			return fmt.Errorf("launcher: steward exe %q for version %q is missing: %w", exe, current, statErr)
+			fault(fmt.Errorf("launcher: steward exe %q for version %q is missing: %w", exe, current, statErr))
+			continue
 		}
 
 		started := s.clock.Now()
@@ -284,6 +330,7 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 			// This must NOT be treated as a startup failure — skip the rollback
 			// guard and loop to exec the new current version.
 			if after, readErr := s.Layout.ReadCurrent(); readErr == nil && after != current {
+				backoff = initialRestartBackoff
 				continue
 			}
 		}
@@ -318,6 +365,7 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 			if flagErr := s.writeFlagFile("upgrade-committed", current); flagErr != nil {
 				_, _ = fmt.Fprintf(s.Stderr, "launcher: write upgrade-committed flag: %v\n", flagErr)
 			}
+			backoff = initialRestartBackoff
 			continue
 		}
 
@@ -333,26 +381,36 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 			_, _ = fmt.Fprintf(s.Stderr, "launcher: load state for failure counter: %v\n", loadErr)
 		}
 
-		// Known-good fast-exit: a proven binary that exits inside the startup
-		// window is suffering a transient environmental fault (e.g. a boot-time
-		// dependency race), not an upgrade regression. Restart it in place so
-		// SCM recovery and the OS backoff handle persistence — never roll back
-		// a binary that has already proven healthy (Issue #2033).
-		if isKnownGood && failedStartup {
-			_, _ = fmt.Fprintf(s.Stderr, "launcher: version %q is known-good — restarting in place after fast exit (ran %s); rollback suppressed\n", current, ranFor)
+		// A child that ran past the startup window was healthy for a while, so
+		// whatever failed it is new: start the backoff over.
+		if !failedStartup {
+			backoff = initialRestartBackoff
+		}
+
+		// Known-good failure: a proven binary that exits non-zero (or fast) is
+		// suffering a transient environmental fault (e.g. a boot-time
+		// dependency race, a late crash), not an upgrade regression. Restart it
+		// in place with backoff — never roll back a binary that has already
+		// proven healthy (Issue #2033).
+		if isKnownGood {
+			_, _ = fmt.Fprintf(s.Stderr, "launcher: version %q is known-good — restarting in place after failure (ran %s); rollback suppressed\n", current, ranFor)
+			retryAfter()
 			continue
 		}
 
 		// Attempt rollback if we have a previous version AND budget.
 		previous, perr := s.Layout.ReadPrevious()
 		if perr != nil {
-			return fmt.Errorf("launcher: read previous version after child failure: %w", perr)
+			fault(fmt.Errorf("launcher: read previous version after child failure: %w", perr))
+			continue
 		}
 		if previous == "" || rollbacksRemaining == 0 {
 			if exitErr != nil {
-				return fmt.Errorf("launcher: child failed (ran for %s) and no rollback available: %w", ranFor, exitErr)
+				fault(fmt.Errorf("launcher: child failed (ran for %s) and no rollback available: %w", ranFor, exitErr))
+			} else {
+				fault(fmt.Errorf("launcher: child exited inside startup window (%s) and no rollback available", ranFor))
 			}
-			return fmt.Errorf("launcher: child exited inside startup window (%s) and no rollback available", ranFor)
+			continue
 		}
 
 		// Rollback is going to fire: write the flag file with the version we
@@ -364,9 +422,11 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 
 		newCurrent, rbErr := s.Layout.Rollback()
 		if rbErr != nil {
-			return fmt.Errorf("launcher: rollback after child failure: %w", rbErr)
+			fault(fmt.Errorf("launcher: rollback after child failure: %w", rbErr))
+			continue
 		}
 		rollbacksRemaining--
+		backoff = initialRestartBackoff
 		_, _ = fmt.Fprintf(s.Stderr, "launcher: rolled back to version %q after child failure (ran for %s)\n", newCurrent, ranFor)
 	}
 }

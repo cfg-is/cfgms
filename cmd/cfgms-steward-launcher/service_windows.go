@@ -110,8 +110,9 @@ func (h *windowsServiceHandler) Execute(_ []string, r <-chan svc.ChangeRequest, 
 				return false, uint32(code)
 			}
 		case code := <-done:
-			// Supervise exited on its own (terminal failure — broken child
-			// with no rollback available). A non-zero code is reported as a
+			// Supervise exited on its own. It only returns on cancellation, so
+			// this is a safety net for an unexpected exit (e.g. rejected
+			// arguments or layout open failure). A non-zero code is reported as a
 			// service-specific exit so Win32_Service.ExitCode is non-zero and
 			// the SCM applies its configured recovery actions (RESTART).
 			// A zero code (unexpected clean supervise exit) is reported as a
