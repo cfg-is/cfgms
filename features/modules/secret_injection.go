@@ -79,6 +79,31 @@ type CredentialClientInjectable interface {
 	GetCredentialClient() (client CredentialClient, injected bool)
 }
 
+// DeclaredResource is one resource of the steward's configuration, as the
+// executor hands it to the module that serves it.
+type DeclaredResource struct {
+	// Name is the resource name from the configuration.
+	Name string
+	// Module is the full module reference, e.g. "activedirectory.user".
+	Module string
+	// ResourceID is the module-internal identifier the executor passes to Get
+	// and Set for this resource, e.g. "user:jdoe".
+	ResourceID string
+	// Config is the resource's declared configuration. Modules must not
+	// modify it.
+	Config map[string]interface{}
+}
+
+// DeclaredResourceAware is implemented by modules that need the complete set
+// of resources declared for them, not only the one being converged; the
+// activedirectory module uses it to mark the observed objects it manages.
+// Before every full configuration pass the executor calls SetDeclared on each
+// module instance with that module's resources (possibly none), replacing the
+// previous set.
+type DeclaredResourceAware interface {
+	SetDeclared(resources []DeclaredResource)
+}
+
 // DefaultCredentialClientSupport provides a default CredentialClientInjectable
 // that modules can embed.
 type DefaultCredentialClientSupport struct {

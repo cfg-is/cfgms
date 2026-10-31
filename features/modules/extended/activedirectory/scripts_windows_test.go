@@ -224,3 +224,77 @@ func TestRunner_RealScriptValidatesRequestWithoutEcho(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteScript_EmbeddedHashMatchesConstant(t *testing.T) {
+	sum := sha256.Sum256(writeScript)
+	assert.Equal(t, writeScriptSHA256, hex.EncodeToString(sum[:]),
+		"writeScriptSHA256 must be updated whenever scripts/write.ps1 changes")
+	onDisk, err := os.ReadFile(filepath.Join("scripts", "write.ps1"))
+	require.NoError(t, err)
+	assert.Equal(t, onDisk, writeScript, "the embedded write script is scripts/write.ps1")
+	assert.NotContains(t, string(writeScript), "-"+"Command", "the write script never passes an inline command")
+	assert.NotContains(t, string(writeScript), "Invoke-Expression")
+}
+
+// TestWriteRunner_ErrorCarriesNoStderr: the write script's stdin can carry a
+// password, so its errors never include anything the script printed.
+func TestWriteRunner_ErrorCarriesNoStderr(t *testing.T) {
+	const password = "Zq7#tP2m-Lw9xR4v"
+	stdin := []byte(`{"operation":"create_user","sam_account_name":"jdoe"}` + "\n" + password)
+	recordExec(t, "", "echo: "+string(stdin)+"\n"+password+"\n", 1)
+	err := invokeScript(context.Background(), `C:\x\write.ps1`, writeEmbedded, stdin, func([]byte) error { return nil })
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), password)
+	assert.NotContains(t, err.Error(), "echo")
+	assert.Equal(t, "activedirectory: write script failed with exit code 1", err.Error())
+}
+
+// TestWriteScript_RealPowerShellNeverEchoesPassword runs the embedded write
+// script with the real powershell.exe. Every request is validated, and a new
+// user's password read into a SecureString, before the ActiveDirectory module
+// loads, so no domain controller is needed: on this host the run ends with a
+// validation error, ad_module_unavailable or ad_write_failed. In every case
+// the password and request values appear on neither stdout nor stderr.
+func TestWriteScript_RealPowerShellNeverEchoesPassword(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "write.ps1")
+	require.NoError(t, os.WriteFile(path, writeScript, 0o600))
+	require.NoError(t, verifyStaged(path, writeEmbedded))
+	exe := powershellExe()
+
+	const password = "Zq7#tP2m-Lw9xR4v"
+	const marker = "zz-secret-marker"
+	cases := []struct {
+		name    string
+		request string
+		codes   []string
+	}{
+		{"hostile name", `{"operation":"create_user","sam_account_name":"` + marker + `; Remove-Item"}`, []string{"invalid_sam_account_name"}},
+		{"leading dash", `{"operation":"create_user","sam_account_name":"-` + marker + `"}`, []string{"invalid_sam_account_name"}},
+		{"unknown field", `{"operation":"create_user","password":"` + marker + `"}`, []string{"request_unknown_field"}},
+		{"bad ou", `{"operation":"create_user","sam_account_name":"jdoe","ou":"OU=` + marker + `\\,x,DC=a"}`, []string{"invalid_ou"}},
+		{"bad id", `{"operation":"set_user_enabled","id":"` + marker + `","enabled":true}`, []string{"invalid_id"}},
+		{"delete is not an operation", `{"operation":"delete_user","id":"00000000-0000-4000-8000-000000000001"}`, []string{"invalid_operation"}},
+		{"valid create", `{"operation":"create_user","sam_account_name":"jdoe` + `","display_name":"J Doe"}`, []string{"ad_module_unavailable", "ad_write_failed"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr strings.Builder
+			stdin := strings.NewReader(tc.request + "\n" + password + "\n")
+			_, err := execScript(context.Background(), scriptArgv(exe, path), stdin, &stdout, &stderr)
+			require.Error(t, err, "every case ends in an error record and exit code 1")
+
+			var codes []string
+			for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+				var rec readRecord
+				require.NoError(t, json.Unmarshal([]byte(line), &rec), "stdout is NDJSON: %q", line)
+				codes = append(codes, rec.Code)
+			}
+			require.Len(t, codes, 1)
+			assert.Contains(t, tc.codes, codes[0])
+			for _, out := range []string{stdout.String(), stderr.String()} {
+				assert.NotContains(t, out, password)
+				assert.NotContains(t, out, marker)
+			}
+		})
+	}
+}

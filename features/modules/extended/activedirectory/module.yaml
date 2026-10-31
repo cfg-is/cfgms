@@ -22,6 +22,9 @@ platforms:
 resource_types:
   - activedirectory_local
   - activedirectory_system
+  - activedirectory.user    # declared user: create, enable/disable, display_name, mail
+  - activedirectory.group   # declared group: create, listed members added/removed
+  - activedirectory.domain  # verifies the declared domain is the machine's domain
 
 # Per-object directory inventory. Get("directory_user") and
 # Get("directory_group") return one object per user / group under the reserved
@@ -64,12 +67,20 @@ supported_object_types:
   - user
   - group
 
-# Supported operations. Write operations are added only as they are
-# implemented. Besides status, Get serves the inventory IDs directory_user and
-# directory_group (see owns).
+# Supported operations: exactly what is implemented. Besides status, Get
+# serves the inventory IDs directory_user and directory_group (see owns) and
+# the declared activedirectory.user/.group/.domain resources. Every write
+# targets only the object bound to a declared resource. There is no delete.
 supported_operations:
   read:
     - status
+  write:
+    - create_user
+    - set_user_enabled
+    - set_user_attributes
+    - create_group
+    - add_group_member
+    - remove_group_member
 
 # Health checks
 health_checks:
@@ -97,28 +108,40 @@ observe_when:
 
 behavioral_envelope:
   shells_out_to:
-    - "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" # absolute path under %SystemRoot%, never PATH; runs the fixed, embedded read script with -File
+    - "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" # absolute path under %SystemRoot%, never PATH; runs the fixed, embedded read or write script with -File
   reads_paths:
-    - "%ProgramData%\\cfgms\\activedirectory-scripts" # staged read script, read back for its hash check before every run
+    - "%ProgramData%\\cfgms\\activedirectory-scripts" # staged read and write scripts, read back for their hash check before every run
+    - "%ProgramData%\\cfgms\\steward\\activedirectory" # resource-to-objectGUID bindings (no secrets)
   writes_paths:
-    - "%ProgramData%\\cfgms\\activedirectory-scripts" # the embedded read script is staged here (admin-only directory)
+    - "%ProgramData%\\cfgms\\activedirectory-scripts" # the embedded read and write scripts are staged here (admin-only directory)
+    - "%ProgramData%\\cfgms\\steward\\activedirectory" # resource-to-objectGUID bindings, replaced atomically (admin-only directory)
   lolbin_usage_justification: |
-    The module reads Active Directory through the ActiveDirectory PowerShell
-    cmdlets, which have no in-process Go equivalent. Every run is
-    `powershell.exe -NoProfile -NonInteractive -File <staged read script>`: the
-    script is a fixed file embedded in the steward binary, staged in an
-    admin-only directory (security.EnsureAdminOnlyDir), and its SHA-256 is
-    compared with the embedded constant before every run; a mismatch refuses to
-    run. No inline command string, encoded command or runtime script composition
-    is used, and the execution policy is not changed. The operation and its
-    parameters go in
-    as one JSON document on stdin, validated by the script and used only as
-    typed cmdlet parameters; nothing user-derived reaches argv or script text.
+    The module reads and writes Active Directory through the ActiveDirectory
+    PowerShell cmdlets, which have no in-process Go equivalent. Every run is
+    `powershell.exe -NoProfile -NonInteractive -File <staged script>`, where the
+    script is one of two fixed files embedded in the steward binary (read.ps1,
+    write.ps1), staged in an admin-only directory (security.EnsureAdminOnlyDir),
+    and its SHA-256 is compared with the embedded constant before every run; a
+    mismatch refuses to run. No inline command string, encoded command or
+    runtime script composition is used, and the execution policy is not
+    changed. The operation and its parameters go in as one JSON document on
+    stdin, validated by the script and used only as typed cmdlet parameters or
+    as variables an ActiveDirectory -Filter refers to by name; nothing
+    user-derived reaches argv or script text. A new user's one-time password,
+    issued by the controller, follows the request on stdin and is read one
+    character at a time into a SecureString: it never appears in argv, script
+    text, output, errors, logs or module state.
     Hosts that enforce the AllSigned execution policy need the script
     Authenticode-signed, which is a release-signing concern.
 
 # Security considerations
 security:
-  sensitive_fields: []  # No stored credentials
+  sensitive_fields: []  # No stored credentials; a new user's password is held in memory only
   encryption_required: []  # No credential storage
-  audit_operations: []  # No write operations are implemented
+  audit_operations:
+    - create_user
+    - set_user_enabled
+    - set_user_attributes
+    - create_group
+    - add_group_member
+    - remove_group_member
