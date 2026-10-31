@@ -23,7 +23,7 @@ import (
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	clusterregistry "github.com/cfgis/cfgms/features/controller/clusterregistry"
 	"github.com/cfgis/cfgms/features/controller/fleet"
-	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/features/workflow/modules/m365/moduleset"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/config"
 	configroutingiface "github.com/cfgis/cfgms/pkg/configrouting/interfaces"
@@ -1038,7 +1038,7 @@ func dropControllerKindResources(cfg *stewardtypes.StewardConfig) *stewardtypes.
 	}
 	kept := make([]stewardtypes.ResourceConfig, 0, len(cfg.Resources))
 	for _, r := range cfg.Resources {
-		if workflow.IsM365CredentialedModule(r.Module) {
+		if moduleset.Contains(r.Module) {
 			continue
 		}
 		kept = append(kept, r)

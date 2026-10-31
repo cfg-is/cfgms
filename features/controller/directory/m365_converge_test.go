@@ -745,3 +745,17 @@ func TestM365Inventory_AfterTenantRunsOncePerTenantUnderTheLease(t *testing.T) {
 	require.True(t, leader.RunOnce(context.Background()))
 	assert.False(t, follower.RunOnce(context.Background()))
 }
+
+func TestM365Converge_DeclaredTenantIDMustMatchConnection(t *testing.T) {
+	e := newCvEnv(t, "tenant-a")
+	conn := e.connect("tenant-a", "app-a", guidA)
+	e.gr.tenant("app-a").users[cvUserA] = &cgUser{ID: cvUserA, UPN: "alice@example.com", Name: "Old", Enabled: true}
+	e.declare("tenant-a", apply(), userRes("alice", "alice@example.com",
+		map[string]interface{}{"display_name": "Alice", "adopt": true, "tenant_id": guidB}))
+
+	c := e.converger()
+	c.Converge(context.Background(), conn)
+
+	assert.Zero(t, e.gr.writeCount("app-a"))
+	assert.Equal(t, ConvergeStateRefused, e.outcomes(c, "tenant-a")["alice"].State)
+}

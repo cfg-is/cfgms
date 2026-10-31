@@ -15,8 +15,8 @@ import (
 
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/modules"
-	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/graph"
+	"github.com/cfgis/cfgms/features/workflow/modules/m365/moduleset"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	dirif "github.com/cfgis/cfgms/pkg/directory/interfaces"
@@ -308,7 +308,7 @@ func (c *M365Converge) Converge(ctx context.Context, conn M365Connection) {
 		if r.Module != M365UserModule && r.Module != M365GroupModule {
 			continue
 		}
-		if !workflow.IsM365CredentialedModule(r.Module) {
+		if !moduleset.Contains(r.Module) {
 			continue
 		}
 		declaredKeys[bindingKey(r.Module, r.Name)] = struct{}{}
@@ -745,8 +745,12 @@ func newResourceSpec(res stewardtypes.ResourceConfig, guid string) (*resourceSpe
 			return nil, errors.New("user_principal_name is required to identify a user")
 		}
 	}
+	// The connection's Entra tenant is authoritative; a declaration naming another
+	// directory is refused rather than forwarded.
 	if t, ok := res.Config["tenant_id"].(string); ok && t != "" {
-		s.guid = t
+		if g, valid := normalizeEntraGUID(t); !valid || g != guid {
+			return nil, errors.New("tenant_id does not match the tenant's M365 connection")
+		}
 	}
 	for _, f := range strFields {
 		if v, ok := res.Config[f].(string); ok {
