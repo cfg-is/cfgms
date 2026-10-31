@@ -190,14 +190,24 @@ func Write(w io.Writer, m Measurement) error {
 	return err
 }
 
-// Read parses a metric file, full or hotspot-only, and checks its schema
-// version.
-func Read(r io.Reader) (Measurement, error) {
+// ReadAny parses a metric file without checking its schema version, so a
+// baseline written under another schema can be reported as stale.
+func ReadAny(r io.Reader) (Measurement, error) {
 	var m Measurement
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&m); err != nil {
 		return Measurement{}, fmt.Errorf("parse metric file: %w", err)
+	}
+	return m, nil
+}
+
+// Read parses a metric file, full or hotspot-only, and checks its schema
+// version.
+func Read(r io.Reader) (Measurement, error) {
+	m, err := ReadAny(r)
+	if err != nil {
+		return Measurement{}, err
 	}
 	if m.SchemaVersion != SchemaVersion {
 		return Measurement{}, fmt.Errorf("metric file schema_version %d, want %d", m.SchemaVersion, SchemaVersion)

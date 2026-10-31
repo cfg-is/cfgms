@@ -11,6 +11,10 @@
 // The check subcommand enforces the no-worsening rules against a ratchet
 // baseline and the merge-base tree (see docs/development/complexity-gate.md).
 //
+// The ratchet subcommand moves the ratchet baseline only when the gate passes,
+// freeze writes the frozen baseline once, and staleness checks the ratchet
+// baseline against the running tool and manifest.
+//
 // Exit codes: 0 = ok, 1 = partition or duplicate-identity violation,
 // 2 = usage, IO or parse error.
 package main
@@ -31,6 +35,14 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "check" {
 		os.Exit(checkCmd(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	subs := map[string]func([]string, io.Writer, io.Writer) int{
+		"ratchet": ratchetCmd, "freeze": freezeCmd, "staleness": stalenessCmd,
+	}
+	if len(os.Args) > 1 {
+		if cmd, ok := subs[os.Args[1]]; ok {
+			os.Exit(cmd(os.Args[2:], os.Stdout, os.Stderr))
+		}
 	}
 	root := flag.String("root", ".", "repository root to analyse")
 	flag.Parse()

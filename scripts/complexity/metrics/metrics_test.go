@@ -84,3 +84,12 @@ func TestHotspotsOnly(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Equal(t, 11, got[0].CC)
 }
+
+func TestReadAnyAcceptsForeignSchema(t *testing.T) {
+	in := `{"schema_version": 99, "segments": {}}`
+	m, err := ReadAny(strings.NewReader(in))
+	require.NoError(t, err)
+	assert.Equal(t, 99, m.SchemaVersion)
+	_, err = Read(strings.NewReader(in))
+	assert.Error(t, err)
+}
