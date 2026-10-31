@@ -73,7 +73,7 @@ func readMetrics(t *testing.T, out string) metrics.Measurement {
 	t.Helper()
 	f, err := os.Open(out)
 	require.NoError(t, err)
-	defer f.Close()
+	t.Cleanup(func() { assert.NoError(t, f.Close()) })
 	m, err := metrics.Read(f)
 	require.NoError(t, err)
 	return m
@@ -185,7 +185,7 @@ func TestReportRealTreeSumsMatchAggregate(t *testing.T) {
 func TestCommittedInventoryIsValidHotspotForm(t *testing.T) {
 	f, err := os.Open("baselines/inventory.json")
 	require.NoError(t, err)
-	defer f.Close()
+	t.Cleanup(func() { assert.NoError(t, f.Close()) })
 	m, err := metrics.Read(f)
 	require.NoError(t, err)
 	assert.Equal(t, metrics.FormHotspots, m.Form)

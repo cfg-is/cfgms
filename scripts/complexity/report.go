@@ -52,7 +52,31 @@ func reportCmd(args []string, stdout, stderr io.Writer) int {
 	return report(o, stdout, stderr)
 }
 
+// printer writes formatted output and keeps the first write error, so a
+// closed or full stdout/stderr turns into a non-zero exit instead of silently
+// truncated output.
+type printer struct {
+	w   io.Writer
+	err error
+}
+
+func (p *printer) printf(format string, a ...any) {
+	if p.err != nil {
+		return
+	}
+	_, p.err = fmt.Fprintf(p.w, format, a...)
+}
+
 func report(o reportOptions, stdout, stderr io.Writer) int {
+	out, errOut := &printer{w: stdout}, &printer{w: stderr}
+	code := reportTo(o, out, errOut)
+	if out.err != nil || errOut.err != nil {
+		return exitError
+	}
+	return code
+}
+
+func reportTo(o reportOptions, stdout, stderr *printer) int {
 	m := metrics.Measurement{
 		SchemaVersion:    metrics.SchemaVersion,
 		BaseCommit:       o.baseCommit,
@@ -69,15 +93,15 @@ func report(o reportOptions, stdout, stderr io.Writer) int {
 	if m.BaseCommit == "" {
 		m.BaseCommit = gitBaseCommit(o.root)
 		if m.BaseCommit == "unknown" {
-			fmt.Fprintln(stderr, "complexity: WARN: could not resolve origin/develop; base_commit recorded as unknown")
+			stderr.printf("complexity: WARN: could not resolve origin/develop; base_commit recorded as unknown\n")
 		}
 	}
 	fail := func(err error) int {
-		fmt.Fprintf(stderr, "complexity: %v\n", err)
+		stderr.printf("complexity: %v\n", err)
 		m.Status = metrics.StatusError
 		m.Violations = append(m.Violations, err.Error())
 		if werr := writeMetrics(o.out, m); werr != nil {
-			fmt.Fprintf(stderr, "complexity: %v\n", werr)
+			stderr.printf("complexity: %v\n", werr)
 		}
 		return exitError
 	}
@@ -98,9 +122,9 @@ func report(o reportOptions, stdout, stderr io.Writer) int {
 		if strings.Contains(err.Error(), "duplicate identity") {
 			m.Status = metrics.StatusFail
 			m.Violations = append(m.Violations, err.Error())
-			fmt.Fprintf(stderr, "complexity: %v\n", err)
+			stderr.printf("complexity: %v\n", err)
 			if werr := writeMetrics(o.out, m); werr != nil {
-				fmt.Fprintf(stderr, "complexity: %v\n", werr)
+				stderr.printf("complexity: %v\n", werr)
 				return exitError
 			}
 			return exitViolation
@@ -137,18 +161,18 @@ func report(o reportOptions, stdout, stderr io.Writer) int {
 		m.Violations = append(m.Violations, v.String())
 	}
 	if err := writeMetrics(o.out, m); err != nil {
-		fmt.Fprintf(stderr, "complexity: %v\n", err)
+		stderr.printf("complexity: %v\n", err)
 		return exitError
 	}
 
 	for _, u := range man.UnusedPrefixes(fns) {
-		fmt.Fprintf(stdout, "WARN: manifest path has no production function: %s\n", u)
+		stdout.printf("WARN: manifest path has no production function: %s\n", u)
 	}
 	printSummary(stdout, m)
 	for _, v := range m.Violations {
-		fmt.Fprintf(stderr, "VIOLATION: %s\n", v)
+		stderr.printf("VIOLATION: %s\n", v)
 	}
-	fmt.Fprintf(stdout, "metric file: %s (status %s)\n", filepath.ToSlash(o.out), m.Status)
+	stdout.printf("metric file: %s (status %s)\n", filepath.ToSlash(o.out), m.Status)
 	if m.Status != metrics.StatusPass {
 		return exitViolation
 	}
@@ -171,24 +195,24 @@ func writeMetrics(out string, m metrics.Measurement) error {
 	if err := metrics.Write(&buf, m); err != nil {
 		return fmt.Errorf("encode metric file: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(out), 0o750); err != nil {
 		return fmt.Errorf("create %s: %v", filepath.ToSlash(filepath.Dir(out)), ioReason(err))
 	}
-	if err := os.WriteFile(out, buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(out, buf.Bytes(), 0o600); err != nil {
 		return fmt.Errorf("write %s: %v", filepath.ToSlash(out), ioReason(err))
 	}
 	return nil
 }
 
-func printSummary(w io.Writer, m metrics.Measurement) {
+func printSummary(w *printer, m metrics.Measurement) {
 	names := make([]string, 0, len(m.Segments))
 	for n := range m.Segments {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	fmt.Fprintf(w, "%-16s %9s %8s %7s %7s\n", "segment", "functions", "hotspots", "excess", "mean_cc")
+	w.printf("%-16s %9s %8s %7s %7s\n", "segment", "functions", "hotspots", "excess", "mean_cc")
 	row := func(n string, t metrics.Totals) {
-		fmt.Fprintf(w, "%-16s %9d %8d %7d %7.2f\n", n, t.Functions, t.Hotspots, t.AggregateExcess, t.MeanCC)
+		w.printf("%-16s %9d %8d %7d %7.2f\n", n, t.Functions, t.Hotspots, t.AggregateExcess, t.MeanCC)
 	}
 	for _, n := range names {
 		row(n, m.Segments[n])
@@ -197,7 +221,13 @@ func printSummary(w io.Writer, m metrics.Measurement) {
 }
 
 func gitBaseCommit(root string) string {
-	cmd := exec.Command("git", "-C", root, "rev-parse", "origin/develop")
+	// Make the directory absolute so it can never be parsed as a git option.
+	dir, err := filepath.Abs(root)
+	if err != nil {
+		return "unknown"
+	}
+	// #nosec G204 -- fixed argv with no shell; dir is an absolute path (cannot start with '-') passed as the -C operand.
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "origin/develop")
 	out, err := cmd.Output()
 	if err != nil {
 		return "unknown"
