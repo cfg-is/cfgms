@@ -1,6 +1,6 @@
 # Complexity Report
 
-`make complexity-report` measures every production Go function in the repository, partitions the population into seven segments from a committed manifest, and writes a versioned machine-readable metric file. It is report-only: there is no gate, ratchet or frozen baseline yet, and high complexity never fails the run.
+`make complexity-report` measures every production Go function in the repository, partitions the population into seven segments from a committed manifest, and writes a versioned machine-readable metric file. The report is report-only: high complexity never fails it. The `check` subcommand (see [Gate rules](#gate-rules)) enforces no-worsening rules against a baseline.
 
 The in-repo analyzer exists because the per-function Halstead metrics and the exact counting rules below are not available from an off-the-shelf linter, and the measurement must be reproducible from the repository alone with no new module dependency.
 
@@ -81,6 +81,57 @@ Regenerate:
 ```bash
 make complexity-report COMPLEXITY_OUT=scripts/complexity/baselines/inventory.json COMPLEXITY_FLAGS=-compact-baseline
 ```
+
+## Gate rules
+
+`go run ./scripts/complexity check -baseline <file>` measures the current tree, measures **Previous** (the merge-base tree), reads the ratchet baseline from `-baseline`, and evaluates three rules. The current tree goes through the same measure-and-partition path as `report`; a partition violation is a finding printed as `partition: <violation>`. Previous is measured with the analyzer only, with no partition, because older trees predate the manifest. `-current <file>` replaces the current measurement and exists for tests only.
+
+Rules are pure functions in `scripts/complexity/gate`; they do no IO.
+
+### Baseline versus Previous
+
+Rules 1 and 2 compare to the **ratchet baseline**, a committed metric file that moves only when the ratchet is updated. Rule 3 compares to **Previous**, the tree at the merge-base. Judging rule 3 against Previous, not the lagging baseline, means a pull request is never failed for a function an earlier merged pull request changed.
+
+| Rule | Fails when |
+|------|-----------|
+| 1 aggregate | versus the baseline, hotspot count, aggregate excess or P95 Halstead effort (nearest rank) increases. Equal passes. Each metric is its own finding. |
+| 2 hotspot growth | an identity in both baseline and current, with baseline CC > 10, has current CC > baseline CC. |
+| 3 changed function | a function is **changed** and has CC > 10, unless it reduces an existing hotspot (Previous CC > 10 and current CC < Previous CC). |
+
+A function is **changed** when its file is in the touched set and any of its metrics (CC or any Halstead field) differ between Previous and current. An identity absent from Previous counts as different. Functions in untouched files and functions identical to Previous are never subject to rule 3.
+
+Deleted hotspots fire nothing under rule 2. A **renamed or moved** hotspot is a new identity: rule 2 no longer sees it, and rule 3 applies, so it must be at CC <= 10 or reduce below its Previous CC (it has none, so it must be <= 10).
+
+### Warn-only and neutral metrics
+
+An increase in mean CC or P95 volume prints `WARN: <metric> <base> -> <cur>` and leaves the exit code unchanged. A change in function count affects nothing. Percentiles use nearest rank (see above).
+
+### Failure format
+
+One line per finding on stdout:
+
+```text
+<file>:<line>: rule <2|3>: <identity> CC <base> -> <cur>
+aggregate: rule 1: <metric> <base> -> <cur>
+partition: <violation>
+```
+
+`<line>` is the function's line in the current tree. For rule 3, `<base>` is the Previous CC (0 for a new function).
+
+Exit codes: 0 pass (warnings allowed), 1 any finding, 2 IO or git error.
+
+### Merge-base and touched files
+
+The base ref is `origin/develop`, then `develop`; if neither resolves, `check` exits 2. If `git rev-parse --is-shallow-repository` is true, or `git merge-base HEAD <ref>` fails, `check` exits 2 with `history too shallow to compute merge-base; fetch full history (actions/checkout fetch-depth: 0 or git fetch --unshallow)`. A failure to resolve the merge-base is never treated as "no files touched" or "all files touched".
+
+The touched set is `git diff --name-only <merge-base>` (committed, staged and unstaged tracked changes) united with `git ls-files --others --exclude-standard` (untracked files), because the local pre-commit run happens before the commit exists. Paths are repo-root-relative with forward slashes, and are compared to `Function.File` after slash normalisation.
+
+CI event shapes, all needing full history (`fetch-depth: 0`):
+
+- `pull_request`: the checkout is the PR merge commit, so merge-base..HEAD is the PR diff.
+- `merge_group`: the checkout is the queue branch tip, with `origin/develop` as its base.
+
+Previous is materialised by `MaterializeRef` in `gittree.go`, which reads `git archive <ref>` with the standard library tar reader into a temporary directory. It never touches the working tree or index.
 
 ## Limits
 
