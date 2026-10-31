@@ -2330,7 +2330,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		if err := attachM365Convergence(m365ConvergeDeps{
 			Inventory: srv.m365Inventory, Config: configService, Modules: workflowModuleFactory,
 			Providers: directoryManager, Writer: egProvider, ConfigStore: storageManager.GetConfigStore(),
-			Audit: auditManager, Logger: logger,
+			Audit: auditManager, Credentials: credentialService, Logger: logger,
 		}); err != nil {
 			return nil, err
 		}

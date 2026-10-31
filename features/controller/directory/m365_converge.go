@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
+	"github.com/cfgis/cfgms/features/controller/credentials"
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/graph"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/moduleset"
@@ -68,8 +70,16 @@ type ConvergeAuditor interface {
 	RecordEvent(ctx context.Context, event *audit.AuditEventBuilder) error
 }
 
+// CredentialIssuer issues the one-time password of a user the loop creates
+// (*credentials.Service). Issue stores the password before it returns.
+type CredentialIssuer interface {
+	Issue(ctx context.Context, key credentials.Key) (string, error)
+	Discard(ctx context.Context, key credentials.Key) error
+}
+
 // M365ConvergeConfig configures an M365Converge. Config, Modules, Providers,
-// Writer and Store are required.
+// Writer and Store are required. Without Credentials a missing user is not
+// created.
 type M365ConvergeConfig struct {
 	Config       ConvergeConfigSource
 	Modules      TenantModuleSource
@@ -78,6 +88,7 @@ type M365ConvergeConfig struct {
 	Writer       ObservationWriter
 	Store        cfgconfig.ConfigStore
 	Audit        ConvergeAuditor
+	Credentials  CredentialIssuer
 	Logger       logging.Logger
 	Now          func() time.Time
 }
@@ -410,8 +421,8 @@ func (r *converge) resource(res stewardtypes.ResourceConfig) {
 	case !found && isBound:
 		r.outcome(res, mode, ConvergeStateAbsent, "the bound object no longer exists; it is not recreated", nil)
 		return
-	case !found && spec.kind == kindUser:
-		r.outcome(res, mode, ConvergeStateAbsent, "the user does not exist; convergence does not create users", nil)
+	case !found && spec.kind == kindUser && (mode != stewardtypes.DriftModeApply || r.c.cfg.Credentials == nil):
+		r.outcome(res, mode, ConvergeStateAbsent, "the user does not exist; it is created in apply mode", nil)
 		return
 	case !found:
 		ensureNew = true
@@ -430,6 +441,10 @@ func (r *converge) resource(res stewardtypes.ResourceConfig) {
 	if ensureNew {
 		if mode != stewardtypes.DriftModeApply {
 			r.outcome(res, mode, ConvergeStateAbsent, "the group does not exist; it is created in apply mode", nil)
+			return
+		}
+		if spec.kind == kindUser {
+			r.createUser(res, spec, mode, key)
 			return
 		}
 		r.create(res, spec, mode, key)
@@ -606,6 +621,88 @@ func (r *converge) create(res stewardtypes.ResourceConfig, spec *resourceSpec, m
 	r.outcome(res, mode, ConvergeStateCreated, "", nil)
 }
 
+// createUser makes a declared user that does not exist (apply mode). The one-time
+// password is issued and stored by the credential service before the module is
+// called, so a store failure creates no user. The password is passed only here,
+// with force_change_password_next_signin, and never reaches a log, an outcome, an
+// audit record or any store the loop writes.
+func (r *converge) createUser(res stewardtypes.ResourceConfig, spec *resourceSpec, mode stewardtypes.DriftMode, key string) {
+	ckey := credentials.Key{TenantID: r.conn.Tenant, StewardID: m365ConvergeActor, ResourceID: res.Name}
+	password, err := r.c.cfg.Credentials.Issue(r.ctx, ckey)
+	if err != nil {
+		r.outcome(res, mode, ConvergeStateError, "the initial password could not be stored; the user is not created", nil)
+		return
+	}
+	mod, stop, err := r.instance(res.Module)
+	if err != nil {
+		r.outcome(res, mode, ConvergeStateError, "module unavailable: "+boundedMessage(err), nil)
+		return
+	}
+	defer stop()
+
+	state := spec.stateMap(nil)
+	if _, declared := spec.bools["account_enabled"]; !declared {
+		state["account_enabled"] = true
+	}
+	state["password_profile"] = map[string]interface{}{
+		"password":                          password,
+		"force_change_password_next_signin": true,
+	}
+	rawErr := mod.Set(r.ctx, r.guid+":new", fragState(state))
+	var setErr error
+	if rawErr != nil {
+		setErr = errors.New(redactPassword(rawErr.Error(), password))
+	}
+	r.audit(res, "create", setErr, nil)
+	if setErr != nil {
+		// A retried create whose first attempt was lost comes back as a 4xx
+		// ("already exists"), so a definite-looking failure is only trusted when
+		// the user is confirmed not to exist.
+		if _, exists, lerr := r.lookup(spec); definiteCreateFailure(rawErr) && lerr == nil && !exists {
+			if err := r.c.cfg.Credentials.Discard(r.ctx, ckey); err != nil {
+				r.c.cfg.Logger.Warn("m365 converge: discarding the initial password failed",
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
+		}
+		r.outcome(res, mode, ConvergeStateError, "creating failed: "+boundedMessage(setErr), nil)
+		return
+	}
+	live, found, err := r.lookup(spec)
+	if err != nil || !found {
+		r.outcome(res, mode, ConvergeStateError, "created; the new object could not be bound", nil)
+		return
+	}
+	r.bindObject(key, live.id, spec.identity)
+	// The credential service refuses a second issue once the account exists.
+	if err := r.c.writeJSON(r.ctx, credentials.BindingConfigKey(ckey), convergeBinding{ObjectID: live.id, Identity: spec.identity, BoundAt: r.now}); err != nil {
+		r.c.cfg.Logger.Warn("m365 converge: recording the credential binding failed",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+	r.outcome(res, mode, ConvergeStateCreated, "", nil)
+}
+
+// redactPassword removes the password from msg, in its literal form and as a JSON
+// encoder writes it (an error that echoes a request body escapes <, > and &).
+func redactPassword(msg, password string) string {
+	msg = strings.ReplaceAll(msg, password, "[redacted]")
+	if enc, err := json.Marshal(password); err == nil && len(enc) > 2 {
+		msg = strings.ReplaceAll(msg, string(enc[1:len(enc)-1]), "[redacted]")
+	}
+	return msg
+}
+
+// definiteCreateFailure reports whether Graph rejected a create outright (a 4xx
+// other than a timeout), so no user exists. Anything else — a 5xx, a timeout, a
+// lost response, an error from before the request — is ambiguous: the user may
+// exist with the issued password.
+func definiteCreateFailure(err error) bool {
+	var ge *graph.GraphError
+	if !errors.As(err, &ge) {
+		return false
+	}
+	return ge.StatusCode >= 400 && ge.StatusCode < 500 && ge.StatusCode != http.StatusRequestTimeout
+}
+
 // audit records a write the controller made. The resource id is the cfg-declared
 // resource id, never the Entra object id.
 func (r *converge) audit(res stewardtypes.ResourceConfig, action string, setErr error, fields []string) {
@@ -703,7 +800,7 @@ var (
 	userStringFields = []string{"display_name", "mail", "mobile_phone", "office_location", "job_title", "department", "company_name"}
 	userBoolFields   = []string{"account_enabled"}
 	groupStringField = []string{"display_name", "description"}
-	groupListFields  = []string{"members", "owners"}
+	groupListFields  = []string{"members_present", "members_absent"}
 )
 
 func (s *resourceSpec) identityWord() string {
@@ -792,10 +889,25 @@ func (s *resourceSpec) compare(live map[string]interface{}) []fieldDiff {
 	for _, f := range s.managed {
 		d := fieldDiff{attr: f}
 		switch {
-		case s.lists[f] != nil || isListField(f):
+		case isListField(f):
+			// Membership is additive and subtractive: only the listed members are
+			// compared, so a member nobody declared is never drift.
 			want := normalizeList(s.lists[f])
-			have := normalizeList(asStrings(live[f]))
-			d.desired, d.actual = strings.Join(want, ","), strings.Join(have, ",")
+			have := normalizeList(asStrings(live["members"]))
+			inLive := map[string]struct{}{}
+			for _, h := range have {
+				inLive[h] = struct{}{}
+			}
+			var listed []string // the declared members that are in the group
+			for _, w := range want {
+				if _, ok := inLive[w]; ok {
+					listed = append(listed, w)
+				}
+			}
+			d.desired, d.actual = strings.Join(want, ","), strings.Join(listed, ",")
+			if f == "members_absent" {
+				d.desired = ""
+			}
 			d.matching = d.desired == d.actual
 		case isBoolField(f):
 			have, _ := live[f].(bool)
@@ -811,7 +923,7 @@ func (s *resourceSpec) compare(live map[string]interface{}) []fieldDiff {
 	return out
 }
 
-func isListField(f string) bool { return f == "members" || f == "owners" }
+func isListField(f string) bool { return f == "members_present" || f == "members_absent" }
 func isBoolField(f string) bool { return f == "account_enabled" }
 
 func asStrings(v interface{}) []string {
@@ -850,6 +962,12 @@ func normalizeList(in []string) []string {
 // requires but the declaration omits are filled from the live object and are not
 // managed. groups is never set.
 func (s *resourceSpec) state(live map[string]interface{}) modules.ConfigState {
+	return fragState(s.stateMap(live))
+}
+
+// stateMap is state's map. It never carries a password: password_profile is not a
+// managed field of an update, so the module cannot re-apply one.
+func (s *resourceSpec) stateMap(live map[string]interface{}) map[string]interface{} {
 	m := map[string]interface{}{"tenant_id": s.guid}
 	liveStr := func(k string) string { v, _ := live[k].(string); return v }
 	for k, v := range s.strs {
@@ -898,5 +1016,6 @@ func (s *resourceSpec) state(live map[string]interface{}) modules.ConfigState {
 		}
 	}
 	m["managed_fields"] = append([]string(nil), s.managed...)
-	return fragState(m)
+	delete(m, "password_profile")
+	return m
 }

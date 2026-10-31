@@ -296,3 +296,17 @@ func TestCredentialExpiry_RevealedRecordKeepsRefusal(t *testing.T) {
 	_, err = f.svc.Issue(ctx, testKey)
 	require.ErrorIs(t, err, ErrAlreadyIssued)
 }
+
+func TestService_Discard_RemovesRecordAndPassword(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	pw, err := f.svc.Issue(ctx, testKey)
+	require.NoError(t, err)
+	require.NotEmpty(t, pw)
+
+	require.NoError(t, f.svc.Discard(ctx, testKey))
+	_, err = f.store.Get(ctx, testKey)
+	assert.ErrorIs(t, err, ErrNotFound)
+	assert.NoError(t, f.svc.Discard(ctx, testKey), "discarding nothing is not an error")
+	assert.ErrorIs(t, f.svc.Discard(ctx, Key{}), ErrInvalidKey)
+}

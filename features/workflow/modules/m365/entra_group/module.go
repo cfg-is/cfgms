@@ -58,6 +58,12 @@ type EntraGroupConfig struct {
 	Members []string `yaml:"members,omitempty"`
 	Owners  []string `yaml:"owners,omitempty"`
 
+	// MembersPresent and MembersAbsent are additive/subtractive membership: the
+	// listed UPNs are added or removed and every other member is left alone.
+	// Neither ever causes an exact-match sync.
+	MembersPresent []string `yaml:"members_present,omitempty"`
+	MembersAbsent  []string `yaml:"members_absent,omitempty"`
+
 	// Team settings (for Microsoft Teams integration)
 	IsTeamEnabled bool          `yaml:"is_team_enabled,omitempty"`
 	TeamSettings  *TeamSettings `yaml:"team_settings,omitempty"`
@@ -128,6 +134,12 @@ func (c *EntraGroupConfig) AsMap() map[string]interface{} {
 	}
 	if len(c.Owners) > 0 {
 		result["owners"] = c.Owners
+	}
+	if len(c.MembersPresent) > 0 {
+		result["members_present"] = c.MembersPresent
+	}
+	if len(c.MembersAbsent) > 0 {
+		result["members_absent"] = c.MembersAbsent
 	}
 	if c.IsTeamEnabled {
 		result["is_team_enabled"] = c.IsTeamEnabled
@@ -200,6 +212,14 @@ func (c *EntraGroupConfig) Validate() error {
 		return fmt.Errorf("auto_subscribe_new_members is not supported: Microsoft Graph accepts it only with delegated permissions")
 	}
 
+	for _, upn := range c.MembersPresent {
+		for _, other := range c.MembersAbsent {
+			if strings.EqualFold(upn, other) {
+				return fmt.Errorf("member %q is listed in both members_present and members_absent", upn)
+			}
+		}
+	}
+
 	if c.TeamSettings != nil && !c.IsTeamEnabled {
 		return fmt.Errorf("team_settings requires is_team_enabled to be true")
 	}
@@ -243,6 +263,12 @@ func (c *EntraGroupConfig) GetManagedFields() []string {
 	}
 	if len(c.Owners) > 0 {
 		fields = append(fields, "owners")
+	}
+	if len(c.MembersPresent) > 0 {
+		fields = append(fields, "members_present")
+	}
+	if len(c.MembersAbsent) > 0 {
+		fields = append(fields, "members_absent")
 	}
 	if c.IsTeamEnabled {
 		fields = append(fields, "is_team_enabled")
@@ -324,6 +350,19 @@ func (m *entraGroupModule) Set(ctx context.Context, resourceID string, config mo
 	}
 	if owners, ok := configMap["owners"].([]string); ok {
 		groupConfig.Owners = owners
+	}
+
+	for _, f := range []struct {
+		key string
+		dst *[]string
+	}{{"members_present", &groupConfig.MembersPresent}, {"members_absent", &groupConfig.MembersAbsent}} {
+		if raw, present := configMap[f.key]; present && raw != nil {
+			list, err := toStringSlice(raw)
+			if err != nil {
+				return fmt.Errorf("invalid configuration: %s: %w", f.key, err)
+			}
+			*f.dst = list
+		}
 	}
 
 	// Map team settings
@@ -535,6 +574,13 @@ func (m *entraGroupModule) createGroup(ctx context.Context, token *auth.AccessTo
 		}
 	}
 
+	// A new group has no members to remove, so only members_present applies.
+	for _, member := range config.MembersPresent {
+		if err := m.addGroupMember(ctx, token, group.ID, member); err != nil {
+			return fmt.Errorf("failed to add member %s: %w", member, err)
+		}
+	}
+
 	// Create Microsoft Team if enabled
 	if config.IsTeamEnabled {
 		if err := m.createTeam(ctx, token, group.ID, config.GroupType, config.TeamSettings); err != nil {
@@ -626,6 +672,14 @@ func (m *entraGroupModule) updateGroup(ctx context.Context, token *auth.AccessTo
 	if contains(managedFields, "members") {
 		if err := m.syncGroupMembers(ctx, token, existingGroup.ID, config.Members); err != nil {
 			return fmt.Errorf("failed to sync group members: %w", err)
+		}
+	}
+
+	if contains(managedFields, "members_present") || contains(managedFields, "members_absent") {
+		if err := m.applyMemberChanges(ctx, token, existingGroup.ID,
+			managedList(managedFields, "members_present", config.MembersPresent),
+			managedList(managedFields, "members_absent", config.MembersAbsent)); err != nil {
+			return fmt.Errorf("failed to change group members: %w", err)
 		}
 	}
 
@@ -730,6 +784,45 @@ func (m *entraGroupModule) syncGroupOwners(ctx context.Context, token *auth.Acce
 	for _, upn := range toAdd {
 		if err := m.graphClient.AddGroupOwner(ctx, token, groupID, upn); err != nil {
 			return fmt.Errorf("failed to add owner %s: %w", upn, err)
+		}
+	}
+	return nil
+}
+
+// managedList returns list when field is managed and nil otherwise.
+func managedList(managed []string, field string, list []string) []string {
+	if !contains(managed, field) {
+		return nil
+	}
+	return list
+}
+
+// applyMemberChanges adds the listed present UPNs that are not yet members and
+// removes the listed absent UPNs that are. Members named in neither list are never
+// touched. UPNs compare case-insensitively.
+func (m *entraGroupModule) applyMemberChanges(ctx context.Context, token *auth.AccessToken, groupID string, present, absent []string) error {
+	current, err := m.graphClient.ListGroupMembers(ctx, token, groupID)
+	if err != nil {
+		return fmt.Errorf("failed to list current group members: %w", err)
+	}
+	have := make(map[string]struct{}, len(current))
+	for _, upn := range current {
+		have[strings.ToLower(upn)] = struct{}{}
+	}
+	for _, upn := range absent {
+		if _, ok := have[strings.ToLower(upn)]; !ok {
+			continue
+		}
+		if err := m.graphClient.RemoveGroupMember(ctx, token, groupID, upn); err != nil {
+			return fmt.Errorf("failed to remove member %s: %w", upn, err)
+		}
+	}
+	for _, upn := range present {
+		if _, ok := have[strings.ToLower(upn)]; ok {
+			continue
+		}
+		if err := m.graphClient.AddGroupMember(ctx, token, groupID, upn); err != nil {
+			return fmt.Errorf("failed to add member %s: %w", upn, err)
 		}
 	}
 	return nil
