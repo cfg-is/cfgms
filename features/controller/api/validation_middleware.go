@@ -223,6 +223,11 @@ func (s *Server) validateQueryParameters(validator *security.EnhancedValidator, 
 			case "cidr":
 				// CIDR ranges (e.g. "192.168.1.0/24", "2001:db8::/32") — the slash is not in safe_text.
 				validator.ValidateString(result, fieldName, value, "charset:cidr", "max_length:64")
+			case "q":
+				// Directory search text (Issue #5557) carries names, logins and mail
+				// addresses, so '@' and a few other characters safe_text refuses are
+				// legitimate. The directory handlers enforce the exact charset.
+				validator.ValidateString(result, fieldName, value, "max_length:256", "no_control_chars")
 			default:
 				// Generic query parameter validation
 				validator.ValidateString(result, fieldName, value, "charset:safe_text", "max_length:512", "no_control_chars")

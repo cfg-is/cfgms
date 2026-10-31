@@ -30,6 +30,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/cluster"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/directory"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/features/controller/modules/resolution"
@@ -201,6 +202,7 @@ type Server struct {
 	telemetryHandler                http.Handler                             // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter             egConfigstoreIngestor                    // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
 	egProvider                      egReadProvider                           // Issue #2880: entity graph read API
+	directoryMembership             directory.MembershipStore                // Issue #5557: durable directory membership (nil when unwired)
 	egWriter                        egWriteProvider                          // Issue #3374: operator edge assertion write path
 	terminalHandler                 http.Handler                             // Issue #2761: terminal WebSocket relay handler
 	tenantStore                     business.TenantStore                     // Issue #2839: tenant hierarchy for per-tenant assurance resolution
@@ -2416,6 +2418,15 @@ func (s *Server) SetEntityGraphProvider(p egReadProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.egProvider = p
+}
+
+// SetDirectoryMembershipStore wires the durable directory membership store read by
+// the member, group-of and membership-change routes under /api/v1/directory
+// (Issue #5557). When nil (default) those routes return 503.
+func (s *Server) SetDirectoryMembershipStore(store directory.MembershipStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.directoryMembership = store
 }
 
 // SetEntityGraphWriteProvider wires the entity graph write provider into the REST

@@ -3819,6 +3819,91 @@ across all the caller's crossings, and `NextToken` only ever names a drift state
 Tenant scoping: only drift records for entities in the caller's tenant subtree
 are returned.
 
+### Directory
+
+Read-only access to directory users and groups (Active Directory and Microsoft 365) and their
+membership (Issue #5557). Everything is served from stored state: objects from the entity graph,
+membership from the directory membership store. No route calls a steward or Microsoft Graph, so a
+response is as fresh as the last sync; each object carries `last_observed` and `stale`.
+
+**Required permission:** `directory:read` for every route. The routes are reads, so there is no
+elevated assurance floor.
+
+**Objects.** User and group objects carry `source` (`ad` or `m365`), `kind`, `id` (the object id),
+`authority` (the AD domain or the Microsoft 365 tenant GUID), `display_name`, `sam_account_name`,
+`user_principal_name`, `mail` and `description` when known, `managed`, `last_observed` and `stale`.
+Users also carry `enabled`. A fixed set of fields is returned; nothing else stored on the object
+(distinguished names, SIDs, anything credential-shaped) is ever included. `groups_truncated: true`
+means the source reported the object's group list as cut off, so the list may be incomplete.
+
+**Tenant scoping.** The tenant cut is the caller's own, as for the entity routes. A by-id read of
+an object owned by another tenant returns `404`, the same response as an object that does not exist.
+A root caller subject to the tenant-crossing boundary sees client-tenant objects only under an
+active crossing.
+
+**Paging.** `limit` is 1–500 (default 100); `page_token` is an opaque cursor taken from
+`next_page_token` of the previous response, absent on the last page. A list token is bound to the
+caller's tenant cut and to the filters it was issued under; a token used elsewhere is a `400`. A
+page holds up to `limit` rows; when filters make the server scan a long stretch of the directory
+without finding `limit` matches it returns what it found with a `next_page_token`, so keep
+following the token until it is absent. Invalid parameters return `400`.
+
+#### GET /api/v1/directory/users and GET /api/v1/directory/groups
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `source` | `ad` \| `m365` | Only that source; default both. Host-local users are never listed. |
+| `q` | string | Case-insensitive text match against display name, account name, user principal name, mail and id. At most 256 characters of letters, digits, spaces and `- _ . @ ' + , # & ( )`. |
+| `enabled` | `true` \| `false` | Users only. |
+| `managed` | `true` \| `false` | Only objects with that `managed` attribute. |
+| `limit` | integer | 1–500, default 100. |
+| `page_token` | string | Cursor from a previous response. |
+
+**Response (200):** `{"items": [object, ...], "next_page_token": "..."}`. List rows never include a
+group list or any membership attribute.
+
+#### GET /api/v1/directory/users/{source}/{id} and GET /api/v1/directory/groups/{source}/{id}
+
+Return one object. `{source}` is `ad` or `m365`; `{id}` is at most 64 characters of
+`[A-Za-z0-9._-]`. An object id is unique within one domain or tenant: if the same id exists in more
+than one domain the caller can read, the request returns `409` and the `authority` query parameter
+(the domain or tenant GUID) selects one. A user also carries `groups`, at most 100 entries of
+`{id, display_name}`, and `groups_truncated: true` when it belongs to more, or when the source cut
+the list off. When the membership store is not available the list is omitted and
+`groups_truncated` is `true`.
+
+#### GET /api/v1/directory/groups/{source}/{id}/members
+
+Direct members, from the membership store, after the group itself passes the tenant check.
+Query: `limit` (1–500, default 100), `page_token` (the store's opaque cursor, bound to the group
+and its owning tenant). **Response (200):** `{"members": [{"id", "type", "display_name"}, ...],
+"next_page_token": "..."}`. `type` is `user`, `group`, `computer`, `contact`,
+`foreign_security_principal`, `device`, `service_principal` or `other`.
+
+#### GET /api/v1/directory/users/{source}/{id}/groups
+
+Direct groups of a user, paged from the membership store with the same query parameters.
+**Response (200):** `{"groups": [{"id", "display_name"}, ...], "groups_truncated": false,
+"next_page_token": "..."}`. Display names come from the stored group objects.
+
+#### GET /api/v1/directory/groups/{source}/{id}/membership-changes
+
+Membership changes of one group, newest first.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `since`, `until` | RFC 3339 | Bound the time the change was recorded; `until` must not be before `since`. |
+| `member` | string | Only changes to that member id. |
+| `include_baseline` | `true` \| `false` | The first observation of a group is logged as a baseline, not a change; excluded by default. |
+| `limit` | integer | 1–500, default 100. |
+| `page_token` | string | Cursor from a previous response, bound to the group and these filters. |
+
+**Response (200):** `{"events": [{"group", "member", "member_type", "op", "observed_at",
+"recorded_at", "source", "baseline"}, ...], "next_page_token": "..."}` where `group` and `member`
+are entity ids, `op` is `added` or `removed`, and `source` is `directory:<domain>` or
+`m365:<guid>`. A range holding more than 100,000 changes returns `400`; narrow it with `since` and
+`until`.
+
 ## Internal Test Endpoints (not for external use)
 
 Three routes exist solely for integration-test setup and carry no normal

@@ -192,6 +192,9 @@ var knownPermissions = map[string]bool{
 	// Entity graph read API (Issue #2880)
 	"entity:list": true,
 	"entity:read": true,
+	// Directory read API (Issue #5557): users, groups, members and membership changes
+	// served from stored DNA and the membership store; reads only.
+	"directory:read": true,
 	// Entity graph operator edge assertion (Issue #3374): gates POST /entities/edges,
 	// the only mutating entity-graph route. It must be listed here so a least-privilege
 	// API key or account can actually hold it — otherwise handleCreateAPIKey and the
