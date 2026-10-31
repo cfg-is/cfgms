@@ -1462,7 +1462,7 @@ validate-providers:
 
 # Pre-commit validation (smart tests + quality gates + SECRET SCANNING + ARCHITECTURE + LICENSE)
 test-commit: export CFGMS_TEST_SCRIPTS_GROUPS := $(TEST_SCRIPTS_ALL_GROUPS)
-test-commit: test lint lint-log-injection check-license-headers security-precommit check-architecture check-stdlib-completeness security-scan
+test-commit: test lint lint-log-injection check-license-headers security-precommit check-architecture check-stdlib-completeness complexity-check security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
 	@echo "===================================="
@@ -1473,6 +1473,7 @@ test-commit: test lint lint-log-injection check-license-headers security-precomm
 	@echo "- ✅ Architecture compliance passed (no central provider violations)"
 	@echo "- ✅ Stdlib payload boundary validated (all five sources agree)"
 	@echo "- ✅ Stdlib completeness validated (ADR-016 clause 6)"
+	@echo "- ✅ Complexity gate passed (no worsening against the ratchet baseline)"
 	@echo "- ✅ Security scanning passed (vulnerabilities)"
 	@echo ""
 	@echo "🎯 Code is validated and ready for commit/PR"
