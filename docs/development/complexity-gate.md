@@ -133,6 +133,8 @@ CI event shapes, all needing full history (`fetch-depth: 0`):
 
 Previous is materialised by `MaterializeRef` in `gittree.go`, which reads `git archive <ref>` with the standard library tar reader into a temporary directory. It never touches the working tree or index.
 
+Rule 3 has been replayed against recent merged develop PRs with `make complexity-replay`; the measured result is in [complexity-gate-calibration.md](complexity-gate-calibration.md).
+
 ## Ratchet, frozen baseline and staleness
 
 Three baselines exist, each with one writer:

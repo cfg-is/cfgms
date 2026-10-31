@@ -15,6 +15,8 @@
 // freeze writes the frozen baseline once, and staleness checks the ratchet
 // baseline against the running tool and manifest.
 //
+// The replay subcommand replays rule 3 over recent merged develop commits.
+//
 // Exit codes: 0 = ok, 1 = partition or duplicate-identity violation,
 // 2 = usage, IO or parse error.
 package main
@@ -37,7 +39,7 @@ func main() {
 		os.Exit(checkCmd(os.Args[2:], os.Stdout, os.Stderr))
 	}
 	subs := map[string]func([]string, io.Writer, io.Writer) int{
-		"ratchet": ratchetCmd, "freeze": freezeCmd, "staleness": stalenessCmd,
+		"ratchet": ratchetCmd, "freeze": freezeCmd, "staleness": stalenessCmd, "replay": replayCmd,
 	}
 	if len(os.Args) > 1 {
 		if cmd, ok := subs[os.Args[1]]; ok {
