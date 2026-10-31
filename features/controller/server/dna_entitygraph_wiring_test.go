@@ -314,7 +314,8 @@ func TestWireDNAEntityGraph_DeltaCommitReachesEntityGraph(t *testing.T) {
 	require.NoError(t, err)
 
 	dnaHandler := controllerTransport.NewDNAHandler(logging.NewNoopLogger(), controllerTransport.NewTenantQueue(), nil).
-		WithPartialSync(store, wiringNoopPublisher{})
+		WithPartialSync(store, wiringNoopPublisher{}).
+		WithHostPartialSync(true)
 	svc.wireDNAEntityGraph(dnaHandler)
 
 	// Simulate the ADR-017 §7 step 2 heartbeat-root mismatch that records the
@@ -372,7 +373,8 @@ func TestWireDNAEntityGraph_ClusteredVMRecordedUnderClusterAuthority(t *testing.
 	require.NoError(t, err)
 
 	dnaHandler := controllerTransport.NewDNAHandler(logging.NewNoopLogger(), controllerTransport.NewTenantQueue(), nil).
-		WithPartialSync(store, wiringNoopPublisher{})
+		WithPartialSync(store, wiringNoopPublisher{}).
+		WithHostPartialSync(true)
 	svc.wireDNAEntityGraph(dnaHandler)
 
 	dnaHandler.HandleHeartbeatRoot(context.Background(), peerID, claimedRoot)

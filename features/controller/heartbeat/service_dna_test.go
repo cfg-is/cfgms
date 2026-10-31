@@ -585,3 +585,36 @@ func TestHeartbeatService_LogSanitization_TrustEvaluatorError(t *testing.T) {
 	require.True(t, ok)
 	requireNoNewline(t, entry, "error", "steward_id")
 }
+
+// TestHeartbeatService_BulkRootCallback verifies that the bulk-root callback fires
+// only for a heartbeat carrying a non-empty DNABulkRoot, independently of the
+// host-lane DNAAggregateRoot callback, and can be late-wired with SetOnBulkRoot.
+func TestHeartbeatService_BulkRootCallback(t *testing.T) {
+	var mu sync.Mutex
+	var roots []string
+	hostCalls := 0
+
+	svc, cp := newTestService(t, func(cfg *Config) {
+		cfg.OnFragmentRoot = func(context.Context, string, string) { mu.Lock(); hostCalls++; mu.Unlock() }
+	})
+	svc.SetOnBulkRoot(func(_ context.Context, stewardID, claimedRoot string) {
+		mu.Lock()
+		defer mu.Unlock()
+		roots = append(roots, stewardID+"="+claimedRoot)
+	})
+	ctx := context.Background()
+
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: "steward-bulk", Status: controlplaneTypes.StatusHealthy, Timestamp: time.Now(),
+		DNAAggregateRoot: "host-root",
+	}))
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: "steward-bulk", Status: controlplaneTypes.StatusHealthy, Timestamp: time.Now(),
+		DNABulkRoot: "bulk-root",
+	}))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"steward-bulk=bulk-root"}, roots, "only the bulk-root heartbeat reaches the bulk callback")
+	assert.Equal(t, 1, hostCalls, "the host callback fires only for the host root")
+}

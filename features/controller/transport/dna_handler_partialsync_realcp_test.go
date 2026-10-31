@@ -216,7 +216,8 @@ func newPartialSyncEnv(t *testing.T, stewardID string) *partialSyncEnv {
 // environment's real signing publisher.
 func (e *partialSyncEnv) handler(store FragmentDeltaStore) *DNAHandler {
 	return NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil).
-		WithPartialSync(store, e.publisher)
+		WithPartialSync(store, e.publisher).
+		WithHostPartialSync(true)
 }
 
 // requireDispatched waits for one command to arrive over the real wire.
@@ -492,7 +493,8 @@ func TestDNAHandler_HeartbeatRoot_RealChain_DispatchFailure_ClearsClaim(t *testi
 	store.SetManifest(stewardID, fragmentsToManifest(makeTestFragments(2)))
 
 	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil).
-		WithPartialSync(store, publisher)
+		WithPartialSync(store, publisher).
+		WithHostPartialSync(true)
 
 	h.HandleHeartbeatRoot(context.Background(), stewardID,
 		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
