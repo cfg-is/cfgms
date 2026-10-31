@@ -4,7 +4,15 @@
 package server
 
 import (
+	"context"
 	"fmt"
+	"time"
+
+	"github.com/cfgis/cfgms/features/controller/directory"
+	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/lease"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 
 	"github.com/cfgis/cfgms/features/workflow/modules/m365"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
@@ -46,4 +54,93 @@ func registerDirectoryProviders(store secretsif.SecretStore, logger logging.Logg
 		return nil, fmt.Errorf("failed to register Entra ID directory provider: %w", err)
 	}
 	return manager, nil
+}
+
+// tenantLister lists the CFGMS tenants (tenant.Manager satisfies it).
+type tenantLister interface {
+	ListTenants(ctx context.Context, filter *business.TenantFilter) ([]*business.TenantData, error)
+}
+
+// m365ConnectionSource finds the active CFGMS tenants that hold an M365
+// connection. A tenant with no connection on file is simply absent.
+type m365ConnectionSource struct {
+	tenants tenantLister
+	creds   auth.CredentialStore
+}
+
+func (s m365ConnectionSource) M365Connections(ctx context.Context) ([]directory.M365Connection, error) {
+	tenants, err := s.tenants.ListTenants(ctx, &business.TenantFilter{Status: business.TenantStatusActive})
+	if err != nil {
+		return nil, fmt.Errorf("list tenants: %w", err)
+	}
+	var out []directory.M365Connection
+	for _, t := range tenants {
+		cfg, err := s.creds.GetConfig(t.ID)
+		if err != nil || cfg == nil || cfg.TenantID == "" {
+			continue
+		}
+		out = append(out, directory.M365Connection{Tenant: t.ID, EntraTenantID: cfg.TenantID})
+	}
+	return out, nil
+}
+
+// m365InventoryDeps are the controller services the inventory collector runs over.
+type m365InventoryDeps struct {
+	Providers   *interfaces.DirectoryProviderManager
+	Store       secretsif.SecretStore
+	Tenants     tenantLister
+	Writer      directory.ObservationWriter
+	ConfigStore cfgconfig.ConfigStore
+	Job         lease.SingletonJob
+	Interval    time.Duration
+	Audit       *audit.Manager
+	Logger      logging.Logger
+}
+
+// newM365Inventory builds the lease-gated M365 tenant inventory collector
+// (Issue #5561). It returns nil, nil when a dependency it cannot run without is
+// absent (no secret store, entity graph or config store).
+func newM365Inventory(d m365InventoryDeps) (*directory.M365Inventory, error) {
+	if d.Providers == nil || d.Store == nil || d.Tenants == nil || d.Writer == nil || d.ConfigStore == nil {
+		return nil, nil
+	}
+	membership, err := directory.NewMembership(d.ConfigStore, nil, directory.WithLogger(d.Logger))
+	if err != nil {
+		return nil, fmt.Errorf("m365 inventory membership: %w", err)
+	}
+	return directory.NewM365Inventory(directory.M365InventoryConfig{
+		Providers:    d.Providers,
+		ProviderName: "entraid",
+		Connections:  m365ConnectionSource{tenants: d.Tenants, creds: auth.NewSecretStoreCredentialStore(d.Store)},
+		Writer:       d.Writer,
+		Membership:   membership,
+		Store:        d.ConfigStore,
+		Job:          d.Job,
+		Interval:     d.Interval,
+		Logger:       d.Logger,
+		OnSecurity: func(ctx context.Context, ev directory.SecurityEvent) {
+			recordSharedEntraTenantAudit(ctx, d.Audit, d.Logger, ev)
+		},
+	})
+}
+
+// recordSharedEntraTenantAudit puts the shared-Entra-tenant event on the root
+// admin audit stream. It names every CFGMS tenant involved, so it is recorded
+// under the system tenant only.
+func recordSharedEntraTenantAudit(ctx context.Context, auditManager *audit.Manager, logger logging.Logger, ev directory.SecurityEvent) {
+	if auditManager == nil {
+		return
+	}
+	b := audit.NewEventBuilder().
+		Tenant(audit.SystemTenantID).
+		Type(business.AuditEventSecurityEvent).
+		Action(ev.Kind).
+		User(audit.SystemUserID, business.AuditUserTypeSystem).
+		Resource("entra_tenant", logging.SanitizeLogValue(ev.EntraTenantID), "").
+		Result(business.AuditResultFailure).
+		Severity(business.AuditSeverityHigh).
+		Details(map[string]interface{}{"cfgms_tenants": ev.Tenants})
+	if err := auditManager.RecordEvent(ctx, b); err != nil {
+		logger.Warn("Failed to record shared Entra tenant audit event", "error", logging.SanitizeLogValue(err.Error()))
+	}
 }

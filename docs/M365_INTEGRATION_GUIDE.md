@@ -147,6 +147,17 @@ A connection made with `cfg tenant m365 set` or `cfg tenant m365 gdap-link` is u
 
 **Signature binding by build.** In a signed build (one carrying a real CFGMS publisher key), the controller issues the token only to a module bundle carrying a valid `cfgms` publisher signature, checked every time a token is issued; a bundle without one fails the step with an error naming the module and tenant. In unsigned OSS release builds (placeholder key) the token is issued on the bundle's manifest name and publisher alone, and the controller logs a warning at engine start that M365 module credentials are not signature-bound.
 
+## Tenant Inventory
+
+The controller reads every user and group of each CFGMS tenant that has an M365 connection on a schedule and records them in the entity graph under `m365:<entra-tenant-guid>/...`. Nothing is installed on a device and nothing is written to M365.
+
+- **Schedule and freshness.** Each tenant is re-read every 60 minutes by default (`directory.m365_inventory_interval` in the controller config). Only changed objects are written; an unchanged tenant writes nothing, and a controller restart does not rewrite the inventory. In a cluster, one controller (the lease holder) does the reading.
+- **What is recorded.** Per user: display name, user principal name, mail, enabled state, department, job title, office location and company name. Per group: display name, description, mail, and mail- and security-enabled flags. Each object carries `source: m365`, `managed` (false until declared configuration names it) and `member_of`: the object ids of its direct groups, at most 10,000, with `member_of_truncated` set when there are more. Group membership, including members that are devices, service principals or contacts, is logged as added and removed events.
+- **Removals.** An object that no longer appears in a complete read is retracted.
+- **Failures.** If Graph throttles the controller or rejects the connection's credentials, that tenant keeps its previous inventory, marked stale, with a short error; other tenants are unaffected and nothing is retracted.
+- **Permissions.** The connection needs the Graph application permissions `User.Read.All`, `Group.Read.All` and `GroupMember.Read.All` (or `Directory.Read.All`).
+- **One Entra tenant, one CFGMS tenant.** If two CFGMS tenants have connections to the same Entra tenant, that Entra tenant is collected for neither, and a security event naming both CFGMS tenants is written to the root administrators' audit stream. Remove the connection from one of them to resume collection. The tenant that first recorded an object remains its owner.
+
 ## Part 3: Capability Testing
 
 ### MSP Capabilities Tested

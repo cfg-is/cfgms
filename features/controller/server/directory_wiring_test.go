@@ -20,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/directory/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
@@ -165,4 +166,33 @@ func TestServerStop_ClosesDirectoryManager(t *testing.T) {
 	srv := &Server{directoryManager: mgr, logger: logging.NewNoopLogger()}
 	require.NoError(t, srv.Stop())
 	assert.Empty(t, mgr.ListProviders(), "Stop must close the directory manager")
+}
+
+type staticTenants []*business.TenantData
+
+func (s staticTenants) ListTenants(context.Context, *business.TenantFilter) ([]*business.TenantData, error) {
+	return s, nil
+}
+
+func TestM365ConnectionSource_ListsOnlyTenantsWithAConnection(t *testing.T) {
+	f := newEntraFixture(t)
+	store := newTenantStore()
+	seedTenant(t, store, f, "root/tenant-x", "client-x")
+	creds := auth.NewSecretStoreCredentialStore(store)
+
+	src := m365ConnectionSource{
+		tenants: staticTenants{{ID: "root/tenant-x"}, {ID: "root/tenant-none"}},
+		creds:   creds,
+	}
+	got, err := src.M365Connections(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "root/tenant-x", got[0].Tenant)
+	assert.Equal(t, "m365-client-x", got[0].EntraTenantID)
+}
+
+func TestNewM365Inventory_MissingDependenciesYieldsNoCollector(t *testing.T) {
+	inv, err := newM365Inventory(m365InventoryDeps{Logger: logging.NewNoopLogger()})
+	require.NoError(t, err)
+	assert.Nil(t, inv)
 }
