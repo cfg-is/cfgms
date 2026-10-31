@@ -1,6 +1,6 @@
 # Complexity Report
 
-`make complexity-report` measures every production Go function in the repository, partitions the population into seven segments from a committed manifest, and writes a versioned machine-readable metric file. The report is report-only: high complexity never fails it. The `check` subcommand (see [Gate rules](#gate-rules)) enforces no-worsening rules against a baseline.
+`make complexity-report` measures every production Go function in the repository, partitions the population into seven segments from a committed manifest, and writes a versioned machine-readable metric file. The report is report-only: high complexity never fails it. The `check` subcommand (see [Gate rules](#gate-rules)) enforces no-worsening rules against a baseline, and the ratchet, freeze and staleness commands maintain the baselines (see [Ratchet](#ratchet-frozen-baseline-and-staleness)).
 
 The in-repo analyzer exists because the per-function Halstead metrics and the exact counting rules below are not available from an off-the-shelf linter, and the measurement must be reproducible from the repository alone with no new module dependency.
 
@@ -132,6 +132,44 @@ CI event shapes, all needing full history (`fetch-depth: 0`):
 - `merge_group`: the checkout is the queue branch tip, with `origin/develop` as its base.
 
 Previous is materialised by `MaterializeRef` in `gittree.go`, which reads `git archive <ref>` with the standard library tar reader into a temporary directory. It never touches the working tree or index.
+
+## Ratchet, frozen baseline and staleness
+
+Three baselines exist, each with one writer:
+
+| File | Written by | Purpose |
+|------|-----------|---------|
+| `baselines/inventory.json` | `make complexity-report` | Phase 0 inventory |
+| `baselines/ratchet.json` | `make complexity-ratchet` | The baseline rules 1 and 2 compare to |
+| `baselines/frozen.json` | `make complexity-freeze` | Starting point of the programme, never moved |
+
+### Make targets
+
+- `make complexity-check` runs `check -baseline scripts/complexity/baselines/ratchet.json`: staleness first, then the gate rules.
+- `make complexity-ratchet` runs the gate against the current `ratchet.json` and writes the new baseline (hotspot-only form) **only if zero findings are reported**. A failing rule exits 1 and leaves the file byte-identical. Mean CC and P95 volume worsening only warn and do not block the ratchet. The ratchet never reads or writes `frozen.json`.
+- `make complexity-freeze` writes `frozen.json` (`schema_version`, the base commit SHA, hotspot-only compact form) and exits 1 if it already exists. Replacing it takes deleting the file in a reviewed diff and running the target again. It needs `origin/develop` to resolve (or `-base-commit`).
+
+### When to move the ratchet
+
+Move it after a change lowers hotspots, aggregate excess or P95 effort, so the improvement cannot be lost: run `make complexity-ratchet` and commit the new `ratchet.json` in its own reviewed diff. The target refuses while any gate rule fails, so the baseline cannot be moved to hide a regression.
+
+### Init procedure
+
+`ratchet.json` does not exist until the gate is enabled. Create it with `make complexity-ratchet COMPLEXITY_INIT=1` (flag `-init`). Init writes only when the file is absent and refuses (exit 1) otherwise.
+
+### Why frozen is separate
+
+The ratchet baseline moves with every improvement; `frozen.json` records where the programme started so total progress stays measurable. If one file served both roles, each ratchet move would erase the starting point.
+
+### Staleness
+
+`check` (and `go run ./scripts/complexity staleness -baseline <file>`) fails with exit 1 when the ratchet baseline is stale. There are exactly four conditions: the baseline's `schema_version`, `analyzer_version`, `hotspot_threshold` or `manifest_sha256` differs from the running tool or the sha256 of the committed `manifest.json` bytes. Nothing else makes it stale; deleted functions are legitimate and the identity set is not compared.
+
+A manifest change is repaired with `make complexity-ratchet`, which skips the staleness check (it is the remedy) and goes straight to the gate. If `schema_version`, `analyzer_version` or `hotspot_threshold` differ, counts are not comparable and the ratchet refuses with `counting rules changed: delete baselines/ratchet.json in a reviewed diff and run make complexity-ratchet COMPLEXITY_INIT=1`.
+
+### Concurrency
+
+Two pull requests that both move `ratchet.json` conflict textually. The merge queue rebases the second, and `check` then re-runs against the new baseline.
 
 ## Limits
 

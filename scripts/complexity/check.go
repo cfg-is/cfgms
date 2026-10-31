@@ -46,9 +46,33 @@ func checkTo(o checkOptions, stdout, stderr *printer) int {
 	if o.baseline == "" {
 		return fail(fmt.Errorf("-baseline is required"))
 	}
-	baseline, err := readMetricFile(o.baseline)
+	baseline, err := readBaselineFile(o.baseline)
 	if err != nil {
 		return fail(err)
+	}
+	if reasons, err := Staleness(baseline, o.manifest); err != nil {
+		return fail(err)
+	} else if len(reasons) > 0 {
+		for _, r := range reasons {
+			stderr.printf("complexity: stale baseline: %s\n", r)
+		}
+		stderr.printf("complexity: %s\n", staleRemedy)
+		return exitViolation
+	}
+	_, code := runGate(o, baseline, stdout, stderr)
+	if code == exitOK {
+		stdout.printf("complexity gate: pass\n")
+	}
+	return code
+}
+
+// runGate measures the current tree and the merge-base tree and evaluates the
+// gate rules against baseline, printing partition violations, warnings and
+// findings. It returns the current measurement alongside the exit code.
+func runGate(o checkOptions, baseline metrics.Measurement, stdout, stderr *printer) (metrics.Measurement, int) {
+	fail := func(err error) (metrics.Measurement, int) {
+		stderr.printf("complexity: %v\n", err)
+		return metrics.Measurement{}, exitError
 	}
 
 	// Resolve git state first: a shallow clone must fail before any work.
@@ -111,13 +135,22 @@ func checkTo(o checkOptions, stdout, stderr *printer) int {
 		stdout.printf("%s\n", f)
 	}
 	if len(res.Findings) > 0 || len(partition) > 0 {
-		return exitViolation
+		return current, exitViolation
 	}
-	stdout.printf("complexity gate: pass\n")
-	return exitOK
+	return current, exitOK
 }
 
 func readMetricFile(path string) (metrics.Measurement, error) {
+	return readMetricFileWith(path, metrics.Read)
+}
+
+// readBaselineFile reads a baseline without rejecting a foreign schema_version,
+// which staleness and the ratchet report as their own condition.
+func readBaselineFile(path string) (metrics.Measurement, error) {
+	return readMetricFileWith(path, metrics.ReadAny)
+}
+
+func readMetricFileWith(path string, read func(io.Reader) (metrics.Measurement, error)) (metrics.Measurement, error) {
 	// #nosec G304 -- path is the operator-supplied -baseline/-current CLI flag
 	// of a local dev tool run by the operator against their own checkout.
 	f, err := os.Open(path)
@@ -125,7 +158,7 @@ func readMetricFile(path string) (metrics.Measurement, error) {
 		return metrics.Measurement{}, fmt.Errorf("read %s: %v", filepath.ToSlash(path), ioReason(err))
 	}
 	defer func() { _ = f.Close() }()
-	m, err := metrics.Read(f)
+	m, err := read(f)
 	if err != nil {
 		return metrics.Measurement{}, fmt.Errorf("%s: %w", filepath.ToSlash(path), err)
 	}
