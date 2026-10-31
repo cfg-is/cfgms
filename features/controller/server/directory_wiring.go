@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"time"
 
+	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/directory"
+	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -122,6 +125,63 @@ func newM365Inventory(d m365InventoryDeps) (*directory.M365Inventory, error) {
 			recordSharedEntraTenantAudit(ctx, d.Audit, d.Logger, ev)
 		},
 	})
+}
+
+// effectiveConfigSource reads a tenant's effective cfg through the controller's
+// one effective-config function (ConfigurationServiceV2.GetEffectiveConfiguration,
+// the tenant-only cascade).
+type effectiveConfigSource struct {
+	svc *service.ConfigurationServiceV2
+}
+
+func (s effectiveConfigSource) EffectiveConfig(ctx context.Context, tenantID string) (*stewardtypes.StewardConfig, error) {
+	eff, err := s.svc.GetEffectiveConfiguration(ctx, tenantID, "")
+	if err != nil || eff == nil {
+		return nil, err
+	}
+	return eff.Config, nil
+}
+
+// m365ConvergeDeps are the controller services the declared-resource convergence
+// loop runs over.
+type m365ConvergeDeps struct {
+	Inventory   *directory.M365Inventory
+	Config      *service.ConfigurationServiceV2
+	Modules     workflow.TenantModuleLoader
+	Providers   *interfaces.DirectoryProviderManager
+	Writer      directory.ObservationWriter
+	ConfigStore cfgconfig.ConfigStore
+	Audit       *audit.Manager
+	Logger      logging.Logger
+}
+
+// attachM365Convergence builds the convergence loop (Issue #5562) and hooks it to
+// the inventory collector, so it runs under the collector's lease after each
+// tenant's inventory pass. It is a no-op when the collector or a dependency the
+// loop cannot run without is absent.
+func attachM365Convergence(d m365ConvergeDeps) error {
+	if d.Inventory == nil || d.Config == nil || d.Modules == nil || d.Providers == nil ||
+		d.Writer == nil || d.ConfigStore == nil {
+		return nil
+	}
+	cfg := directory.M365ConvergeConfig{
+		Config:       effectiveConfigSource{svc: d.Config},
+		Modules:      d.Modules,
+		Providers:    d.Providers,
+		ProviderName: "entraid",
+		Writer:       d.Writer,
+		Store:        d.ConfigStore,
+		Logger:       d.Logger,
+	}
+	if d.Audit != nil {
+		cfg.Audit = d.Audit
+	}
+	conv, err := directory.NewM365Converge(cfg)
+	if err != nil {
+		return fmt.Errorf("m365 convergence: %w", err)
+	}
+	d.Inventory.AttachConvergence(conv)
+	return nil
 }
 
 // recordSharedEntraTenantAudit puts the shared-Entra-tenant event on the root

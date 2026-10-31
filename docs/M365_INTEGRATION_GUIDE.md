@@ -158,6 +158,39 @@ The controller reads every user and group of each CFGMS tenant that has an M365 
 - **Permissions.** The connection needs the Graph application permissions `User.Read.All`, `Group.Read.All` and `GroupMember.Read.All` (or `Directory.Read.All`).
 - **One Entra tenant, one CFGMS tenant.** If two CFGMS tenants have connections to the same Entra tenant, that Entra tenant is collected for neither, and a security event naming both CFGMS tenants is written to the root administrators' audit stream. Remove the connection from one of them to resume collection. The tenant that first recorded an object remains its owner.
 
+## Declaring Users and Groups
+
+A tenant's `m365-entra-user` and `m365-entra-group` resources in its cfg are converged by the controller, not by a steward. They are removed from the cfg delivered to stewards, so no steward ever receives or runs them. Objects that are not declared are never written, and the controller never deletes anything.
+
+```yaml
+steward:
+  drift_mode: monitor                 # report only; apply to correct
+  module_drift_modes:
+    m365-entra-user: apply            # a per-module mode wins over drift_mode
+resources:
+  - name: alice
+    module: m365-entra-user
+    config:
+      user_principal_name: alice@example.com   # identifies the user
+      display_name: Alice Example
+      department: Finance
+      adopt: true
+  - name: finance-staff
+    module: m365-entra-group
+    config:
+      display_name: Finance Staff              # identifies the group
+      description: Finance department
+      members: [alice@example.com]
+```
+
+- **Mode.** The mode is the same drift mode stewards use (`drift_mode`, overridden per module by `module_drift_modes`; unset means `apply`, an unknown value means `monitor`). In `monitor` the controller records a drift observation and never writes. In `apply` it writes the declared values and records the outcome. A workflow definition never sets the mode.
+- **Managed attributes.** Only attributes the declaration names are compared and written. Users: `display_name`, `account_enabled`, `mail`, `mobile_phone`, `office_location`, `job_title`, `department`, `company_name`. Groups: `display_name`, `description`, `members`, `owners`. `groups`, licenses and passwords on a user are ignored.
+- **Bind and adopt.** A declared resource is bound to the Entra object id of its user (matched by user principal name) or group (matched by exact display name). An object that exists but is not bound is left alone and reported unless the resource sets `adopt: true`; the controller then binds it. Once bound, the object is matched by id: if the user principal name or group name later resolves to a different object, the resource is refused and reported. Removing a resource from the cfg drops its binding.
+- **Creation.** A declared group that does not exist is created in `apply` mode and bound. A declared user that does not exist is reported as absent; user creation is not part of convergence.
+- **Cadence.** The loop runs after each inventory pass, so its cadence is `directory.m365_inventory_interval` (60 minutes by default). A direct change made in M365 to a managed object is detected on the next pass: reported in `monitor`, reverted in `apply`. A revert can lag the change by up to one interval.
+- **Reporting.** Each pass records the outcome of every declared resource (`converged`, `drift-reported`, `drift-reverted`, `created`, `absent`, `refused`, `error`) for the tenant. A failing resource is reported and skipped; the others continue. Drift is recorded as a drift-diff observation on the object's entity, carrying the cfg resource id. Inventory records of bound objects carry `managed: true`.
+- **Audit.** Every write the controller makes to M365 is audited with the tenant, actor `controller`, the module as resource type, the cfg-declared resource name as resource id, the action (`update` or `create`) and the result.
+
 ## Part 3: Capability Testing
 
 ### MSP Capabilities Tested

@@ -29,6 +29,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
+	"github.com/cfgis/cfgms/features/workflow/modules/m365/moduleset"
 	"github.com/cfgis/cfgms/features/workflow/runtime"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -297,7 +298,7 @@ func TestM365Credential_CredentialedModuleReceivesMintedToken(t *testing.T) {
 func TestM365ModuleSet_MatchesShippedModules(t *testing.T) {
 	mains, err := filepath.Glob("modules/m365/*/cmd/main.go")
 	require.NoError(t, err)
-	require.Len(t, mains, len(m365CredentialedModules), "every M365 module main.go must be in the issuer set")
+	require.Len(t, mains, len(moduleset.Names()), "every M365 module main.go must be in the issuer set")
 
 	seen := map[string]bool{}
 	for _, mainPath := range mains {
@@ -309,8 +310,7 @@ func TestM365ModuleSet_MatchesShippedModules(t *testing.T) {
 			Publisher string `yaml:"publisher"`
 		}
 		require.NoError(t, yaml.Unmarshal(raw, &m))
-		_, ok := m365CredentialedModules[m.Name]
-		assert.True(t, ok, "%s: manifest name %q is not in the issuer set", manifestPath, m.Name)
+		assert.True(t, moduleset.Contains(m.Name), "%s: manifest name %q is not in the issuer set", manifestPath, m.Name)
 		assert.Equal(t, cfgmsPublisher, m.Publisher, manifestPath)
 		seen[m.Name] = true
 
@@ -318,7 +318,7 @@ func TestM365ModuleSet_MatchesShippedModules(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, string(src), "moduleserver.Run(", "%s must use the shared moduleserver bootstrap", mainPath)
 	}
-	for name := range m365CredentialedModules {
+	for _, name := range moduleset.Names() {
 		assert.True(t, seen[name], "issuer set names %q but no shipped module has that manifest", name)
 	}
 

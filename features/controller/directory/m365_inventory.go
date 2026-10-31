@@ -56,8 +56,9 @@ const (
 )
 
 // DeclaredSet answers whether an object is named by a declared configuration.
-// #5562 supplies the real implementation; until then the collector uses an empty
-// set, so every recorded object carries managed:false.
+// M365Converge is the controller's implementation (an object is managed when a
+// declared resource is bound to it); a collector given none records every object
+// with managed:false.
 type DeclaredSet interface {
 	IsDeclared(kind, id string) bool
 }
@@ -124,7 +125,11 @@ type M365InventoryConfig struct {
 	Job          lease.SingletonJob
 	Declared     DeclaredSet
 	Logger       logging.Logger
-	OnSecurity   func(ctx context.Context, ev SecurityEvent)
+	// AfterTenant, when set, runs once per tenant after its inventory pass, inside
+	// the same lease-gated run, whether or not the collection succeeded. The
+	// convergence loop hangs here, so its cadence is the inventory interval.
+	AfterTenant func(ctx context.Context, conn M365Connection)
+	OnSecurity  func(ctx context.Context, ev SecurityEvent)
 
 	// Interval is the per-tenant collection period (default 60 minutes).
 	Interval time.Duration
@@ -229,6 +234,17 @@ func (c *M365Inventory) Start(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// AttachConvergence hooks the declared-resource convergence loop to the
+// collector: its bindings answer the managed flag and it runs after each tenant's
+// inventory pass. It must be called before Start.
+func (c *M365Inventory) AttachConvergence(conv *M365Converge) {
+	if conv == nil {
+		return
+	}
+	c.cfg.Declared = conv
+	c.cfg.AfterTenant = conv.Converge
 }
 
 // Stop ends the loop and waits for the run in flight.
@@ -400,6 +416,9 @@ func normalizeEntraGUID(s string) (string, bool) {
 
 func (c *M365Inventory) runTenant(ctx context.Context, conn M365Connection, guid string) {
 	tctx := context.WithValue(ctx, ctxkeys.TenantID, conn.Tenant)
+	if c.cfg.AfterTenant != nil {
+		defer c.cfg.AfterTenant(ctx, conn)
+	}
 	res, err := c.collectTenant(tctx, conn, guid)
 	if err != nil {
 		c.recordFailure(ctx, conn, err)

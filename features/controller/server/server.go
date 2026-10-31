@@ -2322,7 +2322,19 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 	workflowRuntimeDir := filepath.Join(resolveDNADataRoot(cfg), "workflow-runtime")
 	workflowModuleRuntime := workflowruntime.NewModuleRuntime(workflowRuntimeDir)
-	workflowHandler, triggerMgr, workflowEngine := initializeWorkflowHandler(storageManager, moduleCache, workflowModuleRuntime, logger, httpServer.GetSecretStore(), configService)
+	workflowHandler, triggerMgr, workflowEngine, workflowModuleFactory := initializeWorkflowHandler(storageManager, moduleCache, workflowModuleRuntime, logger, httpServer.GetSecretStore(), configService)
+	// Issue #5562: converge the tenants' declared m365-entra-user/-group resources
+	// after each inventory pass, through the same tenant-scoped module factory the
+	// workflow engine uses.
+	if workflowModuleFactory != nil {
+		if err := attachM365Convergence(m365ConvergeDeps{
+			Inventory: srv.m365Inventory, Config: configService, Modules: workflowModuleFactory,
+			Providers: directoryManager, Writer: egProvider, ConfigStore: storageManager.GetConfigStore(),
+			Audit: auditManager, Logger: logger,
+		}); err != nil {
+			return nil, err
+		}
+	}
 	if workflowHandler != nil {
 		httpServer.SetWorkflowHandler(workflowHandler)
 		srv.triggerManager = triggerMgr
@@ -2740,7 +2752,7 @@ func initializeWorkflowHandler(
 	logger logging.Logger,
 	secrets secretsif.SecretStore,
 	configService *service.ConfigurationServiceV2,
-) (*api.WorkflowHandler, *workflowtrigger.TriggerManagerImpl, *workflow.Engine) {
+) (*api.WorkflowHandler, *workflowtrigger.TriggerManagerImpl, *workflow.Engine, workflow.TenantModuleLoader) {
 	// Workflow module factory: looks up controller-kind module bundles by
 	// name in the controller's module cache (#1883) and fork/execs them as
 	// workflow-kind module subprocesses connected over the WorkflowModuleClient
@@ -2789,7 +2801,8 @@ func initializeWorkflowHandler(
 	handler := api.NewWorkflowHandler(workflowEngine, configStore, triggerMgr, logger)
 
 	logger.Info("Workflow engine and trigger manager initialized (Issue #414)")
-	return handler, triggerMgr, workflowEngine
+	tenantModules, _ := moduleFactory.(workflow.TenantModuleLoader)
+	return handler, triggerMgr, workflowEngine, tenantModules
 }
 
 // workflowEngineAdapter implements trigger.WorkflowTrigger by delegating to the workflow engine.

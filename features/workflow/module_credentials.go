@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
+	"github.com/cfgis/cfgms/features/workflow/modules/m365/moduleset"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
@@ -19,28 +20,14 @@ import (
 // workflow modules.
 const cfgmsPublisher = "cfgms"
 
-// m365CredentialedModules is the fixed set of CFGMS-published M365 workflow
-// modules that receive a controller-issued Microsoft Graph access token. A
-// bundle gets a credential only when its manifest name is in this set and its
-// publisher is cfgmsPublisher. TestM365ModuleSet_MatchesShippedModules keeps it
-// in step with the shipped module manifests.
-var m365CredentialedModules = map[string]struct{}{
-	"m365-conditional-access": {},
-	"m365-entra-admin-unit":   {},
-	"m365-entra-application":  {},
-	"m365-entra-group":        {},
-	"m365-entra-user":         {},
-	"m365-intune-policy":      {},
-}
-
 // isCredentialedModule reports whether the bundle's manifest identifies a
-// CFGMS-published M365 workflow module.
+// CFGMS-published M365 workflow module: its manifest name is in the
+// moduleset set and its publisher is cfgmsPublisher.
 func isCredentialedModule(b *bundle.Bundle) bool {
 	if b == nil || b.Manifest == nil || b.Manifest.Publisher != cfgmsPublisher {
 		return false
 	}
-	_, ok := m365CredentialedModules[b.Manifest.Name]
-	return ok
+	return moduleset.Contains(b.Manifest.Name)
 }
 
 // verifyCFGMSSignature checks, at issue time, that b carries at least one
