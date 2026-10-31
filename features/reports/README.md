@@ -77,6 +77,8 @@ through `features/reports/api`, which imports `features/reports/interfaces`, wit
 - `GET /api/v1/reports/custom/data` — one page of a streamed custom report (`report:read`)
 - `GET|POST /api/v1/reports/custom-templates`, `GET|DELETE /api/v1/reports/custom-templates/{id}`, `POST /api/v1/reports/custom-templates/{id}/share` — custom templates (`report:read`; writes need `report:manage`)
 
+The custom report and template endpoints are also reachable from the CLI: `cfg report template list|show|create|delete|share` and `cfg report custom run|page`. Definition files (JSON or YAML) passed with `--file` must not set `tenant_id` or `created_by`; the controller derives both from the credential.
+
 ## Integration
 
 - **Entity Graph**: `GetDNAData`, `GetDeviceStats`, and `GetDriftEvents` read device

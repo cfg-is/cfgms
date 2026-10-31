@@ -2621,13 +2621,13 @@ Custom reports are caller-defined queries over the caller's own tenant data; cus
 
 | Method and path | Permission | Purpose |
 |---|---|---|
-| `POST /api/v1/reports/custom/generate` | `report:generate` | Generate a custom report from a query; large results return `is_streamed`, `stream_token` and `total_pages` |
-| `GET /api/v1/reports/custom/data` | `report:read` | One page of a streamed report: query parameters `stream_token`, `page` (default 1), `page_size`; the `X-Has-More` response header reports whether more pages follow |
-| `GET /api/v1/reports/custom-templates` | `report:read` | Templates owned by or shared with the caller's tenant |
-| `GET /api/v1/reports/custom-templates/{id}` | `report:read` | One template |
-| `POST /api/v1/reports/custom-templates` | `report:manage` | Create or update a template |
-| `DELETE /api/v1/reports/custom-templates/{id}` | `report:manage` | Delete a template the caller's tenant owns |
-| `POST /api/v1/reports/custom-templates/{id}/share` | `report:manage` | Share a template (`shared_with_tenants`, `permissions` of `read`, `execute`, `modify`, optional `expires_at`) with tenants under the same MSP |
+| `POST /api/v1/reports/custom/generate` | `report:generate` | Generate a custom report from a query; large results return `is_streamed`, `stream_token` and `total_pages` CLI: `cfg report custom run --file report.yaml` |
+| `GET /api/v1/reports/custom/data` | `report:read` | One page of a streamed report: query parameters `stream_token`, `page` (default 1), `page_size`; the `X-Has-More` response header reports whether more pages follow CLI: `cfg report custom page --stream-token <token> --page 2` |
+| `GET /api/v1/reports/custom-templates` | `report:read` | Templates owned by or shared with the caller's tenant CLI: `cfg report template list` |
+| `GET /api/v1/reports/custom-templates/{id}` | `report:read` | One template CLI: `cfg report template show <id>` |
+| `POST /api/v1/reports/custom-templates` | `report:manage` | Create or update a template CLI: `cfg report template create --file template.yaml` |
+| `DELETE /api/v1/reports/custom-templates/{id}` | `report:manage` | Delete a template the caller's tenant owns CLI: `cfg report template delete <id> [--yes]` |
+| `POST /api/v1/reports/custom-templates/{id}/share` | `report:manage` | Share a template (`shared_with_tenants`, `permissions` of `read`, `execute`, `modify`, optional `expires_at`) with tenants under the same MSP CLI: `cfg report template share <id> --with <tenant> --permission read [--expires-in 72h]` |
 
 `report:manage` requires strong assurance; API keys cannot hold it.
 

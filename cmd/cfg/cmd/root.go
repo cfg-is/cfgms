@@ -64,6 +64,7 @@ func init() {
 	rootCmd.AddCommand(connectCmd)
 	rootCmd.AddCommand(disconnectCmd)
 	rootCmd.AddCommand(jobCmd)
+	rootCmd.AddCommand(reportCmd)
 	rootCmd.AddCommand(webAuthnCmd)
 	rootCmd.AddCommand(accountCmd)
 	rootCmd.AddCommand(loginCmd)
