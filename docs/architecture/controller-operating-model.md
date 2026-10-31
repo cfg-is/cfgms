@@ -499,6 +499,10 @@ The controller records each M365-connected tenant's users and groups in the enti
 - **Failure.** A Graph or authentication failure for one tenant records a bounded, sanitized error and flags the tenant stale; its previous inventory stays and nothing is retracted. Other tenants still run.
 - **Shared Entra tenant.** If two CFGMS tenants name the same Entra tenant id, it is collected for neither and a security event naming both goes to the root admin audit stream. The owning tenant of an existing `m365` subject never changes on ingest (Issue #5551).
 
+### Directory Reads Come From Stored DNA (Issue #5557)
+
+The directory read API (`/api/v1/directory/...`) answers from stored state only: user and group objects from the entity graph (the same tenant-scoped read path as the entity routes, restricted to the `directory` and `m365` authority types so host-local users never appear) and membership from the directory membership store. No handler calls a steward or Microsoft Graph, so a read never triggers a sync and never waits on one; every object reports `last_observed` and `stale` so a reader can see how old the answer is. Tenant scoping is in the handler: a by-id read of another tenant's object is a `404`, and the membership store is read with the owning tenant of the entity the caller was already allowed to read.
+
 ## Deployment Rings
 
 Deployment rings are a fleet-wide governance mechanism that controls which steward binary version reaches which stewards, in what order. The controller declares an ordered, named ring set; ring membership is declared in controller config only (no write path exists for stewards or operators to self-assign rings); and config delivery applies the ring's `desired_version` to stewards per their controller-config membership.
