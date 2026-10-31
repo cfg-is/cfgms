@@ -263,8 +263,9 @@ for _d in "${_path_dirs[@]}"; do
     _name="$(basename "$_f")"
     [[ "$_name" == "flock" ]] && continue
     [[ -e "${NOFLOCK_BIN}/${_name}" ]] && continue
+    [[ -x "$_f" ]] || continue
     ln -s "$_f" "${NOFLOCK_BIN}/${_name}" 2>/dev/null || true
-  done < <(find "$_d" -maxdepth 1 -type f -perm -u+x -print0 2>/dev/null)
+  done < <(find "$_d" -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
 done
 unset _path_dirs _d _f _name
 
