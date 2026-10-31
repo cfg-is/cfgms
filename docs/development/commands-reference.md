@@ -1522,6 +1522,75 @@ Runs a catalog query against the stewards a fleet selector matches, via `POST /a
 - `--param` is repeatable as `k=v`. `k=` sends an empty string; an argument with no `=` is an error; a repeated key is an error (`parameter k given twice`).
 - Catalog ids are not guessed; find them with `cfg osquery catalog`.
 
+## Directory (Issue #5558)
+
+`cfg directory` reads the directory users and groups (Active Directory and Microsoft 365) and group membership that the controller holds, through the read-only `/api/v1/directory` routes (see [REST API → Directory](../api/rest-api.md#directory)). Every route requires `directory:read`. Nothing is read from the directory itself: output is as fresh as the last sync, and each object carries `last_observed` and `stale`.
+
+Flags on `cfg directory` itself, accepted by every verb below:
+
+| Flag | Description |
+|------|-------------|
+| `--url <url>` | Controller API URL (env: `CFGMS_API_URL`) |
+| `--tls-insecure` | Skip TLS verification (env: `CFGMS_TLS_INSECURE`) |
+| `--server-name <name>` | Override the TLS server name used for certificate verification |
+
+**Output.** `--output table` (default) or `--output json`. Both expose exactly the field set the API returns, under the API's own names (table columns are the field names in capitals; `show` prints `name: value` lines). JSON is the API's shape: `items` for lists, `events` for changes, and for `group show` the group's fields plus `members`; `next_page_token` appears only when more remain. In table output every value is made terminal-safe: C0 and C1 control characters, DEL, ESC (so ANSI and OSC sequences), bidirectional and other format controls, and U+2028/U+2029 are printed as visible `\xNN` / `\uNNNN` escapes, because directory strings are attacker-influenced. JSON output is escaped by the encoder.
+
+**Paging.** A list prints one page (`--limit`, 1–500, default 100) and, when more remain, a `More results: --page-token <token>` line. `--page-token <token>` continues from there. `--all` follows tokens to the end, up to a cap of **10000** rows, and prints `Stopped after N rows … continue with --page-token <token>` if it stops at the cap. With `--all` and no `--limit`, pages of 500 are requested. `--all` and `--page-token` cannot be combined.
+
+**References.** `<source>/<id>` names one object: `source` is `ad` or `m365`, `id` is at most 64 characters of `[A-Za-z0-9._-]`. A malformed reference is refused before any request. If the same id exists in more than one domain or tenant the controller answers `409`; `--authority <domain-or-tenant-guid>` selects one.
+
+**Not found.** A `404` prints `not found` and nothing else: the same answer for an object that does not exist and one the caller may not see, with no hint about which tenant owns it.
+
+### cfg directory user list
+
+```bash
+cfg directory user list [--source ad|m365] [--query Q] [--enabled | --disabled] [--managed] [--limit N] [--all] [--page-token T] [--output table|json]
+```
+
+Lists users. Columns: `SOURCE KIND ID AUTHORITY DISPLAY_NAME SAM_ACCOUNT_NAME USER_PRINCIPAL_NAME MAIL DESCRIPTION ENABLED MANAGED LAST_OBSERVED STALE`.
+
+- `--source` limits to one source (default both). Host-local users are never listed.
+- `--query` is a case-insensitive match against display name, account name, user principal name, mail and id (at most 256 characters of letters, digits, spaces and `- _ . @ ' + , # & ( )`).
+- `--enabled` / `--disabled` filter on `enabled` and cannot be combined. `--managed` keeps only users CFGMS manages.
+
+### cfg directory user show
+
+```bash
+cfg directory user show <source>/<id> [--authority A] [--output table|json]
+```
+
+Prints the user's fields and its groups (`ID`, `DISPLAY_NAME`; at most 100). `groups_truncated: true` is printed when the user belongs to more groups than are listed or the source cut the list off.
+
+### cfg directory group list
+
+```bash
+cfg directory group list [--source ad|m365] [--query Q] [--managed] [--limit N] [--all] [--page-token T] [--output table|json]
+```
+
+Lists groups with the same flags as `user list` minus `--enabled` / `--disabled`. Columns: `SOURCE KIND ID AUTHORITY DISPLAY_NAME SAM_ACCOUNT_NAME USER_PRINCIPAL_NAME MAIL DESCRIPTION MANAGED LAST_OBSERVED STALE`.
+
+### cfg directory group show
+
+```bash
+cfg directory group show <source>/<id> [--authority A] [--limit N] [--all] [--page-token T] [--output table|json]
+```
+
+Prints the group's fields and its direct members (`ID`, `TYPE`, `DISPLAY_NAME`), one page at a time. `--limit`, `--all` and `--page-token` page the members; the group itself is read once.
+
+### cfg directory group changes
+
+```bash
+cfg directory group changes <source>/<id> [--since T] [--until T] [--member M] [--include-baseline] [--authority A] [--limit N] [--all] [--page-token T] [--output table|json]
+```
+
+Lists membership changes of one group, newest first. Columns: `GROUP MEMBER MEMBER_TYPE OP OBSERVED_AT RECORDED_AT SOURCE BASELINE`; `OP` is `added` or `removed`, and `GROUP` and `MEMBER` are entity ids.
+
+- `--since` / `--until` are RFC 3339 times bounding when the change was recorded; `until` must not be before `since`.
+- `--member` keeps only changes to that member id.
+- `--include-baseline` includes the baseline logged at the first observation of a group, which is excluded by default.
+- A range holding more than 100,000 changes is refused by the controller; narrow it with `--since` and `--until`.
+
 ## Workflow Management
 
 `cfg workflow` subcommands manage workflow definitions and their executions on the controller.
