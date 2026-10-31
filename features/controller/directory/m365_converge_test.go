@@ -1166,3 +1166,21 @@ func TestM365Write_AuditedUnderDeclaredResourceID(t *testing.T) {
 	assert.Equal(t, map[string]string{"newbie": "create", "bob-declared": "update", "staff-declared": "create"}, got,
 		"each write is audited under the cfg-declared resource id")
 }
+
+func TestM365Create_TypedConfigAsMapOmitsPassword(t *testing.T) {
+	const pw = "Sup3r-secret-Pw!"
+	state := map[string]interface{}{
+		"tenant_id": guidA, "user_principal_name": newUPN, "display_name": "Newbie",
+		"mail_nickname": "newbie", "account_enabled": true,
+		"managed_fields": []string{"display_name", "account_enabled"},
+	}
+	cfg := userCreateConfig(state, pw)
+
+	m := cfg.AsMap()
+	assert.NotContains(t, fmt.Sprint(m), pw, "AsMap exposes no password")
+	profile, ok := m["password_profile"].(map[string]interface{})
+	require.True(t, ok)
+	assert.NotContains(t, profile, "password")
+	assert.Equal(t, true, profile["force_change_password_next_signin"])
+	assert.Equal(t, pw, cfg.SignInProfile.Password, "the typed config still carries it to Set")
+}

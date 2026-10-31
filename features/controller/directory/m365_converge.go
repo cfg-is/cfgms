@@ -17,6 +17,7 @@ import (
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/credentials"
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/features/workflow/modules/m365/entra_user"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/graph"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/moduleset"
 	"github.com/cfgis/cfgms/pkg/audit"
@@ -644,11 +645,8 @@ func (r *converge) createUser(res stewardtypes.ResourceConfig, spec *resourceSpe
 	if _, declared := spec.bools["account_enabled"]; !declared {
 		state["account_enabled"] = true
 	}
-	state["password_profile"] = map[string]interface{}{
-		"password":                          password,
-		"force_change_password_next_signin": true,
-	}
-	rawErr := mod.Set(r.ctx, r.guid+":new", fragState(state))
+	cfg := userCreateConfig(state, password)
+	rawErr := mod.Set(r.ctx, r.guid+":new", cfg)
 	var setErr error
 	if rawErr != nil {
 		setErr = errors.New(redactPassword(rawErr.Error(), password))
@@ -679,6 +677,32 @@ func (r *converge) createUser(res stewardtypes.ResourceConfig, spec *resourceSpe
 			"error", logging.SanitizeLogValue(err.Error()))
 	}
 	r.outcome(res, mode, ConvergeStateCreated, "", nil)
+}
+
+// userCreateConfig builds the typed entra_user config for a create. The password
+// travels only in SignInProfile.Password: the typed config's AsMap omits it, so
+// it never enters a generic config map that other code could hash or log.
+func userCreateConfig(state map[string]interface{}, password string) *entra_user.EntraUserConfig {
+	str := func(k string) string { v, _ := state[k].(string); return v }
+	cfg := &entra_user.EntraUserConfig{
+		UserPrincipalName: str("user_principal_name"),
+		DisplayName:       str("display_name"),
+		MailNickname:      str("mail_nickname"),
+		TenantID:          str("tenant_id"),
+		Mail:              str("mail"),
+		MobilePhone:       str("mobile_phone"),
+		OfficeLocation:    str("office_location"),
+		JobTitle:          str("job_title"),
+		Department:        str("department"),
+		CompanyName:       str("company_name"),
+		SignInProfile:     &entra_user.PasswordProfile{Password: password, ForceResetAtNextSignIn: true},
+	}
+	cfg.AccountEnabled, _ = state["account_enabled"].(bool)
+	switch mf := state["managed_fields"].(type) {
+	case []string:
+		cfg.ManagedFieldsList = mf
+	}
+	return cfg
 }
 
 // redactPassword removes the password from msg, in its literal form and as a JSON
