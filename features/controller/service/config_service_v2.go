@@ -23,6 +23,7 @@ import (
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	clusterregistry "github.com/cfgis/cfgms/features/controller/clusterregistry"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/config"
 	configroutingiface "github.com/cfgis/cfgms/pkg/configrouting/interfaces"
@@ -512,6 +513,9 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 
 	// Filter configuration by requested modules if specified
 	filteredConfig := s.filterConfigByModules(effective.Config, req.Modules)
+	// Controller-kind resources are converged by the controller and never
+	// delivered: a steward has no executor for them.
+	filteredConfig = dropControllerKindResources(filteredConfig)
 
 	// Convert Go struct to protobuf
 	protoConfig, err := stewardtypes.ToProto(filteredConfig)
@@ -1023,6 +1027,28 @@ func (s *ConfigurationServiceV2) filterConfigByModules(config *stewardtypes.Stew
 	}
 
 	return &filteredConfig
+}
+
+// dropControllerKindResources returns config without the resources whose module
+// runs on the controller (executors: [controller], e.g. the m365-entra-* modules).
+// The input is not modified; it is returned as is when nothing is dropped.
+func dropControllerKindResources(cfg *stewardtypes.StewardConfig) *stewardtypes.StewardConfig {
+	if cfg == nil {
+		return cfg
+	}
+	kept := make([]stewardtypes.ResourceConfig, 0, len(cfg.Resources))
+	for _, r := range cfg.Resources {
+		if workflow.IsM365CredentialedModule(r.Module) {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	if len(kept) == len(cfg.Resources) {
+		return cfg
+	}
+	out := *cfg
+	out.Resources = kept
+	return &out
 }
 
 // convertValidationLevel converts internal validation level to proto level

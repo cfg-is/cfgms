@@ -33,6 +33,13 @@ var m365CredentialedModules = map[string]struct{}{
 	"m365-intune-policy":      {},
 }
 
+// IsM365CredentialedModule reports whether name is one of the CFGMS-published
+// M365 controller-kind modules. It is the exported view of the fixed set above.
+func IsM365CredentialedModule(name string) bool {
+	_, ok := m365CredentialedModules[name]
+	return ok
+}
+
 // isCredentialedModule reports whether the bundle's manifest identifies a
 // CFGMS-published M365 workflow module.
 func isCredentialedModule(b *bundle.Bundle) bool {
