@@ -157,6 +157,10 @@ func TestRepairServiceRegistration_RecreatesService(t *testing.T) {
 	assert.Equal(t, 10*time.Second, recovery[0].Delay)
 	assert.Equal(t, 30*time.Second, recovery[1].Delay)
 	assert.Equal(t, 60*time.Second, recovery[2].Delay)
+
+	nonCrash, err := s.RecoveryActionsOnNonCrashFailures()
+	require.NoError(t, err)
+	assert.True(t, nonCrash, "recovery must apply to non-crash failures")
 }
 
 // TestRepairServiceRegistration_RefusesRegtokenValue: arguments carrying a
