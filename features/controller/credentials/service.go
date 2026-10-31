@@ -185,6 +185,16 @@ func (s *Service) Issue(ctx context.Context, key Key) (string, error) {
 	return "", errors.New("credential issue contended too long")
 }
 
+// Discard removes key's record and password. The account-creation path calls it
+// when the directory definitely rejected the create, so no account exists with
+// that password.
+func (s *Service) Discard(ctx context.Context, key Key) error {
+	if err := key.Validate(); err != nil {
+		return err
+	}
+	return s.store.Delete(ctx, key)
+}
+
 // checkCaps rejects the issue when it would exceed the pending caps. Replacing a
 // pending record does not add to the count.
 func (s *Service) checkCaps(ctx context.Context, key Key, replaces *Record) error {
