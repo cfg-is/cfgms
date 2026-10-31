@@ -270,7 +270,11 @@ func (c *M365Inventory) jitterFor(tenant string) time.Duration {
 		return 0
 	}
 	sum := sha256.Sum256([]byte(tenant))
-	return time.Duration(binary.BigEndian.Uint64(sum[:8]) % uint64(c.cfg.Jitter))
+	// Clear the top bit so the hash value is non-negative as an int64; the
+	// modulo then stays in signed arithmetic and no width-narrowing
+	// conversion is needed.
+	h := int64(binary.BigEndian.Uint64(sum[:8]) >> 1)
+	return time.Duration(h % int64(c.cfg.Jitter))
 }
 
 func (c *M365Inventory) connections(ctx context.Context, force bool) ([]M365Connection, error) {

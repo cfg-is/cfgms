@@ -22,7 +22,9 @@ func TestInventoryPages_FollowNextLinkWithoutCap(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Query().Get("$skiptoken") {
 		case "":
-			fmt.Fprintf(w, `{"value":[{"id":"u1"},{"id":"u2"}],"@odata.nextLink":"%s%s?$skiptoken=2"}`, srv.URL, r.URL.Path)
+			if _, err := fmt.Fprintf(w, `{"value":[{"id":"u1"},{"id":"u2"}],"@odata.nextLink":"%s%s?$skiptoken=2"}`, srv.URL, r.URL.Path); err != nil {
+				t.Errorf("write first page: %v", err)
+			}
 		default:
 			_, _ = w.Write([]byte(`{"value":[{"id":"u3"}]}`))
 		}
@@ -76,4 +78,15 @@ func TestListGroupMembersPage_ReturnsEveryObjectTypeWithODataType(t *testing.T) 
 	require.Len(t, got, 2)
 	assert.Equal(t, "#microsoft.graph.device", got[1].ODataType)
 	assert.Equal(t, "D", got[1].DisplayName)
+}
+
+func TestInventoryPages_NextLinkOnLookalikeHostIsRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"value":[]}`))
+	}))
+	defer srv.Close()
+	c := NewHTTPClient(WithBaseURL(srv.URL))
+
+	_, _, err := c.ListUsersPage(context.Background(), &auth.AccessToken{Token: "t", TokenType: "Bearer"}, srv.URL+".attacker.example/users", 10)
+	require.Error(t, err, "a host that merely starts with the base URL must not receive the bearer token")
 }

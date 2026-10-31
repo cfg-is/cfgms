@@ -52,7 +52,7 @@ func (c *HTTPClient) pageEndpoint(first, pageLink string) (string, error) {
 	if pageLink == "" {
 		return first, nil
 	}
-	if !strings.HasPrefix(pageLink, c.baseURL) {
+	if !strings.HasPrefix(pageLink, c.baseURL+"/") {
 		return "", fmt.Errorf("graph next link does not belong to the configured Graph endpoint")
 	}
 	return pageLink[len(c.baseURL):], nil
