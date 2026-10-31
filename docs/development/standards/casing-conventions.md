@@ -13,7 +13,7 @@ This is **not** about Go source naming — that follows standard Go (see
 |---|---|---|
 | YAML/JSON config keys (`steward.cfg`, pushed fleet config) | `snake_case` | `converge_interval`, `module_trust` |
 | Module resource config keys (`module.yaml`, `hyperv.vm` config) | `snake_case` | `enroll_steward_path`, `on_existing` |
-| CLI flags | `kebab-case` | `--controller-url`, `--regtoken` |
+| CLI flags | `kebab-case` | `--controller-url`, `--regtoken-file` |
 | PowerShell transport functions + params | `PascalCase` / `-PascalCase` | `Cfgms-CopyToSeedVHD -StewardSrc` |
 | Module manifest cmdlet / behavioral-envelope references | `PascalCase` | `Get-VM`, `Add-ClusterVirtualMachineRole` |
 

@@ -308,15 +308,29 @@ func runInstallScriptInContainer(t *testing.T, container string, archiveData []b
 
 	// Run install.sh with CFGMS_INSTALL_PREFIX so it writes to the isolated prefix
 	// instead of /etc/cfgms, and --fingerprint so no interactive prompt is required.
-	// The registration token must be provided; use the token from the compose env.
+	// The registration token is provided by file.
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+
+	// install.sh requires the token file to be owned by the invoking user, so it
+	// is written by the same user docker exec runs install.sh as (not root).
+	// workDir was created by root, so hand it to that user first.
+	idOut, idErr := exec.CommandContext(ctx, "docker", "exec", container,
+		"sh", "-c", "echo $(id -u):$(id -g)").CombinedOutput()
+	require.NoError(t, idErr, "resolving the exec user failed: %s", string(idOut))
+	dockerExecRoot(t, container, "chown", strings.TrimSpace(string(idOut)), workDir)
+
+	tokenFile := workDir + "/regtoken"
+	writeOut, writeErr := exec.CommandContext(ctx, "docker", "exec", container,
+		"sh", "-c", "umask 077; printf %s dockertest_fleet_child_a > "+tokenFile,
+	).CombinedOutput()
+	require.NoError(t, writeErr, "writing the token file failed: %s", string(writeOut))
 
 	out, err := exec.CommandContext(ctx, "docker", "exec",
 		"-e", "CFGMS_INSTALL_PREFIX="+installPfx,
 		container,
 		"bash", filepath.Join(workDir, "install.sh"),
-		"--regtoken", "dockertest_fleet_child_a",
+		"--regtoken-file", tokenFile,
 		"--fingerprint", fingerprint,
 	).CombinedOutput()
 

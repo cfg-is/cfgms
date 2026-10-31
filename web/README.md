@@ -567,14 +567,17 @@ packaged `README.txt` does not spell out:
 
 | Platform | Assembled command |
 |---|---|
-| `linux` / `darwin` | `sudo ./cfgms-steward-{arch} install --regtoken '{token}' --controller-url {origin}` |
-| `windows` | `.\cfgms-steward-{arch}.exe install --regtoken {token} --controller-url {origin}` |
+| `linux` / `darwin` | `CFGMS_TOKEN_FILE=$(sudo mktemp) && printf '%s' '{token}' \| sudo tee "$CFGMS_TOKEN_FILE" >/dev/null && sudo ./cfgms-steward-{arch} install --regtoken-file "$CFGMS_TOKEN_FILE" --controller-url {origin}; sudo rm -f "$CFGMS_TOKEN_FILE"` |
+| `windows` (elevated PowerShell) | `$f = Join-Path $env:TEMP 'cfgms-regtoken'; New-Item -ItemType File -Path $f -Force \| Out-Null; icacls $f /inheritance:r /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' \| Out-Null; Set-Content -LiteralPath $f -Value '{token}' -NoNewline; .\cfgms-steward-{arch}.exe install --regtoken-file $f --controller-url {origin}; Remove-Item -LiteralPath $f -Force` |
 
-The `install` subcommand and the `--regtoken` / `--controller-url` flag names
-are those of the real steward CLI (`buildInstallCommand` in
-`cmd/steward/main.go`) — not `--token` / `--controller`. The POSIX token is
-single-quoted; the Windows one is not, because single quotes are literal in
-`cmd.exe` and would be passed through as part of the value.
+The `install` subcommand and the `--regtoken-file` / `--controller-url` flag
+names are those of the real steward CLI (`buildInstallCommand` in
+`cmd/steward/main.go`) — not `--token` / `--controller`. The token reaches a
+root/admin-only temp file through shell builtins only, so it never appears in a
+process argument list, and the temp file is removed afterwards. `sudo mktemp`
+creates a root-owned 0600 file; on Windows the ACL is restricted to SYSTEM and
+BUILTIN\Administrators before the token is written. The Windows command must be
+run in an elevated PowerShell; `cmd.exe` is not supported.
 
 `{origin}` is `window.location.origin` (the controller's own URL). The copy
 button is disabled until platform, arch, and token are all supplied; it shows a

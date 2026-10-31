@@ -262,7 +262,8 @@ journalctl -u cfgms-steward --since "10 minutes ago"
 cfg token create --tenant-id <tenant> --controller-url https://<controller>:4433
 
 # ... then re-run install on the endpoint (idempotent; restarts the service)
-cfgms-steward install --regtoken <token> \
+# <token-file> holds the token and must be root-only (mode 0600)
+cfgms-steward install --regtoken-file <token-file> \
   --controller-url https://<controller> \
   --controller-ca /etc/cfgms/controller-ca.crt \
   --fingerprint <ca-sha256-hex>

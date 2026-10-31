@@ -91,6 +91,9 @@ func serviceRegistrationOK(name string) (bool, error) {
 // this against a unique throwaway service without ever touching the host's real
 // CFGMSSteward registration.
 func repairServiceRegistration(name, exePath string, args []string) error {
+	if err := rejectRegtokenValue(args); err != nil {
+		return err
+	}
 	scm, err := mgr.Connect()
 	if err != nil {
 		return fmt.Errorf("connect SCM: %w", err)

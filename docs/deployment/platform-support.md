@@ -156,8 +156,8 @@ make build-steward-cross GOOS=darwin GOARCH=arm64
 sudo cp bin/cfgms-steward /usr/local/bin/cfgms-steward
 sudo chmod +x /usr/local/bin/cfgms-steward
 
-# Register with controller and start
-./cfgms-steward --regtoken <TOKEN>
+# Register with controller and start (the token file must be root-only, mode 0600)
+./cfgms-steward --regtoken-file <PATH>
 
 # systemd service (optional, see single-controller/walkthrough.md)
 sudo systemctl enable cfgms-steward
@@ -171,11 +171,10 @@ sudo systemctl start cfgms-steward
 Copy-Item cfgms-steward.exe "C:\Program Files\CFGMS\cfgms-steward.exe"
 
 # Register with controller
-& "C:\Program Files\CFGMS\cfgms-steward.exe" --regtoken <TOKEN>
+& "C:\Program Files\CFGMS\cfgms-steward.exe" --regtoken-file <PATH>
 
-# Windows Service (optional)
-sc create CFGMSSteward binPath="C:\Program Files\CFGMS\cfgms-steward.exe --regtoken <TOKEN>"
-sc start CFGMSSteward
+# Windows Service (optional; the token file must be readable by SYSTEM and Administrators only)
+cfgms-steward.exe install --regtoken-file <PATH>
 ```
 
 ### macOS Steward
@@ -185,8 +184,8 @@ sc start CFGMSSteward
 sudo cp bin/cfgms-steward /usr/local/bin/cfgms-steward
 sudo chmod +x /usr/local/bin/cfgms-steward
 
-# Register with controller
-./cfgms-steward --regtoken <TOKEN>
+# Register with controller (the token file must be root-only, mode 0600)
+./cfgms-steward --regtoken-file <PATH>
 
 # launchd service (optional)
 sudo launchctl load /Library/LaunchDaemons/com.cfgms.steward.plist

@@ -217,17 +217,17 @@ describe('validateToken', () => {
 })
 
 describe('assembleCommand', () => {
-  it('produces linux install command with correct flags and a single-quoted token', () => {
+  it('produces linux install command that hands the token over by file', () => {
     const cmd = assembleCommand('linux', 'amd64', 'abcde2345')
     expect(cmd).toBe(
-      `sudo ./cfgms-steward-amd64 install --regtoken 'abcde2345' --controller-url ${window.location.origin}`,
+      `CFGMS_TOKEN_FILE=$(sudo mktemp) && printf '%s' 'abcde2345' | sudo tee "$CFGMS_TOKEN_FILE" >/dev/null && sudo ./cfgms-steward-amd64 install --regtoken-file "$CFGMS_TOKEN_FILE" --controller-url ${window.location.origin}; sudo rm -f "$CFGMS_TOKEN_FILE"`,
     )
   })
 
   it('produces darwin command like linux', () => {
     const cmd = assembleCommand('darwin', 'arm64', 'abc2345fg')
     expect(cmd).toBe(
-      `sudo ./cfgms-steward-arm64 install --regtoken 'abc2345fg' --controller-url ${window.location.origin}`,
+      `CFGMS_TOKEN_FILE=$(sudo mktemp) && printf '%s' 'abc2345fg' | sudo tee "$CFGMS_TOKEN_FILE" >/dev/null && sudo ./cfgms-steward-arm64 install --regtoken-file "$CFGMS_TOKEN_FILE" --controller-url ${window.location.origin}; sudo rm -f "$CFGMS_TOKEN_FILE"`,
     )
   })
 
@@ -256,14 +256,19 @@ describe('assembleCommand', () => {
   it('produces windows command with .exe and backslash prefix', () => {
     const cmd = assembleCommand('windows', 'amd64', 'abc2345fg')
     expect(cmd).toBe(
-      `.\\cfgms-steward-amd64.exe install --regtoken abc2345fg --controller-url ${window.location.origin}`,
+      `$f = Join-Path $env:TEMP 'cfgms-regtoken'; New-Item -ItemType File -Path $f -Force | Out-Null; icacls $f /inheritance:r /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' | Out-Null; Set-Content -LiteralPath $f -Value 'abc2345fg' -NoNewline; .\\cfgms-steward-amd64.exe install --regtoken-file $f --controller-url ${window.location.origin}; Remove-Item -LiteralPath $f -Force`,
     )
   })
 
-  it('uses --regtoken and --controller-url flags (not --token/--controller)', () => {
+  it('uses --regtoken-file and --controller-url flags (not --token/--controller)', () => {
+    for (const platform of ['linux', 'darwin', 'windows']) {
+      const cmd = assembleCommand(platform, 'amd64', 'abc2345fg')
+      expect(cmd).toContain('--regtoken-file')
+      expect(cmd).toContain('--controller-url')
+      // No bare token-valued flag in any form (only the -file variant).
+      expect(cmd).not.toMatch(/--regtoken(?!-file)/)
+    }
     const cmd = assembleCommand('linux', 'amd64', 'abc2345fg')
-    expect(cmd).toContain('--regtoken')
-    expect(cmd).toContain('--controller-url')
     expect(cmd).not.toContain('--token=')
     expect(cmd).not.toContain('--controller=')
   })
@@ -564,7 +569,7 @@ describe('InstallerPage — command assembler', () => {
     fireEvent.change(screen.getByTestId('assembler-token'), { target: { value: 'abcde23456fg' } })
     const cmd = (screen.getByTestId('assembler-command') as HTMLInputElement).value
     expect(cmd).toContain('cfgms-steward-amd64')
-    expect(cmd).toContain('--regtoken')
+    expect(cmd).toContain('--regtoken-file')
     expect(cmd).toContain('--controller-url')
     expect(cmd).toContain(window.location.origin)
     expect(cmd).toContain('abcde23456fg')
@@ -616,7 +621,7 @@ describe('InstallerPage — command assembler', () => {
     fireEvent.change(screen.getByTestId('assembler-arch'), { target: { value: 'amd64' } })
     fireEvent.change(screen.getByTestId('assembler-token'), { target: { value: 'abcde23456fg' } })
     const cmd = (screen.getByTestId('assembler-command') as HTMLInputElement).value
-    expect(cmd).toContain("--regtoken 'abcde23456fg'")
+    expect(cmd).toContain("printf '%s' 'abcde23456fg'")
   })
 
   it('copy button is enabled and no error when token is valid base32', async () => {
@@ -726,7 +731,7 @@ describe('InstallerPage — command assembler over http', () => {
     const text = section?.textContent ?? ''
     // The refusal prose names the flag and the scheme on purpose; what must not
     // appear is a runnable command or the insecure origin itself.
-    expect(text).not.toContain('install --regtoken')
+    expect(text).not.toContain('install --regtoken-file')
     expect(text).not.toContain('cfgms-steward')
     expect(text).not.toContain('http://controller.example.test')
   })

@@ -52,29 +52,12 @@ func makeReadableByOthers(t *testing.T, path string) {
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil))
 }
 
-func TestServiceRegToken_RegTokenFlag(t *testing.T) {
-	token, err := serviceRegToken("tok_flag_only", "")
-	require.NoError(t, err)
-	assert.Equal(t, "tok_flag_only", token)
-}
-
-func TestServiceRegToken_BothFlagsIsError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "registration-token")
-	require.NoError(t, os.WriteFile(path, []byte("tok_from_file\n"), 0o600))
-
-	_, err := serviceRegToken("tok_flag", path)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot be used together")
-	assert.NotContains(t, err.Error(), "tok_flag")
-	assert.NotContains(t, err.Error(), "tok_from_file")
-}
-
 func TestServiceRegToken_RefusesFileOtherPrincipalsCanRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "registration-token")
 	require.NoError(t, os.WriteFile(path, []byte("tok_user_readable\n"), 0o600))
 	makeReadableByOthers(t, path)
 
-	_, err := serviceRegToken("", path)
+	_, err := serviceRegToken(path)
 	require.Error(t, err)
 	// The owner check or the ACE check refuses it, depending on whether the
 	// runner's default owner is its own account or Administrators.
@@ -86,7 +69,7 @@ func TestRegTokenFile_WindowsAdminOnlyFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "registration-token")
 	writeAdminOnlyTokenFile(t, path, "tok_admin_only")
 
-	token, err := serviceRegToken("", path)
+	token, err := serviceRegToken(path)
 	require.NoError(t, err)
 	assert.Equal(t, "tok_admin_only", token, "the service handler reads --regtoken-file")
 

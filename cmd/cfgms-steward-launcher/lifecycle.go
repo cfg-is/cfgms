@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/version"
@@ -52,7 +53,7 @@ type Supervisor struct {
 	Stderr io.Writer
 
 	// ExtraArgs are appended to the child's argv after argv[0]. Production
-	// callers leave it empty; the OS service manager arranges --regtoken
+	// callers leave it empty; the OS service manager arranges --regtoken-file
 	// (and any other steward CLI flags) via the registered service-binPath
 	// arguments. Tests set this to control what their fake child does.
 	ExtraArgs []string
@@ -142,6 +143,9 @@ func (s *Supervisor) runServiceRegistrationRepair(ctx context.Context, interval 
 // Returns nil if the child completed normally; an error describing the
 // final fault otherwise.
 func (s *Supervisor) Supervise(ctx context.Context) error {
+	if err := rejectRegtokenValue(s.ExtraArgs); err != nil {
+		return err
+	}
 	if s.clock == nil {
 		s.clock = realClock{}
 	}
@@ -438,4 +442,22 @@ func (s *Supervisor) writeFlagFile(name, version string) error {
 		return err
 	}
 	return os.Rename(tmp, dst)
+}
+
+// rejectedTokenFlag is the removed token-on-the-command-line flag; use --regtoken-file.
+const rejectedTokenFlag = "--regtoken" // use --regtoken-file
+
+// rejectRegtokenValue refuses child arguments that carry the registration token
+// as a command-line value, which other local users could read from the process
+// list. Each argument is split on whitespace because a service definition holds
+// the whole --child-args value as one argument.
+func rejectRegtokenValue(args []string) error {
+	for _, arg := range args {
+		for _, field := range strings.Fields(arg) {
+			if name, _, _ := strings.Cut(field, "="); name == rejectedTokenFlag {
+				return errors.New("--regtoken is not supported in child arguments: pass the token in a root-only file with --regtoken-file PATH")
+			}
+		}
+	}
+	return nil
 }

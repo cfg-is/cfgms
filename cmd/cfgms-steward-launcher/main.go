@@ -94,7 +94,7 @@ func runSuperviseWithCtx(ctx context.Context, args []string) int {
 	root := fs.String("root", defaultRoot(), "Install root holding current.txt + versions/")
 	startupWindow := fs.Duration("startup-window", 30*time.Second, "How long a child must run to be considered healthy")
 	maxRollbacks := fs.Int("max-rollbacks", 1, "Cap on auto-rollback attempts per Supervise call")
-	childArgs := fs.String("child-args", "", "Space-separated args forwarded to the supervised steward (e.g. \"--regtoken xxx\")")
+	childArgs := fs.String("child-args", "", "Space-separated args forwarded to the supervised steward (e.g. \"--regtoken-file <path>\")")
 	certStoreDir := fs.String("cert-store-dir", defaultCertStoreDir(), "Directory where upgrade flag files are written for the steward to pick up on reconnect")
 	maxVersions := fs.Int("max-versions", 3, "Maximum number of old version directories to retain past the quarantine window (0 = unlimited)")
 	maxBytes := fs.Int64("max-bytes", 500*1024*1024, "Maximum total bytes for retained version directories past the quarantine window (0 = unlimited)")

@@ -423,7 +423,6 @@ func main() {
 func buildRootCommand() *cobra.Command {
 	var (
 		configPath    string
-		regToken      string
 		regTokenFile  string
 		controllerURL string
 	)
@@ -438,22 +437,25 @@ Manages the local endpoint configuration on behalf of a CFGMS controller.
 
 Entry paths:
   cfgms-steward --regtoken-file PATH Run in foreground, token read from a root-only file
-  cfgms-steward --regtoken TOKEN     Run in foreground (legacy: token visible in the process list)
   cfgms-steward --config path.cfg    Run in standalone mode
   cfgms-steward install --regtoken-file PATH  Install as OS service
   cfgms-steward                      Interactive mode (prompts for token)`, version.Short()),
 		// SilenceUsage prevents cobra printing usage on every error.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRootCommand(cmd, regToken, regTokenFile, controllerURL, configPath)
+			return runRootCommand(cmd, regTokenFile, controllerURL, configPath)
 		},
 	}
 
 	// Flags used by the root command (foreground run mode).
 	root.Flags().StringVar(&configPath, "config", "", "Path to configuration file (enables standalone mode)")
-	root.Flags().StringVar(&regToken, "regtoken", "", "Legacy: registration token on the command line, visible in the process list (prefer --regtoken-file)")
-	root.Flags().StringVar(&regTokenFile, "regtoken-file", "", "Path to a root-only file holding the registration token (mutually exclusive with --regtoken)")
+	root.Flags().StringVar(&regTokenFile, "regtoken-file", "", "Path to a root-only file holding the registration token")
 	root.Flags().StringVar(&controllerURL, "controller-url", "", "Controller URL (overrides compile-time URL; set at install time via service definition)")
+
+	// A token on the command line is visible in the process list, so the flag
+	// does not exist; the error for it points at the file form. Child commands
+	// inherit this handler.
+	root.SetFlagErrorFunc(regtokenFlagError)
 
 	// Subcommands.
 	root.AddCommand(
@@ -469,18 +471,15 @@ Entry paths:
 
 // runRootCommand implements the default (foreground) run behaviour.
 // When no meaningful flags are provided it enters interactive mode.
-func runRootCommand(cmd *cobra.Command, regToken, regTokenFile, controllerURL, configPath string) error {
-	if regToken != "" && regTokenFile != "" {
-		return fmt.Errorf("--regtoken and --regtoken-file cannot be used together")
-	}
-
+func runRootCommand(cmd *cobra.Command, regTokenFile, controllerURL, configPath string) error {
 	// Interactive mode: no flags set and no subcommand selected.
-	noFlags := regToken == "" && regTokenFile == "" && configPath == ""
+	noFlags := regTokenFile == "" && configPath == ""
 	if noFlags {
 		return runInteractive()
 	}
 
 	// The token is read into memory only; it is never placed in process arguments.
+	var regToken string
 	if regTokenFile != "" {
 		token, err := service.ReadTokenFile(regTokenFile)
 		if err != nil {
@@ -500,6 +499,18 @@ func runRootCommand(cmd *cobra.Command, regToken, regTokenFile, controllerURL, c
 	}()
 
 	return rootRunSteward(ctx, regToken, controllerURL, configPath)
+}
+
+// rejectedTokenFlag is the removed token-on-the-command-line flag; use --regtoken-file.
+const rejectedTokenFlag = "--regtoken" // use --regtoken-file
+
+// regtokenFlagError turns pflag's unknown-flag error for that flag into an error that
+// names --regtoken-file. The rejected value is never echoed.
+func regtokenFlagError(_ *cobra.Command, err error) error {
+	if err != nil && err.Error() == "unknown flag: "+rejectedTokenFlag {
+		return errors.New("--regtoken is not supported: pass the token in a root-only file with --regtoken-file PATH")
+	}
+	return err
 }
 
 // rootRunSteward is the steward entry the root command calls; tests substitute
@@ -868,7 +879,7 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 
 // buildInstallCommand builds the `cfgms-steward install` subcommand.
 func buildInstallCommand() *cobra.Command {
-	var regToken, regTokenFile, controllerURL, caCertPath, fingerprint string
+	var regTokenFile, controllerURL, caCertPath, fingerprint string
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -884,10 +895,9 @@ Platforms:
 Requires elevated privileges (Administrator on Windows, root on Linux/macOS).
 Install is idempotent: running it again updates the binary and restarts the service.
 
-Exactly one of --regtoken-file and --regtoken is required. The token file is
-checked (root-only on Linux/macOS, SYSTEM and Administrators only on Windows) and
-its content is copied to the service's own root-only token file. --regtoken is
-legacy: the value is visible in the process list during install.
+--regtoken-file is required. The token file is checked (root-only on
+Linux/macOS, SYSTEM and Administrators only on Windows) and its content is
+copied to the service's own root-only token file.
 
 Compile-baked URL (default — binary built with -ldflags):
 
@@ -905,12 +915,11 @@ TOFU — trust-on-first-use (lab environments):
   cfgms-steward install --regtoken-file /path/to/token \
     --controller-url https://ctrl.example.com`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInstall(regToken, regTokenFile, controllerURL, caCertPath, fingerprint)
+			return runInstall(regTokenFile, controllerURL, caCertPath, fingerprint)
 		},
 	}
 
-	cmd.Flags().StringVar(&regTokenFile, "regtoken-file", "", "Path to a root-only file holding the registration token (one of --regtoken-file or --regtoken is required)")
-	cmd.Flags().StringVar(&regToken, "regtoken", "", "Legacy: registration token on the command line, visible in the process list (prefer --regtoken-file)")
+	cmd.Flags().StringVar(&regTokenFile, "regtoken-file", "", "Path to a root-only file holding the registration token (required)")
 	cmd.Flags().StringVar(&controllerURL, "controller-url", "", "Controller URL (install-pinned and TOFU modes; omit to use compile-time URL)")
 	cmd.Flags().StringVar(&caCertPath, "controller-ca", "", "Path to controller CA certificate PEM file (install-pinned mode)")
 	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "Expected SHA-256 fingerprint of the CA certificate (hex, from controller --init output)")
@@ -952,22 +961,22 @@ func buildStatusCommand() *cobra.Command {
 }
 
 // runInstall performs the install operation for the current platform.
-func runInstall(regToken, regTokenFile, controllerURL, caCertPath, fingerprint string) error {
-	if regToken != "" && regTokenFile != "" {
-		return fmt.Errorf("--regtoken and --regtoken-file cannot be used together")
-	}
-	if regToken == "" && regTokenFile == "" {
-		return fmt.Errorf("one of --regtoken-file or --regtoken is required")
+func runInstall(regTokenFile, controllerURL, caCertPath, fingerprint string) error {
+	if regTokenFile == "" {
+		return fmt.Errorf("--regtoken-file is required")
 	}
 	// Read the token file before the elevation check so a bad file fails
 	// before any privileged step.
-	if regTokenFile != "" {
-		token, readErr := service.ReadTokenFile(regTokenFile)
-		if readErr != nil {
-			return readErr
-		}
-		regToken = token
+	regToken, readErr := service.ReadTokenFile(regTokenFile)
+	if readErr != nil {
+		return readErr
 	}
+	return installWithToken(regToken, controllerURL, caCertPath, fingerprint)
+}
+
+// installWithToken installs the service with a registration token already held
+// in memory (read from a token file, or typed at the interactive prompt).
+func installWithToken(regToken, controllerURL, caCertPath, fingerprint string) error {
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -1120,7 +1129,7 @@ func runInteractive() error {
 
 	switch choice {
 	case "1":
-		return runInstall(token, "", "", "", "")
+		return installWithToken(token, "", "", "")
 	case "2":
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
