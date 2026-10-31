@@ -1,4 +1,0 @@
-file: tamper-restore-ban.html
-order: 17
-status: **Reference**
-what: Steward **tamper lockdown** (Epic #5621 · #5668) — a steward that raises a tamper alarm is marked **Tampered**: the controller keeps accepting its heartbeats and reports but sends nothing new, while hands-on shell / scripts stay open and audited. Fleet rows sort to the top with a Tampered badge; the asset page carries the lockdown banner, tamper codes (still reported / not reported) and the three ways out — **Restore**, **Repair and restore** (incl. the data-loss approval) and **Ban** (type the host name) — each behind a passkey step-up. Also repair-in-progress, restored, banned, conflict, passkey-cancelled, read-only, no-codes and loading states. Renders directly with its own **State / Theme** strip; both themes.

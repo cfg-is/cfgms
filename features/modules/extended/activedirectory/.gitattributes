@@ -1,3 +1,0 @@
-# The read script is embedded and verified by its SHA-256 (scripts_windows.go).
-# Pin its line endings so every checkout has the bytes the hash was taken over.
-scripts/*.ps1 text eol=lf
