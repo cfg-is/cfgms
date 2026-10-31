@@ -4,9 +4,11 @@
 package directory
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -20,6 +22,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
+	"github.com/cfgis/cfgms/features/controller/credentials"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365"
@@ -36,6 +39,7 @@ import (
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -72,12 +76,24 @@ type convGraph struct {
 	mu      sync.Mutex
 	tenants map[string]*cgTenant
 	writes  map[string][]string // client -> "METHOD path"
+	bodies  map[string][]string // client -> "METHOD path body"
 	nextID  int
+
+	// createStatus fails POST /users for a UPN with that status before creating it;
+	// createLost creates the user but answers 500, as a lost response would.
+	createStatus map[string]int
+	createLost   map[string]bool
+	creates      map[string]int   // UPN -> POST /users requests seen
+	beforeCreate func(upn string) // called as Graph receives a create, before it answers
+	echoBody     bool             // a rejected create's error message carries the request body
+	lastEchoed   string
+	lastBody     []byte
 }
 
 func newConvGraph(t *testing.T) *convGraph {
 	t.Helper()
-	g := &convGraph{tenants: map[string]*cgTenant{}, writes: map[string][]string{}}
+	g := &convGraph{tenants: map[string]*cgTenant{}, writes: map[string][]string{}, bodies: map[string][]string{},
+		createStatus: map[string]int{}, createLost: map[string]bool{}, creates: map[string]int{}}
 	g.srv = httptest.NewServer(http.HandlerFunc(g.serve))
 	t.Cleanup(g.srv.Close)
 	return g
@@ -102,6 +118,13 @@ func (g *convGraph) writeLog(client string) []string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return append([]string(nil), g.writes[client]...)
+}
+
+// requestBodies returns every mutating request with its body.
+func (g *convGraph) requestBodies(client string) []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.bodies[client]...)
 }
 
 func (g *convGraph) user(client, id string) *cgUser {
@@ -147,9 +170,73 @@ func (g *convGraph) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodGet {
 		g.writes[client] = append(g.writes[client], r.Method+" "+r.URL.Path)
+		raw, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		g.lastBody = raw
+		g.bodies[client] = append(g.bodies[client], r.Method+" "+r.URL.Path+" "+string(raw))
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	switch {
+	case parts[0] == "users" && len(parts) == 1 && r.Method == http.MethodPost:
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		upn, _ := body["userPrincipalName"].(string)
+		g.creates[upn]++
+		if g.beforeCreate != nil {
+			g.beforeCreate(upn)
+		}
+		if status := g.createStatus[upn]; status != 0 {
+			msg := "rejected"
+			if g.echoBody {
+				msg += ": " + string(g.lastBody)
+			}
+			g.lastEchoed = msg
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "Request_BadRequest", "message": msg}})
+			return
+		}
+		for _, u := range td.users {
+			if strings.EqualFold(u.UPN, upn) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"code":"Request_BadRequest","message":"already exists"}}`))
+				return
+			}
+		}
+		g.nextID++
+		id := fmt.Sprintf("ffffffff-0000-0000-0000-%012d", g.nextID)
+		name, _ := body["displayName"].(string)
+		enabled, _ := body["accountEnabled"].(bool)
+		td.users[id] = &cgUser{ID: id, UPN: upn, Name: name, Enabled: enabled}
+		if g.createLost[upn] {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":{"code":"InternalServerError","message":"lost"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(td.users[id].json())
+	case parts[0] == "groups" && len(parts) == 4 && parts[2] == "members" && parts[3] == "$ref" && r.Method == http.MethodPost:
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		ref, _ := body["@odata.id"].(string)
+		if gr := td.groups[parts[1]]; gr != nil {
+			for _, u := range td.users {
+				if strings.HasSuffix(ref, "/"+u.ID) {
+					gr.Members = append(gr.Members, u.UPN)
+				}
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case parts[0] == "groups" && len(parts) == 5 && parts[2] == "members" && parts[4] == "$ref" && r.Method == http.MethodDelete:
+		if gr := td.groups[parts[1]]; gr != nil {
+			var kept []string
+			for _, m := range gr.Members {
+				if u := td.users[parts[3]]; u == nil || !strings.EqualFold(u.UPN, m) {
+					kept = append(kept, m)
+				}
+			}
+			gr.Members = kept
+		}
+		w.WriteHeader(http.StatusNoContent)
 	case parts[0] == "users" && len(parts) == 2:
 		var u *cgUser
 		for _, c := range td.users {
@@ -330,11 +417,31 @@ type cvEnv struct {
 	writer  *recWriter
 	audit   *audit.Manager
 	eg      *egsqlite.SQLiteEntityGraphProvider
+
+	// The credential service the loop issues one-time passwords from, over its own
+	// secret store (failCredSecrets makes that store reject every write).
+	credSecrets     *testutil.MemSecretStore
+	failCredSecrets bool
+	credStore       credentials.CredentialStore
+	creds           *credentials.Service
+	logger          *logging.CapturingLogger
+}
+
+// failingSecretStore rejects every write, as an unavailable secret backend would.
+type failingSecretStore struct{ *testutil.MemSecretStore }
+
+func (failingSecretStore) StoreSecret(context.Context, *secretsif.SecretRequest) error {
+	return fmt.Errorf("secret backend unavailable")
+}
+
+func (failingSecretStore) CompareAndSwapSecret(context.Context, string, int, *secretsif.SecretRequest) (int, bool, error) {
+	return 0, false, fmt.Errorf("secret backend unavailable")
 }
 
 func newCvEnv(t *testing.T, tenants ...string) *cvEnv {
 	t.Helper()
-	e := &cvEnv{t: t, gr: newConvGraph(t), secrets: tenantMemStore{testutil.NewMemSecretStore()}}
+	e := &cvEnv{t: t, gr: newConvGraph(t), secrets: tenantMemStore{testutil.NewMemSecretStore()},
+		credSecrets: testutil.NewMemSecretStore(), logger: logging.NewCapturingLogger()}
 	sm := pkgtesting.SetupTestStorage(t)
 	sys := ctxkeys.WithSystem(context.Background())
 	for _, id := range tenants {
@@ -347,7 +454,8 @@ func newCvEnv(t *testing.T, tenants ...string) *cvEnv {
 
 	logger := logging.NewNoopLogger()
 	authp := auth.NewOAuth2Provider(auth.NewSecretStoreCredentialStore(e.secrets), nil, logger)
-	gc := graph.NewRateLimitedHTTPClient(graph.WithBaseURL(e.gr.srv.URL))
+	gc := graph.NewRateLimitedHTTPClient(graph.WithBaseURL(e.gr.srv.URL),
+		graph.WithRetryConfig(&graph.RetryConfig{MaxRetries: 1, InitialDelay: time.Millisecond, MaxDelay: time.Millisecond, BackoffMultiplier: 1}))
 	e.factory = &boundFactory{auth: authp, gc: gc}
 	e.mgr = dirif.NewDirectoryProviderManager(nil)
 	entra := m365.NewEntraIDDirectoryProvider(logger, authp, gc)
@@ -392,9 +500,18 @@ func (e *cvEnv) declare(tenant string, settings stewardtypes.StewardSettings, re
 
 func (e *cvEnv) converger() *M365Converge {
 	e.t.Helper()
+	var sec secretsif.SecretStore = e.credSecrets
+	if e.failCredSecrets {
+		sec = failingSecretStore{e.credSecrets}
+	}
+	var err error
+	e.credStore, err = credentials.NewStore(e.store, sec)
+	require.NoError(e.t, err)
+	e.creds, err = credentials.NewService(e.credStore, credentials.ConfigBindingChecker{Store: e.store}, logging.NewNoopLogger())
+	require.NoError(e.t, err)
 	c, err := NewM365Converge(M365ConvergeConfig{
 		Config: svcSource{e.svc}, Modules: e.factory, Providers: e.mgr, Writer: e.writer,
-		Store: e.store, Audit: e.audit,
+		Store: e.store, Audit: e.audit, Credentials: e.creds, Logger: e.logger,
 	})
 	require.NoError(e.t, err)
 	return c
@@ -601,7 +718,7 @@ func TestM365Converge_OneBadResourceDoesNotStopOthers(t *testing.T) {
 
 	out := e.outcomes(c, "tenant-a")
 	assert.Equal(t, ConvergeStateRefused, out["broken"].State)
-	assert.Equal(t, ConvergeStateAbsent, out["ghost"].State)
+	assert.Equal(t, ConvergeStateCreated, out["ghost"].State, "a declared user that does not exist is created (Issue #5563)")
 	assert.Equal(t, ConvergeStateReverted, out["alice"].State)
 	assert.Equal(t, "Alice", e.gr.user("app-a", cvUserA).Name)
 }
@@ -758,4 +875,312 @@ func TestM365Converge_DeclaredTenantIDMustMatchConnection(t *testing.T) {
 
 	assert.Zero(t, e.gr.writeCount("app-a"))
 	assert.Equal(t, ConvergeStateRefused, e.outcomes(c, "tenant-a")["alice"].State)
+}
+
+// --- Issue #5563: create with a one-time password, enable/disable, membership ---
+
+const newUPN = "newbie@example.com"
+
+func newUserRes() stewardtypes.ResourceConfig {
+	return userRes("newbie", newUPN, map[string]interface{}{"display_name": "New Bie"})
+}
+
+func newbieKey() credentials.Key {
+	return credentials.Key{TenantID: "tenant-a", StewardID: "controller", ResourceID: "newbie"}
+}
+
+// createBody returns the decoded POST /users request body the fake Graph received.
+func createBody(t *testing.T, e *cvEnv, client string) map[string]any {
+	t.Helper()
+	for _, b := range e.gr.requestBodies(client) {
+		if rest, ok := strings.CutPrefix(b, "POST /users "); ok {
+			var body map[string]any
+			require.NoError(t, json.Unmarshal([]byte(rest), &body))
+			return body
+		}
+	}
+	t.Fatalf("no POST /users was made: %v", e.gr.requestBodies(client))
+	return nil
+}
+
+func TestM365Create_PasswordStoredBeforeSetAndForceChange(t *testing.T) {
+	e := newCvEnv(t, "tenant-a")
+	conn := e.connect("tenant-a", "app-a", guidA)
+	e.declare("tenant-a", apply(), newUserRes())
+	c := e.converger()
+
+	// At the moment Graph receives the create, the password is already stored.
+	var storedAtCreate string
+	e.gr.beforeCreate = func(string) {
+		cred, err := e.credStore.Get(context.Background(), newbieKey())
+		require.NoError(t, err)
+		storedAtCreate = cred.Password
+	}
+	c.Converge(context.Background(), conn)
+
+	assert.Equal(t, ConvergeStateCreated, e.outcomes(c, "tenant-a")["newbie"].State)
+	pp, ok := createBody(t, e, "app-a")["passwordProfile"].(map[string]any)
+	require.True(t, ok, "the create carries a password profile")
+	assert.Equal(t, true, pp["forceChangePasswordNextSignIn"])
+	sent, _ := pp["password"].(string)
+	require.NotEmpty(t, sent)
+	assert.Equal(t, sent, storedAtCreate, "the stored secret was the password Graph received, stored before the create")
+
+	cred, err := e.credStore.Get(context.Background(), newbieKey())
+	require.NoError(t, err)
+	assert.Equal(t, sent, cred.Password)
+	assert.Equal(t, credentials.StatePending, cred.State, "shown once, not yet revealed")
+	assert.True(t, createBody(t, e, "app-a")["accountEnabled"].(bool), "a created user is enabled unless declared otherwise")
+
+	// The next pass finds the user: no second create, no new password.
+	c.Converge(context.Background(), conn)
+	assert.Equal(t, 1, e.gr.creates[newUPN])
+	assert.Equal(t, ConvergeStateConverged, e.outcomes(c, "tenant-a")["newbie"].State)
+	_, err = e.creds.Issue(context.Background(), newbieKey())
+	assert.NoError(t, err, "the pending password is returned again until revealed")
+}
+
+func TestM365Create_StoreFailureCreatesNoUser(t *testing.T) {
+	e := newCvEnv(t, "tenant-a")
+	conn := e.connect("tenant-a", "app-a", guidA)
+	e.failCredSecrets = true
+	e.declare("tenant-a", apply(), newUserRes())
+	c := e.converger()
+
+	c.Converge(context.Background(), conn)
+
+	assert.Equal(t, ConvergeStateError, e.outcomes(c, "tenant-a")["newbie"].State)
+	assert.Zero(t, e.gr.creates[newUPN], "Graph was never asked to create the user")
+	assert.Empty(t, e.gr.tenant("app-a").users)
+	assert.Zero(t, e.gr.writeCount("app-a"))
+}
+
+func TestM365Create_AmbiguousFailureKeepsSecret(t *testing.T) {
+	e := newCvEnv(t, "tenant-a")
+	conn := e.connect("tenant-a", "app-a", guidA)
+	// Graph creates the user and the response is lost (a 5xx); the client's retry
+	// then meets a 4xx "already exists".
+	e.gr.createLost[newUPN] = true
+	e.declare("tenant-a", apply(), newUserRes())
+	c := e.converger()
+
+	c.Converge(context.Background(), conn)
+
+	assert.Equal(t, ConvergeStateError, e.outcomes(c, "tenant-a")["newbie"].State)
+	require.Len(t, e.gr.tenant("app-a").users, 1, "the user exists")
+	cred, err := e.credStore.Get(context.Background(), newbieKey())
+	require.NoError(t, err, "the credential is kept: the user may exist with that password")
+	sent, _ := createBody(t, e, "app-a")["passwordProfile"].(map[string]any)["password"].(string)
+	assert.Equal(t, sent, cred.Password)
+}
+
+func TestM365Create_DefiniteFailureDeletesSecret(t *testing.T) {
+	e := newCvEnv(t, "tenant-a")
+	conn := e.connect("tenant-a", "app-a", guidA)
+	e.gr.createStatus[newUPN] = http.StatusBadRequest
+	e.declare("tenant-a", apply(), newUserRes())
+	c := e.converger()
+
+	c.Converge(context.Background(), conn)
+
+	assert.Equal(t, ConvergeStateError, e.outcomes(c, "tenant-a")["newbie"].State)
+	assert.Empty(t, e.gr.tenant("app-a").users)
+	_, err := e.credStore.Get(context.Background(), newbieKey())
+	assert.ErrorIs(t, err, credentials.ErrNotFound, "the credential is deleted: no user holds that password")
+}
+
+func TestM365Create_MonitorModeDoesNotCreate(t *testing.T) {
+	e := newCvEnv(t, "tenant-a")
+	conn := e.connect("tenant-a", "app-a", guidA)
+	e.declare("tenant-a", monitor(), newUserRes())
+	c := e.converger()
+
+	c.Converge(context.Background(), conn)
+
+	assert.Equal(t, ConvergeStateAbsent, e.outcomes(c, "tenant-a")["newbie"].State)
+	assert.Zero(t, e.gr.creates[newUPN])
+	_, err := e.credStore.Get(context.Background(), newbieKey())
+	assert.ErrorIs(t, err, credentials.ErrNotFound, "no password is issued for a user that is not created")
+}
+
+func TestM365Update_NeverSendsPassword(t *testing.T) {
+	e := newCvEnv(t, "tenant-a")
+	conn := e.connect("tenant-a", "app-a", guidA)
+	e.gr.tenant("app-a").users[cvUserA] = &cgUser{ID: cvUserA, UPN: "alice@example.com", Name: "Drift", Enabled: true}
+	// A declaration that tries to carry a password through to an update.
+	e.declare("tenant-a", apply(), userRes("alice", "alice@example.com", map[string]interface{}{
+		"display_name": "Alice", "adopt": true,
+		"password_profile":      map[string]interface{}{"password": "Declared-Pw-1!", "force_change_password_next_signin": true},
+		"force_change_password": true,
+	}))
+	c := e.converger()
+
+	c.Converge(context.Background(), conn)
+
+	assert.Equal(t, ConvergeStateReverted, e.outcomes(c, "tenant-a")["alice"].State)
+	require.Equal(t, "Alice", e.gr.user("app-a", cvUserA).Name)
+	for _, b := range e.gr.requestBodies("app-a") {
+		assert.NotContains(t, strings.ToLower(b), "password", b)
+	}
+	_, err := e.credStore.Get(context.Background(), credentials.Key{TenantID: "tenant-a", StewardID: "controller", ResourceID: "alice"})
+	assert.ErrorIs(t, err, credentials.ErrNotFound, "no password is issued on update")
+}
+
+func TestEntraUser_EnableDisableOnly_ChangesAccountEnabled(t *testing.T) {
+	e := newCvEnv(t, "tenant-a")
+	conn := e.connect("tenant-a", "app-a", guidA)
+	e.gr.tenant("app-a").users[cvUserA] = &cgUser{ID: cvUserA, UPN: "alice@example.com", Name: "Alice", Dept: "Sales", Enabled: true}
+	c := e.converger()
+
+	for _, enabled := range []bool{false, true} {
+		e.declare("tenant-a", apply(), userRes("alice", "alice@example.com", map[string]interface{}{
+			"account_enabled": enabled, "adopt": true,
+		}))
+		before := len(e.gr.requestBodies("app-a"))
+		c.Converge(context.Background(), conn)
+
+		assert.Equal(t, enabled, e.gr.user("app-a", cvUserA).Enabled)
+		bodies := e.gr.requestBodies("app-a")[before:]
+		require.Len(t, bodies, 1, "one write")
+		assert.JSONEq(t, fmt.Sprintf(`{"accountEnabled":%t}`, enabled),
+			strings.TrimPrefix(bodies[0], "PATCH /users/"+cvUserA+" "), "no field but accountEnabled is sent")
+	}
+	user := e.gr.user("app-a", cvUserA)
+	assert.Equal(t, "Alice", user.Name)
+	assert.Equal(t, "Sales", user.Dept)
+}
+
+func TestEntraGroup_ConvergeMembersPresentAbsent_OnlyListedChange(t *testing.T) {
+	e := newCvEnv(t, "tenant-a")
+	conn := e.connect("tenant-a", "app-a", guidA)
+	td := e.gr.tenant("app-a")
+	for id, upn := range map[string]string{"u-a": "a@example.com", "u-b": "b@example.com", "u-c": "c@example.com"} {
+		td.users[id] = &cgUser{ID: id, UPN: upn, Name: upn, Enabled: true}
+	}
+	td.groups[cvGroupA] = &cgGroup{ID: cvGroupA, Name: "Staff", Members: []string{"b@example.com", "c@example.com"}}
+	e.declare("tenant-a", apply(), groupRes("staff", "Staff", map[string]interface{}{
+		"adopt": true, "members_present": []interface{}{"a@example.com"}, "members_absent": []interface{}{"b@example.com"},
+	}))
+	c := e.converger()
+
+	c.Converge(context.Background(), conn)
+
+	assert.Equal(t, ConvergeStateReverted, e.outcomes(c, "tenant-a")["staff"].State)
+	assert.ElementsMatch(t, []string{"c@example.com", "a@example.com"}, e.gr.group("app-a", cvGroupA).Members,
+		"c is declared nowhere and is left alone")
+
+	// Converged: nothing further is written.
+	writes := e.gr.writeCount("app-a")
+	c.Converge(context.Background(), conn)
+	assert.Equal(t, ConvergeStateConverged, e.outcomes(c, "tenant-a")["staff"].State)
+	assert.Equal(t, writes, e.gr.writeCount("app-a"))
+}
+
+func TestM365Password_NeverInLogsErrorsAuditOrExecutionStore(t *testing.T) {
+	e := newCvEnv(t, "tenant-a")
+	conn := e.connect("tenant-a", "app-a", guidA)
+	// A rejected create whose Graph error echoes the request body, password included.
+	e.gr.createStatus["bad@example.com"] = http.StatusBadRequest
+	e.gr.echoBody = true
+	e.declare("tenant-a", apply(), newUserRes(),
+		userRes("bad", "bad@example.com", map[string]interface{}{"display_name": "Bad"}))
+	c := e.converger()
+	var issued []string
+	e.gr.beforeCreate = func(upn string) {
+		key := credentials.Key{TenantID: "tenant-a", StewardID: "controller", ResourceID: map[string]string{newUPN: "newbie", "bad@example.com": "bad"}[upn]}
+		cred, err := e.credStore.Get(context.Background(), key)
+		require.NoError(t, err)
+		issued = append(issued, cred.Password)
+	}
+
+	c.Converge(context.Background(), conn)
+
+	require.Len(t, issued, 2)
+	out := e.outcomes(c, "tenant-a")
+	require.Equal(t, ConvergeStateCreated, out["newbie"].State)
+	require.Equal(t, ConvergeStateError, out["bad"].State)
+
+	ctx := context.Background()
+	require.NoError(t, e.audit.Flush(ctx))
+	entries, err := e.audit.QueryEntries(ctx, &business.AuditFilter{TenantID: "tenant-a"})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries)
+
+	var surfaces []string
+	st, _, err := c.Status(ctx, "tenant-a")
+	require.NoError(t, err)
+	surfaces = append(surfaces, fmt.Sprintf("%+v", st))
+	for _, en := range entries {
+		surfaces = append(surfaces, fmt.Sprintf("%+v", *en))
+	}
+	for _, w := range e.logger.WarnEntries {
+		surfaces = append(surfaces, fmt.Sprint(w))
+	}
+	surfaces = append(surfaces, e.logger.WarnMessages...)
+	for _, o := range e.writer.obs {
+		surfaces = append(surfaces, fmt.Sprintf("%+v", o))
+	}
+	// Every config store the controller holds: the loop's own, and the one that
+	// carries effective configuration. The loop calls the module directly, so no
+	// workflow execution store is written at all.
+	for _, store := range []cfgconfig.ConfigStore{e.store, e.svc.GetConfigStore()} {
+		for _, tenant := range []string{"tenant-a", m365ManifestTenant} {
+			list, err := store.ListConfigs(ctxkeys.WithSystem(ctx), &cfgconfig.ConfigFilter{TenantID: tenant})
+			require.NoError(t, err)
+			for _, entry := range list {
+				surfaces = append(surfaces, entry.Key.Name+" "+string(entry.Data))
+			}
+		}
+	}
+	for _, pw := range issued {
+		require.NotEmpty(t, pw)
+		for _, s := range surfaces {
+			assert.NotContains(t, s, pw)
+		}
+	}
+	assert.Contains(t, e.gr.lastEchoed, "rejected", "the fake Graph did echo the body into its error")
+}
+
+func TestM365Write_AuditedUnderDeclaredResourceID(t *testing.T) {
+	e := newCvEnv(t, "tenant-a")
+	conn := e.connect("tenant-a", "app-a", guidA)
+	e.gr.tenant("app-a").users[cvUserB] = &cgUser{ID: cvUserB, UPN: "bob@example.com", Name: "Bob", Enabled: true}
+	e.declare("tenant-a", apply(),
+		newUserRes(),
+		userRes("bob-declared", "bob@example.com", map[string]interface{}{"account_enabled": false, "adopt": true}),
+		groupRes("staff-declared", "Staff", map[string]interface{}{"members_present": []interface{}{"bob@example.com"}}))
+	c := e.converger()
+
+	c.Converge(context.Background(), conn)
+
+	ctx := context.Background()
+	require.NoError(t, e.audit.Flush(ctx))
+	entries, err := e.audit.QueryEntries(ctx, &business.AuditFilter{TenantID: "tenant-a"})
+	require.NoError(t, err)
+	got := map[string]string{}
+	for _, en := range entries {
+		got[en.ResourceID] = en.Action
+		assert.Equal(t, business.AuditResultSuccess, en.Result)
+		assert.NotContains(t, fmt.Sprint(en.Details), cvUserB)
+	}
+	assert.Equal(t, map[string]string{"newbie": "create", "bob-declared": "update", "staff-declared": "create"}, got,
+		"each write is audited under the cfg-declared resource id")
+}
+
+func TestM365Create_TypedConfigAsMapOmitsPassword(t *testing.T) {
+	const pw = "Sup3r-secret-Pw!"
+	state := map[string]interface{}{
+		"tenant_id": guidA, "user_principal_name": newUPN, "display_name": "Newbie",
+		"mail_nickname": "newbie", "account_enabled": true,
+		"managed_fields": []string{"display_name", "account_enabled"},
+	}
+	cfg := userCreateConfig(state, pw)
+
+	m := cfg.AsMap()
+	assert.NotContains(t, fmt.Sprint(m), pw, "AsMap exposes no password")
+	profile, ok := m["password_profile"].(map[string]interface{})
+	require.True(t, ok)
+	assert.NotContains(t, profile, "password")
+	assert.Equal(t, true, profile["force_change_password_next_signin"])
+	assert.Equal(t, pw, cfg.SignInProfile.Password, "the typed config still carries it to Set")
 }

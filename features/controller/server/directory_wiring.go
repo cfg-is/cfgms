@@ -9,6 +9,7 @@ import (
 	"time"
 
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
+	"github.com/cfgis/cfgms/features/controller/credentials"
 	"github.com/cfgis/cfgms/features/controller/directory"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/workflow"
@@ -152,6 +153,7 @@ type m365ConvergeDeps struct {
 	Writer      directory.ObservationWriter
 	ConfigStore cfgconfig.ConfigStore
 	Audit       *audit.Manager
+	Credentials *credentials.Service // nil: a missing user is not created
 	Logger      logging.Logger
 }
 
@@ -175,6 +177,9 @@ func attachM365Convergence(d m365ConvergeDeps) error {
 	}
 	if d.Audit != nil {
 		cfg.Audit = d.Audit
+	}
+	if d.Credentials != nil {
+		cfg.Credentials = d.Credentials
 	}
 	conv, err := directory.NewM365Converge(cfg)
 	if err != nil {

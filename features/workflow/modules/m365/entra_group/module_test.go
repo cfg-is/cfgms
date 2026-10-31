@@ -4,8 +4,13 @@ package entra_group
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1447,4 +1452,94 @@ func TestEntraGroupModule_TenantIsolation(t *testing.T) {
 		assert.Equal(t, "Group B", cfg.DisplayName)
 		assert.Contains(t, f.tokensUsed, "tok-b")
 	})
+}
+
+// TestEntraGroup_MembersPresentAbsent_OnlyListedChange drives Set against a Graph
+// server that holds real membership state: only the UPNs named in members_present
+// and members_absent change, and a member named in neither stays.
+func TestEntraGroup_MembersPresentAbsent_OnlyListedChange(t *testing.T) {
+	var mu sync.Mutex
+	members := []string{"alice@example.com", "bob@example.com", "carol@example.com"}
+	var mutations []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		mu.Lock()
+		defer mu.Unlock()
+		path := r.URL.Path
+		switch {
+		case r.Method == http.MethodGet && path == "/groups/grp-1":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "grp-1", "displayName": "Team A", "mailNickname": "teama", "securityEnabled": true})
+		case r.Method == http.MethodGet && path == "/groups/grp-1/members":
+			out := []map[string]interface{}{}
+			for _, m := range members {
+				out = append(out, map[string]interface{}{"id": "id-" + m, "userPrincipalName": m})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": out})
+		case r.Method == http.MethodGet && strings.HasPrefix(path, "/users/"):
+			upn := strings.TrimPrefix(path, "/users/")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": "id-" + upn, "userPrincipalName": upn})
+		case r.Method == http.MethodPost && path == "/groups/grp-1/members/$ref":
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			id := body["@odata.id"][strings.LastIndex(body["@odata.id"], "/")+1:]
+			members = append(members, strings.TrimPrefix(id, "id-"))
+			mutations = append(mutations, "add "+strings.TrimPrefix(id, "id-"))
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && strings.HasPrefix(path, "/groups/grp-1/members/"):
+			id := strings.TrimSuffix(strings.TrimPrefix(path, "/groups/grp-1/members/"), "/$ref")
+			upn := strings.TrimPrefix(id, "id-")
+			var kept []string
+			for _, m := range members {
+				if !strings.EqualFold(m, upn) {
+					kept = append(kept, m)
+				}
+			}
+			members = kept
+			mutations = append(mutations, "remove "+strings.ToLower(upn))
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"Request_ResourceNotFound","message":"not found"}}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	token := &auth.AccessToken{Token: "tok", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Hour), TenantID: "m365-tenant"}
+	m := &entraGroupModule{
+		authProvider: &stubEntraGroupAP{token: token},
+		graphClient:  graph.NewHTTPClient(graph.WithBaseURL(srv.URL), graph.WithHTTPClient(srv.Client())),
+	}
+
+	cfg := &EntraGroupConfig{
+		DisplayName: "Team A", MailNickname: "teama", SecurityEnabled: true, TenantID: "m365-tenant",
+		// alice is already a member and BOB@ differs only in case; dave is new.
+		MembersPresent:    []string{"alice@example.com", "dave@example.com"},
+		MembersAbsent:     []string{"BOB@example.com", "erin@example.com"},
+		ManagedFieldsList: []string{"members_present", "members_absent"},
+	}
+	require.NoError(t, m.Set(ctxForTenant("cfgms-t"), "m365-tenant:grp-1", cfg))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.ElementsMatch(t, []string{"remove bob@example.com", "add dave@example.com"}, mutations,
+		"only the listed members that differ change")
+	assert.ElementsMatch(t, []string{"alice@example.com", "carol@example.com", "dave@example.com"}, members,
+		"carol is named in neither list and stays; membership is never synced to an exact set")
+
+	// Absent from managed_fields, the lists do nothing.
+	mutations = nil
+	cfg.ManagedFieldsList = []string{"display_name"}
+	cfg.MembersAbsent = []string{"carol@example.com"}
+	mu.Unlock()
+	require.NoError(t, m.Set(ctxForTenant("cfgms-t"), "m365-tenant:grp-1", cfg))
+	mu.Lock()
+	assert.Empty(t, mutations)
+}
+
+func TestEntraGroup_MemberListedPresentAndAbsentIsInvalid(t *testing.T) {
+	cfg := &EntraGroupConfig{
+		DisplayName: "Team A", MailNickname: "teama", TenantID: "t",
+		MembersPresent: []string{"alice@example.com"}, MembersAbsent: []string{"Alice@example.com"},
+	}
+	assert.ErrorContains(t, cfg.Validate(), "both members_present and members_absent")
 }
