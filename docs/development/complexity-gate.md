@@ -169,10 +169,26 @@ The ratchet baseline moves with every improvement; `frozen.json` records where t
 
 A manifest change is repaired with `make complexity-ratchet`, which skips the staleness check (it is the remedy) and goes straight to the gate. If `schema_version`, `analyzer_version` or `hotspot_threshold` differ, counts are not comparable and the ratchet refuses with `counting rules changed: delete baselines/ratchet.json in a reviewed diff and run make complexity-ratchet COMPLEXITY_INIT=1`.
 
+## CI and anti-gaming
+
+### Where the gate runs
+
+- `make test-commit` runs `complexity-check` locally.
+- The `complexity-gate` job in `.github/workflows/test-suite.yml` runs `make complexity-check` on every `pull_request` and `merge_group`, with a full-history checkout and no path filter. The `unit-tests` aggregator lists it in `needs:` and checks its result before the docs-only exit, so a docs-only pull request cannot skip it.
+- In the merge queue the job runs and posts its own `complexity-gate` context, but blocking is pull-request-side only, through the aggregator. The context is not in the branch ruleset's required checks.
+
+### Moving the ratchet in CI
+
+If develop moves while a pull request is queued and `make complexity-check` then fails against the committed baseline, delete `baselines/ratchet.json` and run `make complexity-ratchet COMPLEXITY_INIT=1` in the same pull request. There is no other baseline-writing path.
+
+### Protected paths
+
+`scripts/complexity/manifest.json`, `scripts/complexity/baselines/` and the tooling under `scripts/complexity/` are protected against quiet edits by three controls: the CLAUDE.md scope constraints, a `CODEOWNERS` entry for `/scripts/complexity/`, and an acceptance-reviewer rule that lists every changed path there and treats a manifest or baseline edit as a finding unless the story names it. The `CODEOWNERS` entry adds specificity but no new reviewer, because the default `*` entry already names the same owner.
+
 ### Concurrency
 
 Two pull requests that both move `ratchet.json` conflict textually. The merge queue rebases the second, and `check` then re-runs against the new baseline.
 
 ## Limits
 
-Blocking is evaluated per pull request; two pull requests that each pass alone can together move P95 effort past the ratchet, and the develop-side run surfaces it.
+Blocking is evaluated per pull request; the merge queue can, in principle, let two pull requests merge that each pass alone but together worsen P95 effort. The develop-side run surfaces it.

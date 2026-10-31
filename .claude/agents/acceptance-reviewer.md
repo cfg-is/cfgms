@@ -264,6 +264,8 @@ Review the PR diff for:
 
    Any newly-introduced match outside of a `// Deferred: tracked in #NNN — ...` annotation is a finding (catches agents shipping fresh stubs). Severity: **High** if the matched file is named by the story AC; **Medium** otherwise. A Deferred annotation must reference an open issue labeled `story` or `epic` — closed-issue references are themselves a Medium finding.
 
+6. **Complexity gate protection** — `gh pr diff <PR_NUM> --name-only` and list in the review comment every changed path under `scripts/complexity/`. A diff that edits `scripts/complexity/manifest.json` or anything under `scripts/complexity/baselines/` is a finding unless the story body names that edit (a finding forces manual `/pr-review`).
+
    Pre-existing markers in unchanged lines are out of scope for this scan — they're handled by the sweep story (#1430) and by Phase 3's file-state check for AC-named files.
 
 ### Capability-tag consistency (informational — NEVER a blocking finding)
