@@ -30,6 +30,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/cluster"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
+	initialcreds "github.com/cfgis/cfgms/features/controller/credentials"
 	"github.com/cfgis/cfgms/features/controller/directory"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/health"
@@ -202,6 +203,8 @@ type Server struct {
 	telemetryHandler                http.Handler                             // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter             egConfigstoreIngestor                    // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
 	egProvider                      egReadProvider                           // Issue #2880: entity graph read API
+	credentialStore                 initialcreds.CredentialStore             // Issue #5559: one-time initial-password reveal (nil when unwired)
+	credentialClock                 func() time.Time                         // tests only: clock for the reveal API (nil = time.Now)
 	directoryMembership             directory.MembershipStore                // Issue #5557: durable directory membership (nil when unwired)
 	egWriter                        egWriteProvider                          // Issue #3374: operator edge assertion write path
 	terminalHandler                 http.Handler                             // Issue #2761: terminal WebSocket relay handler
@@ -2427,6 +2430,15 @@ func (s *Server) SetDirectoryMembershipStore(store directory.MembershipStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.directoryMembership = store
+}
+
+// SetCredentialStore wires the one-time initial-password store behind the
+// /api/v1/directory/credentials routes (Issue #5559). When nil (default) they
+// return 503.
+func (s *Server) SetCredentialStore(store initialcreds.CredentialStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.credentialStore = store
 }
 
 // SetEntityGraphWriteProvider wires the entity graph write provider into the REST

@@ -1980,6 +1980,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		if cfg.Directory != nil {
 			credOpts = append(credOpts, credentials.WithTTL(cfg.Directory.InitialCredentialTTL.AsDuration()))
 		}
+		httpServer.SetCredentialStore(credStore) // Issue #5559: one-time reveal API
 		var credSvcErr error
 		credentialService, credSvcErr = credentials.NewService(credStore, credentials.ConfigBindingChecker{Store: cs}, logger, credOpts...)
 		if credSvcErr != nil {

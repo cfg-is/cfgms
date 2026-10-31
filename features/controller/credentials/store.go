@@ -43,6 +43,11 @@ const (
 	DefaultTTL = 72 * time.Hour
 
 	// MaxPendingPerSteward and MaxPendingPerTenant bound un-revealed records.
+	// RevealStaleAfter is how long a record may sit in revealing, with its secret
+	// still present, before another reveal may claim it again: the first revealer
+	// is presumed to have crashed before the secret was deleted.
+	RevealStaleAfter = 60 * time.Second
+
 	MaxPendingPerSteward = 1000
 	MaxPendingPerTenant  = 1000
 )
@@ -109,6 +114,10 @@ type Record struct {
 	CreatedAt  time.Time `json:"created_at"`
 	ExpiresAt  time.Time `json:"expires_at"`
 	State      State     `json:"state"`
+	// StateChangedAt is when Claim last moved the record between states; zero for a
+	// record never claimed. The reveal API reads it to tell a reveal in progress
+	// from one that crashed (RevealStaleAfter).
+	StateChangedAt time.Time `json:"state_changed_at,omitempty"`
 }
 
 // Key returns the record's identity.
@@ -406,6 +415,7 @@ func (s *store) Claim(ctx context.Context, key Key, id string, from, to State) (
 			return nil, ErrConflict
 		}
 		rec.State = to
+		rec.StateChangedAt = s.now().UTC()
 		updated = rec
 		return encode(rec)
 	})

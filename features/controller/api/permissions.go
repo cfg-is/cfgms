@@ -195,6 +195,12 @@ var knownPermissions = map[string]bool{
 	// Directory read API (Issue #5557): users, groups, members and membership changes
 	// served from stored DNA and the membership store; reads only.
 	"directory:read": true,
+	// One-time initial-password reveal (Issue #5559): credential-list shows the pending
+	// records (never a value); credential-reveal returns a password once and carries a
+	// Strong floor plus a per-action passkey tap (see permissionAssurance). Only the
+	// admin role is granted them.
+	"directory:credential-list":   true,
+	"directory:credential-reveal": true,
 	// Entity graph operator edge assertion (Issue #3374): gates POST /entities/edges,
 	// the only mutating entity-graph route. It must be listed here so a least-privilege
 	// API key or account can actually hold it — otherwise handleCreateAPIKey and the

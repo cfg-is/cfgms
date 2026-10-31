@@ -181,6 +181,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// (read surface, mirroring credential-request:list / cert-binding:list).
 	{"POST", "/api/v1/enrolment-tokens/test-token-id/revoke-issued-credentials", "enrolment-token:revoke-issued"},
 	{"POST", "/api/v1/credential-requests/test-request-id/cancel", "credential-request:cancel"},
+	// One-time initial-password reveal (Issue #5559): Strong plus a passkey tap; the list
+	// route (directory:credential-list) is intentionally absent, no elevated floor.
+	{"POST", "/api/v1/directory/credentials/0123456789abcdef0123456789abcdef/reveal", "directory:credential-reveal"},
 	{"POST", "/api/v1/credential-requests/orphaned/testserial/revoke", "credential-request:revoke-orphaned"},
 	// Browser-authenticated CLI login approval (Issue #3721, Epic #3711) — mints a
 	// cfg-CLI Bearer session for the approving principal; AssuranceStrong mirrors

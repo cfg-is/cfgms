@@ -381,6 +381,7 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"credential-request:approve":          true, // Issue #3718: decides the marker set/account binding for a credential
 		"hyperv-profile:create":               true, // Issue #3785: rendered and executed as root at guest first boot
 		"hyperv-profile:delete":               true, // Issue #3785: mirrors module:approve/module:reject
+		"directory:credential-reveal":         true, // Issue #5559: returns a password once, per-action tap
 		"steward:execute-scripts":             true, // Issue #5416: per-action tap, cancel and inline command exempt
 		"script:admin":                        true, // Issue #5416: per-action tap, reads exempt
 		"refresh:set-policy":                  true, // Issue #5419: can switch a tenant to auto_accept

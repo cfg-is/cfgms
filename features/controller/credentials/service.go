@@ -101,6 +101,9 @@ func NewService(store CredentialStore, bindings BindingChecker, logger logging.L
 	return s, nil
 }
 
+// Store returns the CredentialStore the service issues from, for the reveal API.
+func (s *Service) Store() CredentialStore { return s.store }
+
 // Issue returns the initial password for key, generating it the first time.
 //
 //   - none yet, or expired: a new password is issued;

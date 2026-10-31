@@ -269,6 +269,12 @@ var permissionAssurance = map[string]Requirement{
 	"hyperv-profile:create": {Min: session.AssuranceStrong, RequireUserPresence: true},
 	"hyperv-profile:delete": {Min: session.AssuranceStrong, RequireUserPresence: true},
 
+	// One-time initial-password reveal (Issue #5559). The reveal returns a credential and
+	// destroys it, so it needs Strong and a fresh passkey tap, and no API key may use it
+	// (AllowMachine false, stated for the reader). directory:credential-list shows only
+	// record metadata and is intentionally absent: no elevated floor.
+	"directory:credential-reveal": {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: false},
+
 	// Installer and upgrade actions (Issue #5298): a human session needs a per-action passkey
 	// tap; scoped API keys keep working for automation (AllowMachine).
 	// config:push (Issue #5419) gates POST /api/v1/config/push and GET /api/v1/config/push/{id};
