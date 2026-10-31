@@ -8,6 +8,9 @@
 // function. The report subcommand partitions the measured population into the
 // manifest's segments and writes the versioned metric file.
 //
+// The check subcommand enforces the no-worsening rules against a ratchet
+// baseline and the merge-base tree (see docs/development/complexity-gate.md).
+//
 // Exit codes: 0 = ok, 1 = partition or duplicate-identity violation,
 // 2 = usage, IO or parse error.
 package main
@@ -25,6 +28,9 @@ import (
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "report" {
 		os.Exit(reportCmd(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "check" {
+		os.Exit(checkCmd(os.Args[2:], os.Stdout, os.Stderr))
 	}
 	root := flag.String("root", ".", "repository root to analyse")
 	flag.Parse()
