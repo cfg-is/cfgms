@@ -265,8 +265,8 @@ func TestSetUser_RenamedAndReplaced_Refused(t *testing.T) {
 	require.NoError(t, converge(t, m, r))
 	bound, _ := d.Lookup("jdoe")
 
-	// The bound object is deleted outside CFGMS (simulated by renaming it out
-	// of reach and dropping it) and a new object takes the name.
+	// The bound object is deleted outside CFGMS (the fake directory drops it,
+	// which is how an out-of-band delete looks to the module)
 	d.mu.Lock()
 	delete(d.objects, bound)
 	d.mu.Unlock()
