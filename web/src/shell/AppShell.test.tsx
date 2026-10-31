@@ -3,7 +3,7 @@
 
 import { useEffect, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { AuthProvider, useAuth } from '../auth/AuthContext.tsx'
 import FleetOverview from '../fleet/FleetOverview.tsx'
@@ -56,6 +56,31 @@ function renderShell() {
 }
 
 describe('AppShell', () => {
+  it('shows the Directory entry only when directory:read is proven', async () => {
+    fetchMock.mockImplementation((input) =>
+      Promise.resolve(
+        String(input).startsWith('/api/v1/directory/')
+          ? new Response('{}', { status: 403 })
+          : new Response(
+              JSON.stringify({ data: { stewards: [], total: 0, limit: 50, offset: 0 }, timestamp: 't' }),
+              { status: 200 },
+            ),
+      ),
+    )
+    renderShell()
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith('/api/v1/directory/'))).toBe(true),
+    )
+    expect(screen.queryByRole('link', { name: 'Directory' })).toBeNull()
+  })
+
+  it('lists Directory with Users and Groups links when access is granted', async () => {
+    renderShell()
+    expect(await screen.findByRole('link', { name: 'Directory' })).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Users' }).getAttribute('href')).toBe('/directory/users')
+    expect(screen.getByRole('link', { name: 'Groups' }).getAttribute('href')).toBe('/directory/groups')
+  })
+
   it('renders sidebar navigation with Fleet, Modules, Config, Workflows, Scripts, Registration, Reports, Audit, and Accounts as links', () => {
     renderShell()
     expect(screen.getByRole('navigation')).toBeInTheDocument()

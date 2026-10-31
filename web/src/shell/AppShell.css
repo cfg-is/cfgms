@@ -115,6 +115,10 @@ nav a {
   font-size: var(--text-base);
   cursor: pointer;
 }
+nav a.nav-sub {
+  padding-left: var(--space-5);
+  font-size: var(--text-sm);
+}
 nav a.active {
   background: var(--tint-blue);
   color: var(--accent);

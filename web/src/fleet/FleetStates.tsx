@@ -8,9 +8,9 @@
  * the filter/scope").
  */
 
-export function LoadingRows() {
+export function LoadingRows({ label = 'Loading stewards' }: { label?: string } = {}) {
   return (
-    <div data-testid="fleet-loading" aria-label="Loading stewards">
+    <div data-testid="fleet-loading" aria-label={label}>
       {Array.from({ length: 6 }, (_, i) => (
         <div className="skrow" key={i}>
           <span className="skel" style={{ width: '75%' }} />
@@ -27,15 +27,17 @@ export function LoadingRows() {
 export function ErrorNotice({
   detail,
   onRetry,
+  message = 'The fleet list request failed. Check your connection and try again.',
 }: {
   detail: string
   onRetry: () => void
+  message?: string
 }) {
   return (
     <div className="notice err" role="alert">
       <div className="ic">!</div>
       <h3>Couldn&apos;t reach the controller</h3>
-      <p>The fleet list request failed. Check your connection and try again.</p>
+      <p>{message}</p>
       <span className="mono detail">{detail}</span>
       <button type="button" className="btn" onClick={onRetry}>
         Retry

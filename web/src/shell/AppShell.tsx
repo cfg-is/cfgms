@@ -11,7 +11,7 @@
  * the route table.
  */
 import { useEffect, useState } from 'react'
-import { NavLink, Outlet } from 'react-router'
+import { NavLink, Outlet, useLocation } from 'react-router'
 import { TenantScopeProvider } from './TenantScopeContext.tsx'
 import TenantSwitcher from './TenantSwitcher.tsx'
 import GlobalSearch from './GlobalSearch.tsx'
@@ -21,6 +21,7 @@ import ControllerChip from './ControllerChip.tsx'
 import ElevationBanner from './ElevationBanner.tsx'
 import { useActiveCrossings } from './useActiveCrossings.ts'
 import { useAuth } from '../auth/AuthContext.tsx'
+import { probeDirectoryAccess } from '../directory/directoryApi.ts'
 import './AppShell.css'
 
 /** Context type exposed to outlet children via useOutletContext. */
@@ -56,6 +57,20 @@ export default function AppShell() {
   const [search, setSearch] = useState('')
   const { crossings, refresh } = useActiveCrossings()
   const isRoot = principal?.rootScope === true
+  const location = useLocation()
+  const inDirectory = location.pathname.startsWith('/directory/')
+  // Directory entry shows only when directory:read is proven (Issue #5565).
+  const [directoryAccess, setDirectoryAccess] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    probeDirectoryAccess().then((ok) => {
+      if (!cancelled) setDirectoryAccess(ok)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [principal?.username, principal?.tenantId])
 
   useEffect(() => {
     document.body.classList.toggle('drawer', drawerOpen)
@@ -122,6 +137,23 @@ export default function AppShell() {
                   {item.label}
                 </NavLink>
               ),
+            )}
+            {directoryAccess && (
+              <>
+                <NavLink
+                  to="/directory/users"
+                  className={inDirectory ? 'active' : ''}
+                  end
+                >
+                  Directory
+                </NavLink>
+                <NavLink to="/directory/users" className="nav-sub">
+                  Users
+                </NavLink>
+                <NavLink to="/directory/groups" className="nav-sub">
+                  Groups
+                </NavLink>
+              </>
             )}
           </nav>
         </aside>
