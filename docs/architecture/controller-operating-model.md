@@ -765,6 +765,55 @@ only when the controller's `dnasync.ClusterMembership` verifier corroborates the
 peer's claimed cluster membership from controller-side state — an unset verifier
 denies every cluster claim and the VM is recorded under its reporting host instead.
 
+#### Bulk lane (per-object fragments)
+
+Per-object fragments (one per directory user or group, for example) travel on a
+second lane, separate from the host lane above (Issue #5554). The steward reports
+`dna_bulk_root` on the heartbeat Metrics side-channel; `Server.Start` wires it
+through `heartbeat.Service.SetOnBulkRoot` to `DNAHandler.HandleHeartbeatBulkRoot`.
+The stored side is `transport.BulkManifestStore`, a durable manifest sharded into
+256 buckets per steward, wired with `DNAHandler.WithPartialSync` and the signed
+command publisher.
+
+A heartbeat whose bulk root differs from the stored one starts a round on the
+node that received it. Each step is triggered by the previous reply:
+
+1. `bulk=buckets` — the steward returns its 256 bucket roots. They must hash to
+   the heartbeat root. The controller compares them to the stored bucket roots.
+2. `bulk=manifest` — for the differing buckets, 16 at a time. Each bucket's
+   entries must hash to the root the steward advertised for it. The diff yields
+   changed or new ids and removed ids.
+3. `bulk=fragments` — changed and new ids in batches of at most 2,000. Every
+   fragment is re-hashed from its canonical bytes and must match the manifest
+   hash the steward declared. For each verified batch the directory membership
+   sink (`MembershipSink.ApplyBatch`) runs first, then the manifest commit, then
+   the entity-graph write. A sink failure leaves the batch uncommitted; the next
+   round re-diffs and fetches it again, with no pending marker.
+4. After the last batch the controller recomputes the bulk root from the stored
+   manifest minus the removed ids. It must equal the heartbeat root. Only then
+   are removed ids passed to the sink, retracted from the entity graph
+   (`Writer.RetractFragments`, which withdraws only this reporter's assertions
+   and leaves another reporter's observation of the same entity), and deleted
+   from the store. A mismatch commits nothing beyond the batches already
+   verified, and the next heartbeat retries.
+
+Bounds. A steward can force at most one round per 60 seconds and 20 per hour, and
+one round runs at a time per steward. A round with no progress for 60 seconds is
+replaced by the next heartbeat; this is how a round abandoned by a reconnect to
+another node ends. Commands go only to the node that received the heartbeat.
+A fragment is accepted only if its id was requested in the current batch, its
+kind prefix is a per-object kind owned by an approved manifest
+(`ListPerObjectKinds`, from `moduleManifestAdapter`), and it fits 2,000 fragments
+and 8 MiB per delta, 1 MiB per fragment and 250,000 stored per steward. A missing
+or failing kind lookup, or an unknown steward tenant, starts no round (fail
+closed). Fragments of directory kinds reach the sink only when the directory
+authority verifier accepts the peer for the fragment's domain.
+
+The host lane is unchanged and off: `HandleHeartbeatRoot` starts no round unless
+`DNAHandler.WithHostPartialSync(true)` is called, and the host-lane caps
+(`maxDNATransferFragments`, `maxDeltaFragments`, `maxDNAFragmentBytes`,
+`maxDeltaCanonicalBytes`, `maxDeltaStreamBytes`) keep their values.
+
 Controller startup also constructs two further entity-graph writers against the
 same provider (Issue #4413): `pkg/entitygraph/writers/tenantsync.Writer` mirrors
 the tenant hierarchy as `tenant:*` entities and `contains` edges (ADR-022 §7),

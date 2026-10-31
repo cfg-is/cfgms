@@ -84,6 +84,13 @@ type HeartbeatReceivedCallback func(stewardID string)
 // mTLS-verified steward identity, never take it from the heartbeat.
 type FragmentRootCallback func(ctx context.Context, stewardID, claimedRoot string)
 
+// BulkRootCallback is called whenever a heartbeat carries a non-empty DNABulkRoot,
+// the aggregate root over the steward's per-object (bulk-lane) fragments. The
+// receiver compares it to the stored bulk root and runs a bulk round on mismatch.
+// Optional — nil disables bulk-lane detection. As with FragmentRootCallback the
+// claimed tenant is deliberately not passed.
+type BulkRootCallback func(ctx context.Context, stewardID, claimedRoot string)
+
 // TrustEvaluator receives liveness signals from the heartbeat service and
 // decides whether an IP should be promoted to trusted status (Issue #1694).
 // The implementation (e.g. IPTrustEvaluator via the server.go adapter) is
@@ -115,6 +122,7 @@ type Service struct {
 	onDNAHashMismatch   DNAHashMismatchCallback
 	onHeartbeatReceived HeartbeatReceivedCallback
 	onFragmentRoot      FragmentRootCallback
+	onBulkRoot          BulkRootCallback
 
 	// Trust evaluator for IP-trust establishment (Issue #1694). Optional — nil disables.
 	trustEvaluator TrustEvaluator
@@ -167,6 +175,9 @@ type Config struct {
 	// root and requests a fragment delta on mismatch (ADR-017 §7). Optional.
 	OnFragmentRoot FragmentRootCallback
 
+	// OnBulkRoot is called whenever a heartbeat carries a non-empty DNABulkRoot.
+	OnBulkRoot BulkRootCallback
+
 	// TrustEvaluator receives healthy/unhealthy liveness signals so the
 	// IP-trust establishment gate (Issue #1694) can promote IPs to trusted
 	// status after sustained liveness. Optional — nil disables.
@@ -209,6 +220,7 @@ func New(cfg *Config) (*Service, error) {
 		onDNAHashMismatch:     cfg.OnDNAHashMismatch,
 		onHeartbeatReceived:   cfg.OnHeartbeatReceived,
 		onFragmentRoot:        cfg.OnFragmentRoot,
+		onBulkRoot:            cfg.OnBulkRoot,
 		trustEvaluator:        cfg.TrustEvaluator,
 		ctx:                   ctx,
 		cancel:                cancel,
@@ -328,6 +340,13 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 	// Fire fragment-root callback for partial-sync detection (ADR-017 §7).
 	if hb.DNAAggregateRoot != "" && s.onFragmentRoot != nil {
 		s.onFragmentRoot(ctx, hb.StewardID, hb.DNAAggregateRoot)
+	}
+
+	// Fire bulk-root callback for the per-object lane. The root arrives on the
+	// heartbeat Metrics side-channel (dna_bulk_root) and is lifted onto
+	// hb.DNABulkRoot by the control-plane provider's heartbeat conversion.
+	if hb.DNABulkRoot != "" && s.onBulkRoot != nil {
+		s.onBulkRoot(ctx, hb.StewardID, hb.DNABulkRoot)
 	}
 
 	// Notify the trust evaluator of a healthy liveness event (Issue #1694).
@@ -480,6 +499,14 @@ func (s *Service) SetOnDNAHashMismatch(cb DNAHashMismatchCallback) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onDNAHashMismatch = cb
+}
+
+// SetOnBulkRoot registers the callback that fires when a heartbeat carries a
+// non-empty DNABulkRoot. Same late-wiring pattern as SetOnFragmentRoot.
+func (s *Service) SetOnBulkRoot(cb BulkRootCallback) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onBulkRoot = cb
 }
 
 // SetOnFragmentRoot registers the callback that fires when a heartbeat carries

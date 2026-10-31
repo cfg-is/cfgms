@@ -10,6 +10,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"google.golang.org/grpc"
@@ -22,6 +23,7 @@ import (
 	common "github.com/cfgis/cfgms/api/proto/common"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/controller/commands"
+	"github.com/cfgis/cfgms/features/controller/directory"
 	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dptypes "github.com/cfgis/cfgms/pkg/dataplane/types"
@@ -148,6 +150,22 @@ type DNAHandler struct {
 	// HandleGRPC falls back to the wire value (test / degenerate; production
 	// always wires it in server.go).
 	tenantResolver StewardTenantResolver
+
+	// hostPartialSync gates the host-lane partial sync in HandleHeartbeatRoot. It
+	// defaults to false: the host lane stays off until it is enabled explicitly.
+	hostPartialSync bool
+
+	// Bulk lane (dna_bulk_round.go). bulkRounds holds the in-progress round per
+	// steward, verifiedBulkRoots the last bulk root a completed round verified.
+	bulkKinds         PerObjectKindLister
+	membershipSink    directory.MembershipSink
+	directoryAuth     dnasync.DirectoryAuthority
+	bulkRounds        sync.Map // stewardID -> *bulkRound
+	verifiedBulkRoots sync.Map // stewardID -> string
+	bulkLimiter       roundLimiter
+	bulkSweepMu       sync.Mutex
+	bulkSweptAt       time.Time
+	now               func() time.Time // test clock; nil uses time.Now
 }
 
 // deltaRequest is the controller-side record of one outstanding partial-sync
@@ -289,6 +307,13 @@ func (h *DNAHandler) HandleHeartbeatRoot(ctx context.Context, stewardID, claimed
 	}
 	if storedRoot == claimedRoot {
 		h.logger.Debug("partial-sync: root matches; no sync needed", "steward_id", safeStewardID)
+		return
+	}
+
+	// The host lane is off unless explicitly enabled: the store may hold the bulk
+	// manifest, whose root never equals a host root.
+	if !h.hostPartialSync {
+		h.logger.Debug("partial-sync: host lane disabled; no round started", "steward_id", safeStewardID)
 		return
 	}
 
@@ -494,6 +519,18 @@ func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DN
 
 	h.logger.Info("DNA sync received", "chunks", len(chunks), "peer_id", peerID)
 
+	// A bulk-lane reply (bucket roots or a bucket manifest) is routed to its round
+	// and never persisted as a snapshot.
+	transfer, tErr := reassembleDNATransfer(chunks, peerID)
+	if tErr == nil && transfer.Bulk {
+		if bErr := h.handleBulkTransfer(ctx, peerID, transfer); bErr != nil {
+			h.logger.Warn("bulk reply rejected", "peer_id", logging.SanitizeLogValue(peerID),
+				"error", logging.SanitizeLogValue(bErr.Error()))
+			return status.Errorf(codes.FailedPrecondition, "bulk reply rejected")
+		}
+		return stream.SendAndClose(&transportpb.DNASyncResponse{Accepted: true, Message: "accepted"})
+	}
+
 	// No persistence configured (test / degenerate). Accept without reassembly —
 	// production always wires a persister (server.go).
 	if h.persister == nil {
@@ -501,7 +538,10 @@ func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DN
 		return stream.SendAndClose(&transportpb.DNASyncResponse{Accepted: true, Message: "accepted"})
 	}
 
-	dna, driftRejected, rErr := reassembleDNA(chunks, peerID)
+	if tErr != nil {
+		return status.Errorf(codes.InvalidArgument, "failed to reassemble DNA: %v", tErr)
+	}
+	dna, driftRejected, rErr := decodeDNATransfer(transfer, peerID)
 	if rErr != nil {
 		return status.Errorf(codes.InvalidArgument, "failed to reassemble DNA: %v", rErr)
 	}
@@ -585,6 +625,20 @@ func (h *DNAHandler) handleDeltaGRPC(ctx context.Context, stream grpc.ClientStre
 	transfer, err := reassembleDNATransfer(chunks, peerID)
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "failed to reassemble delta transfer: %v", err)
+	}
+
+	// A bulk-flagged delta belongs to the bulk lane's round protocol, never to the
+	// host lane below.
+	if transfer.Bulk {
+		if h.store == nil {
+			return status.Error(codes.FailedPrecondition, "partial-sync not configured on this server")
+		}
+		if bErr := h.handleBulkTransfer(ctx, peerID, transfer); bErr != nil {
+			h.logger.Warn("bulk delta rejected", "peer_id", safePeerID,
+				"error", logging.SanitizeLogValue(bErr.Error()))
+			return status.Error(codes.InvalidArgument, "bulk delta rejected")
+		}
+		return stream.SendAndClose(&transportpb.DNASyncResponse{Accepted: true, Message: "accepted"})
 	}
 
 	receivedFragments := transfer.Fragments
@@ -1021,6 +1075,12 @@ func reassembleDNA(chunks []*transportpb.DNAChunk, stewardID string) (*common.DN
 	if err != nil {
 		return nil, 0, err
 	}
+	return decodeDNATransfer(transfer, stewardID)
+}
+
+// decodeDNATransfer decodes an already-reassembled transfer into a common.DNA.
+// See reassembleDNA for the bounds it applies.
+func decodeDNATransfer(transfer *dptypes.DNATransfer, stewardID string) (*common.DNA, int, error) {
 
 	// Fragment count and per-fragment size are bounded BEFORE any decode. A
 	// malformed fragment is skipped (rejecting the sync would black-hole an

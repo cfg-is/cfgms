@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/clusterregistry"
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/directory"
 	"github.com/cfgis/cfgms/features/controller/dispatcher"
 	controllerFleet "github.com/cfgis/cfgms/features/controller/fleet"
 	dnaStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
@@ -156,6 +158,37 @@ func (p *moduleManifestAdapter) ListObservableManifests() ([]*modules.ModuleMeta
 		}
 	}
 	return result, nil
+}
+
+var _ controllerTransport.PerObjectKindLister = (*moduleManifestAdapter)(nil)
+
+// ListPerObjectKinds returns the per-object fragment kinds a steward may deliver on
+// the bulk lane: every Owns entry with PerObject set, from the approved manifests
+// ListObservableManifests returns (those with an observe_when predicate or
+// always_pull). The module cache is controller-wide, so the answer does not vary by
+// tenant today; the tenant argument keeps the contract tenant-scoped for when it
+// does. A cache error is returned, never an empty allow-all answer.
+func (p *moduleManifestAdapter) ListPerObjectKinds(_ string) ([]string, error) {
+	manifests, err := p.ListObservableManifests()
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]struct{}{}
+	var kinds []string
+	for _, m := range manifests {
+		for _, own := range m.Owns {
+			if !own.PerObject || own.Kind == "" {
+				continue
+			}
+			if _, dup := seen[own.Kind]; dup {
+				continue
+			}
+			seen[own.Kind] = struct{}{}
+			kinds = append(kinds, own.Kind)
+		}
+	}
+	sort.Strings(kinds)
+	return kinds, nil
 }
 
 // Server represents the controller server component (gRPC-over-QUIC based)
@@ -2889,6 +2922,7 @@ func (s *Server) Start() error {
 			s.heartbeatService.SetOnFragmentRoot(dnaHandler.HandleHeartbeatRoot)
 			s.logger.Info("Fragment-root partial-sync detection wired (Issue #3329)")
 		}
+		s.wireDNABulkLane(dnaHandler)
 
 		bulkHandler := controllerTransport.NewBulkHandler(s.logger, tenantQueue)
 		logStreamHandler := s.newLogStreamHandler()
@@ -4359,6 +4393,51 @@ func (s *Server) buildDNAEntityGraphWriter() (*dnasync.Writer, error) {
 	return dnasync.New(s.egProvider,
 		dnasync.WithClusterMembership(&dnaClusterMembershipAdapter{server: s}),
 		dnasync.WithDirectoryAuthority(s.directoryAuthorityVerifier()))
+}
+
+// wireDNABulkLane wires the bulk lane onto dnaHandler (Issue #5554): the durable
+// per-steward bulk manifest, the signed command publisher, the per-object kind
+// allowlist, the directory membership sink and authority verifier, and the
+// heartbeat callback that carries dna_bulk_root. A missing dependency leaves the
+// lane off with a warning rather than half-wired: the handler is fail-closed
+// without any of them. The host lane stays off either way.
+func (s *Server) wireDNABulkLane(dnaHandler *controllerTransport.DNAHandler) {
+	if s.storageManager == nil || s.commandPublisher == nil || s.heartbeatService == nil {
+		s.logger.Warn("dna-sync: bulk lane not wired; per-object fragments will not sync")
+		return
+	}
+	cs := s.storageManager.GetConfigStore()
+	if cs == nil {
+		s.logger.Warn("dna-sync: bulk lane not wired; no config store for the bulk manifest")
+		return
+	}
+	store, err := controllerTransport.NewBulkManifestStore(cs)
+	if err != nil {
+		s.logger.Warn("dna-sync: bulk lane not wired", "error", logging.SanitizeLogValue(err.Error()))
+		return
+	}
+
+	var kinds controllerTransport.PerObjectKindLister
+	if lister, ok := s.observeManifestProvider.(controllerTransport.PerObjectKindLister); ok {
+		kinds = lister
+	}
+
+	var sink directory.MembershipSink
+	if s.configService != nil {
+		if owners := s.configService.DirectoryDomains(); owners != nil {
+			m, mErr := directory.NewMembership(cs, owners)
+			if mErr != nil {
+				s.logger.Warn("dna-sync: directory membership sink unavailable", "error", logging.SanitizeLogValue(mErr.Error()))
+			} else {
+				sink = m
+			}
+		}
+	}
+
+	dnaHandler.WithPartialSync(store, s.commandPublisher).
+		WithBulkLane(kinds, sink, s.directoryAuthorityVerifier())
+	s.heartbeatService.SetOnBulkRoot(dnaHandler.HandleHeartbeatBulkRoot)
+	s.logger.Info("Bulk-lane DNA sync wired (Issue #5554)")
 }
 
 // wireDNAEntityGraph chains the DNA-sync entity-graph write path onto dnaHandler
