@@ -132,3 +132,61 @@ Rule 3 has been replayed against recent merged develop PRs with `make complexity
 Blocking is evaluated per pull request; two pull requests that each pass alone can together raise P95 effort above develop's, and the develop-side run surfaces it.
 
 Phase 2 reduction targets will reference a pinned develop commit SHA, re-measured on demand.
+
+## Ratchet, frozen baseline and staleness
+
+Three baselines exist, each with one writer:
+
+| File | Written by | Purpose |
+|------|-----------|---------|
+| `baselines/inventory.json` | `make complexity-report` | Phase 0 inventory |
+| `baselines/ratchet.json` | `make complexity-ratchet` | The baseline rules 1 and 2 compare to |
+| `baselines/frozen.json` | `make complexity-freeze` | Starting point of the programme, never moved |
+
+### Make targets
+
+- `make complexity-check` runs `check -baseline scripts/complexity/baselines/ratchet.json`: staleness first, then the gate rules.
+- `make complexity-ratchet` runs the gate against the current `ratchet.json` and writes the new baseline (hotspot-only form) **only if zero findings are reported**. A failing rule exits 1 and leaves the file byte-identical. Mean CC and P95 volume worsening only warn and do not block the ratchet. The ratchet never reads or writes `frozen.json`.
+- `make complexity-freeze` writes `frozen.json` (`schema_version`, the base commit SHA, hotspot-only compact form) and exits 1 if it already exists. Replacing it takes deleting the file in a reviewed diff and running the target again. It needs `origin/develop` to resolve (or `-base-commit`).
+
+### When to move the ratchet
+
+Move it after a change lowers hotspots, aggregate excess or P95 effort, so the improvement cannot be lost: run `make complexity-ratchet` and commit the new `ratchet.json` in its own reviewed diff. The target refuses while any gate rule fails, so the baseline cannot be moved to hide a regression.
+
+### Init procedure
+
+`ratchet.json` does not exist until the gate is enabled. Create it with `make complexity-ratchet COMPLEXITY_INIT=1` (flag `-init`). Init writes only when the file is absent and refuses (exit 1) otherwise.
+
+### Why frozen is separate
+
+The ratchet baseline moves with every improvement; `frozen.json` records where the programme started so total progress stays measurable. If one file served both roles, each ratchet move would erase the starting point.
+
+### Staleness
+
+`check` (and `go run ./scripts/complexity staleness -baseline <file>`) fails with exit 1 when the ratchet baseline is stale. There are exactly four conditions: the baseline's `schema_version`, `analyzer_version`, `hotspot_threshold` or `manifest_sha256` differs from the running tool or the sha256 of the committed `manifest.json` bytes. Nothing else makes it stale; deleted functions are legitimate and the identity set is not compared.
+
+A manifest change is repaired with `make complexity-ratchet`, which skips the staleness check (it is the remedy) and goes straight to the gate. If `schema_version`, `analyzer_version` or `hotspot_threshold` differ, counts are not comparable and the ratchet refuses with `counting rules changed: delete baselines/ratchet.json in a reviewed diff and run make complexity-ratchet COMPLEXITY_INIT=1`.
+
+## CI and anti-gaming
+
+### Where the gate runs
+
+- `make test-commit` runs `complexity-check` locally.
+- The `complexity-gate` job in `.github/workflows/test-suite.yml` runs `make complexity-check` on every `pull_request` and `merge_group`, with a full-history checkout and no path filter. The `unit-tests` aggregator lists it in `needs:` and checks its result before the docs-only exit, so a docs-only pull request cannot skip it.
+- In the merge queue the job runs and posts its own `complexity-gate` context, but blocking is pull-request-side only, through the aggregator. The context is not in the branch ruleset's required checks.
+
+### Moving the ratchet in CI
+
+If develop moves while a pull request is queued and `make complexity-check` then fails against the committed baseline, delete `baselines/ratchet.json` and run `make complexity-ratchet COMPLEXITY_INIT=1` in the same pull request. There is no other baseline-writing path.
+
+### Protected paths
+
+`scripts/complexity/manifest.json`, `scripts/complexity/baselines/` and the tooling under `scripts/complexity/` are protected against quiet edits by three controls: the CLAUDE.md scope constraints, a `CODEOWNERS` entry for `/scripts/complexity/`, and an acceptance-reviewer rule that lists every changed path there and treats a manifest or baseline edit as a finding unless the story names it. The `CODEOWNERS` entry adds specificity but no new reviewer, because the default `*` entry already names the same owner.
+
+### Concurrency
+
+Two pull requests that both move `ratchet.json` conflict textually. The merge queue rebases the second, and `check` then re-runs against the new baseline.
+
+## Limits
+
+Blocking is evaluated per pull request; the merge queue can, in principle, let two pull requests merge that each pass alone but together worsen P95 effort. The develop-side run surfaces it.
