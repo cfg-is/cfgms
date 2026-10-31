@@ -3904,6 +3904,49 @@ are entity ids, `op` is `added` or `removed`, and `source` is `directory:<domain
 `m365:<guid>`. A range holding more than 100,000 changes returns `400`; narrow it with `since` and
 `until`.
 
+#### One-time initial passwords
+
+The controller generates the initial password for each account a cfg declares and holds it until
+an admin reveals it (Issue #5559). The password can be revealed exactly once. Both routes answer
+with `Cache-Control: no-store`, including the step-up challenge.
+
+| Route | Permission | Floor |
+|-------|------------|-------|
+| `GET /api/v1/directory/credentials` | `directory:credential-list` | none |
+| `POST /api/v1/directory/credentials/{id}/reveal` | `directory:credential-reveal` | Strong assurance and a fresh passkey tap (`RequireUserPresence`); API keys are refused (`AllowMachine: false`) |
+
+Only the admin role is granted these permissions; the viewer and other roles are not.
+
+**GET /api/v1/directory/credentials** lists the caller tenant's pending, unexpired records.
+**Response (200):** `{"items": [{"id", "resource_id", "created_at", "expires_at"}, ...]}`.
+`resource_id` is the id the cfg declared for the account; `id` is a random 128-bit value (32
+lowercase hex characters). The value is never listed.
+
+**POST /api/v1/directory/credentials/{id}/reveal** returns the password once. Without a presence
+token it answers `401` with the `CFGMS-StepUp` challenge (`presence="required"`,
+`permission="directory:credential-reveal"`); the client retries with `X-Presence-Token`.
+**Response (200):** `{"id", "resource_id", "password"}`.
+
+| Status | Meaning |
+|--------|---------|
+| `404` | No such record, or it belongs to a tenant the caller may not reach (the two are indistinguishable). |
+| `409` | A reveal of this record is in progress; retry shortly. |
+| `410` | Already revealed, expired, or the secret is gone. No secret is returned. |
+| `503` | The store is unavailable, or the controller is a multi-node cluster and the config store is not cluster-atomic (the reveal fails closed with nothing changed). |
+
+Once-only semantics: the record moves `pending` to `revealing` with an atomic update, the secret
+is read and deleted, and the record is marked `revealed`. Of several concurrent reveals exactly
+one receives the password. If a reveal crashes while the secret still exists, the record becomes
+claimable again 60 seconds after it entered `revealing`; if the secret is already gone it answers
+`410`.
+
+**A lost response loses the password.** The secret is deleted before the response is written, and
+there is no second read and no reset. If the HTTP response is lost, delete the account and have
+it recreated.
+
+Every reveal attempt, success or failure, writes an audit event (`credential.reveal`) naming the
+revealing principal and the cfg-declared resource id; the password is never recorded.
+
 ## Internal Test Endpoints (not for external use)
 
 Three routes exist solely for integration-test setup and carry no normal

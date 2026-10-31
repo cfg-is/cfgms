@@ -1591,6 +1591,26 @@ Lists membership changes of one group, newest first. Columns: `GROUP MEMBER MEMB
 - `--include-baseline` includes the baseline logged at the first observation of a group, which is excluded by default.
 - A range holding more than 100,000 changes is refused by the controller; narrow it with `--since` and `--until`.
 
+### cfg directory credential list
+
+```bash
+cfg directory credential list [--output table|json]
+```
+
+Lists the pending one-time initial passwords for new directory accounts in your tenant, through `GET /api/v1/directory/credentials` (permission `directory:credential-list`). Columns: `ID RESOURCE_ID CREATED EXPIRES`. `RESOURCE_ID` is the id the cfg declared for the account. The password itself is never listed.
+
+### cfg directory credential reveal
+
+```bash
+cfg directory credential reveal <id>
+```
+
+Reveals one initial password, through `POST /api/v1/directory/credentials/{id}/reveal` (permission `directory:credential-reveal`, Strong assurance). The controller answers with the step-up challenge, `cfg` opens the controller-served presence page, you tap your passkey, and `cfg` retries the request.
+
+- The password is printed to stdout and nowhere else: it is never written to a file, shell history or the keychain. A warning that it is shown once goes to stderr, so `cfg directory credential reveal <id>` can be read on screen without the warning mixed into captured output.
+- The password can be revealed exactly once. A second reveal fails with "no longer available" and prints nothing. A password the controller already deleted before its response reached you is lost: delete the account and have it recreated.
+- API keys cannot reveal; the command needs an interactive session with a passkey.
+
 ## Workflow Management
 
 `cfg workflow` subcommands manage workflow definitions and their executions on the controller.
