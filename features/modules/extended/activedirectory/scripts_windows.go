@@ -26,16 +26,40 @@ import (
 	"github.com/cfgis/cfgms/pkg/security"
 )
 
-// readScript is the module's only PowerShell: a fixed, read-only inventory
-// script. It is never composed or modified at runtime.
+// readScript is the module's fixed, read-only inventory and lookup script.
+// writeScript is its fixed write script. Neither is ever composed or modified
+// at runtime.
 //
 //go:embed scripts/read.ps1
 var readScript []byte
 
-// readScriptSHA256 is the SHA-256 of scripts/read.ps1. The staged copy is
-// checked against it before every run; TestReadScript_EmbeddedHashMatchesConstant
-// keeps it in step with the embedded file.
-const readScriptSHA256 = "bd496cfb2f966fe4f85075d886472b00cbd721d942db56c517d579c6e9bf457d"
+//go:embed scripts/write.ps1
+var writeScript []byte
+
+// readScriptSHA256 and writeScriptSHA256 are the SHA-256 of scripts/read.ps1
+// and scripts/write.ps1. The staged copy is checked against them before every
+// run; TestReadScript_EmbeddedHashMatchesConstant and
+// TestWriteScript_EmbeddedHashMatchesConstant keep them in step with the
+// embedded files.
+const (
+	readScriptSHA256  = "64b52c9459fc2bd74e00a19205b9c50343978f8bcacb5a09d875eb3071271c76"
+	writeScriptSHA256 = "cc3fcecb43bd2b4a6cec377fa555b21a301418824936e52c00d5cc43c45ddaed"
+)
+
+// embeddedScript is one fixed script and its expected hash.
+type embeddedScript struct {
+	name   string // file name prefix: "read" or "write"
+	body   []byte
+	sha256 string
+	// quiet keeps the script's stderr out of errors entirely. The write
+	// script's stdin can carry a password, so nothing it prints is returned.
+	quiet bool
+}
+
+var (
+	readEmbedded  = embeddedScript{name: "read", body: readScript, sha256: readScriptSHA256}
+	writeEmbedded = embeddedScript{name: "write", body: writeScript, sha256: writeScriptSHA256, quiet: true}
+)
 
 const (
 	// maxLineBytes bounds one line of script output (one directory object).
@@ -110,16 +134,30 @@ func defaultScriptDir() string {
 	return filepath.Join(programData, "cfgms", "activedirectory-scripts")
 }
 
-// psScriptRunner stages the embedded read script in an admin-only directory,
+// psScriptRunner stages one embedded script in an admin-only directory,
 // verifies it, and runs it with -File.
 type psScriptRunner struct {
 	// dir is the script directory, secured with security.EnsureAdminOnlyDir
 	// before every stage. Tests point it at their own directory.
 	dir string
+	// script is the embedded script this runner runs. The zero value is the
+	// read script.
+	script embeddedScript
 }
 
 func newPlatformRunner() scriptRunner {
-	return &psScriptRunner{dir: defaultScriptDir()}
+	return &psScriptRunner{dir: defaultScriptDir(), script: readEmbedded}
+}
+
+func newPlatformWriteRunner() scriptRunner {
+	return &psScriptRunner{dir: defaultScriptDir(), script: writeEmbedded}
+}
+
+func (r *psScriptRunner) embedded() embeddedScript {
+	if r.script.body == nil {
+		return readEmbedded
+	}
+	return r.script
 }
 
 // Run implements scriptRunner.
@@ -128,10 +166,10 @@ func (r *psScriptRunner) Run(ctx context.Context, request []byte, onLine func(li
 	if err != nil {
 		return err
 	}
-	if err := verifyStagedScript(path); err != nil {
+	if err := verifyStaged(path, r.embedded()); err != nil {
 		return err
 	}
-	return invoke(ctx, path, request, onLine)
+	return invokeScript(ctx, path, r.embedded(), request, onLine)
 }
 
 // stage secures the script directory and writes the embedded script into it
@@ -141,54 +179,65 @@ func (r *psScriptRunner) stage() (string, error) {
 	stagingMu.Lock()
 	defer stagingMu.Unlock()
 
+	s := r.embedded()
 	if err := security.EnsureAdminOnlyDir(r.dir); err != nil {
 		return "", fmt.Errorf("activedirectory: secure script directory: %w", err)
 	}
-	path := filepath.Join(r.dir, "read-"+readScriptSHA256[:12]+".ps1")
+	path := filepath.Join(r.dir, s.name+"-"+s.sha256[:12]+".ps1")
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- module-built path inside the secured script directory
 	if errors.Is(err, os.ErrExist) {
 		return path, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("activedirectory: stage read script: %w", err)
+		return "", fmt.Errorf("activedirectory: stage %s script: %w", s.name, err)
 	}
-	if _, werr := f.Write(readScript); werr != nil {
+	if _, werr := f.Write(s.body); werr != nil {
 		_ = f.Close()
 		_ = os.Remove(path)
-		return "", fmt.Errorf("activedirectory: write read script: %w", werr)
+		return "", fmt.Errorf("activedirectory: write %s script: %w", s.name, werr)
 	}
 	if cerr := f.Close(); cerr != nil {
 		_ = os.Remove(path)
-		return "", fmt.Errorf("activedirectory: close read script: %w", cerr)
+		return "", fmt.Errorf("activedirectory: close %s script: %w", s.name, cerr)
 	}
 	return path, nil
 }
 
-// verifyStagedScript refuses to run unless the staged file's SHA-256 equals
-// readScriptSHA256. A mismatch is never repaired by overwriting: it means the
-// file was changed after staging and is left in place for investigation.
-func verifyStagedScript(path string) error {
+// verifyStagedScript checks a staged read script.
+func verifyStagedScript(path string) error { return verifyStaged(path, readEmbedded) }
+
+// verifyStaged refuses to run unless the staged file's SHA-256 equals the
+// script's embedded hash. A mismatch is never repaired by overwriting: it
+// means the file was changed after staging and is left in place for
+// investigation.
+func verifyStaged(path string, s embeddedScript) error {
 	f, err := os.Open(path) // #nosec G304 -- module-built path inside the secured script directory
 	if err != nil {
-		return fmt.Errorf("activedirectory: open staged read script: %w", err)
+		return fmt.Errorf("activedirectory: open staged %s script: %w", s.name, err)
 	}
 	defer func() { _ = f.Close() }()
 	h := sha256.New()
 	n, err := io.Copy(h, io.LimitReader(f, maxStagedScriptBytes+1))
 	if err != nil {
-		return fmt.Errorf("activedirectory: read staged read script: %w", err)
+		return fmt.Errorf("activedirectory: read staged %s script: %w", s.name, err)
 	}
-	if n > maxStagedScriptBytes || hex.EncodeToString(h.Sum(nil)) != readScriptSHA256 {
-		return fmt.Errorf("activedirectory: staged read script does not match the embedded script; refusing to run it")
+	if n > maxStagedScriptBytes || hex.EncodeToString(h.Sum(nil)) != s.sha256 {
+		return fmt.Errorf("activedirectory: staged %s script does not match the embedded script; refusing to run it", s.name)
 	}
 	return nil
 }
 
-// invoke runs the staged script with request on stdin and calls onLine for
-// every non-empty stdout line. A line longer than maxLineBytes ends the run.
-// Errors never contain the request: the stderr tail they carry has every
-// request value redacted.
+// invoke runs a staged read script.
 func invoke(ctx context.Context, scriptPath string, request []byte, onLine func(line []byte) error) error {
+	return invokeScript(ctx, scriptPath, readEmbedded, request, onLine)
+}
+
+// invokeScript runs the staged script with request on stdin and calls onLine
+// for every non-empty stdout line. A line longer than maxLineBytes ends the
+// run. Errors never contain the request: the stderr tail a read script's
+// error carries has every request value redacted, and a quiet script's errors
+// carry no stderr at all.
+func invokeScript(ctx context.Context, scriptPath string, s embeddedScript, request []byte, onLine func(line []byte) error) error {
 	exe := powershellExe()
 	if exe == "" {
 		return fmt.Errorf("activedirectory: cannot resolve an absolute powershell.exe path")
@@ -222,11 +271,14 @@ func invoke(ctx context.Context, scriptPath string, request []byte, onLine func(
 		return scanErr
 	}
 	if res.err != nil {
-		tail := redactRequest(stderr.String(), request)
-		if tail == "" {
-			return fmt.Errorf("activedirectory: read script failed with exit code %d", res.code)
+		tail := ""
+		if !s.quiet {
+			tail = redactRequest(stderr.String(), request)
 		}
-		return fmt.Errorf("activedirectory: read script failed with exit code %d: %s", res.code, tail)
+		if tail == "" {
+			return fmt.Errorf("activedirectory: %s script failed with exit code %d", s.name, res.code)
+		}
+		return fmt.Errorf("activedirectory: %s script failed with exit code %d: %s", s.name, res.code, tail)
 	}
 	return nil
 }

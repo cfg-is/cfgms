@@ -16,6 +16,8 @@ type unsupportedRunner struct{}
 
 func newPlatformRunner() scriptRunner { return unsupportedRunner{} }
 
+func newPlatformWriteRunner() scriptRunner { return unsupportedRunner{} }
+
 // Run implements scriptRunner.
 func (unsupportedRunner) Run(context.Context, []byte, func([]byte) error) error {
 	return errors.New("activedirectory module requires Windows")
