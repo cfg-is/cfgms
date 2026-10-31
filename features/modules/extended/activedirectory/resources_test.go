@@ -154,6 +154,20 @@ func TestSetUser_CredentialUnavailableCreatesNoAccount(t *testing.T) {
 	}
 }
 
+func TestSetUser_OverlongPasswordRejectedWithoutWriting(t *testing.T) {
+	long := strings.Repeat("A", maxPasswordLen+1)
+	d := NewFakeDirectory()
+	m := newDeclaredModule(t, d, "", &issuingClient{password: long}, nil)
+	r := userDecl("jdoe", jdoe())
+	m.SetDeclared([]modules.DeclaredResource{r})
+
+	err := m.Set(context.Background(), r.ResourceID, state(r.Config))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no account was created")
+	assert.NotContains(t, err.Error(), long)
+	assert.Empty(t, d.WriteOps(), "no write script ran")
+}
+
 func TestSetUser_ExistingUnboundName_NotAdopted(t *testing.T) {
 	d := NewFakeDirectory()
 	existing := d.AddUser("jdoe")

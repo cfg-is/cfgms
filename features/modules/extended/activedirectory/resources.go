@@ -732,6 +732,9 @@ func (m *activeDirectoryModule) createUser(ctx context.Context, resourceID, name
 	if err != nil || password == "" {
 		return fmt.Errorf("activedirectory: the controller did not issue an initial password; no account was created for %q", logging.SanitizeLogValue(resourceID))
 	}
+	if len(password) > maxPasswordLen {
+		return fmt.Errorf("activedirectory: the issued initial password exceeds the supported length; no account was created for %q", logging.SanitizeLogValue(resourceID))
+	}
 	secret := []byte(password)
 	defer clear(secret)
 
@@ -855,6 +858,13 @@ type writeRequest struct {
 	GroupCategory     string  `json:"group_category,omitempty"`
 }
 
+const (
+	// maxPasswordLen bounds an issued password; AD's own limit is far lower.
+	maxPasswordLen = 256
+	// maxRequestLen bounds the encoded write request line.
+	maxRequestLen = 16 * 1024
+)
+
 func stringPtr(s string) *string { return &s }
 func boolPtr(b bool) *bool       { return &b }
 
@@ -869,7 +879,13 @@ func (m *activeDirectoryModule) runWrite(ctx context.Context, req writeRequest, 
 	if err != nil {
 		return "", fmt.Errorf("activedirectory: encode write request: %w", err)
 	}
-	stdin := make([]byte, 0, len(line)+1+len(password))
+	if len(password) > maxPasswordLen {
+		return "", fmt.Errorf("activedirectory: %s password exceeds the supported length", req.Operation)
+	}
+	if len(line) > maxRequestLen {
+		return "", fmt.Errorf("activedirectory: %s request is too large", req.Operation)
+	}
+	stdin := make([]byte, 0, maxRequestLen+1+maxPasswordLen)
 	stdin = append(stdin, line...)
 	stdin = append(stdin, '\n')
 	stdin = append(stdin, password...)
