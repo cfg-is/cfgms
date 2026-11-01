@@ -24,46 +24,45 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
-// TestWindowsServiceHandler_TerminalFailure_ReportsServiceSpecificExitCode
-// verifies AC5: when the supervise loop exits on its own (terminal failure —
-// no rollback available), Execute must return svcSpecificEC=true with a
-// non-zero exit code so that Win32_Service.ExitCode is non-zero and the SCM
-// applies its configured RESTART recovery actions.
-//
-// The three independent self-heal caps are:
-//   - SCM's OS-configured reset period (sc failure reset=86400)
-//   - launcher MaxRollbackCycles (default 1): governs how many times the
-//     launcher itself will roll back before giving up and surfacing a terminal
-//     failure to the SCM.
-//   - Known-good restart-in-place loop: a proven binary is retried
-//     indefinitely; SCM recovery fires only when a non-known-good binary
-//     exhausts rollback budget and the launcher process exits.
-//
-// Expected Win32_Service state after terminal failure:
-//
-//	ExitCode:        ERROR_SERVICE_SPECIFIC_ERROR (1066)
-//	ServiceExitCode: the launcher's own exit code (1 for supervise error)
-func TestWindowsServiceHandler_TerminalFailure_ReportsServiceSpecificExitCode(t *testing.T) {
-	// Empty root with no current version: Supervise returns an error immediately.
+// TestWindowsServiceHandler_BrokenLayout_StaysAliveUntilStop verifies that a
+// layout Supervise cannot run (no current version) no longer ends the service:
+// Supervise keeps retrying with backoff, Execute stays alive, and it returns a
+// clean (non-service-specific, zero) code only after the SCM sends Stop.
+func TestWindowsServiceHandler_BrokenLayout_StaysAliveUntilStop(t *testing.T) {
 	root := t.TempDir()
 
-	r := make(chan svc.ChangeRequest)
+	r := make(chan svc.ChangeRequest, 1)
 	status := make(chan svc.Status, 10)
 
 	h := &windowsServiceHandler{
-		// --max-rollbacks 0: no rollback budget → terminal failure on first child error.
 		args: []string{"--root", root, "--max-rollbacks", "0"},
 	}
 
-	svcSpecific, exitCode := h.Execute(nil, r, status)
-
-	if !svcSpecific {
-		t.Errorf("Execute returned svcSpecificEC=false on terminal failure; want true so SCM " +
-			"records ERROR_SERVICE_SPECIFIC_ERROR and applies recovery actions (AC5)")
+	type execResult struct {
+		svcSpecific bool
+		code        uint32
 	}
-	if exitCode == 0 {
-		t.Errorf("Execute returned exitCode=0 on terminal failure; want non-zero so " +
-			"Win32_Service.ExitCode is non-zero and SCM recovery fires (AC5)")
+	resultCh := make(chan execResult, 1)
+	go func() {
+		sp, c := h.Execute(nil, r, status)
+		resultCh <- execResult{sp, c}
+	}()
+
+	select {
+	case res := <-resultCh:
+		t.Fatalf("Execute returned (%v, %d) before Stop; the supervisor must keep retrying", res.svcSpecific, res.code)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	r <- svc.ChangeRequest{Cmd: svc.Stop}
+
+	select {
+	case res := <-resultCh:
+		if res.svcSpecific || res.code != 0 {
+			t.Errorf("Execute after Stop = (%v, %d), want (false, 0)", res.svcSpecific, res.code)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Execute did not return after Stop")
 	}
 }
 

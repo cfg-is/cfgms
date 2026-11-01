@@ -148,11 +148,16 @@ func installFakeSteward(t *testing.T, l Layout, version string) string {
 }
 
 // runSupervisor runs Supervise with timeout-bounded context so a buggy
-// loop can't hang the test suite.
+// loop can't hang the test suite. Unless the test set its own sleep seam, the
+// first backoff cancels the context: the supervisor never returns on a fault,
+// so "the first point where it used to give up" is where the run ends (nil).
 func runSupervisor(t *testing.T, s *Supervisor, timeout time.Duration) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	if s.sleep == nil {
+		s.sleep = func(context.Context, time.Duration) { cancel() }
+	}
 	return s.Supervise(ctx)
 }
 
@@ -198,19 +203,6 @@ func TestSupervise_RejectsRegtokenChildArg(t *testing.T) {
 	}
 }
 
-func TestSupervise_NoCurrentVersion_ReturnsError(t *testing.T) {
-	l := newLayout(t)
-	s := &Supervisor{
-		Layout: l,
-		Stdout: &bytes.Buffer{},
-		Stderr: &bytes.Buffer{},
-	}
-	err := runSupervisor(t, s, 2*time.Second)
-	if err == nil {
-		t.Fatal("Supervise with no current.txt returned nil error")
-	}
-}
-
 func TestSupervise_BrokenChild_RollsBackWhenPreviousExists(t *testing.T) {
 	l := newLayout(t)
 
@@ -249,8 +241,8 @@ func TestSupervise_BrokenChild_RollsBackWhenPreviousExists(t *testing.T) {
 		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
 	}
 	err := runSupervisor(t, s, 10*time.Second)
-	if err == nil {
-		t.Fatal("Supervise returned nil error after both versions broken")
+	if err != nil {
+		t.Fatalf("Supervise returned %v after both versions broken; want nil (never gives up)", err)
 	}
 
 	if _, statErr := os.Stat(marker); statErr != nil {
@@ -266,36 +258,6 @@ func TestSupervise_BrokenChild_RollsBackWhenPreviousExists(t *testing.T) {
 	}
 	if !bytes.Contains(stderr.Bytes(), []byte(`rolled back to version "v1"`)) {
 		t.Errorf("stderr did not mention rollback to v1:\n%s", stderr.String())
-	}
-}
-
-func TestSupervise_BrokenChild_NoPreviousReturnsError(t *testing.T) {
-	l := newLayout(t)
-	installFakeSteward(t, l, "v1")
-	if err := l.WriteCurrent("v1"); err != nil {
-		t.Fatalf("WriteCurrent v1: %v", err)
-	}
-
-	marker := filepath.Join(t.TempDir(), "ran")
-	envForChild(t, map[string]string{
-		"FAKE_STEWARD_EXIT_CODE":   "1",
-		"FAKE_STEWARD_MARKER_FILE": marker,
-	})
-
-	s := &Supervisor{
-		Layout:            l,
-		StartupWindow:     50 * time.Millisecond,
-		MaxRollbackCycles: 1,
-		Stdout:            &bytes.Buffer{},
-		Stderr:            &bytes.Buffer{},
-		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
-	}
-	err := runSupervisor(t, s, 10*time.Second)
-	if err == nil {
-		t.Fatal("Supervise returned nil when broken child had no rollback target")
-	}
-	if _, statErr := os.Stat(marker); statErr != nil {
-		t.Errorf("fake-steward marker not present (%v) — child never actually ran", statErr)
 	}
 }
 
@@ -879,8 +841,8 @@ func TestSupervise_Rollback_WritesFlagFileAndIncrementsCounter(t *testing.T) {
 		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
 	}
 
-	if err := runSupervisor(t, s, 10*time.Second); err == nil {
-		t.Fatal("Supervise should return error when v2 fails and v1 binary is absent")
+	if err := runSupervisor(t, s, 10*time.Second); err != nil {
+		t.Fatalf("Supervise returned %v when v2 fails and v1 binary is absent; want nil", err)
 	}
 
 	// upgrade-rolled-back must exist and contain v1 (the version rolled back TO).
@@ -1050,8 +1012,8 @@ func TestSupervise_ConsecutiveFailures_CountAndReset(t *testing.T) {
 	}
 
 	// Phase 1: three executions → counter = 3.
-	if err := runSupervisor(t, s, 10*time.Second); err == nil {
-		t.Fatal("phase 1: Supervise should return error when all versions fail")
+	if err := runSupervisor(t, s, 10*time.Second); err != nil {
+		t.Fatalf("phase 1: Supervise returned %v when all versions fail; want nil", err)
 	}
 	ps, loadErr := l.loadState()
 	if loadErr != nil {
@@ -1361,8 +1323,8 @@ func TestSupervise_Probation_FastExitRollsBack(t *testing.T) {
 	}
 
 	err := runSupervisor(t, s, 10*time.Second)
-	if err == nil {
-		t.Fatal("Supervise must return error when non-known-good v2 fails and v1 also fails")
+	if err != nil {
+		t.Fatalf("Supervise returned %v when non-known-good v2 fails and v1 also fails; want nil", err)
 	}
 
 	// Rollback must have fired: current must be v1 after the rollback.
@@ -1478,9 +1440,9 @@ func TestSupervise_KnownGoodCutover_NewVersionEntersProbation(t *testing.T) {
 		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
 	}
 
-	// Both vA and vB fail (same env), so supervise exhausts rollback budget and errors.
-	if err := runSupervisor(t, s, 10*time.Second); err == nil {
-		t.Fatal("Supervise must return error after vB fails and vA also fails")
+	// Both vA and vB fail (same env), so supervise exhausts rollback budget and then backs off.
+	if err := runSupervisor(t, s, 10*time.Second); err != nil {
+		t.Fatalf("Supervise returned %v after vB fails and vA also fails; want nil", err)
 	}
 
 	// The rollback to vA must have fired (vB was in probation, not known-good).
@@ -1687,6 +1649,7 @@ func TestSupervise_HashFailureAfterFailedStartup_TreatsAsNotKnownGood(t *testing
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	s.sleep = func(context.Context, time.Duration) { cancel() }
 	done := make(chan error, 1)
 	go func() { done <- s.Supervise(ctx) }()
 
@@ -1695,11 +1658,11 @@ func TestSupervise_HashFailureAfterFailedStartup_TreatsAsNotKnownGood(t *testing
 	var superviseErr error
 	select {
 	case superviseErr = <-done:
-	case <-ctx.Done():
+	case <-time.After(15 * time.Second):
 		t.Fatal("Supervise did not exit within 15s — rollback to v0 must have stalled")
 	}
-	if superviseErr == nil {
-		t.Error("Supervise returned nil after hash-failure rollback with exhausted budget; want non-nil error")
+	if superviseErr != nil {
+		t.Errorf("Supervise returned %v after hash-failure rollback with exhausted budget; want nil", superviseErr)
 	}
 
 	// current must be v0 — rollback must have fired (not restart-in-place).
@@ -1709,5 +1672,341 @@ func TestSupervise_HashFailureAfterFailedStartup_TreatsAsNotKnownGood(t *testing
 	}
 	if cur != "v0" {
 		t.Errorf("current = %q after v1 hash-failure fast-exit, want v0 (rollback must fire; v1 must NOT restart in place when hash fails)", cur)
+	}
+}
+
+// scriptedClock reports a fixed Since for every child run unless since is set,
+// in which case since decides per call (and may run test hooks).
+type scriptedClock struct {
+	since func() time.Duration
+}
+
+func (c *scriptedClock) Now() time.Time                { return time.Unix(0, 0) }
+func (c *scriptedClock) Since(time.Time) time.Duration { return c.since() }
+
+// sleepRecorder is the Supervisor.sleep seam: it records each requested delay,
+// runs onSleep (to heal or re-break the fixture), and cancels the context once
+// n delays have been requested so Supervise returns.
+type sleepRecorder struct {
+	mu      sync.Mutex
+	delays  []time.Duration
+	n       int
+	cancel  context.CancelFunc
+	onSleep func()
+}
+
+func (r *sleepRecorder) sleep(_ context.Context, d time.Duration) {
+	r.mu.Lock()
+	r.delays = append(r.delays, d)
+	count := len(r.delays)
+	r.mu.Unlock()
+	if r.onSleep != nil {
+		r.onSleep()
+	}
+	if count >= r.n {
+		r.cancel()
+	}
+}
+
+func (r *sleepRecorder) got() []time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]time.Duration(nil), r.delays...)
+}
+
+func writeRawState(t *testing.T, l Layout, raw string) {
+	t.Helper()
+	if err := os.MkdirAll(l.Root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(l.StatePath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(l.StatePath(), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// hookWriter lets a test react to a specific Stderr line.
+type hookWriter struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	needle string
+	hook   func()
+}
+
+func (w *hookWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	w.buf.Write(p)
+	w.mu.Unlock()
+	if w.hook != nil && bytes.Contains(p, []byte(w.needle)) {
+		w.hook()
+	}
+	return len(p), nil
+}
+
+func (w *hookWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// TestSupervise_NeverGivesUp drives each of the seven former give-up points and
+// proves Supervise keeps retrying with non-decreasing, capped delays, returning
+// nil only once the context is cancelled.
+func TestSupervise_NeverGivesUp(t *testing.T) {
+	const attempts = 12 // enough doublings (1s..256s) to reach the 5m cap
+
+	cases := []struct {
+		name   string
+		setup  func(t *testing.T, l Layout) (restore func(), hooks *caseHooks)
+		expect string
+	}{
+		{
+			name: "read current error",
+			setup: func(t *testing.T, l Layout) (func(), *caseHooks) {
+				writeRawState(t, l, "{not json")
+				return func() {}, &caseHooks{}
+			},
+			expect: "read current version",
+		},
+		{
+			name: "empty current",
+			setup: func(t *testing.T, l Layout) (func(), *caseHooks) {
+				return func() {}, &caseHooks{}
+			},
+			expect: "no current version recorded",
+		},
+		{
+			name: "resolve exe error",
+			setup: func(t *testing.T, l Layout) (func(), *caseHooks) {
+				writeRawState(t, l, `{"current":"a..b"}`)
+				return func() {}, &caseHooks{}
+			},
+			expect: "resolve steward exe",
+		},
+		{
+			name: "exe missing",
+			setup: func(t *testing.T, l Layout) (func(), *caseHooks) {
+				writeRawState(t, l, `{"current":"v1"}`)
+				return func() {}, &caseHooks{}
+			},
+			expect: "is missing",
+		},
+		{
+			name: "read previous error",
+			setup: func(t *testing.T, l Layout) (func(), *caseHooks) {
+				installFakeSteward(t, l, "v1")
+				good := `{"current":"v1"}`
+				writeRawState(t, l, good)
+				envForChild(t, map[string]string{"FAKE_STEWARD_EXIT_CODE": "1"})
+				h := &caseHooks{}
+				// Corrupt state after the child exits (Since is called then),
+				// so ReadPrevious fails; sleep restores it.
+				h.onSince = func() { writeRawState(t, l, "{not json") }
+				return func() { writeRawState(t, l, good) }, h
+			},
+			expect: "read previous version",
+		},
+		{
+			name: "no previous",
+			setup: func(t *testing.T, l Layout) (func(), *caseHooks) {
+				installFakeSteward(t, l, "v1")
+				if err := l.WriteCurrent("v1"); err != nil {
+					t.Fatal(err)
+				}
+				envForChild(t, map[string]string{"FAKE_STEWARD_EXIT_CODE": "1"})
+				return func() {}, &caseHooks{}
+			},
+			expect: "no rollback available",
+		},
+		{
+			name: "rollback error",
+			setup: func(t *testing.T, l Layout) (func(), *caseHooks) {
+				installFakeSteward(t, l, "v1")
+				installFakeSteward(t, l, "v2")
+				if err := l.WriteCurrent("v1"); err != nil {
+					t.Fatal(err)
+				}
+				if err := l.WriteCurrent("v2"); err != nil {
+					t.Fatal(err)
+				}
+				raw, err := os.ReadFile(l.StatePath())
+				if err != nil {
+					t.Fatal(err)
+				}
+				envForChild(t, map[string]string{"FAKE_STEWARD_EXIT_CODE": "1"})
+				h := &caseHooks{
+					// The flag-file write fails (CertStoreDir is a file) and is
+					// logged just before Rollback runs; turn state.json into a
+					// directory at that moment so Rollback's load fails.
+					needle: "write upgrade-rolled-back flag",
+					onLine: func() {
+						_ = os.Remove(l.StatePath())
+						_ = os.Mkdir(l.StatePath(), 0o755)
+					},
+				}
+				return func() { writeRawState(t, l, string(raw)) }, h
+			},
+			expect: "rollback after child failure",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newLayout(t)
+			restore, h := tc.setup(t, l)
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			rec := &sleepRecorder{n: attempts, cancel: cancel, onSleep: restore}
+
+			certStore := filepath.Join(t.TempDir(), "not-a-dir")
+			if err := os.WriteFile(certStore, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stderr := &hookWriter{needle: h.needle, hook: h.onLine}
+			s := &Supervisor{
+				Layout:            l,
+				StartupWindow:     time.Hour,
+				MaxRollbackCycles: 5,
+				Stdout:            &bytes.Buffer{},
+				Stderr:            stderr,
+				ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+				CertStoreDir:      certStore,
+				sleep:             rec.sleep,
+				clock: &scriptedClock{since: func() time.Duration {
+					if h.onSince != nil {
+						h.onSince()
+					}
+					return 0
+				}},
+			}
+			if err := s.Supervise(ctx); err != nil {
+				t.Fatalf("Supervise returned %v; want nil after cancellation", err)
+			}
+			delays := rec.got()
+			if len(delays) < attempts {
+				t.Fatalf("only %d retries, want >= %d", len(delays), attempts)
+			}
+			for i, d := range delays {
+				if d > maxRestartBackoff {
+					t.Errorf("delay[%d]=%s exceeds cap %s", i, d, maxRestartBackoff)
+				}
+				if i > 0 && d < delays[i-1] {
+					t.Errorf("delay[%d]=%s decreased from %s", i, d, delays[i-1])
+				}
+			}
+			if delays[0] != initialRestartBackoff {
+				t.Errorf("first delay = %s, want %s", delays[0], initialRestartBackoff)
+			}
+			if delays[len(delays)-1] != maxRestartBackoff {
+				t.Errorf("final delay = %s, want cap %s", delays[len(delays)-1], maxRestartBackoff)
+			}
+			if !strings.Contains(stderr.String(), tc.expect) {
+				t.Errorf("stderr missing %q:\n%s", tc.expect, stderr.String())
+			}
+		})
+	}
+}
+
+type caseHooks struct {
+	onSince func()
+	needle  string
+	onLine  func()
+}
+
+// TestSupervise_KnownGood_LateNonZeroExit_RestartsInPlace: a known-good binary
+// that crashes after the startup window is restarted with no rollback.
+func TestSupervise_KnownGood_LateNonZeroExit_RestartsInPlace(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	installFakeSteward(t, l, "v2")
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.WriteCurrent("v2"); err != nil {
+		t.Fatal(err)
+	}
+	premarkKnownGood(t, l, "v2")
+	envForChild(t, map[string]string{"FAKE_STEWARD_EXIT_CODE": "1"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	rec := &sleepRecorder{n: 4, cancel: cancel}
+	stderr := &bytes.Buffer{}
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     30 * time.Second,
+		MaxRollbackCycles: 3,
+		Stdout:            &bytes.Buffer{},
+		Stderr:            stderr,
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+		sleep:             rec.sleep,
+		clock:             &fakeClock{sinceResult: time.Minute},
+	}
+	if err := s.Supervise(ctx); err != nil {
+		t.Fatalf("Supervise = %v, want nil", err)
+	}
+	if cur, _ := l.ReadCurrent(); cur != "v2" {
+		t.Errorf("current = %q, want v2 (no rollback)", cur)
+	}
+	if prev, _ := l.ReadPrevious(); prev != "v1" {
+		t.Errorf("previous = %q, want v1", prev)
+	}
+	if strings.Contains(stderr.String(), "rolled back") {
+		t.Errorf("rollback fired:\n%s", stderr.String())
+	}
+	if len(rec.got()) < 4 {
+		t.Errorf("expected >= 4 restarts, got %d", len(rec.got()))
+	}
+}
+
+// TestSupervise_BackoffResetsAfterHealthyRun: a child that outlived the startup
+// window resets the delay to the initial value.
+func TestSupervise_BackoffResetsAfterHealthyRun(t *testing.T) {
+	l := newLayout(t)
+	installFakeSteward(t, l, "v1")
+	if err := l.WriteCurrent("v1"); err != nil {
+		t.Fatal(err)
+	}
+	envForChild(t, map[string]string{"FAKE_STEWARD_EXIT_CODE": "1"})
+
+	// Runs 1-3 are fast failures (1s, 2s, 4s); run 4 outlives the window; run 5 fails fast.
+	var mu sync.Mutex
+	run := 0
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	rec := &sleepRecorder{n: 5, cancel: cancel}
+	s := &Supervisor{
+		Layout:            l,
+		StartupWindow:     30 * time.Second,
+		MaxRollbackCycles: 0,
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
+		sleep:             rec.sleep,
+		clock: &scriptedClock{since: func() time.Duration {
+			mu.Lock()
+			defer mu.Unlock()
+			run++
+			if run == 4 {
+				return time.Minute
+			}
+			return 0
+		}},
+	}
+	if err := s.Supervise(ctx); err != nil {
+		t.Fatalf("Supervise = %v, want nil", err)
+	}
+	want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, time.Second, 2 * time.Second}
+	got := rec.got()
+	if len(got) != len(want) {
+		t.Fatalf("delays = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("delays = %v, want %v", got, want)
+		}
 	}
 }
