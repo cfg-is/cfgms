@@ -16,7 +16,7 @@ import (
 )
 
 type checkOptions struct {
-	root, manifest, baseline, current string
+	root, manifest, current string
 }
 
 func checkCmd(args []string, stdout, stderr io.Writer) int {
@@ -25,7 +25,6 @@ func checkCmd(args []string, stdout, stderr io.Writer) int {
 	var o checkOptions
 	fset.StringVar(&o.root, "root", ".", "repository root to analyse")
 	fset.StringVar(&o.manifest, "manifest", "scripts/complexity/manifest.json", "population manifest")
-	fset.StringVar(&o.baseline, "baseline", "", "ratchet baseline metric file (required)")
 	fset.StringVar(&o.current, "current", "", "metric file to use as the current measurement (tests only)")
 	if err := fset.Parse(args); err != nil {
 		return exitError
@@ -39,27 +38,7 @@ func checkCmd(args []string, stdout, stderr io.Writer) int {
 }
 
 func checkTo(o checkOptions, stdout, stderr *printer) int {
-	fail := func(err error) int {
-		stderr.printf("complexity: %v\n", err)
-		return exitError
-	}
-	if o.baseline == "" {
-		return fail(fmt.Errorf("-baseline is required"))
-	}
-	baseline, err := readBaselineFile(o.baseline)
-	if err != nil {
-		return fail(err)
-	}
-	if reasons, err := Staleness(baseline, o.manifest); err != nil {
-		return fail(err)
-	} else if len(reasons) > 0 {
-		for _, r := range reasons {
-			stderr.printf("complexity: stale baseline: %s\n", r)
-		}
-		stderr.printf("complexity: %s\n", staleRemedy)
-		return exitViolation
-	}
-	_, code := runGate(o, baseline, stdout, stderr)
+	_, code := runGate(o, stdout, stderr)
 	if code == exitOK {
 		stdout.printf("complexity gate: pass\n")
 	}
@@ -67,9 +46,9 @@ func checkTo(o checkOptions, stdout, stderr *printer) int {
 }
 
 // runGate measures the current tree and the merge-base tree and evaluates the
-// gate rules against baseline, printing partition violations, warnings and
+// gate rules against the merge-base measurement, printing partition violations, warnings and
 // findings. It returns the current measurement alongside the exit code.
-func runGate(o checkOptions, baseline metrics.Measurement, stdout, stderr *printer) (metrics.Measurement, int) {
+func runGate(o checkOptions, stdout, stderr *printer) (metrics.Measurement, int) {
 	fail := func(err error) (metrics.Measurement, int) {
 		stderr.printf("complexity: %v\n", err)
 		return metrics.Measurement{}, exitError
@@ -124,7 +103,7 @@ func runGate(o checkOptions, baseline metrics.Measurement, stdout, stderr *print
 	}
 	previous := metrics.Measurement{Aggregate: metrics.Summarize(recs), Functions: recs}
 
-	res := gate.Evaluate(baseline, previous, current, touched)
+	res := gate.Evaluate(previous, current, touched)
 	for _, v := range partition {
 		stdout.printf("partition: %s\n", v)
 	}
@@ -141,24 +120,14 @@ func runGate(o checkOptions, baseline metrics.Measurement, stdout, stderr *print
 }
 
 func readMetricFile(path string) (metrics.Measurement, error) {
-	return readMetricFileWith(path, metrics.Read)
-}
-
-// readBaselineFile reads a baseline without rejecting a foreign schema_version,
-// which staleness and the ratchet report as their own condition.
-func readBaselineFile(path string) (metrics.Measurement, error) {
-	return readMetricFileWith(path, metrics.ReadAny)
-}
-
-func readMetricFileWith(path string, read func(io.Reader) (metrics.Measurement, error)) (metrics.Measurement, error) {
-	// #nosec G304 -- path is the operator-supplied -baseline/-current CLI flag
+	// #nosec G304 -- path is the operator-supplied -current CLI flag
 	// of a local dev tool run by the operator against their own checkout.
 	f, err := os.Open(path)
 	if err != nil {
 		return metrics.Measurement{}, fmt.Errorf("read %s: %v", filepath.ToSlash(path), ioReason(err))
 	}
 	defer func() { _ = f.Close() }()
-	m, err := read(f)
+	m, err := metrics.Read(f)
 	if err != nil {
 		return metrics.Measurement{}, fmt.Errorf("%s: %w", filepath.ToSlash(path), err)
 	}

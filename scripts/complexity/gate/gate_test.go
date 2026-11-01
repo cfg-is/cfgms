@@ -12,10 +12,9 @@ import (
 )
 
 func TestEvaluate_CombinesRules(t *testing.T) {
-	base := meas(totals(1, 5, 100), rec("p.F", "a.go", 15))
+	prev := meas(totals(1, 5, 100), rec("p.F", "a.go", 15))
 	cur := meas(totals(2, 7, 100), rec("p.F", "a.go", 16), rec("p.N", "a.go", 11))
-	prev := meas(metrics.Totals{}, rec("p.F", "a.go", 15))
-	res := Evaluate(base, prev, cur, []string{"a.go"})
+	res := Evaluate(prev, cur, []string{"a.go"})
 	rules := map[int]int{}
 	for _, f := range res.Findings {
 		rules[f.Rule]++
@@ -26,13 +25,13 @@ func TestEvaluate_CombinesRules(t *testing.T) {
 func TestEvaluate_WarnOnlyAndNeutralMetrics(t *testing.T) {
 	base := meas(metrics.Totals{Functions: 10, MeanCC: 2, P95Volume: 50})
 	cur := meas(metrics.Totals{Functions: 10, MeanCC: 2.5, P95Volume: 60})
-	res := Evaluate(base, meas(metrics.Totals{}), cur, nil)
+	res := Evaluate(base, cur, nil)
 	assert.Empty(t, res.Findings)
 	assert.Equal(t, []string{"mean_cc 2 -> 2.5", "p95_volume 50 -> 60"}, res.Warnings)
 
 	// A function-count change alone affects nothing.
 	cur = meas(metrics.Totals{Functions: 99, MeanCC: 2, P95Volume: 50})
-	res = Evaluate(base, meas(metrics.Totals{}), cur, nil)
+	res = Evaluate(base, cur, nil)
 	assert.Empty(t, res.Findings)
 	assert.Empty(t, res.Warnings)
 }

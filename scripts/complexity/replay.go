@@ -108,7 +108,7 @@ func replayTo(o replayOptions, stdout, stderr *printer) int {
 		case cerr != nil:
 			r.unmeasurable = fmt.Sprintf("commit %s: %v", short(c.sha), cerr)
 		default:
-			res := gate.Evaluate(prev, prev, cur, touched)
+			res := gate.Evaluate(prev, cur, touched)
 			for _, f := range res.Findings {
 				switch f.Rule {
 				case 1:

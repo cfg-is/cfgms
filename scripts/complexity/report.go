@@ -34,7 +34,6 @@ const (
 
 type reportOptions struct {
 	root, manifest, out, baseCommit string
-	compact                         bool
 }
 
 func reportCmd(args []string, stdout, stderr io.Writer) int {
@@ -45,7 +44,6 @@ func reportCmd(args []string, stdout, stderr io.Writer) int {
 	fset.StringVar(&o.manifest, "manifest", "scripts/complexity/manifest.json", "population manifest")
 	fset.StringVar(&o.out, "out", "bin/complexity/metrics.json", "metric file to write")
 	fset.StringVar(&o.baseCommit, "base-commit", "", "base commit SHA recorded in the file (default: git rev-parse origin/develop)")
-	fset.BoolVar(&o.compact, "compact-baseline", false, "write hotspot functions plus aggregate and per-segment totals only")
 	if err := fset.Parse(args); err != nil {
 		return exitError
 	}
@@ -86,9 +84,6 @@ func reportTo(o reportOptions, stdout, stderr *printer) int {
 		Form:             metrics.FormFull,
 		Violations:       []string{},
 		Segments:         map[string]metrics.Totals{},
-	}
-	if o.compact {
-		m.Form = metrics.FormHotspots
 	}
 	if m.BaseCommit == "" {
 		m.BaseCommit = gitBaseCommit(o.root)
@@ -152,9 +147,6 @@ func reportTo(o reportOptions, stdout, stderr *printer) int {
 		m.Segments[s.Name] = metrics.Summarize(bySegRecs[s.Name])
 	}
 	m.Functions = recs
-	if o.compact {
-		m.Functions = metrics.HotspotsOnly(recs)
-	}
 	m.Status = metrics.StatusPass
 	for _, v := range violations {
 		m.Status = metrics.StatusFail

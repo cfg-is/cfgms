@@ -2,7 +2,7 @@
 // Copyright 2026 Jordan Ritz
 
 // Package metrics is the complexity metric-file model shared by the report
-// command and the gate: the Measurement type, its full and compact writers,
+// command and the gate: the Measurement type, its writer,
 // the reader, and the nearest-rank percentile.
 package metrics
 
@@ -141,17 +141,6 @@ func Summarize(recs []FuncRecord) Totals {
 // Round rounds to three decimals so metric files are stable and diff cleanly.
 func Round(v float64) float64 { return math.Round(v*1000) / 1000 }
 
-// HotspotsOnly returns the records with CC above the hotspot threshold.
-func HotspotsOnly(recs []FuncRecord) []FuncRecord {
-	var out []FuncRecord
-	for _, r := range recs {
-		if r.CC > HotspotThreshold {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
 // Write writes m as JSON with one function object per line. The functions
 // written are exactly m.Functions; the caller picks full or hotspot-only.
 func Write(w io.Writer, m Measurement) error {
@@ -190,24 +179,14 @@ func Write(w io.Writer, m Measurement) error {
 	return err
 }
 
-// ReadAny parses a metric file without checking its schema version, so a
-// baseline written under another schema can be reported as stale.
-func ReadAny(r io.Reader) (Measurement, error) {
+// Read parses a metric file, full or hotspot-only, and checks its schema
+// version.
+func Read(r io.Reader) (Measurement, error) {
 	var m Measurement
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&m); err != nil {
 		return Measurement{}, fmt.Errorf("parse metric file: %w", err)
-	}
-	return m, nil
-}
-
-// Read parses a metric file, full or hotspot-only, and checks its schema
-// version.
-func Read(r io.Reader) (Measurement, error) {
-	m, err := ReadAny(r)
-	if err != nil {
-		return Measurement{}, err
 	}
 	if m.SchemaVersion != SchemaVersion {
 		return Measurement{}, fmt.Errorf("metric file schema_version %d, want %d", m.SchemaVersion, SchemaVersion)
