@@ -290,9 +290,7 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 			resp.Hidden++
 			continue
 		}
-		for code := range reasonsByID[res.ID] {
-			resp.ReasonCounts[code]++
-		}
+		resp.countReasons(reasonsByID[res.ID])
 		switch res.Status {
 		case "active":
 			if now.Sub(res.LastHeartbeat) <= DegradedHeartbeatAge {
@@ -313,6 +311,13 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 		"hidden", resp.Hidden,
 	)
 	s.writeSuccessResponse(w, resp)
+}
+
+// countReasons adds one to the count of each reason code a steward reports.
+func (r *FleetHealthResponse) countReasons(codes map[string]struct{}) {
+	for code := range codes {
+		r.ReasonCounts[code]++
+	}
 }
 
 // healthReasonCodesByID returns each steward's distinct reason codes from the

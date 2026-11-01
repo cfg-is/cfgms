@@ -1226,6 +1226,69 @@ func formatClockOffset(ms int64) string {
 	return "+" + d.String()
 }
 
+// printHealthReasons prints every reason with its component, code and message.
+func printHealthReasons(reasons []stewardHealthReason) {
+	if len(reasons) == 0 {
+		return
+	}
+	fmt.Printf("Health Reasons:\n")
+	for _, hr := range reasons {
+		fmt.Printf("  - [%s] %s", sanitizeTerminal(hr.Component), sanitizeTerminal(hr.Code))
+		if hr.Message != "" {
+			fmt.Printf(": %s", sanitizeTerminal(hr.Message))
+		}
+		fmt.Println()
+	}
+}
+
+// printStewardDNA prints the host identity fields from the steward's DNA.
+func printStewardDNA(dna *struct {
+	Hostname     string `json:"hostname"`
+	OS           string `json:"os"`
+	Architecture string `json:"architecture"`
+}) {
+	if dna == nil {
+		return
+	}
+	fmt.Printf("Hostname:         %s\n", dna.Hostname)
+	fmt.Printf("OS:               %s\n", dna.OS)
+	if dna.Architecture != "" {
+		fmt.Printf("Architecture:     %s\n", dna.Architecture)
+	}
+}
+
+// printStewardStatus prints the labelled status fields of one steward.
+func printStewardStatus(s stewardStatusInfo) {
+	fmt.Printf("ID:               %s\n", s.ID)
+	fmt.Printf("Status:           %s\n", s.Status)
+	fmt.Printf("Connection:       %s\n", s.ConnectionState)
+	lastSeen := ""
+	if !s.LastSeen.IsZero() {
+		lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
+	}
+	fmt.Printf("Last Seen:        %s\n", lastSeen)
+	fmt.Printf("Version:          %s\n", s.Version)
+	if s.ClockOffsetMs != nil {
+		fmt.Printf("Clock Offset:     %s\n", formatClockOffset(*s.ClockOffsetMs))
+	}
+	keyProtection := s.KeyProtectionLevel
+	if keyProtection == "" {
+		keyProtection = "unknown"
+	}
+	fmt.Printf("key_protection_level: %s\n", keyProtection)
+	if s.KeyAlgorithm != "" {
+		fmt.Printf("key_algorithm:        %s\n", s.KeyAlgorithm)
+	}
+	printHealthReasons(s.HealthReasons)
+	printStewardDNA(s.DNA)
+	if s.TenantID != "" {
+		fmt.Printf("Tenant ID:        %s\n", s.TenantID)
+	}
+	if s.Group != "" {
+		fmt.Printf("Group:            %s\n", s.Group)
+	}
+}
+
 func runStewardStatus(_ *cobra.Command, args []string) error {
 	selector := args[0]
 
@@ -1298,50 +1361,7 @@ func runStewardStatus(_ *cobra.Command, args []string) error {
 			continue
 		}
 
-		s := apiResp.Data
-		fmt.Printf("ID:               %s\n", s.ID)
-		fmt.Printf("Status:           %s\n", s.Status)
-		fmt.Printf("Connection:       %s\n", s.ConnectionState)
-		lastSeen := ""
-		if !s.LastSeen.IsZero() {
-			lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
-		}
-		fmt.Printf("Last Seen:        %s\n", lastSeen)
-		fmt.Printf("Version:          %s\n", s.Version)
-		if s.ClockOffsetMs != nil {
-			fmt.Printf("Clock Offset:     %s\n", formatClockOffset(*s.ClockOffsetMs))
-		}
-		keyProtection := s.KeyProtectionLevel
-		if keyProtection == "" {
-			keyProtection = "unknown"
-		}
-		fmt.Printf("key_protection_level: %s\n", keyProtection)
-		if s.KeyAlgorithm != "" {
-			fmt.Printf("key_algorithm:        %s\n", s.KeyAlgorithm)
-		}
-		if len(s.HealthReasons) > 0 {
-			fmt.Printf("Health Reasons:\n")
-			for _, hr := range s.HealthReasons {
-				fmt.Printf("  - [%s] %s", sanitizeTerminal(hr.Component), sanitizeTerminal(hr.Code))
-				if hr.Message != "" {
-					fmt.Printf(": %s", sanitizeTerminal(hr.Message))
-				}
-				fmt.Println()
-			}
-		}
-		if s.DNA != nil {
-			fmt.Printf("Hostname:         %s\n", s.DNA.Hostname)
-			fmt.Printf("OS:               %s\n", s.DNA.OS)
-			if s.DNA.Architecture != "" {
-				fmt.Printf("Architecture:     %s\n", s.DNA.Architecture)
-			}
-		}
-		if s.TenantID != "" {
-			fmt.Printf("Tenant ID:        %s\n", s.TenantID)
-		}
-		if s.Group != "" {
-			fmt.Printf("Group:            %s\n", s.Group)
-		}
+		printStewardStatus(apiResp.Data)
 	}
 
 	if overallErr != nil && len(matches) == 1 {
@@ -1480,6 +1500,56 @@ func runStewardModules(_ *cobra.Command, args []string) error {
 	return overallErr
 }
 
+// stewardRow is one line of the steward list table.
+type stewardRow struct {
+	ID, Status, Version, Hostname string
+	LastSeen                      time.Time
+	HealthReasons                 []stewardHealthReason
+}
+
+func rowsFromStewardInfos(in []StewardInfo) []stewardRow {
+	rows := make([]stewardRow, len(in))
+	for i, s := range in {
+		rows[i] = stewardRow{ID: s.ID, Status: s.Status, Version: s.Version, LastSeen: s.LastSeen, HealthReasons: s.HealthReasons}
+		if s.DNA != nil {
+			rows[i].Hostname = s.DNA.Hostname
+		}
+	}
+	return rows
+}
+
+func rowsFromStewardEntries(in []stewardEntry) []stewardRow {
+	rows := make([]stewardRow, len(in))
+	for i, s := range in {
+		rows[i] = stewardRow{ID: s.ID, Status: s.Status, Version: s.Version, LastSeen: s.LastSeen, HealthReasons: s.HealthReasons}
+		if s.DNA != nil {
+			rows[i].Hostname = s.DNA.Hostname
+		}
+	}
+	return rows
+}
+
+// printStewardTable writes the `cfg steward list` table for the given stewards.
+func printStewardTable(stewards []stewardRow) error {
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(w, "ID\tSTATUS\tREASONS\tVERSION\tLAST SEEN\tHOSTNAME"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, "--\t------\t-------\t-------\t---------\t--------"); err != nil {
+		return err
+	}
+	for _, s := range stewards {
+		lastSeen := ""
+		if !s.LastSeen.IsZero() {
+			lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
+		}
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Status, formatReasonsColumn(s.HealthReasons), s.Version, lastSeen, s.Hostname); err != nil {
+			return err
+		}
+	}
+	return w.Flush()
+}
+
 func runStewardList(cmd *cobra.Command, args []string) error {
 	client, err := getStewardClient()
 	if err != nil {
@@ -1492,27 +1562,7 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		if _, err := fmt.Fprintln(w, "ID\tSTATUS\tREASONS\tVERSION\tLAST SEEN\tHOSTNAME"); err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintln(w, "--\t------\t-------\t-------\t---------\t--------"); err != nil {
-			return err
-		}
-		for _, s := range matches {
-			hostname := ""
-			if s.DNA != nil {
-				hostname = s.DNA.Hostname
-			}
-			lastSeen := ""
-			if !s.LastSeen.IsZero() {
-				lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
-			}
-			if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Status, formatReasonsColumn(s.HealthReasons), s.Version, lastSeen, hostname); err != nil {
-				return err
-			}
-		}
-		return w.Flush()
+		return printStewardTable(rowsFromStewardInfos(matches))
 	}
 
 	// No-arg path: unchanged GET /api/v1/stewards behavior (backward compatible).
@@ -1544,27 +1594,7 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(w, "ID\tSTATUS\tREASONS\tVERSION\tLAST SEEN\tHOSTNAME"); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintln(w, "--\t------\t-------\t-------\t---------\t--------"); err != nil {
-		return err
-	}
-	for _, s := range apiResp.Data {
-		hostname := ""
-		if s.DNA != nil {
-			hostname = s.DNA.Hostname
-		}
-		lastSeen := ""
-		if !s.LastSeen.IsZero() {
-			lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
-		}
-		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Status, formatReasonsColumn(s.HealthReasons), s.Version, lastSeen, hostname); err != nil {
-			return err
-		}
-	}
-	if err := w.Flush(); err != nil {
+	if err := printStewardTable(rowsFromStewardEntries(apiResp.Data)); err != nil {
 		return err
 	}
 

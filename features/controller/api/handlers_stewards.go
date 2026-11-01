@@ -203,7 +203,6 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			stewardList = append(stewardList, info)
 		}
 		s.attachStewardTags(r.Context(), stewardList)
-		s.attachHealthReasons(r.Context(), stewardList)
 		if paginated {
 			page := paginateStewards(stewardList, limit, offset)
 			s.logger.Info("Listed stewards (selector, paginated)",
@@ -270,7 +269,6 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			stewardList = append(stewardList, info)
 		}
 		s.attachStewardTags(r.Context(), stewardList)
-		s.attachHealthReasons(r.Context(), stewardList)
 		if paginated {
 			page := paginateStewards(stewardList, limit, offset)
 			s.logger.Info("Listed stewards (filtered, paginated)", "count", len(page.Stewards), "total", page.Total)
@@ -380,9 +378,6 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.attachStewardTags(r.Context(), stewardList)
-	for i := range stewardList {
-		stewardList[i].HealthReasons = healthReasonsFromRecord(durable[stewardList[i].ID])
-	}
 
 	if paginated {
 		page := paginateStewards(stewardList, limit, offset)
@@ -395,12 +390,26 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccessResponse(w, stewardList)
 }
 
-// attachStewardTags populates Tags on each already-tenant-scoped list row with a
+// applyDurableRecord copies the facts only the durable record carries (key
+// protection and health reasons) onto the API view. A nil record leaves it
+// unchanged.
+func applyDurableRecord(info *StewardInfo, rec *business.StewardRecord) {
+	if rec == nil {
+		return
+	}
+	info.KeyProtectionLevel = rec.KeyProtectionLevel
+	info.KeyAlgorithm = effectiveKeyAlgorithm(rec.KeyAlgorithm)
+	info.HealthReasons = healthReasonsFromRecord(rec)
+}
+
+// attachStewardTags populates Tags (and, from the durable store, health
+// reasons) on each already-tenant-scoped list row with a
 // single batch read of the tag store, avoiding one request per row (Issue #4595).
 // Tags are looked up only for rows in the list, so a scoped caller never sees tags
 // for stewards outside its visible set. A missing or failing store leaves Tags
 // empty rather than failing the list.
 func (s *Server) attachStewardTags(ctx context.Context, list []StewardInfo) {
+	s.attachHealthReasons(ctx, list)
 	s.mu.RLock()
 	ts := s.tagStore
 	s.mu.RUnlock()
@@ -538,11 +547,7 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 
 	// Key protection comes from the durable record, which the in-memory
 	// attachment does not carry. Read after the tenant check above.
-	if rec := s.durableStewardRecord(r.Context(), stewardID); rec != nil {
-		apiStewardInfo.KeyProtectionLevel = rec.KeyProtectionLevel
-		apiStewardInfo.KeyAlgorithm = effectiveKeyAlgorithm(rec.KeyAlgorithm)
-		apiStewardInfo.HealthReasons = healthReasonsFromRecord(rec)
-	}
+	applyDurableRecord(&apiStewardInfo, s.durableStewardRecord(r.Context(), stewardID))
 
 	// Include DNA information if available
 	if stewardInfo.DNA != nil {

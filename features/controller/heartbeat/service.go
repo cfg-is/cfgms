@@ -294,14 +294,7 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 	status.receivedAt = time.Now()
 	status.Status = string(hb.Status)
 
-	// Convert metrics from map[string]interface{} to map[string]string
-	if hb.Metrics != nil {
-		metrics := make(map[string]string, len(hb.Metrics))
-		for k, v := range hb.Metrics {
-			metrics[k] = fmt.Sprintf("%v", v)
-		}
-		status.Metrics = metrics
-	}
+	status.Metrics = stringifyMetrics(hb.Metrics, status.Metrics)
 
 	status.ActiveSessions = int(hb.ActiveSessions)
 	status.ConnectionState = hb.ConnectionState
@@ -529,4 +522,17 @@ func (s *Service) SetOnFragmentRoot(cb FragmentRootCallback) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onFragmentRoot = cb
+}
+
+// stringifyMetrics converts a heartbeat's metrics from map[string]interface{} to
+// map[string]string. A nil input keeps the previous value.
+func stringifyMetrics(in map[string]interface{}, prev map[string]string) map[string]string {
+	if in == nil {
+		return prev
+	}
+	metrics := make(map[string]string, len(in))
+	for k, v := range in {
+		metrics[k] = fmt.Sprintf("%v", v)
+	}
+	return metrics
 }

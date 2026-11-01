@@ -1027,14 +1027,7 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 // and a set that becomes empty is written once. A failed write is retried on
 // the next heartbeat.
 func (s *ControllerService) RecordHealthReasons(stewardID string, reasons []types.HealthReason) {
-	capped := types.TruncateHealthReasons(reasons)
-	var incoming []business.HealthReasonRecord
-	if len(capped) > 0 {
-		incoming = make([]business.HealthReasonRecord, len(capped))
-		for i, r := range capped {
-			incoming[i] = business.HealthReasonRecord{Component: r.Component, Code: r.Code, Message: r.Message}
-		}
-	}
+	incoming := healthReasonRecords(types.TruncateHealthReasons(reasons))
 
 	s.mu.Lock()
 	if info, ok := s.stewards[stewardID]; ok {
@@ -1045,44 +1038,73 @@ func (s *ControllerService) RecordHealthReasons(stewardID string, reasons []type
 	if s.stewardStore == nil {
 		return
 	}
-	ctx := context.Background()
 	now := time.Now()
+	known, ok := s.knownHealthReasons(stewardID, now)
+	if !ok {
+		return
+	}
+	if !healthReasonsEqual(known, incoming) && !s.persistHealthReasons(stewardID, incoming) {
+		return
+	}
+	s.cacheHealthReasons(stewardID, incoming, now)
+}
 
+// healthReasonRecords converts capped wire reasons to their storage form; nil
+// for an empty set.
+func healthReasonRecords(capped []types.HealthReason) []business.HealthReasonRecord {
+	if len(capped) == 0 {
+		return nil
+	}
+	out := make([]business.HealthReasonRecord, len(capped))
+	for i, r := range capped {
+		out[i] = business.HealthReasonRecord{Component: r.Component, Code: r.Code, Message: r.Message}
+	}
+	return out
+}
+
+// knownHealthReasons returns the set believed persisted for the steward: the
+// cached set while it is fresh, otherwise the durable record's (re-verified so a
+// steward moving between nodes cannot leave a stale set). ok is false when there
+// is no readable durable record; the next heartbeat tries again.
+func (s *ControllerService) knownHealthReasons(stewardID string, now time.Time) (known []business.HealthReasonRecord, ok bool) {
 	s.healthReasonsMu.Lock()
 	state, cached := s.healthReasons[stewardID]
 	s.healthReasonsMu.Unlock()
-
-	known := state.reasons
-	if !cached || now.Sub(state.verifiedAt) >= healthReasonsRecheckInterval {
-		rec, err := s.stewardStore.GetSteward(ctx, stewardID)
-		if err != nil {
-			// No durable record (or an unreadable one): nothing to attach the
-			// reasons to. The next heartbeat tries again.
-			if !errors.Is(err, business.ErrStewardNotFound) {
-				s.logger.Warn("Failed to read steward record for health reasons",
-					"steward_id", logging.SanitizeLogValue(stewardID),
-					"error", logging.SanitizeLogValue(err.Error()))
-			}
-			return
-		}
-		known = rec.HealthReasons
+	if cached && now.Sub(state.verifiedAt) < healthReasonsRecheckInterval {
+		return state.reasons, true
 	}
-
-	if !healthReasonsEqual(known, incoming) {
-		if err := s.stewardStore.SetHealthReasons(ctx, stewardID, incoming); err != nil {
-			s.logger.Warn("Failed to persist steward health reasons",
+	rec, err := s.stewardStore.GetSteward(context.Background(), stewardID)
+	if err != nil {
+		if !errors.Is(err, business.ErrStewardNotFound) {
+			s.logger.Warn("Failed to read steward record for health reasons",
 				"steward_id", logging.SanitizeLogValue(stewardID),
 				"error", logging.SanitizeLogValue(err.Error()))
-			return
 		}
+		return nil, false
 	}
+	return rec.HealthReasons, true
+}
 
+// persistHealthReasons writes the set to the durable record, reporting whether
+// it succeeded. A failed write is retried on the next heartbeat.
+func (s *ControllerService) persistHealthReasons(stewardID string, reasons []business.HealthReasonRecord) bool {
+	if err := s.stewardStore.SetHealthReasons(context.Background(), stewardID, reasons); err != nil {
+		s.logger.Warn("Failed to persist steward health reasons",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return false
+	}
+	return true
+}
+
+// cacheHealthReasons records the set as persisted and verified at the given time.
+func (s *ControllerService) cacheHealthReasons(stewardID string, reasons []business.HealthReasonRecord, at time.Time) {
 	s.healthReasonsMu.Lock()
+	defer s.healthReasonsMu.Unlock()
 	if s.healthReasons == nil {
 		s.healthReasons = make(map[string]healthReasonsState)
 	}
-	s.healthReasons[stewardID] = healthReasonsState{reasons: incoming, verifiedAt: now}
-	s.healthReasonsMu.Unlock()
+	s.healthReasons[stewardID] = healthReasonsState{reasons: reasons, verifiedAt: at}
 }
 
 // healthReasonsEqual reports whether two reason sets are identical in order and
