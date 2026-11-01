@@ -4515,6 +4515,15 @@ pipeline_suite_result_kind() {
     fi
 }
 
+# pipeline_suite_failure_lines prints every line of a failed suite's output that
+# marks a failure (`FAIL ...`, `not ok ...`, `FAIL: ...`), so a failing assertion
+# is not hidden behind the passing lines a bare `tail -20` shows (Issue #5707).
+# Avoids \b, which BSD grep handles inconsistently. grep exits 1 on no match,
+# which must not trip set -e/pipefail.
+pipeline_suite_failure_lines() {
+    printf '%s\n' "$1" | grep -E '^[[:space:]]*(FAIL|not ok)([^[:alnum:]_]|$)|^FAIL:' || true
+}
+
 test_claude_pipeline_suites() {
     # The self-contained suites under .claude/scripts/tests/ (30 as of
     # 2026-09-18, up from the 21 measured 2026-08-20) guard the dispatch
@@ -4611,14 +4620,17 @@ test_claude_pipeline_suites() {
                 ;;
             timeout)
                 log_fail "${base}: timed out after 180s"
+                pipeline_suite_failure_lines "$out"
                 echo "$out" | tail -20
                 ;;
             missing)
                 log_fail "${base}: no exit status recorded — the suite subshell died before writing one"
+                pipeline_suite_failure_lines "$out"
                 echo "$out" | tail -20
                 ;;
             *)
                 log_fail "${base}: exit ${rc}"
+                pipeline_suite_failure_lines "$out"
                 echo "$out" | tail -20
                 ;;
         esac
@@ -4735,14 +4747,17 @@ run_devcontainer_suites() {
                 ;;
             timeout)
                 log_fail "${base}: timed out after 180s"
+                pipeline_suite_failure_lines "$out"
                 echo "$out" | tail -20
                 ;;
             missing)
                 log_fail "${base}: no exit status recorded — the suite subshell died before writing one"
+                pipeline_suite_failure_lines "$out"
                 echo "$out" | tail -20
                 ;;
             *)
                 log_fail "${base}: exit ${rc}"
+                pipeline_suite_failure_lines "$out"
                 echo "$out" | tail -20
                 ;;
         esac
@@ -4852,6 +4867,50 @@ test_devcontainer_suite_skip_status() {
     fi
 
     log_pass "run_devcontainer_suites: exit 77 is a skip, other non-zero statuses still fail"
+}
+
+# Issue #5707: a failed parallel suite must print its failing assertion lines
+# ahead of the tail, and a passing one nothing extra.
+test_parallel_suite_failure_lines_printed() {
+    log_test "Testing parallel suite failure reporting prints failing assertion lines..."
+
+    local fake
+    fake=$(printf '  FAIL  alpha\n'; for _ in $(seq 1 30); do printf '  ok\n'; done
+           printf 'not ok 3 beta\n'; for _ in $(seq 1 30); do printf '  ok\n'; done
+           printf 'FAIL: gamma\n'; for _ in $(seq 1 30); do printf '  ok\n'; done)
+    local report want
+    report=$(pipeline_suite_failure_lines "$fake"; echo "$fake" | tail -20)
+    for want in "FAIL  alpha" "not ok 3 beta" "FAIL: gamma"; do
+        if ! grep -qF -- "$want" <<<"$report"; then
+            log_fail "failure report is missing '${want}'"
+            return
+        fi
+    done
+
+    local okout helper_out
+    okout=$(for _ in $(seq 1 30); do printf '  ok\n'; done; printf 'FAILED_OVER is fine\n')
+    helper_out=$(pipeline_suite_failure_lines "$okout")
+    if [[ -n "$helper_out" ]]; then
+        log_fail "helper printed output for a suite with no failure lines: ${helper_out}"
+        return
+    fi
+
+    local runner body pass_arm fail_calls
+    for runner in test_claude_pipeline_suites run_devcontainer_suites; do
+        body=$(declare -f "$runner")
+        pass_arm=$(awk '/^ +pass\)$/{f=1;next} /;;$/{f=0} f' <<<"$body")
+        if grep -q pipeline_suite_failure_lines <<<"$pass_arm"; then
+            log_fail "${runner}: pass arm calls the failure-report helper"
+            return
+        fi
+        fail_calls=$(grep -c 'pipeline_suite_failure_lines "\$out"' <<<"$body" || true)
+        if [[ "$fail_calls" != "3" ]]; then
+            log_fail "${runner}: expected 3 failure-arm helper calls (timeout, missing, fail), found ${fail_calls}"
+            return
+        fi
+    done
+
+    log_pass "parallel suite failure reporting: failing lines printed, passing suites silent"
 }
 
 # Regression guard for Makefile's test-framework-api-sharded (Issue #4151):
@@ -5906,6 +5965,7 @@ DISPATCH_TABLE=(
     "test_api_shard_aggregation_fails_closed:core"
     "test_api_shard_count_rejects_non_integer:core"
     "test_pipeline_suite_result_fails_closed:core"
+    "test_parallel_suite_failure_lines_printed:core"
     "test_claude_pipeline_suites:claude-tooling"
     "test_devcontainer_suite_discovery:devinfra"
     "test_devcontainer_suite_skip_status:devinfra"
