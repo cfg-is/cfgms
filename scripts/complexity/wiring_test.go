@@ -75,5 +75,5 @@ func TestWiringProtectedPaths(t *testing.T) {
 	assert.Contains(t, repoFile(t, ".claude/agents/acceptance-reviewer.md"), "scripts/complexity/")
 	claude := repoFile(t, "CLAUDE.md")
 	assert.Contains(t, claude, "scripts/complexity/manifest.json")
-	assert.Contains(t, claude, "scripts/complexity/baselines/")
+	assert.Contains(t, claude, "scripts/complexity/analyzer/")
 }

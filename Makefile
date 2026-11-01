@@ -1473,7 +1473,7 @@ test-commit: test lint lint-log-injection check-license-headers security-precomm
 	@echo "- ✅ Architecture compliance passed (no central provider violations)"
 	@echo "- ✅ Stdlib payload boundary validated (all five sources agree)"
 	@echo "- ✅ Stdlib completeness validated (ADR-016 clause 6)"
-	@echo "- ✅ Complexity gate passed (no worsening against the ratchet baseline)"
+	@echo "- ✅ Complexity gate passed (no worsening against the merge-base)"
 	@echo "- ✅ Security scanning passed (vulnerabilities)"
 	@echo ""
 	@echo "🎯 Code is validated and ready for commit/PR"
