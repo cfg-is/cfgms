@@ -770,12 +770,7 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 					return
 				case <-time.After(backoff):
 				}
-				if backoff < maxBackoff {
-					backoff *= 2
-					if backoff > maxBackoff {
-						backoff = maxBackoff
-					}
-				}
+				backoff = nextConnectBackoff(backoff, maxBackoff)
 			}
 		}()
 
@@ -2587,6 +2582,18 @@ type refreshedCredential struct {
 	priorCAPin string
 }
 
+// nextConnectBackoff doubles the connect-retry backoff, capped at maxBackoff.
+func nextConnectBackoff(backoff, maxBackoff time.Duration) time.Duration {
+	if backoff >= maxBackoff {
+		return maxBackoff
+	}
+	backoff *= 2
+	if backoff > maxBackoff {
+		return maxBackoff
+	}
+	return backoff
+}
+
 // requestRefreshedCredential runs the device-key proof-of-possession exchange
 // shared by boot re-admission and in-process renewal: challenge, proof, a fresh
 // mTLS keypair carried in a CSR, and the controller's signed certificate. It
@@ -2626,105 +2633,22 @@ func requestRefreshedCredential(
 	if err != nil {
 		return nil, err
 	}
+	proof := refreshProof{nonce: nonce, serverTS: serverTS, pop: pop}
 
-	exchangeCtx, exchangeCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer exchangeCancel()
-
-	var completeResp *registration.RefreshCompleteResponse
-	var renewedKeyPEM string
-	pending, pendingErr := loadRefreshPendingState(certStoreDir)
-	if pendingErr != nil {
-		logger.Warn("Discarding unreadable pending re-admission state", "error", logging.SanitizeLogValue(pendingErr.Error()))
-		_ = clearRefreshPendingState(certStoreDir)
+	completeResp, renewedKeyPEM, err := exchangeRefresh(ctx, httpClient, ks, certStoreDir, tenantID, proof, logger)
+	if err != nil {
+		return nil, err
 	}
-	if pending != nil {
-		completeResp, err = httpClient.RefreshClaim(exchangeCtx, ks.DeviceID(), pending.PendingID, nonce, serverTS, pop, hostAttributes())
-		switch {
-		case err == nil:
-			renewedKeyPEM = pending.ClientKeyPEM
-		case errors.Is(err, registration.ErrRefreshPending):
-			logger.Info("Re-admission is pending operator approval",
-				"pending_id", logging.SanitizeLogValue(pending.PendingID))
-			return nil, err
-		case errors.Is(err, registration.ErrRefreshRejected), errors.Is(err, registration.ErrRefreshNotAvailable):
-			// Rejected, expired or already collected: the next cycle files a new
-			// request, so a later policy change or approval can still admit it.
-			_ = clearRefreshPendingState(certStoreDir)
-			return nil, err
-		default:
-			return nil, fmt.Errorf("collect pending re-admission: %w", err)
-		}
-	} else {
-		completeResp, renewedKeyPEM, err = completeRefreshWithFreshKeypair(
-			exchangeCtx, httpClient, ks.DeviceID(), tenantID, nonce, serverTS, pop, hostAttributes())
-		if err != nil {
-			var queued *registration.RefreshPendingError
-			if errors.As(err, &queued) && queued.PendingID != "" && renewedKeyPEM != "" {
-				if saveErr := saveRefreshPendingState(certStoreDir, PendingState{PendingID: queued.PendingID, ClientKeyPEM: renewedKeyPEM}); saveErr != nil {
-					logger.Warn("Failed to persist pending re-admission; the next cycle files a new request",
-						"error", logging.SanitizeLogValue(saveErr.Error()))
-				}
-				logger.Info("Re-admission queued for operator approval",
-					"pending_id", logging.SanitizeLogValue(queued.PendingID))
-			}
-			return nil, err
-		}
-	}
-	_ = clearRefreshPendingState(certStoreDir)
 
 	logger.Info("Re-admission approved; storing new certificate",
 		"steward_id", logging.SanitizeLogValue(stewardID))
 
-	// Preserve the stored trust mode — the trust anchor is already established,
-	// matching registerAndConnect's reconnect semantics. With no stored identity
-	// the configured trust source applies.
-	refreshTrustSrc := trustSrc
-	priorCAPin := ""
-	if id != nil {
-		if stored := trustSourceFromMode(id.TrustMode); stored != 0 {
-			refreshTrustSrc = stored
-		}
-		priorCAPin = id.CAPinFingerprint
-		// Trust downgrade guard (Issue #4324 item 5): reject a CA swap against the
-		// fingerprint already pinned in id.
-		if dgErr := checkTrustDowngrade(refreshTrustSrc, completeResp.CACert, id); dgErr != nil {
-			return nil, fmt.Errorf("re-admission rejected: %w", dgErr)
-		}
-	}
-	if refreshTrustSrc == 0 {
-		refreshTrustSrc = trustSourceCompileBaked
+	refreshTrustSrc, priorCAPin, err := resolveRefreshTrust(trustSrc, id, completeResp.CACert)
+	if err != nil {
+		return nil, err
 	}
 
-	bundle := approvedRegistration{
-		StewardID:        completeResp.StewardID,
-		TenantID:         completeResp.TenantID,
-		TransportAddress: completeResp.TransportAddress,
-		ClientCert:       completeResp.ClientCert,
-		ClientKey:        renewedKeyPEM,
-		CACert:           completeResp.CACert,
-		ServerCert:       completeResp.ServerCert,
-		IssuerChain:      completeResp.IssuerChain,
-	}
-	// The stored identity stays authoritative for anything the response omits
-	// (older controllers send no identity fields or transport address).
-	if id != nil {
-		bundle.StewardID, bundle.TenantID = id.StewardID, id.TenantID
-		if bundle.TransportAddress == "" {
-			bundle.TransportAddress = id.TransportAddress
-		}
-		if bundle.ServerCert == "" {
-			bundle.ServerCert = id.ServerCertPEM
-		}
-		// A certificate-only response (a tampered steward's) omits the CA and
-		// signing certificate: the stored values stay, so an empty CA is never
-		// persisted over the pinned one.
-		if bundle.CACert == "" {
-			bundle.CACert = id.CACertPEM
-		}
-		if bundle.SigningCert == "" {
-			bundle.SigningCert = id.SigningCertPEM
-		}
-	}
+	bundle := refreshedBundle(completeResp, renewedKeyPEM, id)
 	if bundle.StewardID == "" || bundle.TransportAddress == "" {
 		return nil, fmt.Errorf("re-admission response lacks the steward identity or transport address needed without a stored identity")
 	}
@@ -2734,6 +2658,162 @@ func requestRefreshedCredential(
 		pinCAPEM = installCAPEM
 	}
 	return &refreshedCredential{bundle: bundle, trustSrc: refreshTrustSrc, pinCAPEM: pinCAPEM, priorCAPin: priorCAPin}, nil
+}
+
+// refreshProof is the signed answer to one refresh challenge.
+type refreshProof struct {
+	nonce    string
+	serverTS int64
+	pop      []byte
+}
+
+// exchangeRefresh collects a previously filed re-admission request when one is
+// pending, and otherwise files a new one with a freshly generated mTLS keypair.
+// On success the pending state is cleared and the signed response is returned
+// with the private key that matches its certificate.
+func exchangeRefresh(
+	ctx context.Context,
+	httpClient *registration.HTTPClient,
+	ks identity.KeyStore,
+	certStoreDir, tenantID string,
+	proof refreshProof,
+	logger logging.Logger,
+) (*registration.RefreshCompleteResponse, string, error) {
+	exchangeCtx, exchangeCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer exchangeCancel()
+
+	pending, pendingErr := loadRefreshPendingState(certStoreDir)
+	if pendingErr != nil {
+		logger.Warn("Discarding unreadable pending re-admission state", "error", logging.SanitizeLogValue(pendingErr.Error()))
+		_ = clearRefreshPendingState(certStoreDir)
+	}
+	var completeResp *registration.RefreshCompleteResponse
+	var renewedKeyPEM string
+	var err error
+	if pending != nil {
+		completeResp, renewedKeyPEM, err = collectPendingRefresh(exchangeCtx, httpClient, ks, certStoreDir, pending, proof, logger)
+	} else {
+		completeResp, renewedKeyPEM, err = fileFreshRefresh(exchangeCtx, httpClient, ks, certStoreDir, tenantID, proof, logger)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	_ = clearRefreshPendingState(certStoreDir)
+	return completeResp, renewedKeyPEM, nil
+}
+
+// collectPendingRefresh claims a re-admission request filed by an earlier cycle.
+func collectPendingRefresh(
+	ctx context.Context,
+	httpClient *registration.HTTPClient,
+	ks identity.KeyStore,
+	certStoreDir string,
+	pending *PendingState,
+	proof refreshProof,
+	logger logging.Logger,
+) (*registration.RefreshCompleteResponse, string, error) {
+	completeResp, err := httpClient.RefreshClaim(ctx, ks.DeviceID(), pending.PendingID, proof.nonce, proof.serverTS, proof.pop, hostAttributes())
+	switch {
+	case err == nil:
+		return completeResp, pending.ClientKeyPEM, nil
+	case errors.Is(err, registration.ErrRefreshPending):
+		logger.Info("Re-admission is pending operator approval",
+			"pending_id", logging.SanitizeLogValue(pending.PendingID))
+		return nil, "", err
+	case errors.Is(err, registration.ErrRefreshRejected), errors.Is(err, registration.ErrRefreshNotAvailable):
+		// Rejected, expired or already collected: the next cycle files a new
+		// request, so a later policy change or approval can still admit it.
+		_ = clearRefreshPendingState(certStoreDir)
+		return nil, "", err
+	default:
+		return nil, "", fmt.Errorf("collect pending re-admission: %w", err)
+	}
+}
+
+// fileFreshRefresh files a new re-admission request carrying a CSR for a freshly
+// generated mTLS keypair. A request queued for operator approval is persisted so
+// the next cycle collects it with the same key.
+func fileFreshRefresh(
+	ctx context.Context,
+	httpClient *registration.HTTPClient,
+	ks identity.KeyStore,
+	certStoreDir, tenantID string,
+	proof refreshProof,
+	logger logging.Logger,
+) (*registration.RefreshCompleteResponse, string, error) {
+	completeResp, renewedKeyPEM, err := completeRefreshWithFreshKeypair(
+		ctx, httpClient, ks.DeviceID(), tenantID, proof.nonce, proof.serverTS, proof.pop, hostAttributes())
+	if err == nil {
+		return completeResp, renewedKeyPEM, nil
+	}
+	var queued *registration.RefreshPendingError
+	if errors.As(err, &queued) && queued.PendingID != "" && renewedKeyPEM != "" {
+		if saveErr := saveRefreshPendingState(certStoreDir, PendingState{PendingID: queued.PendingID, ClientKeyPEM: renewedKeyPEM}); saveErr != nil {
+			logger.Warn("Failed to persist pending re-admission; the next cycle files a new request",
+				"error", logging.SanitizeLogValue(saveErr.Error()))
+		}
+		logger.Info("Re-admission queued for operator approval",
+			"pending_id", logging.SanitizeLogValue(queued.PendingID))
+	}
+	return nil, "", err
+}
+
+// resolveRefreshTrust preserves the stored trust mode — the trust anchor is
+// already established, matching registerAndConnect's reconnect semantics. With
+// no stored identity the configured trust source applies. It also rejects a CA
+// swap against the fingerprint already pinned in id (Issue #4324 item 5).
+func resolveRefreshTrust(trustSrc TrustSource, id *StewardIdentity, responseCACert string) (TrustSource, string, error) {
+	refreshTrustSrc := trustSrc
+	priorCAPin := ""
+	if id != nil {
+		if stored := trustSourceFromMode(id.TrustMode); stored != 0 {
+			refreshTrustSrc = stored
+		}
+		priorCAPin = id.CAPinFingerprint
+		if dgErr := checkTrustDowngrade(refreshTrustSrc, responseCACert, id); dgErr != nil {
+			return 0, "", fmt.Errorf("re-admission rejected: %w", dgErr)
+		}
+	}
+	if refreshTrustSrc == 0 {
+		refreshTrustSrc = trustSourceCompileBaked
+	}
+	return refreshTrustSrc, priorCAPin, nil
+}
+
+// refreshedBundle builds the credential bundle from a refresh response. The
+// stored identity stays authoritative for anything the response omits (older
+// controllers send no identity fields or transport address).
+func refreshedBundle(resp *registration.RefreshCompleteResponse, clientKeyPEM string, id *StewardIdentity) approvedRegistration {
+	bundle := approvedRegistration{
+		StewardID:        resp.StewardID,
+		TenantID:         resp.TenantID,
+		TransportAddress: resp.TransportAddress,
+		ClientCert:       resp.ClientCert,
+		ClientKey:        clientKeyPEM,
+		CACert:           resp.CACert,
+		ServerCert:       resp.ServerCert,
+		IssuerChain:      resp.IssuerChain,
+	}
+	if id == nil {
+		return bundle
+	}
+	bundle.StewardID, bundle.TenantID = id.StewardID, id.TenantID
+	bundle.TransportAddress = firstNonEmpty(bundle.TransportAddress, id.TransportAddress)
+	bundle.ServerCert = firstNonEmpty(bundle.ServerCert, id.ServerCertPEM)
+	// A certificate-only response (a tampered steward's) omits the CA and
+	// signing certificate: the stored values stay, so an empty CA is never
+	// persisted over the pinned one.
+	bundle.CACert = firstNonEmpty(bundle.CACert, id.CACertPEM)
+	bundle.SigningCert = firstNonEmpty(bundle.SigningCert, id.SigningCertPEM)
+	return bundle
+}
+
+// firstNonEmpty returns v when set, and fallback otherwise.
+func firstNonEmpty(v, fallback string) string {
+	if v != "" {
+		return v
+	}
+	return fallback
 }
 
 // renewIntoCertStore renews the client certificate of a steward that is already
