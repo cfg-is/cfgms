@@ -19,6 +19,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { apiFetch } from '../api/client.ts'
 import { useTenantScope } from '../shell/TenantScopeContext.tsx'
 import type { Steward, StewardPage } from './columns.ts'
+import type { HealthReason } from './health.ts'
 
 export interface UseStewardsResult {
   page: StewardPage | null
@@ -30,6 +31,24 @@ export interface UseStewardsResult {
   retry: () => void
 }
 
+/** Validate health_reasons (untrusted wire data); malformed entries are dropped. */
+export function parseHealthReasons(value: unknown): HealthReason[] {
+  if (!Array.isArray(value)) return []
+  const reasons: HealthReason[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const r = entry as Record<string, unknown>
+    if (typeof r.code !== 'string' || r.code === '') continue
+    const reason: HealthReason = {
+      component: typeof r.component === 'string' ? r.component : '',
+      code: r.code,
+    }
+    if (typeof r.message === 'string' && r.message !== '') reason.message = r.message
+    reasons.push(reason)
+  }
+  return reasons
+}
+
 function parseSteward(value: unknown): Steward | null {
   if (typeof value !== 'object' || value === null) return null
   const record = value as Record<string, unknown>
@@ -39,6 +58,8 @@ function parseSteward(value: unknown): Steward | null {
   if (typeof record.last_seen === 'string') steward.last_seen = record.last_seen
   if (typeof record.version === 'string') steward.version = record.version
   if (typeof record.hidden === 'boolean') steward.hidden = record.hidden
+  const healthReasons = parseHealthReasons(record.health_reasons)
+  if (healthReasons.length > 0) steward.health_reasons = healthReasons
   if (Array.isArray(record.tags)) {
     const tags = record.tags.filter((t): t is string => typeof t === 'string')
     if (tags.length > 0) steward.tags = tags

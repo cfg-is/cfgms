@@ -13,7 +13,7 @@
  * the parent opens the asset-DNA drawer for the selected steward.
  */
 import { useEffect, useRef } from 'react'
-import { deriveHealth, formatLastSeen } from './health.ts'
+import { deriveHealth, formatHealthReasons, formatLastSeen } from './health.ts'
 import type { ColumnDef, Steward } from './columns.ts'
 import { stewardDisplayName } from './columns.ts'
 import RowActionMenu from './RowActionMenu.tsx'
@@ -100,12 +100,23 @@ function Cell({
   }
   if (column.kind === 'health') {
     const health = deriveHealth(steward.status, steward.last_seen, nowMs)
+    const reasonText = formatHealthReasons(steward.health_reasons)
+    const reasonCodes = (steward.health_reasons ?? []).map((r) => r.code).join(', ')
     return (
       <td className={`c-${column.key}`} onClick={onRowSelect}>
-        <span className={`pill ${health.tone}`}>
+        <span className={`pill ${health.tone}`} title={reasonText || undefined}>
           <span className="dot" />
           {health.label}
         </span>
+        {reasonCodes && (
+          <span
+            className="mut health-reasons"
+            data-testid="health-reasons"
+            style={{ marginLeft: 'var(--space-2)' }}
+          >
+            {reasonCodes}
+          </span>
+        )}
       </td>
     )
   }

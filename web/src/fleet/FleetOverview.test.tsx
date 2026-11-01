@@ -51,6 +51,7 @@ interface StewardSpec {
   attributes?: Record<string, string>
   version?: string
   tags?: string[]
+  health_reasons?: { component: string; code: string; message?: string }[]
 }
 
 function makeSteward(spec: StewardSpec): Steward {
@@ -64,6 +65,7 @@ function makeSteward(spec: StewardSpec): Steward {
     last_seen: lastSeen,
     version: spec.version ?? 'v0.42',
     ...(spec.tags ? { tags: spec.tags } : {}),
+    ...(spec.health_reasons ? { health_reasons: spec.health_reasons } : {}),
     dna: {
       hostname: spec.hostname ?? spec.id,
       os: 'linux',
@@ -511,6 +513,55 @@ describe('health column', () => {
     expect(screen.getByText('Degraded').className).toContain('warn')
     expect(screen.getByText('Unreachable').className).toContain('crit')
     expect(screen.getByText('Registered').className).toContain('neutral')
+  })
+})
+
+describe('health reasons and tampered state', () => {
+  it('renders a TAMPERED crit badge above healthy rows', async () => {
+    mockFleet([
+      makeSteward({ id: 't1', hostname: 'tamper-host', status: 'tampered' }),
+      makeSteward({ id: 'h1', hostname: 'ok-host', status: 'active' }),
+    ])
+    renderFleet()
+    await screen.findByRole('table')
+    const badge = screen.getByText('TAMPERED')
+    expect(badge.className).toContain('crit')
+    const rows = screen.getAllByRole('row')
+    expect(rows[1]!.textContent).toContain('TAMPERED')
+    expect(rows[2]!.textContent).toContain('Healthy')
+  })
+
+  it('shows reason codes and tooltip for a steward with reasons, nothing for one without', async () => {
+    mockFleet([
+      makeSteward({
+        id: 'r1',
+        hostname: 'reason-host',
+        status: 'degraded',
+        health_reasons: [{ component: 'disk', code: 'disk.low', message: '2% free' }],
+      }),
+      makeSteward({ id: 'n1', hostname: 'plain-host', status: 'active' }),
+    ])
+    renderFleet()
+    await screen.findByRole('table')
+    expect(screen.getAllByTestId('health-reasons')).toHaveLength(1)
+    expect(screen.getByText('disk.low')).toBeInTheDocument()
+    expect(screen.getByText('Degraded').getAttribute('title')).toBe('disk.low: 2% free')
+    expect(screen.getByText('Healthy').hasAttribute('title')).toBe(false)
+  })
+
+  it('renders a reason containing markup as text, not elements', async () => {
+    mockFleet([
+      makeSteward({
+        id: 'x1',
+        hostname: 'x-host',
+        status: 'degraded',
+        health_reasons: [{ component: 'c', code: '<img src=x onerror=alert(1)>', message: '<b>m</b>' }],
+      }),
+    ])
+    const { container } = renderFleet()
+    await screen.findByRole('table')
+    expect(screen.getByTestId('health-reasons').textContent).toBe('<img src=x onerror=alert(1)>')
+    expect(container.querySelector('img')).toBeNull()
   })
 })
 
