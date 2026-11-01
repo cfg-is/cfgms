@@ -303,6 +303,13 @@ func heartbeatToProto(hb *types.Heartbeat) *transportpb.Heartbeat {
 		ActiveSessions:  hb.ActiveSessions,
 		ConnectionState: hb.ConnectionState,
 	}
+	for _, r := range types.TruncateHealthReasons(hb.Reasons) {
+		pb.Reasons = append(pb.Reasons, &transportpb.HealthReason{
+			Component: r.Component,
+			Code:      r.Code,
+			Message:   r.Message,
+		})
+	}
 	// Merge Metrics and DNAAggregateRoot into pb.Metrics.
 	// DNAAggregateRoot is side-channelled through the Metrics map because the
 	// transportpb.Heartbeat message cannot be regenerated in this build environment
@@ -343,6 +350,21 @@ func heartbeatFromProto(pb *transportpb.Heartbeat) *types.Heartbeat {
 		DNAHash:         pb.GetDnaHash(),
 		ActiveSessions:  pb.GetActiveSessions(),
 		ConnectionState: pb.GetConnectionState(),
+	}
+	if raw := pb.GetReasons(); len(raw) > 0 {
+		// Re-truncate: the steward is untrusted. Bound the slice before copying.
+		if len(raw) > types.MaxHealthReasons {
+			raw = raw[:types.MaxHealthReasons]
+		}
+		reasons := make([]types.HealthReason, 0, len(raw))
+		for _, r := range raw {
+			reasons = append(reasons, types.HealthReason{
+				Component: r.GetComponent(),
+				Code:      r.GetCode(),
+				Message:   r.GetMessage(),
+			})
+		}
+		hb.Reasons = types.TruncateHealthReasons(reasons)
 	}
 	// Extract DNAAggregateRoot and DNABulkRoot from Metrics (side-channelled in
 	// heartbeatToProto). Remaining Metrics are surfaced as hb.Metrics.

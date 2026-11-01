@@ -676,8 +676,11 @@ type Heartbeat struct {
 	DnaHash         string                 `protobuf:"bytes,7,opt,name=dna_hash,json=dnaHash,proto3" json:"dna_hash,omitempty"`                         // for hash-based sync detection
 	ActiveSessions  int32                  `protobuf:"varint,8,opt,name=active_sessions,json=activeSessions,proto3" json:"active_sessions,omitempty"`   // number of active control-channel streams (1 when connected, 0 otherwise)
 	ConnectionState string                 `protobuf:"bytes,9,opt,name=connection_state,json=connectionState,proto3" json:"connection_state,omitempty"` // steward connection state ("connected", "disconnected", "connecting", "reconnecting")
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Machine-readable reasons the steward is not healthy (empty when healthy).
+	// Steward-controlled and untrusted: the receiver re-truncates every field.
+	Reasons       []*HealthReason `protobuf:"bytes,11,rep,name=reasons,proto3" json:"reasons,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -773,6 +776,74 @@ func (x *Heartbeat) GetConnectionState() string {
 	return ""
 }
 
+func (x *Heartbeat) GetReasons() []*HealthReason {
+	if x != nil {
+		return x.Reasons
+	}
+	return nil
+}
+
+// HealthReason explains one reason a steward reports a non-healthy status.
+type HealthReason struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Component     string                 `protobuf:"bytes,1,opt,name=component,proto3" json:"component,omitempty"` // reporting component, <= 64 bytes
+	Code          string                 `protobuf:"bytes,2,opt,name=code,proto3" json:"code,omitempty"`           // machine-readable code, <= 64 bytes
+	Message       string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`     // short fixed text, <= 256 bytes
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HealthReason) Reset() {
+	*x = HealthReason{}
+	mi := &file_transport_control_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HealthReason) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HealthReason) ProtoMessage() {}
+
+func (x *HealthReason) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_control_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HealthReason.ProtoReflect.Descriptor instead.
+func (*HealthReason) Descriptor() ([]byte, []int) {
+	return file_transport_control_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *HealthReason) GetComponent() string {
+	if x != nil {
+		return x.Component
+	}
+	return ""
+}
+
+func (x *HealthReason) GetCode() string {
+	if x != nil {
+		return x.Code
+	}
+	return ""
+}
+
+func (x *HealthReason) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 // Response is sent from steward to controller for command acknowledgment.
 type Response struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -788,7 +859,7 @@ type Response struct {
 
 func (x *Response) Reset() {
 	*x = Response{}
-	mi := &file_transport_control_proto_msgTypes[4]
+	mi := &file_transport_control_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -800,7 +871,7 @@ func (x *Response) String() string {
 func (*Response) ProtoMessage() {}
 
 func (x *Response) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_control_proto_msgTypes[4]
+	mi := &file_transport_control_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -813,7 +884,7 @@ func (x *Response) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Response.ProtoReflect.Descriptor instead.
 func (*Response) Descriptor() ([]byte, []int) {
-	return file_transport_control_proto_rawDescGZIP(), []int{4}
+	return file_transport_control_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Response) GetCommandId() string {
@@ -896,7 +967,7 @@ const file_transport_control_proto_rawDesc = "" +
 	"\bseverity\x18\b \x01(\x0e2\x19.cfgms.transport.SeverityR\bseverity\x1a:\n" +
 	"\fDetailsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe1\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9a\x04\n" +
 	"\tHeartbeat\x12\x1d\n" +
 	"\n" +
 	"steward_id\x18\x01 \x01(\tR\tstewardId\x12\x1b\n" +
@@ -907,11 +978,16 @@ const file_transport_control_proto_rawDesc = "" +
 	"\aversion\x18\x06 \x01(\tR\aversion\x12\x19\n" +
 	"\bdna_hash\x18\a \x01(\tR\adnaHash\x12'\n" +
 	"\x0factive_sessions\x18\b \x01(\x05R\x0eactiveSessions\x12)\n" +
-	"\x10connection_state\x18\t \x01(\tR\x0fconnectionState\x1a:\n" +
+	"\x10connection_state\x18\t \x01(\tR\x0fconnectionState\x127\n" +
+	"\areasons\x18\v \x03(\v2\x1d.cfgms.transport.HealthReasonR\areasons\x1a:\n" +
 	"\fMetricsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\n" +
-	"\x10\vR\x18signing_payload_versions\"\xb4\x02\n" +
+	"\x10\vR\x18signing_payload_versions\"Z\n" +
+	"\fHealthReason\x12\x1c\n" +
+	"\tcomponent\x18\x01 \x01(\tR\tcomponent\x12\x12\n" +
+	"\x04code\x18\x02 \x01(\tR\x04code\x12\x18\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\"\xb4\x02\n" +
 	"\bResponse\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x1d\n" +
@@ -986,7 +1062,7 @@ func file_transport_control_proto_rawDescGZIP() []byte {
 }
 
 var file_transport_control_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_transport_control_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_transport_control_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_transport_control_proto_goTypes = []any{
 	(CommandType)(0),              // 0: cfgms.transport.CommandType
 	(EventType)(0),                // 1: cfgms.transport.EventType
@@ -996,35 +1072,37 @@ var file_transport_control_proto_goTypes = []any{
 	(*Command)(nil),               // 5: cfgms.transport.Command
 	(*Event)(nil),                 // 6: cfgms.transport.Event
 	(*Heartbeat)(nil),             // 7: cfgms.transport.Heartbeat
-	(*Response)(nil),              // 8: cfgms.transport.Response
-	nil,                           // 9: cfgms.transport.Command.ParamsEntry
-	nil,                           // 10: cfgms.transport.Event.DetailsEntry
-	nil,                           // 11: cfgms.transport.Heartbeat.MetricsEntry
-	nil,                           // 12: cfgms.transport.Response.DetailsEntry
-	(*timestamppb.Timestamp)(nil), // 13: google.protobuf.Timestamp
+	(*HealthReason)(nil),          // 8: cfgms.transport.HealthReason
+	(*Response)(nil),              // 9: cfgms.transport.Response
+	nil,                           // 10: cfgms.transport.Command.ParamsEntry
+	nil,                           // 11: cfgms.transport.Event.DetailsEntry
+	nil,                           // 12: cfgms.transport.Heartbeat.MetricsEntry
+	nil,                           // 13: cfgms.transport.Response.DetailsEntry
+	(*timestamppb.Timestamp)(nil), // 14: google.protobuf.Timestamp
 }
 var file_transport_control_proto_depIdxs = []int32{
 	5,  // 0: cfgms.transport.ControlMessage.command:type_name -> cfgms.transport.Command
 	6,  // 1: cfgms.transport.ControlMessage.event:type_name -> cfgms.transport.Event
 	7,  // 2: cfgms.transport.ControlMessage.heartbeat:type_name -> cfgms.transport.Heartbeat
-	8,  // 3: cfgms.transport.ControlMessage.response:type_name -> cfgms.transport.Response
+	9,  // 3: cfgms.transport.ControlMessage.response:type_name -> cfgms.transport.Response
 	0,  // 4: cfgms.transport.Command.type:type_name -> cfgms.transport.CommandType
-	13, // 5: cfgms.transport.Command.timestamp:type_name -> google.protobuf.Timestamp
-	9,  // 6: cfgms.transport.Command.params:type_name -> cfgms.transport.Command.ParamsEntry
+	14, // 5: cfgms.transport.Command.timestamp:type_name -> google.protobuf.Timestamp
+	10, // 6: cfgms.transport.Command.params:type_name -> cfgms.transport.Command.ParamsEntry
 	1,  // 7: cfgms.transport.Event.type:type_name -> cfgms.transport.EventType
-	13, // 8: cfgms.transport.Event.timestamp:type_name -> google.protobuf.Timestamp
-	10, // 9: cfgms.transport.Event.details:type_name -> cfgms.transport.Event.DetailsEntry
+	14, // 8: cfgms.transport.Event.timestamp:type_name -> google.protobuf.Timestamp
+	11, // 9: cfgms.transport.Event.details:type_name -> cfgms.transport.Event.DetailsEntry
 	2,  // 10: cfgms.transport.Event.severity:type_name -> cfgms.transport.Severity
 	3,  // 11: cfgms.transport.Heartbeat.status:type_name -> cfgms.transport.StewardStatus
-	13, // 12: cfgms.transport.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
-	11, // 13: cfgms.transport.Heartbeat.metrics:type_name -> cfgms.transport.Heartbeat.MetricsEntry
-	13, // 14: cfgms.transport.Response.timestamp:type_name -> google.protobuf.Timestamp
-	12, // 15: cfgms.transport.Response.details:type_name -> cfgms.transport.Response.DetailsEntry
-	16, // [16:16] is the sub-list for method output_type
-	16, // [16:16] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	14, // 12: cfgms.transport.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
+	12, // 13: cfgms.transport.Heartbeat.metrics:type_name -> cfgms.transport.Heartbeat.MetricsEntry
+	8,  // 14: cfgms.transport.Heartbeat.reasons:type_name -> cfgms.transport.HealthReason
+	14, // 15: cfgms.transport.Response.timestamp:type_name -> google.protobuf.Timestamp
+	13, // 16: cfgms.transport.Response.details:type_name -> cfgms.transport.Response.DetailsEntry
+	17, // [17:17] is the sub-list for method output_type
+	17, // [17:17] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_transport_control_proto_init() }
@@ -1044,7 +1122,7 @@ func file_transport_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transport_control_proto_rawDesc), len(file_transport_control_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   9,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

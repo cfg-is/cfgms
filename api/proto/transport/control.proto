@@ -140,6 +140,16 @@ message Heartbeat {
   // The controller signs every command over v2 (#5285), so it is retired.
   reserved 10;
   reserved "signing_payload_versions";
+  // Machine-readable reasons the steward is not healthy (empty when healthy).
+  // Steward-controlled and untrusted: the receiver re-truncates every field.
+  repeated HealthReason reasons = 11;
+}
+
+// HealthReason explains one reason a steward reports a non-healthy status.
+message HealthReason {
+  string component = 1;  // reporting component, <= 64 bytes
+  string code = 2;       // machine-readable code, <= 64 bytes
+  string message = 3;    // short fixed text, <= 256 bytes
 }
 
 // Response is sent from steward to controller for command acknowledgment.

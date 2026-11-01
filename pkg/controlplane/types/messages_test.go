@@ -3,8 +3,10 @@
 package types
 
 import (
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -259,4 +261,25 @@ func TestCommandSigningBytesVersion_UnknownVersionRejected(t *testing.T) {
 		_, err := CommandSigningBytesVersion(&cmd, nil, v)
 		assert.ErrorIs(t, err, ErrUnknownSigningPayloadVersion, "version %d", v)
 	}
+}
+
+func TestIsTamperCode(t *testing.T) {
+	for _, c := range []string{
+		ReasonCodeTamperDataDir, ReasonCodeTamperTrustDowngrade,
+		ReasonCodeTamperCAMismatch, ReasonCodeTamperSecurityProfile,
+	} {
+		assert.True(t, IsTamperCode(c), c)
+	}
+	for _, c := range []string{"", "subsystem.pending", "tamper.unknown", "tamper.", "tamper.data_dir "} {
+		assert.False(t, IsTamperCode(c), "exact-set check, not prefix: %q", c)
+	}
+}
+
+func TestTruncateHealthReasons_UTF8Boundary(t *testing.T) {
+	// 3-byte rune repeated; a cut at 64 bytes lands mid-rune and must back off.
+	got := TruncateHealthReasons([]HealthReason{{Component: strings.Repeat("€", 40)}})
+	require.Len(t, got, 1)
+	assert.LessOrEqual(t, len(got[0].Component), MaxHealthReasonComponent)
+	assert.True(t, utf8.ValidString(got[0].Component))
+	assert.Nil(t, TruncateHealthReasons(nil))
 }
