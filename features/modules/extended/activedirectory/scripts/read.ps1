@@ -9,15 +9,25 @@
 #   powershell.exe -NoProfile -NonInteractive -File <path>
 # Nothing is composed at runtime: the request arrives as one JSON document on
 # stdin, is validated here, and its values are only ever passed as typed cmdlet
-# parameters (-ResultPageSize, -Server). Nothing from the request reaches argv
-# or script text.
+# parameters (-ResultPageSize, -Server, -Identity) or as variables an
+# ActiveDirectory -Filter refers to by name. Nothing from the request reaches
+# argv or script text.
 #
 # Request (stdin): {"operation":"status"|"users"|"groups","page_size":1-5000,"domain":""}
+#   or, to find the object of one declared resource:
+#   {"operation":"find_user"|"find_group","id":"<objectGUID>","sam_account_name":"<name>",
+#    "members":["<name>", ...]}       (members: find_group only)
 #
 # Output (stdout): newline-delimited JSON, one object per line:
 #   {"type":"status", ...}   domain summary
 #   {"type":"user", ...}     one line per user
 #   {"type":"group", ...}    one line per group
+#   find_user / find_group: up to two user or group lines, "match":"id" for the
+#   object with the requested objectGUID and "match":"name" for the object with
+#   the requested sAMAccountName, then for find_group one line per requested
+#   member: {"type":"member","index":<request index>,"found":..,"id":..,
+#   "is_member":..,"uncertain":..}, relative to the id match or, without one,
+#   the name match.
 #   {"type":"error","code":"<fixed code>","detail":"<exception type>"}
 #                            on failure, followed by exit code 1
 # Request values are never echoed, on any stream.
@@ -70,7 +80,7 @@ try {
 } catch {
     Stop-WithError 'request_unreadable'
 }
-if ($raw.Length -gt 4096) { Stop-WithError 'request_too_large' }
+if ($raw.Length -gt 131072) { Stop-WithError 'request_too_large' }
 
 try {
     $request = $raw | ConvertFrom-Json
@@ -83,12 +93,42 @@ if ($null -eq $request -or $request -isnot [System.Management.Automation.PSCusto
 
 $fields = @($request.PSObject.Properties | ForEach-Object { $_.Name })
 foreach ($field in $fields) {
-    if (@('operation', 'page_size', 'domain') -notcontains $field) { Stop-WithError 'request_unknown_field' }
+    if (@('operation', 'page_size', 'domain', 'id', 'sam_account_name', 'members') -notcontains $field) { Stop-WithError 'request_unknown_field' }
 }
 
 $operation = $request.operation
-if ($operation -isnot [string] -or @('status', 'users', 'groups') -cnotcontains $operation) {
+if ($operation -isnot [string] -or @('status', 'users', 'groups', 'find_user', 'find_group') -cnotcontains $operation) {
     Stop-WithError 'invalid_operation'
+}
+
+# Names: letters, digits, '.', '_', '@', '-' and spaces, not starting with '-'
+# or a space, at most 64 characters (a user's sAMAccountName is at most 20).
+$NamePattern = '^[A-Za-z0-9._@][A-Za-z0-9._@ -]{0,63}$'
+$GuidPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+$findId = ''
+if ($fields -contains 'id') {
+    $value = $request.id
+    if ($value -isnot [string] -or ($value -ne '' -and $value -cnotmatch $GuidPattern)) { Stop-WithError 'invalid_id' }
+    $findId = $value
+}
+$findName = ''
+if ($fields -contains 'sam_account_name') {
+    $value = $request.sam_account_name
+    if ($value -isnot [string] -or ($value -ne '' -and $value -cnotmatch $NamePattern)) { Stop-WithError 'invalid_name' }
+    $findName = $value
+}
+$findMembers = @()
+if ($fields -contains 'members') {
+    if ($operation -cne 'find_group') { Stop-WithError 'request_unknown_field' }
+    $findMembers = @($request.members)
+    if ($findMembers.Count -gt 2000) { Stop-WithError 'too_many_members' }
+    foreach ($value in $findMembers) {
+        if ($value -isnot [string] -or $value -cnotmatch $NamePattern) { Stop-WithError 'invalid_member' }
+    }
+}
+if (($operation -ceq 'find_user' -or $operation -ceq 'find_group') -and $findId -eq '' -and $findName -eq '') {
+    Stop-WithError 'missing_identity'
 }
 
 $pageSize = 1000
@@ -137,6 +177,99 @@ try {
                 forest_root       = Get-StringOrEmpty $forest.Name
                 domain_controller = Get-StringOrEmpty (@($dc.HostName)[0])
             })
+        exit 0
+    }
+
+    if ($operation -ceq 'find_user' -or $operation -ceq 'find_group') {
+        $isGroup = $operation -ceq 'find_group'
+        $props = @('DisplayName', 'mail', 'MemberOf', 'UserPrincipalName')
+        if ($isGroup) { $props = @('DisplayName', 'MemberOf') }
+
+        $byId = $null
+        if ($findId -ne '') {
+            $guid = [guid]$findId
+            if ($isGroup) {
+                $byId = @(Get-ADGroup -Filter 'ObjectGUID -eq $guid' -Properties $props @server)
+            } else {
+                $byId = @(Get-ADUser -Filter 'ObjectGUID -eq $guid' -Properties $props @server)
+            }
+            if ($byId.Count -eq 0) { $byId = $null } else { $byId = $byId[0] }
+        }
+        $byName = $null
+        if ($findName -ne '') {
+            $samValue = $findName
+            if ($isGroup) {
+                $byName = @(Get-ADGroup -Filter 'sAMAccountName -eq $samValue' -Properties $props @server)
+            } else {
+                $byName = @(Get-ADUser -Filter 'sAMAccountName -eq $samValue' -Properties $props @server)
+            }
+            if ($byName.Count -eq 0) { $byName = $null } else { $byName = $byName[0] }
+        }
+
+        foreach ($pair in @(@{ match = 'id'; o = $byId }, @{ match = 'name'; o = $byName })) {
+            $o = $pair.o
+            if ($null -eq $o) { continue }
+            if ($isGroup) {
+                Write-Record ([ordered]@{
+                        type               = 'group'
+                        match              = $pair.match
+                        id                 = $o.ObjectGUID.ToString()
+                        sam_account_name   = Get-StringOrEmpty $o.SamAccountName
+                        display_name       = Get-StringOrEmpty $o.DisplayName
+                        distinguished_name = Get-StringOrEmpty $o.DistinguishedName
+                        group_scope        = Get-StringOrEmpty $o.GroupScope
+                        group_category     = Get-StringOrEmpty $o.GroupCategory
+                        directory_domain   = $dnsRoot
+                    })
+            } else {
+                Write-Record ([ordered]@{
+                        type                = 'user'
+                        match               = $pair.match
+                        id                  = $o.ObjectGUID.ToString()
+                        sam_account_name    = Get-StringOrEmpty $o.SamAccountName
+                        user_principal_name = Get-StringOrEmpty $o.UserPrincipalName
+                        display_name        = Get-StringOrEmpty $o.DisplayName
+                        mail                = Get-StringOrEmpty $o.mail
+                        enabled             = [bool]$o.Enabled
+                        distinguished_name  = Get-StringOrEmpty $o.DistinguishedName
+                        directory_domain    = $dnsRoot
+                    })
+            }
+        }
+
+        if ($isGroup -and $findMembers.Count -gt 0) {
+            $target = $byId
+            if ($null -eq $target) { $target = $byName }
+            $targetDn = ''
+            if ($null -ne $target) { $targetDn = [string]$target.DistinguishedName }
+            for ($i = 0; $i -lt $findMembers.Count; $i++) {
+                $memberName = [string]$findMembers[$i]
+                $found = @(Get-ADObject -Filter '(objectClass -eq "user" -or objectClass -eq "group") -and sAMAccountName -eq $memberName' -Properties memberOf @server)
+                if ($found.Count -eq 0) {
+                    Write-Record ([ordered]@{ type = 'member'; index = $i; found = $false; id = ''; is_member = $false; uncertain = $false })
+                    continue
+                }
+                $o = $found[0]
+                $rawMemberOf = @($o.memberOf | Where-Object { $null -ne $_ })
+                $isMember = $false
+                if ($targetDn -ne '') {
+                    foreach ($dn in $rawMemberOf) {
+                        if ([string]::Equals([string]$dn, $targetDn, [StringComparison]::OrdinalIgnoreCase)) { $isMember = $true; break }
+                    }
+                }
+                # memberOf is capped by AD Web Services; a member that is not
+                # found in a capped list may still be a member.
+                $uncertain = (-not $isMember) -and ($rawMemberOf.Count -ge $AdwsMembershipCap)
+                Write-Record ([ordered]@{
+                        type      = 'member'
+                        index     = $i
+                        found     = $true
+                        id        = $o.ObjectGUID.ToString()
+                        is_member = $isMember
+                        uncertain = $uncertain
+                    })
+            }
+        }
         exit 0
     }
 

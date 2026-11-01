@@ -449,18 +449,56 @@ func (f *ModuleFactory) newPatchModule() modules.Module {
 	return m
 }
 
+// activeDirectoryDeclared is the one declared-set holder every activedirectory
+// module instance in the process shares. The executor's factory and the
+// observe sweep's factory each create their own instance; the executor hands
+// the declared set to its instance (modules.DeclaredResourceAware), and the
+// sweep's instance reads it through this holder to mark managed objects.
+var activeDirectoryDeclared = activedirectory_module.NewDeclaredSet()
+
 // newActiveDirectoryModule constructs the activedirectory module with the
 // factory's own logger. The module has no SetLogger method (it does not
 // implement modules.LoggingInjectable), so attemptLoggerInjection would no-op
 // on it; passing the logger through the constructor is the only way it
 // reaches the module. The module authenticates through the Windows system
 // context rather than a stored credential, so no secret store is wired here.
+// Every instance gets the shared declared-set holder and the durable binding
+// store under defaultActiveDirectoryStateDir().
 //
 // Callers must hold f.mu (it reads f.logger).
 func (f *ModuleFactory) newActiveDirectoryModule() modules.Module {
-	m := activedirectory_module.New(f.logger)
+	m := activedirectory_module.New(f.logger,
+		activedirectory_module.WithDeclaredSet(activeDirectoryDeclared),
+		activedirectory_module.WithBindingStore(activedirectory_module.NewFileBindingStore(defaultActiveDirectoryStateDir())),
+	)
 	f.attemptCredentialClientInjection(m, "activedirectory")
 	return m
+}
+
+// defaultActiveDirectoryStateDir returns the directory of the activedirectory
+// module's durable state (its resource-to-objectGUID bindings). Mirrors
+// defaultHypervProvisionStoreDir. CFGMS_ACTIVEDIRECTORY_STATE_DIR overrides
+// the default for test isolation.
+func defaultActiveDirectoryStateDir() string {
+	if override := os.Getenv("CFGMS_ACTIVEDIRECTORY_STATE_DIR"); override != "" {
+		return override
+	}
+	switch runtime.GOOS {
+	case "windows":
+		programData := os.Getenv("ProgramData")
+		if programData == "" {
+			programData = `C:\ProgramData`
+		}
+		return filepath.Join(programData, "cfgms", "steward", "activedirectory")
+	case "darwin":
+		home, _ := os.UserHomeDir()
+		if home == "" {
+			home = "/tmp"
+		}
+		return filepath.Join(home, "Library", "Application Support", "cfgms", "steward", "activedirectory")
+	default:
+		return "/var/lib/cfgms/steward/activedirectory"
+	}
 }
 
 // SetCredentialClient sets the controller credential client injected into

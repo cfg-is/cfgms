@@ -39,7 +39,7 @@ func TestActiveDirectoryModule_GetCapabilities(t *testing.T) {
 	assert.NotNil(t, capabilities)
 
 	assert.Equal(t, true, capabilities["supports_read"])
-	assert.Equal(t, false, capabilities["supports_write"], "no write operation is implemented")
+	assert.Equal(t, true, capabilities["supports_write"], "declared users and groups are written")
 	assert.Equal(t, false, capabilities["supports_monitor"])
 	assert.Equal(t, true, capabilities["system_context"])
 	assert.Equal(t, true, capabilities["credential_free"])
@@ -462,9 +462,9 @@ func TestGet_ReservedIDsAreInventory_DeclaredReservedNameRejected(t *testing.T) 
 		err = m.Set(context.Background(), id, cfg)
 		require.Error(t, err, "a declared resource named %q must be rejected", id)
 		assert.Contains(t, err.Error(), "reserved")
-		assert.Error(t, validateDeclaredResourceID(id))
+		assert.Error(t, m.Validate(id, cfg))
 	}
-	assert.NoError(t, validateDeclaredResourceID("config"))
+	assert.NoError(t, m.Validate("config", nil))
 	assert.Len(t, r.requests, 2, "a rejected Set never reads the directory")
 }
 
@@ -716,7 +716,7 @@ func TestManifest_ParsesOwnsPerObjectAndObserveWhen(t *testing.T) {
 	assert.NotEmpty(t, meta.BehavioralEnvelope.LolbinUsageJustification)
 }
 
-func TestModuleYAML_ListsNoUnimplementedWriteOperations(t *testing.T) {
+func TestModuleYAML_ListsExactlyTheImplementedWriteOperations(t *testing.T) {
 	data, err := os.ReadFile("module.yaml")
 	require.NoError(t, err)
 	var manifest struct {
@@ -730,8 +730,10 @@ func TestModuleYAML_ListsNoUnimplementedWriteOperations(t *testing.T) {
 	}
 	require.NoError(t, yaml.Unmarshal(data, &manifest))
 
-	assert.Empty(t, manifest.SupportedOperations["write"], "no write operation is implemented")
-	assert.Empty(t, manifest.Security.AuditOperations, "no write operation is implemented")
+	assert.ElementsMatch(t, writeOperations, manifest.SupportedOperations["write"],
+		"supported_operations.write lists exactly the implemented writes")
+	assert.ElementsMatch(t, writeOperations, manifest.Security.AuditOperations,
+		"security.audit_operations lists exactly the implemented writes")
 	assert.NotContains(t, manifest.Permissions.Windows, "Act as part of operating system")
 
 	// Every listed read operation is served by Get.

@@ -277,6 +277,8 @@ func (e *Executor) executeConfiguration(ctx context.Context, cfg config.StewardC
 	e.logger.Info("Starting configuration execution",
 		"total_resources", report.TotalResources)
 
+	e.handDeclaredResources(cfg.Resources, failedModules)
+
 	for _, resource := range cfg.Resources {
 		select {
 		case <-ctx.Done():
@@ -336,6 +338,42 @@ func (e *Executor) executeConfiguration(ctx context.Context, cfg config.StewardC
 		"duration", report.EndTime.Sub(report.StartTime))
 
 	return report
+}
+
+// handDeclaredResources gives every module implementing
+// modules.DeclaredResourceAware its complete declared set before resources
+// run: the bundles named by resources, plus every module already loaded, which
+// receives an empty set once its last resource is removed. Bundles listed in
+// failedModules are skipped. A module that fails to load here is left for
+// ExecuteResource to report.
+func (e *Executor) handDeclaredResources(resources []config.ResourceConfig, failedModules map[string]string) {
+	byBundle := make(map[string][]modules.DeclaredResource)
+	for _, r := range resources {
+		bundle, _ := parseModuleRef(r.Module)
+		byBundle[bundle] = append(byBundle[bundle], modules.DeclaredResource{
+			Name:       r.Name,
+			Module:     r.Module,
+			ResourceID: e.getResourceIdentifier(r),
+			Config:     r.Config,
+		})
+	}
+	for _, loaded := range e.factory.GetLoadedModules() {
+		if _, ok := byBundle[loaded]; !ok {
+			byBundle[loaded] = nil
+		}
+	}
+	for bundle, declared := range byBundle {
+		if failedModules[bundle] != "" {
+			continue
+		}
+		module, err := e.factory.CreateModuleInstance(bundle)
+		if err != nil || module == nil {
+			continue
+		}
+		if aware, ok := module.(modules.DeclaredResourceAware); ok {
+			aware.SetDeclared(declared)
+		}
+	}
 }
 
 // ExecuteResource executes configuration for a single resource.

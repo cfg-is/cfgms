@@ -186,9 +186,12 @@ type scriptRunner interface {
 
 // readRequest is the request document the read script validates.
 type readRequest struct {
-	Operation string `json:"operation"`
-	PageSize  int    `json:"page_size"`
-	Domain    string `json:"domain"`
+	Operation      string   `json:"operation"`
+	PageSize       int      `json:"page_size"`
+	Domain         string   `json:"domain"`
+	ID             string   `json:"id,omitempty"`
+	SamAccountName string   `json:"sam_account_name,omitempty"`
+	Members        []string `json:"members,omitempty"`
 }
 
 // readRecord is one line of read script output.
@@ -196,6 +199,14 @@ type readRecord struct {
 	Type   string `json:"type"`
 	Code   string `json:"code"`
 	Detail string `json:"detail"`
+
+	// find_user / find_group: Match is "id" or "name". A "member" record
+	// reports the member at request index Index.
+	Match     string `json:"match"`
+	Index     int    `json:"index"`
+	Found     bool   `json:"found"`
+	IsMember  bool   `json:"is_member"`
+	Uncertain bool   `json:"uncertain"`
 
 	ID                    string       `json:"id"`
 	SamAccountName        string       `json:"sam_account_name"`
@@ -293,13 +304,20 @@ func (s *inventoryState) GetManagedFields() []string { return nil }
 // Directory management using the Windows system context.
 type activeDirectoryModule struct {
 	// DefaultCredentialClientSupport lets the steward inject the controller
-	// credential client (Issue #5555); account creation uses it (#5563).
+	// credential client (Issue #5555); creating a user requests its initial
+	// password through it.
 	modules.DefaultCredentialClientSupport
 
 	logger logging.Logger
 
-	// runner runs the fixed read script.
+	// runner runs the fixed read script; writer runs the fixed write script.
 	runner scriptRunner
+	writer scriptRunner
+
+	// declared is the declared set shared by every instance the steward
+	// factory creates; bindings records each declared resource's objectGUID.
+	declared *DeclaredSet
+	bindings BindingStore
 
 	// Configuration management
 	config    *ADModuleConfig
@@ -316,37 +334,68 @@ type activeDirectoryModule struct {
 	}
 }
 
-// New creates a new instance of the system-context Active Directory module
-func New(logger logging.Logger) modules.Module {
-	return newWithRunner(logger, newPlatformRunner())
+// Option configures the module.
+type Option func(*activeDirectoryModule)
+
+// WithDeclaredSet shares holder between module instances. The steward factory
+// passes the same holder to every instance it creates.
+func WithDeclaredSet(holder *DeclaredSet) Option {
+	return func(m *activeDirectoryModule) {
+		if holder != nil {
+			m.declared = holder
+		}
+	}
 }
 
-// newWithRunner creates the module with the given script runner.
+// WithBindingStore sets the store of resource-to-objectGUID bindings.
+func WithBindingStore(store BindingStore) Option {
+	return func(m *activeDirectoryModule) { m.bindings = store }
+}
+
+// platformRunners returns the read and write script runners of this platform.
+// Tests replace it to run the module against their own runners.
+var platformRunners = func() (read, write scriptRunner) {
+	return newPlatformRunner(), newPlatformWriteRunner()
+}
+
+// New creates a new instance of the system-context Active Directory module
+func New(logger logging.Logger, opts ...Option) modules.Module {
+	read, write := platformRunners()
+	return newWithRunners(logger, read, write, opts...)
+}
+
+// newWithRunner creates the module with the given read script runner and no
+// write runner.
 func newWithRunner(logger logging.Logger, runner scriptRunner) *activeDirectoryModule {
+	return newWithRunners(logger, runner, nil)
+}
+
+// newWithRunners creates the module with the given script runners.
+func newWithRunners(logger logging.Logger, read, write scriptRunner, opts ...Option) *activeDirectoryModule {
 	if logger == nil {
 		logger = logging.NewNoopLogger()
 	}
-	return &activeDirectoryModule{
-		logger: logger,
-		runner: runner,
+	m := &activeDirectoryModule{
+		logger:   logger,
+		runner:   read,
+		writer:   write,
+		declared: NewDeclaredSet(),
 	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
-// validateDeclaredResourceID rejects a declared resource that uses one of the
-// reserved inventory IDs.
-func validateDeclaredResourceID(resourceID string) error {
-	switch resourceID {
-	case kindDirectoryUser, kindDirectoryGroup:
-		return fmt.Errorf("resource ID %q is reserved for directory inventory and cannot be declared", resourceID)
-	}
-	return nil
-}
-
-// Get returns the AD system status ("status") or the per-object directory
-// inventory ("directory_user", "directory_group").
+// Get returns the AD system status ("status"), the per-object directory
+// inventory ("directory_user", "directory_group"), or the state of a declared
+// activedirectory.user, .group or .domain resource ("<type>:<name>").
 func (m *activeDirectoryModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
 	m.logger.Debug("Getting local AD object", "resource_id", logging.SanitizeLogValue(resourceID))
 
+	if _, _, typed := splitResourceID(resourceID); typed {
+		return m.getDeclared(ctx, resourceID)
+	}
 	switch resourceID {
 	case "status":
 		return m.getSystemStatus(ctx)
@@ -359,11 +408,15 @@ func (m *activeDirectoryModule) Get(ctx context.Context, resourceID string) (mod
 	}
 }
 
-// Set configures the system-context Active Directory module
+// Set converges a declared activedirectory.user, .group or .domain resource
+// ("<type>:<name>"), or configures the module for any other resource ID.
 func (m *activeDirectoryModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
 	m.logger.Debug("Setting local AD module configuration", "resource_id", logging.SanitizeLogValue(resourceID))
 
-	if err := validateDeclaredResourceID(resourceID); err != nil {
+	if _, _, typed := splitResourceID(resourceID); typed {
+		return m.setDeclared(ctx, resourceID, config)
+	}
+	if err := m.Validate(resourceID, config); err != nil {
 		return err
 	}
 
@@ -520,10 +573,17 @@ func (m *activeDirectoryModule) pageSize() int {
 // record. A script error record ends the read with an error carrying only the
 // script's fixed error code.
 func (m *activeDirectoryModule) runRead(ctx context.Context, operation string, handle func(rec *readRecord) error) error {
+	return m.runReadRequest(ctx, readRequest{Operation: operation}, handle)
+}
+
+// runReadRequest runs the read script with req (its page size set from the
+// configuration) and calls handle for every data record.
+func (m *activeDirectoryModule) runReadRequest(ctx context.Context, req readRequest, handle func(rec *readRecord) error) error {
 	if m.runner == nil {
 		return fmt.Errorf("activedirectory: no script runner")
 	}
-	request, err := json.Marshal(readRequest{Operation: operation, PageSize: m.pageSize()})
+	req.PageSize = m.pageSize()
+	request, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("activedirectory: encode read request: %w", err)
 	}
@@ -547,6 +607,7 @@ func (m *activeDirectoryModule) runRead(ctx context.Context, operation string, h
 // getInventory reads every object of one kind and returns it as per-object
 // state sorted by objectGUID.
 func (m *activeDirectoryModule) getInventory(ctx context.Context, kind, operation, recordType string) (modules.ConfigState, error) {
+	matcher := m.declared.matcher(recordType, m.bindings)
 	byID := make(map[string]map[string]interface{})
 	var skipped, duplicates, truncated int
 	err := m.runRead(ctx, operation, func(rec *readRecord) error {
@@ -568,6 +629,7 @@ func (m *activeDirectoryModule) getInventory(ctx context.Context, kind, operatio
 		if cut {
 			truncated++
 		}
+		attrs["managed"] = matcher.managed(rec.ID, rec.SamAccountName)
 		byID[rec.ID] = attrs
 		return nil
 	})
@@ -735,7 +797,7 @@ func (m *activeDirectoryModule) updateStats(isRequest bool) {
 func (m *activeDirectoryModule) GetCapabilities() map[string]interface{} {
 	return map[string]interface{}{
 		"supports_read":      true,
-		"supports_write":     false,
+		"supports_write":     true,
 		"supports_monitor":   false, // Not yet implemented
 		"supports_bulk":      true,
 		"object_types":       []string{"user", "group"},

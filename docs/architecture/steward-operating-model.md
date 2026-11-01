@@ -365,6 +365,10 @@ written and the caller tries again on its next convergence run. Errors carry a
 fixed sentinel (`ErrCredentialUnavailable`, `ErrCredentialRefused`,
 `ErrCredentialAlreadyIssued`) and never the server's message text.
 
+### Declared-Set Hook
+
+Before every full configuration pass the executor hands each module that implements `modules.DeclaredResourceAware` its complete declared set (`SetDeclared`; an empty set once its last resource is removed); the steward factory shares one holder between the executor's and the observe sweep's `activedirectory` instances, so the sweep marks declared objects `managed: true`.
+
 ### Four Execution Paths
 
 Every byte of code that runs on a steward arrives through exactly one of these paths (see ADR-006 for full details):
