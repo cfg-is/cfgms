@@ -31,6 +31,7 @@ type EventEmitter struct {
 	clientSrc func() transportpb.StewardTransportClient
 	stewardID string
 	logger    logging.Logger
+	onPanic   func(component string)
 
 	// lifecycle — stop is closed by Close(); done is closed when the goroutine exits.
 	// The stop channel is separate from the parent context so that Close() can drain
@@ -58,6 +59,10 @@ type EventEmitterConfig struct {
 
 	// BufferDepth is the size of the internal entry channel. Defaults to 256.
 	BufferDepth int
+
+	// OnPanic, when non-nil, is called with the component name after the send
+	// loop recovered from a panic. The loop then reconnects with back-off.
+	OnPanic func(component string)
 }
 
 // NewEventEmitter creates an EventEmitter. Call Start to begin the send goroutine.
@@ -75,6 +80,7 @@ func NewEventEmitter(cfg EventEmitterConfig) *EventEmitter {
 		clientSrc: cfg.ClientSource,
 		stewardID: cfg.StewardID,
 		logger:    logger,
+		onPanic:   cfg.OnPanic,
 		done:      make(chan struct{}),
 	}
 }
@@ -136,7 +142,10 @@ func (e *EventEmitter) sendLoop(ctx context.Context, stop <-chan struct{}) {
 			return
 		default:
 		}
-		if err := e.sendStream(ctx, stop); err != nil {
+		err := recoverToError(e.logger, componentEventEmitter, e.onPanic, func() error {
+			return e.sendStream(ctx, stop)
+		})
+		if err != nil {
 			select {
 			case <-ctx.Done():
 				return

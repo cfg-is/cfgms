@@ -40,6 +40,17 @@ func (r *HealthReasonRegistry) Clear(component string) {
 	r.mu.Unlock()
 }
 
+// ClearIfCode removes the reason for component only when it carries code, so a
+// component that clears its own panic reason never erases a different reason
+// recorded under the same component name.
+func (r *HealthReasonRegistry) ClearIfCode(component, code string) {
+	r.mu.Lock()
+	if cur, ok := r.reasons[component]; ok && cur.Code == code {
+		delete(r.reasons, component)
+	}
+	r.mu.Unlock()
+}
+
 // List returns the current reasons sorted by component.
 func (r *HealthReasonRegistry) List() []cpTypes.HealthReason {
 	r.mu.RLock()
