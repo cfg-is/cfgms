@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -46,9 +45,9 @@ func tokenDefects(t *testing.T) map[string]struct{ path, code string } {
 	t.Helper()
 	dir := t.TempDir()
 	empty := filepath.Join(dir, "empty-token")
-	require.NoError(t, os.WriteFile(empty, []byte("\n"), 0o600))
+	writeSafeTokenFile(t, empty, "")
 	unsafe := filepath.Join(dir, "unsafe-token")
-	require.NoError(t, os.WriteFile(unsafe, []byte(unsafeTokenContent+"\n"), 0o600))
+	writeSafeTokenFile(t, unsafe, unsafeTokenContent)
 	makeReadableByOthers(t, unsafe)
 	return map[string]struct{ path, code string }{
 		"missing":     {filepath.Join(dir, "absent-token"), "token_file.missing"},
@@ -96,14 +95,9 @@ func TestTokenFromFile_ValidTokenIsUsed(t *testing.T) {
 	newStoredIdentityFixture(t, "127.0.0.1:1")
 	resetStartupReasons(t)
 	path := filepath.Join(t.TempDir(), "registration-token")
-	if err := os.WriteFile(path, []byte("tok_valid_123\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeSafeTokenFile(t, path, "tok_valid_123")
 	token, err := tokenFromFile(path)
-	if err != nil {
-		// A Windows file needs an admin-only DACL; the unix result is asserted.
-		t.Skipf("token file not acceptable on this platform: %v", err)
-	}
+	require.NoError(t, err)
 	assert.Equal(t, "tok_valid_123", token)
 	assert.Empty(t, startupReasons.List())
 }
