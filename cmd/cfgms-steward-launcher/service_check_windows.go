@@ -124,6 +124,11 @@ func repairServiceRegistration(name, exePath string, args []string) error {
 	if err := newSvc.SetRecoveryActions(recoveryActions, 86400); err != nil {
 		return fmt.Errorf("set recovery actions for %q: %w", name, err)
 	}
+	// The launcher exits with a service-specific error code when it gives up;
+	// recovery applies to that only with the non-crash flag set.
+	if err := newSvc.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
+		return fmt.Errorf("set non-crash recovery flag for %q: %w", name, err)
+	}
 	return nil
 }
 

@@ -7,6 +7,7 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
+	"golang.org/x/sys/windows/svc/mgr"
 
 	"github.com/cfgis/cfgms/pkg/security"
 )
@@ -424,4 +426,37 @@ func setOwnerWithRestorePrivilege(t *testing.T, path, sidString string) {
 	require.NoError(t, err)
 	require.NoError(t, windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION, sid, nil, nil, nil))
+}
+
+// TestConfigureServiceRecovery_AppliesToNonCrashFailures creates a throwaway
+// service in the real SCM and verifies the install path's recovery policy,
+// including the flag that makes the launcher's non-zero service-specific exit
+// code trigger the restart actions.
+func TestConfigureServiceRecovery_AppliesToNonCrashFailures(t *testing.T) {
+	scm, err := mgr.Connect()
+	if err != nil {
+		t.Skipf("skipping - requires Administrator (SCM connect failed: %v)", err)
+	}
+	defer func() { _ = scm.Disconnect() }()
+
+	name := fmt.Sprintf("CFGMSRecoveryTest_%d", os.Getpid())
+	s, err := scm.CreateService(name, `C:\Windows\System32\cmd.exe`, mgr.Config{StartType: mgr.StartManual})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = s.Delete()
+		_ = s.Close()
+	})
+
+	require.NoError(t, configureServiceRecovery(s))
+
+	recovery, err := s.RecoveryActions()
+	require.NoError(t, err)
+	require.Len(t, recovery, 3)
+	for _, a := range recovery {
+		assert.Equal(t, mgr.ServiceRestart, a.Type)
+	}
+
+	nonCrash, err := s.RecoveryActionsOnNonCrashFailures()
+	require.NoError(t, err)
+	assert.True(t, nonCrash, "recovery must apply to non-crash failures")
 }

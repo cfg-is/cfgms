@@ -374,6 +374,22 @@ func stageRegistrationToken(token string) error {
 	return nil
 }
 
+// configureServiceRecovery sets automatic restart on failure (3 escalating
+// delays, 1-day reset) and applies it to non-crash failures too. The launcher
+// reports a non-zero service-specific exit code when it gives up, which the
+// service manager only treats as a failure when the non-crash flag is set.
+func configureServiceRecovery(svc *mgr.Service) error {
+	recoveryActions := []mgr.RecoveryAction{
+		{Type: mgr.ServiceRestart, Delay: 10 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 60 * time.Second},
+	}
+	if err := svc.SetRecoveryActions(recoveryActions, 86400); err != nil {
+		return err
+	}
+	return svc.SetRecoveryActionsOnNonCrashFailures(true)
+}
+
 // registerAndStartService creates the launcher-backed service, sets its
 // environment and recovery actions, and starts it.
 func registerAndStartService(scm *mgr.Mgr, tokenPath, controllerURL string) error {
@@ -405,13 +421,7 @@ func registerAndStartService(scm *mgr.Mgr, tokenPath, controllerURL string) erro
 		return fmt.Errorf("failed to set service environment: %w", err)
 	}
 
-	// Configure automatic restart on failure (3 escalating delays, 1-day reset).
-	recoveryActions := []mgr.RecoveryAction{
-		{Type: mgr.ServiceRestart, Delay: 10 * time.Second},
-		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
-		{Type: mgr.ServiceRestart, Delay: 60 * time.Second},
-	}
-	if err := newSvc.SetRecoveryActions(recoveryActions, 86400); err != nil {
+	if err := configureServiceRecovery(newSvc); err != nil {
 		// Non-fatal: service still works without recovery options.
 		fmt.Printf("Warning: could not set service recovery options: %v\n", err)
 	}
