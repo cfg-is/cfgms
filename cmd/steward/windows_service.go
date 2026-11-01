@@ -13,8 +13,6 @@ import (
 
 	"github.com/spf13/pflag"
 	"golang.org/x/sys/windows/svc"
-
-	"github.com/cfgis/cfgms/cmd/steward/service"
 )
 
 // checkAndRunAsWindowsService detects whether the process was launched by the
@@ -41,7 +39,7 @@ func serviceRegToken(regTokenFile string) (string, error) {
 	if regTokenFile == "" {
 		return "", nil
 	}
-	return service.ReadTokenFile(regTokenFile)
+	return tokenFromFile(regTokenFile)
 }
 
 // winServiceName must match the name registered in service/manager_windows.go.

@@ -8,10 +8,8 @@ package service
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 )
 
@@ -63,44 +61,30 @@ func ReadTokenFile(path string) (string, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //#nosec G304 -- operator-supplied path, validated below
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("registration token file %s does not exist", path)
+			return "", tokenFileErr(TokenFileMissing, "registration token file %s does not exist", path)
 		}
-		return "", fmt.Errorf("open registration token file %s: %w", path, err)
+		return "", tokenFileErr(TokenFilePermissions, "open registration token file %s: %w", path, err)
 	}
 	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
-		return "", fmt.Errorf("inspect registration token file %s: %w", path, err)
+		return "", tokenFileErr(TokenFilePermissions, "inspect registration token file %s: %w", path, err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("registration token file %s is not a regular file", path)
+		return "", tokenFileErr(TokenFilePermissions, "registration token file %s is not a regular file", path)
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return "", fmt.Errorf("cannot determine owner of registration token file %s", path)
+		return "", tokenFileErr(TokenFilePermissions, "cannot determine owner of registration token file %s", path)
 	}
 	if int(st.Uid) != os.Geteuid() {
-		return "", fmt.Errorf("registration token file %s is not owned by the current user", path)
+		return "", tokenFileErr(TokenFilePermissions, "registration token file %s is not owned by the current user", path)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("registration token file %s must not be accessible by group or others (mode %04o): use mode 0600", path, info.Mode().Perm())
+		return "", tokenFileErr(TokenFilePermissions, "registration token file %s must not be accessible by group or others (mode %04o): use mode 0600", path, info.Mode().Perm())
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxTokenFileSize+1))
-	if err != nil {
-		return "", fmt.Errorf("read registration token file %s: %w", path, err)
-	}
-	if len(data) > maxTokenFileSize {
-		return "", fmt.Errorf("registration token file %s is too large", path)
-	}
-	token := strings.TrimSpace(string(data))
-	if token == "" {
-		return "", fmt.Errorf("registration token file %s is empty", path)
-	}
-	if err := validateToken(token); err != nil {
-		return "", fmt.Errorf("registration token file %s: %w", path, err)
-	}
-	return token, nil
+	return readTokenContent(f, path)
 }
 
 // tokenFileConfigured reports whether path is a non-empty regular file. A

@@ -134,3 +134,38 @@ func TestPlatformTokenFilePathHonoursInstallPrefix(t *testing.T) {
 	assert.Equal(t, filepath.Join(filepath.Dir(platformCACertPath()), tokenFileName), platformTokenFilePath())
 	assert.Contains(t, platformTokenFilePath(), prefix)
 }
+
+func TestReadTokenFile_ErrorKinds(t *testing.T) {
+	dir := t.TempDir()
+	kindOf := func(path string) TokenFileErrorKind {
+		_, err := ReadTokenFile(path)
+		require.Error(t, err)
+		tfe, ok := AsTokenFileError(err)
+		require.True(t, ok, "a refused file returns a *TokenFileError")
+		return tfe.Kind
+	}
+
+	assert.Equal(t, TokenFileMissing, kindOf(filepath.Join(dir, "absent")))
+
+	empty := filepath.Join(dir, "empty")
+	require.NoError(t, os.WriteFile(empty, []byte(" \n"), 0o600))
+	assert.Equal(t, TokenFileEmpty, kindOf(empty))
+
+	open := filepath.Join(dir, "open")
+	require.NoError(t, os.WriteFile(open, []byte("tok_open\n"), 0o600))
+	require.NoError(t, os.Chmod(open, 0o644))
+	assert.Equal(t, TokenFilePermissions, kindOf(open))
+
+	spaced := filepath.Join(dir, "spaced")
+	require.NoError(t, os.WriteFile(spaced, []byte("tok a b\n"), 0o600))
+	assert.Equal(t, TokenFileInvalid, kindOf(spaced))
+}
+
+func TestReadTokenFile_ErrorNeverContainsToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "open")
+	require.NoError(t, os.WriteFile(path, []byte("tok_secret_value\n"), 0o600))
+	require.NoError(t, os.Chmod(path, 0o644))
+	_, err := ReadTokenFile(path)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "tok_secret_value")
+}
