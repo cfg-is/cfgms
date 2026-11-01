@@ -8,10 +8,8 @@ package service
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 )
 
@@ -86,21 +84,7 @@ func ReadTokenFile(path string) (string, error) {
 	if info.Mode().Perm()&0o077 != 0 {
 		return "", tokenFileErr(TokenFilePermissions, "registration token file %s must not be accessible by group or others (mode %04o): use mode 0600", path, info.Mode().Perm())
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxTokenFileSize+1))
-	if err != nil {
-		return "", tokenFileErr(TokenFileInvalid, "read registration token file %s: %w", path, err)
-	}
-	if len(data) > maxTokenFileSize {
-		return "", tokenFileErr(TokenFileInvalid, "registration token file %s is too large", path)
-	}
-	token := strings.TrimSpace(string(data))
-	if token == "" {
-		return "", tokenFileErr(TokenFileEmpty, "registration token file %s is empty", path)
-	}
-	if err := validateToken(token); err != nil {
-		return "", tokenFileErr(TokenFileInvalid, "registration token file %s: %w", path, err)
-	}
-	return token, nil
+	return readTokenContent(f, path)
 }
 
 // tokenFileConfigured reports whether path is a non-empty regular file. A

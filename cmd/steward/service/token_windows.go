@@ -10,10 +10,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -137,21 +135,7 @@ func ReadTokenFile(path string) (string, error) {
 		return "", err
 	}
 
-	data, err := io.ReadAll(io.LimitReader(f, maxTokenFileSize+1))
-	if err != nil {
-		return "", tokenFileErr(TokenFileInvalid, "read registration token file %s: %w", path, err)
-	}
-	if len(data) > maxTokenFileSize {
-		return "", tokenFileErr(TokenFileInvalid, "registration token file %s is too large", path)
-	}
-	token := strings.TrimSpace(string(data))
-	if token == "" {
-		return "", tokenFileErr(TokenFileEmpty, "registration token file %s is empty", path)
-	}
-	if err := validateToken(token); err != nil {
-		return "", tokenFileErr(TokenFileInvalid, "registration token file %s: %w", path, err)
-	}
-	return token, nil
+	return readTokenContent(f, path)
 }
 
 // explainAccessDenied reports why the token file could not be opened for

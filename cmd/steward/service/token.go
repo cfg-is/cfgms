@@ -6,6 +6,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 )
@@ -80,4 +81,25 @@ func AsTokenFileError(err error) (*TokenFileError, bool) {
 		return tfe, true
 	}
 	return nil, false
+}
+
+// readTokenContent reads the token from r, an already-opened and checked token
+// file at path, and refuses content that is too large, empty or not a valid
+// token. Errors never contain the token.
+func readTokenContent(r io.Reader, path string) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxTokenFileSize+1))
+	if err != nil {
+		return "", tokenFileErr(TokenFileInvalid, "read registration token file %s: %w", path, err)
+	}
+	if len(data) > maxTokenFileSize {
+		return "", tokenFileErr(TokenFileInvalid, "registration token file %s is too large", path)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", tokenFileErr(TokenFileEmpty, "registration token file %s is empty", path)
+	}
+	if err := validateToken(token); err != nil {
+		return "", tokenFileErr(TokenFileInvalid, "registration token file %s: %w", path, err)
+	}
+	return token, nil
 }

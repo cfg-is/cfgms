@@ -308,7 +308,8 @@ func TestRunSteward_TokenDefectHeartbeatCarriesReason(t *testing.T) {
 			go func() { done <- runStewardInternal(ctx, token, "", "", nil) }()
 			t.Cleanup(func() {
 				cancel()
-				<-done
+				// A cancelled context is a clean shutdown, not an error.
+				assert.NoError(t, <-done)
 				// The client's Disconnect leaves the process-wide data plane provider
 				// started; stop it so the next defect can connect in this process.
 				_ = dataplaneInterfaces.GetProvider("grpc").Stop(context.Background())

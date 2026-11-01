@@ -665,22 +665,9 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 
 		// Resolve trust source using the compile-baked URL, install-time URL,
 		// and the CA cert on disk (written by the installer for install-pinned mode).
-		installCACertPath := resolveRegistrationCACertPath(logger)
-		var installCAPEM string
-		if installCACertPath != "" {
-			// #nosec G304 -- path is returned by resolveRegistrationCACertPath
-			// from the explicit installer CA option or fixed service CA path.
-			if _, caErr := os.Stat(installCACertPath); caErr == nil {
-				var pin string
-				if storedID != nil {
-					pin = storedID.CAPinFingerprint
-				}
-				canonical, vErr := repairPersistedCAFile(installCACertPath, pin)
-				if vErr != nil {
-					return vErr
-				}
-				installCAPEM = canonical
-			}
+		installCAPEM, caErr := loadInstallCAPEM(storedID, logger)
+		if caErr != nil {
+			return caErr
 		}
 		trustSrc, resolvedURL, trustErr := resolveTrustSourceForStart(ControllerURL, controllerURL, installCAPEM, storedID)
 		if trustErr != nil {
@@ -1559,6 +1546,45 @@ func registerNewDevice(
 	return tc, err
 }
 
+// loadInstallCAPEM returns the installer-written CA, repaired to its canonical
+// form and checked against the stored identity's CA pin when there is one. It
+// returns "" when no installer CA is present.
+func loadInstallCAPEM(storedID *StewardIdentity, logger logging.Logger) (string, error) {
+	installCACertPath := resolveRegistrationCACertPath(logger)
+	if installCACertPath == "" {
+		return "", nil
+	}
+	// #nosec G304 -- path is returned by resolveRegistrationCACertPath
+	// from the explicit installer CA option or fixed service CA path.
+	if _, err := os.Stat(installCACertPath); err != nil {
+		return "", nil
+	}
+	var pin string
+	if storedID != nil {
+		pin = storedID.CAPinFingerprint
+	}
+	return repairPersistedCAFile(installCACertPath, pin)
+}
+
+// registrationPollTimeout is the approval poll timeout from optional local
+// config (default: 24h).
+func registrationPollTimeout(runtimeCfg stewardconfig.StewardConfig) time.Duration {
+	if runtimeCfg.Steward.RegistrationPollTimeout > 0 {
+		return runtimeCfg.Steward.RegistrationPollTimeout
+	}
+	return 24 * time.Hour
+}
+
+// seedRegistrationHost seeds hostname and OS so the controller is not
+// identity-blind before first DNA sync (Issue #2640). Mirrors
+// features/steward/dna/dna.go:227 without importing that package.
+func seedRegistrationHost(regReq *registration.RegistrationRequest) {
+	if hostname, err := os.Hostname(); err == nil {
+		regReq.Hostname = hostname
+	}
+	regReq.OS = runtime.GOOS
+}
+
 func registerWithToken(
 	ctx context.Context,
 	certStoreDir, token, controllerURL string,
@@ -1588,11 +1614,7 @@ func registerWithToken(
 		return nil, fmt.Errorf("failed to create HTTP registration client: %w", err)
 	}
 
-	// Load the approval poll timeout from optional local config (default: 24h).
-	pollTimeout := 24 * time.Hour
-	if runtimeCfg.Steward.RegistrationPollTimeout > 0 {
-		pollTimeout = runtimeCfg.Steward.RegistrationPollTimeout
-	}
+	pollTimeout := registrationPollTimeout(runtimeCfg)
 
 	// Resume a pending registration from a previous run if one exists.
 	// This avoids creating a duplicate pending record on every steward restart (Issue #1899).
@@ -1646,12 +1668,7 @@ func registerWithToken(
 	defer regCancel()
 
 	regReq := buildRegistrationRequest(token, cloneOf, ks)
-	// Seed hostname and OS so the controller is not identity-blind before first DNA sync
-	// (Issue #2640). Mirrors features/steward/dna/dna.go:227 without importing that package.
-	if hostname, err := os.Hostname(); err == nil {
-		regReq.Hostname = hostname
-	}
-	regReq.OS = runtime.GOOS
+	seedRegistrationHost(&regReq)
 
 	regResp, pendingResp, err := httpClient.Register(regCtx, regReq)
 	if errors.Is(err, registration.ErrDeviceAlreadyRegistered) && ks != nil && ks.DeviceID() != "" {
