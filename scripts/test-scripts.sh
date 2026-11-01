@@ -4964,6 +4964,38 @@ test_api_shard_chunks_respect_pattern_cap() {
     log_pass "test-framework-api-sharded: every -test.run chunk is within ${cap} bytes and covers each test exactly once"
 }
 
+# test-fast must not run features/controller/api in its bulk `go test` call: the
+# package needs ~540s under -race alone and trips the 10m hang detector under
+# load. It must go through test-framework-api-sharded, as `make test` does.
+# `make -n` prints the recipe without running tests; the sharded sub-make is
+# expanded inline, so its presence is asserted via the shard recipe text.
+test_test_fast_shards_api_package() {
+    log_test "Testing test-fast excludes features/controller/api from the bulk run and shards it..."
+
+    local recipe rc
+    recipe=$(make --no-print-directory -n test-fast 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+        log_fail "make -n test-fast exited ${rc}"
+        echo "$recipe" | tail -20
+        return
+    fi
+
+    if ! echo "$recipe" | grep -qF "grep -v '/features/controller/api\$'"; then
+        log_fail "test-fast bulk run does not exclude '/features/controller/api\$' via grep -v"
+        return
+    fi
+    if ! echo "$recipe" | grep -qE 'CFGMS_TEST_SHORT=1 (make|\$\(MAKE\)) .*test-framework-api-sharded'; then
+        log_fail "test-fast does not invoke test-framework-api-sharded with CFGMS_TEST_SHORT=1"
+        return
+    fi
+    if echo "$recipe" | grep -E 'go test .*\./features/\.\.\.' >/dev/null; then
+        log_fail "test-fast still passes ./features/... to go test unsharded"
+        return
+    fi
+    log_pass "test-fast shards features/controller/api and excludes it from the bulk run"
+}
+
 # Regression guard for the Makefile's test-go-group-controller-core /
 # test-go-group-heavy-providers / test-go-group-rest split (Issue #4151): the
 # three groups must partition the exact package list the pre-split single
@@ -5868,6 +5900,7 @@ DISPATCH_TABLE=(
     "test_api_shard_partition_covers_all_tests:core"
     "test_api_shard_chunks_respect_pattern_cap:core"
     "test_go_group_split_partition_covers_all_packages:core"
+    "test_test_fast_shards_api_package:core"
     "test_go_group_rest_propagates_early_failure:core"
     "test_all_modules_covers_module_yaml_tree:core"
     "test_api_shard_aggregation_fails_closed:core"
