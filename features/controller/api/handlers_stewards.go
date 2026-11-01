@@ -304,20 +304,28 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seen[steward.ID] = true
+		// The durable record is authoritative for tampered: a peer node may have
+		// recorded the alarm after this node's entry was last refreshed.
+		status := steward.Status
+		if rec, ok := durable[steward.ID]; ok && rec.Status == business.StewardStatusTampered {
+			status = string(business.StewardStatusTampered)
+		}
 		if !includeDeregistered && steward.Status == string(business.StewardStatusDeregistered) {
 			continue
 		}
-		if !includeQuarantined && steward.Status == "quarantined" {
+		// Only quarantined is hidden here: tampered must stay in the default list.
+		if !includeQuarantined && status == "quarantined" {
 			continue
 		}
-		if !includeHidden && steward.Hidden {
+		// Hidden is orthogonal to status, but a tampered steward is never concealed.
+		if !includeHidden && steward.Hidden && status != string(business.StewardStatusTampered) {
 			continue
 		}
 		info := StewardInfo{
 			ID:          steward.ID,
 			TenantID:    steward.TenantID,
 			Version:     steward.Version,
-			Status:      steward.Status,
+			Status:      status,
 			LastSeen:    steward.LastHeartbeat,
 			ConnectedAt: steward.LastHeartbeat,
 			Metrics:     steward.Metrics,
@@ -363,7 +371,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			if !includeQuarantined && string(rec.Status) == "quarantined" {
 				continue
 			}
-			if !includeHidden && rec.Hidden {
+			if !includeHidden && rec.Hidden && rec.Status != business.StewardStatusTampered {
 				continue
 			}
 			stewardList = append(stewardList, StewardInfo{
@@ -410,6 +418,7 @@ func applyDurableRecord(info *StewardInfo, rec *business.StewardRecord) {
 // empty rather than failing the list.
 func (s *Server) attachStewardTags(ctx context.Context, list []StewardInfo) {
 	s.attachHealthReasons(ctx, list)
+	s.attachTamperCodes(ctx, list)
 	s.mu.RLock()
 	ts := s.tagStore
 	s.mu.RUnlock()
@@ -442,8 +451,9 @@ func buildFleetFilter(r *http.Request, tenantID string) (fleet.Filter, error) {
 	q := r.URL.Query()
 
 	status := q.Get("status")
-	if status != "" && status != "online" && status != "offline" && status != "any" {
-		return fleet.Filter{}, fmt.Errorf("invalid status %q: must be online, offline, or any", status)
+	if status != "" && status != "online" && status != "offline" && status != "any" &&
+		status != string(business.StewardStatusTampered) {
+		return fleet.Filter{}, fmt.Errorf("invalid status %q: must be online, offline, tampered, or any", status)
 	}
 
 	os := q.Get("os")
@@ -547,7 +557,12 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 
 	// Key protection comes from the durable record, which the in-memory
 	// attachment does not carry. Read after the tenant check above.
-	applyDurableRecord(&apiStewardInfo, s.durableStewardRecord(r.Context(), stewardID))
+	durableRec := s.durableStewardRecord(r.Context(), stewardID)
+	applyDurableRecord(&apiStewardInfo, durableRec)
+	if durableRec != nil && durableRec.Status == business.StewardStatusTampered {
+		apiStewardInfo.Status = string(business.StewardStatusTampered)
+	}
+	s.attachTamperCodesTo(r.Context(), &apiStewardInfo)
 
 	// Include DNA information if available
 	if stewardInfo.DNA != nil {

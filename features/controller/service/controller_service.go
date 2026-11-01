@@ -415,7 +415,10 @@ func (s *ControllerService) StorageReady(ctx context.Context) error {
 // approval gate in pkg/controlplane/providers/grpc/approval.go.
 func reconnectionAdmissibleStatus(status business.StewardStatus) bool {
 	switch status {
-	case business.StewardStatusRegistered, business.StewardStatusActive, business.StewardStatusLost:
+	case business.StewardStatusRegistered, business.StewardStatusActive, business.StewardStatusLost,
+		// tampered: the steward keeps its tampered status across the reconnection
+		// (EnsureSteward never promotes it); only an operator restore ends it.
+		business.StewardStatusTampered:
 		return true
 	default:
 		return false
@@ -977,6 +980,12 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 	// Fetch DNA separately so it has its own storage source (Issue #3324).
 	dna := s.lookupDurableDNA(stewardID)
 
+	// A tampered record keeps its durable status in the rebuilt entry.
+	createdStatus := "active"
+	if s.durableStatusIs(stewardID, business.StewardStatusTampered) {
+		createdStatus = string(business.StewardStatusTampered)
+	}
+
 	// Re-acquire and double-check: a concurrent connect-hook upsert or another
 	// heartbeat may have inserted the steward while the lock was released. Refresh
 	// the existing entry rather than overwriting it.
@@ -1003,7 +1012,7 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 		Version:       version,
 		DNA:           dna,
 		LastHeartbeat: ts,
-		Status:        "active",
+		Status:        createdStatus,
 		Metrics:       make(map[string]string),
 	}
 	s.stewards[stewardID] = created
@@ -1015,7 +1024,7 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 
 	// Persist so the durable record's timestamp is refreshed consistently with
 	// EnsureSteward. storeDNA runs outside s.mu.
-	s.storeDNA(context.Background(), stewardID, tenantID, dna, "active")
+	s.storeDNA(context.Background(), stewardID, tenantID, dna, createdStatus)
 	s.persistHeartbeat(stewardID, version)
 	return true
 }
@@ -1221,9 +1230,19 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 		durableDNA = s.lookupDurableDNA(stewardID)
 	}
 
+	// A tampered record keeps its status across a reconnect: the node-local entry
+	// must show the durable status, never the "active" a connect would assert.
+	tampered := haveDurable && s.durableStatusIs(stewardID, business.StewardStatusTampered)
+	if tampered {
+		status = string(business.StewardStatusTampered)
+	}
+
 	s.mu.Lock()
 	if existing, ok := s.stewards[stewardID]; ok {
 		existing.LastHeartbeat = now
+		if tampered {
+			existing.Status = status
+		}
 		promoted := existing.Status == "" || existing.Status == "registered"
 		if promoted {
 			existing.Status = "active"
@@ -1279,7 +1298,7 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 	// (registered, lost, active); terminal states (deregistered, revoked, archived,
 	// dormant) must not be overwritten even if the approval checker failed to block
 	// the connection — defence-in-depth. ErrStewardNotFound is benign.
-	if s.stewardStore != nil {
+	if s.stewardStore != nil && !tampered {
 		// The terminal check is atomic with the write (Issue #4851).
 		if _, storeErr := s.stewardStore.TransitionStewardStatus(context.Background(), stewardID, business.StewardStatus(status),
 			business.StewardStatusRegistered, business.StewardStatusLost, business.StewardStatusActive); storeErr != nil && storeErr != business.ErrStewardNotFound {
@@ -1293,6 +1312,16 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 		"steward_id", logging.SanitizeLogValue(stewardID),
 		"tenant_id", logging.SanitizeLogValue(tenantID),
 		"status", logging.SanitizeLogValue(status))
+}
+
+// durableStatusIs reports whether the steward's durable record holds status. A
+// missing store, a missing record or a read error all report false.
+func (s *ControllerService) durableStatusIs(stewardID string, status business.StewardStatus) bool {
+	if s.stewardStore == nil {
+		return false
+	}
+	rec, err := s.stewardStore.GetSteward(context.Background(), stewardID)
+	return err == nil && rec != nil && rec.Status == status
 }
 
 // SetRingConfig updates the deployment ring set. If the ring set has changed,

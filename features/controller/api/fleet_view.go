@@ -114,7 +114,7 @@ func (s *Server) writeStewardFromDurableRecord(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	s.writeSuccessResponse(w, StewardInfo{
+	info := StewardInfo{
 		ID:              rec.ID,
 		TenantID:        rec.TenantID,
 		Version:         rec.Version,
@@ -127,7 +127,9 @@ func (s *Server) writeStewardFromDurableRecord(w http.ResponseWriter, r *http.Re
 		KeyProtectionLevel: rec.KeyProtectionLevel,
 		KeyAlgorithm:       effectiveKeyAlgorithm(rec.KeyAlgorithm),
 		HealthReasons:      healthReasonsFromRecord(rec),
-	})
+	}
+	s.attachTamperCodesTo(r.Context(), &info)
+	s.writeSuccessResponse(w, info)
 }
 
 // effectiveKeyAlgorithm maps a stored empty key algorithm to "ed25519", the

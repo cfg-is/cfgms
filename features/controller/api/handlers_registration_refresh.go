@@ -336,6 +336,12 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		// Archived: add pending refresh and return 202 — policy is skipped.
 		s.handleRefreshQueueEntry(w, r, record, deviceID, req.Provenance, req.CSRPEM, 0, 0, "archived")
 
+	case business.StewardStatusTampered:
+		// Tampered: never auto-approved by policy; the refresh waits for an
+		// operator, and the record keeps its tampered status (it is not in the
+		// from-list of the status write after issuance).
+		s.handleRefreshQueueEntry(w, r, record, deviceID, req.Provenance, req.CSRPEM, 0, 0, "tampered")
+
 	default:
 		// active / registered / dormant / lost / deregistered — consult policy.
 		if s.refreshPolicyStore == nil {

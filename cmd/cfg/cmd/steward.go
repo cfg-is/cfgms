@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -920,6 +921,7 @@ type stewardEntry struct {
 	LastSeen      time.Time             `json:"last_seen"`
 	Version       string                `json:"version"`
 	HealthReasons []stewardHealthReason `json:"health_reasons,omitempty"`
+	TamperCodes   []string              `json:"tamper_codes,omitempty"`
 	DNA           *struct {
 		Hostname string `json:"hostname"`
 	} `json:"dna,omitempty"`
@@ -1505,12 +1507,13 @@ type stewardRow struct {
 	ID, Status, Version, Hostname string
 	LastSeen                      time.Time
 	HealthReasons                 []stewardHealthReason
+	TamperCodes                   []string
 }
 
 func rowsFromStewardInfos(in []StewardInfo) []stewardRow {
 	rows := make([]stewardRow, len(in))
 	for i, s := range in {
-		rows[i] = stewardRow{ID: s.ID, Status: s.Status, Version: s.Version, LastSeen: s.LastSeen, HealthReasons: s.HealthReasons}
+		rows[i] = stewardRow{ID: s.ID, Status: s.Status, Version: s.Version, LastSeen: s.LastSeen, HealthReasons: s.HealthReasons, TamperCodes: s.TamperCodes}
 		if s.DNA != nil {
 			rows[i].Hostname = s.DNA.Hostname
 		}
@@ -1521,7 +1524,7 @@ func rowsFromStewardInfos(in []StewardInfo) []stewardRow {
 func rowsFromStewardEntries(in []stewardEntry) []stewardRow {
 	rows := make([]stewardRow, len(in))
 	for i, s := range in {
-		rows[i] = stewardRow{ID: s.ID, Status: s.Status, Version: s.Version, LastSeen: s.LastSeen, HealthReasons: s.HealthReasons}
+		rows[i] = stewardRow{ID: s.ID, Status: s.Status, Version: s.Version, LastSeen: s.LastSeen, HealthReasons: s.HealthReasons, TamperCodes: s.TamperCodes}
 		if s.DNA != nil {
 			rows[i].Hostname = s.DNA.Hostname
 		}
@@ -1529,8 +1532,34 @@ func rowsFromStewardEntries(in []stewardEntry) []stewardRow {
 	return rows
 }
 
+// tamperedStatus is the steward status a tamper alarm sets.
+const tamperedStatus = "tampered"
+
+// sortTamperedFirst moves tampered stewards to the top, keeping the relative order
+// of every other row, so the highest-severity rows are read first.
+func sortTamperedFirst(rows []stewardRow) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		return rows[i].Status == tamperedStatus && rows[j].Status != tamperedStatus
+	})
+}
+
+// reasonsForRow returns the reasons the REASONS column shows. A tampered steward
+// whose live reasons were replaced by a healthy heartbeat still shows the codes of
+// its last alarm.
+func reasonsForRow(s stewardRow) []stewardHealthReason {
+	if len(s.HealthReasons) > 0 || s.Status != tamperedStatus {
+		return s.HealthReasons
+	}
+	out := make([]stewardHealthReason, len(s.TamperCodes))
+	for i, c := range s.TamperCodes {
+		out[i] = stewardHealthReason{Code: c}
+	}
+	return out
+}
+
 // printStewardTable writes the `cfg steward list` table for the given stewards.
 func printStewardTable(stewards []stewardRow) error {
+	sortTamperedFirst(stewards)
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	if _, err := fmt.Fprintln(w, "ID\tSTATUS\tREASONS\tVERSION\tLAST SEEN\tHOSTNAME"); err != nil {
 		return err
@@ -1543,7 +1572,7 @@ func printStewardTable(stewards []stewardRow) error {
 		if !s.LastSeen.IsZero() {
 			lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
 		}
-		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Status, formatReasonsColumn(s.HealthReasons), s.Version, lastSeen, s.Hostname); err != nil {
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Status, formatReasonsColumn(reasonsForRow(s)), s.Version, lastSeen, s.Hostname); err != nil {
 			return err
 		}
 	}

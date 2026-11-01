@@ -172,6 +172,7 @@ func TestStewardStoreApprovalChecker_StatusPolicy(t *testing.T) {
 		business.StewardStatusRegistered,
 		business.StewardStatusActive,
 		business.StewardStatusLost,
+		business.StewardStatusTampered, // stays admitted so it can keep reporting (Issue #5652)
 	}
 	for _, stewardStatus := range allowed {
 		checker := NewStewardStoreApprovalChecker(&approvalTestStore{

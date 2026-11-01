@@ -253,7 +253,10 @@ func (s *Server) operatorStewardRecord(w http.ResponseWriter, r *http.Request, r
 		return nil, false
 	}
 	switch record.Status {
-	case business.StewardStatusRevoked, business.StewardStatusDeregistered:
+	case business.StewardStatusRevoked, business.StewardStatusDeregistered,
+		// tampered is not a valid source for rotate-credentials or identity move:
+		// only an operator restore or ban ends it.
+		business.StewardStatusTampered:
 		s.writeErrorResponse(w, http.StatusConflict, "Steward is "+string(record.Status), "STEWARD_NOT_ACTIVE")
 		return nil, false
 	}

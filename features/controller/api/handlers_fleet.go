@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // DegradedHeartbeatAge is the heartbeat age beyond which an otherwise-active
@@ -27,6 +29,12 @@ const DegradedHeartbeatAge = 5 * time.Minute
 // Hidden is always present (non-suppressible) regardless of include_hidden:
 // an operator must always see that concealment is in effect (Issue #2918).
 type FleetHealthResponse struct {
+	// Tampered counts readable stewards that raised a tamper alarm, hidden ones
+	// included: a tampered steward is never concealed. TamperedStewards lists them
+	// and comes first so a consumer reads the highest-severity group before the rest.
+	Tampered         int                    `json:"tampered"`
+	TamperedStewards []FleetTamperedSteward `json:"tampered_stewards"`
+
 	Healthy     int `json:"healthy"`
 	Degraded    int `json:"degraded"`
 	Unreachable int `json:"unreachable"`
@@ -42,6 +50,13 @@ type FleetHealthResponse struct {
 	// counts only, and is absent for every other caller and when nothing is
 	// walled off. The four counters above cover only stewards the caller may read.
 	WalledOff *FleetAnonymizedMetrics `json:"walled_off,omitempty"`
+}
+
+// FleetTamperedSteward is one tampered steward in the fleet health response.
+type FleetTamperedSteward struct {
+	ID          string   `json:"id"`
+	TenantID    string   `json:"tenant_id"`
+	TamperCodes []string `json:"tamper_codes,omitempty"`
 }
 
 // FleetAnonymizedMetrics is the Amendment 6 (A6.1) anonymized metric set: online
@@ -249,6 +264,7 @@ func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 //   - healthy:     status=="active" with a heartbeat within DegradedHeartbeatAge
 //   - degraded:    status=="active" with a heartbeat older than DegradedHeartbeatAge
 //   - unreachable: status=="lost"
+//   - tampered:    status=="tampered", listed first with its tamper codes
 //
 // Other lifecycle states (registered, deregistered, archived, dormant, revoked)
 // are not counted. Scoping includes the caller's full tenant subtree (the caller
@@ -275,7 +291,7 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 	results, walledOff := splitReadableResults(s.tenantReadScope(r, "GET /api/v1/fleet/health"), results)
 
 	now := time.Now()
-	resp := FleetHealthResponse{ReasonCounts: map[string]int{}}
+	resp := FleetHealthResponse{ReasonCounts: map[string]int{}, TamperedStewards: []FleetTamperedSteward{}}
 	reasonsByID := s.healthReasonCodesByID(r.Context())
 	if len(walledOff) > 0 {
 		resp.WalledOff = &FleetAnonymizedMetrics{Versions: map[string]int{}}
@@ -283,7 +299,17 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 			resp.WalledOff.add(res)
 		}
 	}
+	tenantByTampered := make(map[string]string)
 	for _, res := range results {
+		// A tampered steward is counted and listed whether or not it is hidden,
+		// and is not also counted as healthy, degraded or hidden.
+		if res.Status == string(business.StewardStatusTampered) {
+			resp.Tampered++
+			resp.TamperedStewards = append(resp.TamperedStewards, FleetTamperedSteward{ID: res.ID, TenantID: res.TenantID})
+			tenantByTampered[res.ID] = res.TenantID
+			resp.countReasons(reasonsByID[res.ID])
+			continue
+		}
 		// Count hidden stewards in the caller's scope regardless of include_hidden
 		// (non-suppressible: the operator must always see that concealment is in effect).
 		if res.Hidden {
@@ -303,8 +329,17 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	sort.Slice(resp.TamperedStewards, func(i, j int) bool { return resp.TamperedStewards[i].ID < resp.TamperedStewards[j].ID })
+	if len(tenantByTampered) > 0 {
+		codes := s.tamperCodesFromAudit(r.Context(), tenantByTampered)
+		for i := range resp.TamperedStewards {
+			resp.TamperedStewards[i].TamperCodes = codes[resp.TamperedStewards[i].ID]
+		}
+	}
+
 	s.logger.Info("Fleet health query",
 		"tenant_id", logging.SanitizeLogValue(tid),
+		"tampered", resp.Tampered,
 		"healthy", resp.Healthy,
 		"degraded", resp.Degraded,
 		"unreachable", resp.Unreachable,

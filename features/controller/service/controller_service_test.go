@@ -2102,3 +2102,56 @@ func TestRecordHealthReasons_MirrorsOntoRegistry(t *testing.T) {
 	info, _ = svc.GetStewardInfo("dev-mir")
 	assert.Empty(t, info.HealthReasons)
 }
+
+// TestEnsureSteward_TamperedRecordKeepsStatus verifies Issue #5652: a reconnect of
+// a tampered steward loads the durable status into the node-local entry instead of
+// promoting it to active, whether the entry is absent, already present, or rebuilt
+// by a heartbeat; and the durable record stays tampered.
+func TestEnsureSteward_TamperedRecordKeepsStatus(t *testing.T) {
+	ctx := context.Background()
+	storage := newTestFleetStorage(t)
+	st := pkgtesting.SetupTestStorage(t).GetStewardStore()
+	require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{
+		ID: "dev-t", TenantID: "tenant-a", Status: business.StewardStatusTampered,
+	}))
+	require.NoError(t, storage.Store(ctx, "dev-t", makeTestDNA("dev-t", map[string]string{"os": "linux"}),
+		&fleetStorage.StoreOptions{TenantID: "tenant-a", Status: "active"}))
+	require.NoError(t, storage.SetDeviceTenant(ctx, "dev-t", "tenant-a"))
+
+	newSvc := func() *ControllerService {
+		svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
+		svc.SetStewardStore(st)
+		return svc
+	}
+	durable := func() business.StewardStatus {
+		rec, err := st.GetSteward(ctx, "dev-t")
+		require.NoError(t, err)
+		return rec.Status
+	}
+
+	t.Run("absent entry", func(t *testing.T) {
+		svc := newSvc()
+		svc.EnsureSteward("dev-t", "", "active")
+		info, ok := svc.GetStewardInfo("dev-t")
+		require.True(t, ok)
+		assert.Equal(t, "tampered", info.Status)
+		assert.Equal(t, business.StewardStatusTampered, durable())
+	})
+
+	t.Run("existing entry", func(t *testing.T) {
+		svc := newSvc()
+		require.NoError(t, svc.RegisterSteward("dev-t", "tenant-a", "addr", "active"))
+		svc.EnsureSteward("dev-t", "", "active")
+		info, _ := svc.GetStewardInfo("dev-t")
+		assert.Equal(t, "tampered", info.Status)
+		assert.Equal(t, business.StewardStatusTampered, durable())
+	})
+
+	t.Run("heartbeat rebuilds an absent entry", func(t *testing.T) {
+		svc := newSvc()
+		require.True(t, svc.RecordHeartbeat("dev-t", "1.0.0", time.Now()))
+		info, _ := svc.GetStewardInfo("dev-t")
+		assert.Equal(t, "tampered", info.Status)
+		assert.Equal(t, business.StewardStatusTampered, durable())
+	})
+}
