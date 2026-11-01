@@ -76,9 +76,13 @@ var pendingRuntimeConfigFault atomic.Pointer[runtimeConfigFault]
 // stale config reason) and returns the status the initial heartbeat carries.
 // It runs before that heartbeat so the first heartbeat already has the reason.
 func applyPendingRuntimeConfigFault(tc *client.TransportClient) string {
+	startup := applyStartupReasons(tc)
 	f := pendingRuntimeConfigFault.Load()
 	if f == nil {
 		tc.ClearHealthReason(runtimeConfigFaultComponent)
+		if startup {
+			return "degraded"
+		}
 		return "healthy"
 	}
 	tc.SetHealthReason(runtimeConfigFaultComponent, runtimeConfigFaultCode, f.message)

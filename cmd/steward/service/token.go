@@ -4,6 +4,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -37,4 +38,46 @@ func platformTokenFilePath() string {
 // TokenFilePath returns the path of the registration token file.
 func TokenFilePath() string {
 	return platformTokenFilePath()
+}
+
+// TokenFileErrorKind classifies why a registration token file was refused, so a
+// caller can tell the class without matching the message.
+type TokenFileErrorKind string
+
+const (
+	// TokenFileMissing: the file does not exist.
+	TokenFileMissing TokenFileErrorKind = "missing"
+	// TokenFileEmpty: the file holds no token.
+	TokenFileEmpty TokenFileErrorKind = "empty"
+	// TokenFilePermissions: the file is not exclusively controlled by the
+	// service account (owner, mode or ACL), is not a regular file, or cannot be
+	// opened for reading.
+	TokenFilePermissions TokenFileErrorKind = "permissions"
+	// TokenFileInvalid: the file was read but its content is unusable (too
+	// large, or not a single-token string), or reading it failed.
+	TokenFileInvalid TokenFileErrorKind = "invalid"
+)
+
+// TokenFileError is returned by ReadTokenFile when the file is refused. Its
+// message never contains the token.
+type TokenFileError struct {
+	Kind TokenFileErrorKind
+	Err  error
+}
+
+func (e *TokenFileError) Error() string { return e.Err.Error() }
+func (e *TokenFileError) Unwrap() error { return e.Err }
+
+// tokenFileErr wraps err as a *TokenFileError of the given kind.
+func tokenFileErr(kind TokenFileErrorKind, format string, args ...any) error {
+	return &TokenFileError{Kind: kind, Err: fmt.Errorf(format, args...)}
+}
+
+// AsTokenFileError reports whether err is (or wraps) a *TokenFileError.
+func AsTokenFileError(err error) (*TokenFileError, bool) {
+	var tfe *TokenFileError
+	if errors.As(err, &tfe) {
+		return tfe, true
+	}
+	return nil, false
 }
