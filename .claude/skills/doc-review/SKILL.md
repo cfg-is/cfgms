@@ -33,19 +33,22 @@ Parse the output sections:
 - `v[0-9].*-validation.md`, `sprint-*.md` — Sprint reports
 - `story-*-summary.md`, `*-implementation-summary.md` — Story summaries
 
-**ALWAYS KEEP** (contributor-facing):
-- Security audits (demonstrates due diligence)
-- Architecture decision records (ADRs)
-- Contributor-facing guides and documentation
-- Historical design documents (with "HISTORICAL DOCUMENT" header)
+**REVIEW FOR CURRENT PURPOSE** (contributor-facing):
+- Security audits and ADRs may retain evidence or decision lineage relevant to
+  current constraints; verify their status and references.
+- Guides and design documents must describe current behavior or clearly approved
+  future direction. Update/consolidate/delete superseded or inaccurate material
+  and repair inbound references. A historical header alone is not a reason to keep
+  it; Git history preserves prior versions.
+- Apply `docs/development/product-planning.md` → Documentation currency.
 
 ## Decision Tree
 ```
 Does this document help future contributors?
-  YES → Keep
+  YES → Verify current accuracy and purpose; update or consolidate as needed
   NO  → Does it document completed internal work?
     YES → Remove
-    NO  → Keep but mark as historical
+    NO  → Remove superseded material once its current replacement is established
 ```
 
 ## Return

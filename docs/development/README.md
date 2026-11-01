@@ -15,6 +15,7 @@ This directory contains detailed development guides, standards, and workflows fo
 
 ### Story Development Process
 
+- [Product Planning](product-planning.md) - Discovery, epic readiness, existing-work reconciliation and outcome evidence
 - [Story Checklist](story-checklist.md) - Complete checklist for implementing stories
 - [PR Review Methodology](pr-review-methodology.md) - 5-phase structured PR review process
 - [Git Workflow](git-workflow.md) - GitFlow branching strategy and commit guidelines

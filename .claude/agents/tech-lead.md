@@ -29,6 +29,11 @@ Also read `CLAUDE.md` for architecture rules, central providers, and anti-patter
 
 ## Validation Checklist
 
+Apply `docs/development/product-planning.md`: check the proposed delta against
+existing code/issues and the epic coverage map. Flag duplicated or already-fixed
+work and unsupported readiness claims. Validate this story's bounded contract;
+do not require every story to deliver the whole epic.
+
 > **Before check 1, sync the working tree.** Run `git fetch origin develop` and confirm
 > `git rev-list --count HEAD..origin/develop` is `0`; if it is not, the tree you are
 > validating against is not the tree the dev agent will branch from. Stories are written

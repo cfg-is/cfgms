@@ -617,8 +617,8 @@ construction (§9 restriction, §10 constraints) — **rejected**.
 - [ADR-003](003-storage-data-taxonomy.md) — storage data taxonomy the `case_store` and provider
   compose with
 - [ADR-021](021-identity-assurance-levels.md) — step-up model the cockpit's REST surface rides
-- `docs/product/roadmap.md` — Digital Twin & DEX tiered rollout (Tier-2 graph, temporal query,
-  unified entity query API); Captured Backlog
+- `docs/product/roadmap.md` — current delivery coverage and deferred graph/DEX direction;
+  this ADR owns the graph and temporal access contract
 - `docs/design/mockups/troubleshooting-cockpit.html` + `docs/design/web-ui-design-system.md`
   — the consuming surface (case model, evidence canvas)
 - `features/modules/hyperv/cluster.go`, `pkg/directory/dna/interfaces.go`,

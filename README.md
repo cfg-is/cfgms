@@ -1,14 +1,14 @@
 # CFGMS
 
-> CFGMS manages your clients' Windows, Mac, Linux, and Microsoft 365 estates from one place, keeps every setting where you said it should be, auto-investigates problems, and answers questions about the whole fleet in seconds.
+CFGMS is an open-source, multi-tenant management and monitoring platform for
+managed service providers (MSPs), with a hosted SaaS service as the current
+delivery priority. Declarative configuration, extensible modules, workflows and
+the DNA knowledge graph provide its foundation.
 
-CFGMS is an open-source current-state intelligence and configuration
-management platform for managed service providers (MSPs). It stands on two
-pillars: zero-trust configuration management for Windows, macOS, Linux, and
-Microsoft 365, and live query and execution across every endpoint in the
-fleet. You declare how each client's devices and Microsoft 365 tenant should
-be set up. CFGMS makes them match and keeps them matching. And when you need
-to know what is true right now, you ask the fleet and get a live answer.
+The product goal is trustworthy current-state visibility and fast investigation
+across endpoints, SaaS resources, directories, users and groups. The API-first
+platform prioritizes the web operator experience; full CLI parity, self-hosting
+product work and standalone steward product work are deferred.
 
 [![Build Status](https://github.com/cfg-is/cfgms/workflows/Cross-Platform%20Build%20Validation/badge.svg)](https://github.com/cfg-is/cfgms/actions)
 [![Security Scan](https://github.com/cfg-is/cfgms/workflows/Security%20Scanning%20Workflow/badge.svg)](https://github.com/cfg-is/cfgms/actions)
@@ -18,44 +18,40 @@ to know what is true right now, you ask the fleet and get a live answer.
 
 ## How it works
 
-Every managed object has a **DNA** record: its exact state, versioned over
-time. CFGMS links those records into a **knowledge graph**: which server an
-application depends on, which policy set a registry key, what changed on a
-device last Tuesday. Three engines draw on that graph:
+**Stewards** observe and manage endpoints; **controller-side modules** interact
+with SaaS and directory APIs. DNA records observed state with source and freshness
+information, including resources whose configuration is not managed. The
+controller stores observations and their relationships in a knowledge graph.
+Steward heartbeat hashes support detection of missed DNA synchronization.
 
-- **Live fleet query and execution.** Ask the fleet a question and get a live
-  answer from every endpoint at once: which machines run a given software
-  version, who is logged in, which service is down. Then act on the answer at
-  the same speed when a fix cannot wait for a scheduled rollout.
-- **The reactor.** A device drifts, a user is added, a certificate nears
-  expiry. The reactor matches each event against the reactions you declared
-  and runs them.
-- **The workflow engine.** Multi-step processes built once and run for every
-  tenant: onboard a user, decommission a laptop, rotate a secret across a
-  client.
+Stored DNA supports controller-side queries; live endpoint connections support
+queries and execution when current observations are needed. Declarative
+configuration governs desired state, while workflows compose operations.
 
-Other tools make a technician browse to the problem. CFGMS is being built to
-bring the assembled case to them: the affected device, its dependencies, its
-recent changes, the likely cause, and a fix through the same engine. The [product vision](docs/product/vision.md) says why; the
-[roadmap](docs/product/roadmap.md) says when.
+## Implementation and product direction
 
-## What CFGMS provides
+The repository includes configuration and execution infrastructure, DNA/graph
+storage and synchronization, catalog-based live OSquery dispatch, workflow
+execution and approvals, and web fleet and cockpit components. Implementation
+coverage and remaining work are linked in the [roadmap](docs/product/roadmap.md).
 
-- Desired-state configuration and policy-as-code for Windows, macOS, Linux,
-  and Microsoft 365
-- Configuration drift detection and enforcement
-- Live fleet query and execution across every managed endpoint
-- Event-driven reactions and multi-step workflow automation
-- Hierarchical multi-tenancy, with each client's data and access kept apart
-- Endpoint inventory, live telemetry, and historical state
-- Microsoft 365, Active Directory, endpoint, and infrastructure integrations
-- Zero-trust internals: mutual TLS on every internal connection, role-based
-  access control, publisher-signed modules, and encrypted secrets
-- A `cfg` CLI, REST API and web UI
+The early-beta goal includes Windows, macOS and Linux endpoints, Microsoft 365
+integration, an iterative query workspace and a general read-only investigation
+agent. Existing fleet views, evidence cards and M365 modules provide foundations;
+they do not establish the complete beta experience. Directory inventory, declared-user/group convergence and directory read surfaces
+now have implementations in the controller and web console. Launch licensing and
+PSA workflows still need further scope and integration coverage; these source
+implementations are not a claim of verified production readiness.
+
+The intended cockpit accepts operator input through one chat-like input and
+presents agent output as structured evidence, hypothesis, action and open-question
+cards. Agentic investigation and its complete input/tool loop remain delivery
+work. HaloPSA and PAX8 are launch integration priorities, not claims of working
+connectors. See the [product vision](docs/product/vision.md) for the full contract.
 
 ## Architecture
 
-CFGMS uses three cooperating components:
+The architecture has two implemented component roles and a future third role:
 
 - **Controller.** The central control plane for configuration, orchestration,
   workflows, fleet state, APIs, and multi-tenant administration.
@@ -74,11 +70,15 @@ components are implemented, but it should not yet be treated as a finished
 production product. Interfaces and deployment procedures may change.
 
 Direction and progress are tracked in the [roadmap](docs/product/roadmap.md) and
-on the [project board](https://github.com/orgs/cfg-is/projects/1).
+in [public issues](https://github.com/cfg-is/cfgms/issues). The
+[project board](https://github.com/orgs/cfg-is/projects/1) requires access; deferred
+security work may remain private.
 
 ## Build from source
 
-Prerequisites: Go and Git. See [`go.mod`](go.mod) for the required Go version.
+Prerequisites: Go, Git, GNU Make and the shell/build tools described in
+[DEVELOPMENT.md](DEVELOPMENT.md). See [`go.mod`](go.mod) for the Go language
+version and toolchain. Frontend development has separate Node/npm requirements.
 
 ```bash
 git clone https://github.com/cfg-is/cfgms.git
