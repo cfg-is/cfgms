@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cfgis/cfgms/features/config/signature"
 )
@@ -317,6 +318,83 @@ type Heartbeat struct {
 	// ConnectionState is the steward's current connection state string.
 	// Values: "connected", "disconnected", "connecting", "reconnecting".
 	ConnectionState string `json:"connection_state,omitempty"`
+
+	// Reasons are the machine-readable reasons the steward is not healthy.
+	// Empty when healthy. Steward-controlled, so untrusted at the controller:
+	// bounded by TruncateHealthReasons on send and on receive.
+	Reasons []HealthReason `json:"reasons,omitempty"`
+}
+
+// Limits on HealthReason content. Reasons are untrusted input at the controller.
+const (
+	MaxHealthReasons          = 16
+	MaxHealthReasonComponent  = 64
+	MaxHealthReasonCode       = 64
+	MaxHealthReasonMessageLen = 256
+)
+
+// HealthReason explains one reason a steward reports a non-healthy status.
+// Message must be a fixed or sanitized string: never secrets, file contents or tokens.
+type HealthReason struct {
+	Component string `json:"component"`
+	Code      string `json:"code"`
+	Message   string `json:"message,omitempty"`
+}
+
+// Tamper reason codes. This is the single definition; consumers import these
+// and never redefine them.
+const (
+	ReasonCodeTamperDataDir         = "tamper.data_dir"
+	ReasonCodeTamperTrustDowngrade  = "tamper.trust_downgrade"
+	ReasonCodeTamperCAMismatch      = "tamper.ca_mismatch"
+	ReasonCodeTamperSecurityProfile = "tamper.security_profile"
+)
+
+// IsTamperCode reports whether code is exactly one of the defined tamper codes.
+// It is an exact-set check: an unknown "tamper.*" code is not a tamper code.
+func IsTamperCode(code string) bool {
+	switch code {
+	case ReasonCodeTamperDataDir,
+		ReasonCodeTamperTrustDowngrade,
+		ReasonCodeTamperCAMismatch,
+		ReasonCodeTamperSecurityProfile:
+		return true
+	}
+	return false
+}
+
+// TruncateHealthReasons returns a copy of reasons with at most MaxHealthReasons
+// entries and every field cut to its byte cap on a UTF-8 boundary. Returns nil
+// for an empty input.
+func TruncateHealthReasons(reasons []HealthReason) []HealthReason {
+	if len(reasons) == 0 {
+		return nil
+	}
+	n := len(reasons)
+	if n > MaxHealthReasons {
+		n = MaxHealthReasons
+	}
+	out := make([]HealthReason, n)
+	for i := 0; i < n; i++ {
+		out[i] = HealthReason{
+			Component: truncateUTF8(reasons[i].Component, MaxHealthReasonComponent),
+			Code:      truncateUTF8(reasons[i].Code, MaxHealthReasonCode),
+			Message:   truncateUTF8(reasons[i].Message, MaxHealthReasonMessageLen),
+		}
+	}
+	return out
+}
+
+// truncateUTF8 cuts s to at most max bytes without splitting a rune.
+func truncateUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // Response represents a command response/acknowledgment.

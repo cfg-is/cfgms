@@ -1604,6 +1604,30 @@ func TestSubsystemState_StatusTransitions(t *testing.T) {
 	assert.Equal(t, string(steward.StatusHealthy), s.status())
 }
 
+// TestSubsystemState_Reasons verifies the subsystem tracker publishes a
+// machine-readable heartbeat reason per degraded subsystem.
+func TestSubsystemState_Reasons(t *testing.T) {
+	s := newSubsystemState()
+	assert.Empty(t, s.reasons.List())
+
+	s.markDegraded("controller")
+	got := s.reasons.List()
+	require.Len(t, got, 1)
+	assert.Equal(t, "controller", got[0].Component)
+	assert.Equal(t, "subsystem.pending", got[0].Code)
+
+	s.markDegraded("dna")
+	assert.Len(t, s.reasons.List(), 2)
+
+	s.markHealthy("controller")
+	got = s.reasons.List()
+	require.Len(t, got, 1)
+	assert.Equal(t, "dna", got[0].Component)
+
+	s.markHealthy("dna")
+	assert.Empty(t, s.reasons.List())
+}
+
 // fakeModuleDNASource is a stub moduleDNASource for the composite-collector
 // merge test (#2423).
 type fakeModuleDNASource struct {

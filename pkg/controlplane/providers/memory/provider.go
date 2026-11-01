@@ -858,6 +858,7 @@ func cloneEvent(event *types.Event) *types.Event {
 // cloneHeartbeat returns a copy of hb with an independent Metrics map.
 func cloneHeartbeat(hb *types.Heartbeat) *types.Heartbeat {
 	out := *hb
+	out.Reasons = types.TruncateHealthReasons(hb.Reasons)
 	if hb.Metrics != nil {
 		metrics := make(map[string]interface{}, len(hb.Metrics))
 		for k, v := range hb.Metrics {

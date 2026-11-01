@@ -153,21 +153,30 @@ type connectFuncT func(
 type subsystemState struct {
 	mu       sync.Mutex
 	degraded map[string]struct{}
+	// reasons mirrors degraded as machine-readable heartbeat reasons. It is
+	// handed to the transport client once connected (UseHealthReasons).
+	reasons *client.HealthReasonRegistry
 }
 
+// subsystemPendingReasonCode is the heartbeat reason code for a subsystem that
+// has not attached yet.
+const subsystemPendingReasonCode = "subsystem.pending"
+
 func newSubsystemState() *subsystemState {
-	return &subsystemState{degraded: make(map[string]struct{})}
+	return &subsystemState{degraded: make(map[string]struct{}), reasons: client.NewHealthReasonRegistry()}
 }
 
 func (s *subsystemState) markDegraded(subsystem string) {
 	s.mu.Lock()
 	s.degraded[subsystem] = struct{}{}
+	s.reasons.Set(subsystem, subsystemPendingReasonCode, "subsystem not ready")
 	s.mu.Unlock()
 }
 
 func (s *subsystemState) markHealthy(subsystem string) {
 	s.mu.Lock()
 	delete(s.degraded, subsystem)
+	s.reasons.Clear(subsystem)
 	s.mu.Unlock()
 }
 
@@ -763,6 +772,9 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		// Must be called before loops start so the first periodic heartbeat uses
 		// the correct status. (Issue #2034)
 		transportCl.SetStatusFunc(subsysState.status)
+		// Share the subsystem reasons with the client so the heartbeat carries
+		// why the steward is degraded, alongside components that set their own.
+		transportCl.UseHealthReasons(subsysState.reasons)
 
 		// Wire the graceful-shutdown trigger used after a successful
 		// push_steward_binary swap. Pass runCtx so the upgrade grace-delay timer

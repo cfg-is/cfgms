@@ -492,6 +492,11 @@ type TransportClient struct {
 	// connection to wire in the subsystem state tracker. (Issue #2034)
 	statusFunc func() string
 
+	// reasons is the health-reason registry sent on every heartbeat. Created
+	// lazily; may be replaced via UseHealthReasons. Guarded by reasonsMu.
+	reasonsMu sync.Mutex
+	reasons   *HealthReasonRegistry
+
 	// shutdownScheduleFunc schedules trigger to run after delay. When nil the
 	// default real implementation (a timer goroutine) is used. Injectable for
 	// testing so the grace delay is exercised synchronously without time.Sleep
@@ -2136,6 +2141,7 @@ func (c *TransportClient) SendHeartbeat(ctx context.Context, status string, metr
 		ActiveSessions:   activeSessions,
 		ConnectionState:  connectionState,
 		Version:          version.Short(),
+		Reasons:          cpTypes.TruncateHealthReasons(c.HealthReasons()),
 	}
 
 	if err := cp.SendHeartbeat(ctx, heartbeat); err != nil {
@@ -2992,10 +2998,16 @@ func (c *TransportClient) heartbeatStatus() string {
 	c.mu.RLock()
 	fn := c.statusFunc
 	c.mu.RUnlock()
+	status := "healthy"
 	if fn != nil {
-		return fn()
+		status = fn()
 	}
-	return "healthy"
+	// A set reason means the steward is not healthy; an error-class (or any
+	// other non-healthy) status from the function is kept as is.
+	if status == string(cpTypes.StatusHealthy) && len(c.HealthReasons()) > 0 {
+		return string(cpTypes.StatusDegraded)
+	}
+	return status
 }
 
 // SetRevokedVersions updates the cached list of revoked steward versions received
@@ -3192,7 +3204,11 @@ func verifyPushedSigningCertChain(bundlePEM []byte, leaf *x509.Certificate, caPE
 	if err != nil {
 		return fmt.Errorf("no usable pinned controller CA to verify signing certificate")
 	}
-	intermediates := x509.NewCertPool()
+	// Every CERTIFICATE block after the leaf is a candidate intermediate. The
+	// pool is built through pkg/cert; unparseable blocks are skipped, and a
+	// bundle carrying no usable intermediate leaves the pool nil so the leaf
+	// must chain directly to a pinned root.
+	var intermediatePEM []byte
 	rest := bundlePEM
 	first := true
 	for {
@@ -3208,8 +3224,12 @@ func verifyPushedSigningCertChain(bundlePEM []byte, leaf *x509.Certificate, caPE
 			first = false
 			continue
 		}
-		if ic, perr := x509.ParseCertificate(block.Bytes); perr == nil {
-			intermediates.AddCert(ic)
+		intermediatePEM = append(intermediatePEM, pem.EncodeToMemory(block)...)
+	}
+	var intermediates *x509.CertPool
+	if len(intermediatePEM) > 0 {
+		if pool, perr := cert.NewCertPoolFromPEM(intermediatePEM); perr == nil {
+			intermediates = pool
 		}
 	}
 	if _, err := leaf.Verify(x509.VerifyOptions{

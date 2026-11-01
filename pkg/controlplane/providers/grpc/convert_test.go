@@ -5,6 +5,7 @@ package grpc
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 	"time"
 
@@ -842,4 +843,55 @@ func TestHeartbeat_BulkRootRoundTrip(t *testing.T) {
 		assert.Empty(t, got.DNABulkRoot)
 		assert.Equal(t, "agg", got.DNAAggregateRoot)
 	})
+}
+
+func TestHeartbeatReasonsRoundTrip(t *testing.T) {
+	hb := &types.Heartbeat{
+		StewardID: "s1",
+		Status:    types.StatusDegraded,
+		Timestamp: time.Now(),
+		Reasons: []types.HealthReason{
+			{Component: "controller", Code: "subsystem.pending", Message: "subsystem not ready"},
+			{Component: "dna", Code: "subsystem.pending", Message: "subsystem not ready"},
+			{Component: "x", Code: types.ReasonCodeTamperDataDir, Message: "m"},
+		},
+	}
+	got := heartbeatFromProto(heartbeatToProto(hb))
+	require.NotNil(t, got)
+	assert.Equal(t, hb.Reasons, got.Reasons)
+}
+
+func TestHeartbeatReasonsTruncatedBothDirections(t *testing.T) {
+	long := types.HealthReason{
+		Component: strings.Repeat("c", 200),
+		Code:      strings.Repeat("d", 200),
+		Message:   strings.Repeat("m", 1000),
+	}
+	check := func(t *testing.T, rs []types.HealthReason) {
+		require.Len(t, rs, types.MaxHealthReasons)
+		for _, r := range rs {
+			assert.Len(t, r.Component, types.MaxHealthReasonComponent)
+			assert.Len(t, r.Code, types.MaxHealthReasonCode)
+			assert.Len(t, r.Message, types.MaxHealthReasonMessageLen)
+		}
+	}
+
+	over := make([]types.HealthReason, 40)
+	for i := range over {
+		over[i] = long
+	}
+
+	// Send direction: heartbeatToProto bounds what goes on the wire.
+	pb := heartbeatToProto(&types.Heartbeat{Reasons: over})
+	require.Len(t, pb.Reasons, types.MaxHealthReasons)
+	check(t, heartbeatFromProto(pb).Reasons)
+
+	// Receive direction: an untrusted proto built without the send-side caps.
+	raw := &transportpb.Heartbeat{}
+	for i := 0; i < 40; i++ {
+		raw.Reasons = append(raw.Reasons, &transportpb.HealthReason{
+			Component: long.Component, Code: long.Code, Message: long.Message,
+		})
+	}
+	check(t, heartbeatFromProto(raw).Reasons)
 }
