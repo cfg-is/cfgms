@@ -914,6 +914,9 @@ func (m *activeDirectoryModule) runWrite(ctx context.Context, req writeRequest, 
 	if !objectGUIDPattern.MatchString(id) {
 		return "", fmt.Errorf("activedirectory: %s did not report the object's objectGUID", req.Operation)
 	}
+	m.writeOpsMu.Lock()
+	m.writeOps = append(m.writeOps, req.Operation)
+	m.writeOpsMu.Unlock()
 	m.logger.Info("AD write applied", "operation", req.Operation, "object_guid", id)
 	return id, nil
 }

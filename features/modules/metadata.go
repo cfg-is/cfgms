@@ -145,6 +145,9 @@ type ModuleSecurity struct {
 	RequiresRoot bool     `yaml:"requires_root,omitempty" json:"requires_root,omitempty"`
 	Capabilities []string `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
 	Ports        []int    `yaml:"ports,omitempty" json:"ports,omitempty"`
+	// AuditOperations lists the write operations the controller audits when a
+	// steward reports one as changed (Issue #5564).
+	AuditOperations []string `yaml:"audit_operations,omitempty" json:"audit_operations,omitempty"`
 }
 
 // ModuleDocumentation defines documentation references
@@ -491,6 +494,10 @@ func (m *ModuleMetadata) Clone() *ModuleMetadata {
 		if m.Security.Ports != nil {
 			clone.Security.Ports = make([]int, len(m.Security.Ports))
 			copy(clone.Security.Ports, m.Security.Ports)
+		}
+		if m.Security.AuditOperations != nil {
+			clone.Security.AuditOperations = make([]string, len(m.Security.AuditOperations))
+			copy(clone.Security.AuditOperations, m.Security.AuditOperations)
 		}
 	}
 
