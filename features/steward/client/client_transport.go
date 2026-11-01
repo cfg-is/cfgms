@@ -2925,6 +2925,50 @@ func (c *TransportClient) IsConnected() bool {
 	return c.connected
 }
 
+// CertManager returns the certificate manager the client loads its mTLS client
+// certificate from on every handshake, or nil when the client has none. A
+// certificate imported into it is used by the next dial.
+func (c *TransportClient) CertManager() *cert.Manager {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.certManager
+}
+
+// ControlStreamConnected reports whether the control plane connection is up.
+func (c *TransportClient) ControlStreamConnected() bool {
+	c.mu.RLock()
+	cp := c.controlPlane
+	c.mu.RUnlock()
+	return cp != nil && cp.IsConnected()
+}
+
+// ReconnectWithNewCredentials drops the current control connection and re-dials
+// on the SAME client. The TLS configuration loads the newest client certificate
+// from the certificate manager on each handshake (CreateOnDemandClientTLSConfig),
+// so a certificate imported before this call is the one presented. Without a
+// certificate manager the client holds a static certificate that cannot change,
+// so this refuses rather than re-dialling with the old one.
+func (c *TransportClient) ReconnectWithNewCredentials(ctx context.Context) error {
+	c.mu.RLock()
+	cp := c.controlPlane
+	certMgr := c.certManager
+	c.mu.RUnlock()
+	if certMgr == nil {
+		return fmt.Errorf("client has no certificate manager; credentials cannot be renewed in place")
+	}
+	if cp == nil {
+		return fmt.Errorf("control plane not connected")
+	}
+	r, ok := cp.(interface{ Reconnect(context.Context) error })
+	if !ok {
+		return fmt.Errorf("control plane does not support reconnect")
+	}
+	if err := r.Reconnect(ctx); err != nil {
+		return fmt.Errorf("reconnect with new credentials: %w", err)
+	}
+	return nil
+}
+
 // GetStewardID returns the steward ID.
 func (c *TransportClient) GetStewardID() string {
 	c.mu.RLock()

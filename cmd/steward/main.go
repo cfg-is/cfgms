@@ -681,6 +681,9 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		// the background instead of exiting. Process liveness is never gated on
 		// controller availability. (Issue #2034)
 		connectedCh := make(chan *client.TransportClient, 1)
+		// Shared with the identity lifecycle runner: a connect attempt and a
+		// certificate renewal never run at the same time.
+		var connectMu sync.Mutex
 		// Read once, before the goroutine starts: the loop below can outlive
 		// runStewardInternal's caller, so it must not re-read the package var.
 		rejectedRetry := rejectedReadmissionRetry
@@ -692,9 +695,11 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 				if runCtx.Err() != nil {
 					return
 				}
+				connectMu.Lock()
 				tc, connErr := connectGuarded(subsysState, logger, func() (*client.TransportClient, error) {
 					return cf(runCtx, regToken, resolvedURL, trustSrc, installCAPEM, ks, publicBeta, logger)
 				})
+				connectMu.Unlock()
 				if connErr == nil {
 					subsysState.markHealthy("controller")
 					connectedCh <- tc
@@ -849,6 +854,19 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		// the configured interval and publishes delta updates so the controller
 		// fleet view stays current without requiring a full reconnect. (Issue #1915)
 		transportCl.StartDNARefreshLoop(runCtx)
+
+		// Keep the client certificate current for as long as the process runs:
+		// renew inside the renewal window and re-dial on this same client.
+		go (&identityLifecycle{
+			tc:            transportCl,
+			ks:            ks,
+			certStoreDir:  certStoreDirResolver(),
+			controllerURL: resolvedURL,
+			trustSrc:      trustSrc,
+			installCAPEM:  installCAPEM,
+			logger:        logger,
+			mu:            &connectMu,
+		}).Run(runCtx)
 
 		// Wait for context cancellation (signal, SCM stop, or a pushed-upgrade
 		// graceful self-exit request via SetShutdownFunc → runCancel).
@@ -2546,6 +2564,45 @@ func readmitWithDeviceKey(
 	publicBeta bool,
 	logger logging.Logger,
 ) (*client.TransportClient, error) {
+	cred, err := requestRefreshedCredential(ctx, id, ks, certStoreDir, controllerURL, trustSrc, installCAPEM, logger)
+	if err != nil {
+		return nil, err
+	}
+	tc, err := connectWithApprovedRegistration(ctx, cred.bundle, certStoreDir, token, cred.trustSrc, cred.pinCAPEM, cred.priorCAPin, runtimeCfg, publicBeta, logger)
+	if err != nil {
+		// The new identity is already persisted (connectWithApprovedRegistration
+		// saves it before connecting), so the caller retries it as a stored
+		// identity rather than registering — which would 409 and re-admit again.
+		return nil, fmt.Errorf("%w: re-admitted identity stored but connect failed: %v", errStoredIdentityUnreachable, err)
+	}
+	return tc, nil
+}
+
+// refreshedCredential is what a successful registration-refresh exchange yields:
+// the credential bundle plus the trust settings its persistence must use.
+type refreshedCredential struct {
+	bundle     approvedRegistration
+	trustSrc   TrustSource
+	pinCAPEM   string
+	priorCAPin string
+}
+
+// requestRefreshedCredential runs the device-key proof-of-possession exchange
+// shared by boot re-admission and in-process renewal: challenge, proof, a fresh
+// mTLS keypair carried in a CSR, and the controller's signed certificate. It
+// persists nothing but the pending-request state and creates no client.
+//
+// The identity key (ks) only signs the proof; the mTLS key is generated here for
+// every exchange and never leaves the device.
+func requestRefreshedCredential(
+	ctx context.Context,
+	id *StewardIdentity,
+	ks identity.KeyStore,
+	certStoreDir, controllerURL string,
+	trustSrc TrustSource,
+	installCAPEM string,
+	logger logging.Logger,
+) (*refreshedCredential, error) {
 	if controllerURL == "" {
 		return nil, fmt.Errorf("controller URL not set; cannot request re-admission")
 	}
@@ -2658,6 +2715,15 @@ func readmitWithDeviceKey(
 		if bundle.ServerCert == "" {
 			bundle.ServerCert = id.ServerCertPEM
 		}
+		// A certificate-only response (a tampered steward's) omits the CA and
+		// signing certificate: the stored values stay, so an empty CA is never
+		// persisted over the pinned one.
+		if bundle.CACert == "" {
+			bundle.CACert = id.CACertPEM
+		}
+		if bundle.SigningCert == "" {
+			bundle.SigningCert = id.SigningCertPEM
+		}
 	}
 	if bundle.StewardID == "" || bundle.TransportAddress == "" {
 		return nil, fmt.Errorf("re-admission response lacks the steward identity or transport address needed without a stored identity")
@@ -2667,14 +2733,45 @@ func readmitWithDeviceKey(
 	if refreshTrustSrc == trustSourceInstallPinned {
 		pinCAPEM = installCAPEM
 	}
-	tc, err := connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, refreshTrustSrc, pinCAPEM, priorCAPin, runtimeCfg, publicBeta, logger)
-	if err != nil {
-		// The new identity is already persisted (connectWithApprovedRegistration
-		// saves it before connecting), so the caller retries it as a stored
-		// identity rather than registering — which would 409 and re-admit again.
-		return nil, fmt.Errorf("%w: re-admitted identity stored but connect failed: %v", errStoredIdentityUnreachable, err)
+	return &refreshedCredential{bundle: bundle, trustSrc: refreshTrustSrc, pinCAPEM: pinCAPEM, priorCAPin: priorCAPin}, nil
+}
+
+// renewIntoCertStore renews the client certificate of a steward that is already
+// running: it performs the refresh exchange and imports the new certificate and
+// its freshly generated key into certMgr, so the next TLS handshake presents
+// them. It creates no client and leaves the stored identity untouched — CA,
+// server certificate, signing certificates and transport address all stay as
+// pinned — and it never persists material the controller did not sign for this
+// device. Returns the serial of the new certificate.
+func renewIntoCertStore(
+	ctx context.Context,
+	id *StewardIdentity,
+	ks identity.KeyStore,
+	certMgr *cert.Manager,
+	certStoreDir, controllerURL string,
+	trustSrc TrustSource,
+	installCAPEM string,
+	logger logging.Logger,
+) (string, error) {
+	if id == nil {
+		return "", fmt.Errorf("no stored identity to renew")
 	}
-	return tc, nil
+	if certMgr == nil {
+		return "", fmt.Errorf("no certificate manager to store the renewed certificate in")
+	}
+	cred, err := requestRefreshedCredential(ctx, id, ks, certStoreDir, controllerURL, trustSrc, installCAPEM, logger)
+	if err != nil {
+		return "", err
+	}
+	if cred.bundle.ClientCert == "" || cred.bundle.ClientKey == "" {
+		return "", fmt.Errorf("renewal response carries no usable client certificate")
+	}
+	fullChain := cred.bundle.ClientCert + cred.bundle.IssuerChain
+	imported, err := certMgr.ImportCertificate([]byte(fullChain), []byte(cred.bundle.ClientKey), cert.CertificateTypeClient)
+	if err != nil {
+		return "", fmt.Errorf("store renewed client certificate: %w", err)
+	}
+	return imported.SerialNumber, nil
 }
 
 // hasOpenReadmission reports whether a re-admission request is already filed and
@@ -2717,7 +2814,7 @@ func signRefreshChallenge(ctx context.Context, httpClient *registration.HTTPClie
 
 	pop, err := ks.Sign(digest[:])
 	if err != nil {
-		return "", 0, nil, fmt.Errorf("sign refresh digest: %w", err)
+		return "", 0, nil, fmt.Errorf("sign refresh digest: %w: %v", errDeviceKeyUnusable, err)
 	}
 	// #nosec G115 -- the controller-provided uint64 timestamp is explicitly
 	// rejected above unless it fits the signed protocol field.
