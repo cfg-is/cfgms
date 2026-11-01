@@ -1377,10 +1377,7 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 	// so the first heartbeat carries it. Evaluated on every attempt.
 	runtimeCfg, cfgFault := resolveConnectedRuntimeConfig(publicBeta, logger)
 	pendingRuntimeConfigFault.Store(cfgFault)
-	return connectWithRuntimeConfig(ctx, token, controllerURL, trustSrc, installCAPEM, ks, runtimeCfg, publicBeta, logger)
-}
 
-func connectWithRuntimeConfig(ctx context.Context, token, controllerURL string, trustSrc TrustSource, installCAPEM string, ks identity.KeyStore, runtimeCfg stewardconfig.StewardConfig, publicBeta bool, logger logging.Logger) (*client.TransportClient, error) {
 	certStoreDir := certStoreDirResolver()
 
 	// Downgrade guard: reject if stored enrollment had stronger trust assurance.
@@ -1960,9 +1957,7 @@ func connectWithApprovedRegistration(
 	logger.Info("Connected to controller via gRPC transport",
 		"transport_address", reg.TransportAddress)
 
-	if err := transportClient.SendHeartbeat(ctx, applyPendingRuntimeConfigFault(transportClient), nil); err != nil {
-		logger.Warn("Failed to send initial heartbeat", "error", err)
-	}
+	sendInitialHeartbeat(ctx, transportClient, "Failed to send initial heartbeat", logger)
 
 	if err := transportClient.InitializeConfigExecutor(reg.TenantID); err != nil {
 		return nil, fmt.Errorf("failed to initialize config executor: %w", err)
@@ -2280,9 +2275,7 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		logger.Warn("Initial DNA refresh failed; first heartbeat DNA hash will be empty", "error", err)
 	}
 
-	if err := transportClient.SendHeartbeat(ctx, applyPendingRuntimeConfigFault(transportClient), nil); err != nil {
-		logger.Warn("Failed to send initial heartbeat after reconnect", "error", err)
-	}
+	sendInitialHeartbeat(ctx, transportClient, "Failed to send initial heartbeat after reconnect", logger)
 
 	if err := transportClient.InitializeConfigExecutor(id.TenantID); err != nil {
 		return nil, fmt.Errorf("failed to initialize config executor: %w", err)

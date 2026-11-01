@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"sync/atomic"
 
@@ -82,4 +83,12 @@ func applyPendingRuntimeConfigFault(tc *client.TransportClient) string {
 	}
 	tc.SetHealthReason(runtimeConfigFaultComponent, runtimeConfigFaultCode, f.message)
 	return "degraded"
+}
+
+// sendInitialHeartbeat sends the first heartbeat on tc with the config fault
+// state applied, and logs failure under failMsg.
+func sendInitialHeartbeat(ctx context.Context, tc *client.TransportClient, failMsg string, logger logging.Logger) {
+	if err := tc.SendHeartbeat(ctx, applyPendingRuntimeConfigFault(tc), nil); err != nil {
+		logger.Warn(failMsg, "error", logging.SanitizeLogValue(err.Error()))
+	}
 }
