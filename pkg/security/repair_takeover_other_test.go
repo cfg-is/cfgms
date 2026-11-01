@@ -108,7 +108,10 @@ func TestTakeOverForRepair_LinksToOutsideAreQuarantinedNotFollowed(t *testing.T)
 
 func TestTakeOverForRepair_NeverTouchesPathsOutsideRoots(t *testing.T) {
 	asCurrentUser(t)
-	base := t.TempDir()
+	// Getwd reports the resolved path (/private/var on macOS), so resolve the
+	// temp dir the same way before comparing paths.
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	root := filepath.Join(base, "root")
 	sibling := filepath.Join(base, "sibling")
 	require.NoError(t, os.Mkdir(root, 0755))

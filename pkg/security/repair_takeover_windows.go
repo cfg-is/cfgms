@@ -49,20 +49,16 @@ func TakeOverForRepair(roots []string) (TakeoverReport, error) {
 		}
 		abs = append(abs, a)
 	}
-	dacl, err := adminOnlyDACL()
+	sd, err := windows.SecurityDescriptorFromString(adminOwnedSDDL)
 	if err != nil {
-		return rep, err
-	}
-	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
-	if err != nil {
-		return rep, fmt.Errorf("build Administrators SID: %w", err)
+		return rep, fmt.Errorf("build admin-owned security descriptor: %w", err)
 	}
 	// Administrators hold these privileges but have them disabled. They let the
 	// repair take an entry whose DACL grants the administrator nothing.
 	restore := enableTakeoverPrivileges()
 	defer restore()
 
-	t := &takeover{dacl: dacl, admins: admins, rep: &rep}
+	t := &takeover{sd: sd, rep: &rep}
 	for _, root := range abs {
 		t.root(root)
 	}
@@ -73,9 +69,8 @@ func TakeOverForRepair(roots []string) (TakeoverReport, error) {
 }
 
 type takeover struct {
-	dacl   *windows.ACL
-	admins *windows.SID
-	rep    *TakeoverReport
+	sd  *windows.SECURITY_DESCRIPTOR
+	rep *TakeoverReport
 }
 
 func (t *takeover) refuse(path, why string) {
@@ -170,12 +165,27 @@ func (t *takeover) entry(path string) {
 func (t *takeover) secure(h windows.Handle, path string) bool {
 	secInfo := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION |
 		windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
-	if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT, secInfo, t.admins, nil, t.dacl, nil); err != nil {
+	// NtSetSecurityObject sets exactly this object. SetSecurityInfo would also
+	// push the inheritable ACEs down to every child, and through a hard link
+	// that rewrites the security descriptor of a file outside the root.
+	if err := ntSetSecurityObject(h, secInfo, t.sd); err != nil {
 		t.refuse(path, fmt.Sprintf("take ownership: %v", err))
 		return false
 	}
 	t.rep.Secured = append(t.rep.Secured, path)
 	return true
+}
+
+var procNtSetSecurityObject = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtSetSecurityObject")
+
+// ntSetSecurityObject applies the selected parts of sd to h without
+// propagating to children.
+func ntSetSecurityObject(h windows.Handle, info windows.SECURITY_INFORMATION, sd *windows.SECURITY_DESCRIPTOR) error {
+	status, _, _ := procNtSetSecurityObject.Call(uintptr(h), uintptr(info), uintptr(unsafe.Pointer(sd)))
+	if status != 0 {
+		return windows.NTStatus(status)
+	}
+	return nil
 }
 
 // fileDispositionInfo is FILE_DISPOSITION_INFO.
@@ -234,7 +244,12 @@ func enableTakeoverPrivileges() (restore func()) {
 		}
 		tp := windows.Tokenprivileges{PrivilegeCount: 1}
 		tp.Privileges[0] = windows.LUIDAndAttributes{Luid: luid, Attributes: windows.SE_PRIVILEGE_ENABLED}
-		if err := windows.AdjustTokenPrivileges(token, false, &tp, 0, nil, nil); err == nil {
+		var prev windows.Tokenprivileges
+		var prevLen uint32
+		err := windows.AdjustTokenPrivileges(token, false, &tp, uint32(unsafe.Sizeof(prev)), &prev, &prevLen)
+		// prev lists only privileges whose state changed, so one that was
+		// already enabled (or is not held) is left as it was on restore.
+		if err == nil && prev.PrivilegeCount == 1 {
 			tp.Privileges[0].Attributes = 0
 			enabled = append(enabled, tp)
 		}

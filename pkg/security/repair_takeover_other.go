@@ -102,35 +102,45 @@ func takeOverEntry(dirFD int, dirPath, name string, rep *TakeoverReport) {
 	case unix.S_IFLNK:
 		quarantine(dirFD, name, path, rep)
 	case unix.S_IFDIR:
-		fd, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-		if err != nil {
-			rep.Refused = append(rep.Refused, fmt.Sprintf("%s: open directory: %v", path, err))
-			return
-		}
-		defer func() { _ = unix.Close(fd) }()
-		takeOverDir(fd, path, rep)
+		takeOverSubdir(dirFD, name, path, rep)
 	case unix.S_IFREG:
-		if st.Nlink > 1 {
-			quarantine(dirFD, name, path, rep)
-			return
-		}
-		fd, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
-		if err != nil {
-			rep.Refused = append(rep.Refused, fmt.Sprintf("%s: open file: %v", path, err))
-			return
-		}
-		defer func() { _ = unix.Close(fd) }()
-		// The entry may have been swapped for a hard-linked file since the
-		// stat above; the descriptor is what counts.
-		var fst unix.Stat_t
-		if err := unix.Fstat(fd, &fst); err != nil || fst.Mode&unix.S_IFMT != unix.S_IFREG || fst.Nlink > 1 {
-			rep.Refused = append(rep.Refused, path+": changed while being secured")
-			return
-		}
-		secureFD(fd, path, 0600, rep)
+		takeOverFile(dirFD, name, path, st.Nlink > 1, rep)
 	default:
 		rep.Refused = append(rep.Refused, path+": special file")
 	}
+}
+
+func takeOverSubdir(dirFD int, name, path string, rep *TakeoverReport) {
+	fd, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		rep.Refused = append(rep.Refused, fmt.Sprintf("%s: open directory: %v", path, err))
+		return
+	}
+	defer func() { _ = unix.Close(fd) }()
+	takeOverDir(fd, path, rep)
+}
+
+// takeOverFile secures a regular file, or quarantines it when it has more than
+// one hard link.
+func takeOverFile(dirFD int, name, path string, hardLinked bool, rep *TakeoverReport) {
+	if hardLinked {
+		quarantine(dirFD, name, path, rep)
+		return
+	}
+	fd, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		rep.Refused = append(rep.Refused, fmt.Sprintf("%s: open file: %v", path, err))
+		return
+	}
+	defer func() { _ = unix.Close(fd) }()
+	// The entry may have been swapped for a hard-linked file since the stat
+	// in the caller; the descriptor is what counts.
+	var fst unix.Stat_t
+	if err := unix.Fstat(fd, &fst); err != nil || fst.Mode&unix.S_IFMT != unix.S_IFREG || fst.Nlink > 1 {
+		rep.Refused = append(rep.Refused, path+": changed while being secured")
+		return
+	}
+	secureFD(fd, path, 0600, rep)
 }
 
 // quarantine unlinks name from dirFD. unlinkat removes the directory entry
