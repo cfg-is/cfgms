@@ -78,18 +78,3 @@ func TestReadRejectsBadSchemaAndUnknownFields(t *testing.T) {
 	_, err = Read(strings.NewReader(`not json`))
 	assert.Error(t, err)
 }
-
-func TestHotspotsOnly(t *testing.T) {
-	got := HotspotsOnly([]FuncRecord{{CC: 10}, {CC: 11}})
-	require.Len(t, got, 1)
-	assert.Equal(t, 11, got[0].CC)
-}
-
-func TestReadAnyAcceptsForeignSchema(t *testing.T) {
-	in := `{"schema_version": 99, "segments": {}}`
-	m, err := ReadAny(strings.NewReader(in))
-	require.NoError(t, err)
-	assert.Equal(t, 99, m.SchemaVersion)
-	_, err = Read(strings.NewReader(in))
-	assert.Error(t, err)
-}

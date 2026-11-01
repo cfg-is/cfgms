@@ -124,15 +124,6 @@ func TestRule3_Cases(t *testing.T) {
 	t.Run("identical to previous CC 40 in touched file passes", func(t *testing.T) {
 		assert.Empty(t, Rule3ChangedFunction(with(rec("p.F", "a.go", 40)), with(rec("p.F", "a.go", 40)), touched))
 	})
-	t.Run("identical to previous but not to ratchet baseline passes", func(t *testing.T) {
-		prev := with(rec("p.F", "a.go", 40))
-		cur := with(rec("p.F", "a.go", 40))
-		ratchet := with(rec("p.F", "a.go", 30))
-		assert.Empty(t, Rule3ChangedFunction(prev, cur, touched))
-		for _, f := range Evaluate(ratchet, prev, cur, touched).Findings {
-			assert.NotEqual(t, 3, f.Rule, f.String())
-		}
-	})
 	t.Run("untouched file not subject", func(t *testing.T) {
 		assert.Empty(t, Rule3ChangedFunction(empty, with(rec("p.N", "b.go", 50)), touched))
 	})

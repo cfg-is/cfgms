@@ -5,7 +5,7 @@ Measured replay of gate [rule 3](complexity-gate.md#gate-rules) over the last 30
 ## Method
 
 - Window: `git log --first-parent --max-count=30` on `origin/develop`.
-- For each commit C with parent P, P and C are materialised with `MaterializeRef` and analysed with `analyzer.Analyze`; the touched set is `git diff --name-only P C`. Rule 3 runs through `gate.Evaluate` with P as previous and C as current, the same path `check` uses. Rules 1 and 2 are evaluated against P as the baseline and listed in the run output, but are not the headline.
+- For each commit C with parent P, P and C are materialised with `MaterializeRef` and analysed with `analyzer.Analyze`; the touched set is `git diff --name-only P C`. Rule 3 runs through `gate.Evaluate` with P as previous and C as current, the same path `check` uses. Rules 1 and 2 are evaluated against P as previous and listed in the run output, but are not the headline.
 - The partition check is not applied (old trees predate the seven-segment manifest).
 - Unmeasurable commits (analysis error) would be reported with a reason and not counted as pass.
 

@@ -8,12 +8,8 @@
 // function. The report subcommand partitions the measured population into the
 // manifest's segments and writes the versioned metric file.
 //
-// The check subcommand enforces the no-worsening rules against a ratchet
-// baseline and the merge-base tree (see docs/development/complexity-gate.md).
-//
-// The ratchet subcommand moves the ratchet baseline only when the gate passes,
-// freeze writes the frozen baseline once, and staleness checks the ratchet
-// baseline against the running tool and manifest.
+// The check subcommand enforces the no-worsening rules against a fresh
+// measurement of the merge-base tree (see docs/development/complexity-gate.md).
 //
 // The replay subcommand replays rule 3 over recent merged develop commits.
 //
@@ -27,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/cfgis/cfgms/scripts/complexity/analyzer"
 )
@@ -39,12 +36,16 @@ func main() {
 		os.Exit(checkCmd(os.Args[2:], os.Stdout, os.Stderr))
 	}
 	subs := map[string]func([]string, io.Writer, io.Writer) int{
-		"ratchet": ratchetCmd, "freeze": freezeCmd, "staleness": stalenessCmd, "replay": replayCmd,
+		"replay": replayCmd,
 	}
 	if len(os.Args) > 1 {
 		if cmd, ok := subs[os.Args[1]]; ok {
 			os.Exit(cmd(os.Args[2:], os.Stdout, os.Stderr))
 		}
+	}
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		fmt.Fprintf(os.Stderr, "complexity: unknown subcommand %q\n", os.Args[1])
+		os.Exit(exitError)
 	}
 	root := flag.String("root", ".", "repository root to analyse")
 	flag.Parse()

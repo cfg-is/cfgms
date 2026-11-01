@@ -40,9 +40,10 @@ func slash(p string) string { return strings.ReplaceAll(filepath.ToSlash(p), "\\
 func num(v float64) string { return fmt.Sprintf("%g", v) }
 
 // Rule1Aggregate fails for each of hotspot count, aggregate excess and P95
-// Halstead effort that is higher in current than in the ratchet baseline.
-func Rule1Aggregate(baseline, current metrics.Measurement) []Finding {
-	b, c := baseline.Aggregate, current.Aggregate
+// Halstead effort that is higher in current than in previous (the merge-base
+// tree).
+func Rule1Aggregate(previous, current metrics.Measurement) []Finding {
+	b, c := previous.Aggregate, current.Aggregate
 	var out []Finding
 	add := func(metric string, base, cur float64) {
 		if cur > base {
@@ -56,12 +57,12 @@ func Rule1Aggregate(baseline, current metrics.Measurement) []Finding {
 }
 
 // Rule2HotspotGrowth fails for every identity present in both measurements
-// whose baseline CC is above the hotspot threshold and whose current CC is
-// higher. Deleted or renamed hotspots fire nothing.
-func Rule2HotspotGrowth(baseline, current metrics.Measurement) []Finding {
+// whose previous (merge-base) CC is above the hotspot threshold and whose
+// current CC is higher. Deleted or renamed hotspots fire nothing.
+func Rule2HotspotGrowth(previous, current metrics.Measurement) []Finding {
 	cur := index(current.Functions)
 	var out []Finding
-	for _, b := range baseline.Functions {
+	for _, b := range previous.Functions {
 		c, ok := cur[b.Identity]
 		if !ok || b.CC <= metrics.HotspotThreshold || c.CC <= b.CC {
 			continue

@@ -1,6 +1,6 @@
 # Complexity Report
 
-`make complexity-report` measures every production Go function in the repository, partitions the population into seven segments from a committed manifest, and writes a versioned machine-readable metric file. The report is report-only: high complexity never fails it. The `check` subcommand (see [Gate rules](#gate-rules)) enforces no-worsening rules against a baseline, and the ratchet, freeze and staleness commands maintain the baselines (see [Ratchet](#ratchet-frozen-baseline-and-staleness)).
+`make complexity-report` measures every production Go function in the repository, partitions the population into seven segments from a committed manifest, and writes a versioned machine-readable metric file. The report is report-only: high complexity never fails it. The `check` subcommand (see [Gate rules](#gate-rules)) enforces no-worsening rules against a fresh measurement of the merge-base with `develop` (see [The baseline is the merge-base](#the-baseline-is-the-merge-base)). No measurement output is committed.
 
 The in-repo analyzer exists because the per-function Halstead metrics and the exact counting rules below are not available from an off-the-shelf linter, and the measurement must be reproducible from the repository alone with no new module dependency.
 
@@ -67,35 +67,27 @@ Exit codes: 0 report written and partition clean; 1 partition or duplicate-ident
 
 Percentiles use nearest rank: the element at index `ceil(p*n)-1` of the ascending series. The model, writers, reader and `NearestRank` live in `scripts/complexity/metrics` so later tooling can import them.
 
-The per-run metric file is gitignored (`bin/`) and uploaded as a CI artifact, never committed, because a committed per-run file would conflict on every concurrent PR. Only baselines are committed.
-
-## Baseline inventory
-
-`scripts/complexity/baselines/inventory.json` is the committed Phase 0 inventory in the compact hotspot form: aggregate and per-segment totals plus only the functions with CC > 10. The full per-function file stays the gitignored per-run output. Do not edit the inventory by hand.
-
-- Base commit measured from: `06fac0c634a279a2f7b7f145b3047c8d950572f0` (develop at generation time, not the pull request's own commit).
-- Size: 264774 bytes.
-
-Regenerate:
-
-```bash
-make complexity-report COMPLEXITY_OUT=scripts/complexity/baselines/inventory.json COMPLEXITY_FLAGS=-compact-baseline
-```
+The per-run metric file is gitignored (`bin/`) and uploaded as a CI artifact, never committed, because a committed per-run file would conflict on every concurrent PR. No measurement data is committed to the repository.
 
 ## Gate rules
 
-`go run ./scripts/complexity check -baseline <file>` measures the current tree, measures **Previous** (the merge-base tree), reads the ratchet baseline from `-baseline`, and evaluates three rules. The current tree goes through the same measure-and-partition path as `report`; a partition violation is a finding printed as `partition: <violation>`. Previous is measured with the analyzer only, with no partition, because older trees predate the manifest. `-current <file>` replaces the current measurement and exists for tests only.
+`go run ./scripts/complexity check -root . -manifest scripts/complexity/manifest.json` (`make complexity-check`) measures the current tree, measures **Previous** (the merge-base tree), and evaluates three rules. The current tree goes through the same measure-and-partition path as `report`; a partition violation is a finding printed as `partition: <violation>`. Previous is measured with the analyzer only, with no partition, because older trees predate the manifest. `-current <file>` replaces the current measurement and exists for tests only.
 
 Rules are pure functions in `scripts/complexity/gate`; they do no IO.
 
-### Baseline versus Previous
+### The baseline is the merge-base
 
-Rules 1 and 2 compare to the **ratchet baseline**, a committed metric file that moves only when the ratchet is updated. Rule 3 compares to **Previous**, the tree at the merge-base. Judging rule 3 against Previous, not the lagging baseline, means a pull request is never failed for a function an earlier merged pull request changed.
+All three rules compare to **Previous**, the tree at the merge-base with `develop`, measured fresh by the same analyzer on every run. Previous and Current are measured over the same population (the whole tree, same exclusions), so a tree identical to its merge-base produces no findings.
+
+- **Develop is the ratchet.** Develop only receives gate-passing code, so it advances only on passing merges, which is the property a committed ratchet provided.
+- **Analyzer changes cannot go stale.** Both sides are re-measured by the running analyzer, so a counting-rule change compares like with like and there is no regeneration procedure.
+- **Nothing is committed.** No baseline, inventory or other measurement output lives in the repository.
+- **Fail closed.** A shallow clone or an unresolvable `origin/develop` exits 2.
 
 | Rule | Fails when |
 |------|-----------|
-| 1 aggregate | versus the baseline, hotspot count, aggregate excess or P95 Halstead effort (nearest rank) increases. Equal passes. Each metric is its own finding. |
-| 2 hotspot growth | an identity in both baseline and current, with baseline CC > 10, has current CC > baseline CC. |
+| 1 aggregate | versus Previous, hotspot count, aggregate excess or P95 Halstead effort (nearest rank) increases. Equal passes. Each metric is its own finding. |
+| 2 hotspot growth | an identity in both Previous and current, with Previous CC > 10, has current CC > Previous CC. |
 | 3 changed function | a function is **changed** and has CC > 10, unless it reduces an existing hotspot (Previous CC > 10 and current CC < Previous CC). |
 
 A function is **changed** when its file is in the touched set and any of its metrics (CC or any Halstead field) differ between Previous and current. An identity absent from Previous counts as different. Functions in untouched files and functions identical to Previous are never subject to rule 3.
@@ -135,44 +127,8 @@ Previous is materialised by `MaterializeRef` in `gittree.go`, which reads `git a
 
 Rule 3 has been replayed against recent merged develop PRs with `make complexity-replay`; the measured result is in [complexity-gate-calibration.md](complexity-gate-calibration.md).
 
-## Ratchet, frozen baseline and staleness
-
-Three baselines exist, each with one writer:
-
-| File | Written by | Purpose |
-|------|-----------|---------|
-| `baselines/inventory.json` | `make complexity-report` | Phase 0 inventory |
-| `baselines/ratchet.json` | `make complexity-ratchet` | The baseline rules 1 and 2 compare to |
-| `baselines/frozen.json` | `make complexity-freeze` | Starting point of the programme, never moved |
-
-### Make targets
-
-- `make complexity-check` runs `check -baseline scripts/complexity/baselines/ratchet.json`: staleness first, then the gate rules.
-- `make complexity-ratchet` runs the gate against the current `ratchet.json` and writes the new baseline (hotspot-only form) **only if zero findings are reported**. A failing rule exits 1 and leaves the file byte-identical. Mean CC and P95 volume worsening only warn and do not block the ratchet. The ratchet never reads or writes `frozen.json`.
-- `make complexity-freeze` writes `frozen.json` (`schema_version`, the base commit SHA, hotspot-only compact form) and exits 1 if it already exists. Replacing it takes deleting the file in a reviewed diff and running the target again. It needs `origin/develop` to resolve (or `-base-commit`).
-
-### When to move the ratchet
-
-Move it after a change lowers hotspots, aggregate excess or P95 effort, so the improvement cannot be lost: run `make complexity-ratchet` and commit the new `ratchet.json` in its own reviewed diff. The target refuses while any gate rule fails, so the baseline cannot be moved to hide a regression.
-
-### Init procedure
-
-`ratchet.json` does not exist until the gate is enabled. Create it with `make complexity-ratchet COMPLEXITY_INIT=1` (flag `-init`). Init writes only when the file is absent and refuses (exit 1) otherwise.
-
-### Why frozen is separate
-
-The ratchet baseline moves with every improvement; `frozen.json` records where the programme started so total progress stays measurable. If one file served both roles, each ratchet move would erase the starting point.
-
-### Staleness
-
-`check` (and `go run ./scripts/complexity staleness -baseline <file>`) fails with exit 1 when the ratchet baseline is stale. There are exactly four conditions: the baseline's `schema_version`, `analyzer_version`, `hotspot_threshold` or `manifest_sha256` differs from the running tool or the sha256 of the committed `manifest.json` bytes. Nothing else makes it stale; deleted functions are legitimate and the identity set is not compared.
-
-A manifest change is repaired with `make complexity-ratchet`, which skips the staleness check (it is the remedy) and goes straight to the gate. If `schema_version`, `analyzer_version` or `hotspot_threshold` differ, counts are not comparable and the ratchet refuses with `counting rules changed: delete baselines/ratchet.json in a reviewed diff and run make complexity-ratchet COMPLEXITY_INIT=1`.
-
-### Concurrency
-
-Two pull requests that both move `ratchet.json` conflict textually. The merge queue rebases the second, and `check` then re-runs against the new baseline.
-
 ## Limits
 
-Blocking is evaluated per pull request; two pull requests that each pass alone can together move P95 effort past the ratchet, and the develop-side run surfaces it.
+Blocking is evaluated per pull request; two pull requests that each pass alone can together raise P95 effort above develop's, and the develop-side run surfaces it.
+
+Phase 2 reduction targets will reference a pinned develop commit SHA, re-measured on demand.

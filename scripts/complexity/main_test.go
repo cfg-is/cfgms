@@ -144,20 +144,6 @@ func TestReportBadManifestAndMissingManifest(t *testing.T) {
 	assert.NotContains(t, stderr, "open ", "OS error must not repeat the path")
 }
 
-func TestReportCompactBaselineHoldsHotspotsOnly(t *testing.T) {
-	root, manifest := synthTree(t, map[string]string{
-		"pkg/a/a.go": hotFn, "cmd/c/c.go": "package c\n\nfunc G() {}\n",
-	})
-	out := filepath.Join(t.TempDir(), "inv.json")
-	code, _, stderr := runReport(t, root, manifest, out, "-compact-baseline")
-	require.Equal(t, 0, code, stderr)
-	m := readMetrics(t, out)
-	assert.Equal(t, metrics.FormHotspots, m.Form)
-	assert.Equal(t, 2, m.Aggregate.Functions)
-	require.Len(t, m.Functions, 1)
-	assert.Equal(t, "pkg", m.Functions[0].Segment)
-}
-
 func TestReportBadFlagIsUsageError(t *testing.T) {
 	assert.Equal(t, 2, reportCmd([]string{"-nope"}, &bytes.Buffer{}, &bytes.Buffer{}))
 }
@@ -179,20 +165,5 @@ func TestReportRealTreeSumsMatchAggregate(t *testing.T) {
 	assert.Len(t, m.Functions, m.Aggregate.Functions)
 	for _, f := range m.Functions {
 		assert.NotEmpty(t, f.Segment, f.Identity)
-	}
-}
-
-func TestCommittedInventoryIsValidHotspotForm(t *testing.T) {
-	f, err := os.Open("baselines/inventory.json")
-	require.NoError(t, err)
-	t.Cleanup(func() { assert.NoError(t, f.Close()) })
-	m, err := metrics.Read(f)
-	require.NoError(t, err)
-	assert.Equal(t, metrics.FormHotspots, m.Form)
-	assert.Equal(t, metrics.StatusPass, m.Status)
-	assert.Len(t, m.BaseCommit, 40)
-	assert.Equal(t, m.Aggregate.Hotspots, len(m.Functions))
-	for _, fn := range m.Functions {
-		assert.Greater(t, fn.CC, metrics.HotspotThreshold)
 	}
 }
