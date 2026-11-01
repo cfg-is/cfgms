@@ -485,6 +485,9 @@ button:focus-visible, input:focus-visible{outline:2px solid var(--accent); outli
     <button data-state="ban-ready">ban-ready</button>
     <button data-state="passkey">passkey</button>
     <button data-state="repairing">repairing</button>
+    <button data-state="repair-quiet">repair-quiet</button>
+    <button data-state="repair-failed">repair-failed</button>
+    <button data-state="contested">contested</button>
     <button data-state="restored">restored</button>
     <button data-state="banned">banned</button>
     <button data-state="conflict">conflict</button>
@@ -634,7 +637,7 @@ button:focus-visible, input:focus-visible{outline:2px solid var(--accent); outli
             </div>
             <div class="msg msg-neu" id="mNoAnchor" hidden style="margin:10px 16px 0">
               <svg class="i"><use href="#i-lock"/></svg>
-              <span><b>Hands-on tools are not available on this host while it is locked.</b> Its steward was installed without this controller's root certificate built in, so it cannot check that a command really comes from an operator. Inventory and logs still arrive. Repair, Restore and Ban still work.</span>
+              <span><b>Hands-on tools are not available on this host while it is locked.</b> Its steward was installed without this controller's root certificate built in, so it cannot check that a command really comes from an operator. Inventory and logs still arrive. Repair, Restore and Ban still work, but a repair that would lose local data is not possible on this host.</span>
             </div>
 
             <!-- repair progress -->
@@ -649,6 +652,29 @@ button:focus-visible, input:focus-visible{outline:2px solid var(--accent); outli
                 <span class="hvar">variant · steward offline</span>
                 <div class="msg msg-neu"><svg class="i"><use href="#i-off"/></svg><span><b>The steward is offline.</b> The repair runs when it next connects.</span></div>
               </div>
+            </div>
+
+            <!-- repair done, waiting for the quiet window -->
+            <div class="tb-sec" id="sQuiet" hidden>
+              <div class="sh"><svg class="i s12" style="color:var(--state-ok)"><use href="#i-check-circle"/></svg>Repaired — waiting for a quiet period<span class="n">repair sent by J. Ritz at 14:20 · audited</span></div>
+              <ul class="steps">
+                <li class="st-done"><svg class="i"><use href="#i-check-circle"/></svg>Controller sent the repair<span class="t">14:20</span></li>
+                <li class="st-done"><svg class="i"><use href="#i-check-circle"/></svg>Steward reset its file rights and made a new key. Old certificate revoked.<span class="t">14:21</span></li>
+                <li class="st-now"><span class="spin" style="width:13px;height:13px;color:var(--accent)"></span>Quiet period on the new certificate. No old key may be used.<span class="t">until 14:51</span></li>
+              </ul>
+              <div style="padding:0 12px 12px"><div class="msg msg-info"><svg class="i"><use href="#i-clock"/></svg><span>It returns to trusted by itself at the end of the quiet period. If anyone uses the old keys before then, it is marked <b>repair contested</b> and you are notified.</span></div></div>
+            </div>
+
+            <!-- repair failed -->
+            <div class="msg msg-crit" id="mRepairFailed" hidden style="margin:12px 16px 0">
+              <svg class="i"><use href="#i-alert"/></svg>
+              <span><b>Repair failed at 14:21.</b> The steward could not reset the rights on its data folder: access denied. Nothing was changed and its old key is still in use. It stays tampered. Check the host, then repair again or ban it.</span>
+            </div>
+
+            <!-- repair contested -->
+            <div class="msg msg-crit" id="mContested" hidden style="margin:12px 16px 0">
+              <svg class="i"><use href="#i-shield-alert"/></svg>
+              <span><b>Repair contested.</b> The repair finished at 14:21. At 14:34 someone used this steward's old certificate from <span class="mono">203.0.113.9</span>. Someone else may hold a copy of its keys. Check the host with your security tools before you restore it, or ban it.</span>
             </div>
 
             <!-- codes -->
@@ -847,7 +873,7 @@ button:focus-visible, input:focus-visible{outline:2px solid var(--accent); outli
 (function(){
   var root = document.documentElement, body = document.body;
   var $ = function(id){ return document.getElementById(id); };
-  var STATES = ['fleet','asset-cleared','asset-active','restore','repair','repair-loss','ban','ban-ready','passkey','repairing','restored','banned','conflict','cancelled','readonly','no-codes','no-anchor','loading'];
+  var STATES = ['fleet','asset-cleared','asset-active','restore','repair','repair-loss','ban','ban-ready','passkey','repairing','repair-quiet','repair-failed','contested','restored','banned','conflict','cancelled','readonly','no-codes','no-anchor','loading'];
   var HOST = 'WS-ACCT-07';
 
   function press(grp, btn){ grp.querySelectorAll('button').forEach(function(b){ b.setAttribute('aria-pressed', b===btn ? 'true':'false'); }); }
@@ -870,7 +896,7 @@ button:focus-visible, input:focus-visible{outline:2px solid var(--accent); outli
     show('vFleet', fleet); show('vAsset', !fleet);
     show('aSkel', s === 'loading'); show('aReal', s !== 'loading');
 
-    var active = ['asset-active','repair','repair-loss','ban','ban-ready','passkey','cancelled','repairing'].indexOf(s) >= 0;
+    var active = ['asset-active','repair','repair-loss','ban','ban-ready','passkey','cancelled','repairing','repair-failed'].indexOf(s) >= 0;
     var restored = s === 'restored', banned = s === 'banned';
     show('pTampered', !restored && !banned); show('pHealthy', restored); show('pBanned', banned);
     show('mRestored', restored); show('bBanned', banned); show('bTamper', !restored && !banned);
@@ -886,13 +912,16 @@ button:focus-visible, input:focus-visible{outline:2px solid var(--accent); outli
     // actions
     var repairing = s === 'repairing', ro = s === 'readonly', na = s === 'no-anchor';
     show('mNoAnchor', na); show('handsLead', !na);
+    var quiet = s === 'repair-quiet', failed = s === 'repair-failed', contested = s === 'contested';
+    show('sQuiet', quiet); show('mRepairFailed', failed); show('mContested', contested);
+    $('tbh').textContent = contested ? 'Tampered — repair contested' : 'Tampered — locked down';
     document.querySelectorAll('.tb-hands .lnk').forEach(function(b, i){ b.disabled = na && i < 2; b.title = (na && i < 2) ? 'Not available while locked on this host' : ''; });
     show('sRepairing', repairing);
     $('tbIco').innerHTML = repairing ? '<span class="spin" style="width:18px;height:18px"></span>' : '<svg class="i s20"><use href="#i-shield-alert"/></svg>';
     $('bTamper').classList.toggle('repairing', repairing);
-    show('aRestore', !active && !repairing); show('aRepair', active && !repairing);
+    show('aRestore', !active && !repairing && !quiet && !failed); show('aRepair', (active || failed) && !repairing && !quiet);
     [$('aRestore'), $('aRepair'), $('aBan')].forEach(function(b){ b.disabled = ro; });
-    show('aNote', !ro && !repairing); show('aNoteRO', ro); show('aNoteRep', repairing);
+    show('aNote', !ro && !repairing && !quiet); show('aNoteRO', ro); show('aNoteRep', repairing || quiet);
 
     // dialogs
     var dlg = {restore:'dRestore', conflict:'dRestore', repair:'dRepair', 'repair-loss':'dRepair', ban:'dBan', 'ban-ready':'dBan', passkey:'dBan', cancelled:'dBan'}[s];
