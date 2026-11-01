@@ -213,3 +213,15 @@ func TestReceiveCommand_ReportsRejectionReason(t *testing.T) {
 		}
 	})
 }
+
+// TestReconnectWithNewCredentials_RefusesWithoutRenewableCredentials: a client
+// that cannot load a renewed certificate (no certificate manager) or has no
+// control plane refuses, rather than re-dialling with the credential it has.
+func TestReconnectWithNewCredentials_RefusesWithoutRenewableCredentials(t *testing.T) {
+	h := newRejectionHarness(t)
+	err := h.tc.ReconnectWithNewCredentials(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "certificate manager")
+	assert.False(t, (&TransportClient{logger: newTestLogger(t)}).ControlStreamConnected())
+	assert.True(t, h.tc.ControlStreamConnected())
+}
