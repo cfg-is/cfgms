@@ -38,9 +38,10 @@ coverage and remaining work are linked in the [roadmap](docs/product/roadmap.md)
 The early-beta goal includes Windows, macOS and Linux endpoints, Microsoft 365
 integration, an iterative query workspace and a general read-only investigation
 agent. Existing fleet views, evidence cards and M365 modules provide foundations;
-they do not establish the complete beta experience. Directory inventory and
-management have existing planned work; launch licensing and PSA workflows need
-further scope and integration coverage.
+they do not establish the complete beta experience. Directory inventory, declared-user/group convergence and directory read surfaces
+now have implementations in the controller and web console. Launch licensing and
+PSA workflows still need further scope and integration coverage; these source
+implementations are not a claim of verified production readiness.
 
 The intended cockpit accepts operator input through one chat-like input and
 presents agent output as structured evidence, hypothesis, action and open-question
