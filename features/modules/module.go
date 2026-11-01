@@ -83,6 +83,16 @@ type ManagedElsewhere interface {
 	ManagedElsewhere() (managed bool, authority string)
 }
 
+// OperationReporter is implemented by modules whose Set performs named,
+// auditable writes (the operations a module.yaml lists under
+// security.audit_operations). TakeOperations returns the operations completed
+// since the last call, in order, and clears them. The executor drains it
+// before and after Set so a resource's outcome carries exactly its own
+// writes. A module that does not implement it reports no operation.
+type OperationReporter interface {
+	TakeOperations() []string
+}
+
 // Configurable is implemented by modules that require initialization from
 // operator config before Get() can safely read the current resource state.
 // The execution engine calls Configure(desiredState) before Get() when the

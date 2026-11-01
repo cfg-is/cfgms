@@ -447,6 +447,13 @@ type ApplyOutcomeRecord struct {
 	// "retry_exhausted". Empty on success.
 	Error string `json:"error,omitempty"`
 
+	// Operation is the write operation the module reported for this record
+	// (e.g. "create_user"). Empty when the module reports none.
+	Operation string `json:"operation,omitempty"`
+
+	// Changed is true when the module completed the write named by Operation.
+	Changed bool `json:"changed,omitempty"`
+
 	// Timestamp is when this resource's execution completed.
 	Timestamp time.Time `json:"timestamp"`
 }

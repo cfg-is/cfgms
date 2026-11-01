@@ -247,6 +247,7 @@ type Server struct {
 	stewardEventManager             *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
 	observeManifestProvider         ObserveManifestProvider                  // Issue #3104: nil = Tier-2 disabled
 	moduleCache                     *modulecache.ModuleCache                 // Issue #4985: serves FetchModuleBundle; nil = RPC Unimplemented
+	outcomeAuditSources             applyOutcomeAuditSources                 // Issue #5564: nil = built from controllerService, configService and moduleCache
 	terminalSessionMgr              terminal.SessionManager                  // Issue #2761: must be stopped on Stop to finalize session recordings
 	egProvider                      egServerProvider                         // Issue #3253: entity graph provider (must be closed on Stop to release DB handle)
 	egClusterMembership             dnasync.ClusterMembership                // Issue #3376: gates cluster authority; nil denies every claim
@@ -4328,7 +4329,7 @@ func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlpla
 		// apply_outcomes arrives as []interface{} of map[string]interface{} after the
 		// Event.Details JSON round-trip through interfaceMapToStringMap/stringMapToInterfaceMap.
 		// Decode defensively — same approach as the "modules" branch above.
-		if s.egProvider != nil {
+		if s.egProvider != nil || s.auditManager != nil {
 			if err := s.ingestApplyOutcomes(ctx, event.StewardID, configVersion, details); err != nil {
 				// Log and continue: a write failure here must not prevent the event from
 				// being acknowledged. The next apply cycle will produce fresh records.
@@ -4379,6 +4380,13 @@ func (s *Server) ingestApplyOutcomes(ctx context.Context, peerHostAuthority, con
 			"received", len(rawOutcomes),
 			"cap", maxApplyOutcomeRecordsPerEvent)
 		rawOutcomes = rawOutcomes[:maxApplyOutcomeRecordsPerEvent]
+	}
+
+	// Audit completed writes under the cfg-declared resource id (Issue #5564).
+	// Independent of the entity graph: it runs even when none is wired.
+	s.auditApplyOutcomes(ctx, peerHostAuthority, configVersion, rawOutcomes)
+	if s.egProvider == nil {
+		return nil
 	}
 
 	now := time.Now().UTC()

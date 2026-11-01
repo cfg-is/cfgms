@@ -543,3 +543,15 @@ func TestManagedFlag_BoundByGUIDOrUnboundBySam(t *testing.T) {
 	}
 	assert.Equal(t, map[string]interface{}{jdoeID: true, asmith: true, other: false}, managed)
 }
+
+func TestTakeOperations_ReportsCompletedWritesOnce(t *testing.T) {
+	d := NewFakeDirectory()
+	m := newDeclaredModule(t, d, "", &issuingClient{password: testPassword}, nil)
+	r := userDecl("jdoe", jdoe())
+	m.SetDeclared([]modules.DeclaredResource{r})
+
+	assert.Empty(t, m.TakeOperations())
+	require.NoError(t, converge(t, m, r))
+	assert.ElementsMatch(t, d.WriteOps(), m.TakeOperations(), "the module reports exactly the writes it performed")
+	assert.Empty(t, m.TakeOperations(), "taking clears the list")
+}
