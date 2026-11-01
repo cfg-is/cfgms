@@ -1204,7 +1204,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// are two instances and not one.
 	admissionQueues := newIngestAdmissionQueues()
 	var heartbeatService *heartbeat.Service
-	var tamperRelay *tamperAlarmRelay
+	// Issue #5652: late-binds the API server as the tamper alarm target. Unused
+	// (and harmless) when no heartbeat service is built.
+	tamperRelay := &tamperAlarmRelay{}
 	var commandPublisher *commands.Publisher
 	var executionQueue *scriptmodule.ExecutionQueue
 	var scriptLibrary *scriptmodule.TenantScriptRepository
@@ -1584,7 +1586,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// health reasons (written only when the set changes).
 		// Issue #5652: the same hook turns a tamper-code heartbeat into the
 		// tampered status; the API server is bound after it is constructed.
-		tamperRelay = &tamperAlarmRelay{}
 		onHeartbeatReceived := newHeartbeatReceivedHook(jobDispatcher, controllerService, routingStore, routingHook.localNodeID, tamperRelay.Handle, logger)
 
 		// Initialize heartbeat monitoring service
@@ -1912,9 +1913,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Issue #5652: heartbeats carrying a tamper code now reach the API server,
 	// which owns the transition, audit event and admin notification.
-	if tamperRelay != nil {
-		tamperRelay.Set(httpServer)
-	}
+	tamperRelay.Set(httpServer)
 
 	// Issue #4857: one dedicated steward-event LoggingManager shared by the
 	// log-stream handler (writer, built in Start) and the REST API (reader). It
@@ -1939,11 +1938,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// {id}/tags`, handlers_tags.go) read the API server's OWN tagStore field —
 	// without this call it stays nil and every tag REST request returns 503
 	// TAG_STORE_UNAVAILABLE even though tags resolve fine internally. Nil when
-	// SQLite is unconfigured (SetTagStore is a no-op on nil; endpoints degrade to
-	// 503 by design in that case).
-	if tagStoreInstance != nil {
-		httpServer.SetTagStore(tagStoreInstance)
-	}
+	// SQLite is unconfigured (SetTagStore stores nil, leaving the field unset;
+	// endpoints degrade to 503 by design in that case).
+	httpServer.SetTagStore(tagStoreInstance)
 
 	// Issue #2543: Wire the role-config store into the HTTP API server. Same
 	// wiring gap as the tag store above — the role-config REST endpoints

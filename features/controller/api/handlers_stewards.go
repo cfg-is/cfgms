@@ -283,16 +283,18 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	// No filter: return all stewards including registered-but-not-connected.
 	// Deregistered stewards are excluded by default; pass ?include_deregistered=true to restore them.
 	// Hidden and quarantined stewards are excluded by default (Issue #2918).
-	includeDeregistered := r.URL.Query().Get("include_deregistered") == "true"
-	includeQuarantined := r.URL.Query().Get("include_quarantined") == "true"
-	includeHidden := r.URL.Query().Get("include_hidden") == "true"
+	visibility := stewardListVisibility{
+		includeDeregistered: r.URL.Query().Get("include_deregistered") == "true",
+		includeQuarantined:  r.URL.Query().Get("include_quarantined") == "true",
+		includeHidden:       r.URL.Query().Get("include_hidden") == "true",
+	}
 	stewards := s.controllerService.ListFleetStewards(r.Context())
 
 	// The in-process map only holds stewards THIS node handled, so on a cluster
 	// it is a fraction of the fleet. Start from the durable store — authoritative
 	// for existence cluster-wide — and let the local entries below overlay it
 	// with live DNA/metrics for the stewards actually attached here (Issue #3480).
-	durable, haveDurable := s.fleetRecords(r.Context(), tenantID)
+	durable, _ := s.fleetRecords(r.Context(), tenantID)
 	seen := make(map[string]bool, len(stewards))
 
 	stewardList := make([]StewardInfo, 0, len(stewards))
@@ -304,85 +306,32 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seen[steward.ID] = true
-		// The durable record is authoritative for tampered: a peer node may have
-		// recorded the alarm after this node's entry was last refreshed.
-		status := steward.Status
-		if rec, ok := durable[steward.ID]; ok && rec.Status == business.StewardStatusTampered {
-			status = string(business.StewardStatusTampered)
-		}
-		if !includeDeregistered && steward.Status == string(business.StewardStatusDeregistered) {
+		status := listedStewardStatus(steward.Status, durable[steward.ID])
+		if visibility.excludes(steward.Status, status, steward.Hidden) {
 			continue
 		}
-		// Only quarantined is hidden here: tampered must stay in the default list.
-		if !includeQuarantined && status == "quarantined" {
-			continue
-		}
-		// Hidden is orthogonal to status, but a tampered steward is never concealed.
-		if !includeHidden && steward.Hidden && status != string(business.StewardStatusTampered) {
-			continue
-		}
-		info := StewardInfo{
-			ID:          steward.ID,
-			TenantID:    steward.TenantID,
-			Version:     steward.Version,
-			Status:      status,
-			LastSeen:    steward.LastHeartbeat,
-			ConnectedAt: steward.LastHeartbeat,
-			Metrics:     steward.Metrics,
-			Hidden:      steward.Hidden,
-		}
-		if steward.ClockOffsetKnown {
-			ms := steward.ClockOffset.Milliseconds()
-			info.ClockOffsetMs = &ms
-		}
-
-		if steward.DNA != nil {
-			attrs := filteredDNAAttrs(service.FlattenDNAFragments(steward.DNA.Fragments))
-			if steward.TenantID != "" {
-				merged := make(map[string]string, len(attrs)+1)
-				for k, v := range attrs {
-					merged[k] = v
-				}
-				merged["tenant"] = steward.TenantID
-				attrs = merged
-			}
-			info.DNA = &DNAInfo{
-				Hostname:     attrs["hostname"],
-				OS:           attrs["os"],
-				Architecture: attrs["arch"],
-				Attributes:   attrs,
-			}
-		}
-
-		stewardList = append(stewardList, info)
+		stewardList = append(stewardList, localStewardInfo(steward, status))
 	}
 
 	// Add stewards this node has never handled — the ones attached to peer nodes.
 	// They carry their durable facts and deliberately no liveness fields: this
 	// node has no heartbeat from them and must not invent one (Issue #3480).
-	if haveDurable {
-		for id, rec := range durable {
-			if seen[id] || !readScope.Allows(rec.TenantID) {
-				continue
-			}
-			if !includeDeregistered && rec.Status == business.StewardStatusDeregistered {
-				continue
-			}
-			if !includeQuarantined && string(rec.Status) == "quarantined" {
-				continue
-			}
-			if !includeHidden && rec.Hidden && rec.Status != business.StewardStatusTampered {
-				continue
-			}
-			stewardList = append(stewardList, StewardInfo{
-				ID:       rec.ID,
-				TenantID: rec.TenantID,
-				Version:  rec.Version,
-				Status:   string(rec.Status),
-				LastSeen: rec.LastSeen,
-				Hidden:   rec.Hidden,
-			})
+	// durable is nil when the store is unavailable, which adds nothing.
+	for id, rec := range durable {
+		if seen[id] || !readScope.Allows(rec.TenantID) {
+			continue
 		}
+		if visibility.excludes(string(rec.Status), string(rec.Status), rec.Hidden) {
+			continue
+		}
+		stewardList = append(stewardList, StewardInfo{
+			ID:       rec.ID,
+			TenantID: rec.TenantID,
+			Version:  rec.Version,
+			Status:   string(rec.Status),
+			LastSeen: rec.LastSeen,
+			Hidden:   rec.Hidden,
+		})
 	}
 
 	s.attachStewardTags(r.Context(), stewardList)
@@ -396,6 +345,81 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("Listed stewards", "count", len(stewardList))
 	s.writeSuccessResponse(w, stewardList)
+}
+
+// stewardListVisibility holds the include_* query flags of the unfiltered
+// steward list. Deregistered, hidden and quarantined stewards are excluded by
+// default (Issue #2918).
+type stewardListVisibility struct {
+	includeDeregistered bool
+	includeQuarantined  bool
+	includeHidden       bool
+}
+
+// excludes reports whether a row is left out of the list. recordStatus is the
+// row's own status (deregistration is judged on it); status is the listed
+// status. Only quarantined is excluded by status: tampered stays in the default
+// list, and hidden is orthogonal to status except that a tampered steward is
+// never concealed.
+func (v stewardListVisibility) excludes(recordStatus, status string, hidden bool) bool {
+	switch {
+	case !v.includeDeregistered && recordStatus == string(business.StewardStatusDeregistered):
+		return true
+	case !v.includeQuarantined && status == "quarantined":
+		return true
+	case !v.includeHidden && hidden && status != string(business.StewardStatusTampered):
+		return true
+	default:
+		return false
+	}
+}
+
+// listedStewardStatus returns the status to list for a node-local entry. The
+// durable record is authoritative for tampered: a peer node may have recorded
+// the alarm after this node's entry was last refreshed.
+func listedStewardStatus(localStatus string, rec *business.StewardRecord) string {
+	if rec != nil && rec.Status == business.StewardStatusTampered {
+		return string(business.StewardStatusTampered)
+	}
+	return localStatus
+}
+
+// localStewardInfo builds the API view of a steward this node handled, with its
+// live liveness, clock offset, metrics and DNA, listed with status.
+func localStewardInfo(steward *service.StewardInfo, status string) StewardInfo {
+	info := StewardInfo{
+		ID:          steward.ID,
+		TenantID:    steward.TenantID,
+		Version:     steward.Version,
+		Status:      status,
+		LastSeen:    steward.LastHeartbeat,
+		ConnectedAt: steward.LastHeartbeat,
+		Metrics:     steward.Metrics,
+		Hidden:      steward.Hidden,
+	}
+	if steward.ClockOffsetKnown {
+		ms := steward.ClockOffset.Milliseconds()
+		info.ClockOffsetMs = &ms
+	}
+	if steward.DNA == nil {
+		return info
+	}
+	attrs := filteredDNAAttrs(service.FlattenDNAFragments(steward.DNA.Fragments))
+	if steward.TenantID != "" {
+		merged := make(map[string]string, len(attrs)+1)
+		for k, v := range attrs {
+			merged[k] = v
+		}
+		merged["tenant"] = steward.TenantID
+		attrs = merged
+	}
+	info.DNA = &DNAInfo{
+		Hostname:     attrs["hostname"],
+		OS:           attrs["os"],
+		Architecture: attrs["arch"],
+		Attributes:   attrs,
+	}
+	return info
 }
 
 // applyDurableRecord copies the facts only the durable record carries (key
@@ -528,17 +552,7 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activeSessions := 0
-	connectionState := "disconnected"
-	s.mu.RLock()
-	reg := s.registry
-	s.mu.RUnlock()
-	if reg != nil {
-		if _, ok := reg.Get(stewardID); ok {
-			activeSessions = 1
-			connectionState = "connected"
-		}
-	}
+	activeSessions, connectionState := s.stewardConnectionState(stewardID)
 
 	apiStewardInfo := StewardInfo{
 		ID:              stewardInfo.ID,
@@ -559,9 +573,7 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 	// attachment does not carry. Read after the tenant check above.
 	durableRec := s.durableStewardRecord(r.Context(), stewardID)
 	applyDurableRecord(&apiStewardInfo, durableRec)
-	if durableRec != nil && durableRec.Status == business.StewardStatusTampered {
-		apiStewardInfo.Status = string(business.StewardStatusTampered)
-	}
+	apiStewardInfo.Status = listedStewardStatus(apiStewardInfo.Status, durableRec)
 	s.attachTamperCodesTo(r.Context(), &apiStewardInfo)
 
 	// Include DNA information if available
@@ -577,6 +589,22 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccessResponse(w, apiStewardInfo)
+}
+
+// stewardConnectionState reports whether the steward holds a session on this
+// node's registry: (1, "connected") when it does, (0, "disconnected") otherwise
+// or when no registry is wired. The registry is per-node.
+func (s *Server) stewardConnectionState(stewardID string) (int, string) {
+	s.mu.RLock()
+	reg := s.registry
+	s.mu.RUnlock()
+	if reg == nil {
+		return 0, "disconnected"
+	}
+	if _, ok := reg.Get(stewardID); ok {
+		return 1, "connected"
+	}
+	return 0, "disconnected"
 }
 
 // dnaAttributeDenylist contains glob-style patterns (case-insensitive substring match)

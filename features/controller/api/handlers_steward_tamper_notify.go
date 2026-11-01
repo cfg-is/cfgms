@@ -189,14 +189,20 @@ func (s *Server) notifyStewardTamper(ctx context.Context, stewardID, tenantID st
 
 	s.tamperNotify.markNotified(stewardID, time.Now())
 	result, err := notifier.Send(ctx, s.composeStewardTamperEmail(ctx, stewardID, tenantID, codes, contacts))
-	var accepted, rejected int
-	if result != nil {
-		accepted, rejected = len(result.Accepted()), len(result.Failed())
-	}
 	if err != nil {
 		s.logger.Warn("Tamper notification email failed",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
 			"error", logging.SanitizeLogValue(err.Error()))
+	}
+	return tamperSendOutcome(result, err)
+}
+
+// tamperSendOutcome classifies a Send result: no accepted recipient is a
+// failure, any rejected recipient or send error is partial, otherwise sent.
+func tamperSendOutcome(result *notifif.DeliveryResult, err error) string {
+	var accepted, rejected int
+	if result != nil {
+		accepted, rejected = len(result.Accepted()), len(result.Failed())
 	}
 	switch {
 	case accepted == 0:

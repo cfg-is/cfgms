@@ -331,6 +331,13 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Gate (8): lifecycle gate
+	s.routeRefreshByLifecycle(w, r, record, deviceID, &req)
+}
+
+// routeRefreshByLifecycle is gate (8) of /refresh/complete: archived and
+// tampered records always queue for an operator, every other status consults
+// the tenant's refresh policy (require_approval when no policy store is set).
+func (s *Server) routeRefreshByLifecycle(w http.ResponseWriter, r *http.Request, record *business.StewardRecord, deviceID string, req *RefreshCompleteRequest) {
 	switch record.Status {
 	case business.StewardStatusArchived:
 		// Archived: add pending refresh and return 202 — policy is skipped.
