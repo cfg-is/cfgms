@@ -15,6 +15,11 @@ var ErrStewardNotFound = errors.New("steward not found")
 // ErrStewardAlreadyExists is returned when attempting to register an already-registered steward.
 var ErrStewardAlreadyExists = errors.New("steward already exists")
 
+// ErrIdentityKeyChanged is returned by RebindStewardIdentityIf when the stored
+// IdentityKeyPub no longer equals the expected old key, i.e. another writer
+// replaced the identity after the caller read it. Nothing is changed.
+var ErrIdentityKeyChanged = errors.New("steward identity key changed")
+
 // ErrStewardDeviceIDConflict is returned when a steward record cannot be written
 // because a DIFFERENT steward in the same tenant already holds its device_id.
 // It is distinct from ErrStewardAlreadyExists, which reports the same steward
@@ -251,8 +256,19 @@ type StewardStore interface {
 	// device_id) rule applies: when another non-deregistered steward in the same
 	// tenant already holds deviceID the call returns ErrStewardDeviceIDConflict
 	// and changes nothing. Returns ErrStewardNotFound if no record exists.
-	// Only the operator move-identity endpoint may call it.
+	// Only the operator move-identity endpoint may call it; the repair path
+	// calls the compare-and-swap sibling RebindStewardIdentityIf instead.
 	RebindStewardIdentity(ctx context.Context, stewardID, deviceID string, identityKeyPub []byte, keyProtectionLevel, keyAlgorithm string) error
+
+	// RebindStewardIdentityIf performs the same field replacement and clears the
+	// same state as RebindStewardIdentity, but only if the stored IdentityKeyPub
+	// still equals expectedOldKey at the instant it is applied (atomically).
+	// Otherwise it returns ErrIdentityKeyChanged and changes nothing, so two
+	// parallel completions authorized against the same key cannot both win.
+	// Returns ErrStewardNotFound if no record exists and
+	// ErrStewardDeviceIDConflict under the same rule as RebindStewardIdentity.
+	// Called by the identity repair path.
+	RebindStewardIdentityIf(ctx context.Context, stewardID string, expectedOldKey []byte, deviceID string, identityKeyPub []byte, keyProtectionLevel, keyAlgorithm string) error
 
 	// UpdateStewardTenant moves a steward to a different tenant, guarded by a
 	// compare-and-swap on the steward's current tenant (Issue #3895): the write

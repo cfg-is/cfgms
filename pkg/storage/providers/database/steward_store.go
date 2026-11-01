@@ -430,6 +430,58 @@ func (s *DatabaseStewardStore) RebindStewardIdentity(ctx context.Context, stewar
 	return tx.Commit()
 }
 
+// RebindStewardIdentityIf is RebindStewardIdentity guarded by a compare-and-swap
+// on the stored identity key: the conditional UPDATE re-checks the key under the
+// row lock, so concurrent callers holding the same expected key cannot both match.
+func (s *DatabaseStewardStore) RebindStewardIdentityIf(ctx context.Context, stewardID string, expectedOldKey []byte, deviceID string, identityKeyPub []byte, keyProtectionLevel, keyAlgorithm string) error {
+	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin rebind identity tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	if identityKeyPub == nil {
+		identityKeyPub = []byte{}
+	}
+	if expectedOldKey == nil {
+		expectedOldKey = []byte{}
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE steward_records
+		SET device_id = $2, identity_key_pub = $3, key_protection_level = $4, key_algorithm = $5, last_provenance_json = ''
+		WHERE id = $1 AND identity_key_pub = $6`,
+		stewardID, deviceID, identityKeyPub, keyProtectionLevel, keyAlgorithm, expectedOldKey)
+	if err != nil {
+		if strings.Contains(err.Error(), "uq_steward_records_tenant_device") {
+			return business.ErrStewardDeviceIDConflict
+		}
+		return fmt.Errorf("database: failed to rebind identity for steward %s: %w", stewardID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// The steward existed when its tenant was fetched; a miss now means the
+		// key moved on (or the row was removed concurrently).
+		var one int
+		qerr := tx.QueryRowContext(ctx, `SELECT 1 FROM steward_records WHERE id = $1`, stewardID).Scan(&one)
+		if qerr == sql.ErrNoRows {
+			return business.ErrStewardNotFound
+		}
+		if qerr != nil {
+			return fmt.Errorf("database: failed to look up steward %s after rebind miss: %w", stewardID, qerr)
+		}
+		return business.ErrIdentityKeyChanged
+	}
+	return tx.Commit()
+}
+
 // DeregisterSteward marks the steward as deregistered. Records are retained for audit.
 func (s *DatabaseStewardStore) DeregisterSteward(ctx context.Context, stewardID string) error {
 	return s.UpdateStewardStatus(ctx, stewardID, business.StewardStatusDeregistered)

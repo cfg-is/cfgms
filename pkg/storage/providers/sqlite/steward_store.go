@@ -347,6 +347,47 @@ func (s *SQLiteStewardStore) RebindStewardIdentity(ctx context.Context, stewardI
 	return nil
 }
 
+// RebindStewardIdentityIf is RebindStewardIdentity guarded by a compare-and-swap
+// on the stored identity key: the conditional UPDATE is a single statement, so
+// concurrent callers holding the same expected key cannot both match.
+func (s *SQLiteStewardStore) RebindStewardIdentityIf(ctx context.Context, stewardID string, expectedOldKey []byte, deviceID string, identityKeyPub []byte, keyProtectionLevel, keyAlgorithm string) error {
+	if identityKeyPub == nil {
+		identityKeyPub = []byte{}
+	}
+	if expectedOldKey == nil {
+		expectedOldKey = []byte{}
+	}
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var e error
+		res, e = s.db.ExecContext(ctx, `
+			UPDATE stewards SET device_id = ?, identity_key_pub = ?, key_protection_level = ?, key_algorithm = ?, last_provenance_json = ''
+			WHERE id = ? AND COALESCE(identity_key_pub, x'') = ?`,
+			deviceID, identityKeyPub, keyProtectionLevel, keyAlgorithm, stewardID, expectedOldKey,
+		)
+		return e
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return business.ErrStewardDeviceIDConflict
+		}
+		return fmt.Errorf("sqlite: failed to rebind identity for steward %s: %w", stewardID, err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	// No row matched: either the steward is unknown or its key moved on.
+	var one int
+	err = s.db.QueryRowContext(ctx, `SELECT 1 FROM stewards WHERE id = ?`, stewardID).Scan(&one)
+	if err == sql.ErrNoRows {
+		return business.ErrStewardNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to look up steward %s after rebind miss: %w", stewardID, err)
+	}
+	return business.ErrIdentityKeyChanged
+}
+
 // DeregisterSteward marks the steward as deregistered. Records are retained for audit.
 func (s *SQLiteStewardStore) DeregisterSteward(ctx context.Context, stewardID string) error {
 	return s.UpdateStewardStatus(ctx, stewardID, business.StewardStatusDeregistered)
