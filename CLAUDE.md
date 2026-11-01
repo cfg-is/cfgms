@@ -36,6 +36,7 @@ Two modes, detected automatically. Both enforce identical validation gates.
 
 **Scope constraints:**
 - Do not modify `CLAUDE.md`, `Makefile` root targets, `.github/workflows/`, or `scripts/install-git-hooks.sh` unless the story requires it
+- Do not modify `scripts/complexity/manifest.json` or `scripts/complexity/analyzer/` unless the story names the edit; the acceptance reviewer flags such diffs
 - Do not add Go module dependencies without story justification
 - Do not create new central providers — extend existing ones or flag for human review
 - Never force-push, reset --hard, or delete branches
@@ -379,6 +380,7 @@ make test-complete     # Story completion — matches ALL CI checks
 make build             # All binaries (current platform)
 make security-scan     # Security checks (blocking on critical/high)
 make check-architecture # Central provider violation detection
+make complexity-check  # Complexity no-worsening gate (see docs/development/complexity-gate.md)
 ```
 
 ## Architecture

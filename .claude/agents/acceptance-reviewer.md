@@ -266,6 +266,8 @@ Review the PR diff for:
 
    Pre-existing markers in unchanged lines are out of scope for this scan — they're handled by the sweep story (#1430) and by Phase 3's file-state check for AC-named files.
 
+6. **Complexity gate protection** — `gh pr diff <PR_NUM> --name-only` and list in the review comment every changed path under `scripts/complexity/`. A diff that edits `scripts/complexity/manifest.json` or anything under `scripts/complexity/analyzer/` (the counting rules) is a finding unless the story body names that edit (a finding forces manual `/pr-review`).
+
 ### Capability-tag consistency (informational — NEVER a blocking finding)
 
 If the parent story carries `cap:*` capability tags (the product capability that consumes it — see `docs/product/roadmap.md`), sanity-check that the delivered surface plausibly advances each tagged consumer, not just that it compiles (guards the "built ≠ live" failure — code that exists but doesn't reach its consumer). `cap:*` is **descriptive**, so a mismatch is an **informational observation in the review comment only** — it does **not** set Fix/Blocked status, does not lower the verdict, and never blocks merge. Surface it as a note so a human can retag or re-scope; do not manufacture a finding from it.
