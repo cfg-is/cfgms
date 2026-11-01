@@ -77,7 +77,10 @@ func (c *stewardStoreApprovalChecker) IsApproved(ctx context.Context, stewardID 
 		return false, fmt.Errorf("load steward approval state: %w", err)
 	}
 	switch record.Status {
-	case business.StewardStatusRegistered, business.StewardStatusActive, business.StewardStatusLost:
+	case business.StewardStatusRegistered, business.StewardStatusActive, business.StewardStatusLost,
+		// A tampered steward stays admitted: it must keep reporting, and refusing
+		// controller-to-endpoint traffic for it is a separate decision.
+		business.StewardStatusTampered:
 		return true, nil
 	default:
 		return false, nil

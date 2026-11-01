@@ -282,3 +282,50 @@ func TestControlChannel_Response_AdmittedDeliveredExactlyOnce(t *testing.T) {
 	assert.EqualValues(t, 0, env.stats(t).ResponsesDropped)
 	requireTenantSlotsFree(t, env.responseQueue, admissionTenantA, "response slots must be released after handlers return")
 }
+
+// TestControlChannel_Heartbeat_TamperAlarmAboutAnotherSteward_Rejected: a steward
+// can raise a tamper alarm only about itself. A heartbeat that carries a tamper code
+// but names another steward is rejected and counted, so nothing reaches the
+// subscriber that would move that other steward to tampered (Issue #5652). A tamper
+// heartbeat from the authenticated steward itself is delivered.
+func TestControlChannel_Heartbeat_TamperAlarmAboutAnotherSteward_Rejected(t *testing.T) {
+	t.Parallel()
+	env := newMultiStewardEnv(t)
+
+	dispatched := make(chan *types.Heartbeat, 5)
+	require.NoError(t, env.server.SubscribeHeartbeats(context.Background(), func(_ context.Context, hb *types.Heartbeat) error {
+		dispatched <- hb
+		return nil
+	}))
+	tamper := []types.HealthReason{{Component: "integrity", Code: types.ReasonCodeTamperDataDir}}
+
+	// steward-a's certificate, steward-b's ID.
+	require.NoError(t, env.clientA.SendHeartbeat(context.Background(), &types.Heartbeat{
+		StewardID: "steward-b",
+		Status:    types.StatusError,
+		Timestamp: time.Now().Truncate(time.Microsecond),
+		Reasons:   tamper,
+	}))
+	require.Never(t, func() bool { return len(dispatched) > 0 },
+		300*time.Millisecond, 20*time.Millisecond, "a tamper alarm naming another steward must not be dispatched")
+	require.Eventually(t, func() bool {
+		stats, err := env.server.GetStats(context.Background())
+		return err == nil && stats.IdentityMismatches == 1
+	}, 3*time.Second, 50*time.Millisecond, "the cross-steward alarm must be counted as an identity mismatch")
+
+	// The same alarm about itself is delivered, bound to the authenticated ID.
+	require.NoError(t, env.clientA.SendHeartbeat(context.Background(), &types.Heartbeat{
+		StewardID: "steward-a",
+		Status:    types.StatusError,
+		Timestamp: time.Now().Truncate(time.Microsecond),
+		Reasons:   tamper,
+	}))
+	select {
+	case got := <-dispatched:
+		assert.Equal(t, "steward-a", got.StewardID)
+		require.Len(t, got.Reasons, 1)
+		assert.True(t, types.IsTamperCode(got.Reasons[0].Code))
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the steward's own tamper heartbeat")
+	}
+}

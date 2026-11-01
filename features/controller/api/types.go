@@ -65,6 +65,11 @@ type StewardInfo struct {
 	// non-healthy status, read from the durable record so every controller node
 	// returns the same answer. Omitted when the steward reports none.
 	HealthReasons []HealthReasonInfo `json:"health_reasons,omitempty"`
+	// TamperCodes are the tamper codes of the last alarm, kept until an operator
+	// restores or bans the steward even after a healthy heartbeat replaces the live
+	// reasons. Read from the latest steward_tamper_alarm audit event, capped and
+	// sanitized; present only for a tampered steward.
+	TamperCodes []string `json:"tamper_codes,omitempty"`
 }
 
 // HealthReasonInfo is one machine-readable health reason in an API response.

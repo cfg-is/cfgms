@@ -1779,3 +1779,51 @@ func TestSanitizeTerminal_StripsControlCharacters(t *testing.T) {
 	assert.Equal(t, "disk.low +1", formatReasonsColumn([]stewardHealthReason{{Code: "disk.low"}, {Code: "x"}}))
 	assert.NotContains(t, formatReasonsColumn([]stewardHealthReason{{Code: "bad\x1b[2Jcode"}}), "\x1b")
 }
+
+// TestStewardList_TamperedFirstWithStatusAndCodes verifies Issue #5652: tampered
+// stewards are listed first with their status, other rows keep their order, and a
+// tampered steward whose live reasons were replaced shows its last alarm's codes.
+func TestStewardList_TamperedFirstWithStatusAndCodes(t *testing.T) {
+	now := time.Now().UTC()
+	stewards := []map[string]interface{}{
+		{"id": "steward-a", "status": "active", "last_seen": now.Format(time.RFC3339)},
+		{"id": "steward-b", "status": "tampered", "last_seen": now.Format(time.RFC3339),
+			"tamper_codes": []string{"tamper.data_dir", "tamper.ca_mismatch"}},
+		{"id": "steward-c", "status": "lost", "last_seen": now.Format(time.RFC3339)},
+		{"id": "steward-d", "status": "tampered", "last_seen": now.Format(time.RFC3339),
+			"health_reasons": []map[string]string{{"component": "integrity", "code": "tamper.trust_downgrade"}}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/registration/pending" {
+			_ = json.NewEncoder(w).Encode([]interface{}{})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": stewards, "timestamp": now})
+	}))
+	defer server.Close()
+
+	origURL, origInsecure := stewardURL, stewardTLSInsecure
+	t.Cleanup(func() { stewardURL, stewardTLSInsecure = origURL, origInsecure })
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		require.NoError(t, runStewardList(stewardListCmd, []string{}))
+	})
+
+	var order []string
+	lines := map[string]string{}
+	for _, l := range strings.Split(output, "\n") {
+		for _, id := range []string{"steward-a", "steward-b", "steward-c", "steward-d"} {
+			if strings.HasPrefix(l, id+" ") {
+				order = append(order, id)
+				lines[id] = l
+			}
+		}
+	}
+	assert.Equal(t, []string{"steward-b", "steward-d", "steward-a", "steward-c"}, order)
+	assert.Contains(t, lines["steward-b"], "tampered")
+	assert.Contains(t, lines["steward-b"], "tamper.data_dir +1", "codes of the last alarm are shown when no live reason is reported")
+	assert.Contains(t, lines["steward-d"], "tamper.trust_downgrade")
+}

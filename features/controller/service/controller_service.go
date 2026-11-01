@@ -415,7 +415,10 @@ func (s *ControllerService) StorageReady(ctx context.Context) error {
 // approval gate in pkg/controlplane/providers/grpc/approval.go.
 func reconnectionAdmissibleStatus(status business.StewardStatus) bool {
 	switch status {
-	case business.StewardStatusRegistered, business.StewardStatusActive, business.StewardStatusLost:
+	case business.StewardStatusRegistered, business.StewardStatusActive, business.StewardStatusLost,
+		// tampered: the steward keeps its tampered status across the reconnection
+		// (EnsureSteward never promotes it); only an operator restore ends it.
+		business.StewardStatusTampered:
 		return true
 	default:
 		return false
@@ -937,16 +940,7 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 	// enough to mutate the in-memory entry; never call storage under s.mu.
 	s.mu.Lock()
 	if steward, exists := s.stewards[stewardID]; exists {
-		steward.LastHeartbeat = ts
-		if version != "" {
-			steward.Version = version
-		}
-		// Promote registered -> active on the first heartbeat. Leave any other
-		// lifecycle status (e.g. an operator-set state) untouched.
-		if steward.Status == "" || steward.Status == "registered" {
-			steward.Status = "active"
-		}
-		warn := s.recordClockOffset(steward, offset, offsetKnown, receivedAt)
+		warn := s.refreshHeartbeatLocked(steward, version, ts, offset, offsetKnown, receivedAt)
 		s.mu.Unlock()
 		if warn {
 			s.warnClockSkew(stewardID, offset)
@@ -977,19 +971,18 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 	// Fetch DNA separately so it has its own storage source (Issue #3324).
 	dna := s.lookupDurableDNA(stewardID)
 
+	// A tampered record keeps its durable status in the rebuilt entry.
+	createdStatus := "active"
+	if s.durableStatusIs(stewardID, business.StewardStatusTampered) {
+		createdStatus = string(business.StewardStatusTampered)
+	}
+
 	// Re-acquire and double-check: a concurrent connect-hook upsert or another
 	// heartbeat may have inserted the steward while the lock was released. Refresh
 	// the existing entry rather than overwriting it.
 	s.mu.Lock()
 	if steward, exists := s.stewards[stewardID]; exists {
-		steward.LastHeartbeat = ts
-		if version != "" {
-			steward.Version = version
-		}
-		if steward.Status == "" || steward.Status == "registered" {
-			steward.Status = "active"
-		}
-		warn := s.recordClockOffset(steward, offset, offsetKnown, receivedAt)
+		warn := s.refreshHeartbeatLocked(steward, version, ts, offset, offsetKnown, receivedAt)
 		s.mu.Unlock()
 		if warn {
 			s.warnClockSkew(stewardID, offset)
@@ -1003,7 +996,7 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 		Version:       version,
 		DNA:           dna,
 		LastHeartbeat: ts,
-		Status:        "active",
+		Status:        createdStatus,
 		Metrics:       make(map[string]string),
 	}
 	s.stewards[stewardID] = created
@@ -1015,9 +1008,25 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 
 	// Persist so the durable record's timestamp is refreshed consistently with
 	// EnsureSteward. storeDNA runs outside s.mu.
-	s.storeDNA(context.Background(), stewardID, tenantID, dna, "active")
+	s.storeDNA(context.Background(), stewardID, tenantID, dna, createdStatus)
 	s.persistHeartbeat(stewardID, version)
 	return true
+}
+
+// refreshHeartbeatLocked applies a heartbeat to an existing registry entry:
+// last heartbeat, version (when reported), registered -> active promotion on the
+// first heartbeat (any other lifecycle status, e.g. an operator-set state or
+// tampered, is left untouched) and the clock offset. It reports whether a clock
+// skew warning is due. The caller holds s.mu.
+func (s *ControllerService) refreshHeartbeatLocked(steward *StewardInfo, version string, ts time.Time, offset time.Duration, offsetKnown bool, receivedAt time.Time) bool {
+	steward.LastHeartbeat = ts
+	if version != "" {
+		steward.Version = version
+	}
+	if steward.Status == "" || steward.Status == "registered" {
+		steward.Status = "active"
+	}
+	return s.recordClockOffset(steward, offset, offsetKnown, receivedAt)
 }
 
 // RecordHealthReasons stores the health reasons a steward reported on its latest
@@ -1210,20 +1219,27 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 	// (Issue #3324). The storage-derived tenant always wins over the caller-supplied
 	// value — the connect hook only knows the mTLS CN, never a tenant.
 	durableTenant, haveDurable := s.lookupDurableTenant(stewardID)
-	if haveDurable {
-		tenantID = durableTenant
-	}
-
 	// Fetch DNA separately — it has its own storage source (Issue #3324). Runs
 	// outside s.mu so storage I/O does not serialize the whole registry.
 	var durableDNA *common.DNA
 	if haveDurable {
+		tenantID = durableTenant
 		durableDNA = s.lookupDurableDNA(stewardID)
+	}
+
+	// A tampered record keeps its status across a reconnect: the node-local entry
+	// must show the durable status, never the "active" a connect would assert.
+	tampered := haveDurable && s.durableStatusIs(stewardID, business.StewardStatusTampered)
+	if tampered {
+		status = string(business.StewardStatusTampered)
 	}
 
 	s.mu.Lock()
 	if existing, ok := s.stewards[stewardID]; ok {
 		existing.LastHeartbeat = now
+		if tampered {
+			existing.Status = status
+		}
 		promoted := existing.Status == "" || existing.Status == "registered"
 		if promoted {
 			existing.Status = "active"
@@ -1232,13 +1248,9 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 
 		// Persist the status promotion and last-seen to the durable fleet store so
 		// GET /api/v1/stewards shows "active" after a first connect (Issue #3403).
-		if promoted && s.stewardStore != nil {
-			if _, storeErr := s.stewardStore.TransitionStewardStatus(context.Background(), stewardID, business.StewardStatusActive,
-				business.StewardStatusRegistered, business.StewardStatusLost, business.StewardStatusActive); storeErr != nil && storeErr != business.ErrStewardNotFound {
-				s.logger.Warn("EnsureSteward: failed to persist status promotion to fleet store",
-					"steward_id", logging.SanitizeLogValue(stewardID),
-					"error", logging.SanitizeLogValue(storeErr.Error()))
-			}
+		if promoted {
+			s.transitionOnConnect(stewardID, business.StewardStatusActive,
+				"EnsureSteward: failed to persist status promotion to fleet store")
 		}
 		return
 	}
@@ -1279,20 +1291,44 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 	// (registered, lost, active); terminal states (deregistered, revoked, archived,
 	// dormant) must not be overwritten even if the approval checker failed to block
 	// the connection — defence-in-depth. ErrStewardNotFound is benign.
-	if s.stewardStore != nil {
-		// The terminal check is atomic with the write (Issue #4851).
-		if _, storeErr := s.stewardStore.TransitionStewardStatus(context.Background(), stewardID, business.StewardStatus(status),
-			business.StewardStatusRegistered, business.StewardStatusLost, business.StewardStatusActive); storeErr != nil && storeErr != business.ErrStewardNotFound {
-			s.logger.Warn("EnsureSteward: failed to update fleet store status on reconnect",
-				"steward_id", logging.SanitizeLogValue(stewardID),
-				"error", logging.SanitizeLogValue(storeErr.Error()))
-		}
+	// A tampered record is not written: tampered is not in the from-list, and only
+	// an operator restore ends it.
+	if !tampered {
+		s.transitionOnConnect(stewardID, business.StewardStatus(status),
+			"EnsureSteward: failed to update fleet store status on reconnect")
 	}
 
 	s.logger.Info("Steward ensured in registry on authenticated connect",
 		"steward_id", logging.SanitizeLogValue(stewardID),
 		"tenant_id", logging.SanitizeLogValue(tenantID),
 		"status", logging.SanitizeLogValue(status))
+}
+
+// transitionOnConnect moves the durable fleet record to status `to`, only from
+// a non-terminal status (registered, lost, active); the terminal check is atomic
+// with the write (Issue #4851). A missing store is a no-op, ErrStewardNotFound is
+// benign, and any other failure is logged with failureMsg.
+func (s *ControllerService) transitionOnConnect(stewardID string, to business.StewardStatus, failureMsg string) {
+	if s.stewardStore == nil {
+		return
+	}
+	_, err := s.stewardStore.TransitionStewardStatus(context.Background(), stewardID, to,
+		business.StewardStatusRegistered, business.StewardStatusLost, business.StewardStatusActive)
+	if err != nil && err != business.ErrStewardNotFound {
+		s.logger.Warn(failureMsg,
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+// durableStatusIs reports whether the steward's durable record holds status. A
+// missing store, a missing record or a read error all report false.
+func (s *ControllerService) durableStatusIs(stewardID string, status business.StewardStatus) bool {
+	if s.stewardStore == nil {
+		return false
+	}
+	rec, err := s.stewardStore.GetSteward(context.Background(), stewardID)
+	return err == nil && rec != nil && rec.Status == status
 }
 
 // SetRingConfig updates the deployment ring set. If the ring set has changed,

@@ -291,3 +291,47 @@ func TestHeartbeatOnStatusChange_NoClobberRevoked(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, business.StewardStatusLost, rec.Status)
 }
+
+// TestHeartbeatOnStatusChange_TamperedSticks verifies Issue #5652: neither the
+// healthy-recovery nor the lost transition of the heartbeat callback moves a
+// tampered record, so only an operator restore or ban ends it.
+func TestHeartbeatOnStatusChange_TamperedSticks(t *testing.T) {
+	ctx := context.Background()
+	st := newFlatFileStewardStore(t)
+	const stewardID = "hb-tampered-001"
+	require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{
+		ID: stewardID, TenantID: "test-tenant", Status: business.StewardStatusTampered,
+	}))
+
+	onStatusChange := makeHeartbeatStatusChangeCallback(st, logging.NewNoopLogger())
+	onStatusChange(stewardID, true, heartbeat.StewardStatus{})
+	rec, err := st.GetSteward(ctx, stewardID)
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusTampered, rec.Status, "a healthy heartbeat must not promote tampered to active")
+
+	onStatusChange(stewardID, false, heartbeat.StewardStatus{})
+	rec, err = st.GetSteward(ctx, stewardID)
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusTampered, rec.Status, "going offline must not turn tampered into lost")
+}
+
+// TestHeartbeatReceivedHook_ForwardsReasonsToTamperAlarm verifies the hook hands
+// every heartbeat's reasons and its steward ID to the alarm, and tolerates a nil
+// alarm; and that the relay drops alarms until the API server is bound.
+func TestHeartbeatReceivedHook_ForwardsReasonsToTamperAlarm(t *testing.T) {
+	var gotID string
+	var gotReasons []controlplaneTypes.HealthReason
+	hook := newHeartbeatReceivedHook(nil, nil, nil, "node-1", func(id string, reasons []controlplaneTypes.HealthReason) {
+		gotID, gotReasons = id, reasons
+	}, logging.NewNoopLogger())
+
+	reasons := []controlplaneTypes.HealthReason{{Component: "integrity", Code: controlplaneTypes.ReasonCodeTamperCAMismatch}}
+	hook("steward-x", reasons)
+	assert.Equal(t, "steward-x", gotID)
+	assert.Equal(t, reasons, gotReasons)
+
+	assert.NotPanics(t, func() {
+		newHeartbeatReceivedHook(nil, nil, nil, "node-1", nil, logging.NewNoopLogger())("steward-x", reasons)
+		(&tamperAlarmRelay{}).Handle("steward-x", reasons)
+	})
+}

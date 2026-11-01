@@ -43,6 +43,8 @@ type StewardInfo struct {
 	DNA      *StewardInfoDNA `json:"dna,omitempty"`
 	// HealthReasons is why the steward reports a non-healthy status; empty when healthy.
 	HealthReasons []stewardHealthReason `json:"health_reasons,omitempty"`
+	// TamperCodes are the codes of the last tamper alarm; set only for a tampered steward.
+	TamperCodes []string `json:"tamper_codes,omitempty"`
 }
 
 // stewardKey returns the unambiguous per-steward output key used as the JSON

@@ -81,6 +81,13 @@ const (
 	// and return ErrStewardRevoked before performing any proof-of-possession verification
 	// (revocation-before-PoP ordering invariant, ADR-010 §3).
 	StewardStatusRevoked StewardStatus = "revoked"
+
+	// StewardStatusTampered indicates the steward raised a tamper alarm (a heartbeat
+	// carrying a tamper reason code) about its own host. Lifecycle: set only by a
+	// tamper alarm from registered, active, lost or archived; ended only by an
+	// operator restore or ban. Heartbeat recovery and reconnection must not clear
+	// it. Unlike a quarantined steward it is never hidden from default lists.
+	StewardStatusTampered StewardStatus = "tampered"
 )
 
 // StewardRecord holds the durable fleet registration data for a single steward.
