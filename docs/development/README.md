@@ -86,19 +86,3 @@ For automated development workflow, use the slash commands documented in `.claud
 - `/pr-review [number]` - Execute structured PR review
 
 See [CLAUDE.md](../../CLAUDE.md) for complete slash command documentation.
-
----
-
-## Version Information
-
-- **Document Version**: 2.0
-- **Last Updated**: 2025-11-06
-- **Status**: Active
-- **Part of**: Story #228 - Documentation Cleanup & Creation
-
-## Change History
-
-| Date | Version | Description |
-|------|---------|-------------|
-| 2025-11-06 | 2.0 | Updated to lightweight index pointing to root docs and actual development files |
-| 2024-04-04 | 1.0 | Initial documentation structure (deprecated) |

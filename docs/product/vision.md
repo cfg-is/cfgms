@@ -102,13 +102,14 @@ code composition.
 certificate trust, time and hostname ship as the standard library in the
 steward installer. Anything else can be added with an extended module, pulled on demand and trusted through the same signing chain.
 
-**One binary.** Controller and steward are self-contained Go binaries. No
-interpreter, no external runtime to patch.
+**Component packaging.** Controller and steward are Go binaries. Resource
+modules are separate executable bundles; scripts and platform integrations can
+require declared interpreters or operating-system tooling.
 
 ## The three engines
 
-**Live fleet query and execution.** Ask the fleet a question and get a live
-answer from every endpoint at once. Which machines run the vulnerable
+**Live fleet query and execution.** Query connected, authorized endpoints in
+parallel, with offline endpoints and partial failures visible. Which machines run the vulnerable
 version? Who is logged in right now? Then act on the answer at the same
 speed, across the whole fleet, when a fix cannot wait for a ringed rollout.
 
@@ -179,36 +180,18 @@ snapshot and never extends the authorized tenant scope. Associated client
 incidents separately retain a historical record of devices accessed during the
 investigation, even when those devices no longer match the filter.
 
-## Release priorities
+## Delivery direction
 
-**Early beta:** Windows, macOS and Linux endpoints, Microsoft 365 integration,
-the interactive query workspace and the agentic troubleshooting cockpit. Exact
-Microsoft 365 beta coverage remains to be scoped.
+Early beta includes Windows, macOS and Linux endpoints, Microsoft 365 integration,
+the query workspace and agentic cockpit. The [roadmap](roadmap.md) owns detailed
+launch coverage, integration priorities, existing-work pointers and deferred scope.
+Self-hosting product work, standalone steward product work, full CLI parity,
+Outpost and DEX experiences are deferred while SaaS takes priority.
 
-**Launch:** dependable updates that preserve steward connectivity, fast live
-queries, reliable shipped configuration modules and workflow primitives, and
-visible failed or missed operations with optional alerting. Limited module
-coverage is acceptable; silent failures are not. Numeric quality targets require
-measurement and explicit agreement.
-
-Microsoft 365 launch scope includes user and group lifecycle, user details,
-licensing and basic membership configuration. PAX8 supplies subscription
-visibility and auditing, and license procurement or quantity changes as
-onboarding/offboarding workflow steps, subject to provider capabilities and
-subscription terms. HaloPSA is the first PSA connector, centered on ticket
-context in the cockpit and license-count reconciliation. Embedding the cockpit
-in a Halo ticket is an exploratory note, with no launch acceptance requirement. Halo's knowledge base
-and Notion are the initial knowledge sources; exact delivery timing remains open.
-
-**Later:** Outpost, DEX, additional connectors, self-hosting and standalone
-steward product work, and full CLI parity. DEX should establish application and
-device performance baselines and guide hardware decisions using measured user
-experience rather than device age alone. Estimated productivity benefits need
-supporting evidence.
-
-Deferred graph and DEX direction is described in the
-[roadmap](roadmap.md#deferred-capability-direction); detailed sequencing follows
-current operator needs and accepted architecture contracts.
+DEX should establish application/device baselines and guide hardware decisions
+using measured user experience rather than age alone. Estimated productivity
+benefits require evidence. Graph and temporal contracts remain useful for current
+investigations regardless of DEX sequencing.
 
 ## Principles
 

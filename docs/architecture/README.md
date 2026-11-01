@@ -2,13 +2,18 @@
 
 Design documents for CFGMS. The contributor entry point is [ARCHITECTURE.md](../../ARCHITECTURE.md) at the repository root.
 
-## Operating Models (required reading)
+## Read by task
 
-Consult these before changing steward or controller behaviour.
+Load the sections relevant to the change; these are reference documents, not a
+requirement to read every operating model before doing any work.
 
-- [CFGMS Operating Model](operating-model.md) - Component roles, communication, and failure modes at runtime
-- [Controller Operating Model](controller-operating-model.md) - Startup, fleet management, and orchestration
-- [Steward Operating Model](steward-operating-model.md) - Convergence loop, modules, and DNA sync
+| Task | Start here |
+|------|------------|
+| Understand component interaction and runtime boundaries | [System operating model](operating-model.md) |
+| Change controller startup, orchestration or a controller-owned feature | Relevant section of the [controller model](controller-operating-model.md) and its accepted ADRs |
+| Change convergence, module execution or endpoint DNA | Relevant section of the [steward model](steward-operating-model.md) and [module contract](modules/README.md) |
+| Change persistence or backend configuration | [Storage architecture](storage-architecture.md), the provider interfaces and canonical boot config |
+| Plan product or epic scope | [Vision](../product/vision.md) and [Product Planning](../development/product-planning.md) |
 
 ## Design Documents
 

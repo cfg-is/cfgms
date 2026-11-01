@@ -1,4 +1,6 @@
-## Parent epic: #<EPIC_NUMBER>
+## Parent Epic
+
+#<EPIC_NUMBER> — <epic title>
 
 ## Goal
 
@@ -15,9 +17,9 @@ None
 order and each create-story call returns its real #NNN immediately, so sibling
 references always use real numbers; placeholder tokens are retired):>
 - #NNN — <reason> — must be merged into develop before this story starts
-- #MMM — <reason> — <when external PR known: (PR: #PPP)>
+- #MMM — <reason> — <when external PR known: (PR PPP)>
 
-<IMPORTANT: PO cron preflight rejects prose without #NNN. Only `None` / `none.` / `n/a` / empty are accepted as empty markers.>
+<IMPORTANT: PO cron preflight rejects prose without #NNN. Only `None` / `none.` / `n/a` / empty are accepted as empty markers. Put PR numbers in the form `PR 123`, never `#123`: every #NNN in this section becomes an issue dependency.>
 
 <IMPORTANT: story bodies are world-readable at creation (ADR-015). No secrets, no customer/business specifics, no exploit-grade vulnerability detail — use create-story --defer for bodies that must stay private until dispatch.>
 
@@ -38,6 +40,19 @@ references always use real numbers; placeholder tokens are retired):>
 - `docs/path/to/doc.md` — <what to update>
 
 <Use "None — no product-shape change" with justification only if the story genuinely doesn't change observable shape. See ba.md "Documentation & Tests Currency" rule.>
+
+## Design Source
+
+<Required only for visual stories: web/src changes, TSX/styles or a new/changed
+screen, view, component or visual state. Omit for non-visual work; CLI output is
+not visual. Name ONE current Reference mockup under docs/design/mockups/ or an
+explicit reuse statement naming an existing shipped surface/component. Require
+matching the reference in acceptance criteria, including relevant themes and
+Ready/Loading/Error/Empty states. Cite docs/design/web-ui-design-tokens.css and
+follow docs/design/web-ui-design-system.md. Never use a Superseded mockup or
+free-hand tokens. If a new surface lacks a Reference mockup, write
+"Design source: PENDING founder mockup" and flag the PO; the story cannot reach
+Ready until the founder-owned design gate is satisfied.>
 
 ## Environment
 

@@ -9,6 +9,10 @@
 
 ## Context
 
+Implementation gaps in this context describe the state when the decision was
+made, not a current delivery inventory. The accepted model/access contract below
+remains normative; use the operating models and current source for delivery state.
+
 CFGMS is pulling the **troubleshooting cockpit** forward as its flagship surface: the screen that
 answers, about any piece of a fleet, *what is wrong here, what else does it affect, what changed,
 and how do I fix it* — and keeps answering as an investigation widens from one machine to several.

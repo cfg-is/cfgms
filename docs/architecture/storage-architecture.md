@@ -104,12 +104,13 @@ An MSP hosting configs on GitHub with PR-based change management continues to wo
 5. GitHub sends webhook → CFGMS git-sync imports the merged tree.
 6. Scopes not under `root/msp-corp` (e.g., fleet-wide policy set by the platform admin) stay in the backend, unaffected.
 
-OSS deployments: the imported configs land in flat-file storage. Admin runs their own backup.
-Commercial deployments: the imported configs land in PostgreSQL. HA, replication, PITR come from the database.
+Imported configs land in the selected flatfile or PostgreSQL backend. Backup,
+replication and point-in-time recovery depend on that backend and its operating
+procedures, not a separate license tier.
 
-## Flat-File Provider (OSS)
+## Flat-File Provider
 
-The flat-file provider (`pkg/storage/providers/flatfile`) is the OSS default for config storage. It stores configs and audit logs as files under a configured root directory.
+The flat-file provider (`pkg/storage/providers/flatfile`) is the local composite default for config storage. It stores configs and audit logs as files under a configured root directory.
 
 **File layout**:
 
@@ -125,7 +126,8 @@ The flat-file provider (`pkg/storage/providers/flatfile`) is the OSS default for
 
 **Admin responsibilities**:
 - Backups. CFGMS does not version at the storage layer. Use filesystem snapshots, rsync, restic, or an equivalent.
-- Filesystem durability. SSD + regular snapshots is sufficient for single-controller OSS.
+- Filesystem durability. Choose and verify filesystem persistence and a backup/restore procedure for the
+  deployment; a disk type alone is not a durability guarantee.
 - Access control. Directory is readable/writable only by the controller process.
 
 **What the flat-file provider implements**:
@@ -279,7 +281,7 @@ which keeps the newest `DefaultExecutionRetention` (1000, `WithExecutionRetentio
 records and never deletes a non-terminal one. Like `AlertStore`, it is not yet carried by
 `cfg migrate --provider storage`.
 
-**Config update required after migration.** Replace the old single-provider block with OSS composite:
+**Config update required after migration.** Replace the old single-provider block with the local flatfile/SQLite composite:
 
 ```yaml
 # Before (git — no longer supported)
@@ -317,96 +319,38 @@ Interfaces are organized into five sub-packages under `pkg/storage/interfaces/`:
 
 ## Configuration Example
 
-**Connection pooling (database provider, ADR-031 Decision 6).** A controller
-process holds exactly one `database`-provider instance, and that instance opens
-one shared `*sql.DB` connection pool per distinct connection string — not one
-pool per store. Every business store (audit, RBAC, tenant, session, case, alert,
-and the rest) configured with the same connection string reuses the same pool,
-so `max_open_connections` below sizes the node's connection budget for that
-database, not a single store's. A pool is opened once per connection string,
-from whichever store using it is created first; set the sizing keys on the
-`business` config block, which is where the provider is first exercised in
-practice. There is no longer a per-store `max_open_connections` or
-`max_idle_connections` key — those were removed, not deprecated.
-
-Pools are keyed by connection string rather than one-per-process because the
-provider registry hands the same instance to every consumer, and a deployment
-may point different storage blocks (for example `business` and `config`, or
-`storage.cluster.postgres_dsn` and `storage.config.dsn`) at different databases.
-A caller configured for one database is never served a pool opened for another:
-that would silently discard its target database, credentials, and `sslmode`.
+Use the [canonical controller boot configuration](../deployment/controller.cfg)
+and the [single-controller walkthrough](../deployment/single-controller/walkthrough.md)
+for a complete configuration. Storage keys are top-level controller settings:
 
 ```yaml
-# cfgms.yaml — five-type storage composition (commercial/SaaS example)
-controller:
-  storage:
-    business:
-      provider: postgres
-      config:
-        host: cfgms-postgres.internal
-        database: cfgms
-        max_open_connections: 100 # sizes the shared pool for this connection string, not a per-store pool
-
-    config:
-      provider: postgres
-      config:
-        host: cfgms-postgres.internal
-        database: cfgms
-
-    secrets:
-      provider: vault
-      config:
-        address: https://vault.internal
-        mount: cfgms
-
-    timeseries:
-      provider: clickhouse
-      config:
-        host: clickhouse.internal
-
-    blobs:
-      provider: s3
-      config:
-        bucket: cfgms-blobs
-        region: us-east-1
-
-  # Optional: scopes that should be imported from external git
-  git_sync:
-    - scope: root/msp-corp
-      origin: git@github.com:msp-corp/cfgms-configs.git
-      branch: main
-      credentials_ref: secrets/git/msp-corp
+storage:
+  flatfile_root: /var/lib/cfgms/storage
+  sqlite_path: /var/lib/cfgms/cfgms.db
 ```
 
-```yaml
-# cfgms.yaml — OSS single-controller example
-controller:
-  storage:
-    business:
-      provider: sqlite
-      config:
-        path: /var/lib/cfgms/business.db
+This selects the local flatfile/SQLite composite. Both paths must be persistent
+and accessible to the controller identity. It is only the storage block, not a
+complete controller configuration. Logging, certificates, transport and secrets
+have their own startup requirements.
 
-    config:
-      provider: flatfile
-      config:
-        root: /var/lib/cfgms/configs
+`StorageConfig` in `features/controller/config/config.go` defines `provider`,
+`config`, `flatfile_root`, `sqlite_path` and `cluster`. The five data categories
+above describe interface responsibilities; they are not five independently
+named YAML children under `controller.storage`. Do not use that proposed shape
+as a boot configuration. For PostgreSQL/shared stores, use the
+[cluster walkthrough](../deployment/controller-cluster/walkthrough.md) and
+[ADR-031](decisions/031-controller-cluster-service-model.md).
 
-    secrets:
-      provider: sops
-      config:
-        root: /var/lib/cfgms/secrets
-
-    timeseries:
-      provider: filelog
-      config:
-        root: /var/lib/cfgms/timeseries
-
-    blobs:
-      provider: filesystem
-      config:
-        root: /var/lib/cfgms/blobs
-```
+**Database connection pools.** The database provider shares one `*sql.DB` pool
+per distinct connection string. Stores targeting the same database reuse it;
+those targeting a different connection string do not. Provider configuration
+keys `max_open_connections`, `max_idle_connections` and
+`connection_max_lifetime_minutes` are read when that pool is first opened.
+Configure them consistently on the actual database-provider configuration path,
+not on a hypothetical `business` boot-config block. See
+`pkg/storage/providers/database/plugin.go` for the accepted provider keys and
+[ADR-031](decisions/031-controller-cluster-service-model.md) for the contract.
 
 ## Blob Storage
 
@@ -431,7 +375,7 @@ type BlobKey struct {
 
 ### Providers
 
-| Provider | Package | OSS default | Notes |
+| Provider | Package | Local default | Notes |
 |----------|---------|-------------|-------|
 | `filesystem` | `pkg/storage/providers/blobstore/filesystem/` | Yes | Streams via `io.Copy`; atomic temp+rename writes; SHA-256 sidecar |
 | `s3` | `pkg/storage/providers/blobstore/s3/` | No (operator choice) | AWS SDK v2; bucket + prefix key mapping; JSON sidecar object |
@@ -453,22 +397,19 @@ Both providers:
 
 ### Configuration example
 
-```yaml
-# OSS single-controller
-blobs:
-  provider: filesystem
-  config:
-    root: /var/lib/cfgms/blobs
+For a local controller, the actual `BlobStorageConfig` boot shape is:
 
-# Commercial/SaaS
-blobs:
-  provider: s3
-  config:
-    bucket: cfgms-blobs
-    region: us-east-1
-    # endpoint_url: http://minio.internal:9000  # optional: MinIO or local dev
-    # prefix: cfgms                              # optional: global key prefix
+```yaml
+blob_storage:
+  root: /var/lib/cfgms/installers
 ```
+
+When omitted, the root defaults to `<data_dir>/installers`. This is not a
+`blobs.provider` block. Cluster deployments obtain the shared S3 configuration
+through `storage.cluster`; use the [cluster walkthrough](../deployment/controller-cluster/walkthrough.md)
+and the current `ClusterStorageConfig` in `features/controller/config/config.go`.
+The provider registry's S3 configuration is a Go factory contract, not a second
+public YAML schema.
 
 ### Multi-tenant isolation
 

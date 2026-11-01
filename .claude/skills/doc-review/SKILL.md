@@ -1,6 +1,6 @@
 ---
 name: doc-review
-description: Scan for internal tracking documents that must be removed before PR creation. Use during story completion to enforce documentation hygiene.
+description: Review changed documentation for current purpose, accuracy, ownership, and artifact hygiene before PR creation.
 context: fork
 agent: general-purpose
 allowed-tools: Bash, Grep, Glob
@@ -8,50 +8,52 @@ allowed-tools: Bash, Grep, Glob
 
 # Documentation Review Gate
 
-## Purpose
-Detect internal tracking documents in the diff that should NOT be in PRs. These are progress trackers, sprint reports, and story summaries that pollute the repo.
+Review the changed documentation, not the whole repository on every story.
+Apply `docs/development/standards/documentation-standards.md` and the currency
+contract in `docs/development/product-planning.md`.
 
-## Scan Steps
+## Scope and triage
 
-Run the doc scan helper (wraps pipe+regex commands to avoid approval prompts):
+Identify the actual PR base and head. Include added, modified, renamed and deleted
+Markdown, agent instructions and relevant config examples. Read affected current
+owners and known consumers when necessary.
 
-```bash
-./.claude/scripts/pr-review-helper.sh doc-scan
-```
+Run `./.claude/scripts/pr-review-helper.sh doc-scan` for artifact triage. Its
+filename/story-marker hits are candidates, not deletion instructions; `(none)`
+is not a review verdict. The helper compares local `develop...HEAD`, so reconcile
+its output with the actual PR refs when that local branch is stale or the PR
+uses another base. Do not inspect only helper hits.
 
-Parse the output sections:
-- **Changed docs in PR** — Files matching internal tracking patterns (status, summary, report, etc.)
-- **Version-specific internal reports** — Files with version numbers in their name
-- **New docs with Story references** — Changed docs containing "Story #NNN" references
-- `(none)` means that section found nothing
+## Required checks
 
-## Classification Rules
+For every changed document or coherent group, establish:
 
-**ALWAYS REMOVE** (internal tracking):
-- `*-status.md`, `*-progress.md` — Progress tracking
-- `INTERNAL_*.md`, `*_REVIEW_STATUS.md` — Internal reviews
-- `v[0-9].*-validation.md`, `sprint-*.md` — Sprint reports
-- `story-*-summary.md`, `*-implementation-summary.md` — Story summaries
+1. **Purpose:** a concrete current reader task, tool consumer or required evidence.
+2. **Owner:** one authoritative contract; remove or consolidate competing rules.
+3. **Accuracy:** claims match source and wiring, accepted decisions or approved
+   intent, with those categories explicit. Examples match real flags/config keys;
+   source inspection alone does not prove runtime verification.
+4. **Proportion:** retain the information the task requires; remove generic
+   boilerplate, redundant copies and temporary work tracking. A date or line
+   count is not a reason by itself to keep or delete anything.
+5. **Change safety:** check inbound links/anchors and non-Markdown loaders,
+   fixtures, tests and scripts for every move/deletion. Preserve unique relevant
+   decision or security evidence, not every adjacent historical memo.
+6. **Validation:** run applicable docs structure/link/boundary checks. Report
+   examples or operational claims that lack required validation evidence.
 
-**REVIEW FOR CURRENT PURPOSE** (contributor-facing):
-- Security audits and ADRs may retain evidence or decision lineage relevant to
-  current constraints; verify their status and references.
-- Guides and design documents must describe current behavior or clearly approved
-  future direction. Update/consolidate/delete superseded or inaccurate material
-  and repair inbound references. A historical header alone is not a reason to keep
-  it; Git history preserves prior versions.
-- Apply `docs/development/product-planning.md` → Documentation currency.
-
-## Decision Tree
-```
-Does this document help future contributors?
-  YES → Verify current accuracy and purpose; update or consolidate as needed
-  NO  → Does it document completed internal work?
-    YES → Remove
-    NO  → Remove superseded material once its current replacement is established
-```
+Progress/sprint/story-summary naming patterns are strong triage signals. Confirm
+actual purpose before removing: a functional test fixture or unique evidence
+record may have such a name. Historical headers do not excuse stale guidance.
 
 ## Return
-- List of problematic files found (with classification)
-- PASS if no internal tracking documents detected
-- FAIL with file list if internal tracking documents found — blocks PR creation
+
+Return a compact table: path/group, purpose/owner, disposition, evidence and
+remaining finding. Use KEEP, SHORTEN, CONSOLIDATE, REWRITE or DELETE as needed.
+
+PASS requires the changed documentation's relevant checks to pass with no
+unresolved acceptance finding. FAIL names each inaccurate claim, competing rule,
+unnecessary artifact, broken consumer or required evidence gap and its remedy.
+Do not declare PASS solely because the helper found no tracker files. Keep this
+review in the normal review response; do not add another permanent audit report
+unless the task explicitly calls for one.

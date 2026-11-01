@@ -29,6 +29,7 @@ Also read `CLAUDE.md` for architecture rules, central providers, and anti-patter
 
 ## Validation Checklist
 
+Read `docs/development/story-template.md` for the current body contract.
 Apply `docs/development/product-planning.md`: check the proposed delta against
 existing code/issues and the epic coverage map. Flag duplicated or already-fixed
 work and unsupported readiness claims. Validate this story's bounded contract;

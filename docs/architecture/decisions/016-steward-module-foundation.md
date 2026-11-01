@@ -15,7 +15,7 @@ ADR-006 established the module *packaging and distribution* model: out-of-proces
 2. **How the module source tree is organised** so that the stdlib (installer payload) is physically separable from non-stdlib modules (pulled on demand).
 3. **What a module's `Get` must emit for DNA**, and **how a module declares the objects it authoritatively owns** — the two clauses the forthcoming DNA composition ADR (ADR-017) depends on.
 
-### Current state
+### State at decision time
 
 All modules live flat in `features/modules/`, mixing stdlib and non-stdlib:
 
