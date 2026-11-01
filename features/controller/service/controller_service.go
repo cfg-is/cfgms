@@ -19,6 +19,7 @@ import (
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/controller/tagstore"
 	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -44,6 +45,19 @@ type heartbeatPersistState struct {
 	version string
 }
 
+// healthReasonsRecheckInterval bounds how long a node trusts its cached copy of
+// a steward's persisted health reasons. After it elapses the next heartbeat
+// re-reads the durable record, so a steward that moved to another node and back
+// cannot leave a stale set behind.
+const healthReasonsRecheckInterval = 5 * time.Minute
+
+// healthReasonsState is the last health reason set this node saw persisted for
+// one steward and when it was last confirmed against the durable record.
+type healthReasonsState struct {
+	reasons    []business.HealthReasonRecord
+	verifiedAt time.Time
+}
+
 // ControllerService implements the Controller service
 type ControllerService struct {
 	logger     logging.Logger
@@ -61,6 +75,11 @@ type ControllerService struct {
 	// is never held across storage I/O.
 	heartbeatPersistMu sync.Mutex
 	heartbeatPersist   map[string]heartbeatPersistState
+
+	// healthReasons caches the persisted reason set per steward so a steady
+	// heartbeat causes no store write. Own mutex: never held across storage I/O.
+	healthReasonsMu sync.Mutex
+	healthReasons   map[string]healthReasonsState
 
 	// tenantAncestry resolves tenant subtree containment for ListFleetStewards'
 	// tenant scoping. Wired via SetTenantAncestry; nil denies every non-identical
@@ -157,6 +176,10 @@ type StewardInfo struct {
 	// Hidden is the operator-controlled fleet-view visibility flag (Issue #2944).
 	// Orthogonal to Status: hiding a steward does not change its lifecycle state.
 	Hidden bool
+
+	// HealthReasons mirrors the steward's current health reason set for the
+	// node-local view. The durable record is authoritative; the API reads that.
+	HealthReasons []business.HealthReasonRecord
 
 	// Tags holds the controller-assigned tags for this steward (Issue #3494).
 	// Populated only by ListFleetStewards; never by GetStewardInfo, so
@@ -835,6 +858,7 @@ func (s *ControllerService) GetStewardInfo(stewardID string) (*StewardInfo, bool
 	copied := *info
 	copied.DNA = cloneDNA(info.DNA)
 	copied.Metrics = copyMetrics(info.Metrics)
+	copied.HealthReasons = append([]business.HealthReasonRecord(nil), info.HealthReasons...)
 	return &copied, true
 }
 
@@ -993,6 +1017,107 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 	// EnsureSteward. storeDNA runs outside s.mu.
 	s.storeDNA(context.Background(), stewardID, tenantID, dna, "active")
 	s.persistHeartbeat(stewardID, version)
+	return true
+}
+
+// RecordHealthReasons stores the health reasons a steward reported on its latest
+// heartbeat. The set is capped here again (steward input is untrusted), mirrored
+// onto the node-local registry entry, and written to the durable record only
+// when it differs from the persisted set: a steady heartbeat causes no write,
+// and a set that becomes empty is written once. A failed write is retried on
+// the next heartbeat.
+func (s *ControllerService) RecordHealthReasons(stewardID string, reasons []types.HealthReason) {
+	incoming := healthReasonRecords(types.TruncateHealthReasons(reasons))
+
+	s.mu.Lock()
+	if info, ok := s.stewards[stewardID]; ok {
+		info.HealthReasons = incoming
+	}
+	s.mu.Unlock()
+
+	if s.stewardStore == nil {
+		return
+	}
+	now := time.Now()
+	known, ok := s.knownHealthReasons(stewardID, now)
+	if !ok {
+		return
+	}
+	if !healthReasonsEqual(known, incoming) && !s.persistHealthReasons(stewardID, incoming) {
+		return
+	}
+	s.cacheHealthReasons(stewardID, incoming, now)
+}
+
+// healthReasonRecords converts capped wire reasons to their storage form; nil
+// for an empty set.
+func healthReasonRecords(capped []types.HealthReason) []business.HealthReasonRecord {
+	if len(capped) == 0 {
+		return nil
+	}
+	out := make([]business.HealthReasonRecord, len(capped))
+	for i, r := range capped {
+		out[i] = business.HealthReasonRecord{Component: r.Component, Code: r.Code, Message: r.Message}
+	}
+	return out
+}
+
+// knownHealthReasons returns the set believed persisted for the steward: the
+// cached set while it is fresh, otherwise the durable record's (re-verified so a
+// steward moving between nodes cannot leave a stale set). ok is false when there
+// is no readable durable record; the next heartbeat tries again.
+func (s *ControllerService) knownHealthReasons(stewardID string, now time.Time) (known []business.HealthReasonRecord, ok bool) {
+	s.healthReasonsMu.Lock()
+	state, cached := s.healthReasons[stewardID]
+	s.healthReasonsMu.Unlock()
+	if cached && now.Sub(state.verifiedAt) < healthReasonsRecheckInterval {
+		return state.reasons, true
+	}
+	rec, err := s.stewardStore.GetSteward(context.Background(), stewardID)
+	if err != nil {
+		if !errors.Is(err, business.ErrStewardNotFound) {
+			s.logger.Warn("Failed to read steward record for health reasons",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+		return nil, false
+	}
+	return rec.HealthReasons, true
+}
+
+// persistHealthReasons writes the set to the durable record, reporting whether
+// it succeeded. A failed write is retried on the next heartbeat.
+func (s *ControllerService) persistHealthReasons(stewardID string, reasons []business.HealthReasonRecord) bool {
+	if err := s.stewardStore.SetHealthReasons(context.Background(), stewardID, reasons); err != nil {
+		s.logger.Warn("Failed to persist steward health reasons",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return false
+	}
+	return true
+}
+
+// cacheHealthReasons records the set as persisted and verified at the given time.
+func (s *ControllerService) cacheHealthReasons(stewardID string, reasons []business.HealthReasonRecord, at time.Time) {
+	s.healthReasonsMu.Lock()
+	defer s.healthReasonsMu.Unlock()
+	if s.healthReasons == nil {
+		s.healthReasons = make(map[string]healthReasonsState)
+	}
+	s.healthReasons[stewardID] = healthReasonsState{reasons: reasons, verifiedAt: at}
+}
+
+// healthReasonsEqual reports whether two reason sets are identical in order and
+// content; nil and empty are the same set.
+func healthReasonsEqual(a, b []business.HealthReasonRecord) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
 	return true
 }
 

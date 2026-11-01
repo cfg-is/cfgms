@@ -471,6 +471,33 @@ func resolveWORMMarkerRoot(cfg *config.Config) string {
 // the heartbeat.Service. When a steward's liveness state changes, the callback
 // persists the new status to the durable StewardStore so that cfg steward list
 // and GET /api/v1/stewards reflect the change without a restart (Issue #2463).
+// newHeartbeatReceivedHook builds the per-heartbeat hook: it drains the steward's
+// pending jobs, persists its health reasons (written only when the set changes,
+// Issue #5651) and, when a routing table is configured, refreshes the steward's
+// routing liveness (Issue #3764). controllerService and routingStore may be nil.
+func newHeartbeatReceivedHook(dispatcher *dispatcher.Dispatcher, controllerService *service.ControllerService, routingStore business.RoutingStore, localNodeID string, logger logging.Logger) heartbeat.HeartbeatReceivedCallback {
+	return func(stewardID string, reasons []controlplaneTypes.HealthReason) {
+		dispatcher.OnHeartbeat(stewardID)
+		if controllerService != nil {
+			controllerService.RecordHealthReasons(stewardID, reasons)
+		}
+		recordRoutingHeartbeat(routingStore, localNodeID, stewardID, logger)
+	}
+}
+
+// recordRoutingHeartbeat refreshes a steward's routing-table liveness timestamp.
+// It is a no-op when routingStore is nil.
+func recordRoutingHeartbeat(routingStore business.RoutingStore, localNodeID, stewardID string, logger logging.Logger) {
+	if routingStore == nil {
+		return
+	}
+	if err := routingStore.RecordConnection(context.Background(), stewardID, localNodeID); err != nil {
+		logger.Warn("internaldelivery: failed to refresh routing connection on heartbeat",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
 func makeHeartbeatStatusChangeCallback(store business.StewardStore, logger logging.Logger) heartbeat.StatusChangeCallback {
 	return func(sid string, healthy bool, status heartbeat.StewardStatus) {
 		if healthy {
@@ -1522,18 +1549,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Issue #3764: refresh this steward's routing-table liveness timestamp on
 		// every heartbeat, in addition to on connect, so a long-lived connection
 		// never goes stale under business.RoutingStaleAfter between reconnects.
-		onHeartbeatReceived := jobDispatcher.OnHeartbeat
-		if routingStore != nil {
-			dispatcherOnHeartbeat := jobDispatcher.OnHeartbeat
-			onHeartbeatReceived = func(stewardID string) {
-				dispatcherOnHeartbeat(stewardID)
-				if err := routingStore.RecordConnection(context.Background(), stewardID, routingHook.localNodeID); err != nil {
-					logger.Warn("internaldelivery: failed to refresh routing connection on heartbeat",
-						"steward_id", logging.SanitizeLogValue(stewardID),
-						"error", logging.SanitizeLogValue(err.Error()))
-				}
-			}
-		}
+		// Issue #5651: the same per-heartbeat hook also persists the steward's
+		// health reasons (written only when the set changes).
+		onHeartbeatReceived := newHeartbeatReceivedHook(jobDispatcher, controllerService, routingStore, routingHook.localNodeID, logger)
 
 		// Initialize heartbeat monitoring service
 		logger.Info("Initializing heartbeat monitoring service...")

@@ -23,6 +23,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	"github.com/spf13/cobra"
@@ -914,23 +915,58 @@ func getStewardClient() (*APIClient, error) {
 
 // stewardEntry is a local representation of a steward from the API response.
 type stewardEntry struct {
-	ID       string    `json:"id"`
-	Status   string    `json:"status"`
-	LastSeen time.Time `json:"last_seen"`
-	Version  string    `json:"version"`
-	DNA      *struct {
+	ID            string                `json:"id"`
+	Status        string                `json:"status"`
+	LastSeen      time.Time             `json:"last_seen"`
+	Version       string                `json:"version"`
+	HealthReasons []stewardHealthReason `json:"health_reasons,omitempty"`
+	DNA           *struct {
 		Hostname string `json:"hostname"`
 	} `json:"dna,omitempty"`
 }
 
+// stewardHealthReason is one machine-readable reason a steward reports a
+// non-healthy status, as returned by the controller.
+type stewardHealthReason struct {
+	Component string `json:"component"`
+	Code      string `json:"code"`
+	Message   string `json:"message,omitempty"`
+}
+
+// sanitizeTerminal replaces control characters (including ESC) in steward-supplied
+// text with '?', so a compromised steward cannot inject terminal escape
+// sequences or forge output lines through a health reason.
+func sanitizeTerminal(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '?'
+		}
+		return r
+	}, s)
+}
+
+// formatReasonsColumn renders the REASONS list column: the first reason code,
+// followed by "+N" when more are reported, or "-" when there are none.
+func formatReasonsColumn(reasons []stewardHealthReason) string {
+	if len(reasons) == 0 {
+		return "-"
+	}
+	if len(reasons) == 1 {
+		return sanitizeTerminal(reasons[0].Code)
+	}
+	return fmt.Sprintf("%s +%d", sanitizeTerminal(reasons[0].Code), len(reasons)-1)
+}
+
 // stewardStatusCmd shows detailed status for every steward a selector matches.
 var stewardStatusCmd = &cobra.Command{
-	Use:   "status <selector>",
-	Short: "Show detailed status for stewards matching a selector",
+	Use:     "status <selector>",
+	Aliases: []string{"get"},
+	Short:   "Show detailed status for stewards matching a selector",
 	Long: `Display full details for every steward the selector matches.
 
 Prints labelled fields including id, status, last_seen, version, hostname, OS,
-connection state, and other available metadata. With --json, emits a
+connection state, health reasons (component, code and message of each), and
+other available metadata. With --json, emits a
 keyed-by-steward JSON array (one entry per matched steward).
 
 Examples:
@@ -1171,7 +1207,9 @@ type stewardStatusInfo struct {
 	// (ADR-034 §7). Empty protection level means the record predates the field.
 	KeyProtectionLevel string `json:"key_protection_level,omitempty"`
 	KeyAlgorithm       string `json:"key_algorithm,omitempty"`
-	DNA                *struct {
+	// HealthReasons is every reason the steward reports for a non-healthy status.
+	HealthReasons []stewardHealthReason `json:"health_reasons,omitempty"`
+	DNA           *struct {
 		Hostname     string `json:"hostname"`
 		OS           string `json:"os"`
 		Architecture string `json:"architecture"`
@@ -1186,6 +1224,69 @@ func formatClockOffset(ms int64) string {
 		return d.String()
 	}
 	return "+" + d.String()
+}
+
+// printHealthReasons prints every reason with its component, code and message.
+func printHealthReasons(reasons []stewardHealthReason) {
+	if len(reasons) == 0 {
+		return
+	}
+	fmt.Printf("Health Reasons:\n")
+	for _, hr := range reasons {
+		fmt.Printf("  - [%s] %s", sanitizeTerminal(hr.Component), sanitizeTerminal(hr.Code))
+		if hr.Message != "" {
+			fmt.Printf(": %s", sanitizeTerminal(hr.Message))
+		}
+		fmt.Println()
+	}
+}
+
+// printStewardDNA prints the host identity fields from the steward's DNA.
+func printStewardDNA(dna *struct {
+	Hostname     string `json:"hostname"`
+	OS           string `json:"os"`
+	Architecture string `json:"architecture"`
+}) {
+	if dna == nil {
+		return
+	}
+	fmt.Printf("Hostname:         %s\n", dna.Hostname)
+	fmt.Printf("OS:               %s\n", dna.OS)
+	if dna.Architecture != "" {
+		fmt.Printf("Architecture:     %s\n", dna.Architecture)
+	}
+}
+
+// printStewardStatus prints the labelled status fields of one steward.
+func printStewardStatus(s stewardStatusInfo) {
+	fmt.Printf("ID:               %s\n", s.ID)
+	fmt.Printf("Status:           %s\n", s.Status)
+	fmt.Printf("Connection:       %s\n", s.ConnectionState)
+	lastSeen := ""
+	if !s.LastSeen.IsZero() {
+		lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
+	}
+	fmt.Printf("Last Seen:        %s\n", lastSeen)
+	fmt.Printf("Version:          %s\n", s.Version)
+	if s.ClockOffsetMs != nil {
+		fmt.Printf("Clock Offset:     %s\n", formatClockOffset(*s.ClockOffsetMs))
+	}
+	keyProtection := s.KeyProtectionLevel
+	if keyProtection == "" {
+		keyProtection = "unknown"
+	}
+	fmt.Printf("key_protection_level: %s\n", keyProtection)
+	if s.KeyAlgorithm != "" {
+		fmt.Printf("key_algorithm:        %s\n", s.KeyAlgorithm)
+	}
+	printHealthReasons(s.HealthReasons)
+	printStewardDNA(s.DNA)
+	if s.TenantID != "" {
+		fmt.Printf("Tenant ID:        %s\n", s.TenantID)
+	}
+	if s.Group != "" {
+		fmt.Printf("Group:            %s\n", s.Group)
+	}
 }
 
 func runStewardStatus(_ *cobra.Command, args []string) error {
@@ -1260,40 +1361,7 @@ func runStewardStatus(_ *cobra.Command, args []string) error {
 			continue
 		}
 
-		s := apiResp.Data
-		fmt.Printf("ID:               %s\n", s.ID)
-		fmt.Printf("Status:           %s\n", s.Status)
-		fmt.Printf("Connection:       %s\n", s.ConnectionState)
-		lastSeen := ""
-		if !s.LastSeen.IsZero() {
-			lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
-		}
-		fmt.Printf("Last Seen:        %s\n", lastSeen)
-		fmt.Printf("Version:          %s\n", s.Version)
-		if s.ClockOffsetMs != nil {
-			fmt.Printf("Clock Offset:     %s\n", formatClockOffset(*s.ClockOffsetMs))
-		}
-		keyProtection := s.KeyProtectionLevel
-		if keyProtection == "" {
-			keyProtection = "unknown"
-		}
-		fmt.Printf("key_protection_level: %s\n", keyProtection)
-		if s.KeyAlgorithm != "" {
-			fmt.Printf("key_algorithm:        %s\n", s.KeyAlgorithm)
-		}
-		if s.DNA != nil {
-			fmt.Printf("Hostname:         %s\n", s.DNA.Hostname)
-			fmt.Printf("OS:               %s\n", s.DNA.OS)
-			if s.DNA.Architecture != "" {
-				fmt.Printf("Architecture:     %s\n", s.DNA.Architecture)
-			}
-		}
-		if s.TenantID != "" {
-			fmt.Printf("Tenant ID:        %s\n", s.TenantID)
-		}
-		if s.Group != "" {
-			fmt.Printf("Group:            %s\n", s.Group)
-		}
+		printStewardStatus(apiResp.Data)
 	}
 
 	if overallErr != nil && len(matches) == 1 {
@@ -1432,6 +1500,56 @@ func runStewardModules(_ *cobra.Command, args []string) error {
 	return overallErr
 }
 
+// stewardRow is one line of the steward list table.
+type stewardRow struct {
+	ID, Status, Version, Hostname string
+	LastSeen                      time.Time
+	HealthReasons                 []stewardHealthReason
+}
+
+func rowsFromStewardInfos(in []StewardInfo) []stewardRow {
+	rows := make([]stewardRow, len(in))
+	for i, s := range in {
+		rows[i] = stewardRow{ID: s.ID, Status: s.Status, Version: s.Version, LastSeen: s.LastSeen, HealthReasons: s.HealthReasons}
+		if s.DNA != nil {
+			rows[i].Hostname = s.DNA.Hostname
+		}
+	}
+	return rows
+}
+
+func rowsFromStewardEntries(in []stewardEntry) []stewardRow {
+	rows := make([]stewardRow, len(in))
+	for i, s := range in {
+		rows[i] = stewardRow{ID: s.ID, Status: s.Status, Version: s.Version, LastSeen: s.LastSeen, HealthReasons: s.HealthReasons}
+		if s.DNA != nil {
+			rows[i].Hostname = s.DNA.Hostname
+		}
+	}
+	return rows
+}
+
+// printStewardTable writes the `cfg steward list` table for the given stewards.
+func printStewardTable(stewards []stewardRow) error {
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(w, "ID\tSTATUS\tREASONS\tVERSION\tLAST SEEN\tHOSTNAME"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, "--\t------\t-------\t-------\t---------\t--------"); err != nil {
+		return err
+	}
+	for _, s := range stewards {
+		lastSeen := ""
+		if !s.LastSeen.IsZero() {
+			lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
+		}
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Status, formatReasonsColumn(s.HealthReasons), s.Version, lastSeen, s.Hostname); err != nil {
+			return err
+		}
+	}
+	return w.Flush()
+}
+
 func runStewardList(cmd *cobra.Command, args []string) error {
 	client, err := getStewardClient()
 	if err != nil {
@@ -1444,27 +1562,7 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		if _, err := fmt.Fprintln(w, "ID\tSTATUS\tVERSION\tLAST SEEN\tHOSTNAME"); err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintln(w, "--\t------\t-------\t---------\t--------"); err != nil {
-			return err
-		}
-		for _, s := range matches {
-			hostname := ""
-			if s.DNA != nil {
-				hostname = s.DNA.Hostname
-			}
-			lastSeen := ""
-			if !s.LastSeen.IsZero() {
-				lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
-			}
-			if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.ID, s.Status, s.Version, lastSeen, hostname); err != nil {
-				return err
-			}
-		}
-		return w.Flush()
+		return printStewardTable(rowsFromStewardInfos(matches))
 	}
 
 	// No-arg path: unchanged GET /api/v1/stewards behavior (backward compatible).
@@ -1496,27 +1594,7 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(w, "ID\tSTATUS\tVERSION\tLAST SEEN\tHOSTNAME"); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintln(w, "--\t------\t-------\t---------\t--------"); err != nil {
-		return err
-	}
-	for _, s := range apiResp.Data {
-		hostname := ""
-		if s.DNA != nil {
-			hostname = s.DNA.Hostname
-		}
-		lastSeen := ""
-		if !s.LastSeen.IsZero() {
-			lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
-		}
-		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.ID, s.Status, s.Version, lastSeen, hostname); err != nil {
-			return err
-		}
-	}
-	if err := w.Flush(); err != nil {
+	if err := printStewardTable(rowsFromStewardEntries(apiResp.Data)); err != nil {
 		return err
 	}
 

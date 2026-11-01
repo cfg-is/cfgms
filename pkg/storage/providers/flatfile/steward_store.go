@@ -336,6 +336,23 @@ func (s *FlatFileStewardStore) SetStewardHidden(_ context.Context, stewardID str
 	return s.writeSteward(record)
 }
 
+// SetHealthReasons replaces the steward's current health reason set.
+func (s *FlatFileStewardStore) SetHealthReasons(_ context.Context, stewardID string, reasons []business.HealthReasonRecord) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	record, err := s.readSteward(stewardID)
+	if err != nil {
+		return err
+	}
+	if len(reasons) == 0 {
+		record.HealthReasons = nil
+	} else {
+		record.HealthReasons = append([]business.HealthReasonRecord(nil), reasons...)
+	}
+	return s.writeSteward(record)
+}
+
 // SetStewardProvenance replaces the steward's provenance baseline.
 func (s *FlatFileStewardStore) SetStewardProvenance(_ context.Context, stewardID, provenanceJSON string) error {
 	s.mutex.Lock()

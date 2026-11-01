@@ -6,6 +6,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -62,8 +63,8 @@ func (s *SQLiteStewardStore) RegisterSteward(ctx context.Context, record *busine
 				(id, hostname, platform, arch, version, ip_address, status,
 				 registered_at, last_seen, last_heartbeat_at,
 				 device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json,
-				 tenant_id, hidden)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				 tenant_id, hidden, health_reasons)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			record.ID,
 			record.Hostname,
 			record.Platform,
@@ -81,6 +82,7 @@ func (s *SQLiteStewardStore) RegisterSteward(ctx context.Context, record *busine
 			record.LastProvenanceJSON,
 			record.TenantID,
 			hiddenInt,
+			encodeHealthReasons(record.HealthReasons),
 		)
 		return e
 	})
@@ -139,7 +141,7 @@ func (s *SQLiteStewardStore) GetSteward(ctx context.Context, stewardID string) (
 		SELECT id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json,
-		       tenant_id, hidden
+		       tenant_id, hidden, health_reasons
 		FROM stewards WHERE id = ?`, stewardID)
 	return scanStewardRow(row)
 }
@@ -160,7 +162,7 @@ func (s *SQLiteStewardStore) GetStewardByDeviceID(ctx context.Context, deviceID 
 		SELECT id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json,
-		       tenant_id, hidden
+		       tenant_id, hidden, health_reasons
 		FROM stewards WHERE device_id = ? ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`, deviceID)
 	return scanStewardRow(row)
 }
@@ -177,7 +179,7 @@ func (s *SQLiteStewardStore) GetStewardByDeviceIDForTenant(ctx context.Context, 
 		SELECT id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json,
-		       tenant_id, hidden
+		       tenant_id, hidden, health_reasons
 		FROM stewards WHERE device_id = ? AND tenant_id = ? ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`,
 		deviceID, tenantID)
 	return scanStewardRow(row)
@@ -189,7 +191,7 @@ func (s *SQLiteStewardStore) ListStewards(ctx context.Context) ([]*business.Stew
 		SELECT id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json,
-		       tenant_id, hidden
+		       tenant_id, hidden, health_reasons
 		FROM stewards ORDER BY registered_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to list stewards: %w", err)
@@ -204,7 +206,7 @@ func (s *SQLiteStewardStore) ListStewardsByStatus(ctx context.Context, status bu
 		SELECT id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json,
-		       tenant_id, hidden
+		       tenant_id, hidden, health_reasons
 		FROM stewards WHERE status = ? ORDER BY registered_at ASC`,
 		string(status),
 	)
@@ -294,6 +296,52 @@ func (s *SQLiteStewardStore) SetStewardHidden(ctx context.Context, stewardID str
 		return business.ErrStewardNotFound
 	}
 	return nil
+}
+
+// SetHealthReasons replaces the steward's current health reason set.
+func (s *SQLiteStewardStore) SetHealthReasons(ctx context.Context, stewardID string, reasons []business.HealthReasonRecord) error {
+	encoded := encodeHealthReasons(reasons)
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var e error
+		res, e = s.db.ExecContext(ctx, `
+			UPDATE stewards SET health_reasons = ? WHERE id = ?`,
+			encoded, stewardID,
+		)
+		return e
+	})
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to set health reasons for steward %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return nil
+}
+
+// encodeHealthReasons serialises reasons as JSON; an empty set is stored as ”.
+func encodeHealthReasons(reasons []business.HealthReasonRecord) string {
+	if len(reasons) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(reasons)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// decodeHealthReasons parses the stored JSON; ” or malformed data reads as no reasons.
+func decodeHealthReasons(s string) []business.HealthReasonRecord {
+	if s == "" {
+		return nil
+	}
+	var out []business.HealthReasonRecord
+	if err := json.Unmarshal([]byte(s), &out); err != nil || len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // SetStewardProvenance replaces the steward's provenance baseline.
@@ -399,7 +447,7 @@ func (s *SQLiteStewardStore) GetStewardsSeen(ctx context.Context, since time.Tim
 		SELECT id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json,
-		       tenant_id, hidden
+		       tenant_id, hidden, health_reasons
 		FROM stewards WHERE last_seen > ? ORDER BY last_seen DESC`,
 		formatTime(since),
 	)
@@ -446,11 +494,12 @@ func scanStewardRow(row *sql.Row) (*business.StewardRecord, error) {
 	var statusStr, regStr, lastSeenStr, lastHBStr string
 	var keyPub []byte
 	var hiddenInt int
+	var reasonsJSON string
 	err := row.Scan(
 		&r.ID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
 		&statusStr, &regStr, &lastSeenStr, &lastHBStr,
 		&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON,
-		&r.TenantID, &hiddenInt,
+		&r.TenantID, &hiddenInt, &reasonsJSON,
 	)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrStewardNotFound
@@ -460,6 +509,7 @@ func scanStewardRow(row *sql.Row) (*business.StewardRecord, error) {
 	}
 	r.IdentityKeyPub = keyPub
 	r.Hidden = hiddenInt != 0
+	r.HealthReasons = decodeHealthReasons(reasonsJSON)
 	return populateSteward(r, statusStr, regStr, lastSeenStr, lastHBStr), nil
 }
 
@@ -471,16 +521,18 @@ func scanStewardRows(rows *sql.Rows) ([]*business.StewardRecord, error) {
 		var statusStr, regStr, lastSeenStr, lastHBStr string
 		var keyPub []byte
 		var hiddenInt int
+		var reasonsJSON string
 		if err := rows.Scan(
 			&r.ID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
 			&statusStr, &regStr, &lastSeenStr, &lastHBStr,
 			&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON,
-			&r.TenantID, &hiddenInt,
+			&r.TenantID, &hiddenInt, &reasonsJSON,
 		); err != nil {
 			return nil, fmt.Errorf("sqlite: failed to scan steward row: %w", err)
 		}
 		r.IdentityKeyPub = keyPub
 		r.Hidden = hiddenInt != 0
+		r.HealthReasons = decodeHealthReasons(reasonsJSON)
 		records = append(records, populateSteward(r, statusStr, regStr, lastSeenStr, lastHBStr))
 	}
 	return records, rows.Err()

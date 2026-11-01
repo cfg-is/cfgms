@@ -23,6 +23,7 @@ import (
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/controller/tagstore"
+	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -1984,4 +1985,120 @@ func TestRecordHeartbeat_ClockSkewWarnRateLimited(t *testing.T) {
 	seedHeartbeatSteward(svc, "sw-ok")
 	svc.RecordHeartbeat("sw-ok", "v1", time.Now().Add(-5*time.Second))
 	assert.Equal(t, 1, log.WarnCount(), "offset under threshold must not warn")
+}
+
+// reasonCountingStewardStore wraps a real StewardStore and counts
+// SetHealthReasons calls. Embedding the interface promotes every other method.
+type reasonCountingStewardStore struct {
+	business.StewardStore
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *reasonCountingStewardStore) SetHealthReasons(ctx context.Context, id string, r []business.HealthReasonRecord) error {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	return c.StewardStore.SetHealthReasons(ctx, id, r)
+}
+
+func (c *reasonCountingStewardStore) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+// TestRecordHealthReasons_WritesOnlyOnChange verifies Issue #5651: ten identical
+// heartbeats cause one store write, a changed set one more, and a set that
+// becomes empty is written once and clears the record.
+func TestRecordHealthReasons_WritesOnlyOnChange(t *testing.T) {
+	ctx := context.Background()
+	sm := pkgtesting.SetupTestStorage(t)
+	st := &reasonCountingStewardStore{StewardStore: sm.GetStewardStore()}
+	require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{
+		ID: "dev-hr", TenantID: "tenant-a", Status: business.StewardStatusActive,
+	}))
+
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.SetStewardStore(st)
+
+	set1 := []controlplaneTypes.HealthReason{{Component: "disk", Code: "disk.low", Message: "low"}}
+	for i := 0; i < 10; i++ {
+		svc.RecordHealthReasons("dev-hr", set1)
+	}
+	assert.Equal(t, 1, st.count(), "ten identical heartbeats must cause one write")
+	rec, err := st.GetSteward(ctx, "dev-hr")
+	require.NoError(t, err)
+	assert.Equal(t, []business.HealthReasonRecord{{Component: "disk", Code: "disk.low", Message: "low"}}, rec.HealthReasons)
+
+	set2 := []controlplaneTypes.HealthReason{{Component: "net", Code: "net.down"}}
+	svc.RecordHealthReasons("dev-hr", set2)
+	svc.RecordHealthReasons("dev-hr", set2)
+	assert.Equal(t, 2, st.count(), "a changed set causes exactly one more write")
+
+	svc.RecordHealthReasons("dev-hr", nil)
+	svc.RecordHealthReasons("dev-hr", nil)
+	assert.Equal(t, 3, st.count(), "a set that becomes empty is written once")
+	rec, err = st.GetSteward(ctx, "dev-hr")
+	require.NoError(t, err)
+	assert.Empty(t, rec.HealthReasons)
+}
+
+// TestRecordHealthReasons_HealthySteward_NoWrite: a steward that never reports a
+// reason causes no write at all.
+func TestRecordHealthReasons_HealthySteward_NoWrite(t *testing.T) {
+	ctx := context.Background()
+	sm := pkgtesting.SetupTestStorage(t)
+	st := &reasonCountingStewardStore{StewardStore: sm.GetStewardStore()}
+	require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{ID: "dev-ok", TenantID: "t", Status: business.StewardStatusActive}))
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.SetStewardStore(st)
+	for i := 0; i < 5; i++ {
+		svc.RecordHealthReasons("dev-ok", nil)
+	}
+	assert.Equal(t, 0, st.count())
+}
+
+// TestRecordHealthReasons_TruncatesBeforeStore: over-long steward fields are cut
+// before they reach the store, and unknown stewards are ignored without error.
+func TestRecordHealthReasons_TruncatesBeforeStore(t *testing.T) {
+	ctx := context.Background()
+	sm := pkgtesting.SetupTestStorage(t)
+	st := sm.GetStewardStore()
+	require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{ID: "dev-long", TenantID: "t", Status: business.StewardStatusActive}))
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.SetStewardStore(st)
+
+	long := strings.Repeat("y", 2000)
+	svc.RecordHealthReasons("dev-long", []controlplaneTypes.HealthReason{{Component: long, Code: long, Message: long}})
+	svc.RecordHealthReasons("dev-unknown", []controlplaneTypes.HealthReason{{Code: "x"}})
+
+	rec, err := st.GetSteward(ctx, "dev-long")
+	require.NoError(t, err)
+	require.Len(t, rec.HealthReasons, 1)
+	assert.Len(t, rec.HealthReasons[0].Component, controlplaneTypes.MaxHealthReasonComponent)
+	assert.Len(t, rec.HealthReasons[0].Code, controlplaneTypes.MaxHealthReasonCode)
+	assert.Len(t, rec.HealthReasons[0].Message, controlplaneTypes.MaxHealthReasonMessageLen)
+	_, err = st.GetSteward(ctx, "dev-unknown")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
+// TestRecordHealthReasons_MirrorsOntoRegistry: the node-local StewardInfo shows
+// the current set.
+func TestRecordHealthReasons_MirrorsOntoRegistry(t *testing.T) {
+	ctx := context.Background()
+	sm := pkgtesting.SetupTestStorage(t)
+	st := sm.GetStewardStore()
+	require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{ID: "dev-mir", TenantID: "t", Status: business.StewardStatusActive}))
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.SetStewardStore(st)
+	require.NoError(t, svc.LoadFromStorage(ctx))
+
+	svc.RecordHealthReasons("dev-mir", []controlplaneTypes.HealthReason{{Component: "c", Code: "k"}})
+	info, ok := svc.GetStewardInfo("dev-mir")
+	require.True(t, ok)
+	assert.Equal(t, []business.HealthReasonRecord{{Component: "c", Code: "k"}}, info.HealthReasons)
+	svc.RecordHealthReasons("dev-mir", nil)
+	info, _ = svc.GetStewardInfo("dev-mir")
+	assert.Empty(t, info.HealthReasons)
 }

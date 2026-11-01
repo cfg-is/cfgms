@@ -61,6 +61,17 @@ type StewardInfo struct {
 	// record that stored no algorithm is reported as "ed25519" (ADR-011
 	// Amendment 3), so consumers never see an empty value.
 	KeyAlgorithm string `json:"key_algorithm,omitempty"`
+	// HealthReasons is the current set of reasons the steward reported for a
+	// non-healthy status, read from the durable record so every controller node
+	// returns the same answer. Omitted when the steward reports none.
+	HealthReasons []HealthReasonInfo `json:"health_reasons,omitempty"`
+}
+
+// HealthReasonInfo is one machine-readable health reason in an API response.
+type HealthReasonInfo struct {
+	Component string `json:"component"`
+	Code      string `json:"code"`
+	Message   string `json:"message,omitempty"`
 }
 
 // DNAInfo represents DNA information for API responses
