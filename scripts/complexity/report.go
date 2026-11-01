@@ -220,6 +220,7 @@ func gitBaseCommit(root string) string {
 	}
 	// #nosec G204 -- fixed argv with no shell; dir is an absolute path (cannot start with '-') passed as the -C operand.
 	cmd := exec.Command("git", "-C", dir, "rev-parse", "origin/develop")
+	cmd.Env = gitCleanEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		return "unknown"

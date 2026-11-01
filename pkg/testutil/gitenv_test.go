@@ -42,13 +42,16 @@ func snapshotRepo(t *testing.T, gitDir string) map[string]string {
 func sentinelEnv(t *testing.T) (gitDir string) {
 	t.Helper()
 	sentinel := t.TempDir()
-	out, err := exec.Command("git", "init", "-q", sentinel).CombinedOutput() // #nosec G204 -- fixed args
+	// Isolated: inside a hook the inherited GIT_DIR would make a bare `git init`
+	// re-initialise the calling repository instead of creating the sentinel.
+	out, err := GitCommand(t, "", "init", "-q", sentinel).CombinedOutput()
 	require.NoError(t, err, string(out))
 	gitDir = filepath.Join(sentinel, ".git")
 	require.NoError(t, os.WriteFile(filepath.Join(gitDir, "index"), []byte("sentinel-index"), 0o600))
 	t.Setenv("GIT_DIR", gitDir)
 	t.Setenv("GIT_INDEX_FILE", filepath.Join(gitDir, "index"))
 	t.Setenv("GIT_WORK_TREE", sentinel)
+	t.Setenv("GIT_COMMON_DIR", gitDir)
 	return gitDir
 }
 
@@ -56,7 +59,7 @@ func TestGitEnv_DropsRepositoryVariablesAndIsolatesConfig(t *testing.T) {
 	sentinelEnv(t)
 	home := t.TempDir()
 	env := strings.Join(GitEnv(home), "\n")
-	for _, n := range []string{"GIT_DIR=", "GIT_INDEX_FILE=", "GIT_WORK_TREE="} {
+	for _, n := range []string{"GIT_DIR=", "GIT_INDEX_FILE=", "GIT_WORK_TREE=", "GIT_COMMON_DIR="} {
 		assert.NotContains(t, "\n"+env, "\n"+n)
 	}
 	assert.Contains(t, env, "GIT_CONFIG_NOSYSTEM=1")
