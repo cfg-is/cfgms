@@ -1,0 +1,1273 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package rbac
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+
+	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac/continuous"
+	"github.com/cfgis/cfgms/features/rbac/memory"
+	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+)
+
+// Issue #764: audit write errors (caller cancellation / manager stopped) are
+// logged via slog.Warn at each call site instead of being discarded with
+// `_ = m.auditManager.RecordEvent(...)`. The bounded audit queue applies
+// caller-context backpressure rather than shedding authorization evidence.
+
+// Manager provides a complete RBAC implementation with advanced features
+type Manager struct {
+	store *memory.Store
+
+	// Pluggable storage interfaces (when using NewManagerWithStorage)
+	auditStore          business.AuditStore
+	rbacStore           business.RBACStore
+	usePluggableStorage bool
+	auditManager        *audit.Manager
+
+	// Optional: wire via SetCacheManager to get synchronous cache invalidation on
+	// RevokeRole and DeleteRolesByTenant. When nil, those operations skip invalidation.
+	cacheManager *continuous.CacheManager
+
+	advancedEngine          *AdvancedAuthEngine
+	hierarchyEngine         *HierarchyEngine
+	templateManager         *TemplateManager
+	escalationPreventionMgr *EscalationPreventionManager
+}
+
+// SetCacheManager wires a CacheManager into the RBAC Manager so that RevokeRole
+// and DeleteRolesByTenant synchronously invalidate the authorization cache.
+func (m *Manager) SetCacheManager(cm *continuous.CacheManager) {
+	m.cacheManager = cm
+}
+
+// NewManager is DEPRECATED and removed in Epic 6: Complete Storage Migration
+// Use NewManagerWithStorage() with pluggable storage providers instead
+// Minimum storage requirement: git provider with local repository
+//
+// BREAKING CHANGE: This function has been removed to eliminate package-level
+// storage mechanisms. All RBAC operations now require durable storage.
+//
+// Migration example:
+//   // OLD: manager := rbac.NewManager()
+//   // NEW:
+//   storageManager := interfaces.CreateAllStoresFromConfig("git", config)
+//   manager := rbac.NewManagerWithStorage(storageManager.GetAuditStore(), storageManager.GetRBACStore())
+//
+// For testing, use: pkg/testing.SetupTestRBACManager(t)
+//
+// This change ensures Epic 6 goal: Zero package-level storage mechanisms
+
+// NewManagerWithStorage creates a new RBAC manager with pluggable storage interfaces
+// This is the recommended constructor for production deployments with configurable storage backends
+func NewManagerWithStorage(auditStore business.AuditStore, rbacStore business.RBACStore) *Manager {
+	if auditStore == nil || rbacStore == nil {
+		panic("NewManagerWithStorage requires non-nil storage interfaces")
+	}
+
+	// Epic 6: Create ephemeral memory store (not package-level persistent)
+	// This store exists only for the lifetime of this manager instance
+	// All persistent data flows through global storage interfaces (auditStore, rbacStore)
+	ephemeralStore := memory.NewStore()
+	hierarchyEngine := NewHierarchyEngine(ephemeralStore, ephemeralStore)
+
+	// Create audit manager for RBAC operations
+	auditManager, auditErr := audit.NewManager(auditStore, "rbac")
+	if auditErr != nil {
+		panic(fmt.Sprintf("NewManagerWithStorage: failed to create audit manager: %v", auditErr))
+	}
+
+	// Create manager instance with pluggable storage
+	manager := &Manager{
+		store:               ephemeralStore, // Epic 6: Ephemeral store - not persistent
+		auditStore:          auditStore,
+		rbacStore:           rbacStore, // Write-through persistent RBAC storage
+		usePluggableStorage: true,
+		auditManager:        auditManager,
+		hierarchyEngine:     hierarchyEngine,
+	}
+
+	// Initialize advanced components
+	advancedEngine := NewAdvancedAuthEngine(ephemeralStore, ephemeralStore, ephemeralStore, ephemeralStore)
+	templateManager := NewTemplateManager(manager)                              // Pass manager for template operations
+	escalationPreventionMgr := NewEscalationPreventionManager(manager, manager) // manager satisfies both RBACManager and RBACStoreAccessor
+
+	// Update manager with advanced components
+	manager.advancedEngine = advancedEngine
+	manager.templateManager = templateManager
+	manager.escalationPreventionMgr = escalationPreventionMgr
+
+	// Wire the hierarchy engine into the advanced engine's base engine so the production
+	// call path Manager.GetEffectivePermissions → advancedEngine → baseEngine uses hierarchy.
+	advancedEngine.SetHierarchyEngine(hierarchyEngine)
+
+	// Wire the durable audit manager into the advanced engine
+	advancedEngine.SetAuditManager(manager.auditManager)
+
+	return manager
+}
+
+// Close flushes pending audit entries and stops the audit drain goroutine.
+// It is idempotent via the underlying audit.Manager's stopOnce.
+//
+// Callers that construct a Manager and back it with per-test temporary storage
+// (e.g., via `t.TempDir()`) MUST register a t.Cleanup that calls Close before
+// the temp directory is removed. Without this, the audit drain goroutine may
+// still be writing files when `TempDir` RemoveAll runs, producing flaky
+// "directory not empty" cleanup errors on slower filesystems (macOS, Windows).
+//
+// Returns nil if no audit manager was configured.
+func (m *Manager) Close(ctx context.Context) error {
+	if m.auditManager == nil {
+		return nil
+	}
+	return m.auditManager.Stop(ctx)
+}
+
+// Initialize sets up the RBAC system with default roles and permissions
+func (m *Manager) Initialize(ctx context.Context) error {
+	if err := m.store.Initialize(ctx); err != nil {
+		return err
+	}
+
+	// Initialize persistent storage
+	if m.rbacStore != nil {
+		if err := m.rbacStore.Initialize(ctx); err != nil {
+			return fmt.Errorf("failed to initialize RBAC store: %w", err)
+		}
+
+		// Load existing data from persistent storage into ephemeral store
+		if err := m.loadFromPersistentStorage(ctx); err != nil {
+			return fmt.Errorf("failed to load data from persistent storage: %w", err)
+		}
+	}
+
+	// Load default permissions (both in ephemeral and persistent storage)
+	if err := m.loadDefaultPermissions(ctx); err != nil {
+		return fmt.Errorf("failed to load default permissions: %w", err)
+	}
+
+	// Load default system roles (both in ephemeral and persistent storage)
+	if err := m.loadDefaultRoles(ctx); err != nil {
+		return fmt.Errorf("failed to load default roles: %w", err)
+	}
+
+	// Initialize template manager with system templates
+	if err := m.templateManager.Initialize(ctx); err != nil {
+		return fmt.Errorf("failed to initialize template manager: %w", err)
+	}
+
+	return nil
+}
+
+// loadFromPersistentStorage loads existing RBAC data from persistent storage into ephemeral store
+func (m *Manager) loadFromPersistentStorage(ctx context.Context) error {
+	if m.rbacStore == nil {
+		return nil
+	}
+
+	// Load all permissions
+	permissions, err := m.rbacStore.ListPermissions(ctx, "")
+	if err != nil {
+		return fmt.Errorf("failed to load permissions: %w", err)
+	}
+	if len(permissions) > 0 {
+		m.store.LoadPermissions(permissions)
+	}
+
+	// Load all roles
+	roles, err := m.rbacStore.ListRoles(ctx, "")
+	if err != nil {
+		return fmt.Errorf("failed to load roles: %w", err)
+	}
+	if len(roles) > 0 {
+		m.store.LoadRoles(roles)
+	}
+
+	// Load all subjects
+	subjects, err := m.rbacStore.ListSubjects(ctx, "", common.SubjectType_SUBJECT_TYPE_UNSPECIFIED)
+	if err != nil {
+		return fmt.Errorf("failed to load subjects: %w", err)
+	}
+	for _, subject := range subjects {
+		if err := m.store.CreateSubject(ctx, subject); err != nil {
+			slog.Warn("rbac: failed to load subject from persistent storage",
+				"subject_id", subject.Id,
+				"error", err,
+			)
+		}
+	}
+
+	// Load all role assignments
+	assignments, err := m.rbacStore.ListRoleAssignments(ctx, "", "", "")
+	if err != nil {
+		return fmt.Errorf("failed to load role assignments: %w", err)
+	}
+	for _, assignment := range assignments {
+		if err := m.store.AssignRole(ctx, assignment); err != nil {
+			slog.Warn("rbac: failed to load role assignment from persistent storage",
+				"assignment_id", assignment.Id,
+				"subject_id", assignment.SubjectId,
+				"role_id", assignment.RoleId,
+				"error", err,
+			)
+		}
+	}
+
+	return nil
+}
+
+// loadDefaultPermissions ensures default permissions exist in both stores
+func (m *Manager) loadDefaultPermissions(ctx context.Context) error {
+	// Load into ephemeral store
+	m.store.LoadPermissions(DefaultPermissions)
+
+	// Persist to storage provider if available
+	if m.rbacStore != nil {
+		if err := m.rbacStore.StoreBulkPermissions(ctx, DefaultPermissions); err != nil {
+			return fmt.Errorf("failed to persist default permissions: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// loadDefaultRoles ensures default roles exist in both stores
+func (m *Manager) loadDefaultRoles(ctx context.Context) error {
+	systemRoles := GetSystemRoles()
+
+	// Load into ephemeral store
+	m.store.LoadRoles(systemRoles)
+
+	// Persist to storage provider if available
+	if m.rbacStore != nil {
+		if err := m.rbacStore.StoreBulkRoles(ctx, systemRoles); err != nil {
+			return fmt.Errorf("failed to persist default roles: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// CreateTenantDefaultRoles creates default roles for a new tenant.
+// Internal path: bypasses ValidateSensitiveOperation by calling store.LoadRoles directly.
+func (m *Manager) CreateTenantDefaultRoles(ctx context.Context, tenantID string) error {
+	tenantRoles := make([]*common.Role, 0)
+	for _, template := range GetTenantRoleTemplates() {
+		tenantRole := CreateTenantRole(template, tenantID)
+		tenantRoles = append(tenantRoles, tenantRole)
+	}
+
+	m.store.LoadRoles(tenantRoles)
+
+	if m.rbacStore != nil {
+		if err := m.rbacStore.StoreBulkRoles(ctx, tenantRoles); err != nil {
+			return fmt.Errorf("failed to persist tenant default roles for %s: %w", tenantID, err)
+		}
+	}
+
+	return nil
+}
+
+// Permission Store Methods
+func (m *Manager) CreatePermission(ctx context.Context, permission *common.Permission) error {
+	// M-AUTH-2: Validate justification for sensitive operation (security audit finding)
+	justification := GetSensitiveOperationJustification(ctx)
+	opCtx := &SensitiveOperationContext{
+		OperationType: SensitiveOpCreatePermission,
+		// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+		SubjectID:     "system",
+		TenantID:      "system",
+		ResourceID:    permission.Id,
+		Justification: justification,
+	}
+	if validateErr := ValidateSensitiveOperation(opCtx); validateErr != nil {
+		m.AuditSensitiveOperation(ctx, opCtx, business.AuditResultError, validateErr)
+		return validateErr
+	}
+
+	// Write-through: persist to both ephemeral and persistent storage
+	if err := m.store.CreatePermission(ctx, permission); err != nil {
+		return err
+	}
+
+	// Persist to storage provider
+	if m.rbacStore != nil {
+		if err := m.rbacStore.StorePermission(ctx, permission); err != nil {
+			// Try to rollback ephemeral store change
+			_ = m.store.DeletePermission(ctx, permission.Id)
+			return fmt.Errorf("failed to persist permission: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (m *Manager) GetPermission(ctx context.Context, id string) (*common.Permission, error) {
+	return m.store.GetPermission(ctx, id)
+}
+
+func (m *Manager) ListPermissions(ctx context.Context, resourceType string) ([]*common.Permission, error) {
+	return m.store.ListPermissions(ctx, resourceType)
+}
+
+func (m *Manager) UpdatePermission(ctx context.Context, permission *common.Permission) error {
+	// Write-through: persist to both ephemeral and persistent storage
+	if err := m.store.UpdatePermission(ctx, permission); err != nil {
+		return err
+	}
+
+	// Persist to storage provider
+	if m.rbacStore != nil {
+		if err := m.rbacStore.UpdatePermission(ctx, permission); err != nil {
+			return fmt.Errorf("failed to persist permission update: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (m *Manager) DeletePermission(ctx context.Context, id string) error {
+	// M-AUTH-2: Validate justification for sensitive operation (security audit finding)
+	justification := GetSensitiveOperationJustification(ctx)
+	opCtx := &SensitiveOperationContext{
+		OperationType: SensitiveOpDeletePermission,
+		// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+		SubjectID:     "system",
+		TenantID:      "system",
+		ResourceID:    id,
+		Justification: justification,
+	}
+	if validateErr := ValidateSensitiveOperation(opCtx); validateErr != nil {
+		m.AuditSensitiveOperation(ctx, opCtx, business.AuditResultError, validateErr)
+		return validateErr
+	}
+
+	// Write-through: remove from both ephemeral and persistent storage
+	if err := m.store.DeletePermission(ctx, id); err != nil {
+		return err
+	}
+
+	// Remove from storage provider
+	if m.rbacStore != nil {
+		if err := m.rbacStore.DeletePermission(ctx, id); err != nil {
+			return fmt.Errorf("failed to persist permission deletion: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// Role Store Methods
+func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
+	// M-AUTH-2: Validate justification for sensitive operation (security audit finding)
+	justification := GetSensitiveOperationJustification(ctx)
+	opCtx := &SensitiveOperationContext{
+		OperationType: SensitiveOpCreateRole,
+		// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+		SubjectID:     "system",
+		TenantID:      role.TenantId,
+		ResourceID:    role.Id,
+		Justification: justification,
+	}
+	if validateErr := ValidateSensitiveOperation(opCtx); validateErr != nil {
+		m.AuditSensitiveOperation(ctx, opCtx, business.AuditResultError, validateErr)
+		return validateErr
+	}
+
+	// M-TENANT-2: Validate tenant boundary for role inheritance (security audit finding)
+	// Prevent cross-tenant role inheritance which could allow privilege escalation across tenants
+	if role.ParentRoleId != "" {
+		parentRole, err := m.GetRole(ctx, role.ParentRoleId)
+		if err != nil {
+			// Record audit failure
+			if m.auditManager != nil {
+				event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
+					Resource("role", role.Id, role.Name).
+					Result(business.AuditResultError).
+					Error("RBAC_PARENT_ROLE_NOT_FOUND", fmt.Sprintf("parent role %s not found: %v", role.ParentRoleId, err)).
+					Detail("parent_role_id", role.ParentRoleId).
+					Severity(business.AuditSeverityHigh)
+				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+					slog.Warn("rbac: failed to record audit event", "error", auditErr)
+				}
+			}
+			return fmt.Errorf("parent role %s not found: %w", role.ParentRoleId, err)
+		}
+
+		// M-TENANT-2: Block cross-tenant role inheritance (security audit finding)
+		if parentRole.TenantId != role.TenantId {
+			errMsg := fmt.Sprintf("cross-tenant role inheritance not allowed: parent tenant=%s, child tenant=%s (security finding M-TENANT-2)",
+				parentRole.TenantId, role.TenantId)
+
+			// Record critical audit event for cross-tenant inheritance attempt
+			if m.auditManager != nil {
+				event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
+					Resource("role", role.Id, role.Name).
+					Result(business.AuditResultError).
+					Error("RBAC_CROSS_TENANT_INHERITANCE_BLOCKED", errMsg).
+					Detail("child_tenant", role.TenantId).
+					Detail("parent_tenant", parentRole.TenantId).
+					Detail("parent_role_id", role.ParentRoleId).
+					Detail("security_finding", "M-TENANT-2").
+					Severity(business.AuditSeverityCritical)
+				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+					slog.Warn("rbac: failed to record audit event", "error", auditErr)
+				}
+			}
+
+			return errors.New(errMsg)
+		}
+	}
+
+	// Write-through: persist to both ephemeral and persistent storage
+	err := m.store.CreateRole(ctx, role)
+	if err != nil {
+		// Record audit failure
+		if m.auditManager != nil {
+			event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
+				Resource("role", role.Id, role.Name).
+				Result(business.AuditResultError).
+				Error("RBAC_CREATE_ROLE_FAILED", err.Error()).
+				Severity(business.AuditSeverityHigh)
+			if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+				slog.Warn("rbac: failed to record audit event", "error", auditErr)
+			}
+		}
+		return err
+	}
+
+	// Persist to storage provider
+	if m.rbacStore != nil {
+		if persistErr := m.rbacStore.StoreRole(ctx, role); persistErr != nil {
+			// Try to rollback ephemeral store change
+			_ = m.store.DeleteRole(ctx, role.Id)
+
+			// Record audit failure
+			if m.auditManager != nil {
+				event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
+					Resource("role", role.Id, role.Name).
+					Result(business.AuditResultError).
+					Error("RBAC_CREATE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
+					Severity(business.AuditSeverityHigh)
+				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+					slog.Warn("rbac: failed to record audit event", "error", auditErr)
+				}
+			}
+			return fmt.Errorf("failed to persist role: %w", persistErr)
+		}
+	}
+
+	// Record successful audit event
+	if m.auditManager != nil {
+		event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "create_role").
+			Resource("role", role.Id, role.Name).
+			Result(business.AuditResultSuccess).
+			Detail("role_permissions", len(role.PermissionIds)).
+			Detail("role_description", role.Description).
+			Severity(business.AuditSeverityHigh)
+		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+			slog.Warn("rbac: failed to record audit event", "error", auditErr)
+		}
+	}
+
+	return nil
+}
+
+func (m *Manager) GetRole(ctx context.Context, id string) (*common.Role, error) {
+	return m.store.GetRole(ctx, id)
+}
+
+func (m *Manager) ListRoles(ctx context.Context, tenantID string) ([]*common.Role, error) {
+	return m.store.ListRoles(ctx, tenantID)
+}
+
+func (m *Manager) UpdateRole(ctx context.Context, role *common.Role) error {
+	// M-AUTH-2: Validate justification for sensitive operation (security audit finding)
+	justification := GetSensitiveOperationJustification(ctx)
+	opCtx := &SensitiveOperationContext{
+		OperationType: SensitiveOpModifyRole,
+		// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+		SubjectID:     "system",
+		TenantID:      role.TenantId,
+		ResourceID:    role.Id,
+		Justification: justification,
+	}
+	if validateErr := ValidateSensitiveOperation(opCtx); validateErr != nil {
+		m.AuditSensitiveOperation(ctx, opCtx, business.AuditResultError, validateErr)
+		return validateErr
+	}
+
+	// Get the old role for change tracking
+	var oldRole *common.Role
+	if m.auditManager != nil {
+		oldRole, _ = m.store.GetRole(ctx, role.Id) // Ignore error for audit purposes
+	}
+
+	// Write-through: persist to both ephemeral and persistent storage
+	err := m.store.UpdateRole(ctx, role)
+	if err != nil {
+		// Record audit failure
+		if m.auditManager != nil {
+			event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "update_role").
+				Resource("role", role.Id, role.Name).
+				Result(business.AuditResultError).
+				Error("RBAC_UPDATE_ROLE_FAILED", err.Error()).
+				Severity(business.AuditSeverityHigh)
+			if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+				slog.Warn("rbac: failed to record audit event", "error", auditErr)
+			}
+		}
+		return err
+	}
+
+	// Persist to storage provider
+	if m.rbacStore != nil {
+		if persistErr := m.rbacStore.UpdateRole(ctx, role); persistErr != nil {
+			// Record audit failure
+			if m.auditManager != nil {
+				event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "update_role").
+					Resource("role", role.Id, role.Name).
+					Result(business.AuditResultError).
+					Error("RBAC_UPDATE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
+					Severity(business.AuditSeverityHigh)
+				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+					slog.Warn("rbac: failed to record audit event", "error", auditErr)
+				}
+			}
+			return fmt.Errorf("failed to persist role update: %w", persistErr)
+		}
+	}
+
+	// Record successful audit event with change tracking
+	if m.auditManager != nil {
+		event := audit.UserManagementEvent(role.TenantId, "system", role.Id, "update_role").
+			Resource("role", role.Id, role.Name).
+			Result(business.AuditResultSuccess).
+			Detail("role_permissions", len(role.PermissionIds)).
+			Severity(business.AuditSeverityHigh)
+
+		// Add change tracking if we have the old role
+		if oldRole != nil {
+			changes := make(map[string]interface{})
+			after := make(map[string]interface{})
+			before := make(map[string]interface{})
+
+			if oldRole.Name != role.Name {
+				before["name"] = oldRole.Name
+				after["name"] = role.Name
+				changes["name"] = true
+			}
+			if oldRole.Description != role.Description {
+				before["description"] = oldRole.Description
+				after["description"] = role.Description
+				changes["description"] = true
+			}
+			if len(oldRole.PermissionIds) != len(role.PermissionIds) {
+				before["permission_count"] = len(oldRole.PermissionIds)
+				after["permission_count"] = len(role.PermissionIds)
+				changes["permissions"] = true
+			}
+
+			if len(changes) > 0 {
+				fields := make([]string, 0, len(changes))
+				for field := range changes {
+					fields = append(fields, field)
+				}
+				event = event.Changes(before, after, fields)
+			}
+		}
+
+		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+			slog.Warn("rbac: failed to record audit event", "error", auditErr)
+		}
+	}
+
+	return nil
+}
+
+func (m *Manager) DeleteRole(ctx context.Context, id string) error {
+	// Get the role before deletion for audit purposes
+	var deletedRole *common.Role
+	if m.auditManager != nil {
+		deletedRole, _ = m.store.GetRole(ctx, id) // Ignore error for audit purposes
+	}
+
+	// M-AUTH-2: Validate justification for sensitive operation (security audit finding)
+	justification := GetSensitiveOperationJustification(ctx)
+	tenantID := "system"
+	if deletedRole != nil {
+		tenantID = deletedRole.TenantId
+	}
+
+	opCtx := &SensitiveOperationContext{
+		OperationType: SensitiveOpDeleteRole,
+		SubjectID:     "system", // Should be extracted from auth context
+		TenantID:      tenantID,
+		ResourceID:    id,
+		Justification: justification,
+	}
+
+	// M-AUTH-2: Require justification for role deletion
+	if validateErr := ValidateSensitiveOperation(opCtx); validateErr != nil {
+		m.AuditSensitiveOperation(ctx, opCtx, business.AuditResultError, validateErr)
+		return validateErr
+	}
+
+	// Write-through: remove from both ephemeral and persistent storage
+	err := m.store.DeleteRole(ctx, id)
+	if err != nil {
+		// Record audit failure
+		if m.auditManager != nil {
+			tenantID := "system" // Default for system-level operations
+			roleName := id
+			if deletedRole != nil {
+				tenantID = deletedRole.TenantId
+				roleName = deletedRole.Name
+			}
+
+			event := audit.UserManagementEvent(tenantID, "system", id, "delete_role").
+				Resource("role", id, roleName).
+				Result(business.AuditResultError).
+				Error("RBAC_DELETE_ROLE_FAILED", err.Error()).
+				Severity(business.AuditSeverityHigh)
+			if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+				slog.Warn("rbac: failed to record audit event", "error", auditErr)
+			}
+		}
+		return err
+	}
+
+	// Remove from storage provider
+	if m.rbacStore != nil {
+		if persistErr := m.rbacStore.DeleteRole(ctx, id); persistErr != nil {
+			// Record audit failure
+			if m.auditManager != nil {
+				tenantID := "system"
+				roleName := id
+				if deletedRole != nil {
+					tenantID = deletedRole.TenantId
+					roleName = deletedRole.Name
+				}
+
+				event := audit.UserManagementEvent(tenantID, "system", id, "delete_role").
+					Resource("role", id, roleName).
+					Result(business.AuditResultError).
+					Error("RBAC_DELETE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
+					Severity(business.AuditSeverityHigh)
+				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+					slog.Warn("rbac: failed to record audit event", "error", auditErr)
+				}
+			}
+			return fmt.Errorf("failed to persist role deletion: %w", persistErr)
+		}
+	}
+
+	// Record successful audit event
+	if m.auditManager != nil {
+		tenantID := "system" // Default for system-level operations
+		roleName := id
+
+		if deletedRole != nil {
+			tenantID = deletedRole.TenantId
+			roleName = deletedRole.Name
+		}
+
+		event := audit.UserManagementEvent(tenantID, "system", id, "delete_role").
+			Resource("role", id, roleName).
+			Result(business.AuditResultSuccess).
+			Severity(business.AuditSeverityHigh)
+
+		if deletedRole != nil {
+			event = event.Detail("deleted_permissions", len(deletedRole.PermissionIds)).
+				Detail("role_description", deletedRole.Description)
+		}
+
+		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+			slog.Warn("rbac: failed to record audit event", "error", auditErr)
+		}
+	}
+
+	return nil
+}
+
+func (m *Manager) GetRolePermissions(ctx context.Context, roleID string) ([]*common.Permission, error) {
+	return m.store.GetRolePermissions(ctx, roleID)
+}
+
+// Subject Store Methods
+func (m *Manager) CreateSubject(ctx context.Context, subject *common.Subject) error {
+	// Write-through: persist to both ephemeral and persistent storage
+	if err := m.store.CreateSubject(ctx, subject); err != nil {
+		return err
+	}
+
+	// Persist to storage provider
+	if m.rbacStore != nil {
+		if err := m.rbacStore.StoreSubject(ctx, subject); err != nil {
+			// Try to rollback ephemeral store change
+			_ = m.store.DeleteSubject(ctx, subject.Id)
+			return fmt.Errorf("failed to persist subject: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (m *Manager) GetSubject(ctx context.Context, id string) (*common.Subject, error) {
+	return m.store.GetSubject(ctx, id)
+}
+
+func (m *Manager) ListSubjects(ctx context.Context, tenantID string, subjectType common.SubjectType) ([]*common.Subject, error) {
+	return m.store.ListSubjects(ctx, tenantID, subjectType)
+}
+
+func (m *Manager) UpdateSubject(ctx context.Context, subject *common.Subject) error {
+	return m.store.UpdateSubject(ctx, subject)
+}
+
+func (m *Manager) DeleteSubject(ctx context.Context, id string) error {
+	return m.store.DeleteSubject(ctx, id)
+}
+
+// ListAllSubjects returns all subjects scoped to a tenant, across all subject types.
+func (m *Manager) ListAllSubjects(ctx context.Context, tenantID string) ([]*common.Subject, error) {
+	return m.store.ListSubjects(ctx, tenantID, common.SubjectType_SUBJECT_TYPE_UNSPECIFIED)
+}
+
+// DeleteSubjectsByTenant removes all subjects scoped to a tenant.
+// Failures on individual deletes are logged and the loop continues (best-effort).
+func (m *Manager) DeleteSubjectsByTenant(ctx context.Context, tenantID string) error {
+	if tenantID == "" {
+		return fmt.Errorf("tenantID must not be empty")
+	}
+	subjects, err := m.ListAllSubjects(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to list subjects for tenant %s: %w", tenantID, err)
+	}
+	for _, subject := range subjects {
+		if delErr := m.DeleteSubject(ctx, subject.Id); delErr != nil {
+			slog.Warn("rbac: failed to delete subject during tenant cascade cleanup",
+				"tenant_id", tenantID,
+				"subject_id", subject.Id,
+				"error", delErr,
+			)
+		}
+	}
+	return nil
+}
+
+// DeleteRolesByTenant removes all non-system roles scoped to a tenant.
+// System roles are global and are never touched by this operation.
+// Failures on individual deletes are logged and the loop continues (best-effort).
+// The context is enriched with a cascade justification required by the M-AUTH-2 sensitive-operation gate.
+func (m *Manager) DeleteRolesByTenant(ctx context.Context, tenantID string) error {
+	if tenantID == "" {
+		return fmt.Errorf("tenantID must not be empty")
+	}
+	roles, err := m.ListRoles(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to list roles for tenant %s: %w", tenantID, err)
+	}
+	ctxWithJustification := WithSensitiveOperationJustification(ctx, "tenant deletion cascade: removing all roles scoped to deleted tenant")
+	for _, role := range roles {
+		// ListRoles includes system roles; never delete those during tenant cleanup.
+		if role.IsSystemRole || role.TenantId != tenantID {
+			continue
+		}
+		// DeleteRole enforces ValidateSensitiveOperation; ctxWithJustification satisfies the gate.
+		if delErr := m.DeleteRole(ctxWithJustification, role.Id); delErr != nil {
+			slog.Warn("rbac: failed to delete role during tenant cascade cleanup",
+				"tenant_id", tenantID,
+				"role_id", role.Id,
+				"error", delErr,
+			)
+		}
+	}
+
+	// Synchronously invalidate all cached authorization decisions for this tenant.
+	// Invalidation errors are non-fatal: the roles have been deleted from storage,
+	// and L1 TTL (up to 5 min) + L2 TTL (up to 10 min) bound the stale window.
+	if m.cacheManager != nil {
+		if invErr := m.cacheManager.InvalidateTenant(tenantID); invErr != nil {
+			slog.Warn("rbac: failed to invalidate tenant cache after DeleteRolesByTenant",
+				"tenant_id", tenantID,
+				"error", invErr,
+			)
+		}
+	}
+
+	return nil
+}
+
+func (m *Manager) GetSubjectRoles(ctx context.Context, subjectID string, tenantID string) ([]*common.Role, error) {
+	return m.store.GetSubjectRoles(ctx, subjectID, tenantID)
+}
+
+// Role Assignment Store Methods
+func (m *Manager) AssignRole(ctx context.Context, assignment *common.RoleAssignment) error {
+	// M-AUTH-2: Validate justification for sensitive operation (security audit finding)
+	justification := GetSensitiveOperationJustification(ctx)
+	opCtx := &SensitiveOperationContext{
+		OperationType: SensitiveOpAssignRole,
+		// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+		SubjectID:     "system",
+		TenantID:      assignment.TenantId,
+		ResourceID:    assignment.SubjectId,
+		Justification: justification,
+	}
+	if validateErr := ValidateSensitiveOperation(opCtx); validateErr != nil {
+		m.AuditSensitiveOperation(ctx, opCtx, business.AuditResultError, validateErr)
+		return validateErr
+	}
+
+	// Use escalation prevention manager for enhanced security
+	return m.escalationPreventionMgr.ValidateAndAssignRole(ctx, assignment)
+}
+
+func (m *Manager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID string) error {
+	// M-AUTH-2: Validate justification for sensitive operation (security audit finding)
+	justification := GetSensitiveOperationJustification(ctx)
+	opCtx := &SensitiveOperationContext{
+		OperationType: SensitiveOpRevokeRole,
+		// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+		SubjectID:     "system",
+		TenantID:      tenantID,
+		ResourceID:    subjectID,
+		Justification: justification,
+	}
+	if validateErr := ValidateSensitiveOperation(opCtx); validateErr != nil {
+		m.AuditSensitiveOperation(ctx, opCtx, business.AuditResultError, validateErr)
+		return validateErr
+	}
+
+	// Write-through: remove from both ephemeral and persistent storage
+	err := m.store.RevokeRole(ctx, subjectID, roleID, tenantID)
+	if err != nil {
+		// Record audit failure
+		if m.auditManager != nil {
+			event := audit.UserManagementEvent(tenantID, subjectID, subjectID, "revoke_role").
+				Resource("role_assignment", roleID, "").
+				Result(business.AuditResultError).
+				Error("RBAC_REVOKE_ROLE_FAILED", err.Error()).
+				Detail("revoked_role", roleID).
+				Detail("subject_id", subjectID).
+				Severity(business.AuditSeverityHigh)
+			if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+				slog.Warn("rbac: failed to record audit event", "error", auditErr)
+			}
+		}
+		return err
+	}
+
+	// Remove from storage provider
+	if m.rbacStore != nil {
+		if persistErr := m.rbacStore.DeleteRoleAssignment(ctx, subjectID, roleID, tenantID); persistErr != nil {
+			// Record audit failure
+			if m.auditManager != nil {
+				event := audit.UserManagementEvent(tenantID, subjectID, subjectID, "revoke_role").
+					Resource("role_assignment", roleID, "").
+					Result(business.AuditResultError).
+					Error("RBAC_REVOKE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
+					Detail("revoked_role", roleID).
+					Detail("subject_id", subjectID).
+					Severity(business.AuditSeverityHigh)
+				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+					slog.Warn("rbac: failed to record audit event", "error", auditErr)
+				}
+			}
+			return fmt.Errorf("failed to persist role revocation: %w", persistErr)
+		}
+	}
+
+	// Synchronously invalidate the authorization cache for this subject so stale
+	// grants cannot outlive the revocation. Worst-case stale window when the
+	// CacheManager is not wired: L1 TTL (up to 5 min) + L2 TTL (up to 10 min).
+	// Invalidation errors are non-fatal but are surfaced in the audit event.
+	var cacheInvalidationFailed bool
+	if m.cacheManager != nil {
+		if invErr := m.cacheManager.InvalidateSubject(subjectID); invErr != nil {
+			cacheInvalidationFailed = true
+			slog.Warn("rbac: failed to invalidate subject cache after RevokeRole",
+				"subject_id", logging.SanitizeLogValue(subjectID),
+				"error", logging.SanitizeLogValue(invErr.Error()),
+			)
+		}
+	}
+
+	// Record successful audit event
+	if m.auditManager != nil {
+		event := audit.UserManagementEvent(tenantID, subjectID, subjectID, "revoke_role").
+			Resource("role_assignment", roleID, "").
+			Result(business.AuditResultSuccess).
+			Detail("revoked_role", roleID).
+			Detail("subject_id", subjectID).
+			Severity(business.AuditSeverityHigh)
+		if cacheInvalidationFailed {
+			event = event.Detail("cache_invalidation_failed", "true")
+		}
+		if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+			slog.Warn("rbac: failed to record audit event", "error", auditErr)
+		}
+	}
+
+	return nil
+}
+
+func (m *Manager) GetAssignment(ctx context.Context, id string) (*common.RoleAssignment, error) {
+	return m.store.GetAssignment(ctx, id)
+}
+
+func (m *Manager) ListAssignments(ctx context.Context, subjectID, roleID, tenantID string) ([]*common.RoleAssignment, error) {
+	return m.store.ListAssignments(ctx, subjectID, roleID, tenantID)
+}
+
+func (m *Manager) GetSubjectAssignments(ctx context.Context, subjectID, tenantID string) ([]*common.RoleAssignment, error) {
+	return m.store.GetSubjectAssignments(ctx, subjectID, tenantID)
+}
+
+// Authorization Engine Methods (delegated to advanced engine)
+func (m *Manager) ValidateAccess(ctx context.Context, authContext *common.AuthorizationContext, requiredPermission string) (*common.AccessResponse, error) {
+	return m.advancedEngine.ValidateAccess(ctx, authContext, requiredPermission)
+}
+
+// Helper methods for common operations
+
+// CreateStewardSubject creates a subject for a steward instance
+func (m *Manager) CreateStewardSubject(ctx context.Context, stewardID, tenantID string) error {
+	subject := &common.Subject{
+		Id:          stewardID,
+		Type:        common.SubjectType_SUBJECT_TYPE_STEWARD,
+		DisplayName: "Steward " + stewardID,
+		TenantId:    tenantID,
+		IsActive:    true,
+		Attributes: map[string]string{
+			"steward_id": stewardID,
+		},
+	}
+
+	if err := m.CreateSubject(ctx, subject); err != nil {
+		return err
+	}
+
+	// Assign steward service role; inject system justification for the M-AUTH-2 gate.
+	// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+	ctxWithJustification := WithSensitiveOperationJustification(ctx, "system: steward service account automated role assignment during registration")
+	assignment := &common.RoleAssignment{
+		SubjectId: stewardID,
+		RoleId:    "steward.service",
+		TenantId:  tenantID,
+	}
+
+	return m.AssignRole(ctxWithJustification, assignment)
+}
+
+// CreateServiceSubject creates a subject for a service account
+func (m *Manager) CreateServiceSubject(ctx context.Context, serviceID, serviceName, tenantID string, roleIDs []string) error {
+	subject := &common.Subject{
+		Id:          serviceID,
+		Type:        common.SubjectType_SUBJECT_TYPE_SERVICE,
+		DisplayName: serviceName,
+		TenantId:    tenantID,
+		RoleIds:     roleIDs,
+		IsActive:    true,
+		Attributes: map[string]string{
+			"service_name": serviceName,
+		},
+	}
+
+	if err := m.CreateSubject(ctx, subject); err != nil {
+		return err
+	}
+
+	// Assign requested roles; inject system justification for the M-AUTH-2 gate.
+	// TODO(#742): SubjectID should be plumbed from auth context once that infrastructure exists.
+	ctxWithJustification := WithSensitiveOperationJustification(ctx, "system: service account automated role assignment during subject creation")
+	for _, roleID := range roleIDs {
+		assignment := &common.RoleAssignment{
+			SubjectId: serviceID,
+			RoleId:    roleID,
+			TenantId:  tenantID,
+		}
+
+		if err := m.AssignRole(ctxWithJustification, assignment); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Hierarchy Management Operations
+
+func (m *Manager) ComputeRolePermissions(ctx context.Context, roleID string) (*memory.EffectivePermissions, error) {
+	return m.hierarchyEngine.ComputeEffectivePermissions(ctx, roleID)
+}
+
+func (m *Manager) CreateRoleWithParent(ctx context.Context, role *common.Role, parentRoleID string, inheritanceType common.RoleInheritanceType) error {
+	// Validate hierarchy operation first
+	if parentRoleID != "" {
+		if err := m.ValidateHierarchyOperation(ctx, role.Id, parentRoleID); err != nil {
+			return fmt.Errorf("invalid hierarchy operation: %w", err)
+		}
+	}
+
+	// Set parent relationship
+	role.ParentRoleId = parentRoleID
+	role.InheritanceType = inheritanceType
+
+	// Create the role
+	if err := m.CreateRole(ctx, role); err != nil {
+		return err
+	}
+
+	// Set the parent relationship in store
+	if parentRoleID != "" {
+		return m.store.SetRoleParent(ctx, role.Id, parentRoleID, inheritanceType)
+	}
+
+	return nil
+}
+
+func (m *Manager) GetRoleHierarchyTree(ctx context.Context, rootRoleID string, maxDepth int) (*memory.RoleHierarchy, error) {
+	return m.hierarchyEngine.buildRoleHierarchy(ctx, rootRoleID)
+}
+
+func (m *Manager) ValidateHierarchyOperation(ctx context.Context, childRoleID, parentRoleID string) error {
+	if childRoleID == parentRoleID {
+		return fmt.Errorf("role cannot be its own parent")
+	}
+
+	// Check if parent exists
+	if parentRoleID != "" {
+		_, err := m.store.GetRole(ctx, parentRoleID)
+		if err != nil {
+			return fmt.Errorf("failed to get role %s: %w", parentRoleID, err)
+		}
+
+		// Check if adding this relationship would create a cycle
+		// We need to check if parentRoleID is already a descendant of childRoleID
+		// Only do this check if the child role already exists
+		if childExists, _ := m.roleExists(ctx, childRoleID); childExists {
+			// Check if the proposed parent is already an ancestor of the child
+			// This would create a circular dependency
+			if err := m.checkForCircularDependency(ctx, childRoleID, parentRoleID); err != nil {
+				return err
+			}
+			return m.hierarchyEngine.ValidateHierarchy(ctx, childRoleID)
+		}
+	}
+
+	return nil
+}
+
+func (m *Manager) roleExists(ctx context.Context, roleID string) (bool, error) {
+	_, err := m.store.GetRole(ctx, roleID)
+	if err != nil {
+		// Check if it's a "not found" error vs other errors
+		if err.Error() == "role "+roleID+" not found" {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// checkForCircularDependency checks if setting parentRoleID as parent of childRoleID would create a cycle
+func (m *Manager) checkForCircularDependency(ctx context.Context, childRoleID, parentRoleID string) error {
+	// Traverse up the hierarchy from parentRoleID
+	// If we find childRoleID, then setting childRoleID -> parentRoleID would create a cycle
+	visited := make(map[string]bool)
+	return m.checkAncestorsForRole(ctx, parentRoleID, childRoleID, visited)
+}
+
+// checkAncestorsForRole recursively checks if targetRoleID appears in the ancestor chain of startRoleID
+func (m *Manager) checkAncestorsForRole(ctx context.Context, startRoleID, targetRoleID string, visited map[string]bool) error {
+	if visited[startRoleID] {
+		return nil // Already checked this branch
+	}
+	visited[startRoleID] = true
+
+	if startRoleID == targetRoleID {
+		return fmt.Errorf("circular dependency detected: role %s is already an ancestor of role %s", targetRoleID, startRoleID)
+	}
+
+	// Get the current role to check its parent
+	role, err := m.store.GetRole(ctx, startRoleID)
+	if err != nil {
+		return err
+	}
+
+	// If this role has a parent, recursively check the parent chain
+	if role.ParentRoleId != "" {
+		return m.checkAncestorsForRole(ctx, role.ParentRoleId, targetRoleID, visited)
+	}
+
+	return nil
+}
+
+func (m *Manager) ResolvePermissionConflicts(ctx context.Context, roleID string, conflictingPermissions map[string][]*common.Permission) (map[string]*common.Permission, error) {
+	hierarchy, err := m.hierarchyEngine.buildRoleHierarchy(ctx, roleID)
+	if err != nil {
+		return nil, err
+	}
+
+	resolution, err := m.hierarchyEngine.resolveConflicts(ctx, roleID, conflictingPermissions, hierarchy)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert ConflictResult map to Permission map
+	result := make(map[string]*common.Permission)
+	for permID, conflict := range resolution {
+		result[permID] = conflict.Permission
+	}
+
+	return result, nil
+}
+
+// Override GetRoleHierarchy to convert between types
+func (m *Manager) GetRoleHierarchy(ctx context.Context, roleID string) (*memory.RoleHierarchy, error) {
+	memoryHierarchy, err := m.store.GetRoleHierarchy(ctx, roleID)
+	if err != nil {
+		return nil, err
+	}
+
+	return memoryHierarchy, nil
+}
+
+// Delegate hierarchy store operations
+func (m *Manager) GetChildRoles(ctx context.Context, roleID string) ([]*common.Role, error) {
+	return m.store.GetChildRoles(ctx, roleID)
+}
+
+func (m *Manager) GetParentRole(ctx context.Context, roleID string) (*common.Role, error) {
+	return m.store.GetParentRole(ctx, roleID)
+}
+
+func (m *Manager) SetRoleParent(ctx context.Context, roleID, parentRoleID string, inheritanceType common.RoleInheritanceType) error {
+	// Use escalation prevention manager for enhanced security
+	return m.escalationPreventionMgr.ValidateAndSetRoleParent(ctx, roleID, parentRoleID, inheritanceType, "system")
+}
+
+func (m *Manager) RemoveRoleParent(ctx context.Context, roleID string) error {
+	return m.store.RemoveRoleParent(ctx, roleID)
+}
+
+func (m *Manager) ValidateRoleHierarchy(ctx context.Context, roleID string) error {
+	return m.hierarchyEngine.ValidateHierarchy(ctx, roleID)
+}
+
+// Advanced Permission Management Methods
+
+// CheckPermissionWithContext performs advanced permission checking with context
+func (m *Manager) CheckPermissionWithContext(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error) {
+	return m.advancedEngine.CheckPermission(ctx, request)
+}
+
+// CreateTemporaryPermission creates a temporary permission grant with conditions
+func (m *Manager) CreateTemporaryPermission(ctx context.Context, req *TemporaryPermissionRequest) (*common.ConditionalPermission, error) {
+	return m.advancedEngine.CreateTemporaryPermission(ctx, req)
+}
+
+// QueryAuditEntries queries the durable audit store for RBAC permission events.
+// Use business.AuditFilter to filter by tenant, user, action, event type, and time range.
+func (m *Manager) QueryAuditEntries(ctx context.Context, filter *business.AuditFilter) ([]*business.AuditEntry, error) {
+	return m.auditManager.QueryEntries(ctx, filter)
+}
+
+// FlushAudit blocks until all pending RBAC audit events have been written to durable storage.
+// Call this in tests before querying the audit store to guarantee in-flight async writes have landed.
+func (m *Manager) FlushAudit(ctx context.Context) error {
+	return m.auditManager.Flush(ctx)
+}
+
+// CreateTemplate creates a new permission template
+func (m *Manager) CreateTemplate(ctx context.Context, req *TemplateCreateRequest) (*common.PermissionTemplate, error) {
+	return m.templateManager.CreateTemplate(ctx, req)
+}
+
+// ApplyTemplate applies a template to create roles and assign permissions
+func (m *Manager) ApplyTemplate(ctx context.Context, templateID, subjectID, tenantID string, customizations map[string]string) error {
+	return m.templateManager.ApplyTemplate(ctx, templateID, subjectID, tenantID, customizations)
+}
+
+// ListTemplates lists available permission templates
+func (m *Manager) ListTemplates(ctx context.Context, tenantID, category string) ([]*common.PermissionTemplate, error) {
+	return m.templateManager.ListTemplates(ctx, tenantID, category)
+}
+
+// GetTemplatesByCategory returns templates grouped by category
+func (m *Manager) GetTemplatesByCategory(ctx context.Context, tenantID string) (map[string][]*common.PermissionTemplate, error) {
+	return m.templateManager.GetTemplatesByCategory(ctx, tenantID)
+}
+
+// Privilege Escalation Prevention Methods
+
+// GetEscalationAlerts returns recent privilege escalation alerts
+func (m *Manager) GetEscalationAlerts() []EscalationAlert {
+	return m.escalationPreventionMgr.GetEscalationAlerts()
+}
+
+// GetEscalationPreventionMetrics returns comprehensive metrics about escalation prevention
+func (m *Manager) GetEscalationPreventionMetrics() map[string]interface{} {
+	return m.escalationPreventionMgr.GetMetrics()
+}
+
+// GetOperationLog returns recent RBAC operations for audit purposes
+func (m *Manager) GetOperationLog() []OperationRecord {
+	return m.escalationPreventionMgr.GetOperationLog()
+}
+
+// GetStore returns the internal store (for testing purposes)
+func (m *Manager) GetStore() *memory.Store {
+	return m.store
+}
+
+func (m *Manager) GetRBACStore() business.RBACStore {
+	return m.rbacStore
+}
+
+// Override CheckPermission to use advanced engine by default.
+// When the engine returns a non-not-found DB error (propagated from GetRolePermissions),
+// records a RBAC_PERMISSION_CHECK_DB_ERROR audit event before returning the error so
+// partial-failure-as-cover attacks are detectable in the audit trail.
+func (m *Manager) CheckPermission(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error) {
+	resp, err := m.advancedEngine.CheckPermission(ctx, request)
+	if err != nil {
+		if m.auditManager != nil {
+			event := audit.AuthorizationEvent(
+				request.TenantId, request.SubjectId, "permission", request.PermissionId,
+				"check_permission", business.AuditResultError,
+			).Error("RBAC_PERMISSION_CHECK_DB_ERROR", err.Error()).
+				Detail("subject_id", request.SubjectId).
+				Detail("tenant_id", request.TenantId).
+				Detail("permission_id", request.PermissionId).
+				Severity(business.AuditSeverityCritical)
+			if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
+				slog.Warn("rbac: failed to record audit event", "error", auditErr)
+			}
+		}
+		return resp, err
+	}
+	return resp, nil
+}
+
+// Override GetSubjectPermissions to include delegated permissions
+func (m *Manager) GetSubjectPermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
+	return m.advancedEngine.GetSubjectPermissions(ctx, subjectID, tenantID)
+}
+
+// Override GetEffectivePermissions to include advanced features
+func (m *Manager) GetEffectivePermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
+	return m.advancedEngine.GetEffectivePermissions(ctx, subjectID, tenantID)
+}
+
+// Verify that Manager implements the RBACManager interface
+var _ RBACManager = (*Manager)(nil)

@@ -1,0 +1,72 @@
+metadata:
+  id: service-restart
+  name: Service Restart with Verification
+  description: Restarts a service and verifies it's running correctly
+  version:
+    major: 1
+    minor: 0
+    patch: 0
+  author: cfgms-team@cfg.is
+  tags:
+    - system
+    - service
+    - restart
+  category: system-maintenance
+  platform:
+    - linux
+  shell: bash
+  parameters:
+    - name: SERVICE_NAME
+      type: string
+      description: Name of the service to restart
+      required: true
+    - name: WAIT_TIME
+      type: number
+      description: Seconds to wait before verification
+      required: false
+      default: "5"
+  created_at: 2025-10-13T00:00:00Z
+  updated_at: 2025-10-13T00:00:00Z
+
+content: |
+  #!/bin/bash
+  set -euo pipefail
+
+  SERVICE_NAME="${SERVICE_NAME:?SERVICE_NAME is required}"
+  WAIT_TIME="${WAIT_TIME:-5}"
+
+  echo "Restarting service: $SERVICE_NAME"
+
+  # Check if service exists
+  if ! systemctl list-unit-files | grep -q "^${SERVICE_NAME}.service"; then
+      echo "Error: Service $SERVICE_NAME not found"
+      exit 1
+  fi
+
+  # Get current status
+  echo "Current status:"
+  systemctl status "$SERVICE_NAME" --no-pager || true
+
+  # Restart service
+  echo ""
+  echo "Restarting..."
+  systemctl restart "$SERVICE_NAME"
+
+  # Wait
+  echo "Waiting ${WAIT_TIME} seconds..."
+  sleep "$WAIT_TIME"
+
+  # Verify
+  echo ""
+  echo "Verification:"
+  if systemctl is-active --quiet "$SERVICE_NAME"; then
+      echo "[OK] Service is active"
+      systemctl status "$SERVICE_NAME" --no-pager | head -10
+      exit 0
+  else
+      echo "[FAIL] Service failed to start"
+      systemctl status "$SERVICE_NAME" --no-pager
+      exit 1
+  fi
+
+hash: placeholder

@@ -1,0 +1,201 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+// Package config provides conversion between Go structs and protobuf messages
+package config
+
+import (
+	"fmt"
+	"time"
+
+	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/structpb"
+)
+
+// ToProto converts Go StewardConfig to protobuf StewardConfig
+func ToProto(config *StewardConfig) (*controller.StewardConfig, error) {
+	if config == nil {
+		return nil, fmt.Errorf("config is nil")
+	}
+
+	// Convert steward settings
+	stewardSettings := &controller.StewardSettings{
+		Id: config.Steward.ID,
+		Logging: &controller.LoggingConfig{
+			Level: config.Steward.Logging.Level,
+		},
+		ErrorHandling: &controller.ErrorHandlingConfig{
+			ModuleLoadFailure:  string(config.Steward.ErrorHandling.ModuleLoadFailure),
+			ResourceFailure:    string(config.Steward.ErrorHandling.ResourceFailure),
+			ConfigurationError: string(config.Steward.ErrorHandling.ConfigurationError),
+		},
+	}
+
+	if config.Steward.ModulePaths != nil {
+		stewardSettings.ModulePaths = config.Steward.ModulePaths
+	}
+
+	// Secrets: serialise SecretsConfig as a map of string references
+	stewardSettings.Secrets = map[string]string{
+		"secrets_dir": config.Steward.Secrets.SecretsDir,
+		"provider":    config.Steward.Secrets.Provider,
+	}
+
+	// ConvergeInterval: Go duration string → proto Duration
+	if config.Steward.ConvergeInterval != "" {
+		d, err := time.ParseDuration(config.Steward.ConvergeInterval)
+		if err != nil {
+			return nil, fmt.Errorf("invalid converge_interval %q: %w", config.Steward.ConvergeInterval, err)
+		}
+		stewardSettings.ConvergeInterval = durationpb.New(d)
+	}
+
+	// ScriptSigning
+	ss := config.Steward.ScriptSigning
+	protoSS := &controller.ScriptSigningConfig{
+		Policy:        string(ss.Policy),
+		TrustMode:     string(ss.TrustMode),
+		AllowPublicCa: ss.AllowPublicCA,
+	}
+	for _, key := range ss.TrustedKeys {
+		protoSS.TrustedKeys = append(protoSS.TrustedKeys, &controller.TrustedKeyRef{
+			Name:         key.Name,
+			Thumbprint:   key.Thumbprint,
+			PublicKeyRef: key.PublicKeyRef,
+		})
+	}
+	stewardSettings.ScriptSigning = protoSS
+
+	// Upgrade: carry the controller-declared target binary version. Mirrors the
+	// controller-side stewardtypes.ToProto so a config round-trips desired_version.
+	// The proto has no allow_downgrade field, so AllowDowngrade is not serialised here.
+	stewardSettings.DesiredVersion = config.Steward.Upgrade.DesiredVersion
+
+	// Drift mode and per-module overrides ride the wire so a controller-delivered
+	// cfg can put a steward (or one module) in monitor mode.
+	stewardSettings.DriftMode = string(config.Steward.DriftMode)
+	if len(config.Steward.ModuleDriftModes) > 0 {
+		stewardSettings.ModuleDriftModes = make(map[string]string, len(config.Steward.ModuleDriftModes))
+		for module, mode := range config.Steward.ModuleDriftModes {
+			stewardSettings.ModuleDriftModes[module] = string(mode)
+		}
+	}
+
+	// Convert resources
+	resources := make([]*controller.ResourceConfig, len(config.Resources))
+	for i, res := range config.Resources {
+		// Convert config map to protobuf Struct
+		configStruct, err := structpb.NewStruct(res.Config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert resource config to struct: %w", err)
+		}
+
+		resources[i] = &controller.ResourceConfig{
+			Name:   res.Name,
+			Module: res.Module,
+			Config: configStruct,
+		}
+	}
+
+	return &controller.StewardConfig{
+		Steward:   stewardSettings,
+		Resources: resources,
+		Modules:   config.Modules,
+	}, nil
+}
+
+// FromProto converts protobuf StewardConfig to Go StewardConfig
+func FromProto(proto *controller.StewardConfig) (*StewardConfig, error) {
+	if proto == nil {
+		return nil, fmt.Errorf("proto config is nil")
+	}
+
+	config := &StewardConfig{
+		Steward: StewardSettings{
+			ID:          proto.Steward.Id,
+			ModulePaths: proto.Steward.ModulePaths,
+			// Upgrade.DesiredVersion carries the controller-declared target binary
+			// version so version auto-convergence (Issue #2260) and steward self-fetch
+			// (Issue #2833) act on it. Without this, every delivered config silently
+			// dropped desired_version here on the steward and convergence never fired.
+			// Mirrors the controller-side stewardtypes.FromProto. The proto has no
+			// allow_downgrade field, so AllowDowngrade is sourced from the local
+			// steward.cfg, not from the delivered config.
+			Upgrade: UpgradeConfig{
+				DesiredVersion: proto.Steward.DesiredVersion,
+			},
+		},
+		Modules: proto.Modules,
+	}
+
+	config.Steward.DriftMode = DriftMode(proto.Steward.DriftMode)
+	if len(proto.Steward.ModuleDriftModes) > 0 {
+		config.Steward.ModuleDriftModes = make(map[string]DriftMode, len(proto.Steward.ModuleDriftModes))
+		for module, mode := range proto.Steward.ModuleDriftModes {
+			config.Steward.ModuleDriftModes[module] = DriftMode(mode)
+		}
+	}
+
+	// Convert logging settings
+	if proto.Steward.Logging != nil {
+		config.Steward.Logging = LoggingConfig{
+			Level: proto.Steward.Logging.Level,
+		}
+	}
+
+	// Convert error handling settings
+	if proto.Steward.ErrorHandling != nil {
+		config.Steward.ErrorHandling = ErrorHandlingConfig{
+			ModuleLoadFailure:  ErrorAction(proto.Steward.ErrorHandling.ModuleLoadFailure),
+			ResourceFailure:    ErrorAction(proto.Steward.ErrorHandling.ResourceFailure),
+			ConfigurationError: ErrorAction(proto.Steward.ErrorHandling.ConfigurationError),
+		}
+	}
+
+	// Secrets: reconstruct SecretsConfig from the proto map
+	if proto.Steward.Secrets != nil {
+		config.Steward.Secrets = SecretsConfig{
+			SecretsDir: proto.Steward.Secrets["secrets_dir"],
+			Provider:   proto.Steward.Secrets["provider"],
+		}
+	}
+
+	// ConvergeInterval: proto Duration → Go duration string
+	if proto.Steward.ConvergeInterval != nil {
+		d := proto.Steward.ConvergeInterval.AsDuration()
+		config.Steward.ConvergeInterval = d.String()
+	}
+
+	// ScriptSigning
+	if proto.Steward.ScriptSigning != nil {
+		ps := proto.Steward.ScriptSigning
+		sc := ScriptSigningConfig{
+			Policy:        ScriptSigningPolicy(ps.Policy),
+			TrustMode:     ScriptTrustMode(ps.TrustMode),
+			AllowPublicCA: ps.AllowPublicCa,
+		}
+		for _, key := range ps.TrustedKeys {
+			sc.TrustedKeys = append(sc.TrustedKeys, TrustedKeyRef{
+				Name:         key.Name,
+				Thumbprint:   key.Thumbprint,
+				PublicKeyRef: key.PublicKeyRef,
+			})
+		}
+		config.Steward.ScriptSigning = sc
+	}
+
+	// Convert resources
+	config.Resources = make([]ResourceConfig, len(proto.Resources))
+	for i, res := range proto.Resources {
+		// Convert protobuf Struct to map
+		configMap := res.Config.AsMap()
+
+		config.Resources[i] = ResourceConfig{
+			Name:   res.Name,
+			Module: res.Module,
+			Config: configMap,
+		}
+	}
+
+	return config, nil
+}

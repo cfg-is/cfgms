@@ -1,0 +1,166 @@
+name: Basic Firewall Operations
+description: Tests basic firewall rule management
+tests:
+  - name: Create basic allow rule
+    config:
+      name: "allow-http"
+      action: "allow"
+      protocol: "tcp"
+      port: 80
+      source: "0.0.0.0/0"
+      destination: "10.0.0.0/24"
+    expected:
+      name: "allow-http"
+      action: "allow"
+      protocol: "tcp"
+      port: 80
+      source: "0.0.0.0/0"
+      destination: "10.0.0.0/24"
+      enabled: true
+
+  - name: Create deny rule
+    config:
+      name: "deny-ssh"
+      action: "deny"
+      protocol: "tcp"
+      port: 22
+      source: "192.168.1.0/24"
+      destination: "10.0.0.0/24"
+    expected:
+      name: "deny-ssh"
+      action: "deny"
+      protocol: "tcp"
+      port: 22
+      source: "192.168.1.0/24"
+      destination: "10.0.0.0/24"
+      enabled: true
+
+  - name: Create rule with service name
+    config:
+      name: "allow-https"
+      action: "allow"
+      service: "https"
+      source: "0.0.0.0/0"
+      destination: "10.0.0.0/24"
+    expected:
+      name: "allow-https"
+      action: "allow"
+      service: "https"
+      source: "0.0.0.0/0"
+      destination: "10.0.0.0/24"
+      enabled: true
+
+  - name: Create rule with multiple ports
+    config:
+      name: "allow-dns"
+      action: "allow"
+      protocol: "udp"
+      ports: [53, 5353]
+      source: "10.0.0.0/24"
+      destination: "8.8.8.8"
+    expected:
+      name: "allow-dns"
+      action: "allow"
+      protocol: "udp"
+      ports: [53, 5353]
+      source: "10.0.0.0/24"
+      destination: "8.8.8.8"
+      enabled: true
+
+  - name: Create rule with description
+    config:
+      name: "allow-ntp"
+      action: "allow"
+      protocol: "udp"
+      port: 123
+      source: "0.0.0.0/0"
+      destination: "10.0.0.0/24"
+      description: "Allow NTP traffic"
+    expected:
+      name: "allow-ntp"
+      action: "allow"
+      protocol: "udp"
+      port: 123
+      source: "0.0.0.0/0"
+      destination: "10.0.0.0/24"
+      description: "Allow NTP traffic"
+      enabled: true
+
+  - name: Create disabled rule
+    config:
+      name: "disabled-rule"
+      action: "allow"
+      protocol: "tcp"
+      port: 8080
+      source: "0.0.0.0/0"
+      destination: "10.0.0.0/24"
+      enabled: false
+    expected:
+      name: "disabled-rule"
+      action: "allow"
+      protocol: "tcp"
+      port: 8080
+      source: "0.0.0.0/0"
+      destination: "10.0.0.0/24"
+      enabled: false
+
+  - name: Update existing rule
+    config:
+      name: "updated-rule"
+      action: "allow"
+      protocol: "tcp"
+      port: 443
+      source: "0.0.0.0/0"
+      destination: "10.0.0.0/24"
+    setup:
+      - create_rule:
+          name: "updated-rule"
+          action: "allow"
+          protocol: "tcp"
+          port: 80
+          source: "0.0.0.0/0"
+          destination: "10.0.0.0/24"
+    expected:
+      name: "updated-rule"
+      action: "allow"
+      protocol: "tcp"
+      port: 443
+      source: "0.0.0.0/0"
+      destination: "10.0.0.0/24"
+      enabled: true
+
+  - name: Invalid protocol
+    config:
+      name: "invalid-protocol"
+      action: "allow"
+      protocol: "invalid"
+      port: 80
+      source: "0.0.0.0/0"
+      destination: "10.0.0.0/24"
+    expected_error: "invalid protocol"
+
+  - name: Invalid port range
+    config:
+      name: "invalid-port"
+      action: "allow"
+      protocol: "tcp"
+      port: 70000
+      source: "0.0.0.0/0"
+      destination: "10.0.0.0/24"
+    expected_error: "invalid port"
+
+  - name: Invalid IP address
+    config:
+      name: "invalid-ip"
+      action: "allow"
+      protocol: "tcp"
+      port: 80
+      source: "invalid-ip"
+      destination: "10.0.0.0/24"
+    expected_error: "invalid IP address"
+
+  - name: Missing required fields
+    config:
+      name: "missing-fields"
+      action: "allow"
+    expected_error: "missing required fields" 

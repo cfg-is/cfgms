@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+// Package server test-only provider registrations.
+// The concrete flatfile import is confined to this allowlisted */providers_test.go
+// path (see scripts/check-providers.sh).
+package server
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	memoryprovider "github.com/cfgis/cfgms/pkg/storage/providers/memory"
+)
+
+// newFlatFileStewardStore returns a real flat-file StewardStore rooted at a
+// t.TempDir() (no external infrastructure required). The concrete flatfile
+// import is confined to this allowlisted */providers_test.go path (see
+// scripts/check-providers.sh).
+func newFlatFileStewardStore(t *testing.T) business.StewardStore {
+	t.Helper()
+	st, err := flatfile.NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err, "creating flat-file steward store")
+	return st
+}
+
+// newFlatFileIPTrustStore returns a real flat-file IPTrustStore rooted at root.
+// The caller supplies the root so tests can inspect — or deliberately corrupt —
+// the on-disk state the store reads back. The concrete flatfile import is
+// confined to this allowlisted */providers_test.go path (see
+// scripts/check-providers.sh).
+func newFlatFileIPTrustStore(t *testing.T, root string) business.IPTrustStore {
+	t.Helper()
+	st, err := flatfile.NewFlatFileIPTrustStore(root)
+	require.NoError(t, err, "creating flat-file IP trust store")
+	return st
+}
+
+// requireInMemoryUpgradeStore asserts that store is the in-memory fallback
+// UpgradeStore. The concrete memoryprovider import is confined to this
+// allowlisted */providers_test.go path (see scripts/check-providers.sh) so that
+// business-logic tests depend on pkg/storage/interfaces only.
+func requireInMemoryUpgradeStore(t *testing.T, store business.UpgradeStore, msgAndArgs ...interface{}) {
+	t.Helper()
+	require.IsType(t, (*memoryprovider.UpgradeStore)(nil), store, msgAndArgs...)
+}
+
+// newFlatFileLeaseStore returns a real flat-file LeaseStore rooted at a
+// t.TempDir(), closed on test cleanup — the durable substrate a real
+// lease.Manager needs to exercise cluster-singleton gating without external
+// infrastructure. The concrete flatfile import is confined to this allowlisted
+// */providers_test.go path (see scripts/check-providers.sh).
+func newFlatFileLeaseStore(t *testing.T) business.LeaseStore {
+	t.Helper()
+	st, err := flatfile.NewFlatFileLeaseStore(t.TempDir())
+	require.NoError(t, err, "creating flat-file lease store")
+	t.Cleanup(func() { require.NoError(t, st.Close()) })
+	return st
+}
+
+// newFlatFileRoutingStore returns a real flat-file RoutingStore rooted at a
+// t.TempDir(). The concrete flatfile import is confined to this allowlisted
+// */providers_test.go path (see scripts/check-providers.sh).
+func newFlatFileRoutingStore(t *testing.T) business.RoutingStore {
+	t.Helper()
+	st, err := flatfile.NewFlatFileRoutingStore(t.TempDir())
+	require.NoError(t, err, "creating flat-file routing store")
+	return st
+}

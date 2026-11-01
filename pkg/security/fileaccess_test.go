@@ -1,0 +1,695 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package security
+
+import (
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestValidateAndCleanPath(t *testing.T) {
+	// Create temporary directory for testing
+	tempDir := t.TempDir()
+
+	tests := []struct {
+		name        string
+		basePath    string
+		userPath    string
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name:        "valid relative path",
+			basePath:    tempDir,
+			userPath:    "subdir/file.txt",
+			expectError: false,
+		},
+		{
+			name:        "valid absolute path within base",
+			basePath:    tempDir,
+			userPath:    filepath.Join(tempDir, "file.txt"),
+			expectError: false,
+		},
+		{
+			name:        "directory traversal attempt with ../",
+			basePath:    tempDir,
+			userPath:    "../../../etc/passwd",
+			expectError: true,
+			errorMsg:    "path traversal attempt detected",
+		},
+		{
+			name:     "directory traversal with absolute path",
+			basePath: tempDir,
+			userPath: func() string {
+				// An absolute path well outside the base. Both fixtures normally
+				// exist but are read-restricted, which is the point of #2120: on
+				// Windows the SAM hive is ACL-protected, so a naive EvalSymlinks
+				// would fail with "Access is denied" before any containment check
+				// and surface a permission error instead of a traversal error.
+				// ValidateAndCleanPath must reject it as a traversal attempt
+				// (containment is checked in raw form before the filesystem is
+				// touched), with the same assertion on every platform.
+				if runtime.GOOS == "windows" {
+					return "C:\\Windows\\System32\\config\\sam"
+				}
+				return "/etc/passwd"
+			}(),
+			expectError: true,
+			errorMsg:    "path traversal attempt detected",
+		},
+		{
+			name:        "path with . and .. elements",
+			basePath:    tempDir,
+			userPath:    "./subdir/../file.txt",
+			expectError: false,
+		},
+		{
+			name:        "empty base path",
+			basePath:    "",
+			userPath:    "file.txt",
+			expectError: true,
+			errorMsg:    "base path cannot be empty",
+		},
+		{
+			name:        "empty user path",
+			basePath:    tempDir,
+			userPath:    "",
+			expectError: true,
+			errorMsg:    "user path cannot be empty",
+		},
+		{
+			name:        "complex traversal attempt",
+			basePath:    tempDir,
+			userPath:    "subdir/../../outside/file.txt",
+			expectError: true,
+			errorMsg:    "path traversal attempt detected",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ValidateAndCleanPath(tt.basePath, tt.userPath)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error but got none")
+				} else if tt.errorMsg != "" && !strings.Contains(err.Error(), tt.errorMsg) {
+					t.Errorf("Expected error to contain '%s', got '%s'", tt.errorMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+				}
+				if result == "" {
+					t.Errorf("Expected non-empty result")
+				}
+				// Verify result is absolute path
+				if !filepath.IsAbs(result) {
+					t.Errorf("Result should be absolute path, got %s", result)
+				}
+				// Verify result is within base directory using eval-symlinked base
+				evalBase, evalErr := filepath.EvalSymlinks(tt.basePath)
+				if evalErr != nil {
+					t.Fatalf("Failed to eval-symlink base: %v", evalErr)
+				}
+				if !strings.HasPrefix(result, evalBase) {
+					t.Errorf("Result %s is not within base directory %s", result, evalBase)
+				}
+			}
+		})
+	}
+}
+
+// TestValidateAndCleanPathSiblingPrefix verifies that a path sharing a string prefix with
+// basePath but outside it (e.g. /base_extra vs /base) is correctly rejected.
+func TestValidateAndCleanPathSiblingPrefix(t *testing.T) {
+	parent := t.TempDir()
+	base := filepath.Join(parent, "testbase")
+	sibling := filepath.Join(parent, "testbase_sibling")
+	if err := os.MkdirAll(base, 0750); err != nil {
+		t.Fatalf("failed to create base dir: %v", err)
+	}
+	if err := os.MkdirAll(sibling, 0750); err != nil {
+		t.Fatalf("failed to create sibling dir: %v", err)
+	}
+
+	_, err := ValidateAndCleanPath(base, filepath.Join(sibling, "secret"))
+	if err == nil {
+		t.Fatal("expected error for sibling-prefix traversal, got nil")
+	}
+	if !strings.Contains(err.Error(), "path traversal attempt detected") {
+		t.Errorf("expected 'path traversal attempt detected' in error, got: %v", err)
+	}
+}
+
+// TestValidateAndCleanPathSymlinks covers symlink-specific acceptance criteria.
+func TestValidateAndCleanPathSymlinks(t *testing.T) {
+	t.Run("symlink_escape_rejected", func(t *testing.T) {
+		base := t.TempDir()
+		// Symlink inside base pointing to a file outside base.
+		outside := filepath.Dir(base)
+		link := filepath.Join(base, "link")
+		if err := os.Symlink(filepath.Join(outside, "outside_file"), link); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink creation requires SeCreateSymbolicLinkPrivilege: %v", err)
+			}
+			t.Fatalf("failed to create symlink: %v", err)
+		}
+		// Create the target so EvalSymlinks can resolve it.
+		if err := os.WriteFile(filepath.Join(outside, "outside_file"), []byte("x"), 0600); err != nil {
+			t.Fatalf("failed to create outside file: %v", err)
+		}
+
+		_, err := ValidateAndCleanPath(base, "link")
+		if err == nil {
+			t.Fatal("expected error for symlink escape, got nil")
+		}
+		if !strings.Contains(err.Error(), "path traversal attempt detected") {
+			t.Errorf("expected 'path traversal attempt detected' in error, got: %v", err)
+		}
+	})
+
+	t.Run("internal_symlink_accepted", func(t *testing.T) {
+		base := t.TempDir()
+		target := filepath.Join(base, "b")
+		if err := os.MkdirAll(target, 0750); err != nil {
+			t.Fatalf("failed to create target dir: %v", err)
+		}
+		link := filepath.Join(base, "a")
+		if err := os.Symlink(target, link); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink creation requires SeCreateSymbolicLinkPrivilege: %v", err)
+			}
+			t.Fatalf("failed to create internal symlink: %v", err)
+		}
+
+		result, err := ValidateAndCleanPath(base, "a")
+		if err != nil {
+			t.Fatalf("unexpected error for internal symlink: %v", err)
+		}
+		// Result must be the resolved canonical target within base.
+		evalBase, evalErr := filepath.EvalSymlinks(base)
+		if evalErr != nil {
+			t.Fatalf("failed to eval-symlink base: %v", evalErr)
+		}
+		if !strings.HasPrefix(result, evalBase) {
+			t.Errorf("expected result within base %s, got %s", evalBase, result)
+		}
+		// Result should resolve to the target, not the symlink name.
+		evalTarget, evalTargetErr := filepath.EvalSymlinks(target)
+		if evalTargetErr != nil {
+			t.Fatalf("failed to eval-symlink target: %v", evalTargetErr)
+		}
+		if result != evalTarget {
+			t.Errorf("expected resolved target %s, got %s", evalTarget, result)
+		}
+	})
+
+	t.Run("nonexistent_with_safe_parent", func(t *testing.T) {
+		base := t.TempDir()
+
+		result, err := ValidateAndCleanPath(base, "newfile.txt")
+		if err != nil {
+			t.Fatalf("unexpected error for non-existent file with safe parent: %v", err)
+		}
+		evalBase, evalErr := filepath.EvalSymlinks(base)
+		if evalErr != nil {
+			t.Fatalf("failed to eval-symlink base: %v", evalErr)
+		}
+		if !strings.HasPrefix(result, evalBase) {
+			t.Errorf("expected result within base %s, got %s", evalBase, result)
+		}
+		if filepath.Base(result) != "newfile.txt" {
+			t.Errorf("expected filename 'newfile.txt' preserved, got %s", filepath.Base(result))
+		}
+	})
+
+	t.Run("nonexistent_with_malicious_ancestor_symlink", func(t *testing.T) {
+		base := t.TempDir()
+		outside := t.TempDir() // sibling directory — guaranteed outside base
+
+		// Symlink inside base pointing to the outside directory.
+		evil := filepath.Join(base, "evil")
+		if err := os.Symlink(outside, evil); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink creation requires SeCreateSymbolicLinkPrivilege: %v", err)
+			}
+			t.Fatalf("failed to create malicious symlink: %v", err)
+		}
+
+		// Access a non-existent file through the malicious symlink.
+		_, err := ValidateAndCleanPath(base, "evil/nonexistent")
+		if err == nil {
+			t.Fatal("expected error for path through malicious ancestor symlink, got nil")
+		}
+		if !strings.Contains(err.Error(), "path traversal attempt detected") {
+			t.Errorf("expected 'path traversal attempt detected' in error, got: %v", err)
+		}
+	})
+}
+
+func TestSecureWriteFile(t *testing.T) {
+	tempDir := t.TempDir()
+	testData := []byte("test content")
+
+	t.Run("successful write", func(t *testing.T) {
+		err := SecureWriteFile(tempDir, "test.txt", testData)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		// Verify file was written
+		filePath := filepath.Join(tempDir, "test.txt")
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			t.Fatalf("Failed to read written file: %v", err)
+		}
+
+		if string(content) != string(testData) {
+			t.Errorf("File content mismatch. Expected %s, got %s", testData, content)
+		}
+
+		// Verify file permissions are 0600 (Unix only - Windows uses ACLs)
+		if runtime.GOOS != "windows" {
+			info, err := os.Stat(filePath)
+			if err != nil {
+				t.Fatalf("Failed to stat file: %v", err)
+			}
+
+			if info.Mode().Perm() != 0600 {
+				t.Errorf("Expected file permissions 0600, got %o", info.Mode().Perm())
+			}
+		}
+	})
+
+	t.Run("write with directory creation", func(t *testing.T) {
+		err := SecureWriteFile(tempDir, "subdir/nested/test.txt", testData)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		// Verify directory was created with correct permissions (Unix only - Windows uses ACLs)
+		if runtime.GOOS != "windows" {
+			dirPath := filepath.Join(tempDir, "subdir", "nested")
+			info, err := os.Stat(dirPath)
+			if err != nil {
+				t.Fatalf("Failed to stat directory: %v", err)
+			}
+
+			if info.Mode().Perm() != 0750 {
+				t.Errorf("Expected directory permissions 0750, got %o", info.Mode().Perm())
+			}
+		}
+	})
+
+	t.Run("path traversal prevention", func(t *testing.T) {
+		err := SecureWriteFile(tempDir, "../outside.txt", testData)
+		if err == nil {
+			t.Error("Expected error for path traversal attempt")
+		}
+		if !strings.Contains(err.Error(), "path traversal") {
+			t.Errorf("Expected path traversal error, got %v", err)
+		}
+	})
+}
+
+func TestSecureReadFile(t *testing.T) {
+	tempDir := t.TempDir()
+	testData := []byte("test content")
+	testFile := filepath.Join(tempDir, "test.txt")
+
+	// Create test file
+	err := os.WriteFile(testFile, testData, 0600)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	t.Run("successful read", func(t *testing.T) {
+		content, err := SecureReadFile(tempDir, "test.txt")
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		if string(content) != string(testData) {
+			t.Errorf("Content mismatch. Expected %s, got %s", testData, content)
+		}
+	})
+
+	t.Run("path traversal prevention", func(t *testing.T) {
+		_, err := SecureReadFile(tempDir, "../../../etc/passwd")
+		if err == nil {
+			t.Error("Expected error for path traversal attempt")
+		}
+		if !strings.Contains(err.Error(), "path traversal") {
+			t.Errorf("Expected path traversal error, got %v", err)
+		}
+	})
+
+	t.Run("nonexistent file", func(t *testing.T) {
+		_, err := SecureReadFile(tempDir, "nonexistent.txt")
+		if err == nil {
+			t.Error("Expected error for nonexistent file")
+		}
+		// Should be a file system error, not a path validation error
+		if strings.Contains(err.Error(), "path traversal") {
+			t.Errorf("Unexpected path traversal error for valid path, got %v", err)
+		}
+	})
+}
+
+func TestSecureWriteFileWithPerms(t *testing.T) {
+	tempDir := t.TempDir()
+	testData := []byte("executable content")
+
+	t.Run("write executable file", func(t *testing.T) {
+		err := SecureWriteFileWithPerms(tempDir, "script.sh", testData, 0700)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		// Verify file permissions are 0700 (Unix only - Windows uses ACLs)
+		if runtime.GOOS != "windows" {
+			filePath := filepath.Join(tempDir, "script.sh")
+			info, err := os.Stat(filePath)
+			if err != nil {
+				t.Fatalf("Failed to stat file: %v", err)
+			}
+
+			if info.Mode().Perm() != 0700 {
+				t.Errorf("Expected file permissions 0700, got %o", info.Mode().Perm())
+			}
+		}
+	})
+}
+
+// Story #253: Additional tests for 90%+ coverage
+
+func TestSecureOpenFile(t *testing.T) {
+	tempDir := t.TempDir()
+
+	t.Run("successful open for reading", func(t *testing.T) {
+		// Create a test file first
+		testData := []byte("test content")
+		testFile := filepath.Join(tempDir, "test.txt")
+		err := os.WriteFile(testFile, testData, 0600)
+		if err != nil {
+			t.Fatalf("Failed to create test file: %v", err)
+		}
+
+		// Open the file using SecureOpenFile
+		file, err := SecureOpenFile(tempDir, "test.txt", os.O_RDONLY, 0)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		defer func() { _ = file.Close() }()
+
+		// Verify we can read from it
+		content, err := io.ReadAll(file)
+		if err != nil {
+			t.Fatalf("Failed to read file: %v", err)
+		}
+
+		if string(content) != string(testData) {
+			t.Errorf("Content mismatch. Expected %s, got %s", testData, content)
+		}
+	})
+
+	t.Run("successful open for writing", func(t *testing.T) {
+		file, err := SecureOpenFile(tempDir, "new.txt", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		defer func() { _ = file.Close() }()
+
+		// Write some data
+		testData := []byte("new content")
+		_, err = file.Write(testData)
+		if err != nil {
+			t.Fatalf("Failed to write: %v", err)
+		}
+
+		// Close and verify
+		_ = file.Close()
+
+		// Read back to verify
+		content, err := os.ReadFile(filepath.Join(tempDir, "new.txt"))
+		if err != nil {
+			t.Fatalf("Failed to read back: %v", err)
+		}
+
+		if string(content) != string(testData) {
+			t.Errorf("Content mismatch. Expected %s, got %s", testData, content)
+		}
+	})
+
+	t.Run("path traversal prevention", func(t *testing.T) {
+		file, err := SecureOpenFile(tempDir, "../../../etc/passwd", os.O_RDONLY, 0)
+		if err == nil {
+			_ = file.Close()
+			t.Error("Expected error for path traversal attempt")
+		}
+		if !strings.Contains(err.Error(), "path traversal") {
+			t.Errorf("Expected path traversal error, got %v", err)
+		}
+	})
+
+	t.Run("nonexistent file with O_RDONLY fails", func(t *testing.T) {
+		file, err := SecureOpenFile(tempDir, "nonexistent.txt", os.O_RDONLY, 0)
+		if err == nil {
+			_ = file.Close()
+			t.Error("Expected error for nonexistent file")
+		}
+		// Should be a file system error from os.OpenFile
+		if strings.Contains(err.Error(), "path validation") {
+			t.Errorf("Should be file system error, not path validation, got %v", err)
+		}
+	})
+}
+
+func TestReadRegularFileNoSymlinks(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "s.txt"), []byte("secret"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(base, "d"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(base, "d", "ok.txt"), []byte("ok"), 0o600))
+	require.NoError(t, os.Symlink(filepath.Join(outside, "s.txt"), filepath.Join(base, "leaf")))
+	require.NoError(t, os.Symlink(outside, filepath.Join(base, "dirlink")))
+	require.NoError(t, os.Symlink(filepath.Join(base, "d"), filepath.Join(base, "inlink")))
+
+	data, info, err := ReadRegularFileNoSymlinks(base, "d/ok.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "ok", string(data))
+	assert.NotNil(t, info)
+
+	for _, p := range []string{"leaf", "dirlink/s.txt", "inlink/ok.txt"} {
+		_, _, err = ReadRegularFileNoSymlinks(base, p)
+		assert.ErrorIs(t, err, ErrSymlinkInPath, p)
+	}
+	_, _, err = ReadRegularFileNoSymlinks(base, "d")
+	assert.ErrorIs(t, err, ErrNotRegularFile)
+	_, _, err = ReadRegularFileNoSymlinks(base, "../x")
+	assert.Error(t, err)
+	_, _, err = ReadRegularFileNoSymlinks(base, "nope")
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestSecureReadFileRefusesLeafSymlink(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target")
+	require.NoError(t, os.WriteFile(target, []byte("content"), 0600))
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink creation requires SeCreateSymbolicLinkPrivilege: %v", err)
+		}
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	data, err := SecureReadFile(base, "link")
+	require.Error(t, err)
+	assert.Nil(t, data)
+
+	data, err = SecureReadFile(base, "target")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("content"), data)
+
+	_, err = SecureReadFile(base, "missing")
+	require.Error(t, err)
+	assert.True(t, os.IsNotExist(err), "got %v", err)
+}
+
+func TestReadValidatedFile(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target")
+	require.NoError(t, os.WriteFile(target, []byte("content"), 0600))
+
+	data, err := readValidatedFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("content"), data)
+
+	data, err = readValidatedFile(base)
+	require.Error(t, err)
+	assert.Nil(t, data)
+
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink creation requires SeCreateSymbolicLinkPrivilege: %v", err)
+		}
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+	data, err = readValidatedFile(link)
+	require.Error(t, err)
+	assert.Nil(t, data)
+}
+
+func TestSecureWriteFileIntermediateSymlinkRefused(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(base, "sub")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	if err := SecureWriteFile(base, "sub/new/f.txt", []byte("x")); err == nil {
+		t.Fatal("write through a symlinked intermediate directory must fail")
+	}
+	entries, _ := os.ReadDir(outside)
+	if len(entries) != 0 {
+		t.Fatalf("outside directory must stay empty, found %d entries", len(entries))
+	}
+}
+
+// A swap after validation is modelled by calling the root writer directly with a
+// path that was valid before the intermediate directory became a link.
+func TestWriteFileInRootSwappedIntermediateStaysInRoot(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	validated := filepath.Join(base, "sub", "f.txt")
+	if err := os.Symlink(outside, filepath.Join(base, "sub")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	if err := writeFileInRoot(base, "sub/f.txt", validated, []byte("x"), 0600); err == nil {
+		t.Fatal("write through a swapped intermediate directory must fail")
+	}
+	entries, _ := os.ReadDir(outside)
+	if len(entries) != 0 {
+		t.Fatalf("outside directory must stay empty, found %d entries", len(entries))
+	}
+}
+
+// The intermediate directory is a real directory when the path is validated and
+// becomes a link to an outside directory before the write.
+func TestSecureWriteFileIntermediateSwappedAfterValidationRefused(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	sub := filepath.Join(base, "sub")
+	if err := os.Mkdir(sub, 0750); err != nil {
+		t.Fatal(err)
+	}
+	swapped := false
+	afterValidateHook = func() {
+		if err := os.Remove(sub); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, sub); err != nil {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+		swapped = true
+	}
+	t.Cleanup(func() { afterValidateHook = nil })
+
+	if err := SecureWriteFile(base, "sub/new/f.txt", []byte("x")); err == nil {
+		t.Fatal("write through an intermediate directory swapped after validation must fail")
+	}
+	if !swapped {
+		t.Fatal("swap hook did not run")
+	}
+	entries, _ := os.ReadDir(outside)
+	if len(entries) != 0 {
+		t.Fatalf("outside directory must stay empty, found %d entries", len(entries))
+	}
+}
+
+func TestSecureWriteFileLeafSymlinkInsideBaseRefused(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target.txt")
+	if err := os.WriteFile(target, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(base, "link.txt")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	if err := SecureWriteFile(base, "link.txt", []byte("changed")); err == nil {
+		t.Fatal("write through a leaf symlink must fail")
+	}
+	got, _ := os.ReadFile(target)
+	if string(got) != "original" {
+		t.Fatalf("target content changed to %q", got)
+	}
+}
+
+// swapLeafForLinkTest runs SecureWriteFile on base/leaf.txt with the leaf replaced
+// by a link to base/other.txt between the leaf pre-check and the leaf open, and
+// requires the write to fail with other.txt left intact.
+func swapLeafForLinkTest(t *testing.T, leafExists bool) {
+	t.Helper()
+	base := t.TempDir()
+	leaf := filepath.Join(base, "leaf.txt")
+	other := filepath.Join(base, "other.txt")
+	if err := os.WriteFile(other, []byte("other"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if leafExists {
+		if err := os.WriteFile(leaf, []byte("leaf"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	swapped := false
+	beforeLeafOpenHook = func() {
+		if leafExists {
+			if err := os.Remove(leaf); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink(other, leaf); err != nil {
+			t.Fatalf("creating the leaf symlink: %v", err)
+		}
+		swapped = true
+	}
+	t.Cleanup(func() { beforeLeafOpenHook = nil })
+
+	if err := SecureWriteFile(base, "leaf.txt", []byte("changed")); err == nil {
+		t.Fatal("write through a leaf swapped for a link after the pre-check must fail")
+	}
+	if !swapped {
+		t.Fatal("swap hook did not run")
+	}
+	got, err := os.ReadFile(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "other" {
+		t.Fatalf("link target must be untouched, content is %q", got)
+	}
+}
+
+// The leaf did not exist at the pre-check and becomes a link to another file in
+// the base before the open; the write must not land in that file.
+func TestSecureWriteFileNewLeafSwappedForLinkRefused(t *testing.T) {
+	swapLeafForLinkTest(t, false)
+}
+
+// The leaf was a regular file at the pre-check and becomes a link to another file
+// in the base before the open; that file must not be truncated.
+func TestSecureWriteFileExistingLeafSwappedForLinkRefused(t *testing.T) {
+	swapLeafForLinkTest(t, true)
+}

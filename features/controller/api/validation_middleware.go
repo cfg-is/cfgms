@@ -1,0 +1,549 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package api
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gorilla/mux"
+
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/security"
+)
+
+const (
+	maxStructuredRequestBodyBytes int64 = 10 * 1024 * 1024
+	maxBinaryRequestBodyBytes     int64 = 64 * 1024 * 1024
+)
+
+// requestBodyLimitMiddleware enforces body limits on every router surface,
+// including unauthenticated base-router endpoints that do not pass through
+// validationMiddleware. Structured bodies are buffered only up to the limit so
+// chunked requests cannot bypass Content-Length checks. Binary artifacts remain
+// streaming, but are bounded by MaxBytesReader.
+func (s *Server) requestBodyLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body == nil || r.Body == http.NoBody {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		limit := maxStructuredRequestBodyBytes
+		isBinary := strings.HasPrefix(r.Header.Get("Content-Type"), "application/octet-stream")
+		if isBinary {
+			limit = maxBinaryRequestBodyBytes
+		}
+
+		if r.ContentLength > limit {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+
+		if isBinary {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+		if closeErr := r.Body.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if int64(len(body)) > limit {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ValidationMiddleware provides comprehensive input validation for API requests
+func (s *Server) validationMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Create security context
+		ctx := s.buildSecurityContext(r)
+		validator := security.NewEnhancedValidator(ctx)
+		result := &security.ValidationResult{Valid: true}
+
+		// Validate URL parameters
+		s.validateURLParameters(validator, result, r)
+
+		// Validate query parameters
+		s.validateQueryParameters(validator, result, r)
+
+		// Only validate headers for mutating operations to avoid breaking GET requests
+		if r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" || r.Method == "DELETE" {
+			// Validate request headers
+			s.validateRequestHeaders(validator, result, r)
+		}
+
+		// Validate request body for POST/PUT requests
+		if r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" {
+			if err := s.validateRequestBody(validator, result, r); err != nil {
+				s.writeErrorResponse(w, http.StatusBadRequest, "Request body validation failed", "BODY_VALIDATION_ERROR")
+				return
+			}
+		}
+
+		// If validation failed, return error response
+		if !result.Valid {
+			// Log validation failure for debugging. We intentionally avoid
+			// logging the raw r.URL.Path or result.Errors slice — both can
+			// contain user-controlled values and trip CWE-117 / CWE-312
+			// rules. The error count + method give enough signal for triage;
+			// full details ship in the JSON response body.
+			s.logger.Debug("Request validation failed",
+				"error_count", len(result.Errors),
+				"method", r.Method)
+			s.writeValidationErrorResponse(w, result)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// buildSecurityContext creates a security context from the request
+func (s *Server) buildSecurityContext(r *http.Request) *security.SecurityContext {
+	ctx := &security.SecurityContext{
+		RemoteAddr:  r.RemoteAddr,
+		UserAgent:   r.Header.Get("User-Agent"),
+		RequestPath: r.URL.Path,
+	}
+
+	// Extract user and tenant info from context if available
+	if userID, ok := r.Context().Value(ctxkeys.UserIDKey).(string); ok {
+		ctx.UserID = userID
+	}
+	if tenantID, ok := r.Context().Value(ctxkeys.TenantID).(string); ok {
+		ctx.TenantID = tenantID
+	}
+
+	return ctx
+}
+
+// validateURLParameters validates URL path parameters
+func (s *Server) validateURLParameters(validator *security.EnhancedValidator, result *security.ValidationResult, r *http.Request) {
+	vars := mux.Vars(r)
+
+	for param, value := range vars {
+		switch param {
+		case "id":
+			// Cluster node IDs may be IPs or FQDNs, so the node lifecycle routes admit '.'.
+			if strings.HasPrefix(r.URL.Path, "/api/v1/cluster/nodes/") {
+				validator.ValidateString(result, "path."+param, value, "required", "charset:node_id", "max_length:64")
+				if strings.Contains(value, "..") {
+					result.AddError("path."+param, "", "no_dot_dot", "must not contain '..'")
+				}
+				break
+			}
+			// Validate ID parameters (should be UUIDs or alphanumeric)
+			validator.ValidateString(result, "path."+param, value, "required", "charset:alphanumeric_dash", "max_length:64")
+		case "tenant_path":
+			// Hierarchical tenant IDs use '/' as a path separator: "fleet-root/fleet-child-a".
+			validator.ValidateString(result, "path."+param, value, "required", "charset:tenant_path_id", "max_length:256")
+		case "serial":
+			// Certificate serial numbers
+			validator.ValidateString(result, "path."+param, value, "required", "charset:alphanumeric", "max_length:40")
+		case "tenantId", "tenant_id":
+			// Tenant IDs are human-readable identifiers (e.g., "acme-corp", "test-tenant")
+			validator.ValidateString(result, "path."+param, value, "required", "charset:alphanumeric_dash", "max_length:128")
+		case "stewardId", "steward_id":
+			// Steward IDs
+			validator.ValidateString(result, "path."+param, value, "required", "charset:alphanumeric_dash", "max_length:64")
+		case "cidr":
+			// CIDR ranges: IPv4 (10.0.0.0/8) and IPv6 (2001:db8::/32)
+			validator.ValidateString(result, "path."+param, value, "required", "charset:cidr", "max_length:64")
+		default:
+			// Generic validation for other path parameters
+			validator.ValidateString(result, "path."+param, value, "charset:safe_text", "max_length:128", "no_control_chars")
+			// ValidateString does not enforce max_length:N, so bound the length here.
+			validateMaxBytes(result, "path."+param, value, 128)
+		}
+	}
+}
+
+// validateQueryParameters validates URL query parameters
+func (s *Server) validateQueryParameters(validator *security.EnhancedValidator, result *security.ValidationResult, r *http.Request) {
+	query := r.URL.Query()
+
+	for param, values := range query {
+		for i, value := range values {
+			fieldName := fmt.Sprintf("query.%s[%d]", param, i)
+
+			switch param {
+			case "limit":
+				// M-INPUT-1: Use ParseInt instead of Atoi to prevent integer overflow (security audit finding)
+				limit, err := strconv.ParseInt(value, 10, 64)
+				if err != nil {
+					result.AddError(fieldName, value, "integer", "must be a valid integer")
+				} else if limit < 0 || limit > 1000 {
+					result.AddError(fieldName, value, "range", "must be between 0 and 1000")
+				}
+			case "offset":
+				// M-INPUT-1: Use ParseInt instead of Atoi to prevent integer overflow (security audit finding)
+				offset, err := strconv.ParseInt(value, 10, 64)
+				if err != nil {
+					result.AddError(fieldName, value, "integer", "must be a valid integer")
+				} else if offset < 0 {
+					result.AddError(fieldName, value, "range", "must be greater than or equal to 0")
+				}
+			case "sort":
+				// Sort parameter validation
+				validator.ValidateString(result, fieldName, value, "charset:alphanumeric_dash", "max_length:64")
+			case "filter", "search":
+				// Search and filter parameters
+				validator.ValidateString(result, fieldName, value, "charset:safe_text", "max_length:256", "no_control_chars")
+			case "format":
+				// Output format validation
+				if value != "json" && value != "xml" && value != "csv" {
+					result.AddError(fieldName, value, "enum", "format must be json, xml, or csv")
+				}
+			case "status":
+				// Status filter validation
+				validator.ValidateString(result, fieldName, value, "charset:alphanumeric_dash", "max_length:32")
+			case "tenant_id":
+				// Hierarchical tenant IDs use '/' as a path separator (e.g., "fleet-root/fleet-child-b").
+				// Must match charset:tenant_path_id which allows letters, digits, hyphens, underscores, and '/'.
+				validator.ValidateString(result, fieldName, value, "charset:tenant_path_id", "max_length:256")
+			case "cidr":
+				// CIDR ranges (e.g. "192.168.1.0/24", "2001:db8::/32") — the slash is not in safe_text.
+				validator.ValidateString(result, fieldName, value, "charset:cidr", "max_length:64")
+			case "q":
+				// Directory search text (Issue #5557) carries names, logins and mail
+				// addresses, so '@' and a few other characters safe_text refuses are
+				// legitimate. The directory handlers enforce the exact charset.
+				validator.ValidateString(result, fieldName, value, "max_length:256", "no_control_chars")
+			default:
+				// Generic query parameter validation
+				validator.ValidateString(result, fieldName, value, "charset:safe_text", "max_length:512", "no_control_chars")
+			}
+		}
+	}
+}
+
+// validateRequestHeaders validates critical request headers
+func (s *Server) validateRequestHeaders(validator *security.EnhancedValidator, result *security.ValidationResult, r *http.Request) {
+	// Validate Content-Type for POST/PUT requests
+	if r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" {
+		contentType := r.Header.Get("Content-Type")
+		if contentType != "" {
+			// YAML content types are accepted because the steward config
+			// upload endpoint (handleUpdateStewardConfig) ingests production
+			// .cfg files sent as application/yaml by `cfg config upload`.
+			// application/octet-stream is accepted for binary uploads
+			// (handleUploadInstallerArtifact ingests ~30MB steward binaries).
+			if !strings.HasPrefix(contentType, "application/json") &&
+				!strings.HasPrefix(contentType, "application/x-www-form-urlencoded") &&
+				!strings.HasPrefix(contentType, "multipart/form-data") &&
+				!strings.HasPrefix(contentType, "application/yaml") &&
+				!strings.HasPrefix(contentType, "application/x-yaml") &&
+				!strings.HasPrefix(contentType, "text/yaml") &&
+				!strings.HasPrefix(contentType, "application/octet-stream") {
+				result.AddError("header.Content-Type", contentType, "content_type", "unsupported content type")
+			}
+		}
+	}
+
+	// Validate User-Agent
+	userAgent := r.Header.Get("User-Agent")
+	if userAgent != "" {
+		validator.ValidateString(result, "header.User-Agent", userAgent, "max_length:512", "no_control_chars")
+	}
+
+	// Validate custom headers
+	for name, values := range r.Header {
+		if strings.HasPrefix(name, "X-") {
+			for i, value := range values {
+				fieldName := fmt.Sprintf("header.%s[%d]", name, i)
+				validator.ValidateString(result, fieldName, value, "max_length:1024", "no_control_chars")
+			}
+		}
+	}
+
+	// Validate Authorization header if present
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		if strings.HasPrefix(auth, "Bearer ") {
+			token := strings.TrimPrefix(auth, "Bearer ")
+			// API keys can be various formats, just validate basic safety
+			validator.ValidateString(result, "header.Authorization", token, "charset:safe_text", "max_length:2048")
+		}
+	}
+}
+
+// validateRequestBody validates the request body for POST/PUT requests.
+//
+// Binary uploads (application/octet-stream) bypass body buffering — they can
+// legitimately exceed the 10MB JSON-body cap (installer artifact uploads carry
+// ~30MB steward binaries), and reading the entire body into memory would also
+// defeat streaming-write to the blob store.
+func (s *Server) validateRequestBody(validator *security.EnhancedValidator, result *security.ValidationResult, r *http.Request) error {
+	if r.Body == nil {
+		return nil
+	}
+
+	contentType := r.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "application/octet-stream") {
+		return nil
+	}
+
+	// Read at most one byte beyond the limit. This protects direct users of
+	// validationMiddleware as well as the normal global middleware chain.
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxStructuredRequestBodyBytes+1))
+	if err != nil {
+		return fmt.Errorf("failed to read request body: %w", err)
+	}
+
+	// Restore the body for downstream handlers
+	r.Body = io.NopCloser(bytes.NewBuffer(body))
+
+	// Check body size
+	if int64(len(body)) > maxStructuredRequestBodyBytes {
+		result.AddError("body", "", "max_size", "request body too large (max 10MB)")
+		return nil
+	}
+
+	if len(body) == 0 {
+		return nil // Empty body is OK
+	}
+
+	// Validate JSON structure if Content-Type is JSON
+	if strings.HasPrefix(contentType, "application/json") {
+		if err := s.validateJSONBody(validator, result, body, r.URL.Path); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateJSONBody validates JSON request bodies with endpoint-specific rules
+func (s *Server) validateJSONBody(validator *security.EnhancedValidator, result *security.ValidationResult, body []byte, path string) error {
+	// Parse JSON for field-level validation
+	var jsonData map[string]interface{}
+	if err := json.Unmarshal(body, &jsonData); err != nil {
+		// This is a JSON parsing error, not a validation error
+		// Let the downstream handler deal with it to maintain existing error codes
+		return nil
+	}
+
+	// First validate JSON structure after successful parsing
+	validator.ValidateJSON(result, "body", string(body), "required")
+
+	if !result.Valid {
+		return nil // Don't continue with invalid JSON structure
+	}
+
+	// Apply endpoint-specific validation rules
+	switch {
+	case strings.Contains(path, "/api/v1/stewards"):
+		s.validateStewardRequest(validator, result, jsonData)
+	case strings.Contains(path, "/api/v1/certificates"):
+		s.validateCertificateRequest(validator, result, jsonData)
+	case strings.Contains(path, "/api/v1/rbac"):
+		s.validateRBACRequest(validator, result, jsonData)
+	case strings.Contains(path, "/api/v1/api-keys"):
+		s.validateAPIKeyRequest(validator, result, jsonData)
+	default:
+		s.validateGenericRequest(validator, result, jsonData)
+	}
+
+	return nil
+}
+
+// validateMaxBytes records a max_length error when value exceeds limit bytes.
+// security.Validator.ValidateString parses "max_length:N" but only enforces its
+// own global cap, so per-field byte limits are checked explicitly.
+func validateMaxBytes(result *security.ValidationResult, field, value string, limit int) {
+	if len(value) > limit {
+		result.AddErrorf(field, "", "max_length", "exceeds maximum length of %d bytes", limit)
+	}
+}
+
+// validateStewardRequest validates steward-specific request fields
+func (s *Server) validateStewardRequest(validator *security.EnhancedValidator, result *security.ValidationResult, data map[string]interface{}) {
+	if id, ok := data["id"].(string); ok {
+		validator.ValidateString(result, "body.id", id, "required", "charset:alphanumeric_dash", "max_length:64")
+	}
+
+	if version, ok := data["version"].(string); ok {
+		validator.ValidateString(result, "body.version", version, "required", "charset:safe_text", "max_length:32")
+	}
+
+	if status, ok := data["status"].(string); ok {
+		validStatuses := []string{"connected", "disconnected", "error", "updating"}
+		if !contains(validStatuses, status) {
+			result.AddError("body.status", status, "enum", "invalid status value")
+		}
+	}
+
+	// tenant_id: no charset rule, tenant identifiers may be hierarchical paths.
+	if tenantID, ok := data["tenant_id"].(string); ok {
+		validator.ValidateString(result, "body.tenant_id", tenantID, "no_control_chars", "max_length:256")
+		validateMaxBytes(result, "body.tenant_id", tenantID, 256)
+	}
+
+	// Validate DNA structure if present
+	if dna, ok := data["dna"].(map[string]interface{}); ok {
+		s.validateDNAObject(validator, result, dna)
+	}
+}
+
+// validateCertificateRequest validates certificate request fields
+func (s *Server) validateCertificateRequest(validator *security.EnhancedValidator, result *security.ValidationResult, data map[string]interface{}) {
+	if commonName, ok := data["common_name"].(string); ok {
+		validator.ValidateString(result, "body.common_name", commonName, "required", "charset:hostname", "max_length:253")
+	}
+
+	if sans, ok := data["sans"].([]interface{}); ok {
+		validator.ValidateSlice(result, "body.sans", len(sans), "max_items:50")
+		for i, san := range sans {
+			if sanStr, ok := san.(string); ok {
+				validator.ValidateString(result, fmt.Sprintf("body.sans[%d]", i), sanStr, "charset:hostname", "max_length:253")
+			}
+		}
+	}
+
+	if keyType, ok := data["key_type"].(string); ok {
+		validKeyTypes := []string{"rsa", "ecdsa", "ed25519"}
+		if !contains(validKeyTypes, keyType) {
+			result.AddError("body.key_type", keyType, "enum", "invalid key type")
+		}
+	}
+}
+
+// validateRBACRequest validates RBAC request fields
+func (s *Server) validateRBACRequest(validator *security.EnhancedValidator, result *security.ValidationResult, data map[string]interface{}) {
+	if roleName, ok := data["role_name"].(string); ok {
+		validator.ValidateString(result, "body.role_name", roleName, "required", "charset:alphanumeric_dash", "max_length:64")
+	}
+
+	if permissions, ok := data["permissions"].([]interface{}); ok {
+		validator.ValidateSlice(result, "body.permissions", len(permissions), "required", "max_items:100")
+		for i, perm := range permissions {
+			if permStr, ok := perm.(string); ok {
+				validator.ValidateString(result, fmt.Sprintf("body.permissions[%d]", i), permStr, "charset:alphanumeric_dash", "max_length:128")
+			}
+		}
+	}
+
+	if subjects, ok := data["subjects"].([]interface{}); ok {
+		validator.ValidateSlice(result, "body.subjects", len(subjects), "max_items:1000")
+		for i, subject := range subjects {
+			if subjectStr, ok := subject.(string); ok {
+				validator.ValidateWithContext(result, fmt.Sprintf("body.subjects[%d]", i), subjectStr, "charset:uuid", "tenant_scoped")
+			}
+		}
+	}
+}
+
+// validateAPIKeyRequest validates API key request fields
+func (s *Server) validateAPIKeyRequest(validator *security.EnhancedValidator, result *security.ValidationResult, data map[string]interface{}) {
+	if name, ok := data["name"].(string); ok {
+		validator.ValidateString(result, "body.name", name, "required", "charset:safe_text", "max_length:128")
+	}
+
+	if description, ok := data["description"].(string); ok {
+		validator.ValidateString(result, "body.description", description, "charset:safe_text", "max_length:512")
+	}
+
+	if permissions, ok := data["permissions"].([]interface{}); ok {
+		validator.ValidateSlice(result, "body.permissions", len(permissions), "required", "min_items:1", "max_items:50")
+		for i, perm := range permissions {
+			if permStr, ok := perm.(string); ok {
+				// Allow colons in permission strings for resource:action format
+				validator.ValidateString(result, fmt.Sprintf("body.permissions[%d]", i), permStr, "charset:safe_text", "max_length:128")
+			}
+		}
+	}
+
+	if tenantID, ok := data["tenant_id"].(string); ok {
+		// Validate tenant ID - allow both UUIDs and simple strings for testing
+		validator.ValidateString(result, "body.tenant_id", tenantID, "charset:alphanumeric_dash", "max_length:128")
+	}
+
+	if expiresAt, ok := data["expires_at"].(string); ok {
+		// Validate RFC3339 timestamp format
+		validator.ValidateString(result, "body.expires_at", expiresAt, "charset:safe_text", "max_length:64")
+	}
+}
+
+// validateDNAObject validates DNA object structure
+func (s *Server) validateDNAObject(validator *security.EnhancedValidator, result *security.ValidationResult, dna map[string]interface{}) {
+	if id, ok := dna["id"].(string); ok {
+		validator.ValidateString(result, "body.dna.id", id, "required", "charset:uuid")
+	}
+
+	if attributes, ok := dna["attributes"].(map[string]interface{}); ok {
+		for key, value := range attributes {
+			validator.ValidateString(result, fmt.Sprintf("body.dna.attributes.%s", key), key, "charset:alphanumeric_dash", "max_length:64")
+			if valueStr, ok := value.(string); ok {
+				validator.ValidateString(result, fmt.Sprintf("body.dna.attributes.%s", key), valueStr, "charset:safe_text", "max_length:512")
+			}
+		}
+	}
+}
+
+// validateGenericRequest validates common fields in generic requests
+func (s *Server) validateGenericRequest(validator *security.EnhancedValidator, result *security.ValidationResult, data map[string]interface{}) {
+	// Validate common fields that might appear in any request
+	if name, ok := data["name"].(string); ok {
+		validator.ValidateString(result, "body.name", name, "charset:safe_text", "max_length:256")
+	}
+
+	if description, ok := data["description"].(string); ok {
+		validator.ValidateString(result, "body.description", description, "charset:safe_text", "max_length:1024")
+	}
+
+	if tags, ok := data["tags"].([]interface{}); ok {
+		validator.ValidateSlice(result, "body.tags", len(tags), "max_items:20")
+		for i, tag := range tags {
+			if tagStr, ok := tag.(string); ok {
+				validator.ValidateString(result, fmt.Sprintf("body.tags[%d]", i), tagStr, "charset:alphanumeric_dash", "max_length:64")
+			}
+		}
+	}
+}
+
+// writeValidationErrorResponse writes a validation error response
+func (s *Server) writeValidationErrorResponse(w http.ResponseWriter, result *security.ValidationResult) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+
+	errorResponse := ErrorResponse{
+		Error: &APIError{
+			Code:    "VALIDATION_ERROR",
+			Message: "Request validation failed",
+			Details: map[string]interface{}{
+				"validation_errors": result.Errors,
+			},
+		},
+		Timestamp: time.Now().UTC(),
+	}
+
+	_ = json.NewEncoder(w).Encode(errorResponse)
+}
+
+// Helper function to check if slice contains string
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}

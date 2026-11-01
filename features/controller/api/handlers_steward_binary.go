@@ -1,0 +1,495 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package api
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"io"
+	"net/http"
+	"regexp"
+
+	"github.com/gorilla/mux"
+
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
+	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
+)
+
+// stewardBinaryVersionRe validates semantic version strings like v0.5.12 or v0.5.12-rc1.
+var stewardBinaryVersionRe = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?$`)
+
+// stewardBinaryPublishResponse is the JSON body returned by POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}.
+type stewardBinaryPublishResponse struct {
+	Version         string `json:"version"`
+	Platform        string `json:"platform"`
+	Arch            string `json:"arch"`
+	Size            int64  `json:"size"`
+	SHA256          string `json:"sha256"`
+	PublishedBy     string `json:"published_by"`
+	Publisher       string `json:"publisher"`
+	SignatureDigest string `json:"signature_digest"`
+}
+
+// stewardBinaryTrust returns the trust store used for steward binary signature verification.
+// Uses the server-level override when set (injected in tests); otherwise constructs a
+// fresh store seeded with CFGMSPublisherIdentity.
+func (s *Server) stewardBinaryTrust() trust.TrustStore {
+	if s.stewardBinaryTrustStore != nil {
+		return s.stewardBinaryTrustStore
+	}
+	store := trust.NewInMemoryTrustStore()
+	_ = store.AddPublisher(trust.CFGMSPublisherIdentity())
+	return store
+}
+
+// installerBlobTenant maps a caller's tenant restriction (callerTenantFilter: "" only
+// for an explicitly root caller) to the steward-binary blob namespace. A root caller
+// publishes to and reads from "default" — the fleet-wide namespace every steward's
+// self-fetch falls back to after its own tenant (client_transport_upgrade.go), so it is
+// a wire contract with deployed stewards, not an empty-tenant fallback (Issue #4665).
+// Scoped callers use their own tenant.
+func installerBlobTenant(callerTenantID string) string {
+	if callerTenantID == "" {
+		return "default"
+	}
+	return callerTenantID
+}
+
+// stewardBinaryBlobKey builds the BlobKey for a steward binary within the steward-binaries namespace.
+// Name format: "{version}-{platform}-{arch}" (e.g. "v0.5.12-linux-amd64").
+// The blob key Name must not contain "/" — the filesystem provider rejects path separators.
+func stewardBinaryBlobKey(tenantID, version, platform, arch string) blob.BlobKey {
+	return blob.BlobKey{
+		TenantID:  tenantID,
+		Namespace: "steward-binaries",
+		Name:      version + "-" + platform + "-" + arch,
+	}
+}
+
+func stewardBinaryDownloadCacheKey(tenantID, version, platform, arch string) string {
+	return "steward/" + tenantID + "/" + version + "/" + platform + "/" + arch
+}
+
+// installerBlobTenantForCallerScope derives the steward-binary blob namespace from
+// the caller's ctxkeys.TenantScope (Issue #4335): root maps to the fleet-wide
+// "default" namespace (see installerBlobTenant), a tenant scope maps to its own
+// path, and an unset scope is
+// refused (ok=false) rather than silently falling back to "default" — closing the
+// gap where a caller whose context lost its tenant scope could reach the same
+// namespace a genuine root-scoped admin publishes into.
+func (s *Server) installerBlobTenantForCallerScope(r *http.Request) (tenantID string, ok bool) {
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	switch {
+	case scope.IsRoot(): //architecture:allow-root-scope -- steward binaries are published to the fleet-wide namespace
+		return "default", true
+	case scope.IsTenant() && scope.Path() != "":
+		return scope.Path(), true
+	default:
+		return "", false
+	}
+}
+
+// handlePublishStewardBinary handles POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}.
+// Verifies the Ed25519 publisher signature against CFGMSPublisherIdentity before storing the blob.
+// Returns 400 if signature is absent or invalid, 409 if the binary already exists (use ?force=true to overwrite).
+func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Request) {
+	if s.blobStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Binary storage not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+	// Admin mTLS principals carry global scope with an empty tenant (middleware.go:173)
+	// and publish into the global namespace; only a NON-admin caller with no tenant is a
+	// genuine auth failure (Issue #1999, same pattern as #1990's authRunAccess).
+	_, _, ok := s.authRunAccess(w, r)
+	if !ok {
+		return
+	}
+	// The blob namespace is derived from ctxkeys.TenantScope, not the raw
+	// ctxkeys.TenantID authRunAccess returns (Issue #4335): an unset scope must be
+	// refused, not silently fall back to the same "default" namespace a genuine
+	// root-scoped admin publishes into — that ambiguity would let a caller whose
+	// context lost its tenant scope publish steward binaries into the shared
+	// default namespace every genuine admin trusts.
+	tenantID, tenantOK := s.installerBlobTenantForCallerScope(r)
+	if !tenantOK {
+		s.writeErrorResponse(w, http.StatusForbidden, "Tenant scope required", "FORBIDDEN")
+		return
+	}
+
+	vars := mux.Vars(r)
+	version := vars["version"]
+	platform := vars["platform"]
+	arch := vars["arch"]
+
+	if !stewardBinaryVersionRe.MatchString(version) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Invalid version: "+logging.SanitizeLogValue(version)+"; must match ^v\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?",
+			"INVALID_VERSION")
+		return
+	}
+	if !validPlatforms[platform] {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Unknown platform: "+logging.SanitizeLogValue(platform)+"; valid values: windows, darwin, linux",
+			"INVALID_PLATFORM")
+		return
+	}
+	if !validArchs[arch] {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Unknown arch: "+logging.SanitizeLogValue(arch)+"; valid values: amd64, arm64",
+			"INVALID_ARCH")
+		return
+	}
+
+	// Require a publisher signature — unsigned uploads are rejected.
+	sigBase64 := r.URL.Query().Get("signature")
+	if sigBase64 == "" {
+		// Also check multipart form field (used when binary is uploaded as multipart).
+		// Keep a handler-local bound in addition to the global request-body middleware:
+		// ParseMultipartForm may otherwise allocate before the later binary read.
+		r.Body = http.MaxBytesReader(w, r.Body, maxBinaryRequestBodyBytes)
+		// #nosec G120 -- both the global middleware and the immediately preceding
+		// MaxBytesReader cap the request at 64 MiB; in-memory form parts cap at 32 MiB.
+		if parseErr := r.ParseMultipartForm(32 << 20); parseErr == nil {
+			sigBase64 = r.FormValue("signature")
+		}
+	}
+	if sigBase64 == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Signature required; provide ?signature=<base64> or a multipart 'signature' field",
+			"SIGNATURE_REQUIRED")
+		return
+	}
+
+	// Signature is URL-safe base64 (no padding) so it survives query-param sanitization.
+	sigBytes, err := base64.RawURLEncoding.DecodeString(sigBase64)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Invalid signature encoding; must be URL-safe base64 (no padding)",
+			"INVALID_SIGNATURE_ENCODING")
+		return
+	}
+
+	// Buffer the binary body to compute SHA-256 for signature verification.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.logger.Error("Failed to read request body", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read request body", "READ_ERROR")
+		return
+	}
+
+	sum := sha256.Sum256(body)
+	contentHash := hex.EncodeToString(sum[:])
+
+	// Verify the publisher signature over the canonical (content hash, version,
+	// platform, arch) message. Binding the release coordinates means a signature
+	// issued for one version/platform/arch cannot be replayed to publish a
+	// different one (Issue #2834). version/platform/arch are the route vars
+	// validated above, so the stored signature always covers the key it lands under.
+	sig := bundle.BundleSignature{
+		Publisher: "cfgms",
+		Algorithm: "ed25519",
+		Signature: sigBytes,
+	}
+	if verifyErr := trust.VerifyStewardBinarySignature(
+		contentHash, version, platform, arch, sig, s.stewardBinaryTrust()); verifyErr != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Signature verification failed: "+verifyErr.Error(),
+			"SIGNATURE_VERIFICATION_FAILED")
+		return
+	}
+
+	key := stewardBinaryBlobKey(tenantID, version, platform, arch)
+	force := r.URL.Query().Get("force") == "true"
+
+	// Compute signature digest (SHA-256 of raw signature bytes) for the manifest.
+	sigHashBytes := sha256.Sum256(sigBytes)
+	sigDigest := hex.EncodeToString(sigHashBytes[:])
+
+	// Operator identity from auth context.
+	publishedBy, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
+
+	labels := map[string]string{
+		"version":          version,
+		"platform":         platform,
+		"arch":             arch,
+		"published_by":     publishedBy,
+		"publisher":        "cfgms",
+		"signature_digest": sigDigest,
+		"signature":        base64.RawURLEncoding.EncodeToString(sigBytes),
+		"publisher_tenant": tenantID,
+	}
+	// Issue #1948: auto-approve when test mode is active (CFGMS_SEED_TEST_API_KEYS=1 +
+	// CFGMS_TEST_STEWARD_PUBLISHER_KEY set). Production binaries require a separate
+	// approval step; this path is never reachable in production.
+	if s.testAutoApproveStewardBinaries {
+		labels["approved_by"] = "auto-approved-test"
+	}
+	meta := blob.BlobMeta{
+		ContentType: "application/octet-stream",
+		Labels:      labels,
+	}
+
+	// Issue #3895: force=true keeps the unconditional overwrite; the default path
+	// uses PutBlobIfAbsent so the not-found check and the write are one atomic
+	// operation at the storage layer. Two concurrent publishes without force can
+	// no longer both pass a GetBlob pre-check and both PutBlob — the provider's
+	// conditional-create primitive lets exactly one caller win.
+	var putErr error
+	if force {
+		putErr = s.blobStore.PutBlob(r.Context(), key, bytes.NewReader(body), meta)
+	} else {
+		putErr = s.blobStore.PutBlobIfAbsent(r.Context(), key, bytes.NewReader(body), meta)
+	}
+	if putErr != nil {
+		if errors.Is(putErr, blob.ErrBlobAlreadyExists) {
+			s.writeErrorResponse(w, http.StatusConflict,
+				"Steward binary already exists for this version/platform/arch; use --force to overwrite",
+				"DUPLICATE_BINARY")
+			return
+		}
+		s.logger.Error("Failed to store steward binary",
+			"error", logging.SanitizeLogValue(putErr.Error()),
+			"version", logging.SanitizeLogValue(version),
+			"platform", logging.SanitizeLogValue(platform),
+			"arch", logging.SanitizeLogValue(arch))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store binary", "STORE_ERROR")
+		return
+	}
+	s.publicDownloadCache.invalidate(stewardBinaryDownloadCacheKey(tenantID, version, platform, arch))
+
+	// Retrieve stored metadata — provider populates Checksum and Size during PutBlob.
+	rc, storedMeta, err := s.blobStore.GetBlob(r.Context(), key)
+	if err != nil {
+		s.logger.Error("Failed to retrieve stored steward binary metadata",
+			"error", logging.SanitizeLogValue(err.Error()),
+			"version", logging.SanitizeLogValue(version),
+			"platform", logging.SanitizeLogValue(platform),
+			"arch", logging.SanitizeLogValue(arch))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve binary metadata", "METADATA_ERROR")
+		return
+	}
+	_ = rc.Close()
+
+	s.writeSuccessResponse(w, stewardBinaryPublishResponse{
+		Version:         version,
+		Platform:        platform,
+		Arch:            arch,
+		Size:            storedMeta.Size,
+		SHA256:          storedMeta.Checksum,
+		PublishedBy:     publishedBy,
+		Publisher:       "cfgms",
+		SignatureDigest: sigDigest,
+	})
+}
+
+// handleGetStewardBinary handles GET /api/v1/installer/steward-binaries/{version}/{platform}/{arch}.
+// Returns the raw binary stream. Returns 404 when the binary is absent for this tenant.
+func (s *Server) handleGetStewardBinary(w http.ResponseWriter, r *http.Request) {
+	if s.blobStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Binary storage not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+	// Admin mTLS principals carry global scope with an empty tenant (middleware.go:173)
+	// and read from the global namespace; only a NON-admin caller with no tenant is a
+	// genuine auth failure (Issue #1999, same pattern as #1990's authRunAccess).
+	_, _, ok := s.authRunAccess(w, r)
+	if !ok {
+		return
+	}
+	// Derived from ctxkeys.TenantScope, not the raw callerTenantID (Issue #4335) —
+	// see installerBlobTenantForCallerScope's doc comment.
+	tenantID, tenantOK := s.installerBlobTenantForCallerScope(r)
+	if !tenantOK {
+		s.writeErrorResponse(w, http.StatusForbidden, "Tenant scope required", "FORBIDDEN")
+		return
+	}
+
+	vars := mux.Vars(r)
+	version := vars["version"]
+	platform := vars["platform"]
+	arch := vars["arch"]
+
+	if !stewardBinaryVersionRe.MatchString(version) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Invalid version: "+logging.SanitizeLogValue(version)+"; must match ^v\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?",
+			"INVALID_VERSION")
+		return
+	}
+	if !validPlatforms[platform] {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Unknown platform: "+logging.SanitizeLogValue(platform)+"; valid values: windows, darwin, linux",
+			"INVALID_PLATFORM")
+		return
+	}
+	if !validArchs[arch] {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Unknown arch: "+logging.SanitizeLogValue(arch)+"; valid values: amd64, arm64",
+			"INVALID_ARCH")
+		return
+	}
+
+	key := stewardBinaryBlobKey(tenantID, version, platform, arch)
+	rc, meta, err := s.blobStore.GetBlob(r.Context(), key)
+	if err != nil {
+		if errors.Is(err, blob.ErrBlobNotFound) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward binary not found", "BINARY_NOT_FOUND")
+			return
+		}
+		s.logger.Error("Failed to get steward binary",
+			"error", logging.SanitizeLogValue(err.Error()),
+			"version", logging.SanitizeLogValue(version),
+			"platform", logging.SanitizeLogValue(platform),
+			"arch", logging.SanitizeLogValue(arch))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get binary", "GET_ERROR")
+		return
+	}
+	defer func() {
+		if cerr := rc.Close(); cerr != nil {
+			s.logger.Warn("failed to close steward binary reader", "error", logging.SanitizeLogValue(cerr.Error()))
+		}
+	}()
+
+	contentType := meta.ContentType
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	if meta.Checksum != "" {
+		w.Header().Set("X-CFGMS-SHA256", meta.Checksum)
+	}
+	w.WriteHeader(http.StatusOK)
+	if _, copyErr := io.Copy(w, rc); copyErr != nil {
+		s.logger.Warn("Failed to stream steward binary to client", "error", logging.SanitizeLogValue(copyErr.Error()))
+	}
+}
+
+// handleGetStewardBinaryPublic handles GET /api/v1/public/steward-binaries/{version}/{platform}/{arch}?tenant=<tenantID>.
+// No authentication is required — the binary's Ed25519 signature authenticates the content
+// at the steward side. The required tenant parameter identifies which namespace to serve from.
+// This endpoint is called by stewards during the upgrade flow; steward mTLS certs do not
+// carry the admin marker required by the authenticated GET endpoint. (Issue #1948)
+//
+// Intentionally pre-authentication: there is no caller identity to scope by
+// (unauthenticated steward download path, upgrade flow), and the binary's
+// Ed25519 signature is what authenticates the content, not a tenant check. The
+// ?tenant= query param picks a namespace to serve from, not a caller identity
+// to authorize.
+//
+//architecture:allow-unscoped-tenant-read -- pre-authentication download path, no caller identity (Issue #4335)
+func (s *Server) handleGetStewardBinaryPublic(w http.ResponseWriter, r *http.Request) {
+	if s.blobStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Binary storage not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	tenantID := r.URL.Query().Get("tenant")
+	if tenantID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "tenant query parameter required", "MISSING_TENANT")
+		return
+	}
+
+	vars := mux.Vars(r)
+	version := vars["version"]
+	platform := vars["platform"]
+	arch := vars["arch"]
+
+	if !stewardBinaryVersionRe.MatchString(version) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Invalid version: "+logging.SanitizeLogValue(version)+"; must match ^v\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?",
+			"INVALID_VERSION")
+		return
+	}
+	if !validPlatforms[platform] {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Unknown platform: "+logging.SanitizeLogValue(platform)+"; valid values: windows, darwin, linux",
+			"INVALID_PLATFORM")
+		return
+	}
+	if !validArchs[arch] {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Unknown arch: "+logging.SanitizeLogValue(arch)+"; valid values: amd64, arm64",
+			"INVALID_ARCH")
+		return
+	}
+
+	asset, err := s.publicDownloadCache.getOrBuild(
+		r.Context(),
+		stewardBinaryDownloadCacheKey(tenantID, version, platform, arch),
+		func() (*publicDownloadAsset, error) {
+			return s.buildPublicStewardBinary(r, tenantID, version, platform, arch)
+		},
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, blob.ErrBlobNotFound):
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward binary not found", "BINARY_NOT_FOUND")
+		case errors.Is(err, errPublicDownloadTooLarge):
+			s.writeErrorResponse(w, http.StatusRequestEntityTooLarge, "Steward binary too large", "BINARY_TOO_LARGE")
+		default:
+			s.logger.Error("Failed to get steward binary (public)",
+				"error", logging.SanitizeLogValue(err.Error()),
+				"version", logging.SanitizeLogValue(version),
+				"platform", logging.SanitizeLogValue(platform),
+				"arch", logging.SanitizeLogValue(arch))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get binary", "GET_ERROR")
+		}
+		return
+	}
+	servePublicDownload(w, r, "cfgms-steward-"+platform+"-"+arch, asset)
+}
+
+func (s *Server) buildPublicStewardBinary(
+	r *http.Request,
+	tenantID, version, platform, arch string,
+) (*publicDownloadAsset, error) {
+	key := stewardBinaryBlobKey(tenantID, version, platform, arch)
+	rc, meta, err := s.blobStore.GetBlob(r.Context(), key)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if cerr := rc.Close(); cerr != nil {
+			s.logger.Warn("failed to close steward binary reader (public)", "error", logging.SanitizeLogValue(cerr.Error()))
+		}
+	}()
+	if meta.Size > maxBinaryRequestBodyBytes {
+		return nil, errPublicDownloadTooLarge
+	}
+	body, err := io.ReadAll(io.LimitReader(rc, maxBinaryRequestBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxBinaryRequestBodyBytes {
+		return nil, errPublicDownloadTooLarge
+	}
+
+	contentType := meta.ContentType
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	asset := newPublicDownloadAsset(
+		body,
+		contentType,
+		"",
+		"public, max-age=300, must-revalidate",
+	)
+	asset.headers = make(map[string]string, 3)
+	if meta.Checksum != "" {
+		asset.headers["X-CFGMS-SHA256"] = meta.Checksum
+	}
+	// Read these labels individually. The same map contains operator and internal
+	// tenant identifiers that must never cross this anonymous trust boundary.
+	if sig := meta.Labels["signature"]; sig != "" {
+		asset.headers["X-CFGMS-Signature"] = sig
+	}
+	if pub := meta.Labels["publisher"]; pub != "" {
+		asset.headers["X-CFGMS-Publisher"] = pub
+	}
+	return asset, nil
+}

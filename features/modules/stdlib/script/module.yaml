@@ -1,0 +1,42 @@
+name: script
+version: 0.1.0
+description: >
+  Cross-platform script execution module that supports running shell scripts,
+  PowerShell scripts, and Python scripts with configurable timeouts, environment
+  variables, and optional signature validation.
+
+publisher: cfgms
+
+# Supported execution environments
+executors:
+  - steward  # Local script execution on steward systems
+
+requirements:
+  os: [windows, linux, darwin]
+  arch: [amd64, arm64]
+  min_memory: "256MB"
+  min_disk: "100MB"
+
+interfaces:
+  - Get
+  - Set
+  - Test
+
+owns:
+  - kind: script  # authority over script:* objects this module manages
+    required_fields:
+      - hostname  # device identity — required in every full-os-device DNA snapshot
+      - os        # device identity — required in every full-os-device DNA snapshot
+
+# observe_when: omitted — script is an execution primitive with no observation
+# domain; it executes signed files on demand and is never auto-pulled for DNA
+# observation (ADR-024 §3).
+
+security:
+  requires_root: false
+  capabilities: []
+  ports: []
+
+documentation:
+  api: "README.md"
+  examples: "tests/"

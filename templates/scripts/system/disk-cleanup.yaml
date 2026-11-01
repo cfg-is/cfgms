@@ -1,0 +1,77 @@
+metadata:
+  id: disk-cleanup
+  name: Disk Cleanup
+  description: Cleans up temporary files, logs, and package caches to free disk space
+  version:
+    major: 1
+    minor: 0
+    patch: 0
+  author: cfgms-team@cfg.is
+  tags:
+    - system
+    - maintenance
+    - disk-space
+  category: system-maintenance
+  platform:
+    - linux
+    - darwin
+  shell: bash
+  parameters:
+    - name: AGGRESSIVE
+      type: boolean
+      description: Perform aggressive cleanup including older log files
+      required: false
+      default: "false"
+  created_at: 2025-10-13T00:00:00Z
+  updated_at: 2025-10-13T00:00:00Z
+
+content: |
+  #!/bin/bash
+  set -euo pipefail
+
+  AGGRESSIVE="${AGGRESSIVE:-false}"
+  FREED=0
+
+  echo "Disk Cleanup Script"
+  echo "Aggressive mode: $AGGRESSIVE"
+  echo ""
+
+  # Clean package manager caches
+  if command -v apt-get >/dev/null; then
+      echo "Cleaning apt cache..."
+      apt-get clean && apt-get autoclean && apt-get autoremove -y
+  elif command -v yum >/dev/null; then
+      echo "Cleaning yum cache..."
+      yum clean all
+  elif command -v dnf >/dev/null; then
+      echo "Cleaning dnf cache..."
+      dnf clean all
+  fi
+
+  # Clean temp files
+  echo "Cleaning /tmp..."
+  find /tmp -type f -atime +7 -delete 2>/dev/null || true
+
+  # Clean old logs
+  if [ "$AGGRESSIVE" = "true" ]; then
+      echo "Cleaning old log files (aggressive)..."
+      find /var/log -type f -name "*.gz" -delete 2>/dev/null || true
+      find /var/log -type f -name "*.old" -delete 2>/dev/null || true
+      find /var/log -type f -size +100M -mtime +30 -delete 2>/dev/null || true
+  else
+      echo "Cleaning very old log files..."
+      find /var/log -type f -mtime +90 -delete 2>/dev/null || true
+  fi
+
+  # Clean journal logs
+  if command -v journalctl >/dev/null; then
+      echo "Cleaning systemd journal..."
+      journalctl --vacuum-time=30d
+  fi
+
+  echo ""
+  echo "Disk cleanup completed"
+  df -h / | tail -1
+  exit 0
+
+hash: placeholder

@@ -1,0 +1,178 @@
+# CFGMS Prometheus Alert Rules
+# This file defines alerting rules for CFGMS monitoring
+
+groups:
+  - name: cfgms_controller_alerts
+    rules:
+      # High CPU usage alert
+      - alert: CFGMSHighCPUUsage
+        expr: cfgms_cpu_percent > 80
+        for: 5m
+        labels:
+          severity: warning
+          component: controller
+        annotations:
+          summary: "CFGMS Controller high CPU usage"
+          description: "Controller CPU usage is {{ $value }}% for more than 5 minutes"
+
+      # High memory usage alert
+      - alert: CFGMSHighMemoryUsage
+        expr: cfgms_memory_bytes > 1073741824  # 1GB
+        for: 5m
+        labels:
+          severity: warning
+          component: controller
+        annotations:
+          summary: "CFGMS Controller high memory usage"
+          description: "Controller memory usage is {{ $value | humanizeBytes }} for more than 5 minutes"
+
+      # Controller down alert
+      - alert: CFGMSControllerDown
+        expr: up{job="cfgms-controller"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: controller
+        annotations:
+          summary: "CFGMS Controller is down"
+          description: "CFGMS Controller has been down for more than 1 minute"
+
+      # High error rate alert
+      - alert: CFGMSHighErrorRate
+        expr: rate(cfgms_errors_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          component: controller
+        annotations:
+          summary: "CFGMS Controller high error rate"
+          description: "Error rate is {{ $value | humanizePercentage }} for more than 2 minutes"
+
+  - name: cfgms_steward_alerts
+    rules:
+      # Too many disconnected stewards
+      - alert: CFGMSManyDisconnectedStewards
+        expr: cfgms_stewards_disconnected > 10
+        for: 3m
+        labels:
+          severity: warning
+          component: steward
+        annotations:
+          summary: "Many CFGMS Stewards disconnected"
+          description: "{{ $value }} stewards are currently disconnected"
+
+      # No stewards connected
+      - alert: CFGMSNoStewardsConnected
+        expr: cfgms_stewards_connected == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: steward
+        annotations:
+          summary: "No CFGMS Stewards connected"
+          description: "No stewards have been connected for more than 5 minutes"
+
+      # Steward registration failures
+      - alert: CFGMSStewardRegistrationFailures
+        expr: rate(cfgms_steward_registration_failures_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+          component: steward
+        annotations:
+          summary: "CFGMS Steward registration failures"
+          description: "Steward registration failure rate is {{ $value | humanizePercentage }}"
+
+  - name: cfgms_configuration_alerts
+    rules:
+      # Configuration application failures
+      - alert: CFGMSConfigurationFailures
+        expr: rate(cfgms_configuration_failures_total[5m]) > 0.1
+        for: 3m
+        labels:
+          severity: warning
+          component: configuration
+        annotations:
+          summary: "CFGMS Configuration application failures"
+          description: "Configuration failure rate is {{ $value | humanizePercentage }}"
+
+      # Configuration validation errors
+      - alert: CFGMSConfigurationValidationErrors
+        expr: rate(cfgms_configuration_validation_errors_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+          component: configuration
+        annotations:
+          summary: "CFGMS Configuration validation errors"
+          description: "Configuration validation error rate is {{ $value | humanizePercentage }}"
+
+  - name: cfgms_monitoring_alerts
+    rules:
+      # Export failures
+      - alert: CFGMSMonitoringExportFailure
+        expr: cfgms_export_failures_total > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "CFGMS Monitoring export failures"
+          description: "{{ $value }} monitoring export failures detected"
+
+      # Export lag
+      - alert: CFGMSMonitoringExportLag
+        expr: time() - cfgms_last_export_timestamp > 300  # 5 minutes
+        for: 2m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "CFGMS Monitoring export lag"
+          description: "Last successful export was {{ $value | humanizeDuration }} ago"
+
+  - name: cfgms_system_alerts
+    rules:
+      # Disk space usage
+      - alert: CFGMSHighDiskUsage
+        expr: cfgms_disk_usage_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "CFGMS High disk usage"
+          description: "Disk usage is {{ $value }}% for more than 5 minutes"
+
+      # Too many goroutines
+      - alert: CFGMSHighGoroutineCount
+        expr: cfgms_goroutines > 1000
+        for: 5m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "CFGMS High goroutine count"
+          description: "Goroutine count is {{ $value }} for more than 5 minutes"
+
+      # Certificate expiration warning
+      - alert: CFGMSCertificateExpiringSoon
+        expr: cfgms_certificate_expiry_days < 30
+        for: 1m
+        labels:
+          severity: warning
+          component: security
+        annotations:
+          summary: "CFGMS Certificate expiring soon"
+          description: "Certificate expires in {{ $value }} days"
+
+      # Certificate already expired
+      - alert: CFGMSCertificateExpired
+        expr: cfgms_certificate_expiry_days < 0
+        for: 1m
+        labels:
+          severity: critical
+          component: security
+        annotations:
+          summary: "CFGMS Certificate expired"
+          description: "Certificate expired {{ $value | humanizeDuration }} ago"

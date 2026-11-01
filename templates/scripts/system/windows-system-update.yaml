@@ -1,0 +1,115 @@
+metadata:
+  id: windows-system-update
+  name: Windows System Update
+  description: Installs Windows Updates using PSWindowsUpdate module
+  version:
+    major: 1
+    minor: 0
+    patch: 0
+  author: cfgms-team@cfg.is
+  tags:
+    - system
+    - updates
+    - maintenance
+    - windows
+  category: system-maintenance
+  platform:
+    - windows
+  shell: powershell
+  parameters:
+    - name: AUTO_REBOOT
+      type: boolean
+      description: Automatically reboot if required after updates
+      required: false
+      default: "false"
+    - name: INSTALL_CRITICAL_ONLY
+      type: boolean
+      description: Only install critical and security updates
+      required: false
+      default: "false"
+  created_at: 2025-10-13T00:00:00Z
+  updated_at: 2025-10-13T00:00:00Z
+
+content: |
+  # Windows System Update Script
+  # Requires PSWindowsUpdate module
+
+  [CmdletBinding()]
+  param(
+      [string]$AUTO_REBOOT = "false",
+      [string]$INSTALL_CRITICAL_ONLY = "false"
+  )
+
+  $ErrorActionPreference = "Stop"
+
+  Write-Host "Starting Windows Update..."
+  Write-Host "Critical only: $INSTALL_CRITICAL_ONLY"
+  Write-Host "Auto reboot: $AUTO_REBOOT"
+
+  # Check if running as Administrator
+  if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+      Write-Error "This script must be run as Administrator"
+      exit 1
+  }
+
+  # Install PSWindowsUpdate module if not present
+  if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
+      Write-Host "Installing PSWindowsUpdate module..."
+      Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+      Install-Module -Name PSWindowsUpdate -Force -AllowClobber
+  }
+
+  Import-Module PSWindowsUpdate
+
+  # Configure update parameters
+  $updateParams = @{
+      MicrosoftUpdate = $true
+      AcceptAll = $true
+      Verbose = $true
+  }
+
+  if ($INSTALL_CRITICAL_ONLY -eq "true") {
+      $updateParams.Category = @('Critical Updates', 'Security Updates')
+      Write-Host "Installing critical and security updates only..."
+  } else {
+      Write-Host "Installing all available updates..."
+  }
+
+  if ($AUTO_REBOOT -eq "true") {
+      $updateParams.AutoReboot = $true
+      Write-Host "System will reboot automatically if required"
+  } else {
+      $updateParams.IgnoreReboot = $true
+  }
+
+  # Install updates
+  try {
+      $result = Get-WindowsUpdate @updateParams -Install
+
+      Write-Host ""
+      Write-Host "Update Summary:"
+      Write-Host "  Total updates: $($result.Count)"
+      Write-Host "  Successfully installed: $(($result | Where-Object {$_.Result -eq 'Installed'}).Count)"
+      Write-Host "  Failed: $(($result | Where-Object {$_.Result -eq 'Failed'}).Count)"
+
+      # Check if reboot is required
+      if (Get-WURebootStatus -Silent) {
+          Write-Host ""
+          Write-Host "WARNING: System reboot is required"
+
+          if ($AUTO_REBOOT -ne "true") {
+              Write-Host "Please reboot the system to complete installation"
+              exit 100
+          }
+      }
+
+      Write-Host ""
+      Write-Host "Windows Update completed successfully"
+      exit 0
+
+  } catch {
+      Write-Error "Failed to install updates: $_"
+      exit 1
+  }
+
+hash: placeholder

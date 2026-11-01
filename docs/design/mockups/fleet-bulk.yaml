@@ -1,0 +1,4 @@
+file: fleet-bulk.html
+order: 11
+status: **Reference**
+what: Fleet **bulk selection + actions** (Epic #2931 · #2939) — a checkbox column + select-all-on-page and a bulk-action bar layered on the fleet table: **Edit tags** live (one authorized call per steward), **Decommission** deferred ("SOON"). Selection clears on page/filter/sort. Both themes.

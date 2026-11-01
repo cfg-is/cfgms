@@ -1,0 +1,460 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+// Package sqlite implements StewardStore using SQLite for durable fleet registry storage.
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+)
+
+// SQLiteStewardStore implements business.StewardStore using a SQLite database.
+// It stores fleet registration data in the `stewards` table, which is append-only
+// in practice (deregistered records are retained, never deleted).
+type SQLiteStewardStore struct {
+	db *sql.DB
+}
+
+// Initialize is a no-op; schema is applied in openAndInit.
+func (s *SQLiteStewardStore) Initialize(_ context.Context) error { return nil }
+
+// Close closes the database connection.
+func (s *SQLiteStewardStore) Close() error {
+	if s.db != nil {
+		return s.db.Close()
+	}
+	return nil
+}
+
+// RegisterSteward creates a new steward record. Returns ErrStewardAlreadyExists if
+// a record with the same ID already exists.
+func (s *SQLiteStewardStore) RegisterSteward(ctx context.Context, record *business.StewardRecord) error {
+	if record == nil {
+		return fmt.Errorf("sqlite: record cannot be nil")
+	}
+	if record.ID == "" {
+		return fmt.Errorf("sqlite: steward ID cannot be empty")
+	}
+
+	now := nowUTC()
+	status := record.Status
+	if status == "" {
+		status = business.StewardStatusRegistered
+	}
+
+	err := retryOnBusy(ctx, func() error {
+		keyPub := record.IdentityKeyPub
+		if keyPub == nil {
+			keyPub = []byte{}
+		}
+		hiddenInt := 0
+		if record.Hidden {
+			hiddenInt = 1
+		}
+		_, e := s.db.ExecContext(ctx, `
+			INSERT INTO stewards
+				(id, hostname, platform, arch, version, ip_address, status,
+				 registered_at, last_seen, last_heartbeat_at,
+				 device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json,
+				 tenant_id, hidden)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			record.ID,
+			record.Hostname,
+			record.Platform,
+			record.Arch,
+			record.Version,
+			record.IPAddress,
+			string(status),
+			formatTime(now),
+			formatTime(now),
+			"", // last_heartbeat_at empty until first heartbeat
+			record.DeviceID,
+			keyPub,
+			record.KeyProtectionLevel,
+			record.KeyAlgorithm,
+			record.LastProvenanceJSON,
+			record.TenantID,
+			hiddenInt,
+		)
+		return e
+	})
+	if err != nil {
+		// Issue #3403: disambiguate by primary key, not by the columns SQLite names.
+		// Re-registering the SAME steward violates both stewards.id and
+		// uq_stewards_tenant_device, and SQLite reports whichever it checks first —
+		// so keying off "stewards.device_id" alone would turn a benign idempotent
+		// claim retry into a rejection. Only a violation with no row under this ID is
+		// a genuine device_id conflict with a DIFFERENT steward.
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			var exists int
+			probeErr := s.db.QueryRowContext(ctx,
+				`SELECT 1 FROM stewards WHERE id = ?`, record.ID).Scan(&exists)
+			if probeErr == nil {
+				return business.ErrStewardAlreadyExists
+			}
+			if strings.Contains(err.Error(), "stewards.device_id") {
+				return business.ErrStewardDeviceIDConflict
+			}
+			return business.ErrStewardAlreadyExists
+		}
+		return fmt.Errorf("sqlite: failed to register steward %s: %w", record.ID, err)
+	}
+	return nil
+}
+
+// UpdateHeartbeat records a heartbeat, updating last_heartbeat_at and last_seen.
+// An empty version leaves the stored version unchanged.
+func (s *SQLiteStewardStore) UpdateHeartbeat(ctx context.Context, stewardID, version string) error {
+	now := formatTime(nowUTC())
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var e error
+		res, e = s.db.ExecContext(ctx, `
+			UPDATE stewards SET last_heartbeat_at = ?, last_seen = ?,
+				version = CASE WHEN ? = '' THEN version ELSE ? END
+			WHERE id = ?`,
+			now, now, version, version, stewardID,
+		)
+		return e
+	})
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to update heartbeat for steward %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return nil
+}
+
+// GetSteward retrieves the record for the given steward ID.
+func (s *SQLiteStewardStore) GetSteward(ctx context.Context, stewardID string) (*business.StewardRecord, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, hostname, platform, arch, version, ip_address, status,
+		       registered_at, last_seen, last_heartbeat_at,
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json,
+		       tenant_id, hidden
+		FROM stewards WHERE id = ?`, stewardID)
+	return scanStewardRow(row)
+}
+
+// GetStewardByDeviceID retrieves the record whose device_id matches the given
+// fingerprint, with NO tenant predicate. Device identifiers are allowed to
+// collide across tenants by design, so when more than one row matches, the row
+// with the lexicographically smallest id is returned — ORDER BY id ASC makes
+// this deterministic instead of leaving the choice to whichever row SQLite
+// visits first. See the interface doc comment (business.StewardStore) for who
+// may call this unscoped form.
+// Returns ErrStewardNotFound when no matching record exists.
+func (s *SQLiteStewardStore) GetStewardByDeviceID(ctx context.Context, deviceID string) (*business.StewardRecord, error) {
+	if deviceID == "" {
+		return nil, fmt.Errorf("sqlite: device ID cannot be empty")
+	}
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, hostname, platform, arch, version, ip_address, status,
+		       registered_at, last_seen, last_heartbeat_at,
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json,
+		       tenant_id, hidden
+		FROM stewards WHERE device_id = ? ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`, deviceID)
+	return scanStewardRow(row)
+}
+
+// GetStewardByDeviceIDForTenant retrieves the record whose device_id matches
+// the given fingerprint AND whose tenant_id matches tenantID. Returns
+// ErrStewardNotFound when no matching record exists in the given tenant, even
+// if deviceID matches a record belonging to a different tenant.
+func (s *SQLiteStewardStore) GetStewardByDeviceIDForTenant(ctx context.Context, deviceID, tenantID string) (*business.StewardRecord, error) {
+	if deviceID == "" {
+		return nil, fmt.Errorf("sqlite: device ID cannot be empty")
+	}
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, hostname, platform, arch, version, ip_address, status,
+		       registered_at, last_seen, last_heartbeat_at,
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json,
+		       tenant_id, hidden
+		FROM stewards WHERE device_id = ? AND tenant_id = ? ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`,
+		deviceID, tenantID)
+	return scanStewardRow(row)
+}
+
+// ListStewards returns all steward records regardless of status.
+func (s *SQLiteStewardStore) ListStewards(ctx context.Context) ([]*business.StewardRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, hostname, platform, arch, version, ip_address, status,
+		       registered_at, last_seen, last_heartbeat_at,
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json,
+		       tenant_id, hidden
+		FROM stewards ORDER BY registered_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: failed to list stewards: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanStewardRows(rows)
+}
+
+// ListStewardsByStatus returns records with the given status. Uses an indexed query.
+func (s *SQLiteStewardStore) ListStewardsByStatus(ctx context.Context, status business.StewardStatus) ([]*business.StewardRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, hostname, platform, arch, version, ip_address, status,
+		       registered_at, last_seen, last_heartbeat_at,
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json,
+		       tenant_id, hidden
+		FROM stewards WHERE status = ? ORDER BY registered_at ASC`,
+		string(status),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: failed to list stewards by status: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanStewardRows(rows)
+}
+
+// UpdateStewardStatus updates the lifecycle status of the given steward and bumps last_seen.
+func (s *SQLiteStewardStore) UpdateStewardStatus(ctx context.Context, stewardID string, status business.StewardStatus) error {
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var e error
+		res, e = s.db.ExecContext(ctx, `
+			UPDATE stewards SET status = ?, last_seen = ? WHERE id = ?`,
+			string(status), formatTime(nowUTC()), stewardID,
+		)
+		return e
+	})
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to update steward status %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return nil
+}
+
+// TransitionStewardStatus applies status only if the stored status is in from.
+// The check is part of the UPDATE's WHERE clause, so it is atomic with the write.
+func (s *SQLiteStewardStore) TransitionStewardStatus(ctx context.Context, stewardID string, status business.StewardStatus, from ...business.StewardStatus) (bool, error) {
+	if len(from) == 0 {
+		return false, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(from)), ",")
+	args := []interface{}{string(status), formatTime(nowUTC()), stewardID}
+	for _, f := range from {
+		args = append(args, string(f))
+	}
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var e error
+		// #nosec G202 -- placeholders is only "?" markers; all values are bound parameters.
+		res, e = s.db.ExecContext(ctx,
+			`UPDATE stewards SET status = ?, last_seen = ? WHERE id = ? AND status IN (`+placeholders+`)`, args...)
+		return e
+	})
+	if err != nil {
+		return false, fmt.Errorf("sqlite: failed to transition steward status %s: %w", stewardID, err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return true, nil
+	}
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM stewards WHERE id = ?`, stewardID).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, business.ErrStewardNotFound
+		}
+		return false, fmt.Errorf("sqlite: failed to probe steward %s: %w", stewardID, err)
+	}
+	return false, nil
+}
+
+// SetStewardHidden sets the operator-controlled visibility flag for the given steward.
+func (s *SQLiteStewardStore) SetStewardHidden(ctx context.Context, stewardID string, hidden bool) error {
+	hiddenInt := 0
+	if hidden {
+		hiddenInt = 1
+	}
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var e error
+		res, e = s.db.ExecContext(ctx, `
+			UPDATE stewards SET hidden = ? WHERE id = ?`,
+			hiddenInt, stewardID,
+		)
+		return e
+	})
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to set hidden flag for steward %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return nil
+}
+
+// SetStewardProvenance replaces the steward's provenance baseline.
+func (s *SQLiteStewardStore) SetStewardProvenance(ctx context.Context, stewardID, provenanceJSON string) error {
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var e error
+		res, e = s.db.ExecContext(ctx, `
+			UPDATE stewards SET last_provenance_json = ? WHERE id = ?`,
+			provenanceJSON, stewardID,
+		)
+		return e
+	})
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to set provenance for steward %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return nil
+}
+
+// RebindStewardIdentity replaces the steward's device identity and clears its
+// provenance baseline. A device_id held by another live steward in the tenant
+// is reported as ErrStewardDeviceIDConflict.
+func (s *SQLiteStewardStore) RebindStewardIdentity(ctx context.Context, stewardID, deviceID string, identityKeyPub []byte, keyProtectionLevel, keyAlgorithm string) error {
+	if identityKeyPub == nil {
+		identityKeyPub = []byte{}
+	}
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var e error
+		res, e = s.db.ExecContext(ctx, `
+			UPDATE stewards SET device_id = ?, identity_key_pub = ?, key_protection_level = ?, key_algorithm = ?, last_provenance_json = ''
+			WHERE id = ?`,
+			deviceID, identityKeyPub, keyProtectionLevel, keyAlgorithm, stewardID,
+		)
+		return e
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return business.ErrStewardDeviceIDConflict
+		}
+		return fmt.Errorf("sqlite: failed to rebind identity for steward %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return nil
+}
+
+// DeregisterSteward marks the steward as deregistered. Records are retained for audit.
+func (s *SQLiteStewardStore) DeregisterSteward(ctx context.Context, stewardID string) error {
+	return s.UpdateStewardStatus(ctx, stewardID, business.StewardStatusDeregistered)
+}
+
+// GetStewardsSeen returns all stewards whose last_seen time is after the given time.
+func (s *SQLiteStewardStore) GetStewardsSeen(ctx context.Context, since time.Time) ([]*business.StewardRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, hostname, platform, arch, version, ip_address, status,
+		       registered_at, last_seen, last_heartbeat_at,
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json,
+		       tenant_id, hidden
+		FROM stewards WHERE last_seen > ? ORDER BY last_seen DESC`,
+		formatTime(since),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: failed to get stewards seen since %v: %w", since, err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanStewardRows(rows)
+}
+
+// UpdateStewardTenant moves a steward to a different tenant by updating its
+// tenant_id column, guarded by a compare-and-swap on the steward's current
+// tenant (Issue #3895).
+func (s *SQLiteStewardStore) UpdateStewardTenant(ctx context.Context, stewardID, expectedTenantID, newTenantID string) error {
+	var res sql.Result
+	err := retryOnBusy(ctx, func() error {
+		var e error
+		res, e = s.db.ExecContext(ctx,
+			`UPDATE stewards SET tenant_id = ? WHERE id = ? AND tenant_id = ?`,
+			newTenantID, stewardID, expectedTenantID,
+		)
+		return e
+	})
+	if err != nil {
+		return fmt.Errorf("sqlite: failed to update tenant for steward %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return nil
+}
+
+// HealthCheck verifies the database is reachable.
+func (s *SQLiteStewardStore) HealthCheck(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
+// ---- helpers ----------------------------------------------------------------
+
+// scanStewardRow scans a *sql.Row into a StewardRecord.
+func scanStewardRow(row *sql.Row) (*business.StewardRecord, error) {
+	r := &business.StewardRecord{}
+	var statusStr, regStr, lastSeenStr, lastHBStr string
+	var keyPub []byte
+	var hiddenInt int
+	err := row.Scan(
+		&r.ID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
+		&statusStr, &regStr, &lastSeenStr, &lastHBStr,
+		&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON,
+		&r.TenantID, &hiddenInt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, business.ErrStewardNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: failed to scan steward: %w", err)
+	}
+	r.IdentityKeyPub = keyPub
+	r.Hidden = hiddenInt != 0
+	return populateSteward(r, statusStr, regStr, lastSeenStr, lastHBStr), nil
+}
+
+// scanStewardRows scans *sql.Rows into a slice of StewardRecords.
+func scanStewardRows(rows *sql.Rows) ([]*business.StewardRecord, error) {
+	var records []*business.StewardRecord
+	for rows.Next() {
+		r := &business.StewardRecord{}
+		var statusStr, regStr, lastSeenStr, lastHBStr string
+		var keyPub []byte
+		var hiddenInt int
+		if err := rows.Scan(
+			&r.ID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
+			&statusStr, &regStr, &lastSeenStr, &lastHBStr,
+			&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON,
+			&r.TenantID, &hiddenInt,
+		); err != nil {
+			return nil, fmt.Errorf("sqlite: failed to scan steward row: %w", err)
+		}
+		r.IdentityKeyPub = keyPub
+		r.Hidden = hiddenInt != 0
+		records = append(records, populateSteward(r, statusStr, regStr, lastSeenStr, lastHBStr))
+	}
+	return records, rows.Err()
+}
+
+// populateSteward fills in the time and status fields from their string representations.
+func populateSteward(r *business.StewardRecord, statusStr, regStr, lastSeenStr, lastHBStr string) *business.StewardRecord {
+	r.Status = business.StewardStatus(statusStr)
+	r.RegisteredAt = parseTime(regStr)
+	r.LastSeen = parseTime(lastSeenStr)
+	if lastHBStr != "" {
+		r.LastHeartbeatAt = parseTime(lastHBStr)
+	}
+	return r
+}
+
+// Compile-time assertion
+var _ business.StewardStore = (*SQLiteStewardStore)(nil)

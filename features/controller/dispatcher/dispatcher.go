@@ -1,0 +1,1343 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+// Package dispatcher drains the controller ExecutionQueue, sending pending
+// script executions to stewards via the control plane.
+//
+// A per-device ownership lock (sync.Map[deviceID → chan struct{}] with capacity 1)
+// ensures at most one job runs per steward at a time. The dispatcher fires on
+// every heartbeat and on a configurable polling interval (default 30 s). On
+// startup it fires once immediately to drain any executions queued before the
+// dispatcher started.
+package dispatcher
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/cfgis/cfgms/features/config/signature"
+	script "github.com/cfgis/cfgms/features/modules/stdlib/script"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/logging"
+)
+
+const (
+	defaultPollInterval = 30 * time.Second
+	// maxScriptContentBytes is the decoded size cap for script_content params.
+	// gRPC default max recv is 4 MB; 1 MB decoded ≈ 1.33 MB base64 leaves margin.
+	maxScriptContentBytes = 1 << 20 // 1 MiB
+
+	// defaultLockGraceMultiplier is multiplied by an execution's own Timeout to
+	// compute the per-device lock TTL used by the sweep. A value of 2 gives 100%
+	// headroom above the declared script timeout before a lock is considered wedged.
+	defaultLockGraceMultiplier = 2.0
+)
+
+// lockMetaEntry holds per-device lock metadata used by the TTL sweep and the
+// cancel-release path. executionID is stored alongside acquiredAt so that
+// ReleaseDeviceForCancelledExecution can verify that a late cancel does not
+// accidentally release a lock now held by a newer execution for the same device.
+type lockMetaEntry struct {
+	acquiredAt  time.Time
+	executionID string
+	// lockTTL is exec.Timeout * lockGraceMultiplier. Zero means use d.defaultLockTTL.
+	lockTTL time.Duration
+}
+
+// Dispatcher drains the ExecutionQueue and sends CommandExecuteScript to stewards.
+//
+// Per-device serialization: a capacity-1 channel stored in deviceLocks acts as
+// a mutex for each steward. The lock is acquired BEFORE calling DequeueForDevice
+// (so nothing is dequeued when the device is already busy) and released only
+// inside handleCompletionEvent or on send failure, ensuring exactly one
+// execution is in-flight per device at any given time.
+//
+// Three release paths ensure the lock is never held permanently:
+//  1. handleCompletionEvent (normal completion)
+//  2. TTL sweep in pollLoop (no completion event within lockTTL)
+//  3. ReleaseDeviceForCancelledExecution (explicit cancellation via CancelRun)
+type Dispatcher struct {
+	queue              *script.ExecutionQueue
+	controlPlane       controlplaneInterfaces.ControlPlaneProvider
+	signer             signature.Signer            // optional; when nil commands are sent unsigned
+	isLocallyConnected func(stewardID string) bool // optional; nil = dispatch to every queued device
+	termSource         TermSource                  // optional; when nil commands carry term 0
+	requireSignedAdhoc bool
+	// deviceLocks maps deviceID → chan struct{} (capacity 1).
+	// A non-blocking send acquires the slot; a receive releases it.
+	deviceLocks  sync.Map
+	pollInterval time.Duration
+	logger       logging.Logger
+	// runSink, when set, receives job-completion notifications so the run/job
+	// tracking model can advance run status. Set once via SetRunCompletionSink
+	// before Start; nil when no run manager is wired.
+	runSink RunCompletionSink
+
+	// actionAudit, when set, receives every steward action the expiry sweep
+	// closes without a steward result (Issue #4625). Set once via
+	// SetActionAuditSink or Config.ActionAudit before Start.
+	actionAudit ActionAuditSink
+
+	// grantManager, when set, creates and consumes per-execution relay grants
+	// (Issue #1675). Set once via SetGrantManager before Start; nil = no grants.
+	grantManager GrantManager
+
+	// lockMetaMu guards lockMetaMap for atomic check-and-delete in the cancel and
+	// TTL-sweep paths. Separate from mu so neither sweep nor cancel blocks Stop.
+	lockMetaMu  sync.Mutex
+	lockMetaMap map[string]lockMetaEntry
+
+	// defaultLockTTL is used when a lock's execution has zero Timeout.
+	// Set to 10 × pollInterval in New — conservative, covering multi-minute scripts.
+	defaultLockTTL time.Duration
+
+	// lockGraceMultiplier is applied to exec.Timeout to compute the per-execution
+	// lock TTL. Configurable via Config.LockGraceMultiplier; defaults to 2.
+	lockGraceMultiplier float64
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+
+	// mu protects stopped. wg.Add must only be called when stopped is false
+	// to prevent a race between external callbacks and wg.Wait in Stop.
+	mu      sync.Mutex
+	stopped bool
+}
+
+// RunCompletionSink is notified when a dispatched execution reaches a terminal
+// state so the run/job tracking model can advance run status (Issue #1673).
+// It is implemented by *run.Manager. The dispatcher depends on this narrow
+// interface rather than importing the run package directly.
+type RunCompletionSink interface {
+	RecordJobCompletion(ctx context.Context, runID, jobID, executionID string, failed bool) error
+	// RecordJobResult records the terminal completion together with the captured
+	// execution result (stdout/stderr/exit code) so `cfg steward exec` can surface
+	// output (Issue #1995, root cause D).
+	RecordJobResult(ctx context.Context, runID, jobID, executionID string, failed bool, output, stderr string, exitCode int) error
+
+	// ClaimActionDispatch is the compare-and-set a steward action must win before
+	// it is sent: pending → dispatched. claimed is false when the job is no longer
+	// pending; status is then its current status ("dispatched" means the action
+	// was already sent and must not be sent again) (Issue #4625).
+	ClaimActionDispatch(ctx context.Context, runID, jobID string, at time.Time) (claimed bool, status string, err error)
+	// RecordActionResult records a steward action's result code and advances the
+	// job and run (Issue #4625).
+	RecordActionResult(ctx context.Context, runID, jobID, executionID, resultCode string) error
+	// ExpireActionJobs closes steward-action jobs that will never report — pending
+	// past their TTL ("expired"), or dispatched but unreported past their bound
+	// ("no_result") — and returns the jobs this caller closed. The transition is a
+	// compare-and-set in the shared store, so across nodes each job is returned to
+	// exactly one caller (Issue #4625).
+	ExpireActionJobs(ctx context.Context, now time.Time) ([]ExpiredActionJob, error)
+}
+
+// ExpiredActionJob describes a steward action closed without a steward result.
+type ExpiredActionJob = script.ExpiredActionJob
+
+// LateResultIgnored describes a result that arrived for a job the run store
+// already held in a terminal status. It carries identifiers and codes only: no
+// script output and no stderr, since the result was not accepted.
+type LateResultIgnored struct {
+	RunID       string
+	JobID       string
+	ExecutionID string
+	DeviceID    string
+	TenantID    string
+	CreatedBy   string
+	// Kind is "script" or "steward_action".
+	Kind string
+	// RecordedStatus is the terminal status the job row holds.
+	RecordedStatus string
+	// ReportedStatus is the outcome the late result reported: completed or failed.
+	ReportedStatus string
+	// ReportedExitCode is the exit code the late result reported.
+	ReportedExitCode int
+	// ReportedResultCode is the steward-action result code; empty for scripts.
+	ReportedResultCode string
+	At                 time.Time
+}
+
+// ActionAuditSink is the dispatcher's narrow handle on the audit log. The expiry
+// sweep passes it every action it closed as "expired" (never delivered) or
+// "no_result" (sent, never reported) so neither outcome disappears (Issue #4625).
+type ActionAuditSink interface {
+	RecordActionExpired(ctx context.Context, job ExpiredActionJob)
+	// RecordActionCompleted records a steward action that reported a result. The
+	// job carries the result code the run store recorded (Issue #4628).
+	RecordActionCompleted(ctx context.Context, job ExpiredActionJob)
+	// RecordLateResultIgnored records a result that arrived after the job was
+	// already terminal (for instance cancelled while dispatched, so the work may
+	// have run). The job row stays unchanged; this keeps the audit trail honest.
+	RecordLateResultIgnored(ctx context.Context, late LateResultIgnored)
+}
+
+// GrantManager creates and consumes per-execution relay grants (Issue #1675).
+// It is implemented by *run.Manager.
+type GrantManager interface {
+	// CreateGrant records a JIT relay grant at dispatch time.
+	CreateGrant(deviceID, tenantID, executionID string, scope []string, ttl time.Duration) error
+	// ConsumeGrant marks the grant consumed when the execution completes.
+	ConsumeGrant(executionID string) error
+}
+
+// Config holds Dispatcher configuration.
+// TermSource provides the current fencing term for outbound commands.
+type TermSource interface {
+	GetTerm() uint64
+}
+
+type Config struct {
+	Queue        *script.ExecutionQueue
+	ControlPlane controlplaneInterfaces.ControlPlaneProvider
+	// Signer signs each CommandExecuteScript before transmission.
+	// When nil commands are sent without a signature (unsecured/transitional mode).
+	// Should be set to the same signer used by the command publisher so all
+	// controller-issued commands carry consistent signatures.
+	Signer signature.Signer
+	// RequireSignedAdhoc makes a signer mandatory and prevents unsigned
+	// execute_script delivery. Public-beta deployments must set this true.
+	RequireSignedAdhoc bool
+	// IsLocallyConnected reports whether a steward's control-plane session is
+	// held by this node. When set, the dispatcher only dispatches to locally
+	// connected stewards: with a cluster-shared execution queue (Issue #4528)
+	// every node sees every device's work, and the node holding the session is
+	// the one that must deliver it and receive its result. Nil dispatches to
+	// every device in the queue (single-node behaviour).
+	IsLocallyConnected func(stewardID string) bool
+	// TermSource stamps the current fencing term onto every execute_script
+	// command, as the command publisher does for all other commands (#3390).
+	// Stewards that have seen a stamped command reject term 0 (ADR-029
+	// Decision 6), so a cluster without it can never run ad-hoc scripts
+	// (Issue #4510). Nil sends term 0 (single-server behaviour).
+	TermSource TermSource
+	// ActionAudit receives each steward action the expiry sweep closes without a
+	// result. Optional: when nil the closure is still logged and recorded on the
+	// job, but not written to the audit log.
+	ActionAudit ActionAuditSink
+	// PollInterval is how often the background loop polls all devices.
+	// Defaults to 30 s when zero.
+	PollInterval time.Duration
+	// LockGraceMultiplier is applied to each execution's Timeout to compute the
+	// per-device lock TTL for the sweep. Defaults to 2 (100% grace headroom above
+	// the declared script timeout). When the execution has no declared Timeout,
+	// 10 × PollInterval is used instead. Configurable mainly for tests.
+	LockGraceMultiplier float64
+	Logger              logging.Logger
+}
+
+// New creates a new Dispatcher. Call Start to begin operation.
+func New(cfg *Config) (*Dispatcher, error) {
+	if cfg.Queue == nil {
+		return nil, fmt.Errorf("execution queue is required")
+	}
+	if cfg.ControlPlane == nil {
+		return nil, fmt.Errorf("control plane provider is required")
+	}
+	if cfg.Logger == nil {
+		return nil, fmt.Errorf("logger is required")
+	}
+	if cfg.RequireSignedAdhoc && cfg.Signer == nil {
+		return nil, fmt.Errorf("signed ad-hoc execution requires a command signer")
+	}
+
+	interval := cfg.PollInterval
+	if interval == 0 {
+		interval = defaultPollInterval
+	}
+
+	graceMultiplier := cfg.LockGraceMultiplier
+	if graceMultiplier == 0 {
+		graceMultiplier = defaultLockGraceMultiplier
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	return &Dispatcher{
+		queue:               cfg.Queue,
+		controlPlane:        cfg.ControlPlane,
+		signer:              cfg.Signer,
+		isLocallyConnected:  cfg.IsLocallyConnected,
+		termSource:          cfg.TermSource,
+		requireSignedAdhoc:  cfg.RequireSignedAdhoc,
+		actionAudit:         cfg.ActionAudit,
+		pollInterval:        interval,
+		logger:              cfg.Logger,
+		lockMetaMap:         make(map[string]lockMetaEntry),
+		defaultLockTTL:      10 * interval,
+		lockGraceMultiplier: graceMultiplier,
+		ctx:                 ctx,
+		cancel:              cancel,
+	}, nil
+}
+
+// SetRunCompletionSink wires the run/job tracking sink that receives a
+// notification when a dispatched execution completes. It must be called before
+// Start so the field is published before the event subscription begins.
+func (d *Dispatcher) SetRunCompletionSink(sink RunCompletionSink) {
+	d.runSink = sink
+}
+
+// SetActionAuditSink wires the audit handle that records steward actions closed
+// without a result (Issue #4625). Must be called before Start.
+func (d *Dispatcher) SetActionAuditSink(sink ActionAuditSink) {
+	d.actionAudit = sink
+}
+
+// SetGrantManager wires the grant manager for zero-trust script API access
+// (Issue #1675). Must be called before Start.
+func (d *Dispatcher) SetGrantManager(gm GrantManager) {
+	d.grantManager = gm
+}
+
+// Start begins the polling loop and subscribes to script terminal events.
+// It subscribes to both EventScriptCompleted (success/non-zero exit) and
+// EventCommandFailed (executor error before a result is produced) so a failed
+// execution still records a terminal completion and releases the device lock
+// (Issue #1995, root cause C).
+func (d *Dispatcher) Start(ctx context.Context) error {
+	filter := &controlplaneTypes.EventFilter{
+		EventTypes: []controlplaneTypes.EventType{
+			controlplaneTypes.EventScriptCompleted,
+			controlplaneTypes.EventCommandFailed,
+		},
+	}
+	if err := d.controlPlane.SubscribeEvents(ctx, filter, d.handleCompletionEvent); err != nil {
+		return fmt.Errorf("dispatcher: subscribe events: %w", err)
+	}
+
+	// Drain any executions queued before Start was called. Running this
+	// synchronously before the goroutine starts ensures callers that queue
+	// executions after Start returns never race with the startup dispatch.
+	d.dispatchAll(d.ctx)
+
+	d.wg.Add(1)
+	go d.pollLoop()
+
+	d.logger.Info("Job dispatcher started", "poll_interval", d.pollInterval)
+	return nil
+}
+
+// Stop cancels the polling loop and waits for in-flight goroutines to exit.
+func (d *Dispatcher) Stop() {
+	d.cancel()
+	// Mark as stopped under lock so concurrent external callers (OnHeartbeat,
+	// handleCompletionEvent) see the flag before wg.Wait returns and wg reaches 0.
+	d.mu.Lock()
+	d.stopped = true
+	d.mu.Unlock()
+	d.wg.Wait()
+	d.logger.Info("Job dispatcher stopped")
+}
+
+// tryAdd calls wg.Add(1) only if the dispatcher has not yet been stopped.
+// Returns false if Stop has already been called — caller must not launch a goroutine.
+func (d *Dispatcher) tryAdd() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.stopped {
+		return false
+	}
+	d.wg.Add(1)
+	return true
+}
+
+// OnHeartbeat is called by the heartbeat service on every received heartbeat.
+// It dispatches pending jobs for the given device without waiting for the poll cycle.
+func (d *Dispatcher) OnHeartbeat(stewardID string) {
+	if !d.tryAdd() {
+		return
+	}
+	go func() {
+		defer d.wg.Done()
+		d.dispatchForDevice(d.ctx, stewardID)
+	}()
+}
+
+// lockForDevice returns (or creates) the capacity-1 channel for deviceID.
+func (d *Dispatcher) lockForDevice(deviceID string) chan struct{} {
+	val, _ := d.deviceLocks.LoadOrStore(deviceID, make(chan struct{}, 1))
+	return val.(chan struct{})
+}
+
+// tryAcquireDevice attempts a non-blocking send on the device's channel.
+// Returns true if the lock was acquired, false if another dispatch is in-flight.
+// On acquisition, a lockMetaEntry is recorded with the current time so the TTL
+// sweep can detect wedged locks. The executionID is filled in later via
+// setLockExecution once the dequeued execution is known.
+func (d *Dispatcher) tryAcquireDevice(deviceID string) bool {
+	ch := d.lockForDevice(deviceID)
+	select {
+	case ch <- struct{}{}:
+		d.lockMetaMu.Lock()
+		d.lockMetaMap[deviceID] = lockMetaEntry{acquiredAt: time.Now()}
+		d.lockMetaMu.Unlock()
+		return true
+	default:
+		return false
+	}
+}
+
+// setLockExecution updates the lock metadata for deviceID with the in-flight
+// executionID and its computed TTL. Called immediately after DequeueForDevice
+// returns the execution so the cancel and TTL-sweep paths can match by ID.
+func (d *Dispatcher) setLockExecution(deviceID, executionID string, timeout time.Duration) {
+	ttl := time.Duration(0)
+	if timeout > 0 {
+		ttl = time.Duration(float64(timeout) * d.lockGraceMultiplier)
+	}
+	d.setLockExecutionTTL(deviceID, executionID, ttl)
+}
+
+// setLockExecutionTTL is setLockExecution with an explicit lock TTL (zero keeps
+// the default). A steward action's lock lives exactly as long as its timeout, with
+// no grace multiplier: the expiry sweep closes the job at that bound, so the
+// device slot must be free by then (Issue #4625).
+func (d *Dispatcher) setLockExecutionTTL(deviceID, executionID string, ttl time.Duration) {
+	d.lockMetaMu.Lock()
+	defer d.lockMetaMu.Unlock()
+	entry, ok := d.lockMetaMap[deviceID]
+	if !ok {
+		return
+	}
+	entry.executionID = executionID
+	if ttl > 0 {
+		entry.lockTTL = ttl
+	}
+	d.lockMetaMap[deviceID] = entry
+}
+
+// releaseDevice drains the device's channel and clears its lock metadata,
+// freeing the slot for the next dispatch.
+func (d *Dispatcher) releaseDevice(deviceID string) {
+	ch := d.lockForDevice(deviceID)
+	select {
+	case <-ch:
+	default:
+	}
+	d.lockMetaMu.Lock()
+	delete(d.lockMetaMap, deviceID)
+	d.lockMetaMu.Unlock()
+}
+
+// releaseDeviceIfExecution releases the device lock only when the currently-held
+// executionID matches. This prevents a stale cancel or late sweep entry from
+// accidentally releasing a lock now held by a newer execution for the same device.
+// Returns true if the lock was released.
+//
+// The metadata is deleted under lockMetaMu before the channel is drained. Between
+// deletion and drain, tryAcquireDevice cannot succeed (channel still full), so no
+// new dispatch can start in that window.
+func (d *Dispatcher) releaseDeviceIfExecution(deviceID, executionID string) bool {
+	d.lockMetaMu.Lock()
+	entry, ok := d.lockMetaMap[deviceID]
+	if !ok || entry.executionID != executionID {
+		d.lockMetaMu.Unlock()
+		return false
+	}
+	delete(d.lockMetaMap, deviceID)
+	d.lockMetaMu.Unlock()
+
+	ch := d.lockForDevice(deviceID)
+	select {
+	case <-ch:
+	default:
+	}
+	return true
+}
+
+// ReleaseDeviceForCancelledExecution releases the per-device dispatch lock for
+// deviceID when the currently-held execution matches executionID. It is called
+// by run.Manager.CancelRun so the device is unblocked immediately on cancellation
+// rather than waiting for the TTL sweep.
+//
+// Returns true if the lock was released; false if the lock is held by a different
+// (newer) execution or is not currently held.
+func (d *Dispatcher) ReleaseDeviceForCancelledExecution(deviceID, executionID string) bool {
+	released := d.releaseDeviceIfExecution(deviceID, executionID)
+	if released {
+		d.logger.Info("Device lock released for cancelled execution",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"execution_id", logging.SanitizeLogValue(executionID))
+	}
+	return released
+}
+
+// sweepExpiredLocks checks all held device locks and releases any whose TTL has
+// elapsed without a completion event. The TTL is derived from the execution's own
+// Timeout (× lockGraceMultiplier); zero-Timeout executions use defaultLockTTL.
+// A Warn-level event with "event"="device_lock_ttl_released" is emitted for each
+// release so wedge incidents are distinguishable in logs from normal completions.
+func (d *Dispatcher) sweepExpiredLocks() {
+	now := time.Now()
+
+	d.lockMetaMu.Lock()
+	type expiredEntry struct {
+		deviceID    string
+		executionID string
+	}
+	var expired []expiredEntry
+	for deviceID, meta := range d.lockMetaMap {
+		ttl := meta.lockTTL
+		if ttl == 0 {
+			ttl = d.defaultLockTTL
+		}
+		if now.Sub(meta.acquiredAt) > ttl {
+			expired = append(expired, expiredEntry{deviceID, meta.executionID})
+		}
+	}
+	d.lockMetaMu.Unlock()
+
+	for _, e := range expired {
+		if d.releaseDeviceIfExecution(e.deviceID, e.executionID) {
+			d.logger.Warn("Device lock TTL exceeded; releasing wedged lock",
+				"event", "device_lock_ttl_released",
+				"device_id", logging.SanitizeLogValue(e.deviceID),
+				"execution_id", logging.SanitizeLogValue(e.executionID))
+		}
+	}
+}
+
+// pollLoop fires sweepExpiredLocks, sweepActionJobs then dispatchAll on each poll
+// interval tick. The sweeps run first so that any freed device slots are
+// immediately available for the following dispatchAll.
+// The initial dispatch on startup is handled synchronously by Start.
+func (d *Dispatcher) pollLoop() {
+	defer d.wg.Done()
+
+	ticker := time.NewTicker(d.pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-ticker.C:
+			d.sweepExpiredLocks()
+			d.sweepActionJobs(d.ctx)
+			d.dispatchAll(d.ctx)
+		}
+	}
+}
+
+// dispatchAll iterates all devices with pending executions and dispatches each.
+func (d *Dispatcher) dispatchAll(ctx context.Context) {
+	execsByDevice := d.queue.ListQueuedExecutions()
+	for deviceID := range execsByDevice {
+		if ctx.Err() != nil {
+			return
+		}
+		deviceID := deviceID
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			d.dispatchForDevice(ctx, deviceID)
+		}()
+	}
+}
+
+// dispatchForDevice sends the next queued execution for a device.
+//
+// The per-device lock is acquired BEFORE calling DequeueForDevice. If the lock
+// is already held (another execution is in-flight), the device is skipped
+// entirely — its executions remain in queued state and will be dispatched on
+// the next heartbeat or poll cycle after the current execution completes.
+//
+// The lock is released on error (before the command is sent) or by
+// handleCompletionEvent when the steward reports completion.
+func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
+	if ctx.Err() != nil {
+		return
+	}
+	// Issue #4528: with a shared queue, only the node holding the steward's
+	// session dispatches to it, so the dispatching node is also the node that
+	// receives the result. Other nodes leave the work queued.
+	if d.isLocallyConnected != nil && !d.isLocallyConnected(deviceID) {
+		return
+	}
+
+	// Acquire per-device slot BEFORE dequeuing.
+	if !d.tryAcquireDevice(deviceID) {
+		// Another execution is in-flight for this device — skip this cycle.
+		return
+	}
+
+	executions, err := d.queue.DequeueForDevice(deviceID)
+	if err != nil {
+		d.logger.Error("Failed to dequeue for device", "device_id", logging.SanitizeLogValue(deviceID), "error", logging.SanitizeLogValue(err.Error()))
+		d.releaseDevice(deviceID)
+		return
+	}
+
+	if len(executions) == 0 {
+		d.releaseDevice(deviceID)
+		return
+	}
+
+	// Dispatch only the first execution to enforce one-job-per-device serialization.
+	// Remaining executions (if any) were moved to dispatched state by DequeueForDevice;
+	// the queue's background maintenance (RequeueStale) will move them back to queued
+	// after dispatchTimeout so they can be picked up in a future cycle.
+	exec := executions[0]
+
+	// A steward action takes its own path: no script is prepared, no relay grant
+	// is created, and the command is steward_action, not execute_script.
+	if script.IsStewardAction(exec.Kind) {
+		d.dispatchStewardAction(ctx, deviceID, exec)
+		return
+	}
+
+	// Record executionID and lock TTL now that we know the execution.
+	d.setLockExecution(deviceID, exec.ExecutionID, exec.Timeout)
+
+	prepared, err := d.queue.PrepareExecutionForDevice(ctx, deviceID, "", exec)
+	if err != nil {
+		d.logger.Error("Failed to prepare execution",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		d.releaseDevice(deviceID)
+		return
+	}
+
+	if err := d.sendCommand(ctx, deviceID, exec, prepared); err != nil {
+		d.logger.Error("Failed to send execute_script command",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		// Release lock — the dispatched entry will be re-queued by background maintenance.
+		d.releaseDevice(deviceID)
+		return
+	}
+
+	// Lock is intentionally NOT released here. It is held until handleCompletionEvent
+	// receives the steward's EventScriptCompleted and calls releaseDevice. This ensures
+	// no second execution is dispatched while the first is running.
+}
+
+// metaInt reads an integer metadata value. A durable queue store returns
+// metadata through a JSON round-trip, so numbers arrive as float64 (or
+// json.Number) rather than int; reading only int would reset a retry counter
+// to 0 on every attempt and retry an idempotent failure forever (Issue #4528).
+func metaInt(v interface{}) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	}
+	return 0
+}
+
+// currentTerm returns the fencing term from the configured TermSource, or 0 when
+// none is set.
+func (d *Dispatcher) currentTerm() uint64 {
+	if d.termSource == nil {
+		return 0
+	}
+	return d.termSource.GetTerm()
+}
+
+// signCommand wraps cmd in a SignedCommand, signing it with the controller's
+// command signer when one is configured. The signature covers the whole command
+// as sent; it is the controller's outer layer and is independent of any operator
+// envelope carried in the params.
+func (d *Dispatcher) signCommand(cmd *controlplaneTypes.Command) (*controlplaneTypes.SignedCommand, error) {
+	return controlplaneTypes.SignCommand(cmd, d.signer)
+}
+
+// Operator-credential keys of an inline command: the X.509 set or the WebAuthn set
+// (which includes the per-steward roster manifest the steward verifies it against).
+var (
+	adhocX509Keys     = actionX509Keys
+	adhocWebAuthnKeys = append(append([]string{}, actionWebAuthnKeys...), "webauthn_manifest")
+	adhocEnvelopeKeys = append(append(append([]string{}, adhocX509Keys...), adhocWebAuthnKeys...), "nonce", "expires_at")
+)
+
+func hasParams(params map[string]interface{}, keys []string) bool {
+	for _, key := range keys {
+		if _, ok := params[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// BuildScriptCommandParams builds the execute_script command params for a prepared
+// execution. For a library run (exec.ScriptRef set) it forwards the library identity
+// and the stored signature (script_id, signature_algorithm, signature_value,
+// signature_public_key) so the steward verifies the script against its trusted keys;
+// the script ID comes from exec.ScriptRef because synthesis sets only ScriptRef.
+// An inline run carries none of those four params.
+func BuildScriptCommandParams(exec *script.QueuedExecution, prepared *script.PreparedExecution) map[string]interface{} {
+	params := map[string]interface{}{
+		"execution_id":   exec.ExecutionID,
+		"script_content": base64.StdEncoding.EncodeToString([]byte(prepared.ScriptContent)),
+		"shell":          string(exec.Shell),
+	}
+	for _, key := range adhocEnvelopeKeys {
+		if value, ok := exec.Metadata[key].(string); ok && value != "" {
+			params[key] = value
+		}
+	}
+	// Issue #3694: forward the operator-signed target list alongside the signature
+	// metadata above — the steward independently verifies its own ID is a member
+	// before executing an inline command.
+	if targets := extractMetaStringSlice(exec.Metadata, "targets"); len(targets) > 0 {
+		params["targets"] = targets
+	}
+	if exec.ScriptRef != "" {
+		params["script_id"] = exec.ScriptRef
+		params["signature_algorithm"] = prepared.SignatureAlgorithm
+		params["signature_value"] = prepared.SignatureValue
+		params["signature_public_key"] = prepared.SignaturePublicKey
+	}
+
+	if exec.ExecutionContext != "" {
+		params["execution_context"] = string(exec.ExecutionContext)
+	}
+
+	if exec.Timeout > 0 {
+		params["timeout_seconds"] = int64(exec.Timeout.Seconds())
+	}
+
+	if len(prepared.Environment) > 0 {
+		params["environment"] = prepared.Environment
+	}
+
+	if scope := extractMetaStringSlice(exec.Metadata, "required_api_scope"); len(scope) > 0 {
+		params["required_api_scope"] = scope
+	}
+	return params
+}
+
+// sendCommand builds and transmits a CommandExecuteScript via the control plane.
+func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *script.QueuedExecution, prepared *script.PreparedExecution) error {
+	content := prepared.ScriptContent
+
+	// Enforce decoded script content size cap before base64 encoding.
+	if len(content) > maxScriptContentBytes {
+		return fmt.Errorf("script exceeds maximum inline size of 1 MB (execution_id=%s, size=%d bytes)",
+			exec.ExecutionID, len(content))
+	}
+
+	params := BuildScriptCommandParams(exec, prepared)
+	if d.requireSignedAdhoc && exec.ScriptRef == "" {
+		// Exactly the credential the operator presented must be complete: the full
+		// X.509 set or the full WebAuthn set (roster manifest included). A partial
+		// set of either is refused.
+		if !hasParams(params, adhocX509Keys) && !hasParams(params, adhocWebAuthnKeys) {
+			return fmt.Errorf("signed ad-hoc execution missing a complete operator credential")
+		}
+	}
+
+	// Issue #1675: create JIT relay grant when the script requires API access.
+	// The scope comes from QueuedExecution.Metadata["required_api_scope"] which is set
+	// by SynthesizeScriptRun from the stored ScriptPrivilegeMetadata — never from runtime input.
+	if scope := extractMetaStringSlice(exec.Metadata, "required_api_scope"); len(scope) > 0 && d.grantManager != nil {
+		tenantID, ok := exec.Metadata["tenant_id"].(string)
+		if !ok || tenantID == "" {
+			return fmt.Errorf("create execution grant: missing or invalid tenant_id in script metadata")
+		}
+		ttl := exec.Timeout
+		if ttl <= 0 {
+			ttl = 15 * time.Minute // library-script grant lifetime; independent of the steward inline default
+		}
+		if err := d.grantManager.CreateGrant(deviceID, tenantID, exec.ExecutionID, scope, ttl); err != nil {
+			return fmt.Errorf("create execution grant: %w", err)
+		}
+	}
+
+	cmd := &controlplaneTypes.Command{
+		ID:        uuid.New().String(),
+		Type:      controlplaneTypes.CommandExecuteScript,
+		StewardID: deviceID,
+		Timestamp: time.Now(),
+		Params:    params,
+		Term:      d.currentTerm(),
+	}
+
+	signed, err := d.signCommand(cmd)
+	if err != nil {
+		return err
+	}
+	if d.requireSignedAdhoc && (signed.Signature == nil ||
+		signed.Signature.Signature == "" ||
+		!signed.Signature.Algorithm.IsValid()) {
+		return fmt.Errorf("signed ad-hoc execution refused unsigned command")
+	}
+
+	if err := d.controlPlane.SendCommand(ctx, signed); err != nil {
+		return fmt.Errorf("send command: %w", err)
+	}
+
+	d.logger.Info("Sent execute_script command",
+		"device_id", logging.SanitizeLogValue(deviceID),
+		"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+		"shell", logging.SanitizeLogValue(string(exec.Shell)))
+
+	return nil
+}
+
+// handleCompletionEvent processes EventScriptCompleted from stewards and calls
+// AcknowledgeCompletion. The event's StewardID (from the mTLS-verified control
+// plane connection) is used as the authoritative device identity — the
+// execution_id field alone is never trusted, preventing a compromised steward
+// from acknowledging another device's execution.
+func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlplaneTypes.Event) error {
+	// Both terminal event types are handled here (Issue #1995, root cause C):
+	//   - EventScriptCompleted: the executor ran and produced a result.
+	//   - EventCommandFailed:   the executor failed before producing a result
+	//     (e.g. unsupported shell, temp-file error). Treated as a terminal FAILED
+	//     completion so the run advances and the device lock is released.
+	if event.Type != controlplaneTypes.EventScriptCompleted &&
+		event.Type != controlplaneTypes.EventCommandFailed {
+		return nil
+	}
+	commandFailed := event.Type == controlplaneTypes.EventCommandFailed
+
+	// StewardID is set by the control plane from the mTLS peer certificate.
+	deviceID := event.StewardID
+	if deviceID == "" {
+		d.logger.Warn("Received script terminal event with empty steward_id — ignoring",
+			"event_type", string(event.Type))
+		return nil
+	}
+
+	var executionID string
+	if event.Details != nil {
+		executionID, _ = event.Details["execution_id"].(string)
+	}
+	if executionID == "" {
+		d.logger.Warn("Received script terminal event with no execution_id",
+			"event_type", string(event.Type),
+			"device_id", logging.SanitizeLogValue(deviceID))
+		return nil
+	}
+
+	// Determine completion state. A command_failed event is always terminal-failed.
+	// A script_completed event is failed only when the exit code is non-zero.
+	state := script.QueueStateCompleted
+	if commandFailed {
+		state = script.QueueStateFailed
+	} else if event.Details != nil {
+		if exitCode, ok := event.Details["exit_code"].(float64); ok && exitCode != 0 {
+			state = script.QueueStateFailed
+		}
+	}
+
+	var result *script.ExecutionResult
+	if event.Details != nil {
+		result = &script.ExecutionResult{}
+		if ec, ok := event.Details["exit_code"].(float64); ok {
+			result.ExitCode = int(ec)
+		}
+		// Prefer the full capped stdout/stderr keys (Issue #1978: steward now sends up to 1 MB
+		// under the "stdout"/"stderr" keys). Fall back to stdout_preview/stderr_preview (4 KB)
+		// for compatibility with older stewards that only send preview keys.
+		if stdout, ok := event.Details["stdout"].(string); ok {
+			result.Stdout = stdout
+		} else if stdout, ok := event.Details["stdout_preview"].(string); ok {
+			result.Stdout = stdout
+		}
+		if stderr, ok := event.Details["stderr"].(string); ok {
+			result.Stderr = stderr
+		} else if stderr, ok := event.Details["stderr_preview"].(string); ok {
+			result.Stderr = stderr
+		}
+		// On a command_failed event there is no result; surface the error string
+		// as stderr so the CLI shows why the execution failed.
+		if commandFailed && result.Stderr == "" {
+			if errStr, ok := event.Details["error"].(string); ok {
+				result.Stderr = errStr
+			}
+		}
+		if durMs, ok := event.Details["duration_ms"].(float64); ok {
+			result.Duration = time.Duration(durMs) * time.Millisecond
+		}
+
+		// 4 MB controller ceiling: defense-in-depth against a compromised or buggy steward
+		// bypassing the steward-side 1 MB cap (Issue #1978). Drop oversized output rather
+		// than storing unbounded data. The steward-side cap (1 MB) should prevent this from
+		// triggering under normal operation.
+		const controllerOutputCapBytes = 4 * 1024 * 1024
+		if len(result.Stdout)+len(result.Stderr) > controllerOutputCapBytes {
+			d.logger.Error("Execution output exceeds 4 MB controller ceiling; dropping output",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(executionID),
+				"stdout_bytes", len(result.Stdout),
+				"stderr_bytes", len(result.Stderr))
+			result.Stdout = ""
+			result.Stderr = ""
+		}
+	}
+
+	// Capture run-tracking metadata BEFORE AcknowledgeCompletion moves the entry
+	// out of the active queue. The run synthesis layer threads workflow_run_id,
+	// job_id, and idempotent flag through QueuedExecution.Metadata (Issue #1673,
+	// Issue #1674).
+	var runID, jobID string
+	var actionTenantID, actionCreatedBy string
+	var isIdempotent, isAction bool
+	var retryCount int
+	var origQE *script.QueuedExecution
+	for _, qe := range d.queue.PeekForDevice(deviceID) {
+		if qe.ExecutionID == executionID && qe.Metadata != nil {
+			runID, _ = qe.Metadata["workflow_run_id"].(string)
+			jobID, _ = qe.Metadata["job_id"].(string)
+			isIdempotent, _ = qe.Metadata["idempotent"].(bool)
+			retryCount = metaInt(qe.Metadata["retry_count"])
+			isAction = script.IsStewardAction(qe.Kind)
+			actionTenantID, _ = qe.Metadata["tenant_id"].(string)
+			actionCreatedBy, _ = qe.Metadata["created_by"].(string)
+			origQE = qe
+			break
+		}
+	}
+
+	// A steward action reports a result code, not script output. The code decides
+	// the recorded outcome; an action is never retried — it was authorized once,
+	// for one nonce (Issue #4625).
+	var actionResultCode string
+	if isAction {
+		actionResultCode = stewardActionResultCode(event, commandFailed)
+		state = script.QueueStateCompleted
+		if actionResultCode != "ok" {
+			state = script.QueueStateFailed
+		}
+	}
+
+	// Determine whether to retry before acknowledging, so we hold the full QE.
+	shouldRetry := !isAction && state == script.QueueStateFailed && isIdempotent && retryCount < 1
+
+	// AcknowledgeCompletion moves the queue entry out of the active set. A failure
+	// here (e.g. the entry was already evicted by a dispatch-timeout sweep) must NOT
+	// prevent run/job tracking from advancing — otherwise the job would be stuck
+	// pending forever even though the device lock is released, reproducing the very
+	// stall this handler exists to fix (Issue #1995, root cause B3). The run-sink
+	// update and grant consumption below therefore run regardless of ack success.
+	if err := d.queue.AcknowledgeCompletion(executionID, deviceID, state, result); err != nil {
+		d.logger.Error("Failed to acknowledge completion; recording terminal outcome anyway",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"execution_id", logging.SanitizeLogValue(executionID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	} else {
+		d.logger.Info("Script execution completed",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"execution_id", logging.SanitizeLogValue(executionID),
+			"state", state)
+	}
+
+	if shouldRetry && origQE != nil {
+		// Re-queue the idempotent execution with an incremented retry count.
+		// The run/job tracking record is NOT advanced yet — it will be updated
+		// when the retry completes (success or second failure).
+		retryMeta := make(map[string]interface{}, len(origQE.Metadata))
+		for k, v := range origQE.Metadata {
+			retryMeta[k] = v
+		}
+		retryMeta["retry_count"] = retryCount + 1
+
+		retryQE := &script.QueuedExecution{
+			ExecutionID:   uuid.New().String(),
+			ScriptID:      origQE.ScriptID,
+			ScriptVersion: origQE.ScriptVersion,
+			ScriptRef:     origQE.ScriptRef,
+			Shell:         origQE.Shell,
+			Parameters:    origQE.Parameters,
+			Timeout:       origQE.Timeout,
+			Metadata:      retryMeta,
+		}
+		if err := d.queue.QueueExecution(deviceID, retryQE); err != nil {
+			d.logger.Error("Failed to re-queue idempotent execution after failure",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(retryQE.ExecutionID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		} else {
+			d.logger.Info("Re-queued idempotent execution after failure",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(retryQE.ExecutionID))
+		}
+	}
+
+	// Advance run/job tracking only when not retrying. On retry, the job remains
+	// in-progress until the retry execution reaches a terminal state. This runs
+	// even when AcknowledgeCompletion failed so the job cannot be stuck pending.
+	if isAction && d.runSink != nil && runID != "" && jobID != "" {
+		if err := d.runSink.RecordActionResult(ctx, runID, jobID, executionID, actionResultCode); err != nil {
+			code := script.NormalizeActionResultCode(actionResultCode)
+			exitCode := 0
+			if code != "ok" {
+				exitCode = 1
+			}
+			late := LateResultIgnored{
+				RunID: runID, JobID: jobID, ExecutionID: executionID, DeviceID: deviceID,
+				TenantID: actionTenantID, CreatedBy: actionCreatedBy, Kind: "steward_action",
+				ReportedStatus: reportedStatus(code != "ok"), ReportedExitCode: exitCode, ReportedResultCode: code,
+			}
+			if !d.handleLateResult(ctx, err, late) {
+				d.logger.Error("Failed to record steward action result in run store",
+					"device_id", logging.SanitizeLogValue(deviceID),
+					"execution_id", logging.SanitizeLogValue(executionID),
+					"run_id", logging.SanitizeLogValue(runID),
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
+		} else if d.actionAudit != nil && origQE != nil && origQE.Action != nil {
+			d.actionAudit.RecordActionCompleted(ctx, ExpiredActionJob{
+				RunID: runID, JobID: jobID, DeviceID: deviceID, ExecutionID: executionID,
+				TenantID: actionTenantID, CreatedBy: actionCreatedBy, Action: *origQE.Action,
+				ResultCode: script.NormalizeActionResultCode(actionResultCode), At: time.Now().UTC(),
+			})
+		}
+	} else if !shouldRetry && d.runSink != nil && runID != "" && jobID != "" {
+		var output, stderr string
+		var exitCode int
+		if result != nil {
+			output = result.Stdout
+			stderr = result.Stderr
+			exitCode = result.ExitCode
+		}
+		if err := d.runSink.RecordJobResult(ctx, runID, jobID, executionID,
+			state == script.QueueStateFailed, output, stderr, exitCode); err != nil {
+			late := LateResultIgnored{
+				RunID: runID, JobID: jobID, ExecutionID: executionID, DeviceID: deviceID,
+				TenantID: actionTenantID, CreatedBy: actionCreatedBy, Kind: "script",
+				ReportedStatus: reportedStatus(state == script.QueueStateFailed), ReportedExitCode: exitCode,
+			}
+			if !d.handleLateResult(ctx, err, late) {
+				d.logger.Error("Failed to record job completion in run store",
+					"device_id", logging.SanitizeLogValue(deviceID),
+					"execution_id", logging.SanitizeLogValue(executionID),
+					"run_id", logging.SanitizeLogValue(runID),
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
+		}
+	}
+
+	// Issue #1675: consume the relay grant on execution completion so further
+	// relay requests return 403. Best-effort — a failure must not stall dispatch.
+	if d.grantManager != nil {
+		if err := d.grantManager.ConsumeGrant(executionID); err != nil {
+			d.logger.Debug("ConsumeGrant: no grant for execution (inline or no API scope)",
+				"execution_id", logging.SanitizeLogValue(executionID))
+		}
+	}
+
+	// Release the per-device lock so the next queued execution can be dispatched.
+	d.releaseDevice(deviceID)
+
+	// Immediately try to dispatch the next queued execution for this device.
+	// Use d.ctx (not the subscription ctx) so the goroutine exits on Stop.
+	if d.tryAdd() {
+		go func() {
+			defer d.wg.Done()
+			d.dispatchForDevice(d.ctx, deviceID)
+		}()
+	}
+
+	return nil
+}
+
+// extractMetaStringSlice extracts a []string value from a metadata map.
+// Handles []interface{} (JSON-decoded) and []string (direct).
+func extractMetaStringSlice(meta map[string]interface{}, key string) []string {
+	if meta == nil {
+		return nil
+	}
+	v := meta[key]
+	if v == nil {
+		return nil
+	}
+	if s, ok := v.([]interface{}); ok {
+		result := make([]string, 0, len(s))
+		for _, item := range s {
+			if str, ok := item.(string); ok && str != "" {
+				result = append(result, str)
+			}
+		}
+		return result
+	}
+	if s, ok := v.([]string); ok {
+		return s
+	}
+	return nil
+}
+
+// Steward-action dispatch and expiry (Issue #4625).
+
+// actionProofKeys are the operator-envelope credential keys of a steward action.
+// An action must carry a complete X.509 or WebAuthn credential to be sent.
+var (
+	actionX509Keys     = []string{"signature_algorithm", "signature_value", "signature_public_key"}
+	actionWebAuthnKeys = []string{"webauthn_authenticator_data", "webauthn_client_data_json", "webauthn_signature", "webauthn_credential_id"}
+	// actionEnvelopeKeys are forwarded byte for byte from the entry metadata:
+	// the credential keys plus the manifest, nonce and expiry the steward needs to
+	// verify them. The controller never re-signs or strips them.
+	actionEnvelopeKeys = append(append(append([]string{}, actionX509Keys...), actionWebAuthnKeys...),
+		"webauthn_manifest", "nonce", "expires_at")
+)
+
+const jobStatusDispatched = "dispatched"
+
+// hasOperatorProof reports whether meta carries a complete operator credential.
+func hasOperatorProof(meta map[string]interface{}) bool {
+	complete := func(keys []string) bool {
+		for _, key := range keys {
+			if v, _ := meta[key].(string); v == "" {
+				return false
+			}
+		}
+		return true
+	}
+	return complete(actionX509Keys) || complete(actionWebAuthnKeys)
+}
+
+// dispatchStewardAction delivers one steward-action entry. The caller holds the
+// device lock and has already moved the entry to dispatched.
+//
+// With a run sink the job must first win the pending → dispatched compare-and-set:
+// an action the expiry sweep already closed is never sent, and one already
+// dispatched is never sent twice. An entry without a complete operator
+// credential is never sent; its job ends failed. The lock stays held until the
+// steward reports (or the lock sweep frees it after the action's timeout).
+func (d *Dispatcher) dispatchStewardAction(ctx context.Context, deviceID string, exec *script.QueuedExecution) {
+	timeout := exec.Timeout
+	if timeout <= 0 {
+		timeout = script.StewardActionTimeout
+	}
+	d.setLockExecutionTTL(deviceID, exec.ExecutionID, timeout)
+
+	runID, _ := exec.Metadata["workflow_run_id"].(string)
+	jobID, _ := exec.Metadata["job_id"].(string)
+	tracked := d.runSink != nil && runID != "" && jobID != ""
+
+	if tracked {
+		claimed, status, err := d.runSink.ClaimActionDispatch(ctx, runID, jobID, time.Now().UTC())
+		switch {
+		case err != nil:
+			// The entry stays dispatched and is returned again on the next cycle.
+			d.logger.Error("Failed to claim steward action for dispatch",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+				"error", logging.SanitizeLogValue(err.Error()))
+			d.releaseDevice(deviceID)
+			return
+		case !claimed && status == jobStatusDispatched:
+			// Already sent: the steward rejects a replayed nonce, and the sweep
+			// reports no_result if it never answers. The entry is kept so a late
+			// result can still be linked to its job.
+			d.logger.Warn("Steward action already sent; not re-sending",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(exec.ExecutionID))
+			d.releaseDevice(deviceID)
+			return
+		case !claimed:
+			// Closed (expired or cancelled) before delivery: never send it.
+			d.logger.Warn("Steward action job is closed; not sending",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+				"job_status", logging.SanitizeLogValue(status))
+			_ = d.queue.CancelExecution(deviceID, exec.ExecutionID) //nolint:errcheck // entry may already be gone
+			d.releaseDevice(deviceID)
+			return
+		}
+	}
+
+	if !hasOperatorProof(exec.Metadata) {
+		d.failStewardAction(ctx, deviceID, exec, tracked, "steward action has no operator proof")
+		d.releaseDevice(deviceID)
+		return
+	}
+
+	if err := d.sendStewardAction(ctx, deviceID, exec); err != nil {
+		d.failStewardAction(ctx, deviceID, exec, tracked, "failed to send steward_action command")
+		d.logger.Error("Failed to send steward_action command",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		d.releaseDevice(deviceID)
+	}
+}
+
+// reportedStatus names the outcome a result reported.
+func reportedStatus(failed bool) string {
+	if failed {
+		return "failed"
+	}
+	return "completed"
+}
+
+// handleLateResult logs and audits a result the run store refused because the job
+// was already terminal. It reports whether err was that case; the caller must not
+// treat it as a dispatch failure.
+func (d *Dispatcher) handleLateResult(ctx context.Context, err error, late LateResultIgnored) bool {
+	if !errors.Is(err, script.ErrJobAlreadyTerminal) {
+		return false
+	}
+	var terminal *script.JobAlreadyTerminalError
+	if errors.As(err, &terminal) {
+		late.RecordedStatus = terminal.Status
+	}
+	d.logger.Warn("Ignoring late result for a job that is already terminal",
+		"device_id", logging.SanitizeLogValue(late.DeviceID),
+		"execution_id", logging.SanitizeLogValue(late.ExecutionID),
+		"job_id", logging.SanitizeLogValue(late.JobID),
+		"run_id", logging.SanitizeLogValue(late.RunID),
+		"recorded_status", logging.SanitizeLogValue(late.RecordedStatus))
+	if d.actionAudit != nil {
+		late.At = time.Now().UTC()
+		d.actionAudit.RecordLateResultIgnored(ctx, late)
+	}
+	return true
+}
+
+// failStewardAction ends an action that cannot be delivered: the job records
+// result "failed" and the queue entry is acknowledged failed.
+func (d *Dispatcher) failStewardAction(ctx context.Context, deviceID string, exec *script.QueuedExecution, tracked bool, reason string) {
+	d.logger.Error("Steward action not delivered",
+		"device_id", logging.SanitizeLogValue(deviceID),
+		"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+		"reason", reason)
+	if tracked {
+		runID, _ := exec.Metadata["workflow_run_id"].(string)
+		jobID, _ := exec.Metadata["job_id"].(string)
+		if err := d.runSink.RecordActionResult(ctx, runID, jobID, exec.ExecutionID, "failed"); err != nil {
+			tenantID, _ := exec.Metadata["tenant_id"].(string)
+			createdBy, _ := exec.Metadata["created_by"].(string)
+			late := LateResultIgnored{
+				RunID: runID, JobID: jobID, ExecutionID: exec.ExecutionID, DeviceID: deviceID,
+				TenantID: tenantID, CreatedBy: createdBy, Kind: "steward_action",
+				ReportedStatus: reportedStatus(true), ReportedExitCode: 1, ReportedResultCode: "failed",
+			}
+			if !d.handleLateResult(ctx, err, late) {
+				d.logger.Error("Failed to record undelivered steward action",
+					"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
+		}
+	}
+	if err := d.queue.AcknowledgeCompletion(exec.ExecutionID, deviceID, script.QueueStateFailed,
+		&script.ExecutionResult{ExitCode: 1, Stderr: reason}); err != nil {
+		d.logger.Warn("Failed to acknowledge undelivered steward action",
+			"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+// sendStewardAction builds and transmits a CommandStewardAction. It is the
+// sibling of sendCommand for actions: the params are the action itself plus the
+// operator envelope exactly as stored on the entry, the outer command is signed
+// by the same signer and fencing term as every controller command, and there is
+// no script, relay grant or signed-ad-hoc rule.
+func (d *Dispatcher) sendStewardAction(ctx context.Context, deviceID string, exec *script.QueuedExecution) error {
+	spec := exec.Action
+	if spec == nil {
+		return fmt.Errorf("steward action entry %s has no action", exec.ExecutionID)
+	}
+	parameters := spec.Parameters
+	if parameters == nil {
+		parameters = map[string]string{}
+	}
+	params := map[string]interface{}{
+		"execution_id": exec.ExecutionID,
+		"verb":         spec.Verb,
+		"target":       map[string]string{"kind": spec.TargetKind, "name": spec.TargetName},
+		"parameters":   parameters,
+	}
+	for _, key := range actionEnvelopeKeys {
+		if value, ok := exec.Metadata[key].(string); ok && value != "" {
+			params[key] = value
+		}
+	}
+	if targets := extractMetaStringSlice(exec.Metadata, "targets"); len(targets) > 0 {
+		params["targets"] = targets
+	}
+
+	cmd := &controlplaneTypes.Command{
+		ID:        uuid.New().String(),
+		Type:      controlplaneTypes.CommandStewardAction,
+		StewardID: deviceID,
+		Timestamp: time.Now(),
+		Params:    params,
+		Term:      d.currentTerm(),
+	}
+	signed, err := d.signCommand(cmd)
+	if err != nil {
+		return err
+	}
+	if err := d.controlPlane.SendCommand(ctx, signed); err != nil {
+		return fmt.Errorf("send command: %w", err)
+	}
+
+	d.logger.Info("Sent steward_action command",
+		"device_id", logging.SanitizeLogValue(deviceID),
+		"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+		"verb", logging.SanitizeLogValue(spec.Verb))
+	return nil
+}
+
+// stewardActionResultCode reads the result code from a completion event. A
+// command_failed event, or a result with neither a code nor a zero exit code, is
+// "failed". The run manager bounds the code to its known set when recording it.
+func stewardActionResultCode(event *controlplaneTypes.Event, commandFailed bool) string {
+	if commandFailed {
+		return "failed"
+	}
+	if code, _ := event.Details["result_code"].(string); code != "" {
+		return code
+	}
+	switch exit := event.Details["exit_code"].(type) {
+	case float64:
+		if exit == 0 {
+			return "ok"
+		}
+	case int:
+		if exit == 0 {
+			return "ok"
+		}
+	}
+	return "failed"
+}
+
+// sweepActionJobs closes steward-action jobs that will never report and audits
+// each one. Every node runs this on its poll loop; the run store's compare-and-set
+// returns a closed job to exactly one caller, so each is audited exactly once.
+func (d *Dispatcher) sweepActionJobs(ctx context.Context) {
+	d.sweepActionJobsAt(ctx, time.Now().UTC())
+}
+
+// sweepActionJobsAt is sweepActionJobs evaluated at now.
+func (d *Dispatcher) sweepActionJobsAt(ctx context.Context, now time.Time) {
+	if d.runSink == nil {
+		return
+	}
+	closed, err := d.runSink.ExpireActionJobs(ctx, now)
+	if err != nil {
+		d.logger.Error("Steward action expiry sweep failed",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+	for _, job := range closed {
+		d.logger.Warn("Steward action closed without a result",
+			"event", "steward_action_"+job.ResultCode,
+			"device_id", logging.SanitizeLogValue(job.DeviceID),
+			"execution_id", logging.SanitizeLogValue(job.ExecutionID),
+			"run_id", logging.SanitizeLogValue(job.RunID),
+			"verb", logging.SanitizeLogValue(job.Action.Verb),
+			"detail", job.Detail)
+		if d.actionAudit != nil {
+			d.actionAudit.RecordActionExpired(ctx, job)
+		}
+	}
+}

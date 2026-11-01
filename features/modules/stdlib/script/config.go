@@ -1,0 +1,370 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package script
+
+import (
+	"fmt"
+	"runtime"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/modules"
+)
+
+// ScriptConfig represents the configuration for a script resource
+type ScriptConfig struct {
+	// Action is the script action: "" or "execute" (default) runs inline Content;
+	// "stage" stages a library script by id+version for delivery without executing inline.
+	Action           string                 `yaml:"action,omitempty" json:"action,omitempty"`
+	Content          string                 `yaml:"content"`                     // Script content (required when Action == "execute")
+	Shell            ShellType              `yaml:"shell"`                       // Required shell type
+	Timeout          time.Duration          `yaml:"timeout"`                     // Execution timeout
+	Environment      map[string]string      `yaml:"environment,omitempty"`       // Environment variables
+	WorkingDir       string                 `yaml:"working_dir,omitempty"`       // Working directory
+	Signature        *ScriptSignature       `yaml:"signature,omitempty"`         // Script signature
+	SigningPolicy    SigningPolicy          `yaml:"signing_policy"`              // Signing policy
+	ExecutionContext ExecutionContext       `yaml:"execution_context,omitempty"` // How the script runs (system or logged_in_user)
+	Description      string                 `yaml:"description,omitempty"`       // Script description
+	Metadata         map[string]interface{} `yaml:"metadata,omitempty"`          // Additional metadata
+	// Stage is required when Action == ScriptActionStage.
+	Stage *StageConfig `yaml:"stage,omitempty" json:"stage,omitempty"`
+	// ParamBindings declares how script parameters receive their values at execution time.
+	// Resolved on both the "execute" and "stage" paths via the module's secret store.
+	ParamBindings []ParamBinding `yaml:"param_bindings,omitempty" json:"param_bindings,omitempty"`
+	// rawTimeout preserves the original string form (e.g. "5m") from operator YAML
+	// so AsMap() can echo it back without Go Duration.String() normalisation
+	// (which would turn "5m" into "5m0s", causing a false comparator mismatch).
+	rawTimeout string `yaml:"-"`
+}
+
+// AsMap returns the configuration as a map for efficient field-by-field comparison.
+//
+// timeout is echoed as the original operator string (e.g. "5m") when available so
+// the comparator does not see a false mismatch from Go's Duration.String()
+// normalisation (which turns "5m" → "5m0s").
+func (c *ScriptConfig) AsMap() map[string]interface{} {
+	timeoutStr := c.rawTimeout
+	if timeoutStr == "" {
+		timeoutStr = c.Timeout.String()
+	}
+	result := map[string]interface{}{
+		"content":           c.Content,
+		"shell":             string(c.Shell),
+		"timeout":           timeoutStr,
+		"signing_policy":    string(c.SigningPolicy),
+		"execution_context": string(c.ExecutionContext),
+	}
+
+	if len(c.Environment) > 0 {
+		result["environment"] = c.Environment
+	}
+	if c.WorkingDir != "" {
+		result["working_dir"] = c.WorkingDir
+	}
+	if c.Signature != nil {
+		result["signature"] = c.Signature
+	}
+	if c.Description != "" {
+		result["description"] = c.Description
+	}
+	if len(c.Metadata) > 0 {
+		result["metadata"] = c.Metadata
+	}
+
+	return result
+}
+
+// ToYAML serializes the configuration to YAML for export/storage
+func (c *ScriptConfig) ToYAML() ([]byte, error) {
+	return yaml.Marshal(c)
+}
+
+// FromYAML deserializes YAML data into the configuration
+func (c *ScriptConfig) FromYAML(data []byte) error {
+	return yaml.Unmarshal(data, c)
+}
+
+// scriptConfigFromMap builds a ScriptConfig from a generic config map — the form
+// the convergence executor delivers (a map-backed modules.ConfigState rather
+// than a typed *ScriptConfig). Mirrors the file/directory modules' map-based
+// decode. Config values arrive as strings via the controller→steward proto, so
+// timeout is parsed from its duration string. (Issue #1572)
+func scriptConfigFromMap(m map[string]interface{}) (*ScriptConfig, error) {
+	c := &ScriptConfig{}
+	if v, ok := m["action"].(string); ok {
+		c.Action = v
+	}
+	if v, ok := m["content"].(string); ok {
+		c.Content = v
+	}
+	if v, ok := m["shell"].(string); ok {
+		c.Shell = ShellType(v)
+	}
+	if v, ok := m["working_dir"].(string); ok {
+		c.WorkingDir = v
+	}
+	if v, ok := m["description"].(string); ok {
+		c.Description = v
+	}
+	if v, ok := m["signing_policy"].(string); ok {
+		c.SigningPolicy = SigningPolicy(v)
+	}
+	if v, ok := m["execution_context"].(string); ok {
+		c.ExecutionContext = ExecutionContext(v)
+	}
+	switch env := m["environment"].(type) {
+	case map[string]string:
+		c.Environment = env
+	case map[string]interface{}:
+		c.Environment = make(map[string]string, len(env))
+		for k, val := range env {
+			if s, ok := val.(string); ok {
+				c.Environment[k] = s
+			}
+		}
+	}
+	switch t := m["timeout"].(type) {
+	case string:
+		if t != "" {
+			d, err := time.ParseDuration(t)
+			if err != nil {
+				return nil, fmt.Errorf("invalid timeout %q: %w", t, err)
+			}
+			c.Timeout = d
+			// Preserve the original string so AsMap() echoes it back verbatim,
+			// avoiding Duration.String() normalisation ("5m" → "5m0s") that
+			// would cause the comparator to report a false mismatch (Issue #2479).
+			c.rawTimeout = t
+		}
+	case time.Duration:
+		c.Timeout = t
+	case int:
+		c.Timeout = time.Duration(t)
+	case int64:
+		c.Timeout = time.Duration(t)
+	case float64:
+		c.Timeout = time.Duration(t)
+	}
+
+	// Decode stage config if present.
+	if stageRaw, ok := m["stage"]; ok {
+		switch stageVal := stageRaw.(type) {
+		case map[string]interface{}:
+			stage := &StageConfig{}
+			if id, ok := stageVal["id"].(string); ok {
+				stage.ID = id
+			}
+			if ver, ok := stageVal["version"].(string); ok {
+				stage.Version = ver
+			}
+			c.Stage = stage
+		case *StageConfig:
+			c.Stage = stageVal
+		}
+	}
+
+	// Decode param_bindings if present.
+	if pbRaw, ok := m["param_bindings"]; ok {
+		switch pbVal := pbRaw.(type) {
+		case []ParamBinding:
+			c.ParamBindings = pbVal
+		case []interface{}:
+			for _, item := range pbVal {
+				if pbMap, ok := item.(map[string]interface{}); ok {
+					pb := ParamBinding{}
+					if name, ok := pbMap["name"].(string); ok {
+						pb.Name = name
+					}
+					if from, ok := pbMap["from"].(string); ok {
+						pb.From = ParamSource(from)
+					}
+					if key, ok := pbMap["key"].(string); ok {
+						pb.Key = key
+					}
+					if value, ok := pbMap["value"].(string); ok {
+						pb.Value = value
+					}
+					c.ParamBindings = append(c.ParamBindings, pb)
+				}
+			}
+		}
+	}
+
+	return c, nil
+}
+
+// Validate ensures the configuration is valid
+func (c *ScriptConfig) Validate() error {
+	// Validate the action field and dispatch to action-specific validation.
+	switch c.Action {
+	case "", ScriptActionExecute:
+		return c.validateExecuteAction()
+	case ScriptActionStage:
+		return c.validateStageAction()
+	default:
+		return fmt.Errorf("%w: unsupported action %q (must be %q or %q)",
+			modules.ErrInvalidInput, c.Action, ScriptActionExecute, ScriptActionStage)
+	}
+}
+
+// validateExecuteAction validates the configuration for the execute (default) action.
+func (c *ScriptConfig) validateExecuteAction() error {
+	if c.Content == "" {
+		return fmt.Errorf("%w: script content cannot be empty", modules.ErrInvalidInput)
+	}
+
+	if c.Shell == "" {
+		return fmt.Errorf("%w: shell type is required", modules.ErrInvalidInput)
+	}
+
+	// Validate shell type is supported on current platform
+	if !c.isShellSupported() {
+		return fmt.Errorf("%w: shell %s is not supported on %s", modules.ErrInvalidInput, c.Shell, runtime.GOOS)
+	}
+
+	// Validate timeout
+	if c.Timeout < 0 {
+		return fmt.Errorf("%w: timeout cannot be negative", modules.ErrInvalidInput)
+	}
+
+	// Set default timeout if not specified
+	if c.Timeout == 0 {
+		c.Timeout = 5 * time.Minute // Default 5 minute timeout
+	}
+
+	// Validate and default execution context
+	switch c.ExecutionContext {
+	case ExecutionContextSystem, ExecutionContextLoggedInUser:
+		// Valid
+	case "":
+		c.ExecutionContext = ExecutionContextSystem // default
+	default:
+		return fmt.Errorf("%w: invalid execution context: %s", modules.ErrInvalidInput, c.ExecutionContext)
+	}
+
+	// Validate signing policy
+	switch c.SigningPolicy {
+	case SigningPolicyNone, SigningPolicyOptional, SigningPolicyRequired:
+		// Valid policies
+	case "":
+		c.SigningPolicy = SigningPolicyNone // Default to no signing required
+	default:
+		return fmt.Errorf("%w: invalid signing policy: %s", modules.ErrInvalidInput, c.SigningPolicy)
+	}
+
+	// If signing is required, signature must be present
+	if c.SigningPolicy == SigningPolicyRequired && c.Signature == nil {
+		return fmt.Errorf("%w: signature is required when signing policy is 'required'", modules.ErrInvalidInput)
+	}
+
+	// Validate signature if present
+	if c.Signature != nil {
+		if err := c.validateSignature(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateStageAction validates the configuration for the stage action.
+// Content is NOT required; Stage.ID and Stage.Version are required.
+func (c *ScriptConfig) validateStageAction() error {
+	if c.Stage == nil {
+		return fmt.Errorf("%w: stage configuration is required when action is %q",
+			modules.ErrInvalidInput, ScriptActionStage)
+	}
+	if c.Stage.ID == "" {
+		return fmt.Errorf("%w: stage.id is required", modules.ErrInvalidInput)
+	}
+	if c.Stage.Version == "" {
+		return fmt.Errorf("%w: stage.version is required", modules.ErrInvalidInput)
+	}
+	return nil
+}
+
+// EffectiveSigningPolicy returns the more restrictive of the script's own signing policy
+// and the steward-level minimum enforced by the operator. This allows the steward config
+// to mandate a floor (e.g. "required") without having to modify every individual script config.
+func (c *ScriptConfig) EffectiveSigningPolicy(stewardMinimum SigningPolicy) SigningPolicy {
+	level := map[SigningPolicy]int{
+		SigningPolicyNone:     0,
+		SigningPolicyOptional: 1,
+		SigningPolicyRequired: 2,
+	}
+	scriptLevel := level[c.SigningPolicy]
+	stewardLevel := level[stewardMinimum]
+	if stewardLevel > scriptLevel {
+		return stewardMinimum
+	}
+	return c.SigningPolicy
+}
+
+// GetManagedFields returns the list of fields this configuration manages
+func (c *ScriptConfig) GetManagedFields() []string {
+	fields := []string{"content", "shell", "timeout", "signing_policy", "execution_context"}
+
+	if len(c.Environment) > 0 {
+		fields = append(fields, "environment")
+	}
+	if c.WorkingDir != "" {
+		fields = append(fields, "working_dir")
+	}
+	if c.Signature != nil {
+		fields = append(fields, "signature")
+	}
+	if c.Description != "" {
+		fields = append(fields, "description")
+	}
+	if len(c.Metadata) > 0 {
+		fields = append(fields, "metadata")
+	}
+
+	return fields
+}
+
+// isShellSupported checks if the specified shell is supported on the current platform
+func (c *ScriptConfig) isShellSupported() bool {
+	switch runtime.GOOS {
+	case "windows":
+		// pwsh (PowerShell Core) is cross-platform and valid on Windows alongside
+		// Windows PowerShell 5.1 (powershell).
+		return c.Shell == ShellPowerShell || c.Shell == ShellPwsh || c.Shell == ShellCmd || c.Shell == ShellPython || c.Shell == ShellPython3
+	case "linux", "darwin":
+		// pwsh (PowerShell Core) is cross-platform and valid on Unix.
+		return c.Shell == ShellBash || c.Shell == ShellZsh || c.Shell == ShellSh || c.Shell == ShellPwsh || c.Shell == ShellPython || c.Shell == ShellPython3
+	default:
+		return false
+	}
+}
+
+// validateSignature validates the script signature structure
+func (c *ScriptConfig) validateSignature() error {
+	if c.Signature.Algorithm == "" {
+		return fmt.Errorf("%w: signature algorithm is required", modules.ErrInvalidInput)
+	}
+	if c.Signature.Signature == "" {
+		return fmt.Errorf("%w: signature value is required", modules.ErrInvalidInput)
+	}
+	if c.Signature.PublicKey == "" && c.Signature.Thumbprint == "" {
+		return fmt.Errorf("%w: either public key or certificate thumbprint is required", modules.ErrInvalidInput)
+	}
+
+	// Validate algorithm format
+	supportedAlgorithms := []string{"rsa-sha256", "rsa-sha512", "ecdsa-sha256", "ecdsa-sha384"}
+	algorithm := strings.ToLower(c.Signature.Algorithm)
+	isSupported := false
+	for _, supported := range supportedAlgorithms {
+		if algorithm == supported {
+			isSupported = true
+			break
+		}
+	}
+	if !isSupported {
+		return fmt.Errorf("%w: unsupported signature algorithm: %s", modules.ErrInvalidInput, c.Signature.Algorithm)
+	}
+
+	return nil
+}

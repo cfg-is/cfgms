@@ -1,0 +1,227 @@
+# Agent Dispatch Developer Reference
+
+Developer reference for the CFGMS agent dispatch system — containerized headless Claude agents that implement GitHub issues and produce reviewed PRs.
+
+## Quick Start
+
+```bash
+# 1. One-time setup (builds container image, configures credentials)
+/agent-setup
+
+# 2. Write a well-scoped issue (see story writing guidelines below)
+gh issue create --title "feat: add X" --label "agent:ready"
+
+# 3. Dispatch one or more agents
+/dispatch 123 124 125
+
+# 4. Monitor progress (agents typically complete in 15-45 min)
+/isoagents
+
+# 5. Review and merge
+/pr-review 456
+gh pr merge 456 --squash
+```
+
+## Architecture
+
+```
+Developer (architect)
+│
+├── /dispatch <issue#>          deterministic, no LLM
+│     ├── .claude/scripts/agent-dispatch.sh create-clone <N>
+│     │     └── git worktree add -b feature/story-N-agent ../worktrees/story-N develop
+│     └── .claude/scripts/agent-dispatch.sh launch <N>
+│           └── docker run --detach cfg-agent:latest
+│                 ├── Mounts: worktree (rw), gh-creds (ro); Claude auth via CLAUDE_CODE_OAUTH_TOKEN (token mode) or host ~/.claude/.credentials.json (fallback)
+│                 ├── Firewall: GitHub + Anthropic API + Go proxy only
+│                 ├── entrypoint: gh issue view N → agent prompt
+│                 ├── claude --dangerously-skip-permissions
+│                 │     Phase 1: Implement (TDD, follow CLAUDE.md patterns)
+│                 │     Phase 2: make test-agent-complete
+│                 │     Phase 3: self-review (QA + security checks, max 3 rounds)
+│                 │     Phase 4: commit + push + gh pr create --base develop
+│                 │     On failure: draft PR with diagnostics, exit non-zero
+│                 └── Resource limits: 8GB RAM, 4 CPUs, 1h timeout
+│
+├── /isoagents                  monitor containers, view logs
+│
+└── Developer reviews PR        /pr-review or GitHub mobile → merge
+```
+
+## Workflow Mapping: Interactive → Headless
+
+| Interactive (human present)            | Headless (agent container)                    |
+|----------------------------------------|-----------------------------------------------|
+| `/story-start` pre-flight              | Worktree created from known-good `develop`    |
+| `/story-start` branch creation         | `git worktree add -b feature/story-N develop` |
+| Developer implements                   | Claude implements autonomously                |
+| `/story-commit` validation             | Agent runs `make test-commit`                 |
+| `/story-complete` QA + security review | Agent runs `make test-agent-complete`         |
+| `/story-complete` fix loop             | Agent fixes issues, re-validates (max 3×)     |
+| `/story-complete` push + PR            | Agent pushes, `gh pr create --base develop`   |
+| Docker/E2E tests                       | CI required checks on PR                      |
+| Roadmap updates                        | Human only (architect concern)                |
+| PR review + merge                      | `/pr-review` or phone → human merges          |
+
+## Credential Management
+
+### Claude OAuth Token
+
+Headless agent containers authenticate with a separate long-lived subscription token (`claude setup-token`) passed as `CLAUDE_CODE_OAUTH_TOKEN`, so they no longer share the host's refreshing OAuth session (a refresh by either side used to invalidate the other). The token is a TPM2-bound `systemd-creds` credential at `~/.config/cfgms/claude-oauth-token.cred`; the launcher decrypts it under a 15 s timeout, hands it to `docker run` through the process environment only (`-e CLAUDE_CODE_OAUTH_TOKEN`, never in argv, never on disk), and does not mount the host credentials file. One-time operator setup and rotation: `/agent-setup` ("Agent token setup").
+
+If the credential is absent, cannot be decrypted, or times out, the launch falls back to bind-mounting the host's live `~/.claude/.credentials.json` and prints one `WARN:agent_token:<absent|decrypt_failed|timeout>` line. In fallback mode a `LOW` or `EXPIRED` token is not a dispatch blocker (the entrypoint refreshes it); only a missing or unparseable file blocks a launch (`CREDS_MISSING`). `po-live` still bind-mounts the whole host `~/.claude` directory.
+
+### Rotate GitHub PAT
+
+```bash
+# Generate new token at: github.com → Settings → Developer settings → Personal access tokens
+# Required scopes: repo, workflow, read:org
+
+# Re-run agent setup to update stored credentials
+/agent-setup creds
+```
+
+### Check Credential Status
+
+```bash
+./.claude/scripts/agent-dispatch.sh check-creds
+# CREDS_MODE:token       — long-lived agent token decrypts; host token freshness is not checked
+# CREDS_OK:<minutes>     — valid, minutes until expiry
+# CREDS_LOW:<minutes>    — expiring soon, advisory only (agent refreshes the live file in place)
+# CREDS_EXPIRED:<N>      — advisory only; the host's own token rotation covers it
+# CREDS_MISSING:*        — run `claude` on the host to authenticate, then /agent-setup
+```
+
+## Writing Good Agent Stories
+
+Agents cannot ask clarifying questions. Everything they need must be in the issue.
+
+### Checklist
+
+- [ ] **Self-contained**: all context in the issue body, no "see our discussion in Slack"
+- [ ] **Reference files explicitly**: "follow the pattern in `pkg/storage/providers/sqlite/`" not "follow existing patterns"
+- [ ] **Testable acceptance criteria**: `- [ ]` checkboxes that can be mechanically verified
+- [ ] **Single concern**: one focused change, not "refactor X and also add Y"
+- [ ] **No vague verbs**: "add", "implement", "fix" — not "improve", "enhance", "clean up"
+
+### Examples
+
+**Good** — agent can succeed:
+```
+Add `RetryConfig` field to `pkg/config/manager.go` following the pattern in
+`pkg/config/rollback_types.go`. Add validation in `pkg/config/validation.go`
+following `validateResources`. Tests in `pkg/config/manager_test.go`.
+
+Acceptance criteria:
+- [ ] RetryConfig struct has MaxAttempts (int), BackoffMs (int), fields
+- [ ] Validation rejects MaxAttempts < 1 or > 100
+- [ ] `make test-commit` passes
+```
+
+**Bad** — agent will guess wrong:
+```
+Improve the retry handling in the config system. Make it more robust and
+follow best practices. Should be well-tested.
+```
+
+## Story Sizing Guidelines
+
+| Category | Characteristics | Action |
+|----------|-----------------|--------|
+| **Agent-ready** | ≤5 files, ≤300 lines, single concern, has reference impl | Dispatch directly |
+| **Likely agent-ready** | New feature following established pattern, clear spec, no ref impl | Write detailed task description |
+| **Needs human** | Cross-cutting architectural change, establishes new pattern, >5 files | Interactive session |
+| **Not agent-ready** | Vague requirements, needs clarification, touches CI/CD or `.github/` | Clarify first, then re-evaluate |
+
+**When no reference implementation exists**: write the task description as if explaining to a new team member on their first week — specify the exact files, function signatures, and error handling expectations.
+
+## CI Failure Recovery
+
+When an agent creates a PR but CI fails, three options:
+
+### Option 1: Fix interactively (preferred for small CI failures)
+
+```bash
+/pr-review 456          # review the PR, identify failures
+# make manual edits to the agent's branch
+git push origin feature/story-N-agent
+```
+
+### Option 2: Re-dispatch (preferred when issue needs richer context)
+
+```bash
+gh pr close 456         # close the failed PR
+# Update the issue with the CI failure output and what to fix
+gh issue edit 123 --body "$(gh issue view 123 --json body -q .body)\n\n## CI Failure\n..."
+/dispatch 123           # re-dispatch with updated context
+```
+
+> **Stale remote branch cleanup:** When re-dispatching, `create-clone` automatically detects and
+> force-deletes the old `feature/story-N-agent` remote branch before creating a fresh one. This
+> prevents the new container from pushing on top of stale history and causing tangled merge commits.
+> The dispatch log will show `Cleaning stale remote branch: feature/story-N-agent` when this happens.
+>
+> To preserve the old branch for forensic investigation, pass `--keep-remote` to `create-clone`
+> (or use `/dispatch --keep-remote N` if the skill exposes it). Be aware that with `--keep-remote`
+> the new container's eventual push will conflict with the preserved branch.
+
+### Option 3: Fix in interactive session on agent branch
+
+```bash
+git fetch origin
+git checkout feature/story-N-agent
+# fix the issue
+make test-commit
+git push origin feature/story-N-agent
+```
+
+## Troubleshooting
+
+### Agent container exits immediately
+
+**Cause**: OAuth token expired or credentials missing.
+**Fix**: Run `/agent-setup creds` to refresh credentials, then re-dispatch.
+
+### "Image not found" on dispatch
+
+**Cause**: First run, or image was deleted.
+**Fix**: `/agent-setup` — builds the container image (3-5 min).
+
+### Agent creates draft PR with test failures
+
+**Cause**: Story scope too large, or ambiguous requirements.
+**Fix**: Read the draft PR description for the specific failure. Either fix interactively (Option 1 above) or update the issue and re-dispatch (Option 2).
+
+### Salvaged `WIP:` draft PR (agent produced no PR)
+
+**Cause**: The agent's session ended before it opened a PR (for example, its login was revoked mid-run). The entrypoint pushes whatever work exists and opens a draft PR titled `WIP: <branch> (agent produced no PR)`, with a commit subject `WIP: agent attempt for issue #N (...)`. The pipeline then dispatches a fix agent onto that PR.
+**Behaviour**: If the fix agent finds the salvaged work already complete, it makes no commit. When that run is in `fix-pr` mode, `/tmp/agent-validation-passed` exists, a linked issue is known, and the PR is a draft whose title starts with `WIP:`, the entrypoint finishes the PR itself (`ac_promote_salvaged_pr` in `.devcontainer/agent-context.sh`). It retitles the PR `<issue title> (Issue #N)`, sets a body that starts with `Fixes #N`, pushes an empty commit whose subject is that title so the squash subject is correct, marks the PR ready, prints `PROMOTED_SALVAGED_PR:<pr>`, and exits 0 so the PR goes to acceptance review.
+Every other no-commit `fix-pr` or `resolve-conflict` run still fails: exit 1, plus the "Fix agent ran but made no changes" comment on the PR. That covers a missing validation marker, a non-draft or non-`WIP:` PR, no linked issue, and any promotion step that fails (the container log names the step).
+
+### Agent creates PR that touches unrelated files
+
+**Cause**: Story wasn't scoped to specific files.
+**Fix**: Close PR, update issue to specify exact files in scope, re-dispatch.
+
+### `/isoagents` shows container "Exited (1)" with no PR
+
+**Cause**: Agent hit max fix iterations and created a draft PR, OR dispatch itself failed.
+**Fix**: `docker logs cfg-agent-story-N` — look for the draft PR URL or the failure reason.
+
+## Relationship to Interactive Workflow
+
+Agent dispatch and interactive slash commands coexist — they're complementary, not alternatives:
+
+- **Agent dispatch**: well-scoped stories with clear acceptance criteria, while you do other work
+- **Interactive session**: architecture decisions, new patterns, stories that need iteration, reviewing agent PRs
+
+The same `CLAUDE.md` conventions, validation gates, and PR standards apply to both. Agent PRs go through the same CI pipeline and require the same human PR review before merging.
+
+Run multiple agents in parallel while working interactively on a different story. The only constraint: don't dispatch an issue that depends on an in-progress agent's work — wait for the PR and merge first.
+
+## Max Plan Usage Tips
+
+- Dispatch during off-hours — agents run ~15-45 min per story
+- Batch independent stories: `/dispatch 123 124 125` launches three containers in parallel
+- Stories with reference implementations use fewer tokens (agent spends less time exploring)
+- If an agent is stuck at 45+ min, check `/isoagents` — it may have already finished

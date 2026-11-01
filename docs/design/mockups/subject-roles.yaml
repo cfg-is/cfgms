@@ -1,0 +1,4 @@
+file: subject-roles.html
+order: 14
+status: **Reference**
+what: **Subject-role assignment** (Epic #2858 · #3134) — extends `AccountsView`'s account row with an expand panel (the same pattern `RolesView` uses for permissions) to view, assign, and revoke a subject's roles in place. Role picker + Assign, chip `×` + confirm to revoke, and a distinct 403 escalation-prevention message. Both themes.

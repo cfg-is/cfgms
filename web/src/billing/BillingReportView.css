@@ -1,0 +1,117 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright 2026 Jordan Ritz */
+
+/*
+ * Billing report layout (Issue #4650). Tiles, panels and notices reuse the
+ * rdb-* classes from ReportsDashboardView.css; only the table, the expander
+ * and the metric chips are defined here. Tokens only — both themes come from
+ * docs/design/web-ui-design-tokens.css.
+ */
+
+.bill-tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-base);
+}
+
+.bill-tbl th {
+  text-align: left;
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 600;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.bill-tbl td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.bill-tbl .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.bill-tbl tr.bill-client td {
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+}
+
+.bill-tbl tr.bill-client td:first-child {
+  padding-left: 40px;
+}
+
+.bill-tbl tr.bill-detail td {
+  background: var(--bg-elevated);
+  padding-left: 40px;
+}
+
+.bill-expander {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.bill-expander:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.bill-chev {
+  display: inline-block;
+  transition: transform 0.12s;
+}
+
+.bill-expander[aria-expanded='true'] .bill-chev {
+  transform: rotate(90deg);
+}
+
+.bill-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bill-chip {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 2px 9px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+}
+
+.bill-metric-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: var(--space-2);
+}
+
+.bill-metric-group h3 {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+.bill-disclosure {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}

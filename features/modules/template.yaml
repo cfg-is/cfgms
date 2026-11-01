@@ -1,0 +1,30 @@
+# Module Metadata Template
+# Copy this file to your module directory as module.yaml and customize it
+
+name: module-name        # Unique module identifier
+version: 0.1.0          # Module version
+description: >          # Module description
+  Brief description of what this module does
+  and what resources it manages.
+
+dependencies: []        # List of other modules this module depends on
+
+requirements:           # System requirements
+  os: [windows, linux, darwin]  # Supported operating systems
+  arch: [amd64, arm64]         # Supported architectures
+  min_memory: "512MB"          # Minimum memory requirement
+  min_disk: "1GB"              # Minimum disk space
+
+interfaces:            # Implemented interfaces
+  - Get
+  - Set
+  - Test
+
+security:             # Security requirements
+  requires_root: false
+  capabilities: []    # Required Linux capabilities
+  ports: []          # Required network ports
+
+documentation:        # Documentation links
+  api: "docs/api.md"
+  examples: "docs/examples/"

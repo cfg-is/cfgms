@@ -1,0 +1,377 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+// Package config provides configuration loading and validation for standalone steward operation.
+//
+// This package handles hostname.cfg files that define steward settings, resource
+// configurations, and error handling policies for standalone mode operation.
+//
+// Configuration files are searched in platform-specific locations:
+//   - Current working directory (highest priority)
+//   - User configuration directories
+//   - System configuration directories
+//
+// Basic usage:
+//
+//	// Load configuration from default search paths
+//	config, err := config.LoadConfiguration("")
+//	if err != nil {
+//		return fmt.Errorf("failed to load config: %w", err)
+//	}
+//
+//	// Get list of required modules
+//	modules := config.GetConfiguredModules(config)
+//
+//	// Validate configuration
+//	if err := config.ValidateConfiguration(config); err != nil {
+//		return fmt.Errorf("invalid config: %w", err)
+//	}
+//
+// Configuration file format (YAML):
+//
+//	steward:
+//	  id: hostname
+//	  logging:
+//	    level: info
+//	  error_handling:
+//	    module_load_failure: continue
+//	    resource_failure: warn
+//	    configuration_error: fail
+//
+//	resources:
+//	  - name: example-directory
+//	    module: directory
+//	    config:
+//	      path: /opt/example
+//	      permissions: 755
+//
+// #nosec G304 - Steward configuration system requires file access for loading config files
+package config
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/config/stewardtypes"
+	"github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/security"
+)
+
+// Type aliases — re-export from stewardtypes so existing callers compile unchanged.
+type (
+	StewardConfig        = stewardtypes.StewardConfig
+	StewardSettings      = stewardtypes.StewardSettings
+	ResourceConfig       = stewardtypes.ResourceConfig
+	ErrorHandlingConfig  = stewardtypes.ErrorHandlingConfig
+	DriftMode            = stewardtypes.DriftMode
+	LoggingConfig        = stewardtypes.LoggingConfig
+	SecretsConfig        = stewardtypes.SecretsConfig
+	ScriptSigningConfig  = stewardtypes.ScriptSigningConfig
+	ScriptSigningPolicy  = stewardtypes.ScriptSigningPolicy
+	ScriptTrustMode      = stewardtypes.ScriptTrustMode
+	TrustedKeyRef        = stewardtypes.TrustedKeyRef
+	ErrorAction          = stewardtypes.ErrorAction
+	ModuleTrustConfig    = stewardtypes.ModuleTrustConfig
+	ModuleTrustMode      = stewardtypes.ModuleTrustMode
+	RemoteTerminalConfig = stewardtypes.RemoteTerminalConfig
+	RequiredModule       = stewardtypes.RequiredModule
+	UpgradeConfig        = stewardtypes.UpgradeConfig
+)
+
+// Constant re-exports from stewardtypes.
+const (
+	ScriptSigningPolicyNone       = stewardtypes.ScriptSigningPolicyNone
+	ScriptSigningPolicyOptional   = stewardtypes.ScriptSigningPolicyOptional
+	ScriptSigningPolicyRequired   = stewardtypes.ScriptSigningPolicyRequired
+	TrustModeAnyValid             = stewardtypes.TrustModeAnyValid
+	TrustModeTrustedKeys          = stewardtypes.TrustModeTrustedKeys
+	TrustModeTrustedKeysAndPublic = stewardtypes.TrustModeTrustedKeysAndPublic
+	DriftModeApply                = stewardtypes.DriftModeApply
+	DriftModeMonitor              = stewardtypes.DriftModeMonitor
+	ActionContinue                = stewardtypes.ActionContinue
+	ActionFail                    = stewardtypes.ActionFail
+	ActionWarn                    = stewardtypes.ActionWarn
+	ModuleTrustModeStrict         = stewardtypes.ModuleTrustModeStrict
+	ModuleTrustModeController     = stewardtypes.ModuleTrustModeController
+	ModuleTrustModeBypass         = stewardtypes.ModuleTrustModeBypass
+)
+
+// envVarPattern matches ${VAR} patterns without defaults
+// It excludes ${VAR:-default} and ${VAR:=default} patterns
+var envVarPattern = regexp.MustCompile(`\$\{([^}:]+)\}`)
+
+// envVarWithDefaultPattern matches ${VAR:-default} and ${VAR:=default} patterns
+var envVarWithDefaultPattern = regexp.MustCompile(`\$\{([^}:]+):-([^}]*)\}`)
+
+// ErrNoConfiguration reports that none of the default steward configuration
+// search paths contained a file.
+var ErrNoConfiguration = errors.New("no configuration file found")
+
+// validateEnvVars checks that all referenced environment variables (without defaults) are set.
+// This provides fail-safe behavior: if a config references ${VAR} and VAR is not set,
+// the application fails fast instead of silently using an empty value.
+func validateEnvVars(content string) error {
+	matches := envVarPattern.FindAllStringSubmatch(content, -1)
+	var missing []string
+
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		varName := match[1]
+		if _, exists := os.LookupEnv(varName); !exists {
+			missing = append(missing, varName)
+		}
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required environment variables: %v (use ${VAR:-default} syntax to provide defaults)", missing)
+	}
+
+	return nil
+}
+
+// expandEnvWithDefaults expands environment variables with support for ${VAR:-default} syntax.
+// This extends Go's os.ExpandEnv to support shell-style defaults.
+func expandEnvWithDefaults(content string) string {
+	// First, expand ${VAR:-default} patterns
+	result := envVarWithDefaultPattern.ReplaceAllStringFunc(content, func(match string) string {
+		parts := envVarWithDefaultPattern.FindStringSubmatch(match)
+		if len(parts) < 3 {
+			return match
+		}
+		varName := parts[1]
+		defaultValue := parts[2]
+		if value, exists := os.LookupEnv(varName); exists {
+			return value
+		}
+		return defaultValue
+	})
+
+	// Then expand remaining ${VAR} patterns using os.ExpandEnv
+	return os.ExpandEnv(result)
+}
+
+// LoadConfiguration searches for and loads the steward configuration from hostname.cfg.
+//
+// If configPath is empty, searches platform-specific locations for hostname.cfg
+// using the current hostname. If configPath is provided, loads from that specific file.
+//
+// Configuration search order (when configPath is empty):
+//  1. Current working directory/hostname.cfg
+//  2. User configuration directories
+//  3. System configuration directories
+//
+// The function automatically applies defaults for optional fields and validates
+// the complete configuration before returning.
+//
+// Returns the loaded and validated configuration, or an error if no configuration
+// is found, parsing fails, or validation fails.
+func LoadConfiguration(configPath string) (StewardConfig, error) {
+	var config StewardConfig
+
+	// If specific path provided, use it
+	if configPath != "" {
+		return loadAndRecord(configPath)
+	}
+
+	// Search for configuration file in priority order
+	searchPaths := getConfigSearchPaths()
+
+	for _, path := range searchPaths {
+		if _, err := os.Stat(path); err == nil {
+			warnShadowedConfigs(searchPaths, path)
+			return loadAndRecord(path)
+		}
+	}
+
+	return config, fmt.Errorf("%w in search paths", ErrNoConfiguration)
+}
+
+// loadAndRecord loads path and records it with the boot-config write guard, so
+// the file the running steward loaded stays protected even if the host is
+// renamed afterwards.
+func loadAndRecord(path string) (StewardConfig, error) {
+	if _, err := os.Stat(path); err == nil {
+		security.SetLoadedBootConfigPath(path)
+	}
+	return loadFromPath(path)
+}
+
+// loadFromPath loads configuration from a specific file path
+func loadFromPath(configPath string) (StewardConfig, error) {
+	var config StewardConfig
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return config, fmt.Errorf("failed to read configuration file: %w", err)
+	}
+
+	content := string(data)
+
+	// Validate that all referenced env vars (without defaults) are set
+	// This provides fail-safe behavior for missing env vars
+	if err := validateEnvVars(content); err != nil {
+		return config, fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	// Expand environment variables in the configuration content
+	// This supports ${VAR} and ${VAR:-default} syntax for explicit env var references
+	expandedData := expandEnvWithDefaults(content)
+
+	dec := yaml.NewDecoder(strings.NewReader(expandedData))
+	dec.KnownFields(true)
+	if err := dec.Decode(&config); err != nil {
+		// An empty (or whitespace-only) configuration file yields io.EOF from the
+		// streaming decoder. Treat it as an empty config: defaults are applied below
+		// and ID falls back to the hostname.
+		if !errors.Is(err, io.EOF) {
+			return config, fmt.Errorf("failed to parse configuration: %w", err)
+		}
+	}
+
+	// Security invariant: DriftMode must come from controller-delivered cfg only.
+	// Clear any local-file value so a tampered hostname.cfg cannot flip a
+	// controller-connected steward into monitor mode.
+	config.Steward.DriftMode = ""
+	config.Steward.ModuleDriftModes = nil
+
+	// Apply defaults
+	applyDefaults(&config)
+
+	// Validate configuration
+	if err := ValidateConfiguration(config); err != nil {
+		return config, fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	return config, nil
+}
+
+// getConfigSearchPaths returns the prioritized list of configuration search
+// paths: for each directory in security.BootConfigDirs, "<hostname>.cfg" then
+// the canonical steward.cfg. The same directory list backs the file-module
+// write guard.
+func getConfigSearchPaths() []string {
+	var paths []string
+	for _, dir := range security.BootConfigDirs() {
+		for _, name := range security.BootConfigFileNames() {
+			paths = append(paths, filepath.Join(dir, name))
+		}
+	}
+	return paths
+}
+
+// warnShadowedConfigs logs at Warn for every existing candidate configuration
+// file that was not loaded. A shadowed steward.cfg (for example a local
+// remote_terminal.enabled: false) is otherwise silently ignored. It returns the
+// shadowed paths it warned about, in search order.
+func warnShadowedConfigs(searchPaths []string, loaded string) []string {
+	logger := logging.ForModule("steward-config")
+	var shadowed []string
+	for _, p := range searchPaths {
+		if p == loaded {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
+			shadowed = append(shadowed, p)
+			logger.Warn("steward configuration file exists but was not loaded; settings in it have no effect",
+				"unread_path", logging.SanitizeLogValue(p),
+				"loaded_path", logging.SanitizeLogValue(loaded))
+		}
+	}
+	return shadowed
+}
+
+// applyDefaults sets default values for configuration fields
+func applyDefaults(config *StewardConfig) {
+	// Set default steward settings
+	if config.Steward.Logging.Level == "" {
+		config.Steward.Logging.Level = "info"
+	}
+
+	// Set default error handling
+	if config.Steward.ErrorHandling.ModuleLoadFailure == "" {
+		config.Steward.ErrorHandling.ModuleLoadFailure = ActionContinue
+	}
+
+	if config.Steward.ErrorHandling.ResourceFailure == "" {
+		config.Steward.ErrorHandling.ResourceFailure = ActionWarn
+	}
+
+	if config.Steward.ErrorHandling.ConfigurationError == "" {
+		config.Steward.ErrorHandling.ConfigurationError = ActionFail
+	}
+
+	// Set default convergence interval
+	if config.Steward.ConvergeInterval == "" {
+		config.Steward.ConvergeInterval = "30m"
+	}
+
+	// Set default module trust mode
+	if config.Steward.ModuleTrust.Mode == "" {
+		config.Steward.ModuleTrust.Mode = ModuleTrustModeController
+	}
+
+	// Set default steward ID if not provided
+	if config.Steward.ID == "" {
+		if hostname, err := os.Hostname(); err == nil {
+			config.Steward.ID = hostname
+		} else {
+			config.Steward.ID = "unknown"
+		}
+	}
+
+	// Default poll timeout for manual-review registration: 24h (Issue #1899).
+	if config.Steward.RegistrationPollTimeout == 0 {
+		config.Steward.RegistrationPollTimeout = 24 * time.Hour
+	}
+
+	// Default DNA refresh interval: 30m (Issue #1915).
+	if config.Steward.DNARefreshInterval == "" {
+		config.Steward.DNARefreshInterval = "30m"
+	}
+}
+
+// validateScriptSigningConfig delegates to the shared stewardtypes validator.
+// Kept as a package-internal function so tests in this package can call it directly.
+func validateScriptSigningConfig(cfg ScriptSigningConfig) error {
+	return stewardtypes.ValidateScriptSigningConfig(cfg)
+}
+
+// BuildModuleSigningConfig converts a steward ScriptSigningConfig into the
+// script.ModuleSigningConfig consumed by the script module and the steward
+// command handler's pre-dispatch signature verification (Issue #1671).
+//
+// Policy carries the steward-wide signing floor through to the module, which
+// combines it with each script's own signing_policy via
+// ScriptConfig.EffectiveSigningPolicy — the floor may be tightened per script
+// but never loosened (Issue #4399). An empty/absent Policy maps to
+// script.SigningPolicy(""), which EffectiveSigningPolicy treats as no floor,
+// preserving pre-#4399 behavior for deployments that don't set it.
+//
+// It is used by both standalone-mode wiring (steward.go) and controller-connected
+// wiring (client.TransportClient) so the two paths cannot diverge.
+func BuildModuleSigningConfig(cfg ScriptSigningConfig) script.ModuleSigningConfig {
+	entries := make([]script.TrustedKeyEntry, len(cfg.TrustedKeys))
+	for i, key := range cfg.TrustedKeys {
+		entries[i] = script.TrustedKeyEntry{
+			Name:         key.Name,
+			Thumbprint:   key.Thumbprint,
+			PublicKeyRef: key.PublicKeyRef,
+		}
+	}
+	return script.ModuleSigningConfig{
+		Policy:        script.SigningPolicy(cfg.Policy),
+		TrustMode:     script.TrustMode(cfg.TrustMode),
+		TrustedKeys:   entries,
+		AllowPublicCA: cfg.AllowPublicCA,
+	}
+}

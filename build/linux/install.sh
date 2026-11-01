@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026 Jordan Ritz
+#
+# install.sh — Install cfgms-steward on Linux with CA trust bootstrap.
+#
+# Installs the bundled cfgms-steward binary, verifies the controller CA cert
+# fingerprint (interactive prompt or --fingerprint flag for non-interactive
+# use), and delegates to cfgms-steward install for cert placement and systemd
+# service registration.
+#
+# The bundle MUST also contain the cfgms-steward-launcher binary alongside
+# cfgms-steward: `cfgms-steward install` performs a launcher-managed install
+# (steward supervised by cfgms-launcher, staged under /opt/cfgms/versions/), which
+# is what makes the steward upgradeable via the control plane. It fails with a
+# clear error if the launcher binary is missing.
+#
+# Usage:
+#   sudo bash install.sh --regtoken-file PATH [--controller-url URL] \
+#       [--fingerprint HEX] [--controller-ca PATH]
+#
+# Flags:
+#   --regtoken-file PATH    File holding the registration token (required).
+#                           Must be non-empty, owned by the invoking user (root
+#                           under sudo) and not group/world accessible (mode 0600)
+#   --controller-url URL    Controller URL (install-pinned and TOFU modes;
+#                           omit to use the compile-time URL baked into the binary)
+#   --fingerprint HEX       CA cert SHA-256 fingerprint, lowercase hex no colons;
+#                           skips interactive prompt
+#   --controller-ca PATH    CA cert PEM path (default: ca.crt in script directory
+#                           if present — matches the tar.gz bundle layout)
+#
+# Non-interactive install-pinned example:
+#   sudo bash install.sh --regtoken-file /root/cfgms.token \
+#       --controller-url https://ctrl.example.com \
+#       --controller-ca ca.crt --fingerprint aabbcc1122...
+#
+# Interactive example (CA bundled in tar.gz):
+#   sudo bash install.sh --regtoken-file /root/cfgms.token --controller-url https://ctrl.example.com
+#   (Displays the fingerprint from ca.fingerprint, prompts for confirmation)
+#
+# Compile-baked URL (default, binary rebuilt per controller):
+#   sudo bash install.sh --regtoken-file /root/cfgms.token
+#
+# The token reaches `cfgms-steward install` through --regtoken-file, never on a
+# command line. There is no token-on-the-command-line form: a value on the command line is
+# visible in the process list. The operator-supplied token file is never deleted.
+#
+# Test isolation:
+#   CFGMS_INSTALL_PREFIX=/tmp/test sudo bash install.sh ...
+#   All write paths are prefixed; the binary is resolved from the prefix path
+#   so tests can inject a mock cfgms-steward without root.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+
+REGTOKEN_FILE=""
+CONTROLLER_URL=""
+FINGERPRINT=""
+CA_CERT=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --regtoken|--regtoken\=*)  # use --regtoken-file
+            echo "Error: --regtoken is not supported: pass the token in a root-only file with --regtoken-file PATH" >&2
+            exit 1 ;;
+        --regtoken-file)   REGTOKEN_FILE="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+        --controller-url)  CONTROLLER_URL="$2";  shift 2 ;;
+        --fingerprint)     FINGERPRINT="$2";     shift 2 ;;
+        --controller-ca)   CA_CERT="$2";         shift 2 ;;
+        *) echo "Unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+
+# ── Validation ────────────────────────────────────────────────────────────────
+
+usage() {
+    echo "Usage: sudo bash install.sh --regtoken-file PATH [--controller-url URL] [--fingerprint HEX] [--controller-ca PATH]" >&2
+    echo "" >&2
+    echo "  --regtoken-file PATH    File holding the registration token (mode 0600, owned by root)" >&2
+    echo "  --controller-url URL    Controller URL (install-pinned/TOFU; omit for compile-baked binary)" >&2
+    echo "  --fingerprint HEX       CA cert SHA-256 fingerprint for non-interactive install" >&2
+    echo "  --controller-ca PATH    Path to CA cert PEM (default: ca.crt in script directory)" >&2
+}
+
+if [[ -z "$REGTOKEN_FILE" ]]; then
+    usage
+    exit 1
+fi
+
+# Same checks as the steward's own token-file reader: a regular, non-empty file
+# owned by the invoking user and inaccessible to group and others. Messages never
+# include file contents.
+if [[ -n "$REGTOKEN_FILE" ]]; then
+    if [[ ! -f "$REGTOKEN_FILE" || -L "$REGTOKEN_FILE" ]]; then
+        echo "Error: --regtoken-file $REGTOKEN_FILE is not a regular file" >&2
+        exit 1
+    fi
+    read -r TOKEN_MODE TOKEN_UID < <(stat -c '%a %u' "$REGTOKEN_FILE")
+    if [[ "$TOKEN_UID" != "$(id -u)" ]]; then
+        echo "Error: --regtoken-file $REGTOKEN_FILE must be owned by the installing user (root)" >&2
+        exit 1
+    fi
+    if (( 8#$TOKEN_MODE & 8#077 )); then
+        echo "Error: --regtoken-file $REGTOKEN_FILE must not be group or world accessible (mode $TOKEN_MODE; use chmod 600)" >&2
+        exit 1
+    fi
+    if [[ ! -s "$REGTOKEN_FILE" ]]; then
+        echo "Error: --regtoken-file $REGTOKEN_FILE is empty" >&2
+        exit 1
+    fi
+fi
+
+# ── Locate CA cert ────────────────────────────────────────────────────────────
+
+# Default: ca.crt in the same directory as this script (matches tar.gz layout).
+if [[ -z "$CA_CERT" && -f "$SCRIPT_DIR/ca.crt" ]]; then
+    CA_CERT="$SCRIPT_DIR/ca.crt"
+fi
+
+# ── Fingerprint verification ──────────────────────────────────────────────────
+
+if [[ -n "$CA_CERT" ]]; then
+    if [[ -n "$FINGERPRINT" ]]; then
+        # Non-interactive: compute SHA-256 from the cert, normalize to lowercase
+        # hex without colons, and compare to the caller-supplied value.
+        COMPUTED="$(openssl x509 -noout -fingerprint -sha256 -in "$CA_CERT" 2>/dev/null \
+            | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')"
+        EXPECTED="$(echo "$FINGERPRINT" | tr '[:upper:]' '[:lower:]')"
+        if [[ "$COMPUTED" != "$EXPECTED" ]]; then
+            echo "Fingerprint mismatch:" >&2
+            echo "  expected: $EXPECTED" >&2
+            echo "  computed: $COMPUTED" >&2
+            echo "Installation aborted. Verify the CA fingerprint before deploying." >&2
+            exit 1
+        fi
+    else
+        # Interactive: display the bundled fingerprint and prompt for confirmation.
+        FP_FILE="$SCRIPT_DIR/ca.fingerprint"
+        if [[ -f "$FP_FILE" ]]; then
+            DISPLAYED_FP="$(cat "$FP_FILE")"
+        else
+            DISPLAYED_FP="$(openssl x509 -noout -fingerprint -sha256 -in "$CA_CERT" 2>/dev/null \
+                | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')"
+        fi
+        echo ""
+        echo "CA Certificate Fingerprint (SHA-256):"
+        echo "  $DISPLAYED_FP"
+        echo ""
+        printf "Verify this fingerprint against your controller --init output. Continue? [y/N] "
+        read -r ANSWER || ANSWER=""
+        case "$ANSWER" in
+            [yY]|[yY][eE][sS]) ;;
+            *)
+                echo "Installation aborted. Verify the CA fingerprint before deploying." >&2
+                exit 1
+                ;;
+        esac
+    fi
+fi
+
+# ── Locate cfgms-steward binary ───────────────────────────────────────────────
+
+# Primary: bundle path (same directory as this script, matching tar.gz layout).
+# Test-isolation fallback: CFGMS_INSTALL_PREFIX/usr/local/bin/cfgms-steward
+# lets tests inject a mock binary without root access.
+INSTALL_PREFIX="${CFGMS_INSTALL_PREFIX:-}"
+if [[ -x "$SCRIPT_DIR/cfgms-steward" ]]; then
+    STEWARD_BIN="$SCRIPT_DIR/cfgms-steward"
+elif [[ -n "$INSTALL_PREFIX" && -x "$INSTALL_PREFIX/usr/local/bin/cfgms-steward" ]]; then
+    STEWARD_BIN="$INSTALL_PREFIX/usr/local/bin/cfgms-steward"
+else
+    echo "Error: cfgms-steward binary not found in $SCRIPT_DIR" >&2
+    exit 1
+fi
+
+# ── Install stdlib module bundle installation roots ───────────────────────────
+
+# Each stdlib module ships as a signed bundle installation root — a directory
+# holding the publisher's module.yaml, the bundle.yaml sidecar (content hash and
+# publisher signature) and the module binary — assembled at build time by
+# scripts/sign-module-bundle and laid out in the release archive as
+# modules/<name>/. They are installed as modules/<name>/ under MODULES_INSTALL_DIR,
+# the location the steward's bundle discovery reads. Entries are bare module
+# names (root directories), never flat cfgms-module-<name> binaries;
+# scripts/check-stdlib-payload-boundary.sh enforces both.
+STDLIB_MODULES=(
+    cert_trust
+    file
+    firewall
+    hostname
+    package
+    patch
+    script
+    service
+    time
+    user
+)
+MODULES_INSTALL_DIR="${INSTALL_PREFIX}/usr/local/lib/cfgms/modules"
+
+install -d -m 755 "$MODULES_INSTALL_DIR"
+for module in "${STDLIB_MODULES[@]}"; do
+    src="$SCRIPT_DIR/modules/$module"
+    dest="$MODULES_INSTALL_DIR/$module"
+    if [[ -f "$src/module.yaml" ]]; then
+        # Replace a previous root wholesale so a stale binary or sidecar from an
+        # older version can never sit beside a new manifest.
+        rm -rf "$dest"
+        install -d -m 755 "$dest"
+        # Stage each file with install(1) rather than cp -p: the files are
+        # created by this (root) process, so they are root-owned regardless of
+        # who extracted the archive — a root steward must never execute a
+        # binary an unprivileged user can rewrite. Only the permission bits the
+        # assembler set (binary 755, manifest 644, sidecar 644) are carried
+        # over; setuid/setgid/sticky bits are masked off. The bytes are copied
+        # verbatim, so the installed content is exactly the signed content.
+        while IFS= read -r -d '' entry; do
+            rel="${entry#"$src"/}"
+            if [[ -d "$entry" ]]; then
+                install -d -m 755 "$dest/$rel"
+            elif [[ -f "$entry" && ! -L "$entry" ]]; then
+                mode="$(stat -c '%a' "$entry")"
+                mode="$(printf '%o' $(( 8#$mode & 8#0777 )))"
+                install -m "$mode" "$entry" "$dest/$rel"
+            else
+                echo "Error: unexpected non-regular entry in module bundle root: $entry" >&2
+                exit 1
+            fi
+        done < <(find "$src" -mindepth 1 -print0)
+    else
+        echo "Warning: stdlib module bundle root not found: $src (skipping $module)" >&2
+    fi
+done
+
+# ── Build and run install command ─────────────────────────────────────────────
+
+INSTALL_ARGS=(install --regtoken-file "$REGTOKEN_FILE")
+if [[ -n "$CONTROLLER_URL" ]]; then
+    INSTALL_ARGS+=(--controller-url "$CONTROLLER_URL")
+fi
+if [[ -n "$CA_CERT" ]]; then
+    INSTALL_ARGS+=(--controller-ca "$CA_CERT")
+fi
+if [[ -n "$FINGERPRINT" ]]; then
+    INSTALL_ARGS+=(--fingerprint "$FINGERPRINT")
+fi
+
+echo "Installing CFGMS Steward..."
+"$STEWARD_BIN" "${INSTALL_ARGS[@]}"

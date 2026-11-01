@@ -1,0 +1,109 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package interfaces
+
+import (
+	"context"
+	"testing"
+
+	"github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// testProvider is a test implementation of ControlPlaneProvider
+type testProvider struct {
+	name        string
+	initialized bool
+	started     bool
+	connected   bool
+}
+
+func newTestProvider(name string) *testProvider {
+	return &testProvider{
+		name: name,
+	}
+}
+
+func (m *testProvider) Name() string      { return m.name }
+func (m *testProvider) IsConnected() bool { return m.connected }
+
+func (m *testProvider) Initialize(ctx context.Context, config map[string]interface{}) error {
+	m.initialized = true
+	return nil
+}
+
+func (m *testProvider) Start(ctx context.Context) error {
+	m.started = true
+	m.connected = true
+	return nil
+}
+
+func (m *testProvider) Stop(ctx context.Context) error {
+	m.started = false
+	m.connected = false
+	return nil
+}
+
+func (m *testProvider) SendCommand(ctx context.Context, cmd *types.SignedCommand) error {
+	return nil
+}
+
+func (m *testProvider) FanOutCommand(ctx context.Context, cmd *types.SignedCommand, stewardIDs []string) (*types.FanOutResult, error) {
+	return &types.FanOutResult{Succeeded: stewardIDs, Failed: make(map[string]error)}, nil
+}
+
+func (m *testProvider) SubscribeCommands(ctx context.Context, stewardID string, handler CommandHandler) error {
+	return nil
+}
+
+func (m *testProvider) PublishEvent(ctx context.Context, event *types.Event) error {
+	return nil
+}
+
+func (m *testProvider) SubscribeEvents(ctx context.Context, filter *types.EventFilter, handler EventHandler) error {
+	return nil
+}
+
+func (m *testProvider) SendHeartbeat(ctx context.Context, heartbeat *types.Heartbeat) error {
+	return nil
+}
+
+func (m *testProvider) SubscribeHeartbeats(ctx context.Context, handler HeartbeatHandler) error {
+	return nil
+}
+
+func (m *testProvider) GetStats(ctx context.Context) (*types.ControlPlaneStats, error) {
+	return &types.ControlPlaneStats{}, nil
+}
+
+func (m *testProvider) Reconnect(ctx context.Context) error { return nil }
+
+func TestProviderLifecycle(t *testing.T) {
+	provider := newTestProvider("lifecycle-test")
+
+	// Initial state
+	assert.False(t, provider.initialized)
+	assert.False(t, provider.started)
+	assert.False(t, provider.connected)
+
+	// Initialize
+	ctx := context.Background()
+	err := provider.Initialize(ctx, nil)
+	require.NoError(t, err)
+	assert.True(t, provider.initialized)
+
+	// Start
+	err = provider.Start(ctx)
+	require.NoError(t, err)
+	assert.True(t, provider.started)
+	assert.True(t, provider.connected)
+	assert.True(t, provider.IsConnected())
+
+	// Stop
+	err = provider.Stop(ctx)
+	require.NoError(t, err)
+	assert.False(t, provider.started)
+	assert.False(t, provider.connected)
+	assert.False(t, provider.IsConnected())
+}

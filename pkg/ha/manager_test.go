@@ -1,0 +1,1718 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
+package ha
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"github.com/cfgis/cfgms/pkg/testing/storage"
+)
+
+func TestManager_SingleServerMode(t *testing.T) {
+	logger := logging.GetLogger()
+
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+	cfg.HealthCheck.Interval = 100 * time.Millisecond
+
+	manager, err := NewManager(cfg, logger, storageManager)
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+
+	assert.Equal(t, SingleServerMode, manager.GetDeploymentMode())
+	assert.True(t, manager.HasLeadership())
+
+	localNode := manager.GetLocalNode()
+	assert.NotNil(t, localNode)
+	assert.Equal(t, NodeRoleLeader, localNode.Role)
+	assert.Equal(t, NodeStateHealthy, localNode.State)
+
+	// Register check BEFORE Start to avoid concurrent map access.
+	var checkCalled int32
+	manager.RegisterHealthCheck("test", func(ctx context.Context) error {
+		atomic.StoreInt32(&checkCalled, 1)
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+
+	// Wait for health check to appear in the status map.
+	require.Eventually(t, func() bool {
+		h := manager.GetHealth()
+		_, exists := h.Checks["test"]
+		return exists
+	}, 3*time.Second, 25*time.Millisecond, "test health check must appear in health status")
+
+	assert.Equal(t, int32(1), atomic.LoadInt32(&checkCalled))
+
+	health := manager.GetHealth()
+	assert.NotNil(t, health)
+	assert.Equal(t, NodeStateHealthy, health.Overall)
+	assert.Contains(t, health.Checks, "test")
+
+	err = manager.Stop(ctx)
+	assert.NoError(t, err)
+}
+
+func TestManager_BlueGreenMode(t *testing.T) {
+	// Create test logger
+	logger := logging.GetLogger()
+
+	// Create test storage manager
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	// Create HA config for blue-green mode.
+	// Node ID is required by Validate() for blue-green mode.
+	cfg := DefaultConfig()
+	cfg.Mode = BlueGreenMode
+	cfg.Node.ID = "test-node-bluegreen"
+
+	// Create HA manager
+	manager, err := NewManager(cfg, logger, storageManager)
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+
+	// Test deployment mode
+	assert.Equal(t, BlueGreenMode, manager.GetDeploymentMode())
+
+	// Test local node info
+	localNode := manager.GetLocalNode()
+	assert.NotNil(t, localNode)
+	assert.NotEmpty(t, localNode.ID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+
+	err = manager.Stop(ctx)
+	assert.NoError(t, err)
+}
+
+// TestManager_ClusterMode verifies that a ClusterMode manager constructs with a
+// lease store auto-wired from the storage manager (the OSS composite's SQLite
+// bundle supplies one), starts and acquires the cluster leadership lease as the
+// sole contender, and stops cleanly.
+func TestManager_ClusterMode(t *testing.T) {
+	logger := logging.GetLogger()
+
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	const nodeID = "test-node-cluster-mode"
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = nodeID
+	cfg.Cluster = FastElectionConfig()
+
+	manager, err := NewManager(cfg, logger, storageManager)
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+
+	assert.Equal(t, ClusterMode, manager.GetDeploymentMode())
+
+	localNode := manager.GetLocalNode()
+	assert.NotNil(t, localNode)
+	assert.NotEmpty(t, localNode.ID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+
+	require.Eventually(t, manager.HasLeadership, 5*time.Second, 5*time.Millisecond,
+		"single-node cluster must acquire the cluster leadership lease as the sole contender")
+
+	err = manager.Stop(ctx)
+	assert.NoError(t, err)
+}
+
+// TestManager_Start_SurvivesCallerContextCancelledAfterReturn guards against a
+// regression found live during #3130: server.go's Start() calls
+// `ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second);
+// defer cancel(); haManager.Start(ctx)` — a pattern that cancels ctx almost
+// immediately (on the enclosing function's return), not after the 30s bound.
+// Manager.Start() used to derive its internal m.ctx directly from that
+// parameter, so every long-lived background component (originally the node-info
+// replication goroutine; today the lease-acquisition and node-registration
+// loops) was killed within milliseconds of Start() returning. This test
+// reproduces the exact caller pattern (cancel the passed context immediately
+// after Start() returns, not at test teardown) and proves the lease-acquisition
+// loop still completes.
+func TestManager_Start_SurvivesCallerContextCancelledAfterReturn(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	const nodeID = "test-node-ctx-survives-cancel"
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = nodeID
+	cfg.Cluster = FastElectionConfig()
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+
+	// Reproduce server.go's exact pattern: a short-lived context whose cancel
+	// fires on this function's return, not tied to the Manager's lifetime.
+	func() {
+		startCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		startErr := manager.Start(startCtx)
+		require.NoError(t, startErr)
+	}()
+	// startCtx is now cancelled — m.ctx must NOT be, or the lease-acquisition
+	// loop died before it ever got a chance to acquire.
+
+	require.Eventually(t, manager.HasLeadership, 5*time.Second, 5*time.Millisecond,
+		"lease acquisition must complete even after the caller's Start(ctx) context is cancelled")
+
+	require.NoError(t, manager.Stop(context.Background()))
+}
+
+func TestManager_HealthChecks(t *testing.T) {
+	logger := logging.GetLogger()
+
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.HealthCheck.Interval = 100 * time.Millisecond
+	manager, err := NewManager(cfg, logger, storageManager)
+	require.NoError(t, err)
+
+	var passingCheckCalled, failingCheckCalled int32
+
+	// Register checks BEFORE Start so they are included in initializeCheckStates
+	// and there is no concurrent map access between registration and first tick.
+	manager.RegisterHealthCheck("passing", func(ctx context.Context) error {
+		atomic.StoreInt32(&passingCheckCalled, 1)
+		return nil
+	})
+
+	manager.RegisterHealthCheck("failing", func(ctx context.Context) error {
+		atomic.StoreInt32(&failingCheckCalled, 1)
+		return assert.AnError
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+
+	// Poll health.Checks (the authoritative observable state) rather than the atomics:
+	// the atomics are set inside performSingleHealthCheck but healthStatus is updated
+	// after all checks complete, so checking atomics first races against the status update.
+	require.Eventually(t, func() bool {
+		h := manager.GetHealth()
+		_, hasP := h.Checks["passing"]
+		_, hasF := h.Checks["failing"]
+		return hasP && hasF
+	}, 3*time.Second, 25*time.Millisecond, "both health checks must appear in health status")
+
+	// Once health.Checks is populated, the check functions have definitely been called.
+	assert.Equal(t, int32(1), atomic.LoadInt32(&passingCheckCalled))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&failingCheckCalled))
+
+	health := manager.GetHealth()
+	assert.NotNil(t, health)
+	assert.Contains(t, health.Checks, "passing")
+	assert.Contains(t, health.Checks, "failing")
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer stopCancel()
+	err = manager.Stop(stopCtx)
+	assert.NoError(t, err)
+}
+
+// TestManager_HealthChecks_ConcurrentRegistration verifies that calling
+// RegisterHealthCheck while the health checker is running does not cause a data
+// race on the healthChecks map or a deadlock between the health checker goroutine
+// and Manager.Stop. Both were possible before the lock-ordering fix in health.go.
+func TestManager_HealthChecks_ConcurrentRegistration(t *testing.T) {
+	logger := logging.GetLogger()
+
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.HealthCheck.Interval = 5 * time.Millisecond
+	manager, err := NewManager(cfg, logger, storageManager)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+
+	// Register checks concurrently while the health-checker goroutine is running.
+	// With the old code this races on healthChecks (read without m.mu in
+	// performHealthChecks, write under m.mu in RegisterHealthCheck).
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 20; i++ {
+			manager.RegisterHealthCheck("concurrent-check", func(ctx context.Context) error {
+				return nil
+			})
+		}
+	}()
+
+	<-done
+
+	// Verify that at least one performHealthChecks cycle ran while registrations
+	// were in flight and picked up the concurrent-check. This confirms the data-race
+	// fix actually propagates concurrent registrations to observable health state,
+	// not just that the goroutine didn't crash.
+	require.Eventually(t, func() bool {
+		h := manager.GetHealth()
+		_, exists := h.Checks["concurrent-check"]
+		return exists
+	}, 3*time.Second, 25*time.Millisecond, "concurrent-check must appear in health status")
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	// Stop must not deadlock. The old code deadlocked when Manager.Stop held m.mu
+	// and called h.Stop (needing h.mu) while the health goroutine held h.mu and
+	// waited for m.mu.
+	err = manager.Stop(stopCtx)
+	assert.NoError(t, err)
+}
+
+func TestManager_ConfigValidation(t *testing.T) {
+	logger := logging.GetLogger()
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	// Test invalid config
+	cfg := &Config{
+		Mode: ClusterMode,
+		Node: NodeConfig{}, // Invalid - node ID is empty
+	}
+
+	_, err = NewManager(cfg, logger, storageManager)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "node ID is required")
+
+	// Test invalid cluster config
+	cfg = DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = "test-node-123" // Set valid node ID to test quorum validation
+	cfg.Cluster.MinQuorum = 10
+	cfg.Cluster.ExpectedSize = 3 // Invalid - quorum > expected size
+
+	_, err = NewManager(cfg, logger, storageManager)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "min quorum must be between 1 and expected size")
+}
+
+func TestConfig_LoadFromEnvironment_InvalidQuorum(t *testing.T) {
+	logger := logging.GetLogger()
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	t.Setenv("CFGMS_HA_MODE", "cluster")
+	t.Setenv("CFGMS_NODE_ID", "test-node")
+	t.Setenv("CFGMS_HA_CLUSTER_SIZE", "3")
+	t.Setenv("CFGMS_HA_MIN_QUORUM", "5")
+
+	cfg := DefaultConfig()
+	require.NoError(t, cfg.LoadFromEnvironment())
+
+	_, err = NewManager(cfg, logger, storageManager)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "quorum")
+}
+
+// TestModeFromString verifies all valid mode strings (case-insensitive) and the
+// error path for unrecognised values.
+func TestModeFromString(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  DeploymentMode
+		isErr bool
+	}{
+		{"single", SingleServerMode, false},
+		{"Single", SingleServerMode, false},
+		{"SINGLE", SingleServerMode, false},
+		{"blue-green", BlueGreenMode, false},
+		{"Blue-Green", BlueGreenMode, false},
+		{"cluster", ClusterMode, false},
+		{"CLUSTER", ClusterMode, false},
+		{"", SingleServerMode, true},
+		{"clustr", SingleServerMode, true},
+		{"Cluster!", SingleServerMode, true},
+	} {
+		got, err := ModeFromString(tc.input)
+		if tc.isErr {
+			require.Error(t, err, "ModeFromString(%q) should return error", tc.input)
+			assert.Equal(t, SingleServerMode, got, "error path must return SingleServerMode")
+		} else {
+			require.NoError(t, err, "ModeFromString(%q) must not error", tc.input)
+			assert.Equal(t, tc.want, got, "ModeFromString(%q) wrong mode", tc.input)
+		}
+	}
+}
+
+func TestDeploymentModeProgression(t *testing.T) {
+	// This test verifies the progressive deployment model works correctly
+	logger := logging.GetLogger()
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Phase 1: Single Server
+	t.Run("SingleServer", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Mode = SingleServerMode
+
+		manager, err := NewManager(cfg, logger, storageManager)
+		require.NoError(t, err)
+
+		err = manager.Start(ctx)
+		require.NoError(t, err)
+
+		// Should be leader immediately
+		assert.True(t, manager.HasLeadership())
+		assert.Equal(t, SingleServerMode, manager.GetDeploymentMode())
+
+		err = manager.Stop(ctx)
+		assert.NoError(t, err)
+	})
+
+	// Phase 2: Blue-Green
+	t.Run("BlueGreen", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Mode = BlueGreenMode
+		cfg.Node.ID = "test-progression-bluegreen-node"
+
+		manager, err := NewManager(cfg, logger, storageManager)
+		require.NoError(t, err)
+
+		err = manager.Start(ctx)
+		require.NoError(t, err)
+
+		// Should support blue-green deployment
+		assert.Equal(t, BlueGreenMode, manager.GetDeploymentMode())
+
+		err = manager.Stop(ctx)
+		assert.NoError(t, err)
+	})
+
+	// Phase 3: Full Cluster
+	t.Run("Cluster", func(t *testing.T) {
+		const nodeID = "test-progression-cluster-node"
+		cfg := DefaultConfig()
+		cfg.Mode = ClusterMode
+		cfg.Node.ID = nodeID
+		cfg.Cluster = FastElectionConfig()
+
+		manager, err := NewManager(cfg, logger, storageManager)
+		require.NoError(t, err)
+
+		err = manager.Start(ctx)
+		require.NoError(t, err)
+
+		// Should support cluster operations, acquiring the lease as sole contender.
+		assert.Equal(t, ClusterMode, manager.GetDeploymentMode())
+		// WaitForLeadership blocks on the manager's own acquisition signal
+		// instead of polling HasLeadership() on a wall-clock budget (Issue
+		// #4160) — see handlers_ha_test.go's newLeaseLeaderHAManager for the
+		// full rationale (same root cause, same fix).
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer waitCancel()
+		require.True(t, manager.WaitForLeadership(waitCtx),
+			"single-node cluster must acquire the cluster leadership lease")
+
+		err = manager.Stop(ctx)
+		assert.NoError(t, err)
+	})
+}
+
+// TestManager_GetCACertPEM_EmptyPath verifies that GetCACertPEM returns nil when
+// CACertPath is empty — no CA is available and no error is surfaced to the caller.
+func TestManager_GetCACertPEM_EmptyPath(t *testing.T) {
+	logger := logging.GetLogger()
+	sm, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+	// CACertPath intentionally left empty
+
+	manager, err := NewManager(cfg, logger, sm)
+	require.NoError(t, err)
+
+	got := manager.GetCACertPEM()
+	assert.Nil(t, got, "GetCACertPEM must return nil when CACertPath is empty")
+}
+
+// TestManager_GetCACertPEM_ValidPath verifies that GetCACertPEM returns the file
+// bytes when CACertPath points to a readable file.
+func TestManager_GetCACertPEM_ValidPath(t *testing.T) {
+	logger := logging.GetLogger()
+	sm, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	// Write a dummy CA cert PEM to a temp file.
+	tmpDir := t.TempDir()
+	caPath := filepath.Join(tmpDir, "ca.pem")
+	want := []byte("-----BEGIN CERTIFICATE-----\ndummy-ca-pem\n-----END CERTIFICATE-----\n")
+	require.NoError(t, os.WriteFile(caPath, want, 0600))
+
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+	cfg.CACertPath = caPath
+
+	manager, err := NewManager(cfg, logger, sm)
+	require.NoError(t, err)
+
+	got := manager.GetCACertPEM()
+	require.NotNil(t, got, "GetCACertPEM must return bytes when CACertPath is readable")
+	assert.Equal(t, want, got, "GetCACertPEM must return exactly the file contents")
+}
+
+// TestManager_GetCACertPEM_InvalidPath verifies that GetCACertPEM returns nil (not an error)
+// when CACertPath points to a non-existent file — callers get a safe nil, not a panic or error.
+func TestManager_GetCACertPEM_InvalidPath(t *testing.T) {
+	logger := logging.GetLogger()
+	sm, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+	cfg.CACertPath = "/nonexistent/path/ca.pem"
+
+	manager, err := NewManager(cfg, logger, sm)
+	require.NoError(t, err)
+
+	got := manager.GetCACertPEM()
+	assert.Nil(t, got, "GetCACertPEM must return nil when file is unreadable")
+}
+
+// TestManager_GetCACertPEM_Concurrent verifies that GetCACertPEM is safe to call
+// from multiple goroutines simultaneously (no data race on m.cfg.CACertPath).
+func TestManager_GetCACertPEM_Concurrent(t *testing.T) {
+	logger := logging.GetLogger()
+	sm, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	tmpDir := t.TempDir()
+	caPath := filepath.Join(tmpDir, "ca.pem")
+	require.NoError(t, os.WriteFile(caPath, []byte("dummy-cert"), 0600))
+
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+	cfg.CACertPath = caPath
+
+	manager, err := NewManager(cfg, logger, sm)
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	for i := 0; i < 10; i++ {
+		go func() {
+			for j := 0; j < 50; j++ {
+				pem := manager.GetCACertPEM()
+				assert.NotNil(t, pem)
+			}
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+}
+
+// TestManager_SingleServerMode_HasLeadership_UnconditionallyTrue is the REQUIRED
+// test for Decision 4 of ADR-029: SingleServerMode HasLeadership() must return true
+// unconditionally, with no lease, no expiry, and no new rejection path.
+func TestManager_SingleServerMode_HasLeadership_UnconditionallyTrue(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+
+	// HasLeadership must return true immediately without any lease or shared substrate.
+	assert.True(t, manager.HasLeadership(),
+		"SingleServerMode HasLeadership() must be unconditionally true — no lease, no expiry")
+
+	// GetTerm in SingleServerMode has no lease-backed authority; it returns 0.
+	assert.Equal(t, uint64(0), manager.GetTerm(),
+		"SingleServerMode GetTerm() must return 0 (no lease-backed authority)")
+}
+
+// TestManager_WaitForLeadership_SingleServerMode_ReturnsTrueImmediately covers
+// WaitForLeadership's SingleServerMode short-circuit (Issue #4160): it must
+// return true without ever consulting ctx, mirroring HasLeadership's own
+// unconditional-true short-circuit for that mode (ADR-029 Decision 4). Proven
+// with an already-cancelled context — if the short-circuit came after the ctx
+// check, this would return false instead.
+func TestManager_WaitForLeadership_SingleServerMode_ReturnsTrueImmediately(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already done before WaitForLeadership is ever called
+
+	assert.True(t, manager.WaitForLeadership(ctx),
+		"SingleServerMode WaitForLeadership must return true even with an already-cancelled context")
+}
+
+// TestManager_WaitForLeadership_NoLeaseManager_ReturnsFalseImmediately covers
+// WaitForLeadership's nil-channel early return (Issue #4160): a ClusterMode
+// manager that has never had SetLeaseStore called has no leaseManager and so
+// no leadershipAcquired channel — there is nothing to wait for, and no
+// acquisition attempt is ever made, so this must return false without
+// blocking on ctx at all (proven with context.Background(), which never
+// cancels on its own).
+func TestManager_WaitForLeadership_NoLeaseManager_ReturnsFalseImmediately(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = "wait-no-lease-manager-node"
+	cfg.Cluster = FastElectionConfig()
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
+	require.NoError(t, err)
+	// Deliberately no SetLeaseStore call.
+
+	done := make(chan bool, 1)
+	go func() { done <- manager.WaitForLeadership(context.Background()) }()
+
+	select {
+	case got := <-done:
+		assert.False(t, got, "WaitForLeadership must return false when no lease manager is wired")
+	case <-time.After(1 * time.Second):
+		t.Fatal("WaitForLeadership blocked instead of returning immediately for a manager with no lease manager")
+	}
+}
+
+// TestManager_WaitForLeadership_ContextCancelled_ReturnsFalse covers
+// WaitForLeadership's ctx.Done() branch (Issue #4160): a Started ClusterMode
+// manager that is genuinely still contending — never acquiring, so
+// leadershipAcquired is a real, non-nil channel that is never closed — must
+// return false once ctx expires rather than hang. Contention is induced by
+// pre-seeding the shared store with a long-lived lease held by a different
+// holder before Start(), so this manager's own TryAcquire calls keep losing
+// for the whole test.
+func TestManager_WaitForLeadership_ContextCancelled_ReturnsFalse(t *testing.T) {
+	store := newTestLeaseStore(t)
+	// Pre-seed a long-lived lease held by a different holder so this test's own
+	// manager keeps losing every TryAcquire for the whole test.
+	seeded, err := store.AcquireOrRenew(context.Background(),
+		clusterLeadershipLeaseName, "other-holder", 10*time.Second)
+	require.NoError(t, err)
+	require.True(t, seeded.Acquired, "seeding the contending lease must itself succeed")
+
+	manager := newLeaseBackedClusterManager(t, "wait-ctx-cancelled-node", store)
+
+	startCtx, startCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer startCancel()
+	require.NoError(t, manager.Start(startCtx))
+	t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer waitCancel()
+
+	got := manager.WaitForLeadership(waitCtx)
+	assert.False(t, got, "WaitForLeadership must return false once ctx expires while genuinely still contending")
+}
+
+// TestManager_WaitForLeadership_AfterStop_ReturnsFalse proves
+// leadershipAcquired is a per-run latch, not a live query (Issue #4160
+// security review): once this node has acquired the lease and then Stop()
+// has been called, WaitForLeadership must go back to reporting false, not
+// keep answering true forever from the previous run's now-cleared signal.
+// Stop() clears m.leadershipAcquired precisely so a caller cannot mistake a
+// stopped manager's stale acquisition for current authority.
+func TestManager_WaitForLeadership_AfterStop_ReturnsFalse(t *testing.T) {
+	store := newTestLeaseStore(t)
+	manager := newLeaseBackedClusterManager(t, "wait-after-stop-node", store)
+
+	startCtx, startCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer startCancel()
+	require.NoError(t, manager.Start(startCtx))
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer waitCancel()
+	require.True(t, manager.WaitForLeadership(waitCtx),
+		"sole contender must acquire the lease before Stop() is exercised")
+
+	require.NoError(t, manager.Stop(context.Background()))
+
+	// A stopped manager's WaitForLeadership must not block: leadershipAcquired
+	// is nil again post-Stop, so this returns immediately via the nil-channel
+	// branch, the same as a manager that never acquired anything.
+	done := make(chan bool, 1)
+	go func() { done <- manager.WaitForLeadership(context.Background()) }()
+	select {
+	case got := <-done:
+		assert.False(t, got, "WaitForLeadership must return false after Stop(), not the previous run's stale true")
+	case <-time.After(1 * time.Second):
+		t.Fatal("WaitForLeadership blocked after Stop() instead of returning immediately")
+	}
+}
+
+// newLeaseBackedClusterManager returns a ClusterMode *Manager (FastElectionConfig)
+// with SetLeaseStore already called against store. It does not Start the manager.
+// Used by the lease-backed HasLeadership()/GetTerm() tests below (Issue #3760,
+// ADR-031 Decision 5).
+func newLeaseBackedClusterManager(t *testing.T, nodeID string, store business.LeaseStore) *Manager {
+	t.Helper()
+
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, storageManager.Close()) })
+
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = nodeID
+	cfg.Node.ExternalAddress = nodeID + ".invalid:9080"
+	cfg.Cluster = FastElectionConfig()
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
+	require.NoError(t, err)
+	require.NoError(t, manager.SetLeaseStore(store))
+	return manager
+}
+
+// TestManager_HasLeadership_ClusterMode_LeaseBackedAndExpires is the REQUIRED test
+// (Issue #3760 AC) proving Manager.HasLeadership()/GetTerm() are backed by the S3
+// database lease (pkg/lease, ADR-031 Decision 5): HasLeadership() becomes true once
+// the lease is acquired, GetTerm() reports the lease's fencing token, and —
+// critically — HasLeadership() lapses once the background renewal loop stops
+// (Manager.Stop), driven purely by the lease's cached-authority SafetyMargin.
+func TestManager_HasLeadership_ClusterMode_LeaseBackedAndExpires(t *testing.T) {
+	store := newTestLeaseStore(t)
+	manager := newLeaseBackedClusterManager(t, "lease-hasleader-test", store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Start(ctx))
+
+	// HasLeadership must become true once the background acquisition loop
+	// (started by Start()) acquires the database lease.
+	require.Eventually(t, manager.HasLeadership, 5*time.Second, 5*time.Millisecond,
+		"HasLeadership must become true once the database lease is acquired")
+
+	token := manager.GetTerm()
+	assert.NotZero(t, token, "GetTerm must return the lease's fencing token once leadership is held")
+
+	state, err := store.GetLease(context.Background(), clusterLeadershipLeaseName)
+	require.NoError(t, err)
+	assert.Equal(t, LeaseTermFloor+state.Token, token, "GetTerm must equal the lease store's own current token offset by LeaseTermFloor")
+	assert.Equal(t, "lease-hasleader-test", state.HolderID)
+
+	// Manager.Stop aggregates component shutdown errors, so it is asserted rather
+	// than discarded: a failure to shut the cluster down cleanly is a real defect.
+	require.NoError(t, manager.Stop(context.Background()))
+
+	// The renewal loop has stopped, so no further TryAcquire calls extend the
+	// cached authority window. Once FastElectionConfig's derived SafetyMargin
+	// (160ms: 0.8 × 200ms ElectionTimeout) lapses, HasLeadership must go false.
+	assert.Eventually(t, func() bool { return !manager.HasLeadership() },
+		2*time.Second, 5*time.Millisecond,
+		"HasLeadership must become false once the cached lease authority window lapses without renewal")
+}
+
+// TestManager_GetTerm_ExceedsPreLeaseRaftTerms reproduces the cluster-upgrade
+// fence lockout: a steward that served a pre-ADR-031 cluster has persisted that
+// cluster's Raft term as its fence ratchet, and a freshly created lease starts at
+// token 1. GetTerm must still stamp a term above every Raft term, or the steward
+// rejects every command after the controller is upgraded.
+func TestManager_GetTerm_ExceedsPreLeaseRaftTerms(t *testing.T) {
+	store := newTestLeaseStore(t)
+	manager := newLeaseBackedClusterManager(t, "lease-term-floor-test", store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Start(ctx))
+	t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
+
+	require.Eventually(t, manager.HasLeadership, 5*time.Second, 5*time.Millisecond)
+
+	// 21 is the Raft term the lab cluster had reached before upgrading; no Raft
+	// term ever approached 2^32.
+	const preUpgradeRaftTerm uint64 = 21
+
+	// The lockout precondition: the fresh lease's raw fencing token sits below the
+	// steward's persisted Raft term, so an un-floored token would be rejected. The
+	// token is not pinned to exactly 1: FastElectionConfig's 200ms lease TTL can
+	// lapse between 40ms renewals under -race/parallel load, and the store then
+	// treats the next AcquireOrRenew as a genuine re-acquisition with token+1.
+	state, err := store.GetLease(context.Background(), clusterLeadershipLeaseName)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, state.Token, uint64(1), "a lease token starts at 1")
+	require.Less(t, state.Token, preUpgradeRaftTerm,
+		"a freshly created lease's raw token must sit below the pre-upgrade Raft term for this scenario to reproduce the lockout")
+
+	// GetTerm reports 0 in any instant the cached authority has lapsed, so read it
+	// while authority is held rather than at one arbitrary moment.
+	var term uint64
+	require.Eventually(t, func() bool {
+		term = manager.GetTerm()
+		return term != 0
+	}, 5*time.Second, 5*time.Millisecond, "GetTerm must report a lease-derived term while leadership is held")
+	assert.Greater(t, term, preUpgradeRaftTerm)
+	assert.Greater(t, term, uint64(math.MaxUint32), "lease-derived terms must lie above the whole Raft term domain")
+}
+
+// TestManager_HasLeadership_MultiNode_AgreesWithLeaseCurrentHolder is the REQUIRED
+// multi-node test (Issue #3760 AC) proving HasLeadership()/GetTerm() agree with the
+// lease's current holder/token across two Manager instances sharing one database —
+// here, one real (not mocked) flatfile business.LeaseStore, per CLAUDE.md's
+// no-mocks rule and the story's "no mocks" implementation note.
+func TestManager_HasLeadership_MultiNode_AgreesWithLeaseCurrentHolder(t *testing.T) {
+	store := newTestLeaseStore(t)
+
+	managerA := newLeaseBackedClusterManager(t, "lease-multi-a", store)
+	managerB := newLeaseBackedClusterManager(t, "lease-multi-b", store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, managerA.Start(ctx))
+	require.NoError(t, managerB.Start(ctx))
+	t.Cleanup(func() {
+		assert.NoError(t, managerA.Stop(context.Background()))
+		assert.NoError(t, managerB.Stop(context.Background()))
+	})
+
+	// Wait until exactly one manager reports leadership and its GetTerm() agrees
+	// with the store's own current-holder token — proving Manager.HasLeadership()/
+	// GetTerm() read through to the same S3 lease state, not an independent view.
+	require.Eventually(t, func() bool {
+		aHas, bHas := managerA.HasLeadership(), managerB.HasLeadership()
+		if aHas == bHas { // both false (not yet settled) or both true (should never happen)
+			return false
+		}
+
+		leader, leaderID := managerA, "lease-multi-a"
+		if bHas {
+			leader, leaderID = managerB, "lease-multi-b"
+		}
+
+		state, err := store.GetLease(context.Background(), clusterLeadershipLeaseName)
+		if err != nil || !state.Valid {
+			return false
+		}
+		return state.HolderID == leaderID && LeaseTermFloor+state.Token == leader.GetTerm()
+	}, 5*time.Second, 5*time.Millisecond,
+		"exactly one manager must hold leadership, and its GetTerm() must equal the lease store's current holder token")
+}
+
+// TestManager_DualAuthorityWindowBound_ThroughManager is the REQUIRED test
+// (Issue #3760 AC, "Security review finding, round 2") proving that two Manager
+// instances never both report HasLeadership() == true for longer than S3's derived
+// SafetyMargin, exercised through Manager specifically — not just pkg/lease.Manager
+// directly (see TestManager_DualAuthorityWindowBound_NoOverlapBeyondSafetyMargin in
+// pkg/lease) — proving the ha.Manager wiring didn't reintroduce the dual-authority
+// gap the primitive itself closed.
+func TestManager_DualAuthorityWindowBound_ThroughManager(t *testing.T) {
+	// Repeated 20x within this single test run — not relying on `go test
+	// -count=20`, which the merge-queue Windows leg does not pass — because the
+	// regression this guards is a goroutine-join race in Manager.Stop(): each
+	// iteration builds a fresh t.TempDir()-backed lease store and Stop()s two
+	// managers against it, so a `TempDir RemoveAll cleanup` diagnostic on any
+	// iteration means Stop() returned before its background loops (
+	// runLeaseAcquisition, runNodeRegistration) had actually released the
+	// store's file handles.
+	for i := 0; i < 20; i++ {
+		t.Run(fmt.Sprintf("iteration_%02d", i), func(t *testing.T) {
+			store := newTestLeaseStore(t)
+
+			managerA := newLeaseBackedClusterManager(t, "dual-auth-a", store)
+			managerB := newLeaseBackedClusterManager(t, "dual-auth-b", store)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			require.NoError(t, managerA.Start(ctx))
+			require.NoError(t, managerB.Start(ctx))
+
+			// Wait on each manager's acquisition event (the latch runLeaseAcquisition
+			// closes on a successful acquire) rather than polling HasLeadership().
+			type acquisition struct {
+				manager *Manager
+				ok      bool
+			}
+			first := make(chan acquisition, 2)
+			for _, m := range []*Manager{managerA, managerB} {
+				go func(m *Manager) { first <- acquisition{m, m.WaitForLeadership(ctx)} }(m)
+			}
+			got := <-first
+			require.True(t, got.ok, "one of the two managers must acquire the lease")
+			winner, loser := got.manager, managerA
+			if winner == managerA {
+				loser = managerB
+			}
+
+			// Stop the winner so its renewal loop stops (simulates a crashed leader).
+			// Stop does not release the lease, so the loser can only acquire once the
+			// winner's last renewal has expired in the store. Liveness is the loser's
+			// acquisition event, not a comparison of elapsed time to a bound; ctx is
+			// only a hang guard. Safety is sampled on every spin until that event:
+			// at most one manager may ever report true.
+			require.NoError(t, winner.Stop(context.Background()))
+
+			// The two HasLeadership() reads are not one atomic sample, so their
+			// order decides whether a true/true result proves an overlap. The
+			// stopped winner never renews again, so its authority is a single
+			// interval that only ever lapses: if it reports true at the later read,
+			// it was also true at the earlier one. Reading the loser first therefore
+			// makes loser==true && winner==true mean both held authority at the
+			// loser's read instant. Reading the winner first does not: a goroutine
+			// preempted between the two reads for longer than leaseTTL-SafetyMargin
+			// (40ms under FastElectionConfig) sees the winner's true from before
+			// its deadline and the loser's true from after a legitimate takeover —
+			// a false overlap produced by the sampler, not by the managers.
+			bothHoldAuthority := func() bool {
+				return loser.HasLeadership() && winner.HasLeadership()
+			}
+
+			loserAcquired := make(chan bool, 1)
+			go func() { loserAcquired <- loser.WaitForLeadership(ctx) }()
+			for done := false; !done; {
+				require.False(t, bothHoldAuthority(),
+					"both managers reported HasLeadership() == true for the same cluster lease simultaneously")
+				select {
+				case ok := <-loserAcquired:
+					require.True(t, ok, "the surviving manager must take over the lease once the winner's lease expires")
+					done = true
+				default:
+					runtime.Gosched()
+				}
+			}
+			require.False(t, bothHoldAuthority(),
+				"both managers reported HasLeadership() == true for the same cluster lease simultaneously")
+
+			require.NoError(t, loser.Stop(context.Background()))
+		})
+	}
+}
+
+// blockingLeaseStore wraps a real business.LeaseStore and blocks each
+// AcquireOrRenew call until the test closes release, so a test can
+// deterministically observe Manager.Stop() waiting on runLeaseAcquisition's
+// in-flight call. Every method other than AcquireOrRenew is the embedded real
+// store's own — this delegates to a genuine implementation rather than faking
+// one (CLAUDE.md's no-mocks rule).
+type blockingLeaseStore struct {
+	business.LeaseStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newBlockingLeaseStore(inner business.LeaseStore) *blockingLeaseStore {
+	return &blockingLeaseStore{
+		LeaseStore: inner,
+		entered:    make(chan struct{}, 1),
+		release:    make(chan struct{}),
+	}
+}
+
+func (b *blockingLeaseStore) AcquireOrRenew(ctx context.Context, name, holderID string, ttl time.Duration) (*business.LeaseState, error) {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	<-b.release
+	return b.LeaseStore.AcquireOrRenew(ctx, name, holderID, ttl)
+}
+
+// blockingNodeRegistryStore is blockingLeaseStore's counterpart for
+// business.NodeRegistryStore, gating RegisterNode instead of AcquireOrRenew.
+type blockingNodeRegistryStore struct {
+	business.NodeRegistryStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newBlockingNodeRegistryStore(inner business.NodeRegistryStore) *blockingNodeRegistryStore {
+	return &blockingNodeRegistryStore{
+		NodeRegistryStore: inner,
+		entered:           make(chan struct{}, 1),
+		release:           make(chan struct{}),
+	}
+}
+
+func (b *blockingNodeRegistryStore) RegisterNode(ctx context.Context, self business.NodeRecord) error {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	<-b.release
+	return b.NodeRegistryStore.RegisterNode(ctx, self)
+}
+
+// TestManager_Stop_JoinsLeaseAcquisitionLoopBeforeReturning is the deterministic
+// regression guard for Issue #4057 (PR #4062 review, round 3): it asserts the
+// join in Stop() directly instead of racing a Windows-only file-handle timing
+// window. TestManager_DualAuthorityWindowBound_ThroughManager's revert-and-rerun
+// showed 20/20 passes even with Stop()'s m.bgWG.Wait() removed on the hardware
+// available at the time — a regression guard that cannot fail when the fix is
+// reverted is not a guard. This test blocks the lease store's AcquireOrRenew call
+// mid-flight, calls Stop() on a separate goroutine, and requires Stop() has NOT
+// returned while that call is still blocked; only after release does Stop()
+// return. Reverting m.bgWG.Wait() in Stop() fails this test immediately, on any
+// OS, with no race required.
+func TestManager_Stop_JoinsLeaseAcquisitionLoopBeforeReturning(t *testing.T) {
+	blocking := newBlockingLeaseStore(newTestLeaseStore(t))
+	manager := newLeaseBackedClusterManager(t, "stop-join-lease-node", blocking)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Start(ctx))
+
+	select {
+	case <-blocking.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runLeaseAcquisition never called AcquireOrRenew")
+	}
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- manager.Stop(context.Background()) }()
+
+	select {
+	case stopDoneErr := <-stopDone:
+		_ = stopDoneErr
+		t.Fatal("Stop() returned while runLeaseAcquisition's AcquireOrRenew call was still blocked in flight — Stop() is not joining the background loop")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(blocking.release)
+
+	select {
+	case err := <-stopDone:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() did not return after the blocked AcquireOrRenew call was released")
+	}
+}
+
+// TestManager_Stop_JoinsNodeRegistrationLoopBeforeReturning is
+// TestManager_Stop_JoinsLeaseAcquisitionLoopBeforeReturning's counterpart for
+// runNodeRegistration, the second goroutine m.bgWG joins in Stop(). Both
+// goroutines share one WaitGroup, but each has its own Add/Done pair, so a
+// defect that dropped the join for only one of the two would not be caught by
+// exercising the other.
+func TestManager_Stop_JoinsNodeRegistrationLoopBeforeReturning(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, storageManager.Close()) })
+
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = "stop-join-registry-node"
+	cfg.Cluster = FastElectionConfig()
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
+	require.NoError(t, err)
+	require.NoError(t, manager.SetLeaseStore(newTestLeaseStore(t)))
+
+	blocking := newBlockingNodeRegistryStore(newTestNodeRegistryStore(t))
+	manager.nodeRegistryStore = blocking
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Start(ctx))
+
+	select {
+	case <-blocking.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runNodeRegistration never called RegisterNode")
+	}
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- manager.Stop(context.Background()) }()
+
+	select {
+	case stopDoneErr := <-stopDone:
+		_ = stopDoneErr
+		t.Fatal("Stop() returned while runNodeRegistration's RegisterNode call was still blocked in flight — Stop() is not joining the background loop")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(blocking.release)
+
+	select {
+	case err := <-stopDone:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() did not return after the blocked RegisterNode call was released")
+	}
+}
+
+// TestNewManager_ClusterMode_WiresLeaseStoreFromStorageManager proves the
+// leadership lease is wired by construction from the StorageManager the Manager is
+// handed, with no explicit SetLeaseStore call anywhere in the test. This is the
+// regression test for the substrate swap shipping without production wiring: an
+// opt-in setter that the controller startup path never calls leaves
+// HasLeadership() permanently false and GetTerm() permanently 0, which is a
+// disabled ADR-029 Decision 5 command fence, not a degraded one.
+func TestNewManager_ClusterMode_WiresLeaseStoreFromStorageManager(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, storageManager.Close()) })
+
+	require.NotNil(t, storageManager.GetLeaseStore(),
+		"the standard test storage tier must supply a LeaseStore; without one this test cannot prove the wiring")
+
+	const nodeID = "lease-autowire-node"
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = nodeID
+	cfg.Cluster = FastElectionConfig()
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Start(ctx),
+		"Start must succeed when the storage manager supplies a lease store")
+	t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
+
+	require.Eventually(t, manager.HasLeadership, 5*time.Second, 5*time.Millisecond,
+		"HasLeadership must become true from the constructor-wired lease, with no explicit SetLeaseStore call")
+
+	token := manager.GetTerm()
+	require.NotZero(t, token,
+		"GetTerm must stamp a non-zero fencing token; term 0 is read as 'unstamped' by the steward fence ratchet")
+
+	state, err := storageManager.GetLeaseStore().GetLease(context.Background(), clusterLeadershipLeaseName)
+	require.NoError(t, err)
+	assert.Equal(t, LeaseTermFloor+state.Token, token, "GetTerm must equal the wired store's own current token offset by LeaseTermFloor")
+	assert.Equal(t, nodeID, state.HolderID)
+}
+
+// TestManager_Start_ClusterMode_WithoutLeaseStore_Fails proves a cluster Manager
+// refuses to start when no lease store is available, rather than degrading to a
+// permanently-false HasLeadership() and a term-0 command stamp. Fail-loud, not
+// fail-quiet: the operator sees a startup error naming the missing substrate.
+func TestManager_Start_ClusterMode_WithoutLeaseStore_Fails(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = "no-lease-store-node"
+	cfg.Cluster = FastElectionConfig()
+
+	// nil storage manager => no lease store to wire by construction.
+	manager, err := NewManager(cfg, logging.GetLogger(), nil)
+	require.NoError(t, err, "construction must still succeed; the lease is a start-time precondition")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = manager.Start(ctx)
+	require.Error(t, err, "Start must refuse to run without the lease that backs leadership authority")
+	assert.Contains(t, err.Error(), "requires a lease store")
+
+	// The control must be off, not silently permissive.
+	assert.False(t, manager.HasLeadership(),
+		"a manager that refused to start must not report leadership")
+	assert.Equal(t, uint64(0), manager.GetTerm())
+}
+
+// TestManager_BlueGreenMode_NeverLeaseBackedAuthority is the regression test for the
+// dual-authority hole this substrate swap opened on its first pass (security review,
+// round 3). Blue-green runs the node-local storage tier, so each node's StorageManager
+// supplies a lease store backed by *its own* database file. Wiring that as cluster
+// leadership let blue and green each acquire "controller-cluster-leadership" against
+// their own copy — both reporting HasLeadership() == true, each minting a fencing
+// sequence starting at 1, with the singleton claim and the command fence silently off.
+//
+// Blue-green therefore gets no lease-backed authority at all: it starts (no lease is
+// required of it), HasLeadership() stays false on both nodes, and GetTerm() stays 0.
+func TestManager_BlueGreenMode_NeverLeaseBackedAuthority(t *testing.T) {
+	newBlueGreenNode := func(nodeID string) *Manager {
+		cfg := DefaultConfig()
+		cfg.Mode = BlueGreenMode
+		cfg.Node.ID = nodeID
+		cfg.Cluster = FastElectionConfig()
+
+		// Each node has its own store, exactly as a per-node SQLite/flat-file
+		// storage tier gives it — the substrate that excludes nothing.
+		storageManager, err := storage.CreateTestStorageManager()
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, storageManager.Close()) })
+		require.NotNil(t, storageManager.GetLeaseStore(),
+			"the node-local tier does supply a lease store; that is exactly why a non-nil check is not enough")
+
+		manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
+		require.NoError(t, err)
+
+		// An explicit wiring attempt must not grant authority either.
+		require.NoError(t, manager.SetLeaseStore(newTestLeaseStore(t)),
+			"SetLeaseStore is a no-op in blue-green, not an error")
+		return manager
+	}
+
+	blue := newBlueGreenNode("blue-node")
+	green := newBlueGreenNode("green-node")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, blue.Start(ctx), "blue-green must start without a shared lease substrate")
+	require.NoError(t, green.Start(ctx))
+	t.Cleanup(func() {
+		assert.NoError(t, blue.Stop(context.Background()))
+		assert.NoError(t, green.Stop(context.Background()))
+	})
+
+	// Sample over a window longer than a lease TTL would be, so a lease-acquisition
+	// loop — if one were ever wired here — would have completed several rounds.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		require.False(t, blue.HasLeadership(),
+			"blue must never report leadership from a node-local lease")
+		require.False(t, green.HasLeadership(),
+			"green must never report leadership from a node-local lease")
+		require.Equal(t, uint64(0), blue.GetTerm(),
+			"blue must stamp no fencing token; an independent per-node sequence is worse than none")
+		require.Equal(t, uint64(0), green.GetTerm())
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestManager_SetLeaseStore_NilStoreRejectedInClusterMode proves the explicit wiring
+// entry point reports a nil store as an error rather than quietly leaving the
+// authority substrate unwired, and that modes without lease-backed authority are
+// unaffected by what is passed.
+func TestManager_SetLeaseStore_NilStoreRejectedInClusterMode(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = "nil-lease-store-node"
+	cfg.Cluster = FastElectionConfig()
+
+	manager, err := NewManager(cfg, logging.GetLogger(), nil)
+	require.NoError(t, err)
+
+	require.Error(t, manager.SetLeaseStore(nil),
+		"SetLeaseStore(nil) must be an error in ClusterMode, where the lease is the authority source")
+
+	// SingleServerMode needs no lease (ADR-029 Decision 4), so nil stays a no-op.
+	singleCfg := DefaultConfig()
+	singleCfg.Mode = SingleServerMode
+	singleManager, err := NewManager(singleCfg, logging.GetLogger(), nil)
+	require.NoError(t, err)
+	assert.NoError(t, singleManager.SetLeaseStore(nil),
+		"SingleServerMode must remain unaffected by the lease substrate")
+	assert.True(t, singleManager.HasLeadership(),
+		"SingleServerMode HasLeadership() must stay unconditionally true")
+}
+
+// TestManager_GetClusterNodes_FallsBackToLocalWhenNoRegistryWired verifies that
+// GetClusterNodes() reports the local-only clusterNodes map (Issue #3763) whenever
+// no shared node registry store is wired — SingleServerMode always, and any
+// ClusterMode deployment whose storage provider does not implement
+// business.NodeRegistryStoreCreator.
+func TestManager_GetClusterNodes_FallsBackToLocalWhenNoRegistryWired(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
+	require.NoError(t, err)
+	require.Nil(t, manager.nodeRegistryStore,
+		"SingleServerMode must never wire a node registry store (see usesLeaseAuthority)")
+
+	nodes, err := manager.GetClusterNodes()
+	require.NoError(t, err)
+	require.Len(t, nodes, 1, "fallback must report exactly the local node")
+	assert.Equal(t, manager.GetLocalNode().ID, nodes[0].ID)
+}
+
+// TestManager_GetClusterNodes_UsesNodeRegistryWhenWired verifies that
+// GetClusterNodes() reads through to a wired business.NodeRegistryStore (Issue
+// #3763, ADR-031 Decision 5's post-Raft membership mechanism), reporting every
+// live record the store has — including peers this Manager never registered
+// itself.
+func TestManager_GetClusterNodes_UsesNodeRegistryWhenWired(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = "registry-nodes-node"
+	cfg.Cluster = FastElectionConfig()
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
+	require.NoError(t, err)
+
+	store := newTestNodeRegistryStore(t)
+	manager.nodeRegistryStore = store
+
+	ctx := context.Background()
+	require.NoError(t, store.RegisterNode(ctx, business.NodeRecord{ID: "peer-node", Address: "10.0.0.9:9080"}))
+
+	nodes, err := manager.GetClusterNodes()
+	require.NoError(t, err)
+
+	var found bool
+	for _, n := range nodes {
+		if n.ID == "peer-node" {
+			found = true
+			assert.Equal(t, "10.0.0.9:9080", n.Address)
+		}
+	}
+	assert.True(t, found, "GetClusterNodes must read through to the wired node registry store")
+}
+
+// TestManager_Start_ClusterMode_RegistersSelfInNodeRegistry verifies that Start()
+// launches runNodeRegistration, which registers this node's own ID and address in
+// the wired node registry store (Issue #3763) — the mechanism
+// features/controller/server's internal-delivery node resolver depends on to
+// locate this node.
+func TestManager_Start_ClusterMode_RegistersSelfInNodeRegistry(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	const nodeID = "self-register-node"
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = nodeID
+	cfg.Node.ExternalAddress = "10.0.0.5:9080"
+	cfg.Cluster = FastElectionConfig()
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
+	require.NoError(t, err)
+
+	store := newTestNodeRegistryStore(t)
+	manager.nodeRegistryStore = store
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Start(ctx))
+	t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
+
+	require.Eventually(t, func() bool {
+		nodes, listErr := store.ListNodes(context.Background())
+		if listErr != nil {
+			return false
+		}
+		for _, n := range nodes {
+			if n.ID == nodeID && n.Address == "10.0.0.5:9080" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 25*time.Millisecond, "runNodeRegistration must register this node's own record")
+}
+
+// TestManager_GetLeader_ClusterMode_ResolvesPeerViaNodeRegistry is the REQUIRED
+// post-Raft counterpart to the deleted uint64-precision regression test: it proves
+// GetLeader() resolves the cluster leadership lease's current holder to a full
+// NodeInfo (Issue #3763) — including from a node that does NOT itself hold the
+// lease, which is only possible by reading through the shared node registry
+// rather than returning only ever-local information.
+func TestManager_GetLeader_ClusterMode_ResolvesPeerViaNodeRegistry(t *testing.T) {
+	leaseStore := newTestLeaseStore(t)
+	registryStore := newTestNodeRegistryStore(t)
+
+	managerA := newLeaseBackedClusterManager(t, "leader-resolve-a", leaseStore)
+	managerA.nodeRegistryStore = registryStore
+	managerB := newLeaseBackedClusterManager(t, "leader-resolve-b", leaseStore)
+	managerB.nodeRegistryStore = registryStore
+
+	startCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, managerA.Start(startCtx))
+	require.NoError(t, managerB.Start(startCtx))
+	t.Cleanup(func() {
+		assert.NoError(t, managerA.Stop(context.Background()))
+		assert.NoError(t, managerB.Stop(context.Background()))
+	})
+
+	// Let each manager's own runNodeRegistration loop (started by Start()) publish
+	// its self-registered address before relying on it below — otherwise the
+	// registry read in GetLeader() could race a self-registration that has not
+	// landed yet and report an empty Address.
+	require.Eventually(t, func() bool {
+		nodes, listErr := registryStore.ListNodes(context.Background())
+		if listErr != nil {
+			return false
+		}
+		seen := map[string]bool{}
+		for _, n := range nodes {
+			seen[n.ID] = true
+		}
+		return seen["leader-resolve-a"] && seen["leader-resolve-b"]
+	}, 5*time.Second, 25*time.Millisecond, "both managers must self-register before the leader resolution below")
+
+	require.Eventually(t, func() bool {
+		return managerA.HasLeadership() || managerB.HasLeadership()
+	}, 5*time.Second, 5*time.Millisecond, "one of the two managers must acquire the lease")
+
+	// Whichever manager holds the lease, GetLeader() called on the OTHER manager
+	// must still resolve the holder's NodeInfo — proving the resolution goes
+	// through the shared node registry, not just local state.
+	loser, winnerID, winnerAddr := managerA, "leader-resolve-b", "leader-resolve-b.invalid:9080"
+	if managerA.HasLeadership() {
+		loser, winnerID, winnerAddr = managerB, "leader-resolve-a", "leader-resolve-a.invalid:9080"
+	}
+
+	var resolved *NodeInfo
+	require.Eventually(t, func() bool {
+		leader, getErr := loser.GetLeader()
+		if getErr != nil || leader == nil || leader.ID != winnerID {
+			return false
+		}
+		resolved = leader
+		return true
+	}, 5*time.Second, 25*time.Millisecond,
+		"GetLeader() must resolve the lease holder's NodeInfo via the shared node registry, even from a non-holding node")
+	assert.Equal(t, winnerAddr, resolved.Address,
+		"the resolved NodeInfo must carry the holder's registered address")
+}
+
+// TestManager_CommandTerm_FollowerStampsCurrentLeaseToken guards Issue #4566: a
+// node that does not hold the leadership lease still stamps the lease's current
+// token on the commands it publishes. GetTerm stays 0 there (it reports local
+// authority), but CommandTerm must equal the leader's term, or every command a
+// follower publishes is rejected by a steward whose fence ratchet is set.
+func TestManager_CommandTerm_FollowerStampsCurrentLeaseToken(t *testing.T) {
+	store := newTestLeaseStore(t)
+	managerA := newLeaseBackedClusterManager(t, "cmdterm-a", store)
+	managerB := newLeaseBackedClusterManager(t, "cmdterm-b", store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, managerA.Start(ctx))
+	require.NoError(t, managerB.Start(ctx))
+	t.Cleanup(func() {
+		assert.NoError(t, managerA.Stop(context.Background()))
+		assert.NoError(t, managerB.Stop(context.Background()))
+	})
+
+	require.Eventually(t, func() bool { return managerA.HasLeadership() != managerB.HasLeadership() },
+		5*time.Second, 5*time.Millisecond, "exactly one node holds the lease")
+	leader, follower := managerA, managerB
+	if managerB.HasLeadership() {
+		leader, follower = managerB, managerA
+	}
+
+	require.NotZero(t, leader.GetTerm())
+	assert.Zero(t, follower.GetTerm(), "GetTerm reports local authority only")
+
+	// The lease token is not frozen: under load a renewal can miss the short
+	// FastElectionConfig TTL and the holder re-acquires with a strictly higher
+	// token. So each stamp is checked against the lease token read immediately
+	// before and after it (tokens only increase), never against a value read
+	// earlier. The follower has not called CommandTerm yet, so its first call
+	// reads the lease fresh rather than from a cache. The second call is served
+	// from that cache (commandTermCacheTTL), so it may legitimately lag the lease:
+	// it is bounded below by the first stamp, not by a fresh lease read.
+	firstStamp, stamped := assertStampsLeaseToken(t, store, "follower", follower.CommandTerm)
+	cached := CommandTermSource{Manager: follower}.GetTerm()
+	if stamped {
+		assert.GreaterOrEqual(t, cached, firstStamp, "the follower never stamps an older token than it did before")
+	}
+	assert.LessOrEqual(t, cached, leaseTerm(t, store), "the follower must not stamp a token the lease has not issued")
+	_, _ = assertStampsLeaseToken(t, store, "holder", leader.CommandTerm)
+}
+
+// leaseTerm reads the cluster leadership lease's current token from the store as a
+// command term.
+func leaseTerm(t *testing.T, store business.LeaseStore) uint64 {
+	t.Helper()
+	term, _ := leaseTermValid(t, store)
+	return term
+}
+
+// leaseTermValid is leaseTerm plus the store's verdict on whether the lease is
+// currently unexpired.
+func leaseTermValid(t *testing.T, store business.LeaseStore) (uint64, bool) {
+	t.Helper()
+	state, err := store.GetLease(context.Background(), clusterLeadershipLeaseName)
+	require.NoError(t, err)
+	return LeaseTermFloor + state.Token, state.Valid
+}
+
+// assertStampsLeaseToken calls stamp once and requires the result to be the lease
+// token as it stood at that call: lease tokens never decrease, so the stamp must
+// lie between the token read just before and just after. A wrong token (a stale
+// or unfloored one) falls outside the bracket.
+//
+// CommandTerm fails closed: it stamps 0 while the lease is not valid. On a loaded
+// runner the holder's renewal can miss the short FastElectionConfig TTL, leaving
+// the lease expired for a moment before the holder re-acquires. A 0 is therefore
+// accepted only when the store itself reported the lease expired in the read
+// before or after the call; a 0 against a lease the store held valid throughout
+// still fails. The returned bool reports whether a non-zero token was stamped.
+func assertStampsLeaseToken(t *testing.T, store business.LeaseStore, who string, stamp func() uint64) (uint64, bool) {
+	t.Helper()
+	before, validBefore := leaseTermValid(t, store)
+	got := stamp()
+	after, validAfter := leaseTermValid(t, store)
+	if got == 0 {
+		assert.False(t, validBefore && validAfter,
+			"%s stamped 0 although the lease was valid before and after the call", who)
+		return 0, false
+	}
+	assert.GreaterOrEqual(t, got, before, "%s must stamp the lease's current token, not an older one", who)
+	assert.LessOrEqual(t, got, after, "%s must not stamp a token the lease has not issued", who)
+	return got, true
+}
+
+// TestManager_CommandTerm_SingleServerIsZero: without a lease there is no token to
+// stamp, exactly as before.
+func TestManager_CommandTerm_SingleServerIsZero(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+	manager, err := NewManager(cfg, logging.NewNoopLogger(), storageManager)
+	require.NoError(t, err)
+	assert.Zero(t, manager.CommandTerm())
+	assert.Zero(t, CommandTermSource{}.GetTerm())
+}
+
+// TestManager_CommandTerm_ExHolderStampsNewToken guards the stale-cache claim on
+// Issue #4566: after a leadership change the former holder stamps the new lease
+// token — higher than its own old term — not a stale one.
+func TestManager_CommandTerm_ExHolderStampsNewToken(t *testing.T) {
+	store := newTestLeaseStore(t)
+	managerA := newLeaseBackedClusterManager(t, "cmdterm-change-a", store)
+	managerB := newLeaseBackedClusterManager(t, "cmdterm-change-b", store)
+
+	// Acquisition and takeover latency depends on the runner (on Windows the
+	// flatfile store's atomic rename retries while the manager's own loops hold the
+	// lease file open), so the waits are bounded by the configured lease timing
+	// scaled by a wide margin rather than by fixed wall-clock constants. Eventually
+	// returns as soon as the condition holds, so the margin costs nothing on a
+	// healthy runner.
+	electionTimeout := FastElectionConfig().ElectionTimeout
+	leaseWait := 150 * electionTimeout // 30s at 200ms: >100x the lease TTL
+	ctx, cancel := context.WithTimeout(context.Background(), 4*leaseWait)
+	defer cancel()
+
+	require.NoError(t, managerA.Start(ctx))
+	t.Cleanup(func() { assert.NoError(t, managerA.Stop(context.Background())) })
+	require.Eventually(t, managerA.HasLeadership, leaseWait, 5*time.Millisecond, "A takes the lease first")
+	oldTerm := managerA.GetTerm()
+	require.NotZero(t, oldTerm)
+
+	// A stops renewing; B starts and takes the lease once it expires. Stop is
+	// idempotent for the cleanup registered above.
+	require.NoError(t, managerA.Stop(context.Background()))
+	require.NoError(t, managerB.Start(ctx))
+	t.Cleanup(func() { assert.NoError(t, managerB.Stop(context.Background())) })
+	require.Eventually(t, managerB.HasLeadership, leaseWait, 10*time.Millisecond, "B takes over the lease")
+	newTerm := managerB.GetTerm()
+	require.Greater(t, newTerm, oldTerm, "a new holder gets a strictly higher token")
+
+	assert.Zero(t, managerA.GetTerm(), "the former holder no longer has local authority")
+	// B's token is not frozen at newTerm: on a loaded runner a renewal can miss
+	// the short FastElectionConfig lease TTL and B re-acquires with a strictly
+	// higher token. A's first CommandTerm call reads the lease fresh, so the guarded
+	// property is that the stamp is the lease's token at that moment (bracketed by
+	// reads of the store), which is at least B's takeover token and above A's old one.
+	// If B's renewal missed the TTL at that instant the lease is expired and the
+	// stamp is 0 (fail closed); the token checks then do not apply.
+	var stamped uint64
+	_, ok := assertStampsLeaseToken(t, store, "the former holder", func() uint64 {
+		stamped = managerA.CommandTerm()
+		return stamped
+	})
+	if ok {
+		assert.GreaterOrEqual(t, stamped, newTerm, "the former holder stamps at least the takeover token")
+		assert.Greater(t, stamped, oldTerm, "the former holder must not keep stamping its old term")
+	}
+}
+
+// erroringLeaseStore is a real business.LeaseStore whose reads fail on demand, for
+// the unreadable-lease path.
+type erroringLeaseStore struct {
+	business.LeaseStore
+	failReads atomic.Bool
+}
+
+func (s *erroringLeaseStore) GetLease(ctx context.Context, name string) (*business.LeaseState, error) {
+	if s.failReads.Load() {
+		return nil, errors.New("lease store unavailable")
+	}
+	return s.LeaseStore.GetLease(ctx, name)
+}
+
+// TestManager_CommandTerm_UnreadableLeaseIsZero: a non-holder that cannot read the
+// lease stamps 0 (fails closed), and recovers once the store answers again.
+func TestManager_CommandTerm_UnreadableLeaseIsZero(t *testing.T) {
+	inner := newTestLeaseStore(t)
+	store := &erroringLeaseStore{LeaseStore: inner}
+	follower := newLeaseBackedClusterManager(t, "cmdterm-unreadable", store)
+
+	// Another node holds the lease, so this manager is a non-holder.
+	held, err := inner.AcquireOrRenew(context.Background(), clusterLeadershipLeaseName, "other-node", time.Hour)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, follower.Start(ctx))
+	t.Cleanup(func() { assert.NoError(t, follower.Stop(context.Background())) })
+	require.False(t, follower.HasLeadership())
+
+	store.failReads.Store(true)
+	assert.Zero(t, follower.CommandTerm(), "an unreadable lease stamps 0")
+
+	store.failReads.Store(false)
+	assert.Eventually(t, func() bool { return follower.CommandTerm() == LeaseTermFloor+held.Token },
+		3*time.Second, 50*time.Millisecond, "once readable again the current token is stamped")
+}
+
+// TestManager_CommandTerm_ExpiredLeaseStampsLastToken: a lease row whose TTL has
+// lapsed (the holder's renewal missed it and nobody re-acquired yet) still carries
+// the highest token issued, and no higher token exists for a steward to have seen.
+// CommandTerm stamps it rather than 0 — a 0 here is what a loaded runner observed
+// as "0 although the lease was valid before and after the call" (Issue #4964).
+func TestManager_CommandTerm_ExpiredLeaseStampsLastToken(t *testing.T) {
+	store := newTestLeaseStore(t)
+	follower := newLeaseBackedClusterManager(t, "cmdterm-expired", store)
+
+	held, err := store.AcquireOrRenew(context.Background(), clusterLeadershipLeaseName, "other-node", 20*time.Millisecond)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, valid := leaseTermValid(t, store)
+		return !valid
+	}, 5*time.Second, 5*time.Millisecond, "the lease lapses")
+
+	assert.Equal(t, LeaseTermFloor+held.Token, follower.CommandTerm(),
+		"an expired lease still stamps its last issued token, never 0")
+}
+
+// TestManager_CommandTerm_ColdCacheConcurrentCallersAllStamp guards the #4567
+// review: on a freshly started non-holder, concurrent first publishes wait for
+// the in-flight lease read instead of stamping 0.
+func TestManager_CommandTerm_ColdCacheConcurrentCallersAllStamp(t *testing.T) {
+	inner := newTestLeaseStore(t)
+	held, err := inner.AcquireOrRenew(context.Background(), clusterLeadershipLeaseName, "other-node", time.Hour)
+	require.NoError(t, err)
+	follower := newLeaseBackedClusterManager(t, "cmdterm-cold", inner)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, follower.Start(ctx))
+	t.Cleanup(func() { assert.NoError(t, follower.Stop(context.Background())) })
+
+	want := LeaseTermFloor + held.Token
+	var wg sync.WaitGroup
+	terms := make([]uint64, 32)
+	for i := range terms {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			terms[i] = follower.CommandTerm()
+		}(i)
+	}
+	wg.Wait()
+	for i, got := range terms {
+		assert.Equal(t, want, got, "caller %d stamped the current token", i)
+	}
+}
+
+// stallingFailoverHandler parks OnFailoverStarted — which the failover manager
+// invokes while holding its own lock — until the test releases it.
+type stallingFailoverHandler struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h *stallingFailoverHandler) OnFailoverStarted(*FailoverEvent) error {
+	close(h.entered)
+	<-h.release
+	return nil
+}
+func (h *stallingFailoverHandler) OnFailoverCompleted(*FailoverEvent) error { return nil }
+func (h *stallingFailoverHandler) OnFailoverFailed(*FailoverEvent, error) error {
+	return nil
+}
+
+// TestManager_Stop_ReturnsWithFailoverInFlight is the REQUIRED regression test
+// for Issue #5579. A failover holds the failover manager's lock while it calls
+// back into Manager (GetLeader takes Manager.mu.RLock); Manager.Stop used to
+// hold Manager.mu while waiting for that lock, a lock-order inversion that
+// hung Stop forever. The test parks a failover mid-flight, starts Stop, and
+// only then lets the failover proceed into the Manager.
+func TestManager_Stop_ReturnsWithFailoverInFlight(t *testing.T) {
+	store := newTestLeaseStore(t)
+	m := newLeaseBackedClusterManager(t, "stop-inflight-failover", store)
+	require.True(t, m.cfg.Failover.Enabled, "failover must be enabled for this test")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	require.NoError(t, m.Start(ctx))
+	require.True(t, m.WaitForLeadership(ctx))
+
+	h := &stallingFailoverHandler{entered: make(chan struct{}), release: make(chan struct{})}
+	m.failover.RegisterFailoverHandler(h)
+
+	failoverDone := make(chan struct{})
+	go func() {
+		defer close(failoverDone)
+		_ = m.failover.TriggerFailover(context.Background(), "test")
+	}()
+	<-h.entered
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- m.Stop(context.Background()) }()
+
+	// Wait until Stop has begun (it cancels the manager context first), then
+	// give it time to reach the failover manager's lock, and only then let the
+	// failover call back into the Manager.
+	require.Eventually(t, func() bool { return m.ctx.Err() != nil },
+		5*time.Second, time.Millisecond, "Stop must begin")
+	time.Sleep(200 * time.Millisecond)
+	close(h.release)
+
+	select {
+	case err := <-stopDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Manager.Stop did not return while a failover was in flight")
+	}
+	select {
+	case <-failoverDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight failover did not finish")
+	}
+}

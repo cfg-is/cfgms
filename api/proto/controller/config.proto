@@ -1,0 +1,188 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 CFGMS Contributors
+syntax = "proto3";
+
+package cfgms.api.controller;
+
+option go_package = "github.com/cfgis/cfgms/api/proto/controller";
+
+import "common/common.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+message ConfigRequest {
+  string steward_id = 1;
+  repeated string modules = 2;
+}
+
+message ConfigResponse {
+  common.Status status = 1;
+  SignedConfig config = 2;  // Protobuf configuration with embedded signature
+  string version = 3;
+}
+
+message ConfigStatusReport {
+  string steward_id = 1;
+  string config_version = 2;
+  common.Status status = 3;
+  repeated ModuleStatus modules = 4;
+}
+
+message ModuleStatus {
+  string name = 1;
+  common.Status status = 2;
+  string message = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+message ConfigValidationRequest {
+  bytes config = 1;  // JSON encoded configuration
+  string version = 2;
+}
+
+message ConfigValidationResponse {
+  common.Status status = 1;
+  repeated ValidationError errors = 2;
+  map<string, string> metadata = 3;
+}
+
+message ValidationError {
+  enum Level {
+    INFO = 0;
+    WARNING = 1;
+    ERROR = 2;
+    CRITICAL = 3;
+  }
+  
+  string field = 1;
+  string message = 2;
+  Level level = 3;
+  string code = 4;
+  string suggestion = 5;
+}
+
+message ConfigStreamRequest {
+  string steward_id = 1;
+  repeated string modules = 2;
+}
+
+message ConfigurationUpdate {
+  string steward_id = 1;
+  bytes config = 2;  // JSON encoded configuration
+  string version = 3;
+  google.protobuf.Timestamp timestamp = 4;
+  enum UpdateType {
+    UNKNOWN = 0;
+    INITIAL = 1;
+    UPDATE = 2;
+    DELETE = 3;
+  }
+  UpdateType update_type = 5;
+}
+
+// StewardConfig represents the complete steward configuration
+message StewardConfig {
+  StewardSettings steward = 1;
+  repeated ResourceConfig resources = 2;
+  map<string, string> modules = 3;
+}
+
+// StewardSettings contains steward-specific configuration
+message StewardSettings {
+  string id = 1;
+  repeated string module_paths = 3;
+  LoggingConfig logging = 4;
+  ErrorHandlingConfig error_handling = 5;
+
+  // secrets holds secret-reference key-value pairs (references only, not values).
+  // The actual secret values are managed by pkg/secrets.
+  map<string, string> secrets = 6;
+
+  // converge_interval is how often the steward re-converges against its config.
+  google.protobuf.Duration converge_interval = 7;
+
+  // script_signing configures script signing policy and trust configuration.
+  ScriptSigningConfig script_signing = 8;
+
+  // desired_version is the ring-resolved target steward binary version (Issue #2271).
+  // When set, the steward convergence loop upgrades or downgrades to this version.
+  string desired_version = 9;
+
+  // drift_mode is the steward-wide drift response: "apply" or "monitor".
+  // Empty means apply. Delivered by the controller only; never read from a local file.
+  string drift_mode = 10;
+
+  // module_drift_modes overrides drift_mode per module bundle name
+  // (the part of a module reference before the first '.'), e.g. {"activedirectory": "monitor"}.
+  map<string, string> module_drift_modes = 11;
+
+  reserved 2;
+  reserved "mode";
+}
+
+// ScriptSigningConfig defines the steward-level script signing policy and trust configuration.
+message ScriptSigningConfig {
+  // policy sets the enforcement level: none, optional, or required.
+  string policy = 1;
+
+  // trust_mode defines which keys are accepted: any_valid, trusted_keys, or trusted_keys_and_public.
+  string trust_mode = 2;
+
+  // trusted_keys lists keys/certificates allowed to sign scripts.
+  repeated TrustedKeyRef trusted_keys = 3;
+
+  // allow_public_ca, when true alongside trusted_keys_and_public mode, also accepts public CAs.
+  bool allow_public_ca = 4;
+
+  reserved 5;
+  reserved "script_repo_url";
+}
+
+// TrustedKeyRef identifies a trusted signing key or certificate.
+message TrustedKeyRef {
+  // name is a human-readable label for this key entry.
+  string name = 1;
+
+  // thumbprint is the certificate thumbprint used to identify the key.
+  string thumbprint = 2;
+
+  // public_key_ref is an opaque reference to a public key stored in the secrets provider.
+  string public_key_ref = 3;
+}
+
+// LoggingConfig defines logging output settings
+message LoggingConfig {
+  string level = 1;
+
+  reserved 2;
+  reserved "format";
+}
+
+// ErrorHandlingConfig defines error handling strategies
+message ErrorHandlingConfig {
+  string module_load_failure = 1;
+  string resource_failure = 2;
+  string configuration_error = 3;
+}
+
+// ResourceConfig defines a single resource to be managed
+message ResourceConfig {
+  string name = 1;
+  string module = 2;
+  google.protobuf.Struct config = 3;  // Dynamic configuration map
+}
+
+// ConfigSignature contains cryptographic signature information
+message ConfigSignature {
+  string algorithm = 1;
+  string signature = 2;
+  int64 timestamp = 3;
+  string key_fingerprint = 4;
+}
+
+// SignedConfig wraps configuration with embedded signature
+message SignedConfig {
+  StewardConfig config = 1;
+  ConfigSignature signature = 2;
+}

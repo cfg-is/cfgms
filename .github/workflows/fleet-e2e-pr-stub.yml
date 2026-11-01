@@ -1,0 +1,30 @@
+name: Fleet E2E Tests (PR stub)
+
+# PR-side half of the required `fleet-e2e-tests` context (Issue #4682).
+#
+# `fleet-e2e-tests` is queue-real: fleet-e2e.yml runs the Docker fleet suite
+# only on `merge_group`, against the merge commit. A required context must also
+# be posted on the pull request or the PR cannot enter the queue, so this
+# workflow posts a passing `fleet-e2e-tests` on every `pull_request`. It has no
+# `needs:` and resolves in seconds, and no PR-side real job exists for it to
+# race (the queue-real shape described under "Stub exclusivity" in CLAUDE.md).
+#
+# DO NOT add `merge_group:` to this file. On `merge_group` the context must be
+# posted only by fleet-e2e.yml's real job; a stub posting there — even a
+# skipped one — would satisfy the requirement without the suite running.
+
+on:
+  pull_request:
+    branches: [ develop ]
+
+# Deny by default; the stub needs no token scope.
+permissions: {}
+
+jobs:
+  fleet-e2e-pr-stub:
+    name: fleet-e2e-tests
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fleet E2E runs in the merge queue
+        run: echo "fleet-e2e-tests runs for real on merge_group (fleet-e2e.yml); PR-side stub."

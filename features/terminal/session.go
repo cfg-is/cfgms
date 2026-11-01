@@ -1,0 +1,438 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package terminal
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/cfgis/cfgms/features/terminal/shell"
+	"github.com/cfgis/cfgms/pkg/logging"
+)
+
+// NewSession creates a new terminal session
+func NewSession(req *SessionRequest, logger logging.Logger) (*Session, error) {
+	if req == nil {
+		return nil, fmt.Errorf("session request cannot be nil")
+	}
+
+	// Validate required fields
+	if req.StewardID == "" {
+		return nil, fmt.Errorf("steward_id is required")
+	}
+	if req.UserID == "" {
+		return nil, fmt.Errorf("user_id is required")
+	}
+	if req.Shell == "" {
+		req.Shell = shell.GetDefaultShell() // Default to platform-appropriate shell
+	}
+	if !ValidateShell(req.Shell) {
+		return nil, fmt.Errorf("unsupported shell: %s", req.Shell)
+	}
+
+	// Validate terminal dimensions - set defaults but don't fail for zero values
+	if req.Cols <= 0 {
+		req.Cols = 80 // Default columns
+	}
+	if req.Rows <= 0 {
+		req.Rows = 24 // Default rows
+	}
+
+	// Generate unique session ID
+	sessionID := uuid.New().String()
+
+	now := time.Now()
+	session := &Session{
+		ID:           sessionID,
+		StewardID:    req.StewardID,
+		UserID:       req.UserID,
+		Shell:        req.Shell,
+		Cols:         req.Cols,
+		Rows:         req.Rows,
+		CreatedAt:    now,
+		LastActivity: now,
+		Environment:  req.Env,
+		closed:       false,
+		outputCh:     make(chan []byte, 64),
+		logger:       logger,
+	}
+
+	// Initialize shell executor
+	factory := shell.NewFactory()
+	shellConfig := &shell.Config{
+		Shell:       req.Shell,
+		Cols:        req.Cols,
+		Rows:        req.Rows,
+		Environment: req.Env,
+	}
+
+	executor, err := factory.CreateExecutor(shellConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create shell executor: %w", err)
+	}
+
+	session.executor = executor
+
+	logger.Info("Created new terminal session",
+		"session_id", logging.RedactedID(sessionID),
+		"steward_id", logging.SanitizeLogValue(req.StewardID),
+		"user_id", logging.SanitizeLogValue(req.UserID),
+		"shell", logging.SanitizeLogValue(req.Shell),
+		"cols", req.Cols,
+		"rows", req.Rows)
+
+	return session, nil
+}
+
+// recordOrTerminate records one frame and fails closed when it cannot be recorded.
+//
+// The recording IS the audit trail of a privileged interactive shell, so a session
+// whose bytes cannot be captured must not keep serving: the session is closed and
+// the error is returned to the caller, which tears the relay (and therefore the
+// steward-side PTY) down. Transient per-frame pressure never reaches here — the
+// recorder absorbs bursts and drops with a warning — so an error means the
+// recording could not be written at all (e.g. the auto-start file create failed),
+// which is a hard audit-integrity failure rather than a resilience concern.
+func (s *Session) recordOrTerminate(ctx context.Context, recorder Recorder, data []byte, direction DataDirection) error {
+	if recorder == nil {
+		return nil
+	}
+
+	err := recorder.RecordData(s.ID, data, direction)
+	if err == nil {
+		return nil
+	}
+
+	if s.logger != nil {
+		s.logger.Error("Terminal session recording failed; terminating session rather than serving unrecorded I/O",
+			"session_id", logging.RedactedID(s.ID), "error", err)
+	}
+	if closeErr := s.Close(ctx); closeErr != nil && s.logger != nil {
+		s.logger.Warn("Failed to close session after recording failure",
+			"session_id", logging.RedactedID(s.ID), "error", closeErr)
+	}
+	return fmt.Errorf("session recording failed: %w", err)
+}
+
+// RecordInput records one operator-originated input frame, failing closed
+// exactly as WriteData does but without writing to a shell executor.
+//
+// The controller's browser relay owns no local PTY — the shell runs on the
+// steward and input is forwarded over the Terminal gRPC stream — so it cannot
+// use WriteData, yet it must still capture keystrokes. Input is the only leg of
+// an interactive session the controller witnesses first-hand: without it the
+// recording of a privileged shell contains nothing but the bytes the endpoint
+// chose to return, leaving a compromised steward in full control of its own
+// audit trail.
+//
+// Callers MUST treat an error as fatal to the session and tear their relay down,
+// so unrecorded keystrokes never reach the shell.
+func (s *Session) RecordInput(ctx context.Context, data []byte) error {
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return fmt.Errorf("session is closed")
+	}
+	recorder := s.recorder
+	s.mu.RUnlock()
+
+	s.UpdateActivity()
+
+	return s.recordOrTerminate(ctx, recorder, data, DataDirectionInput)
+}
+
+// resizeControlSequence renders a geometry change as the xterm CSI 8 ; rows ; cols t
+// window-manipulation sequence — the standard terminal encoding of a resize.
+// Recording that sequence rather than a private marker keeps the captured input
+// stream replayable by an ordinary terminal emulator.
+func resizeControlSequence(cols, rows int) []byte {
+	return []byte(fmt.Sprintf("\x1b[8;%d;%dt", rows, cols))
+}
+
+// RecordResize records an operator-originated resize on the input side of the
+// recording, with the same fail-closed contract as RecordInput. A resize is
+// operator input that changes what the shell renders (and what a replay of the
+// recording shows), so it must not be silently dropped from the audit trail.
+func (s *Session) RecordResize(ctx context.Context, cols, rows int) error {
+	if cols <= 0 || rows <= 0 {
+		return fmt.Errorf("invalid terminal dimensions: cols=%d, rows=%d", cols, rows)
+	}
+	return s.RecordInput(ctx, resizeControlSequence(cols, rows))
+}
+
+// WriteData writes data to the session
+func (s *Session) WriteData(ctx context.Context, data []byte) error {
+	// Record input before it reaches the shell: unrecorded keystrokes must never
+	// be executed.
+	if err := s.RecordInput(ctx, data); err != nil {
+		return err
+	}
+
+	s.mu.RLock()
+	executor := s.executor
+	s.mu.RUnlock()
+
+	// Send data to shell executor
+	if executor != nil {
+		if err := executor.WriteData(ctx, data); err != nil {
+			return fmt.Errorf("failed to write to shell: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// HandleOutput handles output data from the shell
+func (s *Session) HandleOutput(ctx context.Context, data []byte) error {
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return fmt.Errorf("session is closed")
+	}
+	recorder := s.recorder
+	s.mu.RUnlock()
+
+	s.UpdateActivity()
+
+	// Record output before it is relayed to the browser: unrecorded shell output
+	// must never be served.
+	if err := s.recordOrTerminate(ctx, recorder, data, DataDirectionOutput); err != nil {
+		return err
+	}
+
+	// Relay to WebSocket client. Non-blocking: drop and warn when the consumer is slow.
+	select {
+	case s.outputCh <- data:
+	default:
+		s.logger.Warn("Terminal output dropped; WebSocket client is not consuming output fast enough",
+			"session_id", logging.RedactedID(s.ID))
+	}
+
+	return nil
+}
+
+// Resize resizes the terminal
+func (s *Session) Resize(ctx context.Context, cols, rows int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return fmt.Errorf("session is closed")
+	}
+
+	if cols <= 0 || rows <= 0 {
+		return fmt.Errorf("invalid terminal dimensions: cols=%d, rows=%d", cols, rows)
+	}
+
+	s.Cols = cols
+	s.Rows = rows
+	s.LastActivity = time.Now() // Update activity directly since we already hold the lock
+
+	// Resize the shell executor
+	if s.executor != nil {
+		if err := s.executor.Resize(ctx, cols, rows); err != nil {
+			return fmt.Errorf("failed to resize shell: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// Close closes the session
+func (s *Session) Close(ctx context.Context) error {
+	// First, check if already closed and mark as closing
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil // Already closed
+	}
+	s.closed = true
+
+	// Store references to resources we need to clean up
+	executor := s.executor
+	recorder := s.recorder
+	s.mu.Unlock()
+
+	// Close shell executor - done without holding lock to prevent deadlock
+	// This allows handleShellOutput to acquire the RLock and exit cleanly
+	if executor != nil {
+		if err := executor.Close(ctx); err != nil {
+			// Log error but continue cleanup
+			_ = err // Explicitly ignore close errors during cleanup
+		}
+	}
+
+	// Finalize ONLY this session's recording. recorder.Close() must never be called
+	// here: the recorder instance is shared by every session of the manager
+	// (CreateSession wires m.recorder into each Session), and Close finalizes every
+	// active recording at once. On the browser relay — one SessionManager serving
+	// all tenants — closing one terminal would therefore truncate the audit trail of
+	// every other live privileged shell, and their subsequent output would try to
+	// auto-restart a recording whose O_EXCL file already exists, leaving those
+	// shells serving completely unrecorded.
+	if recorder != nil {
+		if err := recorder.EndRecording(s.ID); err != nil && !errors.Is(err, ErrNoActiveRecording) {
+			s.logger.Warn("Failed to finalize session recording on close",
+				"session_id", logging.RedactedID(s.ID), "error", err)
+		}
+	}
+
+	return nil
+}
+
+// IsActive returns true if the session is active
+func (s *Session) IsActive() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return !s.closed
+}
+
+// IsClosed returns true if the session is closed
+func (s *Session) IsClosed() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.closed
+}
+
+// UpdateActivity updates the last activity timestamp
+func (s *Session) UpdateActivity() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.LastActivity = time.Now()
+}
+
+// IsTimedOut returns true if the session has timed out
+func (s *Session) IsTimedOut(timeout time.Duration) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return time.Since(s.LastActivity) > timeout
+}
+
+// GetMetadata returns session metadata
+func (s *Session) GetMetadata() *SessionMetadata {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	metadata := &SessionMetadata{
+		SessionID:   s.ID,
+		StewardID:   s.StewardID,
+		UserID:      s.UserID,
+		Shell:       s.Shell,
+		CreatedAt:   s.CreatedAt,
+		Environment: s.Environment,
+	}
+
+	if s.closed {
+		endTime := time.Now()
+		metadata.EndedAt = &endTime
+	}
+
+	return metadata
+}
+
+// SetRecorder sets the session recorder
+func (s *Session) SetRecorder(recorder Recorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recorder = recorder
+}
+
+// Start starts the shell execution
+func (s *Session) Start(ctx context.Context) error {
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return fmt.Errorf("session is closed")
+	}
+
+	if s.executor == nil {
+		s.mu.RUnlock()
+		return fmt.Errorf("no shell executor available")
+	}
+	executor := s.executor // Copy reference while holding lock
+	s.mu.RUnlock()
+
+	// Start the shell executor
+	if err := executor.Start(ctx, nil); err != nil {
+		return fmt.Errorf("failed to start shell: %w", err)
+	}
+
+	// Start output handler
+	go s.handleShellOutput(ctx)
+
+	return nil
+}
+
+// handleShellOutput handles output from the shell executor
+func (s *Session) handleShellOutput(ctx context.Context) {
+	s.mu.RLock()
+	if s.executor == nil {
+		s.mu.RUnlock()
+		return
+	}
+	outputChan := s.executor.OutputChannel()
+	errorChan := s.executor.ErrorChannel()
+	s.mu.RUnlock()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case data, ok := <-outputChan:
+			if !ok {
+				return // Channel closed
+			}
+
+			// Handle the output data (send to WebSocket, record, etc.)
+			if err := s.HandleOutput(ctx, data); err != nil {
+				// Log error but continue processing output
+				_ = err // Explicitly ignore output handling errors for resilience
+			}
+
+		case err, ok := <-errorChan:
+			if !ok {
+				return // Channel closed
+			}
+
+			_ = err // Shell errors are non-fatal in the output loop; WebSocket error reporting is deferred.
+		}
+	}
+}
+
+// GetOutputChannel returns the shell output channel
+func (s *Session) GetOutputChannel() <-chan []byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.executor == nil {
+		return nil
+	}
+	return s.executor.OutputChannel()
+}
+
+// GetErrorChannel returns the shell error channel
+func (s *Session) GetErrorChannel() <-chan error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.executor == nil {
+		return nil
+	}
+	return s.executor.ErrorChannel()
+}
+
+// OutputChan returns the session-level relay channel that carries steward output
+// destined for the WebSocket client. Writers use HandleOutput; readers are
+// WebSocket write loops. The channel is buffered; messages are dropped (with a
+// warning log) when the buffer is full so a slow consumer never stalls the
+// steward output path.
+//
+// The channel is intentionally never closed: HandleOutput may be invoked from
+// handleShellOutput after Close, so closing would risk a send-on-closed panic.
+// Readers must detect session termination via context cancellation, not a
+// channel-close signal.
+func (s *Session) OutputChan() <-chan []byte {
+	return s.outputCh
+}

@@ -1,0 +1,286 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package lease
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
+)
+
+// SingletonJob wraps a cluster background loop's per-cycle execution so it
+// runs on at most one node at a time, using this package's fenced lease as
+// the singleton claim (ADR-031 Decision 4). A loop constructs one
+// SingletonJob per lease name and calls RunIfLeader on every tick instead of
+// hand-rolling its own acquire/renew/release sequence.
+type SingletonJob struct {
+	// Manager is the shared lease.Manager this job contends on. A nil Manager
+	// means no shared substrate is wired — SingleServerMode has exactly one
+	// node and nothing to exclude (ADR-029 Decision 4, mirrored by
+	// ha.Manager.HasLeadership's own SingleServerMode short-circuit) — so
+	// RunIfLeader always executes fn in that case.
+	Manager *Manager
+
+	// Name is this loop's lease name. Must be unique per loop within Manager.
+	Name string
+
+	// HolderID identifies this node/process contending for the lease.
+	HolderID string
+
+	// TTL is the lease TTL passed to Manager.TryAcquire/Renew; must equal
+	// Manager's configured LeaseTTL.
+	TTL time.Duration
+
+	// RenewInterval controls how often RunIfLeader renews the lease while fn
+	// is still running, so a cycle slower than TTL does not lose the lease
+	// mid-execution and trigger a duplicate run elsewhere. Must be well under
+	// TTL (mirroring pkg/lease.SafetyMargin's derivation).
+	RenewInterval time.Duration
+
+	// Logger receives acquire/renew diagnostics. May be nil.
+	Logger logging.Logger
+
+	// Clock supplies the renewal ticker, the remaining-authority computation
+	// and the retry backoff wait. Nil means the real clock.
+	Clock Clock
+}
+
+// clock returns the job's own Clock when set, else the Manager's clock (see
+// NewManagerWithClock), else the real clock.
+func (j SingletonJob) clock() Clock {
+	if j.Clock != nil {
+		return j.Clock
+	}
+	if j.Manager != nil && j.Manager.clock != nil {
+		return j.Manager.clock
+	}
+	return realClock{}
+}
+
+// NewSingletonJob constructs a SingletonJob, validating name/holderID are
+// non-empty and, when manager is non-nil, that ttl and renewInterval are
+// strictly positive. A nil manager skips the TTL/renewInterval checks — those
+// parameters are meaningless without a lease substrate to apply them to.
+func NewSingletonJob(manager *Manager, name, holderID string, ttl, renewInterval time.Duration, logger logging.Logger) (SingletonJob, error) {
+	if name == "" {
+		return SingletonJob{}, fmt.Errorf("lease: singleton job name cannot be empty")
+	}
+	if holderID == "" {
+		return SingletonJob{}, fmt.Errorf("lease: singleton job holder ID cannot be empty")
+	}
+	if manager != nil {
+		if ttl <= 0 {
+			return SingletonJob{}, fmt.Errorf("lease: singleton job %q ttl must be positive", name)
+		}
+		if renewInterval <= 0 {
+			return SingletonJob{}, fmt.Errorf("lease: singleton job %q renew interval must be positive", name)
+		}
+	}
+	return SingletonJob{
+		Manager:       manager,
+		Name:          name,
+		HolderID:      holderID,
+		TTL:           ttl,
+		RenewInterval: renewInterval,
+		Logger:        logger,
+	}, nil
+}
+
+// RunIfLeader attempts to claim j's lease for this cycle and, only on
+// success, calls fn with a context that is cancelled if the lease is lost to
+// a renewal failure before fn returns. Returns true iff fn was invoked.
+//
+// While fn runs, a background goroutine renews the lease every
+// RenewInterval. If a renewal fails — the store is unreachable, or (should
+// TTL/RenewInterval ever be misconfigured) the lease was actually lost to
+// another holder — RunIfLeader cancels fn's context so fn can stop rather
+// than keep mutating state after authority is gone. The lease itself is not
+// explicitly released when fn returns; it is left to expire at TTL, which is
+// simpler than a release round-trip and equally correct since no other node
+// can acquire it before then regardless.
+func (j SingletonJob) RunIfLeader(ctx context.Context, fn func(ctx context.Context)) bool {
+	if j.Manager == nil {
+		fn(ctx)
+		return true
+	}
+
+	token, acquired, err := j.Manager.TryAcquire(ctx, j.Name, j.HolderID, j.TTL)
+	if err != nil {
+		j.logWarn("lease: acquire failed; skipping this cycle", err)
+		return false
+	}
+	if !acquired {
+		return false
+	}
+
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
+	renewalStopped := make(chan struct{})
+	go func() {
+		defer close(renewalStopped)
+		j.renewWhileRunning(runCtx, cancelRun, token)
+	}()
+	go j.cancelAtAuthorityDeadline(runCtx, cancelRun)
+
+	fn(runCtx)
+	cancelRun()
+	<-renewalStopped
+	return true
+}
+
+// cancelAtAuthorityDeadline cancels fn's context once this holder's local
+// authority (Manager.LocalAuthorityDeadline) lapses with no renewal having
+// extended it, or as soon as the authority is invalidated. It runs
+// independently of the renewal loop, so fn is cancelled before the store row
+// can expire even while a renewal call is still in flight and has not
+// returned (a store that is merely slow never reports a failure the renewal
+// loop could act on). The wait uses a timer re-armed from the Clock's
+// view of the remaining time, so a renewal that lands in the meantime pushes
+// the deadline out.
+func (j SingletonJob) cancelAtAuthorityDeadline(ctx context.Context, onLost context.CancelFunc) {
+	for {
+		deadline, ok := j.Manager.LocalAuthorityDeadline(j.Name, j.HolderID)
+		if !ok {
+			onLost()
+			return
+		}
+		remaining := j.clock().Until(deadline)
+		if remaining <= 0 {
+			j.logWarn("lease: local authority lapsed with no completed renewal; cancelling remaining work to avoid a duplicate run",
+				errAuthorityLapsed)
+			onLost()
+			return
+		}
+		timer := j.newDeadlineTimer(remaining)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C():
+		}
+	}
+}
+
+// newDeadlineTimer arms the watchdog's wait on the job's Clock when it can
+// supply timers, so a test that injects a clock controls the deadline too;
+// otherwise it falls back to a real timer.
+func (j SingletonJob) newDeadlineTimer(d time.Duration) Timer {
+	if tc, ok := j.clock().(TimerClock); ok {
+		return tc.NewTimer(d)
+	}
+	return realTimer{time.NewTimer(d)}
+}
+
+var errAuthorityLapsed = errors.New("lease: local authority deadline reached")
+
+// renewRetryBaseBackoff is the starting backoff for renewWithRetry, doubled
+// on each attempt within the budget — the same shape as the SQLite
+// provider's busyBaseBackoff (pkg/storage/providers/sqlite/retry.go), used
+// here for the same reason: the contending condition (a transient store
+// error, or another holder already fenced this one out) resolves in well
+// under a millisecond, so a short first retry almost always succeeds.
+const renewRetryBaseBackoff = 10 * time.Millisecond
+
+// renewWhileRunning renews j's lease every RenewInterval until ctx is done.
+// A renewal that is still failing once renewWithRetry's budget is exhausted
+// invokes onLost (cancelling fn's context) and returns.
+func (j SingletonJob) renewWhileRunning(ctx context.Context, onLost context.CancelFunc, token uint64) {
+	ticker := j.clock().NewTicker(j.RenewInterval)
+	defer ticker.Stop()
+
+	current := token
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C():
+			newToken, err := j.renewWithRetry(ctx, current)
+			if err != nil {
+				j.logWarn("lease: renew failed mid-cycle; cancelling remaining work to avoid a duplicate run", err)
+				onLost()
+				return
+			}
+			current = newToken
+		}
+	}
+}
+
+// renewWithRetry calls Manager.Renew, retrying with bounded exponential
+// backoff until this holder's local authority lapses — the last successful
+// acquire/renew's call start plus Manager's safety margin
+// (Manager.LocalAuthorityDeadline). That instant is strictly earlier than the
+// store row's expiry, so giving up at it still cancels fn before another node
+// can acquire.
+//
+// The budget is deliberately the remaining authority window, not
+// MaxAllowedRenewalLatency. That field bounds how long one call may take for
+// the safety-margin derivation; it says nothing about how long the lease
+// stays valid after a failure. Giving up after that short budget (Issue
+// #4541) cancelled fn and stopped renewing while the lease still had most of
+// its TTL left, so an outage of a few hundred milliseconds — e.g. the
+// flatfile provider's atomic-rename write path on Windows, which does not
+// retry (pkg/storage/providers/flatfile/rename_windows.go; Issues #4262,
+// #1919, #2068) — let the lease lapse mid-cycle and a second node run.
+//
+// When the store reports a genuine fencing loss, Manager.Renew invalidates
+// the cached authority, the deadline lookup fails, and the loop gives up at
+// once: a lost lease is not retried.
+func (j SingletonJob) renewWithRetry(ctx context.Context, token uint64) (uint64, error) {
+	backoff := renewRetryBaseBackoff
+
+	for {
+		newToken, err := j.renewBounded(ctx, token)
+		if err == nil {
+			return newToken, nil
+		}
+
+		deadline, ok := j.Manager.LocalAuthorityDeadline(j.Name, j.HolderID)
+		if !ok {
+			return 0, err
+		}
+		remaining := j.clock().Until(deadline)
+		if remaining <= 0 {
+			return 0, err
+		}
+		if backoff > j.RenewInterval {
+			backoff = j.RenewInterval
+		}
+		if backoff > remaining {
+			backoff = remaining
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-j.clock().After(backoff):
+		}
+		backoff *= 2
+	}
+}
+
+// renewBounded runs one Manager.Renew call with a deadline of
+// Manager.MaxAllowedRenewalLatency; a call that exceeds it is treated as
+// failed (and retried by renewWithRetry while authority remains), as
+// SafetyMargin documents. The deadline is a context deadline, so a store that
+// ignores its context is not interrupted here; cancelAtAuthorityDeadline
+// still cancels fn at the authority deadline in that case.
+func (j SingletonJob) renewBounded(ctx context.Context, token uint64) (uint64, error) {
+	callCtx, cancel := context.WithTimeout(ctx, j.Manager.MaxAllowedRenewalLatency())
+	defer cancel()
+	return j.Manager.Renew(callCtx, j.Name, j.HolderID, token)
+}
+
+func (j SingletonJob) logWarn(msg string, err error) {
+	if j.Logger == nil {
+		return
+	}
+	// j.Name is caller-supplied and can be tenant-derived (e.g. gitsync builds
+	// it from TenantPath + Namespace), so it is tainted at this sink exactly
+	// like the error text beside it.
+	j.Logger.Warn(msg,
+		"lease_name", logging.SanitizeLogValue(j.Name),
+		"error", logging.SanitizeLogValue(err.Error()))
+}

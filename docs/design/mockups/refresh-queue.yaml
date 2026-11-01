@@ -1,0 +1,4 @@
+file: refresh-queue.html
+order: 10
+status: **Reference**
+what: The **Refresh requests** page (Epic #2931 · #2941) — its own nav entry / `/refresh` route (not a console tab). Pending steward device-credential rotations with a **provenance-match** column (partial match = amber, scrutinize); **Reject** live, **Approve** deferred ("SOON"). Tenant-scoped, both themes.

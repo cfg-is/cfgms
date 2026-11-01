@@ -1,0 +1,464 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package hyperv
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// TestProvisionStore_SurvivesReopen is the REQUIRED TEST from AC: a record
+// written to the durable store is readable after the store is re-opened at the
+// same root (simulating a steward restart). This proves the in-memory-only
+// default is replaced by a real durable implementation in the default wiring
+// path (NewFlatFileProvisionStore → ConfigBackedProvisionStore).
+func TestProvisionStore_SurvivesReopen(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+
+	store1, err := NewFlatFileProvisionStore(root)
+	require.NoError(t, err, "NewFlatFileProvisionStore must succeed on a writable root")
+
+	now := time.Now().Truncate(time.Second).UTC()
+	record := &ProvisionRecord{
+		VMName:        "vm-01",
+		State:         ProvisionStateInstalling,
+		CorrelationID: "corr-restart-test",
+		StartedAt:     now,
+		UpdatedAt:     now,
+	}
+	require.NoError(t, store1.SetProvision(ctx, record))
+
+	// Simulate a steward restart: open a second store instance at the same root.
+	store2, err := NewFlatFileProvisionStore(root)
+	require.NoError(t, err)
+
+	got, err := store2.GetProvision(ctx, "vm-01")
+	require.NoError(t, err, "record written before re-open must be readable after (durable store)")
+	assert.Equal(t, "vm-01", got.VMName)
+	assert.Equal(t, ProvisionStateInstalling, got.State)
+	assert.Equal(t, "corr-restart-test", got.CorrelationID)
+	assert.Equal(t, now, got.StartedAt)
+}
+
+// TestProvisionStore_ConfigBacked_CRUD exercises full Get/Set/Delete/List
+// round-trips on ConfigBackedProvisionStore via NewFlatFileProvisionStore.
+func TestProvisionStore_ConfigBacked_CRUD(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+	store, err := NewFlatFileProvisionStore(root)
+	require.NoError(t, err)
+
+	// Get on empty store returns ErrProvisionNotFound.
+	_, err = store.GetProvision(ctx, "vm-a")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrProvisionNotFound)
+
+	// Delete on empty store returns ErrProvisionNotFound.
+	err = store.DeleteProvision(ctx, "vm-a")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrProvisionNotFound)
+
+	// List on empty store returns empty non-nil slice.
+	list, err := store.ListProvisions(ctx)
+	require.NoError(t, err)
+	assert.NotNil(t, list)
+	assert.Empty(t, list)
+
+	now := time.Now().Truncate(time.Second).UTC()
+	recA := &ProvisionRecord{VMName: "vm-a", State: ProvisionStateCreating, CorrelationID: "c-a", StartedAt: now, UpdatedAt: now}
+	recB := &ProvisionRecord{VMName: "vm-b", State: ProvisionStateReady, CorrelationID: "c-b", StartedAt: now, UpdatedAt: now, LastError: "prior-err"}
+	require.NoError(t, store.SetProvision(ctx, recA))
+	require.NoError(t, store.SetProvision(ctx, recB))
+
+	// Get returns the stored record.
+	gotA, err := store.GetProvision(ctx, "vm-a")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateCreating, gotA.State)
+	assert.Equal(t, "c-a", gotA.CorrelationID)
+
+	// List returns all records.
+	list, err = store.ListProvisions(ctx)
+	require.NoError(t, err)
+	assert.Len(t, list, 2)
+
+	// Set overwrites existing record.
+	recA.State = ProvisionStateFailed
+	require.NoError(t, store.SetProvision(ctx, recA))
+	got, err := store.GetProvision(ctx, "vm-a")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateFailed, got.State)
+
+	// Delete removes the record; Get afterwards returns ErrProvisionNotFound.
+	require.NoError(t, store.DeleteProvision(ctx, "vm-b"))
+	_, err = store.GetProvision(ctx, "vm-b")
+	assert.ErrorIs(t, err, ErrProvisionNotFound)
+
+	// vm-a still present.
+	_, err = store.GetProvision(ctx, "vm-a")
+	require.NoError(t, err)
+}
+
+// ─── ProvisionStore CRUD tests ────────────────────────────────────────────────
+
+// TestProvisionStore_CRUD exercises Get/Set/Delete/ErrProvisionNotFound
+// round-trips on memProvisionStore.
+func TestProvisionStore_CRUD(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemProvisionStore()
+
+	// Get on empty store returns ErrProvisionNotFound.
+	_, err := store.GetProvision(ctx, "vm-01")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrProvisionNotFound, "Get on absent record must return ErrProvisionNotFound")
+
+	// Delete on empty store returns ErrProvisionNotFound.
+	err = store.DeleteProvision(ctx, "vm-01")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrProvisionNotFound, "Delete on absent record must return ErrProvisionNotFound")
+
+	// Set creates a record.
+	now := time.Now().Truncate(time.Second)
+	record := &ProvisionRecord{
+		VMName:        "vm-01",
+		State:         ProvisionStateCreating,
+		CorrelationID: "corr-abc-123",
+		StartedAt:     now,
+		UpdatedAt:     now,
+	}
+	require.NoError(t, store.SetProvision(ctx, record))
+
+	// Get returns the stored record.
+	got, err := store.GetProvision(ctx, "vm-01")
+	require.NoError(t, err)
+	assert.Equal(t, "vm-01", got.VMName)
+	assert.Equal(t, ProvisionStateCreating, got.State)
+	assert.Equal(t, "corr-abc-123", got.CorrelationID)
+	assert.Equal(t, now, got.StartedAt)
+	assert.Equal(t, now, got.UpdatedAt)
+
+	// Set overwrites with a new state.
+	record.State = ProvisionStateInstalling
+	record.UpdatedAt = now.Add(time.Minute)
+	require.NoError(t, store.SetProvision(ctx, record))
+
+	got, err = store.GetProvision(ctx, "vm-01")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateInstalling, got.State, "Set must overwrite existing record")
+
+	// Mutating the returned pointer does not corrupt the store.
+	got.State = ProvisionStateFailed
+	reFetch, err := store.GetProvision(ctx, "vm-01")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateInstalling, reFetch.State,
+		"Get must return a copy; mutating it must not affect the store")
+
+	// Delete removes the record.
+	require.NoError(t, store.DeleteProvision(ctx, "vm-01"))
+	_, err = store.GetProvision(ctx, "vm-01")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrProvisionNotFound, "Get after Delete must return ErrProvisionNotFound")
+
+	// Second Delete returns ErrProvisionNotFound.
+	err = store.DeleteProvision(ctx, "vm-01")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrProvisionNotFound, "Delete on already-deleted record must return ErrProvisionNotFound")
+}
+
+// TestProvisionStore_MultipleVMs verifies independent records for different VMs.
+func TestProvisionStore_MultipleVMs(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemProvisionStore()
+	now := time.Now().Truncate(time.Second)
+
+	recordA := &ProvisionRecord{VMName: "vm-a", State: ProvisionStateCreating, CorrelationID: "corr-a", StartedAt: now, UpdatedAt: now}
+	recordB := &ProvisionRecord{VMName: "vm-b", State: ProvisionStateReady, CorrelationID: "corr-b", StartedAt: now, UpdatedAt: now}
+
+	require.NoError(t, store.SetProvision(ctx, recordA))
+	require.NoError(t, store.SetProvision(ctx, recordB))
+
+	gotA, err := store.GetProvision(ctx, "vm-a")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateCreating, gotA.State)
+
+	gotB, err := store.GetProvision(ctx, "vm-b")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateReady, gotB.State)
+
+	// Deleting A does not affect B.
+	require.NoError(t, store.DeleteProvision(ctx, "vm-a"))
+	_, err = store.GetProvision(ctx, "vm-a")
+	assert.ErrorIs(t, err, ErrProvisionNotFound)
+	_, err = store.GetProvision(ctx, "vm-b")
+	require.NoError(t, err, "vm-b must survive deletion of vm-a")
+}
+
+// TestProvisionStore_ListProvisions verifies that ListProvisions returns
+// independent copies of all stored records and that the empty-store case
+// returns a non-nil empty slice.
+func TestProvisionStore_ListProvisions(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemProvisionStore()
+
+	// Empty store returns empty slice, not nil.
+	list, err := store.ListProvisions(ctx)
+	require.NoError(t, err)
+	assert.NotNil(t, list)
+	assert.Empty(t, list)
+
+	now := time.Now().Truncate(time.Second)
+	recA := &ProvisionRecord{VMName: "vm-a", State: ProvisionStateCreating, CorrelationID: "corr-a", StartedAt: now, UpdatedAt: now}
+	recB := &ProvisionRecord{VMName: "vm-b", State: ProvisionStateReady, CorrelationID: "corr-b", StartedAt: now, UpdatedAt: now}
+	require.NoError(t, store.SetProvision(ctx, recA))
+	require.NoError(t, store.SetProvision(ctx, recB))
+
+	list, err = store.ListProvisions(ctx)
+	require.NoError(t, err)
+	assert.Len(t, list, 2, "ListProvisions must return all stored records")
+
+	// Mutating a returned pointer must not corrupt the store.
+	for _, r := range list {
+		r.State = ProvisionStateFailed
+	}
+	list2, err := store.ListProvisions(ctx)
+	require.NoError(t, err)
+	for _, r := range list2 {
+		assert.NotEqual(t, ProvisionStateFailed, r.State,
+			"ListProvisions must return copies; mutating them must not affect the store")
+	}
+}
+
+// TestProvisionRecord_LastError verifies that LastError is carried through Set/Get.
+func TestProvisionRecord_LastError(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemProvisionStore()
+	now := time.Now().Truncate(time.Second)
+
+	record := &ProvisionRecord{
+		VMName:        "vm-err",
+		State:         ProvisionStateFailed,
+		CorrelationID: "corr-x",
+		StartedAt:     now,
+		UpdatedAt:     now,
+		LastError:     "timeout waiting for steward registration",
+	}
+	require.NoError(t, store.SetProvision(ctx, record))
+
+	got, err := store.GetProvision(ctx, "vm-err")
+	require.NoError(t, err)
+	assert.Equal(t, "timeout waiting for steward registration", got.LastError)
+}
+
+// TestIsOwnIncompleteAttempt verifies the existence-gating helper: a record in a
+// host-side in-progress state (creating/installing/finalizing) reports true;
+// missing or terminal-state records report false. This is the discriminator that
+// separates "our own incomplete attempt" (safe to surface-and-wait) from "a real
+// existing VM" (never destroyed) in the ADR-009 §2 decision tree.
+func TestIsOwnIncompleteAttempt(t *testing.T) {
+	ctx := context.Background()
+	m := &hypervModule{provisionStore: NewMemProvisionStore()}
+	// Non-ha_role / non-CSV cfg → storeFor resolves the host-local store, so
+	// every read here exercises the preserved swallow-on-error semantics: err is
+	// always nil (a NotFound is (false, nil), not an error).
+	cfg := &VMConfig{Name: "vm-x"}
+
+	// No record → (false, nil).
+	own, err := m.isOwnIncompleteAttempt(ctx, cfg)
+	require.NoError(t, err)
+	assert.False(t, own, "no provisioning record must report not-in-progress")
+
+	cases := []struct {
+		state ProvisionState
+		want  bool
+	}{
+		{ProvisionStateAbsent, false},
+		{ProvisionStateCreating, true},
+		{ProvisionStateInstalling, true},
+		{ProvisionStateFinalizing, true},
+		{ProvisionStateReady, false},
+		{ProvisionStateFailed, false},
+		{ProvisionStateDegraded, false},
+	}
+	for _, tc := range cases {
+		require.NoError(t, m.provisionStore.SetProvision(ctx, &ProvisionRecord{
+			VMName: "vm-x", State: tc.state, CorrelationID: "vm-x",
+		}))
+		got, gerr := m.isOwnIncompleteAttempt(ctx, cfg)
+		require.NoError(t, gerr, "host-local reads never fail loud")
+		assert.Equal(t, tc.want, got, "isOwnIncompleteAttempt for state %q", tc.state)
+	}
+}
+
+// TestIsHealthyVMState verifies the broken-state classifier used by the degraded
+// surface: running/stopped/off/paused/saved/absent are healthy; any other state
+// (critical, off-critical, paused-critical, unknown) is broken (ADR-009 §2).
+func TestIsHealthyVMState(t *testing.T) {
+	for _, s := range []string{"running", "stopped", "off", "paused", "saved", "absent", "Running", "Off"} {
+		assert.True(t, isHealthyVMState(s), "%q must be classified healthy", s)
+	}
+	for _, s := range []string{"critical", "off-critical", "paused-critical", "Critical", "starting-critical", "weird"} {
+		assert.False(t, isHealthyVMState(s), "%q must be classified broken", s)
+	}
+}
+
+// TestProvisionState_Values verifies the ProvisionState string enum values are
+// stable and serialise to the expected strings.
+func TestProvisionState_Values(t *testing.T) {
+	cases := []struct {
+		state ProvisionState
+		want  string
+	}{
+		{ProvisionStateAbsent, "absent"},
+		{ProvisionStateCreating, "creating"},
+		{ProvisionStateInstalling, "installing"},
+		{ProvisionStateFinalizing, "finalizing"},
+		{ProvisionStateReady, "ready"},
+		{ProvisionStateFailed, "failed"},
+		{ProvisionStateDegraded, "degraded"},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, string(tc.state),
+			"ProvisionState(%q) must serialise to %q", tc.state, tc.want)
+	}
+}
+
+// TestProvisionNotFound_IsSentinel verifies that ErrProvisionNotFound is a
+// standalone sentinel, not wrapping another error.
+func TestProvisionNotFound_IsSentinel(t *testing.T) {
+	assert.False(t, errors.Is(ErrProvisionNotFound, ErrVMNotFound),
+		"ErrProvisionNotFound must be a distinct sentinel from ErrVMNotFound")
+}
+
+// ─── #2467 phase-capture (FailedFrom) tests ───────────────────────────────────
+
+// TestFailProvision_RecordsFailedFrom is the write-site coverage for the #2467
+// phase capture: failProvision must stamp FailedFrom with the state the record
+// was in at failure time — the signal applySourceGated later uses to tell a
+// seed/create-phase failure from a post-install one — and must persist it. On a
+// re-fail of an already-failed record the earliest failure phase wins (the guard
+// must not clobber it with "failed").
+func TestFailProvision_RecordsFailedFrom(t *testing.T) {
+	ctx := context.Background()
+	m := &hypervModule{provisionStore: NewMemProvisionStore()}
+	cfg := &VMConfig{Name: "vm-fail", VHDPath: `C:\VMs\vm-fail.vhdx`}
+
+	rec, err := m.loadOrInitProvision(ctx, cfg, "vm-fail")
+	require.NoError(t, err)
+	require.NoError(t, m.advanceProvision(ctx, cfg, "vm-fail", rec, ProvisionStateCreating))
+
+	// First failure, from creating → FailedFrom captures creating.
+	cause := errors.New(`hyperv: create seed VHDX for VM "vm-fail": exit status 1`)
+	got := m.failProvision(ctx, cfg, "vm-fail", rec, cause)
+	require.ErrorIs(t, got, cause, "failProvision returns the original cause")
+	assert.Equal(t, ProvisionStateFailed, rec.State)
+	assert.Equal(t, ProvisionStateCreating, rec.FailedFrom, "FailedFrom must capture the pre-failure phase")
+
+	// The persisted copy carries it too (not just the in-memory record).
+	stored, err := m.provisionStore.GetProvision(ctx, "vm-fail")
+	require.NoError(t, err)
+	assert.Equal(t, ProvisionStateFailed, stored.State)
+	assert.Equal(t, ProvisionStateCreating, stored.FailedFrom)
+
+	// Re-fail the already-failed record → FailedFrom must NOT be clobbered to
+	// "failed"; the earliest failure phase (creating) is preserved.
+	// failProvision returns the original cause for the caller to propagate.
+	secondFailure := errors.New("second failure")
+	require.ErrorIs(t, m.failProvision(ctx, cfg, "vm-fail", rec, secondFailure), secondFailure,
+		"failProvision returns the original cause on a re-fail")
+	assert.Equal(t, ProvisionStateFailed, rec.State)
+	assert.Equal(t, ProvisionStateCreating, rec.FailedFrom,
+		"a re-fail must keep the earliest failure phase, not overwrite it with failed")
+}
+
+// TestAdvanceProvision_ClearsStaleFailedFrom proves a retry (advancing a record
+// forward after a prior failure) clears the stale FailedFrom, so a later
+// installing/ready record does not carry a misleading failure phase (#2467).
+func TestAdvanceProvision_ClearsStaleFailedFrom(t *testing.T) {
+	ctx := context.Background()
+	m := &hypervModule{provisionStore: NewMemProvisionStore()}
+	cfg := &VMConfig{Name: "vm-retry", VHDPath: `C:\VMs\vm-retry.vhdx`}
+
+	rec, err := m.loadOrInitProvision(ctx, cfg, "vm-retry")
+	require.NoError(t, err)
+	require.NoError(t, m.advanceProvision(ctx, cfg, "vm-retry", rec, ProvisionStateCreating))
+	// failProvision returns the original cause for the caller to propagate.
+	seedFailure := errors.New("seed failed")
+	require.ErrorIs(t, m.failProvision(ctx, cfg, "vm-retry", rec, seedFailure), seedFailure,
+		"failProvision returns the original cause")
+	require.Equal(t, ProvisionStateCreating, rec.FailedFrom)
+
+	// A retry advances the record forward again → the stale failure phase clears.
+	require.NoError(t, m.advanceProvision(ctx, cfg, "vm-retry", rec, ProvisionStateCreating))
+	assert.Empty(t, string(rec.FailedFrom), "advancing forward must clear the stale failure phase")
+}
+
+// TestFailedDuringSeedPhase is the direct branch-matrix unit test for the #2467
+// classifier (the read side of the phase signal): only a Failed record whose
+// FailedFrom is absent/creating (never reached installing) is a seed-phase
+// failure; an unknown (empty) FailedFrom is deliberately NOT one.
+func TestFailedDuringSeedPhase(t *testing.T) {
+	cases := []struct {
+		name   string
+		record *ProvisionRecord
+		want   bool
+	}{
+		{"nil record", nil, false},
+		{"not failed (installing)", &ProvisionRecord{State: ProvisionStateInstalling, FailedFrom: ProvisionStateCreating}, false},
+		{"failed from creating", &ProvisionRecord{State: ProvisionStateFailed, FailedFrom: ProvisionStateCreating}, true},
+		{"failed from absent", &ProvisionRecord{State: ProvisionStateFailed, FailedFrom: ProvisionStateAbsent}, true},
+		{"failed from installing", &ProvisionRecord{State: ProvisionStateFailed, FailedFrom: ProvisionStateInstalling}, false},
+		{"failed from finalizing", &ProvisionRecord{State: ProvisionStateFailed, FailedFrom: ProvisionStateFinalizing}, false},
+		{"failed from ready", &ProvisionRecord{State: ProvisionStateFailed, FailedFrom: ProvisionStateReady}, false},
+		{"failed with empty FailedFrom (legacy/unknown)", &ProvisionRecord{State: ProvisionStateFailed}, false},
+		{"failed from degraded", &ProvisionRecord{State: ProvisionStateFailed, FailedFrom: ProvisionStateDegraded}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, failedDuringSeedPhase(tc.record))
+		})
+	}
+}
+
+// ─── #3802 bounded seed-phase auto-retry tests ────────────────────────────────
+
+// TestSeedPhaseRetryExhausted is the direct branch-matrix unit test for the
+// #3802 retry-budget classifier: a record is exhausted once RetryCount reaches
+// the effective budget, and a budget of 0 (the disable value) exhausts a fresh
+// (RetryCount 0) record immediately.
+func TestSeedPhaseRetryExhausted(t *testing.T) {
+	cases := []struct {
+		name       string
+		retryCount int
+		maxRetries int
+		want       bool
+	}{
+		{"fresh record, default budget", 0, defaultSeedPhaseRetryMax, false},
+		{"below budget", 2, defaultSeedPhaseRetryMax, false},
+		{"at budget: exhausted", 3, defaultSeedPhaseRetryMax, true},
+		{"past budget: exhausted", 4, defaultSeedPhaseRetryMax, true},
+		{"disabled budget (0): fresh record still exhausted", 0, 0, true},
+		{"re-bound budget: below", 4, 5, false},
+		{"re-bound budget: at", 5, 5, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &ProvisionRecord{State: ProvisionStateFailed, FailedFrom: ProvisionStateCreating, RetryCount: tc.retryCount}
+			assert.Equal(t, tc.want, seedPhaseRetryExhausted(rec, tc.maxRetries))
+		})
+	}
+}
+
+// TestDefaultSeedPhaseRetryMax pins the settled retry bound (3 total attempts:
+// the original create-phase attempt plus 2 automatic repair retries) so a
+// future change to the constant is a deliberate, reviewed decision rather than
+// an accidental one — this is the exact terminal value
+// (ProvisionRecord.RetryCount == 3 on a Failed/seed-phase record) the
+// visibility sibling story's fixture checks.
+func TestDefaultSeedPhaseRetryMax(t *testing.T) {
+	assert.Equal(t, 3, defaultSeedPhaseRetryMax)
+}

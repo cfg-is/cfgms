@@ -1,0 +1,626 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gorilla/mux"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	"github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
+	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+)
+
+const rgMSP = "msp-graph"
+
+// rgFixture is a server with an entity graph holding one root-owned and one
+// client-tenant entity (joined by an edge), plus a drift record on each.
+type rgFixture struct {
+	server *Server
+	prov   *sqlite.SQLiteEntityGraphProvider
+}
+
+const (
+	rgRootEID   = "host:rg-root-host"
+	rgClientEID = "host:rg-client-host"
+)
+
+func newRGFixture(t *testing.T) *rgFixture {
+	t.Helper()
+	server := seedRootTenant(t, wireCrossingStore(t, setupTestServer(t)))
+	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: rgMSP, ParentID: testRootTenantID})
+	require.NoError(t, err)
+	prov := newTestEntityGraphProvider(t)
+	server.SetEntityGraphProvider(prov)
+	server.SetEntityGraphWriteProvider(prov)
+
+	reportEntity(t, prov, rgRootEID, testRootTenantID, "host")
+	reportEntity(t, prov, rgClientEID, rgMSP, "host")
+	now := time.Now().UTC()
+	for _, subject := range []string{rgRootEID, rgClientEID} {
+		require.NoError(t, prov.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+			Source: "test:reporter",
+			Observations: []egtypes.Observation{{
+				Source: "test:reporter", ObservedAt: now, RecordedAt: now, Subject: subject,
+				Kind: egtypes.ObservationKindDriftDiff, Confidence: egtypes.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"fields": []map[string]interface{}{{"attribute": "a", "desired": "x", "actual": "y", "matching": false}},
+				},
+			}},
+		}))
+	}
+	require.NoError(t, prov.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source: "test:reporter",
+		Observations: []egtypes.Observation{{
+			Source: "test:reporter", ObservedAt: now, RecordedAt: now,
+			Subject: "runs-on|" + rgRootEID + "|" + rgClientEID,
+			Kind:    egtypes.ObservationKindState, Confidence: egtypes.ConfidenceHigh,
+			Payload: map[string]interface{}{},
+		}},
+	}))
+	return &rgFixture{server: server, prov: prov}
+}
+
+func (f *rgFixture) get(t *testing.T, h http.HandlerFunc, path string, op *Principal, vars map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h(rec, asRootOperator(httptest.NewRequest(http.MethodGet, path, nil), op, vars))
+	return rec
+}
+
+func rgEntityEIDs(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var page eginterfaces.EntityPage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	var out []string
+	for _, e := range page.Entities {
+		out = append(out, e.Entity.EID.String())
+	}
+	return out
+}
+
+func rgDriftEIDs(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var page driftPage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	out := []string{}
+	for _, s := range page.Drifted {
+		out = append(out, s.EID.String())
+	}
+	return out
+}
+
+// TestRootEntityListReads_CrossingBoundary: list-shaped entity-graph reads return
+// only root-owned entities to a boundary-subject root caller, then the client's
+// too after a crossing.
+func TestRootEntityListReads_CrossingBoundary(t *testing.T) {
+	f := newRGFixture(t)
+	op := boundRootOperator("rg-list-op")
+
+	t.Run("no crossing", func(t *testing.T) {
+		assert.ElementsMatch(t, []string{rgRootEID}, rgEntityEIDs(t, f.get(t, f.server.handleQueryEntities, "/api/v1/entities", op, nil)))
+		assert.ElementsMatch(t, []string{rgRootEID}, rgDriftEIDs(t, f.get(t, f.server.handleListDrifted, "/api/v1/entities/drifted", op, nil)))
+
+		q := url.Values{"eid": {rgRootEID, rgClientEID}, "from": {time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)}, "to": {time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}}
+		rec := f.get(t, f.server.handleGetTimeline, "/api/v1/entities/timeline?"+q.Encode(), op, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var events []*eginterfaces.TimelineEvent
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &events))
+		for _, ev := range events {
+			assert.NotEqual(t, rgClientEID, ev.Subject.String())
+		}
+	})
+
+	t.Run("active crossing", func(t *testing.T) {
+		grantCrossing(t, f.server, op.ID, rgMSP)
+		assert.ElementsMatch(t, []string{rgRootEID, rgClientEID}, rgEntityEIDs(t, f.get(t, f.server.handleQueryEntities, "/api/v1/entities", op, nil)))
+		assert.ElementsMatch(t, []string{rgRootEID, rgClientEID}, rgDriftEIDs(t, f.get(t, f.server.handleListDrifted, "/api/v1/entities/drifted", op, nil)))
+	})
+}
+
+// TestRootEntityKeyedReads_CrossingBoundary: every entity-keyed read of a client
+// entity is challenged without a crossing and served with one.
+func TestRootEntityKeyedReads_CrossingBoundary(t *testing.T) {
+	f := newRGFixture(t)
+	window := "from=" + url.QueryEscape(time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)) +
+		"&to=" + url.QueryEscape(time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	routes := []struct {
+		name   string
+		h      http.HandlerFunc
+		suffix string
+	}{
+		{"entity", f.server.handleGetEntity, ""},
+		{"edges", f.server.handleGetEdges, "/edges"},
+		{"neighborhood", f.server.handleGetNeighborhood, "/neighborhood"},
+		{"history", f.server.handleGetHistory, "/history?" + window},
+		{"diff", f.server.handleDiff, "/diff?" + window},
+		{"drift", f.server.handleGetDriftState, "/drift"},
+		{"desired-state", f.server.handleGetDesiredState, "/desired-state"},
+	}
+	for i, rt := range routes {
+		t.Run(rt.name, func(t *testing.T) {
+			vars := map[string]string{"eid": rgClientEID}
+			path := "/api/v1/entities/" + rgClientEID + rt.suffix
+
+			noCrossing := boundRootOperator("rg-keyed-no-" + string(rune('a'+i)))
+			assertCrossingChallenge(t, f.get(t, rt.h, path, noCrossing, vars), rgMSP)
+
+			// A root-owned entity is still served without a crossing.
+			rec := f.get(t, rt.h, "/api/v1/entities/"+rgRootEID+rt.suffix, noCrossing, map[string]string{"eid": rgRootEID})
+			assert.NotEqual(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+
+			withCrossing := boundRootOperator("rg-keyed-yes-" + string(rune('a'+i)))
+			grantCrossing(t, f.server, withCrossing.ID, rgMSP)
+			rec = f.get(t, rt.h, path, withCrossing, vars)
+			assert.NotEqual(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+			assert.NotEqual(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		})
+	}
+}
+
+// TestRootEntityEdges_DropClientEndpoint: an edge from a root entity to a client
+// entity is not returned to a root caller without a crossing.
+func TestRootEntityEdges_DropClientEndpoint(t *testing.T) {
+	f := newRGFixture(t)
+	vars := map[string]string{"eid": rgRootEID}
+	path := "/api/v1/entities/" + rgRootEID + "/edges"
+
+	rec := f.get(t, f.server.handleGetEdges, path, boundRootOperator("rg-edge-no"), vars)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var page edgePage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	assert.Empty(t, page.Edges)
+
+	with := boundRootOperator("rg-edge-yes")
+	grantCrossing(t, f.server, with.ID, rgMSP)
+	rec = f.get(t, f.server.handleGetEdges, path, with, vars)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	page = edgePage{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	assert.Len(t, page.Edges, 1)
+}
+
+// TestFilterReadableNeighborhood drops a client-tenant neighbor and the edges that
+// touch it, whatever the provider returned.
+func TestFilterReadableNeighborhood(t *testing.T) {
+	f := newRGFixture(t)
+	rootEID, err := egtypes.ParseEID(rgRootEID)
+	require.NoError(t, err)
+	clientEID, err := egtypes.ParseEID(rgClientEID)
+	require.NoError(t, err)
+	n := &egtypes.Neighborhood{
+		Root: rootEID,
+		Nodes: []*egtypes.Entity{
+			{EID: rootEID, OwningTenant: testRootTenantID},
+			{EID: clientEID, OwningTenant: rgMSP},
+		},
+		Edges: []*egtypes.Edge{{Type: "runs-on", From: rootEID, To: clientEID}},
+	}
+	req := asRootOperator(httptest.NewRequest(http.MethodGet, "/x", nil), boundRootOperator("rg-nbr"), nil)
+	scope := f.server.tenantReadScope(req, "TEST")
+	got := filterReadableNeighborhood(scope, n)
+	require.Len(t, got.Nodes, 1)
+	assert.Equal(t, rgRootEID, got.Nodes[0].EID.String())
+	assert.Empty(t, got.Edges)
+}
+
+// TestRootClusterReads_CrossingBoundary: clusters are built from readable
+// stewards; a client cluster is challenged without a crossing and served with one.
+func TestRootClusterReads_CrossingBoundary(t *testing.T) {
+	server := seedRootTenant(t, wireCrossingStore(t, setupTestServer(t)))
+	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: rgMSP, ParentID: testRootTenantID})
+	require.NoError(t, err)
+	seedClusterSteward(t, server, "rg-root-s", testRootTenantID, nil, clusterFragment(t, "rg-root-cluster", map[string]string{"csv": "N1"}))
+	seedClusterSteward(t, server, "rg-client-s", rgMSP, nil, clusterFragment(t, "rg-client-cluster", map[string]string{"csv": "N2"}))
+
+	call := func(h http.HandlerFunc, path, name string, op *Principal) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		h(rec, asRootOperator(httptest.NewRequest(http.MethodGet, path, nil), op, map[string]string{"name": name}))
+		return rec
+	}
+	names := func(rec *httptest.ResponseRecorder) []string {
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp struct {
+			Data []ClusterInfo `json:"data"`
+		}
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		out := []string{}
+		for _, c := range resp.Data {
+			out = append(out, c.Name)
+		}
+		return out
+	}
+
+	no := boundRootOperator("rg-cl-no")
+	assert.Equal(t, []string{"rg-root-cluster"}, names(call(server.handleListClusters, "/api/v1/clusters", "", no)))
+	assertCrossingChallenge(t, call(server.handleGetCluster, "/api/v1/clusters/rg-client-cluster", "rg-client-cluster", no), rgMSP)
+	assertCrossingChallenge(t, call(server.handleClusterReconciliation, "/api/v1/clusters/rg-client-cluster/reconciliation", "rg-client-cluster", no), rgMSP)
+	assert.Equal(t, http.StatusOK, call(server.handleGetCluster, "/api/v1/clusters/rg-root-cluster", "rg-root-cluster", no).Code)
+	assert.Equal(t, http.StatusNotFound, call(server.handleGetCluster, "/api/v1/clusters/none", "none", no).Code)
+
+	yes := boundRootOperator("rg-cl-yes")
+	grantCrossing(t, server, yes.ID, rgMSP)
+	assert.ElementsMatch(t, []string{"rg-root-cluster", "rg-client-cluster"}, names(call(server.handleListClusters, "/api/v1/clusters", "", yes)))
+	assert.Equal(t, http.StatusOK, call(server.handleGetCluster, "/api/v1/clusters/rg-client-cluster", "rg-client-cluster", yes).Code)
+	assert.Equal(t, http.StatusOK, call(server.handleClusterReconciliation, "/api/v1/clusters/rg-client-cluster/reconciliation", "rg-client-cluster", yes).Code)
+}
+
+// TestTenantAndCertAdminGraphReads_Unchanged: a tenant-scoped caller keeps its
+// subtree (and a 404, never a challenge, outside it); an unrestricted certificate
+// admin keeps root breadth.
+func TestTenantAndCertAdminGraphReads_Unchanged(t *testing.T) {
+	f := newRGFixture(t)
+
+	t.Run("tenant-scoped MSP admin", func(t *testing.T) {
+		call := func(h http.HandlerFunc, path string, vars map[string]string) *httptest.ResponseRecorder {
+			rec := httptest.NewRecorder()
+			req := withClusterTenant(httptest.NewRequest(http.MethodGet, path, nil), rgMSP)
+			h(rec, mux_SetVars(req, vars))
+			return rec
+		}
+		assert.ElementsMatch(t, []string{rgClientEID}, rgEntityEIDs(t, call(f.server.handleQueryEntities, "/api/v1/entities", nil)))
+		assert.Equal(t, http.StatusOK, call(f.server.handleGetEntity, "/x", map[string]string{"eid": rgClientEID}).Code)
+		assert.Equal(t, http.StatusNotFound, call(f.server.handleGetEntity, "/x", map[string]string{"eid": rgRootEID}).Code)
+	})
+
+	t.Run("unrestricted certificate admin", func(t *testing.T) {
+		call := func(h http.HandlerFunc, path string, vars map[string]string) *httptest.ResponseRecorder {
+			rec := httptest.NewRecorder()
+			req := withClusterTenant(httptest.NewRequest(http.MethodGet, path, nil), "")
+			h(rec, mux_SetVars(req, vars))
+			return rec
+		}
+		assert.ElementsMatch(t, []string{rgRootEID, rgClientEID}, rgEntityEIDs(t, call(f.server.handleQueryEntities, "/api/v1/entities", nil)))
+		assert.Equal(t, http.StatusOK, call(f.server.handleGetEntity, "/x", map[string]string{"eid": rgClientEID}).Code)
+		assert.ElementsMatch(t, []string{rgRootEID, rgClientEID}, rgDriftEIDs(t, call(f.server.handleListDrifted, "/x", nil)))
+	})
+}
+
+// TestIntakeAssist_DropsClientEntityWithoutCrossing: intake candidates that live
+// in a client tenant are silently dropped for a boundary-subject root caller.
+func TestIntakeAssist_DropsClientEntityWithoutCrossing(t *testing.T) {
+	f := newRGFixture(t)
+	reportEntityWithClaims(t, f.prov, "host:rg-intake-client", rgMSP, "rg-intake-client", "")
+	claims := `{"hostname":"rg-intake-client"}`
+	run := func(op *Principal) []eginterfaces.EIDRef {
+		rec := httptest.NewRecorder()
+		req := asRootOperator(httptest.NewRequest(http.MethodPost, "/api/v1/cases/intake-assist", stringsReader(claims)), op, nil)
+		f.server.handleCasesIntakeAssist(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var out []eginterfaces.EIDRef
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+		return out
+	}
+	assert.Empty(t, run(boundRootOperator("rg-intake-no")))
+	with := boundRootOperator("rg-intake-yes")
+	grantCrossing(t, f.server, with.ID, rgMSP)
+	assert.Len(t, run(with), 1)
+}
+
+func mux_SetVars(r *http.Request, vars map[string]string) *http.Request {
+	if vars == nil {
+		return r
+	}
+	return mux.SetURLVars(r, vars)
+}
+
+func stringsReader(s string) *strings.Reader { return strings.NewReader(s) }
+
+// TestCockpitWatch_RootCrossingBoundary: a root caller is challenged, before the
+// WebSocket upgrade, for the watch of a client-tenant case and gets past the
+// authorization step once it holds a crossing.
+func TestCockpitWatch_RootCrossingBoundary(t *testing.T) {
+	server := seedRootTenant(t, wireCrossingStore(t, setupCockpitWatchServer(t, newWatchProbe(t))))
+	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: rgMSP, ParentID: testRootTenantID})
+	require.NoError(t, err)
+	c := seedWatchCaseNoPins(t, server.casesStore, rgMSP)
+
+	watch := func(op *Principal) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		server.handleCockpitWatch(rec, asRootOperator(
+			httptest.NewRequest(http.MethodGet, "/api/v1/cases/"+c.ID+"/watch", nil), op, map[string]string{"id": c.ID}))
+		return rec
+	}
+	assertCrossingChallenge(t, watch(boundRootOperator("rg-watch-no")), rgMSP)
+
+	with := boundRootOperator("rg-watch-yes")
+	grantCrossing(t, server, with.ID, rgMSP)
+	// Past authorization the handler tries the WebSocket upgrade, which a plain
+	// recorder request cannot complete: any answer but the challenge or 404 proves it.
+	rec := watch(with)
+	assert.NotEqual(t, http.StatusUnauthorized, rec.Code)
+	assert.NotEqual(t, http.StatusNotFound, rec.Code)
+}
+
+// TestRootEntityEdges_PageTokenNeverNamesHiddenEndpoint: a page token is the
+// cursor of an edge the caller was shown, so paging a boundary-subject caller
+// through edges with an unreadable one in the middle never discloses the client
+// entity, and still yields every readable edge once.
+func TestRootEntityEdges_PageTokenNeverNamesHiddenEndpoint(t *testing.T) {
+	f := newRGFixture(t)
+	now := time.Now().UTC()
+	var obs []egtypes.Observation
+	for _, e := range []struct{ typ, to string }{
+		{"contains", "host:rg-r1"}, {"contains", "host:rg-r2"}, {"zz-uses", "host:rg-r3"}, {"zz-uses", "host:rg-r4"},
+	} {
+		reportEntity(t, f.prov, e.to, testRootTenantID, "host")
+		obs = append(obs, egtypes.Observation{
+			Source: "test:reporter", ObservedAt: now, RecordedAt: now,
+			Subject: e.typ + "|" + rgRootEID + "|" + e.to,
+			Kind:    egtypes.ObservationKindState, Confidence: egtypes.ConfidenceHigh,
+			Payload: map[string]interface{}{},
+		})
+	}
+	require.NoError(t, f.prov.ReportObservations(context.Background(),
+		eginterfaces.ObservationBatch{Source: "test:reporter", Observations: obs}))
+
+	op := boundRootOperator("rg-edge-page")
+	vars := map[string]string{"eid": rgRootEID}
+	// Edges sort contains→r1, contains→r2, runs-on→client, zz-uses→r3, zz-uses→r4,
+	// so limit=3 puts the hidden client edge as the last row of the first page
+	// window, and every other limit places it elsewhere in a window.
+	for limit := 1; limit <= 5; limit++ {
+		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
+			var seen []string
+			token := ""
+			for i := 0; i < 10; i++ {
+				path := fmt.Sprintf("/api/v1/entities/%s/edges?limit=%d", rgRootEID, limit)
+				if token != "" {
+					path += "&page_token=" + token
+				}
+				rec := f.get(t, f.server.handleGetEdges, path, op, vars)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assert.NotContains(t, rec.Body.String(), rgClientEID, "response must not name the hidden endpoint")
+				var page edgePage
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+				assert.LessOrEqual(t, len(page.Edges), limit)
+				for _, e := range page.Edges {
+					seen = append(seen, e.Edge.To.String())
+				}
+				if page.NextToken != "" {
+					key, err := eginterfaces.DecodeEdgeCursor(page.NextToken)
+					require.NoError(t, err)
+					assert.NotContains(t, key, rgClientEID, "token must not name the hidden endpoint")
+				}
+				token = page.NextToken
+				if token == "" {
+					break
+				}
+			}
+			assert.Empty(t, token, "paging must terminate")
+			assert.ElementsMatch(t, []string{"host:rg-r1", "host:rg-r2", "host:rg-r3", "host:rg-r4"}, seen)
+		})
+	}
+}
+
+// postAssertEdge posts an operator edge assertion as op, with principalID as the
+// authenticated user ID ("" leaves it unset).
+func (f *rgFixture) postAssertEdge(t *testing.T, op *Principal, userID, fromEID, toEID string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(assertEdgeRequest{EdgeType: "depends-on", FromEID: fromEID, ToEID: toEID, Attributes: map[string]interface{}{"note": "secret-attr-value"}})
+	require.NoError(t, err)
+	req := asRootOperator(httptest.NewRequest(http.MethodPost, "/api/v1/entities/edges", strings.NewReader(string(body))), op, nil)
+	if userID != "" {
+		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.UserIDKey, userID))
+	}
+	rec := httptest.NewRecorder()
+	f.server.handleAssertEdge(rec, req)
+	return rec
+}
+
+func (f *rgFixture) assertedEdgeStored(t *testing.T) bool {
+	t.Helper()
+	eid, err := egtypes.ParseEID(rgRootEID)
+	require.NoError(t, err)
+	edges, err := f.prov.GetEdges(context.Background(), eginterfaces.EdgeFilter{FromEID: &eid, Types: []string{"depends-on"}})
+	require.NoError(t, err)
+	for _, e := range edges {
+		if e.Edge != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *rgFixture) edgeAuditEntries(t *testing.T, tenantID string) []*business.AuditEntry {
+	t.Helper()
+	require.NoError(t, f.server.auditManager.Flush(context.Background()))
+	entries, err := f.server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: tenantID})
+	require.NoError(t, err)
+	var out []*business.AuditEntry
+	for _, e := range entries {
+		if e.Action == entityEdgeAssertedAuditAction {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestRootAssertEdge_CrossingBoundary: a boundary-subject root caller asserting an
+// edge that touches a client-tenant entity is challenged without a crossing (nothing
+// stored, nothing audited) and, with one, stores the edge and audits it under the
+// owning tenant and root.
+func TestRootAssertEdge_CrossingBoundary(t *testing.T) {
+	f := newRGFixture(t)
+	op := boundRootOperator("rg-assert-op")
+
+	rec := f.postAssertEdge(t, op, op.ID, rgRootEID, rgClientEID)
+	assertCrossingChallenge(t, rec, rgMSP)
+	assert.False(t, f.assertedEdgeStored(t))
+	assert.Empty(t, f.edgeAuditEntries(t, rgMSP))
+	assert.Empty(t, f.edgeAuditEntries(t, testRootTenantID))
+
+	grantCrossing(t, f.server, op.ID, rgMSP)
+	rec = f.postAssertEdge(t, op, op.ID, rgRootEID, rgClientEID)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.True(t, f.assertedEdgeStored(t))
+
+	for _, tenantID := range []string{rgMSP, testRootTenantID} {
+		entries := f.edgeAuditEntries(t, tenantID)
+		require.Len(t, entries, 1, "tenant %s", tenantID)
+		assert.Equal(t, op.ID, entries[0].UserID)
+		assert.Equal(t, rgRootEID, entries[0].Details["from_eid"])
+		assert.Equal(t, rgClientEID, entries[0].Details["to_eid"])
+		assert.Equal(t, "depends-on", entries[0].Details["edge_type"])
+		assert.NotContains(t, fmt.Sprint(entries[0].Details), "secret-attr-value")
+	}
+}
+
+// TestRootAssertEdge_AuditFailureWritesNothing: when the audit event cannot be
+// recorded the edge is not written.
+func TestRootAssertEdge_AuditFailureWritesNothing(t *testing.T) {
+	f := newRGFixture(t)
+	op := boundRootOperator("rg-assert-audit-op")
+	require.NoError(t, f.server.auditManager.Stop(context.Background()))
+
+	rec := f.postAssertEdge(t, op, op.ID, rgRootEID, rgRootEID)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.False(t, f.assertedEdgeStored(t))
+
+	f.server.auditManager = nil
+	rec = f.postAssertEdge(t, op, op.ID, rgRootEID, rgRootEID)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.False(t, f.assertedEdgeStored(t))
+}
+
+// TestRootAssertEdge_NoPrincipalRefused: a request with no authenticated principal
+// ID is refused and nothing is stored.
+func TestRootAssertEdge_NoPrincipalRefused(t *testing.T) {
+	f := newRGFixture(t)
+	op := boundRootOperator("")
+
+	rec := f.postAssertEdge(t, op, "", rgRootEID, rgRootEID)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.False(t, f.assertedEdgeStored(t))
+	assert.Empty(t, f.edgeAuditEntries(t, testRootTenantID))
+}
+
+// TestRootTimeline_SameAsPeerCrossing: a same-as event between a root entity and a
+// client entity names the client eid in its detail, so a root caller gets it only
+// with a crossing on the client tenant.
+func TestRootTimeline_SameAsPeerCrossing(t *testing.T) {
+	f := newRGFixture(t)
+	now := time.Now().UTC()
+	require.NoError(t, f.prov.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source: "test:reporter",
+		Observations: []egtypes.Observation{{
+			Source: "test:reporter", ObservedAt: now, RecordedAt: now,
+			Subject: "same-as|" + rgRootEID + "|" + rgClientEID,
+			Kind:    egtypes.ObservationKindState, Confidence: egtypes.ConfidenceHigh,
+			Payload: map[string]interface{}{},
+		}},
+	}))
+	q := url.Values{"eid": {rgRootEID}, "from": {now.Add(-time.Hour).Format(time.RFC3339)}, "to": {now.Add(time.Hour).Format(time.RFC3339)}}
+	path := "/api/v1/entities/timeline?" + q.Encode()
+
+	without := boundRootOperator("rg-tl-no")
+	rec := f.get(t, f.server.handleGetTimeline, path, without, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "rg-client-host", "client eid must appear in no field")
+	assert.NotContains(t, rec.Body.String(), "same-as-change")
+
+	with := boundRootOperator("rg-tl-yes")
+	grantCrossing(t, f.server, with.ID, rgMSP)
+	rec = f.get(t, f.server.handleGetTimeline, path, with, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "same-as-change")
+	assert.Contains(t, rec.Body.String(), "rg-client-host")
+}
+
+// rgReportDrift reports an entity owned by tenant with a drift row.
+func rgReportDrift(t *testing.T, prov *sqlite.SQLiteEntityGraphProvider, subject, tenantID string) {
+	t.Helper()
+	reportEntity(t, prov, subject, tenantID, "host")
+	now := time.Now().UTC()
+	require.NoError(t, prov.ReportObservations(context.Background(), eginterfaces.ObservationBatch{
+		Source: "test:reporter",
+		Observations: []egtypes.Observation{{
+			Source: "test:reporter", ObservedAt: now, RecordedAt: now, Subject: subject,
+			Kind: egtypes.ObservationKindDriftDiff, Confidence: egtypes.ConfidenceHigh,
+			Payload: map[string]interface{}{
+				"fields": []map[string]interface{}{{"attribute": "a", "desired": "x", "actual": "y", "matching": false}},
+			},
+		}},
+	}))
+}
+
+func rgDriftPage(t *testing.T, rec *httptest.ResponseRecorder) driftPage {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var page driftPage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	return page
+}
+
+// TestListDrifted_BoundaryRootPaging: a boundary-subject root caller paging with
+// limit=1 sees each readable row exactly once and never a token naming an
+// uncrossed client entity.
+func TestListDrifted_BoundaryRootPaging(t *testing.T) {
+	f := newRGFixture(t)
+	op := boundRootOperator("rg-page-op")
+	const otherTenant = "client-uncrossed"
+	const otherEID = "host:rg-uncrossed-host"
+	_, err := f.server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: otherTenant, ParentID: testRootTenantID})
+	require.NoError(t, err)
+	rgReportDrift(t, f.prov, otherEID, otherTenant)
+	grantCrossing(t, f.server, op.ID, rgMSP)
+
+	var seen []string
+	token := ""
+	for i := 0; i < 5; i++ {
+		path := "/api/v1/entities/drifted?limit=1"
+		if token != "" {
+			path += "&page_token=" + url.QueryEscape(token)
+		}
+		page := rgDriftPage(t, f.get(t, f.server.handleListDrifted, path, op, nil))
+		require.LessOrEqual(t, len(page.Drifted), 1)
+		for _, d := range page.Drifted {
+			seen = append(seen, d.EID.String())
+		}
+		assert.NotEqual(t, otherEID, page.NextToken, "token must not name an uncrossed entity")
+		if page.NextToken == "" {
+			break
+		}
+		token = page.NextToken
+	}
+	assert.ElementsMatch(t, []string{rgRootEID, rgClientEID}, seen, "each readable row exactly once")
+}
+
+// TestListDrifted_BoundaryRootLimitBoundsAllCuts: with crossings into two client
+// tenants each holding more rows than limit, one response holds at most limit rows.
+func TestListDrifted_BoundaryRootLimitBoundsAllCuts(t *testing.T) {
+	f := newRGFixture(t)
+	op := boundRootOperator("rg-cap-op")
+	const secondTenant = "client-second"
+	_, err := f.server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: secondTenant, ParentID: testRootTenantID})
+	require.NoError(t, err)
+	for i := 0; i < 4; i++ {
+		rgReportDrift(t, f.prov, fmt.Sprintf("host:rg-a-%d", i), rgMSP)
+		rgReportDrift(t, f.prov, fmt.Sprintf("host:rg-b-%d", i), secondTenant)
+	}
+	grantCrossing(t, f.server, op.ID, rgMSP)
+	grantCrossing(t, f.server, op.ID, secondTenant)
+
+	page := rgDriftPage(t, f.get(t, f.server.handleListDrifted, "/api/v1/entities/drifted?limit=3", op, nil))
+	require.Len(t, page.Drifted, 3, "limit bounds the whole response")
+	assert.Equal(t, page.Drifted[2].EID.String(), page.NextToken)
+	ids := rgDriftEIDs(t, f.get(t, f.server.handleListDrifted, "/api/v1/entities/drifted?limit=3", op, nil))
+	assert.True(t, sort.StringsAreSorted(ids), "merged result is ordered by subject: %v", ids)
+}

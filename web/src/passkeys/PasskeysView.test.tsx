@@ -1,0 +1,554 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+//
+// Issue #2992: PasskeysView self-service passkey management UI tests.
+//
+// Scope:
+//   - Renders credential list from the API
+//   - Shows loading skeleton, empty state, and load error
+//   - Revoke happy path removes the row (204)
+//   - Revoke returns 409 LAST_CREDENTIAL → shows anti-lockout alert, row stays
+//   - Revoke server error → shows error banner
+//   - Add passkey: cancel (NotAllowedError) is silently swallowed
+//   - Add passkey: server begin error shows error banner
+//
+// Real components only: the principal comes from the real <AuthProvider>, driven
+// through its real passkey login ceremony (begin → credentials.get → finish) via
+// the SignedInHarness below — the same mechanism App.tsx's Login screen uses, and
+// the same pattern as UserMenu.test.tsx / SavedViews.test.tsx. Nothing inside
+// web/src is mocked.
+//
+// Only the two browser boundaries are stubbed: the fetch global (answered by a
+// URL router so login traffic and passkey-management traffic cannot interleave
+// into an ordering dependency) and navigator.credentials (jsdom provisions no
+// authenticator). Full WebAuthn ceremony validation lives in the handler tests
+// (handlers_webauthn_test.go).
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useEffect } from 'react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
+import { AuthProvider, useAuth } from '../auth/AuthContext.tsx'
+import PasskeysView from './PasskeysView.tsx'
+
+const USERNAME = 'alice'
+
+// ── response helpers ──────────────────────────────────────────────────────
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(status === 204 ? null : JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+function makeListResp(credentials: object[]): Response {
+  return jsonResponse(200, { data: { username: USERNAME, credentials } })
+}
+
+function makeErrorResp(status: number, code: string, message: string): Response {
+  return jsonResponse(status, { error: { code, message } })
+}
+
+// A per-endpoint FIFO of response factories. Responses are built lazily because a
+// Response body can only be consumed once. An exhausted queue answers 500 so an
+// unexpected extra call fails its test loudly instead of silently reusing a body.
+function makeQueue(name: string) {
+  const items: Array<() => Response> = []
+  return {
+    push(factory: () => Response) {
+      items.push(factory)
+    },
+    reset() {
+      items.length = 0
+    },
+    next(): Response {
+      const factory = items.shift()
+      if (factory === undefined) {
+        return jsonResponse(500, { error: { message: `unexpected extra ${name} request` } })
+      }
+      return factory()
+    },
+  }
+}
+
+const listQueue = makeQueue('credential-list')
+const revokeQueue = makeQueue('revoke')
+const renameQueue = makeQueue('rename')
+const registerBeginQueue = makeQueue('register-begin')
+const registerFinishQueue = makeQueue('register-finish')
+
+// ── browser boundary stubs ────────────────────────────────────────────────
+
+const fetchMock = vi.fn<typeof fetch>()
+const credentialsGet = vi.fn<(opts?: CredentialRequestOptions) => Promise<Credential | null>>()
+const credentialsCreate = vi.fn<(opts?: CredentialCreationOptions) => Promise<Credential | null>>()
+
+const LOGIN_BEGIN_OPTIONS = {
+  publicKey: {
+    challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
+    timeout: 60000,
+    rpId: 'localhost',
+    allowCredentials: [],
+    userVerification: 'required' as const,
+  },
+}
+
+function makeAssertionCredential(): PublicKeyCredential {
+  const toArrayBuffer = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer
+  return {
+    id: 'login-cred-id',
+    type: 'public-key',
+    rawId: toArrayBuffer('login-cred-id'),
+    response: {
+      clientDataJSON: toArrayBuffer('{"type":"webauthn.get"}'),
+      authenticatorData: toArrayBuffer('auth-data'),
+      signature: toArrayBuffer('sig'),
+      userHandle: null,
+    } as AuthenticatorAssertionResponse,
+    getClientExtensionResults: () => ({} as AuthenticationExtensionsClientOutputs),
+    authenticatorAttachment: null,
+    toJSON: () => ({}),
+  } as unknown as PublicKeyCredential
+}
+
+const renameCalls: Array<RequestInit | undefined> = []
+
+function route(input: RequestInfo | URL, init?: RequestInit): Response {
+  const url = String(input)
+  // Real AuthProvider login ceremony.
+  if (url.endsWith('/api/v1/web/csrf')) {
+    document.cookie = '__Host-cfgms_csrf_pre=pre-tok; path=/; Secure'
+    return jsonResponse(204, null)
+  }
+  if (url.endsWith('/api/v1/web/passkey/login/begin')) {
+    return jsonResponse(200, LOGIN_BEGIN_OPTIONS)
+  }
+  if (url.endsWith('/api/v1/web/passkey/login/finish')) {
+    return jsonResponse(200, {
+      data: { ok: true, username: USERNAME, tenant_id: '', root_scope: false },
+    })
+  }
+  // PasskeysView management endpoints.
+  if (url.endsWith(`/api/v1/accounts/${USERNAME}/webauthn/credentials`)) {
+    return listQueue.next()
+  }
+  if (url.endsWith('/webauthn/register/begin')) {
+    return registerBeginQueue.next()
+  }
+  if (url.split('?')[0]?.endsWith('/webauthn/register/finish')) {
+    return registerFinishQueue.next()
+  }
+  if (url.includes('/webauthn/credentials/')) {
+    renameCalls.push(init)
+    return renameQueue.next()
+  }
+  if (url.includes('/webauthn/revoke/')) {
+    return revokeQueue.next()
+  }
+  return jsonResponse(404, { error: { message: `unrouted request: ${url}` } })
+}
+
+beforeEach(() => {
+  fetchMock.mockReset()
+  fetchMock.mockImplementation((input, init) => Promise.resolve(route(input, init)))
+  credentialsGet.mockReset()
+  credentialsGet.mockImplementation(() => Promise.resolve(makeAssertionCredential()))
+  credentialsCreate.mockReset()
+  credentialsCreate.mockImplementation(() =>
+    Promise.reject(new Error('credentials.create not configured by this test')),
+  )
+  listQueue.reset()
+  revokeQueue.reset()
+  renameQueue.reset()
+  renameCalls.length = 0
+  registerBeginQueue.reset()
+  registerFinishQueue.reset()
+  vi.stubGlobal('fetch', fetchMock)
+  vi.stubGlobal('navigator', { credentials: { get: credentialsGet, create: credentialsCreate } })
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  cleanup()
+})
+
+// ── fixtures ──────────────────────────────────────────────────────────────
+
+const CRED_A = {
+  id: 'aGVsbG8',
+  label: 'MacBook Touch ID',
+  transport: ['internal'],
+  registered_at: '2026-01-10T12:00:00Z',
+  last_used_at: '2026-08-01T09:00:00Z',
+}
+
+const CRED_B = {
+  id: 'd29ybGQ',
+  label: 'YubiKey 5',
+  transport: ['usb', 'nfc'],
+  registered_at: '2026-02-15T08:00:00Z',
+  last_used_at: null,
+}
+
+// ── harness ───────────────────────────────────────────────────────────────
+
+/*
+ * Signs in through the real AuthProvider.login() — PasskeysView has no login
+ * form of its own, so a principal only exists once something drives the
+ * provider's real ceremony. PasskeysView mounts only after the session is
+ * established, so its credential-list load fires exactly once per test.
+ */
+function SignedInHarness() {
+  const { status, login } = useAuth()
+  useEffect(() => {
+    if (status === 'signedOut') void login(USERNAME)
+  }, [status, login])
+  if (status !== 'signedIn') return null
+  return <PasskeysView />
+}
+
+async function renderView() {
+  const result = render(
+    <MemoryRouter>
+      <AuthProvider>
+        <SignedInHarness />
+      </AuthProvider>
+    </MemoryRouter>,
+  )
+  await screen.findByTestId('passkeys-view')
+  return result
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────
+
+describe('PasskeysView', () => {
+  it('renders the credential list', async () => {
+    listQueue.push(() => makeListResp([CRED_A, CRED_B]))
+    await renderView()
+
+    await waitFor(() => expect(screen.queryByTestId('passkeys-loading')).toBeNull())
+
+    const rows = screen.getAllByTestId('passkey-row')
+    expect(rows).toHaveLength(2)
+    expect(screen.getByText('MacBook Touch ID')).toBeInTheDocument()
+    expect(screen.getByText('YubiKey 5')).toBeInTheDocument()
+  })
+
+  it('shows empty state when no credentials', async () => {
+    listQueue.push(() => makeListResp([]))
+    await renderView()
+
+    await waitFor(() => expect(screen.queryByTestId('passkeys-loading')).toBeNull())
+    expect(screen.getByTestId('passkeys-empty')).toBeInTheDocument()
+  })
+
+  it('shows load error and retry button on API failure', async () => {
+    listQueue.push(() => jsonResponse(503, { error: { message: 'store unavailable' } }))
+    await renderView()
+
+    await waitFor(() => expect(screen.queryByTestId('passkeys-loading')).toBeNull())
+    expect(screen.getByTestId('load-error')).toBeInTheDocument()
+    expect(screen.getByText('Retry')).toBeInTheDocument()
+  })
+
+  it('removes a credential row after successful revoke', async () => {
+    // Initial load returns two credentials.
+    listQueue.push(() => makeListResp([CRED_A, CRED_B]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+
+    // Click "Remove" on the first credential to open the confirm dialog.
+    // Use getByRole to avoid noUncheckedIndexedAccess on the result array.
+    fireEvent.click(screen.getByRole('button', { name: /Remove passkey MacBook Touch ID/i }))
+
+    // Confirm dialog appears — click "Confirm remove".
+    await waitFor(() => expect(screen.getByTestId('confirm-revoke-btn')).toBeInTheDocument())
+
+    // POST revoke → 204; reload list → 1 cred.
+    revokeQueue.push(() => new Response(null, { status: 204 }))
+    listQueue.push(() => makeListResp([CRED_B]))
+
+    fireEvent.click(screen.getByTestId('confirm-revoke-btn'))
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId('passkey-row')).toHaveLength(1)
+    })
+    expect(screen.queryByText('MacBook Touch ID')).toBeNull()
+  })
+
+  it('shows anti-lockout alert on 409 LAST_CREDENTIAL (server backstop for a stale list)', async () => {
+    // The client list shows two keys (Remove enabled) but the server already
+    // sees only one — the backstop refusal must still surface the alert.
+    listQueue.push(() => makeListResp([CRED_A, CRED_B]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+
+    fireEvent.click(screen.getByRole('button', { name: /Remove passkey MacBook Touch ID/i }))
+    await waitFor(() => expect(screen.getByTestId('confirm-revoke-btn')).toBeInTheDocument())
+
+    revokeQueue.push(() => makeErrorResp(409, 'LAST_CREDENTIAL', 'Cannot remove the last passkey'))
+
+    fireEvent.click(screen.getByTestId('confirm-revoke-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('last-cred-alert')).toBeInTheDocument())
+    // Rows must still be present.
+    expect(screen.getAllByTestId('passkey-row')).toHaveLength(2)
+  })
+
+  it('locks Remove and shows the backup nudge with exactly one passkey', async () => {
+    listQueue.push(() => makeListResp([CRED_A]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+
+    expect(screen.getByTestId('revoke-btn')).toBeDisabled()
+    expect(screen.getByTestId('last-key-note')).toBeInTheDocument()
+    expect(screen.getByTestId('backup-nudge')).toBeInTheDocument()
+  })
+
+  it('enables Remove and hides the nudge with two or more passkeys', async () => {
+    listQueue.push(() => makeListResp([CRED_A, CRED_B]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+
+    for (const btn of screen.getAllByTestId('revoke-btn')) expect(btn).toBeEnabled()
+    expect(screen.queryByTestId('backup-nudge')).toBeNull()
+    expect(screen.queryByTestId('last-key-note')).toBeNull()
+  })
+
+  it('falls back to the credential-id fragment when a passkey has no label', async () => {
+    listQueue.push(() => makeListResp([{ ...CRED_A, label: '' }, CRED_B]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+    expect(screen.getByText('aGVsbG8…')).toBeInTheDocument()
+  })
+
+  async function addPasskeyWithLabel(typed: string | null) {
+    credentialsCreate.mockImplementation(() =>
+      Promise.resolve({
+        id: 'new-cred',
+        type: 'public-key',
+        rawId: new TextEncoder().encode('new-cred').buffer as ArrayBuffer,
+        response: {
+          clientDataJSON: new TextEncoder().encode('{}').buffer as ArrayBuffer,
+          attestationObject: new TextEncoder().encode('att').buffer as ArrayBuffer,
+        },
+      } as unknown as PublicKeyCredential),
+    )
+    registerBeginQueue.push(() =>
+      jsonResponse(200, {
+        data: {
+          publicKey: {
+            challenge: 'AAAA',
+            rp: { name: 'CFGMS', id: 'example.com' },
+            user: { id: 'AAAA', name: USERNAME, displayName: USERNAME },
+            pubKeyCredParams: [],
+          },
+        },
+      }),
+    )
+    registerFinishQueue.push(() => jsonResponse(200, { data: { ok: true } }))
+    if (typed !== null) {
+      fireEvent.change(screen.getByTestId('add-label-input'), { target: { value: typed } })
+    }
+    fireEvent.click(screen.getByTestId('add-passkey-btn'))
+  }
+
+  function finishUrl(): string | undefined {
+    const call = fetchMock.mock.calls.find(([input]) => String(input).includes('/webauthn/register/finish'))
+    return call ? String(call[0]) : undefined
+  }
+
+  it('sends the label on register/finish, shows it in the list, and re-enables Remove', async () => {
+    listQueue.push(() => makeListResp([CRED_A]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+    expect(screen.getByTestId('revoke-btn')).toBeDisabled()
+
+    listQueue.push(() =>
+      makeListResp([
+        CRED_A,
+        { ...CRED_B, id: 'bmV3', label: 'Work & Phone' },
+      ]),
+    )
+    await addPasskeyWithLabel('  Work & Phone  ')
+
+    await waitFor(() => expect(screen.getAllByTestId('passkey-row')).toHaveLength(2))
+    expect(finishUrl()).toContain('/webauthn/register/finish?label=Work%20%26%20Phone')
+    expect(screen.getByText('Work & Phone')).toBeInTheDocument()
+    for (const btn of screen.getAllByTestId('revoke-btn')) expect(btn).toBeEnabled()
+    expect(screen.queryByTestId('backup-nudge')).toBeNull()
+    expect((screen.getByTestId('add-label-input') as HTMLInputElement).value).toBe('')
+  })
+
+  it('sends no label param when the label is empty', async () => {
+    listQueue.push(() => makeListResp([CRED_A]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+
+    listQueue.push(() => makeListResp([CRED_A, CRED_B]))
+    await addPasskeyWithLabel(null)
+
+    await waitFor(() => expect(screen.getAllByTestId('passkey-row')).toHaveLength(2))
+    expect(finishUrl()).toMatch(/\/webauthn\/register\/finish$/)
+  })
+
+  it('caps the label input at 64 characters', async () => {
+    listQueue.push(() => makeListResp([CRED_A]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+
+    const input = screen.getByTestId('add-label-input') as HTMLInputElement
+    expect(input.maxLength).toBe(64)
+
+    listQueue.push(() => makeListResp([CRED_A, CRED_B]))
+    await addPasskeyWithLabel('x'.repeat(80))
+    await waitFor(() => expect(screen.getAllByTestId('passkey-row')).toHaveLength(2))
+    expect(finishUrl()).toContain(`?label=${'x'.repeat(64)}`)
+    expect(finishUrl()).not.toContain('x'.repeat(65))
+  })
+
+  it('shows revoke error banner on server error', async () => {
+    listQueue.push(() => makeListResp([CRED_A, CRED_B]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+
+    // Use getByRole to avoid noUncheckedIndexedAccess issue with getAllByTestId()[0].
+    fireEvent.click(screen.getByRole('button', { name: /Remove passkey MacBook Touch ID/i }))
+    await waitFor(() => expect(screen.getByTestId('confirm-revoke-btn')).toBeInTheDocument())
+
+    revokeQueue.push(() => makeErrorResp(500, 'STORE_ERROR', 'store write failed'))
+
+    fireEvent.click(screen.getByTestId('confirm-revoke-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('revoke-error')).toBeInTheDocument())
+  })
+
+  it('silently ignores NotAllowedError from credentials.create', async () => {
+    listQueue.push(() => makeListResp([CRED_A]))
+    // The authenticator rejects with NotAllowedError (user cancelled the prompt).
+    const notAllowed = Object.assign(new Error('NotAllowedError'), { name: 'NotAllowedError' })
+    credentialsCreate.mockImplementation(() => Promise.reject(notAllowed))
+
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+
+    // Begin returns a minimal options object; the authenticator then throws NotAllowedError.
+    registerBeginQueue.push(() =>
+      jsonResponse(200, {
+        data: {
+          publicKey: {
+            challenge: 'AAAA',
+            rp: { name: 'CFGMS', id: 'example.com' },
+            user: { id: 'AAAA', name: USERNAME, displayName: USERNAME },
+            pubKeyCredParams: [],
+            timeout: 60000,
+          },
+        },
+      }),
+    )
+
+    fireEvent.click(screen.getByTestId('add-passkey-btn'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('add-passkey-btn')).not.toBeDisabled()
+    })
+    // No error banner should appear for a user cancel.
+    expect(screen.queryByTestId('add-error')).toBeNull()
+  })
+
+  it('shows add error banner when begin returns an error', async () => {
+    listQueue.push(() => makeListResp([CRED_A]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+
+    registerBeginQueue.push(() =>
+      makeErrorResp(503, 'WEBAUTHN_NOT_CONFIGURED', 'WebAuthn not configured'),
+    )
+
+    fireEvent.click(screen.getByTestId('add-passkey-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('add-error')).toBeInTheDocument())
+  })
+
+  describe('sub-line, chip and rename', () => {
+    const base = { registered_at: '2026-01-10T12:00:00Z', last_used_at: null, transport: ['internal'] }
+
+    it('shows the three sync wordings and never a sync claim from transport alone', async () => {
+      listQueue.push(() =>
+        makeListResp([
+          { ...base, id: 'a', label: 'Bound', device_type: 'security_key', synced: false, sync_capable: false, current: false },
+          { ...base, id: 'b', label: 'Capable', device_type: 'platform', synced: false, sync_capable: true, current: false },
+          { ...base, id: 'c', label: 'Syncing', device_type: 'phone_or_other', synced: true, sync_capable: true, current: false },
+          { ...base, id: 'd', label: 'Nothing', device_type: 'unknown' },
+        ]),
+      )
+      await renderView()
+      const rows = await screen.findAllByTestId('passkey-row')
+      const sub = (i: number) => within(rows.at(i)!).getByTestId('passkey-subline').textContent
+      expect(sub(0)).toContain('Device-bound')
+      expect(sub(1)).toContain('Not synced (can sync)')
+      expect(sub(1)).not.toContain('Device-bound')
+      expect(sub(2)).toContain('Synced')
+      expect(sub(2)).toContain('Phone or other device')
+      expect(sub(3)).toContain('Unknown device')
+      // transport "internal" alone must not yield a sync claim
+      expect(sub(3)).not.toMatch(/Synced|Not synced/)
+    })
+
+    it('has no Transport column', async () => {
+      listQueue.push(() => makeListResp([CRED_A]))
+      await renderView()
+      await screen.findByTestId('passkeys-table')
+      expect(screen.queryByRole('columnheader', { name: 'Transport' })).toBeNull()
+    })
+
+    it('marks only the current credential with the chip', async () => {
+      listQueue.push(() =>
+        makeListResp([
+          { ...CRED_A, device_type: 'platform', current: true },
+          { ...CRED_B, device_type: 'security_key', current: false },
+        ]),
+      )
+      await renderView()
+      const rows = await screen.findAllByTestId('passkey-row')
+      expect(rows[0]!.querySelector('[data-testid="this-device-chip"]')).not.toBeNull()
+      expect(rows[1]!.querySelector('[data-testid="this-device-chip"]')).toBeNull()
+      expect(screen.getAllByTestId('this-device-chip')).toHaveLength(1)
+    })
+
+    async function startRename() {
+      listQueue.push(() => makeListResp([{ ...CRED_A, device_type: 'platform' }]))
+      await renderView()
+      fireEvent.click(await screen.findByRole('button', { name: /Rename passkey MacBook Touch ID/i }))
+      const input = await screen.findByTestId('rename-input')
+      fireEvent.change(input, { target: { value: 'Work laptop' } })
+    }
+
+    it('persists a rename and refreshes the list', async () => {
+      await startRename()
+      renameQueue.push(() => jsonResponse(200, { data: {} }))
+      listQueue.push(() => makeListResp([{ ...CRED_A, label: 'Work laptop', device_type: 'platform' }]))
+      fireEvent.click(screen.getByTestId('rename-save-btn'))
+      await screen.findByText('Work laptop')
+      expect(renameCalls).toHaveLength(1)
+      expect(renameCalls[0]?.method).toBe('PATCH')
+      expect(JSON.parse(String(renameCalls[0]?.body))).toEqual({ label: 'Work laptop' })
+    })
+
+    it('keeps the old label when step-up is cancelled', async () => {
+      await startRename()
+      renameQueue.push(() =>
+        new Response(JSON.stringify({ error: { code: 'STEP_UP_REQUIRED', message: 'step-up required' } }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json', 'WWW-Authenticate': 'CFGMS-StepUp' },
+        }),
+      )
+      fireEvent.click(screen.getByTestId('rename-save-btn'))
+      fireEvent.click(await screen.findByTestId('step-up-cancel-btn'))
+      await screen.findByTestId('rename-error')
+      expect(screen.queryByTestId('rename-input')).toBeNull()
+      expect(screen.getByText('MacBook Touch ID')).toBeInTheDocument()
+      expect(screen.queryByText('Work laptop')).toBeNull()
+    })
+  })
+})

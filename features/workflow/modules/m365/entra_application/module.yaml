@@ -1,0 +1,68 @@
+name: m365-entra-application
+version: 0.1.0
+description: >
+  Desired-state management of Microsoft Entra ID Application Registrations
+  via the Microsoft Graph API. Manages application definitions, redirect
+  URIs, API permissions, secrets / certificate credentials, and
+  service-principal assignments as named resources.
+
+publisher: cfgms
+
+executors:
+  - controller
+
+author: CFGMS Team
+license: AGPL-3.0
+
+platforms:
+  - linux
+  - darwin
+  - windows
+
+interfaces:
+  - Get
+  - Set
+
+env:
+  - HTTP_PROXY
+  - HTTPS_PROXY
+  - NO_PROXY
+
+# Field support. Set either applies a declared field to Microsoft Graph or
+# rejects the step before any authentication or Graph call; it never drops a
+# declared field silently.
+applied_fields:
+  - display_name
+  - description
+  - sign_in_audience
+  - identifier_uris
+  - redirect_uris.web
+  - redirect_uris.spa
+  - logout_url
+  - tags
+  - create_service_principal   # created for the application's appId when none exists
+  - service_principal_settings # applied when the service principal is created
+  - password_credentials  # client secrets, matched by display_name; Graph generates the secret value
+  - key_credentials       # certificates, matched by key_id or display_name; Graph requires a proof of possession
+  - managed_fields   # selects which of the above an update touches
+
+rejected_fields:     # declaring any of these (or listing them in managed_fields) fails Set
+  - redirect_uris.mobile
+  - redirect_uris.desktop
+  - required_resource_access
+  - oauth2_permissions
+  - app_roles
+  - optional_claims
+  - accept_mapped_claims
+  - known_client_applications
+  - pre_authorized_applications
+  - requested_access_token_version
+  - publisher_domain
+# secret_text inside password_credentials is also rejected (see below).
+# A managed identifier_uris, tags or logout_url whose declared value is empty is
+# also rejected: Graph clears are omitted from the request, so it cannot be applied.
+# Credentials: a declared credential with no current match is added, one whose
+# end_date_time differs is replaced, and a current credential that is not declared
+# is removed. Graph generates every client secret; a declared secret_text is
+# rejected, and the generated value is never logged, returned or exposed. Graph's
+# refusal of a key operation (addKey needs a proof of possession) is returned as an error.

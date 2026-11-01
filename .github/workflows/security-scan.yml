@@ -1,0 +1,594 @@
+name: Security Scanning Workflow
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    # CONSERVATIVE: Only skip for pure documentation changes
+    # Security scans still run if ANY code changes are present
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '.claude/**/*.md'   # .claude markdown only — executable pipeline code under .claude/ (scripts, workflows) gets real CI (Issue #2586)
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
+  merge_group:
+  push:
+    branches:
+      - main  # Run on main for release security validation
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        description: 'Type of security scan to run'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+        - quick
+        - full
+        - remediation-report
+
+# Never cancel an in-flight merge_group run — only PR pushes cancel their own
+# workflow's prior run (#2595).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GO_VERSION: '1.27.3'
+
+permissions: {}
+
+jobs:
+  source-security-contract:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    # PR-REAL (Issue #4220): the PR already runs this against the same source,
+    # and it is not a required context, so the merge queue does not repeat it.
+    # It still runs on main, release tags and workflow_dispatch.
+    if: github.event_name != 'merge_group'
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Reject committed compiled artifacts
+      run: bash scripts/check-binary-artifacts.sh
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        # This job runs one short route-classification test; a shared module
+        # cache buys little and is a supply-chain input this gate should not
+        # depend on.
+        cache: false
+
+    - name: Enforce HTTP route security classifications
+      run: go test ./features/controller/api -run '^TestEveryHTTPRouteHasSecurityClassification$'
+
+  # PR-time stub for the `trivy-scan` required context (#2595).
+  # QUEUE-REAL: the real Trivy scan runs in the merge queue (merge_group) and on
+  # push to main — see the trivy-scan job below. This posts the required check
+  # green on code PRs; docs-only PRs are covered by documentation.yml's stub.
+  # Same check-name as the real job; mutually exclusive by event.
+  trivy-scan-pr-stub:
+    name: trivy-scan
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: PR-time stub (real scan runs in the merge queue)
+        run: |
+          echo "trivy-scan: real image/dependency scan runs in the merge queue (merge_group) per #2595."
+          echo "The authoritative scan runs against the merge commit, not this PR head."
+
+  # QUEUE-REAL (#2595): the authoritative Trivy scan runs against the merge
+  # commit, not the PR head — a zero-trust posture the PR-time stub above cannot
+  # provide. security-validation requires this to pass on the events where it
+  # runs, and tolerates its deliberate absence on pull_request.
+  trivy-scan:
+    permissions:
+      contents: read
+      security-events: write
+    runs-on: ubuntu-latest
+    if: github.event_name == 'merge_group' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 10
+    outputs:
+      status: ${{ steps.scan.outputs.status }}
+      issues-found: ${{ steps.scan.outputs.issues-found }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Install Trivy
+      env:
+        # Trivy v0.69.4-v0.69.6 are compromised (CVE-2026-33634); v0.76.1 is
+        # the post-incident clean release. The install helper verifies the
+        # archive SHA-256 against this pinned value before extraction. See
+        # docs/runbooks/trivy-rollback.md for rollback procedure.
+        TRIVY_VERSION: 'v0.76.1'
+        TRIVY_SHA256: 'c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0'
+      run: sudo .github/scripts/install-trivy.sh "$TRIVY_VERSION" "$TRIVY_SHA256"
+
+    - name: Run Trivy Scan
+      id: scan
+      run: |
+        echo "🔍 Running Trivy Filesystem Scan with SARIF"
+        mkdir -p sarif-results
+        
+        # Run with SARIF output for GitHub Security tab
+        trivy fs . --format sarif --output sarif-results/trivy.sarif --scanners vuln,secret,misconfig
+        trivy_exit_code=$?
+        
+        # Also run regular scan for status checking.
+        # UNKNOWN is included deliberately (Issue #2885): advisories sourced from
+        # the Go vulnerability database (vuln.go.dev) carry no CVSS score, so Trivy
+        # assigns them severity UNKNOWN. Filtering on CRITICAL,HIGH alone silently
+        # dropped CVE-2026-46600 (golang.org/x/net) and CVE-2026-56852
+        # (golang.org/x/text) from this gate for four days while the non-blocking
+        # container scans reported them. Public-beta policy also blocks MEDIUM.
+        if trivy fs . --scanners vuln,secret,misconfig --severity UNKNOWN,CRITICAL,HIGH,MEDIUM --exit-code 1; then
+          echo "status=passed" >> $GITHUB_OUTPUT
+          echo "issues-found=false" >> $GITHUB_OUTPUT
+        else
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "issues-found=true" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Upload Trivy SARIF
+      uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+      if: always() && hashFiles('sarif-results/trivy.sarif') != ''
+      with:
+        sarif_file: sarif-results/trivy.sarif
+        category: trivy-vulnerabilities
+      continue-on-error: true
+    
+    - name: Upload Trivy Results
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      if: always()
+      with:
+        name: trivy-results
+        path: sarif-results/
+        retention-days: 30
+
+    - name: Fail on security findings
+      if: steps.scan.outputs.issues-found == 'true'
+      run: |
+        echo "❌ Trivy scan found UNKNOWN/MEDIUM/HIGH/CRITICAL findings — see scan output above"
+        exit 1
+
+  # PR-REAL (#2595): advisory static analysis — fast, cheap, and deterministic on
+  # the diff. Developer and agent feedback matters more here than re-validating an
+  # unchanged dependency graph against the merge commit, so this deliberately does
+  # not run in the merge queue.
+  nancy-scan:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 5
+    outputs:
+      status: ${{ steps.scan.outputs.status }}
+      issues-found: ${{ steps.scan.outputs.issues-found }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        # This workflow also runs on pushes to `main` and on `v*` tags, so its
+        # module cache is writable from a release context. zizmor flags that as
+        # cache poisoning: a cache entry populated by one run is restored by a
+        # later publishing run. The scan jobs re-resolve modules in well under a
+        # minute, and the Actions cache is already at its 10 GB ceiling.
+        cache: false
+
+    - name: Install Nancy
+      run: make install-nancy
+    
+    # Nancy v2 authenticates to Sonatype Guide with GUIDE_TOKEN; it cannot scan
+    # anonymously. GitHub withholds secrets from pull_request runs originating in
+    # a fork, so the token is unavailable there through no fault of the
+    # contributor. Skipping on fork PRs is not a bypass: merge_group runs have
+    # the secret, so nothing reaches develop without a real dependency scan.
+    # A missing token on a same-repo run is a misconfiguration and fails closed.
+    - name: Run Nancy Scan
+      id: scan
+      env:
+        GUIDE_TOKEN: ${{ secrets.GUIDE_TOKEN }}
+        IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+      run: |
+        echo "📦 Running Nancy Go Dependency Scan"
+        if [ -z "${GUIDE_TOKEN:-}" ] && [ "$IS_FORK_PR" = "true" ]; then
+          echo "⏭️  Fork pull request: GUIDE_TOKEN is unavailable to fork runs."
+          echo "   Dependency scanning runs against this change in the merge queue."
+          echo "status=skipped-fork" >> "$GITHUB_OUTPUT"
+          echo "issues-found=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        make security-deps
+        echo "status=passed" >> "$GITHUB_OUTPUT"
+        echo "issues-found=false" >> "$GITHUB_OUTPUT"
+
+  # PR-REAL (#2595): advisory — see nancy-scan comment above.
+  gosec-scan:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 10
+    outputs:
+      status: ${{ steps.scan.outputs.status }}
+      issues-found: ${{ steps.scan.outputs.issues-found }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        # See the cache-poisoning note on the nancy-scan job above.
+        cache: false
+
+    - name: Install gosec
+      run: scripts/install-go-analyzers.sh
+    
+    - name: Run gosec Scan
+      id: scan
+      run: |
+        echo "🛡️  Running gosec Go Security Analysis"
+        mkdir -p sarif-results
+
+        # Run with SARIF output for local artifact storage using our configuration
+        # Use -no-fail to prevent SARIF generation from failing the workflow
+        if [ -f .gosec.json ]; then
+          gosec -conf .gosec.json -fmt sarif -out sarif-results/gosec.sarif -no-fail ./...
+        else
+          gosec -fmt sarif -out sarif-results/gosec.sarif -no-fail ./...
+        fi
+        # Public-beta gate: any medium-or-higher finding fails the job.
+        gosec -conf .gosec.json -severity medium -confidence medium ./...
+        echo "status=passed" >> "$GITHUB_OUTPUT"
+        echo "issues-found=false" >> "$GITHUB_OUTPUT"
+
+    # DISABLED: Upload gosec SARIF to GitHub Security tab
+    # This was triggering duplicate GitHub Advanced Security gosec checks
+    # with default configuration that conflicts with our custom .gosec.json
+    # Our gosec-scan workflow provides comprehensive validation with proper
+    # configuration, and results are still available via workflow artifacts.
+    #
+    # - name: Upload gosec SARIF
+    #   uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+    #   if: always() && hashFiles('sarif-results/gosec.sarif') != ''
+    #   with:
+    #     sarif_file: sarif-results/gosec.sarif
+    #     category: gosec-security-patterns
+    #   continue-on-error: true
+
+    - name: Upload gosec Results
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      if: always()
+      with:
+        name: gosec-results
+        path: sarif-results/
+        retention-days: 30
+
+  # PR-REAL (#2595): advisory — see nancy-scan comment above.
+  staticcheck-scan:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 10
+    outputs:
+      status: ${{ steps.scan.outputs.status }}
+      issues-found: ${{ steps.scan.outputs.issues-found }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        # See the cache-poisoning note on the nancy-scan job above.
+        cache: false
+
+    - name: Install staticcheck
+      run: GOTOOLCHAIN="go${GO_VERSION}" scripts/install-go-analyzers.sh
+    
+    - name: Run staticcheck Scan
+      id: scan
+      run: |
+        echo "🔍 Running Staticcheck Advanced Analysis"
+        # Staticcheck discovers staticcheck.conf by walking up from each package.
+        # Current releases no longer accept the removed -config flag.
+        staticcheck ./...
+        echo "status=passed" >> "$GITHUB_OUTPUT"
+        echo "issues-found=false" >> "$GITHUB_OUTPUT"
+
+  # Consolidated security validation job
+  security-validation:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    needs: [source-security-contract, trivy-scan, nancy-scan, gosec-scan, staticcheck-scan]
+    if: always()
+    timeout-minutes: 5
+    outputs:
+      trivy-status: ${{ needs.trivy-scan.outputs.status }}
+      nancy-status: ${{ needs.nancy-scan.outputs.status }}
+      gosec-status: ${{ needs.gosec-scan.outputs.status }}
+      staticcheck-status: ${{ needs.staticcheck-scan.outputs.status }}
+      issues-found: ${{ steps.summary.outputs.issues-found }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        # See the cache-poisoning note on the nancy-scan job above. This job
+        # only aggregates the other jobs' outputs in shell — it never builds.
+        cache: false
+
+    - name: Security Summary
+      id: summary
+      env:
+        TRIVY_STATUS: ${{ needs.trivy-scan.outputs.status }}
+        NANCY_STATUS: ${{ needs.nancy-scan.outputs.status }}
+        GOSEC_STATUS: ${{ needs.gosec-scan.outputs.status }}
+        STATICCHECK_STATUS: ${{ needs.staticcheck-scan.outputs.status }}
+        TRIVY_ISSUES: ${{ needs.trivy-scan.outputs.issues-found }}
+        NANCY_ISSUES: ${{ needs.nancy-scan.outputs.issues-found }}
+        GOSEC_ISSUES: ${{ needs.gosec-scan.outputs.issues-found }}
+        STATICCHECK_ISSUES: ${{ needs.staticcheck-scan.outputs.issues-found }}
+        SOURCE_RESULT: ${{ needs.source-security-contract.result }}
+        TRIVY_RESULT: ${{ needs.trivy-scan.result }}
+        NANCY_RESULT: ${{ needs.nancy-scan.result }}
+        GOSEC_RESULT: ${{ needs.gosec-scan.result }}
+        STATICCHECK_RESULT: ${{ needs.staticcheck-scan.result }}
+        EVENT_NAME: ${{ github.event_name }}
+        IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+      run: |
+        echo "📊 Parallel Security Scan Summary"
+        echo "================================="
+        echo ""
+        echo "Individual Tool Results:"
+        echo "  • Trivy: $TRIVY_STATUS"
+        echo "  • Nancy: $NANCY_STATUS"
+        echo "  • gosec: $GOSEC_STATUS"
+        echo "  • staticcheck: $STATICCHECK_STATUS"
+        echo ""
+
+        # A fork PR cannot reach the Sonatype Guide token. That skip is only
+        # acceptable on a fork PR, and only because the merge queue re-scans
+        # with the secret before anything merges. Anywhere else it is a failure.
+        if [ "$NANCY_STATUS" = "skipped-fork" ]; then
+          if [ "$IS_FORK_PR" != "true" ]; then
+            echo "❌ Nancy reported a fork skip outside a fork pull request"
+            echo "issues-found=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "ℹ️  Nancy skipped: fork PRs have no GUIDE_TOKEN; the merge queue scans this change."
+        fi
+
+        # The #2595 split means a job's absence is only acceptable on the side of
+        # the split it does not run on. Cancellation, initialization failure, and
+        # an unexpected skip are failures, never implicit approvals.
+        #
+        #   NOT-QUEUE source-security-contract — required everywhere but merge_group
+        #   PR-REAL   nancy / gosec / staticcheck — required on pull_request
+        #   QUEUE-REAL trivy — required on merge_group, main, and release tags
+        #
+        # workflow_dispatch runs both sides, so every job is required there.
+        gate_failed=0
+
+        # required: the job runs on this event and must have passed.
+        required() {
+          if [ "$2" != "success" ]; then
+            echo "❌ $1 must pass on this event but reported: $2"
+            gate_failed=1
+          fi
+        }
+
+        # off_split: the job deliberately does not run on this event. A skip is
+        # expected; success is fine too (workflow_dispatch). Anything else — a
+        # failure or a cancellation — still fails the gate.
+        off_split() {
+          case "$2" in
+            skipped|success) : ;;
+            *)
+              echo "❌ $1 is not expected to run on this event but reported: $2"
+              gate_failed=1
+              ;;
+          esac
+        }
+
+        # source-security-contract runs everywhere except the merge queue (#4220).
+        if [ "$EVENT_NAME" = "merge_group" ]; then
+          off_split "source-security-contract" "$SOURCE_RESULT"
+        else
+          required "source-security-contract" "$SOURCE_RESULT"
+        fi
+
+        if [ "$EVENT_NAME" = "pull_request" ]; then
+          required "nancy-scan" "$NANCY_RESULT"
+          required "gosec-scan" "$GOSEC_RESULT"
+          required "staticcheck-scan" "$STATICCHECK_RESULT"
+          off_split "trivy-scan" "$TRIVY_RESULT"
+        else
+          required "trivy-scan" "$TRIVY_RESULT"
+          off_split "nancy-scan" "$NANCY_RESULT"
+          off_split "gosec-scan" "$GOSEC_RESULT"
+          off_split "staticcheck-scan" "$STATICCHECK_RESULT"
+        fi
+
+        if [ "$gate_failed" -ne 0 ]; then
+          echo "issues-found=true" >> "$GITHUB_OUTPUT"
+          echo "❌ One or more security scans failed, were cancelled, or were absent where required"
+          exit 1
+        fi
+
+        # Determine if any scanner explicitly reported findings.
+        if [ "$TRIVY_ISSUES" = "true" ] || \
+           [ "$NANCY_ISSUES" = "true" ] || \
+           [ "$GOSEC_ISSUES" = "true" ] || \
+           [ "$STATICCHECK_ISSUES" = "true" ]; then
+          echo "issues-found=true" >> "$GITHUB_OUTPUT"
+          echo "❌ Security issues detected across tools"
+          exit 1
+        else
+          echo "issues-found=false" >> "$GITHUB_OUTPUT"
+          echo "✅ All security scans passed"
+        fi
+    
+    - name: Install Security Tools for Remediation Report
+      if: steps.summary.outputs.issues-found == 'true'
+      run: |
+        # Only install tools if we need to generate remediation report
+        make install-nancy
+        
+        # Install Trivy — v0.69.4-v0.69.6 are compromised (CVE-2026-33634);
+        # v0.76.1 is the post-incident clean release. The install helper
+        # verifies the archive SHA-256 against the pinned value before
+        # extraction. See docs/runbooks/trivy-rollback.md for rollback.
+        sudo .github/scripts/install-trivy.sh 'v0.76.1' 'c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0'
+
+        # Install gosec and staticcheck
+        GOTOOLCHAIN="go${GO_VERSION}" scripts/install-go-analyzers.sh
+    
+    - name: Generate Remediation Report on Failure
+      if: steps.summary.outputs.issues-found == 'true'
+      run: |
+        echo "🤖 Generating Automated Remediation Report"
+        echo "========================================="
+        make security-remediation-report
+        
+        if [ -f "/tmp/cfgms-security-remediation.json" ]; then
+          echo ""
+          echo "📋 Remediation Report Available:"
+          echo "Copy the following JSON and ask Claude Code to fix the issues:"
+          echo ""
+          cat /tmp/cfgms-security-remediation.json
+        fi
+    
+    - name: Upload Consolidated Security Results
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      if: always()
+      with:
+        name: security-scan-consolidated
+        path: |
+          /tmp/cfgms-security-remediation.json
+          /tmp/*-results.json
+        retention-days: 30
+
+  # Production Deployment Gate
+  production-gate:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    needs: security-validation
+    if: always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    steps:
+    - name: Production Deployment Decision
+      env:
+        TRIVY_STATUS: ${{ needs.security-validation.outputs.trivy-status }}
+        NANCY_STATUS: ${{ needs.security-validation.outputs.nancy-status }}
+        GOSEC_STATUS: ${{ needs.security-validation.outputs.gosec-status }}
+        STATICCHECK_STATUS: ${{ needs.security-validation.outputs.staticcheck-status }}
+        ISSUES_FOUND: ${{ needs.security-validation.outputs.issues-found }}
+        VALIDATION_RESULT: ${{ needs.security-validation.result }}
+      run: |
+        echo "🚪 PRODUCTION DEPLOYMENT GATE"
+        echo "============================"
+        echo ""
+        echo "Security Scan Results:"
+        echo "  • Trivy: $TRIVY_STATUS"
+        echo "  • Nancy: $NANCY_STATUS"
+        echo "  • gosec: $GOSEC_STATUS"
+        echo "  • staticcheck: $STATICCHECK_STATUS"
+        echo ""
+
+        if [ "$VALIDATION_RESULT" != "success" ] || [ "$ISSUES_FOUND" != "false" ]; then
+          echo "❌ PRODUCTION DEPLOYMENT BLOCKED"
+          echo "   Critical security issues must be resolved before deployment"
+          echo ""
+          echo "🤖 Automated Remediation Available:"
+          echo "   1. Download the security-scan-results artifact"
+          echo "   2. Copy the remediation JSON to Claude Code"
+          echo "   3. Ask Claude to automatically fix the issues"
+          echo ""
+          exit 1
+        else
+          echo "✅ PRODUCTION DEPLOYMENT APPROVED"
+          echo "   All security scans passed - deployment can proceed"
+        fi
+
+  # Summary Report
+  security-summary:
+    permissions: {}
+    runs-on: ubuntu-latest
+    needs: security-validation
+    if: always()
+    steps:
+    - name: Security Scan Summary
+      env:
+        TRIVY_DISPLAY: ${{ needs.security-validation.outputs.trivy-status == 'passed' && '✅ Passed' || '❌ Failed' }}
+        NANCY_DISPLAY: ${{ needs.security-validation.outputs.nancy-status == 'passed' && '✅ Passed' || '❌ Failed' }}
+        GOSEC_DISPLAY: ${{ needs.security-validation.outputs.gosec-status == 'passed' && '✅ Passed' || '❌ Failed' }}
+        STATICCHECK_DISPLAY: ${{ needs.security-validation.outputs.staticcheck-status == 'passed' && '✅ Passed' || '❌ Failed' }}
+        ISSUES_FOUND: ${{ needs.security-validation.outputs.issues-found }}
+        VALIDATION_RESULT: ${{ needs.security-validation.result }}
+      run: |
+        echo "## Security Scan Summary 🛡️" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Scan Results" >> $GITHUB_STEP_SUMMARY
+        echo "| Tool | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Trivy | $TRIVY_DISPLAY |" >> $GITHUB_STEP_SUMMARY
+        echo "| Nancy | $NANCY_DISPLAY |" >> $GITHUB_STEP_SUMMARY
+        echo "| gosec | $GOSEC_DISPLAY |" >> $GITHUB_STEP_SUMMARY
+        echo "| staticcheck | $STATICCHECK_DISPLAY |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        if [ "$VALIDATION_RESULT" != "success" ] || [ "$ISSUES_FOUND" != "false" ]; then
+          echo "### 🤖 Automated Remediation" >> $GITHUB_STEP_SUMMARY
+          echo "Security issues detected! Use Claude Code for automated fixes:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download the \`security-scan-results\` artifact" >> $GITHUB_STEP_SUMMARY
+          echo "2. Copy the JSON remediation report" >> $GITHUB_STEP_SUMMARY
+          echo "3. Ask Claude Code to automatically fix the issues" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### ✅ All Security Checks Passed" >> $GITHUB_STEP_SUMMARY
+          echo "No security issues found - deployment ready!" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Manual Commands" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "# Run full security scan locally" >> $GITHUB_STEP_SUMMARY
+        echo "make security-scan" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# Generate remediation report" >> $GITHUB_STEP_SUMMARY
+        echo "make security-remediation-report" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

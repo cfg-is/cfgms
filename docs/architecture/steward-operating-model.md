@@ -1,0 +1,1256 @@
+# Steward Operating Model
+
+How the steward behaves at runtime. This document governs steward implementation decisions — every steward feature and issue should be consistent with the model described here.
+
+For the system-level operating model, see [operating-model.md](operating-model.md).
+For cfg format details, see [steward-configuration.md](steward-configuration.md).
+
+## One Sentence
+
+The steward is a daemon that maintains a device in the state described by its cfg, reports on compliance, and optionally connects to a controller for cfg delivery, reporting, and remote operations.
+
+## Lifecycle
+
+### Startup
+
+The steward starts immediately when the OS service manager launches it and runs
+regardless of what else on the host is ready. Subsystems attach as they become
+available — the process never exits because a dependency is not yet up. (Issue #2034)
+
+1. **Early logger** — A stderr logger is active from the first instruction, before any disk or network call. A file-based logger is initialised next; if that fails (e.g. log dir not yet writable at early boot) the process continues with the stderr fallback.
+2. **Load cfg** — Find and parse the `hostname.cfg` file (local file, or last-known cfg from controller)
+3. **Discover modules** — Scan module paths and register available modules. Modules referenced in the cfg are loaded on-demand during convergence (not validated at startup)
+4. **Initial convergence** — Evaluate every resource in the cfg immediately (apply or monitor, depending on `drift_mode` received from the controller)
+5. **Start convergence schedule** — Begin the compliance re-check loop at the interval defined by `converge_interval` in the cfg (default: 30 minutes). DNA is collected as part of each convergence run (not a separate startup step)
+6. **Connect to controller** (if configured) — Attempt a gRPC-over-QUIC transport connection. If the network or controller is not yet reachable, the steward marks itself `degraded` and retries in the background with exponential backoff (5 s → 5 min). The process continues running during the retry period. No `depend=` / delayed-start service ordering is required or relied upon.
+
+#### Health states during startup
+
+| State | Meaning |
+|-------|---------|
+| `degraded` | Process is alive but one or more subsystems (controller, DNA/WMI) are not yet attached |
+| `healthy` | All subsystems have attached and the convergence loop is running normally |
+
+The `degraded` state is reported in the controller-facing heartbeat so operators
+and the launcher's known-good gating can distinguish "started but waiting on
+WMI/network" from "broken". A registered steward that sends no heartbeat for
+≥ 90 s (≈ 3× the 20 s base heartbeat interval + jitter per epic #1664) is
+treated as alertable by the controller.
+
+**Fail-closed during degraded mode:** integrity checks are never relaxed while
+degraded. Config-signature failures remain hard rejections (codes.DataLoss).
+Module trust verification with `module_trust.mode: controller` refuses to load
+modules when the controller is unreachable — it never falls back to `bypass`.
+An unloadable or tampered cert store triggers re-registration or stop, not a
+degraded-but-trusted continue.
+
+#### Windows service-registration self-repair (#2465)
+
+On Windows the launcher supervises the steward as a Service Control Manager
+(SCM) service (`CFGMSSteward`). The SCM's install-time recovery actions restart
+a *crashed* service, but they cannot help if the service **registration itself**
+is deleted out from under the running launcher — the failure mode observed live
+when an anti-virus product quarantined the launcher binary and removed its SCM
+entry as "remediation", leaving the steward silently and permanently dead until
+a manual reinstall.
+
+To close that gap the launcher runs a dedicated self-repair ticker inside its
+supervise loop, on its own cadence (≤ the fastest SCM recovery delay, 10 s) and
+**independent of the supervised child's lifecycle** — a stable steward may run
+for weeks between child restarts, so the check must not be gated on that. Each
+tick verifies the `CFGMSSteward` registration still exists and, if it has been
+deleted, re-creates it with the same binary path, automatic start type, and
+recovery actions as the original install, reusing the currently-running
+process's own arguments. The repair is logged loudly at warning level with a
+greppable `event=service_registration_repaired` field (visible in
+`C:\ProgramData\cfgms\logs`); a repair that itself fails is logged and the
+supervise loop continues rather than crashing (the steward child is unaffected
+by a missing SCM entry until the next reboot). This behavior is Windows-only —
+the launcher's supervise loop no-ops the check on Linux/macOS.
+
+#### Windows data directory ACL (#5119)
+
+On Windows the steward keeps its pinned controller CA, client certificate, device identity key, secret store and provision state under `%ProgramData%\cfgms`. The default `%ProgramData%` ACL lets standard users read the tree and create directories directly under `%ProgramData%`, and machine-scope DPAPI blobs can be decrypted by any local user who can read them, so the tree must be admin-only:
+
+- **Owner:** SYSTEM or BUILTIN\Administrators (a directory owned by the elevated administrator account running the process is also accepted).
+- **DACL:** protected (no inherited ACEs), full control for SYSTEM and BUILTIN\Administrators only, inheritable to all child files and directories. The ACL is propagated to existing children.
+
+`pkg/security.EnsureAdminOnlyDir` applies this with in-process Win32 security APIs (no `icacls`/`takeown`). The installer applies it before writing the CA cert; the steward applies it at start-up before reading the pinned CA, cert store or device key; `StewardProvider.CreateSecretStore` applies it to the secrets directory (default or configured `secrets_dir`) and its `blobs` subdirectory. A missing directory is created atomically with this owner and DACL, so it never exists with the inherited `%ProgramData%` ACL. For an existing directory every check and the DACL write happen on one handle opened without following reparse points; a link, junction or other reparse point is refused. Every existing entry below it (including the cert store under `steward\certs`) is walked without following reparse points: an entry that is a reparse point, or that is owned by a principal other than SYSTEM or BUILTIN\Administrators, is refused before anything is changed. After the DACL is applied the tree is walked again and any entry that still grants access to another principal (for example an explicit ACE a standard user added before the upgrade) is refused. An existing install whose tree is admin-owned with inherited DACLs is corrected in place; one containing a user-owned or user-accessible entry is refused, and the steward does not start until an administrator removes that entry.
+
+**The steward refuses a tree owned by a non-admin principal.** If the directory already exists and its owner is neither SYSTEM nor BUILTIN\Administrators, the helper changes nothing and returns an error: the installer fails naming the directory and writes no CA cert, and the steward logs the reason and loads no trust or identity material from it. It never takes ownership of a directory a non-admin created; an administrator must inspect and remove it. On other platforms the helper is a no-op.
+
+**SCM delete-pending window:** `DeleteService` only *marks* a registration
+for deletion; the SCM does not purge it until every reference to it — including
+the running service instance itself — is gone. Confirmed live: a registration
+deleted while its service is still running keeps answering as present (both
+`OpenService` and the `EnumServicesStatusEx` enumeration report it unchanged)
+for as long as the service keeps running, only clearing once it stops. Since no
+read-only Win32 API distinguishes "marked for deletion, still open" from
+"healthy," the repair ticker cannot detect or react to this window while the
+compromised-but-still-running launcher instance is alive — repair only becomes
+possible once that instance stops, whatever the trigger. This mirrors the
+original incident's own boundary (the gap this ticker closes is what happens
+*after* the process eventually stops, not proactive detection while it is
+still up) rather than a defect in the per-tick check: reacting to the missing
+state as soon as it is observable is the only sound behavior available at the
+Win32 API level.
+
+### Normal Operation
+
+The steward runs three concurrent activities:
+
+```
+┌─────────────────────────────────────────────┐
+│              Steward Daemon                  │
+│                                              │
+│  ┌──────────────────────┐                   │
+│  │ Convergence Loop     │  cfg-driven       │
+│  │ (scheduled + events) │  core activity    │
+│  └──────────────────────┘                   │
+│                                              │
+│  ┌──────────────────────┐                   │
+│  │ Self-Awareness       │  DNA, health,     │
+│  │ (periodic collection)│  performance      │
+│  └──────────────────────┘                   │
+│                                              │
+│  ┌──────────────────────┐                   │
+│  │ Controller Channel   │  optional         │
+│  │ (if connected)       │  overlay          │
+│  └──────────────────────┘                   │
+│                                              │
+└─────────────────────────────────────────────┘
+```
+
+### Shutdown
+
+1. Complete any in-progress resource operations
+2. Flush queued reports (to controller if connected, otherwise ensure local logs are written)
+3. Disconnect from controller cleanly (gRPC-over-QUIC transport close)
+4. Exit
+
+### Operator Actions on a Detected Clone (Issue #4951, ADR-034 §5)
+
+The operator decides which machine is the original; each action leaves the steward record in a defined state. See the [identity clone runbook](../runbooks/steward-identity-clone.md).
+
+| Action | Command | Record afterwards |
+|--------|---------|-------------------|
+| Split | `cfg registration approve <pending-id>` | Original unchanged; the copy is a new steward with its own ID. |
+| Removal | `cfg registration deny <pending-id>` (plus `cfg steward rotate-credentials` if the original's credentials may be stolen) | Original unchanged; after rotate it is `archived` and every certificate for the ID is revoked. |
+| Move | `cfg steward move-identity <steward-id> --to <pending-id>` | Same ID, `DeviceID`/`IdentityKeyPub`/`KeyProtectionLevel` of the queued machine, provenance baseline cleared; old certificates revoked. |
+
+After a rotate the approved machine finds its stored certificate refused, runs the re-admission handshake with its device key (ADR-011 Amendment 1) and waits for `cfg refresh approve`. With a file-backed device key a copy holding the key can also file a request, so approve only after checking the machine; hardware-backed keys remove that case.
+
+### Planned Clones (ADR-034 §6)
+
+A base image captured from an enrolled machine would copy the device key, client
+certificate and steward ID into every clone. For planned cloning, run
+`cfgms-steward prepare-image` on the source machine before capture: it stops the
+service and removes the enrolled identity (device key, identity file,
+pending/re-admission state and issued credential), keeping the binary, the service
+definition with its registration token, and the install-pinned trust anchor. The
+first start of each clone finds no stored identity, generates a new device key and
+enrolls through the normal registration and approval flow as a distinct device. See
+[Preparing a Steward Image for Cloning](../deployment/steward-image-preparation.md).
+
+## Convergence Loop
+
+This is the steward's core activity. It runs on startup, on schedule, and in response to events.
+
+### Trigger Sources
+
+| Trigger | Description |
+|---------|-------------|
+| **Startup** | Full convergence immediately on start (both standalone and controller-connected) |
+| **Schedule** | Periodic re-check at the `converge_interval` defined in the cfg (default: 30 minutes) |
+| **Cfg change** | New cfg received from controller, or local cfg file modified |
+| **Event hook** | Module-defined monitor detects a relevant change (e.g., file modified, service stopped) |
+| **Controller command** | Controller sends `sync_config` — immediate convergence trigger, an optimization not a dependency |
+
+### Tiered Convergence (ADR-024 Amendment 1)
+
+Each convergence tick is classified as **Tier-1** or **Tier-2**. Both tiers enforce identical drift-detection and resource-enforcement semantics; they differ only in what happens after declared-resource work completes.
+
+**Tier-1 (every cycle):** Declared-resource enforcement — `Get → Compare → Set → Verify` for every resource in the active cfg. Fast and lightweight; runs every convergence tick.
+
+**Tier-2 (every Nth cycle):** All of Tier-1, plus a whole-domain observe sweep. `N` is the `steward.observe_sweep_n` knob in the steward config file. When the key is absent — including when the steward has no local config file at all — `N` defaults to 10, so the sweep runs on every 10th tick. Setting `N = 0` disables the sweep entirely. Setting `N = 1` runs the sweep on every tick. Negative values are rejected at config validation.
+
+**Tier-2 observe sweep sequence:**
+
+1. The steward reports its current baseline DNA to the controller as an `EventObserveSweepRequest`.
+2. The controller resolves which observe modules apply to this device (matching `observe_when` predicates against the reported DNA) and responds with `CommandObserveModules` carrying the resolved `{name, kind}` specs.
+3. For each spec, the steward loads the module via the existing signed/trust-verified pull path, invokes its `Get()` read-only, and collects the resulting fragments.
+4. Observe-module fragments are merged into the existing DNA fragment set via `Assembler.Assemble`, then committed through `setCurrentDNAFragments` — **the same emission path used by declared-resource convergence** (ADR-024 Amendment 1 §2; no new channel). Module authority always preempts observe-only host-fact fragments for the same kind (ADR-016).
+
+The observe sweep adds endpoint-side CPU proportional to the number and cost of matched observe modules, controllable by tuning `N`.
+
+### Per-Resource Cycle
+
+For each resource in the cfg, the execution engine runs:
+
+```
+Get → Compare → Set → Verify
+```
+
+1. **Get**: Call `module.Get()` to read current state from the system
+2. **Compare**: Engine compares current state against desired state from the cfg (using `StateComparator`)
+3. **Set**: If drifted and in `apply` mode, call `module.Set()` to converge. In `monitor` mode, emit `drift.detected.monitor` event upstream and skip Set/Verify.
+4. **Verify**: Call `module.Get()` again to confirm the change took effect
+
+**In `apply` mode:**
+- If current matches desired: no action, report compliant
+- If drifted: Set → Verify → report remediated
+
+**In `monitor` mode:**
+- If current matches desired: report compliant
+- If drifted: emit `drift.detected.monitor` upstream event; skip Set and Verify; report `StatusNonCompliant`
+
+### Required-Module Pull (Issue #4987)
+
+Before any resource runs, `ApplyConfiguration` checks the applied configuration's `required_modules` (`publisher/name`, exact version) against the installed bundles. A module that is not installed at that exact publisher, name and version is fetched, verified under the configured `module_trust.mode` and installed by the module installer; the resources that use it then load through the normal installed-bundle path in the same apply. A module that is already installed at that version is not fetched. A failed pull fails only the resources whose `module` names that module, with a sanitized error in the `ConfigStatusReport`; sibling resources converge. A strict-mode verification refusal is reported as a security failure and is not retried until the next config sync delivers a new configuration. A required module already installed under a different publisher is that module's failure, and a name in the stdlib set is never fetched: its resources fail with "provided by the installer, not by required_modules". A steward with no installer (standalone) or no `required_modules` behaves as before.
+
+### Convergence Event Emitter (ADR-012)
+
+For every resource check that reaches the drift-comparison step, the execution engine emits a correlated detection+outcome event pair over an out-of-band `LogStream` channel to the controller. The emitter runs on its own goroutine, independent of the module-execution goroutine; the convergence loop enqueues events via a non-blocking call and never waits for the send to complete. When the buffer is full, entries are dropped and counted. The emitter reconnects automatically with exponential back-off if the `LogStream` RPC fails.
+
+**Detection event** — enqueued immediately before `module.Get()`, carrying a newly generated `correlation_id`, the `resource_id`, and the active `drift_mode`. A detection event with no matching outcome event signals that convergence hung inside a module (ADR-012 §2 crash-isolation).
+
+**Outcome event** — enqueued after convergence completes, with the same `correlation_id` and an `action` field: `applied` (convergence succeeded), `drift_reported` (monitor mode), `error` (Set or Verify failed), or `did-not-finish(timeout)` (per-call deadline exceeded — see below).
+
+**Per-call module timeout (ADR-012 §7)** — each individual `module.Get`, `module.Set`, and `verifyChanges` call runs under its own `context.WithTimeout` (default 120 s, configurable via `ExecutorConfig.ModuleCallTimeoutSec`; there is no "infinite" option). If a module call exceeds its deadline, the executor emits a `did-not-finish(timeout)` outcome event carrying `timeout_ms` (the configured ceiling) and `duration_ms` (actual elapsed), then returns `StatusTimeout` immediately — converting the former silent wedge into two queryable, correlated events. Errors that return before the deadline continue through the existing `handleResourceError` → `ConfigStatusReport` → `StatusError` path unchanged.
+
+### Error Handling
+
+Controlled by the cfg's `error_handling` settings (three independent fields: `module_load_failure`, `resource_failure`, `configuration_error`):
+
+- **continue**: Log the error, skip the failed resource, process remaining resources
+- **warn** (default for `resource_failure`): Log a warning, skip the failed resource, continue with remaining resources
+- **fail** (default for `configuration_error`): Stop execution on the first error
+
+The default for `resource_failure` is `warn` (not `continue`). `module_load_failure` defaults to `continue`; `configuration_error` defaults to `fail`.
+
+Failed resources are reported individually — a failure on one resource does not mask the status of others.
+
+### Idempotency
+
+Every convergence run must be safe to repeat. Modules implement Get/Set such that applying a cfg that is already converged results in zero changes. This is fundamental — the scheduled re-check depends on it.
+
+### Drift Modes
+
+The `drift_mode` field in the controller-delivered cfg selects how the steward responds to drift detected during convergence or scheduled re-checks:
+
+- **`apply` mode** (default — matches current behavior when `drift_mode` is absent): the steward attempts local convergence and reports the outcome. The controller sees the drift and its resolution together.
+- **`monitor` mode**: the steward detects drift but does not act. Emits a `drift.detected.monitor` event upstream with `ResourceResult.Status = StatusNonCompliant`; operator action (or a separate `apply` workflow) decides whether to correct.
+
+**Wire path.** `drift_mode` and `module_drift_modes` are fields of `StewardSettings` in `api/proto/controller/config.proto`. Both converters (`features/config/stewardtypes/proto_converter.go` and `features/steward/config/proto_converter.go`) map them in `ToProto` and `FromProto`, so a cfg built on the controller reaches the steward's executor intact. Inheritance merges `drift_mode` like any scalar (child wins) and `module_drift_modes` per key (a child overrides only the modules it names).
+
+**Per-module override.** `module_drift_modes` maps a module bundle name (the part of a module reference before the first `.`, so `hyperv` for `hyperv.vm`) to a mode, e.g. `module_drift_modes: {activedirectory: monitor}`. The executor resolves the mode for each resource, so one steward can report on one module while enforcing the rest. There is no per-resource override.
+
+**Precedence and fail-safe.** `stewardtypes.EffectiveDriftMode(settings, moduleBundle)` is the single resolver (the executor and the controller-side M365 loop both call it): the module override if present, else the steward-wide `drift_mode`, else `apply`. A value that is not `apply` or `monitor` resolves to `monitor`, which reports and never corrects. Validation rejects an unknown mode and a malformed key with an error naming the field.
+
+**Who can change it.** Anyone who can write the cfg can flip a module from `monitor` to `apply`: a config push or a steward config write (both strongly authenticated). For git-synced tenants, git write access carries that power.
+
+**Security invariant**: `drift_mode` and `module_drift_modes` are sourced from the authenticated controller-delivered cfg only. `LoadConfiguration` in `features/steward/config/config.go` clears both after parsing, so a tampered `hostname.cfg` cannot flip a controller-connected steward into monitor mode.
+
+**Distinguishable event type**: for a resource whose effective mode is monitor the executor sets `StateDiff.EventType = "drift.detected.monitor"` before invoking the `DriftEventHandler`. This lets the controller distinguish monitor-mode stewards (which simply haven't drifted) from apply-mode stewards via fleet-wide telemetry. Handler ordering is preserved: `DriftEventHandler` always fires before any mode-specific branch.
+
+Controller-side logging captures both the drift event and convergence result regardless of mode, enabling flapping detection (a future enhancement) without wire-protocol changes.
+
+## Modules
+
+Modules are the code packages that manage resources. Each resource block in the cfg references a module by name and provides module-specific configuration.
+
+### Stdlib Modules
+
+The ten stdlib modules (`file`, `service`, `package`, `script`, `firewall`, `patch`, `user`, `cert_trust`, `time`, `hostname` — ADR-016's closed set) are compiled into the steward binary today and load through `ModuleFactory`'s built-in path (`features/steward/factory/factory.go`), not through the out-of-process module runtime described below. Stdlib's status is governance (installer payload, ADR-016), not implementation: nothing about the closed set requires the modules to be compiled in, and converting them to publisher-signed out-of-process bundles — so stdlib and third-party modules share one load path — is tracked separately (ADR-019; Issue #4410's Out of Scope) and has not happened yet.
+
+Because they are part of the installer payload, the stdlib modules load at steward startup without any network access to the controller — a steward can converge against locally-cached cfg using the stdlib set even when the controller is unreachable. The `directory` resource is no longer a separate module: it is the `file` module's `type: directory` variant.
+
+Installer bundling:
+- **Linux** (tar.gz): binaries at `usr/local/lib/cfgms/modules/cfgms-module-<name>`, copied by `install.sh`
+- **macOS** (.pkg): binaries at `/usr/local/lib/cfgms/modules/cfgms-module-<name>`, included in the pkg payload
+- **Windows** (MSI): binaries at `C:\Program Files\CFGMS\modules\cfgms-module-<name>.exe`, included via WiX components
+
+### Reboot-Window Gating (Issue #4411, ADR-026 §6)
+
+The `patch` module's auto-reboot path and `maintenance.window`/`maintenance.schedule` checks are gated by a steward-side reboot Gate (`pkg/maintenance/providers/steward`), built at startup from the synced `StewardConfig.Steward.RebootWindow` and installed into the module factory before any module loads. The Gate is built unconditionally, whether or not a window is configured:
+
+- **Reboot window configured**: the patch module's auto-reboot and maintenance-window checks are enforced against the declared schedule — a patch apply outside the window is denied (`ErrMaintenanceWindowNotActive`) rather than rebooting immediately.
+- **No reboot window configured**: the device is ungated — auto-reboot and maintenance-window checks always pass, matching the steward's behavior before reboot-window gating existed. A missing configuration is not the same as a denied one.
+
+### Module Trust Modes
+
+The steward verifies module bundle signatures according to the `module_trust.mode` field in `steward.cfg`:
+
+| Mode | Verification | When to use |
+|------|-------------|-------------|
+| **`controller`** (default) | None — the steward accepts any bundle the controller has approved | Normal deployment; trust is delegated to the controller |
+| **`strict`** | Steward independently verifies Ed25519 signatures against its local trust set: the CFGMS publisher identity baked in at build time, plus any publishers listed in `additional_publishers` | High-security environments where a compromised controller must not be able to push arbitrary code to stewards |
+| **`bypass`** | None — no verification | Development and testing only; unavailable in a release build (gated by the `cfgms_dev_bypass` build tag — `ValidateModuleTrustConfig` rejects it from pushed configuration otherwise, Issue #4324) |
+
+A local configuration (`hostname.cfg`) that fails parsing or validation stops the connected steward from starting, in every security profile — the decoded-but-rejected value is never used (for example, `module_trust.mode: bypass` in a release build). Only the absence of any configuration file falls back to defaults. The trust enforcement points (`StewardTrustEnforcer.VerifyForLoad` and `RevocationVerifier.VerifyManifest`) also refuse `bypass` in a build without `cfgms_dev_bypass`.
+
+A transition that weakens this setting (`strict` → `controller` or `strict` → `bypass`) is refused
+during config cascade resolution unless the level making the change also sets
+`module_trust.authorize_downgrade: true`, and the refusal (or the authorized downgrade) is recorded
+in the audit log. A descendant level that adds an `additional_publishers` entry its ancestors do not list is refused the same way unless it sets `authorize_downgrade` (an empty ancestor list exempts only the root level); a list that is a subset of the ancestors' list applies freely.
+
+In `strict` mode, the trusted publisher set is:
+1. The `cfgms` publisher identity — a 32-byte Ed25519 public key compiled into the steward binary at build time via `-ldflags`. This identity cannot be changed via cfg push, including by a same-named entry in `additional_publishers`.
+2. Additional publishers listed in `steward.cfg` under `module_trust.additional_publishers` (by name).
+
+**Threat model invariant**: a compromised controller cannot push arbitrary modules to stewards running in `strict` mode — the steward rejects any bundle whose publisher key is not in its local trust set, regardless of controller approval.
+
+### Module Resolution: Built-in vs. Installed Bundle (Issue #4410)
+
+`ModuleFactory.LoadModule` resolves a module name in two steps, in order:
+
+1. **Built-in.** The compiled-in stdlib and extended modules (`loadBuiltinModule`). A built-in always wins on a name collision with an installed bundle.
+2. **Installed bundle.** When no built-in matches, the factory looks for an installed bundle on disk and, if found, starts it through the out-of-process module runtime described below and wraps the resulting gRPC session as an ordinary `modules.Module` (`features/modules/adapter.Client`). The convergence loop cannot tell a bundle module apart from a built-in.
+
+A `ModuleFactory` only attempts the second step once a `ModuleRuntime` has been wired in via `SetModuleRuntime` — every production construction site (standalone startup, the controller-connected executor, the Tier-2 observe sweep) wires one. A factory with no runtime configured, or with no installed-bundle directory present, behaves exactly as it did before this path existed: only built-ins resolve.
+
+**Installed-bundle discovery root**, one per platform, matching where the steward installers stage module payloads:
+
+| Platform | Root |
+|----------|------|
+| Windows | `C:\Program Files\CFGMS\modules\` |
+| Linux / macOS | `/usr/local/lib/cfgms/modules/` |
+
+Each installed bundle lives in its own `<name>/` subdirectory under that root (`module.yaml` plus the `bundle.yaml` sidecar — Issue #4425's on-disk layout). Bundle binary paths are root-relative; the factory resolves the current platform's entry to an absolute path before starting it, on a copy of the bundle, so the original `ContentHash` (which covers binary content and the manifest, never the path string) still verifies.
+
+Today this path is exercised by test fixtures only: the installers stage stdlib binaries flat into the same root (`cfgms-module-<name>`, no `module.yaml`, no `<name>/` subdirectory — see Stdlib Modules above), so no installed bundle exists on a real steward yet. Making the installer produce the `<name>/` layout for third-party and extended modules is separate, unfiled work.
+
+The configured `module_trust.mode` and `module_trust.additional_publishers` are forwarded unmodified to every bundle start — trust enforcement (below) applies identically whether the bundle came to rest on disk via a future installer-staged payload or a test fixture.
+
+### Module Runtime Lifecycle
+
+Out-of-process module binaries — whether started for an installed bundle (above) or, once ADR-019's migration lands, a stdlib module — are managed by the steward module runtime. Each module runs in a separate process connected over a local socket:
+
+**Startup sequence (per module):**
+
+1. `starting` — runtime fork/execs the module binary; passes the socket path via `CFGMS_MODULE_SOCKET` environment variable
+2. `ready` — runtime polls the socket until the module process starts listening, then dials gRPC and calls `Handshake`
+3. `running` — module is operating normally; the steward holds an active `StewardModuleClient` gRPC session
+
+**Socket paths:**
+- Unix: `${runtime_dir}/sockets/cfgms-module-<name>-<id>.sock` — sockets live in a steward-private directory created mode 0700; the mode is re-asserted on each start. Socket file permissions are the module-channel trust boundary: the gRPC channel carries no per-caller credentials, so access is controlled solely by the directory owner bit.
+- Windows: `\\.\pipe\cfgms-module-<name>-<id>` — Windows enforces per-user pipe ACLs at the kernel level.
+
+**Shutdown sequence:**
+
+1. `stopping` — runtime sends the `Shutdown` RPC; module should exit cleanly
+2. `stopped` — if the module has not exited within **10 seconds** after the `Shutdown` RPC, the runtime kills the process; socket file is removed
+
+Every installed-bundle handle the factory started is tracked and stopped the same way when the steward itself shuts down: `Steward.Stop` calls `ModuleFactory.UnloadAllModules`, which stops each tracked handle before returning, so no bundle module process outlives the steward process that started it.
+
+Trust verification (in `strict` mode) is performed **before** fork/exec. If the bundle fails trust verification, `Start()` returns `ErrPublisherNotTrusted` and no process is started.
+
+### Credential Client (Issue #5555)
+
+A module that creates accounts asks the controller for the initial password
+through `modules.CredentialClientInjectable`. The factory injects a
+`CredentialClient` beside the `activedirectory` constructor, the same way it
+injects the secret store; a module without the interface gets nothing.
+
+The client (`features/steward/client.CredentialClient`) calls the unary
+`IssueInitialCredential` RPC on the steward's `StewardTransport` connection (the
+control-plane provider's gRPC client, resolved per call so it follows
+reconnects), under a 15-second deadline. The password is returned in memory only.
+
+**Why secrets bypass the event queue.** Control-plane events go through
+`publishEventWithQueue`, which persists to the offline queue on disk so they
+survive a disconnect. A password must never reach disk, so it travels by RPC, and
+the client has no queue, no retry file and no cache: on any failure nothing is
+written and the caller tries again on its next convergence run. Errors carry a
+fixed sentinel (`ErrCredentialUnavailable`, `ErrCredentialRefused`,
+`ErrCredentialAlreadyIssued`) and never the server's message text.
+
+### Four Execution Paths
+
+Every byte of code that runs on a steward arrives through exactly one of these paths (see ADR-006 for full details):
+
+| Path | Trust anchor | Notes |
+|------|-------------|-------|
+| **Modules** | Publisher-signed bundle | gRPC module invoked to enforce cfg |
+| **Scripts** | Publisher-signed; cfg-content staged to disk with recorded hash | `<interpreter> -File <path>` against on-disk file |
+| **Inline cfg CLI commands** | Admin mTLS-signed payload, end-to-end | Separate epic |
+| **Remote shell** | Interactive admin session | Separate epic |
+
+### Module Contract
+
+Every module implements the `Module` interface:
+
+| Method | Purpose |
+|--------|---------|
+| **Get** | Read the current state of the resource from the system |
+| **Set** | Apply changes to reach desired state |
+
+Modules also implement `ConfigState` for their configuration, which provides:
+- **Validate** — check that the resource configuration in the cfg is valid
+- **AsMap** — return state as a map for field-by-field comparison
+- **GetManagedFields** — declare which fields this module manages
+
+Compare and Verify are performed by the execution engine (not the module) — it calls `Get`, uses the `StateComparator` to diff against desired state, calls `Set` if needed, then calls `Get` again to verify.
+
+### Event Hooks
+
+Modules **should, when possible, implement the `Monitor` interface** to watch for real-time changes to their managed resources. The monitor provides a `Changes()` channel that emits `ChangeEvent` values (created, modified, deleted, permissions changed). When a change event fires, it triggers a convergence check for that specific resource rather than waiting for the next scheduled run — near-real-time drift correction for critical resources.
+
+Some resources don't have a feasible event-source (no OS-level watcher, no vendor API hook); those modules fall back to the scheduled re-check interval (`steward.converge_interval`). Event-driven Monitor support is preferred and should be added where the underlying platform permits it.
+
+The convergence runtime now wires `Monitor` automatically: on cfg load it calls `Monitor(ctx, resourceID, desired)` for every module that implements the interface, fans in the `Changes()` channels, and on each `ChangeEvent` runs a targeted `ExecuteResource` for the changed `resourceID` (treating the event as a hint — actual state is re-read via `module.Get()` and desired state comes from the cfg, never from `event.Details`).
+
+### Monitor Resilience
+
+The Monitor consumer is hardened against event storms, slow modules, and concurrent shutdown:
+
+| Property | Behaviour |
+|----------|-----------|
+| **Debounce** | Duplicate events for the same `resourceID` within a 1.5 s window are coalesced into a single `ExecuteResource` call. The first event starts a timer; subsequent events within the window are dropped. |
+| **Bounded queue + shed-to-poll** | The fan-in channel has a fixed capacity of 64 events. When full, incoming events are dropped with a `Warn` log entry (`"Monitor event queue full, event shed to scheduled poll"`). The scheduled `convergenceLoop` continues at its normal interval and will correct any resources whose events were shed. |
+| **DNA refresh on change** | After a targeted reconcile that calls `Set` (i.e. `ChangesApplied = true`), the steward re-collects the DNA snapshot immediately. The refreshed hash is available on the next heartbeat without waiting for the next scheduled convergence tick. |
+| **Clean shutdown** | `Stop()` closes the shutdown channel (stopping all pending debounce timers), waits for fan-in and event-loop goroutines to exit via `WaitGroup`, then calls `Close()` on each active monitor before unloading modules. No `Set` call can run after `Close()`. |
+| **Never create for declared-absent** (Issue #3876) | A targeted reconcile never dispatches at all for a resource whose retained desired state is literally `state: absent` — there is nothing to converge toward, and the create path is exactly what must never run for it. Deletion of such a resource is left to the next scheduled convergence pass, which reads current (non-stale) config. |
+| **Bounded reconcile retry** (Issue #3876) | A targeted reconcile that fails (`StatusFailed`, `StatusTimeout`, or `StatusRetryExhausted`) five times in a row for the same `resourceID` stops retrying and logs once explaining why — instead of retrying on every subsequent re-signal indefinitely. The count resets whenever `StartMonitors` rebuilds its resource set, so pushing a corrected config is a sufficient recovery; no steward service restart is needed. |
+| **No orphaned monitor engine across executor re-init** (Issue #3876) | `InitializeConfigExecutor` (client-side) stops any monitor engine running on the executor instance it is about to replace before installing the new one. Without this, a previously-started engine's goroutines kept running against their own stale, retained resource set — invisible to and unstoppable by any config pushed to the new executor. |
+
+Current adoption:
+
+- **Implemented**: `hyperv` (VM state — power on/off and create/delete, via a single host-level Windows Event Log subscription over the Hyper-V VMMS/Worker channels; Windows only, polling backstop elsewhere)
+- **Polling-only (no Monitor yet)**: `activedirectory`, `file`, `script`, `firewall`, `package`, `patch`
+
+Adding `Monitor` support to additional modules is an ongoing enhancement, prioritized by user impact (security-sensitive resources benefit most from event-driven detection).
+
+### Monitor Load Budget and Reaction Latency
+
+Measured end-to-end on a live Hyper-V host (Windows Server 2025) against the `hyperv` VM-state Monitor, validating both a Windows and a Linux guest VM (Issue #2115). The budget is per active host subscription, not per watched VM — the `hyperv` Monitor uses a single host-level `EvtSubscribe` shared across all watched VMs.
+
+| Metric | Budget / target | Measured |
+|--------|-----------------|----------|
+| Idle goroutines | ≤ 1 reader goroutine per active subscription | +1 (one Event-Log reader pump) |
+| Idle heap allocation delta | < 2 MB | ~9 KB |
+| CFGMS-owned subscription handles | ≤ 2 (the `EvtSubscribe` handle + the auto-reset signal event) | 2 |
+| Total process OS-handle delta around `Monitor()` | observed, not a hard budget | ~16 (the extra ~14 are ALPC/RPC handles the Windows eventing service `wevtsvc` opens beneath `EvtSubscribe`; CFGMS neither owns nor can enumerate them) |
+| Per-extra-VM OS-handle growth (single-subscription invariant) | ~0 | +6 for 3 additional watched VMs (benign service-side churn, **not** new subscriptions — a per-VM subscription regression would add ~16 each) |
+| Idle CPU | < 0.1% | Not asserted in-process — the reader goroutine is idle-blocked in `WaitForSingleObject`; observed negligible. |
+| **Reaction latency — event** | < 2 s (out-of-band change → `ChangeEvent` on `Changes()`) | < 20 ms (sub-poll-granularity) |
+| **Reaction latency — correction** | < 5 s (reconcile applies `Start-VM` once the drift is visible) | ~0.9 s |
+| Teardown | `Close()` joins the reader goroutine; no goroutine leak (`goleak`) | clean (0 leaked goroutines) |
+
+**ps-host state-propagation caveat.** The Hyper-V Event Log signal fires within milliseconds of an out-of-band VM power-state change, but the persistent ps-host PowerShell session's `Get-VM` lags the true VM state by several seconds (≈5 s observed) after such a change — VMMS state propagation to that long-lived session. Because a single out-of-band change is debounced into **one** targeted reconcile, a reconcile whose `Get` runs before propagation reads the stale prior state and no-ops, dropping the correction until the next scheduled convergence tick. The production debounce (1.5 s) does not fully cover the observed lag. Operators relying on sub-tick event-driven correction of Hyper-V VM state should be aware that the *correction* (not the detection) can be delayed to the scheduled `converge_interval` when the propagation lag exceeds the debounce window; the scheduled poll is the guaranteed backstop. Tightening this (e.g. a fresh-CIM query in the ps-host `Cfgms-GetVM` verb, or a short reconcile retry when a change event finds no drift) is tracked as a follow-up.
+
+## Self-Awareness
+
+The steward continuously knows about itself. This information is collected independently of the convergence loop.
+
+### DNA (Digital Native Attributes)
+
+The device's stable, hashable state — a **set of addressable fragments**, not a flat snapshot (ADR-016 / ADR-017). Each fragment has an object-canonical **typed entity id** (`service:sshd`, `host:cpu`), a single resolved **authority** (a managing module, or the gatherer/osquery for observe-only host facts), and a **provenance envelope** (`source`, `observed_at`, `confidence`) carried outside its hash. For the per-attribute audit of the **legacy** flat-map collector this model retires, see [DNA Collection Audit](dna-collection.md).
+
+Fragments are sourced by class:
+
+| Class | Examples | Authority | Drift |
+|-------|----------|-----------|-------|
+| **Managed** | services, files, users, packages, firewall (from module `Get`) | managing module | enforced (`auto_correct` / `report_only`) |
+| **Observe-only** | CPU model, total memory, BIOS, OS build | **interim**: existing per-platform gatherers (ADR-017 Amendment 3); **future**: osquery source swap | report-only |
+
+> **Interim authority note (ADR-017 Amendment 3):** The `host:*` observe-only fragments
+> (`host:cpu`, `host:memory`, `host:os`, `host:bios`) are currently sourced by the existing
+> per-platform gatherers (`features/steward/dna/{hardware,network,security}_*.go`) via a
+> partition step that reads the already-collected flat attribute map. The gatherers are reused
+> unmodified. The `commonpb.DNA.attributes` proto field (the legacy flat surface) was retired in
+> Issue #3331; all controller consumers now project attributes from `DNA.Fragments` via
+> `service.FlattenDNAFragments`.
+
+Ephemeral runtime values (utilisation, PIDs, per-process metrics, health) are **not DNA** (ADR-017 clause 4) — see [Performance](#performance) below. DNA serves two purposes:
+1. **Device identity** — the typed entity ids the controller uses to identify and classify devices, and the shared join key for the topology graph and DEX
+2. **Drift baseline** — managed fragments whose state diverges from desired trigger drift correction
+
+#### Monitored module resource state — flat attributes and cluster fragments
+
+The steward's monitor fan-in caches the newest `ChangeEvent` details per
+resource (last-write-wins, no history). Two output paths are derived from the
+same cache:
+
+**Flat attribute path (non-cluster resources):**  `Executor.CollectModuleDNAAttributes`
+merges flattened resource state with the hardware-fact attributes on the same
+refresh tick — the same delta-compressed publish path, no separate channel.
+
+Flattening and namespacing convention:
+
+- every key is `<resourceID>.<field>` with the resource ID **verbatim** —
+  including its colon, with no module-name prefix
+- nested map keys join with `.` — `resource_owner.web-01`
+- slice values join with `,`
+- any other value stringifies (`true`, `3`)
+
+**Fragment path (cluster:* resources, Issue #2908):**  `Executor.CollectModuleFragments`
+produces one `cluster:<Name>` ADR-017 fragment per cached cluster:* resource.
+Each fragment's `CanonicalBytes` encode the full `ClusterStatus.AsMap()` payload
+(including `resource_owner`, `member_nodes`, `cno_owner_node`, `found`) using the
+deterministic `CanonicalizeFragment` binary encoding. The controller cluster
+registry (`features/controller/clusterregistry`) reads from `StewardData.DNAFragments`
+and decodes the canonical bytes via `DecodeCanonicalFragment` to extract role
+ownership.
+
+> **Wire protocol note:** Fragment transmission steward→controller is carried
+> by `DNATransfer` and reassembled by `reassembleDNA` (`dna_handler.go`). The
+> identity check (`firstChunk.GetStewardId() != peerID` in `dna_handler.go`)
+> applies to the full DNA sync and protects all DNA — fragment payloads
+> included — from spoofing.
+
+A resource that leaves monitoring (module close, steward shutdown) is evicted
+from the cache, so its flat keys disappear from the next collected map and its
+fragment disappears from the next `CollectModuleFragments` call — the delta
+publish signals the removal. The snapshot is **eventually consistent** by
+design: it rides the DNA refresh interval, and any safety-critical decision
+(e.g. cluster ownership gating) always uses live module queries, never this
+snapshot.
+
+### DNA Sync Model
+
+DNA is a deterministic, hashable dataset with a **two-level (Merkle-style) hash**: a per-fragment hash over each fragment's canonical bytes, and an **aggregate root** over the sorted `(fragment_id, fragment_hash)` manifest. The steward includes the aggregate root in every heartbeat, keeping the controller aware of DNA currency with near-zero bandwidth.
+
+- **Heartbeats** carry the aggregate root (control plane, every heartbeat interval)
+- **Partial sync**: on a root mismatch the controller diffs manifests and requests only the changed/added/removed fragments' bytes (data plane), then recomputes the root to prove its copy is fully in sync — no whole-DNA re-transfer
+- **Full sync** is required only on initial registration
+
+#### Bulk lane (per-object fragments)
+
+Modules whose owned kind has one fragment per managed object (for example directory objects) set `per_object: true` on the `owns` entry in `module.yaml`. The controller copies that flag into the `per_object` field of each `ObserveModuleSpec` it sends in `CommandObserveModules`. Per-object fragments are reconciled in a separate bulk lane, so thousands of objects never inflate the host-fragment manifest.
+
+Wire format:
+
+- **Heartbeat**: `dna_bulk_root` is a second key in the heartbeat Metrics side-channel, next to `dna_aggregate_root`. Absent means the steward has no bulk fragments; older stewards never send it.
+- **Buckets**: a fragment's bucket is the first byte of the SHA-256 of its fragment id (256 buckets). A bucket root is the aggregate root over that bucket's `(fragment_id, fragment_hash)` entries; an empty bucket has the fixed empty root (SHA-256 of the empty string). The bulk root is the hash over the 256 bucket roots in bucket order. A change touches exactly one bucket root, and one bucket manifest holds about 200 entries per 50,000 objects.
+- **`SYNC_DNA` modes**: three mutually exclusive parameter sets, constants in `pkg/controlplane/types`:
+
+| Params | Reply |
+|--------|-------|
+| `bulk=buckets` | `DNATransfer` with `Bulk=true` and `BucketRoots` (exactly 256 entries) |
+| `bulk=manifest`, `buckets=<json list>` | `DNATransfer` with `Bulk=true` and `Manifest` entries for those buckets |
+| `bulk=fragments`, `fragment_ids=<json list>` | Those fragments as a delta |
+
+Steward side of the bulk lane:
+
+- **Membership**: a fragment is a bulk fragment when its id starts with `<kind>:` for a kind that appeared with `per_object` in the latest sweep's specs. Membership is held in memory and rebuilt by the next sweep; nothing is persisted. A module that owns several kinds keeps all of them.
+- **Exclusions**: bulk fragments are held apart from the host fragments. They do not enter the host aggregate root (byte-identical to a steward without bulk fragments), the `Details["dna"]` payload of the control-plane DNA event, the event's skip-when-unchanged gate, or the full-sync snapshot. The periodic host DNA refresh does not clear them.
+- **Replies**: `bulk=buckets` answers with the 256 bucket roots; `bulk=manifest` answers with entries only for the requested buckets; `bulk=fragments` answers with `Delta=true, Bulk=true` carrying exactly the requested ids. An unknown id is skipped, never a fallback to full sync. A `bulk=fragments` reply over 8 MiB of canonical bytes is split into several transfers on object boundaries, each a valid delta.
+- **Bounds**: at most 256 buckets and at most 10,000 fragment ids per request. An over-bound or malformed request is rejected with a logged error and no reply. Logs carry counts, never fragment ids or contents.
+- **Retirement**: a sweep whose specs omit a per-object kind held from an earlier sweep retires that kind's fragments (the module is no longer active here, for example the PDC emulator role moved). A sweep with no specs omits every held kind. A module that fails to load or whose `Get` fails keeps its previous fragments; only omission retires.
+
+**Sweep cadence for per-object modules**: the steward raises `EventObserveSweepRequest` from `checkAndTriggerObserveSweep` on each convergence-loop tick (tier-2 cadence). The controller answers with `CommandObserveModules` for every approved manifest whose `observe_when` matches the baseline DNA, so a per-object module such as AD is observed every Nth convergence cycle on the matching domain controller.
+
+The controller stores DNA **versioned and append-only** (ADR-017 Amendment A1.3), not last-write-wins: each accepted delta produces a new fragment version, so per-entity state stays queryable over time. Because unchanged fragments dedupe by hash, history cost tracks change volume, not fleet-size × time.
+
+### Health
+
+The steward monitors its own operational health:
+
+| Signal | Healthy | Degraded | Unhealthy |
+|--------|---------|----------|-----------|
+| Config errors | 0 | Threshold exceeded | — |
+| Certificate validity | Valid, > 7 days | < 7 days to expiry | Expired/invalid |
+| Controller connection | Connected | — | Disconnected (if configured) |
+| Task latency | Within bounds | Threshold exceeded | — |
+
+Health status is included in heartbeats and available locally.
+
+### Performance
+
+The steward collects and retains time-series performance metrics for the host system:
+
+- **System metrics**: CPU, memory, disk I/O, network I/O (collected on interval)
+- **Process metrics**: per-process CPU/memory for watched processes
+- **Local retention**: metrics are stored locally with a configurable retention period (e.g., 30 days) for historical analysis even when offline
+- **Threshold alerting**: evaluated locally — the steward reports threshold breach events immediately, not raw metric streams
+- **Controller reporting**: three modes of metric delivery:
+  - **Periodic upload**: steward pushes collected metrics to the controller on a regular interval (e.g., hourly)
+  - **On-demand**: controller requests current metrics or a historical range from the steward
+  - **Real-time streaming**: controller initiates a live metrics stream for a single endpoint (e.g., admin troubleshooting a specific device)
+
+This data is the collection foundation for **Digital Employee Experience (DEX)** — a layered track (collection → attribution → baselines → root-cause → prediction → experience-driven remediation), not a single future capability. Building collection and local retention now means DEX's later layers become an analytics + workflow-engine remediation loop on top, not a rebuild. DEX signals attach to the same typed entity ids as DNA (ADR-017 Amendment A1.4), so baselines and root-cause join against DNA and the topology graph rather than forming a separate data island.
+
+## Reporting
+
+The steward always reports. Where reports go depends on the deployment.
+
+### Local (Always)
+
+Every steward writes structured logs locally, regardless of deployment mode. This is the baseline — it works offline, standalone, and connected.
+
+Log locations:
+- Linux: `/var/log/cfgms/` or systemd journal
+- Windows: Windows Event Log and `C:\ProgramData\CFGMS\logs\`
+- macOS: System log and `/usr/local/var/log/cfgms/`
+
+### Controller (When Connected)
+
+When connected to a controller, the steward also reports upstream:
+
+| Report | Timing | Content |
+|--------|--------|---------|
+| **Heartbeat** | Periodic (20 s base ± up to 10 s uniform jitter per tick; effective interval always in [20 s, 30 s)) | Health status, uptime |
+| **Convergence result** | After each convergence run | Per-resource compliance status, changes made, errors |
+| **DNA hash** | With each heartbeat | Hash of current DNA (control plane) |
+| **DNA delta** | As changes detected | Changed attributes only (control plane) |
+| **DNA full sync** | On hash mismatch or initial registration | Complete DNA snapshot (data plane) |
+| **Performance metrics** | Periodic (e.g., hourly), on-demand, or real-time stream | CPU, memory, disk, network, process metrics |
+| **Events** | As they occur | Drift detected, module errors, threshold breaches |
+
+### Heartbeat Timing
+
+Stewards send heartbeats at a base interval of **20 seconds**, with **uniform per-tick jitter in [0, 10 s)**. The effective per-tick interval is always in **[20 s, 30 s)**.
+
+**Why 20 s base with jitter (epic #1664):**
+
+- **NGFW UDP idle timeout survival**: Most Next-Generation Firewalls and NAT devices expire UDP pinholes after 30 s of silence. With a maximum effective interval of 30 s (exclusive), and QUIC keepalives at 20 s, at least one keepalive or heartbeat always fires before the 30 s timeout — keeping the QUIC connection alive through NGFW/NAT devices without requiring shorter (more expensive) keepalives.
+- **Herd prevention**: Jitter prevents 50 k stewards from synchronising their heartbeats, which would create CPU spikes on the controller. Uniform jitter distributes heartbeat load evenly across the 10 s window.
+- **Controller offline threshold**: The controller marks a steward offline after **60 s of silence** (3 missed heartbeats at 20 s base). The 3-miss threshold provides tolerance for transient network blips while detecting genuinely lost stewards within 60–90 s.
+
+The QUIC `KeepAlivePeriod` is set to **20 s** (aligned with the heartbeat base) so the QUIC layer and application layer cooperate — a QUIC PING fires at 20 s regardless of jitter, ensuring the UDP pinhole never reaches 30 s idle even when the heartbeat fires at its maximum interval.
+
+### Offline Queueing
+
+When the controller connection is lost:
+
+1. Steward continues all normal operations (convergence, DNA, health)
+2. Reports that would go to the controller are queued locally
+3. When connection is restored, queued reports are delivered in order
+4. Controller rebuilds its view of this steward from the resynced reports
+
+## Controller Channel
+
+The controller channel is an **additive overlay** on top of the convergence loop, not a replacement for it. A controller-connected steward behaves identically to a standalone steward for all convergence operations — the connection adds:
+
+1. **Cfg delivery** — the controller pushes cfg updates over the gRPC data plane
+2. **Near-real-time reporting** — convergence results, events, and heartbeats are forwarded upstream
+3. **Out-of-band `sync_config` trigger** — the controller can request immediate convergence (optimization only; the loop continues on schedule regardless)
+
+If the controller connection is lost, the steward continues converging on schedule against its last-received cfg and queues reports locally until reconnection.
+
+The `--regtoken-file` flag establishes the controller channel — it does not change the steward's fundamental convergence behaviour.
+
+### Host Attributes (Issue #4949, ADR-034 §2)
+
+On every ControlChannel connect the steward reports host attributes in the `x-cfgms-host-attrs` metadata header (base64 JSON, at most 4 KiB), collected by `identity.CollectHostAttributes`:
+
+- `machine_id` — the per-OS machine identifier the secrets encryptor also uses (`/etc/machine-id`, `IOPlatformUUID`, Windows `MachineGuid`).
+- `nic_macs` — hardware addresses of physical network interfaces, sorted and comma-joined (loopback and container/hypervisor virtual interfaces excluded).
+- `disk_serials` — block-device serial numbers, sorted and comma-joined; best effort (read on Linux, omitted on macOS and Windows).
+- `install_date` — the calendar date the device identity file was first created.
+
+An attribute that cannot be read is omitted, never fabricated. DNA fields are never included. The controller compares these with the baseline it recorded (see the controller operating model). The same attributes accompany `/refresh/complete` and `/refresh/claim`, so the `auto_accept` demotion can compare them and an operator-approved refresh re-baselines them.
+
+### Duplicate Identity Detection (Issue #4948)
+
+If a second endpoint presents the same steward identity (certificate and key) while another endpoint already holds a control stream, the controller detects the change of peer host and records a high-severity audit event naming both addresses and certificate serials. Detection does not refuse either endpoint; a steward reconnecting from the same host is not treated as a duplicate. Detection is per controller node.
+
+### Device Key Backends (ADR-034 §7)
+
+`identity.Open` chooses the device key backend once, at first enrollment, and reports it as `key_protection_level`. Order: TPM (Linux, and Windows through the Platform Crypto Provider), Secure Enclave (macOS), then the encrypted file. A steward with an existing `device_identity.enc` stays on `file`; a steward whose stored identity records a hardware level reloads only that backend and returns `ErrHardwareKeyUnavailable` rather than minting a file key.
+
+#### macOS Secure Enclave (Issue #4978)
+
+The backend calls the Security framework through `purego`, so the darwin steward stays `CGO_ENABLED=0`. It creates a P-256 key with `kSecAttrTokenIDSecureEnclave` and `kSecAttrIsPermanent` under the stable application tag `io.cfgms.steward.device-identity`, reloads it by that tag on every start, and signs the 32-byte PoP digest with `kSecKeyAlgorithmECDSASignatureDigestX962SHA256` (no second hash). The public key is the X9.63 point from `SecKeyCopyExternalRepresentation`, converted to PKIX DER; `DeviceID` is its SHA-256.
+
+At first enrollment a self-test must pass before the key is adopted: create the persistent key, reload it by tag (same public key), sign a digest, verify the signature. Any failure deletes the key just created, returns the error with its `OSStatus`, and `Open` falls back to `file` with the reason logged. A non-persistent key is never created, because it could not be reloaded and would change `DeviceID` on every start. An existing key that cannot be loaded is an error, never replaced. `Regenerate` creates and self-tests the replacement under a pending tag, deletes the old key, then moves the replacement to the stable tag.
+
+##### Evidence
+
+Whether a launchd daemon can obtain a persistent Secure Enclave key depends on its signing state; this is measured on real hardware and is not yet available.
+
+| Item | Result |
+|------|--------|
+| macOS version | not yet measured: no Mac available to the pipeline |
+| Hardware | not yet measured |
+| Daemon signing (unsigned / ad-hoc / Developer ID) | not yet measured |
+| Create persistent Secure Enclave key (result, OSStatus) | not yet measured |
+| Reload after restart (result, OSStatus) | not yet measured |
+| Reported level | not yet measured |
+
+What CI established instead (macOS runners are virtual and expose no Secure Enclave): the Security and CoreFoundation bindings resolve; a Keychain software P-256 key through the same create/export/sign code verifies over the digest and yields the expected PKIX DER and `DeviceID`; on the runner `Open` falls back to `file` and logs the `OSStatus`; an injected self-test failure leaves no key. When a Mac is available, run the probe unsigned and ad-hoc signed as a root launchd daemon and fill in this table. If entitlements or signing turn out to be required, the steward reports `file` on macOS until the founder decides on a signing change.
+
+### Fencing-Token Command Fence (ADR-029 Decision 6; substrate updated by ADR-031 Decision 5 / Issue #3760)
+
+Every inbound `Command` carries a fencing token stamped by the controller that published it (`Command.Term`, #3390). The field name and wire type are unchanged since #3390 — a `uint64` — only its source has moved: originally the Raft term the controller cluster was at (ADR-029 Decision 5), it is now the S3 database lease's monotonic fencing token (ADR-031 Decision 5, Issue #3760). Every controller node stamps it, not only the lease holder (`ha.Manager.CommandTerm()`): the holder uses its local authority, any other node reads the lease's current token from the lease store (cached for 2 s). An unreadable lease stamps 0, which a steward with a set ratchet rejects — it fails closed. Only a cluster deployment (`ha.mode: cluster`) holds that lease and therefore stamps a non-zero token; single-server and blue-green deployments have no lease to draw one from and publish unstamped commands, which the ratchet's first column already covers. The steward tracks the highest value it has observed and enforces a three-state ratchet on the receive path, ahead of command dispatch — this mechanism did not change when the source did:
+
+| Steward state | Unstamped command (`term` missing or 0) | Stamped command (`term > 0`) |
+|---|---|---|
+| Never seen a stamped command | **Accept** — genuine bootstrap, or mid-rollout behind a controller predating #3390 | **Accept**, record the value as the new high-water mark, set the ratchet |
+| Ratchet set | **Reject — downgrade attempt**, not legacy traffic | Accept iff `term >= highest_seen`; reject and leave the high-water mark unchanged otherwise |
+
+**The ratchet advances only for authenticated commands (Issue #5090).** `Command.Term` is covered by the command signature only under signing-payload v2 (Issue #5174). The controller signs every command over v2 and the steward refuses every stamped (`Term > 0`) v1 command as unauthenticated from first start, before signature verification, with no state consulted (Issue #5285; see the controller operating model's Outbound Command Contract), so the receive path splits the fence into two steps: a compare step before dispatch (`checkTermFence`, which never changes state) and a commit step (`commitTermFence`) that runs only after `commands.Handler.HandleCommand` returns nil — that is, after signature, steward ID, timestamp, replay, params-size and script pre-flight checks pass. A command that fails any of those checks leaves the in-memory high-water mark, the ratchet-set flag and the persisted `fence_ratchet.json` untouched, so an unauthenticated command carrying a very large term cannot fence out later legitimate commands.
+
+A rejected command is a refusal, not a transport error — it never reaches the command dispatch pipeline, and it does not disconnect the control channel or trigger a convergence-loop retry. Rejections are logged at `WARN` (every value derived from the rejected command passes through `logging.SanitizeLogValue()`, including the claimed fencing token).
+
+#### Ratchet Persistence (#3437)
+
+Both ratchet fields — the ratchet-set flag and the high-water fencing token — are persisted to `fence_ratchet.json` in the steward's cert store directory (`CertStoreDir`). The file is written atomically (write-to-tmp then rename) every time the ratchet advances. On startup, `NewTransportClient` loads the file; a missing or unreadable file is treated as "never seen a stamped command" (the same as first boot). This means a routine steward restart no longer resets the fence: a stale leader's old command cannot exploit a restart to look like "never seen a fencing token before" and be accepted inside the dual-authority window the epic exists to close.
+
+#### Enrollment-Path Reset (#3437)
+
+A legitimate controller-cluster rebuild restarts the fencing-token source from its low-water value (Raft terms restarted at 1; the database lease's token starts fresh at 1 for a newly created lease row). Without a reset mechanism, a steward holding a persisted high-water value above that would permanently reject the new cluster — total loss of fleet control. The reset is `registration.resetFenceRatchetOnEnrollment`, which calls `FenceRatchet.ClearRatchet()` and removes the persisted state so the fence starts fresh on the next startup.
+
+**Where it fires.** The registration client (`features/steward/registration/client_http.go`) invokes the reset at its two enrollment-completion points, and nowhere else: `Register`'s HTTP 200 branch (immediate approval) and `PollStatus`'s `claimed` branch (approval by an operator). `cmd/steward/main.go`'s `registerAndConnect` supplies `HTTPConfig.CertStoreDir`, which is what gives the client a durable ratchet to clear; the certificate-refresh path (`refreshAndConnect`) leaves it unset, because re-issuing a certificate for the same cluster is not a cluster rebuild.
+
+**What is verified before it fires.** The reset is conditional, not a rename of `ClearRatchet`. `verifyEnrollmentCertSet` requires the enrollment response to carry a complete certificate set (client certificate, client key, CA certificate); that the certificate and key are a usable pair; and that the leaf chains to the CA delivered in the same response, is inside its validity window, and carries the client-auth EKU. Any failure leaves the persisted fence exactly as it was and logs at `WARN` — fail-closed, since a cleared fence re-opens the dual-authority window. A pending (HTTP 202) registration and an already-claimed (HTTP 410) poll carry no certificate set and so are not enrollment completions.
+
+**Physical isolation.** `resetFenceRatchetOnEnrollment` is unexported and lives in the steward-side enrollment client, and it is the only production caller of `ClearRatchet` in the codebase. `features/steward/client` (the command-receive package) therefore cannot name it — the Go compiler, not a convention, is the primary enforcement. The AST-walk test `TestNoRatchetClearCallerOutsideRegistration` (`features/steward/registration/architecture_test.go`) covers `ClearRatchet`, the reset function, and its exported spelling, so neither a direct call nor a re-exported wrapper can reintroduce a path from the command-receive package. An attacker who controls the command channel cannot trigger the reset.
+
+**Enrollment trust boundary.** The enrollment exchange is TLS-authenticated in the server direction only: the steward verifies the controller against its pinned or installed CA and presents a registration token. The certificate-set verification above therefore proves that the material came from whichever CA that exchange presented. The reset is safe for a routine steward restart and a legitimate controller-cluster rebuild. See `features/steward/registration/client_http.go` `resetFenceRatchetOnEnrollment`.
+
+Whether a given steward is capable of enforcing the fence at all is determinable from the controller via the existing `GET /api/v1/stewards` `StewardInfo.Version` field — no separate capability flag was introduced. A steward at a fence-capable version that has not yet seen a stamped command is in the accept-unstamped bootstrap state, not actively rejecting anything; that is expected for a freshly enrolled or freshly upgraded steward, not itself a sign of compromise.
+
+**Rejection report (Issue #4569).** A command refused on the receive path — by the fence or by `commands.Handler.HandleCommand` — is reported to the controller rather than dropped: `TransportClient.receiveCommand` sends a `types.Response` (`Success=false`, `CommandID`, `StewardID`, `Message` and `Details["reason"]` set to a reason code, `Details["retryable"]` a bool) when the command ID is non-empty, then returns the original error unchanged. A send failure is logged and does not change the outcome; an accepted command produces no response. The message carries the reason code only, never the error text (the fence error includes the steward's highest seen term). Mapping, first match wins: `ErrCommandTermFenced` → `term_fenced` (retryable), `ErrUnauthenticatedCommand` → `unauthenticated`, `ErrWrongSteward` → `wrong_steward`, `ErrCommandStale` → `stale_timestamp`, `ErrCommandDuplicate` → `duplicate_id`, `ErrParamsTooLarge` → `params_too_large`, anything else → `invalid_command`. The controller records the outcome on the delivery record as `rejected`; see the controller operating model, "Cluster Command Delivery".
+
+### Operator-Signed Envelope (Issue #4622)
+
+Privileged steward commands carry an operator-signed envelope in addition to the controller's command signature. The operator signs `operatorpayload.CanonicalBytes` of an envelope holding the SHA-256 of the content, the shell, the resolved target steward IDs, a single-use nonce and an expiry. For an ad-hoc `execute_script` the content is the script and the shell is its interpreter. For a steward action the content is `operatorpayload.ActionContent` (the verb, target kind, target name and sorted parameters as canonical JSON) and the shell is `operatorpayload.ActionShell` (`steward-action`), which is not a script shell. The shell is part of the signed bytes, so a signature for an action never authorizes a script or the reverse, and the controller cannot alter the verb, target or parameters in transit. One routine, `verifyOperatorEnvelope`, verifies the X.509 or WebAuthn credential and then enforces that this steward is in the signed targets, that the envelope has not expired, and that its nonce has not been used before. `preflightScriptSignature` additionally rejects `shell = steward-action` outright.
+
+From the `cfg` CLI, `cfg steward service` and `cfg steward process` sign with the operator's X.509 payload-signing credential: one envelope per matched steward, whose signed targets are that single steward id, signed immediately before its own submit with a fresh nonce and the 5-minute expiry. If the step-up ceremony outlasts the envelope and the controller refuses it as `ENVELOPE_EXPIRED`, the CLI signs a new envelope and submits it as a new request once; it never resends a stale one.
+
+## Entry Paths
+
+The steward binary supports these entry paths:
+
+| Invocation | Mode | Description |
+|------------|------|-------------|
+| `cfgms-steward --regtoken-file PATH` | Controller-connected (foreground) | Registers with the controller via HTTP REST API, receives mTLS certificates, then establishes a gRPC-over-QUIC transport connection. Registration is called on every invocation — there is no stored-certificate resume path. The token is read at start from the file at `PATH`. On Linux and macOS the file must be a regular file owned by the running user with no group or other permission bits (mode 0600); a missing, unreadable or empty file is a start-up error that never prints the token. The token is held in memory only. On Windows the file must be owned by SYSTEM or `BUILTIN\\Administrators` and grant access to those two principals only; the installed Windows service carries `--regtoken-file <path>` to `%ProgramData%\\cfgms\\registration-token` (the data directory is locked down to SYSTEM and Administrators before the file is written, with or without a staged CA certificate), never the token itself. |
+| `cfgms-steward --config path.cfg` | Standalone (foreground) | Loads cfg from the specified local file. No controller connection is established. All convergence, DNA, health, and local logging operate as normal. |
+| `cfgms-steward install --regtoken-file PATH` | Controller-connected (service) | Installs the steward as a native OS service (systemd on Linux, SCM on Windows, launchd on macOS) and starts it. |
+| `cfgms-steward` (no arguments) | Interactive | Prompts for a registration token, then presents a menu: [1] Install as service, [2] Run once in foreground, [3] Exit. |
+
+When both `--regtoken-file` and `--config` are supplied, the `--regtoken-file` path takes precedence and `--config` is ignored. The token is never accepted as a command-line value, because a value on the command line is visible to other local users in the process list; `--regtoken` is rejected with an error naming `--regtoken-file`.
+
+## Logging
+
+The steward writes structured logs using the file logging provider. This is the only supported logging provider for the steward binary — the timescale (database) provider is a controller-only feature.
+
+Log level is controlled by the `CFGMS_LOG_LEVEL` environment variable (default `INFO`). Accepted values are `debug`, `info`, `warn`, and `error` (case-insensitive). Invalid or empty values fall back to `INFO`.
+
+Log directory is controlled by `CFGMS_LOG_DIR`. The three native installers set it automatically to the platform-conventional paths listed under *Log locations* above (Linux `/var/log/cfgms/` via the systemd unit's `Environment=` line, Windows `C:\ProgramData\CFGMS\logs\` via the service's registry `Environment` value, macOS `/usr/local/var/log/cfgms/` via the launchd plist's `EnvironmentVariables` dict) — an installed steward never falls back silently. A steward run bare (no installer — dev/manual/e2e) keeps the `/tmp/cfgms`-with-a-warning fallback.
+
+## Controller-Connected Capabilities
+
+These behaviors require an active controller connection and are not available in standalone mode.
+
+### Cfg Delivery
+
+The steward receives new cfgs via two paths, both arriving over the gRPC data plane service:
+
+- **Controller-initiated sync** — after a save-IS-deploy ConfigStore write on the controller, the controller fans out a `CommandSyncConfig` to the steward, prompting it to fetch the new cfg immediately.
+- **Heartbeat-driven discovery** — every heartbeat carries the steward's current cfg version. If the controller's view diverges (newer cfg available), the next heartbeat response triggers the same sync path.
+
+Either path lands the same outcome: the steward fetches the new cfg, verifies the controller's signature, stores it locally, and triggers a convergence run. Cfgs are signed by the controller's signing certificate — the steward verifies the signature before applying, ensuring cfgs cannot be tampered with in transit or injected by a rogue source.
+
+The steward's signing trust set is de-duplicated by certificate fingerprint. A certificate pushed to it by `push_signing_cert` is applied only if the command is signed by an already-trusted key **and** the certificate chains to the controller CA the steward pins (CodeSigning usage, intermediates taken from the pushed bundle); the command can also name serials to remove with `retire_serials`, never the pushed certificate and never leaving the set empty. See [Certificate Rotation](../security/certificate-rotation.md#steward-trust-set-rules).
+
+In a controller cluster any node can sign what the steward verifies, because every node signs with the same shared certificate; a steward enrolled through one node keeps working when it reconnects through another. Three things reach the steward as `push_signing_cert` commands, each signed by a key the steward already trusts: a rotation (the new certificate, added to the trust set), the move of an existing cluster to the shared certificate (a legacy node key is replaced by the shared certificate once the steward confirms it, and the controller records the confirmation), and a retirement or emergency revoke (`retire_serials` names the serials to remove). A steward that was offline for any of these receives them in the single push it gets when it reconnects, so the order of connections never matters. While a cluster is moving to the shared certificate, a steward that has not yet confirmed and trusts only a legacy node key rejects commands signed by the shared key until its confirmation completes; see [Cluster Signing Identity Migration](../operations/cluster-signing-migration.md#transition-window).
+
+If the controller connection is later lost, the steward continues using the last-received cfg.
+
+### Ad-Hoc Script Execution
+
+The controller can push a one-off script for immediate execution, outside the cfg. Use cases:
+- Emergency remediation
+- Diagnostics and data collection
+- One-time operations that don't belong in desired state
+
+Results are reported back to the controller. Ad-hoc scripts do not modify the cfg.
+
+#### Operator Payload Signature Verification (Issues #3694/#3696/#3697)
+
+An inline ad-hoc command is verified in `preflightScriptSignature`
+(`features/steward/commands/execute_script.go`) before the executor ever runs. The
+signature covers `operatorpayload.CanonicalBytes` of the reconstructed envelope
+(content, shell, resolved target list, nonce, expiry) — never content alone — and the
+envelope must name this steward's own ID, must not be expired, and its nonce must not
+have been seen before, regardless of which credential type signed it.
+
+Two credential types are accepted, dispatched on which proof fields are present in the
+command:
+
+- **X.509 / CSR-issued payload-signing credential.** The operator signs with the
+  zero-custody credential `cfg credential request-signing-cert` issues (Issue #3696);
+  the certificate must chain to the steward's configured controller CA and carry the
+  payload-signing marker (`cert.HasPayloadSigningMarker`) — an admin mTLS bundle no
+  longer qualifies.
+- **WebAuthn assertion (Issue #3697).** A browser-only operator with no mTLS bundle
+  signs via the controller's `/api/v1/operator-payload/sign/begin`/`finish` ceremony
+  (Issue #3695): the assertion's `clientDataJSON.challenge` must equal
+  `operatorpayload.ChallengeHash(envelope)` — SHA-256 over a **domain-separated**
+  preimage, never over bare `CanonicalBytes`, so an assertion collected during any other
+  ceremony at the same relying party (a routine passkey login, say) cannot be replayed as
+  an operator authorization — and the assertion signature must verify, as
+  `authenticatorData || SHA-256(clientDataJSON)`, against the credential's public key.
+
+  The steward applies the mandatory W3C WebAuthn §7.2 assertion checks in full rather
+  than treating `authenticatorData` as opaque signature input: `clientDataJSON.type` must
+  be `webauthn.get`, its `origin` must be one the relying-party binding names,
+  `authenticatorData`'s `rpIdHash` must equal `SHA-256(rpID)`, and both the **User
+  Present** and **User Verified** flags must be set. Requiring UV matches the
+  controller's own `protocol.VerificationRequired` ceremony — the steward exists to check
+  the controller independently, so it applies no weaker verification than the party it
+  checks.
+
+  The credential's public key has no certificate chain of its own, so it is resolved from
+  the CA-signed revocation manifest (`GET /api/v1/certificates/revocation-manifest`,
+  `features/controller/api/handlers_revocation_manifest.go`), extended with a
+  Kind-discriminated `authorized_webauthn_credentials` roster alongside the existing
+  revoked-serials list — never from an unsigned, live controller claim. The manifest's
+  own signature is chain-verified against the steward's controller CA via its embedded
+  `signer_certificate_pem` before any entry in it is trusted, and it also carries the
+  relying-party binding (`webauthn_relying_party`) the origin and `rpIdHash` checks are
+  made against, since a steward has no other trustworthy source for it.
+
+  Roster membership is not authorization. Each entry states the authority its owning
+  account actually holds, and the steward re-checks both predicates:
+
+  - **Grant.** The entry must carry `operator-payload:sign` — the same permission the
+    controller gates the signing ceremony on. The controller builds the roster from
+    accounts holding that permission (root-scope administrators hold every permission),
+    and excludes disabled accounts, whose credentials survive the disable by design
+    (Issue #3126).
+  - **Tenant.** The entry names its owning account's tenant path, or is marked root
+    scope. A steward accepts a root-scope entry fleet-wide, and a tenant-scoped entry
+    only when its own tenant path is that tenant or a descendant of it. Without this the
+    roster's fleet-wide reach would let a credential registered in one tenant authorize
+    execution in another.
+
+  The manifest is also freshness-bound, because it travels inside the command and is
+  otherwise a bearer artifact: it carries an `issued_at` instant, the steward refuses one
+  older than 15 minutes or dated in its own future, and it keeps a high-water mark of the
+  newest instant accepted so a captured older manifest — the copy that still lists a
+  since-removed credential — cannot roll it back. Without that, de-registering a
+  compromised passkey or disabling its account would never take effect on a steward,
+  since `version` counts revoked certificate serials and does not move when the roster
+  changes. The high-water mark is process-scoped; after a restart the age bound alone
+  applies until the first manifest is accepted.
+
+  Unlike the X.509 path, WebAuthn verification has no "no CA roots configured"
+  relaxation: the public key has no other source, so it fails closed rather than silently
+  skipping verification.
+
+Residual-risk profile (Issue #3695's own note, restated here for the verifying side): a
+WebAuthn private key is hardware-bound and never exists server-side at all, so the
+"controller durably retains an extractable private key indefinitely" problem the
+credential cutover (#3696) closes for the mTLS path is structurally impossible on the
+WebAuthn path. What remains is the shallower risk that a compromised controller mints a
+bogus WebAuthn registration — bounded by `webauthn:register`'s existing `AssuranceStrong`
+gate — not the deeper risk of silently stealing a years-old credential.
+
+#### Operator Certificate Revocation Consumption (Issue #3699)
+
+Delivery (Issue #4400): `features/steward/client/client_transport.go`'s
+`setupCommandHandler` fetches the manifest on startup and refreshes it every 5 minutes
+for the life of the connection, from `GET /api/v1/public/steward-revocation-manifest`
+(`features/controller/api/handlers_revocation_manifest.go`'s
+`handleGetStewardRevocationManifest`) — a route separate from the fleet-wide,
+`certificate:list`-gated `GET /api/v1/certificates/revocation-manifest` above, because a
+steward's mTLS certificate carries no CFGMS admin marker and cannot authenticate against
+`certificate:list` at all. The steward route instead authorizes the caller from its own
+peer certificate: the controller resolves the certificate's CommonName to a registered
+steward via the fleet registry, and refuses any certificate — admin-marked or not — that
+does not resolve to one.
+
+The response is filtered per requesting steward, unlike the fleet-wide manifest:
+`revoked_serials` is served in full (a narrower list could only reduce coverage, and
+`VerifyManifest` only ever unions serials into what it already believed revoked, never
+replaces them, so full-list-per-steward is the safe default), while
+`authorized_webauthn_credentials` is narrowed to operators whose tenant scope covers the
+requesting steward's tenant path — the same rule the WebAuthn path above documents for
+how a steward applies `tenant_id`/`root_scope` once it has verified a manifest, applied
+here server-side so a compromised steward never receives another tenant's operator
+credentials in the first place. `webauthn_relying_party` is unchanged. Each filtered
+response is signed fresh with the controller's current signing certificate, so
+per-steward filtering never requires an unsigned or re-signed-by-a-relay payload.
+
+A fetch failure only logs and leaves `IsRevoked` answering from whatever manifest, if
+any, was last verified — execution availability never depends on this round trip
+succeeding, matching every other design choice on this path (see below). Epic #3571,
+previously cited here as the tracker for this gap, is closed with all sub-issues
+complete and did not add this delivery path; #4400 is the issue that did.
+
+The X.509 path above verifies an operator certificate's chain, EKU, expiry, and
+payload-signing marker — none of which change the moment a certificate is revoked, since
+revocation is deliberately independent of the certificate's own claims about itself.
+`features/steward/operatorroster.RevocationVerifier` is the component that closes that
+gap: it verifies the signed revocation manifest fetched as described above (the same
+manifest shape the WebAuthn path's embedded-manifest roster is drawn from, just a
+different, steward-initiated delivery route) against the steward's own pinned CA roots,
+and `verifyOperatorCert` adds `IsRevoked(serial)` as a final check after the marker check
+succeeds — so that once a manifest reaches the steward, a certificate that is otherwise
+perfectly valid is rejected when its serial appears in it.
+
+Deliberately, this is never a live controller assertion made at verification time: the
+steward checks the last manifest it independently verified for itself, using the same
+`controllerCARoots` chain-of-trust `verifyOperatorCert` already uses for the certificate
+itself. Checking revocation live against the controller on every command would make
+execution availability depend on a controller round trip for exactly the case (a
+leaked/stolen operator credential) most likely to coincide with an attacker also
+controlling or blocking that connection.
+
+`VerifyManifest` mirrors `stewardtrust.StewardTrustEnforcer.VerifyForLoad`'s mode dispatch
+(`module_trust.mode`, `features/steward/modules/trust/trust.go`):
+
+- **strict.** The manifest's `signer_certificate_pem` must chain to the steward's pinned
+  CA roots with a CodeSigning EKU, and its signature must verify against that certificate
+  — a manifest signed by a key that does not chain to the pinned root is rejected even if
+  the controller serving it claims validity. A steward holding no usable CA bundle rejects
+  every strict-mode manifest instead of verifying it: the pinned pool is the only
+  acceptable trust anchor here, and `crypto/x509` reads an absent pool as "use the host's
+  system roots", which would let any platform-trusted CA with a CodeSigning EKU issue a
+  manifest this steward would honour.
+- **controller** (default). The manifest is applied without independently verifying its
+  signature — the steward has already decided to trust the controller's own judgment for
+  other artifacts under this mode, so it does the same here.
+- **bypass.** A genuine no-op (development use only): the manifest is never applied and
+  `IsRevoked` stays inert.
+
+In strict and controller mode, anti-rollback is enforced on `version` (the manifest's own
+revoked-serial count, which `Manager.Revoke` only ever grows): a manifest older than the
+last one this steward accepted is rejected, so a captured, still-validly-signed older
+manifest — one missing revocations the steward has already learned about — cannot roll it
+back. `IsRevoked` answers `false` until the first manifest is successfully verified,
+matching the same graceful-degradation posture as an unconfigured `controllerCARoots`
+elsewhere in this verification path: it is a defense-in-depth layer on top of chain/EKU/
+marker verification, not the only check standing between an attacker and execution.
+
+### Remote Terminal
+
+The controller can establish an interactive terminal session through the steward for live troubleshooting. The steward provides a secure, authenticated shell session back to the administrator.
+
+**Operator-signed envelope (Issue #5137):** the steward requires an operator-signed envelope for every `open_terminal` command (see [Operator-Signed Envelope](#operator-signed-envelope-issue-4622)); a controller alone cannot open a shell. `handleOpenTerminal` (`features/steward/commands/open_terminal.go`) runs this check before the shell allowlist, before logging session details and before the dialer. It rejects an empty or omitted `shell`, rebuilds the signed content with `operatorpayload.TerminalContent`, rejects an envelope valid for longer than `operatorpayload.TerminalEnvelopeMaxTTL`, then verifies with exactly `operatorpayload.TerminalShell`. The signed content binds the verb, the steward ID and the shell; it does not bind the session ID, which does not exist when the operator signs. The single-use nonce cache bounds a captured proof to one terminal. `TerminalShell` is refused as the shell of an `execute_script` command, like `ActionShell`. Every failure wraps `ErrUnauthenticatedCommand` and the PTY bridge is never started. A steward on this version refuses terminals from a controller that does not send the proof. The shell allowlist still applies after the envelope.
+
+**Admin session lifetime (Issue #5140):** a terminal session ends when the admin session that opened it is revoked or expires. While the relay runs, the controller re-checks that session (web cookie or cfg Bearer) against the shared session store at least once per ping interval (54 seconds), so a revocation made on another controller node is detected. On failure it sends the browser an error frame, closes the WebSocket with a policy-violation close, and ends the steward's Terminal gRPC stream so the steward tears its PTY down. The `terminal.session.end` audit event records the reason `admin session revoked or expired` and the recording is flushed as for any other close. Principals with no session (mTLS admin certificate, API key) are not re-checked.
+
+**Local disable (Issue #5146):** `steward.cfg` accepts `steward.remote_terminal.enabled: false` to make an endpoint refuse remote terminal entirely. The value is read only from the local `steward.cfg` at start-up and passed to the transport client through `TransportConfig.RemoteTerminalDisabled`; the controller-delivered config path (`FromProto`, convergence) never reads or changes it, so the controller cannot turn it back on. When absent, remote terminal stays enabled. When disabled, the `open_terminal` handler stays registered but rejects every command as its first step — before the envelope check, shell lookup or dialer — with the error `remote terminal disabled by local policy`, so the controller reports a failed command rather than "no handler for command type". Each refusal is logged at Info with the command ID and sanitized session ID. The `file` module refuses any resource that targets a boot-config file (`steward.cfg`, `<hostname>.cfg`) or its directory, so a pushed `steward.cfg` or a delivered resource aimed at the boot-config directory is refused (see the scope statement below); a boot-config file that exists but is shadowed by a higher-priority one is logged at Warn at start-up. The guard also protects the boot config the running steward loaded (recorded process-locally at start-up) and `<hostname>.cfg` for the hostname in force at that time, so a later host rename does not make either writable; the `hostname` module refuses to rename the host to a name whose `<name>.cfg` already exists in a boot-config directory (`ErrHostnameBootConfigConflict`), so a delivered resource cannot choose the next boot config. There is no runtime toggle; changing it needs a steward restart.
+
+**Scope of the switch (Issue #5262):** the local disable is a local privilege boundary. It stops any account that cannot deliver code to the steward from turning remote terminal on: no controller API path outside the permissions listed below can change the setting, because the value is read only from the local boot config and the `file` module refuses boot-config paths. It does not stop a party that can deliver code to the steward, or one that controls the controller. A delivered `file` resource runs as root/SYSTEM and takes its allowed base path from the resource itself, so an account holding a code-delivery permission can write a root-run job that rewrites `steward.cfg`; such an account is at code-delivery level, the same as an account that runs scripts, and is not what this switch is meant to stop. Those cases are bounded by the script-signing and module-trust controls ([Operator-Signed Envelope](#operator-signed-envelope-issue-4622), `module_trust.mode: strict`, ADR-006), not by this switch.
+
+Code-delivery permissions (every `requirePermission` route in `features/controller/api/routes*.go` whose handler delivers config, scripts, modules, installers or a terminal session to a steward). A test checks each ID against `knownPermissions` and the named route file:
+
+<!-- code-delivery-permissions:begin -->
+| Permission ID | Route file | Delivers |
+|---|---|---|
+| `config:push` | `routes_config_push.go` | config push |
+| `steward:write-config` | `routes_stewards.go` | steward config update |
+| `steward:delete-config` | `routes_stewards.go` | steward config removal |
+| `jobs:write` | `routes_jobs.go` | rolling config rollout (`CommandSyncConfig` batches) |
+| `steward:execute-scripts` | `routes_runs.go`, `routes_stewards.go` | scripts and commands |
+| `script:admin` | `routes_scripts.go` | script library privilege |
+| `module:approve` | `routes_module_approvals.go` | module bundles |
+| `terminal:create` | `routes_terminal.go` | terminal session |
+| `installer:upload` | `routes_installer_artifacts.go` | installer artifacts |
+| `installer:delete` | `routes_installer_artifacts.go` | installer artifacts |
+| `installer:publish:steward` | `routes_steward_binaries.go` | steward binaries |
+| `installer:dispatch:steward` | `routes_rollout.go`, `routes_steward_upgrade.go` | steward upgrades and rollouts |
+<!-- code-delivery-permissions:end -->
+
+### Steward Actions (`steward_action`, Issue #4623)
+
+`steward_action` is a structured command with no script text: its params are `execution_id`, `verb`, `target` (`{kind, name}`) and `parameters`, plus the operator envelope proof (see [Operator-Signed Envelope](#operator-signed-envelope-issue-4622)). The handler (`features/steward/commands/steward_action.go`) rebuilds the signed content with `operatorpayload.ActionContent` and verifies it with exactly `operatorpayload.ActionShell` before anything else, rejects an envelope valid for longer than `operatorpayload.ActionEnvelopeMaxTTL`, then decodes the params strictly. An unknown verb, a target name outside `^[A-Za-z0-9_.@:-]{1,256}$`, a wrong target kind or any unexpected param key rejects the whole command before any OS call.
+
+Verb allowlist (closed):
+
+| Verb | Target kind | Effect |
+|------|-------------|--------|
+| `service.start` | `service` | Start the service |
+| `service.stop` | `service` | Stop the service |
+| `service.restart` | `service` | Stop, then start the service |
+| `process.end` | `process` | End the process: SIGTERM, then SIGKILL after a bounded wait (Linux); `TerminateProcess` (Windows) |
+| `process.suspend` | `process` | Suspend the process: SIGSTOP (Linux); `NtSuspendProcess` (Windows) |
+| `process.resume` | `process` | Resume a suspended process: SIGCONT (Linux); `NtResumeProcess` (Windows) |
+
+Service control uses in-process OS APIs only: systemd D-Bus (`StartUnit`, `StopUnit`, `RestartUnit`) on Linux and the Service Control Manager (`svc/mgr`) on Windows. macOS returns the typed `unsupported` result. Nothing shells out.
+
+**Self-protect:** stop and restart of the steward's own service are refused with result code `self_protect`, and nothing is changed. On Linux a unit is the steward's own when its `MainPID` is the steward's PID or the steward's cgroup names it; on Windows when the service is `CFGMSSteward` or its `ServiceStatusProcess.ProcessId` is the steward or its launcher parent. If the steward cannot determine this, the action fails closed (`failed`).
+
+**Process verbs (Issue #4624):** the target name is the decimal PID and the single parameter `image` is the process image name the operator saw (restart is deliberately absent: it would need the original command line; a service's main process restarts through `service.restart`). Process control uses `syscall.Kill` signals on Linux and `OpenProcess`/`TerminateProcess`/`NtSuspendProcess`/`NtResumeProcess` on Windows; macOS returns `unsupported`. Nothing shells out (no `taskkill`, no `kill`). The steward refuses the PID of itself, of its parent (service host or supervisor), PID 0, PID 4 on Windows and PID 1 on Linux with `self_protect`. PID-reuse guard: the live image name of the PID (executable base name, or the kernel comm name on Linux; case-insensitive on Windows) must equal `image`, otherwise nothing is touched and the result is `process_changed`. On Windows the check and the action use one process handle; on Linux `end` re-verifies the image before escalating to SIGKILL.
+
+**Result:** the outcome is reported through the existing `EventScriptCompleted` event, with `Details` of `execution_id`, `exit_code` (0 for `ok`, 1 otherwise) and `result_code`: `ok`, `self_protect`, `unsupported`, `not_found`, `permission_denied`, `process_changed` (process verbs) or `failed`.
+
+### Live Telemetry Stream
+
+The controller can subscribe to a live feed of the steward's process and service
+telemetry via the `TelemetryStream` bidi RPC. While subscribed, the steward
+periodically calls `Snapshot()` (from `features/steward/telemetry`) and streams
+the result. No collection happens between subscriptions — see
+[Live Telemetry Snapshots](#live-telemetry-snapshots-2763--2764--epic-2738)
+above for the full specification.
+
+### Orchestrated Operations
+
+The steward participates in multi-node operations coordinated by the controller (rolling updates, coordinated reboots, cluster-aware operations). The steward applies its own cfg — the controller determines sequencing and timing across devices. See the [controller operating model](controller-operating-model.md) for orchestration details.
+
+#### Cluster-Role Quorum (`dna.cluster_role`)
+
+When multiple stewards form a redundancy cluster (Hyper-V cluster, SQL Availability Group, domain controller site, etc.), rolling updates must never take down all cluster members simultaneously. The controller enforces this via the `dna.cluster_role` DNA attribute and the `DnaRoleQuorumChecker`.
+
+**Setting the attribute:**
+
+Add `cluster_role` to the steward's DNA configuration:
+
+```yaml
+dna:
+  cluster_role: hyperv-cluster
+```
+
+The value is a free-form string — pick a name that identifies the redundancy domain. All stewards that share a value form one group; stewards with no `cluster_role` are treated as independent.
+
+**Example role values:**
+
+| Value | Typical members |
+|-------|----------------|
+| `hyperv-cluster` | Hyper-V failover cluster nodes |
+| `sql-ag-primary` | SQL Server Availability Group members |
+| `dc-site-a` | Domain controllers in site A |
+
+**Quorum guarantee:**
+
+When a rolling batch job runs, the `DnaRoleQuorumChecker` partitions the fleet such that **no two stewards with the same non-empty `cluster_role` appear in the same batch wave**. A cluster with four Hyper-V nodes gets one node per wave regardless of the requested batch size — ensuring at least three nodes remain operational during any wave.
+
+Stewards without a `cluster_role` are placed freely into available slots alongside role-bearing stewards, filling up to the requested batch size.
+
+### Live Telemetry Snapshots (#2763 / #2764 / epic #2738)
+
+For the Web UI live-operations ("task manager") view, the steward exposes an
+on-demand, point-in-time snapshot of its **running processes** (per-process CPU%,
+memory, disk I/O; network counters are reserved — see below) and **installed
+services** (name, run state). This is `features/steward/telemetry` — distinct from
+`features/steward/dex` (the DEX experience-signal ETW/PSI spike) and from the
+convergence loop.
+
+Key properties:
+
+- **On-demand, subscription-scoped.** The collector is a callable snapshot
+  function that does **no work unless invoked** — no background goroutine, no
+  event stream. It runs only while a controller subscriber is attached; between
+  calls it costs nothing.
+- **Usermode, in-process, no shell-out.** Linux reads `/proc` (process table) and
+  the systemd D-Bus `Manager.ListUnits` (services); Windows uses the
+  `NtQuerySystemInformation` process table and the Service Control Manager
+  (`svc/mgr`). No kernel driver, no eBPF, no ETW, and no `ps`/`tasklist`/
+  `systemctl`/`wmic` — matching the steward execution-path posture.
+- **Sub-1% sustained CPU budget.** Measured at a 1 Hz poll cadence: ~0.6% (Windows)
+  / ~0.8% (Linux) of a single core. `NtQuerySystemInformation` is used on Windows
+  in preference to the WMI perf-object query specifically because the latter
+  measured ~20× over budget.
+- **Read-only.** State observation only — no service start/stop/restart (that
+  overlaps the `service` stdlib module's desired-state enforcement, a separate
+  boundary).
+- **Join-able entities.** Each process/service carries an ADR-017 object-canonical
+  `fragment_id` (`process:<name>`, `service:<name>`) so a controller can join the
+  telemetry to DNA + the topology graph. Nothing here writes DNA.
+
+Per-process **network** byte accounting is structurally present in the wire format
+but not populated by this usermode collector — it requires kernel-assisted tracing
+(eBPF / the Windows Kernel-Network ETW provider), reserved for a future story.
+
+Each snapshot also carries **host-level totals** (`host`, proto `HostTotals`):
+whole-host CPU percent, memory used/total, disk read/write bytes per second,
+disk used/total, and network rx/tx bytes per second (non-loopback interfaces).
+Rates are deltas between consecutive snapshots — 0 on the first snapshot and 0
+(never negative or NaN) when a counter wraps or resets. Linux reads
+`/proc/stat`, `/proc/meminfo`, `/proc/diskstats`, `/proc/net/dev`; Windows uses
+`GetSystemTimes`, `GlobalMemoryStatusEx`, `NtQuerySystemInformation`
+(`SystemPerformanceInformation`) and `GetIfTable2Ex`. Host totals are telemetry,
+not DNA, and are not persisted. An older steward sends no `host`; the controller
+WebSocket JSON then omits it.
+
+#### TelemetryStream RPC (#2764)
+
+The steward exposes live telemetry over the data-plane `TelemetryStream` bidi RPC
+(`rpc TelemetryStream(stream TelemetrySnapshot) returns (stream TelemetryRequest)`).
+The steward dials out and is the *sending* side — it emits `TelemetrySnapshot`
+frames and receives `TelemetryRequest` control messages from the controller.
+
+Subscription lifecycle (steward-side):
+
+1. The steward opens the stream and enters an idle receive loop.
+2. On an inbound `TelemetryRequest{subscribe: true, interval_ms: N}`, the steward
+   starts a ticker at `max(N, 1000)` ms and calls `Snapshot()` on each tick,
+   streaming the result to the controller.
+3. On an inbound `TelemetryRequest{subscribe: false}` or stream teardown, the
+   ticker is stopped. No further `Snapshot()` calls occur until the next
+   subscribe=true.
+
+The 1 s floor on `interval_ms` is enforced steward-side as defense in depth —
+the actual untrusted-input boundary is the controller-facing web API (story #2765).
+The stream reconnects with exponential back-off on failure (same pattern as
+`EventEmitter`/`LogStream`).
+
+## Registration
+
+How a steward joins a controller.
+
+### Controller Anchor (Build Time)
+
+The steward binary is built with the controller's URL compiled in at link time (`-ldflags="-X main.ControllerURL=..."`). A given steward binary will only ever talk to its compile-time controller. Scope: per controller (or controller cluster), not per tenant — one steward binary serves all tenants the controller manages.
+
+A steward binary connects to exactly one controller URL.
+
+**Behaviour in a controller cluster (story #3096).** Measured against the real
+3-node cluster, a single controller URL survives a *leader* failover. A steward
+attached to a surviving node keeps its gRPC-over-QUIC ControlChannel open across
+a Raft re-election and misses no heartbeats — the leader changing is invisible
+to it, because every node serves steward traffic directly against the shared
+backend and no request is forwarded to the leader. Measured: leader SIGKILLed,
+re-election 12.02s, steward's next heartbeat landed 6s after the kill, zero
+reconnects (`test/e2e/ha/steward_continuity_real_test.go`).
+
+When the steward's **own** node fails, the steward retries that URL until the
+node returns. To keep stewards attached through a node outage, place an LB/VIP
+in front of the cluster and point `--controller-url` at it; see runbook §6 and
+the [controller cluster walkthrough](../deployment/controller-cluster/walkthrough.md).
+
+### Registration Credentials
+
+Two credential flavors, both flow through the same registration API:
+
+1. **Perennial registration tokens** — generated on the controller via `cfg token create --expires=<duration>`. Suitable for manual onboarding, small fleets, or time-bounded provisioning windows. Tokens survive multiple registrations (never consumed on use); rotate with `cfg token rotate --tenant-id <id>` to atomically invalidate all prior tokens and issue a new one. Expiry enforces time bounds.
+2. **Long-lived tenant/group registration codes** — durable random opaque strings stored as a join field on the controller's tenant/group record. Suitable for RMM/GPO mass deployment where the same code is baked into a deployment script and reused by many devices. On registration the controller looks up the code in its records and assigns the steward to the matching tenant/group; the code itself carries no meaning, so renames of the tenant/group don't break previously issued codes.
+
+The administrator chooses which flavor fits the deployment workflow. Both arrive at the steward as a plain string in a root/admin-only file passed via `--regtoken-file <path>` (or `cfgms-steward install --regtoken-file <path>` for the OS-service install).
+
+### Registration Flow
+
+1. Administrator creates a registration token or code on the controller.
+2. Steward is started with `--regtoken-file <path>` naming a root/admin-only file that holds the token.
+3. Steward contacts its compile-time controller URL (HTTPS), submits the token.
+4. The steward generates its mTLS keypair locally and submits the registration request with a `csr_pem` — a PEM-encoded certificate signing request over that keypair's public half; the private key never crosses the wire (Issue #3780). Controller validates the token (perennial token: check expiry and revocation; long-lived code: look up the matching tenant/group record), validates the CSR (rejects a request with no `csr_pem` or one carrying embedded private-key material), and applies the registration approval workflow:
+   - **Approved** (HTTP 200): controller signs the submitted CSR into an mTLS certificate scoped to the steward's tenant/group identity and returns the full `RegistrationResponse` with `client_cert` and `ca_cert`. When the controller's cert manager is backed by an imported regional intermediate rather than a root CA, the response also carries `issuer_chain` — the PEM-concatenated chain from `client_cert`'s direct issuer up to (but not including) `ca_cert` (Issue #3778). Self-hosted, root-only controllers omit the field; `ca_cert` is always the ultimate trust root, never an intermediate.
+   - **Quarantined** (HTTP 202): controller returns a `RegistrationPendingResponse` with a `pending_id` and `status: "pending"`. No certificates are issued. The steward enters a **Phase 2 poll loop** (see below).
+   - **Rejected** (HTTP 403): registration is denied; steward exits.
+5. **Phase 2 — Poll loop (quarantine path):** The steward polls `GET /api/v1/registration/status/{pending_id}` using `Authorization: Bearer <regToken>`. Poll interval = `baseInterval + rand(jitter)` (default 90 s base, 30 s jitter). Possible outcomes:
+   - `{"status":"pending"}` (HTTP 200): operator has not yet acted — continue polling.
+   - `{"status":"claimed", "client_cert":..., "issuer_chain":..., ...}` (HTTP 200): operator approved; the controller signs the same CSR submitted in step 4 and returns the resulting cert bundle exactly once, with the same `issuer_chain` behavior described above. The steward combines the returned `client_cert` with the private key it generated in step 4 to complete its credential set, and proceeds to step 6.
+   - HTTP 410 Gone: steward already collected the cert (duplicate poll) — stop polling.
+   - `{"status":"denied"}` or `{"status":"expired"}` (HTTP 200): registration was rejected — steward exits or re-registers.
+   The cert is signed on first approved poll (sign-on-claim); the controller never generates or sees a private key for this credential.
+   Registration-refresh follows the same CSR-based shape (Issue #3781): the steward
+   generates a **fresh** local keypair for the renewed credential and submits its
+   public half as `csr_pem` alongside the refresh proof-of-possession signature;
+   `RefreshCompleteResponse` carries the same `client_cert`/`ca_cert`/`issuer_chain`
+   shape as registration, with no `client_key` field, for the same reason.
+6. On approval: steward imports the issued cert into its local `cert.Manager` (stored under the platform cert dir) for use in TLS handshakes, records the node ID, and establishes a gRPC-over-QUIC transport connection.
+6. Steward checks for a cfg from the controller.
+7. Normal operation begins.
+
+#### Device key algorithm on the wire (ADR-011 Amendment 3)
+
+The registration request and the `/refresh/complete` and `/refresh/claim` requests carry an optional `key_algorithm` field: `ed25519` or `ecdsa-p256`. An absent or empty value means `ed25519`, so stewards that predate the field keep working unchanged. Beside it, `identity_key_pub` is the base64 raw 32-byte key for `ed25519`, or the base64 PKIX (SubjectPublicKeyInfo) DER encoding for `ecdsa-p256`; `device_id` is the lowercase hex SHA-256 of those bytes. The `pop` signature is over the same 32-byte digest for both algorithms; for `ecdsa-p256` it is an ASN.1 DER ECDSA signature with the digest as the hash input. The controller refuses a request whose algorithm differs from the one stored for the `device_id`. Controller behavior is in the [Controller operating model](controller-operating-model.md). Stewards send `key_algorithm` and `key_protection_level` on every registration request.
+
+**Device key store.** The steward's device key sits behind the `identity.KeyStore` interface (`pkg/registration/identity`), which is algorithm-neutral and backend-neutral: `GenerateOrLoad` returns a `crypto.PublicKey` and an algorithm (`ed25519` or `ecdsa-p256`); `Algorithm()`, `ProtectionLevel()` (`file`, `tpm` or `secure-enclave`), `DeviceID()`, `Sign`, `Regenerate` (clone re-key) and `RemoveKey` (prepare-image) complete it. `Sign` signs wherever the key lives and never exposes private key material. `identity.Open` selects the backend:
+
+- If `device_identity.enc` exists, the file backend is used and no hardware backend is probed.
+- If the stored identity (`steward-identity.json`) records a hardware `key_protection_level`, only that backend is used. If it cannot load, `Open` returns an error, the steward retries with backoff and logs the reason, and no file key is created, because a new key would mint a new DeviceID.
+- Otherwise (first enrollment) registered hardware backends are tried in order, and an absent or failing backend falls back to the file backend with the reason logged. Fallback is decided once, at first enrollment.
+
+The file backend keeps the AES-256-GCM / DPAPI encrypted `device_identity.enc`, uses `ed25519`, and reports `key_protection_level: file`. Hardware backends register through a per-platform hook.
+
+**Linux TPM 2.0 backend.** On Linux, `Open` first tries the TPM through the kernel's resource-managed device `/dev/tpmrm0`. The device key is a NIST P-256 signing key created inside the TPM (`fixedTPM`, `fixedParent`, `sensitiveDataOrigin`, sign-only) under a storage primary derived from the owner hierarchy. The private key never exists outside the TPM. `Sign` passes the 32-byte digest to `TPM2_Sign` (ECDSA/SHA-256) and returns an ASN.1 DER signature. The steward reports `key_algorithm: ecdsa-p256` and `key_protection_level: tpm`. Only one file is written to the identity directory, `device_identity_tpm.blob` (mode 0600): the key's public area and its private blob, which is wrapped by that TPM's storage seed. Copied to another machine, or to a TPM that has been cleared, the blob does not load. The primary is re-derived and every transient handle is flushed on each operation, so the steward holds no TPM object slots between signatures, and it uses a file rather than a persistent handle so that prepare-image can remove the key without TPM owner authorization. `Regenerate` writes the new blob to a temporary file and renames it over the old one; `RemoveKey` and prepare-image delete it.
+
+The steward falls back to the file backend, with the reason logged and enrollment unaffected, when there is no `/dev/tpmrm0` (no TPM, or a TPM 1.2 device), the service account cannot open it, or any TPM command fails during first enrollment. A `device_identity_tpm.blob` that exists but cannot be loaded is never replaced by a new key: the load error is surfaced, so the steward does not mint a new DeviceID and orphan its enrollment. An existing `device_identity.enc` is never migrated into the TPM.
+
+**Windows TPM 2.0 backend (Platform Crypto Provider).** On Windows, `Open` first tries the TPM through the CNG Platform Crypto Provider (`Microsoft Platform Crypto Provider`, reached through `ncrypt.dll`). The device key is a persisted NIST P-256 (`ECDSA_P256`) key with export policy none and key usage signing only, created in the machine key store (`NCRYPT_MACHINE_KEY_FLAG`), which LocalSystem and an elevated prepare-image can both reach. The key name is `cfgms-steward-device-identity-` followed by 16 hex characters of the SHA-256 of the identity directory's absolute, lower-cased path, so each identity directory owns exactly one key and removing one directory's key never touches another's. Moving the identity directory therefore changes the key name; a steward whose stored identity records `tpm` then reports the key unavailable rather than minting a new one. Nothing is written to the identity directory: the provider holds the TPM-wrapped key, and no private key material is on disk in a usable form. The public key is exported as a `BCRYPT_ECCPUBLIC_BLOB` and converted to PKIX DER; `Sign` passes the 32-byte digest to `NCryptSignHash` unchanged (no second hash) and converts its raw `r||s` signature to ASN.1 DER. The steward reports `key_algorithm: ecdsa-p256` and `key_protection_level: tpm`. Provider and key handles are opened per operation and freed before it returns.
+
+At first enrollment a self-test must pass before the key is adopted: create and finalize the key, reopen it by name (same public key), sign a digest, verify the signature. Any failure deletes the key just created and `Open` falls back to `file` with the CNG `SECURITY_STATUS` in the log. That covers a host with no TPM or a TPM 1.2, a disabled TPM Base Services, a process that may not use the machine key store, and any CNG step that fails. Enrollment is unaffected. A key that exists but cannot be opened or used is an error and is never replaced, because a replacement would change the DeviceID. CNG cannot rename a key, so `Regenerate` creates and self-tests the replacement in a second slot (the same name with `-alt` appended) and then deletes the old key. An interruption leaves the old key or the new one, never neither. `RemoveKey` and prepare-image delete both slots. An existing `device_identity.enc` is never migrated into the TPM.
+
+Tests run the same CNG code against the `Microsoft Software Key Storage Provider` on every native Windows CI leg: create, reload, public export, refused private export, sign, regenerate and delete. On a runner without a TPM they also check that `Open` with the Platform Crypto Provider falls back to `file`. `TestPCP_RealTPM`, selected with `CFGMS_TEST_PCP_TPM=1`, runs the backend against the host's TPM.
+
+### Reconnecting with a Stored Identity
+
+**A healthy, online steward is never left unable to get back in.** When its identity cannot be trusted it goes back through the controller's approval process — trusted by default or queued for an operator, per tenant policy — but it never ends up stuck (#4532).
+
+On every subsequent startup the steward first reconnects with its stored identity — the identity record (`steward-identity.json`) and the client certificate in its `cert.Manager` store — skipping HTTP registration (#1719). When that fails, it walks this sequence each connect cycle:
+
+1. **Stored identity.** Dial the controller's control plane with the stored identity for up to a **5-minute connect budget** (the budget is checked between dial attempts, so one cycle can run up to about 20 s past it). The controller refusing the control channel with `PermissionDenied` or `Unauthenticated` — which it does only after authenticating the TLS peer and looking the steward up (unknown, deregistered or revoked steward) — ends this step at once. A refusal that carries the `IDENTITY_IN_USE` reason (`ErrIdentityInUse`) does not go to step 2; see [Refused as a copy](#refused-as-a-copy-identity_in_use).
+2. **Re-admission with the device key.** If the stored identity was refused, is locally unusable (e.g. an expired client certificate), or stayed unreachable for the whole budget, the steward asks to be re-admitted through the registration-refresh handshake (ADR-011), proving its identity with the device key. It ties back to the same steward record, so it never creates a duplicate. Tenant policy decides:
+   - **Issued:** a new certificate; the steward reconnects with it.
+   - **Queued for approval:** the steward keeps the pending ID and the private key of the CSR it submitted (`steward-refresh-pending.json`, 0600), and each later cycle collects the outcome through `POST /api/v1/stewards/{device_id}/refresh/claim` instead of filing a new request. Approval delivers the certificate signed from that CSR.
+   - **Refused** (revoked, tenant policy `reject`, or an operator rejected it): the refusal holds, but the steward keeps running and asks again every hour, so a later approval needs no one at the device.
+   - **Lost delivery:** an approved certificate is delivered once; if that response is lost, the claim answers "not available" and the steward files a new request — one more approval under `require_approval`.
+   - **Unknown device** (the controller has no record of it): go to step 3.
+   - **No answer** (the controller's HTTPS side is unreachable too): retry the stored identity next cycle.
+
+   A new re-admission request caused by an unreachable control plane (rather than a refusal) is paced: the first waits a random delay of up to 30 minutes, later ones an hour plus up to 30 minutes, so a fleet-wide control-plane outage does not re-admit in lockstep. The pace is persisted (`steward-readmit-pace.json`), so restarts do not reset it. A single steward whose controller is gone therefore waits the 5-minute budget plus up to 30 minutes before its first request. A refusal re-admits at once, and collecting a request already filed is never paced. On the controller, a device's new request supersedes its open one, so the approval queue normally holds one request per device (the supersede is a tenant-wide list-then-update, so two simultaneous requests from one device can briefly leave two open).
+3. **Registration with the configured token**, through the normal registration approval workflow. Tokens are reusable, so this spends nothing. A revoked or expired token is refused and the steward keeps retrying with it — reinstall it with a valid token. A `409` — the controller already holds this device's record, typically because the stored identity record was lost — routes back to step 2, and the identity is rebuilt from the steward ID, tenant and transport address the re-admission response carries.
+
+The stored identity is never deleted until a replacement is issued, and each cycle tries it again first, so a controller that comes back is used as soon as it answers. TLS handshake failures are not treated as refusals: they have transient causes (a controller with a skewed clock rejects a valid client certificate; a TLS-intercepting proxy presents an untrusted server certificate), so they fall under the connect budget and end, at worst, in a visible re-admission request on the controller.
+
+#### Refused as a copy (`IDENTITY_IN_USE`)
+
+When the controller decides the connection is a copy of an already-approved identity (ADR-034 §2/§4) it refuses the control channel with `PermissionDenied` carrying an `ErrorInfo` detail, reason `IDENTITY_IN_USE`, domain `cfgms.io`. The steward surfaces it as `ErrIdentityInUse`, which still satisfies `errors.Is(err, ErrIdentityRejected)`. It differs from every other refusal because the **device key itself was copied**: re-admission with that key (step 2) would only re-present the copy to the refresh path. So the steward does not re-admit. Once per refusal it:
+
+1. writes the clone marker `steward-clone-of.json` (0600) holding the original steward ID from the stored identity;
+2. generates a new device key (`FileKeyStore.Regenerate`: the new encrypted key replaces the old one atomically, and the old key is never reused);
+3. discards the stored identity and any re-admission or registration-pending state, which belong to the original;
+4. registers with the configured token, sending the new `device_id` and `identity_key_pub` and `clone_of` set to the original steward ID, then waits in the normal device approval queue and claims its certificate like any new device.
+
+The marker is cleared once the new identity is connected. A steward that stops after step 2 starts again, finds the marker, skips the stored identity and re-admission entirely and registers with the new key — it never falls back to the copied one. The original device is unaffected.
+
+The controller sends nothing when it admits a control channel; a refusal arrives on the first receive. The stored-identity connect therefore waits up to a fixed **10-second admission window** after the stream opens: a refusal inside the window is a refusal, and silence for the full window counts as admitted. Every admitted stored-identity reconnect pays that 10 s before the connect completes (heartbeats do not end the wait). Connects right after a fresh registration use no window and no budget.
+
+A refusal that arrives mid-session (a steward deregistered while connected) keeps the steward in its reconnect loop; it does not re-admit in place until the process restarts.
+
+The only state that needs someone at the device is an install-pinned steward whose controller now presents a certificate from a different CA: the steward cannot trust that controller over HTTPS, by design, and is reinstalled with the new CA.
+
+### Approval Workflow
+
+Registration approval runs through the controller's workflow engine via the `RegistrationApprovalHook`. Built-in workflows:
+
+- **`auto-approve`** (development default): accepts any valid token immediately.
+- **`manual-review`** (production): pauses the registration workflow pending operator action via `cfg registration approve <id>` or `cfg registration deny <id>`.
+
+Operators can also write custom workflows that implement arbitrary policy (e.g., auto-approve `tenant=lab` registrations, manual-review everything else).
+
+### Bootstrap TLS Trust
+
+The initial registration call is an HTTPS request to a controller whose TLS certificate is signed by a CA the steward has never seen. By default the steward validates against system root CAs. For MSPs that deploy controllers with a private CA (self-signed or internal PKI), set:
+
+```
+CFGMS_HTTP_CA_CERT_PATH=/path/to/controller-ca.crt
+```
+
+The steward loads the PEM-encoded CA certificate at startup and uses it exclusively to verify the controller's TLS certificate during registration. Once registration succeeds, all subsequent communication uses the mTLS certificates issued by the controller — the CA cert file is not needed again.
+
+The controller writes its CA certificate to `<CFGMS_CERT_PATH>/ca/ca.crt` on first boot. In Docker or containerised deployments, mount the controller's cert volume read-only into each steward container and point `CFGMS_HTTP_CA_CERT_PATH` at the mounted path.
+
+TLS verification is always enforced. There is no environment variable to disable it.
+
+**Chain-aware verification (Issue #3778).** The steward's trust pool for a freshly issued certificate set is built from leaf + `issuer_chain` + `ca_cert`, not leaf + `ca_cert` alone: `ca_cert` is verified as the root, and any delivered `issuer_chain` is supplied as intermediates so the leaf can bridge to it. This matters for SaaS cells backed by an imported regional intermediate (ADR-032), where the leaf's direct issuer is the intermediate rather than the pinned root. Self-hosted deployments carry no `issuer_chain` and this reduces to today's leaf + root verification unchanged.
+
+## Cfg Fields Governing Convergence
+
+The convergence loop behaviour is controlled by fields in the cfg:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `steward.converge_interval` | `30m` | How often the steward re-converges against the cfg. Accepts any Go duration string: `"5m"`, `"30m"`, `"1h"`, etc. |
+| `steward.drift_mode` | `apply` | How the steward handles detected drift. `apply`: correct drift with `Set()` + `Verify()`. `monitor`: emit `drift.detected.monitor` event, skip `Set()` and `Verify()`. **Controller-delivered only** — local file value is ignored. |
+
+Typical convergence intervals for configuration-management agents fall in the 5–30 minute range; the `30m` default sits at the conservative end of that range.
+
+## Deployment-Independent Behavior
+
+The steward binary is the same in every deployment. The table below shows which behaviors are active in each mode:
+
+| Behavior | Standalone | Controller-Connected |
+|----------|------------|---------------------|
+| Load and parse cfg | Local file | Pushed by controller, stored locally |
+| Convergence loop (apply/monitor) | Yes | Yes |
+| Scheduled re-check (`converge_interval`) | Yes | Yes (default 30m until cfg received) |
+| Event hooks | Yes | Yes |
+| Module Monitor engine (fan-in, debounce, targeted reconcile) | Yes | Yes — started by `syncConfigNow` after each cfg fetch; stopped by `Disconnect` |
+| DNA collection | Yes | Yes |
+| Health monitoring | Yes | Yes |
+| Performance monitoring | Yes | Yes |
+| Local logging | Yes | Yes |
+| Controller reporting | — | Yes (with offline queueing) |
+| Heartbeats | — | Yes |
+| Cfg delivery from controller | — | Yes |
+| Ad-hoc script execution | — | Yes |
+| Remote terminal | — | Yes |
+| Multi-node orchestration | — | Yes |

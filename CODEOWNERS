@@ -1,0 +1,37 @@
+# CODEOWNERS - Defines code ownership for automatic review assignment
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owners for everything in the repo
+* @jrdnr
+
+# Core architecture and central providers
+/pkg/ @jrdnr
+/api/ @jrdnr
+
+# Security-sensitive areas require explicit review
+/pkg/cert/ @jrdnr
+/pkg/secrets/ @jrdnr
+/pkg/security/ @jrdnr
+/features/rbac/ @jrdnr
+/features/tenant/security/ @jrdnr
+
+# Controller and Steward core
+/cmd/controller/ @jrdnr
+/cmd/steward/ @jrdnr
+/features/controller/ @jrdnr
+/features/steward/ @jrdnr
+
+# Commercial features
+/commercial/ @jrdnr
+
+# Documentation
+/docs/ @jrdnr
+/CLAUDE.md @jrdnr
+
+# CI/CD and development workflow
+/.github/ @jrdnr
+/.claude/ @jrdnr
+/Makefile @jrdnr
+
+# Module development (more open to community contributions)
+/features/modules/ @jrdnr

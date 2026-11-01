@@ -1,0 +1,666 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+// Package cmd implements the CLI commands for cfg
+package cmd
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+)
+
+var (
+	// Controller command flags
+	healthURL             string
+	healthFormat          string
+	controllerTLSCACert   string
+	controllerTLSInsecure bool
+	controllerServerName  string
+
+	// signing-cert rotate flags
+	signingCertOverlapDays int
+)
+
+// controllerCmd represents the controller command
+var controllerCmd = &cobra.Command{
+	Use:   "controller",
+	Short: "Controller health and monitoring commands",
+	Long: `Monitor and inspect controller health, metrics, and performance.
+
+Provides operational visibility into controller status including:
+- Overall health status and component health
+- Performance metrics (transport, storage, application, system)
+- Active alerts and threshold breaches
+- Request traces for debugging
+
+Examples:
+  # Check controller health status
+  cfg controller status --url=https://controller.example.com
+
+  # View detailed metrics
+  cfg controller metrics --url=https://controller.example.com
+
+  # Export metrics in JSON format
+  cfg controller metrics --url=https://controller.example.com --format=json`,
+}
+
+// controllerStatusCmd represents the controller status command
+var controllerStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show controller health status",
+	Long: `Display human-readable controller health status including:
+- Overall health (healthy, degraded, unhealthy)
+- Component status (transport, storage, application, system)
+- Active alerts
+- Uptime
+
+Examples:
+  # Check controller status
+  cfg controller status --url=https://controller.example.com
+
+  # With an admin mTLS bundle
+  cfg controller status --url=https://controller.example.com --bundle=/path/to/admin.bundle.yaml`,
+	RunE: runControllerStatus,
+}
+
+// controllerMetricsCmd represents the controller metrics command
+var controllerMetricsCmd = &cobra.Command{
+	Use:   "metrics",
+	Short: "Show detailed controller metrics",
+	Long: `Display detailed controller performance metrics including:
+- Transport: connected stewards, stream errors, message throughput
+- Storage: latency, pool utilization, slow queries
+- Application: workflow/script queue depths, active executions
+- System: CPU, memory, goroutines
+
+Metrics are served only on the controller's private metrics listener
+(metrics_listen_addr in the controller config), never on the public API
+listener. Point --url, or CFGMS_METRICS_URL, at that listener's address. It
+is reachable only from the controller host or its private network.
+
+Output formats: text (default), json
+
+Examples:
+  # View metrics in human-readable format (run where the private listener is reachable)
+  cfg controller metrics --url=https://10.0.0.5:9443
+
+  # Export metrics as JSON
+  CFGMS_METRICS_URL=https://10.0.0.5:9443 cfg controller metrics --format=json`,
+	RunE: runControllerMetrics,
+}
+
+// signingCertCmd groups signing-certificate management operations.
+var signingCertCmd = &cobra.Command{
+	Use:   "signing-cert",
+	Short: "Signing certificate management",
+	Long: `Manage the controller signing certificate used to sign config and DNA payloads.
+
+The signing certificate is a CodeSigning-EKU certificate minted by the controller CA.
+Stewards pin this certificate at registration and reject payloads signed by a different key.
+
+Subcommands:
+  rotate    Rotate the signing certificate with a configurable overlap window`,
+}
+
+// signingCertRotateCmd triggers a signing-cert rotation.
+var signingCertRotateCmd = &cobra.Command{
+	Use:   "rotate",
+	Short: "Rotate the controller signing certificate",
+	Long: `Rotate the signing certificate and notify connected stewards.
+
+Rotation replaces the active signing certificate and starts an overlap window
+during which configs signed by either the old or the new certificate are accepted.
+Stewards that are offline during rotation receive the new certificate via
+refresh-on-connect when they reconnect.
+
+The --overlap-days flag sets the length of the overlap window (default: 30 days).
+For fleets where stewards may be offline for extended periods, set --overlap-days
+to a value that exceeds the expected maximum offline duration. With refresh-on-connect
+enabled, overlap expiry is a defense-in-depth parameter rather than a hard deadline.
+
+Examples:
+  # Rotate with the default 30-day overlap window
+  cfg controller signing-cert rotate
+
+  # Rotate with a 14-day overlap window
+  cfg controller signing-cert rotate --overlap-days 14
+
+  # Expire the old certificate immediately (test environments only)
+  cfg controller signing-cert rotate --overlap-days 0`,
+	RunE: runSigningCertRotate,
+}
+
+// clusterCmd groups cluster node management operations.
+var clusterCmd = &cobra.Command{
+	Use:   "cluster",
+	Short: "Cluster node management",
+	Long: `Manage controller cluster nodes.
+
+Subcommands:
+  drain         Drain a cluster node, preventing it from accepting new work
+  decommission  Decommission a drained cluster node, removing it from the cluster`,
+}
+
+// clusterDrainCmd drains a cluster node.
+var clusterDrainCmd = &cobra.Command{
+	Use:   "drain <node-id>",
+	Short: "Drain a cluster node",
+	Long: `Drain a cluster node, preventing it from accepting new work.
+
+The node continues running until all in-flight requests complete,
+then transitions to the 'draining' state. Run decommission after
+drain completes to remove the node from the cluster.
+
+Examples:
+  cfg controller cluster drain node-1 --url=https://controller.example.com`,
+	Args: cobra.ExactArgs(1),
+	RunE: runClusterDrain,
+}
+
+// clusterDecommissionCmd decommissions a drained cluster node.
+var clusterDecommissionCmd = &cobra.Command{
+	Use:   "decommission <node-id>",
+	Short: "Decommission a cluster node",
+	Long: `Decommission a drained cluster node, removing it from the cluster.
+
+The node must be in 'draining' state before it can be decommissioned.
+Returns an error (HTTP 409) if the node is not in 'draining' state.
+
+Examples:
+  cfg controller cluster decommission node-1 --url=https://controller.example.com`,
+	Args: cobra.ExactArgs(1),
+	RunE: runClusterDecommission,
+}
+
+func init() {
+	// Controller command flags
+	controllerCmd.PersistentFlags().StringVar(&healthURL, "url", "", "Controller API URL (required)")
+	controllerCmd.PersistentFlags().StringVar(&healthFormat, "format", "text", "Output format (text, json)")
+	controllerCmd.PersistentFlags().StringVar(&controllerTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	controllerCmd.PersistentFlags().BoolVar(&controllerTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	controllerCmd.PersistentFlags().StringVar(&controllerServerName, "server-name", "", "Override TLS server name for certificate verification")
+
+	_ = controllerCmd.MarkPersistentFlagRequired("url")
+
+	// signing-cert rotate flags
+	signingCertRotateCmd.Flags().IntVar(&signingCertOverlapDays, "overlap-days", 30,
+		"Days the old signing certificate remains valid after rotation (default: 30)")
+
+	// signing-cert subcommand tree
+	signingCertCmd.AddCommand(signingCertRotateCmd)
+
+	// cluster subcommand tree
+	clusterCmd.AddCommand(clusterDrainCmd, clusterDecommissionCmd)
+
+	// Add subcommands
+	controllerCmd.AddCommand(controllerStatusCmd)
+	controllerCmd.AddCommand(controllerMetricsCmd)
+	controllerCmd.AddCommand(signingCertCmd)
+	controllerCmd.AddCommand(clusterCmd)
+}
+
+// getControllerClient creates an API client using an active session or an admin mTLS bundle.
+func getControllerClient() (*APIClient, error) {
+	apiURL := strings.TrimSuffix(healthURL, "/")
+	if apiURL == "" {
+		apiURL = os.Getenv("CFGMS_API_URL")
+	}
+
+	tlsInsecure := controllerTLSInsecure
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
+	}
+	serverName := controllerServerName
+
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
+}
+
+func runControllerStatus(cmd *cobra.Command, args []string) error {
+	client, err := getControllerClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.Get(context.Background(), "/api/v1/health/detailed")
+	if err != nil {
+		return fmt.Errorf("failed to fetch health status: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Printf("Failed to close response body: %v\n", err)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	// Parse response
+	var healthStatus struct {
+		Status        string    `json:"status"`
+		Timestamp     time.Time `json:"timestamp"`
+		UptimeSeconds int64     `json:"uptime_seconds"`
+		Components    map[string]struct {
+			Name      string                 `json:"name"`
+			Status    string                 `json:"status"`
+			Message   string                 `json:"message"`
+			LastCheck time.Time              `json:"last_check"`
+			Details   map[string]interface{} `json:"details"`
+		} `json:"components"`
+		Alerts []struct {
+			ID             string    `json:"id"`
+			Timestamp      time.Time `json:"timestamp"`
+			Severity       string    `json:"severity"`
+			Title          string    `json:"title"`
+			Description    string    `json:"description"`
+			MetricName     string    `json:"metric_name"`
+			CurrentValue   float64   `json:"current_value"`
+			ThresholdValue float64   `json:"threshold_value"`
+			Status         string    `json:"status"`
+		} `json:"alerts"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&healthStatus); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	// Display results
+	if healthFormat == "json" {
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(healthStatus)
+	}
+
+	// Text format
+	statusIcon := getStatusIcon(healthStatus.Status)
+	fmt.Printf("\n%s Controller Health Status: %s\n", statusIcon, strings.ToUpper(healthStatus.Status))
+	fmt.Printf("Uptime: %s\n", formatDuration(time.Duration(healthStatus.UptimeSeconds)*time.Second))
+	fmt.Printf("Checked: %s\n", healthStatus.Timestamp.Format("2006-01-02 15:04:05 MST"))
+	fmt.Println()
+
+	// Component health
+	fmt.Println("=== Component Health ===")
+	for _, component := range healthStatus.Components {
+		icon := getStatusIcon(component.Status)
+		fmt.Printf("\n%s %s (%s)\n", icon, component.Name, strings.ToUpper(component.Status))
+		fmt.Printf("  %s\n", component.Message)
+
+		if len(component.Details) > 0 {
+			fmt.Println("  Details:")
+			for key, value := range component.Details {
+				fmt.Printf("    %s: %v\n", formatKey(key), value)
+			}
+		}
+	}
+
+	// Active alerts
+	if len(healthStatus.Alerts) > 0 {
+		fmt.Println()
+		fmt.Println("=== Active Alerts ===")
+		for _, alert := range healthStatus.Alerts {
+			severityIcon := getSeverityIcon(alert.Severity)
+			fmt.Printf("\n%s %s [%s]\n", severityIcon, alert.Title, strings.ToUpper(alert.Severity))
+			fmt.Printf("  %s\n", alert.Description)
+			fmt.Printf("  Current: %.2f | Threshold: %.2f\n", alert.CurrentValue, alert.ThresholdValue)
+			fmt.Printf("  Since: %s\n", alert.Timestamp.Format("2006-01-02 15:04:05"))
+		}
+	}
+
+	fmt.Println()
+	return nil
+}
+
+func runControllerMetrics(cmd *cobra.Command, args []string) error {
+	// Metrics live on the private metrics listener, not the public API
+	// listener, so CFGMS_METRICS_URL takes precedence over CFGMS_API_URL here;
+	// an explicit --url still wins over both.
+	if strings.TrimSpace(healthURL) == "" {
+		if metricsURL := os.Getenv("CFGMS_METRICS_URL"); metricsURL != "" {
+			healthURL = metricsURL
+		}
+	}
+	client, err := getControllerClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	resp, err := client.Get(context.Background(), "/api/v1/health/metrics")
+	if err != nil {
+		return fmt.Errorf("failed to fetch metrics: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Printf("Failed to close response body: %v\n", err)
+		}
+	}()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("metrics are not served at this address (404): point --url or CFGMS_METRICS_URL at the controller's private metrics listener (metrics_listen_addr), not the public API")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	// Parse response
+	var metrics struct {
+		Timestamp time.Time `json:"timestamp"`
+		Transport *struct {
+			ConnectedStewards    int       `json:"connected_stewards"`
+			StreamErrors         int64     `json:"stream_errors"`
+			MessagesSent         int64     `json:"messages_sent"`
+			MessagesReceived     int64     `json:"messages_received"`
+			ReconnectionAttempts int64     `json:"reconnection_attempts"`
+			AvgLatencyNs         int64     `json:"avg_latency_ns"`
+			CollectedAt          time.Time `json:"collected_at"`
+		} `json:"transport"`
+		Storage *struct {
+			Provider          string    `json:"provider"`
+			PoolUtilization   float64   `json:"pool_utilization"`
+			AvgQueryLatencyMs float64   `json:"avg_query_latency_ms"`
+			P95QueryLatencyMs float64   `json:"p95_query_latency_ms"`
+			SlowQueryCount    int64     `json:"slow_query_count"`
+			TotalQueries      int64     `json:"total_queries"`
+			QueryErrors       int64     `json:"query_errors"`
+			CollectedAt       time.Time `json:"collected_at"`
+		} `json:"storage"`
+		Application *struct {
+			WorkflowQueueDepth  int64     `json:"workflow_queue_depth"`
+			WorkflowMaxWaitTime float64   `json:"workflow_max_wait_time"`
+			ActiveWorkflows     int64     `json:"active_workflows"`
+			ScriptQueueDepth    int64     `json:"script_queue_depth"`
+			ScriptMaxWaitTime   float64   `json:"script_max_wait_time"`
+			ActiveScripts       int64     `json:"active_scripts"`
+			ConfigQueueDepth    int64     `json:"config_queue_depth"`
+			CollectedAt         time.Time `json:"collected_at"`
+		} `json:"application"`
+		System *struct {
+			CPUPercent          float64   `json:"cpu_percent"`
+			MemoryUsedBytes     int64     `json:"memory_used_bytes"`
+			MemoryPercent       float64   `json:"memory_percent"`
+			HeapBytes           int64     `json:"heap_bytes"`
+			RSSBytes            int64     `json:"rss_bytes"`
+			GoroutineCount      int64     `json:"goroutine_count"`
+			OpenFileDescriptors int64     `json:"open_file_descriptors"`
+			CollectedAt         time.Time `json:"collected_at"`
+		} `json:"system"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&metrics); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	// Display results
+	if healthFormat == "json" {
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(metrics)
+	}
+
+	// Text format
+	fmt.Printf("\nController Metrics - %s\n", metrics.Timestamp.Format("2006-01-02 15:04:05 MST"))
+	fmt.Println()
+
+	// Transport metrics
+	if metrics.Transport != nil {
+		fmt.Println("=== Transport (gRPC-over-QUIC) ===")
+		fmt.Printf("Connected Stewards:     %d\n", metrics.Transport.ConnectedStewards)
+		fmt.Printf("Stream Errors:          %d\n", metrics.Transport.StreamErrors)
+		fmt.Printf("Messages Sent:          %d\n", metrics.Transport.MessagesSent)
+		fmt.Printf("Messages Received:      %d\n", metrics.Transport.MessagesReceived)
+		fmt.Printf("Reconnection Attempts:  %d\n", metrics.Transport.ReconnectionAttempts)
+		fmt.Printf("Avg Latency:            %dns\n", metrics.Transport.AvgLatencyNs)
+		fmt.Println()
+	}
+
+	// Storage metrics
+	if metrics.Storage != nil {
+		fmt.Println("=== Storage Provider ===")
+		fmt.Printf("Provider:               %s\n", metrics.Storage.Provider)
+		fmt.Printf("Pool Utilization:       %.1f%%\n", metrics.Storage.PoolUtilization*100)
+		fmt.Printf("Avg Query Latency:      %.2f ms\n", metrics.Storage.AvgQueryLatencyMs)
+		fmt.Printf("P95 Query Latency:      %.2f ms\n", metrics.Storage.P95QueryLatencyMs)
+		fmt.Printf("Slow Queries (>1s):     %d\n", metrics.Storage.SlowQueryCount)
+		fmt.Printf("Total Queries:          %d\n", metrics.Storage.TotalQueries)
+		fmt.Printf("Query Errors:           %d\n", metrics.Storage.QueryErrors)
+		fmt.Println()
+	}
+
+	// Application metrics
+	if metrics.Application != nil {
+		fmt.Println("=== Application ===")
+		fmt.Printf("Workflow Queue Depth:   %d\n", metrics.Application.WorkflowQueueDepth)
+		fmt.Printf("Workflow Max Wait:      %.2f sec\n", metrics.Application.WorkflowMaxWaitTime)
+		fmt.Printf("Active Workflows:       %d\n", metrics.Application.ActiveWorkflows)
+		fmt.Printf("Script Queue Depth:     %d\n", metrics.Application.ScriptQueueDepth)
+		fmt.Printf("Script Max Wait:        %.2f sec\n", metrics.Application.ScriptMaxWaitTime)
+		fmt.Printf("Active Scripts:         %d\n", metrics.Application.ActiveScripts)
+		fmt.Printf("Config Queue Depth:     %d\n", metrics.Application.ConfigQueueDepth)
+		fmt.Println()
+	}
+
+	// System metrics
+	if metrics.System != nil {
+		fmt.Println("=== System Resources ===")
+		fmt.Printf("CPU Usage:              %.1f%%\n", metrics.System.CPUPercent)
+		fmt.Printf("Memory Usage:           %.1f%% (%s)\n",
+			metrics.System.MemoryPercent, formatBytes(metrics.System.MemoryUsedBytes))
+		fmt.Printf("Heap Memory:            %s\n", formatBytes(metrics.System.HeapBytes))
+		fmt.Printf("RSS Memory:             %s\n", formatBytes(metrics.System.RSSBytes))
+		fmt.Printf("Goroutines:             %d\n", metrics.System.GoroutineCount)
+		fmt.Printf("Open File Descriptors:  %d\n", metrics.System.OpenFileDescriptors)
+		fmt.Println()
+	}
+
+	return nil
+}
+
+// signingCertRotateRequest is the JSON body for POST /api/v1/certificates/signing/rotate.
+type signingCertRotateRequest struct {
+	OverlapDays int `json:"overlap_days"`
+}
+
+// signingCertRotateResult holds the fields returned by the rotation endpoint.
+type signingCertRotateResult struct {
+	OldSerial        string `json:"old_serial"`
+	NewSerial        string `json:"new_serial"`
+	OverlapDays      int    `json:"overlap_days"`
+	StewardsNotified int    `json:"stewards_notified"`
+}
+
+func runSigningCertRotate(cmd *cobra.Command, args []string) error {
+	if signingCertOverlapDays < 0 {
+		return fmt.Errorf("--overlap-days must be >= 0 (got %d)", signingCertOverlapDays)
+	}
+
+	client, err := getControllerClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	reqBody, err := json.Marshal(signingCertRotateRequest{OverlapDays: signingCertOverlapDays})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := client.doRequest(context.Background(), "POST", "/api/v1/certificates/signing/rotate", bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to call rotation API: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			fmt.Printf("Warning: failed to close response body: %v\n", closeErr)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("rotation failed: %s - %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var apiResp struct {
+		Data signingCertRotateResult `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("failed to parse rotation response: %w", err)
+	}
+
+	result := apiResp.Data
+	fmt.Printf("Signing certificate rotated successfully\n\n")
+	fmt.Printf("Old serial:        %s\n", result.OldSerial)
+	fmt.Printf("New serial:        %s\n", result.NewSerial)
+	fmt.Printf("Overlap days:      %d\n", result.OverlapDays)
+	fmt.Printf("Stewards notified: %d\n", result.StewardsNotified)
+	return nil
+}
+
+func runClusterDrain(cmd *cobra.Command, args []string) error {
+	nodeID := args[0]
+	client, err := getControllerClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	path := "/api/v1/cluster/nodes/" + url.PathEscape(nodeID) + "/drain"
+	resp, err := client.doRequest(context.Background(), "POST", path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to drain node: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to close response body: %v\n", closeErr)
+		}
+	}()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	switch resp.StatusCode {
+	case http.StatusForbidden:
+		return fmt.Errorf("admin mTLS certificate required")
+	case http.StatusOK:
+		var result struct {
+			State string `json:"state"`
+		}
+		state := "draining"
+		if jsonErr := json.Unmarshal(body, &result); jsonErr == nil && result.State != "" {
+			state = result.State
+		}
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Node %s is now %s.\n", nodeID, state)
+		return nil
+	default:
+		return fmt.Errorf("%s - %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+}
+
+func runClusterDecommission(cmd *cobra.Command, args []string) error {
+	nodeID := args[0]
+	client, err := getControllerClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	path := "/api/v1/cluster/nodes/" + url.PathEscape(nodeID) + "/decommission"
+	resp, err := client.doRequest(context.Background(), "POST", path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to decommission node: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to close response body: %v\n", closeErr)
+		}
+	}()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	switch resp.StatusCode {
+	case http.StatusForbidden:
+		return fmt.Errorf("admin mTLS certificate required")
+	case http.StatusConflict:
+		return fmt.Errorf("%s", strings.TrimSpace(string(body)))
+	case http.StatusOK:
+		var result struct {
+			State string `json:"state"`
+		}
+		state := "decommissioned"
+		if jsonErr := json.Unmarshal(body, &result); jsonErr == nil && result.State != "" {
+			state = result.State
+		}
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Node %s is now %s.\n", nodeID, state)
+		return nil
+	default:
+		return fmt.Errorf("%s - %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+}
+
+func getStatusIcon(status string) string {
+	switch strings.ToLower(status) {
+	case "healthy":
+		return "✓"
+	case "degraded":
+		return "⚠"
+	case "unhealthy":
+		return "✗"
+	default:
+		return "?"
+	}
+}
+
+func getSeverityIcon(severity string) string {
+	switch strings.ToLower(severity) {
+	case "critical":
+		return "🔴"
+	case "warning":
+		return "🟡"
+	case "info":
+		return "🔵"
+	default:
+		return "⚪"
+	}
+}
+
+func formatKey(key string) string {
+	// Convert snake_case to Title Case
+	parts := strings.Split(key, "_")
+	for i, part := range parts {
+		if len(part) > 0 {
+			parts[i] = strings.ToUpper(part[:1]) + part[1:]
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.0f seconds", d.Seconds())
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%.0f minutes", d.Minutes())
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%.1f hours", d.Hours())
+	}
+	return fmt.Sprintf("%.1f days", d.Hours()/24)
+}

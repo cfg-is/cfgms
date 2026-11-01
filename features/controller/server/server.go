@@ -1,0 +1,5551 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package server
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"math"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	transportpb "github.com/cfgis/cfgms/api/proto/transport"
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	common "github.com/cfgis/cfgms/api/proto/common"
+
+	configgit "github.com/cfgis/cfgms/features/config/git"
+	gitStorage "github.com/cfgis/cfgms/features/config/git/storage"
+	"github.com/cfgis/cfgms/features/config/rollback"
+	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/controller/api"
+	"github.com/cfgis/cfgms/features/controller/batchjob"
+	"github.com/cfgis/cfgms/features/controller/clusterregistry"
+	"github.com/cfgis/cfgms/features/controller/commands"
+	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/credentials"
+	"github.com/cfgis/cfgms/features/controller/directory"
+	"github.com/cfgis/cfgms/features/controller/dispatcher"
+	controllerFleet "github.com/cfgis/cfgms/features/controller/fleet"
+	dnaStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
+	"github.com/cfgis/cfgms/features/controller/health"
+	"github.com/cfgis/cfgms/features/controller/heartbeat"
+	"github.com/cfgis/cfgms/features/controller/initialization"
+	"github.com/cfgis/cfgms/features/controller/modules/approval"
+	modulecache "github.com/cfgis/cfgms/features/controller/modules/cache"
+	"github.com/cfgis/cfgms/features/controller/modules/resolution"
+	moduleGitSource "github.com/cfgis/cfgms/features/controller/modules/sources/git"
+	"github.com/cfgis/cfgms/features/controller/push"
+	controllerRegistration "github.com/cfgis/cfgms/features/controller/registration"
+	controllerrun "github.com/cfgis/cfgms/features/controller/run"
+	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/controller/tagstore"
+	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
+	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/features/modules/hyperv"
+	hypervcompletion "github.com/cfgis/cfgms/features/modules/hyperv/completion"
+	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/features/monitoring"
+	"github.com/cfgis/cfgms/features/rbac"
+	reportapi "github.com/cfgis/cfgms/features/reports/api"
+	reportscache "github.com/cfgis/cfgms/features/reports/cache"
+	reportsengine "github.com/cfgis/cfgms/features/reports/engine"
+	reportsexporters "github.com/cfgis/cfgms/features/reports/exporters"
+	reportinterfaces "github.com/cfgis/cfgms/features/reports/interfaces"
+	reportsprovider "github.com/cfgis/cfgms/features/reports/provider"
+	reportstemplates "github.com/cfgis/cfgms/features/reports/templates"
+	stewardosquery "github.com/cfgis/cfgms/features/steward/osquery"
+	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/features/terminal"
+	"github.com/cfgis/cfgms/features/workflow"
+	workflownodes "github.com/cfgis/cfgms/features/workflow/nodes"
+	workflowruntime "github.com/cfgis/cfgms/features/workflow/runtime"
+	workflowtrigger "github.com/cfgis/cfgms/features/workflow/trigger"
+	"github.com/cfgis/cfgms/pkg/audit"
+	reportcachepkg "github.com/cfgis/cfgms/pkg/cache"
+	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/configrouting"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
+	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // gRPC control plane provider
+	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
+	dataplaneGRPC "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider; exported for ServerOptions
+	directoryif "github.com/cfgis/cfgms/pkg/directory/interfaces"
+	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	egdatabase "github.com/cfgis/cfgms/pkg/entitygraph/providers/database"
+	egsqlite "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
+	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
+	egconfigstorewriter "github.com/cfgis/cfgms/pkg/entitygraph/writers/configstore"
+	"github.com/cfgis/cfgms/pkg/entitygraph/writers/correlator"
+	"github.com/cfgis/cfgms/pkg/entitygraph/writers/dnasync"
+	"github.com/cfgis/cfgms/pkg/entitygraph/writers/tenantsync"
+	"github.com/cfgis/cfgms/pkg/gitsync"
+	"github.com/cfgis/cfgms/pkg/ha"
+	"github.com/cfgis/cfgms/pkg/lease"
+	"github.com/cfgis/cfgms/pkg/logging"
+	_ "github.com/cfgis/cfgms/pkg/notification/providers/smtp" // register SMTP notification provider (Issue #4710)
+	pkgRegistration "github.com/cfgis/cfgms/pkg/registration"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/session"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
+	"github.com/cfgis/cfgms/pkg/storage/providers/auditsink"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/filesystem" // register filesystem blob provider (Issue #1702)
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/s3"         // register S3 blob provider for cluster mode (Issue #2118)
+	dbprovider "github.com/cfgis/cfgms/pkg/storage/providers/database"    // Postgres-backed stores; used by initializeSessionStore in cluster mode (Issue #2775)
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"             // register flatfile provider for OSS composite manager
+	memoryprovider "github.com/cfgis/cfgms/pkg/storage/providers/memory"  // in-memory fallback stores (Issue #1948, #2296)
+	sqliteprovider "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"  // register sqlite provider; provides SQLiteUpgradeStore (Issue #2464)
+	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
+	"gopkg.in/yaml.v3"
+)
+
+// buildVersionCheck is a compile-time constant to verify code version in Docker
+const buildVersionCheck = "story-362-config-signing-enabled"
+
+// ObserveManifestProvider is the interface through which the controller server
+// accesses module manifests for the Tier-2 observe-module resolution step
+// (Issue #3104, ADR-024 Amendment 1 §3). It wraps the module cache in production
+// and an in-memory stub in tests. Nil = feature disabled.
+type ObserveManifestProvider interface {
+	// ListObservableManifests returns all approved module manifests that declare
+	// at least one observe_when predicate or have always_pull set, making them
+	// eligible for Tier-2 dispatch.
+	ListObservableManifests() ([]*modules.ModuleMetadata, error)
+}
+
+// moduleManifestAdapter adapts *modulecache.ModuleCache as
+// ObserveManifestProvider. Only approved bundles are returned; manifests with no
+// observe_when predicates and always_pull unset are silently filtered out.
+type moduleManifestAdapter struct {
+	cache *modulecache.ModuleCache
+}
+
+var _ ObserveManifestProvider = (*moduleManifestAdapter)(nil)
+
+func (p *moduleManifestAdapter) ListObservableManifests() ([]*modules.ModuleMetadata, error) {
+	entries, err := p.cache.List()
+	if err != nil {
+		return nil, fmt.Errorf("list module cache: %w", err)
+	}
+	var result []*modules.ModuleMetadata
+	for _, entry := range entries {
+		if entry.Status != modulecache.ApprovalStatusApproved {
+			continue
+		}
+		b, getErr := p.cache.Get(entry.Addr)
+		if getErr != nil {
+			continue
+		}
+		if b.Manifest != nil && (len(b.Manifest.ObserveWhen) > 0 || b.Manifest.AlwaysPull) {
+			result = append(result, b.Manifest)
+		}
+	}
+	return result, nil
+}
+
+var _ controllerTransport.PerObjectKindLister = (*moduleManifestAdapter)(nil)
+
+// ListPerObjectKinds returns the per-object fragment kinds a steward may deliver on
+// the bulk lane: every Owns entry with PerObject set, from the approved manifests
+// ListObservableManifests returns (those with an observe_when predicate or
+// always_pull). The module cache is controller-wide, so the answer does not vary by
+// tenant today; the tenant argument keeps the contract tenant-scoped for when it
+// does. A cache error is returned, never an empty allow-all answer.
+func (p *moduleManifestAdapter) ListPerObjectKinds(_ string) ([]string, error) {
+	manifests, err := p.ListObservableManifests()
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]struct{}{}
+	var kinds []string
+	for _, m := range manifests {
+		for _, own := range m.Owns {
+			if !own.PerObject || own.Kind == "" {
+				continue
+			}
+			if _, dup := seen[own.Kind]; dup {
+				continue
+			}
+			seen[own.Kind] = struct{}{}
+			kinds = append(kinds, own.Kind)
+		}
+	}
+	sort.Strings(kinds)
+	return kinds, nil
+}
+
+// Server represents the controller server component (gRPC-over-QUIC based)
+type Server struct {
+	mu                              sync.RWMutex
+	cfg                             *config.Config
+	logger                          logging.Logger
+	httpServer                      *api.Server
+	controllerService               *service.ControllerService
+	configService                   *service.ConfigurationServiceV2
+	rbacService                     *service.RBACService
+	certProvisioningService         *service.CertificateProvisioningService
+	certManager                     *cert.Manager
+	streamRevocationRecheckInterval time.Duration                           // zero uses the 30s default
+	signingRetirementSvc            *service.SigningRetirementService       // Issue #4795: retires superseded signing certs at overlap end
+	signingMigrationSvc             *service.SigningMigrationService        // Issue #4796: moves node-local signing keys to the shared identity
+	stewardMigrationSvc             *service.StewardSigningMigrationService // Issue #4797: moves connected stewards to the shared signing certificate
+	tenantManager                   *tenant.Manager
+	rbacManager                     *rbac.Manager
+	auditManager                    *audit.Manager
+	wormAuditStore                  *auditsink.WORMAuditStore // Issue #4039: nil unless audit.sink is "worm"; owns the buffer-then-flush reconciliation loop
+	haManager                       *ha.Manager
+	controlPlane                    controlplaneInterfaces.ControlPlaneProvider // Story #363 / #514
+	connRegistry                    registry.Registry                           // Issue #1572: shared steward connection registry (CP provider + API server)
+	clusterAwareSender              *internaldelivery.ClusterAwareSender        // ADR-031 Decision 3, Issue #3764: dispatch-path cluster fallback; nil outside cluster mode
+	admissionQueues                 *ingestAdmissionQueues                      // Issue #3759: per-tenant ingest admission gates, split by bucket-key trust level
+	heartbeatService                *heartbeat.Service
+	commandPublisher                *commands.Publisher
+	registrationTokenStore          pkgRegistration.Store
+	dataPlaneProvider               dataplaneInterfaces.DataPlaneProvider
+	configHandler                   *controllerTransport.ConfigHandler
+	logStreamHandler                *controllerTransport.LogStreamHandler // Issue #2140: LogStream ingestion handler
+	grpcServer                      *grpc.Server                          // Shared gRPC server for CP+DP (Story #515)
+	quicListener                    *quictransport.Listener               // Shared QUIC listener (Story #515)
+	signerCertSerial                string                                // Serial number of server cert used for config signing (Story #378)
+	healthCollector                 *health.Collector
+	systemMonitor                   *monitoring.SystemMonitor
+	alertManager                    *health.DefaultAlertManager
+	healthTraceManager              *health.DefaultTraceManager              // Issue #4208: request trace manager backing GET /api/v1/health/trace/{request_id}
+	dnaStorageManager               *dnaStorage.Manager                      // Reports engine DNA storage (must be closed on Stop)
+	triggerManager                  *workflowtrigger.TriggerManagerImpl      // Issue #414: Workflow trigger manager
+	workflowEngine                  *workflow.Engine                         // Issue #4609: owns approval-gate recovery; shut down on Stop
+	gitSyncer                       *gitsync.Syncer                          // Issue #666: git-sync write-through component
+	webhookHandler                  *gitsync.WebhookHandler                  // Issue #681: drain in-flight webhook syncs on shutdown
+	storageManager                  *interfaces.StorageManager               // Main storage manager (must be closed on Stop to release SQLite handles)
+	manualReviewHook                *api.ManualReviewApprovalHook            // Issue #1599: manual-review approval hook (nil if not in use)
+	executionQueue                  *scriptmodule.ExecutionQueue             // Issue #1672: persistent queue for script executions
+	jobDispatcher                   *dispatcher.Dispatcher                   // Issue #1672: job dispatcher for script executions
+	runManager                      *controllerrun.Manager                   // Issue #1673: run/job tracking (must be closed on Stop to release SQLite handle)
+	upgradeStore                    business.UpgradeStore                    // Issue #2464: durable upgrade store (must be closed on Stop to release SQLite handle)
+	tagStore                        *tagstore.Store                          // Issue #2542: durable tag store (must be closed on Stop to release SQLite handle)
+	sessionStore                    session.Store                            // Issue #2774: durable session token store (must be closed on Stop to release SQLite handle)
+	ipTrustExpiryJob                *controllerRegistration.IPTrustExpiryJob // Issue #1697: 30-day dark-window expiry
+	pendingExpiryJob                *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
+	stewardEventManager             *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
+	observeManifestProvider         ObserveManifestProvider                  // Issue #3104: nil = Tier-2 disabled
+	moduleCache                     *modulecache.ModuleCache                 // Issue #4985: serves FetchModuleBundle; nil = RPC Unimplemented
+	terminalSessionMgr              terminal.SessionManager                  // Issue #2761: must be stopped on Stop to finalize session recordings
+	egProvider                      egServerProvider                         // Issue #3253: entity graph provider (must be closed on Stop to release DB handle)
+	egClusterMembership             dnasync.ClusterMembership                // Issue #3376: gates cluster authority; nil denies every claim
+	egDNAWriter                     *dnasync.Writer                          // Issue #4444: DNA-sync -> entity-graph writer, chained onto the DNA handler in Start()
+	configSyncService               *configrouting.SyncService               // Issue #4408: periodic git-sourced tenant config polling
+	configSyncCancel                context.CancelFunc                       // Issue #4408: cancels configSyncService's Run context on Stop
+	directoryManager                *directoryif.DirectoryProviderManager    // Issue #5431: Entra ID registered unconnected, closed on Stop
+	routerSecretStore               secretsif.SecretStore                    // Issue #4408: dedicated secret store for the git-capable config router (separate instance from httpServer's own, closed on Stop)
+	egTenantSyncWriter              *tenantsync.Writer                       // Issue #4413: tenant-hierarchy mirror writer (ADR-022 §7); periodic sweep started in Start()
+	egCorrelatorWriter              *correlator.Writer                       // Issue #4413: MAC-identity correlator writer (ADR-022 §3); periodic sweep started in Start()
+	egTenantSyncSweeper             *entityGraphPeriodicSweeper              // Issue #4413: stopped in Stop() before egProvider closes
+	egCorrelatorSweeper             *entityGraphPeriodicSweeper              // Issue #4413: stopped in Stop() before egProvider closes
+	egTenantSyncLeaseJob            lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the tenant-sync sweep (ADR-031 Decision 4)
+	m365Inventory                   *directory.M365Inventory                 // Issue #5561: lease-gated M365 tenant inventory; stopped in Stop() before egProvider closes
+	egCorrelatorLeaseJob            lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the correlator sweep (ADR-031 Decision 4)
+	credentialService               *credentials.Service                     // Issue #5555: controller-issued initial passwords; nil when the secret store is unavailable
+	credentialLeaseJob              lease.SingletonJob                       // Issue #5555: cluster-singleton claim for the credential expiry sweep
+	credentialSweeper               *entityGraphPeriodicSweeper              // Issue #5555: stopped in Stop()
+}
+
+// egServerProvider is the combined interface the controller server needs for
+// the entity graph provider: the full EntityGraphProvider contract (so the
+// provider can be passed directly to SetEntityGraphProvider and
+// SetEntityGraphWriteProvider without an intermediate assertion) plus Close()
+// for lifecycle management. Both SQLiteEntityGraphProvider and
+// DatabaseEntityGraphProvider satisfy this interface (Issue #3253).
+type egServerProvider interface {
+	eginterfaces.EntityGraphProvider
+	Close() error
+}
+
+// entityGraphTenantSyncSweepInterval and entityGraphCorrelatorSweepInterval are
+// the polling cadences for the tenant-sync and correlator entity-graph writers
+// (Issue #4413). See the cadence-decision comments at each writer's Start()
+// call site for why each is periodic rather than event-driven.
+const (
+	entityGraphTenantSyncSweepInterval = 5 * time.Minute
+	entityGraphCorrelatorSweepInterval = 15 * time.Minute
+
+	// credentialSweepInterval is how often initial credentials past their expiry
+	// are expired and their secrets deleted (Issue #5555).
+	credentialSweepInterval = 5 * time.Minute
+)
+
+// entityGraphPeriodicSweeper runs a bound sweep function on a fixed interval
+// until its context is cancelled. It is parameterized over the sweep function
+// and interval rather than any specific writer (Issue #4413), so a future
+// periodic entity-graph writer reuses this type instead of a new scheduler —
+// construct one with a closure over the writer's own method (and whatever
+// extra arguments that method needs, e.g. tenantsync's store) plus an interval.
+//
+// Every tick is gated on leaseJob, the loop's own cluster-singleton lease
+// (ADR-031 Decision 4), exactly as the other controller sweeps are: the entity
+// graph is a SHARED Postgres instance in cluster mode (see
+// initializeEntityGraphProvider), so an ungated loop would run one fleet-sized
+// scan per node against the same database on every tick, and racing full-tree
+// tenant snapshots would retract and re-assert each other's claim scopes.
+type entityGraphPeriodicSweeper struct {
+	name     string
+	interval time.Duration
+	sweep    func(context.Context) error
+	leaseJob lease.SingletonJob
+	logger   logging.Logger
+	cancel   context.CancelFunc
+	done     chan struct{}
+}
+
+// newEntityGraphPeriodicSweeper constructs a sweeper. Start must be called to
+// begin sweeping. leaseJob must come from ha.Manager.NewBackgroundLoopLease
+// (nil-receiver-safe, and a nil lease.Manager inside it means "no shared
+// substrate — always run", matching every other background loop).
+func newEntityGraphPeriodicSweeper(name string, interval time.Duration, sweep func(context.Context) error, leaseJob lease.SingletonJob, logger logging.Logger) *entityGraphPeriodicSweeper {
+	return &entityGraphPeriodicSweeper{name: name, interval: interval, sweep: sweep, leaseJob: leaseJob, logger: logger}
+}
+
+// Start launches the sweep loop as a goroutine deriving its lifetime from ctx.
+// The first sweep fires after one interval, not immediately — each writer
+// already runs once at controller startup implicitly through whatever state
+// is already in the graph, and the periodic sweep exists to keep that state
+// fresh, not to gate startup on a full sweep completing.
+func (p *entityGraphPeriodicSweeper) Start(ctx context.Context) {
+	sweepCtx, cancel := context.WithCancel(ctx)
+	p.cancel = cancel
+	p.done = make(chan struct{})
+	go p.run(sweepCtx)
+}
+
+func (p *entityGraphPeriodicSweeper) run(ctx context.Context) {
+	defer close(p.done)
+	ticker := time.NewTicker(p.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// RunIfLeader is a no-op on every node that does not hold this
+			// loop's lease this cycle, so exactly one node in the cluster
+			// performs the sweep per tick. The context it hands back is
+			// cancelled if the lease is lost mid-sweep, so a long scan stops
+			// writing once authority is gone rather than racing the new holder.
+			p.leaseJob.RunIfLeader(ctx, func(sweepCtx context.Context) {
+				if err := p.sweep(sweepCtx); err != nil {
+					p.logger.Warn("entity graph periodic sweep failed",
+						"sweep", p.name, "error", logging.SanitizeLogValue(err.Error()))
+				}
+			})
+		}
+	}
+}
+
+// Stop cancels the sweep loop and waits, bounded by ctx, for the goroutine to
+// actually exit — not merely for cancellation to be requested — so a caller
+// can assert the goroutine has drained.
+func (p *entityGraphPeriodicSweeper) Stop(ctx context.Context) error {
+	if p.cancel == nil {
+		return nil
+	}
+	p.cancel()
+	select {
+	case <-p.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// resolveDNADataRoot returns an ABSOLUTE directory under which the durable DNA
+// store (dna-reports/dna.db) is placed. The result MUST be independent of the
+// process working directory: two controllers of the same deployment may be
+// launched from different CWDs — most importantly the systemd unit
+// (WorkingDirectory=/) versus a blue/green candidate spawned by
+// `cfg controller upgrade run` (inheriting the operator's CWD). If the DNA path
+// were CWD-relative, the candidate would open a DIFFERENT, empty dna.db, warm-
+// load zero stewards, and the steward admin registry (cfg list/status/exec)
+// would be blind to the whole fleet after a cutover. (Issue #2010)
+//
+// Resolution:
+//   - A rooted cfg.DataDir is honored as-is (config.IsRootedPath, not filepath.IsAbs —
+//     a controller.cfg is a reviewed, hand-authored artefact that ships a POSIX
+//     data_dir right next to cert_path and is parsed on every platform the controller
+//     builds for; filepath.IsAbs answers for the running platform only and would
+//     silently discard a POSIX-rooted DataDir on Windows, Issue #3460).
+//   - An empty OR relative cfg.DataDir is replaced by a root derived from the
+//     configured durable storage paths (SQLitePath dir, then FlatfileRoot dir),
+//     which are absolute in any real deployment, co-locating the DNA store with
+//     the controller's other durable state.
+//   - As a last resort (no storage paths configured, e.g. minimal tests) the
+//     value is anchored to an absolute path via filepath.Abs so it is at least
+//     deterministic within the process. Note this last-resort anchor is the
+//     process CWD at startup, so true cross-CWD consistency in an all-defaults
+//     deployment still relies on absolute storage paths being configured (every
+//     real deployment, e.g. ctrl-01, sets absolute Storage.SQLitePath).
+func resolveDNADataRoot(cfg *config.Config) string {
+	root := cfg.DataDir
+	if root == "" || !config.IsRootedPath(root) {
+		if cfg.Storage != nil {
+			switch {
+			case cfg.Storage.SQLitePath != "":
+				root = filepath.Dir(cfg.Storage.SQLitePath)
+			case cfg.Storage.FlatfileRoot != "":
+				root = filepath.Dir(cfg.Storage.FlatfileRoot)
+			}
+		}
+	}
+	if !config.IsRootedPath(root) {
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+	}
+	return root
+}
+
+// resolveRootTenantID returns the deployment's root tenant for the periodic config
+// sync's single-root boundary: the single tenant with no parent, resolved by the
+// tenant manager (Issue #4542). With no tenants, or several parentless tenants, it
+// returns "" and logs a warning without blocking startup; SyncService then syncs
+// no tenants and refuses every Register.
+func resolveRootTenantID(ctx context.Context, tenants *tenant.Manager, logger logging.Logger) string {
+	root := tenants.RootTenantID(ctx)
+	if root == "" {
+		logger.Warn("configrouting: no root tenant (no tenants, or more than one top-level tenant); periodic config sync covers no tenants until the controller restarts with exactly one")
+	}
+	return root
+}
+
+// resolveInstallerBlobRoot returns the configured installer artifact root, or
+// derives it from the resolved deployment storage paths. BlobStorage.Root must
+// remain empty in DefaultConfig so a YAML data_dir/storage override cannot
+// inherit the stale relative "data/installers" default from before unmarshal.
+func resolveInstallerBlobRoot(cfg *config.Config) string {
+	if cfg.BlobStorage.Root != "" {
+		return cfg.BlobStorage.Root
+	}
+	if cfg.Storage != nil {
+		if cfg.Storage.FlatfileRoot != "" {
+			return filepath.Join(filepath.Dir(cfg.Storage.FlatfileRoot), "installers")
+		}
+		if cfg.Storage.SQLitePath != "" {
+			return filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "installers")
+		}
+	}
+	if cfg.DataDir != "" {
+		return filepath.Join(cfg.DataDir, "installers")
+	}
+	return ""
+}
+
+// resolveWORMMarkerRoot returns the configured worm-sink marker store root
+// (Issue #4039), or derives the default <DataDir>/audit-worm-pending, matching
+// the BlobStorageConfig.Root/resolveInstallerBlobRoot precedent above. Only
+// called when the worm sink is selected.
+func resolveWORMMarkerRoot(cfg *config.Config) string {
+	if cfg.Audit != nil && cfg.Audit.MarkerRoot != "" {
+		return cfg.Audit.MarkerRoot
+	}
+	return filepath.Join(cfg.DataDir, "audit-worm-pending")
+}
+
+// makeHeartbeatStatusChangeCallback builds the OnStatusChange closure wired into
+// the heartbeat.Service. When a steward's liveness state changes, the callback
+// persists the new status to the durable StewardStore so that cfg steward list
+// and GET /api/v1/stewards reflect the change without a restart (Issue #2463).
+func makeHeartbeatStatusChangeCallback(store business.StewardStore, logger logging.Logger) heartbeat.StatusChangeCallback {
+	return func(sid string, healthy bool, status heartbeat.StewardStatus) {
+		if healthy {
+			logger.Info("Steward heartbeat recovered", "steward_id", logging.SanitizeLogValue(sid))
+			if store == nil {
+				return
+			}
+			// Only promote to Active when currently Registered or Lost; never
+			// overwrite Deregistered, Archived, Dormant, or Revoked (Issue #2463).
+			// The check is atomic with the write (Issue #4851).
+			if _, updErr := store.TransitionStewardStatus(context.Background(), sid, business.StewardStatusActive,
+				business.StewardStatusRegistered, business.StewardStatusLost); updErr != nil {
+				logger.Warn("Heartbeat recovery: failed to persist active status",
+					"steward_id", logging.SanitizeLogValue(sid), "error", logging.SanitizeLogValue(updErr.Error()))
+			}
+		} else {
+			logger.Warn("Steward heartbeat failed", "steward_id", logging.SanitizeLogValue(sid), "status", status.Status)
+			if store == nil {
+				return
+			}
+			// Lost is only a valid successor of registered/active; a revoked,
+			// archived or deregistered record must keep its operator-set status
+			// (Issue #4851).
+			if _, updErr := store.TransitionStewardStatus(context.Background(), sid, business.StewardStatusLost,
+				business.StewardStatusRegistered, business.StewardStatusActive); updErr != nil {
+				logger.Warn("Heartbeat lost: failed to persist lost status",
+					"steward_id", logging.SanitizeLogValue(sid), "error", logging.SanitizeLogValue(updErr.Error()))
+			}
+		}
+	}
+}
+
+// New creates a new server instance
+func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
+	if cfg == nil {
+		return nil, ErrNilConfig
+	}
+	if err := cfg.ValidateExecutionSecurity(); err != nil {
+		return nil, fmt.Errorf("execution security validation failed: %w", err)
+	}
+
+	// Validate transport config early: refuse to start if 0.0.0.0 bind has no external address.
+	if cfg.Transport != nil && strings.HasPrefix(cfg.Transport.ListenAddr, "0.0.0.0") {
+		externalAddr := cfg.Transport.ExternalAddress
+		if externalAddr == "" {
+			externalAddr = os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
+		}
+		if externalAddr == "" {
+			return nil, fmt.Errorf("transport.listen_addr binds 0.0.0.0 but no external address is configured; set transport.external_address in controller.cfg or CFGMS_EXTERNAL_HOSTNAME env var")
+		}
+	}
+
+	logger.Info("Config validated, proceeding with storage initialization...")
+
+	// Initialize global storage provider system - REQUIRED for all deployments
+	if cfg.Storage == nil {
+		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.flatfile_root and storage.sqlite_path (OSS composite). See docs/examples/minimum-storage-config.cfg for examples")
+	}
+
+	// Create storage manager — cluster mode (Postgres), OSS composite (flatfile+SQLite),
+	// or legacy database single-provider. The git provider is removed (Issue #664).
+	//
+	// From the moment any of the three branches below successfully constructs a
+	// storageManager, New holds open SQLite/Postgres handles. Every remaining
+	// failure returns without a Server, so nothing would ever call Stop to
+	// release them — the handles would leak for the process's life. On Windows
+	// that also pins the database files, so a caller cannot delete the data
+	// directory of a controller that refused to start. The defer below is
+	// declared before the branches (not after) and each branch registers its
+	// storageManager immediately after construction succeeds — including the
+	// cluster branch's assertClusterBackendsReady check, which can fail before
+	// any other code runs — so every post-construction failure path is covered.
+	constructed := false
+	var openedStores []func() error
+	defer func() {
+		if constructed {
+			return
+		}
+		// Reverse order, so a store closes before anything it was layered onto.
+		for i := len(openedStores) - 1; i >= 0; i-- {
+			if closeErr := openedStores[i](); closeErr != nil {
+				logger.Warn("Failed to release storage after controller initialization failed",
+					"error", closeErr)
+			}
+		}
+	}()
+
+	var storageManager *interfaces.StorageManager
+	if cfg.HA.IsClusterMode() {
+		// Cluster mode: all business stores backed by shared Postgres so every node
+		// serving the same fleet uses the same state (Issue #2119).
+		pgDSN := ""
+		sessionHMACKey := ""
+		if cfg.Storage.Cluster != nil {
+			pgDSN = cfg.Storage.Cluster.PostgresDSN
+			sessionHMACKey = cfg.Storage.Cluster.SessionHMACKey
+		}
+		var s3Config map[string]interface{}
+		if cfg.Storage.Cluster != nil {
+			s3Config = cfg.Storage.Cluster.S3
+		}
+		logger.Info("Cluster mode: initializing Postgres business store backend...",
+			"ha_mode", cfg.HA.Mode)
+		var clusterErr error
+		storageManager, clusterErr = interfaces.CreateClusterStorageManager(pgDSN, sessionHMACKey, s3Config)
+		if clusterErr != nil {
+			return nil, fmt.Errorf("failed to initialize cluster storage: %w", clusterErr)
+		}
+		openedStores = append(openedStores, storageManager.Close)
+		logger.Info("Cluster storage backend initialized")
+		if backendErr := assertClusterBackendsReady(cfg, storageManager); backendErr != nil {
+			return nil, backendErr
+		}
+	} else if cfg.Storage.FlatfileRoot != "" {
+		logger.Info("Initializing OSS composite storage backend...",
+			"flatfile_root", cfg.Storage.FlatfileRoot,
+			"sqlite_path", cfg.Storage.SQLitePath)
+		var ossErr error
+		storageManager, ossErr = interfaces.CreateOSSStorageManager(cfg.Storage.FlatfileRoot, cfg.Storage.SQLitePath)
+		if ossErr != nil {
+			return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", ossErr)
+		}
+		openedStores = append(openedStores, storageManager.Close)
+		logger.Info("OSS composite storage backend initialized")
+	} else if cfg.Storage.Provider == "database" {
+		logger.Info("Initializing database storage provider (commercial single-provider mode)")
+		var dbErr error
+		// Database provider deliberately uses the legacy single-provider helper: commercial
+		// deployments run all stores through one PostgreSQL backend, which CreateAllStoresFromConfig
+		// is explicitly retained to support (see pkg/storage/interfaces/provider.go).
+		//nolint:staticcheck // SA1019 — retained for database single-provider mode
+		storageManager, dbErr = interfaces.CreateAllStoresFromConfig("database", cfg.Storage.Config)
+		if dbErr != nil {
+			return nil, fmt.Errorf("failed to initialize database storage provider: %w. Verify storage.config contains valid database connection parameters", dbErr)
+		}
+		openedStores = append(openedStores, storageManager.Close)
+	} else {
+		return nil, fmt.Errorf("storage.flatfile_root is required for OSS composite storage, or storage.provider must be 'database' for commercial single-provider mode. The 'git' storage provider has been removed — run 'cfg storage migrate --from git --to flatfile' to migrate existing data")
+	}
+
+	// Validate that the constructed StorageManager supplies every store required by
+	// the enabled subsystems. A missing required store fails closed here — at startup,
+	// before anything tries to use the store — rather than silently producing a nil
+	// that causes a 503 at request time (issue #3400 regression guard).
+	// Registration (#3491) and push (#3492) are wired; workflow-trigger (#3493)
+	// is now wired too — all three subsystems from epic #3406 declare their
+	// required stores below.
+	activeReqs := collectActiveStorageRequirements(cfg)
+	if reqErr := interfaces.ValidateStorageRequirements(storageManager, activeReqs); reqErr != nil {
+		return nil, reqErr
+	}
+
+	// Collect declared-optional capabilities that are absent in this deployment.
+	// Computed once at composition (Issue #3409): the capability set is fixed at
+	// startup and served verbatim by GET /api/v1/ha/status — no per-request recompute.
+	absentCaps := interfaces.CollectAbsentOptionalCapabilities(storageManager, activeReqs, storageProviderName(cfg))
+	if len(absentCaps) > 0 {
+		for _, cap := range absentCaps {
+			logger.Warn("Optional storage capability absent — deployment running in degraded mode",
+				"capability", cap.Capability,
+				"subsystem", cap.Subsystem,
+				"provider", cap.Provider,
+				"consequence", cap.Consequence,
+			)
+		}
+	}
+
+	// Record the configured (never live-peer-count) cluster signal for the shared
+	// atomic-update helper, and warn once if the config store cannot make a
+	// read-modify-write atomic across nodes (Issue #5550). Operations that need
+	// atomicity then fail closed with ErrNotClusterAtomic.
+	cfgconfig.SetClusterConfigured(cfg.HA.IsClusterMode())
+	if cfg.HA.IsClusterMode() {
+		if cs := storageManager.GetConfigStore(); cs != nil && !cfgconfig.ClusterAtomic(cs) {
+			logger.Warn("Config store is not cluster-atomic — domain claim, credential issue/reveal and directory membership writes will be refused; use the database storage provider for multi-node controllers",
+				"error", cfgconfig.ErrNotClusterAtomic.Error())
+		}
+	}
+
+	// Resolve the configured audit sink (Issue #4036/#4037/#4039, ADR-033).
+	// "local" is the zero-extra-infrastructure default; "worm" wraps the
+	// durable store with a forward-only shipper to an append-only WORM blob
+	// target plus a buffer-then-flush reconciliation loop for outages (Epic
+	// #4033). This MUST run before storageManager.GetAuditStore() is read for
+	// RBAC or the audit manager below: RBAC builds its own internal audit.Manager
+	// from a captured store reference (rbac.NewManagerWithStorage), so every
+	// reader of the audit store must see the WORM-wrapped instance once
+	// installed, or RBAC-sourced audit entries would silently bypass the WORM
+	// shipper.
+	var wormAuditStore *auditsink.WORMAuditStore
+	auditSinkName := cfg.Audit.ResolvedSink()
+	switch auditSinkName {
+	case config.AuditSinkWORM:
+		wormBlobStore, wormBlobErr := blob.CreateBlobStoreFromConfig("s3", cfg.Audit.WORM)
+		if wormBlobErr != nil {
+			return nil, fmt.Errorf("failed to initialize worm audit sink blob store: %w", wormBlobErr)
+		}
+		markerRoot := resolveWORMMarkerRoot(cfg)
+		markerStore, markerErr := blob.CreateBlobStoreFromConfig("filesystem", map[string]interface{}{"root": markerRoot})
+		if markerErr != nil {
+			return nil, fmt.Errorf("audit worm sink: marker store at %q is not writable: %w", markerRoot, markerErr)
+		}
+		var wormErr error
+		wormAuditStore, wormErr = auditsink.NewWORMAuditStore(context.Background(), storageManager.GetAuditStore(), wormBlobStore, markerStore, logger)
+		if wormErr != nil {
+			return nil, fmt.Errorf("audit worm sink: marker store at %q is not writable: %w", markerRoot, wormErr)
+		}
+		storageManager.SetAuditStore(wormAuditStore)
+		wormAuditStore.Start(context.Background())
+		logger.Info("Audit worm sink reconciliation loop started", "marker_root", markerRoot)
+	case config.AuditSinkLocal:
+		logger.Info("Audit sink selected",
+			"sink", auditSinkName,
+			"bound", "ADR-004/ADR-033: a host-compromised controller holds the audit HMAC key and can rewrite history under this sink",
+		)
+	default:
+		return nil, fmt.Errorf("unknown audit sink %q (valid values: %q, %q)",
+			auditSinkName, config.AuditSinkLocal, config.AuditSinkWORM)
+	}
+
+	// Initialize RBAC system with pluggable storage only
+	auditStore := storageManager.GetAuditStore()
+	rbacStore := storageManager.GetRBACStore()
+
+	logger.Info("Creating RBAC manager with storage...")
+	rbacManager := rbac.NewManagerWithStorage(
+		auditStore,
+		rbacStore,
+	)
+	logger.Info("RBAC manager created")
+
+	// Initialize unified audit system with pluggable storage only
+	logger.Info("Creating audit manager...")
+	auditSecrets, auditSecretsErr := api.NewSecretStore(cfg)
+	if auditSecretsErr != nil {
+		return nil, fmt.Errorf("failed to initialize durable audit signing key store: %w", auditSecretsErr)
+	}
+	auditManager, auditErr := audit.NewManager(
+		storageManager.GetAuditStore(),
+		"controller",
+		audit.WithSecretsStore(auditSecrets),
+	)
+	closeAuditSecretsErr := auditSecrets.Close()
+	if auditErr != nil {
+		return nil, fmt.Errorf("failed to initialize audit manager: %w", auditErr)
+	}
+	if closeAuditSecretsErr != nil {
+		return nil, fmt.Errorf("failed to close audit signing key store after initialization: %w", closeAuditSecretsErr)
+	}
+	logger.Info("Audit manager created")
+
+	logger.Info("RBAC and Audit systems initialized with pluggable storage", "provider", cfg.Storage.Provider)
+
+	// Initialize default permissions and roles
+	logger.Info("Starting RBAC initialization...")
+	// Startup seeding and loading are system-internal: the RBAC store refuses a
+	// context with no caller (Issue #4665).
+	if err := rbacManager.Initialize(ctxkeys.WithSystem(context.Background())); err != nil {
+		logger.Warn("Failed to initialize RBAC configuration", "error", err)
+	}
+	logger.Info("RBAC initialization completed")
+
+	// Initialize tenant management with durable storage
+	tenantManager := tenant.NewManager(storageManager.GetTenantStore(), rbacManager).
+		WithAuditManager(auditManager)
+	// Fail closed at the point RealmID is actually consumed. Every controller
+	// start reaches here regardless of certificate or HA config shape — unlike
+	// the certificate-manager and --init paths, which are conditional (a
+	// cluster deployment with no certificate.cluster_ca block never builds a
+	// cluster cert manager, and --init runs once at provisioning time). This is
+	// what makes the unconditional "refuses to start when unset" in
+	// docs/reference/config-schema.md and docs/operations/cluster-ca.md true,
+	// and it rejects a malformed realm before any tenant identity is built
+	// from it.
+	if err := tenant.EnforceRealmGuard(cfg); err != nil {
+		return nil, err
+	}
+	// RealmID is deployment-wide config (ADR-032 Decision 3), never stored per-tenant;
+	// QualifiedTenantID computes the qualified form on demand from whatever is configured.
+	tenantManager.RealmID = cfg.RealmID
+
+	// Detect HA cluster mode from cfg.HA (populated by LoadWithPath from ha.mode YAML
+	// key and CFGMS_HA_MODE env var). This is the single source of truth for mode
+	// selection; the separate haEarlyCfg.LoadFromEnvironment() path is no longer needed
+	// because LoadWithPath already applies env-var overrides to cfg.HA (Issue #2119).
+	isClusterMode := cfg.HA.IsClusterMode()
+
+	// DNA storage — durable steward DNA + fleet registry. Shared by the
+	// controller service (warm-loading the steward registry after a restart)
+	// and the reports engine. (Issue #1572)
+	//
+	// Single-node: SQLite at an absolute, CWD-independent path (see resolveDNADataRoot
+	// and Issue #2010). Cluster: PostgreSQL-backed DatabaseBackend shared by all nodes
+	// (connection string from CFGMS_DNA_DATABASE_URL); resolveDNADataRoot is not
+	// called in cluster mode (Issue #2118).
+	dnaStorageConfig := dnaStorage.DefaultConfig()
+	if isClusterMode {
+		dnaStorageConfig.Backend = dnaStorage.BackendDatabase
+		// DatabaseURL left empty: NewDatabaseBackend reads CFGMS_DNA_DATABASE_URL
+		// or individual CFGMS_DNA_DB_* env vars.
+		logger.Info("Cluster mode: using PostgreSQL DNA backend (CFGMS_DNA_DATABASE_URL)")
+	} else {
+		dnaStorageConfig.DataDir = filepath.Join(resolveDNADataRoot(cfg), "dna-reports")
+	}
+	dnaStorageManager, dnaErr := dnaStorage.NewManager(dnaStorageConfig, logger)
+	if dnaErr != nil {
+		logger.Warn("Failed to initialize DNA storage; steward registry will not survive a controller restart", "error", dnaErr)
+	}
+	if dnaStorageManager != nil {
+		openedStores = append(openedStores, dnaStorageManager.Close)
+	}
+
+	// Create the controller service. With durable DNA storage its in-memory
+	// steward registry is warm-loaded from a previous run on startup, so a
+	// controller restart does not lose track of connected stewards. (Issue #1572)
+	var controllerService *service.ControllerService
+	if dnaStorageManager != nil {
+		controllerService = service.NewControllerServiceWithStorage(logger, dnaStorageManager)
+	} else {
+		controllerService = service.NewControllerService(logger)
+	}
+	controllerService.SetTenantAncestry(tenantManager.IsTenantAncestor)
+	// Issue #3403: Wire the StewardStore before LoadFromStorage so the warm-load
+	// can enumerate enrolled-but-never-connected stewards from the fleet registry
+	// in addition to connected stewards tracked in DNA storage.
+	if ss := storageManager.GetStewardStore(); ss != nil {
+		controllerService.SetStewardStore(ss)
+	}
+	// LoadFromStorage is a no-op when neither DNA storage nor StewardStore is
+	// configured (controller_service.go:130). Call it unconditionally so a
+	// deployment without DNA storage still warms the registry from StewardStore.
+	if err := controllerService.LoadFromStorage(context.Background()); err != nil {
+		// Do not log the raw error: storage-driver errors embed the DSN (and
+		// therefore the DB password) in their message text. Log the fixed sentinel
+		// only; the storage layer already logs the underlying cause at its boundary.
+		logger.Warn("Failed to warm-load steward registry from DNA storage or fleet store")
+	}
+
+	// Wire deployment ring config into controller service (Issue #2271).
+	if err := cfg.ValidateDeploymentRings(); err != nil {
+		return nil, fmt.Errorf("invalid deployment_rings config: %w", err)
+	}
+	if err := cfg.ValidateModuleTrust(); err != nil {
+		return nil, fmt.Errorf("invalid module config: %w", err)
+	}
+	controllerService.SetRingConfig(cfg.EffectiveRings())
+
+	// Issue #2542: Wire durable SQLite-backed tag store. Nil when SQLite is not
+	// configured (tags API degrades gracefully; SetTagStore is a no-op on nil).
+	tagStoreInstance := initializeTagStore(context.Background(), cfg, logger)
+	if tagStoreInstance != nil {
+		openedStores = append(openedStores, tagStoreInstance.Close)
+		controllerService.SetTagStore(tagStoreInstance)
+	}
+
+	// Issue #3253: Construct the entity graph provider, tracking the same
+	// storage backend as the rest of the controller. The provider is registered
+	// in openedStores immediately so a mid-New failure releases its handle.
+	egProvider, egErr := initializeEntityGraphProvider(cfg, logger, controllerService)
+	if egErr != nil {
+		return nil, fmt.Errorf("failed to initialize entity graph provider: %w", egErr)
+	}
+	openedStores = append(openedStores, egProvider.Close)
+
+	// Issue #4408: dedicated secret store for the git-capable config source router.
+	// A separate instance from the audit signing key store above (closed immediately
+	// after use) and from httpServer's own internal secret store (api.New constructs
+	// that one later, after configService below already exists) — same on-disk
+	// backing (api.NewSecretStore(cfg)), kept open for the router's lifetime and
+	// closed explicitly in Stop().
+	routerSecretStore, routerSecretErr := api.NewSecretStore(cfg)
+	if routerSecretErr != nil {
+		return nil, fmt.Errorf("failed to initialize config router secret store: %w", routerSecretErr)
+	}
+	openedStores = append(openedStores, routerSecretStore.Close)
+
+	// Issue #5431: directory manager with the Entra ID provider registered
+	// unconnected. Its credentials are the tenant M365 connections held in the
+	// same secret store the router store is built over.
+	directoryManager, dirErr := registerDirectoryProviders(routerSecretStore, logger)
+	if dirErr != nil {
+		return nil, fmt.Errorf("failed to initialize directory providers: %w", dirErr)
+	}
+
+	gitConfigWorkDir := filepath.Join(resolveDNADataRoot(cfg), "config-git-sources")
+	if mkErr := os.MkdirAll(gitConfigWorkDir, 0750); mkErr != nil {
+		return nil, fmt.Errorf("failed to create config git work directory: %w", mkErr)
+	}
+
+	// Create the configuration service (V2: durable storage via StorageManager).
+	// WithGitRouter makes the router git-capable (Issue #4408): storeForSource can
+	// only reach a *gitprovider.GitConfigStore when it sees a non-nil secret store
+	// and a non-empty git work dir — without both, SyncTenantWithRemote (below)
+	// silently pulls nothing on every tick.
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService,
+		service.WithGitRouter(routerSecretStore, gitConfigWorkDir))
+
+	// Issue #4408: wire the periodic git-sourced tenant config sync service.
+	// rootTenantID is resolved through the tenant store (not inlined) so a missing
+	// bootstrap record is visible at startup; cascadeFn mirrors the tenant-only
+	// cascade that on-request resolution already performs for e.g.
+	// GET /api/v1/tenants/{id}/reboot-window (ConfigurationServiceV2.
+	// GetEffectiveConfiguration's own doc comment calls this a "tenant-only
+	// cascade") — distinct from the save=deploy steward fan-out registered
+	// separately below in features/controller/api/server.go, which is a
+	// write-triggered push, not a cascade recompute.
+	rootTenantID := resolveRootTenantID(context.Background(), tenantManager, logger)
+	cascadeFn := func(ctx context.Context, tenantID string) error {
+		_, err := configService.GetEffectiveConfiguration(ctx, tenantID, "")
+		return err
+	}
+	configSyncService := configrouting.NewSyncService(
+		configService.ConfigSourceRouter(),
+		storageManager.GetTenantStore(),
+		auditManager,
+		logger,
+		cascadeFn,
+		rootTenantID,
+	)
+
+	// Create the RBAC service
+	rbacService := service.NewRBACService(rbacManager)
+
+	// Initialize certificate manager if enabled
+	var certManager *cert.Manager
+	var certProvisioningService *service.CertificateProvisioningService
+	var signingMigrationSvc *service.SigningMigrationService
+	if cfg.Certificate != nil && cfg.Certificate.EnableCertManagement {
+		// Init guard: controller must be initialized before normal startup
+		caPath := cfg.Certificate.CAPath
+		if !initialization.IsInitialized(caPath) {
+			if initialization.CAFilesExist(caPath) {
+				// Legacy: existing CA files but no marker — auto-create marker for backward compat
+				logger.Info("Legacy CA detected without init marker, creating marker for backward compatibility", "ca_path", caPath)
+				if err := initialization.CreateLegacyMarker(caPath); err != nil {
+					return nil, fmt.Errorf("failed to create legacy init marker: %w", err)
+				}
+			} else {
+				// Not initialized — refuse to start
+				return nil, ErrNotInitialized
+			}
+		}
+
+		var err error
+		certManager, err = loadExistingCertificateManager(cfg, storageManager, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load certificate manager: %w", err)
+		}
+		// Issue #4864: a single-node controller that predates the signing key store
+		// moves its existing signing certificate and key into the store under the
+		// same serial, before anything provisions a signing certificate. A cluster
+		// uses the signing migration service instead. A failure is not fatal: the
+		// controller keeps signing with its local key and retries on the next start.
+		if !cfg.HA.IsClusterMode() {
+			adoptSingleNodeSigningIdentity(context.Background(), certManager, auditManager, logger)
+		}
+		if cfg.SecurityProfile == config.SecurityProfilePublicBeta {
+			if err := validatePublicBetaControllerRoots(certManager, time.Now()); err != nil {
+				return nil, fmt.Errorf("public-beta signing roots are invalid: %w", err)
+			}
+		}
+
+		// Reject legacy unified-mode config and block on legacy cert types in store
+		if err := cfg.Certificate.ValidateCertificateArchitecture(); err != nil {
+			return nil, err
+		}
+		if err := certManager.CheckForLegacyCertificates(); err != nil {
+			return nil, err
+		}
+
+		// Ensure purpose-specific certificates exist (idempotent first-boot generation).
+		// initialization.TransportCertSANs merges transport defaults, operator-configured
+		// SANs (server + internal blocks), and CFGMS_EXTERNAL_HOSTNAME so stewards can
+		// verify the cert by external hostname. Shared with initialization.Run so that
+		// --init mints the cert with the same SAN set this startup path would generate.
+		logger.Info("Ensuring separated certificates (internal mTLS + config signing)...")
+		dnsNames, ipAddresses := initialization.TransportCertSANs(cfg)
+		internalCfg := &cert.ServerCertConfig{
+			CommonName:   "cfgms-internal",
+			DNSNames:     dnsNames,
+			IPAddresses:  ipAddresses,
+			ValidityDays: 365,
+		}
+		if cfg.Certificate.Internal != nil && cfg.Certificate.Internal.CommonName != "" {
+			internalCfg.CommonName = cfg.Certificate.Internal.CommonName
+		}
+		if cfg.Certificate.InternalCertValidityDays > 0 {
+			internalCfg.ValidityDays = cfg.Certificate.InternalCertValidityDays
+		}
+
+		signingCfg := &cert.SigningCertConfig{
+			CommonName:   "cfgms-config-signer",
+			ValidityDays: 1095,
+			KeySize:      4096,
+		}
+		if cfg.Certificate.Signing != nil {
+			if cfg.Certificate.Signing.CommonName != "" {
+				signingCfg.CommonName = cfg.Certificate.Signing.CommonName
+			}
+			if cfg.Certificate.Signing.Organization != "" {
+				signingCfg.Organization = cfg.Certificate.Signing.Organization
+			}
+		}
+		if cfg.Certificate.SigningCertValidityDays > 0 {
+			signingCfg.ValidityDays = cfg.Certificate.SigningCertValidityDays
+		}
+
+		if err := certManager.EnsureSeparatedCertificates(internalCfg, signingCfg); err != nil {
+			return nil, fmt.Errorf("failed to ensure separated certificates: %w", err)
+		}
+		logger.Info("Separated certificates ensured (internal mTLS + config signing)")
+
+		// Issue #4796: a cluster-mode node imports its node-local signing
+		// certificates into the shared store's migration namespace, promotes the
+		// elected serial, and removes verified local keys. A failure here is not
+		// fatal: the node keeps signing under its resolved identity and the
+		// background pass started with the server retries.
+		signingMigrationSvc = service.NewSigningMigrationService(certManager, logger)
+		signingMigrationSvc.SetAuditManager(auditManager)
+		if err := signingMigrationSvc.Run(context.Background()); err != nil {
+			logger.Warn("Signing identity migration pass failed at startup",
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+
+		// Create certificate provisioning service
+		certProvisioningService = service.NewCertificateProvisioningService(certManager, logger)
+		certProvisioningService.SetTenantAncestry(tenantManager.IsTenantAncestor)
+		if cfg.Certificate.ClientCertValidityDays > 0 {
+			certProvisioningService.SetCertificateDefaults(
+				cfg.Certificate.ClientCertValidityDays,
+				cfg.Certificate.Server.Organization,
+			)
+		}
+	}
+
+	// Initialize HA manager.
+	logger.Info("Initializing HA manager...")
+	haManager, err := initializeHAManager(cfg, logger, storageManager)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize HA manager: %w", err)
+	}
+	logger.Info("HA manager initialized successfully")
+
+	// ADR-031 Decision 4: wire the DNA storage maintenance sweep's cluster-
+	// singleton lease claim now that haManager exists. dnaStorageManager is
+	// constructed earlier (before haManager, which itself requires certManager),
+	// so its maintenance goroutine may already be running — SetMaintenanceLease
+	// is safe to call at any time; the next tick reads the newly set lease job.
+	if dnaStorageManager != nil {
+		maintenanceLeaseJob, err := haManager.NewBackgroundLoopLease("controller-dna-storage-maintenance", logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to construct DNA storage maintenance lease job: %w", err)
+		}
+		dnaStorageManager.SetMaintenanceLease(maintenanceLeaseJob)
+	}
+
+	// Initialize registration token store for HTTP-based registration (Story #263)
+	var regStore pkgRegistration.Store
+	regTokenStore := storageManager.GetRegistrationTokenStore()
+	{
+		if regTokenStore == nil {
+			return nil, fmt.Errorf("registration token store is required")
+		}
+		if err := regTokenStore.Initialize(context.Background()); err != nil {
+			return nil, fmt.Errorf("failed to initialize registration token store: %w", err)
+		}
+		regStore = pkgRegistration.NewStorageAdapter(regTokenStore)
+
+		// Seed test tokens only when explicitly requested via environment variable.
+		// Never runs in production — must be set deliberately in test environments.
+		if os.Getenv("CFGMS_SEED_TEST_TOKENS") == "1" {
+			now := time.Now()
+			expiredTime := now.Add(-1 * time.Hour)
+			testTokens := []*pkgRegistration.Token{
+				{
+					Token:         "dockertest_standalone", //nolint:gosec // test-only seeding, env-gated
+					TenantID:      "test-tenant",
+					ControllerURL: "tcp://controller-standalone:1883",
+					Group:         "test-group",
+					CreatedAt:     now,
+					ExpiresAt:     nil,
+					Revoked:       false,
+				},
+				{
+					Token:         "integration_reusable", //nolint:gosec // test-only seeding, env-gated
+					TenantID:      "test-tenant-integration",
+					ControllerURL: "tcp://localhost:1886",
+					Group:         "production",
+					CreatedAt:     now,
+					ExpiresAt:     nil,
+					Revoked:       false,
+				},
+				{
+					Token:         "integration_expired", //nolint:gosec // test-only seeding, env-gated
+					TenantID:      "test-tenant-integration",
+					ControllerURL: "tcp://localhost:1886",
+					Group:         "production",
+					CreatedAt:     now.Add(-2 * time.Hour),
+					ExpiresAt:     &expiredTime,
+					Revoked:       false,
+				},
+				{
+					Token:         "integration_revoked", //nolint:gosec // test-only seeding, env-gated
+					TenantID:      "test-tenant-integration",
+					ControllerURL: "tcp://localhost:1886",
+					Group:         "production",
+					CreatedAt:     now,
+					ExpiresAt:     nil,
+					Revoked:       true,
+					RevokedAt:     &now,
+				},
+				{
+					Token:         "dockertest_fleet", //nolint:gosec // test-only seeding, env-gated
+					TenantID:      "test-tenant-fleet",
+					ControllerURL: "fleet-controller:4433",
+					Group:         "test-group",
+					CreatedAt:     now,
+					ExpiresAt:     nil,
+					Revoked:       false,
+				},
+				{
+					Token:         "dockertest_fleet_child_a", //nolint:gosec // test-only seeding, env-gated
+					TenantID:      "fleet-root/fleet-child-a",
+					ControllerURL: "fleet-controller:4433",
+					Group:         "test-group",
+					CreatedAt:     now,
+					ExpiresAt:     nil,
+					Revoked:       false,
+				},
+				{
+					Token:         "dockertest_fleet_child_b", //nolint:gosec // test-only seeding, env-gated
+					TenantID:      "fleet-root/fleet-child-b",
+					ControllerURL: "fleet-controller:4433",
+					Group:         "test-group",
+					CreatedAt:     now,
+					ExpiresAt:     nil,
+					Revoked:       false,
+				},
+			}
+
+			for _, testToken := range testTokens {
+				redactedToken := logging.RedactedID(testToken.Token)
+				if err := regStore.SaveToken(context.Background(), testToken); err != nil {
+					logger.Warn("Failed to seed test token", "error", err, "token", redactedToken)
+				} else {
+					logger.Info("Seeded test registration token", "token", redactedToken, "tenant", testToken.TenantID)
+				}
+			}
+
+			// Seed fleet cascade tenant hierarchy and MSP-level parent policy (Issue #1723).
+			// Creates fleet-root → fleet-child-a/fleet-child-b so the InheritanceResolver
+			// can walk the ancestor chain and cascade the parent policy to both child tenants.
+			seedFleetCascadeTestData(context.Background(), storageManager, logger)
+		}
+	}
+
+	// Initialize shared gRPC-over-QUIC transport (Story #515)
+	var controlPlane controlplaneInterfaces.ControlPlaneProvider
+	// connRegistry tracks active steward ControlChannel connections. It is
+	// created once here and shared between the CP provider (which registers
+	// connections) and the HTTP API server (which reads connection_state for
+	// GET /api/v1/stewards/{id}). Without this wiring the API server has no
+	// registry and always reports stewards as disconnected (Issue #1572).
+	var connRegistry registry.Registry
+	// routingStore is hoisted the same way as connRegistry: created inside the
+	// transport-enabled block below, but also needed by the HTTP API server
+	// wiring further down for the decommission drain-wait's cross-node session
+	// count (Issue #3895).
+	var routingStore business.RoutingStore
+	// admissionQueues holds the per-tenant ingest admission gates (Issue #3759).
+	// Created once here so the CP provider (Register/ControlChannel) takes the
+	// server-verified-key queue now and Start() takes the wire-keyed queue for
+	// the DNA and bulk-transfer handlers. See ingest_admission.go for why those
+	// are two instances and not one.
+	admissionQueues := newIngestAdmissionQueues()
+	var heartbeatService *heartbeat.Service
+	var commandPublisher *commands.Publisher
+	var executionQueue *scriptmodule.ExecutionQueue
+	var scriptLibrary *scriptmodule.TenantScriptRepository
+	var jobDispatcher *dispatcher.Dispatcher
+	// ADR-031 Decision 3, Issue #3764: internal controller-to-controller delivery
+	// RPC service handler and the dispatch-path cluster fallback it backs. Both
+	// stay nil outside cluster mode (see the wiring block below).
+	var deliveryServer *internaldelivery.Server
+	var clusterAwareSender *internaldelivery.ClusterAwareSender
+	// hoistedSigner is the static signing cert captured at boot. It is kept for
+	// the config handler's nil-certManager fallback path. The command publisher and
+	// dispatcher use commandSigner (a DynamicSigner) instead (Issue #1844).
+	// hoistedSignerCertSerial is reported by the registration handler (Story #378).
+	var hoistedSigner signature.Signer
+	var hoistedSignerCertSerial string
+	// signingRotationSvc is hoisted so it can be wired to both the gRPC on-connect hook
+	// and the HTTP API rotate endpoint (Issue #1816).
+	var signingRotationSvc *service.SigningRotationService
+	var signingRetirementSvc *service.SigningRetirementService
+	var stewardMigrationSvc *service.StewardSigningMigrationService
+	if cfg.Transport != nil && certManager != nil {
+		logger.Info("Initializing gRPC control plane provider...", "addr", cfg.Transport.ListenAddr)
+
+		grpcTLSConfig, err := buildGRPCControlPlaneTLSConfig(cfg, certManager, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build transport TLS config: %w", err)
+		}
+
+		// Initialize CP provider (shared gRPC server created fresh in Start).
+		// Issue #1817: Create the signing rotation service before the provider so
+		// we can inject it as the on-connect hook. The publisher is wired after
+		// commandPublisher is constructed below (breaks the init cycle).
+		connRegistry = registry.NewRegistry()
+		stewardStore := storageManager.GetStewardStore()
+		if stewardStore == nil {
+			return nil, fmt.Errorf("steward approval store is required when transport is enabled")
+		}
+		approvalChecker := grpcCP.NewStewardStoreApprovalChecker(stewardStore)
+		// Issue #3759: the admission gate keys its buckets on the tenant this
+		// store reports for the mTLS-verified steward CN, never on the tenant
+		// field the steward puts on the wire — otherwise any steward with a
+		// valid certificate could saturate another tenant's shared slots.
+		tenantResolver := grpcCP.NewStewardStoreTenantResolver(stewardStore)
+		// Issue #2008: compose the admin-registry upsert hook alongside the
+		// signing-rotation hook so every authenticated (re)connect repopulates
+		// ControllerService.s.stewards (which backs cfg steward list/status/exec).
+		// A cert-reuse reconnect never re-runs HTTP registration, so without this
+		// the registry stays empty for a reconnecting steward until a restart.
+		registryConnectHook := service.NewStewardRegistryConnectHook(controllerService, logger)
+		// Issue #2050: completion reconciler — flips finalizing→ready when the
+		// newly-registered steward's CN matches the CorrelationID in the provision
+		// record, and sweeps timed-out non-terminal records to failed. A no-op
+		// memProvisionStore is used when the hyperv feature is not configured so
+		// the controller boots cleanly without any hyperv-specific configuration.
+		completionReconciler := hypervcompletion.New(hyperv.NewMemProvisionStore(), logger)
+		// ADR-031 Decision 3, Issue #3764: shared steward-routing table. Composed
+		// into the connect hook chain unconditionally — routingTableConnectHook is
+		// a no-op when routingStore is nil (no provider support / non-cluster
+		// deployment), so this never changes connect behavior outside cluster mode.
+		routingStore = storageManager.GetRoutingStore()
+		routingHook := &routingTableConnectHook{routingStore: routingStore, logger: logger}
+		if haManager != nil {
+			routingHook.localNodeID = haManager.GetLocalNode().ID
+		}
+		// Issue #3757/#3764: drain a reconnecting steward's durable outbox backlog
+		// immediately rather than waiting for the next dispatch attempt. publisher
+		// is nil here (commands.Publisher does not exist yet — same init-cycle
+		// break as signingRotationSvc below) and wired in via SetPublisher once it
+		// does.
+		drainHook := service.NewPendingDeliveryDrainHook(storageManager.GetCommandStore(), stewardStore, nil, logger)
+		if certManager != nil {
+			signingRotationSvc = service.NewSigningRotationService(certManager, logger)
+			if haManager != nil {
+				signingRotationSvc.SetNodeID(haManager.GetLocalNode().ID)
+			}
+			// Issue #4797: moves this node's connected stewards onto the shared
+			// signing certificate. Its OnConnect only queues the steward for a
+			// bounded worker pool, so admission is never delayed. The confirmation
+			// is recorded in the cluster-visible acknowledgement store; without a
+			// provider for it the node-local file store keeps this node correct
+			// (and a single-node controller has nothing else to coordinate with).
+			trustAcks := storageManager.GetSigningTrustAckStore()
+			if trustAcks == nil {
+				fileAcks, ackErr := cert.NewFileSigningTrustAckStore(filepath.Dir(filepath.Clean(cfg.Certificate.CAPath)))
+				if ackErr != nil {
+					return nil, fmt.Errorf("failed to open signing trust acknowledgement store: %w", ackErr)
+				}
+				trustAcks = fileAcks
+			}
+			stewardMigrationSvc = service.NewStewardSigningMigrationService(certManager, trustAcks, logger)
+			stewardMigrationSvc.SetConnectedStewards(connRegistry)
+			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, stewardMigrationSvc, registryConnectHook, completionReconciler, routingHook, drainHook)
+			controlPlane = grpcCP.New(
+				grpcCP.ModeServer,
+				grpcCP.WithOnConnectHook(composite),
+				grpcCP.WithApprovalChecker(approvalChecker),
+				grpcCP.WithRevocationChecker(certManager),
+				// Issue #3759: the connect/heartbeat gate — deliberately NOT the queue
+				// the DNA and bulk handlers use, whose bucket key comes off the wire
+				// (see ingest_admission.go).
+				grpcCP.WithTenantAdmission(admissionQueues.connectHeartbeatQueue()),
+				// Issue #5120: steward events get their own queue so slow handlers
+				// cannot use up connect or heartbeat slots.
+				grpcCP.WithEventAdmission(admissionQueues.eventsQueue()),
+				grpcCP.WithResponseAdmission(admissionQueues.responsesQueue()),
+				grpcCP.WithStewardTenantResolver(tenantResolver),
+				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger)),
+				grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, auditManager, logger)),
+			)
+		} else {
+			composite := service.NewCompositeOnConnectHook(logger, registryConnectHook, completionReconciler, routingHook, drainHook)
+			controlPlane = grpcCP.New(
+				grpcCP.ModeServer,
+				grpcCP.WithOnConnectHook(composite),
+				grpcCP.WithApprovalChecker(approvalChecker),
+				grpcCP.WithRevocationChecker(certManager),
+				// Issue #3759: the connect/heartbeat gate — deliberately NOT the queue
+				// the DNA and bulk handlers use, whose bucket key comes off the wire
+				// (see ingest_admission.go).
+				grpcCP.WithTenantAdmission(admissionQueues.connectHeartbeatQueue()),
+				// Issue #5120: steward events get their own queue so slow handlers
+				// cannot use up connect or heartbeat slots.
+				grpcCP.WithEventAdmission(admissionQueues.eventsQueue()),
+				grpcCP.WithResponseAdmission(admissionQueues.responsesQueue()),
+				grpcCP.WithStewardTenantResolver(tenantResolver),
+				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger)),
+				grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, auditManager, logger)),
+			)
+		}
+		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
+			"mode":                     "server",
+			"addr":                     cfg.Transport.ListenAddr,
+			"tls_config":               grpcTLSConfig,
+			"registry":                 connRegistry,
+			"logger":                   logger,
+			"max_connections":          cfg.Transport.MaxConnections,
+			"registration_token_store": regTokenStore,
+			"require_security_stores":  true,
+		}); err != nil {
+			return nil, fmt.Errorf("failed to initialize gRPC control plane provider: %w", err)
+		}
+		logger.Info("gRPC control plane provider initialized", "provider", controlPlane.Name(), "addr", cfg.Transport.ListenAddr)
+
+		// Story #919: Hoist signer construction so the command publisher, config
+		// handler, and job dispatcher all share the same signer instance.
+		// Constructed here — before any publisher or dispatcher — so every
+		// controller-issued command carries a consistent signature.
+		//
+		// The signer MUST use a dedicated, persisted config-signing certificate
+		// (CertificateTypeConfigSigning) in every architecture mode. A steward
+		// caches the controller's signing certificate at registration (and
+		// restores it from disk on a cert-reuse reconnect) and rejects any
+		// command or config signed by a different key. The gRPC server
+		// certificate must never be used as the signer: listing certs by type
+		// returns every Server-typed cert newest-first, and the controller owns
+		// more than one (gRPC transport + HTTP API), so that selection is not
+		// stable across restarts. EnsureSigningCertificate is idempotent — it
+		// generates the signing cert once and reuses it on every later boot.
+		if certManager != nil {
+			if ensureErr := certManager.EnsureSigningCertificate(nil); ensureErr != nil {
+				if cfg.SecurityProfile == config.SecurityProfilePublicBeta {
+					return nil, fmt.Errorf("public-beta signing certificate initialization failed: %w", ensureErr)
+				}
+				if cfg.HA != nil && cfg.HA.IsClusterMode() {
+					// A clustered node must not run without the cluster's signing
+					// identity: nothing falls back to a local key.
+					return nil, fmt.Errorf("cluster signing identity initialization failed: %w", ensureErr)
+				}
+				logger.Warn("Failed to ensure config signing certificate", "error", logging.SanitizeLogValue(ensureErr.Error()))
+			}
+			signerCert, scErr := certManager.GetCurrentCertForPurpose(cert.PurposeSigning)
+			if scErr == nil {
+				hoistedSignerCertSerial = signerCert.SerialNumber
+				certPEM, keyPEM, exportErr := certManager.ExportCertificate(hoistedSignerCertSerial, true, false)
+				if exportErr == nil && len(certPEM) > 0 && len(keyPEM) > 0 {
+					var signerErr error
+					hoistedSigner, signerErr = signature.NewSigner(&signature.SignerConfig{
+						PrivateKeyPEM:  keyPEM,
+						CertificatePEM: certPEM,
+					})
+					if signerErr != nil {
+						logger.Warn("Failed to create config signer", "error", signerErr)
+					} else {
+						logger.Info("Config signer initialized successfully",
+							"algorithm", hoistedSigner.Algorithm(),
+							"fingerprint", hoistedSigner.KeyFingerprint(),
+							"cert_serial", hoistedSignerCertSerial,
+							"cert_type", cert.CertificateTypeConfigSigning.String())
+					}
+				}
+			} else if cfg.SecurityProfile == config.SecurityProfilePublicBeta {
+				return nil, fmt.Errorf("public-beta signing certificate is unavailable: %w", scErr)
+			}
+		}
+		if cfg.SecurityProfile == config.SecurityProfilePublicBeta && hoistedSigner == nil {
+			return nil, fmt.Errorf("public-beta startup requires a valid loaded command-signing certificate and private key")
+		}
+
+		// Issue #1844: Command publisher and dispatcher use a DynamicSigner that
+		// resolves the current signing cert at each sign call rather than a signer
+		// pinned to the boot cert. After a signing-cert rotation where the boot cert
+		// is retired from a steward's trusted set, boot-signed commands fail
+		// verification on the steward side — the same failure the config signer had
+		// before Issue #1816. The DynamicSigner re-resolves the live signing serial
+		// per sign and rebuilds the underlying signer only when that serial changes
+		// (once per rotation, not once per command).
+		//
+		// push_signing_cert safety: this command must be signed with a cert the
+		// target steward already trusts. During the overlap window both old and new
+		// certs are trusted by the steward, so a DynamicSigner resolving the current
+		// (newly rotated) cert is safe as long as the steward is within the overlap
+		// window. After overlap expires, a steward that missed push_signing_cert
+		// needs re-enrollment (Issue #1845).
+		var commandSigner signature.Signer
+		if certManager != nil {
+			cm := certManager
+			commandSigner = signature.NewDynamicSigner(service.NewSigningResolver(cm))
+		}
+
+		// ADR-031 Decision 3, Issue #3764: shared steward-routing table + internal
+		// controller-to-controller delivery RPC. dispatchControlPlane defaults to
+		// the node-local controlPlane and is only replaced with a cluster-aware
+		// wrapper when this deployment actually has both a routing store and HA
+		// cluster mode — a single-node deployment dispatches exactly as before.
+		//
+		// deliveryServer wraps the RAW controlPlane (never dispatchControlPlane):
+		// it is what a PEER node's forwarded command resolves to locally, and
+		// wrapping the cluster-aware sender here would let a delivery attempt for
+		// a steward this node does not have recurse into forwarding it right back
+		// out.
+		var dispatchControlPlane = controlPlane
+		deliveryServer = internaldelivery.NewServer(connRegistry, controlPlane, logger)
+		if cfg.HA.IsClusterMode() && cfg.InternalDeliveryListenAddr == "" {
+			// Issue #4512: without the delivery listener this node can only reach
+			// stewards connected to itself; say so rather than degrading silently.
+			logger.Warn("internaldelivery: internal_delivery_listen_addr is not set in cluster mode; commands reach only stewards connected to this node")
+		}
+		if haManager != nil && cfg.HA.IsClusterMode() && routingStore != nil && certManager != nil && cfg.InternalDeliveryListenAddr != "" {
+			// Mint a dedicated mTLS CLIENT certificate for outbound delivery
+			// forwarding, exactly as pkg/ha mints one for the Raft peer
+			// transport. Two properties matter and neither holds for the
+			// PurposeTransport certificate this used to present: that cert
+			// carries ExtKeyUsage ServerAuth only, so a peer's
+			// RequireAndVerifyClientCert handshake rejects it outright; and its
+			// CommonName is the fixed "cfgms-internal", which cannot identify
+			// which node is calling. The CommonName here is the local cluster
+			// node ID, which is what the receiving node's PeerAuthorizer
+			// allowlists.
+			localNodeID := haManager.GetLocalNode().ID
+			deliveryClientCert, dErr := certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+				CommonName:   localNodeID,
+				ValidityDays: 365,
+			})
+			if dErr != nil {
+				logger.Warn("internaldelivery: peer client certificate unavailable, cluster dispatch fallback disabled", "error", dErr)
+			} else {
+				caCertPEM, caErr := certManager.GetCACertificate()
+				if caErr != nil {
+					logger.Warn("internaldelivery: CA certificate unavailable, cluster dispatch fallback disabled", "error", caErr)
+				} else {
+					deliveryClientTLS, tlsErr := cert.CreateClientTLSConfig(
+						deliveryClientCert.CertificatePEM, deliveryClientCert.PrivateKeyPEM, caCertPEM, "", tls.VersionTLS13)
+					if tlsErr != nil {
+						logger.Warn("internaldelivery: failed to build client TLS config, cluster dispatch fallback disabled", "error", tlsErr)
+					} else {
+						resolver, resErr := newHAClusterNodeResolver(haManager, cfg.InternalDeliveryListenAddr, logger)
+						if resErr != nil {
+							logger.Warn("internaldelivery: invalid InternalDeliveryListenAddr, cluster dispatch fallback disabled", "error", resErr)
+						} else {
+							clusterAwareSender = internaldelivery.NewClusterAwareSender(
+								controlPlane, haManager.GetLocalNode().ID, routingStore, resolver, deliveryClientTLS, logger)
+							dispatchControlPlane = clusterAwareSender
+							logger.Info("internaldelivery: cluster-aware dispatch fallback enabled",
+								"local_node_id", haManager.GetLocalNode().ID,
+								"delivery_listen_addr", cfg.InternalDeliveryListenAddr)
+						}
+					}
+				}
+			}
+		}
+		if routingStore != nil {
+			connRegistry.OnDisconnect(func(stewardID string) {
+				if err := routingStore.RemoveConnection(context.Background(), stewardID, routingHook.localNodeID); err != nil {
+					logger.Warn("internaldelivery: failed to remove routing connection on disconnect",
+						"steward_id", logging.SanitizeLogValue(stewardID),
+						"error", logging.SanitizeLogValue(err.Error()))
+				}
+			})
+		}
+
+		// Initialize execution queue and job dispatcher (Issue #1672).
+		// The dispatcher drains the execution queue on every steward heartbeat and
+		// on a 30-second polling loop. The heartbeat service wires dispatcher.OnHeartbeat
+		// via OnHeartbeatReceived so that the queue is drained within one heartbeat
+		// cycle even before the next polling tick.
+		logger.Info("Initializing execution queue and job dispatcher...")
+		monitor := scriptmodule.NewExecutionMonitor()
+		keyManager := scriptmodule.NewEphemeralKeyManager()
+		// The script library is stored per tenant; the queue resolves a library run
+		// from the run's tenant, and the API server serves the caller's tenant.
+		if cs := storageManager.GetConfigStore(); cs != nil {
+			var libErr error
+			scriptLibrary, libErr = scriptmodule.NewTenantScriptRepository(cs)
+			if libErr != nil {
+				return nil, fmt.Errorf("failed to create script library: %w", libErr)
+			}
+		}
+		// Issue #4528: in cluster mode the queue is the shared database store, so
+		// the node holding a steward's session dispatches its work whichever node
+		// queued it. Single-node keeps the in-memory store (nil).
+		var queueStore scriptmodule.QueueStore
+		var isLocallyConnected func(string) bool
+		if cfg.HA.IsClusterMode() {
+			if shared := storageManager.GetExecutionQueueStore(); shared != nil {
+				queueStore = controllerrun.NewSharedQueueStore(shared)
+				registryForDispatch := connRegistry
+				isLocallyConnected = func(stewardID string) bool {
+					_, ok := registryForDispatch.Get(stewardID)
+					return ok
+				}
+				logger.Info("Execution queue: using the cluster-shared store")
+			} else {
+				logger.Warn("Execution queue: cluster mode without a shared queue store; exec reaches only runs accepted by this node")
+			}
+		}
+		executionQueue = scriptmodule.NewExecutionQueue(
+			monitor,
+			keyManager,
+			0,                                 // maxAge — defaults to 24 h
+			cfg.ListenAddr,                    // controllerURL for ephemeral-key callbacks
+			queueStore,                        // store — nil defaults to InMemoryQueueStore
+			scriptRepoForQueue(scriptLibrary), // per-tenant script library (nil when no config store)
+			0,                                 // dispatchTimeout — defaults to 1 h
+		)
+		var dispatcherErr error
+		jobDispatcher, dispatcherErr = dispatcher.New(&dispatcher.Config{
+			Queue:              executionQueue,
+			ControlPlane:       dispatchControlPlane,
+			Signer:             commandSigner,
+			RequireSignedAdhoc: cfg.Execution.RequireSignedAdhoc,
+			IsLocallyConnected: isLocallyConnected,
+			// Issue #4510: same term source as the command publisher below, so
+			// execute_script passes the steward fence like every other command.
+			TermSource: ha.CommandTermSource{Manager: haManager},
+			// Issue #4625: steward actions the expiry sweep closes without a
+			// result ("expired" / "no_result") go to the durable audit log.
+			ActionAudit: dispatcher.NewAuditManagerSink(auditManager, logger),
+			Logger:      logger,
+		})
+		if dispatcherErr != nil {
+			return nil, fmt.Errorf("failed to initialize job dispatcher: %w", dispatcherErr)
+		}
+		logger.Info("Execution queue and job dispatcher initialized")
+
+		// Wire the IP-trust evaluator into the heartbeat service when the
+		// IP-trust store is available (Issue #1694). Both the database provider
+		// and the OSS composite (flatfile+SQLite, Issue #1900) supply an
+		// IPTrustStore; the evaluator is skipped only when no store is wired.
+		hbStewardStore := storageManager.GetStewardStore()
+		var heartbeatTrustEvaluator heartbeat.TrustEvaluator
+		if ipTrustStore := storageManager.GetIPTrustStore(); ipTrustStore != nil {
+			ipTrustThreshold := cfg.Registration.GetIPTrustThreshold()
+			evaluator := controllerRegistration.NewIPTrustEvaluator(controllerRegistration.IPTrustEvaluatorConfig{
+				Store:     ipTrustStore,
+				Threshold: ipTrustThreshold,
+				Logger:    logger,
+			})
+			heartbeatTrustEvaluator = newStewardIPTrustAdapter(evaluator, hbStewardStore, logger)
+			logger.Info("IP-trust evaluator wired into heartbeat service",
+				"threshold", ipTrustThreshold)
+		}
+
+		// Issue #3764: refresh this steward's routing-table liveness timestamp on
+		// every heartbeat, in addition to on connect, so a long-lived connection
+		// never goes stale under business.RoutingStaleAfter between reconnects.
+		onHeartbeatReceived := jobDispatcher.OnHeartbeat
+		if routingStore != nil {
+			dispatcherOnHeartbeat := jobDispatcher.OnHeartbeat
+			onHeartbeatReceived = func(stewardID string) {
+				dispatcherOnHeartbeat(stewardID)
+				if err := routingStore.RecordConnection(context.Background(), stewardID, routingHook.localNodeID); err != nil {
+					logger.Warn("internaldelivery: failed to refresh routing connection on heartbeat",
+						"steward_id", logging.SanitizeLogValue(stewardID),
+						"error", logging.SanitizeLogValue(err.Error()))
+				}
+			}
+		}
+
+		// Initialize heartbeat monitoring service
+		logger.Info("Initializing heartbeat monitoring service...")
+		heartbeatService, err = heartbeat.New(&heartbeat.Config{
+			ControlPlane:        controlPlane,
+			HeartbeatTimeout:    15 * time.Second,
+			CheckInterval:       5 * time.Second,
+			OnStatusChange:      makeHeartbeatStatusChangeCallback(hbStewardStore, logger),
+			OnHeartbeatReceived: onHeartbeatReceived,
+			TrustEvaluator:      heartbeatTrustEvaluator,
+			Logger:              logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize heartbeat service: %w", err)
+		}
+		logger.Info("Heartbeat monitoring service initialized successfully")
+
+		// Issue #1986: bridge control-plane heartbeats into the steward registry
+		// the API serves. heartbeat.Service tracks liveness in its own in-memory
+		// map but never updates ControllerService, so GET /api/v1/stewards/{id}
+		// would report a last_seen frozen at registration time and a status stuck
+		// at "registered" even while the steward heartbeats. Register a second
+		// heartbeat handler that advances the registry via RecordHeartbeat.
+		//
+		// The same handler carries Layer-3 instrumentation: it records the
+		// controller-side receipt cadence per steward and warns when a gap exceeds
+		// the expected steward interval, so intermittent heartbeat loss is
+		// observable without changing log levels.
+		if controllerService != nil {
+			var heartbeatGapTracker sync.Map // stewardID -> time.Time (last receipt)
+			const heartbeatGapWarnThreshold = 45 * time.Second
+			if subErr := controlPlane.SubscribeHeartbeats(context.Background(), func(_ context.Context, hb *controlplaneTypes.Heartbeat) error {
+				if hb == nil {
+					return nil
+				}
+				recorded := controllerService.RecordHeartbeat(hb.StewardID, hb.Version, hb.Timestamp)
+
+				now := time.Now()
+				if prev, ok := heartbeatGapTracker.Load(hb.StewardID); ok {
+					gap := now.Sub(prev.(time.Time))
+					if gap > heartbeatGapWarnThreshold {
+						logger.Warn("Steward heartbeat receipt gap exceeded expected interval (Issue #1986 Layer 3)",
+							"steward_id", logging.SanitizeLogValue(hb.StewardID),
+							"gap", gap.Round(time.Millisecond),
+							"recorded", recorded)
+					} else {
+						logger.Debug("heartbeat received",
+							"steward_id", logging.SanitizeLogValue(hb.StewardID),
+							"gap", gap.Round(time.Millisecond),
+							"recorded", recorded)
+					}
+				} else {
+					logger.Debug("heartbeat received (first)",
+						"steward_id", logging.SanitizeLogValue(hb.StewardID),
+						"recorded", recorded)
+				}
+				heartbeatGapTracker.Store(hb.StewardID, now)
+				return nil
+			}); subErr != nil {
+				logger.Warn("Failed to register steward-registry heartbeat bridge", "error", subErr)
+			} else {
+				logger.Info("Steward-registry heartbeat bridge registered (Issue #1986)")
+			}
+		}
+
+		// Issue #4569: record steward receive-path rejections on the delivery
+		// record. Responses reach only the node holding the steward's stream, so
+		// subscribe on the raw controlPlane (the provider deliveryServer wraps),
+		// never dispatchControlPlane. The command store is shared across nodes.
+		var rejectionRecorder *service.CommandRejectionRecorder
+		if respSub, ok := controlPlane.(controlplaneInterfaces.ResponseSubscriber); ok {
+			if cmdStore := storageManager.GetCommandStore(); cmdStore != nil {
+				rejectionRecorder = service.NewCommandRejectionRecorder(cmdStore, logger)
+				if subErr := rejectionRecorder.Subscribe(context.Background(), respSub); subErr != nil {
+					logger.Warn("Failed to subscribe command rejection recorder",
+						"error", logging.SanitizeLogValue(subErr.Error()))
+				}
+			}
+		}
+
+		// Initialize command publisher (Story #198, Story #363, Story #514, Story #919)
+		// Issue #1844: commandSigner is a DynamicSigner — see block above.
+		// Issue #3390: haManager is passed as TermSource so every outbound command
+		// carries the current Raft term for steward-side fencing (#3436).
+		logger.Info("Initializing command publisher...")
+		commandPublisher, err = commands.New(&commands.Config{
+			ControlPlane: dispatchControlPlane,
+			Signer:       commandSigner,
+			TermSource:   ha.CommandTermSource{Manager: haManager},
+			Logger:       logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize command publisher: %w", err)
+		}
+		logger.Info("Command publisher initialized successfully", "signing_enabled", commandSigner != nil)
+
+		// Issue #1817: Wire the publisher into the signing rotation service now
+		// that it is available. The service was created before the provider to
+		// break the init cycle (hook → provider → publisher → provider).
+		if signingRotationSvc != nil {
+			signingRotationSvc.SetPublisher(commandPublisher)
+			logger.Info("Signing rotation service wired (refresh-on-connect enabled)")
+		}
+		if stewardMigrationSvc != nil {
+			stewardMigrationSvc.SetPublisher(commandPublisher)
+		}
+		// Issue #3757/#3764: wire the publisher into the pending-delivery drain
+		// hook now that it exists (same init-cycle break as above).
+		drainHook.SetPublisher(commandPublisher)
+		// Issue #4866: let the rejection recorder re-send fence-rejected commands.
+		if rejectionRecorder != nil {
+			rejectionRecorder.SetRetrier(commandPublisher)
+		}
+
+		// Issue #2524: Wire DNA hash mismatch detection so that a heartbeat
+		// carrying an unexpected DNA hash automatically triggers a full sync.
+		// Guard on both non-nil: transport can be disabled at runtime, so
+		// commandPublisher may be nil in degraded configurations.
+		if heartbeatService != nil && commandPublisher != nil {
+			heartbeatService.SetOnDNAHashMismatch(func(stewardID string) {
+				if _, err := commandPublisher.TriggerDNASync(context.Background(), stewardID); err != nil {
+					logger.Warn("Failed to trigger DNA sync after hash mismatch",
+						"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+				}
+			})
+			logger.Info("DNA hash mismatch detection wired (Issue #2524)")
+		}
+
+		// Issue #2524: Wire post-DNA-sync hook so each successful full sync
+		// updates the expected hash in the heartbeat service, suppressing
+		// repeated mismatch triggers once the steward's DNA is in sync.
+		// Issue #3329: uses the aggregate-root-first dnaStorage.ContentHash in
+		// place of the retired stewarddna.ComputeHash(dna.Attributes) — the
+		// mismatch-detection wiring above depends on expectedDNAHash actually
+		// being set, or it can never fire (see dna_handler.go HandleHeartbeatRoot).
+		if controllerService != nil && heartbeatService != nil {
+			controllerService.SetPostDNASyncHook(func(stewardID string, dna *common.DNA) {
+				hash, hashErr := dnaStorage.ContentHash(dna)
+				if hashErr != nil {
+					logger.Warn("Failed to compute DNA content hash for expected-hash wiring",
+						"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(hashErr.Error()))
+					return
+				}
+				heartbeatService.SetExpectedDNAHash(stewardID, hash)
+			})
+			logger.Info("Post-DNA-sync hook wired (Issue #2524)")
+		}
+
+		// Issue #2524: Warm expectedDNAHash for every previously-known steward
+		// from durable storage.  Without this, a controller restart silently
+		// disables mismatch detection for all known stewards until each runs a
+		// fresh full sync — even though their DNA is already durably stored and
+		// loaded by LoadFromStorage (ControllerService.LoadFromStorage comment
+		// calls out the identical startup-gap pattern this mirrors).
+		if controllerService != nil && heartbeatService != nil {
+			warmed := 0
+			for _, steward := range controllerService.ListFleetStewards(ctxkeys.WithSystem(context.Background())) {
+				if steward.DNA != nil {
+					hash, hashErr := dnaStorage.ContentHash(steward.DNA)
+					if hashErr != nil {
+						logger.Warn("Failed to compute DNA content hash while warming expected hashes",
+							"steward_id", logging.SanitizeLogValue(steward.ID), "error", logging.SanitizeLogValue(hashErr.Error()))
+						continue
+					}
+					if hash != "" {
+						heartbeatService.SetExpectedDNAHash(steward.ID, hash)
+						warmed++
+					}
+				}
+			}
+			logger.Info("Expected DNA hashes warmed from durable storage (Issue #2524)", "warmed", warmed)
+		}
+
+	} else {
+		logger.Warn("Transport config not set — gRPC control plane disabled")
+	}
+
+	// Initialize gRPC data plane provider (Story #515)
+	// The shared gRPC server is passed during Start().
+	var dataPlane dataplaneInterfaces.DataPlaneProvider
+	if controlPlane != nil {
+		logger.Info("Initializing gRPC data plane provider...")
+		dataPlane = dataplaneInterfaces.GetProvider("grpc")
+		if dataPlane == nil {
+			return nil, fmt.Errorf("gRPC data plane provider not registered")
+		}
+		// Initialize in server mode; the shared gRPC server will be wired during Start
+		if err := dataPlane.Initialize(context.Background(), map[string]interface{}{
+			"mode":        "server",
+			"grpc_server": grpc.NewServer(), // Design decision: this initial gRPC server is replaced by the real server in Start(); this field satisfies initialization requirements before the server lifecycle begins.
+		}); err != nil {
+			return nil, fmt.Errorf("failed to initialize gRPC data plane provider: %w", err)
+		}
+		logger.Info("gRPC data plane provider initialized", "provider", dataPlane.Name())
+	}
+
+	// Initialize config handler for data plane configuration sync (Story #362)
+	var configHandler *controllerTransport.ConfigHandler
+	var signerCertSerial string // Story #378: Track cert serial for registration handler
+	if dataPlane != nil {
+		// Story #378: registration handler reports the boot signer serial.
+		signerCertSerial = hoistedSignerCertSerial
+
+		// Config signing must always use the CURRENT signing certificate, not the
+		// one captured at boot. After a signing-cert rotation with a short (or zero)
+		// overlap window, stewards retire the old cert; a boot-pinned signer would
+		// keep signing configs with the retired cert and every steward would reject
+		// the payload (Issue #1816 fleet-e2e OfflinePastWindow). The DynamicSigner
+		// resolves the live signing serial per sign and rebuilds the underlying
+		// signer only when that serial changes (once per rotation). The command
+		// publisher uses the same DynamicSigner pattern (Issue #1844).
+		configSigner := hoistedSigner
+		if certManager != nil {
+			cm := certManager
+			configSigner = signature.NewDynamicSigner(service.NewSigningResolver(cm))
+		}
+
+		configHandler = controllerTransport.NewConfigHandler(configService, logger, configSigner).
+			WithControllerService(controllerService)
+		logger.Debug("Config handler initialized for data plane", "signing_enabled", configSigner != nil)
+	}
+
+	// Initialize health collectors (Story #417, #517)
+	var healthCollector *health.Collector
+	var healthAlertManager *health.DefaultAlertManager
+	var healthTraceManager *health.DefaultTraceManager
+	{
+		// Transport collector reads from the gRPC control plane provider (Issue #517).
+		// Remains nil when no controlPlane is initialized (e.g., Transport config absent).
+		var transportCollector health.TransportCollector
+		if controlPlane != nil {
+			transportCollector = health.NewDefaultTransportCollector(NewGRPCTransportStatsAdapter(controlPlane))
+		}
+
+		// Storage stats — provider name only, latency instrumentation is follow-up
+		storageStats := NewUnimplementedStorageStats(cfg.Storage.Provider)
+		storageCollector := health.NewDefaultStorageCollector(storageStats)
+
+		// Application stats — uses no-op queue stats; workflow engine health
+		// is surfaced via the /api/v1/health endpoint (Issue #414)
+		appCollector := health.NewDefaultApplicationCollector(&NoOpApplicationQueueStats{})
+
+		// System stats (CPU, memory, goroutines)
+		systemCollector, sysErr := health.NewDefaultSystemCollector()
+		if sysErr != nil {
+			logger.Warn("Failed to initialize system collector", "error", sysErr)
+		}
+
+		healthCollector = health.NewCollector(transportCollector, storageCollector, appCollector, systemCollector)
+		healthAlertManager = health.NewAlertManager(health.DefaultThresholds(), health.SMTPConfig{})
+		// Issue #4208: 24h retention matches the documented `cfg trace` contract
+		// ("traces are retained for 24 hours", cmd/cfg/cmd/trace.go).
+		healthTraceManager = health.NewTraceManager(24 * time.Hour)
+		logger.Info("Health collectors initialized (Story #417)")
+	}
+
+	// Initialize installer artifact blob store (Issue #1702).
+	// Cluster mode: S3-compatible blob store so all nodes share one installer
+	// repository, configured by storage.cluster.s3 with CFGMS_S3_INSTALLER_*
+	// overrides (installerS3Config, Issue #4662). Single-node: filesystem blob
+	// store with the node-local path resolved from config (Issue #2118).
+	var installerBlobStore blob.BlobStore
+	var blobErr error
+	if isClusterMode {
+		s3Cfg := installerS3Config(cfg)
+		bucket, _ := s3Cfg["bucket"].(string) // guaranteed non-empty by assertClusterBackendsReady
+		installerBlobStore, blobErr = blob.CreateBlobStoreFromConfig("s3", s3Cfg)
+		if blobErr != nil {
+			return nil, fmt.Errorf("failed to initialize S3 installer blob store: %w", blobErr)
+		}
+		logger.Info("Cluster mode: S3 installer blob store initialized", "bucket", bucket)
+	} else {
+		// Derive the default only after the full configuration is loaded so YAML
+		// overrides cannot retain a stale relative path from DefaultConfig.
+		blobRoot := resolveInstallerBlobRoot(cfg)
+		installerBlobStore, blobErr = blob.CreateBlobStoreFromConfig("filesystem",
+			map[string]interface{}{"root": blobRoot})
+		if blobErr != nil {
+			return nil, fmt.Errorf("failed to initialize installer blob store: %w", blobErr)
+		}
+		logger.Info("Installer artifact blob store initialized", "root", blobRoot)
+	}
+
+	// Platform monitor: controller collector with real-probe services for the
+	// component health/metrics endpoints. Started in Start, stopped in Stop.
+	systemMonitor, err := newControllerMonitor(logger, monitorDeps{
+		healthCollector: healthCollector,
+		controlPlane:    controlPlane,
+		certManager:     certManager,
+		rbacManager:     rbacManager,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize system monitor: %w", err)
+	}
+
+	// Initialize HTTP API server
+	httpServer, err := api.New(
+		cfg,
+		logger,
+		controllerService,
+		configService,
+		certProvisioningService,
+		rbacService,
+		certManager,
+		tenantManager,
+		rbacManager,
+		systemMonitor,
+		haManager,
+		regStore,                      // registrationTokenStore
+		signerCertSerial,              // Story #378: signer cert serial for registration
+		healthCollector,               // Story #417: CFGMS health monitoring
+		auditManager,                  // Issue #775: registration audit events
+		commandPublisher,              // Issue #1319: fan-out config push to active stewards
+		storageManager.GetPushStore(), // Issue #1320: durable push-state for HA failover
+		installerBlobStore,            // Issue #1702: installer artifact storage
+		healthAlertManager,            // Issue #4208: reused, not reconstructed — same alert state as srv.alertManager
+		healthTraceManager,            // Issue #4208: request trace manager for cfg trace
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize HTTP API server: %w", err)
+	}
+
+	logger.Info("HTTP API server initialized successfully")
+
+	// Issue #4857: one dedicated steward-event LoggingManager shared by the
+	// log-stream handler (writer, built in Start) and the REST API (reader). It
+	// must exist before Start builds the handler; failure aborts startup rather
+	// than leaving a nil manager that silently discards steward logs.
+	stewardEventManager, err := newStewardEventManager(cfg, routerSecretStore)
+	if err != nil {
+		return nil, err
+	}
+	openedStores = append(openedStores, stewardEventManager.Close)
+	httpServer.SetStewardEventLoggingManager(stewardEventManager)
+
+	// Issue #3409: Wire absent optional capabilities so GET /api/v1/ha/status
+	// reports them. Computed once above at composition; never recomputed per request.
+	if len(absentCaps) > 0 {
+		httpServer.SetAbsentCapabilities(absentCaps)
+	}
+
+	// Issue #2545: Wire the durable tag store into the HTTP API server too. The
+	// service layer was wired above (line ~371) so the selector engine / role
+	// adapter can read tags, but the REST admin endpoints (`/api/v1/stewards/
+	// {id}/tags`, handlers_tags.go) read the API server's OWN tagStore field —
+	// without this call it stays nil and every tag REST request returns 503
+	// TAG_STORE_UNAVAILABLE even though tags resolve fine internally. Nil when
+	// SQLite is unconfigured (SetTagStore is a no-op on nil; endpoints degrade to
+	// 503 by design in that case).
+	if tagStoreInstance != nil {
+		httpServer.SetTagStore(tagStoreInstance)
+	}
+
+	// Issue #2543: Wire the role-config store into the HTTP API server. Same
+	// wiring gap as the tag store above — the role-config REST endpoints
+	// (`/api/v1/roles`, handlers_roles.go) read the API server's roleConfigStore
+	// field, which is otherwise nil, so every author/list/delete returns 503
+	// "Role config store not available". The canonical store is the controller's
+	// config store under the role-policies namespace (the same store the
+	// selector-driven role adapter reads via GetConfigStore, config_service_v2.go).
+	if cs := storageManager.GetConfigStore(); cs != nil {
+		httpServer.SetRoleConfigStore(cs)
+		httpServer.SetPrivilegeStore(cs)
+	}
+	if scriptLibrary != nil {
+		httpServer.SetScriptRepository(scriptLibrary)
+	}
+
+	// Issue #3785: Wire the hyperv-profile store into the HTTP API server, same
+	// gap and same underlying store as the role-config wiring immediately above —
+	// the hyperv profile REST endpoints (`/api/v1/hyperv/profiles`,
+	// handlers_hyperv_profiles.go) read the API server's hypervProfileConfigStore
+	// field directly and 503 "Hyperv profile store not available" until it is set.
+	if cs := storageManager.GetConfigStore(); cs != nil {
+		httpServer.SetHypervProfileConfigStore(cs)
+	}
+
+	// Issue #3253: Wire entity graph provider and its ConfigStore desired-state
+	// writer into the HTTP API server. egProvider was constructed above and
+	// registered in openedStores; both Set* calls are unconditional because
+	// initializeEntityGraphProvider always returns a non-nil provider or an error.
+	httpServer.SetEntityGraphProvider(egProvider)
+	egWriter, egWriterErr := egconfigstorewriter.New(egProvider)
+	if egWriterErr != nil {
+		return nil, fmt.Errorf("failed to initialize entity graph configstore writer: %w", egWriterErr)
+	}
+	httpServer.SetConfigStoreWriter(egWriter)
+	// Also wire the same provider as the write path so operator-asserted edge
+	// assertions share the same store (Issue #3374).
+	httpServer.SetEntityGraphWriteProvider(egProvider)
+	// Issue #3613: Also wire the same provider as the watch path so the cockpit
+	// WebSocket handler's Watch subscription is reachable in a running
+	// controller (else s.egWatchProv stays nil and every /watch request 503s).
+	httpServer.SetEntityGraphWatchProvider(egProvider)
+
+	// Issue #4413: construct the tenant-hierarchy mirror (ADR-022 §7, Issue #3370)
+	// and MAC-identity correlator (ADR-022 §3, Issue #3369) entity graph writers
+	// against the same egProvider. Both were previously standalone-invokable only
+	// (#3253 wired their sibling configstore writer and explicitly deferred these
+	// two). Neither sets owning_tenant — authorization never uses graph traversal
+	// (ADR-022 §7) — so wiring them changes graph structure only, not access
+	// control. Periodic sweep scheduling for both is started in Start().
+	egTenantSyncWriter, egTenantSyncErr := tenantsync.New(egProvider)
+	if egTenantSyncErr != nil {
+		return nil, fmt.Errorf("failed to initialize entity graph tenantsync writer: %w", egTenantSyncErr)
+	}
+	// Route quarantine warnings (unrepresentable tenant/parent IDs) through the
+	// controller's own logger instead of tenantsync.New's standalone default, so
+	// they reach the same sink as every other startup/runtime log line.
+	egTenantSyncWriter = egTenantSyncWriter.WithLogger(logger)
+	egCorrelatorWriter, egCorrelatorErr := correlator.New(egProvider)
+	if egCorrelatorErr != nil {
+		return nil, fmt.Errorf("failed to initialize entity graph correlator writer: %w", egCorrelatorErr)
+	}
+	// ADR-031 Decision 4: each periodic sweep claims its own cluster-singleton
+	// lease, so only one node sweeps per tick. This matters more here than for
+	// the expiry jobs above: in cluster mode the entity graph is a single shared
+	// Postgres instance, correlator.Correlate is O(fleet size) per sweep
+	// (ADR-022 §9), and tenantsync.Ingest writes a full-tree snapshot whose
+	// claim-scope retraction concurrent writers would contend on.
+	// NewBackgroundLoopLease is nil-receiver-safe.
+	egTenantSyncLeaseJob, egTenantSyncLeaseErr := haManager.NewBackgroundLoopLease("entitygraph-tenantsync", logger)
+	if egTenantSyncLeaseErr != nil {
+		return nil, fmt.Errorf("failed to construct entity graph tenantsync sweep lease job: %w", egTenantSyncLeaseErr)
+	}
+	egCorrelatorLeaseJob, egCorrelatorLeaseErr := haManager.NewBackgroundLoopLease("entitygraph-correlator", logger)
+	if egCorrelatorLeaseErr != nil {
+		return nil, fmt.Errorf("failed to construct entity graph correlator sweep lease job: %w", egCorrelatorLeaseErr)
+	}
+
+	// Issue #5555: controller-issued one-time initial passwords. The password is
+	// held by the secrets provider and the record by the config store; the expiry
+	// sweep is a cluster singleton (ADR-031 Decision 4).
+	credentialLeaseJob, credentialLeaseErr := haManager.NewBackgroundLoopLease("credential-expiry", logger)
+	if credentialLeaseErr != nil {
+		return nil, fmt.Errorf("failed to construct credential expiry lease job: %w", credentialLeaseErr)
+	}
+	var credentialService *credentials.Service
+	if cs := storageManager.GetConfigStore(); cs != nil && routerSecretStore != nil {
+		credStore, credStoreErr := credentials.NewStore(cs, routerSecretStore)
+		if credStoreErr != nil {
+			return nil, fmt.Errorf("failed to construct credential store: %w", credStoreErr)
+		}
+		credOpts := []credentials.ServiceOption{credentials.WithAudit(auditManager)}
+		if cfg.Directory != nil {
+			credOpts = append(credOpts, credentials.WithTTL(cfg.Directory.InitialCredentialTTL.AsDuration()))
+		}
+		httpServer.SetCredentialStore(credStore) // Issue #5559: one-time reveal API
+		var credSvcErr error
+		credentialService, credSvcErr = credentials.NewService(credStore, credentials.ConfigBindingChecker{Store: cs}, logger, credOpts...)
+		if credSvcErr != nil {
+			return nil, fmt.Errorf("failed to construct credential service: %w", credSvcErr)
+		}
+	}
+
+	// Issue #5561: scheduled M365 tenant inventory, recorded in the entity graph.
+	// Gated on its own cluster-singleton lease so one node reads Graph per cycle.
+	m365InventoryLeaseJob, m365InventoryLeaseErr := haManager.NewBackgroundLoopLease("m365-inventory", logger)
+	if m365InventoryLeaseErr != nil {
+		return nil, fmt.Errorf("failed to construct m365 inventory lease job: %w", m365InventoryLeaseErr)
+	}
+	var m365InventoryInterval time.Duration
+	if cfg.Directory != nil {
+		m365InventoryInterval = cfg.Directory.M365InventoryInterval.AsDuration()
+	}
+	m365Inventory, m365InventoryErr := newM365Inventory(m365InventoryDeps{
+		Providers:   directoryManager,
+		Store:       routerSecretStore,
+		Tenants:     tenantManager,
+		Writer:      egProvider,
+		ConfigStore: storageManager.GetConfigStore(),
+		Job:         m365InventoryLeaseJob,
+		Interval:    m365InventoryInterval,
+		Audit:       auditManager,
+		Logger:      logger,
+	})
+	if m365InventoryErr != nil {
+		return nil, fmt.Errorf("failed to initialize m365 inventory: %w", m365InventoryErr)
+	}
+
+	// Issue #2098: Wire registration-refresh stores into the HTTP API server so the
+	// challenge/complete endpoints and the admin approve/reject/policy endpoints are
+	// operational. GetStewardStore is always non-nil for the OSS composite (flatfile
+	// provider creates it); the refresh stores are nil when the non-bundle SQLite
+	// fallback path was taken (unit-test-only scenario).
+	if ss := storageManager.GetStewardStore(); ss != nil {
+		httpServer.SetStewardStore(ss)
+	}
+	if prs := storageManager.GetPendingRefreshStore(); prs != nil {
+		httpServer.SetPendingRefreshStore(prs)
+	}
+	if rps := storageManager.GetRefreshPolicyStore(); rps != nil {
+		httpServer.SetRefreshPolicyStore(rps)
+	}
+	if ns := storageManager.GetNonceStore(); ns != nil {
+		httpServer.SetNonceStore(ns)
+	}
+	if aps := storageManager.GetAssurancePolicyStore(); aps != nil {
+		httpServer.SetAssurancePolicyStore(aps)
+	}
+	if brps := storageManager.GetBlastRadiusPolicyStore(); brps != nil {
+		httpServer.SetBlastRadiusPolicyStore(brps)
+	}
+	if tcs := storageManager.GetTenantCrossingStore(); tcs != nil {
+		httpServer.SetTenantCrossingStore(tcs)
+	}
+	if cs := storageManager.GetCaseStore(); cs != nil {
+		httpServer.SetCasesStore(cs)
+	}
+	wireClusterRateCounterStore(httpServer, storageManager)
+	// TenantStore is core and always present; wire unconditionally for the assurance resolver.
+	httpServer.SetTenantStore(storageManager.GetTenantStore())
+	if as := storageManager.GetAuditStore(); as != nil {
+		httpServer.SetAuditStore(as)
+	}
+	// Issue #3757: wire the durable command/delivery outbox store so config push
+	// creates a trackable delivery record for each targeted steward, atomically,
+	// instead of the retired fire-and-forget goroutine (ADR-031 Decision 2). Nil
+	// when the deployment has no business-tier command store configured; that
+	// degrades handleConfigPush to best-effort fan-out only, same as before.
+	if cmdStore := storageManager.GetCommandStore(); cmdStore != nil {
+		httpServer.SetCommandStore(cmdStore)
+	}
+
+	// Issue #2464: Wire durable SQLite-backed upgrade store; falls back to in-memory
+	// when SQLite is not configured so controller startup is never blocked on storage.
+	// The store is held in srv.upgradeStore so Stop() can close the SQLite handle.
+	upgradeStore := initializeUpgradeStore(context.Background(), cfg, logger)
+	httpServer.SetUpgradeStore(upgradeStore)
+
+	// Issue #2774: Wire durable SQLite-backed session token store; falls back to
+	// in-memory when SQLite is not configured. SetDurableSessionStore wires both the
+	// CLI session manager (ADR-014 defaults) and the web session manager (60m/12h/30s)
+	// from a single shared store, so POST /api/v1/sessions and POST /api/v1/auth/login
+	// are operational on every startup path and never return 503 SESSION_UNAVAILABLE.
+	// The store is held in srv.sessionStore so Stop() can close the SQLite handle.
+	sessionStore := initializeSessionStore(context.Background(), cfg, logger)
+	httpServer.SetDurableSessionStore(sessionStore)
+
+	// Issue #2296: Wire batch job store and rolling-batch executor so that
+	// POST /api/v1/jobs and GET /api/v1/jobs/{id} are operational.
+	// The in-memory store is used for the OSS composite deployment; a durable
+	// SQLite-backed store is a follow-on story that shares batchjob/store_sqlite.go.
+	batchJobStore := memoryprovider.NewBatchJobStore()
+	batchJobFleetQuery := &serverBatchjobFleetQuery{svc: controllerService}
+	batchJobExecutor := batchjob.NewRollingBatchExecutor(
+		batchJobStore,
+		batchJobFleetQuery,
+		commandPublisher,
+		batchjob.NewDnaRoleQuorumChecker(),
+		logger,
+	)
+	httpServer.SetBatchJobStore(batchJobStore)
+	httpServer.SetBatchJobExecutor(batchJobExecutor)
+	logger.Info("Batch job store and executor wired to HTTP API server (Issue #2296)")
+
+	// Wire the shared connection registry into the API server so
+	// GET /api/v1/stewards/{id} reports the live connection_state (Issue #1572).
+	if connRegistry != nil {
+		httpServer.SetRegistry(connRegistry)
+	}
+
+	// Issue #3895: wire the shared steward-routing table into the API server so
+	// the cluster decommission drain-wait can resolve the actual target node's
+	// session count under any-node routing, instead of whichever node happens
+	// to receive the decommission request. A nil routingStore (no provider
+	// support / non-cluster deployment) leaves the handler on its existing
+	// local-registry fallback.
+	if routingStore != nil {
+		httpServer.SetRoutingStore(routingStore)
+	}
+
+	// Wire the internal controller-to-controller delivery RPC service (ADR-031
+	// Decision 3, Issue #3764). A nil deliveryServer or empty
+	// InternalDeliveryListenAddr leaves the delivery listener unstarted — the
+	// expected state outside cluster mode. clusterPeerNodeIDs is the authorized
+	// caller set for the RPC: peers authenticate with a client certificate whose
+	// CommonName is their cluster node ID, exactly as pkg/ha's Raft transport
+	// requires on the sibling internal listener. Outside cluster mode it returns
+	// no IDs, so the endpoint (which is itself unstarted there) denies everything.
+	httpServer.SetDeliveryHandler(deliveryServer, cfg.InternalDeliveryListenAddr, clusterPeerNodeIDs(haManager))
+
+	// Issue #1816: Wire signing rotation service so the rotate endpoint is available.
+	if signingRotationSvc != nil {
+		signingRotationSvc.SetControllerService(controllerService)
+		httpServer.SetSigningRotationService(signingRotationSvc)
+		if stewardMigrationSvc != nil {
+			stewardMigrationSvc.SetControllerService(controllerService)
+			httpServer.SetStewardSigningMigrationService(stewardMigrationSvc)
+		}
+		logger.Info("Signing rotation service wired to HTTP API server (Issue #1816)")
+
+		// Issue #4795: the retirement sweep and the emergency revoke share one
+		// service. In a cluster only the node holding lease-backed authority
+		// sweeps; HasLeadership(), never the raw Raft flag. A nil haManager is
+		// single-node mode, which is always authoritative.
+		var hasLeadership func() bool
+		if haManager != nil {
+			hasLeadership = haManager.HasLeadership
+		}
+		signingRetirementSvc = service.NewSigningRetirementService(signingRotationSvc, hasLeadership, logger)
+		signingRetirementSvc.SetAuditManager(auditManager)
+		httpServer.SetSigningRetirementService(signingRetirementSvc)
+	}
+
+	// Wire the registration admission stores the REST handlers read from.
+	wireRegistrationAPIStores(httpServer,
+		storageManager.GetPendingRegistrationStore(),
+		storageManager.GetIPTrustStore(),
+		logger)
+
+	// Issue #1697: Create background expiry jobs.
+	// IPTrustExpiryJob is only wired when the IPTrustStore is available (database provider).
+	// PendingExpiryJob is only wired when the PendingRegistrationStore is available.
+	// ADR-031 Decision 4: each sweep claims its own cluster-singleton lease.
+	// NewBackgroundLoopLease is nil-receiver-safe.
+	var ipTrustExpiryJob *controllerRegistration.IPTrustExpiryJob
+	if ipTrustStore := storageManager.GetIPTrustStore(); ipTrustStore != nil {
+		darkWindow := cfg.Registration.GetIPTrustDarkWindow()
+		ipTrustLeaseJob, err := haManager.NewBackgroundLoopLease("controller-ip-trust-expiry", logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to construct IP-trust expiry lease job: %w", err)
+		}
+		ipTrustExpiryJob = controllerRegistration.NewIPTrustExpiryJob(controllerRegistration.IPTrustExpiryConfig{
+			Store:         ipTrustStore,
+			TenantStore:   storageManager.GetTenantStore(),
+			DarkWindow:    darkWindow,
+			CheckInterval: time.Hour,
+			Logger:        logger,
+			LeaseJob:      ipTrustLeaseJob,
+		})
+		logger.Info("IP-trust expiry job created (Issue #1697)", "dark_window", darkWindow)
+	}
+
+	var pendingExpiryJob *controllerRegistration.PendingExpiryJob
+	if pendingStore := storageManager.GetPendingRegistrationStore(); pendingStore != nil {
+		pendingTimeout := cfg.Registration.GetPendingReviewTimeout()
+		pendingLeaseJob, err := haManager.NewBackgroundLoopLease("controller-pending-registration-expiry", logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to construct pending-registration expiry lease job: %w", err)
+		}
+		pendingExpiryJob = controllerRegistration.NewPendingExpiryJob(controllerRegistration.PendingExpiryConfig{
+			Store:         pendingStore,
+			Timeout:       pendingTimeout,
+			CheckInterval: time.Hour,
+			Logger:        logger,
+			LeaseJob:      pendingLeaseJob,
+		})
+		logger.Info("Pending-registration expiry job created (Issue #1697)", "timeout", pendingTimeout)
+	}
+
+	srv := &Server{
+		cfg:                     cfg,
+		stewardEventManager:     stewardEventManager,
+		logger:                  logger,
+		controllerService:       controllerService,
+		configService:           configService,
+		rbacService:             rbacService,
+		certProvisioningService: certProvisioningService,
+		certManager:             certManager,
+		signingRetirementSvc:    signingRetirementSvc,
+		signingMigrationSvc:     signingMigrationSvc,
+		stewardMigrationSvc:     stewardMigrationSvc,
+		tenantManager:           tenantManager,
+		rbacManager:             rbacManager,
+		auditManager:            auditManager,
+		wormAuditStore:          wormAuditStore, // Issue #4039: nil unless audit.sink is "worm"
+		haManager:               haManager,
+		controlPlane:            controlPlane,       // Story #363 / #514
+		connRegistry:            connRegistry,       // Issue #1572: shared with CP provider re-init in Start()
+		clusterAwareSender:      clusterAwareSender, // ADR-031 Decision 3, Issue #3764: nil outside cluster mode
+		admissionQueues:         admissionQueues,    // Issue #3759: connect/heartbeat gate wired above; DNA/bulk gate taken in Start()
+		heartbeatService:        heartbeatService,
+		commandPublisher:        commandPublisher,
+		registrationTokenStore:  regStore,
+		dataPlaneProvider:       dataPlane,
+		configHandler:           configHandler,
+		httpServer:              httpServer,
+		signerCertSerial:        signerCertSerial, // Story #378: For registration handler
+		healthCollector:         healthCollector,
+		systemMonitor:           systemMonitor,
+		alertManager:            healthAlertManager,
+		healthTraceManager:      healthTraceManager,
+		storageManager:          storageManager,
+		upgradeStore:            upgradeStore,         // Issue #2464: closed in Stop() to release SQLite handle on Windows
+		tagStore:                tagStoreInstance,     // Issue #2542: closed in Stop() to release SQLite handle on Windows
+		sessionStore:            sessionStore,         // Issue #2774: closed in Stop() to release SQLite handle on Windows
+		executionQueue:          executionQueue,       // Issue #1672
+		jobDispatcher:           jobDispatcher,        // Issue #1672
+		ipTrustExpiryJob:        ipTrustExpiryJob,     // Issue #1697
+		pendingExpiryJob:        pendingExpiryJob,     // Issue #1697
+		egProvider:              egProvider,           // Issue #3253: closed in Stop() to release DB handle
+		configSyncService:       configSyncService,    // Issue #4408: Run() started in Start(), Stop()ped in Stop()
+		routerSecretStore:       routerSecretStore,    // Issue #4408: closed in Stop()
+		directoryManager:        directoryManager,     // Issue #5431: closed in Stop()
+		m365Inventory:           m365Inventory,        // Issue #5561: Start()ed in Start(), Stop()ped before egProvider closes
+		egTenantSyncWriter:      egTenantSyncWriter,   // Issue #4413: periodic sweep started in Start()
+		egCorrelatorWriter:      egCorrelatorWriter,   // Issue #4413: periodic sweep started in Start()
+		egTenantSyncLeaseJob:    egTenantSyncLeaseJob, // Issue #4413: gates the tenant-sync sweep (ADR-031 Decision 4)
+		egCorrelatorLeaseJob:    egCorrelatorLeaseJob, // Issue #4413: gates the correlator sweep (ADR-031 Decision 4)
+		credentialService:       credentialService,    // Issue #5555
+		credentialLeaseJob:      credentialLeaseJob,   // Issue #5555
+	}
+
+	// Issue #4444: build the DNA-sync -> entity-graph writer against the same
+	// egProvider wired into the HTTP API server just above, so a steward's
+	// committed DNA delta also lands in the entity graph (chained onto the DNA
+	// handler in Start() via wireDNAEntityGraph). Built once, here, against srv
+	// rather than a bare provider so the membership adapter can always read
+	// whatever SetEntityGraphClusterMembership currently holds — see
+	// buildDNAEntityGraphWriter.
+	egDNAWriter, egDNAWriterErr := srv.buildDNAEntityGraphWriter()
+	if egDNAWriterErr != nil {
+		return nil, fmt.Errorf("failed to initialize DNA-sync entity graph writer: %w", egDNAWriterErr)
+	}
+	srv.egDNAWriter = egDNAWriter
+
+	// Issue #1673: Wire run/job/execution model into API server.
+	// The run store opens a dedicated connection to the same SQLite database.
+	if runManager := initializeRunManager(context.Background(), cfg, storageManager, executionQueue, logger); runManager != nil {
+		srv.runManager = runManager
+		httpServer.SetRunManager(runManager, executionQueue)
+		// Wire the run manager as the dispatcher's completion sink so steward
+		// completion events advance run/job status to terminal (Issue #1673).
+		if jobDispatcher != nil {
+			jobDispatcher.SetRunCompletionSink(runManager)
+		}
+		logger.Info("Run manager wired to HTTP API server and job dispatcher")
+	}
+
+	// Story #416: Wire rollback manager into API server
+	rollbackManager := initializeRollbackManager(storageManager, logger, rbacManager, controllerService)
+	httpServer.SetRollbackManager(rollbackManager)
+	configService.SetRollbackManager(rollbackManager)
+	logger.Info("Rollback manager wired to HTTP API server and gRPC config service")
+
+	// Issue #4324: wire the controller's durable audit sink into the
+	// inheritance resolver so a refused security-posture downgrade
+	// (module_trust or script_signing) during cascade resolution is recorded,
+	// not just logged.
+	configService.SetAuditManager(auditManager)
+
+	// Story #416: Wire reports engine into API server over the shared DNA
+	// storage manager. The controller server owns the manager's lifecycle
+	// (closed on Stop).
+	srv.dnaStorageManager = dnaStorageManager
+	// The template manager and report builder are kept for the scheduled-report runner's wiring.
+	reportsHandler, reportsDataProvider, reportTemplateManager, reportBuilder := initializeReportsHandler(egProvider, controllerService, tenantManager.IsTenantAncestor, storageManager.GetAlertStore(), storageManager.GetReportTemplateStore(), tenantManager.GetTenantPath, rootTenantID, logger)
+	_, _ = reportTemplateManager, reportBuilder
+	if reportsHandler != nil {
+		httpServer.SetReportsHandler(reportsHandler)
+		httpServer.SetDataProvider(reportsDataProvider)
+		logger.Info("Reports engine wired to HTTP API server")
+	}
+
+	// Issue #3266: Wire alert store into controller API server for the
+	// acknowledge/silence endpoints added in S5.
+	if as := storageManager.GetAlertStore(); as != nil {
+		httpServer.SetAlertStore(as)
+		logger.Info("Alert store wired to HTTP API server (Issue #3266)")
+	}
+
+	// Issue #414: Wire workflow engine and trigger manager into API server.
+	// Issue #1914: Create the controller module cache and workflow module runtime
+	// so the factory can fork/exec controller-kind bundles instead of returning
+	// ErrWorkflowRuntimeNotAvailable on every cache hit.
+	moduleCacheDir := filepath.Join(resolveDNADataRoot(cfg), "module-cache")
+	moduleCache, moduleCacheErr := modulecache.New(moduleCacheDir)
+	if moduleCacheErr != nil {
+		logger.Warn("Failed to initialize controller module cache; workflow modules will be unavailable",
+			"error", moduleCacheErr, "dir", moduleCacheDir)
+	}
+	if moduleCache != nil {
+		wireClusterModuleApprovalStore(moduleCache, cfg, storageManager, logger)
+		// Issue #4270: wire the human module-approval REST surface (Issue #2728)
+		// to this cache. Issue #4984: the approver and trust store are wired too,
+		// so required_modules on cfg push fetches, verifies and queues bundles
+		// for per-version human approval. The trust store comes from the
+		// controller.cfg-only module_trust section; nothing changes it at runtime.
+		gitResolver := newModuleGitSourceResolver(cfg, logger)
+		moduleTrustStore, trustErr := newModuleTrustStore(cfg, logger)
+		if trustErr != nil {
+			return nil, trustErr
+		}
+		moduleApproval := approval.New(moduleCache)
+		httpServer.SetModuleResolution(moduleCache, gitResolver, moduleApproval, moduleTrustStore)
+		httpServer.SetModuleBundleReviewer(moduleApproval)
+	}
+	workflowRuntimeDir := filepath.Join(resolveDNADataRoot(cfg), "workflow-runtime")
+	workflowModuleRuntime := workflowruntime.NewModuleRuntime(workflowRuntimeDir)
+	workflowHandler, triggerMgr, workflowEngine, workflowModuleFactory := initializeWorkflowHandler(storageManager, moduleCache, workflowModuleRuntime, logger, httpServer.GetSecretStore(), configService)
+	// Issue #5562: converge the tenants' declared m365-entra-user/-group resources
+	// after each inventory pass, through the same tenant-scoped module factory the
+	// workflow engine uses.
+	if workflowModuleFactory != nil {
+		if err := attachM365Convergence(m365ConvergeDeps{
+			Inventory: srv.m365Inventory, Config: configService, Modules: workflowModuleFactory,
+			Providers: directoryManager, Writer: egProvider, ConfigStore: storageManager.GetConfigStore(),
+			Audit: auditManager, Logger: logger,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if workflowHandler != nil {
+		httpServer.SetWorkflowHandler(workflowHandler)
+		srv.triggerManager = triggerMgr
+		srv.workflowEngine = workflowEngine
+		logger.Info("Workflow engine wired to HTTP API server")
+
+		// ADR-031 Decision 4: cluster-singleton lease claim for the cron
+		// scheduler's due-trigger check, so a multi-node cluster fires each due
+		// trigger once rather than once per node.
+		schedulerLeaseJob, err := haManager.NewBackgroundLoopLease("controller-workflow-trigger-scheduler", logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to construct workflow-trigger scheduler lease job: %w", err)
+		}
+		triggerMgr.SetSchedulerLease(schedulerLeaseJob)
+	}
+
+	// Wire Tier-2 observe-module manifest provider from the module cache.
+	// When the cache failed to initialize, moduleCache is nil and Tier-2 is disabled.
+	// (Issue #3104, ADR-024 Amendment 1 §3)
+	if moduleCache != nil {
+		srv.observeManifestProvider = &moduleManifestAdapter{cache: moduleCache}
+		srv.moduleCache = moduleCache
+		logger.Info("Tier-2 observe manifest provider wired to module cache")
+	}
+
+	// Issue #1695: Wire the registration approval hook based on registration.workflow.
+	// ip-trust is the new default and does not require the workflow engine.
+	{
+		workflowName := resolveRegistrationWorkflow(cfg)
+
+		switch workflowName {
+		case registrationWorkflowIPTrust:
+			// ip-trust hook is code-wired; seedBuiltinRegistrationWorkflow is a no-op for this path.
+			ipTrustStore := storageManager.GetIPTrustStore()
+			httpServer.SetApprovalHook(api.NewIPTrustApprovalHook(ipTrustStore, logger))
+			if ipTrustStore != nil {
+				logger.Info("IP-trust registration approval hook wired (Issue #1695)")
+			}
+
+		case registrationWorkflowManualReview:
+			// Issue #1527: Seed the manual-review workflow before wiring the hook.
+			if workflowHandler != nil {
+				seedBuiltinRegistrationWorkflow(cfg, storageManager.GetConfigStore(), logger)
+			}
+			// Issue #1599: Use ManualReviewApprovalHook which persists requests to
+			// PendingRegistrationStore for CLI approve/deny (#1522-B).
+			pendingStore := storageManager.GetPendingRegistrationStore()
+			if pendingStore == nil {
+				// Unreachable in a correctly composed deployment: this workflow
+				// contributes ManualReviewApprovalHookStoreRequirements to
+				// collectActiveStorageRequirements, so ValidateStorageRequirements
+				// already rejected this StorageManager at startup (Issue #3491).
+				// Kept as a fail-closed backstop: substituting a different approval
+				// hook here would silently apply an admission policy the operator did
+				// not configure (#3400 condition).
+				return nil, fmt.Errorf("registration.workflow %q requires PendingRegistrationStore but provider %q does not supply it", workflowName, storageManager.GetProviderName())
+			}
+			manualReviewLeaseJob, err := haManager.NewBackgroundLoopLease("controller-manual-review-pending-expiry", logger)
+			if err != nil {
+				return nil, fmt.Errorf("failed to construct manual-review expiry lease job: %w", err)
+			}
+			hook := api.NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logger, manualReviewLeaseJob)
+			httpServer.SetApprovalHook(hook)
+			srv.manualReviewHook = hook
+			logger.Info("Manual-review registration approval hook wired (Issue #1599)")
+
+		case registrationWorkflowAutoApprove:
+			// Deprecated: log a warning but continue to support dev environments.
+			logger.Warn("registration.workflow 'auto-approve' is deprecated; use 'ip-trust' (Issue #1695)")
+			if workflowHandler != nil {
+				seedBuiltinRegistrationWorkflow(cfg, storageManager.GetConfigStore(), logger)
+			}
+			httpServer.SetApprovalHook(&api.AlwaysApproveHook{})
+			logger.Info("auto-approve registration approval hook wired (deprecated)")
+
+		default:
+			logger.Warn("Unknown registration.workflow value, defaulting to ip-trust (Issue #1695)",
+				"workflow", logging.SanitizeLogValue(workflowName))
+			ipTrustStore := storageManager.GetIPTrustStore()
+			httpServer.SetApprovalHook(api.NewIPTrustApprovalHook(ipTrustStore, logger))
+		}
+	}
+
+	// Issue #666: Wire git-sync component when a data directory is configured.
+	// The syncer writes through to the controller's config store.
+	if cfg.DataDir != "" {
+		gitSyncer, webhookHandler := initializeGitSync(cfg.DataDir, storageManager.GetConfigStore(), logger, haManager, auditManager)
+		if gitSyncer != nil {
+			srv.gitSyncer = gitSyncer
+			srv.webhookHandler = webhookHandler // Issue #681: retain for shutdown drain
+			if err := gitSyncer.Start(ctxkeys.WithSystem(context.Background())); err != nil {
+				logger.Warn("git-sync: failed to start syncer", "error", err)
+			} else {
+				logger.Info("git-sync: syncer started", "data_dir", cfg.DataDir)
+			}
+			if webhookHandler != nil {
+				httpServer.SetGitSyncWebhookHandler(webhookHandler)
+			}
+		}
+	}
+
+	// The Server now owns the storage manager and releases it in Stop.
+	constructed = true
+	return srv, nil
+}
+
+// initializeGitSync creates a git-sync Syncer and webhook handler using the
+// given config root and config store. Returns nil, nil when the binding store
+// cannot be created.
+func initializeGitSync(
+	dataDir string,
+	configStore cfgconfig.ConfigStore,
+	logger logging.Logger,
+	haManager *ha.Manager,
+	auditManager *audit.Manager,
+) (*gitsync.Syncer, *gitsync.WebhookHandler) {
+	workDir := filepath.Join(dataDir, ".gitsync", "repos")
+	bindingStore, err := gitsync.NewBindingStore(dataDir)
+	if err != nil {
+		logger.Warn("git-sync: failed to create binding store, git-sync disabled", "error", err)
+		return nil, nil
+	}
+	// ADR-031 Decision 4: each scope's polling cycle claims its own
+	// cluster-singleton lease (many independent per-scope singletons, not one
+	// global sweep — see gitsync.LeaseJobFactory). NewBackgroundLoopLease is
+	// nil-receiver-safe.
+	leaseJobFactory := func(name string) (lease.SingletonJob, error) {
+		return haManager.NewBackgroundLoopLease(name, logger)
+	}
+	syncer, err := gitsync.NewSyncer(configStore, bindingStore, workDir, logger, gitsync.WithLeaseJobFactory(leaseJobFactory), gitsync.WithAuditManager(auditManager))
+	if err != nil {
+		logger.Warn("git-sync: failed to create syncer, git-sync disabled", "error", err)
+		return nil, nil
+	}
+	webhookHandler := gitsync.NewWebhookHandler(syncer, bindingStore, logger)
+	return syncer, webhookHandler
+}
+
+// builtinWorkflowTenantID is the tenant scope used when seeding built-in registration
+// approval workflows. "root" is the standard root tenant in CFGMS multi-tenant deployments.
+// Registrations using tokens with TenantID "root" will find the built-in workflow.
+// Sub-tenants requiring the manual-review policy must deploy their own per-tenant workflow.
+const builtinWorkflowTenantID = "root"
+
+// seedBuiltinRegistrationWorkflow seeds the appropriate built-in registration approval
+// workflow into the config store under the root tenant scope based on
+// cfg.Registration.Workflow (Issue #1527).
+//
+// No-op when Workflow == "ip-trust": the IP-trust hook is wired in code, not via a
+// workflow entry (Issue #1695).
+//
+// If the workflow field is empty and a custom "steward-registration-approval" workflow
+// already exists in the root scope, seeding is skipped to preserve operator-authored workflows.
+func seedBuiltinRegistrationWorkflow(cfg *config.Config, configStore cfgconfig.ConfigStore, logger logging.Logger) {
+	// ip-trust hook is code-wired; no workflow seeding is needed.
+	if cfg.Registration != nil && cfg.Registration.Workflow == "ip-trust" {
+		return
+	}
+
+	ctx := context.Background()
+
+	// Root-tenant workflow store.
+	store := workflow.NewWorkflowStore(configStore, builtinWorkflowTenantID)
+
+	workflowChoice := "auto-approve"
+	if cfg.Registration != nil && cfg.Registration.Workflow != "" {
+		workflowChoice = cfg.Registration.Workflow
+	} else {
+		// No explicit workflow configured: skip seeding if a custom workflow already exists.
+		if _, err := store.GetLatestWorkflow(ctx, "steward-registration-approval"); err == nil {
+			logger.Info("Custom registration approval workflow found, skipping built-in seeding (Issue #1527)")
+			return
+		}
+	}
+
+	var rawYAML []byte
+	switch workflowChoice {
+	case "auto-approve":
+		rawYAML = controllerRegistration.AutoApproveYAML
+	case "manual-review":
+		rawYAML = controllerRegistration.ManualReviewYAML
+	default:
+		// Sanitize workflowChoice: it flows from user-supplied config into the log,
+		// which CodeQL's go/log-injection query flags. Per CLAUDE.md convention.
+		logger.Warn("Unknown registration.workflow value, defaulting to auto-approve (Issue #1527)",
+			"workflow", logging.SanitizeLogValue(workflowChoice))
+		rawYAML = controllerRegistration.AutoApproveYAML
+	}
+
+	var vw workflow.VersionedWorkflow
+	if err := yaml.Unmarshal(rawYAML, &vw); err != nil {
+		logger.Warn("Failed to parse built-in registration workflow YAML (Issue #1527)", "error", err)
+		return
+	}
+
+	if err := store.StoreWorkflow(ctx, &vw); err != nil {
+		logger.Warn("Failed to seed built-in registration workflow (Issue #1527)", "error", err)
+		return
+	}
+
+	// Sanitize workflowChoice (user-supplied config) — closes go/log-injection.
+	logger.Info("Built-in registration approval workflow seeded (Issue #1527)", "workflow", logging.SanitizeLogValue(workflowChoice))
+}
+
+// noOpModuleRegistry is a minimal ModuleRegistry for controller wiring.
+// Returns safe defaults when no external module registry is configured.
+type noOpModuleRegistry struct{}
+
+func (r *noOpModuleRegistry) GetModuleVersion(_ context.Context, _ string) (string, error) {
+	return "latest", nil
+}
+
+func (r *noOpModuleRegistry) GetModuleDependencies(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
+func (r *noOpModuleRegistry) IsModuleCompatible(_ context.Context, _, _ string) (bool, error) {
+	return true, nil
+}
+
+// wireClusterModuleApprovalStore wires a cluster-visible, CAS-protected
+// business.ModuleApprovalStore into moduleCache when the controller runs
+// clustered (pkg/ha.Config.IsClusterMode()), overriding the local-filesystem
+// approval.yaml default with the shared substrate (ADR-031 Decision 1, Issue
+// #3886). storageManager may be nil, and GetModuleApprovalStore may return nil
+// (the running storage provider does not implement ModuleApprovalStoreCreator)
+// — either case leaves moduleCache on its file-backed default, which is not a
+// silent security downgrade: ModuleCache.HasSharedApprovalStore() then reports
+// false and the REST approve/reject handlers keep their lease-backed leadership
+// gate (api.Server.moduleDecisionNodeIsAuthoritative), so decisions stay
+// single-writer instead of being served by every node against node-local files.
+// It is still a degraded cluster, so it is logged as a warning naming the
+// consequence. A single-node deployment (IsClusterMode() false) is never touched
+// here.
+func wireClusterModuleApprovalStore(moduleCache *modulecache.ModuleCache, cfg *config.Config, storageManager *interfaces.StorageManager, logger logging.Logger) {
+	if !cfg.HA.IsClusterMode() {
+		return
+	}
+	var store business.ModuleApprovalStore
+	if storageManager != nil {
+		store = storageManager.GetModuleApprovalStore()
+	}
+	if store == nil {
+		logger.Warn("Clustered controller has no cluster-visible module approval store; "+
+			"module bundle approval status stays node-local and approve/reject remains restricted to the leadership-holding node",
+			"ha_mode", cfg.HA.Mode)
+		return
+	}
+	moduleCache.SetApprovalStore(store)
+	logger.Info("Module bundle approval status wired to cluster-visible, CAS-protected store (Issue #3886)")
+}
+
+// newModuleGitSourceResolver constructs the git source resolver consumed by
+// required_modules resolution (Issue #1884, #4409). Its sources map comes from
+// controller configuration (cfg.ModuleSources) and its clone root is a path
+// under the controller's existing DNA data root — neither is hard-coded.
+//
+// Returns a nil (untyped) resolution.BundleResolver, not a typed-nil pointer,
+// when no sources are configured or construction fails, so the moduleCache-nil
+// check pattern above works identically here: a failure is logged and startup
+// continues with module resolution disabled rather than crashing.
+func newModuleGitSourceResolver(cfg *config.Config, logger logging.Logger) resolution.BundleResolver {
+	if len(cfg.ModuleSources) == 0 {
+		return nil
+	}
+
+	sources := make(map[string]moduleGitSource.SourceConfig, len(cfg.ModuleSources))
+	for publisher, src := range cfg.ModuleSources {
+		sources[publisher] = moduleGitSource.SourceConfig{Type: src.Type, Base: src.Base}
+	}
+
+	cloneRoot := filepath.Join(resolveDNADataRoot(cfg), "module-sources")
+	resolver, err := moduleGitSource.New(sources, cloneRoot, logger)
+	if err != nil {
+		logger.Warn("Failed to initialize git module source resolver; required_modules resolution via git will be unavailable",
+			"error", logging.SanitizeLogValue(err.Error()), "dir", cloneRoot)
+		return nil
+	}
+	return resolver
+}
+
+// initializeRollbackManager creates and wires the rollback manager.
+//
+// controllerService is the steward registry the rollback manager resolves target
+// ownership against; when it is nil the manager refuses every non-root caller
+// (Issue #4340).
+func initializeRollbackManager(storageManager *interfaces.StorageManager, logger logging.Logger, rbacManager rbac.RBACManager, controllerService *service.ControllerService) rollback.RollbackManager {
+	// Use durable storage for rollback operations
+	rollbackStore := rollback.NewStorageRollbackStore(storageManager.GetConfigStore())
+
+	// Create validator with no-op module registry (full module registry requires separate story)
+	rollbackValidator := rollback.NewRollbackValidator(&noOpModuleRegistry{}, nil, rbacManager)
+
+	// Create notifier using standard logger
+	rollbackNotifier := rollback.NewDefaultRollbackNotifier(logger)
+
+	// Create local git store for commit history access
+	localGitStore := gitStorage.NewLocalRepositoryStore("", "")
+
+	// Create git manager for rollback point discovery (nil provider = local-only mode)
+	gitManager := configgit.NewGitManager(nil, localGitStore, configgit.GitManagerConfig{
+		DefaultBranch: "main",
+		AutoSync:      false,
+	}, logger)
+
+	// The steward registry is the authority for rollback target ownership
+	// (Issue #4340) — the same authority the reports API uses for device→tenant
+	// questions. A nil resolver is passed explicitly rather than a typed-nil
+	// service so the manager can tell "no ownership authority wired" apart from
+	// "authority says this target is unknown".
+	var tenantResolver rollback.TargetTenantResolver
+	if controllerService != nil {
+		tenantResolver = controllerService
+	} else {
+		logger.Warn("Rollback manager has no steward registry to resolve target ownership; " +
+			"tenant-scoped callers will be refused until one is wired (Issue #4340)")
+	}
+
+	manager := rollback.NewRollbackManager(gitManager, rollbackValidator, rollbackStore, rollbackNotifier, tenantResolver)
+	logger.Info("Rollback manager initialized")
+	return manager
+}
+
+// initializeReportsHandler creates the reports API handler backed by the entity
+// graph central provider (Issue #3328). Returns nils when egProvider is nil.
+// controllerService supplies device→tenant ownership so tenant-scoped callers
+// cannot select another tenant's devices.
+// alertStore supplies alert acknowledgement and silence state for the dashboard
+// alerts feed (Issue #3267); nil disables ack/silence annotation gracefully.
+// The DataProvider is returned alongside the Handler so callers can wire it into
+// the compliance endpoints for drift-based compliance derivation (Issue #3265).
+// templateStore backs the custom template manager; when it is nil the custom routes
+// answer 503 and the manager return is nil. tenantPath resolves a tenant's root-first
+// path and rootTenantID is the deployment root: an empty root makes every share deny
+// and the builder unconstructable, both failing closed (Issue #5686). The template
+// manager and report builder are returned for the scheduled-report runner.
+func initializeReportsHandler(egProvider eginterfaces.EntityGraphProvider, controllerService *service.ControllerService, tenantAncestry reportapi.TenantAncestryFunc, alertStore business.AlertStore, templateStore business.ReportTemplateStore, tenantPath func(ctx context.Context, tenantID string) ([]string, error), rootTenantID string, logger logging.Logger) (*reportapi.Handler, reportinterfaces.DataProvider, reportinterfaces.CustomTemplateManager, reportinterfaces.CustomReportBuilder) {
+	if egProvider == nil {
+		return nil, nil, nil, nil
+	}
+
+	// Build the reports engine from its components
+	dataProvider := reportsprovider.New(egProvider, logger)
+	templateProcessor := reportstemplates.New(logger)
+	exporter := reportsexporters.New(logger)
+	reportsCache := reportscache.NewMemoryCache()
+	reportEngine := reportsengine.New(dataProvider, templateProcessor, exporter, reportsCache, logger)
+
+	logger.Info("Reports engine initialized")
+	// The steward registry is the device→tenant authority for the reports
+	// endpoints; a report device ID is a steward ID.
+	reportsHandler := reportapi.New(reportEngine, exporter, controllerService, alertStore, logger)
+	reportsHandler.SetTenantAncestry(tenantAncestry)
+
+	var templateManager reportinterfaces.CustomTemplateManager
+	if templateStore != nil {
+		mgr, err := reportsengine.NewCustomTemplateManager(templateStore, time.Now, reportShareScope(tenantPath, rootTenantID))
+		if err != nil {
+			logger.Error("Custom report template manager unavailable", "error", logging.SanitizeLogValue(err.Error()))
+		} else {
+			templateManager = mgr
+		}
+	} else {
+		logger.Warn("Report template store unavailable; custom template routes answer 503")
+	}
+
+	var builder reportinterfaces.CustomReportBuilder
+	pageCache := reportcachepkg.NewCache(reportcachepkg.CacheConfig{
+		Name:            "custom-report-pages",
+		MaxRuntimeItems: 1000,
+		DefaultTTL:      time.Hour,
+		CleanupInterval: time.Minute,
+	})
+	b, err := reportsengine.NewCustomReportBuilder(dataProvider, reportinterfaces.CustomReportConfig{}, pageCache, controllerService, reportsengine.TenantAncestryFunc(tenantAncestry), rootTenantID)
+	if err != nil {
+		pageCache.Close()
+		logger.Error("Custom report builder unavailable", "error", logging.SanitizeLogValue(err.Error()))
+	} else {
+		builder = b
+	}
+
+	reportsHandler.SetCustomReports(templateManager, builder)
+	return reportsHandler, dataProvider, templateManager, builder
+}
+
+// reportShareScope builds the template manager's ShareScopeFunc: a share is allowed only
+// when both tenants resolve, differ, the owner is not the root, and both sit under the
+// same tenant directly below the root. Any error or an empty root denies.
+func reportShareScope(tenantPath func(ctx context.Context, tenantID string) ([]string, error), rootTenantID string) reportsengine.ShareScopeFunc {
+	return func(ctx context.Context, owner, target string) (bool, error) {
+		if tenantPath == nil || rootTenantID == "" || owner == "" || target == "" || owner == target || owner == rootTenantID {
+			return false, nil
+		}
+		ownerPath, err := tenantPath(ctx, owner)
+		if err != nil || len(ownerPath) < 2 {
+			return false, nil
+		}
+		targetPath, err := tenantPath(ctx, target)
+		if err != nil || len(targetPath) < 2 {
+			return false, nil
+		}
+		return ownerPath[1] == targetPath[1], nil
+	}
+}
+
+// initializeWorkflowHandler creates the workflow engine, trigger manager, and API handler.
+// Returns nil, nil on failure so the controller starts without workflow support rather than failing.
+// secrets is the controller's central secret store (Issue #2374); it is threaded through
+// NewEngine → NewProviderRegistry → GitHubAppProvider so the github provider can mint
+// App-JWTs on a live controller without failing with "secrets store not configured".
+func initializeWorkflowHandler(
+	storageManager *interfaces.StorageManager,
+	moduleCache *modulecache.ModuleCache,
+	workflowRT *workflowruntime.ModuleRuntime,
+	logger logging.Logger,
+	secrets secretsif.SecretStore,
+	configService *service.ConfigurationServiceV2,
+) (*api.WorkflowHandler, *workflowtrigger.TriggerManagerImpl, *workflow.Engine, workflow.TenantModuleLoader) {
+	// Workflow module factory: looks up controller-kind module bundles by
+	// name in the controller's module cache (#1883) and fork/execs them as
+	// workflow-kind module subprocesses connected over the WorkflowModuleClient
+	// gRPC contract (#1881, #1914).
+	//
+	// moduleCache and workflowRT may be nil when initialization failed; in that
+	// case the factory surfaces descriptive errors on any module instantiation.
+	// REST-only deployments that never resolve modules through the engine are unaffected.
+	moduleFactory := workflow.NewWorkflowModuleFactory(moduleCache, workflowRT)
+
+	configStore := storageManager.GetConfigStore()
+
+	setHARoleExecutor := workflownodes.NewSetHARoleNodeExecutor(configStore, configService)
+	moveResourceToClusterExecutor := workflownodes.NewMoveResourceToClusterNodeExecutor(configStore, configService)
+	// The approval store is the durable home of approval gates (Issue #4609); a nil
+	// store (provider without one) makes approval steps fail with a clear error.
+	engineOpts := []workflow.EngineOption{}
+	if approvalStore := storageManager.GetApprovalStore(); approvalStore != nil {
+		engineOpts = append(engineOpts, workflow.WithApprovalStore(approvalStore))
+	}
+	// Execution history is written through to the shared store so every node can
+	// answer for any run and history survives a restart (Issue #4675); a nil store
+	// (provider without one) leaves executions node-local.
+	if executionStore := storageManager.GetWorkflowExecutionStore(); executionStore != nil {
+		engineOpts = append(engineOpts, workflow.WithExecutionStore(executionStore))
+	}
+	workflowEngine := workflow.NewEngine(moduleFactory, logger, secrets, nil, nil, setHARoleExecutor, moveResourceToClusterExecutor, engineOpts...)
+	// Composed workflows (nested steps, error workflows, components) resolve by
+	// name from the executing tenant's workflow store (Issue #4638).
+	workflowEngine.SetWorkflowResolver(workflow.NewStoreWorkflowResolver(configStore))
+
+	// workflowEngineAdapter bridges workflow.Engine to trigger.WorkflowTrigger.
+	// Triggers resolve workflows by name from their own tenant's store.
+	adapter := &workflowEngineAdapter{
+		engine:      workflowEngine,
+		configStore: configStore,
+	}
+
+	// Triggers persist in the storage manager's trigger store, their credentials
+	// in the controller's secret store (Issue #4641). The flatfile provider the
+	// manager was built from implements no trigger store, which left triggers in
+	// memory only: every trigger was lost on restart.
+	triggerMgr := workflowtrigger.NewControllerTriggerManager(nil, adapter)
+	triggerMgr.SetPersistence(storageManager.GetTriggerStore(), secrets)
+
+	handler := api.NewWorkflowHandler(workflowEngine, configStore, triggerMgr, logger)
+
+	logger.Info("Workflow engine and trigger manager initialized (Issue #414)")
+	tenantModules, _ := moduleFactory.(workflow.TenantModuleLoader)
+	return handler, triggerMgr, workflowEngine, tenantModules
+}
+
+// workflowEngineAdapter implements trigger.WorkflowTrigger by delegating to the workflow engine.
+type workflowEngineAdapter struct {
+	engine      *workflow.Engine
+	configStore cfgconfig.ConfigStore
+}
+
+func (a *workflowEngineAdapter) TriggerWorkflow(ctx context.Context, trig *workflowtrigger.Trigger, data map[string]interface{}) (*workflow.WorkflowExecution, error) {
+	// The trigger manager always records the tenant a trigger was created in
+	// (never an empty one); its workflow resolves in that tenant's store.
+	if trig.TenantID == "" {
+		return nil, fmt.Errorf("trigger %q has no tenant", trig.ID)
+	}
+	store := workflow.NewWorkflowStore(a.configStore, trig.TenantID)
+	vw, err := store.GetLatestWorkflow(ctx, trig.WorkflowName)
+	if err != nil {
+		return nil, fmt.Errorf("workflow %q not found for trigger %q: %w", trig.WorkflowName, trig.ID, err)
+	}
+
+	// Merge trigger default variables with runtime data
+	vars := make(map[string]interface{})
+	for k, v := range trig.Variables {
+		vars[k] = v
+	}
+	for k, v := range data {
+		vars[k] = v
+	}
+
+	// Run under the trigger's tenant: the engine takes the execution's
+	// authenticated tenant from ctxkeys.TenantID and tenant-scoped steps act on
+	// exactly that tenant. Scheduled and webhook triggers fire without any
+	// caller context, so without this every tenant-scoped step in a triggered
+	// workflow refused to run (Issue #4640).
+	//
+	// The execution is detached from the caller's cancellation: a manual
+	// execution's caller is an HTTP request the server cancels on return, and
+	// the scheduler/webhook/SIEM callbacks return as soon as the asynchronous
+	// start does (Issue #4658). The trigger's timeout bounds the execution as the
+	// workflow's own timeout, which the engine enforces and releases.
+	execCtx := context.WithValue(context.WithoutCancel(ctx), ctxkeys.TenantID, trig.TenantID)
+	wf := vw.Workflow
+	if trig.Timeout > 0 && (wf.Timeout == 0 || trig.Timeout < wf.Timeout) {
+		wf.Timeout = trig.Timeout
+	}
+	exec, err := a.engine.ExecuteWorkflow(execCtx, wf, vars)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start workflow %q: %w", trig.WorkflowName, err)
+	}
+
+	return exec, nil
+}
+
+func (a *workflowEngineAdapter) ValidateTrigger(_ context.Context, trig *workflowtrigger.Trigger) error {
+	if trig.WorkflowName == "" {
+		return fmt.Errorf("trigger %q must specify a workflow_name", trig.ID)
+	}
+	return nil
+}
+
+// Start initializes and starts the controller server (gRPC-over-QUIC mode)
+func (s *Server) Start() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Start HA manager with timeout
+	if s.haManager != nil {
+		s.logger.Info("Starting HA manager...")
+
+		// The HA manager's context is its LIFETIME, not a startup deadline.
+		//
+		// ha.Manager.Start derives m.ctx from the context passed here and bounds
+		// every background goroutine it launches on it. This used to be a
+		// 30-second context.WithTimeout with a deferred cancel, so the moment
+		// Server.Start returned, that cancel fired and killed the manager's
+		// background work while the manager still reported itself started.
+		//
+		// The visible damage was cluster membership: the node-info replication
+		// goroutine active at the time (since replaced by the node-registry
+		// self-registration loop, Issue #3763) observed the cancelled context
+		// first and returned without registering anything, on every node.
+		// GET /api/v1/ha/cluster reported no members while the cluster was
+		// otherwise healthy — only GET /api/v1/ha/status looked correct, because
+		// it reads leadership state directly rather than through the (empty)
+		// membership view.
+		//
+		// Start does not block on the network, so it needs no timeout of its
+		// own; shutdown is Server.Stop's job, which calls haManager.Stop.
+		if err := s.haManager.Start(context.Background()); err != nil {
+			return fmt.Errorf("failed to start HA manager: %w", err)
+		}
+		s.logger.Info("HA manager started successfully")
+	}
+
+	// Start shared gRPC-over-QUIC transport and wire composite handler (Story #515)
+	s.logger.Info("Controller build version", "version", buildVersionCheck)
+	if s.controlPlane != nil {
+		// Build TLS config for the QUIC listener
+		grpcTLSConfig, err := buildGRPCControlPlaneTLSConfig(s.cfg, s.certManager, s.logger)
+		if err != nil {
+			return fmt.Errorf("failed to build transport TLS config: %w", err)
+		}
+
+		// Create fresh shared gRPC server + QUIC listener per Start() cycle.
+		// grpc.Server is not reusable after Stop(), so we create a new one each time.
+		grpcOpts := []grpc.ServerOption{
+			grpc.Creds(quictransport.TransportCredentials()),
+			// Issue #5555: unary calls are logged by method, code and duration only;
+			// IssueInitialCredential never reaches a payload log or a span attribute.
+			grpc.ChainUnaryInterceptor(controllerTransport.NewUnaryAccessLogInterceptor(s.logger)),
+		}
+		if s.certManager != nil {
+			grpcOpts = append(grpcOpts,
+				grpc.ChainUnaryInterceptor(newUnaryRevocationInterceptor(s.certManager, s.logger)),
+				grpc.ChainStreamInterceptor(
+					newStreamRevocationInterceptor(s.certManager, s.logger, s.streamRevocationRecheckInterval)))
+		} else {
+			s.logger.Warn("no certificate manager; steward unary and stream revocation checks are not installed, IssueInitialCredential is disabled")
+		}
+		s.grpcServer = grpc.NewServer(append(grpcOpts, dataplaneGRPC.ServerOptions()...)...)
+		ql, err := quictransport.ListenWithLimits(
+			s.cfg.Transport.ListenAddr,
+			grpcTLSConfig,
+			nil,
+			quictransport.LimitsForMaxConnections(s.cfg.Transport.MaxConnections),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to start shared QUIC listener: %w", err)
+		}
+		s.quicListener = ql
+
+		// Re-initialize CP provider with the fresh gRPC server
+		// Re-initializing creates a fresh registry unless the shared one is
+		// passed back in — keep the same instance the API server holds so
+		// connection_state stays accurate across the Start() re-init (Issue #1572).
+		if err := s.controlPlane.Initialize(context.Background(), map[string]interface{}{
+			"mode":                     "server",
+			"addr":                     s.cfg.Transport.ListenAddr,
+			"tls_config":               grpcTLSConfig,
+			"grpc_server":              s.grpcServer,
+			"registry":                 s.connRegistry,
+			"max_connections":          s.cfg.Transport.MaxConnections,
+			"registration_token_store": s.storageManager.GetRegistrationTokenStore(),
+			"require_security_stores":  true,
+		}); err != nil {
+			return fmt.Errorf("failed to re-initialize CP provider with shared server: %w", err)
+		}
+
+		// Start CP and DP providers (they create their handlers but don't register/listen)
+		if err := s.controlPlane.Start(context.Background()); err != nil {
+			return fmt.Errorf("failed to start control plane provider: %w", err)
+		}
+		s.logger.Info("Control plane provider started")
+
+		if s.dataPlaneProvider != nil {
+			// Re-initialize DP with the fresh gRPC server
+			if err := s.dataPlaneProvider.Initialize(context.Background(), map[string]interface{}{
+				"mode":        "server",
+				"grpc_server": s.grpcServer,
+			}); err != nil {
+				return fmt.Errorf("failed to re-initialize DP provider with shared server: %w", err)
+			}
+			if err := s.dataPlaneProvider.Start(context.Background()); err != nil {
+				return fmt.Errorf("failed to start data plane provider: %w", err)
+			}
+			s.logger.Info("Data plane provider started", "provider", s.dataPlaneProvider.Name())
+		}
+
+		// Build and register composite handler
+		cpProvider, ok := s.controlPlane.(*grpcCP.Provider)
+		if !ok {
+			return fmt.Errorf("control plane provider is not *grpcCP.Provider (got %T)", s.controlPlane)
+		}
+		cpHandler := cpProvider.ServerHandler()
+		if cpHandler == nil {
+			return fmt.Errorf("CP provider ServerHandler() returned nil")
+		}
+
+		// Issue #3759: the DNA and bulk handlers take a dedicated admission queue
+		// instance, separate from the one gating Register/ControlChannel, so a
+		// bucket exhausted here cannot starve a tenant's connects and heartbeats.
+		// See ingest_admission.go.
+		tenantQueue := s.admissionQueues.dnaBulkQueue()
+		dnaHandler := controllerTransport.NewDNAHandler(s.logger, tenantQueue, s.controllerService)
+		// Issue #4346: bind the queue key to the peer's registered tenant rather
+		// than the first chunk's wire-supplied tenant_id, which is steward-supplied
+		// and could otherwise be used to name a victim tenant's bucket.
+		dnaHandler.WithTenantResolver(s.controllerService)
+		// Issue #4444: chain the entity-graph write path so a steward's committed
+		// DNA delta also lands in the entity graph.
+		s.wireDNAEntityGraph(dnaHandler)
+
+		// Wire fragment-root partial-sync detection (Issue #3329). The DNA handler
+		// compares the steward-claimed aggregate root against the stored manifest root
+		// and requests only changed fragments on mismatch (ADR-017 §7). Must be wired
+		// before the heartbeat service starts so no heartbeats are missed.
+		if s.heartbeatService != nil {
+			s.heartbeatService.SetOnFragmentRoot(dnaHandler.HandleHeartbeatRoot)
+			s.logger.Info("Fragment-root partial-sync detection wired (Issue #3329)")
+		}
+		s.wireDNABulkLane(dnaHandler)
+
+		bulkHandler := controllerTransport.NewBulkHandler(s.logger, tenantQueue)
+		logStreamHandler := s.newLogStreamHandler()
+		s.logStreamHandler = logStreamHandler
+		telemetryHandler := controllerTransport.NewTelemetryHandler(s.logger, nil)
+		composite := newCompositeTransportServer(cpHandler, s.logger)
+		composite.SetConfigHandler(s.configHandler)
+		composite.SetDNAHandler(dnaHandler)
+		composite.SetBulkHandler(bulkHandler)
+		// Issue #4985: FetchModuleBundle serves approved bundles to the steward
+		// whose own configuration requires them. It shares the DNA/bulk admission
+		// queue so a bucket exhausted by module fetches cannot starve connects.
+		if s.moduleCache != nil && s.configService != nil && s.controllerService != nil {
+			composite.SetModuleBundleHandler(controllerTransport.NewModuleBundleHandler(
+				s.moduleCache, s.configService, s.controllerService, tenantQueue, s.logger))
+		}
+		// Issue #5555: IssueInitialCredential is a unary RPC so a password never
+		// passes through the steward offline queue (which persists to disk). It is
+		// wired only with a certificate manager: without one the unary revocation
+		// interceptor is not installed, and a revoked steward must never be able
+		// to collect a plaintext initial password.
+		if s.certManager != nil && s.credentialService != nil && s.configService != nil && s.controllerService != nil {
+			composite.SetCredentialHandler(controllerTransport.NewCredentialHandler(
+				s.credentialService, s.configService, s.controllerService, s.logger))
+		}
+		composite.SetLogStreamHandler(logStreamHandler)
+		composite.SetTelemetryHandler(telemetryHandler)
+
+		// Wire terminal relay (Issue #2761). Parse allowed origins from env
+		// (mirrors CFGMS_ALLOWED_ORIGINS: comma-separated, trimmed, empty filtered).
+		var terminalOrigins []string
+		if raw := os.Getenv("CFGMS_TERMINAL_ALLOWED_ORIGINS"); raw != "" {
+			for _, o := range strings.Split(raw, ",") {
+				if trimmed := strings.TrimSpace(o); trimmed != "" {
+					terminalOrigins = append(terminalOrigins, trimmed)
+				}
+			}
+		}
+		// Session recordings capture raw keystrokes and shell output of privileged
+		// admin sessions, so they are stored under the controller's data directory
+		// (same resolution as DNA reports and installer blobs) with owner-only
+		// permissions — never a shared, world-writable location such as /tmp.
+		terminalCfg := terminal.DefaultConfig()
+		terminalCfg.RecordingStoragePath = filepath.Join(resolveDNADataRoot(s.cfg), "terminal-recordings")
+		if s.httpServer == nil || s.httpServer.GetSecretStore() == nil {
+			return fmt.Errorf("failed to create terminal session manager: secrets store is required for the recording HMAC key")
+		}
+		terminalSessionMgr, terminalMgrErr := terminal.NewSessionManager(terminalCfg, s.logger,
+			terminal.WithSecretsStore(s.httpServer.GetSecretStore()))
+		if terminalMgrErr != nil {
+			return fmt.Errorf("failed to create terminal session manager: %w", terminalMgrErr)
+		}
+		// Retained so Stop can finalize recordings of sessions still live at
+		// shutdown; without the finalizing .meta sidecar a recording is treated as
+		// unverifiable and discarded on the next start.
+		s.terminalSessionMgr = terminalSessionMgr
+		// Avoid a non-nil interface with a nil pointer (would bypass the nil-check in ServeWebSocket).
+		var terminalCmdPub controllerTransport.TerminalCommandPublisher
+		if s.commandPublisher != nil {
+			terminalCmdPub = s.commandPublisher
+		}
+		// The audited client IP of a privileged shell session must not be
+		// attacker-controlled, so forwarding headers are believed only from the
+		// configured reverse proxies (same list that gates the registration
+		// IP-trust decision, Issue #1695). Unset means headers are ignored and
+		// the TCP peer address is audited.
+		var terminalTrustedProxies []string
+		if s.cfg.Registration != nil {
+			terminalTrustedProxies = s.cfg.Registration.TrustedProxies
+		}
+		terminalHandler := controllerTransport.NewTerminalHandler(
+			s.logger, terminalCmdPub, terminalSessionMgr, s.auditManager, terminalOrigins,
+			terminalTrustedProxies,
+		)
+		composite.SetTerminalHandler(terminalHandler)
+		if s.httpServer != nil {
+			s.httpServer.SetTerminalHandler(http.HandlerFunc(terminalHandler.ServeWebSocket))
+		}
+
+		// Wire osquery ad-hoc fleet query dispatch (Issue #3569).
+		// The controller side of OsqueryHandler manages the stream registry (HandleGRPC,
+		// QuerySteward); Execute is steward-side only so binPath is irrelevant here.
+		osqueryHandler := stewardosquery.NewOsqueryHandler(s.logger, "")
+		composite.SetOsqueryHandler(osqueryHandler)
+		if s.httpServer != nil {
+			s.httpServer.SetOsqueryDispatcher(osqueryHandler)
+		}
+
+		transportpb.RegisterStewardTransportServer(s.grpcServer, composite)
+		// Wire telemetry WebSocket fan-out into the REST API (Issue #2765).
+		if s.httpServer != nil {
+			s.httpServer.SetTelemetryHandler(http.HandlerFunc(telemetryHandler.ServeWebSocket))
+		}
+
+		// Start serving on the shared QUIC listener
+		go func() {
+			if err := s.grpcServer.Serve(s.quicListener); err != nil {
+				s.logger.Error("Shared gRPC server stopped", "error", err)
+			}
+		}()
+		s.logger.Info("Shared gRPC-over-QUIC transport started",
+			"addr", s.quicListener.Addr().String())
+
+		// Subscribe to events from stewards via ControlPlaneProvider
+		if err := s.controlPlane.SubscribeEvents(context.Background(), nil, s.handleEventFromProvider); err != nil {
+			return fmt.Errorf("failed to subscribe to events: %w", err)
+		}
+		s.logger.Info("Subscribed to steward events via gRPC control plane provider")
+
+		// Start heartbeat monitoring service
+		if s.heartbeatService != nil {
+			// Background jobs run system-internal (ctxkeys.WithSystem): a context with
+			// no caller is refused fleet-wide reach, so each job's reach is an explicit
+			// decision rather than the side effect of a bare context (Issue #4665).
+			if err := s.heartbeatService.Start(ctxkeys.WithSystem(context.Background())); err != nil {
+				return fmt.Errorf("failed to start heartbeat service: %w", err)
+			}
+			s.logger.Info("Heartbeat monitoring service started")
+		}
+
+		// Start command publisher
+		if s.commandPublisher != nil {
+			if err := s.commandPublisher.Start(ctxkeys.WithSystem(context.Background())); err != nil {
+				return fmt.Errorf("failed to start command publisher: %w", err)
+			}
+			s.logger.Info("Command publisher started")
+		}
+
+		// Start job dispatcher (Issue #1672)
+		if s.jobDispatcher != nil {
+			if err := s.jobDispatcher.Start(ctxkeys.WithSystem(context.Background())); err != nil {
+				return fmt.Errorf("failed to start job dispatcher: %w", err)
+			}
+			s.logger.Info("Job dispatcher started")
+		}
+	}
+
+	// Start background expiry jobs (Issue #1697).
+	if s.ipTrustExpiryJob != nil {
+		if err := s.ipTrustExpiryJob.Start(ctxkeys.WithSystem(context.Background())); err != nil {
+			s.logger.Warn("Failed to start IP-trust expiry job", "error", err)
+		} else {
+			s.logger.Info("IP-trust expiry job started (Issue #1697)")
+		}
+	}
+	if s.pendingExpiryJob != nil {
+		if err := s.pendingExpiryJob.Start(ctxkeys.WithSystem(context.Background())); err != nil {
+			s.logger.Warn("Failed to start pending-registration expiry job", "error", err)
+		} else {
+			s.logger.Info("Pending-registration expiry job started (Issue #1697)")
+		}
+	}
+
+	// Resume approval-gated runs the previous process left behind and start the
+	// periodic sweep that expires due approvals (Issue #4609). The engine owns the
+	// sweep's lifetime; Stop shuts it down.
+	if s.workflowEngine != nil {
+		s.workflowEngine.StartApprovalRecovery(ctxkeys.WithSystem(context.Background()), approvalRecoveryInterval)
+	}
+
+	// Start workflow trigger manager (Issue #414)
+	if s.triggerManager != nil {
+		if err := s.triggerManager.Start(ctxkeys.WithSystem(context.Background())); err != nil {
+			s.logger.Warn("Failed to start trigger manager", "error", err)
+		} else {
+			s.logger.Info("Workflow trigger manager started")
+		}
+	}
+
+	// Start periodic git-sourced tenant config sync (Issue #4408). Run derives its
+	// own lifetime context from syncCtx and is idempotent; cancelling syncCtx (done
+	// in Stop, tied to this exact context) stops every per-tenant polling goroutine
+	// it owns — the mechanism behind "cancelling the controller's context stops the
+	// polling loop."
+	if s.configSyncService != nil {
+		syncCtx, cancel := context.WithCancel(ctxkeys.WithSystem(context.Background()))
+		s.configSyncCancel = cancel
+		s.configSyncService.Run(syncCtx)
+		s.logger.Info("Config source sync service started (Issue #4408)")
+	}
+
+	// Start the entity-graph tenant-tree mirror's periodic sweep (Issue #4413,
+	// ADR-022 §7). Cadence decision: periodic, not a tenant CRUD hook — no hook
+	// point exists today at the tenant store's create/update/delete call sites,
+	// and adding one to every call site is new plumbing beyond this wiring
+	// story. Ingest's cost is proportional to tenant count, not fleet size, and
+	// a full-tree snapshot is idempotent, so a short bounded interval keeps the
+	// mirror eventually consistent cheaply. Gated on the sweep's own
+	// cluster-singleton lease (ADR-031 Decision 4) so racing full-tree snapshots
+	// from sibling nodes cannot retract and re-assert each other's claim scopes.
+	if s.egTenantSyncWriter != nil {
+		tenantStore := s.storageManager.GetTenantStore()
+		s.egTenantSyncSweeper = newEntityGraphPeriodicSweeper("entitygraph-tenantsync", entityGraphTenantSyncSweepInterval,
+			func(ctx context.Context) error {
+				return s.egTenantSyncWriter.Ingest(ctx, tenantStore)
+			}, s.egTenantSyncLeaseJob, s.logger)
+		s.egTenantSyncSweeper.Start(ctxkeys.WithSystem(context.Background()))
+		s.logger.Info("Entity graph tenant-sync periodic sweep started (Issue #4413)",
+			"interval", entityGraphTenantSyncSweepInterval)
+	}
+
+	// Issue #5555: expire initial credentials and delete their secrets. Gated on
+	// the sweep's own cluster-singleton lease so one node sweeps per tick.
+	if s.credentialService != nil {
+		s.credentialSweeper = newEntityGraphPeriodicSweeper("credential-expiry", credentialSweepInterval,
+			func(ctx context.Context) error {
+				_, err := s.credentialService.Sweep(ctx)
+				return err
+			}, s.credentialLeaseJob, s.logger)
+		s.credentialSweeper.Start(ctxkeys.WithSystem(context.Background()))
+		s.logger.Info("Credential expiry sweep started (Issue #5555)", "interval", credentialSweepInterval)
+	}
+
+	// Start the MAC-identity correlator's periodic sweep (Issue #4413, ADR-022
+	// §3). The correlator has no event source to hook (it correlates across
+	// fleet-wide observations already in the graph), so periodic is the only
+	// viable cadence. Correlate is O(fleet size) per sweep (ADR-022 §9's known
+	// tension), so it is gated on the sweep's own cluster-singleton lease
+	// (ADR-031 Decision 4): without it, an N-node cluster would multiply a
+	// fleet-sized scan of the shared entity graph by N on every tick.
+	if s.egCorrelatorWriter != nil {
+		s.egCorrelatorSweeper = newEntityGraphPeriodicSweeper("entitygraph-correlator", entityGraphCorrelatorSweepInterval,
+			s.egCorrelatorWriter.Correlate, s.egCorrelatorLeaseJob, s.logger)
+		s.egCorrelatorSweeper.Start(ctxkeys.WithSystem(context.Background()))
+		s.logger.Info("Entity graph correlator periodic sweep started (Issue #4413)",
+			"interval", entityGraphCorrelatorSweepInterval)
+	}
+
+	// Start the M365 tenant inventory (Issue #5561). It only reads Graph on the
+	// node holding its cluster-singleton lease.
+	if s.m365Inventory != nil {
+		s.m365Inventory.Start(ctxkeys.WithSystem(context.Background()))
+		s.logger.Info("M365 tenant inventory started (Issue #5561)")
+	}
+
+	// Start health collector and alert manager (Story #417)
+	if s.healthCollector != nil {
+		if err := s.healthCollector.Start(ctxkeys.WithSystem(context.Background()), 30*time.Second); err != nil {
+			s.logger.Warn("Failed to start health collector", "error", err)
+		} else {
+			s.logger.Info("Health collector started", "interval", "30s")
+		}
+	}
+	if s.systemMonitor != nil {
+		if err := s.systemMonitor.Start(ctxkeys.WithSystem(context.Background())); err != nil {
+			s.logger.Warn("Failed to start system monitor", "error", logging.SanitizeLogValue(err.Error()))
+		} else {
+			s.logger.Info("System monitor started")
+		}
+	}
+	if s.alertManager != nil {
+		if err := s.alertManager.Start(context.Background()); err != nil {
+			s.logger.Warn("Failed to start alert manager", "error", err)
+		} else {
+			s.logger.Info("Alert manager started")
+		}
+	}
+
+	// Start HTTP API server
+	if s.httpServer != nil {
+		// api.Server.Start performs synchronous TLS preflight before launching
+		// its serving goroutine. Propagate any failure so controller startup
+		// cannot report success while the public API is absent or downgraded.
+		if err := s.httpServer.Start(); err != nil {
+			return fmt.Errorf("failed to start HTTPS API server: %w", err)
+		}
+		s.logger.Info("HTTP API server started")
+	}
+
+	// IsRaftLeader() was deleted with the Raft transport it reported on (Issue
+	// #3763); HasLeadership() is now the only is_leader signal, lease-backed
+	// (ADR-031 Decision 5).
+	s.logger.Info("Controller server started (gRPC-over-QUIC transport mode)",
+		"ha_mode", s.haManager.GetDeploymentMode().String(),
+		"is_leader", s.haManager.HasLeadership())
+
+	// Issue #1320: On startup, if this node holds lease-backed authority, replay any
+	// push operations that were interrupted before a previous leader could complete
+	// delivery. Nil haManager means OSS single-node mode, which is always authoritative.
+	// HasLeadership(), not IsLeader() (Issue #3389): a replay is side-effecting —
+	// it re-delivers to real stewards outside the replicated log, so it belongs on
+	// the same admission primitive as handleConfigPush, not the raw Raft flag.
+	if (s.haManager == nil || s.haManager.HasLeadership()) && s.commandPublisher != nil {
+		go s.resumePendingPushes(context.Background())
+	}
+
+	// Issue #4795: retire superseded signing certificates when a rotation's
+	// overlap window ends. The sweep itself checks HasLeadership() each tick, so
+	// every node runs the loop and only the current leader acts.
+	if s.signingRetirementSvc != nil && s.commandPublisher != nil {
+		s.signingRetirementSvc.Start(context.Background())
+	}
+
+	// Issue #4796: keep promoting an elected signing serial and removing verified
+	// local keys, so an election made on another node after startup converges here.
+	if s.signingMigrationSvc != nil {
+		s.signingMigrationSvc.Start(context.Background())
+	}
+
+	// Issue #4797: migrate the stewards connected to this node onto the shared
+	// signing certificate, and keep re-checking them.
+	if s.stewardMigrationSvc != nil {
+		s.stewardMigrationSvc.Start(context.Background())
+	}
+
+	// Record system startup audit event
+	if s.auditManager != nil {
+		ctx := context.Background()
+		// TODO(#751): controller identity as a real tenant — replace audit.SystemTenantID with proper identity.
+		event := audit.SystemEvent(audit.SystemTenantID, "controller_start", fmt.Sprintf("Controller server started on %s", s.cfg.ListenAddr))
+		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
+			s.logger.Warn("Failed to record startup audit event", "error", err)
+		}
+	}
+
+	return nil
+}
+
+// approvalRecoveryInterval is how often each node sweeps for expired approvals and
+// decided-but-unresumed runs.
+const approvalRecoveryInterval = 30 * time.Second
+
+// Stop gracefully shuts down the server
+func (s *Server) Stop() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.logger.Info("Shutting down controller server")
+
+	// Stop health collector and alert manager (Story #417)
+	if s.healthCollector != nil {
+		if err := s.healthCollector.Stop(); err != nil {
+			s.logger.Warn("Failed to stop health collector", "error", err)
+		}
+	}
+	if s.systemMonitor != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := s.systemMonitor.Stop(stopCtx); err != nil {
+			s.logger.Warn("Failed to stop system monitor", "error", logging.SanitizeLogValue(err.Error()))
+		}
+		cancel()
+	}
+	if s.alertManager != nil {
+		if err := s.alertManager.Stop(); err != nil {
+			s.logger.Warn("Failed to stop alert manager", "error", err)
+		}
+	}
+
+	// Stop manual-review approval hook background goroutine (Issue #1599)
+	if s.manualReviewHook != nil {
+		s.manualReviewHook.Stop()
+	}
+
+	// Stop the terminal session manager (Issue #2761): closes live shells and the
+	// recorder, flushing each recording and writing its .meta sidecar so sessions
+	// active at shutdown keep a verifiable audit trail.
+	if s.terminalSessionMgr != nil {
+		if err := s.terminalSessionMgr.Stop(context.Background()); err != nil {
+			s.logger.Warn("Failed to stop terminal session manager", "error", err)
+		}
+	}
+
+	// Stop approval recovery and cancel runs resumed from approvals; their
+	// claims lapse and another engine finishes them (Issue #4609).
+	if s.workflowEngine != nil {
+		s.workflowEngine.Shutdown()
+	}
+
+	// Stop workflow trigger manager (Issue #414)
+	if s.triggerManager != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.triggerManager.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop trigger manager", "error", err)
+		}
+	}
+
+	// Close cluster-aware dispatch fallback's dialed peer connections (ADR-031
+	// Decision 3, Issue #3764) before HA manager stops — Close only tears down
+	// this node's outbound clients, independent of HA's own lifecycle.
+	if s.clusterAwareSender != nil {
+		if err := s.clusterAwareSender.Close(); err != nil {
+			s.logger.Warn("Failed to close cluster-aware delivery sender", "error", err)
+		}
+	}
+
+	// Stop HA manager first
+	if s.haManager != nil {
+		if err := s.haManager.Stop(context.Background()); err != nil {
+			s.logger.Warn("Failed to stop HA manager", "error", err)
+		}
+	}
+
+	// Record system shutdown audit event, then drain the audit write queue and
+	// stop the background drain goroutine. Stop must run BEFORE the underlying
+	// storage manager is closed so pending entries can still reach disk.
+	// Issue #764: audit writes are now asynchronous via an internal queue —
+	// Stop provides the shutdown guarantee that previously relied on synchronous
+	// store calls.
+	if s.auditManager != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// TODO(#751): controller identity as a real tenant — replace audit.SystemTenantID with proper identity.
+		event := audit.SystemEvent(audit.SystemTenantID, "controller_stop", "Controller server shutting down")
+		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
+			s.logger.Warn("Failed to record shutdown audit event", "error", err)
+		}
+		if err := s.auditManager.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop audit manager", "error", err)
+		}
+		cancel()
+	}
+
+	// Stop the worm sink's background reconciliation loop (Issue #4039)
+	// alongside the audit manager above. Stop only halts the loop goroutine —
+	// the wrapped local store is released separately when storageManager.Close
+	// runs later, reached through the AuditStore interface's Close method.
+	if s.wormAuditStore != nil {
+		s.wormAuditStore.Stop()
+	}
+
+	// Stop control plane provider (Story #363)
+	if s.controlPlane != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.controlPlane.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop control plane provider", "error", err)
+		}
+	}
+
+	// Stop data plane provider (Story #362)
+	if s.dataPlaneProvider != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.dataPlaneProvider.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop data plane provider", "error", err)
+		}
+	}
+
+	// Stop shared gRPC server and QUIC listener (Story #515)
+	if s.grpcServer != nil {
+		s.grpcServer.GracefulStop()
+	}
+	if s.quicListener != nil {
+		_ = s.quicListener.Close()
+	}
+
+	// Stop command publisher
+	if s.commandPublisher != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.commandPublisher.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop command publisher", "error", err)
+		}
+	}
+
+	// Stop heartbeat service
+	if s.heartbeatService != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.heartbeatService.Stop(ctx); err != nil {
+			s.logger.Warn("Failed to stop heartbeat service", "error", err)
+		}
+	}
+
+	// Stop job dispatcher and execution queue (Issue #1672)
+	if s.jobDispatcher != nil {
+		s.jobDispatcher.Stop()
+	}
+	if s.executionQueue != nil {
+		s.executionQueue.Stop()
+	}
+
+	// Stop background expiry jobs (Issue #1697)
+	if s.ipTrustExpiryJob != nil {
+		s.ipTrustExpiryJob.Stop()
+	}
+	if s.pendingExpiryJob != nil {
+		s.pendingExpiryJob.Stop()
+	}
+
+	// Close DNA storage manager (releases SQLite DB file handles)
+	if s.dnaStorageManager != nil {
+		if err := s.dnaStorageManager.Close(); err != nil {
+			s.logger.Warn("Failed to close DNA storage manager", "error", err)
+		}
+	}
+
+	// Close run manager — releases the dedicated SQLite connection so temp-directory
+	// cleanup succeeds on Windows (Issue #1673).
+	if s.runManager != nil {
+		if err := s.runManager.Close(); err != nil {
+			s.logger.Warn("Failed to close run manager", "error", err)
+		}
+	}
+
+	// Close upgrade store — releases the SQLite connection so temp-directory cleanup
+	// succeeds on Windows (Issue #2464).
+	if s.upgradeStore != nil {
+		if err := s.upgradeStore.Close(); err != nil {
+			s.logger.Warn("Failed to close upgrade store", "error", err)
+		}
+	}
+
+	// Close tag store — releases the SQLite connection so temp-directory cleanup
+	// succeeds on Windows (Issue #2542).
+	if s.tagStore != nil {
+		if err := s.tagStore.Close(); err != nil {
+			s.logger.Warn("Failed to close tag store", "error", err)
+		}
+	}
+
+	// Stop the M365 inventory (Issue #5561) before the entity graph and the directory
+	// manager it writes through and reads from close.
+	if s.m365Inventory != nil {
+		s.m365Inventory.Stop()
+	}
+
+	// Stop entity-graph periodic writer sweeps (Issue #4413) before the provider
+	// they write through closes below. Each Stop cancels its sweep loop's context
+	// and waits (bounded) for the goroutine to drain.
+	if s.credentialSweeper != nil {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.credentialSweeper.Stop(stopCtx); err != nil {
+			s.logger.Warn("Failed to stop credential expiry sweep", "error", err)
+		}
+		stopCancel()
+	}
+	if s.egTenantSyncSweeper != nil {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.egTenantSyncSweeper.Stop(stopCtx); err != nil {
+			s.logger.Warn("Failed to stop entity graph tenant-sync sweep", "error", err)
+		}
+		stopCancel()
+	}
+	if s.egCorrelatorSweeper != nil {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.egCorrelatorSweeper.Stop(stopCtx); err != nil {
+			s.logger.Warn("Failed to stop entity graph correlator sweep", "error", err)
+		}
+		stopCancel()
+	}
+
+	// Close entity graph provider — releases the SQLite or Postgres connection
+	// so temp-directory cleanup succeeds on Windows (Issue #3253).
+	if s.egProvider != nil {
+		if err := s.egProvider.Close(); err != nil {
+			s.logger.Warn("Failed to close entity graph provider", "error", err)
+		}
+	}
+
+	// Close session store — releases the connection so temp-directory cleanup
+	// succeeds on Windows (Issue #2774). MemStore.Close() has no error return while
+	// SQLiteSessionTokenStore and DatabaseSessionTokenStore do — use a type switch
+	// since the concrete Close signatures do not unify into a shared interface.
+	if s.sessionStore != nil {
+		switch st := s.sessionStore.(type) {
+		case *session.MemStore:
+			st.Close()
+		case *sqliteprovider.SQLiteSessionTokenStore:
+			if err := st.Close(); err != nil {
+				s.logger.Warn("Failed to close session store", "error", err)
+			}
+		case *dbprovider.DatabaseSessionTokenStore:
+			if err := st.Close(); err != nil {
+				s.logger.Warn("Failed to close session store", "error", err)
+			}
+		}
+	}
+
+	// Drain in-flight webhook-triggered syncs before closing storage (Issue #681).
+	// WaitForPendingSyncs must run before storageManager.Close() because webhook
+	// sync goroutines write to the config store.
+	if s.webhookHandler != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		s.webhookHandler.WaitForPendingSyncs(ctx)
+	}
+
+	// Stop git-sync syncer — cancels polling goroutines (Issue #666).
+	// Must also run before storageManager.Close().
+	if s.gitSyncer != nil {
+		s.gitSyncer.Stop()
+		s.logger.Info("git-sync syncer stopped")
+	}
+
+	// Stop periodic git-sourced tenant config sync (Issue #4408). Cancels the
+	// context Start() passed to Run, then waits for every per-tenant polling
+	// goroutine to drain. Must also run before storageManager.Close(): the sync
+	// goroutines read the tenant store and the config router on every tick.
+	if s.configSyncService != nil {
+		if s.configSyncCancel != nil {
+			s.configSyncCancel()
+		}
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.configSyncService.Stop(stopCtx); err != nil {
+			s.logger.Warn("Failed to stop config source sync service", "error", err)
+		}
+		stopCancel()
+	}
+
+	// Stop the signing-retirement sweep before the cert manager it reads is closed.
+	if s.signingRetirementSvc != nil {
+		s.signingRetirementSvc.Stop()
+	}
+	if s.signingMigrationSvc != nil {
+		s.signingMigrationSvc.Stop()
+	}
+	if s.stewardMigrationSvc != nil {
+		s.stewardMigrationSvc.Stop()
+	}
+
+	// Release the cert manager's retained vault connection (cluster mode): the
+	// shared signing-key store reads through it for the Manager's whole lifetime
+	// (Issue #4689). Runs after every component that signs has stopped.
+	if s.certManager != nil {
+		if err := s.certManager.Close(); err != nil {
+			s.logger.Warn("Failed to close certificate manager secret store", "error", logging.SanitizeLogValue(err.Error()))
+		}
+	}
+
+	// Flush and close the steward-event manager (Issue #4857) so buffered steward
+	// log entries are persisted. Runs after the transport/API stopped writing.
+	if s.stewardEventManager != nil {
+		if err := closeStewardEventManager(s.stewardEventManager); err != nil {
+			s.logger.Warn("Failed to flush and close steward event manager", "error", logging.SanitizeLogValue(err.Error()))
+		}
+	}
+
+	// Close the directory manager (Issue #5431) before the secret store its
+	// providers read credentials from.
+	if s.directoryManager != nil {
+		if err := s.directoryManager.Close(context.Background()); err != nil {
+			s.logger.Warn("Failed to close directory manager", "error", logging.SanitizeLogValue(err.Error()))
+		}
+	}
+
+	// Close the dedicated config-router secret store (Issue #4408) — a separate
+	// instance from httpServer's own, which api.Server.Close releases below.
+	if s.routerSecretStore != nil {
+		if err := s.routerSecretStore.Close(); err != nil {
+			s.logger.Warn("Failed to close config router secret store", "error", err)
+		}
+	}
+
+	// Close the REST API server — releases the public HTTPS listener and the
+	// private metrics listener it owns.
+	//
+	// The metrics listener binds a FIXED port: ValidatePrivateListenerAddress
+	// rejects port 0 so a private listener can never land somewhere unpredictable.
+	// Leaking it therefore breaks the next Start with "address already in use",
+	// where the public listener hid the same leak by taking an OS-assigned port
+	// and silently rebinding elsewhere.
+	//
+	// Runs after the managers that serve requests have stopped and before the
+	// storage manager closes: api.Server.Close also releases the secret store and
+	// nonce cache, which the audit drain above still needs.
+	if s.httpServer != nil {
+		apiCtx, apiCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.httpServer.Close(apiCtx); err != nil {
+			s.logger.Warn("Failed to close REST API server", "error", err)
+		}
+		apiCancel()
+	}
+
+	// Close main storage manager — releases flatfile + SQLite store handles so
+	// temp-directory cleanup succeeds on Windows. Must run after managers that
+	// use the stores have stopped.
+	if s.storageManager != nil {
+		if err := s.storageManager.Close(); err != nil {
+			s.logger.Warn("Failed to close storage manager", "error", err)
+		}
+	}
+
+	// Stop HTTP server
+	if s.httpServer != nil {
+		if err := s.httpServer.Stop(); err != nil {
+			s.logger.Warn("Failed to stop HTTP server", "error", err)
+		}
+	}
+
+	return nil
+}
+
+// pushStoreRequirements declares the storage dependency for the push-resumption
+// subsystem. Push resumption re-delivers interrupted push operations on leader
+// startup and cannot query or update delivery records without a durable store.
+var pushStoreRequirements = []interfaces.StoreRequirement{
+	{Subsystem: "push", Store: interfaces.StoreNamePush, Severity: interfaces.RequirementRequired},
+}
+
+// resumePendingPushes is called on leader startup to re-deliver any push
+// operations that were recorded as in_progress before the previous leader
+// stopped. It unmarshals the stored StewardConfiguration blob and calls
+// push.Fanout for each pending record, updating the final status on completion.
+func (s *Server) resumePendingPushes(ctx context.Context) {
+	if s.storageManager == nil || s.commandPublisher == nil {
+		return
+	}
+	pushStore := s.storageManager.GetPushStore()
+	if pushStore == nil {
+		return
+	}
+	records, err := pushStore.GetPendingPushes(ctx)
+	if err != nil {
+		s.logger.Error("Failed to load pending pushes for leader resume", "error", err)
+		return
+	}
+	if len(records) == 0 {
+		return
+	}
+	s.logger.Info("Resuming pending push operations after leader election", "count", len(records))
+	for _, record := range records {
+		var cfg push.StewardConfiguration
+		if err := json.Unmarshal(record.Data, &cfg); err != nil {
+			s.logger.Error("Failed to unmarshal push data for resume; marking failed",
+				"push_id", record.ID, "error", err)
+			if updateErr := pushStore.UpdatePushStatus(ctx, record.ID, business.PushStatusFailed); updateErr != nil {
+				s.logger.Warn("Failed to mark push as failed after unmarshal error",
+					"push_id", record.ID, "error", updateErr)
+			}
+			continue
+		}
+		// Fail closed: a record with no stored target set (including one written
+		// before targets were persisted) is never fanned out fleet-wide.
+		if len(record.TargetStewardIDs) == 0 {
+			s.logger.Error("Pending push has no stored target stewards; marking failed without delivery",
+				"push_id", logging.SanitizeLogValue(record.ID))
+			if updateErr := pushStore.UpdatePushStatus(ctx, record.ID, business.PushStatusFailed); updateErr != nil {
+				s.logger.Warn("Failed to mark push as failed after missing targets",
+					"push_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(updateErr.Error()))
+			}
+			continue
+		}
+		allowed := make(map[string]struct{}, len(record.TargetStewardIDs))
+		for _, id := range record.TargetStewardIDs {
+			allowed[id] = struct{}{}
+		}
+		// Fleet-wide read (a resumed push has no caller of its own, Issue #4665),
+		// narrowed to the set the original caller was authorized for.
+		var stewards []*service.StewardInfo
+		for _, st := range s.controllerService.ListFleetStewards(ctxkeys.WithSystem(ctx)) {
+			if _, ok := allowed[st.ID]; ok {
+				stewards = append(stewards, st)
+			}
+		}
+		result := push.Fanout(ctx, &cfg, stewards, s.commandPublisher, s.logger)
+		s.logger.Info("Resumed push fan-out complete",
+			"push_id", record.ID,
+			"succeeded", len(result.Succeeded),
+			"failed", len(result.Failed))
+		finalStatus := business.PushStatusCompleted
+		if len(result.Failed) > 0 && len(result.Succeeded) == 0 {
+			finalStatus = business.PushStatusFailed
+		}
+		if updateErr := pushStore.UpdatePushStatus(ctx, record.ID, finalStatus); updateErr != nil {
+			s.logger.Warn("Failed to update push record status after resume",
+				"push_id", record.ID, "error", updateErr)
+		}
+	}
+}
+
+// GetConfigurationService returns the configuration service instance
+func (s *Server) GetConfigurationService() *service.ConfigurationServiceV2 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.configService
+}
+
+// GetListenAddr returns the actual listen address after binding
+func (s *Server) GetListenAddr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.ListenAddr
+}
+
+// GetCertificateManager returns the certificate manager instance
+func (s *Server) GetCertificateManager() *cert.Manager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.certManager
+}
+
+// GetHealthTraceManager returns the request trace manager backing
+// GET /api/v1/health/trace/{request_id} (Issue #4208). Exposed for integration
+// tests that need to seed a trace directly; nil when health collectors were not
+// initialized (see the health collector setup block in New).
+func (s *Server) GetHealthTraceManager() *health.DefaultTraceManager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.healthTraceManager
+}
+
+// GetSignerCertSerial returns the signer certificate serial (Story #378)
+func (s *Server) GetSignerCertSerial() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.signerCertSerial
+}
+
+// GetCertificateProvisioningService returns the certificate provisioning service instance
+func (s *Server) GetCertificateProvisioningService() *service.CertificateProvisioningService {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.certProvisioningService
+}
+
+// GetControllerService returns the controller service instance
+func (s *Server) GetControllerService() *service.ControllerService {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.controllerService
+}
+
+// GetRBACService returns the RBAC service instance
+func (s *Server) GetRBACService() *service.RBACService {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.rbacService
+}
+
+// GetTenantManager returns the tenant manager instance
+func (s *Server) GetTenantManager() *tenant.Manager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.tenantManager
+}
+
+// GetAuditManager returns the audit manager instance
+func (s *Server) GetAuditManager() *audit.Manager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.auditManager
+}
+
+// GetRBACManager returns the RBAC manager instance
+func (s *Server) GetRBACManager() *rbac.Manager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.rbacManager
+}
+
+// GetHAManager returns the HA manager instance
+func (s *Server) GetHAManager() *ha.Manager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.haManager
+}
+
+// GetRegistrationTokenStore returns the registration token store
+func (s *Server) GetRegistrationTokenStore() pkgRegistration.Store {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.registrationTokenStore
+}
+
+// GetConfigStore returns the controller's config store (Issue #1527: used to verify built-in workflow seeding in tests).
+func (s *Server) GetConfigStore() cfgconfig.ConfigStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.storageManager.GetConfigStore()
+}
+
+// GetHTTPListenAddr returns the HTTP API server's listen address after binding.
+func (s *Server) GetHTTPListenAddr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.httpServer != nil {
+		return s.httpServer.GetListenAddr()
+	}
+	return ""
+}
+
+// loadExistingCertificateManager loads the certificate manager from an existing CA.
+// Unlike the old initializeCertificateManager, this never creates a new CA — that
+// responsibility belongs to `controller --init` (initialization.Run).
+func loadExistingCertificateManager(cfg *config.Config, storageManager *interfaces.StorageManager, logger logging.Logger) (*cert.Manager, error) {
+	// StoragePath must be the parent of the "ca/" subdirectory; NewManager always derives
+	// the real CA directory as filepath.Join(StoragePath,"ca").
+	certPath := filepath.Dir(filepath.Clean(cfg.Certificate.CAPath))
+
+	// Cluster-mode CA: the private key lives only in the shared OpenBao vault
+	// (cert.NewManagerFromSecretStore never writes it to local disk), so it must
+	// be re-fetched from the vault on every regular startup, not just --init.
+	// Without this branch, cert.NewManager's LoadExistingCA path below would try
+	// (and fail) to read a local ca.key that a cluster-mode node never has.
+	// storageManager also supplies the cluster-visible revocation/signing-cursor
+	// stores (ADR-031 Decision 1, Issue #3852 AC3).
+	if err := initialization.RequireClusterCAConfig(cfg); err != nil {
+		return nil, err
+	}
+	if initialization.UsesClusterCA(cfg) {
+		manager, err := initialization.BuildClusterCertManager(context.Background(), cfg, certPath, storageManager, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load cluster CA from vault: %w", err)
+		}
+		logger.Info("Loaded cluster Certificate Authority from vault", "vault_key_path", cfg.Certificate.ClusterCA.VaultKeyPath)
+		return manager, nil
+	}
+
+	managerCfg := &cert.ManagerConfig{
+		StoragePath:          certPath,
+		LoadExistingCA:       true,
+		EnableAutoRenewal:    cfg.Certificate.EnableCertManagement,
+		RenewalThresholdDays: cfg.Certificate.RenewalThresholdDays,
+	}
+
+	// Single node: the config-signing key is held in the configured secret store,
+	// never in the node-local certificate directory.
+	secretStore, err := api.NewSecretStore(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open secret store for signing key custody: %w", err)
+	}
+	if err := initialization.WireSingleNodeSigningKeyStore(managerCfg, cfg, secretStore); err != nil {
+		_ = secretStore.Close()
+		return nil, err
+	}
+
+	manager, err := cert.NewManager(managerCfg)
+	if err != nil {
+		_ = secretStore.Close()
+		return nil, fmt.Errorf("failed to load existing CA from %s: %w", cfg.Certificate.CAPath, err)
+	}
+	manager.AttachCloser(secretStore)
+	logger.Info("Loaded existing Certificate Authority", "ca_path", cfg.Certificate.CAPath)
+
+	return manager, nil
+}
+
+// Signing identity adoption audit actions.
+const (
+	auditSigningIdentityAdopted        = "signing_identity_adopted"
+	auditSigningIdentityAdoptionRefuse = "signing_identity_adoption_refused"
+	auditSigningIdentityKeyRemoved     = "signing_identity_local_key_removed"
+)
+
+// adoptSingleNodeSigningIdentity runs cert.Manager.AdoptLocalSigningIdentity,
+// logs the outcome and records an audit event per adopted, refused and removed
+// serial. Serials and reasons only: never PEM or key bytes. A nil auditManager
+// skips the audit events. Failure is logged, never returned: the controller keeps
+// signing with its local key and tries again on the next start.
+func adoptSingleNodeSigningIdentity(ctx context.Context, certManager *cert.Manager, auditManager *audit.Manager, logger logging.Logger) {
+	if certManager == nil {
+		return
+	}
+	result, err := certManager.AdoptLocalSigningIdentity(ctx)
+	if err != nil {
+		logger.Warn("Signing identity adoption failed; continuing with the local signing key",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+	if result == nil {
+		return
+	}
+	for _, serial := range result.AdoptedSerials {
+		logger.Info("Adopted local signing identity into the secret store", "serial", logging.SanitizeLogValue(serial))
+		recordSigningAdoptionAudit(ctx, auditManager, logger, auditSigningIdentityAdopted, serial, "", business.AuditResultSuccess)
+	}
+	for _, refusal := range result.RefusedSerials {
+		logger.Warn("Refused to adopt local signing certificate; the local key is kept",
+			"serial", logging.SanitizeLogValue(refusal.Serial),
+			"reason", logging.SanitizeLogValue(refusal.Reason))
+		recordSigningAdoptionAudit(ctx, auditManager, logger, auditSigningIdentityAdoptionRefuse, refusal.Serial, refusal.Reason, business.AuditResultFailure)
+	}
+	for _, serial := range result.RemovedKeySerials {
+		logger.Info("Removed local signing key after verified adoption", "serial", logging.SanitizeLogValue(serial))
+		recordSigningAdoptionAudit(ctx, auditManager, logger, auditSigningIdentityKeyRemoved, serial, "", business.AuditResultSuccess)
+	}
+}
+
+func recordSigningAdoptionAudit(ctx context.Context, auditManager *audit.Manager, logger logging.Logger, action, serial, reason string, result business.AuditResult) {
+	if auditManager == nil {
+		return
+	}
+	details := map[string]interface{}{"serial": logging.SanitizeLogValue(serial)}
+	if reason != "" {
+		details["reason"] = logging.SanitizeLogValue(reason)
+	}
+	b := audit.NewEventBuilder().
+		Tenant(audit.SystemTenantID).
+		Type(business.AuditEventSecurityEvent).
+		Action(action).
+		User(audit.SystemUserID, business.AuditUserTypeSystem).
+		Resource("signing_certificate", logging.SanitizeLogValue(serial), "").
+		Result(result).
+		Severity(business.AuditSeverityHigh).
+		Details(details)
+	if err := auditManager.RecordEvent(ctx, b); err != nil {
+		logger.Warn("Failed to record signing adoption audit event",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+func validatePublicBetaControllerRoots(manager *cert.Manager, now time.Time) error {
+	caPEM, err := manager.GetCACertificate()
+	if err != nil {
+		return fmt.Errorf("load controller CA: %w", err)
+	}
+	remaining := caPEM
+	validRoots := 0
+	for {
+		block, rest := pem.Decode(remaining)
+		if block == nil {
+			break
+		}
+		remaining = rest
+		if block.Type != "CERTIFICATE" {
+			return fmt.Errorf("controller CA contains unexpected PEM block %q", block.Type)
+		}
+		root, parseErr := x509.ParseCertificate(block.Bytes)
+		if parseErr != nil {
+			return fmt.Errorf("parse controller CA certificate: %w", parseErr)
+		}
+		if !root.IsCA || !root.BasicConstraintsValid || root.KeyUsage&x509.KeyUsageCertSign == 0 {
+			return fmt.Errorf("controller root %q is not a certificate authority", root.Subject.CommonName)
+		}
+		if now.Before(root.NotBefore) || now.After(root.NotAfter) {
+			return fmt.Errorf("controller root %q is not currently valid", root.Subject.CommonName)
+		}
+		validRoots++
+	}
+	if strings.TrimSpace(string(remaining)) != "" {
+		return fmt.Errorf("controller CA contains malformed trailing data")
+	}
+	if validRoots == 0 {
+		return fmt.Errorf("controller CA contains no valid certificate roots")
+	}
+	return nil
+}
+
+// wireClusterRateCounterStore hands the composed StorageManager's cluster-visible,
+// fixed-window rate-counter store to the API server, which uses it for the
+// per-source rate limiters and the operator-payload sign-ceremony throttle (Issue
+// #3896, ADR-031 Decision 1). This is what replaces Issue #3761's
+// clusterBudgetDivisor: with the store wired, a configured budget is enforced
+// against the fleet-wide count instead of against a per-process count scaled by the
+// live node count, which an adversary targeting a single node could defeat.
+//
+// It returns the store it handed over, or nil when it wired nothing — the return is
+// what makes this composition-root decision observable to a test, since the API
+// server's own SetRateCounterStore additionally declines the store outside
+// ha.ClusterMode.
+//
+// Nothing is wired when the running storage provider implements no
+// RateCounterStoreCreator (GetRateCounterStore returns nil), leaving every consumer
+// on its node-local in-memory counter — the single-node behaviour, unchanged.
+func wireClusterRateCounterStore(httpServer *api.Server, storageManager *interfaces.StorageManager) business.RateCounterStore {
+	if httpServer == nil || storageManager == nil {
+		return nil
+	}
+	rcs := storageManager.GetRateCounterStore()
+	if rcs == nil {
+		return nil
+	}
+	httpServer.SetRateCounterStore(rcs)
+	return rcs
+}
+
+// initializeHAManager initializes the HA manager, transferring the deployment
+// mode from the YAML config before loading environment overrides. This ordering
+// is required because ha.NewManager calls Validate() before LoadFromEnvironment(),
+// and Validate() requires Node.ID for non-single modes; Node.ID comes exclusively
+// from CFGMS_NODE_ID (env), never from YAML. Pre-loading env here populates
+// Node.ID first so the subsequent NewManager call does not fail Validate().
+// CFGMS_HA_MODE env overrides YAML (env > YAML precedence) via the re-run inside NewManager.
+// In ClusterMode the manager's leadership authority and command fencing token come
+// from the database lease (ADR-031 Decision 5), so this function verifies the
+// storage tier supplies a lease store *whose substrate every node shares* before
+// ha.NewManager wires it. Both halves are startup preconditions:
+//
+//   - No lease store at all is a disabled control, not a degraded one:
+//     HasLeadership() would be false forever and every outbound command would carry
+//     fencing token 0.
+//   - A node-local lease store (per-node SQLite file, per-node flat file) is worse
+//     than none, because it fails open. Each node would acquire the cluster
+//     leadership lease against its own database, all of them reporting
+//     HasLeadership() == true with independent token sequences starting at 1 — the
+//     singleton claim and the command fence both silently off. Only the shared
+//     cluster (Postgres) tier can carry the lease, which is why the check is
+//     business.LeaseStoreIsNodeShared rather than a non-nil test.
+//
+// Other non-single modes (blue-green) run the node-local storage tier and therefore
+// have no shared substrate to arbitrate on. ha.Manager gives them no lease-backed
+// authority at all (HasLeadership() stays false, leader-gated mutating endpoints
+// stay closed); this function logs that consequence at startup so it is visible to
+// the operator rather than discovered as unexplained 503s.
+func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager) (*ha.Manager, error) {
+	haConfig := ha.DefaultConfig()
+
+	if cfg != nil && cfg.HA != nil && cfg.HA.Mode != "" {
+		mode, err := ha.ModeFromString(cfg.HA.Mode)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ha.mode in config: %w", err)
+		}
+		haConfig.Mode = mode
+	}
+
+	if err := haConfig.LoadFromEnvironment(); err != nil {
+		return nil, fmt.Errorf("failed to load HA configuration from environment: %w", err)
+	}
+
+	switch haConfig.Mode {
+	case ha.ClusterMode:
+		// The lease is wired by ha.NewManager from storageManager. Check the
+		// precondition here so the failure names the storage tier the operator has
+		// to change, rather than surfacing later as Start() refusing to run.
+		var leaseStore business.LeaseStore
+		providerName := "<none>"
+		if storageManager != nil {
+			leaseStore = storageManager.GetLeaseStore()
+			providerName = storageManager.GetProviderName()
+		}
+		if leaseStore == nil {
+			return nil, fmt.Errorf(
+				"ha.mode %q requires a leadership lease store for command fencing, but storage provider %q supplies none; use the cluster (Postgres) storage tier (ADR-031 Decision 5)",
+				haConfig.GetModeString(), providerName)
+		}
+		if !business.LeaseStoreIsNodeShared(leaseStore) {
+			return nil, fmt.Errorf(
+				"ha.mode %q requires a leadership lease held in the database every node shares, but storage provider %q supplies a node-local lease store; each node would hold its own copy of the cluster leadership lease and mint its own fencing tokens. Configure storage.cluster.postgres_dsn so the cluster (Postgres) storage tier is used (ADR-031 Decision 5)",
+				haConfig.GetModeString(), providerName)
+		}
+	case ha.SingleServerMode:
+		// No lease: one node, no peer to exclude (ADR-029 Decision 4).
+	default:
+		logger.Warn("HA mode has no shared lease substrate: leadership authority is unavailable",
+			"ha_mode", haConfig.GetModeString(),
+			"consequence", "HasLeadership() is false on every node, so leader-gated mutating endpoints refuse requests and outbound commands carry no fencing token",
+			"remedy", "use ha.mode cluster with storage.cluster.postgres_dsn for a deployment that must serve mutating traffic from more than one node")
+	}
+
+	haManager, err := ha.NewManager(haConfig, logger, storageManager)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HA manager: %w", err)
+	}
+	return haManager, nil
+}
+
+// buildGRPCControlPlaneTLSConfig creates TLS configuration for the gRPC control plane provider.
+// Uses GetCurrentCertForPurpose(PurposeTransport) to resolve the InternalServer certificate.
+// EnsureSeparatedCertificates guarantees the cert exists before this function is called.
+func buildGRPCControlPlaneTLSConfig(cfg *config.Config, certManager *cert.Manager, logger logging.Logger) (*tls.Config, error) {
+	serverCert, err := certManager.GetCurrentCertForPurpose(cert.PurposeTransport)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load gRPC control plane transport certificate: %w", err)
+	}
+	logger.Info("gRPC control plane using transport certificate", "serial", serverCert.SerialNumber)
+
+	caCertPEM, err := certManager.GetCACertificate()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get CA certificate for gRPC control plane: %w", err)
+	}
+
+	// Build mTLS server config using pkg/cert helper
+	tlsConfig, err := cert.CreateServerTLSConfig(serverCert.CertificatePEM, serverCert.PrivateKeyPEM, caCertPEM, tls.VersionTLS13)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gRPC control plane TLS config: %w", err)
+	}
+
+	// Set gRPC-over-QUIC ALPN (distinguishes control plane from data plane on same port)
+	tlsConfig.NextProtos = []string{quictransport.ALPNProtocol}
+
+	logger.Info("gRPC control plane TLS config created", "alpn", quictransport.ALPNProtocol)
+	return tlsConfig, nil
+}
+
+// handleEventFromProvider processes events from stewards via the ControlPlaneProvider.
+// Story #363: Unified event handler replaces separate DNA/config-status/validation handlers.
+// Events are received on the new topic pattern: cfgms/events/{steward_id}
+func (s *Server) handleEventFromProvider(ctx context.Context, event *controlplaneTypes.Event) error {
+	switch event.Type {
+	case controlplaneTypes.EventDNAChanged:
+		return s.handleDNAEvent(ctx, event)
+	case controlplaneTypes.EventConfigApplied:
+		return s.handleConfigAppliedEvent(ctx, event)
+	case controlplaneTypes.EventObserveSweepRequest:
+		return s.handleObserveSweepRequest(ctx, event)
+	default:
+		// Log unhandled event types for debugging
+		s.logger.Debug("Received event from steward",
+			"steward_id", logging.SanitizeLogValue(event.StewardID),
+			"event_type", logging.SanitizeLogValue(string(event.Type)),
+			"event_id", logging.SanitizeLogValue(event.ID))
+	}
+	return nil
+}
+
+// handleDNAEvent processes DNA change events from stewards.
+// Story #363: Replaces handleDNAUpdate which used direct topic subscription.
+// Issue #3330: re-homed from flat attribute delta to fragment-based payload.
+func (s *Server) handleDNAEvent(ctx context.Context, event *controlplaneTypes.Event) error {
+	s.logger.Info("Received DNA change event",
+		"steward_id", logging.SanitizeLogValue(event.StewardID),
+		"event_id", logging.SanitizeLogValue(event.ID))
+
+	// Extract DNA data from event details
+	dna := &common.DNA{
+		Id:          event.StewardID,
+		LastUpdated: timestamppb.New(event.Timestamp),
+	}
+
+	// Extract fragment list from event details. The payload is a protojson-encoded
+	// JSON array string produced by the steward's marshalFragmentsToJSONString —
+	// the transport envelope round-trips it as []interface{} via encoding/json, so
+	// we re-marshal to bytes and protojson-unmarshal each element back. (Issue #3330)
+	if details := event.Details; details != nil {
+		if rawDNA, ok := details["dna"]; ok {
+			frags, fragErr := extractFragmentsFromDetails(rawDNA)
+			if fragErr != nil {
+				s.logger.Warn("Failed to extract fragment list from DNA event; skipping DNA field",
+					"steward_id", logging.SanitizeLogValue(event.StewardID),
+					"error", logging.SanitizeLogValue(fragErr.Error()))
+			} else {
+				dna.Fragments = frags
+				// Fragments are the sole DNA payload this path builds (Issue #3330).
+				// The flat attribute map is deliberately NOT rebuilt here: every
+				// controller consumer of this record projects it from the fragments
+				// themselves via service.FlattenDNAFragments (fleet inventory and
+				// attribute filters in features/controller/api, the cluster hostname
+				// lookup in handlers_clusters.go, and the DNA fingerprint below).
+				// AttributeCount is still derived because re-registration change
+				// detection compares it (features/controller/service).
+				attrCount := len(service.FlattenDNAFragments(frags))
+				if attrCount <= math.MaxInt32 {
+					// #nosec G115 -- explicitly bounded above
+					dna.AttributeCount = int32(attrCount)
+				}
+			}
+		}
+		if hash, ok := details["config_hash"].(string); ok {
+			dna.ConfigHash = hash
+		}
+		if fp, ok := details["sync_fingerprint"].(string); ok {
+			dna.SyncFingerprint = fp
+		}
+	}
+
+	// Update DNA in controller service
+	status, err := s.controllerService.SyncDNA(ctx, dna)
+	if err != nil {
+		s.logger.Error("Failed to sync DNA",
+			"steward_id", logging.SanitizeLogValue(event.StewardID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return fmt.Errorf("failed to sync DNA: %w", err)
+	}
+
+	if status.Code != common.Status_OK {
+		s.logger.Warn("DNA sync returned non-OK status",
+			"steward_id", logging.SanitizeLogValue(event.StewardID),
+			"status_code", status.Code,
+			"message", status.Message)
+	} else {
+		s.logger.Info("DNA synced successfully",
+			"steward_id", logging.SanitizeLogValue(event.StewardID))
+	}
+
+	return nil
+}
+
+// extractFragmentsFromDetails decodes the "dna" value from a DNA change event's
+// Details map into a []*common.Fragment slice.
+//
+// The steward pre-marshals fragments with protojson into a JSON array string.
+// The control-plane transport envelope's encoding/json pass decodes that string
+// back to []interface{} via stringMapToInterfaceMap, so this function
+// re-marshals the decoded value to bytes and protojson-unmarshals each element.
+// Fragments that fail to unmarshal are skipped rather than failing the whole
+// extraction — a compromised steward must not block a valid fragment set.
+func extractFragmentsFromDetails(raw interface{}) ([]*common.Fragment, error) {
+	payloadBytes, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("re-marshal fragment payload: %w", err)
+	}
+	var elems []json.RawMessage
+	if err := json.Unmarshal(payloadBytes, &elems); err != nil {
+		return nil, fmt.Errorf("unmarshal fragment array: %w", err)
+	}
+	frags := make([]*common.Fragment, 0, len(elems))
+	for _, elem := range elems {
+		frag := &common.Fragment{}
+		if err := protojson.Unmarshal(elem, frag); err != nil {
+			continue // skip malformed fragments; hostile input must not blank the set
+		}
+		frags = append(frags, frag)
+	}
+	return frags, nil
+}
+
+// handleConfigAppliedEvent processes configuration applied events from stewards.
+// Story #363: Replaces handleConfigStatusReport which used direct topic subscription.
+// Issue #3375: adds entity-graph ingestion of apply-outcome records via ReportObservations.
+func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlplaneTypes.Event) error {
+	s.logger.Info("Received config applied event",
+		"steward_id", logging.SanitizeLogValue(event.StewardID),
+		"event_id", logging.SanitizeLogValue(event.ID))
+
+	// Extract config status details from event
+	if details := event.Details; details != nil {
+		configVersion, _ := details["config_version"].(string)
+		overallStatus, _ := details["status"].(string)
+
+		s.logger.Info("Configuration status report",
+			"steward_id", logging.SanitizeLogValue(event.StewardID),
+			"config_version", logging.SanitizeLogValue(configVersion),
+			"overall_status", logging.SanitizeLogValue(overallStatus))
+
+		// Log module details if present (existing behaviour — unchanged).
+		if modules, ok := details["modules"].(map[string]interface{}); ok {
+			for moduleName, moduleData := range modules {
+				if moduleMap, ok := moduleData.(map[string]interface{}); ok {
+					moduleStatus, _ := moduleMap["status"].(string)
+					moduleMessage, _ := moduleMap["message"].(string)
+					s.logger.Info("Module status",
+						"steward_id", logging.SanitizeLogValue(event.StewardID),
+						"module", logging.SanitizeLogValue(moduleName),
+						"status", logging.SanitizeLogValue(moduleStatus),
+						"message", logging.SanitizeLogValue(moduleMessage))
+				}
+			}
+		}
+
+		// Ingest per-resource apply-outcome records into the entity graph (Issue #3375).
+		// apply_outcomes arrives as []interface{} of map[string]interface{} after the
+		// Event.Details JSON round-trip through interfaceMapToStringMap/stringMapToInterfaceMap.
+		// Decode defensively — same approach as the "modules" branch above.
+		if s.egProvider != nil {
+			if err := s.ingestApplyOutcomes(ctx, event.StewardID, configVersion, details); err != nil {
+				// Log and continue: a write failure here must not prevent the event from
+				// being acknowledged. The next apply cycle will produce fresh records.
+				s.logger.Error("Failed to ingest apply-outcome records",
+					"steward_id", logging.SanitizeLogValue(event.StewardID),
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
+		}
+	}
+
+	// TODO: Store status report in database/audit log for MSP admin visibility
+
+	return nil
+}
+
+// maxApplyOutcomeRecordsPerEvent bounds how many apply-outcome records a single
+// config_applied event may contribute. details["apply_outcomes"] carries no length
+// limit on the wire and every record costs an entity-graph read plus an observation
+// write, so one peer must not be able to size the controller's work per event
+// (CLAUDE.md threat model: stewards run on hosts that may be compromised). A steward
+// that legitimately applies more resources than this in one cycle reports the
+// remainder on its next cycle; the records are additive, so nothing is lost
+// permanently.
+const maxApplyOutcomeRecordsPerEvent = 1000
+
+// ingestApplyOutcomes decodes apply_outcomes from event details and writes one
+// ObservationKindApplyOutcome observation per record into the entity graph.
+//
+// EID resolution is cluster-aware (Issue #3376): a record lands under
+// cluster:<clusterName>/<resourceID> — the EID form used by entity-state (#3367) — when
+// a cluster-membership verifier corroborates the peer's cluster independently of the
+// peer's own claim AND the graph already holds cluster-scoped entity state for that
+// exact resource. Otherwise the record falls back to
+// host:<peerHostAuthority>/<resourceID>. Resolution is delegated to
+// dnasync.ResolveSubjectEID so both record types share one gate; the gates and their
+// rationale are documented on applyOutcomeEIDResolver.
+//
+// The record list is steward-supplied and unbounded on the wire, so it is capped at
+// maxApplyOutcomeRecordsPerEvent before any per-record work is done.
+func (s *Server) ingestApplyOutcomes(ctx context.Context, peerHostAuthority, configVersion string, details map[string]interface{}) error {
+	rawOutcomes, ok := details["apply_outcomes"].([]interface{})
+	if !ok || len(rawOutcomes) == 0 {
+		return nil
+	}
+	if len(rawOutcomes) > maxApplyOutcomeRecordsPerEvent {
+		s.logger.Warn("ingestApplyOutcomes: apply_outcomes exceeds per-event cap; truncating",
+			"steward_id", logging.SanitizeLogValue(peerHostAuthority),
+			"received", len(rawOutcomes),
+			"cap", maxApplyOutcomeRecordsPerEvent)
+		rawOutcomes = rawOutcomes[:maxApplyOutcomeRecordsPerEvent]
+	}
+
+	now := time.Now().UTC()
+	var observations []egtypes.Observation
+
+	// One resolver per event: cluster membership is a property of the peer, so the
+	// membership query is performed at most once no matter how many records arrive.
+	resolver := s.newApplyOutcomeEIDResolver(peerHostAuthority)
+
+	for _, rawRec := range rawOutcomes {
+		rec, ok := rawRec.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		resourceID, _ := rec["resource_id"].(string)
+		if resourceID == "" {
+			continue
+		}
+		moduleName, _ := rec["module_name"].(string)
+		status, _ := rec["status"].(string)
+		errDetail, _ := rec["error"].(string)
+
+		// Resolve observed timestamp; fall back to now when absent or unparseable.
+		observedAt := now
+		if tsStr, _ := rec["timestamp"].(string); tsStr != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, tsStr); err == nil {
+				observedAt = parsed.UTC()
+			}
+		}
+
+		eid, err := resolver.resolveApplyOutcomeEID(ctx, resourceID)
+		if err != nil {
+			s.logger.Warn("ingestApplyOutcomes: skipping record with invalid resource_id",
+				"steward_id", peerHostAuthority,
+				"resource_id", logging.SanitizeLogValue(resourceID),
+				"error", logging.SanitizeLogValue(err.Error()))
+			continue
+		}
+
+		payload := map[string]interface{}{
+			"status":         status,
+			"module_name":    moduleName,
+			"config_version": configVersion,
+		}
+		if errDetail != "" {
+			payload["error"] = errDetail
+		}
+
+		observations = append(observations, egtypes.Observation{
+			Source:     peerHostAuthority,
+			ObservedAt: observedAt,
+			RecordedAt: now,
+			Subject:    eid.String(),
+			Kind:       egtypes.ObservationKindApplyOutcome,
+			Confidence: egtypes.ConfidenceHigh,
+			Payload:    payload,
+		})
+	}
+
+	if len(observations) == 0 {
+		return nil
+	}
+
+	batch := eginterfaces.ObservationBatch{
+		Source:       peerHostAuthority,
+		Observations: observations,
+	}
+	return s.egProvider.ReportObservations(ctx, batch)
+}
+
+// SetEntityGraphClusterMembership wires the controller-side verifier that decides
+// which cluster names may become an EID authority segment for a given steward
+// (dnasync.ClusterMembership).
+//
+// The same verifier instance MUST be given to the DNA-sync entity-graph writer
+// (dnasync.WithClusterMembership). Both record types for one resource are then gated
+// by one answer, so an apply-outcome can never be filed under a cluster authority that
+// entity-state does not also use.
+//
+// Leaving it unset denies every cluster claim. That is the safe state and it keeps the
+// two paths in agreement: both resolve host-scoped.
+// Deferred: tracked in #2853 — supply this verifier, and the DNA-sync writer that
+// shares it, from controller start-up.
+func (s *Server) SetEntityGraphClusterMembership(m dnasync.ClusterMembership) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.egClusterMembership = m
+}
+
+// entityGraphClusterMembership returns the wired cluster-membership verifier, or nil
+// when none is configured (in which case every cluster claim is denied).
+func (s *Server) entityGraphClusterMembership() dnasync.ClusterMembership {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.egClusterMembership
+}
+
+// dnaClusterMembershipAdapter adapts the server's live cluster-membership verifier
+// to dnasync.ClusterMembership (Issue #4444).
+//
+// The DNA-sync entity-graph writer is built once, in New(), before any caller has
+// had a chance to wire a verifier via SetEntityGraphClusterMembership (deferred to
+// #2853). Capturing s.egClusterMembership directly at that point would freeze a nil
+// snapshot into the writer forever. This adapter instead reads
+// entityGraphClusterMembership() on every call, so the writer always consults
+// whatever verifier is currently wired — the same live-lookup behavior the
+// apply-outcome path (applyOutcomeEIDResolver) already relies on, and exactly what
+// SetEntityGraphClusterMembership's own doc comment requires: "The same verifier
+// instance MUST be given to the DNA-sync entity-graph writer."
+type dnaClusterMembershipAdapter struct {
+	server *Server
+}
+
+var _ dnasync.ClusterMembership = (*dnaClusterMembershipAdapter)(nil)
+
+// IsClusterMember implements dnasync.ClusterMembership.
+func (a *dnaClusterMembershipAdapter) IsClusterMember(peerHostAuthority, clusterName string) bool {
+	m := a.server.entityGraphClusterMembership()
+	if m == nil {
+		return false
+	}
+	return m.IsClusterMember(peerHostAuthority, clusterName)
+}
+
+// buildDNAEntityGraphWriter constructs the DNA-sync -> entity-graph writer wired
+// onto the DNA handler in Start() (Issue #4444, ADR-022 §9). It is a method rather
+// than inline construction so tests can build the exact writer production wiring
+// uses without booting the full server (see dna_entitygraph_wiring_test.go).
+//
+// The writer is built against s.egProvider and gated by dnaClusterMembershipAdapter
+// rather than a raw s.egClusterMembership snapshot — see that type's doc comment for
+// why a snapshot would be wrong here.
+func (s *Server) buildDNAEntityGraphWriter() (*dnasync.Writer, error) {
+	s.wireDirectoryDomainEffects()
+	return dnasync.New(s.egProvider,
+		dnasync.WithClusterMembership(&dnaClusterMembershipAdapter{server: s}),
+		dnasync.WithDirectoryAuthority(s.directoryAuthorityVerifier()))
+}
+
+// wireDNABulkLane wires the bulk lane onto dnaHandler (Issue #5554): the durable
+// per-steward bulk manifest, the signed command publisher, the per-object kind
+// allowlist, the directory membership sink and authority verifier, and the
+// heartbeat callback that carries dna_bulk_root. A missing dependency leaves the
+// lane off with a warning rather than half-wired: the handler is fail-closed
+// without any of them. The host lane stays off either way.
+func (s *Server) wireDNABulkLane(dnaHandler *controllerTransport.DNAHandler) {
+	if s.storageManager == nil || s.commandPublisher == nil || s.heartbeatService == nil {
+		s.logger.Warn("dna-sync: bulk lane not wired; per-object fragments will not sync")
+		return
+	}
+	cs := s.storageManager.GetConfigStore()
+	if cs == nil {
+		s.logger.Warn("dna-sync: bulk lane not wired; no config store for the bulk manifest")
+		return
+	}
+	store, err := controllerTransport.NewBulkManifestStore(cs)
+	if err != nil {
+		s.logger.Warn("dna-sync: bulk lane not wired", "error", logging.SanitizeLogValue(err.Error()))
+		return
+	}
+
+	var kinds controllerTransport.PerObjectKindLister
+	if lister, ok := s.observeManifestProvider.(controllerTransport.PerObjectKindLister); ok {
+		kinds = lister
+	}
+
+	var sink directory.MembershipSink
+	if s.configService != nil {
+		if owners := s.configService.DirectoryDomains(); owners != nil {
+			m, mErr := directory.NewMembership(cs, owners)
+			if mErr != nil {
+				s.logger.Warn("dna-sync: directory membership sink unavailable", "error", logging.SanitizeLogValue(mErr.Error()))
+			} else {
+				sink = m
+			}
+		}
+	}
+
+	dnaHandler.WithPartialSync(store, s.commandPublisher).
+		WithBulkLane(kinds, sink, s.directoryAuthorityVerifier())
+	s.heartbeatService.SetOnBulkRoot(dnaHandler.HandleHeartbeatBulkRoot)
+	s.logger.Info("Bulk-lane DNA sync wired (Issue #5554)")
+}
+
+// wireDNAEntityGraph chains the DNA-sync entity-graph write path onto dnaHandler
+// (Issue #4444). Extracted out of Start() so both the wiring itself and the "not
+// wired" branch are directly unit-testable.
+//
+// s.egDNAWriter is nil only when buildDNAEntityGraphWriter's error path in New()
+// was somehow bypassed (it cannot happen through normal construction, since New()
+// aborts startup on that error) — but WithEntityGraph's own contract is a silent
+// skip on a nil writer, and a configuration error that silently discards every DNA
+// observation must not also be silent about being misconfigured (that silence is
+// exactly how this issue went unnoticed). So this path still logs, once, at warning
+// level, rather than trusting that it can never be reached.
+func (s *Server) wireDNAEntityGraph(dnaHandler *controllerTransport.DNAHandler) {
+	if s.egDNAWriter == nil {
+		s.logger.Warn("dna-sync: entity-graph write path not wired; steward DNA will not reach the entity graph")
+		return
+	}
+	dnaHandler.WithEntityGraph(s.egDNAWriter, egtypes.DefaultTaxonomy())
+}
+
+// applyOutcomeEIDResolver resolves the entity-graph EID for the apply-outcome
+// records of ONE config_applied event from ONE mTLS-verified peer (Issue #3376).
+//
+// The EID is minted by dnasync.ResolveSubjectEID — the same function that mints
+// entity-state EIDs — so the two record types for one resource cannot disagree about
+// where the record belongs. A private copy of the cluster-redirect rule would drift and
+// file outcomes at an EID entity-state never uses.
+//
+// Three gates must all pass before a record leaves the host namespace:
+//
+//  1. Taxonomy. Only kinds a host authority may name (AuthorityClasses contains "host")
+//     are handed to the resolver. A resourceID such as "cluster:<name>" would otherwise
+//     take ResolveSubjectEID's bare cluster-kind branch, where the authority segment is
+//     the identifier itself — a value carried in the event being ingested. Those kinds
+//     are filed under the mTLS-verified peer instead, so nothing from the event can
+//     reach an authority segment (SE threat #1 — authority confusion).
+//
+//  2. Peer membership, corroborated independently of the asserting peer. The
+//     controller's tenant-scoped DNA registry supplies a CANDIDATE cluster name; its
+//     Members are built from cluster:<name> fragments carried in each steward's own DNA
+//     (features/controller/clusterregistry), and a steward can equally declare a
+//     cluster:<name> --contains--> host:<self> edge, so neither signal is more than the
+//     peer's own claim. The candidate becomes an authority segment only when the wired
+//     dnasync.ClusterMembership verifier — contractually required to answer from state
+//     the controller holds independently of the asserting peer — confirms it, and
+//     ResolveSubjectEID re-checks that verifier before minting the EID. With no verifier
+//     wired every candidate is denied, so a compromised steward that publishes a
+//     cluster:<victim> fragment cannot move its records into another cluster's (or,
+//     since cluster EIDs are not tenant-qualified, another tenant's) namespace — where
+//     they could never be retracted, apply-outcome observations carrying no ClaimScope.
+//     Membership is a property of the peer, so this is resolved at most once per event:
+//     the ingest loop must not scale controller-side lookups with a steward-supplied
+//     record count.
+//
+//  3. Per-resource cluster evidence. The entity graph must already hold a
+//     cluster:<name>/<resourceID> ENTITY for that exact resource, which only the dnasync
+//     writer's membership-gated cluster branch can have created (it requires that
+//     resource's OWN ha_role.cluster_name). Peer membership alone does not make a
+//     resource cluster-scoped: a cluster node also runs node-local VMs, and redirecting
+//     those would collapse same-named local VMs on two nodes onto one EID and leave the
+//     outcome pointing at an entity whose state lives elsewhere. Apply-outcome
+//     observations project into no entity table (sqlite/observations.go
+//     updateEntityProjection), so this evidence can never be manufactured by the
+//     apply-outcome path itself.
+//
+// Falling back to host:<peerHostAuthority>/<resourceID> is NOT an error. It is the
+// expected state for a standalone host, for a node-local resource on a cluster member,
+// and for a clustered resource whose entity state has not synced yet — the self-heal
+// ordering choice recorded in #3376.
+type applyOutcomeEIDResolver struct {
+	server            *Server
+	peerHostAuthority string
+	taxonomy          *egtypes.Taxonomy
+	membership        dnasync.ClusterMembership
+
+	// clusterName caches the verified cluster authority for this peer for the lifetime
+	// of one event; clusterLoaded distinguishes "not resolved yet" from "resolved, none
+	// verified", so a peer costs at most one registry pass per event and a record whose
+	// kind is not cluster-eligible costs none at all.
+	clusterName   string
+	clusterLoaded bool
+}
+
+// newApplyOutcomeEIDResolver returns a resolver scoped to one event from one peer.
+func (s *Server) newApplyOutcomeEIDResolver(peerHostAuthority string) *applyOutcomeEIDResolver {
+	return &applyOutcomeEIDResolver{
+		server:            s,
+		peerHostAuthority: peerHostAuthority,
+		taxonomy:          egtypes.DefaultTaxonomy(),
+		membership:        s.entityGraphClusterMembership(),
+	}
+}
+
+// resolveApplyOutcomeEID resolves the EID for a single apply-outcome record, applying
+// the three gates documented on applyOutcomeEIDResolver.
+func (r *applyOutcomeEIDResolver) resolveApplyOutcomeEID(ctx context.Context, resourceID string) (egtypes.EID, error) {
+	kind := resourceID
+	if idx := strings.Index(resourceID, ":"); idx >= 0 {
+		kind = resourceID[:idx]
+	}
+
+	// Gate 1: taxonomy. Kinds a host authority may not name never reach the resolver.
+	if desc, ok := r.taxonomy.LookupEntityType(kind); ok && !applyOutcomeAuthorityHasHost(desc.AuthorityClasses) {
+		return egtypes.NewEID("host", r.peerHostAuthority, resourceID)
+	}
+
+	// Gate 2: the verified cluster name travels to the resolver in the same payload
+	// field a steward's own fragment uses for entity-state, so both go through the
+	// identical membership check inside ResolveSubjectEID.
+	var payload map[string]interface{}
+	if clusterName := r.verifiedClusterName(); clusterName != "" {
+		payload = map[string]interface{}{
+			"ha_role": map[string]interface{}{"cluster_name": clusterName},
+		}
+	}
+
+	eid, _, _, err := dnasync.ResolveSubjectEID(kind, r.peerHostAuthority, resourceID, payload, r.taxonomy, r.membership, nil)
+	if err != nil {
+		return egtypes.EID{}, err
+	}
+
+	// Gate 3: a cluster-scoped result needs entity state at that exact EID.
+	if eid.AuthorityType() == "cluster" && !r.hasClusterScopedEntity(ctx, eid) {
+		return egtypes.NewEID("host", r.peerHostAuthority, resourceID)
+	}
+	return eid, nil
+}
+
+// verifiedClusterName returns the cluster name that BOTH the controller's tenant-scoped
+// DNA registry and the wired membership verifier attribute to this peer, or "" when no
+// such name exists. The result is computed at most once per event.
+//
+// Tenant scoping stops identically-named clusters in sibling tenants from vouching for
+// each other; the verifier is what turns a self-attested candidate into a name that may
+// become an authority segment. A nil verifier short-circuits to "" — no registry work is
+// done and no candidate can be accepted.
+func (r *applyOutcomeEIDResolver) verifiedClusterName() string {
+	if r.clusterLoaded {
+		return r.clusterName
+	}
+	r.clusterLoaded = true
+
+	if r.membership == nil {
+		return ""
+	}
+
+	s := r.server
+	s.mu.RLock()
+	controllerSvc := s.controllerService
+	s.mu.RUnlock()
+
+	if controllerSvc == nil {
+		return ""
+	}
+	info, exists := controllerSvc.GetStewardInfo(r.peerHostAuthority)
+	if !exists || info == nil {
+		return ""
+	}
+	tenantID := info.TenantID
+
+	allStewards := controllerSvc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
+	fleetData := make([]controllerFleet.StewardData, 0, len(allStewards))
+	for _, si := range allStewards {
+		if si == nil || si.TenantID != tenantID {
+			continue
+		}
+		var frags []*common.Fragment
+		if si.DNA != nil {
+			frags = si.DNA.Fragments
+		}
+		fleetData = append(fleetData, controllerFleet.StewardData{
+			ID:           si.ID,
+			TenantID:     si.TenantID,
+			DNAFragments: frags,
+		})
+	}
+
+	candidates := clusterregistry.BuildRegistry(fleetData).MemberClusters(r.peerHostAuthority)
+	for _, name := range candidates {
+		if r.membership.IsClusterMember(r.peerHostAuthority, name) {
+			r.clusterName = name
+			return r.clusterName
+		}
+	}
+	if len(candidates) > 0 {
+		s.logger.Debug("resolveApplyOutcomeEID: cluster claim not corroborated; resolving host-scoped",
+			"steward_id", logging.SanitizeLogValue(r.peerHostAuthority),
+			"candidate_count", len(candidates))
+	}
+	return ""
+}
+
+// hasClusterScopedEntity reports whether the entity graph already holds entity state for
+// eid — the per-resource cluster evidence required by gate 3. A missing entity
+// (ErrNotFound) is the ordinary answer for a node-local resource and is not logged.
+func (r *applyOutcomeEIDResolver) hasClusterScopedEntity(ctx context.Context, eid egtypes.EID) bool {
+	// TenantFilter is deliberately empty: this is controller-internal resolution, not an
+	// API read, and the entity-graph tenant cut is applied by the read APIs that serve
+	// these records. The cluster name reaching this point was already confirmed for the
+	// mTLS-verified peer within its own tenant by gate 2.
+	view, err := r.server.egProvider.GetEntity(ctx, eid, eginterfaces.GetEntityOpts{})
+	if err != nil {
+		if !errors.Is(err, eginterfaces.ErrNotFound) {
+			r.server.logger.Warn("resolveApplyOutcomeEID: cluster evidence lookup failed; resolving host-scoped",
+				"steward_id", logging.SanitizeLogValue(r.peerHostAuthority),
+				"eid", logging.SanitizeLogValue(eid.String()),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+		return false
+	}
+	return view != nil && view.Entity != nil
+}
+
+// applyOutcomeAuthorityHasHost reports whether "host" is among a kind's authority
+// classes, i.e. whether the mTLS-verified peer may name that entity itself.
+func applyOutcomeAuthorityHasHost(classes []string) bool {
+	for _, c := range classes {
+		if c == "host" {
+			return true
+		}
+	}
+	return false
+}
+
+// handleObserveSweepRequest processes EventObserveSweepRequest from a steward.
+// It extracts the baseline DNA, resolves the observe-module set via the manifest
+// provider, and sends CommandObserveModules back to the originating steward.
+// (Issue #3104, ADR-024 Amendment 1 §3)
+func (s *Server) handleObserveSweepRequest(ctx context.Context, event *controlplaneTypes.Event) error {
+	s.mu.RLock()
+	provider := s.observeManifestProvider
+	publisher := s.commandPublisher
+	s.mu.RUnlock()
+
+	if provider == nil {
+		s.logger.Debug("Tier-2 observe sweep request received but provider not configured",
+			"steward_id", event.StewardID)
+		return nil
+	}
+	if publisher == nil {
+		s.logger.Warn("Tier-2 observe sweep request: command publisher not available",
+			"steward_id", event.StewardID)
+		return nil
+	}
+
+	// Extract baseline DNA from the event details.
+	var baselineDNA map[string]string
+	if details := event.Details; details != nil {
+		if raw, ok := details["baseline_dna"].(string); ok && raw != "" {
+			if err := json.Unmarshal([]byte(raw), &baselineDNA); err != nil {
+				s.logger.Warn("Tier-2 observe sweep: failed to parse baseline_dna",
+					"steward_id", event.StewardID, "error", err)
+				return nil
+			}
+		}
+	}
+
+	// Resolve the observe-module set from the baseline DNA.
+	manifests, err := provider.ListObservableManifests()
+	if err != nil {
+		s.logger.Warn("Tier-2 observe sweep: failed to list manifests",
+			"steward_id", event.StewardID, "error", err)
+		return nil
+	}
+
+	names := resolution.ResolveObserveModules(baselineDNA, manifests)
+	if len(names) == 0 {
+		s.logger.Debug("Tier-2 observe sweep: no modules resolved",
+			"steward_id", event.StewardID)
+		return nil
+	}
+
+	// Build ObserveModuleSpec list from resolved names and their ownership declarations.
+	nameSet := make(map[string]bool, len(names))
+	for _, n := range names {
+		nameSet[n] = true
+	}
+	var specs []controlplaneTypes.ObserveModuleSpec
+	for _, m := range manifests {
+		if !nameSet[m.Name] {
+			continue
+		}
+		for _, own := range m.Owns {
+			specs = append(specs, controlplaneTypes.ObserveModuleSpec{
+				Name:      m.Name,
+				Kind:      own.Kind,
+				PerObject: own.PerObject,
+			})
+		}
+	}
+	if len(specs) == 0 {
+		// All resolved modules have no ownership declarations — nothing to observe.
+		s.logger.Debug("Tier-2 observe sweep: resolved modules have no ownership declarations",
+			"steward_id", event.StewardID, "names", names)
+		return nil
+	}
+
+	specsJSON, err := json.Marshal(specs)
+	if err != nil {
+		return fmt.Errorf("tier-2 observe sweep: marshal specs: %w", err)
+	}
+
+	if _, err := publisher.PublishCommand(ctx, event.StewardID, controlplaneTypes.CommandObserveModules, map[string]interface{}{
+		"modules": string(specsJSON),
+	}); err != nil {
+		return fmt.Errorf("tier-2 observe sweep: publish command: %w", err)
+	}
+
+	s.logger.Info("Tier-2 observe sweep dispatched",
+		"steward_id", event.StewardID,
+		"module_count", len(specs))
+
+	return nil
+}
+
+// newLogStreamHandler builds the LogStream ingestion handler on the dedicated
+// steward-event manager that New constructed (Issue #4857). The manager is never
+// nil here: New fails if it cannot be built.
+func (s *Server) newLogStreamHandler() *controllerTransport.LogStreamHandler {
+	return controllerTransport.NewLogStreamHandler(
+		s.stewardEventManager,
+		s.controllerService,
+		s.logger,
+		controllerTransport.DefaultLogStreamConfig(),
+	)
+}
+
+// SetStewardEventManager injects the dedicated steward-event LoggingManager.
+// Called by the Controller before Start so the LogStream handler (S2) can
+// write ingested steward events to this manager.
+func (s *Server) SetStewardEventManager(m *logging.LoggingManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stewardEventManager = m
+}
+
+// GetStewardEventManager returns the dedicated steward-event LoggingManager.
+func (s *Server) GetStewardEventManager() *logging.LoggingManager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.stewardEventManager
+}
+
+// GetAPIServer returns the REST API server owned by this transport server.
+// Used by Controller.New to inject shared dependencies after both servers are created.
+func (s *Server) GetAPIServer() *api.Server {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.httpServer
+}
+
+// GetTransportListenAddr returns the actual QUIC transport listen address after binding.
+// Unlike GetListenAddr (which returns the configured address), this returns the OS-assigned
+// address when port 0 is configured, making it safe for dynamic-port integration tests.
+func (s *Server) GetTransportListenAddr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.quicListener != nil {
+		return s.quicListener.Addr().String()
+	}
+	return s.cfg.Transport.ListenAddr
+}
+
+// initializeRunManager opens a dedicated SQLite connection for the run store,
+// initializes the schema, and returns a run.Manager. Returns nil on failure so
+// the controller starts without run support rather than failing.
+func initializeRunManager(
+	ctx context.Context,
+	cfg *config.Config,
+	storageManager *interfaces.StorageManager,
+	executionQueue *scriptmodule.ExecutionQueue,
+	logger logging.Logger,
+) *controllerrun.Manager {
+	// Issue #4528: in cluster mode runs live in the shared database so a run
+	// accepted by one node is visible to, and completed on, every node.
+	if cfg.HA.IsClusterMode() && storageManager != nil {
+		if shared := storageManager.GetScriptRunStore(); shared != nil {
+			logger.Info("Run manager initialized with the cluster-shared run store")
+			return controllerrun.NewManager(controllerrun.NewSharedRunStore(shared), executionQueue)
+		}
+		logger.Warn("Run manager: cluster mode without a shared run store; runs are visible only on the node that accepted them")
+	}
+
+	if cfg.Storage == nil || cfg.Storage.SQLitePath == "" {
+		logger.Warn("Run manager: SQLite path not configured, run API disabled")
+		return nil
+	}
+
+	dsn := cfg.Storage.SQLitePath
+	if !strings.HasPrefix(dsn, "file:") {
+		dsn = "file:" + dsn
+	}
+
+	store, err := controllerrun.NewRunStoreSQLFromDSN(dsn)
+	if err != nil {
+		logger.Warn("Run manager: failed to open SQLite", "error", err)
+		return nil
+	}
+	if err := store.Init(ctx); err != nil {
+		logger.Warn("Run manager: failed to initialize schema", "error", err)
+		_ = store.Close()
+		return nil
+	}
+
+	logger.Info("Run manager initialized", "sqlite_path", cfg.Storage.SQLitePath)
+	return controllerrun.NewManager(store, executionQueue)
+}
+
+// initializeUpgradeStore opens a SQLite-backed UpgradeStore at cfg.Storage.SQLitePath,
+// initializes its schema, and returns it as the interface. Falls back to an in-memory
+// store (logging a warning, no startup failure) when SQLitePath is empty or either
+// open/Initialize fails — mirroring the degrade-gracefully pattern of initializeRunManager.
+func initializeUpgradeStore(
+	ctx context.Context,
+	cfg *config.Config,
+	logger logging.Logger,
+) business.UpgradeStore {
+	if cfg.Storage == nil || cfg.Storage.SQLitePath == "" {
+		logger.Warn("Upgrade store: SQLite path not configured, using in-memory store (records will not survive restart)")
+		return memoryprovider.NewUpgradeStore()
+	}
+
+	dsn := cfg.Storage.SQLitePath
+	if !strings.HasPrefix(dsn, "file:") {
+		dsn = "file:" + dsn
+	}
+
+	store, err := sqliteprovider.NewUpgradeStoreSQLFromDSN(dsn)
+	if err != nil {
+		logger.Warn("Upgrade store: failed to open SQLite, falling back to in-memory store", "error", err)
+		return memoryprovider.NewUpgradeStore()
+	}
+	if err := store.Initialize(ctx); err != nil {
+		logger.Warn("Upgrade store: failed to initialize schema, falling back to in-memory store", "error", err)
+		_ = store.Close()
+		return memoryprovider.NewUpgradeStore()
+	}
+
+	logger.Info("Upgrade store initialized with SQLite backend (Issue #2464)", "sqlite_path", cfg.Storage.SQLitePath)
+	return store
+}
+
+// initializeTagStore opens a SQLite-backed tag store at cfg.Storage.SQLitePath,
+// initializes its schema, and returns it. Returns nil (logging a warning) when
+// SQLitePath is empty or either open/Initialize fails — controller startup is
+// never blocked on tag store availability.
+func initializeTagStore(
+	ctx context.Context,
+	cfg *config.Config,
+	logger logging.Logger,
+) *tagstore.Store {
+	if cfg.Storage == nil || cfg.Storage.SQLitePath == "" {
+		logger.Warn("Tag store: SQLite path not configured, tag persistence disabled")
+		return nil
+	}
+
+	dsn := cfg.Storage.SQLitePath
+	if !strings.HasPrefix(dsn, "file:") {
+		dsn = "file:" + dsn
+	}
+
+	store, err := tagstore.NewFromDSN(dsn, logger)
+	if err != nil {
+		logger.Warn("Tag store: failed to open SQLite, tag persistence disabled", "error", err)
+		return nil
+	}
+	if err := store.Initialize(ctx); err != nil {
+		logger.Warn("Tag store: failed to initialize schema, tag persistence disabled", "error", err)
+		_ = store.Close()
+		return nil
+	}
+
+	logger.Info("Tag store initialized with SQLite backend (Issue #2542)", "sqlite_path", cfg.Storage.SQLitePath)
+	return store
+}
+
+// initializeEntityGraphProvider constructs the entity graph provider that
+// matches the controller's active storage backend (Issue #3253 / ADR-022):
+//
+//   - Cluster mode: PostgreSQL-backed DatabaseEntityGraphProvider using the
+//     cluster Postgres DSN. SQLite would give each node its own isolated graph,
+//     so the database provider is required — not optional.
+//   - Legacy single-provider "database" mode: DatabaseEntityGraphProvider using
+//     cfg.Storage.Config["dsn"].
+//   - OSS composite mode (FlatfileRoot set): SQLiteEntityGraphProvider at a
+//     dedicated file alongside cfg.Storage.SQLitePath so the two stores never
+//     share the same *sql.DB handle.
+//
+// tenantResolver is wired into every branch via WithTenantResolver so that a
+// peer-bound ObservationBatch (any steward-originated DNA-sync write, Issue
+// #4319) resolves owning_tenant from the controller's own steward registry —
+// *service.ControllerService.TenantForDevice — rather than failing closed to
+// an empty tenant for every real ingest. It may be nil (e.g. in unit tests
+// that only exercise the error/config paths below); nil is passed through
+// unchanged and reproduces the pre-#4319 fail-closed default.
+func initializeEntityGraphProvider(cfg *config.Config, logger logging.Logger, tenantResolver eginterfaces.TenantResolver) (egServerProvider, error) {
+	if cfg.Storage == nil {
+		return nil, fmt.Errorf("storage configuration required for entity graph provider")
+	}
+
+	if cfg.HA.IsClusterMode() {
+		pgDSN := ""
+		if cfg.Storage.Cluster != nil {
+			pgDSN = cfg.Storage.Cluster.PostgresDSN
+		}
+		p, err := egdatabase.NewDatabaseEntityGraphProvider(pgDSN, egdatabase.WithTenantResolver(tenantResolver))
+		if err != nil {
+			return nil, fmt.Errorf("entity graph (cluster/postgres): %w", err)
+		}
+		logger.Info("Entity graph provider initialized with Postgres backend (cluster mode, Issue #3253)")
+		return p, nil
+	}
+
+	if cfg.Storage.Provider == "database" {
+		dsn, dsnErr := entityGraphDatabaseDSN(cfg.Storage.Config)
+		if dsnErr != nil {
+			return nil, fmt.Errorf("entity graph (database single-provider): %w", dsnErr)
+		}
+		p, err := egdatabase.NewDatabaseEntityGraphProvider(dsn, egdatabase.WithTenantResolver(tenantResolver))
+		if err != nil {
+			return nil, fmt.Errorf("entity graph (database single-provider): %w", err)
+		}
+		logger.Info("Entity graph provider initialized with Postgres backend (database mode, Issue #3253)")
+		return p, nil
+	}
+
+	// OSS composite mode — use a dedicated SQLite file next to the main store.
+	if cfg.Storage.SQLitePath == "" {
+		return nil, fmt.Errorf("storage.sqlite_path is required for the entity graph provider in OSS composite mode")
+	}
+	egPath := filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "entitygraph.db")
+	p, err := egsqlite.NewSQLiteEntityGraphProvider(egPath, egsqlite.WithTenantResolver(tenantResolver))
+	if err != nil {
+		return nil, fmt.Errorf("entity graph (sqlite): %w", err)
+	}
+	logger.Info("Entity graph provider initialized with SQLite backend (OSS composite mode, Issue #3253)",
+		"path", egPath)
+	return p, nil
+}
+
+// entityGraphDatabaseDSN extracts a Postgres DSN for the entity graph provider
+// in legacy "database" single-provider mode. It mirrors
+// pkg/storage/providers/database/plugin.go's unexported getDSN exactly —
+// preferring a complete "dsn" string, otherwise building one from discrete
+// host/port/database/username/password/sslmode keys — so the entity graph
+// always tracks the same connection the storage provider itself opens.
+// Duplicated locally rather than imported: features/ business logic must not
+// import pkg/storage/providers directly (see CLAUDE.md central provider
+// rules), and the entity graph provider takes a raw DSN string, not a config
+// map, so this extraction has to live on this side of that boundary.
+//
+// Deployments that configure discrete fields instead of a single "dsn" string
+// (e.g. docker-compose.test.yml's CFGMS_DB_HOST/PORT/... fixtures, and
+// server_security_test.go's createDockerTestStorageConfig) previously made
+// this branch silently pass an empty DSN to lib/pq, which defaults to dialing
+// localhost:5432 instead of the configured host (Issue #3253 merge-queue
+// regression).
+func entityGraphDatabaseDSN(storageConfig map[string]interface{}) (string, error) {
+	if dsn, ok := storageConfig["dsn"].(string); ok && dsn != "" {
+		return dsn, nil
+	}
+
+	host := entityGraphConfigString(storageConfig, "host", "localhost")
+	port := entityGraphConfigInt(storageConfig, "port", 5432)
+	database := entityGraphConfigString(storageConfig, "database", "cfgms")
+	username := entityGraphConfigString(storageConfig, "username", "cfgms")
+	password := entityGraphConfigString(storageConfig, "password", "")
+	sslmode := entityGraphConfigString(storageConfig, "sslmode", "verify-full")
+	sslrootcert := entityGraphConfigString(storageConfig, "sslrootcert", "")
+
+	if password == "" {
+		return "", fmt.Errorf("database password is required")
+	}
+
+	if weak := weakSSLModeLabel(sslmode); weak != "" {
+		logging.NewLogger("warn").Warn("Entity graph database connection uses a weak sslmode that does not verify the server certificate and host name; use verify-full in production",
+			"sslmode", weak)
+	}
+
+	dsn := fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
+		host, port, database, username, password, sslmode)
+	if sslrootcert != "" {
+		dsn += " sslrootcert=" + sslrootcert
+	}
+	return dsn, nil
+}
+
+func entityGraphConfigString(config map[string]interface{}, key, defaultValue string) string {
+	if val, ok := config[key].(string); ok {
+		return val
+	}
+	return defaultValue
+}
+
+func entityGraphConfigInt(config map[string]interface{}, key string, defaultValue int) int {
+	if val, ok := config[key].(int); ok {
+		return val
+	}
+	if val, ok := config[key].(float64); ok {
+		return int(val)
+	}
+	return defaultValue
+}
+
+// initializeSessionStore selects and opens a session.Store.
+//
+// Cluster mode (Issue #2775): when cfg.HA.IsClusterMode() is true and a cluster
+// Postgres DSN is configured, a Postgres-backed DatabaseSessionTokenStore is returned
+// so session tokens issued on one node are validated and revoked correctly across the
+// full cluster. Single-node deployments are unaffected.
+//
+// Single-node fallback: opens a SQLite-backed store at cfg.Storage.SQLitePath so
+// sessions survive controller restarts. Falls back to an in-memory store (with a
+// warning) when SQLitePath is empty or the SQLite open fails — startup is never blocked
+// on session store availability.
+func initializeSessionStore(
+	ctx context.Context,
+	cfg *config.Config,
+	logger logging.Logger,
+) session.Store {
+	_ = ctx // reserved for future use (consistent with initializeUpgradeStore)
+
+	// Cluster mode: use the shared Postgres backend for cross-node session validation.
+	if cfg.HA.IsClusterMode() {
+		pgDSN := ""
+		if cfg.Storage != nil && cfg.Storage.Cluster != nil {
+			pgDSN = cfg.Storage.Cluster.PostgresDSN
+		}
+		if pgDSN != "" {
+			store, err := (&dbprovider.DatabaseProvider{}).CreateSessionTokenStore(map[string]interface{}{"dsn": pgDSN})
+			if err != nil {
+				logger.Warn("Session store: failed to open Postgres cluster store, falling back to SQLite/mem", "error", err)
+			} else {
+				logger.Info("Session store initialized with Postgres backend for cluster mode (Issue #2775)")
+				return store
+			}
+		}
+	}
+
+	if cfg.Storage == nil || cfg.Storage.SQLitePath == "" {
+		logger.Warn("Session store: SQLite path not configured, using in-memory store (sessions will not survive restart)")
+		return session.NewMemStore(session.DefaultConfig(), time.Now)
+	}
+
+	store, err := (&sqliteprovider.SQLiteProvider{}).CreateSessionTokenStore(map[string]interface{}{"path": cfg.Storage.SQLitePath})
+	if err != nil {
+		logger.Warn("Session store: failed to open SQLite, falling back to in-memory store", "error", err)
+		return session.NewMemStore(session.DefaultConfig(), time.Now)
+	}
+
+	logger.Info("Session store initialized with SQLite backend (Issue #2774)", "sqlite_path", cfg.Storage.SQLitePath)
+	return store
+}
+
+// seedFleetCascadeTestData seeds the tenant hierarchy and MSP-level parent policy
+// required by the fleet E2E cascade test (Issue #1723). Called only when
+// CFGMS_SEED_TEST_TOKENS=1 is set. Creates a two-level tenant tree:
+//
+//	fleet-root (parent)
+//	  fleet-root/fleet-child-a (steward-1 tenant)
+//	  fleet-root/fleet-child-b (steward-2 tenant)
+//
+// Stores an MSP-level policy under fleet-root/msp-policies/global so the
+// InheritanceResolver delivers it to stewards in both child tenants via cascade.
+// Errors are logged as warnings (idempotent — tolerated on controller restart).
+func seedFleetCascadeTestData(ctx context.Context, sm *interfaces.StorageManager, logger logging.Logger) {
+	ts := sm.GetTenantStore()
+	cs := sm.GetConfigStore()
+
+	tenants := []business.TenantData{
+		{ID: "fleet-root", Name: "Fleet Root", Status: business.TenantStatusActive},
+		{ID: "fleet-root/fleet-child-a", Name: "Fleet Child A", ParentID: "fleet-root", Status: business.TenantStatusActive},
+		{ID: "fleet-root/fleet-child-b", Name: "Fleet Child B", ParentID: "fleet-root", Status: business.TenantStatusActive},
+	}
+	for i := range tenants {
+		if err := ts.CreateTenant(ctx, &tenants[i]); err != nil {
+			logger.Warn("fleet cascade seed: tenant (may already exist)", "id", tenants[i].ID, "error", err)
+		} else {
+			logger.Info("fleet cascade seed: tenant created", "id", tenants[i].ID)
+		}
+	}
+
+	// Parent policy: two file resources on /test-workspace tmpfs.
+	// cascade-policy: inherited by both children; child device config may override it.
+	// cascade-parent-only: present only at MSP level — proves cascade delivery when it
+	// appears on a steward whose device config does not include it.
+	parentPolicyYAML := `steward:
+  id: ""
+  mode: controller
+  converge_interval: "10s"
+  drift_mode: apply
+resources:
+  - name: cascade-policy
+    module: file
+    config:
+      path: /test-workspace/cascade-policy
+      state: present
+      content: "parent-policy-content\n"
+      mode: "0644"
+      allowed_base_path: /test-workspace
+  - name: cascade-parent-only
+    module: file
+    config:
+      path: /test-workspace/cascade-parent-only
+      state: present
+      content: "parent-only-content\n"
+      mode: "0644"
+      allowed_base_path: /test-workspace
+`
+	if err := cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{
+			TenantID:  "fleet-root",
+			Namespace: "msp-policies",
+			Name:      "global",
+		},
+		Data:   []byte(parentPolicyYAML),
+		Format: cfgconfig.ConfigFormatYAML,
+	}); err != nil {
+		logger.Warn("fleet cascade seed: failed to store MSP-level parent policy", "error", err)
+	} else {
+		logger.Info("fleet cascade seed: MSP-level parent policy stored under fleet-root")
+	}
+}
+
+// serverBatchjobFleetQuery adapts *service.ControllerService to batchjob.FleetQuery
+// so the rolling-batch executor can resolve fleet selectors without importing the
+// api package (which would create an import cycle). Issue #2296.
+type serverBatchjobFleetQuery struct {
+	svc *service.ControllerService
+}
+
+// Lookup returns metadata for exactly the requested steward IDs, filtering the
+// fleet source by ID. Unknown IDs are omitted.
+func (a *serverBatchjobFleetQuery) Lookup(_ context.Context, ids []string) ([]batchjob.StewardMeta, error) {
+	want := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		want[id] = struct{}{}
+	}
+	metas := make([]batchjob.StewardMeta, 0, len(ids))
+	for _, sd := range (&serverFleetStewardProvider{svc: a.svc}).GetAllStewards() {
+		if _, ok := want[sd.ID]; ok {
+			metas = append(metas, batchjob.StewardMeta{ID: sd.ID, DNAAttributes: sd.DNAAttributes})
+		}
+	}
+	return metas, nil
+}
+
+// serverFleetStewardProvider adapts *service.ControllerService to
+// controllerFleet.StewardProvider for use by MemoryQuery.
+type serverFleetStewardProvider struct {
+	svc *service.ControllerService
+}
+
+// serverFleetStewardProvider adapts *service.ControllerService to
+// controllerFleet.StewardProvider for use by MemoryQuery.
+// Population source is ListFleetStewards (ADR-031 Decision 3, Issue #3764): the
+// single cluster-safe-by-construction fleet source. Field composition — tags
+// merged, DNAFragments populated — must match controllerServiceAdapter in
+// features/controller/api/server.go for any steward both adapters can see.
+// (Issue #3495, #3764)
+func (p *serverFleetStewardProvider) GetAllStewards() []controllerFleet.StewardData {
+	// System-internal (Issue #4665): MemoryQuery applies tenant scoping
+	// downstream, and a bare context would be refused.
+	infos := p.svc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
+	result := make([]controllerFleet.StewardData, 0, len(infos))
+	for _, info := range infos {
+		var attrs map[string]string
+		var frags []*common.Fragment
+		if info.DNA != nil {
+			attrs = service.FlattenDNAFragments(info.DNA.Fragments)
+			frags = info.DNA.Fragments
+		}
+		// ListFleetStewards already merges controller-stored tags into info.Tags.
+		if len(info.Tags) > 0 {
+			attrs = mergeControllerTags(attrs, info.Tags)
+		}
+		result = append(result, controllerFleet.StewardData{
+			ID:            info.ID,
+			TenantID:      info.TenantID,
+			Status:        info.Status,
+			LastHeartbeat: info.LastHeartbeat,
+			DNAAttributes: attrs,
+			DNAFragments:  frags,
+			Hidden:        info.Hidden,
+		})
+	}
+	return result
+}
+
+// mergeControllerTags returns a copy of attrs with controller-stored ctrlTags
+// merged into the "tags" key. If attrs already carries a DNA-reported "tags"
+// value, the two sets are unioned (DNA tags first, then controller tags;
+// duplicates dropped). Returns attrs unchanged when ctrlTags is empty.
+// Never mutates the input map — attrs is the fresh map returned by
+// FlattenDNAFragments; copying before merge preserves the no-mutation contract
+// so the caller's view of the attrs slice is not altered.
+func mergeControllerTags(attrs map[string]string, ctrlTags []string) map[string]string {
+	if len(ctrlTags) == 0 {
+		return attrs
+	}
+	// Copy to avoid mutating the FlattenDNAFragments output shared by the caller.
+	merged := make(map[string]string, len(attrs)+1)
+	for k, v := range attrs {
+		merged[k] = v
+	}
+	// Union DNA-reported tags with controller-stored tags; DNA tags come first.
+	seen := make(map[string]struct{})
+	var all []string
+	for _, t := range strings.Split(merged["tags"], ",") {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, dup := seen[t]; !dup {
+			seen[t] = struct{}{}
+			all = append(all, t)
+		}
+	}
+	for _, t := range ctrlTags {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, dup := seen[t]; !dup {
+			seen[t] = struct{}{}
+			all = append(all, t)
+		}
+	}
+	merged["tags"] = strings.Join(all, ",")
+	return merged
+}
+
+// Registration approval workflow names accepted by registration.workflow (Issue #1695).
+const (
+	registrationWorkflowIPTrust      = "ip-trust"
+	registrationWorkflowManualReview = "manual-review"
+	registrationWorkflowAutoApprove  = "auto-approve"
+)
+
+// resolveRegistrationWorkflow returns the effective registration approval workflow
+// for cfg, applying the legacy approval_mode alias and the ip-trust default.
+//
+// New and collectActiveStorageRequirements must agree on this value: the former
+// decides which subsystems are constructed, the latter decides which store
+// requirements are enforced at startup. Deriving both from one function keeps a
+// subsystem from being built without its storage having been validated (#3491).
+func resolveRegistrationWorkflow(cfg *config.Config) string {
+	workflowName := ""
+	if cfg != nil && cfg.Registration != nil {
+		workflowName = cfg.Registration.Workflow
+		// Legacy: if Workflow is empty but ApprovalMode is set, honour it.
+		if workflowName == "" && cfg.Registration.ApprovalMode == registrationWorkflowManualReview {
+			workflowName = registrationWorkflowManualReview
+		}
+	}
+	// Default to ip-trust (Issue #1695).
+	if workflowName == "" {
+		workflowName = registrationWorkflowIPTrust
+	}
+	return workflowName
+}
+
+// collectActiveStorageRequirements returns the union of store requirements from all
+// subsystems that are enabled in this deployment. Requirements are collected from
+// each subsystem's own declaration (adjacent to the code that uses the store), then
+// gated here on whether the subsystem is active — so a deployment that does not run
+// a subsystem cannot be blocked by its requirements.
+//
+// Registration (#3491) is wired: the manual-review approval hook
+// (api.ManualReviewApprovalHookStoreRequirements) and the pending-registration
+// expiry job that sweeps the records it writes (registration.StoreRequirements)
+// both require PendingRegistrationStore, and both are active only when the
+// effective registration workflow is "manual-review". Under any other workflow
+// neither runs, so neither imposes a requirement. Push (#3492) is wired
+// unconditionally via pushStoreRequirements. Workflow-trigger (#3493) is wired
+// unconditionally via workflowtrigger.StoreRequirements — the subsystem is
+// always active when the controller starts. Audit (#4035, Epic #4033) is wired
+// unconditionally via audit.StoreRequirements, next to push and
+// workflow-trigger — audit.NewManager is called for every controller startup,
+// so a nil AuditStore must fail composition rather than surface later wherever
+// the nil store's methods are first called.
+func collectActiveStorageRequirements(cfg *config.Config) []interfaces.StoreRequirement {
+	var reqs []interfaces.StoreRequirement
+	reqs = append(reqs, pushStoreRequirements...)
+	reqs = append(reqs, workflowtrigger.StoreRequirements...)
+	reqs = append(reqs, audit.StoreRequirements...)
+
+	if resolveRegistrationWorkflow(cfg) == registrationWorkflowManualReview {
+		// The approval hook persists incoming requests; the expiry job ages them out.
+		// Both are constructed in New when this workflow is selected.
+		reqs = append(reqs, api.ManualReviewApprovalHookStoreRequirements...)
+		reqs = append(reqs, controllerRegistration.StoreRequirements...)
+	}
+
+	return reqs
+}
+
+// storageProviderName returns a short, human-readable name for the storage
+// provider in cfg. Used as the operator-facing provider label passed to
+// interfaces.CollectAbsentOptionalCapabilities — distinct from
+// StorageManager.GetProviderName(), which reports the internal composition name
+// ("composite") for the OSS composite shape rather than a backend an operator can
+// actually switch to.
+func storageProviderName(cfg *config.Config) string {
+	if cfg == nil || cfg.Storage == nil {
+		return "unknown"
+	}
+	if cfg.HA.IsClusterMode() {
+		return "database"
+	}
+	if cfg.Storage.FlatfileRoot != "" {
+		return "flatfile"
+	}
+	if cfg.Storage.Provider != "" {
+		return cfg.Storage.Provider
+	}
+	return "unknown"
+}
+
+// assertClusterBackendsReady verifies cluster-mode prerequisites before any state is read
+// or written. Called immediately after CreateClusterStorageManager in New(), still inside
+// the cfg.HA.IsClusterMode() block, so callers need not re-check the mode.
+//
+// Gates (in order):
+//  1. Storage provider must be cluster-capable (shared state across controller nodes).
+//  2. An installer blob-store bucket must be configured — storage.cluster.s3.bucket
+//     or CFGMS_S3_INSTALLER_BUCKET (S3-compatible blob store for installer artifacts).
+func assertClusterBackendsReady(cfg *config.Config, storageManager *interfaces.StorageManager) error {
+	if p := storageManager.GetProvider(); p != nil && !p.ClusterCapable() {
+		return fmt.Errorf("cluster mode requires a cluster-capable storage backend; provider %q does not support cluster coordination", storageManager.GetProviderName())
+	}
+	if bucket, _ := installerS3Config(cfg)["bucket"].(string); bucket == "" {
+		return fmt.Errorf("cluster mode requires S3-compatible blob storage: set storage.cluster.s3.bucket or CFGMS_S3_INSTALLER_BUCKET")
+	}
+	return nil
+}
+
+// installerS3Config is the cluster installer blob store's S3 configuration
+// (Issue #4662): storage.cluster.s3 from the controller configuration — whose
+// ${VAR} references are resolved at load, including the <VAR>_FILE
+// sealed-credential form — with each CFGMS_S3_INSTALLER_* environment variable
+// overriding its key. Credentials not given here come from the AWS default
+// chain. storage.cluster.s3 was previously documented but ignored.
+func installerS3Config(cfg *config.Config) map[string]interface{} {
+	s3Cfg := map[string]interface{}{}
+	if cfg != nil && cfg.Storage != nil && cfg.Storage.Cluster != nil {
+		for key, value := range cfg.Storage.Cluster.S3 {
+			s3Cfg[key] = value
+		}
+	}
+	for key, env := range map[string]string{
+		"bucket":       "CFGMS_S3_INSTALLER_BUCKET",
+		"region":       "CFGMS_S3_INSTALLER_REGION",
+		"endpoint_url": "CFGMS_S3_INSTALLER_ENDPOINT_URL",
+	} {
+		if value := os.Getenv(env); value != "" {
+			s3Cfg[key] = value
+		}
+	}
+	return s3Cfg
+}
+
+// weakSSLModeLabel maps a weak sslmode to a string literal ("" when the mode
+// is not weak). Logging the literal rather than the config-derived value keeps
+// credential-bearing config data out of the log call entirely.
+func weakSSLModeLabel(sslmode string) string {
+	switch sslmode {
+	case "disable":
+		return "disable"
+	case "allow":
+		return "allow"
+	case "prefer":
+		return "prefer"
+	case "require":
+		return "require"
+	}
+	return ""
+}
+
+// scriptRepoForQueue converts a possibly-nil tenant library to the queue's
+// interface without producing a non-nil interface wrapping a nil pointer.
+func scriptRepoForQueue(r *scriptmodule.TenantScriptRepository) scriptmodule.ScriptRepository {
+	if r == nil {
+		return nil
+	}
+	return r
+}

@@ -1,0 +1,134 @@
+metadata:
+  id: linux-system-update
+  name: Linux System Update
+  description: Performs system package updates on Linux systems (apt/yum/dnf)
+  version:
+    major: 1
+    minor: 0
+    patch: 0
+  author: cfgms-team@cfg.is
+  tags:
+    - system
+    - updates
+    - maintenance
+    - linux
+  category: system-maintenance
+  platform:
+    - linux
+  shell: bash
+  parameters:
+    - name: AUTO_REBOOT
+      type: boolean
+      description: Automatically reboot if required after updates
+      required: false
+      default: "false"
+    - name: SECURITY_ONLY
+      type: boolean
+      description: Only install security updates
+      required: false
+      default: "false"
+  created_at: 2025-10-13T00:00:00Z
+  updated_at: 2025-10-13T00:00:00Z
+
+content: |
+  #!/bin/bash
+  set -euo pipefail
+
+  # Linux System Update Script
+  # Supports: Ubuntu/Debian (apt), RHEL/CentOS/Fedora (yum/dnf), SUSE (zypper)
+
+  AUTO_REBOOT=${AUTO_REBOOT:-false}
+  SECURITY_ONLY=${SECURITY_ONLY:-false}
+
+  echo "Starting system update..."
+  echo "Security only: $SECURITY_ONLY"
+  echo "Auto reboot: $AUTO_REBOOT"
+
+  # Detect package manager
+  if command -v apt-get >/dev/null 2>&1; then
+    PM="apt"
+  elif command -v dnf >/dev/null 2>&1; then
+    PM="dnf"
+  elif command -v yum >/dev/null 2>&1; then
+    PM="yum"
+  elif command -v zypper >/dev/null 2>&1; then
+    PM="zypper"
+  else
+    echo "Error: No supported package manager found"
+    exit 1
+  fi
+
+  echo "Detected package manager: $PM"
+
+  # Perform update based on package manager
+  case $PM in
+    apt)
+      export DEBIAN_FRONTEND=noninteractive
+      echo "Updating package lists..."
+      apt-get update
+
+      if [ "$SECURITY_ONLY" = "true" ]; then
+        echo "Installing security updates only..."
+        apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" --security
+      else
+        echo "Installing all updates..."
+        apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+      fi
+
+      # Check if reboot required
+      if [ -f /var/run/reboot-required ] && [ "$AUTO_REBOOT" = "true" ]; then
+        echo "Reboot required. Scheduling reboot in 1 minute..."
+        shutdown -r +1 "System reboot required after updates"
+      elif [ -f /var/run/reboot-required ]; then
+        echo "WARNING: Reboot required but AUTO_REBOOT is false"
+        exit 100
+      fi
+      ;;
+
+    dnf|yum)
+      if [ "$SECURITY_ONLY" = "true" ]; then
+        echo "Installing security updates only..."
+        $PM update -y --security
+      else
+        echo "Installing all updates..."
+        $PM update -y
+      fi
+
+      # Check if reboot required
+      if needs-restarting -r >/dev/null 2>&1; then
+        if [ $? -eq 1 ] && [ "$AUTO_REBOOT" = "true" ]; then
+          echo "Reboot required. Scheduling reboot in 1 minute..."
+          shutdown -r +1 "System reboot required after updates"
+        elif [ $? -eq 1 ]; then
+          echo "WARNING: Reboot required but AUTO_REBOOT is false"
+          exit 100
+        fi
+      fi
+      ;;
+
+    zypper)
+      if [ "$SECURITY_ONLY" = "true" ]; then
+        echo "Installing security updates only..."
+        zypper --non-interactive patch --category security
+      else
+        echo "Installing all updates..."
+        zypper --non-interactive update
+      fi
+
+      # Check if reboot required
+      if zypper needs-rebooting; then
+        if [ "$AUTO_REBOOT" = "true" ]; then
+          echo "Reboot required. Scheduling reboot in 1 minute..."
+          shutdown -r +1 "System reboot required after updates"
+        else
+          echo "WARNING: Reboot required but AUTO_REBOOT is false"
+          exit 100
+        fi
+      fi
+      ;;
+  esac
+
+  echo "System update completed successfully"
+  exit 0
+
+hash: placeholder

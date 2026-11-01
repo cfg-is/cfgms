@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CFGMS Crossing Prompt — mockup</title>
+<!--
+  Root crossing prompt (Epic #4701 · Story #4723). Shown when a root-scoped
+  operator opens an MSP whose data needs a crossing. Root sees MSP names only, never
+  client tenant names. Path 1 (recommended): ask the MSP for support access (guidance
+  only). Path 2: break-glass form (reason category + 10-1000 char justification,
+  MSP-notified note). States: Prompt / Filled / Error 403 / Waiting (2nd approver) /
+  Granted -> retried.
+  Design tokens are inlined from docs/design/web-ui-design-tokens.css (source of
+  truth); shell chrome mirrors web/src/shell/AppShell.css. Standalone and
+  interactive: the dashed top strip is a review harness (state + theme), not
+  product UI. URL params ?state=<name>&theme=light|dark preselect a state.
+-->
+<style>
+/*
+ * CFGMS Web UI — Design Tokens
+ * ----------------------------------------------------------------------------
+ * Machine-readable token layer for the controller-served web app (Epic #2344).
+ * Values are lifted verbatim from the public brand style guide
+ * (https://cfg.is/style-guide) so the app and the marketing site share one
+ * source of truth for colour. See docs/design/web-ui-design-system.md for the
+ * rationale, usage rules, and open items.
+ *
+ * Identity in one line: a WARM TERMINAL — near-black / near-white grounds that
+ * hold a trace of warmth, STONE-NEUTRAL text, muted slate-blue accent,
+ * desaturated earth-tone semantics, and a palette of muted card tints. Ground
+ * and ink sit in different hue bands on purpose: when both were warm the whole
+ * surface read rust. State owns the colour budget; the accent is reserved for
+ * interaction; mono carries all machine data.
+ *
+ * Theme model: default tokens are light. `@media (prefers-color-scheme: dark)`
+ * supplies dark. `:root[data-theme="light"|"dark"]` overrides the media query
+ * in both directions (the app's own theme control stamps data-theme on :root).
+ * ==========================================================================*/
+
+:root {
+  /* --- Background & structure --- */
+  --bg-primary:   #f5f4f3;  /* app ground */
+  --bg-surface:   #ffffff;  /* panels, cards */
+  --bg-elevated:  #ececea;  /* raised / inset chrome */
+  --bg-sunk:      #ececea;  /* wells, code blocks */
+  --border:       #d0cfcd;
+
+  /* --- Text & accent --- */
+  --text-primary:   #5f5e58; /* stone (was warm taupe; see design-system §1) */
+  --text-secondary: #6e6d68;
+  --text-faint:     #82807a; /* micro-labels (contrast-tuned vs guide) */
+  --accent:         #4a6b7c; /* muted slate blue — INTERACTION ONLY */
+  --accent-ink:     #ffffff; /* text/icon on accent fill */
+
+  /* --- Semantic state (desaturated earth tones) --- */
+  --state-ok:        #507055;  --state-ok-bg:    #e8f0e9; /* converged / success */
+  --state-warn:      #7b5d1e;  --state-warn-bg:  #f2eadb; /* drift / warning (ochre) */
+  --state-crit:      #965044;  --state-crit-bg:  #f0e6e4; /* error (terracotta) */
+  --state-mauve:     #7a5f6e;                              /* alt error (guide) */
+  --state-neutral:   #605f5a;  --state-neutral-bg:#e2e1df; /* queued / inert */
+
+  /* --- Card tints (background only; meaning-encoding, not decoration) --- */
+  --tint-red:    #f0e6e4;  /* a problem / failing surface */
+  --tint-green:  #e8f0e9;  /* a fix / resolved surface */
+  --tint-orange: #f2eadb;  /* attention / dependency */
+  --tint-blue:   #e6eef2;  /* neutral context / timeline */
+  --tint-brown:  #e2e1df;  /* metadata / reference */
+  --tint-cream:  #f8f8f7;  /* summary / verdict */
+
+  /* --- Type --- */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, "SF Mono", "SFMono-Regular", Menlo, monospace;
+  --font-display: 'Ubuntu Mono', var(--font-mono); /* logo / terminal accent */
+
+  /* Type scale (1.20 minor-third, 13.5px base) */
+  --text-xs:   10px;   /* uppercase micro-labels */
+  --text-sm:   11.5px;
+  --text-base: 13.5px;
+  --text-md:   14px;
+  --text-lg:   16px;
+  --text-xl:   19px;
+  --text-2xl:  26px;   /* stat numerals */
+  --tracking-label: 0.09em; /* uppercase labels */
+
+  /* --- Spacing (4px base) --- */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px;
+  --space-4: 16px; --space-5: 20px; --space-6: 24px;
+
+  /* --- Radii --- */
+  --radius-sm: 7px;   /* pills-in-buttons, chips */
+  --radius:    9px;   /* buttons, inputs */
+  --radius-lg: 13px;  /* cards */
+  --radius-pill: 20px;
+
+  /* --- Elevation --- */
+  --shadow: 0 18px 50px -22px rgba(42, 42, 40, 0.40);
+
+  /* --- Data-viz: sequential ramp (ordinal, magnitude, H≈234 slate) --- */
+  /* Validated: lightness monotone, adjacent ΔL≥0.06, contrast ≥2.0:1, spread 1° */
+  --ordinal-1: #96bad0;  /* lowest */
+  --ordinal-2: #659dbd;
+  --ordinal-3: #2e80a9;
+  --ordinal-4: #0a6388;
+  --ordinal-5: #054561;  /* highest */
+
+  /* --- Data-viz: categorical theme (identity, brand-anchored, 4 slots max) --- */
+  /* Validated: adjacent CVD ΔE 18.5, normal 19.7; all-pairs slots 1-3 CVD 18.5 */
+  --cat-1: #0171a3;  /* slate */
+  --cat-2: #4f9d60;  /* green */
+  --cat-3: #7e3e1b;  /* amber */
+  --cat-4: #c27fb0;  /* mauve — adjacent forms only, not all-pairs (3-slot validated set) */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-primary:  #1a1a1a;
+    --bg-surface:  #242426;
+    --bg-elevated: #323231;
+    --bg-sunk:     #101010;
+    --border:      #535352;
+
+    --text-primary:   #bcbbb5;
+    --text-secondary: #9c9b96;
+    --text-faint:     #8d8c86;
+    --accent:         #7b9fb0;
+    --accent-ink:     #16202a;
+
+    --state-ok:      #7fa985;  --state-ok-bg:     #1a2e1d;
+    --state-warn:    #bd9547;  --state-warn-bg:   #2f2718;
+    --state-crit:    #d0846f;  --state-crit-bg:   #2b201e;
+    --state-mauve:   #a58198;
+    --state-neutral: #9c9b96;  --state-neutral-bg:#262624;
+
+    --tint-red:    #2b201e;
+    --tint-green:  #1a2e1d;
+    --tint-orange: #2f2718;
+    --tint-blue:   #1e2528;
+    --tint-brown:  #262624;
+    --tint-cream:  #232323;
+
+    --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+
+    /* --- Data-viz: sequential ramp (dark mode) --- */
+    --ordinal-1: #095b7e;
+    --ordinal-2: #0475a1;
+    --ordinal-3: #378eba;
+    --ordinal-4: #62a8ce;
+    --ordinal-5: #93c0da;
+
+    /* --- Data-viz: categorical theme (dark mode) --- */
+    /* Validated: adjacent CVD ΔE 8.2, normal 18.4; all-pairs slots 1-3 CVD 8.2 */
+    --cat-1: #3674a5;  /* slate */
+    --cat-2: #5ba269;  /* green */
+    --cat-3: #d57018;  /* amber */
+    --cat-4: #a55e93;  /* mauve */
+  }
+}
+
+/* Explicit overrides — the app's theme control stamps data-theme on :root and
+   must win over the OS media query in BOTH directions. */
+:root[data-theme="light"] {
+  --bg-primary: #f5f4f3; --bg-surface: #ffffff; --bg-elevated: #ececea; --bg-sunk: #ececea; --border: #d0cfcd;
+  --text-primary: #5f5e58; --text-secondary: #6e6d68; --text-faint: #82807a; --accent: #4a6b7c; --accent-ink: #ffffff;
+  --state-ok: #507055; --state-ok-bg: #e8f0e9; --state-warn: #7b5d1e; --state-warn-bg: #f2eadb;
+  --state-crit: #965044; --state-crit-bg: #f0e6e4; --state-mauve: #7a5f6e; --state-neutral: #605f5a; --state-neutral-bg: #e2e1df;
+  --tint-red: #f0e6e4; --tint-green: #e8f0e9; --tint-orange: #f2eadb; --tint-blue: #e6eef2; --tint-brown: #e2e1df; --tint-cream: #f8f8f7;
+  --shadow: 0 18px 50px -22px rgba(42, 42, 40, 0.40);
+  --ordinal-1: #96bad0; --ordinal-2: #659dbd; --ordinal-3: #2e80a9; --ordinal-4: #0a6388; --ordinal-5: #054561;
+  --cat-1: #0171a3; --cat-2: #4f9d60; --cat-3: #7e3e1b; --cat-4: #c27fb0;
+}
+
+:root[data-theme="dark"] {
+  --bg-primary: #1a1a1a; --bg-surface: #242426; --bg-elevated: #323231; --bg-sunk: #101010; --border: #535352;
+  --text-primary: #bcbbb5; --text-secondary: #9c9b96; --text-faint: #8d8c86; --accent: #7b9fb0; --accent-ink: #16202a;
+  --state-ok: #7fa985; --state-ok-bg: #1a2e1d; --state-warn: #bd9547; --state-warn-bg: #2f2718;
+  --state-crit: #d0846f; --state-crit-bg: #2b201e; --state-mauve: #a58198; --state-neutral: #9c9b96; --state-neutral-bg: #262624;
+  --tint-red: #2b201e; --tint-green: #1a2e1d; --tint-orange: #2f2718; --tint-blue: #1e2528; --tint-brown: #262624; --tint-cream: #232323;
+  --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+  --ordinal-1: #095b7e; --ordinal-2: #0475a1; --ordinal-3: #378eba; --ordinal-4: #62a8ce; --ordinal-5: #93c0da;
+  --cat-1: #3674a5; --cat-2: #5ba269; --cat-3: #d57018; --cat-4: #a55e93;
+}
+
+/* ---- mockup base + app shell (mirrors web/src/shell/AppShell.css) ---- */
+*{box-sizing:border-box;}
+html,body{margin:0;}
+body{background:var(--bg-primary); color:var(--text-primary); font-family:var(--font-sans); font-size:var(--text-base);
+  line-height:1.45; -webkit-font-smoothing:antialiased; position:relative; min-height:100dvh;}
+.mono{font-family:var(--font-mono);}
+button{font:inherit;}
+[hidden]{display:none !important;}
+
+/* harness strip — review affordance, not product UI */
+.harness{display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 16px; background:var(--bg-sunk);
+  border-bottom:1px dashed var(--border); font-size:var(--text-sm); color:var(--text-faint);}
+.harness .hl{font-family:var(--font-mono); letter-spacing:.04em; text-transform:uppercase; font-size:var(--text-xs);}
+.harness .grp{display:inline-flex; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius); padding:2px; flex-wrap:wrap;}
+.harness .grp button{appearance:none; border:0; background:transparent; color:var(--text-secondary); font-size:var(--text-sm);
+  font-weight:600; padding:5px 10px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+.harness .grp button[aria-pressed="true"]{background:var(--accent); color:var(--accent-ink);}
+.harness .sp{flex:1;}
+
+.shell{display:grid; grid-template-columns:1fr; min-height:calc(100dvh - 44px); position:relative;}
+.side{display:none; flex-direction:column; background:var(--bg-surface); border-right:1px solid var(--border);}
+.side .logo{display:flex; align-items:baseline; gap:7px; padding:var(--space-4) var(--space-4) var(--space-3);}
+.side .logo b{font-size:var(--text-md); letter-spacing:.13em; text-transform:uppercase;}
+.side .logo i{font-style:normal; font-size:var(--text-xs); color:var(--text-faint); letter-spacing:.05em;}
+.side nav{display:flex; flex-direction:column; gap:2px; padding:6px var(--space-3);}
+.side nav a{display:flex; align-items:center; gap:11px; padding:9px 11px; border-radius:var(--radius-sm); color:var(--text-secondary);
+  text-decoration:none; font-weight:500; font-size:var(--text-base);}
+.side nav a.active{background:var(--tint-blue); color:var(--accent); font-weight:600;}
+.side nav a .new{margin-left:auto; font-size:9px; letter-spacing:.06em; text-transform:uppercase; color:var(--accent);
+  border:1px solid var(--accent); border-radius:var(--radius-pill); padding:0 6px;}
+.main{min-width:0; display:flex; flex-direction:column;}
+.appbar{display:flex; align-items:center; gap:var(--space-2); padding:var(--space-2) var(--space-3); background:var(--bg-primary);
+  border-bottom:1px solid var(--border);}
+.chipbtn{display:inline-flex; align-items:center; gap:7px; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-secondary);
+  border-radius:var(--radius); padding:7px 11px; font-size:var(--text-sm); white-space:nowrap;}
+.chipbtn b{color:var(--text-primary); font-family:var(--font-mono); font-weight:600;}
+.searchbox{flex:1; max-width:420px; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-faint);
+  border-radius:var(--radius); padding:7px 11px; font-size:var(--text-sm);}
+.abspacer{flex:1;}
+.avatar{width:32px; height:32px; border-radius:50%; background:var(--bg-elevated); border:1px solid var(--border); display:grid;
+  place-items:center; font-size:var(--text-sm); font-weight:700; color:var(--text-secondary); flex:none;}
+.content{padding:var(--space-4); display:flex; flex-direction:column; gap:var(--space-4); max-width:1180px; width:100%;}
+.htitle{display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap;}
+.htitle h1{margin:0; font-size:var(--text-xl); font-weight:700; letter-spacing:-.01em;}
+.htitle p{margin:3px 0 0; color:var(--text-secondary); max-width:640px;}
+
+.panel{background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-lg); overflow:hidden;}
+.phead{display:flex; align-items:center; gap:9px; padding:12px 16px; border-bottom:1px solid var(--border); flex-wrap:wrap;}
+.phead h2{margin:0; font-size:var(--text-md); font-weight:700;}
+.phead .sub{color:var(--text-faint); font-size:var(--text-sm);}
+.phead .cnt{margin-left:auto; font-size:var(--text-sm); color:var(--text-faint); font-variant-numeric:tabular-nums;}
+.pbody{padding:14px 16px;}
+
+table.tbl{width:100%; border-collapse:collapse; font-size:13px;}
+.tbl th{text-align:left; font-size:10.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--text-faint); font-weight:600;
+  padding:9px 14px; border-bottom:1px solid var(--border); white-space:nowrap;}
+.tbl td{padding:10px 14px; border-bottom:1px solid var(--border); vertical-align:top;}
+.tbl tbody tr:last-child > td{border-bottom:0;}
+
+.pill{display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:var(--radius-pill); font-size:11px; font-weight:700; white-space:nowrap;}
+.pill svg{flex:none;}
+.pill-ok{background:var(--state-ok-bg); color:var(--state-ok);}
+.pill-warn{background:var(--state-warn-bg); color:var(--state-warn);}
+.pill-crit{background:var(--state-crit-bg); color:var(--state-crit);}
+.pill-neutral{background:var(--state-neutral-bg); color:var(--state-neutral);}
+.pill-acc{background:var(--tint-blue); color:var(--accent);}
+
+.btn{appearance:none; border:1px solid var(--accent); background:var(--accent); color:var(--accent-ink); font-size:var(--text-sm);
+  font-weight:600; padding:7px 14px; border-radius:var(--radius); cursor:pointer; white-space:nowrap; display:inline-flex; align-items:center; gap:7px;}
+.btn:disabled{opacity:.45; cursor:not-allowed;}
+.btn-sec{appearance:none; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-secondary); font-size:var(--text-sm);
+  font-weight:600; padding:7px 13px; border-radius:var(--radius); cursor:pointer; white-space:nowrap;}
+.btn-danger{appearance:none; border:1px solid var(--state-crit); background:var(--state-crit); color:var(--bg-surface); font-size:var(--text-sm);
+  font-weight:700; padding:7px 14px; border-radius:var(--radius); cursor:pointer; white-space:nowrap; display:inline-flex; align-items:center; gap:7px;}
+.btn-danger:disabled{opacity:.45; cursor:not-allowed;}
+.btn-danger-soft{appearance:none; border:1px solid var(--state-crit); background:var(--state-crit-bg); color:var(--state-crit); font-size:11px;
+  font-weight:600; padding:5px 11px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+.btn-sm{font-size:11px; padding:5px 11px; border-radius:var(--radius-sm);}
+button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+
+.field{display:flex; flex-direction:column; gap:5px; min-width:0;}
+.field label, .lbl{font-size:var(--text-xs); letter-spacing:var(--tracking-label); text-transform:uppercase; color:var(--text-faint); font-weight:600;}
+.field .req{color:var(--state-crit);}
+select, textarea, input[type=text], input[type=email]{appearance:none; width:100%; background:var(--bg-surface); color:var(--text-primary);
+  border:1px solid var(--border); border-radius:var(--radius); padding:8px 11px; font:inherit; font-size:var(--text-base);}
+select{background-image:linear-gradient(45deg,transparent 50%,var(--text-faint) 50%),linear-gradient(135deg,var(--text-faint) 50%,transparent 50%);
+  background-position:calc(100% - 15px) 52%, calc(100% - 10px) 52%; background-size:5px 5px; background-repeat:no-repeat; padding-right:30px;}
+textarea{resize:vertical; min-height:92px; line-height:1.5;}
+.field.bad select, .field.bad textarea, .field.bad input{border-color:var(--state-crit);}
+.hint{font-size:var(--text-sm); color:var(--text-faint);}
+.hint b{color:var(--text-secondary); font-weight:600;}
+
+.msg{display:flex; align-items:flex-start; gap:8px; padding:9px 12px; border-radius:var(--radius); font-size:12.5px; line-height:1.45;}
+.msg svg{flex:none; margin-top:2px;}
+.msg-crit{background:var(--state-crit-bg); color:var(--state-crit); border:1px solid var(--state-crit);}
+.msg-warn{background:var(--state-warn-bg); color:var(--state-warn); border:1px solid var(--state-warn);}
+.msg-info{background:var(--tint-blue); color:var(--text-primary); border:1px solid var(--border);}
+.msg b{font-weight:700;}
+
+.spin{width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:sp .7s linear infinite; flex:none; display:inline-block;}
+@keyframes sp{to{transform:rotate(360deg);}}
+@media (prefers-reduced-motion: reduce){.spin{animation:none;}}
+.skel{background:var(--bg-elevated); border-radius:6px; height:12px;}
+
+.toast{position:absolute; left:50%; top:80px; transform:translateX(-50%); background:var(--bg-elevated); border:1px solid var(--border);
+  color:var(--text-primary); padding:9px 16px; border-radius:var(--radius); font-size:12.5px; font-weight:600; box-shadow:var(--shadow);
+  z-index:300; max-width:88%; display:none;}
+.toast.show{display:block;}
+
+@media (min-width:1024px){
+  .shell{grid-template-columns:230px 1fr;}
+  .side{display:flex;}
+  .content{padding:var(--space-5) var(--space-6) 40px;}
+}
+@media (max-width:640px){
+  .searchbox{display:none;}
+  .harness{padding:8px 12px;}
+}
+
+/* ---- crossing prompt (Story #4723) ---- */
+.bgpage{filter:none;}
+.trow-hl > td{background:var(--tint-blue);}
+.loadcell{display:inline-flex; align-items:center; gap:7px; color:var(--text-faint); font-size:var(--text-sm);}
+
+.overlay{position:absolute; inset:0; background:rgba(0,0,0,.55); z-index:200; display:flex; justify-content:center;
+  align-items:flex-start; padding:56px 16px 32px;}
+.overlay[hidden]{display:none;}
+.cx{width:100%; max-width:540px; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-lg);
+  overflow:hidden; box-shadow:var(--shadow);}
+.cx-title{display:flex; align-items:center; padding:10px 13px; background:var(--bg-elevated); border-bottom:1px solid var(--border);}
+.cx-title span{font-family:var(--font-mono); font-size:var(--text-sm); color:var(--text-faint); margin:0 auto; letter-spacing:.02em;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.cx-body{padding:22px 24px 20px; display:flex; flex-direction:column; gap:16px;}
+.cx-head{display:flex; gap:14px; align-items:flex-start;}
+.cx-ico{width:44px; height:44px; border-radius:12px; background:var(--state-neutral-bg); color:var(--state-neutral); display:grid; place-items:center; flex:none;}
+.cx-head h2{margin:0; font-size:var(--text-lg); font-weight:700;}
+.cx-head p{margin:4px 0 0; color:var(--text-secondary); font-size:var(--text-base);}
+.cx-head .tid{font-family:var(--font-mono); font-weight:600; color:var(--text-primary); overflow-wrap:anywhere;}
+
+.path{border:1px solid var(--border); border-radius:var(--radius); padding:13px 14px;}
+.path-top{display:flex; align-items:center; gap:8px; margin-bottom:6px;}
+.path-top .num{width:20px; height:20px; border-radius:50%; display:grid; place-items:center; font-size:11px; font-weight:700; flex:none;}
+.path-top h3{margin:0; font-size:var(--text-md); font-weight:700;}
+.p1{background:var(--tint-blue);}
+.p1 .num{background:var(--accent); color:var(--accent-ink);}
+.p1 p{margin:0; color:var(--text-secondary); font-size:13px; line-height:1.55;}
+.p1 p b{color:var(--text-primary);}
+.p2 .num{background:var(--state-crit-bg); color:var(--state-crit); border:1px solid var(--state-crit);}
+.p2 .lead{margin:0 0 12px; color:var(--text-secondary); font-size:13px;}
+.p2 form{display:flex; flex-direction:column; gap:12px;}
+.cnt{display:flex; justify-content:space-between; gap:8px; font-size:var(--text-sm); color:var(--text-faint); font-variant-numeric:tabular-nums;}
+.cnt .ok{color:var(--state-ok);}
+.cnt .bad{color:var(--state-crit);}
+.or{display:flex; align-items:center; gap:10px; color:var(--text-faint); font-size:var(--text-xs); letter-spacing:var(--tracking-label); text-transform:uppercase;}
+.or::before, .or::after{content:""; flex:1; height:1px; background:var(--border);}
+
+.cx-foot{display:flex; justify-content:flex-end; align-items:center; gap:8px; padding:12px 24px; border-top:1px solid var(--border); background:var(--bg-primary); flex-wrap:wrap;}
+.cx-foot .kbd{margin-right:auto; font-size:var(--text-sm); color:var(--text-faint);}
+.cx-foot .kbd kbd{font-family:var(--font-mono); font-size:10.5px; border:1px solid var(--border); border-bottom-width:2px; border-radius:5px; padding:0 5px; background:var(--bg-surface);}
+
+/* waiting state */
+.wait{display:flex; flex-direction:column; align-items:center; text-align:center; gap:12px; padding:6px 0 2px;}
+.wait .big{width:52px; height:52px; border-radius:14px; background:var(--state-warn-bg); color:var(--state-warn); display:grid; place-items:center;}
+.wait .big .spin{width:20px; height:20px; border-width:2.5px;}
+.wait h3{margin:0; font-size:var(--text-lg);}
+.wait p{margin:0; color:var(--text-secondary); max-width:400px; font-size:13px; line-height:1.55;}
+.summary{width:100%; text-align:left; background:var(--bg-sunk); border:1px solid var(--border); border-radius:var(--radius); padding:11px 13px;
+  display:grid; grid-template-columns:auto 1fr; gap:6px 14px; font-size:12.5px;}
+.summary dt{color:var(--text-faint); font-size:var(--text-xs); letter-spacing:var(--tracking-label); text-transform:uppercase; padding-top:2px;}
+.summary dd{margin:0; overflow-wrap:anywhere;}
+.poll{display:inline-flex; align-items:center; gap:6px; font-size:var(--text-sm); color:var(--text-faint); font-variant-numeric:tabular-nums;}
+.poll .dot{width:7px; height:7px; border-radius:50%; background:var(--state-warn);}
+
+.unlocked{display:none;}
+body.done .unlocked{display:block;}
+body.done .lockedrow{display:none;}
+.unlocked-row{display:none;}
+body.done .unlocked-row{display:table-row;}
+span.unlocked{display:none;} body.done span.unlocked{display:inline;}
+
+@media (max-width:640px){
+  .overlay{padding:12px 8px 20px;}
+  .cx-body{padding:18px 16px 16px;}
+  .cx-foot{padding:12px 16px;}
+  .cx-foot .kbd{display:none;}
+  .cx-foot button{flex:1; justify-content:center;}
+  .tbl .hide-sm{display:none;}
+}
+</style>
+</head>
+<body>
+
+<div class="harness" role="group" aria-label="Mockup controls">
+  <span class="hl">Mockup · #4723 crossing prompt</span>
+  <div class="grp" id="stateGrp">
+    <button data-state="empty" aria-pressed="true">Prompt</button>
+    <button data-state="filled" aria-pressed="false">Filled</button>
+    <button data-state="error" aria-pressed="false">Error 403</button>
+    <button data-state="waiting" aria-pressed="false">Waiting (2nd approver)</button>
+    <button data-state="done" aria-pressed="false">Granted → retried</button>
+  </div>
+  <span class="sp"></span>
+  <div class="grp" id="themeGrp">
+    <button data-theme-mode="auto" aria-pressed="true">Auto</button>
+    <button data-theme-mode="light" aria-pressed="false">Light</button>
+    <button data-theme-mode="dark" aria-pressed="false">Dark</button>
+  </div>
+</div>
+
+<div class="shell bgpage" id="bgpage">
+  <aside class="side">
+    <div class="logo"><b>CFGMS</b><i>controller</i></div>
+    <nav>
+      <a>Fleet</a><a>Cases</a><a>Modules</a><a>Config</a><a>Workflows</a><a>Scripts</a><a>Registration</a>
+      <a>Refresh Requests</a><a>Reports</a><a>Audit</a><a>Accounts</a><a>Certificates</a><a>Installer</a>
+      <a class="active">Tenants</a>
+    </nav>
+  </aside>
+  <div class="main">
+    <div class="appbar">
+      <span class="chipbtn">Tenant <b>root</b></span>
+      <span class="searchbox">Search…</span>
+      <span class="abspacer"></span>
+      <span class="avatar">RO</span>
+    </div>
+    <div class="content">
+      <div class="htitle"><div><h1>Tenants</h1><p>Signed in as <b class="mono">root-ops</b> (root scope). You see MSPs only. Client tenants stay hidden until the MSP gives access.</p></div></div>
+      <div class="panel">
+        <table class="tbl">
+          <thead><tr><th>Tenant</th><th class="hide-sm">Devices</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr class="trow-hl"><td><span class="mono" style="font-weight:600">msp-a</span><div class="hint"><span class="lockedrow">MSP · client tenants hidden</span><span class="unlocked">MSP · access open</span></div></td>
+              <td class="hide-sm"><span class="lockedrow loadcell"><span class="spin"></span>Opening…</span><span class="unlocked">214</span></td><td><span class="pill pill-ok">Active</span></td></tr>
+            <tr class="unlocked-row"><td><span class="mono" style="font-weight:600;padding-left:18px">client-2</span><div class="hint" style="padding-left:18px">root/msp-a/client-2</div></td><td class="hide-sm">82</td><td><span class="pill pill-ok">Active</span></td></tr>
+            <tr class="unlocked-row"><td><span class="mono" style="font-weight:600;padding-left:18px">client-3</span><div class="hint" style="padding-left:18px">root/msp-a/client-3</div></td><td class="hide-sm">9</td><td><span class="pill pill-ok">Active</span></td></tr>
+            <tr><td><span class="mono" style="font-weight:600">msp-b</span><div class="hint">MSP · client tenants hidden</div></td><td class="hide-sm">—</td><td><span class="pill pill-ok">Active</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="msg msg-warn unlocked"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+        <span>Prompt closed. The original request ran again. msp-a and its client tenants are now visible while access lasts. (The elevation banner is a separate story.)</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ the crossing prompt ============ -->
+<div class="overlay" id="overlay">
+  <div class="cx" role="dialog" aria-modal="true" aria-labelledby="cxh">
+    <div class="cx-title"><span id="cxtitle">tenant access required</span></div>
+
+    <!-- prompt view -->
+    <div id="vPrompt">
+      <div class="cx-body">
+        <div class="cx-head">
+          <span class="cx-ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
+          <div>
+            <h2 id="cxh">The MSP controls access to this tenant</h2>
+            <p>You are signed in at root. To see inside <span class="tid">msp-a</span> and its clients, you need access that msp-a gives, or an audited emergency elevation.</p>
+          </div>
+        </div>
+
+        <div class="path p1">
+          <div class="path-top"><span class="num">1</span><h3>Ask the MSP for support access</h3><span class="pill pill-acc" style="margin-left:auto">Recommended</span></div>
+          <p>An msp-a administrator can turn on <b>support access</b> from their own console (<b>Support access</b> page), for 1 to 24 hours. It opens msp-a to the whole CFGMS root support team. Access then opens by itself. You do not need to do anything here.</p>
+        </div>
+
+        <div class="or">or, only in an emergency</div>
+
+        <div class="path p2">
+          <div class="path-top"><span class="num">2</span><h3>Break-glass</h3></div>
+          <p class="lead">Open msp-a now, without the MSP. Use this only when the MSP cannot act, for example when they are locked out.</p>
+          <form id="bgform" novalidate>
+            <div class="field" id="fReason">
+              <label for="reason">Reason <span class="req">*</span></label>
+              <select id="reason" required>
+                <option value="">Choose a reason…</option>
+                <option value="account_recovery">Account recovery: the MSP is locked out</option>
+                <option value="security_incident">Security incident</option>
+                <option value="legal_request">Legal request</option>
+                <option value="billing_dispute">Billing dispute</option>
+              </select>
+            </div>
+            <div class="field" id="fJust">
+              <label for="just">Justification <span class="req">*</span></label>
+              <textarea id="just" maxlength="1000" placeholder="What happened, and why the MSP cannot grant access. Include a ticket number if you have one."></textarea>
+              <div class="cnt"><span id="jhint">At least 10 characters.</span><span id="jcount">0 / 1000</span></div>
+            </div>
+            <div class="msg msg-warn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+              <span><b>The MSP is told right away.</b> They see your name, reason and justification in their console and audit log, and by email if email is set up.</span></div>
+            <div class="msg msg-crit" id="errbox" hidden><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+              <span id="errtext"></span></div>
+          </form>
+        </div>
+      </div>
+      <div class="cx-foot">
+        <span class="kbd"><kbd>Esc</kbd> to cancel</span>
+        <button class="btn-sec" id="cancel1">Cancel</button>
+        <button class="btn-danger" id="submit" disabled>Use break-glass</button>
+      </div>
+    </div>
+
+    <!-- waiting view -->
+    <div id="vWait" hidden>
+      <div class="cx-body">
+        <div class="wait">
+          <span class="big"><span class="spin"></span></span>
+          <h3>Waiting for a second approver</h3>
+          <p>Your break-glass request is in. This controller needs a second root operator to approve it. msp-a opens here as soon as they do.</p>
+          <dl class="summary">
+            <dt>MSP</dt><dd class="mono">msp-a</dd>
+            <dt>Reason</dt><dd>Account recovery: the MSP is locked out</dd>
+            <dt>Justification</dt><dd id="wjust">MSP owner lost both passkeys; ticket INC-4821. Need to reset their admin account.</dd>
+          </dl>
+          <span class="poll"><span class="dot"></span>Checking every 5 s · waiting <span id="wclock" class="mono">00:42</span></span>
+        </div>
+      </div>
+      <div class="cx-foot">
+        <span class="kbd">The request stays open if you stop waiting.</span>
+        <button class="btn-sec" id="cancel2">Stop waiting</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  var root = document.documentElement;
+  var reason = document.getElementById('reason'), just = document.getElementById('just');
+  var submit = document.getElementById('submit'), errbox = document.getElementById('errbox'), errtext = document.getElementById('errtext');
+  var overlay = document.getElementById('overlay'), vPrompt = document.getElementById('vPrompt'), vWait = document.getElementById('vWait');
+  var SAMPLE = 'MSP owner lost both passkeys; ticket INC-4821. Need to reset their admin account.';
+  var waitSec = 42, timer = null;
+
+  function press(grp, btn){ grp.querySelectorAll('button').forEach(function(b){ b.setAttribute('aria-pressed', b===btn ? 'true':'false'); }); }
+  function validate(){
+    var n = just.value.trim().length;
+    document.getElementById('jcount').textContent = just.value.length + ' / 1000';
+    var h = document.getElementById('jhint');
+    if (n === 0){ h.textContent = 'At least 10 characters.'; h.className = ''; }
+    else if (n < 10){ h.textContent = (10-n) + ' more characters needed.'; h.className = 'bad'; }
+    else { h.textContent = 'Looks good.'; h.className = 'ok'; }
+    submit.disabled = !(reason.value && n >= 10 && n <= 1000);
+  }
+  function showErr(t){ if (t){ errtext.innerHTML = t; errbox.hidden = false; } else { errbox.hidden = true; } }
+  function clock(){ var m = Math.floor(waitSec/60), s = waitSec%60; document.getElementById('wclock').textContent = String(m).padStart(2,'0')+':'+String(s).padStart(2,'0'); }
+  function toast(t){ var el = document.getElementById('toast'); el.textContent = t; el.classList.add('show'); setTimeout(function(){ el.classList.remove('show'); }, 2600); }
+
+  function setState(s){
+    clearInterval(timer); timer = null;
+    document.body.classList.remove('done');
+    overlay.hidden = false; vPrompt.hidden = false; vWait.hidden = true; showErr('');
+    document.getElementById('cxtitle').textContent = 'tenant access required';
+    if (s === 'empty'){ reason.value = ''; just.value = ''; }
+    if (s === 'filled' || s === 'error'){ reason.value = 'account_recovery'; just.value = SAMPLE; }
+    if (s === 'error'){ showErr('<b>Break-glass refused.</b> Only a root-scoped session can use break-glass. Sign in with a root account and try again.'); }
+    if (s === 'waiting'){
+      vPrompt.hidden = true; vWait.hidden = false; document.getElementById('cxtitle').textContent = 'break-glass pending approval';
+      waitSec = 42; clock(); timer = setInterval(function(){ waitSec++; clock(); }, 1000);
+    }
+    if (s === 'done'){ overlay.hidden = true; document.body.classList.add('done'); }
+    validate();
+  }
+
+  reason.addEventListener('change', validate); just.addEventListener('input', validate);
+  submit.addEventListener('click', function(e){ e.preventDefault(); if (!submit.disabled){ press(stateGrp, stateGrp.querySelector('[data-state=waiting]')); setState('waiting'); } });
+  function cancel(){ overlay.hidden = true; clearInterval(timer); toast('Cancelled. The request returned the original "access required" error.'); }
+  document.getElementById('cancel1').addEventListener('click', cancel);
+  document.getElementById('cancel2').addEventListener('click', cancel);
+  document.addEventListener('keydown', function(e){ if (e.key === 'Escape' && !overlay.hidden) cancel(); });
+
+  var stateGrp = document.getElementById('stateGrp');
+  stateGrp.addEventListener('click', function(e){ var b = e.target.closest('button'); if (!b) return; press(stateGrp, b); setState(b.dataset.state); });
+  var themeGrp = document.getElementById('themeGrp');
+  themeGrp.addEventListener('click', function(e){ var b = e.target.closest('button'); if (!b) return; press(themeGrp, b);
+    if (b.dataset.themeMode === 'auto') root.removeAttribute('data-theme'); else root.setAttribute('data-theme', b.dataset.themeMode); });
+
+  var q = new URLSearchParams(location.search);
+  if (q.get('theme')) root.setAttribute('data-theme', q.get('theme'));
+  var st = q.get('state') || 'empty';
+  var sb = stateGrp.querySelector('[data-state="'+st+'"]'); if (sb) press(stateGrp, sb);
+  setState(st);
+})();
+</script>
+</body>
+</html>

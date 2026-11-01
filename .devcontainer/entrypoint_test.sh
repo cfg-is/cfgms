@@ -1,0 +1,1303 @@
+#!/usr/bin/env bash
+# Tests for .devcontainer/agent-context.sh (Issue #854).
+#
+# Exercises the rendering helpers against canned JSON fixtures and the no-op
+# detection / idempotent-comment logic against a stub `gh` on $PATH.
+#
+# Run: bash .devcontainer/entrypoint_test.sh
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./agent-context.sh
+source "$SCRIPT_DIR/agent-context.sh"
+
+TESTS_RUN=0
+TESTS_PASSED=0
+FAILURES=()
+
+# --- assertion helpers ---
+
+_fail() {
+    local msg="$1"
+    echo "    ✗ FAIL: $msg"
+    FAILURES+=("$msg")
+}
+
+assert_contains() {
+    local haystack="$1" needle="$2" msg="$3"
+    if [[ "$haystack" == *"$needle"* ]]; then
+        echo "    ✓ $msg"
+    else
+        _fail "$msg — expected to contain: $(printf '%q' "$needle")"
+        echo "      Got (truncated):"
+        echo "$haystack" | head -20 | sed 's/^/        /'
+    fi
+}
+
+assert_not_contains() {
+    local haystack="$1" needle="$2" msg="$3"
+    if [[ "$haystack" != *"$needle"* ]]; then
+        echo "    ✓ $msg"
+    else
+        _fail "$msg — expected NOT to contain: $(printf '%q' "$needle")"
+    fi
+}
+
+assert_equals() {
+    local actual="$1" expected="$2" msg="$3"
+    if [[ "$actual" == "$expected" ]]; then
+        echo "    ✓ $msg"
+    else
+        _fail "$msg — expected $(printf '%q' "$expected"), got $(printf '%q' "$actual")"
+    fi
+}
+
+# run_test <name> <fn>
+run_test() {
+    local name="$1" fn="$2"
+    echo ""
+    echo "--- $name ---"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    local before=${#FAILURES[@]}
+    "$fn"
+    local after=${#FAILURES[@]}
+    if [[ "$before" -eq "$after" ]]; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    fi
+}
+
+# --- stub harness ---
+# Each test that needs stubs sets $TEST_BIN via setup_stubs, places executables
+# in it, and prepends it to PATH. teardown_stubs restores.
+
+setup_stubs() {
+    TEST_BIN=$(mktemp -d)
+    export TEST_BIN
+    # Record calls for later assertion.
+    TEST_CALL_LOG="$TEST_BIN/calls.log"
+    : > "$TEST_CALL_LOG"
+    export TEST_CALL_LOG
+    ORIG_PATH="$PATH"
+    export PATH="$TEST_BIN:$PATH"
+}
+
+teardown_stubs() {
+    export PATH="$ORIG_PATH"
+    rm -rf "$TEST_BIN"
+    unset TEST_BIN TEST_CALL_LOG ORIG_PATH
+}
+
+# Creates a gh stub that dispatches on argv and prints canned responses from
+# $TEST_BIN/responses/<case>.json. Also appends every invocation to calls.log.
+install_gh_stub() {
+    cat > "$TEST_BIN/gh" <<'STUB'
+#!/usr/bin/env bash
+echo "gh $*" >> "$TEST_CALL_LOG"
+# Dispatch: the test writes a dispatcher to $TEST_BIN/gh_dispatch.sh which
+# handles case-by-case responses.
+if [[ -f "$TEST_BIN/gh_dispatch.sh" ]]; then
+    source "$TEST_BIN/gh_dispatch.sh" "$@"
+else
+    echo "[]"
+fi
+STUB
+    chmod +x "$TEST_BIN/gh"
+}
+
+# ============================================================================
+# TEST 1 — fix-pr with conversation-only comments (AC1, Test 1 from #854)
+# ============================================================================
+test_01_conversation_comments_render() {
+    local json='[
+      {"user":{"login":"alice"},"created_at":"2026-04-23T22:00:00Z","body":"Check the TestRapidDisconnect failure"},
+      {"user":{"login":"bob"},"created_at":"2026-04-23T22:05:00Z","body":"Agreed, priority 1 fix"}
+    ]'
+    local output
+    output=$(ac_render_conversation_comments "$json")
+    assert_contains "$output" "### PR Conversation Comments" "section header present"
+    assert_contains "$output" "Check the TestRapidDisconnect failure" "first body rendered"
+    assert_contains "$output" "Agreed, priority 1 fix" "second body rendered"
+    assert_contains "$output" "**alice**" "first author rendered"
+    assert_contains "$output" "**bob**" "second author rendered"
+    assert_contains "$output" "2026-04-23T22:00:00Z" "first timestamp"
+    assert_contains "$output" "2026-04-23T22:05:00Z" "second timestamp"
+}
+
+# ============================================================================
+# TEST 2 — issue comments render (AC3, Test 2 from #854)
+# ============================================================================
+test_02_issue_comments_render() {
+    local json='[
+      {"author":{"login":"po"},"createdAt":"2026-04-20T10:00:00Z","body":"Scope clarification: only OSS path"},
+      {"author":{"login":"reviewer"},"createdAt":"2026-04-21T14:30:00Z","body":"Please also cover macOS"}
+    ]'
+    local output
+    output=$(ac_render_issue_comments "$json")
+    assert_contains "$output" "## Issue Comments" "section header"
+    assert_contains "$output" "Scope clarification: only OSS path" "first body"
+    assert_contains "$output" "Please also cover macOS" "second body"
+    assert_contains "$output" "**po**" "first author"
+    assert_contains "$output" "**reviewer**" "second author"
+}
+
+# ============================================================================
+# TEST 3 — silent no-op detection flags and does NOT post duplicate (AC4, AC5)
+# ============================================================================
+test_03_no_op_detection() {
+    # HEAD unchanged → ac_detect_no_op returns 1 (no-op)
+    if ac_detect_no_op "abc123" "abc123"; then
+        _fail "ac_detect_no_op should return 1 when SHAs equal"
+    else
+        echo "    ✓ ac_detect_no_op returns 1 when SHAs equal"
+    fi
+
+    # HEAD advanced → ac_detect_no_op returns 0 (work happened)
+    if ac_detect_no_op "abc123" "def456"; then
+        echo "    ✓ ac_detect_no_op returns 0 when SHAs differ"
+    else
+        _fail "ac_detect_no_op should return 0 when SHAs differ"
+    fi
+
+    # Empty args → treat as no-op (fail closed)
+    if ac_detect_no_op "" "abc123"; then
+        _fail "ac_detect_no_op should return 1 when pre empty"
+    else
+        echo "    ✓ ac_detect_no_op returns 1 when pre is empty"
+    fi
+}
+
+# ============================================================================
+# TEST 4 — successful fix advances head (AC5)
+# This is covered by test 3's SHA-differ case; add a JSON shape check.
+# ============================================================================
+test_04_head_sha_fields_shape() {
+    # Simulate the JSON snippet that will go into /tmp/agent-result.json
+    local pre="aaaaaaa" post="bbbbbbb"
+    local head_advanced
+    if ac_detect_no_op "$pre" "$post"; then
+        head_advanced="true"
+    else
+        head_advanced="false"
+    fi
+    assert_equals "$head_advanced" "true" "head_advanced=true when SHA changed"
+
+    if ac_detect_no_op "$pre" "$pre"; then
+        head_advanced="true"
+    else
+        head_advanced="false"
+    fi
+    assert_equals "$head_advanced" "false" "head_advanced=false when SHA same"
+}
+
+# ============================================================================
+# TEST 5 — failing CI context renders (AC7)
+# ============================================================================
+test_05_failing_checks_render() {
+    local json='[
+      {"name":"Native Build (ubuntu-latest)","conclusion":"FAILURE","detailsUrl":"https://github.com/o/r/actions/runs/123/job/456","log_tail":"--- FAIL: TestRapidDisconnectReconnectCycles\nExpected 1 got 0"},
+      {"name":"Build Gate","conclusion":"FAILURE","detailsUrl":"https://github.com/o/r/actions/runs/123/job/789","log_tail":""}
+    ]'
+    local output
+    output=$(ac_render_failing_checks "$json")
+    assert_contains "$output" "### Failing CI Checks" "section header"
+    assert_contains "$output" "#### Native Build (ubuntu-latest)" "first check name"
+    assert_contains "$output" "#### Build Gate" "second check name"
+    assert_contains "$output" "TestRapidDisconnectReconnectCycles" "log tail content"
+    assert_contains "$output" "Log tail unavailable" "empty-log fallback message"
+    assert_contains "$output" "actions/runs/123/job/456" "first detailsUrl"
+    assert_contains "$output" "actions/runs/123/job/789" "second detailsUrl"
+}
+
+# ============================================================================
+# TEST 6 — resolution state annotation (AC8)
+# ============================================================================
+test_06_inline_resolution_state() {
+    local inline='[
+      {"id":1001,"user":{"login":"reviewer"},"created_at":"2026-04-22T10:00:00Z","body":"Fix this nil-check","path":"features/rbac/manager.go","line":120},
+      {"id":1002,"user":{"login":"reviewer"},"created_at":"2026-04-22T10:05:00Z","body":"Rename X to Y","path":"features/rbac/manager.go","line":150}
+    ]'
+    local resolution='[
+      {"id":1001,"is_resolved":true},
+      {"id":1002,"is_resolved":false}
+    ]'
+    local output
+    output=$(ac_render_inline_comments "$inline" "$resolution")
+    assert_contains "$output" "[RESOLVED]" "resolved prefix present"
+    assert_contains "$output" "[UNRESOLVED]" "unresolved prefix present"
+    # Count only lines that START with the prefix (excludes the hint line).
+    local resolved_count unresolved_count
+    resolved_count=$(echo "$output" | grep -c "^\[RESOLVED\]" || true)
+    unresolved_count=$(echo "$output" | grep -c "^\[UNRESOLVED\]" || true)
+    assert_equals "$resolved_count" "1" "exactly one leading [RESOLVED] prefix"
+    assert_equals "$unresolved_count" "1" "exactly one leading [UNRESOLVED] prefix"
+    assert_contains "$output" "Fix this nil-check" "resolved body present"
+    assert_contains "$output" "Rename X to Y" "unresolved body present"
+    # Agent guidance present
+    assert_contains "$output" "UNRESOLVED" "agent hint mentions UNRESOLVED priority"
+}
+
+# ============================================================================
+# TEST 7 — chronological ordering (AC9)
+# ============================================================================
+test_07_chronological_ordering() {
+    # Three conversation comments in non-chronological input order.
+    local json='[
+      {"user":{"login":"second"},"created_at":"2026-04-22T12:00:00Z","body":"B-middle"},
+      {"user":{"login":"first"},"created_at":"2026-04-22T10:00:00Z","body":"A-oldest"},
+      {"user":{"login":"third"},"created_at":"2026-04-22T14:00:00Z","body":"C-newest"}
+    ]'
+    local output
+    output=$(ac_render_conversation_comments "$json")
+    # Find positions of each body in the output
+    local pos_a pos_b pos_c
+    pos_a=$(echo "$output" | grep -n "A-oldest" | head -1 | cut -d: -f1)
+    pos_b=$(echo "$output" | grep -n "B-middle" | head -1 | cut -d: -f1)
+    pos_c=$(echo "$output" | grep -n "C-newest" | head -1 | cut -d: -f1)
+    if [[ -z "$pos_a" ]] || [[ -z "$pos_b" ]] || [[ -z "$pos_c" ]]; then
+        _fail "positions not all found: a=$pos_a b=$pos_b c=$pos_c"
+        return
+    fi
+    if (( pos_a < pos_b )) && (( pos_b < pos_c )); then
+        echo "    ✓ comments sorted chronologically (A=$pos_a, B=$pos_b, C=$pos_c)"
+    else
+        _fail "expected chronological order — got A=$pos_a B=$pos_b C=$pos_c"
+    fi
+}
+
+# ============================================================================
+# TEST 8 — idempotent no-op comment (AC4 refinement, Test 8 from #854)
+# ============================================================================
+test_08_idempotent_no_op_comment() {
+    setup_stubs
+    install_gh_stub
+    # Dispatcher: first call to `gh api` (fetch) returns an existing comment
+    # matching the no-op template; second invocation of gh pr comment (post)
+    # must NOT happen.
+    cat > "$TEST_BIN/gh_dispatch.sh" <<'DISP'
+#!/usr/bin/env bash
+case "$1 $2" in
+    "api repos/o/r/issues/42/comments")
+        # Simulate an existing no-op comment. Include the canonical first line
+        # so the idempotency guard matches.
+        cat <<'EXISTING'
+[{"id":9001,"user":{"login":"cfgms-bot"},"created_at":"2026-04-23T22:00:00Z","body":"Fix agent ran but made no changes. Container: `cfg-agent-pr-fix-42`.\n\nRest of message..."}]
+EXISTING
+        ;;
+    "pr comment")
+        # If this gets called, the test should fail — but we still record it.
+        echo "POSTED_COMMENT" >> "$TEST_CALL_LOG"
+        echo "https://github.com/o/r/pull/42#issuecomment-fake"
+        ;;
+    *) echo "[]" ;;
+esac
+DISP
+
+    local rc=0
+    ac_post_no_op_comment "o" "r" "42" "cfg-agent-pr-fix-42" || rc=$?
+    assert_equals "$rc" "0" "idempotent skip returns 0"
+    # Verify the post was NOT called.
+    if grep -q "POSTED_COMMENT" "$TEST_CALL_LOG"; then
+        _fail "gh pr comment should not have been called when duplicate exists"
+    else
+        echo "    ✓ gh pr comment was NOT invoked (duplicate detected)"
+    fi
+    teardown_stubs
+}
+
+# ============================================================================
+# TEST 9 — no-op comment IS posted when no duplicate exists
+# ============================================================================
+test_09_no_op_comment_posts_when_new() {
+    setup_stubs
+    install_gh_stub
+    cat > "$TEST_BIN/gh_dispatch.sh" <<'DISP'
+#!/usr/bin/env bash
+case "$1 $2" in
+    "api repos/o/r/issues/43/comments")
+        # No existing comments — force a post.
+        echo "[]"
+        ;;
+    "pr comment")
+        echo "POSTED_COMMENT_43" >> "$TEST_CALL_LOG"
+        echo "https://github.com/o/r/pull/43#issuecomment-real"
+        ;;
+    *) echo "[]" ;;
+esac
+DISP
+
+    local rc=0
+    ac_post_no_op_comment "o" "r" "43" "cfg-agent-pr-fix-43" || rc=$?
+    assert_equals "$rc" "0" "fresh post returns 0"
+    if grep -q "POSTED_COMMENT_43" "$TEST_CALL_LOG"; then
+        echo "    ✓ gh pr comment WAS invoked when no duplicate exists"
+    else
+        _fail "expected gh pr comment to be invoked"
+    fi
+    teardown_stubs
+}
+
+# ============================================================================
+# TEST 10 — linked issue section renders (AC2)
+# ============================================================================
+test_10_linked_issue_section() {
+    local json='{"title":"Fix flaky test","body":"The test is flaky under load.","labels":[{"name":"bug"},{"name":"high-priority"}],"comments":[{"author":{"login":"po"},"createdAt":"2026-04-22T10:00:00Z","body":"Blocking release"}]}'
+    local output
+    output=$(ac_render_linked_issue "$json" "999")
+    assert_contains "$output" "## Linked Issue #999: Fix flaky test" "title header"
+    assert_contains "$output" "The test is flaky under load" "body"
+    assert_contains "$output" "**Labels:** bug, high-priority" "labels line"
+    assert_contains "$output" "### Linked Issue Comments" "comments sub-header"
+    assert_contains "$output" "Blocking release" "comment body"
+    assert_contains "$output" "**po**" "comment author"
+}
+
+# ============================================================================
+# TEST 11 — empty inputs produce explicit empty-state messages (AC6 dry-run sanity)
+# ============================================================================
+test_11_empty_inputs() {
+    local out
+    out=$(ac_render_conversation_comments '[]')
+    assert_contains "$out" "_No PR conversation comments._" "empty conversation sentinel"
+
+    out=$(ac_render_issue_comments '[]')
+    assert_contains "$out" "_No issue comments._" "empty issue comments sentinel"
+
+    out=$(ac_render_inline_comments '[]' '[]')
+    assert_contains "$out" "_No inline review comments._" "empty inline sentinel"
+
+    out=$(ac_render_failing_checks '[]')
+    assert_contains "$out" "_No failing CI checks._" "empty checks sentinel"
+
+    out=$(ac_render_review_comments '[]')
+    assert_contains "$out" "_No review-level comments._" "empty reviews sentinel"
+}
+
+# ============================================================================
+# TEST 12 — no-op comment body is container-specific and contains breadcrumb text
+# ============================================================================
+test_12_no_op_comment_body_shape() {
+    local body
+    body=$(ac_no_op_comment_body "cfg-agent-pr-fix-999")
+    assert_contains "$body" "cfg-agent-pr-fix-999" "container name embedded"
+    assert_contains "$body" "made no changes" "canonical first-line text"
+    assert_contains "$body" "conversation comment" "mentions conversation comments"
+    assert_contains "$body" "linked issue" "mentions linked issue"
+}
+
+# ============================================================================
+# TEST 13 — review-level comments render with state
+# ============================================================================
+test_13_review_level_comments_render() {
+    local json='[
+      {"author":{"login":"reviewer1"},"state":"CHANGES_REQUESTED","body":"Please fix X","submittedAt":"2026-04-22T10:00:00Z"},
+      {"author":{"login":"reviewer2"},"state":"COMMENTED","body":"Minor nit on Y","submittedAt":"2026-04-22T11:00:00Z"},
+      {"author":{"login":"reviewer3"},"state":"APPROVED","body":""}
+    ]'
+    local output
+    output=$(ac_render_review_comments "$json")
+    assert_contains "$output" "### Review-Level Comments" "header"
+    assert_contains "$output" "Please fix X" "first review body"
+    assert_contains "$output" "Minor nit on Y" "second review body"
+    assert_contains "$output" "(CHANGES_REQUESTED)" "state label first"
+    assert_contains "$output" "(COMMENTED)" "state label second"
+    # Empty-body review (reviewer3 approval-with-no-text) should be filtered out.
+    assert_not_contains "$output" "reviewer3" "approval-without-body skipped"
+}
+
+# ============================================================================
+# Entrypoint subprocess test helpers
+#
+# These helpers set up a self-contained temp directory with stubs for all
+# external dependencies, then invoke entrypoint.sh as a subprocess in
+# --dry-run mode so the prompt-assembly path can be tested without Docker,
+# Claude credentials, or a live GitHub token.
+# ============================================================================
+
+SENTINEL_INJECTION="NON_MEMBER_COMMENT_SENTINEL_XYZZY"
+SENTINEL_PROJECT_BODY="PROJECT_ITEM_BODY_SENTINEL_ABCDE"
+
+setup_entrypoint_stubs() {
+    TEST_ENTRY_DIR=$(mktemp -d)
+    export TEST_ENTRY_DIR
+
+    # Fake home: credentials file with far-future expiry (>>300s remaining)
+    # so the OAuth refresh code path is never triggered.
+    mkdir -p "$TEST_ENTRY_DIR/home/.claude"
+    printf '{"claudeAiOauth":{"expiresAt":9999999999000}}\n' \
+        > "$TEST_ENTRY_DIR/home/.claude/.credentials.json"
+
+    # setup-env.sh stub (no-op) — entrypoint calls this bare-name so PATH must include it.
+    cat > "$TEST_ENTRY_DIR/setup-env.sh" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$TEST_ENTRY_DIR/setup-env.sh"
+
+    # project-queue.sh stub — returns a clean project item (no comments field).
+    cat > "$TEST_ENTRY_DIR/project-queue.sh" <<STUB
+#!/usr/bin/env bash
+printf '{"item_id":"pv2-test-item","title":"Test Story","body":"${SENTINEL_PROJECT_BODY}","issue_num":9999,"status":"Ready","fields":{}}\n'
+STUB
+    chmod +x "$TEST_ENTRY_DIR/project-queue.sh"
+
+    # gh stub — returns injected comments when called for "issue view".
+    # This is the payload that would appear if the entrypoint still called
+    # gh issue view instead of project-queue.sh get-item.
+    cat > "$TEST_ENTRY_DIR/gh" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+    *"issue view"*)
+        printf '{"title":"Test","body":"Issue body","labels":[],"comments":[{"author":{"login":"non-member"},"createdAt":"2026-01-01T00:00:00Z","body":"${SENTINEL_INJECTION}"}]}\n'
+        ;;
+    *"pr list"*)
+        printf '[]\n'
+        ;;
+    *)
+        printf '[]\n'
+        ;;
+esac
+STUB
+    chmod +x "$TEST_ENTRY_DIR/gh"
+
+    ORIG_PATH_ENTRY="$PATH"
+    export PATH="$TEST_ENTRY_DIR:$PATH"
+    export ORIG_PATH_ENTRY
+}
+
+teardown_entrypoint_stubs() {
+    export PATH="$ORIG_PATH_ENTRY"
+    rm -rf "$TEST_ENTRY_DIR"
+    unset TEST_ENTRY_DIR ORIG_PATH_ENTRY
+}
+
+# ============================================================================
+# TEST 14 — dry-run issue mode: injection sentinel absent, project body present
+# (AC1, AC2, AC6 — must fail against develop@HEAD, pass after this story)
+# ============================================================================
+test_14_dry_run_issue_mode_no_injection() {
+    setup_entrypoint_stubs
+
+    local output rc=0
+    output=$(CFGMS_PROJECT_ITEM_ID="pv2-test-item" \
+        CFGMS_TEST_PROJECT_QUEUE="$TEST_ENTRY_DIR/project-queue.sh" \
+        HOME="$TEST_ENTRY_DIR/home" \
+        bash "$SCRIPT_DIR/entrypoint.sh" 9999 --dry-run 2>&1) || rc=$?
+
+    if [[ "$rc" -ne 0 ]]; then
+        _fail "issue --dry-run exited $rc (expected 0)"
+        teardown_entrypoint_stubs
+        return
+    fi
+    assert_not_contains "$output" "$SENTINEL_INJECTION" \
+        "injection sentinel absent from issue-mode prompt"
+    assert_contains "$output" "$SENTINEL_PROJECT_BODY" \
+        "project item body present in issue-mode prompt"
+
+    teardown_entrypoint_stubs
+}
+
+# ============================================================================
+# TEST 15 — dry-run branch mode: injection sentinel absent, project body present
+# (AC1, AC3, AC6 — must fail against develop@HEAD, pass after this story)
+# ============================================================================
+test_15_dry_run_branch_mode_no_injection() {
+    setup_entrypoint_stubs
+
+    local output rc=0
+    output=$(CFGMS_PROJECT_ITEM_ID="pv2-test-item" \
+        CFGMS_TEST_PROJECT_QUEUE="$TEST_ENTRY_DIR/project-queue.sh" \
+        HOME="$TEST_ENTRY_DIR/home" \
+        bash "$SCRIPT_DIR/entrypoint.sh" --branch feature/story-9999-agent --dry-run 2>&1) || rc=$?
+
+    if [[ "$rc" -ne 0 ]]; then
+        _fail "branch --dry-run exited $rc (expected 0)"
+        teardown_entrypoint_stubs
+        return
+    fi
+    assert_not_contains "$output" "$SENTINEL_INJECTION" \
+        "injection sentinel absent from branch-mode prompt"
+    assert_contains "$output" "$SENTINEL_PROJECT_BODY" \
+        "project item body present in branch-mode prompt"
+
+    teardown_entrypoint_stubs
+}
+
+# ============================================================================
+# TEST 16 — hard refusal: CFGMS_PROJECT_ITEM_ID unset → exit non-zero
+# (AC5 — must fail against develop@HEAD, pass after this story)
+# ============================================================================
+test_16_hard_refusal_missing_project_item_id() {
+    setup_entrypoint_stubs
+
+    local output rc=0
+    output=$(HOME="$TEST_ENTRY_DIR/home" \
+        bash "$SCRIPT_DIR/entrypoint.sh" 9999 --dry-run 2>&1) || rc=$?
+
+    if [[ "$rc" -eq 0 ]]; then
+        _fail "entrypoint should exit non-zero when CFGMS_PROJECT_ITEM_ID is unset (got exit 0)"
+        teardown_entrypoint_stubs
+        return
+    fi
+    assert_contains "$output" "CFGMS_PROJECT_ITEM_ID" \
+        "error message names the required env var"
+    echo "    ✓ entrypoint exited $rc (non-zero) with correct message"
+
+    teardown_entrypoint_stubs
+}
+
+# ============================================================================
+# TEST 17 — dry-run: review gate invokes the shared story-review workflow
+# (Story #2308 — must fail against develop@HEAD, pass after this story)
+# The composed prompt must drive the review via `Workflow({name:"story-review"})`
+# with the marker gated on the aggregate `passed:true` verdict, and must NOT still
+# carry the old hand-spawn-three-specialist-agents prose.
+# ============================================================================
+test_17_review_gate_uses_story_review_workflow() {
+    setup_entrypoint_stubs
+
+    local output rc=0
+    output=$(CFGMS_PROJECT_ITEM_ID="pv2-test-item" \
+        CFGMS_TEST_PROJECT_QUEUE="$TEST_ENTRY_DIR/project-queue.sh" \
+        HOME="$TEST_ENTRY_DIR/home" \
+        bash "$SCRIPT_DIR/entrypoint.sh" 9999 --dry-run 2>&1) || rc=$?
+
+    if [[ "$rc" -ne 0 ]]; then
+        _fail "issue --dry-run exited $rc (expected 0)"
+        teardown_entrypoint_stubs
+        return
+    fi
+
+    # The review phase now invokes the shared workflow by name.
+    assert_contains "$output" 'name: "story-review"' \
+        "prompt invokes the story-review workflow"
+    assert_contains "$output" "test-agent-complete" \
+        "workflow is parameterized with the container test target"
+    # Marker is gated on the aggregate verdict, not a single lens.
+    assert_contains "$output" "touch /tmp/agent-validation-passed" \
+        "marker write instruction present"
+    assert_contains "$output" "aggregate workflow verdict" \
+        "marker is gated on the aggregate workflow verdict"
+    # The old hand-spawn-3-agents pattern is gone (regression guard).
+    assert_not_contains "$output" "spawn three specialist review agents" \
+        "old hand-spawn-three-agents prose removed"
+
+    teardown_entrypoint_stubs
+}
+
+# ============================================================================
+# _salvage_no_pr — exit-0-with-no-PR salvage (Issue #3397, root cause of #3158)
+#
+# The helpers are loaded via the CFGMS_ENTRYPOINT_SOURCE_ONLY hook, which
+# returns before any agent flow runs. Each test drives the function inside a
+# throwaway git repo with `git`, `gh` and `project-queue.sh` stubbed to record
+# their invocations, so the assertions are on what the function actually did.
+# ============================================================================
+
+setup_salvage_env() {
+    SALVAGE_DIR="$(mktemp -d)"
+    SALVAGE_LOG="$SALVAGE_DIR/calls.log"
+    : > "$SALVAGE_LOG"
+
+    # gh stub — records every invocation. `gh pr list` prints the contents of
+    # gh-pr-list.out (already in the post---jq "<number> <headRefOid>" shape)
+    # when a test writes one, and exits non-zero when gh-pr-list.fail exists.
+    cat > "$SALVAGE_DIR/gh" <<STUB
+#!/usr/bin/env bash
+echo "gh \$*" >> "$SALVAGE_LOG"
+if [[ "\$1" == "pr" && "\$2" == "list" ]]; then
+    [[ -f "$SALVAGE_DIR/gh-pr-list.fail" ]] && exit 1
+    [[ -f "$SALVAGE_DIR/gh-pr-list.out" ]] && cat "$SALVAGE_DIR/gh-pr-list.out"
+fi
+exit 0
+STUB
+    chmod +x "$SALVAGE_DIR/gh"
+
+    # project-queue.sh stub — records field updates.
+    cat > "$SALVAGE_DIR/project-queue.sh" <<STUB
+#!/usr/bin/env bash
+echo "project-queue \$*" >> "$SALVAGE_LOG"
+case "\$1" in
+    get-item) printf '{"fields":{"ZeroWorkRetries":"0"}}\n' ;;
+esac
+STUB
+    chmod +x "$SALVAGE_DIR/project-queue.sh"
+
+    # A real git repo, so `git status --porcelain` reports honestly. Only the
+    # network-touching subcommands are stubbed out.
+    SALVAGE_REPO="$SALVAGE_DIR/repo"
+    mkdir -p "$SALVAGE_REPO"
+    git -C "$SALVAGE_REPO" init -q
+    git -C "$SALVAGE_REPO" config user.email "test@example.com"
+    git -C "$SALVAGE_REPO" config user.name "Test"
+    echo "seed" > "$SALVAGE_REPO/seed.txt"
+    git -C "$SALVAGE_REPO" add seed.txt
+    git -C "$SALVAGE_REPO" commit -q -m "seed"
+    # An agent clone is branched from develop; salvage measures work against it.
+    git -C "$SALVAGE_REPO" update-ref refs/remotes/origin/develop HEAD
+
+    cat > "$SALVAGE_DIR/git" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == "push" ]]; then
+    echo "git \$*" >> "$SALVAGE_LOG"
+    exit 0
+fi
+exec /usr/bin/env -u PATH_OVERRIDE $(command -v git) "\$@"
+STUB
+    chmod +x "$SALVAGE_DIR/git"
+
+    ORIG_SALVAGE_PATH="$PATH"
+    export PATH="$SALVAGE_DIR:$PATH"
+
+    # Load the helpers without running any agent flow.
+    # shellcheck disable=SC1090
+    CFGMS_ENTRYPOINT_SOURCE_ONLY=1 source "$SCRIPT_DIR/entrypoint.sh"
+}
+
+teardown_salvage_env() {
+    export PATH="$ORIG_SALVAGE_PATH"
+    rm -rf "$SALVAGE_DIR"
+    unset SALVAGE_DIR SALVAGE_LOG SALVAGE_REPO ORIG_SALVAGE_PATH
+}
+
+# T18 — dirty tree: the work is committed and pushed as a draft PR.
+test_18_salvage_captures_uncommitted_work() {
+    setup_salvage_env
+
+    echo "agent work" > "$SALVAGE_REPO/seed.txt"
+
+    (
+        cd "$SALVAGE_REPO" || exit 1
+        CURRENT_BRANCH="feature/story-9999-agent"
+        ISSUE_NUM="9999"
+        EXIT_CODE=0
+        PROJECT_QUEUE="$SALVAGE_DIR/project-queue.sh"
+        CFGMS_PROJECT_ITEM_ID="pv2-test-item"
+        _salvage_no_pr "exited 0 without opening a pull request" > /dev/null 2>&1
+    )
+
+    local log
+    log=$(cat "$SALVAGE_LOG")
+
+    assert_contains "$log" "git push -u origin feature/story-9999-agent" \
+        "salvaged branch is pushed"
+    assert_contains "$log" "pr create --base develop --draft" \
+        "salvaged work becomes a draft PR"
+    assert_contains "$log" "exited 0 without opening a pull request" \
+        "draft PR body carries the reason"
+
+    local subject
+    subject=$(git -C "$SALVAGE_REPO" log --format=%s -1)
+    assert_equals "$subject" "WIP: agent attempt for issue #9999 (exited 0 without opening a pull request)" \
+        "WIP commit records the issue and the reason"
+
+    teardown_salvage_env
+}
+
+# T18b — clean tree, but the agent already committed its work (Issue #4272).
+# That is work, not a zero-work run: push it and open the draft PR, and never
+# route the item for re-dispatch, which would delete the branch.
+test_18b_salvage_captures_committed_work() {
+    setup_salvage_env
+
+    echo "agent fix" > "$SALVAGE_REPO/fix.txt"
+    git -C "$SALVAGE_REPO" add fix.txt
+    git -C "$SALVAGE_REPO" commit -q -m "ci: the agent's own commit (Issue #9999)"
+
+    (
+        cd "$SALVAGE_REPO" || exit 1
+        CURRENT_BRANCH="feature/story-9999-agent"
+        ISSUE_NUM="9999"
+        EXIT_CODE=1
+        PROJECT_QUEUE="$SALVAGE_DIR/project-queue.sh"
+        CFGMS_PROJECT_ITEM_ID="pv2-test-item"
+        _salvage_no_pr "failed validation" > /dev/null 2>&1
+    )
+
+    local log
+    log=$(cat "$SALVAGE_LOG")
+
+    assert_contains "$log" "git push -u origin feature/story-9999-agent" \
+        "committed work is pushed"
+    assert_contains "$log" "pr create --base develop --draft" \
+        "committed work becomes a draft PR"
+    assert_not_contains "$log" "ZeroWorkRetries" \
+        "committed work is not counted as a zero-work retry"
+    assert_not_contains "$log" "status Ready" \
+        "committed work is not reset to Ready for re-dispatch"
+
+    local subject
+    subject=$(git -C "$SALVAGE_REPO" log --format=%s -1)
+    assert_equals "$subject" "ci: the agent's own commit (Issue #9999)" \
+        "no empty WIP commit is stacked on the agent's own commit"
+
+    teardown_salvage_env
+}
+
+# T18c — new (untracked) files are part of the salvage commit. `git add
+# --update` alone skipped them, so a salvage dropped every file the agent
+# created. .gitignore is honoured, and oversized untracked files are left out.
+test_18c_salvage_includes_untracked_files() {
+    setup_salvage_env
+
+    echo "agent edit" > "$SALVAGE_REPO/seed.txt"
+    mkdir -p "$SALVAGE_REPO/pkg/testutil"
+    echo "package testutil" > "$SALVAGE_REPO/pkg/testutil/new_store.go"
+    echo "package testutil" > "$SALVAGE_REPO/pkg/testutil/new_cluster_test.go"
+    printf '*.key\n' > "$SALVAGE_REPO/.gitignore"
+    git -C "$SALVAGE_REPO" add .gitignore
+    git -C "$SALVAGE_REPO" commit -q -m "ignore keys"
+    git -C "$SALVAGE_REPO" update-ref refs/remotes/origin/develop HEAD
+    echo "not-a-real-key" > "$SALVAGE_REPO/agent.key"
+    head -c 2048 /dev/zero > "$SALVAGE_REPO/big.bin"
+    echo "not-a-real-key" > "$SALVAGE_REPO/id_ed25519"
+    echo "machine example.invalid" > "$SALVAGE_REPO/pkg/.netrc"
+
+    local out
+    out=$(
+        cd "$SALVAGE_REPO" || exit 1
+        CURRENT_BRANCH="feature/story-9999-agent"
+        ISSUE_NUM="9999"
+        EXIT_CODE=1
+        PROJECT_QUEUE="$SALVAGE_DIR/project-queue.sh"
+        CFGMS_PROJECT_ITEM_ID="pv2-test-item"
+        SALVAGE_MAX_UNTRACKED_BYTES=1024
+        _salvage_no_pr "failed validation" 2>&1
+    )
+
+    local committed
+    committed=$(git -C "$SALVAGE_REPO" show --name-only --format= HEAD)
+    assert_contains "$committed" "pkg/testutil/new_store.go" \
+        "new untracked source file is in the WIP commit"
+    assert_contains "$committed" "pkg/testutil/new_cluster_test.go" \
+        "new untracked test file is in the WIP commit"
+    assert_contains "$committed" "seed.txt" \
+        "tracked modification is still in the WIP commit"
+    assert_not_contains "$committed" "agent.key" \
+        ".gitignore'd file is not committed"
+    assert_not_contains "$committed" "big.bin" \
+        "oversized untracked file is not committed"
+    assert_contains "$out" "skipping untracked file big.bin" \
+        "oversized file is logged as skipped"
+    assert_not_contains "$committed" "id_ed25519" \
+        "credential-like file not covered by .gitignore is not committed"
+    assert_not_contains "$committed" ".netrc" \
+        "credential-like file in a subdirectory is not committed"
+    assert_contains "$out" "skipping credential-like untracked file id_ed25519" \
+        "credential-like file is logged as skipped"
+    assert_contains "$(cat "$SALVAGE_LOG")" "pr create --base develop --draft" \
+        "salvaged work becomes a draft PR"
+
+    teardown_salvage_env
+}
+
+# T18d — the branch's commits already landed through a squash-merged PR. They
+# are never ancestors of develop, so `ahead` > 0, but they are not unsaved
+# work: no push, no duplicate "agent produced no PR" draft, no re-dispatch.
+test_18d_salvage_skips_branch_with_merged_pr() {
+    setup_salvage_env
+
+    echo "agent fix" > "$SALVAGE_REPO/fix.txt"
+    git -C "$SALVAGE_REPO" add fix.txt
+    git -C "$SALVAGE_REPO" commit -q -m "fix (Issue #9999)"
+    echo "4242 $(git -C "$SALVAGE_REPO" rev-parse HEAD)" > "$SALVAGE_DIR/gh-pr-list.out"
+
+    local out
+    out=$(
+        cd "$SALVAGE_REPO" || exit 1
+        CURRENT_BRANCH="feature/story-9999-agent"
+        ISSUE_NUM="9999"
+        EXIT_CODE=0
+        PROJECT_QUEUE="$SALVAGE_DIR/project-queue.sh"
+        CFGMS_PROJECT_ITEM_ID="pv2-test-item"
+        _salvage_no_pr "exited 0 without opening a pull request" 2>&1
+    )
+
+    local log
+    log=$(cat "$SALVAGE_LOG")
+    assert_contains "$log" "gh pr list --head feature/story-9999-agent --state merged" \
+        "merged PRs for the branch are queried"
+    assert_not_contains "$log" "pr create" \
+        "no duplicate draft PR for already-merged work"
+    assert_not_contains "$log" "git push" \
+        "already-merged branch is not re-pushed"
+    assert_not_contains "$log" "status Ready" \
+        "merged story is not reset to Ready"
+    assert_not_contains "$log" "ZeroWorkRetries" \
+        "merged story is not counted as a zero-work retry"
+    assert_contains "$log" "project-queue update-field pv2-test-item status Done" \
+        "item whose PR merged is routed to Done"
+    assert_contains "$out" "merged PR #4242" \
+        "skip is logged with the merged PR number"
+
+    teardown_salvage_env
+}
+
+# T18e — fail-safe direction: commits beyond the merged head, or a failed gh
+# query, still produce the draft PR.
+test_18e_salvage_merged_check_fails_safe() {
+    setup_salvage_env
+
+    echo "agent fix" > "$SALVAGE_REPO/fix.txt"
+    git -C "$SALVAGE_REPO" add fix.txt
+    git -C "$SALVAGE_REPO" commit -q -m "fix (Issue #9999)"
+    echo "4242 $(git -C "$SALVAGE_REPO" rev-parse HEAD)" > "$SALVAGE_DIR/gh-pr-list.out"
+    echo "follow-up" > "$SALVAGE_REPO/more.txt"
+    git -C "$SALVAGE_REPO" add more.txt
+    git -C "$SALVAGE_REPO" commit -q -m "follow-up after the merge"
+
+    _t18e_run() {
+        (
+            cd "$SALVAGE_REPO" || exit 1
+            CURRENT_BRANCH="feature/story-9999-agent"
+            ISSUE_NUM="9999"
+            EXIT_CODE=1
+            PROJECT_QUEUE="$SALVAGE_DIR/project-queue.sh"
+            CFGMS_PROJECT_ITEM_ID="pv2-test-item"
+            _salvage_no_pr "failed validation" > /dev/null 2>&1
+        )
+    }
+
+    _t18e_run
+    assert_contains "$(cat "$SALVAGE_LOG")" "pr create --base develop --draft" \
+        "commits beyond the merged PR head still become a draft PR"
+
+    : > "$SALVAGE_LOG"
+    git -C "$SALVAGE_REPO" reset -q --hard HEAD~1
+    touch "$SALVAGE_DIR/gh-pr-list.fail"
+    _t18e_run
+    local log
+    log=$(cat "$SALVAGE_LOG")
+    assert_contains "$log" "pr create --base develop --draft" \
+        "a failed merged-PR query falls back to the draft PR"
+    assert_not_contains "$log" "status Done" \
+        "a failed merged-PR query does not mark the item Done"
+
+    teardown_salvage_env
+}
+
+# T19 — clean tree: no PR is invented; the item is routed for re-dispatch.
+test_19_salvage_routes_zero_work_for_redispatch() {
+    setup_salvage_env
+
+    (
+        cd "$SALVAGE_REPO" || exit 1
+        CURRENT_BRANCH="feature/story-9999-agent"
+        ISSUE_NUM="9999"
+        EXIT_CODE=0
+        PROJECT_QUEUE="$SALVAGE_DIR/project-queue.sh"
+        CFGMS_PROJECT_ITEM_ID="pv2-test-item"
+        _salvage_no_pr "exited 0 without opening a pull request" > /dev/null 2>&1
+    )
+
+    local log
+    log=$(cat "$SALVAGE_LOG")
+
+    assert_not_contains "$log" "pr create" \
+        "no draft PR is created when there is nothing to capture"
+    assert_contains "$log" "project-queue update-field pv2-test-item ZeroWorkRetries 1" \
+        "retry counter is incremented"
+    assert_contains "$log" "project-queue update-field pv2-test-item status Ready" \
+        "item is reset to Ready for re-dispatch"
+
+    teardown_salvage_env
+}
+
+# T20 — regression guard: the EXIT_CODE==0 branch must salvage a missing PR.
+# This is the exact gap that stranded #3158 — exit 0 was treated as success
+# without ever checking PR_URL.
+test_20_exit_zero_branch_checks_pr_url() {
+    local success_branch
+    success_branch=$(sed -n '/^if \[ "\$EXIT_CODE" -eq 0 \]; then/,/^else$/p' "$SCRIPT_DIR/entrypoint.sh")
+
+    assert_contains "$success_branch" '[ -z "$PR_URL" ]' \
+        "exit-0 branch tests for an empty PR_URL"
+    assert_contains "$success_branch" "_salvage_no_pr" \
+        "exit-0 branch calls the salvage path"
+}
+
+# ============================================================================
+# TEST 21 — ended-turn-waiting detection (Issue #4178)
+# Fixture transcripts shaped like real Claude session JSONL. The stalled ones
+# use wording observed verbatim in 2026-09-18/19 containers.
+# ============================================================================
+_t21_transcript() {
+    # $1 = path, $2 = last assistant text
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+path, last = sys.argv[1], sys.argv[2]
+recs = [
+    {"type": "user", "message": {"role": "user", "content": "implement the story"}},
+    {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": "Starting validation now."},
+        {"type": "tool_use", "name": "Bash", "input": {"command": "make test"}}]}},
+    {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "content": "Command running in background"}]}},
+    {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": last}]}},
+]
+with open(path, "w") as fh:
+    for r in recs:
+        fh.write(json.dumps(r) + "\n")
+PY
+}
+
+test_21_ended_turn_waiting_detection() {
+    local dir; dir=$(mktemp -d)
+    local stalled=(
+        "I'll wait for the background task notification before continuing with validation and the PR update."
+        "I'll pause here and wait for the background task notification when the dispatched workflow run finishes."
+        "Waiting for the background test run (\`byeez3ry9\`) to finish before continuing."
+        "The hooks all look clean. Now I'll wait for the validation to complete."
+    )
+    local i=0 t
+    for t in "${stalled[@]}"; do
+        i=$((i + 1))
+        _t21_transcript "$dir/s$i.jsonl" "$t"
+        if ac_detect_ended_turn_waiting "$dir/s$i.jsonl"; then
+            echo "    ✓ stalled transcript $i detected"
+        else
+            _fail "stalled transcript $i not detected: $t"
+        fi
+    done
+
+    local normal=(
+        "PR #4175 is up and CI is running. Work is committed and pushed."
+        "Validation failed: TestFoo is red. I could not fix it within scope; see the PR comment."
+        "Done. The fix is committed and the PR description is updated."
+    )
+    i=0
+    for t in "${normal[@]}"; do
+        i=$((i + 1))
+        _t21_transcript "$dir/n$i.jsonl" "$t"
+        if ac_detect_ended_turn_waiting "$dir/n$i.jsonl"; then
+            _fail "normal transcript $i misclassified as waiting: $t"
+        else
+            echo "    ✓ normal transcript $i not flagged"
+        fi
+    done
+
+    # Only the LAST assistant message counts: an earlier "waiting" line that
+    # the agent then moved past is not a stall.
+    python3 - "$dir/moved-on.jsonl" <<'PY'
+import json, sys
+recs = [
+    {"message": {"role": "assistant", "content": [{"type": "text", "text": "Waiting for the background build to finish."}]}},
+    {"message": {"role": "assistant", "content": [{"type": "text", "text": "Build passed; PR opened."}]}},
+]
+with open(sys.argv[1], "w") as fh:
+    for r in recs:
+        fh.write(json.dumps(r) + "\n")
+PY
+    if ac_detect_ended_turn_waiting "$dir/moved-on.jsonl"; then
+        _fail "an earlier waiting line the agent moved past was flagged"
+    else
+        echo "    ✓ only the last assistant message is considered"
+    fi
+
+    if ac_detect_ended_turn_waiting "$dir/does-not-exist.jsonl"; then
+        _fail "missing transcript must not be flagged"
+    else
+        echo "    ✓ missing transcript is not flagged"
+    fi
+    rm -rf "$dir"
+}
+
+# ============================================================================
+# TEST 22 — the no-bg-wait rule reaches every headless prompt (Issue #4178)
+# ============================================================================
+test_22_no_bg_wait_rule_in_prompts() {
+    assert_contains "$AC_HEADLESS_NO_BG_WAIT_RULE" "FOREGROUND" "rule tells the agent to run in the foreground"
+    assert_contains "$AC_HEADLESS_NO_BG_WAIT_RULE" "NEVER end your turn" "rule forbids ending the turn to wait"
+
+    local entry review
+    entry=$(cat "$SCRIPT_DIR/entrypoint.sh")
+    review=$(cat "$SCRIPT_DIR/scripts/review-entrypoint.sh")
+    assert_contains "$entry" 'PROMPT_CONTENT+=$'"'"'\n\n'"'"'"${AC_HEADLESS_NO_BG_WAIT_RULE}"' \
+        "dev/fix entrypoint appends the rule at the single launch point"
+    assert_contains "$review" 'PROMPT_CONTENT+=$'"'"'\n\n'"'"'"${AC_HEADLESS_NO_BG_WAIT_RULE}"' \
+        "review entrypoint appends the rule"
+    assert_contains "$entry" '"outcome": "${AGENT_OUTCOME}"' \
+        "agent-result.json records the outcome"
+    assert_contains "$entry" 'AGENT_OUTCOME=$(ac_classify_outcome "$MODE" "$PR_URL" "$HEAD_ADVANCED"' \
+        "entrypoint classifies the outcome through ac_classify_outcome"
+}
+
+# ============================================================================
+# TEST 23 — outcome classification per mode (Issue #4178 review finding)
+# fix-pr / resolve-conflict always have a PR_URL (the PR pre-exists), so only
+# HEAD advancing counts as landed work there. 3 of the 4 observed stalls were
+# fix-pr containers; gating on an empty PR_URL made them unclassifiable.
+# ============================================================================
+test_23_outcome_classification_by_mode() {
+    local dir; dir=$(mktemp -d)
+    _t21_transcript "$dir/stall.jsonl" "I'll wait for the background task notification before continuing."
+    _t21_transcript "$dir/done.jsonl" "Done. Fix committed and pushed."
+    local pr="https://github.com/cfg-is/cfgms/pull/1"
+
+    _t23() { # desc want mode pr_url head_advanced jsonl
+        local got; got=$(ac_classify_outcome "$3" "$4" "$5" "$6")
+        if [[ "$got" == "$2" ]]; then echo "    ✓ $1"; else _fail "$1: want $2 got $got"; fi
+    }
+    _t23 "fix-pr, existing PR, no commit, waiting → ended_turn_waiting" ended_turn_waiting fix-pr "$pr" false "$dir/stall.jsonl"
+    _t23 "resolve-conflict, existing PR, no commit, waiting → ended_turn_waiting" ended_turn_waiting resolve-conflict "$pr" false "$dir/stall.jsonl"
+    _t23 "fix-pr, commit landed, waiting text → normal" normal fix-pr "$pr" true "$dir/stall.jsonl"
+    _t23 "fix-pr, no commit, normal ending → normal" normal fix-pr "$pr" false "$dir/done.jsonl"
+    _t23 "issue mode, no PR, no commit, waiting → ended_turn_waiting" ended_turn_waiting issue "" false "$dir/stall.jsonl"
+    _t23 "issue mode, PR opened, waiting text → normal" normal issue "$pr" false "$dir/stall.jsonl"
+    _t23 "issue mode, missing transcript → normal" normal issue "" false "$dir/none.jsonl"
+    rm -rf "$dir"
+}
+
+# ============================================================================
+# TEST 24 — salvaged WIP PR promotion (Issue #4709)
+# A fix-pr run that made no commit on a salvaged WIP draft whose work already
+# passed validation finishes the PR instead of failing. gh is a PATH double
+# driven by files in $PROMO_DIR; git is real except `push`, which is recorded.
+# ============================================================================
+
+setup_promo_env() {
+    PROMO_DIR="$(mktemp -d)"
+    export PROMO_DIR
+    PROMO_LOG="$PROMO_DIR/calls.log"
+    : > "$PROMO_LOG"
+    # Defaults: a salvaged WIP draft and a linked issue.
+    printf '%s\n' '{"isDraft":true,"title":"WIP: feature/story-9999-agent (agent produced no PR)","headRefName":"feature/story-9999-agent"}' \
+        > "$PROMO_DIR/pr_view.json"
+    printf '%s\n' "ci: harden the widget's \$(rm -rf) \`path\` handling" > "$PROMO_DIR/issue_title.txt"
+    : > "$PROMO_DIR/fail_step"
+
+    cat > "$PROMO_DIR/gh" <<'STUB'
+#!/usr/bin/env bash
+printf 'gh' >> "$PROMO_DIR/calls.log"
+printf ' [%s]' "$@" >> "$PROMO_DIR/calls.log"
+printf '\n' >> "$PROMO_DIR/calls.log"
+fail_step=$(cat "$PROMO_DIR/fail_step")
+case "$1 $2" in
+    "pr view")
+        [[ "$fail_step" == "pr-view" ]] && exit 1
+        cat "$PROMO_DIR/pr_view.json" ;;
+    "issue view")
+        [[ "$fail_step" == "issue-view" ]] && exit 1
+        cat "$PROMO_DIR/issue_title.txt" ;;
+    "api -X")
+        [[ "$fail_step" == "patch" ]] && exit 1
+        for arg in "$@"; do
+            case "$arg" in
+                title=*) printf '%s' "${arg#title=}" > "$PROMO_DIR/patched_title.txt" ;;
+                body=@*) cp "${arg#body=@}" "$PROMO_DIR/patched_body.txt" ;;
+            esac
+        done
+        echo '{}' ;;
+    "pr ready")
+        [[ "$fail_step" == "ready" ]] && exit 1
+        echo "ready" ;;
+    "repo view")
+        case "$*" in
+            *owner*) echo "o" ;;
+            *) echo "r" ;;
+        esac ;;
+    "pr comment") echo "https://github.com/o/r/pull/42#issuecomment-1" ;;
+    *) echo "[]" ;;
+esac
+STUB
+    chmod +x "$PROMO_DIR/gh"
+
+    PROMO_REPO="$PROMO_DIR/repo"
+    mkdir -p "$PROMO_REPO"
+    git -C "$PROMO_REPO" init -q
+    git -C "$PROMO_REPO" config user.email "test@example.com"
+    git -C "$PROMO_REPO" config user.name "Test"
+    echo "seed" > "$PROMO_REPO/seed.txt"
+    git -C "$PROMO_REPO" add seed.txt
+    git -C "$PROMO_REPO" commit -q -m "WIP: agent attempt for issue #9999 (failed validation)"
+
+    cat > "$PROMO_DIR/git" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == "push" ]]; then
+    printf 'git' >> "$PROMO_LOG"
+    printf ' [%s]' "\$@" >> "$PROMO_LOG"
+    printf '\n' >> "$PROMO_LOG"
+    [[ "\$(cat "$PROMO_DIR/fail_step")" == "push" ]] && exit 1
+    exit 0
+fi
+exec $(command -v git) "\$@"
+STUB
+    chmod +x "$PROMO_DIR/git"
+
+    : > "$PROMO_DIR/agent-validation-passed"
+
+    ORIG_PROMO_PATH="$PATH"
+    export PATH="$PROMO_DIR:$PATH"
+    # shellcheck disable=SC1090
+    CFGMS_ENTRYPOINT_SOURCE_ONLY=1 source "$SCRIPT_DIR/entrypoint.sh"
+}
+
+teardown_promo_env() {
+    export PATH="$ORIG_PROMO_PATH"
+    rm -rf "$PROMO_DIR"
+    unset PROMO_DIR PROMO_LOG PROMO_REPO ORIG_PROMO_PATH
+}
+
+# _promo_run_no_op <mode> <marker_path> <issue_num> — drives _handle_no_op_run
+# in the throwaway repo and prints stdout followed by "EXIT_CODE=<n>".
+_promo_run_no_op() {
+    (
+        cd "$PROMO_REPO" || exit 1
+        MODE="$1"
+        PR_NUM="42"
+        ISSUE_NUM="$3"
+        PRE_FIX_HEAD=$(git rev-parse HEAD)
+        POST_FIX_HEAD="$PRE_FIX_HEAD"
+        HEAD_ADVANCED="false"
+        EXIT_CODE=0
+        HOSTNAME="cfg-agent-pr-fix-42"
+        _handle_no_op_run "$2" 2>&1
+        echo "EXIT_CODE=${EXIT_CODE}"
+        echo "HEAD_ADVANCED=${HEAD_ADVANCED}"
+    )
+}
+
+test_24a_promotes_salvaged_pr() {
+    setup_promo_env
+    local out
+    out=$(_promo_run_no_op fix-pr "$PROMO_DIR/agent-validation-passed" 9999)
+    local log; log=$(cat "$PROMO_LOG")
+    local want_title="ci: harden the widget's \$(rm -rf) \`path\` handling (Issue #9999)"
+
+    assert_contains "$out" "PROMOTED_SALVAGED_PR:42" "promotion is announced"
+    assert_contains "$out" "EXIT_CODE=0" "run exits 0"
+    assert_contains "$out" "HEAD_ADVANCED=true" "result manifest reports the pushed commit"
+    assert_not_contains "$out" "made no commits" "no-op error is not printed"
+    assert_contains "$log" "[api] [-X] [PATCH] [repos/{owner}/{repo}/pulls/42]" "PR is patched via REST"
+    assert_equals "$(cat "$PROMO_DIR/patched_title.txt")" "$want_title" \
+        "title is '<issue title> (Issue #N)', shell metacharacters passed verbatim"
+    assert_equals "$(head -1 "$PROMO_DIR/patched_body.txt")" "Fixes #9999" "body starts with Fixes #N"
+    assert_contains "$(cat "$PROMO_DIR/patched_body.txt")" "passed validation with no further changes" \
+        "body states the work passed validation unchanged"
+    assert_equals "$(git -C "$PROMO_REPO" log --format=%s -1)" "$want_title" "empty commit subject is the new title"
+    assert_contains "$(git -C "$PROMO_REPO" log --format=%b -1)" "Fixes #9999" "empty commit body carries Fixes #N"
+    assert_equals "$(git -C "$PROMO_REPO" diff --stat HEAD~1 HEAD)" "" "commit is empty"
+    assert_contains "$log" "git [push] [origin] [HEAD:feature/story-9999-agent]" "commit is pushed to the PR branch"
+    assert_contains "$log" "gh [pr] [ready] [42]" "PR is marked ready"
+    assert_not_contains "$log" "[pr] [comment]" "no no-op comment is posted"
+    teardown_promo_env
+}
+
+test_24b_no_marker_not_promoted() {
+    setup_promo_env
+    local out
+    out=$(_promo_run_no_op fix-pr "$PROMO_DIR/missing-marker" 9999)
+    local log; log=$(cat "$PROMO_LOG")
+    assert_contains "$out" "made no commits" "no-op error is printed"
+    assert_contains "$out" "EXIT_CODE=1" "run exits 1"
+    assert_not_contains "$out" "PROMOTED_SALVAGED_PR" "PR is not promoted"
+    assert_not_contains "$log" "[PATCH]" "PR is not patched"
+    assert_contains "$log" "gh [pr] [comment] [42]" "no-op comment is posted"
+    teardown_promo_env
+}
+
+test_24c_resolve_conflict_and_no_issue_not_promoted() {
+    setup_promo_env
+    local out
+    out=$(_promo_run_no_op resolve-conflict "$PROMO_DIR/agent-validation-passed" 9999)
+    assert_contains "$out" "EXIT_CODE=1" "resolve-conflict no-op still exits 1"
+    out=$(_promo_run_no_op fix-pr "$PROMO_DIR/agent-validation-passed" "")
+    assert_contains "$out" "EXIT_CODE=1" "fix-pr no-op without a linked issue still exits 1"
+    assert_not_contains "$(cat "$PROMO_LOG")" "[PATCH]" "neither run patches the PR"
+    teardown_promo_env
+}
+
+test_24d_non_wip_or_non_draft_not_promoted() {
+    setup_promo_env
+    local before; before=$(git -C "$PROMO_REPO" rev-parse HEAD)
+    printf '%s\n' '{"isDraft":true,"title":"ci: a normal title (Issue #9999)","headRefName":"feature/story-9999-agent"}' \
+        > "$PROMO_DIR/pr_view.json"
+    local rc=0
+    (cd "$PROMO_REPO" && ac_promote_salvaged_pr 42 9999) 2>/dev/null || rc=$?
+    assert_equals "$rc" "1" "non-WIP title: helper refuses"
+
+    printf '%s\n' '{"isDraft":false,"title":"WIP: feature/story-9999-agent (agent produced no PR)","headRefName":"feature/story-9999-agent"}' \
+        > "$PROMO_DIR/pr_view.json"
+    rc=0
+    (cd "$PROMO_REPO" && ac_promote_salvaged_pr 42 9999) 2>/dev/null || rc=$?
+    assert_equals "$rc" "1" "non-draft PR: helper refuses"
+
+    local out
+    out=$(_promo_run_no_op fix-pr "$PROMO_DIR/agent-validation-passed" 9999)
+    assert_contains "$out" "EXIT_CODE=1" "caller falls back to the failure path"
+    assert_contains "$(cat "$PROMO_LOG")" "gh [pr] [comment] [42]" "no-op comment is posted"
+    assert_not_contains "$(cat "$PROMO_LOG")" "[PATCH]" "PR is never patched"
+    assert_equals "$(git -C "$PROMO_REPO" rev-parse HEAD)" "$before" "no commit is made"
+    teardown_promo_env
+}
+
+test_24e_failed_gh_step_falls_back() {
+    setup_promo_env
+    local step rc out
+    for step in issue-view patch ready push; do
+        echo "$step" > "$PROMO_DIR/fail_step"
+        rc=0
+        (cd "$PROMO_REPO" && ac_promote_salvaged_pr 42 9999) >/dev/null 2>&1 || rc=$?
+        assert_equals "$rc" "1" "helper returns non-zero when '$step' fails"
+    done
+
+    echo "patch" > "$PROMO_DIR/fail_step"
+    : > "$PROMO_LOG"
+    out=$(_promo_run_no_op fix-pr "$PROMO_DIR/agent-validation-passed" 9999)
+    assert_contains "$out" "step 'PATCH title/body' failed" "failed step is named"
+    assert_contains "$out" "made no commits" "caller prints the no-op error"
+    assert_contains "$out" "EXIT_CODE=1" "caller falls back to exit 1"
+    assert_not_contains "$out" "PROMOTED_SALVAGED_PR" "PR is not reported as promoted"
+    assert_contains "$(cat "$PROMO_LOG")" "gh [pr] [comment] [42]" "no-op comment is posted"
+    teardown_promo_env
+}
+
+# ============================================================================
+# runner
+# ============================================================================
+
+run_test "T01 — conversation comments render" test_01_conversation_comments_render
+run_test "T02 — issue comments render" test_02_issue_comments_render
+run_test "T03 — no-op detection via SHA compare" test_03_no_op_detection
+run_test "T04 — head_sha fields shape" test_04_head_sha_fields_shape
+run_test "T05 — failing CI checks render" test_05_failing_checks_render
+run_test "T06 — inline resolution annotation" test_06_inline_resolution_state
+run_test "T07 — chronological ordering" test_07_chronological_ordering
+run_test "T08 — idempotent no-op comment (duplicate skipped)" test_08_idempotent_no_op_comment
+run_test "T09 — no-op comment posts when fresh" test_09_no_op_comment_posts_when_new
+run_test "T10 — linked issue section" test_10_linked_issue_section
+run_test "T11 — empty inputs produce sentinels" test_11_empty_inputs
+run_test "T12 — no-op body shape" test_12_no_op_comment_body_shape
+run_test "T13 — review-level comments render" test_13_review_level_comments_render
+run_test "T14 — dry-run issue mode: no injection, project body present" test_14_dry_run_issue_mode_no_injection
+run_test "T15 — dry-run branch mode: no injection, project body present" test_15_dry_run_branch_mode_no_injection
+run_test "T16 — hard refusal when CFGMS_PROJECT_ITEM_ID unset" test_16_hard_refusal_missing_project_item_id
+run_test "T17 — dry-run: review gate invokes story-review workflow" test_17_review_gate_uses_story_review_workflow
+run_test "T18 — salvage: exit-0 with work becomes a draft PR" test_18_salvage_captures_uncommitted_work
+run_test "T18b — salvage: committed-only work becomes a draft PR, never a zero-work retry" test_18b_salvage_captures_committed_work
+run_test "T18c — salvage: new untracked files are committed (gitignore + size cap honoured)" test_18c_salvage_includes_untracked_files
+run_test "T18d — salvage: a branch whose PR already merged gets no duplicate draft" test_18d_salvage_skips_branch_with_merged_pr
+run_test "T18e — salvage: merged-PR check fails safe to the draft PR" test_18e_salvage_merged_check_fails_safe
+run_test "T19 — salvage: exit-0 with no work routes for re-dispatch" test_19_salvage_routes_zero_work_for_redispatch
+run_test "T20 — regression guard: exit-0 branch checks PR_URL" test_20_exit_zero_branch_checks_pr_url
+run_test "T21 — ended-turn-waiting detection (Issue #4178)" test_21_ended_turn_waiting_detection
+run_test "T22 — headless no-bg-wait rule reaches every prompt (Issue #4178)" test_22_no_bg_wait_rule_in_prompts
+run_test "T23 — outcome classification per mode (Issue #4178)" test_23_outcome_classification_by_mode
+run_test "T24a — salvaged WIP PR with passing validation is promoted (Issue #4709)" test_24a_promotes_salvaged_pr
+run_test "T24b — no validation marker: no promotion, exit 1 (Issue #4709)" test_24b_no_marker_not_promoted
+run_test "T24c — resolve-conflict / no linked issue: no promotion (Issue #4709)" test_24c_resolve_conflict_and_no_issue_not_promoted
+run_test "T24d — non-WIP or non-draft PR: no promotion (Issue #4709)" test_24d_non_wip_or_non_draft_not_promoted
+run_test "T24e — failed gh/git step: helper non-zero, caller falls back (Issue #4709)" test_24e_failed_gh_step_falls_back
+
+echo ""
+echo "============================================================"
+echo "RESULTS: $TESTS_PASSED/$TESTS_RUN passed"
+if [[ ${#FAILURES[@]} -gt 0 ]]; then
+    echo ""
+    echo "FAILURES:"
+    for f in "${FAILURES[@]}"; do
+        echo "  - $f"
+    done
+    exit 1
+fi
+echo "All tests passed."

@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CFGMS Support Access — mockup</title>
+<!--
+  MSP Support access page (Epic #4701 · Story #4724), route /support-access, nav
+  entry below Tenants. Give support access (duration only: 1/4/8/24 h; no named
+  person - the grant opens the tenant to all root support, each use audited per
+  person), list + revoke grants and break-glass (End now / Deny, inline confirm),
+  emergency contact editor. States: Ready / Loading / Error / Empty / Root session.
+  Design tokens are inlined from docs/design/web-ui-design-tokens.css (source of
+  truth); shell chrome mirrors web/src/shell/AppShell.css. Standalone and
+  interactive: the dashed top strip is a review harness (state + theme), not
+  product UI. URL params ?state=<name>&theme=light|dark preselect a state.
+-->
+<style>
+/*
+ * CFGMS Web UI — Design Tokens
+ * ----------------------------------------------------------------------------
+ * Machine-readable token layer for the controller-served web app (Epic #2344).
+ * Values are lifted verbatim from the public brand style guide
+ * (https://cfg.is/style-guide) so the app and the marketing site share one
+ * source of truth for colour. See docs/design/web-ui-design-system.md for the
+ * rationale, usage rules, and open items.
+ *
+ * Identity in one line: a WARM TERMINAL — near-black / near-white grounds that
+ * hold a trace of warmth, STONE-NEUTRAL text, muted slate-blue accent,
+ * desaturated earth-tone semantics, and a palette of muted card tints. Ground
+ * and ink sit in different hue bands on purpose: when both were warm the whole
+ * surface read rust. State owns the colour budget; the accent is reserved for
+ * interaction; mono carries all machine data.
+ *
+ * Theme model: default tokens are light. `@media (prefers-color-scheme: dark)`
+ * supplies dark. `:root[data-theme="light"|"dark"]` overrides the media query
+ * in both directions (the app's own theme control stamps data-theme on :root).
+ * ==========================================================================*/
+
+:root {
+  /* --- Background & structure --- */
+  --bg-primary:   #f5f4f3;  /* app ground */
+  --bg-surface:   #ffffff;  /* panels, cards */
+  --bg-elevated:  #ececea;  /* raised / inset chrome */
+  --bg-sunk:      #ececea;  /* wells, code blocks */
+  --border:       #d0cfcd;
+
+  /* --- Text & accent --- */
+  --text-primary:   #5f5e58; /* stone (was warm taupe; see design-system §1) */
+  --text-secondary: #6e6d68;
+  --text-faint:     #82807a; /* micro-labels (contrast-tuned vs guide) */
+  --accent:         #4a6b7c; /* muted slate blue — INTERACTION ONLY */
+  --accent-ink:     #ffffff; /* text/icon on accent fill */
+
+  /* --- Semantic state (desaturated earth tones) --- */
+  --state-ok:        #507055;  --state-ok-bg:    #e8f0e9; /* converged / success */
+  --state-warn:      #7b5d1e;  --state-warn-bg:  #f2eadb; /* drift / warning (ochre) */
+  --state-crit:      #965044;  --state-crit-bg:  #f0e6e4; /* error (terracotta) */
+  --state-mauve:     #7a5f6e;                              /* alt error (guide) */
+  --state-neutral:   #605f5a;  --state-neutral-bg:#e2e1df; /* queued / inert */
+
+  /* --- Card tints (background only; meaning-encoding, not decoration) --- */
+  --tint-red:    #f0e6e4;  /* a problem / failing surface */
+  --tint-green:  #e8f0e9;  /* a fix / resolved surface */
+  --tint-orange: #f2eadb;  /* attention / dependency */
+  --tint-blue:   #e6eef2;  /* neutral context / timeline */
+  --tint-brown:  #e2e1df;  /* metadata / reference */
+  --tint-cream:  #f8f8f7;  /* summary / verdict */
+
+  /* --- Type --- */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, "SF Mono", "SFMono-Regular", Menlo, monospace;
+  --font-display: 'Ubuntu Mono', var(--font-mono); /* logo / terminal accent */
+
+  /* Type scale (1.20 minor-third, 13.5px base) */
+  --text-xs:   10px;   /* uppercase micro-labels */
+  --text-sm:   11.5px;
+  --text-base: 13.5px;
+  --text-md:   14px;
+  --text-lg:   16px;
+  --text-xl:   19px;
+  --text-2xl:  26px;   /* stat numerals */
+  --tracking-label: 0.09em; /* uppercase labels */
+
+  /* --- Spacing (4px base) --- */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px;
+  --space-4: 16px; --space-5: 20px; --space-6: 24px;
+
+  /* --- Radii --- */
+  --radius-sm: 7px;   /* pills-in-buttons, chips */
+  --radius:    9px;   /* buttons, inputs */
+  --radius-lg: 13px;  /* cards */
+  --radius-pill: 20px;
+
+  /* --- Elevation --- */
+  --shadow: 0 18px 50px -22px rgba(42, 42, 40, 0.40);
+
+  /* --- Data-viz: sequential ramp (ordinal, magnitude, H≈234 slate) --- */
+  /* Validated: lightness monotone, adjacent ΔL≥0.06, contrast ≥2.0:1, spread 1° */
+  --ordinal-1: #96bad0;  /* lowest */
+  --ordinal-2: #659dbd;
+  --ordinal-3: #2e80a9;
+  --ordinal-4: #0a6388;
+  --ordinal-5: #054561;  /* highest */
+
+  /* --- Data-viz: categorical theme (identity, brand-anchored, 4 slots max) --- */
+  /* Validated: adjacent CVD ΔE 18.5, normal 19.7; all-pairs slots 1-3 CVD 18.5 */
+  --cat-1: #0171a3;  /* slate */
+  --cat-2: #4f9d60;  /* green */
+  --cat-3: #7e3e1b;  /* amber */
+  --cat-4: #c27fb0;  /* mauve — adjacent forms only, not all-pairs (3-slot validated set) */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-primary:  #1a1a1a;
+    --bg-surface:  #242426;
+    --bg-elevated: #323231;
+    --bg-sunk:     #101010;
+    --border:      #535352;
+
+    --text-primary:   #bcbbb5;
+    --text-secondary: #9c9b96;
+    --text-faint:     #8d8c86;
+    --accent:         #7b9fb0;
+    --accent-ink:     #16202a;
+
+    --state-ok:      #7fa985;  --state-ok-bg:     #1a2e1d;
+    --state-warn:    #bd9547;  --state-warn-bg:   #2f2718;
+    --state-crit:    #d0846f;  --state-crit-bg:   #2b201e;
+    --state-mauve:   #a58198;
+    --state-neutral: #9c9b96;  --state-neutral-bg:#262624;
+
+    --tint-red:    #2b201e;
+    --tint-green:  #1a2e1d;
+    --tint-orange: #2f2718;
+    --tint-blue:   #1e2528;
+    --tint-brown:  #262624;
+    --tint-cream:  #232323;
+
+    --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+
+    /* --- Data-viz: sequential ramp (dark mode) --- */
+    --ordinal-1: #095b7e;
+    --ordinal-2: #0475a1;
+    --ordinal-3: #378eba;
+    --ordinal-4: #62a8ce;
+    --ordinal-5: #93c0da;
+
+    /* --- Data-viz: categorical theme (dark mode) --- */
+    /* Validated: adjacent CVD ΔE 8.2, normal 18.4; all-pairs slots 1-3 CVD 8.2 */
+    --cat-1: #3674a5;  /* slate */
+    --cat-2: #5ba269;  /* green */
+    --cat-3: #d57018;  /* amber */
+    --cat-4: #a55e93;  /* mauve */
+  }
+}
+
+/* Explicit overrides — the app's theme control stamps data-theme on :root and
+   must win over the OS media query in BOTH directions. */
+:root[data-theme="light"] {
+  --bg-primary: #f5f4f3; --bg-surface: #ffffff; --bg-elevated: #ececea; --bg-sunk: #ececea; --border: #d0cfcd;
+  --text-primary: #5f5e58; --text-secondary: #6e6d68; --text-faint: #82807a; --accent: #4a6b7c; --accent-ink: #ffffff;
+  --state-ok: #507055; --state-ok-bg: #e8f0e9; --state-warn: #7b5d1e; --state-warn-bg: #f2eadb;
+  --state-crit: #965044; --state-crit-bg: #f0e6e4; --state-mauve: #7a5f6e; --state-neutral: #605f5a; --state-neutral-bg: #e2e1df;
+  --tint-red: #f0e6e4; --tint-green: #e8f0e9; --tint-orange: #f2eadb; --tint-blue: #e6eef2; --tint-brown: #e2e1df; --tint-cream: #f8f8f7;
+  --shadow: 0 18px 50px -22px rgba(42, 42, 40, 0.40);
+  --ordinal-1: #96bad0; --ordinal-2: #659dbd; --ordinal-3: #2e80a9; --ordinal-4: #0a6388; --ordinal-5: #054561;
+  --cat-1: #0171a3; --cat-2: #4f9d60; --cat-3: #7e3e1b; --cat-4: #c27fb0;
+}
+
+:root[data-theme="dark"] {
+  --bg-primary: #1a1a1a; --bg-surface: #242426; --bg-elevated: #323231; --bg-sunk: #101010; --border: #535352;
+  --text-primary: #bcbbb5; --text-secondary: #9c9b96; --text-faint: #8d8c86; --accent: #7b9fb0; --accent-ink: #16202a;
+  --state-ok: #7fa985; --state-ok-bg: #1a2e1d; --state-warn: #bd9547; --state-warn-bg: #2f2718;
+  --state-crit: #d0846f; --state-crit-bg: #2b201e; --state-mauve: #a58198; --state-neutral: #9c9b96; --state-neutral-bg: #262624;
+  --tint-red: #2b201e; --tint-green: #1a2e1d; --tint-orange: #2f2718; --tint-blue: #1e2528; --tint-brown: #262624; --tint-cream: #232323;
+  --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+  --ordinal-1: #095b7e; --ordinal-2: #0475a1; --ordinal-3: #378eba; --ordinal-4: #62a8ce; --ordinal-5: #93c0da;
+  --cat-1: #3674a5; --cat-2: #5ba269; --cat-3: #d57018; --cat-4: #a55e93;
+}
+
+/* ---- mockup base + app shell (mirrors web/src/shell/AppShell.css) ---- */
+*{box-sizing:border-box;}
+html,body{margin:0;}
+body{background:var(--bg-primary); color:var(--text-primary); font-family:var(--font-sans); font-size:var(--text-base);
+  line-height:1.45; -webkit-font-smoothing:antialiased; position:relative; min-height:100dvh;}
+.mono{font-family:var(--font-mono);}
+button{font:inherit;}
+[hidden]{display:none !important;}
+
+/* harness strip — review affordance, not product UI */
+.harness{display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 16px; background:var(--bg-sunk);
+  border-bottom:1px dashed var(--border); font-size:var(--text-sm); color:var(--text-faint);}
+.harness .hl{font-family:var(--font-mono); letter-spacing:.04em; text-transform:uppercase; font-size:var(--text-xs);}
+.harness .grp{display:inline-flex; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius); padding:2px; flex-wrap:wrap;}
+.harness .grp button{appearance:none; border:0; background:transparent; color:var(--text-secondary); font-size:var(--text-sm);
+  font-weight:600; padding:5px 10px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+.harness .grp button[aria-pressed="true"]{background:var(--accent); color:var(--accent-ink);}
+.harness .sp{flex:1;}
+
+.shell{display:grid; grid-template-columns:1fr; min-height:calc(100dvh - 44px); position:relative;}
+.side{display:none; flex-direction:column; background:var(--bg-surface); border-right:1px solid var(--border);}
+.side .logo{display:flex; align-items:baseline; gap:7px; padding:var(--space-4) var(--space-4) var(--space-3);}
+.side .logo b{font-size:var(--text-md); letter-spacing:.13em; text-transform:uppercase;}
+.side .logo i{font-style:normal; font-size:var(--text-xs); color:var(--text-faint); letter-spacing:.05em;}
+.side nav{display:flex; flex-direction:column; gap:2px; padding:6px var(--space-3);}
+.side nav a{display:flex; align-items:center; gap:11px; padding:9px 11px; border-radius:var(--radius-sm); color:var(--text-secondary);
+  text-decoration:none; font-weight:500; font-size:var(--text-base);}
+.side nav a.active{background:var(--tint-blue); color:var(--accent); font-weight:600;}
+.side nav a .new{margin-left:auto; font-size:9px; letter-spacing:.06em; text-transform:uppercase; color:var(--accent);
+  border:1px solid var(--accent); border-radius:var(--radius-pill); padding:0 6px;}
+.main{min-width:0; display:flex; flex-direction:column;}
+.appbar{display:flex; align-items:center; gap:var(--space-2); padding:var(--space-2) var(--space-3); background:var(--bg-primary);
+  border-bottom:1px solid var(--border);}
+.chipbtn{display:inline-flex; align-items:center; gap:7px; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-secondary);
+  border-radius:var(--radius); padding:7px 11px; font-size:var(--text-sm); white-space:nowrap;}
+.chipbtn b{color:var(--text-primary); font-family:var(--font-mono); font-weight:600;}
+.searchbox{flex:1; max-width:420px; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-faint);
+  border-radius:var(--radius); padding:7px 11px; font-size:var(--text-sm);}
+.abspacer{flex:1;}
+.avatar{width:32px; height:32px; border-radius:50%; background:var(--bg-elevated); border:1px solid var(--border); display:grid;
+  place-items:center; font-size:var(--text-sm); font-weight:700; color:var(--text-secondary); flex:none;}
+.content{padding:var(--space-4); display:flex; flex-direction:column; gap:var(--space-4); max-width:1180px; width:100%;}
+.htitle{display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap;}
+.htitle h1{margin:0; font-size:var(--text-xl); font-weight:700; letter-spacing:-.01em;}
+.htitle p{margin:3px 0 0; color:var(--text-secondary); max-width:640px;}
+
+.panel{background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-lg); overflow:hidden;}
+.phead{display:flex; align-items:center; gap:9px; padding:12px 16px; border-bottom:1px solid var(--border); flex-wrap:wrap;}
+.phead h2{margin:0; font-size:var(--text-md); font-weight:700;}
+.phead .sub{color:var(--text-faint); font-size:var(--text-sm);}
+.phead .cnt{margin-left:auto; font-size:var(--text-sm); color:var(--text-faint); font-variant-numeric:tabular-nums;}
+.pbody{padding:14px 16px;}
+
+table.tbl{width:100%; border-collapse:collapse; font-size:13px;}
+.tbl th{text-align:left; font-size:10.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--text-faint); font-weight:600;
+  padding:9px 14px; border-bottom:1px solid var(--border); white-space:nowrap;}
+.tbl td{padding:10px 14px; border-bottom:1px solid var(--border); vertical-align:top;}
+.tbl tbody tr:last-child > td{border-bottom:0;}
+
+.pill{display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:var(--radius-pill); font-size:11px; font-weight:700; white-space:nowrap;}
+.pill svg{flex:none;}
+.pill-ok{background:var(--state-ok-bg); color:var(--state-ok);}
+.pill-warn{background:var(--state-warn-bg); color:var(--state-warn);}
+.pill-crit{background:var(--state-crit-bg); color:var(--state-crit);}
+.pill-neutral{background:var(--state-neutral-bg); color:var(--state-neutral);}
+.pill-acc{background:var(--tint-blue); color:var(--accent);}
+
+.btn{appearance:none; border:1px solid var(--accent); background:var(--accent); color:var(--accent-ink); font-size:var(--text-sm);
+  font-weight:600; padding:7px 14px; border-radius:var(--radius); cursor:pointer; white-space:nowrap; display:inline-flex; align-items:center; gap:7px;}
+.btn:disabled{opacity:.45; cursor:not-allowed;}
+.btn-sec{appearance:none; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-secondary); font-size:var(--text-sm);
+  font-weight:600; padding:7px 13px; border-radius:var(--radius); cursor:pointer; white-space:nowrap;}
+.btn-danger{appearance:none; border:1px solid var(--state-crit); background:var(--state-crit); color:var(--bg-surface); font-size:var(--text-sm);
+  font-weight:700; padding:7px 14px; border-radius:var(--radius); cursor:pointer; white-space:nowrap; display:inline-flex; align-items:center; gap:7px;}
+.btn-danger:disabled{opacity:.45; cursor:not-allowed;}
+.btn-danger-soft{appearance:none; border:1px solid var(--state-crit); background:var(--state-crit-bg); color:var(--state-crit); font-size:11px;
+  font-weight:600; padding:5px 11px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+.btn-sm{font-size:11px; padding:5px 11px; border-radius:var(--radius-sm);}
+button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+
+.field{display:flex; flex-direction:column; gap:5px; min-width:0;}
+.field label, .lbl{font-size:var(--text-xs); letter-spacing:var(--tracking-label); text-transform:uppercase; color:var(--text-faint); font-weight:600;}
+.field .req{color:var(--state-crit);}
+select, textarea, input[type=text], input[type=email]{appearance:none; width:100%; background:var(--bg-surface); color:var(--text-primary);
+  border:1px solid var(--border); border-radius:var(--radius); padding:8px 11px; font:inherit; font-size:var(--text-base);}
+select{background-image:linear-gradient(45deg,transparent 50%,var(--text-faint) 50%),linear-gradient(135deg,var(--text-faint) 50%,transparent 50%);
+  background-position:calc(100% - 15px) 52%, calc(100% - 10px) 52%; background-size:5px 5px; background-repeat:no-repeat; padding-right:30px;}
+textarea{resize:vertical; min-height:92px; line-height:1.5;}
+.field.bad select, .field.bad textarea, .field.bad input{border-color:var(--state-crit);}
+.hint{font-size:var(--text-sm); color:var(--text-faint);}
+.hint b{color:var(--text-secondary); font-weight:600;}
+
+.msg{display:flex; align-items:flex-start; gap:8px; padding:9px 12px; border-radius:var(--radius); font-size:12.5px; line-height:1.45;}
+.msg svg{flex:none; margin-top:2px;}
+.msg-crit{background:var(--state-crit-bg); color:var(--state-crit); border:1px solid var(--state-crit);}
+.msg-warn{background:var(--state-warn-bg); color:var(--state-warn); border:1px solid var(--state-warn);}
+.msg-info{background:var(--tint-blue); color:var(--text-primary); border:1px solid var(--border);}
+.msg b{font-weight:700;}
+
+.spin{width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:sp .7s linear infinite; flex:none; display:inline-block;}
+@keyframes sp{to{transform:rotate(360deg);}}
+@media (prefers-reduced-motion: reduce){.spin{animation:none;}}
+.skel{background:var(--bg-elevated); border-radius:6px; height:12px;}
+
+.toast{position:absolute; left:50%; top:80px; transform:translateX(-50%); background:var(--bg-elevated); border:1px solid var(--border);
+  color:var(--text-primary); padding:9px 16px; border-radius:var(--radius); font-size:12.5px; font-weight:600; box-shadow:var(--shadow);
+  z-index:300; max-width:88%; display:none;}
+.toast.show{display:block;}
+
+@media (min-width:1024px){
+  .shell{grid-template-columns:230px 1fr;}
+  .side{display:flex;}
+  .content{padding:var(--space-5) var(--space-6) 40px;}
+}
+@media (max-width:640px){
+  .searchbox{display:none;}
+  .harness{padding:8px 12px;}
+}
+
+/* ---- support access page (Story #4724) ---- */
+.issue{display:grid; grid-template-columns:minmax(0,360px) auto; gap:12px; align-items:end;}
+.durseg{display:inline-flex; background:var(--bg-sunk); border:1px solid var(--border); border-radius:var(--radius); padding:2px; width:100%;}
+.durseg button{flex:1; appearance:none; border:0; background:transparent; color:var(--text-secondary); font-size:var(--text-sm); font-weight:600;
+  padding:6px 0; border-radius:var(--radius-sm); cursor:pointer; font-variant-numeric:tabular-nums;}
+.durseg button[aria-pressed="true"]{background:var(--bg-surface); color:var(--text-primary); box-shadow:0 0 0 1px var(--border);}
+.issue-note{margin-top:10px;}
+.issue .msg{grid-column:1 / -1;}
+.issue > .btn{justify-self:start;}
+
+.kind{display:inline-flex; align-items:center; gap:6px; font-weight:600; white-space:nowrap;}
+.kind svg{flex:none; color:var(--text-faint);}
+.kind.bg svg{color:var(--state-crit);}
+.who{font-family:var(--font-mono); font-weight:600; font-size:12.5px; white-space:nowrap;}
+.rc{font-size:12px; font-weight:600;}
+.just{margin-top:3px; color:var(--text-secondary); font-size:12px; max-width:340px; overflow-wrap:anywhere;}
+.c-reason .just::before{content:"“";} .c-reason .just::after{content:"”";}
+.when{font-size:12px; color:var(--text-secondary); white-space:nowrap; font-variant-numeric:tabular-nums;}
+.when .rel{display:block; color:var(--text-faint); font-size:11px;}
+.when .rel.soon{color:var(--state-warn); font-weight:600;}
+.muted{color:var(--text-faint);}
+tr.row-bg > td{background:var(--tint-red);}
+tr.row-dim > td{color:var(--text-faint);}
+tr.row-dim .who{color:var(--text-secondary);}
+tr.confirm > td{background:var(--bg-sunk); padding:0;}
+.confirm-in{padding:12px 14px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;}
+.confirm-in .t{flex:1; min-width:240px; font-size:12.5px;}
+.confirm-in .t b{font-weight:700;}
+.confirm-in .t .s{display:block; color:var(--text-faint); font-size:11.5px; margin-top:2px;}
+.confirm-in.bg .t{color:var(--state-crit);}
+.filt{display:inline-flex; gap:4px;}
+.filt button{appearance:none; border:1px solid var(--border); background:transparent; color:var(--text-secondary); font-size:11px; font-weight:600;
+  padding:4px 10px; border-radius:var(--radius-pill); cursor:pointer;}
+.filt button[aria-pressed="true"]{background:var(--tint-blue); color:var(--accent); border-color:var(--accent);}
+
+.contacts{display:flex; flex-direction:column; gap:12px;}
+.clist{display:flex; flex-direction:column; border:1px solid var(--border); border-radius:var(--radius); overflow:hidden;}
+.citem{display:flex; align-items:center; gap:10px; padding:8px 8px 8px 12px; border-bottom:1px solid var(--border); font-family:var(--font-mono); font-size:12.5px;}
+.citem:last-child{border-bottom:0;}
+.citem .e{flex:1; min-width:0; overflow-wrap:anywhere;}
+.citem.new .e::after{content:"unsaved"; margin-left:8px; font-family:var(--font-sans); font-size:10px; font-weight:700; letter-spacing:.05em;
+  text-transform:uppercase; color:var(--state-warn);}
+.citem.bad{background:var(--state-crit-bg);}
+.citem.bad .e{color:var(--state-crit);}
+.xbtn{appearance:none; border:1px solid transparent; background:transparent; color:var(--text-faint); width:28px; height:28px; border-radius:var(--radius-sm);
+  display:grid; place-items:center; cursor:pointer; flex:none;}
+.xbtn:hover{border-color:var(--border); color:var(--state-crit);}
+.addrow{display:flex; gap:8px;}
+.addrow input{flex:1;}
+.savebar{display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
+.savebar .dirty{font-size:var(--text-sm); color:var(--state-warn); font-weight:600;}
+.savebar .sp{flex:1;}
+
+.empty{display:flex; flex-direction:column; align-items:center; text-align:center; gap:8px; padding:34px 20px;}
+.empty .ic{width:40px; height:40px; border-radius:11px; background:var(--state-neutral-bg); color:var(--state-neutral); display:grid; place-items:center;}
+.empty h3{margin:0; font-size:var(--text-md);}
+.empty p{margin:0; color:var(--text-secondary); font-size:12.5px; max-width:420px;}
+.errcard{display:flex; align-items:center; gap:12px; padding:16px; flex-wrap:wrap;}
+.errcard .t{flex:1; min-width:200px;}
+.errcard .t b{display:block; color:var(--state-crit);}
+.errcard .t span{color:var(--text-secondary); font-size:12.5px;}
+.skrow td{padding:13px 14px;}
+
+.grid2{display:grid; grid-template-columns:minmax(0,1fr); gap:var(--space-4);}
+.rootnote{display:flex; gap:14px; align-items:flex-start; padding:20px;}
+.rootnote .ic{width:44px; height:44px; border-radius:12px; background:var(--state-neutral-bg); color:var(--state-neutral); display:grid; place-items:center; flex:none;}
+.rootnote h3{margin:0 0 4px; font-size:var(--text-md);}
+.rootnote p{margin:0 0 6px; color:var(--text-secondary); font-size:13px; line-height:1.55; max-width:620px;}
+
+/* state switching */
+[data-s]{display:none;}
+body.s-ready [data-s~="ready"], body.s-loading [data-s~="loading"], body.s-error [data-s~="error"],
+body.s-empty [data-s~="empty"], body.s-root [data-s~="root"], body.s-msp [data-s~="msp"]{display:revert;}
+body.s-ready .flexs[data-s~="ready"], body.s-error .flexs[data-s~="error"], body.s-root .flexs[data-s~="root"], body.s-empty .flexs[data-s~="empty"], body.s-loading .flexs[data-s~="loading"]{display:flex;}
+
+@media (max-width:780px){
+  .issue{grid-template-columns:1fr;}
+  .issue > .btn{justify-self:stretch; justify-content:center;}
+  .tbl.resp thead{display:none;}
+  .tbl.resp tr:not(.confirm){display:grid; grid-template-columns:1fr auto; gap:4px 10px; padding:10px 12px; border-bottom:1px solid var(--border);}
+  .tbl.resp td{border:0; padding:0;}
+  .tbl.resp td.c-act{grid-column:2; grid-row:1; text-align:right;}
+  .tbl.resp td.c-kind{grid-column:1; grid-row:1;}
+  .tbl.resp td.c-who, .tbl.resp td.c-reason, .tbl.resp td.c-when{grid-column:1 / -1;}
+  .tbl.resp td.c-status{grid-column:1 / -1;}
+  .when .rel{display:inline; margin-left:6px;}
+  .tbl.resp tr.row-bg{background:var(--tint-red);}
+  .tbl.resp tr.row-bg > td{background:transparent;}
+  .tbl.resp td.c-when::before{content:attr(data-l); display:inline-block; width:58px; font-size:var(--text-xs); letter-spacing:var(--tracking-label); text-transform:uppercase; color:var(--text-faint);}
+}
+</style>
+</head>
+<body class="s-ready s-msp">
+
+<div class="harness" role="group" aria-label="Mockup controls">
+  <span class="hl">Mockup · #4724 support access</span>
+  <div class="grp" id="stateGrp">
+    <button data-state="ready" aria-pressed="true">Ready</button>
+    <button data-state="loading" aria-pressed="false">Loading</button>
+    <button data-state="error" aria-pressed="false">Error</button>
+    <button data-state="empty" aria-pressed="false">Empty</button>
+    <button data-state="root" aria-pressed="false">Root session</button>
+  </div>
+  <span class="sp"></span>
+  <div class="grp" id="themeGrp">
+    <button data-theme-mode="auto" aria-pressed="true">Auto</button>
+    <button data-theme-mode="light" aria-pressed="false">Light</button>
+    <button data-theme-mode="dark" aria-pressed="false">Dark</button>
+  </div>
+</div>
+
+<div class="shell">
+  <aside class="side">
+    <div class="logo"><b>CFGMS</b><i>controller</i></div>
+    <nav>
+      <a>Fleet</a><a>Cases</a><a>Modules</a><a>Config</a><a>Workflows</a><a>Scripts</a><a>Registration</a>
+      <a>Refresh Requests</a><a>Reports</a><a>Audit</a><a>Accounts</a><a>Certificates</a><a>Installer</a>
+      <a>Tenants</a><a class="active">Support access</a>
+    </nav>
+  </aside>
+  <div class="main">
+    <div class="appbar">
+      <span class="chipbtn">Tenant <b id="tchip">msp-a</b></span>
+      <span class="searchbox">Search…</span>
+      <span class="abspacer"></span>
+      <span class="avatar" id="av">MO</span>
+    </div>
+
+    <div class="content">
+      <div class="htitle">
+        <div>
+          <h1>Support access</h1>
+          <p data-s="msp">Decide when CFGMS root support can see <b class="mono">msp-a</b> and its clients, see every access and emergency elevation, and choose who is told about emergencies.</p>
+          <p data-s="root">Support access is controlled by each MSP, from inside its own tenant.</p>
+        </div>
+      </div>
+
+      <!-- ===== root-scoped explanatory state ===== -->
+      <div class="panel" data-s="root">
+        <div class="rootnote">
+          <span class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
+          <div>
+            <h3>This page is for MSP administrators</h3>
+            <p>You are signed in at root. Root cannot give itself access to an MSP and cannot change who an MSP notifies. An MSP administrator issues support access from this page in their own console.</p>
+            <p class="hint">To read a client tenant now, open it from <b>Tenants</b>. You will be asked for MSP access or break-glass.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== 1. issue a grant ===== -->
+      <div class="panel" data-s="ready loading error empty">
+        <div class="phead"><h2>Give support access</h2><span class="sub">Lets the CFGMS root support team see msp-a and every client under it. Ends by itself.</span></div>
+        <div class="pbody">
+          <div class="issue">
+            <div class="field">
+              <span class="lbl">How long</span>
+              <div class="durseg" id="dur" role="group" aria-label="Duration">
+                <button aria-pressed="false">1 h</button><button aria-pressed="true">4 h</button><button aria-pressed="false">8 h</button><button aria-pressed="false">24 h</button>
+              </div>
+            </div>
+            <button class="btn" id="issueBtn">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>Give access</button>
+            <div class="msg msg-crit" id="issueErr" hidden><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+              <span><b>Not given.</b> The passkey check was cancelled. Try again.</span></div>
+          </div>
+          <p class="hint issue-note">Any root support person can use it while it lasts. Each person who opens msp-a is recorded in your audit log. You confirm with your passkey, and you can revoke access at any time below.</p>
+        </div>
+      </div>
+
+      <!-- ===== 2. list + revoke ===== -->
+      <div class="panel" data-s="ready loading error empty">
+        <div class="phead"><h2>Access to msp-a</h2>
+          <div class="filt" data-s="ready" id="filt"><button aria-pressed="true" data-f="open">Active &amp; pending</button><button aria-pressed="false" data-f="all">All</button></div>
+          <span class="cnt" data-s="ready" id="cnt">3 open · 5 total</span></div>
+
+        <table class="tbl resp" data-s="ready loading">
+          <thead><tr><th>Kind</th><th>Status</th><th>Who</th><th>Reason</th><th>Started</th><th>Ends</th><th></th></tr></thead>
+          <tbody id="rows" data-s="ready"></tbody>
+          <tbody data-s="loading">
+            <tr class="skrow"><td><div class="skel" style="width:90px"></div></td><td><div class="skel" style="width:60px"></div></td><td><div class="skel" style="width:110px"></div></td><td><div class="skel" style="width:180px"></div></td><td><div class="skel" style="width:70px"></div></td><td><div class="skel" style="width:70px"></div></td><td></td></tr>
+            <tr class="skrow"><td><div class="skel" style="width:90px"></div></td><td><div class="skel" style="width:60px"></div></td><td><div class="skel" style="width:110px"></div></td><td><div class="skel" style="width:120px"></div></td><td><div class="skel" style="width:70px"></div></td><td><div class="skel" style="width:70px"></div></td><td></td></tr>
+          </tbody>
+        </table>
+
+        <div class="errcard flexs" data-s="error">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--state-crit)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+          <div class="t"><b>Could not load access records.</b><span>The controller did not answer. Your access settings have not changed.</span></div>
+          <button class="btn-sec">Try again</button>
+        </div>
+
+        <div class="empty" data-s="empty">
+          <span class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>
+          <h3>No one has access to msp-a</h3>
+          <p>Support cannot see your tenants. Give access above when you open a support case. Any emergency break-glass also shows here.</p>
+        </div>
+      </div>
+
+      <!-- ===== 3. contacts ===== -->
+      <div class="panel" data-s="ready loading error empty">
+        <div class="phead"><h2>Emergency contacts</h2><span class="sub">Who is emailed when root uses break-glass on msp-a.</span></div>
+        <div class="pbody contacts">
+          <div class="clist" data-s="ready" id="clist"></div>
+          <div class="clist" data-s="loading"><div class="citem"><div class="skel" style="width:200px"></div></div><div class="citem"><div class="skel" style="width:160px"></div></div></div>
+          <div class="msg msg-warn" data-s="empty"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+            <span><b>No contacts yet.</b> Add at least one address so a person hears about a break-glass right away.</span></div>
+          <div class="msg msg-crit" data-s="error"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+            <span><b>Could not load contacts.</b> <button class="btn-sec btn-sm" style="margin-left:6px">Try again</button></span></div>
+          <div class="addrow flexs" data-s="ready empty">
+            <input type="email" id="newc" placeholder="name@acme-corp.example" aria-label="New contact email">
+            <button class="btn-sec" id="addc">Add</button>
+          </div>
+          <div class="msg msg-crit" id="cerr" hidden><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+            <span><b>Not saved.</b> <span class="mono">ops@acme-corp</span> is not a valid email address.</span></div>
+          <div class="savebar flexs" data-s="ready empty">
+            <span class="hint">Emails go out only when the controller has email set up. Every break-glass also shows in the list above and in your audit log.</span>
+            <span class="sp"></span>
+            <span class="dirty" id="dirty" hidden>Unsaved changes</span>
+            <button class="btn" id="savec" disabled>Save contacts</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  var root = document.documentElement;
+  var ICO_KEY = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></svg>';
+  var ICO_BG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></svg>';
+  var ICO_X = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+  var RC = { account_recovery:'Account recovery', security_incident:'Security incident', legal_request:'Legal request', billing_dispute:'Billing dispute' };
+
+  // seed crossings — status and expiry come from the server; the page only renders them
+  var rows = [
+    { id:'cx-7f2a', kind:'breakglass', status:'active',  who:'root-ops',     rc:'account_recovery', just:'MSP owner lost both passkeys; ticket INC-4821. <b>Need</b> to reset their admin account.', start:'Today 09:14', end:'Today 13:14', rel:'in 3 h 12 m', soon:false },
+    { id:'cx-7e91', kind:'grant',      status:'active',  by:'msp-a-owner',  start:'Today 08:02', end:'Today 12:02', rel:'in 0 h 47 m', soon:true },
+    { id:'cx-7e88', kind:'breakglass', status:'pending', who:'root-dana',    rc:'security_incident', just:'Possible credential stuffing against msp-a admin logins (SOC alert 2219).', start:'Today 10:31', end:'—', rel:'waiting for 2nd approver' },
+    { id:'cx-7c10', kind:'grant',      status:'expired', by:'msp-a-ops', start:'Mon 14:00', end:'Mon 22:00', rel:'' },
+    { id:'cx-7b03', kind:'grant',      status:'revoked', by:'msp-a-owner',  start:'Fri 10:15', end:'Fri 10:40', rel:'revoked by msp-a-owner' }
+  ];
+  var contacts = [ {e:'security@acme-corp.example'}, {e:'owner@acme-corp.example'} ];
+  var filter = 'open', confirming = null, dirty = false;
+
+  function esc(x){ return String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); } // mirrors JSX text-node rendering
+  function pill(s){
+    if (s==='active') return '<span class="pill pill-ok">Active</span>';
+    if (s==='pending') return '<span class="pill pill-warn"><span class="spin" style="width:9px;height:9px;border-width:1.5px"></span>Pending</span>';
+    if (s==='expired') return '<span class="pill pill-neutral">Expired</span>';
+    return '<span class="pill pill-neutral">Revoked</span>';
+  }
+  function renderRows(){
+    var list = rows.filter(function(r){ return filter==='all' || r.status==='active' || r.status==='pending'; });
+    var open = rows.filter(function(r){ return r.status==='active' || r.status==='pending'; }).length;
+    document.getElementById('cnt').textContent = open + ' open · ' + rows.length + ' total';
+    var h = '';
+    list.forEach(function(r){
+      var bg = r.kind==='breakglass', live = r.status==='active' || r.status==='pending';
+      var cls = (bg && live ? 'row-bg' : '') + (!live ? ' row-dim' : '');
+      h += '<tr class="'+cls+'">'
+        + '<td class="c-kind"><span class="kind'+(bg?' bg':'')+'">'+(bg?ICO_BG:ICO_KEY)+(bg?'Break-glass':'Support access')+'</span></td>'
+        + '<td class="c-status">'+pill(r.status)+'</td>'
+        + '<td class="c-who">'+(bg ? '<span class="who">'+esc(r.who)+'</span>' : '<span class="rc">All root support</span><div class="just" style="quotes:none">given by <span class="who">'+esc(r.by)+'</span></div>')+'</td>'
+        + '<td class="c-reason">'+(bg ? '<span class="rc">'+esc(RC[r.rc])+'</span><div class="just">'+esc(r.just)+'</div>' : '<span class="muted">—</span>')+'</td>'
+        + '<td class="c-when" data-l="Started"><span class="when">'+esc(r.start)+'</span></td>'
+        + '<td class="c-when" data-l="Ends"><span class="when">'+esc(r.end)+(r.rel?'<span class="rel'+(r.soon?' soon':'')+'">'+esc(r.rel)+'</span>':'')+'</span></td>'
+        + '<td class="c-act">'+(live ? '<button class="btn-danger-soft" data-revoke="'+r.id+'">'+(bg?(r.status==='pending'?'Deny':'End now'):'Revoke')+'</button>' : '')+'</td>'
+        + '</tr>';
+      if (confirming === r.id){
+        h += '<tr class="confirm"><td colspan="7"><div class="confirm-in'+(bg?' bg':'')+'"><span class="t">'
+          + (bg ? '<b>End this emergency elevation now?</b> <span class="mono">'+esc(r.who)+'</span> loses access to msp-a and all its clients at once. This is recorded in your audit log.'
+                : '<b>Revoke support access?</b> CFGMS root support loses access to msp-a and its clients now.')
+          + '<span class="s">You confirm with your passkey.</span></span>'
+          + '<button class="btn-sec btn-sm" data-keep>Keep</button>'
+          + '<button class="'+(bg?'btn-danger':'btn-danger-soft')+' btn-sm" data-do="'+r.id+'">'+(bg?'End elevation':'Revoke')+'</button>'
+          + '</div></td></tr>';
+      }
+    });
+    document.getElementById('rows').innerHTML = h || '<tr><td colspan="7" class="muted">Nothing open. Choose “All” to see past access.</td></tr>';
+  }
+  function renderContacts(){
+    document.getElementById('clist').innerHTML = contacts.map(function(c, i){
+      return '<div class="citem'+(c.isNew?' new':'')+(c.bad?' bad':'')+'"><span class="e">'+esc(c.e)+'</span><button class="xbtn" aria-label="Remove '+esc(c.e)+'" data-rm="'+i+'">'+ICO_X+'</button></div>';
+    }).join('');
+    document.getElementById('dirty').hidden = !dirty;
+    document.getElementById('savec').disabled = !dirty;
+  }
+  function toast(t){ var el = document.getElementById('toast'); el.textContent = t; el.classList.add('show'); setTimeout(function(){ el.classList.remove('show'); }, 2400); }
+  function press(grp, btn){ grp.querySelectorAll('button').forEach(function(b){ b.setAttribute('aria-pressed', b===btn ? 'true':'false'); }); }
+
+  document.body.addEventListener('click', function(e){
+    var b;
+    if ((b = e.target.closest('[data-revoke]'))){ confirming = b.dataset.revoke; renderRows(); return; }
+    if ((b = e.target.closest('[data-keep]'))){ confirming = null; renderRows(); return; }
+    if ((b = e.target.closest('[data-do]'))){ var r = rows.filter(function(x){ return x.id===b.dataset.do; })[0];
+      r.status = 'revoked'; r.rel = 'revoked by msp-a-ops'; r.end = 'Now'; confirming = null; renderRows();
+      toast(r.kind==='breakglass' ? 'Emergency elevation ended.' : 'Support access revoked.'); return; }
+    if ((b = e.target.closest('#filt button'))){ filter = b.dataset.f; press(b.parentNode, b); renderRows(); return; }
+    if ((b = e.target.closest('#dur button'))){ press(b.parentNode, b); return; }
+    if ((b = e.target.closest('[data-rm]'))){ contacts.splice(+b.dataset.rm, 1); dirty = true; document.getElementById('cerr').hidden = true; renderContacts(); return; }
+    if ((b = e.target.closest('#addc'))){ var v = document.getElementById('newc').value.trim(); if (!v) return;
+      contacts.push({e:v, isNew:true}); document.getElementById('newc').value=''; dirty = true; renderContacts(); return; }
+    if ((b = e.target.closest('#savec'))){
+      var bad = contacts.filter(function(c){ return !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(c.e); });
+      if (bad.length){ bad.forEach(function(c){ c.bad = true; }); document.getElementById('cerr').querySelector('.mono').textContent = bad[0].e;
+        document.getElementById('cerr').hidden = false; renderContacts(); return; }
+      contacts.forEach(function(c){ c.isNew = false; c.bad = false; }); dirty = false; document.getElementById('cerr').hidden = true; renderContacts(); toast('Contacts saved.'); return; }
+    if ((b = e.target.closest('#issueBtn'))){
+      if (e.shiftKey){ document.getElementById('issueErr').hidden = false; return; }
+      document.getElementById('issueErr').hidden = true;
+      var d = document.querySelector('#dur button[aria-pressed=true]').textContent;
+      rows.unshift({ id:'cx-new'+rows.length, kind:'grant', status:'active', by:'msp-a-ops', start:'Now', end:'+'+d, rel:'in '+d });
+      renderRows(); toast('Support access given for '+d+'.'); return; }
+  });
+
+  function setState(s){
+    document.body.className = 's-' + s + (s==='root' ? '' : ' s-msp');
+    document.getElementById('tchip').textContent = s==='root' ? 'root' : 'msp-a';
+    document.getElementById('av').textContent = s==='root' ? 'RO' : 'MO';
+  }
+  var stateGrp = document.getElementById('stateGrp');
+  stateGrp.addEventListener('click', function(e){ var b = e.target.closest('button'); if (!b) return; press(stateGrp, b); setState(b.dataset.state); });
+  var themeGrp = document.getElementById('themeGrp');
+  themeGrp.addEventListener('click', function(e){ var b = e.target.closest('button'); if (!b) return; press(themeGrp, b);
+    if (b.dataset.themeMode === 'auto') root.removeAttribute('data-theme'); else root.setAttribute('data-theme', b.dataset.themeMode); });
+
+  renderRows(); renderContacts();
+  var q = new URLSearchParams(location.search);
+  if (q.get('theme')) root.setAttribute('data-theme', q.get('theme'));
+  if (q.get('confirm')) { confirming = q.get('confirm'); renderRows(); }
+  var st = q.get('state') || 'ready'; var sb = stateGrp.querySelector('[data-state="'+st+'"]'); if (sb) press(stateGrp, sb); setState(st);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,548 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+// #nosec G304 - Module metadata system requires file access for loading module definitions
+package modules
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+
+	"github.com/cfgis/cfgms/pkg/modules/contract"
+	"gopkg.in/yaml.v3"
+)
+
+// ObservePredicate is a single dumb fact-match predicate inside observe_when.
+// Exactly one of Equals or Contains must be set; both or neither is a parse error.
+// Multiple predicates in observe_when are OR'd: any one matching activates the module
+// for read-only DNA observation (ADR-024 Decision §2).
+type ObservePredicate struct {
+	// Fact is the baseline DNA fact key to match against (e.g. "windows_feature", "os").
+	Fact string `yaml:"fact" json:"fact"`
+	// Equals requires an exact string match of the fact value. Mutually exclusive with Contains.
+	Equals string `yaml:"equals,omitempty" json:"equals,omitempty"`
+	// Contains requires the fact value to contain this substring. Mutually exclusive with Equals.
+	Contains string `yaml:"contains,omitempty" json:"contains,omitempty"`
+}
+
+// OwnershipDeclaration records a single object-identity namespace that a module
+// authoritatively owns, per ADR-016 clause 5. When a module declares ownership
+// of a kind, it owns every object of that kind it manages — the entire DNA
+// fragment for that object, with no sub-property co-authorship.
+type OwnershipDeclaration struct {
+	// Kind is the object-identity namespace (e.g. "service", "file", "package").
+	Kind string `yaml:"kind" json:"kind"`
+	// RequiredFields lists DNA Attributes keys that must be present and non-empty
+	// for every DNA snapshot from an entity where this module is active, per
+	// ADR-020. The controller unions RequiredFields across all active modules at
+	// DNA write time; a field absent or empty in the snapshot fails the
+	// write-integrity guard. Omitting RequiredFields is valid (no additional
+	// constraint beyond module ownership).
+	RequiredFields []string `yaml:"required_fields,omitempty" json:"required_fields,omitempty"`
+	// PerObject marks a kind that has one DNA fragment per managed object
+	// (e.g. directory objects) instead of one per host. The controller forwards
+	// it in the observe sweep spec so the steward uses the bulk lane. The module's
+	// Get(kind) returns many objects under the reserved PerObjectKey and the DNA
+	// assembler emits one fragment per object (FragmentId "<kind>:<id>").
+	PerObject bool `yaml:"per_object,omitempty" json:"per_object,omitempty"`
+}
+
+// PerObjectKey is the reserved key in a per-object module's Get(kind).AsMap()
+// output carrying the object list: a list of maps, each with a string "id" and a
+// map "attrs". It is only honoured for ownership declarations with PerObject set.
+const PerObjectKey = "__cfgms_objects"
+
+// ModuleMetadata represents the complete metadata for a module
+// This extends the existing module.yaml format with dependency management
+type ModuleMetadata struct {
+	// Basic module information
+	Name        string `yaml:"name" json:"name"`
+	Version     string `yaml:"version" json:"version"`
+	Description string `yaml:"description" json:"description"`
+	Author      string `yaml:"author,omitempty" json:"author,omitempty"`
+	License     string `yaml:"license,omitempty" json:"license,omitempty"`
+	Publisher   string `yaml:"publisher,omitempty" json:"publisher,omitempty"`
+
+	// Execution environment — exactly one value required
+	// Valid values: steward, outpost, controller
+	Executors []string `yaml:"executors,omitempty" json:"executors,omitempty"`
+	// Kind is derived from Executors[0] at parse time, never read from YAML.
+	// steward→"steward", outpost→"outpost", controller→"workflow"
+	Kind string `yaml:"-" json:"kind,omitempty"`
+
+	// Module dependencies (for inter-module dependencies)
+	ModuleDependencies []ModuleDependency `yaml:"module_dependencies,omitempty" json:"module_dependencies,omitempty"`
+
+	// Platform and system requirements
+	Requirements *ModuleRequirements `yaml:"requirements,omitempty" json:"requirements,omitempty"`
+	Platforms    []string            `yaml:"platforms,omitempty" json:"platforms,omitempty"`
+
+	// Module capabilities and interfaces
+	Interfaces []string `yaml:"interfaces,omitempty" json:"interfaces,omitempty"`
+
+	// Security requirements
+	Security *ModuleSecurity `yaml:"security,omitempty" json:"security,omitempty"`
+
+	// Documentation references
+	Documentation *ModuleDocumentation `yaml:"documentation,omitempty" json:"documentation,omitempty"`
+
+	// Schema file reference for configuration validation
+	Schema string `yaml:"schema,omitempty" json:"schema,omitempty"`
+
+	// BehavioralEnvelope documents what the module does at runtime
+	BehavioralEnvelope *BehavioralEnvelope `yaml:"behavioral_envelope,omitempty" json:"behavioral_envelope,omitempty"`
+
+	// Owns declares the object-identity namespaces this module authoritatively
+	// manages, per ADR-016 clause 5. Optional; zero value (nil/empty) means
+	// this module declares no ownership — backward-compatible with all existing
+	// module.yaml files that predate this field.
+	Owns []OwnershipDeclaration `yaml:"owns,omitempty" json:"owns,omitempty"`
+
+	// ObserveWhen is a list of dumb fact-match predicates that activate this module
+	// for read-only DNA observation (ADR-024 Decision §2). Each predicate specifies
+	// a baseline DNA fact key and an equals/contains match value; predicates are OR'd
+	// so any one matching activates observation. Optional; nil means this module is
+	// never auto-pulled for DNA — backward-compatible with all existing module.yaml
+	// files that predate this field.
+	ObserveWhen []ObservePredicate `yaml:"observe_when,omitempty" json:"observe_when,omitempty"`
+
+	// AlwaysPull activates this module for read-only DNA observation on every
+	// steward unconditionally, without requiring any DNA fact match (ADR-024
+	// Amendment 2). Intended for universal baseline modules such as osquery that
+	// must run on every managed host. False (or absent) preserves the existing
+	// observe_when-only semantics — backward-compatible with all existing
+	// module.yaml files that predate this field.
+	AlwaysPull bool `yaml:"always_pull,omitempty" json:"always_pull,omitempty"`
+
+	// Env lists the NAMES of parent-process environment variables the module
+	// process receives in addition to the runtime's fixed baseline. Values always
+	// come from the parent at start time; the manifest never carries a value.
+	// Names are validated by contract.ValidateEnvNames. The field is part of the
+	// manifest bytes, so it is covered by the bundle ContentHash and signature.
+	Env []string `yaml:"env,omitempty" json:"env,omitempty"`
+}
+
+// BehavioralEnvelope documents the runtime behavior of a module for security auditing
+type BehavioralEnvelope struct {
+	ShellsOutTo              []string `yaml:"shells_out_to,omitempty" json:"shells_out_to,omitempty"`
+	WritesPaths              []string `yaml:"writes_paths,omitempty" json:"writes_paths,omitempty"`
+	ReadsPaths               []string `yaml:"reads_paths,omitempty" json:"reads_paths,omitempty"`
+	NetworkEgress            []string `yaml:"network_egress,omitempty" json:"network_egress,omitempty"`
+	LolbinUsageJustification string   `yaml:"lolbin_usage_justification,omitempty" json:"lolbin_usage_justification,omitempty"`
+}
+
+// ModuleRequirements defines system requirements for a module
+type ModuleRequirements struct {
+	OS        []string `yaml:"os,omitempty" json:"os,omitempty"`
+	Arch      []string `yaml:"arch,omitempty" json:"arch,omitempty"`
+	MinMemory string   `yaml:"min_memory,omitempty" json:"min_memory,omitempty"`
+	MinDisk   string   `yaml:"min_disk,omitempty" json:"min_disk,omitempty"`
+}
+
+// ModuleSecurity defines security requirements and capabilities
+type ModuleSecurity struct {
+	RequiresRoot bool     `yaml:"requires_root,omitempty" json:"requires_root,omitempty"`
+	Capabilities []string `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
+	Ports        []int    `yaml:"ports,omitempty" json:"ports,omitempty"`
+}
+
+// ModuleDocumentation defines documentation references
+type ModuleDocumentation struct {
+	API      string `yaml:"api,omitempty" json:"api,omitempty"`
+	Examples string `yaml:"examples,omitempty" json:"examples,omitempty"`
+	README   string `yaml:"readme,omitempty" json:"readme,omitempty"`
+}
+
+// LoadModuleMetadata loads module metadata from a module.yaml file
+func LoadModuleMetadata(filePath string) (*ModuleMetadata, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open module metadata file %s: %v", filePath, err)
+	}
+	// The file is opened read-only and fully consumed by ParseModuleMetadata
+	// before this defer runs, so a Close error cannot affect the returned
+	// metadata or signal data loss (no writes were buffered). The error is
+	// intentionally discarded rather than surfaced or logged.
+	defer func() { _ = file.Close() }()
+
+	return ParseModuleMetadata(file)
+}
+
+// ParseModuleMetadata parses module metadata from a YAML reader
+func ParseModuleMetadata(reader io.Reader) (*ModuleMetadata, error) {
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read module metadata: %v", err)
+	}
+
+	var metadata ModuleMetadata
+	if err := yaml.Unmarshal(data, &metadata); err != nil {
+		return nil, fmt.Errorf("failed to parse module metadata YAML: %v", err)
+	}
+
+	// Validate required fields
+	if metadata.Name == "" {
+		return nil, fmt.Errorf("module name is required")
+	}
+
+	if metadata.Version == "" {
+		return nil, fmt.Errorf("module version is required")
+	}
+
+	// Validate version format
+	if _, err := ParseVersion(metadata.Version); err != nil {
+		return nil, fmt.Errorf("invalid module version '%s': %v", metadata.Version, err)
+	}
+
+	// Validate executors and derive kind
+	if err := validateAndDeriveKind(&metadata); err != nil {
+		return nil, err
+	}
+
+	// Validate publisher
+	if metadata.Publisher == "" {
+		return nil, fmt.Errorf("publisher is required")
+	}
+
+	// Validate dependency version constraints
+	for i, dep := range metadata.ModuleDependencies {
+		if dep.Name == "" {
+			return nil, fmt.Errorf("dependency %d: name is required", i)
+		}
+
+		if dep.Version != "" {
+			// Test version constraint by checking against a dummy version
+			if _, err := IsVersionCompatible("1.0.0", dep.Version); err != nil {
+				return nil, fmt.Errorf("dependency %d (%s): invalid version constraint '%s': %v",
+					i, dep.Name, dep.Version, err)
+			}
+		}
+	}
+
+	// Validate observe_when predicates
+	if err := validateObserveWhen(metadata.ObserveWhen); err != nil {
+		return nil, err
+	}
+
+	// Validate declared environment variable names
+	if err := contract.ValidateEnvNames(metadata.Env); err != nil {
+		return nil, err
+	}
+
+	return &metadata, nil
+}
+
+// validateAndDeriveKind enforces the single-executor invariant and sets Kind.
+// steward→"steward", outpost→"outpost", controller→"workflow"
+func validateAndDeriveKind(m *ModuleMetadata) error {
+	if len(m.Executors) == 0 {
+		return fmt.Errorf("executors is required: must contain exactly one value (steward, outpost, or controller)")
+	}
+	if len(m.Executors) > 1 {
+		return fmt.Errorf("executors must contain exactly one element, got %d: %v", len(m.Executors), m.Executors)
+	}
+	switch m.Executors[0] {
+	case "steward":
+		m.Kind = "steward"
+	case "outpost":
+		m.Kind = "outpost"
+	case "controller":
+		m.Kind = "workflow"
+	default:
+		return fmt.Errorf("invalid executor %q: must be steward, outpost, or controller", m.Executors[0])
+	}
+	return nil
+}
+
+// SaveModuleMetadata saves module metadata to a module.yaml file
+func (m *ModuleMetadata) SaveModuleMetadata(filePath string) error {
+	// Create directory if it doesn't exist
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return fmt.Errorf("failed to create directory %s: %v", dir, err)
+	}
+
+	// Marshal to YAML
+	data, err := yaml.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("failed to marshal module metadata to YAML: %v", err)
+	}
+
+	// Write to file
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write module metadata file %s: %v", filePath, err)
+	}
+
+	return nil
+}
+
+// ToYAML returns the module metadata as YAML bytes
+func (m *ModuleMetadata) ToYAML() ([]byte, error) {
+	return yaml.Marshal(m)
+}
+
+// FromYAML populates the module metadata from YAML bytes
+func (m *ModuleMetadata) FromYAML(data []byte) error {
+	return yaml.Unmarshal(data, m)
+}
+
+// Validate validates the module metadata
+func (m *ModuleMetadata) Validate() error {
+	if m.Name == "" {
+		return fmt.Errorf("module name is required")
+	}
+
+	if m.Version == "" {
+		return fmt.Errorf("module version is required")
+	}
+
+	// Validate version format
+	if _, err := ParseVersion(m.Version); err != nil {
+		return fmt.Errorf("invalid module version '%s': %v", m.Version, err)
+	}
+
+	// Validate executors and derive Kind as a side effect
+	if err := validateAndDeriveKind(m); err != nil {
+		return err
+	}
+
+	// Validate publisher
+	if m.Publisher == "" {
+		return fmt.Errorf("publisher is required")
+	}
+
+	// Validate dependency version constraints
+	for i, dep := range m.ModuleDependencies {
+		if dep.Name == "" {
+			return fmt.Errorf("dependency %d: name is required", i)
+		}
+
+		if dep.Version != "" {
+			// Test version constraint by checking against a dummy version
+			if _, err := IsVersionCompatible("1.0.0", dep.Version); err != nil {
+				return fmt.Errorf("dependency %d (%s): invalid version constraint '%s': %v",
+					i, dep.Name, dep.Version, err)
+			}
+		}
+	}
+
+	// Validate observe_when predicates
+	if err := validateObserveWhen(m.ObserveWhen); err != nil {
+		return err
+	}
+
+	// Validate declared environment variable names
+	if err := contract.ValidateEnvNames(m.Env); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateObserveWhen rejects malformed ObservePredicate entries: missing fact,
+// both equals+contains set, or neither set.
+func validateObserveWhen(predicates []ObservePredicate) error {
+	for i, p := range predicates {
+		if p.Fact == "" {
+			return fmt.Errorf("observe_when[%d]: fact is required", i)
+		}
+		if p.Equals != "" && p.Contains != "" {
+			return fmt.Errorf("observe_when[%d] (fact=%q): equals and contains are mutually exclusive; set exactly one", i, p.Fact)
+		}
+		if p.Equals == "" && p.Contains == "" {
+			return fmt.Errorf("observe_when[%d] (fact=%q): one of equals or contains is required", i, p.Fact)
+		}
+	}
+	return nil
+}
+
+// GetDependencyNames returns a list of all dependency names
+func (m *ModuleMetadata) GetDependencyNames() []string {
+	names := make([]string, len(m.ModuleDependencies))
+	for i, dep := range m.ModuleDependencies {
+		names[i] = dep.Name
+	}
+	return names
+}
+
+// HasDependency checks if the module has a specific dependency
+func (m *ModuleMetadata) HasDependency(name string) bool {
+	for _, dep := range m.ModuleDependencies {
+		if dep.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// GetDependency returns a specific dependency by name
+func (m *ModuleMetadata) GetDependency(name string) (*ModuleDependency, bool) {
+	for _, dep := range m.ModuleDependencies {
+		if dep.Name == name {
+			return &dep, true
+		}
+	}
+	return nil, false
+}
+
+// AddDependency adds a new module dependency
+func (m *ModuleMetadata) AddDependency(dep ModuleDependency) error {
+	// Check if dependency already exists
+	if m.HasDependency(dep.Name) {
+		return fmt.Errorf("dependency '%s' already exists", dep.Name)
+	}
+
+	// Validate the dependency
+	if dep.Name == "" {
+		return fmt.Errorf("dependency name is required")
+	}
+
+	if dep.Version != "" {
+		// Test version constraint by checking against a dummy version
+		if _, err := IsVersionCompatible("1.0.0", dep.Version); err != nil {
+			return fmt.Errorf("invalid version constraint '%s': %v", dep.Version, err)
+		}
+	}
+
+	m.ModuleDependencies = append(m.ModuleDependencies, dep)
+	return nil
+}
+
+// RemoveDependency removes a module dependency by name
+func (m *ModuleMetadata) RemoveDependency(name string) bool {
+	for i, dep := range m.ModuleDependencies {
+		if dep.Name == name {
+			// Remove the dependency
+			m.ModuleDependencies = append(m.ModuleDependencies[:i], m.ModuleDependencies[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// Clone returns a deep copy of the module metadata
+func (m *ModuleMetadata) Clone() *ModuleMetadata {
+	clone := &ModuleMetadata{
+		Name:        m.Name,
+		Version:     m.Version,
+		Description: m.Description,
+		Author:      m.Author,
+		License:     m.License,
+		Schema:      m.Schema,
+		Publisher:   m.Publisher,
+		Kind:        m.Kind,
+	}
+
+	// Deep copy executors
+	if m.Executors != nil {
+		clone.Executors = make([]string, len(m.Executors))
+		copy(clone.Executors, m.Executors)
+	}
+
+	// Deep copy module dependencies
+	if m.ModuleDependencies != nil {
+		clone.ModuleDependencies = make([]ModuleDependency, len(m.ModuleDependencies))
+		copy(clone.ModuleDependencies, m.ModuleDependencies)
+	}
+
+	// Deep copy declared environment variable names
+	if m.Env != nil {
+		clone.Env = make([]string, len(m.Env))
+		copy(clone.Env, m.Env)
+	}
+
+	// Deep copy platforms
+	if m.Platforms != nil {
+		clone.Platforms = make([]string, len(m.Platforms))
+		copy(clone.Platforms, m.Platforms)
+	}
+
+	// Deep copy interfaces
+	if m.Interfaces != nil {
+		clone.Interfaces = make([]string, len(m.Interfaces))
+		copy(clone.Interfaces, m.Interfaces)
+	}
+
+	// Copy nested structures
+	if m.Requirements != nil {
+		clone.Requirements = &ModuleRequirements{
+			MinMemory: m.Requirements.MinMemory,
+			MinDisk:   m.Requirements.MinDisk,
+		}
+		if m.Requirements.OS != nil {
+			clone.Requirements.OS = make([]string, len(m.Requirements.OS))
+			copy(clone.Requirements.OS, m.Requirements.OS)
+		}
+		if m.Requirements.Arch != nil {
+			clone.Requirements.Arch = make([]string, len(m.Requirements.Arch))
+			copy(clone.Requirements.Arch, m.Requirements.Arch)
+		}
+	}
+
+	if m.Security != nil {
+		clone.Security = &ModuleSecurity{
+			RequiresRoot: m.Security.RequiresRoot,
+		}
+		if m.Security.Capabilities != nil {
+			clone.Security.Capabilities = make([]string, len(m.Security.Capabilities))
+			copy(clone.Security.Capabilities, m.Security.Capabilities)
+		}
+		if m.Security.Ports != nil {
+			clone.Security.Ports = make([]int, len(m.Security.Ports))
+			copy(clone.Security.Ports, m.Security.Ports)
+		}
+	}
+
+	if m.Documentation != nil {
+		clone.Documentation = &ModuleDocumentation{
+			API:      m.Documentation.API,
+			Examples: m.Documentation.Examples,
+			README:   m.Documentation.README,
+		}
+	}
+
+	if m.BehavioralEnvelope != nil {
+		clone.BehavioralEnvelope = &BehavioralEnvelope{
+			LolbinUsageJustification: m.BehavioralEnvelope.LolbinUsageJustification,
+		}
+		if m.BehavioralEnvelope.ShellsOutTo != nil {
+			clone.BehavioralEnvelope.ShellsOutTo = make([]string, len(m.BehavioralEnvelope.ShellsOutTo))
+			copy(clone.BehavioralEnvelope.ShellsOutTo, m.BehavioralEnvelope.ShellsOutTo)
+		}
+		if m.BehavioralEnvelope.WritesPaths != nil {
+			clone.BehavioralEnvelope.WritesPaths = make([]string, len(m.BehavioralEnvelope.WritesPaths))
+			copy(clone.BehavioralEnvelope.WritesPaths, m.BehavioralEnvelope.WritesPaths)
+		}
+		if m.BehavioralEnvelope.ReadsPaths != nil {
+			clone.BehavioralEnvelope.ReadsPaths = make([]string, len(m.BehavioralEnvelope.ReadsPaths))
+			copy(clone.BehavioralEnvelope.ReadsPaths, m.BehavioralEnvelope.ReadsPaths)
+		}
+		if m.BehavioralEnvelope.NetworkEgress != nil {
+			clone.BehavioralEnvelope.NetworkEgress = make([]string, len(m.BehavioralEnvelope.NetworkEgress))
+			copy(clone.BehavioralEnvelope.NetworkEgress, m.BehavioralEnvelope.NetworkEgress)
+		}
+	}
+
+	// Deep copy ownership declarations (each entry may carry a RequiredFields slice)
+	if m.Owns != nil {
+		clone.Owns = make([]OwnershipDeclaration, len(m.Owns))
+		for i, o := range m.Owns {
+			clone.Owns[i] = OwnershipDeclaration{Kind: o.Kind, PerObject: o.PerObject}
+			if o.RequiredFields != nil {
+				clone.Owns[i].RequiredFields = make([]string, len(o.RequiredFields))
+				copy(clone.Owns[i].RequiredFields, o.RequiredFields)
+			}
+		}
+	}
+
+	// Deep copy observe_when predicates (each entry has only string fields — copy is safe)
+	if m.ObserveWhen != nil {
+		clone.ObserveWhen = make([]ObservePredicate, len(m.ObserveWhen))
+		copy(clone.ObserveWhen, m.ObserveWhen)
+	}
+
+	clone.AlwaysPull = m.AlwaysPull
+
+	return clone
+}

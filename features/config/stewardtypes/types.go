@@ -1,0 +1,274 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
+// Package stewardtypes provides the shared data types and validation functions
+// for steward configuration used by both the controller and the steward.
+//
+// These types are extracted so the controller can reference steward configuration
+// shapes without importing steward-internal packages.
+package stewardtypes
+
+import (
+	"time"
+
+	maintenanceschedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
+)
+
+// StewardConfig represents the complete steward configuration.
+type StewardConfig struct {
+	Steward         StewardSettings   `yaml:"steward" json:"steward"`
+	Resources       []ResourceConfig  `yaml:"resources" json:"resources"`
+	Modules         map[string]string `yaml:"modules,omitempty" json:"modules,omitempty"`
+	RequiredModules []RequiredModule  `yaml:"required_modules,omitempty" json:"required_modules,omitempty"`
+}
+
+// StewardSettings contains steward-specific configuration options.
+type StewardSettings struct {
+	ID          string        `yaml:"id" json:"id"`
+	ModulePaths []string      `yaml:"module_paths,omitempty" json:"module_paths,omitempty"`
+	Logging     LoggingConfig `yaml:"logging" json:"logging"`
+
+	ErrorHandling ErrorHandlingConfig `yaml:"error_handling" json:"error_handling"`
+	Secrets       SecretsConfig       `yaml:"secrets,omitempty" json:"secrets,omitempty"`
+
+	// ConvergeInterval is how often the steward re-converges (e.g. "30m").
+	ConvergeInterval string `yaml:"converge_interval,omitempty" json:"converge_interval,omitempty"`
+
+	// ScriptSigning configures script signing policy and trusted keys.
+	// Child tenants may only tighten (not loosen) the inherited policy.
+	ScriptSigning ScriptSigningConfig `yaml:"script_signing,omitempty" json:"script_signing,omitempty"`
+
+	// ModuleTrust configures module trust policy and additional trusted publishers.
+	ModuleTrust ModuleTrustConfig `yaml:"module_trust,omitempty" json:"module_trust,omitempty"`
+
+	// RemoteTerminal is a steward-local switch for remote terminal. It is read
+	// only from the local steward.cfg at start-up and is never populated from a
+	// controller-delivered config. (Issue #5146)
+	RemoteTerminal RemoteTerminalConfig `yaml:"remote_terminal,omitempty" json:"remote_terminal,omitempty"`
+
+	// SignedCommandReplayWindow is the maximum age of an accepted command timestamp.
+	SignedCommandReplayWindow time.Duration `yaml:"signed_command_replay_window,omitempty" json:"signed_command_replay_window,omitempty"`
+
+	// SignedCommandMaxParamsBytes is the maximum JSON-serialized size of Command.Params.
+	SignedCommandMaxParamsBytes int `yaml:"signed_command_max_params_bytes,omitempty" json:"signed_command_max_params_bytes,omitempty"`
+
+	// DriftMode controls how the steward responds to detected configuration drift.
+	// Must be sourced exclusively from the controller-delivered cfg.
+	DriftMode DriftMode `yaml:"drift_mode,omitempty" json:"drift_mode,omitempty"`
+
+	// ModuleDriftModes overrides DriftMode per module bundle name (the part of a
+	// module reference before the first "."), e.g. {"activedirectory": "monitor"}.
+	// Like DriftMode, it is sourced exclusively from the controller-delivered cfg.
+	ModuleDriftModes map[string]DriftMode `yaml:"module_drift_modes,omitempty" json:"module_drift_modes,omitempty"`
+
+	// Upgrade configures the steward upgrade policy. (Issue #1943)
+	Upgrade UpgradeConfig `yaml:"upgrade,omitempty" json:"upgrade,omitempty"`
+
+	// RegistrationPollTimeout is the maximum time to wait for manual registration
+	// approval when the controller uses registration.workflow: manual (Issue #1899).
+	// Default is 24h. Set to 0 to use the default.
+	RegistrationPollTimeout time.Duration `yaml:"registration_poll_timeout,omitempty" json:"registration_poll_timeout,omitempty"`
+
+	// DNARefreshInterval is how often the steward re-collects and publishes DNA
+	// attribute deltas while connected to the controller (Issue #1915).
+	// Accepts Go duration strings (e.g. "30m", "1h"). Default: 30m.
+	DNARefreshInterval string `yaml:"dna_refresh_interval,omitempty" json:"dna_refresh_interval,omitempty"`
+
+	// ObserveSweepN is the Tier-2 whole-domain observe sweep cadence: the sweep
+	// runs on every Nth convergence tick (Issue #3104, ADR-024 Amendment 1 §3).
+	// Unset (nil) applies DefaultObserveSweepN. 0 disables the sweep entirely;
+	// 1 runs it on every tick. The field is a pointer so an explicitly configured
+	// 0 (disable) is distinguishable from an absent key (use the default).
+	ObserveSweepN *int `yaml:"observe_sweep_n,omitempty" json:"observe_sweep_n,omitempty"`
+
+	// TenantDefaultTimezone is the IANA timezone name applied when a reboot_window
+	// does not declare an explicit timezone. A future story reuses this same field
+	// for the workflow-trigger scheduler's timezone default (ADR-026 decision 4).
+	TenantDefaultTimezone string `yaml:"tenant_default_timezone,omitempty" json:"tenant_default_timezone,omitempty"`
+
+	// RebootWindow declares the maintenance window during which reboots are permitted.
+	// Cascades MSP → Client → Group → Cluster → Role → Device with free override in
+	// either direction (tighter or looser). Nil means no window is declared at this level.
+	RebootWindow *maintenanceschedule.Config `yaml:"reboot_window,omitempty" json:"reboot_window,omitempty"`
+}
+
+// UpgradeConfig holds upgrade-related steward policy settings. (Issue #1943)
+type UpgradeConfig struct {
+	// AllowDowngrade permits installing a version older than or equal to the
+	// running version. Disabled by default to prevent accidental rollbacks.
+	AllowDowngrade bool `yaml:"allow_downgrade,omitempty" json:"allow_downgrade,omitempty"`
+
+	// DesiredVersion is the controller-declared target steward binary version
+	// (e.g. "v0.5.21"). When set and different from the running version, the
+	// steward convergence loop retries the launcher swap for the staged binary.
+	// Empty string disables version-convergence auto-upgrade (back-compat no-op).
+	// (Issue #2260)
+	DesiredVersion string `yaml:"desired_version,omitempty" json:"desired_version,omitempty"`
+}
+
+// SecretsConfig defines configuration for steward-side secret storage.
+type SecretsConfig struct {
+	SecretsDir string `yaml:"secrets_dir,omitempty" json:"secrets_dir,omitempty"`
+	Provider   string `yaml:"provider,omitempty" json:"provider,omitempty"`
+}
+
+// ScriptSigningPolicy defines the enforcement level for script signatures.
+type ScriptSigningPolicy string
+
+const (
+	ScriptSigningPolicyNone     ScriptSigningPolicy = "none"
+	ScriptSigningPolicyOptional ScriptSigningPolicy = "optional"
+	ScriptSigningPolicyRequired ScriptSigningPolicy = "required"
+)
+
+// ScriptTrustMode defines which signing keys or CAs are considered trustworthy.
+type ScriptTrustMode string
+
+const (
+	TrustModeAnyValid             ScriptTrustMode = "any_valid"
+	TrustModeTrustedKeys          ScriptTrustMode = "trusted_keys"
+	TrustModeTrustedKeysAndPublic ScriptTrustMode = "trusted_keys_and_public"
+)
+
+// TrustedKeyRef identifies a trusted signing key by name, thumbprint, or key reference.
+type TrustedKeyRef struct {
+	Name         string `yaml:"name" json:"name"`
+	Thumbprint   string `yaml:"thumbprint,omitempty" json:"thumbprint,omitempty"`
+	PublicKeyRef string `yaml:"public_key_ref,omitempty" json:"public_key_ref,omitempty"`
+}
+
+// ScriptSigningConfig defines the steward-level script signing policy.
+//
+// Child tenants inherit parent config via MergeScriptSigningConfig and may only
+// tighten policy (none→optional→required), never loosen it.
+type ScriptSigningConfig struct {
+	Policy        ScriptSigningPolicy `yaml:"policy,omitempty" json:"policy,omitempty"`
+	TrustMode     ScriptTrustMode     `yaml:"trust_mode,omitempty" json:"trust_mode,omitempty"`
+	TrustedKeys   []TrustedKeyRef     `yaml:"trusted_keys,omitempty" json:"trusted_keys,omitempty"`
+	AllowPublicCA bool                `yaml:"allow_public_ca,omitempty" json:"allow_public_ca,omitempty"`
+
+	// RequireSignedAdhoc requires a valid signature on all ad-hoc script commands.
+	// Incompatible with policy: none.
+	RequireSignedAdhoc bool `yaml:"require_signed_adhoc,omitempty" json:"require_signed_adhoc,omitempty"`
+}
+
+// ResourceConfig defines a single resource to be managed by the steward.
+type ResourceConfig struct {
+	Name   string                 `yaml:"name" json:"name"`
+	Module string                 `yaml:"module" json:"module"`
+	Config map[string]interface{} `yaml:"config" json:"config"`
+}
+
+// DriftMode defines how the steward responds to detected configuration drift.
+// Set exclusively from controller-delivered cfg bytes — never from local steward.cfg.
+type DriftMode string
+
+const (
+	DriftModeApply   DriftMode = "apply"
+	DriftModeMonitor DriftMode = "monitor"
+)
+
+// EffectiveDriftMode resolves the drift mode for a module bundle. A per-module
+// override wins over the steward-wide mode, which defaults to apply when unset.
+// It fails safe: an override or steward-wide value that is not a known mode
+// (including an empty override) yields monitor, which reports without correcting.
+func EffectiveDriftMode(settings StewardSettings, moduleBundle string) DriftMode {
+	if mode, ok := settings.ModuleDriftModes[moduleBundle]; ok {
+		return knownDriftModeOrMonitor(mode)
+	}
+	if settings.DriftMode == "" {
+		return DriftModeApply
+	}
+	return knownDriftModeOrMonitor(settings.DriftMode)
+}
+
+func knownDriftModeOrMonitor(mode DriftMode) DriftMode {
+	if mode == DriftModeApply {
+		return DriftModeApply
+	}
+	return DriftModeMonitor
+}
+
+// LoggingConfig defines logging output settings.
+type LoggingConfig struct {
+	Level string `yaml:"level" json:"level"`
+}
+
+// ErrorHandlingConfig defines how to handle various error conditions.
+type ErrorHandlingConfig struct {
+	ModuleLoadFailure  ErrorAction `yaml:"module_load_failure" json:"module_load_failure"`
+	ResourceFailure    ErrorAction `yaml:"resource_failure" json:"resource_failure"`
+	ConfigurationError ErrorAction `yaml:"configuration_error" json:"configuration_error"`
+}
+
+// ErrorAction defines the available error handling strategies.
+type ErrorAction string
+
+const (
+	ActionContinue ErrorAction = "continue"
+	ActionFail     ErrorAction = "fail"
+	ActionWarn     ErrorAction = "warn"
+)
+
+// ModuleTrustMode defines how the steward verifies module bundles.
+type ModuleTrustMode string
+
+const (
+	// ModuleTrustModeStrict requires the steward to independently verify publisher
+	// signatures, consulting AdditionalPublishers in addition to baked-in identities.
+	ModuleTrustModeStrict ModuleTrustMode = "strict"
+
+	// ModuleTrustModeController delegates trust decisions to the controller (default).
+	// The steward accepts any bundle the controller has approved.
+	ModuleTrustModeController ModuleTrustMode = "controller"
+
+	// ModuleTrustModeBypass disables all trust enforcement. Development use only.
+	ModuleTrustModeBypass ModuleTrustMode = "bypass"
+)
+
+// RemoteTerminalConfig configures whether this endpoint offers remote terminal.
+type RemoteTerminalConfig struct {
+	// Enabled turns remote terminal on or off. Nil (absent) means enabled, so
+	// existing deployments do not change. Only `enabled: false` has an effect.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+}
+
+// IsEnabled reports whether remote terminal is allowed; an absent value is enabled.
+func (c RemoteTerminalConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// ModuleTrustConfig configures module trust policy for the steward.
+// Placed alongside ScriptSigning as steward security posture configuration.
+type ModuleTrustConfig struct {
+	// Mode controls how module bundle signatures are verified.
+	// Valid values: "strict", "controller" (default), "bypass".
+	Mode ModuleTrustMode `yaml:"mode,omitempty" json:"mode,omitempty"`
+
+	// AdditionalPublishers lists publisher identifiers trusted in addition to
+	// the CFGMS publisher identity baked into the steward binary.
+	// Only consulted when Mode is "strict". A descendant level that declares a
+	// publisher not in the list accumulated from its ancestors is refused (the
+	// ancestor list is kept) unless that level sets AuthorizeDowngrade; a
+	// declared list that is a subset of the accumulated one applies freely.
+	// When the accumulated list is empty, only the root (MSP) level may declare
+	// publishers without AuthorizeDowngrade.
+	AdditionalPublishers []string `yaml:"additional_publishers,omitempty" json:"additional_publishers,omitempty"`
+
+	// AuthorizeDowngrade must be set explicitly, at the same config level that
+	// weakens Mode (e.g. strict→controller or strict→bypass) or adds an
+	// AdditionalPublishers entry its ancestors do not list, for that transition
+	// to be accepted. Without it, a transition that lowers trust is refused and
+	// the previously established (stronger) mode continues to apply (Issue #4324).
+	// Mirrors the more-permissive-wins precedent of Upgrade.AllowDowngrade: the
+	// permission must be granted deliberately, it is never inferred.
+	AuthorizeDowngrade bool `yaml:"authorize_downgrade,omitempty" json:"authorize_downgrade,omitempty"`
+}
+
+// RequiredModule declares a module bundle that must be present and approved in
+// the controller cache before this cfg file can be deployed to stewards.
+// Name is the full "publisher/name" identifier; Version is an exact version (e.g. 1.0.0).
+type RequiredModule struct {
+	Name    string `yaml:"name" json:"name"`
+	Version string `yaml:"version" json:"version"`
+}

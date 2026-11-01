@@ -1,0 +1,235 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
+// Package telemetry is the production home for steward-side, on-demand process
+// and service telemetry collection (Issue #2763, epic #2738 — Web UI live
+// operations "task manager"). It is distinct from features/steward/dex, which is
+// the DEX experience-signal acquisition spike (ETW/PSI event streams); this
+// package exposes a cheap, point-in-time SNAPSHOT of running processes and
+// services that a controller subscriber polls on an interval (wired by #2764).
+//
+// # Contract
+//
+// A [Collector] returns a [Telemetry] snapshot via [Collector.Snapshot]. The
+// collector does NO work unless invoked — there is no background goroutine, no
+// event stream, nothing running between calls. Story #2764 attaches it to a
+// subscription so it only runs while a controller subscriber is attached.
+//
+// # Platform coverage
+//
+//   - Linux (build: linux): process table from /proc, services from systemd D-Bus.
+//   - Windows (build: windows): process table from NtQuerySystemInformation
+//     (SystemProcessInformation), services from the Service Control Manager
+//     (svc/mgr). See collector_windows.go for why the WMI perf-object query was
+//     rejected (it measured ~20× over the CPU budget).
+//   - Everything else (build: !windows && !linux, e.g. macOS): [NewCollector]
+//     returns a collector whose Snapshot yields [ErrPlatformNotSupported]. macOS
+//     collection (libproc/IOKit) is deferred — no macOS CI runner — but the
+//     interface compiles cleanly there.
+//
+// # Service and process detail
+//
+// Service snapshots carry DisplayName, StartType and the main PID; process
+// snapshots carry a Status ("running"/"suspended") and a Description. These
+// are descriptive telemetry only — none enter hashed DNA — and FragmentID
+// remains the join key against DNA.
+//
+// # Overhead
+//
+// Snapshot is usermode only (no kernel driver, no eBPF, no ETW) and cheap enough
+// to poll repeatedly, staying within the DEX sub-1% sustained single-core CPU
+// budget (features/steward/dex/CONSUME_FEASIBILITY_LINUX.md Part 4/5). It never
+// shells out (no `ps`/`tasklist`/`systemctl`/`wmic`) — in-process APIs only, per
+// the CLAUDE.md steward execution-path posture.
+package telemetry
+
+import (
+	"context"
+	"errors"
+)
+
+// ErrPlatformNotSupported is returned by [Collector.Snapshot] on platforms with
+// no telemetry implementation (currently anything other than Linux and Windows).
+var ErrPlatformNotSupported = errors.New("telemetry: platform not supported")
+
+// ProcessSnapshot is a point-in-time view of one running process.
+//
+// The network counters (NetRxBytes/NetTxBytes) are structurally present so the
+// wire format is stable for #2764/#2765, but are NOT populated by this usermode
+// collector: per-process network byte accounting requires kernel-assisted
+// tracing (eBPF on Linux, the Kernel-Network ETW provider on Windows), both of
+// which the epic's Implementation Notes place out of scope ("usermode only, no
+// eBPF … this collector doesn't touch ETW at all"). They are reserved for a
+// future kernel-assisted story and remain zero here.
+type ProcessSnapshot struct {
+	// PID is the operating-system process id.
+	PID int `json:"pid"`
+	// Name is the executable/image name (e.g. "sshd", "chrome.exe").
+	Name string `json:"name"`
+	// FragmentID is the ADR-017 object-canonical entity reference for this
+	// process ("process:<name>"), carried so #2764/#2765 can join telemetry
+	// against DNA + the topology graph without redesigning the wire format.
+	// Nothing in this package writes DNA.
+	FragmentID string `json:"fragment_id"`
+	// CPUPercent is the process CPU usage as a percentage of ONE logical core
+	// (may exceed 100 on a multi-threaded process spanning cores). On Linux it
+	// is a delta between consecutive Snapshot calls (0 on the first call, since
+	// there is no prior sample); on Windows it is the formatted PercentProcessorTime
+	// perf counter.
+	CPUPercent float64 `json:"cpu_percent"`
+	// MemoryBytes is the process resident/working-set memory in bytes.
+	MemoryBytes uint64 `json:"memory_bytes"`
+	// DiskReadBytes / DiskWriteBytes are cumulative (Linux, /proc/[pid]/io) or
+	// rate-per-second (Windows PerfProc IO counters, which aggregate file+device
+	// I/O — the closest usermode per-process I/O available) storage I/O.
+	DiskReadBytes  uint64 `json:"disk_read_bytes"`
+	DiskWriteBytes uint64 `json:"disk_write_bytes"`
+	// NetRxBytes / NetTxBytes — reserved; always zero (see type doc).
+	NetRxBytes uint64 `json:"net_rx_bytes"`
+	NetTxBytes uint64 `json:"net_tx_bytes"`
+	// Status is the process run status: "running" or "suspended" (Linux: stopped
+	// by a signal or ptrace, state T/t; Windows: every thread waiting with the
+	// Suspended wait reason). Descriptive telemetry only.
+	Status string `json:"status"`
+	// Description is the OS-provided process description when one is cheaply
+	// available; empty otherwise (currently always empty — neither /proc nor
+	// SystemProcessInformation carries one).
+	Description string `json:"description"`
+}
+
+// ServiceSnapshot is a point-in-time view of one installed service / systemd unit.
+type ServiceSnapshot struct {
+	// Name is the service/unit name (e.g. "sshd.service", "Spooler").
+	Name string `json:"name"`
+	// State is the read-only run state ("running", "stopped", "failed",
+	// "start-pending", …). Values are the platform's native state strings,
+	// lower-cased where practical; callers should treat them as opaque labels.
+	State string `json:"state"`
+	// DisplayName is the human-readable service name (systemd Description; SCM
+	// DisplayName). Falls back to empty when the platform has none.
+	DisplayName string `json:"display_name"`
+	// StartType is how the service starts: "auto", "auto-delayed", "manual",
+	// "disabled", "boot", "system" (Windows) or the systemd UnitFileState
+	// ("enabled", "disabled", "static", …) mapped onto the same vocabulary
+	// where it has an equivalent. Empty when unknown.
+	StartType string `json:"start_type"`
+	// PID is the service's main process id; 0 when the service is not running.
+	PID int `json:"pid"`
+	// FragmentID is the ADR-017 object-canonical entity reference
+	// ("service:<name-without-.service>"), matching how the `service` stdlib
+	// module and osquery address the same entity, so a controller can join this
+	// observation to managed/observed DNA for the same service.
+	FragmentID string `json:"fragment_id"`
+}
+
+// HostTotals is the host-level resource view of one collection: whole-machine
+// CPU, memory, disk and network. Rates are per-second values derived from the
+// delta between consecutive Snapshot calls (0 on the first call, and 0 — never
+// negative or NaN — when a cumulative counter wraps or resets between calls).
+// Network counters sum every non-loopback interface.
+type HostTotals struct {
+	// CPUPercent is whole-host CPU busy time, 0-100, over the interval since the
+	// previous Snapshot.
+	CPUPercent float64 `json:"cpu_percent"`
+	// MemoryUsedBytes / MemoryTotalBytes are physical memory in use / installed.
+	MemoryUsedBytes  uint64 `json:"memory_used_bytes"`
+	MemoryTotalBytes uint64 `json:"memory_total_bytes"`
+	// DiskReadBytesPerSec / DiskWriteBytesPerSec are host-wide storage I/O rates.
+	DiskReadBytesPerSec  float64 `json:"disk_read_bytes_per_sec"`
+	DiskWriteBytesPerSec float64 `json:"disk_write_bytes_per_sec"`
+	// DiskUsedBytes / DiskTotalBytes are summed over the host's local filesystems.
+	DiskUsedBytes  uint64 `json:"disk_used_bytes"`
+	DiskTotalBytes uint64 `json:"disk_total_bytes"`
+	// NetRxBytesPerSec / NetTxBytesPerSec are host-wide network rates.
+	NetRxBytesPerSec float64 `json:"net_rx_bytes_per_sec"`
+	NetTxBytesPerSec float64 `json:"net_tx_bytes_per_sec"`
+}
+
+// Telemetry bundles the process and service snapshots from one collection.
+type Telemetry struct {
+	Processes []ProcessSnapshot `json:"processes"`
+	Services  []ServiceSnapshot `json:"services"`
+	// Host carries host-level totals. Nil on platforms or builds that do not
+	// report them.
+	Host *HostTotals `json:"host,omitempty"`
+}
+
+// hostCounters is one raw reading of the host's cumulative counters. CPU values
+// are in arbitrary but consistent tick units; the byte counters are cumulative
+// since boot.
+type hostCounters struct {
+	cpuBusy, cpuTotal   uint64
+	diskRead, diskWrite uint64
+	netRx, netTx        uint64
+}
+
+// counterRate converts the change in a cumulative counter into a per-second
+// rate. It returns 0 when the interval is not positive or the counter went
+// backwards (wrap or reset), so a rate is never negative, NaN or Inf.
+func counterRate(prev, cur uint64, seconds float64) float64 {
+	if seconds <= 0 || cur < prev {
+		return 0
+	}
+	return float64(cur-prev) / seconds
+}
+
+// cpuPercent returns the busy share of the CPU ticks elapsed between two
+// readings, clamped to [0,100]; 0 on a counter reset or an empty interval.
+func cpuPercent(prev, cur hostCounters) float64 {
+	if cur.cpuTotal <= prev.cpuTotal || cur.cpuBusy < prev.cpuBusy {
+		return 0
+	}
+	pct := float64(cur.cpuBusy-prev.cpuBusy) / float64(cur.cpuTotal-prev.cpuTotal) * 100.0
+	if pct < 0 {
+		return 0
+	}
+	if pct > 100 {
+		return 100
+	}
+	return pct
+}
+
+// applyRates fills the rate fields of h from the delta between prev and cur.
+func applyRates(h *HostTotals, prev, cur hostCounters, seconds float64) {
+	h.CPUPercent = cpuPercent(prev, cur)
+	h.DiskReadBytesPerSec = counterRate(prev.diskRead, cur.diskRead, seconds)
+	h.DiskWriteBytesPerSec = counterRate(prev.diskWrite, cur.diskWrite, seconds)
+	h.NetRxBytesPerSec = counterRate(prev.netRx, cur.netRx, seconds)
+	h.NetTxBytesPerSec = counterRate(prev.netTx, cur.netTx, seconds)
+}
+
+// Collector returns point-in-time telemetry snapshots. Implementations are
+// platform-specific; obtain one via [NewCollector]. A Collector is safe for
+// sequential reuse (the Linux implementation caches the previous CPU sample to
+// compute deltas); concurrent calls to Snapshot on the same Collector are not
+// supported.
+type Collector interface {
+	// Snapshot returns the current process and service telemetry, or an error if
+	// the platform-level collection fails. ctx bounds any blocking platform call
+	// (e.g. the systemd D-Bus round-trip). A partial result with a nil error is
+	// permitted when one facet (e.g. services) is unavailable but processes were
+	// collected — see the platform implementations for the exact degradation rules.
+	Snapshot(ctx context.Context) (Telemetry, error)
+}
+
+// processFragmentID returns the ADR-017 fragment_id for a process image name.
+func processFragmentID(name string) string {
+	if name == "" {
+		return "process:unknown"
+	}
+	return "process:" + name
+}
+
+// serviceFragmentID returns the ADR-017 fragment_id for a service/unit name.
+// The caller passes the canonical daemon name: on Linux the collector trims the
+// systemd ".service" suffix first (so a unit and a `service` module managing the
+// same daemon resolve to the identical object-canonical id — service:sshd, not
+// service:sshd.service); on Windows the SCM name is already canonical and is
+// used verbatim (a Windows service literally named "com.docker.service" keeps
+// its ".service" — that is its real name, not a systemd suffix).
+func serviceFragmentID(name string) string {
+	if name == "" {
+		return "service:unknown"
+	}
+	return "service:" + name
+}

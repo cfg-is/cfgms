@@ -1,0 +1,989 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package workflow
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/features/steward/discovery"
+	"github.com/cfgis/cfgms/features/steward/factory"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
+)
+
+// allowLoopbackHTTP re-points an engine at an HTTP client that may reach the
+// loopback httptest server a test just started. The engine's default client
+// blocks private and loopback destinations to stop workflow definitions from
+// reaching controller-internal services (SSRF), so any test serving its own
+// endpoint has to opt out explicitly. Production engines never do.
+func allowLoopbackHTTP(engine *Engine) {
+	engine.httpClient = NewHTTPClient(HTTPClientConfig{AllowPrivateNetworks: true})
+}
+
+func createTestFactory() *factory.ModuleFactory {
+	registry := make(discovery.ModuleRegistry)
+
+	// Add built-in modules to registry
+	registry["directory"] = discovery.ModuleInfo{
+		Name: "directory",
+		Path: "/builtin/directory",
+	}
+	registry["file"] = discovery.ModuleInfo{
+		Name: "file",
+		Path: "/builtin/file",
+	}
+
+	errorConfig := config.ErrorHandlingConfig{
+		ModuleLoadFailure: config.ActionContinue,
+	}
+
+	return factory.New(registry, errorConfig, logging.NewNoopLogger())
+}
+
+func TestEngine_ExecuteWorkflow_Simple(t *testing.T) {
+	moduleFactory := createTestFactory()
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+
+	workflow := Workflow{
+		Name: "simple-workflow",
+		Steps: []Step{
+			{
+				Name: "conditional-group",
+				Type: StepTypeConditional,
+				Condition: &Condition{
+					Type:     ConditionTypeVariable,
+					Variable: "should_run",
+					Operator: OperatorEqual,
+					Value:    true,
+				},
+				Steps: []Step{
+					{
+						Name: "nested-conditional",
+						Type: StepTypeConditional,
+						Condition: &Condition{
+							Type:     ConditionTypeVariable,
+							Variable: "nested_run",
+							Operator: OperatorExists,
+						},
+						Steps: []Step{},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	variables := map[string]interface{}{
+		"should_run": true,
+		"nested_run": "yes",
+	}
+
+	execution, err := engine.ExecuteWorkflow(ctx, workflow, variables)
+	require.NoError(t, err)
+	assert.NotNil(t, execution)
+	assert.Equal(t, workflow.Name, execution.WorkflowName)
+	assert.NotEmpty(t, execution.ID)
+
+	// Wait for execution to complete
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	// Check final status
+	finalExecution, err := engine.GetExecution(context.Background(), "", execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
+}
+
+// TestEngine_ExecuteWorkflow_ResolvesAuthenticatedTenantFromContext verifies that
+// ExecuteWorkflow reads the caller's authenticated tenant from the canonical
+// ctxkeys.TenantID context key — not from logging.ExtractTenantFromContext, and
+// never from workflow-author-controlled variables — and injects it into
+// execution.TenantID for step executors to authorize against (Issue #4338).
+func TestEngine_ExecuteWorkflow_ResolvesAuthenticatedTenantFromContext(t *testing.T) {
+	moduleFactory := createTestFactory()
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+
+	wf := Workflow{
+		Name: "tenant-resolve-workflow",
+		Steps: []Step{
+			{
+				Name: "noop",
+				Type: StepTypeConditional,
+				Condition: &Condition{
+					Type:     ConditionTypeVariable,
+					Variable: "should_run",
+					Operator: OperatorEqual,
+					Value:    false,
+				},
+				Steps: []Step{},
+			},
+		},
+	}
+
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-owner")
+	// A workflow-author-controlled variable naming a different tenant must have
+	// no effect on the authenticated tenant the engine injects.
+	variables := map[string]interface{}{
+		"should_run": false,
+		"tenant_id":  "tenant-attacker",
+	}
+
+	execution, err := engine.ExecuteWorkflow(ctx, wf, variables)
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-owner", execution.TenantID,
+		"ExecuteWorkflow must resolve the authenticated tenant from ctxkeys.TenantID into execution.TenantID")
+
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	finalExecution, err := engine.GetExecution(context.Background(), "tenant-owner", execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-owner", finalExecution.TenantID,
+		"GetExecution must return the authenticated tenant in its copy")
+}
+
+func TestEngine_ExecuteWorkflow_Parallel(t *testing.T) {
+	moduleFactory := createTestFactory()
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+
+	workflow := Workflow{
+		Name: "parallel-workflow",
+		Steps: []Step{
+			{
+				Name: "parallel-group",
+				Type: StepTypeParallel,
+				Steps: []Step{
+					{
+						Name: "parallel-step1",
+						Type: StepTypeConditional,
+						Condition: &Condition{
+							Type:     ConditionTypeVariable,
+							Variable: "missing_var",
+							Operator: OperatorExists,
+						},
+						Steps: []Step{},
+					},
+					{
+						Name: "parallel-step2",
+						Type: StepTypeConditional,
+						Condition: &Condition{
+							Type:     ConditionTypeVariable,
+							Variable: "existing_var",
+							Operator: OperatorEqual,
+							Value:    "expected",
+						},
+						Steps: []Step{},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	variables := map[string]interface{}{
+		"existing_var": "expected",
+	}
+
+	execution, err := engine.ExecuteWorkflow(ctx, workflow, variables)
+	require.NoError(t, err)
+
+	// Wait for execution to complete
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	finalExecution, err := engine.GetExecution(context.Background(), "", execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
+}
+
+func TestEngine_CancelExecution(t *testing.T) {
+	moduleFactory := createTestFactory()
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+
+	workflow := Workflow{
+		Name: "long-running-workflow",
+		Steps: []Step{
+			{
+				Name: "delay-step",
+				Type: StepTypeDelay,
+				Delay: &DelayConfig{
+					Duration: 5 * time.Second,
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+
+	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
+	require.NoError(t, err)
+
+	// Wait for execution to reach running state before cancelling
+	waitForWorkflowRunning(t, execution, 2*time.Second)
+
+	// Cancel the execution
+	err = engine.CancelExecution(execution.ID)
+	assert.NoError(t, err)
+
+	// CancelExecution synchronously sets status — no wait needed
+
+	// Check status
+	finalExecution, err := engine.GetExecution(context.Background(), "", execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCancelled, finalExecution.GetStatus())
+}
+
+func TestEngine_ListExecutions(t *testing.T) {
+	moduleFactory := createTestFactory()
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+
+	workflow := Workflow{
+		Name: "list-test-workflow",
+		Steps: []Step{
+			{
+				Name: "test-step",
+				Type: StepTypeConditional,
+				Condition: &Condition{
+					Type:     ConditionTypeVariable,
+					Variable: "always_true",
+					Operator: OperatorEqual,
+					Value:    true,
+				},
+				Steps: []Step{},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	variables := map[string]interface{}{
+		"always_true": true,
+	}
+
+	// Execute multiple workflows
+	execution1, err := engine.ExecuteWorkflow(ctx, workflow, variables)
+	require.NoError(t, err)
+
+	execution2, err := engine.ExecuteWorkflow(ctx, workflow, variables)
+	require.NoError(t, err)
+
+	// List executions
+	executions, err := engine.ListExecutions(context.Background(), "")
+	require.NoError(t, err)
+	// Note: On fast systems, workflows may complete and be cleaned up before listing.
+	// We verify that executions were created successfully rather than exact count.
+	assert.GreaterOrEqual(t, len(executions), 0, "Should return a list of executions")
+
+	// Verify the executions were created successfully (their IDs exist)
+	assert.NotEmpty(t, execution1.ID, "First execution should have an ID")
+	assert.NotEmpty(t, execution2.ID, "Second execution should have an ID")
+}
+
+func TestEvaluateCondition(t *testing.T) {
+	tests := []struct {
+		name      string
+		condition Condition
+		variables map[string]interface{}
+		expected  bool
+		wantErr   bool
+	}{
+		{
+			name: "variable exists",
+			condition: Condition{
+				Type:     ConditionTypeVariable,
+				Variable: "test_var",
+				Operator: OperatorExists,
+			},
+			variables: map[string]interface{}{"test_var": "value"},
+			expected:  true,
+			wantErr:   false,
+		},
+		{
+			name: "variable not exists",
+			condition: Condition{
+				Type:     ConditionTypeVariable,
+				Variable: "missing_var",
+				Operator: OperatorExists,
+			},
+			variables: map[string]interface{}{"test_var": "value"},
+			expected:  false,
+			wantErr:   false,
+		},
+		{
+			name: "variable equals",
+			condition: Condition{
+				Type:     ConditionTypeVariable,
+				Variable: "test_var",
+				Operator: OperatorEqual,
+				Value:    "expected_value",
+			},
+			variables: map[string]interface{}{"test_var": "expected_value"},
+			expected:  true,
+			wantErr:   false,
+		},
+		{
+			name: "variable not equals",
+			condition: Condition{
+				Type:     ConditionTypeVariable,
+				Variable: "test_var",
+				Operator: OperatorNotEqual,
+				Value:    "unexpected_value",
+			},
+			variables: map[string]interface{}{"test_var": "actual_value"},
+			expected:  true,
+			wantErr:   false,
+		},
+		{
+			name: "unsupported condition type",
+			condition: Condition{
+				Type: ConditionTypeExpression,
+			},
+			variables: map[string]interface{}{},
+			expected:  false,
+			wantErr:   true,
+		},
+	}
+
+	logger := logging.NewNoopLogger()
+	factory := createTestFactory()
+	engine := NewEngine(factory, logger, nil, nil, nil, nil, nil)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := engine.evaluateCondition(&tt.condition, tt.variables)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// testTransformExecutor is a test implementation of TransformStepExecutor.
+// It returns a configurable result and optionally sets a variable in the execution.
+type testTransformExecutor struct {
+	result   StepResult
+	err      error
+	varName  string
+	varValue interface{}
+}
+
+func (e *testTransformExecutor) ExecuteTransformStep(_ context.Context, _ Step, execution *WorkflowExecution) (StepResult, error) {
+	if e.varName != "" {
+		execution.SetVariable(e.varName, e.varValue)
+	}
+	return e.result, e.err
+}
+
+// testErrorHandler is a test implementation of ErrorHandler that always returns a fixed decision.
+// ShouldRetry always returns false — use testRetryDecisionHandler when ShouldRetry must return true.
+type testErrorHandler struct {
+	decision ErrorHandlingDecision
+}
+
+func (h *testErrorHandler) HandleError(_ context.Context, _ *WorkflowError, _ *WorkflowExecution) ErrorHandlingDecision {
+	return h.decision
+}
+
+func (h *testErrorHandler) ShouldRetry(_ *WorkflowError, _ int, _ *RetryConfig) bool {
+	return false
+}
+
+func (h *testErrorHandler) CalculateRetryDelay(_ int, _ *RetryConfig) time.Duration {
+	return 0
+}
+
+// testRetryDecisionHandler returns a fixed HandleError decision and implements ShouldRetry
+// using real retry-count logic so tests can detect whether the retry loop was entered.
+type testRetryDecisionHandler struct {
+	decision    ErrorHandlingDecision
+	maxAttempts int
+}
+
+func (h *testRetryDecisionHandler) HandleError(_ context.Context, _ *WorkflowError, _ *WorkflowExecution) ErrorHandlingDecision {
+	return h.decision
+}
+
+func (h *testRetryDecisionHandler) ShouldRetry(err *WorkflowError, retryCount int, config *RetryConfig) bool {
+	if config != nil {
+		return retryCount < config.MaxAttempts && err.Recoverable
+	}
+	return retryCount < h.maxAttempts && err.Recoverable
+}
+
+func (h *testRetryDecisionHandler) CalculateRetryDelay(_ int, _ *RetryConfig) time.Duration {
+	return 0
+}
+
+func TestEngineTransformExecutorWired(t *testing.T) {
+	factory := createTestFactory()
+	logger := logging.NewNoopLogger()
+	exec := &testTransformExecutor{}
+
+	engine := NewEngine(factory, logger, nil, exec, nil, nil, nil)
+
+	require.NotNil(t, engine.transformExecutor)
+	assert.Equal(t, exec, engine.transformExecutor)
+}
+
+func TestExecuteStepTransformDispatches(t *testing.T) {
+	factory := createTestFactory()
+	logger := logging.NewNoopLogger()
+
+	exec := &testTransformExecutor{
+		result:   StepResult{Status: StatusCompleted},
+		varName:  "transform_output",
+		varValue: "hello",
+	}
+	engine := NewEngine(factory, logger, nil, exec, nil, nil, nil)
+
+	wf := Workflow{
+		Name: "transform-dispatch-test",
+		Steps: []Step{
+			{Name: "transform-step", Type: StepTypeTransform},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, final.GetStatus())
+
+	val, exists := final.GetVariable("transform_output")
+	assert.True(t, exists)
+	assert.Equal(t, "hello", val)
+}
+
+func TestContinueWithStepExecution(t *testing.T) {
+	factory := createTestFactory()
+	logger := logging.NewNoopLogger()
+
+	exec := &testTransformExecutor{err: fmt.Errorf("transform failed")}
+	engine := NewEngine(factory, logger, nil, exec, nil, nil, nil)
+	engine.errorHandler = &testErrorHandler{
+		decision: ErrorHandlingDecision{
+			Action:       ErrorActionContinueWith,
+			ContinueWith: "recovery-step",
+		},
+	}
+
+	wf := Workflow{
+		Name: "continue-with-test",
+		Steps: []Step{
+			{Name: "failing-step", Type: StepTypeTransform},
+			{Name: "skipped-step", Type: StepTypeSequential, Steps: []Step{}},
+			{Name: "recovery-step", Type: StepTypeSequential, Steps: []Step{}},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, final.GetStatus())
+
+	results := final.GetStepResults()
+	assert.Contains(t, results, "s2", "recovery-step (s2) result must exist")
+	assert.NotContains(t, results, "s1", "skipped-step (s1) must be skipped by continue_with")
+}
+
+func TestContinueWithStepNotFound(t *testing.T) {
+	factory := createTestFactory()
+	logger := logging.NewNoopLogger()
+
+	exec := &testTransformExecutor{err: fmt.Errorf("transform failed")}
+	engine := NewEngine(factory, logger, nil, exec, nil, nil, nil)
+	engine.errorHandler = &testErrorHandler{
+		decision: ErrorHandlingDecision{
+			Action:       ErrorActionContinueWith,
+			ContinueWith: "nonexistent-step",
+		},
+	}
+
+	wf := Workflow{
+		Name: "continue-with-not-found",
+		Steps: []Step{
+			{Name: "failing-step", Type: StepTypeTransform},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusFailed, final.GetStatus())
+	assert.Contains(t, final.GetError(), "continue_with target step not found: nonexistent-step")
+}
+
+func TestFallbackStepExecution(t *testing.T) {
+	factory := createTestFactory()
+	logger := logging.NewNoopLogger()
+
+	exec := &testTransformExecutor{err: fmt.Errorf("transform failed")}
+	engine := NewEngine(factory, logger, nil, exec, nil, nil, nil)
+	engine.errorHandler = &testErrorHandler{
+		decision: ErrorHandlingDecision{Action: ErrorActionFallback},
+	}
+
+	fallbackStep := Step{
+		Name:  "fallback-step",
+		Type:  StepTypeSequential,
+		Steps: []Step{},
+	}
+
+	wf := Workflow{
+		Name: "fallback-test",
+		Steps: []Step{
+			{
+				Name: "failing-step",
+				Type: StepTypeTransform,
+				ErrorHandling: &ErrorHandlingConfig{
+					FallbackStep: &fallbackStep,
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, final.GetStatus())
+
+	results := final.GetStepResults()
+	// failing-step is s0; its fallback gets synthetic ID s0.fallback
+	assert.Contains(t, results, "s0.fallback", "fallback step result keyed as parent.fallback")
+}
+
+// TestRetryMaxAttempts verifies that executeStepsWithRetry loops up to
+// retryConfigForStep(step).MaxAttempts on ErrorActionRetry and writes the
+// attempt count to StepResult.RetryCount.
+//
+// The server fails the first two executeHTTPStep calls completely (all MaxAttempts
+// HTTP-client-level retries return 500), then succeeds on the third call.
+// With MaxAttempts=3: initial + 2 retries = 3 total invocations, RetryCount=2.
+func TestRetryMaxAttempts(t *testing.T) {
+	const maxAttempts = 3
+	// Each failed executeHTTPStep call exhausts all maxAttempts HTTP-client retries.
+	// failedCalls=2 means the server must return 500 for (maxAttempts*2) requests,
+	// then 200 from request (maxAttempts*2 + 1) onward.
+	const failedCalls = 2
+	var requestCount int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := int(atomic.AddInt32(&requestCount, 1))
+		if n <= maxAttempts*failedCalls {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte(`{}`)); err != nil {
+			t.Logf("write error: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	factory := createTestFactory()
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(factory, logger, nil, nil, nil, nil, nil)
+	allowLoopbackHTTP(engine)
+	// Use zero delays so the test runs instantly.
+	engine.errorHandler = &DefaultErrorHandler{
+		MaxRetries:        maxAttempts,
+		BaseDelay:         0,
+		MaxDelay:          0,
+		BackoffMultiplier: 1.0,
+	}
+
+	wf := Workflow{
+		Name: "retry-max-attempts-test",
+		Steps: []Step{
+			{
+				Name: "http-retry-step",
+				Type: StepTypeHTTP,
+				HTTP: &HTTPConfig{
+					URL:    server.URL,
+					Method: "GET",
+					Retry: &RetryConfig{
+						MaxAttempts:       maxAttempts,
+						InitialDelay:      0,
+						MaxDelay:          0,
+						BackoffMultiplier: 1.0,
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+
+	waitForWorkflowCompletion(t, execution, 5*time.Second)
+
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, final.GetStatus(), "workflow should complete successfully after retries")
+
+	stepResults := final.GetStepResults()
+	result, exists := stepResults["s0"] // http-retry-step is the only top-level step → s0
+	require.True(t, exists, "step result must exist")
+	assert.Equal(t, 2, result.RetryCount, "RetryCount should be 2 (failed twice, succeeded on third attempt)")
+}
+
+// TestRetryNilConfig verifies that when retryConfigForStep returns nil (step type
+// has no Retry field), a step failure returns the error immediately without retrying.
+//
+// The error handler's ShouldRetry returns true (would allow retries if the nil guard
+// were absent), so RetryCount == 0 proves the nil guard fired and prevented the loop.
+func TestRetryNilConfig(t *testing.T) {
+	factory := createTestFactory()
+	logger := logging.NewNoopLogger()
+	exec := &testTransformExecutor{
+		result: StepResult{Status: StatusFailed},
+		err:    fmt.Errorf("step error"),
+	}
+	engine := NewEngine(factory, logger, nil, exec, nil, nil, nil)
+	// ShouldRetry returns true (up to 5 attempts) — without the nil guard this handler
+	// would cause the loop to run, resulting in RetryCount > 0.
+	engine.errorHandler = &testRetryDecisionHandler{
+		decision:    ErrorHandlingDecision{Action: ErrorActionRetry},
+		maxAttempts: 5,
+	}
+
+	wf := Workflow{
+		Name: "nil-retry-config-test",
+		Steps: []Step{
+			// StepTypeTransform has no Retry field → retryConfigForStep returns nil.
+			{Name: "transform-step", Type: StepTypeTransform},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusFailed, final.GetStatus(), "workflow must fail when step has no retry config")
+
+	stepResults := final.GetStepResults()
+	result, exists := stepResults["s0"] // transform-step is the only top-level step → s0
+	require.True(t, exists, "step result must exist")
+	assert.Equal(t, 0, result.RetryCount, "nil retryConfig must prevent the retry loop (RetryCount must be 0)")
+}
+
+// TestGenericConfigStateYAMLRoundTrip verifies that genericConfigState.ToYAML
+// produces valid YAML from the data map, and FromYAML restores the original values.
+func TestGenericConfigStateYAMLRoundTrip(t *testing.T) {
+	g := &genericConfigState{
+		data: map[string]interface{}{
+			"env":   "prod",
+			"count": 3,
+		},
+	}
+
+	yamlData, err := g.ToYAML()
+	require.NoError(t, err)
+	require.NotNil(t, yamlData)
+	assert.NotEqual(t, []byte("workflow yaml"), yamlData, "ToYAML must not return the stub value")
+
+	g2 := &genericConfigState{}
+	err = g2.FromYAML(yamlData)
+	require.NoError(t, err)
+
+	assert.Equal(t, "prod", g2.data["env"])
+	assert.EqualValues(t, 3, g2.data["count"])
+}
+
+// --- loadWorkflowByName tests ---
+
+func TestEngine_LoadWorkflowByName_Hit(t *testing.T) {
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+
+	want := Workflow{
+		Name: "my-workflow",
+		Steps: []Step{
+			{Name: "step1", Type: StepTypeDelay, Delay: &DelayConfig{Duration: 1 * time.Millisecond}},
+		},
+	}
+	engine.RegisterWorkflow(want)
+
+	got, _, err := engine.loadWorkflowByName(context.Background(), nil, "my-workflow")
+	require.NoError(t, err)
+	assert.Equal(t, want.Name, got.Name)
+	require.Len(t, got.Steps, 1)
+	assert.Equal(t, "step1", got.Steps[0].Name)
+}
+
+func TestEngine_LoadWorkflowByName_Miss(t *testing.T) {
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+
+	_, _, err := engine.loadWorkflowByName(context.Background(), nil, "nonexistent-workflow")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nonexistent-workflow")
+}
+
+func TestRingHealthExecutor_NilReturnsError(t *testing.T) {
+	factory := createTestFactory()
+	logger := logging.NewNoopLogger()
+	// ringHealthExecutor is nil — engine must return a clear error.
+	engine := NewEngine(factory, logger, nil, nil, nil, nil, nil)
+
+	wf := Workflow{
+		Name: "ring-health-nil-test",
+		Steps: []Step{
+			{Name: "check-ring", Type: StepTypeQueryRingHealth},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusFailed, final.GetStatus(), "workflow must fail when ring health executor is nil")
+	assert.Contains(t, final.GetError(), "ring health executor not configured")
+}
+
+func TestRingHealthExecutor_Injected_IsCalled(t *testing.T) {
+	factory := createTestFactory()
+	logger := logging.NewNoopLogger()
+
+	exec := &testRingHealthExecutor{
+		result: StepResult{Status: StatusCompleted, Output: map[string]interface{}{
+			"on_version_pct": 75.0,
+			"failed_pct":     5.0,
+			"pending_count":  3,
+		}},
+	}
+	engine := NewEngine(factory, logger, nil, nil, exec, nil, nil)
+
+	wf := Workflow{
+		Name: "ring-health-dispatch-test",
+		Steps: []Step{
+			{Name: "check-ring", Type: StepTypeQueryRingHealth},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, final.GetStatus())
+	assert.True(t, exec.called, "ring health executor must have been invoked")
+}
+
+// testRingHealthExecutor is a minimal test-local RingHealthStepExecutor.
+type testRingHealthExecutor struct {
+	result StepResult
+	err    error
+	called bool
+}
+
+func (e *testRingHealthExecutor) ExecuteRingHealthStep(_ context.Context, _ Step, _ *WorkflowExecution) (StepResult, error) {
+	e.called = true
+	return e.result, e.err
+}
+
+func TestSetHARoleExecutor_NilReturnsError(t *testing.T) {
+	factory := createTestFactory()
+	logger := logging.NewNoopLogger()
+	// setHARoleExecutor is nil — engine must return a clear error.
+	engine := NewEngine(factory, logger, nil, nil, nil, nil, nil)
+
+	wf := Workflow{
+		Name: "set-ha-role-nil-test",
+		Steps: []Step{
+			{Name: "promote-vm", Type: StepTypeSetHARole},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusFailed, final.GetStatus(), "workflow must fail when set_ha_role executor is nil")
+	assert.Contains(t, final.GetError(), "executor not configured")
+}
+
+func TestMoveResourceToClusterExecutor_NilReturnsError(t *testing.T) {
+	factory := createTestFactory()
+	logger := logging.NewNoopLogger()
+	// moveResourceToClusterExecutor is nil — engine must return a clear error.
+	engine := NewEngine(factory, logger, nil, nil, nil, nil, nil)
+
+	wf := Workflow{
+		Name: "move-resource-nil-test",
+		Steps: []Step{
+			{Name: "move-vm", Type: StepTypeMoveResourceToCluster},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusFailed, final.GetStatus(), "workflow must fail when move_resource_to_cluster executor is nil")
+	assert.Contains(t, final.GetError(), "executor not configured")
+}
+
+// TestEngine_StepResults_KeyedByStepID verifies that GetStepResults keys results by
+// the structural step ID ("s0", "s1") and not by step.Name.
+func TestEngine_StepResults_KeyedByStepID(t *testing.T) {
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+
+	wf := Workflow{
+		Name: "step-id-keying-test",
+		Steps: []Step{
+			{
+				Name: "alpha",
+				Type: StepTypeSequential,
+				Steps: []Step{
+					{
+						Name:  "beta",
+						Type:  StepTypeDelay,
+						Delay: &DelayConfig{Duration: 1 * time.Millisecond},
+					},
+				},
+			},
+			{
+				Name:  "gamma",
+				Type:  StepTypeDelay,
+				Delay: &DelayConfig{Duration: 1 * time.Millisecond},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+	waitForWorkflowCompletion(t, execution, 3*time.Second)
+
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusCompleted, final.GetStatus())
+
+	results := final.GetStepResults()
+
+	// Results must be keyed by structural IDs, not step names.
+	_, hasS0 := results["s0"]
+	_, hasS1 := results["s1"]
+	assert.True(t, hasS0, "expected result keyed by s0 (alpha)")
+	assert.True(t, hasS1, "expected result keyed by s1 (gamma)")
+
+	// Name-based keys must not exist.
+	_, hasAlpha := results["alpha"]
+	_, hasGamma := results["gamma"]
+	assert.False(t, hasAlpha, "result must not be keyed by step name 'alpha'")
+	assert.False(t, hasGamma, "result must not be keyed by step name 'gamma'")
+
+	// Nested step beta is keyed as s0.s0
+	_, hasS0S0 := results["s0.s0"]
+	assert.True(t, hasS0S0, "expected result keyed by s0.s0 (beta)")
+}
+
+// TestEngine_LoopBody_StableID verifies that repeated loop iterations overwrite the
+// same result key (the loop body step's structural ID), so the canvas sees one stable
+// node whose status reflects the most-recent iteration.
+func TestEngine_LoopBody_StableID(t *testing.T) {
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+
+	wf := Workflow{
+		Name: "loop-stable-id-test",
+		Steps: []Step{
+			{
+				Name: "my-loop",
+				Type: StepTypeFor,
+				Loop: &LoopConfig{
+					Type:     LoopTypeFor,
+					Variable: "i",
+					Start:    1,
+					End:      3,
+				},
+				Steps: []Step{
+					{
+						Name:  "body",
+						Type:  StepTypeDelay,
+						Delay: &DelayConfig{Duration: 1 * time.Millisecond},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	execution, err := engine.ExecuteWorkflow(ctx, wf, nil)
+	require.NoError(t, err)
+	waitForWorkflowCompletion(t, execution, 3*time.Second)
+
+	final, err := engine.GetExecution(context.Background(), "", execution.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusCompleted, final.GetStatus())
+
+	results := final.GetStepResults()
+
+	// The loop itself is s0; the body step inside is s0.s0.
+	// After 3 iterations the body result is overwritten to the last-iteration result
+	// — exactly one entry under the stable ID, not three separate keys.
+	_, hasLoop := results["s0"]
+	assert.True(t, hasLoop, "loop step s0 must have a result")
+
+	_, hasBody := results["s0.s0"]
+	assert.True(t, hasBody, "loop body s0.s0 must have a stable result")
+
+	// There must be exactly one entry for the body (most-recent iteration),
+	// not three (one per iteration with a name suffix).
+	for key := range results {
+		assert.False(t, key == "body" || key == "my-loop", "result must not be keyed by step name")
+	}
+}

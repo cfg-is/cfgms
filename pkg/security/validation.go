@@ -1,0 +1,460 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package security
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+)
+
+// Validator provides comprehensive input validation for security-sensitive data
+type Validator struct {
+	// Configuration
+	maxStringLength     int
+	maxSliceLength      int
+	maxJSONDepth        int
+	maxJSONStringLength int
+	allowedCharsets     map[string]*regexp.Regexp
+	dnsLookupTimeout    time.Duration
+	// dnsLookup overrides the DNS resolver used by ValidateURL. When nil,
+	// net.DefaultResolver.LookupIPAddr is used. Set in tests only.
+	dnsLookup func(ctx context.Context, host string) ([]net.IPAddr, error)
+}
+
+// ValidationError represents a validation failure with context
+type ValidationError struct {
+	Field   string `json:"field"`
+	Value   string `json:"value,omitempty"`
+	Rule    string `json:"rule"`
+	Message string `json:"message"`
+}
+
+func (e *ValidationError) Error() string {
+	if e.Value != "" {
+		return fmt.Sprintf("validation failed for field '%s' with value '%s': %s (rule: %s)",
+			e.Field, e.Value, e.Message, e.Rule)
+	}
+	return fmt.Sprintf("validation failed for field '%s': %s (rule: %s)",
+		e.Field, e.Message, e.Rule)
+}
+
+// ValidationResult contains the results of validation
+type ValidationResult struct {
+	Valid  bool               `json:"valid"`
+	Errors []*ValidationError `json:"errors,omitempty"`
+}
+
+func (vr *ValidationResult) AddError(field, value, rule, message string) {
+	vr.Valid = false
+	vr.Errors = append(vr.Errors, &ValidationError{
+		Field:   field,
+		Value:   value,
+		Rule:    rule,
+		Message: message,
+	})
+}
+
+func (vr *ValidationResult) AddErrorf(field, value, rule, format string, args ...interface{}) {
+	vr.AddError(field, value, rule, fmt.Sprintf(format, args...))
+}
+
+// NewValidator creates a new validator with secure defaults
+func NewValidator() *Validator {
+	v := &Validator{
+		maxStringLength:     4096,  // 4KB max single field length
+		maxSliceLength:      1000,  // Max 1000 items in arrays/slices
+		maxJSONDepth:        10,    // Max nesting depth
+		maxJSONStringLength: 65536, // 64KB per JSON string value — signed envelopes
+		//                            (operator cert PEM, base64 signature, base64
+		//                            script body) routinely exceed the previous
+		//                            1000-char limit even for trivial commands.
+		//                            Bumped during #1887 live validation when every
+		//                            `cfg steward run-command` was rejected.
+		allowedCharsets: make(map[string]*regexp.Regexp),
+	}
+
+	// Define allowed character sets
+	v.allowedCharsets["alphanumeric"] = regexp.MustCompile(`^[a-zA-Z0-9]+$`)
+	v.allowedCharsets["alphanumeric_dash"] = regexp.MustCompile(`^[a-zA-Z0-9\-_]+$`)
+	v.allowedCharsets["email"] = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+	v.allowedCharsets["uuid"] = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	v.allowedCharsets["hostname"] = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)
+	v.allowedCharsets["safe_text"] = regexp.MustCompile(`^[a-zA-Z0-9\s\.\-_,;:!?\(\)\[\]]+$`)
+	v.allowedCharsets["base64"] = regexp.MustCompile(`^[A-Za-z0-9+/]*={0,2}$`)
+	// cidr: IPv4 (10.0.0.0/8) and IPv6 (2001:db8::/32) CIDR notation
+	v.allowedCharsets["cidr"] = regexp.MustCompile(`^[0-9a-fA-F.:\/]+$`)
+	// tenant_path_id: hierarchical tenant IDs use '/' as a path separator (e.g., "root/child-a")
+	v.allowedCharsets["tenant_path_id"] = regexp.MustCompile(`^[a-zA-Z0-9\-_/]+$`)
+	// node_id: cluster node IDs come from CFGMS_NODE_ID, which is unvalidated at startup, so
+	// IPs and FQDNs ("192.168.234.106", "ctrl-01.lab.internal") are legal. '.' is admitted;
+	// '/' is not, and '..' is rejected by the dedicated check in validateURLParameters.
+	v.allowedCharsets["node_id"] = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
+	v.dnsLookupTimeout = 5 * time.Second
+
+	return v
+}
+
+// ValidateString validates a string field with comprehensive security checks
+func (v *Validator) ValidateString(result *ValidationResult, field, value string, rules ...string) {
+	if value == "" && v.hasRule(rules, "required") {
+		result.AddError(field, value, "required", "field is required")
+		return
+	}
+
+	if value == "" {
+		return // Empty is OK if not required
+	}
+
+	// Check UTF-8 validity
+	if !utf8.ValidString(value) {
+		result.AddError(field, "", "utf8", "invalid UTF-8 encoding")
+		return
+	}
+
+	// Length validation
+	if len(value) > v.maxStringLength {
+		result.AddErrorf(field, "", "max_length", "exceeds maximum length of %d characters", v.maxStringLength)
+		return
+	}
+
+	// Minimum length check
+	if minLen := v.getRuleInt(rules, "min_length"); minLen > 0 && len(value) < minLen {
+		result.AddErrorf(field, "", "min_length", "minimum length is %d characters", minLen)
+		return
+	}
+
+	// Character set validation — allowlist-based; XSS, SQL injection, and other
+	// injection prevention is the responsibility of the output-encoding layer and
+	// parameterized queries respectively (see pkg/security/doc.go).
+	if charset := v.getRuleString(rules, "charset"); charset != "" {
+		if pattern, exists := v.allowedCharsets[charset]; exists {
+			if !pattern.MatchString(value) {
+				result.AddErrorf(field, "", "charset", "contains invalid characters for charset '%s'", charset)
+				return
+			}
+		}
+	}
+
+	// Check for control characters
+	if v.hasRule(rules, "no_control_chars") {
+		for _, r := range value {
+			if unicode.IsControl(r) && r != '\t' && r != '\n' && r != '\r' {
+				result.AddError(field, "", "control_chars", "contains prohibited control characters")
+				return
+			}
+		}
+	}
+}
+
+// ValidateInteger validates an integer field.
+// Zero is a valid value; callers that need "must be non-zero" should use
+// "min:1" or "positive". The "min" and "max" rules are enforced whenever
+// the rule is present, regardless of the rule's parsed value.
+func (v *Validator) ValidateInteger(result *ValidationResult, field string, value int64, rules ...string) {
+	if v.hasRuleWithValue(rules, "min") {
+		min := v.getRuleInt64(rules, "min")
+		if value < min {
+			result.AddErrorf(field, fmt.Sprintf("%d", value), "min", "minimum value is %d", min)
+			return
+		}
+	}
+
+	if v.hasRuleWithValue(rules, "max") {
+		max := v.getRuleInt64(rules, "max")
+		if value > max {
+			result.AddErrorf(field, fmt.Sprintf("%d", value), "max", "maximum value is %d", max)
+			return
+		}
+	}
+
+	if v.hasRule(rules, "positive") && value <= 0 {
+		result.AddError(field, fmt.Sprintf("%d", value), "positive", "must be positive")
+		return
+	}
+}
+
+// ValidateSlice validates a slice/array field
+func (v *Validator) ValidateSlice(result *ValidationResult, field string, length int, rules ...string) {
+	if length == 0 && v.hasRule(rules, "required") {
+		result.AddError(field, "[]", "required", "field is required")
+		return
+	}
+
+	if length > v.maxSliceLength {
+		result.AddErrorf(field, "", "max_length", "exceeds maximum length of %d items", v.maxSliceLength)
+		return
+	}
+
+	if min := v.getRuleInt(rules, "min_items"); min > 0 && length < min {
+		result.AddErrorf(field, "", "min_items", "minimum items is %d", min)
+		return
+	}
+
+	if max := v.getRuleInt(rules, "max_items"); max > 0 && length > max {
+		result.AddErrorf(field, "", "max_items", "maximum items is %d", max)
+		return
+	}
+}
+
+// ValidateIPAddress validates an IP address
+func (v *Validator) ValidateIPAddress(result *ValidationResult, field, value string, rules ...string) {
+	if value == "" && v.hasRule(rules, "required") {
+		result.AddError(field, value, "required", "field is required")
+		return
+	}
+
+	if value == "" {
+		return
+	}
+
+	ip := net.ParseIP(value)
+	if ip == nil {
+		result.AddError(field, "", "ip", "invalid IP address format")
+		return
+	}
+
+	if v.hasRule(rules, "no_private") {
+		if ip.IsPrivate() {
+			result.AddError(field, "", "no_private", "private IP addresses not allowed")
+			return
+		}
+	}
+
+	if v.hasRule(rules, "no_loopback") {
+		if ip.IsLoopback() {
+			result.AddError(field, "", "no_loopback", "loopback addresses not allowed")
+			return
+		}
+	}
+
+	if v.hasRule(rules, "ipv4_only") {
+		if ip.To4() == nil {
+			result.AddError(field, "", "ipv4_only", "only IPv4 addresses allowed")
+			return
+		}
+	}
+}
+
+// ValidateURL validates a URL with security checks.
+// All valid URLs are subject to SSRF protection: the resolved hostname must not
+// be loopback, private, link-local, or unspecified. Use the "allow_host:<hostname>"
+// rule to bypass IP-class rejection for an explicitly trusted hostname.
+//
+// The rules parameter must only contain developer-controlled values. Never
+// populate rules from user-supplied input, as allow_host: is an unconditional bypass.
+func (v *Validator) ValidateURL(result *ValidationResult, field, value string, rules ...string) {
+	if value == "" && v.hasRule(rules, "required") {
+		result.AddError(field, value, "required", "field is required")
+		return
+	}
+
+	if value == "" {
+		return
+	}
+
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		result.AddError(field, "", "url", "invalid URL format")
+		return
+	}
+
+	if u.Scheme != "http" && u.Scheme != "https" {
+		result.AddError(field, "", "url", "only http/https schemes allowed")
+		return
+	}
+
+	if v.hasRule(rules, "https_only") && u.Scheme != "https" {
+		result.AddError(field, "", "https_only", "only HTTPS URLs allowed")
+		return
+	}
+
+	host := u.Hostname()
+	allowed := v.getAllowedHosts(rules)
+	if !containsFold(allowed, host) {
+		ctx, cancel := context.WithTimeout(context.Background(), v.dnsLookupTimeout)
+		defer cancel()
+		lookup := v.dnsLookup
+		if lookup == nil {
+			lookup = net.DefaultResolver.LookupIPAddr
+		}
+		ips, err := lookup(ctx, host)
+		if err != nil {
+			result.AddError(field, "", "url", "hostname resolution failed")
+			return
+		}
+		if len(ips) == 0 {
+			result.AddError(field, "", "url", "hostname resolved to no addresses")
+			return
+		}
+		for _, ipa := range ips {
+			ip := ipa.IP
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+				result.AddError(field, "", "ssrf", "URL resolves to disallowed IP class")
+				return
+			}
+		}
+	}
+}
+
+// getAllowedHosts collects all "allow_host:<hostname>" values from rules.
+func (v *Validator) getAllowedHosts(rules []string) []string {
+	var hosts []string
+	for _, rule := range rules {
+		if strings.HasPrefix(rule, "allow_host:") {
+			hosts = append(hosts, strings.TrimPrefix(rule, "allow_host:"))
+		}
+	}
+	return hosts
+}
+
+// containsFold reports whether slice contains s using case-insensitive comparison.
+func containsFold(slice []string, s string) bool {
+	for _, item := range slice {
+		if strings.EqualFold(item, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateJSON validates JSON content for safety, tracking structural depth via
+// json.Decoder token walking. String literals containing bracket characters do
+// not contribute to depth. Per-string length is measured against the
+// post-unescape decoded rune count.
+func (v *Validator) ValidateJSON(result *ValidationResult, field, value string, rules ...string) {
+	if value == "" && v.hasRule(rules, "required") {
+		result.AddError(field, value, "required", "field is required")
+		return
+	}
+
+	if value == "" {
+		return
+	}
+
+	dec := json.NewDecoder(strings.NewReader(value))
+	depth := 0
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			result.AddError(field, "", "json_syntax", "invalid JSON: "+err.Error())
+			return
+		}
+		switch t := tok.(type) {
+		case json.Delim:
+			if t == '{' || t == '[' {
+				depth++
+				if depth > v.maxJSONDepth {
+					result.AddError(field, "", "max_depth", "JSON structure too deeply nested")
+					return
+				}
+			} else {
+				depth--
+			}
+		case string:
+			if utf8.RuneCountInString(t) > v.maxJSONStringLength {
+				result.AddError(field, "", "json_string_length", "JSON contains oversized string values")
+				return
+			}
+		}
+	}
+}
+
+// Helper methods for rule processing
+func (v *Validator) hasRule(rules []string, rule string) bool {
+	for _, r := range rules {
+		if r == rule {
+			return true
+		}
+	}
+	return false
+}
+
+// hasRuleWithValue reports whether any rule starts with "prefix:" regardless
+// of what follows. Used to distinguish "rule not present" from "rule present
+// with value 0" in ValidateInteger.
+func (v *Validator) hasRuleWithValue(rules []string, prefix string) bool {
+	for _, rule := range rules {
+		if strings.HasPrefix(rule, prefix+":") {
+			return true
+		}
+	}
+	return false
+}
+
+func (v *Validator) getRuleString(rules []string, prefix string) string {
+	for _, rule := range rules {
+		if strings.HasPrefix(rule, prefix+":") {
+			return strings.TrimPrefix(rule, prefix+":")
+		}
+	}
+	return ""
+}
+
+func (v *Validator) getRuleInt(rules []string, prefix string) int {
+	if val := v.getRuleString(rules, prefix); val != "" {
+		if i, err := strconv.Atoi(val); err == nil {
+			return i
+		}
+	}
+	return 0
+}
+
+func (v *Validator) getRuleInt64(rules []string, prefix string) int64 {
+	if val := v.getRuleString(rules, prefix); val != "" {
+		if i, err := strconv.ParseInt(val, 10, 64); err == nil {
+			return i
+		}
+	}
+	return 0
+}
+
+// SecurityContext provides context for validation
+type SecurityContext struct {
+	UserID      string
+	TenantID    string
+	RemoteAddr  string
+	UserAgent   string
+	RequestPath string
+}
+
+// EnhancedValidator extends basic validation with security context
+type EnhancedValidator struct {
+	*Validator
+	context *SecurityContext
+}
+
+// NewEnhancedValidator creates a validator with security context
+func NewEnhancedValidator(ctx *SecurityContext) *EnhancedValidator {
+	return &EnhancedValidator{
+		Validator: NewValidator(),
+		context:   ctx,
+	}
+}
+
+// ValidateWithContext performs validation with security context awareness
+func (ev *EnhancedValidator) ValidateWithContext(result *ValidationResult, field, value string, rules ...string) {
+	// Perform standard validation
+	ev.ValidateString(result, field, value, rules...)
+
+	// Additional context-aware validation
+	if ev.hasRule(rules, "tenant_scoped") && ev.context != nil {
+		// Ensure the value doesn't reference other tenants
+		if strings.Contains(value, "/tenant/") && !strings.Contains(value, ev.context.TenantID) {
+			result.AddError(field, "", "tenant_scope", "cross-tenant reference not allowed")
+		}
+	}
+}

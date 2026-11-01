@@ -1,0 +1,2374 @@
+# Controller Operating Model
+
+How the controller behaves at runtime. This document governs controller implementation decisions — every controller feature and issue should be consistent with the model described here.
+
+For the system-level operating model, see [operating-model.md](operating-model.md).
+For the steward operating model, see [steward-operating-model.md](steward-operating-model.md).
+
+## One Sentence
+
+The controller is the central management server that stores and distributes cfgs, collects reports from stewards, orchestrates multi-node operations, runs cloud/SaaS workflows, and provides a REST API for administration.
+
+## Lifecycle
+
+### First Run (Initialization)
+
+The controller distinguishes between first run and normal startup. First run requires explicit action — the controller never silently auto-generates infrastructure.
+
+**Why**: If the controller auto-generated a CA and certs on every startup where it couldn't find existing ones, a misconfigured storage mount or wrong config path would silently create a new CA — breaking trust with every registered steward. This is a catastrophic failure disguised as a successful startup.
+
+#### The `--init` command
+
+Initialization is performed by running `controller --init --config /path/to/controller.cfg`. This is a one-shot command: it performs all initialization steps, prints the result (CA fingerprint, storage provider, timestamp), and exits. It does not start the server.
+
+#### Init sequence
+
+The `initialization.Run()` function performs the following steps in order:
+
+1. **Pre-flight validation** — verifies that config is present, certificate management is enabled (`certificate.enable_cert_management: true`), and `certificate.ca_path` is set
+2. **Idempotent guard** — reads the CA directory for an existing `.cfgms-initialized` marker. If the marker exists, init refuses to run and reports when and with what CA the controller was previously initialized. To re-initialize, the operator must remove the CA directory and run `--init` again
+3. **Storage backend creation** — initializes the storage backend. Default configuration deployments use the composite flatfile + SQLite backend via `interfaces.CreateOSSStorageManager()`; production-scale deployments may configure a database backend via `interfaces.CreateAllStoresFromConfig()`
+4. **CA directory and CA generation** — creates the CA directory (`os.MkdirAll` with `0700`), then creates a new Certificate Authority via `pkg/cert.Manager` with `LoadExistingCA: false`
+5. **Internal mTLS certificate** — if separated certificate architecture is configured, generates the `cfgms-internal` certificate used for gRPC-over-QUIC inter-component communication
+6. **Config signing certificate** — in cluster mode, generates the `cfgms-config-signer` certificate used to sign cfgs distributed to stewards (4096-bit RSA key). On a single node `--init` does not create it: the first server start creates it in the configured secret store
+7. **RBAC store initialization** — initializes default permissions, roles, and subjects via `rbac.NewManagerWithStorage()`
+8. **Init marker written last** — the `.cfgms-initialized` marker is the final step. If any earlier step fails, no marker is written, and the installation is not considered initialized
+9. **Admin credential bundle** — issues the admin mTLS client certificate and writes the bundle to the platform-default path (`/etc/cfgms/admin.bundle.yaml` on Linux/macOS, `%ProgramData%\cfgms\admin.bundle.yaml` on Windows). If a bundle already exists at that path, issuance is skipped (idempotent). The bundle is the operator's credential for all subsequent REST API access
+
+Server certificates (for the transport listener) are **not** created during `--init`. Those are generated during normal startup by the transport subsystem, which knows the specific certificate names and file paths it requires.
+
+#### The `.cfgms-initialized` marker
+
+The marker is a JSON file named `.cfgms-initialized` placed in the CA directory. It records:
+
+- `version` — marker format version (for future migration)
+- `initialized_at` — UTC timestamp of initialization
+- `controller_version` — version of the controller binary that ran `--init`
+- `storage_provider` — storage backend used (e.g., `flatfile`, `database`)
+- `ca_fingerprint` — SHA-256 fingerprint of the generated CA certificate
+
+The marker is written atomically using a temp file + rename pattern (`WriteInitMarker` writes to `.cfgms-initialized.tmp`, then renames). Placing the marker in the CA directory is intentional: if the CA mount is missing, both CA files and marker are absent, producing the correct failure mode on startup.
+
+#### Rollback on failure
+
+A `RollbackTracker` registers cleanup functions as initialization progresses. If any step fails, all registered cleanup functions execute in LIFO order (e.g., removing the CA directory that was just created). The tracker collects all rollback errors rather than stopping at the first failure.
+
+#### Server startup init guard
+
+On normal startup (without `--init`), the server checks for the marker before loading the certificate manager:
+
+- **Marker present** — proceed with normal startup
+- **No marker but CA files exist** — legacy installation from before the init guard was introduced. The server auto-creates a marker with `storage_provider: unknown-legacy` and the existing CA's fingerprint, then proceeds normally
+- **No marker and no CA files** — refuse to start with `ErrNotInitialized`, directing the operator to run `controller --init --config <path>`
+
+### Windows Data Tree Ownership (Issue #5220)
+
+On Windows the CA private key, every issued private key and the root admin bundle live under `%ProgramData%\cfgms`. Unix file modes have no effect there, so the controller locks the tree itself with `security.AdoptAdminOnlyDir`:
+
+- **Required owner:** `BUILTIN\Administrators` (or SYSTEM).
+- **Required DACL:** protected from inheritance, granting access only to `NT AUTHORITY\SYSTEM` and `BUILTIN\Administrators`. `BUILTIN\Users` and other principals have no access.
+- **Locked directories:** the fixed base `%ProgramData%\cfgms`, the certificate storage directory, the CA directory and the admin bundle directory.
+- **Confined to the base:** locking rewrites the owner and DACL of every entry below a directory, so `certificate.ca_path`, its parent directory and the directory of `admin_bundle_path` must be absolute paths inside `%ProgramData%\cfgms`. A relative path, or one outside that base (for example a user profile or a shared folder), is refused with `ErrDataDirOutsideBase` before any directory is changed, and the controller does not start. Move such paths under `%ProgramData%\cfgms`.
+- **When:** `%ProgramData%\cfgms` is locked on every controller start before the config file is located or read; the configured directories are locked before anything reads them, by `--init` before any key or bundle is written, and by `bootstrap-admin` before any operation reads the CA.
+- **Adoption:** entries owned by an individual member of local Administrators (what Windows creates for an administrator's own files) are taken over and become owned by `BUILTIN\Administrators`; each adopted path is logged.
+- **Fail closed:** an entry owned by any other principal is refused with `ErrUntrustedDirOwner`, never taken over, and the controller does not start. Linux and macOS are unaffected.
+
+**Operators of existing Windows controllers:** until this change the CA key, issued private keys and the root admin bundle inherited the default `%ProgramData%` ACL and were readable by standard local users. Treat them as exposed: rotate the CA and every admin credential after upgrading.
+
+### Normal Startup
+
+After initialization, the controller starts normally. If required infrastructure is missing (no CA, no storage, no config), **the controller refuses to start and reports what is wrong** — it does not attempt to regenerate or self-heal.
+
+1. **Load configuration** — Parse controller config file. Fail with clear error if not found
+2. **Initialize storage** — Connect to durable storage backend. Fail if unreachable — the controller cannot operate without persistent storage
+3. **Verify security** — Load existing CA, server certs, and signing cert. Fail if missing or invalid — never regenerate silently. **First start after upgrade (Issue #4864):** a single-node controller that predates the signing key store adopts its existing signing certificate and key into the configured secret store under the same serial, before it ensures any certificate. It adopts the serial it signs with today and, if a rotation overlap is open, the rotating serial; each must be issued by the controller CA, unexpired, carry the CodeSigning extended key usage and match its key. An empty signing cursor is seeded with the current serial, so the controller resolves `shared` mode on the serial stewards already pin and no re-enrollment or certificate push is needed. The controller then reads each adopted serial back from the store, compares it byte for byte with the local material, and only when the read-back matches and the mode is `shared` removes the local `key.pem` of each adopted serial and of every expired local signing certificate (`cert.pem` and metadata stay). Adoption is repeatable and safe if the process stops at any step; the next start completes it. When a certificate is refused, the controller logs a warning and records a `signing_identity_adoption_refused` audit event naming the serial and the reason (never key material), removes nothing, and keeps signing with its local key in `legacy_local` mode, retrying on the next start. Adoption failures never stop startup. A cluster does not use this path; it uses the cluster migration below
+4. **Initialize RBAC** — Load permissions, roles, subjects from storage
+5. **Start transport server** — Unified gRPC-over-QUIC server for the control and data planes (port 4433, mTLS). Serves control plane (heartbeats, commands, status) and data plane (cfg delivery, DNA sync) over multiplexed QUIC streams. **Exception — installer/steward-binary distribution:** steward binary payloads (both the controller push and the steward self-fetch, Issue #2833) transfer over the **HTTPS REST listener** (port 9080, step 9), not the QUIC transport — matching how installers and package managers are fetched everywhere and keeping large-file transfer off the control/data-plane streams. The QUIC transport carries control/data-plane messages, not binary payloads. Deployment consequence: a managed steward needs reachability to **both** port 4433 (QUIC) and port 9080 (HTTPS) on the controller — the "single port for everything" goal holds for the control+data plane, not for binary distribution
+6. **Build the directory manager** (Issue #5431) — `NewServer` builds a `DirectoryProviderManager` over the controller's secret store and registers the Entra ID provider on it without calling `Connect` or `HealthCheck`. The provider holds no tenant: its OAuth2 provider has no default config and reads each CFGMS tenant's M365 connection from the secret store on every call, so a call for tenant X uses tenant X's credential and a tenant with no connection fails. The manager connects the provider lazily on first use, and provider calls go through `ExecuteProviderOp` so statistics move. With no secret store the registration is skipped with a warning and startup continues. The manager is closed on `Stop`. Active Directory is not registered.
+7. **Start services** — Heartbeat monitoring, command publisher, registration handler, tenant manager
+8. **Start HA** (if clustered) — Begin contending for the cluster leadership lease (`pkg/lease`, ADR-031 Decision 5) against the shared database, and begin self-registering this node in the shared controller-node registry (Issue #3763) so peers can resolve it for cluster-to-cluster delivery. `GET /api/v1/ha/nodes` and `GET /api/v1/ha/leader` converge once the node's own registration and lease-acquisition loops complete their first cycle — both are independent background loops with no cross-node log to replay.
+9. **Start REST API and Web UI** — A single TLS HTTP server (port 9080) serves both the REST API and the embedded web UI from the same listener. Owned exclusively by `server.Server` (`httpServer` field); `controller.go` does not create a second instance. The web UI is embedded in the controller binary via `//go:embed all:dist` in the `web/` package — no separate server, no second port, no Node toolchain at runtime. A committed placeholder (`web/dist/index.html`) keeps `go build` self-contained; a real Vite build (`npm run build` inside `web/`) writes to `web/dist/app/`, which the controller prefers over the placeholder when producing a release binary. The placeholder carries the `CFGMS_DIST_PLACEHOLDER` sentinel: a binary built without a frontend build refuses to route `/` and logs the reason, rather than serving an empty shell as if it were the application. The SPA is served as a lowest-priority catch-all route: REST API (`/api/*`) routes always take precedence. In `ClusterMode` the TLS listener is configured with `ClientAuth = tls.RequestClientCert`: HA peers that present a client certificate will have it recorded in `r.TLS.PeerCertificates` for application-layer CN verification, while non-cluster API clients (operators, curl, stewards, browsers) that do not present a client certificate are accepted without modification
+10. **Start workflow engine** — Begin processing scheduled and queued workflows
+
+**Failure modes on startup:**
+- Missing config file → error with expected paths
+- Storage unreachable → error with connection details
+- CA/certs missing → error explaining that `--init` is required
+- CA/certs expired → error with expiry details and renewal instructions
+- Storage schema mismatch → error with migration instructions
+- Transport address conflict → error with port details and resolution steps
+
+### Audit Sink Selection (ADR-033, Issues #4036, #4037)
+
+The controller's audit store is a configurable sink, selected via `audit.sink` in
+controller config (or the `CFGMS_AUDIT_SINK` environment variable override):
+
+- **`local`** (default) — the storage provider's own durable audit store. Zero
+  extra infrastructure: an operator who never touches `audit.sink` still gets
+  audit logging. Carries the same adversary bound as ADR-004: a
+  host-compromised controller holds the audit HMAC key (loaded from its own
+  secrets store) and can rewrite history under this sink.
+- **`worm`** — the recommended production option (ADR-033): every
+  locally-sequenced audit entry is additionally shipped to an append-only
+  WORM (S3-compatible) blob target, keyed so a second write to the same
+  tenant/sequence key is refused. The local durable store remains the sole
+  sequence authority — `WORMAuditStore` (`pkg/storage/providers/auditsink`) is a
+  forward-only shipper layered over it, never a replacement `AuditStore`.
+
+Resolution and, for `worm`, construction happen once, at composition time
+(`features/controller/server/server.go:New`), before the RBAC manager and the
+audit manager are constructed — RBAC builds its own internal `audit.Manager`
+from a captured store reference, so the sink must be resolved (and, for
+`worm`, `StorageManager.SetAuditStore` called) before that reference is taken,
+or RBAC-sourced audit entries would silently bypass the WORM shipper.
+
+#### `worm` sink configuration
+
+`audit.worm` (or `CFGMS_AUDIT_SINK=worm` with the same keys under
+`audit.worm`) holds the same shape as `storage.cluster.s3`: `bucket`
+(required), `region`, `endpoint_url`, `prefix`, `access_key_id` /
+`secret_access_key` (optional; the default AWS credential chain is used when
+omitted). The blob store is constructed via
+`blob.CreateBlobStoreFromConfig("s3", cfg.Audit.WORM)` against the existing S3
+blob provider — there is no separate WORM-specific provider.
+
+**Object Lock is an operator responsibility, not something this code path can
+turn on.** `PutBlobIfAbsent`'s conditional write only prevents the
+*controller's own code path* from overwriting an already-shipped key; it does
+not stop a credential-holding attacker with full bucket permissions from
+deleting or overwriting objects directly. True protection against that
+requires the operator to (1) enable S3 Object Lock (governance or compliance
+mode) on the target bucket, and (2) scope the controller's IAM credentials
+without `s3:PutObjectRetention` / `s3:BypassGovernanceRetention`. Neither step
+is something the controller can enforce from inside the process.
+
+At startup the controller probes the configured bucket once
+(`S3BlobStore.ProbeObjectLock`, via the optional `blob.ObjectLockProber`
+capability) and logs an `"Audit sink selected"` line reporting the result:
+
+- **Object Lock confirmed on** — logged at `Info`; the strong bound applies.
+- **Object Lock confirmed off**, or **could not be verified** (e.g. the
+  credentials lack permission to read the bucket's Object Lock configuration,
+  or the probe call fails for any other reason) — both logged at `Warn`,
+  naming the reduced bound plainly: entries are write-once against the
+  controller's own code path only, and a credential-holding attacker can
+  still delete or overwrite them. Neither `Warn` case is worded as the strong
+  bound.
+
+The probe outcome never blocks or fails controller startup in any of the
+three cases — fail-closed on sink misconfiguration was explicitly rejected
+(Epic #4033); it only changes what is logged.
+
+#### Buffer-then-flush on WORM outage (Issue #4039)
+
+A `PutBlobIfAbsent` failure while shipping a locally-committed entry (e.g. the
+bucket is temporarily unreachable) never blocks or fails the caller and is
+never a permanent gap: the local write already durably committed — the local
+store remains the sole sequence authority — and a pending marker (the entry ID
+only, never audit content) written *before* the local append survives the
+failed ship. A background reconciliation loop retries every pending marker
+once the WORM target is reachable again, on a fixed **30-second** interval
+(not operator-tunable in this story; a follow-up can expose it if needed).
+
+The marker store is a genuinely local filesystem directory, separate from the
+(possibly unreachable) WORM blob target, so it stays writable precisely during
+the outage this design exists to survive. It needs no extra infrastructure:
+it defaults to `<DataDir>/audit-worm-pending`, overridable via
+`audit.marker_root`, matching the `blob_storage.root`/`<DataDir>/installers`
+precedent used for installer artifacts. If the marker store is not writable at
+controller startup, startup fails closed with a named error — the marker
+mechanism is what makes "an entry is never silently dropped" true, so running
+the `worm` sink without a working marker store would silently degrade shipping
+back to best-effort with no crash-safety.
+
+The design resolves each pending entry by asking the one authority that always
+knows the truth — the local store itself, via `GetAuditEntry` — rather than
+inferring from a timestamp window or a persisted high-water mark that can
+drift from reality. This is why it is provably correct rather than
+probabilistic, and why it replaces those two earlier candidate designs
+entirely rather than layering on top of either. Per-tenant entries are **not**
+guaranteed to be appended in non-decreasing `Timestamp` order — `Timestamp` is
+assigned before an entry is queued and `SequenceNumber` is assigned later,
+whichever asynchronous write actually dequeues it first — so the design
+deliberately never inspects `Timestamp` at all, only entry ID and
+`SequenceNumber`.
+
+**Accepted residual risk, unchanged from the `local` sink's default bound
+(ADR-033):** an entry that has committed locally but not yet shipped to WORM
+is, for the duration of that buffered window, rewritable by a
+host-compromised controller exactly like every entry under the `local` sink —
+the WORM guarantee only applies once an entry is actually flushed. This is a
+deliberate, accepted consequence of never blocking or failing a caller on a
+WORM outage (the founder explicitly rejected a fail-closed alternative), not
+an oversight.
+
+**Not a new loss window:** if a marker is written but the process crashes
+before the local append it precedes ever commits, reconciliation correctly
+discards that marker once it observes `business.ErrAuditNotFound` for an entry
+ID that is not in flight — no `SequenceNumber` was ever consumed, so nothing
+is missing from the chain. This is the same pre-existing loss window
+`pkg/audit.Manager`'s in-memory write queue already has today (a crash before
+its drain loop writes a queued entry loses that event, with or without this
+design) — not a new gap introduced by the marker mechanism.
+
+An unrecognized `audit.sink` value fails startup, naming the valid values.
+
+`pkg/storage/interfaces.StorageManager.SetAuditStore` wires a replacement
+audit store after construction. It is called exactly once, for the `worm`
+sink, to install the `WORMAuditStore`-wrapped store before anything else reads
+`GetAuditStore()`.
+
+### Cluster-Atomic Config Writes (Issue #5550)
+
+Read-modify-write and create-if-absent on a `ConfigStore` go through the shared helper in `pkg/storage/interfaces/config` (`AtomicUpdate`, `CreateIfAbsent`, `ClusterAtomic`). With the database provider it uses `CompareAndSwapConfig` with bounded retry. With flatfile (the default) it takes a per-key file lock in the store's own directory (mode 0700), which serializes processes on one host only.
+
+Multi-node controllers therefore require the database provider for the domain claim, credential issue and reveal, and directory membership. Whether the controller is a multi-node cluster is decided from configuration (`ha.mode: cluster`), never from the live peer count; with any other provider those operations return `ErrNotClusterAtomic` and never proceed, and the controller logs one startup warning.
+
+### Degraded-Mode Visibility
+
+A deployment may run with declared-optional storage capabilities absent. Optionality is a legitimate design choice — a subsystem can declare a store as optional (`interfaces.RequirementOptional`) when it degrades gracefully without it, rather than failing composition. Silence about such gaps is not: every declared-optional store that composes absent is surfaced, not left for an operator to discover at request time.
+
+As of this writing, every subsystem-declared store requirement in the controller (including push-resumption's `PushStore`, guaranteed across all deployment shapes since Issue #3402) is `RequirementRequired`, so no capability is currently absent-by-design. The mechanism below is exercised by future subsystems (registration, workflow-trigger — epic #3406) that may declare optional dependencies; the example fields are illustrative.
+
+**At startup**, every absent optional capability is logged once at `WARN` level with four fields:
+
+| Field | Example |
+|-------|---------|
+| `capability` | `ExampleStore` |
+| `subsystem` | `example` |
+| `provider` | `flatfile` |
+| `consequence` | `Example feature is degraded — <functional impact> (provider: flatfile)` |
+
+An operator who watches the startup log can see exactly which features are degraded and why, without querying an endpoint.
+
+**At runtime**, the same information is available through `GET /api/v1/ha/status` (requires the `ha:read-status` permission). The response includes an `absent_capabilities` array: empty when all declared optional capabilities are present, or one entry per absent capability otherwise. Each entry carries the same four fields logged at startup.
+
+```json
+{
+  "node_id": "ctrl-01",
+  "is_leader": true,
+  "mode": "single_server",
+  "health": "healthy",
+  "absent_capabilities": [
+    {
+      "capability": "ExampleStore",
+      "subsystem": "example",
+      "consequence": "Example feature is degraded — <functional impact> (provider: flatfile)",
+      "provider": "flatfile"
+    }
+  ]
+}
+```
+
+**Fixable vs. by-design absence**: every entry names the running `provider`. If the consequence is unacceptable, the operator can switch to a provider that supplies the capability. If the absence is intentional for this deployment shape, the entry is informational only — it does not affect the `health` field or block any operation.
+
+**Computation**: the capability set is evaluated once at composition time (`features/controller/server/server.go:New`), not per request. The result is stored in the API server and served verbatim.
+
+**Access control**: `absent_capabilities` is part of the administrative status surface. Unauthenticated callers and callers without `ha:read-status` receive `401` before the handler runs; the capability detail is never included in error responses.
+
+### Node Management
+
+The controller is a self-sufficient application — it creates its own directories, certificates, and storage during `--init` and runs without external dependencies beyond the OS. For quick-start and development, no steward is needed.
+
+For production fleets, a steward runs alongside the controller on each node. The steward manages node-level infrastructure via its convergence loop, while the controller focuses on fleet operations.
+
+| Responsibility | Owner | Examples |
+|----------------|-------|----------|
+| OS packages | Steward | `git`, `sops`, system updates |
+| System directories | Steward | `/etc/cfgms/`, `/var/lib/cfgms/`, `/var/log/cfgms/` |
+| Firewall rules | Steward | Ports 8080/TCP, 4433/UDP |
+| OS service management | Steward | systemd unit, service restart on failure |
+| Controller config file | Steward | `/etc/cfgms/controller.cfg` |
+| CA and certificates | Controller | Generated during `--init`, managed in-memory |
+| RBAC and tenant data | Controller | Stored in durable storage backend |
+| Fleet registry | Controller | Steward registrations and heartbeats persisted in `StewardStore` — survives controller restarts (Issue #663) |
+| Steward tags | Controller | Operator-assigned tags persisted in `tagstore.Store` (SQLite-backed, `features/controller/tagstore`) — survives controller restarts and DNA refreshes (Issue #2542) |
+| Storage backend | Controller | Flatfile + SQLite (default) or PostgreSQL (production scale) operations |
+| Fleet orchestration | Controller | Config distribution, steward registration, workflows |
+
+See [Single Controller Deployment](../deployment/single-controller/walkthrough.md) for the deployment guide and [ADR-002](decisions/002-steward-bootstrap-for-controllers.md) for the architectural decision.
+
+### Normal Operation
+
+The controller runs several concurrent activities:
+
+```
+┌───────────────────────────────────────────────────────┐
+│                  Controller                            │
+│                                                        │
+│  ┌────────────────────┐  ┌─────────────────────────┐  │
+│  │ Fleet Management   │  │ Workflow Engine          │  │
+│  │ (steward comms)    │  │ (cloud/SaaS automation) │  │
+│  └────────────────────┘  └─────────────────────────┘  │
+│                                                        │
+│  ┌────────────────────┐  ┌─────────────────────────┐  │
+│  │ REST API           │  │ Orchestration           │  │
+│  │ (admin interface)  │  │ (multi-node operations) │  │
+│  └────────────────────┘  └─────────────────────────┘  │
+│                                                        │
+│  ┌────────────────────┐  ┌─────────────────────────┐  │
+│  │ Identity & Auth    │  │ Monitoring & Reporting  │  │
+│  │ (certs, RBAC)      │  │ (fleet visibility)      │  │
+│  └────────────────────┘  └─────────────────────────┘  │
+│                                                        │
+└───────────────────────────────────────────────────────┘
+```
+
+### Shutdown
+
+1. Stop accepting new API requests
+2. Complete in-progress orchestrated operations (or safely pause them)
+3. Notify stewards of impending disconnect (stewards continue operating independently)
+4. Flush pending writes to storage
+5. Leave HA cluster cleanly (if clustered)
+6. Close transport server (gRPC-over-QUIC)
+7. Exit
+
+## Cfg Management
+
+The controller is the authoring and distribution point for steward cfgs. It does not apply cfgs itself — stewards do that.
+
+### Cfg Lifecycle
+
+```
+Author → Validate → Store → Distribute → Monitor Compliance
+```
+
+1. **Author** — Cfgs are created or updated via the `cfg` CLI (`cfg config upload`), the administration web UI, a GitOps webhook, or workflow output. All sources write through the same ConfigStore — there is no separate "fast path".
+2. **Validate** — Controller validates cfg syntax, module references, and tenant scoping before accepting. Validation is part of the write path; an invalid cfg never lands in storage.
+3. **Store** — Cfg is persisted in durable, version-controlled ConfigStore. Every change is a new version with full audit trail.
+4. **Distribute** — A successful `ConfigStore` write inside `SetConfiguration()` triggers automatic distribution via a service-level callback (Issue #1521, Option A). The callback is registered at server startup (`server.go`) and invokes `push.Fanout()` scoped to the tenant from the write context. Distribution is fire-and-forget: `SetConfiguration()` returns without blocking on fanout completion. Cfgs are signed with the controller's signing certificate so stewards can verify authenticity. Note: debounce (burst-save absorption) and per-steward targeting evaluation are tracked as follow-on stories.
+5. **Monitor** — Controller receives convergence results from stewards and tracks per-device compliance status. Operators view propagation via `cfg config deployments <id>`.
+
+**Save = Deploy:** `SetConfiguration()` automatically triggers fan-out to all active stewards of the affected tenant via the registered `FanoutCallback`. `POST /api/v1/config/push` is retained as an explicit-override / force-push endpoint. See [system operating model — Save = Deploy](operating-model.md#save--deploy) for the cross-component view.
+
+### Cfg Targeting
+
+The controller decides which steward gets which cfg based on:
+
+- **Direct assignment** — a cfg explicitly targets a steward by ID ✓ implemented (`config_service_v2.go`: per-steward config stored and retrieved by steward ID)
+- **Group membership** — a cfg targets a group; all stewards in that group receive it ✓ implemented (tenant/group path used in inheritance resolution)
+- **Tenant hierarchy** — cfgs inherit through the recursive tenant hierarchy (e.g., MSP → Client → Group → Device). Child tenants can override parent settings, but `InheritanceResolver.ResolveConfiguration()` only ever applies the first three tenant-path levels (MSP, Client, Group) plus the Device leaf — a tenant path deeper than that has its extra intermediate levels silently skipped, not "any depth." See [Configuration Inheritance](../guides/configuration-inheritance.md#current-inheritance-depth) for the depth cap and its rationale.
+- **Cluster membership** — a steward that belongs to one or more clusters (Hyper-V, SQL, etc.) receives an additional `cluster-policies/<clusterName>` config layer inserted after Group-level and before Device-level in the merge order ✓ implemented (`InheritanceResolver` cluster-policies cascade, Issue #2425)
+- **Effective cfg** — the controller resolves inheritance and produces the effective cfg for each steward, merging all applicable layers ✓ implemented (`GetEffectiveConfiguration()`)
+- **Tag-based targeting** — stewards can carry arbitrary tags (e.g., `ring=canary`, `role=web-server`, `region=us-east`); a cfg targets stewards by tag expression via role configs ✓ implemented (`roleConfigAdapter` in config_service_v2.go injects matching role fragments into `InheritanceResolver`, Issue #2546)
+- **DNA-attribute matching** — a cfg can target stewards whose DNA attributes match a predicate (e.g., `os=linux`, `cpu_arch=arm64`) via role config selectors ✓ implemented (same role-policies cascade, Issue #2546)
+
+**Deployment rings:** see the Deployment Rings section below for the v1 mechanism. Operator-tagged phased rollouts using separate cfgs are still supported alongside rings.
+
+### Cluster-Policies and Role-Policies Cascade
+
+Stewards receive additional configuration layers beyond the tenant hierarchy: cluster membership adds a `cluster-policies/<clusterName>` layer, and matching role configs add a `role-policies/<roleName>` layer. Both are applied by `InheritanceResolver.ResolveConfiguration()` after the tenant hierarchy and before device-level config.
+
+**Merge priority order (lowest → highest):**
+
+| Level | ConfigKey namespace | Source |
+|-------|--------------------|-----------------------|
+| MSP | `msp-policies/global` | Tenant hierarchy root |
+| Client | `client-policies/<tenantID>` | Tenant hierarchy |
+| Group | `group-policies/<tenantID>-groups` | Tenant hierarchy |
+| **Cluster** | **`cluster-policies/<clusterName>`** | **Cluster membership (DNA attributes)** |
+| **Role** | **`role-policies/<roleName>`** | **Selector match (DNA + controller tags)** |
+| Device | `stewards/<stewardID>` | Device-level override |
+
+A device-level resource always wins. A role resource overrides cluster-policies for the same resource name. A cluster resource overrides group-level defaults.
+
+**Sourcing cluster membership:** the cluster registry is derived from steward DNA attributes published by the steward's `DNARefreshLoop` ticker (default 30 min). A steward that carries `cluster:<clusterName>.*` DNA attributes is recorded as a member of that cluster. Membership is **eventually consistent**: a steward joining or leaving a cluster can take up to one refresh interval before `ResolveConfiguration` reflects the change.
+
+**Authoring cluster-policies configs:** use the existing config-push path (`cfg config upload`) to store a `ConfigKey{Namespace: "cluster-policies", Name: "<clusterName>"}` document for the cluster's tenant. The resolver looks up this document automatically for every member steward. For migrating a single resource from device scope to cluster scope, the `move_resource_to_cluster` workflow step is the production path: it reads both docs, writes the resource into `cluster-policies/<clusterName>` via the raw `ConfigStore` (no service-layer equivalent exists for that namespace), and then removes it from `stewards/<stewardID>` via `ConfigurationServiceV2.SetConfiguration` (the validated + fan-out path). The cluster-first write order is the recoverability contract — a crash between the two writes leaves the resource in both docs, and re-running the step detects this and completes the device-side removal without re-writing the cluster doc. Manual `cfg config upload` authoring of whole cluster-policies documents remains the path for bulk cluster-scope changes.
+
+**Accountable-authority reconciliation (Issue #2704):** the controller exposes `GET /api/v1/clusters/{name}/reconciliation` as the **single accountable authority** that reconciles the declared clustered resources (sourced from `cluster-policies/<clusterName>`) against the actual cluster registry (derived from steward DNA). For each declared resource the endpoint produces one of four classifications:
+
+| Status | Meaning |
+|--------|---------|
+| `present-with-live-owner` | Resource exists in the registry and its owner steward has a heartbeat within the last 60 s. Healthy. |
+| `declared-but-missing` | Resource declared in `cluster-policies` but no steward has published a `resource_owner.<role>` DNA attribute for it (create-coverage gap). Non-owner stewards' compliant-by-delegation abstain is **not safe** for this resource. |
+| `orphan-dead-owner` | Registry entry exists but the owner steward's last heartbeat exceeds 60 s (`DeadOwnerStaleThreshold`, matching the 3-missed-heartbeat offline timeout from epic #1664). Resource is orphaned. |
+| `split-brain` | Two or more cluster members report different `resource_owner.<role>` values for the same role. All distinct claims are listed in `all_owner_claims`. |
+
+Non-healthy statuses surface as `health.Alert` entries (critical for missing/split-brain, warning for dead-owner) and `health.ComponentHealth` entries in the response. Detection is on-demand (no background poll): the endpoint scans the current DNA snapshot and config store on each call.
+
+**Workflow-driven `ha_role` writes (Issue #2667):** the `set_ha_role` workflow step is the first production writer of a resource's `ha_role` field via the workflow engine. It reads the target steward's device-scope config document (`stewards/<steward_id>`), locates the named `hyperv.vm` resource, and merges `{cluster_name, resource_group_name}` into its `ha_role` block. The write goes through `ConfigurationServiceV2.SetConfiguration` — the same validated + fan-out path as every other device-scope write — ensuring `ValidateConfiguration` runs and the registered `FanoutCallback` (Save = Deploy) fires an immediate push to the steward.
+
+**No-op for non-clustered stewards:** when a steward has no cluster membership, the cluster-policies step is skipped entirely. The `EffectiveConfiguration` output is byte-identical to before this cascade level was introduced, verified by regression tests.
+
+**FC-cascade config invariant (Issue #3107):** every `hyperv.vm` resource that carries an `ha_role` block — making it a clustered failover-cluster VM role — and every `hyperv.cluster` resource MUST reside in `cluster-policies/<clusterName>`, never in device scope (`stewards/<stewardID>`). This is not a soft convention: `GetClusterDeclaredResources` (the sole source for `Reconcile`'s declared set) reads **only** from `cluster-policies/<clusterName>`. A clustered resource that remains in device scope is **silently absent** from `Reconcile`'s input — it is never classified as `declared-but-missing`, `orphan-dead-owner`, or `split-brain`; the reconciliation machinery simply cannot see it. This means device-scope clustered declarations are not flagged as errors — they are silently unreconciled.
+
+The `promote-hv-role` workflow (epics #2657/#2807, stories #2667–#2671) is the canonical and exclusive creation path for clustered `hyperv.vm` resources since those epics shipped. Every promotion terminates with the `move_resource_to_cluster` step, which atomically relocates the resource from `stewards/<stewardID>` to `cluster-policies/<clusterName>` with a cluster-first write order (the cluster doc is written before the device doc is updated, so a mid-flight crash leaves the resource in both docs rather than neither; re-running the step completes the device-side removal without re-writing the cluster doc). There are no backlog scattered declarations to migrate: the fleet has been greenfield on this invariant since the epics shipped. Operators authoring clustered resources directly (outside the workflow) must use `cfg config upload` targeting `cluster-policies/<clusterName>` from the start — never the device-scope `stewards/<id>` path.
+
+### Role-Policies Namespace (Issues #2543, #2546)
+
+The `role-policies` ConfigStore namespace stores **role configs**: named objects that couple a selector expression with a `StewardConfig` fragment. During config resolution the resolver evaluates all role configs for the tenant, selects those whose selector matches the target steward's DNA + controller-stored tags, and merges the fragments into the effective config after cluster-policies and before device config. Authoring is handled by the `/api/v1/roles` REST endpoint and the `cfg role` CLI verb. Tag and role edits push the new effective config to affected stewards: adding or removing a steward tag that changes its tag set, and creating, replacing or deleting a role config, each record a durable `sync_config` command and trigger a config sync (the same delivery path as a config upload) for every affected steward — the tagged steward, or the stewards in the role's tenant whose selector matches the new or the replaced/deleted role. A failed delivery is logged and left pending; it does not fail the tag or role request. Inherited tenant policy edits are not covered by this trigger.
+
+**Role config object shape:**
+
+```json
+{
+  "name":      "github-runners",
+  "tenant_id": "acme/ops",
+  "selector":  "os:windows tag:github-runner",
+  "fragment":  { ... StewardConfig fields ... },
+  "created_at": "2026-07-13T00:00:00Z",
+  "created_by": "ops-admin"
+}
+```
+
+- `name` — unique within the tenant; alphanumerics, hyphens, underscores, and dots only.
+- `selector` — standard fleet selector expression parsed by `pkg/fleet/selector.Parse`; stored verbatim. Validated at author time; an un-parseable selector is rejected with 400.
+- `fragment` — a partial `StewardConfig`; no steward ID is required. Fields that are empty or zero-valued in the fragment are not merged (the field retains the value from the lower-priority layer).
+
+**ConfigKey:**
+
+```
+ConfigKey{TenantID: "<tenant>", Namespace: "role-policies", Name: "<roleName>"}
+```
+
+**Authoring:** `POST /api/v1/roles` (requires `role:write`), `GET /api/v1/roles` / `GET /api/v1/roles/{name}` (requires `role:read`), `DELETE /api/v1/roles/{name}` (requires `role:write`). Cross-tenant authoring is rejected with 403. See `cfg role --help` for CLI usage.
+
+**Resolution:** `InheritanceResolver.ResolveConfiguration()` applies matching role fragments between cluster-policies and device-level config (Issue #2546). The `roleConfigAdapter` in `config_service_v2.go` lists all `role-policies` entries for the tenant, parses each selector via `pkg/fleet/selector.Parse`, and returns the matching fragments sorted alphabetically by name. Multiple matching roles merge in that order; later names override earlier ones for the same resource. A role-provider error is non-fatal: resolution continues without role fragments and a WARN is emitted.
+
+### Directory Authority, Domain Registry and Owner Immutability (Issue #5551)
+
+Per-object directory fragments (`directory_user:<guid>`, `directory_group:<guid>`) become entities named `directory:<domain>/user:<guid>` and `directory:<domain>/group:<guid>`. The domain is a claim made by the steward in the fragment payload (`directory_domain`), so it is honoured only for the one steward entitled to make it.
+
+**Declaration shape.** A domain controller declares its domain in its **own device-level cfg**:
+
+```yaml
+resources:
+  - name: corp-domain
+    module: activedirectory.domain
+    config:
+      domain: corp.example.com   # DNS name; normalized to lowercase, no trailing dot
+```
+
+**Config validation (one shared check).** `ConfigurationServiceV2` runs the same validation on `SetConfiguration` (which the config push handler calls), `BatchSetConfigurations` and `ValidateConfig`, and the role-config create handler runs the static part for role documents. Errors name the field and never name another tenant. It rejects:
+
+- an `activedirectory.*` resource at any non-device level (tenant, group, role): `resources[i].module`;
+- a `password`, `password_profile` or `initial_password` field, at any depth, in an `activedirectory.*` or `m365-entra-*` resource: `resources[i].config.<path>`;
+- a resource named `directory_user` or `directory_group` (reserved for the fragment kinds);
+- a malformed `domain` (not a DNS name), and a domain another tenant already owns.
+
+**Domain registry.** Saving a device cfg that declares a domain records the owning tenant in the config store under namespace `directory-domains`, name `<normalized domain>` (tenant segment `_global`, because config stores reject an empty tenant). The first tenant creates the entry with `CreateIfAbsent`; later declarations by the same tenant add a declarer; a different tenant's save is rejected. The entry lists the stewards that declare the domain and is released when the last one drops it (cfg edited or deleted). Atomicity is the shared config-store helper's: cluster-atomic only on a store that supports conditional writes.
+
+**Resolving a rejected declaration.** The first save wins. A tenant whose declaration is rejected with `DIRECTORY_DOMAIN_CONFLICT` must ask the owning tenant to remove its declaration (releasing the domain), or contact support. The error deliberately does not say who owns it.
+
+**Verifier.** `DirectoryAuthority.IsDirectoryAuthority(peer, domain)` is true only if (a) the registry owner of the domain is the tenant the peer is registered under (from the mTLS-verified peer identity), and (b) the domain is declared in the peer's **own effective cfg** (resolved by the same function that serves the steward its cfg). A same-tenant steward that does not declare the domain is denied. The writer asks once per peer and domain per delta batch. The `ad_pdc_emulator` fact only activates observation on a steward; it is never used for authorisation.
+
+**Drop, never host fallback.** A directory fragment with no verifier, a denied peer, a malformed domain or a kind outside the taxonomy is **dropped**: counted, logged once per batch with sanitized values, and never written under `host:<peer>`. A steward fragment can only ever produce a `directory` authority, never `m365`. A directory fragment's `__entitygraph_edges` key is ignored (membership is the `member_of` attribute).
+
+**Owner immutability.** For `directory` and `m365` subjects the owning tenant never changes on ingest, in both entity-graph providers. A write from a different tenant is rejected, logged as a security event naming both tenants, and recorded in the root (system tenant) audit stream as `entity_owner_conflict_rejected`. Host subjects are unchanged (a steward move still moves its entities).
+
+**Domain release.** When the registry entry is released, the controller retracts the owning tenant's `directory:<domain>/...` entities, so the stale inventory is no longer visible and another tenant can then declare the domain and own new entities. A release whose retraction did not finish is completed before any new claim of that domain.
+
+### Directory Membership Store and Change Log (Issue #5553)
+
+`features/controller/directory` keeps every direct group membership (Active Directory and Microsoft 365) and logs every change. Membership is the `member_of` attribute of user and group fragments; it is not stored as graph edges. State is derived on the controller from verified AD fragments (`MembershipSink.ApplyBatch`) and from the M365 collector (`MembershipSink.ApplyGroup`) and is durable through `ConfigStore`, whichever provider backs it.
+
+**Nothing is dropped.** Every change is logged for every group, managed or not: there is no filter, sampling or cap. A batch that changes more than 10,000 memberships still applies and logs all of them, and also emits a warning event naming the tenant and peer (counts only). A source object whose `member_of` was cut off (`member_of_truncated`) is stored with that flag and a warning event; its missing entries are never treated as removals. Members that are not users or groups (computers, contacts, foreign security principals, devices, service principals, other) are stored and logged with their type, bare object id and display name; they are never managed objects.
+
+**Layout.** All names are flat hashes, so they pass every provider's key validation; the real ids live in each value.
+
+| Namespace | Name | Value |
+|-----------|------|-------|
+| `directory-membership` | `<h>-<NN>`: `h` is the first 32 hex of SHA-256 of `<authority>\|<group id>`, `NN` one of 64 shards chosen by a hash of the member id | the group's members in that shard |
+| `directory-membership-by-member` | first 32 hex of SHA-256 of `<authority>\|<member id>` | that member's direct groups |
+| `directory-membership-log` | `<h>-<sequence>`, tagged `group:<id>` and a month bucket `m:YYYY-MM` | up to 500 events; a full entry is immutable |
+| `directory-membership-seq` | `<h>` | the group's current log sequence; its existence marks the group as observed |
+| `directory-membership-peer` | first 32 hex of SHA-256 of the peer id | the peer's last verified authority |
+
+Every update goes through `config.AtomicUpdate`. A batch groups its changes per shard and per by-member entry, so each touched entry is read and written once per batch; the write count is bounded by touched entries, not by members.
+
+**Input validation.** Each `member_of` entry must be a bare object id (at most 64 characters of `[A-Za-z0-9._-]`) and is always joined to the peer's verified authority. An entry carrying an authority prefix, a `/`, a `:` or a control character is rejected and counted; the object's other entries still apply. The authority is supplied by the caller (the directory-authority verifier's answer for the peer) and is never recomputed from fragment contents.
+
+**Tenant scoping.** The owning tenant of every key and log entry is the domain-registry owner of the verified authority. Removals use the registry owner of the peer's stored last-known authority, not the peer's current tenant, so a steward that moved tenant cannot write removals into another tenant's keys. Reads take the owning tenant of a group entity the caller has already authorised, and list cursors are opaque, stable, and bound to that tenant and subject.
+
+**Change log.** An event records tenant, group and member entity ids, member type, `added` or `removed`, observed and recorded time, source (`directory:<domain>` or `m365:<guid>`) and, for AD, `reported_by` (the reporting steward). The first observation of a group is logged with `baseline: true`; `ListChanges` excludes baseline events unless asked. For AD, `observed_at` is the controller receipt time, or the steward-supplied time clamped to the 24 hours before receipt and never after it, so a compromised steward cannot backdate events.
+
+**Retention.** A sweep under `lease.SingletonJob.RunIfLeader` (a background job, not a write serializer) deletes log entries whose newest event is older than 400 days (configurable). It lists only the month-bucket tags at or before the cutoff month, never the whole log namespace, then deletes the counters of groups left with no log entries and the last-known-authority entry of every deregistered peer.
+
+**Multi-node.** Membership writes need a store that is atomic across controller nodes. In a multi-node cluster with a store that is not (anything but the database provider), every membership write fails closed with `ErrNotClusterAtomic` and nothing is written. There is no lease fallback; multi-node deployments use the database provider.
+
+### Initial Credential Issue (Issue #5555)
+
+The controller generates a one-time initial password for a declared
+`activedirectory.user` resource and returns it to the requesting steward at the
+moment the steward is about to create the account. The admin reveals it later
+through the reveal API.
+
+**RPC.** `IssueInitialCredential` is a unary RPC on the `StewardTransport`
+service taking `resource_id` and `kind` (only `activedirectory.user`) and
+returning `password`. It is unary on purpose: control-plane events pass through
+the steward's offline queue, which persists to disk, and a secret must never take
+that path. The RPC is excluded from payload logging (the unary access-log
+interceptor records method, status code and duration only, and omits even the
+error text for secret-bearing methods) and from tracing span attributes
+(`IsSecretBearingMethod`).
+
+**Revocation.** Before the handler runs, the unary revocation interceptor
+installed in `Server.Start` looks up the peer certificate serial through
+`cert.Manager.IsRevoked`: a revoked serial is refused with
+`codes.PermissionDenied`, a lookup error with `codes.Unavailable` (fail closed),
+and a call with no peer certificate with `codes.Unauthenticated`. A steward whose
+certificate was revoked (for example by credential rotation after a compromise)
+therefore cannot collect a pending password, even though the credential service
+returns the same pending password to that identity for the whole TTL. The
+credential handler is wired only when a certificate manager is present; without
+one the interceptor is not installed and the RPC is `Unimplemented`.
+
+**Authorization.** The steward is the verified mTLS peer; its tenant comes from
+the fleet registry, never the request. The request is accepted only when
+`resource_id` names an `activedirectory.user` resource in that steward's OWN
+effective cfg, so another steward in the same tenant is refused. Every record is
+keyed by (tenant, steward, resource), so a pending record can be replaced or
+re-issued only to the peer that owns it. A refusal carries a fixed message; the
+reason is logged server-side.
+
+**Password.** `credentials.GeneratePassword` produces 24 characters from
+`crypto/rand`, with at least one upper-case letter, lower-case letter, digit and
+symbol, each chosen uniformly within its class. It is the one generator; the
+in-process account path uses it too.
+
+**Lifecycle (once per steward and resource id).**
+
+| State of the record | Request outcome |
+|---------------------|-----------------|
+| none, or `expired`, or `pending` past its expiry | a new password is issued |
+| `pending` | the same password is returned |
+| `revealing` | refused: `already issued` |
+| `revealed`, resource has a GUID binding (the account exists) | refused: `already issued` |
+| `revealed`, no GUID binding (the create failed after reveal) | the old record is voided, a new password is issued, and a `credential_reissued` audit event is written |
+
+**Storage.** The password lives in the secrets provider (SOPS), under the record's
+tenant, in a secret named `credentials-initial_<steward id>_<resource id>_<record id>`.
+The record (random 128-bit id, tenant, steward id, resource id, created, expires,
+state `pending|revealing|revealed|expired`) is a config-store entry in the
+`credentials` namespace. The password is never in the config store, DNA, logs,
+audit events or error text. `features/controller/credentials.CredentialStore`
+(`Put`, `Get`, `List`, `Claim`, `Delete`, plus `DeleteSecret`) is the interface the
+reveal API and the in-process account path import; it does not depend on the RPC
+handler. The GUID binding is read from the `credential-bindings` config namespace,
+written by the account-creation path once the account has a GUID.
+
+**Caps and rate limit.** At most 1,000 pending records per steward and per tenant;
+over the cap the request is rejected. Each node admits at most 60 requests per
+steward per minute, counted in memory.
+
+**Expiry.** The TTL defaults to 72 hours (`directory.initial_credential_ttl`). A
+sweep every five minutes runs under `pkg/lease.SingletonJob.RunIfLeader`
+(`credential-expiry`). It moves a `pending` or `revealing` record past its expiry
+to `expired`, deletes its secret, and writes a `credential_expired_unrevealed`
+audit event (the account then exists with an unknown password). A `revealed`
+record keeps its record, which is what refuses a second issue, and loses only its
+secret.
+
+**Cluster.** The RPC lands on whichever node holds the steward's stream; the
+secrets and config stores are shared and there is no cross-node command. The first
+issue uses `CreateIfAbsent` and every state move (re-issue, void, expiry, claim)
+uses `AtomicUpdate`, so two concurrent issues return one password. In a multi-node
+cluster with a config store that is not cluster-atomic the RPC fails closed with
+`ErrNotClusterAtomic` (`Unavailable`) and writes nothing.
+
+### M365 Tenant Inventory (Issue #5561)
+
+The controller records each M365-connected tenant's users and groups in the entity graph without any steward involved. A collector (`features/controller/directory/m365_inventory.go`) runs under the `m365-inventory` background-loop lease (`lease.SingletonJob.RunIfLeader`, ADR-031 Decision 4), so in a cluster only the lease holder reads Graph; a follower's cycle does nothing.
+
+- **Schedule.** Every `directory.m365_inventory_interval` (default 60m) per tenant. A tenant's first run after a start is offset by a stable per-tenant jitter of up to a quarter of the interval (at most 15 minutes).
+- **Reads.** Through `DirectoryProviderManager.ExecuteProviderOp` over the registered Entra provider, with the tenant in the context so a run uses only that tenant's credential. Users, groups and each group's members are read page by page (999 per page, `@odata.nextLink`); one members call per page per group, and Graph's per-user `memberOf` is never called.
+- **Writes.** One fragment per object (`directory_user:<id>`, `directory_group:<id>`), canonicalized and hashed exactly like steward DNA, written with `ReportObservations` under source `m365:<entra-tenant-guid>`, subject `m365:<guid>/user:<id>` or `/group:<id>`, no authenticated peer, and `owning_tenant` set by the controller to the CFGMS tenant being collected. Membership is not written as edges: each group's complete member set goes to the membership sink (`ApplyGroup`, Issue #5553), which logs added and removed members.
+- **Manifest.** A per-tenant manifest of fragment id to hash, sharded into the 256 DNA buckets, is kept in the config store. A run writes only new or changed objects and retracts objects absent from a complete enumeration; an unchanged tenant, or a restarted controller, writes nothing.
+- **Failure.** A Graph or authentication failure for one tenant records a bounded, sanitized error and flags the tenant stale; its previous inventory stays and nothing is retracted. Other tenants still run.
+- **Shared Entra tenant.** If two CFGMS tenants name the same Entra tenant id, it is collected for neither and a security event naming both goes to the root admin audit stream. The owning tenant of an existing `m365` subject never changes on ingest (Issue #5551).
+
+### Directory Reads Come From Stored DNA (Issue #5557)
+
+The directory read API (`/api/v1/directory/...`) answers from stored state only: user and group objects from the entity graph (the same tenant-scoped read path as the entity routes, restricted to the `directory` and `m365` authority types so host-local users never appear) and membership from the directory membership store. No handler calls a steward or Microsoft Graph, so a read never triggers a sync and never waits on one; every object reports `last_observed` and `stale` so a reader can see how old the answer is. Tenant scoping is in the handler: a by-id read of another tenant's object is a `404`, and the membership store is read with the owning tenant of the entity the caller was already allowed to read.
+
+### M365 Declared-Resource Convergence (Issue #5562)
+
+The controller converges the `m365-entra-user` and `m365-entra-group` resources a tenant declares, without any steward involved. The loop (`features/controller/directory/m365_converge.go`) is hooked to the inventory collector (`M365Inventory.AttachConvergence`) and runs per tenant after that tenant's inventory pass, inside the same `m365-inventory` lease run, so it executes on the lease holder only and its cadence is `directory.m365_inventory_interval`. A revert of a direct M365 change can therefore lag by up to one interval.
+
+- **Declared set.** The tenant's effective cfg from `ConfigurationServiceV2.GetEffectiveConfiguration(tenant, "")`, restricted to resources whose module is `m365-entra-user` or `m365-entra-group` (controller-kind, in the credentialed M365 set).
+- **Mode.** `stewardtypes.EffectiveDriftMode` over the tenant's effective cfg, per module. `monitor` records a drift-diff observation and never calls `Set`; `apply` calls `Set` for drifted resources and audits the write.
+- **Module instances.** `CreateTenantModuleInstance(ctx, module, tenant)`, the call `Engine.executeTaskStep` makes, so credential issuance and the execution-tenant check apply per tenant. The loop reads with `Get`, compares only declared attributes, and `Set`s only when they differ; it passes `managed_fields` so nothing else is written, never passes `groups`, and has no delete path.
+- **Binding.** A resource binds to the Entra object id (config store, namespace `m365-converge-bindings`). An unbound existing object needs `adopt: true`; a bound resource whose UPN or name resolves to another object id is refused. Bound object ids answer `DeclaredSet.IsDeclared`, which sets `managed` on inventory records.
+- **Outputs.** Drift-diff observations under the object's `m365:<guid>/user:<id>` or `/group:<id>` subject with the cfg resource id in the payload; a per-tenant outcome document (`m365-converge-status`); and an audit event per write (actor `controller`, resource id = the cfg resource name).
+- **Steward cfg filter.** `GetConfiguration` — the function that builds the cfg delivered to a steward — drops every controller-kind resource (`dropControllerKindResources`). A steward cfg for a tenant declaring `m365-entra-*` resources contains none of them, so they never reach a steward's resource-failure path. The controller's own effective-config reads keep them.
+
+## Deployment Rings
+
+Deployment rings are a fleet-wide governance mechanism that controls which steward binary version reaches which stewards, in what order. The controller declares an ordered, named ring set; ring membership is declared in controller config only (no write path exists for stewards or operators to self-assign rings); and config delivery applies the ring's `desired_version` to stewards per their controller-config membership.
+
+### Ring Configuration
+
+Rings are declared in the controller config under `deployment_rings:`. Example with the four default rings:
+
+```yaml
+deployment_rings:
+  fallback_ring: default          # ring used for stewards with no/invalid ring attribute
+  rings:
+    - name: pre-release           # name must match ^[a-z][a-z0-9-]{0,31}$
+      desired_version: "v0.6.0"   # version targeted at this ring; empty = no override
+    - name: early
+      desired_version: "v0.5.21"
+      soak: 24h                   # Story S3: minimum soak before promotion
+      halt_threshold: 0.05        # Story S3: error-rate threshold that halts promotion
+      concurrency_limit: 10       # Story S3: max simultaneous upgrades in this ring
+    - name: default
+      desired_version: "v0.5.20"
+    - name: stable
+      desired_version: "v0.5.19"
+```
+
+When `deployment_rings:` is absent from controller config, the default four-ring set is applied automatically: `pre-release → early → default → stable`, with `default` as the fallback ring.
+
+**Validation at startup:** ring names must be non-empty, unique within the set, and match `^[a-z][a-z0-9-]{0,31}$`. The `fallback_ring` must name a declared ring. Invalid config causes a startup error.
+
+### Steward Ring Subscription
+
+A steward's ring membership is declared in controller configuration only. There is no steward-facing or CLI write path for ring assignment — no `cfg dna set ... deployment_ring` command exists or is planned. Ring assignment is controller-config-only: set `deployment_ring` for a steward by authoring the appropriate controller config document and reloading or restarting the controller.
+
+### Ring-Resolved Config Delivery
+
+When the controller delivers config to a steward (`GetConfiguration`), the effective `desired_version` comes from the tenant-path inheritance resolver only. Issue #3316 removed the config-delivery-time override that had read a steward's `deployment_ring` DNA attribute and applied the matching ring's `desired_version` on top of the resolver's result — that attribute has no write path, so the override always took the no-op fallback branch. This did not remove DNA-attribute-based ring reads elsewhere: the rollout health gate (`queryRingHealthCounts`, `failedStewardIDs` in `features/controller/api/handlers_rollout.go`) and the workflow engine's ring-health node (`features/workflow/nodes/ring_health_node.go`) still query the fleet by `deployment_ring` DNA attribute; see [Rollout Workflow](#rollout-workflow) below.
+
+### Fallback Behavior
+
+`fallback_ring` names the ring used when a steward's `deployment_ring` is absent or names a ring not in the declared set. Prior to Issue #3316, config delivery resolved this per steward on every `GetConfiguration` call and logged a structured WARN when the fallback was taken; that resolution path has been removed; no code now computes or logs an individual steward's fallback outcome. `fallback_ring` remains a declared config field (defaulted by `DefaultFallbackRing` in `features/controller/config/config.go`), but since no steward has a `deployment_ring` DNA attribute set (no write path exists), rollout health queries for any ring currently match zero stewards.
+
+### Ring-Set Change Audit
+
+Every change to the ring set (add/remove/reorder/version change) is logged at INFO level via the structured audit logger with actor, before-state, and after-state:
+
+```
+ring_set_changed  actor=controller  before=[pre-release=v0.5.20,...] fallback=default  after=[...]
+```
+
+Ring-set mutation happens only via controller config file reload or restart. No live-mutation REST API exists in this version.
+
+### Ordered Promotion Model
+
+The ring order in `deployment_rings.rings` defines the promotion sequence: the operator advances a version from earlier rings (pre-release → early → default → stable) by setting `desired_version` on each ring. The rollout workflow that automates this advancement is described in the [Rollout Workflow](#rollout-workflow) section below.
+
+### Rollout Workflow
+
+`POST /api/v1/rollout` starts a ring-advance rollout that moves a target steward binary version through the ordered ring set. Each ring transition is governed by a configurable soak period and a health gate; if the health gate fails the rollout halts and the operator must resolve the issue before restarting.
+
+#### Ring-Advance Loop
+
+The rollout goroutine processes rings in declaration order:
+
+1. **Set desired_version** — the ring's `desired_version` is updated in-memory to the target version, making it visible to ring health queries for this controller process.
+2. **Soak** — if `ring.soak` is non-zero, the goroutine waits the soak duration before sampling health. Zero soak skips the wait.
+3. **Query ring health** — the fleet is queried for all stewards with `deployment_ring = <ring>`. Each steward is classified as:
+   - **on-version**: `RunningVersion == desired_version`
+   - **failed**: has a terminal-failure upgrade record (`status: failed` or `rolled_back`) for this version
+   - **pending**: all others (no record yet, or an in-progress upgrade)
+4. **Halt or advance**: if `failed / (on_version + failed) > halt_threshold` the rollout transitions to `halted`. Otherwise the ring is marked completed and the loop advances to the next ring.
+
+#### Failure Policy
+
+**Per-endpoint requeue**: a steward that does not reach the target version is not dropped. Its ID is appended to `RolloutRecord.DeferredStewards` after the health gate runs. The steward's `deployment_ring` attribute is never mutated by the rollout; it remains in its ring and will be retried on the next rollout pass.
+
+**Per-ring halt**: if `failed_count / (on_version_count + failed_count) > halt_threshold` (per-ring `RingSpec` field, default 0.05) the rollout halts: no further ring promotions occur, no new dispatches are issued, and a structured error is logged. The operator resolves the failures and re-issues the rollout.
+
+Pending stewards are excluded from the halt-threshold denominator — they are still in-flight and are counted separately.
+
+#### Operator Halt
+
+`POST /api/v1/rollout/{rollout_id}/halt` signals the rollout goroutine to stop advancing. The goroutine checks the halt signal at soak time and at each ring boundary. The rollout record transitions to `halted` status immediately on the API call; the goroutine exits at the next checkpoint.
+
+#### Rollout Status
+
+`GET /api/v1/rollout/{rollout_id}` returns:
+
+| Field | Description |
+|-------|-------------|
+| `current_ring` | Ring currently being processed; empty when completed |
+| `status` | `in-progress`, `halted`, or `completed` |
+| `on_version_pct` | Percentage of current-ring stewards on the target version |
+| `failed_count` | Stewards with terminal upgrade failures in the current ring |
+| `pending_count` | Stewards still in progress in the current ring |
+| `rings_completed` | Number of rings that passed the health gate |
+| `rings_total` | Total rings in the rollout plan |
+
+Health metrics are computed live against the current ring for in-progress rollouts; terminal states report the final observed values.
+
+#### v1 In-Memory Durability Risk
+
+The rollout goroutine runs in memory on the in-memory workflow engine. **A controller restart during a rollout loses the orchestration state (current ring, progress counter).** The operator must re-issue the rollout after restart.
+
+Ring `desired_version` mutations applied by the goroutine are in-memory only in v1; they survive for the lifetime of the controller process but are not persisted to the git-backed config. The `RolloutRecord` stored in `RolloutStore` is durable (git-backed or database-backed depending on the configured provider) and tracks which rings were completed before the restart.
+
+**Mitigation**: the operator re-issues `POST /api/v1/rollout` after restart. Rings already at the target version will pass their health gate quickly (soak re-runs from scratch); rings not yet reached are processed as if starting fresh. No data is lost; at most a soak period is duplicated.
+
+This risk is tracked in [ADR-008](decisions/008-durable-execution-substrate.md) and will be addressed when durable workflow execution (DBOS or equivalent) is adopted. Do not engineer around this limitation in v1 stories.
+
+### Config Signing
+
+Every cfg distributed to a steward is signed using the controller's dedicated signing certificate (or server cert in unified mode). The steward verifies this signature before applying, ensuring cfgs cannot be tampered with in transit or injected by a rogue source.
+
+**Cluster signing identity (epic #4687).** In cluster mode every node signs cfgs and commands with one shared signing certificate. Its certificate and key are held in the cluster-atomic secret store, one entry per serial, and are never written to a node's certificate directory; the signing cursor in the shared database names the current serial (and the rotating serial during an overlap window), and a node re-reads it at most every five seconds. A node is in one of three modes — `Unprovisioned`, `LegacyLocal` (it signs with its own pre-existing local key because the cursor names no serial that resolves in the shared namespace) or `Shared`. A rotation through any node takes a cluster-wide claim, stores one new certificate and makes one cursor transition. A cluster that predates the shared identity migrates in three steps, all idempotent and safe on every node at once: each node imports its local signing certificates into the migration namespace, the shared certificate is the serial the cursor names or the one an administrator elects (never the newest), and each node promotes it and deletes its own signing keys once they read back equal. The procedure, the window in which a steward that has not yet confirmed rejects the cluster's signatures, and rollback limits are in [Cluster Signing Identity Migration](../operations/cluster-signing-migration.md). The behaviour across nodes is proven by the three-node scenarios in `features/steward/client/signing_identity_cluster_test.go` and by the fleet suite's `TestFleetRotation`; the design record is the cluster signing identity amendment in [ADR-031](decisions/031-controller-cluster-service-model.md).
+
+**Signing key custody (Issue #4692).** In every mode the signing certificate and key live in the controller's configured `pkg/secrets` secret store, under the `config-signing/` layout; no signing key is written to the node-local certificate directory, at bootstrap or at rotation. The backend is whatever the controller's secret store is: SOPS over the controller storage provider on a single node, OpenBao in cluster mode. A single node builds its key store with `cert.NewSingleNodeSigningKeyStore`, which does not require a cluster-atomic compare-and-swap; cluster wiring refuses such a store. Signing fails closed: if the secret store cannot be read, signing returns an error and never falls back to a local key file. A single node that already holds a local signing key keeps signing with it and reports `legacy_local` until that key is adopted into the store, which happens on the first start after upgrade (see Normal Startup).
+
+**Moving stewards to the shared signing certificate (Issue #4797).** In a migrating cluster each node runs a steward migration service while it is in `Shared` signing-identity mode. For every steward connected to that node without a recorded confirmation for the shared serial, it sends `push_signing_cert` commands one at a time, each waiting for the steward's completion event: first signed by the shared key; failing that, signed by each legacy migration signer in turn until one completes; then a confirmation push signed by the shared key, whose completion is recorded in the cluster-visible acknowledgement store; and only then a push signed by the shared key with `retire_serials` naming every legacy migration serial. The sequence is completion-gated because a steward verifies a command on receipt, before the previous push has necessarily been applied, and it silently drops a command signed by a key it does not trust, so each candidate is bounded by a timeout. The work runs off the connect path in a bounded per-node worker pool, failed stewards are retried at most every five minutes, and a reconciler re-checks the node's connected stewards every 30 seconds. `GET /api/v1/certificates/signing/migration` reports the shared serial, steward and confirmed counts and a bounded list of unconfirmed stewards.
+
+**Retiring superseded signing certificates (Issue #4795).** A rotation leaves the previous signing certificate trusted by stewards until it is explicitly retired. A retirement service on the controller does that at overlap end: on the node holding `HasLeadership()`, when the cursor names a rotating serial whose overlap window has elapsed and `RetiredAt` is unset, it sends every steward a `push_signing_cert` with `retire_serials` naming that serial and then marks the cursor retired with a conditional write (skipped in `LegacyLocal` signing-identity mode). An operator holding an admin certificate can withdraw a named superseded serial immediately with `POST /api/v1/certificates/signing/revoke`; the serial is recorded in the revocation store with a signing-certificate reason and fanned out the same way. A steward that was offline receives the retirement inside the single `push_signing_cert` it gets on connect (`EnsureStewardCurrent`), never as a second command, because a second command signed by the new key could be rejected before the first has been applied. The controller never signs with a revoked serial except in that one delivery, for a steward that trusts nothing else.
+
+## Fleet Management
+
+The controller maintains awareness of all registered stewards and their state.
+
+### Fleet Registry Durability (Issue #663)
+
+The fleet registry is backed by a `StewardStore` (see `pkg/storage/interfaces/business/steward_store.go`). Registrations, heartbeats, and status transitions are persisted to durable storage so the fleet view survives controller restarts without waiting for all stewards to re-register.
+
+**Steward lifecycle states**: `registered` → `active` → `lost` / `deregistered`. Records are retained indefinitely for audit; a `lost` steward can re-register and will have its record updated in place.
+
+**Enrollment at claim, not at check-in (Issue #3403)**: A steward's durable `StewardRecord` is written at cert-issuance time (the "claim" step), not lazily at the first gRPC check-in. Both registration paths write the record at the same point:
+- **Direct approval** (`handleRegister` with `AlwaysApproveHook`): `handleRegister` itself calls `StewardStore.RegisterSteward` with `StewardStatusRegistered` inline, before returning the cert bundle (pre-existing write, Issue #2095, unchanged by this story).
+- **Quarantine → approve → claim** (manual-review flow): the steward polls `/api/v1/registration/status/{id}` once the operator has approved the pending entry; `buildClaimResponse` calls `StewardStore.RegisterSteward` at that poll, before the cert is returned.
+
+Both paths enforce the same tenant-scoped `device_id` uniqueness rule before writing. `handleRegister` rejects a registration whose `device_id` is already held by another steward in the tenant (HTTP 409), and `buildClaimResponse` re-runs that check immediately before its own write: the register-time check cannot catch a collision between two enrollments that are both still pending, because neither has a `StewardRecord` yet. A colliding claim is refused with 409 and mints no certificate. Cross-tenant collisions remain allowed — each tenant namespace is independent. The rule keeps `GetStewardByDeviceID` unambiguous; it is the single lookup behind the registration-refresh revocation gate, so a second record sharing a `device_id` would let a revoked steward pass that gate against its sibling's identity key.
+
+**Device key algorithms and proof of possession (ADR-011 Amendment 3, Issue #4973)**: the controller accepts two device key algorithms, `ed25519` (the default when `key_algorithm` is absent) and `ecdsa-p256`, and stores the algorithm on the `StewardRecord` and the pending registration entry (`key_algorithm`; an absent value reads as `ed25519`, so existing records need no migration). At registration `handleRegister` validates `identity_key_pub` by algorithm: `ed25519` is the base64 raw 32-byte key; `ecdsa-p256` is the base64 PKIX (SubjectPublicKeyInfo) DER encoding of a P-256 key, and `device_id` must equal the lowercase hex SHA-256 of that DER. Any other algorithm string, a wrong key type or curve, or a mismatched `device_id` is a 400 and nothing is stored. The refresh handshake (`/refresh/complete` and `/refresh/claim`) verifies the proof of possession by the **stored** algorithm through the injectable `PoPVerifier.Verify(alg, pub, digest, sig)`: the digest is the unchanged `sha256(nonce || device_id || server_ts)`; Ed25519 signs it as a message, and ECDSA P-256 signs the 32-byte digest directly (no second hash) as an ASN.1 DER signature.
+
+**Algorithm changes are refused (downgrade guard)**: a request that names a different algorithm than the one stored for its `DeviceID` is refused before any signature verification, with an audit event (`refresh_rejected`, reason `key_algorithm_mismatch`; `registration_rejected`, reason `key_algorithm_change`, at registration). On `/refresh/complete` and `/refresh/claim` the check runs after the nonce is consumed and answers 401, identical to an invalid signature; revocation and tenant checks still come first, so a revoked device never reaches the verifier. On registration re-presentation of an existing `DeviceID` the answer is the same 409 as any other existing-device collision. The only path that changes a record's algorithm is the operator move-identity endpoint, which carries the pending entry's algorithm through `RebindStewardIdentity`.
+
+In both cases, `status = registered` at enrollment and `status = active` after the first gRPC check-in. A steward that is enrolled (cert issued) but has never connected is present in `StewardStore` and therefore visible in the fleet registry after a controller restart via `LoadFromStorage` — it cannot silently disappear due to a backend migration or node replacement that clears in-memory state.
+
+An **unapproved** steward (pending entry in `PendingRegistrationStore`, operator has not yet acted) has no `StewardRecord` and is invisible to `LoadFromStorage`. It cannot receive config pushes or participate in convergence until its cert is claimed.
+
+**Implementation**: `features/controller/fleet/fleet.HealthTracker` wraps a `StewardStore` for durable fields and keeps ephemeral per-process metrics (`HealthMetrics`: task latency counters, config error counts) in-memory only. The in-memory metrics are not persisted and reset on restart — this is by design.
+
+**After a restart**: `LoadFromStorage` warms the in-memory registry from two sources: DNA storage (connected stewards that have sent at least one check-in) and `StewardStore` (all enrolled stewards including those that have never connected). This union guarantees that a steward enrolled on one controller node is immediately visible after a failover or backend migration, without waiting for it to reconnect.
+
+### Durable Device-Tenant Mapping (Issue #3324)
+
+Tenant resolution for a steward is backed by a dedicated `device_tenant` table (SQLite migration v2 / PostgreSQL schema), not by DNA. This is deliberate: the flat `DNARecord`/`dna_history` store is steward-writable data (`SyncDNA` replaces a steward's DNA wholesale on every refresh cycle), and deriving tenant from it would let a compromised steward influence its own tenant scoping — the invariant Issue #2008 forbids. `device_tenant` is written only by the controller at registration time (`RegisterSteward`, `AcceptRegistration`) and on an authenticated admin move (`UpdateStewardTenant`); the connect-hook reconnect path always passes an empty tenant so the durable value wins.
+
+`lookupDurableTenant` (`features/controller/service/controller_service.go`) reads exclusively from `device_tenant` via `GetDeviceTenant` — `ok=false` means "tenant unknown," and callers must decline to fabricate a tenant-scoped registry entry rather than fall back to DNA.
+
+**Controller-startup registry recovery** (`LoadFromStorage`) warms the in-memory steward registry from two sources:
+
+1. **DNA storage**: tenant from `ListDeviceTenants()` (primary); `GetLatestByDeviceID`'s `record.DNA` for the DNA payload only, never for tenant. The single fallback to `record.TenantID` covers the narrow window between a `dna_history` write and a controller restart where the corresponding `device_tenant` write did not complete — migration v2 backfills `device_tenant` from `dna_history` on upgrade, so this fallback is a transient gap, not a steady-state path.
+
+2. **StewardStore** (Issue #3403): `ListStewards()` is called after the DNA enumeration. Any steward present in `StewardStore` but absent from DNA storage (enrolled but never connected) is added to the in-memory registry using the tenant and status from its `StewardRecord`. This source is the fix for a validation lab incident where 3 HV-host stewards enrolled on 2026-08-01, never reconnected, and became invisible after the 2026-08-05 Postgres cutover that wiped DNA storage.
+
+A device with no resolvable tenant from either source is skipped rather than warm-loaded with a fabricated tenant, per the Issue #2008 no-fabrication contract.
+
+### Controller-Side Tag Store (Issue #2542)
+
+The tag store (`features/controller/tagstore`) provides a durable store of operator-assigned tags keyed by steward ID.
+
+**Why a separate store — not DNA attributes:**
+The controller replaces a steward's DNA wholesale on every `DNARefreshLoop` cycle (`SyncDNA` in `controller_service.go`). Any tag written into the DNA record would be clobbered on the next refresh. The tag store is the clobber-proof source of truth for controller-owned metadata. (`DNA.Attributes` — the legacy flat map that was the prior candidate for in-band tag storage — was retired in Issue #3331; DNA now carries only `DNA.Fragments`.)
+
+**Invariant:** Admin sets tags here; DNA refresh never touches this store. Tags survive controller restarts and DNA refreshes.
+
+**Tag format:** `^[a-z0-9][a-z0-9-]{0,63}$` — lowercase alphanumeric start, hyphen-and-alphanumeric body, 1–64 characters. Enforced at write time. Keeps tags selector-safe without escaping.
+
+**Implementation:** SQLite-backed (`modernc.org/sqlite`, pure-Go, CGO-free). Wired into `ControllerService` via `SetTagStore()`; accessed by later stories via `controllerService.TagStore()`.
+
+**API:**
+- `Set(ctx, stewardID, []string) error` — replace the full tag list (validates format, rejects duplicates)
+- `Get(ctx, stewardID) ([]string, error)` — returns empty slice when no tags exist (not an error)
+- `Delete(ctx, stewardID) error` — remove the entry (idempotent)
+- `GetAll(ctx) (map[string][]string, error)` — all entries
+- `TagsFor(stewardID) []string` — convenience accessor with no error return; logs failures
+
+### Session Token Store (Issue #2774)
+
+The session token store (`pkg/session` + `pkg/storage/providers/sqlite`) provides a durable backing store for `pkg/session.Manager`. At bootstrap the controller calls `initializeSessionStore` (`features/controller/server/server.go`) which selects the backing store based on `storage.sqlite_path`:
+
+- **SQLite configured** — `SQLiteSessionTokenStore` is opened at `cfg.Storage.SQLitePath` (a dedicated handle, separate from the shared business-store handle). Both the CLI session manager (ADR-014 defaults: idle 15m / absolute 8h / grace 30s) and the web session manager (idle 60m / absolute 12h / grace 30s) share this store. Sessions survive controller restarts and, with the multi-node store backend (separate story), cluster failovers.
+- **SQLite absent** — `session.NewMemStore()` is used. Sessions are operational but are lost when the controller process stops.
+
+Either way, `httpServer.SetDurableSessionStore(sessionStore)` is called on every startup path so `sessionManager` and `webSessionManager` are never nil, and `POST /api/v1/sessions` / `POST /api/v1/web/passkey/login/begin` / `POST /api/v1/web/passkey/login/finish` never return 503 SESSION_UNAVAILABLE.
+
+The security invariant is unchanged by the backing store: `session.Manager` always passes `session.HashToken(token)` to `Store.Set`/`Get` — the raw token value is never stored or logged.
+
+### Control-Plane Admission (Issue #4930)
+
+`transportServer.Register` and `transportServer.ControlChannel` admit a steward only after two independent checks on the mTLS-verified peer certificate, in this order:
+
+1. **Certificate revocation.** The peer's client-certificate serial is looked up through `cert.Manager.IsRevoked` (injected with `WithRevocationChecker`, always wired by `features/controller/server`). A revoked serial is refused with `codes.PermissionDenied`; a lookup error is refused with `codes.Unavailable` (fail closed) and logged with sanitized values. The steward treats `PermissionDenied` as an identity rejection and follows the re-admission path.
+2. **Record status.** The approval checker confirms the steward record is in a reconnect-capable state (`registered`, `active`, `lost`).
+
+Revocation therefore takes effect at admission even while the steward record stays `active`. An already-open ControlChannel re-checks its serial every 30 seconds (`WithRevocationRecheckInterval`) and is closed with `PermissionDenied` once the serial is revoked, so a revoked identity is cut off within one re-check interval (30s plus store propagation delay). A transient lookup error during a re-check keeps the stream open and is retried on the next tick; new admissions still fail closed.
+
+Every other steward stream on the shared gRPC server (SyncConfig, FetchModuleBundle, SyncDNA, BulkTransfer, LogStream, TelemetryStream, Terminal, OsqueryQuery) is covered by a stream interceptor installed in `Server.Start` (Issue #5370). It checks the peer certificate serial through `cert.Manager.IsRevoked` at admission: a revoked serial is refused with `codes.PermissionDenied`, a lookup error with `codes.Unavailable` (fail closed), and a stream with no peer certificate with `codes.Unauthenticated`. While the stream is open the interceptor re-checks the serial every 30 seconds and cancels the stream context once it is revoked, so the handler returns and the client sees `PermissionDenied`. A transient lookup error during a re-check keeps the stream open and is retried on the next tick. ControlChannel is skipped by the interceptor because the provider already checks it.
+
+Unary steward RPCs other than `Register` (which the provider already checks) — `Ping` and the secret-bearing `IssueInitialCredential` (Issue #5555) — are covered by a unary interceptor installed alongside the stream interceptor. It applies the same admission check before the handler runs: a revoked serial is refused with `codes.PermissionDenied`, a lookup error with `codes.Unavailable` (fail closed), and a call with no peer certificate with `codes.Unauthenticated`. Unary calls are short-lived, so there is no re-check.
+
+### Host Provenance at Admission (Issue #4949, ADR-034 §2)
+
+The admission pipeline order is: **revocation, approval, provenance**. Provenance runs only for a connection the first two gates already admitted, and is demote-only (ADR-011 §7): it classifies the connection and can never admit one they refused.
+
+The steward sends its host attributes as gRPC metadata on the `ControlChannel` call (`x-cfgms-host-attrs`, base64 of a JSON string map, hard cap 4 KiB). `transportServer.ControlChannel` reads it and, through the checker injected with `WithProvenanceChecker`, scores it against the steward record's `LastProvenanceJSON` using `registration.ProvenanceMatcher.ScoreAdmission` at `registration.ProvenanceMatchThreshold` (0.60). The decision is one of:
+
+`ScoreAdmission` rules: DNA keys never count; a baseline key that is absent or empty in the incoming report is skipped (neither matched nor divergent); `install_date` is not scored while the baseline holds a stable key (`machine_id`, `disk_serials`); `nic_macs` is scored by **set overlap** — any MAC present in both baseline and report is a match, no shared MAC is divergent; every other key is an exact match.
+
+- `unknown` — no baseline is recorded, no attributes were sent (an old steward without the collector, or an oversized/unparsable header), or the check could not be made. The connection is admitted exactly as before.
+- `approved_machine` — score at or above the threshold.
+- `copy` — score below the threshold. The controller writes a `security_event` audit entry `steward_provenance_divergence`, severity `high`, carrying the decision, score, matched/total field counts and the **names** of the attributes that differed (never their values), rate-limited to one per steward ID per minute. The stored baseline is not touched. The decision is also passed to the `IdentityConflictObserver` so a duplicate-identity report carries the same evidence. A `copy` decision is refused at the admission gate described under "Refusing a Copied Identity" below.
+
+**Baseline.** `LastProvenanceJSON` is written (trust on first use, audited as `steward_provenance_baseline_recorded`) at the first admission that presents attributes while the baseline is empty, and when a steward collects an operator-approved refresh (`POST .../refresh/claim` carries the steward's current attributes; they replace the baseline and are audited as `steward_provenance_rebaselined`). A legitimate hardware change therefore re-baselines through an operator, never automatically; a connection that scores below threshold never overwrites the baseline. DNA fields are dropped before anything is stored.
+
+**Store failures fail toward the pre-provenance behaviour.** If the steward store cannot be read, the connection is admitted as `unknown` and the error is logged (sanitized) at error level, so a store outage does not lock the fleet out. The revocation and approval gates ahead of it still fail closed.
+
+**Limit (false attributes).** The attributes are self-reported by the endpoint, and a copy controls its own steward binary. A disk-image clone carries `machine_id` and `install_date`, but normally not the NIC and disk hardware, so a clone with different MACs scores low (on macOS/Windows, where `disk_serials` is not collected, the NIC set is the deciding signal). A clone that also carries the original MACs (for example a VM clone with a preserved MAC), or an attacker who has learned the full attribute set, is not caught by provenance; the concurrent-connection check (#4948) is the control for that case. Provenance raises the cost of an unnoticed clone and leaves an audit trail; it is not proof of identity, and certificate revocation remains the authoritative control.
+
+### Duplicate Steward Identity Detection (Issue #4948, ADR-034 §3)
+
+After the revocation and approval gates and before `registry.Register`, `transportServer.ControlChannel` looks up the steward ID in the connection registry. If a live stream exists and its remote host (IP, port stripped) differs from the new peer's host, the provider reports an `IdentityConflict` to the observer injected with `WithIdentityConflictObserver`. A reconnect from the same host (a restarting steward whose stale stream has not yet errored) is not a conflict, and the new stream still replaces the stale one.
+
+Detection itself only reports; the refusal that follows is described in the next section. The controller's observer writes an audit event of type `security_event`, action `steward_identity_conflict_detected`, severity `high`, resource `steward`. Details carry both peer addresses and both client-certificate serials; the tenant is resolved server-side from the fleet record. Events are rate-limited in memory to one per steward ID per minute. Operators see them through `GET /api/v1/audit/entries` and `cfg controller audit list`.
+
+**Limitation:** the connection registry is per controller node. A duplicate that connects to a different node of a cluster is not detected.
+
+### Refusing a Copied Identity (Issue #4950, ADR-034 §2 and §4)
+
+After the revocation and approval gates, and before `registry.Register`, `transportServer.ControlChannel` applies two rules, in this order:
+
+1. **Provenance first.** A `copy` provenance decision is refused. A live connection for the same steward ID from a different peer host is displaced by a newcomer whose provenance is positively `approved_machine`: the newcomer is admitted and the existing stream is closed with the same refusal (`registry.StewardConnection.Evict`). This holds even when the copy connected while the original was offline.
+2. **The holder keeps the channel.** Otherwise a newcomer from a different peer host than a live connection is refused, whatever its provenance (`unknown` included), and the first connection is not disturbed.
+
+A same-host reconnect (a restarting steward) is neither a conflict nor a refusal; the new stream replaces the stale one as before.
+
+The refusal is `codes.PermissionDenied` with an `errdetails.ErrorInfo` detail: `Reason: "IDENTITY_IN_USE"`, `Domain: "cfgms.io"`. The message text is fixed and never names the other endpoint's address, hostname or provenance. The refusal is the only admission refusal that carries a reason; revocation (`PermissionDenied`, "client certificate revoked") and the approval gate ("steward reconnect not approved") carry none and are not treated as copies. A steward that receives `IDENTITY_IN_USE` re-keys and registers as a new device with `clone_of` (see the steward operating model); the controller records `clone_of` on the pending registration and shows it in `cfg registration pending`.
+
+### Operator Actions on a Detected Clone (Issue #4951, ADR-034 §5)
+
+Three endpoints back the operator verbs; the [identity clone runbook](../runbooks/steward-identity-clone.md) says when to use each.
+
+- `GET /api/v1/stewards/identity-clones` (`steward:read`, tenant-scoped) joins the `steward_identity_conflict_detected` and `steward_provenance_divergence` audit events with the pending registrations whose `CloneOf` names the steward. It reads the audit manager and `PendingRegistrationStore.ListPending`; nothing new is stored.
+- `POST /api/v1/stewards/{id}/credentials/rotate` (`steward:rotate-credentials`, AssuranceStrong) revokes every client-certificate serial issued for the steward ID through `cert.Manager.Revoke` (refused at admission by the #4930 gate, including open streams) and moves the record to `archived`, so the next refresh is queued for approval. Audit: `steward_credentials_rotated`.
+- `POST /api/v1/stewards/{id}/identity/move` (`steward:move-identity`, AssuranceStrong) takes `{"pending_id"}` of a pending same-tenant copy with `CloneOf` equal to the steward. It calls `StewardStore.RebindStewardIdentity` (honouring the unique `(tenant_id, device_id)` rule), `PendingRegistrationStore.ReassignPendingSteward` and approves the entry; the ordinary claim then signs the certificate with the original ID as CN and takes the existing record whose `DeviceID` now matches as the benign re-claim. Previous serials are revoked. Audit: `steward_identity_moved`. This is the only code path that changes a record's `DeviceID`.
+
+### Steward Tracking
+
+For each steward, the controller tracks:
+
+| Data | Source | Update Frequency |
+|------|--------|-----------------|
+| Identity (ID, tenant, group) | Registration | Once |
+| Connection status | Heartbeats | Configurable interval |
+| Last heartbeat | gRPC heartbeat calls | Configurable interval |
+| Health status | Heartbeat payload | With each heartbeat |
+| Compliance status | Convergence result reports | After each convergence run |
+| DNA aggregate root | Heartbeat payload | With each heartbeat |
+| DNA fragments | Full sync (initial) or partial-sync deltas (data plane); stored **versioned/append-only** | On root mismatch, initial registration, or as changes occur |
+| Steward version | Heartbeat `Version` field + `steward.version` DNA attribute | With each heartbeat and DNA delta |
+| Performance metrics | Steward metric uploads | Periodic + on-demand |
+
+Every committed DNA fragment set (full sync or partial-sync delta) is also written
+into the entity graph by `pkg/entitygraph/writers/dnasync.Writer`, chained onto
+`features/controller/transport.DNAHandler` via `WithEntityGraph` (Issue #4444,
+ADR-022 §9). The write is additive: it runs after the fragment manifest commit
+and a write failure logs a warning without failing the steward's stream or
+rolling back the manifest. Host-scoped fragments land under
+`host:<mTLS-verified peer>`; a clustered VM lands under `cluster:<name>/vm:<name>`
+only when the controller's `dnasync.ClusterMembership` verifier corroborates the
+peer's claimed cluster membership from controller-side state — an unset verifier
+denies every cluster claim and the VM is recorded under its reporting host instead.
+
+#### Bulk lane (per-object fragments)
+
+Per-object fragments (one per directory user or group, for example) travel on a
+second lane, separate from the host lane above (Issue #5554). The steward reports
+`dna_bulk_root` on the heartbeat Metrics side-channel; `Server.Start` wires it
+through `heartbeat.Service.SetOnBulkRoot` to `DNAHandler.HandleHeartbeatBulkRoot`.
+The stored side is `transport.BulkManifestStore`, a durable manifest sharded into
+256 buckets per steward, wired with `DNAHandler.WithPartialSync` and the signed
+command publisher.
+
+A heartbeat whose bulk root differs from the stored one starts a round on the
+node that received it. Each step is triggered by the previous reply:
+
+1. `bulk=buckets` — the steward returns its 256 bucket roots. They must hash to
+   the heartbeat root. The controller compares them to the stored bucket roots.
+2. `bulk=manifest` — for the differing buckets, 16 at a time. Each bucket's
+   entries must hash to the root the steward advertised for it. The diff yields
+   changed or new ids and removed ids.
+3. `bulk=fragments` — changed and new ids in batches of at most 2,000. Every
+   fragment is re-hashed from its canonical bytes and must match the manifest
+   hash the steward declared. For each verified batch the directory membership
+   sink (`MembershipSink.ApplyBatch`) runs first, then the manifest commit, then
+   the entity-graph write. A sink failure leaves the batch uncommitted; the next
+   round re-diffs and fetches it again, with no pending marker.
+4. After the last batch the controller recomputes the bulk root from the stored
+   manifest minus the removed ids. It must equal the heartbeat root. Only then
+   are removed ids passed to the sink, retracted from the entity graph
+   (`Writer.RetractFragments`, which withdraws only this reporter's assertions
+   and leaves another reporter's observation of the same entity), and deleted
+   from the store. A mismatch commits nothing beyond the batches already
+   verified, and the next heartbeat retries.
+
+Bounds. A steward can force at most one round per 60 seconds and 20 per hour, and
+one round runs at a time per steward. A round with no progress for 60 seconds is
+replaced by the next heartbeat; this is how a round abandoned by a reconnect to
+another node ends. Commands go only to the node that received the heartbeat.
+A fragment is accepted only if its id was requested in the current batch, its
+kind prefix is a per-object kind owned by an approved manifest
+(`ListPerObjectKinds`, from `moduleManifestAdapter`), and it fits 2,000 fragments
+and 8 MiB per delta, 1 MiB per fragment and 250,000 stored per steward. A missing
+or failing kind lookup, or an unknown steward tenant, starts no round (fail
+closed). Fragments of directory kinds reach the sink only when the directory
+authority verifier accepts the peer for the fragment's domain.
+
+The host lane is unchanged and off: `HandleHeartbeatRoot` starts no round unless
+`DNAHandler.WithHostPartialSync(true)` is called, and the host-lane caps
+(`maxDNATransferFragments`, `maxDeltaFragments`, `maxDNAFragmentBytes`,
+`maxDeltaCanonicalBytes`, `maxDeltaStreamBytes`) keep their values.
+
+Controller startup also constructs two further entity-graph writers against the
+same provider (Issue #4413): `pkg/entitygraph/writers/tenantsync.Writer` mirrors
+the tenant hierarchy as `tenant:*` entities and `contains` edges (ADR-022 §7),
+and `pkg/entitygraph/writers/correlator.Writer` asserts cross-tenant `same-as`
+edges between entities that share a normalized MAC address (ADR-022 §3). Both
+run on a periodic sweep — a tenant-CRUD hook was considered for tenantsync and
+rejected: no hook point exists today at the tenant store's create/update/delete
+call sites, and instrumenting every one would be new plumbing beyond what this
+wiring required. `Server.Start()` starts each sweep (tenant-sync every 5
+minutes, correlator every 15 minutes) via a shared `entityGraphPeriodicSweeper`
+helper parameterized over the sweep function and interval, and `Server.Stop()`
+cancels and drains both before the entity-graph provider closes. Each sweep
+holds its own cluster-singleton lease (`entitygraph-tenantsync`,
+`entitygraph-correlator`) built by `ha.Manager.NewBackgroundLoopLease` and
+invoked through `lease.SingletonJob.RunIfLeader`, so exactly one node sweeps per
+tick (ADR-031 Decision 4). That gate is load-bearing rather than cosmetic: in
+cluster mode the entity graph is a single shared Postgres instance, the
+correlator's sweep is O(fleet size) (ADR-022 §9), and concurrent full-tree
+tenant snapshots would contend on the same claim-scope retraction. Neither writer
+sets `owning_tenant` on the entities or edges it asserts — ADR-022 §7 is
+explicit that authorization never uses graph traversal, so these cross-tenant
+writes change graph structure only, never access control.
+
+### Heartbeat Monitoring
+
+The controller monitors steward heartbeats to detect connectivity loss:
+
+- Stewards send heartbeats at a **20 s base interval with ±10 s uniform per-tick jitter** (effective interval always in [20 s, 30 s) — see the [steward operating model heartbeat timing](steward-operating-model.md#heartbeat-timing) for rationale)
+- The controller marks a steward **offline after 60 s of silence** (`StewardOfflineTimeout`, epic #1664) — this is 3 missed heartbeats at the 20 s base, providing tolerance for transient network blips
+- Disconnected stewards continue operating independently — the controller simply loses visibility until the steward reconnects
+- On reconnect, the steward resyncs queued reports and the controller rebuilds its view
+
+**Two distinct timeout thresholds — do not confuse them:**
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `StewardOfflineTimeout` | 60 s | Marks a steward offline after extended silence (epic #1664). Used by `checkStaleHeartbeats`. |
+| `HeartbeatTimeout` | 15 s | HA-failover detection threshold (Story #198, <15 s). Scoped exclusively to controller-HA scenarios. |
+
+These fields must remain distinct. `HeartbeatTimeout` is intentionally short for fast HA-failover detection and must not be used for steward-liveness decisions.
+
+### Per-Tenant Ingest Admission Control (Issue #3759, ADR-031 Decision 6)
+
+Steward ingest is admission-controlled per tenant by
+`features/controller/transport.TenantQueue` — a per-tenant concurrency
+semaphore, `MaxConcurrentPerTenant` (32) in-flight slots per tenant, non-blocking
+`Acquire`/`Release`. Five entry points are gated on a cell: **connect**
+(`Register`), **heartbeat** (`ControlChannel`'s Heartbeat message), **event**
+(`ControlChannel`'s Event message, with its own queue and a per-stream
+in-flight limit), **DNA sync** (`SyncDNA`), and **bulk transfer**
+(`BulkTransfer`).
+
+Three `TenantQueue` instances are constructed in
+`features/controller/server.New` (`features/controller/server/ingest_admission.go`),
+split by how much the controller trusts the bucket key each path uses:
+
+| Instance | Paths | Bucket key |
+|----------|-------|------------|
+| `connectHeartbeat` | connect, heartbeat | server-verified (see below) |
+| `events` | steward events | server-verified, same key as `connectHeartbeat` |
+| `dnaBulk` | DNA sync, bulk transfer | DNA: first chunk's `tenant_id` (wire data). Bulk: mTLS peer CN |
+
+- **Connect** (`pkg/controlplane/providers/grpc.transportServer.Register`):
+  `Acquire`/`Release` bracket the RPC from just after the registration-token
+  tenant-binding check to the return. A saturated tenant gets
+  `codes.ResourceExhausted`; other tenants are unaffected.
+- **Heartbeat** (`transportServer.ControlChannel`, the `Heartbeat` case):
+  the tenant slot is taken before dispatch and held until every heartbeat
+  handler for that message has returned (a handler panic is recovered and still
+  releases it). A stream also has at most one heartbeat in flight. A saturated
+  tenant or stream has that heartbeat dropped, counted in
+  `ControlPlaneStats.HeartbeatsDropped` and logged (stream stays open, receive
+  loop never blocks).
+- **Event** (`transportServer.ControlChannel`, the `Event` case,
+  `grpc.WithEventAdmission`): takes a slot from the separate `events` queue,
+  keyed on the same server-side bucket as heartbeats, so slow event handlers
+  from one tenant cannot use up its connect or heartbeat slots. Each stream may
+  also have at most `maxInFlightEventsPerStream` (8, a quarter of the tenant
+  limit) events in flight at once; that bounds concurrent handlers, not the
+  event rate. Both slots are held until every handler for the event has
+  returned. Events over either limit are dropped, not queued, and counted in
+  `ControlPlaneStats.EventsDropped`. The per-stream limit applies even when no
+  gate is configured. Drop warnings are rate-limited per stream: the first is
+  logged, then at most one line per 30 seconds with the number of drops since
+  the last line.
+- **DNA sync / bulk transfer** (`features/controller/transport.DNAHandler` /
+  `BulkHandler`): unchanged by #3759 — `Acquire` on the first chunk, `Release`
+  deferred for the RPC's duration. This is the pre-existing mechanism the connect
+  and heartbeat paths above compose with, by reusing the same type, the same
+  limit and the same acquire/release discipline.
+
+Because `pkg/controlplane` is a central provider and must never import a
+`features/` package (Central Provider System, CLAUDE.md), the gRPC provider
+declares its own narrow `TenantAdmission` interface (`Acquire`/`Release`) rather
+than importing `TenantQueue` directly; `*TenantQueue` satisfies it structurally
+with no changes. `grpc.WithTenantAdmission(queue)` injects the gate — nil (the
+default) disables admission control entirely, matching pre-#3759 behavior.
+
+**Why two instances and not one.** A shared queue makes the bucket key an
+authorization-relevant input: whoever can name a bucket can pin all 32 of that
+bucket's slots. The DNA handler takes its key from the first chunk's
+`tenant_id`, which is unverified wire data, and holds the slot for the life of
+the RPC. Were connect and heartbeat to share that instance, a steward with a
+valid certificate — CLAUDE.md's threat model assumes stewards run on hosts that
+may be compromised — could open 32 concurrent `SyncDNA` streams naming a
+**victim** tenant, trickle chunks to hold the slots, and thereby have the
+victim's `Register` calls rejected and its heartbeats dropped fleet-wide, making
+the victim's whole fleet look stale. The same sharing would also let unbounded,
+unvalidated tenant strings into a `sync.Map` whose entries are never evicted.
+Keeping the wire-keyed paths on their own instance bounds that flood to the DNA
+and bulk paths, exactly as it was before connect and heartbeat were gated. The
+split is by key trust level, not by path count: a further path may join
+`connectHeartbeat` only once its key is derived server-side the same way.
+
+**The connect/heartbeat bucket key is always server-verified, never the wire's
+`tenant_id`.** `creds.tenant_id` and `heartbeat.tenant_id` are never inputs to
+it. `Provider.admissionBucket` resolves the key in this order:
+
+1. the tenant the caller has proven server-side — the tenant the registration
+   token is bound to, from the `RegistrationTokenStore` lookup (connect only,
+   which is why the binding check runs *before* `Acquire`);
+2. the tenant the controller's own fleet record reports for the mTLS-verified
+   certificate CN, via `StewardTenantResolver`
+   (`grpc.NewStewardStoreTenantResolver` over `business.StewardStore`, wired in
+   `server.New`). The ControlChannel resolves this **once at connect** and
+   reuses it for every heartbeat on the stream, so the per-heartbeat path does no
+   store lookups;
+3. otherwise the mTLS-verified CN itself, in the reserved `steward-cn:`
+   namespace — a still-bounded key (one per certificate this controller's CA
+   issued) used when the steward has no fleet record yet or the resolver is
+   unavailable. Admission is a fairness control, not an authorization decision,
+   so a resolver outage degrades to per-steward buckets rather than refusing
+   traffic.
+
+A candidate key is additionally rejected by `validAdmissionTenantID` unless it is
+1–128 bytes of `[A-Za-z0-9._/-]`; a rejected value falls back to the `steward-cn:`
+bucket. `TenantQueue` entries are created lazily and never evicted, so its
+documented bound ("number of active tenants") holds only while the key space is
+server-controlled and bounded — that is what this validation, the server-verified
+sourcing, and the instance split preserve for the connect/heartbeat gate.
+
+### IP-Trust Establishment
+
+The controller promotes a steward's source IP to **trusted status** only after it has been continuously healthy for at least the configured threshold (default: **30 minutes**). This is implemented by `IPTrustEvaluator` (`features/controller/registration/ip_trust_evaluator.go`, Issue #1694).
+
+**Mechanism:**
+
+1. Each heartbeat from a healthy steward triggers `RecordLiveness(tenantID, stewardID, ip, healthy=true)` via the `TrustEvaluator` wired into the heartbeat service.
+2. The evaluator maintains an in-memory per-(tenantID, ip) timer recording the first time a healthy liveness event was seen.
+3. When `now − firstSeen ≥ threshold`, the evaluator calls `store.AddTrustedRange(tenantID, ip+"/32", false)` and clears the timer.
+4. When the steward goes offline (`healthy=false`), the timer is reset. The IP must sustain liveness from scratch before trust is granted.
+
+**Sandbox-detonation resistance:** Analysis environments (VMs, containers) that auto-detonate after 3–15 minutes cannot sustain the 30-minute liveness window. Their IP is never promoted to trusted status.
+
+**Failure-safe restarts:** The in-memory timer is intentionally non-durable. After a controller restart the 30-minute clock resets, but existing trust entries in the `IPTrustStore` survive. This is fail-safe — the timer reset only delays trust establishment; it never revokes already-trusted IPs.
+
+**Configuration:** `registration.ip_trust_threshold` (YAML duration, default `30m`). The threshold is configurable per deployment; the default of 30 minutes is chosen to be well above sandbox lifetime (3–15 min) while remaining practical for legitimate registrations.
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `registration.ip_trust_threshold` | 30 min | Continuous liveness required before IP is trusted (Issue #1694) |
+| `registration.ip_trust_dark_window` | 30 days | Inactivity period before a trusted IP range is auto-revoked (Issue #1697) |
+| `registration.pending_review_timeout` | 5 days | Maximum time a pending registration may await operator action (Issue #1697) |
+| `registration.enrollment_link_ttl` | 72 hours | Validity window for a single-use passkey enrollment magic link (Issue #2966) |
+
+### IP-Trust Dark-Window Expiry (Issue #1697)
+
+A trusted IP range is automatically revoked after 30 consecutive days with no registrations and no healthy stewards from that range (the **dark window**). The sweep is performed hourly by `IPTrustExpiryJob` (`features/controller/registration/ip_trust_expiry.go`). In a multi-node cluster, only the node holding the `controller-ip-trust-expiry` lease runs a given sweep cycle — see [Background-Loop Singleton Scheduling](#background-loop-singleton-scheduling-issue-3762-adr-031-decision-4).
+
+**Exemption:** Pre-seeded entries (`PreSeeded: true`) are never auto-revoked. Operator-owned ranges added via `cfg registration ip-trust add --pre-seeded` can only be revoked explicitly with `cfg registration ip-trust revoke`.
+
+**Activity tracking:** `RecordHealthySteward` (called on every healthy steward heartbeat) updates the `last_activity` timestamp on the matching CIDR entry. A registration attempt from an already-known IP also counts as activity. An entry whose `last_activity` is older than the dark window is revoked on the next sweep.
+
+**Idempotency:** Revoking an already-revoked entry is a no-op.
+
+### Pending-Registration Expiry (Issue #1697)
+
+Pending registration entries that have not been acted on within 5 days are automatically marked `expired` by `PendingExpiryJob` (`features/controller/registration/pending_expiry.go`). The sweep runs hourly and delegates to `PendingRegistrationStore.ExpireStale`. In a multi-node cluster, only the node holding the `controller-pending-registration-expiry` lease runs a given sweep cycle — see [Background-Loop Singleton Scheduling](#background-loop-singleton-scheduling-issue-3762-adr-031-decision-4). The manual-review workflow's own pending-expiry sweep (`ManualReviewApprovalHook`) is a separate loop with its own lease; see that section.
+
+Expired entries are visible via `cfg registration pending` (status `expired`). They cannot be approved or denied after expiry; the steward must re-register to obtain a fresh pending entry.
+
+### Commands
+
+The controller can send commands to stewards over the gRPC control plane service:
+
+| Command | Purpose |
+|---------|---------|
+| `sync_config` | Tell steward to fetch its latest cfg now (optimization — steward also checks on schedule). Save=deploy will automatically issue this command for affected stewards once the storage-watch trigger is wired (see issue #1521). |
+| `sync_dna` | Request fresh DNA collection and upload |
+| `reconnect` | Instruct the steward to reconnect to the controller (used during HA failover) |
+| `execute_script` | Run an ad-hoc script (outside the cfg). `CommandExecuteScript` in `pkg/controlplane/types`; the controller dispatcher (`features/controller/dispatcher`) signs and sends it, the steward handles it in `features/steward/commands`. Reachable via `cfg steward run-script` and the REST API (`POST /api/v1/runs/script`). |
+
+| `steward_action` | Perform one verb from the steward's closed allowlist (`service.start`, `service.stop`, `service.restart`) against a typed target, authorized by an operator-signed envelope. `CommandStewardAction` in `pkg/controlplane/types`; the same dispatcher signs and sends it, the steward verifies the envelope and acts in `features/steward/commands`. See [Steward Actions](#steward-actions-in-the-execution-queue). |
+
+Commands are fire-and-forget with completion tracking — the controller publishes the command and monitors for completion/failure events.
+
+**Operator-signed execution of inline commands.** `POST /api/v1/runs/command` runs an inline command only under an operator proof over the envelope (content, shell, targets, nonce, expiry). It accepts exactly one of two proofs; a request with both or neither is refused with `INVALID_SIGNATURE`:
+
+- an **X.509** operator signature (request key `signature`), which `cfg` produces with the operator signing certificate;
+- a **WebAuthn** operator proof (request key `webauthn`), which the web console produces with a fresh, per-action passkey tap: `POST /api/v1/operator-payload/sign/begin` resolves the selector into frozen targets and issues the challenge, and `sign/finish` returns the assertion. The controller verifies it over the envelope for any number of targets, requires the credential to belong to the authenticated principal, bounds the expiry by `operatorpayload.ActionEnvelopeMaxTTL`, and attaches the per-steward roster manifest to each queued command. The assertion is forwarded intact; the controller never re-signs it.
+
+Each steward re-verifies the proof it receives. Under `requireSignedAdhoc` the dispatcher sends a command only when it carries the full `signature_*` set or the full `webauthn_*` set (including `webauthn_manifest`).
+
+**Saved (library) scripts (Issue #5422).** A saved script is a signed entry in the tenant's script library, and a library run works end to end:
+
+- **Stored per tenant.** The script library is a `TenantScriptRepository` (`features/modules/stdlib/script`) that returns one repository per tenant, so a script stored for tenant A is never found when resolving for tenant B. Controller startup gives it to the execution queue and to the API server, which also gets the privilege store. `GET /api/v1/scripts`, `GET /api/v1/scripts/{id}` and `PUT /api/v1/scripts/{id}/privilege` act on the caller's tenant library.
+- **Identity and signature travel with the run.** When the dispatcher prepares a library run (`ScriptRef` set), the queue resolves the content and the stored signature from the run's tenant library, and `dispatcher.BuildScriptCommandParams` adds `script_id`, `signature_algorithm`, `signature_value` and `signature_public_key` to the `execute_script` command. The steward verifies the signature over the script content and shell against its `TrustedKeys` and refuses the run on a missing, untrusted or mismatched signature. An inline run carries none of these four params.
+- **No tenant, no run.** A library run resolves its tenant from the dispatch argument, else from `Metadata["tenant_id"]` (set by run synthesis and by the workflow script step from its authenticated tenant). With neither, the run fails with an error. A REST call whose principal has no tenant is refused with `400 TENANT_REQUIRED`. Neither path falls back to a global or root library.
+
+#### Steward Actions in the Execution Queue
+
+A steward action (verb, target kind, target name, parameters) travels the same
+shared queue as a script run (Issue #4528), as a run and queue entry of kind
+`steward_action` (Issue #4625):
+
+- **Record.** The run (`script_runs.kind`, `action_json`) and each device's job
+  (`script_run_jobs.result_code`, `dispatched_at`) are kept in the run store — the
+  shared database in cluster mode, SQLite on a single node. The controller-local
+  SQLite store uses those table names; the cluster-shared Postgres store uses
+  `cfgms_script_runs` and `cfgms_script_run_jobs`. Runs that predate the
+  field read back as `script`. The queue entry carries `Kind`, the action spec and,
+  in its `Metadata`, the operator envelope exactly as the operator signed it: the
+  X.509 (`signature_*`) or WebAuthn (`webauthn_*`, including the manifest)
+  credential, `nonce`, `expires_at` and `targets`. The envelope is stored once, at
+  enqueue, so whichever node dispatches the entry sends the same bytes; the
+  controller signs only the outer command and never re-signs or strips the envelope.
+- **Delivery stays on the node holding the session.** Every node sees every entry;
+  only the node whose control-plane connection holds the steward dispatches it
+  (`IsLocallyConnected`), as for scripts. A non-owning node leaves the entry queued,
+  so an action accepted on node A is delivered by node B. The dispatcher branches
+  before script preparation: no script is resolved, no relay grant is created, and
+  the command is `steward_action`, signed with the controller's command signer and
+  the current fencing term. An entry without a complete operator credential is never
+  sent; its job ends `failed`.
+- **At most one send.** Before sending, the dispatcher moves the job
+  `pending → dispatched` with a compare-and-set in the run store. A job that the
+  expiry sweep already closed is not sent, and a job already dispatched is not sent
+  a second time.
+- **Completion records on any node.** The steward answers with `EventScriptCompleted`
+  whose `Details["result_code"]` is one of `ok`, `self_protect`, `process_changed`,
+  `unsupported`, `failed` (plus the steward's `not_found` and `permission_denied`);
+  anything else is recorded as `failed`. The node that receives the event links it
+  to the run through the shared queue entry and records the job's status
+  (`completed` for `ok`, `failed` otherwise) and `ResultCode` in the shared store,
+  so the node that accepted the request reads the result.
+- **Nothing disappears.** An action entry expires after 2 minutes
+  (`StewardActionTTL`) — a safety property, so a stale "stop service" cannot fire
+  when a steward reconnects later — and carries a 60 second timeout
+  (`StewardActionTimeout`), which is also the lifetime of its per-device slot. The
+  poll-loop sweep on every node closes what will never report:
+  a job still `pending` past its TTL ends `expired` (result code `expired`,
+  "expired, not run"); a job `dispatched` but unreported past the timeout ends
+  `no_result` ("sent, no result reported" — the action may have run). Each
+  transition is a compare-and-set (`ExpireJobIfStatus`), so only the one node whose
+  update changed the row cancels the queue entry, advances the run and passes the
+  job to the audit sink (`ActionAuditSink.RecordActionExpired`); a node that loses
+  the race writes and audits nothing. In the controller the sink is
+  `dispatcher.AuditManagerSink`, which writes a `steward_action_expired` or
+  `steward_action_no_result` entry to the durable audit log, attributed to the
+  operator who issued the action. An expired or `no_result` job counts as failed
+  when the run's status is computed.
+
+#### Cluster Command Delivery — Routing Table + Internal RPC + Outbox (ADR-031 Decision 3, Issue #3764)
+
+A cluster deployment is any-node: the controller node that decides to dispatch a
+command to a steward is not necessarily the node holding that steward's live
+control-plane connection. Two primitives compose to make dispatch safe regardless
+of which node that is:
+
+- **Shared steward-routing table** (`pkg/storage/interfaces/business.RoutingStore`,
+  `business.RoutingStaleAfter` = 90s). Every node records, on each steward connect,
+  which node currently holds that steward's connection
+  (`RecordConnection(ctx, stewardID, nodeID)`), refreshed by the same connect event
+  that populates the node-local registry — there is no polling loop. A record older
+  than the staleness window is not trusted and is treated as absent.
+- **Internal controller-to-controller delivery RPC**
+  (`pkg/controlplane/internaldelivery`, `cfgms.clusterdelivery.DeliveryService`) —
+  the one inter-node RPC this deployment shape has. mTLS-secured on a
+  dedicated internal listener (`InternalDeliveryListenAddr`), sharing the same
+  mTLS trust material as the internal admin listener but its own port —
+  gRPC needs to own its listener's connections directly, so it cannot share
+  the internal HTTP listener. Node A calls `DeliverCommand` on node B to ask B to
+  deliver locally; B returns a normal `DeliverCommandResponse` with
+  `not_connected = true` if the steward is not connected there at that instant —
+  never a gRPC error — since "not here right now" is an expected outcome the
+  caller falls back on, not a failure.
+
+`pkg/controlplane/internaldelivery.ClusterAwareSender` wraps the node-local
+`ControlPlaneProvider` (the grpc/memory `SendCommand`/`FanOutCommand`
+implementations) with this composition: try local delivery first; on a
+"not connected here" result (`controlplane/interfaces.ErrStewardNotConnected`),
+look up the routing table, and if a peer node claims the steward, forward via the
+internal delivery RPC. Any miss along that chain — no routing entry, the routing
+table naming this node itself, an unreachable peer, or the peer's own
+`not_connected` response — surfaces the *original* local error to the caller,
+unchanged. The
+dispatcher (`features/controller/dispatcher`) and command publisher
+(`features/controller/commands.Publisher`) are both constructed against this
+wrapped sender in cluster mode, so every existing dispatch call site becomes
+cluster-safe without a call-site change.
+
+This RPC is a fast path, not a substitute for the durable outbox (Issue #3757,
+ADR-031 Decision 2): the outbox row is the guarantee underneath it. A command
+that fails every fast-path attempt (no routing entry, peer unreachable, peer
+itself lost the connection since its last routing-table refresh) stays `pending`
+in `CommandStore` and is drained the moment the steward next connects to any
+node — `features/controller/service.PendingDeliveryDrainHook`, wired as an
+on-connect hook, calls `CommandStore.ListPendingDeliveries` keyed by the
+mTLS-authenticated connecting steward's own identity (never a caller-supplied
+ID) and republishes each pending row through the normal publish path.
+
+A record-backed command is sent to the steward under its delivery record ID
+(`Publisher.PublishCommandWithID` / `TriggerConfigSyncWithID`): the `command_id`
+an operator sees in the API is the `Command.ID` the steward receives. A drained
+re-send of a `pending` record reuses that same ID, so a steward that already
+accepted it inside its replay window (`ErrCommandReplay`, 5 minutes) drops the
+re-send instead of running the command a second time. A re-send after the window,
+or after a steward restart, still runs; `sync_config` is idempotent. Send paths
+with no delivery record keep generated IDs.
+
+**Steward rejection report (Issue #4569).** When a steward refuses an inbound
+command on its receive path, it sends the controller a `types.Response` with
+`Success=false`, `CommandID`, and a reason code in `Message` and
+`Details["reason"]` (`Details["retryable"]` is a bool, true only for
+`term_fenced`). The controller node holding the steward's stream receives it
+through `ResponseSubscriber`; `features/controller/service.CommandRejectionRecorder`
+(subscribed on the node-local control plane, not the cluster-aware sender)
+checks that the record's `StewardID` equals the authenticated steward and writes
+`DeliveryStatus` `rejected` with `DeliveryDetail` set to the reason code. The
+outcome is visible through the command-record API, a Warn log line and a
+per-reason counter (`RejectionCounts()`). Reason codes: `term_fenced`,
+`unauthenticated`, `wrong_steward`, `stale_timestamp`, `duplicate_id`,
+`params_too_large`, `invalid_command`. The recorder accepts only these codes and
+writes `DeliveryDetail` from its own constants, never the wire string. Two rules:
+
+- `duplicate_id` on a `pending` or `delivered` record means the steward already
+  holds the ID, so the record becomes `delivered` (this is how a drained re-send
+  of an already-accepted command resolves).
+- Any other code on a `pending` or `delivered` record makes it `rejected`.
+  Records in any other state are left unchanged.
+
+A `term_fenced` rejection is the one exception, and only when the report also
+carries `retryable: true` (Issue #4866). Both the code and the flag are required,
+because the flag comes from a steward that may be compromised. Such a command was
+most likely stamped during a leadership change, so the recorder asks
+`Publisher.RetryFenced` to re-send it — same ID, type and params from the delivery
+record — after `FenceRetryDelay` (default 2 seconds), with the term read again at
+send time. A fence-rejected command never enters the steward's replay cache, so the
+re-send is not a `duplicate_id`. Each command gets at most `MaxFenceRetries` (3)
+re-sends. A re-send the steward accepts leaves the record `delivered` with detail
+`term_fenced: delivered on retry <n>`; a transport failure on a re-send returns the
+record to `pending` for the on-connect drain. When all 3 re-sends are rejected, the
+record ends `rejected` with detail `term_fenced`. The attempt count is held per
+node in a TTL cache and is not persisted, so a controller restart or a stream that
+moves nodes can restart the budget. Every other rejection code is not retried.
+
+`rejected` is terminal: `UpdateDeliveryStatus` never moves a record out of it and
+returns `ErrDeliveryStatusTerminal`, which also settles the race where the
+steward's rejection arrives before the publisher's own `delivered` write.
+Commands with no delivery record (generated IDs) are counted, not recorded.
+
+On-connect hooks run as soon as the ControlChannel stream registers, which is
+before the steward has subscribed its command handler: the steward opens the
+stream first and builds its handler after. The steward-side control-plane
+provider holds every command received before `SubscribeCommands` and delivers
+them, in arrival order and ahead of anything received later, when the handler
+subscribes (`pkg/controlplane/providers/internal/pendingcmd`, Issue #4678).
+Before that, the drained deliveries and the signing-cert refresh push sent in
+this window were silently discarded.
+
+**Retired by this mechanism:** the `GetAllStewardsCluster`/`GetAllStewards` split
+(`features/controller/service.ControllerService`) — the former had to stay
+node-local because dispatching to a steward it didn't know about locally simply
+failed, while the fleet-wide method was explicitly documented "NOT for
+dispatch". `ControllerService.ListFleetStewards` is now the single fleet source
+for every consumer, including dispatch: it reads durable storage directly on
+every call (no polling cache, no populate-lag window) and dispatch safety no
+longer depends on which source produced the steward ID at all — it is a property
+of `ClusterAwareSender`, not of the listing method.
+
+#### Outbound Command Contract — Fencing Term (#3390, ADR-029 Decision 5)
+
+*Fence rejections are retried (Issue #4866).* When a steward refuses a command on
+its term fence and reports it retryable, the controller re-sends the same command
+ID up to 3 times (`commands.MaxFenceRetries`), `FenceRetryDelay` (default 2 seconds)
+apart, each time stamped with a freshly read term. If all 3 re-sends are rejected the
+delivery record ends `rejected` with detail `term_fenced`. See the delivery
+lifecycle section above.
+
+The `Command` proto message carries a `term` field (field 8, `uint64`). Commands
+published through `commands.Publisher` — `PublishCommand`,
+`PublishCommandWithCallback`, and `PublishCommandWithSigner`
+(`features/controller/commands/publisher.go`) — are stamped at publish time with the
+current fencing term, read from the `TermSource` wired at construction
+(`*ha.Manager`, whose `GetTerm()` is lease-backed — the shared database lease,
+ADR-031 Decision 5 — rather than a Raft term). This is
+the **controller-side half** of the command fencing scheme defined in ADR-029:
+
+- **Wire-compatible additive field.** A steward that does not yet understand field
+  8 silently ignores it — unknown proto3 fields are preserved and forwarded, not
+  rejected. Older stewards continue to operate unchanged.
+- **Zero means not stamped, not "no fencing".** A `term` of zero means the command
+  was published either by a controller predating fencing, or by one of the emitters
+  listed under "Unstamped command paths" below. The steward-side enforcement —
+  rejecting commands whose term is lower than the highest seen — is added in story
+  #3436. Until that story ships, the field is informational only.
+- **The term is covered by the signature under signing-payload v2 (#5174).**
+  `CommandSigningBytes` (`pkg/controlplane/types/messages.go`) is the version-1
+  payload: `ID`, `Type`, `StewardID`, `TenantID`, `Timestamp` and `Params`, with
+  `Term` deliberately omitted so stewards predating the fence kept verifying
+  commands. A term under a v1 signature is transport-trusted only (mTLS, not the
+  signature): a party between signer and steward could raise it to defeat the fence
+  or set it to `MaxUint64` to wedge the steward's persisted high-water mark. Version 2
+  (`CommandSigningBytesVersion` with `SigningPayloadV2`) signs every v1 field plus
+  `Term` and an explicit `payload_version`. The controller signs every command over v2
+  (#5285); there is no per-steward choice:
+  - *One signing path.* The publisher, the script dispatcher and the relay handler
+    all sign through `types.SignCommand`, which always signs over v2 and sets
+    `Command.signing_payload_version` (field 9) to 2.
+  - *Verify.* `commands.Handler.HandleCommand` verifies against the version the
+    command names. An absent version is v1 and never selects v2; an unknown version
+    is refused. A v2 command whose `Term` was altered after signing fails with
+    `ErrUnauthenticatedCommand`.
+  - *Stamped v1 is always refused.* `HandleCommand` refuses every command that is
+    signed over v1 and carries `Term > 0` with `ErrUnauthenticatedCommand`, from
+    first start and before signature verification. No steward state is consulted.
+    A v1 command with `Term == 0` carries no unsigned term and follows the normal
+    verification path.
+  - The v1 payload remains supported until no supported steward release lacks v2.
+- **Fence coverage is per-steward-determinable.** An operator can determine which
+  stewards are capable of enforcing the fence without any new mechanism. The
+  existing `GET /api/v1/stewards` endpoint (`handleListStewards`,
+  `features/controller/api/handlers_stewards.go`) returns a `StewardInfo` per
+  connected steward that includes the `version` field sourced from each steward's
+  `steward.version` DNA attribute. A steward running the release that includes
+  story #3436's enforcement is **capable** of enforcing the fence; full durability
+  across restarts requires story #3437 as well. No capability flag or new field is
+  introduced — binary version is the sufficient discriminant.
+
+**Unstamped command paths (known gap for #3436).** Three controller-side emitters
+build a `SignedCommand` directly instead of going through `commands.Publisher`, and
+therefore send `term = 0`:
+
+| Emitter | Command type | Location |
+|---------|--------------|----------|
+| Script dispatcher | `execute_script` | `features/controller/dispatcher/dispatcher.go:567` |
+| Relay handler | `relay_response` | `features/controller/api/relay_handler.go:210` |
+| HA manager, on leadership acquisition | `reconnect` | `pkg/ha/manager.go:556` |
+
+These are unfenced today, and `execute_script` is the highest-privilege command in
+the system: a deposed-but-still-running leader's dispatcher would land scripts on
+endpoints that #3436's fence could not reject on term grounds. The inverse also
+matters — under #3436's fail-closed downgrade rule (a steward that has observed a
+non-zero term rejects a subsequent unstamped command), these three paths would start
+being *rejected* by fence-enforcing stewards, breaking ad-hoc script execution and
+relay responses. #3436 must resolve both directions: either these emitters take a
+`TermSource` and stamp the term, or the enforcement rule exempts them explicitly.
+Stamping them is out of scope for #3390, which is confined to the schema, the
+publisher, and its wiring.
+
+### Steward Auto-Upgrade via `desired_version` (Issue #2260)
+
+Operators pin the steward version fleet-wide or per-tenant via the `steward.upgrade` cfg block:
+
+```yaml
+steward:
+  upgrade:
+    desired_version: "v1.4.2"
+    allow_downgrade: false   # default; set true to permit rollback
+```
+
+**Inheritance:** `desired_version` and `allow_downgrade` flow through the normal cfg-inheritance tree (root → tenant → group → device). A child setting overrides the parent. Absence at a level means the parent value is inherited unchanged.
+
+**How a steward converges to `desired_version`:**
+
+1. The controller pushes a new steward binary to the endpoint via the `push_steward_binary` data-plane command. The steward downloads, verifies, and stages the binary under `{Root}/versions/{version}/{binaryName}`, then invokes the launcher's `swap` sub-command. On success, the staged version and path are recorded internally (`lastStagedVersion` / `lastStagedBinaryPath`).
+2. On every cfg-convergence cycle (`TriggerConvergence`), the steward reads `desired_version` from its last received cfg. If it differs from the running version, the steward re-invokes the launcher swap against the already-staged binary without downloading again.
+3. **Self-fetch when nothing is staged (Issue #2833).** If the desired binary is not already staged, the steward pulls it from the controller itself — no push required. It requests `GET /api/v1/public/steward-binaries/{version}/{platform}/{arch}?tenant=...` over mTLS against the controller's HTTPS base (`CFGMS_CONTROLLER_HTTPS_URL`), then verifies, stages, and swaps through the same pipeline as the pushed path. This makes declaring a `desired_version` sufficient on its own to converge a steward.
+   - **Tenant resolution:** the steward requests its own tenant namespace first, then falls back to `default` — so a fleet-wide binary published under `default` reaches every steward, while a tenant may override for just its own devices. The steward only ever requests tenants it is registered under.
+   - **Independent publisher verification:** the steward verifies the Ed25519 publisher signature against the **build-time-baked** `CFGMSPublisherIdentity`, over the version-bound `contentHash|version|platform|arch` composite (Issue #2834). The version/platform/arch fed to the check come only from the steward's own requested `desired_version` and detected `runtime.GOOS`/`GOARCH`, and the content hash is recomputed locally — never taken from a controller-supplied header. The `X-CFGMS-Publisher` response header is a hint only and can never select a verification key. This means a compromised controller cannot make a steward run an unsigned, altered, or rolled-back binary.
+   - **Host-pinned + https-only:** the constructed URL's host is pinned to the controller transport host and the scheme must be https, so no cross-host fetch is possible.
+   - **Degrade safe:** any failure (unset HTTPS base, network, sha/signature/version-binding mismatch, both tenants 404) leaves the steward on its current version to retry next cycle; it never swaps an unverified binary.
+4. If `allow_downgrade` is `false` (the default) and `desired_version` is older than the running version, the swap is blocked. Set `allow_downgrade: true` to permit explicit rollbacks.
+
+**Downgrade guard:**
+- Blocked unless `allow_downgrade` is `true` in either the running cfg or the controller-synced config cache (`upgradeAllowDowngrade`).
+- This prevents accidental downgrades from misconfigured cfg pushes.
+
+**Version tracking in DNA and heartbeats:**
+- `steward.version` is injected into every DNA delta before publish. The controller stores it as a DNA attribute and exposes it in the fleet list API (`GET /api/v1/stewards`).
+- Every heartbeat now carries a `Version` field, which `RecordHeartbeat` uses to keep the in-memory fleet registry current. `RecordHeartbeat` also persists last-seen and version to the shared steward store at a rate-limited interval (at most once per 30 seconds per steward, or immediately when the version changes), so every controller node reports the same values for every steward, not only the node holding the session. Connection state, active sessions and live metrics stay node-local.
+
+**Fleet visibility:** the steward API list response includes `version` (from `steward.version` DNA attribute) alongside `id`, `status`, and `last_seen`. Operators can filter and audit version skew across the fleet without a separate inventory tool.
+
+## Orchestration
+
+The controller coordinates operations that span multiple stewards. Individual stewards apply their own cfgs; the controller determines sequencing and timing.
+
+### Batch Job Dispatch (Issue #2296)
+
+Rolling-batch jobs are the primary orchestration primitive. A batch job:
+
+1. Resolves a fleet selector to a list of steward IDs.
+2. Partitions the list into waves of `batch_size` stewards.
+3. Dispatches a `ConfigSyncBatch` command to each wave via the `RollingBatchExecutor`.
+4. Tracks per-step status in `BatchJobStore` (pending → running → completed/failed).
+
+**REST API:**
+
+| Method | Path | Permission | Description |
+|--------|------|------------|-------------|
+| `POST` | `/api/v1/jobs` | `jobs:write` | Submit a rolling-batch job; returns 202 Accepted with job ID |
+| `GET`  | `/api/v1/jobs/{id}` | `jobs:write` | Poll job status and step table |
+
+**CLI:**
+
+```
+cfg job submit --selector <expr> [--batch-size <n>]   # default batch-size 10
+cfg job status <job-id>
+```
+
+The executor runs asynchronously — the HTTP response returns immediately with the job ID. Callers poll `GET /api/v1/jobs/{id}` for progress.
+
+### Orchestration Model
+
+```
+Admin triggers operation
+        │
+        ▼
+Controller plans execution order
+(considering dependencies, roles, cluster membership)
+        │
+        ▼
+Batch 1: [steward-A, steward-B]  → wait for completion
+Batch 2: [steward-C]             → wait for completion
+Batch 3: [steward-D, steward-E]  → wait for completion
+        │
+        ▼
+Operation complete (or rolled back on failure)
+```
+
+### Dependency Awareness
+
+The controller understands infrastructure relationships:
+
+- **Cluster membership** — which stewards belong to Hyper-V clusters, SQL clusters, etc.
+- **Infrastructure roles** — domain controllers, DNS servers, DHCP servers
+- **Quorum requirements** — how many nodes must remain online during updates
+- **Service dependencies** — which services depend on which infrastructure roles
+
+This knowledge informs operation sequencing:
+- Never update all domain controllers simultaneously
+- Respect Hyper-V cluster quorum during rolling updates
+- Drain a node before rebooting, ensure it rejoins before proceeding
+- Pause the rollout if a batch fails
+
+### Coordinated Operations
+
+| Operation | Orchestration Behavior |
+|-----------|----------------------|
+| **Rolling cfg update** | Push cfg to stewards in batches, verify convergence success before next batch |
+| **Coordinated reboot** | Drain workloads, reboot in sequence respecting quorum, verify node health before proceeding |
+| **Cluster-aware patching** | Patch one node at a time, live-migrate VMs, verify cluster health between nodes |
+| **Emergency rollback** | If a batch fails, halt rollout and optionally push previous cfg version to affected stewards |
+
+## Workflow Engine
+
+The workflow engine serves three roles:
+
+1. **Desired-state engine for cloud resources** — brings the same Get/Set convergence model to SaaS platforms that stewards bring to local devices
+2. **Orchestration and data sync between services** — keeps third-party platforms in sync with CFGMS-managed endpoints and each other
+3. **Integration platform** — connects services together via workflows, with extensible node types
+
+Integrations are organized by type. Initial integrations focus on MSP operational needs, with additional categories added based on demand:
+
+| Integration Type | Purpose | Examples |
+|-----------------|---------|----------|
+| **PSA / Ticketing** | Asset sync, ticket routing, client management | Service desk platforms |
+| **Distribution / Licensing** | License provisioning, reconciliation, billing | Distributor marketplaces |
+| **Cloud Identity** | User/group management, policy enforcement | M365, Azure AD, Google Workspace |
+| **Endpoint Management** | Device configuration, compliance | CFGMS stewards (Windows, Linux, macOS) |
+
+### Design Principle: Same Mental Model
+
+Configuring an M365 conditional access policy should feel like configuring a firewall rule on a steward. The admin writes a resource block in a cfg, declares desired state, and the system converges. The difference is where it executes — not how the admin thinks about it.
+
+```yaml
+# These should feel the same to an admin:
+
+# Runs on steward (local device)
+resources:
+  - name: web-firewall
+    module: firewall
+    config:
+      rules:
+        - name: allow-https
+          port: 443
+          action: allow
+
+# Runs on controller (cloud API)
+resources:
+  - name: mfa-policy
+    module: conditional_access
+    config:
+      name: "Require MFA for all users"
+      state: enabled
+      conditions:
+        users: all
+      grant_controls:
+        require_mfa: true
+```
+
+### How It Works
+
+The workflow engine hosts **workflow modules** that implement the same Get/Set contract as steward modules, but execute against external APIs instead of local system state. The M365 family (auth, conditional-access, intune-policy, entra-group, entra-admin-unit, entra-user, entra-application) lives at `features/workflow/modules/m365/` and is the first set of these.
+
+1. **Get** — Query the external API for current resource state (e.g., read current conditional access policies from Entra ID)
+2. **Compare** — Engine compares current state against desired state from the cfg
+3. **Set** — If drifted, call the external API to converge (e.g., create/update the policy)
+
+This means externally-managed resources get the same convergence loop as local resources — scheduled re-checks detect drift (someone changed a policy in the portal), and the controller corrects it.
+
+### Event Hooks for Workflow-Managed Resources
+
+Workflow modules can register monitors using platform-native mechanisms:
+
+- **Log ingestion** — consume audit logs from M365, Azure, AWS to detect changes in near-real-time
+- **Webhook receivers** — receive change notifications from cloud platforms
+- **Polling** — scheduled API checks for platforms without push notifications
+
+When a change is detected, it triggers a convergence check for that resource — the same pattern as a steward's file monitor detecting a local change.
+
+### Imperative Workflows
+
+Not everything is desired state. The workflow engine also supports imperative operations:
+
+- **User provisioning** — onboard a new employee across M365, create mailbox, assign licenses
+- **Scheduled tasks** — recurring license reconciliation, report generation
+- **Event-driven automation** — respond to alerts, webhooks, or steward events
+
+These are authored as step sequences, not convergent cfgs. They execute once (or on schedule) and report results.
+
+### Service Orchestration and Data Sync
+
+MSPs operate across multiple platforms that need to stay in sync. The workflow engine acts as the glue:
+
+```
+PSA / Ticketing  ◄──►  CFGMS Controller  ◄──►  Distributor / Licensing
+                              │
+                       ┌──────┴──────┐
+                       │             │
+                 Cloud Tenants   Stewards
+                 (cloud cfg)    (device cfg)
+```
+
+**Examples of sync workflows:**
+
+- **New client onboarding** — create tenant in CFGMS, provision cloud tenant, create client in PSA, set up licensing — all from one trigger
+- **Device sync** — steward DNA (hardware, software) syncs to PSA asset records automatically
+- **License reconciliation** — compare distributor license counts against actual cloud usage, flag discrepancies
+- **Alert routing** — steward threshold breach events create tickets in PSA
+
+Each integration is a workflow node type. Nodes can be composed into multi-step workflows that span services. Data flows between nodes, transformed as needed.
+
+### Extensibility
+
+The workflow engine uses a node-based architecture where each integration is a pluggable node type:
+
+- **Service nodes** — PSA, distributor, cloud identity, endpoint management
+- **Logic nodes** — conditionals, loops, filters, transforms
+
+### Workflow Engine Capabilities
+
+The workflow engine must support the following capabilities to fulfill its role as a serious automation platform:
+
+- **Authoring** — visual node-based workflow builder with draft/publish lifecycle
+- **Triggers** — webhook, schedule, event-driven, manual, and chained (workflow triggers workflow)
+- **Execution** — per-node retry policies, error paths, partial rollback, real-time execution trace
+- **Data flow** — field mapping between service schemas, filtering, and transformation between nodes
+- **Credentials** — tenant-scoped secret injection, never exposed in workflow definitions or logs
+- **Debugging** — failed workflow runs retain full execution detail (inputs, outputs, and API request/response at every node) so failures can be diagnosed from history without re-execution. Successful runs retain summary-level traces. Debug depth and retention are configurable per workflow. Step-through execution with breakpoints available during development. Resume or re-run from any failed node without restarting the entire workflow
+- **Testing** — sandbox execution, replay failed runs, input/output inspection per node
+- **Execution history** — a run's status, step results and error are durable, not node-local: the engine writes each execution through to the `WorkflowExecutionStore` (when it is registered, after each step result, and at its terminal status), so `cfg workflow status` and `GET /api/v1/workflows/{id}/executions/{exec_id}` answer on any controller node and after a restart. Cluster-wide visibility needs the `database` storage provider. A node answers for a run it owns from its live state and for any other run from the store. History is bounded per tenant (the newest 1000 terminal executions by default). Run variables are not stored. A run left `running` by a dead node is readable but not resumed, and cancelling a run is still handled only by the node executing it; see [Storage Architecture](storage-architecture.md).
+- **Versioning** — workflow version history, rollback to previous versions
+- **Operability** — operators can inspect and control running executions via the `cfg` CLI: `cfg workflow list` (definitions), `cfg workflow status <exec-id> --workflow <name>` (per-execution state and current step), `cfg workflow cancel <exec-id> --workflow <name>` (cancel a running execution). See [commands reference](../development/commands-reference.md#workflow-management).
+
+### Workflow vs Cfg Summary
+
+| | Steward Cfg | Cloud Cfg (Workflow Engine) | Imperative Workflow |
+|---|---|---|---|
+| **Runs on** | Steward | Controller | Controller |
+| **Manages** | Local device resources | Cloud/SaaS resources | Any external operation |
+| **Model** | Desired state (Get/Set) | Desired state (Get/Set) | Imperative steps |
+| **Convergence** | Yes (scheduled + hooks) | Yes (scheduled + log/webhook hooks) | No (run once or on schedule) |
+| **Example** | Firewall rule | Conditional access policy | Onboard new employee |
+
+## Identity and Authorization
+
+### Steward Registration
+
+The controller is the certificate authority and identity provider for stewards. Two credential flavors support different deployment workflows:
+
+**Perennial registration tokens**
+- Generated via REST API or `cfg token create --expires=<duration>`
+- Scoped to tenant/group, with optional expiry
+- Survive multiple registrations (never consumed on use); rotate with `cfg token rotate` to atomically invalidate all prior tokens and issue a fresh one
+- Suitable for: manual onboarding, small fleets, time-bounded provisioning
+
+**Long-lived tenant/group registration codes**
+- Durable random opaque strings stored as a join field on the tenant/group record
+- On registration, the controller looks up the code and assigns the steward to the matching tenant/group
+- Suitable for: RMM/GPO mass deployment where the same code is baked into deployment scripts and used by many devices
+- Renaming a tenant/group does not break previously issued codes (the code is independent of the human-readable name)
+
+**Registration flow:**
+
+1. Admin creates a token or code on the controller (scoped to tenant/group, with optional expiry for tokens).
+2. Steward presents the token/code during registration via the compile-time controller URL.
+3. Controller validates the credential — perennial token: check expiry and revocation; long-lived code: look up matching record.
+4. Controller runs the registration approval workflow via `RegistrationApprovalHook`. The active workflow is selected by `registration.workflow` in `controller.cfg`:
+   - **`ip-trust`** (default): approves the registration when the steward's source IP is trusted for its tenant; quarantines otherwise. The first steward from any new tenant always quarantines because no IP is trusted yet. The hook is code-wired (`IPTrustApprovalHook`), not seeded as a workflow. It fails closed — a nil or erroring trust store quarantines rather than admits.
+   - **`manual-review`** (production): quarantines the steward pending operator action. Sets `registration_decision: quarantine` so the steward is restricted to baseline config until promoted. Operators use `cfg registration pending` to list quarantined stewards, `cfg registration approve <id>` to promote, and `cfg registration deny <id> [--reason ...]` to reject.
+   - **`auto-approve`** (deprecated): approves every valid registration unconditionally. Dev/test environments only — a startup warning is logged. Replaces the legacy `DefaultApprovalHook`.
+   - Custom workflows can implement arbitrary policy (e.g., approve `tenant=lab` registrations, reject everything else)
+5. On approval (`approve`): controller generates the steward ID and signs the steward-submitted CSR into an mTLS client certificate scoped to the steward's tenant/group identity (HTTP 200 with full cert bundle). The steward generated its own keypair locally before registering and submitted only the public half as a CSR (`csr_pem`) — the controller never generates or sees a private key for this credential (Issue #3780). The controller also persists this tenant assignment to the durable `device_tenant` mapping — see [Durable Device-Tenant Mapping](#durable-device-tenant-mapping-issue-3324).
+   On quarantine (`quarantine`): controller returns HTTP 202 with a `pending_id` and no certificates. The pending entry — including the submitted `csr_pem`, signed later at claim time — is written to the durable `PendingRegistrationStore` (SQLite by default, PostgreSQL at production scale). The steward polls `GET /api/v1/registration/status/{pending_id}` with its registration token as a Bearer credential until the operator acts. Operators use `cfg registration approve <pending-id>` or `cfg registration deny <pending-id>`.
+   On rejection (`reject`): HTTP 403 is returned; registration is denied.
+6. **Sign-on-claim (quarantine path):** When the operator approves an entry and the steward polls again, the controller signs the steward-submitted CSR in memory for that single response, marks the entry as `claimed`, and returns the full cert bundle in HTTP 200. A subsequent poll on an already-claimed entry returns HTTP 410 Gone — the cert is never re-issued. The controller never generates or sees a private key for this credential.
+7. Controller distributes the CA cert, signing cert, and connection details.
+8. Steward is now a trusted member of the fleet and stores its cert for subsequent startups.
+
+**Registration status endpoint (Issue #1696):**
+
+`GET /api/v1/registration/status/{pending_id}` — authenticated with `Authorization: Bearer <regToken>`.
+
+| Response | Meaning |
+|----------|---------|
+| HTTP 200 `{"status":"pending"}` | Operator has not yet acted |
+| HTTP 200 `{"status":"claimed", "client_cert":..., ...}` | Approved and cert issued — steward should connect now |
+| HTTP 410 Gone | Already claimed (duplicate poll) — stop polling |
+| HTTP 200 `{"status":"denied"}` | Operator denied — steward should exit or re-register |
+| HTTP 200 `{"status":"expired"}` | Entry expired before operator acted — steward should re-register |
+| HTTP 403 | Token tenant ≠ entry tenant (tenant isolation) |
+| HTTP 401 | Invalid or missing Bearer token |
+
+**Configuring the registration workflow (`controller.cfg`):**
+
+```yaml
+registration:
+  workflow: ip-trust       # or: manual-review, auto-approve (default: ip-trust)
+  # trusted_proxies lists CIDR ranges of reverse proxies trusted to set
+  # X-Forwarded-For. Empty (default) means X-Forwarded-For is never trusted.
+  trusted_proxies:
+    - "10.0.0.0/8"
+```
+
+| Value | Behavior |
+|---|---|
+| `ip-trust` (default) | Approves the registration when the source IP is trusted for the tenant; quarantines otherwise. Code-wired (`IPTrustApprovalHook`) — no workflow is seeded. Fails closed on a missing or erroring trust store. |
+| `manual-review` | Quarantines every new steward pending operator action. Seeds a built-in workflow with `Variables: {registration_decision: quarantine}`. Use `cfg registration pending` / `approve` / `deny` to manage the queue. |
+| `auto-approve` (deprecated) | Approves all valid registrations immediately. Dev/test environments only — a startup deprecation warning is logged. |
+
+If `registration.workflow` is omitted, the controller defaults to `ip-trust`. The `CFGMS_REGISTRATION_WORKFLOW` environment variable overrides the config-file value (used by test environments to opt into `auto-approve`).
+
+**X-Forwarded-For spoofing protection:** The controller derives the steward's source IP for the IP-trust decision and anonymous-download budgets from the TCP peer address (`r.RemoteAddr`). It honors `X-Forwarded-For` **only** when the TCP peer falls within a `trusted_proxies` CIDR range, then walks all header fields and comma-separated hops from right to left to select the first untrusted address. A malformed chain falls back to the TCP peer. With `trusted_proxies` empty (the default), `X-Forwarded-For` is always ignored. Configure every trusted hop and require the edge to append its observed upstream address or replace client-supplied headers; forwarding an unmodified client header defeats any origin-address scheme.
+
+**Managing pending registrations with `cfg registration`:**
+
+When using `manual-review`, quarantined stewards accumulate in the controller's durable pending queue until approved or denied. Use the `cfg registration` CLI commands to manage them:
+
+```bash
+# List all quarantined stewards awaiting approval (shows SOURCE_IP and RDNS columns)
+cfg registration pending
+
+# Approve a steward (promotes from quarantined → registered)
+cfg registration approve <steward-id>
+
+# Deny a steward (removes from queue; steward must re-register to retry)
+cfg registration deny <steward-id> --reason "Unauthorized deployment"
+
+# Approve all pending registrations in one call
+cfg registration approve-all
+
+# Approve only pending entries whose source IP is in a given CIDR range
+cfg registration approve-by-cidr 10.0.0.0/8
+
+# Add a pre-seeded trusted CIDR range for a tenant (ip-trust workflow)
+cfg registration ip-trust add 10.0.0.0/8 --tenant-id acme-corp
+
+# Revoke a trusted CIDR range for a tenant
+cfg registration ip-trust revoke 10.0.0.0/8 --tenant-id acme-corp
+```
+
+| Command | HTTP call | Effect |
+|---|---|---|
+| `cfg registration pending` | `GET /api/v1/registration/pending` | Lists all quarantined stewards with SOURCE_IP and RDNS |
+| `cfg registration approve <id>` | `POST /api/v1/registration/{id}/approve` | Promotes steward status to `registered` |
+| `cfg registration deny <id>` | `POST /api/v1/registration/{id}/deny` | Removes steward from pending queue |
+| `cfg registration approve-all` | `POST /api/v1/registration/approve-all` | Approves all pending registrations in the caller's tenant scope; prints count approved |
+| _(web registration console only)_ | `GET /api/v1/registration/approve-by-cidr/preview?cidr=<cidr>` | Read-only dry run: returns the count, pending IDs, and source IPs that `approve-by-cidr` would approve. Mutates nothing |
+| `cfg registration approve-by-cidr <cidr>` | `POST /api/v1/registration/approve-by-cidr` | Approves pending entries in the caller's tenant scope whose source IP falls in the CIDR. Requires a user-presence step-up (below) |
+| `cfg registration ip-trust add <cidr>` | `POST /api/v1/registration/ip-trust` | Adds a pre-seeded trusted CIDR for `--tenant-id` |
+| `cfg registration ip-trust revoke <cidr>` | `DELETE /api/v1/registration/ip-trust/{tenant_id}/{cidr}` | Revokes a trusted CIDR for `--tenant-id` |
+
+Required API key permissions: `registration:list-pending` for `pending` and for the approve-by-CIDR preview; `registration:approve` for individual approval and `approve-all`; `registration:approve-by-cidr` for `approve-by-cidr`; `registration:deny` for denial; `registration:manage-ip-trust` for ip-trust subcommands.
+
+**Tenant scoping of bulk approval.** `approve-all` and `approve-by-cidr` — and the preview — resolve their target set through `ListPending(ctx, callerTenantID)`, so a caller whose principal carries a tenant (API key or non-root account) can only approve pending entries belonging to that tenant. A caller with no tenant on its principal (mTLS admin bundle, root-scoped account) retains fleet-wide reach. Entries outside the caller's scope are never listed, previewed, or mutated.
+
+**Presence step-up on `approve-by-cidr`.** `registration:approve-by-cidr` carries `RequireUserPresence: true` (ADR-021 Decision 4): `AssuranceStrong` alone is not enough, and the request must also carry a fresh, single-use `X-Presence-Token` obtained from `POST /api/v1/webauthn/presence/begin` → `/finish`. Without one the call returns `401` with `WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="strong", presence="required"`. Rationale: one call admits every pending steward in an IP range, and RFC1918 ranges collide across tenants, so the match set is a trust-boundary decision. The preview endpoint is deliberately *not* presence-gated — an operator inspects the exact match set first, then spends one gesture on the mutation. The web console blocks the mutating call until the preview has been shown and confirmed.
+
+The `pending` output includes a `SOURCE_IP` column showing the steward's source IP at registration time, and an `RDNS` column populated by a best-effort reverse DNS lookup at display time (shows `-` on failure or timeout).
+
+The `approve-by-cidr` command performs IP containment filtering on the controller using `net.ParseCIDR` + `ipNet.Contains` — the CIDR is not delegated to the database. All approved entries are updated atomically per-entry; partial approval (some entries approved, others skipped) is the expected outcome.
+
+The pending queue is backed by the durable `PendingRegistrationStore` (SQLite by default, PostgreSQL at production scale) and survives controller restarts.
+
+### RBAC
+
+All API operations are governed by role-based access control:
+
+- **Permissions** — fine-grained actions (e.g., `steward:list`, `steward:write-config`)
+- **Roles** — groups of permissions (e.g., `admin`, `operator`, `viewer`)
+- **Subjects** — users or API keys assigned to roles
+- **Tenant scoping** — permissions are scoped to tenant path; an MSP admin sees all descendants, a client admin sees only their subtree
+- **Zero-trust evaluation** — every request is evaluated against the policy engine
+
+#### Cache Invalidation
+
+The RBAC and zero-trust policy subsystems maintain a two-tier authorization cache (L1 in-memory, L2 warm store). When a role is revoked or a zero-trust policy is deactivated or retired, all cache layers are invalidated **synchronously** before the write returns. Stale cached grants cannot outlive the policy change that revoked them.
+
+If a cache invalidation call fails transiently (e.g., transient error), the operation is still recorded in the audit log with `cache_invalidation_failed=true`. In that scenario, the worst-case stale window is bounded by cache TTLs: **up to 5 minutes** for L1 + **up to 10 minutes** for L2 (L2 TTL is typically 2× L1). Under normal operation (invalidation succeeds) the stale window is zero.
+
+### API Authentication
+
+Three authentication mechanisms, used for different purposes.
+
+**Admin mTLS bundle (primary operator path)**
+- Single-file YAML containing admin cert + key + CA inline
+- Generated on `--init` and written to a platform-default path:
+  - Linux/macOS: `/etc/cfgms/admin.bundle.yaml`
+  - Windows: `%ProgramData%\cfgms\admin.bundle.yaml`
+- The `cfg` CLI auto-discovers via: `--bundle <path>` flag → `CFGMS_ADMIN_BUNDLE` env → `~/.config/cfgms/admin.bundle.yaml` → system path
+- `cfgms-controller bootstrap-admin` manages bundles:
+  - Issue named bundles per operator (`bootstrap-admin --name <op> --output <path>`)
+  - Regenerate the system bundle (`bootstrap-admin --regenerate`)
+  - List issued bundles (`bootstrap-admin --list`)
+  - Revoke by serial (`bootstrap-admin --revoke <serial>`)
+
+**API keys (programmatic access)**
+- Stored encrypted, used for service-to-service integration and scripted automation
+- Scoped to specific permissions via RBAC
+
+**Registration tokens (steward bootstrap only)**
+- Scoped, expirable tokens for the steward registration flow described in [Steward Registration](#steward-registration)
+- Not usable for general API authentication after bootstrap
+
+### mTLS Admin Certificate Principal Resolution
+
+When an admin-marked mTLS certificate passes chain verification and revocation check, the controller resolves the authenticating principal from the certificate's bound account (if one exists) rather than hardcoding root scope unconditionally.
+
+**Account-bound path:** If the certificate's serial appears in a `CertBindings` entry on a non-disabled account, the principal derives its `ID`, `TenantID`, `GlobalScope`, and `Permissions` from that account. `Principal.ID` is always the account's ID — never the certificate CommonName — so the audit trail and RBAC subject identity are the same value on every surface. `RootScoped` is read exclusively from the certificate's explicit extension (`cert.HasRootScopeMarker`), never derived from the account (ADR-025 A2.1/A2.2). A certificate carrying the root-scope marker but bound to a tenant-scoped account produces `RootScoped == true` with a non-empty `TenantID`; the marker is therefore inert, because `authorizeTenantAccess` only consults it when `TenantID == ""`.
+
+**Root binding (ADR-025 Amendment 7):** a root-scope account's principal — and the bootstrap admin certificate's — carries the deployment's root tenant as `TenantID` and root `TenantScope` from its explicit flag. An empty tenant is never root: a principal with neither a root flag nor a tenant is refused.
+
+**Fail-closed paths:** A certificate bound to a disabled account is rejected (HTTP 401) without falling through to any fallback. A store error during account lookup is also rejected — an outage must not become a privilege escalation.
+
+**Bootstrap fallback (ADR-025 Amendment 3):** An admin-marked certificate with no bound account is treated as unscoped root indefinitely. This is a deliberate, permanent design decision: closing the fallback once a first account exists would mean a lost or corrupted account store leaves a freshly issued certificate also unbound and therefore rejected, so holding the CA would no longer suffice to regain access to the deployment. Every request that takes this path emits the `admin.bootstrap_fallback_used` audit event with `auth_path: "bootstrap-fallback"`. The `accounts_in_cache` field in the event makes the anomalous combination — bootstrap path used while accounts exist — separately detectable in monitoring. Revocation remains authoritative: a revoked certificate is rejected before the account lookup, so a stolen unbound certificate cannot bypass revocation by lacking a binding.
+
+**Bound certificates cannot re-enter the fallback.** Because the fallback is unscoped root, any transition from *bound* to *unbound* while the certificate is still valid would widen that certificate's scope — deleting a tenant-scoped administrator would promote their certificate to root over every tenant. Three API paths can reach that transition, and each is closed rather than cascaded. This list is the complete set: every write path that rebuilds an account record must appear here, because `persistAccount` rebuilds the account metadata from the record it is handed and writes `cert_bindings` only when the slice is non-empty, so a write path that drops the field silently unbinds every certificate on the account.
+
+- `POST /api/v1/accounts/{username}/certs/revoke/{serial}` revokes the certificate through `pkg/cert` *before* dropping the binding, and refuses the request with `503 CERT_MANAGER_UNAVAILABLE` when no certificate manager is configured — an unbind that cannot revoke is refused, not completed as a partial success.
+- `DELETE /api/v1/accounts/{username}` refuses with `409 CERT_BINDINGS_PRESENT` while the account still has bindings. Deprovisioning is revoke-then-delete; the certificate is invalid before the account record that scoped it disappears.
+- `POST /api/v1/accounts` on an existing username (reset/upsert) **carries the bindings forward** onto the rebuilt record. It is not refused the way a delete is: a reset is the takeover-containment operation — re-provision to zero authenticators, terminate live sessions — so refusing it while bindings exist would block containment on precisely the most privileged accounts. A reset keeps the account record and its ID, so the record that scopes each binding survives the write; carrying the slice forward closes the transition without weakening containment. A reset that also moves the account's scope moves its bindings with it, and the destination scope is bounded by the caller's own subtree (`isWithinTenantScope`), so no reset can widen a certificate beyond the authority of the admin issuing it.
+
+`PUT /api/v1/accounts/{username}` and the WebAuthn, passkey-login and elevation write paths copy the whole account record before persisting, so they carry bindings forward structurally and are not separate transitions.
+
+**The identity pin.** An operator authenticating with a certificate bound to `account-foo` is identified as `account-foo` on every request — direct mTLS and Bearer-token CLI sessions alike. `handleSessionCreate` mints the CLI session under the cert principal, so the session's `PrincipalID` is that same account ID, and the Bearer path re-reads the account record by it. The certificate's CommonName is never the acting identity on any surface, and no caller-supplied string can be substituted for the account ID.
+
+**What authorizes a request is the account record, not a role assignment.** `requirePermission` → `hasPermission` consults `Principal.Permissions` only, and `Permissions` is populated exclusively from the authenticated account's `Permissions` field (all three branches: mTLS cert, Bearer session, web cookie). Root-scope accounts carry `ImplicitAdmin` instead and hold every permission. **RBAC subject-role assignments (`POST /api/v1/rbac/subjects/{id}/roles`) are stored and readable, but no request path resolves them into effective permissions** — every `rbacService` call site in `features/controller/api` is CRUD or read, and `handleAssignSubjectRole` writes to the RBAC store without touching the account record.
+
+Two operational consequences follow, and both cut against the operator's expectation:
+
+- **Granting a role does not grant API or web access.** The permission must be present on the account record (`account.Permissions`) for any surface to honour it.
+- **Revoking a role assignment does not revoke access.** This is the direction that matters for containment: a grant already written to `account.Permissions` keeps authorizing after the role assignment is removed. Removing a permission from the account record — or disabling the account, which is rejected at authentication on every surface — is what actually revokes it.
+
+Subject-role assignments are role modelling. `account.Permissions` is the enforced grant set on every surface; `requirePermission` in `features/controller/api/middleware.go` checks it directly.
+
+When a role *is* assigned, the subject ID must be the account ID returned by `GET /api/v1/accounts/{username}` — never the certificate's CN field. `handleAssignSubjectRole` validates no foreign key against the account type, so a CN string is accepted as a subject ID and records a grant against an identity the auth chain never produces.
+
+See `features/controller/api/middleware.go` (`extractAdminPrincipal`, `authenticationMiddleware`, `requirePermission`, `hasPermission`, `emitBootstrapFallbackAudit`) for the implementation. `features/controller/api/account_rbac_integration_test.go` asserts both properties above end-to-end (Issue #3583): the identity pin, and that a role carrying `config:list` assigned to the account's own subject ID leaves a `config:list`-gated request denied.
+
+### Admin Session Model
+
+The zero-standing-privilege session model (ADR-014) eliminates long-lived admin credentials: a human admin authenticates once with a short-lived mTLS certificate, receives a rolling bearer token, and the token automatically expires if unused.
+
+For the operator-facing CLI workflow (first connect, reconnect, session status, disconnect), see the [cfg Operator Guide](../deployment/cfg-operator-guide.md). This section documents the server-side mechanics.
+
+**Session lifecycle:**
+
+1. `POST /api/v1/sessions` — admin mTLS only; returns `{session_id, token, issued_at, idle_ttl, absolute_expiry}` (HTTP 201). The token is a 43-char base64url string (32 random bytes from `crypto/rand`, 256 bits of entropy). The `cfg connect` command drives this call.
+2. Every authenticated request carrying `Authorization: Bearer <session-token>` resets the idle TTL and returns a refreshed token in the `X-Session-Token` response header. The client replaces its stored token with the refreshed value on each response. The `cfg` CLI handles token rotation transparently — each subcommand that makes an API call automatically updates the stored token.
+3. `DELETE /api/v1/sessions/{id}` — revokes immediately; callable with a valid session token or an admin mTLS cert. The `cfg disconnect` command drives this call.
+
+**Token lifecycle parameters (ADR-014 ratified defaults):**
+
+| Parameter | Default | Description |
+|---|---|---|
+| Idle TTL | 15 minutes | Session expires if no request is made within this window |
+| Absolute cap | 8 hours | Hard ceiling from original connect, regardless of activity |
+| Grace window | 30 seconds | Prior token remains valid this long after a renewal (tolerates racing requests from a stateless CLI) |
+
+**Rolling-token model:** On each successful request, the controller generates a fresh token (current token → new token, old token moves to grace slot). Concurrent requests carrying the prior token during the grace window are accepted without triggering a second rotation. After the grace window, the prior token is rejected (HTTP 401).
+
+**Security properties:**
+- The controller stores only SHA-256(token) — raw token values are never persisted or logged.
+- Token values are sanitized from all log output via `logging.SanitizeLogValue()`.
+- Session-token principals carry `IsAdmin=true` with the same tenant scope as the originating mTLS cert (typically empty for admin certs, meaning no tenant restriction).
+- Session tokens are length-distinguishable from API keys: session tokens are 43 chars (base64url without padding), API keys are 44 chars (base64url with padding). The middleware uses this length difference to route auth correctly.
+- Session durability follows `storage.sqlite_path`: when SQLite is configured, sessions survive a controller restart and the `cfg` CLI can reconnect without re-authenticating; when SQLite is absent, an in-memory store is used and sessions are lost on restart. The store selection happens at bootstrap (`initializeSessionStore`, story #2774) using the same config signal as the upgrade-store and tag-store fallback paths.
+- The `cfg` CLI stores the session token in the OS-native secret store (Windows Credential Manager, macOS Keychain, Linux Secret Service or kernel keyring) — never in a file on disk. The encrypted admin bundle stored alongside it is machine-bound and cannot be reused from another machine.
+
+## Multi-Tenancy
+
+The controller enforces strict tenant isolation across all operations.
+
+### Principal Fields: Assurance vs. GlobalScope
+
+Every authenticated `Principal` carries two independent fields that govern different access decisions:
+
+- **`Assurance`** — the identity assurance level (ADR-021). Governs which operations the principal may perform: `AssuranceMachine` (API key, relay-script), `AssuranceBasic` (cfg-Bearer session, web session), `AssuranceStrong` (mTLS cert). Auth-strength-gated routes (certificate provisioning, RBAC management, etc.) check this field.
+
+- **`GlobalScope`** — whether the principal has cross-tenant visibility (`true`) or is confined to its own tenant subtree (`false`). Today all human-authenticated principals (mTLS cert, cfg-Bearer session, web session) have `GlobalScope=true`; all machine principals (API key, relay-script) have `GlobalScope=false`.
+
+These signals are **orthogonal**: a future tenant-scoped account type would have `Assurance=AssuranceBasic` but `GlobalScope=false` and would be tenant-confined despite its assurance level. A strongly-authenticated but tenant-scoped service account would have `Assurance=AssuranceStrong` but `GlobalScope=false` — it could perform strongly-authenticated operations but only within its own tenant. Do not collapse these two signals back into one; see ADR-021 Context §"It is load-bearing on an unwritten assumption" for the failure mode this separation forecloses.
+
+### Tenant Model
+
+CFGMS uses a **recursive parent-child tenant model**. Every tenant has a unique identifier and an optional parent identifier. There are no fixed hierarchy levels — "MSP → Client → Group → Device" is a common convention, but the system supports arbitrary depth.
+
+Tenants are identified by **path** (e.g., `root/msp-a/client-1/servers`). Path-based identification enables:
+
+- **Prefix matching** — target all tenants under `root/msp-a/` with a single operation
+- **Wildcard targeting** — `root/msp-a/*/production` matches all production groups across clients
+- **Efficient resolution** — cfg inheritance walks the path from root to leaf
+
+#### Example: Single MSP
+
+```
+acme-msp (root)
+ ├── client-a
+ │   ├── production
+ │   │   ├── device-1 (steward)
+ │   │   └── device-2 (steward)
+ │   └── development
+ │       └── device-3 (steward)
+ ├── client-b
+ │   ├── servers
+ │   │   └── device-4 (steward)
+ │   └── workstations
+ │       └── device-5 (steward)
+ └── internal
+     └── device-6 (steward)
+```
+
+One root tenant, unlimited depth.
+
+#### Example: SaaS Platform
+
+```
+Cell 1                    Cell 2                    Cell 3
+─────────────             ─────────────             ─────────────
+msp-alpha (root)          msp-beta (root)           msp-gamma (root)
+ ├── client-1              ├── client-1              └── ...
+ │   └── ...                │   └── ...
+ └── client-2               └── client-2
+     └── ...                    └── ...
+```
+
+Each cell is a complete, independent CFGMS deployment (its own controller cluster, database, blob store, and vault, per ADR-032) with exactly one root tenant; MSPs are children of that root. Cells share no runtime state — there is no shared parent tenant, no cross-cell inheritance, and no cross-cell visibility. This topology enables cfg.is to host hundreds of MSPs across cells with per-MSP isolation, resource scheduling, and billing. Cross-cell concerns (a tenant→cell directory, admin routing, a cross-cell operations view) are deferred until a second cell is justified.
+
+### Cfg Inheritance
+
+Configuration resolves from root toward the leaf, but not through every
+intermediate tenant on a deep path:
+
+1. Start with the root tenant's cfg
+2. Merge the child tenant's cfg over the parent's, but only for the first
+   three tenant-path levels (MSP, Client, Group) — `InheritanceResolver`
+   applies `msp-policies`, `client-policies` and `group-policies` at those
+   three levels specifically and skips any intermediate tenant beyond them;
+   a path deeper than three levels does not get a fourth merge step
+3. Named resources replace entire blocks (declarative merging)
+4. Device-level cfg is then applied unconditionally, keyed by steward ID
+   rather than tenant-path depth, so the leaf layer always applies regardless
+   of how deep the steward's tenant sits
+5. The leaf cfg (effective cfg for a steward) is the fully-resolved result
+
+See [Configuration Inheritance — Current Inheritance Depth](../guides/configuration-inheritance.md#current-inheritance-depth)
+for the depth cap in full and its rationale.
+
+Every value in the effective cfg carries its **source path** and **version** for auditability — an admin can see exactly which tenant level provided each setting.
+
+### Isolation Guarantees
+
+- **Data isolation** — tenants cannot access other tenants' cfgs, DNA, or reports
+- **Transport isolation** — each steward connects with its own mTLS client certificate; gRPC service handlers enforce per-steward identity on every call
+- **Certificate isolation** — each steward gets its own client certificate
+- **RBAC isolation** — permissions are scoped to tenant path; a client admin cannot manage another client's devices
+- **Cfg inheritance** — flows down the hierarchy only; children inherit from parents, never sideways
+- **Cell isolation** — cells share no runtime state; each cell has exactly one root tenant
+
+## Monitoring and Reporting
+
+### Fleet Visibility
+
+The controller aggregates data from all stewards to provide:
+
+- **Compliance dashboard** — which devices are in desired state, which have drift
+- **Health overview** — which stewards are connected, degraded, or offline
+- **Performance trends** — historical CPU, memory, disk, network across the fleet (from steward metric uploads)
+- **Audit trail** — who changed what cfg, when, and what happened as a result
+
+### Reports
+
+The controller generates reports from aggregated steward data:
+
+- **Compliance reports** — per-tenant, per-group, or fleet-wide compliance status
+- **Drift reports** — what changed, when, on which devices
+- **Executive summaries** — high-level fleet health for management
+- **Export formats** — JSON, CSV, HTML, PDF
+
+### Alerting
+
+The controller evaluates fleet-level conditions and raises alerts:
+
+- Steward disconnection (heartbeat timeout)
+- Widespread compliance failure (threshold of stewards reporting drift)
+- Cfg distribution failure (steward rejected or failed to apply)
+- Security events (unauthorized registration attempts, certificate issues)
+
+## High Availability
+
+### Single Server
+
+The controller runs as a single instance. If it goes down, stewards continue operating independently on their last-known cfgs. When the controller comes back, stewards reconnect and resync.
+
+### Clustered
+
+Multiple controller instances form a cluster with no leader-election protocol
+of its own. Cluster membership and leadership authority are both derived from
+the **shared PostgreSQL backend** every node already reads and writes — there
+is no replicated log, no peer-to-peer consensus transport, and no election
+timer (Issue #3763, ADR-031 Decision 5, superseding the Raft-based design of
+ADR-028):
+
+- **Cluster membership** — every `ClusterMode` node periodically registers its
+  own ID, advertised address, version and start time in the shared
+  controller-node registry
+  (`pkg/storage/interfaces/business.NodeRegistryStore`,
+  `business.NodeRegistryStaleAfter` = 90s). `GetClusterNodes()` reads the
+  registry directly; a node that stops registering (crash, graceful shutdown)
+  drops out once its record goes stale — there is no separate deregistration
+  call and no persisted membership log to recover on restart. A restarting
+  node simply resumes registering itself on the next cycle. The record also
+  carries a last-seen time that the store sets from its own clock (never the
+  registering node's). `ListNodes` omits stale records, so a registry-listed node
+  is live: the failover monitor treats it as healthy, and `GetClusterNodes()` /
+  `GET /api/v1/ha/cluster` report its version, start time and last-seen from the
+  record rather than a published state.
+- **Leadership** — one cluster-wide lease (`pkg/lease`, row name
+  `controller-cluster-leadership`) is the sole authority. Every node contends
+  for it independently via `TryAcquire`; `HasLeadership()` reads a
+  monotonic-clock-bounded local cache of the last successful acquire/renew
+  (`pkg/lease.SafetyMargin`, derived from `cfg.Cluster.ElectionTimeout` via
+  the same 0.8× ratio ADR-029 Decision 1 established for the Raft-era lease).
+  A node that can no longer renew — because it lost network access to the
+  database, or crashed — has its cached authority lapse on its own clock,
+  with no live database read required to detect the loss.
+- **State replication** — there is nothing to replicate: every node reads and
+  writes the shared PostgreSQL backend directly for cfg data, registration
+  records, audit, RBAC, the leadership lease, and cluster membership alike.
+- **Automatic failover** — if the leader goes down (or loses database
+  reachability), its cached authority lapses within one `SafetyMargin`
+  window and any contending node may then acquire the now-expired lease row.
+  There is no explicit election: whichever node's next `TryAcquire` lands
+  first wins.
+- **Split-brain prevention** — two nodes cannot simultaneously hold the same
+  lease row for longer than the derived `SafetyMargin` bound: the lease row
+  itself is exclusive at the database layer (`AcquireOrRenew`'s
+  compare-and-set), and each node's belief that it still holds authority is
+  bounded by its own monotonic clock, not by a live check. This is the same
+  property ADR-029's Raft-era lease existed to provide; ADR-031 Decision 5
+  keeps the property while removing the Raft layer it used to sit on top of.
+
+Stewards connect to any cluster node. If their node goes down, they reconnect to another.
+
+Cross-node steward dispatch — reaching a steward whose control-plane
+connection is held by a *different* node than the one that decided to send it
+a command — is a separate mechanism from either of the above: see "Cluster
+Command Delivery — Routing Table + Internal RPC + Outbox" below.
+
+#### Write Admission (ADR-031 Decision 1)
+
+Every cluster node accepts every read and write; there is no per-request
+leadership gate. Before this decision, ~50 inline `HasLeadership()` checks
+enforced a leader-only write convention across `features/controller/api`
+(inconsistently — a parallel `ungatedHandlerBaseline` ratchet tracked dozens of
+handlers that were never gated at all). The shared PostgreSQL database (ADR-007)
+was already the only durable store these writes reached, so the gate blocked no
+actual race there — it only enforced routing. ADR-031 removes the gates and makes
+multi-writer safety explicit at the database layer instead: uniqueness
+constraints and compare-and-set on version columns per write path (see "Write
+Admission for Mutating Admin API Actions" under the REST API section below for
+the inventory).
+
+`HasLeadership()` (lease-backed, ADR-029 Decision 4) still exists and still
+governs the one thing that remains a true cluster singleton: background
+sweep/expiry/scheduler loops, claimed via `pkg/lease.SingletonJob` (see
+Background-Loop Singleton Scheduling below) rather than a request-path gate. It
+also remains available for status/diagnostic reporting (`GET /api/v1/ha/status`
+et al.). Batch-job command dispatch continues to use lease-token-derived fencing
+(sourced from the database lease's monotonic token rather than `GetTerm()`,
+per ADR-031 Decision 3) rather than an HTTP-layer gate.
+
+#### Background-Loop Singleton Scheduling (Issue #3762, ADR-031 Decision 4)
+
+Before this story, every background sweep/expiry/scheduler loop ran on **every**
+cluster node unconditionally — a multi-node deployment did each sweep once per
+node per cycle rather than once per cluster. `HasLeadership()` gated exactly one
+of these, and only incidentally: `resumePendingPushes`, a one-shot startup replay
+(`features/controller/server/server.go`), not a periodic loop.
+
+Cluster-singleton loops now claim a `pkg/lease` lease before running each cycle,
+using the reusable `pkg/lease.SingletonJob` wrapper
+(`RunIfLeader(ctx, fn)`) so no call site hand-rolls its own acquire/renew/release
+sequence. `ha.Manager.NewBackgroundLoopLease(name, logger)` constructs one,
+backed by a lease population distinct from the cluster-leadership lease
+(`backgroundLoopLeaseTTL` = 90s, `backgroundLoopRenewInterval` = 20s, independent
+of `cfg.Cluster.ElectionTimeout`). It is nil-receiver-safe: a nil `*ha.Manager`
+(OSS single-node) and any non-`ClusterMode` deployment yield a `SingletonJob`
+that runs every cycle unconditionally — identical to pre-#3762 behavior, so only
+genuine multi-node clusters are affected.
+
+**How `RunIfLeader` works:** on each tick, the loop calls
+`leaseJob.RunIfLeader(ctx, cycleFn)`. It attempts `TryAcquire` for this cycle;
+if another node holds the lease, `cycleFn` is skipped entirely (`RunIfLeader`
+returns `false`). If acquired, a background goroutine renews the lease every
+`RenewInterval` for as long as `cycleFn` runs — so a cycle slower than the lease
+TTL does not lose the lease mid-execution and trigger a duplicate run elsewhere.
+The lease is not explicitly released when the cycle finishes; it is left to
+expire at TTL, which is simpler than a release round-trip and equally correct,
+since no other node can acquire it before then regardless.
+
+**Converted loops and their lease names:**
+
+| Loop | Lease name | Category |
+|------|-----------|----------|
+| IP-trust dark-window expiry (`IPTrustExpiryJob`) | `controller-ip-trust-expiry` | True singleton — one global sweep across all tenants |
+| Pending-registration expiry (`PendingExpiryJob`) | `controller-pending-registration-expiry` | True singleton |
+| Manual-review pending expiry (`ManualReviewApprovalHook`) | `controller-manual-review-pending-expiry` | True singleton — a second, independent sweep of the same `PendingRegistrationStore.ExpireStale`, pre-existing and out of scope to merge with the above (this story does not redesign loop business logic) |
+| Credential-request / enrolment-token expiry sweep | `controller-credential-request-expiry` | True singleton — one tick covers both the enrolment-token and orphaned-collected-certificate sweeps |
+| CLI-login request expiry sweep | `controller-cli-login-request-expiry` | True singleton |
+| DNA storage maintenance (`dnaStorage.Manager.runMaintenance`: flush, optimize, retention) | `controller-dna-storage-maintenance` | True singleton — the longest-running cycle of the set (see the renewal-under-load test below) |
+| Workflow trigger cron scheduler (`CronScheduler.checkAndExecuteDueTriggers`) | `controller-workflow-trigger-scheduler` | True singleton — a due trigger must fire once per cluster, not once per node |
+| Git-sync per-scope polling (`pkg/gitsync.Syncer`) | `controller-gitsync-scope-<tenant_path>/<namespace>` | True singleton, **one lease per scope** — scopes are independent (many may legitimately poll concurrently across a cluster), so this is many small singletons rather than one global sweep or a claimable work queue. Webhook-triggered syncs (`pkg/gitsync/webhook.go`) are **not** gated: a webhook must run on whichever node received the HTTP request, never wherever a different scope's polling lease happens to be held. |
+
+**No loop in the current, live set is queue-shaped** (a table of discrete,
+independently claimable work items) in the `SELECT ... FOR UPDATE SKIP LOCKED`
+sense. The one candidate that resembles queue-shaped work —
+`features/controller/dispatcher.Dispatcher`, which dispatches queued script
+executions per device — is excluded: its `ExecutionQueue` is an in-memory,
+node-local structure (`features/modules/stdlib/script/execution_queue.go`), not
+shared cluster state, so each node correctly dispatches only what was queued to
+it directly. Converting it to database work-claiming would require making that
+queue durable and shared first, which is a storage-layer change this story does
+not make.
+
+Several other loops matching a `time.NewTicker` search were found unwired to any
+production binary (RBAC JIT access-manager cleanup, the SIEM engine's four
+tickers, directory DNA drift/monitoring, and `features/config/git.DefaultGitManager`,
+superseded by `pkg/gitsync`) — dead code, not currently running, so they are out
+of this story's live-loop count and were left untouched.
+
+`pkg/configrouting.SyncService` was in that unwired set when this story ran;
+Issue #4408 constructs and runs it from `features/controller/server/server.go`
+afterward (`Start()` calls `Run`, `Stop()` cancels the context `Start()` passed
+it and waits for every per-tenant goroutine to drain). It runs **unleased**: no
+`SingletonJob`/`NewBackgroundLoopLease` gate, so in a cluster deployment every
+node polls and pulls each git-sourced tenant independently rather than once per
+cluster per cycle — the same unconverted shape every loop in this section had
+before Issue #3762, not something #4408 introduced new. `SyncTenantWithRemote`
+is a fast-forward pull that is a no-op when already up to date, so redundant
+per-node polls are wasted work, not a correctness hazard; converting it to the
+per-scope lease pattern `pkg/gitsync.Syncer` already uses is a candidate
+follow-up, not done here (Issue #4408 wires the service as designed — "Out of
+Scope: Changing SyncService's own polling design").
+
+Each git-sourced tenant polls at its own `config_source_poll_interval` tenant
+metadata value, floored to **one minute**: a configured value below one minute
+(including zero or negative) is raised to one minute rather than rejected. An
+absent or unparseable value does not reach the floor at all — `pkg/config`'s
+`ParseConfigSource` falls back to a 5-minute default before `SyncService` ever
+sees it, and 5 minutes is already above the floor. A tenant with no git config
+source is never polled at all — `SyncService` discovers
+git-sourced tenants by walking the tenant hierarchy under its configured root
+(`rootTenantID`, resolved from the controller's "default" bootstrap tenant
+record) and only starts a polling goroutine for tenants whose effective config
+source resolves to `ConfigSourceTypeGit`. On a pull that introduces new
+commits, the service records a `config_source_sync` audit event and invokes
+the same tenant-level cascade recompute that on-request resolution already
+performs for that tenant (`ConfigurationServiceV2.GetEffectiveConfiguration`
+with an empty steward ID) — not the save=deploy steward fan-out, which is a
+separate, write-triggered push registered in
+`features/controller/api/server.go`.
+
+A git credential is tied to the repository it was stored for. The credential
+named by `config_source_credential` carries a `bound_repository_url` value in
+its own secret metadata, written by `cfg tenant config-source set-credential`;
+the binding is never read from tenant metadata. Both the mount-point validator
+and the git config store (at clone and at every pull) compare that binding with
+`config_source_url` by exact equality after normalization, before the secret
+value reaches an `Authorization` header. An existing credential without the
+binding stops working until it is stored again with `set-credential`, and a
+secret store whose provider returns no metadata fails closed. An unbound or
+mismatched credential is refused with an error that names the fix (store it
+again with `cfg tenant config-source set-credential`) and never contains the
+secret value.
+
+**Tests:** `pkg/lease/singleton_test.go` and
+`pkg/ha/background_loop_lease_test.go` prove the `SingletonJob`/
+`NewBackgroundLoopLease` primitives directly (two-node mutual exclusion, and a
+cycle far longer than the lease TTL renewing without a duplicate run). Each
+converted loop above carries its own two-node test proving the same property
+through its actual production wiring (e.g.
+`TestIPTrustExpiryJob_TwoNodes_OnlyOneRunsPerCycle`,
+`TestSyncer_PerScopeLease_TwoNodes_OnlyOneRunsPerCycle`); the DNA storage
+maintenance loop additionally carries
+`TestManager_MaintenanceLease_SlowCycleRenewsAcrossTTL_NoDuplicateRun`, the
+renewal-under-load test for the longest-running cycle.
+
+## REST API
+
+The REST API is the admin interface to the controller. All operations are authenticated, authorized via RBAC, and audit-logged.
+
+### API Categories
+
+| Category | Purpose |
+|----------|---------|
+| **Health** | Controller status, component health |
+| **Steward management** | List, inspect, configure stewards |
+| **Cfg management** | Upload, validate, distribute cfgs |
+| **Registration tokens** | Create, list, revoke tokens for steward bootstrap |
+| **Certificates** | List, provision, revoke certificates |
+| **RBAC** | Manage permissions, roles, subjects |
+| **API keys** | Create, list, delete API keys |
+| **Tenants** | Manage recursive tenant hierarchy (create, move, delete tenants at any depth) |
+| **Monitoring** | Fleet metrics, health, logs, traces |
+| **Compliance** | Compliance status, reports |
+| **HA** | Cluster status, leader info, node list |
+| **Workflows** | Create, trigger, monitor workflows |
+| **Orchestration** | Initiate and monitor multi-node operations |
+| **Modules** | List cached modules, approve queued bundles |
+| **Live telemetry** | `GET /api/v1/telemetry/ws/{steward_id}` — WebSocket endpoint that fans steward telemetry snapshots (process/service) to browser subscribers in real time. Requires `steward:telemetry` permission. The controller subscribes upstream to the steward (via `TelemetryRequest{subscribe=true}`) on the first browser connection and unsubscribes on the last browser disconnect, preserving the "collect only while watched" property. |
+
+### Steward List Pagination
+
+`GET /api/v1/stewards` returns the full steward list by default and supports optional server-side pagination (Issue #2489) so browser clients can page through large fleets without downloading the full list:
+
+- **Query parameters:** `limit` (integer, 1–500) and `offset` (integer, ≥ 0). `limit` without `offset` implies `offset=0`; `offset` without `limit` is rejected with HTTP 400 (ambiguous page size). Out-of-range or non-integer values are rejected with HTTP 400 and a specific error code.
+- **Ordering:** when paginating, results are sorted by steward ID before slicing so pages are stable across requests. This ordering exists solely for pagination determinism — user-facing sort is a client-side concern.
+- **Paginated envelope:** when `limit`/`offset` are present, the response `data` payload is an object instead of the plain array:
+
+```json
+{
+  "stewards": [ ... ],
+  "total": 48123,
+  "limit": 100,
+  "offset": 200
+}
+```
+
+`total` is the post-filter, pre-slice steward count, so clients can compute page counts. Pagination composes with the existing filter parameters (`os`, `platform`, `arch`, `status`, `hostname`, `tag`) and applies on both the filtered and unfiltered code paths.
+
+- **Backward compatibility:** requests without `limit`/`offset` return the existing payload shape unchanged — a plain JSON array of stewards — so `cfg` and existing API clients are unaffected.
+
+### Write Admission for Mutating Admin API Actions (ADR-031 Decision 1)
+
+Every state-mutating handler (POST/PUT/DELETE/PATCH) in `features/controller/api` accepts requests on any cluster node — there is no per-handler `HasLeadership()` gate on the request path. Before ADR-031, epic #3411 had gated roughly fifty of these handlers on `HasLeadership()` (the lease-backed authority primitive, ADR-029 Decision 4) while a parallel `ungatedHandlerBaseline` ratchet tracked dozens more that were never gated at all — the leader-only model was a convention, not a completed invariant. ADR-031 Decision 1 removes the convention rather than finishing it: the shared PostgreSQL database (ADR-007) was already the only durable store these writes reached, from any node, so the gate blocked no actual race there.
+
+#### Multi-writer safety is now explicit per write path
+
+Removing the gate transferred the safety obligation it used to provide implicitly to each write path individually. Reviewed and made safe as part of this decision and its dependencies:
+
+- **Credential and CLI-login lifecycle transitions** (WebAuthn credential revocation, enrolment-token spend-then-lodge, both approved→collected transitions, credential issue-and-rebind, credential-request approval) persist via `SecretStore.CompareAndSwapSecret`, keyed on the version read alongside the record — a concurrent conflicting write observes `409 Conflict` rather than silently losing an update (Issue #3775).
+- **Audit-chain sequencing** (ADR-004) — per-tenant sequence numbers and `previous_checksum` linkage are assigned by database-side serialization rather than a single in-process drain goroutine, which N cluster nodes running independently could no longer make safe (Issue #3754).
+- **Registration-refresh nonces** (ADR-011) — the single-use nonce lives in a durable, cross-node consumable `NonceStore` rather than an in-process cache, so a challenge and its completion can land on different nodes safely (Issue #3755).
+- **WebAuthn ceremony state and throttles** (ADR-021) — in `ClusterMode`, the pending state of every passkey ceremony (register, presence, presence token, step-up, operator-payload sign, passkey login, first-passkey enrolment) lives in the shared `NonceStore` under a per-ceremony key prefix, so `begin` and `finish` can land on different nodes and each ceremony finishes at most once cluster-wide. The failed-attempt throttles (step-up, passkey login) count on the shared `RateCounterStore`, so spreading attempts across nodes does not multiply the budget. The per-client cap on passkey login ceremonies counts `begin` calls per client in the five-minute ceremony window rather than concurrently pending ceremonies, because a `finish` on another node cannot release a node-local gauge. A missing `NonceStore` or a store error returns 503; the node-local map is never a fallback. Outside `ClusterMode` the in-memory maps remain the default (Issue #4527).
+
+#### Config push and background loops
+
+`POST /api/v1/config/push` (`handleConfigPush`), the save=deploy fanout callback (`RegisterFanoutCallback` in `server.go`), and the startup replay of interrupted pushes (`resumePendingPushes`) are, likewise, no longer leadership-gated. Any node now accepts a push, resolves the selector, queries the fleet, writes desired state to the entity graph, and fans out to stewards via `commandPublisher` directly. Delivery durability — one outbox row per targeted steward, committed atomically with the push record so a controller crash mid-fan-out cannot silently drop a steward — is ADR-031 Decision 2, a separate concern from this admission change.
+
+`HasLeadership()` remains the correct primitive for the one thing that is still a genuine cluster singleton: background sweep/expiry/scheduler loops, which claim a `pkg/lease.SingletonJob` lease per cycle rather than gating a request (see Background-Loop Singleton Scheduling above). It also remains available for status/diagnostic reporting. `IsLeader()`/`IsRaftLeader()` — the raw Raft replication-protocol primitives the architecture rule (Story #3391) used to police outside `pkg/ha` — were deleted along with Raft itself (Issue #3763); `TestNoRawLeaderPrimitiveOutsidePkgHA` (`pkg/ha/architecture_test.go`) remains in place as a name-based guard against either being reintroduced.
+
+#### Retired: the baseline ratchet
+
+`features/controller/api/architecture_test.go`'s `TestNoUngatedMutatingHandler` and its `ungatedHandlerBaseline` map — the mechanism that used to enforce the gate and track handlers still owing one — are deleted along with the gates themselves (Issue #3761). Per ADR-031 Decision 1, epic #3411's remaining scope (gating the handlers the baseline still listed) inverts rather than completing: there is no gate left to add those handlers to. `check-architecture` no longer runs this test; `TestNoRawLeaderPrimitiveOutsidePkgHA` (Story #3391, `pkg/ha/architecture_test.go`) is unaffected and continues to run as part of the same Makefile target.
+
+---
+
+## Module Cache and Approval Workflow
+
+The controller fetches module bundles from configured git sources, verifies publisher signatures, assigns an approval decision, and stages approved bundles in a content-addressed on-disk cache.
+
+### Cache Filesystem Layout
+
+Bundles are stored at:
+
+```
+<data_dir>/module-cache/<publisher>/<name>/<version>/<content_hash>/
+    manifest.yaml      — module metadata (ModuleMetadata)
+    binaries.yaml      — os-arch → relative binary path index
+    signatures.yaml    — publisher signatures
+    content_hash.txt   — original content hash (pre-path-sanitization)
+    approval.yaml      — current approval state
+```
+
+The `<content_hash>` directory name is a path-safe transformation of the bundle's SHA-256 content hash. Standard base64 characters (`/`, `+`, `=`) are replaced with filesystem-safe equivalents; the original hash is preserved in `content_hash.txt` and returned by all cache operations.
+
+**Idempotency:** `Put()` with the same content hash is a no-op. `Put()` with a different hash at the same `(publisher, name, version)` returns `ErrContentAddressConflict`.
+
+### Git Source Resolver
+
+`GitSourceResolver` maps `module_sources:` config blocks to git clone URLs:
+
+```yaml
+module_sources:
+  cfgms:
+    type: git
+    base: https://modules.example.com/cfgms
+```
+
+For a reference like `cfgms/hyperv@0.2.1`, the clone URL is `<base>/<name>` (e.g. `https://modules.example.com/cfgms/hyperv`). Clones use `--depth 1` for minimal network and disk usage. Publisher, name, and version components are validated to reject path traversal sequences before use.
+
+### Approval State Machine
+
+Each bundle in the cache has one of three approval states:
+
+```
+                    ┌─────────────────┐
+  Trusted publisher │                 │
+  + valid signature │  auto-approve   │──────────────┐
+                    └─────────────────┘              │
+                                                     ▼
+  [bundle arrives]──►  evaluate()  ──► pending ──► approved
+                                          │
+                    Unknown publisher     │  (admin Approve())
+                                          │
+                    ┌─────────────────┐   │
+  Signature fails   │                 │   │
+  (tampered bundle) │     reject      │◄──┘ (only from pending)
+                    └─────────────────┘
+                          ▼
+                       rejected
+```
+
+**`ApprovalWorkflow.Evaluate(bundle, store)` rules:**
+
+| Condition | Decision |
+|-----------|----------|
+| Publisher in trust store AND signature passes `VerifyBundleSignature` | `AutoApprove` |
+| Publisher NOT in trust store | `QueueForReview` |
+| Publisher in trust store but signature fails | `Reject` |
+
+**Default trust list:** `["cfgms"]` (seeded from `pkg/modules/trust.CFGMSPublisherIdentity()`).
+
+### `cfg module` CLI
+
+```
+cfg module list [--status pending|approved|rejected]
+cfg module approve <publisher>/<name>@<version> [--content-hash <hash-or-prefix>]
+```
+
+`cfg module list` calls `GET /api/v1/modules` with an optional `?status=...` query parameter and renders a tabular summary of publisher, name, version, approval status, and (truncated) content hash. The module cache has no tenant dimension (modules are publisher-signed and cluster-wide, per ADR-006), so there is no `--tenant` filter.
+
+`cfg module approve` resolves `<publisher>/<name>@<version>` against `GET /api/v1/modules/approvals` (the pending review queue) to find the matching entry's composite address, then calls `POST /api/v1/modules/approvals/<address>/approve`, which invokes `ApprovalWorkflow.Approve()` server-side. Only bundles in `pending` state can be approved; an error is returned for bundles that are already approved or rejected, or for a ref with no matching pending entry.
+
+**The ref is not a unique key.** The cache is content-addressed — its key includes the content hash — so several distinct bundles can be pending under one `publisher/name@version`, and a `QueueForReview` bundle's publisher name is self-asserted manifest data because that decision is reached before any signature is verified. A ref matching more than one pending entry is therefore **refused** with an error listing every candidate content hash; `--content-hash` (full value, or a prefix unique within that candidate set) names the reviewed bundle. On success the command echoes the approved content hash, so the operator's confirmation binds to specific content rather than to the mutable triple.
+
+Admin mTLS authentication (via admin bundle file) is required for both commands, following the same auth pattern as `cfg registration approve`.
+
+**Presence ceremony (Issue #4287, ADR-021 Amendment 7).** `module:approve` carries `RequireUserPresence: true` — an authenticated, `AssuranceStrong` admin credential is not enough; the request also needs a fresh, single-use presence token proving a human touched their security key for this specific approval. `cfg module approve` cannot run that WebAuthn ceremony itself (no browser, and a CLI-local loopback listener can never satisfy a relying party configured for the controller's own origin — the rejected shape from ADR-021 Amendment 4). Instead it drives a controller-served relay:
+
+1. Lodge — `POST /api/v1/cli-presence/lodge`, bound to the exact pending action: HTTP method, path, a SHA-256 of the request body, and the `module:approve` permission. Authenticated by the same credential that received the `401` step-up challenge; API-key (`AssuranceMachine`) principals cannot lodge one at all (ADR-021 Amendment 7 Decision 2).
+2. Relay page — `cfg` prints a short confirmation code and opens `https://<controller>/cli/presence?request_id=<id>`, served by the controller's own web UI under its configured `rp_origins`. The admin confirms the code and completes the presence ceremony there (`POST /api/v1/webauthn/presence/begin|finish`, `userVerification: "required"`). The page's consent text is the binding itself — permission, method, path and request-body digest, read from the lodged record; the relay has no caller-supplied description field at any layer, so the action displayed is the action the token is bound to. The minted presence token is bound to the same method/path/body-hash/permission the CLI lodged — never to anything the browser page itself supplies — and requires the same account that lodged the request.
+3. Collect — `cfg` polls `POST /api/v1/cli-presence/{id}/collect` for the single-use token, then retries `POST /api/v1/modules/approvals/<address>/approve` with `X-Presence-Token` attached.
+
+An expired or unknown request, a code mismatch, a ceremony failure, an unconfigured relying party, or an assurance level that cannot reach `AssuranceStrong` each fail the command closed with a distinct error — the guarded approval is never sent without a valid, action-bound token.
+
+**Fresh passkey tap for every presence-gated action (Issue #5297, ADR-021 Amendment 9).** Every presence-gated action is confirmed by a fresh passkey tap, either in the browser step-up flow or through the `cfg` relay; both are equal paths, so a web-only admin without `cfg` installed can run every action. The presence token is bound server-side to one exact action (method, canonical path with query, body hash and permission), is single-use and short-lived; `requirePermission` refuses a token presented for any other action with `presence_token_action_mismatch`. Two relay rules stay in force: only a cfg Bearer session or an mTLS admin certificate can lodge a relay request (`WEB_SESSION_CANNOT_LODGE` for a web-cookie session; the principal carries an explicit authentication channel, and an unknown channel is refused), and a relay request ID attaches only to the ceremony that named it at `presence/begin` (`REQUEST_CEREMONY_MISMATCH` otherwise). Tenant deletion approval can also be run with `cfg tenant approve-delete <tenant-id>`.
+
+**Script runs and script privilege changes (Issue #5416).** `steward:execute-scripts` and `script:admin` carry `RequireUserPresence: true` on top of `AssuranceStrong`, so every route they gate needs a fresh, action-bound passkey tap (browser step-up or `cfg` relay) unless the route is listed in the requirement's `PresenceExemptRoutes`. The default is a tap: a new route under either permission is gated without anyone remembering to add it. Each exemption is `"<METHOD> <mux path template>"`, matched against `mux.CurrentRoute(r).GetPathTemplate()`; a request with no readable current route is never exempt. The exempt routes skip only the presence check and still pass every other check:
+
+| Permission | Exempt route | Reason |
+|------------|--------------|--------|
+| `steward:execute-scripts` | `DELETE /api/v1/runs/{run_id}` | Cancelling a run stops work rather than starting it |
+| `steward:execute-scripts` | `POST /api/v1/runs/command` | An inline command already carries a per-action X.509 operator signature over the command envelope |
+| `script:admin` | `GET /api/v1/scripts`, `GET /api/v1/scripts/{id}` | Read-only |
+
+A per-tenant assurance override that sets `RequireUserPresence` clears the exemptions for that permission; an override that sets only a higher `MinOverride` leaves them in place. At construction the server walks the router and fails if any `PresenceExemptRoutes` entry matches no registered route, so a renamed route cannot leave a stale exemption. Opening a remote terminal (`POST /api/v1/terminal/tickets/{steward_id}`) is confirmed by its per-action operator passkey proof over the terminal-open envelope (steward, shell, nonce, expiry), and an inline command by its per-action X.509 operator signature; neither takes a second tap. No REST route schedules a script today.
+
+**Installer writes, binary publish, rollout start and upgrade dispatch (Issue #5298).** `installer:upload`, `installer:delete`, `installer:publish:steward` and `installer:dispatch:steward` carry `RequireUserPresence: true` on top of `AssuranceStrong`, so a human session confirms each of these with a fresh, action-bound passkey tap: installer artifact upload and delete, steward binary publish, `POST /api/v1/rollout` (rollout start) and `POST /api/v1/stewards/upgrade` (upgrade dispatch). Rollout halt (`POST /api/v1/rollout/{rollout_id}/halt`) and upgrade rollback (`POST /api/v1/stewards/upgrade/{upgrade_id}/rollback`) are listed in `PresenceExemptRoutes` and need no tap, so stopping or reverting a rollout stays fast during an incident. Scoped API keys that hold these permissions run all of these routes without a tap: the four requirements set `AllowMachine: true`, a code-only opt-in under which an `AssuranceMachine` principal skips the `Min` and presence checks while RBAC and tenant scoping still apply. Assurance-policy overrides can raise `Min` or demand presence for human principals but cannot set or clear `AllowMachine`. Boot-time `scanAPIKeysForPrivilegedAccess` does not warn on `AllowMachine` permissions.
+
+## Observe-Resolution: DNA-driven Module Activation
+
+`ResolveObserveModules` (`features/controller/modules/resolution/observe.go`) computes the set of modules a steward should observe based on its baseline DNA attributes and the registered module manifests.
+
+### How it works
+
+Each module manifest may carry an `observe_when` list of predicates. `ResolveObserveModules` takes a DNA attribute map and a slice of manifests, and returns the names of modules that match:
+
+- A manifest with no `observe_when` (nil or empty) is **never** included. Absence means "never auto-pull for DNA" (ADR-024 §2).
+- Predicates within a single manifest use **OR semantics**: any one matching predicate activates that module.
+- `equals` requires an exact string match of the DNA attribute value.
+- `contains` requires `strings.Contains` on the DNA attribute value.
+
+### Relation to `ResolveCfgRequiredModules`
+
+These are two distinct resolution functions serving different triggers:
+
+| Function | File | Trigger | Input | Purpose |
+|---|---|---|---|---|
+| `ResolveCfgRequiredModules` | `resolution.go` | Cfg deployment | `required_modules:` list from cfg | Verify/fetch/approve modules before a cfg can deploy |
+| `ResolveObserveModules` | `observe.go` | Baseline DNA available | DNA attribute map + manifests | Determine which modules to auto-pull for read-only DNA observation |
+
+Do not conflate the two. `required_modules:` is a deployment-time cfg contract; `observe_when` is a baseline-fact-driven auto-pull signal. They use separate code paths intentionally.
+
+### Purity guarantee
+
+`ResolveObserveModules` is a pure function — no I/O, no RPC, no side effects. Wiring the result into a steward-facing command is done by the server's `handleObserveSweepRequest` handler (see below).
+
+### Tier-2 observe RPC (Issue #3104, ADR-024 Amendment 1)
+
+The observe-resolution path is triggered by the steward's Tier-2 convergence cycle:
+
+1. **Steward → Controller:** On every Nth convergence tick (N = the steward's `steward.observe_sweep_n` config key, default 10), the steward publishes `EventObserveSweepRequest` carrying its current baseline DNA attribute map in `Details["baseline_dna"]`.
+2. **Controller:** `handleObserveSweepRequest` in `features/controller/server/` receives the event, calls `ResolveObserveModules(baselineDNA, manifests)`, and — if any modules matched — sends `CommandObserveModules` back to the originating steward. The command's `params["modules"]` field carries a JSON array of `{name, kind}` specs.
+3. **Steward:** `handleObserveModules` receives the command, loads each module via the signed/trust-verified pull path, runs `Get()` read-only, and merges the resulting fragments into the existing DNA fragment set via `setCurrentDNAFragments`.
+
+If no modules match (empty resolution result), no command is sent — the steward's DNA update is skipped for that Tier-2 cycle. If the manifest provider is unavailable, the handler returns without sending a command (non-fatal).

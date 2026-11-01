@@ -1,0 +1,36 @@
+name: firewall
+description: Manages firewall rules across different operating systems
+version: 0.1.0
+
+publisher: cfgms
+
+# Supported execution environments
+executors:
+  - steward  # Local firewall management on steward systems
+
+author: CFGMS Team
+license: MIT
+platforms:
+  - linux
+schema: schema.yaml
+interfaces:
+  - Get
+  - Set
+  - Test
+
+owns:
+  - kind: firewall  # authority over firewall:* objects this module manages
+    required_fields:
+      - hostname  # device identity — required in every full-os-device DNA snapshot
+      - os        # device identity — required in every full-os-device DNA snapshot
+
+# Bounded, inventory-worthy domain (firewall rule enumeration). Currently
+# Linux-only per the platforms declaration above.
+observe_when:
+  - fact: os
+    equals: linux
+
+security:
+  requires_root: true
+  capabilities: []
+  ports: []

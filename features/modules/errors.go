@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package modules
+
+import "errors"
+
+var (
+	// ErrInvalidResourceID is returned when a resource ID is invalid
+	ErrInvalidResourceID = errors.New("invalid resource ID")
+	// ErrInvalidInput is returned when input parameters are invalid
+	ErrInvalidInput = errors.New("invalid input")
+	// ErrUnsupportedPlatform is returned when a feature is not supported on the current platform
+	ErrUnsupportedPlatform = errors.New("unsupported platform")
+	// ErrNotImplemented is returned when a requested operation is not yet supported.
+	ErrNotImplemented = errors.New("operation not implemented")
+	// ErrInsufficientPrivilege is returned when an operation needs privileges
+	// the current process does not hold (e.g. Administrator on Windows). It is
+	// distinct from ErrUnsupportedPlatform: the operation is supported on this
+	// platform, but this process cannot perform it right now.
+	ErrInsufficientPrivilege = errors.New("insufficient privilege")
+)

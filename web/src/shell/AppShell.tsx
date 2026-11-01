@@ -1,0 +1,197 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
+/*
+ * App shell (Story #2496) — mockups/fleet-overview.html lines ~102-266.
+ * The persistent chrome every authenticated screen mounts into: sidebar +
+ * top bar at desktop width, hamburger + off-canvas drawer + scrim below
+ * 1024px, Escape closes overlays. Routed content occupies `.content` via
+ * <Outlet> (Story #2723); the global search box is passed to the outlet
+ * context so FleetOverview can live-filter without prop drilling through
+ * the route table.
+ */
+import { useEffect, useState } from 'react'
+import { NavLink, Outlet, useLocation } from 'react-router'
+import { TenantScopeProvider } from './TenantScopeContext.tsx'
+import TenantSwitcher from './TenantSwitcher.tsx'
+import GlobalSearch from './GlobalSearch.tsx'
+import AlertCenter from './AlertCenter.tsx'
+import UserMenu from './UserMenu.tsx'
+import ControllerChip from './ControllerChip.tsx'
+import ElevationBanner from './ElevationBanner.tsx'
+import { useActiveCrossings } from './useActiveCrossings.ts'
+import { useAuth } from '../auth/AuthContext.tsx'
+import { probeDirectoryAccess } from '../directory/directoryApi.ts'
+import './AppShell.css'
+
+/** Context type exposed to outlet children via useOutletContext. */
+export interface AppShellContext {
+  search: string
+  onSearchChange: (value: string) => void
+}
+
+const NAV_ITEMS = [
+  { label: 'Fleet', to: '/', soon: false },
+  { label: 'Cases', to: '/cases', soon: false },
+  { label: 'Modules', to: '/modules', soon: false },
+  { label: 'Config', to: '/config', soon: false },
+  { label: 'Workflows', to: '/workflows', soon: false },
+  { label: 'Approvals', to: '/approvals', soon: false },
+  { label: 'Scripts', to: '/scripts', soon: false },
+  { label: 'Registration', to: '/registration', soon: false },
+  { label: 'Refresh Requests', to: '/refresh', soon: false },
+  { label: 'Reports', to: '/reports', soon: false },
+  { label: 'Billing', to: '/billing', soon: false },
+  { label: 'Audit', to: '/audit', soon: false },
+  { label: 'Accounts', to: '/accounts', soon: false },
+  { label: 'Certificates', to: '/certificates', soon: false },
+  { label: 'Installer', to: '/installer', soon: false },
+  { label: 'API keys', to: '/api-keys', soon: false },
+  { label: 'Tenants', to: '/tenants', soon: false },
+  { label: 'Support access', to: '/support-access', soon: false },
+] as const
+
+export default function AppShell() {
+  const { principal } = useAuth()
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const { crossings, refresh } = useActiveCrossings()
+  const isRoot = principal?.rootScope === true
+  const location = useLocation()
+  const inDirectory = location.pathname.startsWith('/directory/')
+  // Directory entry shows only when directory:read is proven (Issue #5565).
+  const [directoryAccess, setDirectoryAccess] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    probeDirectoryAccess().then((ok) => {
+      if (!cancelled) setDirectoryAccess(ok)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [principal?.username, principal?.tenantId])
+
+  useEffect(() => {
+    document.body.classList.toggle('drawer', drawerOpen)
+    return () => document.body.classList.remove('drawer')
+  }, [drawerOpen])
+
+  useEffect(() => {
+    if (!drawerOpen) return
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') setDrawerOpen(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [drawerOpen])
+
+  return (
+    <TenantScopeProvider rootPath={principal?.tenantId ?? ''}>
+      <div
+        className="scrim"
+        data-testid="shell-scrim"
+        onClick={() => setDrawerOpen(false)}
+      />
+      <div className="shell">
+        <aside className="side">
+          <div className="logo">
+            <div className="l">
+              <b>CFGMS</b>
+              <i>controller</i>
+            </div>
+            <button
+              type="button"
+              className="icobtn drawer-close"
+              aria-label="Close navigation"
+              onClick={() => setDrawerOpen(false)}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M6 6l12 12M18 6L6 18"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </button>
+          </div>
+          <nav>
+            {NAV_ITEMS.map((item) =>
+              item.soon ? (
+                <a
+                  key={item.label}
+                  role="link"
+                  tabIndex={0}
+                  className="soon"
+                >
+                  {item.label}
+                  <span className="tag">soon</span>
+                </a>
+              ) : (
+                <NavLink
+                  key={item.label}
+                  to={item.to}
+                  className={({ isActive }) => (isActive ? 'active' : '')}
+                >
+                  {item.label}
+                </NavLink>
+              ),
+            )}
+            {directoryAccess && (
+              <>
+                <NavLink
+                  to="/directory/users"
+                  className={inDirectory ? 'active' : ''}
+                  end
+                >
+                  Directory
+                </NavLink>
+                <NavLink to="/directory/users" className="nav-sub">
+                  Users
+                </NavLink>
+                <NavLink to="/directory/groups" className="nav-sub">
+                  Groups
+                </NavLink>
+              </>
+            )}
+          </nav>
+        </aside>
+
+        <div className="main">
+          <div className="appbar">
+            <button
+              type="button"
+              className="icobtn ham"
+              aria-label="Open navigation"
+              onClick={() => setDrawerOpen(true)}
+            >
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M4 7h16M4 12h16M4 17h16"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </button>
+            <TenantSwitcher />
+            <GlobalSearch value={search} onChange={setSearch} />
+            <div className="abspacer" />
+            <ControllerChip />
+            <AlertCenter
+              breakGlassNotices={isRoot ? [] : crossings.filter((c) => c.kind === 'break_glass')}
+            />
+            <UserMenu />
+          </div>
+
+          <ElevationBanner crossings={crossings} root={isRoot} onChanged={refresh} />
+
+          <div className="content">
+            <Outlet context={{ search, onSearchChange: setSearch } satisfies AppShellContext} />
+          </div>
+        </div>
+      </div>
+    </TenantScopeProvider>
+  )
+}

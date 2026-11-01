@@ -1,0 +1,348 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
+// Package flatfile implements a flat-file storage provider for CFGMS.
+//
+// # Overview
+//
+// The flat-file provider stores configuration and audit data as files under a
+// configured root directory. It is the OSS default for config storage (ADR-003).
+//
+// # Backup Responsibility
+//
+// The flat-file provider does NOT manage version history or replication. Backup
+// is the operator's responsibility. Use filesystem snapshots, rsync, restic, or
+// an equivalent tool to protect the root directory. A built-in helper is planned
+// for sub-story B (cfg backup CLI).
+//
+// # File Layout
+//
+//	Config storage: <root>/<tenantID>/configs/<namespace>/<name>.<format>
+//	Audit storage:  <root>/<tenantID>/audit/<YYYY-MM-DD>.jsonl
+//
+// # Limitations
+//
+//   - No automatic version history (use git-sync if you want PR-based change management)
+//   - No replication (use PostgreSQL if you need HA)
+//   - Atomic writes use temp-file + rename (crash-safe on Linux; Windows rename
+//     across volumes may fail — keep root on a single filesystem)
+//
+// # Concurrency contract (#1919, blue/green substrate)
+//
+// Within ONE process: a sync.RWMutex per store serialises overlapping
+// goroutine writes and lets concurrent readers proceed.
+//
+// Across TWO processes (typical blue/green controller pair):
+//
+//   - Reads are always safe. Every write commits via os.Rename, which is
+//     atomic on the host filesystem (POSIX guarantee on local FS; NTFS
+//     ReplaceFile semantics on Windows). A reader therefore always observes
+//     either the pre-rename file or the post-rename file in full — it
+//     cannot observe a half-written file.
+//   - Concurrent writers are not coordinated across processes. If both
+//     blue and green write the SAME key at the same time, the file content
+//     is whichever process renamed last (last-writer-wins). No corruption,
+//     but no merge semantics either. This is acceptable for blue/green
+//     cutover (only one side is the primary writer at any moment) and is
+//     NOT acceptable for multi-active HA — multi-active HA needs the
+//     database provider (#TBD).
+//
+// The test pkg/storage/providers/flatfile/concurrent_processes_test.go
+// exec's two test subprocesses against the same root directory and proves
+// readers never observe torn files even under sustained write load.
+//
+// # Supported Stores
+//
+// This provider implements ConfigStore, AuditStore, StewardStore, and
+// IPTrustStore (Issue #1900). All other store factory methods (CreateRBACStore,
+// CreateTenantStore, CreateRegistrationTokenStore)
+// return ErrNotSupported, as these belong to the business-data tier (SQLite,
+// sub-story C).
+package flatfile
+
+import (
+	"errors"
+	"fmt"
+	"os"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
+)
+
+// ErrNotSupported is returned by store factory methods not supported by the flat-file provider.
+// These stores belong to the business-data tier.
+var ErrNotSupported = errors.New("flatfile: operation not supported by flat-file provider")
+
+// ErrImmutable is returned when attempting to mutate immutable data, such as
+// adding an audit entry with a timestamp that falls before the configured
+// retention period cutoff.
+var ErrImmutable = errors.New("flatfile: data is immutable and cannot be modified")
+
+// FlatFileProvider implements StorageProvider using the local filesystem.
+// It is automatically registered on import via init().
+type FlatFileProvider struct{}
+
+// Compile-time assertions. The optional store-creator extensions are wired
+// through a type assertion in the storage-manager factories, so a missing
+// method silently leaves the store nil instead of failing the build at the
+// call site (Issue #3755).
+var (
+	_ interfaces.StorageProvider   = (*FlatFileProvider)(nil)
+	_ interfaces.NonceStoreCreator = (*FlatFileProvider)(nil)
+)
+
+// Name returns the provider name used for registration and configuration.
+func (p *FlatFileProvider) Name() string {
+	return "flatfile"
+}
+
+// Description returns a human-readable description of the provider.
+func (p *FlatFileProvider) Description() string {
+	return "Flat-file storage provider for OSS config and audit data; operator is responsible for backups"
+}
+
+// GetVersion returns the provider version.
+func (p *FlatFileProvider) GetVersion() string {
+	return "1.0.0"
+}
+
+// GetCapabilities returns the provider capabilities.
+// SupportsVersioning is false: flat-file does not auto-commit history.
+func (p *FlatFileProvider) GetCapabilities() interfaces.ProviderCapabilities {
+	return interfaces.ProviderCapabilities{
+		SupportsTransactions:   false,
+		SupportsVersioning:     false, // flat-file does not auto-commit history
+		SupportsFullTextSearch: false,
+		SupportsEncryption:     false,
+		SupportsCompression:    false,
+		SupportsReplication:    false,
+		SupportsSharding:       false,
+		MaxBatchSize:           100,
+		MaxConfigSize:          10 * 1024 * 1024, // 10MB per config
+		MaxAuditRetentionDays:  3650,             // 10 years; operator manages disk
+	}
+}
+
+// ClusterCapable returns true if this provider can serve as shared state across
+// multiple CFGMS controller nodes in cluster mode.
+func (p *FlatFileProvider) ClusterCapable() bool { return false }
+
+// Available returns true if the flat-file provider can operate on this system.
+// The flat-file provider only requires the OS filesystem and is always available.
+func (p *FlatFileProvider) Available() (bool, error) {
+	return true, nil
+}
+
+// getRootFromConfig extracts and validates the root directory from provider configuration.
+func getRootFromConfig(config map[string]interface{}) (string, error) {
+	root, ok := config["root"].(string)
+	if !ok || root == "" {
+		return "", fmt.Errorf("flatfile: 'root' directory is required in provider configuration")
+	}
+
+	// Ensure the root exists and is accessible
+	info, err := os.Stat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Root does not exist yet; Create* methods will create it.
+			return root, nil
+		}
+		return "", fmt.Errorf("flatfile: cannot stat root directory: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("flatfile: root path is not a directory")
+	}
+	return root, nil
+}
+
+// CreateConfigStore creates a flat-file-based configuration store.
+// Config map must contain "root" (string): the root directory for config files.
+func (p *FlatFileProvider) CreateConfigStore(config map[string]interface{}) (cfgconfig.ConfigStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileConfigStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create config store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateAuditStore creates a flat-file-based audit store.
+// Config map must contain "root" (string). Optional: "max_retention_days" (int, default 90).
+func (p *FlatFileProvider) CreateAuditStore(config map[string]interface{}) (business.AuditStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	maxRetentionDays := 90
+	if days, ok := config["max_retention_days"].(int); ok && days > 0 {
+		maxRetentionDays = days
+	}
+	store, err := NewFlatFileAuditStore(root, maxRetentionDays)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create audit store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateRBACStore returns ErrNotSupported.
+// RBAC data belongs in the business-data tier.
+func (p *FlatFileProvider) CreateRBACStore(config map[string]interface{}) (business.RBACStore, error) {
+	return nil, ErrNotSupported
+}
+
+// CreateTenantStore returns ErrNotSupported.
+// Tenant data belongs in the business-data tier.
+func (p *FlatFileProvider) CreateTenantStore(config map[string]interface{}) (business.TenantStore, error) {
+	return nil, ErrNotSupported
+}
+
+// CreateRegistrationTokenStore returns ErrNotSupported.
+// Registration token data belongs in the business-data tier.
+func (p *FlatFileProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
+	return nil, ErrNotSupported
+}
+
+// CreateSessionStore is not supported by the flatfile provider.
+// Use the SQLite provider for durable session storage.
+func (p *FlatFileProvider) CreateSessionStore(config map[string]interface{}) (business.SessionStore, error) {
+	return nil, ErrNotSupported
+}
+
+// CreateStewardStore creates a flat-file-based StewardStore.
+// Config map must contain "root" (string): the root directory.
+// Steward records are stored as JSON files under <root>/stewards/.
+func (p *FlatFileProvider) CreateStewardStore(config map[string]interface{}) (business.StewardStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileStewardStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create steward store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateCommandStore returns ErrNotSupported.
+// Command dispatch state belongs in the business-data tier (SQLite).
+func (p *FlatFileProvider) CreateCommandStore(config map[string]interface{}) (business.CommandStore, error) {
+	return nil, ErrNotSupported
+}
+
+// CreateTriggerStore returns ErrNotSupported.
+// Trigger persistence belongs in the business-data tier (SQLite).
+func (p *FlatFileProvider) CreateTriggerStore(config map[string]interface{}) (business.TriggerStore, error) {
+	return nil, ErrNotSupported
+}
+
+// CreatePushStore returns ErrNotSupported.
+// Push-state persistence belongs in the business-data tier (SQLite).
+func (p *FlatFileProvider) CreatePushStore(config map[string]interface{}) (business.PushStore, error) {
+	return nil, ErrNotSupported
+}
+
+// CreatePendingRegistrationStore returns ErrNotSupported.
+// Pending registration state belongs in the business-data tier (SQLite).
+func (p *FlatFileProvider) CreatePendingRegistrationStore(config map[string]interface{}) (business.PendingRegistrationStore, error) {
+	return nil, ErrNotSupported
+}
+
+// CreateIPTrustStore creates a flat-file-backed IPTrustStore.
+// Config map must contain "root" (string): the root directory.
+// Entries are stored at <root>/ip-trust/ip_trust.json with atomic writes.
+func (p *FlatFileProvider) CreateIPTrustStore(config map[string]interface{}) (business.IPTrustStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileIPTrustStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create ip trust store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateAlertStore creates a flat-file-backed AlertStore.
+// Config map must contain "root" (string): the root directory.
+// States are stored at <root>/alerts/alert_states.json with atomic writes.
+func (p *FlatFileProvider) CreateAlertStore(config map[string]interface{}) (business.AlertStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileAlertStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create alert store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateApprovalStore creates a flat-file-backed ApprovalStore.
+// Config map must contain "root" (string): the root directory.
+// Approvals are stored at <root>/approvals/workflow_approvals.json with atomic writes.
+func (p *FlatFileProvider) CreateApprovalStore(config map[string]interface{}) (business.ApprovalStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileApprovalStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create approval store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateWorkflowExecutionStore creates a flat-file-backed WorkflowExecutionStore
+// (Issue #4675). Config map must contain "root" (string): the root directory.
+// Executions are stored one file each under <root>/workflow_executions/<tenant>/.
+func (p *FlatFileProvider) CreateWorkflowExecutionStore(config map[string]interface{}) (business.WorkflowExecutionStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileWorkflowExecutionStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create workflow execution store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateReportTemplateStore creates a flat-file-backed ReportTemplateStore (Issue #5527).
+// Config map must contain "root" (string): the root directory.
+// Templates are stored at <root>/report_templates/templates.json with atomic writes.
+func (p *FlatFileProvider) CreateReportTemplateStore(config map[string]interface{}) (business.ReportTemplateStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileReportTemplateStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create report template store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateNonceStore creates a flat-file-backed NonceStore (Issue #3755, ADR-031
+// amendment to ADR-011). Implements interfaces.NonceStoreCreator.
+// Config map must contain "root" (string): the root directory.
+// Entries are stored at <root>/nonces/refresh_nonces.json with atomic writes.
+func (p *FlatFileProvider) CreateNonceStore(config map[string]interface{}) (business.NonceStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileNonceStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create nonce store: %w", err)
+	}
+	return store, nil
+}
+
+// init auto-registers the flat-file provider so that a blank import is sufficient.
+func init() {
+	interfaces.RegisterStorageProvider(&FlatFileProvider{})
+}

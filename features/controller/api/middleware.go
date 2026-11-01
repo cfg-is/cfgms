@@ -1,0 +1,2628 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package api
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
+
+	"github.com/cfgis/cfgms/features/controller/fleet"
+	tenantsecurity "github.com/cfgis/cfgms/features/tenant/security"
+	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/session"
+)
+
+// contextKey is a custom type for context keys to avoid collisions
+type contextKey string
+
+const (
+	// Context keys
+	apiKeyContextKey       contextKey = "api_key"
+	authDecisionContextKey contextKey = "auth_decision"
+	principalContextKey    contextKey = "principal"
+	// targetTenantContextKey carries the explicitly requested target tenant for the
+	// isolation check. Set by test helpers or upstream middleware; takes precedence
+	// over URL-derived tenant. Empty means same-tenant (no cross-tenant check).
+	targetTenantContextKey contextKey = "target_tenant"
+	// cookieAuthContextKey is set to true when authentication succeeds via the
+	// __Host-cfgms_session cookie (Issue #2493: CSRF middleware uses this to distinguish
+	// cookie-authenticated requests from Bearer/API-key/mTLS requests).
+	cookieAuthContextKey contextKey = "cookie_authenticated"
+	// webSessionIDContextKey carries the session ID of a cookie-authenticated
+	// web session. Set alongside cookieAuthContextKey (Issue #2493: CSRF token lookup).
+	webSessionIDContextKey contextKey = "web_session_id"
+	// authSessionContextKey carries the authSessionRef of the session (Bearer or web
+	// cookie) that authenticated the request, so long-lived handlers can re-check it.
+	authSessionContextKey contextKey = "auth_session_ref"
+	// authRecheckContextKey carries the credential re-check for principals that
+	// authenticate without a session (admin mTLS certificate, API key), so long-lived
+	// handlers can end a stream whose credential was revoked, disabled or expired.
+	authRecheckContextKey contextKey = "auth_recheck"
+	// principalRefreshContextKey carries the principalRefresh that re-derives the
+	// request's principal from its credential's source of truth, so long-lived
+	// handlers can re-run the route's permission and tenant decision (authzRecheck).
+	principalRefreshContextKey contextKey = "principal_refresh"
+
+	// presenceTokenHeader is the HTTP request header that carries a short-lived,
+	// single-use presence token minted by POST /api/v1/webauthn/presence/finish.
+	// RequireUserPresence-gated routes consume this token via requirePermission.
+	// ADR-021 Decision 4: presence must be proven fresh per action, not per session.
+	presenceTokenHeader = "X-Presence-Token"
+)
+
+// hashPresenceToken returns the hex-encoded SHA-256 digest of the raw token value.
+// Presence tokens are stored by hash (not plaintext) so the sync.Map is safe to
+// inspect under a debugger or profiler without revealing usable token material.
+func hashPresenceToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// hashRequestBodyForPresenceBinding returns the hex-encoded SHA-256 digest of r's
+// body, and restores r.Body so the downstream handler can still read it in full
+// (Issue #4287). A nil body hashes as the empty byte string, matching what the CLI
+// hashes for a bodyless request at lodge time.
+func hashRequestBodyForPresenceBinding(r *http.Request) (string, error) {
+	if r.Body == nil {
+		sum := sha256.Sum256(nil)
+		return hex.EncodeToString(sum[:]), nil
+	}
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", err
+	}
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(data))
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// Principal represents an authenticated entity — either an mTLS admin cert, an API key,
+// a cfg-CLI Bearer session (ADR-014), or a web session cookie (ADR-018).
+//
+// Assurance is the identity assurance level (ADR-021 Decision 1). It governs auth-strength
+// gating: Assurance >= AssuranceBasic covers the three human-authenticated paths (mTLS admin
+// cert, cfg-CLI Bearer session, web session cookie); AssuranceMachine covers API-key principals.
+//
+// GlobalScope is a separate, orthogonal axis that controls tenant visibility (Issue #2787).
+// It is true for principals that have cross-tenant (fleet-wide) read access and false for
+// principals confined to their own tenant subtree. Today every human-authenticated principal
+// has GlobalScope=true and every machine-authenticated principal has GlobalScope=false —
+// these happen to correlate, but they model different questions. A future tenant-scoped web
+// account type (Assurance=AssuranceBasic, GlobalScope=false) is confined by GlobalScope
+// regardless of its assurance level; a strongly-authenticated but tenant-scoped service account
+// (Assurance=AssuranceStrong, GlobalScope=false) would pass AssuranceStrong-gated routes but
+// still be confined to its tenant. The two signals MUST NOT be collapsed back into one.
+// See ADR-021 Context §"It is load-bearing on an unwritten assumption".
+// AuthChannel records how a Principal was authenticated. The zero value is
+// AuthChannelUnknown and is refused wherever a specific channel is required.
+type AuthChannel int
+
+const (
+	AuthChannelUnknown   AuthChannel = iota
+	AuthChannelWebCookie             // browser session cookie
+	AuthChannelCfgBearer             // cfg CLI Bearer session
+	AuthChannelMTLS                  // mTLS admin certificate
+	AuthChannelAPIKey                // API key
+	AuthChannelRelay                 // steward relay script principal
+)
+
+type Principal struct {
+	// Channel is the authentication channel that produced this principal.
+	Channel      AuthChannel
+	ID           string
+	Name         string
+	Assurance    session.AssuranceLevel
+	GlobalScope  bool      // true → cross-tenant visibility; false → confined to TenantID subtree
+	LastProvenAt time.Time // time of last strong-factor proof; set by mTLS path (others: follow-on story)
+	Permissions  []string
+	TenantID     string
+	// Cert-auth fields — non-empty only for mTLS principals (Assurance == AssuranceStrong, H3)
+	CertSerial      string
+	CertFingerprint string
+	CertNotAfter    time.Time
+	// AuthenticatorCount is the number of WebAuthn credentials registered for this principal's
+	// account. Set at Principal-build time for cookie-authenticated sessions only (Issue #2965).
+	// Zero for mTLS/API-key principals. -1 indicates the account could not be loaded.
+	// Confinement middleware and routing layers use this to distinguish "no passkeys" (0)
+	// from "unknown" (-1) or "has passkeys" (>0) without a per-request store query.
+	AuthenticatorCount int
+	// RootScoped marks a principal as a root-scoped SaaS-operator (ADR-025 Amendment 1
+	// A1.3), a distinct and narrower category than an unscoped superadmin. Both present
+	// TenantID == "" — that field alone MUST NOT be read as root scope — but only a
+	// RootScoped principal is subject to ADR-025 Decision 1's root<->MSP boundary
+	// (isCallerAuthorizedForTenant in handlers_tenants.go). Set from an explicit signal
+	// only: cert.HasRootScopeMarker for mTLS admin certs, Session.RootScoped for cfg-CLI
+	// Bearer sessions, or — for both the Bearer and web-cookie session paths — a
+	// phishing-resistant assertion (Assurance >= AssuranceStrong) for an account whose
+	// RootScope flag is set (ADR-025 Amendment 4 A4.1), re-derived on every request by
+	// rootScopeFromAssertion. Always false for API-key and relay principals.
+	RootScoped bool
+	// ImplicitAdmin marks a principal as having unrestricted permission breadth (ADR-025
+	// Amendment 3). Exactly three construction sites set this: mTLS admin certs
+	// (extractAdminPrincipal), CLI Bearer sessions with no bound account or a root-scope
+	// account, and root-scope web accounts. All other principals — API keys, relay
+	// principals, tenant-scoped accounts, zero-valued Principal{} — are denied any
+	// permission unless it appears in Permissions verbatim.
+	//
+	// A zero-valued Principal{} (ImplicitAdmin==false, Permissions==nil) is denied every
+	// permission by construction. Previously, Permissions==nil served as the implicit-admin
+	// marker; that sentinel made a zero-valued principal unintentionally privileged.
+	ImplicitAdmin bool
+	// AccountBound is true when this principal was resolved from a durable account record
+	// (extractAdminPrincipal's bound-cert branch, or a Bearer/web session with a resolvable
+	// account) rather than the no-binding bootstrap fallback (Issue #4337, ADR-025
+	// Amendment 5). It is the signal subjectToTenantCrossingBoundary uses to decide whether
+	// GlobalScope (acct.RootScope, durable) or RootScoped (per-credential, and for sessions
+	// re-derived from the current request's assurance) governs the ADR-025 root<->MSP
+	// crossing boundary for this principal: GlobalScope only when AccountBound, because for
+	// an unbound principal GlobalScope carries no account-level root-scope signal at all
+	// (it is unconditionally true for the mTLS bootstrap fallback, and merely mirrors tenant
+	// emptiness for an unbound session) — see authorizeTenantAccess's doc comment.
+	AccountBound bool
+}
+
+// rootScopeFromAssertion derives the ADR-025 Amendment 4 A4.1 explicit root-scope
+// marker for a session-authenticated principal from two facts alone: the bound
+// account's RootScope flag and the session's current assurance being phishing-resistant
+// (AssuranceStrong — a passkey login or a WebAuthn step-up elevation). It is never
+// inferred from TenantID being empty, from GlobalScope, or from ImplicitAdmin.
+//
+// Deliberately recomputed by the caller on every request rather than cached on the
+// session record: an assurance downgrade (ADR-021 Decision 5, source-IP change) or an
+// administrative clearing of the account's RootScope flag must stop conferring the
+// marker on the very next request, not at session expiry (ADR-025 Amendment 4 A4.3).
+func rootScopeFromAssertion(acct *account, assurance session.AssuranceLevel) bool {
+	return acct != nil && acct.RootScope && assurance >= session.AssuranceStrong
+}
+
+// loggingMiddleware logs HTTP requests
+func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		// Wrap the response writer to capture status code
+		wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+
+		// Process request
+		next.ServeHTTP(wrapped, r)
+
+		// Log the request
+		duration := time.Since(start)
+		s.logger.Info("HTTP request",
+			"method", r.Method,
+			"path", logging.SanitizeLogValue(redactCredentialPath(r.URL.Path)),
+			"status", wrapped.statusCode,
+			"duration", duration,
+			"remote_addr", logging.SanitizeLogValue(r.RemoteAddr),
+			"user_agent", logging.SanitizeLogValue(r.Header.Get("User-Agent")),
+		)
+	})
+}
+
+// responseWriter wraps http.ResponseWriter to capture status code
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack implements http.Hijacker so that WebSocket upgrade handlers can take
+// over the raw TCP connection even when the ResponseWriter is wrapped by the
+// logging middleware. Without this, gorilla/websocket's Upgrade() fails because
+// the type assertion w.(http.Hijacker) returns false on the wrapped writer.
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := rw.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("responseWriter: underlying ResponseWriter does not implement http.Hijacker")
+}
+
+// corsMiddleware handles CORS headers
+// H-AUTH-3: Validate origin against allowed origins list (security audit finding)
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Add("Vary", "Origin")
+		}
+
+		// Check if origin is in allowed list
+		allowed := false
+		if s.corsConfig != nil && origin != "" {
+			for _, allowedOrigin := range s.corsConfig.AllowedOrigins {
+				if origin == allowedOrigin {
+					allowed = true
+					break
+				}
+			}
+		}
+
+		// Only set CORS headers if origin is allowed
+		if allowed {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Total-Count")
+		}
+
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			if allowed {
+				w.WriteHeader(http.StatusOK)
+			} else {
+				w.WriteHeader(http.StatusForbidden)
+			}
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// securityHeadersMiddleware applies browser and intermediary hardening to every
+// public response, including early authentication, rate-limit, and error paths.
+func (s *Server) securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers := w.Header()
+		headers.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		headers.Set("X-Content-Type-Options", "nosniff")
+		headers.Set("X-Frame-Options", "DENY")
+		headers.Set("Referrer-Policy", "no-referrer")
+		// Passkeys (publickey-credentials-get/create) must stay allowed: do not deny them.
+		headers.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), bluetooth=(), interest-cohort=()")
+		headers.Set("Cross-Origin-Opener-Policy", "same-origin")
+		headers.Set("Cross-Origin-Resource-Policy", "same-origin")
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			headers.Set("Cache-Control", "no-store")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// notFoundHandler returns the handler wired to s.router.NotFoundHandler for unmatched
+// routes (Issue #4183, DAST 10035/10049). gorilla/mux only builds the router.Use()
+// middleware chain when a route matches (mux.Router.Match skips it whenever MatchErr !=
+// nil), so NotFoundHandler is never reached by securityHeadersMiddleware via Use() —
+// it must be wrapped directly here instead. Cache-Control: no-store is forced
+// unconditionally, not gated on the "/api/" prefix the way securityHeadersMiddleware
+// gates it for matched routes: this handler by construction never serves anything but a
+// 404 body, so there is no path under it that is ever legitimately cacheable.
+func (s *Server) notFoundHandler() http.Handler {
+	return s.securityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			// mux reports ErrNotFound rather than ErrMethodMismatch when a method
+			// mismatch happens inside a nested /api/v1 subrouter, so recover the
+			// 405 here by probing which methods the path does serve (Issue #5022).
+			if allowed := s.allowedMethodsForPath(r); len(allowed) > 0 {
+				w.Header().Set("Allow", strings.Join(allowed, ", "))
+				s.writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed", "METHOD_NOT_ALLOWED")
+				return
+			}
+			s.writeErrorResponse(w, http.StatusNotFound, "Not found", "NOT_FOUND")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+}
+
+// allowedMethodsForPath returns the methods for which the root router has a real
+// route matching r's path. It is only consulted after the router found no route
+// for r's own method.
+func (s *Server) allowedMethodsForPath(r *http.Request) []string {
+	var allowed []string
+	for _, m := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		if m == r.Method {
+			continue
+		}
+		probe := r.Clone(r.Context())
+		probe.Method = m
+		var match mux.RouteMatch
+		if s.router.Match(probe, &match) && match.MatchErr == nil {
+			allowed = append(allowed, m)
+		}
+	}
+	return allowed
+}
+
+// methodNotAllowedHandler is the router.MethodNotAllowedHandler counterpart to
+// notFoundHandler (Issue #4183) — same unreachable-by-Use() gap, same fix.
+func (s *Server) methodNotAllowedHandler() http.Handler {
+	return s.securityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			s.writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed", "METHOD_NOT_ALLOWED")
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+}
+
+// contentTypeMiddleware sets appropriate content type headers
+func (s *Server) contentTypeMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Set default content type for API responses
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Content-Type", "application/json")
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// extractAdminPrincipal inspects r.TLS.PeerCertificates[0] for the CFGMS admin extension.
+// Returns a non-nil *Principal when the cert carries the admin marker AND is not revoked.
+// Chain verification is done at the TLS layer (VerifyClientCertIfGiven + ClientCAs).
+// Returns nil when no cert is presented, the cert lacks the admin marker, the cert
+// serial is in the revoked-serials list (Story D: C2 fix), the cert is bound to a
+// disabled account, or the account-lookup store is unavailable (fail closed).
+//
+// Resolution rule (ADR-025 Amendment 3):
+//   - Bound, active account: principal derives from account (ID, TenantID, GlobalScope,
+//     Permissions). RootScoped derives from cert.HasRootScopeMarker alone — never from
+//     the account (ADR-025 A2.1/A2.2).
+//   - Bound, disabled account: returns nil; does not fall back to bootstrap.
+//   - Account lookup error: returns nil (fail closed); does not fall back to bootstrap.
+//   - No binding found: bootstrap fallback — implicit root, audited on every use.
+func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return nil
+	}
+	peerCert := r.TLS.PeerCertificates[0]
+	if !cert.HasAdminMarker(peerCert) {
+		return nil
+	}
+	return s.principalFromAdminCert(r.Context(), peerCert, true)
+}
+
+// principalFromAdminCert resolves the principal for an admin-marked peer certificate
+// (everything extractAdminPrincipal does after its TLS peer checks). recordUse is true
+// only for a request that authenticates with the certificate: it records the binding's
+// last use and emits the bootstrap-fallback audit. A keepalive re-check passes false so
+// a tick never writes either.
+func (s *Server) principalFromAdminCert(ctx context.Context, peerCert *x509.Certificate, recordUse bool) *Principal {
+	serial := peerCert.SerialNumber.String()
+	// Story D: C2 fix — check revocation on every cert-auth request.
+	// certManager may be nil in OSS deployments that haven't initialised cert management.
+	if s.certManager != nil {
+		revoked, err := s.certManager.IsRevoked(serial)
+		if err != nil {
+			// Fail closed: a revocation-store outage must not be interpreted as
+			// "not revoked" — that would let a serial the operator believes is
+			// revoked keep authenticating (Issue #3852).
+			s.logger.Error("Revocation check failed; failing closed",
+				"cert_serial", logging.SanitizeLogValue(serial),
+				"error", logging.SanitizeLogValue(err.Error()))
+			return nil
+		}
+		if revoked {
+			return nil
+		}
+	}
+	fpSum := sha256.Sum256(peerCert.Raw)
+	fp := hex.EncodeToString(fpSum[:])
+
+	// ADR-025 Amendment 3: resolve the principal from the account bound to this serial.
+	// Fail-closed default: non-nil empty slice as working permissions value, matching
+	// the web-session branch's documented fail-closed default.
+	acct, err := s.getAccountByCertSerial(ctx, serial)
+	if err != nil {
+		// Fail closed: a store outage must not fall through to the bootstrap fallback
+		// and grant unscoped root to a cert whose account scope cannot be verified.
+		s.logger.Error("Cert serial account lookup failed; failing closed",
+			"cert_serial", logging.SanitizeLogValue(serial),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return nil
+	}
+	if acct != nil {
+		if acct.Disabled {
+			// Disabled account: reject; do not fall back to bootstrap.
+			// An admin must not regain access by presenting a cert bound to a
+			// disabled account.
+			return nil
+		}
+		// Bound, active account: derive the principal from account fields.
+		// Principal.ID is the account's ID — never the certificate CommonName.
+		// RootScoped derives from cert.HasRootScopeMarker alone (ADR-025 A2.1/A2.2);
+		// account.RootScope is the field that feeds GlobalScope, not the ADR-025 marker.
+		//
+		// Issue #3715: the certificate has now fully passed authentication (revoked and
+		// disabled-account rejections are both behind us) — record the use. Every earlier
+		// return in this function is a rejection and must not reach this line.
+		if recordUse {
+			s.recordCertBindingUse(acct.Username, acct.TenantID, serial)
+		}
+
+		var permissions []string
+		implicitAdmin := false
+		if acct.RootScope {
+			// Root-scope account: implicit admin (same breadth as the bootstrap fallback);
+			// Permissions is nil — ImplicitAdmin is the gate (ADR-025 Amendment 3).
+			permissions = nil
+			implicitAdmin = true
+		} else {
+			permissions = append([]string{}, acct.Permissions...)
+		}
+		return &Principal{
+			Channel:         AuthChannelMTLS,
+			ID:              acct.ID,
+			Name:            "mtls-admin:" + acct.Username,
+			Assurance:       session.AssuranceStrong,
+			GlobalScope:     acct.RootScope,
+			TenantID:        s.accountPrincipalTenant(ctx, acct),
+			CertSerial:      serial,
+			CertFingerprint: fp,
+			CertNotAfter:    peerCert.NotAfter,
+			// RootScoped is read from an explicit certificate extension (ADR-025 A2.1/A2.2) —
+			// never derived from account.RootScope or TenantID being empty.
+			RootScoped:    cert.HasRootScopeMarker(peerCert),
+			Permissions:   permissions,
+			ImplicitAdmin: implicitAdmin,
+			// AccountBound: resolved from a durable account record (Issue #4337) — makes
+			// GlobalScope (acct.RootScope) the authoritative ADR-025 crossing-boundary signal
+			// for this principal, even if the bound certificate itself predates the
+			// RootScoped extension or the two ever diverge.
+			AccountBound: true,
+		}
+	}
+
+	// No binding found: bootstrap fallback (ADR-025 Amendment 3).
+	// An admin-marked certificate with no bound account keeps implicit root indefinitely.
+	// Every use of this path is audited; the combination with accounts_in_cache > 0
+	// is anomalous and separately detectable in monitoring.
+	if recordUse {
+		s.emitBootstrapFallbackAudit(ctx, serial, peerCert.Subject.CommonName)
+	}
+
+	return &Principal{
+		Channel: AuthChannelMTLS,
+		ID:      peerCert.Subject.CommonName,
+		Name:    "mtls-admin:" + peerCert.Subject.CommonName,
+		// The bootstrap admin is root: its identity tenant is the deployment's
+		// root tenant and its reach comes from GlobalScope (root TenantScope),
+		// never from an empty tenant (Issue #4665).
+		Assurance:       session.AssuranceStrong,
+		GlobalScope:     true,
+		TenantID:        s.rootTenantID(ctx),
+		CertSerial:      serial,
+		CertFingerprint: fp,
+		CertNotAfter:    peerCert.NotAfter,
+		// RootScoped is read from an explicit certificate extension (ADR-025 Amendment 1
+		// A1.3) — never inferred from TenantID being empty. Absent on every admin cert
+		// issued before this marker existed, so existing deployments are unaffected.
+		RootScoped: cert.HasRootScopeMarker(peerCert),
+		// mTLS admin certs are one of the three implicit-admin construction sites
+		// (ADR-025 Amendment 3). Permissions is left nil; ImplicitAdmin is the gate.
+		ImplicitAdmin: true,
+	}
+}
+
+// certBindingLastUsedCoalesceWindow bounds how often a busy certificate's last-used
+// timestamp is persisted to durable storage. Every authenticated mTLS admin request
+// reaches recordCertBindingUse, so without coalescing this would turn every request on
+// the authentication hot path into a store write (Issue #3715).
+const certBindingLastUsedCoalesceWindow = 5 * time.Minute
+
+// certBindingLastUsedKeyPrefix namespaces the durable record of certificate-binding
+// last-used timestamps, keyed per account username and stored INDEPENDENTLY of the
+// account record itself (Issue #3715).
+//
+// This separation is deliberate, not incidental. The account record also carries
+// Disabled, Permissions, TenantID, RootScope, and Credentials; a read-modify-write of
+// that whole blob on the authentication hot path — reading it once, then persisting a
+// copy some time later from a background goroutine, with s.mu deliberately not held
+// across the store call — races any concurrent admin action that also mutates the
+// account (disable, permission change, credential reset). If a disable's own persist
+// lands in the store in between this call's read and its write, this call's write can
+// silently overwrite it, un-disabling the account. That is not an acceptable trade-off
+// for an observability timestamp: "Recording use must never affect whether a request is
+// authorised" (Issue #3715 out-of-scope note) is a hard requirement, not a best-effort
+// one. Storing last-used data in its own record, addressed only by username, means a
+// write here can never touch — and therefore can never regress — any security-relevant
+// account field. The only residual race is against another last-used write for a
+// different serial on the same account, which is accepted (see persistCertBindingLastUsed).
+// The trailing "-" (not ":") is deliberate: this key is written as a filename by the
+// flatfile-backed secret store, and ":" is legal in a POSIX filename but illegal on
+// Windows (NTFS reserves it as the alternate-data-stream separator) — a colon here
+// made every write of this key fail on Windows while passing on Linux (Issue #3715
+// merge-queue diagnosis, 2026-08-28). "-" matches the separator every sibling prefix
+// in this package already uses (enrolmentTokenKeyPrefix, credentialRequestKeyPrefix,
+// accountKeyPrefix) and is filename-safe on every supported platform. "/" is
+// deliberately avoided too — see findCertBindingLastUsedRecord for why a slash in a
+// composed key is unsafe for multi-level tenants.
+const certBindingLastUsedKeyPrefix = "cert-binding-last-used-"
+
+const (
+	// certBindingLastUsedTag is the store tag carried by every last-used record; it is
+	// the coarse filter for the metadata lookup that locates one (see
+	// findCertBindingLastUsedRecord).
+	certBindingLastUsedTag = "cert-binding-last-used"
+
+	// certBindingLastUsedSecretType is the secret_type metadata value that, together
+	// with the username metadata field, identifies exactly one record within a tenant.
+	certBindingLastUsedSecretType = "cert_binding_last_used"
+
+	// certBindingLastUsedUsernameKey is the metadata field the record is looked up by.
+	certBindingLastUsedUsernameKey = "username"
+
+	// certBindingLastUsedSerialPrefix namespaces the serial -> RFC3339 timestamp entries
+	// inside the record's metadata map, keeping them disjoint from the identifying
+	// fields above so a serial can never collide with (or be mistaken for) one.
+	certBindingLastUsedSerialPrefix = "serial:"
+)
+
+// certBindingLastUsedStoreKey returns the secret-store write key for username's
+// certificate-binding last-used record. Reads never compose this key with a tenant
+// prefix — see findCertBindingLastUsedRecord.
+func certBindingLastUsedStoreKey(username string) string {
+	return certBindingLastUsedKeyPrefix + username
+}
+
+// certBindingLastUsedSerialKey returns the metadata key holding serial's timestamp.
+func certBindingLastUsedSerialKey(serial string) string {
+	return certBindingLastUsedSerialPrefix + serial
+}
+
+// findCertBindingLastUsedRecord locates username's certificate-binding last-used record
+// within storageTenant, returning (nil, nil) when none exists.
+//
+// The record is resolved by metadata filter, never by composing a "tenant/key" string for
+// GetSecret: GetSecret takes a single key and splits it on the FIRST slash to recover the
+// tenant, so for a multi-level tenant such as root/msp-a/client-1 — the documented CFGMS
+// tenancy shape — "root/msp-a/client-1/cert-binding-last-used-alice" resolves to tenant
+// "root" with name "msp-a/client-1/cert-binding-last-used-alice". That is a different
+// record in a different tenant's namespace than the one StoreSecret wrote (StoreSecret
+// takes TenantID as a separate field, so the write path is unaffected by the split).
+// Reading through that composition would silently return not-found for every multi-level
+// tenant: the listing would report "never used" for a certificate in daily use, and the
+// read-merge-write below would drop every other serial's timestamp on each write.
+// loadAccountFromStore resolves account records the same way for the same reason.
+func (s *Server) findCertBindingLastUsedRecord(ctx context.Context, username, storageTenant string) (*secretsif.SecretMetadata, error) {
+	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		TenantID: storageTenant,
+		Tags:     []string{certBindingLastUsedTag},
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: certBindingLastUsedSecretType,
+			certBindingLastUsedUsernameKey:  username,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list certificate binding last-used records: %w", err)
+	}
+	// Re-check the identifying fields rather than trusting the filter: providers differ in
+	// how much of SecretFilter they honour, and returning another tenant's or another
+	// account's record here would cross exactly the boundary this lookup exists to keep.
+	for _, m := range metas {
+		if m == nil {
+			continue
+		}
+		if m.TenantID == storageTenant && m.Metadata[certBindingLastUsedUsernameKey] == username {
+			return m, nil
+		}
+	}
+	return nil, nil
+}
+
+// recordCertBindingUse asynchronously records that serial was just used to authenticate
+// on username's account (Issue #3715). It MUST be called only after extractAdminPrincipal
+// has fully resolved a bound, active-account principal — every rejection branch (revoked
+// serial, disabled account) returns before reaching this call, and the bootstrap-fallback
+// (no binding found) branch never calls it either, so a rejected or unbound request
+// produces zero store writes.
+//
+// Coalesced to at most one store write per certBindingLastUsedCoalesceWindow per serial,
+// tracked in s.certBindingLastUsedThrottle independently of s.mu — a busy credential
+// therefore produces occasional writes, not one per request.
+//
+// Runs in its own goroutine so the authentication hot path is never blocked by a store
+// call, and s.mu is never held across the store call inside persistCertBindingLastUsed
+// (which does not touch s.mu or the account cache at all — see certBindingLastUsedKeyPrefix).
+// A failed persist is logged, rate-limited by the same coalescing window, but never fails
+// the request that triggered it — recording use is an observability signal, not part of
+// the authorization decision.
+//
+// Tracked in s.certBindingLastUsedWG so Close() can wait for in-flight goroutines to
+// finish before secretStore is closed underneath them.
+func (s *Server) recordCertBindingUse(username, tenantID, serial string) {
+	now := time.Now().UTC()
+	if last, ok := s.certBindingLastUsedThrottle.Load(serial); ok {
+		if now.Sub(last.(time.Time)) < certBindingLastUsedCoalesceWindow {
+			return
+		}
+	}
+	s.certBindingLastUsedThrottle.Store(serial, now)
+
+	s.certBindingLastUsedWG.Add(1)
+	go func() {
+		defer s.certBindingLastUsedWG.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err := s.persistCertBindingLastUsed(ctx, username, tenantID, serial, now)
+		if err != nil {
+			s.logger.Warn("Failed to persist certificate binding last-used timestamp",
+				"username", logging.SanitizeLogValue(username),
+				"serial", logging.SanitizeLogValue(serial),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+		if s.onCertBindingLastUsedPersisted != nil {
+			s.onCertBindingLastUsedPersisted(username, serial, err)
+		}
+	}()
+}
+
+// persistCertBindingLastUsed merges serial -> usedAt into username's durable
+// certificate-binding last-used record (see certBindingLastUsedKeyPrefix for why this is
+// a separate record rather than a field updated in place on the account). It never reads
+// or writes s.accounts, so it never touches s.mu and cannot race any account mutation.
+//
+// Known, accepted race: two authenticated certificates on the same account recording use
+// concurrently can race this read-merge-write against each other, and the loser's
+// timestamp for its (different) serial can be dropped. This is confined entirely to this
+// observability record — it can never touch account security fields — and self-heals on
+// the next authenticated request for the dropped serial within the coalescing window.
+func (s *Server) persistCertBindingLastUsed(ctx context.Context, username, tenantID, serial string, usedAt time.Time) error {
+	if s.secretStore == nil {
+		return nil
+	}
+	storageTenant := accountStorageTenant(tenantID)
+
+	// Identifying fields are rewritten on every store so the record stays locatable by
+	// findCertBindingLastUsedRecord regardless of which write created it.
+	uses := map[string]string{
+		secretsif.MetadataKeySecretType: certBindingLastUsedSecretType,
+		certBindingLastUsedUsernameKey:  username,
+	}
+	existing, err := s.findCertBindingLastUsedRecord(ctx, username, storageTenant)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		// Carry forward only the serial entries; the identifying fields are set above.
+		for k, v := range existing.Metadata {
+			if strings.HasPrefix(k, certBindingLastUsedSerialPrefix) {
+				uses[k] = v
+			}
+		}
+	}
+
+	uses[certBindingLastUsedSerialKey(serial)] = usedAt.Format(time.RFC3339)
+
+	return s.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
+		Key:         certBindingLastUsedStoreKey(username),
+		TenantID:    storageTenant,
+		Description: "certificate binding last-used timestamps",
+		Tags:        []string{certBindingLastUsedTag},
+		Metadata:    uses,
+	})
+}
+
+// loadCertBindingLastUsed reads username's durable certificate-binding last-used record
+// and returns it as serial -> timestamp. Returns (nil, nil) when no certificate on this
+// account has ever recorded a use (including when secretStore is nil).
+func (s *Server) loadCertBindingLastUsed(ctx context.Context, username, tenantID string) (map[string]time.Time, error) {
+	if s.secretStore == nil {
+		return nil, nil
+	}
+	record, err := s.findCertBindingLastUsedRecord(ctx, username, accountStorageTenant(tenantID))
+	if err != nil {
+		return nil, err
+	}
+	if record == nil {
+		return nil, nil
+	}
+	uses := make(map[string]time.Time, len(record.Metadata))
+	for k, ts := range record.Metadata {
+		serial, isSerialEntry := strings.CutPrefix(k, certBindingLastUsedSerialPrefix)
+		if !isSerialEntry {
+			continue // identifying field (secret_type, username), not a recorded use
+		}
+		parsed, parseErr := time.Parse(time.RFC3339, ts)
+		if parseErr != nil {
+			continue // corrupt/unparseable entry — skip rather than fail the whole lookup
+		}
+		uses[serial] = parsed
+	}
+	return uses, nil
+}
+
+// emitBootstrapFallbackAudit logs the admin.bootstrap_fallback_used audit event.
+// Called every time an mTLS admin cert with no bound account is accepted via the
+// bootstrap fallback (ADR-025 Amendment 3). The accounts_in_cache field makes the
+// anomalous combination — bootstrap path used while accounts exist — separately
+// detectable in monitoring without a store query on the auth hot path.
+func (s *Server) emitBootstrapFallbackAudit(ctx context.Context, serial, commonName string) {
+	s.mu.RLock()
+	accountsInCache := len(s.accounts)
+	s.mu.RUnlock()
+
+	s.logger.Warn("admin.bootstrap_fallback_used: mTLS cert has no bound account; treating as unscoped root (ADR-025 Amendment 3)",
+		"event_type", "admin.bootstrap_fallback_used",
+		"auth_path", "bootstrap-fallback",
+		"cert_serial", logging.SanitizeLogValue(serial),
+		"cert_cn", logging.SanitizeLogValue(commonName),
+		"accounts_in_cache", accountsInCache,
+	)
+}
+
+// principalTenantScope is the ctxkeys.TenantScope for an authenticated
+// principal (Issue #4665). A principal is root-scoped only by its explicit
+// GlobalScope flag — a root-scope account (any credential) or the bootstrap
+// admin certificate — and otherwise confined to its tenant. Proof strength is a
+// separate layer: requirePermission still applies permissionAssurance, so
+// AssuranceStrong permissions still force a WebAuthn step-up. A principal with
+// neither flag nor tenant gets an empty-path tenant scope, which
+// ctxkeys.TenantRestriction and isAuthorizedForTenant refuse.
+func principalTenantScope(p *Principal) ctxkeys.TenantScope {
+	if p != nil && p.GlobalScope {
+		return ctxkeys.NewRootScope()
+	}
+	if p == nil {
+		return ctxkeys.NewTenantScope("")
+	}
+	return ctxkeys.NewTenantScope(p.TenantID)
+}
+
+// accountPrincipalTenant is the identity tenant of a principal resolved from
+// acct (Issue #4665): a root-scope account is bound to the deployment's root
+// tenant, a tenant account to its own tenant.
+func (s *Server) accountPrincipalTenant(ctx context.Context, acct *account) string {
+	if acct.RootScope {
+		return s.rootTenantID(ctx)
+	}
+	return acct.TenantID
+}
+
+// tenantSubtreeContains reports whether resourceTenant is callerTenant itself or
+// one of its descendants in the tenant manager's ParentID ancestry (ADR-025
+// Amendment 1: a tenant ID is a single DNS-label token, so containment is never a
+// string-prefix test). It fails closed: a nil tenant manager, an empty ID, an
+// unknown tenant, a dangling ParentID or any lookup error all deny.
+func (s *Server) tenantSubtreeContains(ctx context.Context, callerTenant, resourceTenant string) bool {
+	if callerTenant == "" || resourceTenant == "" {
+		return false
+	}
+	if resourceTenant == callerTenant {
+		return true
+	}
+	if s.tenantManager == nil {
+		return false
+	}
+	ok, err := s.tenantManager.IsTenantAncestor(ctx, callerTenant, resourceTenant)
+	if err != nil {
+		s.logger.Warn("Tenant ancestry lookup failed; denying",
+			"error", logging.SanitizeLogValue(err.Error()))
+		return false
+	}
+	return ok
+}
+
+// tenantSubtreeSet is the set of tenant IDs in a caller's subtree (the caller
+// itself plus every ParentID descendant), resolved once so a list handler can
+// filter N records without N ancestry lookups.
+type tenantSubtreeSet map[string]struct{}
+
+// Contains reports whether tenantID is in the set. An empty ID is never contained.
+func (t tenantSubtreeSet) Contains(tenantID string) bool {
+	if tenantID == "" {
+		return false
+	}
+	_, ok := t[tenantID]
+	return ok
+}
+
+// tenantSubtreeIDs resolves callerTenant's subtree by walking GetChildTenants from
+// callerTenant. The set always contains callerTenant itself; an empty callerTenant
+// yields an empty set. A nil tenant manager or a failed walk yields only the
+// callerTenant (fail closed: descendants are not granted on error).
+func (s *Server) tenantSubtreeIDs(ctx context.Context, callerTenant string) tenantSubtreeSet {
+	set := tenantSubtreeSet{}
+	if callerTenant == "" {
+		return set
+	}
+	set[callerTenant] = struct{}{}
+	if s.tenantManager == nil {
+		return set
+	}
+	queue := []string{callerTenant}
+	for len(queue) > 0 {
+		parent := queue[0]
+		queue = queue[1:]
+		children, err := s.tenantManager.GetChildTenants(ctx, parent)
+		if err != nil {
+			s.logger.Warn("Tenant subtree walk failed; descendants not granted",
+				"error", logging.SanitizeLogValue(err.Error()))
+			return tenantSubtreeSet{callerTenant: {}}
+		}
+		for _, c := range children {
+			if c == nil || c.ID == "" {
+				continue
+			}
+			if _, seen := set[c.ID]; seen {
+				continue
+			}
+			set[c.ID] = struct{}{}
+			queue = append(queue, c.ID)
+		}
+	}
+	return set
+}
+
+// scopeFilterToTenantSubtree scopes f to tenantID's subtree: TenantSubtree is the
+// tenant itself and TenantSubtreeIDs its ParentID descendants, resolved once per
+// request. A failed or unavailable resolution leaves only the tenant itself
+// (fail closed). An empty tenantID leaves the filter unrestricted.
+func (s *Server) scopeFilterToTenantSubtree(ctx context.Context, f *fleet.Filter, tenantID string) {
+	f.TenantSubtree = tenantID
+	f.TenantSubtreeIDs = s.tenantDescendantIDs(ctx, tenantID)
+}
+
+// tenantDescendantIDs returns the IDs of tenantID's ParentID descendants,
+// excluding tenantID itself, for layers that take the tenant and its resolved
+// descendants as separate inputs. It is empty when tenantID is empty, the tenant
+// manager is unavailable or the walk fails (fail closed).
+func (s *Server) tenantDescendantIDs(ctx context.Context, tenantID string) []string {
+	var ids []string
+	for id := range s.tenantSubtreeIDs(ctx, tenantID) {
+		if id != tenantID {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// isWithinTenantScope reports whether resourceTenant is within callerTenant's
+// authorized subtree. An empty callerTenant (mTLS admin with no tenant scope)
+// has unrestricted access and always returns true; otherwise it defers to
+// tenantSubtreeContains.
+func (s *Server) isWithinTenantScope(ctx context.Context, callerTenant, resourceTenant string) bool {
+	if callerTenant == "" {
+		return true
+	}
+	return s.tenantSubtreeContains(ctx, callerTenant, resourceTenant)
+}
+
+// selectorPathWithinCaller reports whether selectorPath is callerPath or beneath
+// it. It compares slash-separated fleet selector paths (pkg/fleet/selector Parse),
+// NOT tenant IDs; tenant containment goes through tenantSubtreeContains.
+func selectorPathWithinCaller(callerPath, selectorPath string) bool {
+	return selectorPath == callerPath || strings.HasPrefix(selectorPath, callerPath+"/") //architecture:allow-path-prefix -- selector path, not a tenant ID
+}
+
+// tenantAccessForScope answers "may this caller act on resourceTenant" for the
+// explicit three-state ctxkeys.TenantScope (Issue #4316). It is the fail-closed
+// replacement for comparing an empty tenant string by hand: unlike
+// Server.isWithinTenantScope(""), the unset state here is never treated as unrestricted.
+//
+// route identifies the HTTP route for the denial log (pass the route template or
+// r.URL.Path, never a resource ID) so a denial is traceable to the endpoint that
+// produced it.
+//
+//   - Unset scope (context never carried an explicit TenantScope, or a tenant scope
+//     was built with an empty path) always denies and logs the reason — this is
+//     exactly the plumbing-bug signature the type exists to catch: a lookup that
+//     read the wrong context key, or a context.Background() call that dropped the
+//     request's scope. Silently treating it as "no restriction" is the defect this
+//     story closes.
+//   - Root scope allows, except for a principal subject to ADR-025 Decision 1's
+//     root<->MSP crossing boundary (subjectToTenantCrossingBoundary): it is judged by
+//     authorizeTenantAccess, so a record owned by a tenant below root needs an active
+//     grant or break-glass crossing and yields tenantAuthNeedsCrossing without one.
+//     Routes that name a stored record by ID (an account, a token, a registration, a
+//     run) carry no tenant in the request, so requirePermission's boundary gate cannot
+//     see the record's tenant; this is the one place every such route passes through
+//     (Issue #4665).
+//   - Tenant scope defers to tenantSubtreeContains: the caller's own tenant or a
+//     ParentID descendant, resolved through the tenant manager and failing closed.
+//
+// A caller that can respond to the request writes the crossing challenge for
+// tenantAuthNeedsCrossing (writeTenantCrossingIfNeeded) and its own not-found or
+// forbidden response for tenantAuthDenied.
+func (s *Server) tenantAccessForScope(ctx context.Context, scope ctxkeys.TenantScope, resourceTenant, route string) tenantAuthDecision {
+	switch {
+	case scope.IsRoot():
+		principal, _ := ctx.Value(principalContextKey).(*Principal)
+		if !subjectToTenantCrossingBoundary(principal) {
+			return tenantAuthAllowed
+		}
+		var decision tenantAuthDecision
+		if s.tenantManager == nil {
+			// No ancestry source wired: root's own records stay reachable and every
+			// other tenant fails closed exactly as if no crossing were active,
+			// matching authorizeRootScopedTenantAccess's nil-store stance.
+			decision = tenantAuthNeedsCrossing
+			if resourceTenant == "" || resourceTenant == s.rootTenantID(ctx) {
+				decision = tenantAuthAllowed
+			}
+		} else {
+			decision = s.authorizeTenantAccess(ctx, principal, resourceTenant)
+		}
+		if decision != tenantAuthAllowed {
+			s.logger.Info("Root-scoped tenant access refused at the crossing boundary",
+				"route", logging.SanitizeLogValue(route),
+				"principal_id", logging.SanitizeLogValue(principal.ID),
+				"resource_tenant", logging.SanitizeLogValue(resourceTenant),
+				"needs_crossing", strconv.FormatBool(decision == tenantAuthNeedsCrossing),
+			)
+		}
+		return decision
+	case scope.IsTenant() && scope.Path() != "":
+		if s.tenantSubtreeContains(ctx, scope.Path(), resourceTenant) {
+			return tenantAuthAllowed
+		}
+		s.logger.Warn("Tenant scope authorization denied",
+			"route", logging.SanitizeLogValue(route),
+			"reason", "resource_outside_caller_subtree",
+		)
+		return tenantAuthDenied
+	default:
+		// Covers both the unset zero value and a tenant scope with an empty path
+		// (see NewTenantScope's doc comment on why the latter is treated as unset).
+		s.logger.Warn("Tenant scope authorization denied",
+			"route", logging.SanitizeLogValue(route),
+			"reason", "unset_scope",
+		)
+		return tenantAuthDenied
+	}
+}
+
+// isAuthorizedForTenant is the boolean form of tenantAccessForScope, for a caller
+// with no response to shape: anything short of tenantAuthAllowed — including a
+// missing crossing — is a refusal.
+func (s *Server) isAuthorizedForTenant(ctx context.Context, scope ctxkeys.TenantScope, resourceTenant, route string) bool {
+	return s.tenantAccessForScope(ctx, scope, resourceTenant, route) == tenantAuthAllowed
+}
+
+// writeTenantCrossingIfNeeded writes the ADR-025 crossing challenge when decision is
+// tenantAuthNeedsCrossing and reports whether it did; the caller writes its own
+// refusal otherwise.
+func (s *Server) writeTenantCrossingIfNeeded(w http.ResponseWriter, decision tenantAuthDecision, resourceTenant string) bool {
+	if decision != tenantAuthNeedsCrossing {
+		return false
+	}
+	s.writeTenantCrossingChallenge(w, resourceTenant)
+	return true
+}
+
+// refuseUnscopedPrincipal refuses, at the authentication edge, a principal that
+// is neither root (GlobalScope) nor bound to a tenant, and reports whether it did
+// (ADR-025 Amendment 7, Issue #4665). Every credential path calls it before the
+// principal reaches a handler, so "no tenant" can never be read further in as
+// "every tenant" — the scope a handler sees is always root or a real tenant.
+func (s *Server) refuseUnscopedPrincipal(w http.ResponseWriter, principal *Principal) bool {
+	if principal != nil && (principal.GlobalScope || principal.TenantID != "") {
+		return false
+	}
+	id := ""
+	if principal != nil {
+		id = principal.ID
+	}
+	s.logger.Warn("Authenticated principal has no tenant scope; refused",
+		"principal_id", logging.SanitizeLogValue(id))
+	s.writeErrorResponse(w, http.StatusForbidden, "Credential is not bound to a tenant", "NO_TENANT_SCOPE")
+	return true
+}
+
+// hasHeaderCredentials reports whether the request carries an API key or Bearer token header.
+func hasHeaderCredentials(r *http.Request) bool {
+	if r.Header.Get("X-API-Key") != "" {
+		return true
+	}
+	return strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")
+}
+
+// accountHoldsCredential reports whether id is a non-empty credential ID present
+// on the account.
+func accountHoldsCredential(acct *account, id []byte) bool {
+	if len(id) == 0 {
+		return false
+	}
+	for _, c := range acct.Credentials {
+		if bytes.Equal(c.ID, id) {
+			return true
+		}
+	}
+	return false
+}
+
+// authenticationMiddleware validates incoming requests via mTLS admin cert or API key.
+// States: (a) admin-marked cert only → admin principal; (b) admin-marked cert + header → 400;
+// (c) cert without admin marker → fall through to API-key auth; (d) no cert → API-key auth.
+// M-AUTH-1: Load API keys from secret store on-demand if not in cache.
+// Issue #1675: relay-injected principals bypass normal auth when relayPrincipalKey is set.
+func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Issue #1675: relay principal — pre-validated by RelayHandler after grant check.
+		// The relayPrincipalKey is set only in the relay handler after LookupGrant succeeds,
+		// so this path can only be reached via an internal in-process call, never from the
+		// network. The principalContextKey is also set by the relay handler before calling
+		// ServeHTTP, so the context already carries both keys.
+		if injected, ok := r.Context().Value(relayPrincipalKey).(*Principal); ok && injected != nil {
+			// principalContextKey is already set by the relay handler; just proceed.
+			if s.refuseUnscopedPrincipal(w, injected) {
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// H2: mTLS-presented identity always wins.
+		if adminPrincipal := s.extractAdminPrincipal(r); adminPrincipal != nil {
+			// H2/L5: Conflicting credentials — cert AND header present → reject.
+			if hasHeaderCredentials(r) {
+				s.writeErrorResponse(w, http.StatusBadRequest,
+					"Conflicting credentials: mTLS admin cert and API key header cannot both be present",
+					"CONFLICTING_CREDENTIALS")
+				return
+			}
+			// Cert-auth success: set principal context and proceed.
+			if s.refuseUnscopedPrincipal(w, adminPrincipal) {
+				return
+			}
+			ctx := context.WithValue(r.Context(), principalContextKey, adminPrincipal)
+			ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(adminPrincipal.ID))
+			ctx = context.WithValue(ctx, ctxkeys.TenantID, adminPrincipal.TenantID)
+			// Sole call site for ctxkeys.NewRootScope (via scopeForVerifiedAdminCert),
+			// enforced by ctxkeys' restricted-caller architecture test (Issue #4316).
+			ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, principalTenantScope(adminPrincipal))
+			ctx = context.WithValue(ctx, authRecheckContextKey, s.adminCertRecheck(r.TLS.PeerCertificates[0]))
+			ctx = context.WithValue(ctx, principalRefreshContextKey, s.adminCertRefresh(r.TLS.PeerCertificates[0]))
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// State (c)/(d): no admin cert presented.
+
+		// Session-token path (Issue #2232): intercept Bearer tokens that are 43 chars
+		// (base64url without padding for 32 random bytes — length-distinguishable from
+		// API keys, which use base64url with padding: 44 chars). Only attempted when a
+		// sessionManager is wired; falls through to API-key path otherwise.
+		//
+		// Contract:
+		//   - Token present, 43 chars, manager wired, valid   → admin Principal from session + X-Session-Token header
+		//   - Token present, 43 chars, manager wired, invalid → 401 (no fallthrough to API-key)
+		//   - Token present, non-43 chars OR manager nil       → fall through to API-key path
+		if s.sessionManager != nil {
+			authHeader := r.Header.Get("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				bearerToken := strings.TrimPrefix(authHeader, "Bearer ")
+				// sessionTokenLen is the exact length of a session token:
+				// base64.RawURLEncoding of 32 bytes = 43 chars (no padding).
+				const sessionTokenLen = 43
+				if len(bearerToken) == sessionTokenLen {
+					// Pass source IP to Validate for IP-change detection (ADR-021 Decision 5).
+					// SplitHostPort extracts just the host; errors are ignored (empty host → no detection).
+					sourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+					validateCtx := session.WithSourceIP(r.Context(), sourceIP)
+					sess, err := s.sessionManager.Validate(validateCtx, bearerToken)
+					if err != nil {
+						switch {
+						case errors.Is(err, session.ErrSessionRevoked):
+							s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+						case errors.Is(err, session.ErrSessionExpired):
+							s.writeErrorResponse(w, http.StatusUnauthorized, "Session has expired", "SESSION_EXPIRED")
+						default:
+							s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
+						}
+						return
+					}
+					// Renew the session to reset idle TTL; set X-Session-Token when
+					// a new token is issued (empty string = prior-token grace path,
+					// no new token to publish). The raw new token is never logged.
+					_, newToken, renewErr := s.sessionManager.Renew(validateCtx, bearerToken)
+					// A session revoked between Validate and Renew (on any node) must not
+					// proceed: answer with the same 401 as an invalid token.
+					if errors.Is(renewErr, session.ErrSessionRevoked) || errors.Is(renewErr, session.ErrSessionNotFound) {
+						s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
+						return
+					}
+					if renewErr == nil && newToken != "" {
+						w.Header().Set("X-Session-Token", newToken)
+					}
+					// Build a Principal from session state. Assurance is read directly from
+					// the session so that IP-change downgrades (ADR-021 Decision 5) and future
+					// WebAuthn upgrades are reflected on every request rather than fixed at issuance.
+					//
+					// GlobalScope mirrors the session's actual scope (Issue #3194): unscoped sessions
+					// (TenantID=="", matching an unscoped mTLS admin cert) receive cross-tenant
+					// visibility; tenant-scoped sessions are confined to their subtree. Fail-closed:
+					// explicit scope → GlobalScope=false, matching the web-session path's shape.
+					//
+					// Issue #3576: if an account is bound to this session's PrincipalID,
+					// re-resolve TenantID, GlobalScope, and Permissions from that live account
+					// on every request — mirroring the web-cookie branch's per-request account
+					// recheck (Issue #3311). When no account is found, all three fall back to
+					// their session-derived defaults, preserving byte-identical behavior for
+					// today's principals (certificate-derived or root-scope accounts).
+					// An unbound session (no account: minted for an admin-certificate
+					// principal) is root only by an explicit signal — the RootScoped
+					// marker, or a tenant equal to the deployment's root tenant — and
+					// then carries that root tenant (Issue #4665). An unbound session
+					// with an empty tenant, the pre-#4665 form, has no scope at all
+					// and is refused below.
+					rootTenant := s.rootTenantID(r.Context())
+					globalScope := sess.RootScoped || (rootTenant != "" && sess.TenantID == rootTenant)
+					tenantID := sess.TenantID
+					if globalScope {
+						tenantID = rootTenant
+					}
+					// Default: no bound account → certificate-derived or root-scope session → implicit admin.
+					// ImplicitAdmin is set explicitly; permissions is always non-nil (ADR-025 Amendment 3).
+					implicitAdmin := true
+					permissions := []string{}
+					acct, acctErr := s.getAccountByID(r.Context(), sess.PrincipalID)
+					if acctErr != nil {
+						// Fail closed. The bound account is the authority for this
+						// principal's permissions, tenant scope and disabled status, so a
+						// lookup failure (secret-store/SOPS error, git storage error,
+						// ListSecrets failure, context deadline) must not be treated as
+						// "no account found": the no-account fallback sets ImplicitAdmin:
+						// true (the default for certificate-derived sessions), which would
+						// skip the Issue #3126 disabled check and restore session-derived
+						// scope over the authoritative account values — every containment
+						// control would degrade precisely when the store is unhealthy.
+						// A principal with no bound account (certificate-derived CLI
+						// session) returns (nil, nil), not an error, so those sessions
+						// never reach this branch.
+						s.logger.Error("Account lookup failed for session token; failing closed",
+							"principal_id", logging.SanitizeLogValue(sess.PrincipalID),
+							"error", logging.SanitizeLogValue(acctErr.Error()))
+						s.writeErrorResponse(w, http.StatusServiceUnavailable,
+							"Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
+						return
+					}
+					// CLI-login sessions live only while the passkeys that approved them exist
+					// (Issue #5199). Revoking a passkey is how a phished account is contained,
+					// so a legacy CLI session with no recorded credential is refused too
+					// (fail closed; the user re-runs CLI login once) rather than kept until
+					// expiry. A missing account is refused the same way. Sessions from
+					// POST /api/v1/sessions use other connection names and are unaffected.
+					if sess.ConnectionName == cliLoginConnectionName &&
+						(acct == nil ||
+							!accountHoldsCredential(acct, sess.LoginCredentialID) ||
+							(len(sess.CredentialID) > 0 && !accountHoldsCredential(acct, sess.CredentialID))) {
+						if revokeErr := s.sessionManager.Revoke(r.Context(), sess.ID); revokeErr != nil {
+							s.logger.Warn("Failed to revoke cli-login session with a revoked credential",
+								"session_id", logging.SanitizeLogValue(sess.ID),
+								"error", logging.SanitizeLogValue(revokeErr.Error()))
+						}
+						s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+						return
+					}
+					if acct != nil {
+						if acct.Disabled {
+							// Disabled account: reject with the same 401 a revoked session gets.
+							// Best-effort revocation ensures the token is rejected on subsequent
+							// requests by sessionManager.Validate, but a revocation failure does
+							// not affect this request's 401 (same pattern as the web-cookie branch).
+							if revokeErr := s.sessionManager.Revoke(r.Context(), sess.ID); revokeErr != nil {
+								s.logger.Warn("Failed to revoke session of disabled account",
+									"session_id", logging.SanitizeLogValue(sess.ID),
+									"error", logging.SanitizeLogValue(revokeErr.Error()))
+							}
+							s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+							return
+						}
+						tenantID = s.accountPrincipalTenant(r.Context(), acct)
+						globalScope = acct.RootScope
+						if acct.RootScope {
+							// Root-scope account: implicit admin, same as a no-account session.
+							// ImplicitAdmin is already true; permissions stays empty.
+						} else {
+							// Tenant-scoped account: enforce RBAC grants verbatim; not implicit admin.
+							implicitAdmin = false
+							permissions = append([]string{}, acct.Permissions...)
+						}
+					}
+					if acct == nil && !globalScope && tenantID == "" {
+						s.writeErrorResponse(w, http.StatusUnauthorized,
+							"Session has no tenant scope; reconnect to obtain a new session", "SESSION_SCOPE_INVALID")
+						return
+					}
+					sessionPrincipal := &Principal{
+						Channel:       AuthChannelCfgBearer,
+						ID:            sess.PrincipalID,
+						Name:          "session:" + logging.SanitizeLogValue(sess.PrincipalID),
+						Assurance:     sess.Assurance,
+						LastProvenAt:  sess.LastProvenAt,
+						GlobalScope:   globalScope,
+						Permissions:   permissions,
+						TenantID:      tenantID,
+						ImplicitAdmin: implicitAdmin,
+						// AccountBound: true only when a live account was resolved for
+						// sess.PrincipalID (Issue #4337) — the no-account fallback above keeps
+						// globalScope's sess.TenantID=="" default, which is not an account-level
+						// root-scope signal and must not be read as one by
+						// subjectToTenantCrossingBoundary.
+						AccountBound: acct != nil,
+						// RootScoped is true when either the session's own explicit marker
+						// (ADR-025 Amendment 1 A1.3, set only by session.Manager.IssueRootScoped
+						// and immutable thereafter) is set, or this request's phishing-resistant
+						// assertion against the bound account qualifies (ADR-025 Amendment 4
+						// A4.1, re-derived every request). Never derived from TenantID or
+						// GlobalScope.
+						RootScoped: sess.RootScoped || rootScopeFromAssertion(acct, sess.Assurance),
+					}
+					if s.refuseUnscopedPrincipal(w, sessionPrincipal) {
+						return
+					}
+					ctx := context.WithValue(r.Context(), principalContextKey, sessionPrincipal)
+					ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(sess.PrincipalID))
+					ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
+					ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, principalTenantScope(sessionPrincipal))
+					ctx = context.WithValue(ctx, authSessionContextKey, authSessionRef{manager: s.sessionManager, id: sess.ID})
+					ctx = context.WithValue(ctx, principalRefreshContextKey, s.sessionPrincipalRefresh(sessionPrincipal, sess.RootScoped))
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+			}
+		}
+
+		// Web session cookie path (Issue #2492, ADR-018 §1,2): authenticate browser clients
+		// via the __Host-cfgms_session HttpOnly+Secure+SameSite=Strict cookie. Credential precedence
+		// (security B5.2): any header credential (Bearer or API key) or admin mTLS ALWAYS wins
+		// — when a header credential is present the cookie is ignored entirely (not validated,
+		// not renewed, no Set-Cookie emitted). This branch only fires when no header credential
+		// is present, ensuring existing Bearer/API-key/mTLS clients are byte-identical.
+		if s.webSessionManager != nil && !hasHeaderCredentials(r) {
+			if cookie, cookieErr := r.Cookie(cookieWebSession); cookieErr == nil {
+				// Pass source IP to Validate for IP-change detection (ADR-021 Decision 5).
+				webSourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+				webValidateCtx := session.WithSourceIP(r.Context(), webSourceIP)
+				webSess, webErr := s.webSessionManager.Validate(webValidateCtx, cookie.Value)
+				if webErr != nil {
+					switch {
+					case errors.Is(webErr, session.ErrSessionRevoked):
+						s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+					case errors.Is(webErr, session.ErrSessionExpired):
+						s.writeErrorResponse(w, http.StatusUnauthorized, "Session has expired", "SESSION_EXPIRED")
+					default:
+						s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
+					}
+					return
+				}
+				// Rolling renewal: refresh the cookie so the idle TTL resets on every
+				// authenticated response (ADR-018 §1). When the session is already in the
+				// grace window (prior token), Renew returns newToken == "" — do not
+				// overwrite a Set-Cookie the client already received.
+				// A session revoked between Validate and Renew (on any node) must not
+				// proceed: answer with the same 401 as an invalid token. Other Renew
+				// errors stay soft — the next request is re-validated.
+				_, newToken, renewErr := s.webSessionManager.Renew(webValidateCtx, cookie.Value)
+				if errors.Is(renewErr, session.ErrSessionRevoked) || errors.Is(renewErr, session.ErrSessionNotFound) {
+					s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
+					return
+				}
+				if renewErr == nil && newToken != "" {
+					http.SetCookie(w, &http.Cookie{
+						Name:     cookieWebSession,
+						Value:    newToken,
+						HttpOnly: true,
+						Secure:   true,
+						SameSite: http.SameSiteStrictMode,
+						Path:     "/",
+					})
+				}
+				// Build Principal mirroring the Bearer session path (the sessionPrincipal block above).
+				// Assurance and LastProvenAt are read from session state so that IP-change downgrades
+				// and WebAuthn upgrades (Issue #2965) are reflected on every request (ADR-021 Decision 3/5).
+				webAcct, webAcctErr := s.getAccountByID(r.Context(), webSess.PrincipalID)
+				// A web session lives only while the passkeys behind it exist (Issue
+				// #5166): the account is the proof, so every request resolves it. A
+				// lookup error fails closed with 503 and leaves the session intact
+				// (the error may be transient); a missing account proves no
+				// credential and ends the session.
+				if webAcctErr != nil {
+					s.logger.Error("Web session account lookup failed",
+						"session_id", logging.SanitizeLogValue(webSess.ID),
+						"error", logging.SanitizeLogValue(webAcctErr.Error()))
+					s.writeErrorResponse(w, http.StatusServiceUnavailable,
+						"Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
+					return
+				}
+				// endWebSession revokes the session server-side (best effort) so the
+				// rejection is durable, and answers with the same 401 for every reason:
+				// the response must not distinguish "disabled", "passkey revoked" and
+				// "revoked".
+				endWebSession := func(reason string) {
+					s.csrfTokens.Delete(webSess.ID)
+					if revokeErr := s.webSessionManager.Revoke(r.Context(), webSess.ID); revokeErr != nil {
+						s.logger.Warn("Failed to revoke "+reason+" web session",
+							"session_id", logging.SanitizeLogValue(webSess.ID),
+							"error", logging.SanitizeLogValue(revokeErr.Error()))
+					}
+					s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+				}
+				if webAcct == nil {
+					endWebSession("unbound")
+					return
+				}
+				// Every path below runs only for a resolved account: an unresolvable
+				// one has already been answered with 503 or 401 above. ImplicitAdmin is
+				// only set for a root-scope account (ADR-025 Amendment 3), and
+				// permissions is always non-nil; the nil-sentinel is gone.
+				implicitAdminWeb := false
+				permissions := []string{}
+				{
+					acct := webAcct
+					// Issue #3126: an administratively disabled account loses access
+					// immediately, not at session expiry.
+					if acct.Disabled {
+						endWebSession("disabled-account")
+						return
+					}
+					// Both the login passkey and the last proving passkey must still be
+					// on the account. An empty ID is refused: passkey login, the only
+					// issuer of web sessions, always records both.
+					if !accountHoldsCredential(acct, webSess.LoginCredentialID) ||
+						!accountHoldsCredential(acct, webSess.CredentialID) {
+						endWebSession("revoked-passkey")
+						return
+					}
+					if acct.RootScope {
+						// Root-scope accounts are platform administrators: they hold
+						// every permission, exactly as the mTLS-admin and CLI-session
+						// principals do. This is not an authorization hole — permission
+						// breadth and proof strength are separate layers, and this one
+						// only decides breadth. requirePermission still applies
+						// permissionAssurance immediately afterwards, so the 32
+						// AssuranceStrong permissions still force a WebAuthn step-up from
+						// this AssuranceBasic session, and the 6 RequireUserPresence ones
+						// still demand a fresh single-use presence token. Enumerating all
+						// IDs per account instead would add no assurance gate that is
+						// not already applied, and would silently strip an administrator
+						// of any permission introduced after their account was created.
+						// ADR-025 Amendment 3: ImplicitAdmin replaces the nil-sentinel.
+						implicitAdminWeb = true
+					} else {
+						// Tenant-scoped accounts are least-privilege operators: their
+						// configured RBAC grants are enforced verbatim (Issue #2919).
+						permissions = append(permissions, acct.Permissions...)
+					}
+				}
+				authCount := len(webAcct.Credentials)
+				globalScope := webAcct.RootScope
+				webTenant := s.accountPrincipalTenant(r.Context(), webAcct)
+				webPrincipal := &Principal{
+					Channel:            AuthChannelWebCookie,
+					ID:                 webSess.PrincipalID,
+					Name:               "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),
+					Assurance:          webSess.Assurance,
+					LastProvenAt:       webSess.LastProvenAt,
+					GlobalScope:        globalScope,
+					Permissions:        permissions,
+					TenantID:           webTenant,
+					AuthenticatorCount: authCount,
+					ImplicitAdmin:      implicitAdminWeb,
+					// RootScoped is derived per request from the bound account's RootScope
+					// flag and this session's current assurance being phishing-resistant
+					// (ADR-025 Amendment 4 A4.1) — never stored on the session record, never
+					// inferred from TenantID or GlobalScope. This is the browser-path half of
+					// the asymmetry Amendment 4 closes: before this, a root-scope web session
+					// never carried the marker at all and was therefore unconfined by the
+					// Decision 1 root<->MSP boundary (A4.2).
+					RootScoped: rootScopeFromAssertion(webAcct, webSess.Assurance),
+					// AccountBound: true only when webAcct actually resolved (Issue #4337) —
+					// mirrors the Bearer-session branch's acct != nil signal.
+					AccountBound: webAcct != nil,
+				}
+				if s.refuseUnscopedPrincipal(w, webPrincipal) {
+					return
+				}
+				ctx := context.WithValue(r.Context(), principalContextKey, webPrincipal)
+				ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(webSess.PrincipalID))
+				ctx = context.WithValue(ctx, ctxkeys.TenantID, webTenant)
+				ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, principalTenantScope(webPrincipal))
+				// Issue #2493: mark this request as cookie-authenticated so csrfMiddleware
+				// can enforce the session-bound CSRF check on unsafe methods.
+				ctx = context.WithValue(ctx, cookieAuthContextKey, true)
+				ctx = context.WithValue(ctx, webSessionIDContextKey, webSess.ID)
+				ctx = context.WithValue(ctx, authSessionContextKey, authSessionRef{manager: s.webSessionManager, id: webSess.ID})
+				ctx = context.WithValue(ctx, principalRefreshContextKey, s.sessionPrincipalRefresh(webPrincipal, false))
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+		}
+
+		// API-key path.
+
+		// Extract API key from header
+		apiKeyStr := r.Header.Get("X-API-Key")
+		if apiKeyStr == "" {
+			// Also check Authorization header for Bearer token
+			authHeader := r.Header.Get("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				apiKeyStr = strings.TrimPrefix(authHeader, "Bearer ")
+			}
+		}
+
+		if apiKeyStr == "" {
+			s.writeErrorResponse(w, http.StatusUnauthorized, "API key required", "MISSING_API_KEY")
+			return
+		}
+
+		// Check memory cache first
+		s.mu.RLock()
+		keyInfo, exists := s.apiKeys[apiKeyStr]
+		s.mu.RUnlock()
+
+		// M-AUTH-1: If not in cache, try to load from secret store
+		if !exists {
+			loadedKey, err := s.loadAPIKeyFromStore(r.Context(), apiKeyStr)
+			if err != nil {
+				s.logger.Debug("Failed to load API key from store", "error", logging.SanitizeLogValue(err.Error()))
+				s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
+				return
+			}
+			keyInfo = loadedKey
+		}
+
+		// Check if key is expired
+		now := s.apiKeyNow()
+		if keyInfo.ExpiresAt != nil && now.After(*keyInfo.ExpiresAt) {
+			s.writeErrorResponse(w, http.StatusUnauthorized, "API key expired", "EXPIRED_API_KEY")
+			return
+		}
+
+		// Issue #4574: the secret store is the source of truth. A cached, store-backed
+		// entry older than apiKeyRevalidateInterval is re-read from the store so a key
+		// deleted on another controller node stops authenticating here within that
+		// bound. See apiKeyMaxStaleness for how a store outage is handled.
+		if exists && keyInfo.recordRef != "" && now.Sub(keyInfo.validatedAt) >= apiKeyRevalidateInterval {
+			refreshed, err := s.revalidateCachedAPIKey(r.Context(), apiKeyStr, keyInfo, now)
+			switch {
+			case err == nil:
+				keyInfo = refreshed
+			case errors.Is(err, errAPIKeyRevoked):
+				s.logger.Info("Cached API key no longer in secret store; evicted",
+					"id", logging.SanitizeLogValue(keyInfo.ID),
+					"tenant_id", logging.SanitizeLogValue(keyInfo.TenantID))
+				s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
+				return
+			case now.Sub(keyInfo.validatedAt) < apiKeyMaxStaleness:
+				s.logger.Warn("API key re-validation failed; serving cached entry within the staleness bound",
+					"id", logging.SanitizeLogValue(keyInfo.ID),
+					"last_validated", keyInfo.validatedAt.Format(time.RFC3339),
+					"error", logging.SanitizeLogValue(err.Error()))
+			default:
+				s.logger.Error("API key re-validation failed past the staleness bound; refusing request",
+					"id", logging.SanitizeLogValue(keyInfo.ID),
+					"last_validated", keyInfo.validatedAt.Format(time.RFC3339),
+					"error", logging.SanitizeLogValue(err.Error()))
+				s.writeErrorResponse(w, http.StatusServiceUnavailable,
+					"API key could not be validated; retry later", "KEY_VALIDATION_UNAVAILABLE")
+				return
+			}
+		}
+
+		// Convert API key to Principal for uniform authorization handling.
+		principal := apiKeyPrincipal(keyInfo)
+
+		if s.refuseUnscopedPrincipal(w, principal) {
+			return
+		}
+
+		// Add key info and principal to request context
+		ctx := context.WithValue(r.Context(), apiKeyContextKey, keyInfo)
+		ctx = context.WithValue(ctx, principalContextKey, principal)
+		ctx = context.WithValue(ctx, ctxkeys.UserIDKey, keyInfo.ID)
+		ctx = context.WithValue(ctx, ctxkeys.TenantID, keyInfo.TenantID)
+		// API-key principals are never root-scoped (Issue #4316): NewRootScope is
+		// reserved for a verified mTLS admin certificate.
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(keyInfo.TenantID))
+		tracker := s.newAPIKeyTracker(keyInfo)
+		ctx = context.WithValue(ctx, authRecheckContextKey, authRecheck(tracker.live))
+		ctx = context.WithValue(ctx, principalRefreshContextKey, tracker.refresh())
+
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// errAPIKeyRevoked reports that a cached API key's durable record is gone from the
+// secret store (deleted, or expired out of it) — Issue #4574.
+var errAPIKeyRevoked = errors.New("API key no longer present in secret store")
+
+// readAPIKeyRecord reads one API key's record directly by its store path (Issue
+// #4574): never a listing. It returns (nil, nil) — "no usable key" — when the record
+// does not exist, has expired, cannot be decrypted or parsed, or is not an API-key
+// record. Only a storage-unavailable error is returned, and only that kind is
+// eligible for the apiKeyMaxStaleness grace in authenticateMiddleware.
+func (s *Server) readAPIKeyRecord(ctx context.Context, tenantID, keyHash string) (*secretsif.Secret, error) {
+	var rec *secretsif.Secret
+	var err error
+	if acc, ok := s.secretStore.(secretsif.TenantSecretAccessor); ok {
+		// The tenant is known (from the index or the cache entry): address the
+		// record explicitly, with no reference resolution involved.
+		rec, err = acc.GetTenantSecret(ctx, tenantID, keyHash)
+	} else {
+		// SecretStore lookup path (tenant + key hash), not the credential itself.
+		rec, err = s.secretStore.GetSecret(ctx, apiKeyStoreRef(tenantID, keyHash))
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, secretsif.ErrSecretNotFound), errors.Is(err, secretsif.ErrSecretExpired):
+			return nil, nil
+		case errors.Is(err, secretsif.ErrSecretUndecryptable):
+			// The record exists but is unusable; retrying cannot fix it, so it is
+			// treated as absent (fail closed) rather than as a store outage.
+			s.logger.Warn("API key record cannot be decrypted; treating key as revoked",
+				"tenant_id", logging.SanitizeLogValue(tenantID))
+			return nil, nil
+		}
+		// Anything else is the store being unavailable (I/O, timeout, context).
+		return nil, err
+	}
+	if rec.Metadata[secretsif.MetadataKeySecretType] != string(secretsif.SecretTypeAPIKey) {
+		return nil, nil
+	}
+	return rec, nil
+}
+
+// apiKeyFromSecret builds the cache entry for apiKey from its secret-store record.
+func apiKeyFromSecret(apiKey string, rec *secretsif.Secret, validatedAt time.Time) *APIKey {
+	return &APIKey{
+		ID:          rec.Metadata["id"],
+		Key:         apiKey, // Store plaintext key in memory for fast lookup
+		Name:        rec.Description,
+		Permissions: parsePermissions(rec.Metadata["permissions"]),
+		CreatedAt:   rec.CreatedAt,
+		ExpiresAt:   rec.ExpiresAt,
+		TenantID:    rec.TenantID,
+		recordRef:   rec.Key,
+		validatedAt: validatedAt,
+	}
+}
+
+// M-AUTH-1: loadAPIKeyFromStore loads an API key from the secret store and caches it.
+// Issue #4574: the key's tenant comes from the API-key index (no tenant name is
+// assumed), and the record itself is then read directly. An unknown key costs no store
+// access unless the index is older than apiKeyIndexMissRefreshFloor.
+func (s *Server) loadAPIKeyFromStore(ctx context.Context, apiKey string) (*APIKey, error) {
+	keyHash := hashAPIKey(apiKey)
+	entry, found, err := s.locateAPIKey(ctx, keyHash)
+	if err != nil {
+		return nil, fmt.Errorf("API key index refresh failed: %w", err)
+	}
+	if !found {
+		return nil, fmt.Errorf("API key not found in secret store")
+	}
+	rec, err := s.readAPIKeyRecord(ctx, entry.TenantID, keyHash)
+	if err != nil {
+		return nil, fmt.Errorf("API key read failed: %w", err)
+	}
+	if rec == nil {
+		s.apiKeyIdx.remove(keyHash)
+		return nil, fmt.Errorf("API key not found in secret store")
+	}
+
+	keyInfo := apiKeyFromSecret(apiKey, rec, s.apiKeyNow())
+
+	// Cache in memory for future requests — unless this node deleted the key while
+	// the record was being read (see cacheAPIKeyUnlessDeleted).
+	if !s.cacheAPIKeyUnlessDeleted(apiKey, keyHash, keyInfo) {
+		return nil, fmt.Errorf("API key not found in secret store")
+	}
+
+	s.logger.Debug("Loaded API key from secret store",
+		"id", logging.SanitizeLogValue(keyInfo.ID),
+		"tenant_id", logging.SanitizeLogValue(keyInfo.TenantID))
+
+	return keyInfo, nil
+}
+
+// revalidateCachedAPIKey re-reads a cached, store-backed key's record directly (Issue
+// #4574). On success the cache entry is replaced with one refreshed from the record
+// and stamped validated at now. When the record is gone the entry is evicted and
+// errAPIKeyRevoked is returned. Any other error leaves the cache untouched and is
+// returned for the caller to weigh against apiKeyMaxStaleness.
+func (s *Server) revalidateCachedAPIKey(ctx context.Context, apiKey string, cached *APIKey, now time.Time) (*APIKey, error) {
+	rec, err := s.readAPIKeyRecord(ctx, cached.TenantID, cached.recordRef)
+	if err != nil {
+		return nil, err
+	}
+	if rec == nil {
+		s.mu.Lock()
+		delete(s.apiKeys, apiKey)
+		s.mu.Unlock()
+		s.apiKeyIdx.remove(cached.recordRef)
+		return nil, errAPIKeyRevoked
+	}
+
+	refreshed := apiKeyFromSecret(apiKey, rec, now)
+	if !s.cacheAPIKeyUnlessDeleted(apiKey, cached.recordRef, refreshed) {
+		s.mu.Lock()
+		delete(s.apiKeys, apiKey)
+		s.mu.Unlock()
+		return nil, errAPIKeyRevoked
+	}
+	return refreshed, nil
+}
+
+// writeErrorResponse writes a standardized error response
+func (s *Server) writeErrorResponse(w http.ResponseWriter, statusCode int, message, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+
+	errorResponse := ErrorResponse{
+		Error: &APIError{
+			Code:    code,
+			Message: message,
+		},
+		Timestamp: time.Now().UTC(),
+	}
+
+	s.encodeJSONBody(w, errorResponse, "error")
+}
+
+// writeStatusError writes the JSON ErrorResponse for handlers that report a bare
+// status and fixed message (Issue #5022). The code is derived from the status;
+// message must be a fixed string, never a wrapped internal error.
+func (s *Server) writeStatusError(w http.ResponseWriter, statusCode int, message string) {
+	code := strings.ToUpper(strings.ReplaceAll(http.StatusText(statusCode), " ", "_"))
+	s.writeErrorResponse(w, statusCode, message, code)
+}
+
+// encodeJSONBody serializes payload to w and reports an encode failure instead of
+// discarding it. Every rejection path in this file routes through here so that a
+// truncated or unwritable security response is visible in the logs — the same
+// treatment writeResponse gives the success path. bodyKind names the response shape
+// (e.g. "error", "step_up_required") so the log identifies which path failed without
+// echoing the payload.
+//
+// The header and status have already been written by the caller at this point, so
+// there is no second response to send; logging is the only remaining action.
+func (s *Server) encodeJSONBody(w http.ResponseWriter, payload interface{}, bodyKind string) {
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		s.logger.Error("Failed to encode response",
+			"body_kind", bodyKind,
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+// writeSuccessResponse writes a standardized success response
+func (s *Server) writeSuccessResponse(w http.ResponseWriter, data interface{}) {
+	s.writeResponse(w, http.StatusOK, data)
+}
+
+// writeResponse writes a standardized API response
+func (s *Server) writeResponse(w http.ResponseWriter, statusCode int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+
+	response := APIResponse{
+		Data:      data,
+		Timestamp: time.Now().UTC(),
+	}
+
+	s.encodeJSONBody(w, response, "success")
+}
+
+// AuthorizationDecision contains the result of an authorization check
+type AuthorizationDecision struct {
+	Granted         bool                   `json:"granted"`
+	PermissionID    string                 `json:"permission_id"`
+	Resource        string                 `json:"resource"`
+	Action          string                 `json:"action"`
+	Decision        string                 `json:"decision"`
+	Reason          string                 `json:"reason"`
+	CheckedAt       time.Time              `json:"checked_at"`
+	DurationMs      int64                  `json:"duration_ms"`
+	SubjectID       string                 `json:"subject_id"`
+	TenantID        string                 `json:"tenant_id"`
+	ConditionalVars map[string]interface{} `json:"conditional_vars,omitempty"`
+}
+
+// tenantCrossingRemedyPermissions lists the ADR-025 Decision 2 endpoints whose handlers
+// own the root-scoped decision themselves, so requirePermission's boundary check must not
+// pre-empt them:
+//
+//   - tenant:crossing-break-glass is the remedy for lacking a crossing. Gating it on
+//     already holding one would make the boundary unopenable — a root-scoped operator
+//     could never obtain a first crossing, and ADR-025 Decision 2(b) would be dead code.
+//   - tenant:crossing-approve-break-glass is the second half of that remedy: the approving
+//     root-scoped operator holds no crossing into the tenant either, so the boundary gate
+//     would make a pending break-glass unapprovable.
+//   - tenant:crossing-grant refuses every root-scoped caller outright
+//     (handlers_tenant_crossing.go, ROOT_SCOPED_CANNOT_GRANT) because a grant is the MSP's
+//     consent, never the operator's self-dealing. That refusal is strictly stricter than a
+//     crossing check, and a challenge here would advertise a remedy that does not unlock
+//     the endpoint.
+//
+// tenant:crossing-list is deliberately absent: reading an MSP's crossing history is
+// ordinary tenant-scoped data and its handler already applies authorizeTenantAccess.
+var tenantCrossingRemedyPermissions = map[string]bool{
+	"tenant:crossing-break-glass":         true,
+	"tenant:crossing-approve-break-glass": true,
+	"tenant:crossing-grant":               true,
+}
+
+// enrollmentConfinementMiddleware blocks cookie-authenticated web sessions whose
+// principal has zero enrolled passkeys (AuthenticatorCount == 0) from all api routes.
+//
+// A zero-passkey session can ONLY redeem a first-passkey enrollment link; that redemption
+// path is on the BASE router (/api/v1/web/passkey/enroll/begin|finish), not the api
+// subrouter, so this middleware does not apply to it — by construction.
+//
+// mTLS admin and API-key principals are not cookie-authenticated (cookieAuthContextKey
+// is false), so they pass through regardless of AuthenticatorCount. AuthenticatorCount==-1
+// (account-load failure) is also blocked: fail-closed is safer than fail-open when the
+// session's enrollable state cannot be determined.
+//
+// This middleware MUST run BEFORE requirePermission (added earlier in the chain) so
+// that confinement is enforced even when the principal holds the required permission.
+func (s *Server) enrollmentConfinementMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookieAuth, _ := r.Context().Value(cookieAuthContextKey).(bool)
+		if cookieAuth {
+			principal, _ := r.Context().Value(principalContextKey).(*Principal)
+			if principal != nil && principal.AuthenticatorCount <= 0 {
+				// Zero or unknown authenticator count on a cookie-auth session.
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"Account has no passkey enrolled — redeem your enrollment link first",
+					"ENROLLMENT_REQUIRED")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requirePermission creates middleware that enforces specific permission requirements.
+// Implicit-admin principals (ImplicitAdmin: true) are authorized for every permission;
+// all other principals are held to their Permissions slice verbatim.
+func (s *Server) requirePermission(resourceType, action string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Fail closed when the authorization service was not wired. Relay
+			// principals are the sole exception: their grant-derived permission
+			// set is independently verified inline.
+			if s.rbacService == nil {
+				if _, isRelay := r.Context().Value(relayPrincipalKey).(*Principal); isRelay {
+					p, _ := r.Context().Value(principalContextKey).(*Principal)
+					permID := s.buildPermissionID(resourceType, action)
+					if !s.hasPermission(p, permID) {
+						s.writeErrorResponse(w, http.StatusForbidden, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS")
+						return
+					}
+					next.ServeHTTP(w, r)
+					return
+				}
+				s.logger.Error("RBAC service not available; denying request")
+				s.writeErrorResponse(w, http.StatusServiceUnavailable,
+					"Authorization service unavailable", "AUTHORIZATION_UNAVAILABLE")
+				return
+			}
+
+			// Get authenticated principal from context (set by authenticationMiddleware).
+			principal, ok := r.Context().Value(principalContextKey).(*Principal)
+			if !ok {
+				s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+				return
+			}
+
+			userID, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
+			tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+
+			// Build resource identifier from URL path variables
+			resource := s.buildResourceIdentifier(r, resourceType)
+
+			permissionID := s.buildPermissionID(resourceType, action)
+			if !s.hasPermission(principal, permissionID) {
+				decision := &AuthorizationDecision{
+					Granted:      false,
+					PermissionID: permissionID,
+					Resource:     resource,
+					Action:       action,
+					Decision:     "DENY",
+					Reason:       "Principal lacks required permission: " + permissionID,
+					CheckedAt:    time.Now(),
+					SubjectID:    userID,
+					TenantID:     tenantID,
+				}
+
+				s.auditAuthorizationDecision(r, decision)
+				s.writeAuthorizationError(w, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS", decision)
+				return
+			}
+
+			// Assurance check (ADR-021 Decision 2): after confirming the principal
+			// holds the permission, verify the assurance level meets the minimum for
+			// this route. This replaces requireTier(TierMTLSOnly) entirely.
+			// resolveAssuranceRequirement composes the global floor with any per-tenant
+			// overrides declared by ancestors of tenantID (root→leaf), taking the max
+			// of all Min values and OR-ing RequireUserPresence (ADR-021, Issue #2839).
+			assuranceReq, assuranceFound, assuranceErr := s.resolveAssuranceRequirement(r.Context(), tenantID, permissionID)
+			if assuranceErr != nil {
+				s.logger.Error("Failed to resolve assurance requirement",
+					"permission_id", logging.SanitizeLogValue(permissionID),
+					"tenant_id", logging.SanitizeLogValue(tenantID), "error", logging.SanitizeLogValue(assuranceErr.Error()))
+				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
+				return
+			}
+			// AllowMachine (code-only opt-in, never set by assurance-policy overrides): an
+			// API-key principal that holds the permission skips both the Min floor and the
+			// presence check. Human principals are unaffected. RBAC and tenant scoping above
+			// still apply.
+			machineAllowed := assuranceFound && assuranceReq.AllowMachine && principal.Assurance == session.AssuranceMachine
+			if assuranceFound && !machineAllowed && principal.Assurance < assuranceReq.Min {
+				decision := &AuthorizationDecision{
+					Granted:      false,
+					PermissionID: permissionID,
+					Resource:     resource,
+					Action:       action,
+					Decision:     "DENY",
+					Reason:       fmt.Sprintf("Insufficient assurance: %s < %s required for %s", principal.Assurance, assuranceReq.Min, permissionID),
+					CheckedAt:    time.Now(),
+					SubjectID:    userID,
+					TenantID:     tenantID,
+				}
+				s.auditAuthorizationDecision(r, decision)
+
+				if principal.Assurance == session.AssuranceMachine {
+					// API-key principals can never step up; send a plain 403.
+					s.writeAuthorizationError(w, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS", decision)
+					return
+				}
+				// All other callers (AssuranceBasic+) receive a step-up challenge (ADR-021 Decision 6).
+				levelName := assuranceReq.Min.String()
+				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s"`, levelName))
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				s.encodeJSONBody(w, struct {
+					Error             string `json:"error"`
+					RequiredAssurance string `json:"required_assurance"`
+				}{
+					Error:             "step_up_required",
+					RequiredAssurance: levelName,
+				}, "step_up_required")
+				return
+			}
+
+			// User-presence check (ADR-021 Decision 4): a fresh per-action WebAuthn assertion
+			// is required for catastrophic permissions (RequireUserPresence: true in permissionAssurance).
+			// This runs only after the assurance check above has confirmed the principal holds at least
+			// req.Min assurance, so AssuranceMachine principals are already rejected above (they never
+			// reach this branch). The presence token was minted by POST /api/v1/webauthn/presence/finish
+			// and is passed in X-Presence-Token. It is single-use (LoadAndDelete) and short-lived
+			// (presenceTokenTTL). Continuity / LastProvenAt alone is insufficient — a hijacked-but-
+			// continuous session cannot fake a present human (ADR-021 Decision 4 threat model).
+			if assuranceFound && !machineAllowed && assuranceReq.RequireUserPresence && !presenceExemptForRequest(r, assuranceReq) {
+				levelName := assuranceReq.Min.String()
+
+				presenceToken := r.Header.Get(presenceTokenHeader)
+				if presenceToken == "" {
+					// No presence token: step-up challenge including presence="required" (ADR-021 Decision 6).
+					// permission names the gated permission (Issue #4287) so a CLI-side step-up
+					// handler can lodge a CLI presence-relay request bound to it.
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					s.encodeJSONBody(w, struct {
+						Error             string `json:"error"`
+						RequiredAssurance string `json:"required_assurance"`
+						PresenceRequired  bool   `json:"presence_required"`
+					}{
+						Error:             "step_up_required",
+						RequiredAssurance: levelName,
+						PresenceRequired:  true,
+					}, "step_up_required")
+					return
+				}
+
+				// Validate and atomically consume the token (single-use via LoadAndDelete).
+				tokenHash := hashPresenceToken(presenceToken)
+				record, tokenOutcome := s.takePresenceToken(r.Context(), tokenHash)
+				if tokenOutcome == ceremonyUnavailable {
+					s.writeCeremonyUnavailable(w)
+					return
+				}
+				if tokenOutcome != ceremonyOK {
+					// Token not found (already used, never issued, or tampered).
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					s.encodeJSONBody(w, struct {
+						Error            string `json:"error"`
+						PresenceRequired bool   `json:"presence_required"`
+					}{
+						Error:            "presence_token_invalid",
+						PresenceRequired: true,
+					}, "presence_token_invalid")
+					return
+				}
+				if time.Now().After(record.expires) {
+					// Expired token (already removed from map above).
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					s.encodeJSONBody(w, struct {
+						Error            string `json:"error"`
+						PresenceRequired bool   `json:"presence_required"`
+					}{
+						Error:            "presence_token_expired",
+						PresenceRequired: true,
+					}, "presence_token_expired")
+					return
+				}
+				// Bind the presence proof to the acting principal (ADR-021 Decision 4):
+				// the token is only valid for the principal that ran the WebAuthn ceremony.
+				// A proof performed by principal A must never satisfy the gate for principal
+				// B's catastrophic action. The token was already consumed by LoadAndDelete,
+				// so a mismatch cannot be retried with the same token.
+				if record.principalID != principal.ID {
+					s.logger.Warn("Presence token principal mismatch",
+						"token_principal_id", logging.SanitizeLogValue(record.principalID),
+						"request_principal_id", logging.SanitizeLogValue(principal.ID),
+						"permission_id", permissionID,
+					)
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					s.encodeJSONBody(w, struct {
+						Error            string `json:"error"`
+						PresenceRequired bool   `json:"presence_required"`
+					}{
+						Error:            "presence_token_principal_mismatch",
+						PresenceRequired: true,
+					}, "presence_token_principal_mismatch")
+					return
+				}
+
+				// Action binding (Issues #4287, #5142, ADR-021 Amendment 7): every presence
+				// token carries the exact method/path/body-hash/permission of the one
+				// request its gesture authorized, whether minted through the CLI presence
+				// relay or the browser step-up flow. A token with an empty binding is
+				// refused for every RequireUserPresence permission.
+				bodyHash, hashErr := hashRequestBodyForPresenceBinding(r)
+				if hashErr != nil {
+					s.logger.Error("Failed to read request body for presence binding check",
+						"error", logging.SanitizeLogValue(hashErr.Error()))
+					s.writeErrorResponse(w, http.StatusInternalServerError,
+						"Failed to verify presence token", "PRESENCE_TOKEN_BINDING_ERROR")
+					return
+				}
+				if record.boundPermissionID == "" || record.boundMethod != r.Method ||
+					record.boundPath != canonicalRequestTarget(r.URL.Path, r.URL.RawQuery) || record.boundBodyHash != bodyHash ||
+					record.boundPermissionID != permissionID {
+					s.logger.Warn("Presence token action-binding mismatch",
+						"token_permission_id", logging.SanitizeLogValue(record.boundPermissionID),
+						"permission_id", permissionID,
+					)
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					s.encodeJSONBody(w, struct {
+						Error            string `json:"error"`
+						PresenceRequired bool   `json:"presence_required"`
+					}{
+						Error:            "presence_token_action_mismatch",
+						PresenceRequired: true,
+					}, "presence_token_action_mismatch")
+					return
+				}
+
+				s.logger.Debug("Presence token accepted",
+					"principal_id", logging.SanitizeLogValue(principal.ID),
+					"permission_id", permissionID,
+				)
+			}
+
+			// ADR-025 Decision 1 root<->MSP boundary for principals subject to it.
+			//
+			// This must sit outside the tenant-scoped block below: a boundary-subject
+			// principal presents GlobalScope == true (its TenantID is the root tenant,
+			// Issue #4665), and that block runs only for !GlobalScope principals, so it is
+			// structurally unreachable for it. Enforcing the boundary only inside the
+			// handlers that happen to call authorizeTenantAccess left every other
+			// tenant-targeting route open — tenant:manage's suspend and config-source/test,
+			// and the per-tenant refresh-policy and assurance-policy endpoints — letting a
+			// root-scoped SaaS-operator suspend an MSP tenant or drive a config-source test
+			// against that tenant's git credential with no active grant and no break-glass
+			// record. Checking here covers every current and future tenant-targeting route
+			// by construction rather than by handler-by-handler discipline.
+			//
+			// subjectToTenantCrossingBoundary (not principal.RootScoped directly, Issue
+			// #4337): RootScoped alone would let a bound root-scope account's session
+			// silently skip this entire block — and the GlobalScope-gated tenant-isolation
+			// check below — the moment its current assurance drops below phishing-resistant,
+			// since RootScoped's session-path derivation is re-evaluated against that
+			// assurance on every request while the account's actual scope has not changed.
+			if subjectToTenantCrossingBoundary(principal) && !tenantCrossingRemedyPermissions[permissionID] {
+				if targetTenant := s.extractBoundaryTenantFromRequest(r, resourceType); targetTenant != "" {
+					switch s.authorizeTenantAccess(r.Context(), principal, targetTenant) {
+					case tenantAuthAllowed:
+						// Root itself, or a tenant covered by an active crossing.
+					case tenantAuthNeedsCrossing:
+						s.auditAuthorizationDecision(r, &AuthorizationDecision{
+							Granted:      false,
+							PermissionID: permissionID,
+							Resource:     resource,
+							Action:       action,
+							Decision:     "DENY",
+							Reason:       "Root-scoped principal has no active tenant crossing for target tenant",
+							CheckedAt:    time.Now(),
+							SubjectID:    userID,
+							TenantID:     tenantID,
+						})
+						// The tenant is real and inside root's own subtree, so a challenge
+						// discloses nothing this caller cannot already learn, and it is the
+						// only way a legitimate break-glass invocation learns its remedy
+						// (ADR-025 Decision 3).
+						s.writeTenantCrossingChallenge(w, targetTenant)
+						return
+					default:
+						isoDecision := &AuthorizationDecision{
+							Granted:      false,
+							PermissionID: permissionID,
+							Resource:     resource,
+							Action:       action,
+							Decision:     "DENY",
+							Reason:       "Target tenant is outside the root-scoped principal's boundary",
+							CheckedAt:    time.Now(),
+							SubjectID:    userID,
+							TenantID:     tenantID,
+						}
+						s.auditAuthorizationDecision(r, isoDecision)
+						// Same existence-oracle stance as handleGetTenant/handleUpdateTenant:
+						// a tenant outside root's subtree must not be distinguishable from one
+						// that does not exist.
+						if resourceType == "tenant" {
+							s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+							return
+						}
+						s.writeAuthorizationError(w, "Cross-tenant access denied", "CROSS_TENANT_ACCESS_DENIED", isoDecision)
+						return
+					}
+				}
+			}
+
+			// Tenant isolation check for tenant-scoped (non-global) principals.
+			s.mu.RLock()
+			engine := s.isolationEngine
+			s.mu.RUnlock()
+			if !principal.GlobalScope && principal.TenantID != "" {
+				targetTenant := s.extractTargetTenantFromRequest(r, resourceType)
+				// Real tenant IDs are flat, ParentID-linked tokens, never hierarchical
+				// paths, so subtree containment resolves through the tenant manager's
+				// ancestry. The tenant resource type additionally honours the ADR-025
+				// crossing boundary via isCallerAuthorizedForTenant.
+				var inTargetScope bool
+				if targetTenant == "" || targetTenant == principal.TenantID {
+					inTargetScope = true
+				} else if resourceType == "tenant" {
+					inTargetScope = s.isCallerAuthorizedForTenant(r.Context(), principal, targetTenant)
+				} else {
+					inTargetScope = s.tenantSubtreeContains(r.Context(), principal.TenantID, targetTenant)
+				}
+				if !inTargetScope {
+					isoDecision := &AuthorizationDecision{
+						Granted:      false,
+						PermissionID: permissionID,
+						Resource:     resource,
+						Action:       action,
+						Decision:     "DENY",
+						Reason:       "Target tenant is outside principal tenant subtree",
+						CheckedAt:    time.Now(),
+						SubjectID:    userID,
+						TenantID:     tenantID,
+					}
+					s.auditAuthorizationDecision(r, isoDecision)
+					// tenant:read, tenant:update and tenant:manage (suspend, config-source/test)
+					// all resolve a single tenant by ID and must return an identical 404 for
+					// "doesn't exist" and "exists but out of my subtree" (ADR-025 existence-oracle
+					// prevention, Issue #3125; extended to tenant:manage by Issue #3181 and to
+					// tenant:billing-read by ADR-025 Amendment 6) — a 403
+					// here would let a caller distinguish the two cases via status code alone,
+					// before ever reaching the handler's own isCallerAuthorizedForTenant check.
+					if resourceType == "tenant" && (action == "read" || action == "update" || action == "manage" || action == "billing-read") {
+						s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+						return
+					}
+					s.writeAuthorizationError(w, "Cross-tenant access denied", "CROSS_TENANT_ACCESS_DENIED", isoDecision)
+					return
+				}
+				if engine != nil && targetTenant != "" && targetTenant != principal.TenantID {
+					isoResp, isoErr := engine.ValidateTenantAccess(r.Context(), &tenantsecurity.TenantAccessRequest{
+						SubjectID:       principal.ID,
+						SubjectTenantID: principal.TenantID,
+						TargetTenantID:  targetTenant,
+						ResourceID:      resource,
+						AccessLevel:     tenantsecurity.CrossTenantLevelRead,
+					})
+					if isoErr != nil || isoResp == nil || !isoResp.Granted {
+						isoDecision := &AuthorizationDecision{
+							Granted:      false,
+							PermissionID: permissionID,
+							Resource:     resource,
+							Action:       action,
+							Decision:     "DENY",
+							Reason:       "Cross-tenant access denied by isolation engine",
+							CheckedAt:    time.Now(),
+							SubjectID:    userID,
+							TenantID:     tenantID,
+						}
+						s.auditAuthorizationDecision(r, isoDecision)
+						s.writeAuthorizationError(w, "Cross-tenant access denied", "CROSS_TENANT_ACCESS_DENIED", isoDecision)
+						return
+					}
+				}
+			}
+
+			// Principal has required permission — grant access.
+			reason := "API key has required permission: " + permissionID
+			if principal.Assurance >= session.AssuranceBasic {
+				reason = "principal assurance sufficient for full access"
+			}
+			decision := &AuthorizationDecision{
+				Granted:      true,
+				PermissionID: permissionID,
+				Resource:     resource,
+				Action:       action,
+				Decision:     "ALLOW",
+				Reason:       reason,
+				CheckedAt:    time.Now(),
+				SubjectID:    userID,
+				TenantID:     tenantID,
+			}
+
+			// Add decision to context
+			ctx := context.WithValue(r.Context(), authDecisionContextKey, decision)
+
+			s.logger.Debug("Access granted",
+				"subject_id", userID,
+				"assurance_sufficient", principal.Assurance >= session.AssuranceBasic,
+				"permission_id", permissionID,
+				"resource", logging.SanitizeLogValue(resource),
+			)
+
+			// Audit the authorization decision
+			s.auditAuthorizationDecision(r, decision)
+
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// buildResourceIdentifier constructs a resource identifier from the request
+func (s *Server) buildResourceIdentifier(r *http.Request, resourceType string) string {
+	vars := mux.Vars(r)
+
+	switch resourceType {
+	case "steward":
+		if stewardID := vars["id"]; stewardID != "" {
+			return "steward:" + stewardID
+		}
+		return "steward:*"
+	case "certificate":
+		if serial := vars["serial"]; serial != "" {
+			return "certificate:" + serial
+		}
+		return "certificate:*"
+	case "rbac":
+		if id := vars["id"]; id != "" {
+			return "rbac:" + id
+		}
+		return "rbac:*"
+	case "api-key":
+		if id := vars["id"]; id != "" {
+			return "api-key:" + id
+		}
+		return "api-key:*"
+	case "monitoring":
+		return "monitoring:*"
+	default:
+		return resourceType + ":*"
+	}
+}
+
+// buildPermissionID constructs a permission ID from resource type and action
+func (s *Server) buildPermissionID(resourceType, action string) string {
+	return resourceType + ":" + action
+}
+
+// generateRequestID generates a unique request ID for tracing
+func (s *Server) generateRequestID() string {
+	return uuid.New().String()
+}
+
+// writeAuthorizationError writes a 403 carrying only the code, message and missing permission_id
+func (s *Server) writeAuthorizationError(w http.ResponseWriter, message, code string, decision *AuthorizationDecision) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+
+	errorResponse := ErrorResponse{
+		Error: &APIError{
+			Code:    code,
+			Message: message,
+			// Only the missing permission is disclosed; the full decision (subject,
+			// tenant, reason, timing) is recorded by auditAuthorizationDecision.
+			Details: map[string]interface{}{
+				"permission_id": decision.PermissionID,
+			},
+		},
+		Timestamp: time.Now().UTC(),
+	}
+
+	s.encodeJSONBody(w, errorResponse, "authorization_error")
+}
+
+// auditAuthorizationDecision logs authorization decisions for security auditing (H3).
+func (s *Server) auditAuthorizationDecision(r *http.Request, decision *AuthorizationDecision) {
+	auditFields := map[string]interface{}{
+		"event_type":     "api_authorization",
+		"timestamp":      decision.CheckedAt.UTC().Format(time.RFC3339Nano),
+		"subject_id":     logging.SanitizeLogValue(decision.SubjectID),
+		"tenant_id":      logging.SanitizeLogValue(decision.TenantID),
+		"permission_id":  logging.SanitizeLogValue(decision.PermissionID),
+		"resource":       logging.SanitizeLogValue(decision.Resource),
+		"action":         logging.SanitizeLogValue(decision.Action),
+		"decision":       logging.SanitizeLogValue(decision.Decision),
+		"granted":        decision.Granted,
+		"reason":         logging.SanitizeLogValue(decision.Reason),
+		"duration_ms":    decision.DurationMs,
+		"request_path":   logging.SanitizeLogValue(redactCredentialPath(r.URL.Path)),
+		"request_method": logging.SanitizeLogValue(r.Method),
+		"remote_addr":    logging.SanitizeLogValue(r.RemoteAddr),
+		"user_agent":     logging.SanitizeLogValue(r.Header.Get("User-Agent")),
+		"request_id":     logging.SanitizeLogValue(s.getRequestID(r)),
+		"severity":       s.getAuditSeverity(decision),
+	}
+
+	// H3: Include auth method and cert details in audit log. CertSerial is only
+	// populated for mTLS principals (Assurance == AssuranceStrong), making it a
+	// more precise discriminator than the general assurance level here.
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	if principal != nil && principal.CertSerial != "" {
+		auditFields["auth_method"] = "cert"
+		auditFields["cert_serial"] = logging.SanitizeLogValue(principal.CertSerial)
+		auditFields["cert_fingerprint"] = logging.SanitizeLogValue(principal.CertFingerprint)
+		auditFields["cert_not_after"] = principal.CertNotAfter.UTC().Format(time.RFC3339)
+	} else {
+		auditFields["auth_method"] = "api_key"
+	}
+	// Issue #4337: the ADR-025 crossing boundary now binds on the account's durable
+	// GlobalScope rather than the assurance-gated RootScoped marker, so a crossing made
+	// from a lower-assurance session no longer shows up as a difference in *whether* the
+	// boundary engaged. Recording the assurance level here is what keeps that fact visible
+	// after the fact instead of losing it.
+	if principal != nil {
+		auditFields["assurance"] = principal.Assurance.String()
+	}
+
+	if decision.ConditionalVars != nil {
+		auditFields["conditional_vars"] = logging.SanitizeFieldsRecursive(decision.ConditionalVars)
+	}
+
+	if decision.Granted {
+		s.logger.Info("Authorization audit", flattenFieldsToKV(auditFields)...)
+	} else {
+		s.logger.Warn("Authorization audit - access denied", flattenFieldsToKV(auditFields)...)
+	}
+}
+
+// flattenFieldsToKV converts a map to a sorted flat key/value slice for variadic logger calls.
+// Keys are sorted alphabetically to make log output deterministic.
+func flattenFieldsToKV(fields map[string]interface{}) []interface{} {
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]interface{}, 0, 2*len(fields))
+	for _, k := range keys {
+		out = append(out, k, fields[k])
+	}
+	return out
+}
+
+// getRequestID extracts or generates a request ID for audit correlation
+func (s *Server) getRequestID(r *http.Request) string {
+	// Check if request ID was set by upstream proxy/load balancer
+	if reqID := r.Header.Get("X-Request-ID"); reqID != "" {
+		return reqID
+	}
+	if reqID := r.Header.Get("X-Correlation-ID"); reqID != "" {
+		return reqID
+	}
+
+	// Generate one if not present
+	return s.generateRequestID()
+}
+
+// getAuditSeverity determines audit severity based on authorization decision
+func (s *Server) getAuditSeverity(decision *AuthorizationDecision) string {
+	if !decision.Granted {
+		// Failed authorization attempts are high severity
+		if strings.Contains(decision.Reason, "Cross-tenant") {
+			return "CRITICAL" // Cross-tenant violations are critical
+		}
+		return "HIGH" // Regular permission denials are high
+	}
+
+	// Successful authorizations for sensitive resources
+	if strings.Contains(decision.PermissionID, "delete") ||
+		strings.Contains(decision.PermissionID, "admin") ||
+		strings.Contains(decision.Resource, "rbac") {
+		return "MEDIUM" // Sensitive operations get medium severity
+	}
+
+	return "LOW" // Regular authorized operations
+}
+
+// hasPermission checks whether principal has permissionID.
+//
+// The three platform-administrator principal types — mTLS admin certs, CLI Bearer
+// sessions (no bound account or root-scope account), and root-scope web accounts —
+// carry ImplicitAdmin: true (ADR-025 Amendment 3). All other principals — API keys,
+// relay principals, tenant-scoped accounts, and a zero-valued Principal{} — have
+// ImplicitAdmin: false and are held to their Permissions slice verbatim.
+//
+// This decides permission BREADTH only, never proof strength. requirePermission
+// consults permissionAssurance immediately after this returns, so an implicit admin
+// is still forced through a WebAuthn step-up for AssuranceStrong permissions and a
+// fresh single-use presence token for RequireUserPresence ones. Widening breadth here
+// cannot widen the assurance gate.
+//
+// A zero-valued Principal{} is denied every permission by construction: ImplicitAdmin
+// is false and Permissions is nil (empty range). The prior Permissions==nil sentinel
+// made a zero-valued principal unintentionally privileged; that hazard is removed.
+//
+// C1: "*" is treated as a literal permission name — it will not match any real permissionID.
+func (s *Server) hasPermission(principal *Principal, permissionID string) bool {
+	if principal == nil {
+		return false
+	}
+	if principal.ImplicitAdmin {
+		return true
+	}
+	for _, p := range principal.Permissions {
+		if p == permissionID {
+			return true
+		}
+	}
+	return false
+}
+
+// csrfMiddleware enforces session-bound double-submit CSRF for unsafe HTTP methods on
+// cookie-authenticated requests (ADR-018 §3, security A5.3). Must run after
+// authenticationMiddleware so the cookie-auth context key is set.
+//
+//   - Safe methods (GET, HEAD) are always exempt.
+//   - Requests authenticated via Bearer token, API key, or mTLS are exempt (no cookie).
+//   - Cookie-authenticated requests for POST/PUT/PATCH/DELETE must supply X-CSRF-Token
+//     matching the server-side per-session token (constant-time compare).
+//
+// This is the only middleware that enforces CSRF for the api subrouter. The
+// login and logout endpoints on the base router enforce their own CSRF checks inline.
+func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Safe methods are always exempt.
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Bearer/API-key/mTLS requests are never CSRF-checked (security A5.2).
+		if !isCookieAuthenticated(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Retrieve the session ID set by authenticationMiddleware on cookie-auth success.
+		sessID, _ := r.Context().Value(webSessionIDContextKey).(string)
+		csrfHeader := r.Header.Get(headerCSRFToken)
+		stored, _ := s.csrfTokens.Load(sessID)
+		storedStr, _ := stored.(string)
+		if csrfHeader == "" || storedStr == "" || subtle.ConstantTimeCompare([]byte(csrfHeader), []byte(storedStr)) != 1 {
+			s.writeErrorResponse(w, http.StatusForbidden, "CSRF token mismatch", "CSRF_MISMATCH")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isCookieAuthenticated reports whether this request was authenticated via the
+// __Host-cfgms_session HttpOnly cookie (set by authenticationMiddleware on cookie-auth success).
+func isCookieAuthenticated(r *http.Request) bool {
+	v, _ := r.Context().Value(cookieAuthContextKey).(bool)
+	return v
+}
+
+// extractTargetTenantFromRequest returns the tenant being targeted by this request,
+// used by the isolation engine to detect cross-tenant access. Resolution order:
+//  1. targetTenantContextKey in context (set by tests or upstream middleware).
+//  2. URL path variable "tenant_id".
+//  3. URL path variable "id" when resourceType == "tenant".
+//
+// Returns "" when no explicit target tenant is present (caller treats as same-tenant).
+func (s *Server) extractTargetTenantFromRequest(r *http.Request, resourceType string) string {
+	if t, ok := r.Context().Value(targetTenantContextKey).(string); ok && t != "" {
+		return t
+	}
+	vars := mux.Vars(r)
+	if t := vars["tenant_id"]; t != "" {
+		return t
+	}
+	if resourceType == "tenant" {
+		if t := vars["id"]; t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// extractBoundaryTenantFromRequest returns the tenant a request acts on for the ADR-025
+// Decision 1 boundary check, extending extractTargetTenantFromRequest with the
+// "tenant_path" path variable. The per-tenant refresh-policy and assurance-policy routes
+// (routes_tenants.go) name their target tenant under that variable, so they resolve to ""
+// through the isolation-engine extractor and were invisible to any middleware scope check.
+//
+// It is a separate function rather than a widening of extractTargetTenantFromRequest
+// because the tenant-scoped block that consumes the latter answers a cross-tenant denial
+// with 403 CROSS_TENANT_ACCESS_DENIED, whereas those two handlers already enforce the same
+// boundary for tenant-scoped callers and answer with 404 to avoid disclosing that the
+// tenant exists. Routing them through the 403 path would trade one isolation gap for an
+// existence oracle.
+func (s *Server) extractBoundaryTenantFromRequest(r *http.Request, resourceType string) string {
+	if t := s.extractTargetTenantFromRequest(r, resourceType); t != "" {
+		return t
+	}
+	return mux.Vars(r)["tenant_path"]
+}
+
+// resolveAssuranceRequirement composes the global permissionAssurance floor with any
+// per-tenant overrides declared along the root→leaf path to tenantID (ADR-021, Issue #2839).
+//
+// Resolution rules:
+//   - Min takes the maximum seen across [global floor, ancestor overrides, tenant override].
+//   - RequireUserPresence is true if true anywhere in the chain (OR, never cleared).
+//
+// When assurancePolicyStore or tenantStore is nil, or tenantID is empty, the method
+// returns the global floor unchanged — preserving today's exact behavior in unit tests
+// that build a bare Server without these stores.
+//
+// A GetTenantPath or GetPolicy error is returned to the caller with no requirement: the
+// global floor is only a lower bound, and a tenant may have raised a permission that is
+// absent from the global map purely through a policy override, so falling back to it
+// would silently drop that tenant's stricter policy. Callers must fail closed.
+func (s *Server) resolveAssuranceRequirement(ctx context.Context, tenantID, permissionID string) (Requirement, bool, error) {
+	floor, found := permissionAssurance[permissionID]
+	if s.assurancePolicyStore == nil || s.tenantStore == nil || tenantID == "" {
+		return floor, found, nil
+	}
+
+	path, err := s.tenantStore.GetTenantPath(ctx, tenantID)
+	if err != nil {
+		return Requirement{}, false, fmt.Errorf("get tenant path: %w", err)
+	}
+
+	result := floor
+	for _, t := range path {
+		policy, err := s.assurancePolicyStore.GetPolicy(ctx, t)
+		if err != nil {
+			return Requirement{}, false, fmt.Errorf("get assurance policy: %w", err)
+		}
+		for _, ov := range policy.Overrides {
+			// overrideAppliesTo matches the exact ID and any pre-rename ID for the same
+			// operation, so a stored override survives a permission-ID rename instead of
+			// silently dropping the admin's raised bar (Issue #3574).
+			if !overrideAppliesTo(ov.PermissionID, permissionID) {
+				continue
+			}
+			found = true
+			if ov.MinOverride != nil {
+				if ovMin := session.AssuranceLevel(*ov.MinOverride); ovMin > result.Min {
+					result.Min = ovMin
+				}
+			}
+			if ov.RequireUserPresence {
+				result.RequireUserPresence = true
+				// A tenant that demands presence withdraws the built-in exemptions.
+				result.PresenceExemptRoutes = nil
+			}
+		}
+	}
+	return result, found, nil
+}
+
+// authSessionRef identifies the session that authenticated a request and the manager
+// that owns it. Principals authenticated without a session (mTLS, API key) carry none.
+type authSessionRef struct {
+	manager session.Manager
+	id      string
+}
+
+// stillLive reports whether the session behind ref is still live according to
+// the shared store (manager.GetByID consults it even on an in-memory cache hit).
+func (ref authSessionRef) stillLive(ctx context.Context) bool {
+	_, err := ref.manager.GetByID(ctx, ref.id)
+	return err == nil
+}
+
+// authRecheck reports whether the credential that authenticated a request is still
+// valid. It is called repeatedly, from one goroutine, by long-lived handlers.
+type authRecheck func(ctx context.Context) bool
+
+// requestAuthRecheck returns the re-check for whichever credential authenticated r
+// (session, API key or admin mTLS certificate), or nil when none was recorded.
+func requestAuthRecheck(r *http.Request) authRecheck {
+	if ref, ok := r.Context().Value(authSessionContextKey).(authSessionRef); ok {
+		return ref.stillLive
+	}
+	if rc, ok := r.Context().Value(authRecheckContextKey).(authRecheck); ok {
+		return rc
+	}
+	return nil
+}
+
+// adminCertRecheck re-validates an admin mTLS credential: the certificate must be
+// unexpired and unrevoked and its bound account, if any, enabled. Every uncertain
+// outcome (a revocation or account store error) fails closed.
+func (s *Server) adminCertRecheck(peerCert *x509.Certificate) authRecheck {
+	serial := peerCert.SerialNumber.String()
+	notAfter := peerCert.NotAfter
+	return func(ctx context.Context) bool {
+		if time.Now().After(notAfter) {
+			return false
+		}
+		if s.certManager != nil {
+			if revoked, err := s.certManager.IsRevoked(serial); err != nil || revoked {
+				return false
+			}
+		}
+		acct, err := s.getAccountByCertSerial(ctx, serial)
+		if err != nil {
+			return false
+		}
+		return acct == nil || !acct.Disabled
+	}
+}
+
+// presenceExemptForRequest reports whether the matched route is listed in
+// req.PresenceExemptRoutes. It fails closed: with no current route (a wrapper
+// called without a router) or an unreadable template, nothing is exempt.
+func presenceExemptForRequest(r *http.Request, req Requirement) bool {
+	if len(req.PresenceExemptRoutes) == 0 {
+		return false
+	}
+	route := mux.CurrentRoute(r)
+	if route == nil {
+		return false
+	}
+	tmpl, err := route.GetPathTemplate()
+	if err != nil || tmpl == "" {
+		return false
+	}
+	key := r.Method + " " + tmpl
+	for _, e := range req.PresenceExemptRoutes {
+		if e == key {
+			return true
+		}
+	}
+	return false
+}

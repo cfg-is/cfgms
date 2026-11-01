@@ -1,0 +1,10 @@
+version: v2
+inputs:
+  - directory: api/proto
+plugins:
+  - protoc_builtin: go
+    out: api/proto
+    opt: paths=source_relative
+  - protoc_builtin: go-grpc
+    out: api/proto
+    opt: paths=source_relative

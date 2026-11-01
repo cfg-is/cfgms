@@ -1,0 +1,27 @@
+name: m365-auth
+version: 0.1.0
+description: >
+  OAuth 2.0 / OpenID Connect authentication for Microsoft Graph and the
+  M365 module family. Handles authorization-code, client-credentials, and
+  GDAP-delegated flows; manages token caching, refresh, and the
+  admin-consent callback. Runs in the controller's workflow runtime —
+  never on a steward — because tokens are tenant-scoped credentials the
+  steward must not see.
+
+publisher: cfgms
+
+executors:
+  - controller
+
+author: CFGMS Team
+license: AGPL-3.0
+
+# Workflow modules run in-controller; no platform restriction.
+platforms:
+  - linux
+  - darwin
+  - windows
+
+interfaces:
+  - Get
+  - Set

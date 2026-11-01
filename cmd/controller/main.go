@@ -1,0 +1,741 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/spf13/cobra"
+
+	"github.com/cfgis/cfgms/cmd/controller/service"
+	controllerapi "github.com/cfgis/cfgms/features/controller/api"
+	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/initialization"
+	"github.com/cfgis/cfgms/features/controller/server"
+	certpkg "github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/security"
+	"github.com/cfgis/cfgms/pkg/version"
+
+	// Import logging providers to register them
+	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
+	_ "github.com/cfgis/cfgms/pkg/logging/providers/timescale"
+
+	// Import storage providers to register them
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
+)
+
+func main() {
+	rootCmd := buildRootCommand()
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+// buildRootCommand constructs the cobra command tree for cfgms-controller.
+func buildRootCommand() *cobra.Command {
+	var (
+		configPath          string
+		initMode            bool
+		listenAPIAddr       string
+		listenTransportAddr string
+	)
+
+	root := &cobra.Command{
+		Use:   "cfgms-controller",
+		Short: "CFGMS Controller — fleet configuration management controller",
+		Long: fmt.Sprintf(`CFGMS Controller %s
+
+Manages fleet-wide configuration distribution, CA issuance, and steward registration.
+
+Entry paths:
+  cfgms-controller --config /etc/cfgms/controller.cfg   Run in foreground
+  cfgms-controller --init --config /path/to/config      First-run initialization
+  cfgms-controller install --config /path/to/config     Install as OS service
+  cfgms-controller status                               Show service status
+
+Blue/green operation:
+  --listen-api-addr / --listen-transport-addr override the canonical listen
+  addresses from the config file so a "green" controller can bind on
+  alternate ports while a "blue" controller holds the canonical ones. Both
+  must point at the same data_dir + storage backing (Issue #1919).`, version.Short()),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runController(configPath, initMode, listenAPIAddr, listenTransportAddr)
+		},
+	}
+
+	root.Flags().StringVar(&configPath, "config", "", "Path to configuration file (default: search /etc/cfgms/controller.cfg, then ./controller.cfg)")
+	root.Flags().BoolVar(&initMode, "init", false, "Perform first-run initialization (creates CA, storage, RBAC defaults)")
+	root.Flags().StringVar(&listenAPIAddr, "listen-api-addr", "", "Override REST API listen address (e.g. ':9081'); takes precedence over config + env")
+	root.Flags().StringVar(&listenTransportAddr, "listen-transport-addr", "", "Override unified transport listen address (e.g. ':4434'); takes precedence over config + env")
+
+	root.AddCommand(
+		buildInstallCommand(),
+		buildUninstallCommand(),
+		buildStatusCommand(),
+		buildBootstrapAdminCommand(),
+	)
+
+	return root
+}
+
+// runController starts the controller server (or runs --init and exits).
+//
+// listenAPIAddr / listenTransportAddr — when non-empty — override the
+// matching cfg fields after the config file + env vars have been applied.
+// This is the highest-precedence layer so an operator can stand up a
+// blue/green pair on the same host (Issue #1919). An empty string means
+// "use what config + env produced," preserving legacy single-controller
+// startup exactly.
+func runController(configPath string, initMode bool, listenAPIAddr, listenTransportAddr string) error {
+	// Lock the fixed base before the config file is located or read.
+	if err := adoptControllerBaseDir(); err != nil {
+		return err
+	}
+
+	cfg, err := config.LoadWithPath(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Lock the configured CA, certificate and admin bundle directories before
+	// anything reads them. --init does this itself in initialization.Run.
+	if err := initialization.AdoptControllerDataTree(cfg); err != nil {
+		return fmt.Errorf("failed to secure controller data directory: %w", err)
+	}
+
+	applyListenOverrides(cfg, listenAPIAddr, listenTransportAddr)
+
+	// Guard: reject deprecated git provider before any initialization
+	if cfg.Storage != nil && cfg.Storage.Provider == "git" {
+		return fmt.Errorf("the 'git' storage provider has been removed; " +
+			"run 'cfg storage migrate --from git --to flatfile' to migrate your data, " +
+			"then update your configuration to use 'flatfile' or 'database'")
+	}
+
+	secretStore, err := controllerapi.NewSecretStore(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize secret store: %w", err)
+	}
+
+	loggingConfig, err := buildLoggingConfig(cfg, secretStore, "main")
+	if err != nil {
+		return err
+	}
+
+	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
+		return fmt.Errorf("failed to initialize global logging: %w", err)
+	}
+	(&logging.TelemetryBridge{}).Initialize()
+
+	logging.InitializeGlobalLoggerFactory("controller", "main")
+	logger := logging.ForComponent("controller")
+
+	// Handle --init mode: perform first-run initialization and exit.
+	if initMode {
+		logger.Info("Starting controller first-run initialization...", "operation", "init")
+		result, err := initialization.Run(cfg, logger)
+		if err != nil {
+			return fmt.Errorf("initialization failed: %w", err)
+		}
+
+		fmt.Println("Controller initialization complete:")
+		fmt.Printf("  CA Fingerprint:    %s\n", result.CAFingerprint)
+		fmt.Printf("  Storage Provider:  %s\n", result.StorageProvider)
+		fmt.Printf("  Initialized At:    %s\n", result.InitializedAt.Format(time.RFC3339))
+		fmt.Println("\nThe controller is now ready to start with: cfgms-controller --config <path>")
+		return nil
+	}
+
+	legacyLogger := logging.GetLogger()
+	srv, err := server.New(cfg, legacyLogger)
+	if err != nil {
+		return fmt.Errorf("failed to create controller server: %w", err)
+	}
+
+	// Issue #3713: construct and install the WebAuthn relying party before the API
+	// server starts serving. cfg.WebAuthn was already validated by config.LoadWithPath
+	// (ValidateWebAuthn); wa is nil, nil when the operator has not configured it, which
+	// leaves the passkey endpoints answering 503 exactly as before this wiring existed.
+	wa, err := buildWebAuthnRelyingParty(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to configure webauthn relying party: %w", err)
+	}
+	if wa != nil {
+		srv.GetAPIServer().SetWebAuthn(wa)
+	}
+
+	logger.Info("Starting controller server",
+		"operation", "server_start",
+		"log_provider", loggingConfig.Provider,
+		"service_name", "controller")
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	return runControllerServer(srv, sigChan)
+}
+
+// controllerServer is the interface used by runControllerServer so that tests
+// can inject a fake without depending on the real server implementation.
+type controllerServer interface {
+	Start() error
+	Stop() error
+}
+
+// runControllerServer blocks until a signal arrives on sigChan or Start()
+// returns a non-nil error. It always calls Stop() before returning.
+func runControllerServer(srv controllerServer, sigChan <-chan os.Signal) error {
+	logger := logging.ForComponent("controller")
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.Start(); err != nil {
+			errCh <- err
+		}
+		// nil return from Start() means services launched successfully;
+		// goroutine exits silently and errCh stays empty so the main
+		// goroutine continues waiting for sigChan.
+	}()
+
+	var runErr error
+	select {
+	case sig := <-sigChan:
+		logger.Info("Received signal, shutting down controller...",
+			"operation", "server_shutdown",
+			"signal", sig.String())
+	case runErr = <-errCh:
+		logger.Error("Controller server failed",
+			"operation", "server_run",
+			"error", runErr.Error())
+	}
+
+	if stopErr := srv.Stop(); stopErr != nil {
+		logger.Error("Error during controller shutdown",
+			"operation", "server_shutdown",
+			"error", stopErr.Error())
+	}
+
+	logger.Info("Controller shutdown completed",
+		"operation", "server_shutdown",
+		"status", "completed")
+
+	if runErr != nil {
+		return fmt.Errorf("controller server failed: %w", runErr)
+	}
+	return nil
+}
+
+// applyListenOverrides applies CLI listen-address overrides on top of the
+// already-loaded config. Empty strings are no-ops so that operators who
+// don't pass the flags get exactly the legacy startup behaviour.
+//
+// Precedence (highest wins): CLI flag → env var → cfg file → built-in default.
+// The env-var layer is applied inside config.LoadWithPath, so by the time
+// this function runs cfg already reflects env > file > default.
+func applyListenOverrides(cfg *config.Config, listenAPIAddr, listenTransportAddr string) {
+	if listenAPIAddr != "" {
+		cfg.ListenAddr = listenAPIAddr
+	}
+	if listenTransportAddr != "" {
+		if cfg.Transport == nil {
+			cfg.Transport = &config.TransportConfig{}
+		}
+		cfg.Transport.ListenAddr = listenTransportAddr
+	}
+}
+
+// buildWebAuthnRelyingParty constructs the WebAuthn relying party from the
+// controller's webauthn configuration block (Issue #3713).
+//
+// Returns (nil, nil) when cfg.WebAuthn is unset or its rp_id is empty — the passkey
+// login and step-up endpoints keep answering 503, exactly as they did before this
+// wiring existed. There is no local-development fallback identifier: an unset
+// configuration must never silently produce a relying party, because that would let a
+// phishing-resistant authenticator verify against an identifier the operator never
+// chose. config.LoadWithPath already runs ValidateWebAuthn before this is reached, so
+// the error path here is defense in depth, not the primary validation gate.
+func buildWebAuthnRelyingParty(cfg *config.Config) (*webauthn.WebAuthn, error) {
+	if cfg.WebAuthn == nil || cfg.WebAuthn.RPID == "" {
+		return nil, nil
+	}
+	displayName := cfg.WebAuthn.RPDisplayName
+	if displayName == "" {
+		displayName = cfg.WebAuthn.RPID
+	}
+	return controllerapi.NewWebAuthnFromConfig(cfg.WebAuthn.RPID, displayName, cfg.WebAuthn.RPOrigins)
+}
+
+// buildInstallCommand builds the `cfgms-controller install` subcommand.
+func buildInstallCommand() *cobra.Command {
+	var configPath string
+
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Copy binary to platform path and register as OS service",
+		Long: `Install copies the cfgms-controller binary to the platform-standard location
+and registers it as a persistent OS service that starts automatically on boot.
+
+Platforms:
+  Windows  C:\Program Files\CFGMS\cfgms-controller.exe  (Windows Service)
+  Linux    /usr/local/bin/cfgms-controller               (systemd)
+  macOS    /usr/local/bin/cfgms-controller               (launchd)
+
+Requires elevated privileges (Administrator on Windows, root on Linux/macOS).
+Install is idempotent: running it again updates the binary and restarts the service.
+
+If the controller has not been initialized yet (no CA present), --init is run
+automatically before the service is started.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runInstall(configPath)
+		},
+	}
+
+	cmd.Flags().StringVar(&configPath, "config", "", "Path to configuration file (required)")
+	if err := cmd.MarkFlagRequired("config"); err != nil {
+		panic(err) // programming error: flag name mismatch
+	}
+
+	return cmd
+}
+
+// buildUninstallCommand builds the `cfgms-controller uninstall` subcommand.
+func buildUninstallCommand() *cobra.Command {
+	var purge bool
+
+	cmd := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Stop and remove the OS service",
+		Long: `Uninstall stops the running cfgms-controller service and removes the service
+definition from the OS service manager. With --purge the installed binary is
+also deleted.
+
+Requires elevated privileges (Administrator on Windows, root on Linux/macOS).`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runUninstall(purge)
+		},
+	}
+
+	cmd.Flags().BoolVar(&purge, "purge", false, "Also remove the installed binary")
+
+	return cmd
+}
+
+// buildStatusCommand builds the `cfgms-controller status` subcommand.
+func buildStatusCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show service state, install path, config path, and CA fingerprint",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runStatus()
+		},
+	}
+}
+
+// runInstall performs the install operation for the current platform.
+// If the controller has not been initialized, it runs --init before registering
+// the OS service.
+func runInstall(configPath string) error {
+	if configPath == "" {
+		return fmt.Errorf("--config is required for install")
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to determine executable path: %w", err)
+	}
+
+	mgr := service.New(exe)
+
+	if !mgr.IsElevated() {
+		return fmt.Errorf("install requires elevated privileges\n" +
+			"  Windows: right-click the binary and select 'Run as administrator'\n" +
+			"  Linux/macOS: re-run with sudo")
+	}
+
+	// Check whether the controller needs first-run initialization.
+	cfg, err := config.LoadWithPath(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load configuration from %s: %w", configPath, err)
+	}
+
+	secretStore, err := controllerapi.NewSecretStore(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize secret store: %w", err)
+	}
+
+	caPath, err := resolveInstallCAPath(cfg, configPath)
+	if err != nil {
+		return err
+	}
+
+	if !initialization.IsInitialized(caPath) {
+		fmt.Println("Controller not yet initialized — running --init...")
+		loggingConfig, err := buildLoggingConfig(cfg, secretStore, "install")
+		if err != nil {
+			return fmt.Errorf("failed to initialize logging: %w", err)
+		}
+		if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
+			return fmt.Errorf("failed to initialize logging: %w", err)
+		}
+		(&logging.TelemetryBridge{}).Initialize()
+		logging.InitializeGlobalLoggerFactory("controller", "install")
+		logger := logging.ForComponent("controller")
+
+		result, err := initialization.Run(cfg, logger)
+		if err != nil {
+			return fmt.Errorf("controller initialization failed: %w", err)
+		}
+		fmt.Printf("  CA Fingerprint:    %s\n", result.CAFingerprint)
+		fmt.Printf("  Storage Provider:  %s\n", result.StorageProvider)
+		fmt.Println()
+	}
+
+	return mgr.Install(configPath)
+}
+
+// runUninstall performs the uninstall operation for the current platform.
+func runUninstall(purge bool) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to determine executable path: %w", err)
+	}
+
+	mgr := service.New(exe)
+
+	if !mgr.IsElevated() {
+		return fmt.Errorf("uninstall requires elevated privileges\n" +
+			"  Windows: right-click the binary and select 'Run as administrator'\n" +
+			"  Linux/macOS: re-run with sudo")
+	}
+
+	return mgr.Uninstall(purge)
+}
+
+// runStatus prints the current service state without requiring elevated privileges.
+func runStatus() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to determine executable path: %w", err)
+	}
+
+	mgr := service.New(exe)
+	status, err := mgr.Status()
+	if err != nil {
+		return fmt.Errorf("failed to query service status: %w", err)
+	}
+
+	fmt.Printf("CFGMS Controller %s\n\n", version.Short())
+	fmt.Printf("  Service name:  %s\n", status.ServiceName)
+	fmt.Printf("  Install path:  %s\n", status.InstallPath)
+
+	configPath := status.ConfigPath
+	if configPath == "" {
+		configPath = "(not installed)"
+	}
+	fmt.Printf("  Config path:   %s\n", configPath)
+
+	// Try to read CA fingerprint from the initialization marker.
+	caFingerprint := caFingerprintFromConfig(configPath)
+	fmt.Printf("  CA fingerprint: %s\n", caFingerprint)
+
+	if !status.Installed {
+		fmt.Printf("  Status:        not installed\n")
+		fmt.Printf("\n  To install: cfgms-controller install --config /etc/cfgms/controller.cfg\n")
+		return nil
+	}
+
+	state := "stopped"
+	if status.Running {
+		state = "running"
+	}
+	fmt.Printf("  Status:        %s\n", state)
+	return nil
+}
+
+// caFingerprintFromConfig loads the controller config and reads the CA fingerprint
+// from the initialization marker. Returns a human-friendly string in all cases.
+func caFingerprintFromConfig(configPath string) string {
+	if configPath == "" || configPath == "(not installed)" {
+		return "(unknown — service not installed)"
+	}
+
+	cfg, err := config.LoadWithPath(configPath)
+	if err != nil {
+		return fmt.Sprintf("(unavailable — cannot load config: %v)", err)
+	}
+
+	if cfg.Certificate == nil || cfg.Certificate.CAPath == "" {
+		return "(unavailable — CA path not configured)"
+	}
+
+	marker, err := initialization.ReadInitMarker(cfg.Certificate.CAPath)
+	if err != nil {
+		return "(unavailable — controller not yet initialized)"
+	}
+
+	return marker.CAFingerprint
+}
+
+// resolveInstallCAPath extracts the CA path from the config, returning an error
+// when the certificate configuration is absent. The prior silent-skip when
+// cfg.Certificate is nil is replaced by an explicit failure so the operator
+// gets a clear actionable message.
+func resolveInstallCAPath(cfg *config.Config, configPath string) (string, error) {
+	if cfg.Certificate == nil {
+		return "", fmt.Errorf("certificate configuration is required for initialization; set certificate.ca_path in %s", configPath)
+	}
+	return cfg.Certificate.CAPath, nil
+}
+
+// buildBootstrapAdminCommand builds the `cfgms-controller bootstrap-admin` subcommand.
+// Exactly one of --name, --regenerate, --revoke, or --list must be specified.
+func buildBootstrapAdminCommand() *cobra.Command {
+	var (
+		configPath string
+		name       string
+		outputPath string
+		regenerate bool
+		revoke     string
+		list       bool
+		rootScoped bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "bootstrap-admin",
+		Short: "Issue, regenerate, or revoke admin credential bundles",
+		Long: `bootstrap-admin manages admin mTLS credential bundles for the CFGMS controller.
+
+Each bundle contains the admin client certificate, key, CA certificate, and controller
+URL. The holder of a bundle can authenticate to the controller REST API as a full admin.
+
+Operations:
+  --name <name> --output <path>   Issue a new bundle for a named operator or system.
+                                  Name must be alphanumeric+hyphens, max 64 chars.
+  --root-scoped                   Only valid with --name. Marks the issued cert as a
+                                  root-scoped SaaS-operator credential (ADR-025 Decision
+                                  1): subject to the root<->MSP tenant boundary rather
+                                  than unrestricted access, and requires an active grant
+                                  or break-glass crossing to reach tenants below "root".
+                                  Do not use for single-root or on-prem deployments'
+                                  primary admin — that would lock it out of its own
+                                  fleet. Issuance is audited.
+  --regenerate                    Regenerate the system admin bundle at the configured
+                                  path. Requires interactive confirmation (type 'yes').
+                                  After regenerating, revoke the old bundle serial:
+                                    cfgms-controller bootstrap-admin --revoke <old-serial>
+  --revoke <serial>               Revoke a previously-issued bundle by serial number.
+                                  The serial is printed at issuance time and stored in
+                                  the bundle file (cert_serial field).
+  --list                          List all issued and revoked admin certs.
+
+Bundles are written with mode 0600. Treat them like root SSH keys.`,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runBootstrapAdmin(configPath, name, outputPath, regenerate, revoke, list, rootScoped)
+		},
+	}
+
+	cmd.Flags().StringVar(&configPath, "config", "", "Path to configuration file (default: search /etc/cfgms/controller.cfg)")
+	cmd.Flags().StringVar(&name, "name", "", "Operator or system name for the new bundle (alphanumeric+hyphens, max 64)")
+	cmd.Flags().StringVar(&outputPath, "output", "", "Output path for the bundle file (required with --name)")
+	cmd.Flags().BoolVar(&regenerate, "regenerate", false, "Regenerate the system admin bundle (requires confirmation)")
+	cmd.Flags().StringVar(&revoke, "revoke", "", "Revoke a bundle by serial number")
+	cmd.Flags().BoolVar(&list, "list", false, "List all issued and revoked admin certs")
+	cmd.Flags().BoolVar(&rootScoped, "root-scoped", false, "Mark the new bundle as a root-scoped SaaS-operator credential (ADR-025 Decision 1); only valid with --name")
+
+	return cmd
+}
+
+// runBootstrapAdmin executes the bootstrap-admin operation.
+func runBootstrapAdmin(configPath, name, outputPath string, regenerate bool, revoke string, list bool, rootScoped bool) error {
+	// Exactly one operation must be specified.
+	active := 0
+	if name != "" {
+		active++
+	}
+	if regenerate {
+		active++
+	}
+	if revoke != "" {
+		active++
+	}
+	if list {
+		active++
+	}
+	if active == 0 {
+		return fmt.Errorf("one of --name, --regenerate, --revoke, or --list is required")
+	}
+	if active > 1 {
+		return fmt.Errorf("only one of --name, --regenerate, --revoke, or --list may be specified at a time")
+	}
+	if name != "" && outputPath == "" {
+		return fmt.Errorf("--output is required with --name")
+	}
+	if rootScoped && name == "" {
+		return fmt.Errorf("--root-scoped is only valid with --name")
+	}
+
+	if err := adoptControllerBaseDir(); err != nil {
+		return err
+	}
+
+	cfg, err := config.LoadWithPath(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	if err := initialization.AdoptControllerDataTree(cfg); err != nil {
+		return fmt.Errorf("failed to secure controller data directory: %w", err)
+	}
+
+	logger := logging.NewNoopLogger()
+
+	switch {
+	case name != "":
+		if err := initialization.IssueAdminBundle(cfg, logger, name, outputPath, rootScoped); err != nil {
+			return err
+		}
+		fmt.Printf("Admin bundle issued: %s\n", outputPath)
+		return nil
+
+	case regenerate:
+		return initialization.RunRegenerate(cfg, logger, os.Stdin, os.Stdout)
+
+	case revoke != "":
+		if err := initialization.RevokeAdminBundle(cfg, logger, revoke); err != nil {
+			return err
+		}
+		fmt.Printf("Bundle revoked: serial=%s\n", revoke)
+		return nil
+
+	case list:
+		return runBootstrapAdminList(cfg)
+	}
+
+	return nil
+}
+
+// runBootstrapAdminList prints all issued admin certs and their revocation status.
+func runBootstrapAdminList(cfg *config.Config) error {
+	if cfg.Certificate == nil || cfg.Certificate.CAPath == "" {
+		return fmt.Errorf("certificate path not configured (certificate.ca_path required)")
+	}
+	// StoragePath must be the parent of the "ca/" subdirectory; NewManager derives the
+	// real CA directory as filepath.Join(StoragePath,"ca").
+	certPath := filepath.Dir(filepath.Clean(cfg.Certificate.CAPath))
+
+	certManager, err := certpkg.NewManager(&certpkg.ManagerConfig{
+		StoragePath:    certPath,
+		LoadExistingCA: true,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to load cert manager: %w", err)
+	}
+
+	certs, err := certManager.GetAllValidCertificatesForPurpose(certpkg.PurposeClient)
+	if err != nil {
+		return fmt.Errorf("failed to list certificates: %w", err)
+	}
+
+	revoked, err := certManager.ListRevoked()
+	if err != nil {
+		return fmt.Errorf("failed to list revoked serials: %w", err)
+	}
+
+	revokedSet := make(map[string]bool, len(revoked))
+	for _, e := range revoked {
+		revokedSet[e.Serial] = true
+	}
+
+	fmt.Printf("%-20s  %-30s  %-12s  %s\n", "SERIAL (last 12)", "COMMON NAME", "STATUS", "EXPIRES")
+	fmt.Printf("%s\n", strings.Repeat("-", 80))
+	for _, c := range certs {
+		status := "active"
+		if revokedSet[c.SerialNumber] {
+			status = "REVOKED"
+		}
+		short := c.SerialNumber
+		if len(short) > 12 {
+			short = "..." + short[len(short)-12:]
+		}
+		fmt.Printf("%-20s  %-30s  %-12s  %s\n",
+			short,
+			truncate(c.CommonName, 30),
+			status,
+			c.ExpiresAt.Format("2006-01-02"),
+		)
+	}
+	return nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-3] + "..."
+}
+
+// buildLoggingConfig constructs a complete LoggingConfig for the given component.
+// All fields are set identically regardless of call site so runController and
+// runInstall share the same logging shape.
+func buildLoggingConfig(cfg *config.Config, store secretsif.SecretStore, component string) (*logging.LoggingConfig, error) {
+	logProviderConfig, err := getLogProviderConfig(cfg, store)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build log provider config: %w", err)
+	}
+	return &logging.LoggingConfig{
+		Provider:          getLogProvider(cfg),
+		Level:             strings.ToUpper(cfg.LogLevel),
+		ServiceName:       "controller",
+		Component:         component,
+		TenantIsolation:   true,
+		EnableCorrelation: true,
+		EnableTracing:     true,
+		AsyncWrites:       true,
+		BatchSize:         100,
+		FlushInterval:     5 * time.Second,
+		RetentionDays:     90,
+		Config:            logProviderConfig,
+	}, nil
+}
+
+// getLogProvider determines the logging provider from configuration.
+func getLogProvider(cfg *config.Config) string { return server.LogProvider(cfg) }
+
+// getLogProviderConfig creates provider-specific configuration. See
+// server.LogProviderConfig.
+func getLogProviderConfig(cfg *config.Config, store secretsif.SecretStore) (map[string]interface{}, error) {
+	return server.LogProviderConfig(cfg, store)
+}
+
+// adoptControllerBaseDir locks the fixed controller base directory
+// (%ProgramData%\cfgms) to SYSTEM and Administrators before the controller
+// config file is located or read. It is a no-op outside Windows, and any error,
+// including security.ErrUntrustedDirOwner, aborts start-up.
+func adoptControllerBaseDir() error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	base := initialization.ControllerBaseDir()
+	adopted, err := security.AdoptAdminOnlyDir(base)
+	for _, p := range adopted {
+		logging.ForComponent("controller").Info("Adopted controller data path", "path", logging.SanitizeLogValue(p))
+	}
+	if err != nil {
+		return fmt.Errorf("failed to secure controller data directory: %w", err)
+	}
+	return nil
+}

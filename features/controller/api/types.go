@@ -1,0 +1,339 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package api
+
+import (
+	"time"
+
+	"github.com/cfgis/cfgms/api/proto/common"
+	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/controller/service"
+)
+
+// APIResponse represents a standard API response wrapper
+type APIResponse struct {
+	Data      interface{} `json:"data"`
+	Timestamp time.Time   `json:"timestamp"`
+}
+
+// ErrorResponse represents a standard error response
+type ErrorResponse struct {
+	Error     *APIError `json:"error"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// APIError represents an API error
+type APIError struct {
+	Code    string                 `json:"code"`
+	Message string                 `json:"message"`
+	Details map[string]interface{} `json:"details,omitempty"`
+}
+
+// StewardInfo represents steward information for API responses
+type StewardInfo struct {
+	ID          string            `json:"id"`
+	TenantID    string            `json:"tenant_id,omitempty"`
+	Status      string            `json:"status"`
+	LastSeen    time.Time         `json:"last_seen"`
+	Version     string            `json:"version"`
+	ConnectedAt time.Time         `json:"connected_at"`
+	Metrics     map[string]string `json:"metrics,omitempty"`
+	DNA         *DNAInfo          `json:"dna,omitempty"`
+	// Hidden is the operator-controlled fleet-view visibility flag (Issue #2918).
+	Hidden bool `json:"hidden,omitempty"`
+	// Tags are the steward's operator-assigned tags (Issue #4595). Omitted when empty.
+	Tags []string `json:"tags,omitempty"`
+	// ClockOffsetMs is the steward clock minus the controller clock in
+	// milliseconds, from the last heartbeat (negative = steward behind).
+	// Nil when unknown, which is distinct from 0 ms (Issue #4539).
+	ClockOffsetMs *int64 `json:"clock_offset_ms,omitempty"`
+	// ActiveSessions is 1 when the steward has an active ControlChannel stream,
+	// 0 otherwise. Each steward holds at most one stream at a time, so this is
+	// a binary sentinel, not a real connection count.
+	ActiveSessions  int    `json:"active_sessions"`
+	ConnectionState string `json:"connection_state"` // "connected" or "disconnected"
+	// KeyProtectionLevel is how the steward's device key is protected: "file",
+	// "tpm" or "secure-enclave" (ADR-034 §7). Omitted for a record that predates
+	// the field; it is never defaulted, because "file" would be a claim the
+	// steward never made.
+	KeyProtectionLevel string `json:"key_protection_level,omitempty"`
+	// KeyAlgorithm is the device key algorithm, "ed25519" or "ecdsa-p256". A
+	// record that stored no algorithm is reported as "ed25519" (ADR-011
+	// Amendment 3), so consumers never see an empty value.
+	KeyAlgorithm string `json:"key_algorithm,omitempty"`
+}
+
+// DNAInfo represents DNA information for API responses
+type DNAInfo struct {
+	Hostname     string             `json:"hostname"`
+	OS           string             `json:"os"`
+	Architecture string             `json:"architecture"`
+	ConfigHash   string             `json:"config_hash,omitempty"`
+	Attributes   map[string]string  `json:"attributes,omitempty"`
+	Fragments    []*common.Fragment `json:"fragments,omitempty"` // ADR-017 fragments (cluster:* and host:* fragment-shaped state)
+	CollectedAt  *time.Time         `json:"collected_at,omitempty"`
+}
+
+// ConfigurationInfo represents configuration information
+type ConfigurationInfo struct {
+	StewardID string                 `json:"steward_id"`
+	Version   string                 `json:"version"`
+	Config    map[string]interface{} `json:"config"`
+	UpdatedAt time.Time              `json:"updated_at"`
+}
+
+// ConfigValidationRequest represents a config validation request
+type ConfigValidationRequest struct {
+	Config  map[string]interface{} `json:"config"`
+	Version string                 `json:"version,omitempty"`
+}
+
+// ConfigValidationResult represents validation results
+type ConfigValidationResult struct {
+	Valid    bool              `json:"valid"`
+	Errors   []ValidationError `json:"errors,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+// ValidationError represents a validation error
+type ValidationError struct {
+	Field      string `json:"field"`
+	Message    string `json:"message"`
+	Level      string `json:"level"`
+	Code       string `json:"code"`
+	Suggestion string `json:"suggestion,omitempty"`
+}
+
+// CertificateInfo represents certificate information
+type CertificateInfo struct {
+	SerialNumber        string    `json:"serial_number"`
+	CommonName          string    `json:"common_name"`
+	StewardID           string    `json:"steward_id,omitempty"`
+	TenantID            string    `json:"tenant_id,omitempty"`
+	IsValid             bool      `json:"is_valid"`
+	IssuedAt            time.Time `json:"issued_at,omitzero"`
+	ExpiresAt           time.Time `json:"expires_at"`
+	DaysUntilExpiration int32     `json:"days_until_expiration"`
+	NeedsRenewal        bool      `json:"needs_renewal"`
+}
+
+// CertificateProvisionRequest represents a certificate provision request
+type CertificateProvisionRequest struct {
+	StewardID    string `json:"steward_id"`
+	CommonName   string `json:"common_name"`
+	Organization string `json:"organization,omitempty"`
+	ValidityDays int32  `json:"validity_days,omitempty"`
+}
+
+// CertificateProvisionResult represents a certificate provision result
+type CertificateProvisionResult struct {
+	CertificatePEM   string    `json:"certificate_pem"`
+	PrivateKeyPEM    string    `json:"private_key_pem"`
+	CACertificatePEM string    `json:"ca_certificate_pem"`
+	SerialNumber     string    `json:"serial_number"`
+	ExpiresAt        time.Time `json:"expires_at"`
+}
+
+// RoleInfo represents role information
+type RoleInfo struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Permissions []string  `json:"permissions"`
+	TenantID    string    `json:"tenant_id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// SubjectInfo represents subject information
+type SubjectInfo struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Type      string    `json:"type"`
+	TenantID  string    `json:"tenant_id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// PermissionInfo represents permission information
+type PermissionInfo struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	ResourceType string   `json:"resource_type"`
+	Actions      []string `json:"actions"`
+}
+
+// RoleAssignmentRequest represents a role assignment request
+type RoleAssignmentRequest struct {
+	RoleID   string `json:"role_id"`
+	TenantID string `json:"tenant_id,omitempty"`
+}
+
+// PermissionCheckRequest represents a permission check request
+type PermissionCheckRequest struct {
+	SubjectID    string `json:"subject_id"`
+	ResourceType string `json:"resource_type"`
+	ResourceID   string `json:"resource_id"`
+	Action       string `json:"action"`
+	TenantID     string `json:"tenant_id,omitempty"`
+}
+
+// PermissionCheckResult represents a permission check result
+type PermissionCheckResult struct {
+	Allowed bool   `json:"allowed"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// APIKeyCreateRequest represents an API key creation request
+type APIKeyCreateRequest struct {
+	Name        string     `json:"name"`
+	Permissions []string   `json:"permissions"`
+	RoleID      string     `json:"role_id,omitempty"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	TenantID    string     `json:"tenant_id,omitempty"`
+}
+
+// APIKeyInfo represents API key information (without the actual key)
+type APIKeyInfo struct {
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	Permissions []string   `json:"permissions"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	TenantID    string     `json:"tenant_id"`
+}
+
+// APIKeyCreateResult represents the result of API key creation
+type APIKeyCreateResult struct {
+	APIKeyInfo
+	Key string `json:"key"` // Only returned on creation
+}
+
+// HealthStatus represents the system health status
+type HealthStatus struct {
+	Status string `json:"status"`
+}
+
+// ReadinessStatus represents the controller's real-state readiness (Issue #2012).
+// Distinct from HealthStatus (object-presence liveness): a "ready" status means
+// the controller round-tripped its durable storage and can actually serve.
+type ReadinessStatus struct {
+	Status string `json:"status"` // "ready" | "not_ready"
+}
+
+// ConfigPushResponse is returned by POST /api/v1/config/push on acceptance.
+// Deliveries references the trackable per-steward delivery record created for
+// this push (Issue #3757, ADR-031 Decision 2) — callers watch a write until it
+// lands via GET /api/v1/commands/{id} rather than trusting a bare "accepted".
+// Empty when the durable command store is not configured for this deployment.
+type ConfigPushResponse struct {
+	PushID     string                `json:"push_id"`
+	Status     string                `json:"status"`
+	QueuedAt   time.Time             `json:"queued_at"`
+	Deliveries []*ConfigPushDelivery `json:"deliveries,omitempty"`
+}
+
+// ConfigPushDelivery references one steward's durable delivery record for a
+// config push (Issue #3757). CommandID is the ID to pass to
+// GET /api/v1/commands/{id} to watch this specific delivery's lifecycle.
+type ConfigPushDelivery struct {
+	StewardID string `json:"steward_id"`
+	CommandID string `json:"command_id"`
+	Status    string `json:"status"`
+}
+
+// DeploymentSummary holds aggregate counts for a config deployment query.
+type DeploymentSummary struct {
+	Applied int `json:"applied"`
+	Pending int `json:"pending"`
+	Failed  int `json:"failed"`
+	Halted  int `json:"halted"`
+	Total   int `json:"total"`
+}
+
+// StewardDeploymentStatus captures per-steward deployment state for a config.
+type StewardDeploymentStatus struct {
+	StewardID   string    `json:"steward_id"`
+	Status      string    `json:"status"`
+	LastUpdated time.Time `json:"last_updated"`
+}
+
+// PushSummary is a compact view of a push record for the deployments response.
+type PushSummary struct {
+	PushID      string    `json:"push_id"`
+	Status      string    `json:"status"`
+	Version     string    `json:"version"`
+	InitiatedBy string    `json:"initiated_by"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// ConfigDeploymentsResponse is returned by GET /api/v1/configs/{id}/deployments.
+type ConfigDeploymentsResponse struct {
+	ConfigID    string                    `json:"config_id"`
+	Summary     DeploymentSummary         `json:"summary"`
+	Stewards    []StewardDeploymentStatus `json:"stewards"`
+	PushHistory []PushSummary             `json:"push_history"`
+}
+
+// PushStatusResponse is returned by GET /api/v1/config/push/{id}.
+type PushStatusResponse struct {
+	PushID      string    `json:"push_id"`
+	ConfigID    string    `json:"config_id"`
+	TenantID    string    `json:"tenant_id"`
+	Version     string    `json:"version"`
+	Status      string    `json:"status"`
+	InitiatedBy string    `json:"initiated_by,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// Helper functions to convert protobuf messages to API types
+
+// DNAFromProto converts a protobuf DNA message to DNAInfo
+func DNAFromProto(dna *common.DNA) *DNAInfo {
+	if dna == nil {
+		return nil
+	}
+
+	attrs := service.FlattenDNAFragments(dna.Fragments)
+
+	// A missing LastUpdated is reported as absent, never as the Unix epoch.
+	var collectedAt *time.Time
+	if dna.LastUpdated != nil {
+		if t := dna.LastUpdated.AsTime(); t.Unix() != 0 || t.Nanosecond() != 0 {
+			collectedAt = &t
+		}
+	}
+
+	return &DNAInfo{
+		Hostname:     attrs["hostname"],
+		OS:           attrs["os"],
+		Architecture: attrs["architecture"],
+		ConfigHash:   dna.ConfigHash,
+		Attributes:   attrs,
+		CollectedAt:  collectedAt,
+	}
+}
+
+// ValidationErrorFromProto converts a protobuf ValidationError to ValidationError
+func ValidationErrorFromProto(err *controller.ValidationError) ValidationError {
+	level := "INFO"
+	switch err.Level {
+	case controller.ValidationError_WARNING:
+		level = "WARNING"
+	case controller.ValidationError_ERROR:
+		level = "ERROR"
+	case controller.ValidationError_CRITICAL:
+		level = "CRITICAL"
+	}
+
+	return ValidationError{
+		Field:      err.Field,
+		Message:    err.Message,
+		Level:      level,
+		Code:       err.Code,
+		Suggestion: err.Suggestion,
+	}
+}

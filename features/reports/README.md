@@ -1,0 +1,124 @@
+# Reports
+
+Report generation for CFGMS DNA monitoring data: compliance reports, executive
+dashboards, and drift analysis, with multi-format export and REST API access.
+
+## Architecture
+
+```
+features/reports/
+├── api/                  # REST API endpoints
+│   ├── handlers.go       # Dashboard and report HTTP handlers
+│   └── custom_handlers.go # Custom report and custom template routes
+├── engine/               # Report generation engine
+│   ├── engine.go         # Core report generation logic
+│   ├── advanced.go       # Audit-integrated, multi-tenant report generation (not yet wired to an API endpoint)
+│   ├── custom_templates.go # Custom template manager over the durable report template store
+│   └── custom_builder.go # Custom report builder: ad-hoc queries over the dna, drift, device_stats and trends data sources
+├── interfaces/           # Shared types and interface contracts
+│   ├── interfaces.go     # Core report types (ReportRequest, Report, DataQuery, ...)
+│   ├── advanced.go       # Advanced/audit-integrated report types
+│   ├── custom.go         # Custom and scheduled report type contracts
+│   ├── custom_template_errors.go # Template sentinel errors
+│   └── custom_report_errors.go # Custom report builder sentinel errors
+├── provider/             # Data integration layer
+│   ├── provider.go       # DNA storage and drift detection integration
+│   └── advanced.go       # Audit data integration and cross-system metrics
+├── templates/            # Built-in report templates (compliance, executive, drift)
+├── exporters/            # Multi-format export (JSON, CSV, HTML, PDF)
+└── cache/                # Report caching
+```
+
+`engine.CustomTemplateManager` stores custom templates in `business.ReportTemplateStore`.
+Every method takes an explicit tenant and refuses an empty one. Templates are readable by
+their owner or by a tenant with a non-expired `read` share; save, share and delete are
+owner-only. Share targets must pass the `ShareScopeFunc` (same MSP subtree, existing
+tenant); every refusal returns the same `ErrShareTargetInvalid`. Non-owners see only their
+own entry in `SharedWith`. The `modify` permission is accepted for forward compatibility
+but grants nothing today, since `SaveTemplate` is owner-only.
+
+`engine.CustomReportBuilder` runs user-defined queries over the `dna`, `drift`,
+`device_stats` and `trends` data sources on `interfaces.DataProvider`. It validates
+parameters, enforces the `CustomReportConfig` limits, and above `StreamThreshold` returns a
+stream token whose pages `GetReportData` serves. **Tenant rule:** every query it builds sets
+`DataQuery.TenantIDs` to the request's tenant; an empty tenant and the root tenant are
+refused before any provider call, and stream tokens, page cache entries and query cache keys
+are bound to the tenant. Because the provider treats `DeviceIDs` as an alternative to
+`TenantIDs`, every device ID a query names (`device_id` / `device_ids`, in filters or user
+parameters) is checked against the tenant's subtree first; unknown and foreign devices are
+refused identically.
+
+Only `api`, `engine`, `interfaces`, `provider`, `templates`, `exporters`, and `cache` are
+part of the live report path — every binary in the module reaches report generation
+through `features/reports/api`, which imports `features/reports/interfaces`, with
+`features/reports/engine` behind it.
+
+## Key features
+
+- **Template-based report generation** for compliance, executive, and drift report types
+- **Multi-format export**: JSON, CSV, HTML, PDF
+- **REST API** for dashboard and report access, backed directly by `engine.Engine`
+- **Report caching** for improved performance (write-through, configurable TTL)
+- **Tenant and device scoping** enforced at the API boundary (`api/handlers.go`):
+  a tenant-scoped caller is pinned to its own tenant, and every requested device ID is
+  authorized against that tenant's subtree before it reaches the engine
+
+## REST API endpoints
+
+- `POST /api/v1/reports/generate` — generate a report and export it in the requested format
+- `GET /api/v1/reports/templates` — list available report templates
+- `GET /api/v1/reports/templates/{template}` — get a specific template's info
+- `GET /api/v1/reports/dashboard/overview` — executive KPI summary
+- `GET /api/v1/reports/dashboard/trends` — trend charts and analysis
+- `GET /api/v1/reports/dashboard/alerts` — active drift alerts, with acknowledge/silence state
+- `GET /api/v1/reports/compliance/status` — compliance score and summary
+- `GET /api/v1/reports/drift/summary` — drift event summary
+- `POST /api/v1/reports/custom/generate` — generate a custom report for the caller's own tenant (`report:generate`)
+- `GET /api/v1/reports/custom/data` — one page of a streamed custom report (`report:read`)
+- `GET|POST /api/v1/reports/custom-templates`, `GET|DELETE /api/v1/reports/custom-templates/{id}`, `POST /api/v1/reports/custom-templates/{id}/share` — custom templates (`report:read`; writes need `report:manage`)
+
+The custom report and template endpoints are also reachable from the CLI: `cfg report template list|show|create|delete|share` and `cfg report custom run|page`. Definition files (JSON or YAML) passed with `--file` must not set `tenant_id` or `created_by`; the controller derives both from the credential.
+
+## Integration
+
+- **Entity Graph**: `GetDNAData`, `GetDeviceStats`, and `GetDriftEvents` read device
+  identity, observation history, and drift state from
+  `pkg/entitygraph/interfaces.EntityGraphProvider` (ADR-022).
+- **Templates**: `features/reports/templates` processes report templates into
+  `interfaces.Report` values.
+- **REST API**: registered on the controller API server
+  (`features/controller/server/server.go`).
+- **Multi-tenancy**: tenant scope always comes from the authenticated caller, not from a
+  caller-supplied request field; see `api/handlers.go`'s `parseTenantIDs` and
+  `enforceDeviceTenant`.
+
+### Query scoping
+
+Every report read carries exactly one authorization cut, and a read that carries none is
+refused rather than widened (ADR-022 §7):
+
+- **Device selector** (`DataQuery.DeviceIDs`) — the narrowest cut. Each device ID is
+  authorized against the caller's tenant subtree at the API boundary before the query
+  reaches the data provider, and results cover only those devices.
+- **Tenant scope** (`DataQuery.TenantIDs`) — used when no device is named. Hosts are
+  discovered through `QueryEntities` with `EntityFilter.TenantFilter` set to the tenant
+  subtree, and drift through `ListDrifted` with `DriftFilter.TenantFilter`; several
+  tenants mean one filtered query each, never one unfiltered query.
+- **Neither** — refused. An empty tenant filter means "every tenant" to the entity graph
+  providers, so such a query would return the whole deployment.
+
+## Advanced (audit-integrated, multi-tenant) reporting
+
+`engine.AdvancedEngine` and `provider.AdvancedProvider` (`engine/advanced.go`,
+`provider/advanced.go`) implement compliance/security/executive/multi-tenant report
+generation with audit-data integration and RBAC-validated tenant access. They are fully
+implemented and tested but are not yet constructed by any server wiring or reachable
+through `features/reports/api` — see Issue #4333 for the tracked follow-up that reaches
+the remaining unimplemented capability (scheduled reports, custom report building, custom
+template management) through this same live path.
+
+## Testing
+
+- Unit tests for engine, provider, exporter, cache, and template logic
+- API handler tests, including tenant/device scoping enforcement
+- No mocks — tests use real CFGMS components per CLAUDE.md

@@ -1,0 +1,1547 @@
+#!/usr/bin/env bash
+# security-review.sh — sweep orchestration CLI for the security review harness
+# (Issue #3910). The single host-side command a human runs to operate the
+# whole harness end to end: launch a sweep against a named ref, check its
+# status, and resume an interrupted or partially-parked sweep.
+#
+# This is a thin CLI. It adds no classification, schema, or credential logic
+# of its own -- it only calls each dependency's existing entry point, in
+# sequence, exactly as documented in .claude/skills/security-review/docs/harness-architecture.md:
+#   - manifest.py (#3902)   -- create_sweep(), given the roster-derived lane list
+#   - planner.py (#3906)    -- prepare()/launch()/finalize()
+#   - agent-dispatch.sh launch-investigator (#3903) -- dispatches each roster
+#     lane's own subscription-harness container, one per invocation
+#   - consolidate.py (#3904) -- consolidate()/load_sweep()/build_coverage_table()
+#   - adjudicate.py (#3984) -- prepare()/launch(): the optional model-backed
+#     severity-adjudication stage between the lanes and the consolidator,
+#     selected by CFGMS_SECURITY_REVIEW_ADJUDICATOR (one harness:model pair)
+#   - roster.py (#3932) -- parse_roster(), the ONLY lane-dispatch path (epic
+#     #3927's contract C5). `CFGMS_SECURITY_REVIEW_LANES` must be set; there
+#     is no hardcoded fallback lane set (Issue #3933 removed the three REST
+#     lanes this script used to dispatch directly, and STORY-5a's opt-in
+#     roster path with them).
+#
+# Container lifecycle is short-lived and per-invocation, not one long-running
+# process per lane: each launch/resume call dispatches a lane's container for
+# one pass over its currently-missing steps, waits for it to exit (`docker
+# wait`), then moves on. That is what makes #3903's per-invocation credential
+# file safe to remove on every container exit (its own design) -- a park
+# interval spanning days is never a still-running container holding a stale
+# credential mount, because parking IS the container exiting under this
+# lifecycle. This script owns that guarantee; #3903 depends on it rather than
+# re-deriving it.
+#
+# No GitHub Actions workflow and no repository secret are added or required by
+# this script -- it is a host-only tool, invoked interactively or by a future
+# scheduling wrapper, never by CI.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SECURITY_REVIEW_DIR="${SCRIPT_DIR}"
+
+# REPO_ROOT: CFGMS_TEST_REPO_ROOT lets hermetic tests point this at a
+# throwaway fixture git repository instead of this checkout -- the same
+# override agent-dispatch.sh has always honored (see its own REPO_ROOT
+# line), needed here so a test can make the snapshot's committed content
+# diverge from a live working tree without ever touching this checkout.
+# Production invocations never set it, so `git rev-parse --show-toplevel`
+# against this script's own location remains the only resolution path that
+# matters outside tests.
+if [[ -n "${CFGMS_TEST_REPO_ROOT:-}" ]]; then
+  REPO_ROOT="$CFGMS_TEST_REPO_ROOT"
+else
+  REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+fi
+if [[ -z "$REPO_ROOT" ]]; then
+  echo "ERROR: cannot determine the repository root (\`git rev-parse --show-toplevel\` failed)" >&2
+  exit 1
+fi
+
+# agent-dispatch.sh stays under .claude/scripts/ -- this script no longer
+# shares a directory with it after the security-review skill relocation, so
+# it must be resolved relative to REPO_ROOT rather than SCRIPT_DIR.
+AGENT_DISPATCH_SCRIPT="${REPO_ROOT}/.claude/scripts/agent-dispatch.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: security-review.sh <command> [args...]
+
+Commands:
+  launch <ref> [--scope-file <path>] [--path <subtree>]...
+                       Resolve <ref>, create a new sweep tree AND its immutable snapshot,
+                       verify the snapshot, write the auditable bundle and run the
+                       bundle-based planner, dispatch every roster lane
+                       (CFGMS_SECURITY_REVIEW_LANES) independently, run the
+                       consolidator, and print the path to report/consolidated.md.
+                       --scope-file names an operator-supplied prose description copied
+                       verbatim into the bundle's 00-scope.md (metadata.write_bundle());
+                       omit it to record scope_provided=false instead.
+                       --path (repeatable; Issue #4012) bounds the sweep to one or more
+                       repository-relative subtrees, e.g. "--path pkg/cert --path
+                       pkg/session": the bundle's 01-tree.tsv/03-routes.tsv, the planner
+                       prompt's file inventory, and the coverage denominator all narrow to
+                       those subtrees instead of the whole repository. Recorded in
+                       manifest.json's scope_paths so `resume` keeps it automatically. Omit
+                       for the previous, unscoped, full-repository behavior.
+  resume <sweep-id> [--scope-file <path>]
+                       Re-verify the sweep's snapshot, re-invoke the planner against an
+                       existing sweep (a no-op if plan/ is already populated) and
+                       re-dispatch every roster lane -- each lane's own resume-scanner
+                       integration ensures only its missing steps run again -- then
+                       re-run the consolidator. --scope-file is the same flag as launch's.
+                       A sweep created with launch's --path keeps that scope automatically,
+                       read back from manifest.json -- there is no --path flag here, and
+                       none is needed.
+  status <sweep-id>   Print the per-lane x per-step coverage breakdown, plus the G-2/G-3
+                       plan coverage-gate result (Issue #3980), for an existing sweep.
+                       Read-only: never re-runs the planner, a lane, or the consolidator.
+  adversarial-review <pr-number> [--item <item-id>] [--check | --release]
+                       Adversarial review of a security-fix PR (Issue #5025). Applies only
+                       when the PR's story project item is in a sweep's private
+                       triage/stories/index.json; otherwise prints
+                       ADVERSARIAL_REVIEW:not_applicable. Builds a prompt from the private
+                       finding detail plus the PR diff, runs
+                       CFGMS_SECURITY_REVIEW_ADVERSARIAL_RUNS (default 3; RERUNS, default 1, after a held head) agent-loop runs (harness: adversarial.py)
+                       of CFGMS_SECURITY_REVIEW_ADVERSARIAL_MODEL (default: adversarial.py)
+                       against a snapshot of the PR head, and unions them. Results stay under
+                       <base>/<sweep-id>/adversarial/pr-<N>/ and are never posted anywhere.
+                       Last line: ADVERSARIAL_REVIEW:pass | hold:<n> | error:<reason> |
+                       pending | not_applicable. --check never waits (review-pr uses it);
+                       each run it starts prints ADVERSARIAL_REVIEW_ATTEMPT:<n>/<max> before
+                       the final line. A head gets CFGMS_SECURITY_REVIEW_ADVERSARIAL_MAX_ATTEMPTS
+                       (default 3) runs; after that a stored error stays the answer, and a run
+                       that died without a result ends as error:attempts_exhausted. A result
+                       file that cannot be read is error:result_unreadable. --release clears a
+                       hold or an error for the current head after the founder read it, and
+                       refuses when CFGMS_AUTONOMOUS=true.
+
+CFGMS_SECURITY_REVIEW_LANES (required) is a comma-separated list of harness:model
+pairs, e.g. "claude:claude-sonnet-5" (full id; the pinned CLI rejects short
+forms like "sonnet-5") -- see roster.py and
+.claude/skills/security-review/docs/harness-architecture.md. To see which model ids the
+pinned `claude` CLI actually recognizes, run `claude --model` interactively
+for its picker, or use the full `claude-<family>-<n>` form directly. A lane
+that parks, refuses, or fails on some steps never blocks any other lane's
+dispatch or progress, and never prevents the consolidator from running
+against whatever the other lanes produced.
+
+CFGMS_SECURITY_REVIEW_ADJUDICATOR (optional) is exactly ONE harness:model pair,
+e.g. "claude:claude-opus-5". When set, after every lane has exited the deterministic
+findings are handed -- findings only, never source -- to that model in a
+read-only investigator container (adjudicate.py, Issue #3984), which applies
+the severity rubric to each finding and assesses cross-step groups; the
+consolidator then merges that verdict beside the lanes' raw values. When
+unset, the report says so and every severity is a raw lane value. An
+adjudicator that fails, refuses, parks, or cannot be dispatched is recorded
+in the report's Incomplete section; it never blocks consolidation.
+
+Which directory a container mounts at /workspace is mode-dependent (Issue #3979).
+Every LANE container still mounts the sweep's own verified snapshot (snapshot.py,
+Issue #3951), never the live, mutable repository checkout -- launch creates that
+snapshot right after the sweep tree, and both launch and resume independently
+re-verify it against the pinned commit before dispatching anything (Issue #3952,
+epic #3950's D1). A verify_snapshot() mismatch is printed to stderr and is fatal:
+no lane is ever dispatched against a snapshot that does not match its own commit.
+The PLANNER container instead mounts the sweep's auditable bundle (metadata.py's
+write_bundle(), #3978) -- structured metadata, never a repository checkout -- so
+the planner has no source file body anywhere in its container to read. This is a
+narrower claim than "source code never leaves the review environment": finder
+lanes still ship file bodies to their configured provider by design: only the
+planner is walled off from source.
+
+Exit status: non-zero if the sweep base directory cannot be resolved, if
+CFGMS_SECURITY_REVIEW_LANES is unset or malformed, if the sweep's snapshot
+cannot be created or fails verification, if the planner's bundle cannot be
+written or verified, or if consolidation could not run -- this script never
+exits 0 having silently written a partial or empty sweep tree, or having
+dispatched anything against an unverified snapshot or a missing bundle.
+EOF
+}
+
+resolve_base_dir() {
+  python3 "${SECURITY_REVIEW_DIR}/basedir.py" --repo-root "$REPO_ROOT"
+}
+
+# create_sweep_tree <ref> [<path> ...]
+# Prints "<sweep_dir><TAB><commit_sha>" on success. Resolves
+# CFGMS_SECURITY_REVIEW_LANES via roster.py (the only lane-dispatch path,
+# Issue #3933) into a lane_dir_name list and hands it, plus any trailing
+# <path> arguments (Issue #4012's --path subtree filter, zero or more), to
+# manifest.py's create_sweep(), which resolves the base directory
+# (fail-closed) before creating anything -- a BaseDirError here means zero
+# directories were created, satisfying the "write no partial sweep tree"
+# exit-code contract. A missing or malformed CFGMS_SECURITY_REVIEW_LANES
+# fails closed here too, before any sweep directory exists -- there is no
+# hardcoded lane set to fall back to.
+#
+# The <path> arguments are recorded verbatim in manifest.json's scope_paths
+# field by create_sweep() -- this function does not validate or normalize
+# them itself (metadata.write_bundle(), via planner.py prepare(), is the one
+# place that happens). Passing none at all means an unscoped, full-repository
+# sweep, unchanged from before this story.
+#
+# Immediately after manifest.create_sweep() succeeds, this also materializes
+# <sweep_dir>/snapshot/ via snapshot.create_snapshot() (Issue #3952, epic
+# #3950's D1) -- every container this script later dispatches mounts that
+# directory, never REPO_ROOT's live working tree. A snapshot-creation
+# failure makes this function return non-zero exactly like a manifest
+# failure does, so cmd_launch's existing hard-exit on a non-zero
+# create_sweep_tree already covers it -- no new branch needed there. Skipped
+# (not re-created) when the snapshot directory already has content, matching
+# manifest.create_sweep()'s own idempotency: a second `launch` call against a
+# sweep id that already exists (same ref, same UTC minute) must not crash on
+# `create_snapshot()`'s "dest_dir already contains files" guard.
+create_sweep_tree() {
+  local ref="$1"; shift
+  local paths=("$@")
+
+  if [[ -z "${CFGMS_SECURITY_REVIEW_LANES:-}" ]]; then
+    echo "ERROR: CFGMS_SECURITY_REVIEW_LANES must be set (comma-separated harness:model pairs, e.g. \"claude:claude-sonnet-5\") -- the roster is the only lane-dispatch path" >&2
+    return 1
+  fi
+
+  local roster_output
+  if ! roster_output=$(python3 "${SECURITY_REVIEW_DIR}/roster.py" "$CFGMS_SECURITY_REVIEW_LANES" 2>&1); then
+    echo "ERROR: could not parse CFGMS_SECURITY_REVIEW_LANES: ${roster_output}" >&2
+    return 1
+  fi
+  local lane_dir_names
+  lane_dir_names=$(printf '%s\n' "$roster_output" | cut -f3 | paste -sd, -)
+
+  python3 - "$SECURITY_REVIEW_DIR" "$REPO_ROOT" "$ref" "$lane_dir_names" "${paths[@]:-}" <<'PYEOF'
+import json
+import os
+import sys
+
+sec_dir, repo_root, ref, lane_dir_names = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+paths = [p for p in sys.argv[5:] if p]
+sys.path.insert(0, sec_dir)
+import manifest  # noqa: E402
+import snapshot  # noqa: E402
+
+lanes = tuple(lane_dir_names.split(","))
+try:
+    sweep_dir = manifest.create_sweep(
+        ref, lanes=lanes, repo_root=repo_root, paths=tuple(paths) if paths else None
+    )
+except Exception as exc:
+    print(f"ERROR: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+with open(os.path.join(sweep_dir, "manifest.json")) as f:
+    m = json.load(f)
+
+snapshot_dir = os.path.join(sweep_dir, "snapshot")
+if not (os.path.isdir(snapshot_dir) and os.listdir(snapshot_dir)):
+    try:
+        snapshot.create_snapshot(m["commit_sha"], repo_root, snapshot_dir)
+    except snapshot.SnapshotError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+print(f"{sweep_dir}\t{m['commit_sha']}")
+PYEOF
+}
+
+# _is_intentional_dispatch_skip <launch_investigator_output>
+# True (exit 0) when a non-zero `launch-investigator` (or `planner.py
+# launch`, which just wraps it and folds its stdout/stderr into its own
+# error message) exit is one of the two documented, non-fatal credential-
+# unavailable skips: the lane-mode credential loader's own
+# "LAUNCH_FAILED:...:credential_unavailable", or the plan-mode credential
+# gate's "DISPATCH_DEFERRED:creds_missing:..." (gate_credentials_for_launch
+# in agent-dispatch.sh). Both mean "nothing is wrong, the operator just
+# hasn't provisioned this credential yet" -- an expected, recoverable state
+# this script has always treated as a per-lane skip.
+#
+# Everything else -- a stale container that could not be reaped, a
+# container-name collision with a still-running container
+# (INVESTIGATOR_REFUSED:...:container_exists), invalid input, or any other
+# non-zero exit -- is a real failure (Issue #3930) and must NOT match here,
+# so the caller can tell "the operator hasn't set up credentials yet" apart
+# from "something is actually broken" and set a non-zero final exit code
+# only for the latter.
+_is_intentional_dispatch_skip() {
+  local output="$1"
+  case "$output" in
+    *credential_unavailable*|*DISPATCH_DEFERRED:creds_missing*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# plan_already_populated <sweep_dir>
+# True if at least one plan/step-*.json file already exists -- resume's
+# signal to skip re-dispatching the planner as a no-op (#3906's planner does
+# not overwrite an existing valid plan; this is the check that keeps this
+# script from asking it to regenerate one anyway).
+plan_already_populated() {
+  local sweep_dir="$1"
+  compgen -G "${sweep_dir}/plan/step-*.json" >/dev/null 2>&1
+}
+
+# read_scope_paths <sweep_dir>
+# Prints the sweep's own manifest.json `scope_paths` (Issue #4012), one path
+# per line, or nothing at all when the sweep is unscoped (`scope_paths` is
+# `null`, absent -- an older sweep predating this story -- or the manifest
+# cannot be read). This is how `cmd_resume` recovers the `--path` filter an
+# operator passed at `launch` time without asking them to pass it again: the
+# manifest, written once by create_sweep_tree() at sweep creation, is this
+# sweep's durable record of what it was bounded to.
+read_scope_paths() {
+  local sweep_dir="$1"
+  python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        m = json.load(f)
+except (OSError, ValueError):
+    sys.exit(0)
+for p in (m.get('scope_paths') or []):
+    if isinstance(p, str) and p:
+        print(p)
+" "${sweep_dir}/manifest.json"
+}
+
+# verify_snapshot <sweep_dir> <commit_sha>
+# Re-checks <sweep_dir>/snapshot/ against <commit_sha>'s tree byte-for-byte
+# via snapshot.py's own CLI (snapshot.verify_snapshot(), Issue #3951) --
+# never re-implemented here. Called by both cmd_launch and cmd_resume before
+# any dispatch call on that invocation (Issue #3952, epic #3950's D1: "and
+# again on resume" -- a sweep can sit parked for days, and this re-proves the
+# snapshot on disk still matches the pinned commit every time, not only at
+# creation). Every mismatch line snapshot.py prints is forwarded to stderr
+# verbatim; a non-empty result is the one condition that must stop a launch
+# or resume before dispatching the planner or any lane at all.
+verify_snapshot() {
+  local sweep_dir="$1" commit_sha="$2"
+  local output
+  if ! output=$(python3 "${SECURITY_REVIEW_DIR}/snapshot.py" verify "${sweep_dir}/snapshot" "$commit_sha" "$REPO_ROOT" 2>&1); then
+    echo "ERROR: snapshot verification failed for ${sweep_dir}:" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+  return 0
+}
+
+# record_planner_dispatch_outcome <sweep_dir> <outcome> [<roster-line> ...]
+# Writes/merges the "planners" array of <sweep_dir>/dispatch_report.json
+# (Issue #3954, epic #3950's D3): one entry per configured planner --
+# resolved separately from planner.py's own CFGMS_SECURITY_REVIEW_PLANNERS
+# parse purely so this record exists even when nothing was actually
+# launched -- or, when no roster is configured at all, a single legacy entry
+# describing the one hardcoded planner (harness "claude", no configured
+# model -- that call never passes --harness/--model to begin with).
+#
+# <outcome> is dispatched / credential_unavailable / launch_failed /
+# container_failed, the DEFAULT applied to every entry in this call -- a
+# multi-planner `planner.py launch` reports one aggregated success/failure
+# for the whole roster (see launch()'s own docstring), not a per-entry
+# result, so this is the finest granularity the launch call itself can give.
+# Every configured planner still gets a record -- never omitted.
+#
+# Each <roster-line> is one "harness<TAB>model<TAB>lane_dir_name" line as
+# roster.py prints it. resolved_model is read back from planner.py's own
+# <sweep_dir>/.plan-resolved-models.json sidecar (finalize_multi_planner()'s
+# output, keyed by lane_dir_name) -- "unknown" wherever that sidecar has
+# nothing for a given entry, including always on the legacy path, which
+# never asks the CLI to report a resolved identity in the first place.
+# passed_harness/passed_model equal requested_harness/requested_model: there
+# is no transformation between "configured" and "passed to the executable"
+# anywhere in this script.
+#
+# Per-entry override (Issue #4009): after the launch call itself succeeds,
+# `dispatch_planner()` observes each launched container's own exit code
+# directly (`docker wait`) and records it at that entry's own plan directory
+# (`record_planner_container_result()`) -- a granularity the launch call's
+# own return value cannot express, since `launch()` only reports "every
+# container started" or "one failed to start", never "container N crashed
+# after starting". This function re-derives that per-entry outcome itself,
+# by reading each entry's own PLANNER_CONTAINER_FILENAME sidecar back (legacy:
+# <sweep_dir>/plan/; roster: <sweep_dir>/planners/<lane_dir_name>/plan/) --
+# never trusting a value threaded through <roster-line>, so a caller cannot
+# desync the two. A record with a non-zero exit_code overrides <outcome> to
+# "container_failed" for that entry alone and the entry also carries the
+# observed container_exit_code/container_stderr_tail; every other entry, and
+# the legacy single-planner entry, keeps the passed-in <outcome> unchanged.
+record_planner_dispatch_outcome() {
+  local sweep_dir="$1" outcome="$2"; shift 2
+  python3 - "$SECURITY_REVIEW_DIR" "$sweep_dir" "$outcome" "$@" <<'PYEOF'
+import json
+import os
+import sys
+
+sec_dir, sweep_dir, outcome = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, sec_dir)
+import atomic_write  # noqa: E402
+
+resolved_path = os.path.join(sweep_dir, ".plan-resolved-models.json")
+try:
+    with open(resolved_path) as f:
+        resolved = json.load(f)
+    if not isinstance(resolved, dict):
+        resolved = {}
+except (OSError, ValueError):
+    resolved = {}
+
+
+def container_result(plan_dir):
+    try:
+        with open(os.path.join(plan_dir, ".planner-container.json")) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def apply_container_result(entry, plan_dir):
+    result = container_result(plan_dir)
+    if not result:
+        return
+    exit_code = result.get("exit_code")
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool) or exit_code == 0:
+        return
+    entry["outcome"] = "container_failed"
+    entry["container_exit_code"] = exit_code
+    entry["container_stderr_tail"] = result.get("stderr_tail", "")
+
+
+roster_lines = [line for line in sys.argv[4:] if line]
+entries = []
+if roster_lines:
+    for raw in roster_lines:
+        harness, model, lane_dir_name = raw.split("\t")
+        entry = {
+            "requested_harness": harness,
+            "requested_model": model,
+            "passed_harness": harness,
+            "passed_model": model,
+            "resolved_model": resolved.get(lane_dir_name, "unknown"),
+            "outcome": outcome,
+        }
+        apply_container_result(entry, os.path.join(sweep_dir, "planners", lane_dir_name, "plan"))
+        entries.append(entry)
+else:
+    entry = {
+        "requested_harness": "claude",
+        "requested_model": "",
+        "passed_harness": "claude",
+        "passed_model": "",
+        "resolved_model": "unknown",
+        "outcome": outcome,
+    }
+    apply_container_result(entry, os.path.join(sweep_dir, "plan"))
+    entries.append(entry)
+
+report_path = os.path.join(sweep_dir, "dispatch_report.json")
+try:
+    with open(report_path) as f:
+        report = json.load(f)
+    if not isinstance(report, dict):
+        report = {}
+except (OSError, ValueError):
+    report = {}
+report.setdefault("lanes", [])
+report["planners"] = entries
+atomic_write.write_json_atomic(report_path, report)
+PYEOF
+}
+
+# record_lane_dispatch_outcomes <sweep_dir> [<harness>TAB<model>TAB<outcome> ...]
+# Writes/merges the "lanes" array of <sweep_dir>/dispatch_report.json (Issue
+# #3954): one entry per configured finder lane, whatever its outcome -- a
+# credential-unavailable skip is recorded here exactly like a dispatched
+# lane is, never silently omitted. passed_harness/passed_model equal
+# requested_harness/requested_model, matching record_planner_dispatch_outcome
+# above for the same reason.
+record_lane_dispatch_outcomes() {
+  local sweep_dir="$1"; shift
+  python3 - "$SECURITY_REVIEW_DIR" "$sweep_dir" "$@" <<'PYEOF'
+import json
+import os
+import sys
+
+sec_dir, sweep_dir = sys.argv[1], sys.argv[2]
+sys.path.insert(0, sec_dir)
+import atomic_write  # noqa: E402
+
+entries = []
+for raw in sys.argv[3:]:
+    harness, model, outcome = raw.split("\t")
+    entries.append({
+        "requested_harness": harness,
+        "requested_model": model,
+        "passed_harness": harness,
+        "passed_model": model,
+        "outcome": outcome,
+    })
+
+report_path = os.path.join(sweep_dir, "dispatch_report.json")
+try:
+    with open(report_path) as f:
+        report = json.load(f)
+    if not isinstance(report, dict):
+        report = {}
+except (OSError, ValueError):
+    report = {}
+report.setdefault("planners", [])
+report["lanes"] = entries
+atomic_write.write_json_atomic(report_path, report)
+PYEOF
+}
+
+# verify_bundle <sweep_dir>
+# Confirms <sweep_dir>/bundle/MANIFEST.json exists before the planner is
+# dispatched against it (Issue #3979) -- the same "check before dispatching,
+# fail loudly, dispatch nothing" shape verify_snapshot() applies to the
+# snapshot, sized down to an existence check: there is no bundle equivalent
+# of snapshot.py's byte-for-byte re-verification against the pinned commit,
+# because metadata.write_bundle() just wrote it moments earlier in this same
+# process (dispatch_planner()'s own `prepare` call below), not at sweep
+# creation like the snapshot -- so a missing MANIFEST.json here means
+# `prepare` did not actually write what it claimed to, not that time has
+# passed for something on disk to drift.
+verify_bundle() {
+  local sweep_dir="$1"
+  if [[ ! -f "${sweep_dir}/bundle/MANIFEST.json" ]]; then
+    echo "ERROR: bundle verification failed for ${sweep_dir}: ${sweep_dir}/bundle/MANIFEST.json not found" >&2
+    return 1
+  fi
+  return 0
+}
+
+# record_planner_container_result <plan_dir> <container_id> <exit_code> <stderr_tail>
+# Writes <plan_dir>/.planner-container.json (Issue #4009): the planner
+# container's own exit code, as `docker wait` reported it, and the last 30
+# lines of `docker logs` -- the same tail length `agent-dispatch.sh
+# inspect-detail`/`inspect-container` already use for a running agent.
+# `dispatch_planner()`'s own `docker wait` previously discarded this
+# entirely, so a container that started successfully (a real `docker run`
+# succeeded) but then crashed inside -- a broken entrypoint, an argv the
+# shell rejected -- left no trace anywhere in the sweep tree once `cleanup`
+# reaped it; an operator reading a sweep whose planner produced zero
+# step-*.json files had no way to tell that apart from a model that cleanly
+# declined to write a plan. `record_planner_dispatch_outcome()` reads this
+# sidecar back to override that entry's `dispatch_report.json` outcome to
+# `container_failed`, and `planner.py finalize()`/`finalize_multi_planner()`
+# read it to fold the exit code and log tail into `plan/PLANNING_FAILED`.
+record_planner_container_result() {
+  local plan_dir="$1" container_id="$2" exit_code="$3" stderr_tail="$4"
+  mkdir -p "$plan_dir"
+  python3 - "$SECURITY_REVIEW_DIR" "$plan_dir" "$container_id" "$exit_code" "$stderr_tail" <<'PYEOF'
+import os
+import sys
+
+sec_dir, plan_dir, container_id, exit_code, stderr_tail = sys.argv[1:6]
+sys.path.insert(0, sec_dir)
+import atomic_write  # noqa: E402
+
+atomic_write.write_json_atomic(
+    os.path.join(plan_dir, ".planner-container.json"),
+    {
+        "container_id": container_id,
+        "exit_code": int(exit_code),
+        "stderr_tail": stderr_tail,
+    },
+)
+PYEOF
+}
+
+# dispatch_planner <sweep_dir> <commit_sha> [<scope_file>] [<path> ...]
+# prepare() -> verify_bundle() -> launch() -> wait for the container to exit
+# -> finalize(). A `prepare` failure is logged and treated as non-fatal to
+# the overall launch/resume: a broken plan leaves the lanes nothing to do
+# (they will simply find zero outstanding steps), and the consolidator still
+# runs and renders that state visibly rather than the whole command aborting.
+#
+# `scope_file`, when non-empty, is forwarded to `planner.py prepare` as
+# `--scope-file` (Issue #3979) -- the operator-supplied prose
+# `metadata.write_bundle()` copies verbatim into the bundle's `00-scope.md`.
+# Omitted (the common case) means `prepare()` calls `write_bundle()` with
+# `no_scope=True`, recording the omission in `MANIFEST.json` rather than
+# leaving it to be inferred from a missing file.
+#
+# Every trailing <path> argument (Issue #4012) is forwarded to `planner.py
+# prepare` as its own `--path <path>` -- the operator's subtree filter,
+# already resolved by the caller (cmd_launch from its own `--path` flags,
+# cmd_resume from the sweep's own manifest.json `scope_paths`, never
+# re-derived here). Zero <path> arguments means an unscoped, full-repository
+# bundle, unchanged from before this story.
+#
+# A `launch` failure is different (Issue #3930): `launch` is the one step
+# that actually calls `agent-dispatch.sh launch-investigator`, so its
+# failure is either a documented credential-unavailable skip (non-fatal,
+# same as before) or a real dispatch problem -- a stale container that could
+# not be reaped, a container-name collision with a still-running container,
+# or anything else launch-investigator can fail on. Returns 1 for the latter
+# so the caller can propagate a non-zero final exit code instead of silently
+# reporting the sweep as having completed cleanly.
+#
+# A container that launches successfully (`launch` reports "dispatched") but
+# then exits non-zero is a third, distinct failure (Issue #4009): unlike
+# `launch_failed`, `finalize()` still runs -- its own `plan/PLANNING_FAILED`
+# gains the exit code and log tail `record_planner_container_result()`
+# recorded below -- but this function still returns 1, exactly like
+# `launch_failed`, so the caller does not report the sweep as clean either.
+dispatch_planner() {
+  local sweep_dir="$1" commit_sha="$2" scope_file="${3:-}"
+  shift $(( $# >= 3 ? 3 : $# ))
+  local scope_paths=("$@")
+
+  local prepare_args=(prepare "$sweep_dir" "$commit_sha" --repo-root "$REPO_ROOT")
+  [[ -n "$scope_file" ]] && prepare_args+=(--scope-file "$scope_file")
+  local p
+  for p in "${scope_paths[@]:-}"; do
+    [[ -n "$p" ]] && prepare_args+=(--path "$p")
+  done
+
+  local prepare_output
+  if ! prepare_output=$(python3 "${SECURITY_REVIEW_DIR}/planner.py" "${prepare_args[@]}" 2>&1); then
+    echo "WARNING: planner prepare failed: ${prepare_output}" >&2
+    return 0
+  fi
+
+  if ! verify_bundle "$sweep_dir"; then
+    return 1
+  fi
+
+  # Resolved purely for the dispatch-outcome record below (Issue #3954) --
+  # planner.py's own launch()/finalize_multi_planner() resolve
+  # CFGMS_SECURITY_REVIEW_PLANNERS themselves via _planners_from_env(); this
+  # is a second, read-only parse of the same env var, never a second source
+  # of truth for which planners actually run.
+  local planner_roster_lines=()
+  if [[ -n "${CFGMS_SECURITY_REVIEW_PLANNERS:-}" ]]; then
+    local planner_roster_output
+    if ! planner_roster_output=$(python3 "${SECURITY_REVIEW_DIR}/roster.py" "$CFGMS_SECURITY_REVIEW_PLANNERS" 2>&1); then
+      echo "ERROR: could not parse CFGMS_SECURITY_REVIEW_PLANNERS: ${planner_roster_output}" >&2
+      return 1
+    fi
+    local roster_line
+    while IFS= read -r roster_line; do
+      [[ -n "$roster_line" ]] && planner_roster_lines+=("$roster_line")
+    done <<<"$planner_roster_output"
+  fi
+
+  local launch_output launch_rc=0
+  launch_output=$(python3 "${SECURITY_REVIEW_DIR}/planner.py" launch "$sweep_dir" --bundle-dir "${sweep_dir}/bundle" --repo-root "$REPO_ROOT" 2>&1) || launch_rc=$?
+
+  local outcome="dispatched"
+  if [[ $launch_rc -ne 0 ]]; then
+    if _is_intentional_dispatch_skip "$launch_output"; then
+      outcome="credential_unavailable"
+    else
+      outcome="launch_failed"
+    fi
+  fi
+
+  # Wait for EVERY container this launch call started, not only the last one
+  # (Issue #3954): a multi-planner dispatch calls agent-dispatch.sh once per
+  # roster entry, and launch_output concatenates one
+  # LAUNCHED_INVESTIGATOR:plan:<id> line per entry that actually started --
+  # the old `tail -n1` here waited on only the last of those, letting
+  # finalize() run while an earlier planner's container might still be
+  # writing into its own plan/ directory.
+  #
+  # Also records each container's own exit code and log tail (Issue #4009).
+  # `container_ids` is in the same order `planner_roster_lines` is: `launch()`
+  # only returns rc=0 (this function's "dispatched" outcome, the only case
+  # this block runs at all) once EVERY roster entry's own launch-investigator
+  # call has itself returned 0, in roster-list order -- see `launch()`'s own
+  # docstring -- so a length mismatch here can only mean that invariant broke,
+  # guarded against below (`roster_ok`) rather than assumed blindly; on a
+  # mismatch the per-container sidecar still gets written, just without a
+  # roster-entry-specific plan directory to key it to.
+  local container_ids=()
+  while IFS= read -r container_id; do
+    [[ -n "$container_id" ]] || continue
+    container_ids+=("$container_id")
+  done < <(printf '%s\n' "$launch_output" | sed -n 's/^LAUNCHED_INVESTIGATOR:plan://p')
+
+  if [[ "$outcome" == "dispatched" ]]; then
+    local roster_ok=0
+    [[ ${#planner_roster_lines[@]} -gt 0 ]] && [[ ${#planner_roster_lines[@]} -eq ${#container_ids[@]} ]] && roster_ok=1
+
+    local i=0 any_container_failed=0
+    for container_id in "${container_ids[@]}"; do
+      local exit_code
+      exit_code="$(docker wait "$container_id" 2>/dev/null)" || exit_code=""
+
+      if [[ "$exit_code" =~ ^[0-9]+$ ]]; then
+        local plan_dir="${sweep_dir}/plan"
+        if [[ "$roster_ok" -eq 1 ]]; then
+          local lane_dir_name
+          lane_dir_name="$(printf '%s' "${planner_roster_lines[$i]}" | cut -f3)"
+          plan_dir="${sweep_dir}/planners/${lane_dir_name}/plan"
+        fi
+
+        local stderr_tail
+        stderr_tail="$(docker logs --tail 30 "$container_id" 2>&1 || true)"
+        record_planner_container_result "$plan_dir" "$container_id" "$exit_code" "$stderr_tail"
+        [[ "$exit_code" != "0" ]] && any_container_failed=1
+      fi
+      i=$((i + 1))
+    done
+
+    [[ "$any_container_failed" -eq 1 ]] && outcome="container_failed"
+  fi
+
+  record_planner_dispatch_outcome "$sweep_dir" "$outcome" "${planner_roster_lines[@]:-}"
+
+  if [[ "$outcome" == "credential_unavailable" ]]; then
+    echo "WARNING: planner launch skipped (credentials unavailable): ${launch_output}" >&2
+    return 0
+  fi
+  if [[ "$outcome" == "launch_failed" ]]; then
+    echo "ERROR: planner launch failed: ${launch_output}" >&2
+    return 1
+  fi
+  if [[ "$outcome" == "container_failed" ]]; then
+    echo "ERROR: a planner container exited non-zero; see plan/.planner-container.json (or planners/<lane>/plan/.planner-container.json) for its exit code and log tail" >&2
+  fi
+
+  local finalize_output
+  if ! finalize_output=$(python3 "${SECURITY_REVIEW_DIR}/planner.py" finalize "$sweep_dir" 2>&1); then
+    echo "WARNING: planning failed for ${sweep_dir}: ${finalize_output}" >&2
+  fi
+
+  [[ "$outcome" == "container_failed" ]] && return 1
+  return 0
+}
+
+# dispatch_roster_lanes <sweep_dir> <roster_value>
+# The sole lane-dispatch mechanism (Issue #3932/#3933, epic #3927's contract
+# C5): parses CFGMS_SECURITY_REVIEW_LANES via roster.py into (harness, model,
+# lane_dir_name) tuples and dispatches one launch-investigator call per entry
+# with --harness/--model -- a roster lane authenticates as its harness's own
+# subscription session (C2), never an OS-keychain API key. The lane
+# entrypoint script is resolved by harness id under
+# CFGMS_SECURITY_REVIEW_LANE_ENTRYPOINT_DIR (default: lanes/ alongside this
+# script), named "<harness>_lane.py" -- e.g. `claude_lane.py` for harness
+# `claude` (Issue #3933).
+#
+# A per-lane credential-unavailable skip is logged and does not fail the
+# sweep; any other non-zero launch-investigator exit is a real failure
+# (Issue #3930) and this function returns 1 so the caller does not report the
+# sweep as having completed cleanly.
+dispatch_roster_lanes() {
+  local sweep_dir="$1" roster_value="$2"
+  local container_ids=()
+  local lane_entries=()
+  local had_failure=0
+
+  local roster_output
+  if ! roster_output=$(python3 "${SECURITY_REVIEW_DIR}/roster.py" "$roster_value" 2>&1); then
+    echo "ERROR: could not parse CFGMS_SECURITY_REVIEW_LANES: ${roster_output}" >&2
+    return 1
+  fi
+
+  local entrypoint_dir="${CFGMS_SECURITY_REVIEW_LANE_ENTRYPOINT_DIR:-${SECURITY_REVIEW_DIR}/lanes}"
+  local harness model lane_dir_name entrypoint output rc cid
+
+  while IFS=$'\t' read -r harness model lane_dir_name; do
+    [[ -n "$lane_dir_name" ]] || continue
+    entrypoint="${entrypoint_dir}/${harness}_lane.py"
+
+    rc=0
+    output=$("$AGENT_DISPATCH_SCRIPT" launch-investigator \
+      --sweep-dir "$sweep_dir" \
+      --snapshot-dir "${sweep_dir}/snapshot" \
+      --mode "$lane_dir_name" \
+      --harness "$harness" \
+      --model "$model" \
+      --lane-entrypoint "$entrypoint" 2>&1) || rc=$?
+
+    if [[ $rc -ne 0 ]]; then
+      if _is_intentional_dispatch_skip "$output"; then
+        echo "WARNING: lane ${lane_dir_name} dispatch skipped (exit ${rc}): ${output}" >&2
+        lane_entries+=("${harness}"$'\t'"${model}"$'\t'"credential_unavailable")
+      else
+        echo "ERROR: lane ${lane_dir_name} dispatch failed (exit ${rc}): ${output}" >&2
+        had_failure=1
+        lane_entries+=("${harness}"$'\t'"${model}"$'\t'"launch_failed")
+      fi
+      continue
+    fi
+
+    cid="$(printf '%s\n' "$output" | sed -n "s/^LAUNCHED_INVESTIGATOR:${lane_dir_name}://p" | tail -n1)"
+    if [[ -z "$cid" ]]; then
+      echo "ERROR: lane ${lane_dir_name} dispatched but no container id was parsed from: ${output}" >&2
+      had_failure=1
+      lane_entries+=("${harness}"$'\t'"${model}"$'\t'"launch_failed")
+      continue
+    fi
+    container_ids+=("$cid")
+    lane_entries+=("${harness}"$'\t'"${model}"$'\t'"dispatched")
+  done <<<"$roster_output"
+
+  for cid in "${container_ids[@]:-}"; do
+    [[ -n "$cid" ]] || continue
+    docker wait "$cid" >/dev/null 2>&1 || true
+  done
+
+  record_lane_dispatch_outcomes "$sweep_dir" "${lane_entries[@]:-}"
+
+  return "$had_failure"
+}
+
+# dispatch_all_lanes <sweep_dir>
+# Dispatches every roster lane independently (AC6) via dispatch_roster_lanes
+# -- the only lane-dispatch path (Issue #3933 removed the hardcoded
+# LANE_IDS/LANE_CRED_NAMES/LANE_SCRIPTS loop and the three REST lanes it
+# called). Fails closed, before dispatching anything, if
+# CFGMS_SECURITY_REVIEW_LANES is unset -- there is no hardcoded lane set left
+# to fall back to.
+dispatch_all_lanes() {
+  local sweep_dir="$1"
+
+  if [[ -z "${CFGMS_SECURITY_REVIEW_LANES:-}" ]]; then
+    echo "ERROR: CFGMS_SECURITY_REVIEW_LANES must be set (comma-separated harness:model pairs, e.g. \"claude:claude-sonnet-5\") -- the roster is the only lane-dispatch path" >&2
+    return 1
+  fi
+
+  dispatch_roster_lanes "$sweep_dir" "$CFGMS_SECURITY_REVIEW_LANES"
+}
+
+# record_adjudicator_dispatch_outcome <sweep_dir> <harness> <model> <outcome>
+# Writes dispatch_report.json's `adjudicator` entry (Issue #3984), preserving
+# the `planners`/`lanes` entries the two recorders above own. consolidate.py
+# reads this entry to tell "not configured" (no entry) from "dispatched but
+# left no output" (entry present, envelope missing) -- the lane rule applied
+# to the adjudication stage.
+record_adjudicator_dispatch_outcome() {
+  local sweep_dir="$1" harness="$2" model="$3" outcome="$4"
+  python3 - "$SECURITY_REVIEW_DIR" "$sweep_dir" "$harness" "$model" "$outcome" <<'PYEOF'
+import json
+import os
+import sys
+
+sec_dir, sweep_dir, harness, model, outcome = sys.argv[1:6]
+sys.path.insert(0, sec_dir)
+import atomic_write  # noqa: E402
+
+report_path = os.path.join(sweep_dir, "dispatch_report.json")
+try:
+    with open(report_path) as f:
+        report = json.load(f)
+    if not isinstance(report, dict):
+        report = {}
+except (OSError, ValueError):
+    report = {}
+report.setdefault("planners", [])
+report.setdefault("lanes", [])
+report["adjudicator"] = {
+    "requested_harness": harness,
+    "requested_model": model,
+    "passed_harness": harness,
+    "passed_model": model,
+    "outcome": outcome,
+}
+atomic_write.write_json_atomic(report_path, report)
+PYEOF
+}
+
+# dispatch_verifier <sweep_dir>
+# The verification stage (Issue #4071). Runs AFTER every finder lane has exited
+# and BEFORE dispatch_adjudicator.
+#
+# THE ORDER IS THE POINT, not an optimisation. The adjudicator receives findings
+# only and can never establish whether one is real, so it discounts severity for
+# exploitability it cannot check -- its own rationale from sweep
+# bench-finders-02: "the precondition here is unconfirmed ... an unconfirmed
+# prerequisite moves severity down from the medium anchor to low". Verifying
+# first converts the adjudicator's largest source of uncertainty into an input
+# instead of a guess.
+#
+# UNLIKE EVERY OTHER DISPATCH HERE, THIS ONE NEVER RETURNS NON-ZERO. A
+# verification stage must not be able to fail a sweep whose finder lanes
+# completed. Every failure path -- unparseable roster, prepare failure, absent
+# credentials, a dispatch that exits non-zero, a container that writes nothing
+# -- leaves the findings unverified and the sweep intact, and the consolidator
+# reports the gap from the envelope's absence or its recorded state. That is
+# why there is no dispatch-outcome sidecar to keep in step: the envelope is the
+# record.
+dispatch_verifier() {
+  local sweep_dir="$1"
+
+  if [[ -z "${CFGMS_SECURITY_REVIEW_VERIFIER:-}" ]]; then
+    return 0
+  fi
+
+  local roster_output
+  if ! roster_output=$(python3 "${SECURITY_REVIEW_DIR}/roster.py" "$CFGMS_SECURITY_REVIEW_VERIFIER" 2>&1); then
+    echo "WARNING: could not parse CFGMS_SECURITY_REVIEW_VERIFIER; findings stay unverified: ${roster_output}" >&2
+    return 0
+  fi
+  local entry_count
+  entry_count=$(printf '%s\n' "$roster_output" | grep -c . || true)
+  if [[ "$entry_count" -ne 1 ]]; then
+    echo "WARNING: CFGMS_SECURITY_REVIEW_VERIFIER must name exactly one harness:model pair, got ${entry_count}; findings stay unverified" >&2
+    return 0
+  fi
+  local harness model lane_dir_name
+  IFS=$'\t' read -r harness model lane_dir_name <<<"$roster_output"
+
+  local prepare_output
+  if ! prepare_output=$(python3 "${SECURITY_REVIEW_DIR}/verify.py" prepare "$sweep_dir" --repo-root "$REPO_ROOT" 2>&1); then
+    echo "WARNING: verification prepare failed; findings stay unverified: ${prepare_output}" >&2
+    return 0
+  fi
+  if [[ "$prepare_output" == *NOTHING_TO_VERIFY* ]]; then
+    echo "verification skipped for ${sweep_dir}: no findings to verify" >&2
+    return 0
+  fi
+
+  local launch_output launch_rc=0
+  launch_output=$(python3 "${SECURITY_REVIEW_DIR}/verify.py" launch "$sweep_dir" \
+    --harness "$harness" --model "$model" --repo-root "$REPO_ROOT" 2>&1) || launch_rc=$?
+
+  if [[ $launch_rc -ne 0 ]]; then
+    if _is_intentional_dispatch_skip "$launch_output"; then
+      echo "WARNING: verifier dispatch skipped (credentials unavailable): ${launch_output}" >&2
+    else
+      echo "WARNING: verifier dispatch failed; findings stay unverified: ${launch_output}" >&2
+    fi
+    return 0
+  fi
+
+  local cid
+  cid="$(printf '%s\n' "$launch_output" | sed -n 's/^LAUNCHED_INVESTIGATOR:verifier://p' | tail -n1)"
+  if [[ -z "$cid" ]]; then
+    echo "WARNING: verifier dispatched but no container id was parsed; findings stay unverified" >&2
+    return 0
+  fi
+  docker wait "$cid" >/dev/null 2>&1 || true
+  return 0
+}
+
+# dispatch_adjudicator <sweep_dir>
+# The adjudication stage (Issue #3984). A no-op when
+# CFGMS_SECURITY_REVIEW_ADJUDICATOR is unset -- the consolidator then reports
+# "not configured" and renders raw severities. Otherwise: parse the single
+# harness:model pair through roster.py (the same parser the lane roster uses;
+# more than one entry is a configuration error), have adjudicate.py prepare
+# the findings-only input and the source-free sub-sweep directory, dispatch
+# ONE launch-investigator container through adjudicate.py launch, wait for it
+# to exit, and record the outcome. Mirrors dispatch_roster_lanes' failure
+# contract exactly: a credential-unavailable skip is logged and returns 0; any
+# other launch failure is recorded and returns 1 so the caller's final exit
+# code is non-zero. Runs AFTER every lane has exited (its input is their
+# output) and BEFORE run_consolidation (which merges its envelope).
+dispatch_adjudicator() {
+  local sweep_dir="$1"
+
+  if [[ -z "${CFGMS_SECURITY_REVIEW_ADJUDICATOR:-}" ]]; then
+    return 0
+  fi
+
+  # A configured stage whose configuration cannot be used is a FAILED
+  # stage, not an unconfigured one: record launch_failed on both parse
+  # branches so the consolidator renders the gap under Incomplete (and never
+  # reuses an earlier run's envelope as if this run had adjudicated).
+  local roster_output
+  if ! roster_output=$(python3 "${SECURITY_REVIEW_DIR}/roster.py" "$CFGMS_SECURITY_REVIEW_ADJUDICATOR" 2>&1); then
+    echo "ERROR: could not parse CFGMS_SECURITY_REVIEW_ADJUDICATOR: ${roster_output}" >&2
+    record_adjudicator_dispatch_outcome "$sweep_dir" "unparsed" "$CFGMS_SECURITY_REVIEW_ADJUDICATOR" "launch_failed"
+    return 1
+  fi
+  local entry_count
+  entry_count=$(printf '%s\n' "$roster_output" | grep -c . || true)
+  if [[ "$entry_count" -ne 1 ]]; then
+    echo "ERROR: CFGMS_SECURITY_REVIEW_ADJUDICATOR must name exactly one harness:model pair, got ${entry_count}" >&2
+    record_adjudicator_dispatch_outcome "$sweep_dir" "unparsed" "$CFGMS_SECURITY_REVIEW_ADJUDICATOR" "launch_failed"
+    return 1
+  fi
+  local harness model lane_dir_name
+  IFS=$'\t' read -r harness model lane_dir_name <<<"$roster_output"
+
+  local prepare_output
+  if ! prepare_output=$(python3 "${SECURITY_REVIEW_DIR}/adjudicate.py" prepare "$sweep_dir" --repo-root "$REPO_ROOT" 2>&1); then
+    echo "ERROR: adjudication prepare failed: ${prepare_output}" >&2
+    record_adjudicator_dispatch_outcome "$sweep_dir" "$harness" "$model" "launch_failed"
+    return 1
+  fi
+  if [[ "$prepare_output" == *NOTHING_TO_ADJUDICATE* ]]; then
+    echo "adjudication skipped for ${sweep_dir}: no findings to adjudicate" >&2
+    record_adjudicator_dispatch_outcome "$sweep_dir" "$harness" "$model" "skipped_no_findings"
+    return 0
+  fi
+
+  local launch_output launch_rc=0
+  launch_output=$(python3 "${SECURITY_REVIEW_DIR}/adjudicate.py" launch "$sweep_dir" \
+    --harness "$harness" --model "$model" --repo-root "$REPO_ROOT" 2>&1) || launch_rc=$?
+
+  if [[ $launch_rc -ne 0 ]]; then
+    if _is_intentional_dispatch_skip "$launch_output"; then
+      echo "WARNING: adjudicator dispatch skipped (credentials unavailable): ${launch_output}" >&2
+      record_adjudicator_dispatch_outcome "$sweep_dir" "$harness" "$model" "credential_unavailable"
+      return 0
+    fi
+    echo "ERROR: adjudicator dispatch failed: ${launch_output}" >&2
+    record_adjudicator_dispatch_outcome "$sweep_dir" "$harness" "$model" "launch_failed"
+    return 1
+  fi
+
+  local cid
+  cid="$(printf '%s\n' "$launch_output" | sed -n 's/^LAUNCHED_INVESTIGATOR:adjudicator://p' | tail -n1)"
+  if [[ -z "$cid" ]]; then
+    echo "ERROR: adjudicator dispatched but no container id was parsed from: ${launch_output}" >&2
+    record_adjudicator_dispatch_outcome "$sweep_dir" "$harness" "$model" "launch_failed"
+    return 1
+  fi
+  docker wait "$cid" >/dev/null 2>&1 || true
+
+  record_adjudicator_dispatch_outcome "$sweep_dir" "$harness" "$model" "dispatched"
+  return 0
+}
+
+# run_consolidation <sweep_dir>
+# Reuses consolidate.py's CLI unmodified. Its own exit code is the contract:
+# non-zero only when the repository root could not be determined, which
+# cannot happen here since $REPO_ROOT is already resolved.
+run_consolidation() {
+  local sweep_dir="$1"
+  python3 "${SECURITY_REVIEW_DIR}/consolidate.py" "$sweep_dir" --repo-root "$REPO_ROOT"
+}
+
+cmd_launch() {
+  if [[ $# -lt 1 || -z "${1:-}" ]]; then
+    echo "ERROR: launch requires a <ref> argument" >&2
+    exit 1
+  fi
+  local ref="$1"; shift
+  local scope_file=""
+  local scope_paths=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --scope-file) scope_file="${2:?--scope-file requires a value}"; shift 2 ;;
+      --path) scope_paths+=("${2:?--path requires a value}"); shift 2 ;;
+      *) echo "ERROR: unknown launch argument: $1" >&2; exit 1 ;;
+    esac
+  done
+  local result sweep_dir commit_sha
+
+  if ! result=$(create_sweep_tree "$ref" "${scope_paths[@]:-}"); then
+    exit 1
+  fi
+  sweep_dir="$(printf '%s' "$result" | cut -f1)"
+  # manifest.py builds this path with os.path.join, which uses the native
+  # separator (backslash on Windows). Everything downstream that also
+  # resolves a path to the same directory (agent-dispatch.sh's own
+  # launch-investigator normalizes --sweep-dir via realpath) ends up
+  # forward-slash, so leaving this one as-is made it the only backslash
+  # value in the whole chain -- every caller comparing this script's own
+  # printed sweep_dir against a realpath'd path elsewhere would mismatch on
+  # Windows (Issue #4158).
+  sweep_dir="$(realpath "$sweep_dir")"
+  commit_sha="$(printf '%s' "$result" | cut -f2)"
+
+  # Verify before dispatching anything (Issue #3952, epic #3950's D1): a
+  # mismatch here -- however unlikely immediately after create_sweep_tree
+  # just wrote this snapshot -- must stop this launch exactly as loudly as a
+  # mismatch found on a days-later resume does, never dispatch the planner
+  # or a lane against an unverified tree.
+  if ! verify_snapshot "$sweep_dir" "$commit_sha"; then
+    exit 1
+  fi
+
+  local dispatch_failed=0
+  dispatch_planner "$sweep_dir" "$commit_sha" "$scope_file" "${scope_paths[@]:-}" || dispatch_failed=1
+  dispatch_all_lanes "$sweep_dir" || dispatch_failed=1
+  dispatch_verifier "$sweep_dir"
+  dispatch_adjudicator "$sweep_dir" || dispatch_failed=1
+
+  if ! run_consolidation "$sweep_dir"; then
+    echo "ERROR: consolidation failed for sweep ${sweep_dir}" >&2
+    exit 1
+  fi
+
+  # A real (non-skip) dispatch failure (Issue #3930) exits non-zero rather
+  # than printing the report path as if the sweep completed cleanly -- the
+  # WARNING/ERROR lines already logged above explain which lane or the
+  # planner failed and why.
+  if [[ "$dispatch_failed" -ne 0 ]]; then
+    echo "ERROR: sweep ${sweep_dir} had a dispatch failure that was not an intentional credential-unavailable skip; see ERROR lines above" >&2
+    exit 1
+  fi
+
+  echo "${sweep_dir}/report/consolidated.md"
+}
+
+cmd_resume() {
+  if [[ $# -lt 1 || -z "${1:-}" ]]; then
+    echo "ERROR: resume requires a <sweep-id> argument" >&2
+    exit 1
+  fi
+  local sweep_id="$1"; shift
+  local scope_file=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --scope-file) scope_file="${2:?--scope-file requires a value}"; shift 2 ;;
+      *) echo "ERROR: unknown resume argument: $1" >&2; exit 1 ;;
+    esac
+  done
+  local base_dir
+
+  if ! base_dir=$(resolve_base_dir 2>&1); then
+    echo "ERROR: cannot resolve sweep base directory: ${base_dir}" >&2
+    exit 1
+  fi
+
+  local sweep_dir="${base_dir}/${sweep_id}"
+  if [[ ! -f "${sweep_dir}/manifest.json" ]]; then
+    echo "ERROR: no sweep found at ${sweep_dir} (manifest.json missing)" >&2
+    exit 1
+  fi
+  # resolve_base_dir (basedir.py) builds its path with os.path.join, so
+  # base_dir carries the native separator (backslash on Windows) while
+  # sweep_id and everything bash-concatenates onto it here use forward
+  # slashes -- a mixed path. A plain [[ -f ]] test above tolerates that fine
+  # (passed straight to stat()), but a glob pattern built from this value
+  # does not: bash's glob syntax treats a backslash as an escape character
+  # (Issue #4158, found via cmd_resume's plan_already_populated() silently
+  # failing to match real files). Matches cmd_launch's own realpath
+  # normalization of sweep_dir.
+  sweep_dir="$(realpath "$sweep_dir")"
+
+  local commit_sha
+  commit_sha="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['commit_sha'])" "${sweep_dir}/manifest.json")"
+
+  # Re-verify before dispatching anything on this resume (Issue #3952, epic
+  # #3950's D1: "and again on resume") -- a sweep can sit parked for days,
+  # and this re-proves the on-disk snapshot still matches the pinned commit
+  # every time, not only at creation.
+  if ! verify_snapshot "$sweep_dir" "$commit_sha"; then
+    exit 1
+  fi
+
+  # Recovered from the manifest, never re-passed on the command line (Issue
+  # #4012, AC3): a scoped sweep keeps its scope across `resume` calls.
+  local scope_paths=()
+  while IFS= read -r scope_path; do
+    [[ -n "$scope_path" ]] && scope_paths+=("$scope_path")
+  done < <(read_scope_paths "$sweep_dir")
+
+  local dispatch_failed=0
+  if plan_already_populated "$sweep_dir"; then
+    echo "plan/ already populated for ${sweep_id}; skipping planner re-dispatch" >&2
+  else
+    dispatch_planner "$sweep_dir" "$commit_sha" "$scope_file" "${scope_paths[@]:-}" || dispatch_failed=1
+  fi
+
+  dispatch_all_lanes "$sweep_dir" || dispatch_failed=1
+  dispatch_verifier "$sweep_dir"
+  dispatch_adjudicator "$sweep_dir" || dispatch_failed=1
+
+  if ! run_consolidation "$sweep_dir"; then
+    echo "ERROR: consolidation failed for sweep ${sweep_dir}" >&2
+    exit 1
+  fi
+
+  # See cmd_launch: a real (non-skip) dispatch failure exits non-zero rather
+  # than printing the report path as if resume completed cleanly.
+  if [[ "$dispatch_failed" -ne 0 ]]; then
+    echo "ERROR: sweep ${sweep_dir} had a dispatch failure that was not an intentional credential-unavailable skip; see ERROR lines above" >&2
+    exit 1
+  fi
+
+  echo "${sweep_dir}/report/consolidated.md"
+}
+
+cmd_status() {
+  if [[ $# -lt 1 || -z "${1:-}" ]]; then
+    echo "ERROR: status requires a <sweep-id> argument" >&2
+    exit 1
+  fi
+  local sweep_id="$1"
+  local base_dir
+
+  if ! base_dir=$(resolve_base_dir 2>&1); then
+    echo "ERROR: cannot resolve sweep base directory: ${base_dir}" >&2
+    exit 1
+  fi
+
+  local sweep_dir="${base_dir}/${sweep_id}"
+  if [[ ! -f "${sweep_dir}/manifest.json" ]]; then
+    echo "ERROR: no sweep found at ${sweep_dir} (manifest.json missing)" >&2
+    exit 1
+  fi
+  # resolve_base_dir (basedir.py) builds its path with os.path.join, so
+  # base_dir carries the native separator (backslash on Windows) while
+  # sweep_id and everything bash-concatenates onto it here use forward
+  # slashes -- a mixed path. A plain [[ -f ]] test above tolerates that fine
+  # (passed straight to stat()), but a glob pattern built from this value
+  # does not: bash's glob syntax treats a backslash as an escape character
+  # (Issue #4158, found via cmd_resume's plan_already_populated() silently
+  # failing to match real files). Matches cmd_launch's own realpath
+  # normalization of sweep_dir.
+  sweep_dir="$(realpath "$sweep_dir")"
+
+  # Reuses consolidate.py's own load_sweep()/build_coverage_table() rather
+  # than re-deriving the coverage computation -- this command never writes
+  # anything and never touches a lane or the planner.
+  python3 - "$SECURITY_REVIEW_DIR" "$sweep_dir" <<'PYEOF'
+import sys
+
+sec_dir, sweep_dir = sys.argv[1], sys.argv[2]
+sys.path.insert(0, sec_dir)
+import consolidate  # noqa: E402
+
+(
+    lanes,
+    step_ids,
+    lane_step_state,
+    lane_step_files,
+    _findings,
+    plan_failed,
+    _lane_step_tail,
+) = consolidate.load_sweep(sweep_dir)
+coverage = consolidate.build_coverage_table(lanes, step_ids, lane_step_state, lane_step_files)
+coverage_gates = consolidate.load_coverage_gates(sweep_dir)
+
+print(f"Sweep: {sweep_dir}")
+if plan_failed:
+    print("Coverage cannot be computed for this sweep: no plan survived planning")
+    print("(plan/PLANNING_FAILED is present or plan/ contains zero step-*.json files)")
+else:
+    print(f"Steps discovered: {len(step_ids)}")
+    print("")
+    if not coverage:
+        print("(no lane output found for this sweep)")
+    else:
+        print(
+            f"{'Lane':<24}{'Complete':>10}{'Parked':>9}{'Refused':>10}{'Failed':>9}"
+            f"{'Not started':>13}{'Files short':>13}"
+        )
+        for row in coverage:
+            total = row["total_steps"]
+            print(
+                f"{row['lane']:<24}"
+                f"{str(row['complete']) + '/' + str(total):>10}"
+                f"{str(row['parked']) + '/' + str(total):>9}"
+                f"{str(row['refused']) + '/' + str(total):>10}"
+                f"{str(row['failed']) + '/' + str(total):>9}"
+                f"{str(row['not_started']) + '/' + str(total):>13}"
+                f"{row['files_short']:>13}"
+            )
+
+print("")
+if coverage_gates is None:
+    print("Coverage gates (G-2/G-3): not evaluated for this sweep (no plan/coverage.json)")
+elif not coverage_gates.get("evaluated"):
+    reason = coverage_gates.get("reason", "no detail recorded")
+    print(f"Coverage gates (G-2/G-3): COULD NOT EVALUATE -- {reason}")
+else:
+    g2 = coverage_gates.get("g2") or {}
+    g3 = coverage_gates.get("g3") or {}
+    if g2.get("passed"):
+        g2_status = "PASS"
+    else:
+        g2_status = f"FAIL ({len(g2.get('unassigned_files') or [])} file(s) unassigned)"
+    if g3.get("passed"):
+        g3_status = "PASS"
+    else:
+        g3_status = f"FAIL ({len(g3.get('short_files') or [])} file(s) short)"
+    print(f"Coverage gate G-2 (every code-tier file reviewed):        {g2_status}")
+    print(f"Coverage gate G-3 (entrypoint/security reviewed twice):   {g3_status}")
+PYEOF
+}
+
+# cmd_adversarial_review <pr-number> [--item <item-id>] [--check | --release]
+#
+# Adversarial review of a security-fix PR (Issue #5025); adversarial.py owns
+# the private prompt and the verdict. Results live only under
+# <base>/<sweep-id>/adversarial/pr-<N>/adv-pr<N>-<head12>/ and are keyed by the
+# PR head, so a head that has a result is never reviewed twice. A head whose
+# PR-own diff fingerprint matches a reviewed head reuses its result (Issue
+# #5100); a head after a held head gets a 1-run focused re-review. The last stdout line is
+# always one ADVERSARIAL_REVIEW:<status> line.
+#
+#   (default)  run now: snapshot the PR head, launch N agent-loop runs, wait,
+#              union them.
+#   --check    never waits: print the stored result for this head, `pending`
+#              while a run is in progress, or start one in the background and
+#              print `pending`. This is what review-pr calls. Runs per head
+#              are bounded by CFGMS_SECURITY_REVIEW_ADVERSARIAL_MAX_ATTEMPTS:
+#              an error result is retried only while attempts remain.
+#   --release  the founder read a `hold` or `error:*` result and clears it for
+#              this head. Refused for an autonomous agent.
+cmd_adversarial_review() {
+  local pr="" item="" mode="run"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --item)    item="${2:?--item requires a value}"; shift 2 ;;
+      --check)   mode="check"; shift ;;
+      --release) mode="release"; shift ;;
+      -*)        echo "ERROR: unknown flag: $1" >&2; exit 1 ;;
+      *)         pr="$1"; shift ;;
+    esac
+  done
+  [[ "$pr" =~ ^[0-9]+$ ]] || { echo "ERROR: adversarial-review requires a PR number" >&2; exit 1; }
+
+  local runs="${CFGMS_SECURITY_REVIEW_ADVERSARIAL_RUNS:-3}"
+  # adversarial.py names the harness and default model, so this CLI stays
+  # harness-agnostic; the entrypoint resolves like dispatch_roster_lanes'.
+  local adv_harness default_model model
+  IFS=$'\t' read -r adv_harness default_model < <(python3 "${SECURITY_REVIEW_DIR}/adversarial.py" harness)
+  model="${CFGMS_SECURITY_REVIEW_ADVERSARIAL_MODEL:-$default_model}"
+  local adv_entrypoint="${CFGMS_SECURITY_REVIEW_LANE_ENTRYPOINT_DIR:-$SECURITY_REVIEW_DIR/lanes}/${adv_harness}_lane.py"
+  [[ "$runs" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: CFGMS_SECURITY_REVIEW_ADVERSARIAL_RUNS must be a positive integer" >&2; exit 1; }
+  local reruns="${CFGMS_SECURITY_REVIEW_ADVERSARIAL_RERUNS:-1}"
+  [[ "$reruns" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: CFGMS_SECURITY_REVIEW_ADVERSARIAL_RERUNS must be a positive integer" >&2; exit 1; }
+  local block_at="${CFGMS_SECURITY_REVIEW_ADVERSARIAL_BLOCK_AT:-high+residual}"
+  case "$block_at" in
+    high+residual|medium) ;;
+    *) echo "ERROR: CFGMS_SECURITY_REVIEW_ADVERSARIAL_BLOCK_AT must be high+residual or medium, got: ${block_at}" >&2; exit 1 ;;
+  esac
+  local max_attempts="${CFGMS_SECURITY_REVIEW_ADVERSARIAL_MAX_ATTEMPTS:-3}"
+  [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: CFGMS_SECURITY_REVIEW_ADVERSARIAL_MAX_ATTEMPTS must be a positive integer" >&2; exit 1; }
+
+  local base pr_json head base_ref story
+  base="$(resolve_base_dir)" || { echo "ADVERSARIAL_REVIEW:error:base_dir"; return 0; }
+  pr_json="$(gh pr view "$pr" --repo cfg-is/cfgms --json headRefOid,headRefName,baseRefName,body 2>/dev/null)" \
+    || { echo "ADVERSARIAL_REVIEW:error:pr_lookup"; return 0; }
+  head="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["headRefOid"])')"
+  base_ref="$(printf '%s' "$pr_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["baseRefName"])')"
+
+  if [[ -z "$item" ]]; then
+    story="$(printf '%s' "$pr_json" | python3 -c '
+import json, re, sys
+d = json.load(sys.stdin)
+m = re.match(r"feature/story-(\d+)", d.get("headRefName") or "") or \
+    re.search(r"(?:Fixes|Closes|Resolves) #(\d+)", d.get("body") or "")
+print(m.group(1) if m else "")')"
+    [[ -n "$story" ]] || { echo "ADVERSARIAL_REVIEW:not_applicable"; return 0; }
+    item="$(bash "${REPO_ROOT}/scripts/project-queue.sh" add-issue "$story" 2>/dev/null \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("item_id",""))' 2>/dev/null || true)"
+    [[ -n "$item" ]] || { echo "ADVERSARIAL_REVIEW:error:item_lookup"; return 0; }
+  fi
+
+  local entry sweep_dir
+  entry="$(python3 "${SECURITY_REVIEW_DIR}/adversarial.py" lookup --base "$base" --item "$item")"
+  if [[ "$entry" == "ADVERSARIAL_REVIEW:not_applicable" ]]; then
+    echo "$entry"
+    return 0
+  fi
+  sweep_dir="$(printf '%s' "$entry" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sweep_dir"])')"
+
+  # The run dir is sweep-shaped for launch-investigator (snapshot/, plan/,
+  # lanes/<mode>/); its basename names the containers.
+  local pr_dir="${sweep_dir}/adversarial/pr-${pr}"
+  local run_dir="${pr_dir}/adv-pr${pr}-${head:0:12}"
+  local result="${run_dir}/result.json" released="${run_dir}/released.json" lock="${run_dir}/.running"
+
+  local attempts_file="${run_dir}/attempts"
+
+  _adv_stored_status() {
+    if [[ -f "$released" ]]; then echo "ADVERSARIAL_REVIEW:pass:released"; return 0; fi
+    python3 -c '
+import json, sys
+try:
+    status = json.load(open(sys.argv[1]))["status"]
+    if not isinstance(status, str) or not status:
+        raise ValueError("status")
+except Exception:
+    status = "error:result_unreadable"
+print("ADVERSARIAL_REVIEW:" + status)' "$result"
+  }
+  # The runs --check has started for this head. A missing counter is zero; an
+  # unreadable one counts as spent so a damaged counter cannot lift the bound.
+  _adv_attempts() {
+    local n
+    n="$(cat "$attempts_file" 2>/dev/null || echo 0)"
+    [[ "$n" =~ ^[0-9]+$ ]] || n="$max_attempts"
+    echo "$n"
+  }
+  # Store an error result atomically: a temp file in the run dir, then rename.
+  _adv_write_error() {
+    local stage="$1" tmp
+    mkdir -p "$run_dir"
+    tmp="$(mktemp "${run_dir}/.result.XXXXXX")" || return 1
+    python3 -c 'import json,sys; json.dump({"status": "error:" + sys.argv[1], "stage": sys.argv[1], "attempt": int(sys.argv[2])}, open(sys.argv[3], "w"))' \
+      "$stage" "$(_adv_attempts)" "$tmp" && mv -f "$tmp" "$result" || { rm -f "$tmp"; return 1; }
+  }
+  # Pre-collect failure of the background run: store it so the next --check
+  # sees an error rather than a missing result.
+  _adv_fail() {
+    _adv_write_error "$1" || echo "ERROR: could not store adversarial result for stage $1" >&2
+    echo "ADVERSARIAL_REVIEW:error:$1"
+  }
+  # A run in progress owns the lock; the background run started by --check
+  # finds its own PID there.
+  _adv_running() {
+    [[ -f "$lock" ]] && [[ "$(cat "$lock")" != "$$" ]] && kill -0 "$(cat "$lock")" 2>/dev/null
+  }
+
+  # Fingerprint of the PR's own change (merge-base..head), so a rebase that
+  # leaves the PR's diff byte-identical gives the same value. It is the SHA-256
+  # of the exact diff bytes: whitespace is kept (an indentation or in-string
+  # space change can change behaviour, and `git patch-id --stable` drops it),
+  # external diff drivers and textconv are off so neither can hide a change,
+  # and --binary carries binary content. Empty when it cannot be computed or
+  # the diff is empty; an empty fingerprint never matches.
+  _adv_fingerprint() {
+    git -C "$REPO_ROOT" fetch --quiet origin "pull/${pr}/head" "${base_ref}" >/dev/null 2>&1 || return 0
+    [[ "$(git -C "$REPO_ROOT" rev-parse FETCH_HEAD 2>/dev/null)" == "$head" ]] || return 0
+    local mb diff_file
+    mb="$(git -C "$REPO_ROOT" merge-base "origin/${base_ref}" "$head" 2>/dev/null)" || return 0
+    diff_file="$(mktemp)" || return 0
+    if git -C "$REPO_ROOT" -c core.quotePath=false diff --no-ext-diff --no-textconv --no-color \
+         --binary --full-index "$mb" "$head" >"$diff_file" 2>/dev/null && [[ -s "$diff_file" ]]; then
+      python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$diff_file"
+    fi
+    rm -f "$diff_file"
+  }
+  # Carry an earlier head's pass, pass:released or hold over to this head when
+  # the fingerprint matches exactly. Returns 0 when the result was reused.
+  _adv_try_reuse() {
+    local fp from
+    fp="$(_adv_fingerprint)"
+    [[ -n "$fp" ]] || return 1
+    python3 "${SECURITY_REVIEW_DIR}/adversarial.py" fingerprint-record --pr-dir "$pr_dir" --head "$head" --fingerprint "$fp" || return 1
+    from="$(python3 "${SECURITY_REVIEW_DIR}/adversarial.py" reuse --pr-dir "$pr_dir" --pr "$pr" --head "$head" \
+      --fingerprint "$fp" --run-dir "$run_dir")" || return 1
+    [[ -n "$from" ]] || return 1
+    echo "ADVERSARIAL_REVIEW_REUSED:${from:0:12}"
+    return 0
+  }
+
+  case "$mode" in
+    release)
+      if [[ "${CFGMS_AUTONOMOUS:-}" == "true" ]]; then
+        echo "ERROR: adversarial-review --release is refused for an autonomous agent; the founder clears a hold or an error" >&2
+        exit 1
+      fi
+      [[ -f "$result" ]] || { echo "ERROR: no adversarial result for PR #${pr} at head ${head}" >&2; exit 1; }
+      python3 -c 'import json,sys,datetime; json.dump({"released_at": datetime.datetime.now(datetime.timezone.utc).isoformat(), "head": sys.argv[2]}, open(sys.argv[1], "w"))' "$released" "$head"
+      echo "ADVERSARIAL_REVIEW:pass:released"
+      return 0
+      ;;
+    check)
+      local stored attempts
+      mkdir -p "$run_dir"
+      attempts="$(_adv_attempts)"
+      if [[ -f "$released" ]]; then _adv_stored_status; return 0; fi
+      if [[ -f "$result" ]]; then
+        stored="$(_adv_stored_status)"
+        # Only pass and hold are final for a head. An error is kept for
+        # diagnosis under a timestamped name and retried while attempts remain.
+        if [[ "$stored" == ADVERSARIAL_REVIEW:error:* && "$stored" != "ADVERSARIAL_REVIEW:error:result_unreadable" ]] \
+          && (( attempts < max_attempts )); then
+          mv "$result" "${run_dir}/result.error.$(date +%Y%m%dT%H%M%S).json"
+        else
+          echo "$stored"
+          return 0
+        fi
+      fi
+      if _adv_running; then echo "ADVERSARIAL_REVIEW:pending"; return 0; fi
+      if (( attempts >= max_attempts )); then
+        _adv_write_error attempts_exhausted || { echo "ADVERSARIAL_REVIEW:error:attempts_exhausted"; return 0; }
+        _adv_stored_status
+        return 0
+      fi
+      if _adv_try_reuse; then _adv_stored_status; return 0; fi
+      attempts=$((attempts + 1))
+      echo "$attempts" >"$attempts_file"
+      nohup "$0" adversarial-review "$pr" --item "$item" >"${pr_dir}/run-${head:0:12}.log" 2>&1 &
+      echo "$!" >"$lock"
+      echo "ADVERSARIAL_REVIEW_ATTEMPT:${attempts}/${max_attempts}"
+      echo "ADVERSARIAL_REVIEW:pending"
+      return 0
+      ;;
+  esac
+
+  # mode=run
+  if [[ -f "$result" ]]; then _adv_stored_status; return 0; fi
+  mkdir -p "$run_dir"
+  if _adv_running; then echo "ADVERSARIAL_REVIEW:pending"; return 0; fi
+  echo "$$" >"$lock"
+  trap 'rm -f "'"$lock"'"' EXIT
+
+  if _adv_try_reuse; then _adv_stored_status; return 0; fi
+
+  git -C "$REPO_ROOT" fetch --quiet origin "pull/${pr}/head" "${base_ref}" \
+    || { _adv_fail fetch; return 0; }
+  [[ "$(git -C "$REPO_ROOT" rev-parse FETCH_HEAD)" == "$head" ]] \
+    || { _adv_fail head_moved; return 0; }
+  git -C "$REPO_ROOT" diff "origin/${base_ref}...${head}" >"${run_dir}/pr.diff" \
+    || { _adv_fail diff; return 0; }
+  git -C "$REPO_ROOT" diff --name-only --diff-filter=d "origin/${base_ref}...${head}" >"${run_dir}/changed-files.txt"
+
+  if [[ ! -d "${run_dir}/snapshot" ]]; then
+    python3 "${SECURITY_REVIEW_DIR}/snapshot.py" create "$head" "$REPO_ROOT" "${run_dir}/snapshot" >/dev/null \
+      || { _adv_fail snapshot; return 0; }
+  fi
+  python3 "${SECURITY_REVIEW_DIR}/snapshot.py" verify "${run_dir}/snapshot" "$head" "$REPO_ROOT" >/dev/null \
+    || { _adv_fail snapshot_verify; return 0; }
+  # An earlier head of this PR held: a focused re-review of 1 run carries its
+  # findings. The first review of a PR keeps the full run count.
+  local review_mode="full" earlier_head="" earlier_result="" rr
+  rr="$(python3 "${SECURITY_REVIEW_DIR}/adversarial.py" rereview-source --pr-dir "$pr_dir" --pr "$pr" --head "$head")" || rr=""
+  if [[ -n "$rr" ]]; then
+    IFS=$'\t' read -r earlier_head earlier_result <<<"$rr"
+    review_mode="rereview"
+    runs="$reruns"
+  fi
+  python3 "${SECURITY_REVIEW_DIR}/adversarial.py" prepare --base "$base" --item "$item" --pr "$pr" \
+    --head "$head" --run-dir "$run_dir" --diff-file "${run_dir}/pr.diff" \
+    --changed-files-file "${run_dir}/changed-files.txt" \
+    ${earlier_result:+--prior-result "$earlier_result" --earlier-head "$earlier_head"} >/dev/null \
+    || { _adv_fail prepare; return 0; }
+
+  # Ollama Pro allows 3 concurrent requests and each run is one agent loop, so
+  # at most 3 run at once.
+  local n cids=() out cid
+  for ((n = 1; n <= runs; n++)); do
+    mkdir -p "${run_dir}/lanes/adv-${n}"
+    out="$("$AGENT_DISPATCH_SCRIPT" launch-investigator --sweep-dir "$run_dir" \
+      --snapshot-dir "${run_dir}/snapshot" --mode "adv-${n}" --harness "$adv_harness" \
+      --model "$model" --lane-entrypoint "$adv_entrypoint" 2>&1)" || true
+    cid="$(printf '%s\n' "$out" | sed -n "s/^LAUNCHED_INVESTIGATOR:adv-${n}://p")"
+    if [[ -z "$cid" ]]; then
+      printf '%s\n' "$out" >"${run_dir}/lanes/adv-${n}/launch-error.txt"
+      continue
+    fi
+    cids+=("$cid")
+    if (( ${#cids[@]} % 3 == 0 )); then
+      docker wait "${cids[@]: -3}" >/dev/null 2>&1 || true
+    fi
+  done
+  [[ ${#cids[@]} -gt 0 ]] && docker wait "${cids[@]}" >/dev/null 2>&1 || true
+
+  python3 -c 'import json,sys; json.dump({"pr": sys.argv[1], "head": sys.argv[2], "model": sys.argv[3], "runs": int(sys.argv[4])}, open(sys.argv[5], "w"))' \
+    "$pr" "$head" "$model" "$runs" "${run_dir}/run-meta.json"
+  python3 "${SECURITY_REVIEW_DIR}/adversarial.py" collect --run-dir "$run_dir" --runs "$runs" \
+    --block-at "$block_at" --mode "$review_mode" ${earlier_head:+--earlier-head "$earlier_head"}
+}
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    adversarial-review)
+      shift
+      cmd_adversarial_review "$@"
+      ;;
+    launch)
+      shift
+      cmd_launch "$@"
+      ;;
+    resume)
+      shift
+      cmd_resume "$@"
+      ;;
+    status)
+      shift
+      cmd_status "$@"
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

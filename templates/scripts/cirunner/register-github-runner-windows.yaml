@@ -1,0 +1,69 @@
+metadata:
+  id: register-github-runner-windows
+  name: Register GitHub Actions Runner (Windows)
+  description: >
+    Registers this already-enrolled Windows host as a GitHub Actions self-hosted
+    runner by invoking the runner's own config.cmd against the on-disk
+    actions-runner directory, installing and starting the runner's Windows
+    service (--runasservice) so the runner comes Online without a separate
+    service step. The single-use registration token is supplied by the
+    provisioning workflow's staging step as the secret env var
+    CFGMS_SECRET_RUNNER_TOKEN (secret-store param binding); it is never written
+    into this file nor composed into a command string.
+  version:
+    major: 1
+    minor: 1
+    patch: 0
+  author: cfgms-team@cfg.is
+  tags:
+    - cirunner
+    - github-actions
+    - registration
+    - windows
+  category: ci-runner
+  platform:
+    - windows
+  shell: powershell
+  parameters:
+    - name: REPO_URL
+      type: string
+      description: GitHub repository (or org) URL the runner registers against. Injected as CFGMS_PARAM_REPO_URL.
+      required: true
+    - name: RUNNER_LABELS
+      type: string
+      description: Comma-separated runner labels. Injected as CFGMS_PARAM_RUNNER_LABELS.
+      required: false
+      default: "self-hosted,windows,cfgms"
+    - name: RUNNER_TOKEN
+      type: string
+      description: >
+        Single-use GitHub Actions registration token. Bound at staging from the
+        secret store and injected as the secret env var CFGMS_SECRET_RUNNER_TOKEN
+        — never passed on the command line or stored in this file.
+      required: true
+  created_at: 2026-06-29T00:00:00Z
+  updated_at: 2026-07-07T00:00:00Z
+content: |
+  #Requires -Version 5.1
+  Set-StrictMode -Version Latest
+  $ErrorActionPreference = 'Stop'
+
+  # Register this host as a GitHub Actions self-hosted runner.
+  #
+  # The registration token arrives as the secret environment variable
+  # CFGMS_SECRET_RUNNER_TOKEN (resolved by the staging step's secret-store param
+  # binding). It is referenced here only as $env:CFGMS_SECRET_RUNNER_TOKEN — never
+  # interpolated into a command string, logged, or written to disk.
+
+  $repoUrl = $env:CFGMS_PARAM_REPO_URL
+  if ([string]::IsNullOrWhiteSpace($repoUrl)) { throw 'REPO_URL is required' }
+  $runnerLabels = if ($env:CFGMS_PARAM_RUNNER_LABELS) { $env:CFGMS_PARAM_RUNNER_LABELS } else { 'self-hosted,windows,cfgms' }
+
+  # --runasservice installs and starts the runner's Windows service so the
+  # runner is Online immediately after registration. Without it config.cmd only
+  # writes settings and the runner stays offline until something runs run.cmd
+  # (confirmed live on cfgms-ci-win-01, Issue #2336). The Linux sibling leaves
+  # service management to the github_runner module; on Windows the service is
+  # created by config.cmd itself, so the flag belongs here.
+  Set-Location .\actions-runner
+  .\config.cmd --url $repoUrl --token $env:CFGMS_SECRET_RUNNER_TOKEN --labels $runnerLabels --unattended --replace --runasservice

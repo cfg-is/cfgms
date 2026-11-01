@@ -1,0 +1,34 @@
+name: Basic Service Management
+description: Tests basic service state management via the convergence model
+tests:
+  - name: Ensure service running and enabled
+    config:
+      state: "running"
+      enabled: true
+    expected:
+      state: "running"
+      enabled: true
+
+  - name: Ensure service stopped and disabled
+    config:
+      state: "stopped"
+      enabled: false
+    expected:
+      state: "stopped"
+      enabled: false
+
+  - name: Service running but not enabled on boot
+    config:
+      state: "running"
+      enabled: false
+    expected:
+      state: "running"
+      enabled: false
+
+  - name: Service stopped but enabled on boot
+    config:
+      state: "stopped"
+      enabled: true
+    expected:
+      state: "stopped"
+      enabled: true

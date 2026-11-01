@@ -1,0 +1,1155 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package tenant
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/url"
+	"os"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/pkg/audit"
+	cfgpkg "github.com/cfgis/cfgms/pkg/config"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
+	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+)
+
+// cacheInvalidator is the minimal interface required by Manager to invalidate cached
+// config source resolutions after a tenant update. Implemented by ConfigSourceRouter.
+type cacheInvalidator interface {
+	InvalidateTenantCache(tenantID string)
+}
+
+// Manager handles tenant operations and integrates with RBAC
+type Manager struct {
+	store        Store
+	rbacManager  *rbac.Manager
+	router       cacheInvalidator           // optional; invalidates config source cache on UpdateTenant
+	validator    cfgpkg.MountPointValidator // optional; validates git mount points on create/update
+	secretStore  secretsiface.SecretStore   // optional; provides credentials to validator
+	auditManager *audit.Manager             // optional; records config source lifecycle events
+
+	// suspendMu serializes SuspendTenant and RestoreTenant against each other and
+	// against themselves. Both walk the tenant subtree with sequential
+	// read-then-write store calls and no other concurrency control (the store's
+	// UpdateTenant takes no version), so two interleaved concurrent administrative
+	// calls could otherwise leave a descendant active after an ancestor's
+	// suspension has already been recorded (Issue #4347).
+	suspendMu sync.Mutex
+
+	// Root tenant resolution cache (root.go, Issue #4542).
+	rootMu         sync.Mutex
+	rootID         string
+	rootResolved   bool
+	rootResolvedAt time.Time
+
+	// RealmID is the deployment-wide realm qualifier naming this cell (ADR-032
+	// Decision 3). Empty by default (self-hosted: no realm concept). It is never
+	// stored per-tenant — every tenant's qualified identity is computed on demand
+	// by QualifiedTenantID from whatever RealmID is currently configured.
+	RealmID string
+}
+
+// NewManager creates a new tenant manager
+func NewManager(store Store, rbacManager *rbac.Manager) *Manager {
+	return &Manager{
+		store:       store,
+		rbacManager: rbacManager,
+	}
+}
+
+// WithConfigRouter wires a ConfigSourceRouter into the manager so that
+// UpdateTenant can invalidate the per-tenant config source cache immediately
+// after a successful store update.
+func (m *Manager) WithConfigRouter(r cacheInvalidator) *Manager {
+	m.router = r
+	return m
+}
+
+// WithMountPointValidator wires a MountPointValidator and its required SecretStore
+// into the manager. When set, CreateTenant and UpdateTenant call ValidateMountPoint
+// for requests that set config_source_type to "git". Passing nil skips validation.
+func (m *Manager) WithMountPointValidator(v cfgpkg.MountPointValidator, ss secretsiface.SecretStore) *Manager {
+	m.validator = v
+	m.secretStore = ss
+	return m
+}
+
+// WithAuditManager wires an audit.Manager so that config source lifecycle transitions
+// (created, updated, deleted) are recorded as audit events.
+func (m *Manager) WithAuditManager(a *audit.Manager) *Manager {
+	m.auditManager = a
+	return m
+}
+
+// InvalidateConfigCache evicts the cached source resolution for tenantID.
+// Called by the steward-move handler to invalidate both source and destination tenants
+// after a move, so the next config resolution picks up the correct tenant path.
+// No-op when no config router is wired (single-node dev/test setups).
+func (m *Manager) InvalidateConfigCache(tenantID string) {
+	if m.router != nil {
+		m.router.InvalidateTenantCache(tenantID)
+	}
+}
+
+// CreateTenant creates a new tenant with validation and RBAC setup
+func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*business.TenantData, error) {
+	// When an explicit ID is provided without a name, use the ID as the display name.
+	if req.ID != "" && req.Name == "" {
+		req.Name = req.ID
+	}
+
+	if _, reserved := req.Metadata[MetaKeyAdminContacts]; reserved {
+		return nil, ErrReservedMetadataKey
+	}
+
+	// Validate the request
+	if err := m.validateTenantRequest(req); err != nil {
+		return nil, fmt.Errorf("validation failed: %w", err)
+	}
+
+	// Generate tenant ID from name, or use the explicit ID when provided.
+	// Resolved before any config source validation because the credential
+	// reference is checked against this ID, and that check must run before
+	// validateGitMountPoint dereferences the reference against the secret store.
+	tenantID := m.generateTenantID(req.Name)
+	if req.ID != "" {
+		if err := validateExplicitTenantID(req.ID); err != nil {
+			return nil, fmt.Errorf("invalid explicit tenant ID: %w", err)
+		}
+		tenantID = req.ID
+	}
+
+	if err := validateCredentialRefOwnership(tenantID, req.Metadata); err != nil {
+		return nil, err
+	}
+
+	// Validate git mount point when config_source_type is "git"
+	if req.Metadata[cfgpkg.MetaKeyConfigSourceType] == string(cfgpkg.ConfigSourceTypeGit) {
+		if err := m.validateGitMountPoint(ctx, req.Metadata); err != nil {
+			return nil, err
+		}
+	}
+
+	// Reject tenant creation under a suspended parent or a parent with a pending deletion.
+	// Defense-in-depth: prevents subtree membership from growing under an in-flight deletion hold.
+	// If the parent does not yet exist, the storage layer's constraints enforce that;
+	// we only need to check the state of parents that do exist.
+	if req.ParentID != "" {
+		parent, err := m.store.GetTenant(ctx, req.ParentID)
+		if err != nil && !errors.Is(err, business.ErrTenantDoesNotExist) {
+			return nil, fmt.Errorf("failed to look up parent tenant: %w", err)
+		}
+		if err == nil {
+			if parent.Status == business.TenantStatusSuspended {
+				return nil, fmt.Errorf("cannot create tenant under a suspended parent (%s)", req.ParentID)
+			}
+			if _, err := m.store.GetPendingDeletion(ctx, req.ParentID); err == nil {
+				return nil, fmt.Errorf("cannot create tenant under a parent with a pending deletion (%s)", req.ParentID)
+			}
+		}
+	}
+
+	// Generated once here, never derived from the name or ID (ADR-025 A6.2).
+	billingLabel, err := GenerateBillingLabel()
+	if err != nil {
+		return nil, err
+	}
+
+	// Create tenant object
+	now := time.Now()
+	td := &business.TenantData{
+		BillingLabel: billingLabel,
+		ID:           tenantID,
+		Name:         req.Name,
+		Description:  req.Description,
+		ParentID:     req.ParentID,
+		Metadata:     req.Metadata,
+		Status:       business.TenantStatusActive,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+
+	// Create the tenant in storage. A tenant with no parent is the deployment
+	// root, of which there is exactly one. The store's CreateTopLevelTenant is
+	// the atomic guarantee across controller nodes (Issue #4547); the pre-check
+	// only spares a write in the common refusal.
+	if td.ParentID == "" {
+		if err := m.checkTopLevelCreatable(ctx); err != nil {
+			return nil, err
+		}
+	}
+	if err := m.createTenantWithUniqueLabel(ctx, td); err != nil {
+		return nil, fmt.Errorf("failed to create tenant: %w", err)
+	}
+	if td.ParentID == "" {
+		m.invalidateRootTenant()
+	}
+
+	// Emit audit event when a git config source is set on creation
+	if req.Metadata[cfgpkg.MetaKeyConfigSourceType] == string(cfgpkg.ConfigSourceTypeGit) {
+		m.recordConfigSourceEvent(ctx, tenantID,
+			req.Metadata[cfgpkg.MetaKeyConfigSourceURL],
+			"config_source_created")
+	}
+
+	// Create default RBAC roles for the tenant (if RBAC is enabled)
+	if m.rbacManager != nil {
+		if err := m.rbacManager.CreateTenantDefaultRoles(ctx, tenantID); err != nil {
+			// Rollback tenant creation if RBAC setup fails. If the rollback itself
+			// fails the tenant record is orphaned in storage, so surface the error
+			// loudly for operators to reconcile rather than swallowing it.
+			if delErr := m.store.DeleteTenant(ctx, tenantID); delErr != nil {
+				slog.Error("tenant: failed to roll back tenant after RBAC setup failure; orphaned tenant record left in storage",
+					"tenant_id", logging.SanitizeLogValue(tenantID),
+					"rbac_error", logging.SanitizeLogValue(err.Error()),
+					"rollback_error", logging.SanitizeLogValue(delErr.Error()),
+				)
+			}
+			return nil, fmt.Errorf("failed to create tenant RBAC roles: %w", err)
+		}
+	}
+
+	m.recordTenantLifecycleEvent(ctx, tenantID, td.Name, "tenant_created")
+
+	return td, nil
+}
+
+// GetTenant retrieves a tenant by ID
+func (m *Manager) GetTenant(ctx context.Context, tenantID string) (*business.TenantData, error) {
+	return m.store.GetTenant(ctx, tenantID)
+}
+
+// maxBillingLabelAttempts bounds the regenerate-and-retry loop on a billing
+// label unique-index collision.
+const maxBillingLabelAttempts = 5
+
+// createTenantWithUniqueLabel stores td. When the store reports the tenant as
+// already existing but no tenant with td.ID is there, the collision was on the
+// billing label's unique index: a fresh random label is generated and the create
+// retried, a bounded number of times. A label is never derived as a fallback.
+func (m *Manager) createTenantWithUniqueLabel(ctx context.Context, td *business.TenantData) error {
+	var err error
+	for attempt := 0; attempt < maxBillingLabelAttempts; attempt++ {
+		if td.ParentID == "" {
+			err = m.store.CreateTopLevelTenant(ctx, td)
+		} else {
+			err = m.store.CreateTenant(ctx, td)
+		}
+		if err == nil || !errors.Is(err, business.ErrTenantAlreadyExists) {
+			return err
+		}
+		if _, getErr := m.store.GetTenant(ctx, td.ID); getErr == nil || !errors.Is(getErr, business.ErrTenantDoesNotExist) {
+			return err // the ID itself is taken (or the probe failed)
+		}
+		label, genErr := GenerateBillingLabel()
+		if genErr != nil {
+			return genErr
+		}
+		td.BillingLabel = label
+	}
+	return err
+}
+
+// UpdateTenant updates an existing tenant
+func (m *Manager) UpdateTenant(ctx context.Context, tenantID string, req *TenantRequest) (*business.TenantData, error) {
+	// Get existing tenant
+	existing, err := m.store.GetTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, reserved := req.Metadata[MetaKeyAdminContacts]; reserved {
+		return nil, ErrReservedMetadataKey
+	}
+
+	// Validate the request
+	if err := m.validateTenantRequest(req); err != nil {
+		return nil, fmt.Errorf("validation failed: %w", err)
+	}
+
+	// A tenant may only point at credentials in its own secret namespace.
+	// Checked before validateGitMountPoint, which dereferences the reference
+	// against the secret store and hands the value to the caller-chosen host.
+	if err := validateCredentialRefOwnership(tenantID, req.Metadata); err != nil {
+		return nil, err
+	}
+
+	// Validate git mount point when config_source_type is "git"
+	if req.Metadata[cfgpkg.MetaKeyConfigSourceType] == string(cfgpkg.ConfigSourceTypeGit) {
+		if err := m.validateGitMountPoint(ctx, req.Metadata); err != nil {
+			return nil, err
+		}
+	}
+
+	// Determine which config source audit event to emit before updating metadata.
+	oldType := existing.Metadata[cfgpkg.MetaKeyConfigSourceType]
+	newType := req.Metadata[cfgpkg.MetaKeyConfigSourceType]
+	auditAction, auditURL := m.resolveConfigSourceAuditAction(oldType, newType, existing.Metadata, req.Metadata)
+
+	// Update fields
+	existing.Name = req.Name
+	existing.Description = req.Description
+	// The reserved admin-contacts key is not caller-writable here; carry it over
+	// from the stored tenant so a wholesale metadata replacement cannot drop it.
+	newMeta := make(map[string]string, len(req.Metadata)+1)
+	for k, v := range req.Metadata {
+		newMeta[k] = v
+	}
+	if contacts, ok := existing.Metadata[MetaKeyAdminContacts]; ok {
+		newMeta[MetaKeyAdminContacts] = contacts
+	}
+	existing.Metadata = newMeta
+	// Note: ParentID cannot be changed after creation to maintain hierarchy integrity
+
+	// Update in storage
+	if err := m.store.UpdateTenant(ctx, existing); err != nil {
+		return nil, fmt.Errorf("failed to update tenant: %w", err)
+	}
+
+	// Emit audit event for config source lifecycle transition
+	if auditAction != "" {
+		m.recordConfigSourceEvent(ctx, tenantID, auditURL, auditAction)
+	}
+
+	m.recordTenantLifecycleEvent(ctx, tenantID, existing.Name, "tenant_updated")
+
+	// Invalidate the config source cache so the next resolution reflects the new metadata.
+	if m.router != nil {
+		m.router.InvalidateTenantCache(tenantID)
+	}
+
+	return existing, nil
+}
+
+// CascadeSuspendResult describes the outcome of a cascading suspend operation.
+type CascadeSuspendResult struct {
+	// Target is the tenant ID that was directly suspended.
+	Target string `json:"target"`
+	// NewlyCascadeSuspended lists descendant IDs that were not already independently
+	// suspended and are now cascade-suspended as a side effect.
+	NewlyCascadeSuspended []string `json:"newly_cascade_suspended"`
+	// AlreadySuspended lists descendant IDs that were already independently
+	// (DirectlySuspended) suspended; they now also carry CascadeSuspendedFrom.
+	AlreadySuspended []string `json:"already_suspended"`
+}
+
+// CascadeRestoreResult describes the outcome of a cascading restore operation.
+type CascadeRestoreResult struct {
+	// Target is the tenant ID whose direct suspension was cleared.
+	Target string `json:"target"`
+	// Restored lists descendant IDs whose only suspension reason was the ancestor
+	// cascade; they are now fully active.
+	Restored []string `json:"restored"`
+	// StillSuspended lists descendant IDs whose cascade from the target was lifted but
+	// that remain suspended for another reason: either their own DirectlySuspended flag,
+	// or an intermediate ancestor between them and the target that is itself still
+	// suspended. Their cascade provenance is re-pointed at that ancestor so a later
+	// restore of it reactivates them.
+	StillSuspended []string `json:"still_suspended"`
+}
+
+// SuspendTenant suspends the target tenant and its entire subtree (ADR-027 Decision 1).
+// The target gains DirectlySuspended=true; each descendant gains CascadeSuspendedFrom
+// set to tenantID, keeping any pre-existing DirectlySuspended flag (ADR-027 Decision 2).
+//
+// CascadeSuspendedFrom holds the OUTERMOST suspended ancestor, so a descendant already
+// cascade-suspended by a tenant above the target keeps that provenance instead of being
+// re-pointed at the (deeper) target. Overwriting it would let a restore of the target lift
+// a containment imposed higher in the hierarchy.
+//
+// A cycle in the tenant hierarchy (data corruption) causes an error rather than an
+// infinite loop. An audit event is recorded on success (fire-and-forget).
+func (m *Manager) SuspendTenant(ctx context.Context, tenantID string) (*CascadeSuspendResult, error) {
+	if m.isProtectedRootTenant(ctx, tenantID) {
+		return nil, ErrCannotSuspendRoot
+	}
+
+	m.suspendMu.Lock()
+	defer m.suspendMu.Unlock()
+
+	result := &CascadeSuspendResult{
+		Target:                tenantID,
+		NewlyCascadeSuspended: []string{},
+		AlreadySuspended:      []string{},
+	}
+
+	// BFS walk of the subtree. visited tracks IDs to detect data-corruption cycles.
+	visited := map[string]bool{tenantID: true}
+	queue := []string{tenantID}
+
+	for len(queue) > 0 {
+		currentID := queue[0]
+		queue = queue[1:]
+
+		current, err := m.store.GetTenant(ctx, currentID)
+		if err != nil {
+			return nil, err
+		}
+
+		if currentID == tenantID {
+			current.DirectlySuspended = true
+			current.Status = business.TenantStatusSuspended
+		} else {
+			// Descendant: record cascade provenance. Keep DirectlySuspended if already set.
+			//
+			// Only claim provenance when the existing value names a tenant inside this
+			// subtree (BFS is level-order, so every already-visited ID is the target or a
+			// node above `current` within the target's subtree). Such a value is deeper
+			// than the target and is therefore superseded by it. A value naming a tenant
+			// outside the subtree is a strict ancestor of the target — a broader
+			// suspension — and must survive, otherwise restoring the target would
+			// reactivate a tenant contained by that outer suspension.
+			if current.CascadeSuspendedFrom == nil || visited[*current.CascadeSuspendedFrom] {
+				ancestorID := tenantID
+				current.CascadeSuspendedFrom = &ancestorID
+			}
+			if current.DirectlySuspended {
+				result.AlreadySuspended = append(result.AlreadySuspended, currentID)
+			} else {
+				current.Status = business.TenantStatusSuspended
+				result.NewlyCascadeSuspended = append(result.NewlyCascadeSuspended, currentID)
+			}
+		}
+
+		if err := m.store.UpdateTenant(ctx, current); err != nil {
+			return nil, err
+		}
+
+		children, err := m.store.GetChildTenants(ctx, currentID)
+		if err != nil {
+			return nil, err
+		}
+		for _, child := range children {
+			if visited[child.ID] {
+				return nil, fmt.Errorf("cycle detected in tenant hierarchy at %s", child.ID)
+			}
+			visited[child.ID] = true
+			queue = append(queue, child.ID)
+		}
+	}
+
+	// Retrieve tenant name for the audit event (the GetTenant above fetched it, but
+	// we only have it within the loop; re-fetch is fine — audit is best-effort).
+	if t, err := m.store.GetTenant(ctx, tenantID); err == nil {
+		m.recordTenantLifecycleEvent(ctx, tenantID, t.Name, "tenant_suspended")
+	}
+
+	return result, nil
+}
+
+// restoreWalkNode is one work item of RestoreTenant's BFS. suspendedAncestor is the ID
+// of the outermost ancestor of this node's CHILDREN that is still suspended once the
+// restore has been applied to this node, or nil when no such ancestor remains. It is the
+// containment carrier: a child may only become active when it is nil.
+type restoreWalkNode struct {
+	id                string
+	suspendedAncestor *string
+}
+
+// childProvenanceAfterRestore computes the value restoreWalkNode.suspendedAncestor must
+// carry for td's children, given td's post-restore state. If td is still cascade-suspended,
+// its children are contained by the same outer ancestor; if td itself remains suspended for
+// any other reason, td is that ancestor; otherwise the subtree below td is unconstrained.
+func childProvenanceAfterRestore(td *business.TenantData) *string {
+	if td.CascadeSuspendedFrom != nil {
+		ancestorID := *td.CascadeSuspendedFrom
+		return &ancestorID
+	}
+	if td.Status == business.TenantStatusSuspended {
+		ancestorID := td.ID
+		return &ancestorID
+	}
+	return nil
+}
+
+// RestoreTenant clears the target tenant's own suspension and lifts only the cascade
+// component on descendants (ADR-027 Decision 2). Descendants that carry their own
+// DirectlySuspended flag remain suspended — the cascade effect is removed but the
+// independent suspension is not.
+//
+// A descendant is reactivated only when every tenant between it and the restore target —
+// and the target itself — comes out of the restore active. Where an ancestor stays
+// suspended (its own DirectlySuspended flag, or a cascade from above the target), the
+// descendant's cascade provenance is re-pointed at that ancestor and it stays suspended.
+// Reactivating it instead would let an operator holding tenant:manage inside a contained
+// subtree escape a suspension imposed above them (ADR-027 Decision 1 containment).
+//
+// An audit event is recorded on success (fire-and-forget).
+func (m *Manager) RestoreTenant(ctx context.Context, tenantID string) (*CascadeRestoreResult, error) {
+	m.suspendMu.Lock()
+	defer m.suspendMu.Unlock()
+
+	result := &CascadeRestoreResult{
+		Target:         tenantID,
+		Restored:       []string{},
+		StillSuspended: []string{},
+	}
+
+	// Clear the target's own direct suspension.
+	existing, err := m.store.GetTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	existing.DirectlySuspended = false
+	// Keep cascade flag if it exists (target may be cascade-suspended by its own ancestor).
+	if existing.CascadeSuspendedFrom == nil {
+		existing.Status = business.TenantStatusActive
+	}
+	if err := m.store.UpdateTenant(ctx, existing); err != nil {
+		return nil, err
+	}
+
+	// BFS walk: lift CascadeSuspendedFrom == tenantID on all descendants, carrying the
+	// containment state of each node down to its children.
+	visited := map[string]bool{tenantID: true}
+	queue := []restoreWalkNode{{id: tenantID, suspendedAncestor: childProvenanceAfterRestore(existing)}}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		children, err := m.store.GetChildTenants(ctx, current.id)
+		if err != nil {
+			return nil, err
+		}
+		for _, child := range children {
+			if visited[child.ID] {
+				return nil, fmt.Errorf("cycle detected in tenant hierarchy at %s", child.ID)
+			}
+			visited[child.ID] = true
+
+			if child.CascadeSuspendedFrom == nil || *child.CascadeSuspendedFrom != tenantID {
+				// Not part of this cascade: its provenance names a tenant above the
+				// target, which this restore does not touch. Its own state is unchanged,
+				// so it carries its own containment onwards.
+				queue = append(queue, restoreWalkNode{id: child.ID, suspendedAncestor: childProvenanceAfterRestore(child)})
+				continue
+			}
+
+			// The target's cascade is lifted; any suspension still standing between the
+			// target and this child takes its place as the provenance. The pointer is
+			// copied rather than shared so sibling records never alias one string.
+			child.CascadeSuspendedFrom = nil
+			if current.suspendedAncestor != nil {
+				ancestorID := *current.suspendedAncestor
+				child.CascadeSuspendedFrom = &ancestorID
+			}
+			switch {
+			case child.DirectlySuspended || child.CascadeSuspendedFrom != nil:
+				child.Status = business.TenantStatusSuspended
+				result.StillSuspended = append(result.StillSuspended, child.ID)
+			default:
+				child.Status = business.TenantStatusActive
+				result.Restored = append(result.Restored, child.ID)
+			}
+			if err := m.store.UpdateTenant(ctx, child); err != nil {
+				return nil, err
+			}
+			queue = append(queue, restoreWalkNode{id: child.ID, suspendedAncestor: childProvenanceAfterRestore(child)})
+		}
+	}
+
+	m.recordTenantLifecycleEvent(ctx, tenantID, existing.Name, "tenant_restored")
+
+	return result, nil
+}
+
+// recordTenantLifecycleEvent emits a tenant lifecycle audit event. It is
+// fire-and-forget: audit failures are logged but do not surface to the caller.
+func (m *Manager) recordTenantLifecycleEvent(ctx context.Context, tenantID, tenantName, action string) {
+	if m.auditManager == nil {
+		return
+	}
+
+	actor := audit.SystemUserID
+	if uid, ok := ctx.Value(ctxkeys.UserIDKey).(string); ok && uid != "" {
+		actor = uid
+	}
+
+	event := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Type(business.AuditEventConfiguration).
+		Action(action).
+		User(actor, business.AuditUserTypeHuman).
+		Resource("tenant", tenantID, tenantName).
+		Detail("tenant_id", tenantID).
+		Detail("actor", actor)
+
+	if err := m.auditManager.RecordEvent(ctx, event); err != nil {
+		slog.Warn("tenant: failed to record tenant lifecycle audit event",
+			"action", action,
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+	}
+}
+
+// DeleteTenant deletes a tenant
+func (m *Manager) DeleteTenant(ctx context.Context, tenantID string) error {
+	// Cannot delete the root tenant
+	if m.isProtectedRootTenant(ctx, tenantID) {
+		return fmt.Errorf("cannot delete root tenant")
+	}
+
+	// Check if tenant has child tenants
+	children, err := m.store.GetChildTenants(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	if len(children) > 0 {
+		return ErrTenantHasChildren
+	}
+
+	// Cascade RBAC cleanup: remove subjects then roles scoped to this tenant.
+	// Subjects first — they reference roles. Both loops are best-effort: a single
+	// child failure is logged and the cascade continues rather than aborting.
+	if m.rbacManager != nil {
+		if err := m.rbacManager.DeleteSubjectsByTenant(ctx, tenantID); err != nil {
+			slog.Warn("tenant: failed to list subjects for RBAC cascade cleanup",
+				"tenant_id", logging.SanitizeLogValue(tenantID),
+				"error", logging.SanitizeLogValue(err.Error()),
+			)
+		}
+		if err := m.rbacManager.DeleteRolesByTenant(ctx, tenantID); err != nil {
+			slog.Warn("tenant: failed to list roles for RBAC cascade cleanup",
+				"tenant_id", logging.SanitizeLogValue(tenantID),
+				"error", logging.SanitizeLogValue(err.Error()),
+			)
+		}
+	}
+
+	// Hard-delete the tenant row from storage.
+	if err := m.store.DeleteTenant(ctx, tenantID); err != nil {
+		return err
+	}
+	m.invalidateRootTenant()
+	return nil
+}
+
+// RequestTenantDeletion begins the ADR-027 Decision 3 deletion pipeline for
+// tenantID's subtree. The entire subtree must already be suspended; if any
+// descendant (including the root) is not fully suspended, an error wrapping
+// ErrTenantNotFullySuspended is returned naming the first unsuspended tenant
+// found. On success the hold-period timer starts and a PendingDeletion record
+// is written with the pinned member set.
+func (m *Manager) RequestTenantDeletion(ctx context.Context, tenantID, requesterID string, holdPeriod time.Duration) (*business.PendingDeletion, error) {
+	if m.isProtectedRootTenant(ctx, tenantID) {
+		return nil, fmt.Errorf("cannot delete root tenant")
+	}
+
+	// BFS walk of the subtree; collect member IDs and reject any unsuspended tenant.
+	visited := map[string]bool{tenantID: true}
+	queue := []string{tenantID}
+	var memberIDs []string
+
+	for len(queue) > 0 {
+		currentID := queue[0]
+		queue = queue[1:]
+
+		current, err := m.store.GetTenant(ctx, currentID)
+		if err != nil {
+			return nil, err
+		}
+
+		if current.Status != business.TenantStatusSuspended {
+			return nil, fmt.Errorf("%w: first unsuspended tenant: %s", ErrTenantNotFullySuspended, currentID)
+		}
+
+		memberIDs = append(memberIDs, currentID)
+
+		children, err := m.store.GetChildTenants(ctx, currentID)
+		if err != nil {
+			return nil, err
+		}
+		for _, child := range children {
+			if visited[child.ID] {
+				return nil, fmt.Errorf("cycle detected in tenant hierarchy at %s", child.ID)
+			}
+			visited[child.ID] = true
+			queue = append(queue, child.ID)
+		}
+	}
+
+	now := time.Now()
+	pending := &business.PendingDeletion{
+		SubtreeRootID:   tenantID,
+		RequestedBy:     requesterID,
+		RequestedAt:     now,
+		EligibleAt:      now.Add(holdPeriod),
+		State:           business.DeletionStateHold,
+		PinnedMemberIDs: memberIDs,
+	}
+
+	if err := m.store.RequestDeletion(ctx, pending); err != nil {
+		return nil, err
+	}
+
+	m.recordTenantLifecycleEvent(ctx, tenantID, tenantID, "tenant_deletion_requested")
+	return pending, nil
+}
+
+// CancelTenantDeletion cancels a pending Hold/Eligible deletion, returning the
+// subtree to plain Suspended state (ADR-027 Decision 4). Never partial, never Active.
+func (m *Manager) CancelTenantDeletion(ctx context.Context, tenantID string) error {
+	if err := m.store.CancelDeletion(ctx, tenantID); err != nil {
+		return err
+	}
+	m.recordTenantLifecycleEvent(ctx, tenantID, tenantID, "tenant_deletion_cancelled")
+	return nil
+}
+
+// ApproveTenantDeletion executes the dual-control terminal step (ADR-027 Decision 4).
+// The store atomically verifies hold-period elapsed, dual-control (when required), and
+// membership match, then hard-deletes the entire subtree. RBAC cleanup runs afterward
+// on the returned IDs (best-effort, fire-and-forget on individual tenant failures).
+func (m *Manager) ApproveTenantDeletion(ctx context.Context, tenantID, approverID string, requireDualControl bool) ([]string, error) {
+	if m.isProtectedRootTenant(ctx, tenantID) {
+		return nil, fmt.Errorf("cannot delete root tenant")
+	}
+
+	deleted, err := m.store.ApproveDeletion(ctx, tenantID, approverID, requireDualControl, time.Now())
+	if err != nil {
+		return nil, err
+	}
+
+	// RBAC cleanup for each deleted tenant (best-effort).
+	if m.rbacManager != nil {
+		for _, id := range deleted {
+			if err := m.rbacManager.DeleteSubjectsByTenant(ctx, id); err != nil {
+				slog.Warn("tenant: failed to delete subjects for deleted tenant",
+					"tenant_id", logging.SanitizeLogValue(id),
+					"error", logging.SanitizeLogValue(err.Error()),
+				)
+			}
+			if err := m.rbacManager.DeleteRolesByTenant(ctx, id); err != nil {
+				slog.Warn("tenant: failed to delete roles for deleted tenant",
+					"tenant_id", logging.SanitizeLogValue(id),
+					"error", logging.SanitizeLogValue(err.Error()),
+				)
+			}
+		}
+	}
+
+	m.recordTenantLifecycleEvent(ctx, tenantID, tenantID, "tenant_deletion_approved")
+	return deleted, nil
+}
+
+// GetPendingDeletion returns the current pending-deletion record for tenantID, if any.
+// Returns ErrPendingDeletionNotFound when none exists.
+//
+// State is computed here rather than trusted from storage: RequestDeletion writes
+// DeletionStateHold once and no production path ever updates it to
+// DeletionStateEligible (ApproveDeletion branches on EligibleAt directly, not on the
+// stored state column). Deriving it from EligibleAt on every read keeps the read path
+// (and the countdown it renders) accurate without a background transition process.
+func (m *Manager) GetPendingDeletion(ctx context.Context, tenantID string) (*business.PendingDeletion, error) {
+	pending, err := m.store.GetPendingDeletion(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if !time.Now().Before(pending.EligibleAt) {
+		pending.State = business.DeletionStateEligible
+	} else {
+		pending.State = business.DeletionStateHold
+	}
+	return pending, nil
+}
+
+// ListTenants lists tenants with optional filtering
+func (m *Manager) ListTenants(ctx context.Context, filter *business.TenantFilter) ([]*business.TenantData, error) {
+	return m.store.ListTenants(ctx, filter)
+}
+
+// GetTenantHierarchy retrieves the hierarchical structure for a tenant
+func (m *Manager) GetTenantHierarchy(ctx context.Context, tenantID string) (*business.TenantHierarchy, error) {
+	return m.store.GetTenantHierarchy(ctx, tenantID)
+}
+
+// GetChildTenants returns all direct child tenants
+func (m *Manager) GetChildTenants(ctx context.Context, parentID string) ([]*business.TenantData, error) {
+	return m.store.GetChildTenants(ctx, parentID)
+}
+
+// GetTenantPath returns the full path from root to the specified tenant
+func (m *Manager) GetTenantPath(ctx context.Context, tenantID string) ([]string, error) {
+	return m.store.GetTenantPath(ctx, tenantID)
+}
+
+// IsTenantAncestor checks if one tenant is an ancestor of another
+func (m *Manager) IsTenantAncestor(ctx context.Context, ancestorID, descendantID string) (bool, error) {
+	return m.store.IsTenantAncestor(ctx, ancestorID, descendantID)
+}
+
+// validateTenantRequest validates a tenant creation/update request
+func (m *Manager) validateTenantRequest(req *TenantRequest) error {
+	if req.Name == "" {
+		return fmt.Errorf("tenant name is required")
+	}
+
+	// Validate name format (alphanumeric, hyphens, underscores)
+	nameRegex := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	if !nameRegex.MatchString(req.Name) {
+		return fmt.Errorf("tenant name must contain only alphanumeric characters, hyphens, and underscores")
+	}
+
+	if len(req.Name) > 64 {
+		return fmt.Errorf("tenant name must be 64 characters or less")
+	}
+
+	if len(req.Description) > 255 {
+		return fmt.Errorf("tenant description must be 255 characters or less")
+	}
+
+	return nil
+}
+
+// validateCredentialRefOwnership enforces that a tenant's config_source_credential
+// names a secret inside that tenant's own namespace.
+//
+// Ownership is not the whole check. It keeps the reference inside the caller's
+// tenant but does not tie the secret to a repository. The second check is the
+// binding: the secret's own metadata must carry the repository URL it was stored
+// for (pkg/config CheckCredentialBinding), and the consuming sinks refuse the
+// credential when it does not match config_source_url.
+//
+// The reference is a secret-store key in "<tenant_id>/<secret_key>" form (see
+// pkg/secrets/providers/sops and pkg/secrets/providers/openbao splitKey), and the
+// consuming sinks — pkg/config's MountPointValidator and the configrouting git
+// store — fetch it and send the value as HTTP Basic auth to the host named by
+// config_source_url. Without this constraint a tenant-scoped principal holding
+// tenant:update could write "victim-tenant/git-token" into its own tenant
+// alongside an attacker-controlled HTTPS URL and have the controller deliver
+// another tenant's credential to that host: the scope check on which tenant row
+// is mutated says nothing about the contents written into it, and the SSRF guard
+// in validateSourceURL deliberately permits public HTTPS hosts.
+//
+// Ownership is exact: a parent may not reference a child's secret and vice versa,
+// so a compromised tenant at any depth cannot reach outside its own namespace.
+// The secret key itself must be a single path segment, otherwise a reference such
+// as "self/../victim/git-token" would satisfy the prefix while resolving into
+// another tenant's storage path.
+//
+// The reference is checked on every write that carries it, not only when
+// config_source_type is "git": metadata is persisted wholesale, and a value
+// stored under a non-git type is live the moment the type changes.
+func validateCredentialRefOwnership(tenantID string, metadata map[string]string) error {
+	ref, ok := metadata[cfgpkg.MetaKeyConfigSourceCredential]
+	if !ok || ref == "" {
+		return nil
+	}
+
+	owner, key, found := strings.Cut(ref, "/")
+	if !found || owner == "" || key == "" {
+		return fmt.Errorf("invalid config source metadata: %s must be in \"<tenant_id>/<secret_key>\" form",
+			cfgpkg.MetaKeyConfigSourceCredential)
+	}
+	if owner != tenantID {
+		return fmt.Errorf("invalid config source metadata: %s references tenant %q, but a tenant may only reference secrets in its own namespace (%q)",
+			cfgpkg.MetaKeyConfigSourceCredential, owner, tenantID)
+	}
+	if strings.ContainsAny(key, "/\\") || key == "." || key == ".." {
+		return fmt.Errorf("invalid config source metadata: %s secret key %q must be a single path segment",
+			cfgpkg.MetaKeyConfigSourceCredential, key)
+	}
+
+	return nil
+}
+
+// validateGitMountPoint calls the MountPointValidator when one is configured.
+// Returns a user-facing error (HTTP 422 equivalent) if validation fails.
+// When no validator is configured, validation is skipped silently.
+func (m *Manager) validateGitMountPoint(ctx context.Context, metadata map[string]string) error {
+	if m.validator == nil {
+		return nil
+	}
+	info, err := cfgpkg.ParseConfigSource(metadata)
+	if err != nil {
+		return fmt.Errorf("invalid config source metadata: %w", err)
+	}
+	if err := m.validator.ValidateMountPoint(ctx, info, m.secretStore); err != nil {
+		return fmt.Errorf("config source validation failed: %w", err)
+	}
+	return nil
+}
+
+// resolveConfigSourceAuditAction determines which audit action to emit (if any)
+// based on the old and new config_source_type values and metadata fields.
+// Returns ("", "") when no audit event is warranted.
+func (m *Manager) resolveConfigSourceAuditAction(oldType, newType string, oldMeta, newMeta map[string]string) (action, url string) {
+	const git = string(cfgpkg.ConfigSourceTypeGit)
+	newURL := newMeta[cfgpkg.MetaKeyConfigSourceURL]
+
+	switch {
+	case oldType != git && newType == git:
+		// Transition: no git source → git source
+		return "config_source_created", newURL
+
+	case oldType == git && newType != git:
+		// Transition: git source → no git source / controller
+		return "config_source_deleted", oldMeta[cfgpkg.MetaKeyConfigSourceURL]
+
+	case oldType == git && newType == git:
+		// Both are git; emit updated only if URL, branch, or credential changed.
+		if oldMeta[cfgpkg.MetaKeyConfigSourceURL] != newURL ||
+			oldMeta[cfgpkg.MetaKeyConfigSourceBranch] != newMeta[cfgpkg.MetaKeyConfigSourceBranch] ||
+			oldMeta[cfgpkg.MetaKeyConfigSourceCredential] != newMeta[cfgpkg.MetaKeyConfigSourceCredential] {
+			return "config_source_updated", newURL
+		}
+	}
+	return "", ""
+}
+
+// recordConfigSourceEvent emits a config source audit event. It is fire-and-forget:
+// audit failures are logged but do not surface as errors to the caller.
+func (m *Manager) recordConfigSourceEvent(ctx context.Context, tenantID, rawURL, action string) {
+	if m.auditManager == nil {
+		return
+	}
+
+	// Extract actor from authenticated context; fall back to "system".
+	actor := audit.SystemUserID
+	if uid, ok := ctx.Value(ctxkeys.UserIDKey).(string); ok && uid != "" {
+		actor = uid
+	}
+
+	// Sanitize the URL before including it in any log or audit record.
+	sanitizedURL := sanitizeAuditURL(rawURL)
+
+	event := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Type(business.AuditEventConfiguration).
+		Action(action).
+		User(actor, business.AuditUserTypeHuman).
+		Resource("config_source", tenantID, "").
+		Detail("tenant_id", tenantID).
+		Detail("url", sanitizedURL).
+		Detail("actor", actor)
+
+	if err := m.auditManager.RecordEvent(ctx, event); err != nil {
+		slog.Warn("tenant: failed to record config source audit event",
+			"action", action,
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+	}
+}
+
+// sanitizeAuditURL removes all userinfo from a URL before including it in audit records.
+// Strips username and password entirely — Redacted() only masks passwords, not usernames.
+// Returns the raw URL unchanged if parsing fails (URLs are validated before this function).
+func sanitizeAuditURL(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	parsed.User = nil
+	return parsed.String()
+}
+
+// generateTenantID generates a tenant ID from the name
+func (m *Manager) generateTenantID(name string) string {
+	// Convert to lowercase and replace spaces with hyphens
+	id := regexp.MustCompile(`[^a-zA-Z0-9_-]`).ReplaceAllString(name, "-")
+	id = regexp.MustCompile(`-+`).ReplaceAllString(id, "-")
+	id = regexp.MustCompile(`^-|-$`).ReplaceAllString(id, "")
+
+	// Add timestamp suffix to ensure uniqueness
+	timestamp := time.Now().Unix()
+	return fmt.Sprintf("%s-%d", id, timestamp)
+}
+
+// k8sNameRegex matches Kubernetes-compatible DNS label names per RFC 1123.
+var k8sNameRegex = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+// validateExplicitTenantID validates a caller-supplied tenant ID against
+// Kubernetes RFC 1123 DNS label rules: lowercase alphanumeric and hyphens only,
+// no leading/trailing hyphens, max 63 characters.
+func validateExplicitTenantID(id string) error {
+	if id == "" {
+		return fmt.Errorf("tenant ID cannot be empty")
+	}
+	if len(id) > 63 {
+		return fmt.Errorf("tenant ID must be 63 characters or less (Kubernetes DNS label limit), got %d", len(id))
+	}
+	if !k8sNameRegex.MatchString(id) {
+		return fmt.Errorf("tenant ID %q is not Kubernetes-compatible: must contain only lowercase alphanumeric characters and hyphens, must not start or end with a hyphen", id)
+	}
+	return nil
+}
+
+// validateRealmQualifiedTenantID validates a realm-qualified tenant ID of the
+// form "<realm>/<unqualified-id>", where each half independently satisfies the
+// same Kubernetes RFC 1123 DNS label rules as validateExplicitTenantID. This
+// keeps the qualified form syntactically distinct from an intra-cell
+// hierarchical path — tenant IDs never contain "/" today (ADR-025 Amendment 1,
+// A1.1: hierarchy is carried by ParentID, not string concatenation) — while
+// giving the qualified form its own unambiguous, parseable shape. Valid only
+// on cross-cell surfaces; intra-cell resolution (IsTenantAncestor,
+// isWithinTenantScope) is unaffected and never sees this form.
+func validateRealmQualifiedTenantID(id string) error {
+	parts := strings.Split(id, "/")
+	if len(parts) != 2 {
+		return fmt.Errorf("realm-qualified tenant ID %q must have exactly one \"/\" separator (\"<realm>/<id>\"), got %d segment(s)", id, len(parts))
+	}
+	realm, unqualifiedID := parts[0], parts[1]
+	if err := validateExplicitTenantID(realm); err != nil {
+		return fmt.Errorf("realm segment invalid: %w", err)
+	}
+	if err := validateExplicitTenantID(unqualifiedID); err != nil {
+		return fmt.Errorf("tenant ID segment invalid: %w", err)
+	}
+	return nil
+}
+
+// validateRealmID validates a deployment's realm qualifier against the same
+// Kubernetes RFC 1123 DNS label rules a tenant ID must satisfy. The realm is
+// one half of the "<realm>/<unqualified-id>" grammar, so anything that is not
+// a single DNS label — "root/msp-a", "Cell1", "../.." — would produce a
+// qualified identity validateRealmQualifiedTenantID rejects, reintroducing the
+// multi-segment parsing ambiguity ADR-025 Amendment 1 (A1.1) eliminated.
+func validateRealmID(realm string) error {
+	if err := validateExplicitTenantID(realm); err != nil {
+		return fmt.Errorf("realm ID is not a valid single DNS label: %w", err)
+	}
+	return nil
+}
+
+// QualifiedTenantID returns the realm-qualified form "<RealmID>/<unqualifiedID>"
+// for cross-cell surfaces. The realm is deployment-wide config, never stored
+// per-tenant, so the qualified identity is always computed on demand from
+// whatever RealmID is currently configured — there is no per-tenant record to
+// migrate if the realm is assigned or corrected later. Returns unqualifiedID
+// unchanged when RealmID is empty (self-hosted default: no realm concept).
+//
+// Both halves are validated at construction, and the result is checked against
+// validateRealmQualifiedTenantID, so a returned value always satisfies the
+// documented grammar (ADR-025 Amendment 1, A1.4). A realm or tenant ID that
+// cannot produce a conforming identity is an error, never a silently malformed
+// string handed to a cross-cell surface.
+func (m *Manager) QualifiedTenantID(unqualifiedID string) (string, error) {
+	if err := validateExplicitTenantID(unqualifiedID); err != nil {
+		return "", fmt.Errorf("cannot build realm-qualified tenant ID: %w", err)
+	}
+	if m.RealmID == "" {
+		return unqualifiedID, nil
+	}
+	if err := validateRealmID(m.RealmID); err != nil {
+		return "", fmt.Errorf("cannot build realm-qualified tenant ID: %w", err)
+	}
+	qualified := m.RealmID + "/" + unqualifiedID
+	if err := validateRealmQualifiedTenantID(qualified); err != nil {
+		return "", fmt.Errorf("cannot build realm-qualified tenant ID: %w", err)
+	}
+	return qualified, nil
+}
+
+// normalizeTelemetryEnvironment trims surrounding whitespace and case-folds
+// raw, the value of CFGMS_TELEMETRY_ENVIRONMENT, so that "Production",
+// " production ", and "PRODUCTION" are all treated identically to
+// "production" rather than silently falling through to the non-production
+// path on a formatting difference alone. recognized reports whether the
+// normalized value is empty (unset) or one of the documented deployment
+// environments (pkg/telemetry/config.go: development, staging, production);
+// any other value is unrecognised.
+func normalizeTelemetryEnvironment(raw string) (normalized string, recognized bool) {
+	normalized = strings.ToLower(strings.TrimSpace(raw))
+	switch normalized {
+	case "", "development", "staging", "production":
+		return normalized, true
+	default:
+		return normalized, false
+	}
+}
+
+// EnforceRealmGuard fails closed when a configured realm is malformed (any
+// deployment shape) or when a SaaS cluster deployment reaches production with
+// no realm configured at all. Mirrors
+// openbao.enforceProductionGuard's "fail closed in production, no-op
+// otherwise" pattern: the same CFGMS_TELEMETRY_ENVIRONMENT=production signal,
+// gated additionally on ha.mode: cluster (the existing SaaS-deployment
+// signal) so self-hosted deployments are never gated regardless of RealmID.
+// This is what makes ADR-032 Decision 3's "assigned before the first
+// production tenant is created" an enforced fact rather than an optional
+// field nobody sets.
+func EnforceRealmGuard(cfg *controllerconfig.Config) error {
+	// A configured realm is validated on every deployment shape, not just SaaS
+	// production: RealmID is concatenated into a tenant identity by
+	// QualifiedTenantID, so a malformed value must fail closed at startup
+	// rather than surface later as an unparseable cross-cell identity. The
+	// emptiness gate below stays scoped to SaaS production, where a realm is
+	// mandatory; a malformed one is wrong everywhere.
+	if cfg.RealmID != "" {
+		if err := validateRealmID(cfg.RealmID); err != nil {
+			return fmt.Errorf(
+				"controller refused to start:\n"+
+					"  Reason: configured realm is not a valid realm identifier.\n"+
+					"  A realm names a single cell and must be one Kubernetes DNS label\n"+
+					"  (lowercase alphanumeric and hyphens, no leading/trailing hyphen,\n"+
+					"  63 characters or less) — it is not a slash-delimited path, and\n"+
+					"  tenant hierarchy is carried by ParentID, not by string\n"+
+					"  concatenation (ADR-025 Amendment 1).\n"+
+					"  Detail: %w\n"+
+					"  Fix: set realm_id in controller.cfg to this cell's stable identifier.\n"+
+					"  See: docs/operations/cluster-ca.md",
+				err,
+			)
+		}
+	}
+
+	rawEnv := os.Getenv("CFGMS_TELEMETRY_ENVIRONMENT")
+	normalizedEnv, recognized := normalizeTelemetryEnvironment(rawEnv)
+
+	if !cfg.HA.IsClusterMode() {
+		return nil
+	}
+
+	// An unrecognised value cannot be safely assumed non-production — that would
+	// let a typo or stray whitespace in CFGMS_TELEMETRY_ENVIRONMENT silently
+	// disable this guard on a real production cluster. Fail closed instead of
+	// falling through to the isProduction check below.
+	if !recognized {
+		return fmt.Errorf(
+			"controller refused to start:\n"+
+				"  Reason: CFGMS_TELEMETRY_ENVIRONMENT=%q is not a recognised deployment\n"+
+				"  environment for a cluster (ha.mode: cluster) deployment.\n"+
+				"  Recognised values are \"development\", \"staging\", and \"production\"\n"+
+				"  (case-insensitive, surrounding whitespace ignored). An unrecognised\n"+
+				"  value cannot be safely treated as non-production, so the realm guard\n"+
+				"  fails closed instead of silently skipping ADR-032 Decision 3's check.\n"+
+				"  Fix: set CFGMS_TELEMETRY_ENVIRONMENT to one of those values.\n"+
+				"  See: docs/operations/cluster-ca.md",
+			rawEnv,
+		)
+	}
+
+	if normalizedEnv != "production" {
+		return nil
+	}
+	if cfg.RealmID == "" {
+		return fmt.Errorf(
+			"tenant manager refused to start:\n" +
+				"  Reason: no realm configured for a SaaS cluster deployment in production.\n" +
+				"  ADR-032 Decision 3 requires every tenant identity to carry a realm\n" +
+				"  qualifier naming its home cell, assigned before the first production\n" +
+				"  tenant is created. ha.mode is \"cluster\" and\n" +
+				"  CFGMS_TELEMETRY_ENVIRONMENT=production, but RealmID is empty.\n" +
+				"  Fix: set RealmID in controller.cfg to this cell's stable identifier.\n" +
+				"  See: docs/operations/cluster-ca.md",
+		)
+	}
+	return nil
+}

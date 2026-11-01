@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026 Jordan Ritz
+#
+# cfgms-bundle-load — Load the CFGMS admin bundle from the OS keychain.
+#
+# Sources this file into your shell; do not execute it directly.
+#
+# Usage:
+#   source scripts/cfgms-bundle-load
+#
+# After sourcing, CFGMS_ADMIN_BUNDLE points to a temp file containing the
+# bundle YAML. The temp file is removed automatically when the shell exits.
+#
+# Requires:
+#   Linux:  secret-tool (libsecret-tools package)
+#   macOS:  security (built-in Keychain utility)
+#
+# To store the bundle first, see:
+#   docs/operations/tier1-controller-bringup.md § "Distribute Admin Bundle"
+
+_cfgms_os="$(uname -s)"
+_cfgms_bundle=""
+
+if [[ "$_cfgms_os" == "Linux" ]]; then
+    if ! command -v secret-tool &>/dev/null; then
+        echo "cfgms-bundle-load: secret-tool not found." >&2
+        echo "  Install with: sudo apt install libsecret-tools" >&2
+        return 1 2>/dev/null || exit 1
+    fi
+    _cfgms_bundle="$(secret-tool lookup service cfgms bundle admin 2>/dev/null || true)"
+elif [[ "$_cfgms_os" == "Darwin" ]]; then
+    if ! command -v security &>/dev/null; then
+        echo "cfgms-bundle-load: security command not found." >&2
+        return 1 2>/dev/null || exit 1
+    fi
+    _cfgms_bundle="$(security find-generic-password -s cfgms -a admin -w 2>/dev/null || true)"
+else
+    echo "cfgms-bundle-load: unsupported OS: $_cfgms_os (supported: Linux, Darwin)" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+if [[ -z "$_cfgms_bundle" ]]; then
+    echo "cfgms-bundle-load: admin bundle not found in keychain." >&2
+    echo "  Store it first — see docs/operations/tier1-controller-bringup.md § 'Distribute Admin Bundle'" >&2
+    unset _cfgms_os _cfgms_bundle
+    return 1 2>/dev/null || exit 1
+fi
+
+_cfgms_tmpfile="$(mktemp /tmp/cfgms-bundle-XXXXXX.yaml)"
+printf '%s' "$_cfgms_bundle" > "$_cfgms_tmpfile"
+chmod 600 "$_cfgms_tmpfile"
+
+export CFGMS_ADMIN_BUNDLE="$_cfgms_tmpfile"
+
+# Ensure temp file is removed when the calling shell exits.
+trap 'rm -f "$CFGMS_ADMIN_BUNDLE"' EXIT
+
+echo "cfgms-bundle-load: CFGMS_ADMIN_BUNDLE=$CFGMS_ADMIN_BUNDLE"
+
+unset _cfgms_os _cfgms_bundle _cfgms_tmpfile

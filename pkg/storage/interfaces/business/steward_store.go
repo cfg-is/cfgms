@@ -1,0 +1,286 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+// Package business defines the StewardStore interface for durable fleet registry persistence.
+package business
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// ErrStewardNotFound is returned when a steward record does not exist.
+var ErrStewardNotFound = errors.New("steward not found")
+
+// ErrStewardAlreadyExists is returned when attempting to register an already-registered steward.
+var ErrStewardAlreadyExists = errors.New("steward already exists")
+
+// ErrStewardDeviceIDConflict is returned when a steward record cannot be written
+// because a DIFFERENT steward in the same tenant already holds its device_id.
+// It is distinct from ErrStewardAlreadyExists, which reports the same steward
+// being registered twice and is benign for an idempotent retry. A device_id
+// collision is not benign: two records sharing one device_id break
+// GetStewardByDeviceID, the single lookup feeding the revocation gate, so a
+// record still in "registered" state alongside a revoked sibling would let the
+// revoked holder pass that gate. Providers enforce this with a unique index on
+// (tenant_id, device_id) restricted to non-empty device_id, which is what makes
+// the guard hold under concurrent claims rather than only in sequence (Issue #3403).
+//
+// A DEREGISTERED record does not hold its device_id (Issue #4534): decommissioning
+// releases the device so the same machine can enroll again, while the record keeps
+// the device_id for history matching. Revoked records still hold it. Device lookups
+// return a non-deregistered record ahead of deregistered ones, so at most one live
+// record answers for a device and an old deregistered record's key cannot be used
+// to revive it once the device has re-enrolled.
+var ErrStewardDeviceIDConflict = errors.New("device_id already registered by another steward in this tenant")
+
+// ErrStewardRevoked is returned by callers of GetStewardByDeviceID when the
+// returned record has Status == StewardStatusRevoked. The gate handler must
+// check for revocation before verifying the proof-of-possession signature
+// (revocation-before-PoP invariant, ADR-010 §3).
+var ErrStewardRevoked = errors.New("steward revoked")
+
+// StewardStatus represents the lifecycle state of a steward in the fleet.
+// Records are never deleted; deregistered stewards are retained for audit.
+type StewardStatus string
+
+const (
+	// StewardStatusRegistered indicates the steward has registered but not yet sent a heartbeat.
+	StewardStatusRegistered StewardStatus = "registered"
+
+	// StewardStatusActive indicates the steward is actively sending heartbeats.
+	StewardStatusActive StewardStatus = "active"
+
+	// StewardStatusLost indicates the steward has not been seen within the configured TTL.
+	// The record is retained for audit; the steward may re-register.
+	StewardStatusLost StewardStatus = "lost"
+
+	// StewardStatusDeregistered indicates the steward has been explicitly deregistered.
+	// Records are retained for audit history.
+	StewardStatusDeregistered StewardStatus = "deregistered"
+
+	// StewardStatusArchived indicates the steward's mTLS cert has expired and the
+	// steward is offline. The steward may re-enter the fleet via the registration-refresh
+	// flow (ADR-010). A pending_refresh_requests entry is created when a refresh challenge
+	// is received for an archived steward.
+	StewardStatusArchived StewardStatus = "archived"
+
+	// StewardStatusDormant indicates the steward has been archived for longer than
+	// RefreshPolicy.MaxDormancyDays. Refresh requests are auto-rejected unless an
+	// operator overrides the policy. MaxDormancyDays == nil means the dormancy backstop
+	// is disabled (default OFF, ADR-010 §4).
+	StewardStatusDormant StewardStatus = "dormant"
+
+	// StewardStatusRevoked indicates the steward has been permanently denied re-entry.
+	// GetStewardByDeviceID returns the record regardless; callers must check the status
+	// and return ErrStewardRevoked before performing any proof-of-possession verification
+	// (revocation-before-PoP ordering invariant, ADR-010 §3).
+	StewardStatusRevoked StewardStatus = "revoked"
+)
+
+// StewardRecord holds the durable fleet registration data for a single steward.
+// Fields that are only meaningful during the current process lifetime (task latency
+// counters, recovery attempt counters) belong in HealthMetrics, not here.
+type StewardRecord struct {
+	// ID is the unique steward identifier, assigned at registration.
+	ID string `json:"id"`
+
+	// TenantID is the tenant this steward belongs to, derived from the registration token
+	// used during HTTP registration. Set at first registration; authoritative source is
+	// RegistrationToken.TenantID from the RegistrationTokenStore.
+	TenantID string `json:"tenant_id"`
+
+	// Hostname is the DNS hostname of the steward's machine.
+	Hostname string `json:"hostname"`
+
+	// Platform is the operating system (e.g. "linux", "windows", "darwin").
+	Platform string `json:"platform"`
+
+	// Arch is the CPU architecture (e.g. "amd64", "arm64").
+	Arch string `json:"arch"`
+
+	// Version is the steward binary version at last registration.
+	Version string `json:"version"`
+
+	// IPAddress is the IP address of the steward at last contact.
+	IPAddress string `json:"ip_address"`
+
+	// Status is the current lifecycle state of the steward.
+	Status StewardStatus `json:"status"`
+
+	// Hidden is the operator-controlled fleet-view visibility flag (Issue #2944).
+	// Orthogonal to Status: hiding a steward does not change its lifecycle state.
+	Hidden bool `json:"hidden"`
+
+	// RegisteredAt is the time the steward first registered.
+	RegisteredAt time.Time `json:"registered_at"`
+
+	// LastSeen is the time of any steward activity (registration, heartbeat, or other RPC).
+	LastSeen time.Time `json:"last_seen"`
+
+	// LastHeartbeatAt is the time of the last explicit heartbeat RPC.
+	// Distinct from LastSeen: a steward may be visible (last_seen recent) without sending heartbeats.
+	LastHeartbeatAt time.Time `json:"last_heartbeat_at"`
+
+	// DeviceID is the 64-character lowercase hex fingerprint of the steward's Ed25519
+	// identity key. Set by S2c (populate-identity-fields story). Empty for stewards
+	// registered before ADR-010 was implemented.
+	DeviceID string `json:"device_id"`
+
+	// IdentityKeyPub is the raw 32-byte Ed25519 public key for this steward's device
+	// identity. Separate from the rotating mTLS certificate (ADR-010 §1). Set by S2c.
+	IdentityKeyPub []byte `json:"identity_key_pub"`
+
+	// KeyProtectionLevel describes how the private key material is protected on the
+	// steward host: "file" (software-only) or "tpm" (hardware-backed). Set by S2c.
+	KeyProtectionLevel string `json:"key_protection_level"`
+
+	// KeyAlgorithm is the device key algorithm: "ed25519" or "ecdsa-p256" (ADR-011
+	// Amendment 3). Empty means "ed25519": records written before the field existed
+	// read back as ed25519. For ed25519 IdentityKeyPub is the raw 32-byte key; for
+	// ecdsa-p256 it is the PKIX (SubjectPublicKeyInfo) DER encoding.
+	KeyAlgorithm string `json:"key_algorithm,omitempty"`
+
+	// LastProvenanceJSON is the last observed provenance snapshot serialised as JSON.
+	// Provenance is a set of device-identity signals (hostname, MAC, CPU serial, etc.)
+	// used by the gate handler (S3b) to score re-entry confidence. Updated at each
+	// successful refresh. Empty until the first refresh cycle completes.
+	LastProvenanceJSON string `json:"last_provenance_json"`
+}
+
+// StewardFilter defines criteria for filtering steward queries.
+type StewardFilter struct {
+	// Status filters records to the given lifecycle state. Empty means no filter.
+	Status StewardStatus `json:"status,omitempty"`
+}
+
+// StewardStore defines the storage interface for durable fleet registry data.
+//
+// The controller uses this interface to persist steward registrations so that the
+// fleet view (last-seen, heartbeat, status, platform) survives controller restarts
+// without waiting for all stewards to re-register.
+//
+// Ephemeral per-process metrics (task latency, config errors, recovery counters)
+// belong in HealthMetrics and must NOT be stored here.
+type StewardStore interface {
+	// RegisterSteward creates a new steward record. Returns ErrStewardAlreadyExists
+	// if a record with the same ID already exists.
+	RegisterSteward(ctx context.Context, record *StewardRecord) error
+
+	// UpdateHeartbeat records a heartbeat for the given steward, updating both
+	// last_heartbeat_at and last_seen to the current time. A non-empty version
+	// replaces the stored Version; an empty version leaves it unchanged.
+	// Returns ErrStewardNotFound if no record exists for the ID.
+	UpdateHeartbeat(ctx context.Context, stewardID, version string) error
+
+	// GetSteward retrieves the record for the given steward ID.
+	// Returns ErrStewardNotFound if no record exists.
+	GetSteward(ctx context.Context, stewardID string) (*StewardRecord, error)
+
+	// GetStewardByDeviceID retrieves the record whose DeviceID matches the given
+	// 64-character hex fingerprint, with NO tenant predicate. Device identifiers
+	// are allowed to collide across tenants by design (only same-tenant device_id
+	// is unique, enforced by ErrStewardDeviceIDConflict), so when more than one
+	// record shares deviceID this returns a single, deterministic record — the
+	// match with the lexicographically smallest ID — never an arbitrary one.
+	//
+	// This is the unscoped form. A caller holding an authenticated tenant MUST
+	// use GetStewardByDeviceIDForTenant instead; this form exists ONLY for the
+	// pre-authentication registration-refresh handshake (handleRefreshChallenge /
+	// handleRefreshComplete in handlers_registration_refresh.go), where the tenant
+	// is not yet known — it arrives, if at all, as an unauthenticated, caller-
+	// asserted request field and MUST NOT be used to scope this lookup. On that
+	// path the returned record's identity is instead confirmed by proof-of-
+	// possession: the caller must sign the challenge nonce with the private key
+	// matching the returned record's IdentityKeyPub, so a device-id collision
+	// cannot be used to act on another tenant's record even though the lookup
+	// itself is unscoped (Issue #4350).
+	//
+	// Returns ErrStewardNotFound when no matching record exists. Callers must
+	// inspect the returned record's Status field and return ErrStewardRevoked if
+	// Status == StewardStatusRevoked — the store does not surface the revocation
+	// error directly (ADR-010 §3 revocation-before-PoP ordering invariant).
+	GetStewardByDeviceID(ctx context.Context, deviceID string) (*StewardRecord, error)
+
+	// GetStewardByDeviceIDForTenant retrieves the record whose DeviceID matches
+	// the given fingerprint AND whose TenantID matches tenantID. This is the
+	// tenant-scoped form: use it whenever the caller holds an authenticated
+	// tenant (e.g. from a registration token, an authorized admin principal, or
+	// an already-tenant-checked pending-* record) so a device_id collision with a
+	// different tenant can never be returned. Returns ErrStewardNotFound when no
+	// matching record exists in the given tenant, even if deviceID matches a
+	// record belonging to a different tenant.
+	GetStewardByDeviceIDForTenant(ctx context.Context, deviceID, tenantID string) (*StewardRecord, error)
+
+	// ListStewards returns all steward records regardless of status.
+	ListStewards(ctx context.Context) ([]*StewardRecord, error)
+
+	// ListStewardsByStatus returns steward records with the given status.
+	// Uses an indexed query on the SQLite backend for efficiency.
+	ListStewardsByStatus(ctx context.Context, status StewardStatus) ([]*StewardRecord, error)
+
+	// UpdateStewardStatus updates the lifecycle status of the given steward.
+	// Returns ErrStewardNotFound if no record exists.
+	UpdateStewardStatus(ctx context.Context, stewardID string, status StewardStatus) error
+
+	// TransitionStewardStatus moves the steward to status only if its stored
+	// status is one of from, evaluated atomically with the write. It returns
+	// true when the write was applied and false (with a nil error) when the
+	// current status is not in from, so a system-initiated transition (heartbeat
+	// promotion, lost-marking) can never overwrite a status an operator set
+	// concurrently, such as revoked. A read-then-UpdateStewardStatus sequence is
+	// NOT equivalent: the status can change between the read and the write.
+	// Returns ErrStewardNotFound if no record exists.
+	TransitionStewardStatus(ctx context.Context, stewardID string, status StewardStatus, from ...StewardStatus) (bool, error)
+
+	// SetStewardHidden sets the operator-controlled visibility flag for the given steward.
+	// Returns ErrStewardNotFound if no record exists.
+	SetStewardHidden(ctx context.Context, stewardID string, hidden bool) error
+
+	// SetStewardProvenance replaces the steward's recorded provenance baseline
+	// (LastProvenanceJSON) with provenanceJSON (ADR-034 §2). It is written at
+	// first admission (trust on first use) and when an operator approves a
+	// refresh; a connection that scores below the match threshold must never
+	// call it. Returns ErrStewardNotFound if no record exists.
+	SetStewardProvenance(ctx context.Context, stewardID, provenanceJSON string) error
+
+	// RebindStewardIdentity points the steward record at a different machine's
+	// device identity (ADR-034 §5 "move"): DeviceID, IdentityKeyPub and
+	// KeyProtectionLevel and KeyAlgorithm (empty = ed25519) are replaced and LastProvenanceJSON is cleared so the
+	// new machine re-baselines at its next admission. The unique (tenant_id,
+	// device_id) rule applies: when another non-deregistered steward in the same
+	// tenant already holds deviceID the call returns ErrStewardDeviceIDConflict
+	// and changes nothing. Returns ErrStewardNotFound if no record exists.
+	// Only the operator move-identity endpoint may call it.
+	RebindStewardIdentity(ctx context.Context, stewardID, deviceID string, identityKeyPub []byte, keyProtectionLevel, keyAlgorithm string) error
+
+	// UpdateStewardTenant moves a steward to a different tenant, guarded by a
+	// compare-and-swap on the steward's current tenant (Issue #3895): the write
+	// only applies if the record's tenant_id still equals expectedTenantID at
+	// the instant it is applied. Returns ErrStewardNotFound if no record exists
+	// for stewardID, OR if a concurrent writer already moved it away from
+	// expectedTenantID — both report the same sentinel, mirroring the
+	// PendingRegistrationStore guard pattern in pending_registration_store.go.
+	// Callers that already resolved existence via their own GetSteward should
+	// treat a post-existence-check ErrStewardNotFound as a lost race, not a
+	// fresh not-found.
+	UpdateStewardTenant(ctx context.Context, stewardID, expectedTenantID, newTenantID string) error
+
+	// DeregisterSteward marks the steward as deregistered. Records are retained
+	// for audit history; use ListStewardsByStatus to exclude them from active views.
+	// Returns ErrStewardNotFound if no record exists.
+	DeregisterSteward(ctx context.Context, stewardID string) error
+
+	// GetStewardsSeen returns all stewards whose last_seen time is after the given time.
+	GetStewardsSeen(ctx context.Context, since time.Time) ([]*StewardRecord, error)
+
+	// HealthCheck verifies the store is reachable and operational.
+	HealthCheck(ctx context.Context) error
+
+	// Initialize prepares the store (creates directories, tables, etc.).
+	// Safe to call multiple times.
+	Initialize(ctx context.Context) error
+
+	// Close releases any resources held by the store.
+	Close() error
+}

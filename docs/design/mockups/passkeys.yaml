@@ -1,0 +1,4 @@
+file: passkeys.html
+order: 3
+status: **Reference**
+what: Self-service **My passkeys** (Epic #2931 / #2992) — list / add / remove your own passkeys: editable label, device-type sub-line, "This device" chip, Added / Last-used. Add & remove step up to `AssuranceStrong`. `list` (several keys) and `one` (backup nudge + last key's Remove **locked** — the anti-lockout guard) states, both themes.

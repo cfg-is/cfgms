@@ -1,0 +1,92 @@
+name: cfgms
+
+x-controller-security: &controller-security
+  user: "1001:1001"
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=1001,gid=1001
+    - /run:rw,noexec,nosuid,nodev,size=16m,mode=0750,uid=1001,gid=1001
+  pids_limit: 512
+  mem_limit: 2g
+  cpus: 2.0
+
+services:
+  # Run explicitly once:
+  #   docker compose --profile init run --rm controller-init
+  # Any initialization error is returned to the operator and blocks launch.
+  controller-init:
+    <<: *controller-security
+    image: "${CFGMS_CONTROLLER_IMAGE:?set CFGMS_CONTROLLER_IMAGE to an immutable image@sha256 digest}"
+    command:
+      - --init
+      - --config
+      - /etc/cfgms/controller.cfg
+    restart: "no"
+    network_mode: none
+    environment:
+      CFGMS_SECURITY_PROFILE: public-beta
+      CFGMS_EXECUTION_REQUIRE_SIGNED_ADHOC: "true"
+      CFGMS_TELEMETRY_ENVIRONMENT: production
+      CFGMS_SECRETS_KEY_FILE: /run/secrets/cfgms-secrets-key
+    profiles:
+      - init
+    volumes:
+      - ./controller.cfg:/etc/cfgms/controller.cfg:ro
+      - ${CFGMS_SECRETS_KEY_FILE:?set CFGMS_SECRETS_KEY_FILE to the host key path}:/run/secrets/cfgms-secrets-key:ro
+      - controller-data:/var/lib/cfgms
+      - controller-logs:/var/log/cfgms
+
+  controller:
+    <<: *controller-security
+    image: "${CFGMS_CONTROLLER_IMAGE:?set CFGMS_CONTROLLER_IMAGE to an immutable image@sha256 digest}"
+    command:
+      - --config
+      - /etc/cfgms/controller.cfg
+    restart: on-failure:5
+    stop_grace_period: 30s
+    environment:
+      CFGMS_SECURITY_PROFILE: public-beta
+      CFGMS_EXECUTION_REQUIRE_SIGNED_ADHOC: "true"
+      CFGMS_TELEMETRY_ENVIRONMENT: production
+      CFGMS_SECRETS_KEY_FILE: /run/secrets/cfgms-secrets-key
+    ports:
+      # Product API and steward transport are public. The distinct metrics
+      # listener is host-loopback-only and cannot be widened by an env var.
+      - "${CFGMS_HTTPS_BIND_IP:-0.0.0.0}:${CFGMS_HTTPS_PORT:-9080}:9080/tcp"
+      - "${CFGMS_QUIC_BIND_IP:-0.0.0.0}:${CFGMS_QUIC_PORT:-4433}:4433/udp"
+      - "127.0.0.1:${CFGMS_METRICS_PORT:-9090}:9090/tcp"
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --quiet
+        - --output-document=/dev/null
+        - --ca-certificate=/var/lib/cfgms/certs/ca/ca.crt
+        - https://localhost:9080/api/v1/health
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - ./controller.cfg:/etc/cfgms/controller.cfg:ro
+      - ${CFGMS_SECRETS_KEY_FILE:?set CFGMS_SECRETS_KEY_FILE to the host key path}:/run/secrets/cfgms-secrets-key:ro
+      - controller-data:/var/lib/cfgms
+      - controller-logs:/var/log/cfgms
+    networks:
+      controller-private:
+        ipv4_address: 172.30.0.10
+
+networks:
+  controller-private:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  controller-data:
+  controller-logs:

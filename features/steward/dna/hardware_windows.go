@@ -1,0 +1,709 @@
+//go:build windows
+
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
+package dna
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+
+	"golang.org/x/sys/windows/registry"
+
+	"github.com/cfgis/cfgms/pkg/logging"
+)
+
+// WindowsHardwareCollector handles Windows-specific hardware collection.
+// Each method accepts a context to enforce per-command timeouts on WMI calls.
+type WindowsHardwareCollector struct{}
+
+// commandTimeout is the per-command timeout applied to every WMI and PowerShell call.
+const commandTimeout = 30 * time.Second
+
+// commandWaitDelay bounds how long Output() will wait for a killed command's
+// I/O to drain before its pipes are force-closed. Mirrors darwinCmdWaitDelay
+// in exec_darwin.go (Issue #2361) for the identical root cause on Windows: a
+// child (wmic.exe, powershell.exe) can pass its inherited stdout/stderr pipe
+// handle to a grandchild it spawns, and if the child is killed before that
+// grandchild exits, the pipe never closes — Output() then blocks forever
+// waiting for EOF instead of returning once cmdCtx is cancelled. WaitDelay
+// (Cmd.WaitDelay, added Go 1.20) is exactly the bounded grace period this
+// needs: after cancellation, Go waits at most this long before forcibly
+// closing the pipes regardless of whether the process tree has fully exited.
+const commandWaitDelay = 5 * time.Second
+
+// runCommand executes a command with a 30-second per-command timeout derived from ctx.
+// If the command times out or ctx is cancelled, an error is returned. WaitDelay
+// bounds subprocess cleanup after cancellation (Issue #3600) so a killed
+// command's I/O pipes cannot block this call past the context deadline.
+func runCommand(ctx context.Context, name string, args ...string) (string, error) {
+	cmdCtx, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(cmdCtx, name, args...)
+	cmd.WaitDelay = commandWaitDelay
+	output, err := cmd.Output()
+	return string(output), err
+}
+
+// CollectCPU gathers detailed CPU information on Windows using WMI.
+// The wmic call is attempted first; PowerShell is used only as a fallback.
+func (w *WindowsHardwareCollector) CollectCPU(ctx context.Context, attributes map[string]string) error {
+	// Basic CPU count from runtime (always available)
+	attributes["cpu_count"] = fmt.Sprintf("%d", runtime.NumCPU())
+	attributes["cpu_arch"] = runtime.GOARCH
+
+	// Primary: wmic
+	output, err := runCommand(ctx, "wmic", "cpu", "get",
+		"Name,Manufacturer,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors,Architecture",
+		"/format:csv")
+	if err == nil {
+		w.parseWMICPUOutput(output, attributes)
+		return nil
+	}
+
+	// Fallback: PowerShell Get-CimInstance (modern replacement for Get-WmiObject)
+	psOutput, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+		"Get-CimInstance -ClassName Win32_Processor | Select-Object Name,Manufacturer,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors,Architecture | ConvertTo-Csv -NoTypeInformation")
+	if psErr == nil {
+		w.parsePowerShellCPUOutput(psOutput, attributes)
+	}
+
+	return nil
+}
+
+// CollectMemory gathers detailed memory information on Windows.
+// The wmic call is attempted first; PowerShell is used only as a fallback.
+func (w *WindowsHardwareCollector) CollectMemory(ctx context.Context, attributes map[string]string) error {
+	// Physical memory total — primary: wmic
+	memOutput, err := runCommand(ctx, "wmic", "computersystem", "get",
+		"TotalPhysicalMemory", "/format:csv")
+	if err == nil {
+		w.parseWMIMemoryOutput(memOutput, attributes)
+	} else {
+		// Fallback: PowerShell
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object TotalPhysicalMemory | ConvertTo-Csv -NoTypeInformation")
+		if psErr == nil {
+			w.parseWMIMemoryOutput(psOut, attributes)
+		}
+	}
+
+	// Memory modules — primary: wmic
+	modOutput, err := runCommand(ctx, "wmic", "memorychip", "get",
+		"Capacity,Speed,MemoryType,FormFactor", "/format:csv")
+	if err == nil {
+		w.parseWMIMemoryModulesOutput(modOutput, attributes)
+	} else {
+		// Fallback: Get-CimInstance (wmic absent on Windows Server 2025 / 11 24H2+)
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"Get-CimInstance -ClassName Win32_PhysicalMemory | Select-Object Capacity,FormFactor,MemoryType,Speed | ConvertTo-Csv -NoTypeInformation")
+		if psErr == nil {
+			parseCIMMemoryModules(psOut, attributes)
+		}
+	}
+
+	// Virtual memory — primary: PowerShell (no wmic equivalent)
+	vmOutput, err := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+		"Get-CimInstance -ClassName Win32_PageFileUsage | Select-Object AllocatedBaseSize,CurrentUsage | ConvertTo-Csv -NoTypeInformation")
+	if err == nil {
+		w.parsePowerShellVirtualMemoryOutput(vmOutput, attributes)
+	}
+
+	return nil
+}
+
+// CollectDisk gathers disk and storage information on Windows.
+func (w *WindowsHardwareCollector) CollectDisk(ctx context.Context, attributes map[string]string) error {
+	// Physical disk — primary: wmic
+	diskOutput, err := runCommand(ctx, "wmic", "diskdrive", "get",
+		"Model,Size,MediaType,InterfaceType", "/format:csv")
+	if err == nil {
+		w.parseWMIDiskOutput(diskOutput, attributes)
+	} else {
+		// Fallback: Get-CimInstance (wmic absent on Windows Server 2025 / 11 24H2+)
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"Get-CimInstance -ClassName Win32_DiskDrive | Select-Object InterfaceType,MediaType,Model,Size | ConvertTo-Csv -NoTypeInformation")
+		if psErr == nil {
+			parseCIMPhysicalDisks(psOut, attributes)
+		}
+	}
+
+	// Logical disk — primary: wmic
+	logicalOutput, err := runCommand(ctx, "wmic", "logicaldisk", "get",
+		"Size,FreeSpace,FileSystem,DriveType,DeviceID", "/format:csv")
+	if err == nil {
+		w.parseWMILogicalDiskOutput(logicalOutput, attributes)
+	} else {
+		// Fallback: PowerShell
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"Get-CimInstance -ClassName Win32_LogicalDisk | Select-Object DeviceID,Size,FreeSpace,FileSystem | ConvertTo-Csv -NoTypeInformation")
+		if psErr == nil {
+			w.parsePowerShellDiskUsageOutput(psOut, attributes)
+		}
+	}
+
+	return nil
+}
+
+// CollectMotherboard gathers motherboard and system information on Windows.
+func (w *WindowsHardwareCollector) CollectMotherboard(ctx context.Context, attributes map[string]string) error {
+	// Computer system info — primary: wmic
+	csOutput, err := runCommand(ctx, "wmic", "computersystem", "get",
+		"Manufacturer,Model,TotalPhysicalMemory", "/format:csv")
+	if err == nil {
+		w.parseWMIComputerSystemOutput(csOutput, attributes)
+	} else {
+		// Fallback: Get-CimInstance (wmic absent on Windows Server 2025 / 11 24H2+)
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object Manufacturer,Model,TotalPhysicalMemory | ConvertTo-Csv -NoTypeInformation")
+		if psErr == nil {
+			parseCIMComputerSystem(psOut, attributes)
+		}
+	}
+
+	// BIOS info — primary: wmic
+	biosOutput, err := runCommand(ctx, "wmic", "bios", "get",
+		"Manufacturer,SMBIOSBIOSVersion,ReleaseDate", "/format:csv")
+	if err == nil {
+		w.parseWMIBIOSOutput(biosOutput, attributes)
+	} else {
+		// Fallback: Get-CimInstance (wmic absent on Windows Server 2025 / 11 24H2+)
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"Get-CimInstance -ClassName Win32_BIOS | Select-Object Manufacturer,ReleaseDate,SMBIOSBIOSVersion | ConvertTo-Csv -NoTypeInformation")
+		if psErr == nil {
+			parseCIMBIOS(psOut, attributes)
+		}
+	}
+
+	// Baseboard info — primary: wmic
+	bbOutput, err := runCommand(ctx, "wmic", "baseboard", "get",
+		"Manufacturer,Product,Version,SerialNumber", "/format:csv")
+	if err == nil {
+		w.parseWMIMotherboardOutput(bbOutput, attributes)
+	} else {
+		// Fallback: Get-CimInstance (wmic absent on Windows Server 2025 / 11 24H2+)
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"Get-CimInstance -ClassName Win32_BaseBoard | Select-Object Manufacturer,Product,SerialNumber,Version | ConvertTo-Csv -NoTypeInformation")
+		if psErr == nil {
+			parseCIMBaseboard(psOut, attributes)
+		}
+	}
+
+	// System UUID — primary: wmic
+	uuidOutput, err := runCommand(ctx, "wmic", "csproduct", "get",
+		"UUID", "/format:csv")
+	if err == nil {
+		w.parseWMIUUIDOutput(uuidOutput, attributes)
+	} else {
+		// Fallback: Get-CimInstance (wmic absent on Windows Server 2025 / 11 24H2+)
+		psOut, psErr := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"Get-CimInstance -ClassName Win32_ComputerSystemProduct | Select-Object UUID | ConvertTo-Csv -NoTypeInformation")
+		if psErr == nil {
+			parseCIMSystemUUID(psOut, attributes)
+		}
+	}
+
+	// OS version for hardware context — native registry reads (no process spawn)
+	w.collectOSVersionFromRegistry(attributes)
+
+	w.collectHyperVInfo(ctx, attributes)
+
+	return nil
+}
+
+// collectHyperVInfo records Hyper-V host-capability and guest-detection
+// attributes:
+//   - hyperv_role_installed (true/false): the Virtual Machine Management service
+//     (vmms) is registered. Read from the registry — no process spawn, no
+//     elevation.
+//   - virtualization_type / virtualization_role: guest detection from the BIOS
+//     system identity (registry, no elevation).
+//   - hyperv_enabled (true/false): the Microsoft-Hyper-V-All optional feature is
+//     enabled. Queried with DISM in argv form (no PowerShell string
+//     composition). This requires elevation; on any error the attribute is
+//     omitted (not stubbed) with a WARN, per #1950.
+//
+// VM inventory / running-VM count / VM names are deliberately NOT collected
+// (#1950): VM presence/state is observed via the hyperv module Get()/Monitor
+// path, and VM names are tenant-sensitive and must never enter DNA.
+func (w *WindowsHardwareCollector) collectHyperVInfo(ctx context.Context, attributes map[string]string) {
+	// Hyper-V role installed: the vmms service key exists. Registry read only.
+	roleInstalled := false
+	if key, err := registry.OpenKey(registry.LOCAL_MACHINE,
+		`SYSTEM\CurrentControlSet\Services\vmms`, registry.QUERY_VALUE); err == nil {
+		_ = key.Close()
+		roleInstalled = true
+	}
+	attributes["hyperv_role_installed"] = strconv.FormatBool(roleInstalled)
+
+	// Guest detection from the BIOS system identity (registry, no elevation).
+	virtType := "none"
+	if key, err := registry.OpenKey(registry.LOCAL_MACHINE,
+		`HARDWARE\DESCRIPTION\System\BIOS`, registry.QUERY_VALUE); err == nil {
+		manufacturer, _, _ := key.GetStringValue("SystemManufacturer")
+		product, _, _ := key.GetStringValue("SystemProductName")
+		_ = key.Close()
+		combined := strings.ToLower(manufacturer + " " + product)
+		switch {
+		case strings.Contains(combined, "microsoft") && strings.Contains(combined, "virtual"):
+			virtType = "hyperv"
+		case strings.Contains(combined, "vmware"):
+			virtType = "vmware"
+		case strings.Contains(combined, "virtualbox"):
+			virtType = "virtualbox"
+		case strings.Contains(combined, "kvm"), strings.Contains(combined, "qemu"):
+			virtType = "kvm"
+		}
+	}
+	attributes["virtualization_type"] = virtType
+
+	switch {
+	case virtType != "none":
+		attributes["virtualization_role"] = "guest"
+	case roleInstalled:
+		attributes["virtualization_role"] = "host"
+	default:
+		attributes["virtualization_role"] = "baremetal"
+	}
+
+	// Hyper-V enabled: query the optional feature via DISM in argv form. Requires
+	// elevation; on any error, WARN and omit rather than emit a misleading value.
+	out, err := runCommand(ctx, "dism", "/online", "/english", "/get-featureinfo",
+		"/featurename:Microsoft-Hyper-V-All")
+	if err != nil {
+		_ = logging.Warn(ctx, "dna: could not query Hyper-V feature state via DISM (elevation may be required); omitting hyperv_enabled", nil)
+		return
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "State :") {
+			state := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "State :")))
+			// DISM reports "Enabled", "Disabled", or transitional
+			// "Enable Pending" / "Disable Pending".
+			attributes["hyperv_enabled"] = strconv.FormatBool(strings.HasPrefix(state, "enable"))
+			return
+		}
+	}
+	// Feature info returned but no State line — treat as undeterminable.
+	_ = logging.Warn(ctx, "dna: DISM returned no State for Microsoft-Hyper-V-All; omitting hyperv_enabled", nil)
+}
+
+// parseWMICPUOutput parses WMI CPU output
+func (w *WindowsHardwareCollector) parseWMICPUOutput(output string, attributes map[string]string) {
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Node") {
+			continue
+		}
+
+		fields := strings.Split(line, ",")
+		if len(fields) >= 7 {
+			// Skip the Node field (first field)
+			if len(fields) > 1 && fields[1] != "" {
+				attributes["cpu_architecture"] = fields[1]
+			}
+			if len(fields) > 2 && fields[2] != "" {
+				attributes["cpu_max_clock_speed"] = fields[2] + "MHz"
+			}
+			if len(fields) > 3 && fields[3] != "" {
+				attributes["cpu_manufacturer"] = fields[3]
+			}
+			if len(fields) > 4 && fields[4] != "" {
+				attributes["cpu_name"] = fields[4]
+			}
+			if len(fields) > 5 && fields[5] != "" {
+				attributes["cpu_cores"] = fields[5]
+			}
+			if len(fields) > 6 && fields[6] != "" {
+				attributes["cpu_logical_processors"] = fields[6]
+			}
+		}
+	}
+}
+
+// parsePowerShellCPUOutput parses PowerShell CPU output (fallback)
+func (w *WindowsHardwareCollector) parsePowerShellCPUOutput(output string, attributes map[string]string) {
+	lines := strings.Split(output, "\n")
+	for i, line := range lines {
+		if i == 0 { // Skip header
+			continue
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		fields := w.parseCSVLine(line)
+		if len(fields) >= 6 {
+			if fields[0] != "" {
+				attributes["cpu_architecture_ps"] = fields[0]
+			}
+			if fields[1] != "" {
+				attributes["cpu_manufacturer_ps"] = fields[1]
+			}
+			if fields[2] != "" {
+				attributes["cpu_max_clock_speed_ps"] = fields[2] + "MHz"
+			}
+			if fields[3] != "" {
+				attributes["cpu_name_ps"] = fields[3]
+			}
+			if fields[4] != "" {
+				attributes["cpu_cores_ps"] = fields[4]
+			}
+			if fields[5] != "" {
+				attributes["cpu_logical_processors_ps"] = fields[5]
+			}
+		}
+		break // Design decision: only the first CPU is reported; multi-CPU systems report aggregate metrics via the performance counter path, not per-CPU.
+	}
+}
+
+// parseWMIMemoryOutput parses WMI memory output
+func (w *WindowsHardwareCollector) parseWMIMemoryOutput(output string, attributes map[string]string) {
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Node") {
+			continue
+		}
+
+		fields := strings.Split(line, ",")
+		if len(fields) >= 2 && fields[1] != "" {
+			if totalMem, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
+				attributes["memory_total_bytes"] = fmt.Sprintf("%d", totalMem)
+				attributes["memory_total_gb"] = fmt.Sprintf("%.2f", float64(totalMem)/1024/1024/1024)
+			}
+		}
+	}
+}
+
+// parseWMIMemoryModulesOutput parses WMI memory modules output
+func (w *WindowsHardwareCollector) parseWMIMemoryModulesOutput(output string, attributes map[string]string) {
+	lines := strings.Split(output, "\n")
+	var moduleCount int
+	var totalCapacity int64
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Node") {
+			continue
+		}
+
+		fields := strings.Split(line, ",")
+		if len(fields) >= 5 {
+			moduleCount++
+			if capacity, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
+				totalCapacity += capacity
+			}
+
+			// Store first module details as sample
+			if moduleCount == 1 {
+				if fields[1] != "" {
+					attributes["memory_module_capacity"] = fields[1]
+				}
+				if fields[2] != "" {
+					attributes["memory_module_form_factor"] = fields[2]
+				}
+				if fields[3] != "" {
+					attributes["memory_module_type"] = fields[3]
+				}
+				if fields[4] != "" {
+					attributes["memory_module_speed"] = fields[4] + "MHz"
+				}
+			}
+		}
+	}
+
+	if moduleCount > 0 {
+		attributes["memory_module_count"] = fmt.Sprintf("%d", moduleCount)
+		attributes["memory_modules_total_capacity"] = fmt.Sprintf("%d", totalCapacity)
+	}
+}
+
+// parsePowerShellVirtualMemoryOutput parses PowerShell virtual memory output
+func (w *WindowsHardwareCollector) parsePowerShellVirtualMemoryOutput(output string, attributes map[string]string) {
+	lines := strings.Split(output, "\n")
+	for i, line := range lines {
+		if i == 0 { // Skip header
+			continue
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		fields := w.parseCSVLine(line)
+		if len(fields) >= 2 {
+			if fields[0] != "" {
+				attributes["pagefile_allocated_size"] = fields[0] + "MB"
+			}
+			if fields[1] != "" {
+				attributes["pagefile_current_usage"] = fields[1] + "MB"
+			}
+		}
+		break // Only process first pagefile
+	}
+}
+
+// parseWMIDiskOutput parses WMI physical disk output
+func (w *WindowsHardwareCollector) parseWMIDiskOutput(output string, attributes map[string]string) {
+	lines := strings.Split(output, "\n")
+	var diskCount int
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Node") {
+			continue
+		}
+
+		fields := strings.Split(line, ",")
+		if len(fields) >= 5 {
+			diskCount++
+			prefix := fmt.Sprintf("physical_disk_%d", diskCount)
+
+			if fields[1] != "" {
+				attributes[prefix+"_interface"] = fields[1]
+			}
+			if fields[2] != "" {
+				attributes[prefix+"_media_type"] = fields[2]
+			}
+			if fields[3] != "" {
+				attributes[prefix+"_model"] = fields[3]
+			}
+			if fields[4] != "" {
+				if size, err := strconv.ParseInt(fields[4], 10, 64); err == nil {
+					attributes[prefix+"_size_bytes"] = fmt.Sprintf("%d", size)
+					attributes[prefix+"_size_gb"] = fmt.Sprintf("%.2f", float64(size)/1024/1024/1024)
+				}
+			}
+		}
+	}
+
+	if diskCount > 0 {
+		attributes["physical_disk_count"] = fmt.Sprintf("%d", diskCount)
+	}
+}
+
+// parseWMILogicalDiskOutput parses WMI logical disk output
+func (w *WindowsHardwareCollector) parseWMILogicalDiskOutput(output string, attributes map[string]string) {
+	lines := strings.Split(output, "\n")
+	var driveCount int
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Node") {
+			continue
+		}
+
+		fields := strings.Split(line, ",")
+		if len(fields) >= 6 && fields[1] != "" {
+			driveCount++
+			prefix := fmt.Sprintf("logical_drive_%s", strings.ReplaceAll(fields[1], ":", ""))
+
+			attributes[prefix+"_device"] = fields[1]
+			if fields[2] != "" {
+				attributes[prefix+"_drive_type"] = fields[2]
+			}
+			if fields[3] != "" {
+				attributes[prefix+"_filesystem"] = fields[3]
+			}
+			if fields[4] != "" {
+				if freeSpace, err := strconv.ParseInt(fields[4], 10, 64); err == nil {
+					attributes[prefix+"_free_space_gb"] = fmt.Sprintf("%.2f", float64(freeSpace)/1024/1024/1024)
+				}
+			}
+			if fields[5] != "" {
+				if totalSize, err := strconv.ParseInt(fields[5], 10, 64); err == nil {
+					attributes[prefix+"_total_size_gb"] = fmt.Sprintf("%.2f", float64(totalSize)/1024/1024/1024)
+				}
+			}
+		}
+	}
+
+	if driveCount > 0 {
+		attributes["logical_drive_count"] = fmt.Sprintf("%d", driveCount)
+	}
+}
+
+// parsePowerShellDiskUsageOutput parses PowerShell disk usage output
+func (w *WindowsHardwareCollector) parsePowerShellDiskUsageOutput(output string, attributes map[string]string) {
+	lines := strings.Split(output, "\n")
+	for i, line := range lines {
+		if i == 0 { // Skip header
+			continue
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		fields := w.parseCSVLine(line)
+		if len(fields) >= 4 && fields[0] != "" {
+			prefix := fmt.Sprintf("ps_drive_%s", strings.ReplaceAll(fields[0], ":", ""))
+
+			if fields[1] != "" {
+				attributes[prefix+"_filesystem"] = fields[1]
+			}
+			if fields[2] != "" {
+				if freeSpace, err := strconv.ParseInt(fields[2], 10, 64); err == nil {
+					attributes[prefix+"_free_space_gb"] = fmt.Sprintf("%.2f", float64(freeSpace)/1024/1024/1024)
+				}
+			}
+			if fields[3] != "" {
+				if totalSize, err := strconv.ParseInt(fields[3], 10, 64); err == nil {
+					attributes[prefix+"_total_size_gb"] = fmt.Sprintf("%.2f", float64(totalSize)/1024/1024/1024)
+				}
+			}
+		}
+	}
+}
+
+func (w *WindowsHardwareCollector) parseWMIComputerSystemOutput(output string, attributes map[string]string) {
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Node") {
+			continue
+		}
+
+		fields := strings.Split(line, ",")
+		if len(fields) >= 4 {
+			if fields[1] != "" {
+				attributes["system_manufacturer"] = fields[1]
+			}
+			if fields[2] != "" {
+				attributes["system_model"] = fields[2]
+			}
+			if fields[3] != "" {
+				if totalMem, err := strconv.ParseInt(fields[3], 10, 64); err == nil {
+					attributes["system_total_memory"] = fmt.Sprintf("%.2f GB", float64(totalMem)/1024/1024/1024)
+				}
+			}
+		}
+	}
+}
+
+func (w *WindowsHardwareCollector) parseWMIBIOSOutput(output string, attributes map[string]string) {
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Node") {
+			continue
+		}
+
+		fields := strings.Split(line, ",")
+		if len(fields) >= 4 {
+			if fields[1] != "" {
+				attributes["bios_manufacturer"] = fields[1]
+			}
+			if fields[2] != "" {
+				attributes["bios_release_date"] = fields[2]
+			}
+			if fields[3] != "" {
+				attributes["bios_version"] = fields[3]
+			}
+		}
+	}
+}
+
+func (w *WindowsHardwareCollector) parseWMIMotherboardOutput(output string, attributes map[string]string) {
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Node") {
+			continue
+		}
+
+		fields := strings.Split(line, ",")
+		if len(fields) >= 5 {
+			if fields[1] != "" {
+				attributes["motherboard_manufacturer"] = fields[1]
+			}
+			if fields[2] != "" {
+				attributes["motherboard_product"] = fields[2]
+			}
+			if fields[3] != "" {
+				attributes["motherboard_serial"] = fields[3]
+			}
+			if fields[4] != "" {
+				attributes["motherboard_version"] = fields[4]
+			}
+		}
+	}
+}
+
+func (w *WindowsHardwareCollector) parseWMIUUIDOutput(output string, attributes map[string]string) {
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Node") {
+			continue
+		}
+
+		fields := strings.Split(line, ",")
+		if len(fields) >= 2 && fields[1] != "" {
+			attributes["system_uuid"] = fields[1]
+		}
+	}
+}
+
+// collectOSVersionFromRegistry reads Windows version info directly from the
+// registry for the hardware cache fast path. No process spawn required.
+func (w *WindowsHardwareCollector) collectOSVersionFromRegistry(attributes map[string]string) {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE,
+		`SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.QUERY_VALUE)
+	if err != nil {
+		return
+	}
+	defer func() { _ = key.Close() }()
+
+	if product, _, err := key.GetStringValue("ProductName"); err == nil {
+		attributes["windows_caption"] = product
+	}
+
+	if build, _, err := key.GetStringValue("CurrentBuildNumber"); err == nil {
+		attributes["windows_build_number"] = build
+	}
+
+	major, _, majorErr := key.GetIntegerValue("CurrentMajorVersionNumber")
+	minor, _, minorErr := key.GetIntegerValue("CurrentMinorVersionNumber")
+	buildStr, _, buildErr := key.GetStringValue("CurrentBuildNumber")
+	if majorErr == nil && minorErr == nil && buildErr == nil {
+		attributes["windows_version"] = fmt.Sprintf("%d.%d.%s", major, minor, buildStr)
+	}
+}
+
+// parseCSVLine handles basic CSV parsing with quoted fields
+func (w *WindowsHardwareCollector) parseCSVLine(line string) []string {
+	var fields []string
+	var current strings.Builder
+	inQuotes := false
+
+	for _, char := range line {
+		switch char {
+		case '"':
+			inQuotes = !inQuotes
+		case ',':
+			if !inQuotes {
+				fields = append(fields, strings.TrimSpace(current.String()))
+				current.Reset()
+			} else {
+				current.WriteRune(char)
+			}
+		default:
+			current.WriteRune(char)
+		}
+	}
+
+	// Add the last field
+	fields = append(fields, strings.TrimSpace(current.String()))
+
+	return fields
+}

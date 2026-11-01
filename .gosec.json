@@ -1,0 +1,19 @@
+{
+  "_comment": "CFGMS gosec configuration for v0.8.0",
+  "_description": "Public-beta Go security scanning rules",
+  "_usage": "This config is designed to work with command-line flags in Makefile. Use: gosec -conf .gosec.json ./...",
+
+  "global": {
+    "audit": false
+  },
+
+  "severity": "medium",
+  "confidence": "medium",
+
+  "_notes": [
+    "The public-beta gate uses every default rule at Medium severity and confidence or higher",
+    "No rules, generated code, or directories are excluded",
+    "False positives may be suppressed only at the individual finding with a rule-specific security rationale",
+    "Use 'make security-gosec' for production scanning"
+  ]
+}

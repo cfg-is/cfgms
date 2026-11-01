@@ -1,0 +1,77 @@
+# Simple workflow example demonstrating basic workflow engine features
+workflow:
+  name: "simple-file-deployment"
+  description: "Deploy configuration files and create directories"
+  version: "1.0.0"
+  timeout: "10m"
+  
+  variables:
+    config_dir: "/etc/myapp"
+    log_dir: "/var/log/myapp"
+    app_user: "myapp"
+
+  steps:
+    # Create required directories
+    - name: "create-directories"
+      type: "parallel"
+      steps:
+        - name: "create-config-dir"
+          type: "task"
+          module: "directory"
+          config:
+            path: "{{config_dir}}"
+            owner: "root"
+            group: "root"
+            permissions: "755"
+            
+        - name: "create-log-dir"
+          type: "task"
+          module: "directory"
+          config:
+            path: "{{log_dir}}"
+            owner: "{{app_user}}"
+            group: "{{app_user}}"
+            permissions: "755"
+
+    # Deploy configuration files
+    - name: "deploy-config-files"
+      type: "sequential"
+      steps:
+        - name: "deploy-main-config"
+          type: "task"
+          module: "file"
+          config:
+            path: "{{config_dir}}/config.json"
+            content: |
+              {
+                "app_name": "myapp",
+                "log_level": "info",
+                "log_file": "{{log_dir}}/app.log"
+              }
+            owner: "root"
+            group: "root"
+            permissions: "644"
+            
+        - name: "deploy-env-config"
+          type: "task"
+          module: "file"
+          config:
+            path: "{{config_dir}}/environment"
+            content: |
+              CONFIG_DIR={{config_dir}}
+              LOG_DIR={{log_dir}}
+              APP_USER={{app_user}}
+            owner: "root"
+            group: "root"
+            permissions: "644"
+
+    # Set up log file
+    - name: "initialize-log-file"
+      type: "task"
+      module: "file"
+      config:
+        path: "{{log_dir}}/app.log"
+        content: "Application log initialized\n"
+        owner: "{{app_user}}"
+        group: "{{app_user}}"
+        permissions: "644"

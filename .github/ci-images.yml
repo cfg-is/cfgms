@@ -1,0 +1,33 @@
+# Third-party container images that CI pulls from Docker Hub.
+#
+# Each entry is two lines, parsed by line pattern only (no YAML parser is
+# available to scripts/mirror-ci-images.sh or discover-pins.py):
+#
+#   - upstream: <image>:<tag>@sha256:<64 hex>
+#     mirror: <name>
+#
+# `scripts/mirror-ci-images.sh` copies each upstream reference, digest
+# unchanged, to ghcr.io/cfg-is/ci-mirror/<mirror>:<tag>. `--check` fails when a
+# reference in docker-compose.test.yml, a Dockerfile FROM line or a workflow
+# pull_with_retry step is missing from this file or carries a different digest.
+# See docs/development/ci-infrastructure-setup.md.
+- upstream: postgres:15-alpine@sha256:a8e042598834300dfaa17a54f695b87b7f25d3490433bbbe2ef3bffbb9747f24
+  mirror: postgres
+- upstream: timescale/timescaledb:latest-pg15@sha256:6343bdc87ca132c6b53acb26113a6bad1821d188fa39975a745f32ddd9757634
+  mirror: timescaledb
+- upstream: gitea/gitea:1.21@sha256:0056032dc8c6ab70583e4a105b9ee0dc72dce4f4fbc8022c98bcec46b0273883
+  mirror: gitea
+- upstream: redis:7-alpine@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
+  mirror: redis
+- upstream: openbao/openbao:latest@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf
+  mirror: openbao
+- upstream: golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c
+  mirror: golang
+- upstream: golang:1.27.3-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4
+  mirror: golang
+- upstream: alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+  mirror: alpine
+- upstream: debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+  mirror: debian
+- upstream: ghcr.io/versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
+  mirror: versitygw

@@ -1,0 +1,48 @@
+# Authoritative source — also copied to cmd/cfg/cmd/templates/promote-hv-role.yaml
+# (Issue #2670) for CLI embedding; keep both in sync.
+workflow:
+  name: promote-hv-role
+  description: >
+    Hyper-V VM promotion from standalone to Failover Cluster role: writes
+    ha_role into device-scope config [set_ha_role], soaks to register the
+    cluster VM role, then moves the VM resource to cluster-policies scope
+    [move_resource_to_cluster].
+
+    Soak delay is a fixed wait; SetConfiguration triggers immediate fanout
+    push so the steward does not poll before acting. Increase delay at
+    execute time for slow cluster registration; default 30s is intentionally
+    conservative.
+
+    Halts [on_failure: stop] if set_ha_role fails; no cluster-scope write
+    occurs when device-scope config is incomplete.
+
+    Operator setup: 1. Supply vm_name, steward_id, cluster_name, tenant_id
+    via cfg workflow promote-hv-role or the REST API execute endpoint
+    [variables map]; do not edit placeholders. 2. Target steward must be
+    registered and manage the VM. 3. Soak delay [step 2, 30s] is fixed;
+    Epic 2520 tracks convergence-poll gaps.
+
+    Durability: runs on the in-memory engine. Restart loses progress; re-run.
+    Config writes before restart are durable [git-backed].
+  version: "1.0.0"
+  timeout: 10m
+  on_failure: stop
+
+  variables:
+    vm_name: ""
+    steward_id: ""
+    cluster_name: ""
+    tenant_id: ""
+
+  steps:
+    - name: set-ha-role
+      type: set_ha_role
+
+    - name: soak-before-cluster-move
+      type: delay
+      delay:
+        duration: 30s
+        message: "Waiting for steward convergence loop to register the cluster VM role before moving resource to cluster scope"
+
+    - name: move-to-cluster
+      type: move_resource_to_cluster

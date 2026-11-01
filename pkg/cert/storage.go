@@ -1,0 +1,579 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package cert
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/security"
+)
+
+// serialNumberPattern bounds the accepted shape of a certificate serial number
+// before it is ever joined into a filesystem path. Certificate serials are
+// generated internally (pkg/cert issuance, (*big.Int).String()) as base-10
+// digit strings, and test/fixture serials additionally use hyphenated
+// alphanumeric labels — this is intentionally conservative: alphanumeric,
+// starting with an alphanumeric character, with only internal hyphens
+// allowed, 1-128 chars. No path separator, ".", or other filesystem
+// metacharacter is in the accepted set, so no traversal sequence can ever
+// reach filepath.Join.
+var serialNumberPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,127}$`)
+
+// resolveCertDir validates serialNumber against serialNumberPattern and joins
+// it onto basePath, then confirms — after symlink resolution — that the
+// result is still contained within basePath. filepath.Clean alone does not
+// satisfy this: it collapses ".." segments lexically but does not detect a
+// symlink inside basePath that points outside of it. GetCertificate and
+// DeleteCertificate take a serial number from an HTTP path parameter, so an
+// unvalidated value here is an arbitrary-path read/delete primitive for any
+// caller holding certificate-read permission.
+func resolveCertDir(basePath, serialNumber string) (string, error) {
+	if !serialNumberPattern.MatchString(serialNumber) {
+		return "", fmt.Errorf("invalid certificate serial number")
+	}
+
+	certDir := filepath.Join(basePath, serialNumber)
+
+	resolvedBase, err := filepath.EvalSymlinks(basePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve storage base path: %w", err)
+	}
+
+	// The certificate directory may not exist yet (StoreCertificate) or may
+	// exist (GetCertificate/DeleteCertificate). Resolve symlinks on whichever
+	// deepest existing ancestor there is, then re-append the unresolved tail,
+	// so a not-yet-created directory doesn't fail EvalSymlinks outright.
+	resolvedDir, err := resolveExistingAncestorSymlinks(certDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve certificate path: %w", err)
+	}
+
+	if resolvedDir != resolvedBase &&
+		!strings.HasPrefix(resolvedDir, resolvedBase+string(os.PathSeparator)) {
+		return "", fmt.Errorf("certificate path escapes storage root")
+	}
+
+	// Return the resolved directory that was just checked, so later reads,
+	// writes and deletes do not walk the original path again. The leaf is
+	// rebuilt from the resolved base: the final component must not itself be
+	// a link or reparse point (a link to another certificate's directory
+	// inside the base passes the containment check above).
+	resolvedCertDir := filepath.Join(resolvedBase, serialNumber)
+	if err := refuseLinkedLeaf(resolvedCertDir); err != nil {
+		return "", fmt.Errorf("certificate directory is not a plain directory: %w", err)
+	}
+
+	return resolvedCertDir, nil
+}
+
+// errLinkedLeaf reports a symlink or reparse point where a plain entry is required.
+var errLinkedLeaf = errors.New("path is a symlink or reparse point")
+
+// refuseLinkedLeaf returns an error if path exists and is a symlink or other
+// irregular entry (reparse point). A missing path is accepted; any other Lstat
+// failure is returned (fail closed).
+func refuseLinkedLeaf(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return errLinkedLeaf
+	}
+	return nil
+}
+
+// writeCertFile writes one per-certificate file after refusing an existing link
+// at the leaf. SecureWriteFileWithPerms resolves the path before writing, so the
+// explicit Lstat of the unresolved leaf is what refuses a link to a target
+// inside the base; its no-follow open covers a link swapped in afterwards.
+func writeCertFile(certDir, name string, data []byte) error {
+	if err := refuseLinkedLeaf(filepath.Join(certDir, name)); err != nil {
+		return err
+	}
+	return security.SecureWriteFileWithPerms(certDir, name, data, 0600)
+}
+
+// resolveExistingAncestorSymlinks resolves symlinks on the deepest existing
+// ancestor of path and re-joins the remaining (possibly nonexistent) suffix,
+// so a path containment check can be performed before the target directory
+// has necessarily been created.
+func resolveExistingAncestorSymlinks(path string) (string, error) {
+	cleaned := filepath.Clean(path)
+	suffix := ""
+	current := cleaned
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			return filepath.Join(resolved, suffix), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", err
+		}
+		suffix = filepath.Join(filepath.Base(current), suffix)
+		current = parent
+	}
+}
+
+// FileStore provides filesystem-based certificate storage
+type FileStore struct {
+	mu       sync.RWMutex
+	basePath string
+	// Disk-synchronised index: authoritative in-memory snapshot of PEM files on disk. Populated by loadCertificates on init and kept consistent on every StoreCertificate/DeleteCertificate call. Not a cache — migrating to pkg/cache would lose the write-through-to-disk invariant.
+	certs map[string]*CertificateInfo // indexed by serial number
+}
+
+// NewFileStore creates a new filesystem-based certificate store
+func NewFileStore(basePath string) (*FileStore, error) {
+	if basePath == "" {
+		return nil, fmt.Errorf("base path is required")
+	}
+
+	// Create base directory if it doesn't exist
+	if err := os.MkdirAll(basePath, 0750); err != nil {
+		return nil, fmt.Errorf("failed to create storage directory: %w", err)
+	}
+
+	store := &FileStore{
+		basePath: basePath,
+		certs:    make(map[string]*CertificateInfo),
+	}
+
+	// Load existing certificates
+	if err := store.loadCertificates(); err != nil {
+		return nil, fmt.Errorf("failed to load existing certificates: %w", err)
+	}
+
+	return store, nil
+}
+
+// StoreCertificate stores a certificate in the filesystem
+func (fs *FileStore) StoreCertificate(cert *Certificate) error {
+	if cert == nil {
+		return fmt.Errorf("certificate is required")
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	// Create certificate-specific directory. Routed through the same
+	// resolveCertDir validation as GetCertificate/DeleteCertificate so a
+	// serial this function accepts is always one those two can later reach:
+	// SerialNumber is normally an internally generated (*big.Int).String()
+	// decimal digit string, but a parsed certificate's DER serial can have
+	// its high bit set and stringify with a leading '-' (pkg/cert/manager.go's
+	// x509Cert.SerialNumber.String()) — without this check that would store
+	// successfully here and then be permanently unreadable/undeletable.
+	certDir, err := resolveCertDir(fs.basePath, cert.SerialNumber)
+	if err != nil {
+		return fmt.Errorf("invalid certificate serial number: %w", err)
+	}
+	if err := os.MkdirAll(certDir, 0750); err != nil {
+		return fmt.Errorf("failed to create certificate directory: %w", err)
+	}
+
+	// Store certificate PEM
+	if err := writeCertFile(certDir, "cert.pem", cert.CertificatePEM); err != nil {
+		return fmt.Errorf("failed to write certificate: %w", err)
+	}
+
+	// Store the issuer chain PEM (if any). Only present when this certificate was
+	// issued by an intermediate CA (Issue #3778); absent for every certificate
+	// issued today.
+	if len(cert.IssuerChainPEM) > 0 {
+		if err := writeCertFile(certDir, "chain.pem", cert.IssuerChainPEM); err != nil {
+			return fmt.Errorf("failed to write issuer chain: %w", err)
+		}
+	}
+
+	// Store private key PEM (if available) with restricted permissions
+	if cert.PrivateKeyPEM != nil {
+		if err := writeCertFile(certDir, "key.pem", cert.PrivateKeyPEM); err != nil {
+			return fmt.Errorf("failed to write private key: %w", err)
+		}
+	}
+
+	// Store certificate metadata
+	metadata := &CertificateInfo{
+		Type:                cert.Type,
+		CommonName:          cert.CommonName,
+		SerialNumber:        cert.SerialNumber,
+		CreatedAt:           cert.CreatedAt,
+		ExpiresAt:           cert.ExpiresAt,
+		IsValid:             cert.IsValid,
+		Fingerprint:         cert.Fingerprint,
+		Issuer:              cert.Issuer,
+		ClientID:            cert.ClientID,
+		DaysUntilExpiration: int(time.Until(cert.ExpiresAt).Hours() / 24),
+		NeedsRenewal:        int(time.Until(cert.ExpiresAt).Hours()/24) < 30,
+	}
+
+	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	if err := writeCertFile(certDir, "metadata.json", metadataJSON); err != nil {
+		return fmt.Errorf("failed to write metadata: %w", err)
+	}
+
+	// Update in-memory cache
+	fs.certs[cert.SerialNumber] = metadata
+
+	return nil
+}
+
+// GetCertificate retrieves a certificate by serial number
+func (fs *FileStore) GetCertificate(serialNumber string) (*Certificate, error) {
+	if serialNumber == "" {
+		return nil, fmt.Errorf("serial number is required")
+	}
+
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	certDir, err := resolveCertDir(fs.basePath, serialNumber)
+	if err != nil {
+		// serialNumber failed format/containment validation here — it is
+		// known malformed or hostile input (an HTTP path parameter), unlike
+		// the not-found branch below where it already matched
+		// serialNumberPattern. Do not echo it back.
+		return nil, fmt.Errorf("certificate not found")
+	}
+
+	// Check if certificate directory exists
+	if _, err := os.Stat(certDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("certificate not found: %s", serialNumber)
+	}
+
+	// Load certificate PEM
+	certPEM, _, err := security.ReadRegularFileNoSymlinks(certDir, "cert.pem")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read certificate: %w", err)
+	}
+
+	// Load private key PEM (if exists)
+	keyPEM, _, err := security.ReadRegularFileNoSymlinks(certDir, "key.pem")
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to read private key: %w", err)
+		}
+		keyPEM = nil
+	}
+
+	// Load issuer chain PEM (if exists)
+	issuerChainPEM, _, err := security.ReadRegularFileNoSymlinks(certDir, "chain.pem")
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to read issuer chain: %w", err)
+		}
+		issuerChainPEM = nil
+	}
+
+	// Load metadata
+	metadataJSON, _, err := security.ReadRegularFileNoSymlinks(certDir, "metadata.json")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read metadata: %w", err)
+	}
+
+	var metadata CertificateInfo
+	if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
+	}
+
+	// Recompute dynamic validity fields from the current wall clock so that a
+	// cert stored as "valid" does not appear valid after it has expired.
+	now := time.Now()
+	metadata.IsValid = now.Before(metadata.ExpiresAt) && now.After(metadata.CreatedAt)
+	metadata.DaysUntilExpiration = int(time.Until(metadata.ExpiresAt).Hours() / 24)
+	metadata.NeedsRenewal = metadata.DaysUntilExpiration < 30
+
+	return &Certificate{
+		Type:           metadata.Type,
+		CommonName:     metadata.CommonName,
+		SerialNumber:   metadata.SerialNumber,
+		CreatedAt:      metadata.CreatedAt,
+		ExpiresAt:      metadata.ExpiresAt,
+		IsValid:        metadata.IsValid,
+		CertificatePEM: certPEM,
+		IssuerChainPEM: issuerChainPEM,
+		PrivateKeyPEM:  keyPEM,
+		Fingerprint:    metadata.Fingerprint,
+		Issuer:         metadata.Issuer,
+		ClientID:       metadata.ClientID,
+	}, nil
+}
+
+// GetCertificateByCommonName retrieves certificates by common name
+func (fs *FileStore) GetCertificateByCommonName(commonName string) ([]*CertificateInfo, error) {
+	if commonName == "" {
+		return nil, fmt.Errorf("common name is required")
+	}
+
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	var results []*CertificateInfo
+	for _, cert := range fs.certs {
+		if cert.CommonName == commonName {
+			// Create a copy to avoid mutation
+			certCopy := *cert
+			// Recompute dynamic fields so callers always see current validity.
+			certCopy.DaysUntilExpiration = int(time.Until(certCopy.ExpiresAt).Hours() / 24)
+			certCopy.NeedsRenewal = certCopy.DaysUntilExpiration < 30
+			certCopy.IsValid = time.Now().Before(certCopy.ExpiresAt) && time.Now().After(certCopy.CreatedAt)
+			results = append(results, &certCopy)
+		}
+	}
+
+	// Sort by creation date (newest first)
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].CreatedAt.After(results[j].CreatedAt)
+	})
+
+	return results, nil
+}
+
+// getCertificatesByType retrieves certificates by type (package-private; external callers use Manager.GetCurrentCertForPurpose or Manager.GetAllValidCertificatesForPurpose)
+func (fs *FileStore) getCertificatesByType(certType CertificateType) ([]*CertificateInfo, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	var results []*CertificateInfo
+	for _, cert := range fs.certs {
+		if cert.Type == certType {
+			// Create a copy to avoid mutation
+			certCopy := *cert
+			// Recompute dynamic fields so callers always see current validity.
+			certCopy.DaysUntilExpiration = int(time.Until(certCopy.ExpiresAt).Hours() / 24)
+			certCopy.NeedsRenewal = certCopy.DaysUntilExpiration < 30
+			certCopy.IsValid = time.Now().Before(certCopy.ExpiresAt) && time.Now().After(certCopy.CreatedAt)
+			results = append(results, &certCopy)
+		}
+	}
+
+	// Sort by creation date (newest first)
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].CreatedAt.After(results[j].CreatedAt)
+	})
+
+	return results, nil
+}
+
+// ListCertificates returns all certificates
+func (fs *FileStore) ListCertificates() ([]*CertificateInfo, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	var results []*CertificateInfo
+	for _, cert := range fs.certs {
+		// Skip CA certificates - they are handled separately
+		if cert.Type == CertificateTypeCA {
+			continue
+		}
+
+		// Create a copy to avoid mutation
+		certCopy := *cert
+		// Update dynamic fields
+		certCopy.DaysUntilExpiration = int(time.Until(certCopy.ExpiresAt).Hours() / 24)
+		certCopy.NeedsRenewal = certCopy.DaysUntilExpiration < 30
+		certCopy.IsValid = time.Now().Before(certCopy.ExpiresAt) && time.Now().After(certCopy.CreatedAt)
+
+		results = append(results, &certCopy)
+	}
+
+	// Sort by creation date (newest first)
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].CreatedAt.After(results[j].CreatedAt)
+	})
+
+	return results, nil
+}
+
+// DeleteCertificate removes a certificate from storage
+func (fs *FileStore) DeleteCertificate(serialNumber string) error {
+	if serialNumber == "" {
+		return fmt.Errorf("serial number is required")
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	certDir, err := resolveCertDir(fs.basePath, serialNumber)
+	if err != nil {
+		// See the identical comment in GetCertificate: serialNumber here is
+		// known malformed/hostile, so it is not echoed back.
+		return fmt.Errorf("certificate not found")
+	}
+
+	// Check if certificate directory exists
+	if _, err := os.Stat(certDir); os.IsNotExist(err) {
+		return fmt.Errorf("certificate not found: %s", serialNumber)
+	}
+
+	// Remove certificate directory and all files
+	if err := os.RemoveAll(certDir); err != nil {
+		return fmt.Errorf("failed to remove certificate directory: %w", err)
+	}
+
+	// Remove from in-memory cache
+	delete(fs.certs, serialNumber)
+
+	return nil
+}
+
+// RemoveSigningKeyFile overwrites and then removes the private key file of one
+// certificate, keeping cert.pem, the chain and the metadata so the public half
+// stays visible to trust-path listings. The overwrite is best effort: it does not
+// defeat media-level recovery (journaling filesystems, SSD wear levelling).
+// Removing a key that is already gone is not an error.
+func (fs *FileStore) RemoveSigningKeyFile(serialNumber string) error {
+	if serialNumber == "" {
+		return fmt.Errorf("serial number is required")
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	certDir, err := resolveCertDir(fs.basePath, serialNumber)
+	if err != nil {
+		return fmt.Errorf("certificate not found")
+	}
+	keyPath := filepath.Join(certDir, "key.pem")
+	info, err := os.Lstat(keyPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to stat private key: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("private key path is not a regular file")
+	}
+
+	// #nosec G304 - path is resolved and contained by resolveCertDir
+	f, err := os.OpenFile(keyPath, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("failed to open private key for overwrite: %w", err)
+	}
+	_, werr := f.Write(make([]byte, info.Size()))
+	if werr == nil {
+		werr = f.Sync()
+	}
+	cerr := f.Close()
+	if werr != nil {
+		return fmt.Errorf("failed to overwrite private key: %w", werr)
+	}
+	if cerr != nil {
+		return fmt.Errorf("failed to close private key: %w", cerr)
+	}
+	if err := os.Remove(keyPath); err != nil {
+		return fmt.Errorf("failed to remove private key: %w", err)
+	}
+	return nil
+}
+
+// GetExpiringCertificates returns certificates expiring within the specified days
+func (fs *FileStore) GetExpiringCertificates(withinDays int) ([]*CertificateInfo, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	cutoffDate := time.Now().Add(time.Duration(withinDays) * 24 * time.Hour)
+
+	var results []*CertificateInfo
+	for _, cert := range fs.certs {
+		if cert.ExpiresAt.Before(cutoffDate) && cert.ExpiresAt.After(time.Now()) {
+			// Create a copy to avoid mutation
+			certCopy := *cert
+			certCopy.DaysUntilExpiration = int(time.Until(certCopy.ExpiresAt).Hours() / 24)
+			certCopy.NeedsRenewal = true
+
+			results = append(results, &certCopy)
+		}
+	}
+
+	// Sort by expiration date (soonest first)
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].ExpiresAt.Before(results[j].ExpiresAt)
+	})
+
+	return results, nil
+}
+
+// loadCertificates loads all certificates from storage into memory
+func (fs *FileStore) loadCertificates() error {
+	// Read all directories in base path
+	entries, err := os.ReadDir(fs.basePath)
+	if err != nil {
+		return fmt.Errorf("failed to read storage directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		serialNumber := entry.Name()
+
+		// Skip if not a valid serial number directory
+		if strings.Contains(serialNumber, ".") {
+			continue
+		}
+
+		// Obtain the directory through the same link-refusing path as every
+		// other access; a linked or otherwise unacceptable directory is skipped.
+		certDir, err := resolveCertDir(fs.basePath, serialNumber)
+		if err != nil {
+			slog.Warn("skipping certificate directory",
+				"serial", logging.SanitizeLogValue(serialNumber),
+				"error", logging.SanitizeLogValue(err.Error()))
+			continue
+		}
+
+		metadataJSON, _, err := security.ReadRegularFileNoSymlinks(certDir, "metadata.json")
+		if err != nil {
+			continue // Skip directories without readable metadata
+		}
+
+		var metadata CertificateInfo
+		if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+			continue // Skip if metadata is invalid
+		}
+
+		// Recompute dynamic fields so the cache reflects current validity,
+		// not the snapshot values written at store time.
+		metadata.DaysUntilExpiration = int(time.Until(metadata.ExpiresAt).Hours() / 24)
+		metadata.NeedsRenewal = metadata.DaysUntilExpiration < 30
+		metadata.IsValid = time.Now().Before(metadata.ExpiresAt) && time.Now().After(metadata.CreatedAt)
+
+		// Add to in-memory cache
+		fs.certs[serialNumber] = &metadata
+	}
+
+	return nil
+}
+
+// GetStoragePath returns the base storage path
+func (fs *FileStore) GetStoragePath() string {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	return fs.basePath
+}

@@ -1,0 +1,11 @@
+# Basic test configuration for script module
+content: |
+  echo "Hello from CFGMS script execution"
+  echo "Current directory: $(pwd)"
+shell: bash
+timeout: 30s
+signing_policy: none
+description: "Basic test script for validation"
+environment:
+  TEST_VAR: "test_value"
+  CFGMS_TEST: "true"

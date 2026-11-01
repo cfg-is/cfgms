@@ -1,0 +1,343 @@
+name: Documentation Validation
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    # Run when documentation, agent definitions, or workflow files change
+    paths:
+      - 'docs/**'
+      - '*.md'
+      - '.claude/**/*.md'   # .claude markdown only — executable pipeline code under .claude/ (scripts, workflows) gets real CI (Issue #2586)
+      - '.gitignore'
+      - '.editorconfig'
+      - 'LICENSE'
+      - '.github/workflows/*.yml'
+  push:
+    branches:
+      - main
+    # Same paths filter on push
+    paths:
+      - 'docs/**'
+      - '*.md'
+      - '.claude/**/*.md'   # .claude markdown only — executable pipeline code under .claude/ (scripts, workflows) gets real CI (Issue #2586)
+      - '.gitignore'
+      - '.editorconfig'
+      - 'LICENSE'
+      - '.github/workflows/*.yml'
+  # NO merge_group trigger, deliberately.
+  #
+  # Every job below is either `pull_request`/`push`-gated or a docs-only stub for a
+  # required check context. A job whose `if:` is false still posts a check run with
+  # conclusion `skipped`, and GitHub accepts a `skipped` run as satisfying a required
+  # status check. While this workflow triggered on merge_group, its skipped `Build
+  # Gate` stub was the sole poster of that context during the window when the real
+  # `build-gate` job (needs: [native-builds, integration-tests]) had not created a
+  # check run yet — so the queue merged before the real gate ever reported.
+  #
+  # Measured on queue commit 5b0518ab: `Build Gate` had exactly one check run, this
+  # workflow's `skipped` one; PR #3501 merged at 00:15:21Z; `Native Build (Linux)`
+  # FAILED at 00:15:31Z with the native builds still running. Removing the trigger
+  # leaves the context unreported until the real gate posts, which is what makes the
+  # queue wait.
+  #
+  # Nothing here is needed in the queue: every required context has a real queue-side
+  # poster (test-suite.yml, production-gates.yml, cross-platform-build.yml,
+  # security-scan.yml, codeql-analysis.yml, zizmor.yml, frontend-ci.yml,
+  # cla-check.yml), each under a bare `merge_group:` trigger with no paths filter, so
+  # even a docs-only queue entry is fully covered.
+  #
+  # DO NOT add `merge_group:` here.
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  # Validate CLAUDE.md structure and links
+  validate-claude-md:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate CLAUDE.md Structure
+        run: |
+          echo "## CLAUDE.md Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check essential content exists (concept-based, not exact heading names)
+          errors=0
+
+          check_content() {
+            local description="$1"
+            local pattern="$2"
+            if grep -qi "$pattern" CLAUDE.md; then
+              echo "✅ $description" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Missing: $description (pattern: $pattern)" >> $GITHUB_STEP_SUMMARY
+              errors=$((errors + 1))
+            fi
+          }
+
+          check_content "Project overview" "CFGMS"
+          check_content "Agent workflow" "CFGMS_AGENT_MODE"
+          check_content "Slash commands" "story-start\|story-commit\|story-complete"
+          check_content "Git workflow (PRs target develop)" "base develop"
+          check_content "Central providers" "central provider"
+          check_content "Testing standards" "TDD\|real.*components\|no.*mock"
+          check_content "DSD principles" "Desired State"
+          check_content "Security rules" "mTLS\|mutual TLS"
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ $errors -eq 0 ]; then
+            echo "✅ CLAUDE.md structure validation passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ CLAUDE.md validation failed: $errors missing sections" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+      - name: Check Internal File References
+        run: |
+          echo "## Internal Link Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Extract file paths from markdown links (excluding URLs)
+          # Format: [text](path/to/file.md)
+          broken_links=0
+
+          while IFS= read -r file; do
+            # Skip URLs and anchors
+            if [[ "$file" =~ ^http ]] || [[ "$file" =~ ^# ]]; then
+              continue
+            fi
+
+            # Strip anchor fragment (#section) before checking file existence
+            file_path="${file%%#*}"
+            if [ ! -f "$file_path" ] && [ ! -d "$file_path" ]; then
+              echo "❌ Broken link: $file" >> $GITHUB_STEP_SUMMARY
+              broken_links=$((broken_links + 1))
+            fi
+          done < <(grep -oP '\[.*?\]\(\K[^)]+' CLAUDE.md 2>/dev/null || true)
+
+          if [ $broken_links -eq 0 ]; then
+            echo "✅ All internal file references are valid" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "❌ Found $broken_links broken link(s)" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+  # Validate roadmap structure
+  validate-roadmap:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate Roadmap Format
+        run: |
+          echo "## Roadmap Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check for required sections
+          if grep -q "## Current Status" docs/product/roadmap.md; then
+            echo "✅ Current Status section found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️  Missing Current Status section" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check for Epic structure
+          if grep -q "### Epic [0-9]" docs/product/roadmap.md; then
+            echo "✅ Epic structure found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️  No Epic structure found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Count completed vs pending stories
+          completed=$(grep -c "\- \[x\]" docs/product/roadmap.md || echo "0")
+          pending=$(grep -c "\- \[ \]" docs/product/roadmap.md || echo "0")
+          total=$((completed + pending))
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Roadmap Statistics" >> $GITHUB_STEP_SUMMARY
+          echo "- Completed Stories: $completed" >> $GITHUB_STEP_SUMMARY
+          echo "- Pending Stories: $pending" >> $GITHUB_STEP_SUMMARY
+          echo "- Total Stories: $total" >> $GITHUB_STEP_SUMMARY
+
+          if [ $total -gt 0 ]; then
+            progress=$((completed * 100 / total))
+            echo "- Progress: $progress%" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # Documentation summary
+  documentation-summary:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    needs: [validate-claude-md, validate-roadmap]
+    if: always()
+    steps:
+      - name: Documentation Validation Summary
+        run: |
+          echo "## Documentation Validation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ needs.validate-claude-md.result }}" == "success" ]]; then
+            echo "✅ **CLAUDE.md Validation**: Passed" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.validate-claude-md.result }}" == "skipped" ]]; then
+            echo "⏭️  **CLAUDE.md Validation**: Skipped (merge_group)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **CLAUDE.md Validation**: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [[ "${{ needs.validate-roadmap.result }}" == "success" ]]; then
+            echo "✅ **Roadmap Validation**: Passed" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.validate-roadmap.result }}" == "skipped" ]]; then
+            echo "⏭️  **Roadmap Validation**: Skipped (merge_group)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Roadmap Validation**: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Documentation Best Practices" >> $GITHUB_STEP_SUMMARY
+          echo "- Keep documentation in sync with code changes" >> $GITHUB_STEP_SUMMARY
+          echo "- Update CLAUDE.md when changing development workflow" >> $GITHUB_STEP_SUMMARY
+          echo "- Mark roadmap items complete when stories are merged" >> $GITHUB_STEP_SUMMARY
+          echo "- Use relative links for internal documentation" >> $GITHUB_STEP_SUMMARY
+
+  # Stub jobs for branch protection requirements on docs-only PRs
+  # These provide the required check names so docs-only PRs can merge
+  # without waiting for code validation workflows that won't run
+
+  # `unit-tests` no longer has a stub here (Issue #4174). test-suite.yml is no
+  # longer paths-ignored for docs and owns the context unconditionally — its
+  # `changes` job detects a docs-only PR and its aggregator posts a passing
+  # `unit-tests` without running the five legs, so this workflow posting the
+  # same context too would just reintroduce a second, race-prone poster of a
+  # PR-real context. See test-suite.yml's `changes` job and CLAUDE.md
+  # "Stub exclusivity" for why this had to move rather than stay duplicated.
+
+  # QUEUE-REAL context (#2595): the real security-deployment-gate scan runs in the
+  # merge queue (production-gates.yml). This stub only covers docs-only PRs, where
+  # that workflow is paths-ignored. It must NOT fire on merge_group — the real job
+  # is the sole queue poster there. (Code PRs are covered by production-gates.yml's
+  # security-deployment-gate-pr-stub.)
+  security-deployment-gate:
+    name: security-deployment-gate
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Docs-only security validation
+        run: |
+          echo "✅ Documentation-only PR detected"
+          echo "   Skipping security scans (no code changes)"
+          echo "   No security vulnerabilities possible in docs-only changes"
+
+  # QUEUE-REAL context (#3189): cross-platform-build.yml's build-gate job
+  # (if: always() && (merge_group || workflow_dispatch)) is the sole queue-side poster
+  # for this context. This stub only covers docs-only PRs, where cross-platform-build.yml
+  # is paths-ignored. It must NOT fire on merge_group: firing there posted a green
+  # Build Gate two minutes before the real gate finished, and PR #3490 merged on this
+  # stub while Native Build (Windows) was still running.
+  build-gate:
+    name: Build Gate
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Docs-only build validation
+        run: |
+          echo "✅ Documentation-only PR detected"
+          echo "   Skipping build validation (no code changes)"
+          echo "   No compilation required for documentation updates"
+
+  # QUEUE-REAL context (#3189): test-suite.yml's integration-tests job
+  # (if: always() && (workflow_dispatch || merge_group || refs/heads/main)) is the sole
+  # queue-side poster for this context. This stub only covers docs-only PRs. Since
+  # #4174, test-suite.yml no longer has a workflow-level paths-ignore (it also owns
+  # `unit-tests`, which can't tolerate one); its own PR-side `integration-tests-pr-stub`
+  # instead skips on a docs-only PR via that workflow's `changes` job, which keeps this
+  # stub the sole PR-side poster there, same as before. It must NOT fire on merge_group.
+  integration-tests:
+    name: integration-tests
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Docs-only integration test validation
+        run: |
+          echo "Documentation-only PR detected"
+          echo "   Skipping integration tests (no code changes)"
+          echo "   No integration test validation required for docs-only changes"
+
+  # QUEUE-REAL context (#3189): production-gates.yml's integration-tests-controller job
+  # (if: merge_group || refs/heads/main || workflow_dispatch) is the sole queue-side
+  # poster for this context. This stub only covers docs-only PRs, where
+  # production-gates.yml is paths-ignored. It must NOT fire on merge_group.
+  integration-tests-controller:
+    name: Controller Integration Tests (Linux)
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Docs-only controller integration test validation
+        run: |
+          echo "✅ Documentation-only PR detected"
+          echo "   Skipping controller integration tests (no code changes)"
+          echo "   No controller test validation required for docs-only changes"
+
+  # QUEUE-REAL context (#2595): the real trivy-scan runs in the merge queue
+  # (security-scan.yml). This stub only covers docs-only PRs; it must NOT fire on
+  # merge_group. (Code PRs are covered by security-scan.yml's trivy-scan-pr-stub.)
+  trivy-scan:
+    name: trivy-scan
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Docs-only Trivy validation
+        run: |
+          echo "✅ Documentation-only PR detected"
+          echo "   Skipping Trivy filesystem scan (no code or Dockerfile changes)"
+          echo "   No vulnerability scanning required for docs-only changes"
+          echo "   Matches the check context name emitted by security-scan.yml's"
+          echo "   real trivy-scan job, so the develop ruleset's required check"
+          echo "   is satisfied uniformly for both code PRs and docs-only PRs."
+
+  # Docs-only stub for the `security-validation` aggregate context.
+  # security-scan.yml is paths-ignored for pure documentation changes, so its
+  # security-validation job never posts there. Without this stub the context
+  # would be permanently absent on a docs-only PR, which blocks the merge
+  # outright once security-validation is a required check.
+  #
+  # Same shape as the trivy-scan stub above: pull_request only, never
+  # merge_group — in the queue the real job in security-scan.yml is the sole
+  # poster. On a PR touching .github/workflows/*.yml both this workflow and
+  # security-scan.yml run, so both post this context; that overlap is inherent
+  # to the existing stub design and is shared by trivy-scan and Build Gate.
+  # `unit-tests` no longer has this overlap — see #4174.
+  security-validation:
+    name: security-validation
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Docs-only security validation aggregate
+        run: |
+          echo "✅ Documentation-only PR detected"
+          echo "   security-scan.yml is paths-ignored for documentation changes,"
+          echo "   so there are no scan results to aggregate."
+          echo "   Posting the security-validation context so the required check"
+          echo "   is satisfied uniformly for both code PRs and docs-only PRs."

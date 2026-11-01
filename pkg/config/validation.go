@@ -1,0 +1,408 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+// Package config provides configuration validation before storage persistence
+package config
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
+)
+
+// ValidationManager handles configuration validation before storage
+type ValidationManager struct {
+	configStore cfgconfig.ConfigStore
+	tenantStore business.TenantStore
+}
+
+// NewValidationManager creates a new validation manager
+func NewValidationManager(configStore cfgconfig.ConfigStore, tenantStore business.TenantStore) *ValidationManager {
+	return &ValidationManager{
+		configStore: configStore,
+		tenantStore: tenantStore,
+	}
+}
+
+// ValidationResult represents the result of configuration validation
+type ValidationResult struct {
+	Valid            bool                        `json:"valid"`
+	Errors           []ValidationError           `json:"errors"`
+	Warnings         []ValidationError           `json:"warnings"`
+	TenantChecks     *TenantValidationResult     `json:"tenant_checks,omitempty"`
+	DependencyChecks *DependencyValidationResult `json:"dependency_checks,omitempty"`
+	StorageChecks    *StorageValidationResult    `json:"storage_checks,omitempty"`
+}
+
+// ValidationError represents a specific validation error or warning
+type ValidationError struct {
+	Field      string `json:"field"`
+	Message    string `json:"message"`
+	Code       string `json:"code"`
+	Level      string `json:"level"` // error, warning, info
+	Suggestion string `json:"suggestion,omitempty"`
+}
+
+// TenantValidationResult represents tenant-specific validation results
+type TenantValidationResult struct {
+	TenantExists      bool   `json:"tenant_exists"`
+	TenantID          string `json:"tenant_id"`
+	InheritanceValid  bool   `json:"inheritance_valid"`
+	ConflictsDetected int    `json:"conflicts_detected"`
+}
+
+// DependencyValidationResult represents module dependency validation
+type DependencyValidationResult struct {
+	MissingModules     []string `json:"missing_modules"`
+	ConflictingModules []string `json:"conflicting_modules"`
+	UnusedModules      []string `json:"unused_modules"`
+}
+
+// StorageValidationResult represents storage-level validation
+type StorageValidationResult struct {
+	FormatValid      bool `json:"format_valid"`
+	ChecksumValid    bool `json:"checksum_valid"`
+	SizeWithinLimits bool `json:"size_within_limits"`
+	DataSize         int  `json:"data_size"`
+}
+
+// ValidateConfiguration performs comprehensive configuration validation
+func (vm *ValidationManager) ValidateConfiguration(ctx context.Context, tenantID, stewardID string, config *stewardconfig.StewardConfig) *ValidationResult {
+	result := &ValidationResult{
+		Valid:    true,
+		Errors:   []ValidationError{},
+		Warnings: []ValidationError{},
+	}
+
+	// Basic steward configuration validation
+	if err := stewardconfig.ValidateConfiguration(*config); err != nil {
+		result.Valid = false
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "steward_config",
+			Message: fmt.Sprintf("Basic validation failed: %v", err),
+			Code:    "BASIC_VALIDATION_FAILED",
+			Level:   "critical",
+		})
+	}
+
+	// Validate tenant context
+	tenantChecks, tenantErr := vm.validateTenantContext(ctx, tenantID, stewardID, config)
+	if tenantErr != nil {
+		result.Valid = false
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "tenant_id",
+			Message: fmt.Sprintf("Tenant lookup failed: %v", tenantErr),
+			Code:    "TENANT_LOOKUP_ERROR",
+			Level:   "error",
+		})
+		result.TenantChecks = &TenantValidationResult{TenantID: tenantID}
+	} else {
+		result.TenantChecks = tenantChecks
+	}
+
+	// Validate module dependencies
+	result.DependencyChecks = vm.validateDependencies(ctx, config)
+	if len(result.DependencyChecks.MissingModules) > 0 {
+		result.Warnings = append(result.Warnings, ValidationError{
+			Field:      "modules",
+			Message:    fmt.Sprintf("Missing modules: %s", strings.Join(result.DependencyChecks.MissingModules, ", ")),
+			Code:       "MISSING_MODULES",
+			Level:      "warning",
+			Suggestion: "Ensure all required modules are available on the target system",
+		})
+	}
+
+	// Validate storage requirements
+	result.StorageChecks = vm.validateStorageRequirements(ctx, config)
+	if !result.StorageChecks.SizeWithinLimits {
+		result.Valid = false
+		result.Errors = append(result.Errors, ValidationError{
+			Field:      "config_size",
+			Message:    fmt.Sprintf("Configuration size (%d bytes) exceeds storage limits", result.StorageChecks.DataSize),
+			Code:       "CONFIG_TOO_LARGE",
+			Level:      "error",
+			Suggestion: "Reduce configuration size or contact administrator to increase limits",
+		})
+	}
+
+	// Validate inheritance conflicts
+	if result.TenantChecks.ConflictsDetected > 0 {
+		result.Warnings = append(result.Warnings, ValidationError{
+			Field:      "inheritance",
+			Message:    fmt.Sprintf("Detected %d inheritance conflicts", result.TenantChecks.ConflictsDetected),
+			Code:       "INHERITANCE_CONFLICTS",
+			Level:      "warning",
+			Suggestion: "Review tenant hierarchy configuration for conflicting settings",
+		})
+	}
+
+	// Validate resource configurations
+	vm.validateResources(result, config)
+
+	return result
+}
+
+// validateTenantContext validates tenant-related aspects of the configuration.
+// Returns (result, nil) when the tenant exists or is simply absent from the store.
+// Returns (nil, err) only on a real store error (not a not-found condition).
+func (vm *ValidationManager) validateTenantContext(ctx context.Context, tenantID, stewardID string, config *stewardconfig.StewardConfig) (*TenantValidationResult, error) {
+	result := &TenantValidationResult{
+		TenantExists:      false,
+		TenantID:          tenantID,
+		InheritanceValid:  true,
+		ConflictsDetected: 0,
+	}
+
+	if tenantID == "" {
+		return result, nil
+	}
+
+	_, err := vm.tenantStore.GetTenant(ctx, tenantID)
+	if err != nil {
+		// Sentinel match, not substring: a missing tenant is a validation result
+		// (TenantExists=false), any other error is a store fault. Classifying on
+		// message text made this depend on one provider's phrasing.
+		if errors.Is(err, business.ErrTenantDoesNotExist) {
+			return result, nil
+		}
+		return nil, fmt.Errorf("tenant store lookup failed: %w", err)
+	}
+
+	result.TenantExists = true
+	return result, nil
+}
+
+// validateDependencies validates module dependencies and availability
+func (vm *ValidationManager) validateDependencies(ctx context.Context, config *stewardconfig.StewardConfig) *DependencyValidationResult {
+	result := &DependencyValidationResult{
+		MissingModules:     []string{},
+		ConflictingModules: []string{},
+		UnusedModules:      []string{},
+	}
+
+	// Get required modules from resources
+	requiredModules := make(map[string]bool)
+	for _, resource := range config.Resources {
+		requiredModules[resource.Module] = true
+	}
+
+	// Check configured module paths
+	configuredModules := make(map[string]bool)
+	for moduleName := range config.Modules {
+		configuredModules[moduleName] = true
+	}
+
+	// Find missing modules (required but not configured)
+	for moduleName := range requiredModules {
+		if !configuredModules[moduleName] {
+			result.MissingModules = append(result.MissingModules, moduleName)
+		}
+	}
+
+	// Find unused modules (configured but not required)
+	for moduleName := range configuredModules {
+		if !requiredModules[moduleName] {
+			result.UnusedModules = append(result.UnusedModules, moduleName)
+		}
+	}
+
+	return result
+}
+
+// validateStorageRequirements validates storage-level requirements
+func (vm *ValidationManager) validateStorageRequirements(ctx context.Context, config *stewardconfig.StewardConfig) *StorageValidationResult {
+	result := &StorageValidationResult{
+		FormatValid:      true,
+		ChecksumValid:    true,
+		SizeWithinLimits: true,
+	}
+
+	// Estimate configuration size
+	configData, err := yaml.Marshal(config)
+	if err != nil {
+		result.FormatValid = false
+		return result
+	}
+
+	result.DataSize = len(configData)
+
+	// Check size limits (simplified - would use storage provider capabilities)
+	maxConfigSize := 1024 * 1024 // 1MB default limit
+	if result.DataSize > maxConfigSize {
+		result.SizeWithinLimits = false
+	}
+
+	return result
+}
+
+// validateResources validates resource configurations
+func (vm *ValidationManager) validateResources(result *ValidationResult, config *stewardconfig.StewardConfig) {
+	resourceNames := make(map[string]bool)
+
+	for i, resource := range config.Resources {
+		// Check for duplicate resource names
+		if resourceNames[resource.Name] {
+			result.Valid = false
+			result.Errors = append(result.Errors, ValidationError{
+				Field:      fmt.Sprintf("resources[%d].name", i),
+				Message:    fmt.Sprintf("Duplicate resource name: %s", resource.Name),
+				Code:       "DUPLICATE_RESOURCE_NAME",
+				Level:      "error",
+				Suggestion: "Ensure all resource names are unique within the configuration",
+			})
+		}
+		resourceNames[resource.Name] = true
+
+		// Validate resource name format
+		if !isValidResourceName(resource.Name) {
+			result.Valid = false
+			result.Errors = append(result.Errors, ValidationError{
+				Field:      fmt.Sprintf("resources[%d].name", i),
+				Message:    fmt.Sprintf("Invalid resource name format: %s", resource.Name),
+				Code:       "INVALID_RESOURCE_NAME",
+				Level:      "error",
+				Suggestion: "Resource names must contain only alphanumeric characters, hyphens, and underscores",
+			})
+		}
+
+		// Validate module name. The module field selects a bundle and may carry
+		// an optional resource-type suffix as "<bundle>.<type>" (e.g.
+		// "hyperv.vm") — the steward executor resolves the suffix into the
+		// module's internal typed resource ID. The format permits lowercase
+		// letters, digits, '_', '-', and at most a single '.' separating the
+		// bundle from the resource type. Resource-NAME validation
+		// (isValidResourceName) is intentionally NOT loosened by this.
+		if resource.Module == "" {
+			result.Valid = false
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   fmt.Sprintf("resources[%d].module", i),
+				Message: "Module name is required",
+				Code:    "MISSING_MODULE_NAME",
+				Level:   "error",
+			})
+		} else if !isValidModuleName(resource.Module) {
+			result.Valid = false
+			result.Errors = append(result.Errors, ValidationError{
+				Field:      fmt.Sprintf("resources[%d].module", i),
+				Message:    fmt.Sprintf("Invalid module name format: %s", resource.Module),
+				Code:       "INVALID_MODULE_NAME",
+				Level:      "error",
+				Suggestion: "Module names must be lowercase bundle or bundle.type (letters, digits, '-', '_', and a single '.')",
+			})
+		}
+
+		// Validate resource configuration
+		if len(resource.Config) == 0 {
+			result.Warnings = append(result.Warnings, ValidationError{
+				Field:      fmt.Sprintf("resources[%d].config", i),
+				Message:    fmt.Sprintf("Resource '%s' has empty configuration", resource.Name),
+				Code:       "EMPTY_RESOURCE_CONFIG",
+				Level:      "warning",
+				Suggestion: "Consider providing configuration for this resource or removing it",
+			})
+		}
+	}
+}
+
+// isValidResourceName checks if a resource name follows the required format
+func isValidResourceName(name string) bool {
+	if name == "" {
+		return false
+	}
+
+	for _, char := range name {
+		if (char < 'a' || char > 'z') &&
+			(char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') &&
+			char != '-' && char != '_' {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isValidModuleName checks a resource's module field. A module value is a
+// lowercase bundle name, optionally followed by a single resource-type suffix
+// after a "." — e.g. "directory", "hyperv", "hyperv.vm". Permitted characters
+// are lowercase letters, digits, '-', '_', and at most one '.'. Both the
+// bundle and (when present) the type segment must be non-empty.
+//
+// This deliberately accepts the #1903 "module-type convention" (hyperv.vm,
+// hyperv.vswitch) without touching resource-NAME validation.
+func isValidModuleName(module string) bool {
+	if module == "" {
+		return false
+	}
+
+	dotSeen := false
+	segmentLen := 0
+	for _, char := range module {
+		switch {
+		case char == '.':
+			if dotSeen {
+				return false // more than one '.' is not allowed
+			}
+			if segmentLen == 0 {
+				return false // empty bundle segment before '.'
+			}
+			dotSeen = true
+			segmentLen = 0
+		case (char >= 'a' && char <= 'z') ||
+			(char >= '0' && char <= '9') ||
+			char == '-' || char == '_':
+			segmentLen++
+		default:
+			return false
+		}
+	}
+
+	// Trailing '.' (empty type segment) is invalid.
+	return segmentLen > 0
+}
+
+// ValidateConfigurationEntry validates a configuration entry for storage
+func (vm *ValidationManager) ValidateConfigurationEntry(ctx context.Context, entry *cfgconfig.ConfigEntry) error {
+	// Validate required fields
+	if entry.Key == nil {
+		return fmt.Errorf("configuration key is required")
+	}
+
+	if entry.Key.TenantID == "" {
+		return fmt.Errorf("tenant ID is required")
+	}
+
+	if entry.Key.Namespace == "" {
+		return fmt.Errorf("namespace is required")
+	}
+
+	if entry.Key.Name == "" {
+		return fmt.Errorf("name is required")
+	}
+
+	if len(entry.Data) == 0 {
+		return fmt.Errorf("configuration data is required")
+	}
+
+	// Validate format
+	if entry.Format != cfgconfig.ConfigFormatYAML && entry.Format != cfgconfig.ConfigFormatJSON {
+		return fmt.Errorf("invalid format: %s", entry.Format)
+	}
+
+	// Validate data format consistency
+	if entry.Format == cfgconfig.ConfigFormatYAML {
+		var temp interface{}
+		if err := yaml.Unmarshal(entry.Data, &temp); err != nil {
+			return fmt.Errorf("invalid YAML data: %w", err)
+		}
+	}
+
+	// Use storage provider validation if available
+	return vm.configStore.ValidateConfig(ctx, entry)
+}

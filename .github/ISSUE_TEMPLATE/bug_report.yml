@@ -1,0 +1,132 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in CFGMS
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this bug! Please fill out the information below to help us investigate.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+      placeholder: Describe what happened...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+      placeholder: Describe what you expected...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior
+      placeholder: |
+        1. Configure '...'
+        2. Run command '...'
+        3. See error
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which CFGMS component is affected?
+      options:
+        - Controller
+        - Steward
+        - CLI (cfgcli)
+        - API
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: CFGMS Version
+      description: Output of `cfgcli version` or `controller --version`
+      placeholder: "v0.7.4"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      description: What OS are you running on?
+      options:
+        - Linux (AMD64)
+        - Linux (ARM64)
+        - Windows (AMD64)
+        - Windows (ARM64)
+        - macOS (ARM64/Apple Silicon)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS Version
+      description: Specific OS version (e.g., Ubuntu 22.04, Windows 11, macOS 14.0)
+      placeholder: "Ubuntu 22.04 LTS"
+    validations:
+      required: false
+
+  - type: input
+    id: go-version
+    attributes:
+      label: Go Version
+      description: Output of `go version` (if building from source)
+      placeholder: "go1.21.0"
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: Please copy and paste any relevant log output. This will be automatically formatted.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Relevant configuration (please redact any sensitive information like secrets, API keys, etc.)
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Add any other context about the problem here (screenshots, related issues, etc.)
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have searched existing issues to ensure this bug hasn't already been reported
+          required: true
+        - label: I have redacted any sensitive information from logs and configuration
+          required: true

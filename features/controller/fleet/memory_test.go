@@ -1,0 +1,507 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package fleet
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// staticProvider is a test StewardProvider backed by a fixed slice.
+type staticProvider struct {
+	stewards []StewardData
+}
+
+func (p *staticProvider) GetAllStewards() []StewardData {
+	return p.stewards
+}
+
+func testSteward(id, tenant, status string, attrs map[string]string) StewardData {
+	return StewardData{
+		ID:            id,
+		TenantID:      tenant,
+		Status:        status,
+		LastHeartbeat: time.Now(),
+		DNAAttributes: attrs,
+	}
+}
+
+func newQuery(stewards ...StewardData) *MemoryQuery {
+	return NewMemoryQuery(&staticProvider{stewards: stewards})
+}
+
+func TestMemoryQuery_EmptyFilter_ReturnsAll(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "tenant-a", "online", map[string]string{"os": "linux", "hostname": "host1", "arch": "amd64"}),
+		testSteward("s2", "tenant-b", "offline", map[string]string{"os": "windows", "hostname": "host2", "arch": "amd64"}),
+	)
+
+	results, err := q.Search(context.Background(), Filter{})
+	require.NoError(t, err)
+	assert.Len(t, results, 2)
+}
+
+func TestMemoryQuery_FilterByTenantID(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "tenant-a", "online", map[string]string{"hostname": "host1"}),
+		testSteward("s2", "tenant-b", "online", map[string]string{"hostname": "host2"}),
+		testSteward("s3", "tenant-a", "online", map[string]string{"hostname": "host3"}),
+	)
+
+	results, err := q.Search(context.Background(), Filter{TenantID: "tenant-a"})
+	require.NoError(t, err)
+	assert.Len(t, results, 2)
+	for _, r := range results {
+		assert.Equal(t, "tenant-a", r.TenantID)
+	}
+}
+
+func TestMemoryQuery_FilterByOS(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", map[string]string{"os": "linux"}),
+		testSteward("s2", "t", "online", map[string]string{"os": "windows"}),
+		testSteward("s3", "t", "online", map[string]string{"os": "linux"}),
+	)
+
+	results, err := q.Search(context.Background(), Filter{OS: "linux"})
+	require.NoError(t, err)
+	assert.Len(t, results, 2)
+	for _, r := range results {
+		assert.Equal(t, "linux", r.OS)
+	}
+}
+
+func TestMemoryQuery_FilterByPlatform(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", map[string]string{"platform": "ubuntu"}),
+		testSteward("s2", "t", "online", map[string]string{"platform": "rhel"}),
+	)
+
+	results, err := q.Search(context.Background(), Filter{Platform: "ubuntu"})
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+	assert.Equal(t, "s1", results[0].ID)
+}
+
+func TestMemoryQuery_FilterByArchitecture(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", map[string]string{"arch": "amd64"}),
+		testSteward("s2", "t", "online", map[string]string{"arch": "arm64"}),
+		testSteward("s3", "t", "online", map[string]string{"arch": "amd64"}),
+	)
+
+	results, err := q.Search(context.Background(), Filter{Architecture: "arm64"})
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+	assert.Equal(t, "s2", results[0].ID)
+}
+
+func TestMemoryQuery_FilterByStatus(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", nil),
+		testSteward("s2", "t", "offline", nil),
+		testSteward("s3", "t", "online", nil),
+	)
+
+	results, err := q.Search(context.Background(), Filter{Status: "online"})
+	require.NoError(t, err)
+	assert.Len(t, results, 2)
+	for _, r := range results {
+		assert.Equal(t, "online", r.Status)
+	}
+}
+
+func TestMemoryQuery_FilterByStatus_Any(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", nil),
+		testSteward("s2", "t", "offline", nil),
+	)
+
+	results, err := q.Search(context.Background(), Filter{Status: "any"})
+	require.NoError(t, err)
+	assert.Len(t, results, 2)
+}
+
+func TestMemoryQuery_FilterByHostname_SubstringMatch(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", map[string]string{"hostname": "web-server-01"}),
+		testSteward("s2", "t", "online", map[string]string{"hostname": "db-server-01"}),
+		testSteward("s3", "t", "online", map[string]string{"hostname": "web-server-02"}),
+	)
+
+	results, err := q.Search(context.Background(), Filter{Hostname: "web-server"})
+	require.NoError(t, err)
+	assert.Len(t, results, 2)
+}
+
+func TestMemoryQuery_FilterByHostname_GlobMatch(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", map[string]string{"hostname": "es-hv01"}),
+		testSteward("s2", "t", "online", map[string]string{"hostname": "es-hv02"}),
+		testSteward("s3", "t", "online", map[string]string{"hostname": "db-server-01"}),
+	)
+
+	results, err := q.Search(context.Background(), Filter{Hostname: "es-hv0*"})
+	require.NoError(t, err)
+	assert.Len(t, results, 2)
+	for _, r := range results {
+		assert.Equal(t, "t", r.TenantID)
+	}
+}
+
+func TestMemoryQuery_FilterByHostname_GlobNoMatch(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", map[string]string{"hostname": "web-01"}),
+	)
+
+	results, err := q.Search(context.Background(), Filter{Hostname: "es-hv*"})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestMemoryQuery_FilterByTags_SingleTag(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", map[string]string{"tags": "production,web"}),
+		testSteward("s2", "t", "online", map[string]string{"tags": "staging"}),
+		testSteward("s3", "t", "online", map[string]string{"tags": "production,db"}),
+	)
+
+	results, err := q.Search(context.Background(), Filter{Tags: []string{"production"}})
+	require.NoError(t, err)
+	assert.Len(t, results, 2)
+}
+
+func TestMemoryQuery_FilterByTags_MultipleTagsAND(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", map[string]string{"tags": "production,web"}),
+		testSteward("s2", "t", "online", map[string]string{"tags": "production"}),
+		testSteward("s3", "t", "online", map[string]string{"tags": "web"}),
+	)
+
+	// Both production AND web must be present
+	results, err := q.Search(context.Background(), Filter{Tags: []string{"production", "web"}})
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+	assert.Equal(t, "s1", results[0].ID)
+}
+
+func TestMemoryQuery_FilterByTags_NoTagAttribute(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", map[string]string{"os": "linux"}), // no tags key
+	)
+
+	results, err := q.Search(context.Background(), Filter{Tags: []string{"production"}})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestMemoryQuery_FilterByDNAAttributes_ExactMatch(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", map[string]string{"env": "prod", "region": "us-east-1"}),
+		testSteward("s2", "t", "online", map[string]string{"env": "staging", "region": "us-east-1"}),
+		testSteward("s3", "t", "online", map[string]string{"env": "prod", "region": "eu-west-1"}),
+	)
+
+	results, err := q.Search(context.Background(), Filter{
+		DNAAttributes: map[string]string{"env": "prod", "region": "us-east-1"},
+	})
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+	assert.Equal(t, "s1", results[0].ID)
+}
+
+func TestMemoryQuery_CombinedFilters_AND(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "tenant-a", "online", map[string]string{"os": "linux", "arch": "amd64", "hostname": "web-01"}),
+		testSteward("s2", "tenant-a", "online", map[string]string{"os": "windows", "arch": "amd64", "hostname": "win-01"}),
+		testSteward("s3", "tenant-b", "online", map[string]string{"os": "linux", "arch": "amd64", "hostname": "web-02"}),
+		testSteward("s4", "tenant-a", "offline", map[string]string{"os": "linux", "arch": "amd64", "hostname": "web-03"}),
+	)
+
+	// tenant-a + linux + online
+	results, err := q.Search(context.Background(), Filter{
+		TenantID: "tenant-a",
+		OS:       "linux",
+		Status:   "online",
+	})
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+	assert.Equal(t, "s1", results[0].ID)
+}
+
+func TestMemoryQuery_NoMatch_ReturnsEmptySlice(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", map[string]string{"os": "linux"}),
+	)
+
+	results, err := q.Search(context.Background(), Filter{OS: "windows"})
+	require.NoError(t, err)
+	assert.NotNil(t, results)
+	assert.Empty(t, results)
+}
+
+func TestMemoryQuery_EmptyProvider_ReturnsEmptySlice(t *testing.T) {
+	q := newQuery() // no stewards
+
+	results, err := q.Search(context.Background(), Filter{})
+	require.NoError(t, err)
+	assert.NotNil(t, results)
+	assert.Empty(t, results)
+}
+
+func TestMemoryQuery_Count(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", map[string]string{"os": "linux"}),
+		testSteward("s2", "t", "online", map[string]string{"os": "windows"}),
+		testSteward("s3", "t", "offline", map[string]string{"os": "linux"}),
+	)
+
+	count, err := q.Count(context.Background(), Filter{OS: "linux"})
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+}
+
+func TestMemoryQuery_Count_EmptyFilter(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", nil),
+		testSteward("s2", "t", "online", nil),
+	)
+
+	count, err := q.Count(context.Background(), Filter{})
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+}
+
+func TestMemoryQuery_StewardResult_Fields(t *testing.T) {
+	now := time.Now()
+	provider := &staticProvider{
+		stewards: []StewardData{
+			{
+				ID:            "abc-123",
+				TenantID:      "tenant-x",
+				Status:        "online",
+				LastHeartbeat: now,
+				DNAAttributes: map[string]string{
+					"hostname":        "my-host",
+					"os":              "linux",
+					"arch":            "arm64",
+					"custom":          "value",
+					"steward.version": "v1.5.3",
+				},
+			},
+		},
+	}
+	q := NewMemoryQuery(provider)
+
+	results, err := q.Search(context.Background(), Filter{})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	r := results[0]
+	assert.Equal(t, "abc-123", r.ID)
+	assert.Equal(t, "tenant-x", r.TenantID)
+	assert.Equal(t, "my-host", r.Hostname)
+	assert.Equal(t, "linux", r.OS)
+	assert.Equal(t, "arm64", r.Architecture)
+	assert.Equal(t, "online", r.Status)
+	assert.WithinDuration(t, now, r.LastHeartbeat, time.Second)
+	assert.Equal(t, "value", r.DNAAttributes["custom"])
+	assert.Equal(t, "v1.5.3", r.RunningVersion, "RunningVersion must be populated from steward.version DNA attribute")
+}
+
+// TestMemoryQuery_StewardResult_Fragments verifies that DNAFragments carried on
+// StewardData flow through to StewardResult.DNAFragments unchanged. This is the
+// only path that gets ADR-017 fragments from the fleet query out to API
+// responses and, from there, to the CLI's deriveHVPromoteCluster (Issue #3317).
+func TestMemoryQuery_StewardResult_Fragments(t *testing.T) {
+	frags := []*commonpb.Fragment{
+		{FragmentId: "cluster:cfg-lab.membership"},
+		{FragmentId: "host:cpu"},
+	}
+	provider := &staticProvider{
+		stewards: []StewardData{
+			{
+				ID:            "abc-123",
+				TenantID:      "tenant-x",
+				Status:        "online",
+				DNAAttributes: map[string]string{"hostname": "my-host"},
+				DNAFragments:  frags,
+			},
+		},
+	}
+	q := NewMemoryQuery(provider)
+
+	results, err := q.Search(context.Background(), Filter{})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, frags, results[0].DNAFragments)
+}
+
+func TestMemoryQuery_StewardResult_RunningVersionEmpty_WhenDNAAbsent(t *testing.T) {
+	provider := &staticProvider{
+		stewards: []StewardData{
+			{
+				ID:       "no-version",
+				TenantID: "tenant-x",
+				Status:   "online",
+				// No steward.version in DNAAttributes
+				DNAAttributes: map[string]string{"hostname": "host-a"},
+			},
+		},
+	}
+	q := NewMemoryQuery(provider)
+
+	results, err := q.Search(context.Background(), Filter{})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "", results[0].RunningVersion, "RunningVersion must be empty when steward.version DNA attribute is absent")
+}
+
+func TestMemoryQuery_TenantScoping_IsolatesData(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "msp-a/client-1", "online", map[string]string{"hostname": "host1"}),
+		testSteward("s2", "msp-a/client-2", "online", map[string]string{"hostname": "host2"}),
+		testSteward("s3", "msp-b/client-1", "online", map[string]string{"hostname": "host3"}),
+	)
+
+	results, err := q.Search(context.Background(), Filter{TenantID: "msp-a/client-1"})
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+	assert.Equal(t, "s1", results[0].ID)
+}
+
+func TestMemoryQuery_Tags_WhitespaceStripped(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "t", "online", map[string]string{"tags": "production, web, db"}),
+	)
+
+	results, err := q.Search(context.Background(), Filter{Tags: []string{"web"}})
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+}
+
+func TestMemoryQuery_FilterByIDs_SingleMatch(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", nil),
+		testSteward("device-002", "t", "online", nil),
+		testSteward("device-003", "t", "online", nil),
+	)
+
+	results, err := q.Search(context.Background(), Filter{IDs: []string{"device-001"}})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "device-001", results[0].ID)
+}
+
+func TestMemoryQuery_FilterByIDs_MultiMatch_OR(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", nil),
+		testSteward("device-002", "t", "online", nil),
+		testSteward("device-003", "t", "online", nil),
+	)
+
+	results, err := q.Search(context.Background(), Filter{IDs: []string{"device-001", "device-003"}})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	ids := []string{results[0].ID, results[1].ID}
+	assert.ElementsMatch(t, []string{"device-001", "device-003"}, ids)
+}
+
+func TestMemoryQuery_FilterByIDs_NoMatch(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", nil),
+	)
+
+	results, err := q.Search(context.Background(), Filter{IDs: []string{"nonexistent"}})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestMemoryQuery_FilterByIDs_AND_WithOS(t *testing.T) {
+	q := newQuery(
+		testSteward("device-001", "t", "online", map[string]string{"os": "linux"}),
+		testSteward("device-002", "t", "online", map[string]string{"os": "windows"}),
+	)
+
+	// IDs includes device-001, but device-001 is linux not windows — no match.
+	results, err := q.Search(context.Background(), Filter{
+		IDs: []string{"device-001"},
+		OS:  "windows",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+// resultIDs extracts IDs from a StewardResult slice for assertion convenience.
+func resultIDs(results []StewardResult) []string {
+	ids := make([]string, len(results))
+	for i, r := range results {
+		ids[i] = r.ID
+	}
+	return ids
+}
+
+// ── TenantSubtree filter tests ────────────────────────────────────────────────
+//
+// Tenant IDs are single DNS-label tokens (ADR-025 A1.1), so subtree membership
+// comes from the caller-resolved TenantSubtreeIDs set, never a string prefix.
+// The tenants below are msp-a, client-1 (ParentID msp-a), msp-b and msp-ab.
+
+func subtreeStewards() []StewardData {
+	return []StewardData{
+		testSteward("s-msp-a", "msp-a", "online", nil),
+		testSteward("s-client-1", "client-1", "online", nil),
+		testSteward("s-msp-b", "msp-b", "online", nil),
+		testSteward("s-msp-ab", "msp-ab", "online", nil),
+	}
+}
+
+func TestMemoryQuery_TenantSubtree_ResolvedSetIncludesDescendant(t *testing.T) {
+	q := newQuery(subtreeStewards()...)
+	results, err := q.Search(context.Background(), Filter{TenantSubtree: "msp-a", TenantSubtreeIDs: []string{"client-1"}})
+	require.NoError(t, err)
+	ids := resultIDs(results)
+	assert.ElementsMatch(t, []string{"s-msp-a", "s-client-1"}, ids)
+	assert.NotContains(t, ids, "s-msp-b", "unrelated tenant must be excluded")
+	assert.NotContains(t, ids, "s-msp-ab", "tenant sharing a name prefix must be excluded")
+}
+
+func TestMemoryQuery_TenantSubtree_NoResolvedSetIsExactOnly(t *testing.T) {
+	// A missing or failed resolution carries no descendants: fail closed.
+	q := newQuery(subtreeStewards()...)
+	results, err := q.Search(context.Background(), Filter{TenantSubtree: "msp-a"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"s-msp-a"}, resultIDs(results))
+}
+
+func TestMemoryQuery_TenantSubtree_PathShapedIDNeverMatchesByPrefix(t *testing.T) {
+	q := newQuery(
+		testSteward("s1", "msp-a/client-1", "online", nil),
+		testSteward("s2", "msp-a/client-1/servers/web", "online", nil),
+		testSteward("s3", "msp-a/client-10", "online", nil),
+	)
+	results, err := q.Search(context.Background(), Filter{TenantSubtree: "msp-a/client-1"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"s1"}, resultIDs(results))
+}
+
+func TestMemoryQuery_TenantSubtree_EmptyIsUnrestricted(t *testing.T) {
+	q := newQuery(subtreeStewards()...)
+	results, err := q.Search(context.Background(), Filter{TenantSubtree: ""})
+	require.NoError(t, err)
+	assert.Len(t, results, 4)
+}
+
+func TestMemoryQuery_TenantSubtree_DescendantSetDoesNotWidenOtherScopes(t *testing.T) {
+	q := newQuery(subtreeStewards()...)
+	results, err := q.Search(context.Background(), Filter{
+		TenantSubtree: "msp-a", TenantSubtreeIDs: []string{"client-1"}, TenantID: "client-1",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"s-client-1"}, resultIDs(results), "TenantID exact match is AND-combined")
+}

@@ -1,0 +1,152 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package ctxkeys_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+)
+
+func TestTenantIDRoundtrip(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "my-tenant")
+	got, ok := ctx.Value(ctxkeys.TenantID).(string)
+	assert.True(t, ok)
+	assert.Equal(t, "my-tenant", got)
+}
+
+func TestTenantIDMissing(t *testing.T) {
+	ctx := context.Background()
+	got, ok := ctx.Value(ctxkeys.TenantID).(string)
+	assert.False(t, ok)
+	assert.Empty(t, got)
+}
+
+func TestContextKeyCollision(t *testing.T) {
+	// A plain string key must not collide with the struct-typed TenantID key.
+	//lint:ignore SA1029 intentionally use a plain string to verify the typed key does not collide
+	//nolint:staticcheck // SA1029: golangci-lint does not honour staticcheck's //lint:ignore directive
+	ctx := context.WithValue(context.Background(), "tenant_id", "plain-string-value")
+	got, ok := ctx.Value(ctxkeys.TenantID).(string)
+	assert.False(t, ok, "struct-typed key must not match plain string key")
+	assert.Empty(t, got)
+}
+
+func TestCorrelationIDKeyRoundtrip(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkeys.CorrelationIDKey, "test-correlation-123")
+	got, ok := ctx.Value(ctxkeys.CorrelationIDKey).(string)
+	assert.True(t, ok)
+	assert.Equal(t, "test-correlation-123", got)
+}
+
+func TestCorrelationIDKeyMissing(t *testing.T) {
+	ctx := context.Background()
+	got, ok := ctx.Value(ctxkeys.CorrelationIDKey).(string)
+	assert.False(t, ok)
+	assert.Empty(t, got)
+}
+
+func TestCorrelationIDKeyCollision(t *testing.T) {
+	// A plain string key must not collide with the struct-typed CorrelationIDKey.
+	//lint:ignore SA1029 intentionally use a plain string to verify the typed key does not collide
+	//nolint:staticcheck // SA1029: golangci-lint does not honour staticcheck's //lint:ignore directive
+	ctx := context.WithValue(context.Background(), "correlation_id", "plain-string-value")
+	got, ok := ctx.Value(ctxkeys.CorrelationIDKey).(string)
+	assert.False(t, ok, "struct-typed key must not match plain string key")
+	assert.Empty(t, got)
+}
+
+func TestUserIDKeyRoundtrip(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkeys.UserIDKey, "user-abc-123")
+	got, ok := ctx.Value(ctxkeys.UserIDKey).(string)
+	assert.True(t, ok)
+	assert.Equal(t, "user-abc-123", got)
+}
+
+func TestUserIDKeyMissing(t *testing.T) {
+	ctx := context.Background()
+	got, ok := ctx.Value(ctxkeys.UserIDKey).(string)
+	assert.False(t, ok)
+	assert.Empty(t, got)
+}
+
+func TestUserIDKeyCollision(t *testing.T) {
+	// A plain string key must not collide with the struct-typed UserIDKey.
+	//lint:ignore SA1029 intentionally use a plain string to verify the typed key does not collide
+	//nolint:staticcheck // SA1029: golangci-lint does not honour staticcheck's //lint:ignore directive
+	ctx := context.WithValue(context.Background(), "user_id", "plain-string-value")
+	got, ok := ctx.Value(ctxkeys.UserIDKey).(string)
+	assert.False(t, ok, "struct-typed key must not match plain string key")
+	assert.Empty(t, got)
+}
+
+func TestAuthClaimsKeyRoundtrip(t *testing.T) {
+	claims := map[string]interface{}{"sub": "user-123", "role": "admin"}
+	ctx := context.WithValue(context.Background(), ctxkeys.AuthClaimsKey, claims)
+	got, ok := ctx.Value(ctxkeys.AuthClaimsKey).(map[string]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, claims, got)
+}
+
+func TestAuthClaimsKeyMissing(t *testing.T) {
+	ctx := context.Background()
+	got, ok := ctx.Value(ctxkeys.AuthClaimsKey).(map[string]interface{})
+	assert.False(t, ok)
+	assert.Nil(t, got)
+}
+
+func TestAuthClaimsKeyCollision(t *testing.T) {
+	// A plain string key must not collide with the struct-typed AuthClaimsKey.
+	//lint:ignore SA1029 intentionally use a plain string to verify the typed key does not collide
+	//nolint:staticcheck // SA1029: golangci-lint does not honour staticcheck's //lint:ignore directive
+	ctx := context.WithValue(context.Background(), "auth_claims", map[string]interface{}{"sub": "bad"})
+	got, ok := ctx.Value(ctxkeys.AuthClaimsKey).(map[string]interface{})
+	assert.False(t, ok, "struct-typed key must not match plain string key")
+	assert.Nil(t, got)
+}
+
+// TestTenantScope_ZeroValueIsUnset proves the zero value of TenantScope — what a
+// context produces when TenantScopeKey was never set — is the unset state, not
+// something that could be mistaken for root (Issue #4316).
+func TestTenantScope_ZeroValueIsUnset(t *testing.T) {
+	var s ctxkeys.TenantScope
+	assert.True(t, s.IsUnset())
+	assert.False(t, s.IsRoot())
+	assert.False(t, s.IsTenant())
+	assert.Empty(t, s.Path())
+}
+
+func TestTenantScope_NewRootScope(t *testing.T) {
+	s := ctxkeys.NewRootScope()
+	assert.False(t, s.IsUnset())
+	assert.True(t, s.IsRoot())
+	assert.False(t, s.IsTenant())
+	assert.Empty(t, s.Path())
+}
+
+func TestTenantScope_NewTenantScope(t *testing.T) {
+	s := ctxkeys.NewTenantScope("root/msp-a")
+	assert.False(t, s.IsUnset())
+	assert.False(t, s.IsRoot())
+	assert.True(t, s.IsTenant())
+	assert.Equal(t, "root/msp-a", s.Path())
+}
+
+func TestTenantScopeKeyRoundtrip(t *testing.T) {
+	scope := ctxkeys.NewTenantScope("root/msp-a")
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantScopeKey, scope)
+	got, ok := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	assert.True(t, ok)
+	assert.True(t, got.IsTenant())
+	assert.Equal(t, "root/msp-a", got.Path())
+}
+
+func TestTenantScopeKeyMissingIsUnset(t *testing.T) {
+	ctx := context.Background()
+	got, ok := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	assert.False(t, ok, "no value set — type assertion fails, zero value is unset")
+	assert.True(t, got.IsUnset())
+}

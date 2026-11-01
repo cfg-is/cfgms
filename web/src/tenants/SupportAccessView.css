@@ -1,0 +1,606 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright 2026 Jordan Ritz */
+
+/*
+ * Support access page (Story #4724). Matches docs/design/mockups/support-access.html;
+ * semantic tokens from docs/design/web-ui-design-tokens.css only. Classes are
+ * sa- prefixed so they cannot collide with the global .pill / .tbl rules.
+ */
+
+.sa-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 1180px;
+}
+
+.sa-title h1 {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: 700;
+}
+
+.sa-title p {
+  margin: 3px 0 0;
+  color: var(--text-secondary);
+  max-width: 640px;
+}
+
+.sa-panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.sa-phead {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.sa-phead h2 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 700;
+}
+
+.sa-sub {
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+}
+
+.sa-count {
+  margin-left: auto;
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.sa-pbody {
+  padding: 14px 16px;
+}
+
+.sa-mono {
+  font-family: var(--font-mono);
+}
+
+.sa-muted {
+  color: var(--text-faint);
+}
+
+.sa-hint {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
+
+/* ── Buttons ── */
+
+.sa-btn,
+.sa-btn-sec,
+.sa-btn-danger,
+.sa-btn-danger-soft {
+  appearance: none;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 7px 14px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sa-btn {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.sa-btn-sec {
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+}
+
+.sa-btn-danger {
+  border: 1px solid var(--state-crit);
+  background: var(--state-crit);
+  color: var(--bg-surface);
+  font-weight: 700;
+}
+
+.sa-btn-danger-soft {
+  border: 1px solid var(--state-crit);
+  background: var(--state-crit-bg);
+  color: var(--state-crit);
+}
+
+.sa-btn:disabled,
+.sa-btn-sec:disabled,
+.sa-btn-danger:disabled,
+.sa-btn-danger-soft:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.sa-sm {
+  font-size: 11px;
+  padding: 5px 11px;
+  border-radius: var(--radius-sm);
+}
+
+.sa-content button:focus-visible,
+.sa-content input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ── Messages ── */
+
+.sa-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 12px;
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.sa-msg-crit {
+  background: var(--state-crit-bg);
+  color: var(--state-crit);
+  border: 1px solid var(--state-crit);
+}
+
+.sa-msg-warn {
+  background: var(--state-warn-bg);
+  color: var(--state-warn);
+  border: 1px solid var(--state-warn);
+}
+
+.sa-msg-ok {
+  background: var(--state-ok-bg);
+  color: var(--state-ok);
+  border: 1px solid var(--state-ok);
+}
+
+/* ── Issue form ── */
+
+.sa-issue {
+  display: grid;
+  grid-template-columns: minmax(0, 360px) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.sa-issue .sa-msg {
+  grid-column: 1 / -1;
+}
+
+.sa-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.sa-lbl {
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+.sa-durseg {
+  display: inline-flex;
+  background: var(--bg-sunk);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2px;
+  width: 100%;
+}
+
+.sa-durseg button {
+  flex: 1;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 6px 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+.sa-durseg button[aria-pressed='true'] {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.sa-issue-note {
+  margin: 10px 0 0;
+}
+
+/* ── Table ── */
+
+.sa-filter {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.sa-filter button {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+}
+
+.sa-filter button[aria-pressed='true'] {
+  background: var(--tint-blue);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.sa-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.sa-table th {
+  text-align: left;
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 600;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.sa-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.sa-table tbody tr:last-child > td {
+  border-bottom: 0;
+}
+
+.sa-row-bg > td {
+  background: var(--tint-red);
+}
+
+.sa-row-dim > td {
+  color: var(--text-faint);
+}
+
+.sa-confirm > td {
+  background: var(--bg-sunk);
+  padding: 0;
+}
+
+.sa-confirm-in {
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.sa-confirm-text {
+  flex: 1;
+  min-width: 240px;
+  font-size: 12.5px;
+}
+
+.sa-confirm-text b {
+  font-weight: 700;
+}
+
+.sa-confirm-sub {
+  display: block;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  margin-top: 2px;
+}
+
+.sa-confirm-err {
+  flex-basis: 100%;
+}
+
+.sa-confirm-bg .sa-confirm-text {
+  color: var(--state-crit);
+}
+
+.sa-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sa-kind-bg {
+  color: var(--state-crit);
+}
+
+.sa-who {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.sa-rc {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sa-just {
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  max-width: 340px;
+  overflow-wrap: anywhere;
+}
+
+.sa-when {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.sa-rel {
+  display: block;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.sa-rel-soon {
+  color: var(--state-warn);
+  font-weight: 600;
+}
+
+.sa-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.sa-pill-ok {
+  background: var(--state-ok-bg);
+  color: var(--state-ok);
+}
+
+.sa-pill-warn {
+  background: var(--state-warn-bg);
+  color: var(--state-warn);
+}
+
+.sa-pill-neutral {
+  background: var(--state-neutral-bg);
+  color: var(--state-neutral);
+}
+
+.sa-skel {
+  background: var(--bg-elevated);
+  border-radius: 6px;
+  height: 12px;
+}
+
+.sa-skrow td {
+  padding: 13px 14px;
+}
+
+/* ── Empty, error, root states ── */
+
+.sa-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+  padding: 34px 20px;
+}
+
+.sa-empty h3 {
+  margin: 0;
+  font-size: var(--text-md);
+}
+
+.sa-empty p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  max-width: 420px;
+}
+
+.sa-errcard {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  flex-wrap: wrap;
+}
+
+.sa-errcard-text {
+  flex: 1;
+  min-width: 200px;
+}
+
+.sa-errcard-text b {
+  display: block;
+  color: var(--state-crit);
+}
+
+.sa-errcard-text span {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.sa-rootnote {
+  padding: 20px;
+}
+
+.sa-rootnote h3 {
+  margin: 0 0 4px;
+  font-size: var(--text-md);
+}
+
+.sa-rootnote p {
+  margin: 0 0 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+  max-width: 620px;
+}
+
+/* ── Contacts ── */
+
+.sa-contacts {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sa-clist {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sa-citem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.sa-citem:last-child {
+  border-bottom: 0;
+}
+
+.sa-citem-addr {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sa-citem-new .sa-citem-addr::after {
+  content: 'unsaved';
+  margin-left: 8px;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--state-warn);
+}
+
+.sa-citem-bad {
+  background: var(--state-crit-bg);
+}
+
+.sa-citem-bad .sa-citem-addr {
+  color: var(--state-crit);
+}
+
+.sa-xbtn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-faint);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex: none;
+  font: inherit;
+}
+
+.sa-xbtn:hover {
+  border-color: var(--border);
+  color: var(--state-crit);
+}
+
+.sa-addrow {
+  display: flex;
+  gap: 8px;
+}
+
+.sa-addrow input {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 11px;
+  font: inherit;
+  font-size: var(--text-base);
+}
+
+.sa-savebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sa-savebar-gap {
+  flex: 1;
+}
+
+.sa-dirty {
+  font-size: var(--text-sm);
+  color: var(--state-warn);
+  font-weight: 600;
+}
+
+@media (max-width: 780px) {
+  .sa-issue {
+    grid-template-columns: 1fr;
+  }
+
+  .sa-issue > .sa-btn {
+    justify-self: stretch;
+  }
+
+  .sa-table-wrap {
+    overflow-x: auto;
+  }
+}

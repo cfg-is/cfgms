@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
+/*
+ * Global search (Story #2496, #2726) — sends the selector expression to
+ * GET /api/v1/stewards?q= for fleet-wide, server-side filtering. The same
+ * grammar as `cfg steward list`; see docs/administration/cli-selectors.md.
+ *
+ * The selector field itself is the shared SelectorInput (#2730); this component
+ * is the shell chrome around it (the magnifying-glass icon and `.searchbox`
+ * frame). The push panel reuses the same SelectorInput with its own chrome.
+ */
+import SelectorInput from './SelectorInput.tsx'
+
+export default function GlobalSearch({
+  value,
+  onChange,
+}: {
+  value: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <div className="searchbox">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="1.7" />
+        <path d="M20 20l-3-3" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+      </svg>
+      <SelectorInput
+        value={value}
+        onChange={onChange}
+        role="searchbox"
+        placeholder="Search fleet: name:web* os:linux tag:prod"
+        hintId="search-selector-hint"
+        hintTestId="search-syntax-hint"
+      />
+    </div>
+  )
+}

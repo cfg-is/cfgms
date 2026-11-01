@@ -1,0 +1,128 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright 2026 Jordan Ritz */
+
+/*
+ * Chart chrome for TrendChart (Story #3269).
+ * All colour references use CSS custom properties from web-ui-design-tokens.css.
+ * Never hardcode colour values here — token var()s only.
+ */
+
+/* ── TrendChart container ─────────────────────────────────────────────── */
+
+.trend-chart {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* ── Header row: title + legend ───────────────────────────────────────── */
+
+.trend-chart-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.trend-chart-title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.trend-chart-sub {
+  margin: 2px 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  line-height: 1;
+}
+
+/* ── Legend ───────────────────────────────────────────────────────────── */
+
+.trend-chart-legend {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.trend-chart-legend-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* Coloured swatch — matches the 2px line weight in the chart */
+.trend-chart-legend-line {
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  flex: none;
+}
+
+.trend-legend-icon {
+  flex: none;
+  color: var(--text-secondary);
+}
+
+/* ── SVG wrapper ──────────────────────────────────────────────────────── */
+
+.trend-chart-svg-wrap {
+  position: relative;
+}
+
+/* ── Table view disclosure ────────────────────────────────────────────── */
+
+.trend-chart-table {
+  margin-top: var(--space-1);
+}
+
+.trend-chart-table-summary {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.trend-chart-table-summary::-webkit-details-marker {
+  display: none;
+}
+
+.trend-chart-table-data {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.trend-chart-table-data th,
+.trend-chart-table-data td {
+  padding: 3px var(--space-2);
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.trend-chart-table-data th {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+}
+
+.trend-chart-table-x {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.trend-chart-table-y {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}

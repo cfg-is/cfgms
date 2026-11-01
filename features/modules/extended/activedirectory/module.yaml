@@ -1,0 +1,124 @@
+name: activedirectory
+version: "1.0.0"
+description: "Local Active Directory integration module using Windows system context for secure, credential-free AD management on domain controllers"
+
+publisher: cfgms
+
+# Supported execution environments
+executors:
+  - steward  # Local AD management using Windows system context APIs
+
+# Required interfaces for module compliance
+interfaces:
+  - Get
+  - Set
+  - Test
+
+# Platform support - Windows only
+platforms:
+  - windows  # Required - reads the directory through Windows PowerShell's ActiveDirectory cmdlets
+
+# Resource type this module manages
+resource_types:
+  - activedirectory_local
+  - activedirectory_system
+
+# Per-object directory inventory. Get("directory_user") and
+# Get("directory_group") return one object per user / group under the reserved
+# __cfgms_objects key; the steward emits one DNA fragment per object. Both IDs
+# are reserved: a declared resource may not use them.
+owns:
+  - kind: directory_user
+    per_object: true
+  - kind: directory_group
+    per_object: true
+
+# Required permissions. The steward runs as SYSTEM on the domain controller,
+# which can read the directory without further rights.
+permissions:
+  windows:
+    - "Log on as a service"
+    - "Local system account context"
+
+# Configuration schema - minimal due to system context
+configuration:
+  required_fields:
+    - operation_type
+    - object_types
+  optional_fields:
+    - search_base
+    - page_size
+    - request_timeout
+    - managed_fields
+    - enable_dna_collection
+
+# Default configuration values
+defaults:
+  page_size: 1000
+  request_timeout: "30s"
+  operation_type: "read"
+  enable_dna_collection: true
+
+# Supported object types
+supported_object_types:
+  - user
+  - group
+
+# Supported operations. Write operations are added only as they are
+# implemented. Besides status, Get serves the inventory IDs directory_user and
+# directory_group (see owns).
+supported_operations:
+  read:
+    - status
+
+# Health checks
+health_checks:
+  - name: "system_context"
+    description: "Verify system context access to AD"
+    interval: "60s"
+  - name: "ad_accessibility"
+    description: "Test local AD accessibility"
+    interval: "300s"
+
+# Monitoring
+monitoring:
+  metrics:
+    - "ad_local_requests_total"
+    - "ad_local_request_duration_seconds"
+    - "ad_local_errors_total"
+    - "ad_dna_collection_status"
+
+# Activate the inventory observe pass on exactly one domain controller per
+# domain: the holder of the PDC-emulator role (steward DNA fact
+# ad_pdc_emulator).
+observe_when:
+  - fact: ad_pdc_emulator
+    equals: "true"
+
+behavioral_envelope:
+  shells_out_to:
+    - "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" # absolute path under %SystemRoot%, never PATH; runs the fixed, embedded read script with -File
+  reads_paths:
+    - "%ProgramData%\\cfgms\\activedirectory-scripts" # staged read script, read back for its hash check before every run
+  writes_paths:
+    - "%ProgramData%\\cfgms\\activedirectory-scripts" # the embedded read script is staged here (admin-only directory)
+  lolbin_usage_justification: |
+    The module reads Active Directory through the ActiveDirectory PowerShell
+    cmdlets, which have no in-process Go equivalent. Every run is
+    `powershell.exe -NoProfile -NonInteractive -File <staged read script>`: the
+    script is a fixed file embedded in the steward binary, staged in an
+    admin-only directory (security.EnsureAdminOnlyDir), and its SHA-256 is
+    compared with the embedded constant before every run; a mismatch refuses to
+    run. No inline command string, encoded command or runtime script composition
+    is used, and the execution policy is not changed. The operation and its
+    parameters go in
+    as one JSON document on stdin, validated by the script and used only as
+    typed cmdlet parameters; nothing user-derived reaches argv or script text.
+    Hosts that enforce the AllSigned execution policy need the script
+    Authenticode-signed, which is a release-signing concern.
+
+# Security considerations
+security:
+  sensitive_fields: []  # No stored credentials
+  encryption_required: []  # No credential storage
+  audit_operations: []  # No write operations are implemented

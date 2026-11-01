@@ -1,0 +1,12 @@
+# Windows-specific test configuration for script module
+content: |
+  Write-Host "Hello from CFGMS PowerShell script execution"
+  Write-Host "Current location: $(Get-Location)"
+  $env:TEST_VAR
+shell: powershell
+timeout: 30s
+signing_policy: none
+description: "PowerShell test script for Windows validation"
+environment:
+  TEST_VAR: "test_value"
+  CFGMS_TEST: "true"

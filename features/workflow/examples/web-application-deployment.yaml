@@ -1,0 +1,299 @@
+# Example workflow for deploying a web application
+# This demonstrates the basic workflow engine capabilities
+
+workflow:
+  name: "web-application-deployment"
+  description: "Deploy a web application with nginx, database, and monitoring"
+  version: "1.0.0"
+  timeout: "30m"
+  on_failure: "stop"
+  
+  variables:
+    app_name: "my-web-app"
+    environment: "production"
+    nginx_port: 80
+    app_port: 3000
+    database_enabled: true
+    monitoring_enabled: true
+
+  steps:
+    # Phase 1: Infrastructure Preparation
+    - name: "infrastructure-preparation"
+      type: "sequential"
+      timeout: "10m"
+      steps:
+        # Create necessary directories in parallel
+        - name: "create-directories"
+          type: "parallel"
+          steps:
+            - name: "create-app-directory"
+              type: "task"
+              module: "directory"
+              config:
+                path: "/opt/{{app_name}}"
+                owner: "www-data"
+                group: "www-data"
+                permissions: "755"
+                
+            - name: "create-log-directory"
+              type: "task"
+              module: "directory"
+              config:
+                path: "/var/log/{{app_name}}"
+                owner: "www-data"
+                group: "www-data"
+                permissions: "755"
+                
+            - name: "create-config-directory"
+              type: "task"
+              module: "directory"
+              config:
+                path: "/etc/{{app_name}}"
+                owner: "root"
+                group: "root"
+                permissions: "755"
+
+        # Install required packages
+        - name: "install-base-packages"
+          type: "parallel"
+          steps:
+            - name: "install-nginx"
+              type: "task"
+              module: "package"
+              config:
+                name: "nginx"
+                state: "present"
+                
+            - name: "install-nodejs"
+              type: "task"
+              module: "package"
+              config:
+                name: "nodejs"
+                state: "present"
+                
+            - name: "install-npm"
+              type: "task"
+              module: "package"
+              config:
+                name: "npm"
+                state: "present"
+
+    # Phase 2: Database Setup (conditional)
+    - name: "database-setup"
+      type: "conditional"
+      condition:
+        type: "variable"
+        variable: "database_enabled"
+        operator: "eq"
+        value: true
+      steps:
+        - name: "install-database"
+          type: "task"
+          module: "package"
+          config:
+            name: "postgresql"
+            state: "present"
+            
+        - name: "configure-database"
+          type: "task"
+          module: "file"
+          config:
+            path: "/etc/postgresql/postgresql.conf"
+            content: |
+              # Configuration for {{app_name}}
+              listen_addresses = 'localhost'
+              port = 5432
+              max_connections = 100
+            backup: true
+
+    # Phase 3: Application Deployment
+    - name: "application-deployment"
+      type: "sequential"
+      timeout: "15m"
+      steps:
+        # Deploy application files
+        - name: "deploy-application-code"
+          type: "task"
+          module: "file"
+          config:
+            path: "/opt/{{app_name}}/app.js"
+            content: |
+              // {{app_name}} Application
+              const express = require('express');
+              const app = express();
+              const port = {{app_port}};
+              
+              app.get('/', (req, res) => {
+                res.send('Hello from {{app_name}} in {{environment}}!');
+              });
+              
+              app.listen(port, () => {
+                console.log(`{{app_name}} listening on port ${port}`);
+              });
+            owner: "www-data"
+            group: "www-data"
+            permissions: "644"
+
+        # Configure nginx
+        - name: "configure-nginx"
+          type: "task"
+          module: "file"
+          config:
+            path: "/etc/nginx/sites-available/{{app_name}}"
+            content: |
+              server {
+                  listen {{nginx_port}};
+                  server_name localhost;
+                  
+                  location / {
+                      proxy_pass http://localhost:{{app_port}};
+                      proxy_http_version 1.1;
+                      proxy_set_header Upgrade $http_upgrade;
+                      proxy_set_header Connection 'upgrade';
+                      proxy_set_header Host $host;
+                      proxy_cache_bypass $http_upgrade;
+                  }
+              }
+            backup: true
+
+        # Enable nginx site
+        - name: "enable-nginx-site"
+          type: "task"
+          module: "file"
+          config:
+            path: "/etc/nginx/sites-enabled/{{app_name}}"
+            src: "/etc/nginx/sites-available/{{app_name}}"
+            state: "link"
+
+    # Phase 4: Service Configuration
+    - name: "service-configuration"
+      type: "sequential"
+      steps:
+        # Create systemd service
+        - name: "create-systemd-service"
+          type: "task"
+          module: "file"
+          config:
+            path: "/etc/systemd/system/{{app_name}}.service"
+            content: |
+              [Unit]
+              Description={{app_name}} Web Application
+              After=network.target
+              
+              [Service]
+              Type=simple
+              User=www-data
+              WorkingDirectory=/opt/{{app_name}}
+              ExecStart=/usr/bin/node app.js
+              Restart=always
+              RestartSec=10
+              Environment=NODE_ENV={{environment}}
+              Environment=PORT={{app_port}}
+              
+              [Install]
+              WantedBy=multi-user.target
+
+        # Configure firewall
+        - name: "configure-firewall"
+          type: "parallel"
+          steps:
+            - name: "allow-http"
+              type: "task"
+              module: "firewall"
+              config:
+                port: "{{nginx_port}}"
+                protocol: "tcp"
+                action: "allow"
+                comment: "Allow HTTP for {{app_name}}"
+                
+            - name: "allow-ssh"
+              type: "task"
+              module: "firewall"
+              config:
+                port: "22"
+                protocol: "tcp"
+                action: "allow"
+                comment: "Allow SSH access"
+
+    # Phase 5: Monitoring Setup (conditional)
+    - name: "monitoring-setup"
+      type: "conditional"
+      condition:
+        type: "variable"
+        variable: "monitoring_enabled"
+        operator: "eq"
+        value: true
+      steps:
+        - name: "install-monitoring-tools"
+          type: "parallel"
+          steps:
+            - name: "install-htop"
+              type: "task"
+              module: "package"
+              config:
+                name: "htop"
+                state: "present"
+                
+            - name: "install-netstat"
+              type: "task"
+              module: "package"
+              config:
+                name: "net-tools"
+                state: "present"
+
+        - name: "setup-log-rotation"
+          type: "task"
+          module: "file"
+          config:
+            path: "/etc/logrotate.d/{{app_name}}"
+            content: |
+              /var/log/{{app_name}}/*.log {
+                  daily
+                  missingok
+                  rotate 30
+                  compress
+                  delaycompress
+                  notifempty
+                  create 0644 www-data www-data
+              }
+
+    # Phase 6: Final Service Startup
+    - name: "service-startup"
+      type: "sequential"
+      timeout: "5m"
+      on_failure: "stop"
+      steps:
+        # Start and enable services
+        - name: "reload-systemd"
+          type: "task"
+          module: "package"  # This would be a system module in real implementation
+          config:
+            command: "systemctl daemon-reload"
+            
+        - name: "start-services"
+          type: "parallel"
+          steps:
+            - name: "start-nginx"
+              type: "task"
+              module: "package"  # This would be a service module in real implementation
+              config:
+                name: "nginx"
+                state: "restarted"
+                enabled: true
+                
+            - name: "start-application"
+              type: "task"
+              module: "package"  # This would be a service module in real implementation
+              config:
+                name: "{{app_name}}"
+                state: "started"
+                enabled: true
+
+        # Verification step
+        - name: "verify-deployment"
+          type: "task"
+          module: "package"  # This would be a health check module in real implementation
+          config:
+            url: "http://localhost:{{nginx_port}}"
+            expected_status: 200
+            timeout: 30

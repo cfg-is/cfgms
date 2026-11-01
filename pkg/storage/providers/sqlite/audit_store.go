@@ -1,0 +1,660 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+// Package sqlite implements AuditStore using SQLite (append-only)
+package sqlite
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+)
+
+// SQLiteAuditStore implements business.AuditStore using SQLite.
+// Entries are append-only: StoreAuditEntry returns ErrImmutable if an entry with the
+// same ID already exists. ArchiveAuditEntries and PurgeAuditEntries both return
+// ErrImmutable to enforce the immutability contract at the SQLite tier.
+type SQLiteAuditStore struct {
+	db *sql.DB
+}
+
+// StoreAuditEntry appends a single audit entry. The entry's checksum is computed and
+// set here if empty. Returns ErrImmutable if an entry with that ID already exists.
+//
+// The INSERT runs under retryOnBusy, like every other writer in this package
+// (steward_store.go, tenant_store.go, AppendChainedEntry). Without it this was
+// the only audit writer that surfaced a transient SQLITE_BUSY straight to its
+// caller: on a file-backed database several pools share one file, and
+// modernc.org/sqlite does not always honor the connection busy_timeout across
+// the database/sql pool (Issue #2068), so a contended write can return BUSY
+// immediately instead of waiting. That cost an audit record every time, because
+// pkg/audit/manager.go writeBatch logs a failed store and moves on — silently
+// destroyed audit evidence. Observed on native Windows in the merge queue:
+// TestAuditStore_AppendChainedEntry_FileBacked_ConcurrentAppenders failed at
+// audit_store_test.go:343 with "unrelated writer failed on entry 86: failed to
+// store audit entry unrelated-86: database is locked (5) (SQLITE_BUSY)" (run
+// 35424951958, job Native Build (Windows), Issue #4189) — the plain-store path,
+// not the BEGIN IMMEDIATE chain append that test was written to guard.
+func (s *SQLiteAuditStore) StoreAuditEntry(ctx context.Context, entry *business.AuditEntry) error {
+	if entry == nil {
+		return fmt.Errorf("audit entry cannot be nil")
+	}
+	if entry.ID == "" {
+		return fmt.Errorf("audit entry ID cannot be empty")
+	}
+
+	if entry.Checksum == "" {
+		entry.Checksum = computeChecksum(entry)
+	}
+
+	details, err := marshalJSON(entry.Details)
+	if err != nil {
+		return fmt.Errorf("failed to marshal details: %w", err)
+	}
+	changesJSON := "{}"
+	if entry.Changes != nil {
+		b, err := json.Marshal(entry.Changes)
+		if err != nil {
+			return fmt.Errorf("failed to marshal changes: %w", err)
+		}
+		changesJSON = string(b)
+	}
+	tags, err := marshalJSONSlice(entry.Tags)
+	if err != nil {
+		return fmt.Errorf("failed to marshal tags: %w", err)
+	}
+
+	// A single autocommit INSERT does not partially apply when it returns BUSY,
+	// so re-running it is safe — retryOnBusy's documented idempotency contract.
+	// A UNIQUE-constraint violation is not a busy error, so the append-only
+	// ErrImmutable case below is still decided on the first attempt.
+	err = retryOnBusy(ctx, func() error {
+		_, e := s.db.ExecContext(ctx, `
+		INSERT INTO audit_entries
+			(id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
+			 resource_type, resource_id, resource_name, result, error_code, error_message,
+			 request_id, ip_address, user_agent, method, path,
+			 details, changes, tags, severity, source, version, checksum,
+			 sequence_number, previous_checksum)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			entry.ID,
+			entry.TenantID,
+			formatTime(entry.Timestamp),
+			string(entry.EventType),
+			entry.Action,
+			entry.UserID,
+			string(entry.UserType),
+			entry.SessionID,
+			entry.ResourceType,
+			entry.ResourceID,
+			entry.ResourceName,
+			string(entry.Result),
+			entry.ErrorCode,
+			entry.ErrorMessage,
+			entry.RequestID,
+			entry.IPAddress,
+			entry.UserAgent,
+			entry.Method,
+			entry.Path,
+			details,
+			changesJSON,
+			tags,
+			string(entry.Severity),
+			entry.Source,
+			entry.Version,
+			entry.Checksum,
+			entry.SequenceNumber,
+			entry.PreviousChecksum,
+		)
+		return e
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return business.ErrImmutable
+		}
+		return fmt.Errorf("failed to store audit entry %s: %w", entry.ID, err)
+	}
+	return nil
+}
+
+// GetAuditEntry retrieves a single audit entry by ID.
+func (s *SQLiteAuditStore) GetAuditEntry(ctx context.Context, id string) (*business.AuditEntry, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
+		       resource_type, resource_id, resource_name, result, error_code, error_message,
+		       request_id, ip_address, user_agent, method, path,
+		       details, changes, tags, severity, source, version, checksum,
+		       sequence_number, previous_checksum
+		FROM audit_entries WHERE id = ?`, id)
+	return scanAuditEntry(row)
+}
+
+// GetLastAuditEntry returns the most recently written entry for tenantID by sequence_number,
+// or nil if no entries exist for that tenant.
+func (s *SQLiteAuditStore) GetLastAuditEntry(ctx context.Context, tenantID string) (*business.AuditEntry, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
+		       resource_type, resource_id, resource_name, result, error_code, error_message,
+		       request_id, ip_address, user_agent, method, path,
+		       details, changes, tags, severity, source, version, checksum,
+		       sequence_number, previous_checksum
+		FROM audit_entries
+		WHERE tenant_id = ?
+		ORDER BY sequence_number DESC
+		LIMIT 1`, tenantID)
+	entry, err := scanAuditEntry(row)
+	if err != nil {
+		if errors.Is(err, business.ErrAuditNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return entry, nil
+}
+
+// AppendChainedEntry implements business.AuditStore.AppendChainedEntry. The
+// head-read, the sequence assignment and the INSERT run inside one BEGIN
+// IMMEDIATE transaction on a single checked-out connection.
+//
+// A deferred transaction (plain BeginTx) is NOT sufficient here. File-backed
+// databases keep the default multi-connection pool and run in WAL mode (openDB /
+// openAndInit in plugin.go — only in-memory databases are pinned to one
+// connection), each store opens its own pool over the same file, and several
+// processes writing one file is a supported shape (concurrent_writers_test.go,
+// concurrent_processes_test.go). In WAL a deferred transaction takes its read
+// snapshot at the head SELECT; if any other connection commits any write before
+// the INSERT, the read-to-write upgrade fails with SQLITE_BUSY, and busy_timeout
+// does not retry a snapshot-invalidation busy. Because the audit manager logs and
+// continues when an append fails (pkg/audit/manager.go writeBatch), that would
+// silently drop audit records while leaving the surviving chain gap-free — a loss
+// VerifyChain cannot detect.
+//
+// BEGIN IMMEDIATE acquires the database write lock before the head is read, so no
+// other writer can commit between the read and the INSERT, and the busy_timeout
+// budget (plus retryOnBusy) applies to acquiring that lock — where waiting is
+// correct — instead of to an upgrade that can never succeed. The transaction is
+// issued on a dedicated *sql.Conn because database/sql exposes no per-transaction
+// locking mode: BEGIN IMMEDIATE is otherwise a DSN-wide (_txlock) setting that
+// would force every transaction of every store sharing the pool, including
+// read-only ones, to take the write lock (ADR-004 amendment, ADR-031 Decision 1,
+// Issue #3754).
+func (s *SQLiteAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, chainChecksum func(entry *business.AuditEntry) string) error {
+	if entry == nil {
+		return fmt.Errorf("audit entry cannot be nil")
+	}
+	if chainChecksum == nil {
+		return fmt.Errorf("computeChecksum function is required")
+	}
+	entry.TenantID = tenantID
+	if entry.ID == "" {
+		return fmt.Errorf("audit entry ID cannot be empty")
+	}
+
+	// A failed attempt rolls back before returning, so re-running it is safe: the
+	// sequence fields are recomputed from the head the next attempt reads.
+	return retryOnBusy(ctx, func() error {
+		return s.appendChainedEntryOnce(ctx, tenantID, entry, chainChecksum)
+	})
+}
+
+// appendChainedEntryOnce performs one BEGIN IMMEDIATE attempt of AppendChainedEntry.
+func (s *SQLiteAuditStore) appendChainedEntryOnce(ctx context.Context, tenantID string, entry *business.AuditEntry, chainChecksum func(entry *business.AuditEntry) string) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("failed to begin immediate transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		// Roll back on a context detached from the caller's: if ctx is already
+		// cancelled the ROLLBACK would be refused, and the connection would go
+		// back to the pool still holding an open write transaction.
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_, _ = conn.ExecContext(rollbackCtx, `ROLLBACK`)
+	}()
+
+	var headSeq uint64
+	var headChecksum string
+	row := conn.QueryRowContext(ctx, `
+		SELECT sequence_number, checksum FROM audit_entries
+		WHERE tenant_id = ?
+		ORDER BY sequence_number DESC
+		LIMIT 1`, tenantID)
+	switch err := row.Scan(&headSeq, &headChecksum); err {
+	case nil:
+		// head found
+	case sql.ErrNoRows:
+		headSeq, headChecksum = 0, ""
+	default:
+		return fmt.Errorf("failed to read chain head: %w", err)
+	}
+
+	entry.SequenceNumber = headSeq + 1
+	entry.PreviousChecksum = headChecksum
+	entry.Checksum = chainChecksum(entry)
+
+	if err := s.storeAuditEntryExec(ctx, conn, entry); err != nil {
+		return err
+	}
+
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return fmt.Errorf("failed to commit chained audit entry: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// ListAuditEntries returns audit entries matching the filter.
+func (s *SQLiteAuditStore) ListAuditEntries(ctx context.Context, filter *business.AuditFilter) ([]*business.AuditEntry, error) {
+	query, args := buildAuditQuery(filter)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list audit entries: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []*business.AuditEntry
+	for rows.Next() {
+		e, err := scanAuditRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// StoreAuditBatch appends multiple entries in a single transaction.
+func (s *SQLiteAuditStore) StoreAuditBatch(ctx context.Context, entries []*business.AuditEntry) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, e := range entries {
+		if err := s.storeAuditEntryExec(ctx, tx, e); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// GetAuditsByUser returns audit entries for a specific user within an optional time range.
+func (s *SQLiteAuditStore) GetAuditsByUser(ctx context.Context, userID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.ListAuditEntries(ctx, &business.AuditFilter{
+		UserIDs:   []string{userID},
+		TimeRange: timeRange,
+	})
+}
+
+// GetAuditsByResource returns audit entries for a specific resource.
+func (s *SQLiteAuditStore) GetAuditsByResource(ctx context.Context, resourceType, resourceID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.ListAuditEntries(ctx, &business.AuditFilter{
+		ResourceTypes: []string{resourceType},
+		ResourceIDs:   []string{resourceID},
+		TimeRange:     timeRange,
+	})
+}
+
+// GetAuditsByAction returns audit entries for a specific action.
+func (s *SQLiteAuditStore) GetAuditsByAction(ctx context.Context, action string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.ListAuditEntries(ctx, &business.AuditFilter{
+		Actions:   []string{action},
+		TimeRange: timeRange,
+	})
+}
+
+// GetFailedActions returns the most recent failed audit entries.
+func (s *SQLiteAuditStore) GetFailedActions(ctx context.Context, timeRange *business.TimeRange, limit int) ([]*business.AuditEntry, error) {
+	return s.ListAuditEntries(ctx, &business.AuditFilter{
+		Results:   []business.AuditResult{business.AuditResultFailure, business.AuditResultError, business.AuditResultDenied},
+		TimeRange: timeRange,
+		Limit:     limit,
+	})
+}
+
+// GetSuspiciousActivity returns high/critical severity security events for a tenant.
+func (s *SQLiteAuditStore) GetSuspiciousActivity(ctx context.Context, tenantID string, timeRange *business.TimeRange) ([]*business.AuditEntry, error) {
+	return s.ListAuditEntries(ctx, &business.AuditFilter{
+		TenantID:   tenantID,
+		EventTypes: []business.AuditEventType{business.AuditEventSecurityEvent},
+		Severities: []business.AuditSeverity{business.AuditSeverityHigh, business.AuditSeverityCritical},
+		TimeRange:  timeRange,
+	})
+}
+
+// GetAuditStats returns aggregate statistics about stored audit entries.
+func (s *SQLiteAuditStore) GetAuditStats(ctx context.Context) (*business.AuditStats, error) {
+	stats := &business.AuditStats{
+		EntriesByTenant:   make(map[string]int64),
+		EntriesByType:     make(map[string]int64),
+		EntriesByResult:   make(map[string]int64),
+		EntriesBySeverity: make(map[string]int64),
+		LastUpdated:       nowUTC(),
+	}
+
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_entries`).Scan(&stats.TotalEntries); err != nil {
+		return nil, fmt.Errorf("failed to count audit entries: %w", err)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `SELECT event_type, COUNT(*) FROM audit_entries GROUP BY event_type`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to aggregate by event_type: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var k string
+		var v int64
+		if err := rows.Scan(&k, &v); err == nil {
+			stats.EntriesByType[k] = v
+		}
+	}
+
+	rows2, err := s.db.QueryContext(ctx, `SELECT result, COUNT(*) FROM audit_entries GROUP BY result`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to aggregate by result: %w", err)
+	}
+	defer func() { _ = rows2.Close() }()
+	for rows2.Next() {
+		var k string
+		var v int64
+		if err := rows2.Scan(&k, &v); err == nil {
+			stats.EntriesByResult[k] = v
+		}
+	}
+
+	rows3, err := s.db.QueryContext(ctx, `SELECT severity, COUNT(*) FROM audit_entries GROUP BY severity`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to aggregate by severity: %w", err)
+	}
+	defer func() { _ = rows3.Close() }()
+	for rows3.Next() {
+		var k string
+		var v int64
+		if err := rows3.Scan(&k, &v); err == nil {
+			stats.EntriesBySeverity[k] = v
+		}
+	}
+
+	return stats, nil
+}
+
+// Close releases the underlying database connection.
+func (s *SQLiteAuditStore) Close() error {
+	return s.db.Close()
+}
+
+// ArchiveAuditEntries returns ErrImmutable — audit entries are immutable at this tier.
+func (s *SQLiteAuditStore) ArchiveAuditEntries(_ context.Context, _ time.Time) (int64, error) {
+	return 0, business.ErrImmutable
+}
+
+// PurgeAuditEntries returns ErrImmutable — audit entries are immutable at this tier.
+func (s *SQLiteAuditStore) PurgeAuditEntries(_ context.Context, _ time.Time) (int64, error) {
+	return 0, business.ErrImmutable
+}
+
+// ---- helpers ----------------------------------------------------------------
+
+// auditRowExecer is the subset of *sql.Tx and *sql.Conn that storeAuditEntryExec
+// needs, so the same INSERT serves both the batch transaction and the
+// BEGIN IMMEDIATE chain append (which drives its transaction on a *sql.Conn).
+type auditRowExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func (s *SQLiteAuditStore) storeAuditEntryExec(ctx context.Context, tx auditRowExecer, entry *business.AuditEntry) error {
+	if entry.Checksum == "" {
+		entry.Checksum = computeChecksum(entry)
+	}
+	details, err := marshalJSON(entry.Details)
+	if err != nil {
+		return fmt.Errorf("audit: failed to marshal details: %w", err)
+	}
+	changesJSON := "{}"
+	if entry.Changes != nil {
+		b, err := json.Marshal(entry.Changes)
+		if err != nil {
+			return fmt.Errorf("audit: failed to marshal changes: %w", err)
+		}
+		changesJSON = string(b)
+	}
+	tags, err := marshalJSONSlice(entry.Tags)
+	if err != nil {
+		return fmt.Errorf("audit: failed to marshal tags: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO audit_entries
+			(id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
+			 resource_type, resource_id, resource_name, result, error_code, error_message,
+			 request_id, ip_address, user_agent, method, path,
+			 details, changes, tags, severity, source, version, checksum,
+			 sequence_number, previous_checksum)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		entry.ID, entry.TenantID, formatTime(entry.Timestamp),
+		string(entry.EventType), entry.Action, entry.UserID, string(entry.UserType), entry.SessionID,
+		entry.ResourceType, entry.ResourceID, entry.ResourceName,
+		string(entry.Result), entry.ErrorCode, entry.ErrorMessage,
+		entry.RequestID, entry.IPAddress, entry.UserAgent, entry.Method, entry.Path,
+		details, changesJSON, tags,
+		string(entry.Severity), entry.Source, entry.Version, entry.Checksum,
+		entry.SequenceNumber, entry.PreviousChecksum,
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return business.ErrImmutable
+		}
+		return fmt.Errorf("failed to store audit entry %s: %w", entry.ID, err)
+	}
+	return nil
+}
+
+func buildAuditQuery(filter *business.AuditFilter) (string, []interface{}) {
+	base := `SELECT id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
+	                resource_type, resource_id, resource_name, result, error_code, error_message,
+	                request_id, ip_address, user_agent, method, path,
+	                details, changes, tags, severity, source, version, checksum,
+	                sequence_number, previous_checksum
+	         FROM audit_entries`
+
+	if filter == nil {
+		return base + ` ORDER BY timestamp DESC`, nil
+	}
+
+	var conditions []string
+	var args []interface{}
+
+	if filter.TenantID != "" {
+		conditions = append(conditions, `tenant_id = ?`)
+		args = append(args, filter.TenantID)
+	}
+	if len(filter.EventTypes) > 0 {
+		ps := make([]string, len(filter.EventTypes))
+		for i, et := range filter.EventTypes {
+			ps[i] = "?"
+			args = append(args, string(et))
+		}
+		conditions = append(conditions, `event_type IN (`+strings.Join(ps, ",")+`)`)
+	}
+	if len(filter.Actions) > 0 {
+		ps := make([]string, len(filter.Actions))
+		for i, a := range filter.Actions {
+			ps[i] = "?"
+			args = append(args, a)
+		}
+		conditions = append(conditions, `action IN (`+strings.Join(ps, ",")+`)`)
+	}
+	if len(filter.UserIDs) > 0 {
+		ps := make([]string, len(filter.UserIDs))
+		for i, u := range filter.UserIDs {
+			ps[i] = "?"
+			args = append(args, u)
+		}
+		conditions = append(conditions, `user_id IN (`+strings.Join(ps, ",")+`)`)
+	}
+	if len(filter.Results) > 0 {
+		ps := make([]string, len(filter.Results))
+		for i, r := range filter.Results {
+			ps[i] = "?"
+			args = append(args, string(r))
+		}
+		conditions = append(conditions, `result IN (`+strings.Join(ps, ",")+`)`)
+	}
+	if len(filter.Severities) > 0 {
+		ps := make([]string, len(filter.Severities))
+		for i, sv := range filter.Severities {
+			ps[i] = "?"
+			args = append(args, string(sv))
+		}
+		conditions = append(conditions, `severity IN (`+strings.Join(ps, ",")+`)`)
+	}
+	if len(filter.ResourceTypes) > 0 {
+		ps := make([]string, len(filter.ResourceTypes))
+		for i, rt := range filter.ResourceTypes {
+			ps[i] = "?"
+			args = append(args, rt)
+		}
+		conditions = append(conditions, `resource_type IN (`+strings.Join(ps, ",")+`)`)
+	}
+	if len(filter.ResourceIDs) > 0 {
+		ps := make([]string, len(filter.ResourceIDs))
+		for i, ri := range filter.ResourceIDs {
+			ps[i] = "?"
+			args = append(args, ri)
+		}
+		conditions = append(conditions, `resource_id IN (`+strings.Join(ps, ",")+`)`)
+	}
+	if filter.TimeRange != nil {
+		if filter.TimeRange.Start != nil {
+			conditions = append(conditions, `timestamp >= ?`)
+			args = append(args, formatTime(*filter.TimeRange.Start))
+		}
+		if filter.TimeRange.End != nil {
+			conditions = append(conditions, `timestamp <= ?`)
+			args = append(args, formatTime(*filter.TimeRange.End))
+		}
+	}
+
+	query := base
+	if len(conditions) > 0 {
+		query += ` WHERE ` + strings.Join(conditions, ` AND `)
+	}
+
+	sortCol := "timestamp"
+	switch filter.SortBy {
+	case "severity":
+		sortCol = "severity"
+	case "user_id":
+		sortCol = "user_id"
+	}
+	order := "DESC"
+	if filter.Order == "asc" {
+		order = "ASC"
+	}
+	query += fmt.Sprintf(` ORDER BY %s %s`, sortCol, order)
+
+	if filter.Limit > 0 {
+		query += fmt.Sprintf(` LIMIT %d`, filter.Limit)
+	}
+	if filter.Offset > 0 {
+		query += fmt.Sprintf(` OFFSET %d`, filter.Offset)
+	}
+
+	return query, args
+}
+
+func scanAuditEntry(row *sql.Row) (*business.AuditEntry, error) {
+	e := &business.AuditEntry{}
+	var tsStr, detailsStr, changesStr, tagsStr string
+
+	err := row.Scan(
+		&e.ID, &e.TenantID, &tsStr,
+		&e.EventType, &e.Action, &e.UserID, &e.UserType, &e.SessionID,
+		&e.ResourceType, &e.ResourceID, &e.ResourceName,
+		&e.Result, &e.ErrorCode, &e.ErrorMessage,
+		&e.RequestID, &e.IPAddress, &e.UserAgent, &e.Method, &e.Path,
+		&detailsStr, &changesStr, &tagsStr,
+		&e.Severity, &e.Source, &e.Version, &e.Checksum,
+		&e.SequenceNumber, &e.PreviousChecksum,
+	)
+	if err == sql.ErrNoRows {
+		return nil, business.ErrAuditNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan audit entry: %w", err)
+	}
+	return populateAuditEntry(e, tsStr, detailsStr, changesStr, tagsStr)
+}
+
+func scanAuditRow(rows *sql.Rows) (*business.AuditEntry, error) {
+	e := &business.AuditEntry{}
+	var tsStr, detailsStr, changesStr, tagsStr string
+
+	if err := rows.Scan(
+		&e.ID, &e.TenantID, &tsStr,
+		&e.EventType, &e.Action, &e.UserID, &e.UserType, &e.SessionID,
+		&e.ResourceType, &e.ResourceID, &e.ResourceName,
+		&e.Result, &e.ErrorCode, &e.ErrorMessage,
+		&e.RequestID, &e.IPAddress, &e.UserAgent, &e.Method, &e.Path,
+		&detailsStr, &changesStr, &tagsStr,
+		&e.Severity, &e.Source, &e.Version, &e.Checksum,
+		&e.SequenceNumber, &e.PreviousChecksum,
+	); err != nil {
+		return nil, fmt.Errorf("failed to scan audit row: %w", err)
+	}
+	return populateAuditEntry(e, tsStr, detailsStr, changesStr, tagsStr)
+}
+
+func populateAuditEntry(e *business.AuditEntry, tsStr, detailsStr, changesStr, tagsStr string) (*business.AuditEntry, error) {
+	e.Timestamp = parseTime(tsStr)
+
+	details, err := unmarshalJSONMap(detailsStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal audit entry details: %w", err)
+	}
+	e.Details = details
+
+	if changesStr != "" && changesStr != "{}" {
+		var changes business.AuditChanges
+		if err := json.Unmarshal([]byte(changesStr), &changes); err == nil {
+			e.Changes = &changes
+		}
+	}
+
+	tags, err := unmarshalJSONSlice(tagsStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal audit entry tags: %w", err)
+	}
+	e.Tags = tags
+
+	return e, nil
+}
+
+func computeChecksum(entry *business.AuditEntry) string {
+	h := sha256.New()
+	// sha256.Hash.Write never returns an error; the return values are intentionally ignored.
+	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s",
+		entry.ID, entry.TenantID, entry.Timestamp.UTC().Format(time.RFC3339Nano),
+		entry.Action, entry.UserID, entry.ResourceID)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// ensure SQLiteAuditStore satisfies the interface at compile time
+var _ business.AuditStore = (*SQLiteAuditStore)(nil)

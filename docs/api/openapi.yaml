@@ -1,0 +1,2695 @@
+openapi: 3.0.3
+info:
+  title: CFGMS REST API
+  description: |
+    Configuration Management System REST API for managing stewards, configurations,
+    certificates, and role-based access control.
+  version: 1.0.0
+  contact:
+    name: CFGMS Support
+    url: https://github.com/cfg-is/cfgms
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: http://localhost:9080/api/v1
+    description: Development server
+  - url: https://{hostname}:9080/api/v1
+    description: Production server
+    variables:
+      hostname:
+        default: cfgms.local
+        description: CFGMS controller hostname
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /registration/pending:
+    get:
+      summary: List pending registrations
+      description: |
+        Devices quarantined at registration and awaiting approval. Tenant-scoped
+        callers see only their own tenant; unscoped callers see all tenants.
+        Requires the `registration:list-pending` permission.
+      operationId: listPendingRegistrations
+      tags:
+        - Registration
+      responses:
+        '200':
+          description: Pending registrations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    pending_id:
+                      type: string
+                    steward_id:
+                      type: string
+                    tenant_id:
+                      type: string
+                    source_ip:
+                      type: string
+                    hostname:
+                      type: string
+                      description: Self-reported by the device, unauthenticated; sanitised on write. Omitted for older entries.
+                    key_fingerprint:
+                      type: string
+                      description: Lowercase hex SHA-256 of the CSR public key (DER SubjectPublicKeyInfo), computed by the controller. Omitted for older entries.
+                    registered_at:
+                      type: string
+                      format: date-time
+  /registration/tokens:
+    get:
+      summary: List registration tokens
+      description: |
+        Lists registration tokens. Each entry carries the stable `token_id` and the
+        6-character `token_prefix`, never the secret. `label` is the operator-written
+        description given at mint time; it is omitted for tokens minted without one.
+        Requires the `registration:list-tokens` permission.
+      operationId: listRegistrationTokens
+      tags:
+        - Registration
+      responses:
+        '200':
+          description: Registration tokens
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tokens:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RegistrationToken'
+                  total:
+                    type: integer
+    post:
+      summary: Create a registration token
+      description: |
+        Mints a registration token. The response is the only time the full secret
+        (`token`) is returned. Requires the `registration:create-token` permission.
+      operationId: createRegistrationToken
+      tags:
+        - Registration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - tenant_id
+                - controller_url
+              properties:
+                tenant_id:
+                  type: string
+                controller_url:
+                  type: string
+                group:
+                  type: string
+                label:
+                  type: string
+                  maxLength: 100
+                  description: Optional free-text description. At most 100 characters, printable only (control characters are rejected). Empty is allowed. Never part of the token secret.
+                expires_in:
+                  type: string
+      responses:
+        '201':
+          description: Token created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistrationToken'
+        '400':
+          description: Invalid request, including an over-length or control-character `label`
+  /health:
+    get:
+      summary: Health check endpoint
+      description: Returns the health status of the API server
+      operationId: getHealth
+      security: []  # No authentication required
+      tags:
+        - System
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                data:
+                  status: healthy
+                  service: cfgms-api
+                  version: "0.2.0"
+                timestamp: "2025-07-27T16:00:00Z"
+
+  /stewards:
+    get:
+      summary: List all stewards
+      description: Returns a list of all registered stewards in the system
+      operationId: listStewards
+      tags:
+        - Stewards
+      responses:
+        '200':
+          description: List of stewards
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/StewardInfo'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /stewards/refresh/pending:
+    get:
+      summary: List pending steward credential refresh requests
+      description: >
+        Returns a bare array. `hostname` is the steward-reported hostname for the
+        device within the entry's own tenant; it is an empty string when the
+        device is unknown. It is untrusted and must be rendered as text.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          description: Filter by tenant (honoured for unscoped callers only)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Pending refresh entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    pending_id:
+                      type: string
+                    device_id:
+                      type: string
+                      description: Ed25519 key fingerprint of the device
+                    hostname:
+                      type: string
+                      description: Steward-reported hostname, empty when unknown
+                    tenant_id:
+                      type: string
+                    source_ip:
+                      type: string
+                    provenance_matched_fields:
+                      type: integer
+                    provenance_total_fields:
+                      type: integer
+                    status:
+                      type: string
+                    created_at:
+                      type: string
+                      format: date-time
+                    expires_at:
+                      type: string
+                      format: date-time
+        '503':
+          description: Pending refresh store unavailable
+
+  /stewards/{stewardId}:
+    get:
+      summary: Get steward details
+      description: Returns detailed information about a specific steward
+      operationId: getSteward
+      tags:
+        - Stewards
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+      responses:
+        '200':
+          description: Steward details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/StewardInfo'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /stewards/{stewardId}/dna:
+    get:
+      summary: Get steward DNA information
+      description: Returns the DNA (system fingerprint) information for a steward
+      operationId: getStewardDNA
+      tags:
+        - Stewards
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+      responses:
+        '200':
+          description: Steward DNA information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/DNAInfo'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /stewards/{stewardId}/config:
+    get:
+      summary: Get steward configuration
+      description: >-
+        Returns the current configuration for a steward. Tenant scope: a
+        scoped caller may read only a steward within its own tenant subtree;
+        an out-of-subtree or unknown steward returns 404. Root/unscoped
+        callers may read any steward.
+      operationId: getStewardConfig
+      tags:
+        - Configuration
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+      responses:
+        '200':
+          description: Steward configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ConfigInfo'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      summary: Update steward configuration
+      description: >-
+        Stores configuration for a steward and triggers delivery. Tenant
+        scope: a scoped caller may write configuration only for a steward
+        within its own tenant subtree; an out-of-subtree or unknown steward
+        is rejected with 404 STEWARD_NOT_FOUND (not 403, to avoid disclosing
+        that the steward exists in another tenant). Root/unscoped callers
+        retain authority across tenants, subject to the ADR-025 root/MSP
+        tenant-crossing-boundary check for principals that are subject to it.
+      operationId: updateStewardConfig
+      tags:
+        - Configuration
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Configuration stored, with a trackable delivery record
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      steward_id:
+                        type: string
+                      tenant_id:
+                        type: string
+                      message:
+                        type: string
+                      command_id:
+                        type: string
+                        description: >-
+                          Present when a durable delivery record was created;
+                          absent if no command store is configured.
+                      delivery_status:
+                        type: string
+                        enum: [pending, delivered]
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: A required module is not cached and approved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: REQUIRED_MODULE_NOT_APPROVED
+                  message: required module not approved
+                timestamp: "2025-07-27T16:00:00Z"
+        '500':
+          description: Configuration could not be stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: STORAGE_ERROR
+                  message: Failed to store configuration
+                timestamp: "2025-07-27T16:00:00Z"
+
+  /stewards/{stewardId}/config/effective:
+    get:
+      summary: Get effective configuration with inheritance
+      description: >-
+        Returns the effective configuration after applying inheritance
+        hierarchy. Tenant scope: resolved against the steward's own tenant
+        when known to the controller's registry; a caller whose tenant
+        differs from the steward's owning tenant is rejected (mapped to 500,
+        since this check does not distinguish the case from a genuine
+        resolution failure).
+      operationId: getEffectiveConfig
+      tags:
+        - Configuration
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+      responses:
+        '200':
+          description: Effective configuration with source tracking
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/EffectiveConfig'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+
+  /stewards/{stewardId}/config/validate:
+    post:
+      summary: Validate configuration
+      description: >-
+        Validates a configuration without applying it. Tenant scope: a
+        scoped caller may validate only a steward within its own tenant
+        subtree; an out-of-subtree or unknown steward returns 404.
+        Root/unscoped callers may validate for any steward.
+      operationId: validateConfig
+      tags:
+        - Configuration
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ValidationResult'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /stewards/{stewardId}/actions/prepare:
+    post:
+      summary: Prepare a steward action for signing
+      description: >-
+        Returns only the canonical action content (base64 of the JSON the operator
+        signs) and the envelope shell (steward-action), so a browser never
+        re-implements canonicalization. The nonce, expiry and targets come from
+        the existing POST /operator-payload/sign/begin envelope (selector
+        id:<steward id>), never from this endpoint. Nothing is queued. Requires
+        steward:service-control for target_kind service and steward:process-control
+        for target_kind process, both at strong assurance (401 CFGMS-StepUp below
+        it). A steward outside the caller's tenant is a 404; a root-scoped caller
+        without a tenant crossing gets the ADR-025 crossing challenge.
+      operationId: prepareStewardAction
+      tags:
+        - Steward Actions
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target_kind, target_name, action]
+              properties:
+                target_kind:
+                  type: string
+                  enum: [service, process]
+                target_name:
+                  type: string
+                  description: Service name, or the decimal PID for a process
+                action:
+                  type: string
+                  enum: [start, stop, restart, end, suspend, resume]
+                image:
+                  type: string
+                  description: Process image name the operator saw (process actions only)
+      responses:
+        '200':
+          description: Canonical content to sign
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      content:
+                        type: string
+                        description: base64 of the canonical action content
+                      shell:
+                        type: string
+                        example: steward-action
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /terminal/prepare/{steward_id}:
+    post:
+      summary: Prepare a terminal-open request for signing
+      description: >-
+        Returns the canonical terminal-open content (base64) and the envelope shell
+        (terminal-open) to feed to POST /operator-payload/sign/begin. An empty
+        terminal_shell resolves to the target steward's platform default
+        (powershell for windows, bash otherwise); 409 when the platform is unknown.
+        Requires terminal:create at strong assurance.
+      operationId: prepareTerminal
+      tags:
+        - Terminal
+      parameters:
+        - name: steward_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                terminal_shell:
+                  type: string
+                  example: bash
+      responses:
+        '200':
+          description: Canonical content to sign
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      content:
+                        type: string
+                        description: base64 of the canonical terminal content
+                      shell:
+                        type: string
+                        example: terminal-open
+                      terminal_shell:
+                        type: string
+                        example: bash
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Steward platform is unknown (STEWARD_PLATFORM_UNKNOWN); pass terminal_shell
+
+  /terminal/ws/{steward_id}:
+    get:
+      summary: Open the terminal WebSocket
+      description: >-
+        Requires a one-time ticket from POST /terminal/tickets/{steward_id}, offered as the
+        WebSocket subprotocol cfgms.ticket.<ticket> alongside cfgms.terminal.v1 in
+        Sec-WebSocket-Protocol (never in the URL). The server selects only
+        cfgms.terminal.v1. The ticket is redeemed after the permission and tenant checks;
+        a missing, unknown, used or expired ticket, or one issued to another principal,
+        tenant, web session or steward, is 403 TERMINAL_TICKET_REQUIRED before upgrade.
+      operationId: openTerminalWebSocket
+      tags:
+        - Terminal
+      parameters:
+        - name: steward_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '101':
+          description: Switching Protocols
+        '403':
+          description: Ticket missing, invalid, used, expired or not issued to this caller (TERMINAL_TICKET_REQUIRED)
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /terminal/tickets/{steward_id}:
+    post:
+      summary: Exchange an operator proof for a one-time terminal ticket
+      description: >-
+        Verifies the operator proof over the terminal-open envelope and returns a
+        ticket valid for 30 seconds. The ticket is single use (the first redemption
+        consumes it, on any controller node) and is presented as the WebSocket
+        subprotocol cfgms.ticket.<ticket> alongside cfgms.terminal.v1. Every
+        proof-related failure is 403 INVALID_SIGNATURE. Requires terminal:create at
+        strong assurance.
+      operationId: createTerminalTicket
+      tags:
+        - Terminal
+      parameters:
+        - name: steward_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [terminal_shell, nonce, expires_at, targets]
+              properties:
+                terminal_shell:
+                  type: string
+                nonce:
+                  type: string
+                expires_at:
+                  type: string
+                  format: date-time
+                targets:
+                  type: array
+                  items:
+                    type: string
+                signature:
+                  type: object
+                  description: X.509 proof (algorithm, value, public_key); exactly one of signature or webauthn
+                webauthn:
+                  type: object
+                  description: WebAuthn proof (authenticator_data, client_data_json, signature, credential_id)
+      responses:
+        '200':
+          description: Ticket minted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      ticket:
+                        type: string
+                        description: base64url, 30 second single-use ticket
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: INVALID_SIGNATURE
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: Cluster mode with no usable shared ceremony store
+
+  /stewards/{stewardId}/services/{name}/actions:
+    post:
+      summary: Start, stop or restart a service on one steward
+      description: >-
+        Verifies the operator-signed envelope, applies the per-principal action
+        budget, creates an action run and queues it through the shared queue. It
+        returns 202 with the run id and never waits for the steward: poll
+        GET /runs/{run_id} and GET /runs/{run_id}/jobs on any node. Requires
+        steward:service-control at strong assurance. The justification is
+        mandatory. Every request and outcome is audited. Error codes:
+        ENVELOPE_EXPIRED (400), ENVELOPE_TTL_EXCEEDED (400), INVALID_TARGETS
+        (400), MISSING_JUSTIFICATION (400), INVALID_ACTION (400),
+        OPERATOR_SIGNATURE_REQUIRED (403), INVALID_SIGNATURE (403),
+        ACTION_BUDGET_EXCEEDED (429).
+      operationId: postStewardServiceAction
+      tags:
+        - Steward Actions
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StewardActionRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/StewardActionAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Missing operator signature, or the signature does not verify
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          description: Per-principal action budget exceeded (ACTION_BUDGET_EXCEEDED)
+
+  /stewards/{stewardId}/processes/{pid}/actions:
+    post:
+      summary: End, suspend or resume a process on one steward
+      description: >-
+        As the service endpoint, for a process identified by decimal PID. The
+        image field is the image name the operator saw; the steward refuses a
+        PID that now belongs to a different image (result code process_changed).
+        Requires steward:process-control at strong assurance. A refusal by the
+        steward, such as self_protect, arrives as the job result_code, not as a
+        synchronous error.
+      operationId: postStewardProcessAction
+      tags:
+        - Steward Actions
+      parameters:
+        - $ref: '#/components/parameters/stewardId'
+        - name: pid
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StewardActionRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/StewardActionAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Missing operator signature, or the signature does not verify
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          description: Per-principal action budget exceeded (ACTION_BUDGET_EXCEEDED)
+
+  /runs/script:
+    post:
+      summary: Run a library script on matched stewards
+      description: >-
+        Creates a run and queues one execution per steward the target selector
+        matches. Requires steward:execute-scripts at strong assurance. The
+        optional shell must be one of bash, sh, powershell, pwsh or cmd; any other
+        value is rejected with 400 UNSUPPORTED_SHELL. The error message lists the
+        allowed shells and never echoes control characters from the submitted
+        value. A missing script_id is 400 MISSING_SCRIPT_ID.
+      operationId: postRunScript
+      tags:
+        - Steward Actions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [script_id]
+              properties:
+                target:
+                  type: string
+                  description: Fleet selector
+                script_id:
+                  type: string
+                script_version:
+                  type: string
+                  description: Empty means latest
+                shell:
+                  type: string
+                  enum: [bash, sh, powershell, pwsh, cmd]
+                  description: Optional shell override; other values return 400 UNSUPPORTED_SHELL
+                params:
+                  type: object
+                  additionalProperties:
+                    type: string
+      responses:
+        '200':
+          description: Run created; data.run_id identifies it
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /runs/{runId}:
+    get:
+      summary: Get a run
+      description: >-
+        Returns the run record, including kind (script or steward_action). Served
+        by every node from the shared run store. A run outside the caller's
+        tenant scope is a 404.
+      operationId: getRun
+      tags:
+        - Steward Actions
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The run
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /runs/{runId}/jobs:
+    get:
+      summary: List a run's jobs
+      description: >-
+        Each job carries its status and, for a steward action, result_code (ok,
+        self_protect, process_changed, unsupported, not_found,
+        permission_denied, failed, expired, no_result). result_detail is the
+        controller's text for an outcome it assigned itself: "expired, not run"
+        for an action never delivered before its 2 minute queue TTL, "sent, no
+        result reported" for one sent but never reported. The steward's raw
+        error text is never returned.
+      operationId: getRunJobs
+      tags:
+        - Steward Actions
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The run's jobs
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /certificates:
+    get:
+      summary: List certificates
+      description: >-
+        Returns certificates within the caller's tenant scope: a scoped
+        caller sees only certificates whose owning steward is in its own
+        tenant subtree (plus certificates with no owning steward). If the
+        subtree cannot be evaluated the request fails closed with 503 rather
+        than returning an unfiltered list. Root/unscoped callers see every
+        certificate.
+      operationId: listCertificates
+      tags:
+        - Certificates
+      responses:
+        '200':
+          description: List of certificates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CertificateInfo'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /certificates/provision:
+    post:
+      summary: Provision new certificate
+      description: Provisions a new certificate for a subject
+      operationId: provisionCertificate
+      tags:
+        - Certificates
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CertificateRequest'
+      responses:
+        '200':
+          description: Certificate provisioned successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/CertificateResponse'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /certificates/{serial}/revoke:
+    post:
+      summary: Revoke certificate
+      description: Revokes a certificate by serial number
+      operationId: revokeCertificate
+      tags:
+        - Certificates
+      parameters:
+        - name: serial
+          in: path
+          required: true
+          description: Certificate serial number
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Certificate revoked successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /workflows:
+    get:
+      summary: List workflows
+      description: >
+        Lists the calling tenant's workflow definitions. Each item carries the
+        stored definition plus a summary of its triggers and latest run, so the
+        list needs no per-row calls. Counts and last_execution are scoped to the
+        caller's tenant. Requires the workflow:list permission.
+      operationId: listWorkflows
+      tags:
+        - Workflows
+      responses:
+        '200':
+          description: Workflows with trigger counts and last execution
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workflows, count]
+                properties:
+                  workflows:
+                    type: array
+                    items:
+                      type: object
+                      description: The stored workflow definition plus the summary fields below
+                      required: [name, trigger_count, enabled_trigger_count, last_execution]
+                      properties:
+                        name:
+                          type: string
+                        trigger_count:
+                          type: integer
+                          description: Triggers of the tenant that start this workflow
+                        enabled_trigger_count:
+                          type: integer
+                          description: Those triggers whose status is active
+                        last_execution:
+                          type: object
+                          nullable: true
+                          description: Most recently started run of this workflow in the tenant; null when it has never run
+                          required: [id, status, start_time]
+                          properties:
+                            id:
+                              type: string
+                            status:
+                              type: string
+                            start_time:
+                              type: string
+                              format: date-time
+                  count:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /workflows/parse-yaml:
+    post:
+      summary: Parse a YAML workflow document
+      description: >
+        Parses a YAML workflow document with the server parser and returns the
+        workflow as JSON plus every validation issue found. Nothing is saved or
+        run. The body is capped at 10 MB (413 above that). Malformed YAML returns
+        400 with a generic message that does not echo the document. Requires the
+        workflow:read permission.
+      operationId: parseWorkflowYaml
+      tags:
+        - Workflows
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              type: string
+          text/plain:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: Parsed workflow and validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workflow, valid, issues]
+                properties:
+                  workflow:
+                    type: object
+                    description: The parsed workflow (same shape as the workflow create request)
+                  valid:
+                    type: boolean
+                  issues:
+                    type: array
+                    items:
+                      type: object
+                      required: [path, message]
+                      properties:
+                        path:
+                          type: string
+                        step_name:
+                          type: string
+                        message:
+                          type: string
+        '400':
+          description: The document is not a parseable workflow
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: Body exceeds the request size limit
+
+  /workflows/render-yaml:
+    post:
+      summary: Render a workflow as canonical YAML
+      description: >
+        Renders a workflow definition as the canonical YAML that parse-yaml
+        reads. Nothing is saved or run. A workflow using fields the YAML format
+        cannot express returns 400 rather than being rendered lossily. Requires
+        the workflow:read permission.
+      operationId: renderWorkflowYaml
+      tags:
+        - Workflows
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Same shape as the workflow create request
+      responses:
+        '200':
+          description: Canonical YAML text
+          content:
+            application/yaml:
+              schema:
+                type: string
+        '400':
+          description: Body is not valid JSON, or the workflow cannot be expressed as YAML
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: Body exceeds the request size limit
+
+  /workflows/validate:
+    post:
+      summary: Validate a workflow definition (dry run)
+      description: >
+        Validates a workflow definition and returns every issue found, without
+        saving or running anything. Always returns 200 for a well-formed JSON
+        body; a definition with defects returns valid=false and a list of
+        issues. Requires the workflow:read permission.
+      operationId: validateWorkflow
+      tags:
+        - Workflows
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Same shape as the workflow create request
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [valid, issues]
+                properties:
+                  valid:
+                    type: boolean
+                  issues:
+                    type: array
+                    items:
+                      type: object
+                      required: [path, message]
+                      properties:
+                        path:
+                          type: string
+                          description: Location of the defect, e.g. steps[2].config
+                        step_name:
+                          type: string
+                        message:
+                          type: string
+        '400':
+          description: Body is not valid JSON
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /workflows/approvals:
+    get:
+      summary: List pending workflow approvals
+      description: >
+        Returns the caller's tenant's pending approval gates, oldest first. A
+        root-scoped caller selects a tenant with the tenant query parameter.
+        Requires the workflow:read permission.
+      operationId: listWorkflowApprovals
+      tags:
+        - Workflows
+      parameters:
+        - name: tenant
+          in: query
+          required: false
+          description: Tenant to list, for root-scoped callers only
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Pending approvals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approvals:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WorkflowApproval'
+                  total:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /workflows/approvals/{approvalId}/decision:
+    post:
+      summary: Approve or reject a workflow approval
+      description: >
+        Records a decision on a pending approval gate and resumes the suspended
+        run (approve) or fails it (reject). Requires the workflow:approve
+        permission at strong assurance; a caller below strong assurance receives
+        a 401 CFGMS-StepUp challenge. When the gate names an approver_permission,
+        the caller must also hold it. The principal that started the run cannot
+        decide its approval (403, code SELF_APPROVAL). An approval in another
+        tenant is a 404. Each decision is audited.
+      operationId: decideWorkflowApproval
+      tags:
+        - Workflows
+      parameters:
+        - name: approvalId
+          in: path
+          required: true
+          description: Approval ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - decision
+              properties:
+                decision:
+                  type: string
+                  enum: [approve, reject]
+                justification:
+                  type: string
+      responses:
+        '200':
+          description: Decision recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approval_id:
+                    type: string
+                  decision:
+                    type: string
+                  execution_id:
+                    type: string
+                  resumed:
+                    type: boolean
+                    description: false when the decision is recorded but the resume is left to engine recovery
+                  execution_status:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Missing approver permission, or the caller started the run (SELF_APPROVAL)
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Approval already decided or expired
+
+  /rbac/permissions:
+    get:
+      summary: List permissions
+      description: Returns all available permissions in the system
+      operationId: listPermissions
+      tags:
+        - RBAC
+      responses:
+        '200':
+          description: List of permissions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Permission'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /rbac/roles:
+    get:
+      summary: List roles
+      description: Returns all roles in the system
+      operationId: listRoles
+      tags:
+        - RBAC
+      responses:
+        '200':
+          description: List of roles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Role'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      summary: Create role
+      description: Creates a new role
+      operationId: createRole
+      tags:
+        - RBAC
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleRequest'
+      responses:
+        '200':
+          description: Role created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Role'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /rbac/check:
+    post:
+      summary: Check permission
+      description: Checks if a subject has a specific permission
+      operationId: checkPermission
+      tags:
+        - RBAC
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PermissionCheckRequest'
+      responses:
+        '200':
+          description: Permission check result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      allowed:
+                        type: boolean
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api-keys:
+    get:
+      summary: List API keys
+      description: >-
+        Returns API keys belonging to the caller's own tenant — an exact
+        tenant match, not a subtree. A request with no resolved tenant is
+        rejected with 401.
+      operationId: listAPIKeys
+      tags:
+        - API Keys
+      responses:
+        '200':
+          description: List of API keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/APIKeyInfo'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      summary: Create API key
+      description: Creates a new API key
+      operationId: createAPIKey
+      tags:
+        - API Keys
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/APIKeyRequest'
+      responses:
+        '200':
+          description: API key created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/APIKeyResponse'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api-keys/{keyId}:
+    get:
+      summary: Get API key details
+      description: Returns details about a specific API key
+      operationId: getAPIKey
+      tags:
+        - API Keys
+      parameters:
+        - name: keyId
+          in: path
+          required: true
+          description: API key ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: API key details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/APIKeyInfo'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Delete API key
+      description: Deletes an API key
+      operationId: deleteAPIKey
+      tags:
+        - API Keys
+      parameters:
+        - name: keyId
+          in: path
+          required: true
+          description: API key ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: API key deleted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /monitoring/health:
+    get:
+      summary: Get system health overview
+      description: Returns comprehensive health status of all system components
+      operationId: getSystemHealth
+      tags:
+        - Monitoring
+      responses:
+        '200':
+          description: System health overview
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/SystemHealth'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /monitoring/metrics:
+    get:
+      summary: Get performance metrics
+      description: Returns current performance metrics from the dedicated private metrics listener. The public product listener returns 404 for this path.
+      operationId: getMetrics
+      tags:
+        - Monitoring
+      servers:
+        - url: https://localhost:9090/api/v1
+          description: Private metrics listener; replace localhost only with an explicitly configured private address
+      responses:
+        '200':
+          description: Performance metrics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: true
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /monitoring/components/{component}/health:
+    get:
+      summary: Get component health
+      description: |
+        Returns the live status, message and last-check time of one controller component.
+        Known components: `grpc_server`, `storage`, `certificate_ca`, `rbac_service`, `transport`.
+        A failing probe reports `unhealthy` with a generic message; probe error text is never returned.
+        Requires `monitoring:read-component-health`.
+      operationId: getComponentHealth
+      tags:
+        - Monitoring
+      parameters:
+        - name: component
+          in: path
+          required: true
+          description: Component name
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Component health
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [status, message, last_checked]
+                    properties:
+                      status:
+                        type: string
+                        enum: [healthy, degraded, unhealthy]
+                      message:
+                        type: string
+                      last_checked:
+                        type: string
+                        format: date-time
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /monitoring/components/{component}/metrics:
+    get:
+      summary: Get component metrics
+      description: Returns the metrics of one controller component (same names as the health endpoint) from the dedicated private metrics listener. The public product listener returns 404 for this path. Requires `monitoring:read-component-metrics`.
+      operationId: getComponentMetrics
+      tags:
+        - Monitoring
+      servers:
+        - url: https://localhost:9090/api/v1
+          description: Private metrics listener; replace localhost only with an explicitly configured private address
+      parameters:
+        - name: component
+          in: path
+          required: true
+          description: Component name
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Component metrics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: true
+                  timestamp:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: The component's metrics are currently unavailable
+
+  /alerts/{alertId}/unsilence:
+    post:
+      summary: Unsilence an alert
+      description: |
+        Reverses a silence, clearing the silence flag, its expiry and the silencing
+        principal. Requires `alert:unsilence` at Strong assurance (same gate as silence).
+        Idempotent: unsilencing an alert that is not silenced returns its current state.
+      operationId: unsilenceAlert
+      tags:
+        - Alerts
+      parameters:
+        - name: alertId
+          in: path
+          required: true
+          description: Alert identifier
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Updated alert state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertState'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: Alert store not configured
+
+  /tenants:
+    get:
+      summary: List tenants visible to the caller
+      description: |
+        Returns the tenants in the caller's visible scope. Each item carries the tenant
+        record plus `device_count`, the number of stewards in the tenant's subtree
+        within the caller's visible scope. Registered, active, lost and hidden stewards
+        count; terminal-state stewards (deregistered, revoked, archived, dormant) and
+        disabled accounts do not. A root-scoped caller also receives a boundary row
+        (`boundary: true`, `accessible: false`) for each MSP, a direct child of the root
+        tenant, that it holds no crossing for: only `id`, `name`, `parent_id`, `status`,
+        `tech_count`, `device_count` and `client_count`. Clients below an MSP are never
+        listed. `device_count` here is `endpoint_count` in the billing reports.
+      operationId: listTenants
+      tags:
+        - Tenants
+      responses:
+        '200':
+          description: Tenants with subtree steward counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        name:
+                          type: string
+                        parent_id:
+                          type: string
+                        status:
+                          type: string
+                        device_count:
+                          type: integer
+                          minimum: 0
+                          description: Subtree steward count within the caller's visible scope.
+                        boundary:
+                          type: boolean
+                          description: True for a walled-off MSP boundary row.
+                        accessible:
+                          type: boolean
+                          description: False for a boundary row, true for a full row.
+                        tech_count:
+                          type: integer
+                          minimum: 0
+                          description: Boundary rows only. Enabled accounts in the MSP subtree.
+                        client_count:
+                          type: integer
+                          minimum: 0
+                          description: Boundary rows only. Number of direct client tenants; none is identified.
+
+  /tenants/{id}/access-grants/{crossingId}:
+    delete:
+      summary: End an active tenant crossing
+      description: |
+        Revokes an active grant or break-glass crossing so it stops granting access
+        immediately. Requires `tenant:crossing-end` at Strong assurance. A grant is ended
+        by an administrator of the granting tenant (root-scoped callers get `403`); a
+        break-glass crossing is ended by the root principal that invoked it or by an
+        administrator of the owning tenant. A crossing that does not belong to `{id}` is
+        `404`. Idempotent: an already revoked or expired crossing returns its current state.
+      operationId: endTenantCrossing
+      tags:
+        - Tenants
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Tenant that owns the crossing
+          schema:
+            type: string
+        - name: crossingId
+          in: path
+          required: true
+          description: Crossing identifier
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Crossing state after the call
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Caller may not end this crossing
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: Tenant crossing store not configured
+  /billing/report:
+    get:
+      summary: Cross-MSP billing report
+      description: |
+        Every MSP (direct child of the root tenant) with tech and endpoint counts and
+        metrics, and each MSP's clients under an opaque stored label. Requires
+        `tenant:billing-read`; callable by a root-scoped caller (no grant needed), a caller
+        bound to the root tenant, or an unscoped certificate-authenticated caller that holds
+        the permission. Any other caller gets `403` `BILLING_ROOT_ONLY`. A client is a direct
+        child of an MSP with its whole subtree rolled up into it. Endpoint counts exclude
+        stewards in a terminal state (deregistered, archived, dormant, revoked); tech counts
+        exclude disabled accounts. The response has no client name, client tenant ID or
+        client-level metrics.
+      operationId: getRootBillingReport
+      tags:
+        - Tenants
+      responses:
+        '200':
+          description: Cross-MSP billing report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      msps:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/RootBillingMSP'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Caller is not the root operator (BILLING_ROOT_ONLY) or lacks tenant:billing-read
+  /tenants/{id}/billing-report:
+    get:
+      summary: Billing report for one tenant subtree
+      description: |
+        The billing report for the subtree of `{id}`, with real client names and IDs.
+        Requires `tenant:billing-read`. A caller outside `{id}`'s subtree gets `404`; a
+        root-scoped caller without a crossing into `{id}` gets the tenant-crossing challenge.
+        A client is a direct child of `{id}` with its whole subtree rolled up into it.
+        Endpoint counts exclude stewards in a terminal state (deregistered, archived,
+        dormant, revoked); tech counts exclude disabled accounts.
+      operationId: getTenantBillingReport
+      tags:
+        - Tenants
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Tenant ID (typically an MSP)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Billing report for the subtree
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/TenantBillingReport'
+        '401':
+          description: Tenant-crossing step-up challenge for a root-scoped caller without a crossing
+        '403':
+          description: Caller lacks tenant:billing-read
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /reports/dashboard/alerts:
+    get:
+      summary: Dashboard alert feed
+      description: |
+        Drift-derived alerts with acknowledgement and silence state. Actively silenced
+        alerts are excluded unless `include_silenced=true`.
+      operationId: getDashboardAlerts
+      tags:
+        - Alerts
+      parameters:
+        - name: severity
+          in: query
+          required: false
+          description: Comma-separated severity filter (critical, warning, info). Defaults to warning,critical.
+          schema:
+            type: string
+        - name: include_silenced
+          in: query
+          required: false
+          description: When true, include alerts whose silence window is still open (with silenced true).
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Alert feed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  alerts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        timestamp:
+                          type: string
+                        device_id:
+                          type: string
+                        severity:
+                          type: string
+                        description:
+                          type: string
+                        acknowledged:
+                          type: boolean
+                        silenced:
+                          type: boolean
+                        acknowledged_by:
+                          type: string
+                          description: Present only when known
+                        silenced_by:
+                          type: string
+                          description: Present only when known
+                  total_alerts:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /compliance/tenants/{tenantId}/devices:
+    get:
+      summary: List a tenant's devices with compliance status
+      description: |
+        Returns a page of one tenant's devices with their drift-based compliance
+        status (the same buckets as the compliance summary). Devices are sorted by
+        steward ID. A tenant outside the caller's scope returns 404 without
+        disclosing whether it exists. Requires `compliance:read-summary`.
+      operationId: getTenantComplianceDevices
+      tags:
+        - Compliance
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Page of the tenant's devices
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id:
+                    type: string
+                  devices:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        steward_id:
+                          type: string
+                        hostname:
+                          type: string
+                        status:
+                          type: string
+                          enum: [compliant, warning, critical]
+                  total:
+                    type: integer
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+        '400':
+          description: Invalid limit or offset
+        '404':
+          description: Tenant not found or outside the caller's scope
+        '503':
+          description: Compliance data provider unavailable
+
+  /web/passkey/login/finish:
+    post:
+      summary: Finish passkey web login
+      description: |
+        Completes the WebAuthn discoverable-credential ceremony and issues the
+        web session (HttpOnly session cookie plus CSRF cookie). The response
+        body never carries a token; `expires_at` is the only way the browser
+        learns the session's remaining lifetime, because it cannot read the
+        HttpOnly cookie. Expiry is informational; enforcement is server-side.
+      operationId: finishPasskeyLogin
+      tags:
+        - Web Login
+      responses:
+        '200':
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      ok:
+                        type: boolean
+                      username:
+                        type: string
+                      tenant_id:
+                        type: string
+                      root_scope:
+                        type: boolean
+                      expires_at:
+                        type: string
+                        format: date-time
+                        description: The issued session's absolute expiry (RFC 3339).
+        '401':
+          description: Assertion rejected
+
+  /accounts/{username}/webauthn/credentials:
+    get:
+      summary: List an account's passkeys
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Passkey metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  username:
+                    type: string
+                  credentials:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WebAuthnCredentialInfo'
+  /accounts/{username}/webauthn/credentials/{credential_id}:
+    patch:
+      summary: Rename a passkey (requires Strong assurance)
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: credential_id
+          in: path
+          required: true
+          description: base64url credential ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label]
+              properties:
+                label:
+                  type: string
+                  maxLength: 64
+      responses:
+        '204':
+          description: Renamed
+        '400':
+          description: Invalid credential ID or label
+        '401':
+          description: Step-up required (Strong assurance)
+        '404':
+          description: Account or credential not found
+        '409':
+          description: Account concurrently modified
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key authentication via X-API-Key header
+
+  parameters:
+    stewardId:
+      name: stewardId
+      in: path
+      required: true
+      description: Unique identifier of the steward
+      schema:
+        type: string
+
+  schemas:
+    BillingMetrics:
+      type: object
+      properties:
+        endpoints_online: {type: integer, minimum: 0, description: Stewards with status active}
+        endpoints_offline: {type: integer, minimum: 0, description: Stewards with status lost}
+        endpoints_pending: {type: integer, minimum: 0, description: Stewards with status registered}
+        endpoints_by_platform:
+          type: object
+          properties:
+            windows: {type: integer}
+            linux: {type: integer}
+            darwin: {type: integer}
+            other: {type: integer}
+        endpoints_by_version:
+          type: object
+          additionalProperties: {type: integer}
+    BillingOwnCounts:
+      type: object
+      description: Counts attached to the MSP itself rather than to a client.
+      properties:
+        tech_count: {type: integer, minimum: 0}
+        endpoint_count: {type: integer, minimum: 0}
+    RootBillingMSP:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        tech_count: {type: integer, minimum: 0}
+        endpoint_count: {type: integer, minimum: 0}
+        client_count: {type: integer, minimum: 0}
+        metrics: {$ref: '#/components/schemas/BillingMetrics'}
+        msp_own: {$ref: '#/components/schemas/BillingOwnCounts'}
+        clients:
+          type: array
+          items:
+            type: object
+            description: A client under an opaque label. Carries no name or tenant ID.
+            properties:
+              label: {type: string}
+              endpoint_count: {type: integer, minimum: 0}
+              tech_count: {type: integer, minimum: 0}
+    TenantBillingReport:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        tech_count: {type: integer, minimum: 0}
+        endpoint_count: {type: integer, minimum: 0}
+        client_count: {type: integer, minimum: 0}
+        metrics: {$ref: '#/components/schemas/BillingMetrics'}
+        msp_own: {$ref: '#/components/schemas/BillingOwnCounts'}
+        clients:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              name: {type: string}
+              endpoint_count: {type: integer, minimum: 0}
+              tech_count: {type: integer, minimum: 0}
+    StewardActionRequest:
+      type: object
+      required: [action, justification, nonce, expires_at, targets]
+      description: >-
+        nonce, expires_at and targets are copied from the sign/begin envelope.
+        Exactly one of signature (X.509) or webauthn is the sign/finish proof.
+        The action content is rebuilt by the server from this body, never from
+        client-supplied bytes.
+      properties:
+        action:
+          type: string
+          enum: [start, stop, restart, end, suspend, resume]
+        justification:
+          type: string
+          maxLength: 1024
+        image:
+          type: string
+          description: Process image name (process actions only)
+        nonce:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+          description: Not past, and no more than 5 minutes ahead
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: string
+          description: Exactly the steward id in the path
+        signature:
+          type: object
+          properties:
+            algorithm:
+              type: string
+            value:
+              type: string
+            public_key:
+              type: string
+        webauthn:
+          type: object
+          properties:
+            authenticator_data:
+              type: string
+              format: byte
+            client_data_json:
+              type: string
+              format: byte
+            signature:
+              type: string
+              format: byte
+            credential_id:
+              type: string
+              format: byte
+    WebAuthnCredentialInfo:
+      type: object
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        transport:
+          type: array
+          items:
+            type: string
+        registered_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+        device_type:
+          type: string
+          enum: [platform, security_key, phone_or_other, unknown]
+          description: Transport heuristic; attachment and AAGUID are not stored.
+        synced:
+          type: boolean
+          description: Stored backup-state (BS) flag.
+        sync_capable:
+          type: boolean
+          description: Stored backup-eligible (BE) flag.
+        current:
+          type: boolean
+          description: True for the credential that last proved the caller's web session; false for non-web callers.
+    WorkflowApproval:
+      type: object
+      properties:
+        approval_id:
+          type: string
+        workflow_name:
+          type: string
+        execution_id:
+          type: string
+        step_id:
+          type: string
+        step_name:
+          type: string
+        message:
+          type: string
+        approver_permission:
+          type: string
+        requested_by:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, rejected, expired]
+        requested_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        decided_by:
+          type: string
+        decided_at:
+          type: string
+          format: date-time
+        justification:
+          type: string
+
+    RegistrationToken:
+      type: object
+      properties:
+        token_id:
+          type: string
+          description: Stable UUID, safe to expose
+        token:
+          type: string
+          description: Full secret — returned by create and rotate only
+        token_prefix:
+          type: string
+        tenant_id:
+          type: string
+        controller_url:
+          type: string
+        group:
+          type: string
+        label:
+          type: string
+          description: Operator-written free text given at mint time; omitted when empty
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        revoked:
+          type: boolean
+        revoked_at:
+          type: string
+          format: date-time
+    AlertState:
+      type: object
+      properties:
+        alert_id:
+          type: string
+        acknowledged:
+          type: boolean
+        acknowledged_by:
+          type: string
+        acknowledged_at:
+          type: string
+          format: date-time
+        silenced:
+          type: boolean
+        silenced_by:
+          type: string
+        silenced_until:
+          type: string
+          format: date-time
+    SuccessResponse:
+      type: object
+      properties:
+        data:
+          type: object
+        timestamp:
+          type: string
+          format: date-time
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              description: Error code
+            message:
+              type: string
+              description: Human-readable error message
+        timestamp:
+          type: string
+          format: date-time
+
+    StewardInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique steward identifier
+        status:
+          type: string
+          description: Current steward status
+          enum: [online, offline, unknown]
+        last_seen:
+          type: string
+          format: date-time
+          description: Last time the steward was seen
+        clock_offset_ms:
+          type: integer
+          format: int64
+          description: >-
+            Steward clock minus controller clock in milliseconds, from the last
+            heartbeat (negative when the steward is behind). Omitted when unknown.
+        key_protection_level:
+          type: string
+          enum: [file, tpm, secure-enclave]
+          description: >-
+            How the steward's device key is protected. Omitted for a record that
+            predates the field.
+        key_algorithm:
+          type: string
+          enum: [ed25519, ecdsa-p256]
+          description: >-
+            Device key algorithm. A record that stored none is reported as ed25519.
+        version:
+          type: string
+          description: Steward software version
+        connected_at:
+          type: string
+          format: date-time
+          description: Connection timestamp
+        metrics:
+          type: object
+          additionalProperties:
+            type: string
+          description: Steward performance metrics
+        tags:
+          type: array
+          items:
+            type: string
+          description: Operator-assigned steward tags; omitted when the steward has none
+        dna:
+          $ref: '#/components/schemas/DNAInfo'
+
+    DNAInfo:
+      type: object
+      properties:
+        hostname:
+          type: string
+          description: Steward hostname
+        os:
+          type: string
+          description: Operating system
+        architecture:
+          type: string
+          description: System architecture
+        attributes:
+          type: object
+          additionalProperties:
+            type: string
+          description: Additional DNA attributes
+
+    ConfigInfo:
+      type: object
+      properties:
+        version:
+          type: string
+          description: Configuration version
+        modules:
+          type: object
+          additionalProperties:
+            type: object
+          description: Module-specific configurations
+
+    EffectiveConfig:
+      type: object
+      properties:
+        values:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ConfigValue'
+
+    ConfigValue:
+      type: object
+      properties:
+        value:
+          description: The configuration value
+        source:
+          type: string
+          description: Which level provided this value
+          enum: [msp, client, group, device]
+        level:
+          type: integer
+          description: Hierarchy level (0=msp, 1=client, 2=group, 3=device)
+
+    ValidationResult:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+        warnings:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+
+    CertificateInfo:
+      type: object
+      properties:
+        serial:
+          type: string
+        subject:
+          type: string
+        issuer:
+          type: string
+        not_before:
+          type: string
+          format: date-time
+        not_after:
+          type: string
+          format: date-time
+        revoked:
+          type: boolean
+        tenant_id:
+          type: string
+          description: Tenant of the owning steward; omitted when the certificate has no owning steward record.
+        issued_at:
+          type: string
+          format: date-time
+          description: Time the certificate was issued.
+
+    CertificateRequest:
+      type: object
+      required:
+        - subject_type
+        - subject_id
+      properties:
+        subject_type:
+          type: string
+          enum: [steward, user]
+        subject_id:
+          type: string
+        validity_days:
+          type: integer
+          default: 365
+          maximum: 825
+          description: >-
+            A request exceeding the maximum is refused with 400 Bad Request
+            (VALIDITY_DAYS_EXCEEDS_MAXIMUM), never silently clamped.
+
+    CertificateResponse:
+      type: object
+      properties:
+        certificate:
+          type: string
+          description: PEM-encoded certificate
+        private_key:
+          type: string
+          description: PEM-encoded private key
+        ca_certificate:
+          type: string
+          description: PEM-encoded CA certificate
+
+    Permission:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        resource:
+          type: string
+        action:
+          type: string
+
+    Role:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+        tenant_id:
+          type: string
+
+    RoleRequest:
+      type: object
+      required:
+        - name
+        - permissions
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+        tenant_id:
+          type: string
+
+    PermissionCheckRequest:
+      type: object
+      required:
+        - subject
+        - resource
+        - action
+      properties:
+        subject:
+          type: string
+        resource:
+          type: string
+        action:
+          type: string
+        tenant_id:
+          type: string
+
+    APIKeyInfo:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        last_used:
+          type: string
+          format: date-time
+        permissions:
+          type: array
+          items:
+            type: string
+
+    APIKeyRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        expires_in_days:
+          type: integer
+          minimum: 1
+          maximum: 365
+          default: 30
+        permissions:
+          type: array
+          items:
+            type: string
+
+    APIKeyResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        key:
+          type: string
+          description: The actual API key (only shown once)
+        name:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+
+    SystemHealth:
+      type: object
+      properties:
+        overall_status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+        components:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              status:
+                type: string
+                enum: [healthy, degraded, unhealthy]
+              message:
+                type: string
+        uptime_seconds:
+          type: integer
+        version:
+          type: string
+
+  responses:
+    StewardActionAccepted:
+      description: Action queued; poll GET /runs/{run_id}
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data:
+                type: object
+                properties:
+                  run_id:
+                    type: string
+              timestamp:
+                type: string
+                format: date-time
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: INVALID_REQUEST
+              message: The request was invalid
+            timestamp: "2025-07-27T16:00:00Z"
+
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: Authentication required
+            timestamp: "2025-07-27T16:00:00Z"
+
+    Forbidden:
+      description: Forbidden
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: FORBIDDEN
+              message: Insufficient permissions
+            timestamp: "2025-07-27T16:00:00Z"
+
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: NOT_FOUND
+              message: Resource not found
+            timestamp: "2025-07-27T16:00:00Z"
+
+    NotImplemented:
+      description: Not implemented
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: NOT_IMPLEMENTED
+              message: This feature is not yet implemented
+            timestamp: "2025-07-27T16:00:00Z"

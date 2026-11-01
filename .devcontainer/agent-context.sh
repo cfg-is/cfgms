@@ -1,0 +1,619 @@
+#!/usr/bin/env bash
+# Helper library for assembling the agent prompt context.
+#
+# Separates fetching (gh/git calls) from rendering (JSON -> markdown) so the
+# rendering layer can be tested offline with canned fixtures and the fetching
+# layer can be exercised with a stub `gh` on $PATH.
+#
+# All render_* functions accept JSON on their first arg and print markdown to
+# stdout. All fetch_* functions print JSON to stdout; callers capture via $().
+#
+# This file is sourced by .devcontainer/entrypoint.sh. Do not `exit` from here.
+
+# ----------------------------------------------------------------------------
+# Fetch helpers
+# ----------------------------------------------------------------------------
+
+# ac_fetch_issue_with_comments <issue_num>
+# stdout: JSON with .title .body .labels .comments[]
+# returns 1 if the fetch fails.
+ac_fetch_issue_with_comments() {
+    local num="$1"
+    gh issue view "$num" --json title,body,labels,comments 2>/dev/null
+}
+
+# ac_fetch_pr_metadata <pr_num>
+# stdout: JSON with .number .title .body .headRefName .reviews .statusCheckRollup
+ac_fetch_pr_metadata() {
+    local num="$1"
+    gh pr view "$num" --json number,title,body,headRefName,reviews,statusCheckRollup 2>/dev/null
+}
+
+# ac_fetch_pr_conversation_comments <owner> <repo> <pr_num>
+# Returns issue-style comments (the "main" PR comment box).
+# stdout: JSON array [{user:{login}, created_at, body}, ...]
+ac_fetch_pr_conversation_comments() {
+    local owner="$1" repo="$2" num="$3"
+    gh api "repos/${owner}/${repo}/issues/${num}/comments" 2>/dev/null
+}
+
+# ac_fetch_pr_inline_comments <owner> <repo> <pr_num>
+# Returns code-review inline comments.
+# stdout: JSON array [{id, user:{login}, created_at, body, path, line, original_line}, ...]
+ac_fetch_pr_inline_comments() {
+    local owner="$1" repo="$2" num="$3"
+    gh api "repos/${owner}/${repo}/pulls/${num}/comments" 2>/dev/null
+}
+
+# ac_fetch_review_thread_resolution <owner> <repo> <pr_num>
+# Queries GraphQL reviewThreads to determine which comment databaseIds are resolved.
+# stdout: JSON array [{id, is_resolved}, ...] — id matches REST comment.id
+ac_fetch_review_thread_resolution() {
+    local owner="$1" repo="$2" num="$3"
+    gh api graphql -f query='query($owner:String!, $repo:String!, $num:Int!) {
+      repository(owner:$owner, name:$repo) {
+        pullRequest(number:$num) {
+          reviewThreads(first:100) {
+            nodes {
+              isResolved
+              comments(first:100) { nodes { databaseId } }
+            }
+          }
+        }
+      }
+    }' -F owner="$owner" -F repo="$repo" -F num="$num" 2>/dev/null \
+      | jq '[.data.repository.pullRequest.reviewThreads.nodes[]
+             | .isResolved as $r
+             | .comments.nodes[]
+             | {id: .databaseId, is_resolved: $r}]' 2>/dev/null \
+      || echo '[]'
+}
+
+# ac_fetch_failing_checks <pr_num>
+# stdout: JSON array [{name, conclusion, detailsUrl, log_tail}, ...]
+# log_tail is best-effort — empty string if unavailable.
+ac_fetch_failing_checks() {
+    local num="$1"
+    local rollup owner repo
+    rollup=$(gh pr view "$num" --json statusCheckRollup 2>/dev/null) || {
+        echo '[]'; return 0
+    }
+    owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null || echo "")
+    repo=$(gh repo view --json name -q '.name' 2>/dev/null || echo "")
+    # Filter FAILURE checks.
+    local failures_base
+    failures_base=$(echo "$rollup" \
+        | jq -c '[.statusCheckRollup[]
+                  | select(.conclusion == "FAILURE")
+                  | {name, conclusion, detailsUrl}]' 2>/dev/null) || failures_base='[]'
+
+    # For each failure, best-effort fetch the log tail via the job id in detailsUrl.
+    # Use the direct actions/jobs/<id>/logs REST endpoint — `gh run view --log-failed`
+    # returns empty in practice for most PR check jobs.
+    local enriched='[]'
+    local count
+    count=$(echo "$failures_base" | jq 'length')
+    local i=0
+    while [[ "$i" -lt "$count" ]]; do
+        local item job_id log_tail
+        item=$(echo "$failures_base" | jq -c ".[$i]")
+        job_id=$(echo "$item" | jq -r '.detailsUrl' | grep -oE 'job/[0-9]+' | cut -d/ -f2 || true)
+        log_tail=""
+        if [[ -n "$job_id" ]] && [[ -n "$owner" ]] && [[ -n "$repo" ]]; then
+            local full_log
+            full_log=$(timeout 30 gh api "repos/${owner}/${repo}/actions/jobs/${job_id}/logs" 2>/dev/null \
+                | sed -E 's/^[0-9T:.Z-]+ //' \
+                | grep -vE '^##\[(group|endgroup)\]' \
+                || true)
+            # Prefer the slice from first real failure signature onward, capped at 120 lines.
+            # Primary: Go-style test failures + panic. These are almost always the thing we care about.
+            # Fallback: ##[error] — used when there's no Go test output (e.g. build/lint step).
+            # Skip ##[error] noise from module-cache tar extraction ("Cannot open: File exists"),
+            # which always appears early and is not fatal.
+            local fail_ln
+            fail_ln=$(echo "$full_log" | grep -nE '^--- FAIL|^FAIL\t|^panic:' | head -1 | cut -d: -f1 || true)
+            if [[ -z "$fail_ln" ]]; then
+                fail_ln=$(echo "$full_log" \
+                    | grep -nE '^##\[error\]' \
+                    | grep -v 'Cannot open: File exists' \
+                    | head -1 | cut -d: -f1 || true)
+            fi
+            if [[ -n "$fail_ln" ]]; then
+                log_tail=$(echo "$full_log" | tail -n "+$fail_ln" | head -120)
+            else
+                log_tail=$(echo "$full_log" | tail -120)
+            fi
+        fi
+        local augmented
+        augmented=$(echo "$item" | jq --arg log "$log_tail" '. + {log_tail: $log}')
+        enriched=$(echo "$enriched" | jq --argjson add "$augmented" '. + [$add]')
+        i=$((i + 1))
+    done
+    echo "$enriched"
+}
+
+# ----------------------------------------------------------------------------
+# Render helpers — all accept JSON as $1, print markdown to stdout
+# ----------------------------------------------------------------------------
+
+# Common header for any comment entry: "**<author>** @ <ISO>:"
+# All comment sections sort ascending by created_at.
+
+# ac_render_conversation_comments <json_array>
+# Input: JSON array [{user:{login}, created_at, body}, ...]
+ac_render_conversation_comments() {
+    local json="$1"
+    echo "### PR Conversation Comments"
+    if [[ -z "$json" ]] || [[ "$(echo "$json" | jq 'length')" == "0" ]]; then
+        echo
+        echo "_No PR conversation comments._"
+        echo
+        return 0
+    fi
+    echo
+    echo "$json" | jq -r 'sort_by(.created_at)[]
+        | "**\(.user.login)** @ \(.created_at):\n\n\(.body)\n"'
+    echo
+}
+
+# ac_render_review_comments <reviews_json>
+# Input: JSON array [{author:{login}, state, body, submittedAt}, ...]
+# Uses submittedAt if present, else createdAt, else empty-string.
+ac_render_review_comments() {
+    local json="$1"
+    echo "### Review-Level Comments"
+    if [[ -z "$json" ]] || [[ "$(echo "$json" | jq '[.[] | select((.body // "") != "")] | length')" == "0" ]]; then
+        echo
+        echo "_No review-level comments._"
+        echo
+        return 0
+    fi
+    echo
+    echo "$json" | jq -r '
+        [.[] | select((.body // "") != "")]
+        | sort_by(.submittedAt // .createdAt // "")[]
+        | "**\(.author.login)** @ \(.submittedAt // .createdAt // "unknown") (\(.state)):\n\n\(.body)\n"'
+    echo
+}
+
+# ac_render_inline_comments <inline_json> <resolution_json>
+# Inline comments are prefixed [RESOLVED] or [UNRESOLVED] based on thread state.
+ac_render_inline_comments() {
+    local inline="$1"
+    local resolution="${2:-[]}"
+    echo "### Inline Comments"
+    if [[ -z "$inline" ]] || [[ "$(echo "$inline" | jq 'length')" == "0" ]]; then
+        echo
+        echo "_No inline review comments._"
+        echo
+        return 0
+    fi
+    echo
+    echo "_Agent: address \`[UNRESOLVED]\` items first; do not re-fix \`[RESOLVED]\` ones unless a newer comment explicitly reopens them._"
+    echo
+    # Build a lookup from id -> is_resolved, then annotate each inline comment.
+    echo "$inline" | jq --argjson res "$resolution" -r '
+        ([$res[] | {(.id|tostring): .is_resolved}] | add // {}) as $map
+        | sort_by(.created_at)[]
+        | (($map[(.id|tostring)]) // false) as $resolved
+        | (if $resolved then "[RESOLVED]" else "[UNRESOLVED]" end) as $prefix
+        | "\($prefix) **\(.user.login)** @ \(.created_at) on `\(.path)` line \(.line // .original_line // "?"):\n\n\(.body)\n"'
+    echo
+}
+
+# ac_render_issue_comments <comments_json>
+# Input: JSON array of comments from `gh issue view --json comments`
+# gh returns {author:{login}, body, createdAt}
+ac_render_issue_comments() {
+    local json="$1"
+    echo "## Issue Comments"
+    if [[ -z "$json" ]] || [[ "$(echo "$json" | jq 'length')" == "0" ]]; then
+        echo
+        echo "_No issue comments._"
+        echo
+        return 0
+    fi
+    echo
+    echo "$json" | jq -r 'sort_by(.createdAt)[]
+        | "**\(.author.login)** @ \(.createdAt):\n\n\(.body)\n"'
+    echo
+}
+
+# ac_render_linked_issue <issue_json> <num>
+# Prints "## Linked Issue #N: <title>" plus body, labels, comments (comments rendered under a sub-heading).
+ac_render_linked_issue() {
+    local json="$1"
+    local num="$2"
+    local title body labels_line
+    title=$(echo "$json" | jq -r '.title // "(unknown title)"')
+    body=$(echo "$json" | jq -r '.body // ""')
+    labels_line=$(echo "$json" | jq -r '[.labels[]?.name] | join(", ")')
+    echo "## Linked Issue #${num}: ${title}"
+    echo
+    if [[ -n "$labels_line" ]]; then
+        echo "**Labels:** ${labels_line}"
+        echo
+    fi
+    if [[ -n "$body" ]]; then
+        echo "$body"
+        echo
+    fi
+    # Comments as sub-section
+    local comments_json
+    comments_json=$(echo "$json" | jq -c '.comments // []')
+    echo "### Linked Issue Comments"
+    if [[ "$(echo "$comments_json" | jq 'length')" == "0" ]]; then
+        echo
+        echo "_No linked issue comments._"
+        echo
+        return 0
+    fi
+    echo
+    echo "$comments_json" | jq -r 'sort_by(.createdAt)[]
+        | "**\(.author.login)** @ \(.createdAt):\n\n\(.body)\n"'
+    echo
+}
+
+# ac_render_failing_checks <checks_json>
+# Input: JSON array [{name, conclusion, detailsUrl, log_tail}, ...]
+ac_render_failing_checks() {
+    local json="$1"
+    echo "### Failing CI Checks"
+    if [[ -z "$json" ]] || [[ "$(echo "$json" | jq 'length')" == "0" ]]; then
+        echo
+        echo "_No failing CI checks._"
+        echo
+        return 0
+    fi
+    echo
+    echo "$json" | jq -r '.[]
+        | "#### \(.name)\n\n"
+          + "- Conclusion: \(.conclusion)\n"
+          + "- Details: \(.detailsUrl)\n\n"
+          + (if (.log_tail // "") == "" then
+                "_Log tail unavailable (job logs may be expired or access-restricted)._\n"
+             else
+                "Log tail (last lines):\n\n```\n\(.log_tail)\n```\n"
+             end)'
+    echo
+}
+
+# ----------------------------------------------------------------------------
+# HEAD advancement / no-op detection for fix-pr mode
+# ----------------------------------------------------------------------------
+
+# ac_detect_no_op <pre_head> <post_head>
+# Returns 0 (HEAD advanced, work was done) or 1 (no-op — same SHA).
+ac_detect_no_op() {
+    local pre="$1" post="$2"
+    if [[ -z "$pre" ]] || [[ -z "$post" ]]; then
+        # If we can't tell, treat as no-op so callers fail closed.
+        return 1
+    fi
+    if [[ "$pre" == "$post" ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Headless background-wait stall (Issue #4178)
+# ----------------------------------------------------------------------------
+#
+# In `claude -p` (print) mode, CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS covers
+# background SUBAGENTS and WORKFLOWS only. A background BASH task gets a few
+# seconds' grace after the agent ends its turn, and is then killed, and the
+# agent is never re-invoked. An agent that starts `make test` in the background
+# and ends its turn "to wait for the notification" therefore loses everything it
+# had not committed. Observed 5 times on 2026-09-18/19 across dev and fix
+# containers.
+
+# The rule appended to every headless agent prompt.
+AC_HEADLESS_NO_BG_WAIT_RULE='## Headless execution rule (mandatory)
+
+You are running headless (`claude -p`). Your session ENDS the moment you end
+your turn, and you are never woken up again. Any background Bash command
+(`run_in_background`, a background Monitor, `&`) is killed a few seconds after
+your turn ends, and its output is lost.
+
+- Run every command you need the result of (make test, test suites, builds,
+  `gh run watch`) in the FOREGROUND.
+- If a command may exceed the ~10 minute tool limit, split it into smaller
+  foreground commands, or run only the suites your change touches.
+- Commit (and push, if your mode pushes) BEFORE any long command, so progress
+  survives.
+- NEVER end your turn with "waiting for the background task / notification /
+  validation to finish". Nothing will resume you.'
+
+# ac_last_assistant_text <session.jsonl>
+# Prints the text of the last assistant message in a Claude session transcript
+# (empty when the file is missing or has none).
+ac_last_assistant_text() {
+    local jsonl="$1"
+    [[ -f "$jsonl" ]] || return 0
+    python3 - "$jsonl" <<'PY' 2>/dev/null || true
+import json, sys
+last = ""
+with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        msg = rec.get("message") or {}
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        texts = []
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            texts = [c.get("text", "") for c in content
+                     if isinstance(c, dict) and c.get("type") == "text"]
+        joined = "\n".join(t for t in texts if t)
+        if joined:
+            last = joined
+print(last)
+PY
+}
+
+# ac_detect_ended_turn_waiting <session.jsonl>
+# Returns 0 when the agent's LAST message says it is waiting on background work.
+# Callers combine this with "no PR and HEAD not advanced". On its own, it only
+# says what the agent intended, not that work was lost.
+ac_detect_ended_turn_waiting() {
+    local text
+    text="$(ac_last_assistant_text "$1")"
+    [[ -n "$text" ]] || return 1
+    grep -qiE "(wait|waiting|pause)[^.]{0,80}(notification|background|monitor|validation|to (complete|finish))" <<<"$text"
+}
+
+# ac_classify_outcome <mode> <pr_url> <head_advanced> <session.jsonl>
+# Prints "ended_turn_waiting" or "normal" for agent-result.json.
+#
+# "Nothing landed" differs by mode. fix-pr and resolve-conflict run on a branch
+# that ALREADY has a PR, so PR_URL is always set there and says nothing about
+# this run -- only HEAD advancing does. For the other modes, a new PR also
+# counts as landing work. Gating fix-pr on an empty PR_URL made the check
+# unreachable for the mode behind 3 of the 4 observed stalls.
+ac_classify_outcome() {
+    local mode="$1" pr_url="$2" head_advanced="$3" jsonl="$4" landed="false"
+    if [[ "$head_advanced" == "true" ]]; then
+        landed="true"
+    elif [[ "$mode" != "fix-pr" && "$mode" != "resolve-conflict" && -n "$pr_url" ]]; then
+        landed="true"
+    fi
+    if [[ "$landed" == "false" ]] && ac_detect_ended_turn_waiting "$jsonl"; then
+        echo "ended_turn_waiting"
+    else
+        echo "normal"
+    fi
+}
+
+# ac_no_op_comment_body <container_name>
+# Returns the canonical no-op comment body (used both for posting and for idempotency lookup).
+ac_no_op_comment_body() {
+    local container="${1:-unknown-container}"
+    cat <<EOF
+Fix agent ran but made no changes. Container: \`${container}\`.
+
+Check that instructions are posted on the PR (conversation comment, inline review comment, review body) or the linked issue, and redispatch. Current fetch covers all three PR comment types plus linked-issue comments and failing CI check context — if none are present the agent has nothing to act on.
+EOF
+}
+
+# ac_post_no_op_comment <owner> <repo> <pr_num> <container_name>
+# Idempotent: checks existing PR conversation comments for an identical body before posting.
+# Returns 0 on success or skip, 1 on fetch/post failure.
+ac_post_no_op_comment() {
+    local owner="$1" repo="$2" pr_num="$3" container="$4"
+    local body
+    body=$(ac_no_op_comment_body "$container")
+    # Check existing comments
+    local existing
+    existing=$(ac_fetch_pr_conversation_comments "$owner" "$repo" "$pr_num" 2>/dev/null || echo '[]')
+    # Idempotency: match on the stable first line (container-aware).
+    local first_line
+    first_line=$(echo "$body" | head -1)
+    if echo "$existing" | jq -e --arg line "$first_line" '.[] | select(.body | startswith($line))' >/dev/null 2>&1; then
+        echo "No-op PR comment already present on PR #${pr_num}; skipping duplicate post."
+        return 0
+    fi
+    gh pr comment "$pr_num" --repo "${owner}/${repo}" --body "$body" >/dev/null 2>&1 || return 1
+    return 0
+}
+
+# ac_promote_salvaged_pr <pr_num> <issue_num>
+# Finishes a salvaged WIP draft PR whose work already passed validation, so a
+# fix-pr run that needed no further commit does not fail as a no-op (Issue #4709).
+#
+# The salvage path opens such PRs as drafts titled
+# "WIP: <branch> (agent produced no PR)", with a WIP commit subject that would
+# otherwise become the squash subject. This helper:
+#   1. confirms the PR is a draft whose title starts with "WIP:" (else refuses),
+#   2. retitles it "<issue title> (Issue #N)" and sets a "Fixes #N" body via the
+#      REST API (`gh pr edit` is unusable in this repo),
+#   3. pushes an empty commit whose subject is the new title,
+#   4. marks the PR ready for review.
+#
+# Every value travels as a quoted argument or a file -- no eval, no command
+# strings -- so an issue title cannot inject shell. Returns 0 only when every
+# step succeeded; otherwise prints the failed step and returns 1.
+ac_promote_salvaged_pr() {
+    local pr_num="${1:-}" issue_num="${2:-}"
+    if [[ ! "$pr_num" =~ ^[0-9]+$ ]] || [[ ! "$issue_num" =~ ^[0-9]+$ ]]; then
+        echo "promote-salvaged-pr: invalid PR or issue number" >&2
+        return 1
+    fi
+
+    local pr_json is_draft pr_title head_ref
+    if ! pr_json=$(gh pr view "$pr_num" --json isDraft,title,headRefName 2>/dev/null); then
+        echo "promote-salvaged-pr: step 'gh pr view' failed for PR #${pr_num}" >&2
+        return 1
+    fi
+    is_draft=$(jq -r '.isDraft' <<<"$pr_json" 2>/dev/null) || is_draft=""
+    pr_title=$(jq -r '.title' <<<"$pr_json" 2>/dev/null) || pr_title=""
+    head_ref=$(jq -r '.headRefName // empty' <<<"$pr_json" 2>/dev/null) || head_ref=""
+    if [[ "$is_draft" != "true" ]]; then
+        echo "promote-salvaged-pr: PR #${pr_num} is not a draft; not promoting" >&2
+        return 1
+    fi
+    if [[ "$pr_title" != WIP:* ]]; then
+        echo "promote-salvaged-pr: PR #${pr_num} title does not start with 'WIP:'; not promoting" >&2
+        return 1
+    fi
+    if [[ -z "$head_ref" ]]; then
+        echo "promote-salvaged-pr: step 'resolve head branch' failed for PR #${pr_num}" >&2
+        return 1
+    fi
+
+    local issue_title
+    if ! issue_title=$(gh issue view "$issue_num" --json title --jq .title 2>/dev/null) \
+        || [[ -z "$issue_title" ]]; then
+        echo "promote-salvaged-pr: step 'gh issue view' failed for issue #${issue_num}" >&2
+        return 1
+    fi
+
+    local new_title="${issue_title} (Issue #${issue_num})"
+    local body_file
+    if ! body_file=$(mktemp); then
+        echo "promote-salvaged-pr: step 'mktemp' failed" >&2
+        return 1
+    fi
+    cat > "$body_file" <<EOF
+Fixes #${issue_num}
+
+This PR is a salvaged agent session: the original run pushed its work and opened a WIP draft without finishing the PR. A fix-pr agent then validated that work and found it complete, so it passed validation with no further changes. The entrypoint retitled the PR, added an empty commit carrying the final squash subject, and marked it ready for review.
+EOF
+
+    if ! gh api -X PATCH "repos/{owner}/{repo}/pulls/${pr_num}" \
+        -f "title=${new_title}" -F "body=@${body_file}" >/dev/null 2>&1; then
+        rm -f "$body_file"
+        echo "promote-salvaged-pr: step 'PATCH title/body' failed for PR #${pr_num}" >&2
+        return 1
+    fi
+    rm -f "$body_file"
+
+    if ! git commit --allow-empty -q -m "$new_title" -m "Fixes #${issue_num}" >/dev/null 2>&1; then
+        echo "promote-salvaged-pr: step 'git commit --allow-empty' failed" >&2
+        return 1
+    fi
+    if ! git push origin "HEAD:${head_ref}" >/dev/null 2>&1; then
+        echo "promote-salvaged-pr: step 'git push' failed for branch ${head_ref}" >&2
+        return 1
+    fi
+    if ! gh pr ready "$pr_num" >/dev/null 2>&1; then
+        echo "promote-salvaged-pr: step 'gh pr ready' failed for PR #${pr_num}" >&2
+        return 1
+    fi
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Per-segment model routing (Issue #3030)
+# ----------------------------------------------------------------------------
+
+# ac_resolve_agent_model <segment>
+# Resolves the model + effort to run a container's `claude` invocation on,
+# reading model-routing.yaml (defaults + per-segment overrides).
+# stdout: two lines, "<model>\n<effort>".
+#
+# The config is read from the HARNESS path only, never from /workspace. The
+# branch under dispatch or review must not select the model of the agent that
+# reviews it: /workspace is a checkout of the PR branch (agent-dispatch.sh
+# review-pr), so a branch could otherwise set
+# `segments: acceptance-review: { model: <weak model> }` and weaken the merge
+# gate judging it. Dev and fix agents consume untrusted issue/PR text, so branch
+# content is never a trusted input to harness configuration (same rule as the
+# token reporter, Issue #3041). The image bakes this file
+# (.devcontainer/Dockerfile) and every dispatch path bind-mounts the harness
+# checkout's copy over it read-only, so routing edits need no image rebuild.
+#
+# CFGMS_MODEL_ROUTING_FILE is the host operator's escape hatch (used by the
+# tests below and by benchmark tooling); it is set from host env, not from the
+# repo under review.
+#
+# CFGMS_MODEL_OVERRIDE (forwarded into the container by agent-dispatch.sh)
+# takes precedence over the file's model regardless of config state — this is
+# what the benchmark harness uses to run a fixture across models without
+# mutating committed config. It originates from host operator env, not the
+# branch. It never affects the resolved effort.
+#
+# A missing or malformed config file falls back to the hardcoded values below
+# (today's prior hardcoded defaults) so a parse failure degrades to previous
+# behavior instead of breaking dispatch. The parser only understands the
+# fixed two-level `defaults:`/`segments:` shape declared in the config file's
+# own header comment — it is a keyed lookup, not a general YAML implementation.
+ac_resolve_agent_model() {
+    local segment="$1"
+    local routing_file="${CFGMS_MODEL_ROUTING_FILE:-/usr/local/share/cfgms-agent/model-routing.yaml}"
+    local fallback_model="claude-sonnet-4-6"
+    local fallback_effort="high"
+    local model="$fallback_model"
+    local effort="$fallback_effort"
+
+    if [[ -f "$routing_file" ]]; then
+        local resolved
+        resolved=$(python3 - "$routing_file" "$segment" "$fallback_model" "$fallback_effort" <<'PYEOF'
+import sys
+
+path, segment, fallback_model, fallback_effort = sys.argv[1:5]
+model, effort = fallback_model, fallback_effort
+try:
+    defaults = {}
+    segments = {}
+    section = None
+    with open(path) as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if line == "defaults:":
+                section = "defaults"
+                continue
+            if line == "segments:":
+                section = "segments"
+                continue
+            if not line.startswith(" "):
+                section = None
+                continue
+            if section == "defaults":
+                key, sep, val = stripped.partition(":")
+                if sep:
+                    defaults[key.strip()] = val.strip()
+            elif section == "segments":
+                seg_name, sep, rest = stripped.partition(":")
+                if not sep:
+                    continue
+                rest = rest.strip()
+                fields = {}
+                if rest.startswith("{") and rest.endswith("}"):
+                    for pair in rest[1:-1].split(","):
+                        k, psep, v = pair.partition(":")
+                        if psep:
+                            fields[k.strip()] = v.strip()
+                segments[seg_name.strip()] = fields
+    seg_fields = segments.get(segment, {})
+    model = seg_fields.get("model") or defaults.get("model") or fallback_model
+    effort = seg_fields.get("effort") or defaults.get("effort") or fallback_effort
+except Exception:
+    model, effort = fallback_model, fallback_effort
+print(model)
+print(effort)
+PYEOF
+        ) || resolved=""
+        if [[ -n "$resolved" ]]; then
+            local resolved_model resolved_effort
+            resolved_model=$(sed -n '1p' <<< "$resolved")
+            resolved_effort=$(sed -n '2p' <<< "$resolved")
+            [[ -n "$resolved_model" ]] && model="$resolved_model"
+            [[ -n "$resolved_effort" ]] && effort="$resolved_effort"
+        fi
+    fi
+
+    if [[ -n "${CFGMS_MODEL_OVERRIDE:-}" ]]; then
+        model="$CFGMS_MODEL_OVERRIDE"
+    fi
+
+    printf '%s\n%s\n' "$model" "$effort"
+}
