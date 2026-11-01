@@ -23,6 +23,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	"github.com/spf13/cobra"
@@ -914,23 +915,58 @@ func getStewardClient() (*APIClient, error) {
 
 // stewardEntry is a local representation of a steward from the API response.
 type stewardEntry struct {
-	ID       string    `json:"id"`
-	Status   string    `json:"status"`
-	LastSeen time.Time `json:"last_seen"`
-	Version  string    `json:"version"`
-	DNA      *struct {
+	ID            string                `json:"id"`
+	Status        string                `json:"status"`
+	LastSeen      time.Time             `json:"last_seen"`
+	Version       string                `json:"version"`
+	HealthReasons []stewardHealthReason `json:"health_reasons,omitempty"`
+	DNA           *struct {
 		Hostname string `json:"hostname"`
 	} `json:"dna,omitempty"`
 }
 
+// stewardHealthReason is one machine-readable reason a steward reports a
+// non-healthy status, as returned by the controller.
+type stewardHealthReason struct {
+	Component string `json:"component"`
+	Code      string `json:"code"`
+	Message   string `json:"message,omitempty"`
+}
+
+// sanitizeTerminal replaces control characters (including ESC) in steward-supplied
+// text with '?', so a compromised steward cannot inject terminal escape
+// sequences or forge output lines through a health reason.
+func sanitizeTerminal(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '?'
+		}
+		return r
+	}, s)
+}
+
+// formatReasonsColumn renders the REASONS list column: the first reason code,
+// followed by "+N" when more are reported, or "-" when there are none.
+func formatReasonsColumn(reasons []stewardHealthReason) string {
+	if len(reasons) == 0 {
+		return "-"
+	}
+	if len(reasons) == 1 {
+		return sanitizeTerminal(reasons[0].Code)
+	}
+	return fmt.Sprintf("%s +%d", sanitizeTerminal(reasons[0].Code), len(reasons)-1)
+}
+
 // stewardStatusCmd shows detailed status for every steward a selector matches.
 var stewardStatusCmd = &cobra.Command{
-	Use:   "status <selector>",
-	Short: "Show detailed status for stewards matching a selector",
+	Use:     "status <selector>",
+	Aliases: []string{"get"},
+	Short:   "Show detailed status for stewards matching a selector",
 	Long: `Display full details for every steward the selector matches.
 
 Prints labelled fields including id, status, last_seen, version, hostname, OS,
-connection state, and other available metadata. With --json, emits a
+connection state, health reasons (component, code and message of each), and
+other available metadata. With --json, emits a
 keyed-by-steward JSON array (one entry per matched steward).
 
 Examples:
@@ -1171,7 +1207,9 @@ type stewardStatusInfo struct {
 	// (ADR-034 §7). Empty protection level means the record predates the field.
 	KeyProtectionLevel string `json:"key_protection_level,omitempty"`
 	KeyAlgorithm       string `json:"key_algorithm,omitempty"`
-	DNA                *struct {
+	// HealthReasons is every reason the steward reports for a non-healthy status.
+	HealthReasons []stewardHealthReason `json:"health_reasons,omitempty"`
+	DNA           *struct {
 		Hostname     string `json:"hostname"`
 		OS           string `json:"os"`
 		Architecture string `json:"architecture"`
@@ -1280,6 +1318,16 @@ func runStewardStatus(_ *cobra.Command, args []string) error {
 		fmt.Printf("key_protection_level: %s\n", keyProtection)
 		if s.KeyAlgorithm != "" {
 			fmt.Printf("key_algorithm:        %s\n", s.KeyAlgorithm)
+		}
+		if len(s.HealthReasons) > 0 {
+			fmt.Printf("Health Reasons:\n")
+			for _, hr := range s.HealthReasons {
+				fmt.Printf("  - [%s] %s", sanitizeTerminal(hr.Component), sanitizeTerminal(hr.Code))
+				if hr.Message != "" {
+					fmt.Printf(": %s", sanitizeTerminal(hr.Message))
+				}
+				fmt.Println()
+			}
 		}
 		if s.DNA != nil {
 			fmt.Printf("Hostname:         %s\n", s.DNA.Hostname)
@@ -1445,10 +1493,10 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		if _, err := fmt.Fprintln(w, "ID\tSTATUS\tVERSION\tLAST SEEN\tHOSTNAME"); err != nil {
+		if _, err := fmt.Fprintln(w, "ID\tSTATUS\tREASONS\tVERSION\tLAST SEEN\tHOSTNAME"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(w, "--\t------\t-------\t---------\t--------"); err != nil {
+		if _, err := fmt.Fprintln(w, "--\t------\t-------\t-------\t---------\t--------"); err != nil {
 			return err
 		}
 		for _, s := range matches {
@@ -1460,7 +1508,7 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 			if !s.LastSeen.IsZero() {
 				lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
 			}
-			if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.ID, s.Status, s.Version, lastSeen, hostname); err != nil {
+			if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Status, formatReasonsColumn(s.HealthReasons), s.Version, lastSeen, hostname); err != nil {
 				return err
 			}
 		}
@@ -1497,10 +1545,10 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(w, "ID\tSTATUS\tVERSION\tLAST SEEN\tHOSTNAME"); err != nil {
+	if _, err := fmt.Fprintln(w, "ID\tSTATUS\tREASONS\tVERSION\tLAST SEEN\tHOSTNAME"); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(w, "--\t------\t-------\t---------\t--------"); err != nil {
+	if _, err := fmt.Fprintln(w, "--\t------\t-------\t-------\t---------\t--------"); err != nil {
 		return err
 	}
 	for _, s := range apiResp.Data {
@@ -1512,7 +1560,7 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 		if !s.LastSeen.IsZero() {
 			lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
 		}
-		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.ID, s.Status, s.Version, lastSeen, hostname); err != nil {
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Status, formatReasonsColumn(s.HealthReasons), s.Version, lastSeen, hostname); err != nil {
 			return err
 		}
 	}

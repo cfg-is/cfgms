@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 
+	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -125,6 +126,7 @@ func (s *Server) writeStewardFromDurableRecord(w http.ResponseWriter, r *http.Re
 
 		KeyProtectionLevel: rec.KeyProtectionLevel,
 		KeyAlgorithm:       effectiveKeyAlgorithm(rec.KeyAlgorithm),
+		HealthReasons:      healthReasonsFromRecord(rec),
 	})
 }
 
@@ -136,4 +138,53 @@ func effectiveKeyAlgorithm(stored string) string {
 		return "ed25519"
 	}
 	return stored
+}
+
+// healthReasonsFromRecord converts a durable record's reason set to its API
+// form, re-applying the per-field caps so an over-long value can never leave
+// the controller even if it reached the store by another path. Returns nil for
+// an empty set.
+func healthReasonsFromRecord(rec *business.StewardRecord) []HealthReasonInfo {
+	if rec == nil || len(rec.HealthReasons) == 0 {
+		return nil
+	}
+	in := make([]controlplaneTypes.HealthReason, len(rec.HealthReasons))
+	for i, r := range rec.HealthReasons {
+		in[i] = controlplaneTypes.HealthReason{Component: r.Component, Code: r.Code, Message: r.Message}
+	}
+	capped := controlplaneTypes.TruncateHealthReasons(in)
+	out := make([]HealthReasonInfo, len(capped))
+	for i, r := range capped {
+		out[i] = HealthReasonInfo{Component: r.Component, Code: r.Code, Message: r.Message}
+	}
+	return out
+}
+
+// attachHealthReasons fills HealthReasons on each already-tenant-scoped list row
+// from the durable store with one batch read. Rows outside the list are never
+// looked up, so a scoped caller sees reasons only for stewards it may read. A
+// missing or failing store leaves the rows without reasons rather than failing
+// the list.
+func (s *Server) attachHealthReasons(ctx context.Context, list []StewardInfo) {
+	store := s.stewardStore
+	if store == nil || len(list) == 0 {
+		return
+	}
+	records, err := store.ListStewards(ctx)
+	if err != nil {
+		s.logger.Warn("Failed to read steward health reasons for list",
+			"error", logging.SanitizeLogValue(err.Error()))
+		return
+	}
+	byID := make(map[string]*business.StewardRecord, len(records))
+	for _, rec := range records {
+		if rec != nil && len(rec.HealthReasons) > 0 {
+			byID[rec.ID] = rec
+		}
+	}
+	for i := range list {
+		if rec, ok := byID[list[i].ID]; ok {
+			list[i].HealthReasons = healthReasonsFromRecord(rec)
+		}
+	}
 }

@@ -6,6 +6,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -92,8 +93,8 @@ func (s *DatabaseStewardStore) RegisterSteward(ctx context.Context, record *busi
 		INSERT INTO steward_records
 			(id, tenant_id, hostname, platform, arch, version, ip_address, status,
 			 registered_at, last_seen, last_heartbeat_at,
-			 device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,$11,$12,$13,$14,$15,$16)`,
+			 device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,$11,$12,$13,$14,$15,$16,$17)`,
 		record.ID,
 		record.TenantID,
 		record.Hostname,
@@ -110,6 +111,7 @@ func (s *DatabaseStewardStore) RegisterSteward(ctx context.Context, record *busi
 		record.KeyAlgorithm,
 		record.LastProvenanceJSON,
 		record.Hidden,
+		encodeHealthReasons(record.HealthReasons),
 	)
 	if err != nil {
 		// Issue #3403: disambiguate the two unique violations by primary key rather
@@ -192,7 +194,7 @@ func (s *DatabaseStewardStore) GetSteward(ctx context.Context, stewardID string)
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
 		FROM steward_records WHERE id = $1`, stewardID)
 	return scanStewardDBRow(row)
 }
@@ -214,7 +216,7 @@ func (s *DatabaseStewardStore) GetStewardByDeviceID(ctx context.Context, deviceI
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
 		FROM steward_records WHERE device_id = $1 ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`, deviceID)
 	return scanStewardDBRow(row)
 }
@@ -230,7 +232,7 @@ func (s *DatabaseStewardStore) GetStewardByDeviceIDForTenant(ctx context.Context
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
 		FROM steward_records WHERE device_id = $1 AND tenant_id = $2 ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`,
 		deviceID, tenantID)
 	return scanStewardDBRow(row)
@@ -241,7 +243,7 @@ func (s *DatabaseStewardStore) ListStewards(ctx context.Context) ([]*business.St
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
 		FROM steward_records ORDER BY registered_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("database: failed to list stewards: %w", err)
@@ -255,7 +257,7 @@ func (s *DatabaseStewardStore) ListStewardsByStatus(ctx context.Context, status 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
 		FROM steward_records WHERE status = $1 ORDER BY registered_at ASC`,
 		string(status))
 	if err != nil {
@@ -358,6 +360,60 @@ func (s *DatabaseStewardStore) SetStewardHidden(ctx context.Context, stewardID s
 		return business.ErrStewardNotFound
 	}
 	return tx.Commit()
+}
+
+// SetHealthReasons replaces the steward's current health reason set.
+func (s *DatabaseStewardStore) SetHealthReasons(ctx context.Context, stewardID string, reasons []business.HealthReasonRecord) error {
+	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin set health reasons tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE steward_records SET health_reasons = $2 WHERE id = $1`,
+		stewardID, encodeHealthReasons(reasons))
+	if err != nil {
+		return fmt.Errorf("database: failed to set health reasons for steward %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return tx.Commit()
+}
+
+// encodeHealthReasons serialises reasons as JSON; an empty set is stored as ”.
+func encodeHealthReasons(reasons []business.HealthReasonRecord) string {
+	if len(reasons) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(reasons)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// decodeHealthReasons parses the stored JSON; ” or malformed data reads as no reasons.
+func decodeHealthReasons(s string) []business.HealthReasonRecord {
+	if s == "" {
+		return nil
+	}
+	var out []business.HealthReasonRecord
+	if err := json.Unmarshal([]byte(s), &out); err != nil || len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // SetStewardProvenance replaces the steward's provenance baseline.
@@ -536,7 +592,7 @@ func (s *DatabaseStewardStore) GetStewardsSeen(ctx context.Context, since time.T
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
 		FROM steward_records WHERE last_seen > $1 ORDER BY last_seen DESC`,
 		since)
 	if err != nil {
@@ -559,11 +615,12 @@ func scanStewardDBRow(row *sql.Row) (*business.StewardRecord, error) {
 	var registeredAt, lastSeen time.Time
 	var lastHeartbeat sql.NullTime
 	var keyPub []byte
+	var reasonsJSON string
 
 	err := row.Scan(
 		&r.ID, &r.TenantID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
 		&statusStr, &registeredAt, &lastSeen, &lastHeartbeat,
-		&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON, &r.Hidden,
+		&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON, &r.Hidden, &reasonsJSON,
 	)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrStewardNotFound
@@ -578,6 +635,7 @@ func scanStewardDBRow(row *sql.Row) (*business.StewardRecord, error) {
 		r.LastHeartbeatAt = lastHeartbeat.Time
 	}
 	r.IdentityKeyPub = keyPub
+	r.HealthReasons = decodeHealthReasons(reasonsJSON)
 	return r, nil
 }
 
@@ -589,11 +647,12 @@ func scanStewardDBRows(rows *sql.Rows) ([]*business.StewardRecord, error) {
 		var registeredAt, lastSeen time.Time
 		var lastHeartbeat sql.NullTime
 		var keyPub []byte
+		var reasonsJSON string
 
 		if err := rows.Scan(
 			&r.ID, &r.TenantID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
 			&statusStr, &registeredAt, &lastSeen, &lastHeartbeat,
-			&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON, &r.Hidden,
+			&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON, &r.Hidden, &reasonsJSON,
 		); err != nil {
 			return nil, fmt.Errorf("database: failed to scan steward row: %w", err)
 		}
@@ -604,6 +663,7 @@ func scanStewardDBRows(rows *sql.Rows) ([]*business.StewardRecord, error) {
 			r.LastHeartbeatAt = lastHeartbeat.Time
 		}
 		r.IdentityKeyPub = keyPub
+		r.HealthReasons = decodeHealthReasons(reasonsJSON)
 		records = append(records, r)
 	}
 	return records, rows.Err()

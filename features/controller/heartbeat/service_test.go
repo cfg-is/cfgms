@@ -6,6 +6,7 @@ package heartbeat
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -280,4 +281,60 @@ func TestHeartbeatService_StalenessUsesReceiptTime_NotStewardClock(t *testing.T)
 	require.True(t, ok)
 	assert.False(t, status.Healthy,
 		"steward must be marked offline after 61s with no receipt")
+}
+
+// TestHeartbeatService_Reasons_CappedReplacedAndHandedToHook verifies Issue
+// #5651: reasons are re-capped on receive (steward input is untrusted), each
+// heartbeat replaces the previous set, and the per-heartbeat hook receives the
+// capped set.
+func TestHeartbeatService_Reasons_CappedReplacedAndHandedToHook(t *testing.T) {
+	var mu sync.Mutex
+	var got [][]controlplaneTypes.HealthReason
+	svc, cp := newTestService(t, func(cfg *Config) {
+		cfg.OnHeartbeatReceived = func(_ string, reasons []controlplaneTypes.HealthReason) {
+			mu.Lock()
+			defer mu.Unlock()
+			got = append(got, reasons)
+		}
+	})
+	ctx := context.Background()
+	const stewardID = "steward-reasons"
+
+	long := strings.Repeat("x", 1000)
+	many := make([]controlplaneTypes.HealthReason, controlplaneTypes.MaxHealthReasons+5)
+	for i := range many {
+		many[i] = controlplaneTypes.HealthReason{Component: long, Code: long, Message: long}
+	}
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: stewardID, Status: controlplaneTypes.StatusDegraded, Timestamp: time.Now(), Reasons: many,
+	}))
+
+	status, ok := svc.GetStatus(stewardID)
+	require.True(t, ok)
+	require.Len(t, status.Reasons, controlplaneTypes.MaxHealthReasons)
+	assert.Len(t, status.Reasons[0].Component, controlplaneTypes.MaxHealthReasonComponent)
+	assert.Len(t, status.Reasons[0].Code, controlplaneTypes.MaxHealthReasonCode)
+	assert.Len(t, status.Reasons[0].Message, controlplaneTypes.MaxHealthReasonMessageLen)
+
+	// A later heartbeat replaces the set; a heartbeat with none clears it.
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: stewardID, Status: controlplaneTypes.StatusDegraded, Timestamp: time.Now(),
+		Reasons: []controlplaneTypes.HealthReason{{Component: "disk", Code: "disk.low"}},
+	}))
+	status, _ = svc.GetStatus(stewardID)
+	assert.Equal(t, []controlplaneTypes.HealthReason{{Component: "disk", Code: "disk.low"}}, status.Reasons)
+
+	require.NoError(t, cp.sendHeartbeat(ctx, &controlplaneTypes.Heartbeat{
+		StewardID: stewardID, Status: controlplaneTypes.StatusHealthy, Timestamp: time.Now(),
+	}))
+	status, _ = svc.GetStatus(stewardID)
+	assert.Empty(t, status.Reasons)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, got, 3)
+	assert.Len(t, got[0], controlplaneTypes.MaxHealthReasons, "hook gets the capped set")
+	assert.Len(t, got[0][0].Message, controlplaneTypes.MaxHealthReasonMessageLen)
+	assert.Len(t, got[1], 1)
+	assert.Empty(t, got[2])
 }

@@ -53,6 +53,11 @@ type StewardStatus struct {
 	// Values: "connected", "disconnected", "connecting", "reconnecting".
 	ConnectionState string
 
+	// Reasons is the steward's current health reason set from its latest
+	// heartbeat, capped on receive. It replaces the previous set every
+	// heartbeat; empty when the steward reports none.
+	Reasons []controlplaneTypes.HealthReason
+
 	// expectedDNAHash is the hash the controller expects the steward to have,
 	// set after a successful full DNA sync.  Compared against DNAHash on each
 	// heartbeat to detect missed deltas.
@@ -70,8 +75,10 @@ type DNAHashMismatchCallback func(stewardID string)
 // HeartbeatReceivedCallback is called on every heartbeat, unconditionally.
 // Unlike OnStatusChange which fires only on healthy→unhealthy transitions,
 // this fires on every received heartbeat so components like the job dispatcher
-// can use the heartbeat as a trigger to drain pending work.
-type HeartbeatReceivedCallback func(stewardID string)
+// can use the heartbeat as a trigger to drain pending work. reasons is the
+// heartbeat's health reason set after the receive-side caps were re-applied
+// (nil when the steward reports none); the callback owns persisting it.
+type HeartbeatReceivedCallback func(stewardID string, reasons []controlplaneTypes.HealthReason)
 
 // FragmentRootCallback is called whenever a heartbeat carries a non-empty
 // DNAAggregateRoot. The receiver should compare the claimed root to its own
@@ -299,6 +306,11 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 	status.ActiveSessions = int(hb.ActiveSessions)
 	status.ConnectionState = hb.ConnectionState
 
+	// Reasons are steward-controlled: re-apply the caps rather than trust the
+	// transport conversion, and replace (never append to) the previous set.
+	reasons := controlplaneTypes.TruncateHealthReasons(hb.Reasons)
+	status.Reasons = reasons
+
 	status.MissedBeats = 0
 	status.Healthy = true
 
@@ -334,7 +346,7 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 
 	// Fire unconditional per-heartbeat hook (e.g. for job dispatch).
 	if s.onHeartbeatReceived != nil {
-		s.onHeartbeatReceived(hb.StewardID)
+		s.onHeartbeatReceived(hb.StewardID, reasons)
 	}
 
 	// Fire fragment-root callback for partial-sync detection (ADR-017 §7).

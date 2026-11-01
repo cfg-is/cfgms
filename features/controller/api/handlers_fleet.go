@@ -32,6 +32,11 @@ type FleetHealthResponse struct {
 	Unreachable int `json:"unreachable"`
 	Hidden      int `json:"hidden"`
 
+	// ReasonCounts counts readable, non-hidden stewards by health reason code
+	// (a steward reporting a code is counted once for it). Always present, empty
+	// when no steward reports a reason.
+	ReasonCounts map[string]int `json:"reason_counts"`
+
 	// WalledOff holds the anonymized aggregate of client-tenant stewards a root
 	// caller subject to the ADR-025 boundary holds no crossing for (A6.1). It is
 	// counts only, and is absent for every other caller and when nothing is
@@ -231,6 +236,7 @@ func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 		}
 		stewardList = append(stewardList, info)
 	}
+	s.attachHealthReasons(r.Context(), stewardList)
 
 	s.logger.Info("Resolved selector",
 		"selector", logging.SanitizeLogValue(req.Selector), "count", len(stewardList))
@@ -269,7 +275,8 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 	results, walledOff := splitReadableResults(s.tenantReadScope(r, "GET /api/v1/fleet/health"), results)
 
 	now := time.Now()
-	resp := FleetHealthResponse{}
+	resp := FleetHealthResponse{ReasonCounts: map[string]int{}}
+	reasonsByID := s.healthReasonCodesByID(r.Context())
 	if len(walledOff) > 0 {
 		resp.WalledOff = &FleetAnonymizedMetrics{Versions: map[string]int{}}
 		for _, res := range walledOff {
@@ -282,6 +289,9 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 		if res.Hidden {
 			resp.Hidden++
 			continue
+		}
+		for code := range reasonsByID[res.ID] {
+			resp.ReasonCounts[code]++
 		}
 		switch res.Status {
 		case "active":
@@ -303,4 +313,33 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 		"hidden", resp.Hidden,
 	)
 	s.writeSuccessResponse(w, resp)
+}
+
+// healthReasonCodesByID returns each steward's distinct reason codes from the
+// durable store, for stewards that report any. Callers look up only stewards
+// already filtered to the caller's read scope, so nothing here widens it. An
+// absent or failing store yields an empty map.
+func (s *Server) healthReasonCodesByID(ctx context.Context) map[string]map[string]struct{} {
+	store := s.stewardStore
+	if store == nil {
+		return nil
+	}
+	records, err := store.ListStewards(ctx)
+	if err != nil {
+		s.logger.Warn("Failed to read steward health reasons for fleet health",
+			"error", logging.SanitizeLogValue(err.Error()))
+		return nil
+	}
+	out := make(map[string]map[string]struct{})
+	for _, rec := range records {
+		if rec == nil || len(rec.HealthReasons) == 0 {
+			continue
+		}
+		codes := make(map[string]struct{}, len(rec.HealthReasons))
+		for _, r := range healthReasonsFromRecord(rec) {
+			codes[r.Code] = struct{}{}
+		}
+		out[rec.ID] = codes
+	}
+	return out
 }

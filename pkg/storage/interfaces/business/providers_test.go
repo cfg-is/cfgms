@@ -252,6 +252,98 @@ func TestStewardStoreContract_DeregisteredReleasesDeviceID(t *testing.T) {
 	})
 }
 
+// assertHealthReasonsRoundTrip is the Issue #5651 contract: SetHealthReasons is
+// read back by GetSteward and by every list path, an empty set clears it, a
+// fresh record has none, and an unknown steward reports ErrStewardNotFound.
+func assertHealthReasonsRoundTrip(t *testing.T, store business.StewardStore) {
+	t.Helper()
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	tenant := "tenant-hr-" + suffix
+	id := "steward-hr-" + suffix
+	other := "steward-hr-other-" + suffix
+
+	require.NoError(t, store.RegisterSteward(ctx, contractStewardRec(id, tenant, "dev-hr-"+suffix)))
+	require.NoError(t, store.RegisterSteward(ctx, contractStewardRec(other, tenant, "dev-hr2-"+suffix)))
+
+	// A record with no field set reads back with no reasons.
+	got, err := store.GetSteward(ctx, id)
+	require.NoError(t, err)
+	assert.Empty(t, got.HealthReasons)
+
+	reasons := []business.HealthReasonRecord{
+		{Component: "disk", Code: "disk.low", Message: "free space below 5%"},
+		{Component: "module", Code: "module.failed"},
+	}
+	require.NoError(t, store.SetHealthReasons(ctx, id, reasons))
+
+	find := func(list []*business.StewardRecord) *business.StewardRecord {
+		for _, r := range list {
+			if r.ID == id {
+				return r
+			}
+		}
+		return nil
+	}
+	got, err = store.GetSteward(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, reasons, got.HealthReasons)
+
+	all, err := store.ListStewards(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, find(all))
+	assert.Equal(t, reasons, find(all).HealthReasons)
+
+	reg, err := store.ListStewardsByStatus(ctx, business.StewardStatusRegistered)
+	require.NoError(t, err)
+	require.NotNil(t, find(reg))
+	assert.Equal(t, reasons, find(reg).HealthReasons)
+
+	seen, err := store.GetStewardsSeen(ctx, time.Now().Add(-time.Hour))
+	require.NoError(t, err)
+	require.NotNil(t, find(seen))
+	assert.Equal(t, reasons, find(seen).HealthReasons)
+
+	byDev, err := store.GetStewardByDeviceIDForTenant(ctx, "dev-hr-"+suffix, tenant)
+	require.NoError(t, err)
+	assert.Equal(t, reasons, byDev.HealthReasons)
+
+	// The other steward is untouched.
+	o, err := store.GetSteward(ctx, other)
+	require.NoError(t, err)
+	assert.Empty(t, o.HealthReasons)
+
+	// Replace, not append.
+	replacement := []business.HealthReasonRecord{{Component: "net", Code: "net.down", Message: "m"}}
+	require.NoError(t, store.SetHealthReasons(ctx, id, replacement))
+	got, err = store.GetSteward(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, replacement, got.HealthReasons)
+
+	// An empty set clears.
+	require.NoError(t, store.SetHealthReasons(ctx, id, nil))
+	got, err = store.GetSteward(ctx, id)
+	require.NoError(t, err)
+	assert.Empty(t, got.HealthReasons)
+	all, err = store.ListStewards(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, find(all).HealthReasons)
+
+	assert.ErrorIs(t, store.SetHealthReasons(ctx, "ghost-"+suffix, reasons), business.ErrStewardNotFound)
+}
+
+func TestStewardStoreContract_HealthReasons(t *testing.T) {
+	t.Run("flatfile", func(t *testing.T) {
+		assertHealthReasonsRoundTrip(t, newContractFlatFileStewardStore(t))
+	})
+	t.Run("sqlite", func(t *testing.T) {
+		assertHealthReasonsRoundTrip(t, newContractSQLiteStewardStore(t))
+	})
+	t.Run("database", func(t *testing.T) {
+		assertHealthReasonsRoundTrip(t, newContractDatabaseStewardStoreOrSkip(t))
+	})
+}
+
 // assertRebindStewardIdentityIf is the Issue #5722 contract: the compare-and-swap
 // rebind applies only while the stored identity key equals the expected old key,
 // reports ErrIdentityKeyChanged otherwise without changing anything, lets exactly

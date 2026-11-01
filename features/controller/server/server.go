@@ -1522,11 +1522,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Issue #3764: refresh this steward's routing-table liveness timestamp on
 		// every heartbeat, in addition to on connect, so a long-lived connection
 		// never goes stale under business.RoutingStaleAfter between reconnects.
-		onHeartbeatReceived := jobDispatcher.OnHeartbeat
-		if routingStore != nil {
-			dispatcherOnHeartbeat := jobDispatcher.OnHeartbeat
-			onHeartbeatReceived = func(stewardID string) {
-				dispatcherOnHeartbeat(stewardID)
+		// Issue #5651: the same per-heartbeat hook also persists the steward's
+		// health reasons (written only when the set changes).
+		onHeartbeatReceived := func(stewardID string, reasons []controlplaneTypes.HealthReason) {
+			jobDispatcher.OnHeartbeat(stewardID)
+			if controllerService != nil {
+				controllerService.RecordHealthReasons(stewardID, reasons)
+			}
+			if routingStore != nil {
 				if err := routingStore.RecordConnection(context.Background(), stewardID, routingHook.localNodeID); err != nil {
 					logger.Warn("internaldelivery: failed to refresh routing connection on heartbeat",
 						"steward_id", logging.SanitizeLogValue(stewardID),

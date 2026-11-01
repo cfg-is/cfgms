@@ -203,6 +203,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			stewardList = append(stewardList, info)
 		}
 		s.attachStewardTags(r.Context(), stewardList)
+		s.attachHealthReasons(r.Context(), stewardList)
 		if paginated {
 			page := paginateStewards(stewardList, limit, offset)
 			s.logger.Info("Listed stewards (selector, paginated)",
@@ -269,6 +270,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			stewardList = append(stewardList, info)
 		}
 		s.attachStewardTags(r.Context(), stewardList)
+		s.attachHealthReasons(r.Context(), stewardList)
 		if paginated {
 			page := paginateStewards(stewardList, limit, offset)
 			s.logger.Info("Listed stewards (filtered, paginated)", "count", len(page.Stewards), "total", page.Total)
@@ -378,6 +380,9 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.attachStewardTags(r.Context(), stewardList)
+	for i := range stewardList {
+		stewardList[i].HealthReasons = healthReasonsFromRecord(durable[stewardList[i].ID])
+	}
 
 	if paginated {
 		page := paginateStewards(stewardList, limit, offset)
@@ -536,6 +541,7 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 	if rec := s.durableStewardRecord(r.Context(), stewardID); rec != nil {
 		apiStewardInfo.KeyProtectionLevel = rec.KeyProtectionLevel
 		apiStewardInfo.KeyAlgorithm = effectiveKeyAlgorithm(rec.KeyAlgorithm)
+		apiStewardInfo.HealthReasons = healthReasonsFromRecord(rec)
 	}
 
 	// Include DNA information if available

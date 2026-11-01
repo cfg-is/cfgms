@@ -41,6 +41,8 @@ type StewardInfo struct {
 	Version  string          `json:"version"`
 	TenantID string          `json:"tenant_id,omitempty"`
 	DNA      *StewardInfoDNA `json:"dna,omitempty"`
+	// HealthReasons is why the steward reports a non-healthy status; empty when healthy.
+	HealthReasons []stewardHealthReason `json:"health_reasons,omitempty"`
 }
 
 // stewardKey returns the unambiguous per-steward output key used as the JSON

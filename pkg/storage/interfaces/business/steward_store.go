@@ -151,6 +151,20 @@ type StewardRecord struct {
 	// used by the gate handler (S3b) to score re-entry confidence. Updated at each
 	// successful refresh. Empty until the first refresh cycle completes.
 	LastProvenanceJSON string `json:"last_provenance_json"`
+
+	// HealthReasons is the current set of machine-readable reasons the steward
+	// last reported for a non-healthy status. Only the current set is kept; it is
+	// replaced by SetHealthReasons and empty when the steward is healthy. Records
+	// written before the field existed read back with no reasons.
+	HealthReasons []HealthReasonRecord `json:"health_reasons,omitempty"`
+}
+
+// HealthReasonRecord is one persisted health reason. Values originate from the
+// steward and are bounded by the controller before they reach the store.
+type HealthReasonRecord struct {
+	Component string `json:"component"`
+	Code      string `json:"code"`
+	Message   string `json:"message,omitempty"`
 }
 
 // StewardFilter defines criteria for filtering steward queries.
@@ -241,6 +255,11 @@ type StewardStore interface {
 	// SetStewardHidden sets the operator-controlled visibility flag for the given steward.
 	// Returns ErrStewardNotFound if no record exists.
 	SetStewardHidden(ctx context.Context, stewardID string, hidden bool) error
+
+	// SetHealthReasons replaces the steward's current health reason set (nil or
+	// empty clears it). It touches only that field, so the heartbeat path never
+	// rewrites the whole record. Returns ErrStewardNotFound if no record exists.
+	SetHealthReasons(ctx context.Context, stewardID string, reasons []HealthReasonRecord) error
 
 	// SetStewardProvenance replaces the steward's recorded provenance baseline
 	// (LastProvenanceJSON) with provenanceJSON (ADR-034 §2). It is written at
