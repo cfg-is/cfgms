@@ -180,6 +180,28 @@ func (s *subsystemState) markHealthy(subsystem string) {
 	s.mu.Unlock()
 }
 
+// errConnectPanicked is the fixed error a recovered connect panic becomes; the
+// recovered value is never part of it.
+var errConnectPanicked = errors.New("controller connect attempt panicked")
+
+// connectGuarded runs one connect attempt under recover so a panic inside it
+// ends that attempt, not the process: the panic is logged (sanitized), recorded
+// as a "controller" heartbeat reason with a fixed message, and returned as an
+// ordinary connect failure that the retry loop backs off on. The reason clears
+// when a later attempt succeeds (markHealthy). runtime.Goexit is not intercepted.
+func connectGuarded(s *subsystemState, logger logging.Logger, connect func() (*client.TransportClient, error)) (tc *client.TransportClient, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("Controller connect attempt panicked; recovered",
+				"operation", "connect_panic",
+				"panic", logging.SanitizeLogValue(fmt.Sprint(r)))
+			s.reasons.Set("controller", "panic", "controller recovered from a panic")
+			tc, err = nil, errConnectPanicked
+		}
+	}()
+	return connect()
+}
+
 // isTrustDowngrade returns true when err is a trust-source downgrade rejection
 // from checkTrustDowngrade or tryReconnectWithStoredIdentity. These are
 // integrity decisions that must not be silently retried. (Issue #2034)
@@ -676,7 +698,9 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 				if runCtx.Err() != nil {
 					return
 				}
-				tc, connErr := cf(runCtx, regToken, resolvedURL, trustSrc, installCAPEM, ks, publicBeta, logger)
+				tc, connErr := connectGuarded(subsysState, logger, func() (*client.TransportClient, error) {
+					return cf(runCtx, regToken, resolvedURL, trustSrc, installCAPEM, ks, publicBeta, logger)
+				})
 				if connErr == nil {
 					subsysState.markHealthy("controller")
 					connectedCh <- tc

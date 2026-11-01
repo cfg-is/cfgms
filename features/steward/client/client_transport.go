@@ -871,6 +871,7 @@ func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 					ClientSource: cp.TransportClient,
 					StewardID:    stewardID,
 					Logger:       c.logger,
+					OnPanic:      c.recordComponentPanic,
 				})
 			}
 		}
@@ -1020,7 +1021,13 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 		c.logger.Info("Initializing gRPC control plane provider",
 			"addr", transportAddress, "steward_id", logging.RedactedID(stewardID))
 
-		provider := grpcCP.New(grpcCP.ModeClient, grpcCP.WithHostAttributes(c.hostAttributes))
+		provider := grpcCP.New(grpcCP.ModeClient, grpcCP.WithHostAttributes(c.hostAttributes),
+			grpcCP.WithPanicHook(func(component string, recovered interface{}) {
+				// The provider has already logged the sanitized panic; only the
+				// fixed-string reason reaches the heartbeat.
+				_ = recovered
+				c.SetHealthReason(component, healthReasonCodePanic, panicReasonMessage(component))
+			}))
 
 		providerCfg := map[string]interface{}{
 			"mode":       "client",
@@ -1110,7 +1117,11 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 	// Subscribe to commands via gRPC control plane provider
 	c.logger.Info("Subscribing to commands", "steward_id", logging.RedactedID(stewardID))
 	if err := controlPlane.SubscribeCommands(ctx, stewardID, func(ctx context.Context, sc *cpTypes.SignedCommand) error {
-		return c.receiveCommand(ctx, sc, cmdHandler.HandleCommand)
+		err := c.receiveCommand(ctx, sc, cmdHandler.HandleCommand)
+		// Reached only when the dispatch did not panic (a panic unwinds to the
+		// provider's recover), so a completed command clears the panic reason.
+		c.healthReasonRegistry().ClearIfCode(componentCommandHandle, healthReasonCodePanic)
+		return err
 	}); err != nil {
 		return fmt.Errorf("failed to subscribe to commands: %w", err)
 	}
@@ -1148,11 +1159,7 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 	// module's declared budget is 120s (Issue #2480).
 	// #nosec G118 -- on-connect sync intentionally survives Connect's caller;
 	// every module operation is bounded by its declared ModuleCallTimeoutSec.
-	go func() {
-		if err := c.syncConfigNow(context.Background(), "on-connect", nil); err != nil {
-			c.logger.Info("On-connect config sync skipped", "error", err)
-		}
-	}()
+	c.startOnConnectSync()
 
 	// Start heartbeat
 	// #nosec G118 -- heartbeat is client-owned, each send has a five-second
@@ -1478,6 +1485,7 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 					ClientSource: grpcProv.TransportClient,
 					StewardID:    stewardID,
 					Logger:       c.logger,
+					OnPanic:      c.recordComponentPanic,
 				})
 				built.Start(context.Background())
 				c.mu.Lock()
@@ -1538,6 +1546,7 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 		StewardID:          stewardID,
 		OnStatus:           statusCallback,
 		Logger:             c.logger,
+		OnPanic:            c.recordComponentPanic,
 		Verifier:           verifier,
 		ReplayWindow:       c.commandReplayWindow,
 		MaxParamsBytes:     c.commandMaxParamsBytes,
@@ -2372,14 +2381,16 @@ func (c *TransportClient) StartConvergenceLoop(ctx context.Context) {
 					ticker.Reset(interval)
 					c.logger.Info("Convergence interval updated", "interval", interval)
 				}
-				c.logger.Info("Scheduled convergence triggered", "interval", interval)
-				if err := c.TriggerConvergence(ctx); err != nil {
-					c.logger.Warn("Scheduled convergence failed", "error", err)
-				}
-				// Tier-2 cadence: run whole-domain observe sweep every Nth cycle.
-				// The counter increments regardless of convergence success so the
-				// cadence is wall-clock-based, not config-dependent.
-				c.checkAndTriggerObserveSweep(ctx)
+				c.guard(componentConvergence, func() {
+					c.logger.Info("Scheduled convergence triggered", "interval", interval)
+					if err := c.TriggerConvergence(ctx); err != nil {
+						c.logger.Warn("Scheduled convergence failed", "error", err)
+					}
+					// Tier-2 cadence: run whole-domain observe sweep every Nth cycle.
+					// The counter increments regardless of convergence success so the
+					// cadence is wall-clock-based, not config-dependent.
+					c.checkAndTriggerObserveSweep(ctx)
+				})
 			}
 		}
 	}()
@@ -2760,12 +2771,14 @@ func (c *TransportClient) StartDNARefreshLoop(ctx context.Context) <-chan struct
 			case <-ticker.C:
 				// Re-read collector on each tick so tests can inject a new
 				// implementation after the loop has started.
-				c.mu.RLock()
-				currentCollector := c.dnaCollector
-				c.mu.RUnlock()
-				if currentCollector != nil {
-					c.runDNARefreshTick(ctx, currentCollector)
-				}
+				c.guard(componentDNARefresh, func() {
+					c.mu.RLock()
+					currentCollector := c.dnaCollector
+					c.mu.RUnlock()
+					if currentCollector != nil {
+						c.runDNARefreshTick(ctx, currentCollector)
+					}
+				})
 				// Signal that this tick has been fully processed so tests can
 				// synchronize without wall-clock sleeps. No-op in production.
 				c.notifyDNARefreshTick(ctx, tick)
@@ -3448,6 +3461,18 @@ func (c *TransportClient) refetchConfigWhenTrusted(gen uint64) {
 	c.startConfigRefetch()
 }
 
+// startOnConnectSync pulls and applies the stored config in a background
+// goroutine, recovering a panic as an "on_connect_sync" health reason.
+func (c *TransportClient) startOnConnectSync() {
+	// #nosec G118 -- on-connect sync intentionally survives Connect's caller;
+	// every module operation is bounded by its declared ModuleCallTimeoutSec.
+	go c.guard(componentOnConnectSync, func() {
+		if err := c.syncConfigNow(context.Background(), "on-connect", nil); err != nil {
+			c.logger.Info("On-connect config sync skipped", "error", err)
+		}
+	})
+}
+
 // startConfigRefetch pulls and applies config in the background after the
 // signing trust set changed.
 func (c *TransportClient) startConfigRefetch() {
@@ -3455,11 +3480,11 @@ func (c *TransportClient) startConfigRefetch() {
 	// #nosec G118 -- like the on-connect sync, the re-fetch outlives the push
 	// command that triggered it; each module operation is bounded by its declared
 	// ModuleCallTimeoutSec.
-	go func() {
+	go c.guard(componentConfigRefetch, func() {
 		if err := c.syncConfigNow(context.Background(), "signing-trust-change", nil); err != nil {
 			c.logger.Info("Configuration re-fetch after signing-cert trust change failed", "error", err)
 		}
-	}()
+	})
 }
 
 // decodeBase64 decodes a standard base64-encoded string, accepting both padded
@@ -3641,6 +3666,9 @@ func (c *TransportClient) drainOfflineQueue(ctx context.Context) {
 		"delivered", delivered, "remaining", q.Len())
 }
 
+// heartbeatJitterMax bounds the uniform per-tick heartbeat jitter. Tests shorten it.
+var heartbeatJitterMax = 10 * time.Second
+
 // startHeartbeat starts the periodic heartbeat goroutine.
 // Each tick fires after base + uniform jitter in [0, 10 s) so the effective
 // interval is always in [20 s, 30 s). Jitter keeps 50k stewards from
@@ -3648,9 +3676,7 @@ func (c *TransportClient) drainOfflineQueue(ctx context.Context) {
 // After each successful heartbeat, queued offline events are drained so the
 // controller receives them promptly (Issue #419).
 func (c *TransportClient) startHeartbeat() {
-	const (
-		jitterMax = 10 * time.Second
-	)
+	jitterMax := heartbeatJitterMax
 
 	rng := c.rng
 	if rng == nil {
@@ -3669,15 +3695,17 @@ func (c *TransportClient) startHeartbeat() {
 		case <-c.heartbeatStop:
 			return
 		case <-timer.C:
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := c.SendHeartbeat(ctx, c.heartbeatStatus(), nil); err != nil {
-				c.logger.Warn("Failed to send heartbeat", "error", err)
-			} else {
-				// Heartbeat succeeded — drain any events queued during a
-				// transient disconnect that did not trigger a full reconnect.
-				c.drainOfflineQueue(ctx)
-			}
-			cancel()
+			c.guard(componentHeartbeat, func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := c.SendHeartbeat(ctx, c.heartbeatStatus(), nil); err != nil {
+					c.logger.Warn("Failed to send heartbeat", "error", err)
+				} else {
+					// Heartbeat succeeded — drain any events queued during a
+					// transient disconnect that did not trigger a full reconnect.
+					c.drainOfflineQueue(ctx)
+				}
+			})
 			timer.Reset(nextInterval())
 		}
 	}

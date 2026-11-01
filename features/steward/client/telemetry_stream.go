@@ -37,6 +37,9 @@ type TelemetryStreamConfig struct {
 	Collector telemetry.Collector
 	// Logger receives warnings about stream failures and reconnects.
 	Logger logging.Logger
+	// OnPanic, when non-nil, is called with the component name after the stream
+	// loop recovered from a panic. The loop then reconnects with back-off.
+	OnPanic func(component string)
 }
 
 // TelemetryStream dials the TelemetryStream bidi RPC and manages the
@@ -55,6 +58,7 @@ type TelemetryStream struct {
 	stewardID string
 	collector telemetry.Collector
 	logger    logging.Logger
+	onPanic   func(component string)
 
 	mu        sync.Mutex
 	started   atomic.Bool
@@ -75,6 +79,7 @@ func NewTelemetryStream(cfg TelemetryStreamConfig) *TelemetryStream {
 		stewardID: cfg.StewardID,
 		collector: cfg.Collector,
 		logger:    logger,
+		onPanic:   cfg.OnPanic,
 		done:      make(chan struct{}),
 	}
 }
@@ -121,7 +126,10 @@ func (t *TelemetryStream) streamLoop(ctx context.Context, stop <-chan struct{}) 
 			return
 		default:
 		}
-		if err := t.runStream(ctx, stop); err != nil {
+		err := recoverToError(t.logger, componentTelemetry, t.onPanic, func() error {
+			return t.runStream(ctx, stop)
+		})
+		if err != nil {
 			select {
 			case <-ctx.Done():
 				return
