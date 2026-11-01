@@ -1372,11 +1372,16 @@ func loadConnectedRuntimeConfig(publicBeta bool) (stewardconfig.StewardConfig, e
 func registerAndConnect(ctx context.Context, token, controllerURL string, trustSrc TrustSource, installCAPEM string, ks identity.KeyStore, publicBeta bool, logger logging.Logger) (*client.TransportClient, error) {
 	logger.Info("Starting steward connect sequence")
 
+	// A rejected local config never blocks connecting: the strict settings are
+	// used and the rejection is reported on the client before it is returned,
+	// so the first heartbeat carries it. Evaluated on every attempt.
+	runtimeCfg, cfgFault := resolveConnectedRuntimeConfig(publicBeta, logger)
+	pendingRuntimeConfigFault.Store(cfgFault)
+	return connectWithRuntimeConfig(ctx, token, controllerURL, trustSrc, installCAPEM, ks, runtimeCfg, publicBeta, logger)
+}
+
+func connectWithRuntimeConfig(ctx context.Context, token, controllerURL string, trustSrc TrustSource, installCAPEM string, ks identity.KeyStore, runtimeCfg stewardconfig.StewardConfig, publicBeta bool, logger logging.Logger) (*client.TransportClient, error) {
 	certStoreDir := certStoreDirResolver()
-	runtimeCfg, err := loadConnectedRuntimeConfig(publicBeta)
-	if err != nil {
-		return nil, err
-	}
 
 	// Downgrade guard: reject if stored enrollment had stronger trust assurance.
 	// priorCAPinFingerprint carries the previously pinned CA (if any) into every
@@ -1955,7 +1960,7 @@ func connectWithApprovedRegistration(
 	logger.Info("Connected to controller via gRPC transport",
 		"transport_address", reg.TransportAddress)
 
-	if err := transportClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
+	if err := transportClient.SendHeartbeat(ctx, applyPendingRuntimeConfigFault(transportClient), nil); err != nil {
 		logger.Warn("Failed to send initial heartbeat", "error", err)
 	}
 
@@ -2275,7 +2280,7 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		logger.Warn("Initial DNA refresh failed; first heartbeat DNA hash will be empty", "error", err)
 	}
 
-	if err := transportClient.SendHeartbeat(ctx, "healthy", nil); err != nil {
+	if err := transportClient.SendHeartbeat(ctx, applyPendingRuntimeConfigFault(transportClient), nil); err != nil {
 		logger.Warn("Failed to send initial heartbeat after reconnect", "error", err)
 	}
 
