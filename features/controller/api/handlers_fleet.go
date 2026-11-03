@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // DegradedHeartbeatAge is the heartbeat age beyond which an otherwise-active
@@ -27,16 +29,34 @@ const DegradedHeartbeatAge = 5 * time.Minute
 // Hidden is always present (non-suppressible) regardless of include_hidden:
 // an operator must always see that concealment is in effect (Issue #2918).
 type FleetHealthResponse struct {
+	// Tampered counts readable stewards that raised a tamper alarm, hidden ones
+	// included: a tampered steward is never concealed. TamperedStewards lists them
+	// and comes first so a consumer reads the highest-severity group before the rest.
+	Tampered         int                    `json:"tampered"`
+	TamperedStewards []FleetTamperedSteward `json:"tampered_stewards"`
+
 	Healthy     int `json:"healthy"`
 	Degraded    int `json:"degraded"`
 	Unreachable int `json:"unreachable"`
 	Hidden      int `json:"hidden"`
+
+	// ReasonCounts counts readable, non-hidden stewards by health reason code
+	// (a steward reporting a code is counted once for it). Always present, empty
+	// when no steward reports a reason.
+	ReasonCounts map[string]int `json:"reason_counts"`
 
 	// WalledOff holds the anonymized aggregate of client-tenant stewards a root
 	// caller subject to the ADR-025 boundary holds no crossing for (A6.1). It is
 	// counts only, and is absent for every other caller and when nothing is
 	// walled off. The four counters above cover only stewards the caller may read.
 	WalledOff *FleetAnonymizedMetrics `json:"walled_off,omitempty"`
+}
+
+// FleetTamperedSteward is one tampered steward in the fleet health response.
+type FleetTamperedSteward struct {
+	ID          string   `json:"id"`
+	TenantID    string   `json:"tenant_id"`
+	TamperCodes []string `json:"tamper_codes,omitempty"`
 }
 
 // FleetAnonymizedMetrics is the Amendment 6 (A6.1) anonymized metric set: online
@@ -231,6 +251,7 @@ func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 		}
 		stewardList = append(stewardList, info)
 	}
+	s.attachHealthReasons(r.Context(), stewardList)
 
 	s.logger.Info("Resolved selector",
 		"selector", logging.SanitizeLogValue(req.Selector), "count", len(stewardList))
@@ -243,6 +264,7 @@ func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 //   - healthy:     status=="active" with a heartbeat within DegradedHeartbeatAge
 //   - degraded:    status=="active" with a heartbeat older than DegradedHeartbeatAge
 //   - unreachable: status=="lost"
+//   - tampered:    status=="tampered", listed first with its tamper codes
 //
 // Other lifecycle states (registered, deregistered, archived, dormant, revoked)
 // are not counted. Scoping includes the caller's full tenant subtree (the caller
@@ -269,38 +291,108 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 	results, walledOff := splitReadableResults(s.tenantReadScope(r, "GET /api/v1/fleet/health"), results)
 
 	now := time.Now()
-	resp := FleetHealthResponse{}
+	resp := FleetHealthResponse{ReasonCounts: map[string]int{}, TamperedStewards: []FleetTamperedSteward{}}
+	reasonsByID := s.healthReasonCodesByID(r.Context())
 	if len(walledOff) > 0 {
 		resp.WalledOff = &FleetAnonymizedMetrics{Versions: map[string]int{}}
 		for _, res := range walledOff {
 			resp.WalledOff.add(res)
 		}
 	}
-	for _, res := range results {
-		// Count hidden stewards in the caller's scope regardless of include_hidden
-		// (non-suppressible: the operator must always see that concealment is in effect).
-		if res.Hidden {
-			resp.Hidden++
-			continue
-		}
-		switch res.Status {
-		case "active":
-			if now.Sub(res.LastHeartbeat) <= DegradedHeartbeatAge {
-				resp.Healthy++
-			} else {
-				resp.Degraded++
-			}
-		case "lost":
-			resp.Unreachable++
-		}
-	}
+	tenantByTampered := resp.tally(results, reasonsByID, now)
+	s.attachFleetTamperCodes(r.Context(), &resp, tenantByTampered)
 
 	s.logger.Info("Fleet health query",
 		"tenant_id", logging.SanitizeLogValue(tid),
+		"tampered", resp.Tampered,
 		"healthy", resp.Healthy,
 		"degraded", resp.Degraded,
 		"unreachable", resp.Unreachable,
 		"hidden", resp.Hidden,
 	)
 	s.writeSuccessResponse(w, resp)
+}
+
+// tally counts readable stewards into the response and returns the tenant of
+// each tampered steward, keyed by steward ID. A tampered steward is counted and
+// listed whether or not it is hidden, and is not also counted as healthy,
+// degraded or hidden.
+func (r *FleetHealthResponse) tally(results []fleet.StewardResult, reasonsByID map[string]map[string]struct{}, now time.Time) map[string]string {
+	tenantByTampered := make(map[string]string)
+	for _, res := range results {
+		if res.Status == string(business.StewardStatusTampered) {
+			r.Tampered++
+			r.TamperedStewards = append(r.TamperedStewards, FleetTamperedSteward{ID: res.ID, TenantID: res.TenantID})
+			tenantByTampered[res.ID] = res.TenantID
+			r.countReasons(reasonsByID[res.ID])
+			continue
+		}
+		// Count hidden stewards in the caller's scope regardless of include_hidden
+		// (non-suppressible: the operator must always see that concealment is in effect).
+		if res.Hidden {
+			r.Hidden++
+			continue
+		}
+		r.countReasons(reasonsByID[res.ID])
+		switch res.Status {
+		case "active":
+			if now.Sub(res.LastHeartbeat) <= DegradedHeartbeatAge {
+				r.Healthy++
+			} else {
+				r.Degraded++
+			}
+		case "lost":
+			r.Unreachable++
+		}
+	}
+	return tenantByTampered
+}
+
+// attachFleetTamperCodes sorts the tampered stewards by ID and fills in each
+// one's tamper codes from the latest alarm audit event.
+func (s *Server) attachFleetTamperCodes(ctx context.Context, resp *FleetHealthResponse, tenantByTampered map[string]string) {
+	sort.Slice(resp.TamperedStewards, func(i, j int) bool { return resp.TamperedStewards[i].ID < resp.TamperedStewards[j].ID })
+	if len(tenantByTampered) == 0 {
+		return
+	}
+	codes := s.tamperCodesFromAudit(ctx, tenantByTampered)
+	for i := range resp.TamperedStewards {
+		resp.TamperedStewards[i].TamperCodes = codes[resp.TamperedStewards[i].ID]
+	}
+}
+
+// countReasons adds one to the count of each reason code a steward reports.
+func (r *FleetHealthResponse) countReasons(codes map[string]struct{}) {
+	for code := range codes {
+		r.ReasonCounts[code]++
+	}
+}
+
+// healthReasonCodesByID returns each steward's distinct reason codes from the
+// durable store, for stewards that report any. Callers look up only stewards
+// already filtered to the caller's read scope, so nothing here widens it. An
+// absent or failing store yields an empty map.
+func (s *Server) healthReasonCodesByID(ctx context.Context) map[string]map[string]struct{} {
+	store := s.stewardStore
+	if store == nil {
+		return nil
+	}
+	records, err := store.ListStewards(ctx)
+	if err != nil {
+		s.logger.Warn("Failed to read steward health reasons for fleet health",
+			"error", logging.SanitizeLogValue(err.Error()))
+		return nil
+	}
+	out := make(map[string]map[string]struct{})
+	for _, rec := range records {
+		if rec == nil || len(rec.HealthReasons) == 0 {
+			continue
+		}
+		codes := make(map[string]struct{}, len(rec.HealthReasons))
+		for _, r := range healthReasonsFromRecord(rec) {
+			codes[r.Code] = struct{}{}
+		}
+		out[rec.ID] = codes
+	}
+	return out
 }

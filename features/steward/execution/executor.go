@@ -584,7 +584,17 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	defer setCancel()
 	setEffectiveDl, _ := setCtx.Deadline()
 	setEffectiveBudget := setEffectiveDl.Sub(setCallStart)
-	if err := module.Set(setCtx, resourceID, desiredState); err != nil {
+	reporter, _ := module.(modules.OperationReporter)
+	if reporter != nil {
+		reporter.TakeOperations() // drop writes left over from an earlier resource
+	}
+	setErr := module.Set(setCtx, resourceID, desiredState)
+	if reporter != nil {
+		// Taken even when Set failed: a write that completed before the failure
+		// still changed the directory and must be audited.
+		result.Operations = reporter.TakeOperations()
+	}
+	if err := setErr; err != nil {
 		result.ExecutionTime = time.Since(startTime)
 		if errors.Is(err, context.DeadlineExceeded) {
 			result.Status = StatusTimeout
@@ -930,13 +940,25 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 		// Per-resource apply-outcome record (ADR-022 §6, Issue #3375).
 		// Status classification mirrors the per-module aggregation above so the two
 		// views stay consistent. Does not modify the Modules aggregation.
-		report.ApplyOutcomes = append(report.ApplyOutcomes, cpTypes.ApplyOutcomeRecord{
-			ResourceID: result.ResourceName,
-			ModuleName: moduleName,
-			Status:     applyOutcomeStatus(result.Status),
-			Error:      result.Error,
-			Timestamp:  time.Now(),
-		})
+		// A module that reported audited writes contributes one record per write
+		// (Operation + Changed); otherwise a single record with both empty.
+		outcomeStatus := applyOutcomeStatus(result.Status)
+		outcomeTime := time.Now()
+		ops := result.Operations
+		if len(ops) == 0 {
+			ops = []string{""}
+		}
+		for _, op := range ops {
+			report.ApplyOutcomes = append(report.ApplyOutcomes, cpTypes.ApplyOutcomeRecord{
+				ResourceID: result.ResourceName,
+				ModuleName: moduleName,
+				Status:     outcomeStatus,
+				Error:      result.Error,
+				Operation:  op,
+				Changed:    op != "",
+				Timestamp:  outcomeTime,
+			})
+		}
 	}
 
 	if len(execReport.Errors) > 0 {

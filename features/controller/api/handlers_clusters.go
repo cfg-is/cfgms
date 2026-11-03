@@ -17,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // ClusterInfo is the per-cluster shape returned by the cluster read endpoints.
@@ -77,6 +78,48 @@ func (s *Server) stewardsInTenantCut(callerTenant string) ([]fleet.StewardData, 
 	return indexStewards(s.controllerService.ListFleetStewards(ctx))
 }
 
+// ownerLivenessChecker returns a liveness predicate over resource owner values.
+// An owner value is matched against controller-assigned steward IDs first (the
+// authoritative identity, so a steward-published hostname can never shadow
+// another steward's ID), then against the published node hostnames in
+// hostnameOwners. Unknown owners and owners resolving to an untrusted steward
+// are reported dead.
+func ownerLivenessChecker(stewards []fleet.StewardData, hostnameOwners map[string]string) func(string) bool {
+	stewardIDIdx := make(map[string]fleet.StewardData, len(stewards))
+	for _, sd := range stewards {
+		stewardIDIdx[sd.ID] = sd
+	}
+	return func(ownerID string) bool {
+		sd, found := stewardIDIdx[ownerID]
+		if !found {
+			if id, ok := hostnameOwners[ownerID]; ok {
+				sd, found = stewardIDIdx[id]
+			}
+		}
+		if !found {
+			return false // unknown owner — cannot confirm liveness → treat as dead
+		}
+		if stewardUntrusted(sd.Status) {
+			return false // an untrusted steward cannot vouch for an owner, even by ID
+		}
+		return time.Since(sd.LastHeartbeat) <= clusterregistry.DeadOwnerStaleThreshold
+	}
+}
+
+// stewardStatusQuarantined is the status string of a steward held pending approval;
+// it has no business.StewardStatus constant.
+const stewardStatusQuarantined = "quarantined"
+
+// stewardUntrusted reports whether a steward's status means its self-reported
+// DNA must not decide cluster ownership or membership.
+func stewardUntrusted(status string) bool {
+	switch status {
+	case string(business.StewardStatusTampered), stewardStatusQuarantined, string(business.StewardStatusRevoked):
+		return true
+	}
+	return false
+}
+
 // indexStewards builds the two views stewardsInTenantCut returns from a steward
 // list: the fragment-only StewardData slice and the hostname → steward ID map.
 func indexStewards(infos []*service.StewardInfo) ([]fleet.StewardData, map[string]string) {
@@ -94,7 +137,8 @@ func indexStewards(infos []*service.StewardInfo) ([]fleet.StewardData, map[strin
 	for _, info := range infos {
 		// Tenant filtering is already applied by ListFleetStewards via the context.
 		var frags []*commonpb.Fragment
-		if info.DNA != nil {
+		untrusted := stewardUntrusted(info.Status)
+		if info.DNA != nil && !untrusted {
 			// Fragments carry cluster:<name> membership and resource_owner state
 			// (ADR-017); clusterregistry.BuildRegistry parses them, so dropping
 			// them here would make every cluster invisible to the read endpoints.
@@ -108,6 +152,12 @@ func indexStewards(infos []*service.StewardInfo) ([]fleet.StewardData, map[strin
 			DNAFragments:  frags,
 		})
 
+		// A tampered, quarantined or revoked steward is still listed with its own
+		// status, but its self-reported hostname and cluster fragments must not
+		// decide ownership or membership (Issue #5729).
+		if untrusted {
+			continue
+		}
 		hostname := dnaHostname(info.DNA)
 		if hostname == "" {
 			continue
@@ -347,22 +397,7 @@ func (s *Server) handleClusterReconciliation(w http.ResponseWriter, r *http.Requ
 	//
 	// The controller-assigned steward ID is matched first: it is authoritative
 	// identity, so a steward-published hostname can never shadow another steward's ID.
-	stewardIDIdx := make(map[string]fleet.StewardData, len(stewards))
-	for _, sd := range stewards {
-		stewardIDIdx[sd.ID] = sd
-	}
-	isOwnerLive := func(ownerID string) bool {
-		sd, found := stewardIDIdx[ownerID]
-		if !found {
-			if id, ok := hostnameOwners[ownerID]; ok {
-				sd, found = stewardIDIdx[id]
-			}
-		}
-		if !found {
-			return false // unknown owner — cannot confirm liveness → treat as dead
-		}
-		return time.Since(sd.LastHeartbeat) <= clusterregistry.DeadOwnerStaleThreshold
-	}
+	isOwnerLive := ownerLivenessChecker(stewards, hostnameOwners)
 
 	results := clusterregistry.Reconcile(declared, reg, stewards, isOwnerLive)
 

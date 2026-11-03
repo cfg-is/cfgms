@@ -20,7 +20,9 @@ func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	full := append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
 		"-c", "commit.gpgsign=false", "-c", "protocol.file.allow=always"}, args...)
-	out, err := exec.Command("git", full...).CombinedOutput()
+	cmd := exec.Command("git", full...)
+	cmd.Env = gitCleanEnv()
+	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 	return strings.TrimSpace(string(out))
 }
@@ -124,4 +126,32 @@ func TestMaterializeRefRejectsOptionLikeRef(t *testing.T) {
 	root := synthRepo(t, map[string]string{"a.go": "package a\n"})
 	_, _, err := materializeRef(root, "--output=x")
 	assert.Error(t, err)
+}
+
+// TestGitCallsIgnoreHookEnvironment sets the variables git exports to a hook,
+// pointing at a separate repository, and checks the fixtures and production
+// helpers neither touch it nor read it.
+func TestGitCallsIgnoreHookEnvironment(t *testing.T) {
+	calling := t.TempDir()
+	runGit(t, calling, "init", "-q", "-b", "main")
+	gitDir := filepath.Join(calling, ".git")
+	cfgBefore, err := os.ReadFile(filepath.Join(gitDir, "config"))
+	require.NoError(t, err)
+	t.Setenv("GIT_DIR", gitDir)
+	t.Setenv("GIT_WORK_TREE", calling)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(gitDir, "index"))
+	t.Setenv("GIT_COMMON_DIR", gitDir)
+
+	root := synthRepo(t, map[string]string{"pkg/a.go": "package pkg\n"})
+	mb, err := MergeBase(root)
+	require.NoError(t, err)
+	assert.Equal(t, runGit(t, root, "rev-parse", "develop"), mb)
+	_, err = TouchedFiles(root, mb)
+	require.NoError(t, err)
+
+	cfgAfter, err := os.ReadFile(filepath.Join(gitDir, "config"))
+	require.NoError(t, err)
+	assert.Equal(t, string(cfgBefore), string(cfgAfter))
+	_, err = os.Stat(filepath.Join(gitDir, "index"))
+	assert.True(t, os.IsNotExist(err), "calling repository index must not be created")
 }

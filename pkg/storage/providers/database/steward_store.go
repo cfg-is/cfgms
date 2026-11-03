@@ -6,6 +6,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -92,8 +93,8 @@ func (s *DatabaseStewardStore) RegisterSteward(ctx context.Context, record *busi
 		INSERT INTO steward_records
 			(id, tenant_id, hostname, platform, arch, version, ip_address, status,
 			 registered_at, last_seen, last_heartbeat_at,
-			 device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,$11,$12,$13,$14,$15,$16)`,
+			 device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,$11,$12,$13,$14,$15,$16,$17)`,
 		record.ID,
 		record.TenantID,
 		record.Hostname,
@@ -110,30 +111,33 @@ func (s *DatabaseStewardStore) RegisterSteward(ctx context.Context, record *busi
 		record.KeyAlgorithm,
 		record.LastProvenanceJSON,
 		record.Hidden,
+		encodeHealthReasons(record.HealthReasons),
 	)
 	if err != nil {
-		// Issue #3403: disambiguate the two unique violations by primary key rather
-		// than by which index Postgres happened to report. Re-registering the SAME
-		// steward violates both the primary key and uq_steward_records_tenant_device,
-		// and that case must stay ErrStewardAlreadyExists so an idempotent claim retry
-		// remains benign. Only a violation with no row under this ID is a genuine
-		// device_id conflict with a DIFFERENT steward. The tx is aborted at this point,
-		// so the probe runs on the pool.
-		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "unique") {
-			var exists int
-			probeErr := s.db.QueryRowContext(ctx,
-				`SELECT 1 FROM steward_records WHERE id = $1`, record.ID).Scan(&exists)
-			if probeErr == nil {
-				return business.ErrStewardAlreadyExists
-			}
-			if strings.Contains(err.Error(), "uq_steward_records_tenant_device") {
-				return business.ErrStewardDeviceIDConflict
-			}
-			return business.ErrStewardAlreadyExists
-		}
-		return fmt.Errorf("database: failed to register steward %s: %w", record.ID, err)
+		return s.classifyRegisterError(ctx, record.ID, err)
 	}
 	return tx.Commit()
+}
+
+// classifyRegisterError maps an INSERT failure from RegisterSteward to a store error.
+func (s *DatabaseStewardStore) classifyRegisterError(ctx context.Context, stewardID string, err error) error {
+	// Issue #3403: disambiguate the two unique violations by primary key rather
+	// than by which index Postgres happened to report. Re-registering the SAME
+	// steward violates both the primary key and uq_steward_records_tenant_device,
+	// and that case must stay ErrStewardAlreadyExists so an idempotent claim retry
+	// remains benign. Only a violation with no row under this ID is a genuine
+	// device_id conflict with a DIFFERENT steward. The tx is aborted at this point,
+	// so the probe runs on the pool.
+	if !strings.Contains(err.Error(), "duplicate key") && !strings.Contains(err.Error(), "unique") {
+		return fmt.Errorf("database: failed to register steward %s: %w", stewardID, err)
+	}
+	var exists int
+	probeErr := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM steward_records WHERE id = $1`, stewardID).Scan(&exists)
+	if probeErr != nil && strings.Contains(err.Error(), "uq_steward_records_tenant_device") {
+		return business.ErrStewardDeviceIDConflict
+	}
+	return business.ErrStewardAlreadyExists
 }
 
 // UpdateHeartbeat updates last_heartbeat_at and last_seen to now. An empty
@@ -192,7 +196,7 @@ func (s *DatabaseStewardStore) GetSteward(ctx context.Context, stewardID string)
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
 		FROM steward_records WHERE id = $1`, stewardID)
 	return scanStewardDBRow(row)
 }
@@ -214,7 +218,7 @@ func (s *DatabaseStewardStore) GetStewardByDeviceID(ctx context.Context, deviceI
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
 		FROM steward_records WHERE device_id = $1 ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`, deviceID)
 	return scanStewardDBRow(row)
 }
@@ -230,7 +234,7 @@ func (s *DatabaseStewardStore) GetStewardByDeviceIDForTenant(ctx context.Context
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
 		FROM steward_records WHERE device_id = $1 AND tenant_id = $2 ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`,
 		deviceID, tenantID)
 	return scanStewardDBRow(row)
@@ -241,7 +245,7 @@ func (s *DatabaseStewardStore) ListStewards(ctx context.Context) ([]*business.St
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
 		FROM steward_records ORDER BY registered_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("database: failed to list stewards: %w", err)
@@ -255,7 +259,7 @@ func (s *DatabaseStewardStore) ListStewardsByStatus(ctx context.Context, status 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
 		FROM steward_records WHERE status = $1 ORDER BY registered_at ASC`,
 		string(status))
 	if err != nil {
@@ -360,6 +364,60 @@ func (s *DatabaseStewardStore) SetStewardHidden(ctx context.Context, stewardID s
 	return tx.Commit()
 }
 
+// SetHealthReasons replaces the steward's current health reason set.
+func (s *DatabaseStewardStore) SetHealthReasons(ctx context.Context, stewardID string, reasons []business.HealthReasonRecord) error {
+	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin set health reasons tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE steward_records SET health_reasons = $2 WHERE id = $1`,
+		stewardID, encodeHealthReasons(reasons))
+	if err != nil {
+		return fmt.Errorf("database: failed to set health reasons for steward %s: %w", stewardID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return tx.Commit()
+}
+
+// encodeHealthReasons serialises reasons as JSON; an empty set is stored as ”.
+func encodeHealthReasons(reasons []business.HealthReasonRecord) string {
+	if len(reasons) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(reasons)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// decodeHealthReasons parses the stored JSON; ” or malformed data reads as no reasons.
+func decodeHealthReasons(s string) []business.HealthReasonRecord {
+	if s == "" {
+		return nil
+	}
+	var out []business.HealthReasonRecord
+	if err := json.Unmarshal([]byte(s), &out); err != nil || len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // SetStewardProvenance replaces the steward's provenance baseline.
 func (s *DatabaseStewardStore) SetStewardProvenance(ctx context.Context, stewardID, provenanceJSON string) error {
 	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
@@ -430,6 +488,58 @@ func (s *DatabaseStewardStore) RebindStewardIdentity(ctx context.Context, stewar
 	return tx.Commit()
 }
 
+// RebindStewardIdentityIf is RebindStewardIdentity guarded by a compare-and-swap
+// on the stored identity key: the conditional UPDATE re-checks the key under the
+// row lock, so concurrent callers holding the same expected key cannot both match.
+func (s *DatabaseStewardStore) RebindStewardIdentityIf(ctx context.Context, stewardID string, expectedOldKey []byte, deviceID string, identityKeyPub []byte, keyProtectionLevel, keyAlgorithm string) error {
+	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin rebind identity tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	if identityKeyPub == nil {
+		identityKeyPub = []byte{}
+	}
+	if expectedOldKey == nil {
+		expectedOldKey = []byte{}
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE steward_records
+		SET device_id = $2, identity_key_pub = $3, key_protection_level = $4, key_algorithm = $5, last_provenance_json = ''
+		WHERE id = $1 AND identity_key_pub = $6`,
+		stewardID, deviceID, identityKeyPub, keyProtectionLevel, keyAlgorithm, expectedOldKey)
+	if err != nil {
+		if strings.Contains(err.Error(), "uq_steward_records_tenant_device") {
+			return business.ErrStewardDeviceIDConflict
+		}
+		return fmt.Errorf("database: failed to rebind identity for steward %s: %w", stewardID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// The steward existed when its tenant was fetched; a miss now means the
+		// key moved on (or the row was removed concurrently).
+		var one int
+		qerr := tx.QueryRowContext(ctx, `SELECT 1 FROM steward_records WHERE id = $1`, stewardID).Scan(&one)
+		if qerr == sql.ErrNoRows {
+			return business.ErrStewardNotFound
+		}
+		if qerr != nil {
+			return fmt.Errorf("database: failed to look up steward %s after rebind miss: %w", stewardID, qerr)
+		}
+		return business.ErrIdentityKeyChanged
+	}
+	return tx.Commit()
+}
+
 // DeregisterSteward marks the steward as deregistered. Records are retained for audit.
 func (s *DatabaseStewardStore) DeregisterSteward(ctx context.Context, stewardID string) error {
 	return s.UpdateStewardStatus(ctx, stewardID, business.StewardStatusDeregistered)
@@ -484,7 +594,7 @@ func (s *DatabaseStewardStore) GetStewardsSeen(ctx context.Context, since time.T
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
 		FROM steward_records WHERE last_seen > $1 ORDER BY last_seen DESC`,
 		since)
 	if err != nil {
@@ -507,11 +617,12 @@ func scanStewardDBRow(row *sql.Row) (*business.StewardRecord, error) {
 	var registeredAt, lastSeen time.Time
 	var lastHeartbeat sql.NullTime
 	var keyPub []byte
+	var reasonsJSON string
 
 	err := row.Scan(
 		&r.ID, &r.TenantID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
 		&statusStr, &registeredAt, &lastSeen, &lastHeartbeat,
-		&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON, &r.Hidden,
+		&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON, &r.Hidden, &reasonsJSON,
 	)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrStewardNotFound
@@ -526,6 +637,7 @@ func scanStewardDBRow(row *sql.Row) (*business.StewardRecord, error) {
 		r.LastHeartbeatAt = lastHeartbeat.Time
 	}
 	r.IdentityKeyPub = keyPub
+	r.HealthReasons = decodeHealthReasons(reasonsJSON)
 	return r, nil
 }
 
@@ -537,11 +649,12 @@ func scanStewardDBRows(rows *sql.Rows) ([]*business.StewardRecord, error) {
 		var registeredAt, lastSeen time.Time
 		var lastHeartbeat sql.NullTime
 		var keyPub []byte
+		var reasonsJSON string
 
 		if err := rows.Scan(
 			&r.ID, &r.TenantID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
 			&statusStr, &registeredAt, &lastSeen, &lastHeartbeat,
-			&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON, &r.Hidden,
+			&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON, &r.Hidden, &reasonsJSON,
 		); err != nil {
 			return nil, fmt.Errorf("database: failed to scan steward row: %w", err)
 		}
@@ -552,6 +665,7 @@ func scanStewardDBRows(rows *sql.Rows) ([]*business.StewardRecord, error) {
 			r.LastHeartbeatAt = lastHeartbeat.Time
 		}
 		r.IdentityKeyPub = keyPub
+		r.HealthReasons = decodeHealthReasons(reasonsJSON)
 		records = append(records, r)
 	}
 	return records, rows.Err()

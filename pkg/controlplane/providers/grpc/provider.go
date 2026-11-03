@@ -119,6 +119,8 @@ type Provider struct {
 
 	// Per-instance overrides injected via constructor options (test-only)
 	backoffOverride *backoff
+	// panicHook is called after a command handler panic was recovered.
+	panicHook func(component string, recovered interface{})
 	// reconnectBackoff persists across reconnectLoop invocations so successive
 	// refused cycles keep escalating. It must NOT be rebuilt per call: a stream
 	// that opens and is then rejected on its first Recv re-enters reconnectLoop,
@@ -1135,8 +1137,35 @@ func (p *Provider) SubscribeCommands(ctx context.Context, stewardID string, hand
 	return nil
 }
 
+// PanicComponentCommandHandler is the component name passed to the PanicHook
+// when a command handler panics.
+const PanicComponentCommandHandler = "command_handler"
+
+// WithPanicHook sets a callback invoked after the provider recovered from a
+// panic in a command handler goroutine. The hook receives the component name and
+// the recovered value; it must not place the value in controller-visible text.
+func WithPanicHook(hook func(component string, recovered interface{})) option {
+	return func(p *Provider) { p.panicHook = hook }
+}
+
 // handleCommand runs the subscribed command handler for one received command.
+// Both delivery paths (the live stream and the post-subscribe backlog Drain) run
+// it, so the recover here keeps a panicking handler from ending the process or
+// stopping the receive loop. The recover wraps the handler call only: the handler
+// owns signature verification and rejects on its own panic (fail closed), and a
+// command whose handler panicked has not been executed.
 func (p *Provider) handleCommand(handler pendingcmd.Handler, sc *types.SignedCommand) {
+	defer func() {
+		if r := recover(); r != nil {
+			p.logger.Error("command handler panicked; recovered",
+				"component", PanicComponentCommandHandler,
+				"command_id", logging.SanitizeLogValue(sc.Command.ID),
+				"panic", logging.SanitizeLogValue(fmt.Sprint(r)))
+			if p.panicHook != nil {
+				p.panicHook(PanicComponentCommandHandler, r)
+			}
+		}
+	}()
 	if err := handler(p.ctx, sc); err != nil {
 		p.logger.Error("command handler error",
 			"command_id", logging.SanitizeLogValue(sc.Command.ID),

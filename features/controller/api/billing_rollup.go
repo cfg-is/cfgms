@@ -33,6 +33,10 @@ func stewardCountsTowardBilling(status business.StewardStatus) bool {
 	switch status {
 	case business.StewardStatusRegistered, business.StewardStatusActive, business.StewardStatusLost:
 		return true
+	case business.StewardStatusTampered:
+		// A tampered steward is still an enrolled endpoint: the alarm changes its
+		// trust, not its billability, so it counts as the active steward it was.
+		return true
 	}
 	return false
 }
@@ -64,7 +68,8 @@ const unknownStewardVersion = "unknown"
 // addSteward counts one billable steward record into m.
 func (m *billingMetrics) addSteward(rec *business.StewardRecord) {
 	switch rec.Status {
-	case business.StewardStatusActive:
+	case business.StewardStatusActive, business.StewardStatusTampered:
+		// tampered is counted online, as the underlying active steward would be.
 		m.EndpointsOnline++
 	case business.StewardStatusLost:
 		m.EndpointsOffline++

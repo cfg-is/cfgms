@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
@@ -247,6 +248,7 @@ type Server struct {
 	stewardEventManager             *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
 	observeManifestProvider         ObserveManifestProvider                  // Issue #3104: nil = Tier-2 disabled
 	moduleCache                     *modulecache.ModuleCache                 // Issue #4985: serves FetchModuleBundle; nil = RPC Unimplemented
+	outcomeAuditSources             applyOutcomeAuditSources                 // Issue #5564: nil = built from controllerService, configService and moduleCache
 	terminalSessionMgr              terminal.SessionManager                  // Issue #2761: must be stopped on Stop to finalize session recordings
 	egProvider                      egServerProvider                         // Issue #3253: entity graph provider (must be closed on Stop to release DB handle)
 	egClusterMembership             dnasync.ClusterMembership                // Issue #3376: gates cluster authority; nil denies every claim
@@ -470,6 +472,62 @@ func resolveWORMMarkerRoot(cfg *config.Config) string {
 // the heartbeat.Service. When a steward's liveness state changes, the callback
 // persists the new status to the durable StewardStore so that cfg steward list
 // and GET /api/v1/stewards reflect the change without a restart (Issue #2463).
+// newHeartbeatReceivedHook builds the per-heartbeat hook: it drains the steward's
+// pending jobs, persists its health reasons (written only when the set changes,
+// Issue #5651) and, when a routing table is configured, refreshes the steward's
+// routing liveness (Issue #3764). controllerService and routingStore may be nil.
+//
+// tamperAlarm (nil disables) receives every heartbeat's reasons; it acts only on
+// an exact tamper code (Issue #5652). stewardID is the heartbeat's StewardID, which
+// the control-plane provider has already bound to the mTLS peer certificate CN.
+func newHeartbeatReceivedHook(dispatcher *dispatcher.Dispatcher, controllerService *service.ControllerService, routingStore business.RoutingStore, localNodeID string, tamperAlarm tamperAlarmFunc, logger logging.Logger) heartbeat.HeartbeatReceivedCallback {
+	return func(stewardID string, reasons []controlplaneTypes.HealthReason) {
+		if dispatcher != nil {
+			dispatcher.OnHeartbeat(stewardID)
+		}
+		if controllerService != nil {
+			controllerService.RecordHealthReasons(stewardID, reasons)
+		}
+		if tamperAlarm != nil {
+			tamperAlarm(stewardID, reasons)
+		}
+		recordRoutingHeartbeat(routingStore, localNodeID, stewardID, logger)
+	}
+}
+
+// tamperAlarmFunc handles one heartbeat's reasons for the steward it came from.
+type tamperAlarmFunc func(stewardID string, reasons []controlplaneTypes.HealthReason)
+
+// tamperAlarmRelay late-binds the API server, which is built after the heartbeat
+// service, as the target of the tamper alarm. Until Set is called, alarms are
+// dropped: no heartbeat is processed before the server finishes construction.
+type tamperAlarmRelay struct {
+	target atomic.Pointer[api.Server]
+}
+
+// Set binds the API server that performs the transition, audit and notification.
+func (r *tamperAlarmRelay) Set(s *api.Server) { r.target.Store(s) }
+
+// Handle forwards the alarm to the bound server.
+func (r *tamperAlarmRelay) Handle(stewardID string, reasons []controlplaneTypes.HealthReason) {
+	if s := r.target.Load(); s != nil {
+		s.HandleStewardTamperAlarm(context.Background(), stewardID, reasons)
+	}
+}
+
+// recordRoutingHeartbeat refreshes a steward's routing-table liveness timestamp.
+// It is a no-op when routingStore is nil.
+func recordRoutingHeartbeat(routingStore business.RoutingStore, localNodeID, stewardID string, logger logging.Logger) {
+	if routingStore == nil {
+		return
+	}
+	if err := routingStore.RecordConnection(context.Background(), stewardID, localNodeID); err != nil {
+		logger.Warn("internaldelivery: failed to refresh routing connection on heartbeat",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
 func makeHeartbeatStatusChangeCallback(store business.StewardStore, logger logging.Logger) heartbeat.StatusChangeCallback {
 	return func(sid string, healthy bool, status heartbeat.StewardStatus) {
 		if healthy {
@@ -1146,6 +1204,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// are two instances and not one.
 	admissionQueues := newIngestAdmissionQueues()
 	var heartbeatService *heartbeat.Service
+	// Issue #5652: late-binds the API server as the tamper alarm target. Unused
+	// (and harmless) when no heartbeat service is built.
+	tamperRelay := &tamperAlarmRelay{}
 	var commandPublisher *commands.Publisher
 	var executionQueue *scriptmodule.ExecutionQueue
 	var scriptLibrary *scriptmodule.TenantScriptRepository
@@ -1521,18 +1582,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Issue #3764: refresh this steward's routing-table liveness timestamp on
 		// every heartbeat, in addition to on connect, so a long-lived connection
 		// never goes stale under business.RoutingStaleAfter between reconnects.
-		onHeartbeatReceived := jobDispatcher.OnHeartbeat
-		if routingStore != nil {
-			dispatcherOnHeartbeat := jobDispatcher.OnHeartbeat
-			onHeartbeatReceived = func(stewardID string) {
-				dispatcherOnHeartbeat(stewardID)
-				if err := routingStore.RecordConnection(context.Background(), stewardID, routingHook.localNodeID); err != nil {
-					logger.Warn("internaldelivery: failed to refresh routing connection on heartbeat",
-						"steward_id", logging.SanitizeLogValue(stewardID),
-						"error", logging.SanitizeLogValue(err.Error()))
-				}
-			}
-		}
+		// Issue #5651: the same per-heartbeat hook also persists the steward's
+		// health reasons (written only when the set changes).
+		// Issue #5652: the same hook turns a tamper-code heartbeat into the
+		// tampered status; the API server is bound after it is constructed.
+		onHeartbeatReceived := newHeartbeatReceivedHook(jobDispatcher, controllerService, routingStore, routingHook.localNodeID, tamperRelay.Handle, logger)
 
 		// Initialize heartbeat monitoring service
 		logger.Info("Initializing heartbeat monitoring service...")
@@ -1857,6 +1911,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	logger.Info("HTTP API server initialized successfully")
 
+	// Issue #5652: heartbeats carrying a tamper code now reach the API server,
+	// which owns the transition, audit event and admin notification.
+	tamperRelay.Set(httpServer)
+
 	// Issue #4857: one dedicated steward-event LoggingManager shared by the
 	// log-stream handler (writer, built in Start) and the REST API (reader). It
 	// must exist before Start builds the handler; failure aborts startup rather
@@ -1880,11 +1938,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// {id}/tags`, handlers_tags.go) read the API server's OWN tagStore field —
 	// without this call it stays nil and every tag REST request returns 503
 	// TAG_STORE_UNAVAILABLE even though tags resolve fine internally. Nil when
-	// SQLite is unconfigured (SetTagStore is a no-op on nil; endpoints degrade to
-	// 503 by design in that case).
-	if tagStoreInstance != nil {
-		httpServer.SetTagStore(tagStoreInstance)
-	}
+	// SQLite is unconfigured (SetTagStore stores nil, leaving the field unset;
+	// endpoints degrade to 503 by design in that case).
+	httpServer.SetTagStore(tagStoreInstance)
 
 	// Issue #2543: Wire the role-config store into the HTTP API server. Same
 	// wiring gap as the tag store above — the role-config REST endpoints
@@ -4328,7 +4384,7 @@ func (s *Server) handleConfigAppliedEvent(ctx context.Context, event *controlpla
 		// apply_outcomes arrives as []interface{} of map[string]interface{} after the
 		// Event.Details JSON round-trip through interfaceMapToStringMap/stringMapToInterfaceMap.
 		// Decode defensively — same approach as the "modules" branch above.
-		if s.egProvider != nil {
+		if s.egProvider != nil || s.auditManager != nil {
 			if err := s.ingestApplyOutcomes(ctx, event.StewardID, configVersion, details); err != nil {
 				// Log and continue: a write failure here must not prevent the event from
 				// being acknowledged. The next apply cycle will produce fresh records.
@@ -4379,6 +4435,13 @@ func (s *Server) ingestApplyOutcomes(ctx context.Context, peerHostAuthority, con
 			"received", len(rawOutcomes),
 			"cap", maxApplyOutcomeRecordsPerEvent)
 		rawOutcomes = rawOutcomes[:maxApplyOutcomeRecordsPerEvent]
+	}
+
+	// Audit completed writes under the cfg-declared resource id (Issue #5564).
+	// Independent of the entity graph: it runs even when none is wired.
+	s.auditApplyOutcomes(ctx, peerHostAuthority, configVersion, rawOutcomes)
+	if s.egProvider == nil {
+		return nil
 	}
 
 	now := time.Now().UTC()

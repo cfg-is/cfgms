@@ -424,3 +424,22 @@ func TestStageDataFiles_UserOwnedTokenAbortsOrReplaces(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "tok_install_secret", token)
 }
+
+func TestReadTokenFile_WindowsErrorKinds(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), tokenFileName)
+	_, err := ReadTokenFile(missing)
+	tfe, ok := AsTokenFileError(err)
+	require.True(t, ok)
+	assert.Equal(t, TokenFileMissing, tfe.Kind)
+
+	requireElevatedToken(t)
+	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
+	path := tokenPathInExistingDir(t)
+	require.NoError(t, writeTokenFile(path, "tok_users_ace_kind"))
+	setDACLFromSDDL(t, path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)", true)
+	_, err = ReadTokenFile(path)
+	tfe, ok = AsTokenFileError(err)
+	require.True(t, ok)
+	assert.Equal(t, TokenFilePermissions, tfe.Kind)
+	assert.NotContains(t, err.Error(), "tok_users_ace_kind")
+}

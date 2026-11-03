@@ -51,6 +51,9 @@ type Handler struct {
 	// Logger
 	logger logging.Logger
 
+	// onPanic is called with a component name after a recovered panic (see Config.OnPanic).
+	onPanic func(component string)
+
 	// CommandStore for durable command dispatch state (Story #665).
 	// When nil the handler operates without persistence (in-memory only).
 	store business.CommandStore
@@ -158,6 +161,11 @@ type Config struct {
 
 	// Logger for command execution logging
 	Logger logging.Logger
+
+	// OnPanic, when non-nil, is called with the component name ("command_handler") after the handler recovered from a panic in command
+	// execution or signature verification. It must record a fixed-string reason;
+	// the recovered value is never passed on.
+	OnPanic func(component string)
 
 	// Store is the durable command dispatch state backend (Story #665).
 	// When nil, state transitions are not persisted across restarts.
@@ -270,6 +278,7 @@ func New(cfg *Config) (*Handler, error) {
 		handlers:                make(map[cpTypes.CommandType]CommandFunc),
 		onStatus:                cfg.OnStatus,
 		logger:                  cfg.Logger,
+		onPanic:                 cfg.OnPanic,
 		store:                   cfg.Store,
 		executing:               make(map[string]*executionContext),
 		verifier:                cfg.Verifier,
@@ -403,6 +412,23 @@ func (h *Handler) unregisterRelay(executionID string) {
 	h.relays.Delete(executionID)
 }
 
+// verifySafely calls verifier.Verify and converts a panic inside it into a
+// verification failure. Fail closed: a verifier that panics rejects the command,
+// so nothing is executed. The recover wraps only the verification call.
+func (h *Handler) verifySafely(verifier signature.Verifier, data []byte, sig *signature.ConfigSignature) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			h.logger.Error("Command signature verification panicked; command rejected",
+				"panic", logging.SanitizeLogValue(fmt.Sprint(r)))
+			if h.onPanic != nil {
+				h.onPanic(panicComponentVerifier)
+			}
+			err = errVerifierPanicked
+		}
+	}()
+	return verifier.Verify(data, sig)
+}
+
 // HandleCommand processes an incoming signed command from the controller.
 //
 // Story #919: Before dispatching, the command is authenticated:
@@ -451,7 +477,7 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrUnauthenticatedCommand, err)
 		}
-		if err := verifier.Verify(cmdBytes, signed.Signature); err != nil {
+		if err := h.verifySafely(verifier, cmdBytes, signed.Signature); err != nil {
 			return fmt.Errorf("%w: %v", ErrUnauthenticatedCommand, err)
 		}
 	}
@@ -570,6 +596,10 @@ func commandTimeout(cmd *cpTypes.Command) time.Duration {
 // executeCommand executes a command with timeout and error handling.
 func (h *Handler) executeCommand(cmd *cpTypes.Command) {
 	defer h.wg.Done()
+	// Registered after wg.Done so it runs first: a panic in a command handler is
+	// recovered here, the command is marked failed, and the process keeps running.
+	// runtime.Goexit is not intercepted (recover returns nil for it).
+	defer h.recoverExecution(cmd)
 
 	h.logger.Info("Executing command",
 		"command_id", cmd.ID,
@@ -710,4 +740,53 @@ func (h *Handler) sendStatus(ctx context.Context, event *cpTypes.Event) {
 	if h.onStatus != nil {
 		h.onStatus(ctx, event)
 	}
+}
+
+// Component names passed to Config.OnPanic.
+//
+// Both use the provider's "command_handler" name so one reason covers the whole
+// command path and clears when the next command completes without a panic.
+const (
+	panicComponentExecutor = "command_handler"
+	panicComponentVerifier = "command_handler"
+)
+
+// errVerifierPanicked is the fixed verification failure for a verifier panic;
+// the recovered value is never part of it.
+var errVerifierPanicked = fmt.Errorf("signature verification failed unexpectedly")
+
+// recoverExecution is deferred by executeCommand. It recovers a panic raised by
+// a command handler, logs it (sanitized), reports the command as failed with a
+// fixed string, and lets the process keep running.
+func (h *Handler) recoverExecution(cmd *cpTypes.Command) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	h.logger.Error("Command execution panicked; recovered",
+		"command_id", logging.SanitizeLogValue(cmd.ID),
+		"type", logging.SanitizeLogValue(string(cmd.Type)),
+		"panic", logging.SanitizeLogValue(fmt.Sprint(r)))
+	if h.onPanic != nil {
+		h.onPanic(panicComponentExecutor)
+	}
+
+	const failure = "command handler panicked"
+	ctx, cancel := context.WithTimeout(context.Background(), defaultCommandTimeout)
+	defer cancel()
+	if h.store != nil {
+		if err := h.store.UpdateCommandStatus(ctx, cmd.ID, business.CommandStatusFailed, nil, failure); err != nil {
+			h.logger.Error("Failed to update command status to failed (panic)",
+				"command_id", logging.SanitizeLogValue(cmd.ID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+	}
+	h.sendStatus(ctx, &cpTypes.Event{
+		ID:        fmt.Sprintf("evt_%d", time.Now().UnixNano()),
+		Type:      cpTypes.EventCommandFailed,
+		StewardID: h.stewardID,
+		CommandID: cmd.ID,
+		Timestamp: time.Now(),
+		Details:   map[string]interface{}{"error": failure},
+	})
 }

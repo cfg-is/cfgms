@@ -38,6 +38,13 @@ func writeAdminOnlyTokenFile(t *testing.T, path, token string) {
 	require.NoError(t, f.Close())
 }
 
+// writeSafeTokenFile writes a token file the product check accepts: the
+// admin-only descriptor the installer uses.
+func writeSafeTokenFile(t *testing.T, path, token string) {
+	t.Helper()
+	writeAdminOnlyTokenFile(t, path, token)
+}
+
 // makeReadableByOthers gives BUILTIN\Users read access to path through an
 // explicit, protected DACL. Inheritance cannot be relied on for this: under
 // SYSTEM, t.TempDir() is in C:\Windows\Temp, whose inheritable ACEs name only

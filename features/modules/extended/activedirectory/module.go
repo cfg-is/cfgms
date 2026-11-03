@@ -319,6 +319,11 @@ type activeDirectoryModule struct {
 	declared *DeclaredSet
 	bindings BindingStore
 
+	// writeOps are the writes completed since the executor last drained them
+	// through TakeOperations.
+	writeOpsMu sync.Mutex
+	writeOps   []string
+
 	// Configuration management
 	config    *ADModuleConfig
 	configMux sync.RWMutex
@@ -386,6 +391,18 @@ func newWithRunners(logger logging.Logger, read, write scriptRunner, opts ...Opt
 	}
 	return m
 }
+
+// TakeOperations implements modules.OperationReporter: the writes completed
+// since the last call, in order.
+func (m *activeDirectoryModule) TakeOperations() []string {
+	m.writeOpsMu.Lock()
+	defer m.writeOpsMu.Unlock()
+	ops := m.writeOps
+	m.writeOps = nil
+	return ops
+}
+
+var _ modules.OperationReporter = (*activeDirectoryModule)(nil)
 
 // Get returns the AD system status ("status"), the per-object directory
 // inventory ("directory_user", "directory_group"), or the state of a declared

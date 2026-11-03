@@ -229,6 +229,7 @@ type Server struct {
 	credentialRequestSweepLease     lease.SingletonJob                       // ADR-031 Decision 4: cluster-singleton claim for the credential-request/enrolment-token expiry sweep
 	credentialRequestCollectLimiter *sourceRateLimiter                       // Issue #3719: per-source rate limit on credential-request collect
 	certBindingLastUsedThrottle     sync.Map                                 // Issue #3715: serial -> last recording-attempt time; coalesces last-used persistence writes
+	tamperNotify                    tamperNotifyState                        // Issue #5652: per-steward tamper notification cooldown (node-local)
 	crossingNotifyWG                sync.WaitGroup                           // Issue #4713: tracks in-flight break-glass announcement goroutines so Close() can wait for them before the audit manager stops
 	certBindingLastUsedWG           sync.WaitGroup                           // Issue #3715: tracks in-flight recordCertBindingUse goroutines so Close() can wait for them before secretStore.Close()
 	onCertBindingLastUsedPersisted  func(username, serial string, err error) // Issue #3715: test-only lifecycle hook; nil in production. Fired after each async last-used persist attempt (success or failure).

@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2039,4 +2040,90 @@ func TestHandleCommand_UnknownOrAbsentVersionNeverSelectsV2(t *testing.T) {
 	unknown.Command.SigningPayloadVersion = 77
 	err = h.HandleCommand(context.Background(), unknown)
 	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+}
+
+// ---------------------------------------------------------------------------
+// Panic containment
+// ---------------------------------------------------------------------------
+
+// panicVerifier wraps a real verifier and panics inside Verify.
+type panicVerifier struct{ signature.Verifier }
+
+func (panicVerifier) Verify([]byte, *signature.ConfigSignature) error { panic("verifier exploded") }
+
+// A panic inside signature verification rejects the command: HandleCommand
+// returns ErrUnauthenticatedCommand and the command body never executes.
+func TestHandleCommand_VerifierPanic_RejectsCommandAndNeverExecutes(t *testing.T) {
+	signer, verifier := newTestSignerVerifier(t)
+	var panics []string
+	h, err := New(&Config{
+		StewardID: "steward-test", OnStatus: noopStatus, Logger: newTestLogger(t),
+		Verifier: panicVerifier{verifier}, ReplayWindow: 5 * time.Minute,
+		OnPanic: func(c string) { panics = append(panics, c) },
+	})
+	require.NoError(t, err)
+
+	var executed atomic.Bool
+	h.RegisterHandler(cpTypes.CommandSyncConfig, func(context.Context, *cpTypes.Command) error {
+		executed.Store(true)
+		return nil
+	})
+
+	sc := signTestCommand(t, signer, &cpTypes.Command{
+		ID: "vpanic-001", Type: cpTypes.CommandSyncConfig, StewardID: "steward-test", Timestamp: time.Now(),
+	})
+	err = h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+	assert.NotContains(t, err.Error(), "verifier exploded", "panic value must not leak into the error")
+	h.Wait()
+	assert.False(t, executed.Load(), "command body must not run after a verifier panic")
+	assert.Equal(t, []string{"command_handler"}, panics)
+}
+
+// A panic in a command's handler is recovered, the command is failed with a fixed
+// string, and the next command still runs.
+func TestExecuteCommand_HandlerPanic_RecoveredAndNextCommandRuns(t *testing.T) {
+	store := newMemCommandStore()
+	var panics atomic.Int32
+	var events []*cpTypes.Event
+	var evMu sync.Mutex
+	h, err := New(&Config{
+		StewardID: "steward-test", Logger: newTestLogger(t), Store: store,
+		OnStatus: func(_ context.Context, e *cpTypes.Event) { evMu.Lock(); events = append(events, e); evMu.Unlock() },
+		OnPanic:  func(string) { panics.Add(1) },
+	})
+	require.NoError(t, err)
+
+	ran := make(chan string, 2)
+	h.RegisterHandler(cpTypes.CommandSyncConfig, func(_ context.Context, c *cpTypes.Command) error {
+		if c.ID == "boom" {
+			panic("executor exploded")
+		}
+		ran <- c.ID
+		return nil
+	})
+
+	require.NoError(t, h.HandleCommand(context.Background(), testSignedCommand("boom", cpTypes.CommandSyncConfig)))
+	h.Wait()
+	require.NoError(t, h.HandleCommand(context.Background(), testSignedCommand("after", cpTypes.CommandSyncConfig)))
+	h.Wait()
+
+	select {
+	case id := <-ran:
+		assert.Equal(t, "after", id)
+	case <-time.After(time.Second):
+		t.Fatal("next command did not run after a handler panic")
+	}
+	assert.EqualValues(t, 1, panics.Load())
+
+	evMu.Lock()
+	defer evMu.Unlock()
+	var failed *cpTypes.Event
+	for _, e := range events {
+		if e.CommandID == "boom" && e.Type == cpTypes.EventCommandFailed {
+			failed = e
+		}
+	}
+	require.NotNil(t, failed, "a panicking command must be reported failed")
+	assert.Equal(t, "command handler panicked", failed.Details["error"])
 }

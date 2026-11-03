@@ -594,6 +594,17 @@ The controller converges the `m365-entra-user` and `m365-entra-group` resources 
 - **Outputs.** Drift-diff observations under the object's `m365:<guid>/user:<id>` or `/group:<id>` subject with the cfg resource id in the payload; a per-tenant outcome document (`m365-converge-status`); and an audit event per write (actor `controller`, resource id = the cfg resource name).
 - **Steward cfg filter.** `GetConfiguration` — the function that builds the cfg delivered to a steward — drops every controller-kind resource (`dropControllerKindResources`). A steward cfg for a tenant declaring `m365-entra-*` resources contains none of them, so they never reach a steward's resource-failure path. The controller's own effective-config reads keep them.
 
+### Apply-Outcome Audit (Issue #5564)
+
+Every steward write that a module names as auditable is traceable to the cfg resource that declared it. A module that performs named writes (the Active Directory module's `create_user`, `set_user_enabled`, `add_group_member` and the rest) reports each completed write to the executor through the optional `modules.OperationReporter` interface; the executor puts one `ApplyOutcomeRecord` per write on the config-applied event with `operation` set and `changed = true`. A module that reports nothing leaves both fields empty.
+
+`Server.ingestApplyOutcomes` (`features/controller/server/apply_outcome_audit.go`) emits an audit event for a record only when all of these hold:
+
+- `changed` is true and `operation` is listed in `security.audit_operations` of an approved bundle manifest of the record's module (`ModuleSecurity.AuditOperations`, read from the module cache).
+- The record's resource id and module are declared in that steward's **own** effective cfg: the controller resolves the steward's registered tenant, requires the `config_version` the steward reported to equal the version it serves, and reads the cfg through `ConfigurationServiceV2.GetEffectiveConfiguration`. A record that fails this, or any report whose declared set cannot be established, is dropped and logged, never audited.
+
+The event is recorded under the steward's registered tenant (never a tenant the steward supplies), with resource type = the module reference (e.g. `activedirectory.user`), resource id = the cfg-declared resource id (never a live host name), action = the operation, result `success` for an `applied` outcome and `failure` otherwise, and the steward id as actor. Details hold only `module`, `config_version` and `status`: no cfg field values, no passwords, no error text. Operator-initiated pushes are audited separately; M365 writes are audited by the convergence loop itself.
+
 ## Deployment Rings
 
 Deployment rings are a fleet-wide governance mechanism that controls which steward binary version reaches which stewards, in what order. The controller declares an ordered, named ring set; ring membership is declared in controller config only (no write path exists for stewards or operators to self-assign rings); and config delivery applies the ring's `desired_version` to stewards per their controller-config membership.

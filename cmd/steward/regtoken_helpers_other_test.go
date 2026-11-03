@@ -17,3 +17,10 @@ func makeReadableByOthers(t *testing.T, path string) {
 	t.Helper()
 	require.NoError(t, os.Chmod(path, 0o644))
 }
+
+// writeSafeTokenFile writes a token file the product check accepts: owner-only
+// mode 0600.
+func writeSafeTokenFile(t *testing.T, path, token string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(path, []byte(token+"\n"), 0o600))
+}

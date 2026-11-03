@@ -15,7 +15,7 @@
  * mocked so ShellTab renders without a canvas/layout engine in jsdom.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import StewardAssetPage, { PanelContent, TABS } from './StewardAssetPage.tsx'
 
@@ -460,5 +460,55 @@ describe('direct load / deep-link (Story #2917)', () => {
 
     // React Router decodes the path param — the page should show the decoded ID.
     expect(screen.getByText('stw/encoded')).toBeInTheDocument()
+  })
+})
+
+describe('health reasons and tampered banner', () => {
+  function mockSteward(status: string, reasons: unknown[]) {
+    fetchMock.mockImplementation((input) =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify(
+            String(input).endsWith('/dna')
+              ? { data: { attributes: {} } }
+              : { data: { id: 'stw-001', status, health_reasons: reasons } },
+          ),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    )
+  }
+
+  it('shows the tampered banner with every reason and lists them as text', async () => {
+    mockSteward('tampered', [
+      { component: 'binary', code: 'tamper.hash', message: '<b>bad</b>' },
+      { component: 'config', code: 'tamper.cfg' },
+    ])
+    renderAssetPage()
+    const banner = await screen.findByTestId('tampered-banner')
+    expect(banner.textContent).toContain('tamper.hash')
+    expect(banner.textContent).toContain('tamper.cfg')
+    expect(banner.textContent).toContain('binary')
+    expect(banner.textContent).toContain('<b>bad</b>')
+    expect(banner.querySelector('b')).toBeNull()
+    expect(screen.getByTestId('health-reasons-block')).toBeInTheDocument()
+  })
+
+  it('shows reasons but no banner for a non-tampered steward', async () => {
+    mockSteward('degraded', [{ component: 'disk', code: 'disk.low', message: 'low' }])
+    renderAssetPage()
+    const block = await screen.findByTestId('health-reasons-block')
+    expect(block.textContent).toContain('disk')
+    expect(block.textContent).toContain('disk.low')
+    expect(block.textContent).toContain('low')
+    expect(screen.queryByTestId('tampered-banner')).not.toBeInTheDocument()
+  })
+
+  it('renders neither for a healthy steward', async () => {
+    mockSteward('active', [])
+    renderAssetPage()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(screen.queryByTestId('tampered-banner')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('health-reasons-block')).not.toBeInTheDocument()
   })
 })

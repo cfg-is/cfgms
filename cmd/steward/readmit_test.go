@@ -49,6 +49,15 @@ type readmitTestController struct {
 	completes  int
 	claims     []string // pending IDs claimed
 	registers  atomic.Int32
+
+	// lifetime, when set, issues certificates that expire after this long instead of
+	// 30 days. certOnly answers with the certificate alone (a tampered steward's
+	// response). failComplete answers /refresh/complete with 503. csrKeys records
+	// the public key (PKIX DER) of every CSR received.
+	lifetime     time.Duration
+	certOnly     bool
+	failComplete atomic.Bool
+	csrKeys      [][]byte
 }
 
 func newReadmitTestController(t *testing.T, completeMode string) *readmitTestController {
@@ -96,9 +105,16 @@ func (c *readmitTestController) handleComplete(t *testing.T, w http.ResponseWrit
 	csr, err := x509.ParseCertificateRequest(block.Bytes)
 	require.NoError(t, err)
 
+	pub, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
+	require.NoError(t, err)
 	c.mu.Lock()
 	c.completes++
+	c.csrKeys = append(c.csrKeys, pub)
 	c.mu.Unlock()
+	if c.failComplete.Load() {
+		http.Error(w, "refresh unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	switch c.completeMode {
 	case "reject":
 		http.Error(w, "refresh rejected by tenant policy", http.StatusForbidden)
@@ -134,14 +150,24 @@ func (c *readmitTestController) handleClaim(t *testing.T, w http.ResponseWriter,
 }
 
 func (c *readmitTestController) writeBundle(t *testing.T, w http.ResponseWriter, csr *x509.CertificateRequest) {
-	issued, err := c.certMgr.SignClientCertificateRequest(csr.PublicKey, &cert.ClientCertConfig{
-		CommonName: csr.Subject.CommonName, ClientID: csr.Subject.CommonName, ValidityDays: 30,
-	})
+	cfg := &cert.ClientCertConfig{CommonName: csr.Subject.CommonName, ClientID: csr.Subject.CommonName, ValidityDays: 30}
+	if c.lifetime > 0 {
+		lifetime := c.lifetime
+		cfg.TemplateModifier = func(tpl *x509.Certificate) {
+			tpl.NotBefore = time.Now().Add(-time.Second)
+			tpl.NotAfter = time.Now().Add(lifetime)
+		}
+	}
+	issued, err := c.certMgr.SignClientCertificateRequest(csr.PublicKey, cfg)
 	require.NoError(t, err)
 	c.mu.Lock()
 	c.issuedCert = string(issued.CertificatePEM)
 	c.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
+	if c.certOnly {
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "approved", "client_cert": string(issued.CertificatePEM)})
+		return
+	}
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"status":            "approved",
 		"client_cert":       string(issued.CertificatePEM),

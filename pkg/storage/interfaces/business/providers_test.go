@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -248,6 +249,184 @@ func TestStewardStoreContract_DeregisteredReleasesDeviceID(t *testing.T) {
 	})
 	t.Run("database", func(t *testing.T) {
 		assertDeregisteredStewardReleasesDeviceID(t, newContractDatabaseStewardStoreOrSkip(t))
+	})
+}
+
+// assertHealthReasonsRoundTrip is the Issue #5651 contract: SetHealthReasons is
+// read back by GetSteward and by every list path, an empty set clears it, a
+// fresh record has none, and an unknown steward reports ErrStewardNotFound.
+func assertHealthReasonsRoundTrip(t *testing.T, store business.StewardStore) {
+	t.Helper()
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	tenant := "tenant-hr-" + suffix
+	id := "steward-hr-" + suffix
+	other := "steward-hr-other-" + suffix
+
+	require.NoError(t, store.RegisterSteward(ctx, contractStewardRec(id, tenant, "dev-hr-"+suffix)))
+	require.NoError(t, store.RegisterSteward(ctx, contractStewardRec(other, tenant, "dev-hr2-"+suffix)))
+
+	// A record with no field set reads back with no reasons.
+	got, err := store.GetSteward(ctx, id)
+	require.NoError(t, err)
+	assert.Empty(t, got.HealthReasons)
+
+	reasons := []business.HealthReasonRecord{
+		{Component: "disk", Code: "disk.low", Message: "free space below 5%"},
+		{Component: "module", Code: "module.failed"},
+	}
+	require.NoError(t, store.SetHealthReasons(ctx, id, reasons))
+
+	find := func(list []*business.StewardRecord) *business.StewardRecord {
+		for _, r := range list {
+			if r.ID == id {
+				return r
+			}
+		}
+		return nil
+	}
+	got, err = store.GetSteward(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, reasons, got.HealthReasons)
+
+	all, err := store.ListStewards(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, find(all))
+	assert.Equal(t, reasons, find(all).HealthReasons)
+
+	reg, err := store.ListStewardsByStatus(ctx, business.StewardStatusRegistered)
+	require.NoError(t, err)
+	require.NotNil(t, find(reg))
+	assert.Equal(t, reasons, find(reg).HealthReasons)
+
+	seen, err := store.GetStewardsSeen(ctx, time.Now().Add(-time.Hour))
+	require.NoError(t, err)
+	require.NotNil(t, find(seen))
+	assert.Equal(t, reasons, find(seen).HealthReasons)
+
+	byDev, err := store.GetStewardByDeviceIDForTenant(ctx, "dev-hr-"+suffix, tenant)
+	require.NoError(t, err)
+	assert.Equal(t, reasons, byDev.HealthReasons)
+
+	// The other steward is untouched.
+	o, err := store.GetSteward(ctx, other)
+	require.NoError(t, err)
+	assert.Empty(t, o.HealthReasons)
+
+	// Replace, not append.
+	replacement := []business.HealthReasonRecord{{Component: "net", Code: "net.down", Message: "m"}}
+	require.NoError(t, store.SetHealthReasons(ctx, id, replacement))
+	got, err = store.GetSteward(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, replacement, got.HealthReasons)
+
+	// An empty set clears.
+	require.NoError(t, store.SetHealthReasons(ctx, id, nil))
+	got, err = store.GetSteward(ctx, id)
+	require.NoError(t, err)
+	assert.Empty(t, got.HealthReasons)
+	all, err = store.ListStewards(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, find(all).HealthReasons)
+
+	assert.ErrorIs(t, store.SetHealthReasons(ctx, "ghost-"+suffix, reasons), business.ErrStewardNotFound)
+}
+
+func TestStewardStoreContract_HealthReasons(t *testing.T) {
+	t.Run("flatfile", func(t *testing.T) {
+		assertHealthReasonsRoundTrip(t, newContractFlatFileStewardStore(t))
+	})
+	t.Run("sqlite", func(t *testing.T) {
+		assertHealthReasonsRoundTrip(t, newContractSQLiteStewardStore(t))
+	})
+	t.Run("database", func(t *testing.T) {
+		assertHealthReasonsRoundTrip(t, newContractDatabaseStewardStoreOrSkip(t))
+	})
+}
+
+// assertRebindStewardIdentityIf is the Issue #5722 contract: the compare-and-swap
+// rebind applies only while the stored identity key equals the expected old key,
+// reports ErrIdentityKeyChanged otherwise without changing anything, lets exactly
+// one of several concurrent callers holding the same expected key win, and
+// reports ErrStewardNotFound for an unknown steward like RebindStewardIdentity.
+func assertRebindStewardIdentityIf(t *testing.T, store business.StewardStore) {
+	t.Helper()
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	tenant := "tenant-cas-" + suffix
+	id := "steward-cas-" + suffix
+	oldKey := []byte("key-old-" + suffix)
+
+	rec := contractStewardRec(id, tenant, "dev-old-"+suffix)
+	rec.IdentityKeyPub, rec.KeyProtectionLevel = oldKey, "file"
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+	require.NoError(t, store.SetStewardProvenance(ctx, id, `{"machine_id":"m1"}`))
+
+	// Wrong expected key: ErrIdentityKeyChanged and nothing changes.
+	err := store.RebindStewardIdentityIf(ctx, id, []byte("not-the-key"), "dev-x-"+suffix, []byte("key-x"), "tpm", "ecdsa-p256")
+	require.ErrorIs(t, err, business.ErrIdentityKeyChanged)
+	got, err := store.GetSteward(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "dev-old-"+suffix, got.DeviceID)
+	assert.Equal(t, oldKey, got.IdentityKeyPub)
+	assert.Equal(t, "file", got.KeyProtectionLevel)
+	assert.JSONEq(t, `{"machine_id":"m1"}`, got.LastProvenanceJSON)
+
+	// Correct expected key: succeeds, stores the new fields and clears provenance.
+	newKey := []byte("key-new-" + suffix)
+	require.NoError(t, store.RebindStewardIdentityIf(ctx, id, oldKey, "dev-new-"+suffix, newKey, "tpm", "ecdsa-p256"))
+	got, err = store.GetSteward(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "dev-new-"+suffix, got.DeviceID)
+	assert.Equal(t, newKey, got.IdentityKeyPub)
+	assert.Equal(t, "tpm", got.KeyProtectionLevel)
+	assert.Equal(t, "ecdsa-p256", got.KeyAlgorithm)
+	assert.Empty(t, got.LastProvenanceJSON)
+
+	// Replaying the old expected key now fails.
+	err = store.RebindStewardIdentityIf(ctx, id, oldKey, "dev-again-"+suffix, []byte("k3"), "file", "")
+	assert.ErrorIs(t, err, business.ErrIdentityKeyChanged)
+
+	// Unknown steward: same error as RebindStewardIdentity.
+	err = store.RebindStewardIdentityIf(ctx, "ghost-"+suffix, oldKey, "dev-z", []byte("k"), "file", "")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+	err = store.RebindStewardIdentity(ctx, "ghost-"+suffix, "dev-z", []byte("k"), "file", "")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+
+	// Concurrent rebinds from the same expected key: exactly one wins.
+	const racers = 8
+	errs := make([]error, racers)
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = store.RebindStewardIdentityIf(ctx, id, newKey, fmt.Sprintf("dev-race-%d-%s", i, suffix), []byte(fmt.Sprintf("key-race-%d", i)), "file", "")
+		}(i)
+	}
+	wg.Wait()
+	wins := 0
+	for _, e := range errs {
+		if e == nil {
+			wins++
+			continue
+		}
+		assert.ErrorIs(t, e, business.ErrIdentityKeyChanged)
+	}
+	assert.Equal(t, 1, wins, "exactly one concurrent rebind may win")
+}
+
+// TestStewardStoreContract_RebindStewardIdentityIf runs the Issue #5722
+// contract across all three StewardStore providers.
+func TestStewardStoreContract_RebindStewardIdentityIf(t *testing.T) {
+	t.Run("flatfile", func(t *testing.T) {
+		assertRebindStewardIdentityIf(t, newContractFlatFileStewardStore(t))
+	})
+	t.Run("sqlite", func(t *testing.T) {
+		assertRebindStewardIdentityIf(t, newContractSQLiteStewardStore(t))
+	})
+	t.Run("database", func(t *testing.T) {
+		assertRebindStewardIdentityIf(t, newContractDatabaseStewardStoreOrSkip(t))
 	})
 }
 

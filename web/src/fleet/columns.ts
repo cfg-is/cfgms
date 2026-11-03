@@ -17,6 +17,8 @@
  * read back are untrusted input and are shape-validated before use.
  */
 
+import type { HealthReason } from './health.ts'
+
 export interface StewardDNA {
   hostname?: string
   os?: string
@@ -33,6 +35,7 @@ export interface Steward {
   dna?: StewardDNA | null
   hidden?: boolean
   tags?: string[]
+  health_reasons?: HealthReason[]
 }
 
 export interface StewardPage {

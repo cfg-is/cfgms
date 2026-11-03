@@ -15,6 +15,11 @@ var ErrStewardNotFound = errors.New("steward not found")
 // ErrStewardAlreadyExists is returned when attempting to register an already-registered steward.
 var ErrStewardAlreadyExists = errors.New("steward already exists")
 
+// ErrIdentityKeyChanged is returned by RebindStewardIdentityIf when the stored
+// IdentityKeyPub no longer equals the expected old key, i.e. another writer
+// replaced the identity after the caller read it. Nothing is changed.
+var ErrIdentityKeyChanged = errors.New("steward identity key changed")
+
 // ErrStewardDeviceIDConflict is returned when a steward record cannot be written
 // because a DIFFERENT steward in the same tenant already holds its device_id.
 // It is distinct from ErrStewardAlreadyExists, which reports the same steward
@@ -76,6 +81,13 @@ const (
 	// and return ErrStewardRevoked before performing any proof-of-possession verification
 	// (revocation-before-PoP ordering invariant, ADR-010 §3).
 	StewardStatusRevoked StewardStatus = "revoked"
+
+	// StewardStatusTampered indicates the steward raised a tamper alarm (a heartbeat
+	// carrying a tamper reason code) about its own host. Lifecycle: set only by a
+	// tamper alarm from registered, active, lost or archived; ended only by an
+	// operator restore or ban. Heartbeat recovery and reconnection must not clear
+	// it. Unlike a quarantined steward it is never hidden from default lists.
+	StewardStatusTampered StewardStatus = "tampered"
 )
 
 // StewardRecord holds the durable fleet registration data for a single steward.
@@ -146,6 +158,20 @@ type StewardRecord struct {
 	// used by the gate handler (S3b) to score re-entry confidence. Updated at each
 	// successful refresh. Empty until the first refresh cycle completes.
 	LastProvenanceJSON string `json:"last_provenance_json"`
+
+	// HealthReasons is the current set of machine-readable reasons the steward
+	// last reported for a non-healthy status. Only the current set is kept; it is
+	// replaced by SetHealthReasons and empty when the steward is healthy. Records
+	// written before the field existed read back with no reasons.
+	HealthReasons []HealthReasonRecord `json:"health_reasons,omitempty"`
+}
+
+// HealthReasonRecord is one persisted health reason. Values originate from the
+// steward and are bounded by the controller before they reach the store.
+type HealthReasonRecord struct {
+	Component string `json:"component"`
+	Code      string `json:"code"`
+	Message   string `json:"message,omitempty"`
 }
 
 // StewardFilter defines criteria for filtering steward queries.
@@ -237,6 +263,11 @@ type StewardStore interface {
 	// Returns ErrStewardNotFound if no record exists.
 	SetStewardHidden(ctx context.Context, stewardID string, hidden bool) error
 
+	// SetHealthReasons replaces the steward's current health reason set (nil or
+	// empty clears it). It touches only that field, so the heartbeat path never
+	// rewrites the whole record. Returns ErrStewardNotFound if no record exists.
+	SetHealthReasons(ctx context.Context, stewardID string, reasons []HealthReasonRecord) error
+
 	// SetStewardProvenance replaces the steward's recorded provenance baseline
 	// (LastProvenanceJSON) with provenanceJSON (ADR-034 §2). It is written at
 	// first admission (trust on first use) and when an operator approves a
@@ -251,8 +282,19 @@ type StewardStore interface {
 	// device_id) rule applies: when another non-deregistered steward in the same
 	// tenant already holds deviceID the call returns ErrStewardDeviceIDConflict
 	// and changes nothing. Returns ErrStewardNotFound if no record exists.
-	// Only the operator move-identity endpoint may call it.
+	// Only the operator move-identity endpoint may call it; the repair path
+	// calls the compare-and-swap sibling RebindStewardIdentityIf instead.
 	RebindStewardIdentity(ctx context.Context, stewardID, deviceID string, identityKeyPub []byte, keyProtectionLevel, keyAlgorithm string) error
+
+	// RebindStewardIdentityIf performs the same field replacement and clears the
+	// same state as RebindStewardIdentity, but only if the stored IdentityKeyPub
+	// still equals expectedOldKey at the instant it is applied (atomically).
+	// Otherwise it returns ErrIdentityKeyChanged and changes nothing, so two
+	// parallel completions authorized against the same key cannot both win.
+	// Returns ErrStewardNotFound if no record exists and
+	// ErrStewardDeviceIDConflict under the same rule as RebindStewardIdentity.
+	// Called by the identity repair path.
+	RebindStewardIdentityIf(ctx context.Context, stewardID string, expectedOldKey []byte, deviceID string, identityKeyPub []byte, keyProtectionLevel, keyAlgorithm string) error
 
 	// UpdateStewardTenant moves a steward to a different tenant, guarded by a
 	// compare-and-swap on the steward's current tenant (Issue #3895): the write

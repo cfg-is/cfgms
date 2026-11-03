@@ -22,6 +22,13 @@ import { apiFetch } from '../api/client.ts'
 
 export type HealthTone = 'ok' | 'warn' | 'crit' | 'neutral'
 
+/** One machine-readable health reason (GET /api/v1/stewards health_reasons). */
+export interface HealthReason {
+  component: string
+  code: string
+  message?: string
+}
+
 export interface Health {
   label: string
   tone: HealthTone
@@ -77,6 +84,8 @@ export function deriveHealth(
       return { label: 'Unreachable', tone: 'crit' }
     case 'revoked':
       return { label: 'Revoked', tone: 'crit' }
+    case 'tampered':
+      return { label: 'TAMPERED', tone: 'crit' }
     case 'registered':
       return { label: 'Registered', tone: 'neutral' }
     case 'dormant':
@@ -87,6 +96,18 @@ export function deriveHealth(
       // Unknown lifecycle states render as inert text, never a guessed tone.
       return { label: status?.trim() ? status.trim() : 'Unknown', tone: 'neutral' }
   }
+}
+
+/**
+ * Format a steward's health reasons for the Health cell tooltip: one line per
+ * reason, `code` or `code: message`. Empty string when there are none, so the
+ * caller can omit the title entirely. Plain text only — never rendered as HTML.
+ */
+export function formatHealthReasons(reasons: readonly HealthReason[] | undefined): string {
+  if (!reasons || reasons.length === 0) return ''
+  return reasons
+    .map((r) => (r.message ? `${r.code}: ${r.message}` : r.code))
+    .join('\n')
 }
 
 // ── Fleet health aggregate (Issue #2729) ─────────────────────────────────────

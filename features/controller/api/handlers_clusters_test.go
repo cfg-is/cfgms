@@ -740,3 +740,77 @@ func TestDNAHostname_NoFragmentsResolvesEmpty(t *testing.T) {
 	assert.Empty(t, dnaHostname(nil), "a nil DNA must resolve to an empty hostname")
 	assert.Empty(t, dnaHostname(&commonpb.DNA{Id: "empty"}), "an empty DNA must resolve to an empty hostname")
 }
+
+// untrustedStewardInfo builds a StewardInfo reporting hostname with the given
+// status and heartbeat, plus a cluster fragment claiming membership.
+func untrustedStewardInfo(t *testing.T, id, status, hostname string, hb time.Time) *service.StewardInfo {
+	t.Helper()
+	host, err := sdna.NewFragment("host:os", "gatherer", sdna.MapState{"hostname": hostname})
+	require.NoError(t, err)
+	return &service.StewardInfo{
+		ID:            id,
+		TenantID:      "default",
+		Status:        status,
+		LastHeartbeat: hb,
+		DNA: &commonpb.DNA{Id: id, Fragments: []*commonpb.Fragment{
+			host, clusterFragment(t, "cfg-lab", map[string]string{"csv": hostname}),
+		}},
+	}
+}
+
+// TestIndexStewards_UntrustedNeverWinsHostname: the untrusted steward has the
+// fresher heartbeat, yet the healthy one owns the hostname. Removing the status
+// check makes this fail.
+func TestIndexStewards_UntrustedNeverWinsHostname(t *testing.T) {
+	for _, status := range []string{"tampered", "quarantined", "revoked"} {
+		t.Run(status, func(t *testing.T) {
+			now := time.Now()
+			healthy := untrustedStewardInfo(t, "steward-healthy", "active", "CFG-70-02", now.Add(-time.Minute))
+			bad := untrustedStewardInfo(t, "steward-bad", status, "CFG-70-02", now)
+			for _, infos := range [][]*service.StewardInfo{{healthy, bad}, {bad, healthy}} {
+				stewards, owners := indexStewards(infos)
+				assert.Equal(t, "steward-healthy", owners["CFG-70-02"])
+				require.Len(t, stewards, 2, "untrusted steward is still listed")
+				for _, sd := range stewards {
+					if sd.ID == "steward-bad" {
+						assert.Equal(t, status, sd.Status)
+						assert.Empty(t, sd.DNAFragments, "untrusted fragments must not add cluster membership")
+					} else {
+						assert.NotEmpty(t, sd.DNAFragments)
+					}
+				}
+			}
+			_, owners := indexStewards([]*service.StewardInfo{bad})
+			assert.Empty(t, owners, "a lone untrusted steward owns nothing")
+		})
+	}
+}
+
+// TestHandleClusterReconciliation_TamperedHostnameDoesNotMaskDeadOwner: a tampered
+// steward reporting the dead owner's hostname must not make that owner look live.
+func TestHandleClusterReconciliation_TamperedHostnameDoesNotMaskDeadOwner(t *testing.T) {
+	server := setupTestServer(t)
+
+	seedClusterSteward(t, server, "steward-a", "default",
+		map[string]string{"hostname": "CFG-70-01"},
+		clusterFragment(t, "cfg-lab", map[string]string{"csv": "CFG-70-02"}))
+	// Dead owner CFG-70-02 is absent; a tampered steward claims its hostname.
+	require.NoError(t, server.controllerService.RegisterStewardWithAttributes(
+		"steward-evil", "default", "addr", "tampered", map[string]string{"hostname": "CFG-70-02"}))
+	require.True(t, server.controllerService.RecordHeartbeat("steward-evil", "", time.Now()))
+	seedClusterPoliciesConfig(t, server, "default", "cfg-lab", "csv")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab/reconciliation", nil)
+	req = withVars(req, map[string]string{"name": "cfg-lab"})
+	req = withClusterTenant(req, "default")
+	rec := httptest.NewRecorder()
+	server.handleClusterReconciliation(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data ClusterReconciliationResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data.Resources, 1)
+	assert.Equal(t, clusterregistry.StatusOrphanDeadOwner, resp.Data.Resources[0].Status)
+}

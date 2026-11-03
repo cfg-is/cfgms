@@ -132,3 +132,19 @@ Rule 3 has been replayed against recent merged develop PRs with `make complexity
 Blocking is evaluated per pull request; two pull requests that each pass alone can together raise P95 effort above develop's, and the develop-side run surfaces it.
 
 Phase 2 reduction targets will reference a pinned develop commit SHA, re-measured on demand.
+
+## CI and anti-gaming
+
+### Where the gate runs
+
+- `make test-commit` runs `complexity-check` locally.
+- The `complexity-gate` job in `.github/workflows/test-suite.yml` runs `make complexity-check` on every `pull_request` and `merge_group`, with a full-history checkout and no path filter. The `unit-tests` aggregator lists it in `needs:` and checks its result before the docs-only exit, so a docs-only pull request cannot skip it.
+- In the merge queue the job runs and posts its own `complexity-gate` context, but blocking is pull-request-side only, through the aggregator. The context is not in the branch ruleset's required checks.
+
+### Baseline
+
+There is no ratchet file to move. Each run re-measures the merge-base with develop and compares the working tree against that fresh measurement, so a pull request is judged against develop as it stands when the check runs. The checkout therefore needs full history (`fetch-depth: 0`).
+
+### Protected paths
+
+`scripts/complexity/manifest.json`, the counting rules under `scripts/complexity/analyzer/` and the tooling under `scripts/complexity/` are protected against quiet edits by three controls: the CLAUDE.md scope constraints, a `CODEOWNERS` entry for `/scripts/complexity/`, and an acceptance-reviewer rule that lists every changed path there and treats a manifest or analyzer edit as a finding unless the story names it. The `CODEOWNERS` entry adds specificity but no new reviewer, because the default `*` entry already names the same owner.

@@ -1680,3 +1680,150 @@ func TestStewardStatus_ClockOffsetLine(t *testing.T) {
 		assert.NotContains(t, out, "Clock Offset:")
 	})
 }
+
+func TestStewardList_ShowsReasonsColumn(t *testing.T) {
+	now := time.Now().UTC()
+	stewards := []map[string]interface{}{
+		{"id": "steward-ok", "status": "active", "last_seen": now.Format(time.RFC3339)},
+		{"id": "steward-one", "status": "degraded", "last_seen": now.Format(time.RFC3339),
+			"health_reasons": []map[string]string{{"component": "disk", "code": "disk.low"}}},
+		{"id": "steward-many", "status": "degraded", "last_seen": now.Format(time.RFC3339),
+			"health_reasons": []map[string]string{
+				{"component": "net", "code": "net.down"},
+				{"component": "disk", "code": "disk.low"},
+				{"component": "module", "code": "module.failed"},
+			}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/registration/pending" {
+			_ = json.NewEncoder(w).Encode([]interface{}{})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": stewards, "timestamp": now})
+	}))
+	defer server.Close()
+
+	origURL, origInsecure := stewardURL, stewardTLSInsecure
+	t.Cleanup(func() { stewardURL, stewardTLSInsecure = origURL, origInsecure })
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		require.NoError(t, runStewardList(stewardListCmd, []string{}))
+	})
+
+	assert.Contains(t, output, "REASONS")
+	lines := map[string]string{}
+	for _, l := range strings.Split(output, "\n") {
+		for _, id := range []string{"steward-ok", "steward-one", "steward-many"} {
+			if strings.HasPrefix(l, id+" ") {
+				lines[id] = l
+			}
+		}
+	}
+	require.Len(t, lines, 3)
+	assert.Contains(t, lines["steward-one"], "disk.low")
+	assert.NotContains(t, lines["steward-one"], "+")
+	assert.Contains(t, lines["steward-many"], "net.down +2")
+	assert.NotContains(t, lines["steward-many"], "disk.low")
+	assert.NotContains(t, lines["steward-ok"], "disk.low")
+}
+
+func TestStewardGet_PrintsEveryReason(t *testing.T) {
+	now := time.Now().UTC()
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"id": "steward-r", "status": "degraded", "connection_state": "connected",
+				"last_seen": now.Format(time.RFC3339), "version": "1.0.0",
+				"health_reasons": []map[string]string{
+					{"component": "disk", "code": "disk.low", "message": "free space below 5%"},
+					{"component": "module", "code": "module.failed"},
+				},
+			},
+			"timestamp": now,
+		})
+	})
+	server := httptest.NewServer(wrapWithResolve(t, "steward-r", inner))
+	defer server.Close()
+
+	origURL, origInsecure := stewardURL, stewardTLSInsecure
+	t.Cleanup(func() { stewardURL, stewardTLSInsecure = origURL, origInsecure })
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	assert.Contains(t, stewardStatusCmd.Aliases, "get", "`cfg steward get` must resolve to the detail command")
+
+	output := captureStdout(t, func() {
+		require.NoError(t, runStewardStatus(stewardStatusCmd, []string{"steward-r"}))
+	})
+	assert.Contains(t, output, "[disk] disk.low: free space below 5%")
+	assert.Contains(t, output, "[module] module.failed")
+
+	// JSON output carries the full list.
+	origJSON := stewardStatusJSONOutput
+	t.Cleanup(func() { stewardStatusJSONOutput = origJSON })
+	stewardStatusJSONOutput = true
+	jsonOut := captureStdout(t, func() {
+		require.NoError(t, runStewardStatus(stewardStatusCmd, []string{"steward-r"}))
+	})
+	assert.Contains(t, jsonOut, "health_reasons")
+	assert.Contains(t, jsonOut, "module.failed")
+	assert.Contains(t, jsonOut, "free space below 5%")
+}
+
+func TestSanitizeTerminal_StripsControlCharacters(t *testing.T) {
+	assert.Equal(t, "a?[31mb?c", sanitizeTerminal("a\x1b[31mb\nc"))
+	assert.Equal(t, "disk.low +1", formatReasonsColumn([]stewardHealthReason{{Code: "disk.low"}, {Code: "x"}}))
+	assert.NotContains(t, formatReasonsColumn([]stewardHealthReason{{Code: "bad\x1b[2Jcode"}}), "\x1b")
+}
+
+// TestStewardList_TamperedFirstWithStatusAndCodes verifies Issue #5652: tampered
+// stewards are listed first with their status, other rows keep their order, and a
+// tampered steward whose live reasons were replaced shows its last alarm's codes.
+func TestStewardList_TamperedFirstWithStatusAndCodes(t *testing.T) {
+	now := time.Now().UTC()
+	stewards := []map[string]interface{}{
+		{"id": "steward-a", "status": "active", "last_seen": now.Format(time.RFC3339)},
+		{"id": "steward-b", "status": "tampered", "last_seen": now.Format(time.RFC3339),
+			"tamper_codes": []string{"tamper.data_dir", "tamper.ca_mismatch"}},
+		{"id": "steward-c", "status": "lost", "last_seen": now.Format(time.RFC3339)},
+		{"id": "steward-d", "status": "tampered", "last_seen": now.Format(time.RFC3339),
+			"health_reasons": []map[string]string{{"component": "integrity", "code": "tamper.trust_downgrade"}}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/registration/pending" {
+			_ = json.NewEncoder(w).Encode([]interface{}{})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": stewards, "timestamp": now})
+	}))
+	defer server.Close()
+
+	origURL, origInsecure := stewardURL, stewardTLSInsecure
+	t.Cleanup(func() { stewardURL, stewardTLSInsecure = origURL, origInsecure })
+	stewardURL = server.URL
+	stewardTLSInsecure = true
+
+	output := captureStdout(t, func() {
+		require.NoError(t, runStewardList(stewardListCmd, []string{}))
+	})
+
+	var order []string
+	lines := map[string]string{}
+	for _, l := range strings.Split(output, "\n") {
+		for _, id := range []string{"steward-a", "steward-b", "steward-c", "steward-d"} {
+			if strings.HasPrefix(l, id+" ") {
+				order = append(order, id)
+				lines[id] = l
+			}
+		}
+	}
+	assert.Equal(t, []string{"steward-b", "steward-d", "steward-a", "steward-c"}, order)
+	assert.Contains(t, lines["steward-b"], "tampered")
+	assert.Contains(t, lines["steward-b"], "tamper.data_dir +1", "codes of the last alarm are shown when no live reason is reported")
+	assert.Contains(t, lines["steward-d"], "tamper.trust_downgrade")
+}

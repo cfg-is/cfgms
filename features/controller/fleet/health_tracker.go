@@ -90,7 +90,8 @@ func (t *HealthTracker) UpdateHeartbeat(ctx context.Context, stewardID string) e
 	if err := t.store.UpdateHeartbeat(ctx, stewardID, ""); err != nil {
 		return err
 	}
-	// Promote registered → active on first heartbeat
+	// Promote registered → active on first heartbeat. A tampered steward is not in
+	// the from-list, so a heartbeat never clears the alarm.
 	if _, statusErr := t.store.TransitionStewardStatus(ctx, stewardID, business.StewardStatusActive,
 		business.StewardStatusRegistered); statusErr != nil {
 		t.logger.Warn("Failed to promote steward to active",

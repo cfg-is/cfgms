@@ -32,6 +32,7 @@
 /.github/ @jrdnr
 /.claude/ @jrdnr
 /Makefile @jrdnr
+/scripts/complexity/ @jrdnr
 
 # Module development (more open to community contributions)
 /features/modules/ @jrdnr

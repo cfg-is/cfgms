@@ -23,10 +23,12 @@ var terminalStewardStatuses = map[string]struct{}{
 	"lost":         {},
 	"deregistered": {},
 	"quarantined":  {},
+	// tampered: no config is pushed to a steward that raised a tamper alarm.
+	"tampered": {},
 }
 
 // Fanout sends a CommandSyncConfig to every reachable steward via the command
-// publisher. Stewards in a terminal status (lost/deregistered/quarantined) are
+// publisher. Stewards in a terminal status (lost/deregistered/quarantined/tampered) are
 // skipped. A failure for one steward does not block delivery to others.
 func Fanout(
 	ctx context.Context,

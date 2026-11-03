@@ -19,6 +19,7 @@ import (
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/controller/tagstore"
 	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -44,6 +45,19 @@ type heartbeatPersistState struct {
 	version string
 }
 
+// healthReasonsRecheckInterval bounds how long a node trusts its cached copy of
+// a steward's persisted health reasons. After it elapses the next heartbeat
+// re-reads the durable record, so a steward that moved to another node and back
+// cannot leave a stale set behind.
+const healthReasonsRecheckInterval = 5 * time.Minute
+
+// healthReasonsState is the last health reason set this node saw persisted for
+// one steward and when it was last confirmed against the durable record.
+type healthReasonsState struct {
+	reasons    []business.HealthReasonRecord
+	verifiedAt time.Time
+}
+
 // ControllerService implements the Controller service
 type ControllerService struct {
 	logger     logging.Logger
@@ -61,6 +75,11 @@ type ControllerService struct {
 	// is never held across storage I/O.
 	heartbeatPersistMu sync.Mutex
 	heartbeatPersist   map[string]heartbeatPersistState
+
+	// healthReasons caches the persisted reason set per steward so a steady
+	// heartbeat causes no store write. Own mutex: never held across storage I/O.
+	healthReasonsMu sync.Mutex
+	healthReasons   map[string]healthReasonsState
 
 	// tenantAncestry resolves tenant subtree containment for ListFleetStewards'
 	// tenant scoping. Wired via SetTenantAncestry; nil denies every non-identical
@@ -157,6 +176,10 @@ type StewardInfo struct {
 	// Hidden is the operator-controlled fleet-view visibility flag (Issue #2944).
 	// Orthogonal to Status: hiding a steward does not change its lifecycle state.
 	Hidden bool
+
+	// HealthReasons mirrors the steward's current health reason set for the
+	// node-local view. The durable record is authoritative; the API reads that.
+	HealthReasons []business.HealthReasonRecord
 
 	// Tags holds the controller-assigned tags for this steward (Issue #3494).
 	// Populated only by ListFleetStewards; never by GetStewardInfo, so
@@ -392,7 +415,10 @@ func (s *ControllerService) StorageReady(ctx context.Context) error {
 // approval gate in pkg/controlplane/providers/grpc/approval.go.
 func reconnectionAdmissibleStatus(status business.StewardStatus) bool {
 	switch status {
-	case business.StewardStatusRegistered, business.StewardStatusActive, business.StewardStatusLost:
+	case business.StewardStatusRegistered, business.StewardStatusActive, business.StewardStatusLost,
+		// tampered: the steward keeps its tampered status across the reconnection
+		// (EnsureSteward never promotes it); only an operator restore ends it.
+		business.StewardStatusTampered:
 		return true
 	default:
 		return false
@@ -835,6 +861,7 @@ func (s *ControllerService) GetStewardInfo(stewardID string) (*StewardInfo, bool
 	copied := *info
 	copied.DNA = cloneDNA(info.DNA)
 	copied.Metrics = copyMetrics(info.Metrics)
+	copied.HealthReasons = append([]business.HealthReasonRecord(nil), info.HealthReasons...)
 	return &copied, true
 }
 
@@ -913,16 +940,7 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 	// enough to mutate the in-memory entry; never call storage under s.mu.
 	s.mu.Lock()
 	if steward, exists := s.stewards[stewardID]; exists {
-		steward.LastHeartbeat = ts
-		if version != "" {
-			steward.Version = version
-		}
-		// Promote registered -> active on the first heartbeat. Leave any other
-		// lifecycle status (e.g. an operator-set state) untouched.
-		if steward.Status == "" || steward.Status == "registered" {
-			steward.Status = "active"
-		}
-		warn := s.recordClockOffset(steward, offset, offsetKnown, receivedAt)
+		warn := s.refreshHeartbeatLocked(steward, version, ts, offset, offsetKnown, receivedAt)
 		s.mu.Unlock()
 		if warn {
 			s.warnClockSkew(stewardID, offset)
@@ -953,19 +971,18 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 	// Fetch DNA separately so it has its own storage source (Issue #3324).
 	dna := s.lookupDurableDNA(stewardID)
 
+	// A tampered record keeps its durable status in the rebuilt entry.
+	createdStatus := "active"
+	if s.durableStatusIs(stewardID, business.StewardStatusTampered) {
+		createdStatus = string(business.StewardStatusTampered)
+	}
+
 	// Re-acquire and double-check: a concurrent connect-hook upsert or another
 	// heartbeat may have inserted the steward while the lock was released. Refresh
 	// the existing entry rather than overwriting it.
 	s.mu.Lock()
 	if steward, exists := s.stewards[stewardID]; exists {
-		steward.LastHeartbeat = ts
-		if version != "" {
-			steward.Version = version
-		}
-		if steward.Status == "" || steward.Status == "registered" {
-			steward.Status = "active"
-		}
-		warn := s.recordClockOffset(steward, offset, offsetKnown, receivedAt)
+		warn := s.refreshHeartbeatLocked(steward, version, ts, offset, offsetKnown, receivedAt)
 		s.mu.Unlock()
 		if warn {
 			s.warnClockSkew(stewardID, offset)
@@ -979,7 +996,7 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 		Version:       version,
 		DNA:           dna,
 		LastHeartbeat: ts,
-		Status:        "active",
+		Status:        createdStatus,
 		Metrics:       make(map[string]string),
 	}
 	s.stewards[stewardID] = created
@@ -991,8 +1008,125 @@ func (s *ControllerService) RecordHeartbeat(stewardID, version string, ts time.T
 
 	// Persist so the durable record's timestamp is refreshed consistently with
 	// EnsureSteward. storeDNA runs outside s.mu.
-	s.storeDNA(context.Background(), stewardID, tenantID, dna, "active")
+	s.storeDNA(context.Background(), stewardID, tenantID, dna, createdStatus)
 	s.persistHeartbeat(stewardID, version)
+	return true
+}
+
+// refreshHeartbeatLocked applies a heartbeat to an existing registry entry:
+// last heartbeat, version (when reported), registered -> active promotion on the
+// first heartbeat (any other lifecycle status, e.g. an operator-set state or
+// tampered, is left untouched) and the clock offset. It reports whether a clock
+// skew warning is due. The caller holds s.mu.
+func (s *ControllerService) refreshHeartbeatLocked(steward *StewardInfo, version string, ts time.Time, offset time.Duration, offsetKnown bool, receivedAt time.Time) bool {
+	steward.LastHeartbeat = ts
+	if version != "" {
+		steward.Version = version
+	}
+	if steward.Status == "" || steward.Status == "registered" {
+		steward.Status = "active"
+	}
+	return s.recordClockOffset(steward, offset, offsetKnown, receivedAt)
+}
+
+// RecordHealthReasons stores the health reasons a steward reported on its latest
+// heartbeat. The set is capped here again (steward input is untrusted), mirrored
+// onto the node-local registry entry, and written to the durable record only
+// when it differs from the persisted set: a steady heartbeat causes no write,
+// and a set that becomes empty is written once. A failed write is retried on
+// the next heartbeat.
+func (s *ControllerService) RecordHealthReasons(stewardID string, reasons []types.HealthReason) {
+	incoming := healthReasonRecords(types.TruncateHealthReasons(reasons))
+
+	s.mu.Lock()
+	if info, ok := s.stewards[stewardID]; ok {
+		info.HealthReasons = incoming
+	}
+	s.mu.Unlock()
+
+	if s.stewardStore == nil {
+		return
+	}
+	now := time.Now()
+	known, ok := s.knownHealthReasons(stewardID, now)
+	if !ok {
+		return
+	}
+	if !healthReasonsEqual(known, incoming) && !s.persistHealthReasons(stewardID, incoming) {
+		return
+	}
+	s.cacheHealthReasons(stewardID, incoming, now)
+}
+
+// healthReasonRecords converts capped wire reasons to their storage form; nil
+// for an empty set.
+func healthReasonRecords(capped []types.HealthReason) []business.HealthReasonRecord {
+	if len(capped) == 0 {
+		return nil
+	}
+	out := make([]business.HealthReasonRecord, len(capped))
+	for i, r := range capped {
+		out[i] = business.HealthReasonRecord{Component: r.Component, Code: r.Code, Message: r.Message}
+	}
+	return out
+}
+
+// knownHealthReasons returns the set believed persisted for the steward: the
+// cached set while it is fresh, otherwise the durable record's (re-verified so a
+// steward moving between nodes cannot leave a stale set). ok is false when there
+// is no readable durable record; the next heartbeat tries again.
+func (s *ControllerService) knownHealthReasons(stewardID string, now time.Time) (known []business.HealthReasonRecord, ok bool) {
+	s.healthReasonsMu.Lock()
+	state, cached := s.healthReasons[stewardID]
+	s.healthReasonsMu.Unlock()
+	if cached && now.Sub(state.verifiedAt) < healthReasonsRecheckInterval {
+		return state.reasons, true
+	}
+	rec, err := s.stewardStore.GetSteward(context.Background(), stewardID)
+	if err != nil {
+		if !errors.Is(err, business.ErrStewardNotFound) {
+			s.logger.Warn("Failed to read steward record for health reasons",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+		return nil, false
+	}
+	return rec.HealthReasons, true
+}
+
+// persistHealthReasons writes the set to the durable record, reporting whether
+// it succeeded. A failed write is retried on the next heartbeat.
+func (s *ControllerService) persistHealthReasons(stewardID string, reasons []business.HealthReasonRecord) bool {
+	if err := s.stewardStore.SetHealthReasons(context.Background(), stewardID, reasons); err != nil {
+		s.logger.Warn("Failed to persist steward health reasons",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return false
+	}
+	return true
+}
+
+// cacheHealthReasons records the set as persisted and verified at the given time.
+func (s *ControllerService) cacheHealthReasons(stewardID string, reasons []business.HealthReasonRecord, at time.Time) {
+	s.healthReasonsMu.Lock()
+	defer s.healthReasonsMu.Unlock()
+	if s.healthReasons == nil {
+		s.healthReasons = make(map[string]healthReasonsState)
+	}
+	s.healthReasons[stewardID] = healthReasonsState{reasons: reasons, verifiedAt: at}
+}
+
+// healthReasonsEqual reports whether two reason sets are identical in order and
+// content; nil and empty are the same set.
+func healthReasonsEqual(a, b []business.HealthReasonRecord) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
 	return true
 }
 
@@ -1085,20 +1219,27 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 	// (Issue #3324). The storage-derived tenant always wins over the caller-supplied
 	// value — the connect hook only knows the mTLS CN, never a tenant.
 	durableTenant, haveDurable := s.lookupDurableTenant(stewardID)
-	if haveDurable {
-		tenantID = durableTenant
-	}
-
 	// Fetch DNA separately — it has its own storage source (Issue #3324). Runs
 	// outside s.mu so storage I/O does not serialize the whole registry.
 	var durableDNA *common.DNA
 	if haveDurable {
+		tenantID = durableTenant
 		durableDNA = s.lookupDurableDNA(stewardID)
+	}
+
+	// A tampered record keeps its status across a reconnect: the node-local entry
+	// must show the durable status, never the "active" a connect would assert.
+	tampered := haveDurable && s.durableStatusIs(stewardID, business.StewardStatusTampered)
+	if tampered {
+		status = string(business.StewardStatusTampered)
 	}
 
 	s.mu.Lock()
 	if existing, ok := s.stewards[stewardID]; ok {
 		existing.LastHeartbeat = now
+		if tampered {
+			existing.Status = status
+		}
 		promoted := existing.Status == "" || existing.Status == "registered"
 		if promoted {
 			existing.Status = "active"
@@ -1107,13 +1248,9 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 
 		// Persist the status promotion and last-seen to the durable fleet store so
 		// GET /api/v1/stewards shows "active" after a first connect (Issue #3403).
-		if promoted && s.stewardStore != nil {
-			if _, storeErr := s.stewardStore.TransitionStewardStatus(context.Background(), stewardID, business.StewardStatusActive,
-				business.StewardStatusRegistered, business.StewardStatusLost, business.StewardStatusActive); storeErr != nil && storeErr != business.ErrStewardNotFound {
-				s.logger.Warn("EnsureSteward: failed to persist status promotion to fleet store",
-					"steward_id", logging.SanitizeLogValue(stewardID),
-					"error", logging.SanitizeLogValue(storeErr.Error()))
-			}
+		if promoted {
+			s.transitionOnConnect(stewardID, business.StewardStatusActive,
+				"EnsureSteward: failed to persist status promotion to fleet store")
 		}
 		return
 	}
@@ -1154,20 +1291,44 @@ func (s *ControllerService) EnsureSteward(stewardID, tenantID, status string) {
 	// (registered, lost, active); terminal states (deregistered, revoked, archived,
 	// dormant) must not be overwritten even if the approval checker failed to block
 	// the connection — defence-in-depth. ErrStewardNotFound is benign.
-	if s.stewardStore != nil {
-		// The terminal check is atomic with the write (Issue #4851).
-		if _, storeErr := s.stewardStore.TransitionStewardStatus(context.Background(), stewardID, business.StewardStatus(status),
-			business.StewardStatusRegistered, business.StewardStatusLost, business.StewardStatusActive); storeErr != nil && storeErr != business.ErrStewardNotFound {
-			s.logger.Warn("EnsureSteward: failed to update fleet store status on reconnect",
-				"steward_id", logging.SanitizeLogValue(stewardID),
-				"error", logging.SanitizeLogValue(storeErr.Error()))
-		}
+	// A tampered record is not written: tampered is not in the from-list, and only
+	// an operator restore ends it.
+	if !tampered {
+		s.transitionOnConnect(stewardID, business.StewardStatus(status),
+			"EnsureSteward: failed to update fleet store status on reconnect")
 	}
 
 	s.logger.Info("Steward ensured in registry on authenticated connect",
 		"steward_id", logging.SanitizeLogValue(stewardID),
 		"tenant_id", logging.SanitizeLogValue(tenantID),
 		"status", logging.SanitizeLogValue(status))
+}
+
+// transitionOnConnect moves the durable fleet record to status `to`, only from
+// a non-terminal status (registered, lost, active); the terminal check is atomic
+// with the write (Issue #4851). A missing store is a no-op, ErrStewardNotFound is
+// benign, and any other failure is logged with failureMsg.
+func (s *ControllerService) transitionOnConnect(stewardID string, to business.StewardStatus, failureMsg string) {
+	if s.stewardStore == nil {
+		return
+	}
+	_, err := s.stewardStore.TransitionStewardStatus(context.Background(), stewardID, to,
+		business.StewardStatusRegistered, business.StewardStatusLost, business.StewardStatusActive)
+	if err != nil && err != business.ErrStewardNotFound {
+		s.logger.Warn(failureMsg,
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+// durableStatusIs reports whether the steward's durable record holds status. A
+// missing store, a missing record or a read error all report false.
+func (s *ControllerService) durableStatusIs(stewardID string, status business.StewardStatus) bool {
+	if s.stewardStore == nil {
+		return false
+	}
+	rec, err := s.stewardStore.GetSteward(context.Background(), stewardID)
+	return err == nil && rec != nil && rec.Status == status
 }
 
 // SetRingConfig updates the deployment ring set. If the ring set has changed,

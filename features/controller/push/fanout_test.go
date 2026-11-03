@@ -164,7 +164,7 @@ func TestFanout_ActiveStewards(t *testing.T) {
 }
 
 // TestFanout_SkipsTerminalStatus asserts that stewards in a terminal status
-// (lost/deregistered/quarantined) are skipped, while a reachable "registered"
+// (lost/deregistered/quarantined/tampered) are skipped, while a reachable "registered"
 // steward still receives a TriggerConfigSync. A ControllerService steward is
 // "registered" before its first heartbeat and "healthy" after — it never has
 // status "active", so those reachable states must not be skipped. (Issue #1572)
@@ -178,6 +178,7 @@ func TestFanout_SkipsTerminalStatus(t *testing.T) {
 		stewardWithStatus("steward-l", "lost"),
 		stewardWithStatus("steward-d", "deregistered"),
 		stewardWithStatus("steward-q", "quarantined"),
+		stewardWithStatus("steward-t", "tampered"),
 	}
 
 	result := push.Fanout(context.Background(), validFanoutCfg(), stewards, pub, logging.NewNoopLogger())

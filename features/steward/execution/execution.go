@@ -74,7 +74,10 @@ type ResourceResult struct {
 	ChangesApplied bool
 	ExecutionTime  time.Duration
 	Error          string
-	StateDiff      *stewardtesting.StateDiff
+	// Operations are the audited writes the module completed during Set, as
+	// reported through modules.OperationReporter. Empty when it reports none.
+	Operations []string
+	StateDiff  *stewardtesting.StateDiff
 	// DeferredUntil is the next instant at which a deferred reboot-gated action
 	// may be retried. Zero when Status is not StatusDeferred.
 	DeferredUntil time.Time

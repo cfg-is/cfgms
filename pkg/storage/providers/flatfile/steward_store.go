@@ -3,6 +3,7 @@
 package flatfile
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -335,6 +336,23 @@ func (s *FlatFileStewardStore) SetStewardHidden(_ context.Context, stewardID str
 	return s.writeSteward(record)
 }
 
+// SetHealthReasons replaces the steward's current health reason set.
+func (s *FlatFileStewardStore) SetHealthReasons(_ context.Context, stewardID string, reasons []business.HealthReasonRecord) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	record, err := s.readSteward(stewardID)
+	if err != nil {
+		return err
+	}
+	if len(reasons) == 0 {
+		record.HealthReasons = nil
+	} else {
+		record.HealthReasons = append([]business.HealthReasonRecord(nil), reasons...)
+	}
+	return s.writeSteward(record)
+}
+
 // SetStewardProvenance replaces the steward's provenance baseline.
 func (s *FlatFileStewardStore) SetStewardProvenance(_ context.Context, stewardID, provenanceJSON string) error {
 	s.mutex.Lock()
@@ -353,10 +371,30 @@ func (s *FlatFileStewardStore) SetStewardProvenance(_ context.Context, stewardID
 func (s *FlatFileStewardStore) RebindStewardIdentity(_ context.Context, stewardID, deviceID string, identityKeyPub []byte, keyProtectionLevel, keyAlgorithm string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
+	return s.rebindLocked(stewardID, nil, deviceID, identityKeyPub, keyProtectionLevel, keyAlgorithm)
+}
 
+// RebindStewardIdentityIf is RebindStewardIdentity guarded by a compare-and-swap
+// on the stored identity key: the stored key is compared with expectedOldKey
+// under the same lock that applies the write.
+func (s *FlatFileStewardStore) RebindStewardIdentityIf(_ context.Context, stewardID string, expectedOldKey []byte, deviceID string, identityKeyPub []byte, keyProtectionLevel, keyAlgorithm string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if expectedOldKey == nil {
+		expectedOldKey = []byte{}
+	}
+	return s.rebindLocked(stewardID, &expectedOldKey, deviceID, identityKeyPub, keyProtectionLevel, keyAlgorithm)
+}
+
+// rebindLocked performs the rebind with s.mutex held. A non-nil expectedOldKey
+// makes the rebind conditional on the stored identity key.
+func (s *FlatFileStewardStore) rebindLocked(stewardID string, expectedOldKey *[]byte, deviceID string, identityKeyPub []byte, keyProtectionLevel, keyAlgorithm string) error {
 	record, err := s.readSteward(stewardID)
 	if err != nil {
 		return err
+	}
+	if expectedOldKey != nil && !bytes.Equal(record.IdentityKeyPub, *expectedOldKey) {
+		return business.ErrIdentityKeyChanged
 	}
 	if deviceID != "" {
 		all, err := s.readAllStewards()

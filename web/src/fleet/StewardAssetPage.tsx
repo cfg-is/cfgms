@@ -18,8 +18,11 @@
  * broken aria-controls references in the DOM. Roving tabindex keeps Tab focus
  * on a single active tab; ArrowLeft/ArrowRight cycle between tabs.
  */
-import { type ComponentType, useRef, useState } from 'react'
+import { type ComponentType, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
+import { apiFetch } from '../api/client.ts'
+import type { HealthReason } from './health.ts'
+import { parseHealthReasons } from './useStewards.ts'
 import ComplianceTab from './ComplianceTab.tsx'
 import DnaDrawer from './DnaDrawer.tsx'
 import LiveActivityTab from './LiveActivityTab.tsx'
@@ -74,10 +77,50 @@ export function PanelContent({ spec, onSelectTab }: { spec: TabSpec } & PanelPro
   return Panel ? <Panel onSelectTab={onSelectTab} /> : <SoonPanel label={spec.label} />
 }
 
+/* Status and health reasons from GET /api/v1/stewards/{id}; null until loaded or on failure. */
+function useStewardHealth(stewardId: string): { status: string; reasons: HealthReason[] } | null {
+  const [state, setState] = useState<{ id: string; status: string; reasons: HealthReason[] } | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    apiFetch(`/api/v1/stewards/${encodeURIComponent(stewardId)}`)
+      .then(async (response) => {
+        if (!response.ok) return
+        const body: unknown = await response.json()
+        const data = (body as Record<string, unknown> | null)?.data as Record<string, unknown> | null | undefined
+        if (cancelled || typeof data !== 'object' || data === null) return
+        setState({
+          id: stewardId,
+          status: typeof data.status === 'string' ? data.status.trim().toLowerCase() : '',
+          reasons: parseHealthReasons(data.health_reasons),
+        })
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [stewardId])
+  return state?.id === stewardId ? state : null
+}
+
+function HealthReasonList({ reasons }: { reasons: HealthReason[] }) {
+  return (
+    <ul>
+      {reasons.map((r, i) => (
+        <li key={`${r.component}:${r.code}:${i}`}>
+          <span className="mono2">{r.component}</span> <strong>{r.code}</strong>
+          {r.message ? <> — {r.message}</> : null}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 export default function StewardAssetPage() {
   // useParams returns an already-decoded value from React Router — do not
   // call decodeURIComponent again or bare % chars in IDs throw URIError.
   const { id: stewardId = '' } = useParams<{ id: string }>()
+  const health = useStewardHealth(stewardId)
+  const tampered = health?.status === 'tampered'
   const [activeTab, setActiveTab] = useState<TabKey>('dna')
   const tabRefs = useRef<Map<TabKey, HTMLButtonElement>>(new Map())
 
@@ -110,6 +153,28 @@ export default function StewardAssetPage() {
         </p>
         <h1>Device</h1>
       </div>
+
+      {tampered && (
+        <div
+          role="alert"
+          data-testid="tampered-banner"
+          style={{
+            background: 'var(--state-crit-bg)',
+            color: 'var(--state-crit)',
+            padding: 'var(--space-3)',
+            marginBottom: 'var(--space-3)',
+          }}
+        >
+          <strong>TAMPERED</strong> — this steward reported tampering.
+          <HealthReasonList reasons={health.reasons} />
+        </div>
+      )}
+      {health !== null && health.reasons.length > 0 && (
+        <section data-testid="health-reasons-block" aria-label="Health reasons">
+          <h2>Health reasons</h2>
+          <HealthReasonList reasons={health.reasons} />
+        </section>
+      )}
 
       <div role="tablist" aria-label="Asset sections" onKeyDown={onKeyDown}>
         {TABS.map((tab) => (

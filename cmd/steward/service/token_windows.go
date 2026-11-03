@@ -10,10 +10,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -110,48 +108,34 @@ func writeTokenFile(path, token string) error {
 func ReadTokenFile(path string) (string, error) {
 	pathPtr, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return "", fmt.Errorf("open registration token file %s: %w", path, err)
+		return "", tokenFileErr(TokenFilePermissions, "open registration token file %s: %w", path, err)
 	}
 	h, err := windows.CreateFile(pathPtr, windows.GENERIC_READ|windows.READ_CONTROL,
 		windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
 		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
-			return "", fmt.Errorf("registration token file %s does not exist", path)
+			return "", tokenFileErr(TokenFileMissing, "registration token file %s does not exist", path)
 		}
 		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 			return "", explainAccessDenied(path, err)
 		}
-		return "", fmt.Errorf("open registration token file %s: %w", path, err)
+		return "", tokenFileErr(TokenFilePermissions, "open registration token file %s: %w", path, err)
 	}
 	f := os.NewFile(uintptr(h), path)
 	defer func() { _ = f.Close() }()
 
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
-		return "", fmt.Errorf("inspect registration token file %s: %w", path, err)
+		return "", tokenFileErr(TokenFilePermissions, "inspect registration token file %s: %w", path, err)
 	}
 	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
-		return "", fmt.Errorf("registration token file %s is not a regular file", path)
+		return "", tokenFileErr(TokenFilePermissions, "registration token file %s is not a regular file", path)
 	}
 	if err := checkTokenFileSecurity(h, path); err != nil {
 		return "", err
 	}
 
-	data, err := io.ReadAll(io.LimitReader(f, maxTokenFileSize+1))
-	if err != nil {
-		return "", fmt.Errorf("read registration token file %s: %w", path, err)
-	}
-	if len(data) > maxTokenFileSize {
-		return "", fmt.Errorf("registration token file %s is too large", path)
-	}
-	token := strings.TrimSpace(string(data))
-	if token == "" {
-		return "", fmt.Errorf("registration token file %s is empty", path)
-	}
-	if err := validateToken(token); err != nil {
-		return "", fmt.Errorf("registration token file %s: %w", path, err)
-	}
-	return token, nil
+	return readTokenContent(f, path)
 }
 
 // explainAccessDenied reports why the token file could not be opened for
@@ -171,7 +155,7 @@ func explainAccessDenied(path string, openErr error) error {
 			return err
 		}
 	}
-	return fmt.Errorf("open registration token file %s: %w", path, openErr)
+	return tokenFileErr(TokenFilePermissions, "open registration token file %s: %w", path, openErr)
 }
 
 // checkTokenFileSecurity refuses the open token file h unless its security
@@ -180,7 +164,7 @@ func checkTokenFileSecurity(h windows.Handle, path string) error {
 	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
-		return fmt.Errorf("read security descriptor of registration token file %s: %w", path, err)
+		return tokenFileErr(TokenFilePermissions, "read security descriptor of registration token file %s: %w", path, err)
 	}
 	return checkTokenFileDescriptor(sd, path)
 }
@@ -192,25 +176,25 @@ func checkTokenFileSecurity(h windows.Handle, path string) error {
 func checkTokenFileDescriptor(sd *windows.SECURITY_DESCRIPTOR, path string) error {
 	owner, _, err := sd.Owner()
 	if err != nil || owner == nil {
-		return fmt.Errorf("cannot determine owner of registration token file %s", path)
+		return tokenFileErr(TokenFilePermissions, "cannot determine owner of registration token file %s", path)
 	}
 	if !isTokenFilePrincipal(owner) {
-		return fmt.Errorf("registration token file %s must be owned by SYSTEM or BUILTIN\\Administrators", path)
+		return tokenFileErr(TokenFilePermissions, "registration token file %s must be owned by SYSTEM or BUILTIN\\Administrators", path)
 	}
 	acl, _, err := sd.DACL()
 	if err != nil || acl == nil {
-		return fmt.Errorf("registration token file %s has no access control list: grant access to SYSTEM and BUILTIN\\Administrators only", path)
+		return tokenFileErr(TokenFilePermissions, "registration token file %s has no access control list: grant access to SYSTEM and BUILTIN\\Administrators only", path)
 	}
 	for i := uint32(0); i < uint32(acl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(acl, i, &ace); err != nil {
-			return fmt.Errorf("read access control list of registration token file %s: %w", path, err)
+			return tokenFileErr(TokenFilePermissions, "read access control list of registration token file %s: %w", path, err)
 		}
 		// Only an access-allowed ACE has its SID at SidStart; any other type is
 		// refused before the SID is read.
 		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
 			!isTokenFilePrincipal((*windows.SID)(unsafe.Pointer(&ace.SidStart))) {
-			return fmt.Errorf("registration token file %s must grant access to SYSTEM and BUILTIN\\Administrators only", path)
+			return tokenFileErr(TokenFilePermissions, "registration token file %s must grant access to SYSTEM and BUILTIN\\Administrators only", path)
 		}
 	}
 	return nil

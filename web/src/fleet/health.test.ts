@@ -7,6 +7,7 @@ import {
   type HealthTone,
   deriveHealth,
   fetchFleetHealth,
+  formatHealthReasons,
   formatLastSeen,
   parseLastSeen,
 } from './health.ts'
@@ -247,5 +248,35 @@ describe('fetchFleetHealth', () => {
       }),
     )
     await expect(fetchFleetHealth()).rejects.toThrow('unexpected health response shape')
+  })
+})
+
+describe('tampered status', () => {
+  it('maps tampered to a crit TAMPERED label', () => {
+    expect(deriveHealth('tampered', iso(1_000), NOW)).toEqual({ label: 'TAMPERED', tone: 'crit' })
+  })
+})
+
+describe('formatHealthReasons', () => {
+  it('returns an empty string for none', () => {
+    expect(formatHealthReasons(undefined)).toBe('')
+    expect(formatHealthReasons([])).toBe('')
+  })
+
+  it('formats one reason, with and without a message', () => {
+    expect(formatHealthReasons([{ component: 'disk', code: 'disk.low', message: '2% free' }])).toBe(
+      'disk.low: 2% free',
+    )
+    expect(formatHealthReasons([{ component: 'disk', code: 'disk.low' }])).toBe('disk.low')
+  })
+
+  it('formats many reasons one per line', () => {
+    expect(
+      formatHealthReasons([
+        { component: 'disk', code: 'disk.low', message: 'x' },
+        { component: 'cfg', code: 'cfg.bad' },
+        { component: 'net', code: 'net.down', message: 'y' },
+      ]),
+    ).toBe('disk.low: x\ncfg.bad\nnet.down: y')
   })
 })

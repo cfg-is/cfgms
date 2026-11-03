@@ -25,10 +25,37 @@ var baseRefs = []string{"origin/develop", "develop"}
 // maxTreeFileBytes bounds one materialised file, as a guard on archive input.
 const maxTreeFileBytes = 64 << 20
 
+// gitCleanEnv returns the process environment without the variables git
+// exports to hooks (GIT_DIR, GIT_INDEX_FILE, ...), which would otherwise make
+// every git call act on the calling repository instead of the -C directory.
+func gitCleanEnv() []string {
+	drop := map[string]bool{"GIT_COMMON_DIR": true, "GIT_PREFIX": true}
+	// #nosec G204 -- fixed git binary and arguments.
+	if out, err := exec.Command("git", "rev-parse", "--local-env-vars").Output(); err == nil {
+		for _, n := range strings.Fields(string(out)) {
+			drop[n] = true
+		}
+	}
+	for _, n := range []string{"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+		"GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE",
+		"GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_SHALLOW_FILE"} {
+		drop[n] = true
+	}
+	var env []string
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if !drop[name] {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
 // git runs git in dir and returns stdout. Failures carry git's stderr text.
 func git(dir string, args ...string) ([]byte, error) {
 	// #nosec G204 -- fixed argv, no shell; callers pass literal subcommands; refs are rejected if they start with "-" (see materializeRef).
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = gitCleanEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
