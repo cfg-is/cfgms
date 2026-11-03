@@ -15,6 +15,7 @@ This directory contains detailed development guides, standards, and workflows fo
 
 ### Story Development Process
 
+- [Product Planning](product-planning.md) - Discovery, epic readiness, existing-work reconciliation and outcome evidence
 - [Story Checklist](story-checklist.md) - Complete checklist for implementing stories
 - [PR Review Methodology](pr-review-methodology.md) - 5-phase structured PR review process
 - [Git Workflow](git-workflow.md) - GitFlow branching strategy and commit guidelines
@@ -85,19 +86,3 @@ For automated development workflow, use the slash commands documented in `.claud
 - `/pr-review [number]` - Execute structured PR review
 
 See [CLAUDE.md](../../CLAUDE.md) for complete slash command documentation.
-
----
-
-## Version Information
-
-- **Document Version**: 2.0
-- **Last Updated**: 2025-11-06
-- **Status**: Active
-- **Part of**: Story #228 - Documentation Cleanup & Creation
-
-## Change History
-
-| Date | Version | Description |
-|------|---------|-------------|
-| 2025-11-06 | 2.0 | Updated to lightweight index pointing to root docs and actual development files |
-| 2024-04-04 | 1.0 | Initial documentation structure (deprecated) |

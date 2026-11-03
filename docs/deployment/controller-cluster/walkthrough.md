@@ -1,6 +1,8 @@
 # Controller Cluster Deployment
 
-Deploy a geo-redundant CFGMS controller cluster for high availability and regional failover.
+Deploy a multi-node CFGMS controller cluster with shared durable stores.
+Steward continuity through a node outage requires the endpoint routing described
+below; clustering alone does not establish regional failover.
 
 **Prerequisite**: Complete [Single Controller](../single-controller/walkthrough.md) first. This guide assumes you have a validated single-controller environment and covers turning it into a multi-node cluster.
 

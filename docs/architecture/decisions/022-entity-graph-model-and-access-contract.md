@@ -9,6 +9,10 @@
 
 ## Context
 
+Implementation gaps in this context describe the state when the decision was
+made, not a current delivery inventory. The accepted model/access contract below
+remains normative; use the operating models and current source for delivery state.
+
 CFGMS is pulling the **troubleshooting cockpit** forward as its flagship surface: the screen that
 answers, about any piece of a fleet, *what is wrong here, what else does it affect, what changed,
 and how do I fix it* — and keeps answering as an investigation widens from one machine to several.
@@ -617,8 +621,8 @@ construction (§9 restriction, §10 constraints) — **rejected**.
 - [ADR-003](003-storage-data-taxonomy.md) — storage data taxonomy the `case_store` and provider
   compose with
 - [ADR-021](021-identity-assurance-levels.md) — step-up model the cockpit's REST surface rides
-- `docs/product/roadmap.md` — Digital Twin & DEX tiered rollout (Tier-2 graph, temporal query,
-  unified entity query API); Captured Backlog
+- `docs/product/roadmap.md` — current delivery coverage and deferred graph/DEX direction;
+  this ADR owns the graph and temporal access contract
 - `docs/design/mockups/troubleshooting-cockpit.html` + `docs/design/web-ui-design-system.md`
   — the consuming surface (case model, evidence canvas)
 - `features/modules/hyperv/cluster.go`, `pkg/directory/dna/interfaces.go`,

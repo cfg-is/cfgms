@@ -33,6 +33,11 @@ ITEM_ID=$(echo "$ARGUMENTS" | sed -n 's/.*--project-item[[:space:]]\+\([^[:space
 
 ## Pre-Checks
 
+Apply `docs/development/product-planning.md`. Read the product vision and active
+SaaS priorities, reconcile existing implementation and issue coverage, and map
+each epic success criterion to stories and verification evidence. Preserve
+existing story-body headings and queue/security rules.
+
 Before decomposing, gather context in parallel:
 
 1. **Epic body** — extract Goal, Success Criteria, Non-Goals, Constraints, PM Notes
@@ -71,137 +76,21 @@ Every story MUST satisfy ALL of these criteria:
 - **The seam test for any split:** each half must compile on its own and have a testable contract at the boundary. If the second story must re-edit the first story's files to work, the split is wrong — keep it one story.
 - **Required tests are marked.** Tests that MUST be present to consider the story done are prefixed `[REQUIRED TEST]` in the AC list — agents have been observed treating unmarked test ACs as optional.
 - **Out of scope is explicit.** Every story has a `## Out of Scope` section calling out adjacent code the agent must NOT touch (e.g., `examples/` directory, README updates, refactors of nearby code). Agents that go out of scope cause acceptance-review kickbacks.
-- **Visual stories carry a design source.** Any story that touches the web UI (`web/src/**`, `.tsx`, component styles) or adds/changes a user-visible screen, view, component, or visual state MUST include a `## Design Source` section (see format below). A visual story with no design source cannot be promoted to Ready — the Tech Lead will Block it as founder-owned design work. Author the design source at decomposition; do not defer it.
+- **Visual stories carry a design source.** Any story that touches the web UI (`web/src/**`, `.tsx`, component styles) or adds/changes a user-visible screen, view, component, or visual state MUST include a `## Design Source` section (load the shared story template below). A visual story with no design source cannot be promoted to Ready — the Tech Lead will Block it as founder-owned design work. Author the design source at decomposition; do not defer it.
 
 ## Story Body Format
 
-Each story must use this exact format:
+Before drafting any story, **read `docs/development/story-template.md`**. It owns
+the body headings, dependency syntax, scope fields, visual design source and
+execution-environment rules. Use the loaded template for each self-contained
+story body; merely citing its path is not enough. Keep this role's quality,
+migration, docs/tests and seam checks below.
 
-```markdown
-## Parent Epic
-
-#<EPIC_NUMBER> — <epic title>
-
-## Goal
-
-<What should be true when this story is done. Outcome, not task.>
-
-## Dependencies
-
-<List other stories from this epic that must be completed first.>
-
-**Format rules (PO cycle preflight at `.claude/scripts/po-cycle-preflight.py:770-793` enforces these):**
-
-- If the story has no dependencies, the section body must be exactly `None` (or `none.` / `n/a` / empty). Anything else — including `"None — independent of X"` — fails the empty whitelist and gets flagged as malformed.
-- If the story has dependencies, the section MUST contain at least one `#NNN` GitHub issue reference. Prose like `"Sibling story: foo"` without a numeric reference triggers the same malformed warning.
-
-For each dependency, list the issue number AND the PR number (once known) so the
-dev agent can run a `git merge-base --is-ancestor` check before starting:
-
-```
-- #NNN — <reason> — must be merged into develop before this story starts (PR: #MMM when known)
-```
-
-**Sibling dependencies use real issue numbers.** Stories are created in dependency order — foundational stories first. Each `create-story` call returns the story's real `#NNN` immediately (`CREATED_ISSUE:<item_id>:#NNN`), so every later sibling's `## Dependencies` references real numbers at authoring time. Placeholder tokens (`#SIBLING-S1`) and the old two-pass edit flow are retired — never emit them. (Only `--defer` drafts lack a number until dispatch; avoid making other stories depend on a deferred story — if unavoidable, the PO wires the dep after materialization.)
-
-If the dev agent finds a listed PR has not yet merged, it halts and re-queues
-the story. This prevents the multi-module sequencing failures observed in
-issue #923 where parallel stories were dispatched out of order.
-
-The full reference template lives at `docs/development/story-template.md`.
-
-## Out of Scope
-
-<Explicit list of things the dev agent must NOT change as part of this story.
-Examples: "Do not modify `examples/` directory", "Do not update README.md",
-"Do not refactor adjacent functions in the same file". Use "None" only if
-genuinely no nearby code is at risk of being touched.>
-
-## Files In Scope
-
-- `path/to/file.go` — <what to do with this file>
-- `path/to/file_test.go` — <what tests to add>
-
-## Docs In Scope
-
-- `docs/path/to/doc.md` — <what to update / add / remove>
-- `pkg/path/to/README.md` — <what to update>
-
-(Use "None" only if the story genuinely does not change product shape. See "Documentation & Tests Currency" rule below.)
-
-## Design Source
-
-(**Required for visual stories only** — a story that touches `web/src/**`, `.tsx`,
-component styles, or adds/changes a user-visible screen, view, component, or
-visual state. Omit this section entirely for non-visual stories; CLI output is
-not visual.)
-
-Name exactly one design source:
-
-- **Reference mockup** — `docs/design/mockups/<file>.html` (status **Reference**,
-  never Superseded) that covers this surface. The acceptance criteria must
-  require the built screen to match it. Example:
-  `docs/design/mockups/fleet-overview.html — build the table to match; both themes, Ready/Loading/Error/Empty states.`
-- **Reuse statement** — for a surface with **no new visual design** (e.g. a new
-  tab inside an existing layout, a table mirroring a shipped screen): "Reuses the
-  shipped app-shell chrome (#2496) / router (#2747) and existing components; no
-  new visual design. Follows `<concrete shipped screen/component>`."
-
-In **both** cases cite `docs/design/web-ui-design-tokens.css` as the source of
-truth — no free-hand colour, spacing, or type; semantic state tokens
-(converged / drift / error / queued). Identity and principles:
-`docs/design/web-ui-design-system.md`.
-
-If a genuinely new visual surface has **no Reference mockup yet**, still create
-the story, put "**Design source: PENDING founder mockup**" in this section, and
-flag it to the PO — the founder authors the mockup (founder-owned design) before
-the Tech Lead can promote it to Ready.
-
-## Environment
-
-(Optional — omit for ordinary Linux-buildable work, which is the default.
-Recognized values: `windows`, `macos`, `linux`. Set `windows` when the story
-needs the Windows host's execution environment. That covers two cases:
-
-1. **Native OS behavior** a Linux container can't build or live-test — Windows
-   (or macOS) APIs, registry, services, installer/MSI, etc.
-2. **Full end-to-end deployment tests and troubleshooting** — the Windows host
-   runs the complete deployment matrix (a Linux controller with Linux *or*
-   Windows minions/stewards), so e2e fleet/deployment validation and
-   reproduce-on-real-hardware troubleshooting belong there even when the code is
-   Linux-buildable. A Linux container can't exercise the Windows-minion side.
-
-A `windows`/`macos` story is routed off the Linux orchestrator to a host that
-serves that environment — see Self-Dispatch Mode in `.claude/agents/po.md` §7. If
-the story is a pure Linux unit/integration change, omit the section.)
-
-```
-## Environment
-windows
-```
-
-## Reference Implementation
-
-- <Pointers to existing patterns in the codebase to follow>
-- <Relevant docs or architecture files>
-
-## Implementation Notes
-
-<Specific technical guidance for the dev agent. Include:>
-- Which central providers to use
-- Which interfaces to implement
-- Edge cases to handle
-- Security considerations
-
-## Acceptance Criteria
-
-- [ ] <Specific, testable criterion>
-- [ ] [REQUIRED TEST] <Specific test that MUST exist for the story to be accepted>
-- [ ] <Another criterion>
-- [ ] Tests added/updated for all behavior changes (unit + integration where applicable)
-- [ ] Docs updated — enumerate files here, or write "N/A — no product-shape change" with justification
-- [ ] `make test-complete` passes
-```
+Create siblings in dependency order and use each returned real issue number in
+later bodies. Never emit placeholder sibling IDs. Only deferred private drafts
+lack numbers; avoid dependencies on them until materialization permits wiring.
+Dependency sections use `#NNN` for issues and `PR NNN` for pull requests; never
+introduce a PR as a second issue edge.
 
 ### File-conflict-only dependencies — last resort
 

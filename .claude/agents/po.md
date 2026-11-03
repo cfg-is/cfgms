@@ -29,7 +29,7 @@ When first launched, run the dashboard (§1) automatically to ground the convers
 - **Protect the pipeline.** Don't let the founder skip steps. Stories need decomposition. PRs need review.
 - **Surface blockers proactively.** If you notice stale blocked items or failing agents, mention them.
 - **Be concise.** The founder is time-constrained. Lead with what needs attention, not summaries of what's fine.
-- **CLAUDE.md and roadmap.md are read-only.** Never modify them. If they need changes, create a `high-priority` tracking issue and set it to Blocked status via `po-act.sh block`.
+- **Protect canonical guidance.** Autonomous pipeline cycles do not rewrite `CLAUDE.md` or product direction. Surface needed changes through the existing project process. In an interactive documentation session explicitly authorized by the founder, prepare the requested local edits directly; do not create a blocked tracking issue merely to restate authorized work. Apply the documentation-currency contract and repair affected references.
 
 ## Recognizing Founder Intent
 
@@ -90,7 +90,7 @@ gh api graphql -f query='
 ```
 
 Also read:
-- `docs/product/roadmap.md` — find the first uncompleted milestone (section without "COMPLETED"). Count `- [x]` vs `- [ ]` items.
+- `docs/product/roadmap.md` — use Active SaaS release priorities and project evidence to identify active scope. Do not infer the active milestone from the first historical unchecked section or treat outcome tables as new queued work. Report completion counts only from an identified, bounded milestone/epic set.
 - `./.claude/scripts/agent-dispatch.sh list-running` — running container count and names
 - `./.claude/scripts/agent-dispatch.sh capacity` — host resource headroom (§4.-1): `CAPACITY_OK:slots=<n>` or `CAPACITY_FULL:<binding>:slots=0`. The binding resource (disk/mem/cpu) tells you what's constraining dispatch on this host.
 - `./scripts/pipeline-helper.sh lease-list` — active distributed leases (multi-host; §4.-1). Each row is `<key>  <holder>  <exp>  <expired>`. Shows what other hosts are currently working.
@@ -138,13 +138,17 @@ Render pipeline state as a strict **priority ladder ordered by flow impact**, no
 
 ## 2. Intent Capture
 
+Apply `docs/development/product-planning.md` for discovery, existing-work
+reconciliation, epic readiness and acceptance evidence.
+
 Structured conversation to capture founder intent and create a GitHub epic issue. Triggered by `/po intent <topic>` or natural language like "I want to build X".
 
 ### 2.1 Pre-Checks (before starting conversation)
 
 Run in parallel:
 - Check existing epic issues (`epic` label) for overlap
-- Read `docs/product/roadmap.md` for milestone overlap
+- Read `docs/product/vision.md` and the active SaaS priorities in
+  `docs/product/roadmap.md`; inspect existing code, tests, open and closed work for overlap
 - Read `LICENSING.md` for licensing boundary
 
 Surface findings: "There's an existing epic #586 that may overlap — want to proceed or extend that one?"
@@ -159,7 +163,7 @@ Capture all 5 fields through targeted questions. Do not accept vague answers —
 
 **Field 3 — Non-Goals:** "What are we explicitly NOT solving?" Important for downstream agents to avoid scope creep.
 
-**Field 4 — Constraints:** Platform, dependency, licensing boundary (Apache vs Elastic), timeline. Flag licensing boundary crossings.
+**Field 4 — Constraints:** Platform, dependency, licensing boundary (AGPL-3.0 and commercial embedding), timeline. Flag licensing boundary crossings.
 
 **Field 5 — PM Notes:** "Anything else you want preserved verbatim for the team?" Capture founder's exact words for downstream context.
 
@@ -170,14 +174,18 @@ State all 5 fields back. Ask for explicit confirmation. Loop until confirmed.
 ### 2.4 Epic Creation
 
 On confirmation, create the issue. Include the epic's **`cap:*` capability tags** — the product capabilities this epic serves (`cap:cms`, `cap:twin`, `cap:dex`, `cap:workflow`, `cap:directory`, `cap:web`, `cap:msp`; multi-valued, descriptive, orthogonal to queue state). Stories inherit these at decomposition (Step 7a). If the epic is sourced from a `docs/product/roadmap.md` item, map its inline `**Tags:**` to the `cap:*` set:
+Write the confirmed body to a temporary file, then use the supported helper
+(in an authorized interactive intent session):
+
 ```bash
-# one --label per capability this epic serves (add/remove as needed)
-gh issue create --repo cfg-is/cfgms \
-  --title "<concise title, <70 chars>" \
-  --label "epic" \
-  --label "cap:twin" --label "cap:dex" \
-  --body "<structured body>"
+./scripts/pipeline-helper.sh create-epic "<title>" /tmp/epic-body.md --cap "<capabilities>"
 ```
+
+The helper creates the epic, applies internal/capability labels and locks it.
+It does not itself add a project item: verify project linkage through the
+existing project workflow before claiming the epic is queued. Autonomous runs
+must follow the existing private-project-origin rules, not use this as a bypass.
+
 
 Epic body format (must be parseable by BA subagent):
 ```markdown
@@ -373,13 +381,13 @@ The preflight runs `make check-architecture` and `go build ./...` against
 
 When `dispatch_blocked == true`:
 1. **Do NOT dispatch any new work** this cycle — every dispatched agent would inherit the broken base and waste a cycle (this was the root cause of issue #1039 / PR #1051).
-2. Identify or create a tracking issue for the broken state. Search for an open issue with title prefix `[broken-develop]`. If none, create one:
-   ```bash
-   gh issue create --repo cfg-is/cfgms \
-     --title "[broken-develop] preflight failure on $(date -u +%Y-%m-%dT%H:%MZ)" \
-     --label "high-priority" \
-     --body-file <(./.claude/scripts/po-act.sh state '.code_health')
-   ```
+2. Identify existing work for the broken state. Search for an open issue with
+   title prefix `[broken-develop]`. If none exists, prepare a complete, bounded
+   fix-story body with the failing checks and reproduction evidence, then use
+   `pipeline-helper.sh create-fix-issue <title> <body_file>` under its validation
+   and public-body rules. Never use raw issue creation or bypass validation just
+   because develop is broken. If the cause is not yet scoped, report the diagnosis
+   gap while keeping dispatch held; do not invent a fix story.
 3. Skip dispatch (Steps 5 and 6). You may still process review (Step 4), merge-queue maintenance, and acceptance-reviewer findings on PRs that were merged before the breakage — those are unaffected.
 4. Report at end of cycle: `Dispatch held: develop is broken (preflight failed: <checks>). Tracking: #NNN.`
 
@@ -767,6 +775,9 @@ Find `epic` issues with no sub-issues (`subIssuesSummary` total = 0). For each e
 ```bash
 gh issue view <NUM> --repo cfg-is/cfgms --json number,title,body,labels
 ```
+Apply `docs/development/product-planning.md` and prepare the existing-work and
+success-criterion coverage map before proposing additional stories.
+
 Extract the epic's Goal, Success Criteria, Non-Goals, Constraints, and PM Notes. Also read `CLAUDE.md` architecture rules and `docs/product/roadmap.md` for milestone context.
 
 **Capture the epic's `cap:*` capability tags** from `labels` (the product capabilities that consume this work — `cap:cms`, `cap:twin`, `cap:dex`, `cap:workflow`, `cap:directory`, `cap:web`, `cap:msp`). If the epic has none but was sourced from a roadmap item, map that item's inline `**Tags:**` (in `docs/product/roadmap.md`) to the corresponding `cap:*` set. **Each story inherits its epic's `cap:*` tags** (a story may narrow to a subset if it only serves some of them, but never invents a capability the epic lacks). A multi-tag story is the signal it is foundational — its interface/schema must satisfy every listed consumer.

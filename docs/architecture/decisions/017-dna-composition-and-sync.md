@@ -12,9 +12,13 @@
 
 DNA is CFGMS's deterministic, hashable representation of a host's state. Its purpose is mutual validation: the steward assembles DNA, the controller holds a copy, and after a **partial** update both sides must be able to confirm the controller's copy is **fully in sync** with the steward's actual state — cheaply, without re-transferring everything.
 
-### Current implementation
+### Implementation at decision time
 
-Today DNA is a **flat `map[string]string`** assembled by a monolithic `Collector` (`features/steward/dna/dna.go`) whose platform-specific gatherers (`hardware_*.go`, `network_*.go`, `security_*.go`, `software_*.go`) fill categories of attributes. A single `ComputeHash(attributes)` hashes the entire map; heartbeats carry that fingerprint. `commonpb.DNA` is the wire type.
+The following describes the pre-decision implementation. The decision and its
+amendments define the accepted contract; current runtime details live in the
+[steward operating model](../steward-operating-model.md).
+
+At decision time, DNA was a **flat `map[string]string`** assembled by a monolithic `Collector` (`features/steward/dna/dna.go`) whose platform-specific gatherers (`hardware_*.go`, `network_*.go`, `security_*.go`, `software_*.go`) fill categories of attributes. A single `ComputeHash(attributes)` hashes the entire map; heartbeats carry that fingerprint. `commonpb.DNA` is the wire type.
 
 This model has three structural limits:
 
@@ -183,7 +187,7 @@ Read everything — even managed objects — from osquery.
 - [ADR-006](006-module-packaging-and-distribution.md) — Module Packaging and Distribution
 - `features/steward/dna/dna.go` — current `Collector`, `ComputeHash` (redefined by this ADR)
 - `features/steward/dna/drift` — drift subsystem gated by the managed/observe-only class
-- `docs/product/roadmap.md` — Captured Backlog (OSquery, controller baseline DNA) + [Digital Twin & DEX — Tiered Rollout](../../product/roadmap.md#digital-twin--digital-employee-experience-dex--tiered-rollout) (the Tier-1 commitments this amendment lands)
+- `docs/product/roadmap.md` — existing-work coverage and [Deferred capability direction](../../product/roadmap.md#deferred-capability-direction) (the Tier-1 commitments this amendment lands)
 
 **Flat-DNA-surface consumers to re-home on the fragment model.** Two shipped
 consumers read/write today's flat attribute map directly and must be migrated

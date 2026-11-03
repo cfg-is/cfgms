@@ -15,7 +15,7 @@ ADR-006 established the module *packaging and distribution* model: out-of-proces
 2. **How the module source tree is organised** so that the stdlib (installer payload) is physically separable from non-stdlib modules (pulled on demand).
 3. **What a module's `Get` must emit for DNA**, and **how a module declares the objects it authoritatively owns** — the two clauses the forthcoming DNA composition ADR (ADR-017) depends on.
 
-### Current state
+### State at decision time
 
 All modules live flat in `features/modules/`, mixing stdlib and non-stdlib:
 
@@ -186,4 +186,4 @@ Let a module own some fields of an object while osquery contributes the rest.
 - [ADR-006](006-module-packaging-and-distribution.md) — Module Packaging and Distribution (this ADR extends it)
 - ADR-017 — DNA Composition & Sync (forthcoming; depends on clauses 4 and 5)
 - `CLAUDE.md` — Modules section, four execution paths, banned patterns
-- `docs/product/roadmap.md` — Captured Backlog (module foundation, OSquery, controller baseline DNA)
+- `docs/product/roadmap.md` — current delivery coverage and unscheduled candidates (module, OSquery and DNA contracts live in their accepted ADRs)

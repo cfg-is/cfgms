@@ -46,9 +46,12 @@ stewards, push configs, and verify the full fleet management loop.
 
 ### [Controller Cluster](controller-cluster/walkthrough.md)
 
-Geo-redundant controller deployment with failover. Starts from a working single-controller environment.
+Multi-node controller deployment with shared durable stores. Starts from a
+working single-controller environment. Steward recovery through a node outage
+requires an appropriately configured LB/VIP; it is not automatic peer failover.
 
-**Use when**: You need high availability or regional distribution.
+**Use when**: You are validating controller high availability with the required
+shared stores, routing and quorum configuration.
 
 ## Role Config Recipes
 

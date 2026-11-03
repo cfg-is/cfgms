@@ -1,172 +1,64 @@
 # Documentation Standards
 
-This document outlines the documentation standards for CFGMS, including guidelines for writing, formatting, and maintaining documentation.
+Write documentation only when it serves a named reader task, a tool contract or
+required evidence. Length, age and a historical label do not establish value.
+Use the [documentation currency contract](../product-planning.md#documentation-currency)
+for retention and the [documentation boundary](../documentation-boundaries.md)
+for product versus private-deployment information.
 
-## Overview
+## Purpose and ownership
 
-These standards ensure that documentation is clear, consistent, and maintainable. They define the structure, format, and content of documentation to facilitate understanding and collaboration.
+- Name the reader/task in the opening. Give each contract one authoritative owner.
+- Link to that owner instead of copying rules across READMEs, agent prompts and
+  runbooks. Keep essential local prerequisites visible where a reader acts.
+- Create a directory README only when it provides useful navigation or required
+  tool input. A folder does not automatically need a document.
+- Separate implemented behavior, approved future direction and dated evidence.
+  Do not present proposed config or APIs as runnable examples.
+- Use Git history for superseded text. Update, consolidate or delete inaccurate
+  material and repair references rather than adding an archive by default.
 
-## Documentation Principles
+## Content appropriate to the task
 
-- **Clarity**: Documentation should be clear and easy to understand.
-- **Consistency**: Documentation should be consistent in style and format.
-- **Completeness**: Documentation should cover all necessary information.
-- **Maintainability**: Documentation should be easy to maintain and update.
-- **Accessibility**: Documentation should be accessible to all team members.
+- **API/package contracts:** document behavior, inputs, outputs, side effects and
+  important failure cases. Exported Go comments follow GoDoc conventions. Add
+  examples when they resolve a real usage ambiguity; do not duplicate source
+  signatures or narrate every implementation step.
+- **Operator procedures:** state prerequisites and provide commands/configuration
+  matching the current parser and trust model. Include recovery/failure guidance
+  where needed. Point to the canonical config instead of maintaining another
+  complete copy.
+- **Architecture decisions:** preserve relevant rationale and accepted constraints.
+  Make status, amendments and decision-time context clear. Current operating
+  behavior belongs in its runtime contract, not a parallel implementation diary.
+- **Agent instructions:** keep task entry points short and explicitly load the
+  relevant contract. Preserve frontmatter, required headings and parser consumers
+  when shortening. A link is not proof the agent has loaded its contents.
+- **Evidence:** retain unique measurements or finding-to-remediation records when
+  they have a current purpose. Temporary progress, sprint and publication-approval
+  memos normally belong outside canonical product documentation.
 
-## Types of Documentation
+## Format and examples
 
-### Code Documentation
+Use descriptive headings, concise prose and lists/tables where they improve
+navigation. Add a table of contents only when useful. Diagrams/screenshots need a
+specific explanatory purpose and must stay accurate. Version footers, change
+histories, repeated overview sections and generic tool recommendations are not
+required; Git already records file revisions. Dates matter for observations,
+measurements and decision records, not as decorative boilerplate.
 
-CFGMS requires comprehensive Go documentation following these standards:
+Canonical documentation describes CFGMS directly, following the naming/example
+rules in [CLAUDE.md](../../../CLAUDE.md#documentation).
 
-#### Package-Level Documentation
+## Review before acceptance
 
-- Every package must have a comprehensive package comment explaining its purpose
-- Include overview of key concepts, primary use cases, and design decisions
-- Provide practical usage examples using Go's example testing pattern
-- Document any package-level configuration, initialization, or dependencies
-- Explain relationships to other packages within the system
+For each added/changed document, establish its purpose and owner, check affected
+claims against source or agreed intent, and resolve overlapping instructions.
+Check links/anchors and non-Markdown loaders, tests and scripts before moving or
+removing a file. Run relevant documentation checks; execute examples or tests
+when needed and report unverified procedures explicitly. A clean link scan is
+not proof of factual accuracy or useful scope.
 
-#### Function and Method Documentation
-
-- All exported functions and methods must have GoDoc comments starting with the function name
-- Document all parameters including types, expected values, and constraints
-- Document all return values including success cases and specific error conditions
-- Explain any side effects, state changes, or external interactions
-- Include usage examples for complex or critical functions
-- Document performance characteristics where relevant
-
-#### Type and Interface Documentation
-
-- All exported types must be documented with their purpose and key responsibilities
-- Document important fields, their relationships, and validation rules
-- Explain the type's lifecycle and proper usage patterns
-- For interfaces: clearly document contracts, expected behavior, and implementation requirements
-- Provide examples of correct implementations and common usage patterns
-
-#### Error and Constant Documentation
-
-- Document all exported constants and variables with their purpose and valid values
-- Create custom error types with clear documentation explaining when they occur
-- Document error handling strategies and recovery options
-- Explain the relationship between different error conditions
-
-#### Example Standards
-
-- Include runnable examples using Go's `Example` function pattern
-- Examples must demonstrate real-world usage scenarios, not trivial cases
-- Test all examples to ensure they remain functional as code evolves
-- Examples should show both successful operations and error handling
-
-#### Implementation Notes
-
-- Document important design decisions and architectural trade-offs
-- Explain any non-obvious behavior, edge cases, or platform-specific considerations
-- Include performance notes for critical paths or resource-intensive operations
-- Use TODO comments with context for planned improvements or known limitations
-
-### API Documentation
-
-- Document all API endpoints, including request and response formats.
-- Provide examples of API usage.
-- Document error codes and messages.
-- Keep API documentation up to date with API changes.
-
-### User Documentation
-
-- Write user guides for all features.
-- Provide step-by-step instructions for common tasks.
-- Include screenshots and diagrams where helpful.
-- Keep user documentation up to date with feature changes.
-
-### Development Documentation
-
-- Document development setup and workflow.
-- Provide guidelines for contributing to the project.
-- Document testing and deployment processes.
-- Keep development documentation up to date with process changes.
-
-## Documentation Format
-
-### Markdown
-
-- Use Markdown for all documentation.
-- Follow the Markdown style guide.
-- Use headings, lists, and code blocks appropriately.
-- Include a table of contents for longer documents.
-
-### Code Examples
-
-- Use code blocks to provide examples.
-- Include comments to explain complex code.
-- Use syntax highlighting for code blocks.
-- Keep examples up to date with code changes.
-
-### Diagrams
-
-- Use diagrams to illustrate complex concepts.
-- Use a consistent style for diagrams.
-- Include captions to explain diagrams.
-- Keep diagrams up to date with concept changes.
-
-## Documentation Structure
-
-### File Organization
-
-- Organize documentation by topic.
-- Use a consistent directory structure.
-- Include a README file in each directory.
-- Keep file names descriptive and consistent.
-
-### Document Structure
-
-- Start with an overview section.
-- Use headings to organize content.
-- Include a table of contents for longer documents.
-- End with a version information section.
-
-## Best Practices
-
-### Writing
-
-- Write in a clear and concise style.
-- Use active voice and present tense.
-- Avoid jargon and acronyms.
-- Proofread for errors.
-
-### Formatting
-
-- Use consistent formatting.
-- Use headings to organize content.
-- Use lists for related items.
-- Use code blocks for code examples.
-
-### Maintenance
-
-- Review documentation regularly.
-- Update documentation with code changes.
-- Remove outdated information.
-- Keep documentation up to date.
-
-## Tools
-
-### Documentation Tools
-
-- Use a Markdown editor for writing documentation.
-- Use a documentation generator for API documentation.
-- Use a diagram tool for creating diagrams.
-- Use a version control system for managing documentation.
-
-### Review Tools
-
-- Use a code review tool for reviewing documentation.
-- Use a spell checker for checking spelling.
-- Use a grammar checker for checking grammar.
-- Use a style checker for checking style.
-
-## Version Information
-
-- **Document Version:** 1.0
-- **Last Updated:** 2024-04-04
-- **Status:** Draft
+Use the [doc-review skill](../../../.claude/skills/doc-review/SKILL.md) during story
+completion. For epic discovery and acceptance evidence, use
+[Product Planning](../product-planning.md).
