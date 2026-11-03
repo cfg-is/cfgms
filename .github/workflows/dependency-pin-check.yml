@@ -8,7 +8,7 @@
 #
 # The check-tool-versions and dependency-cve-scan jobs run weekly on Wednesday
 # (offset from Dependabot's Monday schedule). The denylist-check job also runs
-# on PRs that touch .devcontainer/Dockerfile, .github/workflows/**,
+# on PRs that touch .claude/tooling/devcontainer/Dockerfile, .github/workflows/**,
 # .github/scripts/install-trivy.sh, or Makefile — that PR-side path filter
 # fires often in practice: measured at 15 of 47 sampled PR-side runs. See
 # docs/development/ci-test-tiers.md §AC1.
@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - '.devcontainer/Dockerfile'
+      - '.claude/tooling'
       - '.github/workflows/**'
       - '.github/scripts/install-trivy.sh'
       - 'Makefile'
@@ -45,6 +45,7 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
+        submodules: true
         persist-credentials: false
     - name: Scan for known-compromised trivy versions
       run: |
@@ -56,7 +57,7 @@ jobs:
         if grep -rEn $'(\'|"|=|@)v0\\.69\\.[456]([.-][[:alnum:]_.-]*)?' \
               --include='Dockerfile' --include='*.yml' --include='*.yaml' \
               --include='Makefile' --include='*.sh' \
-              .devcontainer/ .github/ Makefile 2>/dev/null; then
+              .claude/tooling/devcontainer/ .github/ Makefile 2>/dev/null; then
           echo "" >&2
           echo "ERROR: a known-compromised Trivy version (v0.69.4 - v0.69.6) was found in a pin-usage context." >&2
           echo "These releases are part of the CVE-2026-33634 supply-chain compromise." >&2
@@ -88,6 +89,7 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
+        submodules: true
         persist-credentials: false
 
     - name: Set up Go
@@ -162,6 +164,7 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
+        submodules: true
         persist-credentials: false
     - name: Check for outdated pinned tools
       id: pins
@@ -227,7 +230,7 @@ jobs:
         # 2026-10-01 (Issue #4473): it is exempt from the pin-and-cooldown
         # policy this job enforces for every other tool — the agent image
         # installs npm's `stable` dist-tag at build time
-        # (.devcontainer/Dockerfile) rather than a hand-maintained version,
+        # (.claude/tooling/devcontainer/Dockerfile) rather than a hand-maintained version,
         # so there is no pinned version for this job to compare against
         # upstream. See
         # .claude/skills/refresh-pins/references/cooldown-policy.md for the
@@ -257,7 +260,7 @@ jobs:
 
         # Lockstep validator. The Go toolchain version is pinned in MULTIPLE
         # places (go.mod, workflow GO_VERSION/go-version, cmd/*/Dockerfile FROM
-        # golang:X-alpine, .devcontainer/Dockerfile). All must move together.
+        # golang:X-alpine, .claude/tooling/devcontainer/Dockerfile). All must move together.
         # This check caught the 2026-05-12 drift where go.mod was bumped ahead
         # of the Dockerfile FROM lines, causing Trivy to keep reporting stdlib
         # CVEs on PRs against develop.
@@ -267,7 +270,7 @@ jobs:
             grep -hoE "^toolchain go[0-9.]+" go.mod | sed 's/^toolchain go//'
             grep -hoE "(GO_VERSION|go-version):[[:space:]]*['\"]?[0-9]+\.[0-9]+\.[0-9]+['\"]?" .github/workflows/*.yml \
               | grep -oE "[0-9]+\.[0-9]+\.[0-9]+"
-            grep -hoE "^FROM golang:[0-9]+\.[0-9]+\.[0-9]+" cmd/*/Dockerfile .devcontainer/Dockerfile 2>/dev/null \
+            grep -hoE "^FROM golang:[0-9]+\.[0-9]+\.[0-9]+" cmd/*/Dockerfile .claude/tooling/devcontainer/Dockerfile 2>/dev/null \
               | grep -oE "[0-9]+\.[0-9]+\.[0-9]+"
           } | sort -u
         )
@@ -335,7 +338,7 @@ jobs:
         done < <(
           {
             grep -hoE '^FROM [^[:space:]]+@sha256:[0-9a-f]{64}' \
-              .devcontainer/Dockerfile cmd/*/Dockerfile cmd/*/Dockerfile.* Dockerfile.test-runner 2>/dev/null \
+              .claude/tooling/devcontainer/Dockerfile cmd/*/Dockerfile cmd/*/Dockerfile.* Dockerfile.test-runner 2>/dev/null \
               | grep -v '^FROM ghcr.io/cfg-is/ci-mirror/' || true
             # Dockerfile FROM lines name the ghcr.io mirror form of a list entry;
             # the upstream (Docker Hub) reference is read from the CI image list
@@ -372,7 +375,7 @@ jobs:
           fi
         fi
         if [ -n "$outdated" ]; then
-          body="${body}### How to update\n\n1. Update the version in \`.devcontainer/Dockerfile\`, \`.github/workflows/*.yml\`, and \`Makefile\`\n2. For APT packages (trivy): update the \`=X.Y.Z\` version constraint\n3. For \`go install\`: update the \`@vX.Y.Z\` suffix\n4. For binary downloads (nancy, trufflehog): update the URL version\n5. For checksum-verified downloads (trivy, golangci-lint): update the per-architecture \`SHA256\` values alongside the version, taking them from the release's checksums asset — a stale checksum fails the build at image-build time\n6. Run the full CI suite to validate before merging\n\n"
+          body="${body}### How to update\n\n1. Update the version in \`.claude/tooling/devcontainer/Dockerfile\`, \`.github/workflows/*.yml\`, and \`Makefile\`\n2. For APT packages (trivy): update the \`=X.Y.Z\` version constraint\n3. For \`go install\`: update the \`@vX.Y.Z\` suffix\n4. For binary downloads (nancy, trufflehog): update the URL version\n5. For checksum-verified downloads (trivy, golangci-lint): update the per-architecture \`SHA256\` values alongside the version, taking them from the release's checksums asset — a stale checksum fails the build at image-build time\n6. Run the full CI suite to validate before merging\n\n"
         fi
         body="${body}### Why we pin\n\nAll tool versions are pinned to prevent supply chain attacks (see CVE-2026-33634). Never use \`@latest\` — except Claude Code CLI and Codex CLI, which are exempt by founder decision (2026-10-01, Issue #4473; 2026-10-13, Issue #4969): they install npm's \`stable\` (Claude Code) / \`latest\` (Codex, which publishes no \`stable\` tag) dist-tag at build time instead of a hand-maintained pin. See \`.claude/skills/refresh-pins/references/cooldown-policy.md\`.\n\n---\n*Auto-generated by dependency-pin-check workflow*"
 

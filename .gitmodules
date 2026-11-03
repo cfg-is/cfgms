@@ -1,0 +1,3 @@
+[submodule ".claude/tooling"]
+	path = .claude/tooling
+	url = https://github.com/cfg-is/cfgms-tooling.git

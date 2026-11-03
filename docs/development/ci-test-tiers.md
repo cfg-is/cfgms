@@ -394,12 +394,12 @@ Reusing #4151's own measurement (its PR #4155 is open, unmerged, as of this pull
 | — `pkg/cert` | 82.3s | | |
 | — `pkg/controlplane/providers/grpc` | 70.6s | | |
 | — `features/steward/client` | 64.7s | | |
-| Script phase (`scripts/test-scripts.sh`) | ~218s | ~26% | **Wall-bound** — ~108 sequential `test_*` functions; one of them (`test_claude_pipeline_suites`) loops sequentially over 30 independent `.claude/scripts/tests/*` suites. Each suite is lightweight and self-contained (own `mktemp -d`), so this is a pure "not parallelized yet" cost, not CPU contention — `nproc`-wide batching (#4155's proposed fix) is the right lever. |
+| Script phase (`scripts/test-scripts.sh`) | ~218s | ~26% | **Wall-bound** — ~108 sequential `test_*` functions; one of them (`test_claude_pipeline_suites`) loops sequentially over 30 independent `.claude/tooling/scripts/tests/*` suites. Each suite is lightweight and self-contained (own `mktemp -d`), so this is a pure "not parallelized yet" cost, not CPU contention — `nproc`-wide batching (#4155's proposed fix) is the right lever. |
 | — of which `test_claude_pipeline_suites`'s slowest suites | `security_review_cli.test.sh` 64s, `pipeline_watch.test.sh` 27s, `investigator_launch.test.sh` 12s, `cycle_manifest.test.sh` 8s, rest ≤2s each | | |
 
 ### Coverage gaps found alongside the cost data (not this story's to fix, but relevant to AC5)
 
-- **Four (soon five, with #4154) `.devcontainer/*_test.sh` suites never run in CI at all**
+- **Four (soon five, with #4154) `.claude/tooling/devcontainer/*_test.sh` suites never run in CI at all**
   (Issue #4163) — they guard the agent-container egress firewall, DNS allowlist, entrypoint,
   and credential delivery, and pass locally but gate nothing in CI today.
 

@@ -28,9 +28,9 @@ gh pr merge 456 --squash
 Developer (architect)
 │
 ├── /dispatch <issue#>          deterministic, no LLM
-│     ├── .claude/scripts/agent-dispatch.sh create-clone <N>
+│     ├── .claude/tooling/scripts/agent-dispatch.sh create-clone <N>
 │     │     └── git worktree add -b feature/story-N-agent ../worktrees/story-N develop
-│     └── .claude/scripts/agent-dispatch.sh launch <N>
+│     └── .claude/tooling/scripts/agent-dispatch.sh launch <N>
 │           └── docker run --detach cfg-agent:latest
 │                 ├── Mounts: worktree (rw), gh-creds (ro); Claude auth via CLAUDE_CODE_OAUTH_TOKEN (token mode) or host ~/.claude/.credentials.json (fallback)
 │                 ├── Firewall: GitHub + Anthropic API + Go proxy only
@@ -84,7 +84,7 @@ If the credential is absent, cannot be decrypted, or times out, the launch falls
 ### Check Credential Status
 
 ```bash
-./.claude/scripts/agent-dispatch.sh check-creds
+./.claude/tooling/scripts/agent-dispatch.sh check-creds
 # CREDS_MODE:token       — long-lived agent token decrypts; host token freshness is not checked
 # CREDS_OK:<minutes>     — valid, minutes until expiry
 # CREDS_LOW:<minutes>    — expiring soon, advisory only (agent refreshes the live file in place)
@@ -195,7 +195,7 @@ git push origin feature/story-N-agent
 ### Salvaged `WIP:` draft PR (agent produced no PR)
 
 **Cause**: The agent's session ended before it opened a PR (for example, its login was revoked mid-run). The entrypoint pushes whatever work exists and opens a draft PR titled `WIP: <branch> (agent produced no PR)`, with a commit subject `WIP: agent attempt for issue #N (...)`. The pipeline then dispatches a fix agent onto that PR.
-**Behaviour**: If the fix agent finds the salvaged work already complete, it makes no commit. When that run is in `fix-pr` mode, `/tmp/agent-validation-passed` exists, a linked issue is known, and the PR is a draft whose title starts with `WIP:`, the entrypoint finishes the PR itself (`ac_promote_salvaged_pr` in `.devcontainer/agent-context.sh`). It retitles the PR `<issue title> (Issue #N)`, sets a body that starts with `Fixes #N`, pushes an empty commit whose subject is that title so the squash subject is correct, marks the PR ready, prints `PROMOTED_SALVAGED_PR:<pr>`, and exits 0 so the PR goes to acceptance review.
+**Behaviour**: If the fix agent finds the salvaged work already complete, it makes no commit. When that run is in `fix-pr` mode, `/tmp/agent-validation-passed` exists, a linked issue is known, and the PR is a draft whose title starts with `WIP:`, the entrypoint finishes the PR itself (`ac_promote_salvaged_pr` in `.claude/tooling/devcontainer/agent-context.sh`). It retitles the PR `<issue title> (Issue #N)`, sets a body that starts with `Fixes #N`, pushes an empty commit whose subject is that title so the squash subject is correct, marks the PR ready, prints `PROMOTED_SALVAGED_PR:<pr>`, and exits 0 so the PR goes to acceptance review.
 Every other no-commit `fix-pr` or `resolve-conflict` run still fails: exit 1, plus the "Fix agent ran but made no changes" comment on the PR. That covers a missing validation marker, a non-draft or non-`WIP:` PR, no linked issue, and any promotion step that fails (the container log names the step).
 
 ### Agent creates PR that touches unrelated files

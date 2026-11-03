@@ -193,7 +193,7 @@ EOF
 # /workspace — on the host that path does not exist, so this branch dies with
 # "No such file or directory" and the epic's remediation is silently never
 # drafted. Same rule as pipeline-sweep's Phase 2.
-HELPER="$(git rev-parse --show-toplevel)/scripts/pipeline-helper.sh"
+HELPER="$(git rev-parse --show-toplevel)/.claude/tooling/scripts/pipeline-helper.sh"
 "$HELPER" create-story <epic_num> \
   "remediation: <shortened epic title> — <one-line gap>" \
   /tmp/epic-remediation-<N>.md

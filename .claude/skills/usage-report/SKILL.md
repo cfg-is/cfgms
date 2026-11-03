@@ -12,7 +12,7 @@ You answer questions about pipeline token/dollar spend. Two tools, same
 underlying accounting (`usage_db.py` imports `token_report.py`'s own pricing
 and transcript parsing -- no new math, no guessing):
 
-- **`.claude/metrics/usage_db.py`** (preferred) -- a unified SQLite store
+- **`.claude/tooling/metrics/usage_db.py`** (preferred) -- a unified SQLite store
   covering local/po-live sessions, dispatched dev/fix/review containers, and
   po-act.sh cycle manifests **in one queryable table**, keyed for idempotent
   incremental re-ingest (unchanged transcripts are skipped by mtime/size, so
@@ -21,7 +21,7 @@ and transcript parsing -- no new math, no guessing):
   story's cost -- it answers what used to require running `token_report.py`
   twice (once for the session scan, once for `--story-report`) and manually
   reconciling the two.
-- **`.claude/metrics/token_report.py`** -- the underlying per-call accounting
+- **`.claude/tooling/metrics/token_report.py`** -- the underlying per-call accounting
   engine. Still the right tool for `--composition` (cache vs. generation
   breakdown) and `--cycle-manifest` correlation, which `usage_db.py` doesn't
   wrap.
@@ -32,7 +32,7 @@ how the numbers should be read. Do not dump the raw table unless asked for
 detail.
 
 This skill is about **usage telemetry** (where did tokens/dollars actually
-go). It is unrelated to `.claude/bench/` (quality-per-dollar benchmarking) --
+go). It is unrelated to `.claude/tooling/bench/` (quality-per-dollar benchmarking) --
 don't conflate the two even though both live under epic #3026.
 
 ## Inputs
@@ -86,15 +86,15 @@ First, refresh the SQLite store (fast after the first run -- unchanged
 transcripts are skipped):
 
 ```bash
-.claude/metrics/usage_db.py ingest
+.claude/tooling/metrics/usage_db.py ingest
 ```
 
 Then query it:
 
 ```bash
-.claude/metrics/usage_db.py report --group-by <key> --since <N> --top 20
-.claude/metrics/usage_db.py report --story <issue-num>       # dev/fix/review split for one story
-.claude/metrics/usage_db.py report --session <session-id>    # drill into one session's calls + its container + its cycle
+.claude/tooling/metrics/usage_db.py report --group-by <key> --since <N> --top 20
+.claude/tooling/metrics/usage_db.py report --story <issue-num>       # dev/fix/review split for one story
+.claude/tooling/metrics/usage_db.py report --session <session-id>    # drill into one session's calls + its container + its cycle
 ```
 
 `<key>` includes everything `token_report.py --group-by` supports (model,
@@ -105,7 +105,7 @@ and `source` (`local` vs `container`).
 For cache-composition breakdown (still `token_report.py` only):
 
 ```bash
-.claude/metrics/token_report.py --since <N> --composition
+.claude/tooling/metrics/token_report.py --since <N> --composition
 ```
 
 ## Step 4: Report back -- narrative, not a data dump

@@ -6,7 +6,7 @@
 
 **Deciders:** Founder, PO
 
-**Related:** Epic #1469 (private-draft cutover — the decision this ADR partially supersedes). [008](008-durable-execution-substrate.md) (pipeline substrate). `scripts/pipeline-helper.sh`, `scripts/project-queue.sh`, `.claude/scripts/po-act.sh`, `.claude/scripts/po-cycle-preflight.py` (the machinery this ADR reshapes).
+**Related:** Epic #1469 (private-draft cutover — the decision this ADR partially supersedes). [008](008-durable-execution-substrate.md) (pipeline substrate). `.claude/tooling/scripts/pipeline-helper.sh`, `.claude/tooling/scripts/project-queue.sh`, `.claude/tooling/scripts/po-act.sh`, `.claude/tooling/scripts/po-cycle-preflight.py` (the machinery this ADR reshapes).
 
 ---
 

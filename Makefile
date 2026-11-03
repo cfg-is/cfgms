@@ -510,15 +510,6 @@ test-install-cfg: build-cli
 # reducing it. Separate runners are separate CPU pools, which is the only thing
 # that helps a CPU-bound `-race` suite on a 4-vCPU GitHub-hosted runner.
 #
-# The script suite is gated by what changed (Issue #4305): unless the caller has
-# already set CFGMS_TEST_SCRIPTS_GROUPS, `make test` asks
-# scripts/lib/detect-tooling-changed.sh which suite groups the diff against the
-# develop merge base touches, and runs only those. No resolvable merge base
-# (fresh clone, no origin/develop) fails closed to every group, as test-frontend
-# does. test-commit, test-complete-full and test-agent-complete pin every group
-# via a target-specific export, which this target inherits as a prerequisite, so
-# they run test-scripts exactly once, in full, whatever the diff.
-TEST_SCRIPTS_ALL_GROUPS := core,security-review,claude-tooling,devinfra
 test: fix-git-bare
 	@echo "🧪 Running Tests (Smart Mode)"
 	@echo "============================="
@@ -530,26 +521,7 @@ test: fix-git-bare
 	@$(MAKE) test-framework-api-sharded
 	@echo "✅ OSS build tests complete"
 	@echo ""
-	@if [ -n "$(CFGMS_TEST_SCRIPTS_GROUPS)" ]; then \
-		echo "📋 test-scripts groups: $(CFGMS_TEST_SCRIPTS_GROUPS) (CFGMS_TEST_SCRIPTS_GROUPS set by the caller — auto-detection skipped)"; \
-		$(MAKE) test-scripts CFGMS_TEST_SCRIPTS_GROUPS="$(CFGMS_TEST_SCRIPTS_GROUPS)"; \
-	else \
-		MERGE_BASE=$$(git merge-base HEAD origin/develop 2>/dev/null || true); \
-		if [ -z "$$MERGE_BASE" ]; then \
-			SEL_GROUPS="$(TEST_SCRIPTS_ALL_GROUPS)"; \
-			REASON="no origin/develop merge base resolvable — fail closed to every group"; \
-		else \
-			DETECT_OUT=$$(./scripts/lib/detect-tooling-changed.sh "$$MERGE_BASE" 2>&1); \
-			SEL_GROUPS=$$(printf '%s\n' "$$DETECT_OUT" | sed -n 's/^groups=//p' | tail -n 1); \
-			REASON="vs develop merge base $$(printf '%.8s' "$$MERGE_BASE"): $$(printf '%s\n' "$$DETECT_OUT" | grep -v '^groups=' | tail -n 1)"; \
-			if [ -z "$$SEL_GROUPS" ]; then \
-				SEL_GROUPS="$(TEST_SCRIPTS_ALL_GROUPS)"; \
-				REASON="detect-tooling-changed.sh printed no groups= line — fail closed to every group"; \
-			fi; \
-		fi; \
-		echo "📋 test-scripts groups: $$SEL_GROUPS ($$REASON)"; \
-		$(MAKE) test-scripts CFGMS_TEST_SCRIPTS_GROUPS="$$SEL_GROUPS"; \
-	fi
+	@$(MAKE) test-scripts
 	@echo ""
 	@echo "✅ ALL VALIDATION COMPLETE (HA + Scripts)"
 
@@ -914,9 +886,9 @@ test-go-group-macos-rest:
 
 .PHONY: test-scripts
 # CFGMS_TEST_SCRIPTS_GROUPS narrows the run to one or more of test-scripts.sh's
-# named suite groups (core, security-review, claude-tooling, devinfra) — see
-# scripts/test-scripts.sh --group. Unset (the default) runs all four, unchanged
-# from before this variable existed.
+# named suite groups (core, devinfra) — see scripts/test-scripts.sh --group.
+# Unset (the default) runs all of them. The pipeline, agent-image and
+# security-review suites live in the cfgms-tooling submodule (.claude/tooling).
 test-scripts:
 	@echo "🔧 Testing Shell Scripts..."
 	@./scripts/test-scripts.sh $(if $(CFGMS_TEST_SCRIPTS_GROUPS),--group $(CFGMS_TEST_SCRIPTS_GROUPS),) || { echo "❌ Script tests failed"; exit 1; }
@@ -1461,7 +1433,6 @@ validate-providers:
 	echo ""
 
 # Pre-commit validation (smart tests + quality gates + SECRET SCANNING + ARCHITECTURE + LICENSE)
-test-commit: export CFGMS_TEST_SCRIPTS_GROUPS := $(TEST_SCRIPTS_ALL_GROUPS)
 test-commit: test lint lint-log-injection check-license-headers security-precommit check-architecture check-stdlib-completeness complexity-check security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
@@ -2110,7 +2081,7 @@ security-remediation-report:
 # as-is (this is the CI case — golangci-lint.yml installs the pinned version the
 # same way). When it fails, build the pinned version with the pinned toolchain
 # into a user-writable cache, which is the identical `go install` path
-# .devcontainer/Dockerfile and .github/workflows/golangci-lint.yml use.
+# .claude/tooling/devcontainer/Dockerfile and .github/workflows/golangci-lint.yml use.
 #
 # That build needs a writable GOPATH even though GOMODCACHE is separate: switching
 # to a toolchain newer than the local `go` downloads golang.org/toolchain, and the
@@ -2119,7 +2090,7 @@ security-remediation-report:
 # back to the invoking user's own GOPATH rather than weakening sum verification.
 #
 # GOLANGCI_LINT_VERSION must match .github/workflows/dependency-pin-check.yml,
-# .github/workflows/golangci-lint.yml, .devcontainer/Dockerfile and
+# .github/workflows/golangci-lint.yml, .claude/tooling/devcontainer/Dockerfile and
 # windows-setup.ps1.
 GOLANGCI_LINT_VERSION ?= v2.15.0
 GO_TOOLCHAIN_VERSION := $(shell awk '$$1 == "toolchain" { print $$2 }' go.mod)
@@ -2933,12 +2904,11 @@ test-frontend:
 	else \
 		[ -z "$$MERGE_BASE" ] && echo "ℹ️  test-frontend: no develop merge base — running checks (safe fallback)" || true; \
 		echo "🧪 test-frontend: web/ changes detected — running frontend checks"; \
-		command -v npm >/dev/null 2>&1 || { echo "❌ test-frontend: npm not found but web/ changed. Install Node (see .devcontainer/Dockerfile)"; exit 1; }; \
+		command -v npm >/dev/null 2>&1 || { echo "❌ test-frontend: npm not found but web/ changed. Install Node (see .claude/tooling/devcontainer/Dockerfile)"; exit 1; }; \
 		( cd web && npm ci && npm run lint && npm run typecheck && npm run test && npm run build ); \
 		echo "✅ test-frontend: frontend checks passed"; \
 	fi
 
-test-complete-full: export CFGMS_TEST_SCRIPTS_GROUPS := $(TEST_SCRIPTS_ALL_GROUPS)
 test-complete-full: test-commit test-fast test-production-critical build-cross-validate test-frontend test-integration-docker test-e2e-fast
 	@echo ""
 	@echo "✅ COMPLETE STORY VALIDATION FINISHED"
@@ -2967,7 +2937,6 @@ test-complete: test-complete-full
 # Used by headless agent containers that don't have access to Docker daemon
 # Story #435: Provides ~95% of validation coverage without Docker-in-Docker
 .PHONY: test-agent-complete
-test-agent-complete: export CFGMS_TEST_SCRIPTS_GROUPS := $(TEST_SCRIPTS_ALL_GROUPS)
 test-agent-complete: test-commit test-fast test-production-critical build-cross-validate test-frontend
 	@echo ""
 	@echo "✅ AGENT CONTAINER VALIDATION FINISHED"

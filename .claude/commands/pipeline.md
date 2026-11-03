@@ -45,7 +45,7 @@ Cost/usage reporting (`token_report.py`) attributes a session to a segment keyed
 
 ```
 Monitor tool:
-  command: ./.claude/scripts/pipeline-watch.sh watch
+  command: ./.claude/tooling/scripts/pipeline-watch.sh watch
   description: pipeline state changes (merges, PR checks, containers, board)
   timeout_ms: 1800000
 ```
@@ -101,7 +101,7 @@ Every bundle runs under the §4.-1 distributed leases exactly as a full cycle do
 After relaying a cycle summary, record the outcome so the watcher knows whether the pipeline is draining:
 
 ```bash
-./.claude/scripts/pipeline-watch.sh record-cycle <drained|work> <trigger>
+./.claude/tooling/scripts/pipeline-watch.sh record-cycle <drained|work> <trigger>
 ```
 
 `<trigger>` is the event name that caused the cycle (`full_cycle`, `merged`, `checks_green`, …). Pass `work` whenever the cycle dispatched, reviewed, fixed, rebased, swept or unblocked anything; `drained` only when it found nothing at all to do.
@@ -117,8 +117,8 @@ Only the 2-hourly full cycle counts toward that streak — a bundle that happens
 ### Inspecting and resetting
 
 ```bash
-./.claude/scripts/pipeline-watch.sh state   # persisted baselines + drained streak
-./.claude/scripts/pipeline-watch.sh reset   # clear state; next tick re-baselines silently
+./.claude/tooling/scripts/pipeline-watch.sh state   # persisted baselines + drained streak
+./.claude/tooling/scripts/pipeline-watch.sh reset   # clear state; next tick re-baselines silently
 ```
 
-Tests: `.claude/scripts/tests/pipeline_watch.test.sh`, run automatically by `scripts/test-scripts.sh`.
+Tests: `.claude/tooling/scripts/tests/pipeline_watch.test.sh`, run automatically by `scripts/test-scripts.sh`.

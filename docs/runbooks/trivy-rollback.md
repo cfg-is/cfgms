@@ -48,7 +48,7 @@ rm "/tmp/${ARCHIVE}" /tmp/trivy
 
 ### What to update when rolling back
 
-1. `.devcontainer/Dockerfile` — `TRIVY_VERSION` and `TRIVY_SHA256` in the Trivy install RUN block.
+1. `.claude/tooling/devcontainer/Dockerfile` — `TRIVY_VERSION` and `TRIVY_SHA256` in the Trivy install RUN block.
 2. `.github/workflows/security-scan.yml` — both invocations of `install-trivy.sh`.
 3. `.github/workflows/production-gates.yml` — the install invocation.
 4. `.github/workflows/docker-security.yml` — `TRIVY_VERSION` env var (line 35). The SHA-pinned `aquasecurity/trivy-action` and `aquasecurity/setup-trivy` references at lines 53/81/104/140/168/191 must NOT change — those SHAs are the advisory-confirmed safe versions.

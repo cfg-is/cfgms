@@ -217,7 +217,7 @@ gh pr diff [pr_number] | grep -E "(testify|assert|require|t\.Run)"
   - `zizmor` - Workflow security (action pins, cache poisoning, injection)
   - `frontend-checks` - `web/` typecheck, lint and tests
   - `CLA signature check` - Contributor licence agreement
-- [ ] No required context is *missing* — `./.claude/scripts/pr-review-helper.sh pr-checks <NUM>`
+- [ ] No required context is *missing* — `./.claude/tooling/scripts/pr-review-helper.sh pr-checks <NUM>`
       reports `MISSING_COUNT:0`. A context that never ran is absent from the
       `gh pr checks` table, so an all-green table is not by itself a pass.
 - [ ] Deployment impact reviewed and mitigation planned

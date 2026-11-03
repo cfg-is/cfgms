@@ -13,14 +13,15 @@
 # Exception: the agent image bakes harness-owned config into the image so a
 # dispatched branch can neither disable its own accounting (token reporter,
 # Issue #3041) nor choose the model its own reviewer runs on (model routing,
-# Issue #3030) — see .devcontainer/Dockerfile. Re-include exactly those files —
+# Issue #3030) — see .claude/tooling/devcontainer/Dockerfile. Re-include exactly those files —
 # never `.claude` wholesale, since every builder here does `COPY . .` and would
 # bake session transcripts, worktree checkouts and credential-adjacent state
 # into an image layer.
 .claude
-!.claude/metrics/token_report.py
-!.claude/metrics/pricing.json
+!.claude/tooling/metrics/token_report.py
+!.claude/tooling/metrics/pricing.json
 !.claude/model-routing.yaml
+!.claude/tooling/devcontainer
 
 # Frontend toolchain artifacts — images build Go only; node_modules exists
 # wherever the frontend CI lane or a local npm ci ran (~180MB, 14k files)

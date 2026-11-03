@@ -1,6 +1,6 @@
 name: Agent Image Build
 
-# Builds the agent image (.devcontainer/Dockerfile) without pushing it, so a PR
+# Builds the agent image (.claude/tooling/devcontainer/Dockerfile) without pushing it, so a PR
 # that breaks the image cannot merge (Issue #4493). Dependabot PR #4462 bumped
 # pyjwt to a version semgrep refused; every required check stayed green and the
 # first signal was the host's image-staleness gate refusing every agent launch.
@@ -48,6 +48,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
+        submodules: true
         persist-credentials: false
         fetch-depth: 0
 
@@ -99,6 +100,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          submodules: true
           persist-credentials: false
           fetch-depth: 0
 
@@ -147,7 +149,7 @@ jobs:
             exit 0
           fi
 
-          if grep -Eq '^(\.devcontainer/|go\.mod$|go\.sum$|web/\.nvmrc$|web/package\.json$|web/package-lock\.json$|\.claude/metrics/token_report\.py$|\.claude/metrics/pricing\.json$|\.claude/model-routing\.yaml$|\.dockerignore$|\.github/workflows/agent-image-build\.yml$)' changed_files.txt; then
+          if grep -Eq '^(\.claude/tooling$|\.claude/tooling/devcontainer/|go\.mod$|go\.sum$|web/\.nvmrc$|web/package\.json$|web/package-lock\.json$|\.claude/tooling/metrics/token_report\.py$|\.claude/tooling/metrics/pricing\.json$|\.claude/model-routing\.yaml$|\.dockerignore$|\.github/workflows/agent-image-build\.yml$)' changed_files.txt; then
             echo "Agent image inputs changed — building"
             echo "build=true" >> "$GITHUB_OUTPUT"
           else
@@ -166,7 +168,7 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: .devcontainer/Dockerfile
+          file: .claude/tooling/devcontainer/Dockerfile
           push: false
           load: false
           cache-from: type=gha,scope=cfgms-agent-image

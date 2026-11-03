@@ -316,7 +316,7 @@ For each story (one pin, or one group):
 4. Create the story as a PRIVATE project draft (never a public issue). Pass the
    dependency-pins tracking epic as the parent, or `0` if there is none:
    ```bash
-   bash ./scripts/pipeline-helper.sh create-story <epic_num_or_0> \
+   bash ./.claude/tooling/scripts/pipeline-helper.sh create-story <epic_num_or_0> \
      "deps: bump <name> <from> → <to> (<short-reason>)" \
      /tmp/refresh-pins-<slug>.md
    # Returns CREATED_DRAFT:<item_id>, status Draft by default.

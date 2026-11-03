@@ -55,7 +55,7 @@ if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
 Write-Host "`n=== Installing Core Development Tools (winget) ===" -ForegroundColor Yellow
 
 $coreTools = @(
-    @{ Name = 'Go';         Id = 'GoLang.Go';       Version = '1.27.3'; Command = 'go' },   # matches .devcontainer/Dockerfile's golang:1.27.3-trixie
+    @{ Name = 'Go';         Id = 'GoLang.Go';       Version = '1.27.3'; Command = 'go' },   # matches .claude/tooling/devcontainer/Dockerfile's golang:1.27.3-trixie
     @{ Name = 'Git';        Id = 'Git.Git';         Version = '2.47.1'; Command = 'git' },
     @{ Name = 'Make';       Id = 'GnuWin32.Make';   Version = '3.81';   Command = 'make' },
     @{ Name = 'GitHub CLI'; Id = 'GitHub.cli';      Version = '2.63.2'; Command = 'gh' },
@@ -85,7 +85,7 @@ Update-SessionPath
 # A Windows dev box runs the same gates as CI (`make test-commit`,
 # `make security-scan`), so it needs the same tools at the same versions.
 # Every version below is pinned to match
-# .github/workflows/dependency-pin-check.yml and .devcontainer/Dockerfile
+# .github/workflows/dependency-pin-check.yml and .claude/tooling/devcontainer/Dockerfile
 # — if you bump one, bump all three or the pin-check workflow will flag it.
 #
 # Two install paths, deliberately:
@@ -124,7 +124,7 @@ if ($goBinDir) {
     # go.mod targets via its `toolchain` directive, so an upstream release archive
     # breaks `make lint` on every toolchain bump until upstream rebuilds. Building
     # from source ties its build Go to the Go on this box, which the same bump
-    # already moved. See the comment in .devcontainer/Dockerfile (Issue #3627).
+    # already moved. See the comment in .claude/tooling/devcontainer/Dockerfile (Issue #3627).
     $goTools = @(
         @{ Name = 'gosec';         Package = 'github.com/securego/gosec/v2/cmd/gosec@v2.30.0' },
         @{ Name = 'staticcheck';   Package = 'honnef.co/go/tools/cmd/staticcheck@2026.2.2' },

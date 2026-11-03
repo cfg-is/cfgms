@@ -25,7 +25,7 @@ if printf '%s' "$cmd" | grep -qE 'gh +issue +create|pipeline-helper\.sh +create-
   echo "BLOCKED: autonomous agents must not run raw issue creation." >&2
   echo "All pipeline work originates from the private project board; dev items become" >&2
   echo "locked, internal issues only via the CONVERT-based materialize path." >&2
-  echo "Use: ./scripts/pipeline-helper.sh create-story <epic_num> <title> <body_file> [--defer]" >&2
+  echo "Use: ./.claude/tooling/scripts/pipeline-helper.sh create-story <epic_num> <title> <body_file> [--defer]" >&2
   echo "(materializes a locked internal issue; --defer keeps it a private draft)." >&2
   echo "Community/epic issues are human-directed only." >&2
   exit 2

@@ -51,7 +51,7 @@ actually shipping — on 2026-10-01, 2.1.285 was held until 2026-10-02 while
 2.1.286 had already shipped. Each lag cost a bump story and a review cycle
 for no supply-chain benefit the other pins get from waiting.
 
-Instead, `.devcontainer/Dockerfile` and `windows-setup.ps1` install npm's
+Instead, `.claude/tooling/devcontainer/Dockerfile` and `windows-setup.ps1` install npm's
 `stable` dist-tag at build/setup time. There is no pinned version for
 `dependency-pin-check.yml` to compare against upstream, and
 `discover-pins.py` does not emit a `claude-code-cli` inventory entry — do not
@@ -66,7 +66,7 @@ The Codex CLI is **exempt from the cooldown and from pin tracking**, on the
 same terms as Claude Code. Founder decision, 2026-10-13 (Issue #4969): Codex
 is the security-review harness's subscription lane, the account-side model
 list changes often, and a stale CLI can lag what the account serves.
-`.devcontainer/Dockerfile` installs npm's `latest` dist-tag at build time
+`.claude/tooling/devcontainer/Dockerfile` installs npm's `latest` dist-tag at build time
 (`latest`, not `stable`, because Codex publishes no `stable` tag; alphas are
 published under `alpha`). `discover-pins.py` emits no Codex entry — do not file
 a bump story for it. The installed version is recorded as the

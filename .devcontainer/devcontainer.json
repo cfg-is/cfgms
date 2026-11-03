@@ -1,7 +1,7 @@
 {
   "name": "CFGMS Agent",
   "build": {
-    "dockerfile": "Dockerfile",
+    "dockerfile": "../.claude/tooling/devcontainer/Dockerfile",
     "context": ".."
   },
 
@@ -30,8 +30,8 @@
   ],
 
   // Lifecycle hooks — both delegate to the shared setup-env.sh script.
-  "postCreateCommand": ".devcontainer/scripts/post-create.sh",
-  "postStartCommand": ".devcontainer/scripts/post-start.sh",
+  "postCreateCommand": ".claude/tooling/devcontainer/scripts/post-create.sh",
+  "postStartCommand": ".claude/tooling/devcontainer/scripts/post-start.sh",
 
   "customizations": {
     "vscode": {

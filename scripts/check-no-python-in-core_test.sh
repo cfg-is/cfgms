@@ -43,7 +43,7 @@ make_repo() {
     git -C "$dir" config user.name "test"
     mkdir -p "$dir/cmd/controller" "$dir/pkg/storage" "$dir/features/rbac" \
         "$dir/api/proto" "$dir/web/src" "$dir/test/integration" \
-        "$dir/.claude/scripts" "$dir/scripts"
+        "$dir/.claude/tooling/scripts" "$dir/scripts"
     echo "package main" > "$dir/cmd/controller/main.go"
     echo "placeholder" > "$dir/scripts/other.sh"
     git -C "$dir" add cmd pkg features api web test .claude scripts 2>/dev/null || true
@@ -124,9 +124,9 @@ done
 
 # --- 3. A .py file under an allowed tree (.claude/, scripts/) passes --------
 repo="$(make_repo)"
-printf '# fine\n' > "$repo/.claude/scripts/tool.py"
+printf '# fine\n' > "$repo/.claude/tooling/scripts/tool.py"
 printf '# fine\n' > "$repo/scripts/tool.py"
-git -C "$repo" add .claude/scripts/tool.py scripts/tool.py
+git -C "$repo" add .claude/tooling/scripts/tool.py scripts/tool.py
 git -C "$repo" commit --quiet -m "allowed python"
 run_checker "$repo"
 if [ "$RC" -eq 0 ]; then

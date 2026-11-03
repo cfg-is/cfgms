@@ -21,7 +21,7 @@ from the private project:
 
 ```bash
 # For each <NUM> / <ITEM_ID> pair parsed from $ARGUMENTS:
-./scripts/project-queue.sh get-item "<ITEM_ID>"
+./.claude/tooling/scripts/project-queue.sh get-item "<ITEM_ID>"
 # Returns JSON with .body (story body, ACs), .title, .issue_num, .status
 ```
 
@@ -85,13 +85,13 @@ For each story, run all 10 checks. A story must pass ALL checks to be promoted.
 - Also check all stories with "In Progress" or "Ready" status in the same epic:
   ```bash
   # Get sibling stories that are queued or in flight
-  bash ./scripts/project-queue.sh list-by-status "Ready"
-  bash ./scripts/project-queue.sh list-by-status "In Progress"
+  bash ./.claude/tooling/scripts/project-queue.sh list-by-status "Ready"
+  bash ./.claude/tooling/scripts/project-queue.sh list-by-status "In Progress"
   ```
 - **And every `Draft` story, not just your batch** — a Draft story becomes Ready later and
   the overlap lands then, with no one watching for it.
   ```bash
-  bash ./scripts/project-queue.sh list-by-status "Draft"
+  bash ./.claude/tooling/scripts/project-queue.sh list-by-status "Draft"
   ```
 - Widening a scope creates overlaps that did not exist when you started, and Check 2 often
   requires widening. Re-run the overlap check after every scope edit (post-edit checks below).
@@ -273,7 +273,7 @@ cat > /tmp/parked-<NUM>.md <<'PARK_EOF'
 what outcome resolves the criterion>
 PARK_EOF
 
-./scripts/pipeline-helper.sh comment <NUM> /tmp/parked-<NUM>.md
+./.claude/tooling/scripts/pipeline-helper.sh comment <NUM> /tmp/parked-<NUM>.md
 rm /tmp/parked-<NUM>.md
 ```
 
@@ -332,7 +332,7 @@ and principles the tokens encode.
 ## Editing a gate-bearing section
 
 `## Dependencies` and `## Files In Scope` are **machine-read**. The dispatch preflight
-parses them with `parse_story` in `.claude/scripts/po-cycle-preflight.py`, and what it
+parses them with `parse_story` in `.claude/tooling/scripts/po-cycle-preflight.py`, and what it
 extracts decides whether a story dispatches, holds, or collides with another agent.
 Everything else in the body is for a human and a dev agent to read. So an edit that
 would be harmless prose anywhere else changes real behaviour in these two sections.
@@ -355,7 +355,7 @@ Command for step 1:
 ```bash
 python3 - <<'EOF'
 import json, subprocess, importlib.util
-spec = importlib.util.spec_from_file_location("pre", ".claude/scripts/po-cycle-preflight.py")
+spec = importlib.util.spec_from_file_location("pre", ".claude/tooling/scripts/po-cycle-preflight.py")
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 issue = json.loads(subprocess.run(
     ['gh','issue','view','<NUM>','--json','number,title,body,labels,state'],
@@ -409,7 +409,7 @@ and overusing it buries real escalations in noise.
 | **Revision Needed** | `Draft` | A check fails in a way an agent (BA / Planning Team) can fix: missing/malformed sections, vague ACs, oversized / needs-split, wrong refs or paths you could not auto-fix. | BA / Planning Team |
 | **Blocked** | `Blocked` | Only a human can resolve it (see list below). | Founder / PO |
 
-**IMPORTANT:** Use `./scripts/pipeline-helper.sh` for ALL GitHub write operations. Direct `gh` calls with heredocs, subshells, or compound commands will be blocked by permission rules.
+**IMPORTANT:** Use `./.claude/tooling/scripts/pipeline-helper.sh` for ALL GitHub write operations. Direct `gh` calls with heredocs, subshells, or compound commands will be blocked by permission rules.
 
 ### Outcome 1 — Ready (passes)
 
@@ -429,7 +429,7 @@ When all 10 checks pass:
    work=$(mktemp -d)
 
    # Read live, right before writing — not the body/ITEM_ID snapshot from Input above.
-   live=$(./scripts/pipeline-helper.sh view <NUM>)
+   live=$(./.claude/tooling/scripts/pipeline-helper.sh view <NUM>)
    echo "$live" | python3 -c "import json,sys; print(json.load(sys.stdin)['body'])" > "$work/story-body.md"
    updated_at=$(echo "$live" | python3 -c "import json,sys; print(json.load(sys.stdin)['updatedAt'])")
    # ... edit the file to add implementation notes ...
@@ -438,12 +438,12 @@ When all 10 checks pass:
    # $updated_at was read (Issue #4433). On refusal it names both timestamps
    # and writes the live body to a conflict file — merge your notes into that
    # file and retry with a fresh `view`, rather than re-deriving from scratch.
-   ./scripts/pipeline-helper.sh edit-body <NUM> "$work/story-body.md" "$updated_at"
+   ./.claude/tooling/scripts/pipeline-helper.sh edit-body <NUM> "$work/story-body.md" "$updated_at"
 
    # Read the write back and confirm your own additions actually landed.
    # UPDATED / rc0 means the API call succeeded, not that your specific
    # content is what a later reader will see.
-   ./scripts/pipeline-helper.sh view <NUM> | python3 -c "
+   ./.claude/tooling/scripts/pipeline-helper.sh view <NUM> | python3 -c "
    import json, sys
    body = json.load(sys.stdin)['body']
    assert '<distinctive snippet of what you just added>' in body, \
@@ -454,7 +454,7 @@ When all 10 checks pass:
 
 2. Update project status to Ready:
    ```bash
-   bash ./scripts/project-queue.sh update-field "<ITEM_ID>" status "Ready"
+   bash ./.claude/tooling/scripts/project-queue.sh update-field "<ITEM_ID>" status "Ready"
    ```
 
 ### Outcome 2 — Revision Needed (Draft)
@@ -488,7 +488,7 @@ this for obvious gaps). Only when the gap needs BA judgment:
 1. Leave/return project status to Draft and post a revision comment carrying the
    `<!-- tl-revision -->` marker:
    ```bash
-   bash ./scripts/project-queue.sh update-field "<ITEM_ID>" status "Draft"
+   bash ./.claude/tooling/scripts/project-queue.sh update-field "<ITEM_ID>" status "Draft"
 
    cat > /tmp/revision-<NUM>.md <<'REV_EOF'
    <!-- tl-revision -->
@@ -505,7 +505,7 @@ this for obvious gaps). Only when the gap needs BA judgment:
    <Concrete instruction for the BA — sections to add, split boundaries, paths to correct>
    REV_EOF
 
-   ./scripts/pipeline-helper.sh comment <NUM> /tmp/revision-<NUM>.md
+   ./.claude/tooling/scripts/pipeline-helper.sh comment <NUM> /tmp/revision-<NUM>.md
    rm /tmp/revision-<NUM>.md
    ```
 
@@ -536,7 +536,7 @@ yet," the correct outcome is **Ready**.
 
 1. Set project status to Blocked and post the escalation comment:
    ```bash
-   bash ./scripts/project-queue.sh update-field "<ITEM_ID>" status "Blocked"
+   bash ./.claude/tooling/scripts/project-queue.sh update-field "<ITEM_ID>" status "Blocked"
 
    cat > /tmp/blocked-<NUM>.md <<'BLOCK_EOF'
    ## Tech Lead Review: Blocked
@@ -552,7 +552,7 @@ yet," the correct outcome is **Ready**.
    <The decision the founder needs to make — e.g., approve the architecture exception, decompose the non-v1 item, break the dependency cycle>
    BLOCK_EOF
 
-   ./scripts/pipeline-helper.sh comment <NUM> /tmp/blocked-<NUM>.md
+   ./.claude/tooling/scripts/pipeline-helper.sh comment <NUM> /tmp/blocked-<NUM>.md
    rm /tmp/blocked-<NUM>.md
    ```
 
@@ -584,7 +584,7 @@ cat > /tmp/tl-summary.md <<'SUMMARY_EOF'
 - #NNN — <the decision the founder must make>
 SUMMARY_EOF
 
-./scripts/pipeline-helper.sh comment $EPIC_NUM /tmp/tl-summary.md
+./.claude/tooling/scripts/pipeline-helper.sh comment $EPIC_NUM /tmp/tl-summary.md
 rm /tmp/tl-summary.md
 ```
 
