@@ -150,35 +150,22 @@ jobs:
           echo "## Roadmap Validation" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          # Check for required sections
-          if grep -q "## Current Status" docs/product/roadmap.md; then
-            echo "✅ Current Status section found" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "⚠️  Missing Current Status section" >> $GITHUB_STEP_SUMMARY
-          fi
+          # Product outcomes are not a second issue/checkbox backlog. Check the
+          # roadmap's stable navigation contract; issue state lives in GitHub.
+          roadmap=docs/product/roadmap.md
+          for heading in \
+            '## Active SaaS release priorities' \
+            '### Early beta' \
+            '### Launch' \
+            '## Capability Tags'; do
+            if ! grep -Fxq "$heading" "$roadmap"; then
+              echo "❌ Missing roadmap section: $heading" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          done
 
-          # Check for Epic structure
-          if grep -q "### Epic [0-9]" docs/product/roadmap.md; then
-            echo "✅ Epic structure found" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "⚠️  No Epic structure found" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          # Count completed vs pending stories
-          completed=$(grep -c "\- \[x\]" docs/product/roadmap.md || echo "0")
-          pending=$(grep -c "\- \[ \]" docs/product/roadmap.md || echo "0")
-          total=$((completed + pending))
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Roadmap Statistics" >> $GITHUB_STEP_SUMMARY
-          echo "- Completed Stories: $completed" >> $GITHUB_STEP_SUMMARY
-          echo "- Pending Stories: $pending" >> $GITHUB_STEP_SUMMARY
-          echo "- Total Stories: $total" >> $GITHUB_STEP_SUMMARY
-
-          if [ $total -gt 0 ]; then
-            progress=$((completed * 100 / total))
-            echo "- Progress: $progress%" >> $GITHUB_STEP_SUMMARY
-          fi
+          echo "✅ Active priorities and capability vocabulary found" >> "$GITHUB_STEP_SUMMARY"
+          echo "Outcome coverage is reviewed against current source and issues; no checkbox completion percentage is inferred." >> "$GITHUB_STEP_SUMMARY"
 
   # Documentation summary
   documentation-summary:
