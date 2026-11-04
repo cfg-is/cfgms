@@ -2095,15 +2095,14 @@ STUB
         return
     fi
 
-    # 5. The macOS CI-job-level shard targets reimplement the partition instead
-    #    of delegating here, so they must carry the same two properties against
-    #    their own variable pairs: no command execution, and no fail-open.
+    # 5. The macOS CI-job-level shard target reimplements the partition instead
+    #    of delegating here, so it must carry the same two properties against
+    #    its own variable pair: no command execution, and no fail-open.
     #    Their injection vector is awk rather than bash arithmetic — an unquoted
     #    `awk -v s=$shard` lets a value containing whitespace word-split into a
     #    replacement awk program, whose system() runs arbitrary commands.
     local pair shard_var shards_var target
-    for pair in "CFGMS_MACOS_API_SHARD CFGMS_MACOS_API_SHARDS test-go-group-macos-api" \
-                "CFGMS_MACOS_REST_SHARD CFGMS_MACOS_REST_SHARDS test-go-group-macos-rest"; do
+    for pair in "CFGMS_MACOS_REST_SHARD CFGMS_MACOS_REST_SHARDS test-go-group-macos-rest"; do
         # shellcheck disable=SC2086 # deliberate word split of the fixture triple
         set -- $pair
         shard_var="$1"; shards_var="$2"; target="$3"
@@ -2190,6 +2189,78 @@ STUB
     done
 
     log_pass "test-framework-api-sharded and the macOS shard groups: injection payloads, non-integer, zero and out-of-range shard values all fail closed; valid counts still run"
+}
+
+# Regression guard for the macOS unit-test legs (Issue #5746): the union of the
+# test-go-group-macos-* package lists must equal the in-module packages with
+# test files in the GOOS=darwin dependency closure of the three macOS-shipped
+# binaries — nothing outside it (no controller-only package), nothing in it
+# left out. GOOS=darwin is pinned on both sides so this holds on a Linux host.
+test_macos_groups_cover_exactly_shipped_packages() {
+    log_test "Testing macOS groups: union equals the GOOS=darwin shipped-package set exactly..."
+
+    local pkg_filter='^github\.com/cfgis/cfgms/'
+    local expected expected_rc=0
+    expected=$(GOOS=darwin go list -deps -f '{{if and (not .Standard) (or .TestGoFiles .XTestGoFiles)}}{{.ImportPath}}{{end}}' \
+        ./cmd/steward ./cmd/cfgms-steward-launcher ./cmd/cfg 2>&1 | grep -E "$pkg_filter" | sort -u) || expected_rc=$?
+    if [[ $expected_rc -ne 0 || -z "$expected" ]]; then
+        log_fail "GOOS=darwin go list -deps produced no shipped packages (rc=${expected_rc})"
+        return
+    fi
+
+    # Every macos group target in the Makefile, discovered rather than listed,
+    # so a newly added group is included in the union automatically. Rest is
+    # enumerated across two shards.
+    local targets target
+    targets=$(grep -oE '^test-go-group-macos-[a-z]+:' Makefile | tr -d ':')
+    if [[ -z "$targets" ]]; then
+        log_fail "no test-go-group-macos-* targets found in Makefile"
+        return
+    fi
+
+    local actual="" out shard
+    for target in $targets; do
+        for shard in 0 1; do
+            local rc=0
+            out=$(CFGMS_TEST_GROUP_LIST_ONLY=1 CFGMS_MACOS_REST_SHARD=$shard CFGMS_MACOS_REST_SHARDS=2 \
+                make --no-print-directory "$target" 2>&1) || rc=$?
+            if [[ $rc -ne 0 ]]; then
+                log_fail "${target} (shard ${shard}) failed in list-only mode"
+                echo "$out" | tail -10
+                return
+            fi
+            actual+=$(echo "$out" | grep -E "$pkg_filter")$'\n'
+            # Non-sharded targets are identical across shard values.
+            [[ "$target" == "test-go-group-macos-rest" ]] || break
+        done
+    done
+
+    local dups
+    dups=$(echo "$actual" | grep . | sort | uniq -d)
+    if [[ -n "$dups" ]]; then
+        log_fail "package(s) appear in more than one macOS group: $(echo "$dups" | head -5 | tr '\n' ' ')"
+        return
+    fi
+
+    local extra missing
+    actual=$(echo "$actual" | grep . | sort -u)
+    extra=$(comm -13 <(echo "$expected") <(echo "$actual"))
+    missing=$(comm -23 <(echo "$expected") <(echo "$actual"))
+    if [[ -n "$extra" ]]; then
+        log_fail "macOS group(s) test package(s) outside the shipped set: $(echo "$extra" | head -5 | tr '\n' ' ')"
+        return
+    fi
+    if [[ -n "$missing" ]]; then
+        log_fail "shipped package(s) left out of every macOS group: $(echo "$missing" | head -5 | tr '\n' ' ')"
+        return
+    fi
+
+    if grep -qE 'test-go-group-macos-(api|controller)' Makefile .github/workflows/cross-platform-build-pr.yml; then
+        log_fail "a macos-api or macos-controller target/leg still exists"
+        return
+    fi
+
+    log_pass "macOS groups: $(echo "$actual" | wc -l | tr -d ' ') packages, exactly the GOOS=darwin shipped set, no duplicates"
 }
 
 test_resource_sampler_no_placeholder() {
@@ -2523,6 +2594,7 @@ DISPATCH_TABLE=(
     "test_all_modules_covers_module_yaml_tree:core"
     "test_api_shard_aggregation_fails_closed:core"
     "test_api_shard_count_rejects_non_integer:core"
+    "test_macos_groups_cover_exactly_shipped_packages:core"
     "test_no_tracked_file_mutation:core"
 )
 
