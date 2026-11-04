@@ -40,9 +40,9 @@ defined way to query and serve that model.
   persisted centrally; neither is entity-addressed.
 - **Relationships exist only in pockets, shaped by whoever discovered them.** The Hyper-V module
   holds cluster→node→VM topology as fields on Windows-only structs
-  (`features/modules/hyperv/cluster.go:161` — `MemberNodes`, `RoleOwners`); the directory layer
-  holds membership as per-object adjacency lists (`pkg/directory/dna/interfaces.go:182` —
-  `DirectoryRelationships`); tenancy is a `ParentID` pointer plus materialized path
+  (`features/modules/hyperv/cluster.go:161` — `MemberNodes`, `RoleOwners`); directory
+  membership rides as per-object `directory_group` DNA reported by the AD module
+  (`features/modules/extended/activedirectory/module.yaml` `owns:`); tenancy is a `ParentID` pointer plus materialized path
   (`pkg/storage/interfaces/business/tenant_store.go`); M365 GDAP holds partner↔customer edges.
   There is **no shared edge type, no channel in the module contract to emit a discovered
   relationship** (they ride as opaque keys inside `ConfigState.AsMap()`), and **no store that holds
@@ -625,7 +625,7 @@ construction (§9 restriction, §10 constraints) — **rejected**.
   this ADR owns the graph and temporal access contract
 - `docs/design/mockups/troubleshooting-cockpit.html` + `docs/design/web-ui-design-system.md`
   — the consuming surface (case model, evidence canvas)
-- `features/modules/hyperv/cluster.go`, `pkg/directory/dna/interfaces.go`,
+- `features/modules/hyperv/cluster.go`, `features/modules/extended/activedirectory/module.yaml`,
   `pkg/storage/interfaces/business/tenant_store.go` — today's relationship pockets (refactor
   targets)
 - `pkg/dna/drift/drift.go`, `features/steward/steward.go` (StateDiff `:428`, DNA-ID mismatch
