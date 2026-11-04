@@ -41,6 +41,11 @@ param(
     [Parameter(Mandatory = $false)]
     [string]$ControllerURL = "",
 
+    # Controller root CA fingerprint(s) baked into the binary: comma-separated lowercase
+    # hex SHA-256 of the root certificate DER (64 characters each, at most 4). Optional.
+    [Parameter(Mandatory = $false)]
+    [string]$ControllerRootFingerprints = "",
+
     # Version string embedded in the binary and MSI product version (e.g. "v1.2.3").
     # Leading 'v' is stripped for the MSI product version field (requires N.N.N format).
     [Parameter(Mandatory = $false)]
@@ -208,10 +213,23 @@ if ($MsiVersion -notmatch '^\d+\.\d+\.\d+$') {
     $MsiVersion = "0.0.0"
 }
 
+if ($ControllerRootFingerprints -ne "") {
+    $RootFps = $ControllerRootFingerprints -split ','
+    if ($RootFps.Count -gt 4) {
+        throw "ControllerRootFingerprints allows at most 4 entries"
+    }
+    foreach ($fp in $RootFps) {
+        if ($fp -cnotmatch '^[0-9a-f]{64}$') {
+            throw "ControllerRootFingerprints entries must be 64 lowercase hex characters"
+        }
+    }
+}
+
 Write-Host "=== CFGMS Steward MSI Build ===" -ForegroundColor Cyan
 Write-Host "Version:        $Version"
 Write-Host "MSI Version:    $MsiVersion"
 Write-Host "ControllerURL:  $(if ($ControllerURL -ne '') { $ControllerURL } else { '(not set — generic build)' })"
+Write-Host "ControllerRoot: $(if ($ControllerRootFingerprints -ne '') { $ControllerRootFingerprints } else { '(not set)' })"
 Write-Host "PublisherKey:   $(if ($PublisherKey -ne '') { '(set)' } else { '(not set — placeholder key)' })"
 Write-Host "Arch:           $Arch"
 
@@ -238,6 +256,9 @@ if ($BinaryPath -eq "") {
         "-s -w -X main.ControllerURL=$ControllerURL -X main.SecurityProfile=public-beta $VersionFlag"
     } else {
         "-s -w -X main.SecurityProfile=public-beta $VersionFlag"
+    }
+    if ($ControllerRootFingerprints -ne "") {
+        $LdFlags += " -X main.ControllerRootFingerprints=$ControllerRootFingerprints"
     }
     if ($PublisherKey -ne "") {
         $LdFlags += " -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$PublisherKey"

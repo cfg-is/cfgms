@@ -46,6 +46,7 @@ VERSION="0.0.0"
 BINARY_PATH=""
 CONTROLLER_URL=""
 PUBLISHER_KEY=""
+CONTROLLER_ROOT_FPS="${CONTROLLER_ROOT_FPS:-}"
 RELEASE_BUILD="${CFGMS_RELEASE_BUILD:-0}"
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -57,9 +58,21 @@ while [[ $# -gt 0 ]]; do
         --binary-path)   BINARY_PATH="$2";    shift 2 ;;
         --controller-url) CONTROLLER_URL="$2"; shift 2 ;;
         --publisher-key) PUBLISHER_KEY="$2";  shift 2 ;;
+        --controller-root-fps) CONTROLLER_ROOT_FPS="$2"; shift 2 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
+
+# Controller root CA fingerprints: comma list of 64 lowercase hex characters, at most 4.
+# Taken from the CONTROLLER_ROOT_FPS environment variable or --controller-root-fps.
+# Empty is valid.
+if [[ -n "$CONTROLLER_ROOT_FPS" ]]; then
+    ROOT_FP_RE='[0-9a-f]{64}'
+    if ! [[ "$CONTROLLER_ROOT_FPS" =~ ^${ROOT_FP_RE}(,${ROOT_FP_RE}){0,3}$ ]]; then
+        echo "ERROR: CONTROLLER_ROOT_FPS must be 1-4 comma-separated entries of 64 lowercase hex characters." >&2
+        exit 1
+    fi
+fi
 
 if [[ "$RELEASE_BUILD" == 1 ]]; then
     if ! [[ "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+)(\.[0-9A-Za-z-]+)*)?$ ]]; then
@@ -101,6 +114,7 @@ echo "=== CFGMS Steward macOS .pkg Build ==="
 echo "Version:        $VERSION"
 echo "Pkg version:    $PKG_VERSION"
 echo "ControllerURL:  ${CONTROLLER_URL:-(not set — generic build)}"
+echo "ControllerRoot: ${CONTROLLER_ROOT_FPS:-(not set)}"
 echo "PublisherKey:   ${PUBLISHER_KEY:+(set)}${PUBLISHER_KEY:-(not set — placeholder key)}"
 echo "Arch:           $ARCH"
 
@@ -119,6 +133,9 @@ if [[ -z "$BINARY_PATH" ]]; then
         LD_FLAGS="-s -w -X main.ControllerURL=$CONTROLLER_URL -X main.SecurityProfile=public-beta $VERSION_FLAG"
     else
         LD_FLAGS="-s -w -X main.SecurityProfile=public-beta $VERSION_FLAG"
+    fi
+    if [[ -n "$CONTROLLER_ROOT_FPS" ]]; then
+        LD_FLAGS="$LD_FLAGS -X main.ControllerRootFingerprints=$CONTROLLER_ROOT_FPS"
     fi
     if [[ -n "$PUBLISHER_KEY" ]]; then
         LD_FLAGS="$LD_FLAGS -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$PUBLISHER_KEY"
