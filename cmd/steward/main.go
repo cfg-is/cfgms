@@ -510,16 +510,11 @@ func runRootCommand(cmd *cobra.Command, regTokenFile, controllerURL, configPath 
 	}
 
 	// The token is read into memory only; it is never placed in process arguments.
-	var regToken string
-	if regTokenFile != "" {
-		token, err := tokenFromFile(regTokenFile)
-		if err != nil {
-			return err
-		}
-		regToken = token
-	}
+	// A refused token file does not stop the steward: with no stored identity it
+	// waits for a usable token (waitForEnrollment).
+	regToken := startupTokenFromFile(regTokenFile)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(withRegTokenFile(context.Background(), regTokenFile))
 	defer cancel()
 
 	sigChan := make(chan os.Signal, 1)
@@ -646,7 +641,9 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 	// A stored identity is enough to start: with an empty token the steward
 	// connects on the identity. This runs after secureStewardDataDir above, so
 	// the identity is only read from a checked data directory.
-	storedID, _ := loadIdentity(certStoreDirResolver())
+	// With no usable identity, token or config, resolveStartupIdentity keeps the
+	// steward running until a token appears or an identity is stored.
+	regToken, storedID, waitErr := resolveStartupIdentity(ctx, regToken, configPath, logger)
 	if regToken != "" || storedID != nil {
 		publicBeta, profileErr := publicBetaSecurityEnabled()
 		if profileErr != nil {
@@ -900,14 +897,17 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		return nil
 	}
 
-	// Standalone mode: --config was provided.
+	return runStandaloneOrStop(ctx, configPath, waitErr, logger)
+}
+
+// runStandaloneOrStop handles startup without a token or identity: standalone
+// mode when --config was provided, otherwise the outcome of the wait for
+// enrollment (enrollmentWaitResult).
+func runStandaloneOrStop(ctx context.Context, configPath string, waitErr error, logger logging.Logger) error {
 	if configPath != "" {
 		return runStandalone(ctx, configPath, logger)
 	}
-
-	// Structurally unreachable: runRootCommand's noFlags guard prevents calling
-	// runSteward with both regToken and configPath empty.
-	return nil
+	return enrollmentWaitResult(waitErr, logger)
 }
 
 // runStandalone runs the steward in standalone mode from the --config file at

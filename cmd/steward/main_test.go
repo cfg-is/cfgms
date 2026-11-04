@@ -1896,17 +1896,17 @@ func TestRegTokenAndRegTokenFileTogetherIsError(t *testing.T) {
 	assert.NotContains(t, err.Error(), "tok_from_file_123")
 }
 
-func TestRegTokenFileUnreadableIsErrorWithoutToken(t *testing.T) {
+func TestRegTokenFileUnreadableStartsWithoutToken(t *testing.T) {
 	dir := t.TempDir()
 	wide := filepath.Join(dir, "wide")
 	require.NoError(t, os.WriteFile(wide, []byte("tok_secret_789\n"), 0o600))
 	makeReadableByOthers(t, wide)
 
 	for _, path := range []string{wide, filepath.Join(dir, "missing")} {
-		_, started, err := runRootWithSeam(t, "--regtoken-file", path)
-		require.Error(t, err)
-		assert.False(t, started)
-		assert.NotContains(t, err.Error(), "tok_secret_789")
+		token, started, err := runRootWithSeam(t, "--regtoken-file", path)
+		require.NoError(t, err, "an unusable token file is waited on, not fatal")
+		assert.True(t, started)
+		assert.Empty(t, token, "the unsafe file's content is never used")
 	}
 }
 
