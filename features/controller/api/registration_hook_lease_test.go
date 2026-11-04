@@ -82,18 +82,14 @@ func TestManualReviewApprovalHook_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 
 	select {
 	case <-blocking.started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("node-a's cycle never started")
+	case ranA := <-doneA:
+		close(blocking.release)
+		t.Fatalf("node-a's cycle never started: RunIfLeader returned %v without invoking the sweep", ranA)
 	}
 
 	ranB := hookB.leaseJob.RunIfLeader(context.Background(), hookB.expireTimedOut)
 	assert.False(t, ranB, "node-b must not run its own cycle while node-a's is still in flight")
 
 	close(blocking.release)
-	select {
-	case ranA := <-doneA:
-		assert.True(t, ranA)
-	case <-time.After(2 * time.Second):
-		t.Fatal("node-a's cycle never completed")
-	}
+	assert.True(t, <-doneA, "node-a's cycle must complete once released")
 }
