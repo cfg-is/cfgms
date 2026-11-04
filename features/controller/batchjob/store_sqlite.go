@@ -8,10 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // SQLiteBatchJobStore is the SQLite-backed implementation of business.BatchJobStore.
@@ -20,22 +19,9 @@ type SQLiteBatchJobStore struct {
 	db *sql.DB
 }
 
-// NewSQLiteBatchJobStoreFromDSN opens a SQLite database at dsn and returns a
-// SQLiteBatchJobStore backed by it. The caller must call Initialize and Close.
-func NewSQLiteBatchJobStoreFromDSN(dsn string) (*SQLiteBatchJobStore, error) {
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("batch job store: open sqlite %s: %w", dsn, err)
-	}
-	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("batch job store: set busy_timeout: %w", err)
-	}
-	return &SQLiteBatchJobStore{db: db}, nil
-}
-
-// NewSQLiteBatchJobStore creates a SQLiteBatchJobStore that uses an existing db connection.
-// The caller must call Initialize and is responsible for closing db.
+// NewSQLiteBatchJobStore creates a SQLiteBatchJobStore over a connection the
+// caller opened and configured (driver registration, busy_timeout). The store
+// takes ownership of db: Close closes it. The caller must call Initialize.
 func NewSQLiteBatchJobStore(db *sql.DB) *SQLiteBatchJobStore {
 	return &SQLiteBatchJobStore{db: db}
 }
@@ -373,47 +359,9 @@ ORDER BY step_index ASC`
 
 	var steps []business.BatchStep
 	for rows.Next() {
-		var (
-			stewardIDsJSON string
-			failedIDsJSON  string
-			rollbackJobID  string
-			startedAt      sql.NullTime
-			completedAt    sql.NullTime
-		)
-		step := business.BatchStep{}
-		if err := rows.Scan(
-			&step.Index,
-			(*string)(&step.Status),
-			&stewardIDsJSON,
-			&startedAt, &completedAt,
-			&failedIDsJSON, &rollbackJobID,
-		); err != nil {
-			return nil, fmt.Errorf("batch job store scan step: %w", err)
-		}
-		if stewardIDsJSON != "" {
-			if err := json.Unmarshal([]byte(stewardIDsJSON), &step.StewardIDs); err != nil {
-				return nil, fmt.Errorf("batch job store scan step steward_ids: %w", err)
-			}
-		}
-		if failedIDsJSON != "" {
-			if err := json.Unmarshal([]byte(failedIDsJSON), &step.FailedIDs); err != nil {
-				return nil, fmt.Errorf("batch job store scan step failed_ids: %w", err)
-			}
-		}
-		step.RollbackJobID = rollbackJobID
-		if startedAt.Valid {
-			t := startedAt.Time.UTC()
-			step.StartedAt = &t
-		}
-		if completedAt.Valid {
-			t := completedAt.Time.UTC()
-			step.CompletedAt = &t
-		}
-		if step.StewardIDs == nil {
-			step.StewardIDs = []string{}
-		}
-		if step.FailedIDs == nil {
-			step.FailedIDs = []string{}
+		step, err := scanStep(rows)
+		if err != nil {
+			return nil, err
 		}
 		steps = append(steps, step)
 	}
@@ -421,6 +369,64 @@ ORDER BY step_index ASC`
 		return nil, fmt.Errorf("batch job store steps rows: %w", err)
 	}
 	return steps, nil
+}
+
+// scanStep reads one batch_steps row produced by loadSteps' query.
+func scanStep(rows *sql.Rows) (business.BatchStep, error) {
+	var (
+		stewardIDsJSON string
+		failedIDsJSON  string
+		rollbackJobID  string
+		startedAt      sql.NullTime
+		completedAt    sql.NullTime
+	)
+	step := business.BatchStep{}
+	if err := rows.Scan(
+		&step.Index,
+		(*string)(&step.Status),
+		&stewardIDsJSON,
+		&startedAt, &completedAt,
+		&failedIDsJSON, &rollbackJobID,
+	); err != nil {
+		return business.BatchStep{}, fmt.Errorf("batch job store scan step: %w", err)
+	}
+	ids, err := decodeIDList(stewardIDsJSON)
+	if err != nil {
+		return business.BatchStep{}, fmt.Errorf("batch job store scan step steward_ids: %w", err)
+	}
+	step.StewardIDs = ids
+	if ids, err = decodeIDList(failedIDsJSON); err != nil {
+		return business.BatchStep{}, fmt.Errorf("batch job store scan step failed_ids: %w", err)
+	}
+	step.FailedIDs = ids
+	step.RollbackJobID = rollbackJobID
+	step.StartedAt = utcTimePtr(startedAt)
+	step.CompletedAt = utcTimePtr(completedAt)
+	return step, nil
+}
+
+// decodeIDList decodes a JSON string array column. An empty column or a JSON
+// null yields an empty, non-nil slice.
+func decodeIDList(raw string) ([]string, error) {
+	var ids []string
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+			return nil, err
+		}
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
+// utcTimePtr converts a nullable timestamp column to a UTC *time.Time (nil when NULL).
+func utcTimePtr(v sql.NullTime) *time.Time {
+	if !v.Valid {
+		return nil
+	}
+	t := v.Time.UTC()
+	return &t
 }
 
 // txer is the common interface for sql.DB and sql.Tx for Exec.

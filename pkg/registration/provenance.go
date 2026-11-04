@@ -173,6 +173,23 @@ func sharesMember(a, b string) bool {
 	return false
 }
 
+// hasStableProvenanceKey reports whether stored holds any key that is neither a
+// DNA field nor an ephemeral provenance key.
+func hasStableProvenanceKey(stored map[string]string) bool {
+	for k := range stored {
+		if !DNAFieldKeys[k] && !EphemeralProvenanceKeys[k] {
+			return true
+		}
+	}
+	return false
+}
+
+// admissionValueMatches reports whether the incoming value for key matches the
+// stored one: exact equality, or a shared member for set-overlap keys.
+func admissionValueMatches(key, stored, incoming string) bool {
+	return incoming == stored || (setOverlapKeys[key] && sharesMember(stored, incoming))
+}
+
 // ScoreAdmission scores incoming host attributes against a stored baseline for
 // ControlChannel admission. Differences from FuzzyMatch:
 //   - install_date is not scored while the baseline has any stable key;
@@ -187,13 +204,7 @@ func (ProvenanceMatcher) ScoreAdmission(storedJSON string, incoming map[string]s
 	if storedJSON == "" || json.Unmarshal([]byte(storedJSON), &stored) != nil {
 		return ProvenanceResult{}, nil, nil
 	}
-	hasStable := false
-	for k := range stored {
-		if !DNAFieldKeys[k] && !EphemeralProvenanceKeys[k] {
-			hasStable = true
-			break
-		}
-	}
+	hasStable := hasStableProvenanceKey(stored)
 	for k, sv := range stored {
 		if !admissionKeyScored(k, hasStable) {
 			continue
@@ -202,7 +213,7 @@ func (ProvenanceMatcher) ScoreAdmission(storedJSON string, incoming map[string]s
 		if !ok || iv == "" {
 			continue
 		}
-		if iv == sv || (setOverlapKeys[k] && sharesMember(sv, iv)) {
+		if admissionValueMatches(k, sv, iv) {
 			matched = append(matched, k)
 		} else {
 			divergent = append(divergent, k)

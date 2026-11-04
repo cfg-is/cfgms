@@ -83,49 +83,9 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	safeSelector = strings.ReplaceAll(safeSelector, "\n", "_")
 	safeSelector = strings.ReplaceAll(safeSelector, "\r", "_")
 
-	filter, parsedTenantPath, err := selector.Parse(req.Selector)
-	if err != nil {
-		// err embeds req.Selector via selector.Parse format strings — sanitize before logging.
-		safeParseErr := logging.SanitizeLogValue(err.Error())
-		safeParseErr = strings.ReplaceAll(safeParseErr, "\n", "_")
-		safeParseErr = strings.ReplaceAll(safeParseErr, "\r", "_")
-		s.logger.Info("Invalid selector expression",
-			"selector", safeSelector, "error", safeParseErr)
-		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_SELECTOR")
+	targetIDs, ok := s.resolveJobTargets(w, r, req.Selector, safeSelector, tenantID)
+	if !ok {
 		return
-	}
-
-	// Scope to the caller's subtree. An explicit selector prefix must be within
-	// the caller's subtree; absent prefix defaults to tenantID and all descendants.
-	// Global-scope callers (empty tenantID) are unrestricted.
-	if parsedTenantPath != "" {
-		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), parsedTenantPath, "POST /api/v1/jobs"); access != tenantAuthAllowed {
-			if !s.writeTenantCrossingIfNeeded(w, access, parsedTenantPath) {
-				s.writeErrorResponse(w, http.StatusForbidden,
-					"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
-			}
-			return
-		}
-		filter.TenantSubtree = parsedTenantPath
-	} else if tenantID != "" { //architecture:allow-root-scope -- selector narrowing for tenant callers; the matched stewards then pass authorizeFleetTargets
-		s.scopeFilterToTenantSubtree(r.Context(), &filter, tenantID)
-	}
-
-	results, err := s.fleetQuery.Search(r.Context(), filter)
-	if err != nil {
-		s.logger.Error("Fleet query failed during job creation", "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
-		return
-	}
-	// A batch job writes to every matched steward: each one's tenant must pass the
-	// caller's tenant decision, crossing included (Issue #4665).
-	if !s.authorizeFleetTargets(w, r, results, "POST /api/v1/jobs") {
-		return
-	}
-
-	targetIDs := make([]string, 0, len(results))
-	for _, res := range results {
-		targetIDs = append(targetIDs, res.ID)
 	}
 
 	// jobID is captured before the struct so log calls in this handler and the
@@ -178,25 +138,85 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Start the executor asynchronously — the HTTP response returns immediately.
-	if s.batchJobExecutor != nil {
-		executor := s.batchJobExecutor
-		// #nosec G118 -- the persisted batch job intentionally outlives the HTTP
-		// request and the executor applies its own batch/concurrency lifecycle.
-		go func() {
-			if execErr := executor.Execute(context.Background(), job); execErr != nil {
-				// execErr may embed job.Selector (user-tainted) via executor error messages.
-				// Sanitize with the sequential-reassignment form that CodeQL's ReplaceSanitizer
-				// recognises; logging.SanitizeLogValue alone is not recognised at call sites.
-				safeExecErr := logging.SanitizeLogValue(execErr.Error())
-				safeExecErr = strings.ReplaceAll(safeExecErr, "\n", "_")
-				safeExecErr = strings.ReplaceAll(safeExecErr, "\r", "_")
-				s.logger.Error("Batch job execution failed",
-					"job_id", jobID, "error", safeExecErr)
-			}
-		}()
-	}
+	s.startBatchJobExecution(job, jobID)
 
 	s.writeResponse(w, http.StatusAccepted, resp)
+}
+
+// resolveJobTargets parses the job selector, scopes it to the caller's subtree,
+// resolves it against the fleet and authorizes every matched steward. It writes
+// the error response and returns ok=false on any failure. safeSelector is the
+// log-safe form of rawSelector.
+func (s *Server) resolveJobTargets(w http.ResponseWriter, r *http.Request, rawSelector, safeSelector, tenantID string) ([]string, bool) {
+	filter, parsedTenantPath, err := selector.Parse(rawSelector)
+	if err != nil {
+		// err embeds rawSelector via selector.Parse format strings — sanitize before logging.
+		safeParseErr := logging.SanitizeLogValue(err.Error())
+		safeParseErr = strings.ReplaceAll(safeParseErr, "\n", "_")
+		safeParseErr = strings.ReplaceAll(safeParseErr, "\r", "_")
+		s.logger.Info("Invalid selector expression",
+			"selector", safeSelector, "error", safeParseErr)
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_SELECTOR")
+		return nil, false
+	}
+
+	// Scope to the caller's subtree. An explicit selector prefix must be within
+	// the caller's subtree; absent prefix defaults to tenantID and all descendants.
+	// Global-scope callers (empty tenantID) are unrestricted.
+	if parsedTenantPath != "" {
+		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), parsedTenantPath, "POST /api/v1/jobs"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, parsedTenantPath) {
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+			}
+			return nil, false
+		}
+		filter.TenantSubtree = parsedTenantPath
+	} else if tenantID != "" { //architecture:allow-root-scope -- selector narrowing for tenant callers; the matched stewards then pass authorizeFleetTargets
+		s.scopeFilterToTenantSubtree(r.Context(), &filter, tenantID)
+	}
+
+	results, err := s.fleetQuery.Search(r.Context(), filter)
+	if err != nil {
+		s.logger.Error("Fleet query failed during job creation", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
+		return nil, false
+	}
+	// A batch job writes to every matched steward: each one's tenant must pass the
+	// caller's tenant decision, crossing included (Issue #4665).
+	if !s.authorizeFleetTargets(w, r, results, "POST /api/v1/jobs") {
+		return nil, false
+	}
+
+	targetIDs := make([]string, 0, len(results))
+	for _, res := range results {
+		targetIDs = append(targetIDs, res.ID)
+	}
+	return targetIDs, true
+}
+
+// startBatchJobExecution runs the executor for job asynchronously; the HTTP
+// response does not wait for it. jobID is passed separately so the log call
+// references a local that CodeQL does not taint via job.Selector.
+func (s *Server) startBatchJobExecution(job *business.BatchJob, jobID string) {
+	if s.batchJobExecutor == nil {
+		return
+	}
+	executor := s.batchJobExecutor
+	// #nosec G118 -- the persisted batch job intentionally outlives the HTTP
+	// request and the executor applies its own batch/concurrency lifecycle.
+	go func() {
+		if execErr := executor.Execute(context.Background(), job); execErr != nil {
+			// execErr may embed job.Selector (user-tainted) via executor error messages.
+			// Sanitize with the sequential-reassignment form that CodeQL's ReplaceSanitizer
+			// recognises; logging.SanitizeLogValue alone is not recognised at call sites.
+			safeExecErr := logging.SanitizeLogValue(execErr.Error())
+			safeExecErr = strings.ReplaceAll(safeExecErr, "\n", "_")
+			safeExecErr = strings.ReplaceAll(safeExecErr, "\r", "_")
+			s.logger.Error("Batch job execution failed",
+				"job_id", jobID, "error", safeExecErr)
+		}
+	}()
 }
 
 // handleListJobs handles GET /api/v1/jobs.

@@ -5,7 +5,6 @@ package batchjob_test
 import (
 	"context"
 	"errors"
-	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"sort"
 	"sync"
 	"testing"
@@ -19,6 +18,7 @@ import (
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // ----------------------------------------------------------------------------

@@ -3,11 +3,12 @@
 package batchjob_test
 
 import (
-	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 func TestBatchJobStatusConstants(t *testing.T) {
