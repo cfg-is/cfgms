@@ -653,6 +653,9 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		subsysState := newSubsystemState()
 		subsysState.markDegraded("controller") // degraded until first connect succeeds
 		subsysState.markDegraded("dna")        // degraded until initial DNA collection succeeds
+		// A non-default run account is reported as a degraded reason naming the
+		// account and the rights it lacks; the default account sets none.
+		reportRunAccount(subsysState.reasons, probeRunAccount(runAccountProbeDirs()), logger)
 
 		// Initialise device identity key store before registration so the refresh
 		// handshake path (Issue #2094) has a stable key available. Failure here is
@@ -3023,6 +3026,16 @@ var stewardDataDirResolver = func() string {
 	return filepath.Join(programData, "cfgms")
 }
 
+// runAccountProbeDirs lists the directories the run account must be able to
+// write: the cert store and, on Windows, the steward data directory.
+func runAccountProbeDirs() []string {
+	dirs := []string{certStoreDirResolver()}
+	if runtime.GOOS == "windows" {
+		dirs = append(dirs, stewardDataDirResolver())
+	}
+	return dirs
+}
+
 // dataDirCheck is the data-directory check runStewardInternal runs before it
 // reads any identity; tests substitute it to observe the order.
 var dataDirCheck = secureStewardDataDir
@@ -3038,6 +3051,22 @@ func secureStewardDataDir(logger logging.Logger) error {
 		return nil
 	}
 	dir := stewardDataDirResolver()
+	// A data directory owned by the steward's own non-default account is the
+	// legitimate case: it cannot adopt entries it did not create, and the
+	// run-account health reason reports the reduced rights. A tree that grants
+	// write access to anyone else is refused as tampered.
+	handled, ownErr := secureOwnAccountDataDir(dir)
+	if ownErr != nil {
+		logger.Error("Refusing to load trust and identity material from steward data directory",
+			"path", logging.SanitizeLogValue(dir),
+			"error", logging.SanitizeLogValue(ownErr.Error()))
+		return fmt.Errorf("steward data directory %s is not secure: %w", dir, ownErr)
+	}
+	if handled {
+		logger.Warn("Steward data directory is owned by the run account; leaving ownership unchanged",
+			"path", logging.SanitizeLogValue(dir))
+		return nil
+	}
 	adopted, err := security.AdoptAdminOnlyDir(dir)
 	for _, p := range adopted {
 		logger.Info("Took over steward data entry owned by a member of Administrators",
