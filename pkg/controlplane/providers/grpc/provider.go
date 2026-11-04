@@ -863,46 +863,59 @@ func (p *Provider) clientReceiveLoop() {
 			return
 		}
 
-		switch payload := msg.GetPayload().(type) {
-		case *transportpb.ControlMessage_Command:
-			sc := signedCommandFromProto(payload.Command)
-			p.commandsReceived.Add(1)
+		p.dispatchInbound(msg, peerChain, anchorOK)
+	}
+}
 
-			// Report-only enforces nothing the controller sends: a command goes
-			// only to the locked-trust handler, and is dropped when there is none.
-			if p.reportOnly.Load() {
-				p.deliverLockedCommand(sc, peerChain)
-				continue
-			}
+// dispatchInbound is the client receive switch. Command goes to the normal
+// subscription, or in report-only to the locked-trust handler; TamperState and
+// RepairRequest follow their signal rules; every other payload kind, including
+// one this build does not know, is dropped and counted.
+func (p *Provider) dispatchInbound(msg *transportpb.ControlMessage, peerChain interfaces.PeerChain, anchorOK bool) {
+	switch payload := msg.GetPayload().(type) {
+	case *transportpb.ControlMessage_Command:
+		p.receiveCommandMessage(payload.Command, peerChain)
+	case *transportpb.ControlMessage_TamperState:
+		p.receiveTamperState(payload.TamperState, anchorOK)
+	case *transportpb.ControlMessage_RepairRequest:
+		p.receiveRepairRequest(payload.RepairRequest, anchorOK)
+	case *transportpb.ControlMessage_Event:
+		p.dropInbound("event")
+	case *transportpb.ControlMessage_Heartbeat:
+		p.dropInbound("heartbeat")
+	case *transportpb.ControlMessage_Response:
+		p.dropInbound("response")
+	default:
+		// A payload kind this build does not know, or no payload at all.
+		p.dropInbound("unknown")
+	}
+}
 
-			// The controller sends on-connect commands (the signing-cert refresh,
-			// queued deliveries) as soon as this stream registers, which is before
-			// the steward has subscribed. Those are held and delivered on
-			// SubscribeCommands rather than dropped (Issue #4678).
-			handler, dropped := p.commands.Admit(sc)
-			if dropped {
-				p.deliveryFailures.Add(1)
-				p.logger.Warn("command dropped: received before subscription and the pending-command backlog is full",
-					"command_id", logging.SanitizeLogValue(sc.Command.ID),
-					"command_type", logging.SanitizeLogValue(string(sc.Command.Type)))
-			}
-			if handler != nil {
-				go p.handleCommand(handler, sc)
-			}
-		case *transportpb.ControlMessage_TamperState:
-			p.receiveTamperState(payload.TamperState, anchorOK)
-		case *transportpb.ControlMessage_RepairRequest:
-			p.receiveRepairRequest(payload.RepairRequest, anchorOK)
-		case *transportpb.ControlMessage_Event:
-			p.dropInbound("event")
-		case *transportpb.ControlMessage_Heartbeat:
-			p.dropInbound("heartbeat")
-		case *transportpb.ControlMessage_Response:
-			p.dropInbound("response")
-		default:
-			// A payload kind this build does not know, or no payload at all.
-			p.dropInbound("unknown")
-		}
+// receiveCommandMessage routes one received command.
+func (p *Provider) receiveCommandMessage(pb *transportpb.Command, peerChain interfaces.PeerChain) {
+	sc := signedCommandFromProto(pb)
+	p.commandsReceived.Add(1)
+
+	// Report-only enforces nothing the controller sends: a command goes only to
+	// the locked-trust handler, and is dropped when there is none.
+	if p.reportOnly.Load() {
+		p.deliverLockedCommand(sc, peerChain)
+		return
+	}
+
+	// The controller sends on-connect commands (the signing-cert refresh,
+	// queued deliveries) as soon as this stream registers, which is before
+	// the steward has subscribed. Those are held and delivered on
+	// SubscribeCommands rather than dropped (Issue #4678).
+	handler, dropped := p.commands.Admit(sc)
+	if dropped {
+		p.deliveryFailures.Add(1)
+		p.logger.Warn("command dropped: received before subscription and the pending-command backlog is full",
+			"command_id", logging.SanitizeLogValue(sc.Command.ID),
+			"command_type", logging.SanitizeLogValue(string(sc.Command.Type)))
+	}
+	if handler != nil {
+		go p.handleCommand(handler, sc)
 	}
 }
 
@@ -1037,17 +1050,24 @@ func (p *Provider) receiveRepairRequest(rr *transportpb.RepairRequest, anchorOK 
 }
 
 func wellFormedRepair(rr *transportpb.RepairRequest) bool {
-	if rr == nil || hasUnknownFields(rr) {
+	if rr == nil || hasUnknownFields(rr) || rr.GetRepairId() == "" {
 		return false
 	}
-	if rr.GetRepairId() == "" || len(rr.GetRepairId()) > maxRepairIDLen ||
-		len(rr.GetLossDigest()) > maxRepairDigestLen ||
-		len(rr.GetSignature()) > maxRepairSignatureLen ||
-		len(rr.GetSignerChainPem()) > maxRepairChainPEMLen ||
-		len(rr.GetApprovedLossCodes()) > maxApprovedLossCodes {
+	return repairFieldsWithinBounds(rr) && lossCodesValid(rr.GetApprovedLossCodes())
+}
+
+func repairFieldsWithinBounds(rr *transportpb.RepairRequest) bool {
+	return len(rr.GetRepairId()) <= maxRepairIDLen &&
+		len(rr.GetLossDigest()) <= maxRepairDigestLen &&
+		len(rr.GetSignature()) <= maxRepairSignatureLen &&
+		len(rr.GetSignerChainPem()) <= maxRepairChainPEMLen
+}
+
+func lossCodesValid(codes []string) bool {
+	if len(codes) > maxApprovedLossCodes {
 		return false
 	}
-	for _, code := range rr.GetApprovedLossCodes() {
+	for _, code := range codes {
 		if code == "" || len(code) > maxApprovedLossCodeLen {
 			return false
 		}

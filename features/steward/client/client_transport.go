@@ -760,6 +760,17 @@ func validControllerCARoots(caPEM string, now time.Time) (*x509.CertPool, error)
 	return pool, nil
 }
 
+// seedSigningCertPEMs seeds signingCertPEMs from the multi-cert field if
+// provided; otherwise it falls back to the singular SigningCertPEM for backward
+// compatibility. The result is de-duplicated.
+func seedSigningCertPEMs(cfg *TransportConfig) []string {
+	signingCertPEMs := cfg.SigningCertPEMs
+	if len(signingCertPEMs) == 0 && cfg.SigningCertPEM != "" {
+		signingCertPEMs = []string{cfg.SigningCertPEM}
+	}
+	return dedupeSigningCertPEMs(signingCertPEMs)
+}
+
 // NewTransportClient creates a new steward transport client.
 func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 	if cfg.ControllerURL == "" {
@@ -792,11 +803,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 
 	// Initialize offline queue for durable report persistence (Issue #419).
 	// Pass the SecretStore so the encryption key is persisted across restarts (Issue #920).
-	queueDir, queueSecrets := cfg.QueueDir, cfg.SecretStore
-	if cfg.ReportOnly {
-		// A report-only link writes nothing to disk: its queue is in memory.
-		queueDir, queueSecrets = "", nil
-	}
+	queueDir, queueSecrets := offlineQueueStorage(cfg)
 	offlineQueue, err := NewOfflineQueue(OfflineQueueConfig{
 		Dir:         queueDir,
 		MaxSize:     cfg.MaxQueueSize,
@@ -823,13 +830,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 			"error", logging.SanitizeLogValue(err.Error()))
 	}
 
-	// Seed signingCertPEMs from the multi-cert field if provided; otherwise
-	// fall back to the singular SigningCertPEM for backward compatibility.
-	signingCertPEMs := cfg.SigningCertPEMs
-	if len(signingCertPEMs) == 0 && cfg.SigningCertPEM != "" {
-		signingCertPEMs = []string{cfg.SigningCertPEM}
-	}
-	signingCertPEMs = dedupeSigningCertPEMs(signingCertPEMs)
+	signingCertPEMs := seedSigningCertPEMs(cfg)
 
 	c := &TransportClient{
 		heartbeatInterval:               heartbeatInterval,
@@ -874,10 +875,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		observeModuleLoader: cfg.ObserveModuleLoader,
 		logger:              cfg.Logger,
 	}
-	if cfg.ReportOnly {
-		c.reportOnly.Store(true)
-		c.dnaCollector = hostFactsOnly(cfg.DNACollector)
-	}
+	c.applyReportOnlyConfig(cfg)
 
 	return c, nil
 }
@@ -1134,18 +1132,7 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 	c.connected = true
 	c.mu.Unlock()
 
-	// Auto-initialize the config executor when the tenant ID is already known
-	// and no executor has been set. This lets the on-connect sync below run
-	// without the caller needing to call InitializeConfigExecutor first. (Issue #1720)
-	c.mu.RLock()
-	hasExecutor := c.configExecutor != nil
-	knownTenant := c.tenantID
-	c.mu.RUnlock()
-	if !hasExecutor && knownTenant != "" {
-		if initErr := c.InitializeConfigExecutor(knownTenant); initErr != nil {
-			c.logger.Warn("Could not auto-initialize config executor during connect", "error", initErr)
-		}
-	}
+	c.autoInitializeConfigExecutor()
 
 	// Drain any events queued during the offline period (Issue #419).
 	// Done synchronously before starting the heartbeat so the controller
@@ -1172,6 +1159,22 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 
 	c.logger.Info("Connected to controller successfully via gRPC transport")
 	return nil
+}
+
+// autoInitializeConfigExecutor initializes the config executor when the tenant
+// ID is already known and no executor has been set. This lets the on-connect
+// sync run without the caller needing to call InitializeConfigExecutor first.
+// (Issue #1720)
+func (c *TransportClient) autoInitializeConfigExecutor() {
+	c.mu.RLock()
+	hasExecutor := c.configExecutor != nil
+	knownTenant := c.tenantID
+	c.mu.RUnlock()
+	if !hasExecutor && knownTenant != "" {
+		if initErr := c.InitializeConfigExecutor(knownTenant); initErr != nil {
+			c.logger.Warn("Could not auto-initialize config executor during connect", "error", initErr)
+		}
+	}
 }
 
 // newControlPlaneProvider creates and initializes the steward's gRPC control
@@ -1883,9 +1886,6 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 // commandID is used only for log correlation; pass "" when triggered outside of a
 // command context. modules filters which modules to sync; nil means all.
 func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, modules []string) error {
-	if c.reportOnly.Load() {
-		return ErrReportOnly
-	}
 	// Retrieve configuration via gRPC data plane.
 	configData, version, err := c.GetConfiguration(ctx, modules)
 	if err != nil {

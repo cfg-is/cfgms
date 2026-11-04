@@ -19,6 +19,7 @@ import (
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // Report-only link.
@@ -88,6 +89,26 @@ func hostFactsOnly(c DNACollector) DNACollector {
 		return h.HostFactsOnly()
 	}
 	return c
+}
+
+// offlineQueueStorage returns the directory and secret store the offline queue
+// persists with. A report-only link writes nothing to disk: its queue is in
+// memory whatever the configuration says.
+func offlineQueueStorage(cfg *TransportConfig) (string, secretsif.SecretStore) {
+	if cfg.ReportOnly {
+		return "", nil
+	}
+	return cfg.QueueDir, cfg.SecretStore
+}
+
+// applyReportOnlyConfig switches a freshly built client to report-only when the
+// configuration asks for it, narrowing its DNA collector to host facts.
+func (c *TransportClient) applyReportOnlyConfig(cfg *TransportConfig) {
+	if !cfg.ReportOnly {
+		return
+	}
+	c.reportOnly.Store(true)
+	c.dnaCollector = hostFactsOnly(cfg.DNACollector)
 }
 
 // IsReportOnly reports whether the client is a report-only link.
@@ -321,21 +342,7 @@ func (c *TransportClient) connectReportOnly(ctx context.Context) error {
 		}
 	}
 
-	if grpcProv, ok := controlPlane.(*grpcCP.Provider); ok && grpcProv.TransportClient() != nil {
-		// Logs and events leave the host over LogStream. The emitter queue is a
-		// channel: memory only.
-		emitter := NewEventEmitter(EventEmitterConfig{
-			ClientSource: grpcProv.TransportClient,
-			StewardID:    stewardID,
-			Logger:       c.logger,
-			OnPanic:      c.recordComponentPanic,
-		})
-		emitter.Start(context.Background())
-		c.mu.Lock()
-		c.eventEmitter = emitter
-		c.mu.Unlock()
-		c.noteReportOnlyComponent(ReportOnlyComponentEventEmitter)
-	}
+	c.startReportOnlyEmitter(controlPlane, stewardID)
 
 	c.mu.Lock()
 	c.connected = true
@@ -345,14 +352,7 @@ func (c *TransportClient) connectReportOnly(ctx context.Context) error {
 	// timeout, and Disconnect closes heartbeatStop to end the goroutine.
 	go c.startHeartbeat()
 	c.noteReportOnlyComponent(ReportOnlyComponentHeartbeat)
-	// Announce the link and its reasons now rather than after the first tick.
-	go c.guard(componentHeartbeat, func() {
-		hbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		if err := c.SendHeartbeat(hbCtx, c.heartbeatStatus(), nil); err != nil {
-			c.logger.Warn("Failed to send initial report-only heartbeat", "error", logging.SanitizeLogValue(err.Error()))
-		}
-	})
+	c.announceReportOnlyLink(ctx)
 
 	c.mu.RLock()
 	hasCollector := c.dnaCollector != nil
@@ -364,6 +364,38 @@ func (c *TransportClient) connectReportOnly(ctx context.Context) error {
 
 	c.logger.Info("Report-only link connected")
 	return nil
+}
+
+// startReportOnlyEmitter starts the event emitter that carries logs and events
+// off the host over LogStream. Its queue is a channel: memory only.
+func (c *TransportClient) startReportOnlyEmitter(cp controlplaneInterfaces.ControlPlaneProvider, stewardID string) {
+	grpcProv, ok := cp.(*grpcCP.Provider)
+	if !ok || grpcProv.TransportClient() == nil {
+		return
+	}
+	emitter := NewEventEmitter(EventEmitterConfig{
+		ClientSource: grpcProv.TransportClient,
+		StewardID:    stewardID,
+		Logger:       c.logger,
+		OnPanic:      c.recordComponentPanic,
+	})
+	emitter.Start(context.Background())
+	c.mu.Lock()
+	c.eventEmitter = emitter
+	c.mu.Unlock()
+	c.noteReportOnlyComponent(ReportOnlyComponentEventEmitter)
+}
+
+// announceReportOnlyLink sends the first heartbeat now, with its reasons, rather
+// than after the first tick.
+func (c *TransportClient) announceReportOnlyLink(ctx context.Context) {
+	go c.guard(componentHeartbeat, func() {
+		hbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := c.SendHeartbeat(hbCtx, c.heartbeatStatus(), nil); err != nil {
+			c.logger.Warn("Failed to send initial report-only heartbeat", "error", logging.SanitizeLogValue(err.Error()))
+		}
+	})
 }
 
 // StartDNAInventoryLoop is the out-only DNA loop: it publishes the host-fact
