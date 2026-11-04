@@ -14,7 +14,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
-	"github.com/cfgis/cfgms/features/controller/batchjob"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -25,7 +24,7 @@ import (
 // Defined here (not in batchjob) to keep the api package self-contained and to let
 // test components inject a controlled executor without depending on the concrete type.
 type jobExecutor interface {
-	Execute(ctx context.Context, job *batchjob.BatchJob) error
+	Execute(ctx context.Context, job *business.BatchJob) error
 }
 
 // createJobRequest is the JSON body for POST /api/v1/jobs.
@@ -133,17 +132,17 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	// goroutine reference a local that CodeQL does not taint via job.Selector.
 	jobID := uuid.New().String()
 	now := time.Now().UTC()
-	job := &batchjob.BatchJob{
+	job := &business.BatchJob{
 		ID:          jobID,
 		TenantID:    tenantID,
 		Selector:    req.Selector,
 		InitiatedBy: principal.ID,
-		Config: batchjob.BatchJobConfig{
+		Config: business.BatchJobConfig{
 			BatchSize:         batchSize,
 			PreviousConfigRef: req.PreviousConfigRef,
 		},
 		Targets:   targetIDs,
-		Status:    batchjob.BatchJobStatusPending,
+		Status:    business.BatchJobStatusPending,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -256,7 +255,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	readScope := s.tenantReadScope(r, "GET /api/v1/jobs")
-	var jobs []*batchjob.BatchJob
+	var jobs []*business.BatchJob
 	var err error
 	if readScope.boundarySubject() {
 		jobs, err = s.listReadableBatchJobs(r.Context(), readScope, limit, offset)
@@ -274,7 +273,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if jobs == nil {
-		jobs = []*batchjob.BatchJob{}
+		jobs = []*business.BatchJob{}
 	}
 	s.writeSuccessResponse(w, jobs)
 }
@@ -302,7 +301,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 
 	job, err := s.batchJobStore.GetBatchJob(r.Context(), jobID)
 	if err != nil {
-		if errors.Is(err, batchjob.ErrBatchJobNotFound) {
+		if errors.Is(err, business.ErrBatchJobNotFound) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Job not found", "NOT_FOUND")
 			return
 		}
@@ -329,7 +328,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 // boundary-subject root caller may read: root's own plus those under a crossing.
 // The filter runs before offset/limit so a page is never short because rows were
 // dropped after the store paged them.
-func (s *Server) listReadableBatchJobs(ctx context.Context, readScope *tenantReadScope, limit, offset int) ([]*batchjob.BatchJob, error) {
+func (s *Server) listReadableBatchJobs(ctx context.Context, readScope *tenantReadScope, limit, offset int) ([]*business.BatchJob, error) {
 	const pageSize = 500
 	// Bound the limit here as well as in the caller so a page never exceeds
 	// pageSize. The slice grows by append rather than being pre-sized from the
@@ -340,7 +339,7 @@ func (s *Server) listReadableBatchJobs(ctx context.Context, readScope *tenantRea
 	if limit > pageSize {
 		limit = pageSize
 	}
-	out := make([]*batchjob.BatchJob, 0)
+	out := make([]*business.BatchJob, 0)
 	skip := offset
 	for storeOffset := 0; ; storeOffset += pageSize {
 		page, err := s.batchJobStore.ListBatchJobs(ctx, "", pageSize, storeOffset)

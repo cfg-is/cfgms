@@ -17,7 +17,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/controller/batchjob"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	reportapi "github.com/cfgis/cfgms/features/reports/api"
@@ -139,8 +138,8 @@ func newRootReadSweepFixture(t *testing.T) *rootReadSweepFixture {
 	server.pushStore = sm.GetPushStore()
 	createPushRecord(t, server.pushStore, "push-"+sweepMarker, sweepClient, "cfg-"+sweepMarker)
 	server.batchJobStore = newTestAPIBatchJobStore()
-	require.NoError(t, server.batchJobStore.CreateBatchJob(ctx, &batchjob.BatchJob{
-		ID: "job-" + sweepMarker, TenantID: sweepClient, Status: batchjob.BatchJobStatusPending, CreatedAt: now, UpdatedAt: now}))
+	require.NoError(t, server.batchJobStore.CreateBatchJob(ctx, &business.BatchJob{
+		ID: "job-" + sweepMarker, TenantID: sweepClient, Status: business.BatchJobStatusPending, CreatedAt: now, UpdatedAt: now}))
 	server.upgradeStore = newTestUpgradeStore()
 	require.NoError(t, server.upgradeStore.CreateUpgrade(ctx, &business.UpgradeRecord{
 		ID: "upg-" + sweepMarker, StewardID: clientSteward, TenantID: sweepClient, Version: "v1.0.0", Platform: "linux", Arch: "amd64",

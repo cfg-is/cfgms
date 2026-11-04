@@ -15,7 +15,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/controller/batchjob"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
@@ -81,8 +80,8 @@ func setupOpsReadFixture(t *testing.T) *opsReadFixture {
 		c.ids["command"] = "cmd" + suffix
 		createPushRecord(t, pushStore, "push"+suffix, tn, "cfg"+suffix)
 		c.ids["push"] = "push" + suffix
-		require.NoError(t, server.batchJobStore.CreateBatchJob(ctx, &batchjob.BatchJob{
-			ID: "job" + suffix, TenantID: tn, Status: batchjob.BatchJobStatusPending, CreatedAt: now, UpdatedAt: now}))
+		require.NoError(t, server.batchJobStore.CreateBatchJob(ctx, &business.BatchJob{
+			ID: "job" + suffix, TenantID: tn, Status: business.BatchJobStatusPending, CreatedAt: now, UpdatedAt: now}))
 		c.ids["job"] = "job" + suffix
 		require.NoError(t, server.upgradeStore.CreateUpgrade(ctx, &business.UpgradeRecord{
 			ID: "upg" + suffix, StewardID: "s" + suffix, TenantID: tn, Version: "v1.0.0", Platform: "linux", Arch: "amd64",

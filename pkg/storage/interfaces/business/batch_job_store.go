@@ -4,22 +4,169 @@
 package business
 
 import (
-	"github.com/cfgis/cfgms/features/controller/batchjob"
+	"context"
+	"errors"
+	"time"
 )
 
+// BatchJobStatus is the lifecycle state of a batch job.
+type BatchJobStatus string
+
+const (
+	// BatchJobStatusPending — job is created but execution has not started.
+	BatchJobStatusPending BatchJobStatus = "pending"
+
+	// BatchJobStatusRunning — at least one step is actively deploying.
+	BatchJobStatusRunning BatchJobStatus = "running"
+
+	// BatchJobStatusPaused — execution halted on step failure; awaits operator action.
+	BatchJobStatusPaused BatchJobStatus = "paused"
+
+	// BatchJobStatusCompleted — all steps finished successfully.
+	BatchJobStatusCompleted BatchJobStatus = "completed"
+
+	// BatchJobStatusFailed — terminal; rollback not attempted or itself failed.
+	BatchJobStatusFailed BatchJobStatus = "failed"
+
+	// BatchJobStatusRolledBack — compensating dispatch completed.
+	BatchJobStatusRolledBack BatchJobStatus = "rolled_back"
+)
+
+// BatchStepStatus is the lifecycle state of a single step within a batch job.
+type BatchStepStatus string
+
+const (
+	// BatchStepStatusPending — step has not yet started.
+	BatchStepStatusPending BatchStepStatus = "pending"
+
+	// BatchStepStatusRunning — step is actively deploying to its stewards.
+	BatchStepStatusRunning BatchStepStatus = "running"
+
+	// BatchStepStatusCompleted — all stewards in the step converged successfully.
+	BatchStepStatusCompleted BatchStepStatus = "completed"
+
+	// BatchStepStatusFailed — one or more stewards failed; step is terminal.
+	BatchStepStatusFailed BatchStepStatus = "failed"
+
+	// BatchStepStatusRolledBack — compensating dispatch for this step completed.
+	BatchStepStatusRolledBack BatchStepStatus = "rolled_back"
+)
+
+// BatchStep is one wave of stewards within a rolling batch job.
+type BatchStep struct {
+	// Index is the zero-based position of this step in the job's step sequence.
+	Index int
+
+	// StewardIDs is the set of stewards targeted by this step.
+	StewardIDs []string
+
+	// Status is the current lifecycle state of the step.
+	Status BatchStepStatus
+
+	// StartedAt is set when the step transitions to running.
+	StartedAt *time.Time
+
+	// CompletedAt is set when the step reaches a terminal state.
+	CompletedAt *time.Time
+
+	// FailedIDs lists stewards that reported a failure during this step.
+	FailedIDs []string
+
+	// RollbackJobID is set when a compensating dispatch is queued for this step.
+	RollbackJobID string
+}
+
+// BatchJobConfig holds the parameters that control batch execution.
+type BatchJobConfig struct {
+	// BatchSize is the number of stewards per batch wave; must be > 0.
+	BatchSize int
+
+	// PreviousConfigRef is the config version to restore on rollback.
+	// Captured at job creation time so rollback is always available.
+	PreviousConfigRef string
+}
+
+// BatchJob is a fleet-wide rolling update operation managed by the controller.
+type BatchJob struct {
+	// ID is the unique job identifier.
+	ID string
+
+	// TenantID scopes the job to a single tenant.
+	TenantID string
+
+	// Selector is the fleet.Filter expression used to resolve Targets.
+	// Stored verbatim for audit only; it is never re-evaluated.
+	Selector string
+
+	// Config holds the static parameters for this job.
+	Config BatchJobConfig
+
+	// Targets is the authorized set of steward IDs captured at job creation time.
+	// The executor dispatches to exactly these IDs and never re-resolves
+	// Selector or TenantID to choose recipients.
+	Targets []string
+
+	// Status is the current lifecycle state of the job.
+	Status BatchJobStatus
+
+	// Steps is the ordered sequence of batch waves.
+	Steps []BatchStep
+
+	// CreatedAt is the wall-clock time when the job was created.
+	CreatedAt time.Time
+
+	// UpdatedAt is the wall-clock time of the last state change.
+	UpdatedAt time.Time
+
+	// InitiatedBy identifies the operator who created the job.
+	InitiatedBy string
+}
+
 // ErrBatchJobNotFound is returned when a batch job record does not exist.
-// Re-exported from the batchjob package so callers that already import business
-// continue to work unchanged.
-var ErrBatchJobNotFound = batchjob.ErrBatchJobNotFound
+var ErrBatchJobNotFound = errors.New("batch job not found")
 
 // BatchJobStore defines the storage interface for fleet rolling-batch job persistence.
-// Re-exported from the batchjob package as a type alias to break the import cycle:
-//
-//	batchjob (executor/store) → business → batchjob
-//
-// Because it is a type alias (=) callers that declare variables as business.BatchJobStore
-// or pass implementations to functions accepting batchjob.BatchJobStore interchangeably
-// continue to compile and behave identically.
 //
 // All implementations must be safe for concurrent use.
-type BatchJobStore = batchjob.BatchJobStore
+type BatchJobStore interface {
+	// CreateBatchJob inserts a new batch job record.
+	// Returns an error if a record with the same ID already exists.
+	CreateBatchJob(ctx context.Context, job *BatchJob) error
+
+	// UpdateBatchJobStatus sets the top-level status of an existing batch job.
+	// Returns ErrBatchJobNotFound if no record exists for the given id.
+	UpdateBatchJobStatus(ctx context.Context, id string, status BatchJobStatus) error
+
+	// UpdateBatchTargets replaces the resolved target steward IDs for the job.
+	// Called by the executor after fleet selector resolution at job start.
+	// Returns ErrBatchJobNotFound if the job does not exist.
+	UpdateBatchTargets(ctx context.Context, id string, targets []string) error
+
+	// UpdateBatchStep upserts a step within the batch job identified by jobID.
+	// If a step with the same Index already exists it is replaced; otherwise the
+	// step is appended. Returns ErrBatchJobNotFound if the job does not exist.
+	UpdateBatchStep(ctx context.Context, jobID string, step BatchStep) error
+
+	// GetBatchJob retrieves the batch job with the given id.
+	// Returns ErrBatchJobNotFound if no record exists.
+	GetBatchJob(ctx context.Context, id string) (*BatchJob, error)
+
+	// ListBatchJobsByTenant returns all batch jobs belonging to tenantID.
+	// Returns an empty slice (not an error) when no records exist.
+	ListBatchJobsByTenant(ctx context.Context, tenantID string) ([]*BatchJob, error)
+
+	// ListBatchJobs returns batch jobs ordered by created_at DESC with pagination.
+	// When tenantID is non-empty only jobs belonging to that tenant are returned.
+	// An empty tenantID returns all jobs across tenants (global-scope admin callers).
+	// Returns an empty slice (not an error) when no records exist.
+	ListBatchJobs(ctx context.Context, tenantID string, limit, offset int) ([]*BatchJob, error)
+
+	// HealthCheck verifies the store is reachable and operational.
+	HealthCheck(ctx context.Context) error
+
+	// Initialize prepares the store (creates directories, tables, schemas, etc.).
+	Initialize(ctx context.Context) error
+
+	// Close releases resources held by the store.
+	Close() error
+}

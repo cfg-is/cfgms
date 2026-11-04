@@ -11,25 +11,24 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/controller/batchjob"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// inMemBatchJobStore is a minimal in-memory BatchJobStore used to validate the
-// shared contract harness (BatchJobStoreContract). It is not a substitute for
+// inMemBatchJobStore is a minimal in-memory business.BatchJobStore used to validate the
+// shared contract harness (business.BatchJobStoreContract). It is not a substitute for
 // production implementations — the real memory provider and SQLite store each
 // run the same contract in their own test packages where provider imports are
 // permitted by the architecture rules.
 type inMemBatchJobStore struct {
 	mu   sync.RWMutex
-	jobs map[string]*batchjob.BatchJob
+	jobs map[string]*business.BatchJob
 }
 
 func newInMemBatchJobStore() business.BatchJobStore {
-	return &inMemBatchJobStore{jobs: make(map[string]*batchjob.BatchJob)}
+	return &inMemBatchJobStore{jobs: make(map[string]*business.BatchJob)}
 }
 
-func (s *inMemBatchJobStore) CreateBatchJob(_ context.Context, job *batchjob.BatchJob) error {
+func (s *inMemBatchJobStore) CreateBatchJob(_ context.Context, job *business.BatchJob) error {
 	if job == nil {
 		return errBatchJobTestNilRecord
 	}
@@ -43,7 +42,7 @@ func (s *inMemBatchJobStore) CreateBatchJob(_ context.Context, job *batchjob.Bat
 	return nil
 }
 
-func (s *inMemBatchJobStore) UpdateBatchJobStatus(_ context.Context, id string, status batchjob.BatchJobStatus) error {
+func (s *inMemBatchJobStore) UpdateBatchJobStatus(_ context.Context, id string, status business.BatchJobStatus) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j, ok := s.jobs[id]
@@ -67,7 +66,7 @@ func (s *inMemBatchJobStore) UpdateBatchTargets(_ context.Context, id string, ta
 	return nil
 }
 
-func (s *inMemBatchJobStore) UpdateBatchStep(_ context.Context, jobID string, step batchjob.BatchStep) error {
+func (s *inMemBatchJobStore) UpdateBatchStep(_ context.Context, jobID string, step business.BatchStep) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j, ok := s.jobs[jobID]
@@ -86,7 +85,7 @@ func (s *inMemBatchJobStore) UpdateBatchStep(_ context.Context, jobID string, st
 	return nil
 }
 
-func (s *inMemBatchJobStore) GetBatchJob(_ context.Context, id string) (*batchjob.BatchJob, error) {
+func (s *inMemBatchJobStore) GetBatchJob(_ context.Context, id string) (*business.BatchJob, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	j, ok := s.jobs[id]
@@ -96,10 +95,10 @@ func (s *inMemBatchJobStore) GetBatchJob(_ context.Context, id string) (*batchjo
 	return deepCopyBatchJob(j), nil
 }
 
-func (s *inMemBatchJobStore) ListBatchJobsByTenant(_ context.Context, tenantID string) ([]*batchjob.BatchJob, error) {
+func (s *inMemBatchJobStore) ListBatchJobsByTenant(_ context.Context, tenantID string) ([]*business.BatchJob, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out []*batchjob.BatchJob
+	var out []*business.BatchJob
 	for _, j := range s.jobs {
 		if j.TenantID == tenantID {
 			out = append(out, deepCopyBatchJob(j))
@@ -108,17 +107,17 @@ func (s *inMemBatchJobStore) ListBatchJobsByTenant(_ context.Context, tenantID s
 	return out, nil
 }
 
-func (s *inMemBatchJobStore) ListBatchJobs(_ context.Context, tenantID string, limit, offset int) ([]*batchjob.BatchJob, error) {
+func (s *inMemBatchJobStore) ListBatchJobs(_ context.Context, tenantID string, limit, offset int) ([]*business.BatchJob, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out []*batchjob.BatchJob
+	var out []*business.BatchJob
 	for _, j := range s.jobs {
 		if tenantID == "" || j.TenantID == tenantID {
 			out = append(out, deepCopyBatchJob(j))
 		}
 	}
 	if offset >= len(out) {
-		return []*batchjob.BatchJob{}, nil
+		return []*business.BatchJob{}, nil
 	}
 	out = out[offset:]
 	if limit > 0 && len(out) > limit {
@@ -134,17 +133,17 @@ func (s *inMemBatchJobStore) Close() error                        { return nil }
 var _ business.BatchJobStore = (*inMemBatchJobStore)(nil)
 
 // deep copy helpers
-func deepCopyBatchJob(j *batchjob.BatchJob) *batchjob.BatchJob {
+func deepCopyBatchJob(j *business.BatchJob) *business.BatchJob {
 	cp := *j
 	cp.Targets = append([]string(nil), j.Targets...)
-	cp.Steps = make([]batchjob.BatchStep, len(j.Steps))
+	cp.Steps = make([]business.BatchStep, len(j.Steps))
 	for i, s := range j.Steps {
 		cp.Steps[i] = copyBatchStep(s)
 	}
 	return &cp
 }
 
-func copyBatchStep(s batchjob.BatchStep) batchjob.BatchStep {
+func copyBatchStep(s business.BatchStep) business.BatchStep {
 	cp := s
 	cp.StewardIDs = append([]string(nil), s.StewardIDs...)
 	cp.FailedIDs = append([]string(nil), s.FailedIDs...)
@@ -170,19 +169,19 @@ func (e errBatchJobTestStr) Error() string { return string(e) }
 
 // --- Contract tests ---
 
-func newTestBatchJob(id, tenantID string) *batchjob.BatchJob {
+func newTestBatchJob(id, tenantID string) *business.BatchJob {
 	now := time.Now().UTC()
-	return &batchjob.BatchJob{
+	return &business.BatchJob{
 		ID:       id,
 		TenantID: tenantID,
 		Selector: "tag:prod",
-		Config: batchjob.BatchJobConfig{
+		Config: business.BatchJobConfig{
 			BatchSize:         5,
 			PreviousConfigRef: "cfg-v1",
 		},
 		Targets:     []string{"s-1", "s-2", "s-3"},
-		Status:      batchjob.BatchJobStatusPending,
-		Steps:       []batchjob.BatchStep{{Index: 0, StewardIDs: []string{"s-1"}, Status: batchjob.BatchStepStatusPending}},
+		Status:      business.BatchJobStatusPending,
+		Steps:       []business.BatchStep{{Index: 0, StewardIDs: []string{"s-1"}, Status: business.BatchStepStatusPending}},
 		CreatedAt:   now,
 		UpdatedAt:   now,
 		InitiatedBy: "operator@example.com",
@@ -204,7 +203,7 @@ func TestBatchJobStore_Contract(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "job-1", got.ID)
 		assert.Equal(t, "tenant-1", got.TenantID)
-		assert.Equal(t, batchjob.BatchJobStatusPending, got.Status)
+		assert.Equal(t, business.BatchJobStatusPending, got.Status)
 		assert.Equal(t, "tag:prod", got.Selector)
 		assert.Equal(t, 5, got.Config.BatchSize)
 		assert.Equal(t, "cfg-v1", got.Config.PreviousConfigRef)
@@ -220,7 +219,7 @@ func TestBatchJobStore_Contract(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	t.Run("get not found returns ErrBatchJobNotFound", func(t *testing.T) {
+	t.Run("get not found returns business.ErrBatchJobNotFound", func(t *testing.T) {
 		_, err := store.GetBatchJob(ctx, "no-such-id")
 		assert.ErrorIs(t, err, business.ErrBatchJobNotFound)
 	})
@@ -229,19 +228,19 @@ func TestBatchJobStore_Contract(t *testing.T) {
 		job := newTestBatchJob("job-status", "tenant-1")
 		require.NoError(t, store.CreateBatchJob(ctx, job))
 
-		require.NoError(t, store.UpdateBatchJobStatus(ctx, "job-status", batchjob.BatchJobStatusRunning))
+		require.NoError(t, store.UpdateBatchJobStatus(ctx, "job-status", business.BatchJobStatusRunning))
 		got, err := store.GetBatchJob(ctx, "job-status")
 		require.NoError(t, err)
-		assert.Equal(t, batchjob.BatchJobStatusRunning, got.Status)
+		assert.Equal(t, business.BatchJobStatusRunning, got.Status)
 
-		require.NoError(t, store.UpdateBatchJobStatus(ctx, "job-status", batchjob.BatchJobStatusCompleted))
+		require.NoError(t, store.UpdateBatchJobStatus(ctx, "job-status", business.BatchJobStatusCompleted))
 		got, err = store.GetBatchJob(ctx, "job-status")
 		require.NoError(t, err)
-		assert.Equal(t, batchjob.BatchJobStatusCompleted, got.Status)
+		assert.Equal(t, business.BatchJobStatusCompleted, got.Status)
 	})
 
 	t.Run("UpdateBatchJobStatus not found", func(t *testing.T) {
-		err := store.UpdateBatchJobStatus(ctx, "ghost", batchjob.BatchJobStatusFailed)
+		err := store.UpdateBatchJobStatus(ctx, "ghost", business.BatchJobStatusFailed)
 		assert.ErrorIs(t, err, business.ErrBatchJobNotFound)
 	})
 
@@ -267,10 +266,10 @@ func TestBatchJobStore_Contract(t *testing.T) {
 		require.NoError(t, store.CreateBatchJob(ctx, job))
 
 		now := time.Now().UTC()
-		step := batchjob.BatchStep{
+		step := business.BatchStep{
 			Index:         0,
 			StewardIDs:    []string{"s-1"},
-			Status:        batchjob.BatchStepStatusRunning,
+			Status:        business.BatchStepStatusRunning,
 			StartedAt:     &now,
 			FailedIDs:     []string{"s-1"},
 			RollbackJobID: "rj-001",
@@ -282,14 +281,14 @@ func TestBatchJobStore_Contract(t *testing.T) {
 		require.Len(t, got.Steps, 1)
 		s := got.Steps[0]
 		assert.Equal(t, 0, s.Index)
-		assert.Equal(t, batchjob.BatchStepStatusRunning, s.Status)
+		assert.Equal(t, business.BatchStepStatusRunning, s.Status)
 		assert.Equal(t, []string{"s-1"}, s.FailedIDs)
 		assert.Equal(t, "rj-001", s.RollbackJobID)
 		require.NotNil(t, s.StartedAt)
 	})
 
 	t.Run("UpdateBatchStep not found", func(t *testing.T) {
-		step := batchjob.BatchStep{Index: 0, Status: batchjob.BatchStepStatusFailed}
+		step := business.BatchStep{Index: 0, Status: business.BatchStepStatusFailed}
 		err := store.UpdateBatchStep(ctx, "ghost-job", step)
 		assert.ErrorIs(t, err, business.ErrBatchJobNotFound)
 	})
@@ -298,10 +297,10 @@ func TestBatchJobStore_Contract(t *testing.T) {
 		job := newTestBatchJob("job-step-append", "tenant-1")
 		require.NoError(t, store.CreateBatchJob(ctx, job))
 
-		newStep := batchjob.BatchStep{
+		newStep := business.BatchStep{
 			Index:      1,
 			StewardIDs: []string{"s-2"},
-			Status:     batchjob.BatchStepStatusPending,
+			Status:     business.BatchStepStatusPending,
 		}
 		require.NoError(t, store.UpdateBatchStep(ctx, "job-step-append", newStep))
 

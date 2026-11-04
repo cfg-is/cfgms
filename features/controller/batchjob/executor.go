@@ -5,6 +5,7 @@ package batchjob
 import (
 	"context"
 	"fmt"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"time"
 
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
@@ -53,7 +54,7 @@ type CommandPublisher interface {
 // On any batch failure the job transitions to rolled_back (when PreviousConfigRef is set,
 // compensating dispatches are sent to already-completed batches) or paused (no baseline).
 type RollingBatchExecutor struct {
-	store       BatchJobStore
+	store       business.BatchJobStore
 	fleetQuery  FleetQuery
 	publisher   CommandPublisher
 	quorumCheck QuorumChecker
@@ -63,7 +64,7 @@ type RollingBatchExecutor struct {
 // NewRollingBatchExecutor creates an executor with the provided dependencies.
 // quorumCheck may be nil; in that case naive round-robin partitioning is used.
 func NewRollingBatchExecutor(
-	store BatchJobStore,
+	store business.BatchJobStore,
 	fleetQuery FleetQuery,
 	publisher CommandPublisher,
 	quorumCheck QuorumChecker,
@@ -92,7 +93,7 @@ func NewRollingBatchExecutor(
 //
 // job.Targets is the set the create handler authorized. Execute sends commands to
 // those stewards only and never replaces the persisted targets.
-func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error {
+func (e *RollingBatchExecutor) Execute(ctx context.Context, job *business.BatchJob) error {
 	// 1. The authorized set, without duplicates.
 	ids := dedupeIDs(job.Targets)
 
@@ -110,10 +111,10 @@ func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error
 		}
 	}
 
-	if err := e.store.UpdateBatchJobStatus(ctx, job.ID, BatchJobStatusRunning); err != nil {
+	if err := e.store.UpdateBatchJobStatus(ctx, job.ID, business.BatchJobStatusRunning); err != nil {
 		return fmt.Errorf("executor: set running: %w", err)
 	}
-	job.Status = BatchJobStatusRunning
+	job.Status = business.BatchJobStatusRunning
 
 	// 3. Execute batches sequentially.
 	for i, batch := range batches {
@@ -123,10 +124,10 @@ func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error
 
 		// a. Mark step running.
 		now := time.Now().UTC()
-		step := BatchStep{
+		step := business.BatchStep{
 			Index:      i,
 			StewardIDs: batch,
-			Status:     BatchStepStatusRunning,
+			Status:     business.BatchStepStatusRunning,
 			StartedAt:  &now,
 		}
 		if err := e.store.UpdateBatchStep(ctx, job.ID, step); err != nil {
@@ -149,7 +150,7 @@ func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error
 
 		if len(failedIDs) > 0 {
 			// e. At least one steward failed.
-			step.Status = BatchStepStatusFailed
+			step.Status = business.BatchStepStatusFailed
 			step.FailedIDs = failedIDs
 			if persistErr := e.store.UpdateBatchStep(ctx, job.ID, step); persistErr != nil {
 				e.logger.Error("Failed to persist failed step",
@@ -164,12 +165,12 @@ func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error
 				e.rollbackAppliedSteps(ctx, job)
 			} else {
 				// No baseline: pause for operator action.
-				if pauseErr := e.store.UpdateBatchJobStatus(ctx, job.ID, BatchJobStatusPaused); pauseErr != nil {
+				if pauseErr := e.store.UpdateBatchJobStatus(ctx, job.ID, business.BatchJobStatusPaused); pauseErr != nil {
 					e.logger.Error("Failed to set job paused",
 						"job_id", logging.SanitizeLogValue(job.ID),
 						"error", pauseErr)
 				}
-				job.Status = BatchJobStatusPaused
+				job.Status = business.BatchJobStatusPaused
 				e.logger.Info("Job paused (no PreviousConfigRef; rollback skipped)",
 					"job_id", logging.SanitizeLogValue(job.ID))
 			}
@@ -177,7 +178,7 @@ func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error
 		}
 
 		// d. All succeeded → advance.
-		step.Status = BatchStepStatusCompleted
+		step.Status = business.BatchStepStatusCompleted
 		if err := e.store.UpdateBatchStep(ctx, job.ID, step); err != nil {
 			return fmt.Errorf("executor: set step %d completed: %w", i, err)
 		}
@@ -187,10 +188,10 @@ func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error
 	}
 
 	// 4. All batches completed.
-	if err := e.store.UpdateBatchJobStatus(ctx, job.ID, BatchJobStatusCompleted); err != nil {
+	if err := e.store.UpdateBatchJobStatus(ctx, job.ID, business.BatchJobStatusCompleted); err != nil {
 		return fmt.Errorf("executor: set job completed: %w", err)
 	}
-	job.Status = BatchJobStatusCompleted
+	job.Status = business.BatchJobStatusCompleted
 	e.logger.Info("Batch job completed", "job_id", logging.SanitizeLogValue(job.ID))
 	return nil
 }

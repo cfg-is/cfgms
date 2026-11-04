@@ -42,13 +42,13 @@ func TestSQLiteBatchJobStore_ReopenPersists(t *testing.T) {
 		require.NoError(t, err)
 		ctx := t.Context()
 		require.NoError(t, store.Initialize(ctx))
-		job := &batchjob.BatchJob{
+		job := &business.BatchJob{
 			ID:       "persist-job-1",
 			TenantID: "t-1",
 			Selector: "all",
-			Config:   batchjob.BatchJobConfig{BatchSize: 2},
+			Config:   business.BatchJobConfig{BatchSize: 2},
 			Targets:  []string{"s-1"},
-			Status:   batchjob.BatchJobStatusPending,
+			Status:   business.BatchJobStatusPending,
 		}
 		require.NoError(t, store.CreateBatchJob(ctx, job))
 		require.NoError(t, store.Close())
@@ -62,7 +62,7 @@ func TestSQLiteBatchJobStore_ReopenPersists(t *testing.T) {
 		require.NoError(t, store.Initialize(ctx))
 		got, err := store.GetBatchJob(ctx, "persist-job-1")
 		require.NoError(t, err)
-		require.Equal(t, batchjob.BatchJobStatusPending, got.Status)
+		require.Equal(t, business.BatchJobStatusPending, got.Status)
 		require.Equal(t, []string{"s-1"}, got.Targets)
 		require.NoError(t, store.Close())
 	}

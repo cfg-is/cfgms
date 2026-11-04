@@ -5,6 +5,7 @@ package batchjob_test
 import (
 	"context"
 	"errors"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"sort"
 	"sync"
 	"testing"
@@ -256,7 +257,7 @@ func (d *completionDriver) stop() {
 
 type executorFixture struct {
 	cp        *executorTestCP
-	store     batchjob.BatchJobStore
+	store     business.BatchJobStore
 	publisher *commands.Publisher
 	executor  *batchjob.RollingBatchExecutor
 	ids       []string
@@ -329,14 +330,14 @@ func (f *executorFixture) driveFirstFails(t testing.TB) *completionDriver {
 	return d
 }
 
-func newPendingJob(id string, batchSize int) *batchjob.BatchJob {
+func newPendingJob(id string, batchSize int) *business.BatchJob {
 	now := time.Now().UTC()
-	return &batchjob.BatchJob{
+	return &business.BatchJob{
 		ID:          id,
 		TenantID:    "tenant-1",
 		Selector:    "all",
-		Config:      batchjob.BatchJobConfig{BatchSize: batchSize},
-		Status:      batchjob.BatchJobStatusPending,
+		Config:      business.BatchJobConfig{BatchSize: batchSize},
+		Status:      business.BatchJobStatusPending,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 		InitiatedBy: "test-operator",
@@ -364,7 +365,7 @@ func TestRollingBatchExecutor_SequentialBatches(t *testing.T) {
 
 	got, err := f.store.GetBatchJob(f.ctx, "job-seq")
 	require.NoError(t, err)
-	assert.Equal(t, batchjob.BatchJobStatusCompleted, got.Status)
+	assert.Equal(t, business.BatchJobStatusCompleted, got.Status)
 	require.Len(t, got.Steps, 2, "4 stewards / batch 2 = 2 steps")
 
 	// [REQUIRED]: batch 0 timestamps precede batch 1 timestamps (no parallel dispatch).
@@ -402,7 +403,7 @@ func TestRollingBatchExecutor_FailurePausesBatchZero(t *testing.T) {
 	require.NoError(t, err)
 
 	// [REQUIRED]: job must be paused after batch 0 failure.
-	assert.Equal(t, batchjob.BatchJobStatusPaused, got.Status,
+	assert.Equal(t, business.BatchJobStatusPaused, got.Status,
 		"job must be paused when a steward in batch 0 fails")
 
 	// [REQUIRED]: only 2 commands sent (batch 0 only), none to batch 1 stewards.
@@ -411,7 +412,7 @@ func TestRollingBatchExecutor_FailurePausesBatchZero(t *testing.T) {
 
 	// Step 0 must be failed with the failing steward recorded.
 	require.Len(t, got.Steps, 1, "only step 0 should be persisted")
-	assert.Equal(t, batchjob.BatchStepStatusFailed, got.Steps[0].Status)
+	assert.Equal(t, business.BatchStepStatusFailed, got.Steps[0].Status)
 	assert.NotEmpty(t, got.Steps[0].FailedIDs, "failed IDs must be recorded")
 }
 
@@ -432,9 +433,9 @@ func TestRollingBatchExecutor_AllCompleted(t *testing.T) {
 
 	got, err := f.store.GetBatchJob(f.ctx, "job-all")
 	require.NoError(t, err)
-	assert.Equal(t, batchjob.BatchJobStatusCompleted, got.Status)
+	assert.Equal(t, business.BatchJobStatusCompleted, got.Status)
 	require.Len(t, got.Steps, 1)
-	assert.Equal(t, batchjob.BatchStepStatusCompleted, got.Steps[0].Status)
+	assert.Equal(t, business.BatchStepStatusCompleted, got.Steps[0].Status)
 	assert.Len(t, got.Steps[0].StewardIDs, 3)
 }
 
@@ -490,7 +491,7 @@ func TestRollingBatchExecutor_TargetsAreAuthorizedSet(t *testing.T) {
 			got, err := f.store.GetBatchJob(f.ctx, job.ID)
 			require.NoError(t, err)
 			assert.Equal(t, []string{"s-a", "s-c"}, got.Targets)
-			assert.Equal(t, batchjob.BatchJobStatusCompleted, got.Status)
+			assert.Equal(t, business.BatchJobStatusCompleted, got.Status)
 		})
 	}
 }
@@ -571,7 +572,7 @@ func TestRollingBatchExecutor_FleetLookupErrorDispatchesNothing(t *testing.T) {
 
 	got, getErr := f.store.GetBatchJob(f.ctx, job.ID)
 	require.NoError(t, getErr)
-	assert.Equal(t, batchjob.BatchJobStatusPending, got.Status)
+	assert.Equal(t, business.BatchJobStatusPending, got.Status)
 	assert.Empty(t, got.Steps)
 }
 
@@ -589,7 +590,7 @@ func TestRollingBatchExecutor_EmptyTargetsCompletes(t *testing.T) {
 	assert.Zero(t, f.cp.sentCount())
 	got, err := f.store.GetBatchJob(f.ctx, job.ID)
 	require.NoError(t, err)
-	assert.Equal(t, batchjob.BatchJobStatusCompleted, got.Status)
+	assert.Equal(t, business.BatchJobStatusCompleted, got.Status)
 }
 
 // TestRollingBatchExecutor_RollbackOnBatchFailure is the REQUIRED test:
@@ -619,18 +620,18 @@ func TestRollingBatchExecutor_RollbackOnBatchFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	// [REQUIRED]: job must be rolled_back.
-	assert.Equal(t, batchjob.BatchJobStatusRolledBack, got.Status)
+	assert.Equal(t, business.BatchJobStatusRolledBack, got.Status)
 
 	// [REQUIRED]: batch-0 step must be rolled_back.
 	require.Len(t, got.Steps, 2, "step 0 (rolled_back) + step 1 (failed) must be persisted")
-	var step0 *batchjob.BatchStep
+	var step0 *business.BatchStep
 	for i := range got.Steps {
 		if got.Steps[i].Index == 0 {
 			step0 = &got.Steps[i]
 		}
 	}
 	require.NotNil(t, step0, "step 0 must be persisted")
-	assert.Equal(t, batchjob.BatchStepStatusRolledBack, step0.Status)
+	assert.Equal(t, business.BatchStepStatusRolledBack, step0.Status)
 
 	// [REQUIRED]: 6 total commands — 2 forward batch 0, 2 forward batch 1, 2 rollback batch 0.
 	assert.Equal(t, 6, f.cp.sentCount())
@@ -671,7 +672,7 @@ func TestRollingBatchExecutor_NoRollbackWhenNoPreviousConfigRef(t *testing.T) {
 	require.NoError(t, err)
 
 	// [REQUIRED]: job must be paused — not rolled_back, not failed.
-	assert.Equal(t, batchjob.BatchJobStatusPaused, got.Status)
+	assert.Equal(t, business.BatchJobStatusPaused, got.Status)
 
 	// [REQUIRED]: only 4 commands sent (batch 0 + batch 1 forward), no rollback dispatch.
 	assert.Equal(t, 4, f.cp.sentCount(),
@@ -705,7 +706,7 @@ func TestRollingBatchExecutor_RollbackBatchZeroFailurePauses(t *testing.T) {
 	require.NoError(t, err)
 
 	// [REQUIRED]: rollbackAppliedSteps entered with zero completed steps → job paused.
-	assert.Equal(t, batchjob.BatchJobStatusPaused, got.Status,
+	assert.Equal(t, business.BatchJobStatusPaused, got.Status,
 		"job must be paused when batch 0 fails with no prior completed steps")
 
 	// [REQUIRED]: only batch 0 dispatched (2 commands); batch 1 never dispatched and
@@ -719,7 +720,7 @@ func TestRollingBatchExecutor_RollbackBatchZeroFailurePauses(t *testing.T) {
 
 	// Only step 0 persisted, and it is failed.
 	require.Len(t, got.Steps, 1, "only step 0 should be persisted")
-	assert.Equal(t, batchjob.BatchStepStatusFailed, got.Steps[0].Status)
+	assert.Equal(t, business.BatchStepStatusFailed, got.Steps[0].Status)
 	assert.NotEmpty(t, got.Steps[0].FailedIDs, "failed IDs must be recorded")
 }
 
@@ -759,7 +760,7 @@ func TestRollingBatchExecutor_RollbackDispatchFailureTransitionsJobFailed(t *tes
 	require.NoError(t, err)
 
 	// Rollback dispatch failed → job must be failed, not rolled_back.
-	assert.Equal(t, batchjob.BatchJobStatusFailed, got.Status)
+	assert.Equal(t, business.BatchJobStatusFailed, got.Status)
 
 	// 6 total commands: 2 forward batch 0, 2 forward batch 1, 2 rollback batch 0.
 	assert.Equal(t, 6, f.cp.sentCount())

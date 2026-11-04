@@ -15,10 +15,10 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/registration"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
