@@ -4,7 +4,7 @@
 services:
   # PostgreSQL database for database provider testing
   postgres-test:
-    image: ghcr.io/cfg-is/ci-mirror/postgres:15-alpine@sha256:a8e042598834300dfaa17a54f695b87b7f25d3490433bbbe2ef3bffbb9747f24
+    image: ghcr.io/cfg-is/ci-mirror/postgres:15-alpine@sha256:54e0dd8e8cddcdbb9156c2486eed5a43eccb7214d7c6828097d41ce049fb3984
     container_name: cfgms-postgres-test
     environment:
       POSTGRES_DB: cfgms_test
@@ -64,7 +64,7 @@ services:
 
   # Redis for session/cache testing (future Epic support)
   redis-test:
-    image: ghcr.io/cfg-is/ci-mirror/redis:7-alpine@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
+    image: ghcr.io/cfg-is/ci-mirror/redis:7-alpine@sha256:8da19c7399dca900c6822a1cf30f9d2285585e2c4b457ff4095b0f4500054d3f
     container_name: cfgms-redis-test
     ports:
       - "6380:6379"  # Use non-standard port
@@ -1171,7 +1171,7 @@ services:
   # key (certificate.cluster_ca in test/fixtures/ha/controller-ha.cfg). Dev mode is
   # in-memory, so a restart wipes the CA; recreate the ha_cluster_certs volume with it.
   openbao-test:
-    image: ghcr.io/cfg-is/ci-mirror/openbao:latest@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf
+    image: ghcr.io/cfg-is/ci-mirror/openbao:latest@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f
     container_name: cfgms-openbao-test
     command: server -dev -dev-root-token-id=${OPENBAO_TEST_TOKEN:-root}
     environment:
