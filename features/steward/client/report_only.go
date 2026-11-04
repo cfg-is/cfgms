@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -344,6 +345,14 @@ func (c *TransportClient) connectReportOnly(ctx context.Context) error {
 	// timeout, and Disconnect closes heartbeatStop to end the goroutine.
 	go c.startHeartbeat()
 	c.noteReportOnlyComponent(ReportOnlyComponentHeartbeat)
+	// Announce the link and its reasons now rather than after the first tick.
+	go c.guard(componentHeartbeat, func() {
+		hbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := c.SendHeartbeat(hbCtx, c.heartbeatStatus(), nil); err != nil {
+			c.logger.Warn("Failed to send initial report-only heartbeat", "error", logging.SanitizeLogValue(err.Error()))
+		}
+	})
 
 	c.mu.RLock()
 	hasCollector := c.dnaCollector != nil
