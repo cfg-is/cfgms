@@ -7,7 +7,7 @@ allowed-tools: Bash
 Run the helper, which does its own staleness detection (merged-PR check first, git-ancestry fallback — needed because this repo's merge queue is squash-only) and its own confirmation prompt:
 
 ```bash
-./.claude/skills/cleanup-stale-branch/scripts/cleanup-stale-branch.sh $ARGUMENTS
+./.claude/tooling/cleanup-stale-branch/cleanup-stale-branch.sh $ARGUMENTS
 ```
 
 `$ARGUMENTS`: `<branch> [--base <branch>] [--remote <name>] [--delete-remote] [--dry-run] [--yes]`. Defaults: `base=develop`, `remote=origin`, local-only delete.

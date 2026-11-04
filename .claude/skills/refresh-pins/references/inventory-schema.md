@@ -1,6 +1,6 @@
 # Pin Inventory JSON Schema
 
-`scripts/discover-pins.py` emits a JSON array to stdout. Each element is a pin object.
+`.claude/tooling/refresh-pins/discover-pins.py` emits a JSON array to stdout. Each element is a pin object.
 
 ## Pin object
 
