@@ -28,7 +28,7 @@ Stay narrow. Your strength is pattern detection in test files for the anti-patte
 
 ## What You Review
 
-Get the list of changed files with `git diff --name-only develop...HEAD`, then examine all changed files. For each test file, check:
+Get the list of changed files with `git diff --name-only develop...HEAD`, then examine all changed files. For each changed file, check:
 
 ### BLOCKING Issues (Must Fix Before Merge)
 
