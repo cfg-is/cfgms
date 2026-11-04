@@ -483,9 +483,14 @@ func TestNormalClient_TamperStateLocked_SwitchesToReportOnly(t *testing.T) {
 	require.Eventually(t, tc.ControlStreamConnected, 10*time.Second, 50*time.Millisecond)
 	require.False(t, tc.IsReportOnly())
 
+	// The on-connect sync runs in a background goroutine; let it land before
+	// the lock so the snapshot below cannot race with it.
+	require.Eventually(t, func() bool { return srv.pulls.Load() >= 1 }, 30*time.Second, 20*time.Millisecond,
+		"the on-connect sync pulls once before the lock")
+
 	require.NoError(t, srv.cp.SendTamperState(context.Background(), roStewardID, true))
 	require.Eventually(t, tc.IsReportOnly, 10*time.Second, 20*time.Millisecond)
-	pullsAtSwitch := srv.pulls.Load() // the on-connect sync ran before the lock
+	pullsAtSwitch := srv.pulls.Load()
 
 	require.NoError(t, srv.cp.SendCommand(context.Background(), &cpTypes.SignedCommand{Command: cpTypes.Command{
 		ID: "after-lock", Type: cpTypes.CommandSyncConfig, StewardID: roStewardID, Timestamp: time.Now()}}))
