@@ -481,9 +481,9 @@ jobs:
           done
         }
 
-        pull_with_retry ghcr.io/cfg-is/ci-mirror/golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c
+        pull_with_retry ghcr.io/cfg-is/ci-mirror/golang:1.27.3-alpine3.24@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb
         pull_with_retry ghcr.io/cfg-is/ci-mirror/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
-        pull_with_retry ghcr.io/cfg-is/ci-mirror/debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+        pull_with_retry ghcr.io/cfg-is/ci-mirror/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
