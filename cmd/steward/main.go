@@ -861,6 +861,8 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 			installCAPEM:  installCAPEM,
 			logger:        logger,
 			mu:            &connectMu,
+			rejectedRetry: rejectedRetry,
+			pendingPoll:   pendingPoll,
 		}).Run(runCtx)
 
 		// Wait for context cancellation (signal, SCM stop, or a pushed-upgrade

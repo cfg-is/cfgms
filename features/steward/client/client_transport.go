@@ -399,6 +399,7 @@ type TransportClient struct {
 	// downloads binaries to a subdirectory here. (Issue #1943)
 	certStoreDir          string
 	admissionWindow       time.Duration
+	onIdentityRejected    func(cause error)
 	hostAttributes        func() map[string]string
 	initialConnectTimeout time.Duration
 
@@ -1022,6 +1023,7 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 			"addr", transportAddress, "steward_id", logging.RedactedID(stewardID))
 
 		provider := grpcCP.New(grpcCP.ModeClient, grpcCP.WithHostAttributes(c.hostAttributes),
+			grpcCP.WithOnIdentityRejected(c.fireIdentityRejected),
 			grpcCP.WithPanicHook(func(component string, recovered interface{}) {
 				// The provider has already logged the sanitized panic; only the
 				// fixed-string reason reaches the heartbeat.
@@ -2967,6 +2969,35 @@ func (c *TransportClient) ReconnectWithNewCredentials(ctx context.Context) error
 		return fmt.Errorf("reconnect with new credentials: %w", err)
 	}
 	return nil
+}
+
+// SetIdentityRejectedHandler registers fn to be told, once per rejection episode,
+// that the controller refused this steward's identity mid-session (revoked,
+// tenant policy, admission refusal). The control connection keeps retrying
+// regardless; the handler is how the process learns of the refusal. If a refusal
+// is already outstanding when the handler is registered, it is told at once so a
+// refusal that landed before registration is not lost. A nil fn unregisters.
+func (c *TransportClient) SetIdentityRejectedHandler(fn func(cause error)) {
+	c.mu.Lock()
+	c.onIdentityRejected = fn
+	cp := c.controlPlane
+	c.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	if a, ok := cp.(interface{ IdentityRejectionActive() bool }); ok && a.IdentityRejectionActive() {
+		go fn(controlplaneInterfaces.ErrIdentityRejected)
+	}
+}
+
+// fireIdentityRejected forwards a provider rejection to the registered handler.
+func (c *TransportClient) fireIdentityRejected(cause error) {
+	c.mu.RLock()
+	fn := c.onIdentityRejected
+	c.mu.RUnlock()
+	if fn != nil {
+		fn(cause)
+	}
 }
 
 // GetStewardID returns the steward ID.

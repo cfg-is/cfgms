@@ -50,7 +50,12 @@ func (h *lifecycleHarness) presentedSerials() []string {
 
 func newLifecycleHarness(t *testing.T, initialLifetime, renewedLifetime time.Duration) *lifecycleHarness {
 	t.Helper()
-	controller := newReadmitTestController(t, "issue")
+	return newLifecycleHarnessMode(t, "issue", initialLifetime, renewedLifetime)
+}
+
+func newLifecycleHarnessMode(t *testing.T, completeMode string, initialLifetime, renewedLifetime time.Duration) *lifecycleHarness {
+	t.Helper()
+	controller := newReadmitTestController(t, completeMode)
 	controller.lifetime = renewedLifetime
 	h := &lifecycleHarness{controller: controller, dir: t.TempDir(), ks: newReadmitKeyStore(t)}
 
@@ -71,7 +76,8 @@ func newLifecycleHarness(t *testing.T, initialLifetime, renewedLifetime time.Dur
 		}
 		return nil
 	}
-	server := grpcCP.New(grpcCP.ModeServer, grpcCP.WithApprovalChecker(allowAllApproval{}))
+	server := grpcCP.New(grpcCP.ModeServer, grpcCP.WithApprovalChecker(allowAllApproval{}),
+		grpcCP.WithRevocationChecker(controller.certMgr), grpcCP.WithRevocationRecheckInterval(50*time.Millisecond))
 	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
 		"mode": "server", "addr": "127.0.0.1:0", "tls_config": serverTLS, "registry": registry.NewRegistry(),
 	}))
