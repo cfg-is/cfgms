@@ -58,6 +58,8 @@ Get the list of changed files with `git diff --name-only develop...HEAD`, then e
 
 8. **Table-Driven Test Patterns**: Multiple similar test cases not using table-driven patterns.
 
+9. **Duplicated Logic**: New production code that repeats an existing function or block (same structure, renamed identifiers) with no justification comment naming the original. Report both locations as file:line.
+
 ## Output Format
 
 Report findings to the team lead via SendMessage:
