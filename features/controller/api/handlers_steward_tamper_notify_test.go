@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -213,6 +214,47 @@ func TestHandleStewardTamperAlarm_AlarmRestoreRealarmInsideCooldown(t *testing.T
 	outcomes := []interface{}{events[0].Details["notification"], events[1].Details["notification"]}
 	assert.ElementsMatch(t, []interface{}{"sent", "cooldown"}, outcomes)
 	assert.Len(t, smtp.Messages(), 1, "the second alarm is inside the cooldown")
+}
+
+func TestNotifyStewardTamper_ConcurrentAlarmsSendOnce(t *testing.T) {
+	f := newTamperFixture(t)
+	smtp := newEmailTestSMTPServer(t)
+	attachEmail(t, f.server, smtp)
+	setContacts(t, f.server, "admin@acme-corp.example")
+	id := f.steward(t, "tamper-concurrent", "msp-a", business.StewardStatusActive)
+
+	const n = 2
+	var ready, done sync.WaitGroup
+	start := make(chan struct{})
+	ready.Add(n)
+	done.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer done.Done()
+			ready.Done()
+			<-start
+			outcome := f.server.notifyStewardTamper(context.Background(), id, "msp-a", []string{controlplaneTypes.ReasonCodeTamperDataDir})
+			f.server.recordStewardTamperAudit(context.Background(), id, "msp-a", []string{controlplaneTypes.ReasonCodeTamperDataDir}, outcome)
+		}()
+	}
+	ready.Wait()
+	close(start)
+	done.Wait()
+
+	events := alarmEvents(t, f.server, "msp-a", id)
+	require.Len(t, events, n)
+	var sent, cooldown int
+	for _, e := range events {
+		switch e.Details["notification"] {
+		case "sent":
+			sent++
+		case "cooldown":
+			cooldown++
+		}
+	}
+	assert.Equal(t, 1, sent)
+	assert.Equal(t, 1, cooldown)
+	assert.Len(t, smtp.Messages(), 1, "overlapping alarms must send one email")
 }
 
 func TestHandleStewardTamperAlarm_AuditWriteFailureDoesNotBlockTransition(t *testing.T) {
