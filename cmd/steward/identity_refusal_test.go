@@ -30,15 +30,15 @@ func (h *lifecycleHarness) runRefusalLifecycle(t *testing.T, rejectedRetry, pend
 	done := make(chan struct{})
 	go func() { lc.Run(ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
-	// Give Run time to register its handler before the revocation.
-	time.Sleep(100 * time.Millisecond)
+	// No wait for Run to register its handler: a refusal that lands first stays
+	// outstanding, and SetIdentityRejectedHandler replays it on registration.
 }
 
 // A mid-session revocation triggers one re-admission cycle: the request lands in
 // the controller's refresh queue, and once an operator approves it the SAME
 // client is connected again with the new certificate — no restart.
 func TestIdentityLifecycle_RevokedMidSessionReadmitsInProcess(t *testing.T) {
-	h := newLifecycleHarnessMode(t, "queue", time.Hour, 3*time.Hour)
+	h := newLifecycleHarnessMode(t, "queue", time.Minute, time.Hour, 3*time.Hour)
 	tcBefore := h.tc
 	original := h.newestClientSerial(t)
 	h.runRefusalLifecycle(t, time.Hour, 100*time.Millisecond)
@@ -67,7 +67,7 @@ func TestIdentityLifecycle_RevokedMidSessionReadmitsInProcess(t *testing.T) {
 // A refused re-admission keeps the steward alive and asking at the slow interval,
 // with the reason set; once the controller relents the reason clears.
 func TestIdentityLifecycle_RefusedReadmissionRetriesSlowlyThenRecovers(t *testing.T) {
-	h := newLifecycleHarnessMode(t, "reject", time.Hour, 3*time.Hour)
+	h := newLifecycleHarnessMode(t, "reject", time.Minute, time.Hour, 3*time.Hour)
 	original := h.newestClientSerial(t)
 	const retry = 700 * time.Millisecond
 	h.runRefusalLifecycle(t, retry, 100*time.Millisecond)

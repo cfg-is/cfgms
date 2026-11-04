@@ -583,6 +583,19 @@ func (p *Provider) markIdentityRejected(cause error) error {
 	return p.rejectErr
 }
 
+// noteStreamRefusal records err for awaitAdmission when it is the controller
+// refusing this identity, and starts a rejection episode when the stream that
+// carried it was dialled with the current credentials (generation gen).
+func (p *Provider) noteStreamRefusal(err error, gen uint64) {
+	if !isIdentityRejection(err) {
+		return
+	}
+	_ = p.markIdentityRejected(err)
+	if gen == p.credGen.Load() {
+		p.notifyIdentityRejected(err)
+	}
+}
+
 // notifyIdentityRejected calls the identity-rejected callback for the first
 // refusal of an episode. Further refusals while the episode lasts (the reconnect
 // loop being refused again) are silent. The callback runs on its own goroutine so
@@ -801,12 +814,7 @@ func (p *Provider) clientReceiveLoop() {
 		if err != nil {
 			// Record a refusal for awaitAdmission. Reconnection below is unchanged:
 			// a steward refused mid-session keeps retrying, as before (Issue #4532).
-			if isIdentityRejection(err) {
-				_ = p.markIdentityRejected(err)
-				if gen == p.credGen.Load() {
-					p.notifyIdentityRejected(err)
-				}
-			}
+			p.noteStreamRefusal(err, gen)
 			select {
 			case <-p.ctx.Done():
 				p.setState(StateDisconnected)

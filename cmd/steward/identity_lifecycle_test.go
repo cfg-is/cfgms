@@ -50,10 +50,15 @@ func (h *lifecycleHarness) presentedSerials() []string {
 
 func newLifecycleHarness(t *testing.T, initialLifetime, renewedLifetime time.Duration) *lifecycleHarness {
 	t.Helper()
-	return newLifecycleHarnessMode(t, "issue", initialLifetime, renewedLifetime)
+	return newLifecycleHarnessMode(t, "issue", time.Second, initialLifetime, renewedLifetime)
 }
 
-func newLifecycleHarnessMode(t *testing.T, completeMode string, initialLifetime, renewedLifetime time.Duration) *lifecycleHarness {
+// newLifecycleHarnessMode builds the harness with the refresh endpoint answering
+// in completeMode and the initial certificate issued initialAge ago. The cert
+// store ranks client certificates by NotBefore at one-second resolution, so a
+// test that re-issues within a second of setup must give the initial
+// certificate an age that keeps it strictly older than the replacement.
+func newLifecycleHarnessMode(t *testing.T, completeMode string, initialAge, initialLifetime, renewedLifetime time.Duration) *lifecycleHarness {
 	t.Helper()
 	controller := newReadmitTestController(t, completeMode)
 	controller.lifetime = renewedLifetime
@@ -88,7 +93,7 @@ func newLifecycleHarnessMode(t *testing.T, completeMode string, initialLifetime,
 	initial, err := controller.certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
 		CommonName: deviceID, ClientID: deviceID, ValidityDays: 30,
 		TemplateModifier: func(tpl *x509.Certificate) {
-			tpl.NotBefore = time.Now().Add(-time.Second)
+			tpl.NotBefore = time.Now().Add(-initialAge)
 			tpl.NotAfter = time.Now().Add(initialLifetime)
 		},
 	})
