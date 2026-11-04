@@ -278,7 +278,7 @@ jobs:
         if [ "$lockstep_count" -gt 1 ]; then
           echo "  ERROR: Go toolchain pin drift — multiple versions in use:"
           printf '%s\n' "$lockstep_versions" | sed 's/^/    /'
-          outdated="${outdated}- **Go toolchain (lockstep drift)**: multiple versions present in repo — \`$(printf '%s, ' $lockstep_versions | sed 's/, $//')\`. Bump all locations to the same version (run \`./.claude/skills/refresh-pins/scripts/discover-pins.py\` to see every file:line).\n"
+          outdated="${outdated}- **Go toolchain (lockstep drift)**: multiple versions present in repo — \`$(printf '%s, ' $lockstep_versions | sed 's/, $//')\`. Bump all locations to the same version (run \`./.claude/tooling/refresh-pins/discover-pins.py\` to see every file:line).\n"
         else
           echo "  OK: Go toolchain lockstep version=${lockstep_versions}"
         fi

@@ -34,7 +34,7 @@ You research the state of every pinned dependency in the repo, apply the cooldow
 Run the discovery script to build the pin inventory:
 
 ```bash
-./.claude/skills/refresh-pins/scripts/discover-pins.py
+./.claude/tooling/refresh-pins/discover-pins.py
 ```
 
 Output is JSON conforming to `references/inventory-schema.md` (load that file lazily if you need to interpret a field). Each pin entry has: `name`, `kind` (`lockstep` | `tool`), `current` version, `release_source` (URL or `gh:<org>/<repo>`), and `locations[]` of every file:line where the pin appears.
@@ -304,7 +304,7 @@ For each story (one pin, or one group):
    declaration) fails the check. A version string inside a `//`/`#` comment,
    inside a quoted string passed to `echo`/`printf`/`Sprintf`/`console.log`,
    or anywhere in a `.md` file, is prose and must not block the story.
-   `scripts/verify_pin_clean.py` implements this classification (see the
+   `.claude/tooling/refresh-pins/verify_pin_clean.py` implements this classification (see the
    script's own docstring for the full rule order); the story template's AC2
    already invokes it. Two real cases this exists to prevent: a `.pre-commit-
    config.yaml`-style echoed `"... run: go install
