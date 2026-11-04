@@ -50,7 +50,17 @@ func (h *lifecycleHarness) presentedSerials() []string {
 
 func newLifecycleHarness(t *testing.T, initialLifetime, renewedLifetime time.Duration) *lifecycleHarness {
 	t.Helper()
-	controller := newReadmitTestController(t, "issue")
+	return newLifecycleHarnessMode(t, "issue", time.Second, initialLifetime, renewedLifetime)
+}
+
+// newLifecycleHarnessMode builds the harness with the refresh endpoint answering
+// in completeMode and the initial certificate issued initialAge ago. The cert
+// store ranks client certificates by NotBefore at one-second resolution, so a
+// test that re-issues within a second of setup must give the initial
+// certificate an age that keeps it strictly older than the replacement.
+func newLifecycleHarnessMode(t *testing.T, completeMode string, initialAge, initialLifetime, renewedLifetime time.Duration) *lifecycleHarness {
+	t.Helper()
+	controller := newReadmitTestController(t, completeMode)
 	controller.lifetime = renewedLifetime
 	h := &lifecycleHarness{controller: controller, dir: t.TempDir(), ks: newReadmitKeyStore(t)}
 
@@ -71,7 +81,8 @@ func newLifecycleHarness(t *testing.T, initialLifetime, renewedLifetime time.Dur
 		}
 		return nil
 	}
-	server := grpcCP.New(grpcCP.ModeServer, grpcCP.WithApprovalChecker(allowAllApproval{}))
+	server := grpcCP.New(grpcCP.ModeServer, grpcCP.WithApprovalChecker(allowAllApproval{}),
+		grpcCP.WithRevocationChecker(controller.certMgr), grpcCP.WithRevocationRecheckInterval(50*time.Millisecond))
 	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
 		"mode": "server", "addr": "127.0.0.1:0", "tls_config": serverTLS, "registry": registry.NewRegistry(),
 	}))
@@ -82,7 +93,7 @@ func newLifecycleHarness(t *testing.T, initialLifetime, renewedLifetime time.Dur
 	initial, err := controller.certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
 		CommonName: deviceID, ClientID: deviceID, ValidityDays: 30,
 		TemplateModifier: func(tpl *x509.Certificate) {
-			tpl.NotBefore = time.Now().Add(-time.Second)
+			tpl.NotBefore = time.Now().Add(-initialAge)
 			tpl.NotAfter = time.Now().Add(initialLifetime)
 		},
 	})

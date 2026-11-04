@@ -399,6 +399,7 @@ type TransportClient struct {
 	// downloads binaries to a subdirectory here. (Issue #1943)
 	certStoreDir          string
 	admissionWindow       time.Duration
+	onIdentityRejected    func(cause error)
 	hostAttributes        func() map[string]string
 	initialConnectTimeout time.Duration
 
@@ -1018,42 +1019,10 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 
 	// Initialize gRPC control plane provider if not already set
 	if controlPlane == nil {
-		c.logger.Info("Initializing gRPC control plane provider",
-			"addr", transportAddress, "steward_id", logging.RedactedID(stewardID))
-
-		provider := grpcCP.New(grpcCP.ModeClient, grpcCP.WithHostAttributes(c.hostAttributes),
-			grpcCP.WithPanicHook(func(component string, recovered interface{}) {
-				// The provider has already logged the sanitized panic; only the
-				// fixed-string reason reaches the heartbeat.
-				_ = recovered
-				c.SetHealthReason(component, healthReasonCodePanic, panicReasonMessage(component))
-			}))
-
-		providerCfg := map[string]interface{}{
-			"mode":       "client",
-			"addr":       transportAddress,
-			"steward_id": stewardID,
-			"logger":     c.logger,
+		controlPlane, err = c.newControlPlaneProvider(ctx, stewardID, transportAddress, tenantID, tlsConfig)
+		if err != nil {
+			return err
 		}
-		if tenantID != "" {
-			providerCfg["tenant_id"] = tenantID
-		}
-		if c.admissionWindow > 0 {
-			providerCfg["admission_window"] = c.admissionWindow
-		}
-		if c.initialConnectTimeout > 0 {
-			providerCfg["initial_connect_timeout"] = c.initialConnectTimeout
-		}
-		if tlsConfig == nil {
-			return fmt.Errorf("refusing to initialize gRPC control plane provider without a TLS configuration; mutual TLS is mandatory")
-		}
-		providerCfg["tls_config"] = tlsConfig
-
-		if err := provider.Initialize(ctx, providerCfg); err != nil {
-			return fmt.Errorf("failed to initialize gRPC control plane provider: %w", err)
-		}
-
-		controlPlane = provider
 		c.mu.Lock()
 		c.controlPlane = controlPlane
 		c.mu.Unlock()
@@ -1168,6 +1137,48 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 
 	c.logger.Info("Connected to controller successfully via gRPC transport")
 	return nil
+}
+
+// newControlPlaneProvider creates and initializes the steward's gRPC control
+// plane client provider for transportAddress. mTLS is mandatory: a nil tlsConfig
+// is refused.
+func (c *TransportClient) newControlPlaneProvider(ctx context.Context, stewardID, transportAddress, tenantID string, tlsConfig *tls.Config) (controlplaneInterfaces.ControlPlaneProvider, error) {
+	c.logger.Info("Initializing gRPC control plane provider",
+		"addr", transportAddress, "steward_id", logging.RedactedID(stewardID))
+
+	provider := grpcCP.New(grpcCP.ModeClient, grpcCP.WithHostAttributes(c.hostAttributes),
+		grpcCP.WithOnIdentityRejected(c.fireIdentityRejected),
+		grpcCP.WithPanicHook(func(component string, recovered interface{}) {
+			// The provider has already logged the sanitized panic; only the
+			// fixed-string reason reaches the heartbeat.
+			_ = recovered
+			c.SetHealthReason(component, healthReasonCodePanic, panicReasonMessage(component))
+		}))
+
+	providerCfg := map[string]interface{}{
+		"mode":       "client",
+		"addr":       transportAddress,
+		"steward_id": stewardID,
+		"logger":     c.logger,
+	}
+	if tenantID != "" {
+		providerCfg["tenant_id"] = tenantID
+	}
+	if c.admissionWindow > 0 {
+		providerCfg["admission_window"] = c.admissionWindow
+	}
+	if c.initialConnectTimeout > 0 {
+		providerCfg["initial_connect_timeout"] = c.initialConnectTimeout
+	}
+	if tlsConfig == nil {
+		return nil, fmt.Errorf("refusing to initialize gRPC control plane provider without a TLS configuration; mutual TLS is mandatory")
+	}
+	providerCfg["tls_config"] = tlsConfig
+
+	if err := provider.Initialize(ctx, providerCfg); err != nil {
+		return nil, fmt.Errorf("failed to initialize gRPC control plane provider: %w", err)
+	}
+	return provider, nil
 }
 
 // receiveCommand is the steward's command-receive path (Story #3436): it enforces
@@ -2967,6 +2978,35 @@ func (c *TransportClient) ReconnectWithNewCredentials(ctx context.Context) error
 		return fmt.Errorf("reconnect with new credentials: %w", err)
 	}
 	return nil
+}
+
+// SetIdentityRejectedHandler registers fn to be told, once per rejection episode,
+// that the controller refused this steward's identity mid-session (revoked,
+// tenant policy, admission refusal). The control connection keeps retrying
+// regardless; the handler is how the process learns of the refusal. If a refusal
+// is already outstanding when the handler is registered, it is told at once so a
+// refusal that landed before registration is not lost. A nil fn unregisters.
+func (c *TransportClient) SetIdentityRejectedHandler(fn func(cause error)) {
+	c.mu.Lock()
+	c.onIdentityRejected = fn
+	cp := c.controlPlane
+	c.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	if a, ok := cp.(interface{ IdentityRejectionActive() bool }); ok && a.IdentityRejectionActive() {
+		go fn(controlplaneInterfaces.ErrIdentityRejected)
+	}
+}
+
+// fireIdentityRejected forwards a provider rejection to the registered handler.
+func (c *TransportClient) fireIdentityRejected(cause error) {
+	c.mu.RLock()
+	fn := c.onIdentityRejected
+	c.mu.RUnlock()
+	if fn != nil {
+		fn(cause)
+	}
 }
 
 // GetStewardID returns the steward ID.

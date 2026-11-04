@@ -23,6 +23,11 @@ const (
 	clientCertReasonRenewalFailed     = "client_cert.renewal_failed"
 	clientCertReasonDeviceKeyUnusable = "client_cert.device_key_unusable"
 
+	// identityReasonComponent is the health-reason component for the controller
+	// refusing this steward mid-session; identityReasonRefused is its code.
+	identityReasonComponent = "identity"
+	identityReasonRefused   = "identity.refused"
+
 	// Renewal starts once less than max(25% of the certificate's lifetime, 7 days)
 	// remains, so a certificate is replaced well before it can lapse.
 	renewWindowFraction  = 4
@@ -72,11 +77,17 @@ type identityLifecycle struct {
 	onDeviceKeyUnusable func()
 
 	// Tunables; zero values select the production defaults.
-	tick        time.Duration
-	interval    time.Duration
-	jitter      time.Duration
-	renewWindow func(lifetime time.Duration) time.Duration
-	now         func() time.Time
+	rejectedRetry time.Duration // wait after the controller refuses re-admission
+	pendingPoll   time.Duration // poll interval while re-admission awaits approval
+	tick          time.Duration
+	interval      time.Duration
+	jitter        time.Duration
+	renewWindow   func(lifetime time.Duration) time.Duration
+	now           func() time.Time
+
+	// refusedCh carries the provider's "controller refused this identity" signal
+	// into Run; it holds at most one pending signal.
+	refusedCh chan struct{}
 
 	keyUnusableNotified bool
 	reconnectPending    bool
@@ -108,6 +119,17 @@ func (l *identityLifecycle) durations() (tick, interval, jitter time.Duration) {
 // sleep, detected as a tick that arrives much later than scheduled.
 func (l *identityLifecycle) Run(ctx context.Context) {
 	tick, interval, jitter := l.durations()
+	l.refusedCh = make(chan struct{}, 1)
+	l.tc.SetIdentityRejectedHandler(func(cause error) {
+		l.logger.Warn("Controller refused this steward's identity; re-admission will be requested",
+			"operation", "identity_refused",
+			"error", logging.SanitizeLogValue(cause.Error()))
+		select {
+		case l.refusedCh <- struct{}{}:
+		default:
+		}
+	})
+	defer l.tc.SetIdentityRejectedHandler(nil)
 	next := l.clock()
 	last := l.clock()
 	ticker := time.NewTicker(tick)
@@ -126,6 +148,9 @@ func (l *identityLifecycle) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-l.refusedCh:
+			l.readmit(ctx)
+			next = l.clock() // re-check the certificate right after recovery
 		}
 	}
 }
@@ -256,4 +281,133 @@ func (l *identityLifecycle) keyUnusable(err error) bool {
 		}
 	}
 	return false
+}
+
+// readmit answers a mid-session refusal: it reports identity.refused, then asks
+// the controller to re-admit this device with the boot-time device-key flow until
+// the controller approves or ctx ends. The refusal itself still holds, so a
+// refused request waits the slow rejectedRetry — never a hot loop — and a request
+// queued for an operator is polled at pendingPoll. An approved credential is
+// persisted into the certificate store and the SAME client re-dials with it.
+func (l *identityLifecycle) readmit(ctx context.Context) {
+	rejectedRetry, pendingPoll := l.rejectedRetry, l.pendingPoll
+	if rejectedRetry <= 0 {
+		rejectedRetry = rejectedReadmissionRetry
+	}
+	if pendingPoll <= 0 {
+		pendingPoll = pendingReadmissionPoll
+	}
+	l.tc.SetHealthReason(identityReasonComponent, identityReasonRefused,
+		"the controller refused this steward's identity; re-admission requested")
+
+	stored := false // credential persisted, only the re-dial is outstanding
+	for {
+		wait, done := l.readmitOnce(ctx, &stored, rejectedRetry, pendingPoll)
+		if done {
+			select { // a signal queued during recovery belongs to the episode just closed
+			case <-l.refusedCh:
+			default:
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+	}
+}
+
+// readmitOnce makes one re-admission attempt. It returns how long to wait before
+// the next one, or done once the steward is connected again.
+func (l *identityLifecycle) readmitOnce(ctx context.Context, stored *bool, rejectedRetry, pendingPoll time.Duration) (time.Duration, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if !*stored {
+		wait, ok := l.requestReadmission(ctx, rejectedRetry, pendingPoll)
+		if !ok {
+			return wait, false
+		}
+		*stored = true
+	}
+
+	if err := l.tc.ReconnectWithNewCredentials(ctx); err != nil {
+		l.failures++
+		l.logger.Warn("Re-admitted credential stored but reconnect failed; will retry",
+			"operation", "identity_readmit",
+			"error", logging.SanitizeLogValue(err.Error()))
+		return l.backoff(), false
+	}
+	l.failures = 0
+	l.keyUnusableNotified = false
+	l.tc.ClearHealthReason(identityReasonComponent)
+	l.tc.ClearHealthReason(clientCertReasonComponent)
+	return 0, true
+}
+
+// requestReadmission asks the controller to re-admit this device with the
+// device-key refresh flow and persists an approved credential into the
+// certificate store. It reports true once the credential is stored; otherwise it
+// returns how long to wait before asking again. l.mu must be held.
+func (l *identityLifecycle) requestReadmission(ctx context.Context, rejectedRetry, pendingPoll time.Duration) (time.Duration, bool) {
+	certMgr := l.tc.CertManager()
+	id, err := loadIdentity(l.certStoreDir)
+	switch {
+	case certMgr == nil:
+		l.failures++
+		return l.backoff(), false
+	case err != nil || id == nil:
+		if err == nil {
+			err = errors.New("no stored identity")
+		}
+		l.logger.Warn("Re-admission unavailable: stored identity unreadable",
+			"operation", "identity_readmit",
+			"error", logging.SanitizeLogValue(err.Error()))
+		l.failures++
+		return l.backoff(), false
+	case l.ks == nil || l.ks.DeviceID() == "":
+		l.keyUnusable(errors.New("device identity key store unavailable"))
+		return rejectedRetry, false
+	}
+
+	attemptCtx, cancel := context.WithTimeout(ctx, renewAttemptTimeout)
+	serial, err := renewIntoCertStore(attemptCtx, id, l.ks, certMgr, l.certStoreDir, l.controllerURL, l.trustSrc, l.installCAPEM, l.logger)
+	cancel()
+	if err != nil {
+		return l.readmissionFailed(err, rejectedRetry, pendingPoll), false
+	}
+	l.logger.Info("Re-admitted after controller refusal", "serial", logging.SanitizeLogValue(serial))
+	return 0, true
+}
+
+// readmissionFailed classifies a failed re-admission request and returns how
+// long to wait before the next one: a refusal waits the slow rejectedRetry, a
+// request queued for an operator is polled at pendingPoll, and anything else
+// backs off. l.mu must be held.
+func (l *identityLifecycle) readmissionFailed(err error, rejectedRetry, pendingPoll time.Duration) time.Duration {
+	switch {
+	case errors.Is(err, registration.ErrRefreshRejected):
+		l.logger.Error("Controller refused re-admission; asking again later",
+			"operation", "identity_readmit_rejected",
+			"error", logging.SanitizeLogValue(err.Error()),
+			"retry_in", rejectedRetry)
+		return rejectedRetry
+	case errors.Is(err, registration.ErrRefreshPending):
+		wait := pendingReadmissionWait(pendingPoll)
+		l.logger.Info("Re-admission awaiting operator approval; checking again shortly",
+			"operation", "identity_readmit_pending",
+			"retry_in", wait)
+		return wait
+	case errors.Is(err, errDeviceKeyUnusable), errors.Is(err, registration.ErrRefreshUnknownDevice):
+		l.keyUnusable(err)
+		return rejectedRetry
+	default:
+		l.failures++
+		l.logger.Warn("Re-admission failed; will retry",
+			"operation", "identity_readmit",
+			"error", logging.SanitizeLogValue(err.Error()),
+			"failures", l.failures)
+		return l.backoff()
+	}
 }

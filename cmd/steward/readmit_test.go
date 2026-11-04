@@ -115,7 +115,10 @@ func (c *readmitTestController) handleComplete(t *testing.T, w http.ResponseWrit
 		http.Error(w, "refresh unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	switch c.completeMode {
+	c.mu.Lock()
+	mode := c.completeMode
+	c.mu.Unlock()
+	switch mode {
 	case "reject":
 		http.Error(w, "refresh rejected by tenant policy", http.StatusForbidden)
 	case "queue":
@@ -176,6 +179,13 @@ func (c *readmitTestController) writeBundle(t *testing.T, w http.ResponseWriter,
 		"tenant_id":         "tenant-readmit",
 		"transport_address": "127.0.0.1:1",
 	})
+}
+
+// setCompleteMode changes how the refresh endpoint answers from now on.
+func (c *readmitTestController) setCompleteMode(mode string) {
+	c.mu.Lock()
+	c.completeMode = mode
+	c.mu.Unlock()
 }
 
 func (c *readmitTestController) approve() {

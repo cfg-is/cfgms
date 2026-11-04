@@ -878,6 +878,8 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 			installCAPEM:  installCAPEM,
 			logger:        logger,
 			mu:            &connectMu,
+			rejectedRetry: rejectedRetry,
+			pendingPoll:   pendingPoll,
 		}).Run(runCtx)
 
 		// Wait for context cancellation (signal, SCM stop, or a pushed-upgrade
@@ -899,41 +901,46 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 	}
 
 	// Standalone mode: --config was provided.
-	useStandalone := configPath != ""
-	if useStandalone {
-		legacyLogger := logging.GetLogger()
-		s, err := steward.NewStandalone(configPath, legacyLogger)
-		if err != nil {
-			return fmt.Errorf("failed to create standalone steward: %w", err)
-		}
-		logger.Info("Starting steward in standalone mode",
-			"operation", "steward_start", "mode", "standalone", "config_path", configPath)
-
-		errCh := make(chan error, 1)
-		go func() {
-			errCh <- s.Start(ctx)
-		}()
-
-		<-ctx.Done()
-		logger.Info("Shutdown signal received", "operation", "steward_shutdown")
-
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer stopCancel()
-		if stopErr := s.Stop(stopCtx); stopErr != nil {
-			logger.Error("Error during shutdown", "operation", "steward_shutdown", "error", stopErr.Error())
-		}
-
-		if startErr := <-errCh; startErr != nil && startErr != context.Canceled {
-			logger.Error("Steward start failed", "operation", "steward_run", "error", startErr.Error())
-			return fmt.Errorf("steward start failed: %w", startErr)
-		}
-
-		logger.Info("Steward shutdown completed", "operation", "steward_shutdown", "status", "completed")
-		return nil
+	if configPath != "" {
+		return runStandalone(ctx, configPath, logger)
 	}
 
 	// Structurally unreachable: runRootCommand's noFlags guard prevents calling
 	// runSteward with both regToken and configPath empty.
+	return nil
+}
+
+// runStandalone runs the steward in standalone mode from the --config file at
+// configPath until ctx is cancelled, then stops it.
+func runStandalone(ctx context.Context, configPath string, logger logging.Logger) error {
+	legacyLogger := logging.GetLogger()
+	s, err := steward.NewStandalone(configPath, legacyLogger)
+	if err != nil {
+		return fmt.Errorf("failed to create standalone steward: %w", err)
+	}
+	logger.Info("Starting steward in standalone mode",
+		"operation", "steward_start", "mode", "standalone", "config_path", configPath)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.Start(ctx)
+	}()
+
+	<-ctx.Done()
+	logger.Info("Shutdown signal received", "operation", "steward_shutdown")
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer stopCancel()
+	if stopErr := s.Stop(stopCtx); stopErr != nil {
+		logger.Error("Error during shutdown", "operation", "steward_shutdown", "error", stopErr.Error())
+	}
+
+	if startErr := <-errCh; startErr != nil && startErr != context.Canceled {
+		logger.Error("Steward start failed", "operation", "steward_run", "error", startErr.Error())
+		return fmt.Errorf("steward start failed: %w", startErr)
+	}
+
+	logger.Info("Steward shutdown completed", "operation", "steward_shutdown", "status", "completed")
 	return nil
 }
 

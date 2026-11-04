@@ -106,16 +106,27 @@ type Provider struct {
 	// initialConnectTimeout bounds dialInitial's retries (Issue #4532). 0 retries
 	// until p.ctx is done (Issue #3849). It never bounds the established session.
 	initialConnectTimeout time.Duration
-	rejectOnce            sync.Once
-	rejectedCh            chan struct{}
-	rejectErr             error
-	firstRecvOnce         sync.Once
-	firstRecvCh           chan struct{}
-	maxConnections        int
-	stewardID             string
-	tenantID              string
-	logger                logging.Logger
-	startTime             time.Time
+	// onIdentityRejected, when set, is told once per rejection episode that the
+	// controller refused this identity mid-session. identityRejected is true from
+	// the first refusal until a message is received (or Reconnect is called).
+	onIdentityRejected func(cause error)
+	identityRejected   atomic.Bool
+	// credGen counts explicit Reconnect calls (new credentials). A stream records
+	// the value current when its dial began (streamGen, under sendMu); a refusal on
+	// a stream dialled before the latest Reconnect may have presented the old
+	// credentials, so it is not a verdict on the new ones and starts no episode.
+	credGen        atomic.Uint64
+	streamGen      uint64
+	rejectOnce     sync.Once
+	rejectedCh     chan struct{}
+	rejectErr      error
+	firstRecvOnce  sync.Once
+	firstRecvCh    chan struct{}
+	maxConnections int
+	stewardID      string
+	tenantID       string
+	logger         logging.Logger
+	startTime      time.Time
 
 	// Per-instance overrides injected via constructor options (test-only)
 	backoffOverride *backoff
@@ -572,6 +583,36 @@ func (p *Provider) markIdentityRejected(cause error) error {
 	return p.rejectErr
 }
 
+// noteStreamRefusal records err for awaitAdmission when it is the controller
+// refusing this identity, and starts a rejection episode when the stream that
+// carried it was dialled with the current credentials (generation gen).
+func (p *Provider) noteStreamRefusal(err error, gen uint64) {
+	if !isIdentityRejection(err) {
+		return
+	}
+	_ = p.markIdentityRejected(err)
+	if gen == p.credGen.Load() {
+		p.notifyIdentityRejected(err)
+	}
+}
+
+// notifyIdentityRejected calls the identity-rejected callback for the first
+// refusal of an episode. Further refusals while the episode lasts (the reconnect
+// loop being refused again) are silent. The callback runs on its own goroutine so
+// it can never stall the receive loop.
+func (p *Provider) notifyIdentityRejected(cause error) {
+	if !p.identityRejected.CompareAndSwap(false, true) || p.onIdentityRejected == nil {
+		return
+	}
+	go p.onIdentityRejected(cause)
+}
+
+// IdentityRejectionActive reports whether the controller's refusal of this
+// identity is still unanswered by a received message.
+func (p *Provider) IdentityRejectionActive() bool {
+	return p.identityRejected.Load()
+}
+
 // isIdentityRejection reports whether err is the controller definitively refusing
 // this steward's identity: an Unauthenticated or PermissionDenied control-channel
 // status, which the controller returns only after authenticating the TLS peer and
@@ -708,6 +749,7 @@ func (p *Provider) dialAndOpenStream() error {
 	addr := p.addr
 	p.sendMu.Unlock()
 
+	gen := p.credGen.Load()
 	dialer := quictransport.NewDialer(p.tlsConfig, p.quicConfig())
 
 	conn, err := grpc.NewClient(
@@ -735,6 +777,7 @@ func (p *Provider) dialAndOpenStream() error {
 	p.grpcConn = conn
 	p.grpcClient = transportpb.NewStewardTransportClient(conn)
 	p.controlStream = stream
+	p.streamGen = gen
 	p.sendMu.Unlock()
 
 	return nil
@@ -748,6 +791,7 @@ func (p *Provider) clientReceiveLoop() {
 	// field concurrently with closeClientConn/dialAndOpenStream writes.
 	p.sendMu.Lock()
 	stream := p.controlStream
+	gen := p.streamGen
 	p.sendMu.Unlock()
 
 	if stream == nil {
@@ -764,14 +808,13 @@ func (p *Provider) clientReceiveLoop() {
 			// persistently-refused steward escalating while leaving an ordinary
 			// transport drop reconnecting promptly (Issue #3481).
 			p.resetReconnectBackoff()
+			p.identityRejected.Store(false) // a message ends the rejection episode
 			p.firstRecvOnce.Do(func() { close(p.firstRecvCh) })
 		}
 		if err != nil {
 			// Record a refusal for awaitAdmission. Reconnection below is unchanged:
 			// a steward refused mid-session keeps retrying, as before (Issue #4532).
-			if isIdentityRejection(err) {
-				_ = p.markIdentityRejected(err)
-			}
+			p.noteStreamRefusal(err, gen)
 			select {
 			case <-p.ctx.Done():
 				p.setState(StateDisconnected)
@@ -933,6 +976,9 @@ func (p *Provider) Reconnect(_ context.Context) error {
 	if p.mode != ModeClient {
 		return fmt.Errorf("Reconnect called on server-mode provider")
 	}
+	// New credentials are being presented, so a refusal of them is a new episode.
+	p.credGen.Add(1)
+	p.identityRejected.Store(false)
 	p.closeClientConn()
 	go p.reconnectLoop()
 	return nil
@@ -1146,6 +1192,16 @@ const PanicComponentCommandHandler = "command_handler"
 // the recovered value; it must not place the value in controller-visible text.
 func WithPanicHook(hook func(component string, recovered interface{})) option {
 	return func(p *Provider) { p.panicHook = hook }
+}
+
+// WithOnIdentityRejected installs a callback invoked once per rejection episode
+// when the controller refuses the steward's identity mid-session. An episode ends
+// when a message is received after a reconnect, or on an explicit Reconnect. The
+// reconnect loop keeps retrying regardless; the callback is how the process
+// learns of the refusal. The cause may carry controller text: sanitize it before
+// logging.
+func WithOnIdentityRejected(cb func(cause error)) option {
+	return func(p *Provider) { p.onIdentityRejected = cb }
 }
 
 // handleCommand runs the subscribed command handler for one received command.
