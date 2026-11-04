@@ -86,8 +86,8 @@ What becomes easier or harder by making this decision?
 
 ### Superseded/Deprecated
 
-| ADR | Title | Date | Status |
-|-----|-------|------|--------|
+None. A fully superseded ADR is removed; the superseding ADR records its lineage
+(for example, ADR-031 records ADR-028), and Git history keeps the prior text.
 
 ADR-011 and ADR-029 remain active but are **amended** by ADR-031; see their status lines.
 

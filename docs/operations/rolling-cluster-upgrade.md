@@ -13,7 +13,7 @@ configured endpoint routing; this procedure does not promise a fixed reconnect t
 - An authorized operator session for cluster administration. See the
   [operator guide](../deployment/cfg-operator-guide.md).
 - The current node IDs, direct node addresses, CA trust and service configuration.
-  Use the authenticated `GET /api/v1/cluster/nodes` API to inspect the node registry;
+  Use the authenticated `GET /api/v1/ha/nodes` API to inspect the node registry;
   there is no `cfg controller cluster status` command.
 
 ## 1. Drain one node

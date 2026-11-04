@@ -20,7 +20,7 @@ import (
 // This is the automated verification gate for the DNA-collection-audit epic
 // (#1932): it spawns a real steward DNA Collector, waits for the first full
 // snapshot (background collection completed), and asserts every Must-Collect
-// attribute from docs/architecture/dna-collection.md is present and non-empty on
+// attribute from features/steward/dna/README.md is present and non-empty on
 // the corresponding platform.
 //
 // Tiers, per the must-collect spec:
@@ -144,7 +144,7 @@ func wmicAvailable() bool {
 }
 
 // assertAllPlatformMustCollect asserts the cross-platform must-collect set
-// (docs/architecture/dna-collection.md "All platforms").
+// (features/steward/dna/README.md "Must-Collect Attributes", "All platforms").
 func assertAllPlatformMustCollect(t *testing.T, attrs map[string]string) {
 	t.Helper()
 	for _, k := range []string{

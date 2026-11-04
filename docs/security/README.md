@@ -94,7 +94,6 @@ If you don't need M365 integration:
 - [Security Configuration](./SECURITY_CONFIGURATION.md) - Essential security configuration guidance for deployments
 - [Certificate Architecture](./certificate-architecture.md) - Three-certificate architecture and CA hierarchy
 - [Certificate Rotation](./certificate-rotation.md) - Certificate rotation procedures
-- [Zero Trust Security Analysis](architecture.md) - Zero-trust policy engine analysis
 - [Test Credential Security](./test-credential-security.md) - Security practices for test credentials
 - [PGP Email Guide](./pgp-email-guide.md) - Using PGP-encrypted email for vulnerability reports
 - [Sensitive Data Scan Results](./sensitive-data-scan-results.md) - Repository security scan (Story #224)

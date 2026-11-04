@@ -88,7 +88,7 @@ naming the exported path.
 | `--credential-name` | `signing-key` | Name the encrypted signing key is stored under in the credential store |
 | `--export-plaintext-key` | false | Also export the private key as a cleartext PEM (development only); required to use `--key-out` |
 | `--key-out` | `<user config dir>/cfgms/signing-key.pem` | Path for the cleartext key export; ignored unless `--export-plaintext-key` is passed, and an error if passed without it |
-| `--url` | — | Controller REST API URL (env: `CFGMS_API_URL`) |
+| `--url` | — | Controller REST API URL (env: `CFGMS_API_URL`). Use the controller's configured API listener address (`--listen-api-addr`, `CFGMS_HTTP_LISTEN_ADDR` or the config file; default port `9080`). Examples below write it as `https://<controller-api>`. |
 | `--tls-insecure` | false | Skip TLS certificate verification (development only, env: `CFGMS_TLS_INSECURE`) |
 | `--server-name` | — | Override the TLS server name used for certificate verification |
 
@@ -151,8 +151,8 @@ mint within its own subtree).
 Run by the **operator on the headless machine** — the one with no `cfg` credential yet.
 
 ```bash
-cfg credential enrol --token <token> --url https://controller:9443
-cfg credential enrol --token <token> --url https://controller:9443 --name prod
+cfg credential enrol --token <token> --url https://<controller-api>
+cfg credential enrol --token <token> --url https://<controller-api> --name prod
 ```
 
 Generates an ECDSA P-256 keypair locally, builds a certificate signing request over the
@@ -164,7 +164,7 @@ public key alone). On success the command prints, together and prominently:
 Credential request lodged (id: cr-...)
 Public key fingerprint: AB12-CD34-EF56-7890
 Compare this fingerprint with the administrator before they approve the request.
-Approval endpoint (an administrator lists and approves pending requests here): https://controller:9443/api/v1/credential-requests
+Approval endpoint (an administrator lists and approves pending requests here): https://<controller-api>/api/v1/credential-requests
 Expires: 2026-08-28T11:00:00Z
 ```
 
@@ -226,8 +226,8 @@ headless path, `cfg login` is the interactive one: no bundle file, no private ke
 transfer, no shell on the controller.
 
 ```bash
-cfg login --url https://controller:9443
-cfg login --url https://controller:9443 --name prod
+cfg login --url https://<controller-api>
+cfg login --url https://<controller-api> --name prod
 ```
 
 The command generates a random verifier locally (never written to disk, never placed in
@@ -236,7 +236,7 @@ a login request over its own connection, and prints:
 
 ```
 Code: AB3D-7FQK
-Approve this login by visiting: https://controller:9443/login/confirm?request_id=cli-login-...
+Approve this login by visiting: https://<controller-api>/login/confirm?request_id=cli-login-...
 Expires: 2026-08-28T11:05:00Z
 ```
 
@@ -902,11 +902,11 @@ cfg account get <username> [--json]
 
 ### cfg account update
 
-Updates account permissions and/or disabled state. All flags are optional —
+Updates account permissions and/or disabled state, or resets its passkeys. All flags are optional —
 omitted flags retain existing values.
 
 ```
-cfg account update <username> [--permission <p>]... [--disabled=true|false] [--json]
+cfg account update <username> [--permission <p>]... [--disabled=true|false] [--reset-credentials] [--json]
 ```
 
 Example:
@@ -914,6 +914,7 @@ Example:
 ```
 cfg account update alice --disabled=true
 cfg account update alice --permission account:list --permission account:get
+cfg account update alice --reset-credentials
 ```
 
 **Flags:**
@@ -922,6 +923,7 @@ cfg account update alice --permission account:list --permission account:get
 |------|---------|-------------|
 | `--permission` | — | Permissions to set (repeatable; replaces the full existing set) |
 | `--disabled` | — | Set disabled state: `true` or `false` |
+| `--reset-credentials` | false | Revoke the account's existing passkeys and issue a new enrollment link |
 | `--json` | false | Output as JSON |
 | `--url` | env/bundle | Override controller URL |
 

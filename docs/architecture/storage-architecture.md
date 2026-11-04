@@ -146,12 +146,12 @@ The flat-file provider (`pkg/storage/providers/flatfile`) is the local composite
 import _ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 ```
 
-## Migration from the git provider
+## Retired Git backend
 
-The current controller rejects the retired Git backend. The
-[backend migration procedure](../operations/backend-migration.md#migration-from-the-git-provider)
-owns exclusive-write cutover, the legacy Git-to-flatfile path and its data-coverage
-limits. Git sync is a separate editing/import path, not a replacement backend.
+The current controller rejects the retired Git backend. Git sync is a separate
+editing/import path, not a storage backend. The
+[backend migration guide](../operations/backend-migration.md) owns
+exclusive-write cutover between the supported backends.
 
 ## Interface Layout
 

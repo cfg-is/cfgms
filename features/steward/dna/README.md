@@ -59,6 +59,68 @@ The following attributes contain raw values that must be sanitized before any lo
 ---
 
 
+## Must-Collect Attributes
+
+These attributes are the minimum set that a compliant steward binary must emit.
+An attribute is must-collect if its absence prevents device identity, controller
+targeting or drift detection from working.
+[`test/integration/dna_snapshot_test.go`](../../../test/integration/dna_snapshot_test.go)
+asserts that each one is present and non-empty on the platforms it covers. Change
+this list and that test together.
+
+### All platforms
+
+| Attribute Key | Expected value | Rationale |
+|---|---|---|
+| `timestamp` | RFC3339 string | Required for cache validity and delta freshness checks |
+| `runtime_os` | `linux`, `windows`, or `darwin` | Required for platform-specific config targeting |
+| `runtime_arch` | `amd64` or `arm64` | Required for binary delivery targeting |
+| `hostname` | non-empty string | Required for device display and log correlation |
+| `num_cpu` | integer string ≥ 1 | Core identity signal; used in system ID derivation |
+| `primary_mac` | MAC address string | Primary input to `generateSystemID()` — absence produces a time-varying ID |
+| `ip_addresses` | non-empty string | Required for network reachability targeting |
+| `network_interface_count` | integer string ≥ 1 | Required for connectivity classification |
+| `default_gateway` | IP address string | Required for network topology classification |
+| `os` | non-empty string | Required for OS-level config targeting |
+
+### Linux
+
+| Attribute Key | Expected value | Rationale |
+|---|---|---|
+| `os_name` OR `os_pretty_name` | non-empty string | Required for distro-specific config targeting |
+| `kernel_version` | non-empty string | Required for kernel-version-based policy targeting |
+| `memory_total_gb` | decimal string | Required for resource capacity targeting |
+| `local_user_count` | integer string ≥ 1 | Security baseline assertion |
+| `domain_joined` | `"true"` or `"false"` | Required for AD-based policy targeting |
+| `av_products_detected` | non-empty string | Security compliance baseline (value `"none"` is acceptable) |
+| `luks_encrypted_devices` | integer string ≥ 0 | Encryption baseline |
+| `ufw_firewall_state` OR `iptables_rule_count` OR `firewall_state` | non-empty string | At least one firewall signal must be present |
+
+### Windows
+
+| Attribute Key | Expected value | Rationale |
+|---|---|---|
+| `windows_caption` OR `windows_version` | non-empty string | Required for Windows version targeting |
+| `windows_build_number` | integer string | Required for patch-level targeting |
+| `memory_total_gb` | decimal string | Required for resource capacity targeting |
+| `local_user_count` | integer string ≥ 1 | Security baseline assertion |
+| `domain_joined` | `"true"` or `"false"` | Required for AD-based policy targeting |
+| `av_products_detected` | non-empty string | Security compliance baseline (value `"none"` on Server SKU is acceptable) |
+| `bitlocker_enabled` | `"true"` or `"false"` | Encryption baseline |
+| `windows_firewall_domain_profile` | `"enabled"` or `"disabled"` | Firewall baseline |
+
+### macOS
+
+| Attribute Key | Expected value | Rationale |
+|---|---|---|
+| `macos_version` | version string (e.g., `14.5`) | Required for macOS version targeting |
+| `hardware_model` | non-empty string (e.g., `MacBookPro18,3`) | Required for hardware-specific policy targeting |
+| `memory_total_gb` | decimal string | Required for resource capacity targeting |
+| `total_user_count` | integer string ≥ 1 | Security baseline assertion |
+| `sip_status` | `"enabled"`, `"disabled"`, or `"unknown"` | Security integrity baseline |
+| `gatekeeper_status` | non-empty string | Security integrity baseline |
+| `macos_firewall_state` | non-empty string | Firewall baseline |
+
 ## Verify a change
 
 Run source-adjacent parser/collector/assembler tests and the affected platform

@@ -199,11 +199,19 @@ Read `docs/architecture/storage-architecture.md` and `pkg/storage/interfaces/REA
 Business code imports provider interfaces; boot settings follow the canonical
 config/schema. Git is a sync source, not the current backend.
 
+**No memory-only storage.** Data that must survive a restart uses a durable
+provider everywhere, including tests and development. Only ephemeral data that is
+safe to lose on restart (for example, per-process counters) may stay in memory.
+
 ### Certificate Management
 
 Read `docs/security/certificate-architecture.md` and relevant accepted ADRs.
 Use the central certificate manager; preserve distinct TLS, client identity and
 execution-signing purposes and their assurance/rotation contracts.
+
+**Tests use auto-generated certificates, never static test certificates.**
+Generate certificate material at test time (with `t.TempDir()` for files); do not
+commit PEM keys or certificates as test fixtures.
 
 ### Central Provider System
 
