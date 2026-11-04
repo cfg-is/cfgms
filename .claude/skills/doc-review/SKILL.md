@@ -18,7 +18,7 @@ Identify the actual PR base and head. Include added, modified, renamed and delet
 Markdown, agent instructions and relevant config examples. Read affected current
 owners and known consumers when necessary.
 
-Run `./.claude/scripts/pr-review-helper.sh doc-scan` for artifact triage. Its
+Run `./.claude/tooling/scripts/pr-review-helper.sh doc-scan` for artifact triage. Its
 filename/story-marker hits are candidates, not deletion instructions; `(none)`
 is not a review verdict. The helper compares local `develop...HEAD`, so reconcile
 its output with the actual PR refs when that local branch is stale or the PR

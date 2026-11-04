@@ -22,7 +22,7 @@ You are spawned by `/story-complete` with:
 - Working directory: the agent's clone of the repo, on the story branch
 - Story number: derivable from the branch (`feature/story-<N>-*`) or via `git config --get branch.$(git branch --show-current).description` if set
 - Project item ID: passed as `--project-item <ITEM_ID>` at invocation (retained alongside `STORY_NUM` which is used for reference only)
-- Story body: fetch via `./scripts/project-queue.sh get-item <ITEM_ID>` — returns JSON with `.body` (story body, ACs), `.title`, `.issue_num`
+- Story body: fetch via `./.claude/tooling/scripts/project-queue.sh get-item <ITEM_ID>` — returns JSON with `.body` (story body, ACs), `.title`, `.issue_num`
 - Changed files: `git diff --name-only develop...HEAD`
 
 You do NOT have a PR number — the PR doesn't exist yet. That's the whole point of running here.
@@ -38,7 +38,7 @@ STORY_NUM=$(echo "$BRANCH" | sed -nE 's|^feature/story-([0-9]+)-.*|\1|p')
 # ITEM_ID=<value from --project-item argument>
 
 # Fetch story body from the private project (avoids public issue injection surface)
-./scripts/project-queue.sh get-item "$ITEM_ID"
+./.claude/tooling/scripts/project-queue.sh get-item "$ITEM_ID"
 # Returns JSON with .body (story body, ACs), .title, .issue_num
 
 # Identify changed files on this branch

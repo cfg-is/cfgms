@@ -24,7 +24,7 @@ requirement to read every operating model before doing any work.
 - [Workflow Debug System](workflow-debug-system.md) - Workflow debugging capabilities
 - [DNA Collection Audit](dna-collection.md) - Documented vs implemented DNA attributes (epic #1932)
 - [Steward Configuration](steward-configuration.md) - The `hostname.cfg` format and options
-- Security-review harness architecture — `.claude/skills/security-review/docs/harness-architecture.md` - The multi-lab LLM security review harness (moved out of docs/ to live beside the rest of the skill)
+- Security-review harness architecture — `.claude/tooling/security-review/docs/harness-architecture.md` - The multi-lab LLM security review harness (moved out of docs/ to live beside the rest of the skill)
 
 ## Subdirectories
 

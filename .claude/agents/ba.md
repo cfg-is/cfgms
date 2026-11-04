@@ -27,7 +27,7 @@ ISSUE_NUM=$(echo "$ARGUMENTS" | awk '{print $1}')
 ITEM_ID=$(echo "$ARGUMENTS" | sed -n 's/.*--project-item[[:space:]]\+\([^[:space:]]\+\).*/\1/p')
 
 # Read epic body from the private project (avoids public issue injection surface)
-./scripts/project-queue.sh get-item "$ITEM_ID"
+./.claude/tooling/scripts/project-queue.sh get-item "$ITEM_ID"
 # Returns JSON with .body (epic goal, success criteria, non-goals, constraints), .title, .issue_num, .status
 ```
 
@@ -207,7 +207,7 @@ A migration-shaped story with no removal-verification AC is **not ready for a de
 
 ## Creating Stories
 
-**IMPORTANT:** Use `./scripts/pipeline-helper.sh` for ALL GitHub write operations. Direct `gh` calls with heredocs, subshells, or compound commands will be blocked by permission rules.
+**IMPORTANT:** Use `./.claude/tooling/scripts/pipeline-helper.sh` for ALL GitHub write operations. Direct `gh` calls with heredocs, subshells, or compound commands will be blocked by permission rules.
 
 For each story, write the body to a temp file and use the helper:
 
@@ -223,13 +223,13 @@ STORY_EOF
 # capability tags this story INHERITS FROM ITS EPIC (the product capability that
 # consumes it; multi-valued). A story may narrow to a subset of the epic's tags
 # but never invents one the epic lacks. Vocabulary: docs/product/roadmap.md.
-./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md --cap "<inherited, e.g. cms,twin>"
+./.claude/tooling/scripts/pipeline-helper.sh create-story <EPIC_NUM> "<scope>: <title>" /tmp/story-body.md --cap "<inherited, e.g. cms,twin>"
 # Output: CREATED_ISSUE:<item_id>:#NNN
 # Use #NNN in later siblings' ## Dependencies sections.
 
 # Sensitive body (live-vuln detail, business specifics)? Keep it private until dispatch
 # (--defer and --cap compose in any order; cap rides a body marker until materialize):
-#   ./scripts/pipeline-helper.sh create-story <EPIC_NUM> "<title>" /tmp/story-body.md --defer --cap "<...>"
+#   ./.claude/tooling/scripts/pipeline-helper.sh create-story <EPIC_NUM> "<title>" /tmp/story-body.md --defer --cap "<...>"
 #   Output: CREATED_DRAFT:<item_id>
 
 rm /tmp/story-body.md
@@ -243,7 +243,7 @@ If you encounter ambiguity that prevents correct decomposition:
 
 1. Block the **epic itself** with an explanation — do NOT create a parallel tracking issue. The epic's Blocked status + explanatory comment IS the escalation; the founder unblocks the epic when ready.
    ```bash
-   ./.claude/scripts/po-act.sh block <EPIC_NUM> "BA decomposition blocked: <specific question / ambiguity>. Affected scope: <which part of the epic this prevents decomposing>. Recommendation: <what the founder should clarify or decide>."
+   ./.claude/tooling/scripts/po-act.sh block <EPIC_NUM> "BA decomposition blocked: <specific question / ambiguity>. Affected scope: <which part of the epic this prevents decomposing>. Recommendation: <what the founder should clarify or decide>."
    ```
 2. Continue decomposing stories you CAN write. Partial decomposition is acceptable.
 3. Report back what was created and which aspect of the epic was blocked.
@@ -266,7 +266,7 @@ Dependency order: #A → #B → #C
 Blocked items: <none, or list>
 SUMMARY_EOF
 
-./scripts/pipeline-helper.sh comment <EPIC_NUM> /tmp/ba-summary.md
+./.claude/tooling/scripts/pipeline-helper.sh comment <EPIC_NUM> /tmp/ba-summary.md
 rm /tmp/ba-summary.md
 ```
 

@@ -39,12 +39,12 @@ Before any review work, verify that the PR author is a trusted collaborator. Run
 ```bash
 GATE_HEAD=$(gh pr view <PR_NUM> --repo cfg-is/cfgms --json headRefOid -q '.headRefOid')
 [[ "$GATE_HEAD" =~ ^[0-9a-f]{40}$ ]] || { echo "AUTHOR_CHECK_ERROR:<PR_NUM>:head_unknown"; exit 3; }
-/opt/cfgms-trusted/.claude/scripts/agent-dispatch.sh check-pr-author <PR_NUM> "$GATE_HEAD"
+/opt/cfgms-trusted/.claude/tooling/scripts/agent-dispatch.sh check-pr-author <PR_NUM> "$GATE_HEAD"
 ```
 
 An empty or non-40-hex head SHA is a refusal: treat it exactly like `AUTHOR_EXTERNAL` and never call `check-pr-author` without the SHA.
 
-Run the gate only from `/opt/cfgms-trusted/.claude/scripts` — the read-only harness copy. Scripts in the PR checkout (`/workspace/.claude/scripts`, `./scripts`) must not be used for the gate: the PR under review can edit them.
+Run the gate only from `/opt/cfgms-trusted/.claude/tooling/scripts` — the read-only harness copy. Scripts in the PR checkout (`/workspace/.claude/tooling/scripts`, `./scripts`) must not be used for the gate: the PR under review can edit them.
 
 If the exit code is non-zero (`AUTHOR_EXTERNAL:…`):
 
@@ -52,7 +52,7 @@ If the exit code is non-zero (`AUTHOR_EXTERNAL:…`):
 - The `check-pr-author` call already posts a quarantine comment on the PR.
 - Update the project item status back to `In Progress` (not Blocked or Failed):
   ```bash
-  ./scripts/project-queue.sh update-field <ITEM_ID> status "In Progress"
+  ./.claude/tooling/scripts/project-queue.sh update-field <ITEM_ID> status "In Progress"
   ```
 - Exit with verdict `SKIPPED_EXTERNAL_AUTHOR`. Do NOT enqueue or merge.
 
@@ -79,7 +79,7 @@ If `isDraft == true`:
 
 - Update the project item status so the failsafe doesn't think the review is still in flight:
   ```bash
-  ./scripts/project-queue.sh update-field <ITEM_ID> status "In Progress"
+  ./.claude/tooling/scripts/project-queue.sh update-field <ITEM_ID> status "In Progress"
   ```
 - Exit cleanly with verdict `SKIPPED_DRAFT`. Do NOT enqueue, set Fix status, or set Blocked status — those are wrong actions for a session-truncated WIP.
 
@@ -98,7 +98,7 @@ gh pr diff <PR_NUM> --repo cfg-is/cfgms
 gh pr checks <PR_NUM> --repo cfg-is/cfgms
 
 # Story body from the private project
-./scripts/project-queue.sh get-item <ITEM_ID>
+./.claude/tooling/scripts/project-queue.sh get-item <ITEM_ID>
 # Returns .body (acceptance criteria text) and .status
 
 # Which review round is this? COUNT PRIOR REVIEWS — never infer it from status.
@@ -150,7 +150,7 @@ gh api repos/cfg-is/cfgms/rulesets/11647684 \
 ```
 
 - ANY MISSING (a required context with no check run at all — `MISSING_COUNT` greater
-  than `0` from `./.claude/scripts/pr-review-helper.sh pr-checks <NUM>`) → verdict is
+  than `0` from `./.claude/tooling/scripts/pr-review-helper.sh pr-checks <NUM>`) → verdict is
   WAIT, stop here. Name the missing contexts. A missing context is **not** a pass.
 
 - ALL PASSING → continue to Phase 2.1
@@ -169,7 +169,7 @@ GitHub Advanced Security (GHAS) — CodeQL, zizmor, dependency scanning, and sec
 It returns one finding per line, `path:line:rule-or-title` (no raw markdown body):
 
 ```bash
-./scripts/pr-security-findings.sh <PR_NUM>
+./.claude/tooling/scripts/pr-security-findings.sh <PR_NUM>
 ```
 
 - **Empty stdout → continue to Phase 2.5.**
@@ -304,18 +304,18 @@ PASS requires BOTH: the Findings table is empty AND every Code-Reference Verific
 # Pass STORY_NUM as second arg so the script auto-prepends `Fixes #<STORY>` to the
 # PR body if missing — dev agents miss this keyword frequently and the issue stays
 # open after the PR merges without it.
-/opt/cfgms-trusted/.claude/scripts/po-act.sh enqueue <PR_NUM> <STORY_NUM>
+/opt/cfgms-trusted/.claude/tooling/scripts/po-act.sh enqueue <PR_NUM> <STORY_NUM>
 
 # Extract story number from branch for cleanup
 # Branch pattern: feature/story-<NUM>-*
-./.claude/scripts/agent-dispatch.sh cleanup-issue <STORY_NUM>
+./.claude/tooling/scripts/agent-dispatch.sh cleanup-issue <STORY_NUM>
 ```
 
 If `po-act.sh enqueue` exits non-zero (`ENQUEUE_FAILED`), do NOT proceed to cleanup. Surface the failure: post a one-line comment on the PR noting the enqueue gate refused, and leave the dev agent's container/worktree intact so the next cron cycle's reconciliation step can pick it up. Common causes the script's retry can't recover from: required reviewer not yet assigned, CODEOWNERS gate, or a CI check newly going red between PASS verdict and enqueue call.
 
 Mark the story as done in the project queue:
 ```bash
-./scripts/project-queue.sh update-field <ITEM_ID> status Done
+./.claude/tooling/scripts/project-queue.sh update-field <ITEM_ID> status Done
 ```
 
 ### Any Findings — Round 1 (no prior `<!-- cfgms-acceptance-review -->` comment)
@@ -323,7 +323,7 @@ Mark the story as done in the project queue:
 Update project item status and post findings:
 
 ```bash
-./scripts/project-queue.sh update-field <ITEM_ID> status Fix
+./.claude/tooling/scripts/project-queue.sh update-field <ITEM_ID> status Fix
 ```
 
 ### Any Findings — Round 2 (exactly one prior `<!-- cfgms-acceptance-review -->` comment)
@@ -331,16 +331,16 @@ Update project item status and post findings:
 Escalate to founder and clean up the agent container (the dev agent is done regardless):
 
 ```bash
-./scripts/project-queue.sh update-field <ITEM_ID> status Blocked
+./.claude/tooling/scripts/project-queue.sh update-field <ITEM_ID> status Blocked
 gh issue edit <STORY_NUM> --repo cfg-is/cfgms --add-assignee "jrdnr"
 
 # Clean up — agent is done, founder takes over
-./.claude/scripts/agent-dispatch.sh cleanup-issue <STORY_NUM>
+./.claude/tooling/scripts/agent-dispatch.sh cleanup-issue <STORY_NUM>
 ```
 
 ## Structured Review Comment
 
-**IMPORTANT:** Use `./scripts/pipeline-helper.sh` for comments. Direct `gh` calls with heredocs or subshells will be blocked by permission rules.
+**IMPORTANT:** Use `./.claude/tooling/scripts/pipeline-helper.sh` for comments. Direct `gh` calls with heredocs or subshells will be blocked by permission rules.
 
 Post this comment on the PR regardless of verdict:
 
@@ -377,7 +377,7 @@ All checks passing / Check X failing
 [Enqueued — paste the literal `ENQUEUED:<PR>` line from `po-act.sh enqueue` here / Fix required — status set to Fix / Blocked — escalated to founder]
 REVIEW_EOF
 
-./scripts/pipeline-helper.sh comment <PR_NUM> /tmp/review-<PR_NUM>.md
+./.claude/tooling/scripts/pipeline-helper.sh comment <PR_NUM> /tmp/review-<PR_NUM>.md
 rm /tmp/review-<PR_NUM>.md
 ```
 

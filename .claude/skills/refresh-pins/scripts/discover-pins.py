@@ -14,7 +14,7 @@ Discovery sources:
   FROM line below but live in a workflow step, not a Dockerfile.
 - **/Dockerfile*      — FROM golang:X tags (toolchain, lockstep) and every other
   base image (alpine, debian, ...) as its own `kind: "docker"` pin. Globbed from
-  the repo root, not from cmd/ and .devcontainer/ only: Dockerfile.test-runner
+  the repo root, not from cmd/ and .claude/tooling/devcontainer/ only: Dockerfile.test-runner
   sits at the root and was invisible to the earlier globs, so a toolchain bump
   left the image that runs the integration suites on the old Go version.
 - **/*.ps1            — every PowerShell script in the repo (windows-setup.ps1
@@ -93,7 +93,7 @@ _VENDOR_DIRS = {".git", "node_modules", ".cache", "vendor", "worktrees"}
 def all_dockerfiles(root: Path) -> list[Path]:
     """Every Dockerfile in the repo, wherever it lives.
 
-    Earlier globs looked only under cmd/*/ and .devcontainer/, which missed
+    Earlier globs looked only under cmd/*/ and .claude/tooling/devcontainer/, which missed
     Dockerfile.test-runner at the repo root — the image that runs the
     integration suites. A toolchain bump driven by this inventory would have
     left it on the old Go version, so base-image discovery globs from the root
@@ -604,11 +604,11 @@ def discover_go_toolchain(root: Path) -> dict:
 # NOTE: there is deliberately no discover_claude_code_cli() here. Claude Code
 # CLI is exempt from pin tracking entirely (founder decision 2026-10-01,
 # Issue #4473; see references/cooldown-policy.md "Claude Code CLI
-# exemption") — .devcontainer/Dockerfile and windows-setup.ps1 both resolve
+# exemption") — .claude/tooling/devcontainer/Dockerfile and windows-setup.ps1 both resolve
 # npm's `stable` dist-tag at build/setup time instead of naming a version, so
 # there is no version string left for a discoverer to find or a bump story to
 # target. A prior version of this script had a discoverer for `ARG
-# CLAUDE_CODE_VERSION` in .devcontainer/Dockerfile; that ARG no longer
+# CLAUDE_CODE_VERSION` in .claude/tooling/devcontainer/Dockerfile; that ARG no longer
 # exists, having been replaced by the unrelated `CLAUDE_CODE_VERSION_OVERRIDE`
 # build-arg, which pins one exact release rather than declaring the tracked
 # version and is itself out of scope for pin discovery.
@@ -671,7 +671,7 @@ def discover_tool_usage_locations(version: str, root: Path) -> list[dict]:
         if f.name != "dependency-pin-check.yml":
             search_files.append(f)
 
-    devcontainer_df = root / ".devcontainer" / "Dockerfile"
+    devcontainer_df = root / ".claude/tooling/devcontainer" / "Dockerfile"
     if devcontainer_df.exists():
         search_files.append(devcontainer_df)
 

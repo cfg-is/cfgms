@@ -20,16 +20,16 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
    ```
    If either fails, provide specific fix instructions and stop.
 
-2. **If `$ARGUMENTS` is 'creds'**: Headless agent containers use a long-lived token from the TPM2-bound `systemd-creds` credential `~/.config/cfgms/claude-oauth-token.cred` (token mode); if it is absent they fall back to bind-mounting the host's `~/.claude/.credentials.json`. Walk the user through the one-time token setup below if `check-creds` does not report `CREDS_MODE:token`; the fallback needs `claude` logged in on this host. Verify with `./.claude/scripts/agent-dispatch.sh check-creds` and stop (skip all other steps).
+2. **If `$ARGUMENTS` is 'creds'**: Headless agent containers use a long-lived token from the TPM2-bound `systemd-creds` credential `~/.config/cfgms/claude-oauth-token.cred` (token mode); if it is absent they fall back to bind-mounting the host's `~/.claude/.credentials.json`. Walk the user through the one-time token setup below if `check-creds` does not report `CREDS_MODE:token`; the fallback needs `claude` logged in on this host. Verify with `./.claude/tooling/scripts/agent-dispatch.sh check-creds` and stop (skip all other steps).
 
 3. **Health check** (runs when image already exists and `$ARGUMENTS` is NOT 'rebuild'):
    ```bash
-   ./.claude/scripts/agent-dispatch.sh health-check
+   ./.claude/tooling/scripts/agent-dispatch.sh health-check
    ```
    Parse the output lines:
    - `WARN:image_age:...` — Image is stale, recommend rebuild
    - `WARN:claude_version:...` — Version mismatch, recommend rebuild
-   - `WARN:image_inputs_stale:...` — Image was built from a different revision of `.devcontainer` than this checkout (Dockerfile or a runtime-mounted script changed since the last build); recommend rebuild
+   - `WARN:image_inputs_stale:...` — Image was built from a different revision of `.claude/tooling/devcontainer` than this checkout (Dockerfile or a runtime-mounted script changed since the last build); recommend rebuild
    - `INFO:claude_code_version:...` — the `cfgms.claude_code_version` label on `cfg-agent:latest`: the exact Claude Code release this image installed (Issue #4473 — not a pinned version, so this label is the only record of it)
    - `WARN:creds:...` — Credentials missing
    - If any `WARN:image_age`, `WARN:claude_version`, or `WARN:image_inputs_stale` lines appear, recommend: "Image is stale. Run `/agent-setup rebuild` to refresh Trivy DB, Go modules, and Claude Code."
@@ -38,20 +38,20 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
 
 4. **If `$ARGUMENTS` is 'rebuild'**: Force rebuild with `--no-cache` (refreshes Trivy DB and Go modules).
 
-5. **Build agent container image** (use `run_in_background` since this takes 3-5 minutes). The `cfgms.build_inputs_hash` label records the git tree hash of `.devcontainer` at HEAD — the exact set of paths the Dockerfile copies from and every runtime-mounted script (`setup-env.sh`, `review-entrypoint.sh`, `agent-context.sh`, `investigator-entrypoint.sh`) lives under. `agent-dispatch.sh`'s launch paths compare this label against the current checkout before every launch (Issue #4388) and refuse to run a container on a stale image.
+5. **Build agent container image** (use `run_in_background` since this takes 3-5 minutes). The `cfgms.build_inputs_hash` label records the git tree hash of `.claude/tooling/devcontainer` at HEAD — the exact set of paths the Dockerfile copies from and every runtime-mounted script (`setup-env.sh`, `review-entrypoint.sh`, `agent-context.sh`, `investigator-entrypoint.sh`) lives under. `agent-dispatch.sh`'s launch paths compare this label against the current checkout before every launch (Issue #4388) and refuse to run a container on a stale image.
 
    Claude Code is exempt from this image's pin-and-cooldown policy (Issue #4473, founder decision 2026-10-01): resolve npm's current `stable` release first, then pass it as both the `CLAUDE_CODE_VERSION_OVERRIDE` build-arg (so the installed version is pinned to exactly what was resolved, not re-resolved inside the build) and the `cfgms.claude_code_version` label (so it's recorded on the image the same way `cfgms.build_inputs_hash` is):
    The Codex CLI is exempt the same way (Issue #4969, founder decision 2026-10-13), but resolves npm's `latest` dist-tag because Codex publishes no `stable` tag; pass `CODEX_CLI_VERSION_OVERRIDE` and the `cfgms.codex_version` label alongside the Claude Code ones:
    ```bash
    CC_VERSION=$(curl -fsSL "https://registry.npmjs.org/@anthropic-ai/claude-code" | jq -r '.["dist-tags"].stable')
    CODEX_VERSION=$(curl -fsSL "https://registry.npmjs.org/@openai/codex" | jq -r '.["dist-tags"].latest')
-   docker build --label "cfgms.build_inputs_hash=$(git rev-parse HEAD:.devcontainer)" --build-arg "CLAUDE_CODE_VERSION_OVERRIDE=${CC_VERSION}" --label "cfgms.claude_code_version=${CC_VERSION}" --build-arg "CODEX_CLI_VERSION_OVERRIDE=${CODEX_VERSION}" --label "cfgms.codex_version=${CODEX_VERSION}" -t cfg-agent:latest -f .devcontainer/Dockerfile .
+   docker build --label "cfgms.build_inputs_hash=$(git rev-parse HEAD:.claude/tooling/devcontainer)" --build-arg "CLAUDE_CODE_VERSION_OVERRIDE=${CC_VERSION}" --label "cfgms.claude_code_version=${CC_VERSION}" --build-arg "CODEX_CLI_VERSION_OVERRIDE=${CODEX_VERSION}" --label "cfgms.codex_version=${CODEX_VERSION}" -t cfg-agent:latest -f .claude/tooling/devcontainer/Dockerfile .
    ```
-   For rebuild: `docker build --no-cache --label "cfgms.build_inputs_hash=$(git rev-parse HEAD:.devcontainer)" --build-arg "CLAUDE_CODE_VERSION_OVERRIDE=${CC_VERSION}" --label "cfgms.claude_code_version=${CC_VERSION}" --build-arg "CODEX_CLI_VERSION_OVERRIDE=${CODEX_VERSION}" --label "cfgms.codex_version=${CODEX_VERSION}" -t cfg-agent:latest -f .devcontainer/Dockerfile .`
+   For rebuild: `docker build --no-cache --label "cfgms.build_inputs_hash=$(git rev-parse HEAD:.claude/tooling/devcontainer)" --build-arg "CLAUDE_CODE_VERSION_OVERRIDE=${CC_VERSION}" --label "cfgms.claude_code_version=${CC_VERSION}" --build-arg "CODEX_CLI_VERSION_OVERRIDE=${CODEX_VERSION}" --label "cfgms.codex_version=${CODEX_VERSION}" -t cfg-agent:latest -f .claude/tooling/devcontainer/Dockerfile .`
 
    This is also how the Claude Code version actually moves forward: there is
    no automatic trigger — the git-tree-hash staleness gate above only fires
-   on a `.devcontainer/` content change, which a new npm release does not
+   on a `.claude/tooling/devcontainer/` content change, which a new npm release does not
    produce. A rebuild (this step, run manually or via `/agent-setup rebuild`)
    is what picks up a newer release; the `WARN:image_age` (image >= 7 days
    old) and `WARN:claude_version` (host `claude` newer than the container's)
@@ -103,7 +103,7 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
    gh label create "cap:web"       --color "1D76DB" --description "Consumer: web UI and visualization surfaces" --force
    gh label create "cap:msp"       --color "1D76DB" --description "Consumer: MSP integrations (PSA / RMM / docs)" --force
    ```
-   Note: `pipeline:*` and `agent:*` labels were decommissioned (Story #1482). Work queue state is now in GitHub Projects V2 — see `scripts/project-queue.sh`. `cap:*` is the sanctioned **descriptive** namespace; it never encodes queue state.
+   Note: `pipeline:*` and `agent:*` labels were decommissioned (Story #1482). Work queue state is now in GitHub Projects V2 — see `.claude/tooling/scripts/project-queue.sh`. `cap:*` is the sanctioned **descriptive** namespace; it never encodes queue state.
 
 9. **Verify setup** (after image build completes):
    ```bash
@@ -137,4 +137,4 @@ read -rs T; printf %s "$T" | systemd-creds encrypt --with-key=tpm2 --name=claude
 chmod 600 ~/.config/cfgms/claude-oauth-token.cred
 ```
 
-Verify with `./.claude/scripts/agent-dispatch.sh check-creds` (expect `CREDS_MODE:token`). To rotate the token, run `claude setup-token` again and re-run the `read -rs T; ... systemd-creds encrypt` line (it overwrites the file). If the credential is absent, cannot be decrypted, or decryption exceeds 15 s, launches fall back to bind-mounting `~/.claude/.credentials.json` and print one `WARN:agent_token:<absent|decrypt_failed|timeout>` line; a launch never blocks on this.
+Verify with `./.claude/tooling/scripts/agent-dispatch.sh check-creds` (expect `CREDS_MODE:token`). To rotate the token, run `claude setup-token` again and re-run the `read -rs T; ... systemd-creds encrypt` line (it overwrites the file). If the credential is absent, cannot be decrypted, or decryption exceeds 15 s, launches fall back to bind-mounting `~/.claude/.credentials.json` and print one `WARN:agent_token:<absent|decrypt_failed|timeout>` line; a launch never blocks on this.

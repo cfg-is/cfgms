@@ -53,7 +53,7 @@ Welcome to the CFGMS (Configuration Management System) documentation. This index
 ## Security
 
 - [Security](security/README.md) - Security architecture, certificates, configuration, and credential setup
-- Security Review — `.claude/skills/security-review/docs/README.md` - Methodology, threat scenarios, and regression corpus for the LLM security review harness (moved out of docs/ to live beside the rest of the skill)
+- Security Review — `.claude/tooling/security-review/docs/README.md` - Methodology, threat scenarios, and regression corpus for the LLM security review harness (moved out of docs/ to live beside the rest of the skill)
 
 ## Product
 

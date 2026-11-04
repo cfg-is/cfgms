@@ -43,7 +43,7 @@ Work-items originate on the **private project board** and become public issues o
 ## Infrastructure
 
 - **Project board**: configured in `.claude/pipeline.yaml` (project_id, status_field_id, option IDs)
-- **Queue script**: `scripts/project-queue.sh` — all project queue operations
+- **Queue script**: `.claude/tooling/scripts/project-queue.sh` — all project queue operations
 - **Key operations**: `list-by-status`, `update-field`, `add-issue`, `get-item`, `create-draft`, `delete-item`
 
 ## Migration State
@@ -52,16 +52,16 @@ Labels `pipeline:*` and `agent:*` were deleted from `cfg-is/cfgms` before Story 
 No open issues carried those labels at cutover time. The migration is complete with no
 orphaned labeled issues.
 
-Verification script: `scripts/migrate-queue-to-project.sh` documents and confirms migration state.
+Verification script: `.claude/tooling/scripts/migrate-queue-to-project.sh` documents and confirms migration state.
 
 ## Adding Issues to the Queue
 
 ```bash
 # Add an issue and get its item_id
-item_id=$(bash ./scripts/project-queue.sh add-issue <ISSUE_NUM> | python3 -c "import json,sys; print(json.load(sys.stdin)['item_id'])")
+item_id=$(bash ./.claude/tooling/scripts/project-queue.sh add-issue <ISSUE_NUM> | python3 -c "import json,sys; print(json.load(sys.stdin)['item_id'])")
 
 # Set status
-bash ./scripts/project-queue.sh update-field "$item_id" status "Ready"
+bash ./.claude/tooling/scripts/project-queue.sh update-field "$item_id" status "Ready"
 ```
 
 The `add-issue` operation is idempotent — calling it on an issue already in the project returns

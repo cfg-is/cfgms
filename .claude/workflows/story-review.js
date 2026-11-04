@@ -3,7 +3,7 @@
 // One implementation for BOTH callers, replacing two hand-maintained (and
 // already drifted) copies of the same review team:
 //   - /story-complete (interactive):        4 lenses, testTarget=test-quality
-//   - .devcontainer/entrypoint.sh (headless -p): 3 lenses, testTarget=test-agent-complete
+//   - .claude/tooling/devcontainer/entrypoint.sh (headless -p): 3 lenses, testTarget=test-agent-complete
 //
 // Flow: parallel reviewers -> collect blocking findings -> developer fix loop
 // (re-running ONLY the lenses that failed) -> structured verdict.

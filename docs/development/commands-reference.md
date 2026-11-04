@@ -112,107 +112,28 @@ make test-docker
 - **`test-commit`**: Skips M365 tests if credentials unavailable (developer-friendly)
 - **`test-ci`**: Requires M365 credentials or fails (CI enforcement)
 
-#### Shell Script Test Groups
+#### Shell Script Tests
 
-`make test-scripts` (`scripts/test-scripts.sh`) partitions its ~100 `test_*`
-suites into four named groups (Issue #4301):
-
-| Group | Composition |
-|-------|-------------|
-| `core` | Everything not explicitly classified below — the fail-closed default bucket a Go-only PR must always exercise |
-| `security-review` | The `.claude/skills/security-review/` harness and CLI wrapper suites |
-| `claude-tooling` | `.claude/scripts/` and `.claude/skills/` pipeline-dispatch suites |
-| `devinfra` | `.devcontainer/` and `.github/scripts/resource-sampler.*` suites |
-
-**Host packages for the `devinfra` group.** `dnsmasq-allowlist_test.sh` and
-`init-firewall_test.sh` drive a real, unprivileged `dnsmasq` with `dig`, so the
-host needs `bind9-dnsutils` and `dnsmasq` (`sudo apt-get install bind9-dnsutils dnsmasq`).
-`dnsmasq` is resolved from `PATH` with a fallback to `/usr/sbin/dnsmasq`, so it
-need not be on a non-root user's `PATH`. When a tool is missing the suite prints
-`SKIP: <tool> not installed` and exits 77; `run_devcontainer_suites` logs that
-as a skip, not a pass and not a failure. When `CI` is set to any non-empty
-value a missing tool exits 1 instead, because CI installs both packages and
-their absence there is a broken runner.
+`make test-scripts` runs `scripts/test-scripts.sh`, the suites for the
+product's own shell scripts and CI helpers. `make test`, `make test-commit`,
+`make test-complete` and `make test-agent-complete` run it in full. The
+`--group` flag narrows a direct run to `core` or `devinfra`
+(`.github/scripts/resource-sampler.*`):
 
 ```bash
-# Run every group (default — identical to omitting the variable)
 make test-scripts
-
-# Narrow to one or more groups
-make test-scripts CFGMS_TEST_SCRIPTS_GROUPS=security-review
-make test-scripts CFGMS_TEST_SCRIPTS_GROUPS=core,devinfra
-
-# Equivalent direct invocation
-./scripts/test-scripts.sh --group core,devinfra
+./scripts/test-scripts.sh --group devinfra
 ```
 
-`CFGMS_TEST_SCRIPTS_GROUPS` is unset by default, so `make test-scripts` on its
-own always runs every group. An unrecognized group name is a usage error —
-`test-scripts.sh` exits non-zero before running anything.
+The suites for the pipeline scripts, the agent image and the security-review
+harness live with that code in the
+[cfgms-tooling](https://github.com/cfg-is/cfgms-tooling) submodule
+(`.claude/tooling`), and run in that repository's CI. To run them locally
+from a cfgms checkout:
 
-**`make test` runs only the groups your change touches** (Issue #4305). It
-diffs against the merge base with `origin/develop` using
-`scripts/lib/detect-tooling-changed.sh` — the same decision CI uses — and
-prints one line naming the groups and why, e.g.
-`📋 test-scripts groups: core (vs develop merge base 685a6437: Matched suite groups: core)`.
-A Go-only change runs `core` alone; a change under
-`.claude/skills/security-review/` adds `security-review`; a change to the
-gating machinery itself (`scripts/test-scripts.sh`,
-`.github/workflows/test-suite.yml`) runs every group. A `Makefile` change is
-classified like any other path — `core` always, plus whichever other groups
-the rest of the diff selects on its own paths (Issue #4424) — because only two
-spots in the Makefile take part in this gating (the `test-scripts` target's
-`CFGMS_TEST_SCRIPTS_GROUPS` forwarding and `make test`'s own group
-auto-detection below), and no suite outside `core` invokes a `make` target.
-`scripts/test-scripts.sh`'s `test_make_test_groups` (itself in the `core`
-group) guards that forwarding directly, so a break there is still caught even
-though a `Makefile` change no longer forces every group by itself. The
-pre-push hook runs
-`make test`, so it gets the same selection. Two cases fail closed to every
-group: no resolvable `origin/develop` merge base (a fresh clone without the
-remote ref, a shallow clone whose history stops short of it), or a detector run that
-prints no `groups=` line. With commits ahead of the merge base, the detector
-classifies the committed range only; with none, it classifies uncommitted
-edits to tracked files. Untracked files are not seen until they are committed.
-
-A `CFGMS_TEST_SCRIPTS_GROUPS` already set by the caller wins over detection.
-`make test-commit`, `make test-complete` / `test-complete-full` and
-`make test-agent-complete` use this to pin every group, so they run
-`test-scripts` exactly once, in full, whatever the diff.
-`scripts/make-test-groups_test.sh` checks both halves by dry-running each
-target in a throwaway repository and counting the `test-scripts.sh` calls.
-
-**CI gating (Issue #4304, Epic #4296):** `unit-tests-scripts` always runs as a
-job — the `core` group's Go-structure-dependent and `scripts/`-tree suites
-must exercise on every code PR — but it sets `CFGMS_TEST_SCRIPTS_GROUPS` from
-the `changes` job's `groups` output, so only the groups the diff actually
-touches run inside it. `.github/scripts/classify-tooling-changed.sh` is the
-thin CI wrapper: it reuses the `changes` job's already-fetched
-`changed_files.txt` (no second `gh api` call) and delegates the actual
-git-diff classification to `scripts/lib/detect-tooling-changed.sh` via the
-PR's base ref, so CI and local `make test` share one classification
-algorithm. On `push`/`workflow_dispatch`, where the `changes` job doesn't run,
-`needs.changes.outputs.groups` is empty and the Makefile's `--group`-omitted
-default ("run everything") applies — no extra guard needed. Both this
-classifier and `.github/scripts/classify-docs-only.sh` fail closed to running
-more, never less: any defect in either resolves to running every suite group
-(or every unit-test leg, respectively), because a needlessly run suite costs
-runner minutes while a wrongly skipped one ships untested code. The
-no-Python-in-core check (Issue #4303) is unaffected by this gating —
-it runs in the `changes` job itself, outside any suite group, so it always
-executes regardless of which groups `unit-tests-scripts` requests.
-
-**Measured effect on a Go-only change (Epic #4296).** Every time below is
-wall-clock, measured, not estimated.
-
-| Where | Before gating (all four groups) | After gating (`core` only) |
-|---|---|---|
-| CI `unit-tests-scripts` job | 275 s: run 35422391484, job 105842339942, 04:53:17Z–04:57:52Z on 2026-09-19 | 183 s: run 36492330634, job 109163697601, 22:26:18Z–22:29:21Z on 2026-09-28 |
-| Local `make test`, Linux container (`--memory 12g --cpus 8`) | 783 s | 305 s |
-| Local `make test`, Windows Server 2025 git-bash (native) | 2748 s | 2108 s |
-
-- **CI rows.** The "after" run is a throwaway Go-only PR, #4395. It changed one comment in `pkg/version/version.go` and was closed unmerged. Its `changes` job (109163610647) printed `groups=core`, and `unit-tests-scripts` ran with `CFGMS_TEST_SCRIPTS_GROUPS: core`. The "before" run predates group gating, so its `unit-tests-scripts` job ran every group whatever the diff.
-- **Local rows.** Measured in PR #4331. Each pair used the same one-line `pkg/version/version.go` change and differs only in the `test-scripts` step. The Windows "before" run exited non-zero on 7 non-`core` script suites that were unrelated to that change.
+```bash
+./.claude/tooling/scripts/tests/run-tooling-tests.sh
+```
 
 ## Security Scanning
 
@@ -457,16 +378,16 @@ For continuous integration and deployment:
 - `make security-scan` - Security gates
 - `make test-integration-complete` - Full integration testing
 
-## Pipeline Helper Script (scripts/pipeline-helper.sh)
+## Pipeline Helper Script (.claude/tooling/scripts/pipeline-helper.sh)
 
 Wraps `gh` CLI calls for pipeline agents (BA, Tech Lead, Acceptance Reviewer, PO) so they can edit
 issues without triggering approval prompts on heredocs, subshells, and compound commands. Run
-`./scripts/pipeline-helper.sh` with no arguments for the full command list.
+`./.claude/tooling/scripts/pipeline-helper.sh` with no arguments for the full command list.
 
 ### edit-body — optimistic concurrency (Issue #4433)
 
 ```bash
-./scripts/pipeline-helper.sh edit-body <issue_num> <body_file> <expected_updated_at>
+./.claude/tooling/scripts/pipeline-helper.sh edit-body <issue_num> <body_file> <expected_updated_at>
 ```
 
 `edit-body` replaces an issue's body. `expected_updated_at` is required — it is the `updatedAt`

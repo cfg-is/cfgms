@@ -1,9 +1,9 @@
 # Per-segment agent model/effort routing (Issue #3030).
 #
-# Read by .devcontainer/agent-context.sh's ac_resolve_agent_model() from inside
+# Read by .claude/tooling/devcontainer/agent-context.sh's ac_resolve_agent_model() from inside
 # agent containers, from the HARNESS path
 # /usr/local/share/cfgms-agent/model-routing.yaml only — baked into the image
-# (.devcontainer/Dockerfile) and bind-mounted read-only from the harness
+# (.claude/tooling/devcontainer/Dockerfile) and bind-mounted read-only from the harness
 # checkout by agent-dispatch.sh. It is never read from /workspace: that is the
 # branch under dispatch/review, which must not be able to choose the model of
 # the acceptance reviewer that decides whether it merges. Editing this file in

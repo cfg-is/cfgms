@@ -38,7 +38,7 @@ for it alone.
 
 1. **Check PR required checks** (uses helper to avoid approval prompts):
    ```bash
-   ./.claude/scripts/pr-review-helper.sh pr-checks $ARGUMENTS
+   ./.claude/tooling/scripts/pr-review-helper.sh pr-checks $ARGUMENTS
    ```
 
    The helper prints the `gh pr checks --required` table, then three machine-readable
@@ -77,7 +77,7 @@ for it alone.
 
 3. **For failures, get details** (uses helper to avoid approval prompts):
    ```bash
-   ./.claude/scripts/pr-review-helper.sh ci-details $ARGUMENTS
+   ./.claude/tooling/scripts/pr-review-helper.sh ci-details $ARGUMENTS
    ```
 
 ## Blocking Policy

@@ -12,7 +12,7 @@ branch_pattern: "feature/story-{issue}-agent"
 # Container settings
 container:
   image: cfg-agent:latest
-  dockerfile: .devcontainer/Dockerfile
+  dockerfile: .claude/tooling/devcontainer/Dockerfile
   memory: 4g
   cpus: 4
   timeout: 3600

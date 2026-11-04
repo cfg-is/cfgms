@@ -300,7 +300,7 @@ Report CLOSED:${epic.number} on success.`
 const baRemediatePrompt = (epic, bundle, verdict, note) => {
   const { scope } = bundle
   const openCovering = (scope.subIssues || []).filter(s => s.state && String(s.state).toUpperCase() === 'OPEN')
-  return `Remediate INCOMPLETE epic #${epic.number} ("${epic.title}"). You are the BA. Author real work via \`./scripts/pipeline-helper.sh\` ONLY (create-story / comment) — never \`gh issue create\`. Ground EVERY code reference with grep + Read (find the definition, read the body) before you write it (a wrong symbol becomes a dev-agent gap).
+  return `Remediate INCOMPLETE epic #${epic.number} ("${epic.title}"). You are the BA. Author real work via \`./.claude/tooling/scripts/pipeline-helper.sh\` ONLY (create-story / comment) — never \`gh issue create\`. Ground EVERY code reference with grep + Read (find the definition, read the body) before you write it (a wrong symbol becomes a dev-agent gap).
 
 Epic intent: ${scope.intent}
 Confirmed gaps (evidence-backed completion audit vs origin/develop):
@@ -309,15 +309,15 @@ Existing OPEN sub-issues (do NOT duplicate — annotate one if a gap is already 
 Unlinked drafts to fold in or file: ${(scope.unlinkedDrafts || []).join(' | ') || 'none'}
 ${note ? `\n>>> FOUNDER ARCHITECTURAL DECISION for this epic — author TO THIS, not your own reading of the code:\n${note}\n` : ''}
 Rules:
-1. If a gap is already covered by an OPEN sub-issue above, DO NOT create a new story. Instead post the precise audit finding (file:line evidence + what's still missing) to that issue: \`./scripts/pipeline-helper.sh comment <issue> <body-file>\`, and record it in "annotated" — so the dev agent that picks it up knows exactly what remains.
-2. For each UNCOVERED gap, create a right-sized remediation story: \`./scripts/pipeline-helper.sh create-story ${epic.number} "<scope>: <title> (under epic #${epic.number})" <body-file>\`. Full spec: ## Goal, ## Story Dependencies, ## Files In Scope, ## Out of Scope, ## Docs In Scope, ## Acceptance Criteria (mark [REQUIRED TEST] where the audit named a missing test). Record each in "created".
+1. If a gap is already covered by an OPEN sub-issue above, DO NOT create a new story. Instead post the precise audit finding (file:line evidence + what's still missing) to that issue: \`./.claude/tooling/scripts/pipeline-helper.sh comment <issue> <body-file>\`, and record it in "annotated" — so the dev agent that picks it up knows exactly what remains.
+2. For each UNCOVERED gap, create a right-sized remediation story: \`./.claude/tooling/scripts/pipeline-helper.sh create-story ${epic.number} "<scope>: <title> (under epic #${epic.number})" <body-file>\`. Full spec: ## Goal, ## Story Dependencies, ## Files In Scope, ## Out of Scope, ## Docs In Scope, ## Acceptance Criteria (mark [REQUIRED TEST] where the audit named a missing test). Record each in "created".
 3. If this epic has ZERO sub-issues (undecomposed), do a normal full decomposition driven by the audit gaps instead; set decomposed=true. Never exceed 10 stories.
 4. If a gap needs a founder decision you do not have (and no founder note above covers it), DO NOT guess — set "blocked" with the specific question and skip that gap.
 
 Return the created / annotated stories.`
 }
 
-const tlPrompt = (storyNum, epic) => `Validate story #${storyNum} (just authored to remediate epic #${epic.number}) for dev-agent executability, per your full Tech Lead rubric. Read its body and verify every code reference against origin/develop with grep + Read (find the definition, read the body). If it passes, promote it to Ready (project Status change via \`./scripts/pipeline-helper.sh\` / \`project-queue.sh\`). If it fails, leave it Draft and report exactly what the BA must fix. Return {story:${storyNum}, ready:<bool>, revisionNeeded:<text if not ready>}.`
+const tlPrompt = (storyNum, epic) => `Validate story #${storyNum} (just authored to remediate epic #${epic.number}) for dev-agent executability, per your full Tech Lead rubric. Read its body and verify every code reference against origin/develop with grep + Read (find the definition, read the body). If it passes, promote it to Ready (project Status change via \`./.claude/tooling/scripts/pipeline-helper.sh\` / \`project-queue.sh\`). If it fails, leave it Draft and report exactly what the BA must fix. Return {story:${storyNum}, ready:<bool>, revisionNeeded:<text if not ready>}.`
 
 // ── orchestration ────────────────────────────────────────────────────────────
 phase('Discover')

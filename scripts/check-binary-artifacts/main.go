@@ -86,18 +86,29 @@ func hasCompiledExtension(path string) bool {
 	return false
 }
 
+// trackedFiles lists every tracked path except submodule entries. A
+// submodule (mode 160000) records a commit in another repository -- cfgms
+// mounts its tooling that way at .claude/tooling -- so there is no file
+// content here to inspect; its own repository runs its own checks.
 func trackedFiles() ([]string, error) {
-	cmd := exec.Command("git", "ls-files", "-z")
+	cmd := exec.Command("git", "ls-files", "-z", "--stage")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("git ls-files: %w", err)
 	}
 	var files []string
-	for _, f := range bytes.Split(out, []byte{0}) {
-		if len(f) == 0 {
+	for _, entry := range bytes.Split(out, []byte{0}) {
+		if len(entry) == 0 {
 			continue
 		}
-		files = append(files, string(f))
+		meta, path, ok := bytes.Cut(entry, []byte{'\t'})
+		if !ok {
+			return nil, fmt.Errorf("git ls-files --stage: malformed entry %q", entry)
+		}
+		if bytes.HasPrefix(meta, []byte("160000 ")) {
+			continue
+		}
+		files = append(files, string(path))
 	}
 	return files, nil
 }

@@ -23,7 +23,7 @@ Launch an interactive PO session in a docker container running in a new tmux pan
 Run **one** bash command (no `$TMUX` check beforehand — the script handles tmux detection internally and errors out cleanly if not in tmux):
 
 ```bash
-/home/jrdn/git/cfg.is/cfgms/.claude/scripts/agent-dispatch.sh po-live $ARGUMENTS
+/home/jrdn/git/cfg.is/cfgms/.claude/tooling/scripts/agent-dispatch.sh po-live $ARGUMENTS
 ```
 
 Inspect the exit code:
@@ -52,7 +52,7 @@ Live mode is unavailable. Two-part fallback:
 2. **Tell the founder the one-liner** they can paste into a real terminal to launch live mode manually:
 
    ```
-   /home/jrdn/git/cfg.is/cfgms/.claude/scripts/agent-dispatch.sh po-live $ARGUMENTS
+   /home/jrdn/git/cfg.is/cfgms/.claude/tooling/scripts/agent-dispatch.sh po-live $ARGUMENTS
    ```
 
    (To use it: open a tmux session — `tmux new -s cfgms` — then paste the command. The script will then split a pane and start the live PO container.)
@@ -63,7 +63,7 @@ Surface the script's stderr to the founder verbatim and stop. Don't auto-fall-ba
 
 ## Permissions
 
-`Bash(/home/jrdn/git/cfg.is/cfgms/.claude/scripts/agent-dispatch.sh po-live *)` and `Bash(./.claude/scripts/agent-dispatch.sh *)` are both pre-approved in `.claude/settings.local.json`, so this command should run without permission prompts.
+`Bash(/home/jrdn/git/cfg.is/cfgms/.claude/tooling/scripts/agent-dispatch.sh po-live *)` and `Bash(./.claude/tooling/scripts/agent-dispatch.sh *)` are both pre-approved in `.claude/settings.local.json`, so this command should run without permission prompts.
 
 ## Cap impact
 
