@@ -75,15 +75,14 @@ func (h *stewardServiceHandler) Execute(
 	flags.ParseErrorsAllowlist.UnknownFlags = true
 	_ = flags.Parse(os.Args[1:])
 
-	token, err := serviceRegToken(*regTokenFile)
-	if err != nil {
-		// The error names the file, never the token. A non-zero exit lets the
-		// SCM apply recovery actions.
-		fmt.Fprintf(os.Stderr, "steward service start failed: %v\n", err)
-		return true, 1
+	// A refused token file does not end the service: with no stored identity the
+	// steward waits for a usable token (waitForEnrollment).
+	token, tokenErr := serviceRegToken(*regTokenFile)
+	if tokenErr != nil {
+		token = ""
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(withRegTokenFile(context.Background(), *regTokenFile))
 	defer cancel()
 
 	errCh := make(chan error, 1)

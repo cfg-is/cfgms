@@ -115,16 +115,17 @@ func TestRunRoot_TokenDefectWithStoredIdentity_StartsWithEmptyToken(t *testing.T
 	}
 }
 
-func TestRunRoot_TokenDefectWithoutStoredIdentity_Refused(t *testing.T) {
+func TestRunRoot_TokenDefectWithoutStoredIdentity_StartsAndWaits(t *testing.T) {
 	prev := certStoreDirResolver
 	certStoreDirResolver = func() string { return t.TempDir() }
 	t.Cleanup(func() { certStoreDirResolver = prev })
 	for name, d := range tokenDefects(t) {
 		t.Run(name, func(t *testing.T) {
 			resetStartupReasons(t)
-			_, started, err := runRootWithSeam(t, "--regtoken-file", d.path)
-			require.Error(t, err)
-			assert.False(t, started)
+			token, started, err := runRootWithSeam(t, "--regtoken-file", d.path)
+			require.NoError(t, err, "the steward waits for a usable token instead of exiting")
+			assert.True(t, started)
+			assert.Empty(t, token, "a refused file's content is never used")
 		})
 	}
 }
@@ -164,21 +165,6 @@ func TestRunStewardInternal_EmptyTokenWithStoredIdentity_EntersConnectedMode(t *
 	}
 	cancel()
 	require.NoError(t, <-done)
-}
-
-func TestRunStewardInternal_EmptyTokenNoIdentity_DoesNotConnect(t *testing.T) {
-	t.Setenv("CFGMS_LOG_DIR", t.TempDir())
-	prev := certStoreDirResolver
-	certStoreDirResolver = func() string { return t.TempDir() }
-	t.Cleanup(func() { certStoreDirResolver = prev })
-	var calls atomic.Int32
-	cf := connectFuncT(func(context.Context, string, string, TrustSource, string,
-		identity.KeyStore, bool, logging.Logger) (*client.TransportClient, error) {
-		calls.Add(1)
-		return nil, errors.New("unexpected")
-	})
-	require.NoError(t, runStewardInternal(context.Background(), "", "", "", cf))
-	assert.Zero(t, calls.Load(), "behaviour without an identity is unchanged until the no-identity story")
 }
 
 func TestRunStewardInternal_FailedDataDirCheck_DoesNotUseIdentityAddress(t *testing.T) {
