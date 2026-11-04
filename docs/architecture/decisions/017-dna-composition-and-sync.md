@@ -255,7 +255,7 @@ The single commitment this rider adds: that telemetry is **addressed to the same
 - **Invariants held.** Hash determinism (A1.1 keeps metadata out of the hash), single-authority atomicity (unchanged), telemetry exclusion (A1.4 keeps signals out of DNA). The rider adds around the fragment, not inside it — partial-sync validation is untouched.
 - **Wire additions are additive.** The provenance envelope (A1.1) is additive metadata on the `commonpb.DNA` type; manifest and aggregate root are unchanged.
 - **Controller storage is the real new work** (A1.3): fragment-addressable storage becomes version-addressable. This is the load-bearing change and must be scoped explicitly in the DNA-composition epic.
-- **A companion storage-shape ADR is likely needed** for the Tier-2 topology graph (property-graph store) and the temporal query surface — flagged in roadmap.md, to be drafted separately. This rider guarantees only the **identity + history substrate** those build on. *(Both companions have since landed: [ADR-022](022-entity-graph-model-and-access-contract.md) — model and access contract — and [ADR-023](023-entity-graph-storage-shape.md) — storage shape, which also satisfies this amendment's A1.3 versioned-history requirement via its single observation-log store.)*
+- **Storage-shape follow-through:** the subsequent [ADR-022](022-entity-graph-model-and-access-contract.md) and [ADR-023](023-entity-graph-storage-shape.md) own the entity-graph model and relational observation-log shape. The original request for a companion decision is resolved; it is not a new graph-native database requirement.
 
 ---
 

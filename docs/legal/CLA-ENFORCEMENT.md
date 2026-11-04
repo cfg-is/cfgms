@@ -66,19 +66,19 @@ Check that the contributor has completed the CLA section in the PR description:
 - Date is reasonable (not future dated)
 
 **Example PR comment if CLA missing:**
-```markdown
+````markdown
 Thanks for your contribution! Before we can merge this PR, you'll need to sign our Contributor License Agreement (CLA).
 
 **To sign the CLA:**
-1. Read the CLA: [docs/legal/CLA.md](../docs/legal/CLA.md)
-2. Add your name to [CONTRIBUTORS.md](../CONTRIBUTORS.md) in this PR:
+1. Read the CLA: [docs/legal/CLA.md](https://github.com/cfg-is/cfgms/blob/develop/docs/legal/CLA.md)
+2. Add your name to [CONTRIBUTORS.md](https://github.com/cfg-is/cfgms/blob/develop/CONTRIBUTORS.md) in this PR:
    ```markdown
    - [Your Full Name] <your.email@example.com> - 2026-01-10
    ```
 3. Update the CLA checklist in the PR description
 
-See [docs/legal/README.md](../docs/legal/README.md) for more information.
-```
+See [docs/legal/README.md](https://github.com/cfg-is/cfgms/blob/develop/docs/legal/README.md) for more information.
+````
 
 #### Corporate Contributors
 
@@ -101,7 +101,7 @@ For corporate contributions, we need to verify authorization. Could you please:
 1. Confirm you are authorized to contribute on behalf of [Company Name]
 2. Provide documentation if this is your first contribution (e.g., email from legal/manager)
 
-See our corporate CLA guidance: [docs/legal/README.md#corporate-contributions](../docs/legal/README.md#corporate-contributions)
+See our corporate CLA guidance: [docs/legal/README.md#corporate-contributions](https://github.com/cfg-is/cfgms/blob/develop/docs/legal/README.md#corporate-contributions)
 ```
 
 ### 4. Documentation-Only PRs
@@ -123,7 +123,7 @@ See our corporate CLA guidance: [docs/legal/README.md#corporate-contributions](.
 ```markdown
 Thanks for fixing this typo! Since this is a trivial documentation fix, no CLA signature is required.
 
-For future contributions with code or substantial documentation changes, you'll need to sign our CLA: [docs/legal/CLA.md](../docs/legal/CLA.md)
+For future contributions with code or substantial documentation changes, you'll need to sign our CLA: [docs/legal/CLA.md](https://github.com/cfg-is/cfgms/blob/develop/docs/legal/CLA.md)
 ```
 
 ### 5. Handling CLA Issues
@@ -142,7 +142,7 @@ We understand CLAs aren't for everyone. CFGMS requires a CLA to support copyrigh
 
 If you'd prefer not to sign the CLA, we won't be able to merge this PR. However, we appreciate you reporting the issue/suggesting the improvement!
 
-For questions about the CLA: [docs/legal/README.md](../docs/legal/README.md)
+For questions about the CLA: [docs/legal/README.md](https://github.com/cfg-is/cfgms/blob/develop/docs/legal/README.md)
 ```
 
 #### Incorrect CLA Format

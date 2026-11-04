@@ -222,25 +222,14 @@ Run integration tests with the full system:
 make test
 ```
 
-## Performance Characteristics
+## Performance Validation
 
-### Scheduler
-- **Precision**: ±1 second accuracy for cron scheduling
-- **Capacity**: 10,000+ concurrent scheduled triggers
-- **Memory**: ~1KB per scheduled trigger
-- **CPU**: <1% for 1000 triggers with 1-minute check interval
-
-### Webhook Handler
-- **Throughput**: 1000+ requests/second per webhook
-- **Latency**: <50ms response time (95th percentile)
-- **Concurrency**: 1000+ concurrent webhook requests
-- **Memory**: ~100KB per active webhook
-
-### SIEM Processor
-- **Throughput**: 10,000+ log entries/second
-- **Latency**: <100ms trigger evaluation time
-- **Buffer**: 10,000 log entries (configurable)
-- **Memory**: ~10MB for typical workloads
+Scheduler precision, webhook throughput, memory use and evaluation latency depend
+on configured intervals, workload, storage and host resources. The old numeric
+capacity/latency list was not accompanied by reproducible measurements here and
+is not a production guarantee. Use the adjacent benchmarks/tests and a named
+revision/environment for a capacity claim. Buffer sizes and timeouts are settings,
+not evidence that a workload was sustained.
 
 ## REST API Reference
 

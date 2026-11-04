@@ -1,110 +1,32 @@
-# Security Architecture
+# Product Security Architecture
 
-This document details the system-wide security architecture for CFGMS, including communication flows, authentication mechanisms, and deployment security considerations.
+Review the trust and authorization boundaries of current CFGMS paths. Accepted
+ADRs own decisions; the linked runtime/route contracts own implementation details.
+An accepted requirement or component helper does not by itself prove all callers
+are wired or a release has passed security validation.
 
-## Communication Flows
+## Communication and execution boundaries
 
-### Basic Deployment
+- Stewards initiate gRPC-over-QUIC connections to controllers, using mTLS and
+  the installed/compiled trust anchor. HTTPS serves external APIs and installer
+  distribution. [Certificate purposes](certificate-architecture.md) are distinct.
+- Controller clustering requires shared stores, node identity and configured
+  endpoint routing. See [ADR-031](../architecture/decisions/031-controller-cluster-service-model.md).
+- Outpost is future product direction, not the normal intermediary in today's
+  deployment. Do not draw an implemented proxy topology from the vision alone.
+- Publisher-signed modules, script-signing floors and operator proof are separate
+  controls. A [behavioral envelope](../architecture/modules/behavioral-envelope.md)
+  declares intent; it does not create OS confinement in the current runtime.
+- Audit evidence is tamper-evident within its documented adversary bound, not
+  universally tamper-proof. [ADR-033](../architecture/decisions/033-audit-sink-architecture-and-adversary-bound.md)
+  owns that boundary.
 
-```mermaid
-graph TD
-    A[Controller] -->|mTLS| B[Steward]
-    B -->|mTLS| A
-```
+## Authentication and authorization
 
-### Typical Deployment
-
-```mermaid
-graph TD
-    A[Controller] -->|mTLS| B[Outpost]
-    B -->|mTLS| C[Steward 1]
-    B -->|mTLS| D[Steward 2]
-    B -->|mTLS| E[Steward 3]
-    C -->|mTLS| A
-    D -->|mTLS| A
-    E -->|mTLS| A
-```
-
-### Large Environment
-
-```mermaid
-graph TD
-    A[Controller] -->|mTLS| B[Outpost 1]
-    A -->|mTLS| C[Outpost 2]
-    B -->|mTLS| D[Steward 1]
-    B -->|mTLS| E[Steward 2]
-    C -->|mTLS| F[Steward 3]
-    C -->|mTLS| G[Steward 4]
-    D -->|mTLS| A
-    E -->|mTLS| A
-    F -->|mTLS| A
-    G -->|mTLS| A
-```
-
-## Security Considerations for Each Flow
-
-### Basic Deployment
-
-- Local configuration security
-- File system permissions
-- Local authentication
-- Offline operation security
-
-### Typical Deployment
-
-- Certificate management
-- API key security
-- Network security
-
-### Large Environment
-
-- Steward authentication
-- Cache security
-- WAN optimization
-- Local network security
-
-## Communication Security
-
-### Internal Communication
-
-- gRPC-over-QUIC protocol with mTLS for all steward-controller communication
-  - gRPC control plane for real-time commands, heartbeats, and failover detection
-  - gRPC data plane for high-performance configuration and DNA synchronization
-- Certificate-based authentication
-- Strong encryption for all traffic
-- Rate limiting and DoS protection
-
-### External Access
-
-- HTTPS with API keys for REST API
-- Role-based access control (RBAC)
-- API key rotation and management
-- Rate limiting and DoS protection
-
-### Optional OpenZiti Integration
-
-- Zero-trust networking capabilities
-- Enhanced security for complex deployments
-- Seamless integration with existing security
-- Configuration-driven enablement
-
-For detailed information about our security decisions, see the [architecture decision records](../architecture/decisions/README.md).
-
-## Authentication & Authorization
-
-### Steward Authentication
-
-- Certificate-based authentication
-- Automatic certificate rotation
-- Identity verification
-- Secure key storage
-
-### API Authentication
-
-- API key management
-- Key scoping and permissions
-- Rate limiting
-- Audit logging
+Current browser credential/session, CSRF and principal contracts follow below.
+For an endpoint, confirm the registered route and policy manifest as well as the
+handler's tenant/resource checks. A role, ancestor tenant or logging tenant tag
+is not by itself an authorized crossing into another client's data.
 
 ### Web-Admin Credentials (Browser Passkey Login)
 
@@ -407,151 +329,16 @@ silently strip an administrator of any permission introduced after the account
 was created; the implicit-admin switch is the correct model (Founder decision,
 2026-08-25).
 
-## Security Best Practices
 
-### Certificate Management
+## Operating securely
 
-- Automated certificate generation
-- Secure key storage
-- Regular rotation
-- Revocation support
+Use the [security configuration entry](SECURITY_CONFIGURATION.md),
+[tenant support/recovery procedure](../operations/tenant-support-access.md),
+[module publishing](../operations/module-publishing.md) and
+[certificate rotation](certificate-rotation.md) for their distinct tasks. The
+[release checklist](../testing/release-validation-checklist.md) requires actual
+failure/isolation evidence; this architecture page does not declare “no critical
+vulnerabilities” from an old analysis.
 
-### API Key Management
-
-- Secure key generation
-- Key rotation policies
-- Usage monitoring
-- Revocation procedures
-
-### Logging & Monitoring
-
-- Security event logging
-- Audit trail maintenance
-- Performance monitoring
-- Security alerting
-
-## Deployment Security
-
-### Default Security
-
-- Secure by default configuration
-- Minimal attack surface
-- Regular security updates
-- Dependency management
-
-### Network Security
-
-- TLS 1.3 support
-- Strong cipher suites
-- Certificate validation
-- Connection security
-
-### Data Security
-
-- Encrypted storage
-- Secure transmission
-- Data sanitization
-- Access controls
-
-## Security Considerations
-
-### Development
-
-- Security testing requirements
-- Code review guidelines
-- Dependency management
-- Security documentation
-
-### Deployment
-
-- Security checklist
-- Configuration validation
-- Monitoring setup
-- Incident response
-
-## Implementation Examples
-
-### gRPC-over-QUIC with mTLS Configuration
-
-```yaml
-# Example Steward TLS configuration
-tls:
-  ca_cert: "/path/to/ca.crt"
-  cert: "/path/to/client.crt"
-  key: "/path/to/client.key"
-  min_version: "TLS1.3"
-  cipher_suites:
-    - "TLS_AES_256_GCM_SHA384"
-    - "TLS_CHACHA20_POLY1305_SHA256"
-
-# gRPC-over-QUIC transport configuration
-transport:
-  server_address: "controller.example.com:4433"
-  max_idle_timeout: 60s
-  keepalive_period: 30s
-  max_streams: 100
-```
-
-### REST API Security Configuration
-
-```yaml
-# Example API security configuration
-api:
-  rate_limit: 100  # requests per minute
-  key_rotation: 30  # days
-  allowed_origins:
-    - "https://api.example.com"
-  cors:
-    enabled: true
-    max_age: 3600
-```
-
-### OpenZiti Integration
-
-```yaml
-# Example OpenZiti configuration
-ziti:
-  enabled: false  # Enable for zero-trust networking
-  service_name: "cfgms-steward"
-  identity_file: "/path/to/ziti-identity.json"
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. Certificate validation failures
-2. API key authentication issues
-3. Rate limiting problems
-4. TLS handshake failures
-
-### Resolution Steps
-
-1. Verify certificate validity
-2. Check API key permissions
-3. Review rate limit settings
-4. Validate TLS configuration
-
-## Security Checklist
-
-### Deployment
-
-- [ ] Certificates generated and installed
-- [ ] API keys created and secured
-- [ ] TLS configuration verified
-- [ ] Access controls configured
-- [ ] Monitoring enabled
-- [ ] Logging configured
-
-### Maintenance
-
-- [ ] Certificates up to date
-- [ ] API keys rotated
-- [ ] Security patches applied
-- [ ] Access logs reviewed
-- [ ] Security alerts configured
-- [ ] Backup procedures verified
-
-## Related Documentation
-
-For module-specific security requirements, see [Module Behavioral Envelope](../architecture/modules/behavioral-envelope.md).
+Report a vulnerability through [SECURITY.md](../../SECURITY.md). Keep deployment
+credentials, topology and incident records in the deployment's controlled systems.

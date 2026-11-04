@@ -102,7 +102,7 @@ A tenant's git config source authenticates with a token that is bound to one rep
 
 ## M365 connection
 
-A client tenant is connected to Microsoft 365 with `cfg tenant m365`. **A connection exists only on an existing client tenant**, a tenant whose parent is an MSP tenant (a direct child of the root tenant). The root tenant, an MSP tenant, a tenant that does not exist, a tenant below a client tenant and a client tenant that is not a child of the MSP named in the request are all refused before anything is written. No command creates a tenant, an account or a consent record. Setup is described in the [M365 Integration Guide](../M365_INTEGRATION_GUIDE.md#part-2-connecting-client-tenants).
+A client tenant is connected to Microsoft 365 with `cfg tenant m365`. **A connection exists only on an existing client tenant**, a tenant whose parent is an MSP tenant (a direct child of the root tenant). The root tenant, an MSP tenant, a tenant that does not exist, a tenant below a client tenant and a client tenant that is not a child of the MSP named in the request are all refused before anything is written. No command creates a tenant, an account or a consent record. Setup is described in the [M365 Integration Guide](../M365_INTEGRATION_GUIDE.md#connecting-client-tenants).
 
 | Command | What it does |
 |---------|--------------|

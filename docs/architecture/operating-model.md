@@ -293,100 +293,20 @@ On startup, the steward:
 3. Reconnects to controller if configured
 4. Resumes normal schedule
 
-## Concurrent Controller Execution (Blue/Green Pattern)
+## Backend Concurrency
 
-CFGMS controllers are designed to support a **blue/green upgrade pattern**: two
-controller binaries running on the same host (or two hosts sharing storage)
-can coexist on the same data directory without corrupting state. This is the
-substrate for the zero-downtime upgrade flow described in epic #1917.
+Backend tests cover bounded concurrent-reader/writer behavior, including SQLite
+identity visibility and atomic flat-file operations. Those guarantees belong to
+the particular store operation and fixture; they do not establish safe overlapping
+production controllers sharing a single-node data directory.
 
-### What's safe
-
-- **Read concurrency.** Both controllers can serve API reads concurrently against
-  shared storage. Storage backends are coordinated via filesystem-level
-  primitives (POSIX rename / Windows MoveFileEx + retry for flatfile; WAL-mode
-  shared-memory locking for SQLite).
-- **Single-writer + reader peers.** During cutover, one controller is the
-  primary writer for new state (registrations, heartbeats, config updates) and
-  the peer serves reads. Identity continuity is exact: a steward registered
-  against the writer is immediately visible on a read from the peer — no
-  replication lag, no re-registration. See `pkg/storage/providers/sqlite/
-  concurrent_writers_test.go::TestSQLite_IdentityContinuity_BlueWriteGreenRead`
-  for the pinned guarantee.
-- **Concurrent writes to disjoint keys.** Two writers updating different
-  records concurrently complete safely. WAL coordinates SQLite writers; atomic
-  rename + retry coordinates flatfile writers.
-
-### What's not safe (yet)
-
-- **Concurrent writes to the same key.** Two writers updating the same
-  steward record / config / RBAC entry at the same moment race on
-  last-writer-wins semantics. No corruption, but the merge is unordered. This
-  is acceptable for blue/green cutover (the primary writer is well-defined at
-  any given moment); on the flatfile/SQLite backends described here it remains
-  last-writer-wins.
-
-  For the ClusterMode/PostgreSQL deployment shape, this ceiling is resolved by
-  ADR-031 (Decision 1): the leadership gate that used to serialize writes onto
-  one node is removed — every node now accepts every write — and the shared
-  PostgreSQL database becomes the serialization point instead. Multi-writer
-  safety is enforced per write path with uniqueness constraints and
-  compare-and-set on version columns (`SecretStore.CompareAndSwapSecret` for
-  the credential/CLI-login lifecycle transitions, database-side sequencing for
-  the audit chain, a durable shared nonce store for registration refresh), not
-  by last-writer-wins. See ADR-031 for the full any-node service model.
-- **Schema migrations during cutover.** A migration that changes column or
-  field shapes must run during a maintenance window or after both sides have
-  upgraded. Blue/green cutover assumes both binaries speak the same storage
-  schema.
-
-### Storage layer guarantees
-
-| Backend  | Concurrency contract                                                                                                                                                                                                              |
-|----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| SQLite   | WAL mode + `busy_timeout=5000ms`. Multiple `*sql.DB` handles on the same file (in-process OR cross-process) write safely without lock failures. Tested at 1000 concurrent writes split across two handles with zero failures.    |
-| Flatfile | Writes commit via atomic temp-file + rename. On Windows, rename retries `ERROR_SHARING_VIOLATION` from concurrent readers; reads retry the same error from concurrent writers. Tested with 1 writer + N reader subprocesses, 0 torn reads. |
-
-### Operator interface
-
-The blue controller runs on the canonical ports from `controller.cfg`. The
-green controller binds on overrides supplied at startup:
-
-```sh
-cfgms-controller \
-    --config /etc/cfgms/controller.cfg \
-    --listen-api-addr :9081 \
-    --listen-transport-addr :4434
-```
-
-Precedence: CLI flag > env var (`CFGMS_HTTP_LISTEN_ADDR`,
-`CFGMS_TRANSPORT_LISTEN_ADDR`) > cfg file value > built-in default. Both
-binaries read the same `data_dir`, same storage configuration, same identity
-material — so the green binary is bit-for-bit indistinguishable from the
-blue binary in terms of "what it serves." Only the listen addresses differ.
-
-The cutover mechanism itself (story #1920) is implemented as
-**port-ownership-swap** — not a byte-level reverse proxy. The
-orchestrator (`features/controller/cutover`) drains the previous
-canonical, waits for the canonical ports to free, then spawns a fresh
-instance of the new binary on those ports. Stewards reconnect via the
-gRPC-over-QUIC backoff already built into the client. Typical wall-
-clock window: 1-3 seconds.
-
-Operator commands:
-
-```sh
-cfg controller upgrade run --binary /opt/cfgms/cfgms-controller-vNEW \
-    --config /etc/cfgms/controller.cfg
-cfg controller upgrade status
-cfg controller upgrade rollback --config /etc/cfgms/controller.cfg
-```
-
-State persistence: `/var/lib/cfgms/cutover.state.json` (Linux) or
-`%ProgramData%\cfgms\cutover.state.json` (Windows) records the
-canonical + quarantined binary paths so `status` and `rollback` work
-across CLI invocations. The full operator runbook lives at
-[docs/operations/controller-upgrade.md](../operations/controller-upgrade.md).
+The supported [single-controller upgrade](../operations/controller-upgrade.md)
+is restart-based under ADR-007. Production multi-controller service uses the
+shared-store [cluster contract](decisions/031-controller-cluster-service-model.md)
+and explicit routing. Flat-file config storage remains a single-writer deployment
+choice. Use the [storage owner](storage-architecture.md) and source-adjacent
+concurrency tests for the exact data-type/backend behavior; do not infer a
+zero-downtime port-swap procedure from a passing storage-library test.
 
 ## Deployment Modes
 

@@ -93,10 +93,15 @@ cfg version
 
 ### PATH setup
 
-`%GOPATH%\bin` must be on your `PATH`. If `Get-Command cfg` fails, add it permanently:
+The `bin` directory under `go env GOPATH` must be on your `PATH`. If
+`Get-Command cfg` fails, add it to your user PATH in PowerShell:
 
 ```powershell
-setx PATH "%PATH%;%GOPATH%\bin"
+$cfgGoBin = Join-Path (go env GOPATH) 'bin'
+$cfgUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if ($cfgGoBin -notin ($cfgUserPath -split ';')) {
+    [Environment]::SetEnvironmentVariable('Path', ($cfgUserPath + ';' + $cfgGoBin), 'User')
+}
 ```
 
 Then restart your terminal and verify again with `Get-Command cfg`.

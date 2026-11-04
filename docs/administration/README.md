@@ -6,3 +6,6 @@ Day-2 administration from the `cfg` CLI.
 - [Tenant Management](tenant-management.md) - Listing and inspecting tenants with `cfg tenant list` and `cfg tenant get`
 - [Steward Management](steward-management.md) - Moving, decommissioning, and managing registered stewards
 - [Steward Registration-Refresh Management](../deployment/steward-refresh-management.md) - Re-admitting stewards whose mTLS certificate expired offline
+
+- [Operator and service credentials](operator-credentials.md) - Enrollment, renewal, containment, accounts and signing credentials
+- [Workflow operations](workflows.md) - Run, inspect, cancel and role-promotion operations

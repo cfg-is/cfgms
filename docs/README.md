@@ -1,72 +1,28 @@
 # CFGMS Documentation
 
-Welcome to the CFGMS (Configuration Management System) documentation. This index lists every documentation directory; each directory has its own README with a one-line description of every file it holds.
+Choose a reading path for the task. Each topic's owner describes its contract;
+indexes route readers rather than repeat configuration, commands or policy.
 
-## For Contributors (Start Here)
+| Task | Start here |
+|---|---|
+| Understand the product and release direction | [Vision](product/vision.md), [roadmap](product/roadmap.md) |
+| Get a working environment | [Quick start](../QUICK_START.md), [deployment selector](deployment/README.md) |
+| Operate or diagnose a deployment | [Operations](operations/README.md), [administration](administration/README.md), [troubleshooting](troubleshooting/README.md) |
+| Configure a managed resource | [Module reference](modules/README.md), [config schema](reference/config-schema.md), [inheritance](guides/configuration-inheritance.md) |
+| Integrate with an API or M365 | [REST guide](api/rest-api.md), [M365 setup](M365_INTEGRATION_GUIDE.md) |
+| Develop CFGMS | [Workstation setup](../DEVELOPMENT.md), [architecture map](../ARCHITECTURE.md), [development workflow](development/README.md) |
+| Plan or accept an epic | [Shared planning contract](development/product-planning.md) and the relevant role entry |
+| Review web design direction | [Design system](design/web-ui-design-system.md), [reference mockups](design/mockups/README.md) |
+| Select validation/evidence | [Testing](testing/README.md), [release checklist](testing/release-validation-checklist.md) |
+| Review trust, access or reporting a vulnerability | [Security architecture](security/architecture.md), [reporting policy](../SECURITY.md) |
+| Understand license/contributor requirements | [Licensing](../LICENSING.md), [legal documents](legal/README.md) |
 
-- [Architecture](../ARCHITECTURE.md) - System design and architectural overview
-- [Contributing Guidelines](../CONTRIBUTING.md) - How to contribute to the project
-- [Development Setup](../DEVELOPMENT.md) - Local development environment setup
-- [Code of Conduct](../CODE_OF_CONDUCT.md) - Community standards and expectations
-- [Security Policy](../SECURITY.md) - Security practices and vulnerability reporting
-- [Claude Code Integration](../CLAUDE.md) - AI assistant guidance for working with this codebase
+[ADRs](architecture/decisions/README.md) preserve relevant decisions and lineage;
+accepted decisions, current implementation and approved future direction are
+different evidence. [Retained records](archive/README.md) need a current consumer;
+“historical” alone does not justify keeping obsolete instructions.
 
-## Architecture & Design
-
-- [Architecture](architecture/README.md) - Operating models, design documents, and the module design layer
-- [Architecture Decision Records](architecture/decisions/README.md) - Index of all ADRs
-- [Module System](architecture/modules/README.md) - Module architecture, manifest fields, and the stdlib set
-- [Web UI Design](design/README.md) - Design system, tokens, and reference mockups for the web UI
-- [Terminology](terminology.md) - Standardized component terminology and definitions
-
-## Reference
-
-- [Reference](reference/README.md) - Configuration schema reference
-- [REST API](api/README.md) - REST API documentation and OpenAPI specification
-- [Modules](modules/README.md) - Per-module operator reference (file, firewall, user, time, hostname, cert_trust, script)
-
-## Administration & Operations
-
-- [Administration](administration/README.md) - Day-2 admin from the `cfg` CLI: selectors and steward management
-- [Operations](operations/README.md) - Runbooks: upgrades, cluster configuration, Hyper-V onboarding, agent dispatch
-- [Runbooks](runbooks/README.md) - Trivy rollback runbook
-- [Monitoring Guide](monitoring.md) - Tracing, structured logging, metrics, and third-party integration
-- [Troubleshooting](troubleshooting/README.md) - Connectivity troubleshooting and investigation notes
-
-## Deployment
-
-- [Deployment](deployment/README.md) - Deployment modes, walkthroughs, canonical config files, and install guides
-
-## Configuration & Integration Guides
-
-- [Guides](guides/README.md) - Configuration inheritance and script-signing CI
-- [M365 Integration Guide](M365_INTEGRATION_GUIDE.md) - Microsoft 365 integration setup
-- [CSP Sandbox Setup Guide](CSP_SANDBOX_SETUP_GUIDE.md) - Cloud Solution Provider testing environment
-
-## Development
-
-- [Development](development/README.md) - Contributor process, workflow, standards, and CI documentation
-- [Development Standards](development/standards/README.md) - Coding, testing, documentation, and casing standards
-- [GitHub CLI Reference](github-cli-reference.md) - Using `gh` with the CFGMS project board
-- [Testing](testing/README.md) - Testing strategy, E2E guides, and live-validation runbooks
-
-## Security
-
-- [Security](security/README.md) - Security architecture, certificates, configuration, and credential setup
-- Security Review — `.claude/tooling/security-review/docs/README.md` - Methodology, threat scenarios, and regression corpus for the LLM security review harness (moved out of docs/ to live beside the rest of the skill)
-
-## Product
-
-- [Product](product/README.md) - Vision, roadmap, feature boundaries, and the autonomous agent system PRD
-
-## Legal
-
-- [Legal](legal/README.md) - Contributor License Agreement and enforcement guide
-
-## Examples
-
-- [Examples](examples/README.md) - Logging, monitoring, storage, and role-config examples
-
-## Archive
-
-- [Archive](archive/README.md) - Historical documents kept for reference; not maintained
+Pipeline/security-review tooling has its own owner in the pinned `.claude/tooling`
+repository. Product documentation and the remaining in-repo role/config entry
+points must not become a duplicate tooling manual. See the
+[documentation currency contract](development/product-planning.md#documentation-currency).

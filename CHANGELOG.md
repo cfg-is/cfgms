@@ -506,7 +506,7 @@ Consolidation + AGPL governance release. Bundles the v0.9.0–v0.9.5 work that h
 
 ### Changed
 
-- **BREAKING (licensing)**: CFGMS is now licensed under **AGPL-3.0-only**. The previous Apache-2.0 + Elastic License v2 dual-license model has been retired (Epic #1716). Every file in the repository — controller, steward, protocol, integrations, CLI, workflow engine, and HA clustering — is now AGPL-3.0. A separate commercial-embedding license is available via cfg.is for third parties wishing to embed CFGMS in proprietary products without AGPL obligations; see [LICENSE.CommercialLicenses.md](LICENSE.CommercialLicenses.md).
+- **BREAKING (licensing)**: CFGMS is now licensed under **AGPL-3.0-only**. The previous Apache-2.0 + Elastic License v2 dual-license model has been retired (Epic #1716). Every file in the repository — controller, steward, protocol, integrations, CLI, workflow engine, and HA clustering — is now AGPL-3.0. A separate commercial-embedding license is available via cfg.is for third parties wishing to embed CFGMS in proprietary products without AGPL obligations; see [commercial licensing](LICENSING.md#commercial-agreement-and-repository-license).
 - **CLA upgraded to v2.0** (Issue #1744, PR #1753). §3 / §4 broadened to "any license selected by the Copyright Holder at its sole discretion" so future license changes do not require re-papering. §5(f) adds AI-assisted contribution disclosure. §1 copyright assignment retained.
 - **High Availability (HA) is now in every build.** The `commercial/` build-tag split has been removed (Issue #1745, PR #1780). `pkg/ha` is the unified package — controllers built from the public source tree include Raft consensus, failover, and split-brain protection by default.
 

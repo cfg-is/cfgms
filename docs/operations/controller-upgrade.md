@@ -1,89 +1,96 @@
 # Controller Upgrade Runbook
 
-How to upgrade a CFGMS controller in production using the blue/green
-cutover flow introduced by epic #1917 (Story C, #1920).
+Upgrade one installed controller and verify that it can serve durable state.
+For multiple controllers, follow the [rolling cluster procedure](rolling-cluster-upgrade.md)
+so peers can continue serving while this node restarts.
 
-## When to use this
+The supported single-controller path is an in-place restart. It interrupts this
+node's connections; downtime depends on shutdown, startup and state loading.
+The port-swap command `cfg controller upgrade run` is experimental and frozen,
+not the production procedure. [ADR-007](../architecture/decisions/007-controller-upgrade-and-state-externalization.md)
+owns the decision and its constraints.
 
-Use this runbook when you have a new `cfgms-controller` binary to deploy
-to a running controller host AND you cannot tolerate more than ~10
-seconds of API unavailability for connected stewards.
+## Prerequisites
 
-This is the controller side of the zero-downtime upgrade epic. The
-steward-side counterpart is the launcher binary (Story A, #1918) which
-operates on a different mechanism (atomic-swap-with-rollback for the
-steward).
+- Obtain the intended binary using [release artifact verification](../deployment/release-artifact-verification.md).
+- Preserve the current binary and back up durable state using the procedure for
+  your storage backend. Keep the same config, trust material and storage paths.
+- Confirm the service install path, API address and CA path. Examples below use
+  the [single-controller deployment](../deployment/single-controller/walkthrough.md):
+  `/usr/local/bin/cfgms-controller`, `/etc/cfgms/controller.cfg`, and HTTPS on `9080`.
+- Run service and binary replacement commands with host administrative privileges.
 
-## What happens during a cutover
+## Credential-backed systemd service
 
-1. **Validate.** `cfg controller upgrade run --binary <path>` checks
-   the new binary exists and is executable.
-2. **Smoketest.** A candidate instance of the new binary is spawned on
-   the candidate listen addresses (default `:8081` for API and `:4434`
-   for transport). The orchestrator probes its `/healthz` endpoint
-   until it responds (or the smoketest timeout, default 30s, elapses).
-3. **Drain.** The current canonical binary receives a graceful shutdown
-   signal (SIGTERM on Unix, Ctrl-Break on Windows) and is given up to
-   `PortHandoffTimeout` (default 5s) to finish in-flight requests.
-4. **Port handoff.** The orchestrator waits for the canonical TCP ports
-   to actually free at the OS level (TIME_WAIT linger, especially on
-   Windows loopback).
-5. **Stop candidate.** The smoketest instance of the new binary
-   releases its candidate ports.
-6. **Spawn canonical.** A fresh instance of the new binary is started
-   on the canonical ports.
-7. **Readiness probe.** The new canonical is probed to confirm it
-   accepts connections.
-8. **Park previous.** The previous binary path is recorded as the
-   quarantined rollback target. The quarantine window (default 1h)
-   controls how long the rollback remains a one-command operation.
-
-Total wall-clock time: typically 5-15 seconds. Stewards experience
-~1-3 seconds of API unavailability during the port handoff, well
-under the 10-second AC bound from the epic. The gRPC-over-QUIC
-client reconnect logic handles the transient outage transparently.
-
-## Commands
+The canonical service uses `LoadCredentialEncrypted=`. The CLI's restart
+smoketest runs a candidate outside that unit and cannot receive its systemd
+credentials. `cfg controller upgrade restart` therefore refuses this service
+before modifying files. Replace the binary and let systemd supply the credentials:
 
 ```bash
-# Upgrade the canonical binary to v0.5.11
-cfg controller upgrade run \
-    --binary /opt/cfgms/cfgms-controller-v0.5.11 \
-    --config /etc/cfgms/controller.cfg
-
-# See which binary is canonical and which is in the quarantine slot
-cfg controller upgrade status
-
-# Roll back to the quarantined binary (if recent upgrade misbehaves)
-cfg controller upgrade rollback \
-    --config /etc/cfgms/controller.cfg
+# Set this to the verified binary you intend to deploy.
+NEW_BINARY=/opt/cfgms/cfgms-controller-new
+sudo cp -p /usr/local/bin/cfgms-controller /usr/local/bin/cfgms-controller.prev
+sudo install -m 0755 "$NEW_BINARY" /usr/local/bin/cfgms-controller
+sudo systemctl restart cfgms-controller
+sudo systemctl status cfgms-controller --no-pager
+sudo curl --fail --cacert /var/lib/cfgms/certs/ca/ca.crt \
+  https://localhost:9080/api/v1/ready
 ```
 
-The CLI also accepts:
+Use a hostname covered by the controller certificate and the configured CA.
+Wait for readiness during startup; a process being present is not proof that
+its durable storage is available. `/api/v1/ready` performs a storage round trip.
+Inspect `journalctl -u cfgms-controller` if readiness does not recover.
 
-- `--canonical-api-addr` / `--canonical-transport-addr` — override the
-  canonical listen addresses (defaults `:8080` / `:4433`).
-- `--candidate-api-addr` / `--candidate-transport-addr` — override the
-  candidate listen addresses (defaults `:8081` / `:4434`).
-- `--quarantine-window` — how long the previous binary stays available
-  for rollback. Default 1h.
-- `--smoketest-timeout` — cap on the smoketest probe duration. Default 30s.
-- `--state` — path to the cutover state file. Default:
-  `/var/lib/cfgms/cutover.state.json` (Linux) or
-  `%ProgramData%\cfgms\cutover.state.json` (Windows).
+If startup or readiness fails, restore the preserved binary and restart:
 
-## Recovering from a failed cutover
+```bash
+sudo install -m 0755 /usr/local/bin/cfgms-controller.prev /usr/local/bin/cfgms-controller
+sudo systemctl restart cfgms-controller
+sudo curl --fail --cacert /var/lib/cfgms/certs/ca/ca.crt \
+  https://localhost:9080/api/v1/ready
+```
 
-| Failure | Symptom | Recovery |
-|---------|---------|----------|
-| Candidate fails smoketest | CLI surfaces `cutover: candidate smoketest failed: <reason>` and exits non-zero | The original canonical was never touched — it's still serving. Investigate the failure reason (logs in the candidate's stdout/stderr) and try again with a fixed binary. |
-| Canonical port did not free | CLI surfaces `canonical API port :8080 did not free` and exits non-zero | The previous canonical didn't drain in time. The orchestrator force-stopped it; the operator may need to manually kill any zombie process holding the port. Then re-run. |
-| New canonical fails readiness | CLI surfaces `cutover: post-swap readiness probe failed: <reason>` | The new binary is broken. The orchestrator stopped it. The CANONICAL PORTS ARE FREE; stewards have no controller to talk to. Immediately re-run with the previous binary path, or run `cfg controller upgrade rollback` if a quarantined slot exists. |
-| `cfg controller upgrade rollback` fails | CLI surfaces a swap or spawn error | The state file still records the previously-canonical binary; re-run rollback after addressing the underlying error. |
+Verify storage-format compatibility before downgrading. A previous executable
+is not a substitute for a recoverable data backup. Do not remove identity or
+trust storage to make a failed upgrade start.
 
-## See also
+## Service without systemd credential directives
 
-- [Operating model — Concurrent Controller Execution](../architecture/operating-model.md)
-- Epic [#1917](https://github.com/cfg-is/cfgms/issues/1917) — Zero-downtime upgrades
-- Story [#1920](https://github.com/cfg-is/cfgms/issues/1920) — Cutover router + CLI
-- Story [#1919](https://github.com/cfg-is/cfgms/issues/1919) — Multi-bind + storage concurrency substrate
+For an installed service that does not use `LoadCredential=` or
+`LoadCredentialEncrypted=`, the CLI supports a readiness-gated restart:
+
+```bash
+sudo cfg controller upgrade restart \
+  --binary /opt/cfgms/cfgms-controller-new \
+  --config /etc/cfgms/controller.cfg \
+  --canonical-api-addr 127.0.0.1:9080
+```
+
+The command starts a side-port candidate, checks HTTPS `/api/v1/ready`, stops
+the candidate, stages the binary through the service manager, restarts, and
+checks readiness again. If staging or the final probe fails, it attempts to
+restore the previous executable. A failed restoration is reported as requiring
+manual intervention; inspect the error and service logs.
+
+The canonical probe defaults to `:8080`; set `--canonical-api-addr` for the
+actual service port. `--url` does not change this local probe address. Candidate
+ports default to `:8081` and `:4434`; choose unused addresses with
+`--candidate-api-addr` and `--candidate-transport-addr`. The default smoketest
+timeout is 30 seconds, configurable with `--smoketest-timeout`.
+
+This path removes its temporary `.prev` backup after success. It does not
+populate the experimental cutover quarantine or history file. Keep your own
+verified prior artifact for later rollback, and repeat the supported procedure
+with it when a downgrade is compatible.
+
+## Verify the outcome
+
+Check readiness, service logs, and that expected stewards reconnect and can
+complete a query. In a cluster, verify the node rejoins and is admitted by the
+load balancer before proceeding to another node. Do not treat a successful
+restart as evidence that an interrupted fleet rollout resumed.
+
+[Upgrade lifecycle reference](upgrade-lifecycle.md) distinguishes local
+experimental history, steward launcher events and durable upgrade dispatch status.

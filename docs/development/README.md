@@ -20,7 +20,7 @@ This directory contains detailed development guides, standards, and workflows fo
 - [PR Review Methodology](pr-review-methodology.md) - 5-phase structured PR review process
 - [Git Workflow](git-workflow.md) - GitFlow branching strategy and commit guidelines
 - [Merge Protocol](merge-protocol.md) - Cross-cutting PR detection, rebase procedure, and merge serialization
-- [Commands Reference](commands-reference.md) - All available make commands and utilities
+- [Commands Reference](commands-reference.md) - Task map to current Makefile, CLI and operator owners
 - [Commit & PR Standards](commit-and-pr-standards.md) - Commit message and PR description format (facts only)
 - [Story Template](story-template.md) - Body template for pipeline stories
 - [Issue Triage](issue-triage.md) - How issues are triaged and prioritized
@@ -36,8 +36,7 @@ This directory contains detailed development guides, standards, and workflows fo
 - [Complexity Report](complexity-gate.md) - `make complexity-report`: segments, metric file contract, baseline inventory
 - [Code Navigation Tooling](code-navigation-tooling.md) - grep + Read navigation workflow and its measured failure modes
 - [Documentation Boundaries](documentation-boundaries.md) - Product docs vs private-deployment docs
-- [Guides](guides/README.md) - Longer implementation guides
-- [Standalone Steward Implementation](guides/standalone-steward-implementation.md) - Steward architecture guide
+- [Steward runtime](../architecture/steward-operating-model.md) - Lifecycle, observation, convergence and local/managed entry paths
 
 ## Standards & Best Practices
 
@@ -47,7 +46,7 @@ This directory contains detailed development guides, standards, and workflows fo
 - [Casing Conventions](standards/casing-conventions.md) - snake_case config vs PascalCase PowerShell surfaces
 - [Testing Standards](standards/testing-standards.md) - Testing requirements and patterns
 - [Documentation Standards](standards/documentation-standards.md) - Documentation guidelines
-- [Review Process](standards/review-process.md) - Code review standards
+- [Review Process](standards/documentation-standards.md#review-before-acceptance) - Code review standards
 
 ## Security Development
 
@@ -62,10 +61,7 @@ This directory contains detailed development guides, standards, and workflows fo
 
 ### Logging System
 
-- [Module Logging Development Guide](module-logging-development-guide.md) - Implementing logging in modules
-- [Logging Migration Standards](logging-migration-standards.md) - Migrating to new logging system
-- [Logging Architecture Guide](logging-architecture-guide.md) - The global logging provider system and how to use it
-- [Logging Dependency Injection Guide](logging-dependency-injection-guide.md) - Injecting loggers into modules for central visibility
+- [Logging integration](logging-architecture-guide.md) - Initialization, injection, context and safe structured fields
 
 ## Infrastructure
 

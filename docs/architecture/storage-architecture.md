@@ -148,209 +148,24 @@ import _ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 
 ## Migration from the git provider
 
-The git storage provider was removed in Issue #664. Existing deployments running on the git backend must migrate to `flatfile` (config + audit) plus `sqlite` (business data) before upgrading. The controller rejects `provider: git` at startup with a message pointing here.
-
-**One-shot migration command:**
-
-Use the general-purpose migration path (`cfg migrate --provider storage`) or the legacy alias
-`cfg storage migrate`; both delegate through the same provider-agnostic migration seam (Issue #2258):
-
-```bash
-cfg migrate --provider storage \
-  --from git \
-  --to flatfile \
-  --git-root  /var/lib/cfgms/git-storage \
-  --flatfile-root /var/lib/cfgms/flatfile
-```
-
-`cfg storage migrate` also works and delegates to the same seam when a `storage` migrator is registered.
-
-What this does:
-
-- Reads every config and audit entry from the git-backed store at `--git-root`
-- Writes them into the flatfile layout at `--flatfile-root` using upsert semantics
-- Reports per-store counts (configs migrated, audit entries migrated)
-- Leaves the source repository untouched — safe to re-run for verification
-
-**Idempotent**: running the command twice against the same target produces the same record count with no duplicates. Safe to rehearse against a copy of production data before cutting over.
-
-**Dry-run preview**: pass `--dry-run` to read all source records and report per-store counts without writing anything to the target. Use this to confirm expected counts before scheduling downtime:
-
-```bash
-cfg storage migrate --from git --to flatfile \
-  --git-root /var/lib/cfgms/git-storage \
-  --flatfile-root /var/lib/cfgms/flatfile \
-  --dry-run
-```
-
-See [docs/operations/backend-migration.md](../operations/backend-migration.md) for the full offline-cutover procedure and downtime envelope.
-
-### Stores covered by the storage migrator
-
-The `cfg migrate --provider storage` pathway covers the following store kinds. Each row shows whether the OSS (flatfile+SQLite) and database (PostgreSQL) backends support export and import for that kind.
-
-| Store kind | OSS | PostgreSQL | Notes |
-|---|---|---|---|
-| `tenant` | ✓ | ✓ | Tenant tree |
-| `config` | ✓ | ✓ | Config entries |
-| `audit` | ✓ | ✓ | Audit log entries |
-| `registration_token` | ✓ | ✓ | Steward registration tokens |
-| `session` | ✓ | ✓ | Admin sessions |
-| `steward` | ✓ | ✓ | Steward fleet records |
-| `command` | ✓ | ✓ | Command records |
-| `trigger` | ✓ | ✓ | Workflow trigger records; PostgreSQL store added in Issue #3402 |
-| `push` | ✓ | ✓ | Push-state records for failover replay; PostgreSQL store added in Issue #3402 — enables `resumePendingPushes` in cluster mode; each record carries the authorized target steward IDs, and a resumed push delivers only to them (a record with none is failed) |
-| `ip_trust` | ✓ | ✓ | Trusted IP ranges per tenant |
-| `refresh_policy` | ✓ | ✓ | Per-tenant DNA refresh approval policy (Issue #2329) |
-| `pending_refresh` | ✓ | ✓ | Pending DNA refresh requests (Issue #2329) |
-| `pending_registration` | ✓ | ✓ | In-flight steward registration requests (Issue #3224); the PostgreSQL store is reachable through `DatabaseProvider.CreatePendingRegistrationStore` as of Issue #3401 |
-
-**Running the PostgreSQL store tests.** The `pkg/storage/providers/database` tests, and the
-Postgres-backed tests in `pkg/storage/interfaces` and `features/controller/api`, skip
-themselves when no test database is reachable. `make test-integration-setup && make
-test-integration-db` is their run path; no CI workflow provisions PostgreSQL, so a green
-CI run is not evidence that any of them executed.
-
-**Fail-loud on unmigratable kinds (Issue #3404).** Kinds marked `—` in the table above would
-cause the migration to **fail** when the source has records of that kind and the destination
-backend does not support the store — the migration does not silently drop records and report
-success. This applies to both `Plan` (dry-run) and `Run` — the dry run surfaces unmigratable
-kinds before any writes are attempted, so an operator learns about a destination gap before
-committing to a maintenance window. As of Issue #3402, `trigger` and `push` are fully
-supported on both OSS and PostgreSQL, so no kind currently triggers this path — but the
-mechanism remains in place for any future kind that is backend-specific.
-
-To acknowledge data loss for a kind the destination genuinely does not support, pass
-`WithSkippedKinds` explicitly:
-
-```go
-m := storage.NewStorageMigrator(src, dst,
-    storage.WithSkippedKinds("some_kind"))
-```
-
-The acknowledged kinds and their source counts appear in
-`MigrationReport.SkippedKinds`. The default path (without the option) fails; there is
-no silent drop.
-
-The per-kind integrity check at the end of `Run` compares counts for all kinds the
-destination supports (and that are not explicitly skipped). An idempotent re-run after a
-partial migration converges: already-imported records are upserted without duplicates.
-
-**Not yet covered:** `AlertStore` (tenant-scoped alert acknowledgement and silence records, Issue #3266) has no entry in this table because `pkg/migrate/storage/migrate.go` does not define a kind constant or export/import case for it yet — a `cfg migrate --provider storage` run does not transfer alert acknowledge/silence state in either direction. Wire it into the migrator (kind constant, export/import case, kind-availability map entry) before relying on migration to carry this state.
-
-**`ApprovalStore` (Issue #4607).** Pending workflow approvals live in a provider-backed
-store — `flatfile` (`approvals/workflow_approvals.json`), `sqlite` (`workflow_approvals`)
-and `database` (`cfgms_workflow_approvals`) — so they survive a controller restart and, on
-the `database` provider, are visible to every node. Records are keyed by tenant and approval
-id; `ListPending` and `GetApproval` never cross tenants. `DecideApproval` (from `pending`)
-and `ClaimResume` (from decided-and-not-resumed, re-claimable once the claim is older than its
-lease) are compare-and-set, so concurrent callers have exactly one winner. The workflow
-checkpoint can carry step outputs and credentials, so it is written through the secrets
-provider (SOPS-encrypted at rest); the approval record holds only `CheckpointRef`. Like
-`AlertStore`, it is not yet carried by `cfg migrate --provider storage`.
-
-**`ReportTemplateStore` (Issue #5527).** Custom report templates live in a provider-backed
-store — `flatfile` (`report_templates/templates.json`), `sqlite` (`report_templates`) and
-`database` (`cfgms_report_templates`). A template's `ID` is globally unique (caller-supplied
-UUID) so a share recipient can resolve it; the owning tenant is fixed by the first `Save`.
-`Save` takes the tenant explicitly and rejects a mismatch with `template.TenantID`; saving an
-ID another tenant owns returns `ErrReportTemplateExists` and changes nothing. `GetByID` and
-`ListOwned` / `ListSharedWith` never cross tenants except through a share that names the
-caller and has not expired, and a recipient sees only its own share entry. `Delete` and
-`UpdateSharing` are owner-only. Tenant and template IDs are validated with `keysafe` before
-any path is built or query run. The query and parameters are one opaque JSON document; the
-store never interprets it. Like `AlertStore`, it is not yet carried by
-`cfg migrate --provider storage`.
-
-**`WorkflowExecutionStore` (Issue #4675).** Workflow execution history — status, step
-results, error and timestamps — lives in a provider-backed store: `flatfile`
-(`workflow_executions/<tenant>/<execution>.json`, one file per execution), `sqlite`
-(`workflow_executions`) and `database` (`cfgms_workflow_executions`). Only the `database`
-provider is cluster-visible; `flatfile` and `sqlite` are readable by the node that wrote them
-and across its restarts. Records are keyed by tenant and execution id, and the empty tenant
-is the root tenant's key, never "all tenants": `Get` and `List` never cross tenants, and an
-id that exists under another tenant is reported as not found. Tenant, id, workflow name,
-status and the start and end times are columns; step results, trace and error are an opaque
-JSON payload. Run variables are never stored, because they carry values resolved at run time
-that can be secrets, and the variable snapshots that errors and trace entries attach are
-dropped from the payload for the same reason. The engine writes through when an execution is
-registered, after each step result, and at its terminal status; a terminal record is never
-overwritten by a later non-terminal write, and a store failure is logged without failing the
-run. Retention is bounded per tenant: after each terminal write the engine calls `Prune`,
-which keeps the newest `DefaultExecutionRetention` (1000, `WithExecutionRetention`) terminal
-records and never deletes a non-terminal one. Like `AlertStore`, it is not yet carried by
-`cfg migrate --provider storage`.
-
-**Config update required after migration.** Replace the old single-provider block with the local flatfile/SQLite composite:
-
-```yaml
-# Before (git — no longer supported)
-storage:
-  provider: git
-  config:
-    repository_path: /var/lib/cfgms/git-storage
-
-# After (flatfile + sqlite composite)
-storage:
-  provider: flatfile
-  flatfile_root: /var/lib/cfgms/flatfile
-  sqlite_path: /var/lib/cfgms/cfgms.db
-```
-
-Business-data tables (tenants, RBAC, sessions, registration tokens) are created fresh in the new SQLite file — they weren't persisted by the git provider in a migratable form. Plan a short re-seeding window (re-issue registration tokens, re-apply RBAC bindings) as part of the cutover.
+The current controller rejects the retired Git backend. The
+[backend migration procedure](../operations/backend-migration.md#migration-from-the-git-provider)
+owns exclusive-write cutover, the legacy Git-to-flatfile path and its data-coverage
+limits. Git sync is a separate editing/import path, not a replacement backend.
 
 ## Interface Layout
 
-Target layout (tracked under the ADR-003 epic):
-
-```
-pkg/storage/interfaces/
-  business/       # TenantStore, StewardStore, CommandStore,
-                  # AuditStore, RBACStore, SessionStore, RegistrationTokenStore
-  config/         # ConfigStore
-  secrets/        # SecretStore
-  timeseries/     # MetricsStore, LogStore
-  blob/           # BlobStore
-```
-
-**Naming rule**: anything ending in `*Store` is durable. Anything ephemeral (resolved configs, inheritance memoization, rebuildable-on-restart state) is named `*Cache` and lives under [`pkg/cache/`](../../pkg/cache/). The old `RuntimeStore` mixed both and has been retired — its durable parts moved to `business/SessionStore`, its ephemeral parts moved to `pkg/cache`.
-
-Interfaces are organized into five sub-packages under `pkg/storage/interfaces/`: `business/`, `config/`, `blob/`, `secrets/`, and `timeseries/`. See [`pkg/storage/interfaces/README.md`](../../pkg/storage/interfaces/README.md) for the layout and import paths.
+[Storage interfaces](../../pkg/storage/interfaces/README.md) owns the current
+five-type package layout and store contracts. Durable stores and rebuildable
+caches are distinct; do not infer persistence from an in-memory cache field.
 
 ## Configuration Example
 
-Use the [canonical controller boot configuration](../deployment/controller.cfg)
-and the [single-controller walkthrough](../deployment/single-controller/walkthrough.md)
-for a complete configuration. Storage keys are top-level controller settings:
-
-```yaml
-storage:
-  flatfile_root: /var/lib/cfgms/storage
-  sqlite_path: /var/lib/cfgms/cfgms.db
-```
-
-This selects the local flatfile/SQLite composite. Both paths must be persistent
-and accessible to the controller identity. It is only the storage block, not a
-complete controller configuration. Logging, certificates, transport and secrets
-have their own startup requirements.
-
-`StorageConfig` in `features/controller/config/config.go` defines `provider`,
-`config`, `flatfile_root`, `sqlite_path` and `cluster`. The five data categories
-above describe interface responsibilities; they are not five independently
-named YAML children under `controller.storage`. Do not use that proposed shape
-as a boot configuration. For PostgreSQL/shared stores, use the
-[cluster walkthrough](../deployment/controller-cluster/walkthrough.md) and
-[ADR-031](decisions/031-controller-cluster-service-model.md).
-
-**Database connection pools.** The database provider shares one `*sql.DB` pool
-per distinct connection string. Stores targeting the same database reuse it;
-those targeting a different connection string do not. Provider configuration
-keys `max_open_connections`, `max_idle_connections` and
-`connection_max_lifetime_minutes` are read when that pool is first opened.
-Configure them consistently on the actual database-provider configuration path,
-not on a hypothetical `business` boot-config block. See
-`pkg/storage/providers/database/plugin.go` for the accepted provider keys and
-[ADR-031](decisions/031-controller-cluster-service-model.md) for the contract.
+Use [the boot schema](../reference/config-schema.md),
+[canonical controller config](../deployment/controller.cfg) and
+[cluster storage](../operations/cluster-storage-config.md) for exact field
+placement. Backend choice is per data type, not a fabricated nested business
+configuration tree.
 
 ## Blob Storage
 

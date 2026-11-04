@@ -517,4 +517,4 @@ sudo cfgms-controller bootstrap-admin \
   mTLS certificate (from `bootstrap-admin`) remains your CLI credential either way.
 - **Connect stewards**: Create a registration token and deploy stewards to your endpoints.
 - **Configure server roles**: See [Role Config Recipes](../../examples/role-configs/README.md) for ready-to-use configs for domain controllers, file servers, SQL servers, web servers, and more.
-- **Scale up**: When you're ready for geo-redundant deployment, see [Controller Cluster](../controller-cluster/walkthrough.md).
+- **Scale up**: For a shared-store cluster with explicitly configured endpoint routing, see [Controller Cluster](../controller-cluster/walkthrough.md).

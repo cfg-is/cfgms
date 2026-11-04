@@ -19,10 +19,10 @@ requirement to read every operating model before doing any work.
 
 - [Provider Architecture](provider-architecture.md) - The pluggable central-provider pattern
 - [Storage Architecture](storage-architecture.md) - Five-type storage taxonomy (ADR-003)
-- [Communication Layer Migration](communication-layer-migration.md) - gRPC-over-QUIC transport architecture
+- [Transport Architecture](../../ARCHITECTURE.md#communication-architecture) - gRPC-over-QUIC transport architecture
 - [Rollback Design](rollback-design.md) - Configuration rollback system
 - [Workflow Debug System](workflow-debug-system.md) - Workflow debugging capabilities
-- [DNA Collection Audit](dna-collection.md) - Documented vs implemented DNA attributes (epic #1932)
+- [DNA Collection Audit](../../features/steward/dna/README.md) - Documented vs implemented DNA attributes (epic #1932)
 - [Steward Configuration](steward-configuration.md) - The `hostname.cfg` format and options
 - Security-review harness architecture — `.claude/tooling/security-review/docs/harness-architecture.md` - The multi-lab LLM security review harness (moved out of docs/ to live beside the rest of the skill)
 

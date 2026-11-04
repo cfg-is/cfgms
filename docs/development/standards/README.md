@@ -4,4 +4,4 @@
 - [Testing Standards](testing-standards.md) - Testing requirements and patterns
 - [Documentation Standards](documentation-standards.md) - Writing, formatting, and maintaining documentation
 - [Casing Conventions](casing-conventions.md) - Which case to use on user-facing surfaces
-- [Review Process](review-process.md) - How development standards are reviewed and updated
+- [Review Process](documentation-standards.md#review-before-acceptance) - How development standards are reviewed and updated

@@ -129,7 +129,7 @@ body:
       description: Links to API docs, design docs, RFCs, or related issues.
       placeholder: |
         - https://quic-go.net/docs/
-        - docs/architecture/communication-layer-migration.md
+        - ARCHITECTURE.md
         - Related: #123
     validations:
       required: false

@@ -33,18 +33,12 @@ Recommended cutover sequence:
 6. Start the controller and verify it reads the migrated data correctly.
 7. Archive (do not immediately delete) the source backend for a roll-back window.
 
-## Downtime Envelope
+## Plan and verify the cutover
 
-| Phase                          | Typical Duration |
-|-------------------------------|-----------------|
-| `--dry-run` validation         | Seconds to minutes (read-only, no writes) |
-| Live migration (storage)       | Minutes to hours depending on record count |
-| Live migration (secrets)       | Seconds to minutes (secrets are small) |
-| Live migration (blobs)         | Minutes to hours depending on total blob size |
-| Controller restart and verify  | 30–120 seconds |
-
-Migration is idempotent: re-running against the same target is safe and produces
-the same record counts with no duplicates.
+Measure the dry-run/import/verification window for the actual data set and backend.
+There is no fixed restart or migration-time promise here. Supported importers use
+their defined upsert/idempotency contracts; verify the report and destination
+instead of assuming all kinds or backends behave identically.
 
 ## Generic Verb Shape
 
@@ -171,5 +165,51 @@ and provider-specific cutover notes.
 
 ## Related
 
-- [`docs/architecture/storage-architecture.md`](../architecture/storage-architecture.md) — storage provider overview and migration-from-git guide
+- [`docs/architecture/storage-architecture.md`](../architecture/storage-architecture.md) — storage provider overview
 - [Roadmap](../product/roadmap.md) — epic #2256 tracking all migration stories
+
+## Migration from the git provider
+
+The git storage provider was removed in Issue #664. Existing deployments running on the git backend must migrate to `flatfile` (config + audit) plus `sqlite` (business data) before upgrading. The controller rejects `provider: git` at startup with a message pointing here.
+
+**One-shot migration command:**
+
+Use the general-purpose migration path (`cfg migrate --provider storage`) or the legacy alias
+`cfg storage migrate`; both delegate through the same provider-agnostic migration seam (Issue #2258):
+
+```bash
+cfg migrate --provider storage \
+  --from git \
+  --to flatfile \
+  --git-root  /var/lib/cfgms/git-storage \
+  --flatfile-root /var/lib/cfgms/flatfile
+```
+
+`cfg storage migrate` also works and delegates to the same seam when a `storage` migrator is registered.
+
+What this does:
+
+- Reads every config and audit entry from the git-backed store at `--git-root`
+- Writes them into the flatfile layout at `--flatfile-root` using upsert semantics
+- Reports per-store counts (configs migrated, audit entries migrated)
+- Leaves the source repository untouched — safe to re-run for verification
+
+**Idempotent**: running the command twice against the same target produces the same record count with no duplicates. Safe to rehearse against a copy of production data before cutting over.
+
+**Dry-run preview**: pass `--dry-run` to read all source records and report per-store counts without writing anything to the target. Use this to confirm expected counts before scheduling downtime:
+
+```bash
+cfg storage migrate --from git --to flatfile \
+  --git-root /var/lib/cfgms/git-storage \
+  --flatfile-root /var/lib/cfgms/flatfile \
+  --dry-run
+```
+
+### Store coverage
+
+Use the registered import/export adapters and the migration dry-run report for
+supported record kinds and compatibility. The source under `pkg/migrate/storage`
+and its tests owns that evolving matrix; a copied checkmark table does not prove
+every backend can export/import a newly added store. Legacy Git contains only the
+records its original backend persisted; do not infer missing business records
+will be reconstructed from configuration history.

@@ -66,7 +66,7 @@ What becomes easier or harder by making this decision?
 | [016](016-steward-module-foundation.md) | Steward Module Foundation — stdlib set, repository layout, DNA-fragment contract | 2026-07-04 | Accepted (2026-07-08) |
 | [017](017-dna-composition-and-sync.md) | DNA Composition & Sync — fragment model, authority resolution, partial-sync validation (incl. Amendment 1: twin/DEX data-model commitments) | 2026-07-04 | Accepted (2026-07-08) |
 | [018](018-web-session-semantics.md) | Web-Session Semantics (Browser Credential Login) | 2026-07-04 | Accepted |
-| [019](019-third-party-module-inclusion-and-trust.md) | Third-Party Module Inclusion and Delegated Publisher Trust | 2026-07-04 | Proposed |
+| [019](019-third-party-module-inclusion-and-trust.md) | Third-Party Module Inclusion and Delegated Publisher Trust | 2026-07-04 | Accepted |
 | [020](020-dna-required-field-declaration.md) | DNA Required-Field Declaration — per-configuration-type contract, module-manifest sourced | 2026-07-13 | Accepted |
 | [021](021-identity-assurance-levels.md) | Identity Assurance Levels and Step-Up Authentication | 2026-07-16 | Accepted |
 | [022](022-entity-graph-model-and-access-contract.md) | Entity Graph — logical model and access contract | 2026-07-21 | Accepted |
@@ -88,7 +88,6 @@ What becomes easier or harder by making this decision?
 
 | ADR | Title | Date | Status |
 |-----|-------|------|--------|
-| [028](028-raft-log-persistence.md) | Raft Log Persistence for Controller Cluster Restarts | 2026-08-13 | Superseded by ADR-031 |
 
 ADR-011 and ADR-029 remain active but are **amended** by ADR-031; see their status lines.
 

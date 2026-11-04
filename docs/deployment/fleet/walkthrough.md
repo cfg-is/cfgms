@@ -280,7 +280,9 @@ archive containing the steward binary, the controller CA certificate, and the CA
 fingerprint file:
 
 ```bash
-curl -O https://<CONTROLLER_IP>:9080/api/v1/installer/download/linux/amd64
+curl --fail --cacert /path/to/controller-ca.crt \
+  --output cfgms-steward-linux-amd64.tar.gz \
+  https://<CONTROLLER_IP>:9080/api/v1/installer/download/linux/amd64
 tar tzf cfgms-steward-linux-amd64.tar.gz
 # installer/linux-amd64/cfgms-steward-amd64
 # installer/ca.crt
@@ -291,6 +293,7 @@ tar tzf cfgms-steward-linux-amd64.tar.gz
 Extract the archive on each steward VM:
 
 ```bash
+mkdir -p /tmp/cfgms-install
 tar -C /tmp/cfgms-install -xzf cfgms-steward-linux-amd64.tar.gz
 ```
 
@@ -807,9 +810,9 @@ sudo journalctl -u cfgms-steward -f
 | Steward registration fails: `controller URL not set` | Neither `--controller-url` nor compile-baked URL set | Pass `--controller-url` to `install.sh`, or rebuild with `make build-steward STEWARD_CONTROLLER_URL=https://<IP>:9080` |
 | `Connected Stewards: 0` in controller metrics | Stewards registered but not connecting on 4433/UDP | Check firewall — port 4433 must be open for UDP |
 | `curl` REST API call returns `401` | No valid auth credentials | Extract cert/key from admin bundle; see Phase 5 |
-| Convergence not running | Steward is in standalone mode (no regtoken path) | Verify service is using `--regtoken-file` (or legacy `--regtoken`) not `--config` |
+| Convergence not running | Managed identity, connection or convergence failed; explicit `--config` selects standalone mode | Inspect steward logs, stored-identity access and controller connectivity. A registered steward can start from its stored identity without a new token. |
 | Config not applied after push | `converge_interval` delay | Wait up to 30m, or check push was accepted (202) |
-| `cfgms-steward status` shows `not installed` | install subcommand not run as root | Re-run `sudo cfgms-steward install --regtoken-file <path>` (legacy: `--regtoken <token>`) |
+| `cfgms-steward status` shows `not installed` | install subcommand not run as root | Re-run `sudo cfgms-steward install --regtoken-file <path>`; the token file must meet platform access controls |
 
 ### Diagnostic commands
 

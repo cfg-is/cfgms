@@ -1,109 +1,45 @@
-# Upgrade Lifecycle Runbook
+# Upgrade Lifecycle Reference
 
-Operator reference for the CFGMS upgrade pipeline introduced by epic
-#1917. Covers what each upgrade event means, retention semantics, and
-how to use `cfg controller upgrade history` for forensics.
+Use this reference to distinguish upgrade status sources. For execution, start
+with the [controller](controller-upgrade.md), [rolling cluster](rolling-cluster-upgrade.md)
+or [fleet steward](../deployment/fleet-upgrades.md) procedure.
 
-## Quick reference
+## Which status describes which operation?
 
-```bash
-# Stage + cut over to a new controller binary
-cfg controller upgrade run --binary <path> --config /etc/cfgms/controller.cfg
-
-# Show the last 10 upgrade events (newest first)
-cfg controller upgrade history
-
-# Roll back to the quarantined binary (must be within the quarantine window)
-cfg controller upgrade rollback --config /etc/cfgms/controller.cfg
-
-# Inspect retention state for a specific event in JSON
-cfg controller upgrade history --json | jq '.[] | select(.event_type=="upgrade.pruned")'
-```
-
-## The event types
-
-The orchestrator emits a structured event at each transition. Events are
-appended (newest last) to `cutover.history.jsonl` next to the state
-file (`/var/lib/cfgms/cutover.history.jsonl` on Linux,
-`%ProgramData%\cfgms\cutover.history.jsonl` on Windows).
-
-| event_type | When | Operator action |
+| Operation | Status/evidence | Limits |
 |---|---|---|
-| `upgrade.staged` | New binary validated and about to be spawned. | None — informational. |
-| `upgrade.smoketest_passed` | Candidate serving `/api/v1/health` healthy. | None — proceed automatic. |
-| `upgrade.smoketest_failed` | Candidate didn't pass health probe. | Read `reason` field; fix binary and re-run. Blue still serving. |
-| `upgrade.committed` | Swap completed; new binary is canonical. | None — verify via `status`. |
-| `upgrade.rolled_back` | Operator-invoked rollback restored previous binary. | None — verify via `status`. |
-| `upgrade.quarantine_expired` | Quarantined backend stopped after the window. | None — informational. Past this point, rollback isn't a one-command operation. |
-| `upgrade.pruned` | Retention pruner deleted an old binary. | None — informational. |
-| `upgrade.validation_failed` | Validator rejected the binary (bad signature, wrong arch). | Fix the binary supply; nothing was spawned. |
-| `upgrade.aborted` | Context cancellation reached the orchestrator. | Re-run when ready; orchestrator is back to idle. |
+| Supported controller restart | CLI result, service logs, HTTPS `/api/v1/ready`, steward reconnect/query checks | Does not append to the cutover history file or create an experimental quarantine slot. |
+| Steward upgrade dispatch | Returned `upgrade_id` and `GET /api/v1/stewards/upgrade/{upgrade_id}` | Durable dispatch/status records are distinct from launcher event ingestion. |
+| Ringed fleet rollout | `rollout_id` and `GET /api/v1/rollout/{rollout_id}` | Stored progress does not establish automatic resumption after controller restart. |
+| Steward launcher | Local launcher state and upgrade flag events | Local retention and failure counters are not controller cutover history. |
+| Experimental controller port swap | Local `cutover.history.jsonl` and cutover state | Frozen experimental path; not the supported production procedure. |
 
-Each event carries:
+## Local experimental cutover history
 
-- `timestamp` (UTC)
-- `binary_path` — the binary the event concerns
-- `canonical_binary` — what was canonical at the moment of the event
-- `previous_binary` — what was canonical BEFORE the event (only for `committed` / `rolled_back`)
-- `duration_ms` — how long the probe took (`smoketest_passed` / `smoketest_failed`)
-- `reason` — human-readable explanation (failure events)
-
-## Retention semantics
-
-When a cutover commits successfully, the previous binary is kept on disk
-for the configured quarantine window so `rollback` is a one-command
-operation. After the window expires, the binary is eligible for pruning,
-subject to two caps:
-
-- `MaxVersions` (default 3): keep the N most-recent past-quarantine
-  binaries. Anything older is pruned oldest-first.
-- `MaxBytes` (default 500 MB): keep total past-quarantine binary size
-  below this. Anything pushing over is pruned oldest-first.
-
-The MORE RESTRICTIVE cap wins. A small `MaxBytes` with a large
-`MaxVersions` still bounds disk usage; a generous `MaxBytes` with a
-tight `MaxVersions` still bounds the number of archives an operator
-needs to remember.
-
-Active canonical AND any binary within the quarantine window are
-NEVER pruned regardless of caps — the rollback escape hatch is
-absolute within that window.
-
-## Forensic playbook
-
-### "What was the last thing pushed and did it succeed?"
+`cfg controller upgrade history` reads the local cutover JSONL file, not a
+fleet-wide or cluster-wide history API. It does not report supported restart
+upgrades. A missing/empty history file is not evidence that no restart occurred.
 
 ```bash
 cfg controller upgrade history --limit 5
+cfg controller upgrade history --json
 ```
 
-The newest event tells you the current state of the orchestrator.
-`upgrade.committed` ⇒ healthy upgrade; `upgrade.smoketest_failed` ⇒
-attempt that aborted; `upgrade.rolled_back` ⇒ operator regretted a
-recent commit.
+Select a non-default file with `--history`. Defaults are
+`/var/lib/cfgms/cutover.history.jsonl` on Linux and
+`%ProgramData%\cfgms\cutover.history.jsonl` on Windows.
 
-### "Has anyone else upgraded today?"
+The experimental orchestrator emits staged, smoketest-passed/failed, committed,
+rolled-back, quarantine-expired and aborted transitions. A smoketest checks
+HTTPS `/api/v1/ready`, including durable storage. Records include `event_type`,
+`timestamp`, binary paths and, where applicable, `reason` and `duration_ms`.
+The event schema also defines validation/pruning event types; a defined type
+alone does not prove a production producer or scheduled task is wired.
 
-```bash
-cfg controller upgrade history --limit 100 --json | jq '[.[] | select(.timestamp > "2026-06-07T00:00:00Z")] | length'
-```
-
-### "Why did the last smoketest fail?"
-
-```bash
-cfg controller upgrade history --json | jq '.[] | select(.event_type=="upgrade.smoketest_failed") | {ts: .timestamp, reason: .reason, duration_ms: .duration_ms}'
-```
-
-### "I rolled back too late — how do I find the binary?"
-
-After `upgrade.quarantine_expired` fires for a binary, it may still be
-on disk if retention caps haven't been exceeded. Check the controller
-binary archive directory (configured per-deployment) for files whose
-`mod_time` matches the rolled-back binary's `binary_path` from the
-`upgrade.committed` event.
-
-If `upgrade.pruned` was emitted for that path, the binary is gone — pull
-from your backup or rebuild from source.
+The controller cutover retention helper is not called by a production retention
+scheduler. Do not schedule a nonexistent prune CLI or apply its quarantine
+promises to the supported restart path. Follow the selected procedure's backup
+and rollback instructions.
 
 ## Dispatching and rolling back steward upgrades from the console
 
@@ -139,63 +75,34 @@ rollout*, instead of calling `POST /api/v1/rollout` directly:
    Confirm; **Cancel** abandons it). This calls
    `POST /api/v1/rollout/{rollout_id}/halt` and needs no passkey tap.
 
-## Steward-side upgrade lifecycle
+## Steward launcher state and retention
 
-The launcher (`cfgms-steward-launcher`) implements the same upgrade
-lifecycle observability on the steward side as the controller has for
-its own binary. After each supervised restart, the launcher:
-
-1. **Writes a flag file** in `--cert-store-dir` that the steward process
-   reads on reconnect and converts to a `steward.upgrade.committed` or
-   `steward.upgrade.rolled_back` event reported to the controller.
-2. **Prunes old version directories** under `<Root>/versions/` using the
-   same retention algorithm as the controller.
-3. **Tracks consecutive startup-window failures** in `state.json` so
-   operators can see a persistent failure count via `cfgms-steward-launcher status`.
-
-### Steward-side retention defaults
-
-| Setting | Default | Flag |
-|---|---|---|
-| Quarantine window | 1 h | `--quarantine-window` |
-| Max old versions | 3 | `--max-versions` |
-| Max total bytes | 500 MB | `--max-bytes` |
-
-These match the controller defaults. Override per-steward by passing the
-corresponding flags when registering the launcher as an OS service.
-
-Pruning runs after each **clean** startup (child stayed alive past its
-`--startup-window` and exited with code 0). The active version directory is
-never pruned regardless of policy.
-
-### Reading the ConsecutiveFailures counter
+`cfgms-steward-launcher` supervises the steward and records startup failures in
+its local `state.json`. Inspect an installed launcher's configured root:
 
 ```bash
 cfgms-steward-launcher status --root /opt/cfgms
 ```
 
-```
-Root:                /opt/cfgms
-Current:             v1.4.2
-Previous:            v1.4.1
-ConsecutiveFailures: 0
-```
+`ConsecutiveFailures` increments on startup-window failures or non-zero exits,
+and resets after a clean startup. Repeated failures require local service/log
+inspection; a counter alone does not identify the underlying defect.
 
-`ConsecutiveFailures` increments on every startup-window failure or non-zero
-exit, and resets to 0 on the first clean startup. A non-zero value after the
-launcher stabilises means operator intervention is needed: the rollback budget
-may be exhausted, or all installed versions are broken.
+After a clean startup, the launcher prunes old version directories. The active
+version and versions younger than the quarantine window are retained. Older
+versions are subject to both count and byte limits:
 
-## What's NOT yet automated (follow-up work)
+| Flag | Default |
+|---|---|
+| `--quarantine-window` | `1h` |
+| `--max-versions` | `3` old versions |
+| `--max-bytes` | `524288000` bytes (500 MiB) |
 
-- **Scheduled retention sweep**: the controller-side Prune helper exists but no
-  periodic task wires it up. Operators should call it from cron /
-  systemd-timer / Task Scheduler until a built-in scheduler lands.
-- **Steward upgrade history view**: `EventStewardUpgradeCommitted` /
-  `EventStewardUpgradeRolledBack` events reach the controller's
-  `handleEventFromProvider` default case and are not yet stored in
-  `UpgradeStore`. A future story must wire that subscription and expose
-  a REST endpoint before per-steward upgrade history is surfaced in
-  `cfg controller upgrade history`.
+This is launcher-local pruning, not a controller scheduled sweep. Configure the
+flags on the installed launcher service when overriding these defaults.
 
-These are tracked as follow-up tasks.
+The launcher writes flag files that the steward publishes on reconnect as
+`steward.upgrade.committed` or `steward.upgrade.rolled_back`. The controller's
+current event handler does not persist these event types into upgrade history.
+Do not equate their publication with a completed end-to-end event history view;
+the durable upgrade dispatch/status API is a separate mechanism.

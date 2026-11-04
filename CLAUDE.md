@@ -138,35 +138,16 @@ Format: `<scope>: <what changed> (Issue #XXX)`. See [commit standards](docs/deve
 
 ## Required CI Checks
 
-All must pass before merge to `develop`. Verify this list against the ruleset
-rather than trusting it — `gh api repos/cfg-is/cfgms/rulesets/11647684 --jq
-'.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'`.
+Read current branch rules and workflow definitions rather than maintaining a
+second status-check list here. The required contexts can be inspected with:
 
-A green check does not always mean that scan ran. Most of these run for real on
-only **one** side of the PR / merge-queue split and post a stub context on the
-other, so the same change is not scanned twice — read the "Real run" column.
+```bash
+gh api repos/cfg-is/cfgms/rulesets/11647684 --jq '.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'
+```
 
-| Check | Real run | What it validates |
-|-------|----------|-------------------|
-| `unit-tests` | PR (queue stubbed) | Core functionality |
-| `integration-tests` | merge queue (PR stubbed) | The `test/integration` root and `ha` packages, `-short` — the only ones no other job runs |
-| `Build Gate` | both — PR: compile-check + native Windows/macOS/e2e legs; queue: two Linux unit shards on the merge commit + Postgres-backed tests | Cross-platform compilation + native tests |
-| `Controller Integration Tests (Linux)` | merge queue (PR stubbed) | Controller integration suite |
-| `security-deployment-gate` | merge queue (PR stubbed) | Critical vulnerability blocking |
-| `trivy-scan` | merge queue (PR stubbed) | Filesystem vulnerabilities, secrets, misconfiguration |
-| `CodeQL` | both (stubbed on non-Go PRs) | Semantic analysis; reports alerts on changed lines only |
-| `zizmor` | both (no stub) | Workflow security — action pins, cache poisoning, injection |
-| `frontend-checks` | both (no stub) | `web/` typecheck, lint, and tests |
-| `CLA signature check` | both (no stub) | Contributor licence agreement |
-| `fleet-e2e-tests` | merge queue (PR stubbed) | Docker fleet suite: controller + stewards end to end |
-
-The workflow files are authoritative for trigger and job topology:
-[PR platform checks](.github/workflows/cross-platform-build-pr.yml),
-[queue platform checks](.github/workflows/cross-platform-build.yml),
-[unit/integration checks](.github/workflows/test-suite.yml), and
-[documentation checks](.github/workflows/documentation.yml).
-Required contexts come from the current ruleset, not this snapshot. A workflow
-failure can require correction even when its context is not ruleset-required.
+A green context can be a PR/merge-queue stub. Inspect the real run, revision,
+permissions and skip conditions before calling a gate passed. The current
+workflow configuration and CI verification helper own that execution contract.
 
 ### Stub exclusivity
 
@@ -214,50 +195,23 @@ Consult these before implementing steward or controller behavior changes:
 
 ### Storage
 
-- **Pluggable design** — all components use `pkg/storage/interfaces`
-- **Default:** `flatfile` provider (`data/cfgms-config`); `sqlite` and `database` are the alternatives. Git is not a storage backend — the `git` provider was removed (`cfg storage migrate --from git --to flatfile` migrates an existing deployment). Secrets at rest are SOPS-encrypted.
-- **Write-through caching** pattern (memory → durable storage)
-- **No memory-only storage** — features requiring durability use durable storage everywhere
+Read `docs/architecture/storage-architecture.md` and `pkg/storage/interfaces/README.md`.
+Business code imports provider interfaces; boot settings follow the canonical
+config/schema. Git is a sync source, not the current backend.
 
 ### Certificate Management
 
-- `pkg/cert.Manager` handles all certificate operations
-- First-run initialization (`controller --init --config <path>`) creates CA and
-  bootstrap credentials; normal startup must not silently regenerate identity
-- Tests use auto-generated certs (never static test certs)
-- mTLS required for all internal gRPC-over-QUIC communication
+Read `docs/security/certificate-architecture.md` and relevant accepted ADRs.
+Use the central certificate manager; preserve distinct TLS, client identity and
+execution-signing purposes and their assurance/rotation contracts.
 
 ### Central Provider System
 
-**Terminology:** "Provider" and "plugin" refer to the pluggable backend pattern below. Modules are a different concept — see [Modules](#modules).
-
-**Before implementing new functionality, check if it belongs in a central provider.**
-
-**Rules:**
-1. If functionality is needed by >1 feature, it MUST use or become a central provider
-2. New providers MUST be pluggable by default (`interfaces/` subdirectory)
-3. Extend existing providers rather than creating overlapping code
-4. `make check-architecture` enforces this automatically
-
-**Why pluggable by default:** Multi-tenant SaaS with different backend needs, deployment-scale flexibility, 50k+ steward scale, cloud vs on-prem flexibility, testing without mocks (use test implementations). Cheap to do now, expensive to retrofit.
-
-**Pluggable Providers:**
-
-| Package | Purpose |
-|---------|---------|
-| `pkg/storage` | Data persistence (flatfile, sqlite, database) |
-| `pkg/logging` | Structured logging (file, timescale) |
-| `pkg/secrets` | Secret storage with encryption (SOPS) |
-| `pkg/notification` | Outbound notifications (SMTP, TLS mandatory) |
-| `pkg/directory` | Directory services (M365, AD) |
-| `pkg/controlplane` | Control plane communication (gRPC) |
-| `pkg/dataplane` | Data plane communication (gRPC) |
-
-**Direct Providers:** `pkg/cert`, `pkg/telemetry`, `pkg/cache`, `pkg/session`, `pkg/registration`, `pkg/monitoring`, `pkg/maintenance`, `pkg/security`, `pkg/ha`
-
-**Utilities (not providers):** `pkg/config`, `pkg/testing`, `pkg/testutil`, `pkg/version`, `pkg/audit`
-
-See `pkg/README.md` for the full decision tree.
+Read `pkg/README.md` and `docs/architecture/provider-architecture.md` before
+adding cross-cutting behavior. Extend existing providers, import their interfaces
+and avoid introducing ad-hoc TLS, storage, logging, secrets or cache systems.
+The source tree owns the current provider set; do not infer `pkg/monitoring`
+exists from an old provider list.
 
 ### Architecture Checker: Raw Leader Primitive Rule (Story #3391 / Epic #3386)
 
@@ -364,30 +318,10 @@ docs/          # Documentation
 
 ### Code Navigation (grep + Read)
 
-Navigate with grep, Glob and Read; never trust one weak query for "what's been done" (this is measured — see [code-navigation-tooling](docs/development/code-navigation-tooling.md)). grep's failure mode is false confidence about whether code is real, so pair every search with a read:
-
-- **Where is it defined → grep the definition.** `grep -rnE 'func (\([^)]*\) )?Name\b' --include='*.go' .` for functions and methods, `grep -rn 'type Name ' --include='*.go' .` for types. A cited symbol that grep cannot find does not exist where the citation says.
-- **Every caller / usage / import → grep, exhaustively.** `grep -rn '\bName(' --include='*.go' .`; reconcile interface implementations with a `var _ Iface = (*T)(nil)` grep and filter test doubles.
-- **grep sees every build configuration.** It reads text regardless of `GOOS`, so `//go:build windows` code (the hyperv `*_windows.go` cluster/monitor/PS-dispatch surface especially) is visible from a Linux container. Tools built on `go/packages` resolve one `GOOS` at a time; grep is authoritative for build-tagged packages.
-- **"Real or a stub?" → read the body** + grep stub markers (`ErrNotImplemented`, `panic("TODO")`, bare `return nil`) + run the real gate (`go vet`, `make check-architecture`, the tests). A symbol existing is not evidence it's implemented; not having read it is not evidence it's a stub. When an authoritative gate exists, run it instead of inferring.
-- **Calibrate confidence to verification depth.** One grep keyword → *low* confidence until cross-verified; "read the body and two independent methods agree" → *high*.
-
-**What a wide read actually costs.** Every tool result stays in context and is re-billed
-on every later call in the session, so a read's price is its size × how many calls
-follow it — not a one-off. Two patterns dominate measured spend, and both have a
-cheap alternative:
-
-- **Re-reading slices of one large file.** Reading a file, then re-reading it around
-  a different line, repeatedly, is the single largest context cost measured (one
-  session read `client_transport.go` 63 times). Find the symbol's line once with
-  `grep -n`, then Read just that region with `offset`/`limit` instead of pulling the
-  file again.
-- **Bare `git diff` on a wide change.** The whole diff lands in context and stays
-  there. Use `git diff --stat` to see the shape, then `git diff -- <path>` for the
-  file being worked.
-
-The same reasoning covers any large command output: prefer the narrow query, and
-redirect a long run to a file and grep it rather than inlining the whole thing.
+Read `docs/development/code-navigation-tooling.md`. Verify definitions, bodies,
+build-tagged files and all callers before claiming a capability is wired or
+citing a symbol in a specification. Bound large reads/diffs to the task and
+report confidence according to actual verification depth.
 
 ## Desired State Development (DSD)
 
@@ -426,8 +360,6 @@ All CFGMS code is AGPL-3.0. A commercial embedding license is available via priv
 
 ## Dependencies
 
-- `github.com/spf13/cobra` — CLI framework
-- `github.com/stretchr/testify` — Testing utilities
-- `github.com/quic-go/quic-go` — QUIC transport layer
-- `google.golang.org/grpc` — gRPC framework
-- `google.golang.org/protobuf` — Protocol buffers
+`go.mod` and `web/package.json` own dependency/toolchain versions; consult them
+rather than a copied dependency catalog. Follow the existing dependency-change
+and pin-verification workflow when changing either.

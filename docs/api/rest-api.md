@@ -10,30 +10,36 @@ By default, the REST API listens on port 9080. In production the server uses TLS
 https://controller.example.com:9080/api/v1
 ```
 
-In development (no cert manager, or self-signed cert), use `curl -k` to skip certificate verification:
+Use the configured CA and a certificate-covered hostname, including in development:
 
 ```bash
-curl -k https://localhost:9080/api/v1/health
+curl --fail --cacert /path/to/controller-ca.crt https://localhost:9080/api/v1/health
 ```
 
 Override the listen address with `CFGMS_HTTP_LISTEN_ADDR` (default: `0.0.0.0:9080`).
 
 ## Authentication
 
-All API endpoints (except `/api/v1/health`, `/api/v1/register`, and `/api/v1/webhooks/git-push`) require authentication via API key. The `cfg` CLI authenticates using an mTLS admin bundle (see [mTLS Authentication](#mtls-authentication-admin-bundle) below). Raw API keys are supported for machine-to-machine use cases.
+Protected routes use the configured authenticated principal: browser session,
+operator/mTLS client or scoped machine credential as appropriate. Public health,
+enrollment, refresh and download endpoints have explicit route policies; “public”
+does not remove their token/proof, ceremony, validation or rate-limit requirements.
+See [security architecture](../security/architecture.md) and the current route
+registrars/security classification tests. Credential possession alone does not
+satisfy a route's tenant crossing, assurance or operator-proof requirement.
 
 API keys can be provided in two ways:
 
 ### X-API-Key Header
 
 ```bash
-curl -k -H "X-API-Key: your-api-key" https://localhost:9080/api/v1/stewards
+curl --cacert /path/to/controller-ca.crt -H "X-API-Key: your-api-key" https://localhost:9080/api/v1/stewards
 ```
 
 ### Authorization Bearer Token
 
 ```bash
-curl -k -H "Authorization: Bearer your-api-key" https://localhost:9080/api/v1/stewards
+curl --cacert /path/to/controller-ca.crt -H "Authorization: Bearer your-api-key" https://localhost:9080/api/v1/stewards
 ```
 
 ### Permission Scopes
@@ -83,18 +89,16 @@ Where an operation needs a tenant the request does not name, it uses the caller'
 
 ## Response Format
 
-All API responses follow a standard format:
+Most JSON handlers use the wrappers below. Binary/download, WebSocket and some narrow lookup routes have their own documented response shape; do not assume every response is wrapped.
 
 ### Success Response
 
 ```json
 {
-  "data": { ... },
+  "data": {},
   "timestamp": "2025-01-12T10:30:00Z"
 }
 ```
-
-Each item carries the steward's operator-assigned `tags` (omitted when the steward has none), read in one batch from the tag store for the rows returned, so the list needs no per-steward `/tags` request. Tags follow the same tenant scope as the rows themselves.
 
 ### Error Response
 
@@ -111,6 +115,13 @@ Each item carries the steward's operator-assigned `tags` (omitted when the stewa
 
 ## Endpoints
 
+This is an integration/behavior guide, not a second exhaustive schema catalog.
+The [OpenAPI subset](openapi.yaml) owns its documented serialized field shapes;
+registered handlers and their tests own availability, validation and authorization.
+Operations not included in that curated subset retain their usage detail below.
+Neither a documented route nor a handler helper proves optional service wiring.
+
+
 ### Health Check
 
 #### GET /api/v1/health
@@ -122,18 +133,10 @@ carries the overall `status` only (`healthy` or `degraded`, the latter with HTTP
 
 **Authentication:** None required
 
-**Response:**
-
-```json
-{
-  "data": {
-    "status": "healthy"
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
-
 ### Steward Self-Registration
+
+
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### POST /api/v1/register
 
@@ -199,6 +202,8 @@ All steward management endpoints require an API key. The `cfg steward list/statu
 
 #### GET /api/v1/stewards
 
+Each item carries the steward's operator-assigned `tags` (omitted when the steward has none), read in one batch from the tag store for the rows returned, so the list needs no per-steward `/tags` request. Tags follow the same tenant scope as the rows themselves.
+
 List registered stewards. The returned set depends on the session's tenant scope:
 
 - **Root-scoped session** (web account with `root_scope: true`, or mTLS admin bundle with empty tenant): a session subject to the tenant-crossing boundary (ADR-025) returns the root tenant's own stewards plus the stewards of every tenant covered by an active grant or break-glass crossing; stewards of other tenants are silently omitted, and `total` under pagination counts only the returned set. This applies to the `?q=` selector and filter parameters too. A root session not subject to the boundary (an unbound bootstrap certificate) returns stewards from all tenants.
@@ -224,40 +229,8 @@ By default, **operator-hidden** and **quarantined** stewards are excluded from t
 | `include_quarantined` | `false` | Set `true` to include quarantined stewards |
 | `include_deregistered` | `false` | Set `true` to include deregistered stewards |
 
-**Response:**
 
-```json
-{
-  "data": [
-    {
-      "id": "steward-001",
-      "status": "connected",
-      "last_seen": "2025-01-12T10:29:30Z",
-      "clock_offset_ms": -12000,
-      "version": "0.2.0",
-      "hidden": false,
-      "tags": ["prod", "web"],
-      "metrics": {
-        "cpu_usage": "45%",
-        "memory_usage": "512MB"
-      },
-      "dna": {
-        "hostname": "server-001",
-        "os": "linux",
-        "architecture": "x86_64",
-        "attributes": {
-          "hostname": "server-001",
-          "os": "linux",
-          "architecture": "x86_64",
-          "kernel_version": "5.4.0"
-        },
-        "collected_at": "2025-01-12T10:25:00Z"
-      }
-    }
-  ],
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### GET /api/v1/stewards/{id}
 
@@ -270,39 +243,8 @@ Get information about a specific steward, including connection state and active 
 
 - `id` (path): Steward ID
 
-**Response:**
 
-```json
-{
-  "data": {
-    "id": "steward-001",
-    "status": "connected",
-    "last_seen": "2025-01-12T10:29:30Z",
-    "clock_offset_ms": -12000,
-    "key_protection_level": "tpm",
-    "key_algorithm": "ecdsa-p256",
-    "version": "0.2.0",
-    "connection_state": "active",
-    "active_sessions": 2,
-    "metrics": {
-      "cpu_usage": "45%",
-      "memory_usage": "512MB"
-    },
-    "dna": {
-      "hostname": "server-001",
-      "os": "linux",
-      "architecture": "x86_64",
-      "attributes": {
-        "hostname": "server-001",
-        "os": "linux",
-        "architecture": "x86_64"
-      },
-      "collected_at": "2025-01-12T10:25:00Z"
-    }
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### GET /api/v1/stewards/{id}/dna
 
@@ -315,26 +257,8 @@ Get DNA information for a specific steward.
 
 - `id` (path): Steward ID
 
-**Response:**
 
-```json
-{
-  "data": {
-    "hostname": "server-001",
-    "os": "linux",
-    "architecture": "x86_64",
-    "attributes": {
-      "hostname": "server-001",
-      "os": "linux",
-      "architecture": "x86_64",
-      "kernel_version": "5.4.0",
-      "memory_total": "8GB"
-    },
-    "collected_at": "2025-01-12T10:25:00Z"
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### POST /api/v1/stewards/{id}/auth/refresh
 
@@ -522,35 +446,8 @@ tenants. Root/unscoped callers may read any steward's configuration.
 - `id` (path): Steward ID
 - `modules` (query, optional): Comma-separated list of module names to filter
 
-**Response:**
 
-```json
-{
-  "data": {
-    "steward_id": "steward-001",
-    "version": "1.0.0",
-    "config": {
-      "directory": {
-        "/etc/app": {
-          "owner": "app",
-          "group": "app",
-          "mode": "755"
-        }
-      },
-      "file": {
-        "/etc/app/config.yml": {
-          "content": "key: value",
-          "owner": "app",
-          "group": "app",
-          "mode": "644"
-        }
-      }
-    },
-    "updated_at": "2025-01-12T10:30:00Z"
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### PUT /api/v1/stewards/{id}/config
 
@@ -610,38 +507,8 @@ steward.
 
 - `id` (path): Steward ID
 
-**Request Body:**
 
-```json
-{
-  "config": {
-    "directory": {
-      "/etc/app": {
-        "owner": "app",
-        "group": "app",
-        "mode": "755"
-      }
-    }
-  },
-  "version": "1.0.0"
-}
-```
-
-**Response:**
-
-```json
-{
-  "data": {
-    "valid": true,
-    "errors": [],
-    "metadata": {
-      "validation_time": "50ms",
-      "modules_validated": "2"
-    }
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### POST /api/v1/config/push
 
@@ -896,11 +763,10 @@ re-implements canonicalization. The nonce, expiry and targets come from
 **Required permission:** `steward:service-control` for `target_kind` `service`,
 `steward:process-control` for `process`
 
-```json
-{ "target_kind": "process", "target_name": "4242", "action": "end", "image": "notepad.exe" }
-```
-
 Response: `{"data": {"content": "<base64 canonical action content>", "shell": "steward-action"}}`
+
+
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### POST /api/v1/stewards/{id}/services/{name}/actions
 #### POST /api/v1/stewards/{id}/processes/{pid}/actions
@@ -1017,28 +883,11 @@ certificate, unfiltered.
 
 - `steward_id` (query, optional): Filter certificates by steward ID
 
-**Response:**
-
-```json
-{
-  "data": [
-    {
-      "serial_number": "123456789",
-      "common_name": "steward-001",
-      "steward_id": "steward-001",
-      "tenant_id": "acme-corp",
-      "is_valid": true,
-      "issued_at": "2025-01-12T10:30:00Z",
-      "expires_at": "2026-01-12T10:30:00Z",
-      "days_until_expiration": 365,
-      "needs_renewal": false
-    }
-  ],
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
 
 `tenant_id` is the tenant of the steward that owns the certificate; it is omitted when the certificate has no owning steward or the steward has no fleet record. `issued_at` is the time the certificate was issued.
+
+
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### POST /api/v1/certificates/provision
 
@@ -1072,31 +921,8 @@ refused with `403 FORBIDDEN`, so this endpoint never mints a controller peer ide
 is refused with `400 BAD_REQUEST` — the requested period is never silently clamped
 down to the maximum.
 
-**Request Body:**
 
-```json
-{
-  "steward_id": "steward-001",
-  "common_name": "steward-001.example.com",
-  "organization": "Example Org",
-  "validity_days": 365
-}
-```
-
-**Response:**
-
-```json
-{
-  "data": {
-    "certificate_pem": "-----BEGIN CERTIFICATE-----\n...",
-    "private_key_pem": "-----BEGIN PRIVATE KEY-----\n...",
-    "ca_certificate_pem": "-----BEGIN CERTIFICATE-----\n...",
-    "serial_number": "123456789",
-    "expires_at": "2026-01-12T10:30:00Z"
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### POST /api/v1/certificates/signing/rotate
 
@@ -1397,22 +1223,8 @@ List available permissions.
 
 - `resource_type` (query, optional): Filter permissions by resource type
 
-**Response:**
 
-```json
-{
-  "data": [
-    {
-      "id": "steward.register",
-      "name": "Register Steward",
-      "description": "Allow steward registration",
-      "resource_type": "steward",
-      "actions": ["create", "read"]
-    }
-  ],
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### GET /api/v1/rbac/permissions/{id}
 
@@ -1436,24 +1248,8 @@ List roles: the authenticated caller's own tenant roles plus system roles.
 parameter is ignored — it cannot be used to read another tenant's roles. Requests
 without a session tenant are rejected with `401`.
 
-**Response:**
 
-```json
-{
-  "data": [
-    {
-      "id": "admin",
-      "name": "Administrator",
-      "description": "Full administrative access",
-      "permissions": ["steward.register", "config.manage"],
-      "tenant_id": "default",
-      "created_at": "2025-01-01T00:00:00Z",
-      "updated_at": "2025-01-01T00:00:00Z"
-    }
-  ],
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### POST /api/v1/rbac/roles
 
@@ -1470,32 +1266,8 @@ when present it must equal the session tenant, otherwise the request is rejected
 **Validation:** `name` is required, at most 128 characters; `description` at most 512
 characters; neither may contain control characters.
 
-**Request Body:**
 
-```json
-{
-  "name": "Config Manager",
-  "description": "Manage configurations",
-  "permissions": ["config.read", "config.write"]
-}
-```
-
-**Response:**
-
-```json
-{
-  "data": {
-    "id": "config-manager",
-    "name": "Config Manager",
-    "description": "Manage configurations",
-    "permissions": ["config.read", "config.write"],
-    "tenant_id": "default",
-    "created_at": "2025-01-12T10:30:00Z",
-    "updated_at": "2025-01-12T10:30:00Z"
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### GET /api/v1/rbac/roles/{id}
 
@@ -1562,23 +1334,8 @@ returned — an exact tenant match, not a subtree (unlike most list endpoints in
 this document). A request with no resolved tenant is rejected with
 `401 AUTHENTICATION_REQUIRED`.
 
-**Response:**
 
-```json
-{
-  "data": [
-    {
-      "id": "key-001",
-      "name": "Default Admin Key",
-      "permissions": ["stewards:read", "stewards:write"],
-      "created_at": "2025-01-12T10:00:00Z",
-      "expires_at": null,
-      "tenant_id": "default"
-    }
-  ],
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### POST /api/v1/api-keys
 
@@ -1595,35 +1352,10 @@ boundary (see [Tenant Scope](#tenant-scope)). A caller may also only
 grant a `permissions` entry it itself holds — a caller cannot mint a key with a
 permission it does not have, independent of the tenant check.
 
-**Request Body:**
-
-```json
-{
-  "name": "Monitoring Key",
-  "permissions": ["stewards:read", "health:read"],
-  "expires_at": "2026-01-12T10:30:00Z",
-  "tenant_id": "default"
-}
-```
-
-**Response:**
-
-```json
-{
-  "data": {
-    "id": "key-002",
-    "name": "Monitoring Key",
-    "permissions": ["stewards:read", "health:read"],
-    "created_at": "2025-01-12T10:30:00Z",
-    "expires_at": "2026-01-12T10:30:00Z",
-    "tenant_id": "default",
-    "key": "base64-encoded-api-key-here"
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
-
 **Note:** The actual API key is only returned upon creation. Store it securely as it cannot be retrieved later.
+
+
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### GET /api/v1/api-keys/{id}
 
@@ -1836,19 +1568,6 @@ List devices quarantined at registration and awaiting approval. Approved, denied
 
 Each item:
 
-```json
-{
-  "pending_id": "pending-1730000000000000000",
-  "steward_id": "stwd-abc123",
-  "tenant_id": "acme-corp",
-  "source_ip": "10.0.0.5",
-  "hostname": "web-07.acme.lan",
-  "key_fingerprint": "9c4a1f0e77b2d3a85c6e4f1029ab38d7e5c1f6a0b49d82e3c7f15a60d4b2e1ff",
-  "clone_of": "stwd-original",
-  "registered_at": "2026-07-25T10:00:00Z"
-}
-```
-
 - `hostname` — reported by the device itself and not authenticated. It is sanitised on write (control characters and `<>&"'` and backtick removed, capped at 253 characters). Treat it as a hint and render it as text.
 - `key_fingerprint` — lowercase hex SHA-256 of the public key in the device's certificate signing request (DER SubjectPublicKeyInfo), computed by the controller. This is the value to verify against the device.
 - Both fields are omitted for entries created before they were recorded.
@@ -1858,6 +1577,9 @@ Each item:
 
 CFGMS provides monitoring capabilities through dedicated endpoints.
 
+
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
+
 #### GET /api/v1/monitoring/health
 
 System health overview including service status and resource utilisation.
@@ -1865,28 +1587,8 @@ System health overview including service status and resource utilisation.
 **Authentication:** Required  
 **Required permission:** `monitoring:read-health`
 
-**Response:**
 
-```json
-{
-  "data": {
-    "status": "healthy",
-    "timestamp": "2025-01-12T10:30:00Z",
-    "services": {
-      "controller": "healthy",
-      "configuration_service": "healthy",
-      "monitoring_service": "healthy"
-    },
-    "resource_usage": {
-      "cpu_percent": 25.5,
-      "memory_bytes": 134217728,
-      "goroutines": 156
-    },
-    "uptime_seconds": 86400
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### GET /api/v1/monitoring/metrics
 
@@ -1897,31 +1599,8 @@ System performance metrics.
 **Authentication:** Required  
 **Required permission:** `monitoring:read-metrics`
 
-**Response:**
 
-```json
-{
-  "data": {
-    "timestamp": "2025-01-12T10:30:00Z",
-    "system": {
-      "cpu_percent": 25.5,
-      "memory_bytes": 134217728,
-      "disk_usage_bytes": 1073741824,
-      "goroutines": 156,
-      "gc_cycles": 42,
-      "heap_objects": 125000
-    },
-    "application": {
-      "stewards_connected": 45,
-      "configurations_served": 150,
-      "api_requests_total": 1250,
-      "grpc_requests_total": 3500,
-      "errors_total": 5
-    }
-  },
-  "timestamp": "2025-01-12T10:30:00Z"
-}
-```
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### GET /api/v1/monitoring/config
 
@@ -2170,12 +1849,8 @@ and disabled accounts. `tech_count` counts the MSP's accounts across its whole s
 The list calls the steward count `device_count`; the billing reports call the same fact
 `endpoint_count`.
 
-```json
-{"success": true, "data": [
-  {"id": "root", "name": "root", "status": "active", "device_count": 0, "boundary": false, "accessible": true},
-  {"id": "msp-a", "name": "msp-a", "parent_id": "root", "status": "active", "boundary": true, "accessible": false, "tech_count": 4, "device_count": 214, "client_count": 12}
-]}
-```
+
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### POST /api/v1/tenants/{id}/config-source/test
 
@@ -2451,12 +2126,6 @@ All three endpoints require the `notification:configure` permission, a **root-sc
 
 Returns the non-secret settings. The password is never returned.
 
-```json
-{"data": {"provider": "smtp", "host": "smtp.acme-corp.example", "port": 465, "from": "cfgms@acme-corp.example",
-          "username": "mailer", "tls_mode": "implicit_tls", "password_secret_key": "notifications.email.password",
-          "configured": true, "credential_present": false}}
-```
-
 `configured` is true when `host`, `from` and `password_secret_key` are set; `credential_present` is true when a
 password is stored.
 
@@ -2474,16 +2143,15 @@ Sends a fixed test message to the configured `from` address. The request body mu
 the message content are fixed server-side, and any field in the body (`to`, `subject`, `body`, ...) is rejected
 with `400 Bad Request`.
 
-```json
-{"data": {"delivered": true, "recipients": [{"address": "cfgms@acme-corp.example", "accepted": true}]}}
-```
-
 On failure `delivered` is `false` and `failure_reason` carries a sanitized reason that never contains the password.
 
 - `400 Bad Request`: the body names any field (for example `to`, `subject` or `body`), or is not valid JSON.
 - `409 Conflict` (`EMAIL_NOT_CONFIGURED`): email is not configured or no credential has been stored.
 
 ### Webhooks
+
+
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### POST /api/v1/webhooks/git-push
 
@@ -2711,34 +2379,9 @@ List workflow definitions for the calling tenant.
 
 **Authentication:** Required
 
-**Response:**
 
 The `workflows` key is always a JSON array — never `null`. When the tenant has no
 workflows, the response is `{"workflows": [], "count": 0}`.
-
-```json
-{
-  "workflows": [
-    {
-      "name": "patch-linux-fleet",
-      "description": "Apply OS patches to Linux stewards",
-      "version": "1.0.0",
-      "steps": [
-        { "name": "run-patch", "type": "task", "module": "patch" }
-      ],
-      "semantic_version": { "major": 1, "minor": 0, "patch": 0 },
-      "trigger_count": 2,
-      "enabled_trigger_count": 1,
-      "last_execution": {
-        "id": "exec_1791406763145803990_7",
-        "status": "completed",
-        "start_time": "2026-10-07T20:59:23Z"
-      }
-    }
-  ],
-  "count": 1
-}
-```
 
 Each item also carries a summary, computed from one trigger query and one
 execution scan per request and scoped to the calling tenant:
@@ -2749,6 +2392,9 @@ execution scan per request and scoped to the calling tenant:
   or `null` when the workflow has never run.
 
 A workflow with no triggers or runs returns `0`, `0` and `null`.
+
+
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### POST /api/v1/workflows
 
@@ -2968,20 +2614,14 @@ Validate a workflow definition without saving or running it. The body has the sa
 
 **Response:** `200 OK`
 
-```json
-{
-  "valid": false,
-  "issues": [
-    {"path": "steps[1].config", "step_name": "install", "message": "config is required for task steps"}
-  ]
-}
-```
-
 An approval step nested inside a parallel, loop, try, switch or conditional block is reported at its own path with "approval steps must be top-level". A valid definition returns `{"valid": true, "issues": []}`. A body that is not valid JSON returns `400 Bad Request`.
 
 ### Parse and Render Workflow YAML
 
 Both endpoints use the server parser as the single authority for the YAML format, require `workflow:read`, and store and run nothing. Request bodies are capped at 10 MB (`413 Request Entity Too Large` above that).
+
+
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### POST /api/v1/workflows/parse-yaml
 
@@ -2989,17 +2629,10 @@ The body is a YAML workflow document (`Content-Type: application/yaml` or `text/
 
 **Response:** `200 OK`
 
-```json
-{
-  "workflow": {"name": "onboard", "steps": []},
-  "valid": false,
-  "issues": [
-    {"path": "steps[1].config", "step_name": "install", "message": "config is required for task steps"}
-  ]
-}
-```
-
 A document that is not parseable YAML, or has an unparseable duration, returns `400 Bad Request` with the generic message `invalid workflow YAML`; the document is never echoed back.
+
+
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### POST /api/v1/workflows/render-yaml
 
@@ -3015,26 +2648,8 @@ List the caller's tenant's pending approvals, oldest first. Requires `workflow:r
 
 **Response:** `200 OK`
 
-```json
-{
-  "approvals": [
-    {
-      "approval_id": "appr-exec-123-gate",
-      "workflow_name": "deploy-prod",
-      "execution_id": "exec-123",
-      "step_id": "gate",
-      "step_name": "gate",
-      "message": "ship it?",
-      "approver_permission": "workflow:approve",
-      "requested_by": "alice",
-      "status": "pending",
-      "requested_at": "2026-07-07T12:00:00Z",
-      "expires_at": "2026-07-07T13:00:00Z"
-    }
-  ],
-  "total": 1
-}
-```
+
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### POST /api/v1/workflows/approvals/{approval_id}/decision
 
@@ -3042,28 +2657,10 @@ Approve or reject a pending approval. Approving resumes the suspended run; rejec
 
 **Authentication:** Required. The `workflow:approve` permission requires strong assurance: a caller below it receives `401` with a `WWW-Authenticate: CFGMS-StepUp` challenge. If the approval step names an `approver_permission`, the caller must also hold that permission.
 
-**Request:**
-
-```json
-{
-  "decision": "approve",
-  "justification": "change window confirmed"
-}
-```
 
 `decision` is `approve` or `reject`.
 
 **Response:** `200 OK`
-
-```json
-{
-  "approval_id": "appr-exec-123-gate",
-  "decision": "approve",
-  "execution_id": "exec-123",
-  "resumed": true,
-  "execution_status": "running"
-}
-```
 
 `resumed` is `false` when the decision was recorded but the resume could not start immediately; engine recovery resumes it.
 
@@ -3100,6 +2697,9 @@ parameter narrows further within that set — an exact match, not a path prefix
 `.../executions`) treats a trigger outside the caller's tenant identically to
 an unknown ID and returns `404`. A request with no resolved tenant at all is
 rejected outright on create/list; per-ID operations simply match no trigger.
+
+
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### GET /api/v1/triggers/health
 
@@ -4014,13 +3614,13 @@ the no-op — is decided entirely at compile time, before the binary exists.
 2. **Check health (dev mode — self-signed cert):**
 
    ```bash
-   curl -k https://localhost:9080/api/v1/health
+   curl --cacert /path/to/controller-ca.crt https://localhost:9080/api/v1/health
    ```
 
 3. **List stewards:**
 
    ```bash
-   curl -k -H "X-API-Key: your-api-key" https://localhost:9080/api/v1/stewards
+   curl --cacert /path/to/controller-ca.crt -H "X-API-Key: your-api-key" https://localhost:9080/api/v1/stewards
    ```
 
 ## mTLS Authentication (admin bundle)
@@ -4348,11 +3948,10 @@ Lists the account's passkeys (public metadata only; permission `webauthn:list`).
 
 Renames a passkey. Requires permission `webauthn:rename` and Strong assurance (a Basic caller receives `401` with `WWW-Authenticate: CFGMS-StepUp`). Account scoping matches revoke: cookie-auth principals can rename only their own credentials; admin callers are tenant-contained.
 
-```json
-{ "label": "Work laptop" }
-```
-
 The label is trimmed, control characters are removed and it is truncated to 64 characters; an empty label is `400 INVALID_LABEL`. Returns `204` on success, `404 CREDENTIAL_NOT_FOUND` for an unknown credential, `409 ACCOUNT_MODIFIED` on a concurrent write. The audit event `account.passkey_renamed` records the old and new label.
+
+
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.
 
 #### POST /api/v1/accounts/{username}/certs/bind
 
@@ -4641,16 +4240,6 @@ Reverse a silence. Clears the silence flag, its expiry and the silencing princip
 
 **Response (200 OK):** The updated alert state.
 
-```json
-{
-  "alert_id": "9f2c...",
-  "acknowledged": true,
-  "acknowledged_by": "alice",
-  "acknowledged_at": "2026-08-17T09:00:00Z",
-  "silenced": false
-}
-```
-
 Idempotent: unsilencing an alert that is not silenced returns `200` with its current state. Returns `404 Not Found` when the caller's tenant holds no state for the alert (other tenants' alerts are not disclosed). Returns `503 Service Unavailable` when the alert store is not configured.
 
 ## Configuration
@@ -4667,3 +4256,5 @@ The REST API server can be configured via environment variables:
 - Use least-privilege permissions for API keys.
 - Monitor API access logs.
 - Consider rate limiting for production deployments.
+
+Serialized request/response fields: [OpenAPI](openapi.yaml). Apply the behavior and authorization constraints above.

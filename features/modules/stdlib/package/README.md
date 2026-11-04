@@ -1,263 +1,99 @@
 # Package Module
 
-**Kind:** steward
+Manage package presence and version through a declared package-manager provider.
+This page owns the package resource's operator configuration. Developers should
+start with [Config](types.go), [Set/Get](module.go) and [provider selection](providers.go).
 
-## Purpose and scope
+## Resource configuration
 
-The Package module provides a unified interface for managing system packages across different package managers. It abstracts away the differences between package managers (apt, yum, dnf, pacman, brew, chocolatey, winget) and provides a consistent way to install, update, and remove packages.
-
-The module's scope includes:
-
-- Package installation and removal
-- Version management
-- Package updates
-- Dependency management
-- Cross-platform support
-- Package manager auto-detection
-- Retry and timeout handling
-- Security considerations
-
-## Platform Support
-
-### Windows
-
-- **Winget**: Microsoft's official package manager (preferred)
-- **Chocolatey**: Alternative package manager with broader package selection
-
-### macOS
-
-- **Homebrew**: Primary package manager for macOS
-
-### Linux
-
-- **APT**: Debian/Ubuntu based systems
-- **YUM/DNF**: RedHat/CentOS/Fedora based systems
-- **Pacman**: Arch Linux based systems
-
-## Configuration options
-
-The module accepts the following configuration options in YAML format:
-
-| Option | Type | Required | Description |
-|--------|------|----------|-------------|
-| name | string | Yes | Name of the package to manage (1-128 chars, alphanumeric, `-`, `.`, `_`) |
-| state | string | Yes | Desired state (`present` or `absent`) |
-| version | string | No | Specific version to install (`latest` or version number) |
-| update | boolean | No | Whether to update if already installed (default: false) |
-| dependencies | []string | No | List of package dependencies to install |
-| manager | string | No | Package manager to use (auto-detected if not specified) |
-| options | object | No | Additional package manager specific options |
-| force | boolean | No | Force operation even if dangerous (default: false) |
-| allow_untrusted | boolean | No | Allow untrusted packages (default: false) |
-| timeout | integer | No | Operation timeout in seconds (default: 300) |
-| retry | object | No | Retry configuration for failed operations |
-
-### Retry Configuration
-
-| Option | Type | Required | Description |
-|--------|------|----------|-------------|
-| attempts | integer | No | Number of retry attempts (default: 3, max: 10) |
-| delay | integer | No | Delay between retries in seconds (default: 5, max: 300) |
-
-## Version Management
-
-### Latest Version
+Example fragment in a steward desired-state document:
 
 ```yaml
-modules:
-  package:
-    nginx:
-      state: "present"
-      version: "latest"  # Installs the latest GA version available
+resources:
+  - name: application-package
+    module: package
+    config:
+      name: example-package
+      state: present
+      version: latest
+      providers: [apt]
 ```
 
-### Specific Version
+Choose a real package available from the endpoint's configured repositories.
+The `resources[].name` is the CFGMS resource identifier; `config.name` is the
+package name. If omitted, `config.name` falls back to the resource identifier.
+
+| Field | Behavior |
+|---|---|
+| `name` | Package name; required after resource-ID fallback. Slashes, spaces and a leading dash are rejected. |
+| `state` | `present` or `absent`. |
+| `version` | Required for `present`: `latest` or a supported version string. Exact-version availability depends on the selected manager/repository. |
+| `update` | When true, Set replaces the requested version with `latest`. Defaults false; this is not a minimum-version constraint. |
+| `dependencies` | Package names installed at `latest` before the requested package. Self/duplicate dependencies are rejected. |
+| `providers` | Ordered provider allowlist; the first available provider is selected. Unknown names are rejected. |
+| `package_manager` | Legacy singular selector, used when `providers` is empty. Use current provider names below. |
+
+`state: absent` removes the package through the selected provider; it does not
+require a version. Provider/version configuration also affects observed state
+and comparison. The steward's convergence cycle determines when Set is needed;
+this module does not independently schedule updates.
+
+## Provider selection
+
+A resource's `providers` list takes precedence over the host policy at reserved
+resource `@defaults`, which takes precedence over platform defaults. Selection
+never falls back to a provider outside the effective allowlist.
+
+| Platform | Built-in default order | Other registered provider |
+|---|---|---|
+| Linux/Unix fallback | `apt`, `dnf`, `yum`, `pacman` | — |
+| macOS | `brew` | — |
+| Windows | `winget` | `choco` (explicit opt-in) |
+
+Installing a different provider is not an automatic substitute for the one
+allowed by policy. If none of the allowed providers is usable, the operation
+fails with the attempted list.
+
+A host-wide policy fragment can set a narrower default:
 
 ```yaml
-modules:
-  package:
-    nginx:
-      state: "present"
-      version: "1.18.0"  # Installs specific version
+resources:
+  - name: "@defaults"
+    module: package
+    config:
+      providers: [apt]
 ```
 
-### Auto-Update with Optional Maintenance Window
+Ensure the policy resource is applied before resources that rely on it.
 
-```yaml
-modules:
-  package:
-    nginx:
-      state: "present"
-      version: "1.18.0"  # Minimum version
-      update: true       # Will check for updates every config validation
-      # Optional: Specify maintenance window to restrict updates to specific times
-      maintenance:
-        window: "default"  # Use named maintenance window
-        # OR specify inline schedule
-        schedule: "0 2 * * *"  # Daily at 2 AM
-        duration: "2h"
-        timezone: "UTC"
-```
+## Chocolatey policy
 
-## Behavior Rules
+Select Chocolatey with provider name `choco`, not `chocolatey`. The host policy
+must supply `choco_source` for the organization's feed. Optional
+`choco_source_name` defaults to `org`; `choco_bootstrap_package` defaults to the
+feed's `chocolatey.nupkg`. Bootstrapping requires the operator-pinned
+`choco_bootstrap_sha256` (64 hexadecimal characters).
 
-1. **Latest Version**
-   - `version: "latest"` installs the latest GA version available
-   - No automatic updates after initial installation
-   - No maintenance window required
+Chocolatey is invoked only from the verified absolute install path
+`C:\ProgramData\chocolatey\choco.exe`, never an arbitrary PATH entry. The
+module checks file/directory ownership, writable ACLs and reparse points before
+selection and after bootstrap. An untrusted install is unavailable; no fallback
+outside the allowlist is attempted. Bootstrap uses only the configured source,
+not the public community feed. See [bootstrap implementation](choco_bootstrap.go)
+and [Windows trust checks](choco_trust_windows.go) for the enforced contract.
 
-2. **Specific Version**
-   - `version: "1.18.0"` installs that specific version
-   - No automatic updates unless `update: true` is set
-   - If `update: true` is set without a maintenance window:
-     - Will check for updates every time the config test runs
-     - Will update if a newer version is available
-     - Will not update if current version is newer than minimum
+## Limits and failures
 
-3. **Auto-Update with Maintenance Window**
-   - Requires `update: true` to be set
-   - Uses `version` as minimum allowed version
-   - If maintenance window is specified:
-     - Will only update during the specified window
-     - Will not update outside the window
-   - Will not update if current version is newer than minimum
-
-## Usage examples
-
-### Basic Package Installation
-
-```yaml
-name: nginx
-state: present
-version: latest
-```
-
-### Install Specific Version
-
-```yaml
-name: redis
-state: present
-version: "6.2.6"
-```
-
-### Remove Package
-
-```yaml
-name: htop
-state: absent
-```
-
-### Install with Dependencies
-
-```yaml
-name: nodejs
-state: present
-version: latest
-dependencies:
-  - npm
-  - build-essential
-```
-
-### Force Update Package
-
-```yaml
-name: postgresql
-state: present
-version: latest
-update: true
-force: true
-```
-
-### Package with Custom Options
-
-```yaml
-name: mysql-server
-state: present
-version: "8.0"
-options:
-  root_password: "secure123"
-  data_dir: "/data/mysql"
-```
-
-### Installation with Retry
-
-```yaml
-name: docker-ce
-state: present
-version: latest
-retry:
-  attempts: 5
-  delay: 10
-```
-
-### Windows-specific Examples
-
-#### Using Winget
-```yaml
-name: Microsoft.VisualStudioCode
-state: present
-version: latest
-manager: winget
-```
-
-#### Using Chocolatey
-```yaml
-name: vscode
-state: present
-version: latest
-manager: chocolatey
-```
-
-Chocolatey is run only from the verified install path `C:\ProgramData\chocolatey\choco.exe`, by absolute path and never by name from `PATH`. Before every selection (and again after a bootstrap) the module checks that `choco.exe` and its directory are owned by SYSTEM or `BUILTIN\Administrators`, are not reparse points, and grant no write-capable access to any other principal (read and execute for Users is allowed). If the check fails, Chocolatey is reported unavailable and nothing is run.
-
-## Known limitations
-
-1. Platform-specific limitations:
-   - Not all package managers support version rollback
-   - Package names may differ between platforms
-   - Some package managers don't support version pinning
-   - Update behavior varies by package manager
-   - Winget package names use a different format (Publisher.Package)
-
-2. Performance considerations:
-   - Package operations can be slow
-   - Network dependency for package downloads
-   - Large packages may timeout with default settings
-
-3. Technical limitations:
-   - Cannot manage packages that require interactive installation
-   - Some package managers require system restarts
-   - Package verification methods vary by platform
-   - Limited support for source-based installations
-
-## Security considerations
-
-1. Authentication and Authorization:
-   - Requires root/administrator privileges
-   - Access should be restricted through RBAC
-   - Package operations are logged for audit
-   - Package sources should be trusted
-
-2. Input Validation:
-   - Package names are strictly validated
-   - Version strings are verified
-   - Options are sanitized
-   - Dependencies are checked
-
-3. Best Practices:
-   - Avoid untrusted package sources
-   - Use version pinning for stability
-   - Regular security updates
-   - Backup system before major changes
-
-4. Platform Security:
-   - Uses secure package transport (HTTPS)
-   - Verifies package signatures
-   - Respects system security policies
-   - Handles sensitive data securely
-
-## Version Information
-
-- **Version**: 1.0
-- **Last Updated**: 2024-04-20
-- **Status**: Draft
+- The module requires the permissions needed by the selected OS package manager.
+- Resource `manager`, `options`, `force`, `allow_untrusted`, `timeout` and `retry`
+  are not consumed by the current Set implementation; do not use old examples
+  claiming these configure manager operations.
+- `maintenance` exists in Config metadata, but the current Set path does not
+  enforce maintenance windows or a minimum-version update policy. A field being
+  declared is not evidence that its scheduling behavior is implemented.
+- The [field schema](schema.yaml) describes both resource and `@defaults`
+  payloads. Context-dependent name/state/version requirements are enforced by
+  Config/Set; field declarations do not establish additional runtime behavior.
+- Package-manager failures are returned to the caller. Retry/error handling
+  belongs to the surrounding execution/convergence policy, not an undocumented
+  package retry block.

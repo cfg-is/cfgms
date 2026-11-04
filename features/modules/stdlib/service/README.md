@@ -5,7 +5,7 @@
 ## Purpose and scope
 
 The Service Module provides idempotent configuration management for OS services.
-It implements the core Module interface (Get/Set/Test) to manage service runtime
+It implements the core Module interface (Get/Set) to manage service runtime
 state (running/stopped) and boot-enable configuration (enabled/disabled) through
 the native OS service manager.
 
@@ -25,8 +25,7 @@ The module accepts configuration in YAML format with the following fields:
 ```yaml
 state: "running"      # Required: "running" or "stopped"
 enabled: true         # Required: true = start on boot, false = manual start only
-restart_on: ""        # Optional: hint for the resource dependency engine to restart
-                      # this service when a named related resource changes
+restart_on: ""        # Reserved hint; currently does not trigger restarts
 ```
 
 The `resourceID` parameter (the service name) must match the OS-level service
@@ -60,25 +59,14 @@ Service names are validated to contain only safe characters
         enabled: false
     ```
 
-3. Service that restarts when a related config file changes:
-
-    ```yaml
-    - name: "cfgms-controller"
-      module: "service"
-      config:
-        state: "running"
-        enabled: true
-        restart_on: "cfgms-controller-config"
-    ```
-
 ## Known limitations
 
 1. Start/stop/enable/disable operations require elevated privileges (root on
    Linux/macOS, Administrator on Windows).
 2. `Get` does not require elevated privileges on Linux (systemctl is-active/is-enabled
    work as a regular user).
-3. The `restart_on` field is a dependency hint for the steward's resource dependency
-   engine — the module itself does not watch for changes or trigger restarts.
+3. The `restart_on` field is reserved. No current dependency-engine consumer
+   restarts a service from this field; the module itself does not trigger restarts.
 4. macOS launchd `enabled` detection is based on whether the service is currently
    loaded. A service loaded without the `-w` flag may not persist across reboots.
 5. Tests that interact with the OS service manager are skipped in environments

@@ -151,7 +151,7 @@ workstation — the command prints a notice and you copy the URL to a browser
 anywhere else you can complete the passkey ceremony.
 
 **A tenant-scoped account needs the `cli-login:approve` permission** (granted
-like any other RBAC permission — see [cfg account](../development/commands-reference.md#cfg-account--account-lifecycle-and-certificate-credentials-issue-3582))
+like any other RBAC permission — see [cfg account](../administration/operator-credentials.md#cfg-account--account-lifecycle-and-certificate-credentials-issue-3582))
 before it can log in this way. This is a separate permission from
 `session:create` — `cfg login` reuses the session-creation *path*, not its
 permission, so granting `session:create` alone does not satisfy the approve
@@ -168,7 +168,7 @@ session against the same controller.
 If a login is denied in the browser, times out before a decision arrives, or
 you interrupt the waiting command with Ctrl-C, the command exits with a
 distinct message (see the table in [the command
-reference](../development/commands-reference.md#cfg-login--browser-authenticated-cli-login-issue-3721))
+reference](../administration/operator-credentials.md#login-and-reconnect))
 and leaves no session behind. A timeout names `cfg credential enrol` (below)
 as the headless alternative.
 
@@ -179,7 +179,7 @@ login` (above) is not an option — and does not hold a copy of the bootstrap
 bundle, an administrator can mint a short-lived, single-use enrolment token
 from their own already-connected
 workstation and hand it to that machine out of band. See [Enrolment Tokens and
-the Pending Credential-Request Queue](../development/commands-reference.md#enrolment-tokens-and-the-pending-credential-request-queue-issue-3717)
+the Pending Credential-Request Queue](../administration/operator-credentials.md#enrolment-tokens-and-the-pending-credential-request-queue-issue-3717)
 for the full command and flag reference; this section walks the happy path
 end to end.
 
@@ -243,7 +243,7 @@ and the rest of this guide.
 **If the administrator denies the request, it expires before a decision
 arrives, or the operator interrupts the waiting command with Ctrl-C**, the
 command exits with a distinct message (see the table in [the command
-reference](../development/commands-reference.md#cfg-credential-enrol-issue-3720))
+reference](../administration/operator-credentials.md#cfg-credential-enrol-issue-3720))
 and leaves no credential file anywhere on this machine — safe to simply mint a
 fresh token and re-run `cfg credential enrol`.
 
@@ -253,7 +253,7 @@ If an enrolment token or a headless-enrolled host is believed compromised —
 the token leaked before the intended machine used it, or a device enrolled via
 "Headless Enrolment" above needs its credential pulled — `cfg credential`
 carries the containment commands to shut it down. See [Revoking and
-Containing Enrolment-Issued Credentials](../development/commands-reference.md#revoking-and-containing-enrolment-issued-credentials-issue-3725)
+Containing Enrolment-Issued Credentials](../administration/operator-credentials.md#revoking-and-containing-enrolment-issued-credentials-issue-3725)
 for the full command and flag reference; this section is the procedure to
 follow when you suspect a problem, on the administrator's own already-connected
 workstation.
@@ -483,94 +483,23 @@ first thing to check:
   the beginning (see the enrolment-token flow in
   [Adding Operators](single-controller/walkthrough.md#adding-operators), or the
   `POST /api/v1/enrolment-tokens` reference in
-  [Commands Reference](../development/commands-reference.md#renewing-an-issued-credential--cfg-credential-renew-issue-3724)).
+  [Commands Reference](../administration/operator-credentials.md#renewing-an-issued-credential--cfg-credential-renew-issue-3724)).
 - Anything else (a network blip, the controller mid-failover): safe to leave
   alone — the old certificate is never touched until a new one is confirmed
   bound, so a failed or interrupted renewal never costs the host its existing,
   still-working credential.
 
-See [Commands Reference — cfg credential renew](../development/commands-reference.md#renewing-an-issued-credential--cfg-credential-renew-issue-3724)
+See [Commands Reference — cfg credential renew](../administration/operator-credentials.md#renewing-an-issued-credential--cfg-credential-renew-issue-3724)
 for the full flag reference and the exact controller-side contract.
 
 ## 12. The Zero-Standing-Privilege Model
 
-CFGMS admin sessions follow a zero-standing-privilege design: no long-lived
-credential is ever exchanged between operator and controller. Each session is
-short-lived, bound to one machine, and revocable server-side at any time.
-
-### What "zero standing privilege" means in practice
-
-| Concept | Implementation |
-|---------|---------------|
-| No persistent admin token | The mTLS credential (the bundle) never leaves the OS secret store after import. The controller never sees the raw private key outside of a TLS handshake. |
-| Explicit connect per session | Running `cfg connect` is required at the start of each working session. A closed shell, a reboot, or a session expiry all require re-authentication. |
-| Short-lived tokens | The controller issues a bearer token valid for a sliding idle window. The token is replaced on every successful API call (rolling-token model). |
-| Machine-bound credential | The encrypted bundle is bound to the machine's secret store. Copying the secret-store entry to another machine does not produce a usable credential. |
-| Controller-side revocation | The controller can revoke any session immediately (`DELETE /api/v1/sessions/{id}`). Revocation takes effect with zero stale window — the next request carrying the revoked token is rejected. |
-
-### Session token lifecycle
-
-```
-cfg connect
-    │
-    ▼
-Controller issues session token (expires at idle TTL or absolute cap)
-    │
-    ▼
-Each cfg subcommand sends: Authorization: Bearer <token>
-    │
-    ├── Controller validates token
-    ├── Resets idle TTL
-    └── Returns new token in X-Session-Token header
-              │
-              ▼
-        cfg stores new token (replaces old token in OS secret store)
-              │
-              └── Old token valid for grace window, then rejected
-    │
-    ▼
-cfg disconnect  OR  session expires
-    │
-    ▼
-Controller revokes session; token removed from OS secret store
-```
-
-### Token lifecycle parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| Idle TTL | 15 minutes | Session expires if no command is issued within this window. |
-| Absolute cap | 8 hours | Hard ceiling from the original connect, regardless of activity. |
-| Grace window | 30 seconds | The prior token remains valid this long after a renewal, so concurrent or pipelined commands do not race on the token rotation. |
-
-### What is stored where
-
-| Item | Where | Secret? |
-|------|-------|---------|
-| mTLS bundle (cert + key + CA) | OS-native secret store (encrypted at rest) | Yes — never written to a plain file after `cfg connect --bundle` |
-| Session bearer token | OS-native secret store | Yes — never written to a plain file |
-| Connection metadata (name, URL, identity) | `connections.json` in user config dir | No — no credential material |
-
-The OS-native secret stores in use:
-
-| Platform | Store |
-|----------|-------|
-| Windows | Windows Credential Manager |
-| macOS | macOS Keychain |
-| Linux | Secret Service API (e.g., GNOME Keyring, KWallet) or kernel keyring |
-
-On Linux the Secret Service is used only when it answers and its default
-collection is unlocked; the check never prompts. On a host without an unlocked
-Secret Service (for example over SSH, where the login keyring is locked and
-cannot show an unlock prompt), the session token is held in the kernel session
-keyring. That token ends with the login session, so a new SSH session needs
-`cfg connect` again.
-
-### Why the controller only stores a token hash
-
-The controller stores `SHA-256(token)`, not the token value itself. If the
-controller's database is exfiltrated, the raw token values are not recoverable.
-Token values are also sanitised from all controller log output.
+The [session decision](../architecture/decisions/014-cfg-sessions-and-credential-unlock.md)
+owns credential storage, rolling token and unlock semantics. The commands above
+own the setup/reconnect procedure. Credentials stay in the OS-native store;
+a connection registry is not a plaintext credential cache. Session idle/absolute
+limits, revocation and assurance must be checked in the current implementation,
+not inferred from an old copied lifetime table.
 
 ## Acting on a Service or Process
 
@@ -636,5 +565,5 @@ submitting and reports the remaining stewards as not submitted.
 - [Single Controller Deployment](single-controller/walkthrough.md) — initial controller setup
 - [Controller Operating Model](../architecture/controller-operating-model.md) — Admin Session Model internals
 - [Steward Refresh Management](steward-refresh-management.md) — managing offline steward re-registration
-- [Commands Reference: Enrolment Tokens and the Pending Credential-Request Queue](../development/commands-reference.md#enrolment-tokens-and-the-pending-credential-request-queue-issue-3717) — full flag and REST reference for headless enrolment
-- [Commands Reference: Revoking and Containing Enrolment-Issued Credentials](../development/commands-reference.md#revoking-and-containing-enrolment-issued-credentials-issue-3725) — full flag and REST reference for containment
+- [Commands Reference: Enrolment Tokens and the Pending Credential-Request Queue](../administration/operator-credentials.md#enrolment-tokens-and-the-pending-credential-request-queue-issue-3717) — full flag and REST reference for headless enrolment
+- [Commands Reference: Revoking and Containing Enrolment-Issued Credentials](../administration/operator-credentials.md#revoking-and-containing-enrolment-issued-credentials-issue-3725) — full flag and REST reference for containment
