@@ -25,11 +25,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/steward/client"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	"github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/modules/install"
 	"github.com/cfgis/cfgms/pkg/cert"
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
@@ -500,8 +498,19 @@ func TestNormalClient_TamperStateLocked_SwitchesToReportOnly(t *testing.T) {
 	assert.Contains(t, codes, client.ReasonTamperLocked)
 }
 
+// clusterModuleSource returns the real module DNA producer — a
+// *execution.Executor driven by a Monitor-capable module — publishing a
+// cluster:node resource snapshot. If the adapter consults it, cluster:*
+// attributes and fragments appear in the collected DNA.
+func clusterModuleSource(t *testing.T) moduleDNASource {
+	t.Helper()
+	return newModuleDNAExecutor(t, logging.NewNoopLogger(), "cluster:node", map[string]interface{}{"name": "n1"})
+}
+
 func TestDNACollectorAdapter_HostFactsOnlyDropsModuleSource(t *testing.T) {
-	src := fakeModuleSource{}
+	src := clusterModuleSource(t)
+	require.NotEmpty(t, src.CollectModuleFragments(context.Background()),
+		"the real module source must publish a cluster fragment for this test to mean anything")
 	adapter := newDNACollectorAdapter(logging.NewNoopLogger(), src)
 	narrowed := adapter.HostFactsOnly()
 	attrs, err := narrowed.CollectAttributes(context.Background())
@@ -514,27 +523,17 @@ func TestDNACollectorAdapter_HostFactsOnlyDropsModuleSource(t *testing.T) {
 	}
 }
 
-// fakeModuleSource stands in for the monitored-module DNA producer: a source
-// that, if consulted, would leak module attributes and fragments.
-type fakeModuleSource struct{}
-
-func (fakeModuleSource) CollectModuleDNAAttributes(context.Context) map[string]string {
-	return map[string]string{"cluster:node": "n1"}
-}
-
-func (fakeModuleSource) CollectModuleFragments(context.Context) []*commonpb.Fragment {
-	f, err := dna.NewFragment("cluster:node", "test", dna.MapState(map[string]interface{}{"name": "n1"}))
-	if err != nil {
-		return nil
-	}
-	return []*commonpb.Fragment{f}
-}
-
 // A client-package collector without the narrowing hook is rejected nowhere
 // else, so the adapter must be the one place that drops the module source.
 func TestDNACollectorAdapter_FullAdapterStillCarriesModuleSource(t *testing.T) {
-	adapter := newDNACollectorAdapter(logging.NewNoopLogger(), fakeModuleSource{})
+	src := clusterModuleSource(t)
+	adapter := newDNACollectorAdapter(logging.NewNoopLogger(), src)
 	attrs, err := adapter.CollectAttributes(context.Background())
 	require.NoError(t, err)
-	assert.Contains(t, attrs, "cluster:node")
+	want := src.CollectModuleDNAAttributes(context.Background())
+	require.NotEmpty(t, want)
+	for k, v := range want {
+		assert.True(t, strings.HasPrefix(k, "cluster:node"), k)
+		assert.Equal(t, v, attrs[k], "full adapter must carry module attribute %s", k)
+	}
 }
