@@ -555,6 +555,29 @@ func runSteward(ctx context.Context, regToken, controllerURL, configPath string)
 	return runStewardInternal(ctx, regToken, controllerURL, configPath, nil)
 }
 
+// stewardLogDir returns the file-logging directory from CFGMS_LOG_DIR, falling
+// back to /tmp/cfgms with a warning on the early stderr logger.
+func stewardLogDir(earlyLog *log.Logger) string {
+	logDir := os.Getenv("CFGMS_LOG_DIR")
+	if logDir == "" {
+		logDir = "/tmp/cfgms"
+		earlyLog.Printf("WARNING: CFGMS_LOG_DIR not set; using /tmp/cfgms — set for production deployments")
+	}
+	return logDir
+}
+
+// newStartupSubsystemState builds the subsystem tracker the steward starts
+// with: controller and DNA degraded until they first succeed, plus a degraded
+// run_account reason naming the account and the rights it lacks when the
+// steward runs under a non-default account (the default account sets none).
+func newStartupSubsystemState(logger logging.Logger) *subsystemState {
+	subsysState := newSubsystemState()
+	subsysState.markDegraded("controller") // degraded until first connect succeeds
+	subsysState.markDegraded("dna")        // degraded until initial DNA collection succeeds
+	reportRunAccount(subsysState.reasons, probeRunAccount(runAccountProbeDirs()), logger)
+	return subsysState
+}
+
 // runStewardInternal is the testable core of runSteward. cf is the connect
 // function; when nil, registerAndConnect is used. Tests inject a failing stub
 // to simulate controller-unreachable conditions without network I/O. (Issue #2034)
@@ -581,11 +604,7 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 	// ── File logging provider ─────────────────────────────────────────────────
 	// Best-effort: if the file provider fails, fall back to a stdout logger so
 	// the process continues instead of dying with a 0-byte log file. (Issue #2034)
-	logDir := os.Getenv("CFGMS_LOG_DIR")
-	if logDir == "" {
-		logDir = "/tmp/cfgms"
-		earlyLog.Printf("WARNING: CFGMS_LOG_DIR not set; using /tmp/cfgms — set for production deployments")
-	}
+	logDir := stewardLogDir(earlyLog)
 	loggingConfig := &logging.LoggingConfig{
 		Provider:          "file",
 		Level:             logLevelFromEnv(),
@@ -650,9 +669,7 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		// ── Subsystem state tracker ───────────────────────────────────────────
 		// Tracks which subsystems are ready so the heartbeat can report the real
 		// health state instead of a hardcoded "healthy". (Issue #2034)
-		subsysState := newSubsystemState()
-		subsysState.markDegraded("controller") // degraded until first connect succeeds
-		subsysState.markDegraded("dna")        // degraded until initial DNA collection succeeds
+		subsysState := newStartupSubsystemState(logger)
 
 		// Initialise device identity key store before registration so the refresh
 		// handshake path (Issue #2094) has a stable key available. Failure here is
@@ -3023,6 +3040,16 @@ var stewardDataDirResolver = func() string {
 	return filepath.Join(programData, "cfgms")
 }
 
+// runAccountProbeDirs lists the directories the run account must be able to
+// write: the cert store and, on Windows, the steward data directory.
+func runAccountProbeDirs() []string {
+	dirs := []string{certStoreDirResolver()}
+	if runtime.GOOS == "windows" {
+		dirs = append(dirs, stewardDataDirResolver())
+	}
+	return dirs
+}
+
 // dataDirCheck is the data-directory check runStewardInternal runs before it
 // reads any identity; tests substitute it to observe the order.
 var dataDirCheck = secureStewardDataDir
@@ -3038,6 +3065,22 @@ func secureStewardDataDir(logger logging.Logger) error {
 		return nil
 	}
 	dir := stewardDataDirResolver()
+	// A data directory owned by the steward's own non-default account is the
+	// legitimate case: it cannot adopt entries it did not create, and the
+	// run-account health reason reports the reduced rights. A tree that grants
+	// write access to anyone else is refused as tampered.
+	handled, ownErr := secureOwnAccountDataDir(dir)
+	if ownErr != nil {
+		logger.Error("Refusing to load trust and identity material from steward data directory",
+			"path", logging.SanitizeLogValue(dir),
+			"error", logging.SanitizeLogValue(ownErr.Error()))
+		return fmt.Errorf("steward data directory %s is not secure: %w", dir, ownErr)
+	}
+	if handled {
+		logger.Warn("Steward data directory is owned by the run account; leaving ownership unchanged",
+			"path", logging.SanitizeLogValue(dir))
+		return nil
+	}
 	adopted, err := security.AdoptAdminOnlyDir(dir)
 	for _, p := range adopted {
 		logger.Info("Took over steward data entry owned by a member of Administrators",
