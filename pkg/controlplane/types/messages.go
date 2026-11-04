@@ -151,6 +151,35 @@ type Command struct {
 	// (#5174). Zero means SigningPayloadV1. A verifier must never treat an absent
 	// value as a newer version.
 	SigningPayloadVersion uint32 `json:"signing_payload_version,omitempty"`
+
+	// SignerChainPEM is the PEM chain of the certificate that signed the command,
+	// for hosts that verify operator actions against a baked fingerprint list. It
+	// is transport metadata outside the signed payload: a verifier must validate
+	// the chain itself and never trust it because it arrived.
+	SignerChainPEM []byte `json:"signer_chain_pem,omitempty"`
+}
+
+// RepairRequest is the controller's request that a locked steward repair itself.
+// The steward link only receives and hands it on; checking Signature against
+// SignerChainPEM and the approved-loss list belongs to the repair handler.
+type RepairRequest struct {
+	// RepairID identifies the repair; the handler uses it to reject a replay.
+	RepairID string `json:"repair_id"`
+
+	// ApprovedLossCodes lists the local-data losses the operator approved.
+	ApprovedLossCodes []string `json:"approved_loss_codes,omitempty"`
+
+	// LossDigest binds the approval to the loss list that was shown.
+	LossDigest string `json:"loss_digest,omitempty"`
+
+	// ExpiresAtUnix is the Unix second after which the request must be refused.
+	ExpiresAtUnix int64 `json:"expires_at_unix,omitempty"`
+
+	// Signature signs the request; verified by the repair handler.
+	Signature []byte `json:"signature,omitempty"`
+
+	// SignerChainPEM is the PEM chain of the signer's certificate.
+	SignerChainPEM []byte `json:"signer_chain_pem,omitempty"`
 }
 
 // EventType defines the type of event being reported.

@@ -11,6 +11,7 @@ package grpc
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
@@ -201,6 +203,21 @@ type Provider struct {
 	// HostAttrsHeader on each ControlChannel dial. Nil = none sent.
 	hostAttributes func() map[string]string
 
+	// Inbound switch (client mode). hooks are the narrow callbacks for the few
+	// message kinds a report-only steward accepts; reportOnly makes the receive
+	// loop hand commands only to hooks.OnCommand and drop everything else.
+	// anchorPool is the trust anchor the per-stream anchor check verifies the
+	// server chain against (default: the TLS config's RootCAs). streamChain and
+	// streamAnchorOK describe the stream dialAndOpenStream opened last, under
+	// sendMu, so each receive loop reads the facts of its own stream.
+	inboundMu      sync.RWMutex
+	hooks          interfaces.InboundHooks
+	reportOnly     atomic.Bool
+	anchorPool     *x509.CertPool
+	streamChain    []*x509.Certificate
+	streamAnchorOK bool
+	inboundDropped atomic.Int64
+
 	// Subscription handlers (client mode). commands holds the subscribed command
 	// handler and any commands that arrive before it is subscribed (Issue #4678).
 	commands *pendingcmd.Queue
@@ -251,6 +268,7 @@ type eventSubscription struct {
 }
 
 var (
+	_ interfaces.InboundController  = (*Provider)(nil)
 	_ interfaces.ResponseSender     = (*Provider)(nil)
 	_ interfaces.ResponseSubscriber = (*Provider)(nil)
 )
@@ -773,11 +791,21 @@ func (p *Provider) dialAndOpenStream() error {
 		return fmt.Errorf("failed to open ControlChannel: %w", err)
 	}
 
+	var chain []*x509.Certificate
+	if pr, ok := peer.FromContext(stream.Context()); ok {
+		if ti, ok := pr.AuthInfo.(credentials.TLSInfo); ok {
+			chain = ti.State.PeerCertificates
+		}
+	}
+	anchorOK := p.anchorCheck(chain)
+
 	p.sendMu.Lock()
 	p.grpcConn = conn
 	p.grpcClient = transportpb.NewStewardTransportClient(conn)
 	p.controlStream = stream
 	p.streamGen = gen
+	p.streamChain = chain
+	p.streamAnchorOK = anchorOK
 	p.sendMu.Unlock()
 
 	return nil
@@ -792,7 +820,10 @@ func (p *Provider) clientReceiveLoop() {
 	p.sendMu.Lock()
 	stream := p.controlStream
 	gen := p.streamGen
+	chain := p.streamChain
+	anchorOK := p.streamAnchorOK
 	p.sendMu.Unlock()
+	peerChain := interfaces.PeerChain(func() []*x509.Certificate { return chain })
 
 	if stream == nil {
 		p.logger.Error("clientReceiveLoop started with nil stream")
@@ -837,6 +868,13 @@ func (p *Provider) clientReceiveLoop() {
 			sc := signedCommandFromProto(payload.Command)
 			p.commandsReceived.Add(1)
 
+			// Report-only enforces nothing the controller sends: a command goes
+			// only to the locked-trust handler, and is dropped when there is none.
+			if p.reportOnly.Load() {
+				p.deliverLockedCommand(sc, peerChain)
+				continue
+			}
+
 			// The controller sends on-connect commands (the signing-cert refresh,
 			// queued deliveries) as soon as this stream registers, which is before
 			// the steward has subscribed. Those are held and delivered on
@@ -851,8 +889,170 @@ func (p *Provider) clientReceiveLoop() {
 			if handler != nil {
 				go p.handleCommand(handler, sc)
 			}
+		case *transportpb.ControlMessage_TamperState:
+			p.receiveTamperState(payload.TamperState, anchorOK)
+		case *transportpb.ControlMessage_RepairRequest:
+			p.receiveRepairRequest(payload.RepairRequest, anchorOK)
+		case *transportpb.ControlMessage_Event:
+			p.dropInbound("event")
+		case *transportpb.ControlMessage_Heartbeat:
+			p.dropInbound("heartbeat")
+		case *transportpb.ControlMessage_Response:
+			p.dropInbound("response")
+		default:
+			// A payload kind this build does not know, or no payload at all.
+			p.dropInbound("unknown")
 		}
 	}
+}
+
+// Bounds on the fixed-shape inbound signals. A signal over a bound is
+// malformed and ignored, never truncated and acted on.
+const (
+	maxRepairIDLen         = 128
+	maxApprovedLossCodes   = 64
+	maxApprovedLossCodeLen = 128
+	maxRepairDigestLen     = 256
+	maxRepairSignatureLen  = 16 << 10
+	maxRepairChainPEMLen   = 64 << 10
+)
+
+// SetInboundHooks replaces the client-mode inbound callbacks.
+func (p *Provider) SetInboundHooks(hooks interfaces.InboundHooks) {
+	p.inboundMu.Lock()
+	p.hooks = hooks
+	p.inboundMu.Unlock()
+}
+
+// SetReportOnly switches the receive loop between normal operation and
+// report-only. It takes effect for the next message received.
+func (p *Provider) SetReportOnly(on bool) { p.reportOnly.Store(on) }
+
+// InboundDropped returns how many inbound payloads the receive switch dropped.
+func (p *Provider) InboundDropped() int64 { return p.inboundDropped.Load() }
+
+// WithTrustAnchor sets the pool the per-stream anchor check verifies the server
+// chain against. By default the check uses the TLS config's RootCAs, which is
+// the same anchor the handshake verified; setting it separately makes the check
+// an explicit, independent step.
+func WithTrustAnchor(pool *x509.CertPool) option {
+	return func(p *Provider) { p.anchorPool = pool }
+}
+
+// anchorCheck reports whether the server chain verifies against the trust
+// anchor. A missing anchor or chain fails the check. It never looks at the
+// baked fingerprint list: connecting and reporting must survive a controller
+// root rotation.
+func (p *Provider) anchorCheck(chain []*x509.Certificate) bool {
+	pool := p.anchorPool
+	if pool == nil && p.tlsConfig != nil {
+		pool = p.tlsConfig.RootCAs
+	}
+	if pool == nil || len(chain) == 0 {
+		return false
+	}
+	intermediates := x509.NewCertPool()
+	for _, c := range chain[1:] {
+		intermediates.AddCert(c)
+	}
+	_, err := chain[0].Verify(x509.VerifyOptions{
+		Roots:         pool,
+		Intermediates: intermediates,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	})
+	return err == nil
+}
+
+// dropInbound counts a dropped inbound payload and tells the OnDropped hook.
+func (p *Provider) dropInbound(kind string) {
+	p.inboundDropped.Add(1)
+	p.inboundMu.RLock()
+	fn := p.hooks.OnDropped
+	p.inboundMu.RUnlock()
+	if fn != nil {
+		fn(kind)
+	}
+}
+
+// deliverLockedCommand hands a report-only command to the locked-trust handler,
+// or drops it when none is installed.
+func (p *Provider) deliverLockedCommand(sc *types.SignedCommand, chain interfaces.PeerChain) {
+	p.inboundMu.RLock()
+	fn := p.hooks.OnCommand
+	p.inboundMu.RUnlock()
+	if fn == nil || sc == nil {
+		p.dropInbound("command")
+		return
+	}
+	go p.handleCommand(func(ctx context.Context, c *types.SignedCommand) error {
+		return fn(ctx, c, chain)
+	}, sc)
+}
+
+// hasUnknownFields reports whether a message carries fields outside its fixed
+// shape, which makes it malformed.
+func hasUnknownFields(m interface{ ProtoReflect() protoreflect.Message }) bool {
+	return len(m.ProtoReflect().GetUnknown()) > 0
+}
+
+// receiveTamperState applies the TamperState signal rules: locked=true is always
+// honored (it only lowers trust); locked=false only on a session whose server
+// certificate verified against the anchor. A nil or malformed signal is ignored.
+func (p *Provider) receiveTamperState(ts *transportpb.TamperState, anchorOK bool) {
+	if ts == nil || hasUnknownFields(ts) {
+		p.dropInbound("tamper_state")
+		return
+	}
+	if !ts.GetLocked() && !anchorOK {
+		p.dropInbound("tamper_state")
+		return
+	}
+	p.inboundMu.RLock()
+	fn := p.hooks.OnTamperState
+	p.inboundMu.RUnlock()
+	if fn == nil {
+		p.dropInbound("tamper_state")
+		return
+	}
+	fn(ts.GetLocked())
+}
+
+// receiveRepairRequest applies the RepairRequest rules: it is delivered only on
+// a session that passed the anchor check, and only when it has a repair ID, no
+// unknown fields and every field within its bound. The signature itself is
+// checked by the repair handler, not here.
+func (p *Provider) receiveRepairRequest(rr *transportpb.RepairRequest, anchorOK bool) {
+	if !anchorOK || !wellFormedRepair(rr) {
+		p.dropInbound("repair_request")
+		return
+	}
+	p.inboundMu.RLock()
+	fn := p.hooks.OnRepair
+	p.inboundMu.RUnlock()
+	if fn == nil {
+		p.dropInbound("repair_request")
+		return
+	}
+	fn(repairRequestFromProto(rr))
+}
+
+func wellFormedRepair(rr *transportpb.RepairRequest) bool {
+	if rr == nil || hasUnknownFields(rr) {
+		return false
+	}
+	if rr.GetRepairId() == "" || len(rr.GetRepairId()) > maxRepairIDLen ||
+		len(rr.GetLossDigest()) > maxRepairDigestLen ||
+		len(rr.GetSignature()) > maxRepairSignatureLen ||
+		len(rr.GetSignerChainPem()) > maxRepairChainPEMLen ||
+		len(rr.GetApprovedLossCodes()) > maxApprovedLossCodes {
+		return false
+	}
+	for _, code := range rr.GetApprovedLossCodes() {
+		if code == "" || len(code) > maxApprovedLossCodeLen {
+			return false
+		}
+	}
+	return true
 }
 
 // nextReconnectBackoff returns the next reconnect delay and the attempt number
@@ -1127,6 +1327,36 @@ func (p *Provider) SendCommand(ctx context.Context, cmd *types.SignedCommand) er
 	}
 
 	p.commandsSent.Add(1)
+	return nil
+}
+
+// SendTamperState sends a TamperState signal to a connected steward.
+func (p *Provider) SendTamperState(_ context.Context, stewardID string, locked bool) error {
+	return p.sendSignal(stewardID, &transportpb.ControlMessage{
+		Payload: &transportpb.ControlMessage_TamperState{TamperState: &transportpb.TamperState{Locked: locked}},
+	})
+}
+
+// SendRepair sends a RepairRequest to a connected steward.
+func (p *Provider) SendRepair(_ context.Context, stewardID string, req types.RepairRequest) error {
+	return p.sendSignal(stewardID, &transportpb.ControlMessage{
+		Payload: &transportpb.ControlMessage_RepairRequest{RepairRequest: repairRequestToProto(req)},
+	})
+}
+
+func (p *Provider) sendSignal(stewardID string, msg *transportpb.ControlMessage) error {
+	if p.mode != ModeServer {
+		return fmt.Errorf("signals can only be sent in server mode")
+	}
+	conn, ok := p.registry.Get(stewardID)
+	if !ok {
+		p.deliveryFailures.Add(1)
+		return fmt.Errorf("steward %s not connected: %w", stewardID, interfaces.ErrStewardNotConnected)
+	}
+	if err := conn.Send(msg); err != nil {
+		p.deliveryFailures.Add(1)
+		return fmt.Errorf("failed to send signal to steward %s: %w", stewardID, err)
+	}
 	return nil
 }
 

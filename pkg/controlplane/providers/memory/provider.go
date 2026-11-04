@@ -33,6 +33,7 @@ package memory
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -184,6 +185,11 @@ type Provider struct {
 	// and any commands that arrive before it is subscribed (Issue #4678).
 	commands *pendingcmd.Queue
 
+	// hooks and reportOnly mirror the gRPC provider's inbound switch (client
+	// mode). Guarded by mu.
+	hooks      interfaces.InboundHooks
+	reportOnly bool
+
 	// Subscriptions (server mode)
 	eventHandlers     []eventSubscription
 	heartbeatHandlers []interfaces.HeartbeatHandler
@@ -208,6 +214,7 @@ type Provider struct {
 var _ interfaces.ControlPlaneProvider = (*Provider)(nil)
 
 var (
+	_ interfaces.InboundController  = (*Provider)(nil)
 	_ interfaces.ResponseSender     = (*Provider)(nil)
 	_ interfaces.ResponseSubscriber = (*Provider)(nil)
 )
@@ -493,9 +500,123 @@ func (p *Provider) deliverCommand(cmd *types.SignedCommand, stewardID string) er
 	return nil
 }
 
+// SetInboundHooks replaces the client-side inbound callbacks.
+func (p *Provider) SetInboundHooks(hooks interfaces.InboundHooks) {
+	p.mu.Lock()
+	p.hooks = hooks
+	p.mu.Unlock()
+}
+
+// SetReportOnly switches the client-side receive path to report-only: commands
+// go only to InboundHooks.OnCommand, and are dropped when none is installed.
+func (p *Provider) SetReportOnly(on bool) {
+	p.mu.Lock()
+	p.reportOnly = on
+	p.mu.Unlock()
+}
+
+// SendTamperState delivers a TamperState signal to a connected steward. The
+// in-process bus has no server certificate, so every session counts as having
+// passed the anchor check.
+func (p *Provider) SendTamperState(_ context.Context, stewardID string, locked bool) error {
+	client, err := p.signalTarget(stewardID)
+	if err != nil {
+		return err
+	}
+	client.receiveTamperState(locked)
+	return nil
+}
+
+// SendRepair delivers a RepairRequest to a connected steward.
+func (p *Provider) SendRepair(_ context.Context, stewardID string, req types.RepairRequest) error {
+	client, err := p.signalTarget(stewardID)
+	if err != nil {
+		return err
+	}
+	client.receiveRepair(req)
+	return nil
+}
+
+// signalTarget returns the connected client for stewardID, failing when this
+// provider is not a started server.
+func (p *Provider) signalTarget(stewardID string) (*Provider, error) {
+	if p.mode != ModeServer {
+		return nil, fmt.Errorf("signals can only be sent in server mode")
+	}
+	if stewardID == "" {
+		return nil, fmt.Errorf("signal has no target steward ID")
+	}
+	if err := p.checkStarted(); err != nil {
+		return nil, err
+	}
+	p.mu.RLock()
+	bus := p.bus
+	p.mu.RUnlock()
+	client, ok := bus.lookupClient(stewardID)
+	if !ok {
+		p.deliveryFailures.Add(1)
+		return nil, fmt.Errorf("steward %s not connected: %w", stewardID, interfaces.ErrStewardNotConnected)
+	}
+	return client, nil
+}
+
+func (p *Provider) dropped(kind string) {
+	p.mu.RLock()
+	fn := p.hooks.OnDropped
+	p.mu.RUnlock()
+	if fn != nil {
+		fn(kind)
+	}
+}
+
+// receiveTamperState is the client-side ingress for a TamperState.
+func (p *Provider) receiveTamperState(locked bool) {
+	p.mu.RLock()
+	fn := p.hooks.OnTamperState
+	p.mu.RUnlock()
+	if fn == nil {
+		p.dropped("tamper_state")
+		return
+	}
+	fn(locked)
+}
+
+// receiveRepair is the client-side ingress for a RepairRequest.
+func (p *Provider) receiveRepair(req types.RepairRequest) {
+	p.mu.RLock()
+	fn := p.hooks.OnRepair
+	p.mu.RUnlock()
+	if fn == nil || req.RepairID == "" {
+		p.dropped("repair_request")
+		return
+	}
+	fn(req)
+}
+
 // receiveCommand is the client-side ingress for a command.
 func (p *Provider) receiveCommand(cmd *types.SignedCommand) {
 	p.commandsReceived.Add(1)
+
+	p.mu.RLock()
+	reportOnly, onCommand := p.reportOnly, p.hooks.OnCommand
+	p.mu.RUnlock()
+	if reportOnly {
+		if onCommand == nil {
+			p.dropped("command")
+			return
+		}
+		p.dispatchAsync(func() {
+			p.mu.RLock()
+			ctx := p.ctx
+			p.mu.RUnlock()
+			if err := onCommand(ctx, cmd, func() []*x509.Certificate { return nil }); err != nil {
+				p.logger.Error("locked command handler error",
+					"command_id", logging.SanitizeLogValue(cmd.Command.ID),
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
+		})
+		return
+	}
 
 	// A command that arrives before SubscribeCommands is held and delivered on
 	// subscription, as the gRPC provider does (Issue #4678).

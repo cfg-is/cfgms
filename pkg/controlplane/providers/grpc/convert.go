@@ -66,6 +66,7 @@ func commandToProto(cmd *types.Command) *transportpb.Command {
 		Term:      cmd.Term,
 
 		SigningPayloadVersion: cmd.SigningPayloadVersion,
+		SignerChainPem:        cmd.SignerChainPEM,
 	}
 	if len(cmd.Params) > 0 {
 		pb.Params = interfaceMapToStringMap(cmd.Params)
@@ -86,6 +87,7 @@ func commandFromProto(pb *transportpb.Command) *types.Command {
 		Term:      pb.GetTerm(),
 
 		SigningPayloadVersion: pb.GetSigningPayloadVersion(),
+		SignerChainPEM:        pb.GetSignerChainPem(),
 	}
 	if len(pb.GetParams()) > 0 {
 		cmd.Params = stringMapToInterfaceMap(pb.GetParams())
@@ -151,6 +153,7 @@ func signedCommandFromProto(pb *transportpb.Command) *types.SignedCommand {
 		Term:      pb.GetTerm(),
 
 		SigningPayloadVersion: pb.GetSigningPayloadVersion(),
+		SignerChainPem:        pb.GetSignerChainPem(),
 	}
 	cmd := commandFromProto(pbClean)
 	if cmd == nil {
@@ -483,4 +486,38 @@ func protoTimestampToTime(ts *timestamppb.Timestamp) time.Time {
 		return time.Time{}
 	}
 	return ts.AsTime()
+}
+
+// repairRequestToProto maps a RepairRequest to its wire form.
+func repairRequestToProto(r types.RepairRequest) *transportpb.RepairRequest {
+	return &transportpb.RepairRequest{
+		RepairId:          r.RepairID,
+		ApprovedLossCodes: append([]string(nil), r.ApprovedLossCodes...),
+		LossDigest:        r.LossDigest,
+		ExpiresAtUnix:     r.ExpiresAtUnix,
+		Signature:         r.Signature,
+		SignerChainPem:    r.SignerChainPEM,
+	}
+}
+
+// repairRequestFromProto maps the wire RepairRequest back to its value form.
+func repairRequestFromProto(pb *transportpb.RepairRequest) types.RepairRequest {
+	return types.RepairRequest{
+		RepairID:          pb.GetRepairId(),
+		ApprovedLossCodes: append([]string(nil), pb.GetApprovedLossCodes()...),
+		LossDigest:        pb.GetLossDigest(),
+		ExpiresAtUnix:     pb.GetExpiresAtUnix(),
+		Signature:         pb.GetSignature(),
+		SignerChainPEM:    pb.GetSignerChainPem(),
+	}
+}
+
+// RepairRequestToProto exports repairRequestToProto for cross-package round-trip tests.
+func RepairRequestToProto(r types.RepairRequest) *transportpb.RepairRequest {
+	return repairRequestToProto(r)
+}
+
+// RepairRequestFromProto exports repairRequestFromProto for cross-package round-trip tests.
+func RepairRequestFromProto(pb *transportpb.RepairRequest) types.RepairRequest {
+	return repairRequestFromProto(pb)
 }

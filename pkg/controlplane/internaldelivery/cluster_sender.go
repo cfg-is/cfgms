@@ -231,6 +231,14 @@ func (c *ClusterAwareSender) SubscribeCommands(ctx context.Context, stewardID st
 	return c.local.SubscribeCommands(ctx, stewardID, handler)
 }
 
+func (c *ClusterAwareSender) SendTamperState(ctx context.Context, stewardID string, locked bool) error {
+	return c.local.SendTamperState(ctx, stewardID, locked)
+}
+
+func (c *ClusterAwareSender) SendRepair(ctx context.Context, stewardID string, req types.RepairRequest) error {
+	return c.local.SendRepair(ctx, stewardID, req)
+}
+
 func (c *ClusterAwareSender) PublishEvent(ctx context.Context, event *types.Event) error {
 	return c.local.PublishEvent(ctx, event)
 }
