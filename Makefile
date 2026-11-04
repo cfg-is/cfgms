@@ -1,4 +1,4 @@
-.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-rest test-go-group-macos-api test-go-group-macos-providers test-go-group-macos-controller test-go-group-macos-steward test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection complexity-report complexity-check complexity-replay clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
+.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-rest test-go-group-macos-providers test-go-group-macos-steward test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection complexity-report complexity-check complexity-replay clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -713,129 +713,66 @@ test-go-group-windows-rest:
 		go test $$race_flag -short -timeout=10m $$pkgs; \
 	fi
 
-# The queue's former Native Build (macOS) job (removed in #4220) ran the same
-# package set as Linux WITH
-# -race (`go test -race -short ./pkg/... ./features/... ./cmd/...`). A first
-# attempt at 2 legs (api sharded internally 3-way, everything else in one
-# job) measured 10m25s and 11m44s on this story's own PR (#4225, run
-# 35811533253) — `macos-latest` hosted runners have only 3 vCPUs, so
-# test-framework-api-sharded's nproc-based internal sharding maxes out at 3
-# processes on the SAME 3 cores, and -race's overhead compounds it. Splitting
-# into more CI jobs (each its own dedicated 3-core runner) buys real
-# parallelism that internal sharding on one runner cannot; splitting the
-# *content* the way the Windows legs do (controller/steward pulled off the
-# "rest" pile) tackles the heaviest single packages (pkg/cert 74s,
-# pkg/controlplane/providers/grpc 67s, features/steward/client 65s,
-# features/controller/initialization 59s — all measured serial on that same
-# run's macos-rest job).
+# Native macOS unit-test legs (Issue #4219, scoped by Issue #5746). The macOS
+# legs test only code that ships on macOS: the in-module packages with test
+# files in the GOOS=darwin dependency closure of the three macOS-shipped
+# binaries. GOOS=darwin is pinned so CFGMS_TEST_GROUP_LIST_ONLY=1 gives the
+# same answer on a Linux host as on a macOS runner. The set is derived at run
+# time, never hand-listed; a controller package leaves it automatically when
+# the last macOS binary stops importing it.
 #
-# CFGMS_MACOS_API_SHARD/CFGMS_MACOS_API_SHARDS split features/controller/api's
-# test list into CI-job-level groups (default 1 shard = no split), each
-# running go test's own internal parallelism rather than
-# test-framework-api-sharded's process-level sharding — an outer split across
-# separate runners each with a full 3-core budget, not an inner split
-# fighting over the same 3 cores.
-#
-# Both variables are validated as decimal integers, and both `awk -v`
-# assignments are quoted, before either reaches awk. This is the same invariant
-# test-framework-api-sharded documents for CFGMS_API_TEST_SHARDS, in the awk
-# dialect instead of the bash-arithmetic one: an unquoted `-v s=$shard` lets a
-# value containing whitespace word-split into a *replacement awk program*, and
-# awk's system() then executes arbitrary commands. It is also a fail-open —
-# awk on macOS (BWK awk, like gawk) is fatal on a zero or non-numeric modulus
-# while Linux mawk passes every line through, so an unvalidated count
-# misbehaves differently on the only platform that runs this target, and an
-# empty partition used to `exit 0` with zero tests run behind the required
-# Build Gate context. Index and count are both range-checked (0 <= shard <
-# shards) and an empty enumeration or an empty shard slice fails closed. See
-# test_api_shard_count_rejects_non_integer in scripts/test-scripts.sh for the
-# regression guard covering both variable pairs.
-.PHONY: test-go-group-macos-api
-test-go-group-macos-api:
-	@shard="$${CFGMS_MACOS_API_SHARD:-0}"; \
-	shards="$${CFGMS_MACOS_API_SHARDS:-1}"; \
-	case "$$shards" in \
-	''|*[!0-9]*) \
-		echo "❌ CFGMS_MACOS_API_SHARDS must be a positive decimal integer, got '$$shards'"; \
-		exit 1;; \
-	esac; \
-	case "$$shard" in \
-	''|*[!0-9]*) \
-		echo "❌ CFGMS_MACOS_API_SHARD must be a non-negative decimal integer, got '$$shard'"; \
-		exit 1;; \
-	esac; \
-	shards=$$((10#$$shards)); \
-	shard=$$((10#$$shard)); \
-	if [ "$$shards" -lt 1 ]; then \
-		echo "❌ CFGMS_MACOS_API_SHARDS must be a positive decimal integer, got '$$shards'"; \
-		exit 1; \
-	fi; \
-	if [ "$$shard" -ge "$$shards" ]; then \
-		echo "❌ CFGMS_MACOS_API_SHARD must be less than CFGMS_MACOS_API_SHARDS ($$shards), got '$$shard'"; \
-		exit 1; \
-	fi; \
-	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
-		go list ./features/controller/api/...; \
-	else \
-		list_out=$$(go test -list '.*' ./features/controller/api/... 2>&1); \
-		list_rc=$$?; \
-		if [ $$list_rc -ne 0 ]; then \
-			echo "$$list_out"; \
-			echo "❌ failed to enumerate features/controller/api tests"; \
-			exit 1; \
-		fi; \
-		names=$$(echo "$$list_out" | grep -E '^Test'); \
-		total=$$(echo "$$names" | grep -c .); \
-		if [ "$$total" -eq 0 ]; then \
-			echo "❌ no tests found in features/controller/api - check package path or go test -list output"; \
-			exit 1; \
-		fi; \
-		pattern=$$(echo "$$names" | awk -v "s=$$shard" -v "n=$$shards" 'NR % n == s' | paste -sd'|' -); \
-		if [ -z "$$pattern" ]; then \
-			echo "❌ macos-api shard $$shard/$$shards: no tests assigned out of $$total - the shard count exceeds the test count. Refusing to report a pass."; \
-			exit 1; \
-		fi; \
-		echo "  Testing features/controller/api shard $$shard/$$shards (-race)..."; \
-		go test -race -short -timeout=10m -run "^($$pattern)$$" ./features/controller/api/...; \
-	fi
+# The set is partitioned across the three targets below: providers
+# (pkg/cert, pkg/controlplane, pkg/storage/providers/sqlite — the heaviest
+# packages measured under -race on a 3-vCPU macos-latest runner), steward
+# (features/steward, cmd) and rest (everything else, sharded across
+# CI-job-level groups, each on its own dedicated runner).
+MACOS_SHIPPED_PKGS = GOOS=darwin go list -deps -f '{{if and (not .Standard) (or .TestGoFiles .XTestGoFiles)}}{{.ImportPath}}{{end}}' ./cmd/steward ./cmd/cfgms-steward-launcher ./cmd/cfg | grep '^github.com/cfgis/cfgms/'
+MACOS_PROVIDERS_RE = ^github.com/cfgis/cfgms/(pkg/cert|pkg/controlplane|pkg/storage/providers/sqlite$$)
+MACOS_STEWARD_RE = ^github.com/cfgis/cfgms/(features/steward|cmd/)
 
-# pkg/cert, pkg/controlplane, pkg/storage/sqlite — the heaviest non-controller
-# packages measured above.
 .PHONY: test-go-group-macos-providers
 test-go-group-macos-providers:
-	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
-		go list $(GO_GROUP_WINDOWS_CONTROLLER_EXTRA); \
-	else \
-		echo "  Testing macos-providers group (pkg/cert, pkg/controlplane, pkg/storage/sqlite, -race)..."; \
-		go test -race -short -timeout=10m $(GO_GROUP_WINDOWS_CONTROLLER_EXTRA); \
-	fi
-
-.PHONY: test-go-group-macos-controller
-test-go-group-macos-controller:
-	@pkgs=$$(go list ./features/controller/... | grep -v '/features/controller/api$$'); \
+	@pkgs=$$($(MACOS_SHIPPED_PKGS) | grep -E '$(MACOS_PROVIDERS_RE)'); \
+	if [ -z "$$pkgs" ]; then \
+		echo "❌ macos-providers: package enumeration produced no packages - check go list output. Refusing to report a pass."; \
+		exit 1; \
+	fi; \
 	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
 		echo "$$pkgs"; \
 	else \
-		echo "  Testing macos-controller group (features/controller minus api, -race)..."; \
+		echo "  Testing macos-providers group (pkg/cert, pkg/controlplane, pkg/storage/providers/sqlite, -race)..."; \
 		go test -race -short -timeout=10m $$pkgs; \
 	fi
 
 .PHONY: test-go-group-macos-steward
 test-go-group-macos-steward:
-	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
-		go list $(GO_GROUP_WINDOWS_STEWARD_CMD); \
+	@pkgs=$$($(MACOS_SHIPPED_PKGS) | grep -E '$(MACOS_STEWARD_RE)'); \
+	if [ -z "$$pkgs" ]; then \
+		echo "❌ macos-steward: package enumeration produced no packages - check go list output. Refusing to report a pass."; \
+		exit 1; \
+	fi; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		echo "$$pkgs"; \
 	else \
 		echo "  Testing macos-steward group (features/steward, cmd, -race)..."; \
-		go test -race -short -timeout=10m $(GO_GROUP_WINDOWS_STEWARD_CMD); \
+		go test -race -short -timeout=10m $$pkgs; \
 	fi
 
-# Everything not claimed by the api/providers/controller/steward groups above,
-# split into CFGMS_MACOS_REST_SHARDS CI-job-level groups the same way the api
-# group is split (see above for why: more 3-core runners, not more processes
-# fighting over one runner's 3 cores), and validated the same way before either
-# value reaches awk (see test-go-group-macos-api for what an unvalidated,
-# unquoted `awk -v` assignment buys an attacker, and why an empty partition
-# must fail rather than exit 0).
+# Everything in the set not claimed by the providers/steward groups, split into
+# CFGMS_MACOS_REST_SHARDS CI-job-level groups (more 3-core runners, not more
+# processes fighting over one runner's 3 cores).
+#
+# Both variables are validated as decimal integers, and both `awk -v`
+# assignments are quoted, before either reaches awk: an unquoted `-v s=$shard`
+# lets a value containing whitespace word-split into a *replacement awk
+# program*, and awk's system() then executes arbitrary commands. It is also a
+# fail-open — awk on macOS (BWK awk, like gawk) is fatal on a zero or
+# non-numeric modulus while Linux mawk passes every line through, and an empty
+# partition used to `exit 0` with zero tests run behind the required Build
+# Gate context. Index and count are both range-checked (0 <= shard < shards)
+# and an empty enumeration or an empty shard slice fails closed. See
+# test_api_shard_count_rejects_non_integer in scripts/test-scripts.sh for the
+# regression guard.
 .PHONY: test-go-group-macos-rest
 test-go-group-macos-rest:
 	@shard="$${CFGMS_MACOS_REST_SHARD:-0}"; \
@@ -860,14 +797,9 @@ test-go-group-macos-rest:
 		echo "❌ CFGMS_MACOS_REST_SHARD must be less than CFGMS_MACOS_REST_SHARDS ($$shards), got '$$shard'"; \
 		exit 1; \
 	fi; \
-	pkgs_all=$$(go list ./pkg/... ./features/... ./cmd/... \
-		| grep -v '^github.com/cfgis/cfgms/features/controller$$' \
-		| grep -v '^github.com/cfgis/cfgms/features/controller/' \
-		| grep -v '^github.com/cfgis/cfgms/pkg/cert' \
-		| grep -v '^github.com/cfgis/cfgms/pkg/controlplane' \
-		| grep -v '^github.com/cfgis/cfgms/pkg/storage/providers/sqlite$$' \
-		| grep -v '^github.com/cfgis/cfgms/features/steward' \
-		| grep -v '^github.com/cfgis/cfgms/cmd/'); \
+	pkgs_all=$$($(MACOS_SHIPPED_PKGS) \
+		| grep -vE '$(MACOS_PROVIDERS_RE)' \
+		| grep -vE '$(MACOS_STEWARD_RE)'); \
 	if [ -z "$$pkgs_all" ]; then \
 		echo "❌ macos-rest: package enumeration produced no packages - check go list output. Refusing to report a pass."; \
 		exit 1; \
@@ -880,7 +812,7 @@ test-go-group-macos-rest:
 	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
 		echo "$$pkgs"; \
 	else \
-		echo "  Testing macos-rest shard $$shard/$$shards (remaining pkg/features/cmd packages, including modules, -race)..."; \
+		echo "  Testing macos-rest shard $$shard/$$shards (remaining shipped packages, -race)..."; \
 		go test -race -short -timeout=10m $$pkgs; \
 	fi
 

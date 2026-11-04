@@ -114,6 +114,15 @@ Queries: `gh run list --workflow cross-platform-build.yml --event merge_group --
 | `integration-tests` (Docker) | queue real | ubuntu-latest | via `needs` of ✅ `Build Gate` | 50 | 443s / 7.38m | 456s / 7.60m |
 | `build-gate` | queue real, `needs: [native-builds, integration-tests]` | ubuntu-latest | ✅ `Build Gate` | 50 | own step 3s / 0.05m; **effective (gated) time = 1060s / 17.66m** | own step 4s / 0.07m; **effective = 1172s / 19.54m** |
 
+**Native macOS unit-test legs (PR side, current state).** `cross-platform-build-pr.yml` runs 4 native macOS
+legs (`macos-providers`, `macos-steward`, `macos-rest-1`, `macos-rest-2`), all `-race`. They test only code that
+ships on macOS: the in-module packages with test files in the `GOOS=darwin` dependency closure of
+`./cmd/steward`, `./cmd/cfgms-steward-launcher` and `./cmd/cfg`, derived by the Makefile at run time
+(`MACOS_SHIPPED_PKGS`). Controller packages that no macOS binary contains are not tested there; the few
+`features/controller/...` packages that are in the closure stay until the steward stops depending on them.
+`scripts/test-scripts.sh` (`test_macos_groups_cover_exactly_shipped_packages`) asserts the union of the
+`test-go-group-macos-*` lists equals that set. The measurements in the tables above predate this scoping.
+
 ### `security-scan.yml`
 
 Queries per event, n=50 run-level each; job-level timing sampled at n=15 (PR/queue) or n=10 (push) of those 50 due to volume. PR: `2026-09-17T04:45:33Z`→`2026-09-18T21:22:01Z`. Queue: `2026-09-16T11:39:16Z`→`2026-09-18T20:50:15Z`. Push (main/tags): 44 total runs exist (fewer than 50 requested — exhausted); only 2 fall inside the last 90 days.
