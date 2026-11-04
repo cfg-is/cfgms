@@ -80,20 +80,23 @@ func TestManualReviewApprovalHook_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 		doneA <- hookA.leaseJob.RunIfLeader(context.Background(), hookA.expireTimedOut)
 	}()
 
+	// Synchronize on events, not wall-clock deadlines: node-a's lease
+	// acquisition is a durable (fsync'd) flatfile write whose latency is
+	// unbounded under a loaded sharded test run, so a fixed timer here
+	// reports a slow disk as a failed cycle. Either node-a's sweep starts
+	// (blocking.started) or RunIfLeader returns without invoking it (doneA
+	// before started) — the latter is the only genuine failure. A real hang
+	// is caught by go test's -timeout hang detector, which dumps stacks.
 	select {
 	case <-blocking.started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("node-a's cycle never started")
+	case ranA := <-doneA:
+		close(blocking.release)
+		t.Fatalf("node-a's cycle never started: RunIfLeader returned %v without invoking the sweep", ranA)
 	}
 
 	ranB := hookB.leaseJob.RunIfLeader(context.Background(), hookB.expireTimedOut)
 	assert.False(t, ranB, "node-b must not run its own cycle while node-a's is still in flight")
 
 	close(blocking.release)
-	select {
-	case ranA := <-doneA:
-		assert.True(t, ranA)
-	case <-time.After(2 * time.Second):
-		t.Fatal("node-a's cycle never completed")
-	}
+	assert.True(t, <-doneA, "node-a's cycle must complete once released")
 }
