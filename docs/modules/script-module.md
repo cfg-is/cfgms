@@ -28,11 +28,82 @@ The Script Module provides cross-platform script execution capabilities for CFGM
 - [Audit and Monitoring](#audit-and-monitoring)
 - [Examples](#examples)
 
+## Actions
+
+`action: execute` (default) stages content to a file and executes it. This is
+not shell-evaluated inline command execution. `action: stage` resolves a library
+script and records staged state without running it.
+
+### Stage action
+
+The stage action looks up a versioned library script and stages it for delivery to the endpoint without executing inline content. Use this when a workflow needs to make a script available on the host but defer execution.
+
+```yaml
+action: stage
+stage:
+  id: "my-setup-script"
+  version: "1.2.3"
+param_bindings:
+  - name: api_token
+    from: secret-store
+    key: my-api-token-key
+  - name: environment
+    from: literal
+    value: "production"
+```
+
+#### Required Fields (stage action)
+
+- **`action`** - Must be `"stage"`
+- **`stage.id`** - The library script identifier to look up in the `ScriptRepository`
+- **`stage.version`** - The semantic version to stage (e.g. `"1.2.3"`)
+
+#### Optional Fields (stage action)
+
+- **`param_bindings`** - Parameter bindings resolved at staging time (see [Parameter Bindings](#parameter-bindings) below). `content` and `shell` are **not** used on this path.
+
+#### Stage execution status
+
+When the stage action completes successfully the resource status is set to `StatusStaged` (`"staged"`). No `ExecutionResult` is produced (the script was not run). Downstream steps can observe `"staged"` status to confirm a script is ready for delivery.
+
+## Parameter Bindings
+
+`param_bindings` declares how script parameters receive their values at execution time. Bindings are resolved on both the `execute` and `stage` paths via the module's secret store. Resolved values are injected as environment variables — secrets are never written to the command line or script block content.
+
+```yaml
+param_bindings:
+  - name: db_password       # parameter name
+    from: secret-store      # resolve from the steward secret store
+    key: prod/db/password   # secret store lookup key
+  - name: region
+    from: literal           # use the value field directly
+    value: "us-east-1"
+```
+
+### ParamSource values
+
+| `from` value | Description | Required field |
+|---|---|---|
+| `secret-store` | Fetches the value from the steward secret store at execution time. The plaintext value is never stored in the config. | `key` (secret store lookup key) |
+| `literal` | Uses the `value` field directly. Suitable for non-secret runtime variables. | `value` |
+
+### Environment variable naming
+
+Resolved parameter values are injected as environment variables. The variable name depends on the shell and whether the parameter is a secret:
+
+| Shell | Secret (`from: secret-store`) | Literal (`from: literal`) |
+|---|---|---|
+| PowerShell / CMD | `CFGMS_SECRET_<PARAM_UPPER>` | `CFGMS_PARAM_<PARAM_UPPER>` |
+| Bash / Zsh / Sh / Python | `<PARAM_UPPER>` | `CFGMS_PARAM_<PARAM_UPPER>` |
+
 ## Basic Usage
 
 ### Module Configuration
 
-The script module follows the standard CFGMS ConfigState interface:
+Examples wrapped in `script:` below show the script payload, not a complete
+steward configuration. In a delivered desired-state document, put the payload
+under a named resource's `config`, with `module: script`. The Go ConfigState
+contract and the full document envelope are separate.
 
 ```yaml
 script:
@@ -56,7 +127,7 @@ script:
 | `shell` | string | Yes | Shell/interpreter to use (see [Platform Support](#platform-support)) |
 | `timeout` | duration | No | Maximum execution time. Default: **5 minutes** (`5m`). |
 | `description` | string | No | Human-readable description |
-| `working_dir` | string | No | Working directory for execution (defaults to system temp) |
+| `working_dir` | string | No | Working directory for execution (otherwise inherited from the steward process) |
 | `environment` | map | No | Environment variables injected into the script process |
 | `signing_policy` | string | No | Script signing requirement: `none` (default), `optional`, `required` |
 | `execution_context` | string | No | User context for execution: `system` (default) or `logged_in_user` |
@@ -102,9 +173,20 @@ script:
 
 ### Signing Policies
 
-1. **None** (`none`): No signature validation (default when `signing_policy` is omitted)
+The effective policy is the more restrictive of the resource policy and the
+steward-wide `script_signing.policy`. A resource cannot weaken an inherited
+`required` floor. The values below describe the resource request before that
+floor is applied:
+
+1. **None** (`none`): Requests no signature validation (resource default)
 2. **Optional** (`optional`): Validate signature if present; execute without validation if absent
 3. **Required** (`required`): Signature must be present and cryptographically valid
+
+The steward trust mode also restricts acceptable signers: `any_valid`,
+`trusted_keys`, or `trusted_keys_and_public` with public-CA acceptance enabled.
+Cryptographic validity alone is not proof the signer is allowed by the configured
+trust policy. See [signing configuration](../../features/modules/stdlib/script/signing.go)
+and the [configuration schema](../reference/config-schema.md).
 
 ### Supported Algorithms
 
@@ -354,7 +436,7 @@ modules:
 
 ### Example: Simple idempotent health-check script (no signing)
 
-**Use Case:** Run a lightweight health check on every convergence cycle to verify that a critical service is running. No code-signing required because the script performs read-only checks and the risk profile is low.
+**Use Case:** Run a lightweight health check on every convergence cycle to verify that a critical service is running. The resource requests no signing; it still must meet the steward-wide signing floor and authorization policy. Read-only script content is not a signing-policy exception.
 
 **Configuration:**
 

@@ -426,3 +426,12 @@ directly in a browser. Each is wrapped in a small preview harness with a
 fleet-overview add an **Auto / Light / Dark** theme toggle, so both responsive
 breakpoints and both themes can be reviewed from a single file — including from
 a phone.
+
+## Investigation interaction scope
+
+The [product vision](../product/vision.md) owns the approved investigation
+interaction: one chat-like input for the operator and structured agent output
+cards, including hypotheses, evidence, findings, proposed actions and open
+questions. Reference mockups supply visual/layout direction; they do not imply
+a free-form agent transcript or a delivered hypothesis-testing loop. Existing
+UI scaffolding and approved future interaction must remain distinct.

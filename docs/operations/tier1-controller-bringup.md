@@ -9,7 +9,7 @@ changed). No git, no external database out of the box.
 **`ctrl-node-01` deviates from this default as of 2026-08-05**: its storage
 backend was migrated from flatfile+SQLite to the shared PostgreSQL instance
 provisioned in #3124, via the real, live cutover documented in
-[`controller-ha-real-cluster-runbook.md` §2](../testing/controller-ha-real-cluster-runbook.md#2-storage-migration-story-3127)
+[backend migration guide](backend-migration.md)
 (#3127). The steps below still describe how a *fresh* Tier 1 controller is
 bootstrapped (flatfile+SQLite); they do not describe `ctrl-node-01`'s
 current running configuration.

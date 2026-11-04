@@ -5,7 +5,7 @@ audit, and security-audit records. These are dated observations, not current
 product or implementation instructions. Superseded transport and dispatch plans
 have been removed; their prior versions remain in Git history.
 
-Current guidance: [transport architecture](../architecture/communication-layer-migration.md),
+Current guidance: [transport architecture](../../ARCHITECTURE.md#communication-architecture),
 [agent development workflow](../development/agent-dispatch.md), and
 [agent operations](../operations/agent-dispatch.md).
 

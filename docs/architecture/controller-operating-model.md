@@ -348,7 +348,7 @@ The controller decides which steward gets which cfg based on:
 
 - **Direct assignment** — a cfg explicitly targets a steward by ID ✓ implemented (`config_service_v2.go`: per-steward config stored and retrieved by steward ID)
 - **Group membership** — a cfg targets a group; all stewards in that group receive it ✓ implemented (tenant/group path used in inheritance resolution)
-- **Tenant hierarchy** — cfgs inherit through the recursive tenant hierarchy (e.g., MSP → Client → Group → Device). Child tenants can override parent settings, but `InheritanceResolver.ResolveConfiguration()` only ever applies the first three tenant-path levels (MSP, Client, Group) plus the Device leaf — a tenant path deeper than that has its extra intermediate levels silently skipped, not "any depth." See [Configuration Inheritance](../guides/configuration-inheritance.md#current-inheritance-depth) for the depth cap and its rationale.
+- **Tenant hierarchy** — cfgs inherit through every tenant on the root-to-leaf path. Depth 0 uses MSP policy, depth 1 client policy, and each depth 2 or deeper group policy. Matching cluster and role fragments are then applied before device configuration. See [Configuration Inheritance](../guides/configuration-inheritance.md#resolution-order).
 - **Cluster membership** — a steward that belongs to one or more clusters (Hyper-V, SQL, etc.) receives an additional `cluster-policies/<clusterName>` config layer inserted after Group-level and before Device-level in the merge order ✓ implemented (`InheritanceResolver` cluster-policies cascade, Issue #2425)
 - **Effective cfg** — the controller resolves inheritance and produces the effective cfg for each steward, merging all applicable layers ✓ implemented (`GetEffectiveConfiguration()`)
 - **Tag-based targeting** — stewards can carry arbitrary tags (e.g., `ring=canary`, `role=web-server`, `region=us-east`); a cfg targets stewards by tag expression via role configs ✓ implemented (`roleConfigAdapter` in config_service_v2.go injects matching role fragments into `InheritanceResolver`, Issue #2546)
@@ -407,7 +407,7 @@ The `role-policies` ConfigStore namespace stores **role configs**: named objects
   "name":      "github-runners",
   "tenant_id": "acme/ops",
   "selector":  "os:windows tag:github-runner",
-  "fragment":  { ... StewardConfig fields ... },
+  "fragment":  { "resources": [] },
   "created_at": "2026-07-13T00:00:00Z",
   "created_by": "ops-admin"
 }
@@ -1623,7 +1623,7 @@ The workflow engine must support the following capabilities to fulfill its role 
 - **Testing** — sandbox execution, replay failed runs, input/output inspection per node
 - **Execution history** — a run's status, step results and error are durable, not node-local: the engine writes each execution through to the `WorkflowExecutionStore` (when it is registered, after each step result, and at its terminal status), so `cfg workflow status` and `GET /api/v1/workflows/{id}/executions/{exec_id}` answer on any controller node and after a restart. Cluster-wide visibility needs the `database` storage provider. A node answers for a run it owns from its live state and for any other run from the store. History is bounded per tenant (the newest 1000 terminal executions by default). Run variables are not stored. A run left `running` by a dead node is readable but not resumed, and cancelling a run is still handled only by the node executing it; see [Storage Architecture](storage-architecture.md).
 - **Versioning** — workflow version history, rollback to previous versions
-- **Operability** — operators can inspect and control running executions via the `cfg` CLI: `cfg workflow list` (definitions), `cfg workflow status <exec-id> --workflow <name>` (per-execution state and current step), `cfg workflow cancel <exec-id> --workflow <name>` (cancel a running execution). See [commands reference](../development/commands-reference.md#workflow-management).
+- **Operability** — operators can inspect and control running executions via the `cfg` CLI: `cfg workflow list` (definitions), `cfg workflow status <exec-id> --workflow <name>` (per-execution state and current step), `cfg workflow cancel <exec-id> --workflow <name>` (cancel a running execution). See [commands reference](../administration/workflows.md#workflow-management).
 
 ### Workflow vs Cfg Summary
 
@@ -1921,25 +1921,16 @@ Each cell is a complete, independent CFGMS deployment (its own controller cluste
 
 ### Cfg Inheritance
 
-Configuration resolves from root toward the leaf, but not through every
-intermediate tenant on a deep path:
+Resolution walks every tenant in ancestry order, followed by matching cluster
+policies, alphabetically ordered matching roles, and device configuration.
+Named resources replace entire earlier blocks; a replacement preserves its
+resource position. Security controls such as script-signing floors have their
+own tightening rules.
 
-1. Start with the root tenant's cfg
-2. Merge the child tenant's cfg over the parent's, but only for the first
-   three tenant-path levels (MSP, Client, Group) — `InheritanceResolver`
-   applies `msp-policies`, `client-policies` and `group-policies` at those
-   three levels specifically and skips any intermediate tenant beyond them;
-   a path deeper than three levels does not get a fourth merge step
-3. Named resources replace entire blocks (declarative merging)
-4. Device-level cfg is then applied unconditionally, keyed by steward ID
-   rather than tenant-path depth, so the leaf layer always applies regardless
-   of how deep the steward's tenant sits
-5. The leaf cfg (effective cfg for a steward) is the fully-resolved result
-
-See [Configuration Inheritance — Current Inheritance Depth](../guides/configuration-inheritance.md#current-inheritance-depth)
-for the depth cap in full and its rationale.
-
-Every value in the effective cfg carries its **source path** and **version** for auditability — an admin can see exactly which tenant level provided each setting.
+The [inheritance guide](../guides/configuration-inheritance.md) owns the exact
+layer/key mapping, merge behavior and effective-config diagnosis procedure.
+The effective response includes provenance for tracked resource/setting paths;
+use its `sources` metadata rather than inferring origin from the final value.
 
 ### Isolation Guarantees
 
@@ -2213,10 +2204,10 @@ The REST API is the admin interface to the controller. All operations are authen
 
 ```json
 {
-  "stewards": [ ... ],
-  "total": 48123,
+  "stewards": [],
+  "total": 0,
   "limit": 100,
-  "offset": 200
+  "offset": 0
 }
 ```
 

@@ -69,9 +69,9 @@ bootstrap path (Story #922, parent epic #749):
 - `steward.GetControllerConnectionStatus()` — controller mode removed
 - `steward.SetTransportClientForTesting()` — no longer needed; tests use `client.TransportClient` directly
 
-The `features/steward/performance/` subpackage (`AlertManager`, `RemediationEngine`,
+The the current steward performance helpers subpackage (`AlertManager`, `RemediationEngine`,
 `MemoryStorageBackend`, `NoOpStorageBackend`) was also removed — it had zero non-test
 callers and `RemediationEngine.TriggerRemediation` simulated work with `time.Sleep`.
 
-The `features/steward/config/SimpleStorageAdapter` was removed — it had zero callers
+The the current steward config/storage adapters was removed — it had zero callers
 anywhere in the codebase.

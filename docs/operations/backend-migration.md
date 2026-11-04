@@ -33,18 +33,12 @@ Recommended cutover sequence:
 6. Start the controller and verify it reads the migrated data correctly.
 7. Archive (do not immediately delete) the source backend for a roll-back window.
 
-## Downtime Envelope
+## Plan and verify the cutover
 
-| Phase                          | Typical Duration |
-|-------------------------------|-----------------|
-| `--dry-run` validation         | Seconds to minutes (read-only, no writes) |
-| Live migration (storage)       | Minutes to hours depending on record count |
-| Live migration (secrets)       | Seconds to minutes (secrets are small) |
-| Live migration (blobs)         | Minutes to hours depending on total blob size |
-| Controller restart and verify  | 30–120 seconds |
-
-Migration is idempotent: re-running against the same target is safe and produces
-the same record counts with no duplicates.
+Measure the dry-run/import/verification window for the actual data set and backend.
+There is no fixed restart or migration-time promise here. Supported importers use
+their defined upsert/idempotency contracts; verify the report and destination
+instead of assuming all kinds or backends behave identically.
 
 ## Generic Verb Shape
 
@@ -171,5 +165,5 @@ and provider-specific cutover notes.
 
 ## Related
 
-- [`docs/architecture/storage-architecture.md`](../architecture/storage-architecture.md) — storage provider overview and migration-from-git guide
+- [`docs/architecture/storage-architecture.md`](../architecture/storage-architecture.md) — storage provider overview
 - [Roadmap](../product/roadmap.md) — epic #2256 tracking all migration stories

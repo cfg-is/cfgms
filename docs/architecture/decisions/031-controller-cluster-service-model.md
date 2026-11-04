@@ -364,3 +364,12 @@ and [Certificate Rotation](../../security/certificate-rotation.md).
 
 The decisions/README.md index gains ADR-031's row; status columns for ADR-028/029
 update per above when this ADR is Accepted.
+
+## Predecessor lineage
+
+ADR-028 recorded the old Raft restart/log-persistence problem. Decision 5 replaces
+that substrate with database leases and supersedes the persistence design in
+whole; the full prior design remains in Git history. Its old restart timings,
+log paths and consensus implementation are not current deployment instructions.
+ADR-029's authority/fencing constraints remain relevant with the amended lease
+substrate described above.

@@ -186,6 +186,10 @@ Exactly one of `equals` or `contains` must be set per predicate; neither or both
 - **DNA vs config/drift.** DNA is observed inventory + fleet-queryable facts config does not already determine. A module carries `observe_when` iff its domain is bounded and inventory-worthy (`service`, `package`, `user`, `hyperv`, …); its whole-domain `Get` *is* its DNA. Content-bearing / unbounded-domain modules (`file`/directory, future registry-value) carry **no** `observe_when` — their declared resources live in **config + drift only**, never enumerated into DNA. The execution primitive `script` has no observation domain and carries none.
 - **Read-only guarantee.** An observe-eligible module's observe path runs only enumeration + `Get` (never `Set`), and its `behavioral_envelope` for that path must declare no writes — verified by `conformance.AssertObserveReadOnly` and auditable from the manifest.
 
+The read-only requirement and conformance checks describe the module contract.
+The [behavioral envelope](behavioral-envelope.md) is reviewable metadata; it does
+not install an OS sandbox that blocks all unintended writes by a module process.
+
 Resolution is controller-mediated: the steward reports baseline DNA, the controller matches every module's `observe_when` and returns the module set to pull. The steward needs no capability→module map.
 
 **Evaluating a module for `observe_when`:** existing modules are being tagged as part of the ADR-024 epic; new modules must make a considered declaration (or deliberate omission).

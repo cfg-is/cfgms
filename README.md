@@ -126,7 +126,7 @@ covers the development workflow. Contributors must sign the
 [Open an issue](https://github.com/cfg-is/cfgms/issues/new) for bugs and feature
 requests. Issues labelled `internal` are locked automated pipeline items, not
 closed to contribution; see
-[issue classes](CONTRIBUTING.md#issue-classes--why-some-issues-are-locked).
+[issue classes](CONTRIBUTING.md#report-an-issue-or-propose-work).
 
 - [Documentation](docs/)
 - [Development setup](docs/development/)

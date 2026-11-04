@@ -6,11 +6,12 @@ below; clustering alone does not establish regional failover.
 
 **Prerequisite**: Complete [Single Controller](../single-controller/walkthrough.md) first. This guide assumes you have a validated single-controller environment and covers turning it into a multi-node cluster.
 
-## Proven deployment shape
+## Deployment shape and validation scope
 
-A 3-node `ha.mode: cluster` deployment was live-validated against real hardware in epic #3090.
-The full environment, per-node bootstrap procedure, quorum verification, and rollback drills
-are documented in the runbook:
+A three-node shared-store deployment was previously measured on real hardware in
+epic #3090 using the earlier Raft implementation. Those results do not certify
+the current lease implementation. The current reproduction path and bounded
+historical results are in:
 
 **[Controller HA — real-cluster validation runbook](../../testing/controller-ha-real-cluster-runbook.md)**
 
@@ -45,8 +46,8 @@ are the critical per-node values:
 | `CFGMS_STORAGE_DB_PASSWORD_FILE` | Path to the sealed PostgreSQL password |
 | `CFGMS_SESSION_HMAC_KEY_FILE` | Path to the sealed session HMAC key (identical value on every node) |
 
-The `CFGMS_SECRETS_KEY_FILE` and `CFGMS_SESSION_HMAC_KEY_FILE` values **must be identical
-across all nodes** — they encrypt/authenticate shared rows in the cluster Postgres backend.
+The resolved secret-key and session-HMAC key material **must be identical
+across all nodes** (the local file paths may differ) — they encrypt/authenticate shared rows in the cluster Postgres backend.
 Independently generated per-node values produce ciphertext-authentication failures.
 
 ### Controller node time sync
@@ -114,5 +115,5 @@ node through the lease when the holder stops. No coordinated stop-all/start-all 
 For a rolling restart, restart one node, confirm `GET /api/v1/health` returns healthy, then
 move to the next.
 
-See §3 of the runbook for the full cluster-join procedure, rollback drill, and quorum
+See §3 of the runbook for the full cluster-join procedure, rollback drill, and membership/authority
 verification commands.

@@ -21,7 +21,7 @@ These standards ensure consistency, readability, and maintainability of Go code 
 - Organize code by feature, not technical layer.
 - Keep all feature code (implementation, tests, errors, interfaces) in a single package.
 - Use `internal/` for private implementations.
-- Use `pkg/` for public APIs.
+- Use `pkg/` for established central-provider contracts; follow [provider architecture](../../architecture/provider-architecture.md) rather than treating it as a miscellaneous public-API directory.
 
 ### File Organization
 
@@ -47,8 +47,8 @@ import (
     "github.com/pkg/errors"
     "go.uber.org/zap"
 
-    "github.com/cfgis/cfgms/internal/core"
-    "github.com/cfgis/cfgms/pkg/api"
+    "github.com/cfgis/cfgms/features/modules"
+    "github.com/cfgis/cfgms/pkg/logging"
 )
 ```
 

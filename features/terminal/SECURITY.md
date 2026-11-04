@@ -1,10 +1,10 @@
 # Terminal Security Controls
 
-This document describes the comprehensive security controls implemented for CFGMS terminal access, addressing Story #83: Remote Access - Add Terminal Security Controls and RBAC.
+Use this reference to review terminal controls and their implementation boundaries. The [terminal README](README.md) owns the currently wired browser relay and steward paths; the sections below describe the component controls.
 
 ## Overview
 
-The terminal security system provides granular access controls, command filtering, real-time session monitoring, and tamper-proof audit logging for all terminal sessions. It integrates with the existing mTLS authentication framework and implements multiple layers of security controls.
+The terminal security system provides granular access controls, command filtering, real-time session monitoring, and tamper-evident audit logging for all terminal sessions. It integrates with the existing mTLS authentication framework and implements multiple layers of security controls.
 
 **Tenant scoping is enforced at session creation.** `DefaultSessionManager.CreateSession` rejects any `SessionRequest` with an empty `TenantID` — sessions cannot be created without a tenant ID. The WebSocket handler reads the tenant from `r.Context().Value(ctxkeys.TenantID)` (populated by the auth middleware) and returns HTTP 400 if it is absent.
 

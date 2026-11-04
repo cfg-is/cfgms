@@ -122,3 +122,20 @@ template management) through this same live path.
 - Unit tests for engine, provider, exporter, cache, and template logic
 - API handler tests, including tenant/device scoping enforcement
 - No mocks — tests use real CFGMS components per CLAUDE.md
+
+## Advanced library integration
+
+`provider.AdvancedProvider` and `engine.AdvancedEngine` remain library-level
+components. They are not constructed by the controller's report API wiring.
+Their compliance/security aggregation methods and framework heuristics do not
+establish a released compliance-certification or anomaly-detection service.
+There is no measured multi-tenant capacity claim in this reference.
+
+For a deliberate library integration, inspect
+[NewAdvancedProvider](provider/advanced.go), [NewAdvancedEngine](engine/advanced.go)
+and the [advanced interfaces](interfaces/advanced.go). Supply the existing entity
+graph/audit dependencies, authorization manager, template processor, exporter and
+cache as required by those constructors. Propagate the authenticated tenant cut;
+do not promote illustrative tenant arrays into permission to query other clients.
+The adjacent tests cover those components; API availability must be verified
+through registered handlers and their callers separately.

@@ -13,9 +13,11 @@ The steward is a daemon that maintains a device in the state described by its cf
 
 ### Startup
 
-The steward starts immediately when the OS service manager launches it and runs
-regardless of what else on the host is ready. Subsystems attach as they become
-available — the process never exits because a dependency is not yet up. (Issue #2034)
+The service manager starts the steward, which retries transient dependency and
+connection failures as its subsystems become available. This is not a promise
+that every failure is recoverable in-process: invalid configuration, protected
+identity/trust or required security-profile validation can refuse startup or
+hold execution closed. See the actual entry-path guards in `cmd/steward/main.go`.
 
 1. **Early logger** — A stderr logger is active from the first instruction, before any disk or network call. A file-based logger is initialised next; if that fails (e.g. log dir not yet writable at early boot) the process continues with the stderr fallback.
 2. **Load cfg** — Find and parse the `hostname.cfg` file (local file, or last-known cfg from controller)
@@ -449,7 +451,7 @@ The steward continuously knows about itself. This information is collected indep
 
 ### DNA (Digital Native Attributes)
 
-The device's stable, hashable state — a **set of addressable fragments**, not a flat snapshot (ADR-016 / ADR-017). Each fragment has an object-canonical **typed entity id** (`service:sshd`, `host:cpu`), a single resolved **authority** (a managing module, or the gatherer/osquery for observe-only host facts), and a **provenance envelope** (`source`, `observed_at`, `confidence`) carried outside its hash. For the per-attribute audit of the **legacy** flat-map collector this model retires, see [DNA Collection Audit](dna-collection.md).
+The device's stable, hashable state — a **set of addressable fragments**, not a flat snapshot (ADR-016 / ADR-017). Each fragment has an object-canonical **typed entity id** (`service:sshd`, `host:cpu`), a single resolved **authority** (a managing module, or the gatherer/osquery for observe-only host facts), and a **provenance envelope** (`source`, `observed_at`, `confidence`) carried outside its hash. For the per-attribute audit of the **legacy** flat-map collector this model retires, see [DNA Collection Audit](../../features/steward/dna/README.md).
 
 Fragments are sourced by class:
 
@@ -1228,14 +1230,11 @@ TLS verification is always enforced. There is no environment variable to disable
 
 ## Cfg Fields Governing Convergence
 
-The convergence loop behaviour is controlled by fields in the cfg:
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `steward.converge_interval` | `30m` | How often the steward re-converges against the cfg. Accepts any Go duration string: `"5m"`, `"30m"`, `"1h"`, etc. |
-| `steward.drift_mode` | `apply` | How the steward handles detected drift. `apply`: correct drift with `Set()` + `Verify()`. `monitor`: emit `drift.detected.monitor` event, skip `Set()` and `Verify()`. **Controller-delivered only** — local file value is ignored. |
-
-Typical convergence intervals for configuration-management agents fall in the 5–30 minute range; the `30m` default sits at the conservative end of that range.
+The [config schema](../reference/config-schema.md) owns field names/defaults and
+[authoring guide](steward-configuration.md) distinguishes startup from delivered
+resources. This runtime model owns how convergence, drift mode, observation and
+controller connectivity interact. Do not keep a second field/default inventory
+here or treat standalone startup flags as managed reconnect requirements.
 
 ## Deployment-Independent Behavior
 

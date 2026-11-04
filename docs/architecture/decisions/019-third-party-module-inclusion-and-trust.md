@@ -1,6 +1,8 @@
 # ADR-019: Third-Party Module Inclusion and Delegated Publisher Trust
 
-**Status:** Proposed
+**Status:** Accepted
+
+**Accepted:** 2026-11-03
 **Date:** 2026-07-04
 **Issue:** (to be assigned at decomposition)
 **Epic:** (module-trust epic — to be filed)
@@ -14,17 +16,16 @@ ADR-006 established the module trust primitives — signed out-of-process bundle
 1. **How a tenant includes and trusts a third-party module** — one written by an internal team or a vendor CFGMS has never heard of, for a trusted line-of-business app.
 2. **The runtime/SaaS reality.** ADR-006's boundary — "no runtime key store; adding a publisher requires a steward rebuild" — is incompatible with SaaS: the operator compiles stewards centrally and ships one binary to all clients, and cannot recompile per tenant to bake in each tenant's LOB vendor keys.
 
-### Current state (audit, 2026-07-04)
+### State at the July 2026 design audit
 
-An audit of the tree found the bundle/trust machinery is largely **unbuilt on the steward** — this ADR designs a target model, not a patch to a working system:
-
-- **Steward endpoint modules are statically compiled into the binary** (`features/steward/factory/factory.go:171`, `:144`). No bundle, no signature, no trust check on the steward path.
-- `required_modules:` resolution (`features/controller/modules/resolution/`), the steward bundle runtime + trust enforcer (`features/steward/modules/runtime`, `.../trust`), and `module_trust.additional_publishers` (`trust.go:80` `TODO: v2`) are **built-but-orphaned or stub** — zero production callers.
-- The git-repo module lineage (`features/config/git/module_repository.go`, `BasicSecurityScanner`) is **legacy-dead** — no production callers; its scanner is never registered.
-- The **only live bundle path** is controller-side **workflow** (controller-kind) modules (M365/Entra): cache → approval → fork/exec.
-- Trust/approval/cache are **global** — no per-tenant scoping.
-
-The verify primitives themselves (`pkg/modules/trust/verify.go`, the approval rules) are real and correct; they are simply only reachable from the controller workflow path today.
+The initial design audit found statically compiled endpoint modules and
+incomplete bundle/runtime wiring. That was the motivation for this decision,
+not a description of the current tree. The steward now has bundle loading and
+trust enforcement paths. For current admission, approval, loading and error
+behavior use [module publishing](../../operations/module-publishing.md) and the
+[module architecture](../modules/README.md), verified against their referenced
+implementations. Acceptance of this decision does not claim every proposed
+admission policy or platform has been released and runtime-validated.
 
 ### The conflation this ADR resolves
 

@@ -18,10 +18,10 @@ The Terminal module provides secure remote terminal access to managed Stewards t
 ```
 
 ### Integration Points
-1. **Controller REST API** (`features/controller/api/server.go:200`): Add terminal WebSocket endpoints
-2. **QUIC Data Plane** (via `pkg/quic`): Terminal data streaming over existing QUIC connections
+1. **Controller REST API** ([routes_terminal.go](../controller/api/routes_terminal.go)): Registered terminal routes
+2. **gRPC-over-QUIC transport** (via `pkg/transport/quic`): Terminal data streaming over existing QUIC connections
 3. **gRPC Control Plane**: Terminal session management commands
-4. **RBAC System** (`features/rbac/manager.go`): Terminal access permissions
+4. **RBAC System** (`pkg/rbac`): Terminal access permissions
 5. **Certificate Management** (`pkg/cert/manager.go`): mTLS for terminal streams
 
 ## Controller Relay (Issue #2761)
@@ -121,3 +121,21 @@ features/terminal/
 - `github.com/gorilla/websocket`: WebSocket implementation
 - `github.com/creack/pty`: Cross-platform PTY support
 - Existing CFGMS components: RBAC, certificates, logging, telemetry
+## RBAC integration and verification
+
+[AuthenticatedTerminalManager](auth_integration.go) owns terminal authentication
+and continuous-authorization integration. Its revocation, session-token and JIT
+helpers must be evaluated through their actual call sites; a helper existing is
+not proof every terminal path invokes it. The browser relay and steward leg above
+have separate authentication boundaries.
+
+Run the tests beside `auth_integration.go`, `security.go` and the controller relay
+when changing these paths. Preserve empty-tenant refusal, cross-tenant/device
+checks, token binding, recording failure behavior and revocation cases. Do not
+carry forward the old completed-story report's 95% reliability or microsecond
+latency claims as current production guarantees.
+
+[Terminal security](SECURITY.md) owns controls/limitations;
+[ADR-021](../../docs/architecture/decisions/021-identity-assurance-levels.md) owns
+assurance requirements and [ADR-018](../../docs/architecture/decisions/018-web-session-semantics.md)
+the browser-session contract.

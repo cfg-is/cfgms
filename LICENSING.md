@@ -61,6 +61,14 @@ Yes. You may fork CFGMS under AGPL-3.0. Forks distributed to third parties must 
 
 CFGMS supports a recursive parent-child tenant hierarchy with unlimited depth, using path-based identification (e.g., `acme-msp/client-a/production`). Each controller deployment has a single root tenant. This model supports MSPs managing many clients within one CFGMS deployment.
 
+### Commercial agreement and repository license
+
+The commercial license is a private outbound agreement between cfg.is and the
+licensee. No in-repository code is covered by that agreement: every file remains
+AGPL-3.0 as identified by its `AGPL-3.0-only` SPDX header. The private agreement
+governs the licensed components in a licensee's proprietary product; the public
+repository remains AGPL-3.0 for all users.
+
 ### How do I get a commercial license?
 
 Contact [licensing@cfg.is](mailto:licensing@cfg.is).
@@ -81,7 +89,7 @@ The CLA (v2.0) establishes that:
 2. Add your name to [CONTRIBUTORS.md](CONTRIBUTORS.md)
 3. Submit your pull request
 
-See [CONTRIBUTING.md](CONTRIBUTING.md#contributor-license-agreement-cla) for complete details.
+See [CONTRIBUTING.md](CONTRIBUTING.md#contributor-agreement-and-licensing) for complete details.
 
 ## Contact
 

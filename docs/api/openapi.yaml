@@ -4,26 +4,33 @@ info:
   description: |
     Configuration Management System REST API for managing stewards, configurations,
     certificates, and role-based access control.
+    This is a curated operation/schema subset, not an exhaustive route inventory.
+    Registered handlers and route-contract tests determine availability; optional
+    services and the separate metrics listener have their own wiring. Serialized
+    field shapes do not replace handler validation, tenant/assurance or proof rules.
   version: 1.0.0
   contact:
     name: CFGMS Support
     url: https://github.com/cfg-is/cfgms
   license:
-    name: Apache 2.0
-    url: https://www.apache.org/licenses/LICENSE-2.0.html
+    name: AGPL-3.0-only
+    url: https://www.gnu.org/licenses/agpl-3.0.html
 
 servers:
-  - url: http://localhost:9080/api/v1
-    description: Development server
-  - url: https://{hostname}:9080/api/v1
-    description: Production server
+  - url: https://{hostname}:{port}/api/v1
+    description: Controller API listener; trust the configured CA
     variables:
       hostname:
-        default: cfgms.local
+        default: localhost
         description: CFGMS controller hostname
+      port:
+        default: '9080'
+        description: Configured API listener port (--listen-api-addr, CFGMS_HTTP_LISTEN_ADDR or the config file); 9080 is the default
 
 security:
   - ApiKeyAuth: []
+  - BearerAuth: []
+  - BrowserSession: []
 
 paths:
   /registration/pending:
@@ -1491,15 +1498,21 @@ paths:
           $ref: '#/components/responses/Unauthorized'
 
   /monitoring/metrics:
+    servers:
+      - url: https://{hostname}:{port}/api/v1
+        description: Private metrics listener; use configured address and authorized credentials.
+        variables:
+          hostname:
+            default: localhost
+          port:
+            default: '9090'
+            description: Port from metrics_listen_addr or CFGMS_METRICS_LISTEN_ADDR; it has no built-in default, and 9090 is only the container example
     get:
       summary: Get performance metrics
       description: Returns current performance metrics from the dedicated private metrics listener. The public product listener returns 404 for this path.
       operationId: getMetrics
       tags:
         - Monitoring
-      servers:
-        - url: https://localhost:9090/api/v1
-          description: Private metrics listener; replace localhost only with an explicitly configured private address
       responses:
         '200':
           description: Performance metrics
@@ -1564,15 +1577,21 @@ paths:
           $ref: '#/components/responses/NotFound'
 
   /monitoring/components/{component}/metrics:
+    servers:
+      - url: https://{hostname}:{port}/api/v1
+        description: Private metrics listener; use configured address and authorized credentials.
+        variables:
+          hostname:
+            default: localhost
+          port:
+            default: '9090'
+            description: Port from metrics_listen_addr or CFGMS_METRICS_LISTEN_ADDR; it has no built-in default, and 9090 is only the container example
     get:
       summary: Get component metrics
       description: Returns the metrics of one controller component (same names as the health endpoint) from the dedicated private metrics listener. The public product listener returns 404 for this path. Requires `monitoring:read-component-metrics`.
       operationId: getComponentMetrics
       tags:
         - Monitoring
-      servers:
-        - url: https://localhost:9090/api/v1
-          description: Private metrics listener; replace localhost only with an explicitly configured private address
       parameters:
         - name: component
           in: path
@@ -2027,6 +2046,15 @@ paths:
 
 components:
   securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Credential/session bearer transport where accepted by the route; not an operator-proof bypass.
+    BrowserSession:
+      type: apiKey
+      in: cookie
+      name: __Host-cfgms_session
+      description: Browser session; unsafe requests also need the current session CSRF contract.
     ApiKeyAuth:
       type: apiKey
       in: header
@@ -2304,103 +2332,122 @@ components:
       properties:
         id:
           type: string
-          description: Unique steward identifier
+        tenant_id:
+          type: string
         status:
           type: string
-          description: Current steward status
-          enum: [online, offline, unknown]
         last_seen:
           type: string
           format: date-time
-          description: Last time the steward was seen
-        clock_offset_ms:
-          type: integer
-          format: int64
-          description: >-
-            Steward clock minus controller clock in milliseconds, from the last
-            heartbeat (negative when the steward is behind). Omitted when unknown.
-        key_protection_level:
-          type: string
-          enum: [file, tpm, secure-enclave]
-          description: >-
-            How the steward's device key is protected. Omitted for a record that
-            predates the field.
-        key_algorithm:
-          type: string
-          enum: [ed25519, ecdsa-p256]
-          description: >-
-            Device key algorithm. A record that stored none is reported as ed25519.
         version:
           type: string
-          description: Steward software version
         connected_at:
           type: string
           format: date-time
-          description: Connection timestamp
         metrics:
           type: object
-          additionalProperties:
-            type: string
-          description: Steward performance metrics
+          additionalProperties: true
+        dna:
+          type: object
+          additionalProperties: true
+          nullable: true
+        hidden:
+          type: boolean
         tags:
           type: array
           items:
             type: string
-          description: Operator-assigned steward tags; omitted when the steward has none
-        dna:
-          $ref: '#/components/schemas/DNAInfo'
-
+        clock_offset_ms:
+          type: integer
+          nullable: true
+        active_sessions:
+          type: integer
+        connection_state:
+          type: string
+        key_protection_level:
+          type: string
+        key_algorithm:
+          type: string
+        health_reasons:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        tamper_codes:
+          type: array
+          items:
+            type: string
     DNAInfo:
       type: object
       properties:
         hostname:
           type: string
-          description: Steward hostname
         os:
           type: string
-          description: Operating system
         architecture:
           type: string
-          description: System architecture
+        config_hash:
+          type: string
         attributes:
           type: object
-          additionalProperties:
-            type: string
-          description: Additional DNA attributes
-
+          additionalProperties: true
+        fragments:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            nullable: true
+        collected_at:
+          type: string
+          format: date-time
+          nullable: true
     ConfigInfo:
       type: object
       properties:
+        steward_id:
+          type: string
         version:
           type: string
-          description: Configuration version
-        modules:
+        config:
           type: object
-          additionalProperties:
-            type: object
-          description: Module-specific configurations
-
+          additionalProperties: true
+        updated_at:
+          type: string
+          format: date-time
     EffectiveConfig:
       type: object
       properties:
-        values:
+        steward_id:
+          type: string
+        tenant_id:
+          type: string
+        config:
+          type: object
+          additionalProperties: true
+          nullable: true
+        sources:
           type: object
           additionalProperties:
             $ref: '#/components/schemas/ConfigValue'
-
+        generated_at:
+          type: string
+          format: date-time
     ConfigValue:
       type: object
       properties:
-        value:
-          description: The configuration value
-        source:
-          type: string
-          description: Which level provided this value
-          enum: [msp, client, group, device]
         level:
           type: integer
-          description: Hierarchy level (0=msp, 1=client, 2=group, 3=device)
-
+        tenant_id:
+          type: string
+        config_name:
+          type: string
+        version:
+          type: integer
+        updated_at:
+          type: string
+          format: date-time
+        source:
+          type: string
     ValidationResult:
       type: object
       properties:
@@ -2428,60 +2475,55 @@ components:
     CertificateInfo:
       type: object
       properties:
-        serial:
+        serial_number:
           type: string
-        subject:
+        common_name:
           type: string
-        issuer:
+        steward_id:
           type: string
-        not_before:
-          type: string
-          format: date-time
-        not_after:
-          type: string
-          format: date-time
-        revoked:
-          type: boolean
         tenant_id:
           type: string
-          description: Tenant of the owning steward; omitted when the certificate has no owning steward record.
+        is_valid:
+          type: boolean
         issued_at:
           type: string
           format: date-time
-          description: Time the certificate was issued.
-
+        expires_at:
+          type: string
+          format: date-time
+        days_until_expiration:
+          type: integer
+        needs_renewal:
+          type: boolean
     CertificateRequest:
       type: object
-      required:
-        - subject_type
-        - subject_id
       properties:
-        subject_type:
+        steward_id:
           type: string
-          enum: [steward, user]
-        subject_id:
+        common_name:
+          type: string
+        organization:
           type: string
         validity_days:
           type: integer
-          default: 365
-          maximum: 825
-          description: >-
-            A request exceeding the maximum is refused with 400 Bad Request
-            (VALIDITY_DAYS_EXCEEDS_MAXIMUM), never silently clamped.
-
+      required:
+      - steward_id
     CertificateResponse:
       type: object
       properties:
-        certificate:
+        certificate_pem:
           type: string
-          description: PEM-encoded certificate
-        private_key:
+        private_key_pem:
           type: string
-          description: PEM-encoded private key
-        ca_certificate:
+        ca_certificate_pem:
           type: string
-          description: PEM-encoded CA certificate
-
+        serial_number:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+      description: Sensitive steward-leaf provisioning result; distinct from operator
+        signing-credential enrollment.
     Permission:
       type: object
       properties:
@@ -2531,20 +2573,17 @@ components:
 
     PermissionCheckRequest:
       type: object
-      required:
-        - subject
-        - resource
-        - action
       properties:
-        subject:
+        subject_id:
           type: string
-        resource:
+        resource_type:
+          type: string
+        resource_id:
           type: string
         action:
           type: string
         tenant_id:
           type: string
-
     APIKeyInfo:
       type: object
       properties:
@@ -2552,51 +2591,61 @@ components:
           type: string
         name:
           type: string
+        permissions:
+          type: array
+          items:
+            type: string
         created_at:
           type: string
           format: date-time
         expires_at:
           type: string
           format: date-time
-        last_used:
+          nullable: true
+        tenant_id:
           type: string
-          format: date-time
-        permissions:
-          type: array
-          items:
-            type: string
-
     APIKeyRequest:
       type: object
-      required:
-        - name
       properties:
         name:
           type: string
-        expires_in_days:
-          type: integer
-          minimum: 1
-          maximum: 365
-          default: 30
         permissions:
           type: array
           items:
             type: string
-
+        role_id:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        tenant_id:
+          type: string
+      required:
+      - name
     APIKeyResponse:
       type: object
       properties:
         id:
           type: string
-        key:
-          type: string
-          description: The actual API key (only shown once)
         name:
           type: string
+        permissions:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
         expires_at:
           type: string
           format: date-time
-
+          nullable: true
+        tenant_id:
+          type: string
+        key:
+          type: string
+          description: Returned only when the key is created.
     SystemHealth:
       type: object
       properties:

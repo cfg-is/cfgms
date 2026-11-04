@@ -300,7 +300,7 @@ module_trust:
 |------|-----------------------|
 | `controller` (default) | Accepts a bundle the controller delivered. Still checks hashes and identity locally |
 | `strict` | Verifies a publisher signature itself against compiled-in keys (the `cfgms` key and `STEWARD_ADDITIONAL_PUBLISHER_KEYS` named by `additional_publishers`) |
-| `bypass` | No signature enforcement. Development only; logs a warning |
+| `bypass` | Rejected in ordinary builds; only a `cfgms_dev_bypass` development build permits bypass. It is not a production unsigned-module tier. |
 
 **`controller` mode trusts the controller's approval; `strict` is the control that holds
 if the controller or an admin account is compromised.** In `controller` mode, anyone who

@@ -2,8 +2,9 @@
 
 A composite GitHub Action that signs scripts changed in a push using
 `cfg script sign` and commits the resulting `.sig` sidecar files back to the
-branch.  CFGMS stewards verify these signatures before executing any script,
-providing end-to-end integrity guarantees across your MSP fleet.
+branch. Stewards validate signatures according to their effective signing floor
+and signer-trust policy. Producing a sidecar alone does not configure that policy
+or authorize execution; see the [script contract](../../../docs/modules/script-module.md).
 
 ## Quick start
 

@@ -4,7 +4,7 @@ This document outlines the testing standards for CFGMS.
 
 ## Overview
 
-These standards ensure that CFGMS code is thoroughly tested, reliable, and maintainable. They define the types of tests to be written, the testing methodologies to be used, and the quality metrics to be achieved.
+This is the normative test-quality contract. Use the [validation map](../../testing/testing-strategy.md) for execution targets and source-adjacent suite guides for infrastructure. Passing these rules does not alone certify release readiness.
 
 ## Testing Principles
 

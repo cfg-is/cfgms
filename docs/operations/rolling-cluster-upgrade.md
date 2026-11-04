@@ -1,173 +1,87 @@
 # Rolling Cluster Upgrade Runbook
 
-How to perform a zero-downtime rolling upgrade of a CFGMS controller cluster.
-
-## Overview
-
-A rolling cluster upgrade replaces controller nodes one at a time, ensuring the
-cluster remains available throughout. Each node is drained before its binary is
-replaced, then re-joined once the upgraded binary is healthy.
+Replace controller binaries one node at a time while healthy peers serve the
+fleet. Availability depends on shared stores, remaining capacity and correctly
+configured endpoint routing; this procedure does not promise a fixed reconnect time.
 
 ## Prerequisites
 
-- Admin mTLS bundle (`~/.config/cfgms/admin.bundle.yaml` or `--bundle <path>`)
-- Cluster has at least two nodes (single-node clusters cannot drain without downtime)
-- All nodes healthy before starting
+- A validated [controller cluster](../deployment/controller-cluster/walkthrough.md)
+  with enough healthy peers to serve while one node is unavailable.
+- A load balancer/VIP that routes HTTPS and QUIC traffic appropriately and
+  removes a node when its `/api/v1/health` response is not healthy.
+- An authorized operator session for cluster administration. See the
+  [operator guide](../deployment/cfg-operator-guide.md).
+- The current node IDs, direct node addresses, CA trust and service configuration.
+  Use the authenticated `GET /api/v1/ha/nodes` API to inspect the node registry;
+  there is no `cfg controller cluster status` command.
 
-## Procedure
-
-### 1. Identify the node to upgrade
-
-```bash
-# List cluster nodes and their current states (available in a future story)
-cfg controller cluster status --url=https://controller.example.com
-```
-
-### 2. Drain the node
-
-Draining prevents the node from accepting new work while allowing in-flight
-requests to complete.
+## 1. Drain one node
 
 ```bash
 cfg controller cluster drain <node-id> \
-    --url=https://controller.example.com
+  --url https://controller.example.com
 ```
 
-Wait for the drain to complete. The command prints the resulting node state:
-
-```
-Node <node-id> is now draining.
-```
-
-### 3. Verify the load balancer health gate
-
-After drain, confirm `GET /api/v1/health` on the draining node returns HTTP 503.
-Poll the node directly (not through the load balancer):
+Confirm the draining node directly returns `503` from the public liveness gate:
 
 ```bash
-curl -o /dev/null -w "%{http_code}\n" \
-    --cert ~/.config/cfgms/admin.crt \
-    --key ~/.config/cfgms/admin.key \
-    --cacert ~/.config/cfgms/ca.crt \
-    https://<node-host>:9080/api/v1/health
-# Expected: 503
+curl --cacert /path/to/controller-ca.crt \
+  --output /dev/null --write-out '%{http_code}\n' \
+  https://node.example.com:9080/api/v1/health
 ```
 
-The response body reports `"status": "degraded"`.
-The load balancer stops routing new steward connections once it sees the 503.
+Check the load balancer has stopped routing new connections to that node.
+Existing connections can still be disrupted by stopping the process. Observe
+session/connection telemetry where available; `cfg controller status` is a health
+summary, not a per-node active-session counter. Do not wait on an invented counter
+or assume sessions naturally drain to zero within a fixed heartbeat interval.
 
-### 4. Observe session drain
+## 2. Upgrade and restart the drained service
 
-Existing steward sessions established before the drain continue until they close
-naturally. Monitor the active session count until it reaches zero before
-stopping the process (optional but minimises reconnect storms):
+Follow the [single-controller upgrade procedure](controller-upgrade.md), including
+its credential-backed systemd branch, readiness probe and rollback instructions.
+Keep the node's identity, shared-store credentials and config unchanged.
+
+For a service without systemd credential directives, the CLI example is:
 
 ```bash
-# Run on the draining node — repeat until count is 0
-cfg controller status --url=https://<node-host>:9080
+sudo cfg controller upgrade restart \
+  --binary /opt/cfgms/cfgms-controller-new \
+  --config /etc/cfgms/controller.cfg \
+  --canonical-api-addr 127.0.0.1:9080
 ```
 
-In environments where brief reconnect storms are acceptable, you can stop
-the controller immediately after the 503 is confirmed; stewards reconnect to
-remaining nodes within one heartbeat interval.
+The canonical sealed-credential service must use the manual service-manager
+procedure in that runbook. Do not use experimental `upgrade run` as a workaround.
 
-### 5. Upgrade the binary on the drained node
-
-SSH to the node and run the upgrade (see [controller-upgrade.md](controller-upgrade.md) for the full
-single-node upgrade runbook). Use `upgrade restart` — the supported production
-path (Issue #2015) — not `upgrade run`, which is an experimental port-swap
-orchestrator frozen per ADR-007 and explicitly not the supported path:
+## 3. Validate the node before proceeding
 
 ```bash
-cfg controller upgrade restart \
-    --binary /opt/cfgms/cfgms-controller-v0.6.0 \
-    --config /etc/cfgms/controller.cfg \
-    --url=https://<node-host>:9080
+curl --fail --cacert /path/to/controller-ca.crt \
+  https://node.example.com:9080/api/v1/ready
+curl --fail --cacert /path/to/controller-ca.crt \
+  https://node.example.com:9080/api/v1/health
 ```
 
-**Credential-backed units.** If the installed systemd unit
-(`/etc/systemd/system/cfgms-controller.service`) uses `LoadCredential=` or
-`LoadCredentialEncrypted=` (ADR-030), `upgrade restart` refuses to run before
-touching any file: the side-port candidate it starts runs outside the unit and
-cannot receive the credentials. Use this procedure instead:
+Readiness verifies durable-storage access; liveness also reflects the drain gate.
+Check both, the node registry, service logs and the load balancer. Verify a steward
+can reconnect and complete an operation through the public endpoint. Stop the
+rollout and recover this node if either gate remains unhealthy.
 
-```bash
-# 1. Keep the previous binary, then stage the new one at the install path
-sudo cp /usr/local/bin/cfgms-controller /usr/local/bin/cfgms-controller.prev
-sudo install -m 0755 /opt/cfgms/cfgms-controller-v0.6.0 /usr/local/bin/cfgms-controller
-# 2. Restart the unit
-sudo systemctl restart cfgms-controller
-# 3. Verify readiness
-curl -fsS https://<node-host>:9080/api/v1/ready
-```
+A configured `CFGMS_NODE_ID` is stable across binary replacement. Do not generate
+a new ID or decommission the live node merely because its process restarted.
+If a replacement intentionally uses a different identity, retire the old drained
+node through `cfg controller cluster decommission <old-node-id>` only after the
+replacement is serving. Decommission is a membership operation, not an ordinary
+restart step.
 
-If the node is not ready, restore the previous binary by hand
-(`sudo cp /usr/local/bin/cfgms-controller.prev /usr/local/bin/cfgms-controller`)
-and restart the unit again.
+## 4. Repeat
 
-### 6. Decommission the old node entry
+Proceed to the next node only after the upgraded node is healthy and available
+through the routing layer. Keep an independently verified previous binary and
+recoverable storage backup until the full upgrade has been accepted.
 
-After the upgraded node has rejoined the cluster under a new node ID, remove
-the old node entry:
-
-```bash
-cfg controller cluster decommission <node-id> \
-    --url=https://controller.example.com
-```
-
-The node must be in `draining` state. If it is not, the command returns HTTP 409
-and an error message. The command prints the resulting state on success:
-
-```
-Node <node-id> is now decommissioned.
-```
-
-**Timeout behaviour.** The controller waits up to five minutes for all active
-steward sessions on the local node to reach zero before marking the node
-decommissioned. If sessions have not drained by the end of that window the
-node is force-decommissioned and the controller logs a warning at `WARN` level:
-
-```
-decommission timeout: sessions still active on node, proceeding
-  active_sessions=<n>  node_id=<node-id>
-```
-
-Force-decommission on timeout is by design — it bounds the time a rolling
-upgrade step can block while still allowing a clean drain in the common case.
-
-### 6a. Verify the node is excluded from active nodes
-
-After the decommission command returns, confirm the node no longer appears in
-the active node list (available via the cluster status command in a future
-story). You can also query the API directly:
-
-```bash
-# Must return an empty list or a list that does not include <node-id>
-curl --cert ~/.config/cfgms/admin.crt \
-     --key  ~/.config/cfgms/admin.key \
-     --cacert ~/.config/cfgms/ca.crt \
-     https://controller.example.com/api/v1/cluster/nodes
-```
-
-A decommissioned node has state `"decommissioned"` and is not returned by
-`ListActiveNodes`. If the node still appears as active, do not proceed — check
-the controller logs for errors.
-
-### 7. Repeat for each remaining node
-
-Repeat steps 2–6 for each remaining node, one at a time.
-
-## Error handling
-
-| Exit condition | Message | Action |
-|---|---|---|
-| Node not in draining state | Error from HTTP 409 response | Wait for drain or check node state |
-| Not authenticated with admin mTLS | `Error: admin mTLS certificate required` | Ensure admin bundle is present |
-| API unreachable | Connection error | Check controller URL and network |
-
-## Authentication
-
-Both `drain` and `decommission` require the admin mTLS bundle. The `--bundle`
-flag or `CFGMS_ADMIN_BUNDLE` environment variable selects the bundle file.
-The bundle is auto-discovered at `~/.config/cfgms/admin.bundle.yaml` and
-`/etc/cfgms/admin.bundle.yaml` when neither flag nor env var is set.
+The [cluster service decision](../architecture/decisions/031-controller-cluster-service-model.md)
+owns the any-node/shared-store model. The [upgrade lifecycle reference](upgrade-lifecycle.md)
+explains which history and status surfaces apply.
