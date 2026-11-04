@@ -91,7 +91,30 @@ message ControlMessage {
     Event event = 2;
     Heartbeat heartbeat = 3;
     Response response = 4;
+    TamperState tamper_state = 5;
+    RepairRequest repair_request = 6;
   }
+}
+
+// TamperState tells a steward whether the controller considers its host locked
+// (tamper detected). It carries no data besides the flag, so the receiver never
+// has anything to parse or apply. locked=true only lowers trust and is always
+// honored; locked=false is honored only on a link whose server certificate
+// verified against the steward's trust anchor.
+message TamperState {
+  bool locked = 1;
+}
+
+// RepairRequest asks a locked steward to repair itself. The steward only
+// receives and hands it on; signature and loss-approval checks belong to the
+// repair handler, not to the link.
+message RepairRequest {
+  string repair_id = 1;
+  repeated string approved_loss_codes = 2;
+  string loss_digest = 3;
+  int64 expires_at_unix = 4;
+  bytes signature = 5;
+  bytes signer_chain_pem = 6;
 }
 
 // Command is sent from controller to steward via ControlChannel.
@@ -111,6 +134,10 @@ message Command {
   // (#5174). Zero or absent means version 1, which does not cover term; the
   // verifier never treats an absent value as a newer version.
   uint32 signing_payload_version = 9;
+  // signer_chain_pem is the PEM chain of the certificate that signed this
+  // command, for hosts that verify operator actions against a baked list.
+  // Absent for commands whose signature does not carry a separate chain.
+  bytes signer_chain_pem = 10;
 }
 
 // Event is sent from steward to controller via ControlChannel.

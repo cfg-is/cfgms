@@ -3244,6 +3244,13 @@ func (a *dnaCollectorAdapter) setModuleDNASource(src moduleDNASource) {
 	a.mu.Unlock()
 }
 
+// HostFactsOnly returns a collector over the same host-fact gatherer with no
+// module DNA source: the form a report-only link may publish. It satisfies the
+// client package's host-facts-only narrowing hook.
+func (a *dnaCollectorAdapter) HostFactsOnly() client.DNACollector {
+	return &dnaCollectorAdapter{collector: a.collector, logger: a.logger}
+}
+
 // CollectAttributes returns the merged DNA attribute map — host-fact attributes
 // from the Collector's internal raw map (not from the legacy flat attributes
 // proto field, which Collect() no longer writes after Issue #3332) plus any

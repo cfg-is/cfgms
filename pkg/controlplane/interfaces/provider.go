@@ -8,8 +8,13 @@ package interfaces
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
+
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 )
@@ -36,6 +41,44 @@ var ErrIdentityRejected = errors.New("controller rejected steward identity")
 // stored device key must NOT be re-presented for re-admission, because the key
 // itself was copied. The steward re-keys and registers as a new device instead.
 var ErrIdentityInUse = fmt.Errorf("steward identity in use by another device: %w", ErrIdentityRejected)
+
+// LockedDownReason and LockedDownDomain identify the typed lockdown refusal: a
+// FailedPrecondition status carrying an ErrorInfo detail with this reason. The
+// controller returns it from a pull (SyncConfig, FetchModuleBundle,
+// BulkTransfer) to a steward it has locked; the steward then enters report-only
+// and stops pulling.
+const (
+	LockedDownReason = "controller.locked_down"
+	LockedDownDomain = "cfgms.io"
+)
+
+// NewLockedDownError builds the typed lockdown refusal. The text is fixed.
+func NewLockedDownError() error {
+	st := status.New(codes.FailedPrecondition, "steward is locked down by the controller")
+	withDetail, err := st.WithDetails(&errdetails.ErrorInfo{Reason: LockedDownReason, Domain: LockedDownDomain})
+	if err != nil {
+		return st.Err()
+	}
+	return withDetail.Err()
+}
+
+// IsLockedDown reports whether err is, or wraps, the typed lockdown refusal.
+func IsLockedDown(err error) bool {
+	if err == nil {
+		return false
+	}
+	s, ok := status.FromError(err)
+	if !ok || s.Code() != codes.FailedPrecondition {
+		return false
+	}
+	for _, d := range s.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == LockedDownReason && info.GetDomain() == LockedDownDomain {
+			return true
+		}
+	}
+	return false
+}
 
 // ControlPlaneProvider defines the interface for control plane implementations.
 //
@@ -106,6 +149,17 @@ type ControlPlaneProvider interface {
 	// The handler is called for each command received by this steward.
 	// Returns an error if subscription fails.
 	SubscribeCommands(ctx context.Context, stewardID string, handler CommandHandler) error
+
+	// SendTamperState tells a connected steward whether the controller considers
+	// its host locked (controller-side). The message carries only the flag; the
+	// steward honors locked=true always and locked=false only on a session whose
+	// server certificate verified against its trust anchor.
+	SendTamperState(ctx context.Context, stewardID string, locked bool) error
+
+	// SendRepair delivers a repair request to a connected steward
+	// (controller-side). The steward link only receives it and hands it to the
+	// repair handler, which checks the signature and the approved-loss list.
+	SendRepair(ctx context.Context, stewardID string, req types.RepairRequest) error
 
 	// =================================================================
 	// Events (Steward → Controller)
@@ -191,4 +245,49 @@ type ResponseSender interface {
 // Only server-mode providers may subscribe.
 type ResponseSubscriber interface {
 	SubscribeResponses(ctx context.Context, handler ResponseHandler) error
+}
+
+// PeerChain returns the certificate chain the server presented on the stream a
+// message arrived on, leaf first. After a reconnect to a different server it is
+// that server's chain. It is nil when the transport carries no certificates.
+type PeerChain func() []*x509.Certificate
+
+// InboundHooks are the narrow callbacks a client-mode provider calls for the
+// few inbound message kinds a report-only steward accepts. Every other inbound
+// payload is dropped and counted through OnDropped.
+//
+// anchorVerified reports whether the session's server certificate verified
+// against the steward's trust anchor: the install-pinned CA, or the CA pin
+// recorded in the identity. Both are data-folder material, so neither ranks
+// above the other, and the baked fingerprint plays no part in this check.
+type InboundHooks struct {
+	// OnTamperState receives a well-formed TamperState. locked=true is always
+	// delivered; locked=false is delivered only when anchorVerified is true.
+	OnTamperState func(locked bool)
+
+	// OnRepair receives a RepairRequest that carries a repair ID, on a session
+	// that passed the anchor check. It is not called on any other session.
+	OnRepair func(req types.RepairRequest)
+
+	// OnCommand receives commands while report-only (a locked-trust handler).
+	// When nil, report-only drops commands and counts them.
+	OnCommand func(ctx context.Context, cmd *types.SignedCommand, peerChain PeerChain) error
+
+	// OnDropped is told the kind of each inbound payload the receive switch
+	// dropped: "command", "event", "heartbeat", "response", "unknown",
+	// "tamper_state" and "repair_request" for ignored or malformed signals.
+	OnDropped func(kind string)
+}
+
+// InboundController is an optional capability of a client-mode provider: it
+// accepts the inbound callbacks and the report-only switch. Callers
+// type-assert for it.
+type InboundController interface {
+	// SetInboundHooks replaces the provider's inbound callbacks.
+	SetInboundHooks(hooks InboundHooks)
+
+	// SetReportOnly switches the receive switch between normal operation and
+	// report-only. In report-only the provider hands commands only to
+	// InboundHooks.OnCommand and drops every other payload.
+	SetReportOnly(on bool)
 }

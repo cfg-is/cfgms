@@ -311,6 +311,10 @@ type TransportClient struct {
 	// Heartbeat
 	heartbeatInterval time.Duration
 	heartbeatStop     chan struct{}
+	// heartbeatJitter, when positive, replaces heartbeatJitterMax for this
+	// client. A test seam: it avoids rewriting the package variable while a
+	// heartbeat goroutine of an earlier client may still be reading it.
+	heartbeatJitter time.Duration
 	// rng is the per-instance RNG for per-tick heartbeat jitter (epic #1664).
 	// Only accessed from the startHeartbeat goroutine; no mutex required.
 	rng *rand.Rand
@@ -504,6 +508,18 @@ type TransportClient struct {
 	// and without spawning detached goroutines. (Issue #2001)
 	shutdownScheduleFunc func(delay time.Duration, trigger func())
 
+	// Report-only link state (report_only.go). reportOnly is set by
+	// TransportConfig.ReportOnly or EnterReportOnly and never cleared: leaving
+	// report-only means a restart. The inbound callbacks and the drop counters
+	// are guarded by reportOnlyMu.
+	reportOnly       atomic.Bool
+	reportOnlyMu     sync.Mutex
+	tamperHandler    func(locked bool)
+	repairHandler    func(req cpTypes.RepairRequest)
+	lockedCmdHandler LockedCommandHandler
+	reportOnlyParts  []string
+	droppedInbound   map[string]int64
+
 	// Logger
 	logger logging.Logger
 }
@@ -693,6 +709,12 @@ type TransportConfig struct {
 	// in-memory implementation.
 	ObserveModuleLoader ObserveModuleLoader
 
+	// ReportOnly makes the client a report-only link (report_only.go): it
+	// connects with the stored mTLS identity, sends heartbeats with reasons, DNA
+	// inventory and logs out, and enforces nothing the controller sends. Its
+	// offline queue is in memory only whatever QueueDir and SecretStore say.
+	ReportOnly bool
+
 	// Logger for client logging
 	Logger logging.Logger
 }
@@ -738,6 +760,17 @@ func validControllerCARoots(caPEM string, now time.Time) (*x509.CertPool, error)
 	return pool, nil
 }
 
+// seedSigningCertPEMs seeds signingCertPEMs from the multi-cert field if
+// provided; otherwise it falls back to the singular SigningCertPEM for backward
+// compatibility. The result is de-duplicated.
+func seedSigningCertPEMs(cfg *TransportConfig) []string {
+	signingCertPEMs := cfg.SigningCertPEMs
+	if len(signingCertPEMs) == 0 && cfg.SigningCertPEM != "" {
+		signingCertPEMs = []string{cfg.SigningCertPEM}
+	}
+	return dedupeSigningCertPEMs(signingCertPEMs)
+}
+
 // NewTransportClient creates a new steward transport client.
 func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 	if cfg.ControllerURL == "" {
@@ -770,11 +803,12 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 
 	// Initialize offline queue for durable report persistence (Issue #419).
 	// Pass the SecretStore so the encryption key is persisted across restarts (Issue #920).
+	queueDir, queueSecrets := offlineQueueStorage(cfg)
 	offlineQueue, err := NewOfflineQueue(OfflineQueueConfig{
-		Dir:         cfg.QueueDir,
+		Dir:         queueDir,
 		MaxSize:     cfg.MaxQueueSize,
 		MaxAge:      cfg.MaxQueueAge,
-		SecretStore: cfg.SecretStore,
+		SecretStore: queueSecrets,
 		Logger:      cfg.Logger,
 	})
 	if err != nil {
@@ -796,13 +830,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 			"error", logging.SanitizeLogValue(err.Error()))
 	}
 
-	// Seed signingCertPEMs from the multi-cert field if provided; otherwise
-	// fall back to the singular SigningCertPEM for backward compatibility.
-	signingCertPEMs := cfg.SigningCertPEMs
-	if len(signingCertPEMs) == 0 && cfg.SigningCertPEM != "" {
-		signingCertPEMs = []string{cfg.SigningCertPEM}
-	}
-	signingCertPEMs = dedupeSigningCertPEMs(signingCertPEMs)
+	signingCertPEMs := seedSigningCertPEMs(cfg)
 
 	c := &TransportClient{
 		heartbeatInterval:               heartbeatInterval,
@@ -847,6 +875,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		observeModuleLoader: cfg.ObserveModuleLoader,
 		logger:              cfg.Logger,
 	}
+	c.applyReportOnlyConfig(cfg)
 
 	return c, nil
 }
@@ -1005,6 +1034,9 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 	if stewardID == "" {
 		return fmt.Errorf("not registered - call SetStewardID first")
 	}
+	if c.reportOnly.Load() {
+		return c.connectReportOnly(ctx)
+	}
 
 	// Create TLS configuration for gRPC-over-QUIC. mTLS is mandatory; a
 	// configuration failure is fatal — there is no legitimate path without TLS.
@@ -1027,6 +1059,7 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 		c.controlPlane = controlPlane
 		c.mu.Unlock()
 	}
+	c.installInboundHooks(controlPlane)
 
 	// Start the control plane (connects to gRPC server over QUIC)
 	if !controlPlane.IsConnected() {
@@ -1099,18 +1132,7 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 	c.connected = true
 	c.mu.Unlock()
 
-	// Auto-initialize the config executor when the tenant ID is already known
-	// and no executor has been set. This lets the on-connect sync below run
-	// without the caller needing to call InitializeConfigExecutor first. (Issue #1720)
-	c.mu.RLock()
-	hasExecutor := c.configExecutor != nil
-	knownTenant := c.tenantID
-	c.mu.RUnlock()
-	if !hasExecutor && knownTenant != "" {
-		if initErr := c.InitializeConfigExecutor(knownTenant); initErr != nil {
-			c.logger.Warn("Could not auto-initialize config executor during connect", "error", initErr)
-		}
-	}
+	c.autoInitializeConfigExecutor()
 
 	// Drain any events queued during the offline period (Issue #419).
 	// Done synchronously before starting the heartbeat so the controller
@@ -1137,6 +1159,22 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 
 	c.logger.Info("Connected to controller successfully via gRPC transport")
 	return nil
+}
+
+// autoInitializeConfigExecutor initializes the config executor when the tenant
+// ID is already known and no executor has been set. This lets the on-connect
+// sync run without the caller needing to call InitializeConfigExecutor first.
+// (Issue #1720)
+func (c *TransportClient) autoInitializeConfigExecutor() {
+	c.mu.RLock()
+	hasExecutor := c.configExecutor != nil
+	knownTenant := c.tenantID
+	c.mu.RUnlock()
+	if !hasExecutor && knownTenant != "" {
+		if initErr := c.InitializeConfigExecutor(knownTenant); initErr != nil {
+			c.logger.Warn("Could not auto-initialize config executor during connect", "error", initErr)
+		}
+	}
 }
 
 // newControlPlaneProvider creates and initializes the steward's gRPC control
@@ -2065,6 +2103,9 @@ func (c *TransportClient) syncConfigNow(ctx context.Context, commandID string, m
 // GetConfiguration retrieves configuration from the controller via gRPC data plane.
 // Story #516: Uses DataPlaneSession.ReceiveConfig() over gRPC instead of raw QUIC streams.
 func (c *TransportClient) GetConfiguration(ctx context.Context, modules []string) ([]byte, string, error) {
+	if c.reportOnly.Load() {
+		return nil, "", ErrReportOnly
+	}
 	c.logger.Info("Requesting configuration via gRPC data plane")
 
 	c.mu.RLock()
@@ -2077,6 +2118,7 @@ func (c *TransportClient) GetConfiguration(ctx context.Context, modules []string
 
 	transfer, err := session.ReceiveConfig(ctx)
 	if err != nil {
+		c.HandleLockedDown(err)
 		return nil, "", fmt.Errorf("failed to receive configuration: %w", err)
 	}
 
@@ -2355,6 +2397,9 @@ func applyDriftModeDefault(mode stewardconfig.DriftMode) stewardconfig.DriftMode
 //
 // The loop stops when ctx is cancelled or Disconnect is called.
 func (c *TransportClient) StartConvergenceLoop(ctx context.Context) {
+	if c.reportOnly.Load() {
+		return
+	}
 	c.mu.RLock()
 	interval := c.convergeInterval
 	c.mu.RUnlock()
@@ -2413,6 +2458,9 @@ func (c *TransportClient) StartConvergenceLoop(ctx context.Context) {
 // for immediate convergence outside the normal schedule (e.g. after reconnecting).
 // Returns nil without error if no cfg has been received yet.
 func (c *TransportClient) TriggerConvergence(ctx context.Context) error {
+	if c.reportOnly.Load() {
+		return nil
+	}
 	c.lastConfigMu.RLock()
 	lastCfg := c.lastConfigYAML
 	lastVersion := c.lastConfigVersion
@@ -3095,6 +3143,11 @@ func (c *TransportClient) heartbeatStatus() string {
 	c.mu.RLock()
 	fn := c.statusFunc
 	c.mu.RUnlock()
+	if c.reportOnly.Load() {
+		// A report-only link exists because something refused or failed; it
+		// never claims to be healthy, whatever the status function says.
+		return string(cpTypes.StatusError)
+	}
 	status := "healthy"
 	if fn != nil {
 		status = fn()
@@ -3761,6 +3814,9 @@ var heartbeatJitterMax = 10 * time.Second
 // controller receives them promptly (Issue #419).
 func (c *TransportClient) startHeartbeat() {
 	jitterMax := heartbeatJitterMax
+	if c.heartbeatJitter > 0 {
+		jitterMax = c.heartbeatJitter
+	}
 
 	rng := c.rng
 	if rng == nil {
@@ -4229,7 +4285,7 @@ func (c *TransportClient) newModuleInstaller() execution.ModuleInstaller {
 		Mode:                     mode,
 		AdditionalPublisherNames: c.moduleTrustAdditionalPublishers,
 		Enforcer:                 stewardtrust.NewStewardTrustEnforcer(),
-		Client:                   tc,
+		Client:                   lockdownWatchingClient{inner: tc, onErr: c.HandleLockedDown},
 		Logger:                   c.logger,
 	}
 }
