@@ -112,12 +112,14 @@ jobs:
       with:
         persist-credentials: false
 
-    - name: Install Trivy (cached)
-      # zizmor: ignore[unpinned-tools] — TRIVY_VERSION is pinned to a specific clean release (v0.76.1, post-CVE-2026-33634); the action itself is SHA-pinned
-      uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1 — pinned to SHA per CVE-2026-33634
-      with:
-        version: ${{ env.TRIVY_VERSION }}
-        cache: true
+    - name: Install Trivy (verified)
+      # Same verified installer as security-scan.yml and production-gates.yml:
+      # a pinned release archive checked against a pinned SHA-256. Not
+      # aquasecurity/setup-trivy, which runs contrib/install.sh from Trivy's
+      # default branch, so an upstream change reaches CI unreviewed (Issue #5757).
+      env:
+        TRIVY_SHA256: 'c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0'
+      run: sudo .github/scripts/install-trivy.sh "$TRIVY_VERSION" "$TRIVY_SHA256"
 
     - name: Cache Trivy vulnerability database
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -219,12 +221,14 @@ jobs:
       with:
         persist-credentials: false
 
-    - name: Install Trivy (cached)
-      # zizmor: ignore[unpinned-tools] — TRIVY_VERSION is pinned to a specific clean release (v0.76.1, post-CVE-2026-33634); the action itself is SHA-pinned
-      uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1 — pinned to SHA per CVE-2026-33634
-      with:
-        version: ${{ env.TRIVY_VERSION }}
-        cache: true
+    - name: Install Trivy (verified)
+      # Same verified installer as security-scan.yml and production-gates.yml:
+      # a pinned release archive checked against a pinned SHA-256. Not
+      # aquasecurity/setup-trivy, which runs contrib/install.sh from Trivy's
+      # default branch, so an upstream change reaches CI unreviewed (Issue #5757).
+      env:
+        TRIVY_SHA256: 'c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0'
+      run: sudo .github/scripts/install-trivy.sh "$TRIVY_VERSION" "$TRIVY_SHA256"
 
     - name: Cache Trivy vulnerability database
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
