@@ -11,24 +11,23 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/controller/batchjob"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/storage/providers/memory"
 )
 
-func newMemTestBatchJob(id, tenantID string) *batchjob.BatchJob {
+func newMemTestBatchJob(id, tenantID string) *business.BatchJob {
 	now := time.Now().UTC()
-	return &batchjob.BatchJob{
+	return &business.BatchJob{
 		ID:       id,
 		TenantID: tenantID,
 		Selector: "tag:staging",
-		Config: batchjob.BatchJobConfig{
+		Config: business.BatchJobConfig{
 			BatchSize:         3,
 			PreviousConfigRef: "cfg-v2",
 		},
 		Targets:     []string{"s-a", "s-b"},
-		Status:      batchjob.BatchJobStatusPending,
-		Steps:       []batchjob.BatchStep{{Index: 0, StewardIDs: []string{"s-a"}, Status: batchjob.BatchStepStatusPending}},
+		Status:      business.BatchJobStatusPending,
+		Steps:       []business.BatchStep{{Index: 0, StewardIDs: []string{"s-a"}, Status: business.BatchStepStatusPending}},
 		CreatedAt:   now,
 		UpdatedAt:   now,
 		InitiatedBy: "admin@example.com",
@@ -54,7 +53,7 @@ func TestBatchJobStore_Memory_CreateAndGet(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "job-mem-1", got.ID)
 	assert.Equal(t, "tenant-1", got.TenantID)
-	assert.Equal(t, batchjob.BatchJobStatusPending, got.Status)
+	assert.Equal(t, business.BatchJobStatusPending, got.Status)
 	assert.Equal(t, "tag:staging", got.Selector)
 	assert.Equal(t, 3, got.Config.BatchSize)
 	assert.Equal(t, "cfg-v2", got.Config.PreviousConfigRef)
@@ -84,20 +83,20 @@ func TestBatchJobStore_Memory_UpdateBatchJobStatus(t *testing.T) {
 
 	require.NoError(t, store.CreateBatchJob(ctx, newMemTestBatchJob("job-s", "tenant-1")))
 
-	require.NoError(t, store.UpdateBatchJobStatus(ctx, "job-s", batchjob.BatchJobStatusRunning))
+	require.NoError(t, store.UpdateBatchJobStatus(ctx, "job-s", business.BatchJobStatusRunning))
 	got, err := store.GetBatchJob(ctx, "job-s")
 	require.NoError(t, err)
-	assert.Equal(t, batchjob.BatchJobStatusRunning, got.Status)
+	assert.Equal(t, business.BatchJobStatusRunning, got.Status)
 
-	require.NoError(t, store.UpdateBatchJobStatus(ctx, "job-s", batchjob.BatchJobStatusPaused))
+	require.NoError(t, store.UpdateBatchJobStatus(ctx, "job-s", business.BatchJobStatusPaused))
 	got, err = store.GetBatchJob(ctx, "job-s")
 	require.NoError(t, err)
-	assert.Equal(t, batchjob.BatchJobStatusPaused, got.Status)
+	assert.Equal(t, business.BatchJobStatusPaused, got.Status)
 }
 
 func TestBatchJobStore_Memory_UpdateBatchJobStatusNotFound(t *testing.T) {
 	store := memory.NewBatchJobStore()
-	err := store.UpdateBatchJobStatus(context.Background(), "ghost", batchjob.BatchJobStatusFailed)
+	err := store.UpdateBatchJobStatus(context.Background(), "ghost", business.BatchJobStatusFailed)
 	assert.ErrorIs(t, err, business.ErrBatchJobNotFound)
 }
 
@@ -109,10 +108,10 @@ func TestBatchJobStore_Memory_UpdateBatchStep(t *testing.T) {
 
 	now := time.Now().UTC()
 	completed := now.Add(30 * time.Second)
-	step := batchjob.BatchStep{
+	step := business.BatchStep{
 		Index:         0,
 		StewardIDs:    []string{"s-a"},
-		Status:        batchjob.BatchStepStatusCompleted,
+		Status:        business.BatchStepStatusCompleted,
 		StartedAt:     &now,
 		CompletedAt:   &completed,
 		FailedIDs:     []string{},
@@ -125,14 +124,14 @@ func TestBatchJobStore_Memory_UpdateBatchStep(t *testing.T) {
 	require.Len(t, got.Steps, 1)
 	s := got.Steps[0]
 	assert.Equal(t, 0, s.Index)
-	assert.Equal(t, batchjob.BatchStepStatusCompleted, s.Status)
+	assert.Equal(t, business.BatchStepStatusCompleted, s.Status)
 	require.NotNil(t, s.StartedAt)
 	require.NotNil(t, s.CompletedAt)
 }
 
 func TestBatchJobStore_Memory_UpdateBatchStepNotFound(t *testing.T) {
 	store := memory.NewBatchJobStore()
-	step := batchjob.BatchStep{Index: 0}
+	step := business.BatchStep{Index: 0}
 	err := store.UpdateBatchStep(context.Background(), "ghost-job", step)
 	assert.ErrorIs(t, err, business.ErrBatchJobNotFound)
 }
@@ -181,7 +180,7 @@ func TestBatchJobStore_Memory_ConcurrencySafe(t *testing.T) {
 			if _, err := store.GetBatchJob(ctx, id); err != nil {
 				errs <- err
 			}
-			if err := store.UpdateBatchJobStatus(ctx, id, batchjob.BatchJobStatusRunning); err != nil {
+			if err := store.UpdateBatchJobStatus(ctx, id, business.BatchJobStatusRunning); err != nil {
 				errs <- err
 			}
 			if _, err := store.ListBatchJobsByTenant(ctx, tenantID); err != nil {
@@ -205,13 +204,13 @@ func TestBatchJobStore_Memory_CreateIsolatesFromMutation(t *testing.T) {
 	require.NoError(t, store.CreateBatchJob(ctx, job))
 
 	// Mutating original after create must not affect stored copy.
-	job.Status = batchjob.BatchJobStatusFailed
+	job.Status = business.BatchJobStatusFailed
 	job.Targets = append(job.Targets, "s-mutated")
 	job.Steps[0].StewardIDs = append(job.Steps[0].StewardIDs, "s-injected")
 
 	got, err := store.GetBatchJob(ctx, "job-alias")
 	require.NoError(t, err)
-	assert.Equal(t, batchjob.BatchJobStatusPending, got.Status)
+	assert.Equal(t, business.BatchJobStatusPending, got.Status)
 	assert.Len(t, got.Targets, 2)
 	require.Len(t, got.Steps, 1)
 	assert.Len(t, got.Steps[0].StewardIDs, 1, "step StewardIDs must be deep-copied on create")
@@ -227,13 +226,13 @@ func TestBatchJobStore_Memory_GetIsolatesFromMutation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Mutating returned copy must not affect stored value.
-	got.Status = batchjob.BatchJobStatusFailed
+	got.Status = business.BatchJobStatusFailed
 	got.Targets = append(got.Targets, "s-extra")
 	got.Steps[0].StewardIDs = append(got.Steps[0].StewardIDs, "s-injected")
 
 	got2, err := store.GetBatchJob(ctx, "job-get-alias")
 	require.NoError(t, err)
-	assert.Equal(t, batchjob.BatchJobStatusPending, got2.Status)
+	assert.Equal(t, business.BatchJobStatusPending, got2.Status)
 	assert.Len(t, got2.Targets, 2)
 	require.Len(t, got2.Steps, 1)
 	assert.Len(t, got2.Steps[0].StewardIDs, 1, "step StewardIDs must be deep-copied on get")
@@ -246,10 +245,10 @@ func TestBatchJobStore_Memory_UpdateBatchStepAppendNewIndex(t *testing.T) {
 	require.NoError(t, store.CreateBatchJob(ctx, newMemTestBatchJob("job-append", "tenant-1")))
 
 	// Append a step with an index not present in the original fixture.
-	newStep := batchjob.BatchStep{
+	newStep := business.BatchStep{
 		Index:      1,
 		StewardIDs: []string{"s-b"},
-		Status:     batchjob.BatchStepStatusPending,
+		Status:     business.BatchStepStatusPending,
 	}
 	require.NoError(t, store.UpdateBatchStep(ctx, "job-append", newStep))
 
@@ -264,7 +263,7 @@ func TestBatchJobStore_Memory_UpdateBatchStepAppendNewIndex(t *testing.T) {
 	for _, s := range got.Steps {
 		if s.Index == 1 {
 			found = true
-			assert.Equal(t, batchjob.BatchStepStatusPending, s.Status)
+			assert.Equal(t, business.BatchStepStatusPending, s.Status)
 			assert.Equal(t, []string{"s-b"}, s.StewardIDs)
 		}
 	}

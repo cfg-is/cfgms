@@ -8,6 +8,7 @@ import (
 
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 const rollbackTimeout = 5 * time.Minute
@@ -19,33 +20,19 @@ const rollbackTimeout = 5 * time.Minute
 //   - All compensating dispatches succeed → steps marked rolled_back; job → rolled_back.
 //   - Any compensating dispatch fails     → job → failed.
 //   - No completed steps (first batch failed) → job → paused (nothing to undo).
-func (e *RollingBatchExecutor) rollbackAppliedSteps(ctx context.Context, job *BatchJob) {
+func (e *RollingBatchExecutor) rollbackAppliedSteps(ctx context.Context, job *business.BatchJob) {
 	current, err := e.store.GetBatchJob(ctx, job.ID)
 	if err != nil {
 		e.logger.Error("Rollback: failed to fetch job state",
 			"job_id", logging.SanitizeLogValue(job.ID), "error", err)
-		if statusErr := e.store.UpdateBatchJobStatus(ctx, job.ID, BatchJobStatusFailed); statusErr != nil {
-			e.logger.Error("Rollback: failed to set job failed",
-				"job_id", logging.SanitizeLogValue(job.ID), "error", statusErr)
-		}
-		job.Status = BatchJobStatusFailed
+		e.setRollbackJobStatus(ctx, job, business.BatchJobStatusFailed)
 		return
 	}
 
-	var completedSteps []BatchStep
-	for _, step := range current.Steps {
-		if step.Status == BatchStepStatusCompleted {
-			completedSteps = append(completedSteps, step)
-		}
-	}
-
+	completedSteps := completedStepsOf(current.Steps)
 	if len(completedSteps) == 0 {
 		// First batch failed — no forward progress to undo; pause for operator action.
-		if statusErr := e.store.UpdateBatchJobStatus(ctx, job.ID, BatchJobStatusPaused); statusErr != nil {
-			e.logger.Error("Rollback: failed to set job paused",
-				"job_id", logging.SanitizeLogValue(job.ID), "error", statusErr)
-		}
-		job.Status = BatchJobStatusPaused
+		e.setRollbackJobStatus(ctx, job, business.BatchJobStatusPaused)
 		e.logger.Info("Batch step failed with no prior completed steps; job paused",
 			"job_id", logging.SanitizeLogValue(job.ID))
 		return
@@ -55,6 +42,32 @@ func (e *RollingBatchExecutor) rollbackAppliedSteps(ctx context.Context, job *Ba
 		"job_id", logging.SanitizeLogValue(job.ID),
 		"completed_step_count", len(completedSteps))
 
+	if e.rollbackSteps(ctx, job, completedSteps) {
+		e.setRollbackJobStatus(ctx, job, business.BatchJobStatusRolledBack)
+		e.logger.Info("Rollback completed",
+			"job_id", logging.SanitizeLogValue(job.ID))
+		return
+	}
+	e.setRollbackJobStatus(ctx, job, business.BatchJobStatusFailed)
+	e.logger.Warn("Rollback failed; job marked failed",
+		"job_id", logging.SanitizeLogValue(job.ID))
+}
+
+// completedStepsOf returns the steps whose status is completed, in order.
+func completedStepsOf(steps []business.BatchStep) []business.BatchStep {
+	var completed []business.BatchStep
+	for _, step := range steps {
+		if step.Status == business.BatchStepStatusCompleted {
+			completed = append(completed, step)
+		}
+	}
+	return completed
+}
+
+// rollbackSteps sends the compensating dispatch for each completed step and marks
+// fully acknowledged steps rolled_back. It reports whether every step rolled back.
+// A dispatch error stops further steps; partial steward failures continue.
+func (e *RollingBatchExecutor) rollbackSteps(ctx context.Context, job *business.BatchJob, completedSteps []business.BatchStep) bool {
 	params := map[string]interface{}{
 		"config_ref": job.Config.PreviousConfigRef,
 	}
@@ -64,11 +77,10 @@ func (e *RollingBatchExecutor) rollbackAppliedSteps(ctx context.Context, job *Ba
 		step := completedSteps[i]
 		failedIDs, dispatchErr := e.dispatchRollbackBatch(ctx, step.StewardIDs, params)
 		if dispatchErr != nil {
-			allSucceeded = false
 			e.logger.Error("Rollback dispatch error",
 				"job_id", logging.SanitizeLogValue(job.ID),
 				"step", step.Index, "error", dispatchErr)
-			break
+			return false
 		}
 		if len(failedIDs) > 0 {
 			allSucceeded = false
@@ -78,31 +90,25 @@ func (e *RollingBatchExecutor) rollbackAppliedSteps(ctx context.Context, job *Ba
 			continue
 		}
 		// All stewards in this step acknowledged rollback.
-		step.Status = BatchStepStatusRolledBack
+		step.Status = business.BatchStepStatusRolledBack
 		if persistErr := e.store.UpdateBatchStep(ctx, job.ID, step); persistErr != nil {
 			e.logger.Error("Rollback: failed to persist rolled_back step",
 				"job_id", logging.SanitizeLogValue(job.ID),
 				"step", step.Index, "error", persistErr)
 		}
 	}
+	return allSucceeded
+}
 
-	if allSucceeded {
-		if statusErr := e.store.UpdateBatchJobStatus(ctx, job.ID, BatchJobStatusRolledBack); statusErr != nil {
-			e.logger.Error("Rollback: failed to set job rolled_back",
-				"job_id", logging.SanitizeLogValue(job.ID), "error", statusErr)
-		}
-		job.Status = BatchJobStatusRolledBack
-		e.logger.Info("Rollback completed",
-			"job_id", logging.SanitizeLogValue(job.ID))
-	} else {
-		if statusErr := e.store.UpdateBatchJobStatus(ctx, job.ID, BatchJobStatusFailed); statusErr != nil {
-			e.logger.Error("Rollback: failed to set job failed",
-				"job_id", logging.SanitizeLogValue(job.ID), "error", statusErr)
-		}
-		job.Status = BatchJobStatusFailed
-		e.logger.Warn("Rollback failed; job marked failed",
-			"job_id", logging.SanitizeLogValue(job.ID))
+// setRollbackJobStatus persists the job's terminal rollback status and mirrors it
+// onto job. A persistence failure is logged; the in-memory status is still set.
+func (e *RollingBatchExecutor) setRollbackJobStatus(ctx context.Context, job *business.BatchJob, status business.BatchJobStatus) {
+	if statusErr := e.store.UpdateBatchJobStatus(ctx, job.ID, status); statusErr != nil {
+		e.logger.Error("Rollback: failed to set job status",
+			"job_id", logging.SanitizeLogValue(job.ID),
+			"status", string(status), "error", statusErr)
 	}
+	job.Status = status
 }
 
 // dispatchRollbackBatch sends CommandSyncConfig with rollback params to all stewards

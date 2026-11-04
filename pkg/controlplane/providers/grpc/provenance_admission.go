@@ -14,9 +14,9 @@ import (
 
 	"google.golang.org/grpc/metadata"
 
-	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 

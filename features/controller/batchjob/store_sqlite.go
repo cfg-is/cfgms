@@ -10,31 +10,18 @@ import (
 	"fmt"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// SQLiteBatchJobStore is the SQLite-backed implementation of BatchJobStore.
+// SQLiteBatchJobStore is the SQLite-backed implementation of business.BatchJobStore.
 // Call Initialize before any other method — it creates tables idempotently.
 type SQLiteBatchJobStore struct {
 	db *sql.DB
 }
 
-// NewSQLiteBatchJobStoreFromDSN opens a SQLite database at dsn and returns a
-// SQLiteBatchJobStore backed by it. The caller must call Initialize and Close.
-func NewSQLiteBatchJobStoreFromDSN(dsn string) (*SQLiteBatchJobStore, error) {
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("batch job store: open sqlite %s: %w", dsn, err)
-	}
-	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("batch job store: set busy_timeout: %w", err)
-	}
-	return &SQLiteBatchJobStore{db: db}, nil
-}
-
-// NewSQLiteBatchJobStore creates a SQLiteBatchJobStore that uses an existing db connection.
-// The caller must call Initialize and is responsible for closing db.
+// NewSQLiteBatchJobStore creates a SQLiteBatchJobStore over a connection the
+// caller opened and configured (driver registration, busy_timeout). The store
+// takes ownership of db: Close closes it. The caller must call Initialize.
 func NewSQLiteBatchJobStore(db *sql.DB) *SQLiteBatchJobStore {
 	return &SQLiteBatchJobStore{db: db}
 }
@@ -80,7 +67,7 @@ CREATE INDEX IF NOT EXISTS idx_batch_steps_job_id ON batch_steps(job_id);`
 }
 
 // CreateBatchJob inserts a new batch job. Returns an error if the ID already exists.
-func (s *SQLiteBatchJobStore) CreateBatchJob(_ context.Context, job *BatchJob) error {
+func (s *SQLiteBatchJobStore) CreateBatchJob(_ context.Context, job *business.BatchJob) error {
 	configJSON, err := json.Marshal(job.Config)
 	if err != nil {
 		return fmt.Errorf("batch job store create: marshal config: %w", err)
@@ -124,7 +111,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 }
 
 // UpdateBatchJobStatus sets the top-level status and updated_at for the job.
-func (s *SQLiteBatchJobStore) UpdateBatchJobStatus(_ context.Context, id string, status BatchJobStatus) error {
+func (s *SQLiteBatchJobStore) UpdateBatchJobStatus(_ context.Context, id string, status business.BatchJobStatus) error {
 	const q = `UPDATE batch_jobs SET status = ?, updated_at = ? WHERE id = ?`
 	res, err := s.db.Exec(q, string(status), time.Now().UTC(), id)
 	if err != nil {
@@ -151,7 +138,7 @@ func (s *SQLiteBatchJobStore) UpdateBatchTargets(_ context.Context, id string, t
 }
 
 // UpdateBatchStep upserts a step within the batch job identified by jobID.
-func (s *SQLiteBatchJobStore) UpdateBatchStep(_ context.Context, jobID string, step BatchStep) error {
+func (s *SQLiteBatchJobStore) UpdateBatchStep(_ context.Context, jobID string, step business.BatchStep) error {
 	var exists int
 	if err := s.db.QueryRow(
 		`SELECT COUNT(*) FROM batch_jobs WHERE id = ?`, jobID,
@@ -159,7 +146,7 @@ func (s *SQLiteBatchJobStore) UpdateBatchStep(_ context.Context, jobID string, s
 		return fmt.Errorf("batch job store update step: check job: %w", err)
 	}
 	if exists == 0 {
-		return ErrBatchJobNotFound
+		return business.ErrBatchJobNotFound
 	}
 
 	tx, err := s.db.Begin()
@@ -190,7 +177,7 @@ func (s *SQLiteBatchJobStore) UpdateBatchStep(_ context.Context, jobID string, s
 }
 
 // GetBatchJob retrieves the batch job with the given id, including all its steps.
-func (s *SQLiteBatchJobStore) GetBatchJob(_ context.Context, id string) (*BatchJob, error) {
+func (s *SQLiteBatchJobStore) GetBatchJob(_ context.Context, id string) (*business.BatchJob, error) {
 	const q = `
 SELECT id, tenant_id, selector, config_json, targets_json, status,
        created_at, updated_at, initiated_by
@@ -200,7 +187,7 @@ FROM batch_jobs WHERE id = ?`
 	job, err := scanJob(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrBatchJobNotFound
+			return nil, business.ErrBatchJobNotFound
 		}
 		return nil, fmt.Errorf("batch job store get: %w", err)
 	}
@@ -214,7 +201,7 @@ FROM batch_jobs WHERE id = ?`
 }
 
 // ListBatchJobsByTenant returns all batch jobs belonging to tenantID including steps.
-func (s *SQLiteBatchJobStore) ListBatchJobsByTenant(_ context.Context, tenantID string) ([]*BatchJob, error) {
+func (s *SQLiteBatchJobStore) ListBatchJobsByTenant(_ context.Context, tenantID string) ([]*business.BatchJob, error) {
 	const q = `
 SELECT id, tenant_id, selector, config_json, targets_json, status,
        created_at, updated_at, initiated_by
@@ -227,7 +214,7 @@ ORDER BY created_at ASC`
 	}
 	defer func() { _ = rows.Close() }()
 
-	var jobs []*BatchJob
+	var jobs []*business.BatchJob
 	for rows.Next() {
 		job, err := scanJob(rows)
 		if err != nil {
@@ -244,7 +231,7 @@ ORDER BY created_at ASC`
 		return nil, fmt.Errorf("batch job store list rows: %w", err)
 	}
 	if jobs == nil {
-		jobs = []*BatchJob{}
+		jobs = []*business.BatchJob{}
 	}
 	return jobs, nil
 }
@@ -252,7 +239,7 @@ ORDER BY created_at ASC`
 // ListBatchJobs returns batch jobs ordered by created_at DESC with pagination.
 // When tenantID is non-empty only jobs belonging to that tenant are returned.
 // An empty tenantID returns all jobs across tenants (global-scope admin callers).
-func (s *SQLiteBatchJobStore) ListBatchJobs(_ context.Context, tenantID string, limit, offset int) ([]*BatchJob, error) {
+func (s *SQLiteBatchJobStore) ListBatchJobs(_ context.Context, tenantID string, limit, offset int) ([]*business.BatchJob, error) {
 	const selectCols = `
 SELECT id, tenant_id, selector, config_json, targets_json, status,
        created_at, updated_at, initiated_by
@@ -277,7 +264,7 @@ LIMIT ? OFFSET ?`, limit, offset)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var jobs []*BatchJob
+	var jobs []*business.BatchJob
 	for rows.Next() {
 		job, err := scanJob(rows)
 		if err != nil {
@@ -294,7 +281,7 @@ LIMIT ? OFFSET ?`, limit, offset)
 		return nil, fmt.Errorf("batch job store list rows: %w", err)
 	}
 	if jobs == nil {
-		jobs = []*BatchJob{}
+		jobs = []*business.BatchJob{}
 	}
 	return jobs, nil
 }
@@ -312,7 +299,7 @@ func (s *SQLiteBatchJobStore) Close() error {
 	return s.db.Close()
 }
 
-var _ BatchJobStore = (*SQLiteBatchJobStore)(nil)
+var _ business.BatchJobStore = (*SQLiteBatchJobStore)(nil)
 
 // --- helpers ---
 
@@ -321,7 +308,7 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
-func scanJob(s scanner) (*BatchJob, error) {
+func scanJob(s scanner) (*business.BatchJob, error) {
 	var (
 		configJSON  string
 		targetsJSON string
@@ -329,7 +316,7 @@ func scanJob(s scanner) (*BatchJob, error) {
 		createdAt   time.Time
 		updatedAt   time.Time
 	)
-	job := &BatchJob{}
+	job := &business.BatchJob{}
 	err := s.Scan(
 		&job.ID, &job.TenantID, &job.Selector,
 		&configJSON, &targetsJSON,
@@ -358,7 +345,7 @@ func scanJob(s scanner) (*BatchJob, error) {
 	return job, nil
 }
 
-func (s *SQLiteBatchJobStore) loadSteps(jobID string) ([]BatchStep, error) {
+func (s *SQLiteBatchJobStore) loadSteps(jobID string) ([]business.BatchStep, error) {
 	const q = `
 SELECT step_index, status, steward_ids_json, started_at, completed_at, failed_ids_json, rollback_job_id
 FROM batch_steps WHERE job_id = ?
@@ -370,49 +357,11 @@ ORDER BY step_index ASC`
 	}
 	defer func() { _ = rows.Close() }()
 
-	var steps []BatchStep
+	var steps []business.BatchStep
 	for rows.Next() {
-		var (
-			stewardIDsJSON string
-			failedIDsJSON  string
-			rollbackJobID  string
-			startedAt      sql.NullTime
-			completedAt    sql.NullTime
-		)
-		step := BatchStep{}
-		if err := rows.Scan(
-			&step.Index,
-			(*string)(&step.Status),
-			&stewardIDsJSON,
-			&startedAt, &completedAt,
-			&failedIDsJSON, &rollbackJobID,
-		); err != nil {
-			return nil, fmt.Errorf("batch job store scan step: %w", err)
-		}
-		if stewardIDsJSON != "" {
-			if err := json.Unmarshal([]byte(stewardIDsJSON), &step.StewardIDs); err != nil {
-				return nil, fmt.Errorf("batch job store scan step steward_ids: %w", err)
-			}
-		}
-		if failedIDsJSON != "" {
-			if err := json.Unmarshal([]byte(failedIDsJSON), &step.FailedIDs); err != nil {
-				return nil, fmt.Errorf("batch job store scan step failed_ids: %w", err)
-			}
-		}
-		step.RollbackJobID = rollbackJobID
-		if startedAt.Valid {
-			t := startedAt.Time.UTC()
-			step.StartedAt = &t
-		}
-		if completedAt.Valid {
-			t := completedAt.Time.UTC()
-			step.CompletedAt = &t
-		}
-		if step.StewardIDs == nil {
-			step.StewardIDs = []string{}
-		}
-		if step.FailedIDs == nil {
-			step.FailedIDs = []string{}
+		step, err := scanStep(rows)
+		if err != nil {
+			return nil, err
 		}
 		steps = append(steps, step)
 	}
@@ -422,12 +371,70 @@ ORDER BY step_index ASC`
 	return steps, nil
 }
 
+// scanStep reads one batch_steps row produced by loadSteps' query.
+func scanStep(rows *sql.Rows) (business.BatchStep, error) {
+	var (
+		stewardIDsJSON string
+		failedIDsJSON  string
+		rollbackJobID  string
+		startedAt      sql.NullTime
+		completedAt    sql.NullTime
+	)
+	step := business.BatchStep{}
+	if err := rows.Scan(
+		&step.Index,
+		(*string)(&step.Status),
+		&stewardIDsJSON,
+		&startedAt, &completedAt,
+		&failedIDsJSON, &rollbackJobID,
+	); err != nil {
+		return business.BatchStep{}, fmt.Errorf("batch job store scan step: %w", err)
+	}
+	ids, err := decodeIDList(stewardIDsJSON)
+	if err != nil {
+		return business.BatchStep{}, fmt.Errorf("batch job store scan step steward_ids: %w", err)
+	}
+	step.StewardIDs = ids
+	if ids, err = decodeIDList(failedIDsJSON); err != nil {
+		return business.BatchStep{}, fmt.Errorf("batch job store scan step failed_ids: %w", err)
+	}
+	step.FailedIDs = ids
+	step.RollbackJobID = rollbackJobID
+	step.StartedAt = utcTimePtr(startedAt)
+	step.CompletedAt = utcTimePtr(completedAt)
+	return step, nil
+}
+
+// decodeIDList decodes a JSON string array column. An empty column or a JSON
+// null yields an empty, non-nil slice.
+func decodeIDList(raw string) ([]string, error) {
+	var ids []string
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+			return nil, err
+		}
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
+// utcTimePtr converts a nullable timestamp column to a UTC *time.Time (nil when NULL).
+func utcTimePtr(v sql.NullTime) *time.Time {
+	if !v.Valid {
+		return nil
+	}
+	t := v.Time.UTC()
+	return &t
+}
+
 // txer is the common interface for sql.DB and sql.Tx for Exec.
 type txer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }
 
-func insertStep(tx txer, jobID string, step BatchStep) error {
+func insertStep(tx txer, jobID string, step business.BatchStep) error {
 	stewardIDs := step.StewardIDs
 	if stewardIDs == nil {
 		stewardIDs = []string{}
@@ -476,7 +483,7 @@ func requireOneRow(res sql.Result, op, id string) error {
 		return fmt.Errorf("batch job store %s %q: rows affected: %w", op, id, err)
 	}
 	if n == 0 {
-		return ErrBatchJobNotFound
+		return business.ErrBatchJobNotFound
 	}
 	return nil
 }

@@ -3,20 +3,34 @@
 package batchjob_test
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 
 	"github.com/cfgis/cfgms/features/controller/batchjob"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
+// openSQLiteStoreAt opens the SQLite file at path the way a caller must before
+// handing the connection to NewSQLiteBatchJobStore.
+func openSQLiteStoreAt(t *testing.T, path string) *batchjob.SQLiteBatchJobStore {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = db.Exec("PRAGMA busy_timeout = 5000")
+	if err != nil {
+		_ = db.Close()
+	}
+	require.NoError(t, err)
+	return batchjob.NewSQLiteBatchJobStore(db)
+}
+
 func openTestSQLiteStore(t *testing.T) *batchjob.SQLiteBatchJobStore {
 	t.Helper()
-	dsn := filepath.Join(t.TempDir(), "batch_jobs.db")
-	store, err := batchjob.NewSQLiteBatchJobStoreFromDSN(dsn)
-	require.NoError(t, err)
+	store := openSQLiteStoreAt(t, filepath.Join(t.TempDir(), "batch_jobs.db"))
 	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
@@ -38,17 +52,16 @@ func TestSQLiteBatchJobStore_ReopenPersists(t *testing.T) {
 
 	// First connection: create and populate a job.
 	{
-		store, err := batchjob.NewSQLiteBatchJobStoreFromDSN(dsn)
-		require.NoError(t, err)
+		store := openSQLiteStoreAt(t, dsn)
 		ctx := t.Context()
 		require.NoError(t, store.Initialize(ctx))
-		job := &batchjob.BatchJob{
+		job := &business.BatchJob{
 			ID:       "persist-job-1",
 			TenantID: "t-1",
 			Selector: "all",
-			Config:   batchjob.BatchJobConfig{BatchSize: 2},
+			Config:   business.BatchJobConfig{BatchSize: 2},
 			Targets:  []string{"s-1"},
-			Status:   batchjob.BatchJobStatusPending,
+			Status:   business.BatchJobStatusPending,
 		}
 		require.NoError(t, store.CreateBatchJob(ctx, job))
 		require.NoError(t, store.Close())
@@ -56,13 +69,12 @@ func TestSQLiteBatchJobStore_ReopenPersists(t *testing.T) {
 
 	// Second connection: data must still be there.
 	{
-		store, err := batchjob.NewSQLiteBatchJobStoreFromDSN(dsn)
-		require.NoError(t, err)
+		store := openSQLiteStoreAt(t, dsn)
 		ctx := t.Context()
 		require.NoError(t, store.Initialize(ctx))
 		got, err := store.GetBatchJob(ctx, "persist-job-1")
 		require.NoError(t, err)
-		require.Equal(t, batchjob.BatchJobStatusPending, got.Status)
+		require.Equal(t, business.BatchJobStatusPending, got.Status)
 		require.Equal(t, []string{"s-1"}, got.Targets)
 		require.NoError(t, store.Close())
 	}

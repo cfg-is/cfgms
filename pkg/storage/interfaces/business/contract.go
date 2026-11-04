@@ -12,8 +12,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/cfgis/cfgms/features/controller/batchjob"
 )
 
 // TenantStoreLifecycleContract verifies that the suspension provenance fields
@@ -702,19 +700,19 @@ func TenantCrossingStoreContract(t *testing.T, store TenantCrossingStore) {
 	})
 }
 
-func newContractBatchJob(id, tenantID string) *batchjob.BatchJob {
+func newContractBatchJob(id, tenantID string) *BatchJob {
 	now := time.Now().UTC()
-	return &batchjob.BatchJob{
+	return &BatchJob{
 		ID:       id,
 		TenantID: tenantID,
 		Selector: "tag:prod",
-		Config: batchjob.BatchJobConfig{
+		Config: BatchJobConfig{
 			BatchSize:         5,
 			PreviousConfigRef: "cfg-v1",
 		},
 		Targets:     []string{"s-1", "s-2", "s-3"},
-		Status:      batchjob.BatchJobStatusPending,
-		Steps:       []batchjob.BatchStep{{Index: 0, StewardIDs: []string{"s-1"}, Status: batchjob.BatchStepStatusPending}},
+		Status:      BatchJobStatusPending,
+		Steps:       []BatchStep{{Index: 0, StewardIDs: []string{"s-1"}, Status: BatchStepStatusPending}},
 		CreatedAt:   now,
 		UpdatedAt:   now,
 		InitiatedBy: "operator@example.com",
@@ -726,7 +724,7 @@ func newContractBatchJob(id, tenantID string) *batchjob.BatchJob {
 //
 //	func TestMySQLiteBatchJobStore_Contract(t *testing.T) {
 //	    store := openStore(t)
-//	    business.BatchJobStoreContract(t, store)
+//	    BatchJobStoreContract(t, store)
 //	}
 func BatchJobStoreContract(t *testing.T, store BatchJobStore) {
 	t.Helper()
@@ -743,7 +741,7 @@ func BatchJobStoreContract(t *testing.T, store BatchJobStore) {
 		require.NoError(t, err)
 		assert.Equal(t, "ctr-job-1", got.ID)
 		assert.Equal(t, "tenant-1", got.TenantID)
-		assert.Equal(t, batchjob.BatchJobStatusPending, got.Status)
+		assert.Equal(t, BatchJobStatusPending, got.Status)
 		assert.Equal(t, "tag:prod", got.Selector)
 		assert.Equal(t, 5, got.Config.BatchSize)
 		assert.Equal(t, "cfg-v1", got.Config.PreviousConfigRef)
@@ -768,19 +766,19 @@ func BatchJobStoreContract(t *testing.T, store BatchJobStore) {
 		job := newContractBatchJob("ctr-job-status", "tenant-1")
 		require.NoError(t, store.CreateBatchJob(ctx, job))
 
-		require.NoError(t, store.UpdateBatchJobStatus(ctx, "ctr-job-status", batchjob.BatchJobStatusRunning))
+		require.NoError(t, store.UpdateBatchJobStatus(ctx, "ctr-job-status", BatchJobStatusRunning))
 		got, err := store.GetBatchJob(ctx, "ctr-job-status")
 		require.NoError(t, err)
-		assert.Equal(t, batchjob.BatchJobStatusRunning, got.Status)
+		assert.Equal(t, BatchJobStatusRunning, got.Status)
 
-		require.NoError(t, store.UpdateBatchJobStatus(ctx, "ctr-job-status", batchjob.BatchJobStatusCompleted))
+		require.NoError(t, store.UpdateBatchJobStatus(ctx, "ctr-job-status", BatchJobStatusCompleted))
 		got, err = store.GetBatchJob(ctx, "ctr-job-status")
 		require.NoError(t, err)
-		assert.Equal(t, batchjob.BatchJobStatusCompleted, got.Status)
+		assert.Equal(t, BatchJobStatusCompleted, got.Status)
 	})
 
 	t.Run("UpdateBatchJobStatus not found", func(t *testing.T) {
-		err := store.UpdateBatchJobStatus(ctx, "ctr-ghost", batchjob.BatchJobStatusFailed)
+		err := store.UpdateBatchJobStatus(ctx, "ctr-ghost", BatchJobStatusFailed)
 		assert.ErrorIs(t, err, ErrBatchJobNotFound)
 	})
 
@@ -806,10 +804,10 @@ func BatchJobStoreContract(t *testing.T, store BatchJobStore) {
 		require.NoError(t, store.CreateBatchJob(ctx, job))
 
 		now := time.Now().UTC()
-		step := batchjob.BatchStep{
+		step := BatchStep{
 			Index:         0,
 			StewardIDs:    []string{"s-1"},
-			Status:        batchjob.BatchStepStatusRunning,
+			Status:        BatchStepStatusRunning,
 			StartedAt:     &now,
 			FailedIDs:     []string{"s-1"},
 			RollbackJobID: "rj-001",
@@ -821,14 +819,14 @@ func BatchJobStoreContract(t *testing.T, store BatchJobStore) {
 		require.Len(t, got.Steps, 1)
 		s := got.Steps[0]
 		assert.Equal(t, 0, s.Index)
-		assert.Equal(t, batchjob.BatchStepStatusRunning, s.Status)
+		assert.Equal(t, BatchStepStatusRunning, s.Status)
 		assert.Equal(t, []string{"s-1"}, s.FailedIDs)
 		assert.Equal(t, "rj-001", s.RollbackJobID)
 		require.NotNil(t, s.StartedAt)
 	})
 
 	t.Run("UpdateBatchStep not found", func(t *testing.T) {
-		step := batchjob.BatchStep{Index: 0, Status: batchjob.BatchStepStatusFailed}
+		step := BatchStep{Index: 0, Status: BatchStepStatusFailed}
 		err := store.UpdateBatchStep(ctx, "ctr-ghost-step", step)
 		assert.ErrorIs(t, err, ErrBatchJobNotFound)
 	})
@@ -837,10 +835,10 @@ func BatchJobStoreContract(t *testing.T, store BatchJobStore) {
 		job := newContractBatchJob("ctr-job-step-append", "tenant-1")
 		require.NoError(t, store.CreateBatchJob(ctx, job))
 
-		newStep := batchjob.BatchStep{
+		newStep := BatchStep{
 			Index:      1,
 			StewardIDs: []string{"s-2"},
-			Status:     batchjob.BatchStepStatusPending,
+			Status:     BatchStepStatusPending,
 		}
 		require.NoError(t, store.UpdateBatchStep(ctx, "ctr-job-step-append", newStep))
 

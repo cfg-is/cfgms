@@ -9,6 +9,7 @@ import (
 
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 const batchStepTimeout = 10 * time.Minute
@@ -53,7 +54,7 @@ type CommandPublisher interface {
 // On any batch failure the job transitions to rolled_back (when PreviousConfigRef is set,
 // compensating dispatches are sent to already-completed batches) or paused (no baseline).
 type RollingBatchExecutor struct {
-	store       BatchJobStore
+	store       business.BatchJobStore
 	fleetQuery  FleetQuery
 	publisher   CommandPublisher
 	quorumCheck QuorumChecker
@@ -63,7 +64,7 @@ type RollingBatchExecutor struct {
 // NewRollingBatchExecutor creates an executor with the provided dependencies.
 // quorumCheck may be nil; in that case naive round-robin partitioning is used.
 func NewRollingBatchExecutor(
-	store BatchJobStore,
+	store business.BatchJobStore,
 	fleetQuery FleetQuery,
 	publisher CommandPublisher,
 	quorumCheck QuorumChecker,
@@ -92,107 +93,134 @@ func NewRollingBatchExecutor(
 //
 // job.Targets is the set the create handler authorized. Execute sends commands to
 // those stewards only and never replaces the persisted targets.
-func (e *RollingBatchExecutor) Execute(ctx context.Context, job *BatchJob) error {
-	// 1. The authorized set, without duplicates.
-	ids := dedupeIDs(job.Targets)
-
-	// 2. Partition into batches.
-	var batches [][]string
-	if len(ids) > 0 {
-		if e.quorumCheck != nil {
-			found, err := e.fleetQuery.Lookup(ctx, ids)
-			if err != nil {
-				return fmt.Errorf("executor: fleet lookup: %w", err)
-			}
-			batches = e.quorumCheck.Partition(orderedMeta(ids, found), job.Config.BatchSize)
-		} else {
-			batches = naivePartition(ids, job.Config.BatchSize)
-		}
+func (e *RollingBatchExecutor) Execute(ctx context.Context, job *business.BatchJob) error {
+	// 1–2. The authorized set, without duplicates, partitioned into batches.
+	batches, err := e.partitionTargets(ctx, job)
+	if err != nil {
+		return err
 	}
 
-	if err := e.store.UpdateBatchJobStatus(ctx, job.ID, BatchJobStatusRunning); err != nil {
+	if err := e.store.UpdateBatchJobStatus(ctx, job.ID, business.BatchJobStatusRunning); err != nil {
 		return fmt.Errorf("executor: set running: %w", err)
 	}
-	job.Status = BatchJobStatusRunning
+	job.Status = business.BatchJobStatusRunning
 
 	// 3. Execute batches sequentially.
 	for i, batch := range batches {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-
-		// a. Mark step running.
-		now := time.Now().UTC()
-		step := BatchStep{
-			Index:      i,
-			StewardIDs: batch,
-			Status:     BatchStepStatusRunning,
-			StartedAt:  &now,
-		}
-		if err := e.store.UpdateBatchStep(ctx, job.ID, step); err != nil {
-			return fmt.Errorf("executor: set step %d running: %w", i, err)
-		}
-
-		e.logger.Info("Executing batch step",
-			"job_id", logging.SanitizeLogValue(job.ID),
-			"step", i,
-			"size", len(batch))
-
-		// b–c. Dispatch and wait for all results.
-		failedIDs, err := e.dispatchBatch(ctx, batch)
+		stopped, err := e.runBatchStep(ctx, job, i, batch)
 		if err != nil {
 			return err
 		}
-
-		completedAt := time.Now().UTC()
-		step.CompletedAt = &completedAt
-
-		if len(failedIDs) > 0 {
-			// e. At least one steward failed.
-			step.Status = BatchStepStatusFailed
-			step.FailedIDs = failedIDs
-			if persistErr := e.store.UpdateBatchStep(ctx, job.ID, step); persistErr != nil {
-				e.logger.Error("Failed to persist failed step",
-					"job_id", logging.SanitizeLogValue(job.ID),
-					"step", i, "error", persistErr)
-			}
-			e.logger.Info("Batch step failed",
-				"job_id", logging.SanitizeLogValue(job.ID),
-				"step", i, "failed_count", len(failedIDs))
-			if job.Config.PreviousConfigRef != "" {
-				// Baseline captured: compensating dispatch to already-applied stewards.
-				e.rollbackAppliedSteps(ctx, job)
-			} else {
-				// No baseline: pause for operator action.
-				if pauseErr := e.store.UpdateBatchJobStatus(ctx, job.ID, BatchJobStatusPaused); pauseErr != nil {
-					e.logger.Error("Failed to set job paused",
-						"job_id", logging.SanitizeLogValue(job.ID),
-						"error", pauseErr)
-				}
-				job.Status = BatchJobStatusPaused
-				e.logger.Info("Job paused (no PreviousConfigRef; rollback skipped)",
-					"job_id", logging.SanitizeLogValue(job.ID))
-			}
+		if stopped {
 			return nil
 		}
-
-		// d. All succeeded → advance.
-		step.Status = BatchStepStatusCompleted
-		if err := e.store.UpdateBatchStep(ctx, job.ID, step); err != nil {
-			return fmt.Errorf("executor: set step %d completed: %w", i, err)
-		}
-
-		e.logger.Info("Batch step completed",
-			"job_id", logging.SanitizeLogValue(job.ID), "step", i)
 	}
 
 	// 4. All batches completed.
-	if err := e.store.UpdateBatchJobStatus(ctx, job.ID, BatchJobStatusCompleted); err != nil {
+	if err := e.store.UpdateBatchJobStatus(ctx, job.ID, business.BatchJobStatusCompleted); err != nil {
 		return fmt.Errorf("executor: set job completed: %w", err)
 	}
-	job.Status = BatchJobStatusCompleted
+	job.Status = business.BatchJobStatusCompleted
 	e.logger.Info("Batch job completed", "job_id", logging.SanitizeLogValue(job.ID))
 	return nil
+}
+
+// partitionTargets deduplicates job.Targets and splits them into batches,
+// quorum-aware when a QuorumChecker is configured, else naive round-robin.
+func (e *RollingBatchExecutor) partitionTargets(ctx context.Context, job *business.BatchJob) ([][]string, error) {
+	ids := dedupeIDs(job.Targets)
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if e.quorumCheck == nil {
+		return naivePartition(ids, job.Config.BatchSize), nil
+	}
+	found, err := e.fleetQuery.Lookup(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("executor: fleet lookup: %w", err)
+	}
+	return e.quorumCheck.Partition(orderedMeta(ids, found), job.Config.BatchSize), nil
+}
+
+// runBatchStep executes one batch: marks the step running, dispatches to every
+// steward in the batch and waits for results. It returns stopped=true when the
+// batch failed and the job has been rolled back or paused.
+func (e *RollingBatchExecutor) runBatchStep(ctx context.Context, job *business.BatchJob, i int, batch []string) (bool, error) {
+	// a. Mark step running.
+	now := time.Now().UTC()
+	step := business.BatchStep{
+		Index:      i,
+		StewardIDs: batch,
+		Status:     business.BatchStepStatusRunning,
+		StartedAt:  &now,
+	}
+	if err := e.store.UpdateBatchStep(ctx, job.ID, step); err != nil {
+		return false, fmt.Errorf("executor: set step %d running: %w", i, err)
+	}
+
+	e.logger.Info("Executing batch step",
+		"job_id", logging.SanitizeLogValue(job.ID),
+		"step", i,
+		"size", len(batch))
+
+	// b–c. Dispatch and wait for all results.
+	failedIDs, err := e.dispatchBatch(ctx, batch)
+	if err != nil {
+		return false, err
+	}
+
+	completedAt := time.Now().UTC()
+	step.CompletedAt = &completedAt
+
+	if len(failedIDs) > 0 {
+		// e. At least one steward failed.
+		e.handleFailedStep(ctx, job, step, failedIDs)
+		return true, nil
+	}
+
+	// d. All succeeded → advance.
+	step.Status = business.BatchStepStatusCompleted
+	if err := e.store.UpdateBatchStep(ctx, job.ID, step); err != nil {
+		return false, fmt.Errorf("executor: set step %d completed: %w", i, err)
+	}
+
+	e.logger.Info("Batch step completed",
+		"job_id", logging.SanitizeLogValue(job.ID), "step", i)
+	return false, nil
+}
+
+// handleFailedStep persists a failed step, then rolls back applied steps when a
+// baseline (PreviousConfigRef) exists, or pauses the job for operator action.
+func (e *RollingBatchExecutor) handleFailedStep(ctx context.Context, job *business.BatchJob, step business.BatchStep, failedIDs []string) {
+	step.Status = business.BatchStepStatusFailed
+	step.FailedIDs = failedIDs
+	if persistErr := e.store.UpdateBatchStep(ctx, job.ID, step); persistErr != nil {
+		e.logger.Error("Failed to persist failed step",
+			"job_id", logging.SanitizeLogValue(job.ID),
+			"step", step.Index, "error", persistErr)
+	}
+	e.logger.Info("Batch step failed",
+		"job_id", logging.SanitizeLogValue(job.ID),
+		"step", step.Index, "failed_count", len(failedIDs))
+
+	if job.Config.PreviousConfigRef != "" {
+		// Baseline captured: compensating dispatch to already-applied stewards.
+		e.rollbackAppliedSteps(ctx, job)
+		return
+	}
+
+	// No baseline: pause for operator action.
+	if pauseErr := e.store.UpdateBatchJobStatus(ctx, job.ID, business.BatchJobStatusPaused); pauseErr != nil {
+		e.logger.Error("Failed to set job paused",
+			"job_id", logging.SanitizeLogValue(job.ID),
+			"error", pauseErr)
+	}
+	job.Status = business.BatchJobStatusPaused
+	e.logger.Info("Job paused (no PreviousConfigRef; rollback skipped)",
+		"job_id", logging.SanitizeLogValue(job.ID))
 }
 
 type stewardDispatchResult struct {

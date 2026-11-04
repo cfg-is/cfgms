@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/controller/registration"
+	"github.com/cfgis/cfgms/pkg/registration"
 )
 
 func TestCollectHostAttributes_NoDNAKeys_StableAcrossCalls(t *testing.T) {

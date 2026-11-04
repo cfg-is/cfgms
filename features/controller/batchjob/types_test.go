@@ -8,31 +8,31 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/cfgis/cfgms/features/controller/batchjob"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 func TestBatchJobStatusConstants(t *testing.T) {
-	assert.Equal(t, batchjob.BatchJobStatus("pending"), batchjob.BatchJobStatusPending)
-	assert.Equal(t, batchjob.BatchJobStatus("running"), batchjob.BatchJobStatusRunning)
-	assert.Equal(t, batchjob.BatchJobStatus("paused"), batchjob.BatchJobStatusPaused)
-	assert.Equal(t, batchjob.BatchJobStatus("completed"), batchjob.BatchJobStatusCompleted)
-	assert.Equal(t, batchjob.BatchJobStatus("failed"), batchjob.BatchJobStatusFailed)
-	assert.Equal(t, batchjob.BatchJobStatus("rolled_back"), batchjob.BatchJobStatusRolledBack)
+	assert.Equal(t, business.BatchJobStatus("pending"), business.BatchJobStatusPending)
+	assert.Equal(t, business.BatchJobStatus("running"), business.BatchJobStatusRunning)
+	assert.Equal(t, business.BatchJobStatus("paused"), business.BatchJobStatusPaused)
+	assert.Equal(t, business.BatchJobStatus("completed"), business.BatchJobStatusCompleted)
+	assert.Equal(t, business.BatchJobStatus("failed"), business.BatchJobStatusFailed)
+	assert.Equal(t, business.BatchJobStatus("rolled_back"), business.BatchJobStatusRolledBack)
 }
 
 func TestBatchStepStatusConstants(t *testing.T) {
-	assert.Equal(t, batchjob.BatchStepStatus("pending"), batchjob.BatchStepStatusPending)
-	assert.Equal(t, batchjob.BatchStepStatus("running"), batchjob.BatchStepStatusRunning)
-	assert.Equal(t, batchjob.BatchStepStatus("completed"), batchjob.BatchStepStatusCompleted)
-	assert.Equal(t, batchjob.BatchStepStatus("failed"), batchjob.BatchStepStatusFailed)
-	assert.Equal(t, batchjob.BatchStepStatus("rolled_back"), batchjob.BatchStepStatusRolledBack)
+	assert.Equal(t, business.BatchStepStatus("pending"), business.BatchStepStatusPending)
+	assert.Equal(t, business.BatchStepStatus("running"), business.BatchStepStatusRunning)
+	assert.Equal(t, business.BatchStepStatus("completed"), business.BatchStepStatusCompleted)
+	assert.Equal(t, business.BatchStepStatus("failed"), business.BatchStepStatusFailed)
+	assert.Equal(t, business.BatchStepStatus("rolled_back"), business.BatchStepStatusRolledBack)
 }
 
 func TestBatchStepZeroValue(t *testing.T) {
-	var s batchjob.BatchStep
+	var s business.BatchStep
 	assert.Equal(t, 0, s.Index)
 	assert.Nil(t, s.StewardIDs)
-	assert.Equal(t, batchjob.BatchStepStatus(""), s.Status)
+	assert.Equal(t, business.BatchStepStatus(""), s.Status)
 	assert.Nil(t, s.StartedAt)
 	assert.Nil(t, s.CompletedAt)
 	assert.Nil(t, s.FailedIDs)
@@ -40,18 +40,18 @@ func TestBatchStepZeroValue(t *testing.T) {
 }
 
 func TestBatchJobConfigZeroValue(t *testing.T) {
-	var c batchjob.BatchJobConfig
+	var c business.BatchJobConfig
 	assert.Equal(t, 0, c.BatchSize)
 	assert.Empty(t, c.PreviousConfigRef)
 }
 
 func TestBatchJobZeroValue(t *testing.T) {
-	var j batchjob.BatchJob
+	var j business.BatchJob
 	assert.Empty(t, j.ID)
 	assert.Empty(t, j.TenantID)
 	assert.Empty(t, j.Selector)
 	assert.Nil(t, j.Targets)
-	assert.Equal(t, batchjob.BatchJobStatus(""), j.Status)
+	assert.Equal(t, business.BatchJobStatus(""), j.Status)
 	assert.Nil(t, j.Steps)
 	assert.True(t, j.CreatedAt.IsZero())
 	assert.True(t, j.UpdatedAt.IsZero())
@@ -61,10 +61,10 @@ func TestBatchJobZeroValue(t *testing.T) {
 func TestBatchStepFields(t *testing.T) {
 	now := time.Now().UTC()
 	completed := now.Add(time.Minute)
-	s := batchjob.BatchStep{
+	s := business.BatchStep{
 		Index:         2,
 		StewardIDs:    []string{"s-1", "s-2"},
-		Status:        batchjob.BatchStepStatusRunning,
+		Status:        business.BatchStepStatusRunning,
 		StartedAt:     &now,
 		CompletedAt:   &completed,
 		FailedIDs:     []string{"s-2"},
@@ -72,7 +72,7 @@ func TestBatchStepFields(t *testing.T) {
 	}
 	assert.Equal(t, 2, s.Index)
 	assert.Equal(t, []string{"s-1", "s-2"}, s.StewardIDs)
-	assert.Equal(t, batchjob.BatchStepStatusRunning, s.Status)
+	assert.Equal(t, business.BatchStepStatusRunning, s.Status)
 	assert.Equal(t, &now, s.StartedAt)
 	assert.Equal(t, &completed, s.CompletedAt)
 	assert.Equal(t, []string{"s-2"}, s.FailedIDs)
@@ -81,17 +81,17 @@ func TestBatchStepFields(t *testing.T) {
 
 func TestBatchJobFields(t *testing.T) {
 	now := time.Now().UTC()
-	j := batchjob.BatchJob{
+	j := business.BatchJob{
 		ID:       "job-1",
 		TenantID: "tenant-1",
 		Selector: "tag:prod",
-		Config: batchjob.BatchJobConfig{
+		Config: business.BatchJobConfig{
 			BatchSize:         10,
 			PreviousConfigRef: "v1.2",
 		},
 		Targets:     []string{"s-1", "s-2"},
-		Status:      batchjob.BatchJobStatusPending,
-		Steps:       []batchjob.BatchStep{{Index: 0, StewardIDs: []string{"s-1"}}},
+		Status:      business.BatchJobStatusPending,
+		Steps:       []business.BatchStep{{Index: 0, StewardIDs: []string{"s-1"}}},
 		CreatedAt:   now,
 		UpdatedAt:   now,
 		InitiatedBy: "operator@example.com",
@@ -102,7 +102,7 @@ func TestBatchJobFields(t *testing.T) {
 	assert.Equal(t, 10, j.Config.BatchSize)
 	assert.Equal(t, "v1.2", j.Config.PreviousConfigRef)
 	assert.Equal(t, []string{"s-1", "s-2"}, j.Targets)
-	assert.Equal(t, batchjob.BatchJobStatusPending, j.Status)
+	assert.Equal(t, business.BatchJobStatusPending, j.Status)
 	assert.Len(t, j.Steps, 1)
 	assert.Equal(t, now, j.CreatedAt)
 	assert.Equal(t, now, j.UpdatedAt)

@@ -24,12 +24,10 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/providers/memory"
 	sqliteprovider "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"
 	"github.com/cfgis/cfgms/pkg/testutil"
-
-	"github.com/cfgis/cfgms/features/controller/batchjob"
 )
 
 // newTestAPIBatchJobStore returns a memory-backed BatchJobStore for handler tests.
-func newTestAPIBatchJobStore() batchjob.BatchJobStore {
+func newTestAPIBatchJobStore() business.BatchJobStore {
 	return memory.NewBatchJobStore()
 }
 

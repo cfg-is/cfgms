@@ -1318,6 +1318,9 @@ check-architecture:
 	@echo "📦 Checking for tracked .py files under core product paths..."
 	@bash ./scripts/check-no-python-in-core.sh
 	@echo ""
+	@echo "📦 Checking ./cmd/steward ships no features/controller code..."
+	@bash ./scripts/check-steward-no-controller-deps.sh
+	@echo ""
 	@echo "📦 Checking every CI image reference reads the ghcr.io mirror..."
 	@bash ./scripts/mirror-ci-images.sh --check
 	@echo ""

@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/features/controller/batchjob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -19,17 +18,17 @@ import (
 // is not required. All mutations deep-copy the stored record to prevent aliasing.
 type BatchJobStore struct {
 	mu   sync.RWMutex
-	jobs map[string]*batchjob.BatchJob
+	jobs map[string]*business.BatchJob
 }
 
 // NewBatchJobStore returns an initialised in-memory BatchJobStore.
 func NewBatchJobStore() *BatchJobStore {
-	return &BatchJobStore{jobs: make(map[string]*batchjob.BatchJob)}
+	return &BatchJobStore{jobs: make(map[string]*business.BatchJob)}
 }
 
 // CreateBatchJob inserts a new batch job. Returns an error if a record with
 // the same ID already exists.
-func (s *BatchJobStore) CreateBatchJob(_ context.Context, job *batchjob.BatchJob) error {
+func (s *BatchJobStore) CreateBatchJob(_ context.Context, job *business.BatchJob) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.jobs[job.ID]; exists {
@@ -40,7 +39,7 @@ func (s *BatchJobStore) CreateBatchJob(_ context.Context, job *batchjob.BatchJob
 }
 
 // UpdateBatchJobStatus sets the top-level status and updates UpdatedAt.
-func (s *BatchJobStore) UpdateBatchJobStatus(_ context.Context, id string, status batchjob.BatchJobStatus) error {
+func (s *BatchJobStore) UpdateBatchJobStatus(_ context.Context, id string, status business.BatchJobStatus) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j, ok := s.jobs[id]
@@ -67,7 +66,7 @@ func (s *BatchJobStore) UpdateBatchTargets(_ context.Context, id string, targets
 
 // UpdateBatchStep upserts the step identified by step.Index within the job.
 // A matching index is replaced in-place; an unrecognised index appends a new step.
-func (s *BatchJobStore) UpdateBatchStep(_ context.Context, jobID string, step batchjob.BatchStep) error {
+func (s *BatchJobStore) UpdateBatchStep(_ context.Context, jobID string, step business.BatchStep) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j, ok := s.jobs[jobID]
@@ -88,7 +87,7 @@ func (s *BatchJobStore) UpdateBatchStep(_ context.Context, jobID string, step ba
 }
 
 // GetBatchJob retrieves a deep copy of the batch job identified by id.
-func (s *BatchJobStore) GetBatchJob(_ context.Context, id string) (*batchjob.BatchJob, error) {
+func (s *BatchJobStore) GetBatchJob(_ context.Context, id string) (*business.BatchJob, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	j, ok := s.jobs[id]
@@ -99,10 +98,10 @@ func (s *BatchJobStore) GetBatchJob(_ context.Context, id string) (*batchjob.Bat
 }
 
 // ListBatchJobsByTenant returns deep copies of all jobs belonging to tenantID.
-func (s *BatchJobStore) ListBatchJobsByTenant(_ context.Context, tenantID string) ([]*batchjob.BatchJob, error) {
+func (s *BatchJobStore) ListBatchJobsByTenant(_ context.Context, tenantID string) ([]*business.BatchJob, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out []*batchjob.BatchJob
+	var out []*business.BatchJob
 	for _, j := range s.jobs {
 		if j.TenantID == tenantID {
 			out = append(out, deepCopyJob(j))
@@ -113,10 +112,10 @@ func (s *BatchJobStore) ListBatchJobsByTenant(_ context.Context, tenantID string
 
 // ListBatchJobs returns deep copies of jobs ordered by created_at DESC with pagination.
 // An empty tenantID returns all jobs across tenants.
-func (s *BatchJobStore) ListBatchJobs(_ context.Context, tenantID string, limit, offset int) ([]*batchjob.BatchJob, error) {
+func (s *BatchJobStore) ListBatchJobs(_ context.Context, tenantID string, limit, offset int) ([]*business.BatchJob, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out []*batchjob.BatchJob
+	var out []*business.BatchJob
 	for _, j := range s.jobs {
 		if tenantID == "" || j.TenantID == tenantID {
 			out = append(out, deepCopyJob(j))
@@ -126,7 +125,7 @@ func (s *BatchJobStore) ListBatchJobs(_ context.Context, tenantID string, limit,
 		return out[i].CreatedAt.After(out[k].CreatedAt)
 	})
 	if offset >= len(out) {
-		return []*batchjob.BatchJob{}, nil
+		return []*business.BatchJob{}, nil
 	}
 	out = out[offset:]
 	if limit > 0 && len(out) > limit {
@@ -143,10 +142,10 @@ var _ business.BatchJobStore = (*BatchJobStore)(nil)
 
 // deepCopyJob returns a fully independent copy of job, preventing aliasing
 // between the store's internal state and caller-held pointers.
-func deepCopyJob(j *batchjob.BatchJob) *batchjob.BatchJob {
+func deepCopyJob(j *business.BatchJob) *business.BatchJob {
 	cp := *j
 	cp.Targets = append([]string(nil), j.Targets...)
-	cp.Steps = make([]batchjob.BatchStep, len(j.Steps))
+	cp.Steps = make([]business.BatchStep, len(j.Steps))
 	for i, s := range j.Steps {
 		cp.Steps[i] = copyStep(s)
 	}
@@ -154,7 +153,7 @@ func deepCopyJob(j *batchjob.BatchJob) *batchjob.BatchJob {
 }
 
 // copyStep returns an independent copy of a BatchStep.
-func copyStep(s batchjob.BatchStep) batchjob.BatchStep {
+func copyStep(s business.BatchStep) business.BatchStep {
 	cp := s
 	cp.StewardIDs = append([]string(nil), s.StewardIDs...)
 	cp.FailedIDs = append([]string(nil), s.FailedIDs...)

@@ -30,7 +30,7 @@ import (
 
 // newTestBatchJobStoreForAPI returns a memory-backed BatchJobStore for handler tests.
 // The concrete provider import lives in providers_test.go (allowlisted */providers_test.go file).
-func newTestBatchJobStoreForAPI() batchjob.BatchJobStore {
+func newTestBatchJobStoreForAPI() business.BatchJobStore {
 	return newTestAPIBatchJobStore()
 }
 
@@ -200,7 +200,7 @@ func TestHandleCreateJob_AllSelector_Returns202AndPersists(t *testing.T) {
 	require.NoError(t, err, "GetBatchJob must find the persisted record")
 	assert.Equal(t, 3, job.Config.BatchSize, "Config.BatchSize must equal the requested batch_size")
 	assert.Equal(t, "all", job.Selector)
-	assert.Equal(t, string(batchjob.BatchJobStatusPending), string(job.Status))
+	assert.Equal(t, string(business.BatchJobStatusPending), string(job.Status))
 }
 
 // TestHandleCreateJob_PreviousConfigRef_Passthrough verifies that previous_config_ref
@@ -392,7 +392,7 @@ func TestHandleCreateJob_RealExecutor_DispatchesOnlyAuthorizedTargets(t *testing
 
 	require.Eventually(t, func() bool {
 		job, err := store.GetBatchJob(context.Background(), jobID)
-		return err == nil && job.Status == batchjob.BatchJobStatusCompleted
+		return err == nil && job.Status == business.BatchJobStatusCompleted
 	}, 5*time.Second, 10*time.Millisecond, "job must complete")
 
 	assert.Equal(t, []string{authorized}, pub.stewards(),
@@ -423,12 +423,12 @@ func TestHandleGetJob_NonAdminEmptyTenant_Returns401(t *testing.T) {
 	store := newTestBatchJobStoreForAPI()
 	server.batchJobStore = store
 
-	seedJob := &batchjob.BatchJob{
+	seedJob := &business.BatchJob{
 		ID:       "job-any-tenant",
 		TenantID: "tenant-z",
 		Selector: "all",
-		Config:   batchjob.BatchJobConfig{BatchSize: 2},
-		Status:   batchjob.BatchJobStatusPending,
+		Config:   business.BatchJobConfig{BatchSize: 2},
+		Status:   business.BatchJobStatusPending,
 	}
 	require.NoError(t, store.CreateBatchJob(context.Background(), seedJob))
 
@@ -464,12 +464,12 @@ func TestHandleGetJob_WrongTenant_Returns404(t *testing.T) {
 	server.batchJobStore = store
 
 	// Seed a job for tenant-a.
-	seedJob := &batchjob.BatchJob{
+	seedJob := &business.BatchJob{
 		ID:       "job-owned-by-tenant-a",
 		TenantID: "tenant-a",
 		Selector: "all",
-		Config:   batchjob.BatchJobConfig{BatchSize: 5},
-		Status:   batchjob.BatchJobStatusPending,
+		Config:   business.BatchJobConfig{BatchSize: 5},
+		Status:   business.BatchJobStatusPending,
 	}
 	require.NoError(t, store.CreateBatchJob(context.Background(), seedJob))
 
@@ -490,12 +490,12 @@ func TestHandleGetJob_SameTenant_Returns200(t *testing.T) {
 	store := newTestBatchJobStoreForAPI()
 	server.batchJobStore = store
 
-	seedJob := &batchjob.BatchJob{
+	seedJob := &business.BatchJob{
 		ID:       "job-for-tenant-a",
 		TenantID: "tenant-a",
 		Selector: "os:linux",
-		Config:   batchjob.BatchJobConfig{BatchSize: 7},
-		Status:   batchjob.BatchJobStatusRunning,
+		Config:   business.BatchJobConfig{BatchSize: 7},
+		Status:   business.BatchJobStatusRunning,
 	}
 	require.NoError(t, store.CreateBatchJob(context.Background(), seedJob))
 
@@ -517,12 +517,12 @@ func TestHandleGetJob_AdminCallerNoTenant_Returns200(t *testing.T) {
 	store := newTestBatchJobStoreForAPI()
 	server.batchJobStore = store
 
-	seedJob := &batchjob.BatchJob{
+	seedJob := &business.BatchJob{
 		ID:       "job-any-tenant",
 		TenantID: "tenant-z",
 		Selector: "all",
-		Config:   batchjob.BatchJobConfig{BatchSize: 2},
-		Status:   batchjob.BatchJobStatusCompleted,
+		Config:   business.BatchJobConfig{BatchSize: 2},
+		Status:   business.BatchJobStatusCompleted,
 	}
 	require.NoError(t, store.CreateBatchJob(context.Background(), seedJob))
 
@@ -552,12 +552,12 @@ func TestHandleGetJob_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
 	server.batchJobStore = store
 
 	// Seed a job owned by tenant-b.
-	victimJob := &batchjob.BatchJob{
+	victimJob := &business.BatchJob{
 		ID:       "job-owned-by-tenant-b",
 		TenantID: "tenant-b",
 		Selector: "all",
-		Config:   batchjob.BatchJobConfig{BatchSize: 1},
-		Status:   batchjob.BatchJobStatusPending,
+		Config:   business.BatchJobConfig{BatchSize: 1},
+		Status:   business.BatchJobStatusPending,
 	}
 	require.NoError(t, store.CreateBatchJob(context.Background(), victimJob))
 
@@ -586,12 +586,12 @@ func TestHandleGetJob_SessionPrincipal_OwnTenantAllowed(t *testing.T) {
 	store := newTestBatchJobStoreForAPI()
 	server.batchJobStore = store
 
-	ownJob := &batchjob.BatchJob{
+	ownJob := &business.BatchJob{
 		ID:       "job-owned-by-tenant-a",
 		TenantID: "tenant-a",
 		Selector: "all",
-		Config:   batchjob.BatchJobConfig{BatchSize: 2},
-		Status:   batchjob.BatchJobStatusPending,
+		Config:   business.BatchJobConfig{BatchSize: 2},
+		Status:   business.BatchJobStatusPending,
 	}
 	require.NoError(t, store.CreateBatchJob(context.Background(), ownJob))
 
@@ -666,12 +666,12 @@ func TestJobsTenantIsolation_AssuranceBoundary(t *testing.T) {
 			server.batchJobStore = store
 
 			jobID := "job-iso-" + tc.name
-			require.NoError(t, store.CreateBatchJob(context.Background(), &batchjob.BatchJob{
+			require.NoError(t, store.CreateBatchJob(context.Background(), &business.BatchJob{
 				ID:       jobID,
 				TenantID: tc.jobTenant,
 				Selector: "all",
-				Config:   batchjob.BatchJobConfig{BatchSize: 1},
-				Status:   batchjob.BatchJobStatusPending,
+				Config:   business.BatchJobConfig{BatchSize: 1},
+				Status:   business.BatchJobStatusPending,
 			}))
 
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+jobID, nil)
@@ -742,7 +742,7 @@ type errBatchJobExecutor struct {
 	done chan struct{}
 }
 
-func (e *errBatchJobExecutor) Execute(_ context.Context, _ *batchjob.BatchJob) error {
+func (e *errBatchJobExecutor) Execute(_ context.Context, _ *business.BatchJob) error {
 	defer close(e.done)
 	return e.err
 }
