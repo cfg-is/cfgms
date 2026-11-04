@@ -555,6 +555,29 @@ func runSteward(ctx context.Context, regToken, controllerURL, configPath string)
 	return runStewardInternal(ctx, regToken, controllerURL, configPath, nil)
 }
 
+// stewardLogDir returns the file-logging directory from CFGMS_LOG_DIR, falling
+// back to /tmp/cfgms with a warning on the early stderr logger.
+func stewardLogDir(earlyLog *log.Logger) string {
+	logDir := os.Getenv("CFGMS_LOG_DIR")
+	if logDir == "" {
+		logDir = "/tmp/cfgms"
+		earlyLog.Printf("WARNING: CFGMS_LOG_DIR not set; using /tmp/cfgms — set for production deployments")
+	}
+	return logDir
+}
+
+// newStartupSubsystemState builds the subsystem tracker the steward starts
+// with: controller and DNA degraded until they first succeed, plus a degraded
+// run_account reason naming the account and the rights it lacks when the
+// steward runs under a non-default account (the default account sets none).
+func newStartupSubsystemState(logger logging.Logger) *subsystemState {
+	subsysState := newSubsystemState()
+	subsysState.markDegraded("controller") // degraded until first connect succeeds
+	subsysState.markDegraded("dna")        // degraded until initial DNA collection succeeds
+	reportRunAccount(subsysState.reasons, probeRunAccount(runAccountProbeDirs()), logger)
+	return subsysState
+}
+
 // runStewardInternal is the testable core of runSteward. cf is the connect
 // function; when nil, registerAndConnect is used. Tests inject a failing stub
 // to simulate controller-unreachable conditions without network I/O. (Issue #2034)
@@ -581,11 +604,7 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 	// ── File logging provider ─────────────────────────────────────────────────
 	// Best-effort: if the file provider fails, fall back to a stdout logger so
 	// the process continues instead of dying with a 0-byte log file. (Issue #2034)
-	logDir := os.Getenv("CFGMS_LOG_DIR")
-	if logDir == "" {
-		logDir = "/tmp/cfgms"
-		earlyLog.Printf("WARNING: CFGMS_LOG_DIR not set; using /tmp/cfgms — set for production deployments")
-	}
+	logDir := stewardLogDir(earlyLog)
 	loggingConfig := &logging.LoggingConfig{
 		Provider:          "file",
 		Level:             logLevelFromEnv(),
@@ -650,12 +669,7 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		// ── Subsystem state tracker ───────────────────────────────────────────
 		// Tracks which subsystems are ready so the heartbeat can report the real
 		// health state instead of a hardcoded "healthy". (Issue #2034)
-		subsysState := newSubsystemState()
-		subsysState.markDegraded("controller") // degraded until first connect succeeds
-		subsysState.markDegraded("dna")        // degraded until initial DNA collection succeeds
-		// A non-default run account is reported as a degraded reason naming the
-		// account and the rights it lacks; the default account sets none.
-		reportRunAccount(subsysState.reasons, probeRunAccount(runAccountProbeDirs()), logger)
+		subsysState := newStartupSubsystemState(logger)
 
 		// Initialise device identity key store before registration so the refresh
 		// handshake path (Issue #2094) has a stable key available. Failure here is

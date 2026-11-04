@@ -92,40 +92,55 @@ func classifyDataDir(dir, accountSID string) (dataDirClass, error) {
 	if !rootOwner.Equals(own) {
 		return dataDirNotOwned, nil
 	}
-	tampered := false
-	walkErr := filepath.WalkDir(dir, func(p string, d os.DirEntry, werr error) error {
-		if werr != nil {
-			return werr
-		}
-		if !d.IsDir() && !d.Type().IsRegular() {
-			tampered = true
-			return filepath.SkipAll
-		}
-		if d.IsDir() && p != dir && d.Type()&os.ModeSymlink != 0 {
-			tampered = true
-			return filepath.SkipAll
-		}
-		owner, dacl, err := entryOwnerAndDACL(p)
-		if err != nil {
-			return err
-		}
-		if !owner.Equals(own) && !isSystemOrAdmins(owner) {
-			tampered = true
-			return filepath.SkipAll
-		}
-		if daclGrantsForeignWrite(dacl, own) {
-			tampered = true
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	if walkErr != nil {
-		return dataDirNotOwned, walkErr
+	tampered, err := treeHasForeignEntry(dir, own)
+	if err != nil {
+		return dataDirNotOwned, err
 	}
 	if tampered {
 		return dataDirTampered, nil
 	}
 	return dataDirOwnAccount, nil
+}
+
+// treeHasForeignEntry walks dir and reports whether any entry disqualifies the
+// tree from the own-account branch (see entryIsForeign).
+func treeHasForeignEntry(dir string, own *windows.SID) (bool, error) {
+	tampered := false
+	walkErr := filepath.WalkDir(dir, func(p string, d os.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		foreign, err := entryIsForeign(dir, p, d, own)
+		if err != nil {
+			return err
+		}
+		if foreign {
+			tampered = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return tampered, walkErr
+}
+
+// entryIsForeign reports whether entry p under root is something other than a
+// regular file or real directory, is owned by a principal other than own,
+// SYSTEM or Administrators, or grants write access to another principal.
+func entryIsForeign(root, p string, d os.DirEntry, own *windows.SID) (bool, error) {
+	if !d.IsDir() && !d.Type().IsRegular() {
+		return true, nil
+	}
+	if d.IsDir() && p != root && d.Type()&os.ModeSymlink != 0 {
+		return true, nil
+	}
+	owner, dacl, err := entryOwnerAndDACL(p)
+	if err != nil {
+		return false, err
+	}
+	if !owner.Equals(own) && !isSystemOrAdmins(owner) {
+		return true, nil
+	}
+	return daclGrantsForeignWrite(dacl, own), nil
 }
 
 func isSystemOrAdmins(sid *windows.SID) bool {
