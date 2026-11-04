@@ -54,19 +54,17 @@ type tamperNotifyState struct {
 	last map[string]time.Time
 }
 
-// inCooldown reports whether stewardID was notified within the cooldown.
-func (t *tamperNotifyState) inCooldown(stewardID string, now time.Time) bool {
+// claim is the cooldown check and the claim of the notification slot as one step
+// under one lock. It returns false when stewardID was notified within the cooldown;
+// otherwise it records now and returns true, so of two overlapping alarms only one
+// can win. It drops expired entries so the map stays bounded by the stewards
+// alarmed within one cooldown.
+func (t *tamperNotifyState) claim(stewardID string, now time.Time) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	at, ok := t.last[stewardID]
-	return ok && now.Sub(at) < stewardTamperNotifyCooldown
-}
-
-// markNotified records a notification attempt and drops expired entries so the
-// map stays bounded by the stewards alarmed within one cooldown.
-func (t *tamperNotifyState) markNotified(stewardID string, now time.Time) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	if at, ok := t.last[stewardID]; ok && now.Sub(at) < stewardTamperNotifyCooldown {
+		return false
+	}
 	if t.last == nil {
 		t.last = make(map[string]time.Time)
 	}
@@ -76,6 +74,7 @@ func (t *tamperNotifyState) markNotified(stewardID string, now time.Time) {
 		}
 	}
 	t.last[stewardID] = now
+	return true
 }
 
 // tamperCodesIn returns the distinct, sorted tamper codes in reasons. It is an
@@ -166,9 +165,6 @@ func (s *Server) announceStewardTamper(parent context.Context, stewardID, tenant
 // notifyStewardTamper emails the tenant's administrator contacts and returns the
 // outcome. Addresses are never logged.
 func (s *Server) notifyStewardTamper(ctx context.Context, stewardID, tenantID string, codes []string) string {
-	if s.tamperNotify.inCooldown(stewardID, time.Now()) {
-		return tamperNotifyCooldown
-	}
 	notifier := s.EmailNotifier()
 	if notifier == nil {
 		return tamperNotifyNotConfigured
@@ -187,7 +183,11 @@ func (s *Server) notifyStewardTamper(ctx context.Context, stewardID, tenantID st
 		return tamperNotifyNoContacts
 	}
 
-	s.tamperNotify.markNotified(stewardID, time.Now())
+	// Claimed only once there is something to send, so not_configured, no_contacts
+	// and a failed contact read never start a cooldown.
+	if !s.tamperNotify.claim(stewardID, time.Now()) {
+		return tamperNotifyCooldown
+	}
 	result, err := notifier.Send(ctx, s.composeStewardTamperEmail(ctx, stewardID, tenantID, codes, contacts))
 	if err != nil {
 		s.logger.Warn("Tamper notification email failed",
