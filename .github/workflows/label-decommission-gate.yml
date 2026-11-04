@@ -27,7 +27,7 @@ jobs:
           #     prefixed with *, since those are documentation prose
           #   - The docs/ directory entirely (historical records are fine)
           #   - This workflow file itself (the pattern strings above are in a comment)
-          #   - scripts/test-scripts.sh (references patterns to test for their absence)
+          #   - scripts/test-scripts.sh and the tooling run-tooling-tests.sh (reference patterns to test for their absence)
           matches=$(grep -rn \
             -E "pipeline:(draft|ready|fix|reviewing|epic|story|blocked)|agent:(ready|in-progress|failed|success)" \
             .claude/ scripts/ .claude/tooling/devcontainer/ \
@@ -39,6 +39,7 @@ jobs:
             | grep -v "label-decommission-gate.yml" \
             | grep -v ".claude/tooling/scripts/migrate-queue-to-project.sh" \
             | grep -v "scripts/test-scripts.sh" \
+            | grep -v ".claude/tooling/scripts/tests/run-tooling-tests.sh" \
             || true)
 
           if [ -n "$matches" ]; then

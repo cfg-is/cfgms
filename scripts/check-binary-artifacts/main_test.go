@@ -5,6 +5,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -97,4 +98,31 @@ func TestCheckFile_MissingFileIsSkippedNotErrored(t *testing.T) {
 	findings := checkFile(missingSO)
 	require.Len(t, findings, 1)
 	assert.Contains(t, findings[0], "tracked compiled artifact extension: "+missingSO)
+}
+
+// A submodule entry (mode 160000) is a commit pointer, not a file. CI checks
+// out cfgms without its .claude/tooling submodule, so the entry is an empty
+// directory on disk, which checkFile would report as unreadable. trackedFiles
+// must leave it out.
+func TestTrackedFiles_SkipsSubmoduleEntry(t *testing.T) {
+	repo := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	git("init", "--quiet", ".")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "main.go"), []byte("package main\n"), 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(repo, "tooling"), 0o755))
+	git("add", "main.go")
+	git("update-index", "--add", "--cacheinfo", "160000,0123456789abcdef0123456789abcdef01234567,tooling")
+
+	t.Chdir(repo)
+	files, err := trackedFiles()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"main.go"}, files)
+	for _, f := range files {
+		assert.Empty(t, checkFile(f), "finding for %s", f)
+	}
 }
