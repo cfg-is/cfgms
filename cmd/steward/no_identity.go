@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"time"
 
@@ -156,6 +157,35 @@ func checkEnrollment(regTokenFile string) (token, reason string) {
 		return "", reasonIdentityUnusable
 	}
 	return "", reasonNoToken
+}
+
+// resolveStartupIdentity loads the stored identity. When there is no token, no
+// identity and no config it waits for enrollment (waitForEnrollment) and returns
+// the token or the identity stored meanwhile. waitErr is non-nil only when ctx
+// was cancelled during the wait; the token and identity are then empty.
+func resolveStartupIdentity(ctx context.Context, regToken, configPath string, logger logging.Logger) (string, *StewardIdentity, error) {
+	storedID, _ := loadIdentity(certStoreDirResolver())
+	if regToken != "" || storedID != nil || configPath != "" {
+		return regToken, storedID, nil
+	}
+	token, waitErr := waitForEnrollment(ctx, regTokenFileFrom(ctx),
+		newEnrollmentWaiter(newSystemLogSink()), logger)
+	if waitErr != nil {
+		return "", nil, waitErr
+	}
+	storedID, _ = loadIdentity(certStoreDirResolver())
+	return token, storedID, nil
+}
+
+// enrollmentWaitResult is runStewardInternal's result when it has no token,
+// identity or config after resolveStartupIdentity. A cancelled wait is a clean
+// shutdown; any other outcome is a startup invariant violation.
+func enrollmentWaitResult(waitErr error, logger logging.Logger) error {
+	if waitErr != nil {
+		logger.Info("Steward stopped while waiting for enrollment", "operation", "steward_shutdown")
+		return nil
+	}
+	return errors.New("steward has no token, identity or config after waiting for enrollment")
 }
 
 type regTokenFileKey struct{}

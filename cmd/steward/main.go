@@ -641,20 +641,9 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 	// A stored identity is enough to start: with an empty token the steward
 	// connects on the identity. This runs after secureStewardDataDir above, so
 	// the identity is only read from a checked data directory.
-	storedID, _ := loadIdentity(certStoreDirResolver())
-	if regToken == "" && storedID == nil && configPath == "" {
-		// No usable identity and no token: keep running until a token appears or an
-		// identity is stored, then continue into the normal connect path below.
-		token, waitErr := waitForEnrollment(ctx, regTokenFileFrom(ctx),
-			newEnrollmentWaiter(newSystemLogSink()), logger)
-		if waitErr != nil {
-			// ctx cancelled: a clean shutdown.
-			logger.Info("Steward stopped while waiting for enrollment", "operation", "steward_shutdown")
-			return nil
-		}
-		regToken = token
-		storedID, _ = loadIdentity(certStoreDirResolver())
-	}
+	// With no usable identity, token or config, resolveStartupIdentity keeps the
+	// steward running until a token appears or an identity is stored.
+	regToken, storedID, waitErr := resolveStartupIdentity(ctx, regToken, configPath, logger)
 	if regToken != "" || storedID != nil {
 		publicBeta, profileErr := publicBetaSecurityEnabled()
 		if profileErr != nil {
@@ -908,14 +897,17 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		return nil
 	}
 
-	// Standalone mode: --config was provided.
+	return runStandaloneOrStop(ctx, configPath, waitErr, logger)
+}
+
+// runStandaloneOrStop handles startup without a token or identity: standalone
+// mode when --config was provided, otherwise the outcome of the wait for
+// enrollment (enrollmentWaitResult).
+func runStandaloneOrStop(ctx context.Context, configPath string, waitErr error, logger logging.Logger) error {
 	if configPath != "" {
 		return runStandalone(ctx, configPath, logger)
 	}
-
-	// Unreachable: with no token, identity or config the steward waits above
-	// until it has a token or an identity.
-	return errors.New("steward has no token, identity or config after waiting for enrollment")
+	return enrollmentWaitResult(waitErr, logger)
 }
 
 // runStandalone runs the steward in standalone mode from the --config file at

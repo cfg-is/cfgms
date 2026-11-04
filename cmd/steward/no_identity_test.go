@@ -326,7 +326,12 @@ func TestRunStewardInternal_TokenFileAppears_EnrollsWithRealController(t *testin
 	go func() { done <- runStewardInternal(ctx, "", "", "", nil) }()
 	t.Cleanup(func() {
 		cancel()
-		<-done
+		select {
+		case err := <-done:
+			assert.NoError(t, err, "cancellation is a clean shutdown")
+		case <-time.After(10 * time.Second):
+			t.Error("steward did not stop after cancellation")
+		}
 	})
 
 	time.Sleep(300 * time.Millisecond)
