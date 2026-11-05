@@ -181,30 +181,43 @@ func (m *darwinManager) Uninstall(purge bool) error {
 		fmt.Println("Daemon plist not found — nothing to remove.")
 	}
 
+	if err := purgeRegistrationToken(purge); err != nil {
+		return err
+	}
+
 	if purge {
-		// Launcher binary + layout (versions/, state.json) for launcher-managed installs.
-		if _, err := os.Stat(darwinLauncherPath); err == nil {
-			fmt.Printf("Removing %s...\n", darwinLauncherPath)
-			if err := os.Remove(darwinLauncherPath); err != nil {
-				return fmt.Errorf("failed to remove launcher: %w", err)
-			}
-		}
-		if _, err := os.Stat(darwinLauncherRoot); err == nil {
-			fmt.Printf("Removing %s...\n", darwinLauncherRoot)
-			if err := os.RemoveAll(darwinLauncherRoot); err != nil {
-				return fmt.Errorf("failed to remove launcher root: %w", err)
-			}
-		}
-		// Legacy bare-steward binary (pre-launcher direct-service installs).
-		if _, err := os.Stat(darwinInstallPath); err == nil {
-			fmt.Printf("Removing %s...\n", darwinInstallPath)
-			if err := os.Remove(darwinInstallPath); err != nil {
-				return fmt.Errorf("failed to remove binary: %w", err)
-			}
+		if err := m.purgeInstalledBinaries(); err != nil {
+			return err
 		}
 	}
 
 	fmt.Println("CFGMS Steward uninstalled.")
+	return nil
+}
+
+// purgeInstalledBinaries removes the launcher binary, its versioned staging
+// layout and the legacy bare-steward binary. Uninstall calls it on purge.
+func (m *darwinManager) purgeInstalledBinaries() error {
+	// Launcher binary + layout (versions/, state.json) for launcher-managed installs.
+	if _, err := os.Stat(darwinLauncherPath); err == nil {
+		fmt.Printf("Removing %s...\n", darwinLauncherPath)
+		if err := os.Remove(darwinLauncherPath); err != nil {
+			return fmt.Errorf("failed to remove launcher: %w", err)
+		}
+	}
+	if _, err := os.Stat(darwinLauncherRoot); err == nil {
+		fmt.Printf("Removing %s...\n", darwinLauncherRoot)
+		if err := os.RemoveAll(darwinLauncherRoot); err != nil {
+			return fmt.Errorf("failed to remove launcher root: %w", err)
+		}
+	}
+	// Legacy bare-steward binary (pre-launcher direct-service installs).
+	if _, err := os.Stat(darwinInstallPath); err == nil {
+		fmt.Printf("Removing %s...\n", darwinInstallPath)
+		if err := os.Remove(darwinInstallPath); err != nil {
+			return fmt.Errorf("failed to remove binary: %w", err)
+		}
+	}
 	return nil
 }
 

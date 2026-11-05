@@ -240,30 +240,43 @@ func (m *linuxManager) Uninstall(purge bool) error {
 		return fmt.Errorf("systemctl daemon-reload failed: %w\n%s", err, out)
 	}
 
+	if err := purgeRegistrationToken(purge); err != nil {
+		return err
+	}
+
 	if purge {
-		// Launcher binary + layout (versions/, state.json) for launcher-managed installs.
-		if _, err := os.Stat(linuxLauncherPath); err == nil {
-			fmt.Printf("Removing %s...\n", linuxLauncherPath)
-			if err := os.Remove(linuxLauncherPath); err != nil {
-				return fmt.Errorf("failed to remove launcher: %w", err)
-			}
-		}
-		if _, err := os.Stat(linuxLauncherRoot); err == nil {
-			fmt.Printf("Removing %s...\n", linuxLauncherRoot)
-			if err := os.RemoveAll(linuxLauncherRoot); err != nil {
-				return fmt.Errorf("failed to remove launcher root: %w", err)
-			}
-		}
-		// Legacy bare-steward binary (pre-launcher direct-service installs).
-		if _, err := os.Stat(linuxInstallPath); err == nil {
-			fmt.Printf("Removing %s...\n", linuxInstallPath)
-			if err := os.Remove(linuxInstallPath); err != nil {
-				return fmt.Errorf("failed to remove binary: %w", err)
-			}
+		if err := m.purgeInstalledBinaries(); err != nil {
+			return err
 		}
 	}
 
 	fmt.Println("CFGMS Steward uninstalled.")
+	return nil
+}
+
+// purgeInstalledBinaries removes the launcher binary, its versioned staging
+// layout and the legacy bare-steward binary. Uninstall calls it on purge.
+func (m *linuxManager) purgeInstalledBinaries() error {
+	// Launcher binary + layout (versions/, state.json) for launcher-managed installs.
+	if _, err := os.Stat(linuxLauncherPath); err == nil {
+		fmt.Printf("Removing %s...\n", linuxLauncherPath)
+		if err := os.Remove(linuxLauncherPath); err != nil {
+			return fmt.Errorf("failed to remove launcher: %w", err)
+		}
+	}
+	if _, err := os.Stat(linuxLauncherRoot); err == nil {
+		fmt.Printf("Removing %s...\n", linuxLauncherRoot)
+		if err := os.RemoveAll(linuxLauncherRoot); err != nil {
+			return fmt.Errorf("failed to remove launcher root: %w", err)
+		}
+	}
+	// Legacy bare-steward binary (pre-launcher direct-service installs).
+	if _, err := os.Stat(linuxInstallPath); err == nil {
+		fmt.Printf("Removing %s...\n", linuxInstallPath)
+		if err := os.Remove(linuxInstallPath); err != nil {
+			return fmt.Errorf("failed to remove binary: %w", err)
+		}
+	}
 	return nil
 }
 

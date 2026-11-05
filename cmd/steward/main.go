@@ -1197,8 +1197,9 @@ func buildUninstallCommand() *cobra.Command {
 		Use:   "uninstall",
 		Short: "Stop and remove the OS service",
 		Long: `Uninstall stops the running cfgms-steward service and removes the service
-definition from the OS service manager. With --purge the installed binary is
-also deleted.
+definition from the OS service manager. With --purge the installed binary and
+the registration token file are also deleted. A plain uninstall keeps the token
+file so a reinstall (for example after image preparation) can register again.
 
 Requires elevated privileges (Administrator on Windows, root on Linux/macOS).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -1206,7 +1207,7 @@ Requires elevated privileges (Administrator on Windows, root on Linux/macOS).`,
 		},
 	}
 
-	cmd.Flags().BoolVar(&purge, "purge", false, "Also remove the installed binary")
+	cmd.Flags().BoolVar(&purge, "purge", false, "Also remove the installed binary and the registration token file")
 
 	return cmd
 }

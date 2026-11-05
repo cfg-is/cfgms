@@ -4,6 +4,8 @@
 package service
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -65,4 +67,31 @@ func TestValidateToken(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPurgeRegistrationToken(t *testing.T) {
+	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
+	path := platformTokenFilePath()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0700))
+	require.NoError(t, os.WriteFile(path, []byte("tok_purge_test"), 0600))
+
+	require.NoError(t, purgeRegistrationToken(false))
+	_, err := os.Stat(path)
+	require.NoError(t, err, "non-purge must keep the token file")
+
+	require.NoError(t, purgeRegistrationToken(true))
+	_, err = os.Stat(path)
+	assert.True(t, os.IsNotExist(err), "purge must delete the token file")
+
+	assert.NoError(t, purgeRegistrationToken(true), "missing file is not an error")
+}
+
+func TestPurgeRegistrationTokenRemovalError(t *testing.T) {
+	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
+	path := platformTokenFilePath()
+	require.NoError(t, os.MkdirAll(filepath.Join(path, "child"), 0700))
+
+	err := purgeRegistrationToken(true)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "tok_")
 }

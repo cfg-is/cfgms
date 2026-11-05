@@ -731,6 +731,8 @@ The steward binary supports these entry paths:
 | `cfgms-steward install --regtoken-file PATH` | Controller-connected (service) | Installs the steward as a native OS service (systemd on Linux, SCM on Windows, launchd on macOS) and starts it. |
 | `cfgms-steward` (no arguments) | Interactive | Prompts for a registration token, then presents a menu: [1] Install as service, [2] Run once in foreground, [3] Exit. |
 
+The registration token file is kept after a successful registration so clones made from an image can register again, and a plain `cfgms-steward uninstall` keeps it so an uninstall and reinstall cycle still has it. `cfgms-steward uninstall --purge` removes it along with the installed binary.
+
 When both `--regtoken-file` and `--config` are supplied, the `--regtoken-file` path takes precedence and `--config` is ignored. The token is never accepted as a command-line value, because a value on the command line is visible to other local users in the process list; `--regtoken` is rejected with an error naming `--regtoken-file`.
 
 ## Logging
