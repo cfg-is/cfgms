@@ -303,3 +303,36 @@ func TestPublisher_SignCommand_AttachesChainAndFailsClosed(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, sc)
 }
+
+func TestPublisher_ExplicitSignerChainIgnoresOverlapWindowButDefaultFailsClosed(t *testing.T) {
+	m := newChainTestManager(t)
+	outgoing := currentSigner(t, m)
+	_, err := m.RotateSigningCertificate(0)
+	require.NoError(t, err)
+	incoming := currentSigner(t, m)
+	require.NotEqual(t, outgoing.KeyFingerprint(), incoming.KeyFingerprint())
+	cmd := &controlplaneTypes.Command{ID: "c1", Type: controlplaneTypes.CommandPushSigningCert, StewardID: "s1"}
+
+	// The default signer path still requires a certificate in the valid set.
+	defaultPath := &Publisher{signer: outgoing, signerChains: NewSignerChainBuilder(m), logger: logging.NewNoopLogger()}
+	sc, err := defaultPath.signCommand(cmd)
+	require.Error(t, err, "a default signer outside the valid signing set must fail closed")
+	assert.Nil(t, sc)
+
+	// An explicit signer resolves its own stored certificate, window closed or not.
+	explicitPath := &Publisher{signer: incoming, signerChains: NewSignerChainBuilder(m), logger: logging.NewNoopLogger()}
+	sc, err = explicitPath.signCommandWith(cmd, outgoing, true)
+	require.NoError(t, err)
+	certs := parseChain(t, sc.SignerChainPEM)
+	assert.Equal(t, outgoing.KeyFingerprint(), fingerprintOf(certs[0]))
+	require.NoError(t, certs[len(certs)-1].CheckSignatureFrom(certs[len(certs)-1]))
+
+	// The explicit chain never satisfies the default path afterwards.
+	_, err = explicitPath.signCommandWith(cmd, outgoing, false)
+	require.Error(t, err)
+
+	// An explicit signer with no stored certificate still fails closed.
+	other := newChainTestManager(t)
+	_, err = explicitPath.signCommandWith(cmd, currentSigner(t, other), true)
+	require.Error(t, err)
+}
