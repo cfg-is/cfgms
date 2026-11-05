@@ -17,6 +17,7 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/sqlitefile"
 )
 
 // SQLiteBackend implements DNA storage using SQLite database
@@ -82,21 +83,18 @@ func sqliteTimestamp(t time.Time) string {
 	return t.UTC().Format(sqliteTimestampLayout)
 }
 
-// NewSQLiteBackend creates a new SQLite-based DNA storage backend
-func NewSQLiteBackend(config *Config, logger logging.Logger) (*SQLiteBackend, error) {
-	// Determine database path from config
-	dataDir := config.DataDir
-	if dataDir == "" {
-		dataDir = "data" // Fallback default
-	}
-	dbPath := filepath.Join(dataDir, "dna.db")
-
+// openDNADatabase creates the owner-only data directory and database file at
+// dbPath, opens it, and applies the connection-pool settings and pragmas.
+func openDNADatabase(dataDir, dbPath string) (*sql.DB, error) {
 	// Ensure data directory exists
-	if err := os.MkdirAll(dataDir, 0750); err != nil {
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
 
 	// Open SQLite database (modernc.org/sqlite: pure-Go, CGO-free)
+	if err := sqlitefile.Prepare(dbPath); err != nil {
+		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
+	}
 	db, err := sql.Open("sqlite", "file:"+dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
@@ -117,6 +115,22 @@ func NewSQLiteBackend(config *Config, logger logging.Logger) (*SQLiteBackend, er
 			_ = db.Close()
 			return nil, fmt.Errorf("failed to set %s: %w", pragma, err)
 		}
+	}
+	return db, nil
+}
+
+// NewSQLiteBackend creates a new SQLite-based DNA storage backend
+func NewSQLiteBackend(config *Config, logger logging.Logger) (*SQLiteBackend, error) {
+	// Determine database path from config
+	dataDir := config.DataDir
+	if dataDir == "" {
+		dataDir = "data" // Fallback default
+	}
+	dbPath := filepath.Join(dataDir, "dna.db")
+
+	db, err := openDNADatabase(dataDir, dbPath)
+	if err != nil {
+		return nil, err
 	}
 
 	backend := &SQLiteBackend{

@@ -260,7 +260,7 @@ Per ADR-003, the providers and interfaces above are **not all implemented today*
 
 `SessionStore` is implemented in story #662. It stores only `Persistent=true` sessions; ephemeral state (non-persistent sessions, rebuildable runtime values) uses `pkg/cache`. The `ConfigStore` interface returns `ErrNotSupported` from the SQLite provider — config storage targets the flat-file and PostgreSQL providers.
 
-On Linux and macOS the SQLite provider creates the database file and its `-wal` / `-shm` side files `0600`. An existing database file keeps its current mode.
+On Linux and macOS the SQLite provider creates the database file and its `-wal` / `-shm` side files `0600`. An existing database file keeps its current mode. The controller's other SQLite databases (fleet DNA, run store, tag store, entity graph) are created with the same modes through `pkg/storage/sqlitefile`; the fleet DNA data directory is created `0700`.
 
 ### CommandStore (Issue #665; delivery lifecycle: Issue #3757, ADR-031 Decision 2)
 

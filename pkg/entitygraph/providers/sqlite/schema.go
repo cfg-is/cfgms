@@ -22,6 +22,7 @@ import (
 	_ "modernc.org/sqlite" // Pure-Go SQLite driver (CGO-free)
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/sqlitefile"
 )
 
 // Compile-time assertion that SQLiteEntityGraphProvider satisfies the contract.
@@ -129,6 +130,9 @@ func openDB(path string) (*sql.DB, error) {
 		dsn = "file:" + path + "?" + pragmas
 	}
 
+	if err := sqlitefile.Prepare(dsn); err != nil {
+		return nil, fmt.Errorf("entitygraph/sqlite: open %s: %w", path, err)
+	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("entitygraph/sqlite: open %s: %w", path, err)

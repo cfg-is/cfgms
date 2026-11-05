@@ -13,6 +13,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"github.com/cfgis/cfgms/pkg/storage/sqlitefile"
 	_ "modernc.org/sqlite"
 )
 
@@ -221,6 +222,9 @@ func NewRunStoreSQL(db *sql.DB) *RunStoreSQL {
 // done to release the underlying connection. Use this constructor instead of
 // calling sql.Open directly in callers outside pkg/storage.
 func NewRunStoreSQLFromDSN(dsn string) (*RunStoreSQL, error) {
+	if err := sqlitefile.Prepare(dsn); err != nil {
+		return nil, fmt.Errorf("run store: open sqlite %s: %w", dsn, err)
+	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("run store: open sqlite %s: %w", dsn, err)
