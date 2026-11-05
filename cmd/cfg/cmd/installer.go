@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/cfgis/cfgms/pkg/version"
 )
 
 var (
@@ -33,6 +35,7 @@ var (
 
 	// upload subcommand flags
 	uploadSignature string
+	uploadVersion   string
 )
 
 var validInstallerPlatforms = map[string]bool{
@@ -61,12 +64,15 @@ Streams the file to PUT /api/v1/installer/artifacts/{platform}/{arch} using
 the admin bundle mTLS auth. Prints the uploaded size and SHA-256 checksum on success.
 
 The controller stores only publisher-signed installers. --signature names a file
-holding the base64 signature printed by the signer:
-  go run ./scripts/sign-steward-binary --installer <file> <platform> <arch> > installer.sig
+holding the base64 signature printed by the signer, and --version is the steward
+release version that signature binds. The controller refuses a version older than the
+newest it accepted for this tenant, platform and arch (and a different installer at
+the same version); to undo a release, re-sign the older code under a higher version:
+  go run ./scripts/sign-steward-binary --installer <file> <version> <platform> <arch> > installer.sig
 
 Examples:
-  cfg installer upload steward-windows-amd64.exe --platform windows --arch amd64 --signature installer.sig
-  cfg installer upload steward-darwin-arm64.pkg --platform darwin --arch arm64 --signature installer.sig`,
+  cfg installer upload steward-windows-amd64.exe --platform windows --arch amd64 --version v0.9.41 --signature installer.sig
+  cfg installer upload steward-darwin-arm64.pkg --platform darwin --arch arm64 --version v0.9.41 --signature installer.sig`,
 	Args: cobra.ExactArgs(1),
 	RunE: runInstallerUpload,
 }
@@ -107,6 +113,7 @@ func init() {
 	installerUploadCmd.Flags().StringVar(&installerPlatform, "platform", "", "Target platform: windows, darwin, linux (required)")
 	installerUploadCmd.Flags().StringVar(&installerArch, "arch", "", "Target architecture: amd64, arm64 (required)")
 	installerUploadCmd.Flags().StringVar(&uploadSignature, "signature", "", "Path to the file holding the base64 publisher signature (required)")
+	installerUploadCmd.Flags().StringVar(&uploadVersion, "version", "", "Steward release version the signature binds, e.g. v0.9.41 (required)")
 	installerUploadCmd.Flags().StringVar(&installerAPIURL, "url", "", "Controller API URL (env: CFGMS_API_URL)")
 	installerUploadCmd.Flags().StringVar(&installerTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	installerUploadCmd.Flags().BoolVar(&installerTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
@@ -114,6 +121,7 @@ func init() {
 	_ = installerUploadCmd.MarkFlagRequired("platform")
 	_ = installerUploadCmd.MarkFlagRequired("arch")
 	_ = installerUploadCmd.MarkFlagRequired("signature")
+	_ = installerUploadCmd.MarkFlagRequired("version")
 
 	installerDownloadURLCmd.Flags().StringVar(&installerPlatform, "platform", "", "Target platform: windows, darwin, linux (required)")
 	installerDownloadURLCmd.Flags().StringVar(&installerArch, "arch", "", "Target architecture: amd64, arm64 (required)")
@@ -159,14 +167,44 @@ func getInstallerClient() (*APIClient, error) {
 	return requireSessionOrBundleClient(apiURL, insecure, serverName)
 }
 
-func runInstallerUpload(cmd *cobra.Command, args []string) error {
-	filePath := args[0]
-
+// validateInstallerUploadFlags checks the --platform, --arch and --version flags of
+// cfg installer upload before any file is read.
+func validateInstallerUploadFlags() error {
 	if !validInstallerPlatforms[installerPlatform] {
 		return fmt.Errorf("unknown platform %q; valid values: windows, darwin, linux", installerPlatform)
 	}
 	if !validInstallerArchs[installerArch] {
 		return fmt.Errorf("unknown arch %q; valid values: amd64, arm64", installerArch)
+	}
+	if !version.IsSemantic(uploadVersion) || strings.Contains(uploadVersion, "+") {
+		return fmt.Errorf("--version %q must be a semantic version such as v0.9.41 without build metadata", uploadVersion)
+	}
+	return nil
+}
+
+// readUploadSignature returns the trimmed base64 publisher signature held in the
+// file at path.
+func readUploadSignature(path string) (string, error) {
+	// #nosec G304 - file path provided by user via CLI flag
+	sigText, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("signature file not found: %s", path)
+		}
+		return "", fmt.Errorf("cannot read signature file %s: %w", path, err)
+	}
+	signature := strings.TrimSpace(string(sigText))
+	if signature == "" {
+		return "", fmt.Errorf("signature file is empty: %s", path)
+	}
+	return signature, nil
+}
+
+func runInstallerUpload(cmd *cobra.Command, args []string) error {
+	filePath := args[0]
+
+	if err := validateInstallerUploadFlags(); err != nil {
+		return err
 	}
 
 	info, err := os.Stat(filePath)
@@ -180,17 +218,9 @@ func runInstallerUpload(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("file is empty: %s", filePath)
 	}
 
-	// #nosec G304 - file path provided by user via CLI flag
-	sigText, err := os.ReadFile(uploadSignature)
+	signature, err := readUploadSignature(uploadSignature)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("signature file not found: %s", uploadSignature)
-		}
-		return fmt.Errorf("cannot read signature file %s: %w", uploadSignature, err)
-	}
-	signature := strings.TrimSpace(string(sigText))
-	if signature == "" {
-		return fmt.Errorf("signature file is empty: %s", uploadSignature)
+		return err
 	}
 
 	// #nosec G304 - file path provided by user via CLI argument
@@ -205,11 +235,7 @@ func runInstallerUpload(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	if err := client.UploadInstallerArtifact(context.Background(), installerPlatform, installerArch, signature, f); err != nil {
-		return err
-	}
-
-	return nil
+	return client.UploadInstallerArtifact(context.Background(), installerPlatform, installerArch, uploadVersion, signature, f)
 }
 
 func runInstallerDownloadURL(cmd *cobra.Command, args []string) error {
@@ -344,10 +370,12 @@ type installerUploadAPIResponse struct {
 }
 
 // UploadInstallerArtifact streams r to PUT /api/v1/installer/artifacts/{platform}/{arch}
-// with the URL-safe base64 publisher signature as the signature query param, and
-// prints the confirmation line to stdout on success.
-func (c *APIClient) UploadInstallerArtifact(ctx context.Context, platform, arch, signature string, r io.Reader) error {
+// with the steward release version and the URL-safe base64 publisher signature as
+// the version and signature query params, and prints the confirmation line to stdout
+// on success.
+func (c *APIClient) UploadInstallerArtifact(ctx context.Context, platform, arch, version, signature string, r io.Reader) error {
 	q := url.Values{}
+	q.Set("version", version)
 	q.Set("signature", signature)
 	path := "/api/v1/installer/artifacts/" + platform + "/" + arch + "?" + q.Encode()
 	resp, err := c.doRequestWithContentType(ctx, "PUT", path, r, "application/octet-stream")

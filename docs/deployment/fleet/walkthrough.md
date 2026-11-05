@@ -255,13 +255,14 @@ stewards can download a pre-packaged install bundle (binary + CA cert + fingerpr
 # Build the steward binary with your controller URL compiled in
 make build-steward STEWARD_CONTROLLER_URL=https://<CONTROLLER_IP>:9080
 
-# Sign the binary with the publisher key (prints the URL-safe base64 signature).
-# Without CFGMS_PUBLISHER_SEED this uses the dev key, trusted only by dev/lab controllers.
-go run ./scripts/sign-steward-binary --installer bin/cfgms-steward linux amd64 > bin/cfgms-steward.sig
+# Sign the binary with the publisher key and the steward release version (prints the
+# URL-safe base64 signature). Without CFGMS_PUBLISHER_SEED this uses the dev key,
+# trusted only by dev/lab controllers.
+go run ./scripts/sign-steward-binary --installer bin/cfgms-steward v0.9.41 linux amd64 > bin/cfgms-steward.sig
 
-# Upload the Linux amd64 binary and its signature to the controller
+# Upload the Linux amd64 binary, its signature and the same version to the controller
 cfg installer upload bin/cfgms-steward --platform linux --arch amd64 \
-  --signature bin/cfgms-steward.sig --url=https://<CONTROLLER_IP>:9080
+  --version v0.9.41 --signature bin/cfgms-steward.sig --url=https://<CONTROLLER_IP>:9080
 
 # Verify the artifact is listed
 cfg installer list --url=https://<CONTROLLER_IP>:9080
@@ -290,7 +291,21 @@ prints the baked list on the `Root CA:` line (`none` when unset).
 
 The controller verifies the signature against its trusted publisher key before storing
 the installer; an unsigned or wrongly signed upload is refused with
-`SIGNATURE_REQUIRED` or `SIGNATURE_VERIFICATION_FAILED`. The uploaded binary is stored
+`SIGNATURE_REQUIRED` or `SIGNATURE_VERIFICATION_FAILED`. The signature binds the
+version, so it verifies for that version only.
+
+The controller also refuses to move an installer backwards for a tenant, platform and
+arch (`409 INSTALLER_VERSION_NOT_NEWER`):
+
+- A version older than the newest accepted one is refused, including after the artifact
+  is deleted. A pre-release (`v1.0.0-rc.1`) orders below its release (`v1.0.0`).
+- The same version is accepted only for the identical installer (a retry); a different
+  installer at that version is refused.
+- There is no override. To undo a release, roll forward: re-sign the older code under a
+  new, higher version and upload that.
+
+An installer stored before version binding fails verification when served and must be
+re-signed with a version and re-uploaded. The uploaded binary is stored
 in the controller's blob store and served as a
 self-contained install package via the public download endpoint.
 

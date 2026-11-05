@@ -385,6 +385,7 @@ The controller blob store (`pkg/storage/interfaces/blob.BlobStore`) partitions b
 | Namespace | Purpose |
 |-----------|---------|
 | `installers` | Platform installer packages uploaded via `PUT /api/v1/installer/artifacts/{platform}/{arch}` |
+| `installer-floor` | Rollback floor records, one per tenant, platform, arch and accepted installer version (name `<platform>-<arch>@<version>`, body the installer content hash). The newest record is the floor an upload must exceed; records survive artifact delete. |
 | `steward-binaries` | Versioned steward binaries published via `POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}`. Each entry carries publisher-signature metadata and the publishing operator identity. |
 
 Steward binary distribution uses the `steward-binaries` namespace exclusively. Blob keys take the form `{version}-{platform}-{arch}` (e.g. `v0.5.12-linux-amd64`). Binaries must carry a valid Ed25519 publisher signature verified against the CFGMS publisher identity before storage.

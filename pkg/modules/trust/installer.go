@@ -13,17 +13,19 @@ import (
 // A steward-binary message starts with a hex content hash, which can never equal this
 // tag, so no installer message can equal any StewardBinaryMessage output and the
 // reverse. A signature for one artifact class therefore never verifies for the other.
-const installerMessageDomain = "cfgms-installer-v1"
+const installerMessageDomain = "cfgms-installer-v2"
 
 // InstallerMessage returns the canonical Ed25519 message for an installer-artifact
-// publisher signature: cfgms-installer-v1|contentHash|platform|arch.
+// publisher signature: cfgms-installer-v2|contentHash|version|platform|arch.
 //
-// Installer routes carry only platform and arch, so unlike StewardBinaryMessage the
-// message has no version field. Empty fields and fields containing the separator
-// return ErrInvalidSignatureMessage.
-func InstallerMessage(contentHash, platform, arch string) (string, error) {
+// The version is the steward release version, canonicalized like StewardBinaryMessage
+// (a leading "v" is added when absent), so a signature binds the release coordinate
+// and an older signed installer cannot be passed off as a newer one. Empty fields and
+// fields containing the separator return ErrInvalidSignatureMessage.
+func InstallerMessage(contentHash, version, platform, arch string) (string, error) {
 	for _, f := range []struct{ name, value string }{
 		{"content hash", contentHash},
+		{"version", version},
 		{"platform", platform},
 		{"arch", arch},
 	} {
@@ -35,14 +37,14 @@ func InstallerMessage(contentHash, platform, arch string) (string, error) {
 				ErrInvalidSignatureMessage, f.name, stewardBinaryMessageSep)
 		}
 	}
-	return strings.Join([]string{installerMessageDomain, contentHash, platform, arch}, stewardBinaryMessageSep), nil
+	return strings.Join([]string{installerMessageDomain, contentHash, canonicalStewardBinaryVersion(version), platform, arch}, stewardBinaryMessageSep), nil
 }
 
 // VerifyInstallerSignature verifies a publisher signature over the canonical
-// (contentHash, platform, arch) installer message. The caller must pass a content
+// (contentHash, version, platform, arch) installer message. The caller must pass a content
 // hash it computed itself from the bytes it is about to store.
-func VerifyInstallerSignature(contentHash, platform, arch string, sig bundle.BundleSignature, store TrustStore) error {
-	message, err := InstallerMessage(contentHash, platform, arch)
+func VerifyInstallerSignature(contentHash, version, platform, arch string, sig bundle.BundleSignature, store TrustStore) error {
+	message, err := InstallerMessage(contentHash, version, platform, arch)
 	if err != nil {
 		return err
 	}

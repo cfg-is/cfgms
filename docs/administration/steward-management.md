@@ -178,11 +178,18 @@ Each action below asks for your passkey, and files larger than 64 MiB are refuse
 anything is sent.
 
 - **Upload installer artifact** — choose a platform (`windows`, `darwin`, `linux`), an
-  architecture (`amd64`, `arm64`), paste the base64 signature printed by
-  `go run ./scripts/sign-steward-binary --installer <file> <platform> <arch>` and choose the file,
-  then **Upload artifact**. The file is sent as the body of
-  `PUT /api/v1/installer/artifacts/{platform}/{arch}?signature=<base64>`. The form does not send
-  without all four fields.
+  architecture (`amd64`, `arm64`), enter the steward release **Version** (for example
+  `v0.9.41`), paste the base64 **Signature** printed by
+  `go run ./scripts/sign-steward-binary --installer <file> <version> <platform> <arch>` and choose
+  the file, then **Upload artifact**. The file is sent as the body of
+  `PUT /api/v1/installer/artifacts/{platform}/{arch}?signature=<base64>&version=<semver>`. Both
+  query parameters are required (`SIGNATURE_REQUIRED`, `VERSION_REQUIRED`); the signature binds
+  the version, and a version that is not semantic or carries build metadata is refused
+  (`INVALID_VERSION`). The controller refuses a version older than the newest accepted for that
+  tenant, platform and arch, including after the artifact is deleted, and refuses a different
+  installer at an already accepted version (`409 INSTALLER_VERSION_NOT_NEWER`). There is no
+  override: to undo a release, re-sign the older code under a higher version. The form does not
+  send without all five fields, and shows the controller's refusal message.
 - **Delete** — the **Delete** action on an artifact row asks for an inline **Confirm**, then
   sends `DELETE` to the same path.
 - **Publish steward binary** — enter the version, platform and architecture, paste the base64

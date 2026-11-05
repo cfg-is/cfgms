@@ -26,10 +26,10 @@ describe('useArtifacts', () => {
     const { result } = renderHook(() => useArtifacts(changed))
     const file = new File(['abc'], 'a.bin')
     await act(async () => {
-      expect(await result.current.upload({ platform: 'linux', arch: 'amd64', signature: ' c2ln\n', file })).toBe(true)
+      expect(await result.current.upload({ platform: 'linux', arch: 'amd64', version: ' 1.2.3 ', signature: ' c2ln\n', file })).toBe(true)
     })
     const [url, init] = fetchMock.mock.calls[0]!
-    expect(url).toBe('/api/v1/installer/artifacts/linux/amd64?signature=c2ln')
+    expect(url).toBe('/api/v1/installer/artifacts/linux/amd64?signature=c2ln&version=1.2.3')
     expect(init?.method).toBe('PUT')
     expect(init?.body).toBe(file)
     expect(changed).toHaveBeenCalled()
@@ -39,17 +39,28 @@ describe('useArtifacts', () => {
     const { result } = renderHook(() => useArtifacts(vi.fn()))
     for (const signature of ['', '  ']) {
       await act(async () => {
-        expect(await result.current.upload({ platform: 'linux', arch: 'amd64', signature, file: new File(['a'], 'a') })).toBe(false)
+        expect(await result.current.upload({ platform: 'linux', arch: 'amd64', version: '1.2.3', signature, file: new File(['a'], 'a') })).toBe(false)
       })
     }
     expect(fetchMock).not.toHaveBeenCalled()
     expect(result.current.error).toMatch(/signature/i)
   })
 
+  it('upload refuses an empty or blank version without a request', async () => {
+    const { result } = renderHook(() => useArtifacts(vi.fn()))
+    for (const version of ['', '  ']) {
+      await act(async () => {
+        expect(await result.current.upload({ platform: 'linux', arch: 'amd64', version, signature: 'c2ln', file: new File(['a'], 'a') })).toBe(false)
+      })
+    }
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(result.current.error).toMatch(/version/i)
+  })
+
   it('refuses an oversize upload without a request and states the limit', async () => {
     const { result } = renderHook(() => useArtifacts(vi.fn()))
     await act(async () => {
-      expect(await result.current.upload({ platform: 'linux', arch: 'amd64', signature: 'c2ln', file: bigFile() })).toBe(false)
+      expect(await result.current.upload({ platform: 'linux', arch: 'amd64', version: '1.2.3', signature: 'c2ln', file: bigFile() })).toBe(false)
     })
     expect(fetchMock).not.toHaveBeenCalled()
     expect(result.current.error).toBe(OVERSIZE_MESSAGE)

@@ -140,7 +140,16 @@ func TestInstallerDownloadURLMethod(t *testing.T) {
 	})
 }
 
+// setUploadVersion points --version at v for the test and restores it afterwards.
+func setUploadVersion(t *testing.T, v string) {
+	t.Helper()
+	orig := uploadVersion
+	t.Cleanup(func() { uploadVersion = orig })
+	uploadVersion = v
+}
+
 func TestInstallerUpload(t *testing.T) {
+	setUploadVersion(t, "v1.0.0")
 	t.Run("rejects unknown platform before HTTP call", func(t *testing.T) {
 		origPlatform := installerPlatform
 		origArch := installerArch
@@ -394,6 +403,7 @@ func setUploadSignature(t *testing.T, sig string) string {
 }
 
 func TestInstallerUpload_Signature(t *testing.T) {
+	setUploadVersion(t, "v1.0.0")
 	setup := func(t *testing.T, handler http.HandlerFunc) {
 		t.Helper()
 		origPlatform, origArch, origURL := installerPlatform, installerArch, installerAPIURL
@@ -454,6 +464,55 @@ func TestInstallerUpload_Signature(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "Signature verification failed")
 		assert.Contains(t, err.Error(), "SIGNATURE_VERIFICATION_FAILED")
+	})
+}
+
+func TestInstallerUpload_Version(t *testing.T) {
+	setup := func(t *testing.T, handler http.HandlerFunc) string {
+		t.Helper()
+		origPlatform, origArch, origURL := installerPlatform, installerArch, installerAPIURL
+		t.Cleanup(func() {
+			installerPlatform, installerArch, installerAPIURL = origPlatform, origArch, origURL
+		})
+		installerPlatform, installerArch = "linux", "amd64"
+		server := httptest.NewServer(handler)
+		t.Cleanup(server.Close)
+		installerAPIURL = server.URL
+		p := filepath.Join(t.TempDir(), "installer.bin")
+		require.NoError(t, os.WriteFile(p, []byte("installer"), 0600))
+		return p
+	}
+
+	for _, bad := range []string{"", "latest", "1.2", "v1.2.3+build"} {
+		t.Run("rejects "+bad+" before any request", func(t *testing.T) {
+			calls := 0
+			file := setup(t, func(w http.ResponseWriter, r *http.Request) { calls++ })
+			setUploadSignature(t, "c2ln")
+			setUploadVersion(t, bad)
+
+			err := runInstallerUpload(installerUploadCmd, []string{file})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "--version")
+			assert.Equal(t, 0, calls, "no request may reach the server")
+		})
+	}
+
+	t.Run("sends the version query parameter", func(t *testing.T) {
+		var gotVersion, gotSig string
+		file := setup(t, func(w http.ResponseWriter, r *http.Request) {
+			gotVersion = r.URL.Query().Get("version")
+			gotSig = r.URL.Query().Get("signature")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{"platform": "linux", "arch": "amd64", "size": 9, "checksum": "abc"},
+			})
+		})
+		setUploadSignature(t, "c2ln")
+		setUploadVersion(t, "v0.9.41")
+
+		require.NoError(t, runInstallerUpload(installerUploadCmd, []string{file}))
+		assert.Equal(t, "v0.9.41", gotVersion)
+		assert.Equal(t, "c2ln", gotSig)
 	})
 }
 
