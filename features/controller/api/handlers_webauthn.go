@@ -1555,39 +1555,19 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 // covered by emitEnrollmentAudit). actingPrincipalID is the session principal UUID,
 // which may differ from acct.ID when an mTLS admin adds a credential on behalf of a user.
 func (s *Server) emitPasskeyAddedAudit(ctx context.Context, acct *account, credentialID, actingPrincipalID string) {
-	if s.auditManager == nil {
-		return
-	}
-	tenantID := acct.TenantID
-	if tenantID == "" {
-		tenantID = audit.SystemTenantID
-	}
-	details := map[string]interface{}{
-		"credential_id": logging.SanitizeLogValue(credentialID),
-	}
-	if actingPrincipalID != acct.ID {
-		details["acting_principal"] = logging.SanitizeLogValue(actingPrincipalID)
-	}
-	b := audit.NewEventBuilder().
-		Tenant(tenantID).
-		Type(business.AuditEventSystemAccess).
-		Action("account.passkey_added").
-		User(acct.ID, business.AuditUserTypeHuman).
-		Resource("account", logging.SanitizeLogValue(acct.Username), "").
-		Result(business.AuditResultSuccess).
-		Severity(business.AuditSeverityMedium).
-		Details(details)
-	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
-		s.logger.Warn("Failed to emit passkey_added audit event",
-			"account_id", logging.SanitizeLogValue(acct.ID),
-			"error", logging.SanitizeLogValue(err.Error()))
-	}
+	s.emitPasskeyAudit(ctx, acct, credentialID, actingPrincipalID, "passkey_added", business.AuditSeverityMedium)
 }
 
 // emitPasskeyRevokedAudit records a passkey-revoked audit event (Issue #2992).
 // actingPrincipalID is the session principal UUID, which may differ from acct.ID when
 // an mTLS admin revokes a credential on behalf of a user.
 func (s *Server) emitPasskeyRevokedAudit(ctx context.Context, acct *account, credentialID, actingPrincipalID string) {
+	s.emitPasskeyAudit(ctx, acct, credentialID, actingPrincipalID, "passkey_revoked", business.AuditSeverityHigh)
+}
+
+// emitPasskeyAudit records an account.<event> audit event for a credential change.
+// The added and revoked events differ only in event name and severity.
+func (s *Server) emitPasskeyAudit(ctx context.Context, acct *account, credentialID, actingPrincipalID, event string, severity business.AuditSeverity) {
 	if s.auditManager == nil {
 		return
 	}
@@ -1604,14 +1584,14 @@ func (s *Server) emitPasskeyRevokedAudit(ctx context.Context, acct *account, cre
 	b := audit.NewEventBuilder().
 		Tenant(tenantID).
 		Type(business.AuditEventSystemAccess).
-		Action("account.passkey_revoked").
+		Action("account."+event).
 		User(acct.ID, business.AuditUserTypeHuman).
 		Resource("account", logging.SanitizeLogValue(acct.Username), "").
 		Result(business.AuditResultSuccess).
-		Severity(business.AuditSeverityHigh).
+		Severity(severity).
 		Details(details)
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
-		s.logger.Warn("Failed to emit passkey_revoked audit event",
+		s.logger.Warn("Failed to emit "+event+" audit event",
 			"account_id", logging.SanitizeLogValue(acct.ID),
 			"error", logging.SanitizeLogValue(err.Error()))
 	}

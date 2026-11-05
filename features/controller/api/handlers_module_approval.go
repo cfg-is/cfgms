@@ -15,6 +15,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/modules/approval"
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
+	"github.com/cfgis/cfgms/features/controller/modules/resolution"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -207,42 +208,40 @@ func (s *Server) moduleDecisionNodeIsAuthoritative() bool {
 // Approves a queued module bundle, authorizing it for deployment to managed endpoints.
 // Gated by moduleDecisionNodeIsAuthoritative — see that method's doc comment.
 func (s *Server) handleApproveModuleBundle(w http.ResponseWriter, r *http.Request) {
-	if !s.moduleDecisionNodeIsAuthoritative() {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	if !moduleApprovalScopeAllowed(r, principal) {
-		s.writeErrorResponse(w, http.StatusForbidden, "module bundle approval requires an unscoped principal", "FORBIDDEN")
-		return
-	}
-
-	rawAddr := mux.Vars(r)["address"]
-
-	addr, ok := s.resolveModuleAddress(w, rawAddr)
-	if !ok {
-		return
-	}
-
-	if s.moduleBundleReviewer == nil {
-		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Module approval not configured", "SERVICE_UNAVAILABLE")
-		return
-	}
-
-	if err := s.moduleBundleReviewer.Approve(addr); err != nil {
-		s.handleModuleDecisionError(w, err, "approve", logging.SanitizeLogValue(rawAddr))
-		return
-	}
-
-	s.emitModuleApprovalAudit(r, addr, "module.bundle.approved")
-	s.writeSuccessResponse(w, map[string]string{"status": "approved"})
+	s.decideModuleBundle(w, r, moduleDecision{
+		verb:       "approve",
+		refusal:    "module bundle approval requires an unscoped principal",
+		auditEvent: "module.bundle.approved",
+		status:     "approved",
+		apply:      func(rv resolution.BundleReviewer, addr bundle.ContentAddress) error { return rv.Approve(addr) },
+	})
 }
 
 // handleRejectModuleBundle handles POST /api/v1/modules/approvals/{address}/reject.
 // Rejects a queued module bundle, blocking it from deployment.
 // Gated by moduleDecisionNodeIsAuthoritative — see that method's doc comment.
 func (s *Server) handleRejectModuleBundle(w http.ResponseWriter, r *http.Request) {
+	s.decideModuleBundle(w, r, moduleDecision{
+		verb:       "reject",
+		refusal:    "module bundle rejection requires an unscoped principal",
+		auditEvent: "module.bundle.rejected",
+		status:     "rejected",
+		apply:      func(rv resolution.BundleReviewer, addr bundle.ContentAddress) error { return rv.RejectPending(addr) },
+	})
+}
+
+// moduleDecision is the part of an approve/reject request that differs between the two.
+type moduleDecision struct {
+	verb       string // passed to handleModuleDecisionError
+	refusal    string // 403 message for a tenant-scoped principal
+	auditEvent string
+	status     string // value of the "status" field in the success response
+	apply      func(rv resolution.BundleReviewer, addr bundle.ContentAddress) error
+}
+
+// decideModuleBundle runs the shared body of the approve and reject handlers: authority
+// gate, unscoped-principal check, address parse, reviewer call, audit event and response.
+func (s *Server) decideModuleBundle(w http.ResponseWriter, r *http.Request, d moduleDecision) {
 	if !s.moduleDecisionNodeIsAuthoritative() {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
@@ -250,7 +249,7 @@ func (s *Server) handleRejectModuleBundle(w http.ResponseWriter, r *http.Request
 
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	if !moduleApprovalScopeAllowed(r, principal) {
-		s.writeErrorResponse(w, http.StatusForbidden, "module bundle rejection requires an unscoped principal", "FORBIDDEN")
+		s.writeErrorResponse(w, http.StatusForbidden, d.refusal, "FORBIDDEN")
 		return
 	}
 
@@ -266,13 +265,13 @@ func (s *Server) handleRejectModuleBundle(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.moduleBundleReviewer.RejectPending(addr); err != nil {
-		s.handleModuleDecisionError(w, err, "reject", logging.SanitizeLogValue(rawAddr))
+	if err := d.apply(s.moduleBundleReviewer, addr); err != nil {
+		s.handleModuleDecisionError(w, err, d.verb, logging.SanitizeLogValue(rawAddr))
 		return
 	}
 
-	s.emitModuleApprovalAudit(r, addr, "module.bundle.rejected")
-	s.writeSuccessResponse(w, map[string]string{"status": "rejected"})
+	s.emitModuleApprovalAudit(r, addr, d.auditEvent)
+	s.writeSuccessResponse(w, map[string]string{"status": d.status})
 }
 
 // resolveModuleAddress parses the {address} path parameter.

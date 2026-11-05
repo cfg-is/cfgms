@@ -8,6 +8,7 @@ import (
 	"github.com/gorilla/mux"
 )
 
+//duplication:justified features/controller/api/routes_runs.go -- sanctioned RegisterRoutes seam, one file per resource
 func init() { RegisterRoutes(registerRegistrationTokenRoutes) }
 
 func registerRegistrationTokenRoutes(s *Server, api *mux.Router) {
