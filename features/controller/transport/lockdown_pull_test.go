@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/controller/commands"
@@ -163,6 +164,24 @@ func TestBulkTransfer_Lockdown(t *testing.T) {
 		gated := &gatedBulkStream{BidiStreamingServer: inner, checker: ld, stewardID: "tampered-1"}
 		requireLockedDown(t, gated.Send(&transportpb.BulkChunk{TransferId: "pkg-1", Data: []byte("x")}))
 		assert.Empty(t, inner.outChunks, "nothing reaches the endpoint")
+	})
+
+	t.Run("HandleGRPC installs the gate on the stream handed to the send path", func(t *testing.T) {
+		var sendErr error
+		hd := NewBulkHandler(logging.NewNoopLogger(), NewTenantQueue()).WithLockdown(ld)
+		hd.downstream = func(s grpc.BidiStreamingServer[transportpb.BulkChunk, transportpb.BulkChunk]) error {
+			sendErr = s.Send(&transportpb.BulkChunk{TransferId: "pkg-1", Data: []byte("x")})
+			return nil
+		}
+		inner := newTestBulkStream(peerContextWithCA(t, ca, "tampered-1"))
+		require.NoError(t, hd.HandleGRPC(inner))
+		requireLockedDown(t, sendErr)
+		assert.Empty(t, inner.outChunks)
+
+		inner = newTestBulkStream(peerContextWithCA(t, ca, "normal-1"))
+		require.NoError(t, hd.HandleGRPC(inner))
+		require.NoError(t, sendErr)
+		assert.Len(t, inner.outChunks, 1)
 	})
 
 	t.Run("controller-to-steward chunk reaches a normal steward", func(t *testing.T) {

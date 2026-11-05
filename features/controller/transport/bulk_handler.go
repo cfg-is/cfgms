@@ -34,6 +34,11 @@ type BulkHandler struct {
 	// lockdown, when set, refuses controller-to-steward chunks for a
 	// locked-down steward (Issue #5666).
 	lockdown controlplaneInterfaces.LockdownChecker
+	// downstream, when set, runs after the lockdown wrapper is installed and
+	// before the receive loop. It is the seam for the controller-to-steward
+	// send path, which does not exist yet; tests use it to prove HandleGRPC
+	// hands the gated stream to whatever sends.
+	downstream func(grpc.BidiStreamingServer[transportpb.BulkChunk, transportpb.BulkChunk]) error
 }
 
 // WithLockdown wires the lockdown predicate. Endpoint-to-controller uploads
@@ -71,6 +76,11 @@ func (h *BulkHandler) HandleGRPC(stream grpc.BidiStreamingServer[transportpb.Bul
 	// handler only receives; the wrapper keeps a future downstream path gated.
 	if h.lockdown != nil {
 		stream = &gatedBulkStream{BidiStreamingServer: stream, checker: h.lockdown, stewardID: peerCNFromContext(stream.Context())}
+	}
+	if h.downstream != nil {
+		if err := h.downstream(stream); err != nil {
+			return err
+		}
 	}
 	// Use the mTLS peer CN as the per-tenant queue key. BulkChunk carries no
 	// identity fields; the peer cert is the sole identity source for bulk RPCs.

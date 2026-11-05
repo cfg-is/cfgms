@@ -303,7 +303,6 @@ func validateModuleBundleRequest(req *transportpb.FetchModuleBundleRequest) stri
 	return ""
 }
 
-// moduleFetchPeerID returns the steward id of the verified mTLS peer.
 // authorizeStewardPull resolves the steward from the mTLS peer certificate and
 // applies the lockdown gate to its pull (Issue #5666). A locked-down steward
 // gets the typed lockdown refusal.
@@ -330,6 +329,7 @@ func requiresModule(effective *pkgconfig.EffectiveConfiguration, req *transportp
 	return false
 }
 
+// moduleFetchPeerID returns the steward id of the verified mTLS peer.
 func moduleFetchPeerID(ctx context.Context) (string, error) {
 	p, ok := peer.FromContext(ctx)
 	if !ok {
