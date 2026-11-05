@@ -35,7 +35,7 @@ func duplicationCmd(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		// A failed write to stderr cannot change the outcome: this path
 		// already exits with exitError.
-		errOut.printf("complexity: duplication: missing verb (want: report, check)\n")
+		errOut.printf("complexity: duplication: missing verb (want: report, check, replay)\n")
 		return exitError
 	}
 	switch args[0] {
@@ -43,6 +43,8 @@ func duplicationCmd(args []string, stdout, stderr io.Writer) int {
 		return duplicationReportCmd(args[1:], stdout, stderr)
 	case "check":
 		return duplicationCheckCmd(args[1:], stdout, stderr)
+	case "replay":
+		return duplicationReplayCmd(args[1:], stdout, stderr)
 	}
 	errOut.printf("complexity: duplication: unknown verb %q\n", args[0])
 	return exitError

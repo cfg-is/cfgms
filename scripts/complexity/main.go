@@ -13,7 +13,7 @@
 //
 // The replay subcommand replays rule 3 over recent merged develop commits.
 //
-// The duplication subcommand measures clone-duplicated lines (verbs: report, check).
+// The duplication subcommand measures clone-duplicated lines (verbs: report, check, replay).
 //
 // Exit codes: 0 = ok, 1 = partition or duplicate-identity violation,
 // 2 = usage, IO or parse error.

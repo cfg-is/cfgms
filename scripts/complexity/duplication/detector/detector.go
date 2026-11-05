@@ -33,7 +33,7 @@ import (
 )
 
 // DefaultThreshold is the starting window size in tokens.
-const DefaultThreshold = 150
+const DefaultThreshold = 200
 
 // File is one Go source file.
 type File struct {
