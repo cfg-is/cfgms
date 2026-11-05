@@ -105,7 +105,7 @@ issues; remove candidates already delivered or covered elsewhere.
 | Recovery and workflow debugging | Progressive rollback, health verification, resume/retry and live workflow debugging. Reuse current rollback and execution infrastructure; advanced recovery is not a blanket launch gate. |
 | Configuration composition | Conditional inheritance, templates and expressions using DNA; reconcile existing DNA-filtered role matching before defining new behavior. |
 | Credentials and trust | Local-user credential distribution/rotation, script publisher-chain verification, operator signing and enrollment proof. Check current secret/trust decisions and security work before declaring gaps. |
-| Directory expansion | AD custom schema and broader directory operations beyond the existing #5497 scope; reconcile removed or renamed modules before proposing build work. |
+| Directory expansion | AD custom schema and broader directory operations beyond the existing #5497 scope, including comparing two directories (for example on-premises AD against M365) and OU hierarchy / domain DNA, both built on stored directory DNA; reconcile removed or renamed modules before proposing build work. |
 | Operator administration | Terminal-session controls and credential-store coverage; inspect current API/CLI/web implementations rather than infer absence from old docs. |
 | Module platform coverage | Backend-specific stdlib and runner coverage plus missing inventory facts, evaluated individually against current module code and tests. |
 | Authorization | Effective role grants and revocation, reconciled with the current request path and scoped automation design. |

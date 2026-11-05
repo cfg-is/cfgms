@@ -72,8 +72,8 @@ Verified against `develop` (2026-07-16):
 
 - **No continuous authentication or authorization work exists.** No continuous
   access evaluation, no device posture, no device binding, no re-auth or step-up
-  machinery. (The `risk_score` fields in `pkg/dna/drift` and `pkg/directory/dna`
-  are **configuration**-drift scoring — unrelated to identity.)
+  machinery. (The `risk_score` fields in `pkg/dna/drift` are
+  **configuration**-drift scoring — unrelated to identity.)
 - **No WebAuthn / FIDO / passkey anywhere**, including `go.mod`. Net-new.
 - **Sessions carry no device or network context.** `pkg/session.Session`
   (`contract.go:31-39`) holds only ID, ConnectionName, PrincipalID, TenantID,

@@ -118,20 +118,6 @@ packages:
       cannot see them as test-support importers. It must never be reachable
       from a main package: it creates local accounts.
 
-  # --- WIRE (Issue #4345): real, tested implementations missing only a ------
-  # --- caller/registration point. Follow-up issues drafted in the #4345 -----
-  # --- classification comment, pending PO creation. Wiring or deleting any --
-  # --- of these is explicitly out of scope for #4345 — see its Out of Scope.
-  - path: pkg/directory/dna
-    reason: >
-      Directory-object DNA drift/monitoring extension, 10k+ lines, under
-      active maintenance — not abandoned. Owns directory comparison
-      (CompareDirectories over interfaces.DirectoryProvider). With
-      the features/controller/directory facade deleted (Epic #4450) this
-      package has no importer; it is kept by decision (b) of #4450. A
-      reachable caller (controller endpoint or workflow) is a future
-      feature, not part of #4450.
-
   # --- DELETE (Issue #4345): superseded, orphaned, or abandoned — a ---------
   # --- capability-map-then-delete follow-up is drafted in the #4345 ---------
   # --- classification comment, pending PO creation. Deleting any of these ---
