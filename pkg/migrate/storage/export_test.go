@@ -5,3 +5,6 @@ package storage
 
 // ImportRecordForTest exposes importRecord to the external test package.
 var ImportRecordForTest = importRecord
+
+// ExportAllForTest exposes exportAll to the external test package.
+var ExportAllForTest = exportAll

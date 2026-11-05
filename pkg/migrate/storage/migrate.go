@@ -524,119 +524,82 @@ func exportRBAC(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.
 	return recs, nil
 }
 
-func exportRegistrationTokens(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.Record, error) {
-	store := mgr.GetRegistrationTokenStore()
+// exportStore lists every record of one store and maps it to a migrate.Record.
+// A nil store means the backend has no such store: nothing to migrate. When
+// initLabel is non-empty the store is initialized first if it supports it.
+func exportStore[T any](ctx context.Context, store any, kind, initLabel, listLabel string, list func() ([]T, error), id func(T) string) ([]migrate.Record, error) {
 	if store == nil {
 		return nil, nil
 	}
-	if init, ok := store.(interface{ Initialize(context.Context) error }); ok {
-		if err := init.Initialize(ctx); err != nil {
-			return nil, fmt.Errorf("initialize registration token store: %w", err)
+	if initLabel != "" {
+		if err := initializeStore(ctx, store, initLabel); err != nil {
+			return nil, err
 		}
 	}
-	tokens, err := store.ListTokens(ctx, &business.RegistrationTokenFilter{})
+	items, err := list()
 	if err != nil {
-		return nil, fmt.Errorf("list registration tokens: %w", err)
+		return nil, fmt.Errorf("%s: %w", listLabel, err)
 	}
-	recs := make([]migrate.Record, 0, len(tokens))
-	for _, tok := range tokens {
-		data, err := marshal(tok)
+	recs := make([]migrate.Record, 0, len(items))
+	for _, item := range items {
+		data, err := marshal(item)
 		if err != nil {
 			return nil, err
 		}
-		recs = append(recs, migrate.Record{Kind: kindRegistrationToken, ID: tok.Token, Data: data})
+		recs = append(recs, migrate.Record{Kind: kind, ID: id(item), Data: data})
 	}
 	return recs, nil
+}
+
+// initializeStore calls Initialize on stores that expose it.
+func initializeStore(ctx context.Context, store any, label string) error {
+	if init, ok := store.(interface{ Initialize(context.Context) error }); ok {
+		if err := init.Initialize(ctx); err != nil {
+			return fmt.Errorf("initialize %s store: %w", label, err)
+		}
+	}
+	return nil
+}
+
+func exportRegistrationTokens(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.Record, error) {
+	store := mgr.GetRegistrationTokenStore()
+	return exportStore(ctx, store, kindRegistrationToken, "registration token", "list registration tokens",
+		func() ([]*business.RegistrationTokenData, error) {
+			return store.ListTokens(ctx, &business.RegistrationTokenFilter{})
+		},
+		func(t *business.RegistrationTokenData) string { return t.Token })
 }
 
 func exportSessions(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.Record, error) {
 	store := mgr.GetSessionStore()
-	if store == nil {
-		return nil, nil
-	}
-	if init, ok := store.(interface{ Initialize(context.Context) error }); ok {
-		if err := init.Initialize(ctx); err != nil {
-			return nil, fmt.Errorf("initialize session store: %w", err)
-		}
-	}
-	sessions, err := store.ListSessions(ctx, &business.SessionFilter{})
-	if err != nil {
-		return nil, fmt.Errorf("list sessions: %w", err)
-	}
-	recs := make([]migrate.Record, 0, len(sessions))
-	for _, s := range sessions {
-		data, err := marshal(s)
-		if err != nil {
-			return nil, err
-		}
-		recs = append(recs, migrate.Record{Kind: kindSession, ID: s.SessionID, Data: data})
-	}
-	return recs, nil
+	return exportStore(ctx, store, kindSession, "session", "list sessions",
+		func() ([]*business.Session, error) { return store.ListSessions(ctx, &business.SessionFilter{}) },
+		func(s *business.Session) string { return s.SessionID })
 }
 
 func exportStewards(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.Record, error) {
 	store := mgr.GetStewardStore()
-	if store == nil {
-		return nil, nil
-	}
-	if init, ok := store.(interface{ Initialize(context.Context) error }); ok {
-		if err := init.Initialize(ctx); err != nil {
-			return nil, fmt.Errorf("initialize steward store: %w", err)
-		}
-	}
-	stewards, err := store.ListStewards(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list stewards: %w", err)
-	}
-	recs := make([]migrate.Record, 0, len(stewards))
-	for _, s := range stewards {
-		data, err := marshal(s)
-		if err != nil {
-			return nil, err
-		}
-		recs = append(recs, migrate.Record{Kind: kindSteward, ID: s.ID, Data: data})
-	}
-	return recs, nil
+	return exportStore(ctx, store, kindSteward, "steward", "list stewards",
+		func() ([]*business.StewardRecord, error) { return store.ListStewards(ctx) },
+		func(s *business.StewardRecord) string { return s.ID })
 }
 
 func exportCommands(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.Record, error) {
 	store := mgr.GetCommandStore()
-	if store == nil {
-		return nil, nil
-	}
-	cmds, err := store.ListCommandRecords(ctx, &business.CommandFilter{})
-	if err != nil {
-		return nil, fmt.Errorf("list commands: %w", err)
-	}
-	recs := make([]migrate.Record, 0, len(cmds))
-	for _, c := range cmds {
-		data, err := marshal(c)
-		if err != nil {
-			return nil, err
-		}
-		recs = append(recs, migrate.Record{Kind: kindCommand, ID: c.ID, Data: data})
-	}
-	return recs, nil
+	return exportStore(ctx, store, kindCommand, "", "list commands",
+		func() ([]*business.CommandRecord, error) {
+			return store.ListCommandRecords(ctx, &business.CommandFilter{})
+		},
+		func(c *business.CommandRecord) string { return c.ID })
 }
 
 func exportTriggers(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.Record, error) {
 	store := mgr.GetTriggerStore()
-	if store == nil {
-		return nil, nil
-	}
-	triggers, err := store.ListTriggers(ctx, business.TriggerStoreFilter{})
-	if err != nil {
-		return nil, fmt.Errorf("list triggers: %w", err)
-	}
-	recs := make([]migrate.Record, 0, len(triggers))
-	for _, tr := range triggers {
-		data, err := marshal(tr)
-		if err != nil {
-			return nil, err
-		}
-		recs = append(recs, migrate.Record{Kind: kindTrigger, ID: tr.ID, Data: data})
-	}
-	return recs, nil
+	return exportStore(ctx, store, kindTrigger, "", "list triggers",
+		func() ([]*business.TriggerRecord, error) {
+			return store.ListTriggers(ctx, business.TriggerStoreFilter{})
+		},
+		func(t *business.TriggerRecord) string { return t.ID })
 }
 
 // exportPushes exports pending and in-progress push records.
@@ -644,22 +607,9 @@ func exportTriggers(ctx context.Context, mgr *interfaces.StorageManager) ([]migr
 // GetPendingPushes (pending + in_progress) is available for enumeration.
 func exportPushes(ctx context.Context, mgr *interfaces.StorageManager) ([]migrate.Record, error) {
 	store := mgr.GetPushStore()
-	if store == nil {
-		return nil, nil
-	}
-	pushes, err := store.GetPendingPushes(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("get pending pushes: %w", err)
-	}
-	recs := make([]migrate.Record, 0, len(pushes))
-	for _, p := range pushes {
-		data, err := marshal(p)
-		if err != nil {
-			return nil, err
-		}
-		recs = append(recs, migrate.Record{Kind: kindPush, ID: p.ID, Data: data})
-	}
-	return recs, nil
+	return exportStore(ctx, store, kindPush, "", "get pending pushes",
+		func() ([]*business.PushRecord, error) { return store.GetPendingPushes(ctx) },
+		func(p *business.PushRecord) string { return p.ID })
 }
 
 // exportIPTrust exports IP-trust entries for each of the given tenant IDs.
@@ -845,114 +795,95 @@ func importAudit(ctx context.Context, mgr *interfaces.StorageManager, rec migrat
 	return store.StoreAuditEntry(ctx, &entry)
 }
 
+// importDecoded is the shared import path: nil-store check, optional store
+// initialization, JSON decode into T, then the per-type store call. A nil store
+// fails with unavailableMsg; decode failures read "unmarshal <decodeLabel>".
+func importDecoded[T any](ctx context.Context, store any, unavailableMsg, initLabel, decodeLabel string, rec migrate.Record, apply func(*T) error) error {
+	if store == nil {
+		return errors.New(unavailableMsg)
+	}
+	if initLabel != "" {
+		if err := initializeStore(ctx, store, initLabel); err != nil {
+			return err
+		}
+	}
+	var v T
+	if err := json.Unmarshal(rec.Data, &v); err != nil {
+		return fmt.Errorf("unmarshal %s: %w", decodeLabel, err)
+	}
+	return apply(&v)
+}
+
+const rbacUnavailable = "RBAC store not available"
+
 func importRBACPermission(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetRBACStore()
-	if store == nil {
-		return fmt.Errorf("RBAC store not available")
-	}
-	if init, ok := store.(interface{ Initialize(context.Context) error }); ok {
-		if err := init.Initialize(ctx); err != nil {
-			return fmt.Errorf("initialize RBAC store: %w", err)
+	return importDecoded(ctx, store, rbacUnavailable, "RBAC", "permission", rec, func(perm *common.Permission) error {
+		// Upsert by probing for the record first. Using a failed Store as the
+		// existence probe would report the follow-up Update's error and hide why
+		// the insert failed.
+		if existing, err := store.GetPermission(ctx, perm.Id); err == nil && existing != nil {
+			if err := store.UpdatePermission(ctx, perm); err != nil {
+				return fmt.Errorf("update permission %s: %w", perm.Id, err)
+			}
+			return nil
 		}
-	}
-	var perm common.Permission
-	if err := json.Unmarshal(rec.Data, &perm); err != nil {
-		return fmt.Errorf("unmarshal permission: %w", err)
-	}
-	// Upsert by probing for the record first. Using a failed Store as the
-	// existence probe would report the follow-up Update's error and hide why
-	// the insert failed.
-	if existing, err := store.GetPermission(ctx, perm.Id); err == nil && existing != nil {
-		if err := store.UpdatePermission(ctx, &perm); err != nil {
-			return fmt.Errorf("update permission %s: %w", perm.Id, err)
+		if err := store.StorePermission(ctx, perm); err != nil {
+			return fmt.Errorf("store permission %s: %w", perm.Id, err)
 		}
 		return nil
-	}
-	if err := store.StorePermission(ctx, &perm); err != nil {
-		return fmt.Errorf("store permission %s: %w", perm.Id, err)
-	}
-	return nil
+	})
 }
 
 func importRBACRole(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetRBACStore()
-	if store == nil {
-		return fmt.Errorf("RBAC store not available")
-	}
-	if init, ok := store.(interface{ Initialize(context.Context) error }); ok {
-		if err := init.Initialize(ctx); err != nil {
-			return fmt.Errorf("initialize RBAC store: %w", err)
+	return importDecoded(ctx, store, rbacUnavailable, "RBAC", "role", rec, func(role *common.Role) error {
+		// Upsert by probing for the record first (see importRBACPermission).
+		if existing, err := store.GetRole(ctx, role.Id); err == nil && existing != nil {
+			if err := store.UpdateRole(ctx, role); err != nil {
+				return fmt.Errorf("update role %s: %w", role.Id, err)
+			}
+			return nil
 		}
-	}
-	var role common.Role
-	if err := json.Unmarshal(rec.Data, &role); err != nil {
-		return fmt.Errorf("unmarshal role: %w", err)
-	}
-	// Upsert by probing for the record first (see importRBACPermission).
-	if existing, err := store.GetRole(ctx, role.Id); err == nil && existing != nil {
-		if err := store.UpdateRole(ctx, &role); err != nil {
-			return fmt.Errorf("update role %s: %w", role.Id, err)
+		if err := store.StoreRole(ctx, role); err != nil {
+			return fmt.Errorf("store role %s: %w", role.Id, err)
 		}
 		return nil
-	}
-	if err := store.StoreRole(ctx, &role); err != nil {
-		return fmt.Errorf("store role %s: %w", role.Id, err)
-	}
-	return nil
+	})
 }
 
 func importRBACSubject(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetRBACStore()
-	if store == nil {
-		return fmt.Errorf("RBAC store not available")
-	}
-	if init, ok := store.(interface{ Initialize(context.Context) error }); ok {
-		if err := init.Initialize(ctx); err != nil {
-			return fmt.Errorf("initialize RBAC store: %w", err)
+	return importDecoded(ctx, store, rbacUnavailable, "RBAC", "subject", rec, func(subj *common.Subject) error {
+		// Upsert by probing for the record first (see importRBACPermission).
+		if existing, err := store.GetSubject(ctx, subj.Id); err == nil && existing != nil {
+			if err := store.UpdateSubject(ctx, subj); err != nil {
+				return fmt.Errorf("update subject %s: %w", subj.Id, err)
+			}
+			return nil
 		}
-	}
-	var subj common.Subject
-	if err := json.Unmarshal(rec.Data, &subj); err != nil {
-		return fmt.Errorf("unmarshal subject: %w", err)
-	}
-	// Upsert by probing for the record first (see importRBACPermission).
-	if existing, err := store.GetSubject(ctx, subj.Id); err == nil && existing != nil {
-		if err := store.UpdateSubject(ctx, &subj); err != nil {
-			return fmt.Errorf("update subject %s: %w", subj.Id, err)
+		if err := store.StoreSubject(ctx, subj); err != nil {
+			return fmt.Errorf("store subject %s: %w", subj.Id, err)
 		}
 		return nil
-	}
-	if err := store.StoreSubject(ctx, &subj); err != nil {
-		return fmt.Errorf("store subject %s: %w", subj.Id, err)
-	}
-	return nil
+	})
 }
 
 func importRBACAssignment(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetRBACStore()
-	if store == nil {
-		return fmt.Errorf("RBAC store not available")
-	}
-	if init, ok := store.(interface{ Initialize(context.Context) error }); ok {
-		if err := init.Initialize(ctx); err != nil {
-			return fmt.Errorf("initialize RBAC store: %w", err)
+	return importDecoded(ctx, store, rbacUnavailable, "RBAC", "role assignment", rec, func(a *common.RoleAssignment) error {
+		// Check for existence to avoid duplicate-constraint violations.
+		existing, err := store.ListRoleAssignments(ctx, a.SubjectId, a.RoleId, a.TenantId)
+		if err != nil {
+			return fmt.Errorf("list role assignments for subject %s role %s: %w", a.SubjectId, a.RoleId, err)
 		}
-	}
-	var a common.RoleAssignment
-	if err := json.Unmarshal(rec.Data, &a); err != nil {
-		return fmt.Errorf("unmarshal role assignment: %w", err)
-	}
-	// Check for existence to avoid duplicate-constraint violations.
-	existing, err := store.ListRoleAssignments(ctx, a.SubjectId, a.RoleId, a.TenantId)
-	if err != nil {
-		return fmt.Errorf("list role assignments for subject %s role %s: %w", a.SubjectId, a.RoleId, err)
-	}
-	for _, ex := range existing {
-		if ex.Id == a.Id {
-			return nil // already present
+		for _, ex := range existing {
+			if ex.Id == a.Id {
+				return nil // already present
+			}
 		}
-	}
-	return store.StoreRoleAssignment(ctx, &a)
+		return store.StoreRoleAssignment(ctx, a)
+	})
 }
 
 func importTenant(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
@@ -980,117 +911,74 @@ func importTenant(ctx context.Context, mgr *interfaces.StorageManager, rec migra
 
 func importRegistrationToken(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetRegistrationTokenStore()
-	if store == nil {
-		return fmt.Errorf("registration token store not available")
-	}
-	if init, ok := store.(interface{ Initialize(context.Context) error }); ok {
-		if err := init.Initialize(ctx); err != nil {
-			return fmt.Errorf("initialize registration token store: %w", err)
+	return importDecoded(ctx, store, "registration token store not available", "registration token", "registration token", rec, func(tok *business.RegistrationTokenData) error {
+		if err := store.SaveToken(ctx, tok); err != nil {
+			return store.UpdateToken(ctx, tok)
 		}
-	}
-	var tok business.RegistrationTokenData
-	if err := json.Unmarshal(rec.Data, &tok); err != nil {
-		return fmt.Errorf("unmarshal registration token: %w", err)
-	}
-	if err := store.SaveToken(ctx, &tok); err != nil {
-		return store.UpdateToken(ctx, &tok)
-	}
-	return nil
+		return nil
+	})
 }
 
 func importSession(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetSessionStore()
-	if store == nil {
-		return fmt.Errorf("session store not available")
-	}
-	if init, ok := store.(interface{ Initialize(context.Context) error }); ok {
-		if err := init.Initialize(ctx); err != nil {
-			return fmt.Errorf("initialize session store: %w", err)
+	return importDecoded(ctx, store, "session store not available", "session", "session", rec, func(s *business.Session) error {
+		if err := store.CreateSession(ctx, s); err != nil {
+			return store.UpdateSession(ctx, s.SessionID, s)
 		}
-	}
-	var s business.Session
-	if err := json.Unmarshal(rec.Data, &s); err != nil {
-		return fmt.Errorf("unmarshal session: %w", err)
-	}
-	if err := store.CreateSession(ctx, &s); err != nil {
-		return store.UpdateSession(ctx, s.SessionID, &s)
-	}
-	return nil
+		return nil
+	})
 }
 
 func importSteward(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetStewardStore()
-	if store == nil {
-		return fmt.Errorf("steward store not available")
-	}
-	if init, ok := store.(interface{ Initialize(context.Context) error }); ok {
-		if err := init.Initialize(ctx); err != nil {
-			return fmt.Errorf("initialize steward store: %w", err)
+	return importDecoded(ctx, store, "steward store not available", "steward", "steward", rec, func(s *business.StewardRecord) error {
+		if err := store.RegisterSteward(ctx, s); err != nil {
+			if errors.Is(err, business.ErrStewardAlreadyExists) {
+				// Re-sync the status field on idempotent re-run.
+				return store.UpdateStewardStatus(ctx, s.ID, s.Status)
+			}
+			return err
 		}
-	}
-	var s business.StewardRecord
-	if err := json.Unmarshal(rec.Data, &s); err != nil {
-		return fmt.Errorf("unmarshal steward: %w", err)
-	}
-	if err := store.RegisterSteward(ctx, &s); err != nil {
-		if errors.Is(err, business.ErrStewardAlreadyExists) {
-			// Re-sync the status field on idempotent re-run.
-			return store.UpdateStewardStatus(ctx, s.ID, s.Status)
-		}
-		return err
-	}
-	return nil
+		return nil
+	})
 }
 
 func importCommand(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetCommandStore()
-	if store == nil {
-		return fmt.Errorf("command store not available")
-	}
-	var cmd business.CommandRecord
-	if err := json.Unmarshal(rec.Data, &cmd); err != nil {
-		return fmt.Errorf("unmarshal command: %w", err)
-	}
-	// Check existence before creating to avoid duplicate-constraint violations.
-	if existing, err := store.GetCommandRecord(ctx, cmd.ID); err == nil && existing != nil {
-		return nil // already present
-	}
-	return store.CreateCommandRecord(ctx, &cmd)
+	return importDecoded(ctx, store, "command store not available", "", "command", rec, func(cmd *business.CommandRecord) error {
+		// Check existence before creating to avoid duplicate-constraint violations.
+		if existing, err := store.GetCommandRecord(ctx, cmd.ID); err == nil && existing != nil {
+			return nil // already present
+		}
+		return store.CreateCommandRecord(ctx, cmd)
+	})
 }
 
 func importTrigger(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetTriggerStore()
-	if store == nil {
-		return fmt.Errorf("trigger store not available in destination; acknowledge data loss with WithSkippedKinds(%q)", kindTrigger)
-	}
-	var tr business.TriggerRecord
-	if err := json.Unmarshal(rec.Data, &tr); err != nil {
-		return fmt.Errorf("unmarshal trigger: %w", err)
-	}
-	return store.StoreTrigger(ctx, &tr)
+	msg := fmt.Sprintf("trigger store not available in destination; acknowledge data loss with WithSkippedKinds(%q)", kindTrigger)
+	return importDecoded(ctx, store, msg, "", "trigger", rec, func(tr *business.TriggerRecord) error {
+		return store.StoreTrigger(ctx, tr)
+	})
 }
 
 func importPush(ctx context.Context, mgr *interfaces.StorageManager, rec migrate.Record) error {
 	store := mgr.GetPushStore()
-	if store == nil {
-		return fmt.Errorf("push store not available in destination; acknowledge data loss with WithSkippedKinds(%q)", kindPush)
-	}
-	var p business.PushRecord
-	if err := json.Unmarshal(rec.Data, &p); err != nil {
-		return fmt.Errorf("unmarshal push: %w", err)
-	}
-	// Check existence to avoid duplicate-constraint violations.
-	if existing, err := store.GetPush(ctx, p.ID); err == nil && existing != nil {
-		return nil // already present
-	}
-	if err := store.CreatePush(ctx, &p); err != nil {
-		return err
-	}
-	// Restore the original status if it was in_progress.
-	if p.Status == business.PushStatusInProgress {
-		return store.UpdatePushStatus(ctx, p.ID, p.Status)
-	}
-	return nil
+	msg := fmt.Sprintf("push store not available in destination; acknowledge data loss with WithSkippedKinds(%q)", kindPush)
+	return importDecoded(ctx, store, msg, "", "push", rec, func(p *business.PushRecord) error {
+		// Check existence to avoid duplicate-constraint violations.
+		if existing, err := store.GetPush(ctx, p.ID); err == nil && existing != nil {
+			return nil // already present
+		}
+		if err := store.CreatePush(ctx, p); err != nil {
+			return err
+		}
+		// Restore the original status if it was in_progress.
+		if p.Status == business.PushStatusInProgress {
+			return store.UpdatePushStatus(ctx, p.ID, p.Status)
+		}
+		return nil
+	})
 }
 
 // importIPTrust adds each IP-trust entry to the target. AddTrustedRange is
