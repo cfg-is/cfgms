@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
+	"github.com/cfgis/cfgms/pkg/storage/sqlitefile"
 )
 
 // Compile-time assertions that SQLiteProvider satisfies the required interfaces.
@@ -189,10 +190,9 @@ func openDB(path string) (*sql.DB, error) {
 		dsn = "file:" + path + "?" + filePragmas
 	}
 
-	if err := prepareDatabaseFile(dsn); err != nil {
+	if err := sqlitefile.Prepare(dsn); err != nil {
 		return nil, fmt.Errorf("sqlite: failed to open %s: %w", path, err)
 	}
-
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to open %s: %w", path, err)
@@ -619,31 +619,4 @@ func (p *SQLiteProvider) CreateNodeRegistryStore(config map[string]interface{}) 
 // init auto-registers the SQLite provider so it is available after a blank import.
 func init() {
 	interfaces.RegisterStorageProvider(&SQLiteProvider{})
-}
-
-// prepareDatabaseFile pre-creates the database file owner-only (0600) so that
-// SQLite, which gives the -wal and -shm side files the main file's mode, never
-// creates any of them world-readable. An existing file is left untouched.
-// In-memory and empty targets are ignored.
-func prepareDatabaseFile(dsnOrPath string) error {
-	if strings.Contains(dsnOrPath, "mode=memory") {
-		return nil
-	}
-	path := strings.TrimPrefix(dsnOrPath, "file:")
-	if path != dsnOrPath {
-		path = strings.TrimPrefix(path, "//")
-	}
-	if i := strings.IndexByte(path, '?'); i >= 0 {
-		path = path[:i]
-	}
-	if path == "" || path == ":memory:" {
-		return nil
-	}
-	path = filepath.Clean(path)
-	// #nosec G304 -- operator-configured database path (storage config/DSN); same target sql.Open opens next
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	return f.Close()
 }

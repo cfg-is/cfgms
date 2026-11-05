@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"github.com/cfgis/cfgms/pkg/storage/sqlitefile"
 )
 
 // SQLiteUpgradeStore implements business.UpgradeStore using a SQLite database.
@@ -25,7 +26,7 @@ type SQLiteUpgradeStore struct {
 // Mirrors features/controller/run/run.go:NewRunStoreSQLFromDSN — open + busy_timeout only;
 // schema creation belongs in Initialize.
 func NewUpgradeStoreSQLFromDSN(dsn string) (*SQLiteUpgradeStore, error) {
-	if err := prepareDatabaseFile(dsn); err != nil {
+	if err := sqlitefile.Prepare(dsn); err != nil {
 		return nil, fmt.Errorf("upgrade store: open sqlite %s: %w", dsn, err)
 	}
 	db, err := sql.Open("sqlite", dsn)

@@ -22,6 +22,7 @@ import (
 	_ "modernc.org/sqlite" // Pure-Go SQLite driver (CGO-free)
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/sqlitefile"
 )
 
 // tagRE validates tag values: lowercase alphanumeric start, then alphanumeric-or-hyphen,
@@ -43,6 +44,9 @@ type Store struct {
 // NewFromDSN opens a SQLite database at dsn and returns a Store.
 // Call Initialize before any other method, and Close when done.
 func NewFromDSN(dsn string, logger logging.Logger) (*Store, error) {
+	if err := sqlitefile.Prepare(dsn); err != nil {
+		return nil, fmt.Errorf("tagstore: open sqlite %s: %w", dsn, err)
+	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("tagstore: open sqlite %s: %w", dsn, err)
