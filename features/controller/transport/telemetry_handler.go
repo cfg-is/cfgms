@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
@@ -78,6 +79,19 @@ type TelemetryHandler struct {
 	// new stream. Nil in production; set in tests to signal readiness via a channel
 	// instead of polling with time.Sleep.
 	onActivate func()
+
+	// lockdown, when set, gates TelemetryRequest, the controller-originated
+	// subscribe sent to a steward. For a locked-down steward it runs only when
+	// the subscribing request carries the operator-origin marker (Issue #5666).
+	lockdown controlplaneInterfaces.LockdownChecker
+}
+
+// WithLockdown wires the lockdown predicate. Inbound snapshots from a
+// locked-down steward stay accepted; only the downstream TelemetryRequest is
+// operator-only.
+func (h *TelemetryHandler) WithLockdown(c controlplaneInterfaces.LockdownChecker) *TelemetryHandler {
+	h.lockdown = c
+	return h
 }
 
 // NewTelemetryHandler creates a TelemetryHandler. allowedOrigins contains
@@ -120,6 +134,24 @@ func (h *TelemetryHandler) originAllowed(r *http.Request) bool {
 	return false
 }
 
+// subscribeExisting issues the upstream subscribe immediately when browsers were
+// already subscribed (race: browser connected before steward). The stream
+// context carries no operator marker, so a steward that was locked down since
+// the browsers subscribed is not sent the request.
+func (h *TelemetryHandler) subscribeExisting(ctx context.Context, peerID string, sendCh chan<- *transportpb.TelemetryRequest, existingSubCount int) {
+	if existingSubCount <= 0 || controlplaneInterfaces.CheckControllerRequest(ctx, h.lockdown, peerID) != nil {
+		return
+	}
+	select {
+	case sendCh <- &transportpb.TelemetryRequest{
+		StewardId:  peerID,
+		Subscribe:  true,
+		IntervalMs: defaultTelemetryIntervalMs,
+	}:
+	default:
+	}
+}
+
 // HandleGRPC processes a TelemetryStream bidi RPC.
 //
 //   - Receives TelemetrySnapshot frames from the steward.
@@ -145,18 +177,7 @@ func (h *TelemetryHandler) HandleGRPC(stream grpc.BidiStreamingServer[transportp
 		h.deactivateStream(peerID, sendCh)
 	}()
 
-	// If browsers were already subscribed (race: browser connected before steward),
-	// issue the upstream subscribe immediately.
-	if existingSubCount > 0 {
-		select {
-		case sendCh <- &transportpb.TelemetryRequest{
-			StewardId:  peerID,
-			Subscribe:  true,
-			IntervalMs: defaultTelemetryIntervalMs,
-		}:
-		default:
-		}
-	}
+	h.subscribeExisting(ctx, peerID, sendCh, existingSubCount)
 
 	// Goroutine: drain sendCh → stream.Send(). gRPC allows concurrent Send/Recv.
 	sendErrCh := make(chan error, 1)
@@ -199,6 +220,33 @@ func (h *TelemetryHandler) HandleGRPC(stream grpc.BidiStreamingServer[transportp
 	return recvErr
 }
 
+// admitSubscriber validates the steward ID, applies the lockdown gate and
+// upgrades the connection. A browser subscription makes the controller send
+// TelemetryRequest to the steward, so for a locked-down steward it is
+// operator-origin only. ok is false when the request was refused or the upgrade
+// failed; the response has then already been written.
+func (h *TelemetryHandler) admitSubscriber(w http.ResponseWriter, r *http.Request) (string, *websocket.Conn, bool) {
+	stewardID := mux.Vars(r)["id"]
+	if stewardID == "" {
+		http.Error(w, "missing steward id", http.StatusBadRequest)
+		return "", nil, false
+	}
+	if err := controlplaneInterfaces.CheckControllerRequest(r.Context(), h.lockdown, stewardID); err != nil {
+		http.Error(w, "steward is locked down", http.StatusForbidden)
+		return "", nil, false
+	}
+	conn, err := h.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		if h.logger != nil {
+			h.logger.Warn("telemetry: WebSocket upgrade failed",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+		return "", nil, false
+	}
+	return stewardID, conn, true
+}
+
 // ServeWebSocket upgrades an HTTP request to a WebSocket connection and fans
 // TelemetrySnapshot frames to the browser until the steward disconnects or the
 // browser closes the connection.
@@ -207,20 +255,8 @@ func (h *TelemetryHandler) HandleGRPC(stream grpc.BidiStreamingServer[transportp
 // and steward-existence checks are enforced by the API server wrapper before
 // this handler is invoked; ServeWebSocket trusts that the caller is authorised.
 func (h *TelemetryHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	stewardID := vars["id"]
-	if stewardID == "" {
-		http.Error(w, "missing steward id", http.StatusBadRequest)
-		return
-	}
-
-	conn, err := h.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		if h.logger != nil {
-			h.logger.Warn("telemetry: WebSocket upgrade failed",
-				"steward_id", logging.SanitizeLogValue(stewardID),
-				"error", err)
-		}
+	stewardID, conn, ok := h.admitSubscriber(w, r)
+	if !ok {
 		return
 	}
 	defer conn.Close() //nolint:errcheck // conn.Close error in defer is unactionable; connection cleanup proceeds regardless

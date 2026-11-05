@@ -18,6 +18,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
 	"github.com/cfgis/cfgms/features/controller/service"
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -108,6 +109,8 @@ type ModuleBundleHandler struct {
 	// streams is the global concurrent-stream semaphore, capacity
 	// maxConcurrentModuleStreams.
 	streams chan struct{}
+	// lockdown, when set, refuses the pull for a locked-down steward (Issue #5666).
+	lockdown controlplaneInterfaces.LockdownChecker
 }
 
 // NewModuleBundleHandler creates the handler. All arguments are required.
@@ -126,6 +129,13 @@ func NewModuleBundleHandler(
 		logger:  logger,
 		streams: make(chan struct{}, maxConcurrentModuleStreams),
 	}
+}
+
+// WithLockdown wires the lockdown predicate. A locked-down steward gets the typed
+// lockdown refusal instead of a bundle (Issue #5666).
+func (h *ModuleBundleHandler) WithLockdown(c controlplaneInterfaces.LockdownChecker) *ModuleBundleHandler {
+	h.lockdown = c
+	return h
 }
 
 func moduleBundleRefused() error {
@@ -152,10 +162,10 @@ func (h *ModuleBundleHandler) refuse(stewardID string, req *transportpb.FetchMod
 // HandleGRPC processes a FetchModuleBundle RPC on the shared gRPC-over-QUIC
 // server. See ModuleBundleHandler for the authorization order and stream layout.
 func (h *ModuleBundleHandler) HandleGRPC(ctx context.Context, req *transportpb.FetchModuleBundleRequest, stream grpc.ServerStreamingServer[transportpb.ModuleBundleChunk]) error {
-	// 1. Identity: the peer certificate only.
-	stewardID, err := moduleFetchPeerID(ctx)
+	// 1. Identity: the peer certificate only, then the lockdown gate.
+	stewardID, err := authorizeStewardPull(ctx, h.lockdown)
 	if err != nil {
-		return status.Error(codes.Unauthenticated, "mTLS certificate required")
+		return err
 	}
 
 	// 2. Admission. The tenant comes from the fleet registry, never the request.
@@ -186,15 +196,7 @@ func (h *ModuleBundleHandler) HandleGRPC(ctx context.Context, req *transportpb.F
 	if err != nil || effective == nil || effective.Config == nil {
 		return h.refuse(stewardID, req, "configuration unavailable", err)
 	}
-	wantName := req.GetPublisher() + "/" + req.GetName()
-	required := false
-	for _, rm := range effective.Config.RequiredModules {
-		if rm.Name == wantName && rm.Version == req.GetVersion() {
-			required = true
-			break
-		}
-	}
-	if !required {
+	if !requiresModule(effective, req) {
 		return h.refuse(stewardID, req, "module not required by the steward's configuration", nil)
 	}
 
@@ -302,6 +304,32 @@ func validateModuleBundleRequest(req *transportpb.FetchModuleBundleRequest) stri
 }
 
 // moduleFetchPeerID returns the steward id of the verified mTLS peer.
+// authorizeStewardPull resolves the steward from the mTLS peer certificate and
+// applies the lockdown gate to its pull (Issue #5666). A locked-down steward
+// gets the typed lockdown refusal.
+func authorizeStewardPull(ctx context.Context, lockdown controlplaneInterfaces.LockdownChecker) (string, error) {
+	stewardID, err := moduleFetchPeerID(ctx)
+	if err != nil {
+		return "", status.Error(codes.Unauthenticated, "mTLS certificate required")
+	}
+	if err := controlplaneInterfaces.CheckStewardPull(ctx, lockdown, stewardID); err != nil {
+		return "", err
+	}
+	return stewardID, nil
+}
+
+// requiresModule reports whether the configuration requires exactly the
+// requested publisher/name at exactly the requested version.
+func requiresModule(effective *pkgconfig.EffectiveConfiguration, req *transportpb.FetchModuleBundleRequest) bool {
+	wantName := req.GetPublisher() + "/" + req.GetName()
+	for _, rm := range effective.Config.RequiredModules {
+		if rm.Name == wantName && rm.Version == req.GetVersion() {
+			return true
+		}
+	}
+	return false
+}
+
 func moduleFetchPeerID(ctx context.Context) (string, error) {
 	p, ok := peer.FromContext(ctx)
 	if !ok {

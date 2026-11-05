@@ -223,51 +223,54 @@ type Server struct {
 	registrationTokenStore          pkgRegistration.Store
 	dataPlaneProvider               dataplaneInterfaces.DataPlaneProvider
 	configHandler                   *controllerTransport.ConfigHandler
-	logStreamHandler                *controllerTransport.LogStreamHandler // Issue #2140: LogStream ingestion handler
-	grpcServer                      *grpc.Server                          // Shared gRPC server for CP+DP (Story #515)
-	quicListener                    *quictransport.Listener               // Shared QUIC listener (Story #515)
-	signerCertSerial                string                                // Serial number of server cert used for config signing (Story #378)
-	healthCollector                 *health.Collector
-	systemMonitor                   *monitoring.SystemMonitor
-	alertManager                    *health.DefaultAlertManager
-	healthTraceManager              *health.DefaultTraceManager              // Issue #4208: request trace manager backing GET /api/v1/health/trace/{request_id}
-	dnaStorageManager               *dnaStorage.Manager                      // Reports engine DNA storage (must be closed on Stop)
-	triggerManager                  *workflowtrigger.TriggerManagerImpl      // Issue #414: Workflow trigger manager
-	workflowEngine                  *workflow.Engine                         // Issue #4609: owns approval-gate recovery; shut down on Stop
-	gitSyncer                       *gitsync.Syncer                          // Issue #666: git-sync write-through component
-	webhookHandler                  *gitsync.WebhookHandler                  // Issue #681: drain in-flight webhook syncs on shutdown
-	storageManager                  *interfaces.StorageManager               // Main storage manager (must be closed on Stop to release SQLite handles)
-	manualReviewHook                *api.ManualReviewApprovalHook            // Issue #1599: manual-review approval hook (nil if not in use)
-	executionQueue                  *scriptmodule.ExecutionQueue             // Issue #1672: persistent queue for script executions
-	jobDispatcher                   *dispatcher.Dispatcher                   // Issue #1672: job dispatcher for script executions
-	runManager                      *controllerrun.Manager                   // Issue #1673: run/job tracking (must be closed on Stop to release SQLite handle)
-	upgradeStore                    business.UpgradeStore                    // Issue #2464: durable upgrade store (must be closed on Stop to release SQLite handle)
-	tagStore                        *tagstore.Store                          // Issue #2542: durable tag store (must be closed on Stop to release SQLite handle)
-	sessionStore                    session.Store                            // Issue #2774: durable session token store (must be closed on Stop to release SQLite handle)
-	ipTrustExpiryJob                *controllerRegistration.IPTrustExpiryJob // Issue #1697: 30-day dark-window expiry
-	pendingExpiryJob                *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
-	stewardEventManager             *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
-	observeManifestProvider         ObserveManifestProvider                  // Issue #3104: nil = Tier-2 disabled
-	moduleCache                     *modulecache.ModuleCache                 // Issue #4985: serves FetchModuleBundle; nil = RPC Unimplemented
-	outcomeAuditSources             applyOutcomeAuditSources                 // Issue #5564: nil = built from controllerService, configService and moduleCache
-	terminalSessionMgr              terminal.SessionManager                  // Issue #2761: must be stopped on Stop to finalize session recordings
-	egProvider                      egServerProvider                         // Issue #3253: entity graph provider (must be closed on Stop to release DB handle)
-	egClusterMembership             dnasync.ClusterMembership                // Issue #3376: gates cluster authority; nil denies every claim
-	egDNAWriter                     *dnasync.Writer                          // Issue #4444: DNA-sync -> entity-graph writer, chained onto the DNA handler in Start()
-	configSyncService               *configrouting.SyncService               // Issue #4408: periodic git-sourced tenant config polling
-	configSyncCancel                context.CancelFunc                       // Issue #4408: cancels configSyncService's Run context on Stop
-	directoryManager                *directoryif.DirectoryProviderManager    // Issue #5431: Entra ID registered unconnected, closed on Stop
-	routerSecretStore               secretsif.SecretStore                    // Issue #4408: dedicated secret store for the git-capable config router (separate instance from httpServer's own, closed on Stop)
-	egTenantSyncWriter              *tenantsync.Writer                       // Issue #4413: tenant-hierarchy mirror writer (ADR-022 §7); periodic sweep started in Start()
-	egCorrelatorWriter              *correlator.Writer                       // Issue #4413: MAC-identity correlator writer (ADR-022 §3); periodic sweep started in Start()
-	egTenantSyncSweeper             *entityGraphPeriodicSweeper              // Issue #4413: stopped in Stop() before egProvider closes
-	egCorrelatorSweeper             *entityGraphPeriodicSweeper              // Issue #4413: stopped in Stop() before egProvider closes
-	egTenantSyncLeaseJob            lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the tenant-sync sweep (ADR-031 Decision 4)
-	m365Inventory                   *directory.M365Inventory                 // Issue #5561: lease-gated M365 tenant inventory; stopped in Stop() before egProvider closes
-	egCorrelatorLeaseJob            lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the correlator sweep (ADR-031 Decision 4)
-	credentialService               *credentials.Service                     // Issue #5555: controller-issued initial passwords; nil when the secret store is unavailable
-	credentialLeaseJob              lease.SingletonJob                       // Issue #5555: cluster-singleton claim for the credential expiry sweep
-	credentialSweeper               *entityGraphPeriodicSweeper              // Issue #5555: stopped in Stop()
+	// lockdown is the predicate every steward-initiated pull and controller-originated
+	// stream request is gated on (Issue #5666). Nil when no transport is configured.
+	lockdown                controlplaneInterfaces.LockdownChecker
+	logStreamHandler        *controllerTransport.LogStreamHandler // Issue #2140: LogStream ingestion handler
+	grpcServer              *grpc.Server                          // Shared gRPC server for CP+DP (Story #515)
+	quicListener            *quictransport.Listener               // Shared QUIC listener (Story #515)
+	signerCertSerial        string                                // Serial number of server cert used for config signing (Story #378)
+	healthCollector         *health.Collector
+	systemMonitor           *monitoring.SystemMonitor
+	alertManager            *health.DefaultAlertManager
+	healthTraceManager      *health.DefaultTraceManager              // Issue #4208: request trace manager backing GET /api/v1/health/trace/{request_id}
+	dnaStorageManager       *dnaStorage.Manager                      // Reports engine DNA storage (must be closed on Stop)
+	triggerManager          *workflowtrigger.TriggerManagerImpl      // Issue #414: Workflow trigger manager
+	workflowEngine          *workflow.Engine                         // Issue #4609: owns approval-gate recovery; shut down on Stop
+	gitSyncer               *gitsync.Syncer                          // Issue #666: git-sync write-through component
+	webhookHandler          *gitsync.WebhookHandler                  // Issue #681: drain in-flight webhook syncs on shutdown
+	storageManager          *interfaces.StorageManager               // Main storage manager (must be closed on Stop to release SQLite handles)
+	manualReviewHook        *api.ManualReviewApprovalHook            // Issue #1599: manual-review approval hook (nil if not in use)
+	executionQueue          *scriptmodule.ExecutionQueue             // Issue #1672: persistent queue for script executions
+	jobDispatcher           *dispatcher.Dispatcher                   // Issue #1672: job dispatcher for script executions
+	runManager              *controllerrun.Manager                   // Issue #1673: run/job tracking (must be closed on Stop to release SQLite handle)
+	upgradeStore            business.UpgradeStore                    // Issue #2464: durable upgrade store (must be closed on Stop to release SQLite handle)
+	tagStore                *tagstore.Store                          // Issue #2542: durable tag store (must be closed on Stop to release SQLite handle)
+	sessionStore            session.Store                            // Issue #2774: durable session token store (must be closed on Stop to release SQLite handle)
+	ipTrustExpiryJob        *controllerRegistration.IPTrustExpiryJob // Issue #1697: 30-day dark-window expiry
+	pendingExpiryJob        *controllerRegistration.PendingExpiryJob // Issue #1697: 5-day pending-registration expiry
+	stewardEventManager     *logging.LoggingManager                  // Issue #2139: dedicated sink for ingested steward events
+	observeManifestProvider ObserveManifestProvider                  // Issue #3104: nil = Tier-2 disabled
+	moduleCache             *modulecache.ModuleCache                 // Issue #4985: serves FetchModuleBundle; nil = RPC Unimplemented
+	outcomeAuditSources     applyOutcomeAuditSources                 // Issue #5564: nil = built from controllerService, configService and moduleCache
+	terminalSessionMgr      terminal.SessionManager                  // Issue #2761: must be stopped on Stop to finalize session recordings
+	egProvider              egServerProvider                         // Issue #3253: entity graph provider (must be closed on Stop to release DB handle)
+	egClusterMembership     dnasync.ClusterMembership                // Issue #3376: gates cluster authority; nil denies every claim
+	egDNAWriter             *dnasync.Writer                          // Issue #4444: DNA-sync -> entity-graph writer, chained onto the DNA handler in Start()
+	configSyncService       *configrouting.SyncService               // Issue #4408: periodic git-sourced tenant config polling
+	configSyncCancel        context.CancelFunc                       // Issue #4408: cancels configSyncService's Run context on Stop
+	directoryManager        *directoryif.DirectoryProviderManager    // Issue #5431: Entra ID registered unconnected, closed on Stop
+	routerSecretStore       secretsif.SecretStore                    // Issue #4408: dedicated secret store for the git-capable config router (separate instance from httpServer's own, closed on Stop)
+	egTenantSyncWriter      *tenantsync.Writer                       // Issue #4413: tenant-hierarchy mirror writer (ADR-022 §7); periodic sweep started in Start()
+	egCorrelatorWriter      *correlator.Writer                       // Issue #4413: MAC-identity correlator writer (ADR-022 §3); periodic sweep started in Start()
+	egTenantSyncSweeper     *entityGraphPeriodicSweeper              // Issue #4413: stopped in Stop() before egProvider closes
+	egCorrelatorSweeper     *entityGraphPeriodicSweeper              // Issue #4413: stopped in Stop() before egProvider closes
+	egTenantSyncLeaseJob    lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the tenant-sync sweep (ADR-031 Decision 4)
+	m365Inventory           *directory.M365Inventory                 // Issue #5561: lease-gated M365 tenant inventory; stopped in Stop() before egProvider closes
+	egCorrelatorLeaseJob    lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the correlator sweep (ADR-031 Decision 4)
+	credentialService       *credentials.Service                     // Issue #5555: controller-issued initial passwords; nil when the secret store is unavailable
+	credentialLeaseJob      lease.SingletonJob                       // Issue #5555: cluster-singleton claim for the credential expiry sweep
+	credentialSweeper       *entityGraphPeriodicSweeper              // Issue #5555: stopped in Stop()
 }
 
 // egServerProvider is the combined interface the controller server needs for
@@ -1846,15 +1849,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// resolves the live signing serial per sign and rebuilds the underlying
 		// signer only when that serial changes (once per rotation). The command
 		// publisher uses the same DynamicSigner pattern (Issue #1844).
-		configSigner := hoistedSigner
-		if certManager != nil {
-			cm := certManager
-			configSigner = signature.NewDynamicSigner(service.NewSigningResolver(cm))
-		}
-
-		configHandler = controllerTransport.NewConfigHandler(configService, logger, configSigner).
-			WithControllerService(controllerService)
-		logger.Debug("Config handler initialized for data plane", "signing_enabled", configSigner != nil)
+		configHandler = newDataPlaneConfigHandler(configService, controllerService, certManager, hoistedSigner, lockdown, logger)
 	}
 
 	// Initialize health collectors (Story #417, #517)
@@ -2314,6 +2309,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		registrationTokenStore:  regStore,
 		dataPlaneProvider:       dataPlane,
 		configHandler:           configHandler,
+		lockdown:                lockdownChecker(lockdown),
 		httpServer:              httpServer,
 		signerCertSerial:        signerCertSerial, // Story #378: For registration handler
 		healthCollector:         healthCollector,
@@ -3110,30 +3106,15 @@ func (s *Server) Start() error {
 		}
 		s.wireDNABulkLane(dnaHandler)
 
-		bulkHandler := controllerTransport.NewBulkHandler(s.logger, tenantQueue)
+		bulkHandler := controllerTransport.NewBulkHandler(s.logger, tenantQueue).WithLockdown(s.lockdown)
 		logStreamHandler := s.newLogStreamHandler()
 		s.logStreamHandler = logStreamHandler
-		telemetryHandler := controllerTransport.NewTelemetryHandler(s.logger, nil)
+		telemetryHandler := controllerTransport.NewTelemetryHandler(s.logger, nil).WithLockdown(s.lockdown)
 		composite := newCompositeTransportServer(cpHandler, s.logger)
 		composite.SetConfigHandler(s.configHandler)
 		composite.SetDNAHandler(dnaHandler)
 		composite.SetBulkHandler(bulkHandler)
-		// Issue #4985: FetchModuleBundle serves approved bundles to the steward
-		// whose own configuration requires them. It shares the DNA/bulk admission
-		// queue so a bucket exhausted by module fetches cannot starve connects.
-		if s.moduleCache != nil && s.configService != nil && s.controllerService != nil {
-			composite.SetModuleBundleHandler(controllerTransport.NewModuleBundleHandler(
-				s.moduleCache, s.configService, s.controllerService, tenantQueue, s.logger))
-		}
-		// Issue #5555: IssueInitialCredential is a unary RPC so a password never
-		// passes through the steward offline queue (which persists to disk). It is
-		// wired only with a certificate manager: without one the unary revocation
-		// interceptor is not installed, and a revoked steward must never be able
-		// to collect a plaintext initial password.
-		if s.certManager != nil && s.credentialService != nil && s.configService != nil && s.controllerService != nil {
-			composite.SetCredentialHandler(controllerTransport.NewCredentialHandler(
-				s.credentialService, s.configService, s.controllerService, s.logger))
-		}
+		s.wirePullHandlers(composite, tenantQueue)
 		composite.SetLogStreamHandler(logStreamHandler)
 		composite.SetTelemetryHandler(telemetryHandler)
 
@@ -3191,7 +3172,7 @@ func (s *Server) Start() error {
 		// Wire osquery ad-hoc fleet query dispatch (Issue #3569).
 		// The controller side of OsqueryHandler manages the stream registry (HandleGRPC,
 		// QuerySteward); Execute is steward-side only so binPath is irrelevant here.
-		osqueryHandler := stewardosquery.NewOsqueryHandler(s.logger, "")
+		osqueryHandler := stewardosquery.NewOsqueryHandler(s.logger, "").WithLockdown(s.lockdown)
 		composite.SetOsqueryHandler(osqueryHandler)
 		if s.httpServer != nil {
 			s.httpServer.SetOsqueryDispatcher(osqueryHandler)
@@ -5669,4 +5650,57 @@ func newCommandSigning(certManager *cert.Manager) (signature.Signer, *commands.S
 		return nil, nil
 	}
 	return signature.NewDynamicSigner(service.NewSigningResolver(certManager)), commands.NewSignerChainBuilder(certManager)
+}
+
+// lockdownChecker returns the predicate as an interface, or a true nil interface
+// when no lockdown was built, so a nil *Lockdown is never wrapped into a non-nil
+// checker.
+func lockdownChecker(l *controllerFleet.Lockdown) controlplaneInterfaces.LockdownChecker {
+	if l == nil {
+		return nil
+	}
+	return l
+}
+
+// newDataPlaneConfigHandler builds the SyncConfig handler. The signer is a
+// DynamicSigner over the certificate manager when one exists, so configs are
+// always signed with the current signing certificate; the boot-captured signer
+// is the fallback when no certificate manager is configured.
+func newDataPlaneConfigHandler(
+	configService *service.ConfigurationServiceV2,
+	controllerService *service.ControllerService,
+	certManager *cert.Manager,
+	bootSigner signature.Signer,
+	lockdown *controllerFleet.Lockdown,
+	logger logging.Logger,
+) *controllerTransport.ConfigHandler {
+	configSigner := bootSigner
+	if certManager != nil {
+		configSigner = signature.NewDynamicSigner(service.NewSigningResolver(certManager))
+	}
+	logger.Debug("Config handler initialized for data plane", "signing_enabled", configSigner != nil)
+	return controllerTransport.NewConfigHandler(configService, logger, configSigner).
+		WithControllerService(controllerService).
+		WithLockdown(lockdownChecker(lockdown))
+}
+
+// wirePullHandlers wires the steward-initiated pull RPCs whose dependencies are
+// optional, each gated on the lockdown predicate (Issue #5666).
+func (s *Server) wirePullHandlers(composite *compositeTransportServer, tenantQueue *controllerTransport.TenantQueue) {
+	// Issue #4985: FetchModuleBundle serves approved bundles to the steward
+	// whose own configuration requires them. It shares the DNA/bulk admission
+	// queue so a bucket exhausted by module fetches cannot starve connects.
+	if s.moduleCache != nil && s.configService != nil && s.controllerService != nil {
+		composite.SetModuleBundleHandler(controllerTransport.NewModuleBundleHandler(
+			s.moduleCache, s.configService, s.controllerService, tenantQueue, s.logger).WithLockdown(s.lockdown))
+	}
+	// Issue #5555: IssueInitialCredential is a unary RPC so a password never
+	// passes through the steward offline queue (which persists to disk). It is
+	// wired only with a certificate manager: without one the unary revocation
+	// interceptor is not installed, and a revoked steward must never be able
+	// to collect a plaintext initial password.
+	if s.certManager != nil && s.credentialService != nil && s.configService != nil && s.controllerService != nil {
+		composite.SetCredentialHandler(controllerTransport.NewCredentialHandler(
+			s.credentialService, s.configService, s.controllerService, s.logger).WithLockdown(s.lockdown))
+	}
 }

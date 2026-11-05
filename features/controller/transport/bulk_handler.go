@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
@@ -30,6 +31,33 @@ import (
 type BulkHandler struct {
 	logger logging.Logger
 	queue  *TenantQueue
+	// lockdown, when set, refuses controller-to-steward chunks for a
+	// locked-down steward (Issue #5666).
+	lockdown controlplaneInterfaces.LockdownChecker
+}
+
+// WithLockdown wires the lockdown predicate. Endpoint-to-controller uploads
+// stay open for a locked-down steward; every chunk the controller sends toward
+// the endpoint is refused with the typed lockdown error.
+func (h *BulkHandler) WithLockdown(c controlplaneInterfaces.LockdownChecker) *BulkHandler {
+	h.lockdown = c
+	return h
+}
+
+// gatedBulkStream refuses Send for a locked-down steward. The steward is the
+// authenticated peer of the stream, looked up on every Send so a transition
+// mid-stream takes effect. Recv (the upload direction) is untouched.
+type gatedBulkStream struct {
+	grpc.BidiStreamingServer[transportpb.BulkChunk, transportpb.BulkChunk]
+	checker   controlplaneInterfaces.LockdownChecker
+	stewardID string
+}
+
+func (s *gatedBulkStream) Send(c *transportpb.BulkChunk) error {
+	if err := controlplaneInterfaces.CheckStewardPull(s.Context(), s.checker, s.stewardID); err != nil {
+		return err
+	}
+	return s.BidiStreamingServer.Send(c)
 }
 
 // NewBulkHandler creates a new bulk transfer handler.
@@ -39,6 +67,11 @@ func NewBulkHandler(logger logging.Logger, queue *TenantQueue) *BulkHandler {
 
 // HandleGRPC processes a BulkTransfer RPC on the shared gRPC-over-QUIC server.
 func (h *BulkHandler) HandleGRPC(stream grpc.BidiStreamingServer[transportpb.BulkChunk, transportpb.BulkChunk]) error {
+	// Any controller-to-steward chunk goes through this wrapper. Today the
+	// handler only receives; the wrapper keeps a future downstream path gated.
+	if h.lockdown != nil {
+		stream = &gatedBulkStream{BidiStreamingServer: stream, checker: h.lockdown, stewardID: peerCNFromContext(stream.Context())}
+	}
 	// Use the mTLS peer CN as the per-tenant queue key. BulkChunk carries no
 	// identity fields; the peer cert is the sole identity source for bulk RPCs.
 	queueKey := peerCNFromContext(stream.Context())

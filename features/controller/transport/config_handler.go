@@ -12,8 +12,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
@@ -21,10 +19,10 @@ import (
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/service"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	dataplaneTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
-	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
 
 // ConfigSyncStreamID is the stream ID for configuration synchronization.
@@ -42,6 +40,8 @@ type ConfigHandler struct {
 	// so that extractTenantID(ctx) returns the correct tenant on the mTLS-authenticated
 	// data-plane sync path, which carries no tenant value in the gRPC context. (Issue #1720)
 	controllerSvc *service.ControllerService
+	// lockdown, when set, refuses the pull for a locked-down steward (Issue #5666).
+	lockdown controlplaneInterfaces.LockdownChecker
 }
 
 // NewConfigHandler creates a new config sync handler.
@@ -62,6 +62,27 @@ func (h *ConfigHandler) WithControllerService(cs *service.ControllerService) *Co
 	return h
 }
 
+// WithLockdown wires the lockdown predicate. A locked-down steward gets the typed
+// lockdown refusal instead of a configuration (Issue #5666).
+func (h *ConfigHandler) WithLockdown(c controlplaneInterfaces.LockdownChecker) *ConfigHandler {
+	h.lockdown = c
+	return h
+}
+
+// authorizeSync validates the request's steward ID against the mTLS peer CN,
+// closing the steward-impersonation gap, then applies the lockdown gate. The
+// gate keys on the authenticated peer, never on the request body.
+func (h *ConfigHandler) authorizeSync(ctx context.Context, stewardID string) error {
+	peerID, err := moduleFetchPeerID(ctx)
+	if err != nil {
+		return status.Error(codes.Unauthenticated, "mTLS certificate required")
+	}
+	if stewardID != peerID {
+		return status.Error(codes.PermissionDenied, "steward ID mismatch")
+	}
+	return controlplaneInterfaces.CheckStewardPull(ctx, h.lockdown, peerID)
+}
+
 // HandleGRPC processes a SyncConfig RPC on the shared gRPC-over-QUIC server.
 // This is the gRPC path used by the composite handler (Story #515).
 //
@@ -73,21 +94,8 @@ func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigS
 		"steward_id", stewardID,
 		"current_version", req.GetCurrentVersion())
 
-	// Validate steward ID against the mTLS peer CN to close the steward-impersonation gap.
-	p, ok := peer.FromContext(ctx)
-	if !ok {
-		return status.Error(codes.Unauthenticated, "mTLS certificate required")
-	}
-	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
-	if !ok {
-		return status.Error(codes.Unauthenticated, "mTLS certificate required")
-	}
-	peerID, err := quictransport.PeerStewardID(tlsInfo.State)
-	if err != nil {
-		return status.Error(codes.Unauthenticated, "mTLS certificate required")
-	}
-	if stewardID != peerID {
-		return status.Error(codes.PermissionDenied, "steward ID mismatch")
+	if err := h.authorizeSync(ctx, stewardID); err != nil {
+		return err
 	}
 
 	// Inject the steward's authenticated tenant ID from the fleet registry into the

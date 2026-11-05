@@ -40,6 +40,65 @@ type compositeTransportServer struct {
 	logger            logging.Logger
 }
 
+// lockdownClass says how an RPC treats a locked-down (tampered) steward.
+type lockdownClass string
+
+const (
+	// classAccept: inbound traffic from the steward stays open; the data is
+	// untrusted, not refused.
+	classAccept lockdownClass = "accept"
+	// classRefuse: a steward-initiated pull of controller data; refused with the
+	// typed lockdown error.
+	classRefuse lockdownClass = "refuse"
+	// classOperatorOnly: the controller originates the request; it runs only
+	// when the operator-origin marker is on the context.
+	classOperatorOnly lockdownClass = "operator-only"
+	// classExempt: admission acknowledgement that mints nothing.
+	classExempt lockdownClass = "exempt"
+	// classUnimplemented: no handler is wired, so the RPC serves nothing.
+	classUnimplemented lockdownClass = "unimplemented"
+)
+
+// rpcLockdownClassification is the one table of what each StewardTransport RPC
+// does for a locked-down steward (Issue #5666). An inventory test iterates the
+// generated service descriptor and fails on any RPC missing here, so a new RPC
+// must be classified before it can ship. The gate itself lives in each handler
+// (controlplaneInterfaces.CheckStewardPull and CheckControllerRequest).
+var rpcLockdownClassification = map[string]lockdownClass{
+	// Register is an admission acknowledgement: it derives the steward ID from the
+	// mTLS CN and returns {steward_id, OK}. It mints no certificate, config or
+	// secret. Certificates are minted only by the HTTP register route (clone flow,
+	// S21) and the HTTP refresh routes (credential renewal, S24).
+	"Register": classExempt,
+	"Ping":     classAccept,
+	// ControlChannel inbound is accepted; the outbound command gate is the control
+	// plane provider's LockdownGate (Issue #5665).
+	"ControlChannel":         classAccept,
+	"SyncConfig":             classRefuse,
+	"FetchModuleBundle":      classRefuse,
+	"IssueInitialCredential": classRefuse, // secret material
+	"SyncDNA":                classAccept,
+	// BulkTransfer: uploads accepted; controller-to-steward chunks refused.
+	"BulkTransfer": classAccept,
+	"LogStream":    classAccept,
+	// TelemetryStream: inbound snapshots accepted; downstream TelemetryRequest is
+	// operator-only.
+	"TelemetryStream": classAccept,
+	"Terminal":        classOperatorOnly, // operator-initiated, gated by its own proof
+	"OsqueryQuery":    classOperatorOnly,
+	"TaskStream":      classUnimplemented,
+}
+
+// httpMintingRoutes records the HTTP routes that mint certificates or secrets,
+// with the story that owns their lockdown behavior. The gRPC Register is not one
+// of them.
+var httpMintingRoutes = map[string]string{
+	"POST /api/v1/register":                               "S21 (clone flow; a tampered ID reaches it only through clone)",
+	"POST /api/v1/stewards/{device_id}/refresh/challenge": "S24 (credential renewal, the one allowed pull)",
+	"POST /api/v1/stewards/{device_id}/refresh/complete":  "S24 (credential renewal, the one allowed pull)",
+	"POST /api/v1/stewards/{device_id}/refresh/claim":     "S24 (credential renewal, the one allowed pull)",
+}
+
 // newCompositeTransportServer creates a composite handler with the always-required
 // CP handler and logger. Wire optional data-plane handlers via SetConfigHandler,
 // SetDNAHandler, SetBulkHandler, and SetLogStreamHandler before serving.
