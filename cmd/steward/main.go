@@ -26,6 +26,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -390,6 +391,90 @@ func repairPersistedCAFile(path, pin string) (string, error) {
 		return "", fmt.Errorf("repair persisted CA: %w", err)
 	}
 	return canonical, nil
+}
+
+// checkFirstRegistrationCA enforces the baked controller root list on the CA a
+// controller presents at first registration. Without a baked list it is a
+// no-op (TOFU behaviour is unchanged). With one, the CA's fingerprint must be
+// in the list; a malformed baked list or an absent CA fails closed.
+func checkFirstRegistrationCA(caPEM string) error {
+	fps, err := bakedRootFingerprints()
+	if errors.Is(err, errNoBakedRoot) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("first registration refused: %w", err)
+	}
+	if caPEM == "" {
+		return fmt.Errorf("first registration refused: controller presented no CA certificate to check against the baked root list")
+	}
+	fp, err := computeCAPEMFingerprint(caPEM)
+	if err != nil {
+		return fmt.Errorf("first registration refused: compute controller CA fingerprint: %w", err)
+	}
+	if !slices.Contains(fps, fp) {
+		return fmt.Errorf("first registration refused: controller CA fingerprint %s is not in the baked controller root list", fp)
+	}
+	return nil
+}
+
+// establishControllerCATrust applies the controller-CA trust rules for an
+// approved registration before its identity is persisted: the baked root list
+// check at first registration (Issue #5730), then CA pin recording for TOFU
+// and install-pinned modes (recordControllerCAPin).
+func establishControllerCATrust(
+	reg *approvedRegistration,
+	persistedID *StewardIdentity,
+	trustSrc TrustSource,
+	installCAPEM string,
+	priorCAPinFingerprint string,
+	logger logging.Logger,
+) error {
+	// A build carrying a baked root list refuses, at first registration, a
+	// controller CA that is not in it (Issue #5730). Nothing is persisted.
+	if priorCAPinFingerprint == "" && (trustSrc == trustSourceTOFU || trustSrc == trustSourceCompileBaked) {
+		if err := checkFirstRegistrationCA(reg.CACert); err != nil {
+			return err
+		}
+	}
+	return recordControllerCAPin(reg, persistedID, trustSrc, installCAPEM, logger)
+}
+
+// recordControllerCAPin records the CA pin fingerprint for install-pinned and
+// TOFU modes. On TOFU it rewrites reg.CACert and persistedID.CACertPEM to the
+// verified canonical re-encoding.
+func recordControllerCAPin(
+	reg *approvedRegistration,
+	persistedID *StewardIdentity,
+	trustSrc TrustSource,
+	installCAPEM string,
+	logger logging.Logger,
+) error {
+	switch trustSrc {
+	case trustSourceTOFU:
+		if reg.CACert != "" {
+			if err := pinTOFUCA(defaultPlatformCACertPath(), reg.CACert, persistedID); err != nil {
+				return fmt.Errorf("TOFU CA pin failed: %w", err)
+			}
+			// Persist and trust only the verified single-certificate re-encoding.
+			canonicalPEM, _, cerr := service.CanonicalCAPEM(reg.CACert)
+			if cerr != nil {
+				return fmt.Errorf("TOFU CA pin failed: %w", cerr)
+			}
+			reg.CACert = canonicalPEM
+			persistedID.CACertPEM = canonicalPEM
+		}
+	case trustSourceInstallPinned:
+		if installCAPEM != "" {
+			fp, fpErr := computeCAPEMFingerprint(installCAPEM)
+			if fpErr == nil {
+				persistedID.CAPinFingerprint = fp
+			} else {
+				logger.Warn("Failed to compute install CA fingerprint; CAPinFingerprint not recorded", "error", fpErr)
+			}
+		}
+	}
+	return nil
 }
 
 // pinTOFUCA pins the controller CA on first TOFU enrollment. On first call it
@@ -2022,30 +2107,8 @@ func connectWithApprovedRegistration(
 		CAPinFingerprint:   priorCAPinFingerprint,
 	}
 
-	// Record the CA pin fingerprint for install-pinned and TOFU modes.
-	switch trustSrc {
-	case trustSourceTOFU:
-		if reg.CACert != "" {
-			if err := pinTOFUCA(defaultPlatformCACertPath(), reg.CACert, &persistedID); err != nil {
-				return nil, fmt.Errorf("TOFU CA pin failed: %w", err)
-			}
-			// Persist and trust only the verified single-certificate re-encoding.
-			canonicalPEM, _, cerr := service.CanonicalCAPEM(reg.CACert)
-			if cerr != nil {
-				return nil, fmt.Errorf("TOFU CA pin failed: %w", cerr)
-			}
-			reg.CACert = canonicalPEM
-			persistedID.CACertPEM = canonicalPEM
-		}
-	case trustSourceInstallPinned:
-		if installCAPEM != "" {
-			fp, fpErr := computeCAPEMFingerprint(installCAPEM)
-			if fpErr == nil {
-				persistedID.CAPinFingerprint = fp
-			} else {
-				logger.Warn("Failed to compute install CA fingerprint; CAPinFingerprint not recorded", "error", fpErr)
-			}
-		}
+	if err := establishControllerCATrust(&reg, &persistedID, trustSrc, installCAPEM, priorCAPinFingerprint, logger); err != nil {
+		return nil, err
 	}
 
 	if saveErr := saveIdentity(certStoreDir, persistedID); saveErr != nil {
