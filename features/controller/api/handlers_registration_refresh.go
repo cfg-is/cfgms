@@ -334,8 +334,8 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 	s.routeRefreshByLifecycle(w, r, record, deviceID, &req)
 }
 
-// routeRefreshByLifecycle is gate (8) of /refresh/complete: archived and
-// tampered records always queue for an operator, every other status consults
+// routeRefreshByLifecycle is gate (8) of /refresh/complete: archived records
+// always queue for an operator, every other status (tampered included) consults
 // the tenant's refresh policy (require_approval when no policy store is set).
 func (s *Server) routeRefreshByLifecycle(w http.ResponseWriter, r *http.Request, record *business.StewardRecord, deviceID string, req *RefreshCompleteRequest) {
 	switch record.Status {
@@ -343,14 +343,11 @@ func (s *Server) routeRefreshByLifecycle(w http.ResponseWriter, r *http.Request,
 		// Archived: add pending refresh and return 202 — policy is skipped.
 		s.handleRefreshQueueEntry(w, r, record, deviceID, req.Provenance, req.CSRPEM, 0, 0, "archived")
 
-	case business.StewardStatusTampered:
-		// Tampered: never auto-approved by policy; the refresh waits for an
-		// operator, and the record keeps its tampered status (it is not in the
-		// from-list of the status write after issuance).
-		s.handleRefreshQueueEntry(w, r, record, deviceID, req.Provenance, req.CSRPEM, 0, 0, "tampered")
-
 	default:
-		// active / registered / dormant / lost / deregistered — consult policy.
+		// active / registered / dormant / lost / deregistered / tampered — consult
+		// policy. A tampered steward renews under the same rules as any other
+		// (Issue #5673): the tampered state adds no queueing reason, keeps its
+		// status through issuance, and receives a certificate-only response.
 		if s.refreshPolicyStore == nil {
 			// No policy store: default to require_approval.
 			s.handleRefreshQueueEntry(w, r, record, deviceID, req.Provenance, req.CSRPEM, 0, 0, "no_policy_store")
@@ -835,6 +832,26 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 		return nil, serial, fmt.Errorf("CA certificate unavailable: %w", err)
 	}
 
+	// A tampered steward renews so it never goes dark, but receives the new client
+	// certificate and its issuer chain only: no CA, signing certificate, server
+	// certificate, transport address or identity fields (Issue #5673). The
+	// tampered state is never written here; only an operator restore or ban
+	// clears it.
+	if record.Status == business.StewardStatusTampered {
+		s.emitRefreshAudit(ctx, record.DeviceID, record.TenantID,
+			business.AuditEventAuthentication, auditActionTamperRenewal,
+			business.AuditResultSuccess, business.AuditSeverityHigh,
+			map[string]interface{}{"steward_id": record.ID, "cert_serial": serial})
+		s.logger.Info("Issued refresh certificate to tampered steward",
+			"steward_id", logging.SanitizeLogValue(record.ID),
+			"validity_days", validityDays)
+		return &RefreshCompleteResponse{
+			Status:      "approved",
+			ClientCert:  string(clientCert.CertificatePEM),
+			IssuerChain: string(clientCert.IssuerChainPEM),
+		}, serial, nil
+	}
+
 	resp := &RefreshCompleteResponse{
 		Status:      "approved",
 		ClientCert:  string(clientCert.CertificatePEM),
@@ -871,7 +888,10 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 				"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
-	if s.controllerService != nil {
+	// The node-local list status must not be reset for a steward that became
+	// tampered after the gate read: the durable write above skips it (tampered is
+	// not in the from-list), and this write has no such guard of its own.
+	if s.controllerService != nil && !s.stewardIsTampered(ctx, record.ID) {
 		if err := s.controllerService.UpdateStewardStatus(record.ID, "registered"); err != nil {
 			s.logger.Warn("Failed to update steward status after refresh cert issuance",
 				"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
@@ -883,6 +903,16 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 		"validity_days", validityDays)
 
 	return resp, serial, nil
+}
+
+// stewardIsTampered reports whether the durable record of stewardID is tampered.
+// A missing store or a read error report false.
+func (s *Server) stewardIsTampered(ctx context.Context, stewardID string) bool {
+	if s.stewardStore == nil {
+		return false
+	}
+	rec, err := s.stewardStore.GetSteward(ctx, stewardID)
+	return err == nil && rec != nil && rec.Status == business.StewardStatusTampered
 }
 
 // ---- Admin request / response types -----------------------------------------
