@@ -4,6 +4,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -70,4 +71,26 @@ func TestSQLiteStatements_Characterization(t *testing.T) {
 	next, err = b.GetNextVersion(ctx, device)
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), next)
+}
+
+// TestPrepareStatements_ErrorText pins the per-statement error wrapping for both
+// dialect prefixes, and that handles prepared before the failure are kept.
+func TestPrepareStatements_ErrorText(t *testing.T) {
+	b := newTimestampTestBackend(t)
+
+	for _, tc := range []struct{ dialect, want string }{
+		{"", "failed to prepare broken one statement: "},
+		{"PostgreSQL ", "failed to prepare PostgreSQL broken one statement: "},
+	} {
+		var ok, bad *sql.Stmt
+		err := prepareStatements(b.db, tc.dialect, []statementSpec{
+			{&ok, "fine", "SELECT 1"},
+			{&bad, "broken one", "SELECT FROM NOWHERE ((("},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), tc.want)
+		assert.NotNil(t, ok)
+		assert.Nil(t, bad)
+		_ = ok.Close()
+	}
 }
