@@ -771,3 +771,56 @@ func TestDatabaseProvider_CreateSessionTokenStore(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "factory-test", got.ID)
 }
+
+// TestDatabaseSessionTokenStore_GetAndGetByIDAgree characterizes that Get (by token hash)
+// and GetByID (by session ID) decode the same row identically and apply the same
+// found / expired / not-found outcomes (Issue #5795). Runs against PostgreSQL in CI.
+func TestDatabaseSessionTokenStore_GetAndGetByIDAgree(t *testing.T) {
+	store := newTestSessionTokenStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	newSess := func(id string) *session.Session {
+		return &session.Session{
+			ID:                id,
+			PrincipalID:       "erin",
+			ConnectionName:    "ctrl",
+			TenantID:          "tenant-1",
+			IssuedAt:          now,
+			LastActivity:      now,
+			AbsoluteExpiresAt: now.Add(time.Hour),
+			Assurance:         session.AssuranceBasic,
+			BoundIP:           "10.0.0.7",
+			RootScoped:        true,
+			CredentialID:      []byte{1, 2, 3},
+			LoginCredentialID: []byte{4, 5},
+			Channel:           "web",
+		}
+	}
+
+	t.Run("found decodes identically", func(t *testing.T) {
+		hash := session.HashToken(mustGenerateToken(t))
+		sess := newSess("agree-found-pg")
+		require.NoError(t, store.Set(ctx, hash, sess))
+
+		byHash, err := store.Get(ctx, hash)
+		require.NoError(t, err)
+		byID, err := store.GetByID(ctx, sess.ID)
+		require.NoError(t, err)
+		assert.Equal(t, byHash, byID)
+		assert.Equal(t, []byte{1, 2, 3}, byHash.CredentialID)
+		assert.Equal(t, []byte{4, 5}, byHash.LoginCredentialID)
+	})
+
+	t.Run("expired hash is not found by either", func(t *testing.T) {
+		hash := session.HashToken(mustGenerateToken(t))
+		sess := newSess("agree-expired-pg")
+		require.NoError(t, store.Set(ctx, hash, sess))
+		require.NoError(t, store.StampGraceExpiry(ctx, hash, time.Now().Add(-time.Minute)))
+
+		_, err := store.Get(ctx, hash)
+		assert.True(t, errors.Is(err, session.ErrSessionNotFound))
+		_, err = store.GetByID(ctx, sess.ID)
+		assert.True(t, errors.Is(err, session.ErrSessionNotFound))
+	})
+}

@@ -251,33 +251,5 @@ func (s *DatabaseRBACStore) DeleteSubject(ctx context.Context, id string) error 
 	// Tenant validation already performed in getSubjectLocked
 	// Proceed with deletion
 
-	// Begin transaction
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	query := `DELETE FROM rbac_subjects WHERE id = $1`
-
-	result, err := tx.ExecContext(ctx, query, id)
-	if err != nil {
-		return fmt.Errorf("failed to delete subject: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return fmt.Errorf("subject not found: %s", id)
-	}
-
-	// Commit transaction
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
-	return nil
+	return s.deleteByIDLocked(ctx, `DELETE FROM rbac_subjects WHERE id = $1`, "subject", id)
 }
