@@ -27,6 +27,8 @@ var knownPermissions = map[string]bool{
 	"steward:decommission":       true,
 	"steward:rotate-credentials": true, // ADR-034 §5: revoke serials and archive (AssuranceStrong)
 	"steward:move-identity":      true, // ADR-034 §5: move an identity to the queued copy (AssuranceStrong)
+	"steward:tamper-restore":     true, // end tampered: back to trusted (AssuranceStrong)
+	"steward:tamper-ban":         true, // end tampered: revoke the identity (AssuranceStrong)
 	"steward:visibility":         true, // Issue #2918: hide/unhide steward from default fleet view
 	// Config management
 	"config:list":             true,

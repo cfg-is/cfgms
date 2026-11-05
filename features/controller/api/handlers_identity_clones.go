@@ -226,6 +226,25 @@ func (s *Server) handleListIdentityClones(w http.ResponseWriter, r *http.Request
 // missing steward or one outside the caller's tenant scope. On false the
 // response has been written.
 func (s *Server) operatorStewardRecord(w http.ResponseWriter, r *http.Request, route string) (*business.StewardRecord, bool) {
+	record, ok := s.operatorStewardLookup(w, r, route)
+	if !ok {
+		return nil, false
+	}
+	switch record.Status {
+	case business.StewardStatusRevoked, business.StewardStatusDeregistered,
+		// tampered is not a valid source for rotate-credentials or identity move:
+		// only an operator restore or ban ends it.
+		business.StewardStatusTampered:
+		s.writeErrorResponse(w, http.StatusConflict, "Steward is "+string(record.Status), "STEWARD_NOT_ACTIVE")
+		return nil, false
+	}
+	return record, true
+}
+
+// operatorStewardLookup is operatorStewardRecord without the status check: it
+// answers 404 for a missing steward or one outside the caller's tenant scope and
+// leaves the status decision to the verb.
+func (s *Server) operatorStewardLookup(w http.ResponseWriter, r *http.Request, route string) (*business.StewardRecord, bool) {
 	stewardID := mux.Vars(r)["id"]
 	if !identifierRegex.MatchString(stewardID) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
@@ -250,14 +269,6 @@ func (s *Server) operatorStewardRecord(w http.ResponseWriter, r *http.Request, r
 		if !s.writeTenantCrossingIfNeeded(w, access, record.TenantID) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 		}
-		return nil, false
-	}
-	switch record.Status {
-	case business.StewardStatusRevoked, business.StewardStatusDeregistered,
-		// tampered is not a valid source for rotate-credentials or identity move:
-		// only an operator restore or ban ends it.
-		business.StewardStatusTampered:
-		s.writeErrorResponse(w, http.StatusConflict, "Steward is "+string(record.Status), "STEWARD_NOT_ACTIVE")
 		return nil, false
 	}
 	return record, true
@@ -287,6 +298,12 @@ func revokeStewardSerials(mgr *cert.Manager, stewardID string) ([]string, error)
 }
 
 func (s *Server) emitIdentityOperatorAudit(ctx context.Context, r *http.Request, action string, record *business.StewardRecord, extras map[string]interface{}) {
+	s.emitOperatorAuditResult(ctx, r, action, business.AuditResultSuccess, record, extras)
+}
+
+// emitOperatorAuditResult writes a high-severity security audit event naming the
+// acting principal, with the given result (a refused verb is recorded as denied).
+func (s *Server) emitOperatorAuditResult(ctx context.Context, r *http.Request, action string, result business.AuditResult, record *business.StewardRecord, extras map[string]interface{}) {
 	if s.auditManager == nil {
 		return
 	}
@@ -301,7 +318,7 @@ func (s *Server) emitIdentityOperatorAudit(ctx context.Context, r *http.Request,
 		Action(action).
 		User(principalID, business.AuditUserTypeHuman).
 		Resource("steward", record.ID, "").
-		Result(business.AuditResultSuccess).
+		Result(result).
 		Severity(business.AuditSeverityHigh).
 		Detail("steward_id", record.ID)
 	for k, v := range extras {

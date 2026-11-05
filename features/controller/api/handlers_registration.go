@@ -28,6 +28,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/registration"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -162,6 +163,45 @@ func (s *Server) validatedCloneOf(ctx context.Context, cloneOf, tenantID string)
 		return ""
 	}
 	return rec.ID
+}
+
+// registrationTokenUsable refuses a registration whose token is revoked or
+// expired, or that names a banned identity as the one it was copied from (a ban
+// is sticky, Issue #5667). On false the response has been written.
+func (s *Server) registrationTokenUsable(w http.ResponseWriter, r *http.Request, req RegistrationRequest, token *registration.Token) bool {
+	refuse := func(logMsg, httpMsg string, code int, result business.AuditResult, details map[string]interface{}) bool {
+		s.logger.Warn(logMsg, "token_prefix", logging.RedactedID(req.Token))
+		// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
+		s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, "unknown",
+			business.AuditEventSecurityEvent, "registration_rejected",
+			result, business.AuditSeverityCritical, details)
+		http.Error(w, httpMsg, code)
+		return false
+	}
+	switch {
+	case token.Revoked:
+		return refuse("Attempted use of revoked token", "Registration token has been revoked",
+			http.StatusUnauthorized, business.AuditResultFailure, nil)
+	case token.ExpiresAt != nil && token.ExpiresAt.Before(time.Now()):
+		return refuse("Attempted use of expired token", "Registration token has expired",
+			http.StatusUnauthorized, business.AuditResultFailure, nil)
+	case s.cloneOfIsBanned(r.Context(), req.CloneOf, token.TenantID):
+		return refuse("Registration names a banned identity as clone_of", "Registration refused",
+			http.StatusForbidden, business.AuditResultDenied, map[string]interface{}{"reason": "clone_of_banned"})
+	}
+	return true
+}
+
+// cloneOfIsBanned reports whether cloneOf names a revoked (banned) steward in
+// tenantID. Like validatedCloneOf it only matches within the token's tenant, so a
+// value naming another tenant's steward behaves as if it named nothing.
+func (s *Server) cloneOfIsBanned(ctx context.Context, cloneOf, tenantID string) bool {
+	id := s.validatedCloneOf(ctx, cloneOf, tenantID)
+	if id == "" {
+		return false
+	}
+	rec, err := s.stewardStore.GetSteward(ctx, id)
+	return err == nil && rec != nil && rec.Status == business.StewardStatusRevoked
 }
 
 // csrKeyFingerprint returns the lowercase hex SHA-256 of the CSR's public key
@@ -976,25 +1016,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if token is revoked
-	if token.Revoked {
-		s.logger.Warn("Attempted use of revoked token", "token_prefix", logging.RedactedID(req.Token))
-		// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
-		s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, "unknown",
-			business.AuditEventSecurityEvent, "registration_rejected",
-			business.AuditResultFailure, business.AuditSeverityCritical, nil)
-		http.Error(w, "Registration token has been revoked", http.StatusUnauthorized)
-		return
-	}
-
-	// Check if token is expired
-	if token.ExpiresAt != nil && token.ExpiresAt.Before(time.Now()) {
-		s.logger.Warn("Attempted use of expired token", "token_prefix", logging.RedactedID(req.Token), "expired_at", token.ExpiresAt)
-		// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
-		s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, "unknown",
-			business.AuditEventSecurityEvent, "registration_rejected",
-			business.AuditResultFailure, business.AuditSeverityCritical, nil)
-		http.Error(w, "Registration token has expired", http.StatusUnauthorized)
+	if !s.registrationTokenUsable(w, r, req, token) {
 		return
 	}
 

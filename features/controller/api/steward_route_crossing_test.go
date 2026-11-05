@@ -77,6 +77,14 @@ var stewardCrossingTable = map[string]stewardCrossingRoute{
 		body:           func(string) interface{} { return map[string]string{"pending_id": "pending-none"} },
 		pastGateStatus: http.StatusServiceUnavailable, pastGateBody: "Registration store unavailable",
 	},
+	"POST /api/v1/stewards/{id}/tamper/restore": {
+		permission: "steward:tamper-restore", path: stewardPath("/tamper/restore"), body: noBody,
+		pastGateStatus: http.StatusConflict, pastGateBody: "STEWARD_NOT_TAMPERED",
+	},
+	"POST /api/v1/stewards/{id}/tamper/ban": {
+		permission: "steward:tamper-ban", path: stewardPath("/tamper/ban"), body: noBody,
+		pastGateStatus: http.StatusConflict, pastGateBody: "STEWARD_NOT_TAMPERED",
+	},
 	"PATCH /api/v1/stewards/{id}/visibility": {
 		permission: "steward:visibility", path: stewardPath("/visibility"),
 		body:           func(string) interface{} { return map[string]bool{"hidden": false} },

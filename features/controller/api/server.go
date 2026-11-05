@@ -130,6 +130,7 @@ type Server struct {
 	commandPublisher                *commands.Publisher                      // Issue #1319: fan-out config push to active stewards
 	pushStore                       business.PushStore                       // Issue #1320: durable push-state persistence for HA failover
 	commandStore                    business.CommandStore                    // Issue #3757: durable delivery-lifecycle outbox for steward-directed writes (ADR-031 Decision 2)
+	tamperNotifier                  TamperStateNotifier                      // Issue #5667: sends the restored (unlocked) tamper state to a connected steward
 	registry                        registry.Registry                        // Issue #1323: active steward connection registry
 	mountPointValidator             MountPointValidator                      // Issue #1396: config source connection test
 	configSourceSecretStore         secretsif.SecretStore                    // Issue #1396: secrets for config source validator
