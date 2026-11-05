@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/controller/commands"
 	script "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
@@ -49,6 +50,10 @@ type lockMetaEntry struct {
 	executionID string
 	// lockTTL is exec.Timeout * lockGraceMultiplier. Zero means use d.defaultLockTTL.
 	lockTTL time.Duration
+	// operatorPrincipal is the operator who started the in-flight execution; empty
+	// for a workflow or scheduled run. It lets a relay_response for this open
+	// execution carry the operator-origin marker (Issue #5665).
+	operatorPrincipal string
 }
 
 // Dispatcher drains the ExecutionQueue and sends CommandExecuteScript to stewards.
@@ -88,6 +93,11 @@ type Dispatcher struct {
 	// grantManager, when set, creates and consumes per-execution relay grants
 	// (Issue #1675). Set once via SetGrantManager before Start; nil = no grants.
 	grantManager GrantManager
+
+	// lockdown, when set, tells the dispatcher whether a steward is locked down so
+	// it can refuse before preparing a payload (Issue #5665). The control plane's
+	// own gate remains the authority at send time.
+	lockdown controlplaneInterfaces.LockdownChecker
 
 	// lockMetaMu guards lockMetaMap for atomic check-and-delete in the cancel and
 	// TTL-sweep paths. Separate from mu so neither sweep nor cancel blocks Stop.
@@ -131,6 +141,10 @@ type RunCompletionSink interface {
 	// RecordActionResult records a steward action's result code and advances the
 	// job and run (Issue #4625).
 	RecordActionResult(ctx context.Context, runID, jobID, executionID, resultCode string) error
+	// RecordJobRefused records that the lockdown gate refused the job: it ends
+	// with result code "refused" and the text "refused: locked down", not as a
+	// steward failure (Issue #5665).
+	RecordJobRefused(ctx context.Context, runID, jobID, executionID string) error
 	// ExpireActionJobs closes steward-action jobs that will never report — pending
 	// past their TTL ("expired"), or dispatched but unreported past their bound
 	// ("no_result") — and returns the jobs this caller closed. The transition is a
@@ -218,6 +232,9 @@ type Config struct {
 	// Decision 6), so a cluster without it can never run ad-hoc scripts
 	// (Issue #4510). Nil sends term 0 (single-server behaviour).
 	TermSource TermSource
+	// Lockdown is the lockdown predicate. Optional: when nil the dispatcher does
+	// not pre-check, and the control-plane gate alone decides at send time.
+	Lockdown controlplaneInterfaces.LockdownChecker
 	// ActionAudit receives each steward action the expiry sweep closes without a
 	// result. Optional: when nil the closure is still logged and recorded on the
 	// job, but not written to the audit log.
@@ -268,6 +285,7 @@ func New(cfg *Config) (*Dispatcher, error) {
 		termSource:          cfg.TermSource,
 		requireSignedAdhoc:  cfg.RequireSignedAdhoc,
 		actionAudit:         cfg.ActionAudit,
+		lockdown:            cfg.Lockdown,
 		pollInterval:        interval,
 		logger:              cfg.Logger,
 		lockMetaMap:         make(map[string]lockMetaEntry),
@@ -412,6 +430,146 @@ func (d *Dispatcher) setLockExecutionTTL(deviceID, executionID string, ttl time.
 		entry.lockTTL = ttl
 	}
 	d.lockMetaMap[deviceID] = entry
+}
+
+// setLockOperator records the operator who started the in-flight execution.
+func (d *Dispatcher) setLockOperator(deviceID, principal string) {
+	d.lockMetaMu.Lock()
+	defer d.lockMetaMu.Unlock()
+	entry, ok := d.lockMetaMap[deviceID]
+	if !ok {
+		return
+	}
+	entry.operatorPrincipal = principal
+	d.lockMetaMap[deviceID] = entry
+}
+
+func operatorPrincipalOf(exec *script.QueuedExecution) string {
+	if exec == nil {
+		return ""
+	}
+	principal, _ := exec.Metadata[script.MetaOperatorPrincipal].(string)
+	return principal
+}
+
+// withExecutionOrigin stamps ctx with the operator-origin marker when an
+// authenticated operator API call created exec, and returns ctx unchanged
+// otherwise. This and OperatorOriginForRelay are the dispatcher's only
+// operator-origin paths.
+func (d *Dispatcher) withExecutionOrigin(ctx context.Context, exec *script.QueuedExecution) context.Context {
+	if principal := operatorPrincipalOf(exec); principal != "" {
+		return commands.NewOperatorOrigin(ctx, principal)
+	}
+	return ctx
+}
+
+// OperatorOriginForRelay stamps ctx with the operator-origin marker for a
+// relay_response, but only when executionID is the execution an operator started
+// on deviceID and it is still open (the device slot is still held for it). A
+// steward-initiated relay request, a workflow run or a closed execution gets ctx
+// back unchanged, so the control-plane gate refuses the response for a locked
+// steward.
+func (d *Dispatcher) OperatorOriginForRelay(ctx context.Context, deviceID, executionID string) context.Context {
+	d.lockMetaMu.Lock()
+	entry, ok := d.lockMetaMap[deviceID]
+	d.lockMetaMu.Unlock()
+	if !ok || executionID == "" || entry.executionID != executionID || entry.operatorPrincipal == "" {
+		return ctx
+	}
+	return commands.NewOperatorOrigin(ctx, entry.operatorPrincipal)
+}
+
+// isLockedDown reports whether the steward is locked down. A lookup failure
+// counts as locked (fail closed). With no predicate configured it is false and
+// the control-plane gate decides alone.
+func (d *Dispatcher) isLockedDown(ctx context.Context, deviceID string) bool {
+	if d.lockdown == nil {
+		return false
+	}
+	locked, err := d.lockdown.IsLockedDown(ctx, deviceID)
+	return locked || err != nil
+}
+
+// mayReachLockedSteward reports whether a command of cmdType, sent on ctx, may be
+// delivered to a locked-down steward: the type is on the operator allow-list and
+// ctx carries the operator-origin marker.
+func (d *Dispatcher) mayReachLockedSteward(ctx context.Context, cmdType controlplaneTypes.CommandType) bool {
+	if controlplaneInterfaces.CommandLockdownPolicy[cmdType] != controlplaneInterfaces.LockdownOperatorOnly {
+		return false
+	}
+	_, ok := controlplaneInterfaces.OperatorOriginFrom(ctx)
+	return ok
+}
+
+// refuseLockedDown ends an execution the lockdown gate refused. It is a refusal,
+// not a failure to retry: the job records "refused: locked down", the queue entry
+// is removed so it is not re-queued, and the device slot is freed.
+func (d *Dispatcher) refuseLockedDown(ctx context.Context, deviceID string, exec *script.QueuedExecution) {
+	d.logger.Warn("Execution refused: steward is locked down",
+		"device_id", logging.SanitizeLogValue(deviceID),
+		"execution_id", logging.SanitizeLogValue(exec.ExecutionID))
+	runID, _ := exec.Metadata["workflow_run_id"].(string)
+	jobID, _ := exec.Metadata["job_id"].(string)
+	if d.runSink != nil && runID != "" && jobID != "" {
+		if err := d.runSink.RecordJobRefused(ctx, runID, jobID, exec.ExecutionID); err != nil {
+			d.logger.Warn("Failed to record refused job",
+				"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+	}
+	if err := d.queue.CancelExecution(deviceID, exec.ExecutionID); err != nil {
+		d.logger.Warn("Failed to remove refused execution from the queue",
+			"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+	d.releaseDevice(deviceID)
+}
+
+// servesDevice reports whether this node dispatches to deviceID: with a shared
+// queue only the node holding the steward's session does (Issue #4528).
+func (d *Dispatcher) servesDevice(deviceID string) bool {
+	return d.isLocallyConnected == nil || d.isLocallyConnected(deviceID)
+}
+
+// refusesLockedDown reports whether the lockdown gate refuses a command of
+// cmdType, sent on ctx, to deviceID: the steward is locked down (or the lookup
+// failed) and the command may not reach a locked steward.
+func (d *Dispatcher) refusesLockedDown(ctx context.Context, deviceID string, cmdType controlplaneTypes.CommandType) bool {
+	return d.isLockedDown(ctx, deviceID) && !d.mayReachLockedSteward(ctx, cmdType)
+}
+
+// applyScriptLockdown applies the lockdown gate to an execute_script dispatch
+// before its payload is prepared. For an unlocked steward exec is returned
+// unchanged. For a locked steward an operator-origin execution is returned as a
+// copy that mints no credential and carries no controller-resolved environment;
+// anything else is refused and ok is false.
+func (d *Dispatcher) applyScriptLockdown(ctx context.Context, deviceID string, exec *script.QueuedExecution) (*script.QueuedExecution, bool) {
+	if !d.isLockedDown(ctx, deviceID) {
+		return exec, true
+	}
+	if !d.mayReachLockedSteward(ctx, controlplaneTypes.CommandExecuteScript) {
+		d.refuseLockedDown(ctx, deviceID, exec)
+		return nil, false
+	}
+	stripped := *exec
+	stripped.GenerateAPIKey = false
+	stripped.Environment = nil
+	return &stripped, true
+}
+
+// abortScriptSend handles a failed execute_script send. A lockdown refusal ends
+// the execution as refused; any other failure frees the device slot and leaves
+// the dispatched entry for background maintenance to re-queue.
+func (d *Dispatcher) abortScriptSend(ctx context.Context, deviceID string, exec *script.QueuedExecution, err error) {
+	if errors.Is(err, controlplaneInterfaces.ErrStewardLockedDown) {
+		d.refuseLockedDown(ctx, deviceID, exec)
+		return
+	}
+	d.logger.Error("Failed to send execute_script command",
+		"device_id", logging.SanitizeLogValue(deviceID),
+		"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+		"error", logging.SanitizeLogValue(err.Error()))
+	d.releaseDevice(deviceID)
 }
 
 // releaseDevice drains the device's channel and clears its lock metadata,
@@ -559,7 +717,7 @@ func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
 	// Issue #4528: with a shared queue, only the node holding the steward's
 	// session dispatches to it, so the dispatching node is also the node that
 	// receives the result. Other nodes leave the work queued.
-	if d.isLocallyConnected != nil && !d.isLocallyConnected(deviceID) {
+	if !d.servesDevice(deviceID) {
 		return
 	}
 
@@ -587,6 +745,10 @@ func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
 	// after dispatchTimeout so they can be picked up in a future cycle.
 	exec := executions[0]
 
+	// An execution an operator API call created carries the operator-origin
+	// marker on every send below (Issue #5665); any other execution carries none.
+	ctx = d.withExecutionOrigin(ctx, exec)
+
 	// A steward action takes its own path: no script is prepared, no relay grant
 	// is created, and the command is steward_action, not execute_script.
 	if script.IsStewardAction(exec.Kind) {
@@ -596,6 +758,15 @@ func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
 
 	// Record executionID and lock TTL now that we know the execution.
 	d.setLockExecution(deviceID, exec.ExecutionID, exec.Timeout)
+	d.setLockOperator(deviceID, operatorPrincipalOf(exec))
+
+	// A locked-down steward gets nothing automatic, and nothing the controller
+	// resolves for it: refuse before the payload is prepared, and for an
+	// operator-origin run prepare it without minting a credential.
+	exec, ok := d.applyScriptLockdown(ctx, deviceID, exec)
+	if !ok {
+		return
+	}
 
 	prepared, err := d.queue.PrepareExecutionForDevice(ctx, deviceID, "", exec)
 	if err != nil {
@@ -608,12 +779,7 @@ func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
 	}
 
 	if err := d.sendCommand(ctx, deviceID, exec, prepared); err != nil {
-		d.logger.Error("Failed to send execute_script command",
-			"device_id", logging.SanitizeLogValue(deviceID),
-			"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
-			"error", logging.SanitizeLogValue(err.Error()))
-		// Release lock — the dispatched entry will be re-queued by background maintenance.
-		d.releaseDevice(deviceID)
+		d.abortScriptSend(ctx, deviceID, exec, err)
 		return
 	}
 
@@ -1118,41 +1284,14 @@ func (d *Dispatcher) dispatchStewardAction(ctx context.Context, deviceID string,
 		timeout = script.StewardActionTimeout
 	}
 	d.setLockExecutionTTL(deviceID, exec.ExecutionID, timeout)
+	d.setLockOperator(deviceID, operatorPrincipalOf(exec))
 
 	runID, _ := exec.Metadata["workflow_run_id"].(string)
 	jobID, _ := exec.Metadata["job_id"].(string)
 	tracked := d.runSink != nil && runID != "" && jobID != ""
 
-	if tracked {
-		claimed, status, err := d.runSink.ClaimActionDispatch(ctx, runID, jobID, time.Now().UTC())
-		switch {
-		case err != nil:
-			// The entry stays dispatched and is returned again on the next cycle.
-			d.logger.Error("Failed to claim steward action for dispatch",
-				"device_id", logging.SanitizeLogValue(deviceID),
-				"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
-				"error", logging.SanitizeLogValue(err.Error()))
-			d.releaseDevice(deviceID)
-			return
-		case !claimed && status == jobStatusDispatched:
-			// Already sent: the steward rejects a replayed nonce, and the sweep
-			// reports no_result if it never answers. The entry is kept so a late
-			// result can still be linked to its job.
-			d.logger.Warn("Steward action already sent; not re-sending",
-				"device_id", logging.SanitizeLogValue(deviceID),
-				"execution_id", logging.SanitizeLogValue(exec.ExecutionID))
-			d.releaseDevice(deviceID)
-			return
-		case !claimed:
-			// Closed (expired or cancelled) before delivery: never send it.
-			d.logger.Warn("Steward action job is closed; not sending",
-				"device_id", logging.SanitizeLogValue(deviceID),
-				"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
-				"job_status", logging.SanitizeLogValue(status))
-			_ = d.queue.CancelExecution(deviceID, exec.ExecutionID) //nolint:errcheck // entry may already be gone
-			d.releaseDevice(deviceID)
-			return
-		}
+	if tracked && !d.claimStewardAction(ctx, deviceID, exec, runID, jobID) {
+		return
 	}
 
 	if !hasOperatorProof(exec.Metadata) {
@@ -1161,7 +1300,16 @@ func (d *Dispatcher) dispatchStewardAction(ctx context.Context, deviceID string,
 		return
 	}
 
+	if d.refusesLockedDown(ctx, deviceID, controlplaneTypes.CommandStewardAction) {
+		d.refuseLockedDown(ctx, deviceID, exec)
+		return
+	}
+
 	if err := d.sendStewardAction(ctx, deviceID, exec); err != nil {
+		if errors.Is(err, controlplaneInterfaces.ErrStewardLockedDown) {
+			d.refuseLockedDown(ctx, deviceID, exec)
+			return
+		}
 		d.failStewardAction(ctx, deviceID, exec, tracked, "failed to send steward_action command")
 		d.logger.Error("Failed to send steward_action command",
 			"device_id", logging.SanitizeLogValue(deviceID),
@@ -1169,6 +1317,44 @@ func (d *Dispatcher) dispatchStewardAction(ctx context.Context, deviceID string,
 			"error", logging.SanitizeLogValue(err.Error()))
 		d.releaseDevice(deviceID)
 	}
+}
+
+// claimStewardAction wins the job's pending -> dispatched compare-and-set and
+// reports whether the action may be sent. On false the device slot has been
+// released: a claim error leaves the entry dispatched for the next cycle, an
+// already-dispatched job is never sent twice, and a closed job's entry is
+// removed so it is never sent.
+func (d *Dispatcher) claimStewardAction(ctx context.Context, deviceID string, exec *script.QueuedExecution, runID, jobID string) bool {
+	claimed, status, err := d.runSink.ClaimActionDispatch(ctx, runID, jobID, time.Now().UTC())
+	switch {
+	case err != nil:
+		// The entry stays dispatched and is returned again on the next cycle.
+		d.logger.Error("Failed to claim steward action for dispatch",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		d.releaseDevice(deviceID)
+		return false
+	case !claimed && status == jobStatusDispatched:
+		// Already sent: the steward rejects a replayed nonce, and the sweep
+		// reports no_result if it never answers. The entry is kept so a late
+		// result can still be linked to its job.
+		d.logger.Warn("Steward action already sent; not re-sending",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"execution_id", logging.SanitizeLogValue(exec.ExecutionID))
+		d.releaseDevice(deviceID)
+		return false
+	case !claimed:
+		// Closed (expired or cancelled) before delivery: never send it.
+		d.logger.Warn("Steward action job is closed; not sending",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+			"job_status", logging.SanitizeLogValue(status))
+		_ = d.queue.CancelExecution(deviceID, exec.ExecutionID) //nolint:errcheck // entry may already be gone
+		d.releaseDevice(deviceID)
+		return false
+	}
+	return true
 }
 
 // reportedStatus names the outcome a result reported.

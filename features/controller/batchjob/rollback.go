@@ -4,8 +4,10 @@ package batchjob
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -125,18 +127,26 @@ func (e *RollingBatchExecutor) dispatchRollbackBatch(ctx context.Context, stewar
 			rollbackTimeout,
 			func(event *controlplaneTypes.Event) {
 				success := event.Type == controlplaneTypes.EventCommandCompleted
-				ch <- stewardDispatchResult{id, success}
+				ch <- stewardDispatchResult{stewardID: id, success: success}
 			},
 			func() {
 				e.logger.Warn("Rollback dispatch timed out for steward",
 					"steward_id", logging.SanitizeLogValue(id))
-				ch <- stewardDispatchResult{id, false}
+				ch <- stewardDispatchResult{stewardID: id, success: false}
 			},
 		)
+		if errors.Is(publishErr, controlplaneInterfaces.ErrStewardLockedDown) {
+			// A refusal, not a failure: nothing was sent, so the step neither
+			// fails nor triggers a rollback for this steward (Issue #5665).
+			e.logger.Warn("refused: locked down; steward skipped",
+				"steward_id", logging.SanitizeLogValue(id))
+			ch <- stewardDispatchResult{stewardID: id, success: true, refused: true}
+			continue
+		}
 		if publishErr != nil {
 			e.logger.Error("Failed to dispatch rollback to steward",
 				"steward_id", logging.SanitizeLogValue(id), "error", publishErr)
-			ch <- stewardDispatchResult{id, false}
+			ch <- stewardDispatchResult{stewardID: id, success: false}
 		}
 	}
 

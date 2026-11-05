@@ -33,6 +33,7 @@ type executorTestCP struct {
 	sent         []*controlplaneTypes.SignedCommand
 	sentByID     map[string]*controlplaneTypes.SignedCommand
 	eventHandler cpinterfaces.EventHandler
+	refuse       map[string]error // steward ID -> error SendCommand returns (e.g. the lockdown refusal)
 }
 
 func newExecutorTestCP() *executorTestCP {
@@ -67,6 +68,10 @@ func (p *executorTestCP) GetStats(_ context.Context) (*controlplaneTypes.Control
 }
 func (p *executorTestCP) SendCommand(_ context.Context, cmd *controlplaneTypes.SignedCommand) error {
 	p.mu.Lock()
+	if err := p.refuse[cmd.Command.StewardID]; err != nil {
+		p.mu.Unlock()
+		return err
+	}
 	p.sent = append(p.sent, cmd)
 	p.sentByID[cmd.Command.ID] = cmd
 	p.mu.Unlock()
@@ -875,4 +880,30 @@ func TestRollingBatchExecutor_ContextCancellation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Execute did not return after context cancellation")
 	}
+}
+
+// A steward the lockdown gate refuses is skipped, not failed: the step completes
+// for the others, no rollback or pause is triggered, and the refused steward
+// receives nothing (Issue #5665).
+func TestRollingBatchExecutor_LockedDownStewardIsSkippedNotFailed(t *testing.T) {
+	f := newExecutorFixture(t, "s-0", "s-locked", "s-2")
+	defer f.cleanup()
+	f.cp.refuse = map[string]error{"s-locked": cpinterfaces.ErrStewardLockedDown}
+
+	job := newPendingJob("job-locked", 10)
+	job.Targets = f.ids
+	require.NoError(t, f.store.CreateBatchJob(f.ctx, job))
+
+	d := f.driveAllSucceed(t)
+	defer d.stop()
+
+	require.NoError(t, f.executor.Execute(f.ctx, job))
+
+	got, err := f.store.GetBatchJob(f.ctx, "job-locked")
+	require.NoError(t, err)
+	assert.Equal(t, business.BatchJobStatusCompleted, got.Status)
+	require.Len(t, got.Steps, 1)
+	assert.Equal(t, business.BatchStepStatusCompleted, got.Steps[0].Status)
+	assert.Empty(t, got.Steps[0].FailedIDs, "a refusal is not a failure")
+	assert.Equal(t, []string{"s-0", "s-2"}, f.cp.sentStewards())
 }

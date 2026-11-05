@@ -4,9 +4,11 @@ package batchjob
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -226,6 +228,9 @@ func (e *RollingBatchExecutor) handleFailedStep(ctx context.Context, job *busine
 type stewardDispatchResult struct {
 	stewardID string
 	success   bool
+	// refused marks a steward the lockdown gate refused (Issue #5665). It is
+	// skipped: success is true so it never counts as a failed steward.
+	refused bool
 }
 
 // dispatchBatch sends CommandSyncConfig to each steward in batch and waits for all
@@ -241,18 +246,26 @@ func (e *RollingBatchExecutor) dispatchBatch(ctx context.Context, batch []string
 			batchStepTimeout,
 			func(event *controlplaneTypes.Event) {
 				success := event.Type == controlplaneTypes.EventCommandCompleted
-				ch <- stewardDispatchResult{id, success}
+				ch <- stewardDispatchResult{stewardID: id, success: success}
 			},
 			func() {
 				e.logger.Warn("Batch dispatch timed out for steward",
 					"steward_id", logging.SanitizeLogValue(id))
-				ch <- stewardDispatchResult{id, false}
+				ch <- stewardDispatchResult{stewardID: id, success: false}
 			},
 		)
+		if errors.Is(publishErr, controlplaneInterfaces.ErrStewardLockedDown) {
+			// A refusal, not a failure: nothing was sent, so the step neither
+			// fails nor triggers a rollback for this steward (Issue #5665).
+			e.logger.Warn("refused: locked down; steward skipped",
+				"steward_id", logging.SanitizeLogValue(id))
+			ch <- stewardDispatchResult{stewardID: id, success: true, refused: true}
+			continue
+		}
 		if publishErr != nil {
 			e.logger.Error("Failed to dispatch to steward",
 				"steward_id", logging.SanitizeLogValue(id), "error", publishErr)
-			ch <- stewardDispatchResult{id, false}
+			ch <- stewardDispatchResult{stewardID: id, success: false}
 		}
 	}
 

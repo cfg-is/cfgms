@@ -88,6 +88,9 @@ const (
 	ResultCodeFailed         = "failed"
 	ResultCodeExpired        = "expired"
 	ResultCodeNoResult       = "no_result"
+	// ResultCodeRefused is recorded by the controller when the lockdown gate
+	// refused the command: nothing ran, and it is not a steward failure.
+	ResultCodeRefused = "refused"
 )
 
 // RunRecord is the durable tracking record for a multi-steward script dispatch.
@@ -1055,6 +1058,21 @@ func (m *Manager) RecordActionResult(ctx context.Context, runID, jobID, executio
 	return m.RecordJobResult(ctx, runID, jobID, executionID, code != ResultCodeOK, "", "", exitCode)
 }
 
+// RecordJobRefused ends a job the lockdown gate refused. The job records result
+// code "refused" and the run advances as for a failed job; no steward ran
+// anything. The code is assigned here only: NormalizeResultCode still maps a
+// steward-reported "refused" to failed.
+func (m *Manager) RecordJobRefused(ctx context.Context, runID, jobID, executionID string) error {
+	changed, err := m.store.UpdateJobResultCode(jobID, ResultCodeRefused)
+	if err != nil {
+		return fmt.Errorf("record refused job: update job %s: %w", jobID, err)
+	}
+	if !changed {
+		return m.alreadyTerminal(runID, jobID)
+	}
+	return m.RecordJobResult(ctx, runID, jobID, executionID, true, "", ResultCodeDetail(ResultCodeRefused), 1)
+}
+
 // NormalizeResultCode maps a steward-reported result code to the recorded set.
 // The codes a steward reports are kept; anything else (including empty) is failed.
 func NormalizeResultCode(code string) string {
@@ -1069,6 +1087,8 @@ func ResultCodeDetail(code string) string {
 		return "expired, not run"
 	case ResultCodeNoResult:
 		return "sent, no result reported"
+	case ResultCodeRefused:
+		return "refused: locked down"
 	}
 	return ""
 }

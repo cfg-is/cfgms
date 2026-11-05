@@ -100,6 +100,29 @@ func rollbackSynthesis(manager *Manager, executionQueue *scriptmodule.ExecutionQ
 	return errors.Join(errs...)
 }
 
+// enqueue queues qe for deviceID and records it in progress. An execution the
+// queue already holds (ErrDuplicateExecution) is not an error and is not
+// recorded, so a rollback never cancels an entry this synthesis did not queue.
+func (p *synthesisProgress) enqueue(executionQueue *scriptmodule.ExecutionQueue, deviceID string, qe *scriptmodule.QueuedExecution) error {
+	if err := executionQueue.QueueExecution(deviceID, qe); err != nil {
+		if errors.Is(err, scriptmodule.ErrDuplicateExecution) {
+			return nil
+		}
+		return err
+	}
+	p.queued = append(p.queued, queuedRef{deviceID: deviceID, executionID: qe.ExecutionID})
+	return nil
+}
+
+// stampOperatorPrincipal records the operator who created the run on a queue
+// entry's metadata, so the dispatcher sends it with the operator-origin marker
+// (Issue #5665). A run with no operator (createdBy empty) is left unmarked.
+func stampOperatorPrincipal(metadata map[string]interface{}, createdBy string) {
+	if createdBy != "" {
+		metadata[scriptmodule.MetaOperatorPrincipal] = createdBy
+	}
+}
+
 // SynthesizeScriptRun resolves matching devices from the fleet and creates a
 // RunRecord plus one JobRecord per device, each backed by a QueuedExecution.
 // It returns the new run ID so callers can redirect to GET /runs/{run_id}.
@@ -216,6 +239,7 @@ func SynthesizeScriptRunForDevices(
 		if idempotent {
 			meta["idempotent"] = true
 		}
+		stampOperatorPrincipal(meta, createdBy)
 		if len(requiredAPIScope) > 0 {
 			meta["required_api_scope"] = requiredAPIScope
 		}
@@ -228,13 +252,9 @@ func SynthesizeScriptRunForDevices(
 			Parameters:    resolved,
 			Metadata:      meta,
 		}
-		if err := executionQueue.QueueExecution(device.ID, qe); err != nil {
-			if errors.Is(err, scriptmodule.ErrDuplicateExecution) {
-				continue
-			}
+		if err := progress.enqueue(executionQueue, device.ID, qe); err != nil {
 			return "", rollbackSynthesis(manager, executionQueue, runID, progress, fmt.Errorf("synthesize script run: enqueue for device %s: %w", device.ID, err))
 		}
-		progress.queued = append(progress.queued, queuedRef{deviceID: device.ID, executionID: executionID})
 	}
 
 	if err := manager.store.UpdateRunStatus(runID, RunStatusRunning); err != nil {
@@ -363,6 +383,7 @@ func SynthesizeCommandRunForDevices(
 			"job_id":                jobID,
 			"inline_script_content": inlineContent,
 		}
+		stampOperatorPrincipal(metadata, createdBy)
 		if commandSignature != nil {
 			metadata["signature_algorithm"] = commandSignature.Algorithm
 			metadata["signature_value"] = commandSignature.Value
@@ -390,13 +411,9 @@ func SynthesizeCommandRunForDevices(
 			Metadata:    metadata,
 			Timeout:     timeout,
 		}
-		if err := executionQueue.QueueExecution(device.ID, qe); err != nil {
-			if errors.Is(err, scriptmodule.ErrDuplicateExecution) {
-				continue
-			}
+		if err := progress.enqueue(executionQueue, device.ID, qe); err != nil {
 			return "", rollbackSynthesis(manager, executionQueue, runID, progress, fmt.Errorf("synthesize command run: enqueue for device %s: %w", device.ID, err))
 		}
-		progress.queued = append(progress.queued, queuedRef{deviceID: device.ID, executionID: executionID})
 	}
 
 	if err := manager.store.UpdateRunStatus(runID, RunStatusRunning); err != nil {
@@ -485,6 +502,7 @@ func SynthesizeActionRunForDevices(
 			"nonce":           nonce,
 			"expires_at":      expiresAt.UTC().Format(time.RFC3339),
 		}
+		stampOperatorPrincipal(metadata, createdBy)
 		for key, value := range map[string]string{
 			"signature_algorithm":         commandSignature.Algorithm,
 			"signature_value":             commandSignature.Value,
@@ -510,13 +528,9 @@ func SynthesizeActionRunForDevices(
 			ExpiresAt:   now.Add(scriptmodule.StewardActionTTL),
 			Metadata:    metadata,
 		}
-		if err := executionQueue.QueueExecution(device.ID, qe); err != nil {
-			if errors.Is(err, scriptmodule.ErrDuplicateExecution) {
-				continue
-			}
+		if err := progress.enqueue(executionQueue, device.ID, qe); err != nil {
 			return "", rollbackSynthesis(manager, executionQueue, runID, progress, fmt.Errorf("synthesize action run: enqueue for device %s: %w", device.ID, err))
 		}
-		progress.queued = append(progress.queued, queuedRef{deviceID: device.ID, executionID: executionID})
 	}
 
 	if err := manager.store.UpdateRunStatus(runID, RunStatusRunning); err != nil {

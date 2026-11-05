@@ -1919,7 +1919,7 @@ func TestDispatcher_StewardAction_SendsSignedStewardActionWithEnvelopeIntact(t *
 			// The stored envelope equals the params the steward receives.
 			for key, want := range stored.Metadata {
 				switch key {
-				case "workflow_run_id", "job_id", "tenant_id", "created_by":
+				case "workflow_run_id", "job_id", "tenant_id", "created_by", script.MetaOperatorPrincipal:
 					assert.NotContains(t, p, key, "run linkage is not forwarded to the steward")
 				case "targets":
 					assert.Equal(t, []string{device, "steward-other"}, p["targets"])

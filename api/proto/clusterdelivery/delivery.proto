@@ -42,6 +42,14 @@ service DeliveryService {
 message DeliverCommandRequest {
   string steward_id = 1;
   cfgms.transport.Command command = 2;
+
+  // operator_origin is true when the sending node's caller marked the command
+  // as started by an authenticated operator. The receiving node restores the
+  // marker only for a caller that passed the peer-node authorization.
+  bool operator_origin = 3;
+
+  // operator_principal names the operator when operator_origin is true.
+  string operator_principal = 4;
 }
 
 // DeliverCommandResponse reports whether the receiving node's local registry

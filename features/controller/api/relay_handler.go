@@ -43,7 +43,22 @@ type RelayHandler struct {
 	apiHandler   http.Handler
 	signer       signature.Signer // optional; nil = unsigned commands (test mode)
 	logger       logging.Logger
+	// origins stamps the operator-origin marker onto a relay_response whose
+	// execution an operator started and which is still open (Issue #5665). Nil
+	// never stamps, so every relay_response is then treated as automated.
+	origins RelayOriginSource
 }
+
+// RelayOriginSource decides whether a relay_response belongs to an open
+// execution an operator started on that steward. The dispatcher implements it.
+// It returns ctx unchanged when the execution is steward-initiated, a workflow
+// run, or closed.
+type RelayOriginSource interface {
+	OperatorOriginForRelay(ctx context.Context, deviceID, executionID string) context.Context
+}
+
+// SetRelayOriginSource binds the source of the operator-origin marker.
+func (h *RelayHandler) SetRelayOriginSource(src RelayOriginSource) { h.origins = src }
 
 // NewRelayHandler creates a RelayHandler wired to the given control plane, run
 // manager, and API HTTP handler. signer may be nil in test or unsecured mode.
@@ -231,11 +246,17 @@ func (h *RelayHandler) sendRelayResponse(
 		return fmt.Errorf("relay: sign response: %w", err)
 	}
 
+	// The marker is never taken from the relay request itself: it comes from the
+	// controller's record of who started the execution.
+	if h.origins != nil {
+		ctx = h.origins.OperatorOriginForRelay(ctx, targetSteward, executionID)
+	}
+
 	if err := h.controlPlane.SendCommand(ctx, signed); err != nil {
 		h.logger.Error("relay: failed to send relay response",
 			"target_steward", logging.SanitizeLogValue(targetSteward),
 			"execution_id", logging.SanitizeLogValue(executionID),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		return fmt.Errorf("relay: send command: %w", err)
 	}
 
