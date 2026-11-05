@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -200,37 +201,19 @@ func BuildWatchEvent(subject, kind, observedAt string, logSeq int64) (interfaces
 // (the sole access-control axis, ADR-023 §111-119). Entity and drift events are
 // filtered by it; edge events skip tenant filtering (edges store no owning_tenant).
 func WatchFilterMatches(ev interfaces.WatchEvent, tenantPath string, f interfaces.WatchFilter) bool {
-	if len(f.Kinds) > 0 {
-		matched := false
-		for _, k := range f.Kinds {
-			if k == ev.EventKind {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return false
-		}
+	if len(f.Kinds) > 0 && !slices.Contains(f.Kinds, ev.EventKind) {
+		return false
 	}
 
-	if f.TenantFilter != "" && ev.EventKind != "edge-updated" {
-		if !interfaces.NewTenantCut(f.TenantFilter, f.TenantSubtreeIDs).Visible(tenantPath) {
-			return false
-		}
+	if f.TenantFilter != "" && ev.EventKind != "edge-updated" &&
+		!interfaces.NewTenantCut(f.TenantFilter, f.TenantSubtreeIDs).Visible(tenantPath) {
+		return false
 	}
 
-	if len(f.EIDs) > 0 {
-		subj := ev.Subject.String()
-		matched := false
-		for _, eid := range f.EIDs {
-			if eid.String() == subj {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return false
-		}
+	if len(f.EIDs) > 0 && !slices.ContainsFunc(f.EIDs, func(eid interfaces.EIDRef) bool {
+		return eid.String() == ev.Subject.String()
+	}) {
+		return false
 	}
 
 	return true

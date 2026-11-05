@@ -51,77 +51,118 @@ func GetNeighborhood(
 	}
 
 	// BFS over the edge projection, bounded in nodes and in projection rows.
-	type edgeKey struct{ from, to, edgeType string }
-	edgeMap := make(map[edgeKey]*types.Edge)
-	var edgeOrder []*types.Edge
-	seenRows := make(map[[4]string]struct{})
-	rowCount := 0
-	truncated := false
-	visited := map[string]bool{eid.String(): true}
-	order := []string{eid.String()}
-	frontier := []string{eid.String()}
-
-walk:
-	for h := 0; h < depth && len(frontier) > 0; h++ {
-		var nextFrontier []string
-		for start := 0; start < len(frontier); start += NeighborhoodChunk {
-			chunk := frontier[start:min(start+NeighborhoodChunk, len(frontier))]
-			remaining := interfaces.MaxNeighborhoodEdges - rowCount
-			hopEdges, err := hop(ctx, chunk, remaining+1)
-			if err != nil {
-				return nil, err
-			}
-			for _, e := range hopEdges {
-				if rowCount >= interfaces.MaxNeighborhoodEdges {
-					truncated = true
-					break walk
-				}
-				// Determine the peer node relative to what we traversed from.
-				peer := PeerSubject(e, chunk, direction)
-				if peer != "" && !visited[peer] {
-					if len(visited) >= interfaces.MaxNeighborhoodNodes {
-						truncated = true
-						continue
-					}
-					visited[peer] = true
-					order = append(order, peer)
-					nextFrontier = append(nextFrontier, peer)
-				}
-				// A projection row can come back from two chunks, or again on a
-				// later hop; it counts and merges once.
-				rk := [4]string{e.From.String(), e.To.String(), e.Type, e.Sources[0].Source}
-				if _, dup := seenRows[rk]; dup {
-					continue
-				}
-				seenRows[rk] = struct{}{}
-				rowCount++
-				k := edgeKey{from: e.From.String(), to: e.To.String(), edgeType: e.Type}
-				if existing, ok := edgeMap[k]; ok {
-					existing.Sources = append(existing.Sources, e.Sources...)
-				} else {
-					edgeMap[k] = e
-					edgeOrder = append(edgeOrder, e)
-				}
-			}
-		}
-		frontier = nextFrontier
+	w := newWalk(eid)
+	if err := w.run(ctx, depth, direction, hop); err != nil {
+		return nil, err
 	}
+	edges := w.edgesWithinNodes()
 
-	// Only edges with both endpoints in the returned node set survive: an edge to
-	// a peer dropped at the node cap, or visited via the other direction, is out.
-	edges := make([]*types.Edge, 0, len(edgeOrder))
-	for _, e := range edgeOrder {
-		if visited[e.From.String()] && visited[e.To.String()] {
-			edges = append(edges, e)
-		}
-	}
-
-	nodes, err := loadNeighborhoodNodes(ctx, db, d, order)
+	nodes, err := loadNeighborhoodNodes(ctx, db, d, w.order)
 	if err != nil {
 		return nil, err
 	}
 
-	return &types.Neighborhood{Root: eid, Nodes: nodes, Edges: edges, Truncated: truncated}, nil
+	return &types.Neighborhood{Root: eid, Nodes: nodes, Edges: edges, Truncated: w.truncated}, nil
+}
+
+// walk is the state of one breadth-first neighborhood traversal.
+type walk struct {
+	frontier  []string
+	visited   map[string]bool
+	order     []string
+	edgeMap   map[edgeKey]*types.Edge
+	edgeOrder []*types.Edge
+	seenRows  map[[4]string]struct{}
+	rowCount  int
+	truncated bool
+	// stop is set when the projection-row cap is reached: the walk ends.
+	stop bool
+}
+
+type edgeKey struct{ from, to, edgeType string }
+
+func newWalk(root interfaces.EIDRef) *walk {
+	return &walk{
+		frontier: []string{root.String()},
+		visited:  map[string]bool{root.String(): true},
+		order:    []string{root.String()},
+		edgeMap:  make(map[edgeKey]*types.Edge),
+		seenRows: make(map[[4]string]struct{}),
+	}
+}
+
+// absorb folds one chunk's hop edges into the walk and returns the newly
+// reached peers, which form the next frontier.
+func (w *walk) absorb(hopEdges []*types.Edge, chunk []string, direction types.TraversalDirection) []string {
+	var next []string
+	for _, e := range hopEdges {
+		if w.rowCount >= interfaces.MaxNeighborhoodEdges {
+			w.truncated = true
+			w.stop = true
+			return next
+		}
+		// Determine the peer node relative to what we traversed from.
+		peer := PeerSubject(e, chunk, direction)
+		if peer != "" && !w.visited[peer] {
+			if len(w.visited) >= interfaces.MaxNeighborhoodNodes {
+				w.truncated = true
+				continue
+			}
+			w.visited[peer] = true
+			w.order = append(w.order, peer)
+			next = append(next, peer)
+		}
+		w.addEdge(e)
+	}
+	return next
+}
+
+// addEdge records a projection row. A row can come back from two chunks, or
+// again on a later hop; it counts and merges once.
+func (w *walk) addEdge(e *types.Edge) {
+	rk := [4]string{e.From.String(), e.To.String(), e.Type, e.Sources[0].Source}
+	if _, dup := w.seenRows[rk]; dup {
+		return
+	}
+	w.seenRows[rk] = struct{}{}
+	w.rowCount++
+	k := edgeKey{from: e.From.String(), to: e.To.String(), edgeType: e.Type}
+	if existing, ok := w.edgeMap[k]; ok {
+		existing.Sources = append(existing.Sources, e.Sources...)
+		return
+	}
+	w.edgeMap[k] = e
+	w.edgeOrder = append(w.edgeOrder, e)
+}
+
+// run walks up to depth hops from the root.
+func (w *walk) run(ctx context.Context, depth int, direction types.TraversalDirection, hop HopFunc) error {
+	for h := 0; h < depth && len(w.frontier) > 0 && !w.stop; h++ {
+		var next []string
+		for start := 0; start < len(w.frontier) && !w.stop; start += NeighborhoodChunk {
+			chunk := w.frontier[start:min(start+NeighborhoodChunk, len(w.frontier))]
+			hopEdges, err := hop(ctx, chunk, interfaces.MaxNeighborhoodEdges-w.rowCount+1)
+			if err != nil {
+				return err
+			}
+			next = append(next, w.absorb(hopEdges, chunk, direction)...)
+		}
+		w.frontier = next
+	}
+	return nil
+}
+
+// edgesWithinNodes keeps only edges with both endpoints in the returned node
+// set: an edge to a peer dropped at the node cap, or visited via the other
+// direction, is out.
+func (w *walk) edgesWithinNodes() []*types.Edge {
+	edges := make([]*types.Edge, 0, len(w.edgeOrder))
+	for _, e := range w.edgeOrder {
+		if w.visited[e.From.String()] && w.visited[e.To.String()] {
+			edges = append(edges, e)
+		}
+	}
+	return edges
 }
 
 // loadNeighborhoodNodes loads the kind and owning tenant of every subject in
