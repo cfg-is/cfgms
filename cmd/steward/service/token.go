@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -39,6 +41,22 @@ func platformTokenFilePath() string {
 // TokenFilePath returns the path of the registration token file.
 func TokenFilePath() string {
 	return platformTokenFilePath()
+}
+
+// purgeRegistrationToken removes the registration token file when purge is
+// true. A plain uninstall keeps it so an uninstall and reinstall cycle (image
+// preparation) still has the token. A missing file is not an error. The error
+// names the path, never the token.
+func purgeRegistrationToken(purge bool) error {
+	if !purge {
+		return nil
+	}
+	path := platformTokenFilePath()
+	fmt.Printf("Removing %s...\n", path)
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("failed to remove registration token file %s: %w", path, err)
+	}
+	return nil
 }
 
 // TokenFileErrorKind classifies why a registration token file was refused, so a

@@ -63,6 +63,9 @@ directory that is itself a symlink.
 ## What it keeps
 
 - The installed binary and the service definition and the registration token file.
+  The token file is kept after a successful registration so clones can register
+  again, and a plain `uninstall` keeps it so an uninstall and reinstall cycle still
+  has it. Only `cfgms-steward uninstall --purge` deletes it.
 - The trust anchor: the install-pinned CA file (`/etc/cfgms/controller-ca.crt`, or
   `%ProgramData%\cfgms\controller-ca.crt` on Windows). A compile-baked trust anchor
   needs nothing.

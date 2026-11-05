@@ -485,43 +485,56 @@ func (m *windowsManager) Uninstall(purge bool) error {
 		_ = existing.Close()
 	}
 
+	if err := purgeRegistrationToken(purge); err != nil {
+		return err
+	}
+
 	if purge {
-		// Launcher binary + versioned layout (versions\, state.json and the
-		// legacy pointer files) for launcher-managed installs. Remove the
-		// specific known paths only — windowsInstallDir also holds MSI-owned
-		// files (cfgms-steward.exe, modules\), so never RemoveAll the root.
-		if _, err := os.Stat(windowsLauncherPath); err == nil {
-			fmt.Printf("Removing %s...\n", windowsLauncherPath)
-			if err := os.Remove(windowsLauncherPath); err != nil {
-				return fmt.Errorf("failed to remove launcher: %w", err)
-			}
-		}
-		versionsDir := filepath.Join(windowsInstallDir, "versions")
-		if _, err := os.Stat(versionsDir); err == nil {
-			fmt.Printf("Removing %s...\n", versionsDir)
-			if err := os.RemoveAll(versionsDir); err != nil {
-				return fmt.Errorf("failed to remove launcher versions dir: %w", err)
-			}
-		}
-		for _, stateFile := range []string{"state.json", "current.txt", "previous.txt"} {
-			p := filepath.Join(windowsInstallDir, stateFile)
-			if _, err := os.Stat(p); err == nil {
-				fmt.Printf("Removing %s...\n", p)
-				if err := os.Remove(p); err != nil {
-					return fmt.Errorf("failed to remove launcher state file: %w", err)
-				}
-			}
-		}
-		// Legacy bare-steward binary (pre-launcher direct-service installs).
-		if _, err := os.Stat(windowsInstallPath); err == nil {
-			fmt.Printf("Removing %s...\n", windowsInstallPath)
-			if err := os.Remove(windowsInstallPath); err != nil {
-				return fmt.Errorf("failed to remove binary: %w", err)
-			}
+		if err := m.purgeInstalledBinaries(); err != nil {
+			return err
 		}
 	}
 
 	fmt.Println("CFGMS Steward uninstalled.")
+	return nil
+}
+
+// purgeInstalledBinaries removes the launcher binary, its versioned staging
+// layout and the legacy bare-steward binary. Uninstall calls it on purge.
+func (m *windowsManager) purgeInstalledBinaries() error {
+	// Launcher binary + versioned layout (versions\, state.json and the
+	// legacy pointer files) for launcher-managed installs. Remove the
+	// specific known paths only — windowsInstallDir also holds MSI-owned
+	// files (cfgms-steward.exe, modules\), so never RemoveAll the root.
+	if _, err := os.Stat(windowsLauncherPath); err == nil {
+		fmt.Printf("Removing %s...\n", windowsLauncherPath)
+		if err := os.Remove(windowsLauncherPath); err != nil {
+			return fmt.Errorf("failed to remove launcher: %w", err)
+		}
+	}
+	versionsDir := filepath.Join(windowsInstallDir, "versions")
+	if _, err := os.Stat(versionsDir); err == nil {
+		fmt.Printf("Removing %s...\n", versionsDir)
+		if err := os.RemoveAll(versionsDir); err != nil {
+			return fmt.Errorf("failed to remove launcher versions dir: %w", err)
+		}
+	}
+	for _, stateFile := range []string{"state.json", "current.txt", "previous.txt"} {
+		p := filepath.Join(windowsInstallDir, stateFile)
+		if _, err := os.Stat(p); err == nil {
+			fmt.Printf("Removing %s...\n", p)
+			if err := os.Remove(p); err != nil {
+				return fmt.Errorf("failed to remove launcher state file: %w", err)
+			}
+		}
+	}
+	// Legacy bare-steward binary (pre-launcher direct-service installs).
+	if _, err := os.Stat(windowsInstallPath); err == nil {
+		fmt.Printf("Removing %s...\n", windowsInstallPath)
+		if err := os.Remove(windowsInstallPath); err != nil {
+			return fmt.Errorf("failed to remove binary: %w", err)
+		}
+	}
 	return nil
 }
 
