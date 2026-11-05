@@ -144,6 +144,7 @@ For each story, run all 10 checks. A story must pass ALL checks to be promoted.
   - Specific function signatures or interface methods to implement (read the real signature with `find_symbol`)
   - Edge cases the dev agent should handle
 - If a referenced file doesn't exist, check if another story creates it (dependency) or if the path is wrong (fix it)
+- **Duplication risk:** for each new function, type or handler the story asks for, grep for existing code that does the same job. If it exists, rewrite the notes to extend or call it. If the story would leave two copies of the same logic in files it touches, add an AC that removes the duplicate. Return the story for revision only when the deduplication would cross into untouched packages and the story neither scopes it nor states a justification for the copy.
 
 ### 3. Scope Correction
 

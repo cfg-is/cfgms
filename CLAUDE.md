@@ -328,6 +328,10 @@ docs/          # Documentation
 - Manual certificate loading — use `pkg/cert.LoadTLSCertificate()`
 - Committing test artifacts — use `git add <specific files>`
 - Logging unsanitized input — use `logging.SanitizeLogValue()`
+- Duplicating existing logic — extend or call the existing code, or move the
+  shared part into `pkg/` or a shared feature package. A copy needs a solid
+  justification (for example a deliberate build boundary or a real SQL dialect
+  difference), written in a comment at the copy that names the original.
 
 ### Code Navigation (grep + Read)
 

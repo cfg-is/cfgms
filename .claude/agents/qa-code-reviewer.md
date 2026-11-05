@@ -28,7 +28,7 @@ Stay narrow. Your strength is pattern detection in test files for the anti-patte
 
 ## What You Review
 
-Get the list of changed files with `git diff --name-only develop...HEAD`, then examine all changed files. For each test file, check:
+Get the list of changed files with `git diff --name-only develop...HEAD`, then examine all changed files. For each changed file, check:
 
 ### BLOCKING Issues (Must Fix Before Merge)
 
@@ -57,6 +57,8 @@ Get the list of changed files with `git diff --name-only develop...HEAD`, then e
 7. **Test Coverage Gaps**: New functions/methods without corresponding test coverage.
 
 8. **Table-Driven Test Patterns**: Multiple similar test cases not using table-driven patterns.
+
+9. **Duplicated Logic**: New production code that repeats an existing function or block (same structure, renamed identifiers) with no justification comment naming the original. Report both locations as file:line.
 
 ## Output Format
 
