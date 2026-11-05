@@ -7,6 +7,7 @@ package gate
 
 import (
 	"fmt"
+	"math"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -41,7 +42,10 @@ func num(v float64) string { return fmt.Sprintf("%g", v) }
 
 // Rule1Aggregate fails for each of hotspot count, aggregate excess and P95
 // Halstead effort that is higher in current than in previous (the merge-base
-// tree).
+// tree). When both sides carry a full function list the P95 effort threshold
+// is max(P95(previous), P95(previous restricted to identities also in
+// current)), so deleting functions cannot raise current P95 above it; see
+// p95Threshold.
 func Rule1Aggregate(previous, current metrics.Measurement) []Finding {
 	b, c := previous.Aggregate, current.Aggregate
 	var out []Finding
@@ -52,8 +56,43 @@ func Rule1Aggregate(previous, current metrics.Measurement) []Finding {
 	}
 	add("hotspots", float64(b.Hotspots), float64(c.Hotspots))
 	add("aggregate_excess", float64(b.AggregateExcess), float64(c.AggregateExcess))
-	add("p95_effort", b.P95Effort, c.P95Effort)
+	if base, cur, ok := p95Threshold(previous, current); ok {
+		add("p95_effort", base, cur)
+	} else {
+		add("p95_effort", b.P95Effort, c.P95Effort)
+	}
 	return out
+}
+
+// p95Threshold returns the P95 effort threshold and the current P95, both
+// computed from the function lists. ok is false when either side lacks a full
+// function list (empty, or hotspots form), where the caller compares the
+// precomputed aggregates instead.
+func p95Threshold(previous, current metrics.Measurement) (base, cur float64, ok bool) {
+	if len(previous.Functions) == 0 || len(current.Functions) == 0 ||
+		previous.Form == metrics.FormHotspots || current.Form == metrics.FormHotspots {
+		return 0, 0, false
+	}
+	exists := index(current.Functions)
+	all := make([]float64, 0, len(previous.Functions))
+	kept := make([]float64, 0, len(previous.Functions))
+	for _, f := range previous.Functions {
+		all = append(all, f.Effort)
+		if _, in := exists[f.Identity]; in {
+			kept = append(kept, f.Effort)
+		}
+	}
+	curEff := make([]float64, 0, len(current.Functions))
+	for _, f := range current.Functions {
+		curEff = append(curEff, f.Effort)
+	}
+	base = math.Max(p95(all), p95(kept))
+	return base, p95(curEff), true
+}
+
+func p95(efforts []float64) float64 {
+	sort.Float64s(efforts)
+	return metrics.NearestRank(efforts, 0.95)
 }
 
 // Rule2HotspotGrowth fails for every identity present in both measurements
