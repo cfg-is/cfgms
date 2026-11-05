@@ -10,6 +10,7 @@ import (
 	"go/scanner"
 	"go/token"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -34,12 +35,14 @@ func duplicationCmd(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		// A failed write to stderr cannot change the outcome: this path
 		// already exits with exitError.
-		errOut.printf("complexity: duplication: missing verb (want: report)\n")
+		errOut.printf("complexity: duplication: missing verb (want: report, check)\n")
 		return exitError
 	}
 	switch args[0] {
 	case "report":
 		return duplicationReportCmd(args[1:], stdout, stderr)
+	case "check":
+		return duplicationCheckCmd(args[1:], stdout, stderr)
 	}
 	errOut.printf("complexity: duplication: unknown verb %q\n", args[0])
 	return exitError
@@ -71,18 +74,7 @@ func duplicationReport(o duplicationReportOptions, stdout, stderr *printer) int 
 			stderr.printf("complexity: WARN: could not resolve origin/develop; base_commit recorded as unknown\n")
 		}
 	}
-	var files []detector.File
-	prodLines := 0
-	err := analyzer.WalkProduction(os.DirFS(o.root), []string{"."}, func(p string, src []byte) error {
-		files = append(files, detector.File{Path: p, Src: src})
-		prodLines += countSourceLines(src)
-		return nil
-	})
-	if err != nil {
-		stderr.printf("complexity: %v\n", ioReason(err))
-		return exitError
-	}
-	res, err := detector.Detect(files, o.threshold)
+	files, prodLines, res, err := measureDuplication(os.DirFS(o.root), o.threshold)
 	if err != nil {
 		stderr.printf("complexity: %v\n", err)
 		return exitError
@@ -96,6 +88,26 @@ func duplicationReport(o duplicationReportOptions, stdout, stderr *printer) int 
 	printDuplicationSummary(stdout, rep)
 	stdout.printf("metric file: %s\n", filepath.ToSlash(o.out))
 	return exitOK
+}
+
+// measureDuplication walks the production population of fsys and runs the
+// detector over it. It is the one measurement step shared by report and check.
+func measureDuplication(fsys fs.FS, threshold int) ([]detector.File, int, detector.Result, error) {
+	var files []detector.File
+	prodLines := 0
+	err := analyzer.WalkProduction(fsys, []string{"."}, func(p string, src []byte) error {
+		files = append(files, detector.File{Path: p, Src: src})
+		prodLines += countSourceLines(src)
+		return nil
+	})
+	if err != nil {
+		return nil, 0, detector.Result{}, ioReason(err)
+	}
+	res, err := detector.Detect(files, threshold)
+	if err != nil {
+		return nil, 0, detector.Result{}, err
+	}
+	return files, prodLines, res, nil
 }
 
 func buildDuplicationReport(o duplicationReportOptions, res detector.Result, files []detector.File, prodLines int) dupmetrics.Report {
