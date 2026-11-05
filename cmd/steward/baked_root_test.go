@@ -15,8 +15,10 @@ import (
 	"go/parser"
 	"go/token"
 	"math/big"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -162,7 +164,11 @@ func TestBakedRootSourceReadsNothingExternal(t *testing.T) {
 
 func buildStewardForStatus(t *testing.T, ldflags string) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "steward-under-test")
+	name := "steward-under-test"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	bin := filepath.Join(t.TempDir(), name)
 	args := []string{"build", "-o", bin}
 	if ldflags != "" {
 		args = append(args, "-ldflags", ldflags)
@@ -178,13 +184,17 @@ func statusRootLine(t *testing.T, bin string) string {
 	t.Helper()
 	cmd := exec.Command(bin, "status")
 	cmd.Env = []string{} // empty environment
-	out, _ := cmd.CombinedOutput()
+	if runtime.GOOS == "windows" {
+		// Windows processes cannot start without SystemRoot; it carries no baked-root input.
+		cmd.Env = []string{"SystemRoot=" + os.Getenv("SystemRoot")}
+	}
+	out, runErr := cmd.CombinedOutput()
 	for _, l := range strings.Split(string(out), "\n") {
 		if strings.Contains(l, "Root CA:") {
 			return strings.TrimSpace(strings.SplitN(l, "Root CA:", 2)[1])
 		}
 	}
-	t.Fatalf("no Root CA line in status output: %s", out)
+	t.Fatalf("no Root CA line in status output: %s (run error: %v)", out, runErr)
 	return ""
 }
 
