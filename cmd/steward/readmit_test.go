@@ -40,6 +40,7 @@ type readmitTestController struct {
 
 	completeMode string // "issue" | "queue" | "reject"
 	unknown      bool   // challenge answers 404
+	revoked      bool   // challenge answers 403: the identity is banned
 	registerCode int    // status /register answers with
 
 	mu         sync.Mutex
@@ -76,6 +77,10 @@ func newReadmitTestController(t *testing.T, completeMode string) *readmitTestCon
 		case strings.HasSuffix(r.URL.Path, "/refresh/challenge"):
 			if c.unknown {
 				http.Error(w, "device not found", http.StatusNotFound)
+				return
+			}
+			if c.revoked {
+				http.Error(w, "device is revoked", http.StatusForbidden)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -554,4 +559,44 @@ func TestClearReadmissionState_DropsPaceAndFiledRequest(t *testing.T) {
 	_, ok := loadReadmitPace(dir)
 	assert.False(t, ok)
 	assert.False(t, hasOpenReadmission(dir))
+}
+
+// TestRunSteward_BannedIdentityIsRefusedOutrightAndRetriesSlowly guards Issue #5667:
+// a banned (revoked) identity is refused at the challenge, so nothing is submitted
+// to the refresh queue and no registration is attempted, and the steward keeps
+// asking at the slow rejected-readmission interval rather than in a hot loop.
+func TestRunSteward_BannedIdentityIsRefusedOutrightAndRetriesSlowly(t *testing.T) {
+	t.Setenv("CFGMS_LOG_DIR", t.TempDir())
+	saved := ControllerURL
+	ControllerURL = "https://ctrl.test:4433"
+	defer func() { ControllerURL = saved }()
+	prevRetry := rejectedReadmissionRetry
+	rejectedReadmissionRetry = 200 * time.Millisecond
+	defer func() { rejectedReadmissionRetry = prevRetry }()
+
+	controller := newReadmitTestController(t, "issue")
+	controller.revoked = true
+	id := &StewardIdentity{StewardID: "steward-banned", TenantID: "tenant-b", TransportAddress: "127.0.0.1:1", ServerCertPEM: "server"}
+	ks := newReadmitKeyStore(t)
+	dir := t.TempDir()
+
+	var attempts atomic.Int32
+	banned := connectFuncT(func(context.Context, string, string, TrustSource, string, identity.KeyStore, bool, logging.Logger) (*client.TransportClient, error) {
+		attempts.Add(1)
+		return nil, fmt.Errorf("re-admission: %w", readmit(t, controller, dir, id, ks))
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, runStewardInternal(ctx, "tok_test_banned", "", "", banned))
+
+	got := attempts.Load()
+	assert.GreaterOrEqual(t, got, int32(2), "a banned steward keeps asking")
+	assert.LessOrEqual(t, got, int32(8), "at the slow interval, never a hot loop")
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	assert.Zero(t, controller.completes, "nothing is submitted to the refresh queue")
+	assert.Empty(t, controller.claims)
+	assert.Nil(t, controller.pendingCSR)
+	assert.Zero(t, controller.registers.Load(), "a banned steward does not register as a new device")
 }

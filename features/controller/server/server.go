@@ -510,8 +510,15 @@ type tamperAlarmRelay struct {
 	logger   logging.Logger
 }
 
-// Set binds the API server that performs the transition, audit and notification.
-func (r *tamperAlarmRelay) Set(s *api.Server) { r.target.Store(s) }
+// Set binds the API server that performs the transition, audit and notification,
+// and the lockdown that tells a connected steward when an operator restores it.
+func (r *tamperAlarmRelay) Set(s *api.Server) {
+	r.target.Store(s)
+	if r.lockdown != nil {
+		// Issue #5667: restore sends the unlocked tamper state to a connected steward.
+		s.SetTamperStateNotifier(r.lockdown)
+	}
+}
 
 // Handle forwards the alarm to the bound server.
 func (r *tamperAlarmRelay) Handle(stewardID string, reasons []controlplaneTypes.HealthReason) {

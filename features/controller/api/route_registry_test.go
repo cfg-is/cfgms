@@ -344,6 +344,8 @@ var goldenRouteTable = []string{
 	"POST /api/v1/stewards/{id}/scripts/executions/{execution_id}/retry",
 	"POST /api/v1/stewards/{id}/services/{name}/actions",
 	"POST /api/v1/stewards/{id}/tags",
+	"POST /api/v1/stewards/{id}/tamper/ban",
+	"POST /api/v1/stewards/{id}/tamper/restore",
 	"POST /api/v1/tenants",
 	"POST /api/v1/tenants/{id}/access-grants",
 	"POST /api/v1/tenants/{id}/break-glass",

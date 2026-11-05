@@ -65,6 +65,20 @@ var DefaultPermissions = []*common.Permission{
 		ResourceType: "steward",
 		Actions:      []string{"move-identity"},
 	},
+	{
+		Id:           "steward.tamper-restore",
+		Name:         "Restore Tampered Steward",
+		Description:  "Return a tampered steward to trusted once it no longer reports a fault",
+		ResourceType: "steward",
+		Actions:      []string{"tamper-restore"},
+	},
+	{
+		Id:           "steward.tamper-ban",
+		Name:         "Ban Tampered Steward",
+		Description:  "Revoke the identity of a tampered steward so it is refused from then on",
+		ResourceType: "steward",
+		Actions:      []string{"tamper-ban"},
+	},
 
 	// Configuration Management Permissions
 	{
