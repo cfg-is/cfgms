@@ -4,6 +4,7 @@
 package gate
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -53,6 +54,84 @@ func TestRule1_Cases(t *testing.T) {
 	})
 	t.Run("each metric its own finding", func(t *testing.T) {
 		assert.Len(t, Rule1Aggregate(base, meas(totals(6, 21, 101))), 3)
+	})
+}
+
+// effRecs builds functions f<e> with Effort e for each e in efforts, and a
+// measurement whose Aggregate comes from metrics.Summarize.
+func effRecs(efforts ...int) []metrics.FuncRecord {
+	var out []metrics.FuncRecord
+	for _, e := range efforts {
+		r := rec(fmt.Sprintf("p.F%d", e), "a.go", 1)
+		r.Effort = float64(e)
+		out = append(out, r)
+	}
+	return out
+}
+
+func rangeInts(lo, hi int) []int {
+	var out []int
+	for i := lo; i <= hi; i++ {
+		out = append(out, i)
+	}
+	return out
+}
+
+func summed(recs []metrics.FuncRecord) metrics.Measurement {
+	return metrics.Measurement{Aggregate: metrics.Summarize(recs), Functions: recs}
+}
+
+func p95Findings(f []Finding) []Finding {
+	var out []Finding
+	for _, x := range f {
+		if x.Metric == "p95_effort" {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+func TestRule1_P95Population(t *testing.T) {
+	prev := effRecs(rangeInts(1, 100)...)
+	t.Run("pure deletion of ten lowest passes", func(t *testing.T) {
+		cur := effRecs(rangeInts(11, 100)...)
+		require.Equal(t, 95.0, summed(prev).Aggregate.P95Effort)
+		require.Equal(t, 96.0, summed(cur).Aggregate.P95Effort)
+		assert.Empty(t, p95Findings(Rule1Aggregate(summed(prev), summed(cur))))
+	})
+	t.Run("new high-effort function fails", func(t *testing.T) {
+		cur := append(effRecs(rangeInts(1, 100)...), effRecs(1000)...)
+		f := p95Findings(Rule1Aggregate(summed(prev), summed(cur)))
+		require.Len(t, f, 1)
+		assert.Equal(t, 95.0, f[0].Base)
+	})
+	t.Run("raised effort fails", func(t *testing.T) {
+		cur := effRecs(rangeInts(1, 100)...)
+		cur[49].Effort = 1000
+		assert.Len(t, p95Findings(Rule1Aggregate(summed(prev), summed(cur))), 1)
+	})
+	t.Run("deletion plus new high-effort function fails", func(t *testing.T) {
+		cur := append(effRecs(rangeInts(11, 100)...), effRecs(1000)...)
+		f := p95Findings(Rule1Aggregate(summed(prev), summed(cur)))
+		require.Len(t, f, 1)
+		assert.Equal(t, 96.0, f[0].Base)
+		assert.Equal(t, 97.0, f[0].Cur)
+	})
+	t.Run("pure rename of the top function passes", func(t *testing.T) {
+		p := effRecs(rangeInts(1, 21)...)
+		c := effRecs(rangeInts(1, 21)...)
+		c[20].Identity = "p.Renamed"
+		assert.Empty(t, p95Findings(Rule1Aggregate(summed(p), summed(c))))
+	})
+	t.Run("empty function list falls back to aggregate", func(t *testing.T) {
+		f := p95Findings(Rule1Aggregate(meas(totals(0, 0, 100)), meas(totals(0, 0, 101))))
+		require.Len(t, f, 1)
+		assert.Equal(t, 100.0, f[0].Base)
+	})
+	t.Run("hotspots form falls back to aggregate", func(t *testing.T) {
+		p, c := summed(prev), summed(effRecs(rangeInts(11, 100)...))
+		p.Form, c.Form = metrics.FormHotspots, metrics.FormHotspots
+		assert.Len(t, p95Findings(Rule1Aggregate(p, c)), 1)
 	})
 }
 

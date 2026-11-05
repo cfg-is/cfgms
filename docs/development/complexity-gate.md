@@ -86,7 +86,7 @@ All three rules compare to **Previous**, the tree at the merge-base with `develo
 
 | Rule | Fails when |
 |------|-----------|
-| 1 aggregate | versus Previous, hotspot count, aggregate excess or P95 Halstead effort (nearest rank) increases. Equal passes. Each metric is its own finding. |
+| 1 aggregate | versus Previous, hotspot count, aggregate excess or P95 Halstead effort (nearest rank) increases. Equal passes. Each metric is its own finding. The P95 effort finding fires when `P95(Current) > max(P95(Previous), P95(Previous restricted to identities also in Current))`; see [Rule 1 P95 comparison](#rule-1-p95-comparison). |
 | 2 hotspot growth | an identity in both Previous and current, with Previous CC > 10, has current CC > Previous CC. |
 | 3 changed function | a function is **changed** and has CC > 10, unless it reduces an existing hotspot (Previous CC > 10 and current CC < Previous CC). |
 
@@ -124,6 +124,14 @@ CI event shapes, all needing full history (`fetch-depth: 0`):
 - `merge_group`: the checkout is the queue branch tip, with `origin/develop` as its base.
 
 Previous is materialised by `MaterializeRef` in `gittree.go`, which reads `git archive <ref>` with the standard library tar reader into a temporary directory. It never touches the working tree or index.
+
+### Rule 1 P95 comparison
+
+Each P95 is the nearest rank over the ascending `Effort` values of a function set. The sets are Current (all functions), Previous (all functions) and Previous restricted to identities that also exist in Current. The reported `Base` is the `max` of the two Previous P95 values and `Cur` is the Current P95. Deleting functions that exist only in Previous therefore cannot raise Current P95 above the threshold, because a pure deletion leaves Current equal to the restricted set. The threshold is never below `P95(Previous)`, so the comparison is never stricter than comparing the two whole-tree P95 values. A new function or a raised effort lifts Current P95 above the threshold as before.
+
+When either side has no function list, or has `form: hotspots` (a hotspot-only list cannot reproduce a P95), the rule compares the precomputed `Aggregate.P95Effort` values. `hotspots` and `aggregate_excess` always compare `Aggregate`.
+
+A renamed or moved function is a new identity, so it counts as an addition plus a deletion; the threshold makes a pure rename neutral, but a rename combined with other changes is judged as a whole. Deleting low-effort functions raises the threshold, so a later pull request may add functions up to the new P95.
 
 Rule 3 has been replayed against recent merged develop PRs with `make complexity-replay`; the measured result is in [complexity-gate-calibration.md](complexity-gate-calibration.md).
 
