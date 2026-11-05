@@ -8,7 +8,8 @@
 #   2. The scanner database is wrong: the installed version provably contains the
 #      fix.  The entry cites the fix commit, proof that the installed release
 #      contains it, and at least two other databases (OSV, Trivy, govulncheck) that
-#      report the version clean.  Expiry is at most 30 days.
+#      report the version clean.
+# Every entry, in either case, expires at most 15 days after it is added.
 # Every entry must name the affected package.  Re-check each entry when the weekly dependency scan
 # runs (dependency-pin-check.yml / refresh-pins skill) or when a new release of the
 # affected package appears.
@@ -37,3 +38,12 @@ CVE-2026-56860 until=2026-11-15
 #                    agree, measured 2026-10-13 on PR #4971.
 # Expiry           : 2026-11-13 — if Sonatype still flags it then, re-check.
 CVE-2026-84445 until=2026-11-13
+
+# CVE-2026-119591 — modernc.org/sqlite
+# Affected package : modernc.org/sqlite v1.61.1 (direct dependency)
+# Reason           : v1.61.1 is the newest release published upstream as of 2026-11-05;
+#                    there is no patched version to upgrade to.  `go list -m -versions
+#                    modernc.org/sqlite` ends at v1.61.1.  Re-check when a newer release
+#                    appears or when this entry lapses on the expiry date below.
+# Expiry           : 2026-11-20 — after this date the scan re-opens automatically.
+CVE-2026-119591 until=2026-11-20

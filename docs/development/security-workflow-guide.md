@@ -48,7 +48,7 @@ CVE-YYYY-NNNNN until=YYYY-MM-DD
 
 The `until=YYYY-MM-DD` field sets an expiry: once the date lapses nancy re-reports
 the CVE as a live finding, which forces a re-review. Every entry must have an expiry
-approximately one quarter out from the suppression date.
+at most 15 days after the suppression date.
 
 **What justifies an entry:**
 
@@ -77,13 +77,10 @@ When `dependency-pin-check.yml` fires or the `/refresh-pins` skill runs:
 1. Check each entry in `.nancy-ignore` for entries near or past their `until=` date.
 2. Run `go list -m -versions <module>` for each suppressed package to see if a fix landed.
 3. If a fix exists: upgrade via `go get <module>@<version>` and remove the entry.
-4. If no fix: renew the `until=` date and update the comment with today's re-check date.
+4. If no fix: renew the `until=` date (at most 15 days out) and update the comment with today's re-check date.
 
-**Active suppressions:**
-
-| CVE | Package | Reason | Expiry |
-|-----|---------|--------|--------|
-| CVE-2026-56860 | golang.org/x/net v0.58.0 | No patched release upstream as of 2026-08-15; v0.58.0 is newest | 2026-11-15 |
+**Active suppressions:** `.nancy-ignore` is the list. Each entry's comment block names
+the package, the reason and the expiry.
 
 **Scoping verification — a second, unrelated CVE still fails the gate:**
 
