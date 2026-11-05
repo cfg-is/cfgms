@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 	"github.com/cfgis/cfgms/pkg/session"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/testutil"
 )
@@ -774,4 +775,78 @@ func TestHandleApproveModuleBundle_ZeroSignatures_NamedErrorStatusUnchanged(t *t
 	status, err := mc.GetApprovalStatus(addr)
 	require.NoError(t, err)
 	assert.Equal(t, cache.ApprovalStatusPending, status)
+}
+
+// TestModuleBundleDecision_Characterization pins the response body, audit event and
+// scope-refusal body of approve and reject (Issue #5797), so the two handlers can share
+// one body without a behaviour change.
+func TestModuleBundleDecision_Characterization(t *testing.T) {
+	cases := []struct {
+		name       string
+		perm       string
+		status     string
+		action     string
+		refusal    string
+		makeReq    func(*testing.T, *Server, string, *Principal) *http.Request
+		handler    func(*Server) http.HandlerFunc
+		wantStatus cache.ApprovalStatus
+	}{
+		{"approve", "approve", "approved", "module.bundle.approved",
+			"module bundle approval requires an unscoped principal", makeApproveRequest,
+			func(s *Server) http.HandlerFunc { return s.handleApproveModuleBundle }, cache.ApprovalStatusApproved},
+		{"reject", "reject", "rejected", "module.bundle.rejected",
+			"module bundle rejection requires an unscoped principal", makeRejectRequest,
+			func(s *Server) http.HandlerFunc { return s.handleRejectModuleBundle }, cache.ApprovalStatusRejected},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, mc, _ := setupModuleApprovalServer(t)
+			addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
+			param := formatModuleAddress(addr)
+			wrap := func() http.Handler {
+				return server.requirePermission("module", tc.perm)(tc.handler(server))
+			}
+
+			// Tenant-scoped principal: 403 FORBIDDEN with the action-specific message.
+			scoped := moduleTestStrongPrincipal()
+			scoped.TenantID = "tenant-a"
+			rec := httptest.NewRecorder()
+			wrap().ServeHTTP(rec, tc.makeReq(t, server, param, scoped))
+			require.Equal(t, http.StatusForbidden, rec.Code)
+			var errResp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+			assert.Equal(t, tc.refusal, errResp.Error.Message)
+			assert.Equal(t, "FORBIDDEN", errResp.Error.Code)
+
+			// Success: body, state and audit event.
+			rec = httptest.NewRecorder()
+			wrap().ServeHTTP(rec, tc.makeReq(t, server, param, moduleTestStrongPrincipal()))
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var okResp APIResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &okResp))
+			assert.Equal(t, map[string]interface{}{"status": tc.status}, okResp.Data)
+
+			st, err := mc.GetApprovalStatus(addr)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantStatus, st)
+
+			require.NoError(t, server.auditManager.Flush(context.Background()))
+			entries, err := server.auditManager.QueryEntries(context.Background(),
+				&business.AuditFilter{Actions: []string{tc.action}})
+			require.NoError(t, err)
+			require.Len(t, entries, 1)
+			e := entries[0]
+			assert.Equal(t, "root", e.TenantID)
+			assert.Equal(t, business.AuditEventSystemAccess, e.EventType)
+			assert.Equal(t, "cert-admin", e.UserID)
+			assert.Equal(t, "module_bundle", e.ResourceType)
+			assert.Equal(t, "cfgms/hyperv@0.2.1", e.ResourceID)
+			assert.Equal(t, business.AuditResultSuccess, e.Result)
+			assert.Equal(t, business.AuditSeverityHigh, e.Severity)
+			assert.Equal(t, "cfgms", e.Details["publisher"])
+			assert.Equal(t, "hyperv", e.Details["name"])
+			assert.Equal(t, "0.2.1", e.Details["version"])
+		})
+	}
 }

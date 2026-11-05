@@ -1292,3 +1292,61 @@ func TestConfigRollback_StatusCancelAndHistory_TenantBoundary(t *testing.T) {
 			"another tenant's rollback history, and its audit trail, must not be enumerable")
 	})
 }
+
+// TestConfigRollback_ListHandlers_Characterization pins the query parsing, validation,
+// tenant filter and response shape that ListRollbackPoints and ListRollbackHistory
+// share (Issue #5797), so the two handlers can share one body without a behaviour change.
+func TestConfigRollback_ListHandlers_Characterization(t *testing.T) {
+	stack := newRollbackStack(t)
+	stack.seedRepository(t, rollback.TargetTypeDevice, "device-tenant-b")
+	stack.seedOperation(t, rollback.TargetTypeDevice, "device-tenant-b", rollback.RollbackStatusCompleted)
+	lookup := func(_ string) string { return "tenant-b" }
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil, stack.subtree)
+
+	cases := []struct {
+		name string
+		path string
+		key  string
+		call func(http.ResponseWriter, *http.Request)
+	}{
+		{"points", "/api/v1/rollback/points", "rollback_points", handler.ListRollbackPoints},
+		{"history", "/api/v1/rollback/history", "rollback_operations", handler.ListRollbackHistory},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			do := func(query string, scope ctxkeys.TenantScope) *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				tc.call(rec, scopedRollbackRequest("GET", tc.path+query, "", scope, nil))
+				return rec
+			}
+			items := func(t *testing.T, rec *httptest.ResponseRecorder) []interface{} {
+				t.Helper()
+				require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+				assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+				var resp map[string]interface{}
+				require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+				require.Len(t, resp, 1, "response carries exactly the %s key", tc.key)
+				list, ok := resp[tc.key].([]interface{})
+				require.True(t, ok, "%s must be a JSON array, not null", tc.key)
+				return list
+			}
+			const target = "?target_type=device&target_id=device-tenant-b"
+
+			for _, query := range []string{"", "?target_type=device", "?target_id=device-tenant-b"} {
+				rec := do(query, ctxkeys.NewRootScope())
+				assert.Equal(t, http.StatusBadRequest, rec.Code, query)
+				assert.JSONEq(t, `{"error":"target_type and target_id are required"}`, rec.Body.String(), query)
+			}
+
+			assert.NotEmpty(t, items(t, do(target, ctxkeys.NewRootScope())),
+				"root scope sees the seeded entries")
+			assert.NotEmpty(t, items(t, do(target+"&limit=abc", ctxkeys.NewRootScope())),
+				"a non-numeric limit falls back to the default")
+			assert.Empty(t, items(t, do(target, ctxkeys.NewTenantScope("tenant-a"))),
+				"an out-of-scope tenant gets an empty array")
+			assert.Empty(t, items(t, do(target, ctxkeys.TenantScope{})),
+				"an unset scope gets an empty array")
+		})
+	}
+}

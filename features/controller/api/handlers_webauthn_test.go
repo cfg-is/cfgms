@@ -35,6 +35,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -2566,5 +2567,54 @@ func TestWebAuthnRegisterFinish_LostSwap_Returns409(t *testing.T) {
 	assert.Equal(t, otherID, stored.Credentials[0].ID, "administrator credential must survive")
 	for _, c := range stored.Credentials {
 		assert.NotEqual(t, newID, c.ID, "the losing registration must not be written")
+	}
+}
+
+// TestPasskeyAuditEvents_Characterization pins the fields of the passkey-added and
+// passkey-revoked audit events (Issue #5797): they differ only in action and severity.
+func TestPasskeyAuditEvents_Characterization(t *testing.T) {
+	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+	acct := &account{ID: "acct-1", Username: username, TenantID: ""}
+
+	cases := []struct {
+		action   string
+		severity business.AuditSeverity
+		emit     func(context.Context, *account, string, string)
+	}{
+		{"account.passkey_added", business.AuditSeverityMedium, server.emitPasskeyAddedAudit},
+		{"account.passkey_revoked", business.AuditSeverityHigh, server.emitPasskeyRevokedAudit},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			ctx := context.Background()
+			tc.emit(ctx, acct, "cred-1", "acct-1")
+			tc.emit(ctx, acct, "cred-2", "admin-9")
+			require.NoError(t, server.auditManager.Flush(ctx))
+
+			entries, err := server.auditManager.QueryEntries(ctx, &business.AuditFilter{Actions: []string{tc.action}})
+			require.NoError(t, err)
+			require.Len(t, entries, 2)
+
+			// Keyed by whether the event carries an acting_principal detail.
+			byCred := map[string]*business.AuditEntry{}
+			for _, e := range entries {
+				_, delegated := e.Details["acting_principal"]
+				byCred[fmt.Sprint(delegated)] = e
+			}
+			for _, e := range byCred {
+				assert.Equal(t, audit.SystemTenantID, e.TenantID, "empty account tenant falls back to the system tenant")
+				assert.Equal(t, business.AuditEventSystemAccess, e.EventType)
+				assert.Equal(t, "acct-1", e.UserID)
+				assert.Equal(t, business.AuditUserTypeHuman, e.UserType)
+				assert.Equal(t, "account", e.ResourceType)
+				assert.Equal(t, username, e.ResourceID)
+				assert.Equal(t, business.AuditResultSuccess, e.Result)
+				assert.Equal(t, tc.severity, e.Severity)
+			}
+			require.Len(t, byCred, 2)
+			assert.Equal(t, "admin-9", byCred["true"].Details["acting_principal"])
+			assert.Contains(t, byCred["false"].Details, "credential_id")
+		})
 	}
 }
