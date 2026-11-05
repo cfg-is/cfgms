@@ -112,6 +112,8 @@ procedures, not a separate license tier.
 
 The flat-file provider (`pkg/storage/providers/flatfile`) is the local composite default for config storage. It stores configs and audit logs as files under a configured root directory.
 
+On Linux and macOS the provider creates every directory `0700` and every file `0600`, so stored data is readable only by the owning account. Directories and files that already exist keep their current mode.
+
 **File layout**:
 
 ```
@@ -257,6 +259,8 @@ Per ADR-003, the providers and interfaces above are **not all implemented today*
 **Fleet tracker**: `features/controller/fleet/fleet.HealthTracker` wraps a `StewardStore` for durable fields and keeps ephemeral per-process metrics (`HealthMetrics`) in-memory via a `sync.Map`.
 
 `SessionStore` is implemented in story #662. It stores only `Persistent=true` sessions; ephemeral state (non-persistent sessions, rebuildable runtime values) uses `pkg/cache`. The `ConfigStore` interface returns `ErrNotSupported` from the SQLite provider — config storage targets the flat-file and PostgreSQL providers.
+
+On Linux and macOS the SQLite provider creates the database file and its `-wal` / `-shm` side files `0600`. An existing database file keeps its current mode.
 
 ### CommandStore (Issue #665; delivery lifecycle: Issue #3757, ADR-031 Decision 2)
 

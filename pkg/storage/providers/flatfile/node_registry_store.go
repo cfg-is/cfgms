@@ -42,7 +42,7 @@ type nodeRegistryEntryJSON struct {
 // <root>/node_registry. The directory is created if it does not exist.
 func NewFlatFileNodeRegistryStore(root string) (*FlatFileNodeRegistryStore, error) {
 	dir := filepath.Join(root, "node_registry")
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return nil, fmt.Errorf("flatfile: failed to create node registry directory: %w", err)
 	}
 	return &FlatFileNodeRegistryStore{root: root}, nil

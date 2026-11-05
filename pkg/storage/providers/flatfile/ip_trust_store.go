@@ -49,7 +49,7 @@ type ipTrustEntryJSON struct {
 // The directory is created if it does not exist.
 func NewFlatFileIPTrustStore(root string) (*FlatFileIPTrustStore, error) {
 	dir := filepath.Join(root, "ip-trust")
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return nil, fmt.Errorf("flatfile: failed to create ip-trust directory: %w", err)
 	}
 	return &FlatFileIPTrustStore{root: root}, nil

@@ -54,7 +54,7 @@ type chainHead struct {
 // NewFlatFileAuditStore creates a new FlatFileAuditStore rooted at root.
 // maxRetentionDays controls how far back new entries may be stored; defaults to 90.
 func NewFlatFileAuditStore(root string, maxRetentionDays int) (*FlatFileAuditStore, error) {
-	if err := os.MkdirAll(root, 0750); err != nil {
+	if err := os.MkdirAll(root, dirMode); err != nil {
 		return nil, fmt.Errorf("failed to create audit root: %w", err)
 	}
 	if maxRetentionDays <= 0 {
@@ -143,7 +143,7 @@ func (s *FlatFileAuditStore) StoreAuditEntry(ctx context.Context, entry *busines
 	// Drop the cached head; the next chained append re-reads it from disk.
 	s.forgetChainHead(entry.TenantID)
 
-	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), dirMode); err != nil {
 		return fmt.Errorf("failed to create audit dir: %w", err)
 	}
 
@@ -231,7 +231,7 @@ func (s *FlatFileAuditStore) AppendChainedEntry(ctx context.Context, tenantID st
 	}
 	raw = append(raw, '\n')
 
-	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), dirMode); err != nil {
 		s.forgetChainHead(tenantID)
 		return fmt.Errorf("failed to create audit dir: %w", err)
 	}
@@ -793,7 +793,7 @@ func (s *FlatFileAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate
 		}
 
 		archiveDir := filepath.Join(filepath.Dir(path), "archive")
-		if err := os.MkdirAll(archiveDir, 0750); err != nil {
+		if err := os.MkdirAll(archiveDir, dirMode); err != nil {
 			return nil
 		}
 		archivePath := filepath.Join(archiveDir, filepath.Base(path))

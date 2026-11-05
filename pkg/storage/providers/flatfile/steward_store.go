@@ -37,7 +37,7 @@ type FlatFileStewardStore struct {
 // The directory is created if it does not exist.
 func NewFlatFileStewardStore(root string) (*FlatFileStewardStore, error) {
 	stewardDir := filepath.Join(root, "stewards")
-	if err := os.MkdirAll(stewardDir, 0750); err != nil {
+	if err := os.MkdirAll(stewardDir, dirMode); err != nil {
 		return nil, fmt.Errorf("flatfile: failed to create steward directory: %w", err)
 	}
 	return &FlatFileStewardStore{root: root}, nil
@@ -471,7 +471,7 @@ func (s *FlatFileStewardStore) HealthCheck(_ context.Context) error {
 
 // Initialize ensures the steward directory exists.
 func (s *FlatFileStewardStore) Initialize(_ context.Context) error {
-	return os.MkdirAll(s.stewardDir(), 0750)
+	return os.MkdirAll(s.stewardDir(), dirMode)
 }
 
 // Close is a no-op for the flat-file provider (no persistent connections to release).

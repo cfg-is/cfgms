@@ -22,6 +22,10 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/providers/internal/keysafe"
 )
 
+// dirMode is the mode for every directory the provider creates: owner-only,
+// matching the 0600 mode of the files written inside them.
+const dirMode os.FileMode = 0o700
+
 // FlatFileConfigStore implements cfgconfig.ConfigStore using the local filesystem.
 //
 // File layout: <root>/<tenantID>/configs/<namespace>/<name>.<format>
@@ -44,7 +48,7 @@ func (s *FlatFileConfigStore) AtomicLockRoot() string { return s.root }
 // NewFlatFileConfigStore creates a new FlatFileConfigStore rooted at root.
 // The root directory is created (with MkdirAll) if it does not already exist.
 func NewFlatFileConfigStore(root string) (*FlatFileConfigStore, error) {
-	if err := os.MkdirAll(root, 0750); err != nil {
+	if err := os.MkdirAll(root, dirMode); err != nil {
 		return nil, fmt.Errorf("failed to create config root: %w", err)
 	}
 	return &FlatFileConfigStore{root: root}, nil
@@ -144,7 +148,7 @@ func (s *FlatFileConfigStore) findConfigFile(key *cfgconfig.ConfigKey) (string, 
 // short backoff long enough to outlast any reasonable single read.
 func writeAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 

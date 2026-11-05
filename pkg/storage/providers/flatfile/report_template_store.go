@@ -63,7 +63,7 @@ type reportTemplateShare struct {
 // NewFlatFileReportTemplateStore creates a store rooted at <root>/report_templates.
 // The directory is created if it does not exist.
 func NewFlatFileReportTemplateStore(root string) (*FlatFileReportTemplateStore, error) {
-	if err := os.MkdirAll(filepath.Join(root, "report_templates"), 0750); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "report_templates"), dirMode); err != nil {
 		return nil, fmt.Errorf("flatfile: failed to create report_templates directory: %w", err)
 	}
 	return &FlatFileReportTemplateStore{root: root}, nil

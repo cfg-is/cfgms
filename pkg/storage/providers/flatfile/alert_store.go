@@ -45,7 +45,7 @@ type alertStateJSON struct {
 // The directory is created if it does not exist.
 func NewFlatFileAlertStore(root string) (*FlatFileAlertStore, error) {
 	dir := filepath.Join(root, "alerts")
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return nil, fmt.Errorf("flatfile: failed to create alerts directory: %w", err)
 	}
 	return &FlatFileAlertStore{root: root}, nil

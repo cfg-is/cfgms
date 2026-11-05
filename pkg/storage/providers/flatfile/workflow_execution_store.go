@@ -48,7 +48,7 @@ type workflowExecutionJSON struct {
 
 // NewFlatFileWorkflowExecutionStore creates a store rooted at <root>/workflow_executions.
 func NewFlatFileWorkflowExecutionStore(root string) (*FlatFileWorkflowExecutionStore, error) {
-	if err := os.MkdirAll(filepath.Join(root, "workflow_executions"), 0750); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "workflow_executions"), dirMode); err != nil {
 		return nil, fmt.Errorf("flatfile: failed to create workflow executions directory: %w", err)
 	}
 	return &FlatFileWorkflowExecutionStore{root: root}, nil
@@ -147,7 +147,7 @@ func (s *FlatFileWorkflowExecutionStore) Save(_ context.Context, r *business.Wor
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.MkdirAll(s.tenantDir(r.TenantID), 0750); err != nil {
+	if err := os.MkdirAll(s.tenantDir(r.TenantID), dirMode); err != nil {
 		return fmt.Errorf("flatfile: failed to create workflow executions tenant directory: %w", err)
 	}
 	return writeAtomic(path, raw)
