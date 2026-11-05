@@ -367,51 +367,6 @@ func TestParseEdgeSubject(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestResolveWatchCursor_InvalidCursor(t *testing.T) {
-	// A non-numeric cursor is rejected before any DB access, so a nil *sql.DB is
-	// safe here and keeps the test a pure error-path check.
-	for _, bad := range []string{"abc", "12x", "3.14", "-", "0x10", " 5"} {
-		_, err := resolveWatchCursor(context.Background(), nil, bad)
-		require.Error(t, err, "cursor %q must be rejected", bad)
-		require.Contains(t, err.Error(), "must be a decimal integer")
-	}
-}
-
-func TestResolveWatchCursor_ValidDecimal(t *testing.T) {
-	// A valid decimal cursor is parsed without touching the DB (nil is safe).
-	seq, err := resolveWatchCursor(context.Background(), nil, "42")
-	require.NoError(t, err)
-	require.Equal(t, int64(42), seq)
-}
-
-func TestBuildWatchEvent_OKFalseBranches(t *testing.T) {
-	// Edge subject whose pipe-delimited form does not split into exactly three
-	// parts: parseEdgeSubject fails (watch.go line ~160).
-	_, ok := buildWatchEvent("two|parts", "observation", "", 1)
-	require.False(t, ok, "malformed edge subject (wrong part count) must not yield an event")
-
-	// Well-formed edge subject but the from-EID is not a parseable EID
-	// (watch.go line ~164) — a stored edge row with a corrupt from-subject.
-	_, ok = buildWatchEvent("contains|nocolon|host:b", "observation", "", 2)
-	require.False(t, ok, "edge with non-parseable from-EID must not yield an event")
-
-	// Non-edge subject that is not a parseable EID (watch.go line ~171).
-	_, ok = buildWatchEvent("nocolon-subject", "observation", "", 3)
-	require.False(t, ok, "non-edge subject that is not a valid EID must not yield an event")
-}
-
-func TestBuildWatchEvent_OKTrue(t *testing.T) {
-	ev, ok := buildWatchEvent("host:abc", string(types.ObservationKindDriftDiff), "", 7)
-	require.True(t, ok)
-	require.Equal(t, "drift-updated", ev.EventKind)
-	require.Equal(t, int64(7), ev.Version)
-
-	ev, ok = buildWatchEvent("contains|host:a|host:b", "observation", "", 8)
-	require.True(t, ok)
-	require.Equal(t, "edge-updated", ev.EventKind)
-	require.Equal(t, "host:a", ev.Subject.String())
-}
-
 func TestSourceClassPrecedence(t *testing.T) {
 	require.Equal(t, types.SourceClassEnforcingModule, resolveSourceClass("enforcing-module:hyperv"))
 	require.Equal(t, types.SourceClassObserver, resolveSourceClass("mystery:thing"))
@@ -783,4 +738,231 @@ func TestGetTimeline_SameAsPeerLookedUpOncePerCall(t *testing.T) {
 	assert.Equal(t, repeats, same)
 	assert.Equal(t, want, gotTimes, "events match the unmemoized, hand-filtered result")
 	assert.EqualValues(t, 3, count.Load(), "one eg_entity_index lookup per distinct subject")
+}
+
+// --- Characterization tests: Watch and GetNeighborhood (Issue #5793) ---
+// These pin the observable behaviour of the provider so the dialect-independent
+// code can move to egcommon without a behaviour change.
+
+func reportHost(t *testing.T, p *SQLiteEntityGraphProvider, subject, tenant string) {
+	t.Helper()
+	require.NoError(t, p.ReportObservations(context.Background(), interfaces.ObservationBatch{
+		Source: "observer:scan",
+		Observations: []types.Observation{
+			obs(subject, "observer:scan", types.ObservationKindState, time.Now().UTC(), map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": tenant,
+			}),
+		},
+	}))
+}
+
+func reportEdge(t *testing.T, p *SQLiteEntityGraphProvider, edgeType, from, to string) {
+	t.Helper()
+	require.NoError(t, p.ReportObservations(context.Background(), interfaces.ObservationBatch{
+		Source: "observer:scan",
+		Observations: []types.Observation{
+			obs(edgeType+"|"+from+"|"+to, "observer:scan", types.ObservationKindState, time.Now().UTC(), map[string]interface{}{}),
+		},
+	}))
+}
+
+func recvWatch(t *testing.T, ch <-chan interfaces.WatchEvent) interfaces.WatchEvent {
+	t.Helper()
+	select {
+	case ev, ok := <-ch:
+		require.True(t, ok, "channel closed before an event arrived")
+		return ev
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for watch event")
+		return interfaces.WatchEvent{}
+	}
+}
+
+func expectNoWatch(t *testing.T, ch <-chan interfaces.WatchEvent) {
+	t.Helper()
+	select {
+	case ev := <-ch:
+		t.Fatalf("unexpected watch event %+v", ev)
+	case <-time.After(400 * time.Millisecond):
+	}
+}
+
+func TestWatch_CharacterizeCursorAndEvents(t *testing.T) {
+	p := newTestProvider(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	reportHost(t, p, "host:old", "client-1")
+
+	// Empty cursor starts at the tail: the earlier row is not replayed.
+	ch, err := p.Watch(ctx, interfaces.WatchFilter{}, "")
+	require.NoError(t, err)
+	expectNoWatch(t, ch)
+
+	reportHost(t, p, "host:new", "client-1")
+	ev := recvWatch(t, ch)
+	require.Equal(t, "entity-updated", ev.EventKind)
+	require.Equal(t, "host:new", ev.Subject.String())
+	require.Equal(t, int64(2), ev.Version)
+	require.False(t, ev.At.IsZero())
+
+	// Cursor "0" replays everything from the oldest retained row.
+	ch0, err := p.Watch(ctx, interfaces.WatchFilter{}, "0")
+	require.NoError(t, err)
+	first := recvWatch(t, ch0)
+	require.Equal(t, "host:old", first.Subject.String())
+	require.Equal(t, int64(1), first.Version)
+	second := recvWatch(t, ch0)
+	require.Equal(t, int64(2), second.Version)
+
+	// Resuming from a cursor replays only later rows.
+	ch1, err := p.Watch(ctx, interfaces.WatchFilter{}, "1")
+	require.NoError(t, err)
+	require.Equal(t, int64(2), recvWatch(t, ch1).Version)
+
+	// Edge and drift event kinds.
+	reportEdge(t, p, "contains", "host:old", "host:new")
+	require.Equal(t, "edge-updated", recvWatch(t, ch).EventKind)
+}
+
+func TestWatch_CharacterizeInvalidCursorAndExpiry(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+
+	_, err := p.Watch(ctx, interfaces.WatchFilter{}, "abc")
+	require.Error(t, err)
+	require.Equal(t, `entitygraph/sqlite: watch: invalid cursor "abc": must be a decimal integer`, err.Error())
+
+	reportHost(t, p, "host:a", "client-1")
+	reportHost(t, p, "host:b", "client-1")
+	_, err = p.db.ExecContext(ctx, `DELETE FROM eg_observation_log WHERE id = 1`)
+	require.NoError(t, err)
+
+	_, err = p.Watch(ctx, interfaces.WatchFilter{}, "1")
+	require.ErrorIs(t, err, interfaces.ErrCursorExpired)
+
+	// Cursor 0 is exempt from the expiry check.
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	_, err = p.Watch(cctx, interfaces.WatchFilter{}, "0")
+	require.NoError(t, err)
+}
+
+func TestWatch_CharacterizeFilterMatching(t *testing.T) {
+	p := newTestProvider(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Tenant filter: only owning_tenant == filter or listed subtree ids pass;
+	// edges skip the tenant filter.
+	chTenant, err := p.Watch(ctx, interfaces.WatchFilter{TenantFilter: "msp-a", TenantSubtreeIDs: []string{"client-1"}}, "")
+	require.NoError(t, err)
+	chKind, err := p.Watch(ctx, interfaces.WatchFilter{Kinds: []string{"edge-updated"}}, "")
+	require.NoError(t, err)
+	eid := mustEID(t, "host:pick")
+	chEID, err := p.Watch(ctx, interfaces.WatchFilter{EIDs: []interfaces.EIDRef{eid}}, "")
+	require.NoError(t, err)
+
+	reportHost(t, p, "host:other", "msp-b")
+	reportHost(t, p, "host:pick", "client-1")
+	reportEdge(t, p, "contains", "host:other", "host:pick")
+
+	require.Equal(t, "host:pick", recvWatch(t, chTenant).Subject.String())
+	require.Equal(t, "edge-updated", recvWatch(t, chTenant).EventKind)
+	expectNoWatch(t, chTenant)
+
+	require.Equal(t, "edge-updated", recvWatch(t, chKind).EventKind)
+	expectNoWatch(t, chKind)
+
+	require.Equal(t, "host:pick", recvWatch(t, chEID).Subject.String())
+	expectNoWatch(t, chEID)
+}
+
+func TestWatch_CharacterizeChannelClosesOnCancel(t *testing.T) {
+	p := newTestProvider(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := p.Watch(ctx, interfaces.WatchFilter{}, "")
+	require.NoError(t, err)
+	cancel()
+	select {
+	case _, ok := <-ch:
+		require.False(t, ok)
+	case <-time.After(5 * time.Second):
+		t.Fatal("channel not closed after cancel")
+	}
+}
+
+func neighborhoodSubjects(n *types.Neighborhood) []string {
+	var s []string
+	for _, e := range n.Nodes {
+		s = append(s, e.EID.String())
+	}
+	return s
+}
+
+func TestGetNeighborhood_CharacterizeDepthDirectionAndCut(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+
+	// chain a -> b -> c -> d -> e, plus x -> a (inbound to root).
+	reportHost(t, p, "host:a", "client-1")
+	reportHost(t, p, "host:b", "client-1")
+	reportHost(t, p, "host:c", "client-1")
+	reportHost(t, p, "host:d", "client-1")
+	reportHost(t, p, "host:e", "client-1")
+	reportHost(t, p, "host:x", "client-1")
+	reportEdge(t, p, "link", "host:a", "host:b")
+	reportEdge(t, p, "link", "host:b", "host:c")
+	reportEdge(t, p, "link", "host:c", "host:d")
+	reportEdge(t, p, "link", "host:d", "host:e")
+	reportEdge(t, p, "link", "host:x", "host:a")
+	root := mustEID(t, "host:a")
+
+	// depth > max is rejected with the provider-prefixed error.
+	_, err := p.GetNeighborhood(ctx, root, nil, types.TraversalOutbound, 4, interfaces.TenantCut{})
+	require.Error(t, err)
+	require.Equal(t, "entitygraph/sqlite: depth 4 exceeds maximum 3", err.Error())
+
+	// depth 0 defaults to 2.
+	n, err := p.GetNeighborhood(ctx, root, nil, types.TraversalOutbound, 0, interfaces.TenantCut{})
+	require.NoError(t, err)
+	require.Equal(t, []string{"host:a", "host:b", "host:c"}, neighborhoodSubjects(n))
+	require.Len(t, n.Edges, 2)
+	require.False(t, n.Truncated)
+
+	// depth 3 is the maximum.
+	n, err = p.GetNeighborhood(ctx, root, nil, types.TraversalOutbound, 3, interfaces.TenantCut{})
+	require.NoError(t, err)
+	require.Equal(t, []string{"host:a", "host:b", "host:c", "host:d"}, neighborhoodSubjects(n))
+
+	// Inbound walks to x only.
+	n, err = p.GetNeighborhood(ctx, root, nil, types.TraversalInbound, 3, interfaces.TenantCut{})
+	require.NoError(t, err)
+	require.Equal(t, []string{"host:a", "host:x"}, neighborhoodSubjects(n))
+
+	// Both reaches x and b at hop 1.
+	n, err = p.GetNeighborhood(ctx, root, nil, types.TraversalBoth, 1, interfaces.TenantCut{})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"host:a", "host:b", "host:x"}, neighborhoodSubjects(n))
+	for _, node := range n.Nodes {
+		require.Equal(t, "host", node.Kind)
+		require.Equal(t, "client-1", node.OwningTenant)
+	}
+
+	// Edge-type filter excludes non-matching types.
+	n, err = p.GetNeighborhood(ctx, root, []string{"nomatch"}, types.TraversalBoth, 2, interfaces.TenantCut{})
+	require.NoError(t, err)
+	require.Equal(t, []string{"host:a"}, neighborhoodSubjects(n))
+	require.Empty(t, n.Edges)
+
+	// Tenant cut: an edge whose endpoint is outside the cut is dropped.
+	reportHost(t, p, "host:z", "msp-b")
+	reportEdge(t, p, "link", "host:a", "host:z")
+	cut := interfaces.NewTenantCut("msp-a", []string{"client-1"})
+	n, err = p.GetNeighborhood(ctx, root, nil, types.TraversalOutbound, 1, cut)
+	require.NoError(t, err)
+	require.Equal(t, []string{"host:a", "host:b"}, neighborhoodSubjects(n))
+	n, err = p.GetNeighborhood(ctx, root, nil, types.TraversalOutbound, 1, interfaces.TenantCut{})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"host:a", "host:b", "host:z"}, neighborhoodSubjects(n))
 }
