@@ -25,6 +25,7 @@ const (
 	auditActionTamperRestored       = "steward_tamper_restored"
 	auditActionTamperRestoreRefused = "steward_tamper_restore_refused"
 	auditActionTamperBanned         = "steward_tamper_banned"
+	auditActionTamperRenewal        = "steward_tamper_renewal"
 )
 
 const (
