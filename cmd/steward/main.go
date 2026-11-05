@@ -592,13 +592,92 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 	// before anything is written to it (CFGMS_LOG_DIR may sit below it) and
 	// before the pinned CA, cert store or device key are read from it. Uses a
 	// console logger so its diagnostics never land in the tree being locked.
-	if err := dataDirCheck(logging.NewLogger(logLevelFromEnv())); err != nil {
-		return err
+	// A refusal does not end the process: it raises the tamper latch, and the
+	// steward reports it on a report-only link (tamper_alarm.go) without reading
+	// config, module cache or token from the directory.
+	consoleLogger := logging.NewLogger(logLevelFromEnv())
+	dirErr := dataDirCheck(consoleLogger)
+	latch := openTamperLatch(certStoreDirResolver(), consoleLogger)
+	if dirErr != nil {
+		latch.raise(cpTypes.ReasonCodeTamperDataDir)
+		regToken = "" // never used from a tampered directory
 	}
 
 	// ── File logging provider ─────────────────────────────────────────────────
 	// Best-effort: if the file provider fails, fall back to a stdout logger so
 	// the process continues instead of dying with a 0-byte log file. (Issue #2034)
+	// Not started while latched by a data directory refusal: the log directory
+	// may sit inside the refused tree.
+	logger := consoleLogger
+	closeLogging := func() {}
+	loggingStarted := false
+	defer func() { closeLogging() }()
+
+	alarm := &tamperAlarm{
+		latch: latch,
+		rescan: func() *tamperFault {
+			if err := dataDirCheck(consoleLogger); err != nil {
+				return &tamperFault{code: cpTypes.ReasonCodeTamperDataDir}
+			}
+			storedID, _ := loadIdentity(certStoreDirResolver())
+			_, fault, _ := scanStartupTamper(storedID, controllerURL, consoleLogger)
+			return fault
+		},
+		sinkFn: newSystemLogSink,
+		logger: consoleLogger,
+	}
+	alarm.resetDerived = func() { resetDerivedState(consoleLogger) }
+
+	for {
+		if latch.isLatched() {
+			released, err := alarm.run(ctx)
+			if err != nil {
+				return err
+			}
+			if !released {
+				return nil
+			}
+			regToken = ""
+			continue
+		}
+		if !loggingStarted {
+			loggingStarted = true
+			logger, closeLogging = startFileLogging(earlyLog)
+			alarm.logger = logger
+		}
+
+		// ── gRPC transport registration flow ─────────────────────────────────
+		// A stored identity is enough to start: with an empty token the steward
+		// connects on the identity. This runs after the data directory check
+		// above, so the identity is only read from a checked data directory.
+		// With no usable identity, token or config, resolveStartupIdentity keeps
+		// the steward running until a token appears or an identity is stored.
+		var storedID *StewardIdentity
+		var waitErr error
+		regToken, storedID, waitErr = resolveStartupIdentity(ctx, regToken, configPath, logger)
+		if regToken == "" && storedID == nil {
+			return runStandaloneOrStop(ctx, configPath, waitErr, logger)
+		}
+		facts, fault, scanErr := scanStartupTamper(storedID, controllerURL, logger)
+		if scanErr != nil {
+			return scanErr
+		}
+		if fault != nil {
+			latch.raise(fault.code)
+			regToken = ""
+			continue
+		}
+		relatch, err := runControllerConnected(ctx, regToken, facts, cf, latch, logger)
+		if err != nil || !relatch {
+			return err
+		}
+		regToken = ""
+	}
+}
+
+// startFileLogging initialises the file logging provider and returns the logger
+// and the function that flushes and closes it.
+func startFileLogging(earlyLog *log.Logger) (logging.Logger, func()) {
 	logDir := stewardLogDir(earlyLog)
 	loggingConfig := &logging.LoggingConfig{
 		Provider:          "file",
@@ -617,287 +696,318 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		},
 	}
 
-	var logger logging.Logger
 	if err := logging.InitializeGlobalLogging(loggingConfig); err != nil {
 		// File provider unavailable (e.g. /tmp not writable at early boot).
 		// Log to stderr and continue with a stdout fallback — process liveness
 		// must not depend on the log subsystem being ready. (Issue #2034)
 		earlyLog.Printf("WARNING: file logging unavailable (%v); using stdout fallback", err)
-		logger = logging.NewLogger(logLevelFromEnv())
-	} else {
-		// Flush and close the logger when runStewardInternal returns so that
-		// buffered entries (AsyncWrites=true) reach disk before os.Exit fires.
-		defer func() {
-			if mgr := logging.GetGlobalLoggingManager(); mgr != nil {
-				_ = mgr.Close()
-			}
-		}()
-		(&logging.TelemetryBridge{}).Initialize()
-		logging.InitializeGlobalLoggerFactory("steward", "main")
-		logger = logging.ForComponent("steward")
+		return logging.NewLogger(logLevelFromEnv()), func() {}
+	}
+	(&logging.TelemetryBridge{}).Initialize()
+	logging.InitializeGlobalLoggerFactory("steward", "main")
+	// Flush and close the logger when runStewardInternal returns so that
+	// buffered entries (AsyncWrites=true) reach disk before os.Exit fires.
+	return logging.ForComponent("steward"), func() {
+		if mgr := logging.GetGlobalLoggingManager(); mgr != nil {
+			_ = mgr.Close()
+		}
+	}
+}
+
+// runControllerConnected connects to the controller and runs until ctx ends. It
+// returns relatch=true when the steward must go back to the tamper alarm: the
+// controller locked it, or a connect attempt hit a trust downgrade.
+func runControllerConnected(ctx context.Context, regToken string, facts startupFacts, cf connectFuncT, latch *tamperLatch, logger logging.Logger) (relatch bool, err error) {
+	publicBeta, installCAPEM, trustSrc, resolvedURL := facts.publicBeta, facts.installCAPEM, facts.trustSrc, facts.resolvedURL
+	if regToken != "" {
+		logger.Info("Using registration token for auto-registration (gRPC transport mode)",
+			"operation", "registration_init",
+			"token_prefix", logging.RedactedID(regToken))
 	}
 
-	// ── gRPC transport registration flow ─────────────────────────────────────
-	// A stored identity is enough to start: with an empty token the steward
-	// connects on the identity. This runs after secureStewardDataDir above, so
-	// the identity is only read from a checked data directory.
-	// With no usable identity, token or config, resolveStartupIdentity keeps the
-	// steward running until a token appears or an identity is stored.
-	regToken, storedID, waitErr := resolveStartupIdentity(ctx, regToken, configPath, logger)
-	if regToken != "" || storedID != nil {
-		publicBeta, profileErr := publicBetaSecurityEnabled()
-		if profileErr != nil {
-			return profileErr
-		}
-		if regToken != "" {
-			logger.Info("Using registration token for auto-registration (gRPC transport mode)",
-				"operation", "registration_init",
-				"token_prefix", logging.RedactedID(regToken))
-		}
+	// Derive a cancellable context so a pushed binary upgrade can request a
+	// graceful self-exit (the launcher then re-execs the staged binary).
+	// Cancelling runCtx flows into <-runCtx.Done() below, driving the clean
+	// Disconnect+return path — no hard os.Exit. The parent ctx (signal/SCM
+	// stop) still cancels runCtx too. (Issue #2001)
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
 
-		// Derive a cancellable context so a pushed binary upgrade can request a
-		// graceful self-exit (the launcher then re-execs the staged binary).
-		// Cancelling runCtx flows into <-runCtx.Done() below, driving the clean
-		// Disconnect+return path — no hard os.Exit. The parent ctx (signal/SCM
-		// stop) still cancels runCtx too. (Issue #2001)
-		runCtx, runCancel := context.WithCancel(ctx)
-		defer runCancel()
+	// ── Subsystem state tracker ───────────────────────────────────────────
+	// Tracks which subsystems are ready so the heartbeat can report the real
+	// health state instead of a hardcoded "healthy". (Issue #2034)
+	subsysState := newStartupSubsystemState(logger)
 
-		// ── Subsystem state tracker ───────────────────────────────────────────
-		// Tracks which subsystems are ready so the heartbeat can report the real
-		// health state instead of a hardcoded "healthy". (Issue #2034)
-		subsysState := newStartupSubsystemState(logger)
+	// Initialise device identity key store before registration so the refresh
+	// handshake path (Issue #2094) has a stable key available. Failure here is
+	// non-fatal: initial registration still works; only the refresh path is disabled.
+	ks, ksErr := openDeviceKeyStore(runCtx, certStoreDirResolver(), logger)
+	if ksErr != nil {
+		logger.Warn("Failed to open device identity key store; registration-refresh disabled", "error", logging.SanitizeLogValue(ksErr.Error()))
+		ks = nil
+	}
 
-		// Initialise device identity key store before registration so the refresh
-		// handshake path (Issue #2094) has a stable key available. Failure here is
-		// non-fatal: initial registration still works; only the refresh path is disabled.
-		ks, ksErr := openDeviceKeyStore(runCtx, certStoreDirResolver(), logger)
-		if ksErr != nil {
-			logger.Warn("Failed to open device identity key store; registration-refresh disabled", "error", logging.SanitizeLogValue(ksErr.Error()))
-			ks = nil
-		}
+	logStoredIdentityStart(logger)
 
-		// Resolve trust source using the compile-baked URL, install-time URL,
-		// and the CA cert on disk (written by the installer for install-pinned mode).
-		installCAPEM, caErr := loadInstallCAPEM(storedID, logger)
-		if caErr != nil {
-			return caErr
-		}
-		trustSrc, resolvedURL, trustErr := resolveTrustSourceForStart(ControllerURL, controllerURL, installCAPEM, storedID)
-		if trustErr != nil {
-			return trustErr
-		}
-		logStoredIdentityStart(logger)
+	// ── Non-fatal controller connect with exponential backoff ─────────────
+	// A connect failure at boot (network not up, controller not reachable) is
+	// a not-ready condition. The steward marks itself degraded and retries in
+	// the background instead of exiting. Process liveness is never gated on
+	// controller availability. (Issue #2034)
+	connectedCh := make(chan *client.TransportClient, 1)
+	tamperCh := make(chan *tamperFault, 1)
+	// Shared with the identity lifecycle runner: a connect attempt and a
+	// certificate renewal never run at the same time.
+	var connectMu sync.Mutex
+	// Read once, before the goroutine starts: the loop below can outlive
+	// runStewardInternal's caller, so it must not re-read the package var.
+	rejectedRetry := rejectedReadmissionRetry
+	pendingPoll := pendingReadmissionPoll
+	go (&controllerConnectLoop{
+		ctx: runCtx,
+		connect: func() (*client.TransportClient, error) {
+			return cf(runCtx, regToken, resolvedURL, trustSrc, installCAPEM, ks, publicBeta, logger)
+		},
+		subsys:        subsysState,
+		mu:            &connectMu,
+		rejectedRetry: rejectedRetry,
+		pendingPoll:   pendingPoll,
+		connectedCh:   connectedCh,
+		tamperCh:      tamperCh,
+		logger:        logger,
+	}).run()
 
-		// ── Non-fatal controller connect with exponential backoff ─────────────
-		// A connect failure at boot (network not up, controller not reachable) is
-		// a not-ready condition. The steward marks itself degraded and retries in
-		// the background instead of exiting. Process liveness is never gated on
-		// controller availability. (Issue #2034)
-		connectedCh := make(chan *client.TransportClient, 1)
-		// Shared with the identity lifecycle runner: a connect attempt and a
-		// certificate renewal never run at the same time.
-		var connectMu sync.Mutex
-		// Read once, before the goroutine starts: the loop below can outlive
-		// runStewardInternal's caller, so it must not re-read the package var.
-		rejectedRetry := rejectedReadmissionRetry
-		pendingPoll := pendingReadmissionPoll
-		go func() {
-			backoff := 5 * time.Second
-			const maxBackoff = 5 * time.Minute
-			for {
-				if runCtx.Err() != nil {
-					return
-				}
-				connectMu.Lock()
-				tc, connErr := connectGuarded(subsysState, logger, func() (*client.TransportClient, error) {
-					return cf(runCtx, regToken, resolvedURL, trustSrc, installCAPEM, ks, publicBeta, logger)
-				})
-				connectMu.Unlock()
-				if connErr == nil {
-					subsysState.markHealthy("controller")
-					connectedCh <- tc
-					return
-				}
-				if runCtx.Err() != nil {
-					return
-				}
-				// Security refusals are never silently retried, but they never stop
-				// the steward either (Issue #4532): it logs loudly and asks again at
-				// a slow interval, so it recovers without anyone at the device once
-				// the cause is resolved.
-				if errors.Is(connErr, registration.ErrRefreshRejected) {
-					// The controller refused re-admission (revoked, tenant policy, or an
-					// operator rejected it). The refusal holds, but the steward keeps
-					// asking at a slow interval so a later approval needs no one at the
-					// device (Issue #4532).
-					logger.Error("Controller refused re-admission; asking again later",
-						"operation", "connect_rejected",
-						"error", logging.SanitizeLogValue(connErr.Error()),
-						"retry_in", rejectedRetry)
-					select {
-					case <-runCtx.Done():
-						return
-					case <-time.After(rejectedRetry):
-					}
-					continue
-				}
-				if errors.Is(connErr, registration.ErrRefreshPending) {
-					// Re-admission is queued for operator approval: nothing is wrong
-					// with the connection, so check for the outcome at a short fixed
-					// interval and leave the backoff for genuine failures — an approval
-					// then takes effect within seconds (Issue #4669).
-					wait := pendingReadmissionWait(pendingPoll)
-					logger.Info("Re-admission awaiting operator approval; checking again shortly",
-						"operation", "connect_pending",
-						"retry_in", wait)
-					select {
-					case <-runCtx.Done():
-						return
-					case <-time.After(wait):
-					}
-					continue
-				}
-				if isTrustDowngrade(connErr) {
-					// The configured trust source is weaker than the one this steward
-					// enrolled with — a possible man-in-the-middle signal, so it will not
-					// connect with it. It checks again at the slow interval: a transient
-					// cause (a pinned CA file briefly unreadable) then recovers on its
-					// own; a real change needs the identity wiped to re-enroll.
-					logger.Error("Trust-anchor downgrade refused; not connecting with a weaker trust source, checking again later",
-						"operation", "connect_trust_downgrade",
-						"error", logging.SanitizeLogValue(connErr.Error()),
-						"retry_in", rejectedRetry)
-					select {
-					case <-runCtx.Done():
-						return
-					case <-time.After(rejectedRetry):
-					}
-					continue
-				}
-				logger.Warn("Controller connection failed; running in degraded mode, will retry",
-					"operation", "connect_retry",
-					"error", logging.SanitizeLogValue(connErr.Error()),
-					"backoff", backoff)
-				select {
-				case <-runCtx.Done():
-					return
-				case <-time.After(backoff):
-				}
-				backoff = nextConnectBackoff(backoff, maxBackoff)
-			}
-		}()
+	// Block until connected or shutdown signal — the launcher startup window
+	// (#2033) handles known-good gating; this just ensures we stay alive.
+	var transportCl *client.TransportClient
+	select {
+	case transportCl = <-connectedCh:
+	case <-runCtx.Done():
+		logger.Info("Shutdown before controller connection established",
+			"operation", "steward_shutdown")
+		return false, nil
+	case fault := <-tamperCh:
+		// A connect attempt hit a tamper refusal: latch and go back to the alarm.
+		latch.raise(fault.code)
+		return true, nil
+	}
 
-		// Block until connected or shutdown signal — the launcher startup window
-		// (#2033) handles known-good gating; this just ensures we stay alive.
-		var transportCl *client.TransportClient
-		select {
-		case transportCl = <-connectedCh:
-		case <-runCtx.Done():
-			logger.Info("Shutdown before controller connection established",
-				"operation", "steward_shutdown")
-			return nil
-		}
+	// Wire real health state into the periodic heartbeat so the controller
+	// can distinguish "started but subsystems pending" from "fully healthy".
+	// Must be called before loops start so the first periodic heartbeat uses
+	// the correct status. (Issue #2034)
+	transportCl.SetStatusFunc(subsysState.status)
+	// Share the subsystem reasons with the client so the heartbeat carries
+	// why the steward is degraded, alongside components that set their own.
+	transportCl.UseHealthReasons(subsysState.reasons)
 
-		// Wire real health state into the periodic heartbeat so the controller
-		// can distinguish "started but subsystems pending" from "fully healthy".
-		// Must be called before loops start so the first periodic heartbeat uses
-		// the correct status. (Issue #2034)
-		transportCl.SetStatusFunc(subsysState.status)
-		// Share the subsystem reasons with the client so the heartbeat carries
-		// why the steward is degraded, alongside components that set their own.
-		transportCl.UseHealthReasons(subsysState.reasons)
+	// Wire the graceful-shutdown trigger used after a successful
+	// push_steward_binary swap. Pass runCtx so the upgrade grace-delay timer
+	// watches the process lifecycle (cancelled only on SCM stop / signal /
+	// runCancel) for early-exit, NOT a per-command context. (Issue #2001, #2003)
+	transportCl.SetShutdownFunc(runCtx, runCancel)
 
-		// Wire the graceful-shutdown trigger used after a successful
-		// push_steward_binary swap. Pass runCtx so the upgrade grace-delay timer
-		// watches the process lifecycle (cancelled only on SCM stop / signal /
-		// runCancel) for early-exit, NOT a per-command context. (Issue #2001, #2003)
-		transportCl.SetShutdownFunc(runCtx, runCancel)
+	// A TamperState{locked: true} latches the host: it stays report-only across
+	// restarts until the controller restores it (tamper_alarm.go).
+	controllerLocked := watchControllerLock(transportCl, latch)
 
-		logger.Info("Steward registered and connected successfully via gRPC transport",
-			"operation", "registration_complete",
-			"steward_id", transportCl.GetStewardID(),
-			"tenant_id", transportCl.GetTenantID())
+	logger.Info("Steward registered and connected successfully via gRPC transport",
+		"operation", "registration_complete",
+		"steward_id", transportCl.GetStewardID(),
+		"tenant_id", transportCl.GetTenantID())
 
-		logger.Info("Running in gRPC controller-connected mode",
-			"operation", "steward_mode",
-			"mode", "grpc_transport")
+	logger.Info("Running in gRPC controller-connected mode",
+		"operation", "steward_mode",
+		"mode", "grpc_transport")
 
-		// Collect and publish DNA so the controller's steward record carries
-		// `os`, `hostname`, `arch`, etc. — selectors like `os:windows` and
-		// `cfg steward run-command --target …` depend on the controller
-		// having received a non-empty DNA snapshot. Without this one-shot
-		// publish, the controller's steward record stays at its registration-
-		// time defaults (empty DNA) and every selector matches zero stewards.
-		// Failures are non-fatal — the steward stays usable for config
-		// convergence even if DNA publication is briefly unavailable; the
-		// controller will pick up DNA on the next convergence-driven publish
-		// in publishConfigStatus. On success the DNA subsystem is marked healthy
-		// so the heartbeat transitions from degraded to healthy. (Issue #2034)
-		// Publish the FULL composite DNA (hardware + module). Using the composite
-		// collector — not a raw host-only dna.Collector — is essential: a host-only
-		// publish here runs after config apply and would delta-clobber the module
-		// DNA (cluster:*, vm:*) the config-apply publish just sent (#2520).
-		if pubErr := transportCl.PublishCurrentDNA(runCtx); pubErr != nil {
-			// DNA subsystem stays degraded; the refresh loop retries on each tick.
-			logger.Warn("Initial DNA publish failed; controller selectors may match no stewards until the next convergence-driven publish",
-				"error", pubErr)
-		} else {
-			subsysState.markHealthy("dna")
-			logger.Info("Initial DNA snapshot published")
-		}
+	// Collect and publish DNA so the controller's steward record carries
+	// `os`, `hostname`, `arch`, etc. — selectors like `os:windows` and
+	// `cfg steward run-command --target …` depend on the controller
+	// having received a non-empty DNA snapshot. Without this one-shot
+	// publish, the controller's steward record stays at its registration-
+	// time defaults (empty DNA) and every selector matches zero stewards.
+	// Failures are non-fatal — the steward stays usable for config
+	// convergence even if DNA publication is briefly unavailable; the
+	// controller will pick up DNA on the next convergence-driven publish
+	// in publishConfigStatus. On success the DNA subsystem is marked healthy
+	// so the heartbeat transitions from degraded to healthy. (Issue #2034)
+	// Publish the FULL composite DNA (hardware + module). Using the composite
+	// collector — not a raw host-only dna.Collector — is essential: a host-only
+	// publish here runs after config apply and would delta-clobber the module
+	// DNA (cluster:*, vm:*) the config-apply publish just sent (#2520).
+	if pubErr := transportCl.PublishCurrentDNA(runCtx); pubErr != nil {
+		// DNA subsystem stays degraded; the refresh loop retries on each tick.
+		logger.Warn("Initial DNA publish failed; controller selectors may match no stewards until the next convergence-driven publish",
+			"error", logging.SanitizeLogValue(pubErr.Error()))
+	} else {
+		subsysState.markHealthy("dna")
+		logger.Info("Initial DNA snapshot published")
+	}
 
-		// Check for launcher-written upgrade flag files and emit lifecycle events.
-		// Must run before the heartbeat loop so the controller learns commit/rollback
-		// status on the first heartbeat after a restart. (Issue #1943)
-		checkUpgradeFlagFiles(runCtx, certStoreDirResolver(), transportCl, logger)
+	// Check for launcher-written upgrade flag files and emit lifecycle events.
+	// Must run before the heartbeat loop so the controller learns commit/rollback
+	// status on the first heartbeat after a restart. (Issue #1943)
+	checkUpgradeFlagFiles(runCtx, certStoreDirResolver(), transportCl, logger)
 
-		// Start scheduled convergence loop. The initial interval defaults to
-		// 30 minutes. When the controller delivers a cfg, the loop reads
-		// converge_interval from it and resets the ticker accordingly.
-		// sync_config commands from the controller also trigger immediate
-		// convergence as an out-of-band optimization on top of the schedule.
-		transportCl.StartConvergenceLoop(runCtx)
+	// Start scheduled convergence loop. The initial interval defaults to
+	// 30 minutes. When the controller delivers a cfg, the loop reads
+	// converge_interval from it and resets the ticker accordingly.
+	// sync_config commands from the controller also trigger immediate
+	// convergence as an out-of-band optimization on top of the schedule.
+	transportCl.StartConvergenceLoop(runCtx)
 
-		// Start periodic DNA refresh loop. Re-collects system attributes on
-		// the configured interval and publishes delta updates so the controller
-		// fleet view stays current without requiring a full reconnect. (Issue #1915)
-		transportCl.StartDNARefreshLoop(runCtx)
+	// Start periodic DNA refresh loop. Re-collects system attributes on
+	// the configured interval and publishes delta updates so the controller
+	// fleet view stays current without requiring a full reconnect. (Issue #1915)
+	transportCl.StartDNARefreshLoop(runCtx)
 
-		// Keep the client certificate current for as long as the process runs:
-		// renew inside the renewal window and re-dial on this same client.
-		go (&identityLifecycle{
-			tc:            transportCl,
-			ks:            ks,
-			certStoreDir:  certStoreDirResolver(),
-			controllerURL: resolvedURL,
-			trustSrc:      trustSrc,
-			installCAPEM:  installCAPEM,
-			logger:        logger,
-			mu:            &connectMu,
-			rejectedRetry: rejectedRetry,
-			pendingPoll:   pendingPoll,
-		}).Run(runCtx)
+	// Keep the client certificate current for as long as the process runs:
+	// renew inside the renewal window and re-dial on this same client.
+	go (&identityLifecycle{
+		tc:            transportCl,
+		ks:            ks,
+		certStoreDir:  certStoreDirResolver(),
+		controllerURL: resolvedURL,
+		trustSrc:      trustSrc,
+		installCAPEM:  installCAPEM,
+		logger:        logger,
+		mu:            &connectMu,
+		rejectedRetry: rejectedRetry,
+		pendingPoll:   pendingPoll,
+	}).Run(runCtx)
 
-		// Wait for context cancellation (signal, SCM stop, or a pushed-upgrade
-		// graceful self-exit request via SetShutdownFunc → runCancel).
-		<-runCtx.Done()
+	// Wait for context cancellation (signal, SCM stop, or a pushed-upgrade
+	// graceful self-exit request via SetShutdownFunc → runCancel).
+	return waitAndDisconnect(runCtx, controllerLocked, transportCl, logger), nil
+}
+
+// waitAndDisconnect blocks until ctx ends or the controller locks this host,
+// then disconnects. It returns true when the controller locked the host.
+func waitAndDisconnect(ctx context.Context, controllerLocked <-chan struct{}, transportCl *client.TransportClient, logger logging.Logger) bool {
+	relatched := false
+	select {
+	case <-ctx.Done():
+	case <-controllerLocked:
+		relatched = true
+	}
+	if relatched {
+		logger.Warn("Controller locked this host; holding report-only until it is restored",
+			"operation", "tamper_relatch")
+	} else {
 		logger.Info("Shutdown signal received, disconnecting...",
 			"operation", "steward_shutdown")
-
-		disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer disconnectCancel()
-		if err := transportCl.Disconnect(disconnectCtx); err != nil {
-			logger.Error("Error during transport disconnect",
-				"operation", "transport_disconnect",
-				"error", err.Error())
-		}
-
-		logger.Info("Steward shutdown completed", "operation", "steward_shutdown", "status", "completed")
-		return nil
 	}
 
-	return runStandaloneOrStop(ctx, configPath, waitErr, logger)
+	disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer disconnectCancel()
+	if err := transportCl.Disconnect(disconnectCtx); err != nil {
+		logger.Error("Error during transport disconnect",
+			"operation", "transport_disconnect",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+
+	logger.Info("Steward shutdown completed", "operation", "steward_shutdown", "status", "completed")
+	return relatched
+}
+
+// controllerConnectLoop is the non-fatal background connect with backoff: it
+// retries until it connects (sent on connectedCh), hits a trust downgrade
+// (sent on tamperCh) or ctx ends.
+type controllerConnectLoop struct {
+	ctx           context.Context
+	connect       func() (*client.TransportClient, error)
+	subsys        *subsystemState
+	mu            *sync.Mutex
+	rejectedRetry time.Duration
+	pendingPoll   time.Duration
+	connectedCh   chan<- *client.TransportClient
+	tamperCh      chan<- *tamperFault
+	logger        logging.Logger
+}
+
+func (l *controllerConnectLoop) run() {
+	backoff := 5 * time.Second
+	const maxBackoff = 5 * time.Minute
+	for {
+		if l.ctx.Err() != nil {
+			return
+		}
+		l.mu.Lock()
+		tc, connErr := connectGuarded(l.subsys, l.logger, l.connect)
+		l.mu.Unlock()
+		if connErr == nil {
+			l.subsys.markHealthy("controller")
+			l.connectedCh <- tc
+			return
+		}
+		if l.ctx.Err() != nil {
+			return
+		}
+		wait, isBackoff, stop := l.retryWait(connErr, backoff)
+		if stop || !sleepUnlessDone(l.ctx, wait) {
+			return
+		}
+		if isBackoff {
+			backoff = nextConnectBackoff(backoff, maxBackoff)
+		}
+	}
+}
+
+// retryWait classifies a connect failure. It returns how long to wait before
+// the next attempt, whether that wait is the exponential backoff, and whether
+// the loop must stop.
+func (l *controllerConnectLoop) retryWait(connErr error, backoff time.Duration) (wait time.Duration, isBackoff bool, stop bool) {
+	// Security refusals are never silently retried, but they never stop
+	// the steward either (Issue #4532): it logs loudly and asks again at
+	// a slow interval, so it recovers without anyone at the device once
+	// the cause is resolved.
+	switch {
+	case errors.Is(connErr, registration.ErrRefreshRejected):
+		// The controller refused re-admission (revoked, tenant policy, or an
+		// operator rejected it). The refusal holds, but the steward keeps
+		// asking at a slow interval so a later approval needs no one at the
+		// device (Issue #4532).
+		l.logger.Error("Controller refused re-admission; asking again later",
+			"operation", "connect_rejected",
+			"error", logging.SanitizeLogValue(connErr.Error()),
+			"retry_in", l.rejectedRetry)
+		return l.rejectedRetry, false, false
+	case errors.Is(connErr, registration.ErrRefreshPending):
+		// Re-admission is queued for operator approval: nothing is wrong
+		// with the connection, so check for the outcome at a short fixed
+		// interval and leave the backoff for genuine failures — an approval
+		// then takes effect within seconds (Issue #4669).
+		wait := pendingReadmissionWait(l.pendingPoll)
+		l.logger.Info("Re-admission awaiting operator approval; checking again shortly",
+			"operation", "connect_pending",
+			"retry_in", wait)
+		return wait, false, false
+	case isTrustDowngrade(connErr):
+		// The configured trust source is weaker than the one this steward
+		// enrolled with — a possible man-in-the-middle signal, so it will not
+		// connect with it. It raises the tamper alarm and does not retry: the
+		// latch holds until the controller restores the host.
+		l.logger.Error("Trust-anchor downgrade refused; not connecting with a weaker trust source",
+			"operation", "connect_trust_downgrade",
+			"error", logging.SanitizeLogValue(connErr.Error()))
+		l.tamperCh <- &tamperFault{code: cpTypes.ReasonCodeTamperTrustDowngrade}
+		return 0, false, true
+	}
+	l.logger.Warn("Controller connection failed; running in degraded mode, will retry",
+		"operation", "connect_retry",
+		"error", logging.SanitizeLogValue(connErr.Error()),
+		"backoff", backoff)
+	return backoff, true, false
+}
+
+// sleepUnlessDone waits for d. It returns false when ctx ended first.
+func sleepUnlessDone(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
 }
 
 // runStandaloneOrStop handles startup without a token or identity: standalone

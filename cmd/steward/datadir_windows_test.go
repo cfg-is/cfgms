@@ -10,11 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/windows"
 
+	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/security"
 	"github.com/cfgis/cfgms/pkg/testutil/winacct"
@@ -84,11 +86,38 @@ func TestRunStewardInternal_LocksDataDirBeforeCreatingLogFiles(t *testing.T) {
 	winacct.SetOwner(t, file, guest)
 	logDir := filepath.Join(dir, "logs")
 	t.Setenv("CFGMS_LOG_DIR", logDir)
+	prevStore := certStoreDirResolver
+	certStoreDirResolver = func() string { return t.TempDir() }
+	t.Cleanup(func() { certStoreDirResolver = prevStore })
 
-	err := runStewardInternal(context.Background(), "", "", "", nil)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, security.ErrUntrustedDirOwner, "the steward must refuse to start")
+	// The refusal no longer ends the process: with no stored identity the
+	// steward holds the alarm locally until it is stopped.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, runStewardInternal(ctx, "", "", "", nil))
 
 	_, statErr := os.Stat(logDir)
 	assert.True(t, os.IsNotExist(statErr), "no log directory may be created in the tree before the lockdown")
+}
+
+// A data directory owned by an unrelated non-admin principal: the steward does
+// not exit, connects report-only to a real controller and the heartbeat
+// carries the data-directory tamper code. Reverting the change makes
+// runStewardInternal return the error, which fails the done check.
+func TestRunStewardInternal_UnrelatedOwner_ReportsDataDirTamper(t *testing.T) {
+	guest := winacct.StandardUser(t)
+	dir, _, file := useStewardDataDir(t)
+	winacct.SetOwner(t, file, guest)
+
+	e := newAlarmEnv(t, trustSourceCompileBaked)
+	dataDirCheck = secureStewardDataDir // the real check, not the test seam
+	t.Setenv("CFGMS_LOG_DIR", filepath.Join(dir, "logs"))
+
+	stop, done := e.runSteward(t, "", e.cf())
+	hb := tamperHeartbeat(t, e.f.srv, cpTypes.ReasonCodeTamperDataDir)
+	assert.Equal(t, cpTypes.StatusError, hb.Status)
+	assertAlive(t, done)
+	assert.Zero(t, e.connect.Load(), "the normal connect is never attempted")
+	assert.Equal(t, guest.String(), winacct.Owner(t, file), "a standard user's entry must never be adopted")
+	require.NoError(t, stop())
 }

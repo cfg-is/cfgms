@@ -88,28 +88,36 @@ func reportOnlyAnchor(id *StewardIdentity, trustSrc TrustSource, logger logging.
 // dials nothing. A stored identity that cannot be loaded at all is S19/S20's
 // case and returns errReportOnlyNoIdentity.
 func connectReportOnly(ctx context.Context, certStoreDir string, trustSrc TrustSource, logger logging.Logger) (*client.TransportClient, error) {
+	return connectReportOnlyLink(ctx, certStoreDir, trustSrc, reportOnlyLinkOptions{}, logger)
+}
+
+// reportOnlyLinkOptions tunes connectReportOnlyLink for the tamper alarm.
+type reportOnlyLinkOptions struct {
+	// anchorPEM, when set, is the CA the link trusts instead of the one
+	// reportOnlyAnchor derives. The caller has already verified it against the
+	// identity's pin (reconstructPinnedCA).
+	anchorPEM string
+	// prepare runs on the client before it connects, so a handler it installs
+	// sees everything the controller sends on connect.
+	prepare func(tc *client.TransportClient)
+}
+
+// connectReportOnlyLink is connectReportOnly with options.
+func connectReportOnlyLink(ctx context.Context, certStoreDir string, trustSrc TrustSource, opts reportOnlyLinkOptions, logger logging.Logger) (*client.TransportClient, error) {
 	id, err := loadIdentity(certStoreDir)
 	if err != nil || id == nil {
 		return nil, errReportOnlyNoIdentity
 	}
-	anchorPEM, err := reportOnlyAnchor(id, trustSrc, logger)
+	anchorPEM := opts.anchorPEM
+	if anchorPEM == "" {
+		anchorPEM, err = reportOnlyAnchor(id, trustSrc, logger)
+	}
 	if err != nil {
 		return nil, err
 	}
-
-	certMgr, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath:    certStoreDir,
-		LoadExistingCA: true,
-	})
+	certMgr, err := loadReportOnlyCertManager(certStoreDir)
 	if err != nil {
-		return nil, fmt.Errorf("report-only link: cert store not loadable: %w", err)
-	}
-	certs, err := certMgr.ListCertificates()
-	if err != nil {
-		return nil, fmt.Errorf("report-only link: cert list unavailable: %w", err)
-	}
-	if !hasValidClientCert(certs) {
-		return nil, errReportOnlyNoClientCert
+		return nil, err
 	}
 
 	tc, err := client.NewTransportClient(&client.TransportConfig{
@@ -130,10 +138,34 @@ func connectReportOnly(ctx context.Context, certStoreDir string, trustSrc TrustS
 	tc.SetStewardID(id.StewardID)
 	tc.SetTenantID(id.TenantID)
 	applyStartupReasons(tc)
+	if opts.prepare != nil {
+		opts.prepare(tc)
+	}
 
 	if err := tc.Connect(ctx); err != nil {
 		_ = tc.Disconnect(context.Background())
 		return nil, fmt.Errorf("report-only link: connect failed: %w", err)
 	}
 	return tc, nil
+}
+
+// loadReportOnlyCertManager opens the cert store and requires a valid client
+// certificate in it: the report-only link authenticates with the stored
+// identity and never enrolls.
+func loadReportOnlyCertManager(certStoreDir string) (*cert.Manager, error) {
+	certMgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath:    certStoreDir,
+		LoadExistingCA: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("report-only link: cert store not loadable: %w", err)
+	}
+	certs, err := certMgr.ListCertificates()
+	if err != nil {
+		return nil, fmt.Errorf("report-only link: cert list unavailable: %w", err)
+	}
+	if !hasValidClientCert(certs) {
+		return nil, errReportOnlyNoClientCert
+	}
+	return certMgr, nil
 }
