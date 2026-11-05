@@ -1,4 +1,4 @@
-.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-rest test-go-group-macos-providers test-go-group-macos-steward test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection complexity-report complexity-check complexity-replay clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
+.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-rest test-go-group-macos-providers test-go-group-macos-steward test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection complexity-report complexity-check complexity-replay duplication-report clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -2097,6 +2097,12 @@ complexity-check:
 # full history, not part of test-commit). Override the window with COMPLEXITY_REPLAY_N.
 complexity-replay:
 	@go run ./scripts/complexity replay -n $(or $(COMPLEXITY_REPLAY_N),30)
+
+# duplication-report measures clone-duplicated lines of the production Go population and writes
+# the versioned metric file. Report-only; not part of test-commit.
+DUPLICATION_OUT ?= bin/duplication/metrics.json
+duplication-report:
+	@go run ./scripts/complexity duplication report -root . -out $(DUPLICATION_OUT)
 
 # Performance optimization and metrics collection (Story #100)
 security-workflow-metrics:
