@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -271,7 +272,13 @@ func TestInitializationRunChar_CADirectoryCreationFailure(t *testing.T) {
 
 	_, err := Run(cfg, logging.NewNoopLogger())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to create CA directory")
+	if runtime.GOOS == "windows" {
+		// Windows adopts the data tree before the CA directory step and
+		// rejects the file-as-directory path there.
+		assert.Contains(t, err.Error(), "failed to secure controller data directory")
+	} else {
+		assert.Contains(t, err.Error(), "failed to create CA directory")
+	}
 	assert.False(t, IsInitialized(badCA))
 	assert.NoFileExists(t, bundlePath)
 }
