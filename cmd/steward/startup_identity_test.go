@@ -184,8 +184,11 @@ func TestRunStewardInternal_FailedDataDirCheck_DoesNotUseIdentityAddress(t *test
 		return nil, errors.New("must not dial")
 	})
 	resetStartupReasons(t)
-	err := runStewardInternal(context.Background(), "", "", "", cf)
-	require.Error(t, err)
+	// A refused data directory no longer ends the process: the steward holds
+	// report-only (tamper_alarm.go) until cancelled.
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	require.NoError(t, runStewardInternal(ctx, "", "", "", cf))
 	assert.Zero(t, calls.Load(), "the identity's address must not be used after a failed check")
 	assert.Empty(t, startupReasons.List(), "no controller_url reason: the identity was never consulted")
 }

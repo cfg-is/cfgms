@@ -511,14 +511,19 @@ func TestReadmissionPacer_DistrustsImplausiblePaceFile(t *testing.T) {
 	})
 }
 
-// TestRunSteward_TrustDowngradeKeepsChecking guards the founder decision on
-// Issue #4532: a trust downgrade still refuses to connect, but no longer stops the
-// connect loop — the steward checks again at the slow interval.
-func TestRunSteward_TrustDowngradeKeepsChecking(t *testing.T) {
+// TestRunSteward_TrustDowngradeRaisesAlarmAndDoesNotRetry: a trust downgrade
+// found by a connect attempt refuses to connect and raises the tamper latch
+// instead of being retried silently (Issue #5663, replacing the hourly retry of
+// Issue #4532). The steward stays alive.
+func TestRunSteward_TrustDowngradeRaisesAlarmAndDoesNotRetry(t *testing.T) {
 	t.Setenv("CFGMS_LOG_DIR", t.TempDir())
 	saved := ControllerURL
 	ControllerURL = "https://ctrl.test:4433"
 	defer func() { ControllerURL = saved }()
+	prevStore := certStoreDirResolver
+	storeDir := t.TempDir()
+	certStoreDirResolver = func() string { return storeDir }
+	defer func() { certStoreDirResolver = prevStore }()
 	prevRetry := rejectedReadmissionRetry
 	rejectedReadmissionRetry = 20 * time.Millisecond
 	defer func() { rejectedReadmissionRetry = prevRetry }()
@@ -532,7 +537,8 @@ func TestRunSteward_TrustDowngradeKeepsChecking(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	require.NoError(t, runStewardInternal(ctx, "tok_test_downgrade", "", "", downgraded))
-	assert.GreaterOrEqual(t, attempts.Load(), int32(2), "a trust downgrade keeps being re-checked")
+	assert.Equal(t, int32(1), attempts.Load(), "a trust downgrade is not retried")
+	assert.FileExists(t, filepath.Join(storeDir, tamperLatchFileName), "the alarm latches")
 }
 
 // TestClearReadmissionState_DropsPaceAndFiledRequest: once connected, neither a
