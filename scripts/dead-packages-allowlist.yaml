@@ -118,6 +118,15 @@ packages:
       cannot see them as test-support importers. It must never be reachable
       from a main package: it creates local accounts.
 
+  # --- Pending wiring by a tracked follow-up story ---------------------------
+  - path: scripts/complexity/duplication/detector
+    reason: >
+      Issue #5787: pure clone-detection library for the duplication gate
+      (epic #5773), delivered ahead of its consumer by design. Repository
+      walking, the CLI and gate rules that import it are #5788, #5789 and
+      #5790; delete this entry in the story that wires it into a main
+      package.
+
   # --- DELETE (Issue #4345): superseded, orphaned, or abandoned — a ---------
   # --- capability-map-then-delete follow-up is drafted in the #4345 ---------
   # --- classification comment, pending PO creation. Deleting any of these ---
