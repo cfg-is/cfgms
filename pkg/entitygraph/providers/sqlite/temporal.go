@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	"github.com/cfgis/cfgms/pkg/entitygraph/providers/internal/egcommon"
 )
 
 // currentEntityRow holds one scanned row from the entity source queries,
@@ -151,44 +152,6 @@ func (p *SQLiteEntityGraphProvider) entityStateAsOf(ctx context.Context, subject
 	return mergeAttributes(entityRowsToEntries(rows)), nil
 }
 
-// computeAttributeChanges returns the set of attributes that differ between two
-// merged state snapshots. Either snapshot may be nil (entity did not exist).
-// Attributes present in only one snapshot are included (Before or After nil).
-// The result is sorted by attribute name for deterministic output.
-func computeAttributeChanges(atT1, atT2 map[string]interface{}) []interfaces.AttributeChange {
-	keys := make(map[string]struct{})
-	for k := range atT1 {
-		keys[k] = struct{}{}
-	}
-	for k := range atT2 {
-		keys[k] = struct{}{}
-	}
-
-	var changes []interfaces.AttributeChange
-	for k := range keys {
-		v1, ok1 := atT1[k]
-		v2, ok2 := atT2[k]
-		if !ok1 && !ok2 {
-			continue
-		}
-		j1, _ := json.Marshal(v1)
-		j2, _ := json.Marshal(v2)
-		if ok1 == ok2 && string(j1) == string(j2) {
-			continue
-		}
-		changes = append(changes, interfaces.AttributeChange{
-			Attribute: k,
-			Before:    v1,
-			After:     v2,
-		})
-	}
-
-	sort.Slice(changes, func(i, j int) bool {
-		return changes[i].Attribute < changes[j].Attribute
-	})
-	return changes
-}
-
 // Diff computes the attribute delta between two as-of states of a subject. It
 // projects the merged entity state at r.From and r.To, then returns the set of
 // attributes whose values differ.
@@ -208,7 +171,7 @@ func (p *SQLiteEntityGraphProvider) Diff(ctx context.Context, eid interfaces.EID
 		Subject: eid,
 		T1:      r.From,
 		T2:      r.To,
-		Changes: computeAttributeChanges(atT1, atT2),
+		Changes: egcommon.ComputeAttributeChanges(atT1, atT2),
 	}, nil
 }
 

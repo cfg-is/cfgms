@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	"github.com/cfgis/cfgms/pkg/entitygraph/providers/internal/egcommon"
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
 )
 
@@ -115,6 +116,20 @@ func materializePlaceholderNode(ctx context.Context, tx *sql.Tx, subject string)
 	return nil
 }
 
+// edgeTenantConds returns the predicates that keep only edges whose two
+// endpoints are both owned inside the filter's tenant cut, or none when the cut
+// is inactive.
+func edgeTenantConds(filter interfaces.EdgeFilter, args *[]interface{}) []string {
+	cut := interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs)
+	if !cut.Active() {
+		return nil
+	}
+	return []string{
+		egcommon.TenantSubtreeCond("fi.owning_tenant", cut, questionMark, args),
+		egcommon.TenantSubtreeCond("ti.owning_tenant", cut, questionMark, args),
+	}
+}
+
 // GetEdges returns edges matching the filter. Tenant filtering is applied via a
 // JOIN against eg_entity_index (current endpoint ownership), never via any
 // tenant column on the edge row itself (ADR-023 §4 / Story-3 AC 5).
@@ -148,12 +163,7 @@ func (p *SQLiteEntityGraphProvider) GetEdges(ctx context.Context, filter interfa
 		conds = append(conds, "ep.source = ?")
 		args = append(args, filter.Source)
 	}
-	if cut := interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs); cut.Active() {
-		conds = append(conds,
-			tenantSubtreeCond("fi.owning_tenant", cut, &args),
-			tenantSubtreeCond("ti.owning_tenant", cut, &args),
-		)
-	}
+	conds = append(conds, edgeTenantConds(filter, &args)...)
 
 	if filter.After != "" {
 		afterKey, err := interfaces.DecodeEdgeCursor(filter.After)

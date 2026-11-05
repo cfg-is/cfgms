@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/entitygraph/providers/internal/egcommon"
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
 )
 
@@ -118,7 +119,7 @@ func TestEscapeLIKE_Database(t *testing.T) {
 		{`100%_done`, `100\%\_done`},
 	}
 	for _, tc := range cases {
-		require.Equal(t, tc.want, escapeLIKE(tc.in), "input: %q", tc.in)
+		require.Equal(t, tc.want, egcommon.EscapeLIKE(tc.in), "input: %q", tc.in)
 	}
 }
 

@@ -5,9 +5,7 @@ package sqlite
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	"github.com/cfgis/cfgms/pkg/entitygraph/providers/internal/egcommon"
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
 )
 
@@ -23,7 +22,7 @@ import (
 // observation kind is ObservationKindDriftDiff. ON CONFLICT preserves the
 // existing lifecycle_status so that lifecycle annotations survive re-reports.
 func updateDriftProjectionFromObservation(ctx context.Context, tx *sql.Tx, obs types.Observation) error {
-	fieldsJSON, err := driftFieldsJSON(obs.Payload)
+	fieldsJSON, err := egcommon.DriftFieldsJSON(obs.Payload)
 	if err != nil {
 		return fmt.Errorf("entitygraph/sqlite: encode drift fields: %w", err)
 	}
@@ -52,7 +51,7 @@ func applyLifecycleTransitionFromObs(ctx context.Context, tx *sql.Tx, obs types.
 	if transition == "" {
 		return nil
 	}
-	newStatus, err := transitionLifecycleStatus(transition)
+	newStatus, err := egcommon.TransitionLifecycleStatus(dialect, transition)
 	if err != nil {
 		return nil // unknown transition: skip gracefully during replay
 	}
@@ -65,54 +64,6 @@ func applyLifecycleTransitionFromObs(ctx context.Context, tx *sql.Tx, obs types.
 	return nil
 }
 
-// driftFieldsJSON marshals the "fields" payload key as a JSON string for
-// storage in eg_drift_projection.fields. Returns "[]" for absent or nil fields.
-func driftFieldsJSON(payload map[string]interface{}) (string, error) {
-	if payload == nil {
-		return "[]", nil
-	}
-	raw, ok := payload["fields"]
-	if !ok {
-		return "[]", nil
-	}
-	b, err := json.Marshal(raw)
-	if err != nil {
-		return "", fmt.Errorf("marshal drift fields: %w", err)
-	}
-	return string(b), nil
-}
-
-// parseDriftFields decodes a JSON-encoded DriftField list from the storage
-// column. Returns nil for empty or null values.
-func parseDriftFields(data string) ([]interfaces.DriftField, error) {
-	if data == "" || data == "[]" || data == "null" {
-		return nil, nil
-	}
-	var raw []map[string]interface{}
-	if err := json.Unmarshal([]byte(data), &raw); err != nil {
-		return nil, fmt.Errorf("entitygraph/sqlite: parse drift fields: %w", err)
-	}
-	fields := make([]interfaces.DriftField, 0, len(raw))
-	for _, r := range raw {
-		f := interfaces.DriftField{
-			Attribute: extractString(r, "attribute"),
-		}
-		if v, ok := r["desired"]; ok {
-			f.Desired = v
-		}
-		if v, ok := r["actual"]; ok {
-			f.Actual = v
-		}
-		if v, ok := r["matching"]; ok {
-			if b, ok := v.(bool); ok {
-				f.Matching = b
-			}
-		}
-		fields = append(fields, f)
-	}
-	return fields, nil
-}
-
 // normalizeDriftLifecycleStatus converts the empty string (rows created with
 // DEFAULT ”) to "detected". All other values pass through unchanged.
 func normalizeDriftLifecycleStatus(status string) string {
@@ -120,21 +71,6 @@ func normalizeDriftLifecycleStatus(status string) string {
 		return "detected"
 	}
 	return status
-}
-
-// transitionLifecycleStatus maps a lifecycle transition verb to the resulting
-// status string. Returns an error for unrecognized transitions.
-func transitionLifecycleStatus(transition string) (string, error) {
-	switch transition {
-	case "acknowledge":
-		return "acknowledged", nil
-	case "resolve":
-		return "resolved", nil
-	case "ignore":
-		return "ignored", nil
-	default:
-		return "", fmt.Errorf("entitygraph/sqlite: unknown lifecycle transition %q", transition)
-	}
 }
 
 // GetDesiredState returns the most-recent desired-state observation for eid,
@@ -196,7 +132,7 @@ func (p *SQLiteEntityGraphProvider) GetDriftState(ctx context.Context, eid inter
 	}
 
 	da, _ := time.Parse(time.RFC3339Nano, detectedAt)
-	fields, err := parseDriftFields(fieldsData)
+	fields, err := egcommon.ParseDriftFields(dialect, fieldsData)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +177,7 @@ func (p *SQLiteEntityGraphProvider) ListDrifted(ctx context.Context, filter inte
 				 FROM eg_drift_projection d
 				 JOIN eg_entity_index i ON i.subject = d.subject`
 		if cut := interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs); cut.Active() {
-			conds = append(conds, tenantSubtreeCond("i.owning_tenant", cut, &args))
+			conds = append(conds, egcommon.TenantSubtreeCond("i.owning_tenant", cut, questionMark, &args))
 		}
 		if filter.Kind != "" {
 			conds = append(conds, "i.entity_kind = ?")
@@ -271,33 +207,7 @@ func (p *SQLiteEntityGraphProvider) ListDrifted(ctx context.Context, filter inte
 	}
 	defer func() { _ = rows.Close() }()
 
-	states := make([]*interfaces.DriftState, 0)
-	for rows.Next() {
-		var subject, detectedAt, configRevision, lifecycleStatus, fieldsData string
-		if err := rows.Scan(&subject, &detectedAt, &configRevision, &lifecycleStatus, &fieldsData); err != nil {
-			return nil, fmt.Errorf("entitygraph/sqlite: scan drift state: %w", err)
-		}
-		eid, err := types.ParseEID(subject)
-		if err != nil {
-			continue
-		}
-		da, _ := time.Parse(time.RFC3339Nano, detectedAt)
-		fields, err := parseDriftFields(fieldsData)
-		if err != nil {
-			continue
-		}
-		states = append(states, &interfaces.DriftState{
-			EID:             eid,
-			DetectedAt:      da,
-			Fields:          fields,
-			ConfigRevision:  configRevision,
-			LifecycleStatus: normalizeDriftLifecycleStatus(lifecycleStatus),
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("entitygraph/sqlite: iterate drift states: %w", err)
-	}
-	return states, nil
+	return egcommon.ScanDriftStates(rows, dialect, normalizeDriftLifecycleStatus)
 }
 
 // UpdateDriftLifecycle records a workflow lifecycle transition on a drift record.
@@ -306,7 +216,7 @@ func (p *SQLiteEntityGraphProvider) ListDrifted(ctx context.Context, filter inte
 // drift-diff observations. The lifecycle_status in eg_drift_projection is updated
 // atomically in the same transaction (ADR-022 §6).
 func (p *SQLiteEntityGraphProvider) UpdateDriftLifecycle(ctx context.Context, update interfaces.DriftLifecycleUpdate) error {
-	newStatus, err := transitionLifecycleStatus(update.Transition)
+	newStatus, err := egcommon.TransitionLifecycleStatus(dialect, update.Transition)
 	if err != nil {
 		return err
 	}
@@ -334,25 +244,14 @@ func (p *SQLiteEntityGraphProvider) UpdateDriftLifecycle(ctx context.Context, up
 		return fmt.Errorf("entitygraph/sqlite: lookup drift record: %w", err)
 	}
 
-	lifecyclePayload := map[string]interface{}{
-		"transition":  update.Transition,
-		"actor":       update.Actor,
-		"prev_status": normalizeDriftLifecycleStatus(prevStatus),
-	}
-	if update.Note != "" {
-		lifecyclePayload["note"] = update.Note
-	}
-
-	payloadBytes, err := json.Marshal(lifecyclePayload)
+	payloadJSON, hash, err := egcommon.LifecyclePayload(dialect, update, normalizeDriftLifecycleStatus(prevStatus))
 	if err != nil {
-		return fmt.Errorf("entitygraph/sqlite: marshal lifecycle payload: %w", err)
+		return err
 	}
-	sum := sha256.Sum256(payloadBytes)
-	hash := hex.EncodeToString(sum[:])
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT OR IGNORE INTO eg_payload_content(payload_hash, payload) VALUES(?, ?)`,
-		hash, string(payloadBytes),
+		hash, payloadJSON,
 	); err != nil {
 		return fmt.Errorf("entitygraph/sqlite: store lifecycle payload: %w", err)
 	}
