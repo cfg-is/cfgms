@@ -311,3 +311,30 @@ func TestSessionStore_NoEphemeralMethods(t *testing.T) {
 	err := store.CreateSession(ctx, ephemeral)
 	assert.Error(t, err, "non-persistent session must be rejected by the durable SessionStore")
 }
+
+// TestSessionStore_GetStats_Breakdown pins the per-type and per-status counts.
+func TestSessionStore_GetStats_Breakdown(t *testing.T) {
+	store := newSessionStore(t)
+	ctx := context.Background()
+	empty, err := store.GetStats(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), empty.TotalSessions)
+	assert.Empty(t, empty.SessionsByType)
+
+	a := sampleSession("bd-1")
+	b := sampleSession("bd-2")
+	b.SessionType = business.SessionTypeWeb
+	c := sampleSession("bd-3")
+	c.Status = business.SessionStatusExpired
+	for _, s := range []*business.Session{a, b, c} {
+		require.NoError(t, store.CreateSession(ctx, s))
+	}
+	stats, err := store.GetStats(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), stats.TotalSessions)
+	assert.Equal(t, int64(2), stats.SessionsByType[string(business.SessionTypeAPI)])
+	assert.Equal(t, int64(1), stats.SessionsByType[string(business.SessionTypeWeb)])
+	assert.Equal(t, int64(2), stats.SessionsByStatus[string(business.SessionStatusActive)])
+	assert.Equal(t, int64(1), stats.SessionsByStatus[string(business.SessionStatusExpired)])
+	assert.Equal(t, int64(2), stats.ActiveSessions)
+}
