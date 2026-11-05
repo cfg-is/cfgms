@@ -389,30 +389,38 @@ func NewLockdownGate(checker LockdownChecker, observer LockdownObserver) *Lockdo
 // Check returns nil when cmdType may be delivered to stewardID, and
 // ErrStewardLockedDown when it must be refused. A lookup error refuses.
 func (g *LockdownGate) Check(ctx context.Context, stewardID string, cmdType types.CommandType) error {
+	_, err := g.CheckLocked(ctx, stewardID, cmdType)
+	return err
+}
+
+// CheckLocked is Check that also reports whether the steward is locked down, so
+// a caller that attaches the signer chain to a locked steward's commands needs
+// one predicate lookup, not two. locked is false when err is non-nil.
+func (g *LockdownGate) CheckLocked(ctx context.Context, stewardID string, cmdType types.CommandType) (locked bool, err error) {
 	if g == nil || g.checker == nil {
-		return nil
+		return false, nil
 	}
-	locked, err := g.checker.IsLockedDown(ctx, stewardID)
+	locked, err = g.checker.IsLockedDown(ctx, stewardID)
 	if err != nil {
 		g.refuse(ctx, stewardID, cmdType, "lookup_failed")
-		return ErrStewardLockedDown
+		return false, ErrStewardLockedDown
 	}
 	if !locked {
-		return nil
+		return false, nil
 	}
 	if CommandLockdownPolicy[cmdType] != LockdownOperatorOnly {
 		g.refuse(ctx, stewardID, cmdType, "command_type_denied")
-		return ErrStewardLockedDown
+		return false, ErrStewardLockedDown
 	}
 	operator, ok := OperatorOriginFrom(ctx)
 	if !ok {
 		g.refuse(ctx, stewardID, cmdType, "no_operator_origin")
-		return ErrStewardLockedDown
+		return false, ErrStewardLockedDown
 	}
 	if g.observer != nil {
 		g.observer.OperatorCommandAllowed(ctx, operator, stewardID, cmdType)
 	}
-	return nil
+	return true, nil
 }
 
 func (g *LockdownGate) refuse(ctx context.Context, stewardID string, cmdType types.CommandType, reason string) {

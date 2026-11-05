@@ -59,6 +59,10 @@ type Publisher struct {
 	// When nil commands are sent without a signature (unsecured/transitional mode).
 	signer signature.Signer
 
+	// signerChains attaches the signer certificate chain at signing time (#5724).
+	// Nil sends commands without a chain.
+	signerChains *SignerChainBuilder
+
 	// termSource stamps the current Raft term onto outbound commands (#3390).
 	// When nil the term field is zero (pre-fencing behaviour).
 	termSource TermSource
@@ -97,6 +101,10 @@ type Config struct {
 	// When nil, commands are sent unsigned.
 	Signer signature.Signer
 
+	// SignerChains attaches the signer certificate chain to each signed command
+	// so a locked-down steward can verify it. Nil sends commands without a chain.
+	SignerChains *SignerChainBuilder
+
 	// TermSource stamps the current Raft term onto every outbound command (#3390).
 	// When nil the term field is zero (pre-fencing behaviour).
 	TermSource TermSource
@@ -126,6 +134,7 @@ func New(cfg *Config) (*Publisher, error) {
 	return &Publisher{
 		controlPlane:    cfg.ControlPlane,
 		signer:          cfg.Signer,
+		signerChains:    cfg.SignerChains,
 		termSource:      cfg.TermSource,
 		pending:         make(map[string]*pendingCommand),
 		logger:          cfg.Logger,
@@ -208,7 +217,20 @@ func (p *Publisher) currentTerm() uint64 {
 // non-nil. Every command is signed over the v2 payload by
 // controlplaneTypes.SignCommand, the same path the dispatcher and relay handler use.
 func (p *Publisher) signCommandWith(cmd *controlplaneTypes.Command, signer signature.Signer) (*controlplaneTypes.SignedCommand, error) {
-	return controlplaneTypes.SignCommand(cmd, signer)
+	sc, err := controlplaneTypes.SignCommand(cmd, signer)
+	if err != nil {
+		return nil, err
+	}
+	// The chain rides with the signed command and the gRPC provider strips it for
+	// any steward that is not locked down. A chain that cannot be built fails the
+	// command rather than letting it out unchained to a locked steward.
+	if err := p.signerChains.Attach(sc, signer); err != nil {
+		p.logger.Error("Signer certificate chain unavailable; command not sent",
+			"command_type", string(cmd.Type),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return nil, fmt.Errorf("attach signer chain: %w", err)
+	}
+	return sc, nil
 }
 
 // signCommand wraps cmd in a SignedCommand using the publisher's configured signer.

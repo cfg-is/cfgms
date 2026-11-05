@@ -71,9 +71,10 @@ type lockMetaEntry struct {
 type Dispatcher struct {
 	queue              *script.ExecutionQueue
 	controlPlane       controlplaneInterfaces.ControlPlaneProvider
-	signer             signature.Signer            // optional; when nil commands are sent unsigned
-	isLocallyConnected func(stewardID string) bool // optional; nil = dispatch to every queued device
-	termSource         TermSource                  // optional; when nil commands carry term 0
+	signer             signature.Signer             // optional; when nil commands are sent unsigned
+	signerChains       *commands.SignerChainBuilder // optional; attaches the signer chain (#5724)
+	isLocallyConnected func(stewardID string) bool  // optional; nil = dispatch to every queued device
+	termSource         TermSource                   // optional; when nil commands carry term 0
 	requireSignedAdhoc bool
 	// deviceLocks maps deviceID → chan struct{} (capacity 1).
 	// A non-blocking send acquires the slot; a receive releases it.
@@ -216,6 +217,9 @@ type Config struct {
 	// Should be set to the same signer used by the command publisher so all
 	// controller-issued commands carry consistent signatures.
 	Signer signature.Signer
+	// SignerChains attaches the signer certificate chain to each signed command so
+	// a locked-down steward can verify it. Nil sends commands without a chain.
+	SignerChains *commands.SignerChainBuilder
 	// RequireSignedAdhoc makes a signer mandatory and prevents unsigned
 	// execute_script delivery. Public-beta deployments must set this true.
 	RequireSignedAdhoc bool
@@ -281,6 +285,7 @@ func New(cfg *Config) (*Dispatcher, error) {
 		queue:               cfg.Queue,
 		controlPlane:        cfg.ControlPlane,
 		signer:              cfg.Signer,
+		signerChains:        cfg.SignerChains,
 		isLocallyConnected:  cfg.IsLocallyConnected,
 		termSource:          cfg.TermSource,
 		requireSignedAdhoc:  cfg.RequireSignedAdhoc,
@@ -821,7 +826,19 @@ func (d *Dispatcher) currentTerm() uint64 {
 // as sent; it is the controller's outer layer and is independent of any operator
 // envelope carried in the params.
 func (d *Dispatcher) signCommand(cmd *controlplaneTypes.Command) (*controlplaneTypes.SignedCommand, error) {
-	return controlplaneTypes.SignCommand(cmd, d.signer)
+	sc, err := controlplaneTypes.SignCommand(cmd, d.signer)
+	if err != nil {
+		return nil, err
+	}
+	// Fail closed: a chain that cannot be built stops the command rather than
+	// letting it out unchained to a locked-down steward.
+	if err := d.signerChains.Attach(sc, d.signer); err != nil {
+		d.logger.Error("Signer certificate chain unavailable; command not sent",
+			"command_type", string(cmd.Type),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return nil, fmt.Errorf("attach signer chain: %w", err)
+	}
+	return sc, nil
 }
 
 // Operator-credential keys of an inline command: the X.509 set or the WebAuthn set

@@ -557,6 +557,12 @@ type SignedCommand struct {
 	// round-trip type mutations from stringMapToInterfaceMap.
 	// Never transmitted on the wire or serialised to JSON.
 	RawParams map[string]string `json:"-"`
+
+	// SignerChainPEM is the controller's signer certificate chain, with the root
+	// as the last element, set at signing time. The gRPC provider strips it unless
+	// the target steward is locked down, so unlocked traffic is unchanged on the
+	// wire. It is outside the signed payload; the receiver validates it itself.
+	SignerChainPEM []byte `json:"signer_chain_pem,omitempty"`
 }
 
 // commandSigningPayload is the version-1 canonical form used when signing/verifying

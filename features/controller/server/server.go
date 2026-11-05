@@ -1473,11 +1473,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// (newly rotated) cert is safe as long as the steward is within the overlap
 		// window. After overlap expires, a steward that missed push_signing_cert
 		// needs re-enrollment (Issue #1845).
-		var commandSigner signature.Signer
-		if certManager != nil {
-			cm := certManager
-			commandSigner = signature.NewDynamicSigner(service.NewSigningResolver(cm))
-		}
+		commandSigner, signerChains := newCommandSigning(certManager)
 
 		// ADR-031 Decision 3, Issue #3764: shared steward-routing table + internal
 		// controller-to-controller delivery RPC. dispatchControlPlane defaults to
@@ -1594,6 +1590,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			Queue:              executionQueue,
 			ControlPlane:       dispatchControlPlane,
 			Signer:             commandSigner,
+			SignerChains:       signerChains,
 			RequireSignedAdhoc: cfg.Execution.RequireSignedAdhoc,
 			IsLocallyConnected: isLocallyConnected,
 			// Issue #5665: refuse before preparing a payload for a locked steward.
@@ -1725,6 +1722,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		commandPublisher, err = commands.New(&commands.Config{
 			ControlPlane: dispatchControlPlane,
 			Signer:       commandSigner,
+			SignerChains: signerChains,
 			TermSource:   ha.CommandTermSource{Manager: haManager},
 			Logger:       logger,
 		})
@@ -5661,4 +5659,14 @@ func scriptRepoForQueue(r *scriptmodule.TenantScriptRepository) scriptmodule.Scr
 		return nil
 	}
 	return r
+}
+
+// newCommandSigning returns the command signer and, for Issue #5724, the signer
+// chain builder a locked-down steward verifies commands with. Both are nil
+// without a certificate manager (unsigned deployments).
+func newCommandSigning(certManager *cert.Manager) (signature.Signer, *commands.SignerChainBuilder) {
+	if certManager == nil {
+		return nil, nil
+	}
+	return signature.NewDynamicSigner(service.NewSigningResolver(certManager)), commands.NewSignerChainBuilder(certManager)
 }
