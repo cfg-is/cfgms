@@ -57,6 +57,7 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	osquerymodule "github.com/cfgis/cfgms/features/modules/extended/osquery"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 )
@@ -85,6 +86,16 @@ type OsqueryHandler struct {
 	// guarded by streamsMu; populated by HandleGRPC, queried by QuerySteward.
 	streamsMu sync.RWMutex
 	streams   map[string]*osqueryStreamEntry // stewardID → stream entry
+
+	// lockdown, when set, gates QuerySteward: a locked-down steward is queried
+	// only when ctx carries the operator-origin marker (Issue #5666).
+	lockdown controlplaneInterfaces.LockdownChecker
+}
+
+// WithLockdown wires the lockdown predicate used by QuerySteward.
+func (h *OsqueryHandler) WithLockdown(c controlplaneInterfaces.LockdownChecker) *OsqueryHandler {
+	h.lockdown = c
+	return h
 }
 
 // NewOsqueryHandler returns an OsqueryHandler. binPath is the verified osquery
@@ -247,6 +258,9 @@ func (h *OsqueryHandler) HandleGRPC(stream grpc.BidiStreamingServer[transportpb.
 //
 // Returns ErrStewardNotConnected when the steward has no open OsqueryQuery stream.
 func (h *OsqueryHandler) QuerySteward(ctx context.Context, stewardID, catalogID string, params map[string]string) ([]*transportpb.OsqueryRow, error) {
+	if err := controlplaneInterfaces.CheckControllerRequest(ctx, h.lockdown, stewardID); err != nil {
+		return nil, err
+	}
 	h.streamsMu.RLock()
 	entry := h.streams[stewardID]
 	h.streamsMu.RUnlock()

@@ -15,6 +15,8 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/controller/credentials"
+	pkgconfig "github.com/cfgis/cfgms/pkg/config"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -61,6 +63,15 @@ type CredentialHandler struct {
 	tenants ModuleStewardRegistry
 	limiter *credentialLimiter
 	logger  logging.Logger
+	// lockdown, when set, refuses the request for a locked-down steward (Issue #5666).
+	lockdown controlplaneInterfaces.LockdownChecker
+}
+
+// WithLockdown wires the lockdown predicate. The initial credential is secret
+// material, so a locked-down steward gets the typed lockdown refusal.
+func (h *CredentialHandler) WithLockdown(c controlplaneInterfaces.LockdownChecker) *CredentialHandler {
+	h.lockdown = c
+	return h
 }
 
 // NewCredentialHandler creates the handler. All arguments are required.
@@ -85,9 +96,9 @@ func (h *CredentialHandler) refuse(stewardID, reason string, err error) error {
 
 // HandleGRPC processes one IssueInitialCredential RPC.
 func (h *CredentialHandler) HandleGRPC(ctx context.Context, req *transportpb.IssueInitialCredentialRequest) (*transportpb.IssueInitialCredentialResponse, error) {
-	stewardID, err := moduleFetchPeerID(ctx)
+	stewardID, err := authorizeStewardPull(ctx, h.lockdown)
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, "mTLS certificate required")
+		return nil, err
 	}
 	if !h.limiter.allow(stewardID) {
 		h.logger.Warn("Initial credential request rate limited", "steward_id", logging.SanitizeLogValue(stewardID))
@@ -110,14 +121,7 @@ func (h *CredentialHandler) HandleGRPC(ctx context.Context, req *transportpb.Iss
 	if err != nil || effective == nil || effective.Config == nil {
 		return nil, h.refuse(stewardID, "configuration unavailable", err)
 	}
-	declared := false
-	for _, r := range effective.Config.Resources {
-		if r.Module == credentials.KindActiveDirectoryUser && r.Name == key.ResourceID {
-			declared = true
-			break
-		}
-	}
-	if !declared {
+	if !declaresCredentialResource(effective, key) {
 		return nil, h.refuse(stewardID, "resource not declared in the steward's own configuration", nil)
 	}
 
@@ -142,6 +146,17 @@ func (h *CredentialHandler) HandleGRPC(ctx context.Context, req *transportpb.Iss
 		"steward_id", logging.SanitizeLogValue(stewardID),
 		"resource_id", logging.SanitizeLogValue(key.ResourceID))
 	return &transportpb.IssueInitialCredentialResponse{Password: password}, nil
+}
+
+// declaresCredentialResource reports whether the steward's own effective
+// configuration declares the credential's resource.
+func declaresCredentialResource(effective *pkgconfig.EffectiveConfiguration, key credentials.Key) bool {
+	for _, r := range effective.Config.Resources {
+		if r.Module == credentials.KindActiveDirectoryUser && r.Name == key.ResourceID {
+			return true
+		}
+	}
+	return false
 }
 
 // credentialLimiter is a per-key sliding-window limiter held in memory on this

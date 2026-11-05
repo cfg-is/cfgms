@@ -338,3 +338,25 @@ func TestWithOperatorOrigin_EmptyPrincipalGivesNoMarker(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, "bob", p)
 }
+
+// A tampered steward's open control stream receives no sync_config when its
+// configuration is saved: the save path sends CommandSyncConfig over the stream,
+// and the gate refuses it even when an operator caused the save (Issue #5666).
+func TestLockdownGate_ConfigSavePush_NoSyncConfigOnOpenStream(t *testing.T) {
+	env := newGateEnv(t, "s-normal", "s-locked")
+	env.pred.lock("s-locked")
+
+	for name, ctx := range map[string]context.Context{
+		"automated": context.Background(),
+		"operator":  interfaces.WithOperatorOrigin(context.Background(), "operator-1"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := env.server.SendCommand(ctx, gateCmd("save-"+name, "s-locked", types.CommandSyncConfig))
+			require.ErrorIs(t, err, interfaces.ErrStewardLockedDown)
+			env.expectNothing(t, "s-locked")
+		})
+	}
+
+	require.NoError(t, env.server.SendCommand(context.Background(), gateCmd("save-normal", "s-normal", types.CommandSyncConfig)))
+	env.expectDelivered(t, "s-normal", "save-normal")
+}
