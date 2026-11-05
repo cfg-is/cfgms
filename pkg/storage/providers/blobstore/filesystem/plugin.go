@@ -108,6 +108,35 @@ func validateKey(key blob.BlobKey) error {
 	return nil
 }
 
+// resolveKeyPaths builds the directory, blob and sidecar paths for key and
+// verifies each stays strictly inside the store root. It is the path guard at
+// the point of construction: callers must use the returned paths and must not
+// touch the filesystem when it returns an error.
+func (s *FilesystemBlobStore) resolveKeyPaths(key blob.BlobKey) (dir, blobFile, metaFile string, err error) {
+	root := filepath.Clean(s.root)
+	rootPrefix := root + string(os.PathSeparator)
+	dir = filepath.Clean(filepath.Join(root, key.TenantID, key.Namespace))
+	blobFile = filepath.Clean(filepath.Join(dir, key.Name))
+	metaFile = filepath.Clean(blobFile + ".meta.json")
+	// Each path is checked by its own HasPrefix guard on the Clean result so
+	// static path-injection analysis can see the guard dominate every use.
+	errOutside := fmt.Errorf("blob key resolves outside the store root")
+	if !strings.HasPrefix(dir, rootPrefix) {
+		return "", "", "", errOutside
+	}
+	if !strings.HasPrefix(blobFile, rootPrefix) {
+		return "", "", "", errOutside
+	}
+	if !strings.HasPrefix(metaFile, rootPrefix) {
+		return "", "", "", errOutside
+	}
+	// The blob must also sit inside its own namespace directory.
+	if !strings.HasPrefix(blobFile, dir+string(os.PathSeparator)) {
+		return "", "", "", fmt.Errorf("blob key resolves outside its namespace directory")
+	}
+	return dir, blobFile, metaFile, nil
+}
+
 func (s *FilesystemBlobStore) blobPath(key blob.BlobKey) string {
 	return filepath.Join(s.root, key.TenantID, key.Namespace, key.Name)
 }
@@ -206,7 +235,10 @@ func (s *FilesystemBlobStore) PutBlobIfAbsent(ctx context.Context, key blob.Blob
 		return err
 	}
 
-	dir := filepath.Join(s.root, key.TenantID, key.Namespace)
+	dir, blobFilePath, metaFilePath, err := s.resolveKeyPaths(key)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("blob put-if-absent: failed to create directory: %w", err)
 	}
@@ -252,9 +284,27 @@ func (s *FilesystemBlobStore) PutBlobIfAbsent(ctx context.Context, key blob.Blob
 		return fmt.Errorf("blob put-if-absent: failed to marshal metadata: %w", err)
 	}
 
-	// Atomicity point: exactly one concurrent caller wins this O_EXCL create
-	// for a given key.
-	metaFile, err := os.OpenFile(s.metaPath(key), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err := createSidecarExclusive(metaFilePath, metaJSON); err != nil {
+		return err
+	}
+
+	// Won the race: move the blob data into place.
+	if err := os.Rename(tmpPath, blobFilePath); err != nil {
+		_ = os.Remove(metaFilePath)
+		return fmt.Errorf("blob put-if-absent: failed to rename to final path: %w", err)
+	}
+	tmpConsumed = true
+
+	return nil
+}
+
+// createSidecarExclusive is the PutBlobIfAbsent atomicity point: exactly one
+// concurrent caller wins the O_EXCL create of the metadata sidecar for a given
+// key. It returns blob.ErrBlobAlreadyExists when the sidecar already exists and
+// removes a partially written sidecar on write or close failure. metaFilePath
+// must come from resolveKeyPaths.
+func createSidecarExclusive(metaFilePath string, metaJSON []byte) error {
+	metaFile, err := os.OpenFile(metaFilePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- metaFilePath verified inside store root by resolveKeyPaths
 	if err != nil {
 		if os.IsExist(err) {
 			return blob.ErrBlobAlreadyExists
@@ -263,21 +313,13 @@ func (s *FilesystemBlobStore) PutBlobIfAbsent(ctx context.Context, key blob.Blob
 	}
 	if _, err := metaFile.Write(metaJSON); err != nil {
 		_ = metaFile.Close()
-		_ = os.Remove(s.metaPath(key))
+		_ = os.Remove(metaFilePath)
 		return fmt.Errorf("blob put-if-absent: failed to write metadata sidecar: %w", err)
 	}
 	if err := metaFile.Close(); err != nil {
-		_ = os.Remove(s.metaPath(key))
+		_ = os.Remove(metaFilePath)
 		return fmt.Errorf("blob put-if-absent: failed to close metadata sidecar: %w", err)
 	}
-
-	// Won the race: move the blob data into place.
-	if err := os.Rename(tmpPath, s.blobPath(key)); err != nil {
-		_ = os.Remove(s.metaPath(key))
-		return fmt.Errorf("blob put-if-absent: failed to rename to final path: %w", err)
-	}
-	tmpConsumed = true
-
 	return nil
 }
 

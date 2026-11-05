@@ -598,3 +598,56 @@ func TestFilesystemBlobStore_PutBlobIfAbsent_TenantRequired(t *testing.T) {
 	err := s.PutBlobIfAbsent(context.Background(), blob.BlobKey{Namespace: "ns", Name: "n"}, bytes.NewReader([]byte("x")), blob.BlobMeta{})
 	assert.ErrorIs(t, err, blob.ErrBlobTenantRequired)
 }
+
+// TestPutBlobIfAbsent_RefusesOutOfRootKeys verifies keys that would resolve
+// outside the store root are refused before any file is created.
+func TestPutBlobIfAbsent_RefusesOutOfRootKeys(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "store")
+	s := &FilesystemBlobStore{root: root}
+	require.NoError(t, os.MkdirAll(root, 0o700))
+
+	keys := []blob.BlobKey{
+		{TenantID: "tenant-a", Namespace: "installers", Name: ".."},
+		{TenantID: "tenant-a", Namespace: "..", Name: "x"},
+		{TenantID: "..", Namespace: "installers", Name: "x"},
+		{TenantID: "tenant-a/../../escape", Namespace: "installers", Name: "x"},
+		{TenantID: "tenant-a", Namespace: "installers", Name: "a/b"},
+		{TenantID: "tenant-a", Namespace: "installers", Name: `a\b`},
+		{TenantID: filepath.Join(parent, "abs"), Namespace: "installers", Name: "x"},
+		{TenantID: "tenant-a", Namespace: "/abs", Name: "x"},
+		{TenantID: "tenant-a", Namespace: "installers", Name: "/abs"},
+	}
+	for _, k := range keys {
+		err := s.PutBlobIfAbsent(context.Background(), k, bytes.NewReader([]byte("x")), blob.BlobMeta{})
+		require.Error(t, err, "key %+v", k)
+		require.NotErrorIs(t, err, blob.ErrBlobAlreadyExists)
+	}
+
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "no directory or file may be created for a refused key")
+	parentEntries, err := os.ReadDir(parent)
+	require.NoError(t, err)
+	assert.Len(t, parentEntries, 1, "nothing may be created outside the store root")
+
+	require.NoError(t, s.PutBlobIfAbsent(context.Background(), testKey("ok"), bytes.NewReader([]byte("x")), blob.BlobMeta{}))
+}
+
+// TestResolveKeyPaths_GuardsRoot verifies the guard itself, independent of validateKey.
+func TestResolveKeyPaths_GuardsRoot(t *testing.T) {
+	s := newTestStore(t)
+	for _, k := range []blob.BlobKey{
+		{TenantID: "..", Namespace: "n", Name: "x"},
+		{TenantID: "t", Namespace: "..", Name: ".."},
+		{TenantID: "t", Namespace: "n", Name: "../../x"},
+		{TenantID: "t", Namespace: "n", Name: ""},
+		{TenantID: "", Namespace: "", Name: ""},
+	} {
+		_, _, _, err := s.resolveKeyPaths(k)
+		assert.Error(t, err, "key %+v", k)
+	}
+	_, b, m, err := s.resolveKeyPaths(testKey("ok"))
+	require.NoError(t, err)
+	assert.Equal(t, b+".meta.json", m)
+}
