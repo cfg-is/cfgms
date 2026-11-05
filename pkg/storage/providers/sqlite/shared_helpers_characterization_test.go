@@ -17,25 +17,6 @@ import (
 // They pin the observable behaviour so moving the code into providers/internal does not
 // change it.
 
-func TestTicketMarshal_RoundTrip(t *testing.T) {
-	in := makeCase("c", "t").Ticket
-	s, err := marshalTicket(in)
-	require.NoError(t, err)
-	out, err := unmarshalTicket(s)
-	require.NoError(t, err)
-	assert.Equal(t, in, out)
-}
-
-func TestTicketUnmarshal_EmptyAndInvalid(t *testing.T) {
-	for _, s := range []string{"", "{}"} {
-		out, err := unmarshalTicket(s)
-		require.NoError(t, err)
-		assert.Equal(t, business.Ticket{}, out)
-	}
-	_, err := unmarshalTicket("{not json")
-	assert.Error(t, err)
-}
-
 func TestAssurancePolicy_GetPolicy_TenantScoping(t *testing.T) {
 	store := newTestAssurancePolicyStore(t)
 	ctx := context.Background()

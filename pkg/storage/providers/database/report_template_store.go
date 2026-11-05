@@ -154,27 +154,8 @@ func (s *DatabaseReportTemplateStore) ListSharedWith(ctx context.Context, tenant
 }
 
 func (s *DatabaseReportTemplateStore) query(ctx context.Context, tenantID, q string, args ...any) ([]*business.ReportTemplate, error) {
-	rows, err := s.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list report templates: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	now := time.Now()
-	result := make([]*business.ReportTemplate, 0)
-	for rows.Next() {
-		t, err := scanReportTemplate(rows)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan report template: %w", err)
-		}
-		if view, ok := reporttemplate.ViewFor(t, tenantID, now); ok {
-			result = append(result, view)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("failed to read report templates: %w", err)
-	}
-	reporttemplate.Sort(result)
-	return result, nil
+	return reporttemplate.Query(ctx, s.db, tenantID, "",
+		func(rows *sql.Rows) (*business.ReportTemplate, error) { return scanReportTemplate(rows) }, q, args...)
 }
 
 // Delete implements business.ReportTemplateStore.

@@ -17,6 +17,7 @@ import (
 	"github.com/lib/pq"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"github.com/cfgis/cfgms/pkg/storage/providers/internal/sqlstore"
 )
 
 // DatabaseSessionStore implements business.SessionStore using PostgreSQL.
@@ -437,45 +438,11 @@ func (s *DatabaseSessionStore) HealthCheck(ctx context.Context) error {
 
 // GetStats returns aggregate statistics about stored sessions.
 func (s *DatabaseSessionStore) GetStats(ctx context.Context) (*business.RuntimeStoreStats, error) {
-	stats := &business.RuntimeStoreStats{
-		SessionsByType:   make(map[string]int64),
-		SessionsByStatus: make(map[string]int64),
-	}
-
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&stats.TotalSessions); err != nil {
-		return nil, fmt.Errorf("database: failed to count sessions: %w", err)
-	}
-
-	rows, err := s.db.QueryContext(ctx, `SELECT session_type, COUNT(*) FROM sessions GROUP BY session_type`)
-	if err != nil {
-		return nil, fmt.Errorf("database: failed to aggregate by type: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var k string
-		var v int64
-		if err := rows.Scan(&k, &v); err == nil {
-			stats.SessionsByType[k] = v
-		}
-	}
-
-	rows2, err := s.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM sessions GROUP BY status`)
-	if err != nil {
-		return nil, fmt.Errorf("database: failed to aggregate by status: %w", err)
-	}
-	defer func() { _ = rows2.Close() }()
-	for rows2.Next() {
-		var k string
-		var v int64
-		if err := rows2.Scan(&k, &v); err == nil {
-			stats.SessionsByStatus[k] = v
-		}
-	}
-
-	if v, ok := stats.SessionsByStatus[string(business.SessionStatusActive)]; ok {
-		stats.ActiveSessions = v
-	}
-	return stats, nil
+	return sqlstore.SessionStats(ctx, s.db, sqlstore.StatsErrors{
+		Total:    "database: failed to count sessions",
+		ByType:   "database: failed to aggregate by type",
+		ByStatus: "database: failed to aggregate by status",
+	})
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

@@ -7,6 +7,8 @@
 package reporttemplate
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -195,4 +197,32 @@ func DecodeTags(raw string) ([]string, error) {
 		return nil, nil
 	}
 	return tags, nil
+}
+
+// Query runs a template-listing query and returns the templates tenantID may see, sorted by
+// name then ID. scan decodes one row; errPrefix ("sqlite: " or "") is prepended to every
+// error text. The SQL and its placeholders belong to the calling provider.
+func Query(ctx context.Context, db *sql.DB, tenantID, errPrefix string,
+	scan func(*sql.Rows) (*business.ReportTemplate, error), q string, args ...any) ([]*business.ReportTemplate, error) {
+	rows, err := db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("%sfailed to list report templates: %w", errPrefix, err)
+	}
+	defer func() { _ = rows.Close() }()
+	now := time.Now()
+	result := make([]*business.ReportTemplate, 0)
+	for rows.Next() {
+		t, err := scan(rows)
+		if err != nil {
+			return nil, fmt.Errorf("%sfailed to scan report template: %w", errPrefix, err)
+		}
+		if view, ok := ViewFor(t, tenantID, now); ok {
+			result = append(result, view)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%sfailed to read report templates: %w", errPrefix, err)
+	}
+	Sort(result)
+	return result, nil
 }
