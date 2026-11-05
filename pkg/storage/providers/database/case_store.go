@@ -6,13 +6,13 @@ package database
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"time"
 
 	_ "github.com/lib/pq"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"github.com/cfgis/cfgms/pkg/storage/providers/internal/sqlstore"
 )
 
 // Compile-time assertion.
@@ -62,7 +62,7 @@ func (s *DatabaseCaseStore) CreateCase(ctx context.Context, c *business.Case) er
 	if c.ID == "" || c.TenantID == "" {
 		return fmt.Errorf("database: case ID and tenant ID are required")
 	}
-	ticketJSON, err := dbMarshalTicket(c.Ticket)
+	ticketJSON, err := sqlstore.MarshalTicket(c.Ticket)
 	if err != nil {
 		return fmt.Errorf("database: failed to marshal ticket for case %s: %w", c.ID, err)
 	}
@@ -141,7 +141,7 @@ func (s *DatabaseCaseStore) UpdateCase(ctx context.Context, c *business.Case) er
 	if c.ID == "" {
 		return fmt.Errorf("database: case ID is required")
 	}
-	ticketJSON, err := dbMarshalTicket(c.Ticket)
+	ticketJSON, err := sqlstore.MarshalTicket(c.Ticket)
 	if err != nil {
 		return fmt.Errorf("database: failed to marshal ticket for case %s: %w", c.ID, err)
 	}
@@ -175,7 +175,7 @@ func (s *DatabaseCaseStore) UpdateCaseCAS(ctx context.Context, c *business.Case,
 	if c.ID == "" {
 		return 0, false, fmt.Errorf("database: case ID is required")
 	}
-	ticketJSON, err := dbMarshalTicket(c.Ticket)
+	ticketJSON, err := sqlstore.MarshalTicket(c.Ticket)
 	if err != nil {
 		return 0, false, fmt.Errorf("database: failed to marshal ticket for case %s: %w", c.ID, err)
 	}
@@ -340,7 +340,7 @@ func scanDBCase(row *sql.Row) (*business.Case, error) {
 		return nil, fmt.Errorf("database: failed to scan case: %w", err)
 	}
 	c.Status = business.CaseStatus(status)
-	t, err := dbUnmarshalTicket(ticketStr)
+	t, err := sqlstore.UnmarshalTicket(ticketStr)
 	if err != nil {
 		return nil, fmt.Errorf("database: failed to unmarshal ticket for case %s: %w", c.ID, err)
 	}
@@ -355,7 +355,7 @@ func scanDBCaseRow(rows *sql.Rows) (*business.Case, error) {
 		return nil, fmt.Errorf("database: failed to scan case row: %w", err)
 	}
 	c.Status = business.CaseStatus(status)
-	t, err := dbUnmarshalTicket(ticketStr)
+	t, err := sqlstore.UnmarshalTicket(ticketStr)
 	if err != nil {
 		return nil, fmt.Errorf("database: failed to unmarshal ticket: %w", err)
 	}
@@ -400,51 +400,4 @@ func scanDBContentRow(rows *sql.Rows) (*business.ContentEntry, error) {
 	}
 	e.Kind = business.ContentKind(kind)
 	return &e, nil
-}
-
-// dbTicketFieldJSON and dbTicketJSON are private JSON representations for the Postgres store.
-type dbTicketFieldJSON struct {
-	Value  string `json:"value"`
-	Source string `json:"source"`
-	Filled bool   `json:"filled"`
-}
-
-type dbTicketJSON struct {
-	Title    dbTicketFieldJSON `json:"title"`
-	Client   dbTicketFieldJSON `json:"client"`
-	Contact  dbTicketFieldJSON `json:"contact"`
-	Priority dbTicketFieldJSON `json:"priority"`
-	Category dbTicketFieldJSON `json:"category"`
-}
-
-func dbMarshalTicket(t business.Ticket) (string, error) {
-	tj := dbTicketJSON{
-		Title:    dbTicketFieldJSON{Value: t.Title.Value, Source: string(t.Title.Source), Filled: t.Title.Filled},
-		Client:   dbTicketFieldJSON{Value: t.Client.Value, Source: string(t.Client.Source), Filled: t.Client.Filled},
-		Contact:  dbTicketFieldJSON{Value: t.Contact.Value, Source: string(t.Contact.Source), Filled: t.Contact.Filled},
-		Priority: dbTicketFieldJSON{Value: t.Priority.Value, Source: string(t.Priority.Source), Filled: t.Priority.Filled},
-		Category: dbTicketFieldJSON{Value: t.Category.Value, Source: string(t.Category.Source), Filled: t.Category.Filled},
-	}
-	b, err := json.Marshal(tj)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
-}
-
-func dbUnmarshalTicket(s string) (business.Ticket, error) {
-	if s == "" || s == "{}" {
-		return business.Ticket{}, nil
-	}
-	var tj dbTicketJSON
-	if err := json.Unmarshal([]byte(s), &tj); err != nil {
-		return business.Ticket{}, err
-	}
-	return business.Ticket{
-		Title:    business.TicketField{Value: tj.Title.Value, Source: business.TicketFieldSource(tj.Title.Source), Filled: tj.Title.Filled},
-		Client:   business.TicketField{Value: tj.Client.Value, Source: business.TicketFieldSource(tj.Client.Source), Filled: tj.Client.Filled},
-		Contact:  business.TicketField{Value: tj.Contact.Value, Source: business.TicketFieldSource(tj.Contact.Source), Filled: tj.Contact.Filled},
-		Priority: business.TicketField{Value: tj.Priority.Value, Source: business.TicketFieldSource(tj.Priority.Source), Filled: tj.Priority.Filled},
-		Category: business.TicketField{Value: tj.Category.Value, Source: business.TicketFieldSource(tj.Category.Source), Filled: tj.Category.Filled},
-	}, nil
 }

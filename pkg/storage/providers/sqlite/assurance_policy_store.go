@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"github.com/cfgis/cfgms/pkg/storage/providers/internal/sqlstore"
 )
 
 // Compile-time assertion.
@@ -33,33 +34,12 @@ func (s *SQLiteAssurancePolicyStore) Close() error {
 // rows exist, it returns {TenantID: tenantID, Overrides: nil} without error —
 // "no override" and "no data" are equivalent (ADR-021, Issue #2845).
 func (s *SQLiteAssurancePolicyStore) GetPolicy(ctx context.Context, tenantID string) (*business.AssurancePolicy, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return sqlstore.GetPolicy(ctx, s.db, `
 		SELECT permission_id, min_override, require_user_presence
 		FROM assurance_policy_overrides
-		WHERE tenant_id = ?`, tenantID)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: failed to get assurance policy for tenant %s: %w", tenantID, err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var overrides []business.AssurancePolicyOverride
-	for rows.Next() {
-		var o business.AssurancePolicyOverride
-		var minOverride sql.NullInt64
-		if err := rows.Scan(&o.PermissionID, &minOverride, &o.RequireUserPresence); err != nil {
-			return nil, fmt.Errorf("sqlite: failed to scan assurance policy row for tenant %s: %w", tenantID, err)
-		}
-		if minOverride.Valid {
-			v := int(minOverride.Int64)
-			o.MinOverride = &v
-		}
-		overrides = append(overrides, o)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("sqlite: failed to iterate assurance policy rows for tenant %s: %w", tenantID, err)
-	}
-
-	return &business.AssurancePolicy{TenantID: tenantID, Overrides: overrides}, nil
+		WHERE tenant_id = ?`, tenantID,
+		sqlstore.PolicyLabels{Prefix: "sqlite: ", Noun: "assurance policy"},
+		sqlstore.ScanAssuranceOverride, sqlstore.BuildAssurancePolicy)
 }
 
 // SetPolicy replaces the tenant's full assurance-policy override set in one
