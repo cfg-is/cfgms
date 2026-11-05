@@ -41,7 +41,7 @@ type nonceEntryJSON struct {
 // The directory is created if it does not exist.
 func NewFlatFileNonceStore(root string) (*FlatFileNonceStore, error) {
 	dir := filepath.Join(root, "nonces")
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return nil, fmt.Errorf("flatfile: failed to create nonces directory: %w", err)
 	}
 	return &FlatFileNonceStore{root: root}, nil

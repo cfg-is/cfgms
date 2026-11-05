@@ -58,7 +58,7 @@ type approvalJSON struct {
 // NewFlatFileApprovalStore creates a FlatFileApprovalStore rooted at <root>/approvals.
 // The directory is created if it does not exist.
 func NewFlatFileApprovalStore(root string) (*FlatFileApprovalStore, error) {
-	if err := os.MkdirAll(filepath.Join(root, "approvals"), 0750); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "approvals"), dirMode); err != nil {
 		return nil, fmt.Errorf("flatfile: failed to create approvals directory: %w", err)
 	}
 	return &FlatFileApprovalStore{root: root}, nil

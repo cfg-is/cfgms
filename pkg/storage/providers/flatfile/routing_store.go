@@ -44,7 +44,7 @@ type routingEntryJSON struct {
 // <root>/routing. The directory is created if it does not exist.
 func NewFlatFileRoutingStore(root string) (*FlatFileRoutingStore, error) {
 	dir := filepath.Join(root, "routing")
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return nil, fmt.Errorf("flatfile: failed to create routing directory: %w", err)
 	}
 	return &FlatFileRoutingStore{root: root}, nil

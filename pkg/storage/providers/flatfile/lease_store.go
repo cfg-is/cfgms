@@ -49,7 +49,7 @@ type leaseEntryJSON struct {
 // The directory is created if it does not exist.
 func NewFlatFileLeaseStore(root string) (*FlatFileLeaseStore, error) {
 	dir := filepath.Join(root, "leases")
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return nil, fmt.Errorf("flatfile: failed to create leases directory: %w", err)
 	}
 	return &FlatFileLeaseStore{root: root}, nil
