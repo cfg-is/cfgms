@@ -873,6 +873,19 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 		resp.ServerCert = string(signingCertPEM) // matches initial registration response field name
 	}
 
+	s.restoreRegisteredStatusAfterRefresh(ctx, record)
+
+	s.logger.Info("Issued refresh certificate",
+		"steward_id", logging.SanitizeLogValue(record.ID),
+		"validity_days", validityDays)
+
+	return resp, serial, nil
+}
+
+// restoreRegisteredStatusAfterRefresh promotes the steward of record back to registered
+// status after refresh certificate issuance, in the durable store and the
+// node-local service registry. Both writes skip a tampered steward.
+func (s *Server) restoreRegisteredStatusAfterRefresh(ctx context.Context, record *business.StewardRecord) {
 	// Promote steward back to registered status after cert issuance. This must be
 	// written to the PERSISTENT steward store, because the registration-refresh
 	// lifecycle gate reads status via stewardStore.GetStewardByDeviceID. Updating
@@ -899,12 +912,6 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 				"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
-
-	s.logger.Info("Issued refresh certificate",
-		"steward_id", logging.SanitizeLogValue(record.ID),
-		"validity_days", validityDays)
-
-	return resp, serial, nil
 }
 
 // stewardIsTampered reports whether the durable record of stewardID is tampered.
