@@ -837,7 +837,9 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 	// certificate, transport address or identity fields (Issue #5673). The
 	// tampered state is never written here; only an operator restore or ban
 	// clears it.
-	if record.Status == business.StewardStatusTampered {
+	// The gate read may be stale: re-check the durable record so a steward that
+	// became tampered meanwhile also gets the narrow response.
+	if record.Status == business.StewardStatusTampered || s.stewardIsTampered(ctx, record.ID) {
 		s.emitRefreshAudit(ctx, record.DeviceID, record.TenantID,
 			business.AuditEventAuthentication, auditActionTamperRenewal,
 			business.AuditResultSuccess, business.AuditSeverityHigh,
@@ -906,13 +908,17 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 }
 
 // stewardIsTampered reports whether the durable record of stewardID is tampered.
-// A missing store or a read error report false.
+// It fails closed: a read error reports true, so callers keep the tampered
+// handling. Only a missing store reports false.
 func (s *Server) stewardIsTampered(ctx context.Context, stewardID string) bool {
 	if s.stewardStore == nil {
 		return false
 	}
 	rec, err := s.stewardStore.GetSteward(ctx, stewardID)
-	return err == nil && rec != nil && rec.Status == business.StewardStatusTampered
+	if err != nil || rec == nil {
+		return true
+	}
+	return rec.Status == business.StewardStatusTampered
 }
 
 // ---- Admin request / response types -----------------------------------------
