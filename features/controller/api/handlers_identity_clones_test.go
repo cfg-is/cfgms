@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -426,4 +427,280 @@ func TestMoveIdentity_NotAutomatic(t *testing.T) {
 	}
 	assert.Equal(t, []string{"handlers_identity_clones.go"}, callers,
 		"only the move-identity handler may rebind a steward's device identity")
+}
+
+// --- Linking a locked copy to its old identity, Issue #5671 ---
+
+// admitLocked registers a broken-trust copy naming oldID and returns its steward
+// ID and pending entry.
+func (e *cloneEnv) admitLocked(t *testing.T, oldID string) (string, *business.PendingRegistrationEntry) {
+	t.Helper()
+	e.server.SetApprovalHook(&AlwaysApproveHook{})
+	rec := postRegisterWithBody(e.server, e.lockedRequest(t, oldID, cloneReasonBrokenTrust))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	entry := e.pendingFor(t, resp.StewardID)
+	require.NotNil(t, entry)
+	return resp.StewardID, entry
+}
+
+func (e *cloneEnv) link(oldID, pendingID string, confirm bool) *httptest.ResponseRecorder {
+	body := map[string]interface{}{"pending_id": pendingID}
+	if confirm {
+		body["confirm_live"] = true
+	}
+	return callClone(e.server.handleMoveIdentity, http.MethodPost, "/", map[string]string{"id": oldID}, cloneTenant, body)
+}
+
+// liveSerials returns the client-certificate serials issued for cn that are not revoked.
+func (e *cloneEnv) liveSerials(t *testing.T, cn string) []string {
+	t.Helper()
+	infos, err := e.certMgr.GetCertificateByCommonName(cn)
+	require.NoError(t, err)
+	var live []string
+	for _, info := range infos {
+		if info.Type != cert.CertificateTypeClient {
+			continue
+		}
+		revoked, err := e.certMgr.IsRevoked(info.SerialNumber)
+		require.NoError(t, err)
+		if !revoked {
+			live = append(live, info.SerialNumber)
+		}
+	}
+	return live
+}
+
+func TestLinkLockedCopy_RetiresCopyRebindsOldAndSupersedesEntry(t *testing.T) {
+	env := newCloneEnv(t)
+	env.addSteward(t, "steward-old-lk", cloneTenant, cloneDeviceA, business.StewardStatusTampered)
+	oldSerials := env.issueClientCerts(t, "steward-old-lk", 2)
+	copyID, entry := env.admitLocked(t, "steward-old-lk")
+	require.NotEmpty(t, env.liveSerials(t, copyID), "the copy holds a live credential before the link")
+
+	rec := env.link("steward-old-lk", entry.PendingID, false)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp moveIdentityResponse
+	decodeCloneData(t, rec, &resp)
+	assert.Equal(t, copyID, resp.CopyStewardID)
+	assert.ElementsMatch(t, oldSerials, resp.RevokedSerials)
+
+	copyRec, err := env.steward.GetSteward(context.Background(), copyID)
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusDeregistered, copyRec.Status)
+	assert.Empty(t, env.liveSerials(t, copyID), "the copy's serials are revoked")
+	assert.Empty(t, env.liveSerials(t, "steward-old-lk"), "the old ID's previous credentials are revoked")
+
+	old, err := env.steward.GetSteward(context.Background(), "steward-old-lk")
+	require.NoError(t, err)
+	assert.Equal(t, entry.DeviceID, old.DeviceID, "the old record holds the copy's device identity")
+	assert.Equal(t, entry.IdentityKeyPub, old.IdentityKeyPub)
+	assert.Equal(t, business.StewardStatusTampered, old.Status, "the old record keeps its tampered state until restore")
+
+	got, err := env.server.pendingStore.GetPendingByID(context.Background(), entry.PendingID)
+	require.NoError(t, err)
+	assert.Equal(t, "steward-old-lk", got.StewardID, "the entry was approved under the old ID")
+	assert.Equal(t, business.PendingRegistrationStatusDenied, got.Status, "then superseded")
+	assert.Error(t, env.server.pendingStore.UpdateStatus(context.Background(), entry.PendingID, business.PendingRegistrationStatusClaimed),
+		"a superseded entry can never be claimed")
+
+	steps := map[string]bool{}
+	for _, ev := range env.auditActions(t, auditActionLinkStep) {
+		steps[ev.Details["step"].(string)] = true
+		assert.Equal(t, business.AuditSeverityHigh, ev.Severity)
+	}
+	for _, name := range []string{linkStepRetireCopy, linkStepRebindOld, linkStepRevokeOld, linkStepApprovePend, linkStepSupersedePend} {
+		assert.True(t, steps[name], "an audit event for step %s", name)
+	}
+	assert.Len(t, env.auditActions(t, auditActionIdentityMoved), 1)
+}
+
+func TestLinkLockedCopy_OldRecordKeepsActiveStatus(t *testing.T) {
+	env := newCloneEnv(t)
+	env.addSteward(t, "steward-old-act", cloneTenant, cloneDeviceA, business.StewardStatusActive)
+	_, entry := env.admitLocked(t, "steward-old-act")
+	require.Equal(t, http.StatusOK, env.link("steward-old-act", entry.PendingID, false).Code)
+	old, err := env.steward.GetSteward(context.Background(), "steward-old-act")
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusActive, old.Status)
+}
+
+func TestLinkLockedCopy_RequiresStrongAssurance(t *testing.T) {
+	req, ok := permissionAssurance["steward:move-identity"]
+	require.True(t, ok)
+	assert.Equal(t, session.AssuranceStrong, req.Min)
+}
+
+func TestLinkLockedCopy_LiveOldRecordNeedsConfirmation(t *testing.T) {
+	env := newCloneEnv(t)
+	env.addSteward(t, "steward-old-live", cloneTenant, cloneDeviceA, business.StewardStatusTampered)
+	require.NoError(t, env.steward.UpdateHeartbeat(context.Background(), "steward-old-live", "1.0.0"))
+	copyID, entry := env.admitLocked(t, "steward-old-live")
+
+	rec := env.link("steward-old-live", entry.PendingID, false)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "CONFIRM_LIVE_REQUIRED")
+	copyRec, err := env.steward.GetSteward(context.Background(), copyID)
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusTampered, copyRec.Status, "a refused link changes nothing")
+	assert.NotEmpty(t, env.liveSerials(t, copyID))
+	assert.Len(t, env.auditActions(t, auditActionLinkRefused), 1)
+
+	rec = env.link("steward-old-live", entry.PendingID, true)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	confirmed := false
+	for _, ev := range env.auditActions(t, auditActionLinkStep) {
+		if ev.Details["confirm_live"] == true {
+			confirmed = true
+		}
+	}
+	assert.True(t, confirmed, "the confirmation is audited")
+	moved := env.auditActions(t, auditActionIdentityMoved)
+	require.Len(t, moved, 1)
+	assert.Equal(t, true, moved[0].Details["confirm_live"])
+}
+
+// failingRebindStore is the real steward store with a forced failure at the
+// rebind step.
+type failingRebindStore struct {
+	business.StewardStore
+	failures int
+}
+
+func (f *failingRebindStore) RebindStewardIdentity(ctx context.Context, id, deviceID string, key []byte, level, alg string) error {
+	if f.failures > 0 {
+		f.failures--
+		return errors.New("injected rebind failure")
+	}
+	return f.StewardStore.RebindStewardIdentity(ctx, id, deviceID, key, level, alg)
+}
+
+// failingApproveStore is the real pending store with a forced failure when the
+// entry is approved.
+type failingApproveStore struct {
+	business.PendingRegistrationStore
+	failures int
+}
+
+func (f *failingApproveStore) UpdateStatus(ctx context.Context, id, status string) error {
+	if status == business.PendingRegistrationStatusApproved && f.failures > 0 {
+		f.failures--
+		return errors.New("injected approve failure")
+	}
+	return f.PendingRegistrationStore.UpdateStatus(ctx, id, status)
+}
+
+func TestLinkLockedCopy_RebindFailureLeavesOldRecordUntouchedAndRetryCompletes(t *testing.T) {
+	env := newCloneEnv(t)
+	env.addSteward(t, "steward-old-rb", cloneTenant, cloneDeviceA, business.StewardStatusTampered)
+	copyID, entry := env.admitLocked(t, "steward-old-rb")
+	env.server.SetStewardStore(&failingRebindStore{StewardStore: env.steward, failures: 1})
+
+	rec := env.link("steward-old-rb", entry.PendingID, false)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), linkStepRebindOld, "the response names the failed step")
+
+	old, err := env.steward.GetSteward(context.Background(), "steward-old-rb")
+	require.NoError(t, err)
+	assert.Equal(t, cloneDeviceA, old.DeviceID, "the old record is unchanged")
+	assert.Equal(t, business.StewardStatusTampered, old.Status)
+	assert.Empty(t, env.liveSerials(t, copyID), "the copy holds no valid credential")
+	copyRec, err := env.steward.GetSteward(context.Background(), copyID)
+	require.NoError(t, err)
+	assert.NotEqual(t, business.StewardStatusActive, copyRec.Status, "and is not adopted")
+	pending, err := env.server.pendingStore.GetPendingByID(context.Background(), entry.PendingID)
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusPending, pending.Status)
+	assert.Len(t, env.auditActions(t, auditActionLinkFailed), 1)
+
+	rec = env.link("steward-old-rb", entry.PendingID, false)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	old, err = env.steward.GetSteward(context.Background(), "steward-old-rb")
+	require.NoError(t, err)
+	assert.Equal(t, entry.DeviceID, old.DeviceID)
+}
+
+func TestLinkLockedCopy_ApproveFailureNeverLeavesTwoLiveCredentials(t *testing.T) {
+	env := newCloneEnv(t)
+	env.addSteward(t, "steward-old-ap", cloneTenant, cloneDeviceA, business.StewardStatusTampered)
+	env.issueClientCerts(t, "steward-old-ap", 1)
+	copyID, entry := env.admitLocked(t, "steward-old-ap")
+	real := env.server.pendingStore
+	env.server.SetPendingStore(&failingApproveStore{PendingRegistrationStore: real, failures: 1})
+
+	rec := env.link("steward-old-ap", entry.PendingID, false)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), linkStepApprovePend)
+
+	assert.Empty(t, env.liveSerials(t, copyID), "the copy's credential is gone")
+	assert.Empty(t, env.liveSerials(t, "steward-old-ap"), "so is the old identity's: no identity has two live credentials")
+	old, err := env.steward.GetSteward(context.Background(), "steward-old-ap")
+	require.NoError(t, err)
+	assert.Equal(t, cloneDeviceA, old.DeviceID, "the rebind was rolled back")
+	assert.Equal(t, business.StewardStatusTampered, old.Status)
+	pending, err := real.GetPendingByID(context.Background(), entry.PendingID)
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusPending, pending.Status)
+	assert.Equal(t, copyID, pending.StewardID, "the entry is back on the copy")
+
+	require.Equal(t, http.StatusOK, env.link("steward-old-ap", entry.PendingID, false).Code, "a retry completes the link")
+}
+
+func TestListIdentityClones_ShowsLockedCopyWithUnverifiedEvidence(t *testing.T) {
+	env := newCloneEnv(t)
+	env.addSteward(t, "steward-old-ls", cloneTenant, cloneDeviceA, business.StewardStatusActive)
+	require.NoError(t, env.tokenSt.SaveToken(context.Background(), &registration.Token{
+		Token: "cfgms_reg_labelled", Label: "front-desk", TenantID: cloneTenant, ControllerURL: "grpc://c:1",
+	}))
+	env.server.SetApprovalHook(&AlwaysApproveHook{})
+	req := env.lockedRequest(t, "steward-old-ls", cloneReasonBrokenTrust)
+	req.Token = "cfgms_reg_labelled"
+	rec := postRegisterWithBody(env.server, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	// An ordinary queued copy is listed without the locked fields.
+	env.addPending(t, "pending-ordinary-ls", cloneTenant, "steward-old-ls", cloneDeviceB)
+
+	rec = callClone(env.server.handleListIdentityClones, http.MethodGet, "/", nil, cloneTenant, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp identityCloneListResponse
+	decodeCloneData(t, rec, &resp)
+	require.Len(t, resp.Clones, 1)
+	var locked, ordinary *identityCloneQueuedCopy
+	for i := range resp.Clones[0].QueuedCopies {
+		c := &resp.Clones[0].QueuedCopies[i]
+		if c.CloneReason != "" {
+			locked = c
+		} else {
+			ordinary = c
+		}
+	}
+	require.NotNil(t, locked)
+	require.NotNil(t, ordinary)
+	assert.Equal(t, cloneReasonBrokenTrust, locked.CloneReason)
+	assert.Equal(t, "locked-host", locked.Hostname)
+	assert.Equal(t, "front-desk", locked.TokenLabel)
+	require.NotNil(t, locked.ClaimVerified)
+	assert.False(t, *locked.ClaimVerified, "the claim is shown as unverified evidence")
+	assert.NotNil(t, locked.OldLastSeen)
+	assert.Equal(t, "pending-ordinary-ls", ordinary.PendingID)
+}
+
+func TestRestoreLockedCopyNamingOldIDIsRefused(t *testing.T) {
+	env := newTamperEnv(t)
+	env.addSteward(t, "steward-old-rs", cloneTenant, cloneDeviceA, business.StewardStatusActive)
+	copyID, _ := env.admitLocked(t, "steward-old-rs")
+	rec := env.post(env.server.handleRestoreTamperedSteward, "restore", copyID, cloneTenant, nil)
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "LINK_REQUIRED")
+	assert.Equal(t, business.StewardStatusTampered, env.status(t, copyID))
+}
+
+func TestMoveIdentity_OrdinaryMoveStillRefusesTamperedSource(t *testing.T) {
+	env := newCloneEnv(t)
+	env.addSteward(t, "steward-tamp-src", cloneTenant, cloneDeviceA, business.StewardStatusTampered)
+	env.addPending(t, "pending-tamp-src", cloneTenant, "steward-tamp-src", cloneDeviceB)
+	rec := env.link("steward-tamp-src", "pending-tamp-src", false)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "STEWARD_NOT_ACTIVE")
 }

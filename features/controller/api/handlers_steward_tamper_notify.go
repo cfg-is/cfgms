@@ -165,6 +165,18 @@ func (s *Server) announceStewardTamper(parent context.Context, stewardID, tenant
 // notifyStewardTamper emails the tenant's administrator contacts and returns the
 // outcome. Addresses are never logged.
 func (s *Server) notifyStewardTamper(ctx context.Context, stewardID, tenantID string, codes []string) string {
+	return s.notifyTenantAdmins(ctx, tenantID,
+		func() bool { return s.tamperNotify.claim(stewardID, time.Now()) },
+		func(contacts []string) notifif.Message {
+			return s.composeStewardTamperEmail(ctx, stewardID, tenantID, codes, contacts)
+		})
+}
+
+// notifyTenantAdmins emails the tenant's administrator contacts a message built
+// by compose and returns the outcome. claim is called only once there is
+// something to send, so not_configured, no_contacts and a failed contact read
+// never start a cooldown; it returns false to suppress the send (cooldown).
+func (s *Server) notifyTenantAdmins(ctx context.Context, tenantID string, claim func() bool, compose func(contacts []string) notifif.Message) string {
 	notifier := s.EmailNotifier()
 	if notifier == nil {
 		return tamperNotifyNotConfigured
@@ -182,13 +194,10 @@ func (s *Server) notifyStewardTamper(ctx context.Context, stewardID, tenantID st
 	if len(contacts) == 0 {
 		return tamperNotifyNoContacts
 	}
-
-	// Claimed only once there is something to send, so not_configured, no_contacts
-	// and a failed contact read never start a cooldown.
-	if !s.tamperNotify.claim(stewardID, time.Now()) {
+	if !claim() {
 		return tamperNotifyCooldown
 	}
-	result, err := notifier.Send(ctx, s.composeStewardTamperEmail(ctx, stewardID, tenantID, codes, contacts))
+	result, err := notifier.Send(ctx, compose(contacts))
 	if err != nil {
 		s.logger.Warn("Tamper notification email failed",
 			"tenant_id", logging.SanitizeLogValue(tenantID),

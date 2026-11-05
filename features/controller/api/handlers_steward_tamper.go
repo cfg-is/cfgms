@@ -147,6 +147,18 @@ func (s *Server) handleRestoreTamperedSteward(w http.ResponseWriter, r *http.Req
 	}
 	ctx := r.Context()
 
+	// A locked copy that names an old identity is resolved by linking it to that
+	// identity, not by restoring it as a new one.
+	if copyEntry, err := s.lockedCopyNamingOldID(ctx, record); err != nil {
+		s.logger.Error("tamper restore: locked copy lookup failed",
+			"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to restore steward", "INTERNAL_ERROR")
+		return
+	} else if copyEntry != nil {
+		s.writeErrorResponse(w, http.StatusConflict, "This steward was admitted locked and names an old identity; link it to that identity instead of restoring it", "LINK_REQUIRED")
+		return
+	}
+
 	if s.refuseRestoreWhileFaulted(w, r, record, reason) {
 		return
 	}
