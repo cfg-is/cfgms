@@ -179,47 +179,10 @@ func (h *RollbackHandler) RegisterRoutes(router *mux.Router) {
 // ListRollbackPoints returns available rollback points
 // GET /api/v1/rollback/points?target_type={type}&target_id={id}&limit={limit}
 func (h *RollbackHandler) ListRollbackPoints(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	// Parse query parameters
-	targetType := rollback.TargetType(r.URL.Query().Get("target_type"))
-	targetID := r.URL.Query().Get("target_id")
-
-	limit := 50 // default
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil {
-			limit = l
-		}
-	}
-
-	// Validate parameters
-	if targetType == "" || targetID == "" {
-		h.sendError(w, http.StatusBadRequest, "target_type and target_id are required")
-		return
-	}
-
-	// Tenant scope check (Issue #4335): an out-of-scope target returns the same
-	// empty-list response as a target with no recorded rollback points, so the
-	// endpoint cannot be used to probe cross-tenant existence.
-	if h.refuseTarget(w, r, targetID, "GET /api/v1/rollback/points", func() {
-		h.sendJSON(w, http.StatusOK, map[string]interface{}{
-			"rollback_points": []rollback.RollbackPoint{},
+	h.listForTarget(w, r, "GET /api/v1/rollback/points", "rollback_points", []rollback.RollbackPoint{},
+		func(ctx context.Context, targetType rollback.TargetType, targetID string, limit int) (interface{}, error) {
+			return h.rollbackManager.ListRollbackPoints(ctx, targetType, targetID, limit)
 		})
-	}) {
-		return
-	}
-
-	// Get rollback points
-	points, err := h.rollbackManager.ListRollbackPoints(ctx, targetType, targetID, limit)
-	if err != nil {
-		h.sendManagerError(w, err, http.StatusInternalServerError)
-		return
-	}
-
-	// Send response
-	h.sendJSON(w, http.StatusOK, map[string]interface{}{
-		"rollback_points": points,
-	})
 }
 
 // PreviewRollback previews what will change in a rollback
@@ -505,8 +468,20 @@ func (h *RollbackHandler) CancelRollback(w http.ResponseWriter, r *http.Request)
 // ListRollbackHistory returns rollback history
 // GET /api/v1/rollback/history?target_type={type}&target_id={id}&limit={limit}
 func (h *RollbackHandler) ListRollbackHistory(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	h.listForTarget(w, r, "GET /api/v1/rollback/history", "rollback_operations", []rollback.RollbackOperation{},
+		func(ctx context.Context, targetType rollback.TargetType, targetID string, limit int) (interface{}, error) {
+			return h.rollbackManager.ListRollbackHistory(ctx, targetType, targetID, limit)
+		})
+}
 
+// listForTarget serves the per-target list endpoints: it parses target_type, target_id and
+// limit, applies the tenant scope check (Issue #4335) and answers {key: list}. An
+// out-of-scope target returns the same empty-list response (emptyList) as a target with no
+// recorded entries, so the endpoint cannot be used to probe cross-tenant existence.
+func (h *RollbackHandler) listForTarget(
+	w http.ResponseWriter, r *http.Request, route, key string, emptyList interface{},
+	list func(ctx context.Context, targetType rollback.TargetType, targetID string, limit int) (interface{}, error),
+) {
 	// Parse query parameters
 	targetType := rollback.TargetType(r.URL.Query().Get("target_type"))
 	targetID := r.URL.Query().Get("target_id")
@@ -524,28 +499,19 @@ func (h *RollbackHandler) ListRollbackHistory(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Tenant scope check (Issue #4335): an out-of-scope target returns the same
-	// empty-list response as a target with no recorded rollback history, so the
-	// endpoint cannot be used to probe cross-tenant existence.
-	if h.refuseTarget(w, r, targetID, "GET /api/v1/rollback/history", func() {
-		h.sendJSON(w, http.StatusOK, map[string]interface{}{
-			"rollback_operations": []rollback.RollbackOperation{},
-		})
+	if h.refuseTarget(w, r, targetID, route, func() {
+		h.sendJSON(w, http.StatusOK, map[string]interface{}{key: emptyList})
 	}) {
 		return
 	}
 
-	// Get rollback history
-	operations, err := h.rollbackManager.ListRollbackHistory(ctx, targetType, targetID, limit)
+	items, err := list(r.Context(), targetType, targetID, limit)
 	if err != nil {
 		h.sendManagerError(w, err, http.StatusInternalServerError)
 		return
 	}
 
-	// Send response
-	h.sendJSON(w, http.StatusOK, map[string]interface{}{
-		"rollback_operations": operations,
-	})
+	h.sendJSON(w, http.StatusOK, map[string]interface{}{key: items})
 }
 
 // Helper methods

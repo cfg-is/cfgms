@@ -8,6 +8,7 @@ import (
 	"github.com/gorilla/mux"
 )
 
+//duplication:justified features/controller/api/routes_entities.go -- sanctioned RegisterRoutes seam, one file per resource
 func init() { RegisterRoutes(registerCaseRoutes) }
 
 // registerCaseRoutes registers the /api/v1/cases CRUD routes (Issue #3605).
