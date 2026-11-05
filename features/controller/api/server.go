@@ -158,6 +158,7 @@ type Server struct {
 	refreshPolicyStore              business.RefreshPolicyStore              // Issue #2096: per-tenant refresh policy
 	auditStore                      business.AuditStore                      // Issue #2098: direct audit store for test-mode count endpoint
 	nonceStore                      business.NonceStore                      // Issue #3755, ADR-031: durable registration-refresh nonce store (any-node)
+	repair                          *repairDelivery                          // Issue #5726: signer, chain builder and sender of repair requests; nil disables repair
 	popVerifier                     PoPVerifier                              // Issue #2096: injectable for revoked-before-PoP testing
 	isolationEngine                 *tenantsecurity.TenantIsolationEngine    // Issue #2123: tenant isolation enforcement for scoped API keys
 	stewardEventLoggingManager      *logging.LoggingManager                  // Issue #2139: dedicated sink for steward events; queried by handleGetStewardLogs (S6)

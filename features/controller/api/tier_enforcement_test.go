@@ -94,6 +94,8 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"POST", "/api/v1/stewards/test-steward-id/identity/move", "steward:move-identity"},              // ADR-034 §5
 	{"POST", "/api/v1/stewards/test-steward-id/tamper/restore", "steward:tamper-restore"},            // Issue #5667
 	{"POST", "/api/v1/stewards/test-steward-id/tamper/ban", "steward:tamper-ban"},                    // Issue #5667
+	{"POST", "/api/v1/stewards/test-steward-id/tamper/repair", "steward:tamper-repair"},              // Issue #5726
+	{"GET", "/api/v1/stewards/test-steward-id/tamper/repair", "steward:tamper-repair"},               // Issue #5726
 	{"POST", "/api/v1/stewards/test-steward-id/services/spooler/actions", "steward:service-control"}, // Issue #4628
 	{"POST", "/api/v1/stewards/test-steward-id/processes/4242/actions", "steward:process-control"},   // Issue #4628
 	{"POST", "/api/v1/reports/custom-templates", "report:manage"},                                    // Issue #5686: custom template writes

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/audit"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -190,6 +191,13 @@ type Config struct {
 	// status after sustained liveness. Optional — nil disables.
 	TrustEvaluator TrustEvaluator
 
+	// RepairAudit receives the audit events for repair.running and the repair
+	// failure codes a tampered steward reports. StewardTenant resolves the
+	// tenant of the steward from controller-side state (never from the
+	// heartbeat). Both must be set for repair progress to be recorded.
+	RepairAudit   *audit.Manager
+	StewardTenant func(ctx context.Context, stewardID string) (string, error)
+
 	// Logger for service logging
 	Logger logging.Logger
 }
@@ -225,7 +233,7 @@ func New(cfg *Config) (*Service, error) {
 		checkInterval:         checkInterval,
 		onStatusChange:        cfg.OnStatusChange,
 		onDNAHashMismatch:     cfg.OnDNAHashMismatch,
-		onHeartbeatReceived:   cfg.OnHeartbeatReceived,
+		onHeartbeatReceived:   withRepairProgress(cfg),
 		onFragmentRoot:        cfg.OnFragmentRoot,
 		onBulkRoot:            cfg.OnBulkRoot,
 		trustEvaluator:        cfg.TrustEvaluator,

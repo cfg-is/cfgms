@@ -7,9 +7,15 @@
 package types
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -401,6 +407,100 @@ const (
 	// baked root is fresh enough to authorize an operator action.
 	ReasonCodeLockedRevocationStale = "locked_tools.revocation_stale"
 )
+
+// Repair reason codes. This is the single definition; the steward emits the loss,
+// progress and failure codes, the controller emits none of them and N7 emits
+// repair.contested. None is a tamper code: the host is already locked and these
+// describe a repair of it. Each outcome reason carries the repair_id in its
+// Message field (the S1 caps and sanitizing apply to it like any reason).
+const (
+	// HealthComponentRepair is the health-reason component the codes below are
+	// reported under.
+	HealthComponentRepair = "repair"
+
+	// Loss risk: the repair would discard this local data, so the operator must
+	// approve exactly the loss set the steward reports.
+	ReasonCodeRepairLossLocalLogs     = "repair.loss.local_logs"
+	ReasonCodeRepairLossActionHistory = "repair.loss.action_history"
+
+	// Progress.
+	ReasonCodeRepairRunning   = "repair.running"
+	ReasonCodeRepairCompleted = "repair.completed"
+
+	// Failure. The steward stays tampered and nothing retries on its own.
+	ReasonCodeRepairFailed           = "repair.failed"
+	ReasonCodeRepairRefusedDataLoss  = "repair.refused_data_loss"
+	ReasonCodeRepairLossSetChanged   = "repair.loss_set_changed"
+	ReasonCodeRepairNotLocked        = "repair.not_locked"
+	ReasonCodeRepairFaultPersists    = "repair.fault_persists"
+	ReasonCodeRepairSignatureInvalid = "repair.signature_invalid"
+	ReasonCodeRepairAnchorUntrusted  = "repair.anchor_untrusted"
+
+	// ReasonCodeRepairContested is emitted when a repaired identity is also in
+	// use somewhere else (N7).
+	ReasonCodeRepairContested = "repair.contested"
+)
+
+// IsRepairLossCode reports whether code is exactly one of the loss-risk codes.
+func IsRepairLossCode(code string) bool {
+	switch code {
+	case ReasonCodeRepairLossLocalLogs, ReasonCodeRepairLossActionHistory:
+		return true
+	}
+	return false
+}
+
+// IsRepairFailureCode reports whether code is exactly one of the failure codes a
+// steward reports when a repair did not happen.
+func IsRepairFailureCode(code string) bool {
+	switch code {
+	case ReasonCodeRepairFailed,
+		ReasonCodeRepairRefusedDataLoss,
+		ReasonCodeRepairLossSetChanged,
+		ReasonCodeRepairNotLocked,
+		ReasonCodeRepairFaultPersists,
+		ReasonCodeRepairSignatureInvalid,
+		ReasonCodeRepairAnchorUntrusted:
+		return true
+	}
+	return false
+}
+
+// LossDigest binds a repair approval to the loss list that was shown: the
+// lowercase hex SHA-256 of the sorted codes joined with a newline. The empty
+// set has a fixed digest (the SHA-256 of the empty string). The controller signs
+// it into the RepairRequest and the steward recomputes it from its own loss set.
+func LossDigest(codes []string) string {
+	sorted := append([]string(nil), codes...)
+	sort.Strings(sorted)
+	sum := sha256.Sum256([]byte(strings.Join(sorted, "\n")))
+	return hex.EncodeToString(sum[:])
+}
+
+// RepairSigningPayload is the exact byte string the controller signs for a
+// RepairRequest: the steward the request is for, the repair ID, the loss digest
+// and the expiry, so a request cannot be replayed to another steward or have its
+// approval or expiry changed in transit.
+func RepairSigningPayload(stewardID, repairID, lossDigest string, expiresAtUnix int64) []byte {
+	return []byte("cfgms-repair-request-v1\n" + stewardID + "\n" + repairID + "\n" +
+		lossDigest + "\n" + strconv.FormatInt(expiresAtUnix, 10))
+}
+
+// RepairRotationProofDigest is the 32-byte digest both the old and the new
+// identity key sign when a steward completes a repair: the steward ID, the repair
+// ID, the new public key and the CSR. Each field is length-prefixed so no two
+// field sets share a digest.
+func RepairRotationProofDigest(stewardID, repairID string, newIdentityKeyPub []byte, csrPEM string) []byte {
+	h := sha256.New()
+	h.Write([]byte("cfgms-repair-rotate-v1"))
+	for _, f := range [][]byte{[]byte(stewardID), []byte(repairID), newIdentityKeyPub, []byte(csrPEM)} {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(f)))
+		h.Write(n[:])
+		h.Write(f)
+	}
+	return h.Sum(nil)
+}
 
 // IsTamperCode reports whether code is exactly one of the defined tamper codes.
 // It is an exact-set check: an unknown "tamper.*" code is not a tamper code.

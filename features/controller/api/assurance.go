@@ -86,6 +86,7 @@ var permissionAssurance = map[string]Requirement{
 	"steward:move-identity":               {Min: session.AssuranceStrong},                            // POST /stewards/{id}/identity/move (ADR-034 §5)
 	"steward:tamper-restore":              {Min: session.AssuranceStrong},                            // POST /stewards/{id}/tamper/restore
 	"steward:tamper-ban":                  {Min: session.AssuranceStrong},                            // POST /stewards/{id}/tamper/ban
+	"steward:tamper-repair":               {Min: session.AssuranceStrong},                            // POST, GET /stewards/{id}/tamper/repair
 	"account:create":                      {Min: session.AssuranceStrong},                            // POST /accounts (Issue #3574)
 	"account:update":                      {Min: session.AssuranceStrong},                            // PUT  /accounts/{username} (Issue #3126: can reset password or disable; Issue #3574)
 	"account:delete":                      {Min: session.AssuranceStrong},                            // DELETE /accounts/{username} (Issue #3574)

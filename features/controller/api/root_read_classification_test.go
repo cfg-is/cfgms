@@ -175,6 +175,7 @@ var rootReadClassification = map[string]rootReadEntry{
 	"/api/v1/stewards/{id}/scripts/metrics":                          {rootReadCrossing, ""},
 	"/api/v1/stewards/{id}/scripts/status":                           {rootReadCrossing, ""},
 	"/api/v1/stewards/{id}/tags":                                     {rootReadCrossing, ""},
+	"/api/v1/stewards/{id}/tamper/repair":                            {rootReadCrossing, ""}, // Issue #5726
 	"/api/v1/telemetry/ws/{id}":                                      {rootReadCrossing, ""},
 	"/api/v1/tenant-crossings/active":                                {rootReadPlatform, "crossing meta-log feed (A8.3 item 3.2); client tenant names are withheld from root"},
 	"/api/v1/tenants":                                                {rootReadCrossing, ""},

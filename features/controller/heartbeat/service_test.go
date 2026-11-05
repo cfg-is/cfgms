@@ -6,12 +6,16 @@ package heartbeat
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/audit"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -337,4 +341,131 @@ func TestHeartbeatService_Reasons_CappedReplacedAndHandedToHook(t *testing.T) {
 	assert.Len(t, got[0][0].Message, controlplaneTypes.MaxHealthReasonMessageLen)
 	assert.Len(t, got[1], 1)
 	assert.Empty(t, got[2])
+}
+
+// --- repair progress (Issue #5726) ---
+
+// repairAuditFixture is a service wired to a real audit manager and a tenant
+// lookup, plus a way to read back the repair events it wrote.
+func newRepairAuditService(t *testing.T, tenants map[string]string) (*Service, *testControlPlane, *audit.Manager) {
+	t.Helper()
+	am, err := audit.NewManager(pkgtesting.SetupTestStorage(t).GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = am.Stop(context.Background()) })
+	svc, cp := newTestService(t, func(c *Config) {
+		c.RepairAudit = am
+		c.StewardTenant = func(_ context.Context, id string) (string, error) {
+			if tenant, ok := tenants[id]; ok {
+				return tenant, nil
+			}
+			return "", fmt.Errorf("unknown steward")
+		}
+	})
+	return svc, cp, am
+}
+
+func repairEvents(t *testing.T, am *audit.Manager) []*business.AuditEntry {
+	t.Helper()
+	require.NoError(t, am.Flush(context.Background()))
+	entries, err := am.QueryEntries(context.Background(), &business.AuditFilter{
+		Actions: []string{"steward_tamper_repair_running", "steward_tamper_repair_failed"},
+		Order:   "asc",
+	})
+	require.NoError(t, err)
+	return entries
+}
+
+func heartbeatWith(id string, reasons ...controlplaneTypes.HealthReason) *controlplaneTypes.Heartbeat {
+	return &controlplaneTypes.Heartbeat{StewardID: id, Status: controlplaneTypes.StatusHealthy, Timestamp: time.Now(), Reasons: reasons}
+}
+
+func TestHeartbeatService_RecordsRepairRunning(t *testing.T) {
+	svc, cp, am := newRepairAuditService(t, map[string]string{"s1": "tenant-a"})
+	_ = svc
+	ctx := context.Background()
+
+	require.NoError(t, cp.sendHeartbeat(ctx, heartbeatWith("s1",
+		controlplaneTypes.HealthReason{Component: "repair", Code: controlplaneTypes.ReasonCodeRepairRunning, Message: "repair-123"})))
+	// The same reason on the next heartbeats is not a new event.
+	for i := 0; i < 3; i++ {
+		require.NoError(t, cp.sendHeartbeat(ctx, heartbeatWith("s1",
+			controlplaneTypes.HealthReason{Component: "repair", Code: controlplaneTypes.ReasonCodeRepairRunning, Message: "repair-123"})))
+	}
+
+	events := repairEvents(t, am)
+	require.Len(t, events, 1)
+	e := events[0]
+	assert.Equal(t, "steward_tamper_repair_running", e.Action)
+	assert.Equal(t, "tenant-a", e.TenantID, "the tenant comes from controller-side state")
+	assert.Equal(t, "s1", e.ResourceID)
+	assert.Equal(t, "repair-123", e.Details["repair_id"])
+}
+
+func TestHeartbeatService_RecordsRepairFailureCodes(t *testing.T) {
+	failures := []string{
+		controlplaneTypes.ReasonCodeRepairFailed,
+		controlplaneTypes.ReasonCodeRepairRefusedDataLoss,
+		controlplaneTypes.ReasonCodeRepairLossSetChanged,
+		controlplaneTypes.ReasonCodeRepairSignatureInvalid,
+	}
+	for _, code := range failures {
+		t.Run(code, func(t *testing.T) {
+			_, cp, am := newRepairAuditService(t, map[string]string{"s1": "tenant-a"})
+			require.NoError(t, cp.sendHeartbeat(context.Background(), heartbeatWith("s1",
+				controlplaneTypes.HealthReason{Component: "repair", Code: code, Message: "repair-9"})))
+			events := repairEvents(t, am)
+			require.Len(t, events, 1)
+			assert.Equal(t, "steward_tamper_repair_failed", events[0].Action)
+			assert.Equal(t, business.AuditResultFailure, events[0].Result)
+			assert.Equal(t, "repair-9", events[0].Details["repair_id"])
+			assert.Equal(t, []interface{}{code}, events[0].Details["codes"])
+		})
+	}
+}
+
+func TestHeartbeatService_RepairReasonsIgnoredWhenNotRepair(t *testing.T) {
+	_, cp, am := newRepairAuditService(t, map[string]string{"s1": "tenant-a"})
+	ctx := context.Background()
+	require.NoError(t, cp.sendHeartbeat(ctx, heartbeatWith("s1",
+		controlplaneTypes.HealthReason{Component: "integrity", Code: controlplaneTypes.ReasonCodeTamperDataDir},
+		controlplaneTypes.HealthReason{Component: "repair", Code: controlplaneTypes.ReasonCodeRepairLossLocalLogs},
+		controlplaneTypes.HealthReason{Component: "repair", Code: controlplaneTypes.ReasonCodeRepairCompleted},
+		controlplaneTypes.HealthReason{Component: "repair", Code: "repair.invented"})))
+	assert.Empty(t, repairEvents(t, am), "loss risk, completed (the controller records it itself) and unknown codes write no event")
+
+	// A steward whose tenant is unknown writes nothing.
+	require.NoError(t, cp.sendHeartbeat(ctx, heartbeatWith("stranger",
+		controlplaneTypes.HealthReason{Component: "repair", Code: controlplaneTypes.ReasonCodeRepairRunning})))
+	assert.Empty(t, repairEvents(t, am))
+}
+
+func TestHeartbeatService_RepairEventsAreRateLimitedPerSteward(t *testing.T) {
+	_, cp, am := newRepairAuditService(t, map[string]string{"s1": "tenant-a"})
+	ctx := context.Background()
+	// A steward that varies the repair id on every heartbeat cannot flood the audit log.
+	for i := 0; i < 20; i++ {
+		require.NoError(t, cp.sendHeartbeat(ctx, heartbeatWith("s1",
+			controlplaneTypes.HealthReason{Component: "repair", Code: controlplaneTypes.ReasonCodeRepairRunning, Message: fmt.Sprintf("repair-%d", i)})))
+	}
+	assert.Len(t, repairEvents(t, am), repairProgressMaxPerWindow)
+}
+
+func TestHeartbeatService_RunningThenFailureAreBothRecorded(t *testing.T) {
+	_, cp, am := newRepairAuditService(t, map[string]string{"s1": "tenant-a"})
+	ctx := context.Background()
+	require.NoError(t, cp.sendHeartbeat(ctx, heartbeatWith("s1",
+		controlplaneTypes.HealthReason{Component: "repair", Code: controlplaneTypes.ReasonCodeRepairRunning, Message: "r1"})))
+	require.NoError(t, cp.sendHeartbeat(ctx, heartbeatWith("s1",
+		controlplaneTypes.HealthReason{Component: "repair", Code: controlplaneTypes.ReasonCodeRepairFailed, Message: "r1"})))
+	events := repairEvents(t, am)
+	require.Len(t, events, 2)
+	assert.Equal(t, "steward_tamper_repair_running", events[0].Action)
+	assert.Equal(t, "steward_tamper_repair_failed", events[1].Action)
+}
+
+func TestHeartbeatService_RepairProgressNeedsAuditAndTenantLookup(t *testing.T) {
+	svc, cp := newTestService(t)
+	assert.Nil(t, svc.onHeartbeatReceived, "without an audit manager the callback is not wrapped")
+	require.NoError(t, cp.sendHeartbeat(context.Background(), heartbeatWith("s1",
+		controlplaneTypes.HealthReason{Component: "repair", Code: controlplaneTypes.ReasonCodeRepairRunning})))
 }

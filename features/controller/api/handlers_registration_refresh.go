@@ -67,6 +67,18 @@ type RefreshCompleteRequest struct {
 	// this public key into the renewed mTLS client certificate; the matching private
 	// key never crosses the wire.
 	CSRPEM string `json:"csr_pem,omitempty"`
+
+	// RepairID marks the completion of an operator-requested repair of a tampered
+	// steward (the signed RepairRequest's repair_id). The fields below are used
+	// only with it: the steward rotates its identity key, proving possession with
+	// both the old and the new key over (steward ID, repair_id, new public key,
+	// CSR). The nonce, issued_at and signature fields are not used.
+	RepairID            string `json:"repair_id,omitempty"`
+	NewIdentityKeyPub   string `json:"new_identity_key_pub,omitempty"`   // base64url
+	NewIdentityKeyAlg   string `json:"new_identity_key_alg,omitempty"`   // "ed25519" or "ecdsa-p256"
+	NewIdentityKeyLevel string `json:"new_identity_key_level,omitempty"` // "file", "tpm" or "secure-enclave"
+	OldKeyProof         string `json:"old_key_proof,omitempty"`          // base64url signature by the current identity key
+	NewKeyProof         string `json:"new_key_proof,omitempty"`          // base64url signature by the new identity key
 }
 
 // RefreshCompleteResponse is returned by POST /api/v1/stewards/{device_id}/refresh/complete.
@@ -270,6 +282,12 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A repair completion is a distinct request shape with its own gate order.
+	if req.RepairID != "" {
+		s.handleRepairComplete(w, r, deviceID, &req)
+		return
+	}
+
 	// Gate (1): lookup → 404
 	record, err := s.stewardStore.GetStewardByDeviceID(r.Context(), deviceID)
 	if err != nil {
@@ -306,22 +324,8 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 	// context on the emitRefreshAudit calls in this handler. Identity is instead
 	// confirmed below by proof-of-possession against record.IdentityKeyPub.
 
-	// Gate (3): CSR validation (Issue #3781) — the steward generates its renewed
-	// mTLS keypair locally and submits only the public half. Rejected before any
-	// nonce operation or certificate is signed, mirroring the registration
-	// handler's same two checks (handlers_registration.go handleRegister).
-	if req.CSRPEM == "" {
-		s.writeStatusError(w, http.StatusBadRequest, "csr_pem is required")
-		return
-	}
-	if containsPrivateKeyMaterial(req.CSRPEM) {
-		s.writeStatusError(w, http.StatusBadRequest, "private key material is not accepted")
-		return
-	}
-	if _, err := parseAndVerifyCSR(req.CSRPEM); err != nil {
-		s.logger.Warn("Rejected invalid certificate signing request at refresh complete",
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeStatusError(w, http.StatusBadRequest, "invalid certificate signing request")
+	// Gate (3): CSR validation (Issue #3781).
+	if !s.validateRefreshCSR(w, req.CSRPEM) {
 		return
 	}
 
@@ -332,6 +336,30 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 
 	// Gate (8): lifecycle gate
 	s.routeRefreshByLifecycle(w, r, record, deviceID, &req)
+}
+
+// validateRefreshCSR is gate (3) of /refresh/complete: the steward generates its
+// renewed mTLS keypair locally and submits only the public half (Issue #3781). It
+// is rejected before any nonce operation or certificate is signed, mirroring the
+// registration handler's same two checks (handlers_registration.go handleRegister).
+// It writes the error response and returns false when the CSR is unusable. The
+// repair completion shares it.
+func (s *Server) validateRefreshCSR(w http.ResponseWriter, csrPEM string) bool {
+	if csrPEM == "" {
+		s.writeStatusError(w, http.StatusBadRequest, "csr_pem is required")
+		return false
+	}
+	if containsPrivateKeyMaterial(csrPEM) {
+		s.writeStatusError(w, http.StatusBadRequest, "private key material is not accepted")
+		return false
+	}
+	if _, err := parseAndVerifyCSR(csrPEM); err != nil {
+		s.logger.Warn("Rejected invalid certificate signing request at refresh complete",
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeStatusError(w, http.StatusBadRequest, "invalid certificate signing request")
+		return false
+	}
+	return true
 }
 
 // routeRefreshByLifecycle is gate (8) of /refresh/complete: archived records
