@@ -123,7 +123,7 @@ jobs:
 
   sign:
     name: Sign installer artifacts
-    needs: build
+    needs: [validate, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -150,6 +150,7 @@ jobs:
       - name: Write detached installer signatures
         env:
           CFGMS_PUBLISHER_SEED: ${{ secrets.CFGMS_PUBLISHER_SEED }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -164,7 +165,7 @@ jobs:
             platform="${rest%-*}"
             arch="${rest##*-}"
             "$RUNNER_TEMP/sign-steward-binary" --installer --require-publisher-seed \
-              "$file" "$platform" "$arch" > "release-signatures/$name.sig"
+              "$file" "$RELEASE_VERSION" "$platform" "$arch" > "release-signatures/$name.sig"
             signed=$((signed + 1))
           done
           if [[ "$signed" -eq 0 ]]; then

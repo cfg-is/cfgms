@@ -47,10 +47,10 @@ func insecureHTTPClient() *http.Client {
 
 // signInstallerContent signs content as an installer artifact with the zero-seed
 // publisher key the fleet controller trusts, returning URL-safe base64 (no padding).
-func signInstallerContent(t *testing.T, content []byte, platform, arch string) string {
+func signInstallerContent(t *testing.T, content []byte, version, platform, arch string) string {
 	t.Helper()
 	sum := sha256.Sum256(content)
-	msg, err := trust.InstallerMessage(hex.EncodeToString(sum[:]), platform, arch)
+	msg, err := trust.InstallerMessage(hex.EncodeToString(sum[:]), version, platform, arch)
 	require.NoError(t, err)
 	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(testUpgradePrivKey(), []byte(msg)))
 }
@@ -92,10 +92,15 @@ func TestFleetInstallPackageFlow(t *testing.T) {
 	_ = unsignedResp.Body.Close()
 	require.Equal(t, http.StatusBadRequest, unsignedResp.StatusCode, "unsigned upload must be refused")
 
+	// The controller's blob store may persist between runs while the steward binary
+	// is rebuilt; the controller refuses an equal version with different bytes, so
+	// the version is derived per run and only ever increases.
+	installerVersion := fmt.Sprintf("v0.0.%d", time.Now().Unix())
 	uploadReq, err := http.NewRequestWithContext(
 		context.Background(),
 		http.MethodPut,
-		fleetControllerHTTP+"/api/v1/installer/artifacts/linux/amd64?signature="+signInstallerContent(t, binaryData, "linux", "amd64"),
+		fleetControllerHTTP+"/api/v1/installer/artifacts/linux/amd64?version="+installerVersion+
+			"&signature="+signInstallerContent(t, binaryData, installerVersion, "linux", "amd64"),
 		bytes.NewReader(binaryData),
 	)
 	require.NoError(t, err)

@@ -275,7 +275,7 @@ func TestRun_InstallerMode_SignatureVerifiesAsInstallerOnly(t *testing.T) {
 	path := writeBinary(t, content)
 
 	var out bytes.Buffer
-	require.NoError(t, run([]string{"--installer", path, "windows", "amd64"}, &out))
+	require.NoError(t, run([]string{"--installer", path, "v1.2.3", "windows", "amd64"}, &out))
 	sigBytes, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(out.String()))
 	require.NoError(t, err, "installer mode must print only the URL-safe base64 signature")
 
@@ -289,8 +289,10 @@ func TestRun_InstallerMode_SignatureVerifiesAsInstallerOnly(t *testing.T) {
 	hash := hex.EncodeToString(sum[:])
 	sig := bundle.BundleSignature{Publisher: "cfgms", Algorithm: "ed25519", Signature: sigBytes}
 
-	require.NoError(t, trust.VerifyInstallerSignature(hash, "windows", "amd64", sig, store))
-	assert.Error(t, trust.VerifyInstallerSignature(hash, "linux", "amd64", sig, store))
+	require.NoError(t, trust.VerifyInstallerSignature(hash, "v1.2.3", "windows", "amd64", sig, store))
+	assert.Error(t, trust.VerifyInstallerSignature(hash, "v1.2.3", "linux", "amd64", sig, store))
+	assert.Error(t, trust.VerifyInstallerSignature(hash, "v1.2.4", "windows", "amd64", sig, store),
+		"the signature must verify for its version only")
 	assert.Error(t, trust.VerifyStewardBinarySignature(hash, "v1.0.0", "windows", "amd64", sig, store),
 		"an installer signature must not verify as a steward-binary signature")
 }
@@ -298,8 +300,10 @@ func TestRun_InstallerMode_SignatureVerifiesAsInstallerOnly(t *testing.T) {
 func TestRun_InstallerMode_Errors(t *testing.T) {
 	var out bytes.Buffer
 	assert.Error(t, run([]string{"--installer", "only-a-file"}, &out))
-	assert.Error(t, run([]string{"--installer", filepath.Join(t.TempDir(), "missing"), "linux", "amd64"}, &out))
-	assert.ErrorIs(t, run([]string{"--installer", writeBinary(t, []byte("x")), "li|nux", "amd64"}, &out),
+	assert.Error(t, run([]string{"--installer", writeBinary(t, []byte("x")), "linux", "amd64"}, &out),
+		"the pre-version argument form must be refused")
+	assert.Error(t, run([]string{"--installer", filepath.Join(t.TempDir(), "missing"), "v1.2.3", "linux", "amd64"}, &out))
+	assert.ErrorIs(t, run([]string{"--installer", writeBinary(t, []byte("x")), "v1.2.3", "li|nux", "amd64"}, &out),
 		trust.ErrInvalidSignatureMessage)
 }
 
@@ -308,7 +312,7 @@ func TestRun_RequirePublisherSeed_FailsClosedWhenSeedUnset(t *testing.T) {
 	path := writeBinary(t, []byte("installer-bytes"))
 
 	for name, args := range map[string][]string{
-		"installer": {"--require-publisher-seed", "--installer", path, "windows", "amd64"},
+		"installer": {"--require-publisher-seed", "--installer", path, "v1.2.3", "windows", "amd64"},
 		"binary":    {"--require-publisher-seed", path, "v0.9.41", "windows", "amd64"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -333,13 +337,13 @@ func TestRun_RequirePublisherSeed_SignsWithSuppliedSeed(t *testing.T) {
 	path := writeBinary(t, content)
 
 	var out bytes.Buffer
-	require.NoError(t, run([]string{"--installer", "--require-publisher-seed", path, "linux", "arm64"}, &out))
+	require.NoError(t, run([]string{"--installer", "--require-publisher-seed", path, "v1.2.3", "linux", "arm64"}, &out))
 	sigBytes, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(out.String()))
 	require.NoError(t, err)
 
 	priv := ed25519.NewKeyFromSeed(seed)
 	sum := sha256.Sum256(content)
-	message, err := trust.InstallerMessage(hex.EncodeToString(sum[:]), "linux", "arm64")
+	message, err := trust.InstallerMessage(hex.EncodeToString(sum[:]), "v1.2.3", "linux", "arm64")
 	require.NoError(t, err)
 	assert.True(t, ed25519.Verify(priv.Public().(ed25519.PublicKey), []byte(message), sigBytes))
 
@@ -358,13 +362,13 @@ func TestRun_RequirePublisherSeed_NeverEchoesSeed(t *testing.T) {
 	path := writeBinary(t, []byte("installer-bytes"))
 
 	var out bytes.Buffer
-	require.NoError(t, run([]string{"--require-publisher-seed", "--installer", path, "windows", "amd64"}, &out))
+	require.NoError(t, run([]string{"--require-publisher-seed", "--installer", path, "v1.2.3", "windows", "amd64"}, &out))
 	assert.NotContains(t, out.String(), encoded)
 	assert.False(t, bytes.Contains(out.Bytes(), seed))
 
 	t.Setenv(publisherSeedEnv, "not base64!!")
 	out.Reset()
-	err := run([]string{"--require-publisher-seed", "--installer", path, "windows", "amd64"}, &out)
+	err := run([]string{"--require-publisher-seed", "--installer", path, "v1.2.3", "windows", "amd64"}, &out)
 	require.Error(t, err)
 	assert.Empty(t, out.String())
 }
@@ -373,5 +377,5 @@ func TestPublisherKey_DefaultStillAllowedWithoutFlag(t *testing.T) {
 	t.Setenv(publisherSeedEnv, "")
 	path := writeBinary(t, []byte("installer-bytes"))
 	var out bytes.Buffer
-	require.NoError(t, run([]string{"--installer", path, "windows", "amd64"}, &out))
+	require.NoError(t, run([]string{"--installer", path, "v1.2.3", "windows", "amd64"}, &out))
 }

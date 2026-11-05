@@ -1228,6 +1228,7 @@ async function pickUpload(file: File, signature = 'c2ln') {
   fireEvent.change(screen.getByTestId('upload-platform'), { target: { value: 'linux' } })
   fireEvent.change(screen.getByTestId('upload-arch'), { target: { value: 'amd64' } })
   fireEvent.change(screen.getByTestId('upload-file'), { target: { files: [file] } })
+  fireEvent.change(screen.getByTestId('upload-version'), { target: { value: '1.2.3' } })
   fireEvent.change(screen.getByTestId('upload-signature'), { target: { value: signature } })
   fireEvent.click(screen.getByTestId('upload-btn'))
 }
@@ -1280,7 +1281,7 @@ describe('InstallerPage upload, delete and publish', () => {
     expect(new Headers(mutationCalls()[1]![1]?.headers).get('X-Presence-Token')).toBe('tap-token-1')
   })
 
-  it('upload button stays disabled until platform, arch, file and signature are set', async () => {
+  it('upload button stays disabled until platform, arch, file, signature and version are set', async () => {
     installArtifactRoutes({ presence: false })
     renderPage()
     await waitFor(() => expect(screen.getByTestId('artifact-manage-section')).toBeInTheDocument())
@@ -1293,10 +1294,14 @@ describe('InstallerPage upload, delete and publish', () => {
     fireEvent.change(screen.getByTestId('upload-signature'), { target: { value: '   ' } })
     expect(btn).toBeDisabled()
     fireEvent.change(screen.getByTestId('upload-signature'), { target: { value: 'c2ln' } })
+    expect(btn).toBeDisabled()
+    fireEvent.change(screen.getByTestId('upload-version'), { target: { value: '  ' } })
+    expect(btn).toBeDisabled()
+    fireEvent.change(screen.getByTestId('upload-version'), { target: { value: '1.2.3' } })
     expect(btn).toBeEnabled()
     fireEvent.click(btn)
     await waitFor(() => expect(mutationCalls()).toHaveLength(1))
-    expect(mutationCalls()[0]![0]).toBe(`${ARTIFACT_PATH}?signature=c2ln`)
+    expect(mutationCalls()[0]![0]).toBe(`${ARTIFACT_PATH}?signature=c2ln&version=1.2.3`)
   })
 
   it('upload replays the full body after the tap', async () => {
@@ -1306,7 +1311,7 @@ describe('InstallerPage upload, delete and publish', () => {
     await tap()
     await waitFor(() => expect(mutationCalls()).toHaveLength(2))
     const [first, second] = mutationCalls()
-    expect(first![0]).toBe(`${ARTIFACT_PATH}?signature=c2ln`)
+    expect(first![0]).toBe(`${ARTIFACT_PATH}?signature=c2ln&version=1.2.3`)
     expect(first![1]?.body).toBe(file)
     expect(second![1]?.body).toBe(file)
     expect(await (second![1]?.body as Blob).text()).toBe('full-body-bytes')

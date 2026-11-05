@@ -5,7 +5,7 @@
  * useArtifacts (Issue #5456, Epic #5300) — installer artifact upload/delete and
  * signed steward binary publish for the Installer page.
  *
- *   PUT    /api/v1/installer/artifacts/{platform}/{arch}?signature=<base64>
+ *   PUT    /api/v1/installer/artifacts/{platform}/{arch}?version=<semver>&signature=<base64>
  *                                                          raw file body, presence tap
  *   DELETE /api/v1/installer/artifacts/{platform}/{arch}   presence tap
  *   POST   /api/v1/installer/steward-binaries/{version}/{platform}/{arch}?signature=<base64>
@@ -36,6 +36,7 @@ export interface PublishParams {
 export interface UploadParams {
   platform: string
   arch: string
+  version: string
   signature: string
   file: File
 }
@@ -96,10 +97,10 @@ export function useArtifacts(onChanged: () => void): UseArtifacts {
   )
 
   const upload = useCallback(
-    ({ platform, arch, signature, file }: UploadParams) => {
-      if (signature.trim() === '') {
+    ({ platform, arch, version, signature, file }: UploadParams) => {
+      if (version.trim() === '' || signature.trim() === '') {
         setNote(null)
-        setError('A publisher signature is required — nothing was sent.')
+        setError('A version and a publisher signature are required — nothing was sent.')
         return Promise.resolve(false)
       }
       if (file.size > MAX_BODY_BYTES) {
@@ -111,11 +112,15 @@ export function useArtifacts(onChanged: () => void): UseArtifacts {
         'Upload failed',
         `Uploaded the ${platform}/${arch} artifact.`,
         () =>
-          apiFetch(`${artifactPath(platform, arch)}?signature=${encodeURIComponent(signature.trim())}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': file.type || 'application/octet-stream' },
-            body: file,
-          }),
+          apiFetch(
+            `${artifactPath(platform, arch)}?signature=${encodeURIComponent(signature.trim())}` +
+              `&version=${encodeURIComponent(version.trim())}`,
+            {
+              method: 'PUT',
+              headers: { 'Content-Type': file.type || 'application/octet-stream' },
+              body: file,
+            },
+          ),
         true,
       )
     },

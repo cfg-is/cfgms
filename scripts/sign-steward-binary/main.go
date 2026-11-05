@@ -22,17 +22,18 @@
 //	go run ./scripts/sign-steward-binary <binary> <version> <platform> <arch>
 //	go run ./scripts/sign-steward-binary cfgms-steward.exe v0.9.41 windows amd64
 //
-// Installer artifacts (`cfg installer upload --signature <file>`) have no version, so
-// they are signed in installer mode over trust.InstallerMessage. Only the URL-safe
-// base64 signature is printed, ready to redirect into the --signature file:
+// Installer artifacts (`cfg installer upload --signature <file> --version <version>`)
+// are signed in installer mode over trust.InstallerMessage, which binds the steward
+// release version. Only the URL-safe base64 signature is printed, ready to redirect
+// into the --signature file:
 //
-//	go run ./scripts/sign-steward-binary --installer <file> <platform> <arch> > installer.sig
+//	go run ./scripts/sign-steward-binary --installer <file> <version> <platform> <arch> > installer.sig
 //
 // Release use: --require-publisher-seed (leading flag, either mode) refuses to run when
 // CFGMS_PUBLISHER_SEED is empty instead of falling back to the zero-seed dev key, so a
 // misconfigured release job fails closed rather than signing with a public key:
 //
-//	go run ./scripts/sign-steward-binary --require-publisher-seed --installer <file> <platform> <arch>
+//	go run ./scripts/sign-steward-binary --require-publisher-seed --installer <file> <version> <platform> <arch>
 package main
 
 import (
@@ -148,11 +149,11 @@ func publisherKey() (ed25519.PrivateKey, error) {
 // signature. The message comes from trust.InstallerMessage, the helper the
 // controller's verify-on-upload uses.
 func runInstaller(args []string, out io.Writer) error {
-	if len(args) != 3 {
-		return fmt.Errorf("usage: sign-steward-binary --installer <file> <platform> <arch>\n" +
-			"  e.g. sign-steward-binary --installer cfgms-steward-windows-amd64.exe windows amd64")
+	if len(args) != 4 {
+		return fmt.Errorf("usage: sign-steward-binary --installer <file> <version> <platform> <arch>\n" +
+			"  e.g. sign-steward-binary --installer cfgms-steward-windows-amd64.exe v0.9.41 windows amd64")
 	}
-	path, platform, arch := args[0], args[1], args[2]
+	path, version, platform, arch := args[0], args[1], args[2], args[3]
 
 	// #nosec G304 G703 -- this isolated build/release tool intentionally reads
 	// the artifact path supplied by its trusted local operator.
@@ -161,7 +162,7 @@ func runInstaller(args []string, out io.Writer) error {
 		return fmt.Errorf("read installer: %w", err)
 	}
 	sum := sha256.Sum256(content)
-	message, err := trust.InstallerMessage(hex.EncodeToString(sum[:]), platform, arch)
+	message, err := trust.InstallerMessage(hex.EncodeToString(sum[:]), version, platform, arch)
 	if err != nil {
 		return err
 	}

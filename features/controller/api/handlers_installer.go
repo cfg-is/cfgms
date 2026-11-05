@@ -6,6 +6,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -15,6 +16,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -26,7 +29,131 @@ import (
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"github.com/cfgis/cfgms/pkg/version"
 )
+
+// installerFloorNamespace holds the append-only floor records that stop an older
+// signed installer from replacing a newer one. It is deliberately not "installers":
+// handleListInstallerArtifacts lists that namespace and parses each name.
+const installerFloorNamespace = "installer-floor"
+
+// errInstallerVersionNotNewer is returned by acceptInstallerVersion when the upload
+// is older than the floor, or equals it with a different content hash.
+var errInstallerVersionNotNewer = errors.New("installer version is not newer than the accepted floor")
+
+// installerFloorPrefix is the Name prefix shared by all floor records for one
+// tenant, platform and arch.
+func installerFloorPrefix(platform, arch string) string {
+	return platform + "-" + arch + "@"
+}
+
+// acceptInstallerVersion applies the rollback floor for tenantID, platform and arch.
+// canonicalVersion is the canonical (leading "v") version already covered by a
+// verified signature. It returns nil when the upload may be stored,
+// errInstallerVersionNotNewer when it must be refused, or another error when the
+// floor store could not be consulted (the caller fails closed).
+//
+// The BlobStore has no compare-and-set, so the floor is a set of append-only
+// records, one per accepted version, and the floor is their maximum. Step 2 uses
+// PutBlobIfAbsent so two concurrent different installers at one version cannot both
+// pass. Accepted residual: two concurrent uploads of different higher versions can
+// both pass step 1 and the artifact is last-writer-wins, but the floor is still the
+// maximum record, so it never moves backwards.
+func (s *Server) acceptInstallerVersion(ctx context.Context, tenantID, platform, arch, canonicalVersion, contentHash string) error {
+	prefix := installerFloorPrefix(platform, arch)
+	records, err := s.blobStore.ListBlobs(ctx, blob.BlobKey{
+		TenantID:  tenantID,
+		Namespace: installerFloorNamespace,
+		Name:      prefix,
+	})
+	if err != nil {
+		return fmt.Errorf("list installer floor: %w", err)
+	}
+	for _, rec := range records {
+		recVersion, found := strings.CutPrefix(rec.Key.Name, prefix)
+		if !found {
+			continue
+		}
+		cmp, cmpErr := version.CompareSemantic(canonicalVersion, recVersion)
+		if cmpErr != nil {
+			// A record this handler wrote is always semantic; an unparsable one is
+			// store corruption, so fail closed rather than ignore the floor.
+			return fmt.Errorf("compare installer floor record: %w", cmpErr)
+		}
+		if cmp < 0 {
+			return errInstallerVersionNotNewer
+		}
+	}
+	return s.recordInstallerFloor(ctx, tenantID, prefix, canonicalVersion, contentHash)
+}
+
+// recordInstallerFloor is step 2 of acceptInstallerVersion: it writes the floor
+// record for canonicalVersion with PutBlobIfAbsent. When a record already exists it
+// returns nil only if that record holds the same content hash (an idempotent
+// re-upload), and errInstallerVersionNotNewer otherwise.
+func (s *Server) recordInstallerFloor(ctx context.Context, tenantID, prefix, canonicalVersion, contentHash string) error {
+	floorKey := blob.BlobKey{
+		TenantID:  tenantID,
+		Namespace: installerFloorNamespace,
+		Name:      prefix + canonicalVersion,
+	}
+	floorMeta := blob.BlobMeta{
+		ContentType: "text/plain",
+		Labels:      map[string]string{"content_hash": contentHash},
+	}
+	putErr := s.blobStore.PutBlobIfAbsent(ctx, floorKey, strings.NewReader(contentHash), floorMeta)
+	if putErr == nil {
+		return nil
+	}
+	if !errors.Is(putErr, blob.ErrBlobAlreadyExists) {
+		return fmt.Errorf("record installer floor: %w", putErr)
+	}
+	recorded, readErr := s.readInstallerFloorRecord(ctx, floorKey)
+	if readErr != nil {
+		return fmt.Errorf("read installer floor record: %w", readErr)
+	}
+	if recorded != contentHash {
+		return errInstallerVersionNotNewer
+	}
+	return nil
+}
+
+// Bounds for readInstallerFloorRecord's wait on a record another upload is still
+// writing.
+const (
+	installerFloorReadAttempts = 100
+	installerFloorReadBackoff  = 5 * time.Millisecond
+)
+
+// readInstallerFloorRecord returns the content hash stored in the floor record at
+// key. PutBlobIfAbsent claims a key before its data is fully in place, so a reader
+// that lost the claim race can briefly see a partial record; it retries for a
+// bounded time and then fails closed with the last error.
+func (s *Server) readInstallerFloorRecord(ctx context.Context, key blob.BlobKey) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt < installerFloorReadAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(installerFloorReadBackoff):
+			}
+		}
+		rc, _, err := s.blobStore.GetBlob(ctx, key)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		data, readErr := io.ReadAll(io.LimitReader(rc, 1024))
+		_ = rc.Close()
+		if readErr != nil {
+			lastErr = readErr
+			continue
+		}
+		return string(data), nil
+	}
+	return "", lastErr
+}
 
 // validPlatforms is the allow-list of supported installer platforms (Issue #1702).
 var validPlatforms = map[string]bool{
@@ -79,16 +206,7 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 	platform := vars["platform"]
 	arch := vars["arch"]
 
-	if !validPlatforms[platform] {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Unknown platform: "+logging.SanitizeLogValue(platform)+"; valid values: windows, darwin, linux",
-			"INVALID_PLATFORM")
-		return
-	}
-	if !validArchs[arch] {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Unknown arch: "+logging.SanitizeLogValue(arch)+"; valid values: amd64, arm64",
-			"INVALID_ARCH")
+	if !s.validInstallerTarget(w, platform, arch) {
 		return
 	}
 
@@ -101,54 +219,27 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 	// Every refusal below audits a failure and stores nothing: a taken-over admin
 	// session must not be able to replace the installer new endpoints run with
 	// administrator rights without a publisher signature.
-	refuse := func(status int, message, code string) {
+	refuse := func(ref *installerRefusal) {
 		s.emitInstallerAudit(r, tenantID, "installer.artifact.uploaded", platform, arch, "", business.AuditResultFailure)
-		s.writeErrorResponse(w, status, message, code)
+		s.writeErrorResponse(w, ref.status, ref.message, ref.code)
 	}
 
-	sigBase64 := r.URL.Query().Get("signature")
-	if sigBase64 == "" {
-		refuse(http.StatusBadRequest,
-			"Signature required; provide ?signature=<base64> (see scripts/sign-steward-binary --installer)",
-			"SIGNATURE_REQUIRED")
-		return
-	}
-	// Signature is URL-safe base64 (no padding) so it survives query-param sanitization.
-	sigBytes, err := base64.RawURLEncoding.DecodeString(sigBase64)
-	if err != nil {
-		refuse(http.StatusBadRequest,
-			"Invalid signature encoding; must be URL-safe base64 (no padding)",
-			"SIGNATURE_VERIFICATION_FAILED")
+	canonVersion, sigBytes, ref := parseInstallerUploadQuery(r.URL.Query())
+	if ref != nil {
+		refuse(ref)
 		return
 	}
 
-	// Buffer the bounded body: the signature covers its SHA-256, which must be
-	// known before anything is stored.
-	r.Body = http.MaxBytesReader(w, r.Body, maxBinaryRequestBodyBytes)
-	content, err := io.ReadAll(r.Body)
-	if err != nil {
-		s.logger.Error("Failed to read installer artifact body",
-			"error", logging.SanitizeLogValue(err.Error()),
-			"platform", logging.SanitizeLogValue(platform),
-			"arch", logging.SanitizeLogValue(arch))
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			refuse(http.StatusRequestEntityTooLarge, "Installer artifact too large", "ARTIFACT_TOO_LARGE")
-			return
-		}
-		refuse(http.StatusBadRequest, "Failed to read request body", "READ_ERROR")
+	content, ref := s.readInstallerUploadBody(w, r, platform, arch)
+	if ref != nil {
+		refuse(ref)
 		return
 	}
 	sum := sha256.Sum256(content)
 	contentHash := hex.EncodeToString(sum[:])
 
-	sig := bundle.BundleSignature{Publisher: "cfgms", Algorithm: "ed25519", Signature: sigBytes}
-	if verifyErr := trust.VerifyInstallerSignature(contentHash, platform, arch, sig, s.stewardBinaryTrust()); verifyErr != nil {
-		s.logger.Warn("Installer artifact signature verification failed",
-			"error", logging.SanitizeLogValue(verifyErr.Error()),
-			"platform", logging.SanitizeLogValue(platform),
-			"arch", logging.SanitizeLogValue(arch))
-		refuse(http.StatusBadRequest, "Signature verification failed", "SIGNATURE_VERIFICATION_FAILED")
+	if ref := s.authorizeInstallerUpload(r.Context(), tenantID, platform, arch, canonVersion, contentHash, sigBytes); ref != nil {
+		refuse(ref)
 		return
 	}
 	sigDigest := sha256.Sum256(sigBytes)
@@ -158,6 +249,7 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 		Labels: map[string]string{
 			"signature":        base64.RawURLEncoding.EncodeToString(sigBytes),
 			"publisher":        "cfgms",
+			"version":          canonVersion,
 			"signature_digest": hex.EncodeToString(sigDigest[:]),
 		},
 	}
@@ -166,7 +258,7 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 			"error", logging.SanitizeLogValue(err.Error()),
 			"platform", logging.SanitizeLogValue(platform),
 			"arch", logging.SanitizeLogValue(arch))
-		refuse(http.StatusInternalServerError, "Failed to store artifact", "STORE_ERROR")
+		refuse(&installerRefusal{http.StatusInternalServerError, "Failed to store artifact", "STORE_ERROR"})
 		return
 	}
 	// Audit immediately: a stored artifact must always have an audit record,
@@ -195,6 +287,122 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 		Size:     storedMeta.Size,
 		Checksum: storedMeta.Checksum,
 	})
+}
+
+// installerRefusal is the HTTP status, message and error code of a refused
+// installer upload. handleUploadInstallerArtifact audits every refusal.
+type installerRefusal struct {
+	status  int
+	message string
+	code    string
+}
+
+// validInstallerTarget writes a 400 and returns false when platform or arch is not
+// on the installer allow-lists.
+func (s *Server) validInstallerTarget(w http.ResponseWriter, platform, arch string) bool {
+	if !validPlatforms[platform] {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Unknown platform: "+logging.SanitizeLogValue(platform)+"; valid values: windows, darwin, linux",
+			"INVALID_PLATFORM")
+		return false
+	}
+	if !validArchs[arch] {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Unknown arch: "+logging.SanitizeLogValue(arch)+"; valid values: amd64, arm64",
+			"INVALID_ARCH")
+		return false
+	}
+	return true
+}
+
+// parseInstallerUploadQuery reads the signature and version query params of an
+// installer upload. It returns the canonical (leading "v") version and the decoded
+// signature, or the refusal for a missing or malformed param.
+func parseInstallerUploadQuery(q url.Values) (string, []byte, *installerRefusal) {
+	sigBase64 := q.Get("signature")
+	if sigBase64 == "" {
+		return "", nil, &installerRefusal{http.StatusBadRequest,
+			"Signature required; provide ?signature=<base64> (see scripts/sign-steward-binary --installer)",
+			"SIGNATURE_REQUIRED"}
+	}
+	rawVersion := q.Get("version")
+	if rawVersion == "" {
+		return "", nil, &installerRefusal{http.StatusBadRequest,
+			"Version required; provide ?version=<semver> (see scripts/sign-steward-binary --installer)",
+			"VERSION_REQUIRED"}
+	}
+	// Build metadata compares equal to the bare version, which would let one
+	// release coordinate carry many installers; refuse it outright.
+	if strings.Contains(rawVersion, "+") || !version.IsSemantic(rawVersion) {
+		return "", nil, &installerRefusal{http.StatusBadRequest,
+			"Invalid version; must be a semantic version such as v1.2.3 without build metadata",
+			"INVALID_VERSION"}
+	}
+	canonVersion := rawVersion
+	if !strings.HasPrefix(canonVersion, "v") {
+		canonVersion = "v" + canonVersion
+	}
+
+	// Signature is URL-safe base64 (no padding) so it survives query-param sanitization.
+	sigBytes, err := base64.RawURLEncoding.DecodeString(sigBase64)
+	if err != nil {
+		return "", nil, &installerRefusal{http.StatusBadRequest,
+			"Invalid signature encoding; must be URL-safe base64 (no padding)",
+			"SIGNATURE_VERIFICATION_FAILED"}
+	}
+	return canonVersion, sigBytes, nil
+}
+
+// readInstallerUploadBody buffers the bounded upload body: the signature covers its
+// SHA-256, which must be known before anything is stored.
+func (s *Server) readInstallerUploadBody(w http.ResponseWriter, r *http.Request, platform, arch string) ([]byte, *installerRefusal) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBinaryRequestBodyBytes)
+	content, err := io.ReadAll(r.Body)
+	if err == nil {
+		return content, nil
+	}
+	s.logger.Error("Failed to read installer artifact body",
+		"error", logging.SanitizeLogValue(err.Error()),
+		"platform", logging.SanitizeLogValue(platform),
+		"arch", logging.SanitizeLogValue(arch))
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		return nil, &installerRefusal{http.StatusRequestEntityTooLarge, "Installer artifact too large", "ARTIFACT_TOO_LARGE"}
+	}
+	return nil, &installerRefusal{http.StatusBadRequest, "Failed to read request body", "READ_ERROR"}
+}
+
+// authorizeInstallerUpload verifies the publisher signature over contentHash,
+// canonVersion, platform and arch, then applies the rollback floor. It returns nil
+// when the upload may be stored, or the refusal otherwise.
+func (s *Server) authorizeInstallerUpload(ctx context.Context, tenantID, platform, arch, canonVersion, contentHash string, sigBytes []byte) *installerRefusal {
+	sig := bundle.BundleSignature{Publisher: "cfgms", Algorithm: "ed25519", Signature: sigBytes}
+	if verifyErr := trust.VerifyInstallerSignature(contentHash, canonVersion, platform, arch, sig, s.stewardBinaryTrust()); verifyErr != nil {
+		s.logger.Warn("Installer artifact signature verification failed",
+			"error", logging.SanitizeLogValue(verifyErr.Error()),
+			"platform", logging.SanitizeLogValue(platform),
+			"arch", logging.SanitizeLogValue(arch))
+		return &installerRefusal{http.StatusBadRequest, "Signature verification failed", "SIGNATURE_VERIFICATION_FAILED"}
+	}
+
+	floorErr := s.acceptInstallerVersion(ctx, tenantID, platform, arch, canonVersion, contentHash)
+	if floorErr == nil {
+		return nil
+	}
+	if errors.Is(floorErr, errInstallerVersionNotNewer) {
+		s.logger.Warn("Installer upload refused: version is not newer than the accepted floor",
+			"version", logging.SanitizeLogValue(canonVersion),
+			"platform", logging.SanitizeLogValue(platform),
+			"arch", logging.SanitizeLogValue(arch))
+		return &installerRefusal{http.StatusConflict,
+			"Installer version is not newer than the newest accepted version; re-sign under a higher version",
+			"INSTALLER_VERSION_NOT_NEWER"}
+	}
+	s.logger.Error("Failed to apply installer version floor",
+		"error", logging.SanitizeLogValue(floorErr.Error()),
+		"platform", logging.SanitizeLogValue(platform),
+		"arch", logging.SanitizeLogValue(arch))
+	return &installerRefusal{http.StatusInternalServerError, "Failed to store artifact", "STORE_ERROR"}
 }
 
 // handleListInstallerArtifacts handles GET /api/v1/installer/artifacts.
@@ -254,16 +462,7 @@ func (s *Server) handleGetInstallerArtifact(w http.ResponseWriter, r *http.Reque
 	platform := vars["platform"]
 	arch := vars["arch"]
 
-	if !validPlatforms[platform] {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Unknown platform: "+logging.SanitizeLogValue(platform)+"; valid values: windows, darwin, linux",
-			"INVALID_PLATFORM")
-		return
-	}
-	if !validArchs[arch] {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Unknown arch: "+logging.SanitizeLogValue(arch)+"; valid values: amd64, arm64",
-			"INVALID_ARCH")
+	if !s.validInstallerTarget(w, platform, arch) {
 		return
 	}
 
@@ -315,16 +514,7 @@ func (s *Server) handleDeleteInstallerArtifact(w http.ResponseWriter, r *http.Re
 	platform := vars["platform"]
 	arch := vars["arch"]
 
-	if !validPlatforms[platform] {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Unknown platform: "+logging.SanitizeLogValue(platform)+"; valid values: windows, darwin, linux",
-			"INVALID_PLATFORM")
-		return
-	}
-	if !validArchs[arch] {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Unknown arch: "+logging.SanitizeLogValue(arch)+"; valid values: amd64, arm64",
-			"INVALID_ARCH")
+	if !s.validInstallerTarget(w, platform, arch) {
 		return
 	}
 
@@ -334,6 +524,8 @@ func (s *Server) handleDeleteInstallerArtifact(w http.ResponseWriter, r *http.Re
 		Name:      platform + "-" + arch,
 	}
 
+	// Delete only the artifact. The installer-floor records must never be deleted:
+	// they are what refuses an older signed installer after the artifact is gone.
 	if err := s.blobStore.DeleteBlob(r.Context(), key); err != nil {
 		s.logger.Error("Failed to delete installer artifact",
 			"error", logging.SanitizeLogValue(err.Error()),
@@ -461,16 +653,7 @@ func (s *Server) handleDownloadInstallPackage(w http.ResponseWriter, r *http.Req
 	platform := vars["platform"]
 	arch := vars["arch"]
 
-	if !validPlatforms[platform] {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Unknown platform: "+logging.SanitizeLogValue(platform)+"; valid values: windows, darwin, linux",
-			"INVALID_PLATFORM")
-		return
-	}
-	if !validArchs[arch] {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Unknown arch: "+logging.SanitizeLogValue(arch)+"; valid values: amd64, arm64",
-			"INVALID_ARCH")
+	if !s.validInstallerTarget(w, platform, arch) {
 		return
 	}
 
@@ -541,18 +724,8 @@ func (s *Server) buildInstallPackage(
 
 	// Fail closed: re-verify the publisher signature over the bytes about to be
 	// served, so an artifact altered or re-labelled at rest is never distributed.
-	sigBytes, decErr := base64.RawURLEncoding.DecodeString(meta.Labels["signature"])
-	if decErr != nil || len(sigBytes) == 0 {
-		return nil, errInstallerUnverified
-	}
-	sum := sha256.Sum256(artifactBytes)
-	sig := bundle.BundleSignature{Publisher: "cfgms", Algorithm: "ed25519", Signature: sigBytes}
-	if verifyErr := trust.VerifyInstallerSignature(hex.EncodeToString(sum[:]), platform, arch, sig, s.stewardBinaryTrust()); verifyErr != nil {
-		s.logger.Error("Stored installer artifact failed signature verification; refusing to serve",
-			"error", logging.SanitizeLogValue(verifyErr.Error()),
-			"platform", logging.SanitizeLogValue(platform),
-			"arch", logging.SanitizeLogValue(arch))
-		return nil, errInstallerUnverified
+	if verifyErr := s.verifyStoredInstaller(artifactBytes, meta.Labels, platform, arch); verifyErr != nil {
+		return nil, verifyErr
 	}
 
 	var caCertPEM []byte
@@ -614,6 +787,34 @@ func (s *Server) buildInstallPackage(
 		fmt.Sprintf(`attachment; filename="%s"`, archiveName),
 		"public, max-age=300, must-revalidate",
 	), nil
+}
+
+// verifyStoredInstaller re-verifies the publisher signature recorded in a stored
+// installer's labels over artifactBytes and the recorded version. It returns
+// errInstallerUnverified when the signature or version label is missing or the
+// signature does not verify.
+func (s *Server) verifyStoredInstaller(artifactBytes []byte, labels map[string]string, platform, arch string) error {
+	sigBytes, decErr := base64.RawURLEncoding.DecodeString(labels["signature"])
+	if decErr != nil || len(sigBytes) == 0 {
+		return errInstallerUnverified
+	}
+	sum := sha256.Sum256(artifactBytes)
+	sig := bundle.BundleSignature{Publisher: "cfgms", Algorithm: "ed25519", Signature: sigBytes}
+	storedVersion := labels["version"]
+	if storedVersion == "" {
+		s.logger.Error("Stored installer artifact has no version label; it must be re-signed with a version and re-uploaded",
+			"platform", logging.SanitizeLogValue(platform),
+			"arch", logging.SanitizeLogValue(arch))
+		return errInstallerUnverified
+	}
+	if verifyErr := trust.VerifyInstallerSignature(hex.EncodeToString(sum[:]), storedVersion, platform, arch, sig, s.stewardBinaryTrust()); verifyErr != nil {
+		s.logger.Error("Stored installer artifact failed signature verification; if it predates version-bound signatures it must be re-signed with a version and re-uploaded; refusing to serve",
+			"error", logging.SanitizeLogValue(verifyErr.Error()),
+			"platform", logging.SanitizeLogValue(platform),
+			"arch", logging.SanitizeLogValue(arch))
+		return errInstallerUnverified
+	}
+	return nil
 }
 
 // installerFilename returns the filename for the installer binary within the package archive.
