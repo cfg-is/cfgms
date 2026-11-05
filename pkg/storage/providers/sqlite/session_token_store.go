@@ -177,51 +177,32 @@ func (s *SQLiteSessionTokenStore) Rotate(ctx context.Context, prevHash, newHash 
 // Returns ErrSessionNotFound when the hash is absent (including after Delete)
 // or when the hash has passed its per-hash expiry set by StampGraceExpiry.
 func (s *SQLiteSessionTokenStore) Get(ctx context.Context, tokenHash string) (*session.Session, error) {
-	now := formatTime(time.Now().UTC())
-	var sess session.Session
-	var issuedAt, lastActivity, absoluteExpiresAt string
-	var assurance int
-	var lastProvenAt sql.NullString
-	var credentialID []byte
-	var loginCredentialID []byte
-	err := s.db.QueryRowContext(ctx, `
+	return s.queryLiveSession(ctx, "get", `
 		SELECT session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
 		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
 		FROM session_token_records
 		WHERE token_hash = ?
-		  AND (hash_expires_at IS NULL OR hash_expires_at > ?)`, tokenHash, now,
-	).Scan(
-		&sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
-		&issuedAt, &lastActivity, &absoluteExpiresAt,
-		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel,
-	)
-	if err == sql.ErrNoRows {
-		return nil, session.ErrSessionNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: session token get failed: %w", err)
-	}
-	sess.IssuedAt = parseTime(issuedAt)
-	sess.LastActivity = parseTime(lastActivity)
-	sess.AbsoluteExpiresAt = parseTime(absoluteExpiresAt)
-	sess.Assurance = session.AssuranceLevel(assurance)
-	if lastProvenAt.Valid && lastProvenAt.String != "" {
-		sess.LastProvenAt = parseTime(lastProvenAt.String)
-	}
-	if len(credentialID) > 0 {
-		sess.CredentialID = credentialID
-	}
-	if len(loginCredentialID) > 0 {
-		sess.LoginCredentialID = loginCredentialID
-	}
-	return &sess, nil
+		  AND (hash_expires_at IS NULL OR hash_expires_at > ?)`, tokenHash)
 }
 
 // GetByID returns any live session record for the given session ID.
 // Used by Revoke's cache-miss branch to verify a session's Channel before deleting it.
 // Returns ErrSessionNotFound when no non-expired record exists for id.
 func (s *SQLiteSessionTokenStore) GetByID(ctx context.Context, id string) (*session.Session, error) {
+	return s.queryLiveSession(ctx, "get by id", `
+		SELECT session_id, principal_id, connection_name, tenant_id,
+		       issued_at, last_activity, absolute_expires_at,
+		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
+		FROM session_token_records
+		WHERE session_id = ?
+		  AND (hash_expires_at IS NULL OR hash_expires_at > ?)
+		LIMIT 1`, id)
+}
+
+// queryLiveSession runs a single-row session SELECT whose second placeholder is the
+// current time, and decodes it. op names the lookup in the wrapped error text.
+func (s *SQLiteSessionTokenStore) queryLiveSession(ctx context.Context, op, query string, arg any) (*session.Session, error) {
 	now := formatTime(time.Now().UTC())
 	var sess session.Session
 	var issuedAt, lastActivity, absoluteExpiresAt string
@@ -229,15 +210,7 @@ func (s *SQLiteSessionTokenStore) GetByID(ctx context.Context, id string) (*sess
 	var lastProvenAt sql.NullString
 	var credentialID []byte
 	var loginCredentialID []byte
-	err := s.db.QueryRowContext(ctx, `
-		SELECT session_id, principal_id, connection_name, tenant_id,
-		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
-		FROM session_token_records
-		WHERE session_id = ?
-		  AND (hash_expires_at IS NULL OR hash_expires_at > ?)
-		LIMIT 1`, id, now,
-	).Scan(
+	err := s.db.QueryRowContext(ctx, query, arg, now).Scan(
 		&sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 		&issuedAt, &lastActivity, &absoluteExpiresAt,
 		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel,
@@ -246,7 +219,7 @@ func (s *SQLiteSessionTokenStore) GetByID(ctx context.Context, id string) (*sess
 		return nil, session.ErrSessionNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: session token get by id failed: %w", err)
+		return nil, fmt.Errorf("sqlite: session token %s failed: %w", op, err)
 	}
 	sess.IssuedAt = parseTime(issuedAt)
 	sess.LastActivity = parseTime(lastActivity)

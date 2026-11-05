@@ -237,6 +237,12 @@ func (s *DatabaseRBACStore) DeleteRole(ctx context.Context, id string) error {
 	// Tenant validation already performed in getRoleLocked
 	// Proceed with deletion
 
+	return s.deleteByIDLocked(ctx, `DELETE FROM rbac_roles WHERE id = $1`, "role", id)
+}
+
+// deleteByIDLocked runs a single-id DELETE query inside a transaction. kind names the
+// entity in error text. The caller holds s.mutex and has already validated tenant access.
+func (s *DatabaseRBACStore) deleteByIDLocked(ctx context.Context, query, kind, id string) error {
 	// Begin transaction
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -244,11 +250,9 @@ func (s *DatabaseRBACStore) DeleteRole(ctx context.Context, id string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	query := `DELETE FROM rbac_roles WHERE id = $1`
-
 	result, err := tx.ExecContext(ctx, query, id)
 	if err != nil {
-		return fmt.Errorf("failed to delete role: %w", err)
+		return fmt.Errorf("failed to delete %s: %w", kind, err)
 	}
 
 	rowsAffected, err := result.RowsAffected()
@@ -257,7 +261,7 @@ func (s *DatabaseRBACStore) DeleteRole(ctx context.Context, id string) error {
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("role not found: %s", id)
+		return fmt.Errorf("%s not found: %s", kind, id)
 	}
 
 	// Commit transaction

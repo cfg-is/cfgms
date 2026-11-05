@@ -242,56 +242,21 @@ func writeRow(ctx context.Context, tx *sql.Tx, tokenHash string, sess *session.S
 // Get returns the Session for the given token hash.
 // Returns ErrSessionNotFound when the hash is absent or when hash_expires_at has passed.
 func (s *DatabaseSessionTokenStore) Get(ctx context.Context, tokenHash string) (*session.Session, error) {
-	var sess session.Session
-	var assurance int
-	var lastProvenAt sql.NullTime
-	var credentialID []byte
-	var loginCredentialID []byte
-	err := s.db.QueryRowContext(ctx, `
+	return s.queryLiveSession(ctx, "get", `
 		SELECT session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
 		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
 		FROM session_token_store
 		WHERE token_hash = $1
 		  AND (hash_expires_at IS NULL OR hash_expires_at > NOW())`,
-		tokenHash,
-	).Scan(
-		&sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
-		&sess.IssuedAt, &sess.LastActivity, &sess.AbsoluteExpiresAt,
-		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel,
-	)
-	if err == sql.ErrNoRows {
-		return nil, session.ErrSessionNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("database: session token get failed: %w", err)
-	}
-	sess.IssuedAt = sess.IssuedAt.UTC()
-	sess.LastActivity = sess.LastActivity.UTC()
-	sess.AbsoluteExpiresAt = sess.AbsoluteExpiresAt.UTC()
-	sess.Assurance = session.AssuranceLevel(assurance)
-	if lastProvenAt.Valid {
-		sess.LastProvenAt = lastProvenAt.Time.UTC()
-	}
-	if len(credentialID) > 0 {
-		sess.CredentialID = credentialID
-	}
-	if len(loginCredentialID) > 0 {
-		sess.LoginCredentialID = loginCredentialID
-	}
-	return &sess, nil
+		tokenHash)
 }
 
 // GetByID returns any live session record for the given session ID.
 // Used by Revoke's cache-miss branch to verify a session's Channel before deleting it.
 // Returns ErrSessionNotFound when no non-expired record exists for id.
 func (s *DatabaseSessionTokenStore) GetByID(ctx context.Context, id string) (*session.Session, error) {
-	var sess session.Session
-	var assurance int
-	var lastProvenAt sql.NullTime
-	var credentialID []byte
-	var loginCredentialID []byte
-	err := s.db.QueryRowContext(ctx, `
+	return s.queryLiveSession(ctx, "get by id", `
 		SELECT session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
 		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
@@ -299,8 +264,18 @@ func (s *DatabaseSessionTokenStore) GetByID(ctx context.Context, id string) (*se
 		WHERE session_id = $1
 		  AND (hash_expires_at IS NULL OR hash_expires_at > NOW())
 		LIMIT 1`,
-		id,
-	).Scan(
+		id)
+}
+
+// queryLiveSession runs a single-row session SELECT (columns in the order Get uses) and
+// decodes it. op names the lookup in the wrapped error text.
+func (s *DatabaseSessionTokenStore) queryLiveSession(ctx context.Context, op, query string, arg any) (*session.Session, error) {
+	var sess session.Session
+	var assurance int
+	var lastProvenAt sql.NullTime
+	var credentialID []byte
+	var loginCredentialID []byte
+	err := s.db.QueryRowContext(ctx, query, arg).Scan(
 		&sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 		&sess.IssuedAt, &sess.LastActivity, &sess.AbsoluteExpiresAt,
 		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel,
@@ -309,7 +284,7 @@ func (s *DatabaseSessionTokenStore) GetByID(ctx context.Context, id string) (*se
 		return nil, session.ErrSessionNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("database: session token get by id failed: %w", err)
+		return nil, fmt.Errorf("database: session token %s failed: %w", op, err)
 	}
 	sess.IssuedAt = sess.IssuedAt.UTC()
 	sess.LastActivity = sess.LastActivity.UTC()
