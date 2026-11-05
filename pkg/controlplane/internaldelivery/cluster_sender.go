@@ -136,18 +136,9 @@ func (c *ClusterAwareSender) forwardToPeer(ctx context.Context, cmd *types.Signe
 		return fmt.Errorf("internaldelivery: command has no steward_id to route")
 	}
 
-	nodeID, ok, err := c.routingStore.LookupNode(ctx, stewardID)
+	nodeID, err := c.lookupPeerNode(ctx, stewardID)
 	if err != nil {
-		return fmt.Errorf("internaldelivery: routing lookup failed: %w", err)
-	}
-	if !ok {
-		return fmt.Errorf("internaldelivery: no routing entry for steward %s", stewardID)
-	}
-	if nodeID == c.localNodeID {
-		// The routing table says we hold this steward, but the local provider
-		// just told us otherwise (disconnect race). Forwarding to ourselves
-		// would recurse into the same failure.
-		return fmt.Errorf("internaldelivery: routing table points back to local node")
+		return err
 	}
 
 	addr, ok := c.resolver.ResolveDeliveryAddr(nodeID)
@@ -160,18 +151,8 @@ func (c *ClusterAwareSender) forwardToPeer(ctx context.Context, cmd *types.Signe
 		return fmt.Errorf("internaldelivery: failed to dial node %s: %w", nodeID, err)
 	}
 
-	req := &deliverypb.DeliverCommandRequest{
-		StewardId: stewardID,
-		Command:   grpcconvert.SignedCommandToProto(cmd),
-	}
-	// Carry the operator-origin marker so the receiving node's own gate sees it.
-	// An unmarked command stays unmarked.
-	if principal, ok := controlplaneInterfaces.OperatorOriginFrom(ctx); ok {
-		req.OperatorOrigin = true
-		req.OperatorPrincipal = principal
-	}
 	client := deliverypb.NewDeliveryServiceClient(conn)
-	resp, err := client.DeliverCommand(ctx, req)
+	resp, err := client.DeliverCommand(ctx, newDeliverCommandRequest(ctx, stewardID, cmd))
 	if err != nil {
 		return fmt.Errorf("internaldelivery: delivery RPC to node %s failed: %w", nodeID, err)
 	}
@@ -183,6 +164,41 @@ func (c *ClusterAwareSender) forwardToPeer(ctx context.Context, cmd *types.Signe
 		"steward_id", logging.SanitizeLogValue(stewardID),
 		"peer_node_id", logging.SanitizeLogValue(nodeID))
 	return nil
+}
+
+// lookupPeerNode returns the peer node the shared routing table names for
+// stewardID. It is an error when the lookup fails, there is no entry, or the
+// entry points back to this node.
+func (c *ClusterAwareSender) lookupPeerNode(ctx context.Context, stewardID string) (string, error) {
+	nodeID, ok, err := c.routingStore.LookupNode(ctx, stewardID)
+	if err != nil {
+		return "", fmt.Errorf("internaldelivery: routing lookup failed: %w", err)
+	}
+	if !ok {
+		return "", fmt.Errorf("internaldelivery: no routing entry for steward %s", stewardID)
+	}
+	if nodeID == c.localNodeID {
+		// The routing table says we hold this steward, but the local provider
+		// just told us otherwise (disconnect race). Forwarding to ourselves
+		// would recurse into the same failure.
+		return "", fmt.Errorf("internaldelivery: routing table points back to local node")
+	}
+	return nodeID, nil
+}
+
+// newDeliverCommandRequest builds the delivery RPC request for cmd. It carries
+// the operator-origin marker from ctx so the receiving node's own gate sees it
+// (Issue #5665); an unmarked command stays unmarked.
+func newDeliverCommandRequest(ctx context.Context, stewardID string, cmd *types.SignedCommand) *deliverypb.DeliverCommandRequest {
+	req := &deliverypb.DeliverCommandRequest{
+		StewardId: stewardID,
+		Command:   grpcconvert.SignedCommandToProto(cmd),
+	}
+	if principal, ok := controlplaneInterfaces.OperatorOriginFrom(ctx); ok {
+		req.OperatorOrigin = true
+		req.OperatorPrincipal = principal
+	}
+	return req
 }
 
 // dial returns a cached gRPC client connection for addr, creating one if

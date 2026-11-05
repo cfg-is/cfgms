@@ -398,34 +398,9 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 	}()
 
 	// Dispatch COMMAND_TYPE_OPEN_TERMINAL to the steward.
-	if h.commandPub != nil {
-		// cols/rows are uint16, so int32(cols)/int32(rows) are widening conversions
-		// that are provably in range [0, 65535] — no bounds guard is required and
-		// CodeQL's go/incorrect-integer-conversion does not flag a uint16→int32 cast.
-		params := make(map[string]interface{}, len(proof.Params)+4)
-		for k, v := range proof.Params {
-			params[k] = v
-		}
-		params["session_id"] = sess.ID
-		params["shell"] = shell
-		params["cols"] = int32(cols)
-		params["rows"] = int32(rows)
-		// Only an authenticated operator session reaches this point, so the open is
-		// operator-origin; a locked-down steward accepts it for investigation.
-		openCtx := commands.NewOperatorOrigin(ctx, userID)
-		_, cmdErr := h.commandPub.PublishCommand(openCtx, stewardID, controlplaneTypes.CommandOpenTerminal, params)
-		if cmdErr != nil {
-			if h.logger != nil {
-				h.logger.Warn("terminal: dispatch open-terminal command failed",
-					"steward_id", logging.SanitizeLogValue(stewardID),
-					"session_id", logging.RedactedID(sess.ID),
-					// Sanitize cmdErr.Error() explicitly: the error message may
-					// embed stewardID (user-controlled) from PublishCommand internals.
-					"error", logging.SanitizeLogValue(cmdErr.Error()))
-			}
-			http.Error(w, "steward unavailable", http.StatusServiceUnavailable)
-			return
-		}
+	if err := h.dispatchOpenTerminal(ctx, proof, stewardID, userID, sess.ID, shell, cols, rows); err != nil {
+		http.Error(w, "steward unavailable", http.StatusServiceUnavailable)
+		return
 	}
 
 	// Upgrade to WebSocket. Upgrader.CheckOrigin already validated origin above;
@@ -455,6 +430,39 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 	if h.runWSRelay(ctx, conn, relay, sess, sessionRecheck) == relayEndSessionInvalid {
 		endReason = "admin session revoked or expired"
 	}
+}
+
+// dispatchOpenTerminal publishes COMMAND_TYPE_OPEN_TERMINAL for the session. With
+// no command publisher configured it does nothing. A publish failure is logged
+// here and returned; the caller answers the browser.
+func (h *TerminalHandler) dispatchOpenTerminal(ctx context.Context, proof *TerminalProof, stewardID, userID, sessionID, shell string, cols, rows uint16) error {
+	if h.commandPub == nil {
+		return nil
+	}
+	// cols/rows are uint16, so int32(cols)/int32(rows) are widening conversions
+	// that are provably in range [0, 65535] — no bounds guard is required and
+	// CodeQL's go/incorrect-integer-conversion does not flag a uint16→int32 cast.
+	params := make(map[string]interface{}, len(proof.Params)+4)
+	for k, v := range proof.Params {
+		params[k] = v
+	}
+	params["session_id"] = sessionID
+	params["shell"] = shell
+	params["cols"] = int32(cols)
+	params["rows"] = int32(rows)
+	// Only an authenticated operator session reaches this point, so the open is
+	// operator-origin; a locked-down steward accepts it for investigation.
+	openCtx := commands.NewOperatorOrigin(ctx, userID)
+	_, err := h.commandPub.PublishCommand(openCtx, stewardID, controlplaneTypes.CommandOpenTerminal, params)
+	if err != nil && h.logger != nil {
+		h.logger.Warn("terminal: dispatch open-terminal command failed",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"session_id", logging.RedactedID(sessionID),
+			// Sanitize err.Error() explicitly: the error message may embed
+			// stewardID (user-controlled) from PublishCommand internals.
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+	return err
 }
 
 // relayEnd says why runWSRelay returned.

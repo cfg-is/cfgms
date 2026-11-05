@@ -51,6 +51,18 @@ type Server struct {
 // forwarded command is treated as automated.
 func (s *Server) SetPeerAuthorizer(a *PeerAuthorizer) { s.authorizer = a }
 
+// restoreOperatorOrigin returns ctx carrying the operator-origin marker when req
+// asks for it and the caller is an authenticated cluster peer node, and ctx
+// unchanged otherwise. A steward or admin certificate fails the authorizer, so a
+// caller that is not a peer cannot supply the marker; its command is then
+// delivered as automated (Issue #5665).
+func (s *Server) restoreOperatorOrigin(ctx context.Context, req *deliverypb.DeliverCommandRequest) context.Context {
+	if !req.GetOperatorOrigin() || s.authorizer == nil || s.authorizer.Authorize(ctx) != nil {
+		return ctx
+	}
+	return controlplaneInterfaces.WithOperatorOrigin(ctx, req.GetOperatorPrincipal())
+}
+
 // NewServer constructs the internal delivery gRPC service handler. reg and
 // controlPlane must be the node-local registry and control-plane provider —
 // the same pair the API server wires for direct steward delivery — not a
@@ -91,14 +103,7 @@ func (s *Server) DeliverCommand(ctx context.Context, req *deliverypb.DeliverComm
 		return nil, status.Error(codes.InvalidArgument, "command steward_id does not match request steward_id")
 	}
 
-	// The operator-origin marker is restored only from an authenticated peer
-	// node. A steward or admin certificate fails the authorizer, so a caller that
-	// is not a peer cannot supply it; the command is then delivered as automated.
-	if req.GetOperatorOrigin() && s.authorizer != nil && s.authorizer.Authorize(ctx) == nil {
-		ctx = controlplaneInterfaces.WithOperatorOrigin(ctx, req.GetOperatorPrincipal())
-	}
-
-	if err := s.controlPlane.SendCommand(ctx, cmd); err != nil {
+	if err := s.controlPlane.SendCommand(s.restoreOperatorOrigin(ctx, req), cmd); err != nil {
 		if errors.Is(err, controlplaneInterfaces.ErrStewardLockedDown) {
 			// This node's own gate refused the command. It is reported as a
 			// refusal, never as "not connected", so the caller does not retry it

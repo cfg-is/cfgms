@@ -7,9 +7,13 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/cfgis/cfgms/features/controller/config"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
 	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
 // routingTableConnectHook records a steward's connection ownership in the
@@ -67,6 +71,21 @@ func newHAClusterNodeResolver(haManager *ha.Manager, localDeliveryListenAddr str
 		return nil, fmt.Errorf("invalid internal delivery listen address %q: %w", localDeliveryListenAddr, err)
 	}
 	return &haClusterNodeResolver{haManager: haManager, port: port, logger: logger}, nil
+}
+
+// newInternalDeliveryServer builds the handler a peer node's forwarded command
+// resolves to on this node. It wraps the raw node-local controlPlane, never a
+// cluster-aware sender, and restores the operator-origin marker only from a
+// caller that passes the cluster-peer authorization (Issue #5665).
+func newInternalDeliveryServer(cfg *config.Config, reg registry.Registry, controlPlane controlplaneInterfaces.ControlPlaneProvider, haManager *ha.Manager, logger logging.Logger) *internaldelivery.Server {
+	deliveryServer := internaldelivery.NewServer(reg, controlPlane, logger)
+	deliveryServer.SetPeerAuthorizer(internaldelivery.NewPeerAuthorizer(clusterPeerNodeIDs(haManager), logger))
+	if cfg.HA.IsClusterMode() && cfg.InternalDeliveryListenAddr == "" {
+		// Issue #4512: without the delivery listener this node can only reach
+		// stewards connected to itself; say so rather than degrading silently.
+		logger.Warn("internaldelivery: internal_delivery_listen_addr is not set in cluster mode; commands reach only stewards connected to this node")
+	}
+	return deliveryServer
 }
 
 // clusterPeerNodeIDs returns the function the API server hands to
