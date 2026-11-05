@@ -148,6 +148,9 @@ func (s *Server) handleRestoreTamperedSteward(w http.ResponseWriter, r *http.Req
 	}
 	ctx := r.Context()
 
+	if s.refuseRestoreOfLinkableCopy(ctx, w, record) {
+		return
+	}
 	if s.refuseRestoreWhileFaulted(w, r, record, reason) {
 		return
 	}
@@ -186,6 +189,25 @@ func (s *Server) handleRestoreTamperedSteward(w http.ResponseWriter, r *http.Req
 		Status: string(target),
 		Note:   "Restored: the steward is trusted again and normal traffic resumes. If it still reports a tamper code on its next heartbeat it returns to tampered.",
 	})
+}
+
+// refuseRestoreOfLinkableCopy answers 409 LINK_REQUIRED when record is a locked
+// copy that names an old identity: it is resolved by linking it to that
+// identity, not by restoring it as a new one. It reports whether it refused
+// (including on a lookup failure, answered 500).
+func (s *Server) refuseRestoreOfLinkableCopy(ctx context.Context, w http.ResponseWriter, record *business.StewardRecord) bool {
+	copyEntry, err := s.lockedCopyNamingOldID(ctx, record)
+	if err != nil {
+		s.logger.Error("tamper restore: locked copy lookup failed",
+			"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to restore steward", "INTERNAL_ERROR")
+		return true
+	}
+	if copyEntry != nil {
+		s.writeErrorResponse(w, http.StatusConflict, "This steward was admitted locked and names an old identity; link it to that identity instead of restoring it", "LINK_REQUIRED")
+		return true
+	}
+	return false
 }
 
 // refuseRestoreWhileFaulted answers 409 fault_still_reported, and audits the

@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,6 +41,15 @@ type identityCloneQueuedCopy struct {
 	Hostname     string    `json:"hostname"`
 	SourceIP     string    `json:"source_ip"`
 	RegisteredAt time.Time `json:"registered_at"`
+
+	// Set only for a copy admitted locked after declaring broken trust (ADR-034).
+	// Everything after CloneReason is the steward's own claim or the token it
+	// presented, not verified evidence: an operator confirms it out of band.
+	CloneReason   string     `json:"clone_reason,omitempty"`
+	CopyStewardID string     `json:"copy_steward_id,omitempty"`
+	TokenLabel    string     `json:"token_label,omitempty"`
+	OldLastSeen   *time.Time `json:"old_last_seen,omitempty"`
+	ClaimVerified *bool      `json:"claim_verified,omitempty"`
 }
 
 // identityCloneEntry is the evidence for one steward ID with a detected copy.
@@ -167,15 +177,7 @@ func (s *Server) handleListIdentityClones(w http.ResponseWriter, r *http.Request
 			}
 			e := entryFor(stewardID, tenantID)
 			ts := ae.Timestamp.UTC()
-			if e.FirstDetected == nil || ts.Before(*e.FirstDetected) {
-				t := ts
-				e.FirstDetected = &t
-			}
-			if e.LastDetected == nil || ts.After(*e.LastDetected) {
-				t := ts
-				e.LastDetected = &t
-			}
-			e.DetectionCount++
+			e.noteDetection(ts)
 			switch ae.Action {
 			case auditActionIdentityConflictDetected:
 				e.Serials = addUnique(e.Serials, auditString(ae.Details, "existing_serial"), auditString(ae.Details, "new_serial"))
@@ -203,12 +205,7 @@ func (s *Server) handleListIdentityClones(w http.ResponseWriter, r *http.Request
 			continue
 		}
 		e := entryFor(p.CloneOf, p.TenantID)
-		e.QueuedCopies = append(e.QueuedCopies, identityCloneQueuedCopy{
-			PendingID:    p.PendingID,
-			Hostname:     p.Hostname,
-			SourceIP:     p.SourceIP,
-			RegisteredAt: p.RegisteredAt.UTC(),
-		})
+		e.QueuedCopies = append(e.QueuedCopies, s.queuedCopyFor(ctx, p))
 	}
 
 	resp := identityCloneListResponse{Clones: make([]*identityCloneEntry, 0, len(byID))}
@@ -219,6 +216,66 @@ func (s *Server) handleListIdentityClones(w http.ResponseWriter, r *http.Request
 	}
 	sort.Slice(resp.Clones, func(i, j int) bool { return resp.Clones[i].StewardID < resp.Clones[j].StewardID })
 	s.writeSuccessResponse(w, resp)
+}
+
+// noteDetection counts one detection event at ts and widens the first/last
+// detection window to include it.
+func (e *identityCloneEntry) noteDetection(ts time.Time) {
+	if e.FirstDetected == nil || ts.Before(*e.FirstDetected) {
+		t := ts
+		e.FirstDetected = &t
+	}
+	if e.LastDetected == nil || ts.After(*e.LastDetected) {
+		t := ts
+		e.LastDetected = &t
+	}
+	e.DetectionCount++
+}
+
+// queuedCopyFor builds the queued-copy evidence for a pending entry that names
+// an old identity, with the locked-admission claim evidence when it was admitted
+// locked.
+func (s *Server) queuedCopyFor(ctx context.Context, p *business.PendingRegistrationEntry) identityCloneQueuedCopy {
+	c := identityCloneQueuedCopy{
+		PendingID:    p.PendingID,
+		Hostname:     p.Hostname,
+		SourceIP:     p.SourceIP,
+		RegisteredAt: p.RegisteredAt.UTC(),
+	}
+	if s.isLockedAdmission(ctx, p) {
+		s.addLockedCopyEvidence(ctx, &c, p)
+	}
+	return c
+}
+
+// addLockedCopyEvidence marks a queued copy as admitted locked and attaches the
+// unverified claim evidence: the token's label and when the named old record was
+// last seen.
+func (s *Server) addLockedCopyEvidence(ctx context.Context, c *identityCloneQueuedCopy, p *business.PendingRegistrationEntry) {
+	unverified := false
+	c.CloneReason = cloneReasonBrokenTrust
+	c.CopyStewardID = p.StewardID
+	c.ClaimVerified = &unverified
+	if old, err := s.stewardStore.GetSteward(ctx, p.CloneOf); err == nil && old != nil {
+		seen := old.LastSeen
+		if old.LastHeartbeatAt.After(seen) {
+			seen = old.LastHeartbeatAt
+		}
+		if !seen.IsZero() {
+			t := seen.UTC()
+			c.OldLastSeen = &t
+		}
+	}
+	if s.registrationTokenStore != nil {
+		if tokens, err := s.registrationTokenStore.ListTokens(ctx, p.TenantID); err == nil {
+			for _, t := range tokens {
+				if business.RegistrationTokenLookupKey(t.Token) == p.TokenStr {
+					c.TokenLabel = t.Label
+					break
+				}
+			}
+		}
+	}
 }
 
 // operatorStewardRecord resolves the steward for an operator identity verb: it
@@ -385,6 +442,11 @@ func (s *Server) handleRotateCredentials(w http.ResponseWriter, r *http.Request)
 // moveIdentityRequest is the body of POST /stewards/{id}/identity/move.
 type moveIdentityRequest struct {
 	PendingID string `json:"pending_id"`
+
+	// ConfirmLive acknowledges linking a locked copy to an old record that has
+	// heartbeated within linkLiveWindow: the machine holding it may be the
+	// legitimate one.
+	ConfirmLive bool `json:"confirm_live,omitempty"`
 }
 
 // moveIdentityResponse is the body of POST /stewards/{id}/identity/move.
@@ -394,6 +456,9 @@ type moveIdentityResponse struct {
 	Status         string   `json:"status"`
 	RevokedSerials []string `json:"revoked_serials"`
 	NextStep       string   `json:"next_step"`
+
+	// Set when the move linked a locked copy back to its old identity.
+	CopyStewardID string `json:"copy_steward_id,omitempty"`
 }
 
 // handleMoveIdentity handles POST /api/v1/stewards/{id}/identity/move
@@ -403,8 +468,14 @@ type moveIdentityResponse struct {
 // then signs the certificate under that ID), and the previous serials are
 // revoked. Nothing else moves an identity.
 func (s *Server) handleMoveIdentity(w http.ResponseWriter, r *http.Request) {
-	record, ok := s.operatorStewardRecord(w, r, "POST /api/v1/stewards/{id}/identity/move")
+	// A tampered record is a valid source only when the queued entry is a locked
+	// copy being linked back to it; that is decided once the entry is loaded.
+	record, ok := s.operatorStewardLookup(w, r, "POST /api/v1/stewards/{id}/identity/move")
 	if !ok {
+		return
+	}
+	if record.Status == business.StewardStatusRevoked || record.Status == business.StewardStatusDeregistered {
+		s.writeErrorResponse(w, http.StatusConflict, "Steward is "+string(record.Status), "STEWARD_NOT_ACTIVE")
 		return
 	}
 	if s.pendingStore == nil {
@@ -417,32 +488,14 @@ func (s *Server) handleMoveIdentity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	notFound := func() {
-		s.writeErrorResponse(w, http.StatusNotFound, "Queued copy not found for this steward", "PENDING_NOT_FOUND")
-	}
-	entry, err := s.pendingStore.GetPendingByID(ctx, req.PendingID)
-	if err != nil {
-		if errors.Is(err, business.ErrPendingRegistrationNotFound) {
-			notFound()
-			return
-		}
-		s.logger.Error("move identity: pending lookup failed",
-			"pending_id", logging.SanitizeLogValue(req.PendingID), "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up pending registration", "INTERNAL_ERROR")
+	entry, ok := s.loadMoveEntry(w, r, record, req.PendingID)
+	if !ok {
 		return
 	}
-	// Same tenant and an explicit CloneOf: anything else is reported as not found
-	// so one tenant cannot probe another tenant's queue.
-	if entry.TenantID != record.TenantID || entry.CloneOf != record.ID {
-		notFound()
+	if s.tryLinkLockedCopy(w, r, record, entry, req.ConfirmLive) {
 		return
 	}
-	if entry.Status != business.PendingRegistrationStatusPending {
-		s.writeErrorResponse(w, http.StatusConflict, "Queued copy is no longer pending", "PENDING_NOT_PENDING")
-		return
-	}
-	if entry.DeviceID == "" || len(entry.IdentityKeyPub) == 0 {
-		s.writeErrorResponse(w, http.StatusBadRequest, "Queued copy carries no device identity", "INVALID_REQUEST")
+	if !s.ordinaryMoveAllowed(w, record, entry) {
 		return
 	}
 
@@ -506,4 +559,439 @@ func (s *Server) handleMoveIdentity(w http.ResponseWriter, r *http.Request) {
 		RevokedSerials: serials,
 		NextStep:       "The queued machine claims its approved registration under the original steward ID on its next poll; the previous machine's certificates are revoked.",
 	})
+}
+
+// loadMoveEntry loads the queued entry an identity move names. An entry in
+// another tenant, or one that does not name record as its CloneOf, is reported
+// as not found so one tenant cannot probe another tenant's queue. On false the
+// response has been written.
+func (s *Server) loadMoveEntry(w http.ResponseWriter, r *http.Request, record *business.StewardRecord, pendingID string) (*business.PendingRegistrationEntry, bool) {
+	entry, err := s.pendingStore.GetPendingByID(r.Context(), pendingID)
+	if err != nil && !errors.Is(err, business.ErrPendingRegistrationNotFound) {
+		s.logger.Error("move identity: pending lookup failed",
+			"pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up pending registration", "INTERNAL_ERROR")
+		return nil, false
+	}
+	if err != nil || entry.TenantID != record.TenantID || entry.CloneOf != record.ID {
+		s.writeErrorResponse(w, http.StatusNotFound, "Queued copy not found for this steward", "PENDING_NOT_FOUND")
+		return nil, false
+	}
+	return entry, true
+}
+
+// tryLinkLockedCopy links entry back to record when entry is a locked copy of
+// it, and reports whether it handled the request (including a lookup failure,
+// answered 500). On false the request is an ordinary move.
+func (s *Server) tryLinkLockedCopy(w http.ResponseWriter, r *http.Request, record *business.StewardRecord, entry *business.PendingRegistrationEntry, confirmLive bool) bool {
+	lk, locked, err := s.lockedLinkTarget(r.Context(), record, entry)
+	if err != nil {
+		s.logger.Error("move identity: copy lookup failed",
+			"pending_id", logging.SanitizeLogValue(entry.PendingID), "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up queued copy", "INTERNAL_ERROR")
+		return true
+	}
+	if !locked {
+		return false
+	}
+	s.linkLockedCopy(w, r, record, entry, lk, confirmLive)
+	return true
+}
+
+// ordinaryMoveAllowed checks the source record and queued entry of an ordinary
+// (not locked-copy) move. On false the response has been written.
+func (s *Server) ordinaryMoveAllowed(w http.ResponseWriter, record *business.StewardRecord, entry *business.PendingRegistrationEntry) bool {
+	// tampered is not a valid source for an ordinary move: only an operator
+	// restore or ban ends it.
+	if record.Status == business.StewardStatusTampered {
+		s.writeErrorResponse(w, http.StatusConflict, "Steward is "+string(record.Status), "STEWARD_NOT_ACTIVE")
+		return false
+	}
+	if entry.Status != business.PendingRegistrationStatusPending {
+		s.writeErrorResponse(w, http.StatusConflict, "Queued copy is no longer pending", "PENDING_NOT_PENDING")
+		return false
+	}
+	return s.queuedCopyHasIdentity(w, entry)
+}
+
+// queuedCopyHasIdentity answers 400 when the queued entry carries no device
+// identity to rebind to, and reports whether it has one.
+func (s *Server) queuedCopyHasIdentity(w http.ResponseWriter, entry *business.PendingRegistrationEntry) bool {
+	if entry.DeviceID == "" || len(entry.IdentityKeyPub) == 0 {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Queued copy carries no device identity", "INVALID_REQUEST")
+		return false
+	}
+	return true
+}
+
+const (
+	// linkLiveWindow is how recent the old record's last heartbeat must be for
+	// linking a locked copy to it to need confirm_live.
+	linkLiveWindow = 10 * time.Minute
+
+	auditActionLinkStep    = "steward_identity_link_step"
+	auditActionLinkFailed  = "steward_identity_link_failed"
+	auditActionLinkRefused = "steward_identity_link_refused"
+)
+
+// Names of the link steps, reported in a failure response and in the audit trail.
+const (
+	linkStepRetireCopy    = "retire_copy"
+	linkStepRebindOld     = "rebind_old_identity"
+	linkStepRevokeOld     = "revoke_old_credentials"
+	linkStepApprovePend   = "approve_pending"
+	linkStepSupersedePend = "supersede_pending"
+)
+
+// lockedLink describes a queued entry that belongs to a copy admitted locked.
+type lockedLink struct {
+	copyID string // the copy's steward ID; empty when the entry already points at the old ID
+	// copyRetired is set when the copy is already deregistered, or the entry
+	// already names the old ID: an earlier attempt got past the retire step.
+	copyRetired bool
+}
+
+// lockedLinkTarget decides whether entry is a locked copy of record. The entry
+// is one when it was admitted locked: its steward record exists in the old
+// record's tenant and is tampered (or deregistered by an earlier link attempt),
+// or an earlier attempt already pointed it at the old ID.
+func (s *Server) lockedLinkTarget(ctx context.Context, record *business.StewardRecord, entry *business.PendingRegistrationEntry) (lockedLink, bool, error) {
+	if entry.Status != business.PendingRegistrationStatusPending && entry.Status != business.PendingRegistrationStatusApproved {
+		return lockedLink{}, false, nil
+	}
+	if entry.StewardID == record.ID {
+		return lockedLink{copyRetired: true}, s.stoppedLink(ctx, record, entry), nil
+	}
+	copyRec, err := s.stewardStore.GetSteward(ctx, entry.StewardID)
+	if err != nil {
+		if errors.Is(err, business.ErrStewardNotFound) {
+			return lockedLink{}, false, nil
+		}
+		return lockedLink{}, false, err
+	}
+	lk, ok := lockedLinkForCopy(record, copyRec)
+	return lk, ok, nil
+}
+
+// stoppedLink reports whether an entry already on the old ID is a link that
+// stopped part-way: still pending, or approved with a recorded link approval. An
+// ordinary move leaves an approved entry in the same shape and must stay refused.
+func (s *Server) stoppedLink(ctx context.Context, record *business.StewardRecord, entry *business.PendingRegistrationEntry) bool {
+	return entry.Status == business.PendingRegistrationStatusPending || s.linkApprovalAudited(ctx, record, entry.PendingID)
+}
+
+// lockedLinkForCopy classifies the entry's steward record: tampered is a locked
+// copy, deregistered one an earlier attempt already retired.
+func lockedLinkForCopy(record, copyRec *business.StewardRecord) (lockedLink, bool) {
+	if copyRec == nil || copyRec.TenantID != record.TenantID {
+		return lockedLink{}, false
+	}
+	switch copyRec.Status {
+	case business.StewardStatusTampered:
+		return lockedLink{copyID: copyRec.ID}, true
+	case business.StewardStatusDeregistered:
+		return lockedLink{copyID: copyRec.ID, copyRetired: true}, true
+	}
+	return lockedLink{}, false
+}
+
+// linkLockedCopy links a locked copy back to its old identity (ADR-034): the
+// copy is retired and its credential revoked, the old record is rebound to the
+// copy's device identity, the old ID's own credentials are revoked, and the queued
+// entry is pointed at the old ID and approved, then superseded so it can never be
+// claimed (the endpoint returns through the refresh flow). The old record keeps
+// its status.
+//
+// The steps are ordered so no window leaves two live credentials for one
+// identity, and a failure up to the approval leaves the old record as it was.
+// Every step is idempotent, so a retry completes a link that stopped part-way.
+func (s *Server) linkLockedCopy(w http.ResponseWriter, r *http.Request, record *business.StewardRecord, entry *business.PendingRegistrationEntry, lk lockedLink, confirmLive bool) {
+	// An earlier attempt that approved the entry but failed to supersede it only
+	// has the supersede step left.
+	supersedeOnly := entry.Status == business.PendingRegistrationStatusApproved &&
+		entry.StewardID == record.ID && record.DeviceID == entry.DeviceID
+	live, ok := s.linkPreconditions(w, r, record, entry, lk, supersedeOnly, confirmLive)
+	if !ok {
+		return
+	}
+	l := &linkRun{s: s, w: w, r: r, ctx: r.Context(), record: record, entry: entry, lk: lk, confirmed: live && confirmLive}
+
+	var serials []string
+	if !supersedeOnly {
+		if serials, ok = l.relinkIdentity(); !ok {
+			return
+		}
+	}
+	// (5) The approved entry is never claimed: supersede it so it cannot be.
+	if !l.supersedePending() {
+		return
+	}
+	l.finish(serials)
+}
+
+// linkPreconditions checks that entry can be linked and, when the old record
+// heartbeated within linkLiveWindow, that the operator confirmed it. It returns
+// whether the old record is live. On false the response has been written.
+func (s *Server) linkPreconditions(w http.ResponseWriter, r *http.Request, record *business.StewardRecord, entry *business.PendingRegistrationEntry,
+	lk lockedLink, supersedeOnly, confirmLive bool) (live bool, ok bool) {
+	if entry.Status != business.PendingRegistrationStatusPending && !supersedeOnly {
+		s.writeErrorResponse(w, http.StatusConflict, "Queued copy is no longer pending", "PENDING_NOT_PENDING")
+		return false, false
+	}
+	if !s.queuedCopyHasIdentity(w, entry) {
+		return false, false
+	}
+	live = !supersedeOnly && !record.LastHeartbeatAt.IsZero() && time.Since(record.LastHeartbeatAt) <= linkLiveWindow
+	if live && !confirmLive {
+		s.emitOperatorAuditResult(r.Context(), r, auditActionLinkRefused, business.AuditResultDenied, record, map[string]interface{}{
+			"pending_id": entry.PendingID, "copy_steward_id": lk.copyID, "reason": "confirm_live_required",
+		})
+		s.writeErrorResponse(w, http.StatusConflict,
+			"The old record heartbeated within the last 10 minutes, so the machine holding it may be the legitimate one; repeat the request with confirm_live to link anyway",
+			"CONFIRM_LIVE_REQUIRED")
+		return false, false
+	}
+	return live, true
+}
+
+// linkRun carries one link of a locked copy through its steps; each step audits
+// itself on success and, on failure, rolls back what it must, audits the failed
+// step and writes the response.
+type linkRun struct {
+	s         *Server
+	w         http.ResponseWriter
+	r         *http.Request
+	ctx       context.Context
+	record    *business.StewardRecord
+	entry     *business.PendingRegistrationEntry
+	lk        lockedLink
+	confirmed bool // the old record was live and the operator confirmed it
+}
+
+// step audits a completed link step.
+func (l *linkRun) step(name string, extras map[string]interface{}) {
+	d := map[string]interface{}{
+		"step":            name,
+		"confirm_live":    l.confirmed,
+		"pending_id":      l.entry.PendingID,
+		"copy_steward_id": l.lk.copyID,
+	}
+	for k, v := range extras {
+		d[k] = v
+	}
+	l.s.emitIdentityOperatorAudit(l.ctx, l.r, auditActionLinkStep, l.record, d)
+}
+
+// fail runs rollback (when set), audits the failed step and answers status.
+func (l *linkRun) fail(status int, code, name string, err error, rollback func()) {
+	if rollback != nil {
+		rollback()
+	}
+	l.s.logger.Error("link locked copy: step failed",
+		"steward_id", logging.SanitizeLogValue(l.record.ID), "step", name, "error", logging.SanitizeLogValue(err.Error()))
+	l.s.emitOperatorAuditResult(l.ctx, l.r, auditActionLinkFailed, business.AuditResultFailure, l.record, map[string]interface{}{
+		"pending_id": l.entry.PendingID, "copy_steward_id": l.lk.copyID, "step": name,
+	})
+	l.s.writeErrorResponse(l.w, status, "Link failed at step "+name+"; retry to complete the link", code)
+}
+
+// relinkIdentity runs steps (1) to (4) and returns the old ID's revoked serials.
+func (l *linkRun) relinkIdentity() ([]string, bool) {
+	if !l.retireCopy() {
+		return nil, false
+	}
+	rollbackRebind, ok := l.rebindOld()
+	if !ok {
+		return nil, false
+	}
+	// (3) The old ID's own credentials end before anything can return under it.
+	serials, err := revokeStewardSerials(l.s.certManager, l.record.ID)
+	if err != nil {
+		l.fail(http.StatusInternalServerError, "LINK_STEP_FAILED", linkStepRevokeOld, err, rollbackRebind)
+		return nil, false
+	}
+	l.step(linkStepRevokeOld, map[string]interface{}{"revoked_serials": serials})
+	if !l.approvePending(rollbackRebind) {
+		return nil, false
+	}
+	return serials, true
+}
+
+// retireCopy is step (1): the copy's credential dies first, then its record,
+// which frees its device_id for the old record.
+func (l *linkRun) retireCopy() bool {
+	if l.lk.copyID == "" {
+		return true
+	}
+	copySerials, err := revokeStewardSerials(l.s.certManager, l.lk.copyID)
+	if err != nil {
+		l.fail(http.StatusInternalServerError, "LINK_STEP_FAILED", linkStepRetireCopy, err, nil)
+		return false
+	}
+	if !l.lk.copyRetired && !l.deregisterCopy() {
+		return false
+	}
+	if l.s.controllerService != nil {
+		if uErr := l.s.controllerService.UpdateStewardStatus(l.lk.copyID, string(business.StewardStatusDeregistered)); uErr != nil {
+			l.s.logger.Debug("link: in-memory status update skipped",
+				"steward_id", logging.SanitizeLogValue(l.lk.copyID), "error", logging.SanitizeLogValue(uErr.Error()))
+		}
+	}
+	l.s.evictStewardStream(l.lk.copyID)
+	l.step(linkStepRetireCopy, map[string]interface{}{"revoked_serials": copySerials})
+	return true
+}
+
+// deregisterCopy moves the copy's record from tampered to deregistered; a copy
+// that is no longer tampered is a conflict.
+func (l *linkRun) deregisterCopy() bool {
+	transitioned, err := l.s.stewardStore.TransitionStewardStatus(l.ctx, l.lk.copyID, business.StewardStatusDeregistered, business.StewardStatusTampered)
+	if err != nil {
+		l.fail(http.StatusInternalServerError, "LINK_STEP_FAILED", linkStepRetireCopy, err, nil)
+		return false
+	}
+	if !transitioned {
+		l.fail(http.StatusConflict, "LINK_COPY_CHANGED", linkStepRetireCopy, errors.New("copy is no longer locked"), nil)
+		return false
+	}
+	return true
+}
+
+// rebindOld is step (2): rebind the old record to the copy's device identity. It
+// returns the rollback that restores the old record's previous identity.
+func (l *linkRun) rebindOld() (func(), bool) {
+	record, entry := l.record, l.entry
+	oldDeviceID, oldKey, oldLevel, oldAlg := record.DeviceID, record.IdentityKeyPub, record.KeyProtectionLevel, record.KeyAlgorithm
+	if record.DeviceID != entry.DeviceID || !bytes.Equal(record.IdentityKeyPub, entry.IdentityKeyPub) {
+		if err := l.s.stewardStore.RebindStewardIdentity(l.ctx, record.ID, entry.DeviceID, entry.IdentityKeyPub, entry.KeyProtectionLevel, entry.KeyAlgorithm); err != nil {
+			status, code := http.StatusInternalServerError, "LINK_STEP_FAILED"
+			if errors.Is(err, business.ErrStewardDeviceIDConflict) {
+				status, code = http.StatusConflict, "DEVICE_ID_CONFLICT"
+			}
+			l.fail(status, code, linkStepRebindOld, err, nil)
+			return nil, false
+		}
+	}
+	l.step(linkStepRebindOld, map[string]interface{}{"old_device_id": oldDeviceID, "new_device_id": entry.DeviceID})
+	return func() {
+		if rbErr := l.s.stewardStore.RebindStewardIdentity(l.ctx, record.ID, oldDeviceID, oldKey, oldLevel, oldAlg); rbErr != nil {
+			l.s.logger.Error("link locked copy: rollback of rebind failed",
+				"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(rbErr.Error()))
+		}
+	}, true
+}
+
+// approvePending is step (4): point the entry at the old ID and approve it. A
+// failure undoes the reassignment and the rebind.
+func (l *linkRun) approvePending(rollbackRebind func()) bool {
+	reassigned := false
+	var err error
+	if l.entry.StewardID != l.record.ID {
+		if err = l.s.pendingStore.ReassignPendingSteward(l.ctx, l.entry.PendingID, l.record.ID); err == nil {
+			reassigned = true
+		}
+	}
+	if err == nil {
+		err = l.s.pendingStore.UpdateStatus(l.ctx, l.entry.PendingID, business.PendingRegistrationStatusApproved)
+	}
+	if err == nil {
+		l.step(linkStepApprovePend, nil)
+		return true
+	}
+	status, code := http.StatusInternalServerError, "LINK_STEP_FAILED"
+	if errors.Is(err, business.ErrPendingRegistrationNotFound) {
+		status, code = http.StatusConflict, "PENDING_CONFLICT"
+	}
+	l.fail(status, code, linkStepApprovePend, err, func() {
+		if reassigned {
+			l.undoReassign()
+		}
+		rollbackRebind()
+	})
+	return false
+}
+
+// undoReassign points the entry back at the copy's steward ID.
+func (l *linkRun) undoReassign() {
+	if l.lk.copyID == "" {
+		return
+	}
+	if err := l.s.pendingStore.ReassignPendingSteward(l.ctx, l.entry.PendingID, l.lk.copyID); err != nil {
+		l.s.logger.Error("link locked copy: rollback of reassignment failed",
+			"pending_id", logging.SanitizeLogValue(l.entry.PendingID), "error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+// supersedePending is step (5): the approved entry is superseded so it can never
+// be claimed.
+func (l *linkRun) supersedePending() bool {
+	if err := l.s.pendingStore.UpdateStatus(l.ctx, l.entry.PendingID, business.PendingRegistrationStatusDenied); err != nil {
+		l.fail(http.StatusInternalServerError, "LINK_STEP_FAILED", linkStepSupersedePend, err, nil)
+		return false
+	}
+	l.step(linkStepSupersedePend, nil)
+	return true
+}
+
+// finish audits the completed link and answers with its outcome.
+func (l *linkRun) finish(serials []string) {
+	record, entry := l.record, l.entry
+	l.s.emitIdentityOperatorAudit(l.ctx, l.r, auditActionIdentityMoved, record, map[string]interface{}{
+		"pending_id":      entry.PendingID,
+		"copy_steward_id": l.lk.copyID,
+		"new_device_id":   entry.DeviceID,
+		"revoked_serials": serials,
+		"linked":          true,
+		"confirm_live":    l.confirmed,
+	})
+	l.s.logger.Info("Locked copy linked to its old identity",
+		"steward_id", logging.SanitizeLogValue(record.ID), "pending_id", logging.SanitizeLogValue(entry.PendingID))
+	l.s.writeSuccessResponse(l.w, moveIdentityResponse{
+		ID:             record.ID,
+		PendingID:      entry.PendingID,
+		Status:         "linked",
+		RevokedSerials: serials,
+		CopyStewardID:  l.lk.copyID,
+		NextStep:       "The locked copy is retired. The endpoint returns under the original steward ID through its refresh; the original record keeps its current status until it is restored.",
+	})
+}
+
+// lockedCopyNamingOldID returns the pending entry of a locked copy that names an
+// old identity, or nil when record is not such a copy.
+func (s *Server) lockedCopyNamingOldID(ctx context.Context, record *business.StewardRecord) (*business.PendingRegistrationEntry, error) {
+	if s.pendingStore == nil {
+		return nil, nil
+	}
+	pending, err := s.pendingStore.ListPending(ctx, record.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range pending {
+		if p.StewardID == record.ID && p.CloneOf != "" {
+			return p, nil
+		}
+	}
+	return nil, nil
+}
+
+// linkApprovalAudited reports whether a link approved pendingID for record, from
+// the audit trail of the link steps.
+func (s *Server) linkApprovalAudited(ctx context.Context, record *business.StewardRecord, pendingID string) bool {
+	if s.auditManager == nil {
+		return false
+	}
+	entries, err := s.auditManager.QueryEntries(ctx, &business.AuditFilter{
+		Actions:     []string{auditActionLinkStep},
+		ResourceIDs: []string{record.ID},
+		Limit:       identityCloneAuditLimit,
+	})
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if auditString(e.Details, "step") == linkStepApprovePend && auditString(e.Details, "pending_id") == pendingID {
+			return true
+		}
+	}
+	return false
 }

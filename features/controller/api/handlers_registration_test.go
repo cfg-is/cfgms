@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -33,12 +34,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	stwreg "github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
@@ -3976,4 +3979,333 @@ func TestHandleRegistrationStatus_ClaimAuditedWhenStepAfterSigningFails(t *testi
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	assert.NotEmpty(t, entries[0].Details["cert_serial"])
+}
+
+// --- Broken-trust (locked) admission, Issue #5671 ---
+
+// lockedRequest builds a registration request with a fresh device key for the
+// clone env's token.
+func (e *cloneEnv) lockedRequest(t *testing.T, cloneOf, reason string) RegistrationRequest {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	return RegistrationRequest{
+		Token:          e.regToken,
+		DeviceID:       deviceIDForKey([]byte(pub)),
+		IdentityKeyPub: base64.StdEncoding.EncodeToString([]byte(pub)),
+		CSRPEM:         testValidCSRPEM,
+		Hostname:       "locked-host",
+		CloneOf:        cloneOf,
+		CloneReason:    reason,
+	}
+}
+
+func (e *cloneEnv) pendingFor(t *testing.T, stewardID string) *business.PendingRegistrationEntry {
+	t.Helper()
+	all, err := e.server.pendingStore.ListAll(context.Background(), cloneTenant)
+	require.NoError(t, err)
+	for _, p := range all {
+		if p.StewardID == stewardID {
+			return p
+		}
+	}
+	return nil
+}
+
+func TestLockedAdmission_CreatesTamperedRecordAndPendingEntry(t *testing.T) {
+	env := newCloneEnv(t)
+	env.server.SetApprovalHook(&AlwaysApproveHook{})
+	env.addSteward(t, "steward-old-la", cloneTenant, cloneDeviceA, business.StewardStatusActive)
+
+	rec := postRegisterWithBody(env.server, env.lockedRequest(t, "steward-old-la", cloneReasonBrokenTrust))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.ClientCert, "the locked steward is given credentials so it can talk to the controller")
+
+	stored, err := env.steward.GetSteward(context.Background(), resp.StewardID)
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusTampered, stored.Status)
+
+	pending := env.pendingFor(t, resp.StewardID)
+	require.NotNil(t, pending)
+	assert.Equal(t, business.PendingRegistrationStatusPending, pending.Status)
+	assert.Equal(t, "steward-old-la", pending.CloneOf)
+	assert.NotEmpty(t, pending.DeviceID)
+
+	events := env.auditActions(t, auditActionLockedAdmission)
+	require.Len(t, events, 1)
+	assert.Equal(t, business.AuditSeverityHigh, events[0].Severity)
+
+	// Shown as tampered in GET /api/v1/stewards (node-local list entry).
+	assert.Equal(t, "tampered", listDirect(t, env.server, "")[resp.StewardID].Status)
+
+	// It can heartbeat, and the heartbeat does not lift the lock.
+	require.NoError(t, env.steward.UpdateHeartbeat(context.Background(), resp.StewardID, "1.0.0"))
+	after, err := env.steward.GetSteward(context.Background(), resp.StewardID)
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusTampered, after.Status)
+	assert.False(t, after.LastHeartbeatAt.IsZero())
+
+	// The same predicate every pull and command gate reads refuses it: SyncConfig,
+	// FetchModuleBundle and BulkTransfer all call CheckStewardPull with it, and the
+	// command gate CheckControllerRequest.
+	ld := fleet.NewLockdown(env.steward, logging.NewNoopLogger())
+	for _, pull := range []string{"SyncConfig", "FetchModuleBundle", "BulkTransfer"} {
+		err := controlplaneInterfaces.CheckStewardPull(context.Background(), ld, resp.StewardID)
+		assert.True(t, controlplaneInterfaces.IsLockedDown(err), "%s must be refused with the typed lockdown error, got %v", pull, err)
+	}
+	assert.Error(t, controlplaneInterfaces.CheckControllerRequest(context.Background(), ld, resp.StewardID), "commands are refused")
+	// The old record is not affected.
+	old, err := env.steward.GetSteward(context.Background(), "steward-old-la")
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusActive, old.Status)
+}
+
+func TestLockedAdmission_ApprovalPolicyStillDecides(t *testing.T) {
+	cases := []struct {
+		name     string
+		hook     RegistrationApprovalHook
+		wantCode int
+	}{
+		{"reject", &rejectHookForTest{}, http.StatusForbidden},
+		{"quarantine", &quarantineHookForTest{}, http.StatusAccepted},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newCloneEnv(t)
+			env.server.SetApprovalHook(tc.hook)
+			env.addSteward(t, "steward-old-pol", cloneTenant, cloneDeviceA, business.StewardStatusActive)
+			rec := postRegisterWithBody(env.server, env.lockedRequest(t, "steward-old-pol", cloneReasonBrokenTrust))
+			require.Equal(t, tc.wantCode, rec.Code, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "client_cert", "no certificate")
+			assert.Empty(t, env.auditActions(t, auditActionLockedAdmission), "policy decided before the reason applied")
+			tampered, err := env.steward.ListStewardsByStatus(context.Background(), business.StewardStatusTampered)
+			require.NoError(t, err)
+			assert.Empty(t, tampered, "nothing is created locked")
+			if tc.name == "quarantine" {
+				var resp RegistrationPendingResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+				entry := env.pendingFor(t, resp.StewardID)
+				require.NotNil(t, entry)
+				assert.Equal(t, business.PendingRegistrationStatusPending, entry.Status)
+				ev := env.auditActions(t, "registration_quarantined")
+				require.Len(t, ev, 1)
+				assert.Equal(t, cloneReasonBrokenTrust, ev[0].Details["clone_reason"], "the reason is recorded")
+			}
+		})
+	}
+}
+
+func TestLockedAdmission_RequiresValidToken(t *testing.T) {
+	env := newCloneEnv(t)
+	env.server.SetApprovalHook(&AlwaysApproveHook{})
+	env.addSteward(t, "steward-old-tok", cloneTenant, cloneDeviceA, business.StewardStatusActive)
+	oldCert := env.issueClientCerts(t, "steward-old-tok", 1)
+	require.Len(t, oldCert, 1)
+
+	for name, mutate := range map[string]func(*RegistrationRequest){
+		"no token":      func(r *RegistrationRequest) { r.Token = "" },
+		"unknown token": func(r *RegistrationRequest) { r.Token = "cfgms_reg_not_a_token" },
+	} {
+		req := env.lockedRequest(t, "steward-old-tok", cloneReasonBrokenTrust)
+		mutate(&req)
+		body, _ := json.Marshal(req)
+		httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
+		// An old certificate of the steward being replaced is presented as the
+		// peer certificate: it is never accepted as the authentication.
+		block, _ := pem.Decode(mustClientCertPEM(t, env.certMgr, "steward-old-tok"))
+		leaf, err := x509.ParseCertificate(block.Bytes)
+		require.NoError(t, err)
+		httpReq.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}
+		rec := httptest.NewRecorder()
+		env.server.handleRegister(rec, httpReq)
+		assert.Contains(t, []int{http.StatusBadRequest, http.StatusUnauthorized}, rec.Code, name+": "+rec.Body.String())
+		assert.Empty(t, env.auditActions(t, auditActionLockedAdmission), name)
+	}
+
+	expired := time.Now().Add(-time.Hour)
+	require.NoError(t, env.tokenSt.SaveToken(context.Background(), &registration.Token{
+		Token: "cfgms_reg_expired_la", TenantID: cloneTenant, ControllerURL: "grpc://c:1", ExpiresAt: &expired,
+	}))
+	req := env.lockedRequest(t, "steward-old-tok", cloneReasonBrokenTrust)
+	req.Token = "cfgms_reg_expired_la"
+	assert.Equal(t, http.StatusUnauthorized, postRegisterWithBody(env.server, req).Code)
+}
+
+func mustClientCertPEM(t *testing.T, mgr *cert.Manager, cn string) []byte {
+	t.Helper()
+	c, err := mgr.GenerateClientCertificate(&cert.ClientCertConfig{CommonName: cn, ValidityDays: 1})
+	require.NoError(t, err)
+	return c.CertificatePEM
+}
+
+// TestLockedAdmission_CloneOfExistenceIsNotRevealed: a clone_of naming an
+// existing, a missing and an other-tenant steward answer identically in status
+// code and body shape. A banned one is refused and audited, and creates nothing.
+func TestLockedAdmission_CloneOfExistenceIsNotRevealed(t *testing.T) {
+	env := newCloneEnv(t)
+	env.server.SetApprovalHook(&AlwaysApproveHook{})
+	env.server.SetLockedAdmissionTokenCap(50)
+	env.addSteward(t, "steward-exists", cloneTenant, cloneDeviceA, business.StewardStatusActive)
+	env.addSteward(t, "steward-elsewhere", cloneOtherTenant, cloneDeviceB, business.StewardStatusActive)
+	env.addSteward(t, "steward-banned", cloneTenant, cloneDeviceB[:63]+"c", business.StewardStatusRevoked)
+
+	shape := func(rec *httptest.ResponseRecorder) (int, []string) {
+		var m map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &m), rec.Body.String())
+		keys := make([]string, 0, len(m))
+		for k, v := range m {
+			keys = append(keys, k+":"+string(rune(jsonKind(v))))
+		}
+		sort.Strings(keys)
+		return rec.Code, keys
+	}
+	var wantCode int
+	var wantShape []string
+	for i, cloneOf := range []string{"steward-exists", "steward-missing", "steward-elsewhere"} {
+		rec := postRegisterWithBody(env.server, env.lockedRequest(t, cloneOf, cloneReasonBrokenTrust))
+		require.Equal(t, http.StatusOK, rec.Code, cloneOf+": "+rec.Body.String())
+		code, keys := shape(rec)
+		if i == 0 {
+			wantCode, wantShape = code, keys
+			continue
+		}
+		assert.Equal(t, wantCode, code, cloneOf)
+		assert.Equal(t, wantShape, keys, cloneOf)
+	}
+
+	before := len(env.auditActions(t, auditActionLockedAdmission))
+	rec := postRegisterWithBody(env.server, env.lockedRequest(t, "steward-banned", cloneReasonBrokenTrust))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Len(t, env.auditActions(t, auditActionLockedAdmission), before, "nothing is created for a banned clone_of")
+	rejected := env.auditActions(t, "registration_rejected")
+	require.NotEmpty(t, rejected)
+	assert.Equal(t, "clone_of_banned", rejected[len(rejected)-1].Details["reason"])
+
+	// Cross-tenant callers learn nothing: a banned ID of another tenant behaves
+	// like a missing one.
+	env.addSteward(t, "steward-banned-elsewhere", cloneOtherTenant, cloneDeviceB[:63]+"d", business.StewardStatusRevoked)
+	rec = postRegisterWithBody(env.server, env.lockedRequest(t, "steward-banned-elsewhere", cloneReasonBrokenTrust))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// jsonKind returns the first byte of a raw JSON value, a coarse type marker.
+func jsonKind(v json.RawMessage) byte {
+	if len(v) == 0 {
+		return 0
+	}
+	return v[0]
+}
+
+func TestLockedAdmission_OnePendingIdentityPerOldID(t *testing.T) {
+	env := newCloneEnv(t)
+	env.server.SetApprovalHook(&AlwaysApproveHook{})
+	env.addSteward(t, "steward-old-once", cloneTenant, cloneDeviceA, business.StewardStatusActive)
+
+	first := postRegisterWithBody(env.server, env.lockedRequest(t, "steward-old-once", cloneReasonBrokenTrust))
+	require.Equal(t, http.StatusOK, first.Code)
+	var firstResp RegistrationResponse
+	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &firstResp))
+
+	second := postRegisterWithBody(env.server, env.lockedRequest(t, "steward-old-once", cloneReasonBrokenTrust))
+	assert.Equal(t, http.StatusOK, second.Code, "the repeat claim is answered like any other")
+
+	all, err := env.server.pendingStore.ListAll(context.Background(), cloneTenant)
+	require.NoError(t, err)
+	named := 0
+	for _, p := range all {
+		if p.CloneOf == "steward-old-once" {
+			named++
+			assert.Equal(t, firstResp.StewardID, p.StewardID, "the first pending identity is not replaced")
+		}
+	}
+	assert.Equal(t, 1, named, "one pending identity per old ID")
+}
+
+func TestLockedAdmission_PerTokenCapAndAggregatedNotifications(t *testing.T) {
+	env := newCloneEnv(t)
+	env.server.SetApprovalHook(&AlwaysApproveHook{})
+
+	for i := 0; i < defaultLockedAdmissionTokenCap; i++ {
+		rec := postRegisterWithBody(env.server, env.lockedRequest(t, "", cloneReasonBrokenTrust))
+		require.Equal(t, http.StatusOK, rec.Code, "admission %d: %s", i+1, rec.Body.String())
+	}
+	rec := postRegisterWithBody(env.server, env.lockedRequest(t, "", cloneReasonBrokenTrust))
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code, "the sixth pending locked admission is refused")
+	assert.Len(t, env.auditActions(t, auditActionLockedAdmission), defaultLockedAdmissionTokenCap)
+
+	// One notification per token per window.
+	queued, aggregated := 0, 0
+	for _, ev := range env.auditActions(t, auditActionLockedAdmission) {
+		switch ev.Details["notification"] {
+		case "queued":
+			queued++
+		case "aggregated":
+			aggregated++
+		}
+	}
+	assert.Equal(t, 1, queued)
+	assert.Equal(t, defaultLockedAdmissionTokenCap-1, aggregated)
+	env.server.crossingNotifyWG.Wait()
+
+	// Another token has its own budget.
+	require.NoError(t, env.tokenSt.SaveToken(context.Background(), &registration.Token{
+		Token: "cfgms_reg_clone_env_2", TenantID: cloneTenant, ControllerURL: "grpc://controller:7443",
+	}))
+	req := env.lockedRequest(t, "", cloneReasonBrokenTrust)
+	req.Token = "cfgms_reg_clone_env_2"
+	assert.Equal(t, http.StatusOK, postRegisterWithBody(env.server, req).Code)
+
+	// The window resets after it elapses.
+	var st lockedAdmissionState
+	now := time.Now()
+	assert.True(t, st.claimNotify("k", now))
+	assert.False(t, st.claimNotify("k", now.Add(lockedAdmissionNotifyWindow-time.Second)))
+	assert.True(t, st.claimNotify("k", now.Add(lockedAdmissionNotifyWindow)))
+}
+
+func TestLockedAdmission_CapIsConfigurable(t *testing.T) {
+	env := newCloneEnv(t)
+	env.server.SetApprovalHook(&AlwaysApproveHook{})
+	env.server.SetLockedAdmissionTokenCap(1)
+	assert.Equal(t, http.StatusOK, postRegisterWithBody(env.server, env.lockedRequest(t, "", cloneReasonBrokenTrust)).Code)
+	assert.Equal(t, http.StatusTooManyRequests, postRegisterWithBody(env.server, env.lockedRequest(t, "", cloneReasonBrokenTrust)).Code)
+}
+
+func TestLockedAdmission_UnknownReasonFollowsOrdinaryPath(t *testing.T) {
+	env := newCloneEnv(t)
+	env.server.SetApprovalHook(&AlwaysApproveHook{})
+	env.addSteward(t, "steward-old-unk", cloneTenant, cloneDeviceA, business.StewardStatusActive)
+	rec := postRegisterWithBody(env.server, env.lockedRequest(t, "steward-old-unk", "lost_my_keys"))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	stored, err := env.steward.GetSteward(context.Background(), resp.StewardID)
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusRegistered, stored.Status, "an unknown reason is ignored")
+	assert.Nil(t, env.pendingFor(t, resp.StewardID))
+	assert.Empty(t, env.auditActions(t, auditActionLockedAdmission))
+}
+
+func TestLockedAdmission_OrdinaryApprovalCannotClaimLockedEntry(t *testing.T) {
+	env := newCloneEnv(t)
+	env.server.SetApprovalHook(&AlwaysApproveHook{})
+	rec := postRegisterWithBody(env.server, env.lockedRequest(t, "", cloneReasonBrokenTrust))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	pending := env.pendingFor(t, resp.StewardID)
+	require.NotNil(t, pending)
+
+	rec = callClone(env.server.handleApproveRegistration, http.MethodPost, "/", map[string]string{"id": pending.PendingID}, cloneTenant, nil)
+	assert.Equal(t, http.StatusConflict, rec.Code, "an ordinary approval would claim a second credential")
+	rec = callClone(env.server.handleApproveAllRegistrations, http.MethodPost, "/", nil, cloneTenant, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var bulk approveAllResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &bulk))
+	assert.Equal(t, 0, bulk.Approved, "approve-all must not count the locked entry")
+	after, err := env.server.pendingStore.GetPendingByID(context.Background(), pending.PendingID)
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusPending, after.Status, "approve-all skips locked entries")
 }
