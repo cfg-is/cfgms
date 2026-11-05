@@ -343,6 +343,7 @@ func (c *TransportClient) connectReportOnly(ctx context.Context) error {
 	}
 
 	c.startReportOnlyEmitter(controlPlane, stewardID)
+	c.startLockedRevocationRefresh(ctx)
 
 	c.mu.Lock()
 	c.connected = true

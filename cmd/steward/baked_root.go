@@ -10,6 +10,9 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/cfgis/cfgms/features/steward/commands"
+	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 )
 
 // ControllerRootFingerprints is the controller root CA fingerprint list baked
@@ -79,6 +82,26 @@ func matchesBakedRoot(cert *x509.Certificate) bool {
 		return false
 	}
 	return slices.Contains(fps, fp)
+}
+
+// bakedRootReason returns the locked-tools reason code for an unusable baked
+// list, or "" when there is a usable baked root.
+func bakedRootReason() string {
+	_, err := bakedRootFingerprints()
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, errNoBakedRoot):
+		return cpTypes.ReasonCodeLockedNoBakedRoot
+	default:
+		return cpTypes.ReasonCodeLockedBakedRootMalformed
+	}
+}
+
+func init() {
+	// The repair path verifies its signer through commands.VerifyLockedSigner,
+	// which never reads the baked list itself.
+	commands.SetBakedRootMatcher(matchesBakedRoot)
 }
 
 // isSelfSignedCA reports whether cert is a non-empty CA certificate whose

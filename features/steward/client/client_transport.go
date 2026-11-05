@@ -517,6 +517,7 @@ type TransportClient struct {
 	tamperHandler    func(locked bool)
 	repairHandler    func(req cpTypes.RepairRequest)
 	lockedCmdHandler LockedCommandHandler
+	lockedTrust      *commands.LockedTrust
 	reportOnlyParts  []string
 	droppedInbound   map[string]int64
 
@@ -1456,6 +1457,12 @@ func (c *TransportClient) releaseInflightLocked(term uint64) {
 // signatures. With no handler wired (receive-path unit tests) there is nothing to
 // contradict, so it reports true.
 func (c *TransportClient) commandsSignatureVerified() bool {
+	// A report-only link's commands are verified through the locked handler's
+	// chain, not a configured signature verifier: an unsigned Term never moves
+	// the stored fence.
+	if c.reportOnly.Load() {
+		return false
+	}
 	c.mu.RLock()
 	h := c.commandHandler
 	c.mu.RUnlock()

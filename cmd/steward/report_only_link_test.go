@@ -228,8 +228,12 @@ func TestConnectReportOnly_ConnectsHeartbeatsAndReportsReasons(t *testing.T) {
 	tc := connectRO(t, f, trustSourceCompileBaked)
 
 	hb := waitHeartbeat(t, f.srv)
-	require.Len(t, hb.Reasons, 1)
-	assert.Equal(t, "tamper.test", hb.Reasons[0].Code)
+	// A binary with no baked root also says operator actions are unavailable.
+	codes := make([]string, 0, len(hb.Reasons))
+	for _, r := range hb.Reasons {
+		codes = append(codes, r.Code)
+	}
+	assert.ElementsMatch(t, []string{"tamper.test", cpTypes.ReasonCodeLockedNoBakedRoot}, codes)
 	assert.Equal(t, cpTypes.StatusError, hb.Status)
 	assert.Equal(t, roStewardID, hb.StewardID)
 	assert.True(t, tc.IsReportOnly())

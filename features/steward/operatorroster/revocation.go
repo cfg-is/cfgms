@@ -129,12 +129,47 @@ type signedRevocationManifest struct {
 // mTLS *http.Client, so this package neither builds TLS material nor depends on
 // features/steward/client.
 type RevocationVerifier struct {
-	caRoots *x509.CertPool
+	// forceStrict makes every manifest verify as strict whatever mode the caller
+	// passes (WithForcedStrict).
+	forceStrict bool
 
-	mu          sync.RWMutex
-	hasVerified bool
-	lastVersion int64
-	revoked     map[string]struct{}
+	mu            sync.RWMutex
+	caRoots       *x509.CertPool
+	intermediates *x509.CertPool
+	hasVerified   bool
+	lastVersion   int64
+	newestIssued  time.Time
+	revoked       map[string]struct{}
+}
+
+// RevocationOption tunes NewRevocationVerifier.
+type RevocationOption func(*RevocationVerifier)
+
+// WithForcedStrict makes the verifier chain-verify every manifest signer against
+// its roots whatever module trust mode the caller passes, bypass included. A
+// locked steward uses it so a data-folder module_trust.mode cannot weaken the
+// check.
+func WithForcedStrict() RevocationOption {
+	return func(v *RevocationVerifier) { v.forceStrict = true }
+}
+
+// SetTrust replaces the roots (and optional intermediates) the manifest signer
+// is chain-verified against. The caller must already have validated the roots
+// against its own anchor; this verifier trusts what it is handed.
+func (v *RevocationVerifier) SetTrust(roots, intermediates *x509.CertPool) {
+	v.mu.Lock()
+	v.caRoots = roots
+	v.intermediates = intermediates
+	v.mu.Unlock()
+}
+
+// NewestIssuedAt returns the issuance instant of the newest manifest this
+// verifier accepted, and false when it has accepted none. The instant is signed
+// by the controller, so replaying an old manifest does not advance it.
+func (v *RevocationVerifier) NewestIssuedAt() (time.Time, bool) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.newestIssued, v.hasVerified
 }
 
 // NewRevocationVerifier returns a RevocationVerifier that chain-verifies a
@@ -146,8 +181,12 @@ type RevocationVerifier struct {
 // answer false until one is available; VerifyManifest then rejects every strict-mode
 // manifest outright (see its nil-roots guard — a nil pool must never reach
 // x509.VerifyOptions.Roots, where it would mean "use the host's system roots").
-func NewRevocationVerifier(caRoots *x509.CertPool) *RevocationVerifier {
-	return &RevocationVerifier{caRoots: caRoots}
+func NewRevocationVerifier(caRoots *x509.CertPool, opts ...RevocationOption) *RevocationVerifier {
+	v := &RevocationVerifier{caRoots: caRoots}
+	for _, opt := range opts {
+		opt(v)
+	}
+	return v
 }
 
 // VerifyManifest parses raw as a signedRevocationManifest and, depending on mode,
@@ -175,6 +214,9 @@ func NewRevocationVerifier(caRoots *x509.CertPool) *RevocationVerifier {
 // an attacker replaying an older, still-validly-signed manifest is presenting one
 // that is missing revocations the steward has already learned about.
 func (v *RevocationVerifier) VerifyManifest(raw []byte, mode stewardtrust.TrustMode) error {
+	if v.forceStrict {
+		mode = stewardtypes.ModuleTrustModeStrict
+	}
 	switch mode {
 	case stewardtypes.ModuleTrustModeBypass:
 		if !stewardtypes.ModuleTrustBypassAllowed() {
@@ -196,44 +238,8 @@ func (v *RevocationVerifier) VerifyManifest(raw []byte, mode stewardtrust.TrustM
 	}
 
 	if mode == stewardtypes.ModuleTrustModeStrict {
-		// Strict mode verifies against the steward's own pinned controller root, and
-		// only that root. x509.VerifyOptions treats a nil Roots as "use the system
-		// roots or the platform verifier" (crypto/x509/verify.go), so passing a nil
-		// pool through would silently widen strict mode to accept any manifest whose
-		// signer chains to any platform-trusted CA with a CodeSigning EKU — the exact
-		// opposite of this verifier's purpose. Refuse before building VerifyOptions so
-		// a steward without a usable CA bundle fails closed and says why.
-		if v.caRoots == nil {
-			return fmt.Errorf("strict mode requires pinned controller CA roots")
-		}
-		if manifest.Signature == nil {
-			return fmt.Errorf("manifest carries no signature")
-		}
-		block, _ := pem.Decode([]byte(manifest.SignerCertificatePEM))
-		if block == nil {
-			return fmt.Errorf("no PEM block found in manifest signer certificate")
-		}
-		signerCert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			return fmt.Errorf("parse manifest signer certificate: %w", err)
-		}
-		opts := x509.VerifyOptions{
-			Roots:     v.caRoots,
-			KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
-		}
-		if _, err := signerCert.Verify(opts); err != nil {
-			return fmt.Errorf("manifest signer certificate chain verification: %w", err)
-		}
-		verifier, err := signature.NewVerifierFromCertificate(signerCert)
-		if err != nil {
-			return fmt.Errorf("construct manifest verifier: %w", err)
-		}
-		manifestBytes, err := json.Marshal(manifest.Manifest)
-		if err != nil {
-			return fmt.Errorf("marshal manifest for verification: %w", err)
-		}
-		if err := verifier.Verify(manifestBytes, manifest.Signature); err != nil {
-			return fmt.Errorf("manifest signature verification failed: %w", err)
+		if err := v.verifyStrict(&manifest); err != nil {
+			return err
 		}
 	}
 
@@ -264,7 +270,59 @@ func (v *RevocationVerifier) VerifyManifest(raw []byte, mode stewardtrust.TrustM
 	}
 	v.revoked = revoked
 	v.lastVersion = manifest.Manifest.Version
+	if manifest.Manifest.IssuedAt.After(v.newestIssued) {
+		v.newestIssued = manifest.Manifest.IssuedAt
+	}
 	v.hasVerified = true
+	return nil
+}
+
+// verifyStrict chain-verifies the manifest's signer against the pinned roots and
+// checks the signature over the manifest.
+func (v *RevocationVerifier) verifyStrict(manifest *signedRevocationManifest) error {
+	// Strict mode verifies against the steward's own pinned controller root, and
+	// only that root. x509.VerifyOptions treats a nil Roots as "use the system
+	// roots or the platform verifier" (crypto/x509/verify.go), so passing a nil
+	// pool through would silently widen strict mode to accept any manifest whose
+	// signer chains to any platform-trusted CA with a CodeSigning EKU — the exact
+	// opposite of this verifier's purpose. Refuse before building VerifyOptions so
+	// a steward without a usable CA bundle fails closed and says why.
+	v.mu.RLock()
+	roots, intermediates := v.caRoots, v.intermediates
+	v.mu.RUnlock()
+	if roots == nil {
+		return fmt.Errorf("strict mode requires pinned controller CA roots")
+	}
+	if manifest.Signature == nil {
+		return fmt.Errorf("manifest carries no signature")
+	}
+	block, _ := pem.Decode([]byte(manifest.SignerCertificatePEM))
+	if block == nil {
+		return fmt.Errorf("no PEM block found in manifest signer certificate")
+	}
+	signerCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("parse manifest signer certificate: %w", err)
+	}
+	opts := x509.VerifyOptions{
+		Roots:         roots,
+		Intermediates: intermediates,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
+	}
+	if _, err := signerCert.Verify(opts); err != nil {
+		return fmt.Errorf("manifest signer certificate chain verification: %w", err)
+	}
+	verifier, err := signature.NewVerifierFromCertificate(signerCert)
+	if err != nil {
+		return fmt.Errorf("construct manifest verifier: %w", err)
+	}
+	manifestBytes, err := json.Marshal(manifest.Manifest)
+	if err != nil {
+		return fmt.Errorf("marshal manifest for verification: %w", err)
+	}
+	if err := verifier.Verify(manifestBytes, manifest.Signature); err != nil {
+		return fmt.Errorf("manifest signature verification failed: %w", err)
+	}
 	return nil
 }
 
