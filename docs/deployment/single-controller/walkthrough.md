@@ -65,6 +65,27 @@ This produces `bin/controller`, `bin/cfgms-steward`, and `bin/cfg`.
 > install time (install-pinned trust, ADR-013 §3). Both are equally secure for a single
 > self-hosted controller.
 
+**Controller root CA fingerprint (optional build input).** The steward binary can carry the
+controller root CA fingerprint, set only at build time and never overridable from the data
+folder. The locked-mode operator-tools verifier that consumes it is delivered separately;
+this build input only stamps and reports the value. Set `STEWARD_CONTROLLER_ROOT_FP` to a
+comma-separated list (at most 4) of lowercase hex SHA-256 fingerprints of the root
+certificate (the root, not an intermediate; a list lets a planned root rotation be staged
+before cut-over). Get the value from the root certificate you already have:
+
+```bash
+openssl x509 -in root.crt -noout -fingerprint -sha256 | cut -d= -f2 | tr -d : | tr A-F a-f
+make build-steward STEWARD_CONTROLLER_URL=https://<IP>:9080 STEWARD_CONTROLLER_ROOT_FP=<fingerprint>
+```
+
+The same input is `-ControllerRootFingerprints` for `build/windows/build-msi.ps1`,
+`CONTROLLER_ROOT_FPS` for `build/darwin/build-pkg.sh` and the
+`STEWARD_CONTROLLER_ROOT_FP` build arg for the steward Dockerfiles. The Makefile and the
+installer scripts refuse malformed entries; the Dockerfiles do not, and the binary treats
+a malformed value as no baked root. Leaving it unset is valid: the steward still connects
+and reports, but locked-mode operator tools stay unavailable. `cfgms-steward status`
+prints the baked list on the `Root CA:` line (`none` when unset).
+
 ## Step 2: Deploy the Controller
 
 Copy the controller binary to the controller VM:

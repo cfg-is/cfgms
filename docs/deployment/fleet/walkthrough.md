@@ -267,6 +267,27 @@ cfg installer upload bin/cfgms-steward --platform linux --arch amd64 \
 cfg installer list --url=https://<CONTROLLER_IP>:9080
 ```
 
+**Controller root CA fingerprint (optional build input).** The steward binary can carry the
+controller root CA fingerprint, set only at build time and never overridable from the data
+folder. The locked-mode operator-tools verifier that consumes it is delivered separately;
+this build input only stamps and reports the value. Set `STEWARD_CONTROLLER_ROOT_FP` to a
+comma-separated list (at most 4) of lowercase hex SHA-256 fingerprints of the root
+certificate (the root, not an intermediate; a list lets a planned root rotation be staged
+before cut-over). Get the value from the root certificate you already have:
+
+```bash
+openssl x509 -in root.crt -noout -fingerprint -sha256 | cut -d= -f2 | tr -d : | tr A-F a-f
+make build-steward STEWARD_CONTROLLER_URL=https://<IP>:9080 STEWARD_CONTROLLER_ROOT_FP=<fingerprint>
+```
+
+The same input is `-ControllerRootFingerprints` for `build/windows/build-msi.ps1`,
+`CONTROLLER_ROOT_FPS` for `build/darwin/build-pkg.sh` and the
+`STEWARD_CONTROLLER_ROOT_FP` build arg for the steward Dockerfiles. The Makefile and the
+installer scripts refuse malformed entries; the Dockerfiles do not, and the binary treats
+a malformed value as no baked root. Leaving it unset is valid: the steward still connects
+and reports, but locked-mode operator tools stay unavailable. `cfgms-steward status`
+prints the baked list on the `Root CA:` line (`none` when unset).
+
 The controller verifies the signature against its trusted publisher key before storing
 the installer; an unsigned or wrongly signed upload is refused with
 `SIGNATURE_REQUIRED` or `SIGNATURE_VERIFICATION_FAILED`. The uploaded binary is stored

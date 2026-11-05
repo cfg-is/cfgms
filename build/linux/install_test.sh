@@ -258,6 +258,56 @@ else
     fail "test9: go build failed for default binary"
 fi
 
+# Test 9b: the controller root CA fingerprint list is stamped via ldflags and
+# shows on the status "Root CA:" line; a build without it prints "none".
+ROOT_FP_A="$(printf 'ab%.0s' $(seq 32))"
+ROOT_FP_B="$(printf '01%.0s' $(seq 32))"
+ROOT_LDFLAGS="$DEFAULT_LDFLAGS -X main.ControllerRootFingerprints=${ROOT_FP_A},${ROOT_FP_B}"
+if go build -trimpath -ldflags "$ROOT_LDFLAGS" -o "$VERSION_BIN_DIR/cfgms-steward-rootfp" "$REPO_ROOT/cmd/steward" 2>/dev/null; then
+    ROOT_OUT="$(env -i "$VERSION_BIN_DIR/cfgms-steward-rootfp" status 2>/dev/null || true)"
+    if echo "$ROOT_OUT" | grep -q "Root CA:.*${ROOT_FP_A},${ROOT_FP_B}"; then
+        pass "test9b: root CA fingerprints stamp into status output"
+    else
+        fail "test9b: status should list baked fingerprints (got: '$ROOT_OUT')"
+    fi
+else
+    fail "test9b: go build failed for root-fingerprint binary"
+fi
+NONE_OUT="$(env -i "$VERSION_BIN_DIR/cfgms-steward-default" status 2>/dev/null || true)"
+if echo "$NONE_OUT" | grep -q "Root CA:.*none"; then
+    pass "test9c: build without root fingerprints prints none"
+else
+    fail "test9c: status should print 'Root CA: none' (got: '$NONE_OUT')"
+fi
+
+# Test 9d: build-pkg.sh refuses a malformed root fingerprint before building.
+for bad in "ABCDEF" "$(printf 'A%.0s' $(seq 64))" "${ROOT_FP_A},zz" "${ROOT_FP_A},${ROOT_FP_A},${ROOT_FP_A},${ROOT_FP_A},${ROOT_FP_A}"; do
+    if PKG_OUT="$(CONTROLLER_ROOT_FPS="$bad" bash "$REPO_ROOT/build/darwin/build-pkg.sh" --binary-path /nonexistent 2>&1)"; then
+        fail "test9d: build-pkg.sh accepted malformed CONTROLLER_ROOT_FPS '$bad'"
+    elif echo "$PKG_OUT" | grep -q "CONTROLLER_ROOT_FPS must be"; then
+        pass "test9d: build-pkg.sh refuses malformed CONTROLLER_ROOT_FPS"
+    else
+        fail "test9d: build-pkg.sh failed for the wrong reason on '$bad'"
+    fi
+done
+
+# Test 9e: the Makefile refuses a malformed STEWARD_CONTROLLER_ROOT_FP and stamps a valid one.
+if make -C "$REPO_ROOT" -n build-steward STEWARD_CONTROLLER_ROOT_FP="ABC" >/dev/null 2>&1; then
+    fail "test9e: Makefile accepted malformed STEWARD_CONTROLLER_ROOT_FP"
+else
+    pass "test9e: Makefile refuses malformed STEWARD_CONTROLLER_ROOT_FP"
+fi
+if make -C "$REPO_ROOT" -n build-steward STEWARD_CONTROLLER_ROOT_FP="$ROOT_FP_A" 2>/dev/null | grep -q "main.ControllerRootFingerprints=${ROOT_FP_A}"; then
+    pass "test9e: Makefile stamps STEWARD_CONTROLLER_ROOT_FP"
+else
+    fail "test9e: Makefile should stamp STEWARD_CONTROLLER_ROOT_FP"
+fi
+if make -C "$REPO_ROOT" -n build-steward 2>/dev/null | grep -q "ControllerRootFingerprints"; then
+    fail "test9e: Makefile stamped root fingerprints when unset"
+else
+    pass "test9e: Makefile omits root fingerprints when unset"
+fi
+
 rm -rf "$VERSION_BIN_DIR"
 
 # ── Test 10: stdlib modules are staged as bundle installation roots ──────────

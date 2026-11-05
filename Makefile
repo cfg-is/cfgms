@@ -39,7 +39,17 @@ GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
 STEWARD_ADDITIONAL_PUBLISHER_KEYS ?=
 STEWARD_CONTROLLER_URL ?= https://localhost:9080
 STEWARD_SECURITY_PROFILE?=public-beta
-STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CONTROLLER_URL) -X main.SecurityProfile=$(STEWARD_SECURITY_PROFILE) -X github.com/cfgis/cfgms/pkg/version.Version=$(or $(VERSION),0.5.0-dev) -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$(or $(STEWARD_PUBLISHER_KEY),AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=) -X github.com/cfgis/cfgms/features/steward/modules/trust.additionalPublisherKeyMaterial=$(STEWARD_ADDITIONAL_PUBLISHER_KEYS)"
+# Controller root CA fingerprint(s) baked into the steward (comma list of lowercase
+# hex SHA-256 of the root certificate DER, 64 chars each, at most 4). Optional.
+#   make build-steward STEWARD_CONTROLLER_ROOT_FP=$$(openssl x509 -in root.crt -noout -fingerprint -sha256 | cut -d= -f2 | tr -d : | tr A-F a-f)
+STEWARD_CONTROLLER_ROOT_FP ?=
+ifneq ($(STEWARD_CONTROLLER_ROOT_FP),)
+ifneq ($(shell printf '%s\n' '$(STEWARD_CONTROLLER_ROOT_FP)' | tr ',' '\n' | awk '/^[0-9a-f]{64}$$/ {n++} END {print (n >= 1 && n <= 4 && n == NR) ? "ok" : "bad"}'),ok)
+$(error STEWARD_CONTROLLER_ROOT_FP must be 1-4 comma-separated entries of 64 lowercase hex characters)
+endif
+STEWARD_ROOT_FP_LDFLAG = -X main.ControllerRootFingerprints=$(STEWARD_CONTROLLER_ROOT_FP)
+endif
+STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CONTROLLER_URL) -X main.SecurityProfile=$(STEWARD_SECURITY_PROFILE) -X github.com/cfgis/cfgms/pkg/version.Version=$(or $(VERSION),0.5.0-dev) -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$(or $(STEWARD_PUBLISHER_KEY),AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=) -X github.com/cfgis/cfgms/features/steward/modules/trust.additionalPublisherKeyMaterial=$(STEWARD_ADDITIONAL_PUBLISHER_KEYS) $(STEWARD_ROOT_FP_LDFLAG)"
 
 # Binary names
 STEWARD_BINARY=cfgms-steward
@@ -365,6 +375,10 @@ build-msi-windows:
 	if [ -n "$(SIGNING_CERT_THUMBPRINT)" ]; then \
 		SIGN_ARG="-SigningCertThumbprint '$(SIGNING_CERT_THUMBPRINT)'"; \
 	fi; \
+	ROOT_ARG=""; \
+	if [ -n "$(STEWARD_CONTROLLER_ROOT_FP)" ]; then \
+		ROOT_ARG="-ControllerRootFingerprints '$(STEWARD_CONTROLLER_ROOT_FP)'"; \
+	fi; \
 	KEY_ARG=""; \
 	if [ -n "$(PUBLISHER_KEY)" ]; then \
 		KEY_ARG="-PublisherKey '$(PUBLISHER_KEY)'"; \
@@ -373,6 +387,7 @@ build-msi-windows:
 		$$URL_ARG \
 		-Version "$(or $(VERSION),0.0.0)" \
 		$$SIGN_ARG \
+		$$ROOT_ARG \
 		$$KEY_ARG
 	@echo "✅ MSI built: bin/cfgms-steward-windows-amd64.msi"
 

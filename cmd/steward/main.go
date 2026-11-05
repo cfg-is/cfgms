@@ -1105,6 +1105,7 @@ func runStatus() error {
 	fmt.Printf("  Service name:  %s\n", status.ServiceName)
 	fmt.Printf("  Install path:  %s\n", status.InstallPath)
 	fmt.Printf("  Controller:    %s\n", controllerURLOrUnknown())
+	fmt.Printf("  Root CA:       %s\n", bakedRootStatusLine())
 
 	if !status.Installed {
 		fmt.Printf("  Status:        not installed\n")
