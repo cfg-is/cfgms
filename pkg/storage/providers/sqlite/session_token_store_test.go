@@ -192,3 +192,61 @@ func TestSQLiteSessionTokenStore_ManagerCrossChannelRejectAfterRestart(t *testin
 	_, err = freshWebMgr.Validate(ctx, cliToken)
 	assert.Error(t, err, "web manager must reject CLI token after restart")
 }
+
+// TestSQLiteSessionTokenStore_GetAndGetByIDAgree characterizes that Get (by token hash)
+// and GetByID (by session ID) decode the same row identically, and apply the same
+// found / expired / not-found outcomes (Issue #5795).
+func TestSQLiteSessionTokenStore_GetAndGetByIDAgree(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("found decodes identically", func(t *testing.T) {
+		store := newTestSessionTokenStore(t)
+		tok, err := session.GenerateToken()
+		require.NoError(t, err)
+		hash := session.HashToken(tok)
+
+		sess := makeTokenSession("agree-found", "web")
+		sess.BoundIP = "10.0.0.7"
+		sess.RootScoped = true
+		sess.LastProvenAt = sess.IssuedAt.Add(time.Minute)
+		sess.CredentialID = []byte{1, 2, 3}
+		sess.LoginCredentialID = []byte{4, 5}
+		require.NoError(t, store.Set(ctx, hash, sess))
+
+		byHash, err := store.Get(ctx, hash)
+		require.NoError(t, err)
+		byID, err := store.GetByID(ctx, sess.ID)
+		require.NoError(t, err)
+		assert.Equal(t, byHash, byID)
+		assert.Equal(t, sess.ID, byHash.ID)
+		assert.Equal(t, "10.0.0.7", byHash.BoundIP)
+		assert.True(t, byHash.RootScoped)
+		assert.True(t, sess.LastProvenAt.Equal(byHash.LastProvenAt))
+		assert.Equal(t, []byte{1, 2, 3}, byHash.CredentialID)
+		assert.Equal(t, []byte{4, 5}, byHash.LoginCredentialID)
+	})
+
+	t.Run("expired hash is not found by either", func(t *testing.T) {
+		store := newTestSessionTokenStore(t)
+		tok, err := session.GenerateToken()
+		require.NoError(t, err)
+		hash := session.HashToken(tok)
+
+		sess := makeTokenSession("agree-expired", "web")
+		require.NoError(t, store.Set(ctx, hash, sess))
+		require.NoError(t, store.StampGraceExpiry(ctx, hash, time.Now().Add(-time.Minute)))
+
+		_, err = store.Get(ctx, hash)
+		assert.True(t, errors.Is(err, session.ErrSessionNotFound))
+		_, err = store.GetByID(ctx, sess.ID)
+		assert.True(t, errors.Is(err, session.ErrSessionNotFound))
+	})
+
+	t.Run("missing is not found by either", func(t *testing.T) {
+		store := newTestSessionTokenStore(t)
+		_, err := store.Get(ctx, "no-such-hash")
+		assert.True(t, errors.Is(err, session.ErrSessionNotFound))
+		_, err = store.GetByID(ctx, "no-such-id")
+		assert.True(t, errors.Is(err, session.ErrSessionNotFound))
+	})
+}
