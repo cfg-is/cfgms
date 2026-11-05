@@ -499,6 +499,91 @@ func newHeartbeatReceivedHook(dispatcher *dispatcher.Dispatcher, controllerServi
 	}
 }
 
+// repairConnectHook sends a tampered steward its latest unresolved repair request
+// as its control stream registers (Issue #5726), next to the tamper state the
+// lockdown sends. Until Set is called it does nothing.
+type repairConnectHook struct {
+	target atomic.Pointer[api.Server]
+	logger logging.Logger
+}
+
+// Set binds the API server that finds and signs the pending repair request.
+func (h *repairConnectHook) Set(s *api.Server) { h.target.Store(s) }
+
+// OnConnect delivers the pending repair request, if the steward has one.
+func (h *repairConnectHook) OnConnect(ctx context.Context, stewardID string) error {
+	s := h.target.Load()
+	if s == nil {
+		return nil
+	}
+	if err := s.DeliverPendingRepair(ctx, stewardID); err != nil {
+		if h.logger != nil {
+			h.logger.Warn("pending repair request not delivered",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+		return err
+	}
+	return nil
+}
+
+// wireHTTPFleetStores binds the fleet, refresh, policy, crossing and case stores
+// to the API server. Each is optional: a store the composite does not provide
+// leaves its endpoints degraded rather than failing construction.
+func wireHTTPFleetStores(httpServer *api.Server, storageManager *interfaces.StorageManager) {
+	if ss := storageManager.GetStewardStore(); ss != nil {
+		httpServer.SetStewardStore(ss)
+	}
+	if prs := storageManager.GetPendingRefreshStore(); prs != nil {
+		httpServer.SetPendingRefreshStore(prs)
+	}
+	if rps := storageManager.GetRefreshPolicyStore(); rps != nil {
+		httpServer.SetRefreshPolicyStore(rps)
+	}
+	if ns := storageManager.GetNonceStore(); ns != nil {
+		httpServer.SetNonceStore(ns)
+	}
+	if aps := storageManager.GetAssurancePolicyStore(); aps != nil {
+		httpServer.SetAssurancePolicyStore(aps)
+	}
+	if brps := storageManager.GetBlastRadiusPolicyStore(); brps != nil {
+		httpServer.SetBlastRadiusPolicyStore(brps)
+	}
+	if tcs := storageManager.GetTenantCrossingStore(); tcs != nil {
+		httpServer.SetTenantCrossingStore(tcs)
+	}
+	if cs := storageManager.GetCaseStore(); cs != nil {
+		httpServer.SetCasesStore(cs)
+	}
+}
+
+// bindRepairDelivery wires repair requests (Issue #5726) once the API server
+// exists: signed with the command signer, sent over the control plane, and sent
+// to a reconnecting steward by the on-connect hook. Without a control plane and
+// lockdown predicate (no transport configured) there is nothing to deliver over.
+func bindRepairDelivery(s *api.Server, hook *repairConnectHook, cp controlplaneInterfaces.ControlPlaneProvider,
+	lockdown *controllerFleet.Lockdown, signer signature.Signer, chains *commands.SignerChainBuilder) {
+	if cp == nil || lockdown == nil {
+		return
+	}
+	s.SetRepairDelivery(cp, signer, chains)
+	hook.Set(s)
+}
+
+// stewardTenantResolver returns the tenant of a steward from the durable store.
+func stewardTenantResolver(store business.StewardStore) func(ctx context.Context, stewardID string) (string, error) {
+	return func(ctx context.Context, stewardID string) (string, error) {
+		if store == nil {
+			return "", errors.New("steward store unavailable")
+		}
+		rec, err := store.GetSteward(ctx, stewardID)
+		if err != nil {
+			return "", err
+		}
+		return rec.TenantID, nil
+	}
+}
+
 // tamperAlarmFunc handles one heartbeat's reasons for the steward it came from.
 type tamperAlarmFunc func(stewardID string, reasons []controlplaneTypes.HealthReason)
 
@@ -1255,6 +1340,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Issue #5652: late-binds the API server as the tamper alarm target. Unused
 	// (and harmless) when no heartbeat service is built.
 	tamperRelay := &tamperAlarmRelay{logger: logger}
+	// Issue #5726: sends a reconnecting tampered steward its pending repair request.
+	// Late-bound to the API server like tamperRelay; the signer and chain builder
+	// are the command signing pair.
+	repairConnect := &repairConnectHook{logger: logger}
+	var repairSigner signature.Signer
+	var repairChains *commands.SignerChainBuilder
 	// Issue #5664: the single lockdown predicate and tamper-state sender. Built
 	// once the steward store exists; nil when no transport is configured.
 	var lockdown *controllerFleet.Lockdown
@@ -1347,7 +1438,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			}
 			stewardMigrationSvc = service.NewStewardSigningMigrationService(certManager, trustAcks, logger)
 			stewardMigrationSvc.SetConnectedStewards(connRegistry)
-			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, stewardMigrationSvc, registryConnectHook, completionReconciler, routingHook, drainHook, lockdown)
+			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, stewardMigrationSvc, registryConnectHook, completionReconciler, routingHook, drainHook, lockdown, repairConnect)
 			controlPlane = grpcCP.New(
 				grpcCP.ModeServer,
 				grpcCP.WithOnConnectHook(composite),
@@ -1368,7 +1459,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				grpcCP.WithLockdown(lockdown, newLockdownAuditObserver(auditManager, stewardStore, logger)),
 			)
 		} else {
-			composite := service.NewCompositeOnConnectHook(logger, registryConnectHook, completionReconciler, routingHook, drainHook, lockdown)
+			composite := service.NewCompositeOnConnectHook(logger, registryConnectHook, completionReconciler, routingHook, drainHook, lockdown, repairConnect)
 			controlPlane = grpcCP.New(
 				grpcCP.ModeServer,
 				grpcCP.WithOnConnectHook(composite),
@@ -1477,6 +1568,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// window. After overlap expires, a steward that missed push_signing_cert
 		// needs re-enrollment (Issue #1845).
 		commandSigner, signerChains := newCommandSigning(certManager)
+		repairSigner, repairChains = commandSigner, signerChains
 
 		// ADR-031 Decision 3, Issue #3764: shared steward-routing table + internal
 		// controller-to-controller delivery RPC. dispatchControlPlane defaults to
@@ -1647,7 +1739,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			OnStatusChange:      makeHeartbeatStatusChangeCallback(hbStewardStore, logger),
 			OnHeartbeatReceived: onHeartbeatReceived,
 			TrustEvaluator:      heartbeatTrustEvaluator,
-			Logger:              logger,
+			// Issue #5726: repair progress and failure reasons become audit events.
+			RepairAudit:   auditManager,
+			StewardTenant: stewardTenantResolver(hbStewardStore),
+			Logger:        logger,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize heartbeat service: %w", err)
@@ -1957,6 +2052,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Issue #5652: heartbeats carrying a tamper code now reach the API server,
 	// which owns the transition, audit event and admin notification.
 	tamperRelay.Set(httpServer)
+	// Issue #5726: repair requests are signed with the command signer and sent
+	// over the control plane; a reconnecting steward is sent its pending one.
+	bindRepairDelivery(httpServer, repairConnect, controlPlane, lockdown, repairSigner, repairChains)
 
 	// Issue #4857: one dedicated steward-event LoggingManager shared by the
 	// log-stream handler (writer, built in Start) and the REST API (reader). It
@@ -2117,30 +2215,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// operational. GetStewardStore is always non-nil for the OSS composite (flatfile
 	// provider creates it); the refresh stores are nil when the non-bundle SQLite
 	// fallback path was taken (unit-test-only scenario).
-	if ss := storageManager.GetStewardStore(); ss != nil {
-		httpServer.SetStewardStore(ss)
-	}
-	if prs := storageManager.GetPendingRefreshStore(); prs != nil {
-		httpServer.SetPendingRefreshStore(prs)
-	}
-	if rps := storageManager.GetRefreshPolicyStore(); rps != nil {
-		httpServer.SetRefreshPolicyStore(rps)
-	}
-	if ns := storageManager.GetNonceStore(); ns != nil {
-		httpServer.SetNonceStore(ns)
-	}
-	if aps := storageManager.GetAssurancePolicyStore(); aps != nil {
-		httpServer.SetAssurancePolicyStore(aps)
-	}
-	if brps := storageManager.GetBlastRadiusPolicyStore(); brps != nil {
-		httpServer.SetBlastRadiusPolicyStore(brps)
-	}
-	if tcs := storageManager.GetTenantCrossingStore(); tcs != nil {
-		httpServer.SetTenantCrossingStore(tcs)
-	}
-	if cs := storageManager.GetCaseStore(); cs != nil {
-		httpServer.SetCasesStore(cs)
-	}
+	wireHTTPFleetStores(httpServer, storageManager)
 	wireClusterRateCounterStore(httpServer, storageManager)
 	// TenantStore is core and always present; wire unconditionally for the assurance resolver.
 	httpServer.SetTenantStore(storageManager.GetTenantStore())

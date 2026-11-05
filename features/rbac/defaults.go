@@ -79,6 +79,13 @@ var DefaultPermissions = []*common.Permission{
 		ResourceType: "steward",
 		Actions:      []string{"tamper-ban"},
 	},
+	{
+		Id:           "steward.tamper-repair",
+		Name:         "Repair Tampered Steward",
+		Description:  "Repair and restore a tampered steward, approving any local data it would lose",
+		ResourceType: "steward",
+		Actions:      []string{"tamper-repair"},
+	},
 
 	// Configuration Management Permissions
 	{

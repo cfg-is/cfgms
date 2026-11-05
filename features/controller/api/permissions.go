@@ -29,6 +29,7 @@ var knownPermissions = map[string]bool{
 	"steward:move-identity":      true, // ADR-034 §5: move an identity to the queued copy (AssuranceStrong)
 	"steward:tamper-restore":     true, // end tampered: back to trusted (AssuranceStrong)
 	"steward:tamper-ban":         true, // end tampered: revoke the identity (AssuranceStrong)
+	"steward:tamper-repair":      true, // end tampered: repair and restore, with explicit data-loss approval (AssuranceStrong)
 	"steward:visibility":         true, // Issue #2918: hide/unhide steward from default fleet view
 	// Config management
 	"config:list":             true,

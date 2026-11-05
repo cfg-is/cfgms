@@ -85,6 +85,10 @@ var stewardCrossingTable = map[string]stewardCrossingRoute{
 		permission: "steward:tamper-ban", path: stewardPath("/tamper/ban"), body: noBody,
 		pastGateStatus: http.StatusConflict, pastGateBody: "STEWARD_NOT_TAMPERED",
 	},
+	"POST /api/v1/stewards/{id}/tamper/repair": {
+		permission: "steward:tamper-repair", path: stewardPath("/tamper/repair"), body: noBody,
+		pastGateStatus: http.StatusConflict, pastGateBody: "STEWARD_NOT_TAMPERED",
+	},
 	"PATCH /api/v1/stewards/{id}/visibility": {
 		permission: "steward:visibility", path: stewardPath("/visibility"),
 		body:           func(string) interface{} { return map[string]bool{"hidden": false} },
