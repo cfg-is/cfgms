@@ -424,11 +424,11 @@ func (h *Handler) preflightScriptSignature(cmd *cpTypes.Command) error {
 // verifyX509OperatorSignature performs the mTLS/CSR-credential inline verification
 // (Issue #3694/#3696): a raw signature over the canonical envelope bytes, then CA-chain
 // and payload-signing-marker verification of the operator certificate.
-func (h *Handler) verifyX509OperatorSignature(envelope operatorpayload.Envelope, shellStr, sigAlgorithm, sigValue, sigPublicKey string) error {
+func (h *Handler) verifyX509OperatorSignature(roots, intermediates *x509.CertPool, revocation *operatorroster.RevocationVerifier, envelope operatorpayload.Envelope, shellStr, sigAlgorithm, sigValue, sigPublicKey string) error {
 	// Fail closed without usable CA roots: TrustModeAnyValid below accepts any key, so
 	// the CA chain check is the only thing that authenticates the operator. Same
 	// condition as open_terminal.
-	if h.controllerCARoots == nil || h.controllerCARoots.Equal(x509.NewCertPool()) {
+	if emptyPool(roots) {
 		return fmt.Errorf("%w: operator verification requires a configured controller CA", ErrUnauthenticatedCommand)
 	}
 
@@ -461,8 +461,9 @@ func (h *Handler) verifyX509OperatorSignature(envelope operatorpayload.Envelope,
 	// webauthnOperatorCredentialVerifier (webauthn_credential_verifier.go, Issue #3697)
 	// are its two implementations.
 	credVerifier := OperatorCredentialVerifier(&x509OperatorCredentialVerifier{
-		caRoots:            h.controllerCARoots,
-		revocationVerifier: h.revocationVerifier,
+		caRoots:            roots,
+		intermediates:      intermediates,
+		revocationVerifier: revocation,
 	})
 	if err := credVerifier.Verify(envelope, []byte(sigPublicKey)); err != nil {
 		return fmt.Errorf("%w: operator cert: %v", ErrUnauthenticatedCommand, err)
@@ -482,8 +483,8 @@ func (h *Handler) verifyX509OperatorSignature(envelope operatorpayload.Envelope,
 // the verifier: the roster is fleet-wide, so the entry's tenant must cover this steward,
 // and a manifest older than one already accepted here must not resurrect a credential
 // that has since been removed from the roster.
-func (h *Handler) verifyWebAuthnOperatorSignature(envelope operatorpayload.Envelope, authDataB64, clientDataB64, sigB64, credIDB64, manifestJSON string) error {
-	if h.controllerCARoots == nil || h.controllerCARoots.Equal(x509.NewCertPool()) {
+func (h *Handler) verifyWebAuthnOperatorSignature(roots, intermediates *x509.CertPool, envelope operatorpayload.Envelope, authDataB64, clientDataB64, sigB64, credIDB64, manifestJSON string) error {
+	if emptyPool(roots) {
 		return fmt.Errorf("%w: webauthn verification requires a configured controller CA", ErrUnauthenticatedCommand)
 	}
 
@@ -516,7 +517,8 @@ func (h *Handler) verifyWebAuthnOperatorSignature(envelope operatorpayload.Envel
 	}
 
 	credVerifier := OperatorCredentialVerifier(&webauthnOperatorCredentialVerifier{
-		caRoots:       h.controllerCARoots,
+		caRoots:       roots,
+		intermediates: intermediates,
 		stewardTenant: h.tenantID,
 		freshness:     h.webauthnManifestFloor,
 	})
@@ -596,6 +598,10 @@ type OperatorCredentialVerifier interface {
 type x509OperatorCredentialVerifier struct {
 	caRoots *x509.CertPool
 
+	// intermediates are extra certificates the operator certificate may chain
+	// through to caRoots (a locked steward takes them from the signer chain).
+	intermediates *x509.CertPool
+
 	// revocationVerifier answers whether the certificate's serial has been revoked
 	// (Issue #3699). Nil disables the check — the same degrade-safe default as an
 	// unconfigured controllerCARoots elsewhere in this file.
@@ -603,7 +609,7 @@ type x509OperatorCredentialVerifier struct {
 }
 
 func (v *x509OperatorCredentialVerifier) Verify(_ operatorpayload.Envelope, proof []byte) error {
-	return verifyOperatorCert(string(proof), v.caRoots, v.revocationVerifier)
+	return verifyOperatorCert(string(proof), v.caRoots, v.intermediates, v.revocationVerifier)
 }
 
 // verifyOperatorCert parses publicKeyPEM as an X.509 certificate and verifies that it
@@ -611,8 +617,9 @@ func (v *x509OperatorCredentialVerifier) Verify(_ operatorpayload.Envelope, proo
 // payload-signing marker (Issue #3696), and has not been revoked (Issue #3699). An
 // admin-bundle certificate — carrying AdminMarkerOID but not PayloadSigningMarkerOID —
 // chains and has the right EKU but is rejected here: it authenticates mTLS transport,
-// not operator payload signing.
-func verifyOperatorCert(publicKeyPEM string, caRoots *x509.CertPool, revocationVerifier *operatorroster.RevocationVerifier) error {
+// not operator payload signing. intermediates, when non-nil, are certificates the
+// operator certificate may chain through to caRoots.
+func verifyOperatorCert(publicKeyPEM string, caRoots, intermediates *x509.CertPool, revocationVerifier *operatorroster.RevocationVerifier) error {
 	block, _ := pem.Decode([]byte(publicKeyPEM))
 	if block == nil {
 		return fmt.Errorf("no PEM block found in signature_public_key")
@@ -622,8 +629,9 @@ func verifyOperatorCert(publicKeyPEM string, caRoots *x509.CertPool, revocationV
 		return fmt.Errorf("parse certificate: %w", err)
 	}
 	opts := x509.VerifyOptions{
-		Roots:     caRoots,
-		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		Roots:         caRoots,
+		Intermediates: intermediates,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
 	if _, err := parsedCert.Verify(opts); err != nil {
 		return fmt.Errorf("certificate chain verification: %w", err)

@@ -131,6 +131,9 @@ func connectReportOnlyLink(ctx context.Context, certStoreDir string, trustSrc Tr
 		// Host facts only: no module DNA source, no osquery source.
 		DNACollector: newDNACollectorAdapter(logger, nil),
 		Logger:       logger,
+		// The revocation manifest for locked operator actions is fetched from
+		// here and verified against the baked root alone.
+		ControllerHTTPSBaseURL: resolveControllerHTTPSBaseURL(logger),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("report-only link: failed to create client: %w", err)
@@ -138,6 +141,9 @@ func connectReportOnlyLink(ctx context.Context, certStoreDir string, trustSrc Tr
 	tc.SetStewardID(id.StewardID)
 	tc.SetTenantID(id.TenantID)
 	applyStartupReasons(tc)
+	if err := tc.EnableLockedTools(lockedToolsConfig()); err != nil {
+		return nil, fmt.Errorf("report-only link: locked tools: %w", err)
+	}
 	if opts.prepare != nil {
 		opts.prepare(tc)
 	}
@@ -168,4 +174,20 @@ func loadReportOnlyCertManager(certStoreDir string) (*cert.Manager, error) {
 		return nil, errReportOnlyNoClientCert
 	}
 	return certMgr, nil
+}
+
+// lockedToolsConfig is how a locked steward verifies operator actions: against
+// the baked root list only. The local config may only restrict it: a config that
+// disables the remote terminal is honoured, and one that cannot be read is
+// treated as disabling it.
+func lockedToolsConfig() client.LockedToolsConfig {
+	disableTerminal := true
+	if cfg, err := loadConnectedRuntimeConfig(true); err == nil {
+		disableTerminal = !cfg.Steward.RemoteTerminal.IsEnabled()
+	}
+	return client.LockedToolsConfig{
+		MatchesBakedRoot:      matchesBakedRoot,
+		BakedRootReason:       bakedRootReason,
+		DisableRemoteTerminal: disableTerminal,
+	}
 }

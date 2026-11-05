@@ -4,7 +4,6 @@ package commands
 
 import (
 	"context"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"time"
@@ -58,19 +57,7 @@ func (h *Handler) handleOpenTerminal(ctx context.Context, cmd *cpTypes.Command, 
 	}
 	shellStr, _ := cmd.Params["shell"].(string)
 
-	var cols, rows int
-	if c, ok := cmd.Params["cols"].(float64); ok && c > 0 {
-		cols = int(c)
-	}
-	if r, ok := cmd.Params["rows"].(float64); ok && r > 0 {
-		rows = int(r)
-	}
-	if cols <= 0 {
-		cols = 80
-	}
-	if rows <= 0 {
-		rows = 24
-	}
+	cols, rows := terminalSize(cmd)
 
 	// Authenticate first, before the allowlist, any logging of session details or the
 	// dialer. An omitted shell fails closed: the controller always sends an explicit
@@ -80,7 +67,11 @@ func (h *Handler) handleOpenTerminal(ctx context.Context, cmd *cpTypes.Command, 
 	}
 	// Fail closed without controller CA roots: the envelope signature alone proves
 	// nothing about who signed it, so a terminal is never opened on it.
-	if h.controllerCARoots == nil || h.controllerCARoots.Equal(x509.NewCertPool()) {
+	termRoots, _, _, trustErr := h.operatorTrust(cmd)
+	if trustErr != nil {
+		return trustErr
+	}
+	if emptyPool(termRoots) {
 		return fmt.Errorf("%w: open_terminal requires a configured controller CA to verify the operator credential", ErrUnauthenticatedCommand)
 	}
 	content, err := operatorpayload.TerminalContent(h.stewardID, shellStr)
@@ -131,6 +122,18 @@ func (h *Handler) handleOpenTerminal(ctx context.Context, cmd *cpTypes.Command, 
 	}()
 
 	return nil
+}
+
+// terminalSize reads the requested terminal size, defaulting to 80x24.
+func terminalSize(cmd *cpTypes.Command) (cols, rows int) {
+	cols, rows = 80, 24
+	if c, ok := cmd.Params["cols"].(float64); ok && c > 0 {
+		cols = int(c)
+	}
+	if r, ok := cmd.Params["rows"].(float64); ok && r > 0 {
+		rows = int(r)
+	}
+	return cols, rows
 }
 
 // isAllowedShell returns true when s is in the platform-specific shell allowlist

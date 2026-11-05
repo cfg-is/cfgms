@@ -379,6 +379,29 @@ const (
 	ReasonCodeTamperSecurityProfile = "tamper.security_profile"
 )
 
+// Locked-tools reason codes. A locked steward still runs operator-signed actions
+// that verify against a root whose fingerprint is baked into the binary; these
+// codes say why it refused one. This is the single definition. None is a tamper
+// code: the host is already locked, and these describe the operator-action path.
+const (
+	// HealthComponentLockedTools is the health-reason component the codes below
+	// are reported under.
+	HealthComponentLockedTools = "locked_tools"
+
+	// ReasonCodeLockedNoBakedRoot: this binary has no baked controller root.
+	ReasonCodeLockedNoBakedRoot = "locked_tools.no_baked_root"
+	// ReasonCodeLockedBakedRootMalformed: the baked value is not a valid list.
+	ReasonCodeLockedBakedRootMalformed = "locked_tools.baked_root_malformed"
+	// ReasonCodeLockedRootMismatch: a presented chain's root matches no baked root.
+	ReasonCodeLockedRootMismatch = "locked_tools.root_mismatch"
+	// ReasonCodeLockedLinkNotAnchored: the server certificate of the stream a
+	// command arrived on does not chain to the command's baked root.
+	ReasonCodeLockedLinkNotAnchored = "locked_tools.link_not_anchored"
+	// ReasonCodeLockedRevocationStale: no revocation manifest verified against the
+	// baked root is fresh enough to authorize an operator action.
+	ReasonCodeLockedRevocationStale = "locked_tools.revocation_stale"
+)
+
 // IsTamperCode reports whether code is exactly one of the defined tamper codes.
 // It is an exact-set check: an unknown "tamper.*" code is not a tamper code.
 func IsTamperCode(code string) bool {

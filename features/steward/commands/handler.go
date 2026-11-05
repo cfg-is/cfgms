@@ -137,6 +137,14 @@ type Handler struct {
 	// eventEmitter streams script output events to the controller via LogStream (Issue #2143).
 	// When nil, script output emission is skipped (e.g. tests without a live gRPC connection).
 	eventEmitter EventEmitter
+
+	// locked, when non-nil, makes this a locked-trust handler: it verifies only
+	// through a baked root and is entered only via HandleLockedCommand.
+	locked *LockedTrust
+
+	// lockedCmds binds, per command pointer, the trust HandleLockedCommand
+	// selected for it, until the command finishes.
+	lockedCmds sync.Map
 }
 
 // CommandFunc is a function that handles a specific command type.
@@ -219,6 +227,14 @@ type Config struct {
 	// steward's controller CA (Issue #3699). Nil disables the revocation check —
 	// the same degrade-safe default as an unconfigured controllerCARoots.
 	RevocationVerifier *operatorroster.RevocationVerifier
+
+	// Locked builds a locked-trust handler (report-only link). It is a separate
+	// construction, not a flag on the normal verifier: Verifier, Store,
+	// ControllerCARoots and RevocationVerifier must be unset, inline commands
+	// always need a signature (RequireSignedAdhoc is forced true), and the
+	// handler has no durable state. Config can only restrict: nothing in Config
+	// widens what a locked handler accepts.
+	Locked *LockedTrust
 }
 
 const (
@@ -273,7 +289,14 @@ func New(cfg *Config) (*Handler, error) {
 		maxParamsBytes = defaultMaxParamBytes
 	}
 
+	local := *cfg // applyLocked narrows the copy, never the caller's Config
+	cfg = &local
+	if err := cfg.applyLocked(); err != nil {
+		return nil, err
+	}
+
 	h := &Handler{
+		locked:                  cfg.Locked,
 		stewardID:               cfg.StewardID,
 		handlers:                make(map[cpTypes.CommandType]CommandFunc),
 		onStatus:                cfg.OnStatus,
@@ -443,6 +466,11 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 	if signed == nil {
 		return ErrUnauthenticatedCommand
 	}
+	// A locked-trust handler checks the link per command and has no verifier to
+	// fall back on: it is entered only through HandleLockedCommand.
+	if h.locked != nil {
+		return refuse("", "a locked handler accepts commands only through the locked path")
+	}
 
 	cmd := &signed.Command
 
@@ -498,14 +526,8 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 	}
 
 	// 5. Params size bound.
-	if len(cmd.Params) > 0 {
-		paramBytes, err := json.Marshal(cmd.Params)
-		if err != nil {
-			return fmt.Errorf("%w: invalid params", ErrParamsTooLarge)
-		}
-		if len(paramBytes) > h.maxParamsBytes {
-			return ErrParamsTooLarge
-		}
+	if err := h.checkParamsSize(cmd); err != nil {
+		return err
 	}
 
 	// 6. Script signature pre-flight (Story #1671): verify before goroutine dispatch
@@ -517,6 +539,26 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 		}
 	}
 
+	return h.dispatch(ctx, cmd)
+}
+
+// checkParamsSize refuses a command whose JSON-serialized params exceed the bound.
+func (h *Handler) checkParamsSize(cmd *cpTypes.Command) error {
+	if len(cmd.Params) == 0 {
+		return nil
+	}
+	paramBytes, err := json.Marshal(cmd.Params)
+	if err != nil {
+		return fmt.Errorf("%w: invalid params", ErrParamsTooLarge)
+	}
+	if len(paramBytes) > h.maxParamsBytes {
+		return ErrParamsTooLarge
+	}
+	return nil
+}
+
+// dispatch records an authenticated command and runs it in the background.
+func (h *Handler) dispatch(ctx context.Context, cmd *cpTypes.Command) error {
 	h.logger.Debug("Received command", "id", cmd.ID, "type", cmd.Type)
 
 	// Persist incoming command record (Story #665).
@@ -759,6 +801,8 @@ var errVerifierPanicked = fmt.Errorf("signature verification failed unexpectedly
 // a command handler, logs it (sanitized), reports the command as failed with a
 // fixed string, and lets the process keep running.
 func (h *Handler) recoverExecution(cmd *cpTypes.Command) {
+	// Runs on every exit: drop the trust a locked command was bound to.
+	h.lockedCmds.Delete(cmd)
 	r := recover()
 	if r == nil {
 		return

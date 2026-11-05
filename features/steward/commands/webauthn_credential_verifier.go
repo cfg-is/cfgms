@@ -167,6 +167,7 @@ func (f *manifestFreshnessFloor) admit(issuedAt time.Time) bool {
 // tenant-scoped entry against.
 type webauthnOperatorCredentialVerifier struct {
 	caRoots       *x509.CertPool
+	intermediates *x509.CertPool
 	stewardTenant string
 	freshness     *manifestFreshnessFloor
 }
@@ -287,6 +288,28 @@ func verifyAssertionAuthenticatorData(rawAuthData []byte, rpID string) error {
 	return nil
 }
 
+// verifiedManifestSigner parses the manifest's signer certificate and verifies it
+// chains to the verifier's roots (through its intermediates) with the CodeSigning EKU.
+func (v *webauthnOperatorCredentialVerifier) verifiedManifestSigner(signerPEM string) (*x509.Certificate, error) {
+	block, _ := pem.Decode([]byte(signerPEM))
+	if block == nil {
+		return nil, fmt.Errorf("no PEM block found in manifest signer certificate")
+	}
+	signerCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse manifest signer certificate: %w", err)
+	}
+	opts := x509.VerifyOptions{
+		Roots:         v.caRoots,
+		Intermediates: v.intermediates,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
+	}
+	if _, err := signerCert.Verify(opts); err != nil {
+		return nil, fmt.Errorf("manifest signer certificate chain verification: %w", err)
+	}
+	return signerCert, nil
+}
+
 // resolveCredential verifies manifestJSON's embedded signer certificate chains to
 // v.caRoots with the CodeSigning EKU (the PurposeSigning certificate shape —
 // pkg/cert.GenerateSigningCertificate), verifies the manifest's own signature against
@@ -307,20 +330,9 @@ func (v *webauthnOperatorCredentialVerifier) resolveCredential(manifestJSON, cre
 		return nil, nil, fmt.Errorf("unexpected manifest kind %q", manifest.Manifest.Kind)
 	}
 
-	block, _ := pem.Decode([]byte(manifest.SignerCertificatePEM))
-	if block == nil {
-		return nil, nil, fmt.Errorf("no PEM block found in manifest signer certificate")
-	}
-	signerCert, err := x509.ParseCertificate(block.Bytes)
+	signerCert, err := v.verifiedManifestSigner(manifest.SignerCertificatePEM)
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse manifest signer certificate: %w", err)
-	}
-	opts := x509.VerifyOptions{
-		Roots:     v.caRoots,
-		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
-	}
-	if _, err := signerCert.Verify(opts); err != nil {
-		return nil, nil, fmt.Errorf("manifest signer certificate chain verification: %w", err)
+		return nil, nil, err
 	}
 
 	verifier, err := signature.NewVerifierFromCertificate(signerCert)
