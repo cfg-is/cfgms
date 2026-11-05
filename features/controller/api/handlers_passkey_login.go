@@ -48,6 +48,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -192,12 +193,65 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	pending, ok := s.takePendingPasskeyLogin(w, r)
+	if !ok {
+		return
+	}
+
+	sourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ipKey := s.clientIPKey(r) // Issue #4573: trusted-proxy-aware, IPv6 /64-bucketed
+
+	if !s.passkeyLoginClientAllowed(w, r, pending, ipKey) {
+		return
+	}
+
+	// Always use FinishDiscoverableLogin (matches the always-discoverable begin).
+	// The handler resolves the account from the authenticator-provided userHandle,
+	// which the authenticator stores as the account UUID at registration time.
+	var acct *account
+	credential, finishErr := wa.FinishDiscoverableLogin(s.passkeyLoginUserResolver(r.Context(), &acct), pending.data, r)
+	if finishErr != nil {
+		s.logger.Warn("Passkey login finish: FinishDiscoverableLogin failed",
+			"source_ip", logging.SanitizeLogValue(sourceIP),
+			"error", logging.SanitizeLogValue(finishErr.Error()))
+		s.rejectPasskeyLoginVerification(w, r, pending, acct, ipKey)
+		return
+	}
+
+	acct, ok = s.verifyPasskeyLoginAccount(w, r, acct, credential, ipKey, sourceIP)
+	if !ok {
+		return
+	}
+
+	elevatedSess, ok := s.issuePasskeyLoginSession(w, r, mgr, acct, credential.ID, sourceIP)
+	if !ok {
+		return
+	}
+
+	s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.success", business.AuditResultSuccess)
+	s.logger.Info("Passkey login successful",
+		"username", logging.SanitizeLogValue(acct.Username),
+		"source_ip", logging.SanitizeLogValue(sourceIP))
+
+	s.writeResponse(w, http.StatusOK, PasskeyLoginFinishResponse{
+		OK:        true,
+		Username:  acct.Username,
+		TenantID:  s.accountPrincipalTenant(r.Context(), acct),
+		RootScope: acct.RootScope,
+		ExpiresAt: elevatedSess.AbsoluteExpiresAt,
+	})
+}
+
+// takePendingPasskeyLogin binds the finish call to its begin call via the ceremony cookie,
+// consumes the pending session (single use) and checks its expiry. It writes the rejection
+// and returns false when the call must stop.
+func (s *Server) takePendingPasskeyLogin(w http.ResponseWriter, r *http.Request) (*passkeyLoginSession, bool) {
 	// Bind this finish call to the begin call via the ceremony cookie.
 	ceremonyCookie, cookieErr := r.Cookie(cookiePasskeyCeremony)
 	if cookieErr != nil || ceremonyCookie.Value == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"No active login session — call begin first", "NO_ACTIVE_LOGIN_SESSION")
-		return
+		return nil, false
 	}
 	ceremonyID := ceremonyCookie.Value
 
@@ -205,29 +259,32 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 	pending, out := s.takePasskeyLoginSession(r.Context(), ceremonyID)
 	if out == ceremonyUnavailable {
 		s.writeCeremonyUnavailable(w)
-		return
+		return nil, false
 	}
 	if out != ceremonyOK {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"No active login session — call begin first", "NO_ACTIVE_LOGIN_SESSION")
-		return
+		return nil, false
 	}
 
 	if time.Now().After(pending.expires) {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"Login session expired — restart with begin", "SESSION_EXPIRED")
-		return
+		return nil, false
 	}
+	return pending, true
+}
 
-	sourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-	ipKey := s.clientIPKey(r) // Issue #4573: trusted-proxy-aware, IPv6 /64-bucketed
-
+// passkeyLoginClientAllowed applies the cluster-mode client binding and the per-IP and
+// per-account throttles to a consumed pending session. It writes the rejection and
+// returns false when the call must stop.
+func (s *Server) passkeyLoginClientAllowed(w http.ResponseWriter, r *http.Request, pending *passkeyLoginSession, ipKey string) bool {
 	// Issue #4527: bind at begin, check at finish. In ClusterMode the ceremony must be
 	// finished by the client that began it (the entry is already consumed).
 	if s.webAuthnClusterMode() && pending.clientKey != "" && pending.clientKey != ipKey {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"No active login session — call begin first", "NO_ACTIVE_LOGIN_SESSION")
-		return
+		return false
 	}
 
 	// Per-IP throttle check (fast rejection without account resolution).
@@ -236,7 +293,7 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 			s.emitWebLoginAudit(r.Context(), "", "", "web.passkey.login.failure", business.AuditResultFailure)
 			s.writeErrorResponse(w, http.StatusTooManyRequests,
 				"Too many failed attempts — try again later", "THROTTLED")
-			return
+			return false
 		}
 	}
 
@@ -246,51 +303,53 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 			s.emitWebLoginAudit(r.Context(), pending.accountID, "", "web.passkey.login.failure", business.AuditResultFailure)
 			s.writeErrorResponse(w, http.StatusTooManyRequests,
 				"Too many failed attempts — try again later", "THROTTLED")
-			return
+			return false
 		}
 	}
+	return true
+}
 
-	// Always use FinishDiscoverableLogin (matches the always-discoverable begin).
-	// The handler resolves the account from the authenticator-provided userHandle,
-	// which the authenticator stores as the account UUID at registration time.
-	var acct *account
-	handler := func(rawID, userHandle []byte) (webauthn.User, error) {
+// passkeyLoginUserResolver returns the FinishDiscoverableLogin user handler. It resolves
+// the account from the authenticator-provided userHandle and stores it in *resolved.
+func (s *Server) passkeyLoginUserResolver(ctx context.Context, resolved **account) func(rawID, userHandle []byte) (webauthn.User, error) {
+	return func(rawID, userHandle []byte) (webauthn.User, error) {
 		if len(userHandle) == 0 {
 			return nil, fmt.Errorf("blank user handle")
 		}
-		found, err := s.getAccountByID(r.Context(), string(userHandle))
+		found, err := s.getAccountByID(ctx, string(userHandle))
 		if err != nil || found == nil {
 			return nil, err
 		}
-		acct = found
+		*resolved = found
 		return buildWebauthnUser(found), nil
 	}
+}
 
-	credential, finishErr := wa.FinishDiscoverableLogin(handler, pending.data, r)
-	if finishErr != nil {
-		s.logger.Warn("Passkey login finish: FinishDiscoverableLogin failed",
-			"source_ip", logging.SanitizeLogValue(sourceIP),
-			"error", logging.SanitizeLogValue(finishErr.Error()))
-		if ipKey != "" {
-			s.recordPasskeyLoginFailure("ip:" + ipKey)
-		}
-		if pending.accountID != "" {
-			s.recordPasskeyLoginFailure("account:" + pending.accountID)
-		}
-		// Emit failure audit. Account identity may be unknown if the assertion failed
-		// before the user-handler callback was reached.
-		auditUsername := pending.accountID
-		if acct != nil {
-			auditUsername = acct.Username
-		}
-		s.emitWebLoginAudit(r.Context(), auditUsername, "", "web.passkey.login.failure", business.AuditResultFailure)
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
-		return
+// rejectPasskeyLoginVerification records a failed assertion against the throttles and the
+// audit log and writes the verification error. acct is nil when the assertion failed
+// before the user-handler callback resolved an account.
+func (s *Server) rejectPasskeyLoginVerification(w http.ResponseWriter, r *http.Request, pending *passkeyLoginSession, acct *account, ipKey string) {
+	if ipKey != "" {
+		s.recordPasskeyLoginFailure("ip:" + ipKey)
 	}
+	if pending.accountID != "" {
+		s.recordPasskeyLoginFailure("account:" + pending.accountID)
+	}
+	// Emit failure audit. Account identity may be unknown if the assertion failed
+	// before the user-handler callback was reached.
+	auditUsername := pending.accountID
+	if acct != nil {
+		auditUsername = acct.Username
+	}
+	s.emitWebLoginAudit(r.Context(), auditUsername, "", "web.passkey.login.failure", business.AuditResultFailure)
+	s.writeErrorResponse(w, http.StatusBadRequest,
+		"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
+}
 
-	// Sign-count advancement check (W3C WebAuthn §7.2 step 21).
-	// A non-advancing count suggests an authenticator clone; reject and record failure.
+// rejectNonAdvancingSignCount applies the sign-count advancement check (W3C WebAuthn §7.2
+// step 21). A non-advancing count suggests an authenticator clone; it records the failure,
+// writes the rejection and returns true.
+func (s *Server) rejectNonAdvancingSignCount(w http.ResponseWriter, r *http.Request, acct *account, credential *webauthn.Credential, ipKey, sourceIP string) bool {
 	newSignCount := credential.Authenticator.SignCount
 	var storedSignCount uint32
 	for _, c := range acct.Credentials {
@@ -299,19 +358,29 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 			break
 		}
 	}
-	if (storedSignCount > 0 || newSignCount > 0) && newSignCount <= storedSignCount {
-		s.logger.Warn("Passkey login finish: sign count not advancing — potential authenticator clone",
-			"source_ip", logging.SanitizeLogValue(sourceIP),
-			"stored_count", storedSignCount,
-			"response_count", newSignCount)
-		if ipKey != "" {
-			s.recordPasskeyLoginFailure("ip:" + ipKey)
-		}
-		s.recordPasskeyLoginFailure("account:" + acct.Username)
-		s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.failure", business.AuditResultFailure)
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
-		return
+	if (storedSignCount == 0 && newSignCount == 0) || newSignCount > storedSignCount {
+		return false
+	}
+	s.logger.Warn("Passkey login finish: sign count not advancing — potential authenticator clone",
+		"source_ip", logging.SanitizeLogValue(sourceIP),
+		"stored_count", storedSignCount,
+		"response_count", newSignCount)
+	if ipKey != "" {
+		s.recordPasskeyLoginFailure("ip:" + ipKey)
+	}
+	s.recordPasskeyLoginFailure("account:" + acct.Username)
+	s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.failure", business.AuditResultFailure)
+	s.writeErrorResponse(w, http.StatusBadRequest,
+		"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
+	return true
+}
+
+// verifyPasskeyLoginAccount runs the post-verification account checks: sign-count
+// advancement, the disabled-account check and the compare-and-swap sign-count record. It
+// returns the account to issue the session for, or writes the rejection and returns false.
+func (s *Server) verifyPasskeyLoginAccount(w http.ResponseWriter, r *http.Request, acct *account, credential *webauthn.Credential, ipKey, sourceIP string) (*account, bool) {
+	if s.rejectNonAdvancingSignCount(w, r, acct, credential, ipKey, sourceIP) {
+		return nil, false
 	}
 
 	// Issue #3126: check whether the account is disabled before issuing a session.
@@ -323,12 +392,12 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.failure", business.AuditResultFailure)
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
-		return
+		return nil, false
 	}
 
 	// Issue #5066: reload the account and record the sign count with compare-and-swap so
 	// a revoke or disable that landed while the assertion was in flight is never undone.
-	freshAcct, recordErr := s.recordAssertionSignCount(r.Context(), acct, credential.ID, newSignCount, acct.Username)
+	freshAcct, recordErr := s.recordAssertionSignCount(r.Context(), acct, credential.ID, credential.Authenticator.SignCount, acct.Username)
 	if recordErr != nil && !errors.Is(recordErr, errAssertionRefused) {
 		// Store failure while writing: cryptographic verification succeeded and the
 		// reload confirmed the credential is still valid, so proceed with login.
@@ -344,12 +413,19 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.failure", business.AuditResultFailure)
 		s.writeErrorResponse(w, http.StatusUnauthorized,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
-		return
+		return nil, false
 	}
 	if freshAcct != nil {
 		acct = freshAcct
 	}
+	return acct, true
+}
 
+// issuePasskeyLoginSession revokes any pre-existing session cookie, issues a Basic session,
+// elevates it to Strong, mints the CSRF token and sets the response cookies. On failure it
+// revokes the issued session, writes the error and returns false. It returns the
+// elevated session.
+func (s *Server) issuePasskeyLoginSession(w http.ResponseWriter, r *http.Request, mgr session.Manager, acct *account, credID []byte, sourceIP string) (*session.Session, bool) {
 	// Session-fixation defence: revoke any pre-existing session cookie before
 	// issuing a new one. Best-effort — a revocation failure does not abort the login.
 	if sessionCookie, cErr := r.Cookie(cookieWebSession); cErr == nil && sessionCookie.Value != "" {
@@ -367,10 +443,10 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 			"error", logging.SanitizeLogValue(issueErr.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError,
 			"Failed to issue session", "SESSION_ERROR")
-		return
+		return nil, false
 	}
 
-	elevatedSess, newToken, elevateErr := mgr.Elevate(r.Context(), issuedSess.ID, credential.ID, sourceIP)
+	elevatedSess, newToken, elevateErr := mgr.Elevate(r.Context(), issuedSess.ID, credID, sourceIP)
 	if elevateErr != nil {
 		s.logger.Error("Passkey login finish: failed to elevate session",
 			"username", logging.SanitizeLogValue(acct.Username),
@@ -378,7 +454,7 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		_ = mgr.Revoke(r.Context(), issuedSess.ID)
 		s.writeErrorResponse(w, http.StatusInternalServerError,
 			"Failed to elevate session", "SESSION_ELEVATION_ERROR")
-		return
+		return nil, false
 	}
 
 	// Mint and store a session-bound CSRF token for subsequent state-mutating requests.
@@ -390,14 +466,21 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		_ = mgr.Revoke(r.Context(), issuedSess.ID)
 		s.writeErrorResponse(w, http.StatusInternalServerError,
 			"Failed to generate CSRF token", "CSRF_GEN_ERROR")
-		return
+		return nil, false
 	}
 	s.csrfTokens.Store(issuedSess.ID, csrfToken)
 
+	setPasskeyLoginCookies(w, newToken, csrfToken)
+	return elevatedSess, true
+}
+
+// setPasskeyLoginCookies sets the session and CSRF cookies and clears the single-use
+// ceremony and pre-session CSRF cookies.
+func setPasskeyLoginCookies(w http.ResponseWriter, sessionToken, csrfToken string) {
 	// Set the session cookie (HttpOnly — JS must not read the session token).
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieWebSession,
-		Value:    newToken,
+		Value:    sessionToken,
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
@@ -435,19 +518,6 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		Path:     "/",
 		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
-	})
-
-	s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.success", business.AuditResultSuccess)
-	s.logger.Info("Passkey login successful",
-		"username", logging.SanitizeLogValue(acct.Username),
-		"source_ip", logging.SanitizeLogValue(sourceIP))
-
-	s.writeResponse(w, http.StatusOK, PasskeyLoginFinishResponse{
-		OK:        true,
-		Username:  acct.Username,
-		TenantID:  s.accountPrincipalTenant(r.Context(), acct),
-		RootScope: acct.RootScope,
-		ExpiresAt: elevatedSess.AbsoluteExpiresAt,
 	})
 }
 
