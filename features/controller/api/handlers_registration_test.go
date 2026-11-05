@@ -4301,6 +4301,10 @@ func TestLockedAdmission_OrdinaryApprovalCannotClaimLockedEntry(t *testing.T) {
 	rec = callClone(env.server.handleApproveRegistration, http.MethodPost, "/", map[string]string{"id": pending.PendingID}, cloneTenant, nil)
 	assert.Equal(t, http.StatusConflict, rec.Code, "an ordinary approval would claim a second credential")
 	rec = callClone(env.server.handleApproveAllRegistrations, http.MethodPost, "/", nil, cloneTenant, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var bulk approveAllResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &bulk))
+	assert.Equal(t, 0, bulk.Approved, "approve-all must not count the locked entry")
 	after, err := env.server.pendingStore.GetPendingByID(context.Background(), pending.PendingID)
 	require.NoError(t, err)
 	assert.Equal(t, business.PendingRegistrationStatusPending, after.Status, "approve-all skips locked entries")

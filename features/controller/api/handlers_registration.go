@@ -813,7 +813,7 @@ func (s *Server) handleApproveAllRegistrations(w http.ResponseWriter, r *http.Re
 	mayApprove := s.tenantAccessFilter(r, "POST /api/v1/registration/approve-all")
 	approved := 0
 	for _, e := range entries {
-		if e.Status != business.PendingRegistrationStatusPending || !mayApprove(e.TenantID) || s.isLockedAdmission(r.Context(), e) {
+		if !s.bulkApprovable(r.Context(), e, mayApprove) {
 			continue
 		}
 		if err := s.pendingStore.UpdateStatus(r.Context(), e.PendingID, business.PendingRegistrationStatusApproved); err != nil {
@@ -871,11 +871,7 @@ func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 	mayApprove := s.tenantAccessFilter(r, "POST /api/v1/registration/approve-by-cidr")
 	approved := 0
 	for _, e := range entries {
-		if e.Status != business.PendingRegistrationStatusPending || !mayApprove(e.TenantID) || s.isLockedAdmission(r.Context(), e) {
-			continue
-		}
-		ip := net.ParseIP(e.SourceIP)
-		if ip == nil || !ipNet.Contains(ip) {
+		if !s.bulkApprovable(r.Context(), e, mayApprove) || !entryInCIDR(e, ipNet) {
 			continue
 		}
 		if err := s.pendingStore.UpdateStatus(r.Context(), e.PendingID, business.PendingRegistrationStatusApproved); err != nil {
@@ -894,6 +890,19 @@ func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(approveAllResponse{Approved: approved}); err != nil {
 		s.logger.Error("Failed to encode approve-by-cidr response", "error", logging.SanitizeLogValue(err.Error()))
 	}
+}
+
+// bulkApprovable reports whether a bulk approval may approve e: it is pending,
+// in a tenant the caller may act on, and not a locked admission (which only link
+// or ban resolves).
+func (s *Server) bulkApprovable(ctx context.Context, e *business.PendingRegistrationEntry, mayApprove func(string) bool) bool {
+	return e.Status == business.PendingRegistrationStatusPending && mayApprove(e.TenantID) && !s.isLockedAdmission(ctx, e)
+}
+
+// entryInCIDR reports whether e's source IP parses and falls inside ipNet.
+func entryInCIDR(e *business.PendingRegistrationEntry, ipNet *net.IPNet) bool {
+	ip := net.ParseIP(e.SourceIP)
+	return ip != nil && ipNet.Contains(ip)
 }
 
 // approveByCIDRPreviewResponse is returned by GET /api/v1/registration/approve-by-cidr/preview.
@@ -944,11 +953,7 @@ func (s *Server) handleApproveByCIDRPreview(w http.ResponseWriter, r *http.Reque
 	pendingIDs := make([]string, 0)
 	sourceIPs := make([]string, 0)
 	for _, e := range entries {
-		if e.Status != business.PendingRegistrationStatusPending || !mayApprove(e.TenantID) || s.isLockedAdmission(r.Context(), e) {
-			continue
-		}
-		ip := net.ParseIP(e.SourceIP)
-		if ip == nil || !ipNet.Contains(ip) {
+		if !s.bulkApprovable(r.Context(), e, mayApprove) || !entryInCIDR(e, ipNet) {
 			continue
 		}
 		pendingIDs = append(pendingIDs, e.PendingID)
@@ -1043,16 +1048,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Build initial DNA attributes from best-effort identity hints (Issue #2640).
 	// Hostname and OS are optional; registration succeeds when absent.
-	var initialAttrs map[string]string
-	if req.Hostname != "" || req.OS != "" {
-		initialAttrs = make(map[string]string)
-		if req.Hostname != "" {
-			initialAttrs["hostname"] = req.Hostname
-		}
-		if req.OS != "" {
-			initialAttrs["os"] = req.OS
-		}
-	}
+	initialAttrs := initialStewardAttrs(req)
 
 	// Log token use without exposing the bearer value.
 	s.logger.Info("Token used for registration",
@@ -1248,23 +1244,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 					"steward_id", stewardID, "error", logging.SanitizeLogValue(err.Error()))
 			}
 
-			// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
-			quarantineDetails := map[string]interface{}{"quarantined": true, "reason": reason}
-			if req.CloneReason == cloneReasonBrokenTrust {
-				// Quarantine still queues with no credential; the declared reason is
-				// kept for the operator, who decides on the pending entry.
-				quarantineDetails["clone_reason"] = cloneReasonBrokenTrust
-			}
-			s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
-				business.AuditEventAuthentication, "registration_quarantined",
-				business.AuditResultSuccess, business.AuditSeverityHigh,
-				quarantineDetails)
-			if pendingEntry.CloneOf != "" {
-				s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
-					business.AuditEventSecurityEvent, "steward_clone_registration_queued",
-					business.AuditResultSuccess, business.AuditSeverityMedium,
-					map[string]interface{}{"clone_of": pendingEntry.CloneOf, "pending_id": pendingID})
-			}
+			s.emitQuarantineAudits(r.Context(), req, pendingEntry, reason)
 			s.writePendingRegistrationResponse(w, pendingEntry, token.Group)
 			return
 		}
@@ -1310,25 +1290,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get server certificate (public key) for configuration signature verification
-	var serverCert []byte
-	if s.certManager != nil && s.signerCertSerial != "" {
-		certPEM, _, err := s.certManager.ExportCertificate(s.signerCertSerial, false, false)
-		if err == nil && len(certPEM) > 0 {
-			serverCert = certPEM
-			s.logger.Info("Providing signer certificate to steward for signature verification",
-				"steward_id", stewardID,
-				"cert_serial", s.signerCertSerial)
-		} else {
-			s.logger.Warn("Failed to export signer certificate from cert manager",
-				"error", logging.SanitizeLogValue(err.Error()), "steward_id", stewardID, "cert_serial", s.signerCertSerial)
-		}
-	} else if s.signerCertSerial == "" {
-		s.logger.Warn("Signer certificate serial not available (signer may not be initialized)",
-			"steward_id", stewardID)
-	} else {
-		s.logger.Warn("Certificate manager unavailable, cannot provide server cert for signature verification",
-			"steward_id", stewardID)
-	}
+	serverCert := s.signerCertPEMFor(stewardID)
 
 	// This is the REST issuance boundary. For a given device identity exactly one
 	// caller can create the durable claim, even across controller processes, so a
@@ -1375,18 +1337,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	resp.ServerCert = string(serverCert) // For config signature verification (backward compat)
 
 	// Always provide the dedicated signing certificate (separated architecture is mandatory)
-	if s.certManager != nil {
-		signingCertPEM, sigErr := s.certManager.GetSigningCertificate()
-		if sigErr == nil && len(signingCertPEM) > 0 {
-			resp.SigningCert = string(signingCertPEM)
-			resp.ServerCert = string(signingCertPEM)
-			s.logger.Info("Providing dedicated signing certificate to steward",
-				"steward_id", stewardID)
-		} else {
-			s.logger.Warn("Failed to get signing certificate for registration response",
-				"error", sigErr, "steward_id", stewardID)
-		}
-	}
+	s.attachSigningCert(&resp, stewardID)
 
 	s.logger.Info("Generated client certificate for steward",
 		"steward_id", stewardID,
@@ -1399,8 +1350,6 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	registeredStatus := business.StewardStatusRegistered
 	if lockedAdmit {
 		registeredStatus = business.StewardStatusTampered
-	}
-	if lockedAdmit {
 		// The locked record and its pending entry are written before the response
 		// carries the credential: a failure here hands the steward nothing.
 		if !s.admitLockedIdentity(w, r, req, token, claimID, stewardID, identityKeyBytes, clientCert.SerialNumber, csr) {
@@ -1449,6 +1398,92 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		s.logger.Error("Failed to encode registration response", "error", logging.SanitizeLogValue(err.Error()))
 	}
+}
+
+// initialStewardAttrs builds the initial DNA attributes from the best-effort
+// identity hints (Issue #2640). Hostname and OS are optional; nil when both are
+// absent.
+func initialStewardAttrs(req RegistrationRequest) map[string]string {
+	if req.Hostname == "" && req.OS == "" {
+		return nil
+	}
+	attrs := make(map[string]string)
+	if req.Hostname != "" {
+		attrs["hostname"] = req.Hostname
+	}
+	if req.OS != "" {
+		attrs["os"] = req.OS
+	}
+	return attrs
+}
+
+// emitQuarantineAudits records a quarantined registration and, when the entry
+// names an old identity, that a copy of it was queued.
+func (s *Server) emitQuarantineAudits(ctx context.Context, req RegistrationRequest, pendingEntry *business.PendingRegistrationEntry, reason string) {
+	// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
+	quarantineDetails := map[string]interface{}{"quarantined": true, "reason": reason}
+	if req.CloneReason == cloneReasonBrokenTrust {
+		// Quarantine still queues with no credential; the declared reason is
+		// kept for the operator, who decides on the pending entry.
+		quarantineDetails["clone_reason"] = cloneReasonBrokenTrust
+	}
+	s.emitRegistrationAudit(ctx, req.Token, pendingEntry.TenantID, pendingEntry.StewardID,
+		business.AuditEventAuthentication, "registration_quarantined",
+		business.AuditResultSuccess, business.AuditSeverityHigh,
+		quarantineDetails)
+	if pendingEntry.CloneOf != "" {
+		s.emitRegistrationAudit(ctx, req.Token, pendingEntry.TenantID, pendingEntry.StewardID,
+			business.AuditEventSecurityEvent, "steward_clone_registration_queued",
+			business.AuditResultSuccess, business.AuditSeverityMedium,
+			map[string]interface{}{"clone_of": pendingEntry.CloneOf, "pending_id": pendingEntry.PendingID})
+	}
+}
+
+// signerCertPEMFor returns the signer certificate a registering steward uses for
+// configuration signature verification, or nil when it cannot be exported.
+func (s *Server) signerCertPEMFor(stewardID string) []byte {
+	if s.signerCertSerial == "" {
+		s.logger.Warn("Signer certificate serial not available (signer may not be initialized)",
+			"steward_id", stewardID)
+		return nil
+	}
+	if s.certManager == nil {
+		s.logger.Warn("Certificate manager unavailable, cannot provide server cert for signature verification",
+			"steward_id", stewardID)
+		return nil
+	}
+	certPEM, _, err := s.certManager.ExportCertificate(s.signerCertSerial, false, false)
+	if err != nil || len(certPEM) == 0 {
+		errText := "empty certificate"
+		if err != nil {
+			errText = err.Error()
+		}
+		s.logger.Warn("Failed to export signer certificate from cert manager",
+			"error", logging.SanitizeLogValue(errText), "steward_id", stewardID, "cert_serial", s.signerCertSerial)
+		return nil
+	}
+	s.logger.Info("Providing signer certificate to steward for signature verification",
+		"steward_id", stewardID,
+		"cert_serial", s.signerCertSerial)
+	return certPEM
+}
+
+// attachSigningCert sets the dedicated signing certificate on a registration
+// response (separated architecture is mandatory); it also serves as ServerCert.
+func (s *Server) attachSigningCert(resp *RegistrationResponse, stewardID string) {
+	if s.certManager == nil {
+		return
+	}
+	signingCertPEM, sigErr := s.certManager.GetSigningCertificate()
+	if sigErr != nil || len(signingCertPEM) == 0 {
+		s.logger.Warn("Failed to get signing certificate for registration response",
+			"error", sigErr, "steward_id", stewardID)
+		return
+	}
+	resp.SigningCert = string(signingCertPEM)
+	resp.ServerCert = string(signingCertPEM)
+	s.logger.Info("Providing dedicated signing certificate to steward",
+		"steward_id", stewardID)
 }
 
 // registrationClaimID binds a REST claim to the stable device identity without
@@ -1815,18 +1850,9 @@ func (s *Server) admitLockedIdentity(w http.ResponseWriter, r *http.Request, req
 		return false
 	}
 
-	cloneOf := s.validatedCloneOf(ctx, req.CloneOf, token.TenantID)
-	duplicate := false
-	if cloneOf != "" {
-		exists, err := s.pendingCloneExists(ctx, token.TenantID, cloneOf)
-		if err != nil {
-			return fail("Failed to check for an existing pending identity", err)
-		}
-		if exists {
-			// One pending identity per old ID: the repeat claim is admitted like
-			// any locked copy without an old ID, so the caller learns nothing.
-			duplicate, cloneOf = true, ""
-		}
+	cloneOf, duplicate, err := s.lockedAdmissionCloneOf(ctx, req.CloneOf, token.TenantID)
+	if err != nil {
+		return fail("Failed to check for an existing pending identity", err)
 	}
 
 	now := time.Now().UTC()
@@ -1872,28 +1898,52 @@ func (s *Server) admitLockedIdentity(w http.ResponseWriter, r *http.Request, req
 		return fail("Failed to persist locked pending registration", err)
 	}
 
-	tokenKey := business.RegistrationTokenLookupKey(req.Token)
-	notifyOwner := s.lockedAdmission.claimNotify(tokenKey, time.Now())
-	notification := "aggregated"
-	if notifyOwner {
-		notification = "queued"
+	s.recordLockedAdmission(ctx, token, req.Token, stewardID, map[string]interface{}{
+		"clone_reason":    cloneReasonBrokenTrust,
+		"clone_of":        cloneOf,
+		"duplicate_claim": duplicate,
+		"pending_id":      pendingID,
+	})
+	return true
+}
+
+// lockedAdmissionCloneOf resolves the old ID a broken-trust admission keeps: the
+// claimed ID only when it names a real steward of tenantID and no other pending
+// entry already names it. duplicate reports the second case.
+func (s *Server) lockedAdmissionCloneOf(ctx context.Context, claimed, tenantID string) (cloneOf string, duplicate bool, err error) {
+	cloneOf = s.validatedCloneOf(ctx, claimed, tenantID)
+	if cloneOf == "" {
+		return "", false, nil
 	}
-	s.emitRegistrationAudit(ctx, req.Token, token.TenantID, stewardID,
+	exists, err := s.pendingCloneExists(ctx, tenantID, cloneOf)
+	if err != nil {
+		return "", false, err
+	}
+	if exists {
+		// One pending identity per old ID: the repeat claim is admitted like
+		// any locked copy without an old ID, so the caller learns nothing.
+		return "", true, nil
+	}
+	return cloneOf, false, nil
+}
+
+// recordLockedAdmission audits a completed locked admission and, when it owns
+// the token's notification window, announces it to the tenant administrators.
+func (s *Server) recordLockedAdmission(ctx context.Context, token *registration.Token, rawToken, stewardID string, details map[string]interface{}) {
+	tokenKey := business.RegistrationTokenLookupKey(rawToken)
+	notifyOwner := s.lockedAdmission.claimNotify(tokenKey, time.Now())
+	details["notification"] = "aggregated"
+	if notifyOwner {
+		details["notification"] = "queued"
+	}
+	s.emitRegistrationAudit(ctx, rawToken, token.TenantID, stewardID,
 		business.AuditEventSecurityEvent, auditActionLockedAdmission,
-		business.AuditResultSuccess, business.AuditSeverityHigh,
-		map[string]interface{}{
-			"clone_reason":    cloneReasonBrokenTrust,
-			"clone_of":        cloneOf,
-			"duplicate_claim": duplicate,
-			"pending_id":      pendingID,
-			"notification":    notification,
-		})
+		business.AuditResultSuccess, business.AuditSeverityHigh, details)
 	s.logger.Warn("Steward admitted locked (broken trust)",
 		"steward_id", stewardID, "tenant_id", logging.SanitizeLogValue(token.TenantID))
 	if notifyOwner {
-		s.announceLockedAdmission(ctx, token, req.Token, stewardID)
+		s.announceLockedAdmission(ctx, token, rawToken, stewardID)
 	}
-	return true
 }
 
 // announceLockedAdmission sends the one notification of the token's window, off

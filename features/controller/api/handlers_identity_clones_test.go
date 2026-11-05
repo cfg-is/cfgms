@@ -704,3 +704,17 @@ func TestMoveIdentity_OrdinaryMoveStillRefusesTamperedSource(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 	assert.Contains(t, rec.Body.String(), "STEWARD_NOT_ACTIVE")
 }
+
+// An ordinary move leaves an approved entry on the old ID; repeating the request
+// must not be taken for a stopped link and supersede the legitimate claim.
+func TestMoveIdentity_RepeatedOrdinaryMoveDoesNotSupersede(t *testing.T) {
+	env := newCloneEnv(t)
+	env.addSteward(t, "steward-mv-rep", cloneTenant, cloneDeviceA, business.StewardStatusActive)
+	env.addPending(t, "pending-mv-rep", cloneTenant, "steward-mv-rep", cloneDeviceB)
+	require.Equal(t, http.StatusOK, env.link("steward-mv-rep", "pending-mv-rep", false).Code)
+	rec := env.link("steward-mv-rep", "pending-mv-rep", false)
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	entry, err := env.server.pendingStore.GetPendingByID(context.Background(), "pending-mv-rep")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusApproved, entry.Status)
+}
