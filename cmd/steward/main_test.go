@@ -1941,3 +1941,61 @@ func TestPromptRegistrationToken_Errors(t *testing.T) {
 		})
 	}
 }
+
+// Issue #5730: first registration checks the controller CA against the baked root list.
+
+func TestFirstRegistration_BakedListCAInList_PinsMatchingFingerprint(t *testing.T) {
+	caPEM, fp := generateMainTestCACert(t)
+	setBaked(t, fp)
+
+	require.NoError(t, checkFirstRegistrationCA(caPEM))
+
+	id := &StewardIdentity{}
+	require.NoError(t, pinTOFUCA(filepath.Join(t.TempDir(), "ca.crt"), caPEM, id))
+	assert.Equal(t, fp, id.CAPinFingerprint)
+}
+
+func TestFirstRegistration_BakedListCANotInList_RefusesAndPersistsNothing(t *testing.T) {
+	_, listed := generateMainTestCACert(t)
+	otherPEM, otherFP := generateMainTestCACert(t)
+	setBaked(t, listed)
+
+	for _, src := range []TrustSource{trustSourceTOFU, trustSourceCompileBaked} {
+		dir := t.TempDir()
+		reg := approvedRegistration{
+			StewardID:        "s1",
+			TransportAddress: "https://ctrl.example.com",
+			ClientKey:        "fake-key-pem",
+			CACert:           otherPEM,
+		}
+		_, err := connectWithApprovedRegistration(context.Background(), reg, dir, "tok", src, "", "", stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), otherFP)
+		assert.Contains(t, err.Error(), "not in the baked controller root list")
+
+		saved, loadErr := loadIdentity(dir)
+		require.NoError(t, loadErr)
+		assert.Nil(t, saved, "no identity may be written when the CA is refused")
+	}
+}
+
+func TestFirstRegistration_BakedListMalformedOrNoCA_FailsClosed(t *testing.T) {
+	caPEM, _ := generateMainTestCACert(t)
+	setBaked(t, "NOTHEX")
+	require.Error(t, checkFirstRegistrationCA(caPEM))
+
+	_, fp := generateMainTestCACert(t)
+	setBaked(t, fp)
+	require.Error(t, checkFirstRegistrationCA(""))
+}
+
+func TestFirstRegistration_NoBakedList_Unchanged(t *testing.T) {
+	setBaked(t, "")
+	caPEM, fp := generateMainTestCACert(t)
+	require.NoError(t, checkFirstRegistrationCA(caPEM))
+	require.NoError(t, checkFirstRegistrationCA(""))
+
+	id := &StewardIdentity{}
+	require.NoError(t, pinTOFUCA(filepath.Join(t.TempDir(), "ca.crt"), caPEM, id))
+	assert.Equal(t, fp, id.CAPinFingerprint)
+}

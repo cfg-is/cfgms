@@ -637,6 +637,10 @@ If the controller connection is lost, the steward continues converging on schedu
 
 The `--regtoken-file` flag establishes the controller channel — it does not change the steward's fundamental convergence behaviour.
 
+### Trust Source and First-Registration CA Check (Issue #5730)
+
+The steward's trust source is compile-baked (controller URL built in), install-pinned (URL and CA supplied at install) or trust-on-first-use (TOFU: URL supplied, CA recorded at first registration). A build that carries a baked controller root fingerprint list (`main.ControllerRootFingerprints`, see Issue #5721) checks the CA the controller presents at first registration against that list for the TOFU and compile-baked sources. The CA's SHA-256 fingerprint must be in the list; otherwise registration fails with an error naming the fingerprint mismatch and no identity file is written. A malformed baked list, or a controller that presents no CA, also fails registration. A build without a baked list keeps plain TOFU pinning. Re-registration of an already-pinned steward is governed by the existing pin comparison, not this check.
+
 ### Host Attributes (Issue #4949, ADR-034 §2)
 
 On every ControlChannel connect the steward reports host attributes in the `x-cfgms-host-attrs` metadata header (base64 JSON, at most 4 KiB), collected by `identity.CollectHostAttributes`:
