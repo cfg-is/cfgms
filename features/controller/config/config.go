@@ -1305,55 +1305,82 @@ func LoadWithPath(configPath string) (*Config, error) {
 
 	// Load from config file if found
 	if foundPath != "" {
-		// #nosec G304 -- foundPath is selected by findConfigFile from the
-		// operator's explicit configuration path or fixed CFGMS search paths.
-		data, err := os.ReadFile(foundPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read config file %s: %w", foundPath, err)
+		if err := loadConfigFile(cfg, foundPath); err != nil {
+			return nil, err
 		}
-
-		content := string(data)
-
-		// Refuse literal secrets in secret-bearing keys. This must see the raw
-		// text: after expansion a ${VAR} reference is indistinguishable from a
-		// literal (Issue #4664).
-		if err := validateNoLiteralSecrets(content); err != nil {
-			return nil, fmt.Errorf("configuration validation failed in %s: %w", foundPath, err)
-		}
-
-		// Validate that all referenced env vars (without defaults) are set
-		// This provides fail-safe behavior for missing env vars
-		if err := validateEnvVars(content); err != nil {
-			return nil, fmt.Errorf("configuration validation failed in %s: %w", foundPath, err)
-		}
-
-		// Expand environment variables in the configuration content
-		// This supports ${VAR} and ${VAR:-default} syntax for explicit env var references
-		expandedData, err := expandEnvWithDefaults(content)
-		if err != nil {
-			return nil, fmt.Errorf("configuration validation failed in %s: %w", foundPath, err)
-		}
-		expandedBytes := []byte(expandedData)
-
-		if err := yaml.Unmarshal(expandedBytes, cfg); err != nil {
-			return nil, fmt.Errorf("failed to parse config file %s: %w", foundPath, err)
-		}
-
-		// Resolve cert_path to absolute relative to the config file directory.
-		// A relative cert_path is CWD-dependent at runtime; anchoring it to the
-		// config file removes that dependency (Issue #3197).
-		if !IsRootedPath(cfg.CertPath) {
-			cfg.CertPath = filepath.Join(filepath.Dir(foundPath), cfg.CertPath)
-		}
-
 	}
 
 	// Override with environment variables if set
+	if err := applyEnvSecurityOverrides(cfg); err != nil {
+		return nil, err
+	}
+	applyEnvCoreOverrides(cfg)
+	applyEnvCertificateOverrides(cfg)
+	applyEnvStorageOverrides(cfg)
+	applyEnvLoggingOverrides(cfg)
+	applyEnvTransportOverrides(cfg)
+	applyEnvClusterOverrides(cfg)
+
+	if err := validateLoadedConfig(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// loadConfigFile reads foundPath, refuses literal secrets, checks and expands
+// environment references, unmarshals into cfg and anchors a relative cert_path.
+func loadConfigFile(cfg *Config, foundPath string) error {
+	// #nosec G304 -- foundPath is selected by findConfigFile from the
+	// operator's explicit configuration path or fixed CFGMS search paths.
+	data, err := os.ReadFile(foundPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file %s: %w", foundPath, err)
+	}
+
+	content := string(data)
+
+	// Refuse literal secrets in secret-bearing keys. This must see the raw
+	// text: after expansion a ${VAR} reference is indistinguishable from a
+	// literal (Issue #4664).
+	if err := validateNoLiteralSecrets(content); err != nil {
+		return fmt.Errorf("configuration validation failed in %s: %w", foundPath, err)
+	}
+
+	// Validate that all referenced env vars (without defaults) are set
+	// This provides fail-safe behavior for missing env vars
+	if err := validateEnvVars(content); err != nil {
+		return fmt.Errorf("configuration validation failed in %s: %w", foundPath, err)
+	}
+
+	// Expand environment variables in the configuration content
+	// This supports ${VAR} and ${VAR:-default} syntax for explicit env var references
+	expandedData, err := expandEnvWithDefaults(content)
+	if err != nil {
+		return fmt.Errorf("configuration validation failed in %s: %w", foundPath, err)
+	}
+	expandedBytes := []byte(expandedData)
+
+	if err := yaml.Unmarshal(expandedBytes, cfg); err != nil {
+		return fmt.Errorf("failed to parse config file %s: %w", foundPath, err)
+	}
+
+	// Resolve cert_path to absolute relative to the config file directory.
+	// A relative cert_path is CWD-dependent at runtime; anchoring it to the
+	// config file removes that dependency (Issue #3197).
+	if !IsRootedPath(cfg.CertPath) {
+		cfg.CertPath = filepath.Join(filepath.Dir(foundPath), cfg.CertPath)
+	}
+	return nil
+}
+
+// applyEnvSecurityOverrides applies the security profile and signed ad-hoc
+// execution overrides.
+func applyEnvSecurityOverrides(cfg *Config) error {
 	if securityProfile := strings.TrimSpace(os.Getenv("CFGMS_SECURITY_PROFILE")); securityProfile != "" {
 		// An environment variable may tighten a development/test configuration
 		// to public-beta, but it may never downgrade a reviewed public-beta file.
 		if cfg.SecurityProfile == SecurityProfilePublicBeta && securityProfile != SecurityProfilePublicBeta {
-			return nil, fmt.Errorf("CFGMS_SECURITY_PROFILE cannot downgrade configured public-beta security profile to %q", securityProfile)
+			return fmt.Errorf("CFGMS_SECURITY_PROFILE cannot downgrade configured public-beta security profile to %q", securityProfile)
 		}
 		cfg.SecurityProfile = securityProfile
 	}
@@ -1361,11 +1388,15 @@ func LoadWithPath(configPath string) (*Config, error) {
 	if requireSignedAdhoc := strings.TrimSpace(os.Getenv("CFGMS_EXECUTION_REQUIRE_SIGNED_ADHOC")); requireSignedAdhoc != "" {
 		val, parseErr := strconv.ParseBool(requireSignedAdhoc)
 		if parseErr != nil {
-			return nil, fmt.Errorf("invalid CFGMS_EXECUTION_REQUIRE_SIGNED_ADHOC value %q: %w", requireSignedAdhoc, parseErr)
+			return fmt.Errorf("invalid CFGMS_EXECUTION_REQUIRE_SIGNED_ADHOC value %q: %w", requireSignedAdhoc, parseErr)
 		}
 		cfg.Execution.RequireSignedAdhoc = val
 	}
+	return nil
+}
 
+// applyEnvCoreOverrides applies the listener, URL, path and log level overrides.
+func applyEnvCoreOverrides(cfg *Config) {
 	if addr := os.Getenv("CFGMS_LISTEN_ADDR"); addr != "" {
 		cfg.ListenAddr = addr
 	}
@@ -1389,184 +1420,165 @@ func LoadWithPath(configPath string) (*Config, error) {
 	if logLevel := os.Getenv("CFGMS_LOG_LEVEL"); logLevel != "" {
 		cfg.LogLevel = logLevel
 	}
+}
 
-	// Certificate management environment variables
+// envAtoi stores the named variable into dst when it is set and parses as an
+// integer; an unparsable value is ignored.
+func envAtoi(name string, dst *int) {
+	if raw := os.Getenv(name); raw != "" {
+		if val, err := strconv.Atoi(raw); err == nil {
+			*dst = val
+		}
+	}
+}
+
+// envString stores the named variable into dst when it is non-empty.
+func envString(name string, dst *string) {
+	if val := os.Getenv(name); val != "" {
+		*dst = val
+	}
+}
+
+// applyEnvCertificateOverrides applies the CFGMS_CERT_* overrides.
+func applyEnvCertificateOverrides(cfg *Config) {
 	if enableCertMgmt := os.Getenv("CFGMS_CERT_ENABLE_MANAGEMENT"); enableCertMgmt != "" {
 		if val, err := strconv.ParseBool(enableCertMgmt); err == nil {
 			cfg.Certificate.EnableCertManagement = val
 		}
 	}
 
-	if caPath := os.Getenv("CFGMS_CERT_CA_PATH"); caPath != "" {
-		cfg.Certificate.CAPath = caPath
-	}
-
-	if renewalThreshold := os.Getenv("CFGMS_CERT_RENEWAL_THRESHOLD_DAYS"); renewalThreshold != "" {
-		if val, err := strconv.Atoi(renewalThreshold); err == nil {
-			cfg.Certificate.RenewalThresholdDays = val
-		}
-	}
-
-	if serverValidity := os.Getenv("CFGMS_CERT_SERVER_VALIDITY_DAYS"); serverValidity != "" {
-		if val, err := strconv.Atoi(serverValidity); err == nil {
-			cfg.Certificate.ServerCertValidityDays = val
-		}
-	}
-
-	if clientValidity := os.Getenv("CFGMS_CERT_CLIENT_VALIDITY_DAYS"); clientValidity != "" {
-		if val, err := strconv.Atoi(clientValidity); err == nil {
-			cfg.Certificate.ClientCertValidityDays = val
-		}
-	}
-
-	if serverCommonName := os.Getenv("CFGMS_CERT_SERVER_COMMON_NAME"); serverCommonName != "" {
-		cfg.Certificate.Server.CommonName = serverCommonName
-	}
-
-	if serverOrg := os.Getenv("CFGMS_CERT_SERVER_ORGANIZATION"); serverOrg != "" {
-		cfg.Certificate.Server.Organization = serverOrg
-	}
+	envString("CFGMS_CERT_CA_PATH", &cfg.Certificate.CAPath)
+	envAtoi("CFGMS_CERT_RENEWAL_THRESHOLD_DAYS", &cfg.Certificate.RenewalThresholdDays)
+	envAtoi("CFGMS_CERT_SERVER_VALIDITY_DAYS", &cfg.Certificate.ServerCertValidityDays)
+	envAtoi("CFGMS_CERT_CLIENT_VALIDITY_DAYS", &cfg.Certificate.ClientCertValidityDays)
+	envString("CFGMS_CERT_SERVER_COMMON_NAME", &cfg.Certificate.Server.CommonName)
+	envString("CFGMS_CERT_SERVER_ORGANIZATION", &cfg.Certificate.Server.Organization)
 
 	// CFGMS_CERT_ARCHITECTURE: parsed for legacy detection only.
 	// Setting to "unified" triggers a startup error at ValidateCertificateArchitecture.
-	if certArch := os.Getenv("CFGMS_CERT_ARCHITECTURE"); certArch != "" {
-		cfg.Certificate.Architecture = certArch
-	}
+	envString("CFGMS_CERT_ARCHITECTURE", &cfg.Certificate.Architecture)
 
-	if signingValidity := os.Getenv("CFGMS_CERT_SIGNING_VALIDITY_DAYS"); signingValidity != "" {
-		if val, err := strconv.Atoi(signingValidity); err == nil {
-			cfg.Certificate.SigningCertValidityDays = val
+	envAtoi("CFGMS_CERT_SIGNING_VALIDITY_DAYS", &cfg.Certificate.SigningCertValidityDays)
+
+	applyEnvPublicAPICertOverrides(cfg)
+}
+
+// applyEnvPublicAPICertOverrides applies the CFGMS_CERT_PUBLIC_API_* overrides,
+// creating the public API section on first use.
+func applyEnvPublicAPICertOverrides(cfg *Config) {
+	publicAPI := func() *PublicAPICertConfig {
+		if cfg.Certificate.PublicAPI == nil {
+			cfg.Certificate.PublicAPI = &PublicAPICertConfig{}
 		}
+		return cfg.Certificate.PublicAPI
 	}
 
 	if publicAPISource := os.Getenv("CFGMS_CERT_PUBLIC_API_SOURCE"); publicAPISource != "" {
-		if cfg.Certificate.PublicAPI == nil {
-			cfg.Certificate.PublicAPI = &PublicAPICertConfig{}
-		}
-		cfg.Certificate.PublicAPI.Source = publicAPISource
+		publicAPI().Source = publicAPISource
 	}
 
 	if publicAPICertPath := os.Getenv("CFGMS_CERT_PUBLIC_API_CERT_PATH"); publicAPICertPath != "" {
-		if cfg.Certificate.PublicAPI == nil {
-			cfg.Certificate.PublicAPI = &PublicAPICertConfig{}
-		}
-		cfg.Certificate.PublicAPI.CertPath = publicAPICertPath
+		publicAPI().CertPath = publicAPICertPath
 	}
 
 	if publicAPIKeyPath := os.Getenv("CFGMS_CERT_PUBLIC_API_KEY_PATH"); publicAPIKeyPath != "" {
-		if cfg.Certificate.PublicAPI == nil {
-			cfg.Certificate.PublicAPI = &PublicAPICertConfig{}
+		publicAPI().KeyPath = publicAPIKeyPath
+	}
+}
+
+// envFirst returns the first non-empty value among the named variables.
+func envFirst(names ...string) string {
+	for _, name := range names {
+		if val := os.Getenv(name); val != "" {
+			return val
 		}
-		cfg.Certificate.PublicAPI.KeyPath = publicAPIKeyPath
+	}
+	return ""
+}
+
+// applyEnvStorageOverrides applies the storage provider and its
+// provider-specific overrides.
+func applyEnvStorageOverrides(cfg *Config) {
+	storageProvider := os.Getenv("CFGMS_STORAGE_PROVIDER")
+	if storageProvider == "" {
+		return
+	}
+	cfg.Storage.Provider = storageProvider
+
+	// Initialize storage config map if nil
+	if cfg.Storage.Config == nil {
+		cfg.Storage.Config = make(map[string]interface{})
 	}
 
-	// Storage configuration environment variables
-	if storageProvider := os.Getenv("CFGMS_STORAGE_PROVIDER"); storageProvider != "" {
-		cfg.Storage.Provider = storageProvider
+	// Map provider-specific environment variables to config
+	switch storageProvider {
+	case "database":
+		applyEnvDatabaseStorageOverrides(cfg.Storage.Config)
+	case "git":
+		applyEnvGitStorageOverrides(cfg.Storage.Config)
+	}
+}
 
-		// Initialize storage config map if nil
-		if cfg.Storage.Config == nil {
-			cfg.Storage.Config = make(map[string]interface{})
-		}
-
-		// Map provider-specific environment variables to config
-		switch storageProvider {
-		case "database":
-			// Database storage configuration mapping - support both CFGMS_STORAGE_DATABASE_* and CFGMS_DB_* variants
-			if host := os.Getenv("CFGMS_STORAGE_DATABASE_HOST"); host != "" {
-				cfg.Storage.Config["host"] = host
-			} else if host := os.Getenv("CFGMS_DB_HOST"); host != "" {
-				cfg.Storage.Config["host"] = host
-			}
-
-			if port := os.Getenv("CFGMS_STORAGE_DATABASE_PORT"); port != "" {
-				// Convert port string to int
-				if portInt, err := strconv.Atoi(port); err == nil {
-					cfg.Storage.Config["port"] = portInt
-				}
-			} else if port := os.Getenv("CFGMS_DB_PORT"); port != "" {
-				// Convert port string to int
-				if portInt, err := strconv.Atoi(port); err == nil {
-					cfg.Storage.Config["port"] = portInt
-				}
-			}
-
-			if database := os.Getenv("CFGMS_STORAGE_DATABASE_NAME"); database != "" {
-				cfg.Storage.Config["database"] = database
-			} else if database := os.Getenv("CFGMS_DB_NAME"); database != "" {
-				cfg.Storage.Config["database"] = database
-			}
-
-			if username := os.Getenv("CFGMS_STORAGE_DATABASE_USER"); username != "" {
-				cfg.Storage.Config["username"] = username
-			} else if username := os.Getenv("CFGMS_DB_USER"); username != "" {
-				cfg.Storage.Config["username"] = username
-			}
-
-			if password := os.Getenv("CFGMS_STORAGE_DATABASE_PASSWORD"); password != "" {
-				cfg.Storage.Config["password"] = password
-			} else if password := os.Getenv("CFGMS_DB_PASSWORD"); password != "" {
-				cfg.Storage.Config["password"] = password
-			}
-
-			if sslmode := os.Getenv("CFGMS_STORAGE_DATABASE_SSLMODE"); sslmode != "" {
-				cfg.Storage.Config["sslmode"] = sslmode
-			} else if sslmode := os.Getenv("CFGMS_DB_SSLMODE"); sslmode != "" {
-				cfg.Storage.Config["sslmode"] = sslmode
-			}
-		case "git":
-			// Git storage configuration mapping
-			if path := os.Getenv("CFGMS_STORAGE_GIT_PATH"); path != "" {
-				cfg.Storage.Config["path"] = path
-			}
-			if url := os.Getenv("CFGMS_STORAGE_GIT_URL"); url != "" {
-				cfg.Storage.Config["url"] = url
-			}
-			if branch := os.Getenv("CFGMS_STORAGE_GIT_BRANCH"); branch != "" {
-				cfg.Storage.Config["branch"] = branch
-			}
-			if username := os.Getenv("CFGMS_STORAGE_GIT_USERNAME"); username != "" {
-				cfg.Storage.Config["username"] = username
-			}
-			if password := os.Getenv("CFGMS_STORAGE_GIT_PASSWORD"); password != "" {
-				cfg.Storage.Config["password"] = password
-			}
-			if token := os.Getenv("CFGMS_STORAGE_GIT_TOKEN"); token != "" {
-				cfg.Storage.Config["token"] = token
-			}
+// applyEnvDatabaseStorageOverrides maps database storage variables into conf,
+// supporting both CFGMS_STORAGE_DATABASE_* and CFGMS_DB_* variants. The
+// CFGMS_STORAGE_DATABASE_* variable wins whenever it is set, even if its value
+// is unusable.
+func applyEnvDatabaseStorageOverrides(conf map[string]interface{}) {
+	for _, m := range []struct{ key, primary, fallback string }{
+		{"host", "CFGMS_STORAGE_DATABASE_HOST", "CFGMS_DB_HOST"},
+		{"database", "CFGMS_STORAGE_DATABASE_NAME", "CFGMS_DB_NAME"},
+		{"username", "CFGMS_STORAGE_DATABASE_USER", "CFGMS_DB_USER"},
+		{"password", "CFGMS_STORAGE_DATABASE_PASSWORD", "CFGMS_DB_PASSWORD"},
+		{"sslmode", "CFGMS_STORAGE_DATABASE_SSLMODE", "CFGMS_DB_SSLMODE"},
+	} {
+		if val := envFirst(m.primary, m.fallback); val != "" {
+			conf[m.key] = val
 		}
 	}
 
-	// Logging configuration environment variables
-	if loggingProvider := os.Getenv("CFGMS_LOGGING_PROVIDER"); loggingProvider != "" {
-		cfg.Logging.Provider = loggingProvider
-	}
-
-	if logLevel := os.Getenv("CFGMS_LOG_LEVEL"); logLevel != "" {
-		cfg.Logging.Level = logLevel
-	}
-
-	if serviceName := os.Getenv("CFGMS_LOGGING_SERVICE_NAME"); serviceName != "" {
-		cfg.Logging.ServiceName = serviceName
-	}
-
-	if component := os.Getenv("CFGMS_LOGGING_COMPONENT"); component != "" {
-		cfg.Logging.Component = component
-	}
-
-	// Transport configuration environment variables.
-	//
-	// If the config file omitted the `transport:` section entirely, cfg.Transport
-	// is nil at this point. Previously each env var was guarded with
-	// `&& cfg.Transport != nil`, which silently dropped the env-var override
-	// when the section was missing. That violated the documented precedence
-	// (env > cfg > default) and was caught by the Issue #1919 review.
-	// Materialise the struct on first use so env vars apply consistently.
-	ensureTransport := func() {
-		if cfg.Transport == nil {
-			cfg.Transport = &TransportConfig{}
+	if port := envFirst("CFGMS_STORAGE_DATABASE_PORT", "CFGMS_DB_PORT"); port != "" {
+		// Convert port string to int
+		if portInt, err := strconv.Atoi(port); err == nil {
+			conf["port"] = portInt
 		}
 	}
+}
+
+// applyEnvGitStorageOverrides maps git storage variables into conf.
+func applyEnvGitStorageOverrides(conf map[string]interface{}) {
+	for _, m := range []struct{ key, env string }{
+		{"path", "CFGMS_STORAGE_GIT_PATH"},
+		{"url", "CFGMS_STORAGE_GIT_URL"},
+		{"branch", "CFGMS_STORAGE_GIT_BRANCH"},
+		{"username", "CFGMS_STORAGE_GIT_USERNAME"},
+		{"password", "CFGMS_STORAGE_GIT_PASSWORD"},
+		{"token", "CFGMS_STORAGE_GIT_TOKEN"},
+	} {
+		if val := os.Getenv(m.env); val != "" {
+			conf[m.key] = val
+		}
+	}
+}
+
+// applyEnvLoggingOverrides applies the logging configuration overrides.
+func applyEnvLoggingOverrides(cfg *Config) {
+	envString("CFGMS_LOGGING_PROVIDER", &cfg.Logging.Provider)
+	envString("CFGMS_LOG_LEVEL", &cfg.Logging.Level)
+	envString("CFGMS_LOGGING_SERVICE_NAME", &cfg.Logging.ServiceName)
+	envString("CFGMS_LOGGING_COMPONENT", &cfg.Logging.Component)
+}
+
+// applyEnvTransportOverrides applies the CFGMS_TRANSPORT_* overrides and the
+// HTTP API listen address.
+//
+// If the config file omitted the `transport:` section entirely, cfg.Transport
+// is nil at this point. Previously each env var was guarded with
+// `&& cfg.Transport != nil`, which silently dropped the env-var override
+// when the section was missing. That violated the documented precedence
+// (env > cfg > default) and was caught by the Issue #1919 review.
+// Materialise the struct on first use so env vars apply consistently.
+func applyEnvTransportOverrides(cfg *Config) {
+	ensureTransport := func() { materializeTransport(cfg) }
 
 	if transportListenAddr := os.Getenv("CFGMS_TRANSPORT_LISTEN_ADDR"); transportListenAddr != "" {
 		ensureTransport()
@@ -1602,10 +1614,19 @@ func LoadWithPath(configPath string) (*Config, error) {
 	}
 
 	// HTTP API configuration environment variables
-	if httpListenAddr := os.Getenv("CFGMS_HTTP_LISTEN_ADDR"); httpListenAddr != "" {
-		cfg.ListenAddr = httpListenAddr
-	}
+	envString("CFGMS_HTTP_LISTEN_ADDR", &cfg.ListenAddr)
+}
 
+// materializeTransport creates cfg.Transport when the file omitted the section.
+func materializeTransport(cfg *Config) {
+	if cfg.Transport == nil {
+		cfg.Transport = &TransportConfig{}
+	}
+}
+
+// applyEnvClusterOverrides applies the registration, HA, cluster storage,
+// audit sink and cluster CA vault overrides.
+func applyEnvClusterOverrides(cfg *Config) {
 	// Registration configuration environment variables (Issue #1695).
 	// CFGMS_REGISTRATION_WORKFLOW selects the approval workflow ("ip-trust",
 	// "manual-review", "auto-approve"). Test/dev environments use this to opt
@@ -1627,22 +1648,7 @@ func LoadWithPath(configPath string) (*Config, error) {
 		cfg.HA.Mode = strings.ToLower(haMode)
 	}
 
-	// Cluster storage DSN environment variable (Issue #2119).
-	// CFGMS_STORAGE_CLUSTER_POSTGRES_DSN overrides storage.cluster.postgres_dsn.
-	if pgDSN := os.Getenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN"); pgDSN != "" {
-		if cfg.Storage.Cluster == nil {
-			cfg.Storage.Cluster = &ClusterStorageConfig{}
-		}
-		cfg.Storage.Cluster.PostgresDSN = pgDSN
-	}
-
-	// CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY overrides storage.cluster.session_hmac_key.
-	if hmacKey := os.Getenv("CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY"); hmacKey != "" {
-		if cfg.Storage.Cluster == nil {
-			cfg.Storage.Cluster = &ClusterStorageConfig{}
-		}
-		cfg.Storage.Cluster.SessionHMACKey = hmacKey
-	}
+	applyEnvClusterStorageOverrides(cfg)
 
 	// Audit sink environment variable (Issue #4036, ADR-033).
 	// CFGMS_AUDIT_SINK overrides audit.sink ("local" or "worm").
@@ -1653,45 +1659,70 @@ func LoadWithPath(configPath string) (*Config, error) {
 		cfg.Audit.Sink = strings.ToLower(auditSink)
 	}
 
-	// Cluster CA vault configuration environment variables (Issue #2018).
-	// Vault token is intentionally NOT configurable here — it must come from
-	// OPENBAO_TOKEN or BAO_TOKEN environment variables, never from a config file.
-	if vaultAddr := os.Getenv("CFGMS_CLUSTER_CA_VAULT_ADDRESS"); vaultAddr != "" {
-		if cfg.Certificate.ClusterCA == nil {
-			cfg.Certificate.ClusterCA = &ClusterCAConfig{}
+	applyEnvClusterCAOverrides(cfg)
+}
+
+// applyEnvClusterStorageOverrides applies the cluster storage DSN and session
+// HMAC key overrides (Issue #2119).
+func applyEnvClusterStorageOverrides(cfg *Config) {
+	clusterStorage := func() *ClusterStorageConfig {
+		if cfg.Storage.Cluster == nil {
+			cfg.Storage.Cluster = &ClusterStorageConfig{}
 		}
-		cfg.Certificate.ClusterCA.VaultAddress = vaultAddr
-	}
-	if vaultKeyPath := os.Getenv("CFGMS_CLUSTER_CA_VAULT_KEY_PATH"); vaultKeyPath != "" {
-		if cfg.Certificate.ClusterCA == nil {
-			cfg.Certificate.ClusterCA = &ClusterCAConfig{}
-		}
-		cfg.Certificate.ClusterCA.VaultKeyPath = vaultKeyPath
+		return cfg.Storage.Cluster
 	}
 
+	// CFGMS_STORAGE_CLUSTER_POSTGRES_DSN overrides storage.cluster.postgres_dsn.
+	if pgDSN := os.Getenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN"); pgDSN != "" {
+		clusterStorage().PostgresDSN = pgDSN
+	}
+
+	// CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY overrides storage.cluster.session_hmac_key.
+	if hmacKey := os.Getenv("CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY"); hmacKey != "" {
+		clusterStorage().SessionHMACKey = hmacKey
+	}
+}
+
+// applyEnvClusterCAOverrides applies the cluster CA vault overrides (Issue #2018).
+// Vault token is intentionally NOT configurable here — it must come from
+// OPENBAO_TOKEN or BAO_TOKEN environment variables, never from a config file.
+func applyEnvClusterCAOverrides(cfg *Config) {
+	clusterCA := func() *ClusterCAConfig {
+		if cfg.Certificate.ClusterCA == nil {
+			cfg.Certificate.ClusterCA = &ClusterCAConfig{}
+		}
+		return cfg.Certificate.ClusterCA
+	}
+
+	if vaultAddr := os.Getenv("CFGMS_CLUSTER_CA_VAULT_ADDRESS"); vaultAddr != "" {
+		clusterCA().VaultAddress = vaultAddr
+	}
+	if vaultKeyPath := os.Getenv("CFGMS_CLUSTER_CA_VAULT_KEY_PATH"); vaultKeyPath != "" {
+		clusterCA().VaultKeyPath = vaultKeyPath
+	}
+}
+
+// validateLoadedConfig runs the post-override validations in their fixed order.
+func validateLoadedConfig(cfg *Config) error {
 	if err := cfg.ValidateExecutionSecurity(); err != nil {
-		return nil, err
+		return err
 	}
 
 	if cfg.Certificate != nil && cfg.Certificate.CAPath != "" {
 		if err := ValidateCAPath(cfg.Certificate.CAPath); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	if err := cfg.ValidateWebAuthn(); err != nil {
-		return nil, err
+		return err
 	}
 
 	if err := cfg.ValidateNotifications(); err != nil {
-		return nil, err
+		return err
 	}
 
-	if err := cfg.ValidateModuleTrust(); err != nil {
-		return nil, err
-	}
-
-	return cfg, nil
+	return cfg.ValidateModuleTrust()
 }
 
 // ValidateCAPath returns an error when caPath's final component is not "ca".
