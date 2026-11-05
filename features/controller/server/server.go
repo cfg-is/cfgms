@@ -77,6 +77,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	reportcachepkg "github.com/cfgis/cfgms/pkg/cache"
 	"github.com/cfgis/cfgms/pkg/cert"
+	certinterfaces "github.com/cfgis/cfgms/pkg/cert/interfaces"
 	"github.com/cfgis/cfgms/pkg/configrouting"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
@@ -503,6 +504,10 @@ type tamperAlarmFunc func(stewardID string, reasons []controlplaneTypes.HealthRe
 // dropped: no heartbeat is processed before the server finishes construction.
 type tamperAlarmRelay struct {
 	target atomic.Pointer[api.Server]
+	// lockdown, when set, is told about a steward that the alarm just moved to
+	// tampered so a connected steward learns without reconnecting (Issue #5664).
+	lockdown *controllerFleet.Lockdown
+	logger   logging.Logger
 }
 
 // Set binds the API server that performs the transition, audit and notification.
@@ -510,8 +515,27 @@ func (r *tamperAlarmRelay) Set(s *api.Server) { r.target.Store(s) }
 
 // Handle forwards the alarm to the bound server.
 func (r *tamperAlarmRelay) Handle(stewardID string, reasons []controlplaneTypes.HealthReason) {
-	if s := r.target.Load(); s != nil {
-		s.HandleStewardTamperAlarm(context.Background(), stewardID, reasons)
+	s := r.target.Load()
+	if s == nil {
+		return
+	}
+	ctx := context.Background()
+	// Only a heartbeat that carries reasons can cause the transition, so the
+	// extra lookup is skipped for healthy heartbeats.
+	wasLocked := r.lockdown == nil || len(reasons) == 0
+	if !wasLocked {
+		wasLocked, _ = r.lockdown.IsLockedDown(ctx, stewardID)
+	}
+	s.HandleStewardTamperAlarm(ctx, stewardID, reasons)
+	if wasLocked {
+		return
+	}
+	if locked, _ := r.lockdown.IsLockedDown(ctx, stewardID); locked {
+		if err := r.lockdown.NotifyTransition(ctx, stewardID); err != nil && r.logger != nil {
+			r.logger.Warn("tamper state not delivered to connected steward",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
 	}
 }
 
@@ -558,6 +582,20 @@ func makeHeartbeatStatusChangeCallback(store business.StewardStore, logger loggi
 			}
 		}
 	}
+}
+
+// openSigningTrustAckStore returns the cluster-visible signing trust
+// acknowledgement store when the storage provider supplies one, otherwise the
+// node-local file store beside the CA (Issue #4797).
+func openSigningTrustAckStore(storageManager *interfaces.StorageManager, caPath string) (certinterfaces.SigningTrustAckStore, error) {
+	if trustAcks := storageManager.GetSigningTrustAckStore(); trustAcks != nil {
+		return trustAcks, nil
+	}
+	fileAcks, err := cert.NewFileSigningTrustAckStore(filepath.Dir(filepath.Clean(caPath)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to open signing trust acknowledgement store: %w", err)
+	}
+	return fileAcks, nil
 }
 
 // New creates a new server instance
@@ -1206,7 +1244,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var heartbeatService *heartbeat.Service
 	// Issue #5652: late-binds the API server as the tamper alarm target. Unused
 	// (and harmless) when no heartbeat service is built.
-	tamperRelay := &tamperAlarmRelay{}
+	tamperRelay := &tamperAlarmRelay{logger: logger}
+	// Issue #5664: the single lockdown predicate and tamper-state sender. Built
+	// once the steward store exists; nil when no transport is configured.
+	var lockdown *controllerFleet.Lockdown
 	var commandPublisher *commands.Publisher
 	var executionQueue *scriptmodule.ExecutionQueue
 	var scriptLibrary *scriptmodule.TenantScriptRepository
@@ -1245,6 +1286,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("steward approval store is required when transport is enabled")
 		}
 		approvalChecker := grpcCP.NewStewardStoreApprovalChecker(stewardStore)
+		lockdown = controllerFleet.NewLockdown(stewardStore, logger)
+		tamperRelay.lockdown = lockdown
 		// Issue #3759: the admission gate keys its buckets on the tenant this
 		// store reports for the mTLS-verified steward CN, never on the tenant
 		// field the steward puts on the wire — otherwise any steward with a
@@ -1288,17 +1331,13 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			// is recorded in the cluster-visible acknowledgement store; without a
 			// provider for it the node-local file store keeps this node correct
 			// (and a single-node controller has nothing else to coordinate with).
-			trustAcks := storageManager.GetSigningTrustAckStore()
-			if trustAcks == nil {
-				fileAcks, ackErr := cert.NewFileSigningTrustAckStore(filepath.Dir(filepath.Clean(cfg.Certificate.CAPath)))
-				if ackErr != nil {
-					return nil, fmt.Errorf("failed to open signing trust acknowledgement store: %w", ackErr)
-				}
-				trustAcks = fileAcks
+			trustAcks, ackErr := openSigningTrustAckStore(storageManager, cfg.Certificate.CAPath)
+			if ackErr != nil {
+				return nil, ackErr
 			}
 			stewardMigrationSvc = service.NewStewardSigningMigrationService(certManager, trustAcks, logger)
 			stewardMigrationSvc.SetConnectedStewards(connRegistry)
-			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, stewardMigrationSvc, registryConnectHook, completionReconciler, routingHook, drainHook)
+			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, stewardMigrationSvc, registryConnectHook, completionReconciler, routingHook, drainHook, lockdown)
 			controlPlane = grpcCP.New(
 				grpcCP.ModeServer,
 				grpcCP.WithOnConnectHook(composite),
@@ -1317,7 +1356,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, auditManager, logger)),
 			)
 		} else {
-			composite := service.NewCompositeOnConnectHook(logger, registryConnectHook, completionReconciler, routingHook, drainHook)
+			composite := service.NewCompositeOnConnectHook(logger, registryConnectHook, completionReconciler, routingHook, drainHook, lockdown)
 			controlPlane = grpcCP.New(
 				grpcCP.ModeServer,
 				grpcCP.WithOnConnectHook(composite),
@@ -1349,6 +1388,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			return nil, fmt.Errorf("failed to initialize gRPC control plane provider: %w", err)
 		}
 		logger.Info("gRPC control plane provider initialized", "provider", controlPlane.Name(), "addr", cfg.Transport.ListenAddr)
+		// Issue #5664: the provider carries TamperState to connected stewards.
+		// Bound before Start, so the first on-connect send already has a sender.
+		lockdown.SetSender(controlPlane)
 
 		// Story #919: Hoist signer construction so the command publisher, config
 		// handler, and job dispatcher all share the same signer instance.
