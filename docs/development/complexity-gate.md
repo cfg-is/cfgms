@@ -6,7 +6,7 @@ The in-repo analyzer exists because the per-function Halstead metrics and the ex
 
 ## What is measured
 
-Every production function or method with a body, in all build configurations (grep-level view: `//go:build windows` files are measured on Linux). Excluded: `_test.go`, `*.pb.go`, generated files, and the top-level `test/`, `web/` and `scripts/` trees, plus `bin/`, `build/`, `data/`, `node_modules/`, `vendor/`, dot-directories and nested modules.
+Every production function or method with a body, in all build configurations (grep-level view: `//go:build windows` files are measured on Linux). Excluded: `_test.go`, `*.pb.go`, generated files, and the top-level `test/`, `web/` and `scripts/` trees, plus `bin/`, `build/`, `data/`, `node_modules/`, `vendor/`, dot-directories and nested modules. The file walk is exported as `analyzer.WalkProduction` and shared with the duplication gate, so both measure the identical population.
 
 Per function: cyclomatic complexity (CC) and Halstead volume, difficulty and effort. Function literals are folded into their declaring function.
 

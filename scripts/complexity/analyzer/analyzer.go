@@ -45,12 +45,12 @@ var skippedDirs = map[string]bool{
 // the frontend and dev tooling are not measured.
 var skippedTopLevel = map[string]bool{"test": true, "web": true, "scripts": true}
 
-// Analyze walks each root inside fsys and returns one record per production
-// function or method, sorted by identity. It only parses source; analysed
-// code is never executed. Overlapping roots yield the same file twice and are
-// reported as a duplicate-identity error.
-func Analyze(fsys fs.FS, roots []string) ([]Function, error) {
-	var out []Function
+// WalkProduction walks each root inside fsys and calls visit with the path and
+// source of every production Go file: not _test.go, *.pb.go or generated, and
+// outside the skipped directories. It only parses package clauses; analysed
+// code is never executed. Analyze and any other tool measuring the same
+// population share this walk so the skip rules live in one place.
+func WalkProduction(fsys fs.FS, roots []string, visit func(path string, src []byte) error) error {
 	for _, root := range roots {
 		root = path.Clean(root)
 		err := fs.WalkDir(fsys, root, func(p string, d fs.DirEntry, err error) error {
@@ -63,16 +63,42 @@ func Analyze(fsys fs.FS, roots []string) ([]Function, error) {
 			if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") || strings.HasSuffix(p, ".pb.go") {
 				return nil
 			}
-			fns, err := analyzeFile(fsys, p)
+			src, err := fs.ReadFile(fsys, p)
 			if err != nil {
 				return err
 			}
-			out = append(out, fns...)
-			return nil
+			f, err := parser.ParseFile(token.NewFileSet(), p, src, parser.PackageClauseOnly|parser.ParseComments)
+			if err != nil {
+				return fmt.Errorf("parse %s: %w", p, err)
+			}
+			if ast.IsGenerated(f) {
+				return nil
+			}
+			return visit(p, src)
 		})
 		if err != nil {
-			return nil, err
+			return err
 		}
+	}
+	return nil
+}
+
+// Analyze walks each root inside fsys and returns one record per production
+// function or method, sorted by identity. It only parses source; analysed
+// code is never executed. Overlapping roots yield the same file twice and are
+// reported as a duplicate-identity error.
+func Analyze(fsys fs.FS, roots []string) ([]Function, error) {
+	var out []Function
+	err := WalkProduction(fsys, roots, func(p string, src []byte) error {
+		fns, err := analyzeFile(p, src)
+		if err != nil {
+			return err
+		}
+		out = append(out, fns...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	if err := checkDuplicates(out); err != nil {
 		return nil, err
@@ -101,18 +127,11 @@ func dirDecision(fsys fs.FS, root, p, name string) error {
 	return nil
 }
 
-func analyzeFile(fsys fs.FS, p string) ([]Function, error) {
-	src, err := fs.ReadFile(fsys, p)
-	if err != nil {
-		return nil, err
-	}
+func analyzeFile(p string, src []byte) ([]Function, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, p, src, parser.ParseComments)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", p, err)
-	}
-	if ast.IsGenerated(f) {
-		return nil, nil
 	}
 	constraint := buildConstraint(p, f)
 	ordinals := map[string]int{}
