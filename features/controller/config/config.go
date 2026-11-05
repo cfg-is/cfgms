@@ -1422,20 +1422,20 @@ func applyEnvCoreOverrides(cfg *Config) {
 	}
 }
 
-// envAtoi stores the named variable into dst when it is set and parses as an
+// envAtoi stores the named variable into *dst() when it is set and parses as an
 // integer; an unparsable value is ignored.
-func envAtoi(name string, dst *int) {
+func envAtoi(name string, dst func() *int) {
 	if raw := os.Getenv(name); raw != "" {
 		if val, err := strconv.Atoi(raw); err == nil {
-			*dst = val
+			*dst() = val
 		}
 	}
 }
 
-// envString stores the named variable into dst when it is non-empty.
-func envString(name string, dst *string) {
+// envString stores the named variable into *dst() when it is non-empty.
+func envString(name string, dst func() *string) {
 	if val := os.Getenv(name); val != "" {
-		*dst = val
+		*dst() = val
 	}
 }
 
@@ -1447,18 +1447,18 @@ func applyEnvCertificateOverrides(cfg *Config) {
 		}
 	}
 
-	envString("CFGMS_CERT_CA_PATH", &cfg.Certificate.CAPath)
-	envAtoi("CFGMS_CERT_RENEWAL_THRESHOLD_DAYS", &cfg.Certificate.RenewalThresholdDays)
-	envAtoi("CFGMS_CERT_SERVER_VALIDITY_DAYS", &cfg.Certificate.ServerCertValidityDays)
-	envAtoi("CFGMS_CERT_CLIENT_VALIDITY_DAYS", &cfg.Certificate.ClientCertValidityDays)
-	envString("CFGMS_CERT_SERVER_COMMON_NAME", &cfg.Certificate.Server.CommonName)
-	envString("CFGMS_CERT_SERVER_ORGANIZATION", &cfg.Certificate.Server.Organization)
+	envString("CFGMS_CERT_CA_PATH", func() *string { return &cfg.Certificate.CAPath })
+	envAtoi("CFGMS_CERT_RENEWAL_THRESHOLD_DAYS", func() *int { return &cfg.Certificate.RenewalThresholdDays })
+	envAtoi("CFGMS_CERT_SERVER_VALIDITY_DAYS", func() *int { return &cfg.Certificate.ServerCertValidityDays })
+	envAtoi("CFGMS_CERT_CLIENT_VALIDITY_DAYS", func() *int { return &cfg.Certificate.ClientCertValidityDays })
+	envString("CFGMS_CERT_SERVER_COMMON_NAME", func() *string { return &cfg.Certificate.Server.CommonName })
+	envString("CFGMS_CERT_SERVER_ORGANIZATION", func() *string { return &cfg.Certificate.Server.Organization })
 
 	// CFGMS_CERT_ARCHITECTURE: parsed for legacy detection only.
 	// Setting to "unified" triggers a startup error at ValidateCertificateArchitecture.
-	envString("CFGMS_CERT_ARCHITECTURE", &cfg.Certificate.Architecture)
+	envString("CFGMS_CERT_ARCHITECTURE", func() *string { return &cfg.Certificate.Architecture })
 
-	envAtoi("CFGMS_CERT_SIGNING_VALIDITY_DAYS", &cfg.Certificate.SigningCertValidityDays)
+	envAtoi("CFGMS_CERT_SIGNING_VALIDITY_DAYS", func() *int { return &cfg.Certificate.SigningCertValidityDays })
 
 	applyEnvPublicAPICertOverrides(cfg)
 }
@@ -1562,10 +1562,10 @@ func applyEnvGitStorageOverrides(conf map[string]interface{}) {
 
 // applyEnvLoggingOverrides applies the logging configuration overrides.
 func applyEnvLoggingOverrides(cfg *Config) {
-	envString("CFGMS_LOGGING_PROVIDER", &cfg.Logging.Provider)
-	envString("CFGMS_LOG_LEVEL", &cfg.Logging.Level)
-	envString("CFGMS_LOGGING_SERVICE_NAME", &cfg.Logging.ServiceName)
-	envString("CFGMS_LOGGING_COMPONENT", &cfg.Logging.Component)
+	envString("CFGMS_LOGGING_PROVIDER", func() *string { return &cfg.Logging.Provider })
+	envString("CFGMS_LOG_LEVEL", func() *string { return &cfg.Logging.Level })
+	envString("CFGMS_LOGGING_SERVICE_NAME", func() *string { return &cfg.Logging.ServiceName })
+	envString("CFGMS_LOGGING_COMPONENT", func() *string { return &cfg.Logging.Component })
 }
 
 // applyEnvTransportOverrides applies the CFGMS_TRANSPORT_* overrides and the
@@ -1614,7 +1614,7 @@ func applyEnvTransportOverrides(cfg *Config) {
 	}
 
 	// HTTP API configuration environment variables
-	envString("CFGMS_HTTP_LISTEN_ADDR", &cfg.ListenAddr)
+	envString("CFGMS_HTTP_LISTEN_ADDR", func() *string { return &cfg.ListenAddr })
 }
 
 // materializeTransport creates cfg.Transport when the file omitted the section.

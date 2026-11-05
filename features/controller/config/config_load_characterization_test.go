@@ -345,3 +345,16 @@ func TestConfigloadChar_ValidationOrderAndNilSections(t *testing.T) {
 		assert.Equal(t, "127.0.0.1:4", cfg.Transport.ListenAddr)
 	})
 }
+
+// A file may null out pointer sections; with no override variable set, loading
+// must not dereference them.
+func TestConfigloadChar_NilSectionsWithoutEnv(t *testing.T) {
+	for _, section := range []string{"certificate", "logging"} {
+		t.Run(section+" null", func(t *testing.T) {
+			require.NotPanics(t, func() {
+				_, err := configloadCharLoad(t, section+": null\n", nil)
+				require.NoError(t, err)
+			})
+		})
+	}
+}
