@@ -1,6 +1,6 @@
 # Duplication Gate
 
-`make duplication-check` measures clone-duplicated lines of the production Go population in the working tree and in a fresh materialisation of the merge-base with `develop`, applies three no-worsening rules and prints any findings. `make duplication-report` writes the same measurement as a versioned metric file without gating. The gate is not yet part of `make test-commit` or CI.
+`make duplication-check` measures clone-duplicated lines of the production Go population in the working tree and in a fresh materialisation of the merge-base with `develop`, applies three no-worsening rules and prints any findings. `make duplication-report` writes the same measurement as a versioned metric file without gating. `make duplication-replay` replays the rules over the last `DUPLICATION_REPLAY_N` (default 30) merged develop commits at `DUPLICATION_THRESHOLD` and prints per-PR outcomes and totals; set `DUPLICATION_BASELINE` to a ref to also print its baseline. Results are recorded in [duplication-gate-calibration.md](duplication-gate-calibration.md). The gate is not yet part of `make test-commit` or CI.
 
 ## What is measured
 
@@ -14,7 +14,7 @@ The detector (`scripts/complexity/duplication/detector`) works on `go/scanner` t
 - every identifier is one `IDENT` token and literals are one token per kind, so renaming identifiers or changing constants does not hide a copy (Type-1/2 clones);
 - keywords and operators are kept verbatim.
 
-Every window of K consecutive tokens (K is the threshold, default 150, `-threshold` overrides) gets a rolling 64-bit hash. Windows are bucketed tree-wide by hash and each bucket is verified by comparing the actual tokens, so a hash collision never creates a clone. A window is in a clone when its verified bucket holds another window in a different file, or one whose token range does not intersect its own. A **run** is a maximal sequence of consecutive in-clone windows of one file. A line counts as duplicated when it carries a token inside an unannotated run.
+Every window of K consecutive tokens (K is the threshold, default 200, `-threshold` overrides; see [calibration](duplication-gate-calibration.md) for how it was chosen) gets a rolling 64-bit hash. Windows are bucketed tree-wide by hash and each bucket is verified by comparing the actual tokens, so a hash collision never creates a clone. A window is in a clone when its verified bucket holds another window in a different file, or one whose token range does not intersect its own. A **run** is a maximal sequence of consecutive in-clone windows of one file. A line counts as duplicated when it carries a token inside an unannotated run.
 
 These numbers are in scanner tokens over verified windows. They do not transfer from `dupl` or any other tool, which use different units and thresholds.
 

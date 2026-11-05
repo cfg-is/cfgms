@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -298,12 +299,13 @@ func TestExecutionShutdownStopsStoreWrites(t *testing.T) {
 	assert.Equal(t, after, store.writes.Load(), "no store write may happen after Shutdown")
 }
 
-// slowTerminalStore wraps a real execution store and delays the terminal Save and
-// every Prune, recording when the terminal Save finished.
+// slowTerminalStore wraps a real execution store. It delays the terminal Save,
+// recording when that write finished, and holds every Prune until the test
+// releases it, so a Done that waited on retention pruning could never close.
 type slowTerminalStore struct {
 	business.WorkflowExecutionStore
 	saveDelay     time.Duration
-	pruneDelay    time.Duration
+	releasePrune  chan struct{}
 	terminalSaved atomic.Bool
 }
 
@@ -318,7 +320,11 @@ func (s *slowTerminalStore) Save(ctx context.Context, rec *business.WorkflowExec
 }
 
 func (s *slowTerminalStore) Prune(ctx context.Context, tenantID string, keep int) (int, error) {
-	time.Sleep(s.pruneDelay)
+	select {
+	case <-s.releasePrune:
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
 	return s.WorkflowExecutionStore.Prune(ctx, tenantID, keep)
 }
 
@@ -327,21 +333,30 @@ func TestDoneClosesAfterDurableTerminalWriteNotAfterPrune(t *testing.T) {
 	slow := &slowTerminalStore{
 		WorkflowExecutionStore: openSQLiteExecutionStore(t, path),
 		saveDelay:              300 * time.Millisecond,
-		pruneDelay:             1500 * time.Millisecond,
+		releasePrune:           make(chan struct{}),
 	}
 	engine := newExecutionStoreEngine(t, slow)
+	// Registered after the engine, so it runs before engine.Shutdown (cleanups are
+	// LIFO) and the held Prune can finish instead of blocking Shutdown.
+	var release sync.Once
+	releasePrune := func() { release.Do(func() { close(slow.releasePrune) }) }
+	t.Cleanup(releasePrune)
 
 	start := time.Now()
 	exec, err := engine.ExecuteWorkflow(execStoreCtx(executionTestTenant), twoStepWorkflow("slow-wf"), nil)
 	require.NoError(t, err)
 
+	// Every Prune is held until releasePrune, so Done can only close here if it
+	// does not wait for retention pruning. The timeout is a deadlock guard, not
+	// a measurement: Done never closes while Prune is held if it depends on it.
 	select {
 	case <-exec.Done:
-	case <-time.After(1200 * time.Millisecond):
-		t.Fatalf("Done still open after the terminal write finished, status: %s", exec.GetStatus())
+	case <-time.After(30 * time.Second):
+		t.Fatalf("Done still open while retention pruning is held, status: %s", exec.GetStatus())
 	}
 	assert.GreaterOrEqual(t, time.Since(start), slow.saveDelay, "Done closed before the slowed store write")
 	assert.True(t, slow.terminalSaved.Load(), "Done closed before the terminal write was durable")
+	releasePrune()
 
 	fresh := newExecutionStoreEngine(t, openSQLiteExecutionStore(t, path))
 	got, err := fresh.GetExecution(context.Background(), executionTestTenant, exec.ID)

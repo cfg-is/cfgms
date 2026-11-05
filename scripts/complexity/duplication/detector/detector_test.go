@@ -5,7 +5,10 @@ package detector
 
 import (
 	"fmt"
+	"os"
 	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -18,8 +21,22 @@ func TestThresholdBelowTwoErrors(t *testing.T) {
 			t.Errorf("threshold %d: want error", k)
 		}
 	}
-	if DefaultThreshold != 150 {
-		t.Fatalf("DefaultThreshold = %d", DefaultThreshold)
+}
+
+// TestDefaultThresholdMatchesCalibrationDoc keeps the constant equal to the
+// number the calibration record states and justifies.
+func TestDefaultThresholdMatchesCalibrationDoc(t *testing.T) {
+	doc, err := os.ReadFile("../../../../docs/development/duplication-gate-calibration.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile("`detector.DefaultThreshold` is (\\d+)").FindSubmatch(doc)
+	if m == nil {
+		t.Fatal("calibration doc does not state detector.DefaultThreshold")
+	}
+	want, _ := strconv.Atoi(string(m[1]))
+	if DefaultThreshold != want {
+		t.Fatalf("DefaultThreshold = %d, calibration doc states %d", DefaultThreshold, want)
 	}
 }
 
