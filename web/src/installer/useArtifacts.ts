@@ -5,7 +5,8 @@
  * useArtifacts (Issue #5456, Epic #5300) — installer artifact upload/delete and
  * signed steward binary publish for the Installer page.
  *
- *   PUT    /api/v1/installer/artifacts/{platform}/{arch}   raw file body, presence tap
+ *   PUT    /api/v1/installer/artifacts/{platform}/{arch}?signature=<base64>
+ *                                                          raw file body, presence tap
  *   DELETE /api/v1/installer/artifacts/{platform}/{arch}   presence tap
  *   POST   /api/v1/installer/steward-binaries/{version}/{platform}/{arch}?signature=<base64>
  *                                                          raw file body, presence tap
@@ -26,6 +27,13 @@ export const OVERSIZE_MESSAGE = `This file is larger than the ${MAX_BODY_LABEL} 
 
 export interface PublishParams {
   version: string
+  platform: string
+  arch: string
+  signature: string
+  file: File
+}
+
+export interface UploadParams {
   platform: string
   arch: string
   signature: string
@@ -53,7 +61,7 @@ export interface UseArtifacts {
   busy: boolean
   error: string | null
   note: string | null
-  upload: (platform: string, arch: string, file: File) => Promise<boolean>
+  upload: (params: UploadParams) => Promise<boolean>
   remove: (platform: string, arch: string) => Promise<boolean>
   publish: (params: PublishParams) => Promise<boolean>
 }
@@ -88,7 +96,12 @@ export function useArtifacts(onChanged: () => void): UseArtifacts {
   )
 
   const upload = useCallback(
-    (platform: string, arch: string, file: File) => {
+    ({ platform, arch, signature, file }: UploadParams) => {
+      if (signature.trim() === '') {
+        setNote(null)
+        setError('A publisher signature is required — nothing was sent.')
+        return Promise.resolve(false)
+      }
       if (file.size > MAX_BODY_BYTES) {
         setNote(null)
         setError(OVERSIZE_MESSAGE)
@@ -98,7 +111,7 @@ export function useArtifacts(onChanged: () => void): UseArtifacts {
         'Upload failed',
         `Uploaded the ${platform}/${arch} artifact.`,
         () =>
-          apiFetch(artifactPath(platform, arch), {
+          apiFetch(`${artifactPath(platform, arch)}?signature=${encodeURIComponent(signature.trim())}`, {
             method: 'PUT',
             headers: { 'Content-Type': file.type || 'application/octet-stream' },
             body: file,

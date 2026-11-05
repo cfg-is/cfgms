@@ -528,9 +528,10 @@ function ArtifactManageSection({ artifacts }: { artifacts: UseArtifacts }) {
   const [pubPlatform, setPubPlatform] = useState('')
   const [pubArch, setPubArch] = useState('')
   const [pubSignature, setPubSignature] = useState('')
+  const [upSignature, setUpSignature] = useState('')
   const [pubFile, setPubFile] = useState<File | null>(null)
 
-  const canUpload = !busy && upPlatform !== '' && upArch !== '' && upFile !== null
+  const canUpload = !busy && upPlatform !== '' && upArch !== '' && upSignature.trim() !== '' && upFile !== null
   const canPublish =
     !busy && pubVersion.trim() !== '' && pubPlatform !== '' && pubArch !== '' && pubSignature.trim() !== '' && pubFile !== null
 
@@ -562,6 +563,16 @@ function ArtifactManageSection({ artifacts }: { artifacts: UseArtifacts }) {
           </select>
         </label>
         <label className="field-label">
+          Signature (base64, from sign-steward-binary --installer)
+          <input
+            type="text"
+            className="wf-input mono2"
+            value={upSignature}
+            onChange={(e) => setUpSignature(e.target.value)}
+            data-testid="upload-signature"
+          />
+        </label>
+        <label className="field-label">
           Artifact file
           <input
             type="file"
@@ -575,7 +586,7 @@ function ArtifactManageSection({ artifacts }: { artifacts: UseArtifacts }) {
             type="button"
             className="wf-btn-sm"
             disabled={!canUpload}
-            onClick={() => upFile !== null && void upload(upPlatform, upArch, upFile)}
+            onClick={() => upFile !== null && void upload({ platform: upPlatform, arch: upArch, signature: upSignature, file: upFile })}
             data-testid="upload-btn"
           >
             Upload artifact
