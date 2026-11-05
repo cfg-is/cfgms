@@ -38,7 +38,18 @@ type Server struct {
 	registry     registry.Registry
 	controlPlane controlplaneInterfaces.ControlPlaneProvider
 	logger       logging.Logger
+
+	// authorizer re-verifies, inside the handler, that the caller is a cluster
+	// peer node before the operator-origin marker is restored (Issue #5665). The
+	// listener's interceptor already gates the RPC; this keeps the marker from
+	// depending on how the server happens to be mounted. Nil never restores it.
+	authorizer *PeerAuthorizer
 }
+
+// SetPeerAuthorizer binds the authorizer that decides whether a caller may supply
+// the operator-origin marker. Without one the marker is never restored, so every
+// forwarded command is treated as automated.
+func (s *Server) SetPeerAuthorizer(a *PeerAuthorizer) { s.authorizer = a }
 
 // NewServer constructs the internal delivery gRPC service handler. reg and
 // controlPlane must be the node-local registry and control-plane provider —
@@ -80,7 +91,20 @@ func (s *Server) DeliverCommand(ctx context.Context, req *deliverypb.DeliverComm
 		return nil, status.Error(codes.InvalidArgument, "command steward_id does not match request steward_id")
 	}
 
+	// The operator-origin marker is restored only from an authenticated peer
+	// node. A steward or admin certificate fails the authorizer, so a caller that
+	// is not a peer cannot supply it; the command is then delivered as automated.
+	if req.GetOperatorOrigin() && s.authorizer != nil && s.authorizer.Authorize(ctx) == nil {
+		ctx = controlplaneInterfaces.WithOperatorOrigin(ctx, req.GetOperatorPrincipal())
+	}
+
 	if err := s.controlPlane.SendCommand(ctx, cmd); err != nil {
+		if errors.Is(err, controlplaneInterfaces.ErrStewardLockedDown) {
+			// This node's own gate refused the command. It is reported as a
+			// refusal, never as "not connected", so the caller does not retry it
+			// against another peer.
+			return nil, status.Error(codes.FailedPrecondition, "steward is locked down")
+		}
 		if errors.Is(err, controlplaneInterfaces.ErrStewardNotConnected) {
 			// The steward disconnected between our registry check above and the
 			// send itself (race with a concurrent disconnect) — report exactly

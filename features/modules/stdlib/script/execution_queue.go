@@ -78,6 +78,13 @@ type QueuedExecution struct {
 	Action *StewardActionSpec `json:"action,omitempty"`
 }
 
+// MetaOperatorPrincipal is the QueuedExecution.Metadata key that records the
+// authenticated operator whose API call created the execution. Only the run
+// synthesis functions the operator API handlers call write it; a workflow or
+// scheduled run never carries it. The dispatcher turns it into the
+// operator-origin marker on the command it sends (Issue #5665).
+const MetaOperatorPrincipal = "operator_principal"
+
 // NewExecutionQueue creates a new ExecutionQueue backed by the provided QueueStore.
 //
 // If store is nil, an InMemoryQueueStore is used (suitable for testing and dev).

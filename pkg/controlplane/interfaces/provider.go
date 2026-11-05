@@ -291,3 +291,132 @@ type InboundController interface {
 	// InboundHooks.OnCommand and drops every other payload.
 	SetReportOnly(on bool)
 }
+
+// ErrStewardLockedDown is returned to a controller caller when the command gate
+// refuses a command to a locked-down (tampered) steward. It is distinct from
+// ErrStewardNotConnected so a refusal is never mistaken for "try a peer node" or
+// "retry later". The steward never sees it; the steward-side handling of a
+// refused pull is the typed gRPC error above.
+var ErrStewardLockedDown = errors.New("steward is locked down: command refused")
+
+// LockdownChecker is the one-method view of the lockdown predicate the command
+// gate consumes. A non-nil error means the status could not be established; the
+// gate then refuses the command (fail closed).
+type LockdownChecker interface {
+	IsLockedDown(ctx context.Context, stewardID string) (bool, error)
+}
+
+// LockdownObserver receives the gate's audit events. Nil disables auditing.
+type LockdownObserver interface {
+	// CommandRefused is told once per refused command. reason is a short fixed
+	// token, never caller text.
+	CommandRefused(ctx context.Context, stewardID string, cmdType types.CommandType, reason string)
+
+	// OperatorCommandAllowed is told of every operator-origin command the gate
+	// lets through to a locked-down steward.
+	OperatorCommandAllowed(ctx context.Context, operator, stewardID string, cmdType types.CommandType)
+}
+
+// LockdownPolicy classifies one command type for a locked-down steward.
+type LockdownPolicy int
+
+const (
+	// LockdownDenied is refused for a locked-down steward even when
+	// operator-originated, until an operator restore. It is the zero value, so a
+	// command type missing from CommandLockdownPolicy is denied by default.
+	LockdownDenied LockdownPolicy = iota
+
+	// LockdownOperatorOnly is delivered to a locked-down steward only when the
+	// context carries the operator-origin marker.
+	LockdownOperatorOnly
+)
+
+// CommandLockdownPolicy is the one allow-list of command types that may reach a
+// locked-down steward. Anything not listed is denied, so a new command type must
+// opt in here. Every automated or controller-originated command is denied
+// regardless of this table, because it carries no operator-origin marker.
+var CommandLockdownPolicy = map[types.CommandType]LockdownPolicy{
+	types.CommandExecuteScript:  LockdownOperatorOnly,
+	types.CommandOpenTerminal:   LockdownOperatorOnly,
+	types.CommandStewardAction:  LockdownOperatorOnly,
+	types.CommandObserveModules: LockdownOperatorOnly,
+	// sync_dna is a request with no data to the endpoint; reconnect carries no information.
+	types.CommandSyncDNA:   LockdownOperatorOnly,
+	types.CommandReconnect: LockdownOperatorOnly,
+	// relay_response is stamped only for a relay request that belongs to an open
+	// execution an operator started on that steward.
+	types.CommandRelayResponse: LockdownOperatorOnly,
+
+	types.CommandSyncConfig:        LockdownDenied,
+	types.CommandPushSigningCert:   LockdownDenied,
+	types.CommandPushStewardBinary: LockdownDenied,
+}
+
+type operatorOriginKey struct{}
+
+// WithOperatorOrigin returns ctx carrying the operator-origin marker. It is the
+// storage primitive behind features/controller/commands.NewOperatorOrigin, the
+// only constructor controller code may use, and behind the peer-authenticated
+// restore in internaldelivery. An empty principal yields no marker. A test
+// pins the set of non-test callers.
+func WithOperatorOrigin(ctx context.Context, principal string) context.Context {
+	if principal == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, operatorOriginKey{}, principal)
+}
+
+// OperatorOriginFrom reports the operator principal carried on ctx.
+func OperatorOriginFrom(ctx context.Context) (string, bool) {
+	principal, ok := ctx.Value(operatorOriginKey{}).(string)
+	return principal, ok && principal != ""
+}
+
+// LockdownGate is the server-side, default-deny gate on controller-pushed
+// commands. A provider calls Check before it looks the steward up in its
+// registry, so a locked steward attached to another node is refused here and
+// never forwarded.
+type LockdownGate struct {
+	checker  LockdownChecker
+	observer LockdownObserver
+}
+
+// NewLockdownGate builds a gate over the predicate. observer may be nil.
+func NewLockdownGate(checker LockdownChecker, observer LockdownObserver) *LockdownGate {
+	return &LockdownGate{checker: checker, observer: observer}
+}
+
+// Check returns nil when cmdType may be delivered to stewardID, and
+// ErrStewardLockedDown when it must be refused. A lookup error refuses.
+func (g *LockdownGate) Check(ctx context.Context, stewardID string, cmdType types.CommandType) error {
+	if g == nil || g.checker == nil {
+		return nil
+	}
+	locked, err := g.checker.IsLockedDown(ctx, stewardID)
+	if err != nil {
+		g.refuse(ctx, stewardID, cmdType, "lookup_failed")
+		return ErrStewardLockedDown
+	}
+	if !locked {
+		return nil
+	}
+	if CommandLockdownPolicy[cmdType] != LockdownOperatorOnly {
+		g.refuse(ctx, stewardID, cmdType, "command_type_denied")
+		return ErrStewardLockedDown
+	}
+	operator, ok := OperatorOriginFrom(ctx)
+	if !ok {
+		g.refuse(ctx, stewardID, cmdType, "no_operator_origin")
+		return ErrStewardLockedDown
+	}
+	if g.observer != nil {
+		g.observer.OperatorCommandAllowed(ctx, operator, stewardID, cmdType)
+	}
+	return nil
+}
+
+func (g *LockdownGate) refuse(ctx context.Context, stewardID string, cmdType types.CommandType, reason string) {
+	if g.observer != nil {
+		g.observer.CommandRefused(ctx, stewardID, cmdType, reason)
+	}
+}

@@ -1354,6 +1354,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				grpcCP.WithStewardTenantResolver(tenantResolver),
 				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger)),
 				grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, auditManager, logger)),
+				// Issue #5665: the one default-deny gate on controller-pushed commands.
+				grpcCP.WithLockdown(lockdown, newLockdownAuditObserver(auditManager, stewardStore, logger)),
 			)
 		} else {
 			composite := service.NewCompositeOnConnectHook(logger, registryConnectHook, completionReconciler, routingHook, drainHook, lockdown)
@@ -1373,6 +1375,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				grpcCP.WithStewardTenantResolver(tenantResolver),
 				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger)),
 				grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, auditManager, logger)),
+				// Issue #5665: the one default-deny gate on controller-pushed commands.
+				grpcCP.WithLockdown(lockdown, newLockdownAuditObserver(auditManager, stewardStore, logger)),
 			)
 		}
 		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
@@ -1481,6 +1485,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// out.
 		var dispatchControlPlane = controlPlane
 		deliveryServer = internaldelivery.NewServer(connRegistry, controlPlane, logger)
+		// Issue #5665: the operator-origin marker is restored only from a caller
+		// that passes the cluster-peer authorization.
+		deliveryServer.SetPeerAuthorizer(internaldelivery.NewPeerAuthorizer(clusterPeerNodeIDs(haManager), logger))
 		if cfg.HA.IsClusterMode() && cfg.InternalDeliveryListenAddr == "" {
 			// Issue #4512: without the delivery listener this node can only reach
 			// stewards connected to itself; say so rather than degrading silently.
@@ -1590,6 +1597,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			Signer:             commandSigner,
 			RequireSignedAdhoc: cfg.Execution.RequireSignedAdhoc,
 			IsLocallyConnected: isLocallyConnected,
+			// Issue #5665: refuse before preparing a payload for a locked steward.
+			Lockdown: lockdown,
 			// Issue #4510: same term source as the command publisher below, so
 			// execute_script passes the steward fence like every other command.
 			TermSource: ha.CommandTermSource{Manager: haManager},

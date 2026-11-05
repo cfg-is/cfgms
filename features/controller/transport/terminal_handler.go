@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
+	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/terminal"
 	"github.com/cfgis/cfgms/pkg/audit"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
@@ -409,7 +410,10 @@ func (h *TerminalHandler) ServeWebSocket(w http.ResponseWriter, r *http.Request)
 		params["shell"] = shell
 		params["cols"] = int32(cols)
 		params["rows"] = int32(rows)
-		_, cmdErr := h.commandPub.PublishCommand(ctx, stewardID, controlplaneTypes.CommandOpenTerminal, params)
+		// Only an authenticated operator session reaches this point, so the open is
+		// operator-origin; a locked-down steward accepts it for investigation.
+		openCtx := commands.NewOperatorOrigin(ctx, userID)
+		_, cmdErr := h.commandPub.PublishCommand(openCtx, stewardID, controlplaneTypes.CommandOpenTerminal, params)
 		if cmdErr != nil {
 			if h.logger != nil {
 				h.logger.Warn("terminal: dispatch open-terminal command failed",

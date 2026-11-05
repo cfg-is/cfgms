@@ -194,6 +194,10 @@ type Provider struct {
 	// WithIdentityConflictObserver.
 	identityConflictObserver IdentityConflictObserver
 
+	// lockdownGate is the default-deny gate on controller-pushed commands
+	// (Issue #5665). Nil = no gate. Injected via WithLockdown.
+	lockdownGate *interfaces.LockdownGate
+
 	// provenanceChecker compares a connecting host's attributes against the
 	// approved record after the revocation and approval gates (ADR-034 §2).
 	// Nil = no check. Injected via WithProvenanceChecker.
@@ -1331,6 +1335,14 @@ func (p *Provider) SendCommand(ctx context.Context, cmd *types.SignedCommand) er
 		return fmt.Errorf("SendCommand: command must not be nil")
 	}
 
+	// The lockdown gate runs before the registry lookup: a locked steward that is
+	// attached to another node must be refused here, not reported as not
+	// connected, which would send the command to that peer.
+	if err := p.lockdownGate.Check(ctx, cmd.Command.StewardID, cmd.Command.Type); err != nil {
+		p.deliveryFailures.Add(1)
+		return err
+	}
+
 	conn, ok := p.registry.Get(cmd.Command.StewardID)
 	if !ok {
 		p.deliveryFailures.Add(1)
@@ -1399,6 +1411,11 @@ func (p *Provider) FanOutCommand(ctx context.Context, cmd *types.SignedCommand, 
 	conns := p.registry.GetMany(stewardIDs)
 
 	for _, id := range stewardIDs {
+		if err := p.lockdownGate.Check(ctx, id, cmd.Command.Type); err != nil {
+			result.Failed[id] = err
+			p.deliveryFailures.Add(1)
+			continue
+		}
 		conn, ok := conns[id]
 		if !ok {
 			result.Failed[id] = fmt.Errorf("steward %s not connected: %w", id, interfaces.ErrStewardNotConnected)

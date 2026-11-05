@@ -31,11 +31,17 @@ const (
 // SignedCommandToProto/SignedCommandFromProto) — the receiving node decodes
 // it and hands it to its own local SendCommand path unchanged.
 type DeliverCommandRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	StewardId     string                 `protobuf:"bytes,1,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
-	Command       *transport.Command     `protobuf:"bytes,2,opt,name=command,proto3" json:"command,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	StewardId string                 `protobuf:"bytes,1,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
+	Command   *transport.Command     `protobuf:"bytes,2,opt,name=command,proto3" json:"command,omitempty"`
+	// operator_origin is true when the sending node's caller marked the command
+	// as started by an authenticated operator. The receiving node restores the
+	// marker only for a caller that passed the peer-node authorization.
+	OperatorOrigin bool `protobuf:"varint,3,opt,name=operator_origin,json=operatorOrigin,proto3" json:"operator_origin,omitempty"`
+	// operator_principal names the operator when operator_origin is true.
+	OperatorPrincipal string `protobuf:"bytes,4,opt,name=operator_principal,json=operatorPrincipal,proto3" json:"operator_principal,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *DeliverCommandRequest) Reset() {
@@ -80,6 +86,20 @@ func (x *DeliverCommandRequest) GetCommand() *transport.Command {
 		return x.Command
 	}
 	return nil
+}
+
+func (x *DeliverCommandRequest) GetOperatorOrigin() bool {
+	if x != nil {
+		return x.OperatorOrigin
+	}
+	return false
+}
+
+func (x *DeliverCommandRequest) GetOperatorPrincipal() string {
+	if x != nil {
+		return x.OperatorPrincipal
+	}
+	return ""
 }
 
 // DeliverCommandResponse reports whether the receiving node's local registry
@@ -156,11 +176,13 @@ var File_clusterdelivery_delivery_proto protoreflect.FileDescriptor
 
 const file_clusterdelivery_delivery_proto_rawDesc = "" +
 	"\n" +
-	"\x1eclusterdelivery/delivery.proto\x12\x15cfgms.clusterdelivery\x1a\x17transport/control.proto\"j\n" +
+	"\x1eclusterdelivery/delivery.proto\x12\x15cfgms.clusterdelivery\x1a\x17transport/control.proto\"\xc2\x01\n" +
 	"\x15DeliverCommandRequest\x12\x1d\n" +
 	"\n" +
 	"steward_id\x18\x01 \x01(\tR\tstewardId\x122\n" +
-	"\acommand\x18\x02 \x01(\v2\x18.cfgms.transport.CommandR\acommand\"u\n" +
+	"\acommand\x18\x02 \x01(\v2\x18.cfgms.transport.CommandR\acommand\x12'\n" +
+	"\x0foperator_origin\x18\x03 \x01(\bR\x0eoperatorOrigin\x12-\n" +
+	"\x12operator_principal\x18\x04 \x01(\tR\x11operatorPrincipal\"u\n" +
 	"\x16DeliverCommandResponse\x12\x1c\n" +
 	"\tdelivered\x18\x01 \x01(\bR\tdelivered\x12#\n" +
 	"\rnot_connected\x18\x02 \x01(\bR\fnotConnected\x12\x18\n" +

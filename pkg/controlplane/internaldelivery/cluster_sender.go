@@ -160,11 +160,18 @@ func (c *ClusterAwareSender) forwardToPeer(ctx context.Context, cmd *types.Signe
 		return fmt.Errorf("internaldelivery: failed to dial node %s: %w", nodeID, err)
 	}
 
-	client := deliverypb.NewDeliveryServiceClient(conn)
-	resp, err := client.DeliverCommand(ctx, &deliverypb.DeliverCommandRequest{
+	req := &deliverypb.DeliverCommandRequest{
 		StewardId: stewardID,
 		Command:   grpcconvert.SignedCommandToProto(cmd),
-	})
+	}
+	// Carry the operator-origin marker so the receiving node's own gate sees it.
+	// An unmarked command stays unmarked.
+	if principal, ok := controlplaneInterfaces.OperatorOriginFrom(ctx); ok {
+		req.OperatorOrigin = true
+		req.OperatorPrincipal = principal
+	}
+	client := deliverypb.NewDeliveryServiceClient(conn)
+	resp, err := client.DeliverCommand(ctx, req)
 	if err != nil {
 		return fmt.Errorf("internaldelivery: delivery RPC to node %s failed: %w", nodeID, err)
 	}

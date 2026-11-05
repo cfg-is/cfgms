@@ -216,6 +216,9 @@ func SynthesizeScriptRunForDevices(
 		if idempotent {
 			meta["idempotent"] = true
 		}
+		if createdBy != "" {
+			meta[scriptmodule.MetaOperatorPrincipal] = createdBy
+		}
 		if len(requiredAPIScope) > 0 {
 			meta["required_api_scope"] = requiredAPIScope
 		}
@@ -363,6 +366,9 @@ func SynthesizeCommandRunForDevices(
 			"job_id":                jobID,
 			"inline_script_content": inlineContent,
 		}
+		if createdBy != "" {
+			metadata[scriptmodule.MetaOperatorPrincipal] = createdBy
+		}
 		if commandSignature != nil {
 			metadata["signature_algorithm"] = commandSignature.Algorithm
 			metadata["signature_value"] = commandSignature.Value
@@ -484,6 +490,9 @@ func SynthesizeActionRunForDevices(
 			"targets":         targets,
 			"nonce":           nonce,
 			"expires_at":      expiresAt.UTC().Format(time.RFC3339),
+		}
+		if createdBy != "" {
+			metadata[scriptmodule.MetaOperatorPrincipal] = createdBy
 		}
 		for key, value := range map[string]string{
 			"signature_algorithm":         commandSignature.Algorithm,
