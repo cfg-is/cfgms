@@ -103,6 +103,21 @@ const reportOnlyStewardID = "steward-report-only"
 
 func newReportOnlyController(t *testing.T) *reportOnlyController {
 	t.Helper()
+	return newReportOnlyControllerWithLockdown(t, nil)
+}
+
+// lockedStewards is the lockdown predicate of a controller that has these
+// stewards locked down and no others.
+type lockedStewards map[string]bool
+
+func (l lockedStewards) IsLockedDown(_ context.Context, stewardID string) (bool, error) {
+	return l[stewardID], nil
+}
+
+// newReportOnlyControllerWithLockdown is newReportOnlyController with the
+// controller's lockdown gate installed over checker. A nil checker installs no gate.
+func newReportOnlyControllerWithLockdown(t *testing.T, checker controlplaneInterfaces.LockdownChecker) *reportOnlyController {
+	t.Helper()
 	mgr, err := cert.NewManager(&cert.ManagerConfig{
 		StoragePath: t.TempDir(),
 		CAConfig:    &cert.CAConfig{Organization: "CFGMS Report-Only Test CA", Country: "US", ValidityDays: 30},
@@ -128,7 +143,7 @@ func newReportOnlyController(t *testing.T) *reportOnlyController {
 		events:     make(chan *cpTypes.Event, 64),
 		logs:       make(chan *transportpb.LogEntry, 64),
 	}
-	c.cp = grpcCP.New(grpcCP.ModeServer)
+	c.cp = grpcCP.New(grpcCP.ModeServer, grpcCP.WithLockdown(checker, nil))
 	require.NoError(t, c.cp.Initialize(context.Background(), map[string]interface{}{
 		"mode": "server", "grpc_server": grpcSrv, "registry": c.reg,
 	}))
@@ -381,7 +396,9 @@ func TestReportOnly_RepairWithoutHandlerIsDroppedAndCounted(t *testing.T) {
 }
 
 func TestReportOnly_LockedCommandHandlerReceivesCommandAndPeerChain(t *testing.T) {
-	ctl := newReportOnlyController(t)
+	// The controller attaches the signer chain only to a steward it has locked
+	// down, and only operator-origin commands reach such a steward.
+	ctl := newReportOnlyControllerWithLockdown(t, lockedStewards{reportOnlyStewardID: true})
 	c := newReportOnlyClient(t, ctl, nil)
 
 	type got struct {
@@ -394,11 +411,14 @@ func TestReportOnly_LockedCommandHandlerReceivesCommandAndPeerChain(t *testing.T
 		return nil
 	})
 	signer := []byte("signer-chain")
-	require.NoError(t, ctl.cp.SendCommand(context.Background(), &cpTypes.SignedCommand{Command: cpTypes.Command{
-		ID: "locked-1", Type: cpTypes.CommandExecuteScript, StewardID: reportOnlyStewardID, Timestamp: time.Now(), SignerChainPEM: signer}}))
+	operatorCtx := controlplaneInterfaces.WithOperatorOrigin(context.Background(), "operator-1")
+	require.NoError(t, ctl.cp.SendCommand(operatorCtx, &cpTypes.SignedCommand{Command: cpTypes.Command{
+		ID: "locked-1", Type: cpTypes.CommandExecuteScript, StewardID: reportOnlyStewardID, Timestamp: time.Now()},
+		SignerChainPEM: signer}))
 	select {
 	case g := <-received:
 		assert.Equal(t, "locked-1", g.cmd.Command.ID)
+		assert.Equal(t, signer, g.cmd.SignerChainPEM)
 		assert.Equal(t, signer, g.cmd.Command.SignerChainPEM)
 		require.NotEmpty(t, g.chain)
 		assert.Equal(t, "localhost", g.chain[0].Subject.CommonName)

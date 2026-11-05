@@ -1338,7 +1338,8 @@ func (p *Provider) SendCommand(ctx context.Context, cmd *types.SignedCommand) er
 	// The lockdown gate runs before the registry lookup: a locked steward that is
 	// attached to another node must be refused here, not reported as not
 	// connected, which would send the command to that peer.
-	if err := p.lockdownGate.Check(ctx, cmd.Command.StewardID, cmd.Command.Type); err != nil {
+	locked, err := p.lockdownGate.CheckLocked(ctx, cmd.Command.StewardID, cmd.Command.Type)
+	if err != nil {
 		p.deliveryFailures.Add(1)
 		return err
 	}
@@ -1350,7 +1351,7 @@ func (p *Provider) SendCommand(ctx context.Context, cmd *types.SignedCommand) er
 	}
 
 	msg := &transportpb.ControlMessage{
-		Payload: &transportpb.ControlMessage_Command{Command: signedCommandToProto(cmd)},
+		Payload: &transportpb.ControlMessage_Command{Command: signedCommandToProto(withSignerChain(cmd, locked))},
 	}
 
 	if err := conn.Send(msg); err != nil {
@@ -1392,6 +1393,19 @@ func (p *Provider) sendSignal(stewardID string, msg *transportpb.ControlMessage)
 	return nil
 }
 
+// withSignerChain returns cmd as it goes to one steward: unchanged for a
+// locked-down steward, and without the signer chain for every other steward, so
+// unlocked traffic is the same on the wire as before the chain existed.
+func withSignerChain(cmd *types.SignedCommand, locked bool) *types.SignedCommand {
+	if locked || (len(cmd.SignerChainPEM) == 0 && len(cmd.Command.SignerChainPEM) == 0) {
+		return cmd
+	}
+	stripped := *cmd
+	stripped.SignerChainPEM = nil
+	stripped.Command.SignerChainPEM = nil
+	return &stripped
+}
+
 func (p *Provider) FanOutCommand(ctx context.Context, cmd *types.SignedCommand, stewardIDs []string) (*types.FanOutResult, error) {
 	if p.mode != ModeServer {
 		return nil, fmt.Errorf("FanOutCommand is only available in server mode")
@@ -1404,17 +1418,27 @@ func (p *Provider) FanOutCommand(ctx context.Context, cmd *types.SignedCommand, 
 		Failed: make(map[string]error),
 	}
 
-	msg := &transportpb.ControlMessage{
-		Payload: &transportpb.ControlMessage_Command{Command: signedCommandToProto(cmd)},
+	// Two wire forms, built once: with the signer chain for locked-down stewards,
+	// without it for every other steward.
+	chained := &transportpb.ControlMessage{
+		Payload: &transportpb.ControlMessage_Command{Command: signedCommandToProto(withSignerChain(cmd, true))},
+	}
+	plain := &transportpb.ControlMessage{
+		Payload: &transportpb.ControlMessage_Command{Command: signedCommandToProto(withSignerChain(cmd, false))},
 	}
 
 	conns := p.registry.GetMany(stewardIDs)
 
 	for _, id := range stewardIDs {
-		if err := p.lockdownGate.Check(ctx, id, cmd.Command.Type); err != nil {
+		locked, err := p.lockdownGate.CheckLocked(ctx, id, cmd.Command.Type)
+		if err != nil {
 			result.Failed[id] = err
 			p.deliveryFailures.Add(1)
 			continue
+		}
+		msg := plain
+		if locked {
+			msg = chained
 		}
 		conn, ok := conns[id]
 		if !ok {

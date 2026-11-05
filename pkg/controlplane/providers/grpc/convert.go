@@ -107,6 +107,11 @@ func signedCommandToProto(sc *types.SignedCommand) *transportpb.Command {
 	if pb == nil {
 		return nil
 	}
+	// The envelope's chain travels when set (the provider has already stripped it
+	// for a steward that is not locked down); otherwise the inner command's.
+	if len(sc.SignerChainPEM) > 0 {
+		pb.SignerChainPem = sc.SignerChainPEM
+	}
 	if sc.Signature != nil {
 		sigJSON, err := json.Marshal(sc.Signature)
 		if err == nil {
@@ -160,8 +165,9 @@ func signedCommandFromProto(pb *transportpb.Command) *types.SignedCommand {
 		return nil
 	}
 	sc := &types.SignedCommand{
-		Command:   *cmd,
-		Signature: sig,
+		Command:        *cmd,
+		Signature:      sig,
+		SignerChainPEM: cmd.SignerChainPEM,
 	}
 	// Preserve the proto-wire string map for signature verification. The handler
 	// must verify against this form, not cmd.Params, because stringMapToInterfaceMap
