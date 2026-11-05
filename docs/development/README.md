@@ -34,6 +34,7 @@ This directory contains detailed development guides, standards, and workflows fo
 - [Agent Dispatch Reference](agent-dispatch.md) - Container infrastructure, credentials, troubleshooting
 - [Acceptance Reviewer Verification](acceptance-reviewer-verification.md) - Code-reference verification model for acceptance checking
 - [Complexity Report](complexity-gate.md) - `make complexity-report`: segments, metric file contract, baseline inventory
+- [Duplication Gate](duplication-gate.md) - `make duplication-check`: clone measurement, gate rules, annotations, limits
 - [Code Navigation Tooling](code-navigation-tooling.md) - grep + Read navigation workflow and its measured failure modes
 - [Documentation Boundaries](documentation-boundaries.md) - Product docs vs private-deployment docs
 - [Steward runtime](../architecture/steward-operating-model.md) - Lifecycle, observation, convergence and local/managed entry paths

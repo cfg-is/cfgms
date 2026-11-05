@@ -130,7 +130,3 @@ packages:
   # features/controller/server.Server directly, matching
   # cmd/controller/main.go's own wiring, and all four packages are gone from
   # the tree.
-
-  # --- Pending wiring-in by a tracked follow-up story -----------------------
-  - path: scripts/complexity/duplication/gate
-    reason: "Duplication gate rules (#5789); wired into the scripts/complexity CLI by #5790, which must delete this entry."
