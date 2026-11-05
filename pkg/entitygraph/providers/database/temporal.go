@@ -13,45 +13,8 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	"github.com/cfgis/cfgms/pkg/entitygraph/providers/internal/egcommon"
 )
-
-// computeAttributeChanges returns the set of attributes that differ between two
-// merged state snapshots. Either snapshot may be nil (entity did not exist at
-// that time). Attributes present in only one snapshot are included (Before or
-// After nil). The result is sorted by attribute name for deterministic output.
-func computeAttributeChanges(atT1, atT2 map[string]interface{}) []interfaces.AttributeChange {
-	keys := make(map[string]struct{})
-	for k := range atT1 {
-		keys[k] = struct{}{}
-	}
-	for k := range atT2 {
-		keys[k] = struct{}{}
-	}
-
-	var changes []interfaces.AttributeChange
-	for k := range keys {
-		v1, ok1 := atT1[k]
-		v2, ok2 := atT2[k]
-		if !ok1 && !ok2 {
-			continue
-		}
-		j1, _ := json.Marshal(v1)
-		j2, _ := json.Marshal(v2)
-		if ok1 == ok2 && string(j1) == string(j2) {
-			continue
-		}
-		changes = append(changes, interfaces.AttributeChange{
-			Attribute: k,
-			Before:    v1,
-			After:     v2,
-		})
-	}
-
-	sort.Slice(changes, func(i, j int) bool {
-		return changes[i].Attribute < changes[j].Attribute
-	})
-	return changes
-}
 
 // entityStateAsOf projects the merged entity state at or before asOf from the
 // observation log. Returns nil when no state observations existed at that time.
@@ -95,8 +58,21 @@ func (p *DatabaseEntityGraphProvider) Diff(ctx context.Context, eid interfaces.E
 		Subject: eid,
 		T1:      r.From,
 		T2:      r.To,
-		Changes: computeAttributeChanges(atT1, atT2),
+		Changes: egcommon.ComputeAttributeChanges(atT1, atT2),
 	}, nil
+}
+
+// decodeTimelinePayload decodes a timeline row's payload; an empty payload is
+// nil and an undecodable one is an empty map.
+func decodeTimelinePayload(payloadJSON string) map[string]interface{} {
+	if payloadJSON == "" {
+		return nil
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return map[string]interface{}{}
+	}
+	return payload
 }
 
 // GetTimeline returns a merged, time-ordered change-event stream across the
@@ -157,12 +133,7 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 				_ = srows.Close()
 				return nil, fmt.Errorf("entitygraph/database: scan timeline row: %w", err)
 			}
-			var payload map[string]interface{}
-			if payloadJSON != "" {
-				if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-					payload = map[string]interface{}{}
-				}
-			}
+			payload := decodeTimelinePayload(payloadJSON)
 			oa, _ := time.Parse(time.RFC3339Nano, observedAt)
 			eventKind := "state-change"
 			if kind == "apply-outcome" {
@@ -195,8 +166,8 @@ func (p *DatabaseEntityGraphProvider) GetTimeline(ctx context.Context, eids []in
 			  AND l.observed_at <= $4
 			ORDER BY l.id DESC
 			LIMIT $5`,
-			"same-as|"+escapeLIKE(subject)+"|%",
-			"same-as|%|"+escapeLIKE(subject),
+			"same-as|"+egcommon.EscapeLIKE(subject)+"|%",
+			"same-as|%|"+egcommon.EscapeLIKE(subject),
 			fromStr, toStr, interfaces.MaxTimelineEvents+1,
 		)
 		if err != nil {

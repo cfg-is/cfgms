@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	"github.com/cfgis/cfgms/pkg/entitygraph/providers/internal/egcommon"
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
 )
 
@@ -188,6 +189,16 @@ func (p *DatabaseEntityGraphProvider) queryCurrentRows(ctx context.Context, subj
 	return out, nil
 }
 
+// entityTenantConds returns the predicate that keeps only entities owned inside
+// the filter's tenant cut, or none when the filter names no tenant.
+func entityTenantConds(filter interfaces.EntityFilter, n *int, args *[]interface{}) []string {
+	if filter.TenantFilter == "" {
+		return nil
+	}
+	cut := interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs)
+	return []string{egcommon.TenantSubtreeCond("owning_tenant", cut, nextDollar(n), args)}
+}
+
 // QueryEntities returns entities matching the filter, paged. The page token is
 // an integer offset; NextToken is empty on the final page. Kind and tenant
 // filters are applied against the entity index; the tenant filter matches the
@@ -214,9 +225,7 @@ func (p *DatabaseEntityGraphProvider) QueryEntities(ctx context.Context, filter 
 		args = append(args, filter.Kind)
 		n++
 	}
-	if filter.TenantFilter != "" {
-		conds = append(conds, tenantSubtreeCond("owning_tenant", interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs), &n, &args))
-	}
+	conds = append(conds, entityTenantConds(filter, &n, &args)...)
 
 	if filter.SubjectPrefix != "" {
 		conds = append(conds, fmt.Sprintf("substr(subject, 1, $%d) = $%d", n, n+1))

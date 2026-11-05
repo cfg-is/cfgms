@@ -5,67 +5,21 @@ package sqlite
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	"github.com/cfgis/cfgms/pkg/entitygraph/providers/internal/egcommon"
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
 )
 
-// escapeLIKE escapes SQL LIKE metacharacters (\, %, _) in s so s is treated as
-// a literal substring when used in a LIKE pattern with ESCAPE '\'.
-func escapeLIKE(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `%`, `\%`)
-	s = strings.ReplaceAll(s, `_`, `\_`)
-	return s
-}
-
-// tenantSubtreeCond returns the SQL predicate "<col> IN (?, ?, ...)" matching col
-// against every tenant ID in the cut: the scoped tenant plus the descendant IDs
-// the caller resolved from the tenant tree. Every ID is a bound argument, so no
-// tenant string is ever interpreted as a pattern. It appends the arguments to
-// *args. This is the sole builder for tenant subtree predicates in this package.
-func tenantSubtreeCond(col string, cut interfaces.TenantCut, args *[]interface{}) string {
-	members := cut.Members()
-	phs := make([]string, len(members))
-	for i, id := range members {
-		phs[i] = "?"
-		*args = append(*args, id)
-	}
-	return fmt.Sprintf("%s IN (%s)", col, strings.Join(phs, ", "))
-}
+// questionMark is the placeholder source for the sqlite "?" bind style.
+func questionMark() string { return "?" }
 
 // collapseAsOfWalkBudget is the wall-clock budget of one as-of group walk. It is
 // a variable only so a test can shorten it.
 var collapseAsOfWalkBudget = interfaces.CollapseAsOfWalkBudget
-
-// groupWalk is the bounded breadth-first state shared by both same-as walks.
-type groupWalk struct {
-	visited map[string]struct{}
-	queue   []string
-}
-
-func newGroupWalk(start string) *groupWalk {
-	return &groupWalk{visited: map[string]struct{}{start: {}}, queue: []string{start}}
-}
-
-// add records peer as a group member. It fails with ErrCollapseGroupTooLarge as
-// soon as the distinct member count passes MaxCollapseGroupMembers.
-func (w *groupWalk) add(peer string) error {
-	if _, seen := w.visited[peer]; seen {
-		return nil
-	}
-	if len(w.visited) >= interfaces.MaxCollapseGroupMembers {
-		return interfaces.ErrCollapseGroupTooLarge
-	}
-	w.visited[peer] = struct{}{}
-	w.queue = append(w.queue, peer)
-	return nil
-}
 
 // resolveGroupMembersCurrentState walks the same-as graph from eid using the
 // current edge projection (fast path for non-temporal reads). Returns all group
@@ -74,11 +28,11 @@ func (w *groupWalk) add(peer string) error {
 // MaxCollapseGroupMembers and, when the cut is active, only follows edges whose
 // both ends are owned inside the cut.
 func (p *SQLiteEntityGraphProvider) resolveGroupMembersCurrentState(ctx context.Context, eid interfaces.EIDRef, cut interfaces.TenantCut) ([]interfaces.EIDRef, error) {
-	w := newGroupWalk(eid.String())
+	w := egcommon.NewGroupWalk(eid.String())
 
-	for len(w.queue) > 0 {
-		current := w.queue[0]
-		w.queue = w.queue[1:]
+	for len(w.Queue) > 0 {
+		current := w.Queue[0]
+		w.Queue = w.Queue[1:]
 
 		query := `SELECT DISTINCT ep.from_subject, ep.to_subject
 			 FROM eg_edge_projection ep`
@@ -90,8 +44,8 @@ func (p *SQLiteEntityGraphProvider) resolveGroupMembersCurrentState(ctx context.
 			 JOIN eg_entity_index fi ON fi.subject = ep.from_subject
 			 JOIN eg_entity_index ti ON ti.subject = ep.to_subject`
 			conds = append(conds,
-				tenantSubtreeCond("fi.owning_tenant", cut, &args),
-				tenantSubtreeCond("ti.owning_tenant", cut, &args),
+				egcommon.TenantSubtreeCond("fi.owning_tenant", cut, questionMark, &args),
+				egcommon.TenantSubtreeCond("ti.owning_tenant", cut, questionMark, &args),
 			)
 		}
 		args = append(args, interfaces.MaxCollapseGroupMembers+1)
@@ -116,7 +70,7 @@ func (p *SQLiteEntityGraphProvider) resolveGroupMembersCurrentState(ctx context.
 				return nil, interfaces.ErrCollapseGroupTooLarge
 			}
 			for _, peer := range []string{fromSubj, toSubj} {
-				if err := w.add(peer); err != nil {
+				if err := w.Add(peer); err != nil {
 					_ = rows.Close()
 					return nil, err
 				}
@@ -129,7 +83,7 @@ func (p *SQLiteEntityGraphProvider) resolveGroupMembersCurrentState(ctx context.
 		_ = rows.Close()
 	}
 
-	return sortedGroupMembers(w.visited), nil
+	return egcommon.SortedGroupMembers(w.Visited), nil
 }
 
 // resolveGroupMembersAsOf walks the same-as graph from eid using the observation
@@ -158,7 +112,7 @@ func asOfRecursiveBranch(matchCol, peerCol string, cut interfaces.TenantCut, arg
 	q := "SELECT v." + peerCol + " FROM grp g JOIN live v ON v." + matchCol + " = g.eid"
 	if cut.Active() {
 		q += " WHERE v." + peerCol + " IN (SELECT subject FROM eg_entity_index WHERE " +
-			tenantSubtreeCond("owning_tenant", cut, args) + ")"
+			egcommon.TenantSubtreeCond("owning_tenant", cut, questionMark, args) + ")"
 	}
 	return q
 }
@@ -210,37 +164,11 @@ func (p *SQLiteEntityGraphProvider) walkGroupMembersAsOf(ctx context.Context, ei
 	}
 	defer func() { _ = rows.Close() }()
 
-	visited := map[string]struct{}{}
-	for rows.Next() {
-		var member string
-		if err := rows.Scan(&member); err != nil {
-			return nil, fmt.Errorf("entitygraph/sqlite: scan group as-of member: %w", err)
-		}
-		if len(visited) >= interfaces.MaxCollapseGroupMembers {
-			return nil, interfaces.ErrCollapseGroupTooLarge
-		}
-		visited[member] = struct{}{}
+	visited, err := egcommon.ScanAsOfMembers(rows, dialect)
+	if err != nil {
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("entitygraph/sqlite: iterate group as-of members: %w", err)
-	}
-	return sortedGroupMembers(visited), nil
-}
-
-// sortedGroupMembers converts a visited-set map to a sorted EID slice.
-func sortedGroupMembers(visited map[string]struct{}) []interfaces.EIDRef {
-	var members []interfaces.EIDRef
-	for subj := range visited {
-		eid, err := types.ParseEID(subj)
-		if err != nil {
-			continue
-		}
-		members = append(members, eid)
-	}
-	sort.Slice(members, func(i, j int) bool {
-		return members[i].String() < members[j].String()
-	})
-	return members
+	return egcommon.SortedGroupMembers(visited), nil
 }
 
 // applyTenantCut filters group members to those whose current owning_tenant is
@@ -285,65 +213,26 @@ func (p *SQLiteEntityGraphProvider) loadMemberSources(ctx context.Context, subje
 	}
 	defer func() { _ = rows.Close() }()
 
-	var entries []sourceEntry
-	for rows.Next() {
-		var source, sourceClass, observedAt, hash, payloadJSON string
-		if err := rows.Scan(&source, &sourceClass, &observedAt, &hash, &payloadJSON); err != nil {
-			return nil, fmt.Errorf("entitygraph/sqlite: scan member source: %w", err)
-		}
-		var payload map[string]interface{}
-		if payloadJSON != "" {
-			if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-				return nil, fmt.Errorf("entitygraph/sqlite: decode member payload: %w", err)
-			}
-		}
-		t, _ := time.Parse(time.RFC3339Nano, observedAt)
-		entries = append(entries, sourceEntry{
-			source:      source,
-			sourceClass: sourceClass,
-			observedAt:  t,
-			payloadHash: hash,
-			payload:     payload,
-		})
+	scanned, err := egcommon.ScanMemberSources(rows, dialect)
+	if err != nil {
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("entitygraph/sqlite: iterate member sources: %w", err)
+	entries := make([]sourceEntry, len(scanned))
+	for i, m := range scanned {
+		entries[i] = sourceEntry{
+			source:      m.Source,
+			sourceClass: m.SourceClass,
+			observedAt:  m.ObservedAt,
+			payloadHash: m.PayloadHash,
+			payload:     m.Payload,
+		}
 	}
 	return entries, nil
 }
 
-// buildConflicts collects per-attribute values from sources that lost the
-// precedence merge. An attribute has a conflict when multiple sources assert
-// different values for it.
-func buildConflicts(entries []sourceEntry, merged map[string]interface{}) map[string][]types.AttributeConflict {
-	conflicts := make(map[string][]types.AttributeConflict)
-
-	for _, e := range entries {
-		for k, v := range e.payload {
-			mergedV, ok := merged[k]
-			if !ok {
-				continue
-			}
-			vJSON, _ := json.Marshal(v)
-			mergedJSON, _ := json.Marshal(mergedV)
-			if string(vJSON) != string(mergedJSON) {
-				conflicts[k] = append(conflicts[k], types.AttributeConflict{
-					Source: e.source,
-					Value:  v,
-				})
-			}
-		}
-	}
-
-	if len(conflicts) == 0 {
-		return nil
-	}
-
-	for k, cs := range conflicts {
-		sort.Slice(cs, func(i, j int) bool { return cs[i].Source < cs[j].Source })
-		conflicts[k] = cs
-	}
-	return conflicts
+// entryView returns a source entry's source and payload for egcommon.BuildConflicts.
+func entryView(e sourceEntry) (string, map[string]interface{}) {
+	return e.source, e.payload
 }
 
 // resolveCollapseGroup implements the three-step collapse-group read contract
@@ -404,7 +293,7 @@ func (p *SQLiteEntityGraphProvider) resolveCollapseGroup(ctx context.Context, ei
 	}
 
 	merged := mergeAttributes(allEntries)
-	conflicts := buildConflicts(allEntries, merged)
+	conflicts := egcommon.BuildConflicts(allEntries, entryView, merged)
 
 	return &types.CollapseGroupView{
 		Members:   visible,

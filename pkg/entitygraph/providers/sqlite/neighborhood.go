@@ -87,8 +87,8 @@ func (p *SQLiteEntityGraphProvider) queryNeighborhoodEdges(
 	}
 	if cut.Active() {
 		conds = append(conds,
-			tenantSubtreeCond("fi.owning_tenant", cut, &args),
-			tenantSubtreeCond("ti.owning_tenant", cut, &args),
+			egcommon.TenantSubtreeCond("fi.owning_tenant", cut, questionMark, &args),
+			egcommon.TenantSubtreeCond("ti.owning_tenant", cut, questionMark, &args),
 		)
 	}
 

@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	"github.com/cfgis/cfgms/pkg/entitygraph/providers/internal/egcommon"
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
 )
 
@@ -109,6 +110,16 @@ func (p *SQLiteEntityGraphProvider) GetEntity(ctx context.Context, eid interface
 	return view, nil
 }
 
+// entityTenantConds returns the predicate that keeps only entities owned inside
+// the filter's tenant cut, or none when the cut is inactive.
+func entityTenantConds(filter interfaces.EntityFilter, args *[]interface{}) []string {
+	cut := interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs)
+	if !cut.Active() {
+		return nil
+	}
+	return []string{egcommon.TenantSubtreeCond("owning_tenant", cut, questionMark, args)}
+}
+
 // QueryEntities returns entities matching the filter, paged via an integer
 // offset encoded in the page token.
 func (p *SQLiteEntityGraphProvider) QueryEntities(ctx context.Context, filter interfaces.EntityFilter, page interfaces.PageToken) (*interfaces.EntityPage, error) {
@@ -120,9 +131,7 @@ func (p *SQLiteEntityGraphProvider) QueryEntities(ctx context.Context, filter in
 		conds = append(conds, "entity_kind = ?")
 		args = append(args, filter.Kind)
 	}
-	if cut := interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs); cut.Active() {
-		conds = append(conds, tenantSubtreeCond("owning_tenant", cut, &args))
-	}
+	conds = append(conds, entityTenantConds(filter, &args)...)
 	if err := interfaces.ValidateAuthorityTypes(filter.AuthorityTypes); err != nil {
 		return nil, fmt.Errorf("entitygraph/sqlite: query entities: %w", err)
 	}

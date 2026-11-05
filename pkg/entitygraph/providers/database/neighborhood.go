@@ -98,8 +98,8 @@ func (p *DatabaseEntityGraphProvider) queryNeighborhoodEdges(
 
 	if cut.Active() {
 		conds = append(conds,
-			tenantSubtreeCond("fi.owning_tenant", cut, &n, &args),
-			tenantSubtreeCond("ti.owning_tenant", cut, &n, &args),
+			egcommon.TenantSubtreeCond("fi.owning_tenant", cut, nextDollar(&n), &args),
+			egcommon.TenantSubtreeCond("ti.owning_tenant", cut, nextDollar(&n), &args),
 		)
 	}
 
