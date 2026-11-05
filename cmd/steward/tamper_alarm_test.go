@@ -360,27 +360,35 @@ func TestTamperAlarm_TrustDowngradeLatch_ReleasesOnlyWithBothConditions(t *testi
 	ctx := context.Background()
 	latchPath := filepath.Join(e.f.dir, tamperLatchFileName)
 
-	// Restore while the downgrade stands: stays report-only.
-	require.NoError(t, e.f.srv.cp.SendTamperState(ctx, roStewardID, true))
-	require.NoError(t, e.f.srv.cp.SendTamperState(ctx, roStewardID, false))
-	time.Sleep(600 * time.Millisecond)
-	assert.Zero(t, e.connect.Load(), "restore signal with the downgrade still present")
-	assert.FileExists(t, latchPath)
+	// The stages are ordered so the local fault is never cleared while a restore
+	// signal is outstanding or in flight: signals reach the steward
+	// asynchronously, so clearing the fault after sending one would let the
+	// latch release before the next lock arrives.
 
 	// The downgrade condition is removed (the identity is re-enrolled at the
-	// weaker level, which is the only way to change the anchor) and the restore
-	// is withdrawn by a new lock: stays report-only.
+	// weaker level, which is the only way to change the anchor) with no restore
+	// signal sent: stays report-only.
 	weaker := e.f.id
 	weaker.TrustMode = trustModeString(trustSourceTOFU)
 	require.NoError(t, saveIdentity(e.f.dir, weaker))
-	require.NoError(t, e.f.srv.cp.SendTamperState(ctx, roStewardID, true))
 	time.Sleep(600 * time.Millisecond)
 	assert.Zero(t, e.connect.Load(), "downgrade removed but no restore signal")
 	assert.FileExists(t, latchPath)
 	assertAlive(t, done)
 
-	// Both: leaves.
+	// The downgrade stands again (original identity restored) and a restore
+	// signal arrives: stays report-only.
+	require.NoError(t, saveIdentity(e.f.dir, e.f.id))
+	require.NoError(t, e.f.srv.cp.SendTamperState(ctx, roStewardID, true))
 	require.NoError(t, e.f.srv.cp.SendTamperState(ctx, roStewardID, false))
+	time.Sleep(600 * time.Millisecond)
+	assert.Zero(t, e.connect.Load(), "restore signal with the downgrade still present")
+	assert.FileExists(t, latchPath)
+	assertAlive(t, done)
+
+	// Both: the downgrade is removed while the restore stands; leaves. A late
+	// delivery of the restore only delays the release.
+	require.NoError(t, saveIdentity(e.f.dir, weaker))
 	require.Eventually(t, func() bool { return e.connect.Load() > 0 }, 20*time.Second, 20*time.Millisecond)
 	assert.NoFileExists(t, latchPath)
 }
