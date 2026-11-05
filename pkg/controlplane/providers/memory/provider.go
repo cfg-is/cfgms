@@ -943,8 +943,9 @@ func (p *Provider) dispatchAsync(fn func()) {
 // the sender share no mutable state. The signature is treated as immutable.
 func cloneSignedCommand(cmd *types.SignedCommand) *types.SignedCommand {
 	out := &types.SignedCommand{
-		Command:   cmd.Command,
-		Signature: cmd.Signature,
+		Command:        cmd.Command,
+		Signature:      cmd.Signature,
+		SignerChainPEM: append([]byte(nil), cmd.SignerChainPEM...),
 	}
 	if cmd.Command.Params != nil {
 		params := make(map[string]interface{}, len(cmd.Command.Params))

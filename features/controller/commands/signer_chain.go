@@ -32,6 +32,7 @@ type SignerChainSource interface {
 	GetAllValidSigningCertificates() ([]*cert.CertificateInfo, error)
 	GetCertificate(serialNumber string) (*cert.Certificate, error)
 	GetCACertificate() ([]byte, error)
+	ListCertificates() ([]*cert.CertificateInfo, error)
 }
 
 // BuildSignerChain returns the PEM chain for the certificate that signed with
@@ -41,11 +42,27 @@ type SignerChainSource interface {
 // output holds certificates only, never a key, and is capped in size. Any
 // failure returns an error; the caller must not send the command unchained.
 func BuildSignerChain(src SignerChainSource, signer signature.Signer) ([]byte, error) {
+	return buildSignerChain(src, signer, findSigningCertificate)
+}
+
+// BuildExplicitSignerChain is BuildSignerChain for a signer chosen by the
+// caller rather than the publisher's configured signer. It resolves the
+// signer's own stored signing certificate regardless of the rotation overlap
+// window, so the outgoing, closed-window or revoked rotating certificate that
+// signs a push_signing_cert delivery still gets its chain. The chain carries
+// certificates only and the steward validates it against its pinned root.
+func BuildExplicitSignerChain(src SignerChainSource, signer signature.Signer) ([]byte, error) {
+	return buildSignerChain(src, signer, findStoredSigningCertificate)
+}
+
+type certFinder func(src SignerChainSource, fingerprint string) (*cert.Certificate, error)
+
+func buildSignerChain(src SignerChainSource, signer signature.Signer, find certFinder) ([]byte, error) {
 	fingerprint, err := signerFingerprint(src, signer)
 	if err != nil {
 		return nil, err
 	}
-	leaf, err := findSigningCertificate(src, fingerprint)
+	leaf, err := find(src, fingerprint)
 	if err != nil {
 		return nil, err
 	}
@@ -85,6 +102,34 @@ func findSigningCertificate(src SignerChainSource, fingerprint string) (*cert.Ce
 	if err != nil {
 		return nil, fmt.Errorf("signer chain: list signing certificates: %w", err)
 	}
+	if c := matchCertificate(src, infos, fingerprint); c != nil {
+		return c, nil
+	}
+	return nil, errors.New("signer chain: no valid signing certificate matches the signer")
+}
+
+// findStoredSigningCertificate returns the stored config-signing certificate
+// whose SHA-256 fingerprint is fingerprint, whatever its rotation state.
+func findStoredSigningCertificate(src SignerChainSource, fingerprint string) (*cert.Certificate, error) {
+	infos, err := src.ListCertificates()
+	if err != nil {
+		return nil, fmt.Errorf("signer chain: list certificates: %w", err)
+	}
+	signing := infos[:0:0]
+	for _, info := range infos {
+		if info != nil && info.Type == cert.CertificateTypeConfigSigning {
+			signing = append(signing, info)
+		}
+	}
+	if c := matchCertificate(src, signing, fingerprint); c != nil {
+		return c, nil
+	}
+	return nil, errors.New("signer chain: no stored signing certificate matches the signer")
+}
+
+// matchCertificate returns the stored certificate among infos whose SHA-256
+// fingerprint is fingerprint, or nil.
+func matchCertificate(src SignerChainSource, infos []*cert.CertificateInfo, fingerprint string) *cert.Certificate {
 	for _, info := range infos {
 		if info == nil {
 			continue
@@ -95,10 +140,10 @@ func findSigningCertificate(src SignerChainSource, fingerprint string) (*cert.Ce
 		}
 		parsed, err := cert.ParseCertificateFromPEM(c.CertificatePEM)
 		if err == nil && fmt.Sprintf("%X", sha256.Sum256(parsed.Raw)) == fingerprint {
-			return c, nil
+			return c
 		}
 	}
-	return nil, errors.New("signer chain: no valid signing certificate matches the signer")
+	return nil
 }
 
 // orderedSignerChain parses the leaf, its issuer chain and the root into one
@@ -178,14 +223,31 @@ func (b *SignerChainBuilder) Build(signer signature.Signer) ([]byte, error) {
 	if signer == nil {
 		return nil, errors.New("signer chain: no signer")
 	}
-	key := strings.ToUpper(signer.KeyFingerprint())
+	return b.build(signer, "", BuildSignerChain)
+}
+
+// BuildExplicit returns the chain for a caller-chosen signer; see
+// BuildExplicitSignerChain. Its cache entries are kept apart from Build's so a
+// chain resolved for an explicit signer never satisfies the default-signer path.
+func (b *SignerChainBuilder) BuildExplicit(signer signature.Signer) ([]byte, error) {
+	if b == nil {
+		return nil, errors.New("signer chain: no builder")
+	}
+	if signer == nil {
+		return nil, errors.New("signer chain: no signer")
+	}
+	return b.build(signer, "explicit:", BuildExplicitSignerChain)
+}
+
+func (b *SignerChainBuilder) build(signer signature.Signer, keyPrefix string, buildFn func(SignerChainSource, signature.Signer) ([]byte, error)) ([]byte, error) {
+	key := keyPrefix + strings.ToUpper(signer.KeyFingerprint())
 	b.mu.Lock()
 	cached, ok := b.cache[key]
 	b.mu.Unlock()
 	if ok {
 		return append([]byte(nil), cached...), nil
 	}
-	chain, err := BuildSignerChain(b.src, signer)
+	chain, err := buildFn(b.src, signer)
 	if err != nil {
 		return nil, err
 	}
@@ -219,6 +281,19 @@ func (b *SignerChainBuilder) Attach(sc *controlplaneTypes.SignedCommand, signer 
 		return nil
 	}
 	chain, err := b.Build(signer)
+	if err != nil {
+		return err
+	}
+	sc.SignerChainPEM = chain
+	return nil
+}
+
+// AttachExplicit is Attach for a caller-chosen signer; see BuildExplicitSignerChain.
+func (b *SignerChainBuilder) AttachExplicit(sc *controlplaneTypes.SignedCommand, signer signature.Signer) error {
+	if b == nil || signer == nil || sc == nil {
+		return nil
+	}
+	chain, err := b.BuildExplicit(signer)
 	if err != nil {
 		return err
 	}

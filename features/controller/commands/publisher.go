@@ -216,7 +216,7 @@ func (p *Publisher) currentTerm() uint64 {
 // signCommandWith wraps cmd in a SignedCommand, signing with the provided signer when
 // non-nil. Every command is signed over the v2 payload by
 // controlplaneTypes.SignCommand, the same path the dispatcher and relay handler use.
-func (p *Publisher) signCommandWith(cmd *controlplaneTypes.Command, signer signature.Signer) (*controlplaneTypes.SignedCommand, error) {
+func (p *Publisher) signCommandWith(cmd *controlplaneTypes.Command, signer signature.Signer, explicit bool) (*controlplaneTypes.SignedCommand, error) {
 	sc, err := controlplaneTypes.SignCommand(cmd, signer)
 	if err != nil {
 		return nil, err
@@ -224,7 +224,13 @@ func (p *Publisher) signCommandWith(cmd *controlplaneTypes.Command, signer signa
 	// The chain rides with the signed command and the gRPC provider strips it for
 	// any steward that is not locked down. A chain that cannot be built fails the
 	// command rather than letting it out unchained to a locked steward.
-	if err := p.signerChains.Attach(sc, signer); err != nil {
+	attach := p.signerChains.Attach
+	if explicit {
+		// A caller-chosen signer is a rotating certificate signing a
+		// push_signing_cert; its chain resolves regardless of the overlap window.
+		attach = p.signerChains.AttachExplicit
+	}
+	if err := attach(sc, signer); err != nil {
 		p.logger.Error("Signer certificate chain unavailable; command not sent",
 			"command_type", string(cmd.Type),
 			"error", logging.SanitizeLogValue(err.Error()))
@@ -235,7 +241,7 @@ func (p *Publisher) signCommandWith(cmd *controlplaneTypes.Command, signer signa
 
 // signCommand wraps cmd in a SignedCommand using the publisher's configured signer.
 func (p *Publisher) signCommand(cmd *controlplaneTypes.Command) (*controlplaneTypes.SignedCommand, error) {
-	return p.signCommandWith(cmd, p.signer)
+	return p.signCommandWith(cmd, p.signer, false)
 }
 
 // PublishCommandWithSigner publishes a command signed with the provided signer instead
@@ -254,7 +260,7 @@ func (p *Publisher) PublishCommandWithSigner(ctx context.Context, stewardID stri
 		Term:      p.currentTerm(),
 	}
 
-	sc, err := p.signCommandWith(cmd, signer)
+	sc, err := p.signCommandWith(cmd, signer, true)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign command: %w", err)
 	}
@@ -387,7 +393,7 @@ func (p *Publisher) PublishCommandWithSignerAndCallback(
 		Term:      p.currentTerm(),
 	}
 
-	sc, err := p.signCommandWith(cmd, signer)
+	sc, err := p.signCommandWith(cmd, signer, true)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign command: %w", err)
 	}

@@ -853,3 +853,134 @@ func TestSigningPushes_IntermediateIssuedCertCarriesChain(t *testing.T) {
 	require.NoError(t, err)
 	assertPushedCertChainsToRoot(t, next().Command.Params, rootPEM)
 }
+
+// chainedRotationFixture is a real cert manager and publisher with a signer
+// chain builder, one registered steward and an in-memory subscription for it.
+type chainedRotationFixture struct {
+	certMgr  *cert.Manager
+	svc      *service.SigningRotationService
+	received chan *types.SignedCommand
+}
+
+func newChainedRotationFixture(t *testing.T, stewardID string) *chainedRotationFixture {
+	t.Helper()
+	ctx := context.Background()
+	certMgr := newTestCertManager(t, t.TempDir())
+	logger := logging.NewNoopLogger()
+
+	bus := memory.NewBus()
+	server := memory.New(memory.ModeServer)
+	require.NoError(t, server.Initialize(ctx, map[string]interface{}{"bus": bus}))
+	require.NoError(t, server.Start(ctx))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Stop(stopCtx)
+	})
+	client := memory.New(memory.ModeClient)
+	require.NoError(t, client.Initialize(ctx, map[string]interface{}{"bus": bus, "steward_id": stewardID}))
+	require.NoError(t, client.Start(ctx))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = client.Stop(stopCtx)
+	})
+	received := make(chan *types.SignedCommand, 8)
+	require.NoError(t, client.SubscribeCommands(ctx, stewardID, func(_ context.Context, sc *types.SignedCommand) error {
+		received <- sc
+		return nil
+	}))
+
+	controllerSvc := service.NewControllerService(logger)
+	require.NoError(t, controllerSvc.RegisterSteward(stewardID, "root", "", "active"))
+
+	publisher, err := commands.New(&commands.Config{
+		ControlPlane: server,
+		Logger:       logger,
+		SignerChains: commands.NewSignerChainBuilder(certMgr),
+	})
+	require.NoError(t, err)
+
+	svc := service.NewSigningRotationService(certMgr, logger)
+	svc.SetPublisher(publisher)
+	svc.SetControllerService(controllerSvc)
+	return &chainedRotationFixture{certMgr: certMgr, svc: svc, received: received}
+}
+
+func (f *chainedRotationFixture) nextPush(t *testing.T) *types.SignedCommand {
+	t.Helper()
+	select {
+	case sc := <-f.received:
+		require.Equal(t, types.CommandPushSigningCert, sc.Command.Type)
+		return sc
+	case <-time.After(5 * time.Second):
+		t.Fatal("steward never received push_signing_cert")
+		return nil
+	}
+}
+
+// requireChainSignedBy asserts the chain starts at the certificate with the
+// given serial and ends in a self-signed root.
+func requireChainSignedBy(t *testing.T, mgr *cert.Manager, sc *types.SignedCommand, serial string) {
+	t.Helper()
+	require.NotEmpty(t, sc.SignerChainPEM, "push_signing_cert must carry the signer chain")
+	certs, err := cert.ParseCertificateChainFromPEM(sc.SignerChainPEM)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(certs), 2)
+	oldPEM, _, err := mgr.ExportCertificate(serial, false, false)
+	require.NoError(t, err)
+	old, err := cert.ParseCertificateFromPEM(oldPEM)
+	require.NoError(t, err)
+	assert.True(t, certs[0].Equal(old), "chain must start at the signing certificate that signed the push")
+	root := certs[len(certs)-1]
+	require.NoError(t, root.CheckSignatureFrom(root), "chain must end in a self-signed root")
+}
+
+func TestRotate_ZeroOverlapPushDeliveredWithSignerChain(t *testing.T) {
+	t.Parallel()
+	const stewardID = "steward-zero-overlap"
+	f := newChainedRotationFixture(t, stewardID)
+	oldCert, err := f.certMgr.GetCurrentCertForPurpose(cert.PurposeSigning)
+	require.NoError(t, err)
+
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	result, err := f.svc.Rotate(ctx, "operator-serial", 0, false)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.StewardsNotified)
+
+	push := f.nextPush(t)
+	requireChainSignedBy(t, f.certMgr, push, oldCert.SerialNumber)
+	assert.Equal(t, result.NewSerial, fmt.Sprint(push.Command.Params["serial"]))
+	pushed, err := base64.StdEncoding.DecodeString(fmt.Sprint(push.Command.Params["cert_pem"]))
+	require.NoError(t, err)
+	newCerts, err := cert.ParseCertificateChainFromPEM(pushed)
+	require.NoError(t, err)
+	require.NotEmpty(t, newCerts)
+	assert.Equal(t, result.NewSerial, newCerts[0].SerialNumber.String())
+}
+
+func TestEnsureStewardCurrentAndRevokedRetirePushCarryChainAfterZeroOverlap(t *testing.T) {
+	t.Parallel()
+	const stewardID = "steward-zero-overlap-reconnect"
+	f := newChainedRotationFixture(t, stewardID)
+	oldCert, err := f.certMgr.GetCurrentCertForPurpose(cert.PurposeSigning)
+	require.NoError(t, err)
+
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	_, err = f.svc.Rotate(ctx, "operator-serial", 0, false)
+	require.NoError(t, err)
+	f.nextPush(t) // the rotation fan-out
+
+	t.Run("on-connect push after a closed window", func(t *testing.T) {
+		require.NoError(t, f.svc.EnsureStewardCurrent(ctx, stewardID))
+		requireChainSignedBy(t, f.certMgr, f.nextPush(t), oldCert.SerialNumber)
+	})
+
+	t.Run("retire push for a revoked rotating serial", func(t *testing.T) {
+		require.NoError(t, f.certMgr.RevokeSigningCertificate(oldCert.SerialNumber, "test"))
+		require.NoError(t, f.svc.EnsureStewardCurrent(ctx, stewardID))
+		push := f.nextPush(t)
+		requireChainSignedBy(t, f.certMgr, push, oldCert.SerialNumber)
+		assert.Contains(t, fmt.Sprint(push.Command.Params["retire_serials"]), oldCert.SerialNumber)
+	})
+}
