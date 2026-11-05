@@ -1306,14 +1306,101 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	vmName := parts[1]
 
 	configMap := config.AsMap()
+	m.recordAuthoredVMState(vmName, configMap)
 
-	// Record the authored `checkpoints` block for this VM so getVM's compliance
-	// echo is policy-aware (#2627). Keyed by VM name + mutex-guarded: the module
-	// instance is SHARED across all hyperv resources (factory caches one instance
-	// per bundle) and the monitor and convergence goroutines converge concurrently,
-	// so per-VM state must be keyed, not a single instance field. Populated here —
-	// Set receives the correctly-scoped per-resource config as an argument — rather
-	// than in Configure (a module-level hook that would race/leak across VMs).
+	state, _ := configMap["state"].(string)
+	if state == "absent" {
+		return m.deleteVMFlow(ctx, vmName)
+	}
+
+	cfg, err := m.buildDesiredVMConfig(vmName, state, config, configMap)
+	if err != nil {
+		return err
+	}
+
+	// ALWAYS read the live host state via getVM as the source of truth for the
+	// reconcile decision — never the in-memory cache. The executor's drift
+	// detection reads the host directly, so the apply path must reconcile against
+	// the same host truth. Using the cache as "current" let SET/delete diverge
+	// silently when the cache went stale (e.g. an adapter added or removed
+	// out-of-band), computing needed actions as no-ops. The write-through cache is
+	// still updated after a successful apply for the benefit of Get, but it is
+	// never the basis for an apply decision.
+	// Local truth for the reconcile decision: setVM's create/lifecycle owner-gates
+	// key on whether the VM exists on THIS node. A clustered role hosted on another
+	// member must read "absent" here so the existence gate fires (getVMLocal, not
+	// the cluster-wide getVM which would report the owner's VM as present).
+	current, vmExists, err := m.observeLocalVM(ctx, vmName)
+	if err != nil {
+		return err
+	}
+	current, vmExists, err = m.renameIfOldNameDeclared(ctx, cfg, vmName, current, vmExists)
+	if err != nil {
+		return err
+	}
+	var currentVM VMConfig
+	if vmExists {
+		currentVM = *current
+	}
+
+	// The host object name is the exact VM name — no namespacing.
+	hostName := vmName
+
+	if !vmExists {
+		skip, err := m.gateHARoleCreate(ctx, vmName, cfg, current)
+		if err != nil {
+			return err
+		}
+		if skip {
+			return nil
+		}
+	}
+
+	// Existence-gating safety invariant (ADR-009 §2): source provisioning is
+	// existence-gated, never health-gated. When a source block is declared, the
+	// create/destroy decision is made HERE — before any plain-lifecycle apply —
+	// so that an existing VM can never be auto-destroyed or recreated by default,
+	// regardless of its health. The decision tree:
+	//
+	//   1. VM absent, own incomplete provisioning record → surface-and-wait.
+	//   2. VM absent, no in-progress record              → provision (create).
+	//   3. VM exists, on_existing == recreate             → removeVM + provision.
+	//   4. VM exists, broken state, on_existing != recreate → degraded surface.
+	//   5. VM exists, healthy, on_existing != recreate    → source inert;
+	//                                                        drive finalize +
+	//                                                        plain lifecycle.
+	if cfg.Source != nil {
+		return m.applySourceGated(ctx, vmName, hostName, cfg, &currentVM, vmExists, state)
+	}
+
+	if vmExists {
+		if err := m.applyVMState(ctx, vmName, hostName, cfg, &currentVM, state); err != nil {
+			return err
+		}
+		// Converge the checkpoint set to the declared policy (#2627). No-op when
+		// CheckpointPolicy is nil (observe-only). Runs after the power/resource
+		// reconcile so it operates on the settled VM.
+		return m.reconcileCheckpoints(ctx, hostName, cfg.CheckpointPolicy)
+	}
+
+	// VM does not exist — create it (plain lifecycle, no source block).
+	return m.createPlainVM(ctx, vmName, hostName, cfg, state)
+}
+
+// recordAuthoredVMState records the authored per-VM state getVM echoes back.
+//
+// The `checkpoints` block is recorded so getVM's compliance echo is
+// policy-aware (#2627). Keyed by VM name + mutex-guarded: the module instance is
+// SHARED across all hyperv resources (factory caches one instance per bundle)
+// and the monitor and convergence goroutines converge concurrently, so per-VM
+// state must be keyed, not a single instance field. Populated from setVM — Set
+// receives the correctly-scoped per-resource config as an argument — rather than
+// in Configure (a module-level hook that would race/leak across VMs).
+//
+// The authored `vhd_path` is recorded so getVM can echo it back when the disk is
+// already in the desired home directory (#2776 follow-up) — the same keyed,
+// mutex-guarded per-VM record, for the same shared-instance reason.
+func (m *hypervModule) recordAuthoredVMState(vmName string, configMap map[string]interface{}) {
 	m.checkpointDesiredMu.Lock()
 	if m.checkpointDesired == nil {
 		m.checkpointDesired = make(map[string]interface{})
@@ -1321,10 +1408,6 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	m.checkpointDesired[vmName] = configMap["checkpoints"]
 	m.checkpointDesiredMu.Unlock()
 
-	// Record the authored `vhd_path` for this VM so getVM can echo it back when the
-	// disk is already in the desired home directory (#2776 follow-up) — the same
-	// keyed, mutex-guarded per-VM record as checkpointDesired, for the same
-	// shared-instance reason.
 	if vhd, ok := configMap["vhd_path"].(string); ok && vhd != "" {
 		m.vhdPathDesiredMu.Lock()
 		if m.vhdPathDesired == nil {
@@ -1333,57 +1416,62 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 		m.vhdPathDesired[vmName] = vhd
 		m.vhdPathDesiredMu.Unlock()
 	}
+}
 
-	state, _ := configMap["state"].(string)
-
-	if state == "absent" {
-		// Snapshot current state for the audit before-capture (best-effort: nil is
-		// acceptable if the VM is already absent or the host is unreachable). cur
-		// also carries the removed VM's HARole + VHDPath, used below to route the
-		// provisioning-record delete to the same store it was written to.
-		var deleteBefore map[string]interface{}
-		// Local truth: the delete path removes the VM on THIS host — a role hosted
-		// elsewhere must read absent here (getVMLocal), never the owner's state.
-		cur, gErr := m.getVMLocal(ctx, vmName)
-		if gErr == nil && cur != nil && cur.State != "absent" {
-			deleteBefore = map[string]interface{}{
-				"cpu":       cur.CPUCount,
-				"memory_mb": cur.MemoryMB,
-				"state":     cur.State,
-			}
+// deleteVMFlow handles state: absent — snapshot the before-state for the audit,
+// remove the VM, sweep its seed media, then delete the provisioning and
+// storage-move records.
+func (m *hypervModule) deleteVMFlow(ctx context.Context, vmName string) error {
+	// Snapshot current state for the audit before-capture (best-effort: nil is
+	// acceptable if the VM is already absent or the host is unreachable). cur
+	// also carries the removed VM's HARole + VHDPath, used below to route the
+	// provisioning-record delete to the same store it was written to.
+	var deleteBefore map[string]interface{}
+	// Local truth: the delete path removes the VM on THIS host — a role hosted
+	// elsewhere must read absent here (getVMLocal), never the owner's state.
+	cur, gErr := m.getVMLocal(ctx, vmName)
+	if gErr == nil && cur != nil && cur.State != "absent" {
+		deleteBefore = map[string]interface{}{
+			"cpu":       cur.CPUCount,
+			"memory_mb": cur.MemoryMB,
+			"state":     cur.State,
 		}
-		if err := m.removeVM(ctx, vmName, deleteBefore); err != nil {
-			return err
-		}
-		// Remove any orphaned seed media (seed VHDX + answer ISO) for the deleted
-		// VM, using the observed VHD path from the pre-delete getVM. This runs
-		// BEFORE the fallible DeleteProvision/DeleteMove below: once the provision
-		// record is gone, sweepStaleSeedMedia's TTL safety net can no longer see
-		// this VM, so a store error after the record delete would permanently
-		// orphan the media. On a genuine deletion nothing ever rebuilds, so this
-		// synchronous delete is the only collector. cur may be nil (VM already
-		// absent) → empty VHD path, which is fine when seedDir is configured.
-		vhdPath := ""
-		if cur != nil {
-			vhdPath = cur.VHDPath
-		}
-		m.deleteSeedMediaForVM(ctx, vmName, vhdPath)
-		// Delete the provisioning record so a subsequent source: declaration
-		// provisions cleanly without hitting the surface-and-wait wedge.
-		// Mirrors the on_existing: recreate path in applySourceGated. Route via
-		// storeFor(cur) so an ha_role+CSV VM's record is deleted from the CSV
-		// store it was written to; cur may be nil (already absent) → host-local.
-		if err := m.storeFor(cur).DeleteProvision(ctx, vmName); err != nil && !errors.Is(err, ErrProvisionNotFound) {
-			return err
-		}
-		// Delete any storage-move record (#2411) so a later same-named VM
-		// starts clean rather than inheriting an in-flight/failed move.
-		if err := m.moveStore().DeleteMove(ctx, vmName); err != nil && !errors.Is(err, ErrMoveNotFound) {
-			return err
-		}
-		return nil
 	}
+	if err := m.removeVM(ctx, vmName, deleteBefore); err != nil {
+		return err
+	}
+	// Remove any orphaned seed media (seed VHDX + answer ISO) for the deleted
+	// VM, using the observed VHD path from the pre-delete getVM. This runs
+	// BEFORE the fallible DeleteProvision/DeleteMove below: once the provision
+	// record is gone, sweepStaleSeedMedia's TTL safety net can no longer see
+	// this VM, so a store error after the record delete would permanently
+	// orphan the media. On a genuine deletion nothing ever rebuilds, so this
+	// synchronous delete is the only collector. cur may be nil (VM already
+	// absent) → empty VHD path, which is fine when seedDir is configured.
+	vhdPath := ""
+	if cur != nil {
+		vhdPath = cur.VHDPath
+	}
+	m.deleteSeedMediaForVM(ctx, vmName, vhdPath)
+	// Delete the provisioning record so a subsequent source: declaration
+	// provisions cleanly without hitting the surface-and-wait wedge.
+	// Mirrors the on_existing: recreate path in applySourceGated. Route via
+	// storeFor(cur) so an ha_role+CSV VM's record is deleted from the CSV
+	// store it was written to; cur may be nil (already absent) → host-local.
+	if err := m.storeFor(cur).DeleteProvision(ctx, vmName); err != nil && !errors.Is(err, ErrProvisionNotFound) {
+		return err
+	}
+	// Delete any storage-move record (#2411) so a later same-named VM
+	// starts clean rather than inheriting an in-flight/failed move.
+	if err := m.moveStore().DeleteMove(ctx, vmName); err != nil && !errors.Is(err, ErrMoveNotFound) {
+		return err
+	}
+	return nil
+}
 
+// buildDesiredVMConfig parses the executor-supplied config into the desired
+// VMConfig and validates it.
+func (m *hypervModule) buildDesiredVMConfig(vmName, state string, config modules.ConfigState, configMap map[string]interface{}) (*VMConfig, error) {
 	cfg := &VMConfig{Name: vmName}
 	if v, ok := configMap["memory_mb"].(int64); ok {
 		cfg.MemoryMB = v
@@ -1406,26 +1494,8 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	// stringOrStringList YAML unmarshal only runs when the module decodes its
 	// own YAML, not on this executor-supplied map. switch_names (plural) is also
 	// accepted as an alias for callers that build the map via VMConfig.AsMap.
-	parseSwitches := func(v interface{}) {
-		switch sn := v.(type) {
-		case string:
-			if sn != "" {
-				cfg.SwitchNames = append(cfg.SwitchNames, sn)
-			}
-		case []string:
-			cfg.SwitchNames = append(cfg.SwitchNames, sn...)
-		case stringOrStringList:
-			cfg.SwitchNames = append(cfg.SwitchNames, sn...)
-		case []interface{}:
-			for _, e := range sn {
-				if s, ok := e.(string); ok {
-					cfg.SwitchNames = append(cfg.SwitchNames, s)
-				}
-			}
-		}
-	}
-	parseSwitches(configMap["switch_name"])
-	parseSwitches(configMap["switch_names"])
+	cfg.appendSwitchNames(configMap["switch_name"])
+	cfg.appendSwitchNames(configMap["switch_names"])
 	if v, ok := configMap["generation"].(int); ok {
 		cfg.Generation = v
 	}
@@ -1468,72 +1538,102 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 	// enforced in Validate (seed_dir is module-level config, not a per-VM field).
 	cfg.seedDir = m.seedDir
 	if err := cfg.Validate(); err != nil {
-		return err
+		return nil, err
 	}
+	return cfg, nil
+}
 
-	// ALWAYS read the live host state via getVM as the source of truth for the
-	// reconcile decision — never the in-memory cache. The executor's drift
-	// detection reads the host directly, so the apply path must reconcile against
-	// the same host truth. Using the cache as "current" let SET/delete diverge
-	// silently when the cache went stale (e.g. an adapter added or removed
-	// out-of-band), computing needed actions as no-ops. The write-through cache is
-	// still updated after a successful apply for the benefit of Get, but it is
-	// never the basis for an apply decision.
-	// Local truth for the reconcile decision: setVM's create/lifecycle owner-gates
-	// key on whether the VM exists on THIS node. A clustered role hosted on another
-	// member must read "absent" here so the existence gate fires (getVMLocal, not
-	// the cluster-wide getVM which would report the owner's VM as present).
+// appendSwitchNames appends the switch names carried by v (a string, a list of
+// strings or a generic list) to cfg.SwitchNames.
+func (cfg *VMConfig) appendSwitchNames(v interface{}) {
+	switch sn := v.(type) {
+	case string:
+		if sn != "" {
+			cfg.SwitchNames = append(cfg.SwitchNames, sn)
+		}
+	case []string:
+		cfg.SwitchNames = append(cfg.SwitchNames, sn...)
+	case stringOrStringList:
+		cfg.SwitchNames = append(cfg.SwitchNames, sn...)
+	case []interface{}:
+		for _, e := range sn {
+			if s, ok := e.(string); ok {
+				cfg.SwitchNames = append(cfg.SwitchNames, s)
+			}
+		}
+	}
+}
+
+// observeLocalVM reads the VM's local state and reports whether it exists on
+// this host.
+func (m *hypervModule) observeLocalVM(ctx context.Context, vmName string) (*VMConfig, bool, error) {
 	current, err := m.getVMLocal(ctx, vmName)
 	if err != nil {
 		// getVMLocal no longer returns a sentinel for "not found" — absence is
 		// signalled by State=="absent" with err==nil. Any real error here
 		// (module not configured, transport down, malformed response) is
 		// fatal for this Set call.
-		return fmt.Errorf("hyperv: check VM %q existence: %w", vmName, err)
+		return nil, false, fmt.Errorf("hyperv: check VM %q existence: %w", vmName, err)
 	}
-	var vmExists bool
-	var currentVM VMConfig
-	if current.State != "absent" {
-		vmExists = true
-		currentVM = *current
+	return current, current.State != "absent", nil
+}
+
+// renameIfOldNameDeclared performs the declarative in-place rename (#2776): the
+// desired VM `name` is absent but an `old_name` is declared. If a VM by that
+// old_name exists on this host, rename it (module keys VMs by name, so a bare
+// name change would create-new + orphan-old). Runs BEFORE the create/HA gates so
+// a rename is preferred over a create. Idempotent: once `name` exists this is
+// skipped on the next converge. When it does not apply, the observed state is
+// returned unchanged; after a rename the VM is re-read.
+func (m *hypervModule) renameIfOldNameDeclared(ctx context.Context, cfg *VMConfig, vmName string, current *VMConfig, vmExists bool) (*VMConfig, bool, error) {
+	if vmExists || cfg.OldName == "" || cfg.OldName == vmName {
+		return current, vmExists, nil
 	}
-
-	// Declarative in-place rename (#2776): the desired VM `name` is absent but an
-	// `old_name` is declared. If a VM by that old_name exists on this host, rename
-	// it (module keys VMs by name, so a bare name change would create-new +
-	// orphan-old). Runs BEFORE the create/HA gates so a rename is preferred over a
-	// create. Idempotent: once `name` exists this is skipped on the next converge.
-	if !vmExists && cfg.OldName != "" && cfg.OldName != vmName {
-		renamed, rerr := m.renameFromOldName(ctx, cfg, vmName)
-		if rerr != nil {
-			return fmt.Errorf("hyperv: set VM %q: %w", vmName, rerr)
-		}
-		if renamed {
-			current, err = m.getVMLocal(ctx, vmName)
-			if err != nil {
-				return fmt.Errorf("hyperv: re-check VM %q after rename: %w", vmName, err)
-			}
-			if current.State != "absent" {
-				vmExists = true
-				currentVM = *current
-			}
-		}
+	renamed, rerr := m.renameFromOldName(ctx, cfg, vmName)
+	if rerr != nil {
+		return nil, false, fmt.Errorf("hyperv: set VM %q: %w", vmName, rerr)
 	}
+	if !renamed {
+		return current, vmExists, nil
+	}
+	current, err := m.getVMLocal(ctx, vmName)
+	if err != nil {
+		return nil, false, fmt.Errorf("hyperv: re-check VM %q after rename: %w", vmName, err)
+	}
+	return current, current.State != "absent", nil
+}
 
-	// The host object name is the exact VM name — no namespacing.
-	hostName := vmName
-
-	// Cluster-wide existence gate (#2420): the identical ha_role resource
-	// cascades to every member steward, so a steward where the VM is locally
-	// absent but the clustered role it names is already registered cluster-wide
-	// (owned by ANY node — getVM's membership probe reports this on the absent
-	// path) must take no create action at all. This closes the duplicate-VM
-	// window: the same declaration on ≥2 members can never produce two New-VM
-	// calls. It sits BEFORE the source/plain dispatch so it gates both
-	// applySourceGated provisioning and plain-lifecycle createVM. Who owns the
-	// role is deliberately not consulted here (#2421 handles owner-side create);
-	// existence alone is the skip condition. Coordination, not an error.
-	if !vmExists && cfg.HARole != nil && current.HARole != nil {
+// gateHARoleCreate applies the ha_role create gates to a locally absent VM and
+// reports skip=true when this node must take no create action.
+//
+// Cluster-wide existence gate (#2420): the identical ha_role resource cascades
+// to every member steward, so a steward where the VM is locally absent but the
+// clustered role it names is already registered cluster-wide (owned by ANY node
+// — getVM's membership probe reports this on the absent path) must take no
+// create action at all. This closes the duplicate-VM window: the same
+// declaration on ≥2 members can never produce two New-VM calls. It sits BEFORE
+// the source/plain dispatch so it gates both applySourceGated provisioning and
+// plain-lifecycle createVM. Who owns the role is deliberately not consulted here
+// (#2421 handles owner-side create); existence alone is the skip condition.
+// Coordination, not an error.
+//
+// CNO-owner creation gate (#2421): the role does not exist ANYWHERE in the
+// cluster yet (locally absent AND no clustered role registered), so exactly one
+// node must perform the first-ever create. Reuse the cluster module's
+// coordination primitive: only the CNO-owner steward proceeds to
+// create/provision (expensive provisioning is owner-gated too); every other
+// member records an audit skip — coordination, not authorization, mirroring
+// reconcileRoleMembership's non-owner shape. Non-owners converge once the owner
+// creates: their next getVM sees the registered role and the #2420 gate takes
+// over. A transient "CNO has no current owner" cycle returns (false, nil, nil) —
+// no node creates that cycle, which is safe (creation is delayed one cycle,
+// never duplicated). A helper error is fail-safe: it fails the Set rather than
+// being swallowed into a skip.
+func (m *hypervModule) gateHARoleCreate(ctx context.Context, vmName string, cfg, current *VMConfig) (bool, error) {
+	if cfg.HARole == nil {
+		return false, nil
+	}
+	if current.HARole != nil {
 		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
 			"vm-set-skip-hosted-elsewhere", "vm:"+vmName, nil,
 			map[string]interface{}{
@@ -1541,71 +1641,32 @@ func (m *hypervModule) setVM(ctx context.Context, resourceID string, config modu
 				"cluster_name": current.HARole.ClusterName,
 				"locally":      "absent",
 			}, nil)
-		return nil
+		return true, nil
 	}
-
-	// CNO-owner creation gate (#2421): the role does not exist ANYWHERE in the
-	// cluster yet (locally absent AND no clustered role registered — the #2420
-	// probe reports cluster-wide membership on the absent path), so exactly one
-	// node must perform the first-ever create. Reuse the cluster module's
-	// coordination primitive: only the CNO-owner steward proceeds to
-	// create/provision (the gate sits BEFORE the source/plain dispatch, so
-	// expensive provisioning is owner-gated too); every other member records an
-	// audit skip and returns nil — coordination, not authorization, mirroring
-	// reconcileRoleMembership's non-owner shape. Non-owners converge once the
-	// owner creates: their next getVM sees the registered role and the #2420
-	// gate above takes over. A transient "CNO has no current owner" cycle
-	// returns (false, nil, nil) — no node creates that cycle, which is safe
-	// (creation is delayed one cycle, never duplicated). A helper error is
-	// fail-safe: it fails the Set rather than being swallowed into a skip.
-	if !vmExists && cfg.HARole != nil && current.HARole == nil {
-		ownsCNO, _, ownErr := m.clusterOwnershipHelper(ctx, cfg.HARole.ClusterName)
-		if ownErr != nil {
-			return fmt.Errorf("hyperv: set VM %q: CNO ownership for first-ever ha_role create: %w", vmName, ownErr)
-		}
-		if !ownsCNO {
-			cnoOwner := m.readCNOOwner(ctx, cfg.HARole.ClusterName)
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
-				"vm-set-skip-not-cno-owner", "vm:"+vmName, nil,
-				map[string]interface{}{
-					"owns_cno":     false,
-					"cno_owner":    cnoOwner,
-					"skipped":      true,
-					"cluster_name": cfg.HARole.ClusterName,
-					"locally":      "absent",
-				}, nil)
-			return nil
-		}
+	ownsCNO, _, ownErr := m.clusterOwnershipHelper(ctx, cfg.HARole.ClusterName)
+	if ownErr != nil {
+		return false, fmt.Errorf("hyperv: set VM %q: CNO ownership for first-ever ha_role create: %w", vmName, ownErr)
 	}
-
-	// Existence-gating safety invariant (ADR-009 §2): source provisioning is
-	// existence-gated, never health-gated. When a source block is declared, the
-	// create/destroy decision is made HERE — before any plain-lifecycle apply —
-	// so that an existing VM can never be auto-destroyed or recreated by default,
-	// regardless of its health. The decision tree:
-	//
-	//   1. VM absent, own incomplete provisioning record → surface-and-wait.
-	//   2. VM absent, no in-progress record               → provision (create).
-	//   3. VM exists, on_existing == recreate             → removeVM + provision.
-	//   4. VM exists, broken state, on_existing != recreate → degraded surface.
-	//   5. VM exists, healthy, on_existing != recreate    → source inert;
-	//                                                        drive finalize +
-	//                                                        plain lifecycle.
-	if cfg.Source != nil {
-		return m.applySourceGated(ctx, vmName, hostName, cfg, &currentVM, vmExists, state)
+	if ownsCNO {
+		return false, nil
 	}
+	cnoOwner := m.readCNOOwner(ctx, cfg.HARole.ClusterName)
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+		"vm-set-skip-not-cno-owner", "vm:"+vmName, nil,
+		map[string]interface{}{
+			"owns_cno":     false,
+			"cno_owner":    cnoOwner,
+			"skipped":      true,
+			"cluster_name": cfg.HARole.ClusterName,
+			"locally":      "absent",
+		}, nil)
+	return true, nil
+}
 
-	if vmExists {
-		if err := m.applyVMState(ctx, vmName, hostName, cfg, &currentVM, state); err != nil {
-			return err
-		}
-		// Converge the checkpoint set to the declared policy (#2627). No-op when
-		// CheckpointPolicy is nil (observe-only). Runs after the power/resource
-		// reconcile so it operates on the settled VM.
-		return m.reconcileCheckpoints(ctx, hostName, cfg.CheckpointPolicy)
-	}
-
-	// VM does not exist — create it (plain lifecycle, no source block).
+// createPlainVM creates an absent VM with no source block, registers it as a
+// clustered role when ha_role is declared, powers it on if requested and writes
+// it through to the cache.
+func (m *hypervModule) createPlainVM(ctx context.Context, vmName, hostName string, cfg *VMConfig, state string) error {
 	if err := m.createVM(ctx, vmName, hostName, cfg); err != nil {
 		return err
 	}
@@ -1692,51 +1753,8 @@ func (m *hypervModule) demoteClusteredRole(ctx context.Context, cfg *VMConfig, c
 //	VM exists + broken state           → degraded record; never destroyed.
 //	VM exists + healthy                → source inert; finalize + plain lifecycle.
 func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName string, cfg *VMConfig, currentVM *VMConfig, vmExists bool, state string) error {
-	onExisting := cfg.Source.OnExisting // "" is treated as "never"
-
 	if !vmExists {
-		// The VM is absent on the host. Distinguish our OWN incomplete
-		// provisioning attempt (a record at creating/installing/finalizing —
-		// provably holds no operator workload, safe to resume) from a fresh
-		// create. Auto-retry of an own-incomplete attempt is OFF by default
-		// (surface-and-wait, ADR-009 §2): the install may simply be mid-flight
-		// and a half-built VM transiently absent from Get-VM. We do NOT re-issue
-		// New-VM — that is what protects against thrashing an in-progress build.
-		own, ownErr := m.isOwnIncompleteAttempt(ctx, cfg)
-		if ownErr != nil {
-			// CSV (cluster-visible) record was unreadable → fail loud. Creation
-			// must NOT proceed while the cluster record state is unknown, or a
-			// mid-provision CNO failover could produce the duplicate Option A
-			// exists to prevent. (Host-local reads never reach here — they swallow.)
-			return fmt.Errorf("hyperv: cannot determine provisioning state for VM %q: %w", vmName, ownErr)
-		}
-		if own {
-			// An in-progress record exists. On this node it may be our own mid-flight
-			// build; on a NEW CNO owner after a failover it is another node's in-flight
-			// attempt visible via the CSV record. Both surface-and-wait (no auto-retry,
-			// no New-VM) — the record on the CSV is what lets the new owner see it.
-			if logger, ok := m.GetLogger(); ok {
-				logger.Warn("hyperv: in-progress provisioning attempt; surface-and-wait (no auto-retry)",
-					"vm_name", logging.SanitizeLogValue(vmName))
-			}
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
-				"vm-provision-skip-in-progress-elsewhere", "vm:"+vmName, nil,
-				map[string]interface{}{"reason": "provision in progress"}, nil)
-			return nil
-		}
-		// No in-progress record → normal create-from-source path.
-		if err := m.createVM(ctx, vmName, hostName, cfg); err != nil {
-			return err
-		}
-		if err := m.provisionVM(ctx, vmName, hostName, cfg); err != nil {
-			return err
-		}
-		cfgCopy := *cfg
-		cfgCopy.Name = vmName
-		m.vmsMu.Lock()
-		m.vms[vmName] = cfgCopy
-		m.vmsMu.Unlock()
-		return nil
+		return m.applySourceAbsentVM(ctx, vmName, hostName, cfg)
 	}
 
 	// ── The VM EXISTS on the host. ──────────────────────────────────────────
@@ -1744,60 +1762,108 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 	// path that may destroy an existing VM is the explicit on_existing: recreate
 	// opt-in. Health/bootability is NEVER the trigger — a broken VM is surfaced
 	// as degraded, not rebuilt.
-	if onExisting == "recreate" {
-		// Explicit destructive opt-in. Tear the existing VM down, reset any
-		// provisioning record so the create path starts clean (absent), then
-		// provision from source.
-		var recreateBefore map[string]interface{}
-		if vmExists && currentVM != nil {
-			recreateBefore = map[string]interface{}{
-				"cpu":       currentVM.CPUCount,
-				"memory_mb": currentVM.MemoryMB,
-				"state":     currentVM.State,
-			}
+	if cfg.Source.OnExisting == "recreate" { // "" is treated as "never"
+		return m.applySourceRecreate(ctx, vmName, hostName, cfg, currentVM)
+	}
+	return m.applySourceInert(ctx, vmName, hostName, cfg, currentVM, state)
+}
+
+// applySourceAbsentVM handles a source-declared VM that is absent on the host.
+func (m *hypervModule) applySourceAbsentVM(ctx context.Context, vmName, hostName string, cfg *VMConfig) error {
+	// The VM is absent on the host. Distinguish our OWN incomplete
+	// provisioning attempt (a record at creating/installing/finalizing —
+	// provably holds no operator workload, safe to resume) from a fresh
+	// create. Auto-retry of an own-incomplete attempt is OFF by default
+	// (surface-and-wait, ADR-009 §2): the install may simply be mid-flight
+	// and a half-built VM transiently absent from Get-VM. We do NOT re-issue
+	// New-VM — that is what protects against thrashing an in-progress build.
+	own, ownErr := m.isOwnIncompleteAttempt(ctx, cfg)
+	if ownErr != nil {
+		// CSV (cluster-visible) record was unreadable → fail loud. Creation
+		// must NOT proceed while the cluster record state is unknown, or a
+		// mid-provision CNO failover could produce the duplicate Option A
+		// exists to prevent. (Host-local reads never reach here — they swallow.)
+		return fmt.Errorf("hyperv: cannot determine provisioning state for VM %q: %w", vmName, ownErr)
+	}
+	if own {
+		// An in-progress record exists. On this node it may be our own mid-flight
+		// build; on a NEW CNO owner after a failover it is another node's in-flight
+		// attempt visible via the CSV record. Both surface-and-wait (no auto-retry,
+		// no New-VM) — the record on the CSV is what lets the new owner see it.
+		if logger, ok := m.GetLogger(); ok {
+			logger.Warn("hyperv: in-progress provisioning attempt; surface-and-wait (no auto-retry)",
+				"vm_name", logging.SanitizeLogValue(vmName))
 		}
-		if err := m.removeVM(ctx, vmName, recreateBefore); err != nil {
-			return err
-		}
-		// Clear any seed media (seed VHDX + answer ISO) left by a prior provision
-		// before re-provisioning. This runs BEFORE the fallible DeleteProvision
-		// below on purpose: a leftover seed VHDX wedges the rebuild at New-VHD
-		// (0x80070050), and once the record is deleted the TTL sweep is blind to
-		// this VM — so a DeleteProvision error must not be able to abort the
-		// recreate before cleanup and permanently orphan the media. Best-effort;
-		// runs even when no media exists (idempotent).
-		//
-		// Use the OBSERVED VHD path (currentVM) for seed path derivation: when
-		// vhd_path changes alongside on_existing: recreate, the old seed media
-		// sits beside the old disk. Using the desired cfg.VHDPath would miss it
-		// and permanently orphan it once DeleteProvision removes the record
-		// (seedDir fallback: when seedDir is set, vmName alone is sufficient).
-		seedCleanupPath := cfg.VHDPath
-		if currentVM != nil && currentVM.VHDPath != "" {
-			seedCleanupPath = currentVM.VHDPath
-		}
-		m.deleteSeedMediaForVM(ctx, vmName, seedCleanupPath)
-		// Route via storeFor(cfg): an ha_role+CSV recreate must reset the
-		// cluster-visible record, not a stale host-local one.
-		if err := m.storeFor(cfg).DeleteProvision(ctx, vmName); err != nil && !errors.Is(err, ErrProvisionNotFound) {
-			return err
-		}
-		if err := m.createVM(ctx, vmName, hostName, cfg); err != nil {
-			return err
-		}
-		if err := m.provisionVM(ctx, vmName, hostName, cfg); err != nil {
-			return err
-		}
-		cfgCopy := *cfg
-		cfgCopy.Name = vmName
-		m.vmsMu.Lock()
-		m.vms[vmName] = cfgCopy
-		m.vmsMu.Unlock()
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+			"vm-provision-skip-in-progress-elsewhere", "vm:"+vmName, nil,
+			map[string]interface{}{"reason": "provision in progress"}, nil)
 		return nil
 	}
+	// No in-progress record → normal create-from-source path.
+	return m.createAndProvisionVM(ctx, vmName, hostName, cfg)
+}
 
-	// on_existing is never (or empty). The VM is never destroyed.
+// createAndProvisionVM creates the VM, provisions it from source and writes it
+// through to the cache.
+func (m *hypervModule) createAndProvisionVM(ctx context.Context, vmName, hostName string, cfg *VMConfig) error {
+	if err := m.createVM(ctx, vmName, hostName, cfg); err != nil {
+		return err
+	}
+	if err := m.provisionVM(ctx, vmName, hostName, cfg); err != nil {
+		return err
+	}
+	cfgCopy := *cfg
+	cfgCopy.Name = vmName
+	m.vmsMu.Lock()
+	m.vms[vmName] = cfgCopy
+	m.vmsMu.Unlock()
+	return nil
+}
+
+// applySourceRecreate is the explicit destructive opt-in (on_existing:
+// recreate). Tear the existing VM down, reset any provisioning record so the
+// create path starts clean (absent), then provision from source.
+func (m *hypervModule) applySourceRecreate(ctx context.Context, vmName, hostName string, cfg *VMConfig, currentVM *VMConfig) error {
+	var recreateBefore map[string]interface{}
+	if currentVM != nil {
+		recreateBefore = map[string]interface{}{
+			"cpu":       currentVM.CPUCount,
+			"memory_mb": currentVM.MemoryMB,
+			"state":     currentVM.State,
+		}
+	}
+	if err := m.removeVM(ctx, vmName, recreateBefore); err != nil {
+		return err
+	}
+	// Clear any seed media (seed VHDX + answer ISO) left by a prior provision
+	// before re-provisioning. This runs BEFORE the fallible DeleteProvision
+	// below on purpose: a leftover seed VHDX wedges the rebuild at New-VHD
+	// (0x80070050), and once the record is deleted the TTL sweep is blind to
+	// this VM — so a DeleteProvision error must not be able to abort the
+	// recreate before cleanup and permanently orphan the media. Best-effort;
+	// runs even when no media exists (idempotent).
 	//
+	// Use the OBSERVED VHD path (currentVM) for seed path derivation: when
+	// vhd_path changes alongside on_existing: recreate, the old seed media
+	// sits beside the old disk. Using the desired cfg.VHDPath would miss it
+	// and permanently orphan it once DeleteProvision removes the record
+	// (seedDir fallback: when seedDir is set, vmName alone is sufficient).
+	seedCleanupPath := cfg.VHDPath
+	if currentVM != nil && currentVM.VHDPath != "" {
+		seedCleanupPath = currentVM.VHDPath
+	}
+	m.deleteSeedMediaForVM(ctx, vmName, seedCleanupPath)
+	// Route via storeFor(cfg): an ha_role+CSV recreate must reset the
+	// cluster-visible record, not a stale host-local one.
+	if err := m.storeFor(cfg).DeleteProvision(ctx, vmName); err != nil && !errors.Is(err, ErrProvisionNotFound) {
+		return err
+	}
+	return m.createAndProvisionVM(ctx, vmName, hostName, cfg)
+}
+
+// applySourceInert handles an existing VM with on_existing never (or empty).
+// The VM is never destroyed.
+func (m *hypervModule) applySourceInert(ctx context.Context, vmName, hostName string, cfg *VMConfig, currentVM *VMConfig, state string) error {
 	// Load the VM's own provisioning record once for the two record-driven gates
 	// below (seed-phase-failure and degraded). loadOrInitProvision is read-only;
 	// the healthy path already re-reads it via finalizeProvision, so surfacing a
@@ -1807,66 +1873,10 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 		return err
 	}
 
-	// Seed-phase-failure gate (#2467, bounded auto-retry added by #3802): a VM
-	// whose own provisioning failed during the host-side create/seed phase
-	// (before the guest ever started installing) must NOT be powered on with no
-	// working seed. Per ADR-009 §2's amended invariant, this class provably holds
-	// no operator workload (isOwnIncompleteAttempt's own reasoning) and the
-	// host-attached-VHD leak that made a blind retry unsafe is fixed on develop,
-	// so — within a bounded attempt budget — the module re-invokes provisionVM
-	// to repair the seed and retry the install, instead of only surfacing and
-	// waiting forever. A record that failed AFTER reaching installing/finalizing
-	// (a different, post-power-on failure class such as a controller-side
-	// completion timeout, completion/reconciler.go) is deliberately NOT caught
-	// here and keeps converging normally.
-	//
-	// This runs BEFORE the isHealthyVMState/degraded check on purpose: a
-	// seed-phase failure is a more precise diagnosis than "existing VM looks
-	// unhealthy", and both retry and (once the budget is exhausted)
-	// surface-and-wait are the correct outcomes for both a healthy-looking and a
-	// broken observed state — neither should power a seedless guest on outside
-	// this gate. A record failed during the seed phase therefore takes
-	// precedence over the degraded surface. The degraded/broken-VM class itself
-	// (isHealthyVMState false, below) is completely untouched by this gate: it
-	// is never auto-retried or auto-remediated, matching ADR-009 §2's invariant
-	// for that class.
+	// Seed-phase-failure gate: runs BEFORE the isHealthyVMState/degraded check on
+	// purpose — see handleSeedPhaseFailure.
 	if failedDuringSeedPhase(record) {
-		maxRetries := cfg.Source.retryBudget()
-		if !seedPhaseRetryExhausted(record, maxRetries) {
-			// Within budget: the VM already exists on the host (this is the
-			// exists-branch), so only the seed build + attach + power-on steps are
-			// redone via provisionVM — never createVM. provisionVM's own re-entry
-			// guard (vm_provision.go) already falls through correctly from a
-			// Failed record into creating; it needs no change for this to work.
-			if logger, ok := m.GetLogger(); ok {
-				logger.Warn("hyperv: provisioning failed during the seed/create phase; retrying (bounded auto-retry)",
-					"vm_name", logging.SanitizeLogValue(vmName),
-					"failed_from", string(record.FailedFrom),
-					"retry_count", record.RetryCount,
-					"retry_max", maxRetries)
-			}
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
-				"vm-provision-retry-failed-seed-phase", "vm:"+vmName, nil,
-				map[string]interface{}{"reason": "seed-phase failure; bounded auto-retry", "retry_count": record.RetryCount}, nil)
-			return m.provisionVM(ctx, vmName, hostName, cfg)
-		}
-		// Retry budget exhausted: fall back to the original surface-and-wait
-		// behavior — the VM stays off, never destroyed, never powered on. This is
-		// the terminal state the visibility sibling story (Issue #3803, Epic #3799)
-		// surfaces to an operator: return a typed sentinel instead of nil so the
-		// executor can classify this outcome distinctly from a generic convergence
-		// failure (module.go's RetryExhaustedError, mirroring RebootDeferredError).
-		if logger, ok := m.GetLogger(); ok {
-			logger.Warn("hyperv: provisioning failed during the seed/create phase; retry budget exhausted, surface-and-wait (VM stays off until reseeded, no power-on)",
-				"vm_name", logging.SanitizeLogValue(vmName),
-				"failed_from", string(record.FailedFrom),
-				"retry_count", record.RetryCount,
-				"last_error", logging.SanitizeLogValue(record.LastError))
-		}
-		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
-			"vm-provision-skip-failed-seed-phase", "vm:"+vmName, nil,
-			map[string]interface{}{"reason": "seed-phase failure; retry budget exhausted; VM left powered off"}, nil)
-		return modules.NewRetryExhaustedError(record.LastError, string(record.FailedFrom))
+		return m.handleSeedPhaseFailure(ctx, vmName, hostName, cfg, record)
 	}
 
 	if !isHealthyVMState(currentVM.State) {
@@ -1897,6 +1907,66 @@ func (m *hypervModule) applySourceGated(ctx context.Context, vmName, hostName st
 	// policy self-heals identically to a plain-lifecycle VM. No-op when the policy
 	// is nil (observe-only).
 	return m.reconcileCheckpoints(ctx, hostName, cfg.CheckpointPolicy)
+}
+
+// handleSeedPhaseFailure is the seed-phase-failure gate (#2467, bounded
+// auto-retry added by #3802): a VM whose own provisioning failed during the
+// host-side create/seed phase (before the guest ever started installing) must
+// NOT be powered on with no working seed. Per ADR-009 §2's amended invariant,
+// this class provably holds no operator workload (isOwnIncompleteAttempt's own
+// reasoning) and the host-attached-VHD leak that made a blind retry unsafe is
+// fixed on develop, so — within a bounded attempt budget — the module
+// re-invokes provisionVM to repair the seed and retry the install, instead of
+// only surfacing and waiting forever. A record that failed AFTER reaching
+// installing/finalizing (a different, post-power-on failure class such as a
+// controller-side completion timeout, completion/reconciler.go) is deliberately
+// NOT caught here and keeps converging normally.
+//
+// A seed-phase failure is a more precise diagnosis than "existing VM looks
+// unhealthy", and both retry and (once the budget is exhausted)
+// surface-and-wait are the correct outcomes for both a healthy-looking and a
+// broken observed state — neither should power a seedless guest on outside this
+// gate, so it takes precedence over the degraded surface. The degraded/broken-VM
+// class itself (isHealthyVMState false) is completely untouched by this gate: it
+// is never auto-retried or auto-remediated, matching ADR-009 §2's invariant for
+// that class.
+func (m *hypervModule) handleSeedPhaseFailure(ctx context.Context, vmName, hostName string, cfg *VMConfig, record *ProvisionRecord) error {
+	maxRetries := cfg.Source.retryBudget()
+	if !seedPhaseRetryExhausted(record, maxRetries) {
+		// Within budget: the VM already exists on the host (this is the
+		// exists-branch), so only the seed build + attach + power-on steps are
+		// redone via provisionVM — never createVM. provisionVM's own re-entry
+		// guard (vm_provision.go) already falls through correctly from a
+		// Failed record into creating; it needs no change for this to work.
+		if logger, ok := m.GetLogger(); ok {
+			logger.Warn("hyperv: provisioning failed during the seed/create phase; retrying (bounded auto-retry)",
+				"vm_name", logging.SanitizeLogValue(vmName),
+				"failed_from", string(record.FailedFrom),
+				"retry_count", record.RetryCount,
+				"retry_max", maxRetries)
+		}
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+			"vm-provision-retry-failed-seed-phase", "vm:"+vmName, nil,
+			map[string]interface{}{"reason": "seed-phase failure; bounded auto-retry", "retry_count": record.RetryCount}, nil)
+		return m.provisionVM(ctx, vmName, hostName, cfg)
+	}
+	// Retry budget exhausted: fall back to the original surface-and-wait
+	// behavior — the VM stays off, never destroyed, never powered on. This is
+	// the terminal state the visibility sibling story (Issue #3803, Epic #3799)
+	// surfaces to an operator: return a typed sentinel instead of nil so the
+	// executor can classify this outcome distinctly from a generic convergence
+	// failure (module.go's RetryExhaustedError, mirroring RebootDeferredError).
+	if logger, ok := m.GetLogger(); ok {
+		logger.Warn("hyperv: provisioning failed during the seed/create phase; retry budget exhausted, surface-and-wait (VM stays off until reseeded, no power-on)",
+			"vm_name", logging.SanitizeLogValue(vmName),
+			"failed_from", string(record.FailedFrom),
+			"retry_count", record.RetryCount,
+			"last_error", logging.SanitizeLogValue(record.LastError))
+	}
+	recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+		"vm-provision-skip-failed-seed-phase", "vm:"+vmName, nil,
+		map[string]interface{}{"reason": "seed-phase failure; retry budget exhausted; VM left powered off"}, nil)
+	return modules.NewRetryExhaustedError(record.LastError, string(record.FailedFrom))
 }
 
 // renameFromOldName performs the #2776 declarative rename: when the desired VM
@@ -2073,75 +2143,12 @@ func (m *hypervModule) connectAdditionalNics(ctx context.Context, cfgResourceID,
 func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string, desired, current *VMConfig, state string) error {
 	cfgResourceID := "vm:" + vmName
 
-	// Role-owner gate (#2422): lifecycle convergence (storage move, NIC reconcile,
-	// promote/demote, resize, power) for an ha_role VM runs ONLY on the node that
-	// currently owns the role. A non-owner — most importantly the PREVIOUS owner
-	// right after a failover, whose local Get-VM view may transiently still show
-	// the VM — takes no lifecycle action and goes quiet; the new owner converges
-	// instead. This makes success criterion #3 ("after failover the new owner
-	// converges and the previous owner goes quiet") hold even in the edge case
-	// where local Get-VM visibility lags cluster-role ownership, not just when they
-	// already agree.
-	//
-	// Skip only on an AFFIRMATIVE different-owner report: the owner map contains an
-	// entry for this VM AND that entry is a node other than us. A MISSING entry
-	// (role not yet registered — the first-time promote of an existing standalone
-	// VM to ha_role) does NOT skip: local possession decides, and this node holds
-	// the VM locally (applyVMState is the existing-VM path), so it proceeds and the
-	// promote/demote switch below registers the role (founder ruling 2026-07-08:
-	// promotion happens on the host that owns the VM first; only then does the
-	// definition move from the steward config to the cluster config).
-	//
-	// A probe error here is fail-safe-QUIET, deliberately UNLIKE #2421's
-	// clusterOwnershipHelper (which propagates): that call happens once, at
-	// first-creation time, where fail-safe-loud is correct. This call happens on
-	// every convergence tick of every already-existing HA VM, so a transient
-	// cluster-service hiccup must not surface as a steward error state or spam the
-	// error log — treat it as "cannot determine ownership this cycle" and skip,
-	// letting the next tick retry. A future reviewer must not "fix" this to match
-	// #2421/S2. Standalone VMs (desired.HARole == nil) skip this block entirely —
-	// zero added transport calls, zero behavior change.
-	//
-	// An UNRESOLVED owner (the map has an entry for the VM but the owner string is
-	// empty — Get-ClusterGroup reports "" for a role with no current OwnerNode, the
-	// in-flight-failover window this story targets) is treated the same as a
-	// different owner: the node goes quiet. This is the safe bias — while ownership
-	// is unsettled, EVERY member reads "" and waits, so no two nodes ever act at
-	// once; it self-heals the moment the cluster settles an owner. Proceeding on
-	// local possession here would instead risk two nodes converging the same role
-	// during the settle window.
-	if desired.HARole != nil {
-		clusterName := desired.HARole.ClusterName
-		// Scope cap (S5): never issue a transport call for a cluster this steward is
-		// not permitted to read — the same invariant every other cluster-touching
-		// function enforces before the transport (clusterOwnershipHelper,
-		// reconcileRoleMembership, getCluster). A mismatched ha_role.cluster_name is
-		// a persistent misconfiguration, not a transient probe failure, so it fails
-		// LOUD (exactly as the downstream promote path's reconcileRoleMembership
-		// would) rather than taking the fail-safe-quiet path below.
-		if m.clusterName != "" && clusterName != m.clusterName {
-			return fmt.Errorf("hyperv: apply VM state %q: %w", vmName, ErrClusterNotDeclared)
-		}
-		owners, roErr := m.readResourceOwners(ctx, clusterName)
-		if roErr != nil {
-			if logger, ok := m.GetLogger(); ok {
-				logger.Warn("hyperv: ha_role owner probe failed; skipping lifecycle convergence this cycle",
-					"vm_name", logging.SanitizeLogValue(vmName),
-					"cluster", logging.SanitizeLogValue(clusterName),
-					"error", logging.SanitizeLogValue(roErr.Error()))
-			}
-			return nil
-		}
-		if owner, isMember := owners[vmName]; isMember && !strings.EqualFold(owner, m.nodeHostname) {
-			recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
-				"vm-lifecycle-skip-not-owner", cfgResourceID, nil,
-				map[string]interface{}{
-					"skipped":      true,
-					"cluster_name": clusterName,
-					"owner":        owner,
-				}, nil)
-			return nil
-		}
+	proceed, err := m.gateRoleOwner(ctx, vmName, desired)
+	if err != nil {
+		return err
+	}
+	if !proceed {
+		return nil
 	}
 
 	// Storage-location convergence (#2411) runs FIRST: an ha_role registration
@@ -2150,7 +2157,7 @@ func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string
 	// deferred while a live move is in flight. proceed=false means a move was
 	// started or is in flight — the rest of this cycle is a cheap no-op and the
 	// lifecycle resumes once the location converges.
-	proceed, err := m.convergeStorageLocation(ctx, vmName, hostName, desired, current)
+	proceed, err = m.convergeStorageLocation(ctx, vmName, hostName, desired, current)
 	if err != nil {
 		return err
 	}
@@ -2167,99 +2174,166 @@ func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string
 		return err
 	}
 
-	// Cluster-role membership reconcile (#2372): ha_role is convergent on the
-	// existing-VM path, not create-only. current.HARole comes from getVM's
-	// membership probe; both mutations run before any power-state transition,
-	// mirroring the create path's register-before-start ordering.
-	//
-	//   nil → non-nil  promote (register the clustered role)
-	//   non-nil → nil  demote (remove the role — the VM is never touched)
-	//   both non-nil   no-op: already a member; moving a registered VM to a
-	//                  different cluster in one step has no defined semantics
-	//                  (out of scope, #2372) and the same-cluster case is
-	//                  already converged.
-	switch {
-	case desired.HARole != nil && current.HARole == nil:
-		promoteCfg := *desired
-		promoteCfg.Name = vmName
-		if err := m.registerClusteredRole(ctx, &promoteCfg); err != nil {
-			return err
-		}
-	case desired.HARole == nil && current.HARole != nil:
-		demoteCfg := *desired
-		demoteCfg.Name = vmName
-		if err := m.demoteClusteredRole(ctx, &demoteCfg, current.HARole.ClusterName); err != nil {
-			return err
-		}
-	}
-
-	needsCPUResize := desired.CPUCount != 0 && desired.CPUCount != current.CPUCount
-	needsMemResize := desired.MemoryMB != 0 && desired.MemoryMB != current.MemoryMB
-	needsResize := needsCPUResize || needsMemResize
-
-	// Build per-operation before/after snapshots for resize auditing. Only
-	// non-sensitive scalars (cpu count, memory MB) are included — no VHD paths,
-	// no switch names, no live host values.
-	var cpuBefore, cpuAfter, memBefore, memAfter map[string]interface{}
-	if needsCPUResize {
-		cpuBefore = map[string]interface{}{"cpu": current.CPUCount}
-		cpuAfter = map[string]interface{}{"cpu": desired.CPUCount}
-	}
-	if needsMemResize {
-		memBefore = map[string]interface{}{"memory_mb": current.MemoryMB}
-		memAfter = map[string]interface{}{"memory_mb": desired.MemoryMB}
+	if err := m.reconcileHARoleMembership(ctx, vmName, desired, current); err != nil {
+		return err
 	}
 
 	switch state {
 	case "running":
-		if needsResize {
-			// CPU/memory can only be changed on a stopped VM. Stop ONLY IF the
-			// VM is not already stopped, apply the resize, then (re)start below.
-			// Gating on current.State keeps the transition idempotent: a VM that
-			// is already stopped is not issued a redundant Stop-VM.
-			if current.State != "stopped" {
-				if err := m.execStopVM(ctx, cfgResourceID, hostName,
-					map[string]interface{}{"state": current.State},
-					map[string]interface{}{"state": "stopped"}); err != nil {
-					return err
-				}
-			}
-			if needsCPUResize {
-				if err := m.execSetVMProcessor(ctx, cfgResourceID, hostName, desired.CPUCount, cpuBefore, cpuAfter); err != nil {
-					return err
-				}
-			}
-			if needsMemResize {
-				if err := m.execSetVMMemory(ctx, cfgResourceID, hostName, desired.MemoryMB, memBefore, memAfter); err != nil {
-					return err
-				}
-			}
-			// A resize always ends with the VM stopped, so the desired running
-			// state requires an unconditional Start-VM here.
-			if err := m.execStartVM(ctx, cfgResourceID, hostName,
-				map[string]interface{}{"state": "stopped"},
-				map[string]interface{}{"state": "running"}); err != nil {
-				return err
-			}
-		} else if current.State != "running" {
-			// No resize needed — only start the VM if it is not already running.
-			// Re-applying a config whose power state already matches issues no
-			// Start-VM (Hyper-V errors "already in the running state" otherwise).
-			if err := m.execStartVM(ctx, cfgResourceID, hostName,
-				map[string]interface{}{"state": current.State},
-				map[string]interface{}{"state": "running"}); err != nil {
-				return err
-			}
-		}
-		m.vmsMu.Lock()
-		updated := *current
-		updated.State = "running"
-		m.vms[vmName] = updated
-		m.vmsMu.Unlock()
-
+		err = m.applyRunningState(ctx, cfgResourceID, hostName, desired, current)
 	case "stopped":
-		// Stop ONLY IF the VM is not already stopped — re-applying a stopped
-		// config on an already-stopped VM issues no Stop-VM.
+		err = m.applyStoppedState(ctx, cfgResourceID, hostName, desired, current)
+	default:
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	m.cacheVMState(vmName, current, state)
+	return nil
+}
+
+// gateRoleOwner is the role-owner gate (#2422): lifecycle convergence (storage
+// move, NIC reconcile, promote/demote, resize, power) for an ha_role VM runs
+// ONLY on the node that currently owns the role. A non-owner — most importantly
+// the PREVIOUS owner right after a failover, whose local Get-VM view may
+// transiently still show the VM — takes no lifecycle action and goes quiet; the
+// new owner converges instead. It returns proceed=false for that quiet return.
+//
+// Skip only on an AFFIRMATIVE different-owner report: the owner map contains an
+// entry for this VM AND that entry is a node other than us. A MISSING entry
+// (role not yet registered — the first-time promote of an existing standalone
+// VM to ha_role) does NOT skip: local possession decides, and this node holds
+// the VM locally (applyVMState is the existing-VM path), so it proceeds and the
+// promote/demote switch registers the role (founder ruling 2026-07-08:
+// promotion happens on the host that owns the VM first; only then does the
+// definition move from the steward config to the cluster config).
+//
+// A probe error is fail-safe-QUIET, deliberately UNLIKE #2421's
+// clusterOwnershipHelper (which propagates): that call happens once, at
+// first-creation time, where fail-safe-loud is correct. This call happens on
+// every convergence tick of every already-existing HA VM, so a transient
+// cluster-service hiccup must not surface as a steward error state or spam the
+// error log — treat it as "cannot determine ownership this cycle" and skip,
+// letting the next tick retry. A future reviewer must not "fix" this to match
+// #2421/S2. Standalone VMs (desired.HARole == nil) skip the gate entirely —
+// zero added transport calls, zero behavior change.
+//
+// An UNRESOLVED owner (the map has an entry for the VM but the owner string is
+// empty — Get-ClusterGroup reports "" for a role with no current OwnerNode, the
+// in-flight-failover window) is treated the same as a different owner: the node
+// goes quiet. This is the safe bias — while ownership is unsettled, EVERY member
+// reads "" and waits, so no two nodes ever act at once; it self-heals the moment
+// the cluster settles an owner.
+func (m *hypervModule) gateRoleOwner(ctx context.Context, vmName string, desired *VMConfig) (bool, error) {
+	if desired.HARole == nil {
+		return true, nil
+	}
+	clusterName := desired.HARole.ClusterName
+	// Scope cap (S5): never issue a transport call for a cluster this steward is
+	// not permitted to read — the same invariant every other cluster-touching
+	// function enforces before the transport (clusterOwnershipHelper,
+	// reconcileRoleMembership, getCluster). A mismatched ha_role.cluster_name is
+	// a persistent misconfiguration, not a transient probe failure, so it fails
+	// LOUD (exactly as the downstream promote path's reconcileRoleMembership
+	// would) rather than taking the fail-safe-quiet path below.
+	if m.clusterName != "" && clusterName != m.clusterName {
+		return false, fmt.Errorf("hyperv: apply VM state %q: %w", vmName, ErrClusterNotDeclared)
+	}
+	owners, roErr := m.readResourceOwners(ctx, clusterName)
+	if roErr != nil {
+		m.logOwnerProbeFailed(vmName, clusterName, roErr)
+		return false, nil
+	}
+	if owner, isMember := owners[vmName]; isMember && !strings.EqualFold(owner, m.nodeHostname) {
+		recordHypervOp(ctx, m.auditMgr, m.tenantID, m.stewardID, m.nodeHostname,
+			"vm-lifecycle-skip-not-owner", "vm:"+vmName, nil,
+			map[string]interface{}{
+				"skipped":      true,
+				"cluster_name": clusterName,
+				"owner":        owner,
+			}, nil)
+		return false, nil
+	}
+	return true, nil
+}
+
+// logOwnerProbeFailed logs the fail-safe-quiet skip taken when the role-owner
+// probe errors (see gateRoleOwner).
+func (m *hypervModule) logOwnerProbeFailed(vmName, clusterName string, roErr error) {
+	if logger, ok := m.GetLogger(); ok {
+		logger.Warn("hyperv: ha_role owner probe failed; skipping lifecycle convergence this cycle",
+			"vm_name", logging.SanitizeLogValue(vmName),
+			"cluster", logging.SanitizeLogValue(clusterName),
+			"error", logging.SanitizeLogValue(roErr.Error()))
+	}
+}
+
+// reconcileHARoleMembership converges cluster-role membership (#2372): ha_role
+// is convergent on the existing-VM path, not create-only. current.HARole comes
+// from getVM's membership probe; both mutations run before any power-state
+// transition, mirroring the create path's register-before-start ordering.
+//
+//	nil → non-nil  promote (register the clustered role)
+//	non-nil → nil  demote (remove the role — the VM is never touched)
+//	both non-nil   no-op: already a member; moving a registered VM to a
+//	               different cluster in one step has no defined semantics
+//	               (out of scope, #2372) and the same-cluster case is
+//	               already converged.
+func (m *hypervModule) reconcileHARoleMembership(ctx context.Context, vmName string, desired, current *VMConfig) error {
+	switch {
+	case desired.HARole != nil && current.HARole == nil:
+		promoteCfg := *desired
+		promoteCfg.Name = vmName
+		return m.registerClusteredRole(ctx, &promoteCfg)
+	case desired.HARole == nil && current.HARole != nil:
+		demoteCfg := *desired
+		demoteCfg.Name = vmName
+		return m.demoteClusteredRole(ctx, &demoteCfg, current.HARole.ClusterName)
+	}
+	return nil
+}
+
+// needsCPUResize reports whether the desired CPU count differs from the current.
+func needsCPUResize(desired, current *VMConfig) bool {
+	return desired.CPUCount != 0 && desired.CPUCount != current.CPUCount
+}
+
+// needsMemResize reports whether the desired memory differs from the current.
+func needsMemResize(desired, current *VMConfig) bool {
+	return desired.MemoryMB != 0 && desired.MemoryMB != current.MemoryMB
+}
+
+// applyResize applies the CPU and memory changes the desired config requires.
+// The VM must already be stopped. Only non-sensitive scalars (cpu count, memory
+// MB) are included in the per-operation audit before/after snapshots — no VHD
+// paths, no switch names, no live host values.
+func (m *hypervModule) applyResize(ctx context.Context, cfgResourceID, hostName string, desired, current *VMConfig) error {
+	if needsCPUResize(desired, current) {
+		if err := m.execSetVMProcessor(ctx, cfgResourceID, hostName, desired.CPUCount,
+			map[string]interface{}{"cpu": current.CPUCount},
+			map[string]interface{}{"cpu": desired.CPUCount}); err != nil {
+			return err
+		}
+	}
+	if needsMemResize(desired, current) {
+		if err := m.execSetVMMemory(ctx, cfgResourceID, hostName, desired.MemoryMB,
+			map[string]interface{}{"memory_mb": current.MemoryMB},
+			map[string]interface{}{"memory_mb": desired.MemoryMB}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applyRunningState drives an existing VM to the running state, applying any
+// CPU/memory resize first.
+func (m *hypervModule) applyRunningState(ctx context.Context, cfgResourceID, hostName string, desired, current *VMConfig) error {
+	if needsCPUResize(desired, current) || needsMemResize(desired, current) {
+		// CPU/memory can only be changed on a stopped VM. Stop ONLY IF the
+		// VM is not already stopped, apply the resize, then (re)start below.
+		// Gating on current.State keeps the transition idempotent: a VM that
+		// is already stopped is not issued a redundant Stop-VM.
 		if current.State != "stopped" {
 			if err := m.execStopVM(ctx, cfgResourceID, hostName,
 				map[string]interface{}{"state": current.State},
@@ -2267,25 +2341,49 @@ func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string
 				return err
 			}
 		}
-		// The VM is stopped (or was already), so resize can proceed.
-		if needsCPUResize {
-			if err := m.execSetVMProcessor(ctx, cfgResourceID, hostName, desired.CPUCount, cpuBefore, cpuAfter); err != nil {
-				return err
-			}
+		if err := m.applyResize(ctx, cfgResourceID, hostName, desired, current); err != nil {
+			return err
 		}
-		if needsMemResize {
-			if err := m.execSetVMMemory(ctx, cfgResourceID, hostName, desired.MemoryMB, memBefore, memAfter); err != nil {
-				return err
-			}
-		}
-		m.vmsMu.Lock()
-		updated := *current
-		updated.State = "stopped"
-		m.vms[vmName] = updated
-		m.vmsMu.Unlock()
+		// A resize always ends with the VM stopped, so the desired running
+		// state requires an unconditional Start-VM here.
+		return m.execStartVM(ctx, cfgResourceID, hostName,
+			map[string]interface{}{"state": "stopped"},
+			map[string]interface{}{"state": "running"})
 	}
-
+	if current.State != "running" {
+		// No resize needed — only start the VM if it is not already running.
+		// Re-applying a config whose power state already matches issues no
+		// Start-VM (Hyper-V errors "already in the running state" otherwise).
+		return m.execStartVM(ctx, cfgResourceID, hostName,
+			map[string]interface{}{"state": current.State},
+			map[string]interface{}{"state": "running"})
+	}
 	return nil
+}
+
+// applyStoppedState drives an existing VM to the stopped state, then applies
+// any CPU/memory resize.
+func (m *hypervModule) applyStoppedState(ctx context.Context, cfgResourceID, hostName string, desired, current *VMConfig) error {
+	// Stop ONLY IF the VM is not already stopped — re-applying a stopped
+	// config on an already-stopped VM issues no Stop-VM.
+	if current.State != "stopped" {
+		if err := m.execStopVM(ctx, cfgResourceID, hostName,
+			map[string]interface{}{"state": current.State},
+			map[string]interface{}{"state": "stopped"}); err != nil {
+			return err
+		}
+	}
+	// The VM is stopped (or was already), so resize can proceed.
+	return m.applyResize(ctx, cfgResourceID, hostName, desired, current)
+}
+
+// cacheVMState writes the converged power state through to the VM cache.
+func (m *hypervModule) cacheVMState(vmName string, current *VMConfig, state string) {
+	m.vmsMu.Lock()
+	updated := *current
+	updated.State = state
+	m.vms[vmName] = updated
+	m.vmsMu.Unlock()
 }
 
 // reconcileNetwork converges the VM's connected switches to desired.desiredSwitches().
