@@ -7,6 +7,15 @@ package client
 
 import (
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/pem"
+	"runtime"
 	"testing"
 	"time"
 
@@ -14,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/steward/commands"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
@@ -220,4 +230,65 @@ func TestClienttransportsetupChar_SyncDNAWithoutSessionReportsFailureToQueue(t *
 	}}))
 	h.Wait()
 	assert.Greater(t, queue.Len(), 0, "sync_dna with no data plane session reports a failure event")
+}
+
+// clienttransportsetupCharLibraryScript returns an execute_script command for a
+// library script (non-empty script_id) signed by key.
+func clienttransportsetupCharLibraryScript(t *testing.T, key *rsa.PrivateKey, pubPEM, id string) *cpTypes.SignedCommand {
+	t.Helper()
+	content := []byte("echo library")
+	digest := sha256.Sum256(content)
+	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+	require.NoError(t, err)
+	shell := "bash"
+	if runtime.GOOS == "windows" {
+		shell = "powershell"
+	}
+	return &cpTypes.SignedCommand{Command: cpTypes.Command{
+		ID:        id,
+		Type:      cpTypes.CommandExecuteScript,
+		StewardID: clienttransportsetupCharStewardID,
+		Timestamp: time.Now(),
+		Params: map[string]interface{}{
+			"script_content":       base64.StdEncoding.EncodeToString(content),
+			"shell":                shell,
+			"execution_id":         id,
+			"script_id":            "lib-" + id,
+			"signature_algorithm":  "rsa-sha256",
+			"signature_value":      base64.StdEncoding.EncodeToString(sig),
+			"signature_public_key": pubPEM,
+		},
+	}}
+}
+
+func TestClienttransportsetupChar_LibraryScriptsVerifyAgainstTrustedKeys(t *testing.T) {
+	trustedKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubPEM := func(k *rsa.PrivateKey) (string, string) {
+		der, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
+		require.NoError(t, err)
+		sum := sha256.Sum256(der)
+		return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), hex.EncodeToString(sum[:])
+	}
+	trustedPEM, trustedThumb := pubPEM(trustedKey)
+	otherPEM, _ := pubPEM(otherKey)
+
+	c := clienttransportsetupCharClient(t, &TransportConfig{
+		ScriptSigning: stewardconfig.ScriptSigningConfig{
+			Policy:      stewardconfig.ScriptSigningPolicyOptional,
+			TrustMode:   stewardconfig.TrustModeTrustedKeys,
+			TrustedKeys: []stewardconfig.TrustedKeyRef{{Name: "ci-key", Thumbprint: trustedThumb}},
+		},
+	})
+	h, err := c.setupCommandHandler(context.Background(), clienttransportsetupCharStewardID)
+	require.NoError(t, err)
+	t.Cleanup(h.Wait)
+
+	err = h.HandleCommand(context.Background(), clienttransportsetupCharLibraryScript(t, otherKey, otherPEM, "untrusted"))
+	require.ErrorIs(t, err, commands.ErrUnauthenticatedCommand, "a library script signed by a key outside TrustedKeys is rejected")
+
+	err = h.HandleCommand(context.Background(), clienttransportsetupCharLibraryScript(t, trustedKey, trustedPEM, "trusted"))
+	require.NoError(t, err, "a library script signed by a TrustedKeys key is accepted")
 }
