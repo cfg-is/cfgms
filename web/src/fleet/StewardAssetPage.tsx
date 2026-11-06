@@ -18,7 +18,7 @@
  * broken aria-controls references in the DOM. Roving tabindex keeps Tab focus
  * on a single active tab; ArrowLeft/ArrowRight cycle between tabs.
  */
-import { type ComponentType, useEffect, useRef, useState } from 'react'
+import { type ComponentType, useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { apiFetch } from '../api/client.ts'
 import type { HealthReason } from './health.ts'
@@ -29,6 +29,7 @@ import LiveActivityTab from './LiveActivityTab.tsx'
 import LogsPanel from './LogsPanel.tsx'
 import ModulesPanel from './ModulesPanel.tsx'
 import ShellTab from './ShellTab.tsx'
+import TamperPanel, { type HandsOnTab } from './TamperPanel.tsx'
 
 type TabKey = 'dna' | 'config' | 'shell' | 'logs' | 'modules' | 'live' | 'compliance'
 
@@ -77,29 +78,71 @@ export function PanelContent({ spec, onSelectTab }: { spec: TabSpec } & PanelPro
   return Panel ? <Panel onSelectTab={onSelectTab} /> : <SoonPanel label={spec.label} />
 }
 
-/* Status and health reasons from GET /api/v1/stewards/{id}; null until loaded or on failure. */
-function useStewardHealth(stewardId: string): { status: string; reasons: HealthReason[] } | null {
-  const [state, setState] = useState<{ id: string; status: string; reasons: HealthReason[] } | null>(null)
+interface StewardHealth {
+  status: string
+  reasons: HealthReason[]
+  /** Stored tamper codes of the last alarm (tampered stewards only). */
+  tamperCodes: string[]
+  /** Host name the controller has for the steward ('' when none). */
+  hostname: string
+  connectionState: string
+}
+
+type HealthLoad =
+  | { phase: 'loading' }
+  | { phase: 'error' }
+  | { phase: 'ready'; health: StewardHealth }
+
+/*
+ * Status and health reasons from GET /api/v1/stewards/{id}. `reload` re-reads without
+ * dropping the current value, so the tamper panel does not flash through Loading.
+ * NOTE: the REST payload carries no separate host-name field, so the host name is the
+ * `dna.hostname` the controller last stored for the steward.
+ */
+function useStewardHealth(stewardId: string): { load: HealthLoad; reload: () => void } {
+  const [state, setState] = useState<{ id: string; load: HealthLoad }>({ id: stewardId, load: { phase: 'loading' } })
+  const [tick, setTick] = useState(0)
   useEffect(() => {
     let cancelled = false
     apiFetch(`/api/v1/stewards/${encodeURIComponent(stewardId)}`)
       .then(async (response) => {
-        if (!response.ok) return
+        if (!response.ok) {
+          if (!cancelled) setState((prev) => (prev.id === stewardId && prev.load.phase === 'ready' ? prev : { id: stewardId, load: { phase: 'error' } }))
+          return
+        }
         const body: unknown = await response.json()
         const data = (body as Record<string, unknown> | null)?.data as Record<string, unknown> | null | undefined
-        if (cancelled || typeof data !== 'object' || data === null) return
+        if (cancelled) return
+        if (typeof data !== 'object' || data === null) {
+          setState((prev) => (prev.id === stewardId && prev.load.phase === 'ready' ? prev : { id: stewardId, load: { phase: 'error' } }))
+          return
+        }
+        const dna = data.dna as Record<string, unknown> | null | undefined
         setState({
           id: stewardId,
-          status: typeof data.status === 'string' ? data.status.trim().toLowerCase() : '',
-          reasons: parseHealthReasons(data.health_reasons),
+          load: {
+            phase: 'ready',
+            health: {
+              status: typeof data.status === 'string' ? data.status.trim().toLowerCase() : '',
+              reasons: parseHealthReasons(data.health_reasons),
+              tamperCodes: Array.isArray(data.tamper_codes)
+                ? data.tamper_codes.filter((c): c is string => typeof c === 'string')
+                : [],
+              hostname: typeof dna?.hostname === 'string' ? dna.hostname : '',
+              connectionState: typeof data.connection_state === 'string' ? data.connection_state : '',
+            },
+          },
         })
       })
-      .catch(() => {})
+      .catch(() => {
+        if (!cancelled) setState((prev) => (prev.id === stewardId && prev.load.phase === 'ready' ? prev : { id: stewardId, load: { phase: 'error' } }))
+      })
     return () => {
       cancelled = true
     }
-  }, [stewardId])
-  return state?.id === stewardId ? state : null
+  }, [stewardId, tick])
+  const reload = useCallback(() => setTick((t) => t + 1), [])
+  return { load: state.id === stewardId ? state.load : { phase: 'loading' }, reload }
 }
 
 function HealthReasonList({ reasons }: { reasons: HealthReason[] }) {
@@ -119,8 +162,8 @@ export default function StewardAssetPage() {
   // useParams returns an already-decoded value from React Router — do not
   // call decodeURIComponent again or bare % chars in IDs throw URIError.
   const { id: stewardId = '' } = useParams<{ id: string }>()
-  const health = useStewardHealth(stewardId)
-  const tampered = health?.status === 'tampered'
+  const { load, reload } = useStewardHealth(stewardId)
+  const health = load.phase === 'ready' ? load.health : null
   const [activeTab, setActiveTab] = useState<TabKey>('dna')
   const tabRefs = useRef<Map<TabKey, HTMLButtonElement>>(new Map())
 
@@ -154,20 +197,32 @@ export default function StewardAssetPage() {
         <h1>Device</h1>
       </div>
 
-      {tampered && (
-        <div
-          role="alert"
-          data-testid="tampered-banner"
-          style={{
-            background: 'var(--state-crit-bg)',
-            color: 'var(--state-crit)',
-            padding: 'var(--space-3)',
-            marginBottom: 'var(--space-3)',
-          }}
-        >
-          <strong>TAMPERED</strong> — this steward reported tampering.
-          <HealthReasonList reasons={health.reasons} />
+      {load.phase === 'loading' && (
+        <div className="tp-loading" aria-busy="true" data-testid="tamper-loading">
+          Loading steward status…
         </div>
+      )}
+      {load.phase === 'error' && (
+        <div className="tp-error" role="status" data-testid="tamper-error">
+          Steward status could not be loaded.{' '}
+          <button type="button" className="tp-btn-sec" onClick={reload}>
+            Retry
+          </button>
+        </div>
+      )}
+      {health !== null && (
+        <TamperPanel
+          steward={{
+            id: stewardId,
+            status: health.status,
+            hostname: health.hostname,
+            connectionState: health.connectionState,
+            reasons: health.reasons,
+            tamperCodes: health.tamperCodes,
+          }}
+          onChanged={reload}
+          onSelectTab={(tab: HandsOnTab) => activateTab(tab)}
+        />
       )}
       {health !== null && health.reasons.length > 0 && (
         <section data-testid="health-reasons-block" aria-label="Health reasons">

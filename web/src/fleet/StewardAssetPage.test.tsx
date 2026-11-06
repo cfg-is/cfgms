@@ -512,3 +512,60 @@ describe('health reasons and tampered banner', () => {
     expect(screen.queryByTestId('health-reasons-block')).not.toBeInTheDocument()
   })
 })
+
+describe('tamper panel on the asset page (Story #5668)', () => {
+  function mockStewardPayload(data: Record<string, unknown>, status = 200) {
+    fetchMock.mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/tamper/repair')) {
+        return Promise.resolve(new Response(JSON.stringify({ error: { code: 'REPAIR_NOT_FOUND', message: 'none' } }), { status: 404 }))
+      }
+      if (url.endsWith('/dna')) return Promise.resolve(new Response(JSON.stringify({ data: { attributes: {} } }), { status: 200 }))
+      return Promise.resolve(new Response(JSON.stringify({ data: { id: 'stw-001', ...data } }), { status }))
+    })
+  }
+
+  it('offers the three actions and the stored tamper codes for a tampered steward', async () => {
+    mockStewardPayload({
+      status: 'tampered',
+      tamper_codes: ['tamper_data_dir'],
+      dna: { hostname: 'WS-ACCT-07' },
+      health_reasons: [],
+    })
+    renderAssetPage()
+    await screen.findByTestId('tampered-banner')
+    expect(screen.getByRole('button', { name: 'Restore' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Repair and restore' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Ban' })).toBeInTheDocument()
+    expect(screen.getByText('tamper_data_dir')).toBeInTheDocument()
+  })
+
+  it('shows the locked_tools reason from the steward health reasons', async () => {
+    mockStewardPayload({
+      status: 'tampered',
+      health_reasons: [{ component: 'locked_tools', code: 'locked_tools.revocation_stale' }],
+    })
+    renderAssetPage()
+    expect((await screen.findByTestId('locked-tools')).textContent).toContain('no recent enough revocation list')
+  })
+
+  it('shows none of the actions for a healthy steward', async () => {
+    mockStewardPayload({ status: 'active', health_reasons: [] })
+    renderAssetPage()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(screen.queryByRole('button', { name: 'Restore' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Ban' })).not.toBeInTheDocument()
+  })
+
+  it('shows a loading state, then an error state with Retry when the steward cannot be read', async () => {
+    mockStewardPayload({}, 503)
+    renderAssetPage()
+    expect(screen.getByTestId('tamper-loading')).toBeInTheDocument()
+    expect(await screen.findByTestId('tamper-error')).toBeInTheDocument()
+    expect(screen.queryByTestId('tamper-loading')).not.toBeInTheDocument()
+    mockStewardPayload({ status: 'tampered', tamper_codes: ['tamper_data_dir'] })
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByTestId('tampered-banner')).toBeInTheDocument()
+    expect(screen.queryByTestId('tamper-error')).not.toBeInTheDocument()
+  })
+})
