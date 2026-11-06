@@ -2381,6 +2381,58 @@ test_macos_groups_cover_exactly_shipped_packages() {
     log_pass "macOS groups: $(echo "$actual" | wc -l | tr -d ' ') packages, exactly the GOOS=darwin shipped set, no duplicates"
 }
 
+test_windows_steward_groups_cover_exactly_steward_and_cmd() {
+    log_test "Testing Windows steward groups: union equals ./features/steward/... plus ./cmd/... exactly..."
+
+    local expected expected_rc=0
+    expected=$(go list ./features/steward/... ./cmd/... 2>&1 | sort -u) || expected_rc=$?
+    if [[ $expected_rc -ne 0 || -z "$expected" ]]; then
+        log_fail "go list ./features/steward/... ./cmd/... produced no packages (rc=${expected_rc})"
+        return
+    fi
+
+    # Every windows-steward / windows-cmd group target, discovered rather than
+    # listed, so a newly added split leg joins the union automatically.
+    local targets target
+    targets=$(grep -oE '^test-go-group-windows-(steward|cmd)[a-z0-9-]*:' Makefile | tr -d ':')
+    if [[ -z "$targets" ]]; then
+        log_fail "no test-go-group-windows-steward/cmd targets found in Makefile"
+        return
+    fi
+
+    local actual="" out rc
+    for target in $targets; do
+        rc=0
+        out=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make --no-print-directory "$target" 2>&1) || rc=$?
+        if [[ $rc -ne 0 ]]; then
+            log_fail "${target} failed in list-only mode"
+            echo "$out" | tail -10
+            return
+        fi
+        actual+=$(echo "$out" | grep -E '^github\.com/cfgis/cfgms/')$'\n'
+    done
+
+    local dups extra missing
+    dups=$(echo "$actual" | grep . | sort | uniq -d)
+    if [[ -n "$dups" ]]; then
+        log_fail "package(s) appear in more than one Windows steward group: $(echo "$dups" | head -5 | tr '\n' ' ')"
+        return
+    fi
+    actual=$(echo "$actual" | grep . | sort -u)
+    extra=$(comm -13 <(echo "$expected") <(echo "$actual"))
+    missing=$(comm -23 <(echo "$expected") <(echo "$actual"))
+    if [[ -n "$extra" ]]; then
+        log_fail "Windows steward group(s) list package(s) outside steward/cmd: $(echo "$extra" | head -5 | tr '\n' ' ')"
+        return
+    fi
+    if [[ -n "$missing" ]]; then
+        log_fail "steward/cmd package(s) left out of every Windows steward group: $(echo "$missing" | head -5 | tr '\n' ' ')"
+        return
+    fi
+
+    log_pass "Windows steward groups: $(echo "$actual" | wc -l | tr -d ' ') packages, exactly features/steward + cmd, no duplicates"
+}
+
 test_resource_sampler_no_placeholder() {
     log_test "Testing resource-sampler.sh: RESOURCE_PROFILE line contains no literal \${ placeholder..."
 
@@ -2715,6 +2767,7 @@ DISPATCH_TABLE=(
     "test_api_shard_aggregation_fails_closed:core"
     "test_api_shard_count_rejects_non_integer:core"
     "test_macos_groups_cover_exactly_shipped_packages:core"
+    "test_windows_steward_groups_cover_exactly_steward_and_cmd:core"
     "test_no_tracked_file_mutation:core"
 )
 

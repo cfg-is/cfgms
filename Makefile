@@ -1,4 +1,4 @@
-.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-rest test-go-group-macos-providers test-go-group-macos-steward test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection complexity-report complexity-check complexity-replay duplication-report duplication-replay duplication-check clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
+.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-cmd test-go-group-windows-rest test-go-group-macos-providers test-go-group-macos-steward test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection complexity-report complexity-check complexity-replay duplication-report duplication-replay duplication-check clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -654,7 +654,8 @@ test-go-group-rest:
 # checks below) drops -race for these targets without duplicating the sharding
 # or package-list logic the Linux legs already use.
 GO_GROUP_WINDOWS_CONTROLLER_EXTRA := ./pkg/cert/... ./pkg/controlplane/... ./pkg/storage/providers/sqlite/...
-GO_GROUP_WINDOWS_STEWARD_CMD := ./features/steward/... ./cmd/...
+GO_GROUP_WINDOWS_STEWARD := ./features/steward/...
+GO_GROUP_WINDOWS_CMD := ./cmd/...
 
 .PHONY: test-go-group-windows-api
 test-go-group-windows-api:
@@ -676,33 +677,36 @@ test-go-group-windows-controller:
 		go test $$race_flag -short -timeout=10m $$pkgs; \
 	fi
 
-# -v is scoped to ./cmd/... only (matching cross-platform-build.yml's queue
-# job, Issue #3470): cmd/cfgms-steward-launcher's Windows-only SCM tests need
-# per-test output to tell a passing test from one that skipped for lack of
-# Administrator rights — a non-verbose run only prints one "ok <package>" line
-# per package with no per-test result. features/steward stays non-verbose to
-# keep the rest of the log readable.
-#
-# Both go test calls share one shell, so their exit statuses are latched into
-# $$status and re-raised at the end rather than left to the recipe's last
-# command. Without that, a features/steward failure was silently discarded
-# whenever ./cmd/... passed: run 36518171606 job 109245289531 printed
-# "FAIL github.com/cfgis/cfgms/features/steward/modules/runtime" and still
-# concluded success. Both package sets must keep running on every invocation, so
-# `&&` is the wrong fix — a failure in the first must not hide the second's results.
+# Issue #5966: the former single steward/cmd leg ran ./features/steward/... then
+# ./cmd/... sequentially (11m44s-12m16s, cancelled at its 15-minute limit when
+# cmd/steward ran slow). It is split on that seam into two jobs so each has
+# headroom: this target runs ./features/steward/..., test-go-group-windows-cmd
+# runs ./cmd/.... Both package sets are asserted by scripts/test-scripts.sh.
 .PHONY: test-go-group-windows-steward
 test-go-group-windows-steward:
 	@race_flag="-race"; \
 	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
 	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
-		go list $(GO_GROUP_WINDOWS_STEWARD_CMD); \
+		go list $(GO_GROUP_WINDOWS_STEWARD); \
 	else \
-		status=0; \
 		echo "  Testing windows-steward group (features/steward)..."; \
-		go test $$race_flag -short -timeout=10m ./features/steward/... || status=1; \
-		echo "  Testing windows-steward group (cmd, verbose)..."; \
-		go test -v $$race_flag -short -timeout=10m ./cmd/... || status=1; \
-		exit $$status; \
+		go test $$race_flag -short -timeout=10m $(GO_GROUP_WINDOWS_STEWARD); \
+	fi
+
+# -v is scoped to ./cmd/... (matching cross-platform-build.yml's queue job,
+# Issue #3470): cmd/cfgms-steward-launcher's Windows-only SCM tests need
+# per-test output to tell a passing test from one that skipped for lack of
+# Administrator rights — a non-verbose run only prints one "ok <package>" line
+# per package with no per-test result.
+.PHONY: test-go-group-windows-cmd
+test-go-group-windows-cmd:
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $(GO_GROUP_WINDOWS_CMD); \
+	else \
+		echo "  Testing windows-cmd group (cmd, verbose)..."; \
+		go test -v $$race_flag -short -timeout=10m $(GO_GROUP_WINDOWS_CMD); \
 	fi
 
 # Everything the queue's former Native Build (Windows) job tested (./pkg/...
