@@ -29,54 +29,74 @@ func validWorkflowSegment(v string) bool {
 // ErrWorkflowNotFound and never falls through to an ancestor. The version is
 // required; there is no "latest".
 func ResolveInherited(ctx context.Context, configStore cfgconfig.ConfigStore, chain []string, name, version string) (*VersionedWorkflow, string, error) {
-	if configStore == nil {
-		return nil, "", fmt.Errorf("config store is required")
-	}
-	if len(chain) == 0 {
-		return nil, "", fmt.Errorf("tenant chain is required")
-	}
-	for _, id := range chain {
-		if !validWorkflowSegment(id) {
-			return nil, "", fmt.Errorf("invalid tenant id in tenant chain")
-		}
-	}
-	if !validWorkflowSegment(name) {
-		return nil, "", fmt.Errorf("invalid workflow name")
-	}
-	if version == "" {
-		return nil, "", ErrWorkflowVersionRequired
-	}
-	sv, err := ParseSemanticVersion(version)
+	sv, err := validateInheritedLookup(configStore, chain, name, version)
 	if err != nil {
-		return nil, "", fmt.Errorf("invalid workflow version")
+		return nil, "", err
 	}
-
 	for _, tenantID := range chain {
 		if err := ctx.Err(); err != nil {
 			return nil, "", err
 		}
-		store := NewWorkflowStore(configStore, tenantID)
-		held, err := store.ListWorkflowVersions(ctx, name)
-		if err != nil {
-			return nil, "", err
+		wf, owner, held, err := resolveInTenant(ctx, configStore, tenantID, name, sv)
+		if err != nil || held {
+			return wf, owner, err
 		}
-		if len(held) == 0 {
-			continue
-		}
-		wf, err := store.GetWorkflow(ctx, name, *sv)
-		if err != nil {
-			if errors.Is(err, cfgconfig.ErrConfigNotFound) {
-				return nil, "", ErrWorkflowNotFound
-			}
-			return nil, "", err
-		}
-		owner, err := workflowOwner(ctx, configStore, tenantID, name, *sv)
-		if err != nil {
-			return nil, "", err
-		}
-		return wf, owner, nil
 	}
 	return nil, "", ErrWorkflowNotFound
+}
+
+// validateInheritedLookup checks the inputs of ResolveInherited and parses the
+// required exact version.
+func validateInheritedLookup(configStore cfgconfig.ConfigStore, chain []string, name, version string) (SemanticVersion, error) {
+	if configStore == nil {
+		return SemanticVersion{}, fmt.Errorf("config store is required")
+	}
+	if len(chain) == 0 {
+		return SemanticVersion{}, fmt.Errorf("tenant chain is required")
+	}
+	for _, id := range chain {
+		if !validWorkflowSegment(id) {
+			return SemanticVersion{}, fmt.Errorf("invalid tenant id in tenant chain")
+		}
+	}
+	if !validWorkflowSegment(name) {
+		return SemanticVersion{}, fmt.Errorf("invalid workflow name")
+	}
+	if version == "" {
+		return SemanticVersion{}, ErrWorkflowVersionRequired
+	}
+	sv, err := ParseSemanticVersion(version)
+	if err != nil {
+		return SemanticVersion{}, fmt.Errorf("invalid workflow version")
+	}
+	return *sv, nil
+}
+
+// resolveInTenant looks the workflow up in a single tenant. held reports
+// whether the tenant holds any version of the name; when it does, the result
+// (workflow or error) is final and the caller must not fall through to an
+// ancestor.
+func resolveInTenant(ctx context.Context, configStore cfgconfig.ConfigStore, tenantID, name string, sv SemanticVersion) (*VersionedWorkflow, string, bool, error) {
+	store := NewWorkflowStore(configStore, tenantID)
+	versions, err := store.ListWorkflowVersions(ctx, name)
+	if err != nil {
+		return nil, "", false, err
+	}
+	if len(versions) == 0 {
+		return nil, "", false, nil
+	}
+	wf, err := store.GetWorkflow(ctx, name, sv)
+	if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+		return nil, "", true, ErrWorkflowNotFound
+	}
+	if err != nil {
+		return nil, "", true, err
+	}
+	owner, err := workflowOwner(ctx, configStore, tenantID, name, sv)
+	if err != nil {
+		return nil, "", true, err
+	}
+	return wf, owner, true, nil
 }
 
 // workflowOwner reads the owner tenant back from the stored entry's key rather
