@@ -573,8 +573,15 @@ test: fix-git-bare
 # unit-tests-heavy-providers finished in ~4.6m and ~4.0m, so one package moves
 # into each. Exact packages (no `...`) so subpackages stay in rest; test-go-group-rest
 # excludes the same two.
-GO_GROUP_CONTROLLER_CORE := ./features/controller/server/... ./features/controller/initialization/... ./features/workflow
-GO_GROUP_HEAVY_PROVIDERS := ./pkg/cert/... ./pkg/controlplane/providers/grpc/... ./features/steward/client/... ./pkg/storage/providers/sqlite/... ./cmd/steward
+# Moving those two alone did not help: PR #5960 rest still ran 13m37s (framework
+# run 12m05s at -race on 4 vCPUs, so the wall time follows total package work, not
+# the slowest package) while heavy-providers rose to 8.3m and controller-core to
+# 6.1m. The next five largest rest packages (directory 183s, transport 160s,
+# storage/interfaces 154s, steward/commands 127s, entitygraph/interfaces 126s) move
+# too: four to controller-core, storage/interfaces to heavy-providers. Exact
+# packages again, so subpackages stay in rest.
+GO_GROUP_CONTROLLER_CORE := ./features/controller/server/... ./features/controller/initialization/... ./features/workflow ./features/controller/directory ./features/controller/transport ./features/steward/commands ./pkg/entitygraph/interfaces
+GO_GROUP_HEAVY_PROVIDERS := ./pkg/cert/... ./pkg/controlplane/providers/grpc/... ./features/steward/client/... ./pkg/storage/providers/sqlite/... ./cmd/steward ./pkg/storage/interfaces
 
 # CFGMS_TEST_GROUP_LIST_ONLY=1 prints the packages each group resolves to and
 # exits without running anything — mirrors CFGMS_API_TEST_SHARD_PLAN_ONLY
@@ -625,7 +632,12 @@ test-go-group-rest:
 		| grep -v '/features/steward/client$$' \
 		| grep -v '/pkg/storage/providers/sqlite$$' \
 		| grep -v '/features/workflow$$' \
-		| grep -v '/cmd/steward$$'); \
+		| grep -v '/cmd/steward$$' \
+		| grep -v '/features/controller/directory$$' \
+		| grep -v '/features/controller/transport$$' \
+		| grep -v '/features/steward/commands$$' \
+		| grep -v '/pkg/entitygraph/interfaces$$' \
+		| grep -v '/pkg/storage/interfaces$$'); \
 	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
 		echo "$$pkgs"; \
 		exit 0; \
