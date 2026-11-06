@@ -330,7 +330,7 @@ jobs:
       run: make test-go-group-windows-controller
 
   windows-steward:
-    name: Windows Unit Tests (steward, cmd)
+    name: Windows Unit Tests (steward)
     permissions:
       contents: read
     needs: changes
@@ -370,12 +370,60 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
-    - name: Run features/steward and cmd (no -race)
+    - name: Run features/steward (no -race)
       shell: bash
       env:
         CFGMS_TEST_INTEGRATION: "0"
         CFGMS_TEST_RACE: "0"
       run: make test-go-group-windows-steward
+
+  windows-cmd:
+    name: Windows Unit Tests (cmd)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: windows-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run cmd (no -race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+        CFGMS_TEST_RACE: "0"
+      run: make test-go-group-windows-cmd
 
   windows-rest:
     name: Windows Unit Tests (rest + modules)
@@ -684,6 +732,7 @@ jobs:
       - windows-api
       - windows-controller
       - windows-steward
+      - windows-cmd
       - windows-rest
       - macos-providers
       - macos-steward
@@ -699,6 +748,7 @@ jobs:
         WINDOWS_API_RESULT: ${{ needs.windows-api.result }}
         WINDOWS_CONTROLLER_RESULT: ${{ needs.windows-controller.result }}
         WINDOWS_STEWARD_RESULT: ${{ needs.windows-steward.result }}
+        WINDOWS_CMD_RESULT: ${{ needs.windows-cmd.result }}
         WINDOWS_REST_RESULT: ${{ needs.windows-rest.result }}
         MACOS_PROVIDERS_RESULT: ${{ needs.macos-providers.result }}
         MACOS_STEWARD_RESULT: ${{ needs.macos-steward.result }}
@@ -715,7 +765,8 @@ jobs:
         echo "| Cross-Compile Check | $CROSS_COMPILE_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Windows: controller/api | $WINDOWS_API_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Windows: controller/cert/controlplane/sqlite | $WINDOWS_CONTROLLER_RESULT |" >> $GITHUB_STEP_SUMMARY
-        echo "| Windows: steward/cmd | $WINDOWS_STEWARD_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| Windows: steward | $WINDOWS_STEWARD_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| Windows: cmd | $WINDOWS_CMD_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Windows: rest + modules | $WINDOWS_REST_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: cert/controlplane/sqlite | $MACOS_PROVIDERS_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: steward/cmd | $MACOS_STEWARD_RESULT |" >> $GITHUB_STEP_SUMMARY
@@ -760,7 +811,7 @@ jobs:
           docs_only=no
         fi
 
-        for result in "$WINDOWS_API_RESULT" "$WINDOWS_CONTROLLER_RESULT" "$WINDOWS_STEWARD_RESULT" "$WINDOWS_REST_RESULT" "$MACOS_PROVIDERS_RESULT" "$MACOS_STEWARD_RESULT" "$MACOS_REST_1_RESULT" "$MACOS_REST_2_RESULT" "$E2E_RESULT"; do
+        for result in "$WINDOWS_API_RESULT" "$WINDOWS_CONTROLLER_RESULT" "$WINDOWS_STEWARD_RESULT" "$WINDOWS_CMD_RESULT" "$WINDOWS_REST_RESULT" "$MACOS_PROVIDERS_RESULT" "$MACOS_STEWARD_RESULT" "$MACOS_REST_1_RESULT" "$MACOS_REST_2_RESULT" "$E2E_RESULT"; do
           if [ "$result" = "success" ]; then
             continue
           fi
