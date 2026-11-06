@@ -14,11 +14,13 @@ import (
 	"sync"
 	"time"
 
+	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/steward/client"
 	"github.com/cfgis/cfgms/features/steward/modules/install"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/logging/subscribers/systemlog"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Tamper alarm.
@@ -161,6 +163,13 @@ func (l *tamperLatch) isLatched() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.latched
+}
+
+// codesSnapshot returns the codes the latch holds.
+func (l *tamperLatch) codesSnapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.codes...)
 }
 
 // primaryCode is the code the heartbeat reports: the first one raised.
@@ -354,7 +363,9 @@ type tamperAlarm struct {
 	// recovered is set once brokenTrust began the fallback; run then releases
 	// the latch so the steward connects and registers as a new device.
 	recovered bool
-	sink      systemLogWriter
+	// repair performs a signed RepairRequest while the latch holds.
+	repair *repairer
+	sink   systemLogWriter
 	// sinkFn opens the local system log the first time it is needed.
 	sinkFn func() systemLogWriter
 	logger logging.Logger
@@ -374,13 +385,18 @@ func (a *tamperAlarm) run(ctx context.Context) (bool, error) {
 	retry := time.NewTimer(0)
 	defer retry.Stop()
 
+	defer a.repair.clearAll()
+	tc = a.repair.start(ctx, tc)
+
 	for {
 		a.publishReason(tc)
+		a.repair.republish(tc)
 		if tc == nil {
 			tc = a.connectLink(ctx, retry)
 			if ctx.Err() != nil {
 				return false, nil
 			}
+			a.reportQuarantined(tc)
 		}
 
 		if a.tryRelease(tc) {
@@ -390,10 +406,30 @@ func (a *tamperAlarm) run(ctx context.Context) (bool, error) {
 		select {
 		case <-ctx.Done():
 			return false, nil
+		case <-a.repair.wakeChan():
+			tc = a.repair.service(ctx, tc)
 		case <-a.latch.wake:
 		case <-recheck.C:
+			a.repair.refresh(tc)
 		case <-retry.C:
 		}
+	}
+}
+
+// reportQuarantined sends the planted links the last rights reset removed to the
+// controller, once, over the link opened on the new credential.
+func (a *tamperAlarm) reportQuarantined(tc *client.TransportClient) {
+	links := quarantinedLinks.Swap(nil)
+	if tc == nil || links == nil {
+		return
+	}
+	for _, link := range *links {
+		tc.EnqueueLog(&transportpb.LogEntry{
+			Level:     transportpb.Severity_SEVERITY_WARNING,
+			Message:   "repair removed a planted link; its target was not touched",
+			Timestamp: timestamppb.Now(),
+			Fields:    map[string]string{"source": "repair", "path": logging.SanitizeLogValue(link)},
+		})
 	}
 }
 
@@ -423,6 +459,8 @@ func (a *tamperAlarm) connectLink(ctx context.Context, retry *time.Timer) *clien
 		if errors.Is(err, errTamperBrokenTrust) && a.brokenTrust != nil && a.brokenTrust(ctx) {
 			a.recovered = true
 		}
+	case errors.Is(err, errRepairHoldsDials):
+		// A repair is completing: no dial may present the credential it retires.
 	default:
 		a.logger.Warn("Tamper alarm link failed; retrying", "operation", "tamper_alarm_connect",
 			"error", logging.SanitizeLogValue(err.Error()))
@@ -467,6 +505,14 @@ func (a *tamperAlarm) tryRelease(tc *client.TransportClient) bool {
 	startupReasons.Clear(tamperReasonComponent)
 	if tc != nil {
 		tc.ClearHealthReason(tamperReasonComponent)
+	}
+	if a.repair != nil {
+		a.repair.clearAll()
+		if tc != nil {
+			for _, c := range []string{cpTypes.HealthComponentRepair, cpTypes.ReasonCodeRepairLossLocalLogs, cpTypes.ReasonCodeRepairLossActionHistory} {
+				tc.ClearHealthReason(c)
+			}
+		}
 	}
 	if a.resetDerived != nil {
 		a.resetDerived()
@@ -519,6 +565,9 @@ func (a *tamperAlarm) recordLocalOnly(cause error) {
 // verifies against the pin; otherwise errTamperBrokenTrust is returned and
 // nothing is dialed.
 func (a *tamperAlarm) openLink(ctx context.Context) (*client.TransportClient, error) {
+	if a.repair != nil && a.repair.dialsHeld.Load() {
+		return nil, errRepairHoldsDials
+	}
 	dir := certStoreDirResolver()
 	id, _ := loadIdentity(dir)
 	var src TrustSource
@@ -543,6 +592,9 @@ func (a *tamperAlarm) openLink(ctx context.Context) (*client.TransportClient, er
 // installed before the client connects so the state sent on connect is seen.
 func (a *tamperAlarm) watchController(tc *client.TransportClient) {
 	tc.SetTamperStateHandler(a.latch.onController)
+	if a.repair != nil {
+		tc.SetRepairHandler(a.repair.onRequest)
+	}
 }
 
 // watchControllerLock latches when the controller locks a normally connected
@@ -571,6 +623,23 @@ func watchControllerLock(tc *client.TransportClient, latch *tamperLatch) <-chan 
 		}
 	}
 	return locked
+}
+
+// watchRepairWhileNotLocked answers a RepairRequest that reaches a steward that
+// is not latched: it reports repair.not_locked and changes nothing. A latched
+// steward's request is the alarm's (repair.go).
+func watchRepairWhileNotLocked(tc *client.TransportClient, latch *tamperLatch) {
+	tc.SetRepairHandler(func(req cpTypes.RepairRequest) {
+		if validRepairID(req.RepairID) && !latch.isLatched() {
+			tc.SetHealthReason(cpTypes.HealthComponentRepair, cpTypes.ReasonCodeRepairNotLocked, req.RepairID)
+			// Report it now rather than at the next periodic heartbeat.
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = tc.SendHeartbeat(ctx, string(cpTypes.StatusDegraded), nil)
+			}()
+		}
+	})
 }
 
 // resetDerivedState is called on release. Config is pulled from the controller
@@ -611,6 +680,7 @@ func newTamperAlarm(latch *tamperLatch, logger logging.Logger, controllerURL str
 		sinkFn: newSystemLogSink,
 		logger: logger,
 	}
+	alarm.repair = newRepairer(latch, alarm.rescan, controllerURL, logger)
 	alarm.resetDerived = func() { resetDerivedState(logger) }
 	alarm.brokenTrust = func(ctx context.Context) bool {
 		return rekeyFromAlarm(ctx, latch, controllerURL, alarm.logger)

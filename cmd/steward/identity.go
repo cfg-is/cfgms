@@ -4,6 +4,7 @@
 package main
 
 import (
+	"crypto"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/atomicfile"
+	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/registration/identity"
 )
 
 // identityFileName is the name of the on-disk steward identity file,
@@ -313,4 +316,52 @@ func clearStoredIdentity(dir string) error {
 		return fmt.Errorf("clear identity file: %w", err)
 	}
 	return nil
+}
+
+// withRotatedIdentityKey returns id with its device identity key replaced by pub.
+// The steward ID, tenant, transport address, trust anchor and every other stored
+// field stay as they are: a repair's response carries a certificate and chain
+// only, and an absent field keeps its stored value.
+func withRotatedIdentityKey(id StewardIdentity, alg identity.Algorithm, level identity.ProtectionLevel, pub crypto.PublicKey) (StewardIdentity, error) {
+	encoded, err := identity.EncodePublicKey(alg, pub)
+	if err != nil {
+		return id, fmt.Errorf("encode rotated identity key: %w", err)
+	}
+	deviceID, err := identity.ComputeDeviceID(alg, pub)
+	if err != nil {
+		return id, fmt.Errorf("derive rotated device ID: %w", err)
+	}
+	id.IdentityKeyPub, id.DeviceID = encoded, deviceID
+	id.KeyAlgorithm, id.KeyProtectionLevel = string(alg), string(level)
+	return id, nil
+}
+
+// withoutExposedTrust returns id without the trust material that may have been
+// written while the data folder was exposed: the controller's pushed signing
+// certificates. They are fetched again after the return to trusted. The pinned CA
+// is handled separately (reanchoredCA) because the steward cannot reach the
+// controller without one.
+func withoutExposedTrust(id StewardIdentity) StewardIdentity {
+	id.ServerCertPEM = ""
+	id.SigningCertPEM = ""
+	id.SigningCertPEMs = nil
+	id.OverlapExpiresAt = nil
+	return id
+}
+
+// reanchoredCA returns the CA the identity keeps after a repair: the stored CA
+// when it re-derives to the identity's pin, else the CA rebuilt from the install
+// source when that verifies against the pin. It fails when neither does, because
+// a CA the pin does not vouch for must not be kept.
+func reanchoredCA(id *StewardIdentity, logger logging.Logger) (string, error) {
+	if id.CAPinFingerprint == "" {
+		return "", errors.New("the identity records no CA pin to re-anchor the CA to")
+	}
+	if canonical, err := verifyPersistedCA(id.CACertPEM, id.CAPinFingerprint); err == nil {
+		return canonical, nil
+	}
+	if rebuilt := reconstructPinnedCA(id, logger); rebuilt != "" {
+		return rebuilt, nil
+	}
+	return "", errors.New("the stored CA does not verify against its pin and no install source can replace it")
 }

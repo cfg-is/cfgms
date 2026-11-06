@@ -129,6 +129,8 @@ type FileKeyStore struct {
 	privateKey  ed25519.PrivateKey
 	publicKey   crypto.PublicKey
 	deviceID    string
+	// stagedPriv is a replacement key waiting for the controller's acceptance.
+	stagedPriv ed25519.PrivateKey
 }
 
 // NewFileKeyStore creates a FileKeyStore that stores the encrypted device identity key in identityDir.
@@ -294,9 +296,11 @@ func ed25519DeviceID(pub ed25519.PublicKey) string {
 // name stays defined in this package. Removing a key that does not exist is not
 // an error. The path is removed without following symlinks.
 func RemoveStoredKey(dir string) error {
-	err := os.Remove(filepath.Join(dir, keyFileName))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove device identity key: %w", err)
+	for _, name := range []string{keyFileName, stagedKeyFileName} {
+		err := os.Remove(filepath.Join(dir, name))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove device identity key: %w", err)
+		}
 	}
 	return nil
 }

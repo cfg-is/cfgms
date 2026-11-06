@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"testing"
 
 	"golang.org/x/sys/unix"
 )
@@ -30,6 +32,31 @@ var repairOwnerUID = 0
 // target is not touched. Special files and a root that is itself a link are
 // refused. Paths outside roots are never opened.
 func TakeOverForRepair(roots []string) (TakeoverReport, error) {
+	repairOwnerMu.Lock()
+	defer repairOwnerMu.Unlock()
+	return takeOverForRepair(roots)
+}
+
+// repairOwnerMu serialises takeovers, which share repairOwnerUID.
+var repairOwnerMu sync.Mutex
+
+// TakeOverForRepairAs is TakeOverForRepair with an explicit owner. It is a test
+// seam only: it exists so tests of the callers can run the real walk without
+// root. Production code must call TakeOverForRepair, whose owner is always root;
+// it refuses to run outside a test binary.
+func TakeOverForRepairAs(roots []string, ownerUID int) (TakeoverReport, error) {
+	if !testing.Testing() {
+		return TakeoverReport{}, errors.New("TakeOverForRepairAs is available only in test binaries")
+	}
+	repairOwnerMu.Lock()
+	defer repairOwnerMu.Unlock()
+	prev := repairOwnerUID
+	repairOwnerUID = ownerUID
+	defer func() { repairOwnerUID = prev }()
+	return takeOverForRepair(roots)
+}
+
+func takeOverForRepair(roots []string) (TakeoverReport, error) {
 	var rep TakeoverReport
 	if len(roots) == 0 {
 		return rep, errors.New("repair takeover needs at least one root")
