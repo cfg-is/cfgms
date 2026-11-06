@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
 // Characterization tests for Server.handleRegister (Issue #5869). They pin the
 // externally visible behavior (status codes, bodies, store effects) so the
 // function can be decomposed without changing it.
