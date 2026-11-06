@@ -11,7 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	stewardconfig "github.com/cfgis/cfgms/features/config/stewardtypes"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 

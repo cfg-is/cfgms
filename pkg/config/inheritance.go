@@ -13,7 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	stewardconfig "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"

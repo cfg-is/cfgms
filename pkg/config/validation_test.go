@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	stewardconfig "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
