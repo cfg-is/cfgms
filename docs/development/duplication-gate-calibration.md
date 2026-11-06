@@ -291,3 +291,48 @@ Duplicated lines per package (`by_package`, all 72 packages). The cleanup storie
 | `pkg/storage/providers/flatfile` | 472 |
 | `pkg/storage/providers/sqlite` | 1631 |
 | `pkg/testutil` | 60 |
+
+## Cleanup result
+
+Measured by `make duplication-report` (threshold 200, full history) on develop at `8dae010b8e208825fe8c68a6f09c37c6421fb24b`, the commit that merged the last cleanup story (#5799, #5915). Figures are copied from the metric file `bin/duplication/metrics.json` (`aggregate` and `by_package`); the before figures are the [baseline](#baseline-at-71ce9e7e) at `71ce9e7e`, measured by the same tool at the same threshold. `invalid_annotations` is empty at the tip.
+
+| Item | Before `71ce9e7e` | After `8dae010b8e` | Change |
+|------|-------------------|--------------------|--------|
+| Threshold | 200 tokens | 200 tokens | none |
+| Production files | 1353 | 1373 | +20 |
+| Production lines | 426898 | 428365 | +1467 |
+| Duplicated lines (unannotated) | 21651 (5.07%) | 18219 (4.25%) | -3432 |
+| Annotated lines | 0 (0.00%) | 41 (0.01%) | +41 |
+| Duplicated plus annotated | 21651 | 18260 (4.26%) | -3391 |
+| Runs | 536 | 474 | -62 |
+
+The unannotated total fell by 3432 lines and the total including annotated lines fell by 3391, so the drop is not an effect of annotating: only 41 lines were annotated.
+
+### Per-cluster duplicated lines
+
+Packages are those the cleanup stories changed. Before is `by_package` in the baseline table above; after is `by_package` at the tip.
+
+| Story | Package | Before | After | Change |
+|-------|---------|--------|-------|--------|
+| #5793, #5799 | `pkg/entitygraph/providers/database` | 1501 | 856 | -645 |
+| #5793, #5799 | `pkg/entitygraph/providers/sqlite` | 1589 | 962 | -627 |
+| #5793, #5799 | `pkg/entitygraph/providers/internal/egcommon` (new shared package) | 0 (absent) | 0 (absent from `by_package`) | 0 |
+| #5794, #5795 | `pkg/storage/providers/database` | 2520 | 2245 | -275 |
+| #5794, #5795 | `pkg/storage/providers/sqlite` | 1631 | 1397 | -234 |
+| #5796 | `features/controller/fleet/storage` | 591 | 561 | -30 |
+| #5797 | `features/controller/api` | 3728 | 3240 | -488 |
+| #5798 | `pkg/migrate/storage` | 292 | 38 | -254 |
+| #5801 | `pkg/directory/interfaces` | 386 | 42 | -344 |
+
+Every cluster is lower. Stories #5793 and #5799 edit the same packages, as do #5794 and #5795, so their rows are per package and are not split per story.
+
+### Clusters that did not fully clear
+
+No cluster rose, but none reached zero. Lines that remain after each story, from the table above:
+
+- `features/controller/fleet/storage` fell by 30 lines (#5796 named a 139-line copy at baseline); 561 lines remain.
+- `features/controller/api` fell by 488 lines (#5797 named 205 lines); 3240 lines remain.
+- `pkg/storage/providers/database` (2245), `pkg/storage/providers/sqlite` (1397) and both entity-graph providers (856, 962) still hold duplicated lines.
+- `pkg/directory/interfaces` retains 42 lines after the deletion of `bulk.go`; `pkg/migrate/storage` retains 38.
+
+Which remaining runs fall inside each story's named scope was not investigated here; this story changes no code.
