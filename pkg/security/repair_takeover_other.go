@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"testing"
 
 	"golang.org/x/sys/unix"
 )
@@ -42,8 +43,11 @@ var repairOwnerMu sync.Mutex
 // TakeOverForRepairAs is TakeOverForRepair with an explicit owner. It is a test
 // seam only: it exists so tests of the callers can run the real walk without
 // root. Production code must call TakeOverForRepair, whose owner is always root;
-// a caller that passes another owner hands the steward directories to it.
+// it refuses to run outside a test binary.
 func TakeOverForRepairAs(roots []string, ownerUID int) (TakeoverReport, error) {
+	if !testing.Testing() {
+		return TakeoverReport{}, errors.New("TakeOverForRepairAs is available only in test binaries")
+	}
 	repairOwnerMu.Lock()
 	defer repairOwnerMu.Unlock()
 	prev := repairOwnerUID

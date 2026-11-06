@@ -677,6 +677,12 @@ func bakedHost() bool { return bakedRootReason() == "" }
 // local logs directly. Exception: a CA-class fault means the anchor itself is
 // under suspicion, so a request that does not verify to a baked fingerprint is
 // refused with repair.anchor_untrusted.
+//
+// Not applied here: the per-message link check (the session's verified server
+// certificate chains to the root of the request's signer chain). The OnRepair
+// callback does not carry the peer chain, so it cannot be made from this layer.
+// The signature to a baked fingerprint and the two-key completion still bound
+// what a relayed request can do.
 func verifyRepairRequest(stewardID string, req cpTypes.RepairRequest, tamperCodes []string, now time.Time) string {
 	if !validRepairID(req.RepairID) {
 		return "-"
