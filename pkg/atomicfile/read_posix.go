@@ -3,12 +3,12 @@
 
 //go:build !windows
 
-package flatfile
+package atomicfile
 
 import "os"
 
-// readFile reads path with POSIX semantics. Concurrent rename-over of the
+// ReadFile reads path with POSIX semantics. Concurrent rename-over of the
 // target never blocks an open-for-read on POSIX, so no retry is needed.
-func readFile(path string) ([]byte, error) {
+func ReadFile(path string) ([]byte, error) {
 	return os.ReadFile(path) //#nosec G304 -- caller validates path
 }

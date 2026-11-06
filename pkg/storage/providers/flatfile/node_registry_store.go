@@ -4,9 +4,7 @@ package flatfile
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -41,9 +39,8 @@ type nodeRegistryEntryJSON struct {
 // NewFlatFileNodeRegistryStore creates a FlatFileNodeRegistryStore rooted at
 // <root>/node_registry. The directory is created if it does not exist.
 func NewFlatFileNodeRegistryStore(root string) (*FlatFileNodeRegistryStore, error) {
-	dir := filepath.Join(root, "node_registry")
-	if err := os.MkdirAll(dir, dirMode); err != nil {
-		return nil, fmt.Errorf("flatfile: failed to create node registry directory: %w", err)
+	if err := ensureStoreDir(root, "node_registry", "node registry"); err != nil {
+		return nil, err
 	}
 	return &FlatFileNodeRegistryStore{root: root}, nil
 }
@@ -59,31 +56,13 @@ func (s *FlatFileNodeRegistryStore) dataFilePath() string {
 // when the file does not exist. Must be called with at least a read lock
 // held.
 func (s *FlatFileNodeRegistryStore) load() (map[string]nodeRegistryEntryJSON, error) {
-	raw, err := readFile(s.dataFilePath())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]nodeRegistryEntryJSON{}, nil
-		}
-		return nil, fmt.Errorf("flatfile: failed to read node registry file: %w", err)
-	}
-	entries := map[string]nodeRegistryEntryJSON{}
-	if len(raw) == 0 {
-		return entries, nil
-	}
-	if err := json.Unmarshal(raw, &entries); err != nil {
-		return nil, fmt.Errorf("flatfile: failed to parse node registry file: %w", err)
-	}
-	return entries, nil
+	return loadJSONMap[nodeRegistryEntryJSON](s.dataFilePath(), "node registry")
 }
 
 // save atomically writes entries to node_registry.json. Must be called with
 // the write lock held.
 func (s *FlatFileNodeRegistryStore) save(entries map[string]nodeRegistryEntryJSON) error {
-	raw, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return fmt.Errorf("flatfile: failed to marshal node registry entries: %w", err)
-	}
-	return writeAtomic(s.dataFilePath(), raw)
+	return saveJSONMap(s.dataFilePath(), entries, "node registry entries")
 }
 
 // RegisterNode implements business.NodeRegistryStore.RegisterNode.

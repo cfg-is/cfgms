@@ -3,18 +3,18 @@
 
 //go:build !windows
 
-package flatfile
+package atomicfile
 
 import "os"
 
-// atomicRename renames src → dst with POSIX rename(2) semantics: the
+// AtomicReplace renames src → dst with POSIX rename(2) semantics: the
 // rename is atomic with respect to concurrent readers, who always
 // observe either the old file or the new file in full. No retry is
 // needed.
-func atomicRename(src, dst string) error {
+func AtomicReplace(src, dst string) error {
 	return os.Rename(src, dst)
 }
 
-// isSharingViolation is Windows-only in practice: POSIX opens have no share
+// IsSharingViolation is Windows-only in practice: POSIX opens have no share
 // modes, so no error here is one. See rename_windows.go.
-func isSharingViolation(error) bool { return false }
+func IsSharingViolation(error) bool { return false }

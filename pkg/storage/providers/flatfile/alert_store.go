@@ -4,9 +4,6 @@ package flatfile
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -44,9 +41,8 @@ type alertStateJSON struct {
 // NewFlatFileAlertStore creates a FlatFileAlertStore rooted at <root>/alerts.
 // The directory is created if it does not exist.
 func NewFlatFileAlertStore(root string) (*FlatFileAlertStore, error) {
-	dir := filepath.Join(root, "alerts")
-	if err := os.MkdirAll(dir, dirMode); err != nil {
-		return nil, fmt.Errorf("flatfile: failed to create alerts directory: %w", err)
+	if err := ensureStoreDir(root, "alerts", "alerts"); err != nil {
+		return nil, err
 	}
 	return &FlatFileAlertStore{root: root}, nil
 }
@@ -59,31 +55,13 @@ func (s *FlatFileAlertStore) dataFilePath() string {
 // Returns nil slice when the file does not exist.
 // Must be called with at least a read lock held.
 func (s *FlatFileAlertStore) load() ([]alertStateJSON, error) {
-	raw, err := readFile(s.dataFilePath())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("flatfile: failed to read alert states file: %w", err)
-	}
-	var states []alertStateJSON
-	if err := json.Unmarshal(raw, &states); err != nil {
-		return nil, fmt.Errorf("flatfile: failed to parse alert states file: %w", err)
-	}
-	return states, nil
+	return loadJSONSlice[alertStateJSON](s.dataFilePath(), "alert states")
 }
 
 // save atomically writes states to alert_states.json.
 // Must be called with a write lock held.
 func (s *FlatFileAlertStore) save(states []alertStateJSON) error {
-	if states == nil {
-		states = []alertStateJSON{}
-	}
-	raw, err := json.MarshalIndent(states, "", "  ")
-	if err != nil {
-		return fmt.Errorf("flatfile: failed to marshal alert states: %w", err)
-	}
-	return writeAtomic(s.dataFilePath(), raw)
+	return saveJSONSlice(s.dataFilePath(), states, "alert states")
 }
 
 // AcknowledgeAlert implements AlertStore.AcknowledgeAlert.

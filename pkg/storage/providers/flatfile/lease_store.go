@@ -4,9 +4,7 @@ package flatfile
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -48,9 +46,8 @@ type leaseEntryJSON struct {
 // NewFlatFileLeaseStore creates a FlatFileLeaseStore rooted at <root>/leases.
 // The directory is created if it does not exist.
 func NewFlatFileLeaseStore(root string) (*FlatFileLeaseStore, error) {
-	dir := filepath.Join(root, "leases")
-	if err := os.MkdirAll(dir, dirMode); err != nil {
-		return nil, fmt.Errorf("flatfile: failed to create leases directory: %w", err)
+	if err := ensureStoreDir(root, "leases", "leases"); err != nil {
+		return nil, err
 	}
 	return &FlatFileLeaseStore{root: root}, nil
 }
@@ -71,31 +68,13 @@ func (s *FlatFileLeaseStore) dataFilePath() string {
 // load reads and parses leases.json. Returns an empty (non-nil) map when the
 // file does not exist. Must be called with at least a read lock held.
 func (s *FlatFileLeaseStore) load() (map[string]leaseEntryJSON, error) {
-	raw, err := readFile(s.dataFilePath())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]leaseEntryJSON{}, nil
-		}
-		return nil, fmt.Errorf("flatfile: failed to read leases file: %w", err)
-	}
-	entries := map[string]leaseEntryJSON{}
-	if len(raw) == 0 {
-		return entries, nil
-	}
-	if err := json.Unmarshal(raw, &entries); err != nil {
-		return nil, fmt.Errorf("flatfile: failed to parse leases file: %w", err)
-	}
-	return entries, nil
+	return loadJSONMap[leaseEntryJSON](s.dataFilePath(), "leases")
 }
 
 // save atomically writes entries to leases.json. Must be called with the
 // write lock held.
 func (s *FlatFileLeaseStore) save(entries map[string]leaseEntryJSON) error {
-	raw, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return fmt.Errorf("flatfile: failed to marshal lease entries: %w", err)
-	}
-	return writeAtomic(s.dataFilePath(), raw)
+	return saveJSONMap(s.dataFilePath(), entries, "lease entries")
 }
 
 // AcquireOrRenew implements business.LeaseStore.AcquireOrRenew. See the

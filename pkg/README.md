@@ -49,7 +49,7 @@ pkg/{name}/             → Direct provider (single implementation)
 - Examples: `cert`, `telemetry`, `cache`, `ctxkeys`
 
 **Not Central Providers**:
-- `config`, `testing`, `testutil`, `version` - utility packages
+- `atomicfile`, `config`, `testing`, `testutil`, `version` - utility packages
 
 ## Before Adding to `pkg/`
 

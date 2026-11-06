@@ -4,10 +4,8 @@ package flatfile
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -48,9 +46,8 @@ type ipTrustEntryJSON struct {
 // NewFlatFileIPTrustStore creates a FlatFileIPTrustStore rooted at <root>/ip-trust.
 // The directory is created if it does not exist.
 func NewFlatFileIPTrustStore(root string) (*FlatFileIPTrustStore, error) {
-	dir := filepath.Join(root, "ip-trust")
-	if err := os.MkdirAll(dir, dirMode); err != nil {
-		return nil, fmt.Errorf("flatfile: failed to create ip-trust directory: %w", err)
+	if err := ensureStoreDir(root, "ip-trust", "ip-trust"); err != nil {
+		return nil, err
 	}
 	return &FlatFileIPTrustStore{root: root}, nil
 }
@@ -63,31 +60,13 @@ func (s *FlatFileIPTrustStore) dataFilePath() string {
 // Returns nil slice when the file does not exist.
 // Must be called with at least a read lock held.
 func (s *FlatFileIPTrustStore) load() ([]ipTrustEntryJSON, error) {
-	raw, err := readFile(s.dataFilePath())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("flatfile: failed to read ip trust file: %w", err)
-	}
-	var entries []ipTrustEntryJSON
-	if err := json.Unmarshal(raw, &entries); err != nil {
-		return nil, fmt.Errorf("flatfile: failed to parse ip trust file: %w", err)
-	}
-	return entries, nil
+	return loadJSONSlice[ipTrustEntryJSON](s.dataFilePath(), "ip trust")
 }
 
 // save atomically writes entries to ip_trust.json.
 // Must be called with a write lock held.
 func (s *FlatFileIPTrustStore) save(entries []ipTrustEntryJSON) error {
-	if entries == nil {
-		entries = []ipTrustEntryJSON{}
-	}
-	raw, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return fmt.Errorf("flatfile: failed to marshal ip trust entries: %w", err)
-	}
-	return writeAtomic(s.dataFilePath(), raw)
+	return saveJSONSlice(s.dataFilePath(), entries, "ip trust entries")
 }
 
 // normalizeCIDR returns the network-address form of cidr (e.g. "192.168.1.0/24").

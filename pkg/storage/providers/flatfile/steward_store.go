@@ -16,6 +16,8 @@ import (
 	"time"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+
+	"github.com/cfgis/cfgms/pkg/atomicfile"
 )
 
 // FlatFileStewardStore implements business.StewardStore using one JSON file per steward.
@@ -62,9 +64,9 @@ func (s *FlatFileStewardStore) readSteward(stewardID string) (*business.StewardR
 	if err != nil {
 		return nil, err
 	}
-	// path is validated by safeJoin; readFile retries Windows sharing
+	// path is validated by safeJoin; atomicfile.ReadFile retries Windows sharing
 	// violations from concurrent writers.
-	raw, err := readFile(path)
+	raw, err := atomicfile.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, business.ErrStewardNotFound
@@ -255,9 +257,9 @@ func (s *FlatFileStewardStore) readAllStewards() ([]*business.StewardRecord, err
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
-		// path is rooted at s.stewardDir(); readFile retries Windows
+		// path is rooted at s.stewardDir(); atomicfile.ReadFile retries Windows
 		// sharing violations from concurrent writers.
-		raw, err := readFile(path)
+		raw, err := atomicfile.ReadFile(path)
 		if err != nil {
 			continue // skip unreadable files
 		}

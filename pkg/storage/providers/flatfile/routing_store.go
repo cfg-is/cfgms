@@ -4,9 +4,7 @@ package flatfile
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -43,9 +41,8 @@ type routingEntryJSON struct {
 // NewFlatFileRoutingStore creates a FlatFileRoutingStore rooted at
 // <root>/routing. The directory is created if it does not exist.
 func NewFlatFileRoutingStore(root string) (*FlatFileRoutingStore, error) {
-	dir := filepath.Join(root, "routing")
-	if err := os.MkdirAll(dir, dirMode); err != nil {
-		return nil, fmt.Errorf("flatfile: failed to create routing directory: %w", err)
+	if err := ensureStoreDir(root, "routing", "routing"); err != nil {
+		return nil, err
 	}
 	return &FlatFileRoutingStore{root: root}, nil
 }
@@ -60,31 +57,13 @@ func (s *FlatFileRoutingStore) dataFilePath() string {
 // load reads and parses routing.json. Returns an empty (non-nil) map when the
 // file does not exist. Must be called with at least a read lock held.
 func (s *FlatFileRoutingStore) load() (map[string]routingEntryJSON, error) {
-	raw, err := readFile(s.dataFilePath())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]routingEntryJSON{}, nil
-		}
-		return nil, fmt.Errorf("flatfile: failed to read routing file: %w", err)
-	}
-	entries := map[string]routingEntryJSON{}
-	if len(raw) == 0 {
-		return entries, nil
-	}
-	if err := json.Unmarshal(raw, &entries); err != nil {
-		return nil, fmt.Errorf("flatfile: failed to parse routing file: %w", err)
-	}
-	return entries, nil
+	return loadJSONMap[routingEntryJSON](s.dataFilePath(), "routing")
 }
 
 // save atomically writes entries to routing.json. Must be called with the
 // write lock held.
 func (s *FlatFileRoutingStore) save(entries map[string]routingEntryJSON) error {
-	raw, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return fmt.Errorf("flatfile: failed to marshal routing entries: %w", err)
-	}
-	return writeAtomic(s.dataFilePath(), raw)
+	return saveJSONMap(s.dataFilePath(), entries, "routing entries")
 }
 
 // RecordConnection implements business.RoutingStore.RecordConnection.

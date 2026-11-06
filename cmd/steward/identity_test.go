@@ -4,9 +4,11 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -232,4 +234,53 @@ func TestSavePendingState_CreatesDirectoryIfAbsent(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "p1", got.PendingID)
+}
+
+// TestSaveIdentity_ConcurrentReadersNeverBlockOrSeePartialFile proves a save
+// is atomic and never blocked by a reader that is loading the same file.
+func TestSaveIdentity_ConcurrentReadersNeverBlockOrSeePartialFile(t *testing.T) {
+	dir := t.TempDir()
+	a := StewardIdentity{StewardID: "identity-a", TransportAddress: "ctrl-a:4433"}
+	b := StewardIdentity{StewardID: "identity-b", TransportAddress: "ctrl-b:4433"}
+	require.NoError(t, saveIdentity(dir, a))
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	var loads int
+	var loadErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			got, err := loadIdentity(dir)
+			if err != nil {
+				loadErr = err
+				return
+			}
+			if got == nil || (got.StewardID != a.StewardID && got.StewardID != b.StewardID) ||
+				(got.StewardID == a.StewardID && got.TransportAddress != a.TransportAddress) ||
+				(got.StewardID == b.StewardID && got.TransportAddress != b.TransportAddress) {
+				loadErr = errors.New("loadIdentity returned nil or a partial identity")
+				return
+			}
+			loads++
+		}
+	}()
+
+	for i := 0; i < 300; i++ {
+		id := a
+		if i%2 == 1 {
+			id = b
+		}
+		require.NoError(t, saveIdentity(dir, id), "save %d", i)
+	}
+	close(stop)
+	wg.Wait()
+	require.NoError(t, loadErr)
+	assert.Positive(t, loads)
 }
