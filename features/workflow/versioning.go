@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SemanticVersion represents a semantic version following semver.org specification
@@ -156,6 +157,29 @@ type VersionedWorkflow struct {
 	Deprecated      bool             `yaml:"deprecated,omitempty" json:"deprecated,omitempty"`
 	DeprecationNote string           `yaml:"deprecation_note,omitempty" json:"deprecation_note,omitempty"`
 	Changelog       []ChangelogEntry `yaml:"changelog,omitempty" json:"changelog,omitempty"`
+	// Publication is the stored passkey assertion that publishes this exact version. It
+	// is set only by the publish ceremony and is not part of the canonical form it signs.
+	Publication *Publication `yaml:"publication,omitempty" json:"publication,omitempty"`
+}
+
+// Publication is the stored proof that an admin published one workflow version with a
+// passkey tap. It holds the WebAuthn assertion and the ceremony coordinates (Nonce,
+// ExpiresAt) needed to rebuild the signed envelope. It holds no public key: the only
+// trust anchor is the credential registered to SignerAccountID, so a Publication can be
+// re-verified at any time and is worthless without that registration.
+//
+// The binary fields are unpadded base64url. ExpiresAt bounds the publish ceremony only;
+// it is never compared with the current time when a stored Publication is verified.
+type Publication struct {
+	ContentHash       string    `yaml:"content_hash" json:"content_hash"`
+	Nonce             string    `yaml:"nonce" json:"nonce"`
+	ExpiresAt         time.Time `yaml:"expires_at" json:"expires_at"`
+	CredentialID      string    `yaml:"credential_id" json:"credential_id"`
+	AuthenticatorData string    `yaml:"authenticator_data" json:"authenticator_data"`
+	ClientDataJSON    string    `yaml:"client_data_json" json:"client_data_json"`
+	Signature         string    `yaml:"signature" json:"signature"`
+	SignerAccountID   string    `yaml:"signer_account_id" json:"signer_account_id"`
+	SignedAt          time.Time `yaml:"signed_at" json:"signed_at"`
 }
 
 // ChangelogEntry represents a single changelog entry

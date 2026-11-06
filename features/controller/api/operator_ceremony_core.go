@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -14,6 +15,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 )
 
@@ -148,4 +150,29 @@ func (s *Server) VerifyAssertion(acct *account, envelope operatorpayload.Envelop
 		return nil, fmt.Errorf("webauthn assertion verification failed: %w", err)
 	}
 	return stored, nil
+}
+
+// persistAdvancedSignCount stores credID's advanced sign count on acct. It is non-fatal on
+// failure: the cryptographic verification already performed is not affected by a
+// persistence error. It uses persistAccountCAS, keyed on the version read alongside acct,
+// rather than a blind overwrite (Issue #3761, ADR-031 Decision 1): acct's credentials and
+// bindings are copied wholesale, so a blind persist would discard any unrelated field a
+// concurrent write on a peer node committed since acct was read. A lost CAS race is
+// logged and swallowed like any other persist failure; the next successful assertion
+// advances the count from whatever the winning write left in place.
+func (s *Server) persistAdvancedSignCount(ctx context.Context, acct *account, credID []byte, count uint32, principalID, logPrefix string) {
+	updatedAcct := withAdvancedSignCount(acct, credID, count)
+	newVersion, ok, err := s.persistAccountCAS(ctx, &updatedAcct, principalID)
+	switch {
+	case err != nil:
+		s.logger.Error(logPrefix+": failed to persist updated sign count",
+			"principal_id", logging.SanitizeLogValue(principalID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	case !ok:
+		s.logger.Warn(logPrefix+": sign count persist lost a concurrent-write race, not retried",
+			"principal_id", logging.SanitizeLogValue(principalID))
+	default:
+		updatedAcct.Version = newVersion
+		s.cacheAccount(&updatedAcct)
+	}
 }

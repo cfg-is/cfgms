@@ -274,6 +274,7 @@ var reviewedExclusions = map[string]bool{
 	"VersionedWorkflow.Deprecated":      true,
 	"VersionedWorkflow.DeprecationNote": true,
 	"VersionedWorkflow.Changelog":       true,
+	"VersionedWorkflow.Publication":     true,
 }
 
 func TestCanonicalWorkflowHash_EveryFieldCovered(t *testing.T) {

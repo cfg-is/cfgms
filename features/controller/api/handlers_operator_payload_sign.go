@@ -485,28 +485,8 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Persist the advanced sign count. Non-fatal on failure: the cryptographic verification
-	// already performed is not affected by a persistence error. Uses persistAccountCAS,
-	// keyed on the version read alongside acct above, rather than a blind overwrite
-	// (Issue #3761, ADR-031 Decision 1): acct.Credentials/CertBindings/etc. are copied
-	// wholesale into updatedAcct, so a blind persistAccount here would silently discard
-	// any unrelated field a concurrent write on a peer node — e.g. a cert bind or a
-	// different credential's own sign-count advance — committed between this handler's
-	// getAccount read and this persist. A lost CAS race is logged and swallowed exactly
-	// like any other persist failure here; the next successful assertion advances the
-	// count from whatever the winning write left in place.
-	updatedAcct := withAdvancedSignCount(acct, credential.ID, newSignCount)
-	if newVersion, ok, persistErr := s.persistAccountCAS(r.Context(), &updatedAcct, principal.ID); persistErr != nil {
-		s.logger.Error("Operator-payload sign finish: failed to persist updated sign count",
-			"principal_id", logging.SanitizeLogValue(principal.ID),
-			"error", logging.SanitizeLogValue(persistErr.Error()))
-	} else if !ok {
-		s.logger.Warn("Operator-payload sign finish: sign count persist lost a concurrent-write race, not retried",
-			"principal_id", logging.SanitizeLogValue(principal.ID))
-	} else {
-		updatedAcct.Version = newVersion
-		s.cacheAccount(&updatedAcct)
-	}
+	// Persist the advanced sign count; non-fatal on failure (see persistAdvancedSignCount).
+	s.persistAdvancedSignCount(r.Context(), acct, credential.ID, newSignCount, principal.ID, "Operator-payload sign finish")
 
 	s.logger.Info("WebAuthn operator-payload sign successful",
 		"principal_id", logging.SanitizeLogValue(principal.ID),
