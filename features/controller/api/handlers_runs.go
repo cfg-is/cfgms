@@ -357,6 +357,97 @@ func (s *Server) runAccess(ctx context.Context, scope ctxkeys.TenantScope, run *
 	return s.tenantAccessForScope(ctx, scope, run.TenantID, route)
 }
 
+// writeUnsupportedRunShell writes the 400 for a shell outside allowedShells.
+func (s *Server) writeUnsupportedRunShell(w http.ResponseWriter, shell string) {
+	s.writeErrorResponse(w, http.StatusBadRequest,
+		fmt.Sprintf("unsupported shell %q; allowed: bash, sh, powershell, pwsh, cmd", logging.SanitizeLogValue(shell)),
+		"UNSUPPORTED_SHELL")
+}
+
+// parseRunTargetAndRequireFleet parses the target selector and requires a fleet
+// query to be wired. It writes the response and returns ok=false on refusal.
+func (s *Server) parseRunTargetAndRequireFleet(w http.ResponseWriter, target string) (fleet.Filter, bool) {
+	filter, err := parseRunTarget(target)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid target selector: "+err.Error(), "INVALID_TARGET")
+		return filter, false
+	}
+	if s.fleetQuery == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
+		return filter, false
+	}
+	return filter, true
+}
+
+// denyExecScopeDecision writes the response for a non-allowed tenant-scope
+// decision and reports whether it did. An indeterminate scope is denied with a
+// response distinct from the genuine out-of-scope denial (Issue #4091 AC1).
+func (s *Server) denyExecScopeDecision(w http.ResponseWriter, decision execTenantScopeDecision) bool {
+	switch decision {
+	case execScopeForbidden:
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"access denied: steward is not in your tenant scope", "FORBIDDEN")
+		return true
+	case execScopeIndeterminate:
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
+		return true
+	}
+	return false
+}
+
+// enforceRunIDTargetScope applies decide to every explicit id: target in the
+// filter (filter.IDs, then the legacy filter.DeviceID) and writes the denial for
+// the first one that is not allowed. It returns ok=false on refusal.
+func (s *Server) enforceRunIDTargetScope(w http.ResponseWriter, filter fleet.Filter, decide func(deviceID string) execTenantScopeDecision) bool {
+	for _, targetID := range filter.IDs {
+		if s.denyExecScopeDecision(w, decide(targetID)) {
+			return false
+		}
+	}
+	if filter.DeviceID != "" && s.denyExecScopeDecision(w, decide(filter.DeviceID)) {
+		return false
+	}
+	return true
+}
+
+// lookupRunScriptMetadata looks up script metadata for per-steward parameter
+// resolution. Non-fatal if the repo is unavailable or the script is not found —
+// params resolve from runtime overrides and defaults only.
+func (s *Server) lookupRunScriptMetadata(tenantID string, req *postRunScriptRequest) *scriptmodule.ScriptMetadata {
+	if s.scriptRepo == nil {
+		return nil
+	}
+	var vs *scriptmodule.VersionedScript
+	var getErr error
+	if resolver, isTenantLib := s.scriptRepo.(scriptmodule.TenantScriptResolver); isTenantLib {
+		vs, getErr = resolver.GetForTenant(tenantID, req.ScriptID, req.ScriptVersion)
+	} else {
+		vs, getErr = s.scriptRepo.Get(req.ScriptID, req.ScriptVersion)
+	}
+	if getErr == nil && vs != nil {
+		return vs.Metadata
+	}
+	return nil
+}
+
+// lookupRunScriptPrivilege looks up admin-configured privilege metadata: DNA path
+// overrides for parameter resolution and the required API scope (Issue #1675). The
+// scope is read from the store — never from the request body — so callers cannot
+// widen it beyond what was set by script:admin.
+// Privilege metadata is tenant-scoped. A global admin (empty tenant) is not
+// bound by per-tenant script scope, so skip the lookup rather than querying the
+// store with an empty tenant key (which is undefined/store-dependent) — Issue #1990.
+func (s *Server) lookupRunScriptPrivilege(ctx context.Context, tenantID, scriptID string) (map[string]string, []string) {
+	if s.privilegeStore == nil || tenantID == "" { //architecture:allow-root-scope -- skips per-tenant privilege metadata for root; not a grant
+		return nil, nil
+	}
+	meta, loadErr := s.loadPrivilegeMetadata(ctx, tenantID, scriptID)
+	if loadErr != nil || meta == nil {
+		return nil, nil
+	}
+	return meta.ParamPlatformBindings, meta.RequiredAPIScope
+}
+
 // handlePostRunScript handles POST /api/v1/runs/script.
 // Creates a run record and fans out one QueuedExecution per matched steward.
 func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
@@ -381,20 +472,12 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Shell != "" && !allowedShells[req.Shell] {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			fmt.Sprintf("unsupported shell %q; allowed: bash, sh, powershell, pwsh, cmd", logging.SanitizeLogValue(req.Shell)),
-			"UNSUPPORTED_SHELL")
+		s.writeUnsupportedRunShell(w, req.Shell)
 		return
 	}
 
-	filter, err := parseRunTarget(req.Target)
-	if err != nil {
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid target selector: "+err.Error(), "INVALID_TARGET")
-		return
-	}
-
-	if s.fleetQuery == nil {
-		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
+	filter, ok := s.parseRunTargetAndRequireFleet(w, req.Target)
+	if !ok {
 		return
 	}
 
@@ -405,27 +488,10 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 	// filter.DeviceID is the legacy query-param path only.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	if !scope.IsRoot() { //architecture:allow-root-scope -- a root caller's targets pass the crossing in resolveAuthorizedRunTargets below
-		for _, targetID := range filter.IDs {
-			switch s.enforceExecTenantScopeForCallerScope(r.Context(), targetID, scope) {
-			case execScopeForbidden:
-				s.writeErrorResponse(w, http.StatusForbidden,
-					"access denied: steward is not in your tenant scope", "FORBIDDEN")
-				return
-			case execScopeIndeterminate:
-				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
-				return
-			}
-		}
-		if filter.DeviceID != "" {
-			switch s.enforceExecTenantScopeForCallerScope(r.Context(), filter.DeviceID, scope) {
-			case execScopeForbidden:
-				s.writeErrorResponse(w, http.StatusForbidden,
-					"access denied: steward is not in your tenant scope", "FORBIDDEN")
-				return
-			case execScopeIndeterminate:
-				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
-				return
-			}
+		if !s.enforceRunIDTargetScope(w, filter, func(deviceID string) execTenantScopeDecision {
+			return s.enforceExecTenantScopeForCallerScope(r.Context(), deviceID, scope)
+		}) {
+			return
 		}
 	}
 
@@ -436,39 +502,8 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Look up script metadata for per-steward parameter resolution. Non-fatal if
-	// the repo is unavailable or the script is not found — params resolve from
-	// runtime overrides and defaults only.
-	var scriptMeta *scriptmodule.ScriptMetadata
-	if s.scriptRepo != nil {
-		var vs *scriptmodule.VersionedScript
-		var getErr error
-		if resolver, isTenantLib := s.scriptRepo.(scriptmodule.TenantScriptResolver); isTenantLib {
-			vs, getErr = resolver.GetForTenant(tenantID, req.ScriptID, req.ScriptVersion)
-		} else {
-			vs, getErr = s.scriptRepo.Get(req.ScriptID, req.ScriptVersion)
-		}
-		if getErr == nil && vs != nil {
-			scriptMeta = vs.Metadata
-		}
-	}
-
-	// Look up admin-configured privilege metadata: DNA path overrides for
-	// parameter resolution and the required API scope (Issue #1675). The scope
-	// is read from the store — never from the request body — so callers cannot
-	// widen it beyond what was set by script:admin.
-	// Privilege metadata is tenant-scoped. A global admin (empty tenant) is not
-	// bound by per-tenant script scope, so skip the lookup rather than querying the
-	// store with an empty tenant key (which is undefined/store-dependent) — Issue #1990.
-	var paramPlatformBindings map[string]string
-	var requiredAPIScope []string
-	if s.privilegeStore != nil && tenantID != "" { //architecture:allow-root-scope -- skips per-tenant privilege metadata for root; not a grant
-		meta, loadErr := s.loadPrivilegeMetadata(r.Context(), tenantID, req.ScriptID)
-		if loadErr == nil && meta != nil {
-			paramPlatformBindings = meta.ParamPlatformBindings
-			requiredAPIScope = meta.RequiredAPIScope
-		}
-	}
+	scriptMeta := s.lookupRunScriptMetadata(tenantID, &req)
+	paramPlatformBindings, requiredAPIScope := s.lookupRunScriptPrivilege(r.Context(), tenantID, req.ScriptID)
 
 	runID, err := controllerrun.SynthesizeScriptRunForDevices(
 		r.Context(),
@@ -498,156 +533,120 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccessResponse(w, map[string]string{"run_id": runID})
 }
 
-// handlePostRunCommand handles POST /api/v1/runs/command.
-// Creates a run record for an inline (ad-hoc) script and fans out one
-// QueuedExecution per matched steward.
-func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
-	if s.runManager == nil || s.runExecutionQueue == nil {
-		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Run service not available", "SERVICE_UNAVAILABLE")
-		return
-	}
-
-	principal, tenantID, ok := s.authRunAccess(w, r)
-	if !ok {
-		return
-	}
-
-	var req postRunCommandRequest
+// decodeRunCommandBody decodes and validates the request body of
+// POST /api/v1/runs/command up to and including the base64 content. It writes the
+// response and returns ok=false on refusal.
+func (s *Server) decodeRunCommandBody(w http.ResponseWriter, r *http.Request) (req postRunCommandRequest, inlineContent []byte, ok bool) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", "INVALID_REQUEST")
-		return
+		return req, nil, false
 	}
 	if req.Content == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "content is required", "MISSING_CONTENT")
-		return
+		return req, nil, false
 	}
 	if req.Shell == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "shell is required", "MISSING_SHELL")
-		return
+		return req, nil, false
 	}
 	if !allowedShells[req.Shell] {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			fmt.Sprintf("unsupported shell %q; allowed: bash, sh, powershell, pwsh, cmd", logging.SanitizeLogValue(req.Shell)),
-			"UNSUPPORTED_SHELL")
-		return
+		s.writeUnsupportedRunShell(w, req.Shell)
+		return req, nil, false
 	}
-
 	inlineContent, err := base64.StdEncoding.DecodeString(req.Content)
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "content must be base64-encoded", "INVALID_CONTENT")
-		return
+		return req, nil, false
 	}
+	return req, inlineContent, true
+}
+
+// parseRunCommandTiming parses the envelope expiry and the per-run timeout. It
+// writes the response and returns ok=false on refusal.
+func (s *Server) parseRunCommandTiming(w http.ResponseWriter, req *postRunCommandRequest) (expiresAt time.Time, timeout time.Duration, ok bool) {
 	expiresAt, err := time.Parse(time.RFC3339, req.ExpiresAt)
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "expires_at must be RFC3339", "INVALID_EXPIRES_AT")
-		return
+		return expiresAt, 0, false
 	}
-	timeout := defaultRunCommandTimeout
+	timeout = defaultRunCommandTimeout
 	if req.TimeoutSeconds != nil {
 		secs := *req.TimeoutSeconds
 		if secs < int(minRunCommandTimeout/time.Second) || secs > int(maxRunCommandTimeout/time.Second) {
 			s.writeErrorResponse(w, http.StatusBadRequest,
 				"timeout_seconds must be between 1s and 60m (1-3600 seconds)", "INVALID_TIMEOUT")
-			return
+			return expiresAt, 0, false
 		}
 		timeout = time.Duration(secs) * time.Second
 	}
-	var credentialID string
+	return expiresAt, timeout, true
+}
+
+// verifyRunCommandProof verifies exactly one operator proof (WebAuthn or X.509
+// signature) over the signed envelope and returns the signing credential id. It
+// writes the response and returns ok=false on refusal.
+func (s *Server) verifyRunCommandProof(w http.ResponseWriter, ctx context.Context, principal *Principal, req *postRunCommandRequest, inlineContent []byte, expiresAt time.Time) (string, bool) {
 	switch {
 	case req.Signature != nil && req.WebAuthn != nil:
 		s.writeErrorResponse(w, http.StatusBadRequest, "provide exactly one operator proof", "INVALID_SIGNATURE")
-		return
+		return "", false
 	case req.WebAuthn != nil:
-		credentialID, err = s.verifyCommandWebAuthn(r.Context(), inlineContent, req.Shell, req.Targets, req.Nonce, expiresAt, req.WebAuthn)
+		credentialID, err := s.verifyCommandWebAuthn(ctx, inlineContent, req.Shell, req.Targets, req.Nonce, expiresAt, req.WebAuthn)
 		if err != nil {
 			s.logger.Warn("Run command refused: operator envelope not verified",
 				"principal_id", logging.SanitizeLogValue(principal.ID),
 				"error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusBadRequest, "invalid operator signature", "INVALID_SIGNATURE")
-			return
+			return "", false
 		}
+		return credentialID, true
 	default:
-		credentialID, err = s.validatePublicBetaCommandSignature(inlineContent, req.Shell, req.Targets, req.Nonce, expiresAt, req.Signature)
+		credentialID, err := s.validatePublicBetaCommandSignature(inlineContent, req.Shell, req.Targets, req.Nonce, expiresAt, req.Signature)
 		if err != nil {
 			s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_SIGNATURE")
-			return
+			return "", false
 		}
+		return credentialID, true
 	}
+}
 
-	// Blast-radius bound (Issue #3698): a hard reject at admission, checked against the
-	// operator-signed, already-resolved Targets list — after signature verification (so a
-	// malformed or forged request is never what trips this check) and before dispatch. A
-	// good signature does not exempt an oversized target set: the bound is a compensating
-	// control for a compromised-controller UI-trust gap, not a defense against forgery.
-	if maxTargets := s.resolveMaxTargetsForTenant(r.Context(), tenantID); len(req.Targets) > maxTargets {
-		s.emitOperatorPayloadDispatchAudit(r.Context(), tenantID, principal.ID, string(inlineContent),
-			credentialID, req.Targets, "", business.AuditResultDenied,
-			fmt.Sprintf("resolved target count %d exceeds tenant bound of %d", len(req.Targets), maxTargets))
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			fmt.Sprintf("resolved target count %d exceeds the maximum of %d targets allowed for this tenant", len(req.Targets), maxTargets),
-			"BLAST_RADIUS_EXCEEDED")
-		return
+// enforceRunBlastRadius applies the blast-radius bound (Issue #3698): a hard reject
+// at admission, checked against the operator-signed, already-resolved Targets list —
+// after signature verification (so a malformed or forged request is never what trips
+// this check) and before dispatch. A good signature does not exempt an oversized
+// target set: the bound is a compensating control for a compromised-controller
+// UI-trust gap, not a defense against forgery. It writes the response and returns
+// ok=false on refusal.
+func (s *Server) enforceRunBlastRadius(w http.ResponseWriter, ctx context.Context, principal *Principal, tenantID string, req *postRunCommandRequest, inlineContent []byte, credentialID string) bool {
+	maxTargets := s.resolveMaxTargetsForTenant(ctx, tenantID)
+	if len(req.Targets) <= maxTargets {
+		return true
 	}
+	s.emitOperatorPayloadDispatchAudit(ctx, tenantID, principal.ID, string(inlineContent),
+		credentialID, req.Targets, "", business.AuditResultDenied,
+		fmt.Sprintf("resolved target count %d exceeds tenant bound of %d", len(req.Targets), maxTargets))
+	s.writeErrorResponse(w, http.StatusBadRequest,
+		fmt.Sprintf("resolved target count %d exceeds the maximum of %d targets allowed for this tenant", len(req.Targets), maxTargets),
+		"BLAST_RADIUS_EXCEEDED")
+	return false
+}
 
-	// Banned-pattern enforcement — controller-side (defense-in-depth; steward also checks).
-	if patternName, found := containsBannedPattern(string(inlineContent)); found {
-		s.logger.Warn("command rejected: banned pattern detected", "pattern", patternName)
-		s.writeErrorResponse(w, http.StatusBadRequest, "command contains a prohibited pattern", "BANNED_PATTERN")
-		return
+// rejectBannedRunPattern is the controller-side banned-pattern enforcement
+// (defense-in-depth; the steward also checks). It writes the response and returns
+// ok=false on refusal.
+func (s *Server) rejectBannedRunPattern(w http.ResponseWriter, inlineContent []byte) bool {
+	patternName, found := containsBannedPattern(string(inlineContent))
+	if !found {
+		return true
 	}
+	s.logger.Warn("command rejected: banned pattern detected", "pattern", patternName)
+	s.writeErrorResponse(w, http.StatusBadRequest, "command contains a prohibited pattern", "BANNED_PATTERN")
+	return false
+}
 
-	filter, err := parseRunTarget(req.Target)
-	if err != nil {
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid target selector: "+err.Error(), "INVALID_TARGET")
-		return
-	}
-
-	if s.fleetQuery == nil {
-		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
-		return
-	}
-
-	// Tenant RBAC check for id: targets — enforce admin.tenant_path is a prefix of
-	// steward.tenant_path. Applied to every caller that is not root-scoped; a root
-	// caller has fleet-wide reach (Issue #4665).
-	// selector.Parse populates filter.IDs (comma-OR list); filter.DeviceID is the
-	// legacy query-param path only.
-	if execTenant := callerTenantFilter(r.Context()); execTenant != "" { //architecture:allow-root-scope -- tenant callers' id: targets; a root caller's targets pass resolveAuthorizedRunTargets
-		for _, targetID := range filter.IDs {
-			switch s.enforceExecTenantScope(r.Context(), targetID, execTenant) {
-			case execScopeForbidden:
-				s.writeErrorResponse(w, http.StatusForbidden,
-					"access denied: steward is not in your tenant scope", "FORBIDDEN")
-				return
-			case execScopeIndeterminate:
-				// Scope could not be verified — deny, distinguishably from the
-				// genuine out-of-scope denial above (Issue #4091 AC1).
-				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
-				return
-			}
-		}
-		if filter.DeviceID != "" {
-			switch s.enforceExecTenantScope(r.Context(), filter.DeviceID, execTenant) {
-			case execScopeForbidden:
-				s.writeErrorResponse(w, http.StatusForbidden,
-					"access denied: steward is not in your tenant scope", "FORBIDDEN")
-				return
-			case execScopeIndeterminate:
-				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
-				return
-			}
-		}
-	}
-
-	// Resolve the run's targets once and authorize them against ADR-025's
-	// tenant-crossing boundary; exactly this list is dispatched (Issue #4554).
-	devices, ok := s.resolveAuthorizedRunTargets(w, r, principal, tenantID, filter)
-	if !ok {
-		return
-	}
-
+// runCommandSignature converts the request's operator proof to the dispatch form.
+func runCommandSignature(req *postRunCommandRequest) *controllerrun.CommandSignature {
 	var commandSignature *controllerrun.CommandSignature
-	var manifests map[string]string
 	if req.Signature != nil {
 		commandSignature = &controllerrun.CommandSignature{
 			Algorithm: req.Signature.Algorithm,
@@ -663,22 +662,102 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 			WebAuthnSignature:         b64(req.WebAuthn.Signature),
 			WebAuthnCredentialID:      b64(req.WebAuthn.CredentialID),
 		}
-		// Each steward verifies the proof against its own roster manifest, so one is
-		// built per device; a device without one is not dispatched to.
-		manifests = make(map[string]string, len(devices))
-		for _, device := range devices {
-			manifest, err := s.buildWebAuthnManifestForSteward(r.Context(), device.ID)
-			if err != nil {
-				s.logger.Error("Run command not queued: WebAuthn manifest unavailable",
-					"steward_id", logging.SanitizeLogValue(device.ID),
-					"error", logging.SanitizeLogValue(err.Error()))
-				s.emitOperatorPayloadDispatchAudit(r.Context(), tenantID, principal.ID, string(inlineContent),
-					credentialID, req.Targets, "", business.AuditResultError, "webauthn manifest unavailable")
-				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Operator credential manifest not available", "MANIFEST_UNAVAILABLE")
-				return
-			}
-			manifests[device.ID] = manifest
+	}
+	return commandSignature
+}
+
+// admitRunCommandPayload applies the blast-radius bound and then the banned-pattern
+// check, in that order, to a command whose proof has already verified. It writes
+// the response and returns ok=false on refusal.
+func (s *Server) admitRunCommandPayload(w http.ResponseWriter, ctx context.Context, principal *Principal, tenantID string, req *postRunCommandRequest, inlineContent []byte, credentialID string) bool {
+	return s.enforceRunBlastRadius(w, ctx, principal, tenantID, req, inlineContent, credentialID) &&
+		s.rejectBannedRunPattern(w, inlineContent)
+}
+
+// buildRunWebAuthnManifests builds the per-device roster manifests for a WebAuthn
+// proof (none for any other proof). Each steward
+// verifies the proof against its own roster manifest, so one is built per device;
+// a device without one is not dispatched to. It writes the response and returns
+// ok=false on refusal.
+func (s *Server) buildRunWebAuthnManifests(w http.ResponseWriter, ctx context.Context, principal *Principal, tenantID string, req *postRunCommandRequest, inlineContent []byte, credentialID string, devices []fleet.StewardResult) (map[string]string, bool) {
+	if req.WebAuthn == nil {
+		return nil, true
+	}
+	manifests := make(map[string]string, len(devices))
+	for _, device := range devices {
+		manifest, err := s.buildWebAuthnManifestForSteward(ctx, device.ID)
+		if err != nil {
+			s.logger.Error("Run command not queued: WebAuthn manifest unavailable",
+				"steward_id", logging.SanitizeLogValue(device.ID),
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.emitOperatorPayloadDispatchAudit(ctx, tenantID, principal.ID, string(inlineContent),
+				credentialID, req.Targets, "", business.AuditResultError, "webauthn manifest unavailable")
+			s.writeErrorResponse(w, http.StatusServiceUnavailable, "Operator credential manifest not available", "MANIFEST_UNAVAILABLE")
+			return nil, false
 		}
+		manifests[device.ID] = manifest
+	}
+	return manifests, true
+}
+
+// handlePostRunCommand handles POST /api/v1/runs/command.
+// Creates a run record for an inline (ad-hoc) script and fans out one
+// QueuedExecution per matched steward.
+func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
+	if s.runManager == nil || s.runExecutionQueue == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Run service not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	principal, tenantID, ok := s.authRunAccess(w, r)
+	if !ok {
+		return
+	}
+
+	req, inlineContent, ok := s.decodeRunCommandBody(w, r)
+	if !ok {
+		return
+	}
+	expiresAt, timeout, ok := s.parseRunCommandTiming(w, &req)
+	if !ok {
+		return
+	}
+	credentialID, ok := s.verifyRunCommandProof(w, r.Context(), principal, &req, inlineContent, expiresAt)
+	if !ok {
+		return
+	}
+	if !s.admitRunCommandPayload(w, r.Context(), principal, tenantID, &req, inlineContent, credentialID) {
+		return
+	}
+
+	filter, ok := s.parseRunTargetAndRequireFleet(w, req.Target)
+	if !ok {
+		return
+	}
+
+	// Tenant RBAC check for id: targets — enforce admin.tenant_path is a prefix of
+	// steward.tenant_path. Applied to every caller that is not root-scoped; a root
+	// caller has fleet-wide reach (Issue #4665).
+	// selector.Parse populates filter.IDs (comma-OR list); filter.DeviceID is the
+	// legacy query-param path only.
+	if execTenant := callerTenantFilter(r.Context()); execTenant != "" { //architecture:allow-root-scope -- tenant callers' id: targets; a root caller's targets pass resolveAuthorizedRunTargets
+		if !s.enforceRunIDTargetScope(w, filter, func(deviceID string) execTenantScopeDecision {
+			return s.enforceExecTenantScope(r.Context(), deviceID, execTenant)
+		}) {
+			return
+		}
+	}
+
+	// Resolve the run's targets once and authorize them against ADR-025's
+	// tenant-crossing boundary; exactly this list is dispatched (Issue #4554).
+	devices, ok := s.resolveAuthorizedRunTargets(w, r, principal, tenantID, filter)
+	if !ok {
+		return
+	}
+
+	manifests, ok := s.buildRunWebAuthnManifests(w, r.Context(), principal, tenantID, &req, inlineContent, credentialID, devices)
+	if !ok {
+		return
 	}
 
 	runID, err := controllerrun.SynthesizeCommandRunForDevices(
@@ -692,7 +771,7 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		string(inlineContent),
 		scriptmodule.ShellType(req.Shell),
 		req.Params,
-		commandSignature,
+		runCommandSignature(&req),
 		manifests,
 		req.Targets,
 		req.Nonce,
