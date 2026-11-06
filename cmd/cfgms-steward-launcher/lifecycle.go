@@ -163,6 +163,41 @@ func (s *Supervisor) runServiceRegistrationRepair(ctx context.Context, interval 
 	}
 }
 
+// childOutcome is how a finished child run is acted on by the supervise loop.
+type childOutcome int
+
+const (
+	// outcomeShutdown: ctx was cancelled (or the failure was suppressed on a
+	// known-good version); Supervise returns nil.
+	outcomeShutdown childOutcome = iota
+	// outcomeAdvance: the steward staged a new version and exited cleanly.
+	outcomeAdvance
+	// outcomeHealthy: the child outlived the startup window and exited cleanly.
+	outcomeHealthy
+	// outcomeRestartInPlace: a known-good version failed; restart it, never roll back.
+	outcomeRestartInPlace
+	// outcomeRollback: a probation version failed; roll back if possible.
+	outcomeRollback
+)
+
+// childRun is the record of one finished child execution.
+type childRun struct {
+	current     string
+	exitErr     error
+	ranFor      time.Duration
+	exeHash     string
+	hashErr     error
+	isKnownGood bool
+}
+
+// superviseLoop carries the per-Supervise state of the child loop.
+type superviseLoop struct {
+	s                  *Supervisor
+	ctx                context.Context
+	backoff            time.Duration
+	rollbacksRemaining int
+}
+
 // Supervise runs the supervision loop until ctx is cancelled. Every fault
 // (unreadable or missing layout, missing binary, rollback failure, a child
 // that keeps failing) is written to Stderr and retried with capped backoff.
@@ -170,23 +205,8 @@ func (s *Supervisor) runServiceRegistrationRepair(ctx context.Context, interval 
 // Returns nil on context cancellation. The only error returned is an
 // invalid ExtraArgs value, rejected before the loop starts.
 func (s *Supervisor) Supervise(ctx context.Context) error {
-	if err := rejectRegtokenValue(s.ExtraArgs); err != nil {
+	if err := s.normalize(); err != nil {
 		return err
-	}
-	if s.clock == nil {
-		s.clock = realClock{}
-	}
-	if s.StartupWindow <= 0 {
-		s.StartupWindow = 30 * time.Second
-	}
-	// MaxRollbackCycles: zero (or negative) is a legitimate operator
-	// choice — "no auto-rollback, just fail-fast and let the OS service
-	// manager retry per its recovery policy." The previous behaviour
-	// silently coerced 0 → 1, which masked the operator's intent and
-	// confused review tests. Only negative values get coerced (they
-	// represent a programming mistake, not a deliberate choice).
-	if s.MaxRollbackCycles < 0 {
-		s.MaxRollbackCycles = 0
 	}
 
 	// Start the SCM service-registration self-repair ticker (#2465) BEFORE the
@@ -207,19 +227,7 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 	if s.sleep == nil {
 		s.sleep = sleepWithJitter
 	}
-	backoff := initialRestartBackoff
-	// retryAfter waits out the current backoff (honouring ctx) and doubles it.
-	retryAfter := func() {
-		s.sleep(ctx, backoff)
-		backoff = min(backoff*2, maxRestartBackoff)
-	}
-	// fault reports a supervision fault to Stderr and backs off before retrying.
-	fault := func(err error) {
-		_, _ = fmt.Fprintln(s.Stderr, err.Error())
-		retryAfter()
-	}
-
-	rollbacksRemaining := s.MaxRollbackCycles
+	l := &superviseLoop{s: s, ctx: ctx, backoff: initialRestartBackoff, rollbacksRemaining: s.MaxRollbackCycles}
 	for {
 		// Never begin (or re-begin) a child launch once shutdown has been
 		// requested. Every `continue` below re-enters this loop, and a cancel
@@ -234,201 +242,286 @@ func (s *Supervisor) Supervise(ctx context.Context) error {
 			return nil
 		}
 
-		current, err := s.Layout.ReadCurrent()
-		if err != nil {
-			fault(fmt.Errorf("launcher: read current version: %w", err))
+		current, exe, ok := l.resolveChild()
+		if !ok {
 			continue
 		}
-		if current == "" {
-			fault(errors.New("launcher: no current version recorded — install layout is missing or corrupt"))
-			continue
-		}
+		run := s.runChild(ctx, current, exe)
 
-		exe, err := s.Layout.StewardExeFor(current)
-		if err != nil {
-			fault(fmt.Errorf("launcher: resolve steward exe for %q: %w", current, err))
-			continue
+		switch s.classifyRun(ctx, run) {
+		case outcomeShutdown:
+			return nil
+		case outcomeAdvance:
+			l.backoff = initialRestartBackoff
+		case outcomeHealthy:
+			l.handleHealthy(run)
+		case outcomeRestartInPlace:
+			l.handleRestartInPlace(run)
+		case outcomeRollback:
+			l.handleRollback(run)
 		}
-		if _, statErr := os.Stat(exe); statErr != nil {
-			fault(fmt.Errorf("launcher: steward exe %q for version %q is missing: %w", exe, current, statErr))
-			continue
-		}
-
-		started := s.clock.Now()
-		exitErr := s.execOnce(ctx, exe)
-		ranFor := s.clock.Since(started)
-
-		// Compute the binary hash AFTER the child exits. Hashing before exec
-		// would delay the child launch on every restart — for a large binary
-		// the I/O adds hundreds of milliseconds, creating a window where a
-		// caller that checks connection state may observe stale "connected"
-		// from the previous process and dispatch a command to the dead
-		// connection. Hashing after exec still catches on-disk replacements:
-		// if the binary was swapped while the child ran, the new hash differs
-		// from the stored known-good hash and probation rules apply correctly.
-		exeHash, hashErr := computeBinaryHash(exe)
-		isKnownGood := false
-		if hashErr == nil {
-			if kgPS, kgErr := s.Layout.loadState(); kgErr == nil {
-				isKnownGood = kgPS.KnownGood == current && kgPS.KnownGoodHash == exeHash
-			}
-		}
-		// If the binary cannot be hashed (deleted, permission error), isKnownGood
-		// stays false — conservative treatment applies probation rules. This does
-		// not abort supervision; the stat check at the top of the next iteration
-		// will surface a missing-binary error if the file is truly gone.
-
-		// Context cancelled → service manager is shutting us down.
-		// Distinguish two sub-cases:
-		//   (a) The child was still running when ctx fired and got
-		//       killed by exec.CommandContext. exitErr is non-nil but
-		//       reflects the cancellation, not a child fault. Return
-		//       nil so the service manager logs a clean shutdown.
-		//   (b) The child had ALREADY crashed by the time ctx fired —
-		//       e.g. SIGTERM and a crash arriving in the same scheduler
-		//       turn during an in-progress upgrade. exitErr is non-nil
-		//       AND ranFor < StartupWindow. Discarding this as "just a
-		//       cancellation" would silently mask the upgrade failure.
-		//       Differentiate by checking whether the child had time
-		//       to exit on its own: a child that ran past StartupWindow
-		//       definitionally wasn't crashing-during-startup, so
-		//       treat its exit as graceful regardless of code. A child
-		//       that exited inside the window with a non-zero code
-		//       gets the failure surfaced even on cancel.
-		if ctx.Err() != nil {
-			// The guard at the top of the loop is a check-then-act, so a
-			// cancel can still land in the window between it and Start. When
-			// it does, no child process was created, so there is no child
-			// outcome to classify — this is purely a shutdown.
-			if errors.Is(exitErr, errChildNeverStarted) {
-				return nil
-			}
-			failedStartupOnCancel := ranFor < s.StartupWindow && exitErr != nil
-			if !failedStartupOnCancel {
-				return nil
-			}
-			// A known-good version that fast-exits coinciding with a
-			// context cancel is an environmental fault (e.g. WMI race on
-			// boot), not an upgrade failure. Return clean shutdown rather
-			// than rolling back or looping on a cancelled context. Log the
-			// suppression decision first: without it, an operator inspecting
-			// why the launcher exited on a proven binary sees nothing, and
-			// the rollback-suppression guarantee for known-good versions
-			// (Issue #2033) is indistinguishable from a silent crash.
-			if isKnownGood {
-				_, _ = fmt.Fprintf(s.Stderr, "launcher: version %q is known-good — fast exit (ran %s) coincided with shutdown; rollback suppressed, exiting cleanly\n", current, ranFor)
-				return nil
-			}
-			// Fall through to the rollback logic below — this looks
-			// like a real upgrade failure that happened to coincide
-			// with a cancel. The operator (or the next startup) will
-			// observe the rolled-back state.
-		} else if exitErr == nil {
-			// Detect an intentional upgrade self-exit: the steward called
-			// StageBinary (which advances state.json.current to the new version)
-			// then exited cleanly so the launcher re-execs the staged binary.
-			// This must NOT be treated as a startup failure — skip the rollback
-			// guard and loop to exec the new current version.
-			if after, readErr := s.Layout.ReadCurrent(); readErr == nil && after != current {
-				backoff = initialRestartBackoff
-				continue
-			}
-		}
-
-		failedStartup := ranFor < s.StartupWindow
-		nonZeroExit := exitErr != nil
-
-		if !failedStartup && !nonZeroExit {
-			// Child stayed up past the startup window then exited cleanly.
-			// Reset the failure counter, persist the known-good marker, and
-			// prune old version directories. Write the committed flag file
-			// last so its presence is a reliable completion signal for tests
-			// and the steward process.
-			if ps, loadErr := s.Layout.loadState(); loadErr == nil {
-				ps.ConsecutiveFailures = 0
-				// Only update the known-good marker if the post-exec hash
-				// succeeded; if it failed (binary deleted/unreadable after
-				// run) leave any existing marker untouched.
-				if hashErr == nil {
-					ps.KnownGood = current
-					ps.KnownGoodHash = exeHash
-				}
-				if saveErr := s.Layout.saveState(ps); saveErr != nil {
-					_, _ = fmt.Fprintf(s.Stderr, "launcher: save state after commit: %v\n", saveErr)
-				}
-			} else {
-				_, _ = fmt.Fprintf(s.Stderr, "launcher: load state for counter reset: %v\n", loadErr)
-			}
-			if _, pruneErr := pruneVersions(s.Layout.VersionsDir(), current, s.RetentionPolicy, s.clock.Now()); pruneErr != nil {
-				_, _ = fmt.Fprintf(s.Stderr, "launcher: retention prune: %v\n", pruneErr)
-			}
-			if flagErr := s.writeFlagFile("upgrade-committed", current); flagErr != nil {
-				_, _ = fmt.Fprintf(s.Stderr, "launcher: write upgrade-committed flag: %v\n", flagErr)
-			}
-			backoff = initialRestartBackoff
-			continue
-		}
-
-		// Anything else (early exit OR non-zero exit) is a "broken child"
-		// signal. Increment the consecutive-failure counter on any non-clean
-		// exit regardless of whether a rollback will fire.
-		if ps, loadErr := s.Layout.loadState(); loadErr == nil {
-			ps.ConsecutiveFailures++
-			if saveErr := s.Layout.saveState(ps); saveErr != nil {
-				_, _ = fmt.Fprintf(s.Stderr, "launcher: save state on failure: %v\n", saveErr)
-			}
-		} else {
-			_, _ = fmt.Fprintf(s.Stderr, "launcher: load state for failure counter: %v\n", loadErr)
-		}
-
-		// A child that ran past the startup window was healthy for a while, so
-		// whatever failed it is new: start the backoff over.
-		if !failedStartup {
-			backoff = initialRestartBackoff
-		}
-
-		// Known-good failure: a proven binary that exits non-zero (or fast) is
-		// suffering a transient environmental fault (e.g. a boot-time
-		// dependency race, a late crash), not an upgrade regression. Restart it
-		// in place with backoff — never roll back a binary that has already
-		// proven healthy (Issue #2033).
-		if isKnownGood {
-			_, _ = fmt.Fprintf(s.Stderr, "launcher: version %q is known-good — restarting in place after failure (ran %s); rollback suppressed\n", current, ranFor)
-			retryAfter()
-			continue
-		}
-
-		// Attempt rollback if we have a previous version AND budget.
-		previous, perr := s.Layout.ReadPrevious()
-		if perr != nil {
-			fault(fmt.Errorf("launcher: read previous version after child failure: %w", perr))
-			continue
-		}
-		if previous == "" || rollbacksRemaining == 0 {
-			if exitErr != nil {
-				fault(fmt.Errorf("launcher: child failed (ran for %s) and no rollback available: %w", ranFor, exitErr))
-			} else {
-				fault(fmt.Errorf("launcher: child exited inside startup window (%s) and no rollback available", ranFor))
-			}
-			continue
-		}
-
-		// Rollback is going to fire: write the flag file with the version we
-		// are rolling back TO (previous), which will be the version the steward
-		// process is running when it reconnects and reads the flag.
-		if flagErr := s.writeFlagFile("upgrade-rolled-back", previous); flagErr != nil {
-			_, _ = fmt.Fprintf(s.Stderr, "launcher: write upgrade-rolled-back flag: %v\n", flagErr)
-		}
-
-		newCurrent, rbErr := s.Layout.Rollback()
-		if rbErr != nil {
-			fault(fmt.Errorf("launcher: rollback after child failure: %w", rbErr))
-			continue
-		}
-		rollbacksRemaining--
-		backoff = initialRestartBackoff
-		_, _ = fmt.Fprintf(s.Stderr, "launcher: rolled back to version %q after child failure (ran for %s)\n", newCurrent, ranFor)
 	}
+}
+
+// normalize validates ExtraArgs and fills in the Supervisor defaults.
+func (s *Supervisor) normalize() error {
+	if err := rejectRegtokenValue(s.ExtraArgs); err != nil {
+		return err
+	}
+	if s.clock == nil {
+		s.clock = realClock{}
+	}
+	if s.StartupWindow <= 0 {
+		s.StartupWindow = 30 * time.Second
+	}
+	// MaxRollbackCycles: zero (or negative) is a legitimate operator
+	// choice — "no auto-rollback, just fail-fast and let the OS service
+	// manager retry per its recovery policy." The previous behaviour
+	// silently coerced 0 → 1, which masked the operator's intent and
+	// confused review tests. Only negative values get coerced (they
+	// represent a programming mistake, not a deliberate choice).
+	if s.MaxRollbackCycles < 0 {
+		s.MaxRollbackCycles = 0
+	}
+	return nil
+}
+
+// retryAfter waits out the current backoff (honouring ctx) and doubles it.
+func (l *superviseLoop) retryAfter() {
+	l.s.sleep(l.ctx, l.backoff)
+	l.backoff = min(l.backoff*2, maxRestartBackoff)
+}
+
+// fault reports a supervision fault to Stderr and backs off before retrying.
+func (l *superviseLoop) fault(err error) {
+	_, _ = fmt.Fprintln(l.s.Stderr, err.Error())
+	l.retryAfter()
+}
+
+// resolveChild reads the current version and its steward exe. On any fault it
+// reports it, backs off and returns ok=false so the caller retries.
+func (l *superviseLoop) resolveChild() (current, exe string, ok bool) {
+	current, err := l.s.Layout.ReadCurrent()
+	if err != nil {
+		l.fault(fmt.Errorf("launcher: read current version: %w", err))
+		return "", "", false
+	}
+	if current == "" {
+		l.fault(errors.New("launcher: no current version recorded — install layout is missing or corrupt"))
+		return "", "", false
+	}
+
+	exe, err = l.s.Layout.StewardExeFor(current)
+	if err != nil {
+		l.fault(fmt.Errorf("launcher: resolve steward exe for %q: %w", current, err))
+		return "", "", false
+	}
+	if _, statErr := os.Stat(exe); statErr != nil {
+		l.fault(fmt.Errorf("launcher: steward exe %q for version %q is missing: %w", exe, current, statErr))
+		return "", "", false
+	}
+	return current, exe, true
+}
+
+// runChild executes the child once and records its exit, runtime and whether
+// the binary that ran is the recorded known-good one.
+func (s *Supervisor) runChild(ctx context.Context, current, exe string) childRun {
+	started := s.clock.Now()
+	exitErr := s.execOnce(ctx, exe)
+	ranFor := s.clock.Since(started)
+
+	// Compute the binary hash AFTER the child exits. Hashing before exec
+	// would delay the child launch on every restart — for a large binary
+	// the I/O adds hundreds of milliseconds, creating a window where a
+	// caller that checks connection state may observe stale "connected"
+	// from the previous process and dispatch a command to the dead
+	// connection. Hashing after exec still catches on-disk replacements:
+	// if the binary was swapped while the child ran, the new hash differs
+	// from the stored known-good hash and probation rules apply correctly.
+	exeHash, hashErr := computeBinaryHash(exe)
+	isKnownGood := false
+	if hashErr == nil {
+		if kgPS, kgErr := s.Layout.loadState(); kgErr == nil {
+			isKnownGood = kgPS.KnownGood == current && kgPS.KnownGoodHash == exeHash
+		}
+	}
+	// If the binary cannot be hashed (deleted, permission error), isKnownGood
+	// stays false — conservative treatment applies probation rules. This does
+	// not abort supervision; the stat check at the top of the next iteration
+	// will surface a missing-binary error if the file is truly gone.
+	return childRun{current: current, exitErr: exitErr, ranFor: ranFor, exeHash: exeHash, hashErr: hashErr, isKnownGood: isKnownGood}
+}
+
+// classifyRun maps a finished child run to the action the loop takes.
+func (s *Supervisor) classifyRun(ctx context.Context, run childRun) childOutcome {
+	if ctx.Err() != nil {
+		return s.classifyCancelledRun(run)
+	}
+	if run.exitErr == nil {
+		// Detect an intentional upgrade self-exit: the steward called
+		// StageBinary (which advances state.json.current to the new version)
+		// then exited cleanly so the launcher re-execs the staged binary.
+		// This must NOT be treated as a startup failure — skip the rollback
+		// guard and loop to exec the new current version.
+		if after, readErr := s.Layout.ReadCurrent(); readErr == nil && after != run.current {
+			return outcomeAdvance
+		}
+		if run.ranFor >= s.StartupWindow {
+			return outcomeHealthy
+		}
+	}
+	return s.classifyFailure(run)
+}
+
+// classifyFailure picks restart-in-place for a known-good version and rollback
+// otherwise.
+func (s *Supervisor) classifyFailure(run childRun) childOutcome {
+	if run.isKnownGood {
+		return outcomeRestartInPlace
+	}
+	return outcomeRollback
+}
+
+// classifyCancelledRun classifies a run that finished with ctx cancelled.
+// Distinguish two sub-cases:
+//
+//	(a) The child was still running when ctx fired and got killed by
+//	    exec.CommandContext. exitErr is non-nil but reflects the cancellation,
+//	    not a child fault. Return a clean shutdown.
+//	(b) The child had ALREADY crashed by the time ctx fired — e.g. SIGTERM and
+//	    a crash arriving in the same scheduler turn during an in-progress
+//	    upgrade. exitErr is non-nil AND ranFor < StartupWindow. Discarding this
+//	    as "just a cancellation" would silently mask the upgrade failure. A
+//	    child that ran past StartupWindow definitionally wasn't
+//	    crashing-during-startup, so treat its exit as graceful regardless of
+//	    code. A child that exited inside the window with a non-zero code gets
+//	    the failure surfaced even on cancel.
+func (s *Supervisor) classifyCancelledRun(run childRun) childOutcome {
+	// The guard at the top of the loop is a check-then-act, so a cancel can
+	// still land in the window between it and Start. When it does, no child
+	// process was created, so there is no child outcome to classify — this is
+	// purely a shutdown.
+	if errors.Is(run.exitErr, errChildNeverStarted) {
+		return outcomeShutdown
+	}
+	failedStartupOnCancel := run.ranFor < s.StartupWindow && run.exitErr != nil
+	if !failedStartupOnCancel {
+		return outcomeShutdown
+	}
+	// A known-good version that fast-exits coinciding with a context cancel
+	// is an environmental fault (e.g. WMI race on boot), not an upgrade
+	// failure. Return clean shutdown rather than rolling back or looping on a
+	// cancelled context. Log the suppression decision first: without it, an
+	// operator inspecting why the launcher exited on a proven binary sees
+	// nothing, and the rollback-suppression guarantee for known-good versions
+	// (Issue #2033) is indistinguishable from a silent crash.
+	if run.isKnownGood {
+		_, _ = fmt.Fprintf(s.Stderr, "launcher: version %q is known-good — fast exit (ran %s) coincided with shutdown; rollback suppressed, exiting cleanly\n", run.current, run.ranFor)
+		return outcomeShutdown
+	}
+	// This looks like a real upgrade failure that happened to coincide with a
+	// cancel: fall through to the rollback logic. The operator (or the next
+	// startup) will observe the rolled-back state.
+	return outcomeRollback
+}
+
+// handleHealthy runs after a child stayed up past the startup window then
+// exited cleanly. Reset the failure counter, persist the known-good marker,
+// and prune old version directories. Write the committed flag file last so its
+// presence is a reliable completion signal for tests and the steward process.
+func (l *superviseLoop) handleHealthy(run childRun) {
+	s := l.s
+	if ps, loadErr := s.Layout.loadState(); loadErr == nil {
+		ps.ConsecutiveFailures = 0
+		// Only update the known-good marker if the post-exec hash
+		// succeeded; if it failed (binary deleted/unreadable after
+		// run) leave any existing marker untouched.
+		if run.hashErr == nil {
+			ps.KnownGood = run.current
+			ps.KnownGoodHash = run.exeHash
+		}
+		if saveErr := s.Layout.saveState(ps); saveErr != nil {
+			_, _ = fmt.Fprintf(s.Stderr, "launcher: save state after commit: %v\n", saveErr)
+		}
+	} else {
+		_, _ = fmt.Fprintf(s.Stderr, "launcher: load state for counter reset: %v\n", loadErr)
+	}
+	if _, pruneErr := pruneVersions(s.Layout.VersionsDir(), run.current, s.RetentionPolicy, s.clock.Now()); pruneErr != nil {
+		_, _ = fmt.Fprintf(s.Stderr, "launcher: retention prune: %v\n", pruneErr)
+	}
+	if flagErr := s.writeFlagFile("upgrade-committed", run.current); flagErr != nil {
+		_, _ = fmt.Fprintf(s.Stderr, "launcher: write upgrade-committed flag: %v\n", flagErr)
+	}
+	l.backoff = initialRestartBackoff
+}
+
+// recordFailure increments the consecutive-failure counter on any non-clean
+// exit regardless of whether a rollback will fire, and restarts the backoff if
+// the child was healthy for a while before failing.
+func (l *superviseLoop) recordFailure(run childRun) {
+	s := l.s
+	if ps, loadErr := s.Layout.loadState(); loadErr == nil {
+		ps.ConsecutiveFailures++
+		if saveErr := s.Layout.saveState(ps); saveErr != nil {
+			_, _ = fmt.Fprintf(s.Stderr, "launcher: save state on failure: %v\n", saveErr)
+		}
+	} else {
+		_, _ = fmt.Fprintf(s.Stderr, "launcher: load state for failure counter: %v\n", loadErr)
+	}
+
+	// A child that ran past the startup window was healthy for a while, so
+	// whatever failed it is new: start the backoff over.
+	if run.ranFor >= s.StartupWindow {
+		l.backoff = initialRestartBackoff
+	}
+}
+
+// handleRestartInPlace restarts a known-good binary that exited non-zero (or
+// fast). It is suffering a transient environmental fault (e.g. a boot-time
+// dependency race, a late crash), not an upgrade regression, so it is restarted
+// with backoff — never rolled back (Issue #2033).
+func (l *superviseLoop) handleRestartInPlace(run childRun) {
+	l.recordFailure(run)
+	_, _ = fmt.Fprintf(l.s.Stderr, "launcher: version %q is known-good — restarting in place after failure (ran %s); rollback suppressed\n", run.current, run.ranFor)
+	l.retryAfter()
+}
+
+// handleRollback rolls a failed probation version back to the previous one when
+// a previous version exists and rollback budget remains; otherwise it reports
+// the fault and keeps retrying the current version.
+func (l *superviseLoop) handleRollback(run childRun) {
+	s := l.s
+	l.recordFailure(run)
+
+	previous, perr := s.Layout.ReadPrevious()
+	if perr != nil {
+		l.fault(fmt.Errorf("launcher: read previous version after child failure: %w", perr))
+		return
+	}
+	if previous == "" || l.rollbacksRemaining == 0 {
+		if run.exitErr != nil {
+			l.fault(fmt.Errorf("launcher: child failed (ran for %s) and no rollback available: %w", run.ranFor, run.exitErr))
+		} else {
+			l.fault(fmt.Errorf("launcher: child exited inside startup window (%s) and no rollback available", run.ranFor))
+		}
+		return
+	}
+
+	// Rollback is going to fire: write the flag file with the version we
+	// are rolling back TO (previous), which will be the version the steward
+	// process is running when it reconnects and reads the flag.
+	if flagErr := s.writeFlagFile("upgrade-rolled-back", previous); flagErr != nil {
+		_, _ = fmt.Fprintf(s.Stderr, "launcher: write upgrade-rolled-back flag: %v\n", flagErr)
+	}
+
+	newCurrent, rbErr := s.Layout.Rollback()
+	if rbErr != nil {
+		l.fault(fmt.Errorf("launcher: rollback after child failure: %w", rbErr))
+		return
+	}
+	l.rollbacksRemaining--
+	l.backoff = initialRestartBackoff
+	_, _ = fmt.Fprintf(s.Stderr, "launcher: rolled back to version %q after child failure (ran for %s)\n", newCurrent, run.ranFor)
 }
 
 // execOnce runs the child to completion, returning any non-nil error from
