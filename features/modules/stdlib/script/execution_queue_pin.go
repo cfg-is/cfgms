@@ -21,6 +21,9 @@ const (
 	MetaGuardRunID      = "guard_run_id"
 	MetaGuardGrantID    = "guard_grant_id"
 
+	// maxQueueMetadataEntries bounds caller Metadata before it is copied.
+	maxQueueMetadataEntries = 1024
+
 	reservedPinPrefix   = "pin_"
 	reservedGuardPrefix = "guard_"
 )
@@ -84,7 +87,10 @@ func (e *QueuedExecution) metadataWithReserved() (map[string]interface{}, error)
 	if e.pin == nil && e.guard == nil {
 		return e.Metadata, nil
 	}
-	m := make(map[string]interface{}, len(e.Metadata)+5)
+	if len(e.Metadata) > maxQueueMetadataEntries {
+		return nil, fmt.Errorf("%w: metadata exceeds %d entries", ErrReservedMetadataKey, maxQueueMetadataEntries)
+	}
+	m := make(map[string]interface{}, len(e.Metadata))
 	for k, v := range e.Metadata {
 		m[k] = v
 	}
