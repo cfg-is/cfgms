@@ -157,55 +157,14 @@ func AdoptControllerDataTree(cfg *config.Config) error {
 // and writes the initialization marker. If any step fails, all changes
 // are rolled back.
 func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
-	if cfg == nil {
-		return nil, fmt.Errorf("configuration is required for initialization")
-	}
-
-	// Fail closed before any CA material or markers are written: a SaaS
-	// cluster deployment must not reach production without a realm assigned
-	// (ADR-032 Decision 3). Self-hosted (ha.mode unset or not "cluster") is
-	// never gated.
-	if err := tenant.EnforceRealmGuard(cfg); err != nil {
+	caPath, bundlePath, err := validateInitPreconditions(cfg)
+	if err != nil {
 		return nil, err
-	}
-
-	if cfg.Certificate == nil || !cfg.Certificate.EnableCertManagement {
-		return nil, fmt.Errorf("certificate management must be enabled for initialization (certificate.enable_cert_management: true)")
-	}
-
-	// Check external_url before any CA material or markers are written so that
-	// a misconfigured operator gets a clear error without a half-initialized controller.
-	if err := validateBundleExternalURL(cfg); err != nil {
-		return nil, err
-	}
-
-	caPath := cfg.Certificate.CAPath
-	if caPath == "" {
-		return nil, fmt.Errorf("certificate CA path is required for initialization (certificate.ca_path)")
-	}
-
-	bundlePath := cfg.AdminBundlePath
-	if bundlePath == "" {
-		bundlePath = defaultAdminBundlePath()
 	}
 
 	// Idempotent guard: refuse if already initialized
-	if IsInitialized(caPath) {
-		existing, err := ReadInitMarker(caPath)
-		if err != nil {
-			return nil, fmt.Errorf("controller is already initialized but marker is unreadable: %w", err)
-		}
-
-		// Check if bundle was issued but bundle file is now missing (external deletion).
-		if isBundleMarkerPresent(bundlePath) && !fileExists(bundlePath) {
-			return nil, fmt.Errorf("controller is initialized (CA fingerprint: %s) but admin bundle is missing at %s.\n"+
-				"To regenerate the bundle, run: cfgms-controller bootstrap-admin --regenerate",
-				existing.CAFingerprint, bundlePath)
-		}
-
-		return nil, fmt.Errorf("controller is already initialized (initialized at %s with CA fingerprint %s). "+
-			"To re-initialize, remove the CA directory at %s and run --init again",
-			existing.InitializedAt.Format(time.RFC3339), existing.CAFingerprint, caPath)
+	if err := refuseIfInitialized(caPath, bundlePath); err != nil {
+		return nil, err
 	}
 
 	rollback := NewRollbackTracker()
@@ -227,7 +186,124 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 
 	// Step 2: Create CA and certificates
 	logger.Info("Creating Certificate Authority...", "ca_path", caPath)
+	certManager, err := createInitCA(cfg, caPath, storageManager, rollback, logger)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("Certificate Authority created")
 
+	// Step 2b: Generate purpose-specific certificates (mandatory separated architecture)
+	if err := createSeparatedCertificates(cfg, certManager, rollback, logger); err != nil {
+		return nil, err
+	}
+
+	// Note: Server certificates are NOT generated during initialization.
+	// They are created by the controller startup (gRPC-over-QUIC transport)
+	// which knows the specific cert names and file paths they require.
+
+	// Step 3: Initialize RBAC
+	initRBAC(storageManager, logger)
+
+	// Step 4: Get CA fingerprint for marker
+	caInfo, err := certManager.GetCAInfo()
+	if err != nil {
+		executeRollback(rollback, logger, "Rollback failed after CA info error")
+		return nil, fmt.Errorf("failed to get CA info: %w", err)
+	}
+
+	// Step 5: Write init marker (LAST — all-or-nothing)
+	marker, err := writeInitMarkerStep(cfg, caPath, caInfo.Fingerprint, rollback, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 6: Issue admin credential bundle
+	if err := ensureAdminBundle(bundlePath, cfg, certManager, logger); err != nil {
+		return nil, err
+	}
+
+	logger.Info("Initialization complete",
+		"ca_fingerprint", caInfo.Fingerprint,
+		"storage_provider", marker.StorageProvider,
+		"controller_version", version.Short())
+
+	return &Result{
+		CAFingerprint:   caInfo.Fingerprint,
+		StorageProvider: marker.StorageProvider,
+		InitializedAt:   marker.InitializedAt,
+	}, nil
+}
+
+// validateInitPreconditions fails closed before any CA material or markers are
+// written, and returns the CA path and admin bundle path to use.
+func validateInitPreconditions(cfg *config.Config) (caPath, bundlePath string, err error) {
+	if cfg == nil {
+		return "", "", fmt.Errorf("configuration is required for initialization")
+	}
+
+	// A SaaS cluster deployment must not reach production without a realm
+	// assigned (ADR-032 Decision 3). Self-hosted (ha.mode unset or not
+	// "cluster") is never gated.
+	if err := tenant.EnforceRealmGuard(cfg); err != nil {
+		return "", "", err
+	}
+
+	if cfg.Certificate == nil || !cfg.Certificate.EnableCertManagement {
+		return "", "", fmt.Errorf("certificate management must be enabled for initialization (certificate.enable_cert_management: true)")
+	}
+
+	// Check external_url before any CA material or markers are written so that
+	// a misconfigured operator gets a clear error without a half-initialized controller.
+	if err := validateBundleExternalURL(cfg); err != nil {
+		return "", "", err
+	}
+
+	caPath = cfg.Certificate.CAPath
+	if caPath == "" {
+		return "", "", fmt.Errorf("certificate CA path is required for initialization (certificate.ca_path)")
+	}
+
+	bundlePath = cfg.AdminBundlePath
+	if bundlePath == "" {
+		bundlePath = defaultAdminBundlePath()
+	}
+	return caPath, bundlePath, nil
+}
+
+// refuseIfInitialized returns an error when the CA directory already holds an
+// init marker, distinguishing the case where the admin bundle was deleted.
+func refuseIfInitialized(caPath, bundlePath string) error {
+	if !IsInitialized(caPath) {
+		return nil
+	}
+	existing, err := ReadInitMarker(caPath)
+	if err != nil {
+		return fmt.Errorf("controller is already initialized but marker is unreadable: %w", err)
+	}
+
+	// Check if bundle was issued but bundle file is now missing (external deletion).
+	if isBundleMarkerPresent(bundlePath) && !fileExists(bundlePath) {
+		return fmt.Errorf("controller is initialized (CA fingerprint: %s) but admin bundle is missing at %s.\n"+
+			"To regenerate the bundle, run: cfgms-controller bootstrap-admin --regenerate",
+			existing.CAFingerprint, bundlePath)
+	}
+
+	return fmt.Errorf("controller is already initialized (initialized at %s with CA fingerprint %s). "+
+		"To re-initialize, remove the CA directory at %s and run --init again",
+		existing.InitializedAt.Format(time.RFC3339), existing.CAFingerprint, caPath)
+}
+
+// executeRollback runs the rollback tracker and logs msg if the rollback fails.
+func executeRollback(rollback *RollbackTracker, logger logging.Logger, msg string) {
+	if rbErr := rollback.Execute(); rbErr != nil {
+		logger.Error(msg, "rollback_error", rbErr.Error())
+	}
+}
+
+// createInitCA locks the data tree, creates the CA directory and builds the CA
+// (cluster CA in cluster mode, a local CA otherwise). On failure after the CA
+// directory exists, the rollback tracker removes it.
+func createInitCA(cfg *config.Config, caPath string, storageManager *interfaces.StorageManager, rollback *RollbackTracker, logger logging.Logger) (*cert.Manager, error) {
 	// Lock the data tree to SYSTEM and Administrators before any key or bundle
 	// is written. Fails closed on an untrusted owner. No-op outside Windows.
 	if err := AdoptControllerDataTree(cfg); err != nil {
@@ -266,17 +342,14 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 	wireClusterCertStores(managerCfg, cfg, storageManager)
 
 	var certManager *cert.Manager
+	var err error
 	if err := RequireClusterCAConfig(cfg); err != nil {
-		if rbErr := rollback.Execute(); rbErr != nil {
-			logger.Error("Rollback failed after cluster CA config validation error", "rollback_error", rbErr.Error())
-		}
+		executeRollback(rollback, logger, "Rollback failed after cluster CA config validation error")
 		return nil, err
 	}
 	if UsesClusterCA(cfg) {
 		if err := applyClusterCAExternalPaths(caConfig, cfg.Certificate.ClusterCA); err != nil {
-			if rbErr := rollback.Execute(); rbErr != nil {
-				logger.Error("Rollback failed after cluster CA config validation error", "rollback_error", rbErr.Error())
-			}
+			executeRollback(rollback, logger, "Rollback failed after cluster CA config validation error")
 			return nil, err
 		}
 		certManager, err = InitClusterCA(context.Background(), cfg, managerCfg, logger)
@@ -284,27 +357,17 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		certManager, err = cert.NewManager(managerCfg)
 	}
 	if err != nil {
-		if rbErr := rollback.Execute(); rbErr != nil {
-			logger.Error("Rollback failed after CA creation error", "rollback_error", rbErr.Error())
-		}
+		executeRollback(rollback, logger, "Rollback failed after CA creation error")
 		return nil, fmt.Errorf("failed to create Certificate Authority: %w", err)
 	}
-	logger.Info("Certificate Authority created")
+	return certManager, nil
+}
 
-	// Step 2b: Generate purpose-specific certificates (mandatory separated architecture)
-	if err := cfg.Certificate.ValidateCertificateArchitecture(); err != nil {
-		if rbErr := rollback.Execute(); rbErr != nil {
-			logger.Error("Rollback failed after architecture validation error", "rollback_error", rbErr.Error())
-		}
-		return nil, err
-	}
-	logger.Info("Creating separated certificates (internal mTLS + config signing)...")
-	// TransportCertSANs merges defaults, legacy cfg.Certificate.Server SANs,
-	// cfg.Certificate.Internal SANs, and CFGMS_EXTERNAL_HOSTNAME so a steward
-	// dialing the controller by its external hostname can verify the cert.
-	// EnsureSeparatedCertificates is idempotent — if --init mints the cert
-	// here, controller startup will not regenerate it, so the SAN set written
-	// during --init is what stewards see for the cert's full lifetime.
+// internalCertConfig builds the internal mTLS certificate request.
+// TransportCertSANs merges defaults, legacy cfg.Certificate.Server SANs,
+// cfg.Certificate.Internal SANs, and CFGMS_EXTERNAL_HOSTNAME so a steward
+// dialing the controller by its external hostname can verify the cert.
+func internalCertConfig(cfg *config.Config) *cert.ServerCertConfig {
 	dnsNames, ipAddresses := TransportCertSANs(cfg)
 	internalCfg := &cert.ServerCertConfig{
 		CommonName:   "cfgms-internal",
@@ -318,7 +381,11 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 	if cfg.Certificate.InternalCertValidityDays > 0 {
 		internalCfg.ValidityDays = cfg.Certificate.InternalCertValidityDays
 	}
+	return internalCfg
+}
 
+// signingCertConfig builds the config-signing certificate request.
+func signingCertConfig(cfg *config.Config) *cert.SigningCertConfig {
 	signingCfg := &cert.SigningCertConfig{
 		CommonName:   "cfgms-config-signer",
 		ValidityDays: 1095,
@@ -335,6 +402,22 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 	if cfg.Certificate.SigningCertValidityDays > 0 {
 		signingCfg.ValidityDays = cfg.Certificate.SigningCertValidityDays
 	}
+	return signingCfg
+}
+
+// createSeparatedCertificates validates the certificate architecture and
+// mints the internal mTLS (and, in cluster mode, config-signing) certificates.
+// EnsureSeparatedCertificates is idempotent — if --init mints the cert here,
+// controller startup will not regenerate it, so the SAN set written during
+// --init is what stewards see for the cert's full lifetime.
+func createSeparatedCertificates(cfg *config.Config, certManager *cert.Manager, rollback *RollbackTracker, logger logging.Logger) error {
+	if err := cfg.Certificate.ValidateCertificateArchitecture(); err != nil {
+		executeRollback(rollback, logger, "Rollback failed after architecture validation error")
+		return err
+	}
+	logger.Info("Creating separated certificates (internal mTLS + config signing)...")
+	internalCfg := internalCertConfig(cfg)
+	signingCfg := signingCertConfig(cfg)
 
 	// A single node keeps its signing identity in the configured secret store,
 	// which Run cannot open; the first server start creates it there.
@@ -345,18 +428,15 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		ensureErr = certManager.EnsureInternalServerCertificate(internalCfg)
 	}
 	if err := ensureErr; err != nil {
-		if rbErr := rollback.Execute(); rbErr != nil {
-			logger.Error("Rollback failed after separated cert error", "rollback_error", rbErr.Error())
-		}
-		return nil, fmt.Errorf("failed to create separated certificates: %w", err)
+		executeRollback(rollback, logger, "Rollback failed after separated cert error")
+		return fmt.Errorf("failed to create separated certificates: %w", err)
 	}
 	logger.Info("Separated certificates created")
+	return nil
+}
 
-	// Note: Server certificates are NOT generated during initialization.
-	// They are created by the controller startup (gRPC-over-QUIC transport)
-	// which knows the specific cert names and file paths they require.
-
-	// Step 3: Initialize RBAC
+// initRBAC seeds the RBAC defaults. Failure is logged and non-fatal.
+func initRBAC(storageManager *interfaces.StorageManager, logger logging.Logger) {
 	logger.Info("Initializing RBAC...")
 	auditStore := storageManager.GetAuditStore()
 	rbacStore := storageManager.GetRBACStore()
@@ -368,17 +448,11 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		logger.Warn("RBAC initialization warning (non-fatal)", "error", err.Error())
 	}
 	logger.Info("RBAC initialized")
+}
 
-	// Step 4: Get CA fingerprint for marker
-	caInfo, err := certManager.GetCAInfo()
-	if err != nil {
-		if rbErr := rollback.Execute(); rbErr != nil {
-			logger.Error("Rollback failed after CA info error", "rollback_error", rbErr.Error())
-		}
-		return nil, fmt.Errorf("failed to get CA info: %w", err)
-	}
-
-	// Step 5: Write init marker (LAST — all-or-nothing)
+// writeInitMarkerStep writes the init marker and returns it. On failure the
+// rollback tracker undoes the earlier steps.
+func writeInitMarkerStep(cfg *config.Config, caPath, fingerprint string, rollback *RollbackTracker, logger logging.Logger) (*InitMarker, error) {
 	logger.Info("Writing initialization marker...")
 	// Reflect the actual backing provider: cluster mode uses "database" regardless of
 	// what cfg.Storage.Provider says, so second-node bootstrap can identify the backend.
@@ -391,36 +465,24 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 		InitializedAt:     time.Now().UTC(),
 		ControllerVersion: version.Short(),
 		StorageProvider:   storageProviderName,
-		CAFingerprint:     caInfo.Fingerprint,
+		CAFingerprint:     fingerprint,
 	}
 
 	if err := WriteInitMarker(caPath, marker); err != nil {
-		if rbErr := rollback.Execute(); rbErr != nil {
-			logger.Error("Rollback failed after marker write error", "rollback_error", rbErr.Error())
-		}
+		executeRollback(rollback, logger, "Rollback failed after marker write error")
 		return nil, fmt.Errorf("failed to write initialization marker: %w", err)
 	}
+	return marker, nil
+}
 
-	// Step 6: Issue admin credential bundle
+// ensureAdminBundle issues the admin credential bundle unless one already exists.
+func ensureAdminBundle(bundlePath string, cfg *config.Config, certManager *cert.Manager, logger logging.Logger) error {
 	logger.Info("Checking admin bundle...", "path", bundlePath)
 	if fileExists(bundlePath) {
 		logger.Info("Admin bundle already exists, skipping issuance", "path", bundlePath)
-	} else {
-		if err := issueAdminBundle(bundlePath, cfg, certManager, logger); err != nil {
-			return nil, err
-		}
+		return nil
 	}
-
-	logger.Info("Initialization complete",
-		"ca_fingerprint", caInfo.Fingerprint,
-		"storage_provider", storageProviderName,
-		"controller_version", version.Short())
-
-	return &Result{
-		CAFingerprint:   caInfo.Fingerprint,
-		StorageProvider: storageProviderName,
-		InitializedAt:   marker.InitializedAt,
-	}, nil
+	return issueAdminBundle(bundlePath, cfg, certManager, logger)
 }
 
 // openStorageManager opens the configured business storage backend — shared Postgres in
