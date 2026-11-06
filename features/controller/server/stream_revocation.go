@@ -53,6 +53,14 @@ type revocationStream struct {
 
 func (s *revocationStream) Context() context.Context { return s.ctx }
 
+// revokedPeerObserver is told about a stream refused because its client
+// certificate serial is revoked. The repair guard uses it to see a repaired
+// steward's retired credentials used again (Issue #5727). It cannot change the
+// refusal.
+type revokedPeerObserver interface {
+	ObserveRevokedPeer(ctx context.Context, stewardID, serial string)
+}
+
 // newStreamRevocationInterceptor returns a stream interceptor that refuses a
 // peer whose certificate serial is revoked (PermissionDenied), whose status
 // cannot be determined (Unavailable, fail closed) or that presents no
@@ -60,7 +68,10 @@ func (s *revocationStream) Context() context.Context { return s.ctx }
 // the stream is open, cancelling the stream context once it is revoked. A
 // lookup error during a re-check keeps the stream open until the next tick.
 // ControlChannel is skipped: the control-plane provider already checks it.
-func newStreamRevocationInterceptor(checker streamRevocationChecker, logger logging.Logger, interval time.Duration) grpc.StreamServerInterceptor {
+//
+// observer (nil disables) is told about each stream refused as revoked at
+// admission; a stream closed by a later re-check is not an admission attempt.
+func newStreamRevocationInterceptor(checker streamRevocationChecker, logger logging.Logger, interval time.Duration, observer revokedPeerObserver) grpc.StreamServerInterceptor {
 	if interval <= 0 {
 		interval = defaultStreamRevocationRecheckInterval
 	}
@@ -85,6 +96,9 @@ func newStreamRevocationInterceptor(checker streamRevocationChecker, logger logg
 			logger.Warn("steward stream rejected: client certificate revoked",
 				"steward_id", logging.SanitizeLogValue(stewardID),
 				"serial", logging.SanitizeLogValue(serial))
+			if observer != nil {
+				observer.ObserveRevokedPeer(ss.Context(), stewardID, serial)
+			}
 			return status.Error(codes.PermissionDenied, "client certificate revoked")
 		}
 
@@ -93,30 +107,9 @@ func newStreamRevocationInterceptor(checker streamRevocationChecker, logger logg
 		var revokedWhileOpen atomic.Bool
 		go func() {
 			defer close(done)
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-				}
-				isRevoked, rerr := checker.IsRevoked(serial)
-				if rerr != nil {
-					logger.Warn("certificate revocation re-check error, keeping stream open until next check",
-						"steward_id", logging.SanitizeLogValue(stewardID),
-						"serial", logging.SanitizeLogValue(serial),
-						"error", logging.SanitizeLogValue(rerr.Error()))
-					continue
-				}
-				if isRevoked {
-					logger.Warn("steward stream closed: client certificate revoked",
-						"steward_id", logging.SanitizeLogValue(stewardID),
-						"serial", logging.SanitizeLogValue(serial))
-					revokedWhileOpen.Store(true)
-					cancel()
-					return
-				}
+			if watchSerialRevocation(ctx, checker, logger, stewardID, serial, interval) {
+				revokedWhileOpen.Store(true)
+				cancel()
 			}
 		}()
 		defer func() {
@@ -129,6 +122,35 @@ func newStreamRevocationInterceptor(checker streamRevocationChecker, logger logg
 			return status.Error(codes.PermissionDenied, "client certificate revoked")
 		}
 		return herr
+	}
+}
+
+// watchSerialRevocation re-checks serial every interval until ctx ends. It
+// returns true once the serial is revoked. A lookup error keeps the stream open
+// until the next tick.
+func watchSerialRevocation(ctx context.Context, checker streamRevocationChecker, logger logging.Logger, stewardID, serial string, interval time.Duration) bool {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+		isRevoked, rerr := checker.IsRevoked(serial)
+		if rerr != nil {
+			logger.Warn("certificate revocation re-check error, keeping stream open until next check",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"serial", logging.SanitizeLogValue(serial),
+				"error", logging.SanitizeLogValue(rerr.Error()))
+			continue
+		}
+		if isRevoked {
+			logger.Warn("steward stream closed: client certificate revoked",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"serial", logging.SanitizeLogValue(serial))
+			return true
+		}
 	}
 }
 

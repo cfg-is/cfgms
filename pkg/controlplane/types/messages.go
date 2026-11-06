@@ -312,6 +312,11 @@ type Heartbeat struct {
 	// StewardID identifies which steward sent this heartbeat
 	StewardID string `json:"steward_id"`
 
+	// PeerSerial is the serial of the client certificate that authenticated the
+	// stream the heartbeat arrived on. The controller stamps it on receipt; it is
+	// never read from the wire (json:"-"), so a steward cannot claim a serial.
+	PeerSerial string `json:"-"`
+
 	// TenantID identifies the tenant
 	TenantID string `json:"tenant_id,omitempty"`
 

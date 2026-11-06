@@ -159,7 +159,40 @@ func (p *Provider) checkPeerRevocation(ctx context.Context, stewardID string) (s
 		p.logger.Warn("steward rejected: client certificate revoked",
 			"steward_id", logging.SanitizeLogValue(stewardID),
 			"serial", logging.SanitizeLogValue(serial))
+		if p.peerCredentialObserver != nil {
+			p.peerCredentialObserver.ObserveRevokedPeer(ctx, stewardID, serial)
+		}
 		return "", status.Error(codes.PermissionDenied, "client certificate revoked")
 	}
 	return serial, nil
+}
+
+// checkApproval is the approval gate (Issue #1719), checked before admitting a
+// stream. Store and service failures deny admission; an unavailable authorization
+// dependency must not turn into fleet-wide implicit approval.
+func (p *Provider) checkApproval(ctx context.Context, stewardID string) error {
+	if p.approvalChecker == nil {
+		return nil
+	}
+	admitted, err := p.approvalChecker.IsApproved(ctx, stewardID)
+	if err != nil {
+		p.logger.Error("steward approval check error, rejecting (fail-closed)",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return status.Error(codes.Unavailable, "steward approval service unavailable")
+	}
+	if !admitted {
+		p.logger.Warn("steward ControlChannel rejected by approval checker",
+			"steward_id", logging.SanitizeLogValue(stewardID))
+		return status.Error(codes.PermissionDenied, "steward reconnect not approved")
+	}
+	return nil
+}
+
+// observeAdmittedPeer tells the peer credential observer which certificate serial
+// an admitted stream presented (Issue #5727).
+func (p *Provider) observeAdmittedPeer(ctx context.Context, stewardID, serial string) {
+	if p.peerCredentialObserver != nil && serial != "" {
+		p.peerCredentialObserver.ObserveAdmittedPeer(ctx, stewardID, serial)
+	}
 }

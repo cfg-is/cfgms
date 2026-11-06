@@ -182,7 +182,7 @@ func (s *Server) handleRestoreTamperedSteward(w http.ResponseWriter, r *http.Req
 		"reason":          reason,
 	})
 
-	s.notifyTamperReleased(ctx, record.ID)
+	s.notifyTamperState(ctx, record.ID)
 	s.logger.Info("Tampered steward restored", "steward_id", logging.SanitizeLogValue(record.ID))
 	s.writeSuccessResponse(w, tamperVerbResponse{
 		ID:     record.ID,
@@ -233,10 +233,11 @@ func (s *Server) refuseRestoreWhileFaulted(w http.ResponseWriter, r *http.Reques
 	return true
 }
 
-// notifyTamperReleased tells a connected steward it is released (locked=false).
-// One that is offline is told on its next connect, so a failed send is not a
-// failed restore.
-func (s *Server) notifyTamperReleased(ctx context.Context, stewardID string) {
+// notifyTamperState sends a connected steward its current tamper state, read from
+// the durable status: released (locked=false) after a restore or a return to
+// trusted, locked after a transition to tampered. One that is offline is told on
+// its next connect, so a failed send is not a failed transition.
+func (s *Server) notifyTamperState(ctx context.Context, stewardID string) {
 	s.mu.RLock()
 	notifier := s.tamperNotifier
 	s.mu.RUnlock()

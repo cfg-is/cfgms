@@ -206,6 +206,7 @@ type Server struct {
 	certProvisioningService         *service.CertificateProvisioningService
 	certManager                     *cert.Manager
 	streamRevocationRecheckInterval time.Duration                           // zero uses the 30s default
+	repairGuard                     *repairGuardRelay                       // Issue #5727: told about revoked-serial stream attempts
 	signingRetirementSvc            *service.SigningRetirementService       // Issue #4795: retires superseded signing certs at overlap end
 	signingMigrationSvc             *service.SigningMigrationService        // Issue #4796: moves node-local signing keys to the shared identity
 	stewardMigrationSvc             *service.StewardSigningMigrationService // Issue #4797: moves connected stewards to the shared signing certificate
@@ -499,6 +500,98 @@ func newHeartbeatReceivedHook(dispatcher *dispatcher.Dispatcher, controllerServi
 	}
 }
 
+// repairGuardRelay late-binds the API server as the target of the guards of a
+// finished repair (Issue #5727): the revoked and admitted peer certificates seen
+// at admission, an identity conflict, and the heartbeat that may return a
+// repaired steward to trusted. Until Set is called it does nothing. It also keeps
+// two small node-local tables that only spare the API server work: the
+// (steward, serial) pairs already looked at, and the last revoked-serial attempt
+// per steward. The decisions themselves are read from the audit log, so they are
+// the same on every node.
+type repairGuardRelay struct {
+	target atomic.Pointer[api.Server]
+	logger logging.Logger
+
+	mu          sync.Mutex
+	admitted    map[string]struct{}
+	lastRevoked map[string]time.Time
+}
+
+const (
+	// repairGuardMaxTracked bounds each node-local table; a full table is cleared.
+	repairGuardMaxTracked = 50000
+
+	// repairGuardRevokedInterval is the minimum gap between two revoked-serial
+	// checks for one steward on this node, so a looping holder of a retired
+	// certificate cannot make every attempt read the audit log.
+	repairGuardRevokedInterval = 10 * time.Second
+)
+
+// Set binds the API server that owns the guards.
+func (g *repairGuardRelay) Set(s *api.Server) { g.target.Store(s) }
+
+// ObserveRevokedPeer implements grpcCP.PeerCredentialObserver and the stream
+// interceptor's observer.
+func (g *repairGuardRelay) ObserveRevokedPeer(ctx context.Context, stewardID, serial string) {
+	s := g.target.Load()
+	if s == nil || !g.allowRevoked(stewardID, time.Now()) {
+		return
+	}
+	s.ObserveRevokedPeer(ctx, stewardID, serial)
+}
+
+func (g *repairGuardRelay) allowRevoked(stewardID string, now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if at, ok := g.lastRevoked[stewardID]; ok && now.Sub(at) < repairGuardRevokedInterval {
+		return false
+	}
+	if g.lastRevoked == nil || len(g.lastRevoked) >= repairGuardMaxTracked {
+		g.lastRevoked = make(map[string]time.Time)
+	}
+	g.lastRevoked[stewardID] = now
+	return true
+}
+
+// ObserveAdmittedPeer implements grpcCP.PeerCredentialObserver. It looks at a
+// (steward, serial) pair once per node: only a repair issues a new serial, and
+// the audit event it may write is durable and visible to every node.
+func (g *repairGuardRelay) ObserveAdmittedPeer(ctx context.Context, stewardID, serial string) {
+	s := g.target.Load()
+	if s == nil || !g.firstAdmission(stewardID, serial) {
+		return
+	}
+	s.ObserveAdmittedPeer(ctx, stewardID, serial)
+}
+
+func (g *repairGuardRelay) firstAdmission(stewardID, serial string) bool {
+	key := stewardID + "|" + serial
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.admitted[key]; ok {
+		return false
+	}
+	if g.admitted == nil || len(g.admitted) >= repairGuardMaxTracked {
+		g.admitted = make(map[string]struct{})
+	}
+	g.admitted[key] = struct{}{}
+	return true
+}
+
+// ObserveIdentityConflict forwards a steward identity seen on two endpoints.
+func (g *repairGuardRelay) ObserveIdentityConflict(ctx context.Context, stewardID string) {
+	if s := g.target.Load(); s != nil {
+		s.ObserveIdentityConflict(ctx, stewardID)
+	}
+}
+
+// HandleRepairHeartbeat is the heartbeat.RepairHeartbeatCallback.
+func (g *repairGuardRelay) HandleRepairHeartbeat(ctx context.Context, stewardID, peerSerial string, reasons []controlplaneTypes.HealthReason) {
+	if s := g.target.Load(); s != nil {
+		s.HandleRepairHeartbeat(ctx, stewardID, peerSerial, reasons)
+	}
+}
+
 // repairConnectHook sends a tampered steward its latest unresolved repair request
 // as its control stream registers (Issue #5726), next to the tamper state the
 // lockdown sends. Until Set is called it does nothing.
@@ -677,6 +770,27 @@ func makeHeartbeatStatusChangeCallback(store business.StewardStore, logger loggi
 			}
 		}
 	}
+}
+
+// newSigningTrustServices builds the signing-rotation service and the service
+// that moves this node's connected stewards onto the shared signing certificate
+// (Issue #4797). The migration service's OnConnect only queues the steward for a
+// bounded worker pool, so admission is never delayed. Its confirmation is
+// recorded in the cluster-visible acknowledgement store; without a provider for
+// it the node-local file store keeps this node correct (and a single-node
+// controller has nothing else to coordinate with).
+func newSigningTrustServices(certManager *cert.Manager, haManager *ha.Manager, storageManager *interfaces.StorageManager, caPath string, connected registry.Registry, logger logging.Logger) (*service.SigningRotationService, *service.StewardSigningMigrationService, error) {
+	rotation := service.NewSigningRotationService(certManager, logger)
+	if haManager != nil {
+		rotation.SetNodeID(haManager.GetLocalNode().ID)
+	}
+	trustAcks, err := openSigningTrustAckStore(storageManager, caPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	migration := service.NewStewardSigningMigrationService(certManager, trustAcks, logger)
+	migration.SetConnectedStewards(connected)
+	return rotation, migration, nil
 }
 
 // openSigningTrustAckStore returns the cluster-visible signing trust
@@ -1344,6 +1458,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Late-bound to the API server like tamperRelay; the signer and chain builder
 	// are the command signing pair.
 	repairConnect := &repairConnectHook{logger: logger}
+	// Issue #5727: late-bound guards of a finished repair (contested signal and
+	// return to trusted).
+	repairGuard := &repairGuardRelay{logger: logger}
 	var repairSigner signature.Signer
 	var repairChains *commands.SignerChainBuilder
 	// Issue #5664: the single lockdown predicate and tamper-state sender. Built
@@ -1422,22 +1539,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// does.
 		drainHook := service.NewPendingDeliveryDrainHook(storageManager.GetCommandStore(), stewardStore, nil, logger)
 		if certManager != nil {
-			signingRotationSvc = service.NewSigningRotationService(certManager, logger)
-			if haManager != nil {
-				signingRotationSvc.SetNodeID(haManager.GetLocalNode().ID)
+			var svcErr error
+			signingRotationSvc, stewardMigrationSvc, svcErr = newSigningTrustServices(certManager, haManager, storageManager, cfg.Certificate.CAPath, connRegistry, logger)
+			if svcErr != nil {
+				return nil, svcErr
 			}
-			// Issue #4797: moves this node's connected stewards onto the shared
-			// signing certificate. Its OnConnect only queues the steward for a
-			// bounded worker pool, so admission is never delayed. The confirmation
-			// is recorded in the cluster-visible acknowledgement store; without a
-			// provider for it the node-local file store keeps this node correct
-			// (and a single-node controller has nothing else to coordinate with).
-			trustAcks, ackErr := openSigningTrustAckStore(storageManager, cfg.Certificate.CAPath)
-			if ackErr != nil {
-				return nil, ackErr
-			}
-			stewardMigrationSvc = service.NewStewardSigningMigrationService(certManager, trustAcks, logger)
-			stewardMigrationSvc.SetConnectedStewards(connRegistry)
 			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, stewardMigrationSvc, registryConnectHook, completionReconciler, routingHook, drainHook, lockdown, repairConnect)
 			controlPlane = grpcCP.New(
 				grpcCP.ModeServer,
@@ -1453,7 +1559,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				grpcCP.WithEventAdmission(admissionQueues.eventsQueue()),
 				grpcCP.WithResponseAdmission(admissionQueues.responsesQueue()),
 				grpcCP.WithStewardTenantResolver(tenantResolver),
-				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger)),
+				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger).withRepairGuard(repairGuard)),
+				grpcCP.WithPeerCredentialObserver(repairGuard),
 				grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, auditManager, logger)),
 				// Issue #5665: the one default-deny gate on controller-pushed commands.
 				grpcCP.WithLockdown(lockdown, newLockdownAuditObserver(auditManager, stewardStore, logger)),
@@ -1474,7 +1581,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				grpcCP.WithEventAdmission(admissionQueues.eventsQueue()),
 				grpcCP.WithResponseAdmission(admissionQueues.responsesQueue()),
 				grpcCP.WithStewardTenantResolver(tenantResolver),
-				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger)),
+				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger).withRepairGuard(repairGuard)),
+				grpcCP.WithPeerCredentialObserver(repairGuard),
 				grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, auditManager, logger)),
 				// Issue #5665: the one default-deny gate on controller-pushed commands.
 				grpcCP.WithLockdown(lockdown, newLockdownAuditObserver(auditManager, stewardStore, logger)),
@@ -1738,7 +1846,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			CheckInterval:       5 * time.Second,
 			OnStatusChange:      makeHeartbeatStatusChangeCallback(hbStewardStore, logger),
 			OnHeartbeatReceived: onHeartbeatReceived,
-			TrustEvaluator:      heartbeatTrustEvaluator,
+			// Issue #5727: a repaired steward returns to trusted on a clean
+			// heartbeat on its new certificate after the quiet window.
+			OnRepairHeartbeat: repairGuard.HandleRepairHeartbeat,
+			TrustEvaluator:    heartbeatTrustEvaluator,
 			// Issue #5726: repair progress and failure reasons become audit events.
 			RepairAudit:   auditManager,
 			StewardTenant: stewardTenantResolver(hbStewardStore),
@@ -2052,6 +2163,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Issue #5652: heartbeats carrying a tamper code now reach the API server,
 	// which owns the transition, audit event and admin notification.
 	tamperRelay.Set(httpServer)
+	repairGuard.Set(httpServer)
 	// Issue #5726: repair requests are signed with the command signer and sent
 	// over the control plane; a reconnecting steward is sent its pending one.
 	bindRepairDelivery(httpServer, repairConnect, controlPlane, lockdown, repairSigner, repairChains)
@@ -2385,6 +2497,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		dataPlaneProvider:       dataPlane,
 		configHandler:           configHandler,
 		lockdown:                lockdownChecker(lockdown),
+		repairGuard:             repairGuard,
 		httpServer:              httpServer,
 		signerCertSerial:        signerCertSerial, // Story #378: For registration handler
 		healthCollector:         healthCollector,
@@ -3090,14 +3203,7 @@ func (s *Server) Start() error {
 			// IssueInitialCredential never reaches a payload log or a span attribute.
 			grpc.ChainUnaryInterceptor(controllerTransport.NewUnaryAccessLogInterceptor(s.logger)),
 		}
-		if s.certManager != nil {
-			grpcOpts = append(grpcOpts,
-				grpc.ChainUnaryInterceptor(newUnaryRevocationInterceptor(s.certManager, s.logger)),
-				grpc.ChainStreamInterceptor(
-					newStreamRevocationInterceptor(s.certManager, s.logger, s.streamRevocationRecheckInterval)))
-		} else {
-			s.logger.Warn("no certificate manager; steward unary and stream revocation checks are not installed, IssueInitialCredential is disabled")
-		}
+		grpcOpts = append(grpcOpts, s.revocationServerOptions()...)
 		s.grpcServer = grpc.NewServer(append(grpcOpts, dataplaneGRPC.ServerOptions()...)...)
 		ql, err := quictransport.ListenWithLimits(
 			s.cfg.Transport.ListenAddr,
@@ -5778,4 +5884,27 @@ func (s *Server) wirePullHandlers(composite *compositeTransportServer, tenantQue
 		composite.SetCredentialHandler(controllerTransport.NewCredentialHandler(
 			s.credentialService, s.configService, s.controllerService, s.logger).WithLockdown(s.lockdown))
 	}
+}
+
+// revocationServerOptions returns the unary and stream revocation interceptors of
+// the steward gRPC server, or none when there is no certificate manager.
+func (s *Server) revocationServerOptions() []grpc.ServerOption {
+	if s.certManager == nil {
+		s.logger.Warn("no certificate manager; steward unary and stream revocation checks are not installed, IssueInitialCredential is disabled")
+		return nil
+	}
+	return []grpc.ServerOption{
+		grpc.ChainUnaryInterceptor(newUnaryRevocationInterceptor(s.certManager, s.logger)),
+		grpc.ChainStreamInterceptor(
+			newStreamRevocationInterceptor(s.certManager, s.logger, s.streamRevocationRecheckInterval, s.revokedPeerObserver())),
+	}
+}
+
+// revokedPeerObserver returns the repair guard as the stream interceptor's
+// observer, or a true nil interface when none was built.
+func (s *Server) revokedPeerObserver() revokedPeerObserver {
+	if s.repairGuard == nil {
+		return nil
+	}
+	return s.repairGuard
 }

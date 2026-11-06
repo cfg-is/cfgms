@@ -296,6 +296,14 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 				business.AuditEventSecurityEvent, "refresh_rejected",
 				business.AuditResultFailure, business.AuditSeverityMedium,
 				map[string]interface{}{"decision": "rejected", "reason": "unknown_device"})
+			// A refresh for the device ID a repair retired, signed by the retired
+			// key, is a use of retired credentials (Issue #5727). Without a valid
+			// signature it stays the audited refusal above: the device ID is the
+			// hash of a public key and not a secret, so it alone must never change
+			// state. The response is the same either way.
+			s.contestOnRetiredDevice(r.Context(), deviceID, func(tomb *repairRetiredEntry) bool {
+				return s.retiredRefreshSigned(deviceID, tomb, &req)
+			})
 			s.writeStatusError(w, http.StatusNotFound, "device not found")
 			return
 		}
@@ -475,24 +483,14 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 		return false
 	}
 
-	// Decode nonce bytes from base64url.
-	nonceBytes, err := base64.RawURLEncoding.DecodeString(nonceB64)
-	if err != nil {
+	// Decode nonce and signature bytes from base64url.
+	nonceBytes, sigBytes, reason := decodeRefreshProof(nonceB64, sigB64)
+	if reason != "" {
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultFailure, business.AuditSeverityMedium,
-			map[string]interface{}{"reason": "invalid_nonce_encoding"})
-		s.writeStatusError(w, http.StatusUnauthorized, "invalid nonce encoding")
-		return false
-	}
-
-	sigBytes, err := base64.RawURLEncoding.DecodeString(sigB64)
-	if err != nil {
-		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
-			business.AuditEventSecurityEvent, "refresh_rejected",
-			business.AuditResultFailure, business.AuditSeverityMedium,
-			map[string]interface{}{"reason": "invalid_signature_encoding"})
-		s.writeStatusError(w, http.StatusUnauthorized, "invalid signature encoding")
+			map[string]interface{}{"reason": reason})
+		s.writeStatusError(w, http.StatusUnauthorized, refreshProofDecodeMessages[reason])
 		return false
 	}
 
@@ -507,15 +505,7 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 		return false
 	}
 
-	var tsBytes [8]byte
-	binary.BigEndian.PutUint64(tsBytes[:], nonce.ServerTS)
-	h := sha256.New()
-	h.Write(nonceBytes)
-	h.Write([]byte(deviceID))
-	h.Write(tsBytes[:])
-	popMsg := h.Sum(nil)
-
-	if !s.popVerifier.Verify(storedAlg, pubKey, popMsg, sigBytes) {
+	if !s.popVerifier.Verify(storedAlg, pubKey, refreshPoPMessage(nonceBytes, deviceID, nonce.ServerTS), sigBytes) {
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSecurityEvent, "refresh_rejected",
 			business.AuditResultFailure, business.AuditSeverityCritical,
@@ -525,6 +515,85 @@ func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, reco
 	}
 
 	return true
+}
+
+// refreshProofDecodeMessages are the response texts of the decodeRefreshProof
+// refusal reasons.
+var refreshProofDecodeMessages = map[string]string{
+	"invalid_nonce_encoding":     "invalid nonce encoding",
+	"invalid_signature_encoding": "invalid signature encoding",
+}
+
+// decodeRefreshProof decodes the base64url nonce and signature of a refresh
+// proof. The third result is the refusal reason, empty when both decode.
+func decodeRefreshProof(nonceB64, sigB64 string) ([]byte, []byte, string) {
+	nonceBytes, err := base64.RawURLEncoding.DecodeString(nonceB64)
+	if err != nil {
+		return nil, nil, "invalid_nonce_encoding"
+	}
+	sigBytes, err := base64.RawURLEncoding.DecodeString(sigB64)
+	if err != nil {
+		return nil, nil, "invalid_signature_encoding"
+	}
+	return nonceBytes, sigBytes, ""
+}
+
+// refreshPoPMessage is the message a refresh proof-of-possession signs:
+// sha256(nonce_bytes || device_id_utf8 || server_ts_be_uint64).
+func refreshPoPMessage(nonceBytes []byte, deviceID string, serverTS uint64) []byte {
+	var tsBytes [8]byte
+	binary.BigEndian.PutUint64(tsBytes[:], serverTS)
+	h := sha256.New()
+	h.Write(nonceBytes)
+	h.Write([]byte(deviceID))
+	h.Write(tsBytes[:])
+	return h.Sum(nil)
+}
+
+// retiredRefreshSigned reports whether a refresh addressed to the device ID a
+// repair retired is signed by the retired key recorded in tomb (Issue #5727).
+//
+// The challenge endpoint issues no nonce for a retired device ID (the old
+// identity can no longer start a refresh), so the proof cannot be bound to a
+// stored challenge. It is the refresh proof message over the caller's nonce and
+// its IssuedAt as the timestamp, and IssuedAt must be fresh: a valid signature by
+// the retired key over a timestamp inside nonceMaxAge proves the retired key was
+// used just now. A replay of a captured request inside that window only reports
+// the same genuine use again, and the contested audit is rate limited. The
+// algorithm the request names must equal the recorded one.
+func (s *Server) retiredRefreshSigned(deviceID string, tomb *repairRetiredEntry, req *RefreshCompleteRequest) bool {
+	alg, ok := retiredRefreshAlgorithm(tomb, req)
+	if !ok || !freshIssuedAt(req.IssuedAt) {
+		return false
+	}
+	nonceBytes, sig, reason := decodeRefreshProof(req.Nonce, req.Signature)
+	if reason != "" || len(nonceBytes) != 32 || len(sig) == 0 {
+		return false
+	}
+	pub, err := parseDevicePublicKey(alg, tomb.OldKeyPub)
+	if err != nil {
+		return false
+	}
+	// #nosec G115 -- freshIssuedAt rejects a non-positive IssuedAt.
+	return s.popVerifier.Verify(alg, pub, refreshPoPMessage(nonceBytes, deviceID, uint64(req.IssuedAt)), sig)
+}
+
+// retiredRefreshAlgorithm returns the recorded algorithm of the retired key when
+// the request names the same one.
+func retiredRefreshAlgorithm(tomb *repairRetiredEntry, req *RefreshCompleteRequest) (KeyAlgorithm, bool) {
+	alg, ok := normalizeKeyAlgorithm(tomb.OldKeyAlg)
+	reqAlg, reqOK := normalizeKeyAlgorithm(req.KeyAlgorithm)
+	return alg, ok && reqOK && alg == reqAlg
+}
+
+// freshIssuedAt reports whether issuedAt (Unix nanoseconds) is positive and
+// within nonceMaxAge of now, in either direction.
+func freshIssuedAt(issuedAt int64) bool {
+	if issuedAt <= 0 {
+		return false
+	}
+	age := time.Since(time.Unix(0, issuedAt))
+	return age <= nonceMaxAge && age >= -nonceMaxAge
 }
 
 // handleRefreshClaim handles POST /api/v1/stewards/{device_id}/refresh/claim: a

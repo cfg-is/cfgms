@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,7 +43,7 @@ type revocationTestEnv struct {
 // startRevocationServer runs a TCP gRPC server with mTLS from a real
 // cert.Manager and the interceptor under test. The "Hold" stream handler
 // blocks until its (possibly interceptor-wrapped) context is done.
-func startRevocationServer(t *testing.T, checker streamRevocationChecker, interval time.Duration) *revocationTestEnv {
+func startRevocationServer(t *testing.T, checker streamRevocationChecker, interval time.Duration, observer ...revokedPeerObserver) *revocationTestEnv {
 	t.Helper()
 	mgr, err := cert.NewManager(&cert.ManagerConfig{
 		StoragePath: t.TempDir(),
@@ -67,12 +68,16 @@ func startRevocationServer(t *testing.T, checker streamRevocationChecker, interv
 
 	env := &revocationTestEnv{mgr: mgr, handlerCh: make(chan error, 1)}
 	logger := logging.NewLogger("debug")
+	var obs revokedPeerObserver
+	if len(observer) > 0 {
+		obs = observer[0]
+	}
 	s := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(&tls.Config{
 			Certificates: []tls.Certificate{tlsCert}, ClientCAs: pool,
 			ClientAuth: tls.RequireAndVerifyClientCert, MinVersion: tls.VersionTLS13,
 		})),
-		grpc.ChainStreamInterceptor(newStreamRevocationInterceptor(checker, logger, interval)),
+		grpc.ChainStreamInterceptor(newStreamRevocationInterceptor(checker, logger, interval, obs)),
 		grpc.UnknownServiceHandler(func(_ interface{}, ss grpc.ServerStream) error {
 			<-ss.Context().Done()
 			env.handlerCh <- ss.Context().Err()
@@ -169,7 +174,7 @@ func TestStreamRevocation_LookupErrorRefusedAtAdmission(t *testing.T) {
 }
 
 func TestStreamRevocation_NoPeerCertificateUnauthenticated(t *testing.T) {
-	interceptor := newStreamRevocationInterceptor(errChecker{}, logging.NewLogger("debug"), time.Hour)
+	interceptor := newStreamRevocationInterceptor(errChecker{}, logging.NewLogger("debug"), time.Hour, nil)
 	err := interceptor(nil, &fakeCtxStream{ctx: context.Background()}, &grpc.StreamServerInfo{FullMethod: revocationTestMethod},
 		func(interface{}, grpc.ServerStream) error { t.Fatal("handler must not run"); return nil })
 	assert.Equal(t, codes.Unauthenticated, status.Code(err))
@@ -183,3 +188,49 @@ type fakeCtxStream struct {
 }
 
 func (f *fakeCtxStream) Context() context.Context { return f.ctx }
+
+// recordingRevokedObserver records the revoked serials it is told about.
+type recordingRevokedObserver struct {
+	mu   sync.Mutex
+	seen []string
+}
+
+func (r *recordingRevokedObserver) ObserveRevokedPeer(_ context.Context, stewardID, serial string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seen = append(r.seen, stewardID+"|"+serial)
+}
+
+func (r *recordingRevokedObserver) observed() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.seen...)
+}
+
+// TestStreamRevocation_ObserverToldOfRevokedAdmissionOnly checks the repair guard
+// hook: a stream refused as revoked at admission is reported with the steward ID
+// and serial, an admitted stream is not, and a stream closed by the periodic
+// re-check is not an admission attempt.
+func TestStreamRevocation_ObserverToldOfRevokedAdmissionOnly(t *testing.T) {
+	obs := &recordingRevokedObserver{}
+	env := startRevocationServer(t, nil, 25*time.Millisecond, obs)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	serial, recv := env.openStream(t, ctx, true)
+	assert.Equal(t, codes.PermissionDenied, status.Code(recv()))
+	assert.Equal(t, []string{"steward-test|" + serial}, obs.observed())
+
+	openSerial, openRecv := env.openStream(t, ctx, false)
+	got := make(chan error, 1)
+	go func() { got <- openRecv() }()
+	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, env.mgr.Revoke(openSerial))
+	select {
+	case err := <-got:
+		assert.Equal(t, codes.PermissionDenied, status.Code(err))
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream was not closed after revocation")
+	}
+	assert.Equal(t, []string{"steward-test|" + serial}, obs.observed(), "a re-check close is not reported")
+}

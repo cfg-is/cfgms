@@ -207,6 +207,7 @@ type Server struct {
 	egProvider                      egReadProvider                           // Issue #2880: entity graph read API
 	credentialStore                 initialcreds.CredentialStore             // Issue #5559: one-time initial-password reveal (nil when unwired)
 	credentialClock                 func() time.Time                         // tests only: clock for the reveal API (nil = time.Now)
+	repairClock                     func() time.Time                         // tests only: clock for the repair guard windows (nil = time.Now)
 	directoryMembership             directory.MembershipStore                // Issue #5557: durable directory membership (nil when unwired)
 	egWriter                        egWriteProvider                          // Issue #3374: operator edge assertion write path
 	terminalHandler                 http.Handler                             // Issue #2761: terminal WebSocket relay handler
