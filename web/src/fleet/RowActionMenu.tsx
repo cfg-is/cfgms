@@ -339,6 +339,16 @@ export interface QueuedCopy {
   hostname: string
   sourceIp: string
   registeredAt: string
+  /** Set only for a copy the controller admitted locked after broken trust. */
+  cloneReason?: string
+  copyStewardId?: string
+}
+
+const CLONE_REASON_LABELS = new Map([['broken_trust', 'Broken trust']])
+
+/** Label for a locked copy's reason; an unknown reason is shown verbatim. */
+function cloneReasonLabel(reason: string): string {
+  return CLONE_REASON_LABELS.get(reason) ?? reason
 }
 
 /**
@@ -362,6 +372,12 @@ export function parseQueuedCopies(data: unknown, stewardId: string): QueuedCopy[
         hostname: typeof q.hostname === 'string' ? q.hostname : '',
         sourceIp: typeof q.source_ip === 'string' ? q.source_ip : '',
         registeredAt: typeof q.registered_at === 'string' ? q.registered_at : '',
+        ...(typeof q.clone_reason === 'string' && q.clone_reason !== ''
+          ? { cloneReason: q.clone_reason }
+          : {}),
+        ...(typeof q.copy_steward_id === 'string' && q.copy_steward_id !== ''
+          ? { copyStewardId: q.copy_steward_id }
+          : {}),
       })
     }
   }
@@ -459,6 +475,13 @@ function RotateCredentialsPanel({
   )
 }
 
+/** True when a 409 body carries the controller's CONFIRM_LIVE_REQUIRED code. */
+async function isConfirmLiveRequired(resp: Response): Promise<boolean> {
+  const body: unknown = await resp.json().catch(() => null)
+  const err = (body as Record<string, unknown> | null)?.error
+  return (err as Record<string, unknown> | undefined)?.code === 'CONFIRM_LIVE_REQUIRED'
+}
+
 function MoveIdentityPanel({
   stewardId,
   onBack,
@@ -472,6 +495,9 @@ function MoveIdentityPanel({
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [banning, setBanning] = useState(false)
+  const [banned, setBanned] = useState(false)
+  const [liveWarning, setLiveWarning] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -493,20 +519,52 @@ function MoveIdentityPanel({
     }
   }, [stewardId])
 
-  async function move() {
+  const selectedCopy = copies?.find((c) => c.pendingId === selected) ?? null
+  const locked = selectedCopy?.cloneReason !== undefined
+
+  async function ban() {
+    if (selectedCopy?.copyStewardId === undefined) return
+    setBusy(true)
+    setError(null)
+    try {
+      const resp = await apiFetch(
+        `/api/v1/stewards/${encodeURIComponent(selectedCopy.copyStewardId)}/tamper/ban`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+      )
+      if (!resp.ok) {
+        setError(`Failed to ban copy (${resp.status})`)
+        return
+      }
+      setBanned(true)
+    } catch {
+      setError('Failed to ban copy')
+    } finally {
+      setBusy(false)
+      setBanning(false)
+    }
+  }
+
+  async function move(confirmLive = false) {
     if (selected === null) return
     setBusy(true)
     setError(null)
+    setLiveWarning(false)
     try {
       const resp = await apiFetch(
         `/api/v1/stewards/${encodeURIComponent(stewardId)}/identity/move`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pending_id: selected }),
+          body: JSON.stringify(
+            confirmLive ? { pending_id: selected, confirm_live: true } : { pending_id: selected },
+          ),
         },
       )
       if (!resp.ok) {
+        if (resp.status === 409 && (await isConfirmLiveRequired(resp))) {
+          setLiveWarning(true)
+          return
+        }
         setError(`Failed to move identity (${resp.status})`)
         return
       }
@@ -527,9 +585,9 @@ function MoveIdentityPanel({
           {error}
         </div>
       )}
-      {done ? (
+      {done || banned ? (
         <div className="rmove-ok" role="status">
-          Identity moved
+          {done ? 'Identity moved' : 'Copy banned'}
         </div>
       ) : (
         <>
@@ -550,9 +608,14 @@ function MoveIdentityPanel({
                       onChange={() => {
                         setSelected(c.pendingId)
                         setConfirming(false)
+                        setBanning(false)
+                        setLiveWarning(false)
                       }}
                     />
                     <span className="rid-host">{c.hostname}</span>
+                    {c.cloneReason !== undefined && (
+                      <span className="rid-meta">{cloneReasonLabel(c.cloneReason)}</span>
+                    )}
                     <span className="rid-meta">{c.sourceIp}</span>
                     <span className="rid-meta">{c.registeredAt}</span>
                   </label>
@@ -560,9 +623,38 @@ function MoveIdentityPanel({
               ))}
             </ul>
           )}
-          {copies !== null && copies.length > 0 && confirming && (
+          {copies !== null && copies.length > 0 && liveWarning && (
             <div className="rdecom-confirm">
-              <p className="rdecom-warn">Move the identity of {stewardId} to the selected copy?</p>
+              <p className="rdecom-warn">
+                The old record of {stewardId} reported in within the last 10 minutes, so it may still be the
+                legitimate machine. Linking anyway moves the identity to the selected copy.
+              </p>
+              <div className="ract-btns">
+                <button
+                  type="button"
+                  className="rtag-btn rtag-btn-danger"
+                  disabled={busy}
+                  onClick={() => void move(true)}
+                >
+                  Link anyway
+                </button>
+                <button
+                  type="button"
+                  className="rtag-btn rtag-btn-sec"
+                  disabled={busy}
+                  onClick={() => setLiveWarning(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+          {copies !== null && copies.length > 0 && confirming && !liveWarning && (
+            <div className="rdecom-confirm">
+              <p className="rdecom-warn">
+                {locked ? 'Link' : 'Move'} the identity of {stewardId} to the selected copy?
+                {locked && ' The old record keeps any tampered state until it is restored.'}
+              </p>
               <div className="ract-btns">
                 <button
                   type="button"
@@ -583,16 +675,52 @@ function MoveIdentityPanel({
               </div>
             </div>
           )}
-          {copies !== null && copies.length > 0 && !confirming && (
+          {copies !== null && copies.length > 0 && banning && (
             <div className="rdecom-confirm">
-              <button
-                type="button"
-                className="rtag-btn"
-                disabled={selected === null}
-                onClick={() => setConfirming(true)}
-              >
-                Move
-              </button>
+              <p className="rdecom-warn">
+                Ban the selected copy? Its certificates are revoked and it cannot register again.
+              </p>
+              <div className="ract-btns">
+                <button
+                  type="button"
+                  className="rtag-btn rtag-btn-danger"
+                  disabled={busy}
+                  onClick={() => void ban()}
+                >
+                  Confirm ban
+                </button>
+                <button
+                  type="button"
+                  className="rtag-btn rtag-btn-sec"
+                  disabled={busy}
+                  onClick={() => setBanning(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+          {copies !== null && copies.length > 0 && !confirming && !banning && !liveWarning && (
+            <div className="rdecom-confirm">
+              <div className="ract-btns">
+                <button
+                  type="button"
+                  className="rtag-btn"
+                  disabled={selected === null}
+                  onClick={() => setConfirming(true)}
+                >
+                  {locked ? 'Link' : 'Move'}
+                </button>
+                {locked && selectedCopy?.copyStewardId !== undefined && (
+                  <button
+                    type="button"
+                    className="rtag-btn rtag-btn-danger"
+                    onClick={() => setBanning(true)}
+                  >
+                    Ban
+                  </button>
+                )}
+              </div>
             </div>
           )}
         </>

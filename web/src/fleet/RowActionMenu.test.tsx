@@ -744,6 +744,133 @@ describe('RowActionMenu move-identity', () => {
   })
 })
 
+const LOCKED_CLONES = {
+  data: [
+    {
+      steward_id: 'stw-1',
+      tenant_id: 't',
+      detection_count: 1,
+      queued_copies: [
+        { pending_id: 'p-1', hostname: 'host-a', source_ip: '10.0.0.1', registered_at: '2026-10-01T00:00:00Z' },
+        {
+          pending_id: 'p-lock',
+          hostname: 'host-locked',
+          source_ip: '10.0.0.9',
+          registered_at: '2026-10-03T00:00:00Z',
+          clone_reason: 'broken_trust',
+          copy_steward_id: 'stw-new',
+        },
+      ],
+    },
+  ],
+}
+
+function confirmLiveError() {
+  return jsonRes(409, { error: { code: 'CONFIRM_LIVE_REQUIRED', message: 'old record is live' } })
+}
+
+describe('RowActionMenu locked broken-trust copies', () => {
+  it('lists a locked copy with its reason label and a plain copy without one', async () => {
+    fetchMock.mockResolvedValue(jsonRes(200, LOCKED_CLONES))
+    renderMenu()
+    openItem('Move identity')
+    await screen.findByText('host-locked')
+    expect(screen.getByText('Broken trust')).toBeInTheDocument()
+    expect(screen.getAllByText('Broken trust')).toHaveLength(1)
+    expect(screen.getByText('host-a')).toBeInTheDocument()
+  })
+
+  it('a clone list without a locked copy offers no Ban action', async () => {
+    fetchMock.mockResolvedValue(jsonRes(200, CLONES))
+    renderMenu()
+    openItem('Move identity')
+    fireEvent.click(await screen.findByRole('radio', { name: /host-a/ }))
+    expect(screen.queryByText('Broken trust')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Ban' })).not.toBeInTheDocument()
+  })
+
+  it('Link posts identity/move only after Confirm, without confirm_live', async () => {
+    fetchMock.mockImplementation((input, init) => {
+      const u = String(input)
+      if (u.endsWith('/stewards/identity-clones')) return Promise.resolve(jsonRes(200, LOCKED_CLONES))
+      if ((init?.method ?? 'GET') === 'POST') return Promise.resolve(jsonRes(200, { data: { status: 'moved' } }))
+      return Promise.resolve(jsonRes(404))
+    })
+    renderMenu()
+    openItem('Move identity')
+    fireEvent.click(await screen.findByRole('radio', { name: /host-locked/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Link' }))
+    expect(screen.getByText(/tampered state/)).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([, i]) => (i?.method ?? 'GET') === 'POST')).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Identity moved'))
+    const post = fetchMock.mock.calls.find(([, i]) => (i?.method ?? 'GET') === 'POST')
+    expect(String(post?.[0])).toBe('/api/v1/stewards/stw-1/identity/move')
+    expect(JSON.parse(String(post?.[1]?.body))).toEqual({ pending_id: 'p-lock' })
+  })
+
+  it('a live old record shows a warning and confirm_live is sent only after the operator confirms', async () => {
+    let moves = 0
+    fetchMock.mockImplementation((input, init) => {
+      const u = String(input)
+      if (u.endsWith('/stewards/identity-clones')) return Promise.resolve(jsonRes(200, LOCKED_CLONES))
+      if (u.endsWith('/identity/move')) {
+        moves++
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+        return Promise.resolve(body.confirm_live === true ? jsonRes(200, { data: {} }) : confirmLiveError())
+      }
+      return Promise.resolve(jsonRes(404))
+    })
+    renderMenu()
+    openItem('Move identity')
+    fireEvent.click(await screen.findByRole('radio', { name: /host-locked/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Link' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    expect(await screen.findByText(/may still be the legitimate machine/)).toBeInTheDocument()
+    expect(moves).toBe(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(moves).toBe(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Link' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Link anyway' }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Identity moved'))
+    expect(moves).toBe(3)
+    const last = fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/identity/move')).pop()
+    expect(JSON.parse(String(last?.[1]?.body))).toEqual({ pending_id: 'p-lock', confirm_live: true })
+  })
+
+  it('Ban posts to the copy tamper/ban endpoint only after Confirm and step-up', async () => {
+    stubElevation((u, m) => {
+      if (m === 'GET' && u.endsWith('/stewards/identity-clones')) return jsonRes(200, LOCKED_CLONES)
+      if (m === 'POST' && u.endsWith('/stewards/stw-new/tamper/ban')) return jsonRes(200, { data: { status: 'revoked' } })
+      return null
+    })
+    renderMenu()
+    openItem('Move identity')
+    fireEvent.click(await screen.findByRole('radio', { name: /host-locked/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Ban' }))
+    expect(fetchMock.mock.calls.some(([, i]) => (i?.method ?? 'GET') === 'POST')).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm ban' }))
+    fireEvent.click(await screen.findByTestId('step-up-verify-btn'))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Copy banned'))
+    const bans = fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/stewards/stw-new/tamper/ban'))
+    expect(bans).toHaveLength(2)
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('elevate/finish'))).toBe(true)
+  })
+
+  it('Ban is not offered for a plain copy and Cancel sends nothing', async () => {
+    fetchMock.mockResolvedValue(jsonRes(200, LOCKED_CLONES))
+    renderMenu()
+    openItem('Move identity')
+    fireEvent.click(await screen.findByRole('radio', { name: /host-a/ }))
+    expect(screen.queryByRole('button', { name: 'Ban' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('radio', { name: /host-locked/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Ban' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('RowActionMenu auth refresh', () => {
   it('auth refresh posts with no step-up and no presence request, and reports refresh_requested', async () => {
     fetchMock.mockResolvedValue(jsonRes(200, { data: { steward_id: 'stw-1', status: 'refresh_requested' } }))
