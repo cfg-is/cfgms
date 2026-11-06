@@ -317,6 +317,30 @@ var knownPermissions = map[string]bool{
 	"hyperv-profile:delete": true,
 }
 
+// automationPermissions are the automation epic's permission IDs (Issue #5831, Epic #5421).
+// The strong ones are in permissionAssurance; the three reads are not (ADR-021 Decision 2).
+// No default role holds any of them. They are kept as a list and merged into
+// knownPermissions by init rather than appended to the map literal: knownPermissions is a
+// single homogeneous literal, and every entry added to it lengthens the clone the
+// duplication gate already measures in that table.
+var automationPermissions = []string{
+	"automation-grant:create",
+	"automation-grant:revoke",
+	"automation-grant:read",
+	"content-approval:approve",
+	"content-approval:revoke",
+	"automation-approval:read",
+	"content-library:set-mode",
+	"content-library:read",
+	"workflow:publish",
+}
+
+func init() {
+	for _, p := range automationPermissions {
+		knownPermissions[p] = true
+	}
+}
+
 // isKnownPermission reports whether p is a recognized permission ID.
 // "*" and all other unlisted strings return false.
 func isKnownPermission(p string) bool {

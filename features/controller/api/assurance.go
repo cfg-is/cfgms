@@ -305,6 +305,19 @@ var permissionAssurance = map[string]Requirement{
 		AllowMachine:         true,
 		PresenceExemptRoutes: []string{"POST /api/v1/rollout/{rollout_id}/halt", "POST /api/v1/stewards/upgrade/{upgrade_id}/rollback"},
 	},
+
+	// Automation epic (Issue #5831, Epic #5421): registered once here, ahead of the routes
+	// that consume them (see knownFuturePermissions), so later stories do not edit this
+	// table. None sets AllowMachine: no API key may use any of them. The reads
+	// (automation-grant:read, automation-approval:read, content-library:read) are
+	// intentionally absent (ADR-021 Decision 2). content-approval:revoke has no presence
+	// tap: revoking approval is a de-escalation that must stay fast.
+	"automation-grant:create":  {Min: session.AssuranceStrong, RequireUserPresence: true},
+	"automation-grant:revoke":  {Min: session.AssuranceStrong},
+	"content-approval:approve": {Min: session.AssuranceStrong, RequireUserPresence: true},
+	"content-library:set-mode": {Min: session.AssuranceStrong, RequireUserPresence: true},
+	"workflow:publish":         {Min: session.AssuranceStrong},
+	"content-approval:revoke":  {Min: session.AssuranceStrong},
 }
 
 // legacyPermissionIDs maps a current permission ID to the historical IDs that named the

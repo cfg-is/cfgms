@@ -389,6 +389,9 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"installer:delete":                    true, // Issue #5298
 		"installer:publish:steward":           true, // Issue #5298
 		"installer:dispatch:steward":          true, // Issue #5298: start and dispatch gated, halt and rollback exempt
+		"automation-grant:create":             true, // Issue #5831: grants standing automation authority
+		"content-approval:approve":            true, // Issue #5831: approves content for automated use
+		"content-library:set-mode":            true, // Issue #5831: switches the content library mode
 	}
 	for perm, req := range permissionAssurance {
 		if catastrophic[perm] {
@@ -564,4 +567,67 @@ func TestPermissionAssurance_ReportManage_FloorEnforced(t *testing.T) {
 	rec = serve(&Principal{ID: "strong-user", Assurance: session.AssuranceStrong, Permissions: []string{"report:manage"}})
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.True(t, reached)
+}
+
+// automationStrongPermissions is the set registered for the automation epic (Issue #5831).
+var automationStrongPermissions = map[string]Requirement{
+	"automation-grant:create":  {Min: session.AssuranceStrong, RequireUserPresence: true},
+	"automation-grant:revoke":  {Min: session.AssuranceStrong},
+	"content-approval:approve": {Min: session.AssuranceStrong, RequireUserPresence: true},
+	"content-library:set-mode": {Min: session.AssuranceStrong, RequireUserPresence: true},
+	"workflow:publish":         {Min: session.AssuranceStrong},
+	"content-approval:revoke":  {Min: session.AssuranceStrong},
+}
+
+var automationReadPermissions = []string{
+	"automation-grant:read", "automation-approval:read", "content-library:read",
+}
+
+// TestAutomationPermissions_Registered is a REQUIRED test (Issue #5831): the nine automation
+// permissions exist with the stated requirements, none sets AllowMachine, the presence-required
+// ones carry Strong and RequireUserPresence, and reads stay out of permissionAssurance.
+func TestAutomationPermissions_Registered(t *testing.T) {
+	for perm, want := range automationStrongPermissions {
+		got, found := permissionAssurance[perm]
+		require.True(t, found, "%s must be in permissionAssurance", perm)
+		assert.Equal(t, want.Min, got.Min, perm)
+		assert.Equal(t, want.RequireUserPresence, got.RequireUserPresence, perm)
+		assert.False(t, got.AllowMachine, "%s must not set AllowMachine", perm)
+		assert.Empty(t, got.PresenceExemptRoutes, perm)
+		assert.True(t, isKnownPermission(perm), "%s must be a known permission", perm)
+	}
+	for _, perm := range []string{"automation-grant:create", "content-approval:approve", "content-library:set-mode"} {
+		got := permissionAssurance[perm]
+		assert.True(t, got.RequireUserPresence, perm)
+		assert.Equal(t, session.AssuranceStrong, got.Min, perm)
+	}
+	for _, perm := range automationReadPermissions {
+		_, inAssurance := permissionAssurance[perm]
+		assert.False(t, inAssurance, "%s is a read and must stay out of permissionAssurance", perm)
+		assert.True(t, isKnownPermission(perm), "%s must be a known permission", perm)
+	}
+}
+
+// TestAutomationPermissions_APIKeyRefused drives the real requirePermission middleware: an
+// API-key principal that holds the permission string is still refused for every Strong one.
+func TestAutomationPermissions_APIKeyRefused(t *testing.T) {
+	server := setupTestServer(t)
+	for perm := range automationStrongPermissions {
+		t.Run(perm, func(t *testing.T) {
+			parts := strings.SplitN(perm, ":", 2)
+			reached := false
+			probe := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusOK)
+			})
+			handler := server.requirePermission(parts[0], parts[1])(probe)
+			req := httptest.NewRequest(http.MethodPost, "/probe", nil)
+			p := &Principal{ID: "api-key", Assurance: session.AssuranceMachine, Permissions: []string{perm}}
+			req = req.WithContext(context.WithValue(req.Context(), principalContextKey, p))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.False(t, reached)
+		})
+	}
 }
