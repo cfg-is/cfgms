@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 )
@@ -41,9 +42,12 @@ type ExecutionQueue struct {
 	monitor         *ExecutionMonitor
 	keyManager      *EphemeralKeyManager
 	tracker         ExecutionTracker // optional; writes durable audit records on terminal state
-	maxAge          time.Duration    // Maximum time to keep queued executions
-	dispatchTimeout time.Duration    // Maximum time a dispatched execution may wait before re-queue
-	controllerURL   string           // Controller external URL for script callbacks
+	guardMu         sync.RWMutex
+	guardResolver   GuardResolver        // optional; a guarded command is cancelled when none is registered
+	scopeLookup     PrivilegeScopeLookup // optional; current RequiredAPIScope for a pinned script
+	maxAge          time.Duration        // Maximum time to keep queued executions
+	dispatchTimeout time.Duration        // Maximum time a dispatched execution may wait before re-queue
+	controllerURL   string               // Controller external URL for script callbacks
 	stopCh          chan struct{}
 	stopOnce        sync.Once
 }
@@ -76,6 +80,11 @@ type QueuedExecution struct {
 	// then set); empty or QueueKindScript for a script execution.
 	Kind   string             `json:"kind,omitempty"`
 	Action *StewardActionSpec `json:"action,omitempty"`
+
+	// pin and guard are set only by WithPin and WithGuard. QueueExecution alone
+	// copies them into the reserved Metadata keys; entryToQueued reads them back.
+	pin   *executionPin
+	guard *executionGuard
 }
 
 // MetaOperatorPrincipal is the QueuedExecution.Metadata key that records the
@@ -142,6 +151,11 @@ func (q *ExecutionQueue) QueueExecution(deviceID string, execution *QueuedExecut
 		execution.ExpiresAt = execution.QueuedAt.Add(q.maxAge)
 	}
 
+	metadata, err := execution.metadataWithReserved()
+	if err != nil {
+		return err
+	}
+
 	scriptRef := execution.ScriptRef
 	if scriptRef == "" {
 		scriptRef = execution.ScriptID
@@ -163,7 +177,7 @@ func (q *ExecutionQueue) QueueExecution(deviceID string, execution *QueuedExecut
 		APIKeyTTL:         execution.APIKeyTTL,
 		APIKeyPermissions: execution.APIKeyPermissions,
 		ExecutionContext:  execution.ExecutionContext,
-		Metadata:          execution.Metadata,
+		Metadata:          metadata,
 		Kind:              execution.Kind,
 		Action:            execution.Action,
 	}
@@ -194,9 +208,17 @@ func (q *ExecutionQueue) DequeueForDevice(deviceID string) ([]*QueuedExecution, 
 
 	result := make([]*QueuedExecution, 0, len(entries))
 	for _, entry := range entries {
-		result = append(result, entryToQueued(entry))
+		exec := entryToQueued(entry)
+		if err := q.checkGuard(context.Background(), exec); err != nil {
+			q.cancelGuarded(deviceID, exec, err)
+			continue
+		}
+		result = append(result, exec)
 	}
 
+	if len(result) == 0 {
+		return nil, nil
+	}
 	return result, nil
 }
 
@@ -339,112 +361,152 @@ func buildQueueTrackingRecord(entry *QueueEntry, state QueueState, result *Execu
 // library is resolved for tenantID (or Metadata["tenant_id"]) and a missing tenant
 // fails closed.
 func (q *ExecutionQueue) PrepareExecutionForDevice(ctx context.Context, deviceID, tenantID string, execution *QueuedExecution) (*PreparedExecution, error) {
+	// Second guard evaluation: the last check before the bytes go to the steward.
+	if err := q.checkGuard(ctx, execution); err != nil {
+		q.cancelGuarded(deviceID, execution, err)
+		return nil, err
+	}
+
 	scriptRef := execution.ScriptRef
 	if scriptRef == "" {
 		scriptRef = execution.ScriptID
 	}
 
-	// Resolve latest script content from repository
-	var resolvedContent string
-	var resolvedVersion string
-	var signatureAlgorithm, signatureValue, signaturePublicKey string
-
-	if scriptRef != "" {
-		// Library script: resolve the latest (or pinned) content from the repository.
-		if q.scriptRepo != nil {
-			pinVersion := execution.ScriptVersion // empty = resolve latest
-			var script *VersionedScript
-			var err error
-			if resolver, ok := q.scriptRepo.(TenantScriptResolver); ok {
-				// Per-tenant library: the tenant is the argument, else the run's
-				// metadata. Neither present fails closed — no global fallback.
-				libTenant := tenantID
-				if libTenant == "" && execution.Metadata != nil {
-					libTenant, _ = execution.Metadata["tenant_id"].(string)
-				}
-				if libTenant == "" {
-					return nil, fmt.Errorf("failed to resolve script %q from repository: %w", scriptRef, ErrTenantRequired)
-				}
-				script, err = resolver.GetForTenant(libTenant, scriptRef, pinVersion)
-			} else {
-				script, err = q.scriptRepo.Get(scriptRef, pinVersion)
-			}
-			if err != nil {
-				return nil, fmt.Errorf("failed to resolve script %q from repository: %w", scriptRef, err)
-			}
-			resolvedContent = script.Content
-			resolvedVersion = script.Metadata.Version.String()
-			if sig := script.Signature; sig != nil {
-				signatureAlgorithm = sig.Algorithm
-				signatureValue = sig.Signature
-				signaturePublicKey = sig.PublicKey
-			}
-		}
-	} else if execution.Metadata != nil {
-		// Inline (ad-hoc) execution: SynthesizeCommandRun threads the literal script
-		// body through Metadata["inline_script_content"] because there is no scriptRef
-		// to look up in the repository (Issue #1995, root cause A).
-		if inline, ok := execution.Metadata["inline_script_content"].(string); ok {
-			resolvedContent = inline
-		}
+	script, err := q.resolveLibraryScript(ctx, tenantID, scriptRef, execution)
+	if err != nil {
+		return nil, err
 	}
 
 	prepared := &PreparedExecution{
-		ExecutionID:   execution.ExecutionID,
-		ScriptID:      execution.ScriptID,
-		ScriptVersion: resolvedVersion,
-		ScriptContent: resolvedContent,
-		Shell:         execution.Shell,
-		Timeout:       execution.Timeout,
-		Environment:   make(map[string]string),
-		PreparedAt:    time.Now(),
-
-		ScriptRef:          scriptRef,
-		SignatureAlgorithm: signatureAlgorithm,
-		SignatureValue:     signatureValue,
-		SignaturePublicKey: signaturePublicKey,
+		ExecutionID: execution.ExecutionID,
+		ScriptID:    execution.ScriptID,
+		Shell:       execution.Shell,
+		Timeout:     execution.Timeout,
+		Environment: make(map[string]string),
+		PreparedAt:  time.Now(),
+		ScriptRef:   scriptRef,
 	}
+	setPreparedContent(prepared, script, execution)
 
 	for k, v := range execution.Environment {
 		prepared.Environment[k] = v
 	}
 
-	// Generate ephemeral API key just-in-time if requested
-	if execution.GenerateAPIKey && q.keyManager != nil {
-		ttl := execution.APIKeyTTL
-		if ttl == 0 {
-			ttl = 1 * time.Hour
-		}
-
-		permissions := execution.APIKeyPermissions
-		if len(permissions) == 0 {
-			permissions = ScriptCallbackPermissions()
-		}
-
-		apiKey, err := q.keyManager.GenerateKey(
-			execution.ScriptID,
-			execution.ExecutionID,
-			tenantID,
-			deviceID,
-			ttl,
-			permissions,
-			0, // unlimited usage
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate ephemeral API key: %w", err)
-		}
-
-		prepared.Environment["CFGMS_API_KEY"] = apiKey.Key
-		prepared.Environment["CFGMS_EXECUTION_ID"] = execution.ExecutionID
-		prepared.Environment["CFGMS_DEVICE_ID"] = deviceID
-		prepared.Environment["CFGMS_TENANT_ID"] = tenantID
-		prepared.Environment["CFGMS_CONTROLLER_URL"] = q.controllerURL
-
-		prepared.EphemeralKey = apiKey.Key
-		prepared.KeyExpiresAt = apiKey.ExpiresAt
+	if err := q.attachEphemeralKey(prepared, deviceID, tenantID, execution); err != nil {
+		return nil, err
 	}
 
 	return prepared, nil
+}
+
+// resolveLibraryScript resolves the latest (or pinned) library script for
+// scriptRef. It returns nil, nil when there is no scriptRef or no repository is
+// wired; a pinned execution in either case fails closed. With a
+// TenantScriptResolver the library is resolved for tenantID (or
+// Metadata["tenant_id"]); neither present fails closed — no global fallback.
+func (q *ExecutionQueue) resolveLibraryScript(ctx context.Context, tenantID, scriptRef string, execution *QueuedExecution) (*VersionedScript, error) {
+	if execution.pin != nil {
+		if q.scriptRepo == nil {
+			return nil, fmt.Errorf("%w: no script library is wired", ErrPinMismatch)
+		}
+		if scriptRef == "" {
+			return nil, fmt.Errorf("%w: pinned execution has no script reference", ErrPinMismatch)
+		}
+		// Pinned: one read of the owner's exact version; the hash check and the
+		// bytes sent both come from this object.
+		return q.resolvePinned(ctx, tenantID, scriptRef, execution)
+	}
+	if scriptRef == "" || q.scriptRepo == nil {
+		return nil, nil
+	}
+
+	pinVersion := execution.ScriptVersion // empty = resolve latest
+	var script *VersionedScript
+	var err error
+	if resolver, ok := q.scriptRepo.(TenantScriptResolver); ok {
+		libTenant := tenantForExecution(tenantID, execution)
+		if libTenant == "" {
+			return nil, fmt.Errorf("failed to resolve script %q from repository: %w", scriptRef, ErrTenantRequired)
+		}
+		script, err = resolver.GetForTenant(libTenant, scriptRef, pinVersion)
+	} else {
+		script, err = q.scriptRepo.Get(scriptRef, pinVersion)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve script %q from repository: %w", scriptRef, err)
+	}
+	return script, nil
+}
+
+// setPreparedContent fills the script content, version and signature from the
+// resolved library script. Without one, an inline (ad-hoc) execution supplies its
+// body through Metadata["inline_script_content"]: SynthesizeCommandRun threads the
+// literal script there because there is no scriptRef to look up (Issue #1995,
+// root cause A).
+func setPreparedContent(prepared *PreparedExecution, script *VersionedScript, execution *QueuedExecution) {
+	if script != nil {
+		prepared.ScriptContent = script.Content
+		prepared.ScriptVersion = script.Metadata.Version.String()
+		if sig := script.Signature; sig != nil {
+			prepared.SignatureAlgorithm = sig.Algorithm
+			prepared.SignatureValue = sig.Signature
+			prepared.SignaturePublicKey = sig.PublicKey
+		}
+		return
+	}
+	if prepared.ScriptRef != "" {
+		return
+	}
+	if inline, ok := execution.Metadata["inline_script_content"].(string); ok {
+		prepared.ScriptContent = inline
+	}
+}
+
+// attachEphemeralKey generates the ephemeral API key just-in-time when the
+// execution requests one and a key manager is wired.
+func (q *ExecutionQueue) attachEphemeralKey(prepared *PreparedExecution, deviceID, tenantID string, execution *QueuedExecution) error {
+	if !execution.GenerateAPIKey {
+		return nil
+	}
+	if execution.pin != nil || execution.guard != nil {
+		return ErrAPIScopeNotGrantable
+	}
+	if q.keyManager == nil {
+		return nil
+	}
+
+	ttl := execution.APIKeyTTL
+	if ttl == 0 {
+		ttl = 1 * time.Hour
+	}
+
+	permissions := execution.APIKeyPermissions
+	if len(permissions) == 0 {
+		permissions = ScriptCallbackPermissions()
+	}
+
+	apiKey, err := q.keyManager.GenerateKey(
+		execution.ScriptID,
+		execution.ExecutionID,
+		tenantID,
+		deviceID,
+		ttl,
+		permissions,
+		0, // unlimited usage
+	)
+	if err != nil {
+		return fmt.Errorf("failed to generate ephemeral API key: %w", err)
+	}
+
+	prepared.Environment["CFGMS_API_KEY"] = apiKey.Key
+	prepared.Environment["CFGMS_EXECUTION_ID"] = execution.ExecutionID
+	prepared.Environment["CFGMS_DEVICE_ID"] = deviceID
+	prepared.Environment["CFGMS_TENANT_ID"] = tenantID
+	prepared.Environment["CFGMS_CONTROLLER_URL"] = q.controllerURL
+
+	prepared.EphemeralKey = apiKey.Key
+	prepared.KeyExpiresAt = apiKey.ExpiresAt
+	return nil
 }
 
 // PreparedExecution represents a script execution ready for immediate delivery.
@@ -578,19 +640,9 @@ func entryToQueued(entry *QueueEntry) *QueuedExecution {
 		exec.Action = &action
 	}
 
-	if entry.Parameters != nil {
-		exec.Parameters = make(map[string]string, len(entry.Parameters))
-		for k, v := range entry.Parameters {
-			exec.Parameters[k] = v
-		}
-	}
-
-	if entry.Environment != nil {
-		exec.Environment = make(map[string]string, len(entry.Environment))
-		for k, v := range entry.Environment {
-			exec.Environment[k] = v
-		}
-	}
+	// maps.Clone keeps a nil map nil and copies a non-nil one.
+	exec.Parameters = maps.Clone(entry.Parameters)
+	exec.Environment = maps.Clone(entry.Environment)
 
 	if entry.APIKeyPermissions != nil {
 		exec.APIKeyPermissions = make([]string, len(entry.APIKeyPermissions))
@@ -602,6 +654,7 @@ func entryToQueued(entry *QueueEntry) *QueuedExecution {
 		for k, v := range entry.Metadata {
 			exec.Metadata[k] = v
 		}
+		exec.pin, exec.guard = reservedFromMetadata(entry.Metadata)
 	}
 
 	return exec
