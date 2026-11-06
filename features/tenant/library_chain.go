@@ -50,22 +50,9 @@ func LibraryChain(ctx context.Context, mgr TenantPathGetter, runTenant, ceilingT
 	if err != nil {
 		return nil, fmt.Errorf("resolve tenant path: %w", err)
 	}
-	// The path is root-first and must end with the tenant itself.
-	if len(path) == 0 || path[len(path)-1] != runTenant {
-		return nil, fmt.Errorf("tenant path for run tenant is malformed")
-	}
-
-	ceilingIdx := -1
-	for i, id := range path {
-		if err := validateLibraryTenantID(id); err != nil {
-			return nil, err
-		}
-		if id == ceilingTenant {
-			ceilingIdx = i
-		}
-	}
-	if ceilingIdx < 0 {
-		return nil, ErrCeilingNotAncestor
+	ceilingIdx, err := ceilingIndex(path, runTenant, ceilingTenant)
+	if err != nil {
+		return nil, err
 	}
 
 	chain := make([]string, 0, len(path)-ceilingIdx)
@@ -73,4 +60,26 @@ func LibraryChain(ctx context.Context, mgr TenantPathGetter, runTenant, ceilingT
 		chain = append(chain, path[i])
 	}
 	return chain, nil
+}
+
+// ceilingIndex validates a root-first tenant path and returns the position of
+// the ceiling tenant within it.
+func ceilingIndex(path []string, runTenant, ceilingTenant string) (int, error) {
+	// The path is root-first and must end with the tenant itself.
+	if len(path) == 0 || path[len(path)-1] != runTenant {
+		return -1, fmt.Errorf("tenant path for run tenant is malformed")
+	}
+	ceilingIdx := -1
+	for i, id := range path {
+		if err := validateLibraryTenantID(id); err != nil {
+			return -1, err
+		}
+		if id == ceilingTenant {
+			ceilingIdx = i
+		}
+	}
+	if ceilingIdx < 0 {
+		return -1, ErrCeilingNotAncestor
+	}
+	return ceilingIdx, nil
 }

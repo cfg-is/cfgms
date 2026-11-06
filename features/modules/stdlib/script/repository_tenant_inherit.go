@@ -56,6 +56,37 @@ func (r *GitScriptRepository) ownerOf(ctx context.Context, id, version string) (
 	return entry.Key.TenantID, nil
 }
 
+// resolveInLibrary looks the id up in one tenant's library. found is false only
+// when the library does not hold the id at all; a holder lacking the requested
+// version is ErrScriptNotFound.
+func (t *TenantScriptRepository) resolveInLibrary(ctx context.Context, tenantID, id, version string) (*VersionedScript, string, bool, error) {
+	repo, err := t.ForTenant(tenantID)
+	if err != nil {
+		return nil, "", false, err
+	}
+	// Does this library hold the id at all?
+	if _, err := repo.configStore.GetConfig(ctx, &cfgconfig.ConfigKey{
+		TenantID: tenantID, Namespace: repo.namespace, Name: id, Scope: "latest",
+	}); err != nil {
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return nil, "", false, nil
+		}
+		return nil, "", false, fmt.Errorf("library lookup failed: %w", err)
+	}
+	s, err := repo.Get(id, version)
+	if err != nil {
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return nil, "", false, ErrScriptNotFound
+		}
+		return nil, "", false, err
+	}
+	owner, err := repo.ownerOf(ctx, id, version)
+	if err != nil {
+		return nil, "", false, err
+	}
+	return s, owner, true, nil
+}
+
 // ResolveInherited finds a script in the first library of chain (nearest first)
 // that holds id, and reports the tenant owning that library object. The id
 // decides: if the nearest holder lacks the requested version the call returns
@@ -71,31 +102,13 @@ func (t *TenantScriptRepository) ResolveInherited(ctx context.Context, chain []s
 		if err := ctx.Err(); err != nil {
 			return nil, "", err
 		}
-		repo, err := t.ForTenant(tenantID)
+		s, owner, found, err := t.resolveInLibrary(ctx, tenantID, id, version)
 		if err != nil {
 			return nil, "", err
 		}
-		// Does this library hold the id at all?
-		if _, err := repo.configStore.GetConfig(ctx, &cfgconfig.ConfigKey{
-			TenantID: tenantID, Namespace: repo.namespace, Name: id, Scope: "latest",
-		}); err != nil {
-			if errors.Is(err, cfgconfig.ErrConfigNotFound) {
-				continue
-			}
-			return nil, "", fmt.Errorf("library lookup failed: %w", err)
+		if found {
+			return s, owner, nil
 		}
-		s, err := repo.Get(id, version)
-		if err != nil {
-			if errors.Is(err, cfgconfig.ErrConfigNotFound) {
-				return nil, "", ErrScriptNotFound
-			}
-			return nil, "", err
-		}
-		owner, err := repo.ownerOf(ctx, id, version)
-		if err != nil {
-			return nil, "", err
-		}
-		return s, owner, nil
 	}
 	return nil, "", ErrScriptNotFound
 }
