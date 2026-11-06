@@ -334,7 +334,7 @@ jobs:
     - name: Install dependencies
       run: go mod download
 
-    - name: Run controller-core group (server, initialization)
+    - name: Run controller-core group (server, initialization, workflow)
       env:
         CFGMS_TEST_INTEGRATION: "0"
       run: make test-go-group-controller-core
@@ -377,7 +377,7 @@ jobs:
     - name: Install dependencies
       run: go mod download
 
-    - name: Run heavy-providers group (cert, controlplane/grpc, steward/client, storage/sqlite)
+    - name: Run heavy-providers group (cert, controlplane/grpc, steward/client, storage/sqlite, cmd/steward)
       env:
         CFGMS_TEST_INTEGRATION: "0"
       run: make test-go-group-heavy-providers

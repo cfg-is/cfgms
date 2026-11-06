@@ -1865,6 +1865,15 @@ test_go_group_split_partition_covers_all_packages() {
         return
     fi
 
+    # Name any package missing from the groups (Issue #5958): the counts above
+    # catch a drop, this says which package it was.
+    local missing
+    missing=$(comm -23 <(echo "$full" | sort -u) <(printf '%s\n%s\n%s\n' "$core" "$heavy" "$rest" | sort -u))
+    if [[ -n "$missing" ]]; then
+        log_fail "packages in go list ./... but in no group: $(echo "$missing" | tr '\n' ' ')"
+        return
+    fi
+
     log_pass "go-group split: ${full_count} packages partitioned across controller-core (${core_count}), heavy-providers (${heavy_count}), rest (${rest_count}) — complete, no duplicates"
 }
 
