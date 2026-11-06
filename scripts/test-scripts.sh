@@ -1421,6 +1421,68 @@ CONTRIBEOF
     fi
 }
 
+# Helper: returns 0 when the file has no non-trusted tooling-script path and no
+# cleanup-issue command line; prints offending lines and returns 1 otherwise.
+_reviewer_def_clean() {
+    local file="$1" bad=0 m
+    m=$(grep -nP '(?<!/opt/cfgms-trusted/)\.claude/tooling/scripts/' "$file" 2>/dev/null) || true
+    if [[ -n "$m" ]]; then echo "$m"; bad=1; fi
+    m=$(grep -nE '^[^`]*agent-dispatch\.sh cleanup-issue' "$file" 2>/dev/null \
+        | grep -E '^[0-9]+:([[:space:]]|/|\.|bash)') || true
+    if [[ -n "$m" ]]; then echo "$m"; bad=1; fi
+    return "$bad"
+}
+
+test_acceptance_reviewer_trusted_tooling_paths() {
+    log_test "Testing: acceptance-reviewer.md runs tooling only from the trusted root..."
+
+    local root
+    root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
+
+    # Falsifiability probes: the helper must reject relative paths and cleanup-issue
+    # commands, and accept trusted-root invocations.
+    printf './.claude/tooling/scripts/project-queue.sh get-item X\n' > "$tmp_dir/bad.md"
+    printf '/opt/cfgms-trusted/.claude/tooling/scripts/agent-dispatch.sh cleanup-issue 1\n' > "$tmp_dir/bad2.md"
+    printf '/opt/cfgms-trusted/.claude/tooling/scripts/project-queue.sh get-item X\n' > "$tmp_dir/good.md"
+    if ! _reviewer_def_clean "$tmp_dir/bad.md" >/dev/null; then
+        log_pass "acceptance_reviewer_trusted_tooling_paths: probe rejects relative tooling path"
+    else
+        log_fail "acceptance_reviewer_trusted_tooling_paths: probe failed to reject relative tooling path"
+        return
+    fi
+    if ! _reviewer_def_clean "$tmp_dir/bad2.md" >/dev/null; then
+        log_pass "acceptance_reviewer_trusted_tooling_paths: probe rejects cleanup-issue command"
+    else
+        log_fail "acceptance_reviewer_trusted_tooling_paths: probe failed to reject cleanup-issue command"
+        return
+    fi
+    if _reviewer_def_clean "$tmp_dir/good.md" >/dev/null; then
+        log_pass "acceptance_reviewer_trusted_tooling_paths: probe accepts trusted path"
+    else
+        log_fail "acceptance_reviewer_trusted_tooling_paths: probe rejected a trusted path"
+        return
+    fi
+
+    local def="${root}/.claude/agents/acceptance-reviewer.md" out
+    if out=$(_reviewer_def_clean "$def"); then
+        log_pass "acceptance_reviewer_trusted_tooling_paths: no untrusted tooling path or cleanup-issue command"
+    else
+        log_fail "acceptance_reviewer_trusted_tooling_paths: violations in acceptance-reviewer.md:"
+        while IFS= read -r line; do echo "    $line"; done <<< "$out"
+    fi
+
+    if grep -q '/opt/cfgms-trusted/\.claude/tooling/scripts/project-queue\.sh' "$def" \
+        && grep -q '/opt/cfgms-trusted/\.claude/tooling/scripts/pipeline-helper\.sh comment' "$def"; then
+        log_pass "acceptance_reviewer_trusted_tooling_paths: trusted project-queue.sh and pipeline-helper.sh comment present"
+    else
+        log_fail "acceptance_reviewer_trusted_tooling_paths: missing trusted project-queue.sh or pipeline-helper.sh comment invocation"
+    fi
+}
+
 
 test_no_pipeline_label_refs() {
     log_test "Testing: no pipeline:* or agent:* label references in .claude/ or scripts/..."
@@ -2636,6 +2698,7 @@ DISPATCH_TABLE=(
     "test_security_trivy_clean_scan:core"
     "test_check_cla_signed:core"
     "test_no_pipeline_label_refs:core"
+    "test_acceptance_reviewer_trusted_tooling_paths:core"
     "test_tier1_smoke_test:core"
     "test_tier1_bootstrap:core"
     "test_ha_cluster_bootstrap:core"

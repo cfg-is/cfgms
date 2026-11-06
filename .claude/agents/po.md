@@ -716,7 +716,7 @@ indefinitely.
 **What the headless reviewer does** (`.claude/agents/acceptance-reviewer.md`):
 verifies CI, checks acceptance criteria against the diff, posts the structured
 comment, and:
-- Zero findings: enqueues via `./.claude/tooling/scripts/po-act.sh enqueue <PR> <STORY>`, sets project status `Done`, cleans up the dev agent's container/worktree
+- Zero findings: enqueues via `/opt/cfgms-trusted/.claude/tooling/scripts/po-act.sh enqueue <PR> <STORY>`, sets project status `Done`; the host `cleanup-stale` pass cleans up the dev agent's container/worktree
 - Any findings (first review): sets project status `Fix`
 - Any findings (second review): sets project status `Blocked`, assigns to founder
 
