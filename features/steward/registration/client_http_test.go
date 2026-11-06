@@ -835,3 +835,16 @@ func TestRefreshClaim_SendsProvenance(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, attrs, got.Provenance)
 }
+
+// TestRegistrationRequest_CloneReasonOnTheWire verifies the clone_reason field is
+// sent only when set, so an ordinary registration or clone never carries it.
+func TestRegistrationRequest_CloneReasonOnTheWire(t *testing.T) {
+	plain, err := json.Marshal(RegistrationRequest{Token: "tok", CloneOf: "steward-old"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(plain), "clone_reason")
+
+	withReason, err := json.Marshal(RegistrationRequest{Token: "tok", CloneOf: "steward-old", CloneReason: "broken_trust"})
+	require.NoError(t, err)
+	assert.Contains(t, string(withReason), `"clone_reason":"broken_trust"`)
+	assert.Contains(t, string(withReason), `"clone_of":"steward-old"`)
+}

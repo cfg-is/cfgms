@@ -245,13 +245,25 @@ const cloneMarkerFileName = "steward-clone-of.json"
 
 type cloneMarker struct {
 	CloneOf string `json:"clone_of"`
+	// Reason is the clone_reason sent with the registration. Empty for an
+	// ordinary copy; cloneReasonBrokenTrust for the broken-trust fallback, whose
+	// marker also outlives the registration until a link rebinds the old ID.
+	Reason string `json:"reason,omitempty"`
+	// Rekey is set while the device key still has to be regenerated and the old
+	// identity discarded (broken-trust only). It is cleared once both are done,
+	// so a restart never mints a second device.
+	Rekey bool `json:"rekey,omitempty"`
 }
 
 func saveCloneMarker(dir, cloneOf string) error {
+	return saveCloneMarkerDetail(dir, cloneMarker{CloneOf: cloneOf})
+}
+
+func saveCloneMarkerDetail(dir string, m cloneMarker) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create clone marker dir: %w", err)
 	}
-	data, err := json.Marshal(cloneMarker{CloneOf: cloneOf})
+	data, err := json.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("marshal clone marker: %w", err)
 	}

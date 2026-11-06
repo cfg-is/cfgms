@@ -44,6 +44,12 @@ type RegistrationRequest struct {
 	// tenant or authorization decision.
 	CloneOf string `json:"clone_of,omitempty"`
 
+	// CloneReason says why the steward reports a prior identity. Set only to
+	// "broken_trust" by a steward that could not trust its own stored identity
+	// or CA and re-keyed (ADR-034); the controller then admits it locked. Never
+	// set for an ordinary copy.
+	CloneReason string `json:"clone_reason,omitempty"`
+
 	// CSRPEM is a PEM-encoded CERTIFICATE REQUEST over a keypair the steward
 	// generates locally at registration time (Issue #3780). The controller signs
 	// this public key into the steward's mTLS client certificate; the matching

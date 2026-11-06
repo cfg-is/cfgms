@@ -19,7 +19,7 @@ func TestBuildRegistrationRequest_CarriesKeyAlgorithmAndProtection(t *testing.T)
 	pub, _, err := ks.GenerateOrLoad(context.Background())
 	require.NoError(t, err)
 
-	req := buildRegistrationRequest("tok", "", ks)
+	req := buildRegistrationRequest("tok", "", "", ks)
 	assert.Equal(t, "ed25519", req.KeyAlgorithm)
 	assert.Equal(t, "file", req.KeyProtectionLevel)
 	assert.Equal(t, ks.DeviceID(), req.DeviceID)
@@ -32,7 +32,7 @@ func TestBuildRegistrationRequest_CarriesKeyAlgorithmAndProtection(t *testing.T)
 }
 
 func TestBuildRegistrationRequest_NoKeyStore(t *testing.T) {
-	req := buildRegistrationRequest("tok", "", nil)
+	req := buildRegistrationRequest("tok", "", "", nil)
 	assert.Empty(t, req.DeviceID)
 	assert.Empty(t, req.KeyAlgorithm)
 	assert.Empty(t, req.KeyProtectionLevel)

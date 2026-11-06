@@ -3,15 +3,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -82,6 +85,18 @@ type cloneTestController struct {
 	pending      business.PendingRegistrationStore
 	refreshHits  atomic.Int32
 	registerHits atomic.Int32
+	// registerBodies holds the raw JSON of every registration request.
+	registerMu     sync.Mutex
+	registerBodies []string
+}
+
+func (c *cloneTestController) lastRegisterBody() string {
+	c.registerMu.Lock()
+	defer c.registerMu.Unlock()
+	if len(c.registerBodies) == 0 {
+		return ""
+	}
+	return c.registerBodies[len(c.registerBodies)-1]
 }
 
 func newCloneTestController(t *testing.T, originalStewardID string) *cloneTestController {
@@ -146,6 +161,11 @@ func newCloneTestController(t *testing.T, originalStewardID string) *cloneTestCo
 			c.refreshHits.Add(1)
 		case strings.HasSuffix(r.URL.Path, "/api/v1/register"):
 			c.registerHits.Add(1)
+			body, _ := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			c.registerMu.Lock()
+			c.registerBodies = append(c.registerBodies, string(body))
+			c.registerMu.Unlock()
 		}
 		handler.ServeHTTP(w, r)
 	}))
