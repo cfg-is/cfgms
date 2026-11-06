@@ -990,44 +990,52 @@ func isValidDeviceID(id string) bool {
 	return true
 }
 
-// handleRegister handles steward registration via REST API
-// POST /api/v1/register
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	// Only allow POST
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+// registerAdmission carries the validated state of one registration request
+// between the stages of handleRegister.
+type registerAdmission struct {
+	req       RegistrationRequest
+	token     *registration.Token
+	stewardID string
+	keyAlg    KeyAlgorithm
+	keyBytes  []byte
+	claimID   string
+	csr       *x509.CertificateRequest
+	attrs     map[string]string
+}
 
-	// Parse request body
+// decodeRegisterRequest parses the request body and sanitises the hostname.
+// It writes the error response and returns false on failure.
+func (s *Server) decodeRegisterRequest(w http.ResponseWriter, r *http.Request) (RegistrationRequest, bool) {
 	var req RegistrationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.logger.Warn("Failed to parse registration request", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
+		return req, false
 	}
 
 	// The hostname is a steward-supplied, unauthenticated hint (Issue #4598):
 	// sanitise once here so the DNA attributes and the pending entry both carry
 	// the cleaned value.
 	req.Hostname = sanitizeHostnameHint(req.Hostname)
+	return req, true
+}
 
-	// Validate token format
+// resolveRegisterToken checks the token format and store, then reads the token
+// metadata (tenant, group, controller URL) and confirms it is usable.
+func (s *Server) resolveRegisterToken(w http.ResponseWriter, r *http.Request, req RegistrationRequest) (*registration.Token, bool) {
 	if req.Token == "" {
 		http.Error(w, "Registration token is required", http.StatusBadRequest)
-		return
+		return nil, false
 	}
 
 	s.logger.Info("Processing steward registration request", "token_prefix", logging.RedactedID(req.Token))
 
-	// Check if registration token store is available
 	if s.registrationTokenStore == nil {
 		s.logger.Error("Registration token store not available")
 		http.Error(w, "Registration service unavailable", http.StatusInternalServerError)
-		return
+		return nil, false
 	}
 
-	// Retrieve token metadata (tenant, group, controller URL) for building the response
 	token, err := s.registrationTokenStore.GetToken(r.Context(), req.Token)
 	if err != nil {
 		s.logger.Warn("Invalid registration token", "error", logging.SanitizeLogValue(err.Error()))
@@ -1036,233 +1044,308 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			business.AuditEventSecurityEvent, "registration_rejected",
 			business.AuditResultFailure, business.AuditSeverityCritical, nil)
 		http.Error(w, "Invalid or expired registration token", http.StatusUnauthorized)
-		return
+		return nil, false
 	}
 
 	if !s.registrationTokenUsable(w, r, req, token) {
-		return
+		return nil, false
 	}
+	return token, true
+}
 
-	stewardID, idErr := generateStewardID(time.Now())
-	if idErr != nil {
-		s.logger.Error("Failed to generate steward ID", "error", logging.SanitizeLogValue(idErr.Error()))
-		http.Error(w, "Registration service unavailable", http.StatusInternalServerError)
-		return
-	}
-
-	// Build initial DNA attributes from best-effort identity hints (Issue #2640).
-	// Hostname and OS are optional; registration succeeds when absent.
-	initialAttrs := initialStewardAttrs(req)
-
-	// Log token use without exposing the bearer value.
-	s.logger.Info("Token used for registration",
-		"token_prefix", logging.RedactedID(req.Token),
-		"tenant_id", logging.SanitizeLogValue(token.TenantID),
-		"steward_id", stewardID)
-
-	// Validate device identity fields (Issue #2095, ADR-010 §1).
+// validateRegisterIdentity validates the device identity fields (Issue #2095,
+// ADR-010 §1) and fills the key algorithm, key bytes and claim ID of adm.
+func validateRegisterIdentity(w http.ResponseWriter, adm *registerAdmission) bool {
+	req := adm.req
 	if !isValidDeviceID(req.DeviceID) {
 		http.Error(w, "device_id is required and must be a 64-character lowercase hex string", http.StatusBadRequest)
-		return
+		return false
 	}
 	keyAlg, algOK := normalizeKeyAlgorithm(req.KeyAlgorithm)
 	if !algOK {
 		http.Error(w, "key_algorithm must be \"ed25519\" or \"ecdsa-p256\"", http.StatusBadRequest)
-		return
+		return false
 	}
 	identityKeyBytes, keyErr := base64.StdEncoding.DecodeString(req.IdentityKeyPub)
 	if keyErr != nil {
 		http.Error(w, "identity_key_pub is required and must be base64-encoded", http.StatusBadRequest)
-		return
+		return false
 	}
 	if _, parseErr := parseDevicePublicKey(keyAlg, identityKeyBytes); parseErr != nil {
 		http.Error(w, "identity_key_pub is not a valid public key for key_algorithm "+string(keyAlg)+
 			" (ed25519: raw 32-byte key; ecdsa-p256: PKIX DER on P-256)", http.StatusBadRequest)
-		return
+		return false
 	}
 	// The DeviceID is SHA-256 of the key bytes for both algorithms (ADR-010 §1,
 	// ADR-011 Amendment 3).
 	if req.DeviceID != deviceIDForKey(identityKeyBytes) {
 		http.Error(w, "device_id must be the lowercase hex SHA-256 of the identity_key_pub bytes", http.StatusBadRequest)
-		return
+		return false
 	}
-	claimID := registrationClaimID(req.DeviceID, identityKeyBytes)
+	adm.keyAlg = keyAlg
+	adm.keyBytes = identityKeyBytes
+	adm.claimID = registrationClaimID(req.DeviceID, identityKeyBytes)
+	return true
+}
 
-	// Validate the CSR (Issue #3780): the steward generates its mTLS keypair
-	// locally and submits only the public half. Rejected before any store write,
-	// mirroring the credential-request lodge endpoint's same two checks
-	// (handlers_credential_requests.go handleLodgeCredentialRequest).
-	if req.CSRPEM == "" {
+// validateRegisterCSR validates the CSR (Issue #3780): the steward generates its
+// mTLS keypair locally and submits only the public half. Rejected before any
+// store write, mirroring the credential-request lodge endpoint's same two checks
+// (handlers_credential_requests.go handleLodgeCredentialRequest).
+func (s *Server) validateRegisterCSR(w http.ResponseWriter, adm *registerAdmission) bool {
+	if adm.req.CSRPEM == "" {
 		http.Error(w, "csr_pem is required", http.StatusBadRequest)
-		return
+		return false
 	}
-	if containsPrivateKeyMaterial(req.CSRPEM) {
+	if containsPrivateKeyMaterial(adm.req.CSRPEM) {
 		http.Error(w, "private key material is not accepted", http.StatusBadRequest)
-		return
+		return false
 	}
-	csr, csrErr := parseAndVerifyCSR(req.CSRPEM)
+	csr, csrErr := parseAndVerifyCSR(adm.req.CSRPEM)
 	if csrErr != nil {
 		s.logger.Warn("Rejected invalid certificate signing request at registration",
 			"error", logging.SanitizeLogValue(csrErr.Error()))
 		http.Error(w, "invalid certificate signing request", http.StatusBadRequest)
+		return false
+	}
+	adm.csr = csr
+	return true
+}
+
+// rejectDuplicateDeviceID rejects a duplicate DeviceID within the same tenant.
+// Cross-tenant collision is allowed — each tenant namespace is independent
+// (matching the tenant-isolation pattern at line ~221). token.TenantID is
+// authenticated (derived from the registration token), so the lookup is
+// tenant-scoped and cannot match a different tenant's collision. It writes the
+// 409 response and returns true when the registration is a duplicate.
+func (s *Server) rejectDuplicateDeviceID(w http.ResponseWriter, r *http.Request, adm *registerAdmission) bool {
+	if s.stewardStore == nil {
+		return false
+	}
+	req, token, keyAlg := adm.req, adm.token, adm.keyAlg
+	existing, lookupErr := s.stewardStore.GetStewardByDeviceIDForTenant(r.Context(), req.DeviceID, token.TenantID)
+	if lookupErr != nil || existing == nil ||
+		existing.Status == business.StewardStatusDeregistered { // Issue #4534: decommissioned devices may re-enroll
+		return false
+	}
+	if storedAlg, ok := normalizeKeyAlgorithm(existing.KeyAlgorithm); !ok || storedAlg != keyAlg {
+		s.emitRefreshAudit(r.Context(), req.DeviceID, token.TenantID,
+			business.AuditEventSecurityEvent, "registration_rejected",
+			business.AuditResultDenied, business.AuditSeverityCritical,
+			map[string]interface{}{
+				"reason":                "key_algorithm_change",
+				"stored_key_algorithm":  string(storedAlg),
+				"request_key_algorithm": string(keyAlg),
+			})
+	}
+	s.logger.Warn("Duplicate DeviceID registration attempt within tenant",
+		"device_id", logging.SanitizeLogValue(req.DeviceID),
+		"tenant_id", logging.SanitizeLogValue(token.TenantID))
+	http.Error(w, "device_id already registered in this tenant", http.StatusConflict)
+	return true
+}
+
+// admitRegistration runs the registration approval hook (Issue #422). Hook
+// failures must not grant unrestricted access. Quarantine keeps certificate
+// issuance behind an explicit operator decision while preserving a recoverable
+// path for a legitimate steward when the admission service is unavailable.
+// It returns true when the request was answered (rejected or quarantined) and
+// false when it was approved and issuance should continue.
+func (s *Server) admitRegistration(w http.ResponseWriter, r *http.Request, adm *registerAdmission) bool {
+	token := adm.token
+	input := RegistrationInput{
+		Token:    token,
+		SourceIP: extractSourceIP(r, s.trustedProxies),
+	}
+	decision, reason, hookErr := s.approvalHook.Evaluate(r.Context(), input)
+	if hookErr != nil {
+		s.logger.Warn("Registration approval hook error, quarantining",
+			"error", logging.SanitizeLogValue(hookErr.Error()),
+			"tenant_id", logging.SanitizeLogValue(token.TenantID))
+		decision = DecisionQuarantine
+		reason = "admission service unavailable"
+	}
+	switch decision {
+	case DecisionReject:
+		// The reason originates in an approval workflow, which reaches
+		// modules and external APIs, so it is untrusted text of the
+		// controller's own making. It belongs in the durable audit record —
+		// access-controlled and attributable — not in the application log,
+		// which is the broader-exposure surface. The log records only that a
+		// bounded reason exists, so an operator knows where to look.
+		s.logger.Warn("Registration rejected by approval workflow",
+			"tenant_id", logging.SanitizeLogValue(token.TenantID),
+			"has_reason", reason != "")
+		// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
+		s.emitRegistrationAudit(r.Context(), adm.req.Token, token.TenantID, adm.stewardID,
+			business.AuditEventSecurityEvent, "registration_rejected",
+			business.AuditResultDenied, business.AuditSeverityCritical,
+			map[string]interface{}{"rejection_reason": reason})
+		http.Error(w, "Registration rejected", http.StatusForbidden)
+		return true
+	case DecisionQuarantine:
+		s.quarantineRegistration(w, r, adm, reason)
+		return true
+	}
+	return false
+}
+
+// quarantineRegistration answers a quarantine decision with 202 and no cert —
+// cert issuance is gated on approval (Issue #1693). The pending entry is stored
+// durably instead of in an in-memory sync.Map (Issue #1696).
+func (s *Server) quarantineRegistration(w http.ResponseWriter, r *http.Request, adm *registerAdmission, reason string) {
+	req, token, stewardID, claimID := adm.req, adm.token, adm.stewardID, adm.claimID
+	if s.pendingStore == nil {
+		s.logger.Error("Cannot quarantine registration without durable pending store",
+			"tenant_id", logging.SanitizeLogValue(token.TenantID))
+		http.Error(w, "Registration admission service unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Reject duplicate DeviceID within the same tenant. Cross-tenant collision is allowed —
-	// each tenant namespace is independent (matching the tenant-isolation pattern at line ~221).
-	// token.TenantID is authenticated (derived from the registration token), so the
-	// lookup is tenant-scoped and cannot match a different tenant's collision.
-	if s.stewardStore != nil {
-		if existing, lookupErr := s.stewardStore.GetStewardByDeviceIDForTenant(r.Context(), req.DeviceID, token.TenantID); lookupErr == nil && existing != nil &&
-			existing.Status != business.StewardStatusDeregistered { // Issue #4534: decommissioned devices may re-enroll
-			if storedAlg, ok := normalizeKeyAlgorithm(existing.KeyAlgorithm); !ok || storedAlg != keyAlg {
-				s.emitRefreshAudit(r.Context(), req.DeviceID, token.TenantID,
-					business.AuditEventSecurityEvent, "registration_rejected",
-					business.AuditResultDenied, business.AuditSeverityCritical,
-					map[string]interface{}{
-						"reason":                "key_algorithm_change",
-						"stored_key_algorithm":  string(storedAlg),
-						"request_key_algorithm": string(keyAlg),
-					})
-			}
-			s.logger.Warn("Duplicate DeviceID registration attempt within tenant",
-				"device_id", logging.SanitizeLogValue(req.DeviceID),
-				"tenant_id", logging.SanitizeLogValue(token.TenantID))
-			http.Error(w, "device_id already registered in this tenant", http.StatusConflict)
-			return
-		}
+	quarantineTransportAddr, taErr := s.getTransportAddress()
+	if taErr != nil {
+		s.logger.Error("Transport address not configured; steward cannot reconnect after approval",
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", taErr)
+		http.Error(w, "Server misconfiguration: transport address not configured", http.StatusInternalServerError)
+		return
 	}
 
-	// Issue #422: Run registration approval hook.
-	// Hook failures must not grant unrestricted access. Quarantine keeps certificate
-	// issuance behind an explicit operator decision while preserving a recoverable
-	// path for a legitimate steward when the admission service is unavailable.
-	{
-		input := RegistrationInput{
-			Token:    token,
-			SourceIP: extractSourceIP(r, s.trustedProxies),
-		}
-		decision, reason, hookErr := s.approvalHook.Evaluate(r.Context(), input)
-		if hookErr != nil {
-			s.logger.Warn("Registration approval hook error, quarantining",
-				"error", logging.SanitizeLogValue(hookErr.Error()),
-				"tenant_id", logging.SanitizeLogValue(token.TenantID))
-			decision = DecisionQuarantine
-			reason = "admission service unavailable"
-		}
-		switch decision {
-		case DecisionReject:
-			// The reason originates in an approval workflow, which reaches
-			// modules and external APIs, so it is untrusted text of the
-			// controller's own making. It belongs in the durable audit record —
-			// access-controlled and attributable — not in the application log,
-			// which is the broader-exposure surface. The log records only that a
-			// bounded reason exists, so an operator knows where to look.
-			s.logger.Warn("Registration rejected by approval workflow",
-				"tenant_id", logging.SanitizeLogValue(token.TenantID),
-				"has_reason", reason != "")
-			// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
-			s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
-				business.AuditEventSecurityEvent, "registration_rejected",
-				business.AuditResultDenied, business.AuditSeverityCritical,
-				map[string]interface{}{"rejection_reason": reason})
-			http.Error(w, "Registration rejected", http.StatusForbidden)
-			return
-		case DecisionQuarantine:
-			// Issue #1693: quarantine returns 202 with no cert — cert issuance is gated on approval.
-			// Issue #1696: store the pending entry durably instead of in-memory sync.Map.
-			if s.pendingStore == nil {
-				s.logger.Error("Cannot quarantine registration without durable pending store",
-					"tenant_id", logging.SanitizeLogValue(token.TenantID))
-				http.Error(w, "Registration admission service unavailable", http.StatusServiceUnavailable)
-				return
-			}
-
-			quarantineTransportAddr, taErr := s.getTransportAddress()
-			if taErr != nil {
-				s.logger.Error("Transport address not configured; steward cannot reconnect after approval",
-					"steward_id", stewardID, "error", taErr)
-				http.Error(w, "Server misconfiguration: transport address not configured", http.StatusInternalServerError)
-				return
-			}
-
-			created, claimErr := s.registrationTokenStore.ClaimToken(r.Context(), req.Token, claimID)
-			if claimErr != nil {
-				s.logger.Error("Failed to atomically claim registration token", "error", logging.SanitizeLogValue(claimErr.Error()))
-				http.Error(w, "Registration service unavailable", http.StatusServiceUnavailable)
-				return
-			}
-
-			// The pending ID is derived from the token and the device identity
-			// rather than from the clock, so a retrying device can be handed back
-			// its own entry. A perennial token quarantines many devices at once,
-			// so a by-token lookup here could return a different device's entry.
-			pendingID := pendingRegistrationID(req.Token, claimID)
-			if !created {
-				existing, existingErr := s.pendingStore.GetPendingByID(r.Context(), pendingID)
-				if existingErr == nil && existing != nil &&
-					(existing.Status == business.PendingRegistrationStatusPending ||
-						existing.Status == business.PendingRegistrationStatusApproved) {
-					s.writePendingRegistrationResponse(w, existing, token.Group)
-					return
-				}
-				http.Error(w, "Registration token claim is already in progress or completed", http.StatusConflict)
-				return
-			}
-
-			pendingEntry := &business.PendingRegistrationEntry{
-				PendingID:          pendingID,
-				StewardID:          stewardID,
-				TenantID:           token.TenantID,
-				TokenStr:           req.Token,
-				SourceIP:           extractSourceIP(r, s.trustedProxies),
-				RegisteredAt:       time.Now().UTC(),
-				ExpiresAt:          time.Now().UTC().Add(5 * 24 * time.Hour),
-				Status:             business.PendingRegistrationStatusPending,
-				DeviceID:           req.DeviceID,
-				IdentityKeyPub:     identityKeyBytes,
-				KeyProtectionLevel: req.KeyProtectionLevel,
-				KeyAlgorithm:       req.KeyAlgorithm,
-				CSRPEM:             req.CSRPEM,
-				Hostname:           req.Hostname,
-				Platform:           req.OS,
-				KeyFingerprint:     csrKeyFingerprint(csr),
-				CloneOf:            s.validatedCloneOf(r.Context(), req.CloneOf, token.TenantID),
-			}
-			if err := s.pendingStore.AddPending(r.Context(), pendingEntry); err != nil {
-				if releaseErr := s.registrationTokenStore.ReleaseTokenClaim(r.Context(), req.Token, claimID); releaseErr != nil {
-					s.logger.Error("Failed to release registration token claim after pending-store failure",
-						"pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(releaseErr.Error()))
-				}
-				s.logger.Error("Failed to persist pending registration",
-					"pending_id", logging.SanitizeLogValue(pendingID), "steward_id", stewardID, "error", logging.SanitizeLogValue(err.Error()))
-				http.Error(w, "Registration admission service unavailable", http.StatusServiceUnavailable)
-				return
-			}
-
-			s.logger.Info("Registration quarantined by approval workflow",
-				"tenant_id", logging.SanitizeLogValue(token.TenantID),
-				"pending_id", logging.SanitizeLogValue(pendingID))
-			if err := s.controllerService.RegisterStewardWithAttributes(stewardID, token.TenantID, quarantineTransportAddr, "quarantined", initialAttrs); err != nil {
-				s.logger.Error("Failed to register quarantined steward in controller service",
-					"steward_id", stewardID, "error", logging.SanitizeLogValue(err.Error()))
-			}
-
-			s.emitQuarantineAudits(r.Context(), req, pendingEntry, reason)
-			s.writePendingRegistrationResponse(w, pendingEntry, token.Group)
-			return
-		}
+	created, claimErr := s.registrationTokenStore.ClaimToken(r.Context(), req.Token, claimID)
+	if claimErr != nil {
+		s.logger.Error("Failed to atomically claim registration token", "error", logging.SanitizeLogValue(claimErr.Error()))
+		http.Error(w, "Registration service unavailable", http.StatusServiceUnavailable)
+		return
 	}
 
-	// Build response with connection details
+	// The pending ID is derived from the token and the device identity
+	// rather than from the clock, so a retrying device can be handed back
+	// its own entry. A perennial token quarantines many devices at once,
+	// so a by-token lookup here could return a different device's entry.
+	pendingID := pendingRegistrationID(req.Token, claimID)
+	if !created {
+		s.answerLostQuarantineClaim(w, r, adm, pendingID)
+		return
+	}
+
+	pendingEntry := s.newQuarantinePendingEntry(r, adm, pendingID)
+	if !s.persistPendingRegistration(w, r, adm, pendingEntry) {
+		return
+	}
+
+	s.logger.Info("Registration quarantined by approval workflow",
+		"tenant_id", logging.SanitizeLogValue(token.TenantID),
+		"pending_id", logging.SanitizeLogValue(pendingID))
+	if err := s.controllerService.RegisterStewardWithAttributes(stewardID, token.TenantID, quarantineTransportAddr, "quarantined", adm.attrs); err != nil {
+		s.logger.Error("Failed to register quarantined steward in controller service",
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
+	}
+
+	s.emitQuarantineAudits(r.Context(), req, pendingEntry, reason)
+	s.writePendingRegistrationResponse(w, pendingEntry, token.Group)
+}
+
+// answerLostQuarantineClaim answers a retry whose token claim already exists: it
+// hands back the device's own live pending entry, else reports the conflict.
+func (s *Server) answerLostQuarantineClaim(w http.ResponseWriter, r *http.Request, adm *registerAdmission, pendingID string) {
+	existing, existingErr := s.pendingStore.GetPendingByID(r.Context(), pendingID)
+	if existingErr == nil && existing != nil &&
+		(existing.Status == business.PendingRegistrationStatusPending ||
+			existing.Status == business.PendingRegistrationStatusApproved) {
+		s.writePendingRegistrationResponse(w, existing, adm.token.Group)
+		return
+	}
+	http.Error(w, "Registration token claim is already in progress or completed", http.StatusConflict)
+}
+
+// clientCertValidityDays returns the configured client certificate validity,
+// defaulting to 365 days.
+func (s *Server) clientCertValidityDays() int {
+	if s.cfg.Certificate != nil && s.cfg.Certificate.ClientCertValidityDays > 0 {
+		return s.cfg.Certificate.ClientCertValidityDays
+	}
+	return 365
+}
+
+// newQuarantinePendingEntry builds the durable pending entry for a quarantined
+// registration.
+func (s *Server) newQuarantinePendingEntry(r *http.Request, adm *registerAdmission, pendingID string) *business.PendingRegistrationEntry {
+	req, token := adm.req, adm.token
+	return &business.PendingRegistrationEntry{
+		PendingID:          pendingID,
+		StewardID:          adm.stewardID,
+		TenantID:           token.TenantID,
+		TokenStr:           req.Token,
+		SourceIP:           extractSourceIP(r, s.trustedProxies),
+		RegisteredAt:       time.Now().UTC(),
+		ExpiresAt:          time.Now().UTC().Add(5 * 24 * time.Hour),
+		Status:             business.PendingRegistrationStatusPending,
+		DeviceID:           req.DeviceID,
+		IdentityKeyPub:     adm.keyBytes,
+		KeyProtectionLevel: req.KeyProtectionLevel,
+		KeyAlgorithm:       req.KeyAlgorithm,
+		CSRPEM:             req.CSRPEM,
+		Hostname:           req.Hostname,
+		Platform:           req.OS,
+		KeyFingerprint:     csrKeyFingerprint(adm.csr),
+		CloneOf:            s.validatedCloneOf(r.Context(), req.CloneOf, token.TenantID),
+	}
+}
+
+// persistPendingRegistration stores the pending entry, releasing the token claim
+// and writing the 503 response when the store fails.
+func (s *Server) persistPendingRegistration(w http.ResponseWriter, r *http.Request, adm *registerAdmission, entry *business.PendingRegistrationEntry) bool {
+	err := s.pendingStore.AddPending(r.Context(), entry)
+	if err == nil {
+		return true
+	}
+	if releaseErr := s.registrationTokenStore.ReleaseTokenClaim(r.Context(), adm.req.Token, adm.claimID); releaseErr != nil {
+		s.logger.Error("Failed to release registration token claim after pending-store failure",
+			"pending_id", logging.SanitizeLogValue(entry.PendingID), "error", logging.SanitizeLogValue(releaseErr.Error()))
+	}
+	s.logger.Error("Failed to persist pending registration",
+		"pending_id", logging.SanitizeLogValue(entry.PendingID), "steward_id", logging.SanitizeLogValue(adm.stewardID), "error", logging.SanitizeLogValue(err.Error()))
+	http.Error(w, "Registration admission service unavailable", http.StatusServiceUnavailable)
+	return false
+}
+
+// signRegisterCert signs the steward's CSR, releasing the token claim and writing
+// the 500 response when signing fails.
+func (s *Server) signRegisterCert(w http.ResponseWriter, r *http.Request, adm *registerAdmission, validityDays int) (*cert.Certificate, bool) {
+	stewardID := adm.stewardID
+	clientCert, err := s.certManager.SignClientCertificateRequest(adm.csr.PublicKey, &cert.ClientCertConfig{
+		CommonName:   stewardID,
+		Organization: "CFGMS Stewards",
+		ClientID:     stewardID,
+		ValidityDays: validityDays,
+	})
+	if err == nil {
+		return clientCert, true
+	}
+	if releaseErr := s.registrationTokenStore.ReleaseTokenClaim(r.Context(), adm.req.Token, adm.claimID); releaseErr != nil {
+		s.logger.Error("Failed to release registration token claim after certificate failure",
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(releaseErr.Error()))
+	}
+	s.logger.Error("Failed to generate client certificate", "error", logging.SanitizeLogValue(err.Error()), "steward_id", logging.SanitizeLogValue(stewardID))
+	http.Error(w, "Failed to generate client certificate", http.StatusInternalServerError)
+	return nil, false
+}
+
+// issueRegisterCredentials builds the approved response: connection details, the
+// mTLS client certificate and the CA/signing material. Every fallible
+// prerequisite is resolved before the token is claimed, so failures up to the
+// claim are safe for the steward to retry. It returns the response, the issued
+// certificate serial and false if an error response was written.
+func (s *Server) issueRegisterCredentials(w http.ResponseWriter, r *http.Request, adm *registerAdmission, stewardID string) (resp RegistrationResponse, clientSerial string, ok bool) {
+	req, token, claimID := adm.req, adm.token, adm.claimID
+
 	approveTransportAddr, taErr := s.getTransportAddress()
 	if taErr != nil {
 		s.logger.Error("Transport address not configured; steward cannot connect after registration",
 			"steward_id", stewardID, "error", taErr)
 		http.Error(w, "Server misconfiguration: transport address not configured", http.StatusInternalServerError)
-		return
+		return resp, "", false
 	}
-	resp := RegistrationResponse{
+	resp = RegistrationResponse{
 		StewardID:        stewardID,
 		TenantID:         token.TenantID,
 		Group:            token.Group,
@@ -1275,62 +1358,34 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if s.certManager == nil {
 		s.logger.Error("Certificate manager not initialized", "steward_id", stewardID)
 		http.Error(w, "Server misconfiguration: Certificate manager unavailable", http.StatusInternalServerError)
-		return
+		return resp, "", false
 	}
 
-	// Resolve every fallible prerequisite before claiming the token. Failures up
-	// to this point are safe for the steward to retry.
-	validityDays := 365 // Default validity
-	if s.cfg.Certificate != nil && s.cfg.Certificate.ClientCertValidityDays > 0 {
-		validityDays = s.cfg.Certificate.ClientCertValidityDays
-	}
+	validityDays := s.clientCertValidityDays()
 
 	// Get CA certificate (required for certificate chain validation)
 	caCert, err := s.certManager.GetCACertificate()
 	if err != nil || len(caCert) == 0 {
 		s.logger.Error("Failed to get CA certificate", "error", logging.SanitizeLogValue(err.Error()), "steward_id", stewardID)
 		http.Error(w, "CA certificate unavailable", http.StatusInternalServerError)
-		return
+		return resp, "", false
 	}
 
 	// Get server certificate (public key) for configuration signature verification
 	serverCert := s.signerCertPEMFor(stewardID)
 
-	// This is the REST issuance boundary. For a given device identity exactly one
-	// caller can create the durable claim, even across controller processes, so a
-	// concurrent retry cannot obtain a second private key/certificate. The token
-	// itself stays valid for the rest of the fleet (Issue #1690).
 	// A broken-trust admission is checked against its per-token cap before it
 	// consumes the token claim; the approval hook has already approved it.
-	lockedAdmit := req.CloneReason == cloneReasonBrokenTrust
-	if lockedAdmit && !s.lockedAdmissionAllowed(w, r, req, token, stewardID) {
-		return
+	if req.CloneReason == cloneReasonBrokenTrust && !s.lockedAdmissionAllowed(w, r, req, token, stewardID) {
+		return resp, "", false
 	}
-	created, claimErr := s.registrationTokenStore.ClaimToken(r.Context(), req.Token, claimID)
-	if claimErr != nil {
-		s.logger.Error("Failed to atomically claim registration token", "error", logging.SanitizeLogValue(claimErr.Error()))
-		http.Error(w, "Registration service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	if !created {
-		http.Error(w, "Registration token claim is already in progress or completed", http.StatusConflict)
-		return
+	if !s.claimRegisterToken(w, r, req.Token, claimID) {
+		return resp, "", false
 	}
 
-	clientCert, err := s.certManager.SignClientCertificateRequest(csr.PublicKey, &cert.ClientCertConfig{
-		CommonName:   stewardID,
-		Organization: "CFGMS Stewards",
-		ClientID:     stewardID,
-		ValidityDays: validityDays,
-	})
-	if err != nil {
-		if releaseErr := s.registrationTokenStore.ReleaseTokenClaim(r.Context(), req.Token, claimID); releaseErr != nil {
-			s.logger.Error("Failed to release registration token claim after certificate failure",
-				"steward_id", stewardID, "error", logging.SanitizeLogValue(releaseErr.Error()))
-		}
-		s.logger.Error("Failed to generate client certificate", "error", logging.SanitizeLogValue(err.Error()), "steward_id", stewardID)
-		http.Error(w, "Failed to generate client certificate", http.StatusInternalServerError)
-		return
+	clientCert, ok := s.signRegisterCert(w, r, adm, validityDays)
+	if !ok {
+		return resp, "", false
 	}
 
 	// Return certificates in response (ALWAYS - required for mTLS). No private key
@@ -1346,47 +1401,128 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Generated client certificate for steward",
 		"steward_id", stewardID,
 		"validity_days", validityDays)
+	return resp, clientCert.SerialNumber, true
+}
+
+// claimRegisterToken is the REST issuance boundary. For a given device identity
+// exactly one caller can create the durable claim, even across controller
+// processes, so a concurrent retry cannot obtain a second private
+// key/certificate. The token itself stays valid for the rest of the fleet
+// (Issue #1690). It writes the error response and returns false when the claim
+// was not obtained.
+func (s *Server) claimRegisterToken(w http.ResponseWriter, r *http.Request, tokenStr, claimID string) bool {
+	created, claimErr := s.registrationTokenStore.ClaimToken(r.Context(), tokenStr, claimID)
+	if claimErr != nil {
+		s.logger.Error("Failed to atomically claim registration token", "error", logging.SanitizeLogValue(claimErr.Error()))
+		http.Error(w, "Registration service unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	if !created {
+		http.Error(w, "Registration token claim is already in progress or completed", http.StatusConflict)
+		return false
+	}
+	return true
+}
+
+// recordRegisteredSteward registers the approved steward with the controller
+// service and persists its device identity to the durable StewardStore so the S3b
+// PoP verification gate (registration-refresh) has a stored public key to verify
+// against (Issue #2095). Without that write, record.IdentityKeyPub is empty and
+// refresh verification is impossible.
+func (s *Server) recordRegisteredSteward(r *http.Request, adm *registerAdmission, transportAddr string, lockedAdmit bool) {
+	req, token, stewardID := adm.req, adm.token, adm.stewardID
+	registeredStatus := business.StewardStatusRegistered
+	if lockedAdmit {
+		registeredStatus = business.StewardStatusTampered
+	}
+	if err := s.controllerService.RegisterStewardWithAttributes(stewardID, token.TenantID, transportAddr, string(registeredStatus), adm.attrs); err != nil {
+		s.logger.Error("Failed to register steward in controller service",
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
+	}
+
+	if s.stewardStore == nil || lockedAdmit {
+		return
+	}
+	now := time.Now().UTC()
+	if storeErr := s.stewardStore.RegisterSteward(r.Context(), &business.StewardRecord{
+		ID:                 stewardID,
+		TenantID:           token.TenantID,
+		Status:             registeredStatus,
+		RegisteredAt:       now,
+		LastSeen:           now,
+		DeviceID:           req.DeviceID,
+		IdentityKeyPub:     adm.keyBytes,
+		KeyProtectionLevel: req.KeyProtectionLevel,
+		KeyAlgorithm:       req.KeyAlgorithm,
+	}); storeErr != nil {
+		s.logger.Error("Failed to persist device identity to steward store",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"device_id", logging.SanitizeLogValue(req.DeviceID),
+			"error", logging.SanitizeLogValue(storeErr.Error()))
+	}
+}
+
+// handleRegister handles steward registration via REST API
+// POST /api/v1/register
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	// Only allow POST
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	req, ok := s.decodeRegisterRequest(w, r)
+	if !ok {
+		return
+	}
+	token, ok := s.resolveRegisterToken(w, r, req)
+	if !ok {
+		return
+	}
+
+	stewardID, idErr := generateStewardID(time.Now())
+	if idErr != nil {
+		s.logger.Error("Failed to generate steward ID", "error", logging.SanitizeLogValue(idErr.Error()))
+		http.Error(w, "Registration service unavailable", http.StatusInternalServerError)
+		return
+	}
+
+	// Build initial DNA attributes from best-effort identity hints (Issue #2640).
+	// Hostname and OS are optional; registration succeeds when absent.
+	adm := &registerAdmission{req: req, token: token, stewardID: stewardID, attrs: initialStewardAttrs(req)}
+
+	// Log token use without exposing the bearer value.
+	s.logger.Info("Token used for registration",
+		"token_prefix", logging.RedactedID(req.Token),
+		"tenant_id", logging.SanitizeLogValue(token.TenantID),
+		"steward_id", stewardID)
+
+	if !validateRegisterIdentity(w, adm) || !s.validateRegisterCSR(w, adm) {
+		return
+	}
+	if s.rejectDuplicateDeviceID(w, r, adm) || s.admitRegistration(w, r, adm) {
+		return
+	}
+
+	resp, certSerial, ok := s.issueRegisterCredentials(w, r, adm, stewardID)
+	if !ok {
+		return
+	}
+
 	s.logger.Info("Steward registered successfully",
 		"steward_id", stewardID,
 		"tenant_id", logging.SanitizeLogValue(token.TenantID),
 		"group", logging.SanitizeLogValue(token.Group))
 
-	registeredStatus := business.StewardStatusRegistered
+	lockedAdmit := req.CloneReason == cloneReasonBrokenTrust
 	if lockedAdmit {
-		registeredStatus = business.StewardStatusTampered
 		// The locked record and its pending entry are written before the response
 		// carries the credential: a failure here hands the steward nothing.
-		if !s.admitLockedIdentity(w, r, req, token, claimID, stewardID, identityKeyBytes, clientCert.SerialNumber, csr) {
+		if !s.admitLockedIdentity(w, r, req, token, adm.claimID, stewardID, adm.keyBytes, certSerial, adm.csr) {
 			return
 		}
 	}
-	if err := s.controllerService.RegisterStewardWithAttributes(stewardID, token.TenantID, resp.TransportAddress, string(registeredStatus), initialAttrs); err != nil {
-		s.logger.Error("Failed to register steward in controller service",
-			"steward_id", stewardID, "error", logging.SanitizeLogValue(err.Error()))
-	}
-
-	// Persist device identity to the durable StewardStore so the S3b PoP verification
-	// gate (registration-refresh) has a stored public key to verify against (Issue #2095).
-	// Without this write, record.IdentityKeyPub is empty and refresh verification is impossible.
-	if s.stewardStore != nil && !lockedAdmit {
-		now := time.Now().UTC()
-		if storeErr := s.stewardStore.RegisterSteward(r.Context(), &business.StewardRecord{
-			ID:                 stewardID,
-			TenantID:           token.TenantID,
-			Status:             registeredStatus,
-			RegisteredAt:       now,
-			LastSeen:           now,
-			DeviceID:           req.DeviceID,
-			IdentityKeyPub:     identityKeyBytes,
-			KeyProtectionLevel: req.KeyProtectionLevel,
-			KeyAlgorithm:       req.KeyAlgorithm,
-		}); storeErr != nil {
-			s.logger.Error("Failed to persist device identity to steward store",
-				"steward_id", stewardID,
-				"device_id", logging.SanitizeLogValue(req.DeviceID),
-				"error", logging.SanitizeLogValue(storeErr.Error()))
-		}
-	}
+	s.recordRegisteredSteward(r, adm, resp.TransportAddress, lockedAdmit)
 
 	// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
 	s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
