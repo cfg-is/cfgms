@@ -1469,39 +1469,24 @@ func (c *TransportClient) commandsSignatureVerified() bool {
 	return h == nil || h.HasVerifier()
 }
 
-// setupCommandHandler creates and configures the command handler with all command types.
-// Story #516: connect_dataplane handler removed — DP is initialized eagerly in Connect().
-func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID string) (*commands.Handler, error) {
-	// Create status callback that publishes events via the offline-queued path
-	// so events are not lost if the controller is temporarily unreachable (Issue #419).
-	statusCallback := func(ctx context.Context, event *cpTypes.Event) {
-		if err := c.publishEventWithQueue(ctx, event); err != nil {
-			c.logger.Error("Failed to publish status event", "error", err)
-		}
+// publishStatusEvent publishes a command status event via the offline-queued path
+// so events are not lost if the controller is temporarily unreachable (Issue #419).
+func (c *TransportClient) publishStatusEvent(ctx context.Context, event *cpTypes.Event) {
+	if err := c.publishEventWithQueue(ctx, event); err != nil {
+		c.logger.Error("Failed to publish status event", "error", err)
 	}
+}
 
-	// Build the verifier on demand from the stored signing/server cert PEMs.
-	// Not cached — Issue #920 removes the configVerifier field.
-	verifier := c.buildVerifierOnDemand()
-
-	// Wire script signature verification into the command handler (Issue #1671).
-	// Without this, CommandExecuteScript signing enforcement is inactive in
-	// controller-connected deployments: require_signed_adhoc is ignored, library
-	// scripts fail TrustedKeys verification, and operator-cert CA chaining is skipped.
-	c.mu.RLock()
-	scriptSigning := c.scriptSigning
-	caCertPEM := c.caCertPEM
-	existingEmitter := c.eventEmitter
-	c.mu.RUnlock()
-
-	signingConfig := stewardconfig.BuildModuleSigningConfig(scriptSigning)
-
-	// controllerCARoots verifies operator-signed inline command certs chain to the
-	// controller CA — the same CA bundle used for mTLS. Left nil when no usable CA
-	// PEM is available, which the handler treats as "skip operator-cert CA
-	// verification". validControllerCARoots checks each root is a currently-valid
-	// CA before building the pool, and builds it through pkg/cert (the central
-	// certificate provider) rather than assembling an x509 pool locally.
+// commandHandlerCARoots resolves the CA roots that verify operator-signed inline
+// command certs and applies the policy that depends on them.
+//
+// controllerCARoots verifies operator-signed inline command certs chain to the
+// controller CA — the same CA bundle used for mTLS. Left nil when no usable CA
+// PEM is available, which the handler treats as "skip operator-cert CA
+// verification". validControllerCARoots checks each root is a currently-valid
+// CA before building the pool, and builds it through pkg/cert (the central
+// certificate provider) rather than assembling an x509 pool locally.
+func (c *TransportClient) commandHandlerCARoots(caCertPEM string, scriptSigning stewardconfig.ScriptSigningConfig) (*x509.CertPool, error) {
 	controllerCARoots, rootsErr := validControllerCARoots(caCertPEM, time.Now())
 	if rootsErr != nil {
 		if c.publicBeta {
@@ -1523,34 +1508,106 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	if c.publicBeta && !scriptSigning.RequireSignedAdhoc {
 		return nil, fmt.Errorf("public-beta connected execution requires require_signed_adhoc: true")
 	}
+	return controllerCARoots, nil
+}
 
-	// Build the EventEmitter for script output streaming (Issue #2143). Reuse the
-	// already-started emitter when available; otherwise create one now so the command
-	// handler can emit script_output LogEntries from the first connected session.
-	// The emitter shares the control-plane gRPC connection — no extra TLS required.
-	var scriptEmitter commands.EventEmitter // interface — nil unless we successfully build one
+// commandScriptEmitter builds the EventEmitter for script output streaming (Issue #2143).
+// It reuses the already-started emitter when available; otherwise it creates one now
+// so the command handler can emit script_output LogEntries from the first connected
+// session. The emitter shares the control-plane gRPC connection — no extra TLS required.
+// The result is a nil interface unless an emitter is available.
+func (c *TransportClient) commandScriptEmitter(existingEmitter *EventEmitter, stewardID string) commands.EventEmitter {
 	if existingEmitter != nil {
-		scriptEmitter = existingEmitter
-	} else {
-		c.mu.RLock()
-		cp := c.controlPlane
-		c.mu.RUnlock()
-		if grpcProv, ok := cp.(*grpcCP.Provider); ok {
-			if tc := grpcProv.TransportClient(); tc != nil {
-				built := NewEventEmitter(EventEmitterConfig{
-					ClientSource: grpcProv.TransportClient,
-					StewardID:    stewardID,
-					Logger:       c.logger,
-					OnPanic:      c.recordComponentPanic,
-				})
-				built.Start(context.Background())
-				c.mu.Lock()
-				c.eventEmitter = built
-				c.mu.Unlock()
-				scriptEmitter = built
-			}
-		}
+		return existingEmitter
 	}
+	c.mu.RLock()
+	cp := c.controlPlane
+	c.mu.RUnlock()
+	grpcProv, ok := cp.(*grpcCP.Provider)
+	if !ok || grpcProv.TransportClient() == nil {
+		return nil
+	}
+	built := NewEventEmitter(EventEmitterConfig{
+		ClientSource: grpcProv.TransportClient,
+		StewardID:    stewardID,
+		Logger:       c.logger,
+		OnPanic:      c.recordComponentPanic,
+	})
+	built.Start(context.Background())
+	c.mu.Lock()
+	c.eventEmitter = built
+	c.mu.Unlock()
+	return built
+}
+
+// startRevocationManifestRefresh runs delivery (Issue #4400): fetch-on-startup plus
+// periodic refresh against the controller's steward-authenticated, per-steward-filtered
+// manifest endpoint (operatorroster.ManifestPath — see that constant's doc comment for
+// why this is a separate route from the admin-only, certificate:list-gated
+// GET /api/v1/certificates/revocation-manifest a steward certificate cannot reach).
+// Started in a goroutine bound to ctx — the same context Connect received from its
+// caller, which in production is the steward's process-lifetime run context (see
+// cmd/steward/main.go's registerAndConnect and runStewardInternal), never a
+// per-command context — so a slow or unreachable controller never blocks Connect
+// returning: execution availability must not depend on a controller round trip,
+// exactly the case this control exists for (a leaked operator credential coinciding
+// with an attacker blocking the connection). A fetch failure only logs; the
+// verifier keeps answering IsRevoked from whatever manifest, if any, it last
+// verified (RunPeriodicRefresh's contract).
+func (c *TransportClient) startRevocationManifestRefresh(ctx context.Context, revocationVerifier *operatorroster.RevocationVerifier) {
+	moduleTrustMode := c.moduleTrustMode
+	if moduleTrustMode == "" {
+		moduleTrustMode = stewardtypes.ModuleTrustModeController
+	}
+	manifestURL, urlErr := operatorroster.BuildManifestURL(c.controllerHTTPSBaseURL)
+	if urlErr != nil {
+		c.logger.Warn("Revocation manifest fetch disabled: cannot build manifest URL",
+			"error", logging.SanitizeLogValue(urlErr.Error()))
+		return
+	}
+	httpClient, clientErr := c.buildHTTPClientForUpgrade()
+	if clientErr != nil {
+		c.logger.Warn("Revocation manifest fetch disabled: cannot build mTLS HTTP client",
+			"error", logging.SanitizeLogValue(clientErr.Error()))
+		return
+	}
+	// The refresh error is sanitized because it is tainted: FetchAndVerify's error
+	// chain interpolates controller response-body content (operatorroster.
+	// VerifyManifest's "unexpected manifest kind %q"), so an attacker-controlled or
+	// tampered response reaches this sink. Same rule as every other error logged in
+	// this file — never log a bare err.
+	go revocationVerifier.RunPeriodicRefresh(ctx, httpClient, manifestURL, moduleTrustMode,
+		revocationManifestRefreshInterval, func(err error) {
+			c.logger.Warn("Revocation manifest fetch failed; continuing on last verified manifest",
+				"error", logging.SanitizeLogValue(err.Error()))
+		})
+}
+
+// setupCommandHandler creates and configures the command handler with all command types.
+// Story #516: connect_dataplane handler removed — DP is initialized eagerly in Connect().
+func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID string) (*commands.Handler, error) {
+	// Build the verifier on demand from the stored signing/server cert PEMs.
+	// Not cached — Issue #920 removes the configVerifier field.
+	verifier := c.buildVerifierOnDemand()
+
+	// Wire script signature verification into the command handler (Issue #1671).
+	// Without this, CommandExecuteScript signing enforcement is inactive in
+	// controller-connected deployments: require_signed_adhoc is ignored, library
+	// scripts fail TrustedKeys verification, and operator-cert CA chaining is skipped.
+	c.mu.RLock()
+	scriptSigning := c.scriptSigning
+	caCertPEM := c.caCertPEM
+	existingEmitter := c.eventEmitter
+	c.mu.RUnlock()
+
+	signingConfig := stewardconfig.BuildModuleSigningConfig(scriptSigning)
+
+	controllerCARoots, err := c.commandHandlerCARoots(caCertPEM, scriptSigning)
+	if err != nil {
+		return nil, err
+	}
+
+	scriptEmitter := c.commandScriptEmitter(existingEmitter, stewardID)
 
 	// RevocationVerifier answers whether an operator certificate has been revoked
 	// (Issue #3699), independently verified against the same controllerCARoots
@@ -1560,47 +1617,11 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	// false, the same degrade-safe posture as the rest of operator-cert verification when
 	// no usable CA bundle is configured).
 	revocationVerifier := operatorroster.NewRevocationVerifier(controllerCARoots)
-
-	// Delivery (Issue #4400): fetch-on-startup plus periodic refresh against the
-	// controller's steward-authenticated, per-steward-filtered manifest endpoint
-	// (operatorroster.ManifestPath — see that constant's doc comment for why this is a
-	// separate route from the admin-only, certificate:list-gated
-	// GET /api/v1/certificates/revocation-manifest a steward certificate cannot reach).
-	// Started in a goroutine bound to ctx — the same context Connect received from its
-	// caller, which in production is the steward's process-lifetime run context (see
-	// cmd/steward/main.go's registerAndConnect and runStewardInternal), never a
-	// per-command context — so a slow or unreachable controller never blocks Connect
-	// returning: execution availability must not depend on a controller round trip,
-	// exactly the case this control exists for (a leaked operator credential coinciding
-	// with an attacker blocking the connection). A fetch failure only logs; the
-	// verifier keeps answering IsRevoked from whatever manifest, if any, it last
-	// verified (RunPeriodicRefresh's contract).
-	moduleTrustMode := c.moduleTrustMode
-	if moduleTrustMode == "" {
-		moduleTrustMode = stewardtypes.ModuleTrustModeController
-	}
-	if manifestURL, urlErr := operatorroster.BuildManifestURL(c.controllerHTTPSBaseURL); urlErr != nil {
-		c.logger.Warn("Revocation manifest fetch disabled: cannot build manifest URL",
-			"error", logging.SanitizeLogValue(urlErr.Error()))
-	} else if httpClient, clientErr := c.buildHTTPClientForUpgrade(); clientErr != nil {
-		c.logger.Warn("Revocation manifest fetch disabled: cannot build mTLS HTTP client",
-			"error", logging.SanitizeLogValue(clientErr.Error()))
-	} else {
-		// The refresh error is sanitized because it is tainted: FetchAndVerify's error
-		// chain interpolates controller response-body content (operatorroster.
-		// VerifyManifest's "unexpected manifest kind %q"), so an attacker-controlled or
-		// tampered response reaches this sink. Same rule as every other error logged in
-		// this file — never log a bare err.
-		go revocationVerifier.RunPeriodicRefresh(ctx, httpClient, manifestURL, moduleTrustMode,
-			revocationManifestRefreshInterval, func(err error) {
-				c.logger.Warn("Revocation manifest fetch failed; continuing on last verified manifest",
-					"error", logging.SanitizeLogValue(err.Error()))
-			})
-	}
+	c.startRevocationManifestRefresh(ctx, revocationVerifier)
 
 	handler, err := commands.New(&commands.Config{
 		StewardID:          stewardID,
-		OnStatus:           statusCallback,
+		OnStatus:           c.publishStatusEvent,
 		Logger:             c.logger,
 		OnPanic:            c.recordComponentPanic,
 		Verifier:           verifier,
@@ -1623,223 +1644,17 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 
 	// Register sync_config handler — delegates to syncConfigNow for both
 	// command-triggered syncs and the on-connect pull (Issue #1720).
-	handler.RegisterHandler(cpTypes.CommandSyncConfig, func(ctx context.Context, cmd *cpTypes.Command) error {
-		c.logger.Info("Received sync_config command", "command_id", cmd.ID, "params_keys", paramKeys(cmd.Params))
-
-		// Extract optional module filter from command params.
-		var modules []string
-		if modulesParam, ok := cmd.Params["modules"].([]interface{}); ok {
-			for _, m := range modulesParam {
-				if modStr, ok := m.(string); ok {
-					modules = append(modules, modStr)
-				}
-			}
-		}
-
-		// ctx here is executeCommand's 30s-unless-overridden deadline
-		// (handler.go:475) — fine for the fast config-retrieval leg inside
-		// syncConfigNow, but syncConfigNow itself derives an independent
-		// background context before ApplyConfiguration/StartMonitors so THAT
-		// deadline does not also cap every module.Get/Set/verifyChanges call
-		// (Issue #3801; see the comment at syncConfigNow's Apply step).
-		return c.syncConfigNow(ctx, cmd.ID, modules)
-	})
+	handler.RegisterHandler(cpTypes.CommandSyncConfig, c.handleSyncConfigCommand)
 
 	// Register sync_dna handler — sends full DNA or a fragment delta over the
 	// data plane. Triggered by the controller on initial registration (full sync),
 	// hash mismatch (full sync), or aggregate-root mismatch (partial sync, ADR-017 §7).
-	//
-	// Branch on cmd.Params["fragment_ids"]:
-	//   - absent → existing full-snapshot path (unchanged)
-	//   - present → partial-sync: send only the requested fragments with Delta=true
-	handler.RegisterHandler(cpTypes.CommandSyncDNA, func(ctx context.Context, cmd *cpTypes.Command) error {
-		c.mu.RLock()
-		session := c.dataPlaneSession
-		sid := c.stewardID
-		tid := c.tenantID
-		c.mu.RUnlock()
-
-		if session == nil || session.IsClosed() {
-			return fmt.Errorf("data plane session not available for DNA sync")
-		}
-
-		// Bulk lane (per-object fragments): answered separately from the host
-		// partial/full sync paths below.
-		if rawBulk, present := cmd.Params[cpTypes.SyncDNAParamBulk]; present {
-			return c.handleSyncDNABulk(ctx, session, sid, tid, cmd, rawBulk)
-		}
-
-		// Partial-sync branch: fragment_ids param carries the IDs the controller
-		// wants us to send (ADR-017 §7 step 2 response).
-		if rawIDs, present := cmd.Params["fragment_ids"]; present {
-			requestedIDs, parseErr := parseFragmentIDs(rawIDs)
-			if parseErr != nil {
-				return fmt.Errorf("failed to parse fragment_ids: %w", parseErr)
-			}
-			if len(requestedIDs) > 0 {
-				c.dnaMu.RLock()
-				currentFragments := make([]*commonpb.Fragment, len(c.currentDNAFragments))
-				copy(currentFragments, c.currentDNAFragments)
-				c.dnaMu.RUnlock()
-
-				if len(currentFragments) > 0 {
-					fragByID := make(map[string]*commonpb.Fragment, len(currentFragments))
-					for _, f := range currentFragments {
-						fragByID[f.GetFragmentId()] = f
-					}
-
-					selected := make([]*commonpb.Fragment, 0, len(requestedIDs))
-					allFound := true
-					for _, id := range requestedIDs {
-						f, exists := fragByID[id]
-						if !exists {
-							// id originates from controller-supplied command params;
-							// sanitize before logging (CLAUDE.md log-injection rule).
-							c.logger.Warn("requested fragment not in current DNA; falling back to full sync",
-								"fragment_id", logging.SanitizeLogValue(id),
-								"command_id", logging.SanitizeLogValue(cmd.ID))
-							allFound = false
-							break
-						}
-						selected = append(selected, f)
-					}
-
-					if allFound {
-						c.logger.Info("Received partial sync_dna command, sending fragment delta",
-							"command_id", logging.SanitizeLogValue(cmd.ID),
-							"fragment_count", len(selected))
-						// Drain and encode accumulated drift-diff records for this sync.
-						driftBytes := c.encodeDriftDiffs()
-						deltaTransfer := &dpTypes.DNATransfer{
-							ID:             fmt.Sprintf("dna_delta_%d", time.Now().UnixNano()),
-							StewardID:      sid,
-							TenantID:       tid,
-							Timestamp:      time.Now(),
-							Delta:          true,
-							Fragments:      selected,
-							DriftDiffBytes: driftBytes,
-							Metadata: map[string]string{
-								"command_id":       cmd.ID,
-								"fragment_count":   fmt.Sprintf("%d", len(selected)),
-								"drift_diff_count": fmt.Sprintf("%d", len(driftBytes)),
-							},
-						}
-						if err := session.SendDNA(ctx, deltaTransfer); err != nil {
-							return fmt.Errorf("failed to send partial DNA via data plane: %w", err)
-						}
-						c.logger.Info("Partial DNA sync completed via data plane",
-							"command_id", logging.SanitizeLogValue(cmd.ID),
-							"fragment_count", len(selected))
-						return nil
-					}
-				}
-				// Requested fragments not available — fall through to full sync.
-				c.logger.Info("Fragment state unavailable; falling back to full DNA sync",
-					"command_id", logging.SanitizeLogValue(cmd.ID))
-			}
-		}
-
-		// Full-snapshot path (existing, unchanged).
-		c.logger.Info("Received sync_dna command, initiating full DNA sync via data plane", "command_id", cmd.ID)
-
-		// Read the current DNA snapshot maintained by #2521 — the same source
-		// used for heartbeat DNA hashes, ensuring sync_dna ⇄ heartbeat hash
-		// consistency. Unlike lastPublishedDNA, currentDNAAttrs is populated
-		// by RefreshCurrentDNA before the first heartbeat, so this path never
-		// fails due to an empty publish cache.
-		c.dnaMu.RLock()
-		currentDNA := copyStringMap(c.currentDNAAttrs)
-		c.dnaMu.RUnlock()
-
-		// If no snapshot exists yet (e.g. first run before any refresh),
-		// collect one now so the handler streams a real snapshot. A full DNA
-		// sync must never proceed with no internal DNA state (empty attrs AND
-		// no fragments): doing so would tell the controller the steward has no
-		// DNA and clobber its record. If we cannot produce any snapshot (refresh
-		// error, or collector yields nothing), fail the command so the controller
-		// can retry rather than corrupt its state. A zero-managed-resource
-		// steward may have empty attrs but non-empty fragments — that is a valid
-		// sync (Issue #3332).
-		if len(currentDNA) == 0 {
-			if refreshErr := c.RefreshCurrentDNA(ctx); refreshErr != nil {
-				return fmt.Errorf("no DNA snapshot available and refresh failed for full sync: %w", refreshErr)
-			}
-			c.dnaMu.RLock()
-			currentDNA = copyStringMap(c.currentDNAAttrs)
-			fragmentsAfterRefresh := make([]*commonpb.Fragment, len(c.currentDNAFragments))
-			copy(fragmentsAfterRefresh, c.currentDNAFragments)
-			c.dnaMu.RUnlock()
-
-			if len(currentDNA) == 0 && len(fragmentsAfterRefresh) == 0 {
-				return fmt.Errorf("no DNA state available for full sync")
-			}
-		}
-
-		// Collect module fragments (cluster:* resources) for the full DNA sync.
-		// Without this the controller-side cluster registry (BuildRegistry) is
-		// always empty in production because DNA.Fragments is never populated.
-		c.mu.RLock()
-		collector := c.dnaCollector
-		c.mu.RUnlock()
-		var fragBytes [][]byte
-		if collector != nil {
-			for _, frag := range c.hostFragmentsOnly(collector.CollectFragments(ctx)) {
-				b, mErr := proto.Marshal(frag)
-				if mErr != nil {
-					c.logger.Warn("sync_dna: failed to marshal fragment, skipping",
-						"fragment_id", logging.SanitizeLogValue(frag.GetFragmentId()), "error", mErr)
-					continue
-				}
-				fragBytes = append(fragBytes, b)
-			}
-		}
-
-		// Drain and encode accumulated drift-diff records for this sync.
-		driftBytes := c.encodeDriftDiffs()
-		transfer := &dpTypes.DNATransfer{
-			ID:             fmt.Sprintf("dna_full_%d", time.Now().UnixNano()),
-			StewardID:      sid,
-			TenantID:       tid,
-			Timestamp:      time.Now(),
-			FragmentBytes:  fragBytes,
-			Delta:          false, // full snapshot
-			DriftDiffBytes: driftBytes,
-			Metadata: map[string]string{
-				"command_id":       cmd.ID,
-				"dna_hash":         dna.ComputeHash(currentDNA),
-				"attr_count":       fmt.Sprintf("%d", len(currentDNA)),
-				"fragment_count":   fmt.Sprintf("%d", len(fragBytes)),
-				"drift_diff_count": fmt.Sprintf("%d", len(driftBytes)),
-			},
-		}
-
-		if err := session.SendDNA(ctx, transfer); err != nil {
-			return fmt.Errorf("failed to send full DNA via data plane: %w", err)
-		}
-
-		c.logger.Info("Full DNA sync completed via data plane",
-			"command_id", cmd.ID,
-			"attributes", len(currentDNA))
-		return nil
-	})
+	handler.RegisterHandler(cpTypes.CommandSyncDNA, c.handleSyncDNACommand)
 
 	// Register reconnect handler — closes the current gRPC connection and launches
 	// the backoff-reconnect loop so the steward re-establishes its ControlChannel
 	// against the new Raft leader after an HA failover.
-	handler.RegisterHandler(cpTypes.CommandReconnect, func(ctx context.Context, cmd *cpTypes.Command) error {
-		c.logger.Info("Received reconnect command, reconnecting to controller",
-			"command_id", logging.SanitizeLogValue(cmd.ID))
-		c.mu.RLock()
-		cp := c.controlPlane
-		c.mu.RUnlock()
-		if cp == nil {
-			return fmt.Errorf("control plane not connected")
-		}
-		if err := cp.Reconnect(ctx); err != nil {
-			return fmt.Errorf("reconnect failed: %w", err)
-		}
-		return nil
-	})
+	handler.RegisterHandler(cpTypes.CommandReconnect, c.handleReconnectCommand)
 
 	// Register execute_script handler — dispatches controller-sent scripts through
 	// the script module executor and publishes EventScriptCompleted (Issue #1669).
@@ -1884,6 +1699,265 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	})
 
 	return handler, nil
+}
+
+// handleSyncConfigCommand handles sync_config. Optional module filter comes from
+// cmd.Params["modules"].
+func (c *TransportClient) handleSyncConfigCommand(ctx context.Context, cmd *cpTypes.Command) error {
+	c.logger.Info("Received sync_config command", "command_id", cmd.ID, "params_keys", paramKeys(cmd.Params))
+
+	// Extract optional module filter from command params.
+	var modules []string
+	if modulesParam, ok := cmd.Params["modules"].([]interface{}); ok {
+		for _, m := range modulesParam {
+			if modStr, ok := m.(string); ok {
+				modules = append(modules, modStr)
+			}
+		}
+	}
+
+	// ctx here is executeCommand's 30s-unless-overridden deadline
+	// (handler.go:475) — fine for the fast config-retrieval leg inside
+	// syncConfigNow, but syncConfigNow itself derives an independent
+	// background context before ApplyConfiguration/StartMonitors so THAT
+	// deadline does not also cap every module.Get/Set/verifyChanges call
+	// (Issue #3801; see the comment at syncConfigNow's Apply step).
+	return c.syncConfigNow(ctx, cmd.ID, modules)
+}
+
+// handleReconnectCommand handles reconnect by reconnecting the control plane.
+func (c *TransportClient) handleReconnectCommand(ctx context.Context, cmd *cpTypes.Command) error {
+	c.logger.Info("Received reconnect command, reconnecting to controller",
+		"command_id", logging.SanitizeLogValue(cmd.ID))
+	c.mu.RLock()
+	cp := c.controlPlane
+	c.mu.RUnlock()
+	if cp == nil {
+		return fmt.Errorf("control plane not connected")
+	}
+	if err := cp.Reconnect(ctx); err != nil {
+		return fmt.Errorf("reconnect failed: %w", err)
+	}
+	return nil
+}
+
+// handleSyncDNACommand handles sync_dna: the bulk lane, a partial fragment sync, or a
+// full snapshot over the data plane.
+//
+// Branch on cmd.Params["fragment_ids"]:
+//   - absent → full-snapshot path
+//   - present → partial-sync: send only the requested fragments with Delta=true
+func (c *TransportClient) handleSyncDNACommand(ctx context.Context, cmd *cpTypes.Command) error {
+	c.mu.RLock()
+	session := c.dataPlaneSession
+	sid := c.stewardID
+	tid := c.tenantID
+	c.mu.RUnlock()
+
+	if session == nil || session.IsClosed() {
+		return fmt.Errorf("data plane session not available for DNA sync")
+	}
+
+	// Bulk lane (per-object fragments): answered separately from the host
+	// partial/full sync paths below.
+	if rawBulk, present := cmd.Params[cpTypes.SyncDNAParamBulk]; present {
+		return c.handleSyncDNABulk(ctx, session, sid, tid, cmd, rawBulk)
+	}
+
+	// Partial-sync branch: fragment_ids param carries the IDs the controller
+	// wants us to send (ADR-017 §7 step 2 response).
+	if rawIDs, present := cmd.Params["fragment_ids"]; present {
+		sent, err := c.syncDNAPartial(ctx, session, sid, tid, cmd, rawIDs)
+		if err != nil || sent {
+			return err
+		}
+	}
+
+	return c.syncDNAFull(ctx, session, sid, tid, cmd)
+}
+
+// syncDNAPartial sends the requested fragment delta. It reports sent=false (and a nil
+// error) when the request is empty or cannot be satisfied, so the caller falls through
+// to a full sync.
+func (c *TransportClient) syncDNAPartial(ctx context.Context, session dataplaneInterfaces.DataPlaneSession,
+	sid, tid string, cmd *cpTypes.Command, rawIDs interface{}) (bool, error) {
+	requestedIDs, parseErr := parseFragmentIDs(rawIDs)
+	if parseErr != nil {
+		return false, fmt.Errorf("failed to parse fragment_ids: %w", parseErr)
+	}
+	if len(requestedIDs) == 0 {
+		return false, nil
+	}
+	if selected, allFound := c.selectRequestedFragments(requestedIDs, cmd); allFound {
+		return true, c.sendPartialDNA(ctx, session, sid, tid, cmd, selected)
+	}
+	// Requested fragments not available — fall through to full sync.
+	c.logger.Info("Fragment state unavailable; falling back to full DNA sync",
+		"command_id", logging.SanitizeLogValue(cmd.ID))
+	return false, nil
+}
+
+// selectRequestedFragments returns the current DNA fragments for requestedIDs. allFound
+// is false when there is no current fragment state or any requested ID is missing.
+func (c *TransportClient) selectRequestedFragments(requestedIDs []string, cmd *cpTypes.Command) (selected []*commonpb.Fragment, allFound bool) {
+	c.dnaMu.RLock()
+	currentFragments := make([]*commonpb.Fragment, len(c.currentDNAFragments))
+	copy(currentFragments, c.currentDNAFragments)
+	c.dnaMu.RUnlock()
+
+	if len(currentFragments) == 0 {
+		return nil, false
+	}
+	fragByID := make(map[string]*commonpb.Fragment, len(currentFragments))
+	for _, f := range currentFragments {
+		fragByID[f.GetFragmentId()] = f
+	}
+
+	selected = make([]*commonpb.Fragment, 0, len(requestedIDs))
+	for _, id := range requestedIDs {
+		f, exists := fragByID[id]
+		if !exists {
+			// id originates from controller-supplied command params;
+			// sanitize before logging (CLAUDE.md log-injection rule).
+			c.logger.Warn("requested fragment not in current DNA; falling back to full sync",
+				"fragment_id", logging.SanitizeLogValue(id),
+				"command_id", logging.SanitizeLogValue(cmd.ID))
+			return nil, false
+		}
+		selected = append(selected, f)
+	}
+	return selected, true
+}
+
+// sendPartialDNA sends the selected fragments as a delta transfer.
+func (c *TransportClient) sendPartialDNA(ctx context.Context, session dataplaneInterfaces.DataPlaneSession,
+	sid, tid string, cmd *cpTypes.Command, selected []*commonpb.Fragment) error {
+	c.logger.Info("Received partial sync_dna command, sending fragment delta",
+		"command_id", logging.SanitizeLogValue(cmd.ID),
+		"fragment_count", len(selected))
+	// Drain and encode accumulated drift-diff records for this sync.
+	driftBytes := c.encodeDriftDiffs()
+	deltaTransfer := &dpTypes.DNATransfer{
+		ID:             fmt.Sprintf("dna_delta_%d", time.Now().UnixNano()),
+		StewardID:      sid,
+		TenantID:       tid,
+		Timestamp:      time.Now(),
+		Delta:          true,
+		Fragments:      selected,
+		DriftDiffBytes: driftBytes,
+		Metadata: map[string]string{
+			"command_id":       cmd.ID,
+			"fragment_count":   fmt.Sprintf("%d", len(selected)),
+			"drift_diff_count": fmt.Sprintf("%d", len(driftBytes)),
+		},
+	}
+	if err := session.SendDNA(ctx, deltaTransfer); err != nil {
+		return fmt.Errorf("failed to send partial DNA via data plane: %w", err)
+	}
+	c.logger.Info("Partial DNA sync completed via data plane",
+		"command_id", logging.SanitizeLogValue(cmd.ID),
+		"fragment_count", len(selected))
+	return nil
+}
+
+// syncDNAFull sends the full DNA snapshot over the data plane.
+func (c *TransportClient) syncDNAFull(ctx context.Context, session dataplaneInterfaces.DataPlaneSession,
+	sid, tid string, cmd *cpTypes.Command) error {
+	c.logger.Info("Received sync_dna command, initiating full DNA sync via data plane", "command_id", cmd.ID)
+
+	currentDNA, err := c.currentDNAForFullSync(ctx)
+	if err != nil {
+		return err
+	}
+	fragBytes := c.hostFragmentBytes(ctx)
+
+	// Drain and encode accumulated drift-diff records for this sync.
+	driftBytes := c.encodeDriftDiffs()
+	transfer := &dpTypes.DNATransfer{
+		ID:             fmt.Sprintf("dna_full_%d", time.Now().UnixNano()),
+		StewardID:      sid,
+		TenantID:       tid,
+		Timestamp:      time.Now(),
+		FragmentBytes:  fragBytes,
+		Delta:          false, // full snapshot
+		DriftDiffBytes: driftBytes,
+		Metadata: map[string]string{
+			"command_id":       cmd.ID,
+			"dna_hash":         dna.ComputeHash(currentDNA),
+			"attr_count":       fmt.Sprintf("%d", len(currentDNA)),
+			"fragment_count":   fmt.Sprintf("%d", len(fragBytes)),
+			"drift_diff_count": fmt.Sprintf("%d", len(driftBytes)),
+		},
+	}
+
+	if err := session.SendDNA(ctx, transfer); err != nil {
+		return fmt.Errorf("failed to send full DNA via data plane: %w", err)
+	}
+
+	c.logger.Info("Full DNA sync completed via data plane",
+		"command_id", cmd.ID,
+		"attributes", len(currentDNA))
+	return nil
+}
+
+// currentDNAForFullSync reads the current DNA snapshot maintained by #2521 — the same
+// source used for heartbeat DNA hashes, ensuring sync_dna ⇄ heartbeat hash
+// consistency. Unlike lastPublishedDNA, currentDNAAttrs is populated
+// by RefreshCurrentDNA before the first heartbeat, so this path never
+// fails due to an empty publish cache.
+//
+// If no snapshot exists yet (e.g. first run before any refresh),
+// collect one now so the handler streams a real snapshot. A full DNA
+// sync must never proceed with no internal DNA state (empty attrs AND
+// no fragments): doing so would tell the controller the steward has no
+// DNA and clobber its record. If we cannot produce any snapshot (refresh
+// error, or collector yields nothing), fail the command so the controller
+// can retry rather than corrupt its state. A zero-managed-resource
+// steward may have empty attrs but non-empty fragments — that is a valid
+// sync (Issue #3332).
+func (c *TransportClient) currentDNAForFullSync(ctx context.Context) (map[string]string, error) {
+	c.dnaMu.RLock()
+	currentDNA := copyStringMap(c.currentDNAAttrs)
+	c.dnaMu.RUnlock()
+
+	if len(currentDNA) != 0 {
+		return currentDNA, nil
+	}
+	if refreshErr := c.RefreshCurrentDNA(ctx); refreshErr != nil {
+		return nil, fmt.Errorf("no DNA snapshot available and refresh failed for full sync: %w", refreshErr)
+	}
+	c.dnaMu.RLock()
+	currentDNA = copyStringMap(c.currentDNAAttrs)
+	fragmentsAfterRefresh := len(c.currentDNAFragments)
+	c.dnaMu.RUnlock()
+
+	if len(currentDNA) == 0 && fragmentsAfterRefresh == 0 {
+		return nil, fmt.Errorf("no DNA state available for full sync")
+	}
+	return currentDNA, nil
+}
+
+// hostFragmentBytes collects module fragments (cluster:* resources) for the full DNA
+// sync. Without this the controller-side cluster registry (BuildRegistry) is
+// always empty in production because DNA.Fragments is never populated.
+func (c *TransportClient) hostFragmentBytes(ctx context.Context) [][]byte {
+	c.mu.RLock()
+	collector := c.dnaCollector
+	c.mu.RUnlock()
+	if collector == nil {
+		return nil
+	}
+	var fragBytes [][]byte
+	for _, frag := range c.hostFragmentsOnly(collector.CollectFragments(ctx)) {
+		b, mErr := proto.Marshal(frag)
+		if mErr != nil {
+			c.logger.Warn("sync_dna: failed to marshal fragment, skipping",
+				"fragment_id", logging.SanitizeLogValue(frag.GetFragmentId()), "error", mErr)
+			continue
+		}
+		fragBytes = append(fragBytes, b)
+	}
+	return fragBytes
 }
 
 // syncConfigNow pulls the latest config from the controller via the data plane and
