@@ -797,6 +797,13 @@ test-go-group-macos-steward:
 		go test -race -short -timeout=10m $$pkgs; \
 	fi
 
+# Measured `-race -short` seconds per package (CI run 42248777051), used to
+# split the rest group by weight (longest-first onto the least-loaded shard)
+# instead of by list position. Unlisted packages weigh 3. `-timeout=9m` is
+# per test binary and sits under the 15-minute job limit, so a hung package
+# panics with its own name instead of the job being cancelled unattributed.
+MACOS_REST_WEIGHTS := features/workflow=300 pkg/storage/interfaces=182 pkg/ha=37 pkg/transport/quic=26 features/modules/extended/activedirectory=24 pkg/migrate/storage=19 pkg/session=16 pkg/audit=13 features/workflow/runtime=10 pkg/storage/providers/flatfile=9 features/controller/fleet=6 features/modules/adapter=6 features/modules/stdlib/script=6 pkg/secrets/providers/openbao=5 pkg/secrets/providers/oskeychain=5 pkg/modules/bundle=5
+
 # Everything in the set not claimed by the providers/steward groups, split into
 # CFGMS_MACOS_REST_SHARDS CI-job-level groups (more 3-core runners, not more
 # processes fighting over one runner's 3 cores).
@@ -843,7 +850,19 @@ test-go-group-macos-rest:
 		echo "❌ macos-rest: package enumeration produced no packages - check go list output. Refusing to report a pass."; \
 		exit 1; \
 	fi; \
-	pkgs=$$(echo "$$pkgs_all" | awk -v "s=$$shard" -v "n=$$shards" 'NR % n == s'); \
+	pkgs=$$(echo "$$pkgs_all" | awk -v "s=$$shard" -v "n=$$shards" -v "w=$(MACOS_REST_WEIGHTS)" \
+		'BEGIN { m = split(w, e, " "); for (i = 1; i <= m; i++) { split(e[i], kv, "="); wt[kv[1]] = kv[2] } } \
+		{ pkg[NR] = $$0; k = $$0; sub(/^.*\/cfgms\//, "", k); c[NR] = (k in wt) ? wt[k] + 0 : 3; ord[NR] = NR } \
+		END { \
+			for (i = 1; i <= NR; i++) for (j = i + 1; j <= NR; j++) \
+				if (c[ord[j]] > c[ord[i]]) { t = ord[i]; ord[i] = ord[j]; ord[j] = t } \
+			for (b = 0; b < n; b++) load[b] = 0; \
+			for (i = 1; i <= NR; i++) { \
+				best = n - 1; for (b = n - 2; b >= 0; b--) if (load[b] < load[best]) best = b; \
+				load[best] += c[ord[i]]; bin[ord[i]] = best \
+			} \
+			for (i = 1; i <= NR; i++) if (bin[i] == s) print pkg[i] \
+		}'); \
 	if [ -z "$$pkgs" ]; then \
 		echo "❌ macos-rest shard $$shard/$$shards: no packages assigned - the shard count exceeds the package count. Refusing to report a pass."; \
 		exit 1; \
@@ -852,7 +871,7 @@ test-go-group-macos-rest:
 		echo "$$pkgs"; \
 	else \
 		echo "  Testing macos-rest shard $$shard/$$shards (remaining shipped packages, -race)..."; \
-		go test -race -short -timeout=10m $$pkgs; \
+		go test -race -short -timeout=9m $$pkgs; \
 	fi
 
 .PHONY: test-scripts

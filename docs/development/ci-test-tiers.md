@@ -121,7 +121,10 @@ ships on macOS: the in-module packages with test files in the `GOOS=darwin` depe
 (`MACOS_SHIPPED_PKGS`). Controller packages that no macOS binary contains are not tested there; the few
 `features/controller/...` packages that are in the closure stay until the steward stops depending on them.
 `scripts/test-scripts.sh` (`test_macos_groups_cover_exactly_shipped_packages`) asserts the union of the
-`test-go-group-macos-*` lists equals that set. The measurements in the tables above predate this scoping.
+`test-go-group-macos-*` lists equals that set. The rest group is split across two shards by measured per-package weight
+(`MACOS_REST_WEIGHTS` in the `Makefile`, longest-first onto the least-loaded shard) rather than by list
+position, so `features/workflow` and `pkg/storage/interfaces` land on different shards. Its `go test` runs with
+`-timeout=9m` (under the 15-minute job limit) so a hung package fails by name instead of the job being cancelled. The measurements in the tables above predate this scoping.
 
 ### `security-scan.yml`
 
