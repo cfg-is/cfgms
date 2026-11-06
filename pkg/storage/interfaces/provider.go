@@ -699,12 +699,20 @@ func nonceStoreOrNil(c NonceStoreCreator, cfg map[string]interface{}) (business.
 	return store, err
 }
 
+// wireAccessStores wires the RBAC, tenant and registration token stores, which
+// the all-stores, cluster and OSS constructors create in this order. prefix and
+// suffix frame each store's error text; tolerant says whether
+// business.ErrNotSupported leaves a store nil instead of failing.
+func wireAccessStores(w *storageWiring, sm *StorageManager, p StorageProvider, cfg map[string]interface{}, prefix, suffix string, tolerant bool) {
+	wireStore(w, &sm.rbacStore, prefix+"RBAC store"+suffix, tolerant, cfg, p.CreateRBACStore)
+	wireStore(w, &sm.tenantStore, prefix+"tenant store"+suffix, tolerant, cfg, p.CreateTenantStore)
+	wireStore(w, &sm.registrationTokenStore, prefix+"registration token store"+suffix, tolerant, cfg, p.CreateRegistrationTokenStore)
+}
+
 func wireAllCoreStores(w *storageWiring, sm *StorageManager, p StorageProvider, cfg map[string]interface{}) {
 	wireStore(w, &sm.configStore, "failed to create config store", true, cfg, p.CreateConfigStore)
 	wireStore(w, &sm.auditStore, "failed to create audit store", true, cfg, p.CreateAuditStore)
-	wireStore(w, &sm.rbacStore, "failed to create RBAC store", true, cfg, p.CreateRBACStore)
-	wireStore(w, &sm.tenantStore, "failed to create tenant store", true, cfg, p.CreateTenantStore)
-	wireStore(w, &sm.registrationTokenStore, "failed to create registration token store", true, cfg, p.CreateRegistrationTokenStore)
+	wireAccessStores(w, sm, p, cfg, "failed to create ", "", true)
 	wireStore(w, &sm.sessionStore, "failed to create session store", true, cfg, p.CreateSessionStore)
 	wireStore(w, &sm.stewardStore, "failed to create steward store", true, cfg, p.CreateStewardStore)
 	wireStore(w, &sm.commandStore, "failed to create command store", true, cfg, p.CreateCommandStore)
@@ -1328,9 +1336,7 @@ const clusterWiringPrefix = "cluster storage: failed to create "
 func wireClusterCoreStores(w *storageWiring, sm *StorageManager, p StorageProvider, cfg map[string]interface{}) {
 	wireStore(w, &sm.configStore, clusterWiringPrefix+"config store", true, cfg, p.CreateConfigStore)
 	wireStore(w, &sm.auditStore, clusterWiringPrefix+"audit store", false, cfg, p.CreateAuditStore)
-	wireStore(w, &sm.rbacStore, clusterWiringPrefix+"RBAC store", false, cfg, p.CreateRBACStore)
-	wireStore(w, &sm.tenantStore, clusterWiringPrefix+"tenant store", false, cfg, p.CreateTenantStore)
-	wireStore(w, &sm.registrationTokenStore, clusterWiringPrefix+"registration token store", false, cfg, p.CreateRegistrationTokenStore)
+	wireAccessStores(w, sm, p, cfg, clusterWiringPrefix, "", false)
 	wireStore(w, &sm.sessionStore, clusterWiringPrefix+"session store", true, cfg, p.CreateSessionStore)
 	wireStore(w, &sm.stewardStore, clusterWiringPrefix+"steward store", false, cfg, p.CreateStewardStore)
 	wireStore(w, &sm.commandStore, clusterWiringPrefix+"command store", true, cfg, p.CreateCommandStore)
@@ -1494,9 +1500,7 @@ func applyOSSBundle(sm *StorageManager, opener BusinessStoreOpener, path string)
 // every OSS manager carries (session, command, trigger, push, pending
 // registration).
 func wireOSSSQLiteCoreStores(w *storageWiring, sm *StorageManager, p StorageProvider, cfg map[string]interface{}) {
-	wireStore(w, &sm.rbacStore, "failed to create RBAC store (sqlite)", false, cfg, p.CreateRBACStore)
-	wireStore(w, &sm.tenantStore, "failed to create tenant store (sqlite)", false, cfg, p.CreateTenantStore)
-	wireStore(w, &sm.registrationTokenStore, "failed to create registration token store (sqlite)", false, cfg, p.CreateRegistrationTokenStore)
+	wireAccessStores(w, sm, p, cfg, "failed to create ", " (sqlite)", false)
 	wireStore(w, &sm.sessionStore, "failed to create session store (sqlite)", true, cfg, p.CreateSessionStore)
 	wireStore(w, &sm.commandStore, "failed to create command store (sqlite)", true, cfg, p.CreateCommandStore)
 	wireStore(w, &sm.triggerStore, "failed to create trigger store (sqlite)", true, cfg, p.CreateTriggerStore)
