@@ -424,7 +424,7 @@ function BanDialog(props: DialogProps) {
           onChange={(e) => setTyped(e.target.value)}
         />
         <span className="tp-fhint">
-          Steward ID <span className="mono">{steward.id}</span>.{' '}
+          Steward ID <span className="mono">{escapeHidden(steward.id)}</span>.{' '}
           {hasHiddenChars(expected)
             ? 'The name has hidden characters, shown escaped; type it as shown.'
             : 'Type the host name exactly.'}
@@ -691,8 +691,8 @@ export default function TamperPanel({ steward, onChanged, onSelectTab }: Props) 
             <ul className="tp-reasons" data-testid="tamper-reasons">
               {steward.reasons.map((r, i) => (
                 <li key={`${r.component}:${r.code}:${i}`}>
-                  <span className="mono">{r.component}</span> <strong>{r.code}</strong>
-                  {r.message ? <> — {r.message}</> : null}
+                  <span className="mono">{escapeHidden(r.component)}</span> <strong>{escapeHidden(r.code)}</strong>
+                  {r.message ? <> — {escapeHidden(r.message)}</> : null}
                 </li>
               ))}
             </ul>
