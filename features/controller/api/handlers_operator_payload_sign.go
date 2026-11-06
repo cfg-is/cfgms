@@ -46,7 +46,6 @@ package api
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -87,17 +86,6 @@ const operatorPayloadSignThrottleKeyPrefix = "operator-payload-sign:"
 // exceed elevateBackoff's longest cooldown tier (10 minutes) so a determined attacker
 // cannot outlast the window mid-schedule and reset back to an unthrottled count.
 const operatorPayloadSignThrottleWindow = 15 * time.Minute
-
-// operatorPayloadSignSession holds state for an in-progress payload-signing ceremony.
-// Stored in s.operatorPayloadSignSessions keyed by web session ID. Single-use: deleted via
-// LoadAndDelete at the start of handleOperatorPayloadSignFinish regardless of outcome.
-type operatorPayloadSignSession struct {
-	data      webauthn.SessionData
-	expires   time.Time
-	accountID string // principal.ID at begin time; finish re-derives this from context
-	envelope  operatorpayload.Envelope
-	hash      [sha256.Size]byte // operatorpayload.ChallengeHash(envelope); == data.Challenge
-}
 
 // generateOperatorPayloadSignNonce returns a hex-encoded nonce read directly from
 // crypto/rand — never a counter, timestamp, or UUID (Issue #3695 AC: asserted directly
@@ -424,7 +412,7 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 	sourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 	ipKey := s.clientIPKey(r) // Issue #4573: trusted-proxy-aware, IPv6 /64-bucketed
 
-	if blocked, wait := s.checkSignThrottle("session:" + sessID); blocked {
+	if blocked, wait := s.checkSignThrottle(signSessionThrottleKey(sessID)); blocked {
 		s.logger.Warn("Operator-payload sign finish: per-session throttle active",
 			"session_id", logging.SanitizeLogValue(sessID),
 			"retry_after_seconds", int(wait.Seconds()))
@@ -433,7 +421,7 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 		return
 	}
 	if ipKey != "" {
-		if blocked, wait := s.checkSignThrottle("ip:" + ipKey); blocked {
+		if blocked, wait := s.checkSignThrottle(signIPThrottleKey(ipKey)); blocked {
 			s.logger.Warn("Operator-payload sign finish: per-IP throttle active",
 				"source_ip", logging.SanitizeLogValue(sourceIP),
 				"retry_after_seconds", int(wait.Seconds()))
@@ -457,10 +445,7 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 			"principal_id", logging.SanitizeLogValue(principal.ID),
 			"session_id", logging.SanitizeLogValue(sessID),
 			"error", logging.SanitizeLogValue(err.Error()))
-		s.recordSignFailure("session:" + sessID)
-		if ipKey != "" {
-			s.recordSignFailure("ip:" + ipKey)
-		}
+		s.recordSignFailures(sessID, ipKey)
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 		return
@@ -478,10 +463,7 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 			"session_id", logging.SanitizeLogValue(sessID),
 			"source_ip", logging.SanitizeLogValue(sourceIP),
 			"error", logging.SanitizeLogValue(err.Error()))
-		s.recordSignFailure("session:" + sessID)
-		if ipKey != "" {
-			s.recordSignFailure("ip:" + ipKey)
-		}
+		s.recordSignFailures(sessID, ipKey)
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 		return
@@ -490,23 +472,14 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 	// Sign-count advancement check (W3C WebAuthn §7.2 step 21) — identical discipline to
 	// handleStepUpFinish.
 	newSignCount := credential.Authenticator.SignCount
-	var storedSignCount uint32
-	for _, c := range acct.Credentials {
-		if string(c.ID) == string(credential.ID) {
-			storedSignCount = c.SignCount
-			break
-		}
-	}
-	if (storedSignCount > 0 || newSignCount > 0) && newSignCount <= storedSignCount {
+	storedCount := storedSignCount(acct, credential.ID)
+	if !signCountAdvances(storedCount, newSignCount) {
 		s.logger.Warn("Operator-payload sign finish: sign count not advancing — potential authenticator clone",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
 			"session_id", logging.SanitizeLogValue(sessID),
-			"stored_count", storedSignCount,
+			"stored_count", storedCount,
 			"response_count", newSignCount)
-		s.recordSignFailure("session:" + sessID)
-		if ipKey != "" {
-			s.recordSignFailure("ip:" + ipKey)
-		}
+		s.recordSignFailures(sessID, ipKey)
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 		return
@@ -522,15 +495,7 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 	// getAccount read and this persist. A lost CAS race is logged and swallowed exactly
 	// like any other persist failure here; the next successful assertion advances the
 	// count from whatever the winning write left in place.
-	updatedAcct := *acct
-	updatedAcct.Credentials = make([]WebAuthnCredential, len(acct.Credentials))
-	copy(updatedAcct.Credentials, acct.Credentials)
-	for i, c := range updatedAcct.Credentials {
-		if string(c.ID) == string(credential.ID) {
-			updatedAcct.Credentials[i].SignCount = newSignCount
-			break
-		}
-	}
+	updatedAcct := withAdvancedSignCount(acct, credential.ID, newSignCount)
 	if newVersion, ok, persistErr := s.persistAccountCAS(r.Context(), &updatedAcct, principal.ID); persistErr != nil {
 		s.logger.Error("Operator-payload sign finish: failed to persist updated sign count",
 			"principal_id", logging.SanitizeLogValue(principal.ID),

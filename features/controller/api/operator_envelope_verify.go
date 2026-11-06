@@ -5,14 +5,9 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"time"
-
-	"github.com/go-webauthn/webauthn/protocol"
 
 	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
@@ -127,10 +122,6 @@ func (s *Server) verifyActionWebAuthn(ctx context.Context, envelope operatorpayl
 	if len(proof.AuthenticatorData) == 0 || len(proof.ClientDataJSON) == 0 || len(proof.Signature) == 0 || len(proof.CredentialID) == 0 {
 		return "", fmt.Errorf("incomplete webauthn operator proof")
 	}
-	wa := s.getWebAuthn()
-	if wa == nil || wa.Config == nil {
-		return "", fmt.Errorf("webauthn is not configured")
-	}
 	principal, _ := ctx.Value(principalContextKey).(*Principal)
 	if principal == nil {
 		return "", fmt.Errorf("webauthn operator proof requires an authenticated principal")
@@ -143,46 +134,9 @@ func (s *Server) verifyActionWebAuthn(ctx context.Context, envelope operatorpayl
 		return "", fmt.Errorf("operator account not found")
 	}
 
-	var stored *WebAuthnCredential
-	for i := range acct.Credentials {
-		if subtle.ConstantTimeCompare(acct.Credentials[i].ID, proof.CredentialID) == 1 {
-			stored = &acct.Credentials[i]
-			break
-		}
-	}
-	if stored == nil {
-		return "", fmt.Errorf("credential is not registered to the caller")
-	}
-
-	hash, err := operatorpayload.ChallengeHash(envelope)
+	stored, err := s.VerifyAssertion(acct, envelope, proof)
 	if err != nil {
-		return "", fmt.Errorf("invalid operator envelope: %w", err)
-	}
-
-	b64 := base64.RawURLEncoding.EncodeToString
-	body, err := json.Marshal(map[string]any{
-		"id":    b64(proof.CredentialID),
-		"rawId": b64(proof.CredentialID),
-		"type":  "public-key",
-		"response": map[string]string{
-			"authenticatorData": b64(proof.AuthenticatorData),
-			"clientDataJSON":    b64(proof.ClientDataJSON),
-			"signature":         b64(proof.Signature),
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("encode assertion: %w", err)
-	}
-	parsed, err := protocol.ParseCredentialRequestResponseBytes(body)
-	if err != nil {
-		return "", fmt.Errorf("parse webauthn assertion: %w", err)
-	}
-
-	// Cross-origin assertions are refused outright, and opaque and top origins are not
-	// widened: the same posture the steward-side verifier takes.
-	if err := parsed.Verify(b64(hash[:]), wa.Config.RPID, "", wa.Config.RPOrigins, nil, nil,
-		protocol.TopOriginImplicitVerificationMode, false, true, true, stored.PublicKey, wa.Config.Signature); err != nil {
-		return "", fmt.Errorf("webauthn assertion verification failed: %w", err)
+		return "", err
 	}
 
 	// Credential authority, as the steward applies it: a registered passkey says nothing
