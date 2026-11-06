@@ -289,19 +289,32 @@ func (f *fixture) changes(t *testing.T, tenant, authority, group string, baselin
 	}
 }
 
+// The full 300-group form runs on the in-memory conditional store so it stays cheap on
+// every leg, including the native Windows leg under -short: each group costs three
+// fsynced file entries (shard, change-log event, sequence counter), and 300 ListMembers
+// calls read 64 shards each. The file-backed variant below keeps the real store path
+// covered at a reduced size.
 func TestMembership_UserIn300Groups_AllRecordedAndListed(t *testing.T) {
-	f := newFixture(t)
-	groups := make([]string, 300)
+	assertUserInGroupsRecordedAndListed(t, newFixtureOn(t, newMemStore()), 300)
+}
+
+func TestMembership_UserIn20Groups_AllRecordedAndListedOnFileBackedStore(t *testing.T) {
+	assertUserInGroupsRecordedAndListed(t, newFixture(t), 20)
+}
+
+func assertUserInGroupsRecordedAndListed(t *testing.T, f *fixture, n int) {
+	t.Helper()
+	groups := make([]string, n)
 	for i := range groups {
 		groups[i] = oid("grp", i)
 	}
 	res := f.batch(t, "steward-1", authA, []Fragment{userFrag("user-1", groups...)}, nil)
-	if res.Added != 300 {
-		t.Fatalf("Added = %d, want 300", res.Added)
+	if res.Added != n {
+		t.Fatalf("Added = %d, want %d", res.Added, n)
 	}
 	got := f.groupsOf(t, "tenant-a", authA, "user-1", 64)
-	if len(got) != 300 {
-		t.Fatalf("ListGroupsOf returned %d groups, want 300", len(got))
+	if len(got) != n {
+		t.Fatalf("ListGroupsOf returned %d groups, want %d", len(got), n)
 	}
 	seen := map[string]bool{}
 	for _, g := range got {
@@ -355,13 +368,24 @@ func TestMembership_GroupWith60000Members_AllRecordedAndPaged(t *testing.T) {
 }
 
 func TestMembership_FirstSyncOf50000Users_InBatchesOf2000_CompletesOnFileBackedStore(t *testing.T) {
-	f := newFixture(t)
+	assertFirstSyncCompletes(t, newFixture(t), true)
+}
+
+// The full 50,000-user first sync on the in-memory conditional store runs on every
+// leg, including -short, so no CI job (all of them run -short) loses the scale check.
+func TestMembership_FirstSyncOf50000Users_InBatchesOf2000_CompletesOnMemStore(t *testing.T) {
+	assertFirstSyncCompletes(t, newFixtureOn(t, newMemStore()), false)
+}
+
+func assertFirstSyncCompletes(t *testing.T, f *fixture, fileBacked bool) {
+	t.Helper()
 	total, batchSize := 50000, 2000
-	if testing.Short() {
-		// The file-backed store fsyncs every entry. `make test` runs -short under
-		// -race with a 10m hang detector, which the full 50,000 users (about 50,000
-		// fsynced index entries) can exceed on a slow disk. -short therefore syncs
-		// two batches; a plain `go test` runs the full first sync.
+	if fileBacked && testing.Short() {
+		// The file-backed store fsyncs every entry, and the 4,000-user -short form
+		// measured 60s on Linux under -race and about 8 minutes on the native Windows
+		// leg, against its 10m hang detector. -short therefore syncs two batches of
+		// 500; a plain `go test` (the full 50,000 users) is the coverage at scale.
+		batchSize = 500
 		total = 2 * batchSize
 	}
 	deadline := time.Now().Add(9 * time.Minute) // generous CI bound, not a performance claim
