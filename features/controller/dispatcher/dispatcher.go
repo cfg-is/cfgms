@@ -991,119 +991,27 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 	}
 	commandFailed := event.Type == controlplaneTypes.EventCommandFailed
 
-	// StewardID is set by the control plane from the mTLS peer certificate.
-	deviceID := event.StewardID
-	if deviceID == "" {
-		d.logger.Warn("Received script terminal event with empty steward_id — ignoring",
-			"event_type", string(event.Type))
+	deviceID, executionID, ok := d.completionIdentity(event)
+	if !ok {
 		return nil
 	}
 
-	var executionID string
-	if event.Details != nil {
-		executionID, _ = event.Details["execution_id"].(string)
-	}
-	if executionID == "" {
-		d.logger.Warn("Received script terminal event with no execution_id",
-			"event_type", string(event.Type),
-			"device_id", logging.SanitizeLogValue(deviceID))
-		return nil
-	}
-
-	// Determine completion state. A command_failed event is always terminal-failed.
-	// A script_completed event is failed only when the exit code is non-zero.
-	state := script.QueueStateCompleted
-	if commandFailed {
-		state = script.QueueStateFailed
-	} else if event.Details != nil {
-		if exitCode, ok := event.Details["exit_code"].(float64); ok && exitCode != 0 {
-			state = script.QueueStateFailed
-		}
-	}
-
-	var result *script.ExecutionResult
-	if event.Details != nil {
-		result = &script.ExecutionResult{}
-		if ec, ok := event.Details["exit_code"].(float64); ok {
-			result.ExitCode = int(ec)
-		}
-		// Prefer the full capped stdout/stderr keys (Issue #1978: steward now sends up to 1 MB
-		// under the "stdout"/"stderr" keys). Fall back to stdout_preview/stderr_preview (4 KB)
-		// for compatibility with older stewards that only send preview keys.
-		if stdout, ok := event.Details["stdout"].(string); ok {
-			result.Stdout = stdout
-		} else if stdout, ok := event.Details["stdout_preview"].(string); ok {
-			result.Stdout = stdout
-		}
-		if stderr, ok := event.Details["stderr"].(string); ok {
-			result.Stderr = stderr
-		} else if stderr, ok := event.Details["stderr_preview"].(string); ok {
-			result.Stderr = stderr
-		}
-		// On a command_failed event there is no result; surface the error string
-		// as stderr so the CLI shows why the execution failed.
-		if commandFailed && result.Stderr == "" {
-			if errStr, ok := event.Details["error"].(string); ok {
-				result.Stderr = errStr
-			}
-		}
-		if durMs, ok := event.Details["duration_ms"].(float64); ok {
-			result.Duration = time.Duration(durMs) * time.Millisecond
-		}
-
-		// 4 MB controller ceiling: defense-in-depth against a compromised or buggy steward
-		// bypassing the steward-side 1 MB cap (Issue #1978). Drop oversized output rather
-		// than storing unbounded data. The steward-side cap (1 MB) should prevent this from
-		// triggering under normal operation.
-		const controllerOutputCapBytes = 4 * 1024 * 1024
-		if len(result.Stdout)+len(result.Stderr) > controllerOutputCapBytes {
-			d.logger.Error("Execution output exceeds 4 MB controller ceiling; dropping output",
-				"device_id", logging.SanitizeLogValue(deviceID),
-				"execution_id", logging.SanitizeLogValue(executionID),
-				"stdout_bytes", len(result.Stdout),
-				"stderr_bytes", len(result.Stderr))
-			result.Stdout = ""
-			result.Stderr = ""
-		}
-	}
+	state := completionState(event, commandFailed)
+	result := d.completionResult(event, commandFailed, deviceID, executionID)
 
 	// Capture run-tracking metadata BEFORE AcknowledgeCompletion moves the entry
 	// out of the active queue. The run synthesis layer threads workflow_run_id,
 	// job_id, and idempotent flag through QueuedExecution.Metadata (Issue #1673,
 	// Issue #1674).
-	var runID, jobID string
-	var actionTenantID, actionCreatedBy string
-	var isIdempotent, isAction bool
-	var retryCount int
-	var origQE *script.QueuedExecution
-	for _, qe := range d.queue.PeekForDevice(deviceID) {
-		if qe.ExecutionID == executionID && qe.Metadata != nil {
-			runID, _ = qe.Metadata["workflow_run_id"].(string)
-			jobID, _ = qe.Metadata["job_id"].(string)
-			isIdempotent, _ = qe.Metadata["idempotent"].(bool)
-			retryCount = metaInt(qe.Metadata["retry_count"])
-			isAction = script.IsStewardAction(qe.Kind)
-			actionTenantID, _ = qe.Metadata["tenant_id"].(string)
-			actionCreatedBy, _ = qe.Metadata["created_by"].(string)
-			origQE = qe
-			break
-		}
-	}
+	meta := d.captureCompletionMeta(deviceID, executionID)
 
 	// A steward action reports a result code, not script output. The code decides
 	// the recorded outcome; an action is never retried — it was authorized once,
 	// for one nonce (Issue #4625).
-	var actionResultCode string
-	if isAction {
-		actionResultCode = stewardActionResultCode(event, commandFailed)
-		state = script.QueueStateCompleted
-		if actionResultCode != "ok" {
-			state = script.QueueStateFailed
-		}
-	}
+	actionResultCode, state := completionActionState(event, commandFailed, meta.isAction, state)
 
 	// Determine whether to retry before acknowledging, so we hold the full QE.
-	shouldRetry := !isAction && state == script.QueueStateFailed && isIdempotent && retryCount < 1
+	shouldRetry := meta.shouldRetry(state)
 
 	// AcknowledgeCompletion moves the queue entry out of the active set. A failure
 	// here (e.g. the entry was already evicted by a dispatch-timeout sweep) must NOT
@@ -1123,92 +1031,269 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 			"state", state)
 	}
 
-	if shouldRetry && origQE != nil {
-		// Re-queue the idempotent execution with an incremented retry count.
-		// The run/job tracking record is NOT advanced yet — it will be updated
-		// when the retry completes (success or second failure).
-		retryMeta := make(map[string]interface{}, len(origQE.Metadata))
-		for k, v := range origQE.Metadata {
-			retryMeta[k] = v
-		}
-		retryMeta["retry_count"] = retryCount + 1
-
-		retryQE := &script.QueuedExecution{
-			ExecutionID:   uuid.New().String(),
-			ScriptID:      origQE.ScriptID,
-			ScriptVersion: origQE.ScriptVersion,
-			ScriptRef:     origQE.ScriptRef,
-			Shell:         origQE.Shell,
-			Parameters:    origQE.Parameters,
-			Timeout:       origQE.Timeout,
-			Metadata:      retryMeta,
-		}
-		if err := d.queue.QueueExecution(deviceID, retryQE); err != nil {
-			d.logger.Error("Failed to re-queue idempotent execution after failure",
-				"device_id", logging.SanitizeLogValue(deviceID),
-				"execution_id", logging.SanitizeLogValue(retryQE.ExecutionID),
-				"error", logging.SanitizeLogValue(err.Error()))
-		} else {
-			d.logger.Info("Re-queued idempotent execution after failure",
-				"device_id", logging.SanitizeLogValue(deviceID),
-				"execution_id", logging.SanitizeLogValue(retryQE.ExecutionID))
-		}
+	if shouldRetry && meta.origQE != nil {
+		d.requeueIdempotent(deviceID, meta)
 	}
 
 	// Advance run/job tracking only when not retrying. On retry, the job remains
 	// in-progress until the retry execution reaches a terminal state. This runs
 	// even when AcknowledgeCompletion failed so the job cannot be stuck pending.
-	if isAction && d.runSink != nil && runID != "" && jobID != "" {
-		if err := d.runSink.RecordActionResult(ctx, runID, jobID, executionID, actionResultCode); err != nil {
-			code := script.NormalizeActionResultCode(actionResultCode)
-			exitCode := 0
-			if code != "ok" {
-				exitCode = 1
-			}
-			late := LateResultIgnored{
-				RunID: runID, JobID: jobID, ExecutionID: executionID, DeviceID: deviceID,
-				TenantID: actionTenantID, CreatedBy: actionCreatedBy, Kind: "steward_action",
-				ReportedStatus: reportedStatus(code != "ok"), ReportedExitCode: exitCode, ReportedResultCode: code,
-			}
-			if !d.handleLateResult(ctx, err, late) {
-				d.logger.Error("Failed to record steward action result in run store",
-					"device_id", logging.SanitizeLogValue(deviceID),
-					"execution_id", logging.SanitizeLogValue(executionID),
-					"run_id", logging.SanitizeLogValue(runID),
-					"error", logging.SanitizeLogValue(err.Error()))
-			}
-		} else if d.actionAudit != nil && origQE != nil && origQE.Action != nil {
-			d.actionAudit.RecordActionCompleted(ctx, ExpiredActionJob{
-				RunID: runID, JobID: jobID, DeviceID: deviceID, ExecutionID: executionID,
-				TenantID: actionTenantID, CreatedBy: actionCreatedBy, Action: *origQE.Action,
-				ResultCode: script.NormalizeActionResultCode(actionResultCode), At: time.Now().UTC(),
-			})
-		}
-	} else if !shouldRetry && d.runSink != nil && runID != "" && jobID != "" {
-		var output, stderr string
-		var exitCode int
-		if result != nil {
-			output = result.Stdout
-			stderr = result.Stderr
-			exitCode = result.ExitCode
-		}
-		if err := d.runSink.RecordJobResult(ctx, runID, jobID, executionID,
-			state == script.QueueStateFailed, output, stderr, exitCode); err != nil {
-			late := LateResultIgnored{
-				RunID: runID, JobID: jobID, ExecutionID: executionID, DeviceID: deviceID,
-				TenantID: actionTenantID, CreatedBy: actionCreatedBy, Kind: "script",
-				ReportedStatus: reportedStatus(state == script.QueueStateFailed), ReportedExitCode: exitCode,
-			}
-			if !d.handleLateResult(ctx, err, late) {
-				d.logger.Error("Failed to record job completion in run store",
-					"device_id", logging.SanitizeLogValue(deviceID),
-					"execution_id", logging.SanitizeLogValue(executionID),
-					"run_id", logging.SanitizeLogValue(runID),
-					"error", logging.SanitizeLogValue(err.Error()))
-			}
-		}
+	d.recordCompletionOutcome(ctx, deviceID, executionID, actionResultCode, state, result, shouldRetry, meta)
+
+	d.finishCompletion(executionID, deviceID)
+	return nil
+}
+
+// completionMeta is the run-tracking metadata of a queue entry, captured before
+// AcknowledgeCompletion removes the entry from the active queue.
+type completionMeta struct {
+	runID, jobID                    string
+	actionTenantID, actionCreatedBy string
+	isIdempotent, isAction          bool
+	retryCount                      int
+	origQE                          *script.QueuedExecution
+}
+
+// shouldRetry reports whether a failed execution is re-queued: an action is never
+// retried, and a script only once and only when it is idempotent.
+func (m completionMeta) shouldRetry(state script.QueueState) bool {
+	return !m.isAction && state == script.QueueStateFailed && m.isIdempotent && m.retryCount < 1
+}
+
+// completionActionState applies the steward-action rule: the result code decides
+// the recorded outcome. For a script it returns state unchanged.
+func completionActionState(event *controlplaneTypes.Event, commandFailed, isAction bool, state script.QueueState) (string, script.QueueState) {
+	if !isAction {
+		return "", state
+	}
+	code := stewardActionResultCode(event, commandFailed)
+	if code != "ok" {
+		return code, script.QueueStateFailed
+	}
+	return code, script.QueueStateCompleted
+}
+
+// recordCompletionOutcome advances run/job tracking when the entry carries run
+// metadata. This runs even when AcknowledgeCompletion failed so the job cannot be
+// stuck pending, and is skipped for a script that is being retried.
+func (d *Dispatcher) recordCompletionOutcome(ctx context.Context, deviceID, executionID, actionResultCode string, state script.QueueState, result *script.ExecutionResult, shouldRetry bool, m completionMeta) {
+	if d.runSink == nil || m.runID == "" || m.jobID == "" {
+		return
+	}
+	if m.isAction {
+		d.recordActionOutcome(ctx, deviceID, executionID, actionResultCode, m)
+	} else if !shouldRetry {
+		d.recordScriptOutcome(ctx, deviceID, executionID, state, result, m)
+	}
+}
+
+// completionIdentity reads the authoritative steward ID and the execution ID from
+// a terminal event. ok is false (after logging) when either is missing.
+func (d *Dispatcher) completionIdentity(event *controlplaneTypes.Event) (deviceID, executionID string, ok bool) {
+	// StewardID is set by the control plane from the mTLS peer certificate.
+	deviceID = event.StewardID
+	if deviceID == "" {
+		d.logger.Warn("Received script terminal event with empty steward_id — ignoring",
+			"event_type", string(event.Type))
+		return "", "", false
 	}
 
+	if event.Details != nil {
+		executionID, _ = event.Details["execution_id"].(string)
+	}
+	if executionID == "" {
+		d.logger.Warn("Received script terminal event with no execution_id",
+			"event_type", string(event.Type),
+			"device_id", logging.SanitizeLogValue(deviceID))
+		return "", "", false
+	}
+	return deviceID, executionID, true
+}
+
+// completionState decides the completion state. A command_failed event is always
+// terminal-failed. A script_completed event is failed only when the exit code is
+// non-zero.
+func completionState(event *controlplaneTypes.Event, commandFailed bool) script.QueueState {
+	if commandFailed {
+		return script.QueueStateFailed
+	}
+	if event.Details != nil {
+		if exitCode, ok := event.Details["exit_code"].(float64); ok && exitCode != 0 {
+			return script.QueueStateFailed
+		}
+	}
+	return script.QueueStateCompleted
+}
+
+// completionResult builds the execution result from the event details, or nil when
+// the event carries none. Output above the controller ceiling is dropped.
+func (d *Dispatcher) completionResult(event *controlplaneTypes.Event, commandFailed bool, deviceID, executionID string) *script.ExecutionResult {
+	if event.Details == nil {
+		return nil
+	}
+	result := &script.ExecutionResult{}
+	if ec, ok := event.Details["exit_code"].(float64); ok {
+		result.ExitCode = int(ec)
+	}
+	result.Stdout, result.Stderr = completionOutput(event.Details, commandFailed)
+	if durMs, ok := event.Details["duration_ms"].(float64); ok {
+		result.Duration = time.Duration(durMs) * time.Millisecond
+	}
+
+	// 4 MB controller ceiling: defense-in-depth against a compromised or buggy steward
+	// bypassing the steward-side 1 MB cap (Issue #1978). Drop oversized output rather
+	// than storing unbounded data. The steward-side cap (1 MB) should prevent this from
+	// triggering under normal operation.
+	const controllerOutputCapBytes = 4 * 1024 * 1024
+	if len(result.Stdout)+len(result.Stderr) > controllerOutputCapBytes {
+		d.logger.Error("Execution output exceeds 4 MB controller ceiling; dropping output",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"execution_id", logging.SanitizeLogValue(executionID),
+			"stdout_bytes", len(result.Stdout),
+			"stderr_bytes", len(result.Stderr))
+		result.Stdout = ""
+		result.Stderr = ""
+	}
+	return result
+}
+
+// completionOutput picks stdout and stderr from the event details. It prefers the
+// full capped stdout/stderr keys (Issue #1978: steward now sends up to 1 MB under
+// the "stdout"/"stderr" keys) and falls back to stdout_preview/stderr_preview
+// (4 KB) for compatibility with older stewards that only send preview keys.
+func completionOutput(details map[string]interface{}, commandFailed bool) (stdout, stderr string) {
+	if s, ok := details["stdout"].(string); ok {
+		stdout = s
+	} else if s, ok := details["stdout_preview"].(string); ok {
+		stdout = s
+	}
+	if s, ok := details["stderr"].(string); ok {
+		stderr = s
+	} else if s, ok := details["stderr_preview"].(string); ok {
+		stderr = s
+	}
+	// On a command_failed event there is no result; surface the error string
+	// as stderr so the CLI shows why the execution failed.
+	if commandFailed && stderr == "" {
+		if errStr, ok := details["error"].(string); ok {
+			stderr = errStr
+		}
+	}
+	return stdout, stderr
+}
+
+// captureCompletionMeta reads the run-tracking metadata of the active queue entry
+// for executionID on deviceID.
+func (d *Dispatcher) captureCompletionMeta(deviceID, executionID string) completionMeta {
+	var m completionMeta
+	for _, qe := range d.queue.PeekForDevice(deviceID) {
+		if qe.ExecutionID == executionID && qe.Metadata != nil {
+			m.runID, _ = qe.Metadata["workflow_run_id"].(string)
+			m.jobID, _ = qe.Metadata["job_id"].(string)
+			m.isIdempotent, _ = qe.Metadata["idempotent"].(bool)
+			m.retryCount = metaInt(qe.Metadata["retry_count"])
+			m.isAction = script.IsStewardAction(qe.Kind)
+			m.actionTenantID, _ = qe.Metadata["tenant_id"].(string)
+			m.actionCreatedBy, _ = qe.Metadata["created_by"].(string)
+			m.origQE = qe
+			break
+		}
+	}
+	return m
+}
+
+// requeueIdempotent re-queues the idempotent execution with an incremented retry
+// count. The run/job tracking record is NOT advanced yet — it will be updated
+// when the retry completes (success or second failure).
+func (d *Dispatcher) requeueIdempotent(deviceID string, m completionMeta) {
+	origQE := m.origQE
+	retryMeta := make(map[string]interface{}, len(origQE.Metadata))
+	for k, v := range origQE.Metadata {
+		retryMeta[k] = v
+	}
+	retryMeta["retry_count"] = m.retryCount + 1
+
+	retryQE := &script.QueuedExecution{
+		ExecutionID:   uuid.New().String(),
+		ScriptID:      origQE.ScriptID,
+		ScriptVersion: origQE.ScriptVersion,
+		ScriptRef:     origQE.ScriptRef,
+		Shell:         origQE.Shell,
+		Parameters:    origQE.Parameters,
+		Timeout:       origQE.Timeout,
+		Metadata:      retryMeta,
+	}
+	if err := d.queue.QueueExecution(deviceID, retryQE); err != nil {
+		d.logger.Error("Failed to re-queue idempotent execution after failure",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"execution_id", logging.SanitizeLogValue(retryQE.ExecutionID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	} else {
+		d.logger.Info("Re-queued idempotent execution after failure",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"execution_id", logging.SanitizeLogValue(retryQE.ExecutionID))
+	}
+}
+
+// recordActionOutcome records a steward action's result code in the run store and
+// audits the completion.
+func (d *Dispatcher) recordActionOutcome(ctx context.Context, deviceID, executionID, actionResultCode string, m completionMeta) {
+	if err := d.runSink.RecordActionResult(ctx, m.runID, m.jobID, executionID, actionResultCode); err != nil {
+		code := script.NormalizeActionResultCode(actionResultCode)
+		exitCode := 0
+		if code != "ok" {
+			exitCode = 1
+		}
+		late := LateResultIgnored{
+			RunID: m.runID, JobID: m.jobID, ExecutionID: executionID, DeviceID: deviceID,
+			TenantID: m.actionTenantID, CreatedBy: m.actionCreatedBy, Kind: "steward_action",
+			ReportedStatus: reportedStatus(code != "ok"), ReportedExitCode: exitCode, ReportedResultCode: code,
+		}
+		if !d.handleLateResult(ctx, err, late) {
+			d.logger.Error("Failed to record steward action result in run store",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(executionID),
+				"run_id", logging.SanitizeLogValue(m.runID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+	} else if d.actionAudit != nil && m.origQE != nil && m.origQE.Action != nil {
+		d.actionAudit.RecordActionCompleted(ctx, ExpiredActionJob{
+			RunID: m.runID, JobID: m.jobID, DeviceID: deviceID, ExecutionID: executionID,
+			TenantID: m.actionTenantID, CreatedBy: m.actionCreatedBy, Action: *m.origQE.Action,
+			ResultCode: script.NormalizeActionResultCode(actionResultCode), At: time.Now().UTC(),
+		})
+	}
+}
+
+// recordScriptOutcome records a script execution's terminal result in the run store.
+func (d *Dispatcher) recordScriptOutcome(ctx context.Context, deviceID, executionID string, state script.QueueState, result *script.ExecutionResult, m completionMeta) {
+	var output, stderr string
+	var exitCode int
+	if result != nil {
+		output = result.Stdout
+		stderr = result.Stderr
+		exitCode = result.ExitCode
+	}
+	if err := d.runSink.RecordJobResult(ctx, m.runID, m.jobID, executionID,
+		state == script.QueueStateFailed, output, stderr, exitCode); err != nil {
+		late := LateResultIgnored{
+			RunID: m.runID, JobID: m.jobID, ExecutionID: executionID, DeviceID: deviceID,
+			TenantID: m.actionTenantID, CreatedBy: m.actionCreatedBy, Kind: "script",
+			ReportedStatus: reportedStatus(state == script.QueueStateFailed), ReportedExitCode: exitCode,
+		}
+		if !d.handleLateResult(ctx, err, late) {
+			d.logger.Error("Failed to record job completion in run store",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(executionID),
+				"run_id", logging.SanitizeLogValue(m.runID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+	}
+}
+
+// finishCompletion consumes the relay grant, releases the per-device lock and
+// triggers dispatch of the device's next queued execution.
+func (d *Dispatcher) finishCompletion(executionID, deviceID string) {
 	// Issue #1675: consume the relay grant on execution completion so further
 	// relay requests return 403. Best-effort — a failure must not stall dispatch.
 	if d.grantManager != nil {
@@ -1229,8 +1314,6 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 			d.dispatchForDevice(d.ctx, deviceID)
 		}()
 	}
-
-	return nil
 }
 
 // extractMetaStringSlice extracts a []string value from a metadata map.
