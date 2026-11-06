@@ -6,6 +6,7 @@
 package systemlog
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc/eventlog"
 )
@@ -64,4 +66,43 @@ func TestEventLogInitializeFailureNoPanic(t *testing.T) {
 	ok, why := s.Available()
 	assert.False(t, ok)
 	assert.Error(t, why)
+}
+
+func TestOpenSourceWithRetryRecoversFromAccessDenied(t *testing.T) {
+	const denied = 3
+	calls := 0
+	open := func(string) (*eventlog.Log, error) {
+		calls++
+		if calls <= denied {
+			return nil, windows.ERROR_ACCESS_DENIED
+		}
+		return &eventlog.Log{}, nil
+	}
+	l, err := openSourceWithRetry(open, "src", 5*time.Second, time.Millisecond)
+	require.NoError(t, err)
+	assert.NotNil(t, l)
+	assert.Equal(t, denied+1, calls)
+}
+
+func TestOpenSourceWithRetryDoesNotRetryOtherErrors(t *testing.T) {
+	calls := 0
+	boom := errors.New("boom")
+	open := func(string) (*eventlog.Log, error) {
+		calls++
+		return nil, boom
+	}
+	_, err := openSourceWithRetry(open, "src", 5*time.Second, time.Millisecond)
+	require.ErrorIs(t, err, boom)
+	assert.Equal(t, 1, calls)
+}
+
+func TestOpenSourceWithRetryHonoursDeadline(t *testing.T) {
+	open := func(string) (*eventlog.Log, error) { return nil, windows.ERROR_ACCESS_DENIED }
+	deadline := 200 * time.Millisecond
+	start := time.Now()
+	_, err := openSourceWithRetry(open, "src", deadline, 10*time.Millisecond)
+	elapsed := time.Since(start)
+	require.ErrorIs(t, err, windows.ERROR_ACCESS_DENIED)
+	assert.GreaterOrEqual(t, elapsed, deadline)
+	assert.Less(t, elapsed, deadline+2*time.Second)
 }
