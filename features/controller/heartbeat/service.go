@@ -81,6 +81,13 @@ type DNAHashMismatchCallback func(stewardID string)
 // (nil when the steward reports none); the callback owns persisting it.
 type HeartbeatReceivedCallback func(stewardID string, reasons []controlplaneTypes.HealthReason)
 
+// RepairHeartbeatCallback is called for a heartbeat that reports repair.completed.
+// peerSerial is the serial of the client certificate that authenticated the
+// stream the heartbeat arrived on (stamped by the control-plane provider, never
+// taken from the heartbeat body). It lets the receiver count only heartbeats on
+// the repaired steward's new certificate (Issue #5727).
+type RepairHeartbeatCallback func(ctx context.Context, stewardID, peerSerial string, reasons []controlplaneTypes.HealthReason)
+
 // FragmentRootCallback is called whenever a heartbeat carries a non-empty
 // DNAAggregateRoot. The receiver should compare the claimed root to its own
 // stored root and request a fragment delta via SYNC_DNA if they differ
@@ -129,6 +136,7 @@ type Service struct {
 	onStatusChange      StatusChangeCallback
 	onDNAHashMismatch   DNAHashMismatchCallback
 	onHeartbeatReceived HeartbeatReceivedCallback
+	onRepairHeartbeat   RepairHeartbeatCallback
 	onFragmentRoot      FragmentRootCallback
 	onBulkRoot          BulkRootCallback
 
@@ -177,6 +185,12 @@ type Config struct {
 	// every heartbeat (e.g., job dispatch). Unlike OnStatusChange, this fires
 	// even when the steward remains healthy. Optional — nil disables.
 	OnHeartbeatReceived HeartbeatReceivedCallback
+
+	// OnRepairHeartbeat is called for a heartbeat whose reasons include
+	// repair.completed, with the serial of the certificate the stream is
+	// authenticated by. Optional — nil disables the return to trusted of a
+	// repaired steward.
+	OnRepairHeartbeat RepairHeartbeatCallback
 
 	// OnFragmentRoot is called whenever a heartbeat carries a non-empty
 	// DNAAggregateRoot. The receiver compares the claimed root to its stored
@@ -234,6 +248,7 @@ func New(cfg *Config) (*Service, error) {
 		onStatusChange:        cfg.OnStatusChange,
 		onDNAHashMismatch:     cfg.OnDNAHashMismatch,
 		onHeartbeatReceived:   withRepairProgress(cfg),
+		onRepairHeartbeat:     cfg.OnRepairHeartbeat,
 		onFragmentRoot:        cfg.OnFragmentRoot,
 		onBulkRoot:            cfg.OnBulkRoot,
 		trustEvaluator:        cfg.TrustEvaluator,
@@ -315,6 +330,50 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 	status.MissedBeats = 0
 	status.Healthy = true
 
+	s.trackDNAHash(status, hb)
+
+	// Trigger callback if status changed
+	if !previouslyHealthy && s.onStatusChange != nil {
+		s.onStatusChange(hb.StewardID, true, *status)
+	}
+
+	// Fire unconditional per-heartbeat hook (e.g. for job dispatch).
+	if s.onHeartbeatReceived != nil {
+		s.onHeartbeatReceived(hb.StewardID, reasons)
+	}
+
+	// A heartbeat that reports a finished repair is the signal the repaired
+	// steward may return to trusted; the receiver checks the rest.
+	if s.onRepairHeartbeat != nil && reportsRepairCompleted(reasons) {
+		s.onRepairHeartbeat(ctx, hb.StewardID, hb.PeerSerial, reasons)
+	}
+
+	// Fire fragment-root callback for partial-sync detection (ADR-017 §7).
+	if hb.DNAAggregateRoot != "" && s.onFragmentRoot != nil {
+		s.onFragmentRoot(ctx, hb.StewardID, hb.DNAAggregateRoot)
+	}
+
+	// Fire bulk-root callback for the per-object lane. The root arrives on the
+	// heartbeat Metrics side-channel (dna_bulk_root) and is lifted onto
+	// hb.DNABulkRoot by the control-plane provider's heartbeat conversion.
+	if hb.DNABulkRoot != "" && s.onBulkRoot != nil {
+		s.onBulkRoot(ctx, hb.StewardID, hb.DNABulkRoot)
+	}
+
+	// Notify the trust evaluator of a healthy liveness event (Issue #1694).
+	if s.trustEvaluator != nil {
+		if err := s.trustEvaluator.RecordLiveness(ctx, hb.StewardID, true); err != nil {
+			s.logger.Warn("Trust evaluator error on healthy heartbeat",
+				"steward_id", logging.SanitizeLogValue(hb.StewardID), "error", logging.SanitizeLogValue(err.Error()))
+		}
+	}
+
+	return nil
+}
+
+// trackDNAHash records the heartbeat's DNA hash and requests a full sync when it
+// differs from the hash the controller expects (Issue #418). The caller holds s.mu.
+func (s *Service) trackDNAHash(status *StewardStatus, hb *controlplaneTypes.Heartbeat) {
 	// DNA hash tracking (Issue #418).
 	// Only check for mismatch when:
 	//   1. The heartbeat carries a non-empty DNA hash (backward-compatible with older stewards).
@@ -339,38 +398,6 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 				"new_hash", logging.SanitizeLogValue(hb.DNAHash))
 		}
 	}
-
-	// Trigger callback if status changed
-	if !previouslyHealthy && s.onStatusChange != nil {
-		s.onStatusChange(hb.StewardID, true, *status)
-	}
-
-	// Fire unconditional per-heartbeat hook (e.g. for job dispatch).
-	if s.onHeartbeatReceived != nil {
-		s.onHeartbeatReceived(hb.StewardID, reasons)
-	}
-
-	// Fire fragment-root callback for partial-sync detection (ADR-017 §7).
-	if hb.DNAAggregateRoot != "" && s.onFragmentRoot != nil {
-		s.onFragmentRoot(ctx, hb.StewardID, hb.DNAAggregateRoot)
-	}
-
-	// Fire bulk-root callback for the per-object lane. The root arrives on the
-	// heartbeat Metrics side-channel (dna_bulk_root) and is lifted onto
-	// hb.DNABulkRoot by the control-plane provider's heartbeat conversion.
-	if hb.DNABulkRoot != "" && s.onBulkRoot != nil {
-		s.onBulkRoot(ctx, hb.StewardID, hb.DNABulkRoot)
-	}
-
-	// Notify the trust evaluator of a healthy liveness event (Issue #1694).
-	if s.trustEvaluator != nil {
-		if err := s.trustEvaluator.RecordLiveness(ctx, hb.StewardID, true); err != nil {
-			s.logger.Warn("Trust evaluator error on healthy heartbeat",
-				"steward_id", logging.SanitizeLogValue(hb.StewardID), "error", logging.SanitizeLogValue(err.Error()))
-		}
-	}
-
-	return nil
 }
 
 // monitorHeartbeats runs in the background checking for stale heartbeats.
@@ -543,4 +570,14 @@ func stringifyMetrics(in map[string]interface{}, prev map[string]string) map[str
 		metrics[k] = fmt.Sprintf("%v", v)
 	}
 	return metrics
+}
+
+// reportsRepairCompleted reports whether reasons include repair.completed.
+func reportsRepairCompleted(reasons []controlplaneTypes.HealthReason) bool {
+	for _, r := range reasons {
+		if r.Code == controlplaneTypes.ReasonCodeRepairCompleted {
+			return true
+		}
+	}
+	return false
 }

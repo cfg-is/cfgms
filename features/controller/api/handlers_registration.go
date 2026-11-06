@@ -196,6 +196,10 @@ func (s *Server) registrationTokenUsable(w http.ResponseWriter, r *http.Request,
 		return refuse("Registration names a banned identity as clone_of", "Registration refused",
 			http.StatusForbidden, business.AuditResultDenied, map[string]interface{}{"reason": "clone_of_banned"})
 	}
+	// A registration naming a steward as the one it was copied from, inside the
+	// watch window of that steward's repair, is a use of its retired credentials.
+	// The registration itself proceeds unchanged (Issue #5727).
+	s.contestOnCloneOf(r.Context(), req.CloneOf, token.TenantID)
 	return true
 }
 

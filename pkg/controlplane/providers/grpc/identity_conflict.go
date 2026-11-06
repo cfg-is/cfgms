@@ -61,6 +61,27 @@ func WithIdentityConflictObserver(observer IdentityConflictObserver) option {
 	}
 }
 
+// PeerCredentialObserver is told about steward credentials at ControlChannel
+// admission: a connection refused because its client certificate is revoked, and
+// a connection admitted on a certificate. The controller uses them to watch a
+// repaired steward for use of its retired credentials (Issue #5727).
+// Implementations must return quickly and cannot refuse or alter the admission.
+type PeerCredentialObserver interface {
+	// ObserveRevokedPeer is called when stewardID presented a revoked serial.
+	ObserveRevokedPeer(ctx context.Context, stewardID, serial string)
+	// ObserveAdmittedPeer is called when stewardID passed the revocation and
+	// approval gates on serial.
+	ObserveAdmittedPeer(ctx context.Context, stewardID, serial string)
+}
+
+// WithPeerCredentialObserver injects the observer told about revoked and
+// admitted steward certificate serials. Nil (the default) disables reporting.
+func WithPeerCredentialObserver(observer PeerCredentialObserver) option {
+	return func(p *Provider) {
+		p.peerCredentialObserver = observer
+	}
+}
+
 // reportIdentityConflict compares the incoming connection with any live
 // registry entry for the same steward ID and reports a conflict when the peer
 // hosts differ. A same-host reconnect (a restarting steward whose stale stream

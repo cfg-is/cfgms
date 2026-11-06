@@ -35,8 +35,23 @@ type identityConflictAuditObserver struct {
 	logger logging.Logger
 	now    func() time.Time
 
+	// guard, when set, is told about each conflict so a repair that is pending or
+	// was just completed is contested (Issue #5727).
+	guard repairConflictGuard
+
 	mu       sync.Mutex
 	lastSeen map[string]time.Time
+}
+
+// repairConflictGuard is told about a steward identity seen on two endpoints.
+type repairConflictGuard interface {
+	ObserveIdentityConflict(ctx context.Context, stewardID string)
+}
+
+// withRepairGuard sets the guard told about each conflict.
+func (o *identityConflictAuditObserver) withRepairGuard(g repairConflictGuard) *identityConflictAuditObserver {
+	o.guard = g
+	return o
 }
 
 var _ grpcCP.IdentityConflictObserver = (*identityConflictAuditObserver)(nil)
@@ -70,7 +85,13 @@ func (o *identityConflictAuditObserver) allow(stewardID string) bool {
 
 // ObserveIdentityConflict implements grpcCP.IdentityConflictObserver.
 func (o *identityConflictAuditObserver) ObserveIdentityConflict(ctx context.Context, c grpcCP.IdentityConflict) {
-	if o.audit == nil || !o.allow(c.StewardID) {
+	if !o.allow(c.StewardID) {
+		return
+	}
+	if o.guard != nil {
+		o.guard.ObserveIdentityConflict(ctx, c.StewardID)
+	}
+	if o.audit == nil {
 		return
 	}
 	tenantID := c.TenantID

@@ -194,6 +194,10 @@ type Provider struct {
 	// WithIdentityConflictObserver.
 	identityConflictObserver IdentityConflictObserver
 
+	// peerCredentialObserver is told about revoked and admitted client
+	// certificate serials at ControlChannel admission (Issue #5727). Optional.
+	peerCredentialObserver PeerCredentialObserver
+
 	// lockdownGate is the default-deny gate on controller-pushed commands
 	// (Issue #5665). Nil = no gate. Injected via WithLockdown.
 	lockdownGate *interfaces.LockdownGate
@@ -1991,21 +1995,8 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	}
 
 	// Approval gate hook (Issue #1719): checked before admitting the stream.
-	// Store and service failures deny admission; an unavailable authorization
-	// dependency must not turn into fleet-wide implicit approval.
-	if s.provider.approvalChecker != nil {
-		admitted, checkErr := s.provider.approvalChecker.IsApproved(stream.Context(), stewardID)
-		if checkErr != nil {
-			s.provider.logger.Error("steward approval check error, rejecting (fail-closed)",
-				"steward_id", logging.SanitizeLogValue(stewardID),
-				"error", logging.SanitizeLogValue(checkErr.Error()))
-			return status.Error(codes.Unavailable, "steward approval service unavailable")
-		}
-		if !admitted {
-			s.provider.logger.Warn("steward ControlChannel rejected by approval checker",
-				"steward_id", logging.SanitizeLogValue(stewardID))
-			return status.Error(codes.PermissionDenied, "steward reconnect not approved")
-		}
+	if err := s.provider.checkApproval(stream.Context(), stewardID); err != nil {
+		return err
 	}
 
 	// Per-tenant admission bucket for every heartbeat on this stream (Issue
@@ -2023,6 +2014,7 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 		// No revocation checker configured: still record the serial as evidence.
 		peerSerial, _ = peerCertSerial(stream.Context())
 	}
+	s.provider.observeAdmittedPeer(stream.Context(), stewardID, peerSerial)
 
 	// Provenance (ADR-034 §2): demote-only and last — it runs only for a
 	// connection the revocation and approval gates above already admitted, and
@@ -2185,41 +2177,7 @@ func (s *transportServer) controlChannelRecvLoop(stream grpc.BidiStreamingServer
 			s.provider.dispatchEvent(event, release)
 
 		case *transportpb.ControlMessage_Heartbeat:
-			hb := heartbeatFromProto(payload.Heartbeat)
-			if hb.StewardID == "" {
-				hb.StewardID = stewardID
-			} else if hb.StewardID != stewardID {
-				s.provider.logger.Warn("controlchannel heartbeat stewardID mismatch",
-					"authenticated_cn", logging.SanitizeLogValue(stewardID),
-					"payload_steward_id", logging.SanitizeLogValue(hb.StewardID))
-				s.provider.identityMismatches.Add(1)
-				continue
-			}
-
-			// Per-tenant admission control (Issue #3759, ADR-031 Decision 6) plus
-			// one heartbeat in flight per stream (Issue #5120). Slots are held
-			// until every heartbeat handler has returned, so they bound handlers
-			// running at once, not just how fast they start. The bucket is
-			// heartbeatBucket, resolved server-side at connect; hb.TenantID is
-			// payload data and never selects a bucket.
-			if !ingest.tryHeartbeat() {
-				s.provider.dropMessage(ingest.heartbeatDrops, &s.provider.heartbeatsDropped, "heartbeat", "stream in-flight limit reached", stewardID, heartbeatBucket)
-				continue
-			}
-			release := ingest.releaseHeartbeat
-			if ta := s.provider.tenantAdmission; ta != nil {
-				if aErr := ta.Acquire(heartbeatBucket); aErr != nil {
-					ingest.releaseHeartbeat()
-					s.provider.dropMessage(ingest.heartbeatDrops, &s.provider.heartbeatsDropped, "heartbeat", "tenant admission queue full", stewardID, heartbeatBucket)
-					continue
-				}
-				// Stream slot first, then tenant slot (see the event path).
-				release = func() {
-					ingest.releaseHeartbeat()
-					ta.Release(heartbeatBucket)
-				}
-			}
-			s.provider.dispatchHeartbeat(hb, release)
+			s.receiveHeartbeat(payload.Heartbeat, stewardID, conn, heartbeatBucket, ingest)
 
 		case *transportpb.ControlMessage_Response:
 			resp := responseFromProto(payload.Response)
@@ -2262,6 +2220,48 @@ func (s *transportServer) controlChannelRecvLoop(stream grpc.BidiStreamingServer
 			s.provider.dispatchResponse(resp, release)
 		}
 	}
+}
+
+// receiveHeartbeat admits one heartbeat received on an authenticated
+// ControlChannel and hands it to the heartbeat handlers. The serial of the
+// stream's client certificate is stamped on it by the controller (Issue #5727).
+func (s *transportServer) receiveHeartbeat(pb *transportpb.Heartbeat, stewardID string, conn *registry.StewardConnection, heartbeatBucket string, ingest *streamIngest) {
+	hb := heartbeatFromProto(pb)
+	hb.PeerSerial = conn.PeerSerial
+	if hb.StewardID == "" {
+		hb.StewardID = stewardID
+	} else if hb.StewardID != stewardID {
+		s.provider.logger.Warn("controlchannel heartbeat stewardID mismatch",
+			"authenticated_cn", logging.SanitizeLogValue(stewardID),
+			"payload_steward_id", logging.SanitizeLogValue(hb.StewardID))
+		s.provider.identityMismatches.Add(1)
+		return
+	}
+
+	// Per-tenant admission control (Issue #3759, ADR-031 Decision 6) plus
+	// one heartbeat in flight per stream (Issue #5120). Slots are held
+	// until every heartbeat handler has returned, so they bound handlers
+	// running at once, not just how fast they start. The bucket is
+	// heartbeatBucket, resolved server-side at connect; hb.TenantID is
+	// payload data and never selects a bucket.
+	if !ingest.tryHeartbeat() {
+		s.provider.dropMessage(ingest.heartbeatDrops, &s.provider.heartbeatsDropped, "heartbeat", "stream in-flight limit reached", stewardID, heartbeatBucket)
+		return
+	}
+	release := ingest.releaseHeartbeat
+	if ta := s.provider.tenantAdmission; ta != nil {
+		if aErr := ta.Acquire(heartbeatBucket); aErr != nil {
+			ingest.releaseHeartbeat()
+			s.provider.dropMessage(ingest.heartbeatDrops, &s.provider.heartbeatsDropped, "heartbeat", "tenant admission queue full", stewardID, heartbeatBucket)
+			return
+		}
+		// Stream slot first, then tenant slot (see the event path).
+		release = func() {
+			ingest.releaseHeartbeat()
+			ta.Release(heartbeatBucket)
+		}
+	}
+	s.provider.dispatchHeartbeat(hb, release)
 }
 
 // extractStewardIDFromPeer extracts the steward ID from the peer's TLS certificate CN.

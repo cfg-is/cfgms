@@ -42,14 +42,14 @@ import (
 // identical keys (a thief who copied the data folder) no protocol can tell them
 // apart, so the first valid completion wins and consumes the nonce. A thief
 // connected first holds the control channel and would receive the request. The
-// loser is always loud: its credentials are refused and N7 turns that into
+// loser is always loud: its credentials are refused and the repair guard turns that into
 // repair.contested and a tampered status. A compromised controller can also
 // request repairs: a lossless repair destroys nothing, and a lossy one needs an
 // approving passkey at the controller, which already holds copies of the logs
 // and action history.
 
 // Audit actions of the repair state machine. steward_tamper_repair_contested is
-// written by the return-to-trusted flow (N7); it is read here only.
+// written by the guards of a finished repair (handlers_steward_repair_guard.go).
 const (
 	auditActionTamperRepairRequested = "steward_tamper_repair_requested"
 	auditActionTamperRepairCancelled = "steward_tamper_repair_cancelled"
@@ -63,7 +63,7 @@ const (
 const (
 	repairRequestKeyPrefix = "steward-repair/"         // steward-repair/<stewardID>/<repair_id>
 	repairResultKeyPrefix  = "steward-repair-result/"  // steward-repair-result/<repair_id>
-	repairRetiredKeyPrefix = "steward-repair-retired/" // steward-repair-retired/<oldDeviceID> (read by N7)
+	repairRetiredKeyPrefix = "steward-repair-retired/" // steward-repair-retired/<oldDeviceID> (read by the repair guard)
 )
 
 const (
@@ -75,7 +75,7 @@ const (
 	// response can be retried with the same key.
 	repairResultTTL = 24 * time.Hour
 
-	// repairRetiredTTL is the watch window of N7 for a retired device identity.
+	// repairRetiredTTL is the watch window of the repair guard for a retired device identity.
 	repairRetiredTTL = 24 * time.Hour
 
 	// repairAuditLimit bounds the audit events read for one steward's repair state.
@@ -741,11 +741,19 @@ type repairResultEntry struct {
 	ResponseJSON []byte `json:"response_json"`
 }
 
-// repairRetiredEntry is the retired-device tombstone N7 reads with
-// GetAndConsumeNonce: N3 (this) is its single producer.
+// repairRetiredEntry is the retired-device tombstone the repair guard reads with
+// GetAndConsumeNonce: completion (this file) is its single producer.
+//
+// It records the retired public key and its algorithm: a request addressed to the
+// retired device ID contests the repair only when it proves possession of that
+// key, since the device ID itself is public. TenantID is the steward's own tenant,
+// for audit context only.
 type repairRetiredEntry struct {
 	StewardID   string    `json:"steward_id"`
+	TenantID    string    `json:"tenant_id"`
 	OldDeviceID string    `json:"old_device_id"`
+	OldKeyPub   []byte    `json:"old_key_pub"`
+	OldKeyAlg   string    `json:"old_key_alg"`
 	CompletedAt time.Time `json:"completed_at"`
 }
 
@@ -853,6 +861,24 @@ func checkRotationLevel(newLevel, oldLevel string) (string, string) {
 // verifyRepairProofs checks that the old identity key (as stored) and the new
 // identity key both signed the rotation digest.
 func (s *Server) verifyRepairProofs(stewardID string, req *RefreshCompleteRequest, rot *repairRotation, oldAlgName string, oldKey []byte) bool {
+	if !s.verifyRepairOldKeyProof(stewardID, req, rot, oldAlgName, oldKey) {
+		return false
+	}
+	newPub, err := parseDevicePublicKey(rot.newAlg, rot.newKeyPub)
+	if err != nil {
+		return false
+	}
+	digest := controlplaneTypes.RepairRotationProofDigest(stewardID, req.RepairID, rot.newKeyPub, req.CSRPEM)
+	return s.popVerifier.Verify(rot.newAlg, newPub, digest, rot.newProof)
+}
+
+// verifyRepairOldKeyProof checks that oldKey signed the rotation digest of req:
+// proof that the caller holds the old identity key. rot may be nil (a malformed
+// request), which never verifies.
+func (s *Server) verifyRepairOldKeyProof(stewardID string, req *RefreshCompleteRequest, rot *repairRotation, oldAlgName string, oldKey []byte) bool {
+	if rot == nil || len(oldKey) == 0 {
+		return false
+	}
 	oldAlg, ok := normalizeKeyAlgorithm(oldAlgName)
 	if !ok {
 		return false
@@ -861,13 +887,20 @@ func (s *Server) verifyRepairProofs(stewardID string, req *RefreshCompleteReques
 	if err != nil {
 		return false
 	}
-	newPub, err := parseDevicePublicKey(rot.newAlg, rot.newKeyPub)
-	if err != nil {
+	digest := controlplaneTypes.RepairRotationProofDigest(stewardID, req.RepairID, rot.newKeyPub, req.CSRPEM)
+	return s.popVerifier.Verify(oldAlg, oldPub, digest, rot.oldProof)
+}
+
+// retiredKeyProven reports whether a repair-shaped request proves possession of
+// the retired key oldKey of stewardID: its old-key proof over its own rotation
+// digest verifies. Only such a request may contest a finished repair; the retired
+// device ID and the repair ID are not secrets.
+func (s *Server) retiredKeyProven(stewardID string, req *RefreshCompleteRequest, oldAlgName string, oldKey []byte) bool {
+	rot, bad := parseRepairRotation(req, "")
+	if bad != "" {
 		return false
 	}
-	digest := controlplaneTypes.RepairRotationProofDigest(stewardID, req.RepairID, rot.newKeyPub, req.CSRPEM)
-	return s.popVerifier.Verify(oldAlg, oldPub, digest, rot.oldProof) &&
-		s.popVerifier.Verify(rot.newAlg, newPub, digest, rot.newProof)
+	return s.verifyRepairOldKeyProof(stewardID, req, rot, oldAlgName, oldKey)
 }
 
 // handleRepairComplete is the repair shape of POST /stewards/{device_id}/refresh/complete.
@@ -1062,7 +1095,7 @@ func (s *Server) failRepairComplete(w http.ResponseWriter, r *http.Request, reco
 }
 
 // storeRepairResult keeps the completion result for retries and writes the
-// retired-device tombstone N7 reads. A store failure is logged: the repair itself
+// retired-device tombstone the repair guard reads. A store failure is logged: the repair itself
 // has already happened, and a missed retry fails closed. record is the pre-rebind
 // read, so it still names the old identity.
 func (s *Server) storeRepairResult(ctx context.Context, record *business.StewardRecord, rot *repairRotation, req *RefreshCompleteRequest, respJSON []byte) {
@@ -1075,7 +1108,10 @@ func (s *Server) storeRepairResult(ctx context.Context, record *business.Steward
 		s.logger.Error("repair: storing the completion result failed",
 			"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
 	}
-	tomb, _ := json.Marshal(repairRetiredEntry{StewardID: record.ID, OldDeviceID: record.DeviceID, CompletedAt: time.Now().UTC()})
+	tomb, _ := json.Marshal(repairRetiredEntry{
+		StewardID: record.ID, TenantID: record.TenantID, OldDeviceID: record.DeviceID,
+		OldKeyPub: record.IdentityKeyPub, OldKeyAlg: record.KeyAlgorithm, CompletedAt: time.Now().UTC(),
+	})
 	if err := s.nonceStore.PutNonce(ctx, repairRetiredKeyPrefix+record.DeviceID, tomb, repairRetiredTTL); err != nil {
 		s.logger.Error("repair: writing the retired-device tombstone failed",
 			"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
@@ -1105,6 +1141,14 @@ func (s *Server) serveRepairRetry(w http.ResponseWriter, r *http.Request, device
 	}
 	if status, reason := s.checkRepairRetry(record, res, req); reason != "" {
 		s.refuseRepairComplete(w, r, record, deviceID, status, "repair retry refused", reason)
+		// A refused retry that still proves possession of the retired key (a
+		// different new key signed by the old one) is the other holder of the
+		// retired credentials (Issue #5727). Without that proof it is only the
+		// audited refusal: the device ID and repair ID are not secrets, so they
+		// alone must never change state.
+		if s.retiredKeyProven(res.StewardID, req, res.OldKeyAlg, res.OldKeyPub) {
+			s.markRepairContested(ctx, record.ID, repairContestRetiredKeyRefresh)
+		}
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1120,6 +1164,13 @@ func (s *Server) repairDeviceNotFound(w http.ResponseWriter, r *http.Request, de
 		business.AuditEventSecurityEvent, "refresh_rejected",
 		business.AuditResultFailure, business.AuditSeverityMedium,
 		map[string]interface{}{"decision": "rejected", "reason": "unknown_device", "repair": true})
+	// The loser of a race can land here: its old device ID was retired by the
+	// repair the other party completed (Issue #5727). It contests only when its
+	// old-key proof verifies against the retired key; otherwise the refusal audit
+	// above is the only record.
+	s.contestOnRetiredDevice(r.Context(), deviceID, func(tomb *repairRetiredEntry) bool {
+		return s.retiredKeyProven(tomb.StewardID, req, tomb.OldKeyAlg, tomb.OldKeyPub)
+	})
 	s.writeStatusError(w, http.StatusNotFound, "device not found")
 }
 

@@ -469,3 +469,39 @@ func TestHeartbeatService_RepairProgressNeedsAuditAndTenantLookup(t *testing.T) 
 	require.NoError(t, cp.sendHeartbeat(context.Background(), heartbeatWith("s1",
 		controlplaneTypes.HealthReason{Component: "repair", Code: controlplaneTypes.ReasonCodeRepairRunning})))
 }
+
+// --- return to trusted of a repaired steward (Issue #5727) ---
+
+func TestHeartbeatService_RepairHeartbeatCarriesThePeerSerial(t *testing.T) {
+	type call struct {
+		id, serial string
+		reasons    []controlplaneTypes.HealthReason
+	}
+	var mu sync.Mutex
+	var calls []call
+	_, cp := newTestService(t, func(c *Config) {
+		c.OnRepairHeartbeat = func(_ context.Context, id, serial string, reasons []controlplaneTypes.HealthReason) {
+			mu.Lock()
+			defer mu.Unlock()
+			calls = append(calls, call{id, serial, reasons})
+		}
+	})
+	ctx := context.Background()
+
+	// Only a heartbeat that reports repair.completed reaches the callback.
+	require.NoError(t, cp.sendHeartbeat(ctx, heartbeatWith("s1")))
+	require.NoError(t, cp.sendHeartbeat(ctx, heartbeatWith("s1",
+		controlplaneTypes.HealthReason{Component: "repair", Code: controlplaneTypes.ReasonCodeRepairRunning, Message: "r-1"})))
+	hb := heartbeatWith("s1",
+		controlplaneTypes.HealthReason{Component: "repair", Code: controlplaneTypes.ReasonCodeRepairCompleted, Message: "r-1"})
+	hb.PeerSerial = "424242"
+	require.NoError(t, cp.sendHeartbeat(ctx, hb))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, calls, 1)
+	assert.Equal(t, "s1", calls[0].id)
+	assert.Equal(t, "424242", calls[0].serial, "the serial of the authenticated stream")
+	require.Len(t, calls[0].reasons, 1)
+	assert.Equal(t, "r-1", calls[0].reasons[0].Message)
+}
