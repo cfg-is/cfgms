@@ -7,7 +7,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	stewardconfig "github.com/cfgis/cfgms/features/config/stewardtypes"
 )
 
 // FuzzUnmarshalStewardConfig fuzzes the YAML-unmarshal-then-validate path that
