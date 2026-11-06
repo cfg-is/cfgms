@@ -567,8 +567,14 @@ test: fix-git-bare
 #	far from the others, rebalance by moving a package, not by adding a fourth
 #	group — CI job count is a cost too (checkout + setup-go + cache-restore
 #	overhead per job, see CLAUDE.md "Required CI Checks" runs-on routing notes).
-GO_GROUP_CONTROLLER_CORE := ./features/controller/server/... ./features/controller/initialization/...
-GO_GROUP_HEAVY_PROVIDERS := ./pkg/cert/... ./pkg/controlplane/providers/grpc/... ./features/steward/client/... ./pkg/storage/providers/sqlite/...
+# Issue #5958: unit-tests-rest regained the 15-minute edge (passing 12m17s-13m36s,
+# cancelled at the limit on several PRs). In its framework run cmd/steward (368s)
+# and features/workflow (290s) dominated; unit-tests-controller-core and
+# unit-tests-heavy-providers finished in ~4.6m and ~4.0m, so one package moves
+# into each. Exact packages (no `...`) so subpackages stay in rest; test-go-group-rest
+# excludes the same two.
+GO_GROUP_CONTROLLER_CORE := ./features/controller/server/... ./features/controller/initialization/... ./features/workflow
+GO_GROUP_HEAVY_PROVIDERS := ./pkg/cert/... ./pkg/controlplane/providers/grpc/... ./features/steward/client/... ./pkg/storage/providers/sqlite/... ./cmd/steward
 
 # CFGMS_TEST_GROUP_LIST_ONLY=1 prints the packages each group resolves to and
 # exits without running anything — mirrors CFGMS_API_TEST_SHARD_PLAN_ONLY
@@ -581,7 +587,7 @@ test-go-group-controller-core:
 	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
 		go list $(GO_GROUP_CONTROLLER_CORE); \
 	else \
-		echo "  Testing controller-core group (features/controller/server, features/controller/initialization)..."; \
+		echo "  Testing controller-core group (features/controller/server, features/controller/initialization, features/workflow)..."; \
 		go test -race -short -timeout=10m $(GO_GROUP_CONTROLLER_CORE); \
 	fi
 
@@ -590,7 +596,7 @@ test-go-group-heavy-providers:
 	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
 		go list $(GO_GROUP_HEAVY_PROVIDERS); \
 	else \
-		echo "  Testing heavy-providers group (pkg/cert, controlplane/grpc, steward/client, storage/sqlite)..."; \
+		echo "  Testing heavy-providers group (pkg/cert, controlplane/grpc, steward/client, storage/sqlite, cmd/steward)..."; \
 		go test -race -short -timeout=10m $(GO_GROUP_HEAVY_PROVIDERS); \
 	fi
 
@@ -617,7 +623,9 @@ test-go-group-rest:
 		| grep -v '/pkg/cert/interfaces$$' \
 		| grep -v '/pkg/controlplane/providers/grpc$$' \
 		| grep -v '/features/steward/client$$' \
-		| grep -v '/pkg/storage/providers/sqlite$$'); \
+		| grep -v '/pkg/storage/providers/sqlite$$' \
+		| grep -v '/features/workflow$$' \
+		| grep -v '/cmd/steward$$'); \
 	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
 		echo "$$pkgs"; \
 		exit 0; \
