@@ -2362,6 +2362,17 @@ test_macos_groups_cover_exactly_shipped_packages() {
         done
     done
 
+    # The two heaviest rest packages must not share a shard (Issue #5967).
+    local heavy_a heavy_b
+    heavy_a=$(CFGMS_TEST_GROUP_LIST_ONLY=1 CFGMS_MACOS_REST_SHARD=0 CFGMS_MACOS_REST_SHARDS=2 \
+        make --no-print-directory test-go-group-macos-rest 2>&1 | grep -cE '/(features/workflow|pkg/storage/interfaces)$')
+    heavy_b=$(CFGMS_TEST_GROUP_LIST_ONLY=1 CFGMS_MACOS_REST_SHARD=1 CFGMS_MACOS_REST_SHARDS=2 \
+        make --no-print-directory test-go-group-macos-rest 2>&1 | grep -cE '/(features/workflow|pkg/storage/interfaces)$')
+    if [[ "$heavy_a" != "1" || "$heavy_b" != "1" ]]; then
+        log_fail "macOS rest shards are not weight-balanced: heavy packages split ${heavy_a}/${heavy_b}, want 1/1"
+        return
+    fi
+
     local dups
     dups=$(echo "$actual" | grep . | sort | uniq -d)
     if [[ -n "$dups" ]]; then
