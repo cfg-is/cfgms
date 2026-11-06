@@ -650,6 +650,25 @@ func wireHTTPFleetStores(httpServer *api.Server, storageManager *interfaces.Stor
 	}
 }
 
+// wireHTTPConfigNamespaceStores binds the stores that live in namespaces of the
+// controller's config store: role configs and privileges (Issue #2543), hyperv
+// profiles (Issue #3785) and library approval modes (Issue #5840). Without a
+// config store their endpoints stay at 503.
+func wireHTTPConfigNamespaceStores(httpServer *api.Server, cs cfgconfig.ConfigStore) error {
+	if cs == nil {
+		return nil
+	}
+	httpServer.SetRoleConfigStore(cs)
+	httpServer.SetPrivilegeStore(cs)
+	httpServer.SetHypervProfileConfigStore(cs)
+	approvalStore, err := api.NewContentApprovalStore(cs)
+	if err != nil {
+		return fmt.Errorf("failed to create content approval store: %w", err)
+	}
+	httpServer.SetContentApprovalStore(approvalStore)
+	return nil
+}
+
 // bindRepairDelivery wires repair requests (Issue #5726) once the API server
 // exists: signed with the command signer, sent over the control plane, and sent
 // to a reconnecting steward by the on-connect hook. Without a control plane and
@@ -2202,21 +2221,19 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// "Role config store not available". The canonical store is the controller's
 	// config store under the role-policies namespace (the same store the
 	// selector-driven role adapter reads via GetConfigStore, config_service_v2.go).
-	if cs := storageManager.GetConfigStore(); cs != nil {
-		httpServer.SetRoleConfigStore(cs)
-		httpServer.SetPrivilegeStore(cs)
+	//
+	// Issue #3785: Wire the hyperv-profile store into the HTTP API server, same
+	// gap and same underlying store as the role-config wiring — the hyperv
+	// profile REST endpoints (`/api/v1/hyperv/profiles`,
+	// handlers_hyperv_profiles.go) read the API server's hypervProfileConfigStore
+	// field directly and 503 "Hyperv profile store not available" until it is set.
+	// Issue #5840: the library approval mode routes read and write the mode through
+	// ContentApprovalStore over the same config store.
+	if err := wireHTTPConfigNamespaceStores(httpServer, storageManager.GetConfigStore()); err != nil {
+		return nil, err
 	}
 	if scriptLibrary != nil {
 		httpServer.SetScriptRepository(scriptLibrary)
-	}
-
-	// Issue #3785: Wire the hyperv-profile store into the HTTP API server, same
-	// gap and same underlying store as the role-config wiring immediately above —
-	// the hyperv profile REST endpoints (`/api/v1/hyperv/profiles`,
-	// handlers_hyperv_profiles.go) read the API server's hypervProfileConfigStore
-	// field directly and 503 "Hyperv profile store not available" until it is set.
-	if cs := storageManager.GetConfigStore(); cs != nil {
-		httpServer.SetHypervProfileConfigStore(cs)
 	}
 
 	// Issue #3253: Wire entity graph provider and its ConfigStore desired-state
