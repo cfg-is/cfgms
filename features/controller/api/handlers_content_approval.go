@@ -37,6 +37,14 @@ const (
 )
 
 
+// ContentApprovalStore returns the wired content approval store, or nil when
+// unwired. Exposed so controller startup wiring can be regression-tested.
+func (s *Server) ContentApprovalStore() *ContentApprovalStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.contentApprovalStore
+}
+
 // ApproveScriptRequest is the body of POST /api/v1/automation/approvals/scripts.
 // ApprovalHash is the value the presence tap covers: it spans shell, timeout and
 // parameters as well as content. ContentHash is optional; when present it must
