@@ -36,7 +36,6 @@ const (
 	ScriptApprovalPending ScriptApprovalState = "pending"
 )
 
-
 // ContentApprovalStore returns the wired content approval store, or nil when
 // unwired. Exposed so controller startup wiring can be regression-tested.
 func (s *Server) ContentApprovalStore() *ContentApprovalStore {
