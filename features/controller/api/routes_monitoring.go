@@ -32,6 +32,7 @@ func registerMonitoringRoutes(s *Server, api *mux.Router) {
 func registerPrivateMetricsRoutes(s *Server, router *mux.Router) {
 	api := router.PathPrefix("/api/v1").Subrouter()
 	api.Use(s.authenticationMiddleware)
+	api.Use(s.automationRouteGuard)
 	api.Use(s.validationMiddleware)
 
 	monitoring := api.PathPrefix("/monitoring").Subrouter()

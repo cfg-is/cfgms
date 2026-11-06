@@ -120,12 +120,13 @@ func hashRequestBodyForPresenceBinding(r *http.Request) (string, error) {
 type AuthChannel int
 
 const (
-	AuthChannelUnknown   AuthChannel = iota
-	AuthChannelWebCookie             // browser session cookie
-	AuthChannelCfgBearer             // cfg CLI Bearer session
-	AuthChannelMTLS                  // mTLS admin certificate
-	AuthChannelAPIKey                // API key
-	AuthChannelRelay                 // steward relay script principal
+	AuthChannelUnknown         AuthChannel = iota
+	AuthChannelWebCookie                   // browser session cookie
+	AuthChannelCfgBearer                   // cfg CLI Bearer session
+	AuthChannelMTLS                        // mTLS admin certificate
+	AuthChannelAPIKey                      // API key
+	AuthChannelRelay                       // steward relay script principal
+	AuthChannelAutomationGrant             // automation grant credential (ADR-036 section 3)
 )
 
 type Principal struct {
@@ -1100,6 +1101,14 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 
 		// State (c)/(d): no admin cert presented.
 
+		// Automation grant (ADR-036 section 3): a Bearer token with the grant prefix is
+		// handled only by the grant store. A refused grant credential is a 401 and never
+		// falls through to the session or API-key paths below.
+		if credential, ok := bearerGrantCredential(r); ok {
+			s.authenticateAutomationGrant(w, r, credential, next)
+			return
+		}
+
 		// Session-token path (Issue #2232): intercept Bearer tokens that are 43 chars
 		// (base64url without padding for 32 random bytes — length-distinguishable from
 		// API keys, which use base64url with padding: 44 chars). Only attempted when a
@@ -1465,6 +1474,12 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 
 		if apiKeyStr == "" {
 			s.writeErrorResponse(w, http.StatusUnauthorized, "API key required", "MISSING_API_KEY")
+			return
+		}
+
+		// A grant credential is never an API key: the prefix is reserved for the grant path.
+		if strings.HasPrefix(apiKeyStr, automationGrantCredentialPrefix) {
+			s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
 			return
 		}
 

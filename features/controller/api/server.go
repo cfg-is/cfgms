@@ -182,6 +182,7 @@ type Server struct {
 	closeOnce                       sync.Once                                // idempotent Close
 	roleConfigStore                 cfgconfig.ConfigStore                    // Issue #2543: role-config storage under role-policies namespace
 	hypervProfileConfigStore        cfgconfig.ConfigStore                    // Issue #3785: hyperv profile storage under hyperv-profiles namespace
+	automationGrantStore            *AutomationGrantStore                    // ADR-036 section 3: authenticates cfgag_ grant credentials (nil: every grant credential is refused)
 	contentApprovalStore            *ContentApprovalStore                    // Issue #5840: library approval modes (sole writer of the mode namespace)
 	tagStore                        *tagstore.Store                          // Issue #2545: steward tag store for tag: selector support
 	webAuthn                        *webauthn.WebAuthn                       // Issue #2782: WebAuthn RP instance; nil → endpoints return 503
@@ -790,6 +791,7 @@ func (s *Server) setupRouter() {
 	// API routes with authentication and validation
 	api := s.router.PathPrefix("/api/v1").Subrouter()
 	api.Use(s.authenticationMiddleware) // extract principal (API key or mTLS)
+	api.Use(s.automationRouteGuard)     // ADR-036: default-deny a grant principal outside the automation route table
 	// requireTier(TierAny) removed: it was a no-op passthrough (Issue #2780 migrates to assurance-based enforcement).
 	api.Use(s.validationMiddleware)
 	api.Use(s.csrfMiddleware) // Issue #2493: session-bound CSRF for unsafe cookie-auth methods
@@ -1782,6 +1784,14 @@ func (s *Server) SetContentApprovalStore(st *ContentApprovalStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.contentApprovalStore = st
+}
+
+// SetAutomationGrantStore wires the store that authenticates automation grant
+// credentials. Until it is set every request carrying a grant credential is refused.
+func (s *Server) SetAutomationGrantStore(st *AutomationGrantStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.automationGrantStore = st
 }
 
 // SetRegistry wires the active-steward connection registry so that
