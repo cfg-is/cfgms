@@ -57,6 +57,28 @@ The controller refuses the copy at control-plane admission with a distinct reaso
 
 A copy controlled by an attacker can ignore step 1 and keep retrying with the copied identity. It stays refused under §2. The removal path in §5 cuts it off for good.
 
+### 4a. Broken-trust fallback: re-key and register as a new device that names the old one
+
+When a steward cannot trust its own secrets or trust material at all and has a registration token, it takes the section 4 flow for a reason other than a controller refusal. It re-keys, registers as a new device with `clone_of` set to the old steward ID, and declares `clone_reason: "broken_trust"` on the registration request. The controller admits that registration into a locked state instead of the ordinary approval queue.
+
+**Triggers.** All are local file or verification failures, plus the controller answering on the pinned re-admission channel that it has no record of the device key. No control-stream message starts this path.
+
+- The stored identity file is unreadable or corrupt.
+- The clone marker is corrupt.
+- The persisted CA does not verify against its pin, or the report-only link cannot verify its CA and no pin-verified CA can be rebuilt.
+- The device key is missing, corrupt or unknown to the controller, so the host cannot renew by proof. A merely expired certificate does not trigger the fallback; it renews by proof.
+
+**Guards.** The fallback runs only when all of these hold; otherwise the steward keeps retrying and logs locally, and sends nothing.
+
+- A registration token is available and passes the same ownership and permission check as every other token read. The token, never the old or an expired certificate, authenticates the request.
+- The controller is trusted through an install-pinned or compile-time source. A CA fetched from the network is never used, and the token is never sent to a controller trusted that way.
+- The data directory is not tampered. Data directory tamper with a token present runs the data directory alarm, not this fallback.
+- A steward with no token never mints an identity; it stays in the no-token loop.
+
+**Order.** The clone marker is persisted first, with `reason: "broken_trust"`, the old steward ID and a pending re-key flag. The old steward ID is taken from whatever is readable: the identity file's `steward_id`, the clone marker, then the client certificate subject. When none is readable the steward registers without `clone_of` and still sets `clone_reason`. The device key is then regenerated, the old identity and re-admission state are discarded, and the flag is cleared. A restart before the flag is cleared repeats only the re-key; a restart after it resumes the same pending registration and never mints a second device. The reason `identity` / `identity.broken_trust` is set before and after registration so the new identity's first heartbeat names it.
+
+**Link completion.** A broken-trust marker outlives the registration. After an operator links the new device to the old steward record, the re-admission response carries the old steward ID. The steward adopts that ID only when its marker is set and the response ID equals the marker's recorded `clone_of`; it then rewrites its identity and clears the marker and the reason. Any other differing ID is refused, reported as `identity.link_mismatch`, and the marker is kept.
+
 ### 5. Split and removal
 
 - **Split (approve the queued copy):** the copy gets a new `StewardRecord` with its own device key and certificate. The original record continues unchanged.

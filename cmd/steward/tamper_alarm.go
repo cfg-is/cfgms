@@ -150,6 +150,13 @@ func validLatchCodes(codes []string) bool {
 	return true
 }
 
+// onlyCode reports whether code is the one and only reason the latch holds.
+func (l *tamperLatch) onlyCode(code string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.latched && !l.controllerLocked && len(l.codes) == 1 && l.codes[0] == code
+}
+
 func (l *tamperLatch) isLatched() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -340,7 +347,14 @@ type tamperAlarm struct {
 	rescan func() *tamperFault
 	// resetDerived rebuilds derived local state on release.
 	resetDerived func()
-	sink         systemLogWriter
+	// brokenTrust, when set, runs when the stored identity cannot carry the alarm
+	// because its CA does not verify. It returns true when it began the
+	// broken-trust fallback: the device re-keyed and the old identity is gone.
+	brokenTrust func(ctx context.Context) bool
+	// recovered is set once brokenTrust began the fallback; run then releases
+	// the latch so the steward connects and registers as a new device.
+	recovered bool
+	sink      systemLogWriter
 	// sinkFn opens the local system log the first time it is needed.
 	sinkFn func() systemLogWriter
 	logger logging.Logger
@@ -401,9 +415,14 @@ func (a *tamperAlarm) connectLink(ctx context.Context, retry *time.Timer) *clien
 	case err == nil:
 		return link
 	case errors.Is(err, errTamperBrokenTrust), errors.Is(err, errReportOnlyNoIdentity), errors.Is(err, errReportOnlyNoClientCert):
-		// The identity cannot carry the alarm. The reason is kept locally
-		// only; broken-trust recovery (S20) owns the way out.
+		// The identity cannot carry the alarm. The reason is kept locally. With
+		// a registration token and a trusted anchor, an unverifiable CA is the
+		// broken-trust fallback's case (broken_trust.go); otherwise this stays
+		// the no-token loop.
 		a.recordLocalOnly(err)
+		if errors.Is(err, errTamperBrokenTrust) && a.brokenTrust != nil && a.brokenTrust(ctx) {
+			a.recovered = true
+		}
 	default:
 		a.logger.Warn("Tamper alarm link failed; retrying", "operation", "tamper_alarm_connect",
 			"error", logging.SanitizeLogValue(err.Error()))
@@ -412,9 +431,29 @@ func (a *tamperAlarm) connectLink(ctx context.Context, retry *time.Timer) *clien
 	return nil
 }
 
+// releaseAfterRecovery drops the latch after the broken-trust fallback removed
+// the identity whose CA did not verify.
+func (a *tamperAlarm) releaseAfterRecovery() bool {
+	if err := a.latch.release(); err != nil {
+		a.logger.Error("Tamper latch could not be released", "operation", "tamper_release",
+			"error", logging.SanitizeLogValue(err.Error()))
+		return false
+	}
+	a.recovered = false
+	startupReasons.Clear(tamperReasonComponent)
+	if a.resetDerived != nil {
+		a.resetDerived()
+	}
+	return true
+}
+
 // tryRelease releases the latch when the controller has restored this host and
 // the local fault is cleared. It returns true when the latch was released.
 func (a *tamperAlarm) tryRelease(tc *client.TransportClient) bool {
+	if a.recovered {
+		// The broken-trust fallback removed the identity the fault was about.
+		return a.releaseAfterRecovery()
+	}
 	if !a.latch.restoreReady() || !a.localFaultCleared() {
 		return false
 	}
@@ -553,4 +592,28 @@ func resetDerivedState(logger logging.Logger) {
 			}
 		}
 	}
+}
+
+// newTamperAlarm builds the alarm runStewardInternal holds while the latch is
+// set. A CA that cannot be verified hands off to the broken-trust fallback when
+// a registration token and a trusted anchor exist (broken_trust.go).
+func newTamperAlarm(latch *tamperLatch, logger logging.Logger, controllerURL string) *tamperAlarm {
+	alarm := &tamperAlarm{
+		latch: latch,
+		rescan: func() *tamperFault {
+			if err := dataDirCheck(logger); err != nil {
+				return &tamperFault{code: cpTypes.ReasonCodeTamperDataDir}
+			}
+			storedID, _ := loadIdentity(certStoreDirResolver())
+			_, fault, _ := scanStartupTamper(storedID, controllerURL, logger)
+			return fault
+		},
+		sinkFn: newSystemLogSink,
+		logger: logger,
+	}
+	alarm.resetDerived = func() { resetDerivedState(logger) }
+	alarm.brokenTrust = func(ctx context.Context) bool {
+		return rekeyFromAlarm(ctx, latch, controllerURL, alarm.logger)
+	}
+	return alarm
 }
