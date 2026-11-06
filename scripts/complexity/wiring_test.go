@@ -77,3 +77,43 @@ func TestWiringProtectedPaths(t *testing.T) {
 	assert.Contains(t, claude, "scripts/complexity/manifest.json")
 	assert.Contains(t, claude, "scripts/complexity/analyzer/")
 }
+
+func TestWiringMakefileTestCommitDuplication(t *testing.T) {
+	var line string
+	for _, l := range strings.Split(repoFile(t, "Makefile"), "\n") {
+		if strings.HasPrefix(l, "test-commit:") && !strings.Contains(l, "export") {
+			line = l
+		}
+	}
+	require.NotEmpty(t, line, "test-commit prerequisite line")
+	assert.Contains(t, strings.Fields(line), "duplication-check")
+}
+
+func TestWiringWorkflowDuplicationGate(t *testing.T) {
+	wf := repoFile(t, ".github/workflows/test-suite.yml")
+	job := jobBlock(t, wf, "duplication-gate")
+	assert.Contains(t, job, "github.event_name == 'pull_request'")
+	assert.Contains(t, job, "github.event_name == 'merge_group'")
+	assert.Contains(t, job, "fetch-depth: 0")
+	assert.Contains(t, job, "persist-credentials: false")
+	assert.Contains(t, job, "run: make duplication-check")
+
+	agg := jobBlock(t, wf, "unit-tests")
+	nStart, nEnd := strings.Index(agg, "needs:"), strings.Index(agg, "if:")
+	require.True(t, nStart >= 0 && nEnd > nStart, "unit-tests needs:/if: markers")
+	assert.Contains(t, agg[nStart:nEnd], "- duplication-gate")
+
+	check := strings.Index(agg, "needs.duplication-gate.result")
+	docsOnly := strings.Index(agg, "docs-only PR")
+	require.NotEqual(t, -1, check, "result check missing")
+	require.NotEqual(t, -1, docsOnly)
+	assert.Less(t, check, docsOnly, "result check must precede the docs-only exit")
+	assert.Contains(t, agg, `needs.duplication-gate.result }}" != "success"`)
+}
+
+func TestWiringDuplicationProtectedPaths(t *testing.T) {
+	assert.Contains(t, repoFile(t, "CODEOWNERS"), "/scripts/complexity/")
+	reviewer := repoFile(t, ".claude/agents/acceptance-reviewer.md")
+	assert.Contains(t, reviewer, "DefaultThreshold")
+	assert.Contains(t, reviewer, "duplication:justified")
+}

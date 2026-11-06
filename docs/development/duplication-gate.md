@@ -62,6 +62,22 @@ On success the command prints `duplication gate: pass`. Exit codes: 0 pass, 1 fi
 
 `MergeBase` resolves the merge-base with `origin/develop` (falling back to the first of its base refs that exists) and fails closed with exit 2 on a shallow clone, as the complexity check does; CI must fetch full history. The merge-base tree is extracted with `git archive` into a temporary directory and the worktree and index are left unchanged. Touched files are the paths committed since the merge-base plus staged, unstaged and untracked changes. Rules 2 and 3 apply only to runs in touched files; rule 1 is tree-wide.
 
+## CI and anti-gaming
+
+### Where the gate runs
+
+- `make test-commit` runs `duplication-check` locally.
+- The `duplication-gate` job in `.github/workflows/test-suite.yml` runs `make duplication-check` on every `pull_request` and `merge_group`, with a full-history checkout and no path filter. The `unit-tests` aggregator lists it in `needs:` and checks its result before the docs-only exit, so a docs-only pull request cannot skip it.
+- In the merge queue the job runs and posts its own `duplication-gate` context, but blocking is pull-request-side only, through the aggregator. The context is not in the branch ruleset's required checks.
+
+### Baseline
+
+There is no ratchet file to move. Each run measures the merge-base with develop afresh and compares the working tree against it (see [Merge-base and touched files](#merge-base-and-touched-files)), so the checkout needs full history (`fetch-depth: 0`).
+
+### Protected paths
+
+The tooling under `scripts/complexity/`, including the duplication tree and the `DefaultThreshold` constant, is protected against quiet edits by the CLAUDE.md scope constraints, a `CODEOWNERS` entry for `/scripts/complexity/`, and an acceptance-reviewer rule. That rule treats a diff touching `DefaultThreshold` as a finding unless the story names it, and lists every `//duplication:justified` line the diff adds so annotations stay visible.
+
 ## Limits
 
 - Moved or renamed clone code is not flagged: a clone is judged by its windows, so relocating a pre-existing duplicated block is not new duplication.

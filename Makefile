@@ -1383,7 +1383,7 @@ validate-providers:
 	echo ""
 
 # Pre-commit validation (smart tests + quality gates + SECRET SCANNING + ARCHITECTURE + LICENSE)
-test-commit: test lint lint-log-injection check-license-headers security-precommit check-architecture check-stdlib-completeness complexity-check security-scan
+test-commit: test lint lint-log-injection check-license-headers security-precommit check-architecture check-stdlib-completeness complexity-check duplication-check security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
 	@echo "===================================="
@@ -1395,6 +1395,7 @@ test-commit: test lint lint-log-injection check-license-headers security-precomm
 	@echo "- ✅ Stdlib payload boundary validated (all five sources agree)"
 	@echo "- ✅ Stdlib completeness validated (ADR-016 clause 6)"
 	@echo "- ✅ Complexity gate passed (no worsening against the merge-base)"
+	@echo "- ✅ Duplication gate passed (no new or grown clones against the merge-base)"
 	@echo "- ✅ Security scanning passed (vulnerabilities)"
 	@echo ""
 	@echo "🎯 Code is validated and ready for commit/PR"
@@ -2112,7 +2113,7 @@ duplication-replay:
 
 # duplication-check compares the working tree against a fresh measurement of the merge-base with
 # develop and fails on any duplication gate finding; it needs full git history (see
-# docs/development/duplication-gate.md). Not part of test-commit.
+# docs/development/duplication-gate.md). Part of test-commit.
 duplication-check:
 	@go run ./scripts/complexity duplication check -root .
 

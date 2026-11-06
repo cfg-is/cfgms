@@ -227,6 +227,37 @@ jobs:
     - name: Check complexity
       run: make complexity-check
 
+  # Duplication gate (Issue #5792): `make duplication-check` runs on every
+  # pull_request and merge_group with no path filter and no `changes` gate.
+  # Blocking is PR-side only: the `unit-tests` aggregator `needs:` this job, but
+  # its `if:` excludes merge_group and `unit-tests` is stubbed in the queue, so
+  # in the queue this job posts its own `duplication-gate` context for
+  # visibility without blocking. fetch-depth: 0 because the gate reads git
+  # history.
+  duplication-gate:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    - name: Install dependencies
+      run: go mod download
+
+    - name: Check duplication
+      run: make duplication-check
+
   # Fast unit tests - runs on every push/PR
   #
   # Split into 5 group legs + an aggregator (Issue #4151), each its own runner.
@@ -550,6 +581,7 @@ jobs:
       - changes
       - architecture-check
       - complexity-gate
+      - duplication-gate
       - unit-tests-controller-core
       - unit-tests-heavy-providers
       - unit-tests-rest
@@ -563,6 +595,7 @@ jobs:
           echo "changes.no_python_ok: ${{ needs.changes.outputs.no_python_ok }}"
           echo "architecture:     ${{ needs.architecture-check.result }}"
           echo "complexity:       ${{ needs.complexity-gate.result }}"
+          echo "duplication:      ${{ needs.duplication-gate.result }}"
           echo "controller-core:  ${{ needs.unit-tests-controller-core.result }}"
           echo "heavy-providers:  ${{ needs.unit-tests-heavy-providers.result }}"
           echo "rest:             ${{ needs.unit-tests-rest.result }}"
@@ -588,6 +621,12 @@ jobs:
           # Issue #5681: same placement, so a docs-only PR cannot skip the gate.
           if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ needs.complexity-gate.result }}" != "success" ]; then
             echo "❌ make complexity-check did not succeed"
+            exit 1
+          fi
+
+          # Issue #5792: same placement, so a docs-only PR cannot skip the gate.
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ needs.duplication-gate.result }}" != "success" ]; then
+            echo "❌ make duplication-check did not succeed"
             exit 1
           fi
 
