@@ -68,3 +68,8 @@ docs/design/mockups/README.md merge=union
 *.gz        binary
 *.zip       binary
 *.exe       binary
+
+# Golden files pin canonical/signed byte forms. They must be checked out
+# byte-exact on every platform; a CRLF rewrite on Windows changes the bytes
+# the tests compare against (#5847).
+*.golden    -text
