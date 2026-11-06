@@ -186,6 +186,13 @@ per-script setting can tighten the floor but can never loosen it.
 | `optional` | Signatures are verified when present, unsigned scripts are allowed |
 | `required` | The script is rejected unless it carries a valid `.sig` sidecar signed by a key in the steward's `trusted_keys` |
 
+These policies govern ad-hoc and resource script execution. A library script
+run (one that names a `script_id`) is not governed by them: it always requires
+a valid signature from a key in the steward's `trusted_keys`, whatever
+`script_signing.policy` and `trust_mode` are set to. An unsigned library
+script is refused, and `trust_mode: any_valid` does not extend library trust
+beyond `trusted_keys`.
+
 **Recommended rollout:** start with the steward floor at `optional` (or
 unset), verify signatures are being generated and verified correctly, then
 set `script_signing.policy: required` on the steward — or `signing_policy:
