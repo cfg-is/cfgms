@@ -121,10 +121,7 @@ func paginateStewards(stewards []StewardInfo, limit, offset int) StewardListPage
 // compatibility for cfg and existing clients).
 func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	// Extract tenant from authenticated context (same pattern as handleUpdateStewardConfig).
-	tenantID := ""
-	if tid := callerTenantFilter(r.Context()); tid != "" { //architecture:allow-root-scope -- builds the query filter only; visibility of the results is decided by readScope below
-		tenantID = tid
-	}
+	tenantID := callerTenantFilter(r.Context()) //architecture:allow-root-scope -- builds the query filter only; visibility of the results is decided by readScope below
 
 	// A root caller subject to the ADR-025 boundary lists only root-tenant and
 	// crossing-covered stewards; the rest are silently omitted (A2.5), so the
@@ -137,82 +134,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	// (handlers_fleet.go:51-64). The existing ?os, ?platform, ?arch, ?status, ?tag,
 	// ?hostname params are unaffected — they remain active on the non-q path.
 	if q := r.URL.Query().Get("q"); q != "" {
-		s.logger.Debug("Steward list selector search",
-			"q", logging.SanitizeLogValue(q))
-		selectorFilter, parsedTenantPath, parseErr := selector.Parse(q)
-		if parseErr != nil {
-			s.logger.Info("Invalid selector expression in steward list",
-				"q", logging.SanitizeLogValue(q), "error", logging.SanitizeLogValue(parseErr.Error()))
-			s.writeErrorResponse(w, http.StatusBadRequest, "invalid selector expression", "INVALID_SELECTOR")
-			return
-		}
-		// Enforce tenant subtree scope — must match handleResolveSelector exactly
-		// (same grammar, same boundary, same 403 CROSS_TENANT response code).
-		if parsedTenantPath != "" {
-			if tenantID != "" && !selectorPathWithinCaller(tenantID, parsedTenantPath) {
-				s.logger.Info("Selector tenant outside caller subtree",
-					"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
-					"caller_tenant", logging.SanitizeLogValue(tenantID))
-				s.writeErrorResponse(w, http.StatusForbidden,
-					"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
-				return
-			}
-			selectorFilter.TenantSubtree = parsedTenantPath
-		} else if tenantID != "" {
-			s.scopeFilterToTenantSubtree(r.Context(), &selectorFilter, tenantID)
-		}
-
-		limit, offset, paginated, paginErr := parseStewardPagination(r.URL.Query())
-		if paginErr != nil {
-			s.logger.Warn("Rejected steward list pagination params",
-				"limit", logging.SanitizeLogValue(r.URL.Query().Get("limit")),
-				"offset", logging.SanitizeLogValue(r.URL.Query().Get("offset")),
-				"error", logging.SanitizeLogValue(paginErr.Error()))
-			s.writeErrorResponse(w, http.StatusBadRequest, paginErr.Error(), "INVALID_PAGINATION")
-			return
-		}
-
-		results, searchErr := s.fleetQuery.Search(r.Context(), selectorFilter)
-		if searchErr != nil {
-			s.logger.Error("Fleet query failed", "error", searchErr)
-			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
-			return
-		}
-		results, _ = splitReadableResults(readScope, results)
-		stewardList := make([]StewardInfo, 0, len(results))
-		for _, res := range results {
-			info := StewardInfo{
-				ID:       res.ID,
-				TenantID: res.TenantID,
-				Status:   res.Status,
-				LastSeen: res.LastHeartbeat,
-				Version:  res.DNAAttributes["steward.version"],
-			}
-			if len(res.DNAAttributes) > 0 {
-				attrs := filteredDNAAttrs(res.DNAAttributes)
-				if res.TenantID != "" {
-					attrs["tenant"] = res.TenantID
-				}
-				info.DNA = &DNAInfo{
-					Hostname:     res.Hostname,
-					OS:           res.OS,
-					Architecture: res.Architecture,
-					Attributes:   attrs,
-				}
-			}
-			stewardList = append(stewardList, info)
-		}
-		s.attachStewardTags(r.Context(), stewardList)
-		if paginated {
-			page := paginateStewards(stewardList, limit, offset)
-			s.logger.Info("Listed stewards (selector, paginated)",
-				"q", logging.SanitizeLogValue(q), "count", len(page.Stewards), "total", page.Total)
-			s.writeSuccessResponse(w, page)
-			return
-		}
-		s.logger.Info("Listed stewards (selector)",
-			"q", logging.SanitizeLogValue(q), "count", len(stewardList))
-		s.writeSuccessResponse(w, stewardList)
+		s.listStewardsBySelector(w, r, q, tenantID, readScope)
 		return
 	}
 
@@ -226,13 +148,8 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 
 	// Parse optional pagination params. Rejected values are logged sanitized;
 	// the error body names the offending param, never the raw client value.
-	limit, offset, paginated, err := parseStewardPagination(r.URL.Query())
-	if err != nil {
-		s.logger.Warn("Rejected steward list pagination params",
-			"limit", logging.SanitizeLogValue(r.URL.Query().Get("limit")),
-			"offset", logging.SanitizeLogValue(r.URL.Query().Get("offset")),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_PAGINATION")
+	limit, offset, paginated, ok := s.parseStewardListPagination(w, r)
+	if !ok {
 		return
 	}
 
@@ -244,45 +161,153 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
 			return
 		}
-		results, _ = splitReadableResults(readScope, results)
-		stewardList := make([]StewardInfo, 0, len(results))
-		for _, res := range results {
-			info := StewardInfo{
-				ID:       res.ID,
-				TenantID: res.TenantID,
-				Status:   res.Status,
-				LastSeen: res.LastHeartbeat,
-				Version:  res.DNAAttributes["steward.version"],
-			}
-			if len(res.DNAAttributes) > 0 {
-				attrs := filteredDNAAttrs(res.DNAAttributes)
-				if res.TenantID != "" {
-					attrs["tenant"] = res.TenantID
-				}
-				info.DNA = &DNAInfo{
-					Hostname:     res.Hostname,
-					OS:           res.OS,
-					Architecture: res.Architecture,
-					Attributes:   attrs,
-				}
-			}
-			stewardList = append(stewardList, info)
-		}
-		s.attachStewardTags(r.Context(), stewardList)
-		if paginated {
-			page := paginateStewards(stewardList, limit, offset)
-			s.logger.Info("Listed stewards (filtered, paginated)", "count", len(page.Stewards), "total", page.Total)
-			s.writeSuccessResponse(w, page)
-			return
-		}
-		s.logger.Info("Listed stewards (filtered)", "count", len(stewardList))
-		s.writeSuccessResponse(w, stewardList)
+		stewardList := s.readableStewardInfos(r.Context(), readScope, results)
+		s.writeStewardList(w, stewardList, paginated, limit, offset,
+			"Listed stewards (filtered)", "Listed stewards (filtered, paginated)")
 		return
 	}
 
-	// No filter: return all stewards including registered-but-not-connected.
-	// Deregistered stewards are excluded by default; pass ?include_deregistered=true to restore them.
-	// Hidden and quarantined stewards are excluded by default (Issue #2918).
+	stewardList := s.unfilteredStewardList(r, tenantID, readScope)
+	s.writeStewardList(w, stewardList, paginated, limit, offset,
+		"Listed stewards", "Listed stewards (paginated)")
+}
+
+// listStewardsBySelector serves the ?q=<selector> path of handleListStewards.
+func (s *Server) listStewardsBySelector(w http.ResponseWriter, r *http.Request, q, tenantID string, readScope *tenantReadScope) {
+	s.logger.Debug("Steward list selector search",
+		"q", logging.SanitizeLogValue(q))
+	selectorFilter, ok := s.selectorListFilter(w, r, q, tenantID)
+	if !ok {
+		return
+	}
+
+	limit, offset, paginated, ok := s.parseStewardListPagination(w, r)
+	if !ok {
+		return
+	}
+
+	results, searchErr := s.fleetQuery.Search(r.Context(), selectorFilter)
+	if searchErr != nil {
+		s.logger.Error("Fleet query failed", "error", searchErr)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
+		return
+	}
+	stewardList := s.readableStewardInfos(r.Context(), readScope, results)
+	qForLog := logging.SanitizeLogValue(q)
+	if paginated {
+		page := paginateStewards(stewardList, limit, offset)
+		s.logger.Info("Listed stewards (selector, paginated)",
+			"q", qForLog, "count", len(page.Stewards), "total", page.Total)
+		s.writeSuccessResponse(w, page)
+		return
+	}
+	s.logger.Info("Listed stewards (selector)",
+		"q", qForLog, "count", len(stewardList))
+	s.writeSuccessResponse(w, stewardList)
+}
+
+// selectorListFilter parses the ?q= selector and enforces the caller's tenant
+// subtree on it — identical to handleResolveSelector (same grammar, same
+// boundary, same 403 CROSS_TENANT response code). On failure it has written the
+// error response and ok is false.
+func (s *Server) selectorListFilter(w http.ResponseWriter, r *http.Request, q, tenantID string) (fleet.Filter, bool) {
+	selectorFilter, parsedTenantPath, parseErr := selector.Parse(q)
+	if parseErr != nil {
+		s.logger.Info("Invalid selector expression in steward list",
+			"q", logging.SanitizeLogValue(q), "error", logging.SanitizeLogValue(parseErr.Error()))
+		s.writeErrorResponse(w, http.StatusBadRequest, "invalid selector expression", "INVALID_SELECTOR")
+		return fleet.Filter{}, false
+	}
+	if parsedTenantPath == "" {
+		if tenantID != "" {
+			s.scopeFilterToTenantSubtree(r.Context(), &selectorFilter, tenantID)
+		}
+		return selectorFilter, true
+	}
+	if tenantID != "" && !selectorPathWithinCaller(tenantID, parsedTenantPath) {
+		s.logger.Info("Selector tenant outside caller subtree",
+			"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
+			"caller_tenant", logging.SanitizeLogValue(tenantID))
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+		return fleet.Filter{}, false
+	}
+	selectorFilter.TenantSubtree = parsedTenantPath
+	return selectorFilter, true
+}
+
+// parseStewardListPagination parses the optional limit/offset params of the
+// steward list. A rejected value is logged sanitized and answered 400
+// INVALID_PAGINATION (the body names the param, never the raw client value); ok
+// is then false.
+func (s *Server) parseStewardListPagination(w http.ResponseWriter, r *http.Request) (limit, offset int, paginated, ok bool) {
+	limit, offset, paginated, err := parseStewardPagination(r.URL.Query())
+	if err != nil {
+		s.logger.Warn("Rejected steward list pagination params",
+			"limit", logging.SanitizeLogValue(r.URL.Query().Get("limit")),
+			"offset", logging.SanitizeLogValue(r.URL.Query().Get("offset")),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_PAGINATION")
+		return 0, 0, false, false
+	}
+	return limit, offset, paginated, true
+}
+
+// readableStewardInfos narrows fleet search results to those the caller's read
+// scope allows, builds their API view and attaches tags and health reasons.
+func (s *Server) readableStewardInfos(ctx context.Context, readScope *tenantReadScope, results []fleet.StewardResult) []StewardInfo {
+	results, _ = splitReadableResults(readScope, results)
+	stewardList := make([]StewardInfo, 0, len(results))
+	for _, res := range results {
+		stewardList = append(stewardList, fleetResultInfo(res))
+	}
+	s.attachStewardTags(ctx, stewardList)
+	return stewardList
+}
+
+// fleetResultInfo builds the API view of one fleet search result.
+func fleetResultInfo(res fleet.StewardResult) StewardInfo {
+	info := StewardInfo{
+		ID:       res.ID,
+		TenantID: res.TenantID,
+		Status:   res.Status,
+		LastSeen: res.LastHeartbeat,
+		Version:  res.DNAAttributes["steward.version"],
+	}
+	if len(res.DNAAttributes) > 0 {
+		attrs := filteredDNAAttrs(res.DNAAttributes)
+		if res.TenantID != "" {
+			attrs["tenant"] = res.TenantID
+		}
+		info.DNA = &DNAInfo{
+			Hostname:     res.Hostname,
+			OS:           res.OS,
+			Architecture: res.Architecture,
+			Attributes:   attrs,
+		}
+	}
+	return info
+}
+
+// writeStewardList writes the steward list, as a StewardListPage envelope when
+// the request was paginated and as the bare list otherwise. msg and pagedMsg are
+// the info log lines for the two shapes.
+func (s *Server) writeStewardList(w http.ResponseWriter, stewardList []StewardInfo, paginated bool, limit, offset int, msg, pagedMsg string) {
+	if paginated {
+		page := paginateStewards(stewardList, limit, offset)
+		s.logger.Info(pagedMsg, "count", len(page.Stewards), "total", page.Total)
+		s.writeSuccessResponse(w, page)
+		return
+	}
+	s.logger.Info(msg, "count", len(stewardList))
+	s.writeSuccessResponse(w, stewardList)
+}
+
+// unfilteredStewardList builds the no-filter steward list: every steward the
+// caller may read, including registered-but-not-connected ones.
+// Deregistered stewards are excluded by default; pass ?include_deregistered=true to restore them.
+// Hidden and quarantined stewards are excluded by default (Issue #2918).
+func (s *Server) unfilteredStewardList(r *http.Request, tenantID string, readScope *tenantReadScope) []StewardInfo {
 	visibility := stewardListVisibility{
 		includeDeregistered: r.URL.Query().Get("include_deregistered") == "true",
 		includeQuarantined:  r.URL.Query().Get("include_quarantined") == "true",
@@ -313,10 +338,17 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		stewardList = append(stewardList, localStewardInfo(steward, status))
 	}
 
-	// Add stewards this node has never handled — the ones attached to peer nodes.
-	// They carry their durable facts and deliberately no liveness fields: this
-	// node has no heartbeat from them and must not invent one (Issue #3480).
-	// durable is nil when the store is unavailable, which adds nothing.
+	stewardList = appendPeerStewards(stewardList, durable, seen, readScope, visibility)
+	s.attachStewardTags(r.Context(), stewardList)
+	return stewardList
+}
+
+// appendPeerStewards adds stewards this node has never handled — the ones
+// attached to peer nodes. They carry their durable facts and deliberately no
+// liveness fields: this node has no heartbeat from them and must not invent one
+// (Issue #3480). durable is nil when the store is unavailable, which adds
+// nothing.
+func appendPeerStewards(stewardList []StewardInfo, durable map[string]*business.StewardRecord, seen map[string]bool, readScope *tenantReadScope, visibility stewardListVisibility) []StewardInfo {
 	for id, rec := range durable {
 		if seen[id] || !readScope.Allows(rec.TenantID) {
 			continue
@@ -333,18 +365,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			Hidden:   rec.Hidden,
 		})
 	}
-
-	s.attachStewardTags(r.Context(), stewardList)
-
-	if paginated {
-		page := paginateStewards(stewardList, limit, offset)
-		s.logger.Info("Listed stewards (paginated)", "count", len(page.Stewards), "total", page.Total)
-		s.writeSuccessResponse(w, page)
-		return
-	}
-
-	s.logger.Info("Listed stewards", "count", len(stewardList))
-	s.writeSuccessResponse(w, stewardList)
+	return stewardList
 }
 
 // stewardListVisibility holds the include_* query flags of the unfiltered
@@ -922,7 +943,6 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
 
-	// Validate steward ID format
 	stewardIDForLog := logging.SanitizeLogValue(stewardID)
 	if !identifierRegex.MatchString(stewardID) {
 		s.logger.Warn("Invalid steward ID format in config update request")
@@ -952,56 +972,13 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 
 	tenantIDForLog := logging.SanitizeLogValue(tenantID)
 
-	// Parse request body into StewardConfig
-	// Support both JSON (legacy) and YAML (production .cfg format)
-	var config stewardtypes.StewardConfig
-	contentType := r.Header.Get("Content-Type")
-
-	// Read body
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		s.logger.Error("Failed to read request body", "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusBadRequest, "Failed to read request body", "READ_ERROR")
+	config, ok := s.decodeStewardConfigBody(w, r, stewardIDForLog)
+	if !ok {
 		return
 	}
 
-	// Parse based on Content-Type
-	if strings.Contains(contentType, "yaml") || strings.Contains(contentType, "x-yaml") {
-		// YAML format (production .cfg files)
-		if err := yaml.Unmarshal(bodyBytes, &config); err != nil {
-			s.logger.Error("Failed to decode config YAML", "error", logging.SanitizeLogValue(err.Error()))
-			s.writeErrorResponse(w, http.StatusBadRequest, "Invalid YAML body", "INVALID_YAML")
-			return
-		}
-		s.logger.Info("Received configuration in YAML format", "steward_id", stewardIDForLog, "resources", len(config.Resources))
-	} else {
-		// JSON format (legacy/backward compatibility)
-		if err := json.Unmarshal(bodyBytes, &config); err != nil {
-			s.logger.Error("Failed to decode config JSON", "error", logging.SanitizeLogValue(err.Error()))
-			s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_YAML")
-			return
-		}
-		s.logger.Info("Received configuration in JSON format", "steward_id", stewardIDForLog, "resources", len(config.Resources))
-	}
-
-	// Validate resource names at the handler boundary before any storage-side
-	// effect. An invalid name (e.g. containing a dot like "docker.io") is a
-	// client input error, not a storage fault: reject it with 400
-	// VALIDATION_ERROR here rather than letting it reach SetConfiguration and
-	// surface as a generic 500 STORAGE_ERROR. The offending name is
-	// config-derived and therefore safe to echo back to the caller so the
-	// client can self-diagnose without server logs. (Issue #2482)
-	for i, resource := range config.Resources {
-		if !identifierRegex.MatchString(resource.Name) {
-			s.logger.Warn("Invalid resource name in config upload",
-				"steward_id", stewardIDForLog,
-				"resource_index", i,
-				"resource_name", logging.SanitizeLogValue(resource.Name))
-			s.writeErrorResponse(w, http.StatusBadRequest,
-				fmt.Sprintf("Invalid resource name %q: must contain only alphanumeric characters, hyphens, and underscores", resource.Name),
-				"VALIDATION_ERROR")
-			return
-		}
+	if !s.validateConfigResourceNames(w, &config, stewardIDForLog) {
+		return
 	}
 
 	s.logger.Info("Configuration upload request received",
@@ -1009,53 +986,12 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		"tenant_id", tenantIDForLog,
 		"resource_count", len(config.Resources))
 
-	// Issue #1884: resolve required_modules: against the controller module cache
-	// before storing the configuration. When the module subsystem is wired, any
-	// declared module that is not cached + approved must block the deployment.
-	// Dependencies are nil-tolerant so deployments without the module subsystem
-	// (and tests that exercise unrelated paths) continue to function unchanged.
-	s.mu.RLock()
-	cacheLister := s.moduleCacheLister
-	bundleResolver := s.moduleBundleResolver
-	bundleApprover := s.moduleBundleApprover
-	trustStore := s.moduleTrustStore
-	s.mu.RUnlock()
-	if len(config.RequiredModules) > 0 &&
-		cacheLister != nil && bundleResolver != nil &&
-		bundleApprover != nil && trustStore != nil {
-		if err := resolution.ResolveCfgRequiredModules(
-			r.Context(),
-			config.RequiredModules,
-			cacheLister,
-			bundleResolver,
-			bundleApprover,
-			trustStore,
-		); err != nil {
-			s.logger.Warn("cfg deployment blocked by required_modules resolution",
-				"steward_id", stewardIDForLog,
-				"tenant_id", tenantIDForLog,
-				"error", logging.SanitizeLogValue(err.Error()))
-			s.writeErrorResponse(w, http.StatusUnprocessableEntity, err.Error(), "REQUIRED_MODULE_NOT_APPROVED")
-			return
-		}
+	if !s.resolveConfigRequiredModules(w, r, &config, stewardIDForLog, tenantIDForLog) {
+		return
 	}
 
 	// Store configuration using V2 durable config service
-	if err := s.configService.SetConfiguration(r.Context(), tenantID, stewardID, &config); err != nil {
-		var ve *service.ValidationFailedError
-		if errors.As(err, &ve) {
-			s.logger.Warn("Configuration validation failed",
-				"steward_id", stewardIDForLog,
-				"tenant_id", tenantIDForLog,
-				"error_count", len(ve.Errors))
-			s.writeErrorResponse(w, http.StatusBadRequest, ve.Error(), "VALIDATION_ERROR")
-			return
-		}
-		s.logger.Error("Failed to store configuration",
-			"steward_id", stewardIDForLog,
-			"tenant_id", tenantIDForLog,
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store configuration", "STORAGE_ERROR")
+	if !s.storeStewardConfig(w, r, tenantID, stewardID, &config, stewardIDForLog, tenantIDForLog) {
 		return
 	}
 
@@ -1074,44 +1010,7 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		"tenant_id":  tenantID,
 		"message":    "Configuration stored successfully",
 	}
-	if s.commandStore != nil {
-		var issuedBy string
-		if principal, ok := r.Context().Value(principalContextKey).(*Principal); ok && principal != nil {
-			issuedBy = principal.ID
-		}
-		rec := &business.CommandRecord{
-			ID:             fmt.Sprintf("cfg-update-%s-%d", stewardID, time.Now().UnixNano()),
-			Type:           string(controlplaneTypes.CommandSyncConfig),
-			StewardID:      stewardID,
-			TenantID:       tenantID,
-			IssuedAt:       time.Now().UTC(),
-			IssuedBy:       issuedBy,
-			DeliveryStatus: business.DeliveryStatusPending,
-		}
-		if err := s.commandStore.CreateCommandRecord(r.Context(), rec); err != nil {
-			s.logger.Warn("Failed to durably record config update delivery",
-				"steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(err.Error()))
-		} else {
-			deliveryStatus := rec.DeliveryStatus
-			if s.commandPublisher != nil {
-				if pubErr := s.commandPublisher.TriggerConfigSyncWithID(r.Context(), rec.ID, stewardID); pubErr != nil {
-					s.logger.Warn("Failed to trigger config sync after config update",
-						"steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(pubErr.Error()))
-					if updErr := s.commandStore.UpdateDeliveryStatus(r.Context(), rec.ID, business.DeliveryStatusPending, logging.SanitizeLogValue(pubErr.Error())); updErr != nil {
-						s.logger.Warn("Failed to record delivery attempt failure",
-							"steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(updErr.Error()))
-					}
-				} else if updErr := s.commandStore.UpdateDeliveryStatus(r.Context(), rec.ID, business.DeliveryStatusDelivered, ""); updErr != nil {
-					s.logger.Warn("Failed to record delivered status",
-						"steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(updErr.Error()))
-				} else {
-					deliveryStatus = business.DeliveryStatusDelivered
-				}
-			}
-			resp["command_id"] = rec.ID
-			resp["delivery_status"] = string(deliveryStatus)
-		}
-	}
+	s.recordConfigUpdateDelivery(r, stewardID, tenantID, stewardIDForLog, resp)
 	if _, ok := resp["command_id"]; !ok {
 		// No commandStore configured, or the delivery row failed to persist —
 		// fall back to a plain storage acknowledgement rather than claiming a
@@ -1120,6 +1019,180 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 	}
 
 	s.writeSuccessResponse(w, resp)
+}
+
+// decodeStewardConfigBody reads the request body into a StewardConfig.
+// Supports both JSON (legacy) and YAML (production .cfg format), selected by
+// Content-Type. On failure the response has been written and ok is false.
+func (s *Server) decodeStewardConfigBody(w http.ResponseWriter, r *http.Request, stewardIDForLog string) (stewardtypes.StewardConfig, bool) {
+	var config stewardtypes.StewardConfig
+	contentType := r.Header.Get("Content-Type")
+
+	// Read body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.logger.Error("Failed to read request body", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusBadRequest, "Failed to read request body", "READ_ERROR")
+		return config, false
+	}
+
+	// Parse based on Content-Type
+	if strings.Contains(contentType, "yaml") || strings.Contains(contentType, "x-yaml") {
+		// YAML format (production .cfg files)
+		if err := yaml.Unmarshal(bodyBytes, &config); err != nil {
+			s.logger.Error("Failed to decode config YAML", "error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusBadRequest, "Invalid YAML body", "INVALID_YAML")
+			return config, false
+		}
+		s.logger.Info("Received configuration in YAML format", "steward_id", stewardIDForLog, "resources", len(config.Resources))
+		return config, true
+	}
+	// JSON format (legacy/backward compatibility)
+	if err := json.Unmarshal(bodyBytes, &config); err != nil {
+		s.logger.Error("Failed to decode config JSON", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_YAML")
+		return config, false
+	}
+	s.logger.Info("Received configuration in JSON format", "steward_id", stewardIDForLog, "resources", len(config.Resources))
+	return config, true
+}
+
+// validateConfigResourceNames validates resource names at the handler boundary
+// before any storage-side effect. An invalid name (e.g. containing a dot like
+// "docker.io") is a client input error, not a storage fault: reject it with 400
+// VALIDATION_ERROR here rather than letting it reach SetConfiguration and
+// surface as a generic 500 STORAGE_ERROR. The offending name is
+// config-derived and therefore safe to echo back to the caller so the
+// client can self-diagnose without server logs. (Issue #2482)
+func (s *Server) validateConfigResourceNames(w http.ResponseWriter, config *stewardtypes.StewardConfig, stewardIDForLog string) bool {
+	for i, resource := range config.Resources {
+		if !identifierRegex.MatchString(resource.Name) {
+			s.logger.Warn("Invalid resource name in config upload",
+				"steward_id", stewardIDForLog,
+				"resource_index", i,
+				"resource_name", logging.SanitizeLogValue(resource.Name))
+			s.writeErrorResponse(w, http.StatusBadRequest,
+				fmt.Sprintf("Invalid resource name %q: must contain only alphanumeric characters, hyphens, and underscores", resource.Name),
+				"VALIDATION_ERROR")
+			return false
+		}
+	}
+	return true
+}
+
+// resolveConfigRequiredModules resolves required_modules: against the controller
+// module cache before the configuration is stored (Issue #1884). When the module
+// subsystem is wired, any declared module that is not cached + approved must
+// block the deployment. Dependencies are nil-tolerant so deployments without the
+// module subsystem (and tests that exercise unrelated paths) continue to
+// function unchanged.
+func (s *Server) resolveConfigRequiredModules(w http.ResponseWriter, r *http.Request, config *stewardtypes.StewardConfig, stewardIDForLog, tenantIDForLog string) bool {
+	s.mu.RLock()
+	cacheLister := s.moduleCacheLister
+	bundleResolver := s.moduleBundleResolver
+	bundleApprover := s.moduleBundleApprover
+	trustStore := s.moduleTrustStore
+	s.mu.RUnlock()
+	if len(config.RequiredModules) == 0 ||
+		cacheLister == nil || bundleResolver == nil ||
+		bundleApprover == nil || trustStore == nil {
+		return true
+	}
+	if err := resolution.ResolveCfgRequiredModules(
+		r.Context(),
+		config.RequiredModules,
+		cacheLister,
+		bundleResolver,
+		bundleApprover,
+		trustStore,
+	); err != nil {
+		s.logger.Warn("cfg deployment blocked by required_modules resolution",
+			"steward_id", stewardIDForLog,
+			"tenant_id", tenantIDForLog,
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusUnprocessableEntity, err.Error(), "REQUIRED_MODULE_NOT_APPROVED")
+		return false
+	}
+	return true
+}
+
+// storeStewardConfig persists the configuration through the config service. A
+// validation failure is a 400 VALIDATION_ERROR; any other failure is a 500
+// STORAGE_ERROR. On failure the response has been written and ok is false.
+func (s *Server) storeStewardConfig(w http.ResponseWriter, r *http.Request, tenantID, stewardID string, config *stewardtypes.StewardConfig, stewardIDForLog, tenantIDForLog string) bool {
+	err := s.configService.SetConfiguration(r.Context(), tenantID, stewardID, config)
+	if err == nil {
+		return true
+	}
+	var ve *service.ValidationFailedError
+	if errors.As(err, &ve) {
+		s.logger.Warn("Configuration validation failed",
+			"steward_id", stewardIDForLog,
+			"tenant_id", tenantIDForLog,
+			"error_count", len(ve.Errors))
+		s.writeErrorResponse(w, http.StatusBadRequest, ve.Error(), "VALIDATION_ERROR")
+		return false
+	}
+	s.logger.Error("Failed to store configuration",
+		"steward_id", stewardIDForLog,
+		"tenant_id", tenantIDForLog,
+		"error", logging.SanitizeLogValue(err.Error()))
+	s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store configuration", "STORAGE_ERROR")
+	return false
+}
+
+// recordConfigUpdateDelivery records a durable sync_config outbox row for a
+// stored config update and attempts delivery, adding command_id and
+// delivery_status to resp. It leaves resp untouched when no command store is
+// configured or the row fails to persist.
+func (s *Server) recordConfigUpdateDelivery(r *http.Request, stewardID, tenantID, stewardIDForLog string, resp map[string]any) {
+	if s.commandStore == nil {
+		return
+	}
+	var issuedBy string
+	if principal, ok := r.Context().Value(principalContextKey).(*Principal); ok && principal != nil {
+		issuedBy = principal.ID
+	}
+	rec := &business.CommandRecord{
+		ID:             fmt.Sprintf("cfg-update-%s-%d", stewardID, time.Now().UnixNano()),
+		Type:           string(controlplaneTypes.CommandSyncConfig),
+		StewardID:      stewardID,
+		TenantID:       tenantID,
+		IssuedAt:       time.Now().UTC(),
+		IssuedBy:       issuedBy,
+		DeliveryStatus: business.DeliveryStatusPending,
+	}
+	if err := s.commandStore.CreateCommandRecord(r.Context(), rec); err != nil {
+		s.logger.Warn("Failed to durably record config update delivery",
+			"steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(err.Error()))
+		return
+	}
+	resp["command_id"] = rec.ID
+	resp["delivery_status"] = string(s.deliverConfigUpdate(r.Context(), rec, stewardID, stewardIDForLog))
+}
+
+// deliverConfigUpdate triggers the config sync for a recorded config update and
+// returns the delivery status written back to the record: delivered on success,
+// otherwise the record's initial (pending) status.
+func (s *Server) deliverConfigUpdate(ctx context.Context, rec *business.CommandRecord, stewardID, stewardIDForLog string) business.DeliveryStatus {
+	if s.commandPublisher == nil {
+		return rec.DeliveryStatus
+	}
+	if pubErr := s.commandPublisher.TriggerConfigSyncWithID(ctx, rec.ID, stewardID); pubErr != nil {
+		s.logger.Warn("Failed to trigger config sync after config update",
+			"steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(pubErr.Error()))
+		if updErr := s.commandStore.UpdateDeliveryStatus(ctx, rec.ID, business.DeliveryStatusPending, logging.SanitizeLogValue(pubErr.Error())); updErr != nil {
+			s.logger.Warn("Failed to record delivery attempt failure",
+				"steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(updErr.Error()))
+		}
+		return rec.DeliveryStatus
+	}
+	if updErr := s.commandStore.UpdateDeliveryStatus(ctx, rec.ID, business.DeliveryStatusDelivered, ""); updErr != nil {
+		s.logger.Warn("Failed to record delivered status",
+			"steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(updErr.Error()))
+		return rec.DeliveryStatus
+	}
+	return business.DeliveryStatusDelivered
 }
 
 // handleValidateConfig handles POST /api/v1/stewards/{id}/config/validate
@@ -1620,48 +1693,18 @@ func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q := r.URL.Query()
-
-	// Parse and validate tail (default 100, max 1000).
-	tail := 100
-	if tailStr := q.Get("tail"); tailStr != "" {
-		v, err := strconv.Atoi(tailStr)
-		if err != nil || v < 1 || v > 1000 {
-			s.writeErrorResponse(w, http.StatusBadRequest, "tail must be an integer between 1 and 1000", "INVALID_PARAMETER")
-			return
-		}
-		tail = v
-	}
-
-	// Validate since is a parseable Go duration.
-	since := q.Get("since")
-	if since != "" {
-		if _, err := time.ParseDuration(since); err != nil {
-			s.writeErrorResponse(w, http.StatusBadRequest, "since must be a valid Go duration (e.g. 1h, 30m)", "INVALID_PARAMETER")
-			return
-		}
-	}
-
-	// Validate level is one of the four allowed values.
-	level := q.Get("level")
-	if level != "" && level != "DEBUG" && level != "INFO" && level != "WARN" && level != "ERROR" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "level must be DEBUG, INFO, WARN, or ERROR", "INVALID_PARAMETER")
-		return
-	}
-
-	// Cap module at 128 characters.
-	module := q.Get("module")
-	if len(module) > 128 {
-		s.writeErrorResponse(w, http.StatusBadRequest, "module parameter exceeds maximum length of 128 characters", "INVALID_PARAMETER")
+	params, invalidMsg := parseStewardLogParams(r.URL.Query())
+	if invalidMsg != "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, invalidMsg, "INVALID_PARAMETER")
 		return
 	}
 
 	s.logger.Debug("Steward log pull request",
 		"steward_id", stewardIDForLog,
-		"tail", tail,
-		"since", logging.SanitizeLogValue(since),
-		"level", logging.SanitizeLogValue(level),
-		"module", logging.SanitizeLogValue(module),
+		"tail", params.tail,
+		"since", logging.SanitizeLogValue(params.since),
+		"level", logging.SanitizeLogValue(params.level),
+		"module", logging.SanitizeLogValue(params.module),
 	)
 
 	// Containment resolves through ParentID ancestry, so "msp-ab" never matches "msp-a";
@@ -1681,50 +1724,8 @@ func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Map query params to TimeRangeQuery.
-	startTime := time.Now().Add(-24 * time.Hour) // default: last 24 hours
-	if since != "" {
-		d, _ := time.ParseDuration(since) // already validated above
-		startTime = time.Now().Add(-d)
-	}
-
-	filters := map[string]interface{}{
-		"steward_id": stewardID,
-	}
-	if level != "" {
-		filters["level"] = level
-	}
-	if module != "" {
-		filters["component"] = module
-	}
-
-	query := loggingInterfaces.TimeRangeQuery{
-		StartTime: startTime,
-		EndTime:   time.Now(),
-		Filters:   filters,
-		Limit:     tail,
-	}
-
-	// Issue #4857: the manager batches and writes asynchronously, so entries the
-	// log-stream handler has accepted may still be buffered. Flush before reading
-	// so every accepted entry is visible to this query; a flush failure is
-	// reported like a query failure rather than serving a silently stale result.
-	if flushErr := mgr.Flush(r.Context()); flushErr != nil {
-		s.logger.Error("Failed to flush steward event log before query",
-			"steward_id", stewardIDForLog,
-			"error", logging.SanitizeLogValue(flushErr.Error()),
-		)
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query event log", "QUERY_ERROR")
-		return
-	}
-
-	entries, err := mgr.QueryTimeRange(r.Context(), query)
-	if err != nil {
-		s.logger.Error("Failed to query steward event log",
-			"steward_id", stewardIDForLog,
-			"error", logging.SanitizeLogValue(err.Error()),
-		)
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query event log", "QUERY_ERROR")
+	entries, ok := s.flushAndQueryStewardLogs(w, r, mgr, params.timeRangeQuery(stewardID), stewardIDForLog)
+	if !ok {
 		return
 	}
 
@@ -1740,6 +1741,117 @@ func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
 
 	records := rollupStewardLogsByCorrelationID(filtered)
 	s.writeSuccessResponse(w, map[string]interface{}{"events": records})
+}
+
+// stewardLogParams is the validated query of GET /api/v1/stewards/{id}/logs.
+type stewardLogParams struct {
+	tail   int
+	since  string
+	level  string
+	module string
+}
+
+// parseStewardLogParams validates the tail, since, level and module query
+// parameters. A non-empty message names the first invalid parameter and is the
+// 400 INVALID_PARAMETER response text.
+func parseStewardLogParams(q url.Values) (stewardLogParams, string) {
+	tail, ok := parseStewardLogTail(q.Get("tail"))
+	if !ok {
+		return stewardLogParams{}, "tail must be an integer between 1 and 1000"
+	}
+
+	// Validate since is a parseable Go duration.
+	since := q.Get("since")
+	if since != "" {
+		if _, err := time.ParseDuration(since); err != nil {
+			return stewardLogParams{}, "since must be a valid Go duration (e.g. 1h, 30m)"
+		}
+	}
+
+	// Validate level is one of the four allowed values.
+	level := q.Get("level")
+	switch level {
+	case "", "DEBUG", "INFO", "WARN", "ERROR":
+	default:
+		return stewardLogParams{}, "level must be DEBUG, INFO, WARN, or ERROR"
+	}
+
+	// Cap module at 128 characters.
+	module := q.Get("module")
+	if len(module) > 128 {
+		return stewardLogParams{}, "module parameter exceeds maximum length of 128 characters"
+	}
+
+	return stewardLogParams{tail: tail, since: since, level: level, module: module}, ""
+}
+
+// parseStewardLogTail parses the tail parameter (default 100, max 1000); ok is
+// false for a value that is not an integer in 1..1000.
+func parseStewardLogTail(tailStr string) (int, bool) {
+	if tailStr == "" {
+		return 100, true
+	}
+	v, err := strconv.Atoi(tailStr)
+	if err != nil || v < 1 || v > 1000 {
+		return 0, false
+	}
+	return v, true
+}
+
+// timeRangeQuery maps the validated parameters onto a TimeRangeQuery scoped to
+// stewardID.
+func (p stewardLogParams) timeRangeQuery(stewardID string) loggingInterfaces.TimeRangeQuery {
+	startTime := time.Now().Add(-24 * time.Hour) // default: last 24 hours
+	if p.since != "" {
+		d, _ := time.ParseDuration(p.since) // already validated by parseStewardLogParams
+		startTime = time.Now().Add(-d)
+	}
+
+	filters := map[string]interface{}{
+		"steward_id": stewardID,
+	}
+	if p.level != "" {
+		filters["level"] = p.level
+	}
+	if p.module != "" {
+		filters["component"] = p.module
+	}
+
+	return loggingInterfaces.TimeRangeQuery{
+		StartTime: startTime,
+		EndTime:   time.Now(),
+		Filters:   filters,
+		Limit:     p.tail,
+	}
+}
+
+// flushAndQueryStewardLogs flushes the event manager and then runs query.
+//
+// Issue #4857: the manager batches and writes asynchronously, so entries the
+// log-stream handler has accepted may still be buffered. Flush before reading
+// so every accepted entry is visible to this query; a flush failure is
+// reported like a query failure rather than serving a silently stale result.
+// On failure the 500 QUERY_ERROR response has been written and ok is false.
+func (s *Server) flushAndQueryStewardLogs(w http.ResponseWriter, r *http.Request, mgr *logging.LoggingManager, query loggingInterfaces.TimeRangeQuery, stewardIDForLog string) ([]loggingInterfaces.LogEntry, bool) {
+	if flushErr := mgr.Flush(r.Context()); flushErr != nil {
+		s.logger.Error("Failed to flush steward event log before query",
+			"steward_id", stewardIDForLog,
+			"error", logging.SanitizeLogValue(flushErr.Error()),
+		)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query event log", "QUERY_ERROR")
+		return nil, false
+	}
+
+	entries, err := mgr.QueryTimeRange(r.Context(), query)
+	if err != nil {
+		s.logger.Error("Failed to query steward event log",
+			"steward_id", stewardIDForLog,
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query event log", "QUERY_ERROR")
+		return nil, false
+	}
+	return entries, true
 }
 
 // rollupStewardLogsByCorrelationID groups log entries by correlation_id.
@@ -1834,128 +1946,211 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	newTenantID, ok := s.decodeMoveDestination(w, r)
+	if !ok {
+		return
+	}
+
+	record, ok := s.loadMoveSource(w, r, stewardID, stewardIDForLog)
+	if !ok {
+		return
+	}
+
+	// Extract the caller's principal and scope from context once so they are available
+	// throughout authorization, audit, and the success path.
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	mv := stewardMove{
+		stewardID:      stewardID,
+		oldTenantID:    record.TenantID,
+		newTenantID:    newTenantID,
+		principal:      principal,
+		callerTenantID: callerTenantFilter(r.Context()),
+	}
+
+	if !s.authorizeStewardMove(w, r, mv) {
+		return
+	}
+
+	// Self-move: destination equals current tenant — short-circuit with no state change.
+	if mv.oldTenantID == mv.newTenantID {
+		s.logger.Info("steward move skipped (self-move)",
+			"steward_id", logging.SanitizeLogValue(mv.stewardID),
+			"tenant_id", logging.SanitizeLogValue(mv.newTenantID),
+		)
+		s.writeSuccessResponse(w, mv.response("no_change"))
+		return
+	}
+
+	if !s.checkMoveSourceStatus(w, record, stewardIDForLog) {
+		return
+	}
+	if !s.checkMoveDestination(w, r, mv) {
+		return
+	}
+	if !s.applyStewardMove(w, r, mv) {
+		return
+	}
+
+	s.logger.Info("steward moved to new tenant",
+		"steward_id", logging.SanitizeLogValue(mv.stewardID),
+		"old_tenant_id", logging.SanitizeLogValue(mv.oldTenantID),
+		"new_tenant_id", logging.SanitizeLogValue(mv.newTenantID),
+	)
+
+	s.emitMoveAudit(r, mv.stewardID, mv.oldTenantID, mv.newTenantID, mv.principal,
+		business.AuditEventDataModification, "steward_move",
+		business.AuditResultSuccess, business.AuditSeverityHigh,
+		map[string]interface{}{
+			"decision":                "approved",
+			"privileged_cross_tenant": mv.callerTenantID == "", //architecture:allow-root-scope -- audit detail, not an access decision
+		})
+
+	s.writeSuccessResponse(w, mv.response("moved"))
+}
+
+// stewardMove carries the identifiers of one steward move through the
+// authorization, validation and apply steps of handleMoveSteward.
+type stewardMove struct {
+	stewardID, oldTenantID, newTenantID string
+	principal                           *Principal
+	callerTenantID                      string
+}
+
+// response is the success body of a move; status is "moved" or "no_change".
+func (m stewardMove) response(status string) map[string]any {
+	return map[string]any{
+		"steward_id":      m.stewardID,
+		"tenant_id":       m.newTenantID,
+		"previous_tenant": m.oldTenantID,
+		"status":          status,
+	}
+}
+
+// decodeMoveDestination reads and validates new_tenant_id from the request
+// body. On failure the 400 response has been written and ok is false.
+func (s *Server) decodeMoveDestination(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var req moveStewardRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
-		return
+		return "", false
 	}
 
 	newTenantID := req.NewTenantID
 	if newTenantID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "new_tenant_id is required", "MISSING_TENANT_ID")
-		return
+		return "", false
 	}
 	if !tenantPathRegex.MatchString(newTenantID) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid tenant ID format", "INVALID_TENANT_ID")
-		return
+		return "", false
 	}
-	newTenantIDForLog := logging.SanitizeLogValue(newTenantID)
+	return newTenantID, true
+}
 
-	// Steward must exist in durable storage.
+// loadMoveSource loads the steward to move: it must exist in durable storage.
+// On failure the response has been written and ok is false.
+func (s *Server) loadMoveSource(w http.ResponseWriter, r *http.Request, stewardID, stewardIDForLog string) (*business.StewardRecord, bool) {
 	if s.stewardStore == nil {
 		s.logger.Error("steward move failed: steward store not configured", "steward_id", stewardIDForLog)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Steward store not configured", "INTERNAL_ERROR")
-		return
+		return nil, false
 	}
 
 	record, err := s.stewardStore.GetSteward(r.Context(), stewardID)
 	if err != nil {
 		s.logger.Info("steward not found for move", "steward_id", stewardIDForLog)
 		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-		return
+		return nil, false
 	}
+	return record, true
+}
 
-	oldTenantID := record.TenantID
-	oldTenantIDForLog := logging.SanitizeLogValue(oldTenantID)
+// authorizeStewardMove is the dual-admin authorization (Issue #2342). An
+// explicitly root caller (callerTenantID == "") may move across tenants — the move
+// is recorded as a privileged cross-tenant action — but both the source and the
+// destination tenant must pass its tenant decision, so a root caller subject to the
+// ADR-025 boundary needs a crossing for each tenant below root it touches (Issue
+// #4665). A scoped admin must have scope that is an ancestor of (or equal to) BOTH
+// source AND destination through ParentID ancestry: a sibling whose ID merely
+// shares a prefix ("msp-ab" vs "msp-a") is not a descendant and is denied. On
+// denial the audit event and response have been written and ok is false.
+func (s *Server) authorizeStewardMove(w http.ResponseWriter, r *http.Request, mv stewardMove) bool {
+	if mv.callerTenantID == "" { //architecture:allow-root-scope -- an explicitly root caller: both tenants pass tenantAccessForScope here
+		return s.authorizeRootMove(w, r, mv)
+	}
+	return s.authorizeScopedMove(w, r, mv)
+}
 
-	// Extract the caller's principal and scope from context once so they are available
-	// throughout authorization, audit, and the success path.
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	callerTenantID := callerTenantFilter(r.Context())
-
-	// Dual-admin authorization (Issue #2342).
-	// An explicitly root caller (callerTenantID == "") may move across tenants — the move
-	// is recorded as a privileged cross-tenant action — but both the source and the
-	// destination tenant must pass its tenant decision, so a root caller subject to the
-	// ADR-025 boundary needs a crossing for each tenant below root it touches (Issue
-	// #4665). A scoped admin must have scope that is an ancestor of (or equal to) BOTH
-	// source AND destination through ParentID ancestry: a sibling whose ID merely
-	// shares a prefix ("msp-ab" vs "msp-a") is not a descendant and is denied.
-	if callerTenantID == "" { //architecture:allow-root-scope -- an explicitly root caller: both tenants pass tenantAccessForScope here
-		for _, tenant := range []string{oldTenantID, newTenantID} {
-			access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), tenant, "POST /api/v1/stewards/{id}/move")
-			if access == tenantAuthAllowed {
-				continue
-			}
-			reason := "tenant_outside_boundary"
-			if access == tenantAuthNeedsCrossing {
-				reason = "tenant_crossing_required"
-			}
-			s.emitMoveAudit(r, stewardID, oldTenantID, newTenantID, principal,
-				business.AuditEventSecurityEvent, "steward_move",
-				business.AuditResultDenied, business.AuditSeverityCritical,
-				map[string]interface{}{
-					"decision": "denied",
-					"reason":   reason,
-				})
-			if !s.writeTenantCrossingIfNeeded(w, access, tenant) {
-				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-			}
-			return
+// authorizeRootMove applies the tenant decision of a root caller to both the
+// source and the destination tenant of a move.
+func (s *Server) authorizeRootMove(w http.ResponseWriter, r *http.Request, mv stewardMove) bool {
+	for _, tenant := range []string{mv.oldTenantID, mv.newTenantID} {
+		access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), tenant, "POST /api/v1/stewards/{id}/move")
+		if access == tenantAuthAllowed {
+			continue
 		}
-	}
-	if callerTenantID != "" { //architecture:allow-root-scope -- tenant-scoped callers: source and destination must both be in the caller subtree
-		sourceInScope := s.tenantSubtreeContains(r.Context(), callerTenantID, oldTenantID)
-		destInScope := s.tenantSubtreeContains(r.Context(), callerTenantID, newTenantID)
-		if !sourceInScope || !destInScope {
-			s.logger.Warn("steward move denied: scoped admin has insufficient scope",
-				"steward_id", stewardIDForLog,
-				"source_tenant", oldTenantIDForLog,
-				"dest_tenant", newTenantIDForLog,
-				"caller_scope", logging.SanitizeLogValue(callerTenantID),
-			)
-			s.emitMoveAudit(r, stewardID, oldTenantID, newTenantID, principal,
-				business.AuditEventSecurityEvent, "steward_move",
-				business.AuditResultDenied, business.AuditSeverityCritical,
-				map[string]interface{}{
-					"decision":        "denied",
-					"reason":          "insufficient_scope",
-					"source_in_scope": sourceInScope,
-					"dest_in_scope":   destInScope,
-				})
-			if !sourceInScope {
-				// A steward outside the caller's subtree is indistinguishable from an
-				// unknown one, as on every other per-steward route (no existence oracle).
-				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-				return
-			}
-			s.writeErrorResponse(w, http.StatusForbidden, "Insufficient scope to move steward between these tenants", "INSUFFICIENT_SCOPE")
-			return
+		reason := "tenant_outside_boundary"
+		if access == tenantAuthNeedsCrossing {
+			reason = "tenant_crossing_required"
 		}
+		s.emitMoveAudit(r, mv.stewardID, mv.oldTenantID, mv.newTenantID, mv.principal,
+			business.AuditEventSecurityEvent, "steward_move",
+			business.AuditResultDenied, business.AuditSeverityCritical,
+			map[string]interface{}{
+				"decision": "denied",
+				"reason":   reason,
+			})
+		if !s.writeTenantCrossingIfNeeded(w, access, tenant) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		}
+		return false
 	}
+	return true
+}
 
-	// Self-move: destination equals current tenant — short-circuit with no state change.
-	if oldTenantID == newTenantID {
-		s.logger.Info("steward move skipped (self-move)",
-			"steward_id", stewardIDForLog,
-			"tenant_id", newTenantIDForLog,
-		)
-		s.writeSuccessResponse(w, map[string]any{
-			"steward_id":      stewardID,
-			"tenant_id":       newTenantID,
-			"previous_tenant": oldTenantID,
-			"status":          "no_change",
+// authorizeScopedMove requires the source and destination of a move to be in
+// the tenant-scoped caller's subtree.
+func (s *Server) authorizeScopedMove(w http.ResponseWriter, r *http.Request, mv stewardMove) bool {
+	sourceInScope := s.tenantSubtreeContains(r.Context(), mv.callerTenantID, mv.oldTenantID)
+	destInScope := s.tenantSubtreeContains(r.Context(), mv.callerTenantID, mv.newTenantID)
+	if sourceInScope && destInScope {
+		return true
+	}
+	s.logger.Warn("steward move denied: scoped admin has insufficient scope",
+		"steward_id", logging.SanitizeLogValue(mv.stewardID),
+		"source_tenant", logging.SanitizeLogValue(mv.oldTenantID),
+		"dest_tenant", logging.SanitizeLogValue(mv.newTenantID),
+		"caller_scope", logging.SanitizeLogValue(mv.callerTenantID),
+	)
+	s.emitMoveAudit(r, mv.stewardID, mv.oldTenantID, mv.newTenantID, mv.principal,
+		business.AuditEventSecurityEvent, "steward_move",
+		business.AuditResultDenied, business.AuditSeverityCritical,
+		map[string]interface{}{
+			"decision":        "denied",
+			"reason":          "insufficient_scope",
+			"source_in_scope": sourceInScope,
+			"dest_in_scope":   destInScope,
 		})
-		return
+	if !sourceInScope {
+		// A steward outside the caller's subtree is indistinguishable from an
+		// unknown one, as on every other per-steward route (no existence oracle).
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return false
 	}
+	s.writeErrorResponse(w, http.StatusForbidden, "Insufficient scope to move steward between these tenants", "INSUFFICIENT_SCOPE")
+	return false
+}
 
-	// Revoked stewards may not be moved (would back-door un-revoke).
+// checkMoveSourceStatus rejects a source steward whose status does not permit a
+// move. Revoked stewards may not be moved (would back-door un-revoke). On
+// rejection the 400 response has been written and ok is false.
+func (s *Server) checkMoveSourceStatus(w http.ResponseWriter, record *business.StewardRecord, stewardIDForLog string) bool {
 	if string(record.Status) == "revoked" {
 		s.logger.Warn("steward move rejected: source status is revoked",
 			"steward_id", stewardIDForLog,
 		)
 		s.writeErrorResponse(w, http.StatusBadRequest, "Revoked stewards cannot be moved", "STEWARD_REVOKED")
-		return
+		return false
 	}
 
 	// Validate source status against the allowed set.
@@ -1966,59 +2161,69 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 		)
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"Steward status does not permit a move", "STEWARD_STATUS_INVALID")
-		return
+		return false
 	}
+	return true
+}
 
-	// Destination tenant must exist and be active.
+// checkMoveDestination requires the destination tenant to exist and be active.
+// On rejection the response has been written and ok is false.
+func (s *Server) checkMoveDestination(w http.ResponseWriter, r *http.Request, mv stewardMove) bool {
 	if s.tenantManager == nil {
-		s.logger.Error("steward move failed: tenant manager not configured", "steward_id", stewardIDForLog)
+		s.logger.Error("steward move failed: tenant manager not configured", "steward_id", logging.SanitizeLogValue(mv.stewardID))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Tenant manager not configured", "INTERNAL_ERROR")
-		return
+		return false
 	}
 
-	destTenant, err := s.tenantManager.GetTenant(r.Context(), newTenantID)
+	destTenant, err := s.tenantManager.GetTenant(r.Context(), mv.newTenantID)
 	if err != nil {
 		s.logger.Info("destination tenant not found for steward move",
-			"steward_id", stewardIDForLog,
-			"new_tenant_id", newTenantIDForLog,
+			"steward_id", logging.SanitizeLogValue(mv.stewardID),
+			"new_tenant_id", logging.SanitizeLogValue(mv.newTenantID),
 		)
 		s.writeErrorResponse(w, http.StatusBadRequest, "Destination tenant not found", "TENANT_NOT_FOUND")
-		return
+		return false
 	}
 	if destTenant.Status != "active" {
 		s.logger.Warn("destination tenant is not active",
-			"steward_id", stewardIDForLog,
-			"new_tenant_id", newTenantIDForLog,
+			"steward_id", logging.SanitizeLogValue(mv.stewardID),
+			"new_tenant_id", logging.SanitizeLogValue(mv.newTenantID),
 			"tenant_status", logging.SanitizeLogValue(string(destTenant.Status)),
 		)
 		s.writeErrorResponse(w, http.StatusBadRequest, "Destination tenant is not active", "TENANT_NOT_ACTIVE")
-		return
+		return false
 	}
+	return true
+}
 
+// applyStewardMove performs the move: durable storage, the live registry and
+// device-tenant mapping, and the per-tenant config caches. On failure the
+// response has been written and ok is false.
+func (s *Server) applyStewardMove(w http.ResponseWriter, r *http.Request, mv stewardMove) bool {
 	// Update durable storage. Guarded by a compare-and-swap on oldTenantID — the
 	// snapshot read via GetSteward above (Issue #3895): two concurrent moves
 	// racing against the same stale snapshot must not both blindly overwrite
 	// the tenant column. GetSteward above already confirmed the steward exists,
 	// so a guard-loss error here means a concurrent move already changed its
 	// tenant — a conflict, not a fresh not-found.
-	if err := s.stewardStore.UpdateStewardTenant(r.Context(), stewardID, oldTenantID, newTenantID); err != nil {
+	if err := s.stewardStore.UpdateStewardTenant(r.Context(), mv.stewardID, mv.oldTenantID, mv.newTenantID); err != nil {
 		if err == business.ErrStewardNotFound {
 			s.logger.Info("steward move lost the compare-and-swap: tenant changed concurrently",
-				"steward_id", stewardIDForLog,
-				"expected_tenant_id", oldTenantIDForLog,
-				"new_tenant_id", newTenantIDForLog,
+				"steward_id", logging.SanitizeLogValue(mv.stewardID),
+				"expected_tenant_id", logging.SanitizeLogValue(mv.oldTenantID),
+				"new_tenant_id", logging.SanitizeLogValue(mv.newTenantID),
 			)
 			s.writeErrorResponse(w, http.StatusConflict,
 				"Steward was moved concurrently; reload and retry", "STEWARD_MOVE_CONFLICT")
-			return
+			return false
 		}
 		s.logger.Error("steward move: failed to update durable store",
-			"steward_id", stewardIDForLog,
-			"new_tenant_id", newTenantIDForLog,
+			"steward_id", logging.SanitizeLogValue(mv.stewardID),
+			"new_tenant_id", logging.SanitizeLogValue(mv.newTenantID),
 			"error", logging.SanitizeLogValue(err.Error()),
 		)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update steward tenant", "INTERNAL_ERROR")
-		return
+		return false
 	}
 
 	// Update the live in-memory registry and the durable device_tenant mapping that
@@ -2027,46 +2232,26 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 	// the controller just restarted) and the durable writes are authoritative. Any
 	// other error means the device_tenant mapping still names the OLD tenant, so the
 	// move would silently revert on the steward's next reconnect: fail the request.
-	if regErr := s.controllerService.UpdateStewardTenant(stewardID, newTenantID); regErr != nil {
+	if regErr := s.controllerService.UpdateStewardTenant(mv.stewardID, mv.newTenantID); regErr != nil {
 		if !errors.Is(regErr, service.ErrStewardNotInRegistry) {
 			s.logger.Error("steward move: failed to persist device tenant mapping",
-				"steward_id", stewardIDForLog,
-				"new_tenant_id", newTenantIDForLog,
+				"steward_id", logging.SanitizeLogValue(mv.stewardID),
+				"new_tenant_id", logging.SanitizeLogValue(mv.newTenantID),
 				"error", logging.SanitizeLogValue(regErr.Error()),
 			)
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update steward tenant", "INTERNAL_ERROR")
-			return
+			return false
 		}
 		s.logger.Info("steward move: registry entry not present (steward not yet connected)",
-			"steward_id", stewardIDForLog,
+			"steward_id", logging.SanitizeLogValue(mv.stewardID),
 		)
 	}
 
 	// Invalidate per-tenant config cache for both source and destination so the
 	// next config resolution uses the correct tenant path.
-	s.tenantManager.InvalidateConfigCache(oldTenantID)
-	s.tenantManager.InvalidateConfigCache(newTenantID)
-
-	s.logger.Info("steward moved to new tenant",
-		"steward_id", stewardIDForLog,
-		"old_tenant_id", oldTenantIDForLog,
-		"new_tenant_id", newTenantIDForLog,
-	)
-
-	s.emitMoveAudit(r, stewardID, oldTenantID, newTenantID, principal,
-		business.AuditEventDataModification, "steward_move",
-		business.AuditResultSuccess, business.AuditSeverityHigh,
-		map[string]interface{}{
-			"decision":                "approved",
-			"privileged_cross_tenant": callerTenantID == "", //architecture:allow-root-scope -- audit detail, not an access decision
-		})
-
-	s.writeSuccessResponse(w, map[string]any{
-		"steward_id":      stewardID,
-		"tenant_id":       newTenantID,
-		"previous_tenant": oldTenantID,
-		"status":          "moved",
-	})
+	s.tenantManager.InvalidateConfigCache(mv.oldTenantID)
+	s.tenantManager.InvalidateConfigCache(mv.newTenantID)
+	return true
 }
 
 // emitMoveAudit records a steward-move audit event. It is a no-op when auditManager is nil.
