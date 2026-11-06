@@ -120,12 +120,13 @@ func hashRequestBodyForPresenceBinding(r *http.Request) (string, error) {
 type AuthChannel int
 
 const (
-	AuthChannelUnknown   AuthChannel = iota
-	AuthChannelWebCookie             // browser session cookie
-	AuthChannelCfgBearer             // cfg CLI Bearer session
-	AuthChannelMTLS                  // mTLS admin certificate
-	AuthChannelAPIKey                // API key
-	AuthChannelRelay                 // steward relay script principal
+	AuthChannelUnknown         AuthChannel = iota
+	AuthChannelWebCookie                   // browser session cookie
+	AuthChannelCfgBearer                   // cfg CLI Bearer session
+	AuthChannelMTLS                        // mTLS admin certificate
+	AuthChannelAPIKey                      // API key
+	AuthChannelRelay                       // steward relay script principal
+	AuthChannelAutomationGrant             // automation grant credential (ADR-036 section 3)
 )
 
 type Principal struct {
@@ -1052,6 +1053,24 @@ func accountHoldsCredential(acct *account, id []byte) bool {
 	return false
 }
 
+// requestAPIKey returns the API key presented on the request: the X-API-Key header,
+// or else the Authorization Bearer token. It returns "" when neither is present.
+func requestAPIKey(r *http.Request) string {
+	if apiKeyStr := r.Header.Get("X-API-Key"); apiKeyStr != "" {
+		return apiKeyStr
+	}
+	authHeader := r.Header.Get("Authorization")
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		return strings.TrimPrefix(authHeader, "Bearer ")
+	}
+	return ""
+}
+
+// apiKeyExpired reports whether key carries an expiry that now is past.
+func apiKeyExpired(key *APIKey, now time.Time) bool {
+	return key.ExpiresAt != nil && now.After(*key.ExpiresAt)
+}
+
 // authenticationMiddleware validates incoming requests via mTLS admin cert or API key.
 // States: (a) admin-marked cert only → admin principal; (b) admin-marked cert + header → 400;
 // (c) cert without admin marker → fall through to API-key auth; (d) no cert → API-key auth.
@@ -1099,6 +1118,14 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 		}
 
 		// State (c)/(d): no admin cert presented.
+
+		// Automation grant (ADR-036 section 3): a Bearer token with the grant prefix is
+		// handled only by the grant store. A refused grant credential is a 401 and never
+		// falls through to the session or API-key paths below.
+		if credential, ok := bearerGrantCredential(r); ok {
+			s.authenticateAutomationGrant(w, r, credential, next)
+			return
+		}
 
 		// Session-token path (Issue #2232): intercept Bearer tokens that are 43 chars
 		// (base64url without padding for 32 random bytes — length-distinguishable from
@@ -1453,18 +1480,15 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 
 		// API-key path.
 
-		// Extract API key from header
-		apiKeyStr := r.Header.Get("X-API-Key")
-		if apiKeyStr == "" {
-			// Also check Authorization header for Bearer token
-			authHeader := r.Header.Get("Authorization")
-			if strings.HasPrefix(authHeader, "Bearer ") {
-				apiKeyStr = strings.TrimPrefix(authHeader, "Bearer ")
-			}
-		}
-
+		apiKeyStr := requestAPIKey(r)
 		if apiKeyStr == "" {
 			s.writeErrorResponse(w, http.StatusUnauthorized, "API key required", "MISSING_API_KEY")
+			return
+		}
+
+		// A grant credential is never an API key: the prefix is reserved for the grant path.
+		if strings.HasPrefix(apiKeyStr, automationGrantCredentialPrefix) {
+			s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
 			return
 		}
 
@@ -1486,7 +1510,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 
 		// Check if key is expired
 		now := s.apiKeyNow()
-		if keyInfo.ExpiresAt != nil && now.After(*keyInfo.ExpiresAt) {
+		if apiKeyExpired(keyInfo, now) {
 			s.writeErrorResponse(w, http.StatusUnauthorized, "API key expired", "EXPIRED_API_KEY")
 			return
 		}
