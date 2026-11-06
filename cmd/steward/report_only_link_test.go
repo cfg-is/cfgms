@@ -7,8 +7,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -52,6 +54,39 @@ type roServer struct {
 	events     chan *cpTypes.Event
 	logs       chan *transportpb.LogEntry
 	pulls      atomic.Int64
+
+	// revoked holds the serials (decimal) the server refuses at admission;
+	// handshakes records the serial each client presented, in order.
+	revoked     sync.Map
+	handshakeMu sync.Mutex
+	handshakes  []string
+}
+
+// handshakeSerials returns the client certificate serial of every handshake so far.
+func (s *roServer) handshakeSerials() []string {
+	s.handshakeMu.Lock()
+	defer s.handshakeMu.Unlock()
+	return append([]string(nil), s.handshakes...)
+}
+
+// admit records the client certificate a handshake presented and refuses a
+// revoked one.
+func (s *roServer) admit(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+	if len(rawCerts) == 0 {
+		return nil
+	}
+	c, err := x509.ParseCertificate(rawCerts[0])
+	if err != nil {
+		return err
+	}
+	serial := c.SerialNumber.String()
+	s.handshakeMu.Lock()
+	s.handshakes = append(s.handshakes, serial)
+	s.handshakeMu.Unlock()
+	if _, revoked := s.revoked.Load(serial); revoked {
+		return fmt.Errorf("client certificate %s is revoked", serial)
+	}
+	return nil
 }
 
 type roTransport struct {
@@ -111,6 +146,7 @@ func newROServer(t *testing.T) *roServer {
 		mgr: mgr, caPEM: string(caPEM), reg: registry.NewRegistry(), addr: ln.Addr().String(),
 		heartbeats: make(chan *cpTypes.Heartbeat, 64), events: make(chan *cpTypes.Event, 64), logs: make(chan *transportpb.LogEntry, 64),
 	}
+	serverTLS.VerifyPeerCertificate = s.admit
 	s.cp = grpcCP.New(grpcCP.ModeServer)
 	require.NoError(t, s.cp.Initialize(context.Background(), map[string]interface{}{
 		"mode": "server", "grpc_server": grpcSrv, "registry": s.reg,

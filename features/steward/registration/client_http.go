@@ -642,6 +642,83 @@ func (c *HTTPClient) RefreshComplete(ctx context.Context, deviceID, tenantID, no
 	}
 }
 
+// RepairCompleteRequest is the body of a repair completion: the refresh-complete
+// endpoint with the repair fields. The steward rotates its identity key, proving
+// possession with both the old and the new key over (steward ID, repair ID, new
+// public key, CSR); the nonce fields of an ordinary refresh are not used.
+type RepairCompleteRequest struct {
+	TenantID            string `json:"tenant_id,omitempty"`
+	CSRPEM              string `json:"csr_pem"`
+	RepairID            string `json:"repair_id"`
+	NewIdentityKeyPub   string `json:"new_identity_key_pub"`   // base64url
+	NewIdentityKeyAlg   string `json:"new_identity_key_alg"`   // "ed25519" or "ecdsa-p256"
+	NewIdentityKeyLevel string `json:"new_identity_key_level"` // "file", "tpm" or "secure-enclave"
+	OldKeyProof         string `json:"old_key_proof"`          // base64url
+	NewKeyProof         string `json:"new_key_proof"`          // base64url
+}
+
+// RepairRefusedError is the controller's refusal of a repair completion: an HTTP
+// 4xx answer. The refusal is final for that request (a used or expired repair, a
+// wrong state, a failed proof); a caller must not retry it. Transport failures
+// and 5xx answers are returned as ordinary errors, which a caller may retry with
+// the same request.
+type RepairRefusedError struct {
+	Status int
+	Body   string
+}
+
+func (e *RepairRefusedError) Error() string {
+	return fmt.Sprintf("repair completion refused with HTTP %d: %s", e.Status, e.Body)
+}
+
+// RepairComplete submits a repair completion for the steward whose current device
+// ID is deviceID. It returns the certificate response on HTTP 200 and a
+// *RepairRefusedError on any other 4xx answer.
+func (c *HTTPClient) RepairComplete(ctx context.Context, deviceID string, rc RepairCompleteRequest) (*RefreshCompleteResponse, error) {
+	completeURL := fmt.Sprintf("%s/api/v1/stewards/%s/refresh/complete", c.controllerURL, deviceID)
+	reqBody, err := json.Marshal(rc)
+	if err != nil {
+		return nil, fmt.Errorf("marshal repair completion request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, completeURL, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("create repair completion request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send repair completion request: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Warn("Failed to close repair completion response body", "error", logging.SanitizeLogValue(closeErr.Error()))
+		}
+	}()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read repair completion response: %w", err)
+	}
+	return repairCompleteResult(resp.StatusCode, body)
+}
+
+// repairCompleteResult maps the controller's answer to a repair completion: a
+// certificate response, a final refusal (4xx) or a retryable failure.
+func repairCompleteResult(status int, body []byte) (*RefreshCompleteResponse, error) {
+	if status == http.StatusOK {
+		var cr RefreshCompleteResponse
+		if err := json.Unmarshal(body, &cr); err != nil {
+			return nil, fmt.Errorf("parse repair completion response: %w", err)
+		}
+		return &cr, nil
+	}
+	retryable := status < 400 || status >= 500 || status == http.StatusRequestTimeout || status == http.StatusTooManyRequests
+	if retryable {
+		return nil, fmt.Errorf("repair completion failed with HTTP %d", status)
+	}
+	return nil, &RepairRefusedError{Status: status, Body: string(body)}
+}
+
 // refreshPendingFromBody builds the RefreshPendingError for a 202 response.
 func refreshPendingFromBody(body []byte) error {
 	var queued struct {

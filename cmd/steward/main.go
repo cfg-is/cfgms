@@ -885,6 +885,7 @@ func runControllerConnected(ctx context.Context, regToken string, facts startupF
 	// A TamperState{locked: true} latches the host: it stays report-only across
 	// restarts until the controller restores it (tamper_alarm.go).
 	controllerLocked := watchControllerLock(transportCl, latch)
+	watchRepairWhileNotLocked(transportCl, latch)
 
 	logger.Info("Steward registered and connected successfully via gRPC transport",
 		"operation", "registration_complete",

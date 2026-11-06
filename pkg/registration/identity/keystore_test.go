@@ -293,3 +293,56 @@ func TestFileKeyStore_RemoveKey(t *testing.T) {
 	assert.Nil(t, ks.PublicKey())
 	require.NoError(t, ks.RemoveKey(), "removing an absent key is not an error")
 }
+
+func TestFileKeyStore_StagedKeyRotatesOnlyOnPromote(t *testing.T) {
+	dir := t.TempDir()
+	ks, err := NewFileKeyStoreForTesting(dir)
+	require.NoError(t, err)
+	oldPub, _, err := ks.GenerateOrLoad(context.Background())
+	require.NoError(t, err)
+
+	stagedPub, alg, err := ks.StageNext(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, AlgorithmEd25519, alg)
+	assert.NotEqual(t, oldPub, stagedPub)
+	assert.Equal(t, oldPub, ks.PublicKey(), "staging leaves the current key in place")
+
+	again, _, err := ks.StageNext(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, stagedPub, again, "a second stage returns the same key")
+
+	// A new process sees the same staged key and the same current key.
+	reopened, err := NewFileKeyStoreForTesting(dir)
+	require.NoError(t, err)
+	reopenedPub, _, err := reopened.GenerateOrLoad(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, oldPub, reopenedPub)
+	assert.Equal(t, stagedPub, reopened.StagedPublicKey())
+	sig, err := reopened.SignStaged([]byte("m"))
+	require.NoError(t, err)
+	assert.True(t, ed25519.Verify(stagedPub.(ed25519.PublicKey), []byte("m"), sig))
+
+	require.NoError(t, reopened.PromoteStaged())
+	assert.Equal(t, stagedPub, reopened.PublicKey())
+	assert.Nil(t, reopened.StagedPublicKey())
+	third, err := NewFileKeyStoreForTesting(dir)
+	require.NoError(t, err)
+	thirdPub, _, err := third.GenerateOrLoad(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, stagedPub, thirdPub, "the promoted key is the one on disk")
+}
+
+func TestFileKeyStore_DiscardStagedKeepsCurrentKey(t *testing.T) {
+	dir := t.TempDir()
+	ks, err := NewFileKeyStoreForTesting(dir)
+	require.NoError(t, err)
+	oldPub, _, err := ks.GenerateOrLoad(context.Background())
+	require.NoError(t, err)
+	_, _, err = ks.StageNext(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, ks.DiscardStaged())
+	assert.Nil(t, ks.StagedPublicKey())
+	assert.Equal(t, oldPub, ks.PublicKey())
+	assert.Error(t, ks.PromoteStaged(), "nothing staged, nothing to promote")
+	assert.NoFileExists(t, filepath.Join(dir, stagedKeyFileName))
+}
