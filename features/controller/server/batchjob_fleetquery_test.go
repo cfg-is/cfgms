@@ -246,7 +246,7 @@ func TestServerFleetStewardProvider_NoDNAAttributeMutation(t *testing.T) {
 	assert.Equal(t, "linux", stewards[0].DNAAttributes["os"],
 		"fragment-sourced os must be present alongside merged tags")
 
-	// Second call: mergeControllerTags must not have mutated any shared state,
+	// Second call: MergeControllerTags must not have mutated any shared state,
 	// so the fragment-sourced attributes appear intact on every call.
 	stewards2 := provider.GetAllStewards()
 	require.Len(t, stewards2, 1)

@@ -222,7 +222,7 @@ func (s *ControllerService) stewardSelectorQuery(info *StewardInfo) *fleet.Memor
 		attrs = make(map[string]string)
 	}
 	if ts := s.TagStore(); ts != nil {
-		attrs = mergeTagsIntoAttrs(attrs, ts.TagsFor(info.ID))
+		attrs = MergeControllerTags(attrs, ts.TagsFor(info.ID))
 	}
 	return fleet.NewMemoryQuery(&singleStewardProvider{s: fleet.StewardData{
 		ID:            info.ID,
@@ -248,10 +248,10 @@ func (s *ControllerService) StewardMatchesSelector(ctx context.Context, stewardI
 	return count > 0, nil
 }
 
-// mergeTagsIntoAttrs returns a copy of attrs with ctrlTags merged into the "tags" key.
+// MergeControllerTags returns a copy of attrs with ctrlTags merged into the "tags" key.
 // DNA-reported tags come first; controller-stored tags follow; duplicates are dropped.
 // Never mutates the input map — attrs may alias FlattenDNAFragments output (fresh map per call).
-func mergeTagsIntoAttrs(attrs map[string]string, ctrlTags []string) map[string]string {
+func MergeControllerTags(attrs map[string]string, ctrlTags []string) map[string]string {
 	if len(ctrlTags) == 0 {
 		return attrs
 	}

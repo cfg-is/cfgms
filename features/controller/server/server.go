@@ -5609,7 +5609,7 @@ func (p *serverFleetStewardProvider) GetAllStewards() []controllerFleet.StewardD
 		}
 		// ListFleetStewards already merges controller-stored tags into info.Tags.
 		if len(info.Tags) > 0 {
-			attrs = mergeControllerTags(attrs, info.Tags)
+			attrs = service.MergeControllerTags(attrs, info.Tags)
 		}
 		result = append(result, controllerFleet.StewardData{
 			ID:            info.ID,
@@ -5622,49 +5622,6 @@ func (p *serverFleetStewardProvider) GetAllStewards() []controllerFleet.StewardD
 		})
 	}
 	return result
-}
-
-// mergeControllerTags returns a copy of attrs with controller-stored ctrlTags
-// merged into the "tags" key. If attrs already carries a DNA-reported "tags"
-// value, the two sets are unioned (DNA tags first, then controller tags;
-// duplicates dropped). Returns attrs unchanged when ctrlTags is empty.
-// Never mutates the input map — attrs is the fresh map returned by
-// FlattenDNAFragments; copying before merge preserves the no-mutation contract
-// so the caller's view of the attrs slice is not altered.
-func mergeControllerTags(attrs map[string]string, ctrlTags []string) map[string]string {
-	if len(ctrlTags) == 0 {
-		return attrs
-	}
-	// Copy to avoid mutating the FlattenDNAFragments output shared by the caller.
-	merged := make(map[string]string, len(attrs)+1)
-	for k, v := range attrs {
-		merged[k] = v
-	}
-	// Union DNA-reported tags with controller-stored tags; DNA tags come first.
-	seen := make(map[string]struct{})
-	var all []string
-	for _, t := range strings.Split(merged["tags"], ",") {
-		t = strings.TrimSpace(t)
-		if t == "" {
-			continue
-		}
-		if _, dup := seen[t]; !dup {
-			seen[t] = struct{}{}
-			all = append(all, t)
-		}
-	}
-	for _, t := range ctrlTags {
-		t = strings.TrimSpace(t)
-		if t == "" {
-			continue
-		}
-		if _, dup := seen[t]; !dup {
-			seen[t] = struct{}{}
-			all = append(all, t)
-		}
-	}
-	merged["tags"] = strings.Join(all, ",")
-	return merged
 }
 
 // Registration approval workflow names accepted by registration.workflow (Issue #1695).
