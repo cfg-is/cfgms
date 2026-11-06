@@ -1053,6 +1053,24 @@ func accountHoldsCredential(acct *account, id []byte) bool {
 	return false
 }
 
+// requestAPIKey returns the API key presented on the request: the X-API-Key header,
+// or else the Authorization Bearer token. It returns "" when neither is present.
+func requestAPIKey(r *http.Request) string {
+	if apiKeyStr := r.Header.Get("X-API-Key"); apiKeyStr != "" {
+		return apiKeyStr
+	}
+	authHeader := r.Header.Get("Authorization")
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		return strings.TrimPrefix(authHeader, "Bearer ")
+	}
+	return ""
+}
+
+// apiKeyExpired reports whether key carries an expiry that now is past.
+func apiKeyExpired(key *APIKey, now time.Time) bool {
+	return key.ExpiresAt != nil && now.After(*key.ExpiresAt)
+}
+
 // authenticationMiddleware validates incoming requests via mTLS admin cert or API key.
 // States: (a) admin-marked cert only → admin principal; (b) admin-marked cert + header → 400;
 // (c) cert without admin marker → fall through to API-key auth; (d) no cert → API-key auth.
@@ -1462,16 +1480,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 
 		// API-key path.
 
-		// Extract API key from header
-		apiKeyStr := r.Header.Get("X-API-Key")
-		if apiKeyStr == "" {
-			// Also check Authorization header for Bearer token
-			authHeader := r.Header.Get("Authorization")
-			if strings.HasPrefix(authHeader, "Bearer ") {
-				apiKeyStr = strings.TrimPrefix(authHeader, "Bearer ")
-			}
-		}
-
+		apiKeyStr := requestAPIKey(r)
 		if apiKeyStr == "" {
 			s.writeErrorResponse(w, http.StatusUnauthorized, "API key required", "MISSING_API_KEY")
 			return
@@ -1501,7 +1510,7 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 
 		// Check if key is expired
 		now := s.apiKeyNow()
-		if keyInfo.ExpiresAt != nil && now.After(*keyInfo.ExpiresAt) {
+		if apiKeyExpired(keyInfo, now) {
 			s.writeErrorResponse(w, http.StatusUnauthorized, "API key expired", "EXPIRED_API_KEY")
 			return
 		}
