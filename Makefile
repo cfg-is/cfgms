@@ -797,12 +797,12 @@ test-go-group-macos-steward:
 		go test -race -short -timeout=10m $$pkgs; \
 	fi
 
-# Measured `-race -short` seconds per package (CI run 42248777051), used to
+# Measured `-race -short` seconds per package (CI run 42289478500 jobs 128145605948 and 128145605883), used to
 # split the rest group by weight (longest-first onto the least-loaded shard)
 # instead of by list position. Unlisted packages weigh 3. `-timeout=9m` is
 # per test binary and sits under the 15-minute job limit, so a hung package
 # panics with its own name instead of the job being cancelled unattributed.
-MACOS_REST_WEIGHTS := features/workflow=300 pkg/storage/interfaces=182 pkg/ha=37 pkg/transport/quic=26 features/modules/extended/activedirectory=24 pkg/migrate/storage=19 pkg/session=16 pkg/audit=13 features/workflow/runtime=10 pkg/storage/providers/flatfile=9 features/controller/fleet=6 features/modules/adapter=6 features/modules/stdlib/script=6 pkg/secrets/providers/openbao=5 pkg/secrets/providers/oskeychain=5 pkg/modules/bundle=5
+MACOS_REST_WEIGHTS := features/workflow=286 pkg/storage/interfaces=114 pkg/ha=25 pkg/audit=15 pkg/transport/quic=14 features/modules/extended/activedirectory=13 pkg/migrate/storage=12 pkg/session=11 pkg/storage/providers/flatfile=9 features/modules/stdlib/script=8 pkg/modules/trust=6 pkg/lease=6 features/controller/fleet=5 pkg/secrets/providers/openbao=5 features/modules/adapter=4 features/workflow/runtime=4 pkg/dataplane/interfaces=4 pkg/secrets/providers/oskeychain=3 pkg/modules/bundle=2
 
 # Everything in the set not claimed by the providers/steward groups, split into
 # CFGMS_MACOS_REST_SHARDS CI-job-level groups (more 3-core runners, not more
