@@ -656,7 +656,7 @@ func (w *storageWiring) releaseOpened(caller string) {
 			l := registryLogger
 			registryLoggerMu.RUnlock()
 			l.Warn("Failed to release storage after "+caller+" failed",
-				"error", closeErr)
+				"error", logging.SanitizeLogValue(closeErr.Error()))
 		}
 	}
 }
