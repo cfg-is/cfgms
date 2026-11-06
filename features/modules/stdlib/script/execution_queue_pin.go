@@ -32,6 +32,9 @@ var (
 	// ErrReservedMetadataKey reports caller-supplied Metadata that holds a
 	// reserved pin_* or guard_* key.
 	ErrReservedMetadataKey = errors.New("metadata carries a reserved pin_ or guard_ key")
+	// ErrMetadataTooLarge reports caller-supplied Metadata with more than
+	// maxQueueMetadataEntries entries.
+	ErrMetadataTooLarge = errors.New("metadata has too many entries")
 	// ErrPinMismatch reports that a pinned execution no longer resolves to the
 	// object that was evaluated.
 	ErrPinMismatch = errors.New("pinned script differs from the evaluated script")
@@ -88,7 +91,7 @@ func (e *QueuedExecution) metadataWithReserved() (map[string]interface{}, error)
 		return e.Metadata, nil
 	}
 	if len(e.Metadata) > maxQueueMetadataEntries {
-		return nil, fmt.Errorf("%w: metadata exceeds %d entries", ErrReservedMetadataKey, maxQueueMetadataEntries)
+		return nil, fmt.Errorf("%w: limit is %d", ErrMetadataTooLarge, maxQueueMetadataEntries)
 	}
 	m := make(map[string]interface{}, len(e.Metadata))
 	for k, v := range e.Metadata {
