@@ -320,7 +320,7 @@ func TestConnectReportOnly_WritesNoTrustMaterial(t *testing.T) {
 		default:
 			return false
 		}
-	}, 20*time.Second, 20*time.Millisecond)
+	}, 90*time.Second, 20*time.Millisecond) // DNA collection is slow on the Windows runners
 
 	after := treeSnapshot(t, f.dir, dataDir)
 	assert.Equal(t, before, after, "a report-only session must not write, change or delete anything under the cert store or data directory")

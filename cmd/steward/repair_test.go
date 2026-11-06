@@ -902,5 +902,8 @@ func TestRepairPaths_RootsDedupeAndDropShallowDirectories(t *testing.T) {
 	assert.Contains(t, roots, base)
 	assert.NotContains(t, roots, p.certStoreDir, "covered by the data directory")
 	assert.Contains(t, roots, p.logDir)
-	assert.Empty(t, repairPaths{dataDir: string(filepath.Separator), logDir: filepath.Dir(filepath.Dir(base))}.roots(), "never the top of a volume or a direct child of it")
+	// Built from the volume root, not from the temp directory: macOS and Windows
+	// temp directories are deeper than a direct child of the volume.
+	volRoot := filepath.VolumeName(base) + string(filepath.Separator)
+	assert.Empty(t, repairPaths{dataDir: volRoot, logDir: filepath.Join(volRoot, "steward-shallow")}.roots(), "never the top of a volume or a direct child of it")
 }
