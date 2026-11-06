@@ -57,6 +57,7 @@ var rootReadClassification = map[string]rootReadEntry{
 	"/api/v1/api-keys":                                               {rootReadCrossing, ""},
 	"/api/v1/api-keys/{id}":                                          {rootReadCrossing, ""},
 	"/api/v1/audit/entries":                                          {rootReadCrossing, ""},
+	"/api/v1/automation/libraries/{kind}/mode":                       {rootReadOwnScope, ""},
 	"/api/v1/billing/report":                                         {rootReadAggregate, "per-MSP counts with clients under opaque labels only (A6.1, A6.2)"},
 	"/api/v1/cases":                                                  {rootReadCrossing, ""},
 	"/api/v1/cases/{id}":                                             {rootReadCrossing, ""},
