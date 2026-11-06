@@ -210,6 +210,14 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 // that have no REST routes yet — forward-declared for future stories.
 var knownFuturePermissions = map[string]bool{
 	"publisher-trust:add": true,
+	// Issue #5831 (Epic #5421): registered ahead of the routes that consume them; each route
+	// story proves its own Machine 403 and step-up behavior in its own tests.
+	"automation-grant:create":  true,
+	"automation-grant:revoke":  true,
+	"content-approval:approve": true,
+	"content-approval:revoke":  true,
+	"content-library:set-mode": true,
+	"workflow:publish":         true,
 	// Issue #3687: registered in permissionAssurance ahead of the route that will
 	// consume it. signing-credential:request's route landed in Issue #3693 and
 	// operator-payload:sign's routes landed in Issue #3695 — both now have real
