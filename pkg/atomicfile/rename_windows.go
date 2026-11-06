@@ -3,7 +3,7 @@
 
 //go:build windows
 
-package flatfile
+package atomicfile
 
 import (
 	"errors"
@@ -17,7 +17,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// atomicRename renames src → dst on Windows with semantics that match POSIX
+// AtomicReplace renames src → dst on Windows with semantics that match POSIX
 // rename(2): the rename is atomic with respect to concurrent readers, who
 // keep reading their handle's view of the pre-rename file until they close
 // it.
@@ -31,16 +31,16 @@ import (
 // several steps inside the API -- it opens the replaced file to carry its
 // attributes and ACLs across before swapping -- and while it holds that open,
 // a reader's CreateFile on dst fails with ERROR_SHARING_VIOLATION even with
-// every share flag set. Measured in CI (PR #4250, windows-latest): all three
+// every share flag set. Measured in CI for the flatfile provider (PR #4250, windows-latest): all three
 // readers of TestFlatFile_CrossProcess_OneWriterManyReaders exhausted
-// readFile's ~360ms retry budget on "The process cannot access the file
+// ReadFile's ~360ms retry budget on "The process cannot access the file
 // because it is being used by another process".
 //
 // Fallback: if posixRename fails for any reason (a filesystem without POSIX
 // rename semantics returns ERROR_INVALID_PARAMETER / ERROR_NOT_SUPPORTED), the
 // previous behaviour runs unchanged: ReplaceFileW for an existing dst, and
 // os.Rename (MoveFileEx) when dst does not exist yet.
-func atomicRename(src, dst string) error {
+func AtomicReplace(src, dst string) error {
 	if err := posixRename(src, dst); err == nil {
 		return nil
 	}
@@ -74,7 +74,7 @@ type fileRenameInfo struct {
 
 // posixRename renames src over dst with FILE_RENAME_FLAG_POSIX_SEMANTICS:
 // dst's name is replaced in one filesystem operation even while readers hold
-// dst open (they need FILE_SHARE_DELETE, which readFile sets), and those
+// dst open (they need FILE_SHARE_DELETE, which ReadFile sets), and those
 // readers keep reading the old file. Only src is opened here.
 func posixRename(src, dst string) error {
 	absDst, err := filepath.Abs(dst)
@@ -141,7 +141,7 @@ var (
 
 // jitter returns d randomised by ±50% so concurrent readers/writers retrying
 // against the same target don't fire on aligned millisecond boundaries.
-// Used by readFile's retry on ERROR_SHARING_VIOLATION. The writer side does
+// Used by ReadFile's retry on ERROR_SHARING_VIOLATION. The writer side does
 // not retry. The reader-side retry is defense-in-depth for the fallback rename
 // path (ReplaceFileW), which can hold dst open while readers try to open it.
 func jitter(d time.Duration) time.Duration {
@@ -154,7 +154,7 @@ func jitter(d time.Duration) time.Duration {
 
 // isRetryableRenameError reports whether err is the Windows transient
 // failure mode that occurs when a concurrent operation has the file open.
-// Used by readFile (rename_windows is no longer the only caller after the
+// Used by ReadFile (rename_windows is no longer the only caller after the
 // ReplaceFileW switch — the name is kept for continuity with read_windows.go).
 func isRetryableRenameError(err error) bool {
 	if err == nil {
@@ -168,9 +168,9 @@ func isRetryableRenameError(err error) bool {
 	return false
 }
 
-// isSharingViolation reports ERROR_SHARING_VIOLATION (32): another handle's
+// IsSharingViolation reports ERROR_SHARING_VIOLATION (32): another handle's
 // share mode refused this open. Lets the cross-process test tell that apart
 // from a torn read, which is a different defect (Issue #4262).
-func isSharingViolation(err error) bool {
+func IsSharingViolation(err error) bool {
 	return errors.Is(err, syscall.Errno(32))
 }

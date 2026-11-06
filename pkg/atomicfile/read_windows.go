@@ -3,7 +3,7 @@
 
 //go:build windows
 
-package flatfile
+package atomicfile
 
 import (
 	"io"
@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// readFile reads path with Windows share semantics that let concurrent
+// ReadFile reads path with Windows share semantics that let concurrent
 // writers replace the file underneath us. Without these flags, Go's stock
 // os.ReadFile opens with dwShareMode = FILE_SHARE_READ, which blocks any
 // concurrent ReplaceFileW / MoveFileEx for the entire open window. Under
@@ -31,7 +31,7 @@ import (
 // We keep a short retry on ERROR_SHARING_VIOLATION (errno 32) as
 // defense-in-depth for transient FS-driver glitches during the rename
 // window. With the share flags above, retries should be rare.
-func readFile(path string) ([]byte, error) {
+func ReadFile(path string) ([]byte, error) {
 	const (
 		maxAttempts = 12
 		baseDelay   = 1 * time.Millisecond

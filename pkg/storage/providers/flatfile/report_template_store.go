@@ -75,18 +75,7 @@ func (s *FlatFileReportTemplateStore) dataFilePath() string {
 
 // load reads the templates file; a missing file is an empty store. Lock must be held.
 func (s *FlatFileReportTemplateStore) load() ([]reportTemplateJSON, error) {
-	raw, err := readFile(s.dataFilePath())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("flatfile: failed to read report templates file: %w", err)
-	}
-	var list []reportTemplateJSON
-	if err := json.Unmarshal(raw, &list); err != nil {
-		return nil, fmt.Errorf("flatfile: failed to parse report templates file: %w", err)
-	}
-	return list, nil
+	return loadJSONSlice[reportTemplateJSON](s.dataFilePath(), "report templates")
 }
 
 // save atomically writes the templates. Lock must be held. The file is written compact

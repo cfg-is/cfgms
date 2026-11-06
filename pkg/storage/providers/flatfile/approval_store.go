@@ -4,7 +4,6 @@ package flatfile
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -71,30 +70,12 @@ func (s *FlatFileApprovalStore) dataFilePath() string {
 // load reads the approvals file; a missing file is an empty store.
 // Must be called with the lock held.
 func (s *FlatFileApprovalStore) load() ([]approvalJSON, error) {
-	raw, err := readFile(s.dataFilePath())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("flatfile: failed to read approvals file: %w", err)
-	}
-	var approvals []approvalJSON
-	if err := json.Unmarshal(raw, &approvals); err != nil {
-		return nil, fmt.Errorf("flatfile: failed to parse approvals file: %w", err)
-	}
-	return approvals, nil
+	return loadJSONSlice[approvalJSON](s.dataFilePath(), "approvals")
 }
 
 // save atomically writes approvals. Must be called with the lock held.
 func (s *FlatFileApprovalStore) save(approvals []approvalJSON) error {
-	if approvals == nil {
-		approvals = []approvalJSON{}
-	}
-	raw, err := json.MarshalIndent(approvals, "", "  ")
-	if err != nil {
-		return fmt.Errorf("flatfile: failed to marshal approvals: %w", err)
-	}
-	return writeAtomic(s.dataFilePath(), raw)
+	return saveJSONSlice(s.dataFilePath(), approvals, "approvals")
 }
 
 func timePtr(t time.Time) *time.Time {

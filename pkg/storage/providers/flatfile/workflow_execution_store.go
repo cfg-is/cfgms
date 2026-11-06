@@ -15,6 +15,8 @@ import (
 	"time"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+
+	"github.com/cfgis/cfgms/pkg/atomicfile"
 )
 
 // Compile-time assertion.
@@ -79,7 +81,7 @@ func toWorkflowExecutionRecord(j workflowExecutionJSON) *business.WorkflowExecut
 // readOne reads one record file. Must be called with the lock held.
 func (s *FlatFileWorkflowExecutionStore) readOne(path string) (workflowExecutionJSON, error) {
 	var j workflowExecutionJSON
-	raw, err := readFile(path)
+	raw, err := atomicfile.ReadFile(path)
 	if err != nil {
 		return j, err
 	}

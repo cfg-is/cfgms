@@ -4,9 +4,7 @@ package flatfile
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -40,9 +38,8 @@ type nonceEntryJSON struct {
 // NewFlatFileNonceStore creates a FlatFileNonceStore rooted at <root>/nonces.
 // The directory is created if it does not exist.
 func NewFlatFileNonceStore(root string) (*FlatFileNonceStore, error) {
-	dir := filepath.Join(root, "nonces")
-	if err := os.MkdirAll(dir, dirMode); err != nil {
-		return nil, fmt.Errorf("flatfile: failed to create nonces directory: %w", err)
+	if err := ensureStoreDir(root, "nonces", "nonces"); err != nil {
+		return nil, err
 	}
 	return &FlatFileNonceStore{root: root}, nil
 }
@@ -55,31 +52,13 @@ func (s *FlatFileNonceStore) dataFilePath() string {
 // Returns nil slice when the file does not exist.
 // Must be called with s.mu held.
 func (s *FlatFileNonceStore) load() ([]nonceEntryJSON, error) {
-	raw, err := readFile(s.dataFilePath())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("flatfile: failed to read nonce file: %w", err)
-	}
-	var entries []nonceEntryJSON
-	if err := json.Unmarshal(raw, &entries); err != nil {
-		return nil, fmt.Errorf("flatfile: failed to parse nonce file: %w", err)
-	}
-	return entries, nil
+	return loadJSONSlice[nonceEntryJSON](s.dataFilePath(), "nonce")
 }
 
 // save atomically writes entries to refresh_nonces.json.
 // Must be called with s.mu held.
 func (s *FlatFileNonceStore) save(entries []nonceEntryJSON) error {
-	if entries == nil {
-		entries = []nonceEntryJSON{}
-	}
-	raw, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return fmt.Errorf("flatfile: failed to marshal nonce entries: %w", err)
-	}
-	return writeAtomic(s.dataFilePath(), raw)
+	return saveJSONSlice(s.dataFilePath(), entries, "nonce entries")
 }
 
 // PutNonce implements business.NonceStore.PutNonce.

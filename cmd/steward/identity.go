@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/atomicfile"
 )
 
 // identityFileName is the name of the on-disk steward identity file,
@@ -88,7 +90,7 @@ func writePendingStateFile(dir, name string, state PendingState) error {
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return fmt.Errorf("write pending state file: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := atomicfile.AtomicReplace(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("commit pending state file: %w", err)
 	}
@@ -107,7 +109,7 @@ func readPendingStateFile(dir, name string) (*PendingState, error) {
 	path := filepath.Join(dir, name)
 	// #nosec G304 -- dir is the steward's private identity directory and the
 	// pending-state filename is a fixed internal constant.
-	data, err := os.ReadFile(path)
+	data, err := atomicfile.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -195,7 +197,7 @@ func saveIdentity(dir string, id StewardIdentity) error {
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return fmt.Errorf("write identity file: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := atomicfile.AtomicReplace(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("commit identity file: %w", err)
 	}
@@ -215,7 +217,7 @@ func loadIdentity(dir string) (*StewardIdentity, error) {
 	path := filepath.Join(dir, identityFileName)
 	// #nosec G304 -- dir is the steward's private identity directory and the
 	// identity filename is a fixed internal constant.
-	data, err := os.ReadFile(path)
+	data, err := atomicfile.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -272,7 +274,7 @@ func saveCloneMarkerDetail(dir string, m cloneMarker) error {
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return fmt.Errorf("write clone marker: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := atomicfile.AtomicReplace(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("commit clone marker: %w", err)
 	}
@@ -283,7 +285,7 @@ func saveCloneMarkerDetail(dir string, m cloneMarker) error {
 // unreadable or corrupt marker is an error: the caller must not guess.
 func loadCloneMarker(dir string) (*cloneMarker, error) {
 	// #nosec G304 -- fixed file name under the steward's private identity directory.
-	data, err := os.ReadFile(filepath.Join(dir, cloneMarkerFileName))
+	data, err := atomicfile.ReadFile(filepath.Join(dir, cloneMarkerFileName))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/atomicfile"
 	"github.com/cfgis/cfgms/pkg/logging"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/storage/providers/internal/keysafe"
@@ -144,7 +145,7 @@ func (s *FlatFileConfigStore) findConfigFile(key *cfgconfig.ConfigKey) (string, 
 // with ERROR_ACCESS_DENIED when a concurrent reader has the destination
 // file open — unlike POSIX, Windows doesn't let you rename over an
 // open-for-read file. To deliver the same cross-process safety on Windows
-// (needed for #1919 blue/green), atomicRename retries on EACCES with a
+// (needed for #1919 blue/green), atomicfile.AtomicReplace retries on EACCES with a
 // short backoff long enough to outlast any reasonable single read.
 func writeAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
@@ -176,7 +177,7 @@ func writeAtomic(path string, data []byte) error {
 	if err := tmpFile.Close(); err != nil {
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
-	if err := atomicRename(tmpPath, path); err != nil {
+	if err := atomicfile.AtomicReplace(tmpPath, path); err != nil {
 		return fmt.Errorf("atomic rename failed: %w", err)
 	}
 	success = true
@@ -196,10 +197,10 @@ func (s *FlatFileConfigStore) readConfigFile(key *cfgconfig.ConfigKey) (*cfgconf
 		return nil, err
 	}
 
-	// readFile retries Windows ERROR_SHARING_VIOLATION (a concurrent
+	// atomicfile.ReadFile retries Windows ERROR_SHARING_VIOLATION (a concurrent
 	// flatfile writer's in-flight rename) up to renameMaxWait; on POSIX
 	// it is a direct os.ReadFile and contention does not arise.
-	raw, err := readFile(path)
+	raw, err := atomicfile.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, cfgconfig.ErrConfigNotFound
@@ -334,22 +335,8 @@ func inConfigsLayout(root, path string) bool {
 
 // ListConfigs returns all configuration entries matching the filter.
 func (s *FlatFileConfigStore) ListConfigs(ctx context.Context, filter *cfgconfig.ConfigFilter) ([]*cfgconfig.ConfigEntry, error) {
-	if filter != nil {
-		if filter.TenantID != "" {
-			if err := keysafe.ValidateTenantID(filter.TenantID); err != nil {
-				return nil, fmt.Errorf("invalid filter tenant ID: %w", err)
-			}
-		}
-		if filter.Namespace != "" {
-			if err := keysafe.ValidateLeafField("namespace", filter.Namespace); err != nil {
-				return nil, fmt.Errorf("invalid filter namespace: %w", err)
-			}
-		}
-		for _, name := range filter.Names {
-			if err := keysafe.ValidateLeafField("name", name); err != nil {
-				return nil, fmt.Errorf("invalid filter name: %w", err)
-			}
-		}
+	if err := validateConfigFilter(filter); err != nil {
+		return nil, err
 	}
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
@@ -376,14 +363,14 @@ func (s *FlatFileConfigStore) ListConfigs(ctx context.Context, filter *cfgconfig
 			return nil
 		}
 
-		// path originates from WalkDir rooted at s.root; readFile retries
+		// path originates from WalkDir rooted at s.root; atomicfile.ReadFile retries
 		// transient Windows sharing violations from concurrent writers.
 		// Only files under a <tenant>/configs/ path are configs; other
 		// flatfile stores may share the root.
 		if !inConfigsLayout(s.root, path) {
 			return nil
 		}
-		raw, err := readFile(path)
+		raw, err := atomicfile.ReadFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil // removed after the walk saw it: a concurrent delete
@@ -412,6 +399,30 @@ func (s *FlatFileConfigStore) ListConfigs(ctx context.Context, filter *cfgconfig
 	sortConfigs(results, filter)
 	results = paginateConfigs(results, filter)
 	return results, nil
+}
+
+// validateConfigFilter rejects filter fields that are unsafe to use as path
+// components. A nil filter is valid.
+func validateConfigFilter(filter *cfgconfig.ConfigFilter) error {
+	if filter == nil {
+		return nil
+	}
+	if filter.TenantID != "" {
+		if err := keysafe.ValidateTenantID(filter.TenantID); err != nil {
+			return fmt.Errorf("invalid filter tenant ID: %w", err)
+		}
+	}
+	if filter.Namespace != "" {
+		if err := keysafe.ValidateLeafField("namespace", filter.Namespace); err != nil {
+			return fmt.Errorf("invalid filter namespace: %w", err)
+		}
+	}
+	for _, name := range filter.Names {
+		if err := keysafe.ValidateLeafField("name", name); err != nil {
+			return fmt.Errorf("invalid filter name: %w", err)
+		}
+	}
+	return nil
 }
 
 // listSearchRoot returns the directory to start the WalkDir from, based on filter.
@@ -692,9 +703,9 @@ func (s *FlatFileConfigStore) GetConfigStats(ctx context.Context) (*cfgconfig.Co
 			return nil
 		}
 
-		// path from WalkDir rooted at s.root; readFile retries Windows
+		// path from WalkDir rooted at s.root; atomicfile.ReadFile retries Windows
 		// sharing violations from concurrent writers.
-		raw, err := readFile(path)
+		raw, err := atomicfile.ReadFile(path)
 		if err != nil {
 			return nil
 		}
@@ -703,23 +714,7 @@ func (s *FlatFileConfigStore) GetConfigStats(ctx context.Context) (*cfgconfig.Co
 			return nil
 		}
 
-		stats.TotalConfigs++
-		stats.TotalSize += int64(len(raw))
-
-		if entry.Key != nil {
-			stats.ConfigsByTenant[entry.Key.TenantID]++
-			stats.ConfigsByNamespace[entry.Key.Namespace]++
-		}
-		stats.ConfigsByFormat[string(entry.Format)]++
-
-		if oldest == nil || entry.CreatedAt.Before(*oldest) {
-			t := entry.CreatedAt
-			oldest = &t
-		}
-		if newest == nil || entry.CreatedAt.After(*newest) {
-			t := entry.CreatedAt
-			newest = &t
-		}
+		recordConfigStats(stats, &entry, int64(len(raw)), &oldest, &newest)
 		return nil
 	})
 	if walkErr != nil && !os.IsNotExist(walkErr) {
@@ -732,4 +727,26 @@ func (s *FlatFileConfigStore) GetConfigStats(ctx context.Context) (*cfgconfig.Co
 		stats.AverageSize = stats.TotalSize / stats.TotalConfigs
 	}
 	return stats, nil
+}
+
+// recordConfigStats folds one decoded config entry of the given on-disk size
+// into stats and advances the oldest/newest creation-time bounds.
+func recordConfigStats(stats *cfgconfig.ConfigStats, entry *cfgconfig.ConfigEntry, size int64, oldest, newest **time.Time) {
+	stats.TotalConfigs++
+	stats.TotalSize += size
+
+	if entry.Key != nil {
+		stats.ConfigsByTenant[entry.Key.TenantID]++
+		stats.ConfigsByNamespace[entry.Key.Namespace]++
+	}
+	stats.ConfigsByFormat[string(entry.Format)]++
+
+	if *oldest == nil || entry.CreatedAt.Before(**oldest) {
+		t := entry.CreatedAt
+		*oldest = &t
+	}
+	if *newest == nil || entry.CreatedAt.After(**newest) {
+		t := entry.CreatedAt
+		*newest = &t
+	}
 }

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+
+	"github.com/cfgis/cfgms/pkg/atomicfile"
 )
 
 // FlatFileAuditStore implements business.AuditStore using append-only JSONL files.
@@ -797,21 +799,17 @@ func (s *FlatFileAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate
 			return nil
 		}
 		archivePath := filepath.Join(archiveDir, filepath.Base(path))
-		// atomicRename retries Windows ERROR_SHARING_VIOLATION from
+		// atomicfile.AtomicReplace retries Windows ERROR_SHARING_VIOLATION from
 		// concurrent readers (blue/green substrate, Issue #1919).
-		if err := atomicRename(path, archivePath); err != nil {
+		if err := atomicfile.AtomicReplace(path, archivePath); err != nil {
 			return nil
 		}
 
-		// Count entries in the archived file. readFile retries Windows
+		// Count entries in the archived file. atomicfile.ReadFile retries Windows
 		// sharing violations from concurrent writers.
-		raw, err := readFile(archivePath)
+		raw, err := atomicfile.ReadFile(archivePath)
 		if err == nil {
-			for _, line := range strings.Split(string(raw), "\n") {
-				if strings.TrimSpace(line) != "" {
-					count++
-				}
-			}
+			count += countJSONLEntries(raw)
 		}
 		return nil
 	})
@@ -819,6 +817,17 @@ func (s *FlatFileAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate
 		return count, fmt.Errorf("archive walk failed: %w", walkErr)
 	}
 	return count, nil
+}
+
+// countJSONLEntries returns the number of non-blank lines in a JSONL payload.
+func countJSONLEntries(raw []byte) int64 {
+	var n int64
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // PurgeAuditEntries deletes daily JSONL files older than beforeDate.

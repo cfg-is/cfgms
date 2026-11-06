@@ -18,6 +18,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
+
+	"github.com/cfgis/cfgms/pkg/atomicfile"
 )
 
 // TestHelperProcess is the helper invoked by the cross-process flatfile
@@ -113,7 +115,7 @@ func TestHelperProcess(t *testing.T) {
 				// refused it (Issue #4262). Counted and reported under its
 				// own name and exit code, so a failure points at the right
 				// defect instead of at file atomicity.
-				if isSharingViolation(err) {
+				if atomicfile.IsSharingViolation(err) {
 					sharingErr++
 					fmt.Fprintf(os.Stderr, "helper reader: sharing violation opening the file: %v\n", err)
 					continue
