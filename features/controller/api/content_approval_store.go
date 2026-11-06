@@ -239,6 +239,26 @@ func (s *ContentApprovalStore) PutApproval(ctx context.Context, a ContentApprova
 	return s.write(ctx, key, data, a.ApprovedBy, a.ApprovedAt)
 }
 
+// DeleteApproval withdraws the approval for the owner tenant, kind, id, version
+// and approval hash. It reports whether a record existed; withdrawing an absent
+// approval changes nothing.
+func (s *ContentApprovalStore) DeleteApproval(ctx context.Context, ownerTenant string, kind LibraryKind, id, version, hash string) (bool, error) {
+	existing, err := s.GetApproval(ctx, ownerTenant, kind, id, version, hash)
+	if err != nil {
+		return false, err
+	}
+	if existing == nil {
+		return false, nil
+	}
+	if err := s.store.DeleteConfig(ctx, approvalKey(ownerTenant, kind, id, version, hash)); err != nil {
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("content approval store: delete approval: %w", err)
+	}
+	return true, nil
+}
+
 // approvalLookup is the tuple an approval lookup must match exactly.
 type approvalLookup struct {
 	tenant, id, version, hash string

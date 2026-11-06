@@ -336,13 +336,20 @@ func TestReportOnly_OutOnlySharing_DNAAndLogsLeave_InboundIsNotApplied(t *testin
 		t.Fatal("the controller must receive the log entry")
 	}
 
+	// currentDNAHash is written by the DNA inventory loop under dnaMu; read it
+	// under the same lock.
+	c.dnaMu.RLock()
 	hashBefore := c.currentDNAHash
+	c.dnaMu.RUnlock()
 	require.NoError(t, ctl.cp.SendCommand(context.Background(), &cpTypes.SignedCommand{Command: cpTypes.Command{
 		ID: "dna-back", Type: cpTypes.CommandSyncDNA, StewardID: reportOnlyStewardID, Timestamp: time.Now()}}))
 	require.NoError(t, ctl.cp.SendCommand(context.Background(), &cpTypes.SignedCommand{Command: cpTypes.Command{
 		ID: "cfg-back", Type: cpTypes.CommandSyncConfig, StewardID: reportOnlyStewardID, Timestamp: time.Now()}}))
 	require.Eventually(t, func() bool { return c.InboundDroppedKind("command") == 2 }, 10*time.Second, 20*time.Millisecond)
-	assert.Equal(t, hashBefore, c.currentDNAHash)
+	c.dnaMu.RLock()
+	hashAfter := c.currentDNAHash
+	c.dnaMu.RUnlock()
+	assert.Equal(t, hashBefore, hashAfter)
 	assert.Nil(t, c.GetConfigExecutor())
 	assert.Zero(t, ctl.syncConfigCalls.Load())
 	assert.Zero(t, ctl.syncDNACalls.Load(), "no SyncDNA stream is opened in answer to a sync_dna command")

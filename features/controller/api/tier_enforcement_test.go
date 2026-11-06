@@ -204,6 +204,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// so create/delete are code-execution-equivalent and gated like module:approve.
 	{"POST", "/api/v1/hyperv/profiles", "hyperv-profile:create"},
 	{"DELETE", "/api/v1/hyperv/profiles/test-profile", "hyperv-profile:delete"},
+	// Script approval (Issue #5839, Epic #5421): approve is presence-gated, withdrawal is not.
+	{"POST", "/api/v1/automation/approvals/scripts", "content-approval:approve"},
+	{"DELETE", "/api/v1/automation/approvals/scripts/test-script/1.0.0/test-hash", "content-approval:revoke"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine
@@ -214,8 +217,6 @@ var knownFuturePermissions = map[string]bool{
 	// story proves its own Machine 403 and step-up behavior in its own tests.
 	"automation-grant:create":  true,
 	"automation-grant:revoke":  true,
-	"content-approval:approve": true,
-	"content-approval:revoke":  true,
 	"content-library:set-mode": true,
 	"workflow:publish":         true,
 	// Issue #3687: registered in permissionAssurance ahead of the route that will
