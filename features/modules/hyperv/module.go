@@ -455,81 +455,14 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 	m.tenantID, _ = configMap["tenant_id"].(string)
 	m.auditMgr, _ = configMap["audit_manager"].(*audit.Manager)
 
-	// Controller-supplied enrollment wiring for create-from-source (ADR-010).
-	// These ride the existing config sync; absence is non-fatal (a VM source
-	// without enrollment still creates/installs, it just won't auto-register).
-	m.enrollToken, _ = configMap["enroll_token"].(string)
-	if m.enrollToken != "" && !enrollTokenPattern.MatchString(m.enrollToken) {
-		return errInvalidEnrollToken
-	}
-	m.enrollCAFingerprint, _ = configMap["enroll_ca_fingerprint"].(string)
-	if m.enrollCAFingerprint != "" && !enrollCAFingerprintPattern.MatchString(m.enrollCAFingerprint) {
-		return errInvalidEnrollCAFingerprint
-	}
-	m.enrollStewardPath, _ = configMap["enroll_steward_path"].(string)
-	if m.enrollStewardPath != "" && !validEnrollSourcePath(m.enrollStewardPath) {
-		return errInvalidEnrollStewardPath
-	}
-	m.enrollLauncherPath, _ = configMap["enroll_launcher_path"].(string)
-	if m.enrollLauncherPath != "" && !validEnrollSourcePath(m.enrollLauncherPath) {
-		return errInvalidEnrollLauncherPath
-	}
-	m.enrollCAPath, _ = configMap["enroll_ca_path"].(string)
-	if m.enrollCAPath != "" && !validEnrollSourcePath(m.enrollCAPath) {
-		return errInvalidEnrollCAPath
-	}
-	m.debugSSHAuthorizedKey, _ = configMap["debug_ssh_authorized_key"].(string)
-	if m.debugSSHAuthorizedKey != "" && !debugSSHKeyPattern.MatchString(m.debugSSHAuthorizedKey) {
-		return errInvalidDebugSSHKey
-	}
-	m.seedDir, _ = configMap["seed_dir"].(string)
-
-	// Failover-cluster scope cap (S5). cluster_name bounds which cluster this
-	// steward will read; cluster_role_names bounds the clustered VM roles in
-	// scope. nodeHostname is the local node identity recorded on ownership audit
-	// events (S8) — recordHypervOp's host arg is empty under the ps-host
-	// transport, so capture os.Hostname() once here. A failed os.Hostname()
-	// leaves it "" (non-fatal); audit then records an empty node identity, which
-	// the ownership helper still functions without.
-	m.clusterName, _ = configMap["cluster_name"].(string)
-	// An ha_role vm resource carries its cluster name only under the nested
-	// ha_role block, never as a top-level cluster_name key. Derive the S5 scope
-	// cap from there when the top-level key is absent, so the Get path
-	// (probeClusterRoleMembership) can report ha_role in current state and the
-	// resource round-trips through the executor's verify step. Without this,
-	// m.clusterName stays "" for an ha_role vm, the probe is gated off, Get omits
-	// ha_role, and every converge cycle re-detects it as unapplied "added" drift
-	// — a resource that never reports converged (Story #2577).
-	if m.clusterName == "" {
-		if hr := parseHARoleMap(configMap["ha_role"]); hr != nil {
-			m.clusterName = hr.ClusterName
-		}
-	}
-	m.clusterRoleNames = parseStringList(configMap["cluster_role_names"])
-	m.nodeHostname, _ = os.Hostname()
-	// Optional cluster DNA poll cadence (#2241). Accept a Go duration string;
-	// an unset/invalid value leaves the 30s default in place.
-	if pollStr, ok := configMap["cluster_poll_interval"].(string); ok && pollStr != "" {
-		if d, derr := time.ParseDuration(pollStr); derr == nil && d > 0 {
-			m.clusterPollInterval = d
-		}
+	if err := m.configureEnrollment(configMap); err != nil {
+		return err
 	}
 
-	// Wire the stored-config-backed profile store when a config store is
-	// supplied (same injection pattern as audit_manager). Operators define
-	// unattended-install profiles in the controller's stored-config backend and
-	// reference them as profile://<name>; this makes them loadable without code
-	// changes (ADR-009 §7). When no config store is provided, profileStore stays
-	// as set by WithProfileStore (nil in production without a backend).
-	if configStore, ok := configMap["config_store"].(cfgconfig.ConfigStore); ok && configStore != nil {
-		m.profileStore = &ConfigBackedProfileStore{store: configStore, tenantID: m.tenantID}
-	}
-
-	stewardID, _ := configMap["steward_id"].(string)
-	if stewardID == "" {
-		stewardID = m.tenantID + "/hyperv"
-	}
-	m.stewardID = stewardID
+	m.configureClusterScope(configMap)
+	m.configurePollInterval(configMap)
+	m.configureProfileStore(configMap)
+	m.configureStewardID(configMap)
 
 	// A caller-pinned host boundary (WithHostCommandTransport) is never replaced
 	// — same reasoning as the established-ps-host reuse below: the transport is a
@@ -561,6 +494,130 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 	}
 	m.transport = ps
 	return nil
+}
+
+// configureEnrollment reads the controller-supplied enrollment wiring and
+// validates each field, returning the field's sentinel error on a bad value.
+func (m *hypervModule) configureEnrollment(configMap map[string]interface{}) error {
+	if err := m.configureEnrollCredentials(configMap); err != nil {
+		return err
+	}
+	if err := m.configureEnrollPaths(configMap); err != nil {
+		return err
+	}
+	return m.configureDebugAndSeed(configMap)
+}
+
+// configureEnrollCredentials reads and validates the enrollment token and CA
+// fingerprint.
+func (m *hypervModule) configureEnrollCredentials(configMap map[string]interface{}) error {
+	// Controller-supplied enrollment wiring for create-from-source (ADR-010).
+	// These ride the existing config sync; absence is non-fatal (a VM source
+	// without enrollment still creates/installs, it just won't auto-register).
+	m.enrollToken, _ = configMap["enroll_token"].(string)
+	if m.enrollToken != "" && !enrollTokenPattern.MatchString(m.enrollToken) {
+		return errInvalidEnrollToken
+	}
+	m.enrollCAFingerprint, _ = configMap["enroll_ca_fingerprint"].(string)
+	if m.enrollCAFingerprint != "" && !enrollCAFingerprintPattern.MatchString(m.enrollCAFingerprint) {
+		return errInvalidEnrollCAFingerprint
+	}
+	return nil
+}
+
+// configureEnrollPaths reads and validates the enrollment source paths.
+func (m *hypervModule) configureEnrollPaths(configMap map[string]interface{}) error {
+	m.enrollStewardPath, _ = configMap["enroll_steward_path"].(string)
+	if m.enrollStewardPath != "" && !validEnrollSourcePath(m.enrollStewardPath) {
+		return errInvalidEnrollStewardPath
+	}
+	m.enrollLauncherPath, _ = configMap["enroll_launcher_path"].(string)
+	if m.enrollLauncherPath != "" && !validEnrollSourcePath(m.enrollLauncherPath) {
+		return errInvalidEnrollLauncherPath
+	}
+	m.enrollCAPath, _ = configMap["enroll_ca_path"].(string)
+	if m.enrollCAPath != "" && !validEnrollSourcePath(m.enrollCAPath) {
+		return errInvalidEnrollCAPath
+	}
+	return nil
+}
+
+// configureDebugAndSeed reads the debug SSH key and seed directory.
+func (m *hypervModule) configureDebugAndSeed(configMap map[string]interface{}) error {
+	m.debugSSHAuthorizedKey, _ = configMap["debug_ssh_authorized_key"].(string)
+	if m.debugSSHAuthorizedKey != "" && !debugSSHKeyPattern.MatchString(m.debugSSHAuthorizedKey) {
+		return errInvalidDebugSSHKey
+	}
+	m.seedDir, _ = configMap["seed_dir"].(string)
+	return nil
+}
+
+// configureClusterScope captures the failover-cluster scope cap and the local
+// node identity.
+func (m *hypervModule) configureClusterScope(configMap map[string]interface{}) {
+	// Failover-cluster scope cap (S5). cluster_name bounds which cluster this
+	// steward will read; cluster_role_names bounds the clustered VM roles in
+	// scope. nodeHostname is the local node identity recorded on ownership audit
+	// events (S8) — recordHypervOp's host arg is empty under the ps-host
+	// transport, so capture os.Hostname() once here. A failed os.Hostname()
+	// leaves it "" (non-fatal); audit then records an empty node identity, which
+	// the ownership helper still functions without.
+	m.clusterName = m.deriveClusterName(configMap)
+	m.clusterRoleNames = parseStringList(configMap["cluster_role_names"])
+	m.nodeHostname, _ = os.Hostname()
+}
+
+// deriveClusterName returns the top-level cluster_name, falling back to the
+// nested ha_role block when the key is absent.
+func (m *hypervModule) deriveClusterName(configMap map[string]interface{}) string {
+	name, _ := configMap["cluster_name"].(string)
+	// An ha_role vm resource carries its cluster name only under the nested
+	// ha_role block, never as a top-level cluster_name key. Derive the S5 scope
+	// cap from there when the top-level key is absent, so the Get path
+	// (probeClusterRoleMembership) can report ha_role in current state and the
+	// resource round-trips through the executor's verify step. Without this,
+	// m.clusterName stays "" for an ha_role vm, the probe is gated off, Get omits
+	// ha_role, and every converge cycle re-detects it as unapplied "added" drift
+	// — a resource that never reports converged (Story #2577).
+	if name == "" {
+		if hr := parseHARoleMap(configMap["ha_role"]); hr != nil {
+			name = hr.ClusterName
+		}
+	}
+	return name
+}
+
+// configurePollInterval reads the optional cluster DNA poll cadence.
+func (m *hypervModule) configurePollInterval(configMap map[string]interface{}) {
+	// Optional cluster DNA poll cadence (#2241). Accept a Go duration string;
+	// an unset/invalid value leaves the 30s default in place.
+	if pollStr, ok := configMap["cluster_poll_interval"].(string); ok && pollStr != "" {
+		if d, derr := time.ParseDuration(pollStr); derr == nil && d > 0 {
+			m.clusterPollInterval = d
+		}
+	}
+}
+
+// configureProfileStore wires the stored-config-backed profile store.
+func (m *hypervModule) configureProfileStore(configMap map[string]interface{}) {
+	// Wire the stored-config-backed profile store when a config store is
+	// supplied (same injection pattern as audit_manager). Operators define
+	// unattended-install profiles in the controller's stored-config backend and
+	// reference them as profile://<name>; this makes them loadable without code
+	// changes (ADR-009 §7). When no config store is provided, profileStore stays
+	// as set by WithProfileStore (nil in production without a backend).
+	if configStore, ok := configMap["config_store"].(cfgconfig.ConfigStore); ok && configStore != nil {
+		m.profileStore = &ConfigBackedProfileStore{store: configStore, tenantID: m.tenantID}
+	}
+}
+
+// configureStewardID sets the steward identity, defaulting to tenant/hyperv.
+func (m *hypervModule) configureStewardID(configMap map[string]interface{}) {
+	stewardID, _ := configMap["steward_id"].(string)
+	if stewardID == "" {
+		stewardID = m.tenantID + "/hyperv"
+	}
+	m.stewardID = stewardID
 }
 
 // winrmRequested reports whether the config still selects the removed WinRM
