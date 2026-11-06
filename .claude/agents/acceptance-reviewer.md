@@ -280,7 +280,7 @@ Review the PR diff for:
 
    Pre-existing markers in unchanged lines are out of scope for this scan — they're handled by the sweep story (#1430) and by Phase 3's file-state check for AC-named files.
 
-6. **Complexity gate protection** — `gh pr diff <PR_NUM> --name-only` and list in the review comment every changed path under `scripts/complexity/`. A diff that edits `scripts/complexity/manifest.json` or anything under `scripts/complexity/analyzer/` (the counting rules) is a finding unless the story body names that edit (a finding forces manual `/pr-review`).
+6. **Complexity gate protection** — `gh pr diff <PR_NUM> --name-only` and list in the review comment every changed path under `scripts/complexity/`. A diff that edits `scripts/complexity/manifest.json` or anything under `scripts/complexity/analyzer/` (the counting rules) is a finding unless the story body names that edit (a finding forces manual `/pr-review`). A diff that touches the duplication threshold constant (`DefaultThreshold`) is likewise a finding unless the story names it. The review comment also lists every `//duplication:justified` line ADDED by the diff (visibility only, not a finding by itself).
 
 ### Capability-tag consistency (informational — NEVER a blocking finding)
 

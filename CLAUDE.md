@@ -187,6 +187,7 @@ make build             # All binaries (current platform)
 make security-scan     # Security checks (blocking on critical/high)
 make check-architecture # Central provider violation detection
 make complexity-check  # Complexity no-worsening gate (see docs/development/complexity-gate.md)
+make duplication-check # Duplication no-worsening gate (see docs/development/duplication-gate.md)
 ```
 
 ## Architecture
@@ -331,7 +332,8 @@ docs/          # Documentation
 - Duplicating existing logic — extend or call the existing code, or move the
   shared part into `pkg/` or a shared feature package. A copy needs a solid
   justification (for example a deliberate build boundary or a real SQL dialect
-  difference), written in a comment at the copy that names the original.
+  difference), written in a comment at the copy that names the original. The
+  gate-recognised form is `//duplication:justified <path> -- <reason>`.
 
 ### Code Navigation (grep + Read)
 
