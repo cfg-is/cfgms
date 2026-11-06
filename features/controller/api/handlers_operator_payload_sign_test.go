@@ -113,11 +113,18 @@ func injectSignCredential(t *testing.T, server *Server, username string, credID,
 // authenticator flags UP|UV (0x05) and the given sign count.
 func buildSignAssertionBody(t *testing.T, priv *ecdsa.PrivateKey, credID []byte, rpID, origin, challengeB64 string, signCount uint32) *bytes.Reader {
 	t.Helper()
+	return buildSignAssertionBodyFlags(t, priv, credID, rpID, origin, challengeB64, signCount, 0x05)
+}
+
+// buildSignAssertionBodyFlags is buildSignAssertionBody with explicit authenticator flags
+// (0x01 user presence, 0x04 user verification), for tests of an assertion missing one.
+func buildSignAssertionBodyFlags(t *testing.T, priv *ecdsa.PrivateKey, credID []byte, rpID, origin, challengeB64 string, signCount uint32, flags byte) *bytes.Reader {
+	t.Helper()
 
 	rpIDHash := sha256.Sum256([]byte(rpID))
 	authData := make([]byte, 37)
 	copy(authData[:32], rpIDHash[:])
-	authData[32] = 0x05 // UP | UV
+	authData[32] = flags
 	authData[33] = byte(signCount >> 24)
 	authData[34] = byte(signCount >> 16)
 	authData[35] = byte(signCount >> 8)
