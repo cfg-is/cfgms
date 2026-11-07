@@ -101,6 +101,7 @@ gh api graphql -f query='
 Also read:
 - `docs/product/roadmap.md` — use Active SaaS release priorities and project evidence to identify active scope. Do not infer the active milestone from the first historical unchecked section or treat outcome tables as new queued work. Report completion counts only from an identified, bounded milestone/epic set.
 - `./.claude/tooling/scripts/agent-dispatch.sh list-running` — running container count and names
+- `./.claude/tooling/scripts/po-act.sh dispatch status` — FSM supervisor runs on this host, one tab-separated row each (`RUN_ID STATUS STATE MODE TARGET CONTAINER HEARTBEAT SESSIONS REASON`), or `FSM_RUNS:none`. `STATUS` is `live`, `hung`, `starting`, `crashed`, `done` or `abandoned` (state `ABANDONED`; reason `crashed_ttl` for a run that stayed crashed longer than `CFGMS_FSM_CRASHED_TTL_HOURS`, 24 h by default, otherwise the abandon reason). A run has no container while it prepares, snapshots, syncs or publishes, and only a `cfg-validate-<N>` container while it validates, so `list-running` alone does not show dev, fix and resolve work. `dispatch status <RUN_ID>` prints one run as JSON.
 - `./.claude/tooling/scripts/agent-dispatch.sh capacity` — host resource headroom (§4.-1): `CAPACITY_OK:slots=<n>` or `CAPACITY_FULL:<binding>:slots=0`. The binding resource (disk/mem/cpu) tells you what's constraining dispatch on this host.
 - `./.claude/tooling/scripts/pipeline-helper.sh lease-list` — active distributed leases (multi-host; §4.-1). Each row is `<key>  <holder>  <exp>  <expired>`. Shows what other hosts are currently working.
 - Cron PO status via `RemoteTrigger` tool with `action: "list"` — check for **this host's** trigger, named `po-cron-<CFGMS_HOST_ID>` (multiple hosts each run their own; a bare legacy `po-cron` counts as this host's if `CFGMS_HOST_ID` is unset). Report: enabled/disabled, last run time, next scheduled run. If no trigger exists, report "not configured".
@@ -278,20 +279,29 @@ collision-prone action acquires a lease on its work unit BEFORE acting:
 
 | Lease key | Held by | Released by |
 |---|---|---|
-| `story-<item>` | dev dispatch (or §7 self-dispatch claim) | the dev container's entrypoint on exit (`release-story` for §7); TTL reclaim on crash |
-| `pr-<N>` | review / fix / resolve (mutually exclusive on one PR) + inline rebase | the review/fix container's entrypoint on exit; inline rebase releases it itself; TTL on crash |
+| `story-<item>` | dev dispatch (or §7 self-dispatch claim) | the FSM supervisor run, on every terminal state (`REPORT`, `NO_OP`, `REFUSED`, `FAILED`); `release-story` for §7; TTL reclaim when the run crashes and is never resumed |
+| `pr-<N>` | review / fix / resolve (mutually exclusive on one PR) + inline rebase | fix and resolve: the FSM supervisor run, on every terminal state; review: the review container's entrypoint on exit; inline rebase releases it itself; TTL on crash |
 | `epic-decompose-<N>` | Step 7 planning team | the host, in-session, after posting the decomposition summary |
 | `pin-refresh-<week>` | Step 1.6 refresh-pins | the host, after posting the `po-pin-refresh` marker |
 | `sweep` | Step 7.5 pipeline-sweep | the host, after the sweep returns |
 
 The container-op leases (`story-*`, `pr-*`) are acquired by the script helpers
 automatically (`po-act.sh dispatch` / `dispatch-fix` / `resolve-conflict`,
-`agent-dispatch.sh review-pr`) and released by the container — **you do not manage
-them by hand.** This is the "dispatch locks it, the returning agent unlocks it"
-lifecycle: when a dev agent submits its PR and its container exits, the `story-*`
-lease frees, and whichever cron host's next cycle comes first acquires `pr-<N>` to
-review it. The **inline-op leases** (`epic-decompose-*`, `pin-refresh-*`, `sweep`)
-ARE yours to manage in the steps below — acquire, run, release.
+`agent-dispatch.sh review-pr`) — **you do not manage them by hand.** For dev, fix
+and resolve work, `po-act.sh` acquires the lease and hands it to the FSM supervisor
+run it starts (`supervisor.py run … --lease-handoff`). From that handoff on, the run
+owns the lease, renews it while it works and releases it when it reaches any
+terminal state, a refusal included. `po-act.sh` releases the lease itself only when
+the run never got far enough to own it. A crashed run's lease is not released; the
+run is resumed (`po-act.sh dispatch resume <RUN_ID>`, Step 6a), abandoned when its
+work finished elsewhere (which releases the lease if this host holds it), or the
+lease expires.
+This is the "dispatch locks it, the finished run unlocks it" lifecycle: when a dev
+run publishes its PR and finishes, the `story-*` lease frees, and whichever cron
+host's next cycle comes first acquires `pr-<N>` to review it. Review containers
+still release `pr-<N>` from their own entrypoint on exit. The **inline-op leases**
+(`epic-decompose-*`, `pin-refresh-*`, `sweep`) ARE yours to manage in the steps
+below — acquire, run, release.
 
 **Host identity.** Export `CFGMS_HOST_ID` (default `hostname`) once per shell on
 each host; it tags lease holders for debugging and names this host's cron trigger
@@ -309,7 +319,7 @@ no hand-tuned magic number).
 
 - **Enforcement is automatic.** Every launch path (`po-act dispatch` /
   `dispatch-fix` / `resolve-conflict`, `agent-dispatch review-pr`) calls the gate
-  before leasing/cloning and defers when full — you'll see
+  before leasing and defers when full — you'll see
   `DISPATCH_DEFERRED:<id>:resources (…)` / `REVIEW_REFUSED:<pr>:resources`. Trust
   it; deferred work is picked up a later cycle (or by a host with room).
 - **Planning hint.** The preflight surfaces `capacity` (`free_slots`, `binding`
@@ -331,8 +341,42 @@ separate call needed.
 - `./.claude/tooling/scripts/po-act.sh <subcommand>` — every common action is a one-liner:
   - `preflight` — gather state; writes `~/.cache/cfgms-po/preflight.json`, prints summary
   - `state [jq_filter]` — read cached state with optional jq filter
-  - `dispatch <STORY>` — check-conflicts + clone + launch + label swap
-  - `dispatch-fix <PR>` — clean stale container + clone-pr + launch-generic
+  - `dispatch <STORY|ITEM_ID>` — gates, lease, claim (Ready → In Progress), then starts an FSM supervisor run (`supervisor.py run issue … --lease-handoff --detach`) and waits for its launch outcome. The run owns everything after that: the agent sessions, validation, commit, push, PR, board and lease release. No clone or container is created by `po-act.sh` itself.
+  - `dispatch --recover <STORY|ITEM_ID>` — stalled-dispatch recovery (Step 6a). Same as `dispatch`, except that a numeric story is looked up among `In Progress` items instead of `Ready` ones, and the claim accepts an item still `In Progress`: it prints `RECOVERED:<ITEM_ID> (In Progress, no unfinished run, lease free)` and then `CLAIMED:<ITEM_ID>`. Every gate still runs first: Dependencies, unfinished run, duplicate PR, and the story lease (`DISPATCH_SKIPPED:…:lease_held` when another holder has it).
+  - `dispatch --branch <BRANCH> [--issue N]` — a branch-mode run on an existing or new branch (lease `branch-<sanitized>`). When the branch has an open PR whose author is not trusted at its current head, it is refused with `DISPATCH_REFUSED:<BRANCH>:external_author (external:<PR>:<author>:<trust>)` (exit 3); no open PR, or a failed lookup, passes. Then the same capacity, image and unfinished-run gates; no Dependencies gate, no duplicate-PR gate and no claim.
+  - `dispatch-fix <PR>` — author-trust check bound to the PR head, then the same gates and a `fix-pr` run under the `pr-<N>` lease. The story's project item comes from the PR (`feature/story-<N>` or `Fixes #N`); a PR with no item on the project is refused (`DISPATCH_FIX_REFUSED:<PR>:no_story_item`). Adds the display-only `fix-agent` label after a launch.
+  - `resolve-conflict <PR>` — as `dispatch-fix`, in `resolve-conflict` mode (tokens prefixed `RESOLVE_CONFLICT_`).
+  - `dispatch status [RUN_ID]` — list this host's FSM runs, or show one as JSON (read-only).
+  - `dispatch resume <RUN_ID>` — resume a crashed run. The PREPARE gates are re-run first and nothing starts until all pass:
+    - Work finished elsewhere → the run is abandoned (terminal, its lease released if this host holds it), never resumed: `FSM_ABANDONED:<RUN_ID>:<reason>:lease=<released|held_by_other|free|expired|error|none>` (exit 0), `<reason>` one of `item_done`, `story_closed`, `pr_merged`, `pr_closed`.
+    - A state that cannot be read, or an issue/item run whose item is no longer `In Progress` → `FSM_RESUME_REFUSED:<RUN_ID>:<x>` (exit 3), `<x>` one of `item_unreadable`, `issue_unreadable`, `pr_unreadable`, `item_status_<S>` (the item's status with non-alphanumerics as `_`), `unknown_run`, `invalid_run_id`.
+    - Capacity → `DISPATCH_DEFERRED:<RUN_ID>:resources (…)` (0); stale image → `FSM_RESUME_REFUSED:<RUN_ID>:image_stale` (3).
+    - Lease: held here, or free/expired and re-acquired here; held by another host → `FSM_RESUME_REFUSED:<RUN_ID>:lease_other` (3). A lease re-acquired here is released again if the resume fails.
+    - Then `FSM_RESUMED:<RUN_ID>:<status>` (0) or `FSM_RESUME_FAILED:<RUN_ID>:exit_<rc>` (non-zero). A run that is already finished prints `FSM_RESUME_SKIPPED:<RUN_ID>:done` or `:abandoned` (0); one still in flight prints `FSM_RESUME_SKIPPED:<RUN_ID>:in_flight:<status>` (4).
+
+  **Launch outputs** of `dispatch`, `dispatch --branch`, `dispatch-fix` and `resolve-conflict`. `<P>` is the subcommand's prefix (`DISPATCH`, `DISPATCH_FIX`, `RESOLVE_CONFLICT`); a successful launch prints `FSM_RUN:<run>` first.
+
+  | Output | Exit | Meaning / action |
+  |---|---|---|
+  | `FSM_LAUNCHED:<label>:<container>` or `FSM_AGENTLESS:<label>:<state>`, then `DISPATCHED:<N>` / `DISPATCHED_BRANCH:<B>` / `DISPATCHED_FIX:<PR>` / `DISPATCHED_RESOLVE_CONFLICT:<PR>` | 0 | The run started an agent, or passed its gates and moved on without one (resolve-conflict goes straight to SYNC). Move on. |
+  | `FSM_LAUNCH_PENDING:<label>:<status>`, then the `DISPATCHED*` token | 0 | The run is still running but has not launched an agent within the wait window: `CFGMS_FSM_LAUNCH_WAIT_SECS` (120 s) once its gates passed (`<status>` = `GATES_OK`), otherwise up to `CFGMS_FSM_PREPARE_WAIT_SECS` (600 s). It owns the lease and finishes on its own; check it with `dispatch status`. |
+  | `<P>_DEFERRED:<label>:resources (…)` or `<P>_DEFERRED:<label>:<reason>` | 0 | Capacity, or a resource deferral from the run (for example a lease held by another host). Picked up a later cycle. |
+  | `<P>_DEFERRED:<label>:creds` | 10 | No agent token and no credentials file. A `dispatch` claim is rolled back; fix credentials (`/agent-setup creds`) before the next dispatch. |
+  | `IMAGE_STALE:<image>:<checkout>` + `<P>_REFUSED:<label>:image_stale (…)` | 3 | `cfg-agent:latest`'s `cfgms.build_inputs_hash` label is not this checkout's `.claude/tooling/devcontainer` tree. The launch path never rebuilds the image: rebuild it (`/agent-setup rebuild`), then dispatch again. `image_unavailable` means docker was not found. |
+  | `DISPATCH_REFUSED:<STORY>:dependency_open #N(<state>),…` | 3 | An `#NNN` in the story's `## Dependencies` is still open, or its state could not be read (fails closed). `dispatch` only. Leave the story; it is dispatchable once the dependency closes. |
+  | `<P>_REFUSED:<label>:open_pr_exists:<PR>` | 3 | Duplicate-PR gate: an open PR on any branch references the story (closing reference, or `#N` in its title). For `dispatch-fix` / `resolve-conflict` the PR being worked is excepted. Not applied to `dispatch --branch` or to an issueless draft before it is materialized. Work the existing PR instead (a WIP draft is resumed with `dispatch-fix`). |
+  | `<P>_REFUSED:<label>:open_pr_check_failed` | 3 | The duplicate-PR lookup failed; the gate fails closed. Retry next cycle. |
+  | `<P>_REFUSED:<label>:run_index_unreadable` | 3 | The FSM run index could not be read, so no unfinished run can be ruled out. Check `po-act.sh dispatch status`; do not launch. |
+  | `<P>_SKIPPED:<label>:run_in_flight:<run>:<status>:<state>` | 0 | An unfinished run (`live`, `hung`, `starting`) already holds this story, item, branch or PR. Never start a second one beside it. |
+  | `<P>_SKIPPED:<label>:run_resumable:<run> (resume with: …)` | 0 | The previous run for this work crashed. Resume it (`dispatch resume <run>`, Step 6a); do not re-dispatch. |
+  | `DISPATCH_SKIPPED:<lease label>:lease_held (…)` or `:lease_error (…)` | 0 | Another host holds the lease (all four subcommands use this prefix; the label is the story, branch or `pr-<N>`). |
+  | `DISPATCH_SKIPPED:<label>:run_locked` | 4 | Another live supervisor holds the run lock. |
+  | `<P>_REFUSED:<label>:<reason>` | 3 | Any other gate refusal: `external_author` (for `dispatch --branch`: `DISPATCH_REFUSED:<BRANCH>:external_author (<detail>)`), `head_unknown`, `no_story_item`, or the supervisor's own PREPARE refusal (for example `fsm_attempt_cap`, which also sets the item Blocked). |
+  | `FSM_INTERRUPTED:<label>:<run> (resume with: …)` | 75 | The supervisor was interrupted by a signal before `po-act.sh` saw a launch outcome. The run is resumable (`dispatch resume <run>`). |
+  | `LAUNCH_FAILED:<label>:fsm_failed:<run> (…)` | 1 | The run ended in `FAILED` before an agent launched. |
+  | `LAUNCH_FAILED:<label>:supervisor_exit_<rc>:<run> (log …)` | rc | Any other supervisor exit; the launch log path is in the line. |
+
+  On every outcome that leaves no run working on the story, a claimed story goes back to Ready (only while it is still In Progress) and prints `ROLLED_BACK:<ITEM_ID> -> Ready`. `po-act.sh` releases the lease only when the run never got far enough to own it.
   - `close-merged <ISSUE> <PR>` — close issue that missed `Fixes #NNN` auto-close keyword
   - `enqueue <PR>` / `dequeue <PR>` — merge queue management
   - `diagnose <PR>` — extract FAIL/panic lines from failed CI jobs
@@ -433,6 +477,8 @@ It also **reclaims Docker space** when disk usage is at or above `CFGMS_AGENT_DO
 It also reaps **orphaned clones**: a `story-<N>`, `review-pr-<N>`, `pr-fix-<N>` or `resolve-conflict-<N>` directory under the worktrees base whose container no longer exists. A clone is removed only when it is past a 30-minute grace window and holds nothing unsaved. A clone with uncommitted, untracked, stashed or unpushed work is reported as `ORPHAN_KEPT:<dir>:dirty` for salvage and is never deleted. If `docker ps` fails, the pass prints `ORPHAN_CLONES_SKIPPED:docker_ps_failed` and deletes nothing.
 
 The **exited-story-container path** (the common case: every dev agent that exits goes through it, not only containers already gone by some other means) applies this same guard before deleting a `story-<N>` clone, and the fix/resolve-conflict reap does the same for `pr-fix-<N>` / `resolve-conflict-<N>` clones. An exited container is always removed and its credentials revoked, but the clone is deleted only when it is provably safe to discard; otherwise it is kept and reported as `KEPT:clone:<path>:unpushed_work` (Issue #4441 — before this, an agent that exited before pushing lost its work in the same step that reaped its container, with nothing left for salvage to recover). Review clones are exempt from this guard — they are read-only by contract. A `KEPT:clone:` line is a salvage signal for **Step 6a**: the story it belongs to is a stalled-dispatch candidate, and 6a's re-dispatch starts that story from a fresh clone, so check a `KEPT` clone for unpushed work before re-dispatch discards the old one from view.
+
+**FSM runs.** Dev, fix and resolve work runs under an FSM supervisor run, whose workspace and candidate repository live in the run dir under `~/.cache/cfgms-fsm-runs/`, not in the worktrees base. `cleanup-stale` never removes anything that belongs to an unfinished run (`live`, `hung`, `starting` or `crashed`): it keeps the run's agent and validator containers (`KEPT:container:<name>:fsm_run_unfinished`) and its session dirs (`KEPT:session-dir:<dir>:fsm_run_unfinished`). It removes `cfg-validate-<N>` containers of finished or vanished runs (`CLEANED:validator:<name>`) and garbage-collects run dirs of finished runs (`done` or `abandoned`) that hold no lock and have been idle for `CFGMS_FSM_RUN_RETENTION_HOURS` (24 h by default) (`CLEANED:fsm-run:<run>:<state>`), plus stale active-index entries, old launch logs and the FSM trust dirs (`~/.cache/cfgms-agent-trust/fsm/`) of runs that are not unfinished; review and interactive trust dirs are not touched. It also abandons a crashed run whose work finished elsewhere (item Done, story closed, PR merged or closed), printing `FSM_ABANDONED:<run>:<reason>:lease=<…>`. A run that stays crashed longer than `CFGMS_FSM_CRASHED_TTL_HOURS` (24 h) is reported as `abandoned` (`crashed_ttl`) and treated as finished.
 
 **Clone and container removal goes through these helpers only** (`cleanup-stale`, `cleanup-stale-reviews`, `cleanup-container`). Never run a raw `rm` on the worktrees base, and never run `cd <dir> && rm ...` compounds. They need a human's approval, so a backgrounded PO sits on the permission prompt with no report. If a clone survives the helpers, report it by path and leave it.
 
@@ -608,19 +654,19 @@ Outcomes:
   ```bash
   ./.claude/tooling/scripts/po-act.sh resolve-conflict <PR>
   ```
-  The resolve-conflict agent: rebases onto `origin/develop`, resolves conflict markers (understanding both sides' intent, deduplicating helpers, preserving both stories' logic), validates (`go build ./...` + affected tests), and force-pushes with `--force-with-lease` to the PR's own branch. **One attempt per PR per cycle** — the inline call here is the only dispatch; the preflight never emits a separate `resolve-conflict` action type.
+  The resolve-conflict run: the supervisor rebases the PR head onto `origin/develop`; when that conflicts, an agent session resolves the conflict markers (understanding both sides' intent, deduplicating helpers, preserving both stories' logic); the supervisor validates the result with `make test-agent-complete` in an agent-free validator container and force-pushes it with `--force-with-lease` to the PR's own branch. The agent never pushes. **One attempt per PR per cycle** — the inline call here is the only dispatch; the preflight never emits a separate `resolve-conflict` action type.
 
   After a successful dispatch (`DISPATCHED_RESOLVE_CONFLICT:<PR>`):
   - The next cycle will see the PR with a new commit (from the rebase). Because the new commit's `committedDate` is newer than any prior review comment, the preflight routes the PR to **`spawn_acceptance_reviewer`** (AC4 re-review) before enqueue — this applies to prior-PASS, prior-FAIL, and never-reviewed PRs alike. No additional status change is needed.
 
-  If the resolve-conflict dispatch fails (author gate refused, validation failure inside the container):
-  - The agent will have posted the conflict files + failure summary on the PR
+  If the resolve-conflict dispatch is refused (author gate, `image_stale`, `no_story_item`) or the run ends in `FAILED` (validation or conflict budget spent):
+  - On a `FAILED` run the supervisor posts a comment on the PR naming the run and its `FSM-Reason:`; it never pushes unvalidated work onto a ready PR
   - Set status Fix for human triage:
     ```bash
     ./.claude/tooling/scripts/project-queue.sh update-field <ITEM_ID> status Fix
     ```
 
-  **Do NOT re-dispatch** if the PR is still DIRTY in the next cycle after a successful push — surface for human triage instead (the resolve-conflict guard in `active_fix_pr_nums` in the preflight suppresses dispatch while the container is in flight, and after that you get at most one attempt per cycle because Step 3 runs once per PR per cycle).
+  **Do NOT re-dispatch** if the PR is still DIRTY in the next cycle after a successful push — surface for human triage instead (the resolve-conflict guard in `active_fix_pr_nums` in the preflight suppresses dispatch while a fix-pr or resolve-conflict run for the PR is in flight on this host or its container is running, and after that you get at most one attempt per cycle because Step 3 runs once per PR per cycle).
 - `REBASE_REFUSED:<PR>:<reason>` — PR closed/merged/from a fork. Skip; next cycle will resync.
 
 This step is REQUIRED before Step 4 because:
@@ -639,10 +685,13 @@ non-blocking and moves on.
 
 **Pre-step — Resume session-truncated WIP drafts.** Before any review work,
 process every `review_recommendations` entry with `action: "resume_failed_session"`.
-These are draft PRs pushed by `.claude/tooling/devcontainer/entrypoint.sh` after an agent
-session hit a non-recoverable failure (token reauth, token-limit truncation,
-network drop). They should NOT be reviewed in their current state — the
-partial work is committed but incomplete.
+These are draft PRs the FSM supervisor pushes when a run ends in `FAILED` with
+unsaved work (validation or fix budget spent, an agent session that died on a
+token reauth, token limit or network drop). The supervisor commits its latest
+candidate as `WIP: agent attempt …`, pushes it and opens or keeps a draft titled
+`WIP: <branch> (agent failed)`, whose body starts `Agent session failed with exit
+code 1` and carries `FSM-Reason:` / `FSM-Attempt:` trailers. They should NOT be
+reviewed in their current state — the partial work is pushed but unvalidated.
 
 For each such entry:
 
@@ -650,11 +699,16 @@ For each such entry:
 ./.claude/tooling/scripts/po-act.sh dispatch-fix <PR_NUM>
 ```
 
-The fix-pr agent picks up the existing branch, completes the remaining work,
-and the entrypoint marks the PR ready for review when the agent exits 0. The
-next cron cycle will see the now-ready PR and route it through normal
-review (Step 4). This is "finishing a story", not "fixing a story" — fresh
-agent, fresh budget. No retry counter is incremented at the cron level.
+The `fix-pr` run starts from the draft's head, its agent completes the remaining
+work, and only after the supervisor's own validation passes does the supervisor
+push, retitle the draft and mark it ready for review; the agent never pushes or
+touches the PR. The next cron cycle will see the now-ready PR and route it
+through normal review (Step 4). This is "finishing a story", not "fixing a
+story" — fresh agent, fresh budget. No retry counter is incremented at the cron
+level; the supervisor counts failed runs per item itself (the higher of the
+`FsmFailedRuns` project field and the `FSM-Attempt:` trailers on the PR) and,
+once two runs have failed, refuses the next one at PREPARE with
+`fsm_attempt_cap` and sets the item Blocked.
 
 **Find PRs that need review.** A PR is review-eligible when:
 - branch is `feature/story-*`
@@ -725,24 +779,34 @@ For each story with project status `Fix`, find its PR and dispatch the fix agent
 ```bash
 ./.claude/tooling/scripts/po-act.sh dispatch-fix <PR_NUM>
 ```
-This cleans any stale container from a prior failed attempt, re-clones, and launches.
+This starts a `fix-pr` FSM run on the PR (see the launch outputs under Helper scripts). The run gives the agent the PR body, reviews, comments and failing checks as context, validates the result itself and pushes one new commit to the PR; the agent never pushes.
 
-`dispatch-fix` and `resolve-conflict` are sibling modes: `dispatch-fix` addresses review/CI failures on an otherwise-rebased branch; `resolve-conflict` (Step 3) addresses rebase conflicts. The two never run on the same PR simultaneously — the `active_fix_pr_nums` suppression guard in the preflight recognizes both `cfg-agent-pr-fix-<PR>` and `cfg-agent-resolve-conflict-<PR>` containers.
+`dispatch-fix` and `resolve-conflict` are sibling modes: `dispatch-fix` addresses review/CI failures on an otherwise-rebased branch; `resolve-conflict` (Step 3) addresses rebase conflicts. The two never run on the same PR simultaneously — they share the `pr-<N>` lease, `po-act.sh` skips a PR that already has an unfinished run (`run_in_flight` / `run_resumable`), and the `active_fix_pr_nums` suppression guard in the preflight counts in-flight (`live`, `hung`, `starting`) fix-pr and resolve-conflict runs and `cfg-agent-pr-fix-<PR>` / `cfg-agent-resolve-conflict-<PR>` containers.
 
 **Step 6 — Dispatch:**
 
 **6a — Stalled-dispatch recovery (run before new dispatch):**
 
+**Resume crashed FSM runs first.** The preflight emits `fsm_recommendations`, one entry per crashed run on this host (not finished, run lock free, younger than `CFGMS_FSM_CRASHED_TTL_HOURS`; for example after a host reboot or a killed supervisor): `{run_id, number, pr, item_id, mode, action, reason}`. Act on each by `action`:
+- `resume` — this host holds the run's lease, or nobody does. Resume it; never re-dispatch the story beside it:
+  ```bash
+  ./.claude/tooling/scripts/po-act.sh dispatch resume <RUN_ID>
+  ```
+  `FSM_RESUMED:<RUN_ID>:<status>` means the run continues from its last recorded state (PUBLISH sub-steps are idempotent). `FSM_ABANDONED:<RUN_ID>:<reason>:lease=<…>` means its work already finished elsewhere and the run was closed instead; nothing more to do. Any other output is listed under Helper scripts; report it.
+- `hold` — another host holds the run's lease (`reason` names it). Leave it.
+
+(`fsm_runs.in_flight` / `fsm_runs.resumable` carry the same runs with more fields, for the dashboard.) Never dispatch a story that has an in-flight or crashed run: `po-act.sh` would skip it anyway (`run_in_flight` / `run_resumable`), and the preflight leaves those stories out of `stalled_dispatches`. Only in-flight fix-pr / resolve-conflict runs keep their PR out of rebase, review and fix recommendations; a crashed run's PR is not held off.
+
 The preflight emits `stalled_dispatches` — a list of `In Progress` stories whose agent container (`cfg-agent-<N>`) is not running AND which have no open PR (including WIP drafts). These are silently stalled stories: the container was hard-killed (OOM, docker daemon crash, host restart, `docker rm -f`) and left the pipeline item frozen with no artifact.
 
 For each entry in `preflight.stalled_dispatches`:
 - If the story has a WIP draft PR (`is_draft: true` in `prs_open`): route through `dispatch-fix` instead (Step 5 path) — the draft PR is the work artifact to resume.
-- Otherwise: re-dispatch the story to restart the agent from scratch:
+- Otherwise: re-dispatch the story with `--recover` to restart the agent from scratch:
 ```bash
-./.claude/tooling/scripts/po-act.sh dispatch <ITEM_ID>
+./.claude/tooling/scripts/po-act.sh dispatch --recover <ITEM_ID>
 ```
 
-The `item_id` comes from `stalled_dispatches[*].item_id`. Re-dispatch resets the story to `In Progress` with a fresh container. This is safe — no existing container or PR would be clobbered (preflight only flags stories where neither exists).
+The `item_id` comes from `stalled_dispatches[*].item_id`. `--recover` claims the story although it is still `In Progress` from the stalled attempt (`RECOVERED:<ITEM_ID> …` then `CLAIMED:<ITEM_ID>`), but only after the unfinished-run gate, the duplicate-PR gate and the story lease have shown that nothing works on it. Do not set the story back to `Ready` by hand. Re-dispatch starts a fresh FSM run; no existing run, container or PR is clobbered. A story whose run was abandoned (including `crashed_ttl`) appears here too and is recovered the same way.
 
 Report stalled recoveries in the cycle summary as: `Re-dispatched stalled story #NNN (no container, no PR)`.
 
@@ -764,7 +828,7 @@ section and/or a `needs-<env>` label (see Reference: Story Body Conventions).
 hosts work *different* stories when their caps differ, but it is **not** the safety
 mechanism — two identical-caps hosts (or two Linux orchestrators) are fully
 supported. `po-act.sh dispatch` acquires the `story-<item>` lease (§4.-1) BEFORE it
-materializes, claims, clones, or launches, so exactly one host proceeds; a loser
+materializes, claims or starts a run, so exactly one host proceeds; a loser
 prints `DISPATCH_SKIPPED:<id>:lease_held` and exits clean. The lease — not the
 `Ready → In Progress` status flip (Projects V2 has no CAS) — is the interlock. You
 do not manage `story-*` leases by hand; just trust the `DISPATCH_SKIPPED` output.
