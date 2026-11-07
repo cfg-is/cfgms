@@ -86,3 +86,5 @@ to a host serving that environment (see po.md §7).>
 - [ ] `make test-complete` passes
 
 <Mark every AC requiring a specific test with [REQUIRED TEST]. Acceptance review treats these as hard gates.>
+
+<Never tell the dev agent to commit, push, open or update a PR, run `gh`, or record CI run numbers, links or pass counts in the PR body. The dev agent has no GitHub access: the dispatch harness (FSM supervisor) validates the change with `make test-agent-complete`, then commits, pushes and opens the PR itself, and CI evidence lives in the PR's checks. Write CI criteria as "required CI checks pass"; the acceptance reviewer verifies them from the checks.>

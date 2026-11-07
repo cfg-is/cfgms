@@ -12,7 +12,7 @@ The autonomous development pipeline mirrors a standard product delivery org. Hum
 | **Product Owner** | Claude Code session | Pipeline orchestration, dashboard, intent capture, planning team lead |
 | **Business Analyst** | Planning Team member | Proposes story decomposition, defends scope decisions, revises based on Tech Lead feedback |
 | **Tech Lead** | Planning Team member | Validates story proposals for dev agent executability, challenges BA on scope and feasibility |
-| **Developer** | Containerized agent | Implements code in isolated Docker containers, opens PR |
+| **Developer** | Containerized agent under a host supervisor | Implements code in isolated Docker containers with no GitHub access; the FSM supervisor validates, pushes and opens the PR |
 | **Acceptance Reviewer** | PO-spawned subagent | Reviews PRs against acceptance criteria, auto-merges clean PRs |
 | **QA Reviewer** | PO-spawned subagent | Code quality, test correctness (manual review path) |
 | **Security Engineer** | PO-spawned subagent | Vulnerability scanning, architecture compliance (manual review path) |
@@ -27,7 +27,7 @@ flowchart TD
     PO --> TEAM[Planning Team: PO + BA + Tech Lead]:::team
     TEAM -->|consensus reached| STORIES[Stories created as agent:ready]:::agent
     TEAM -->|can't converge| BLOCKED_PLAN[Escalate to PM]:::human
-    STORIES --> DEV[Dev agent implements & opens PR]:::container
+    STORIES --> DEV[Dev agent implements, supervisor validates & opens PR]:::container
     DEV --> AR[Acceptance Reviewer checks PR]:::agent
     AR -->|zero findings| MERGE[Auto-merged]:::agent
     AR -->|any findings, 1st review| FIX[Fix agent patches PR]:::container
@@ -74,14 +74,14 @@ Once consensus is reached, the PO creates all stories on GitHub as sub-issues wi
 
 ### 3. Development
 
-Each story is dispatched to an isolated **Docker container** running Claude Code. The dev agent:
+Each story is dispatched as an **FSM supervisor run** (`po-act.sh dispatch`). The supervisor is a host process; it starts Claude Code in an isolated **Docker container** that holds no GitHub credential. The dev agent:
 
-- Checks out a fresh branch from `develop`
-- Reads the story spec
+- Reads the story spec (from the private project item)
 - Writes tests first (TDD)
 - Implements using real components (no mocks)
-- Runs the full validation suite
-- Opens a PR against `develop`
+- Runs its own checks for feedback (advisory)
+
+The supervisor then snapshots the agent's workspace, validates it with `make test-agent-complete` in a separate agent-free container (sending failures back to the agent, up to a fix budget), rebases it onto current `develop`, and only then commits, pushes and opens the PR against `develop`. See [Agent Dispatch Reference](agent-dispatch.md).
 
 Agents run in parallel — multiple stories can be in flight simultaneously.
 
@@ -132,10 +132,10 @@ stateDiagram-v2
     Planning --> Ready: Team reaches consensus
     Planning --> Blocked: Can't converge (3 rounds)
     Ready --> InProgress: Agent dispatched
-    InProgress --> PR: Agent opens PR
+    InProgress --> PR: Supervisor opens validated PR
     PR --> Merged: Zero findings, auto-merged
     PR --> Fix: Any findings (1st review)
-    Fix --> PR: Fix agent pushes update
+    Fix --> PR: Fix run pushes validated update
     PR --> Blocked: Any findings (2nd review)
     Blocked --> InProgress: PM resolves, re-dispatched
     Merged --> [*]: Story closed

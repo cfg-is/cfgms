@@ -4,14 +4,31 @@ Operational reference for the `agent-dispatch.sh` lifecycle — environment
 variables, container lifecycle, credential flows, Tier 1 connectivity, and
 tenant isolation.
 
+**Current launch path.** Dev, fix-pr, resolve-conflict and branch agents are
+started only by `po-act.sh dispatch | dispatch --branch | dispatch-fix |
+resolve-conflict`, which run the FSM supervisor (`.claude/tooling/scripts/fsm/supervisor.py`).
+`agent-dispatch.sh launch` and `launch-generic` are removed: they print
+`LAUNCH_REMOVED:…` and exit 2. The removed `launch` was the only caller of the
+per-agent Tier 1 credential mint (`mint_agent_creds`), and `po-act.sh` does not
+mint one, so **dispatched agents currently run without a Tier 1 API key** and
+without `CFGMS_TIER1_URL`. The supervisor accepts `--agent-cred-dir <dir>` and
+`--tenant <path>` and, when given them, mounts `<dir>` read-only at
+`/run/cfgms/agent-cred` with `CFGMS_API_KEY_FILE=/run/cfgms/agent-cred/api.key`,
+`CFGMS_ADMIN_BUNDLE=` (empty) and `CFGMS_TENANT=<path>`; `po-act.sh` passes
+neither. The mint, revoke and smoke-test mechanics below describe the
+`agent-dispatch.sh` functions as they exist; wiring the mint into the FSM launch
+path is open work.
+
 ---
 
 ## Environment Variables
 
 ### Container-side (injected by the dispatcher)
 
-These variables are set in every agent container launched by
-`agent-dispatch.sh launch <N>`.
+These are the variables the removed `agent-dispatch.sh launch <N>` set. An FSM
+agent session sets `CFGMS_AGENT_MODE=true`, plus `CFGMS_API_KEY_FILE`,
+`CFGMS_TENANT` and an empty `CFGMS_ADMIN_BUNDLE` only when the supervisor is given
+`--agent-cred-dir` / `--tenant` (see above). It never sets `CFGMS_TIER1_URL`.
 
 | Variable | Example | Description |
 |---|---|---|
@@ -25,22 +42,26 @@ These variables are set in every agent container launched by
 
 | Variable | Purpose |
 |---|---|
-| `CFGMS_TIER1_URL` | Tier 1 controller base URL — passed through to the container. Required for `launch`, `smoke-test`, and `health-check`. |
+| `CFGMS_TIER1_URL` | Tier 1 controller base URL. Required for `smoke-test` and `health-check`. |
 | `CFGMS_TIER1_ADMIN_KEY` | Admin Bearer token for mint/revoke REST calls (preferred). |
 | `CFGMS_ADMIN_BUNDLE` | Path to admin mTLS bundle YAML — used if `CFGMS_TIER1_ADMIN_KEY` is unset. |
 
-One of `CFGMS_TIER1_ADMIN_KEY` or `CFGMS_ADMIN_BUNDLE` must be set for `launch`
-and cleanup operations that reach the controller. If neither is set, mint fails
+One of `CFGMS_TIER1_ADMIN_KEY` or `CFGMS_ADMIN_BUNDLE` must be set for a mint
+and for cleanup operations that reach the controller. If neither is set, mint fails
 with `CRED_MINT_FAILED:no auth available`.
 
 ---
 
 ## Lifecycle
 
-### Full issue-agent lifecycle
+### Issue-agent credential lifecycle
+
+The mint half of this diagram ran inside the removed `agent-dispatch.sh launch <N>`
+and has no caller on the current launch path (see the top of this page). The
+revoke half still runs in every cleanup path.
 
 ```
-agent-dispatch.sh launch <N>
+(removed) agent-dispatch.sh launch <N>
   │
   ├─ mint_agent_creds <N>
   │     POST /api/v1/tenants        → create agent-test/<N> sub-tenant (idempotent)
@@ -82,7 +103,7 @@ agent-dispatch.sh cleanup-issue <N>
 
 ### Expected output samples
 
-**launch:**
+**mint (removed `launch`):**
 ```
 CRED_MINTED:42:key-id-abc123
 LAUNCHED:42:d3f1a2b4c5e6...
@@ -123,7 +144,7 @@ are found it exits immediately with `SMOKE_FAILED:<N>:no_cred`.
 Priority order:
 
 1. `CFGMS_API_KEY_FILE` env var pointing to an existing file
-2. Per-agent tmpfs cred at `${AGENT_CRED_BASE}/<N>/api.key` (written by `launch`)
+2. Per-agent tmpfs cred at `${AGENT_CRED_BASE}/<N>/api.key` (written by `mint_agent_creds`, which no current launch path calls)
 3. `CFGMS_API_KEY` env var (key value directly)
 
 ### Output format
@@ -145,9 +166,10 @@ Each agent container receives a **short-lived, tenant-scoped, least-privilege
 API key**. The key never appears in `docker inspect` output and is never baked
 into an image layer.
 
-### Mint (launch)
+### Mint
 
-When `agent-dispatch.sh launch <N>` runs:
+When `mint_agent_creds <N>` runs (it ran inside the removed `launch`; no current
+launch path calls it):
 
 1. **Create sub-tenant** — `POST /api/v1/tenants` with
    `{"id": "<N>", "parent_id": "agent-test"}`. Returns HTTP 201 on creation
@@ -293,10 +315,10 @@ the cred dir still exists.
 
 | Output | Cause | Fix |
 |---|---|---|
-| `SMOKE_FAILED:<N>:no_cred` | No API key found for issue `<N>` | Run `launch <N>` first, or set `CFGMS_API_KEY` / `CFGMS_API_KEY_FILE` |
+| `SMOKE_FAILED:<N>:no_cred` | No API key found for issue `<N>` | Set `CFGMS_API_KEY` / `CFGMS_API_KEY_FILE` (no current launch path mints a per-agent key) |
 | `SMOKE_FAILED:<N>:no_tier1_url` | `CFGMS_TIER1_URL` not set | Export `CFGMS_TIER1_URL=https://<controller>:<port>` on the host |
 | `SMOKE_FAILED:<N>:connection refused` | Controller not reachable | Check `health-check` output for `WARN:tier1_unreachable`; verify the controller is up and the port is accessible from the dispatch host |
-| `SMOKE_FAILED:<N>:401` | Key was revoked or expired | Run `cleanup-issue <N>` then `launch <N>` to mint a fresh key |
+| `SMOKE_FAILED:<N>:401` | Key was revoked or expired | Run `cleanup-issue <N>`, then supply a fresh key through `CFGMS_API_KEY` / `CFGMS_API_KEY_FILE` |
 | `SMOKE_FAILED:<N>:403` | Key lacks permission for the tenant path | Verify `CFGMS_TENANT` matches `agent-test/<N>`; the key is bound to that tenant only |
 | `SMOKE_FAILED:<N>:certificate verify failed` | TLS trust mismatch | The controller's cert is not trusted by the agent image; rebuild the image with the correct CA or set `CFGMS_TLS_CA_FILE` |
 
