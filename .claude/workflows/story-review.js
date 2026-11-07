@@ -4,10 +4,10 @@
 // already drifted) copies of the same review team:
 //   - /story-complete (interactive):        4 lenses, testTarget=test-quality
 //   - FSM agent sessions (headless, advisory; prompt in
-//     .claude/tooling/devcontainer/fsm/prompts/common.md): includeAcceptanceChecker=false,
-//     and includeTests=false once that prompt passes it, because the FSM
-//     supervisor runs `make test-agent-complete` itself in an agent-free
-//     validator container and only that run counts (DESIGN.md §7, §8)
+//     .claude/tooling/devcontainer/fsm/prompts/common.md): includeAcceptanceChecker=false
+//     and includeTests=false, because the FSM supervisor runs
+//     `make test-agent-complete` itself in an agent-free validator container
+//     and only that run counts (DESIGN.md §7, §8)
 //
 // Flow: parallel reviewers -> collect blocking findings -> developer fix loop
 // (re-running ONLY the lenses that failed) -> structured verdict.

@@ -35,7 +35,7 @@ Headless dev, fix-pr, resolve-conflict and branch work runs under an FSM supervi
       ```bash
       ./.claude/tooling/scripts/po-act.sh dispatch status
       ```
-      Output columns: RUN_ID, STATUS, STATE, MODE, TARGET, CONTAINER, HEARTBEAT, SESSIONS, REASON (tab-separated), or `FSM_RUNS:none`. `STATUS` is `live`, `hung` (lock held, heartbeat stale), `starting`, `crashed` (resumable) or `done`. `po-act.sh dispatch status <RUN_ID>` prints one run as JSON.
+      Output columns: RUN_ID, STATUS, STATE, MODE, TARGET, CONTAINER, HEARTBEAT, SESSIONS, REASON (tab-separated), or `FSM_RUNS:none`. `STATUS` is `live`, `hung` (lock held, heartbeat stale), `starting`, `crashed` (resumable), `done`, or `abandoned` (state `ABANDONED`; REASON `crashed_ttl` when it stayed crashed past `CFGMS_FSM_CRASHED_TTL_HOURS`, 24 h by default, or the reason its work finished elsewhere: `item_done`, `story_closed`, `pr_merged`, `pr_closed`). `po-act.sh dispatch status <RUN_ID>` prints one run as JSON.
 
    d. **Active clone directories** (interactive, review and legacy clones only):
       ```bash
@@ -56,7 +56,7 @@ Headless dev, fix-pr, resolve-conflict and branch work runs under an FSM supervi
    - For interactive containers: show "Connect at https://claude.ai/code" and `docker exec -it <NAME> bash` for shell access
    - Suggest next actions based on state
 
-4. **If `$ARGUMENTS` is 'cleanup'** (no target): `cleanup-issue` and `cleanup-container` never remove a container that belongs to an unfinished FSM run; they print `SKIP:container:<name> belongs to an unfinished FSM run (po-act.sh dispatch status)` instead. Finished run dirs are removed by `agent-dispatch.sh cleanup-stale` (24 h after the run ends), not here. For each exited container:
+4. **If `$ARGUMENTS` is 'cleanup'** (no target): `cleanup-issue` and `cleanup-container` never remove a container that belongs to an unfinished FSM run; they print `SKIP:container:<name> belongs to an unfinished FSM run (po-act.sh dispatch status)` instead. Finished (`done` or `abandoned`) run dirs are removed by `agent-dispatch.sh cleanup-stale` once idle for 24 h, not here; `cleanup-stale` also abandons crashed runs whose work finished elsewhere. For each exited container:
    a. Read container name and mode from labels
    b. For issue-mode containers:
       - Read exit code: `./.claude/tooling/scripts/agent-dispatch.sh inspect-exit <NUM>`
@@ -98,7 +98,7 @@ Headless dev, fix-pr, resolve-conflict and branch work runs under an FSM supervi
    - If completed PR-fix agents with exit 0: "PR #X updated — re-review with `/pr-review X`"
    - If completed PR-fix agents with non-zero exit: "PR-fix agent for PR #X failed — check logs with `/isoagents cfg-agent-pr-fix-X`"
    - If running agents: "Agent still running (25 min). Check back with `/isoagents`"
-   - If a run is `crashed`: "Run <RUN_ID> for <TARGET> crashed in <STATE> — resume with `./.claude/tooling/scripts/po-act.sh dispatch resume <RUN_ID>`"
+   - If a run is `crashed`: "Run <RUN_ID> for <TARGET> crashed in <STATE> — resume with `./.claude/tooling/scripts/po-act.sh dispatch resume <RUN_ID>`" (resume re-checks the work first and abandons the run, `FSM_ABANDONED:…`, when it already finished elsewhere)
    - If a run is `hung`: "Run <RUN_ID> holds its lock but its heartbeat is <HEARTBEAT> old — leave it; the watcher reports it as `container_stalled … reason=heartbeat`"
    - If interactive containers running: "Interactive session on `<branch>` — connect at https://claude.ai/code or shell: `docker exec -it <name> bash`"
    - If nothing running: "No active agents. Use `/dispatch` to launch new ones."

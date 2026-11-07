@@ -69,7 +69,7 @@ For each issue number:
       ```bash
       ./.claude/tooling/scripts/po-act.sh dispatch <NUM>
       ```
-      The story must be `Ready` on the project board: otherwise `po-act.sh` prints `ERROR: story #<NUM> not found in project queue with Ready status` and exits 1. Before any side effect it applies the capacity gate, the image staleness gate, the Dependencies gate (any open `#NNN` in `## Dependencies` refuses with `DISPATCH_REFUSED:<NUM>:dependency_open …`, exit 3) and the unfinished-run gate (`DISPATCH_SKIPPED:<NUM>:run_in_flight:…` or `:run_resumable:<run>`, exit 0). It then acquires the `story-<item>` lease, claims the story (Ready → In Progress) and starts the supervisor run, which clones, works on and publishes `feature/story-<NUM>-agent` itself. No clone or container conflict check is needed: the unfinished-run gate and the lease replace it.
+      The story must be `Ready` on the project board: otherwise `po-act.sh` prints `ERROR: story #<NUM> not found in project queue with Ready status` and exits 1. Before any side effect it applies the capacity gate, the image staleness gate, the Dependencies gate (any open `#NNN` in `## Dependencies` refuses with `DISPATCH_REFUSED:<NUM>:dependency_open …`, exit 3) the unfinished-run gate (`DISPATCH_SKIPPED:<NUM>:run_in_flight:…` or `:run_resumable:<run>`, exit 0; `DISPATCH_REFUSED:<NUM>:run_index_unreadable`, exit 3) and the duplicate-PR gate (`DISPATCH_REFUSED:<NUM>:open_pr_exists:<PR>` when an open PR on any branch already references the story, `:open_pr_check_failed` when the lookup fails; exit 3). It then acquires the `story-<item>` lease, claims the story (Ready → In Progress) and starts the supervisor run, which clones, works on and publishes `feature/story-<NUM>-agent` itself. No clone or container conflict check is needed: the unfinished-run gate and the lease replace it.
 
       On success it prints `FSM_RUN:<run>`, `FSM_LAUNCHED:<NUM>:<container>` (or `FSM_LAUNCH_PENDING:<NUM>:<status>`) and `DISPATCHED:<NUM>`. Every other output and exit code is listed in `.claude/agents/po.md` → Helper scripts → Launch outputs; report the line to the user as printed.
 
@@ -90,7 +90,7 @@ For each branch name:
       ```bash
       ./.claude/tooling/scripts/po-act.sh dispatch --branch <BRANCH> [--issue <NUM>]
       ```
-      Include `--issue <NUM>` only if auto-detected from branch name. The run holds the `branch-<sanitized>` lease (`/` → `--`) and applies the capacity, image staleness and unfinished-run gates; there is no Dependencies gate and no board claim. Branch mode passes no project item, so the agent's `spec.md` is empty: it works from the branch's existing commits. On success it prints `DISPATCHED_BRANCH:<BRANCH>`; other outputs are listed in `.claude/agents/po.md` → Helper scripts → Launch outputs.
+      Include `--issue <NUM>` only if auto-detected from branch name. When the branch has an open PR whose author is not trusted at its current head, `po-act.sh` refuses with `DISPATCH_REFUSED:<BRANCH>:external_author (…)` (exit 3). The run holds the `branch-<sanitized>` lease (`/` → `--`) and applies the capacity, image staleness and unfinished-run gates; there is no Dependencies gate, no duplicate-PR gate and no board claim. Branch mode passes no project item, so the agent's `spec.md` is empty: it works from the branch's existing commits. On success it prints `DISPATCHED_BRANCH:<BRANCH>`; other outputs are listed in `.claude/agents/po.md` → Helper scripts → Launch outputs.
 
 ### 4c. PR-Fix Dispatch
 
@@ -109,7 +109,7 @@ For each `fix-pr <NUM>`:
       ```bash
       ./.claude/tooling/scripts/po-act.sh dispatch-fix <NUM>
       ```
-      `po-act.sh` checks author trust against the PR's current head, applies the capacity, image staleness and unfinished-run gates, resolves the story's project item from the PR (`DISPATCH_FIX_REFUSED:<NUM>:no_story_item`, exit 3, when there is none) and starts a `fix-pr` run under the `pr-<NUM>` lease. The run gives the agent the PR body, reviews, comments and failing checks, validates the result and pushes one new commit. On success it prints `DISPATCHED_FIX:<NUM>`; other outputs are listed in `.claude/agents/po.md` → Helper scripts → Launch outputs.
+      `po-act.sh` checks author trust against the PR's current head, applies the capacity, image staleness and unfinished-run gates, resolves the story's project item from the PR (`DISPATCH_FIX_REFUSED:<NUM>:no_story_item`, exit 3, when there is none), refuses when another open PR references the same story (`DISPATCH_FIX_REFUSED:<NUM>:open_pr_exists:<PR>`, exit 3) and starts a `fix-pr` run under the `pr-<NUM>` lease. The run gives the agent the PR body, reviews, comments and failing checks, validates the result and pushes one new commit. On success it prints `DISPATCHED_FIX:<NUM>`; other outputs are listed in `.claude/agents/po.md` → Helper scripts → Launch outputs.
 
 ### 4d. Interactive Dispatch
 
@@ -205,7 +205,8 @@ For each `acceptance-review <PR_NUM>`:
 - **Docker not running**: Tell user to start Docker and retry
 - **Image not found**: Tell user to run `/agent-setup`
 - **Issue/PR fetch fails**: Skip that target, continue with others
-- **Unfinished run (`run_in_flight`) or crashed run (`run_resumable:<run>`)**: Skip with warning; for a crashed run suggest `./.claude/tooling/scripts/po-act.sh dispatch resume <run>`
+- **Unfinished run (`run_in_flight`) or crashed run (`run_resumable:<run>`)**: Skip with warning; for a crashed run suggest `./.claude/tooling/scripts/po-act.sh dispatch resume <run>` (it abandons the run with `FSM_ABANDONED:…` instead when the work already finished)
+- **Duplicate PR (`open_pr_exists:<PR>`)**: Skip with warning naming the PR; work that PR instead (`fix-pr <PR>` for a WIP draft)
 - **Stale image (`image_stale`)**: Tell user to run `/agent-setup rebuild`
 - **Clone/container conflict** (interactive mode): Skip with warning, suggest `/isoagents` to check existing state
 - **All targets skipped**: Print summary of why each was skipped

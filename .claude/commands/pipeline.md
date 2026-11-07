@@ -89,9 +89,9 @@ Each event justifies a **bundle** of §4 steps, not a single step. The bundles a
 | `board_up status=Fix count=<n>` | Step 5 fix cycle |
 | `board_up status=Failed count=<n>` | Step 1.5 agent cleanup, Step 6a stalled-dispatch recovery |
 | `container_exited name=<c>` | Step 1.5 agent cleanup, Step 6 dispatch |
-| `container_exited name=<c> run=<id> state=<STATE>` | An FSM run finished: `<STATE>` is its terminal state (`REPORT`, `NO_OP`, `REFUSED`, `FAILED`), or `gone` when its run dir disappeared while the run was open. Same bundle as `container_exited`; for `FAILED`, also the Step 4 pre-step (`resume_failed_session` on the WIP draft the run left). |
+| `container_exited name=<c> run=<id> state=<STATE>` | An FSM run finished: `<STATE>` is its terminal state (`REPORT`, `NO_OP`, `REFUSED`, `FAILED`), `ABANDONED` (abandoned because its work finished elsewhere, or crashed past `CFGMS_FSM_CRASHED_TTL_HOURS`), or `gone` when its run dir disappeared while the run was open. Same bundle as `container_exited`; for `FAILED`, also the Step 4 pre-step (`resume_failed_session` on the WIP draft the run left). |
 | `container_stalled name=<c> age_min=<m>` | Step 6a stalled-dispatch recovery for that container |
-| `container_stalled name=<c> age_min=<m> run=<id> reason=heartbeat` | An FSM run's heartbeat went stale (hung) or its supervisor is gone without finishing (crashed). Step 6a: resume the run if the preflight lists it under `fsm_runs.resumable` with `action: resume`; a hung run (still in `fsm_runs.in_flight`) is left alone. Never re-dispatch its story. |
+| `container_stalled name=<c> age_min=<m> run=<id> reason=heartbeat` | An FSM run's heartbeat went stale (hung) or its supervisor is gone without finishing (crashed). Step 6a: resume the run if the preflight's `fsm_recommendations` lists it with `action: resume`; a hung run (still in `fsm_runs.in_flight`) is left alone. Never re-dispatch its story. |
 | `stop reason=drained cycles=<n>` | Report to the founder. Do **not** re-arm. |
 
 Every bundle runs under the §4.-1 distributed leases exactly as a full cycle does, and the host resource-admission gate still governs every launch. Dispatch remains blocked whenever the preflight reports `code_health.ok == false`.
