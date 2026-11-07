@@ -3,7 +3,11 @@
 // One implementation for BOTH callers, replacing two hand-maintained (and
 // already drifted) copies of the same review team:
 //   - /story-complete (interactive):        4 lenses, testTarget=test-quality
-//   - .claude/tooling/devcontainer/entrypoint.sh (headless -p): 3 lenses, testTarget=test-agent-complete
+//   - FSM agent sessions (headless, advisory; prompt in
+//     .claude/tooling/devcontainer/fsm/prompts/common.md): includeAcceptanceChecker=false,
+//     and includeTests=false once that prompt passes it, because the FSM
+//     supervisor runs `make test-agent-complete` itself in an agent-free
+//     validator container and only that run counts (DESIGN.md §7, §8)
 //
 // Flow: parallel reviewers -> collect blocking findings -> developer fix loop
 // (re-running ONLY the lenses that failed) -> structured verdict.
@@ -20,6 +24,12 @@
 //                                       (default 'test-quality'; container passes 'test-agent-complete')
 //   includeAcceptanceChecker: bool   — 4th lens (default true; container passes false —
 //                                       AC is verified post-PR by the cron acceptance-reviewer)
+//   includeTests: bool               — the `tests` lens that runs `make <testTarget>`
+//                                       (default true). false drops it, and the developer
+//                                       fix prompt asks for targeted tests of the changed
+//                                       packages instead of the full target. For callers
+//                                       whose full validation runs elsewhere (the FSM
+//                                       supervisor's validator).
 //   maxRounds: int                   — fix-loop cap (default 3)
 //   storyRef: string                 — story/issue reference for the acceptance checker
 //   injectFailure: bool              — SELF-TEST ONLY (Issue #2459): replaces all review
@@ -42,7 +52,7 @@
 
 export const meta = {
   name: 'story-review',
-  description: 'Shared adversarial review-fix-verify gate: parallel reviewers -> collect -> developer fix loop -> structured verdict. Serves /story-complete and entrypoint.sh.',
+  description: 'Shared adversarial review-fix-verify gate: parallel reviewers -> collect -> developer fix loop -> structured verdict. Serves /story-complete and the FSM agent sessions.',
   phases: [{ title: 'Review' }, { title: 'Fix' }],
 }
 
@@ -59,6 +69,7 @@ const files = cfg.changedFiles || []
 const filesList = files.length ? files.map(f => `- ${f}`).join('\n') : '(discover changed files via `git diff --name-only origin/develop...HEAD` and `git status`)'
 const testTarget = cfg.testTarget || 'test-quality'
 const includeAcceptanceChecker = cfg.includeAcceptanceChecker !== false
+const includeTests = cfg.includeTests !== false
 const maxRounds = cfg.maxRounds || 3
 const scopeNote = `Changed files under review:\n${filesList}\n\nReview ONLY these changes; ignore unrelated pre-existing code.`
 
@@ -103,7 +114,7 @@ const REVIEWERS = [
       { label: 'review:code', phase: 'Review', schema: VERDICT_SCHEMA, agentType: 'qa-code-reviewer' }
     ),
   },
-  {
+  includeTests && {
     key: 'tests',
     thunk: () => agent(
       `Run \`make ${testTarget}\` (tests, lint, builds — no security scans). ${testTarget === 'test-agent-complete' ? 'This is the container target (no Docker).' : ''} Report pass/fail: if it exits non-zero, return passed=false with a blocking finding naming the failing test/package; if it exits zero, return passed=true. Do NOT modify files.`,
@@ -216,7 +227,10 @@ if [ "$MATCH" = false ]; then echo "RESIDUAL:"; cat "$SNAP/status-residual.txt";
 
 function developerPrompt(findings) {
   const list = findings.map(f => `- [${f.reviewer}] ${f.file}${f.line ? ':' + f.line : ''} — ${f.detail}`).join('\n')
-  return `Fix the ROOT CAUSE of each blocking finding below. NO mocks, NO t.Skip, NO hacky workarounds, NO helper-function-instead-of-the-named-fix (when an AC names existing code that must change, change it). Only touch the files under review and their tests.\n\nBlocking findings:\n${list}\n\nAfter fixing, make sure \`make ${testTarget}\` passes.`
+  const verify = includeTests
+    ? `After fixing, make sure \`make ${testTarget}\` passes.`
+    : 'After fixing, run the tests of the packages you changed (for example `go test ./<pkg>/...`). The full validation target runs separately, outside this workflow.'
+  return `Fix the ROOT CAUSE of each blocking finding below. NO mocks, NO t.Skip, NO hacky workarounds, NO helper-function-instead-of-the-named-fix (when an AC names existing code that must change, change it). Only touch the files under review and their tests.\n\nBlocking findings:\n${list}\n\n${verify}`
 }
 
 phase('Review')

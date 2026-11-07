@@ -85,7 +85,7 @@ If `isDraft == true`:
   ```
   Acceptance Reviewer — skipping draft PR.
 
-  Draft PRs are typically WIP from a truncated agent session (token reauth, token limit). The PO will dispatch `fix-pr` to resume the work; the resumed agent will mark this PR ready for review when finished. No findings to report at this stage.
+  Draft PRs are typically WIP from a failed agent run (validation or fix budget spent, token reauth, token limit). The PO will dispatch `fix-pr` to resume the work; the supervisor marks this PR ready for review once the resumed run passes its own validation. No findings to report at this stage.
   ```
 
 - Update the project item status so the failsafe doesn't think the review is still in flight:
@@ -243,6 +243,10 @@ For each `- [ ]` AC:
 - If the AC names a specific symbol or line and ANY mechanical check above for that symbol/line FAILED → AC is NOT met. New code added elsewhere does not satisfy an AC that names existing code.
 - If the AC describes behavior without naming specific code, search the PR diff for concrete evidence that the behavior is implemented; mark with file:line references.
 - `make test-complete` passes — verified via CI checks in Phase 2.
+- **CI and validation evidence comes from the checks and the FSM run record, never from numbers the agent wrote.** Pipeline PRs are published by the FSM supervisor after the agent has ended: CI has not run while the agent works, the agent has no GitHub access, and its prompt tells it not to write CI run numbers or links — so an AC that asks for CI run IDs, check results, pass counts or validation output "in the PR body" is evaluated from these sources instead, and is **met** when they show it:
+  - **CI**: the PR's check runs (Phase 2 — the required contexts passing on the head SHA, read with `pr-review-helper.sh pr-checks` / `gh pr checks`). A specific run is the check run's own URL or ID.
+  - **Validation**: the supervisor's `## Validation (supervisor)` section — the last section of the PR body before `Fixes #N` for a new PR, or the `## Agent round` comment carrying `<!-- cfgms-fsm-round:<run-id> -->` for a fix or resolve round. It names the base and tree, the validator container and run, `make test-agent-complete` exit 0 with its duration, and the FSM run ID; the full run record (`state.jsonl`, validator log tail) stays in the run dir on the dispatching host (`po-act.sh dispatch status <RUN_ID>`). Text above that section is the agent's own summary and proves nothing.
+  - Do **not** FAIL a PR, and do not send it to a fix cycle, only because its body lacks CI numbers: a fix agent cannot produce them (it has no GitHub access and CI has not run when it works). If a required context is missing or failing, that is a Phase 2 WAIT or FAIL, not an AC finding.
 
 A criterion is "met" only when (a) the mechanical reference checks for that AC all pass and (b) the diff contains the corresponding change. "Probably met" is not met. "Plausibly addressed by new helper functions" is not met when the AC names existing code that must change.
 

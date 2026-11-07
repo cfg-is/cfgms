@@ -9,9 +9,11 @@ parameters:
 
 # Dispatch Command
 
-Launch isolated agent containers to implement GitHub issues, continue work on branches, fix PR review comments, or start interactive Claude sessions. Each agent runs in a Docker container with its own git clone.
+Launch isolated agent work to implement GitHub issues, continue work on branches, fix PR review comments, or start interactive Claude sessions.
 
-**Non-blocking**: Headless modes use `docker run -d` and return instantly. Interactive mode prints a command for the user to run. Use `/isoagents` to check progress.
+Headless issue, branch and PR-fix work runs under the FSM supervisor (`.claude/tooling/scripts/fsm/`), started only by `po-act.sh`. The supervisor runs on the host, owns the lease, workspace, validation, commit, push, PR and board updates, and starts agent containers that only edit files and hold no GitHub credential. Interactive and acceptance-review containers keep their own launch subcommands.
+
+**Non-blocking**: `po-act.sh` starts the supervisor detached and returns once the run has launched its first agent (or is still preparing past the wait window, `FSM_LAUNCH_PENDING`). Interactive mode prints a command for the user to run. Use `/isoagents` to check progress.
 
 ## Execution Flow
 
@@ -32,6 +34,7 @@ Launch isolated agent containers to implement GitHub issues, continue work on br
    - Verify Docker is running: `docker info >/dev/null 2>&1`
    - Verify agent image exists: `docker image inspect cfg-agent:latest >/dev/null 2>&1`
    - If image missing, tell user to run `/agent-setup` first
+   - The headless launch path refuses a stale image: when `cfg-agent:latest`'s `cfgms.build_inputs_hash` label is not this checkout's `.claude/tooling/devcontainer` tree, `po-act.sh` prints `IMAGE_STALE:<image>:<checkout>` and `…_REFUSED:<target>:image_stale` (exit 3) and never rebuilds the image itself. Tell the user to run `/agent-setup rebuild`.
    - **Check credential validity**:
      ```bash
      ./.claude/tooling/scripts/agent-dispatch.sh check-creds
@@ -62,24 +65,13 @@ For each issue number:
       - Check for reference implementation mention — warn if absent
       - Print quality summary for the issue
 
-   c. **Check for conflicts** (uses helper to avoid approval prompts):
+   c. **Start the run** (skip in dry-run; in dry-run, show `./.claude/tooling/scripts/po-act.sh dispatch status` instead):
       ```bash
-      ./.claude/tooling/scripts/agent-dispatch.sh check-conflicts <NUM1> [NUM2...]
+      ./.claude/tooling/scripts/po-act.sh dispatch <NUM>
       ```
-      Output lines prefixed `CONTAINER_EXISTS:<NUM>:` or `CLONE_EXISTS:<NUM>:` indicate conflicts — skip those issues with a warning.
+      The story must be `Ready` on the project board: otherwise `po-act.sh` prints `ERROR: story #<NUM> not found in project queue with Ready status` and exits 1. Before any side effect it applies the capacity gate, the image staleness gate, the Dependencies gate (any open `#NNN` in `## Dependencies` refuses with `DISPATCH_REFUSED:<NUM>:dependency_open …`, exit 3) and the unfinished-run gate (`DISPATCH_SKIPPED:<NUM>:run_in_flight:…` or `:run_resumable:<run>`, exit 0). It then acquires the `story-<item>` lease, claims the story (Ready → In Progress) and starts the supervisor run, which clones, works on and publishes `feature/story-<NUM>-agent` itself. No clone or container conflict check is needed: the unfinished-run gate and the lease replace it.
 
-   d. **Create local clone** (skip in dry-run):
-      ```bash
-      ./.claude/tooling/scripts/agent-dispatch.sh create-clone <NUM>
-      ```
-
-   e. **Launch container** (skip in dry-run):
-      ```bash
-      ./.claude/tooling/scripts/agent-dispatch.sh launch <NUM>
-      ```
-
-   f. **Update project queue status** (skip in dry-run):
-      The launch step (`po-act.sh dispatch`) handles the Ready → In Progress status transition via `project-queue.sh update-field`. No label update needed.
+      On success it prints `FSM_RUN:<run>`, `FSM_LAUNCHED:<NUM>:<container>` (or `FSM_LAUNCH_PENDING:<NUM>:<status>`) and `DISPATCHED:<NUM>`. Every other output and exit code is listed in `.claude/agents/po.md` → Helper scripts → Launch outputs; report the line to the user as printed.
 
 ### 4b. Branch Dispatch
 
@@ -89,29 +81,16 @@ For each branch name:
       ```bash
       git ls-remote --heads origin <BRANCH>
       ```
-      If it exists, the agent will check it out. If not, a new branch will be created from develop.
+      If it exists, the run starts from its head (when the head is not already contained in develop). If not, the run starts from develop and publishes a new branch.
 
    b. **Auto-detect issue from branch pattern** `story-(\d+)`:
       If found, fetch the issue for quality context (warnings only).
 
-   c. **Check for conflicts**:
+   c. **Start the run** (skip in dry-run):
       ```bash
-      ./.claude/tooling/scripts/agent-dispatch.sh check-conflicts --branch <BRANCH>
+      ./.claude/tooling/scripts/po-act.sh dispatch --branch <BRANCH> [--issue <NUM>]
       ```
-      Skip if `CONTAINER_EXISTS` or `CLONE_EXISTS` in output.
-
-   d. **Create local clone** (skip in dry-run):
-      ```bash
-      ./.claude/tooling/scripts/agent-dispatch.sh create-clone-branch <BRANCH>
-      ```
-      Output: `CLONE_OK:<dir>:<branch>` (existing) or `CLONE_NEW:<dir>:<branch>` (new branch created).
-
-   e. **Launch container** (skip in dry-run):
-      Derive sanitized name from branch (`/` → `--`).
-      ```bash
-      ./.claude/tooling/scripts/agent-dispatch.sh launch-generic cfg-agent-branch-<sanitized> <clone_dir> --branch <BRANCH> [--issue <NUM>]
-      ```
-      Include `--issue <NUM>` only if auto-detected from branch name.
+      Include `--issue <NUM>` only if auto-detected from branch name. The run holds the `branch-<sanitized>` lease (`/` → `--`) and applies the capacity, image staleness and unfinished-run gates; there is no Dependencies gate and no board claim. Branch mode passes no project item, so the agent's `spec.md` is empty: it works from the branch's existing commits. On success it prints `DISPATCHED_BRANCH:<BRANCH>`; other outputs are listed in `.claude/agents/po.md` → Helper scripts → Launch outputs.
 
 ### 4c. PR-Fix Dispatch
 
@@ -126,26 +105,16 @@ For each `fix-pr <NUM>`:
    b. **Extract branch and issue from PR**:
       Branch comes from `headRefName`. Issue from PR body (`Fixes #NNN`) or branch pattern `story-(\d+)`.
 
-   c. **Check for conflicts**:
+   c. **Start the run** (skip in dry-run):
       ```bash
-      ./.claude/tooling/scripts/agent-dispatch.sh check-conflicts --pr <NUM>
+      ./.claude/tooling/scripts/po-act.sh dispatch-fix <NUM>
       ```
-      Skip if conflict found.
-
-   d. **Create local clone** (skip in dry-run):
-      ```bash
-      ./.claude/tooling/scripts/agent-dispatch.sh create-clone-pr <NUM>
-      ```
-
-   e. **Launch container** (skip in dry-run):
-      ```bash
-      ./.claude/tooling/scripts/agent-dispatch.sh launch-generic cfg-agent-pr-fix-<NUM> <clone_dir> --fix-pr <NUM>
-      ```
+      `po-act.sh` checks author trust against the PR's current head, applies the capacity, image staleness and unfinished-run gates, resolves the story's project item from the PR (`DISPATCH_FIX_REFUSED:<NUM>:no_story_item`, exit 3, when there is none) and starts a `fix-pr` run under the `pr-<NUM>` lease. The run gives the agent the PR body, reviews, comments and failing checks, validates the result and pushes one new commit. On success it prints `DISPATCHED_FIX:<NUM>`; other outputs are listed in `.claude/agents/po.md` → Helper scripts → Launch outputs.
 
 ### 4d. Interactive Dispatch
 
 Interactive mode accepts three target types: branch name, issue number, or PR reference.
-The target determines how the clone is created; the launch is always the same (`claude remote-control`).
+The target determines how the clone is created; the launch is always the same (`claude remote-control`). Interactive mode is the only `/dispatch` mode that still uses `check-conflicts` and the `create-clone*` helpers.
 
 **Determine branch and clone directory based on target type:**
 
@@ -215,7 +184,9 @@ For each `acceptance-review <PR_NUM>`:
    ```bash
    ./.claude/tooling/scripts/agent-dispatch.sh list-running
    ./.claude/tooling/scripts/agent-dispatch.sh list-exited
+   ./.claude/tooling/scripts/po-act.sh dispatch status
    ```
+   `dispatch status` lists the FSM runs (`RUN_ID STATUS STATE MODE TARGET CONTAINER HEARTBEAT SESSIONS REASON`). A run has no container while it prepares, snapshots, syncs or publishes (and only a `cfg-validate-<N>` container while it validates), so show its run row even when no agent container is listed.
 
    Print a single summary table showing ALL agents:
 
@@ -234,5 +205,7 @@ For each `acceptance-review <PR_NUM>`:
 - **Docker not running**: Tell user to start Docker and retry
 - **Image not found**: Tell user to run `/agent-setup`
 - **Issue/PR fetch fails**: Skip that target, continue with others
-- **Clone/container conflict**: Skip with warning, suggest `/isoagents` to check existing state
+- **Unfinished run (`run_in_flight`) or crashed run (`run_resumable:<run>`)**: Skip with warning; for a crashed run suggest `./.claude/tooling/scripts/po-act.sh dispatch resume <run>`
+- **Stale image (`image_stale`)**: Tell user to run `/agent-setup rebuild`
+- **Clone/container conflict** (interactive mode): Skip with warning, suggest `/isoagents` to check existing state
 - **All targets skipped**: Print summary of why each was skipped

@@ -68,7 +68,7 @@ The watcher refuses to start if another instance is already running on this host
 
 | Tier | Interval | Probes |
 |------|----------|--------|
-| fast | 60s (`PIPELINE_WATCH_FAST`) | `git ls-remote` for the develop SHA, `docker ps` for `cfg-agent-*` names and age. Local only, measured at ~0.5s. |
+| fast | 60s (`PIPELINE_WATCH_FAST`) | `git ls-remote` for the develop SHA, `docker ps` for `cfg-agent-*` names and age, and the FSM run index (`runindex.py rows`) for run state and heartbeat age. Local only; the `git` and `docker` probes were measured at ~0.5s, the run-index probe has not been timed. |
 | slow | 300s (`PIPELINE_WATCH_SLOW`) | `project-queue.sh list-by-status` for Ready/Fix/Failed, `gh pr list` check rollups. `list-by-status` costs ~15s per status, which is why it is not on the fast tier. |
 | full | 7200s (`PIPELINE_WATCH_FULL`) | Emits `full_cycle` unconditionally — the safety net for anything no event can observe. |
 
@@ -89,7 +89,9 @@ Each event justifies a **bundle** of §4 steps, not a single step. The bundles a
 | `board_up status=Fix count=<n>` | Step 5 fix cycle |
 | `board_up status=Failed count=<n>` | Step 1.5 agent cleanup, Step 6a stalled-dispatch recovery |
 | `container_exited name=<c>` | Step 1.5 agent cleanup, Step 6 dispatch |
+| `container_exited name=<c> run=<id> state=<STATE>` | An FSM run finished: `<STATE>` is its terminal state (`REPORT`, `NO_OP`, `REFUSED`, `FAILED`), or `gone` when its run dir disappeared while the run was open. Same bundle as `container_exited`; for `FAILED`, also the Step 4 pre-step (`resume_failed_session` on the WIP draft the run left). |
 | `container_stalled name=<c> age_min=<m>` | Step 6a stalled-dispatch recovery for that container |
+| `container_stalled name=<c> age_min=<m> run=<id> reason=heartbeat` | An FSM run's heartbeat went stale (hung) or its supervisor is gone without finishing (crashed). Step 6a: resume the run if the preflight lists it under `fsm_runs.resumable` with `action: resume`; a hung run (still in `fsm_runs.in_flight`) is left alone. Never re-dispatch its story. |
 | `stop reason=drained cycles=<n>` | Report to the founder. Do **not** re-arm. |
 
 Every bundle runs under the §4.-1 distributed leases exactly as a full cycle does, and the host resource-admission gate still governs every launch. Dispatch remains blocked whenever the preflight reports `code_health.ok == false`.
