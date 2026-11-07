@@ -1,6 +1,6 @@
 # Duplication Gate
 
-`make duplication-check` measures clone-duplicated lines of the production Go population in the working tree and in a fresh materialisation of the merge-base with `develop`, applies three no-worsening rules and prints any findings. `make duplication-report` writes the same measurement as a versioned metric file without gating. `make duplication-replay` replays the rules over the last `DUPLICATION_REPLAY_N` (default 30) merged develop commits at `DUPLICATION_THRESHOLD` and prints per-PR outcomes and totals; set `DUPLICATION_BASELINE` to a ref to also print its baseline. Results are recorded in [duplication-gate-calibration.md](duplication-gate-calibration.md). The gate is not yet part of `make test-commit` or CI.
+`make duplication-check` measures clone-duplicated lines of the production Go population in the working tree and in a fresh materialisation of the merge-base with `develop`, applies three no-worsening rules and prints any findings. `make duplication-report` writes the same measurement as a versioned metric file without gating. `make duplication-replay` replays the rules over the last `DUPLICATION_REPLAY_N` (default 30) merged develop commits at `DUPLICATION_THRESHOLD` and prints per-PR outcomes and totals; set `DUPLICATION_BASELINE` to a ref to also print its baseline. Results are recorded in [duplication-gate-calibration.md](duplication-gate-calibration.md). The gate runs as a prerequisite of `make test-commit` and as the `duplication-gate` CI job; see [Where the gate runs](#where-the-gate-runs).
 
 ## What is measured
 
