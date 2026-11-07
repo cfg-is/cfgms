@@ -2706,6 +2706,96 @@ test_tier1_bootstrap() {
     rm -f "$out_file"
 }
 
+# Regression test (Issue #5972): the merge queue's Linux native build is one job
+# that runs `make build` plus the api and controller-core groups. The
+# heavy-providers and rest groups already run on every pull request
+# (test-suite.yml), so a second shard rerunning them in the queue is cost with
+# no coverage. `build-gate` must still `needs:` both the native build and the
+# Postgres job and require both to be `success`, or a failure in either would
+# stop failing the required `Build Gate` context. The workflow path is an
+# optional argument so the test can be pointed at a fixture.
+test_queue_native_build_runs_only_shard_1_content() {
+    log_test "Testing queue native build runs only the build + api + controller-core content (Issue #5972)..."
+
+    local workflow="${1:-.github/workflows/cross-platform-build.yml}"
+    if [[ ! -f "$workflow" ]]; then
+        log_fail "queue native build: $workflow not found"
+        return
+    fi
+
+    # job_block <job-id> prints the lines of one top-level job under `jobs:`
+    # (two-space indented key) up to the next job key or end of file.
+    job_block() {
+        awk -v job="$1" '
+            $0 ~ "^  " job ":[[:space:]]*$" { injob=1; next }
+            injob && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { exit }
+            injob { print }
+        ' "$workflow"
+    }
+
+    local native gate
+    native="$(job_block native-builds)"
+    gate="$(job_block build-gate)"
+    if [[ -z "$native" ]]; then
+        log_fail "queue native build: no native-builds job found in $workflow"
+        return
+    fi
+    if [[ -z "$gate" ]]; then
+        log_fail "queue native build: no build-gate job found in $workflow"
+        return
+    fi
+
+    # Comments are dropped so explanatory text naming a removed group cannot
+    # satisfy or trip an assertion.
+    local native_code
+    native_code="$(echo "$native" | sed -E 's/^[[:space:]]*#.*$//')"
+
+    # (a) neither group the PR legs already cover runs in the queue job.
+    local group ok=true
+    for group in test-go-group-heavy-providers test-go-group-rest; do
+        if echo "$native_code" | grep -qE "(^|[^A-Za-z0-9-])${group}([^A-Za-z0-9-]|\$)"; then
+            log_fail "queue native-builds runs ${group}, which every pull request already runs (test-suite.yml)"
+            ok=false
+        fi
+    done
+
+    # (b) the combined-revision check is still there, and the job is not
+    # sharded (a matrix could reintroduce a second shard).
+    local target
+    for target in "make build" "test-framework-api-sharded" "test-go-group-controller-core"; do
+        if ! echo "$native_code" | grep -qE "(^|[^A-Za-z0-9-])${target}([^A-Za-z0-9-]|\$)"; then
+            log_fail "queue native-builds no longer runs '${target}'"
+            ok=false
+        fi
+    done
+    if echo "$native_code" | grep -qE '^[[:space:]]+(matrix|shard):'; then
+        log_fail "queue native-builds is sharded again (matrix/shard key present)"
+        ok=false
+    fi
+
+    # (c) build-gate needs both jobs and requires both to be success.
+    local needs_line
+    needs_line="$(echo "$gate" | grep -E '^    needs:' || true)"
+    if [[ -z "$needs_line" ]] \
+        || ! echo "$needs_line" | grep -qE '(\[|[ ,])native-builds([],]|$)' \
+        || ! echo "$needs_line" | grep -qE '(\[|[ ,])postgres-integration([],]|$)'; then
+        log_fail "build-gate must 'needs:' both native-builds and postgres-integration (got: ${needs_line:-none})"
+        ok=false
+    fi
+    local gate_code
+    gate_code="$(echo "$gate" | sed -E 's/^[[:space:]]*#.*$//')"
+    if ! echo "$gate_code" | grep -qE 'NATIVE_RESULT: \$\{\{ needs\.native-builds\.result \}\}' \
+        || ! echo "$gate_code" | grep -qE 'POSTGRES_RESULT: \$\{\{ needs\.postgres-integration\.result \}\}' \
+        || ! echo "$gate_code" | grep -qF '[[ "$NATIVE_RESULT" == "success" && "$POSTGRES_RESULT" == "success" ]]'; then
+        log_fail "build-gate's result check must require both native-builds and postgres-integration to be success"
+        ok=false
+    fi
+
+    if [[ "$ok" == true ]]; then
+        log_pass "queue native-builds: build + api + controller-core only, one job; build-gate needs and requires both native-builds and postgres-integration"
+    fi
+}
+
 # Regression test (Issue #4113): asserts the script-test suite itself never
 # mutates tracked files. Compares the git status snapshot taken before any
 # test ran (GIT_STATUS_BEFORE_TESTS, captured just above the "Main execution"
@@ -2788,6 +2878,7 @@ DISPATCH_TABLE=(
     "test_api_shard_count_rejects_non_integer:core"
     "test_macos_groups_cover_exactly_shipped_packages:core"
     "test_windows_steward_groups_cover_exactly_steward_and_cmd:core"
+    "test_queue_native_build_runs_only_shard_1_content:core"
     "test_no_tracked_file_mutation:core"
 )
 
