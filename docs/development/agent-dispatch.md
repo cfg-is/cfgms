@@ -221,7 +221,7 @@ git push origin feature/story-N-agent
 ### Run ended with no PR
 
 **Cause**: The run was refused at PREPARE, ended in `FAILED` with no unsaved work, or crashed.
-**Fix**: `./.claude/tooling/scripts/po-act.sh dispatch status` — find the run, then `po-act.sh dispatch status <RUN_ID>` for its state and reason. The supervisor's log is `~/.cache/cfgms-fsm-runs/<RUN_ID>/logs/supervisor.log`, and the launcher's log under `~/.cache/cfgms-fsm-runs/launch-logs/`. A `crashed` run is resumed with `po-act.sh dispatch resume <RUN_ID>`, not re-dispatched.
+**Fix**: `./.claude/tooling/scripts/po-act.sh dispatch status` — find the run, then `po-act.sh dispatch status <RUN_ID>` for its state and reason. The supervisor's log is `~/.cache/cfgms-fsm-runs/<RUN_ID>/logs/supervisor.log`, and the launcher's log under `~/.cache/cfgms-fsm-runs/launch-logs/`. A `crashed` run is resumed with `po-act.sh dispatch resume <RUN_ID>`, not re-dispatched; the resume re-checks the work first and abandons the run (`FSM_ABANDONED:<RUN_ID>:<reason>:lease=<…>`) when its item is Done, its story closed or its PR merged or closed. A run left crashed longer than `CFGMS_FSM_CRASHED_TTL_HOURS` (24 h) shows as `abandoned` (`crashed_ttl`); a story still In Progress after that is re-dispatched with `po-act.sh dispatch --recover <STORY>`.
 
 ## Relationship to Interactive Workflow
 

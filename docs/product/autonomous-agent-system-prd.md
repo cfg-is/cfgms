@@ -30,7 +30,7 @@ The system mirrors a standard product delivery org. Each role is either a Claude
 | **Product Owner** | Skill — `/po` (interactive) + Scheduled remote agent (cron) | Planning Team (BA + Tech Lead), QA subagent; `/dispatch` for dev agents | GitHub epics, pipeline orchestration, session dashboard |
 | **Business Analyst** | Planning Team member | `SendMessage` (proposals to PO/Tech Lead) | Story proposals for team review; GitHub writes handled by PO after consensus |
 | **Tech Lead** | Planning Team member | `SendMessage` (verdicts to PO/BA) | Story validation verdicts; challenges BA on feasibility and scope |
-| **Developer** | Container Agent | `make test-complete`, `gh pr create` | PR against develop (existing infrastructure, unchanged) |
+| **Developer** | Container Agent (no GitHub access) under the FSM supervisor | Edits files in a scratch workspace; the supervisor validates with `make test-agent-complete`, then commits, pushes and opens the PR | PR against develop, published by the supervisor |
 | **QA** | Subagent | `gh pr review`, `gh issue edit` | Structured verdict comment on PR; `pipeline:review` or `pipeline:fix` label |
 
 > **Planning Team model:** During epic decomposition, the PO spawns BA and Tech Lead as named background agents in the session's implicit team. All three collaborate adversarially via `SendMessage`, communicating **directly with each other**: BA proposes stories, Tech Lead challenges and validates directly with the BA, and the PO participates as a full member — interjecting on product questions and owning the final synthesis. Everyone can challenge everyone with evidence. Stories are only created on GitHub after all three converge; the team dissolves when its agents shut down.
@@ -202,7 +202,7 @@ The standalone Tech Lead pass (PO agent §4.1 Step 2) handles `pipeline:draft` s
 
 - PO cron cycle finds PRs with `pipeline:fix` label
 - PO dispatches a fix agent container against the PR branch
-- Fix agent pushes changes
+- Fix agent edits the branch's files; the supervisor validates the result and pushes it
 - QA subagent re-reviews the PR
 - On pass: removes `pipeline:fix`, applies `pipeline:review`, assigns to founder
 - On second fail: removes `pipeline:fix`, applies `pipeline:blocked`, assigns to founder with specific failure detail. Agent container and clone are cleaned up.
