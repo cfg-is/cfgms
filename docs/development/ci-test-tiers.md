@@ -108,7 +108,7 @@ Queries: `gh run list --workflow cross-platform-build.yml --event merge_group --
 |---|---|---|---|---|---|---|
 | `cross-compile-check` (`Cross-Platform Compilation Check`, runs `make build-cross-validate` — Linux/macOS/Windows AMD64+ARM64 cross-compile, no native execution) | **PR real** | ubuntu-latest | feeds ✅ `Build Gate` stub | 50 | 273s / 4.55m | 390s / 6.50m |
 | `build-gate-pr-stub` | PR (posts `Build Gate`), `needs: [cross-compile-check]` | ubuntu-latest | stub for ✅ `Build Gate` | 50 | 3s / 0.05m own-step (waits on `cross-compile-check` first) | 4s / 0.07m |
-| `native-builds` (Linux) | **queue real**, matrix | ubuntu-latest | via `needs` of ✅ `Build Gate` | 50 | 724s / 12.06m | 756s / 12.60m |
+| `native-builds` (Linux) — one job since Issue #5972; the measurement in this row predates the change and covers the former two-shard layout | **queue real** | ubuntu-latest | via `needs` of ✅ `Build Gate` | 50 | 724s / 12.06m | 756s / 12.60m |
 | `native-builds` (macOS) | queue real, matrix | macos-latest | via `needs` of ✅ `Build Gate` | 50 | 891s / 14.85m | 1042s / 17.37m |
 | `native-builds` (Windows) — builds **and runs the native test suite**, not compile-only | queue real, matrix | windows-latest | via `needs` of ✅ `Build Gate` | 50 | 1057s / 17.61m | 1168s / 19.47m (**8 failures**) |
 | `integration-tests` (Docker) | queue real | ubuntu-latest | via `needs` of ✅ `Build Gate` | 50 | 443s / 7.38m | 456s / 7.60m |
@@ -121,10 +121,18 @@ ships on macOS: the in-module packages with test files in the `GOOS=darwin` depe
 (`MACOS_SHIPPED_PKGS`). Controller packages that no macOS binary contains are not tested there; the few
 `features/controller/...` packages that are in the closure stay until the steward stops depending on them.
 `scripts/test-scripts.sh` (`test_macos_groups_cover_exactly_shipped_packages`) asserts the union of the
-`test-go-group-macos-*` lists equals that set. The rest group is split across two shards by measured per-package weight
+`test-go-group-macos-*` lists equals that set. The rest group is split across two legs by measured per-package weight
 (`MACOS_REST_WEIGHTS` in the `Makefile`, longest-first onto the least-loaded shard) rather than by list
 position, so `features/workflow` and `pkg/storage/interfaces` land on different shards. Its `go test` runs with
 `-timeout=9m` (under the 15-minute job limit) so a hung package fails by name instead of the job being cancelled. The measurements in the tables above predate this scoping.
+
+**Queue Linux native build (current state).** `cross-platform-build.yml` runs one `native-builds` job, `Native Build (Linux)`,
+on `merge_group` and `workflow_dispatch`: `make build`, `make test-framework-api-sharded` and
+`make test-go-group-controller-core` against the merge commit. It no longer runs `make test-go-group-heavy-providers`
+or `make test-go-group-rest`; those groups run on every code pull request in `test-suite.yml`
+(`unit-tests-heavy-providers`, `unit-tests-rest`). `build-gate` `needs:` both `native-builds` and `postgres-integration`
+and fails unless both results are `success`. `scripts/test-scripts.sh` (`test_queue_native_build_runs_only_shard_1_content`)
+asserts all three properties. The Linux row in the table above measures the former two-shard layout.
 
 ### `security-scan.yml`
 

@@ -85,7 +85,7 @@ so it can post nothing in the queue, not even a skipped run.
 **Triggers**: Merge Group, Manual dispatch — deliberately no `pull_request`.
 
 **Jobs**:
-- `native-builds` — Linux only, two shards (Issue #4220): the same `make` group targets as the PR's `unit-tests-*` legs, run once against the merge commit to catch a PR that breaks only in combination with what merged ahead of it. Windows and macOS run on the PR side only (`cross-platform-build-pr.yml`, Issue #4219).
+- `native-builds` — Linux only, one job (Issues #4220, #5972): `make build` plus the api and controller-core `make` group targets, run once against the merge commit to catch a PR that breaks only in combination with what merged ahead of it. The heavy-providers and rest groups run on pull requests only (`test-suite.yml`). Windows and macOS run on the PR side only (`cross-platform-build-pr.yml`, Issue #4219).
 - `postgres-integration` — the Postgres-backed suites no PR job can run (the `features/controller/server` database subtests, and the integration-tagged cert and database-provider suites); the part of the former `Integration Tests (Docker)` job no other job repeats.
 - `build-gate` — emits the queue-side `Build Gate` context; `needs: [native-builds, postgres-integration]`, so it cannot report before they finish.
 
