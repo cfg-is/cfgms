@@ -182,6 +182,17 @@ var templateVar = regexp.MustCompile(`\{[^}]+\}`)
 // including routes registered without requirePermission.
 func TestAutomationGrant_EmptyTableDeniesEveryRoute(t *testing.T) {
 	f := newGrantFixture(t)
+	// The automation run routes register themselves into the table when a server is
+	// built; this test is about the guard's default deny, so it empties the table.
+	snapshot := automationRouteTable()
+	automationRoutesMu.Lock()
+	automationRoutes = nil
+	automationRoutesMu.Unlock()
+	t.Cleanup(func() {
+		automationRoutesMu.Lock()
+		automationRoutes = snapshot
+		automationRoutesMu.Unlock()
+	})
 	_, cred := f.newGrant(t)
 
 	type target struct{ method, template string }
