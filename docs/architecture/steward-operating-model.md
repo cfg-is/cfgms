@@ -43,8 +43,8 @@ treated as alertable by the controller.
 degraded. Config-signature failures remain hard rejections (codes.DataLoss).
 Module trust verification with `module_trust.mode: controller` refuses to load
 modules when the controller is unreachable — it never falls back to `bypass`.
-An unloadable or tampered cert store triggers re-registration or stop, not a
-degraded-but-trusted continue.
+An unloadable or tampered cert store raises the tamper alarm or the broken-trust
+fallback, never a degraded-but-trusted continue; see [Failure Modes](#failure-modes).
 
 #### Windows service-registration self-repair (#2465)
 
@@ -1205,7 +1205,7 @@ The marker is cleared once the new identity is connected. A steward that stops a
 
 The controller sends nothing when it admits a control channel; a refusal arrives on the first receive. The stored-identity connect therefore waits up to a fixed **10-second admission window** after the stream opens: a refusal inside the window is a refusal, and silence for the full window counts as admitted. Every admitted stored-identity reconnect pays that 10 s before the connect completes (heartbeats do not end the wait). Connects right after a fresh registration use no window and no budget.
 
-A refusal that arrives mid-session (a steward deregistered while connected) keeps the steward in its reconnect loop; it does not re-admit in place until the process restarts.
+A refusal that arrives mid-session (a steward deregistered while connected) is answered in process: the steward reports `identity.refused` and re-admits with its device key on the same connection (see [Failure Modes](#failure-modes-table)).
 
 The only state that needs someone at the device is an install-pinned steward whose controller now presents a certificate from a different CA: the steward cannot trust that controller over HTTPS, by design, and is reinstalled with the new CA.
 
@@ -1233,6 +1233,327 @@ The controller writes its CA certificate to `<CFGMS_CERT_PATH>/ca/ca.crt` on fir
 TLS verification is always enforced. There is no environment variable to disable it.
 
 **Chain-aware verification (Issue #3778).** The steward's trust pool for a freshly issued certificate set is built from leaf + `issuer_chain` + `ca_cert`, not leaf + `ca_cert` alone: `ca_cert` is verified as the root, and any delivered `issuer_chain` is supplied as intermediates so the leaf can bridge to it. This matters for SaaS cells backed by an imported regional intermediate (ADR-032), where the leaf's direct issuer is the intermediate rather than the pinned root. Self-hosted deployments carry no `issuer_chain` and this reduces to today's leaf + root verification unchanged.
+
+## Failure Modes
+
+A steward that cannot trust something it found does not stop and does not guess.
+It keeps the part of itself that tells the controller what is wrong running,
+refuses to enforce from the suspect material, and waits for an operator. A
+steward that merely lost a convenience (a token file, a controller URL, a valid
+local config) keeps running normally and reports the condition. Every reason code
+below is defined in `pkg/controlplane/types/messages.go` or at the call site named
+in the section that describes it. Reasons ride the heartbeat as
+`HealthReason{component, code, message}`, at most 16 per heartbeat, each field
+length-capped; the controller stores them durably and shows them in the REST
+steward record and in `cfg`. Messages are fixed strings and never carry a path,
+file content or token.
+
+### Failure Modes Table
+
+| Fault | Steward behavior | Controller-visible reason code | Operator action |
+|-------|------------------|--------------------------------|-----------------|
+| The Windows data directory is not secure (owned by a non-admin principal, holds a link or a foreign write grant), or the tamper latch file is unreadable, corrupt or of an unknown version | Latches. Reads no config, module cache or token from the directory and drops the registration token. Opens the [report-only link](#locked-mode-the-report-only-link) on the stored identity; if no identity loads, the reason goes to the local system log only and the link is retried every 30 s. The fault is re-checked hourly | `tamper.data_dir` | Inspect and remove the foreign entry, then `cfg steward tamper restore`; or `cfg steward tamper repair` (resets rights on the declared paths) when the controller still shows the fault; or `cfg steward tamper ban` |
+| The configured trust source is weaker than the one the steward enrolled with (`trust downgrade rejected`) | Latches; same alarm behavior as above | `tamper.trust_downgrade` | Reinstall with the trust source the steward enrolled with (or wipe the identity to change the anchor deliberately), then restore; repair is refused with `repair.anchor_untrusted` on a host with no usable baked root (see [Repair](#repair)); or ban |
+| The pinned controller CA is unreadable, or does not re-derive to its pin (including a same-level re-enroll against a different CA) | Latches. With a registration token and a compile-baked or install-pinned trust source, and when this is the only latched code, it re-keys and registers as a new device naming the old one ([Broken Trust](#broken-trust-new-identity)). Otherwise stays latched with the reason kept locally | `tamper.ca_mismatch`; then `identity.broken_trust` after the re-key | Restore the installer CA file and restore; or link or ban the locked new identity |
+| The security profile is invalid, or the environment profile downgrades a compiled `public-beta` profile | Latches; the alarm path runs with the strictest (`public-beta`) settings | `tamper.security_profile` | Correct the profile, then restore; or ban |
+| The controller reports the host locked (`TamperState{locked: true}`) or refuses a pull with the typed `controller.locked_down` error | Enters report-only on the same connection. A `TamperState` lock is also persisted in the latch, so a restart stays locked and the steward holds until the controller restores it; a pull refusal alone ends the process's pulls, and the controller sends `TamperState` again on every connect | `tamper.locked` (under component `report_only`; `controller.locked_down` when a pull refusal caused it) | Investigate with [locked-mode tools](#operator-tools-on-a-locked-steward); then restore, repair and restore, or ban |
+| The local steward config is rejected (parse or validation failure, or a value the security profile forbids) | Connects with the strictest settings: `module_trust.mode: strict`, signed ad-hoc commands required, remote terminal off. The file is re-read on every connect attempt, so fixing it clears the fault on the next reconnect | `config.invalid` (component `config`; status `degraded`) | Fix the config file |
+| A registration token file is missing, empty, unsafe to read or unusable, and a stored identity exists | Starts on the stored identity with an empty token; the unsafe file's content is never used | `token_file.missing`, `token_file.empty`, `token_file.permissions` or `token_file.invalid` (component `registration_token`) | Repair the token file before the next enrollment or re-registration |
+| No controller URL is configured and a stored identity exists | Uses the address recorded in the stored identity with the stored trust mode, never a weaker one | `controller_url.missing` (component `trust`) | Configure the controller URL |
+| No stored identity, no usable identity and no registration token | Keeps running without connecting. Retries with a backoff of 5 s doubling to a 5 min cap (up to 10% jitter), writes the reason to the local system log, rewrites an unchanged reason once an hour, and enrolls through the normal path as soon as a valid token file appears. It never creates an identity itself | None (not connected). Local system log keys: `no_registration_token`, `identity_unreadable`, `token_file.<kind>` | Supply a valid registration token file |
+| The stored identity or clone marker cannot be read, or the device key becomes unusable | With a registration token and a compile-baked or install-pinned trust source, re-keys and registers as a new device naming the old one. Without a token, it logs, retries and keeps the stored identity | `identity.broken_trust` after the re-key; `client_cert.device_key_unusable` for an unusable key | Link or ban the locked new identity; or supply a token |
+| The client certificate renewal fails | Renews when less than the greater of 25% of its lifetime or 7 days remains, or when no valid client certificate is left; the check runs every 10 min plus up to 1 min jitter, and after a wake from sleep. Failure retries with a backoff of 1 min doubling to a 10 min cap, never from a weaker credential, and re-dials on the same connection after success | `client_cert.renewal_failed` | Check controller reachability and the tenant refresh policy |
+| The controller refuses the identity mid-session | Re-admits in process with the device key. A refusal is retried every hour and a request queued for an operator is polled every 15 s; an approved credential is stored and the same connection re-dials with it | `identity.refused` | Approve the queued refresh (`cfg refresh approve`) or leave the refusal in place |
+| A long-running component panics | The panic is contained and logged with a sanitized value and stack; the loop continues. The next clean iteration clears the reason | `panic` under the component name (`heartbeat`, `convergence`, `dna_refresh`, `config_refetch`, `on_connect_sync`, `command_handler`, `event_emitter`, `telemetry_stream`) with the message `<component> recovered from a panic` | Report the recurring component; the panic value never leaves the host |
+| The steward runs under a non-default account that lacks rights the default account has | Runs, reports the missing rights and never claims compliance it cannot establish | `account.insufficient_rights` (component `run_account`; status `degraded`) | Run the steward as SYSTEM or root, or grant the listed rights |
+| The Windows service exits with a failure | The service manager restarts it; see [Windows Service Recovery](#windows-service-recovery-and-launcher-backoff) | None; the controller sees a heartbeat gap | None |
+| The launcher cannot start or keep the steward running | It never exits on a fault: it logs to stderr, backs off and retries | None; the controller sees a heartbeat gap | Fix the named fault (missing binary, unreadable version state) |
+
+### Tamper Alarm and the Latch
+
+Four refusals raise the alarm: `tamper.data_dir`, `tamper.trust_downgrade`,
+`tamper.ca_mismatch` and `tamper.security_profile` (the four codes
+`IsTamperCode` accepts; `tamper.locked` is not one of them, so it never starts an
+alarm by itself). None ends the process or retries silently.
+
+The alarm **latches**. The latch is `tamper_latch.json` in the steward cert store,
+written atomically. It holds the codes raised and whether the controller locked
+the host. A latch file that is present but unreadable, not a regular file,
+corrupt or of an unknown version counts as latched under `tamper.data_dir`; a
+missing file is recovered when the controller sends `TamperState{locked: true}`
+on connect. The heartbeat reports the first code raised.
+
+The latch releases only when **both** hold:
+
+1. the local fault has cleared (re-checked at a one-hour interval and again just
+   before release; a fault still present is latched again under its own code), and
+2. the controller has sent `TamperState{locked: false}` **after** it had
+   acknowledged the lock with `TamperState{locked: true}` for this latch.
+
+A controller that sends its current state on connect therefore cannot release a
+host it had not yet been told is tampered. On release the steward drops the
+reasons, clears transient module staging directories (installed bundles are
+verified against publisher signatures when they load and the stdlib ships in the
+installer payload, so nothing else is reset) and reconnects normally; config is
+pulled again on that connect.
+
+`TamperState{locked: true}` is always honored because it only lowers trust.
+`TamperState{locked: false}` and `RepairRequest` are honored only on a session
+whose server certificate verified against the steward's recorded trust anchor.
+
+### Locked Mode: the Report-Only Link
+
+A latched or locked steward holds a **report-only link**: the mTLS identity it
+already has, opened to the transport address recorded in the stored identity. The
+link trusts the controller only through the anchor named in the identity: the
+install-pinned CA for an install-pinned steward, otherwise the CA recorded in the
+identity, which must re-derive to the pin recorded with it. The baked controller
+root fingerprint plays no part in connecting or reporting, so a controller root
+replacement does not strand a locked host.
+
+| Runs | Stopped or refused |
+|------|--------------------|
+| Heartbeat (status `error` plus the reasons) | Convergence loop, config executor and monitors |
+| DNA inventory, **host facts only** (no module DNA, no osquery source, nothing from the module cache) | Every pull: config, module bundles, bulk transfer and the initial credential |
+| Log and event emitter, so local log output leaves the host; its queue is memory-only and nothing is written to disk | Command subscription, on-connect sync, data plane session, offline-queue drain |
+| Revocation-manifest refresh for operator tools | Every inbound payload other than `TamperState`, `RepairRequest` and `Command` (dropped and counted) |
+| Operator commands, scripts and the remote shell, verified [only against the baked root](#operator-tools-on-a-locked-steward) | Library scripts |
+
+Module DNA, config and anything read from the module cache never leave a locked
+host. An unresolved fault that stops the link from opening (no identity, no valid
+client certificate, a CA that does not verify against its anchor with no way to
+rebuild a pin-verified one) is written to the local system log: the Windows Event
+Log on Windows, the local syslog socket on Linux and macOS.
+
+### Baked Controller Root
+
+A steward binary can carry up to four controller root CA fingerprints. They are
+the only trust a locked steward uses for operator tools and the repair signature.
+
+- **Value:** each entry is the lowercase hex SHA-256 of the **root** certificate
+  DER (64 characters, the root and not an intermediate). A list lets a planned
+  root replacement be staged before cut-over.
+- **Export one:**
+  `openssl x509 -in root.crt -noout -fingerprint -sha256 | cut -d= -f2 | tr -d : | tr A-F a-f`
+- **Build-time only:** `-X main.ControllerRootFingerprints=<fp>[,<fp>...]`. There
+  is no environment variable, flag, config or file override, so nothing on the
+  host can change it. The inputs are `STEWARD_CONTROLLER_ROOT_FP` for
+  `make build-steward` and the steward Dockerfiles, `-ControllerRootFingerprints`
+  for `build/windows/build-msi.ps1` and `CONTROLLER_ROOT_FPS` (or
+  `--controller-root-fps`) for `build/darwin/build-pkg.sh`. The Makefile and the
+  installer scripts refuse a malformed list; the binary treats a malformed or
+  absent value as no baked root.
+- **Visible:** `cfgms-steward status` prints the list on the `Root CA:` line, or
+  `none`.
+- **Also used** to check the CA presented at first registration for the TOFU and
+  compile-baked trust sources (see [Trust Source](#trust-source-and-first-registration-ca-check-issue-5730)).
+- **Cost:** a controller whose root is replaced by one not in the baked list
+  cannot sign operator tools or repair requests for that steward that it will
+  accept while locked. Regaining hands-on tools on a locked host needs a rebuilt
+  steward carrying the new root. Connecting and reporting are unaffected.
+
+### Operator Tools on a Locked Steward
+
+A locked steward still runs three kinds of operator-signed action, verified
+**only** against the baked root. Nothing from the data folder (the persisted CA,
+cached signing certificates) is consulted, and the locked handler has no verifier
+or fallback of its own.
+
+| Command type | Locked steward |
+|--------------|----------------|
+| `execute_script` (inline, operator-signed) | Accepted |
+| `steward_action` (operator-signed envelope) | Accepted |
+| `open_terminal` (remote shell) | Accepted unless the local config disables the remote terminal; config can only restrict, and a config that cannot be read counts as disabling it |
+| Every other type (`sync_config`, `push_signing_cert`, `push_steward_binary`, `observe_modules`, `sync_dna`, `reconnect`, `relay_response` and any unknown type) | Refused (`type_not_allowed:<type>`) |
+| Library scripts (`script_id` or `required_api_scope` set) | Refused, not dropped and run |
+
+Each command passes these steps in order; the first failure refuses it:
+
+1. the baked list is usable;
+2. the signer chain the controller attached ends in a self-signed CA whose
+   fingerprint is baked (the root is selected by fingerprint, never by position);
+3. the server certificate of the stream the command arrived on chains, with
+   server-auth usage, to that same root, otherwise the command is dropped as
+   `locked_tools.link_not_anchored`;
+4. the command type is one of the three above;
+5. the controller's outer signature verifies through the chain leaf (code-signing
+   usage);
+6. steward ID, timestamp window, replay and size rules, then an allowlist of
+   parameters and an operator envelope (X.509 or WebAuthn proof) are required;
+7. an inline script's envelope validity does not exceed the five-minute action
+   ceiling;
+8. a **fresh revocation manifest** verified against that root exists, then the
+   operator envelope is verified under the same root.
+
+**Revocation freshness:** the newest manifest verified against the baked root must
+have been issued within twice the refresh interval (5 min, so 10 min). The steward
+refreshes it periodically over the link's mTLS HTTP client and, when it is stale,
+tries one fetch (10 s bound) before refusing with `locked_tools.revocation_stale`.
+The locked revocation verifier is always strict.
+
+**A host with no usable baked root** refuses every operator command. It reports
+`locked_tools.no_baked_root` (nothing baked) or
+`locked_tools.baked_root_malformed` (the baked value is not a valid list) at
+connect, before any command arrives. It accepts only the unlock signal
+(`TamperState{locked: false}`) and the repair signal, each on a session anchored
+as described above; a repair request on such a host is refused with
+`repair.anchor_untrusted` when the latch holds a CA-class fault.
+
+Reason codes a locked steward reports under component `locked_tools`:
+
+| Code | Meaning | Reported when |
+|------|---------|-----------------------|
+| `locked_tools.no_baked_root` | The binary has no baked root | Always while locked |
+| `locked_tools.baked_root_malformed` | The baked value is not a valid fingerprint list | Always while locked |
+| `locked_tools.root_mismatch` | A presented chain is missing, malformed, too large (8 certificates or 64 KiB), does not end in a baked root, or its leaf does not chain to it | A command was refused |
+| `locked_tools.link_not_anchored` | The stream's server certificate does not chain to the command's baked root | A command was refused |
+| `locked_tools.revocation_stale` | No fresh verified revocation manifest | A command was refused |
+
+The reason clears when a later action is accepted. Every other refusal is counted
+and logged without a reason code. The controller side of these tools is in the
+[controller operating model](controller-operating-model.md#tampered-state-epic-5621).
+
+### Repair
+
+`cfg steward tamper repair <steward-id>` (REST: `POST /api/v1/stewards/{id}/tamper/repair`)
+asks a locked steward that still reports a fault to repair itself. One request is one
+transaction:
+
+1. **Verify.** On a host with a baked root the signature over (steward ID, repair
+   ID, loss digest, expiry) must verify through a chain whose root is baked, the
+   approved list must agree with the signed digest, and the request must not be
+   expired: otherwise `repair.signature_invalid`. A steward that is not latched
+   reports `repair.not_locked` and changes nothing. A host with no baked root honors
+   the request on any anchored session (an expired request is `repair.not_locked`), except that a CA-class fault
+   (`tamper.ca_mismatch`, `tamper.trust_downgrade`) refuses a request that does not
+   verify to a baked fingerprint with `repair.anchor_untrusted`.
+2. **Assess loss** and compare it with the approval (below).
+3. **Close the link** so no dial presents the credential about to be retired, and keep
+   it closed until the completion finishes.
+4. **Reset rights** on the declared steward directories (data, cert store and, when
+   set, the log directory) without following links, quarantining planted links
+   (the link is removed, its target is never touched; the controller is told once on
+   the new link), then delete only the approved items and reset and verify rights
+   again.
+5. **Discard** trust material written while the folder was exposed.
+6. **Rotate keys inside the verified directory:** stage a new identity key and a new
+   mTLS key, and complete the rotation with the controller by proving possession of
+   **both** the old and the new identity key.
+7. **Persist** the new certificate, keys and identity record, and only then drop the
+   old keys.
+8. **Re-run** the local checks and report the outcome on the new credential.
+
+**Kept:** steward ID, tenant, local logs and action history (except approved loss).
+**Replaced:** rights on its own files, the mTLS key, the identity key; every old
+client certificate serial is revoked at completion.
+
+**Explicit data-loss approval.** The repair would lose local data only when a log
+file or the action history is unreadable or corrupt, or an entry the rights reset
+could not take over. The steward publishes the loss set before any request arrives
+as `repair.loss.local_logs` and `repair.loss.action_history`. Readable data of those
+kinds is flushed to the controller before anything is deleted.
+
+- *Controller side:* the request is refused with `409 loss_approval_required`
+  unless `approved_loss_codes` equals the loss the steward last reported
+  (`--approve-loss <code,code>` in `cfg`; `cfg` prints the loss first and sends
+  nothing without an exact match).
+- *Steward side:* the controller signs a digest of the sorted approved codes into the
+  request. Loss with nothing approved is `repair.refused_data_loss` and nothing is
+  deleted. A recomputed digest that differs from the approved one, including after
+  the pre-delete re-assessment, is `repair.loss_set_changed`.
+
+**Asynchronous delivery.** The request is signed with the command signer, valid for
+seven days, sent at once to a connected steward and otherwise on its next connect. A
+new request supersedes an unresolved one. The steward reports `repair.running`, then
+`repair.completed` or a failure code (`repair.failed`, `repair.refused_data_loss`,
+`repair.loss_set_changed`, `repair.not_locked`, `repair.fault_persists`,
+`repair.signature_invalid`, `repair.anchor_untrusted`), each carrying the repair ID in
+its message. A completion whose request or response was lost is retried with the same
+repair ID and the same new keys, backing off from 30 s to 5 min, and resumes after a
+restart. A failure keeps the old keys and the steward stays tampered; nothing retries
+with a weaker credential. `cfg steward tamper repair-status <steward-id>` (REST:
+`GET /api/v1/stewards/{id}/tamper/repair`) reports `waiting`, `running`,
+`completed`, `restored`, `failed`, `refused_data_loss`, `cancelled` or `contested`
+with the outcome codes. `repair.fault_persists` means the fault remained after the
+rotation; the latch is raised again under its own code.
+
+**Quiet window and return to trusted.** A completed repair does not return the steward
+to trusted by itself. The controller returns it to `active` on a heartbeat that reports
+`repair.completed` for the latest repair, carries no tamper code and arrives on a
+stream authenticated by the **new** certificate serial, once **10 minutes** have passed
+since the completion with no contested signal. It then sends `TamperState{locked: false}`
+and the steward releases its latch.
+
+**Contested repair (`repair.contested`).** When two parties hold identical keys (a
+copy of the data folder) no protocol can tell them apart: the first valid completion
+wins. The loser is loud. For **24 hours** after the completion, any use of a retired
+credential contests the repair: a connection on a revoked serial, a refresh that proves
+possession of the retired key, a registration naming the steward as `clone_of`, or an
+identity conflict. The controller marks the steward tampered again with
+`repair.contested`, cancels any pending repair, audits the source and emails the
+tenant's administrators. A later healthy heartbeat does not clear it. The operator
+bans the identity if the other party is not theirs, or links the possible duplicate
+(see [Broken Trust](#broken-trust-new-identity)) when it is the real endpoint.
+
+### Broken Trust: New Identity
+
+When the steward's own secrets or trust material cannot be trusted and a registration
+token is available, it re-keys and registers as a new device naming the old one
+(`clone_of`), declaring `clone_reason: broken_trust` so the controller admits it
+**locked**. The triggers are local: an unreadable or unparseable identity file, a
+corrupt clone marker, a pinned CA that does not verify, and an unusable device key.
+No controller message starts it.
+
+State path: **new identity → locked → link | ban**.
+
+Rules, all enforced in `cmd/steward/broken_trust.go` and the controller's
+registration handler:
+
+- **Token only.** The registration token authenticates the new registration, never the
+  old or an expired certificate. The token is sent only when the trust source is
+  compile-baked or install-pinned (a **trusted CA anchor**); a TOFU source never
+  receives it. A data-directory tamper keeps the alarm's case.
+- **No token means retry.** Without a usable token the steward logs the reason and
+  retries; nothing is sent and the stored identity is not discarded.
+- **Marker first.** The clone marker is written before the old identity is discarded,
+  so an interrupted re-key resumes the same fallback instead of starting another.
+- **Tenant from the token.** The controller keeps the claimed `clone_of` only when it
+  names an existing steward of the token's tenant; otherwise the registration is
+  admitted without an old ID and the response is identical.
+- **One pending identity per old ID.** A second locked admission naming an old ID that
+  already has a pending locked identity is admitted without the old ID.
+
+The new identity reports `identity.broken_trust` and receives no config, commands or
+bundles until an operator links it to its previous identity or bans it. A link makes
+the endpoint's refused credential go through re-admission with its device key; the
+response names the old steward ID and the steward adopts it only because its clone
+marker records that same ID. Any other ID is refused and reported as
+`identity.link_mismatch`. The marker and `identity.broken_trust` clear once the stored
+identity carries the old ID.
+
+### Windows Service Recovery and Launcher Backoff
+
+These are the behaviors the tests assert.
+
+**Service recovery.** The launcher reports a non-zero service-specific exit code when
+it fails. The service is registered with three restart actions at 10 s, 30 s and 60 s,
+a 1-day failure-count reset, and the flag that applies the actions to non-crash
+failures as well, so a launcher that exited with an error is restarted. Install and
+the launcher's self-repair of a deleted registration set the same values; the tests
+read all of them back from throwaway services in the real service manager
+(`cmd/cfgms-steward-launcher/service_check_windows_test.go`,
+`cmd/steward/service/manager_windows_test.go`).
+
+**Launcher backoff.** `Supervise` returns only when its context is cancelled. Every
+fault (unreadable current or previous version state, no current version recorded, an
+unresolvable or missing steward binary, no previous version to roll back to, a failed
+rollback, a child that keeps failing) is written to stderr and retried after a delay of 1 s that doubles to a 5 min cap; the default sleeper adds up to
+10% jitter. The delay resets to 1 s after a child outlives the startup window (30 s by
+default), after a rollback and after an upgrade self-exit. A binary already marked
+known-good is restarted in place when it fails and is never rolled back. The tests
+assert the seven former give-up points keep retrying with non-decreasing, capped delays
+(`TestSupervise_NeverGivesUp`) and the sequence 1 s, 2 s, 4 s, 1 s, 2 s across a
+healthy run (`TestSupervise_BackoffResetsAfterHealthyRun`).
 
 ## Cfg Fields Governing Convergence
 
