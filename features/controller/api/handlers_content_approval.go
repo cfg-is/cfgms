@@ -79,6 +79,37 @@ type ScriptApprovalListResponse struct {
 	Scripts []ScriptApprovalEntry `json:"scripts"`
 }
 
+// PendingScriptChange is one approved script whose new version awaits approval,
+// as shown to an administrator of the owner tenant. Diff is the unified diff of
+// the previous approved content against the new content; it is the only place
+// script text leaves the library, and the notice email links here instead of
+// carrying it. DiffUnavailable says why Diff is empty when it cannot be shown.
+type PendingScriptChange struct {
+	ScriptID             string `json:"script_id"`
+	Version              string `json:"version"`
+	ContentHash          string `json:"content_hash"`
+	ApprovalHash         string `json:"approval_hash"`
+	PreviousVersion      string `json:"previous_version"`
+	PreviousApprovalHash string `json:"previous_approval_hash"`
+	FirstSeen            string `json:"first_seen"`
+	Diff                 string `json:"diff"`
+	DiffUnavailable      string `json:"diff_unavailable,omitempty"`
+}
+
+// PendingScriptChangeList is the body of GET /api/v1/automation/approvals/scripts/pending.
+type PendingScriptChangeList struct {
+	Changes []PendingScriptChange `json:"changes"`
+}
+
+func init() { RegisterRoutes(registerContentApprovalPendingRoutes) }
+
+// registerContentApprovalPendingRoutes registers the pending-change list. It is
+// read-only and gated by automation-approval:read, like the approvals list.
+func registerContentApprovalPendingRoutes(s *Server, api *mux.Router) {
+	api.Handle("/automation/approvals/scripts/pending",
+		s.requirePermission("automation-approval", "read")(http.HandlerFunc(s.handleListPendingScriptChanges))).Methods("GET")
+}
+
 // scriptVersionLibrary is implemented by a tenant-resolving repository that can
 // open one tenant's library to enumerate its versions.
 type scriptVersionLibrary interface {
@@ -239,6 +270,12 @@ func (s *Server) handleApproveScript(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to record approval", "INTERNAL_ERROR")
 		return
 	}
+	// The approval is what lets the version run; clearing its pending record is
+	// housekeeping. A failure leaves a record the pending list already hides
+	// because its hash is approved, so it is logged and does not fail the approval.
+	if err := st.ClearPending(r.Context(), owner, req.ScriptID, req.Version, approvalHash); err != nil {
+		s.logger.Warn("Failed to clear pending content change after approval", "error", logging.SanitizeLogValue(err.Error()))
+	}
 	s.writeResponse(w, http.StatusCreated, ScriptApprovalEntry{
 		ScriptID: req.ScriptID, Version: req.Version, ContentHash: vs.Hash, ApprovalHash: approvalHash,
 		State: ScriptApprovalApproved, Approval: &ScriptApprovalInfo{
@@ -377,4 +414,70 @@ func (s *Server) scriptVersionNames(resolver script.TenantScriptResolver, owner 
 		names = append(names, v.String())
 	}
 	return names
+}
+
+// handleListPendingScriptChanges handles GET /api/v1/automation/approvals/scripts/pending:
+// the caller tenant's own pending changes, each with the diff of the previous
+// approved content against the new content. It only reads. A record whose hash
+// has been approved since is left out, so a record that failed to clear is never
+// shown as pending.
+func (s *Server) handleListPendingScriptChanges(w http.ResponseWriter, r *http.Request) {
+	st, resolver, owner, ok := s.approvalDeps(w, r)
+	if !ok {
+		return
+	}
+	records, err := st.ListPending(r.Context(), owner)
+	if err != nil {
+		s.logger.Error("Failed to list pending content changes", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list pending changes", "INTERNAL_ERROR")
+		return
+	}
+	out := make([]PendingScriptChange, 0, len(records))
+	for _, rec := range records {
+		approved, err := st.GetApproval(r.Context(), owner, LibraryKindScript, rec.ScriptID, rec.Version, rec.ApprovalHash)
+		if err != nil {
+			s.logger.Error("Failed to read script approval", "error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list pending changes", "INTERNAL_ERROR")
+			return
+		}
+		if approved != nil {
+			continue
+		}
+		change := PendingScriptChange{
+			ScriptID: rec.ScriptID, Version: rec.Version, ContentHash: rec.ContentHash, ApprovalHash: rec.ApprovalHash,
+			PreviousVersion: rec.PreviousVersion, PreviousApprovalHash: rec.PreviousApprovalHash,
+			FirstSeen: rec.FirstSeen.UTC().Format(time.RFC3339),
+		}
+		change.Diff, change.DiffUnavailable = pendingChangeDiff(resolver, owner, rec)
+		out = append(out, change)
+	}
+	s.writeSuccessResponse(w, PendingScriptChangeList{Changes: out})
+}
+
+// pendingChangeDiff returns the unified diff of the previous approved content
+// against the new content of one pending change. Both versions are read from the
+// owner's library and each must still hash to what the record names, so the diff
+// is never of content that was not the approved or the pending one; otherwise it
+// returns why there is no diff.
+func pendingChangeDiff(resolver script.TenantScriptResolver, owner string, rec *PendingChange) (diff, unavailable string) {
+	prev, err := resolver.GetForTenant(owner, rec.ScriptID, rec.PreviousVersion)
+	if err != nil || !hasVersion(prev, rec.PreviousVersion) {
+		return "", "the previously approved version is no longer in the library"
+	}
+	if script.ScriptApprovalHash(owner, prev) != rec.PreviousApprovalHash {
+		return "", "the previous version no longer matches what was approved"
+	}
+	cur, err := resolver.GetForTenant(owner, rec.ScriptID, rec.Version)
+	if err != nil || !hasVersion(cur, rec.Version) {
+		return "", "the changed version is no longer in the library"
+	}
+	if script.ScriptApprovalHash(owner, cur) != rec.ApprovalHash {
+		return "", "the changed version no longer matches the recorded change"
+	}
+	diff = unifiedDiff(noticeSafe(rec.ScriptID)+" "+noticeSafe(rec.PreviousVersion), noticeSafe(rec.ScriptID)+" "+noticeSafe(rec.Version),
+		prev.Content, cur.Content)
+	if diff == "" {
+		return "", "the content is identical; the shell, timeout or parameters changed"
+	}
+	return diff, ""
 }

@@ -42,13 +42,20 @@ const privilegeNamespace = "script-privilege"
 
 // Decision is the result of ContentApprovalEvaluator.Evaluate. ApprovalHash is
 // the value to bind a queue pin to; it is set whenever it could be computed.
+//
+// AwaitingApproval is true only for a pending decision reached because no
+// approval is recorded for the exact approval hash, the one pending outcome an
+// admin resolves by approving. A pending decision for a script whose header does
+// not request pre-approval leaves it false. It is what RecordPendingAndNotify
+// requires; the evaluator itself never records or sends anything.
 type Decision struct {
-	State        ContentDecisionState
-	Reason       string
-	ContentHash  string
-	ApprovalHash string
-	Method       ApprovalMethod
-	OwnerTenant  string
+	State            ContentDecisionState
+	Reason           string
+	ContentHash      string
+	ApprovalHash     string
+	Method           ApprovalMethod
+	OwnerTenant      string
+	AwaitingApproval bool
 }
 
 // ScriptTrustedKeyResolver returns the trusted signing keys in effect for a
@@ -215,7 +222,7 @@ func (e *ContentApprovalEvaluator) evaluateApprove(ctx context.Context, d Decisi
 	}
 	d.ApprovalHash = hash
 	if state != ScriptApprovalApproved {
-		d.State, d.Reason = ContentDecisionPending, "no approval exists for this exact version and content"
+		d.State, d.Reason, d.AwaitingApproval = ContentDecisionPending, "no approval exists for this exact version and content", true
 		return d, nil
 	}
 	d.State, d.Method, d.Reason = ContentDecisionApproved, rec.Method, "an approval is recorded for this exact version and content"

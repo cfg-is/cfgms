@@ -67,6 +67,7 @@ var rootReadClassification = map[string]rootReadEntry{
 	"/api/v1/certificates/signing/migration":                         {rootReadPlatform, "fleet-wide signing-certificate migration progress, counts only (Decision 4: system and platform logs and metrics)"},
 	"/api/v1/certificates/{serial}":                                  {rootReadCrossing, ""},
 	"/api/v1/automation/approvals/scripts":                           {rootReadOwnScope, ""},
+	"/api/v1/automation/approvals/scripts/pending":                   {rootReadOwnScope, ""},
 	"/api/v1/cli-login/{id}":                                         {rootReadOwnScope, ""},
 	"/api/v1/cli-presence/{id}":                                      {rootReadOwnScope, ""},
 	"/api/v1/clusters":                                               {rootReadCrossing, ""},
