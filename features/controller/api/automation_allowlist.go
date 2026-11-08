@@ -13,10 +13,10 @@ import (
 // principal (ADR-036 section 3) may reach. It is keyed by HTTP method AND mux route
 // template, so the same template under another method is refused.
 //
-// The table ships empty. It is filled only by the route-registration helper the
-// automation run routes add (registerAutomationRoute), so membership comes from a
-// route opting in through that helper, never from a path prefix: a route that merely
-// sits under /api/v1/automation/runs/{run_id}/ is not admitted.
+// The table is filled only by registerAutomationRoute (routes_automation.go), which
+// also wraps the handler in requireAutomationRun, so membership comes from a route
+// opting in through that helper, never from a path prefix: a route that merely sits
+// under /api/v1/automation/runs/{run_id}/ is not admitted.
 
 type automationRoute struct {
 	method   string
@@ -27,6 +27,27 @@ var (
 	automationRoutesMu sync.RWMutex
 	automationRoutes   []automationRoute
 )
+
+// addAutomationRoute admits method and template into the table. Admitting a pair
+// twice (one registration per constructed Server) keeps a single entry.
+func addAutomationRoute(method, template string) {
+	automationRoutesMu.Lock()
+	defer automationRoutesMu.Unlock()
+	for _, rt := range automationRoutes {
+		if rt.method == method && rt.template == template {
+			return
+		}
+	}
+	automationRoutes = append(automationRoutes, automationRoute{method: method, template: template})
+}
+
+// automationRouteTable returns a copy of the table, for tests that must exercise
+// every admitted route.
+func automationRouteTable() []automationRoute {
+	automationRoutesMu.RLock()
+	defer automationRoutesMu.RUnlock()
+	return append([]automationRoute(nil), automationRoutes...)
+}
 
 // automationRouteAllowed reports whether a grant principal may reach the route with
 // the given method and mux path template. An empty template (no matched route) is
