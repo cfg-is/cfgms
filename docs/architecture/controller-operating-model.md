@@ -740,7 +740,7 @@ The controller maintains awareness of all registered stewards and their state.
 
 The fleet registry is backed by a `StewardStore` (see `pkg/storage/interfaces/business/steward_store.go`). Registrations, heartbeats, and status transitions are persisted to durable storage so the fleet view survives controller restarts without waiting for all stewards to re-register.
 
-**Steward lifecycle states**: `registered` → `active` → `lost` / `deregistered`. Records are retained indefinitely for audit; a `lost` steward can re-register and will have its record updated in place.
+**Steward lifecycle states**: `registered` → `active` → `lost` / `deregistered`. A steward that raises a tamper alarm, or is admitted locked, is `tampered` until an operator restores, repairs or bans it (`revoked`); see [Tampered State](#tampered-state-epic-5621). Records are retained indefinitely for audit; a `lost` steward can re-register and will have its record updated in place.
 
 **Enrollment at claim, not at check-in (Issue #3403)**: A steward's durable `StewardRecord` is written at cert-issuance time (the "claim" step), not lazily at the first gRPC check-in. Both registration paths write the record at the same point:
 - **Direct approval** (`handleRegister` with `AlwaysApproveHook`): `handleRegister` itself calls `StewardStore.RegisterSteward` with `StewardStatusRegistered` inline, before returning the cert bundle (pre-existing write, Issue #2095, unchanged by this story).
@@ -810,7 +810,7 @@ The security invariant is unchanged by the backing store: `session.Manager` alwa
 `transportServer.Register` and `transportServer.ControlChannel` admit a steward only after two independent checks on the mTLS-verified peer certificate, in this order:
 
 1. **Certificate revocation.** The peer's client-certificate serial is looked up through `cert.Manager.IsRevoked` (injected with `WithRevocationChecker`, always wired by `features/controller/server`). A revoked serial is refused with `codes.PermissionDenied`; a lookup error is refused with `codes.Unavailable` (fail closed) and logged with sanitized values. The steward treats `PermissionDenied` as an identity rejection and follows the re-admission path.
-2. **Record status.** The approval checker confirms the steward record is in a reconnect-capable state (`registered`, `active`, `lost`).
+2. **Record status.** The approval checker confirms the steward record is in a reconnect-capable state (`registered`, `active`, `lost`, or `tampered`: a tampered steward stays admitted so it keeps reporting, and what it may receive is gated separately).
 
 Revocation therefore takes effect at admission even while the steward record stays `active`. An already-open ControlChannel re-checks its serial every 30 seconds (`WithRevocationRecheckInterval`) and is closed with `PermissionDenied` once the serial is revoked, so a revoked identity is cut off within one re-check interval (30s plus store propagation delay). A transient lookup error during a re-check keeps the stream open and is retried on the next tick; new admissions still fail closed.
 
@@ -862,6 +862,168 @@ Three endpoints back the operator verbs; the [identity clone runbook](../runbook
 - `GET /api/v1/stewards/identity-clones` (`steward:read`, tenant-scoped) joins the `steward_identity_conflict_detected` and `steward_provenance_divergence` audit events with the pending registrations whose `CloneOf` names the steward. It reads the audit manager and `PendingRegistrationStore.ListPending`; nothing new is stored.
 - `POST /api/v1/stewards/{id}/credentials/rotate` (`steward:rotate-credentials`, AssuranceStrong) revokes every client-certificate serial issued for the steward ID through `cert.Manager.Revoke` (refused at admission by the #4930 gate, including open streams) and moves the record to `archived`, so the next refresh is queued for approval. Audit: `steward_credentials_rotated`.
 - `POST /api/v1/stewards/{id}/identity/move` (`steward:move-identity`, AssuranceStrong) takes `{"pending_id"}` of a pending same-tenant copy with `CloneOf` equal to the steward. It calls `StewardStore.RebindStewardIdentity` (honouring the unique `(tenant_id, device_id)` rule), `PendingRegistrationStore.ReassignPendingSteward` and approves the entry; the ordinary claim then signs the certificate with the original ID as CN and takes the existing record whose `DeviceID` now matches as the benign re-claim. Previous serials are revoked. Audit: `steward_identity_moved`. This is the only code path that changes a record's `DeviceID`.
+
+### Tampered State (Epic #5621)
+
+`tampered` is a durable steward status (`StewardStatusTampered`). It means the
+steward reported a fault it cannot clear itself, or was admitted locked because it
+could not trust its own identity. The controller keeps it visible, keeps hearing
+from it, stops sending it anything automated, and leaves only an operator able to
+end it. The steward side is in the
+[steward operating model](steward-operating-model.md#failure-modes).
+
+**State transitions:**
+
+```
+alarm ──► tampered ──► restore ──────────────► active (registered if it never heartbeated)
+                  ├──► repair ─► (steward repairs) ─► 10-min quiet window ─► active
+                  │        └──► contested repair ─► tampered (restore | ban)
+                  └──► ban ──────────────────────► revoked
+
+broken-trust new identity ──► locked (tampered) ──► link ──► old identity continues
+                                              └──► ban ───► revoked
+```
+
+**Entering `tampered`.** A heartbeat that carries any of the four exact tamper
+codes (`tamper.data_dir`, `tamper.trust_downgrade`, `tamper.ca_mismatch`,
+`tamper.security_profile`; an unknown `tamper.*` code does not count) moves the
+steward to `tampered` from `registered`, `active`, `lost` or `archived` only. A
+`revoked`, `deregistered`, `dormant`, `quarantined` or already `tampered` record is
+unchanged, so an alarm can only lower trust. The caller is the steward bound to the
+authenticated mTLS identity, so a steward can alarm only about itself. The status
+write comes first; the transition is mirrored to the node-local registry, audited as
+`steward_tamper_alarm` (codes and notification outcome), and the tenant's
+administrators are emailed, at most once per steward per hour per node (every
+transition is still audited). `tampered` survives reconnects and heartbeat recovery;
+it is never hidden from default steward lists, and fleet health counts it with its
+tamper codes.
+
+**Telling the steward.** The lockdown predicate reads the durable status on every
+call (nothing is cached, so every node sees a transition on its next call) and fails
+closed: a missing store, unknown steward or read error counts as locked. The
+controller sends `TamperState{locked}` as each control stream registers and again on
+every transition (restore, return to trusted, entering `tampered`). An offline steward
+learns on its next connect.
+
+#### What `tampered` Blocks and Allows
+
+| Traffic | While `tampered` |
+|---------|------------------|
+| Control-channel admission, heartbeats | **Allowed.** The steward must keep reporting; revocation and approval gates still apply |
+| DNA inventory, logs and events, inbound uploads | **Allowed** (a locked steward sends host facts only) |
+| Certificate renewal (`/refresh/complete`) | **Allowed** under the tenant's ordinary refresh policy, with no extra queueing reason. The response is the new client certificate and its issuer chain only: no CA, signing certificate, server certificate, transport address or identity fields. The status is unchanged and the issuance is audited as `steward_tamper_renewal` |
+| Controller-pushed commands | **Denied by default.** The one allow-list `CommandLockdownPolicy` lets `execute_script`, `open_terminal`, `steward_action`, `observe_modules`, `sync_dna`, `reconnect` and `relay_response` through, and only when the context carries the operator-origin marker. `sync_config`, `push_signing_cert`, `push_steward_binary` and any type not listed are denied even from an operator. Every automated or controller-originated command is denied because it carries no marker. The gate runs before the registry lookup, so a locked steward attached to another node is refused and never forwarded. Refusals are audited as `command_refused_locked_down`; each operator command let through as `operator_command_to_locked_steward` |
+| Config fan-out and push | **Excluded**: config fan-out skips a steward whose status is `tampered` |
+| Steward-initiated pulls: `SyncConfig`, `FetchModuleBundle`, the controller-to-steward half of `BulkTransfer`, `IssueInitialCredential` | **Refused** with the typed `FailedPrecondition` error `controller.locked_down` (domain `cfgms.io`), which the steward tells apart from an identity rejection and answers by entering report-only. A lookup error refuses too |
+| Controller-originated requests over a steward-opened stream (`TelemetryRequest`, osquery queries) | **Run only with the operator-origin marker**; otherwise `ErrStewardLockedDown` |
+| Ordinary identity move | Refused (`STEWARD_NOT_ACTIVE`); only a locked-copy link, restore or ban ends the state |
+
+The operator-origin marker is set only by `commands.NewOperatorOrigin` for an
+operator-submitted dispatch or an operator terminal, and a test pins the set of
+non-test callers. For a locked target the controller attaches the signer
+certificate chain, with the root as the last element, to the command (outside the
+signed payload; the steward validates it itself and never trusts it because it
+arrived). A command whose chain cannot be built is not sent. Commands to a steward
+that is not locked carry no chain.
+
+#### Restore, Repair and Ban
+
+All verbs are tenant-scoped, require AssuranceStrong (admin mTLS or a
+passkey-elevated session), act only on a `tampered` steward (`409 STEWARD_NOT_TAMPERED`
+otherwise), store an optional `reason` (at most 500 characters) in the audit event,
+and race through one compare-and-swap on the status, so exactly one of two parallel
+verbs wins.
+
+| Verb | REST | `cfg` | Effect |
+|------|------|-------|--------|
+| Restore | `POST /api/v1/stewards/{id}/tamper/restore` (`steward:tamper-restore`) | `cfg steward tamper restore <id>` | `tampered` → `active` (`registered` if it never heartbeated), traffic resumes, the steward is sent `TamperState{locked: false}`, audited `steward_tamper_restored` |
+| Repair | `POST /api/v1/stewards/{id}/tamper/repair` (`steward:tamper-repair`) | `cfg steward tamper repair <id> [--approve-loss <codes>]` | Signs and delivers a `RepairRequest` (below) |
+| Repair status | `GET /api/v1/stewards/{id}/tamper/repair` | `cfg steward tamper repair-status <id>` | Latest repair: `waiting`, `running`, `completed`, `restored`, `failed`, `refused_data_loss`, `cancelled` or `contested`, with who requested it, approved loss codes and outcome codes |
+| Ban | `POST /api/v1/stewards/{id}/tamper/ban` (`steward:tamper-ban`) | `cfg steward tamper ban <id>` | Status → `revoked`, every client-certificate serial revoked, the live control stream closed, audited `steward_tamper_banned`. A failed revocation puts the steward back to `tampered` so the ban can be retried. It affects only the identity named |
+
+**Restore is refused while the fault is live.** If the steward's last heartbeat
+inside the previous 5 minutes still carries a tamper code, restore returns
+`409 fault_still_reported` with the codes and audits `steward_tamper_restore_refused`.
+No request field overrides it; such a steward is repaired or banned. A locked
+copy that names an old identity cannot be restored as a new one
+(`409 LINK_REQUIRED`): it is linked or banned. A restored steward that reports a tamper code again
+returns to `tampered` on its next heartbeat.
+
+**Repair delivery.** The request is accepted with `202`: the operator's approval must
+equal exactly the loss set the steward last reported (`409 loss_approval_required`
+with the codes otherwise; unknown codes are `400`), the request is stored as a
+single-use nonce plus audit events (`steward_tamper_repair_requested`, `..._running`,
+`..._failed`, `..._completed`, `..._cancelled`), signed over (steward ID, repair ID,
+loss digest, expiry) with the command signer, valid for 7 days, and sent at once to a
+connected steward or on its next connect (`DeliverPendingRepair`). A new request
+cancels the previous unresolved one; a ban that wins the race cancels the request.
+
+**Repair completion.** The steward finishes through the refresh-complete endpoint
+addressed to its old device ID. In order, aborting with nothing swapped on any failure:
+revocation, status and format checks; both identity-key proofs against the **current**
+stored key (so a holder of a stolen certificate cannot burn the nonce); consume the
+single-use nonce; compare-and-swap rebind of the record to the new device key
+(`RebindStewardIdentityIf`, so of two completions against the same key exactly one
+succeeds); revoke every serial **before** the new CSR is signed (the new certificate
+shares the steward's CN); evict the live stream; sign the CSR. The response carries the
+certificate and issuer chain only. The completion is audited with its source address
+and kept for 24 hours so a lost response is retried with the same key.
+
+**Return to trusted and contested repairs.** Two guards read the audit events, so every
+node reaches the same decision:
+
+- **Quiet window.** `HandleRepairHeartbeat` moves the steward `tampered` → `active`,
+  audits `steward_tamper_repaired` and sends `TamperState{locked: false}` only on a
+  heartbeat that reports `repair.completed` for the latest repair, carries no tamper
+  code, and arrives on a stream authenticated by the **new** serial, after 10 minutes
+  have passed since the completion with no contested signal.
+- **Contested (`repair.contested`).** For 24 hours after the completion, any use of a
+  retired credential marks the steward `tampered` again, cancels a pending repair,
+  audits `steward_tamper_repair_contested` with its source, and emails the tenant's
+  administrators. Sources: `revoked_serial` (a connection on a revoked serial; armed
+  once the first connection on the new serial was recorded as
+  `steward_tamper_repair_new_serial_seen`, or after the quiet window), `retired_key_refresh`
+  (a refresh that proves possession of the retired key), `clone_of` (a registration
+  naming the steward) and `identity_conflict`. It stays `tampered` until an operator
+  restores or bans it; a later healthy heartbeat does not clear it.
+
+Accepted residual: when two parties hold identical keys no protocol can tell them
+apart, so the first valid completion wins. A thief who wins and whose victim host
+stays offline for the whole watch window is treated as trusted after the quiet window.
+The compensating controls are the completion audit event with its source address, the
+immediate administrator notice on any retired-credential use, and the always-available
+ban.
+
+#### Locked Admission After Broken Trust
+
+A registration that carries `clone_reason: broken_trust` is admitted **locked**: after
+the approval hook approves it, the controller issues a credential, writes the steward
+record with status `tampered`, and writes a pending entry that records `clone_of`.
+The new identity receives nothing but the credential until an operator ends it.
+
+- `clone_of` is kept only when it names an existing steward in the **registration
+  token's tenant** (the tenant is never taken from the request) and no other pending
+  entry already names that old ID. Otherwise the identity is admitted with no old ID and
+  the response is identical. A registration naming a banned (`revoked`) steward as
+  `clone_of` is refused (`403`).
+- Each registration token may have at most 5 pending locked admissions
+  (`429` beyond that, audited as `registration_rejected` with `locked_admission_cap`).
+- Admissions are audited as `steward_locked_admission`; one notification covers all
+  locked admissions on a token in a one-hour window
+  (`steward_locked_admission_notified`).
+
+**Link** (`POST /api/v1/stewards/{id}/identity/move` with the locked copy's
+`pending_id`; `cfg steward move-identity <id> --to <pending-id>`; AssuranceStrong):
+the copy is retired and its credential revoked, the old record is rebound to the copy's
+device identity, the old ID's own credentials are revoked, and the pending entry is
+pointed at the old ID, approved, then superseded so it can never be claimed. Every step
+is idempotent and audited (`steward_identity_link_step`), a failure up to the approval
+leaves the old record as it was, and a retry completes a link that stopped part-way. If
+the old record heartbeated within 10 minutes the machine holding it may be the real one,
+and the request needs `"confirm_live": true` (`409 CONFIRM_LIVE_REQUIRED` otherwise,
+audited `steward_identity_link_refused`). The old record keeps its current status until
+it is restored. **Ban** the locked copy with the tamper ban verb, which revokes only the
+copy.
 
 ### Steward Tracking
 
