@@ -19,7 +19,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
-	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // Security-focused tests for the controller server
@@ -141,7 +140,7 @@ func TestServer_New_SecurityValidation(t *testing.T) {
 			config: func() *config.Config {
 				certDir := tempDir + "/cert-mgmt"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
+				PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
 					Certificate: &config.CertificateConfig{
@@ -386,7 +385,7 @@ func TestServer_SecurityConfiguration(t *testing.T) {
 			config: func() *config.Config {
 				certDir := tempDir + "/prod-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
+				PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
 					Storage: &config.StorageConfig{
@@ -510,7 +509,7 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/excessive-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
+				PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
 					Storage: &config.StorageConfig{
@@ -576,7 +575,7 @@ func TestServer_SecurityEdgeCases_And_AttackVectors(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/wildcard-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
+				PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "0.0.0.0:0",
 					Storage: &config.StorageConfig{
@@ -887,7 +886,7 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/short-validity-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
+				PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
 					Certificate: &config.CertificateConfig{
@@ -922,7 +921,7 @@ func TestServer_CertificateSecurityValidation(t *testing.T) {
 			configFunc: func() *config.Config {
 				certDir := tempDir + "/auto-renewal-certs"
 				_ = os.MkdirAll(certDir, 0700)
-				testutil.PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
+				PreInitControllerForTest(t, certDir, filepath.Join(certDir, "ca"))
 				return &config.Config{
 					ListenAddr: "127.0.0.1:0",
 					Certificate: &config.CertificateConfig{
@@ -985,8 +984,8 @@ func TestServer_EnvironmentSecurityIsolation(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tempDir2) }()
 
 	// Pre-initialize both CA directories before server creation
-	testutil.PreInitControllerForTest(t, tempDir1, filepath.Join(tempDir1, "ca"))
-	testutil.PreInitControllerForTest(t, tempDir2, filepath.Join(tempDir2, "ca"))
+	PreInitControllerForTest(t, tempDir1, filepath.Join(tempDir1, "ca"))
+	PreInitControllerForTest(t, tempDir2, filepath.Join(tempDir2, "ca"))
 
 	// Test that servers created with different configurations are properly isolated
 	config1 := &config.Config{

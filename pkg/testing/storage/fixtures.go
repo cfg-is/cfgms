@@ -19,6 +19,8 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for CreateTestStorageManager's OSS composite
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"   // register sqlite provider for CreateTestStorageManager's OSS composite
 	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
