@@ -52,7 +52,7 @@ source .env.test
 docker-compose -f docker-compose.test.yml -f docker-compose.test.override.yml up -d
 
 # Run tests
-go test -v -tags=integration ./pkg/testing/storage/...
+go test -v -tags=integration ./features/controller/server/...
 ```
 
 ## 🔒 Security Features
