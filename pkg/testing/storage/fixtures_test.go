@@ -52,37 +52,6 @@ func TestStorageTestFixture_Creation(t *testing.T) {
 	assert.Contains(t, dbConfig.Config, "password")
 }
 
-func TestStorageTestFixture_ControllerConfig(t *testing.T) {
-	fixture := NewStorageTestFixture(t)
-	defer fixture.Cleanup()
-
-	t.Run("flatfile_provider_controller_config", func(t *testing.T) {
-		config, err := fixture.CreateControllerConfig("flatfile")
-		require.NoError(t, err, "Should create flatfile controller config")
-		require.NotNil(t, config, "Config should not be nil")
-
-		require.NotNil(t, config.Storage, "Storage config should be set")
-		assert.Equal(t, "flatfile", config.Storage.Provider)
-		assert.NotNil(t, config.Storage.Config, "Storage provider config should be set")
-	})
-
-	t.Run("database_provider_controller_config", func(t *testing.T) {
-		config, err := fixture.CreateControllerConfig("database")
-		require.NoError(t, err, "Should create database controller config")
-		require.NotNil(t, config, "Config should not be nil")
-
-		require.NotNil(t, config.Storage, "Storage config should be set")
-		assert.Equal(t, "database", config.Storage.Provider)
-		assert.NotNil(t, config.Storage.Config, "Storage provider config should be set")
-	})
-
-	t.Run("invalid_provider_should_fail", func(t *testing.T) {
-		_, err := fixture.CreateControllerConfig("invalid-provider")
-		assert.Error(t, err, "Should fail for invalid provider")
-		assert.Contains(t, err.Error(), "not configured", "Error should mention configuration issue")
-	})
-}
-
 func TestStorageTestFixture_ProviderValidation(t *testing.T) {
 	fixture := NewStorageTestFixture(t)
 	defer fixture.Cleanup()

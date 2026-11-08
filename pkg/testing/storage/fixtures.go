@@ -16,7 +16,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile" // register flatfile provider for CreateTestStorageManager's OSS composite
@@ -43,10 +42,10 @@ func isUnsupportedStoreError(err error) bool {
 	return strings.Contains(err.Error(), "operation not supported")
 }
 
-// isInfrastructureRequired determines if infrastructure should be available
+// IsInfrastructureRequired determines if infrastructure should be available
 // Returns true in CI environments or when Docker/infrastructure is explicitly enabled
 // Returns false when running in short mode (unit tests only)
-func isInfrastructureRequired() bool {
+func IsInfrastructureRequired() bool {
 	// Integration test mode explicitly disabled (e.g., -short flag)
 	if os.Getenv("CFGMS_TEST_INTEGRATION") == "0" {
 		return false
@@ -91,7 +90,7 @@ func requireInfrastructureOrSkip(t *testing.T, err error, component string) {
 		return
 	}
 
-	if isInfrastructureRequired() {
+	if IsInfrastructureRequired() {
 		t.Fatalf("REQUIRED INFRASTRUCTURE MISSING: %s is not available in CI/integration environment: %v", component, err)
 	} else {
 		t.Skipf("%s not available in development environment: %v", component, err)
@@ -215,25 +214,6 @@ func (f *StorageTestFixture) setupSQLiteConfig(t *testing.T) {
 func (f *StorageTestFixture) GetProviderConfig(provider string) (*StorageTestConfig, bool) {
 	config, exists := f.Configs[provider]
 	return config, exists
-}
-
-// CreateControllerConfig creates a complete controller configuration using the specified storage provider
-func (f *StorageTestFixture) CreateControllerConfig(provider string) (*config.Config, error) {
-	storageConfig, exists := f.GetProviderConfig(provider)
-	if !exists {
-		return nil, fmt.Errorf("storage provider not configured in test fixture: %s", provider)
-	}
-
-	return &config.Config{
-		ListenAddr: "127.0.0.1:0",
-		Certificate: &config.CertificateConfig{
-			EnableCertManagement: false,
-		},
-		Storage: &config.StorageConfig{
-			Provider: storageConfig.Provider,
-			Config:   storageConfig.Config,
-		},
-	}, nil
 }
 
 // ValidateStorageProvider tests that a storage provider can be initialized successfully

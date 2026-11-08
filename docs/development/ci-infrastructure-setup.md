@@ -74,7 +74,7 @@ This validates infrastructure and runs all integration tests.
 #### 3. Run Individual Tests with Infrastructure
 
 ```bash
-./scripts/test-with-infrastructure.sh go test -v ./pkg/testing/storage/
+./scripts/test-with-infrastructure.sh go test -v ./features/controller/server/
 ```
 
 ### For CI/CD Pipeline
