@@ -132,8 +132,48 @@ confirm it still exits non-zero — then discard the scratch change.
 
 - **Purpose**: Deep semantic / data-flow analysis (taint tracking) for vulnerability classes like path-injection (CWE-22), log-injection (CWE-117), and clear-text logging (CWE-312)
 - **Scope**: Whole-program data flow, run in GitHub Actions (`codeql-analysis.yml`)
-- **Blocking**: Findings post as PR review threads; main's ruleset requires thread resolution, so they gate release PRs in practice
+- **Blocking**: The required `CodeQL` context is satisfied by the `codeql-summary` job, which fails only when the analysis job fails (build, extraction or SARIF upload) — not on alerts, because `fail-on` is unset. Whether a new alert blocks enqueueing through the native `github-advanced-security` `CodeQL` check is **open** (see [What blocks a Go PR with a new CodeQL alert](#what-blocks-a-go-pr-with-a-new-codeql-alert)). Findings also post as PR review threads; main's ruleset requires thread resolution, so they gate release PRs in practice
 - **SARIF Support**: Native (results land in the Security → Code scanning tab)
+
+#### What blocks a Go PR with a new CodeQL alert
+
+Spike #5973. This subsection records what is established and what is not. It changes no workflow. Three kinds of evidence are used and labelled:
+
+- **[repo]** — read from files in this repository at the time of writing; re-checkable with `git`.
+- **[observed 2026-11-07]** — a live observation recorded on #5973 for PR #5965 (head `95909f340e69d00c08b12b3053fc563ef8620d60`). It was not re-queried when this subsection was written.
+- **[open]** — not established. The session that wrote this subsection had no GitHub API access, so the historical-run search, the merge_group commit check runs and the repository settings were **not** collected. Nothing marked open may be read as fact.
+
+**Check runs named `CodeQL`**
+
+| Event | Check run `CodeQL` from app (`app.slug`) | Posted by | Conclusion on a Go PR with no alert | Posted? |
+|---|---|---|---|---|
+| `pull_request` (Go/web/CodeQL-config paths) | `github-actions` | `codeql-analysis.yml` job `codeql-summary` (`name: CodeQL`), [run 42256356085](https://github.com/cfg-is/cfgms/actions/runs/42256356085) on PR [#5965](https://github.com/cfg-is/cfgms/pull/5965) | `success` [observed 2026-11-07] | yes [observed 2026-11-07] |
+| `pull_request` (Go/web/CodeQL-config paths) | `github-advanced-security` | native code scanning, not a workflow job | `success` [observed 2026-11-07] | yes [observed 2026-11-07] |
+| `pull_request` (no Go/web paths) | `github-actions` | `codeql-stub.yml` job `CodeQL`; always `success` [repo] | `success` [repo] | yes [repo] |
+| `merge_group` | `github-actions` | `codeql-analysis.yml` job `codeql-summary`; `merge_group` ignores `paths`, so it runs for every group [repo] | no live merge_group run was read — [open] | yes by configuration [repo]; no live commit read — [open] |
+| `merge_group` | `github-advanced-security` | native code scanning | [open] | [open]: the `merge_group` comment in `codeql-analysis.yml` says the native status is PR-only; no merge_group commit's check runs (`gh api repos/cfg-is/cfgms/commits/<sha>/check-runs?per_page=100`) were read to verify it |
+
+The matrix jobs report as `CodeQL Analysis (go)` and `CodeQL Analysis (javascript-typescript)` (job name × matrix language) [repo]; they are not named `CodeQL`.
+
+**1. The `codeql-summary` job [repo].** `codeql-summary` has `needs: [analyze]` and `if: always()`, and exits 0 only when `needs.analyze.result == success`. It therefore concludes `failure` when `analyze` fails for any reason, including the 34 SARIF upload errors the spike measured in merge-queue runs over 14 days (counts from the Actions API, per #5973). It never reads alert data.
+
+**2. `analyze` and the commented-out `fail-on` [repo].** The `Perform CodeQL Analysis` step has `# fail-on: high` commented out ("disabled for initial setup"). By configuration, `analyze` — and so `codeql-summary` — does not fail because alerts exist. This matches the claim in `.claude/agents/acceptance-reviewer.md` Phase 2.1 that CodeQL "runs advisory". A live run with a new alert whose `codeql-summary` concluded `success` was not read, so the conclusion in practice is [open] even though the configuration points one way.
+
+**3. The `github-advanced-security` `CodeQL` check.**
+
+- Pull request: posted, `success` on a Go PR [observed 2026-11-07]. Whether it concludes `failure` when the PR introduces a new, undismissed alert is [open]. Two in-repo statements point in different directions and neither is run evidence: `.claude/agents/security-engineer.md` describes a failing `CodeQL` check whose summary "states the new alert counts directly", while `.claude/agents/acceptance-reviewer.md` says CodeQL "concludes `success` even with findings" (that sentence is about the workflow job, not necessarily the native check).
+- merge_group: [open] (see the table).
+- Check-failure threshold: [open]. `Develop Branch Protection` (ruleset 11647684) has no `code_scanning` rule [observed 2026-11-07], so a ruleset alert threshold does not apply. The repository's own code-scanning check-failure threshold could not be read from this session. GitHub documents the configurable thresholds (None, Critical, High or higher, Medium or higher, All) in [Set code scanning merge protection](https://docs.github.com/en/code-security/code-scanning/managing-your-code-scanning-configuration/set-code-scanning-merge-protection); that page does not state a default.
+
+**4. The unpinned ruleset context.** `required_status_checks` lists context `CodeQL` with no `integration_id`, so a check run named `CodeQL` from any app can satisfy it [observed 2026-11-07]. On a Go PR two such check runs exist (table above). Which of them GitHub evaluates — all, the latest, or the first — when their conclusions differ is [open]; no GitHub documentation was found that answers it, and none is cited.
+
+**Can a Go PR with a new, undismissed CodeQL alert be enqueued?** Not established. What the configuration does establish: the `github-actions` `CodeQL` check run (`codeql-summary`) cannot be the check that rejects such a PR, on `pull_request` or on `merge_group`, because it reads only the job result and `fail-on` is unset. Whether the PR is blocked therefore depends only on the `github-advanced-security` `CodeQL` check (a failing conclusion on the PR, a threshold that classifies the alert, and GitHub evaluating that check rather than the passing `github-actions` one) — each [open]. Independently of GitHub's checks, the agent pipeline's acceptance review (`.claude/agents/acceptance-reviewer.md` Phase 2.1) blocks agent PRs on new alerts on the PR merge ref [repo]; it does not cover human-authored PRs.
+
+**Contradictions with existing comments [repo].** The header of `codeql-stub.yml` and the `merge_group` comment in `codeql-analysis.yml` say a stub on merge_group "would false-green a Go PR's real findings", and `.github/workflows/README.md` calls the real analysis "authoritative" in the queue. Given items 1 and 2, the merge_group `codeql-summary` run does not turn alerts into a failure, so those comments describe a gate the configuration does not provide unless the native check is posted on merge_group (open). They are corrected by the follow-up story that changes the workflow, not by this change.
+
+**To close the open items** (read-only, needs GitHub access): (a) find a past Go PR where a `github-advanced-security` `CodeQL` check run concluded other than `success`, read its check runs and `mergeStateStatus`; (b) read `commits/<sha>/check-runs?per_page=100` for a recent merge_group commit and record every check run named `CodeQL` with its `app.slug` and conclusion; (c) read the repository's code-scanning check-failure threshold from Settings; (d) if history cannot answer (a), use a throwaway **draft** PR adding one well-known test pattern, never mark it ready or enqueue it, record its check runs and `mergeStateStatus`, and close it unmerged.
+
+**Implication for the merge-queue run.** From the configuration alone, the merge_group analysis can reject a queue entry only through an analysis or upload failure, never through an alert; the 34 evictions in 14 days were all of that kind. Removing it would therefore not let an alert through that `codeql-summary` would have caught. It could still change the outcome if the native check is posted on merge_group and fails there, which is open. The follow-up story must not remove the merge_group analysis until items (a)–(c) are answered. If it is removed, `merge_group` must still produce a `CodeQL`-named job (for example a stub that triggers on `merge_group`), because a `CodeQL`-required queue otherwise waits forever; `test_codeql_context_present_on_merge_group` in `scripts/test-scripts.sh` fails if neither workflow provides one.
 
 #### Custom models & false positives (IMPORTANT)
 

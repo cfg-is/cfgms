@@ -1070,6 +1070,105 @@ test_unit_tests_aggregator_no_python_gate() {
 
 
 
+# The `CodeQL` ruleset context must exist on merge_group (Issue #5973). The
+# required status check `CodeQL` is satisfied by the codeql-summary job in
+# codeql-analysis.yml; codeql-stub.yml is pull_request-only. If neither workflow
+# runs a `CodeQL`-named job on merge_group, a `CodeQL`-required merge queue
+# waits forever for a context that never arrives (the failure Issue #2609 fixed).
+# codeql_merge_group_context_ok passes when at least one of the given workflow
+# files (a) lists `merge_group` under `on:` and (b) defines a job whose `name:`
+# is exactly `CodeQL` with a job-level `if:` that is absent or exactly
+# `always()`. Any other `if:` fails on purpose: a condition that could skip the
+# job on merge_group must update this test deliberately. Extraction is plain
+# awk over the fixed layout these workflows use (2-space job keys, 4-space job
+# properties); no YAML library is used.
+codeql_merge_group_context_ok() {
+    local file verdict
+    for file in "$@"; do
+        [[ -f "$file" ]] || continue
+        verdict="$(awk '
+            function val(line,    v) {
+                v = line
+                sub(/^[^:]*:[[:space:]]*/, "", v)
+                sub(/[[:space:]]+#.*$/, "", v)
+                sub(/[[:space:]]+$/, "", v)
+                gsub(/^["\047]|["\047]$/, "", v)
+                return v
+            }
+            /^[A-Za-z_"\047-]+:/ { top = $0; sub(/:.*/, "", top); gsub(/["\047]/, "", top); next }
+            top == "on" && /^  merge_group:/ { mg = 1; next }
+            top == "jobs" && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { job = $1; sub(/:$/, "", job); next }
+            top == "jobs" && /^    name:/ { jname[job] = val($0); next }
+            top == "jobs" && /^    if:/ { jif[job] = val($0); hasif[job] = 1; next }
+            END {
+                ok = 0
+                for (j in jname) {
+                    if (jname[j] != "CodeQL") continue
+                    if (!(j in hasif) || jif[j] == "always()") ok = 1
+                    else { ok = 0; bad = 1 }
+                }
+                print (mg && ok && !bad) ? "ok" : "no"
+            }
+        ' "$file")"
+        [[ "$verdict" == "ok" ]] && return 0
+    done
+    return 1
+}
+
+test_codeql_context_present_on_merge_group() {
+    log_test "Testing a CodeQL job runs on merge_group (Issue #5973)..."
+
+    local analysis="${1:-.github/workflows/codeql-analysis.yml}"
+    local stub="${2:-.github/workflows/codeql-stub.yml}"
+    if [[ ! -f "$analysis" || ! -f "$stub" ]]; then
+        log_fail "CodeQL merge_group context: $analysis or $stub not found"
+        return
+    fi
+
+    if codeql_merge_group_context_ok "$analysis" "$stub"; then
+        log_pass "a workflow lists merge_group and defines an unconditional job named CodeQL"
+    else
+        log_fail "no workflow lists merge_group and defines a job named CodeQL with no job-level if: (or if: always()); the merge queue would wait forever for the required CodeQL context"
+    fi
+
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+
+    # Negative 1: merge_group trigger (and its branches: block) removed.
+    awk '
+        /^  merge_group:/ { skip = 1; next }
+        skip && /^    / { next }
+        { skip = 0; print }
+    ' "$analysis" > "$tmp_dir/no-merge-group.yml"
+    if cmp -s "$analysis" "$tmp_dir/no-merge-group.yml"; then
+        log_fail "CodeQL merge_group negative case: removing merge_group from $analysis changed nothing (test is vacuous)"
+    elif codeql_merge_group_context_ok "$tmp_dir/no-merge-group.yml" "$stub"; then
+        log_fail "CodeQL merge_group check accepted a copy with the merge_group trigger removed"
+    else
+        log_pass "CodeQL merge_group check rejects a copy with the merge_group trigger removed"
+    fi
+
+    # Negative 2: the CodeQL job's job-level if: restricted to pull_request.
+    sed "s/^    if: always()\$/    if: github.event_name == 'pull_request'/" "$analysis" > "$tmp_dir/pr-only-if.yml"
+    if cmp -s "$analysis" "$tmp_dir/pr-only-if.yml"; then
+        log_fail "CodeQL merge_group negative case: no job-level 'if: always()' found in $analysis to replace (test is vacuous)"
+    elif codeql_merge_group_context_ok "$tmp_dir/pr-only-if.yml" "$stub"; then
+        log_fail "CodeQL merge_group check accepted a copy whose CodeQL job has if: github.event_name == 'pull_request'"
+    else
+        log_pass "CodeQL merge_group check rejects a copy whose CodeQL job has a pull_request-only if:"
+    fi
+
+    # Positive: an absent job-level if: is accepted (always() is optional).
+    sed "/^    if: always()\$/d" "$analysis" > "$tmp_dir/no-if.yml"
+    if codeql_merge_group_context_ok "$tmp_dir/no-if.yml" "$stub"; then
+        log_pass "CodeQL merge_group check accepts a CodeQL job with no job-level if:"
+    else
+        log_fail "CodeQL merge_group check rejected a CodeQL job with no job-level if:"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
 # Fixture suite for scripts/install-git-hooks.sh (Issue #4150). A pre-push hook run
 # from a linked worktree inherits GIT_DIR; running make test with it set let one
 # `git init` in a scratch directory flip the MAIN repository to core.bare=true.
@@ -2853,6 +2952,7 @@ DISPATCH_TABLE=(
     "test_check_no_banned_exec_patterns:core"
     "test_check_dead_packages:core"
     "test_unit_tests_aggregator_no_python_gate:core"
+    "test_codeql_context_present_on_merge_group:core"
     "test_install_git_hooks:core"
     "test_verify_nancy_ignore_scope:core"
     "test_security_trivy_init_error:core"
