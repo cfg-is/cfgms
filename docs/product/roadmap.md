@@ -21,6 +21,23 @@ failures are not. Full CLI parity is deferred.
 | General read-only investigation agent | Reuse cockpit #2854, evidence cards and case updates. Define hypothesis/tool iteration, a shared operator input and open-question cards; existing findings rendering does not establish those capabilities. |
 | Microsoft 365 integration | Reuse directory inventory/convergence and read surfaces under [#5497](https://github.com/cfg-is/cfgms/issues/5497). Exact beta operations remain a product scope decision. |
 
+#### Early-beta delivery enablers
+
+These do not add operator features. They are how merged changes are validated
+continuously on a running deployment before beta users depend on them.
+
+| Enabler | Existing work and boundary |
+|---------|----------------------------|
+| Continuous deployment to a test cell | [#5980](https://github.com/cfg-is/cfgms/issues/5980): a pull-based flow on the test cell's own infrastructure builds, signs with a test-cell key and deploys the newest green `develop` revision to the controller and, when steward code changed, the steward fleet, with automatic rollback. CI publishes no per-commit artifacts or signed releases. Steward auto-rollout depends on fix issues [#5976](https://github.com/cfg-is/cfgms/issues/5976) and [#5977](https://github.com/cfg-is/cfgms/issues/5977). Production deployment is out of scope. |
+| Zero-downtime schema evolution | [#5978](https://github.com/cfg-is/cfgms/issues/5978): an N/N-1 expand/contract contract so schema changes ship under continuous rolling deploys. |
+| Test-cell observability and alerting | [#5979](https://github.com/cfg-is/cfgms/issues/5979): signals, deploy markers, retained history and an alert sink that an agent operations session consumes. Thresholds are measured before they are set. |
+| Continuous load and chaos | [#5981](https://github.com/cfg-is/cfgms/issues/5981) runs low-footprint virtual and real stewards against the test cell continuously. [#5982](https://github.com/cfg-is/cfgms/issues/5982) runs scheduled fault injection checked against steady-state hypotheses. |
+
+The deploy agent, load harness and chaos runner live in the
+[cfgms-tooling](https://github.com/cfg-is/cfgms-tooling) repository. Product
+hooks stay in this repository. Test-cell environment details are kept out of
+both.
+
 ### Launch
 
 | Outcome | Remaining acceptance or scope boundary |
