@@ -48,10 +48,12 @@ import {
   type VersionedWorkflow,
   type WorkflowExecution,
 } from './useWorkflows.ts'
+import PublishButton from './PublishButton.tsx'
 import RunBar from './RunBar.tsx'
 import RunInputsForm from './RunInputsForm.tsx'
 import SchedulePanel from './SchedulePanel.tsx'
 import YamlPane from './YamlPane.tsx'
+import { publicationFrom, type PublicationInfo } from './publishWorkflow.ts'
 import {
   RunError,
   buildPayload,
@@ -401,6 +403,9 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+  // A save replaces the stored version and drops its publication, so it starts from
+  // the loaded workflow and is cleared by a successful save.
+  const [publication, setPublication] = useState<PublicationInfo | null>(() => publicationFrom(workflow.raw?.publication))
   const [newName, setNewName] = useState('')
   const validation = useValidateWorkflow()
   const [execId, setExecId] = useState<string | null>(null)
@@ -569,6 +574,7 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
       }
       setDirty(false)
       setSaved(true)
+      setPublication(null)
       if (isNew) navigate(`/workflows/${encodeURIComponent(name)}/builder`, { replace: true })
     } catch (cause: unknown) {
       setSaveError(cause instanceof Error && cause.message ? cause.message : 'Save failed')
@@ -684,6 +690,14 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
         >
           {starting ? 'Starting…' : 'Run'}
         </button>
+        <PublishButton
+          name={workflow.name}
+          version={workflow.version}
+          isNew={isNew}
+          unsaved={dirty || saving}
+          publication={publication}
+          onPublished={setPublication}
+        />
         <button
           type="button"
           className="wf-btn"
