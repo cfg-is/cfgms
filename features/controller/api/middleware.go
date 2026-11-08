@@ -1071,49 +1071,49 @@ func apiKeyExpired(key *APIKey, now time.Time) bool {
 	return key.ExpiresAt != nil && now.After(*key.ExpiresAt)
 }
 
+// authSourceOutcome is what one credential source decided about a request.
+type authSourceOutcome int
+
+const (
+	// authSourceSkipped: the request carries no credential of this source; the next
+	// source is tried.
+	authSourceSkipped authSourceOutcome = iota
+	// authSourceRejected: the source answered the request with an error response; no
+	// later source runs and the handler is not reached.
+	authSourceRejected
+	// authSourceAuthenticated: the request the source returned carries the resolved
+	// principal and its context; the handler runs with it.
+	authSourceAuthenticated
+)
+
+// serveIfAuthenticated runs next with req only when the source authenticated the
+// request. A rejected source has already written its response.
+func serveIfAuthenticated(next http.Handler, w http.ResponseWriter, req *http.Request, outcome authSourceOutcome) {
+	if outcome == authSourceAuthenticated {
+		next.ServeHTTP(w, req)
+	}
+}
+
 // authenticationMiddleware validates incoming requests via mTLS admin cert or API key.
 // States: (a) admin-marked cert only → admin principal; (b) admin-marked cert + header → 400;
 // (c) cert without admin marker → fall through to API-key auth; (d) no cert → API-key auth.
 // M-AUTH-1: Load API keys from secret store on-demand if not in cache.
 // Issue #1675: relay-injected principals bypass normal auth when relayPrincipalKey is set.
+//
+// The credential sources are tried in a fixed order, first match wins: relay principal,
+// mTLS admin certificate, automation grant, Bearer session token, web session cookie,
+// API key. Each is its own method returning authSourceSkipped (not this source's
+// credential), authSourceRejected (response written) or authSourceAuthenticated.
 func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Issue #1675: relay principal — pre-validated by RelayHandler after grant check.
-		// The relayPrincipalKey is set only in the relay handler after LookupGrant succeeds,
-		// so this path can only be reached via an internal in-process call, never from the
-		// network. The principalContextKey is also set by the relay handler before calling
-		// ServeHTTP, so the context already carries both keys.
-		if injected, ok := r.Context().Value(relayPrincipalKey).(*Principal); ok && injected != nil {
-			// principalContextKey is already set by the relay handler; just proceed.
-			if s.refuseUnscopedPrincipal(w, injected) {
-				return
-			}
-			next.ServeHTTP(w, r)
+		if req, outcome := s.authenticateRelayPrincipal(w, r); outcome != authSourceSkipped {
+			serveIfAuthenticated(next, w, req, outcome)
 			return
 		}
 
 		// H2: mTLS-presented identity always wins.
-		if adminPrincipal := s.extractAdminPrincipal(r); adminPrincipal != nil {
-			// H2/L5: Conflicting credentials — cert AND header present → reject.
-			if hasHeaderCredentials(r) {
-				s.writeErrorResponse(w, http.StatusBadRequest,
-					"Conflicting credentials: mTLS admin cert and API key header cannot both be present",
-					"CONFLICTING_CREDENTIALS")
-				return
-			}
-			// Cert-auth success: set principal context and proceed.
-			if s.refuseUnscopedPrincipal(w, adminPrincipal) {
-				return
-			}
-			ctx := context.WithValue(r.Context(), principalContextKey, adminPrincipal)
-			ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(adminPrincipal.ID))
-			ctx = context.WithValue(ctx, ctxkeys.TenantID, adminPrincipal.TenantID)
-			// Sole call site for ctxkeys.NewRootScope (via scopeForVerifiedAdminCert),
-			// enforced by ctxkeys' restricted-caller architecture test (Issue #4316).
-			ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, principalTenantScope(adminPrincipal))
-			ctx = context.WithValue(ctx, authRecheckContextKey, s.adminCertRecheck(r.TLS.PeerCertificates[0]))
-			ctx = context.WithValue(ctx, principalRefreshContextKey, s.adminCertRefresh(r.TLS.PeerCertificates[0]))
-			next.ServeHTTP(w, r.WithContext(ctx))
+		if req, outcome := s.authenticateAdminCert(w, r); outcome != authSourceSkipped {
+			serveIfAuthenticated(next, w, req, outcome)
 			return
 		}
 
@@ -1127,446 +1127,586 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Session-token path (Issue #2232): intercept Bearer tokens that are 43 chars
-		// (base64url without padding for 32 random bytes — length-distinguishable from
-		// API keys, which use base64url with padding: 44 chars). Only attempted when a
-		// sessionManager is wired; falls through to API-key path otherwise.
-		//
-		// Contract:
-		//   - Token present, 43 chars, manager wired, valid   → admin Principal from session + X-Session-Token header
-		//   - Token present, 43 chars, manager wired, invalid → 401 (no fallthrough to API-key)
-		//   - Token present, non-43 chars OR manager nil       → fall through to API-key path
-		if s.sessionManager != nil {
-			authHeader := r.Header.Get("Authorization")
-			if strings.HasPrefix(authHeader, "Bearer ") {
-				bearerToken := strings.TrimPrefix(authHeader, "Bearer ")
-				// sessionTokenLen is the exact length of a session token:
-				// base64.RawURLEncoding of 32 bytes = 43 chars (no padding).
-				const sessionTokenLen = 43
-				if len(bearerToken) == sessionTokenLen {
-					// Pass source IP to Validate for IP-change detection (ADR-021 Decision 5).
-					// SplitHostPort extracts just the host; errors are ignored (empty host → no detection).
-					sourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-					validateCtx := session.WithSourceIP(r.Context(), sourceIP)
-					sess, err := s.sessionManager.Validate(validateCtx, bearerToken)
-					if err != nil {
-						switch {
-						case errors.Is(err, session.ErrSessionRevoked):
-							s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
-						case errors.Is(err, session.ErrSessionExpired):
-							s.writeErrorResponse(w, http.StatusUnauthorized, "Session has expired", "SESSION_EXPIRED")
-						default:
-							s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
-						}
-						return
-					}
-					// Renew the session to reset idle TTL; set X-Session-Token when
-					// a new token is issued (empty string = prior-token grace path,
-					// no new token to publish). The raw new token is never logged.
-					_, newToken, renewErr := s.sessionManager.Renew(validateCtx, bearerToken)
-					// A session revoked between Validate and Renew (on any node) must not
-					// proceed: answer with the same 401 as an invalid token.
-					if errors.Is(renewErr, session.ErrSessionRevoked) || errors.Is(renewErr, session.ErrSessionNotFound) {
-						s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
-						return
-					}
-					if renewErr == nil && newToken != "" {
-						w.Header().Set("X-Session-Token", newToken)
-					}
-					// Build a Principal from session state. Assurance is read directly from
-					// the session so that IP-change downgrades (ADR-021 Decision 5) and future
-					// WebAuthn upgrades are reflected on every request rather than fixed at issuance.
-					//
-					// GlobalScope mirrors the session's actual scope (Issue #3194): unscoped sessions
-					// (TenantID=="", matching an unscoped mTLS admin cert) receive cross-tenant
-					// visibility; tenant-scoped sessions are confined to their subtree. Fail-closed:
-					// explicit scope → GlobalScope=false, matching the web-session path's shape.
-					//
-					// Issue #3576: if an account is bound to this session's PrincipalID,
-					// re-resolve TenantID, GlobalScope, and Permissions from that live account
-					// on every request — mirroring the web-cookie branch's per-request account
-					// recheck (Issue #3311). When no account is found, all three fall back to
-					// their session-derived defaults, preserving byte-identical behavior for
-					// today's principals (certificate-derived or root-scope accounts).
-					// An unbound session (no account: minted for an admin-certificate
-					// principal) is root only by an explicit signal — the RootScoped
-					// marker, or a tenant equal to the deployment's root tenant — and
-					// then carries that root tenant (Issue #4665). An unbound session
-					// with an empty tenant, the pre-#4665 form, has no scope at all
-					// and is refused below.
-					rootTenant := s.rootTenantID(r.Context())
-					globalScope := sess.RootScoped || (rootTenant != "" && sess.TenantID == rootTenant)
-					tenantID := sess.TenantID
-					if globalScope {
-						tenantID = rootTenant
-					}
-					// Default: no bound account → certificate-derived or root-scope session → implicit admin.
-					// ImplicitAdmin is set explicitly; permissions is always non-nil (ADR-025 Amendment 3).
-					implicitAdmin := true
-					permissions := []string{}
-					acct, acctErr := s.getAccountByID(r.Context(), sess.PrincipalID)
-					if acctErr != nil {
-						// Fail closed. The bound account is the authority for this
-						// principal's permissions, tenant scope and disabled status, so a
-						// lookup failure (secret-store/SOPS error, git storage error,
-						// ListSecrets failure, context deadline) must not be treated as
-						// "no account found": the no-account fallback sets ImplicitAdmin:
-						// true (the default for certificate-derived sessions), which would
-						// skip the Issue #3126 disabled check and restore session-derived
-						// scope over the authoritative account values — every containment
-						// control would degrade precisely when the store is unhealthy.
-						// A principal with no bound account (certificate-derived CLI
-						// session) returns (nil, nil), not an error, so those sessions
-						// never reach this branch.
-						s.logger.Error("Account lookup failed for session token; failing closed",
-							"principal_id", logging.SanitizeLogValue(sess.PrincipalID),
-							"error", logging.SanitizeLogValue(acctErr.Error()))
-						s.writeErrorResponse(w, http.StatusServiceUnavailable,
-							"Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
-						return
-					}
-					// CLI-login sessions live only while the passkeys that approved them exist
-					// (Issue #5199). Revoking a passkey is how a phished account is contained,
-					// so a legacy CLI session with no recorded credential is refused too
-					// (fail closed; the user re-runs CLI login once) rather than kept until
-					// expiry. A missing account is refused the same way. Sessions from
-					// POST /api/v1/sessions use other connection names and are unaffected.
-					if sess.ConnectionName == cliLoginConnectionName &&
-						(acct == nil ||
-							!accountHoldsCredential(acct, sess.LoginCredentialID) ||
-							(len(sess.CredentialID) > 0 && !accountHoldsCredential(acct, sess.CredentialID))) {
-						if revokeErr := s.sessionManager.Revoke(r.Context(), sess.ID); revokeErr != nil {
-							s.logger.Warn("Failed to revoke cli-login session with a revoked credential",
-								"session_id", logging.SanitizeLogValue(sess.ID),
-								"error", logging.SanitizeLogValue(revokeErr.Error()))
-						}
-						s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
-						return
-					}
-					if acct != nil {
-						if acct.Disabled {
-							// Disabled account: reject with the same 401 a revoked session gets.
-							// Best-effort revocation ensures the token is rejected on subsequent
-							// requests by sessionManager.Validate, but a revocation failure does
-							// not affect this request's 401 (same pattern as the web-cookie branch).
-							if revokeErr := s.sessionManager.Revoke(r.Context(), sess.ID); revokeErr != nil {
-								s.logger.Warn("Failed to revoke session of disabled account",
-									"session_id", logging.SanitizeLogValue(sess.ID),
-									"error", logging.SanitizeLogValue(revokeErr.Error()))
-							}
-							s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
-							return
-						}
-						tenantID = s.accountPrincipalTenant(r.Context(), acct)
-						globalScope = acct.RootScope
-						if acct.RootScope {
-							// Root-scope account: implicit admin, same as a no-account session.
-							// ImplicitAdmin is already true; permissions stays empty.
-						} else {
-							// Tenant-scoped account: enforce RBAC grants verbatim; not implicit admin.
-							implicitAdmin = false
-							permissions = append([]string{}, acct.Permissions...)
-						}
-					}
-					if acct == nil && !globalScope && tenantID == "" {
-						s.writeErrorResponse(w, http.StatusUnauthorized,
-							"Session has no tenant scope; reconnect to obtain a new session", "SESSION_SCOPE_INVALID")
-						return
-					}
-					sessionPrincipal := &Principal{
-						Channel:       AuthChannelCfgBearer,
-						ID:            sess.PrincipalID,
-						Name:          "session:" + logging.SanitizeLogValue(sess.PrincipalID),
-						Assurance:     sess.Assurance,
-						LastProvenAt:  sess.LastProvenAt,
-						GlobalScope:   globalScope,
-						Permissions:   permissions,
-						TenantID:      tenantID,
-						ImplicitAdmin: implicitAdmin,
-						// AccountBound: true only when a live account was resolved for
-						// sess.PrincipalID (Issue #4337) — the no-account fallback above keeps
-						// globalScope's sess.TenantID=="" default, which is not an account-level
-						// root-scope signal and must not be read as one by
-						// subjectToTenantCrossingBoundary.
-						AccountBound: acct != nil,
-						// RootScoped is true when either the session's own explicit marker
-						// (ADR-025 Amendment 1 A1.3, set only by session.Manager.IssueRootScoped
-						// and immutable thereafter) is set, or this request's phishing-resistant
-						// assertion against the bound account qualifies (ADR-025 Amendment 4
-						// A4.1, re-derived every request). Never derived from TenantID or
-						// GlobalScope.
-						RootScoped: sess.RootScoped || rootScopeFromAssertion(acct, sess.Assurance),
-					}
-					if s.refuseUnscopedPrincipal(w, sessionPrincipal) {
-						return
-					}
-					ctx := context.WithValue(r.Context(), principalContextKey, sessionPrincipal)
-					ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(sess.PrincipalID))
-					ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
-					ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, principalTenantScope(sessionPrincipal))
-					ctx = context.WithValue(ctx, authSessionContextKey, authSessionRef{manager: s.sessionManager, id: sess.ID})
-					ctx = context.WithValue(ctx, principalRefreshContextKey, s.sessionPrincipalRefresh(sessionPrincipal, sess.RootScoped))
-					next.ServeHTTP(w, r.WithContext(ctx))
-					return
-				}
-			}
-		}
-
-		// Web session cookie path (Issue #2492, ADR-018 §1,2): authenticate browser clients
-		// via the __Host-cfgms_session HttpOnly+Secure+SameSite=Strict cookie. Credential precedence
-		// (security B5.2): any header credential (Bearer or API key) or admin mTLS ALWAYS wins
-		// — when a header credential is present the cookie is ignored entirely (not validated,
-		// not renewed, no Set-Cookie emitted). This branch only fires when no header credential
-		// is present, ensuring existing Bearer/API-key/mTLS clients are byte-identical.
-		if s.webSessionManager != nil && !hasHeaderCredentials(r) {
-			if cookie, cookieErr := r.Cookie(cookieWebSession); cookieErr == nil {
-				// Pass source IP to Validate for IP-change detection (ADR-021 Decision 5).
-				webSourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-				webValidateCtx := session.WithSourceIP(r.Context(), webSourceIP)
-				webSess, webErr := s.webSessionManager.Validate(webValidateCtx, cookie.Value)
-				if webErr != nil {
-					switch {
-					case errors.Is(webErr, session.ErrSessionRevoked):
-						s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
-					case errors.Is(webErr, session.ErrSessionExpired):
-						s.writeErrorResponse(w, http.StatusUnauthorized, "Session has expired", "SESSION_EXPIRED")
-					default:
-						s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
-					}
-					return
-				}
-				// Rolling renewal: refresh the cookie so the idle TTL resets on every
-				// authenticated response (ADR-018 §1). When the session is already in the
-				// grace window (prior token), Renew returns newToken == "" — do not
-				// overwrite a Set-Cookie the client already received.
-				// A session revoked between Validate and Renew (on any node) must not
-				// proceed: answer with the same 401 as an invalid token. Other Renew
-				// errors stay soft — the next request is re-validated.
-				_, newToken, renewErr := s.webSessionManager.Renew(webValidateCtx, cookie.Value)
-				if errors.Is(renewErr, session.ErrSessionRevoked) || errors.Is(renewErr, session.ErrSessionNotFound) {
-					s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
-					return
-				}
-				if renewErr == nil && newToken != "" {
-					http.SetCookie(w, &http.Cookie{
-						Name:     cookieWebSession,
-						Value:    newToken,
-						HttpOnly: true,
-						Secure:   true,
-						SameSite: http.SameSiteStrictMode,
-						Path:     "/",
-					})
-				}
-				// Build Principal mirroring the Bearer session path (the sessionPrincipal block above).
-				// Assurance and LastProvenAt are read from session state so that IP-change downgrades
-				// and WebAuthn upgrades (Issue #2965) are reflected on every request (ADR-021 Decision 3/5).
-				webAcct, webAcctErr := s.getAccountByID(r.Context(), webSess.PrincipalID)
-				// A web session lives only while the passkeys behind it exist (Issue
-				// #5166): the account is the proof, so every request resolves it. A
-				// lookup error fails closed with 503 and leaves the session intact
-				// (the error may be transient); a missing account proves no
-				// credential and ends the session.
-				if webAcctErr != nil {
-					s.logger.Error("Web session account lookup failed",
-						"session_id", logging.SanitizeLogValue(webSess.ID),
-						"error", logging.SanitizeLogValue(webAcctErr.Error()))
-					s.writeErrorResponse(w, http.StatusServiceUnavailable,
-						"Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
-					return
-				}
-				// endWebSession revokes the session server-side (best effort) so the
-				// rejection is durable, and answers with the same 401 for every reason:
-				// the response must not distinguish "disabled", "passkey revoked" and
-				// "revoked".
-				endWebSession := func(reason string) {
-					s.csrfTokens.Delete(webSess.ID)
-					if revokeErr := s.webSessionManager.Revoke(r.Context(), webSess.ID); revokeErr != nil {
-						s.logger.Warn("Failed to revoke "+reason+" web session",
-							"session_id", logging.SanitizeLogValue(webSess.ID),
-							"error", logging.SanitizeLogValue(revokeErr.Error()))
-					}
-					s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
-				}
-				if webAcct == nil {
-					endWebSession("unbound")
-					return
-				}
-				// Every path below runs only for a resolved account: an unresolvable
-				// one has already been answered with 503 or 401 above. ImplicitAdmin is
-				// only set for a root-scope account (ADR-025 Amendment 3), and
-				// permissions is always non-nil; the nil-sentinel is gone.
-				implicitAdminWeb := false
-				permissions := []string{}
-				{
-					acct := webAcct
-					// Issue #3126: an administratively disabled account loses access
-					// immediately, not at session expiry.
-					if acct.Disabled {
-						endWebSession("disabled-account")
-						return
-					}
-					// Both the login passkey and the last proving passkey must still be
-					// on the account. An empty ID is refused: passkey login, the only
-					// issuer of web sessions, always records both.
-					if !accountHoldsCredential(acct, webSess.LoginCredentialID) ||
-						!accountHoldsCredential(acct, webSess.CredentialID) {
-						endWebSession("revoked-passkey")
-						return
-					}
-					if acct.RootScope {
-						// Root-scope accounts are platform administrators: they hold
-						// every permission, exactly as the mTLS-admin and CLI-session
-						// principals do. This is not an authorization hole — permission
-						// breadth and proof strength are separate layers, and this one
-						// only decides breadth. requirePermission still applies
-						// permissionAssurance immediately afterwards, so the 32
-						// AssuranceStrong permissions still force a WebAuthn step-up from
-						// this AssuranceBasic session, and the 6 RequireUserPresence ones
-						// still demand a fresh single-use presence token. Enumerating all
-						// IDs per account instead would add no assurance gate that is
-						// not already applied, and would silently strip an administrator
-						// of any permission introduced after their account was created.
-						// ADR-025 Amendment 3: ImplicitAdmin replaces the nil-sentinel.
-						implicitAdminWeb = true
-					} else {
-						// Tenant-scoped accounts are least-privilege operators: their
-						// configured RBAC grants are enforced verbatim (Issue #2919).
-						permissions = append(permissions, acct.Permissions...)
-					}
-				}
-				authCount := len(webAcct.Credentials)
-				globalScope := webAcct.RootScope
-				webTenant := s.accountPrincipalTenant(r.Context(), webAcct)
-				webPrincipal := &Principal{
-					Channel:            AuthChannelWebCookie,
-					ID:                 webSess.PrincipalID,
-					Name:               "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),
-					Assurance:          webSess.Assurance,
-					LastProvenAt:       webSess.LastProvenAt,
-					GlobalScope:        globalScope,
-					Permissions:        permissions,
-					TenantID:           webTenant,
-					AuthenticatorCount: authCount,
-					ImplicitAdmin:      implicitAdminWeb,
-					// RootScoped is derived per request from the bound account's RootScope
-					// flag and this session's current assurance being phishing-resistant
-					// (ADR-025 Amendment 4 A4.1) — never stored on the session record, never
-					// inferred from TenantID or GlobalScope. This is the browser-path half of
-					// the asymmetry Amendment 4 closes: before this, a root-scope web session
-					// never carried the marker at all and was therefore unconfined by the
-					// Decision 1 root<->MSP boundary (A4.2).
-					RootScoped: rootScopeFromAssertion(webAcct, webSess.Assurance),
-					// AccountBound: true only when webAcct actually resolved (Issue #4337) —
-					// mirrors the Bearer-session branch's acct != nil signal.
-					AccountBound: webAcct != nil,
-				}
-				if s.refuseUnscopedPrincipal(w, webPrincipal) {
-					return
-				}
-				ctx := context.WithValue(r.Context(), principalContextKey, webPrincipal)
-				ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(webSess.PrincipalID))
-				ctx = context.WithValue(ctx, ctxkeys.TenantID, webTenant)
-				ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, principalTenantScope(webPrincipal))
-				// Issue #2493: mark this request as cookie-authenticated so csrfMiddleware
-				// can enforce the session-bound CSRF check on unsafe methods.
-				ctx = context.WithValue(ctx, cookieAuthContextKey, true)
-				ctx = context.WithValue(ctx, webSessionIDContextKey, webSess.ID)
-				ctx = context.WithValue(ctx, authSessionContextKey, authSessionRef{manager: s.webSessionManager, id: webSess.ID})
-				ctx = context.WithValue(ctx, principalRefreshContextKey, s.sessionPrincipalRefresh(webPrincipal, false))
-				next.ServeHTTP(w, r.WithContext(ctx))
-				return
-			}
-		}
-
-		// API-key path.
-
-		apiKeyStr := requestAPIKey(r)
-		if apiKeyStr == "" {
-			s.writeErrorResponse(w, http.StatusUnauthorized, "API key required", "MISSING_API_KEY")
+		if req, outcome := s.authenticateBearerSession(w, r); outcome != authSourceSkipped {
+			serveIfAuthenticated(next, w, req, outcome)
 			return
 		}
 
-		// A grant credential is never an API key: the prefix is reserved for the grant path.
-		if strings.HasPrefix(apiKeyStr, automationGrantCredentialPrefix) {
-			s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
+		if req, outcome := s.authenticateWebCookie(w, r); outcome != authSourceSkipped {
+			serveIfAuthenticated(next, w, req, outcome)
 			return
 		}
 
-		// Check memory cache first
-		s.mu.RLock()
-		keyInfo, exists := s.apiKeys[apiKeyStr]
-		s.mu.RUnlock()
-
-		// M-AUTH-1: If not in cache, try to load from secret store
-		if !exists {
-			loadedKey, err := s.loadAPIKeyFromStore(r.Context(), apiKeyStr)
-			if err != nil {
-				s.logger.Debug("Failed to load API key from store", "error", logging.SanitizeLogValue(err.Error()))
-				s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
-				return
-			}
-			keyInfo = loadedKey
-		}
-
-		// Check if key is expired
-		now := s.apiKeyNow()
-		if apiKeyExpired(keyInfo, now) {
-			s.writeErrorResponse(w, http.StatusUnauthorized, "API key expired", "EXPIRED_API_KEY")
-			return
-		}
-
-		// Issue #4574: the secret store is the source of truth. A cached, store-backed
-		// entry older than apiKeyRevalidateInterval is re-read from the store so a key
-		// deleted on another controller node stops authenticating here within that
-		// bound. See apiKeyMaxStaleness for how a store outage is handled.
-		if exists && keyInfo.recordRef != "" && now.Sub(keyInfo.validatedAt) >= apiKeyRevalidateInterval {
-			refreshed, err := s.revalidateCachedAPIKey(r.Context(), apiKeyStr, keyInfo, now)
-			switch {
-			case err == nil:
-				keyInfo = refreshed
-			case errors.Is(err, errAPIKeyRevoked):
-				s.logger.Info("Cached API key no longer in secret store; evicted",
-					"id", logging.SanitizeLogValue(keyInfo.ID),
-					"tenant_id", logging.SanitizeLogValue(keyInfo.TenantID))
-				s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
-				return
-			case now.Sub(keyInfo.validatedAt) < apiKeyMaxStaleness:
-				s.logger.Warn("API key re-validation failed; serving cached entry within the staleness bound",
-					"id", logging.SanitizeLogValue(keyInfo.ID),
-					"last_validated", keyInfo.validatedAt.Format(time.RFC3339),
-					"error", logging.SanitizeLogValue(err.Error()))
-			default:
-				s.logger.Error("API key re-validation failed past the staleness bound; refusing request",
-					"id", logging.SanitizeLogValue(keyInfo.ID),
-					"last_validated", keyInfo.validatedAt.Format(time.RFC3339),
-					"error", logging.SanitizeLogValue(err.Error()))
-				s.writeErrorResponse(w, http.StatusServiceUnavailable,
-					"API key could not be validated; retry later", "KEY_VALIDATION_UNAVAILABLE")
-				return
-			}
-		}
-
-		// Convert API key to Principal for uniform authorization handling.
-		principal := apiKeyPrincipal(keyInfo)
-
-		if s.refuseUnscopedPrincipal(w, principal) {
-			return
-		}
-
-		// Add key info and principal to request context
-		ctx := context.WithValue(r.Context(), apiKeyContextKey, keyInfo)
-		ctx = context.WithValue(ctx, principalContextKey, principal)
-		ctx = context.WithValue(ctx, ctxkeys.UserIDKey, keyInfo.ID)
-		ctx = context.WithValue(ctx, ctxkeys.TenantID, keyInfo.TenantID)
-		// API-key principals are never root-scoped (Issue #4316): NewRootScope is
-		// reserved for a verified mTLS admin certificate.
-		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(keyInfo.TenantID))
-		tracker := s.newAPIKeyTracker(keyInfo)
-		ctx = context.WithValue(ctx, authRecheckContextKey, authRecheck(tracker.live))
-		ctx = context.WithValue(ctx, principalRefreshContextKey, tracker.refresh())
-
-		next.ServeHTTP(w, r.WithContext(ctx))
+		req, outcome := s.authenticateAPIKey(w, r)
+		serveIfAuthenticated(next, w, req, outcome)
 	})
+}
+
+// authenticateRelayPrincipal accepts a principal pre-validated by RelayHandler after
+// its grant check (Issue #1675). The relayPrincipalKey is set only in the relay handler
+// after LookupGrant succeeds, so this path can only be reached via an internal
+// in-process call, never from the network. The principalContextKey is also set by the
+// relay handler before calling ServeHTTP, so the context already carries both keys.
+func (s *Server) authenticateRelayPrincipal(w http.ResponseWriter, r *http.Request) (*http.Request, authSourceOutcome) {
+	injected, ok := r.Context().Value(relayPrincipalKey).(*Principal)
+	if !ok || injected == nil {
+		return r, authSourceSkipped
+	}
+	// principalContextKey is already set by the relay handler; just proceed.
+	if s.refuseUnscopedPrincipal(w, injected) {
+		return r, authSourceRejected
+	}
+	return r, authSourceAuthenticated
+}
+
+// authenticateAdminCert authenticates a verified mTLS admin certificate. A request that
+// also carries an API key or Bearer header is rejected (H2/L5).
+func (s *Server) authenticateAdminCert(w http.ResponseWriter, r *http.Request) (*http.Request, authSourceOutcome) {
+	adminPrincipal := s.extractAdminPrincipal(r)
+	if adminPrincipal == nil {
+		return r, authSourceSkipped
+	}
+	// H2/L5: Conflicting credentials — cert AND header present → reject.
+	if hasHeaderCredentials(r) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Conflicting credentials: mTLS admin cert and API key header cannot both be present",
+			"CONFLICTING_CREDENTIALS")
+		return r, authSourceRejected
+	}
+	// Cert-auth success: set principal context and proceed.
+	if s.refuseUnscopedPrincipal(w, adminPrincipal) {
+		return r, authSourceRejected
+	}
+	ctx := context.WithValue(r.Context(), principalContextKey, adminPrincipal)
+	ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(adminPrincipal.ID))
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, adminPrincipal.TenantID)
+	// Sole call site for ctxkeys.NewRootScope (via scopeForVerifiedAdminCert),
+	// enforced by ctxkeys' restricted-caller architecture test (Issue #4316).
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, principalTenantScope(adminPrincipal))
+	ctx = context.WithValue(ctx, authRecheckContextKey, s.adminCertRecheck(r.TLS.PeerCertificates[0]))
+	ctx = context.WithValue(ctx, principalRefreshContextKey, s.adminCertRefresh(r.TLS.PeerCertificates[0]))
+	return r.WithContext(ctx), authSourceAuthenticated
+}
+
+// sessionTokenLen is the exact length of a session token: base64.RawURLEncoding of 32
+// bytes = 43 chars (no padding), length-distinguishable from API keys, which use
+// base64url with padding: 44 chars.
+const sessionTokenLen = 43
+
+// sessionBearerToken returns the Bearer token of the request and whether it has the
+// length of a session token.
+func sessionBearerToken(r *http.Request) (string, bool) {
+	authHeader := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return "", false
+	}
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	return token, len(token) == sessionTokenLen
+}
+
+// writeSessionValidationError answers a failed session Validate with a 401 whose code
+// distinguishes a revoked from an expired from an otherwise invalid token.
+func (s *Server) writeSessionValidationError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, session.ErrSessionRevoked):
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+	case errors.Is(err, session.ErrSessionExpired):
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Session has expired", "SESSION_EXPIRED")
+	default:
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
+	}
+}
+
+// renewSession renews the session behind token to reset its idle TTL. It returns the
+// new token to publish, or "" when none is issued (prior-token grace path, or a Renew
+// error that stays soft: the next request is re-validated). A session revoked between
+// Validate and Renew (on any node) must not proceed: ok is false and the same 401 as an
+// invalid token has been written.
+func (s *Server) renewSession(ctx context.Context, w http.ResponseWriter, mgr session.Manager, token string) (newToken string, ok bool) {
+	_, newToken, renewErr := mgr.Renew(ctx, token)
+	if errors.Is(renewErr, session.ErrSessionRevoked) || errors.Is(renewErr, session.ErrSessionNotFound) {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
+		return "", false
+	}
+	if renewErr != nil {
+		return "", true
+	}
+	return newToken, true
+}
+
+// sessionPrincipalScope is the tenant scope and permissions a session principal
+// carries.
+type sessionPrincipalScope struct {
+	tenantID      string
+	globalScope   bool
+	implicitAdmin bool
+	permissions   []string
+}
+
+// accountSessionScope resolves the scope of a session principal from its live bound
+// account: ImplicitAdmin is only set for a root-scope account (ADR-025 Amendment 3),
+// and permissions is always non-nil. Tenant-scoped accounts are least-privilege
+// operators: their configured RBAC grants are enforced verbatim (Issue #2919).
+func (s *Server) accountSessionScope(ctx context.Context, acct *account) sessionPrincipalScope {
+	scope := sessionPrincipalScope{
+		tenantID:    s.accountPrincipalTenant(ctx, acct),
+		globalScope: acct.RootScope,
+		permissions: []string{},
+	}
+	if acct.RootScope {
+		// Root-scope accounts are platform administrators: they hold every permission,
+		// exactly as the mTLS-admin and CLI-session principals do. This is not an
+		// authorization hole — permission breadth and proof strength are separate
+		// layers, and this one only decides breadth. requirePermission still applies
+		// permissionAssurance immediately afterwards, so the AssuranceStrong
+		// permissions still force a WebAuthn step-up and the RequireUserPresence ones
+		// still demand a fresh single-use presence token. Enumerating all IDs per
+		// account instead would add no assurance gate that is not already applied, and
+		// would silently strip an administrator of any permission introduced after
+		// their account was created.
+		scope.implicitAdmin = true
+		return scope
+	}
+	scope.permissions = append(scope.permissions, acct.Permissions...)
+	return scope
+}
+
+// authenticateBearerSession authenticates a session token (Issue #2232): a Bearer token
+// of exactly sessionTokenLen chars, attempted only when a sessionManager is wired.
+//
+// Contract:
+//   - Token present, 43 chars, manager wired, valid   → admin Principal from session + X-Session-Token header
+//   - Token present, 43 chars, manager wired, invalid → 401 (no fallthrough to API-key)
+//   - Token present, non-43 chars OR manager nil       → fall through to API-key path
+func (s *Server) authenticateBearerSession(w http.ResponseWriter, r *http.Request) (*http.Request, authSourceOutcome) {
+	mgr := s.sessionManager
+	if mgr == nil {
+		return r, authSourceSkipped
+	}
+	bearerToken, ok := sessionBearerToken(r)
+	if !ok {
+		return r, authSourceSkipped
+	}
+	// Pass source IP to Validate for IP-change detection (ADR-021 Decision 5).
+	// SplitHostPort extracts just the host; errors are ignored (empty host → no detection).
+	sourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	validateCtx := session.WithSourceIP(r.Context(), sourceIP)
+	sess, err := mgr.Validate(validateCtx, bearerToken)
+	if err != nil {
+		s.writeSessionValidationError(w, err)
+		return r, authSourceRejected
+	}
+	// Renew the session to reset idle TTL; set X-Session-Token when a new token is
+	// issued (empty string = prior-token grace path, no new token to publish). The raw
+	// new token is never logged.
+	newToken, ok := s.renewSession(validateCtx, w, mgr, bearerToken)
+	if !ok {
+		return r, authSourceRejected
+	}
+	if newToken != "" {
+		w.Header().Set("X-Session-Token", newToken)
+	}
+	// An unbound session (no account: minted for an admin-certificate principal) is
+	// root only by an explicit signal — the RootScoped marker, or a tenant equal to the
+	// deployment's root tenant — and then carries that root tenant (Issue #4665).
+	rootTenant := s.rootTenantID(r.Context())
+	acct, ok := s.resolveBearerSessionAccount(w, r, sess)
+	if !ok {
+		return r, authSourceRejected
+	}
+	scope := s.bearerSessionScope(r.Context(), sess, acct, rootTenant)
+	if bearerSessionScopeless(acct, scope) {
+		s.writeErrorResponse(w, http.StatusUnauthorized,
+			"Session has no tenant scope; reconnect to obtain a new session", "SESSION_SCOPE_INVALID")
+		return r, authSourceRejected
+	}
+	sessionPrincipal := bearerSessionPrincipal(sess, acct, scope)
+	if s.refuseUnscopedPrincipal(w, sessionPrincipal) {
+		return r, authSourceRejected
+	}
+	ctx := context.WithValue(r.Context(), principalContextKey, sessionPrincipal)
+	ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(sess.PrincipalID))
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, scope.tenantID)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, principalTenantScope(sessionPrincipal))
+	ctx = context.WithValue(ctx, authSessionContextKey, authSessionRef{manager: mgr, id: sess.ID})
+	ctx = context.WithValue(ctx, principalRefreshContextKey, s.sessionPrincipalRefresh(sessionPrincipal, sess.RootScoped))
+	return r.WithContext(ctx), authSourceAuthenticated
+}
+
+// resolveBearerSessionAccount looks up the account bound to sess and refuses the
+// session when that account no longer vouches for it. It returns a nil account for a
+// session with no bound account (certificate-derived CLI session), and ok false once a
+// response has been written.
+func (s *Server) resolveBearerSessionAccount(w http.ResponseWriter, r *http.Request, sess *session.Session) (*account, bool) {
+	acct, acctErr := s.getAccountByID(r.Context(), sess.PrincipalID)
+	if acctErr != nil {
+		// Fail closed. The bound account is the authority for this principal's
+		// permissions, tenant scope and disabled status, so a lookup failure
+		// (secret-store/SOPS error, git storage error, ListSecrets failure, context
+		// deadline) must not be treated as "no account found": the no-account fallback
+		// sets ImplicitAdmin: true (the default for certificate-derived sessions), which
+		// would skip the Issue #3126 disabled check and restore session-derived scope
+		// over the authoritative account values — every containment control would
+		// degrade precisely when the store is unhealthy. A principal with no bound
+		// account (certificate-derived CLI session) returns (nil, nil), not an error,
+		// so those sessions never reach this branch.
+		s.logger.Error("Account lookup failed for session token; failing closed",
+			"principal_id", logging.SanitizeLogValue(sess.PrincipalID),
+			"error", logging.SanitizeLogValue(acctErr.Error()))
+		s.writeErrorResponse(w, http.StatusServiceUnavailable,
+			"Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
+		return nil, false
+	}
+	if cliLoginSessionRefused(sess, acct) {
+		s.endBearerSession(w, r, sess, "Failed to revoke cli-login session with a revoked credential")
+		return nil, false
+	}
+	if acct != nil && acct.Disabled {
+		// Disabled account: reject with the same 401 a revoked session gets.
+		s.endBearerSession(w, r, sess, "Failed to revoke session of disabled account")
+		return nil, false
+	}
+	return acct, true
+}
+
+// cliLoginSessionRefused reports whether sess is a CLI-login session that must end:
+// CLI-login sessions live only while the passkeys that approved them exist (Issue
+// #5199). Revoking a passkey is how a phished account is contained, so a legacy CLI
+// session with no recorded credential is refused too (fail closed; the user re-runs CLI
+// login once) rather than kept until expiry. A missing account is refused the same way.
+// Sessions from POST /api/v1/sessions use other connection names and are unaffected.
+func cliLoginSessionRefused(sess *session.Session, acct *account) bool {
+	if sess.ConnectionName != cliLoginConnectionName {
+		return false
+	}
+	return acct == nil ||
+		!accountHoldsCredential(acct, sess.LoginCredentialID) ||
+		(len(sess.CredentialID) > 0 && !accountHoldsCredential(acct, sess.CredentialID))
+}
+
+// endBearerSession answers a refused Bearer session with SESSION_REVOKED. Best-effort
+// revocation ensures the token is rejected on subsequent requests by
+// sessionManager.Validate, but a revocation failure (logged as failureMsg) does not
+// affect this request's 401 (same pattern as the web-cookie branch).
+func (s *Server) endBearerSession(w http.ResponseWriter, r *http.Request, sess *session.Session, failureMsg string) {
+	if revokeErr := s.sessionManager.Revoke(r.Context(), sess.ID); revokeErr != nil {
+		s.logger.Warn(failureMsg,
+			"session_id", logging.SanitizeLogValue(sess.ID),
+			"error", logging.SanitizeLogValue(revokeErr.Error()))
+	}
+	s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+}
+
+// bearerSessionScope derives the scope of a Bearer session principal. GlobalScope
+// mirrors the session's actual scope (Issue #3194): unscoped sessions (TenantID=="",
+// matching an unscoped mTLS admin cert) receive cross-tenant visibility; tenant-scoped
+// sessions are confined to their subtree. Fail-closed: explicit scope → GlobalScope=false.
+//
+// Issue #3576: if an account is bound to this session's PrincipalID, TenantID,
+// GlobalScope and Permissions are re-resolved from that live account on every request —
+// mirroring the web-cookie branch's per-request account recheck (Issue #3311). When no
+// account is found, all three fall back to their session-derived defaults: no bound
+// account → certificate-derived or root-scope session → implicit admin, with a non-nil
+// permissions (ADR-025 Amendment 3).
+func (s *Server) bearerSessionScope(ctx context.Context, sess *session.Session, acct *account, rootTenant string) sessionPrincipalScope {
+	if acct != nil {
+		return s.accountSessionScope(ctx, acct)
+	}
+	scope := sessionPrincipalScope{
+		tenantID:      sess.TenantID,
+		globalScope:   sess.RootScoped || (rootTenant != "" && sess.TenantID == rootTenant),
+		implicitAdmin: true,
+		permissions:   []string{},
+	}
+	if scope.globalScope {
+		scope.tenantID = rootTenant
+	}
+	return scope
+}
+
+// bearerSessionScopeless reports whether a session has no scope at all: an unbound
+// session with an empty tenant, the pre-#4665 form.
+func bearerSessionScopeless(acct *account, scope sessionPrincipalScope) bool {
+	return acct == nil && !scope.globalScope && scope.tenantID == ""
+}
+
+// bearerSessionPrincipal builds a Principal from session state. Assurance is read
+// directly from the session so that IP-change downgrades (ADR-021 Decision 5) and future
+// WebAuthn upgrades are reflected on every request rather than fixed at issuance.
+func bearerSessionPrincipal(sess *session.Session, acct *account, scope sessionPrincipalScope) *Principal {
+	return &Principal{
+		Channel:       AuthChannelCfgBearer,
+		ID:            sess.PrincipalID,
+		Name:          "session:" + logging.SanitizeLogValue(sess.PrincipalID),
+		Assurance:     sess.Assurance,
+		LastProvenAt:  sess.LastProvenAt,
+		GlobalScope:   scope.globalScope,
+		Permissions:   scope.permissions,
+		TenantID:      scope.tenantID,
+		ImplicitAdmin: scope.implicitAdmin,
+		// AccountBound: true only when a live account was resolved for
+		// sess.PrincipalID (Issue #4337) — the no-account fallback keeps
+		// globalScope's sess.TenantID=="" default, which is not an account-level
+		// root-scope signal and must not be read as one by
+		// subjectToTenantCrossingBoundary.
+		AccountBound: acct != nil,
+		// RootScoped is true when either the session's own explicit marker
+		// (ADR-025 Amendment 1 A1.3, set only by session.Manager.IssueRootScoped
+		// and immutable thereafter) is set, or this request's phishing-resistant
+		// assertion against the bound account qualifies (ADR-025 Amendment 4
+		// A4.1, re-derived every request). Never derived from TenantID or
+		// GlobalScope.
+		RootScoped: sess.RootScoped || rootScopeFromAssertion(acct, sess.Assurance),
+	}
+}
+
+// authenticateWebCookie authenticates browser clients via the __Host-cfgms_session
+// HttpOnly+Secure+SameSite=Strict cookie (Issue #2492, ADR-018 §1,2). Credential
+// precedence (security B5.2): any header credential (Bearer or API key) or admin mTLS
+// ALWAYS wins — when a header credential is present the cookie is ignored entirely (not
+// validated, not renewed, no Set-Cookie emitted). This source only fires when no header
+// credential is present, ensuring existing Bearer/API-key/mTLS clients are
+// byte-identical.
+func (s *Server) authenticateWebCookie(w http.ResponseWriter, r *http.Request) (*http.Request, authSourceOutcome) {
+	mgr := s.webSessionManager
+	if mgr == nil || hasHeaderCredentials(r) {
+		return r, authSourceSkipped
+	}
+	cookie, cookieErr := r.Cookie(cookieWebSession)
+	if cookieErr != nil {
+		return r, authSourceSkipped
+	}
+	// Pass source IP to Validate for IP-change detection (ADR-021 Decision 5).
+	webSourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	webValidateCtx := session.WithSourceIP(r.Context(), webSourceIP)
+	webSess, webErr := mgr.Validate(webValidateCtx, cookie.Value)
+	if webErr != nil {
+		s.writeSessionValidationError(w, webErr)
+		return r, authSourceRejected
+	}
+	// Rolling renewal: refresh the cookie so the idle TTL resets on every authenticated
+	// response (ADR-018 §1). When the session is already in the grace window (prior
+	// token), Renew returns newToken == "" — do not overwrite a Set-Cookie the client
+	// already received.
+	newToken, ok := s.renewSession(webValidateCtx, w, mgr, cookie.Value)
+	if !ok {
+		return r, authSourceRejected
+	}
+	if newToken != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     cookieWebSession,
+			Value:    newToken,
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteStrictMode,
+			Path:     "/",
+		})
+	}
+	// A web session lives only while the passkeys behind it exist (Issue #5166): the
+	// account is the proof, so every request resolves it. A lookup error fails closed
+	// with 503 and leaves the session intact (the error may be transient); a missing
+	// account proves no credential and ends the session.
+	webAcct, webAcctErr := s.getAccountByID(r.Context(), webSess.PrincipalID)
+	if webAcctErr != nil {
+		s.logger.Error("Web session account lookup failed",
+			"session_id", logging.SanitizeLogValue(webSess.ID),
+			"error", logging.SanitizeLogValue(webAcctErr.Error()))
+		s.writeErrorResponse(w, http.StatusServiceUnavailable,
+			"Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
+		return r, authSourceRejected
+	}
+	if reason := webSessionRefusal(webSess, webAcct); reason != "" {
+		s.endWebSession(w, r, webSess, reason)
+		return r, authSourceRejected
+	}
+	scope := s.accountSessionScope(r.Context(), webAcct)
+	webPrincipal := webSessionPrincipal(webSess, webAcct, scope)
+	if s.refuseUnscopedPrincipal(w, webPrincipal) {
+		return r, authSourceRejected
+	}
+	ctx := context.WithValue(r.Context(), principalContextKey, webPrincipal)
+	ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(webSess.PrincipalID))
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, scope.tenantID)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, principalTenantScope(webPrincipal))
+	// Issue #2493: mark this request as cookie-authenticated so csrfMiddleware can
+	// enforce the session-bound CSRF check on unsafe methods.
+	ctx = context.WithValue(ctx, cookieAuthContextKey, true)
+	ctx = context.WithValue(ctx, webSessionIDContextKey, webSess.ID)
+	ctx = context.WithValue(ctx, authSessionContextKey, authSessionRef{manager: mgr, id: webSess.ID})
+	ctx = context.WithValue(ctx, principalRefreshContextKey, s.sessionPrincipalRefresh(webPrincipal, false))
+	return r.WithContext(ctx), authSourceAuthenticated
+}
+
+// webSessionRefusal returns why a web session must end, or "" when the bound account
+// still vouches for it. A missing account proves no credential. An administratively
+// disabled account loses access immediately, not at session expiry (Issue #3126). Both
+// the login passkey and the last proving passkey must still be on the account; an empty
+// ID is refused, because passkey login, the only issuer of web sessions, always records
+// both.
+func webSessionRefusal(webSess *session.Session, acct *account) string {
+	switch {
+	case acct == nil:
+		return "unbound"
+	case acct.Disabled:
+		return "disabled-account"
+	case !accountHoldsCredential(acct, webSess.LoginCredentialID) ||
+		!accountHoldsCredential(acct, webSess.CredentialID):
+		return "revoked-passkey"
+	}
+	return ""
+}
+
+// endWebSession revokes the web session server-side (best effort) so the rejection is
+// durable, and answers with the same 401 for every reason: the response must not
+// distinguish "disabled", "passkey revoked" and "revoked".
+func (s *Server) endWebSession(w http.ResponseWriter, r *http.Request, webSess *session.Session, reason string) {
+	s.csrfTokens.Delete(webSess.ID)
+	if revokeErr := s.webSessionManager.Revoke(r.Context(), webSess.ID); revokeErr != nil {
+		s.logger.Warn("Failed to revoke "+logging.SanitizeLogValue(reason)+" web session",
+			"session_id", logging.SanitizeLogValue(webSess.ID),
+			"error", logging.SanitizeLogValue(revokeErr.Error()))
+	}
+	s.writeErrorResponse(w, http.StatusUnauthorized, "Session has been revoked", "SESSION_REVOKED")
+}
+
+// webSessionPrincipal builds the Principal of a web session, mirroring the Bearer
+// session principal. Assurance and LastProvenAt are read from session state so that
+// IP-change downgrades and WebAuthn upgrades (Issue #2965) are reflected on every
+// request (ADR-021 Decision 3/5).
+func webSessionPrincipal(webSess *session.Session, webAcct *account, scope sessionPrincipalScope) *Principal {
+	return &Principal{
+		Channel:            AuthChannelWebCookie,
+		ID:                 webSess.PrincipalID,
+		Name:               "web-session:" + logging.SanitizeLogValue(webSess.PrincipalID),
+		Assurance:          webSess.Assurance,
+		LastProvenAt:       webSess.LastProvenAt,
+		GlobalScope:        scope.globalScope,
+		Permissions:        scope.permissions,
+		TenantID:           scope.tenantID,
+		AuthenticatorCount: len(webAcct.Credentials),
+		ImplicitAdmin:      scope.implicitAdmin,
+		// RootScoped is derived per request from the bound account's RootScope
+		// flag and this session's current assurance being phishing-resistant
+		// (ADR-025 Amendment 4 A4.1) — never stored on the session record, never
+		// inferred from TenantID or GlobalScope. This is the browser-path half of
+		// the asymmetry Amendment 4 closes: before this, a root-scope web session
+		// never carried the marker at all and was therefore unconfined by the
+		// Decision 1 root<->MSP boundary (A4.2).
+		RootScoped: rootScopeFromAssertion(webAcct, webSess.Assurance),
+		// AccountBound: true only when webAcct actually resolved (Issue #4337) —
+		// mirrors the Bearer-session branch's acct != nil signal.
+		AccountBound: webAcct != nil,
+	}
+}
+
+// authenticateAPIKey authenticates the X-API-Key or Bearer API key. It is the last
+// source: a request with no credential at all ends here as MISSING_API_KEY.
+func (s *Server) authenticateAPIKey(w http.ResponseWriter, r *http.Request) (*http.Request, authSourceOutcome) {
+	apiKeyStr := requestAPIKey(r)
+	if apiKeyStr == "" {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "API key required", "MISSING_API_KEY")
+		return r, authSourceRejected
+	}
+
+	// A grant credential is never an API key: the prefix is reserved for the grant path.
+	if strings.HasPrefix(apiKeyStr, automationGrantCredentialPrefix) {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
+		return r, authSourceRejected
+	}
+
+	keyInfo, cached, ok := s.lookupRequestAPIKey(w, r, apiKeyStr)
+	if !ok {
+		return r, authSourceRejected
+	}
+
+	// Check if key is expired
+	now := s.apiKeyNow()
+	if apiKeyExpired(keyInfo, now) {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "API key expired", "EXPIRED_API_KEY")
+		return r, authSourceRejected
+	}
+
+	keyInfo, ok = s.revalidateRequestAPIKey(w, r, apiKeyStr, keyInfo, cached, now)
+	if !ok {
+		return r, authSourceRejected
+	}
+
+	// Convert API key to Principal for uniform authorization handling.
+	principal := apiKeyPrincipal(keyInfo)
+
+	if s.refuseUnscopedPrincipal(w, principal) {
+		return r, authSourceRejected
+	}
+
+	// Add key info and principal to request context
+	ctx := context.WithValue(r.Context(), apiKeyContextKey, keyInfo)
+	ctx = context.WithValue(ctx, principalContextKey, principal)
+	ctx = context.WithValue(ctx, ctxkeys.UserIDKey, keyInfo.ID)
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, keyInfo.TenantID)
+	// API-key principals are never root-scoped (Issue #4316): NewRootScope is
+	// reserved for a verified mTLS admin certificate.
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(keyInfo.TenantID))
+	tracker := s.newAPIKeyTracker(keyInfo)
+	ctx = context.WithValue(ctx, authRecheckContextKey, authRecheck(tracker.live))
+	ctx = context.WithValue(ctx, principalRefreshContextKey, tracker.refresh())
+	return r.WithContext(ctx), authSourceAuthenticated
+}
+
+// lookupRequestAPIKey finds the key in the memory cache, then (M-AUTH-1) the secret
+// store. cached reports a memory-cache hit. ok is false once a 401 has been written.
+func (s *Server) lookupRequestAPIKey(w http.ResponseWriter, r *http.Request, apiKeyStr string) (keyInfo *APIKey, cached, ok bool) {
+	// Check memory cache first
+	s.mu.RLock()
+	keyInfo, cached = s.apiKeys[apiKeyStr]
+	s.mu.RUnlock()
+	if cached {
+		return keyInfo, true, true
+	}
+
+	// M-AUTH-1: If not in cache, try to load from secret store
+	loadedKey, err := s.loadAPIKeyFromStore(r.Context(), apiKeyStr)
+	if err != nil {
+		s.logger.Debug("Failed to load API key from store", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
+		return nil, false, false
+	}
+	return loadedKey, false, true
+}
+
+// revalidateRequestAPIKey re-reads a cached, store-backed key when it is older than
+// apiKeyRevalidateInterval. Issue #4574: the secret store is the source of truth, so a
+// key deleted on another controller node stops authenticating here within that bound.
+// See apiKeyMaxStaleness for how a store outage is handled. ok is false once a response
+// has been written.
+func (s *Server) revalidateRequestAPIKey(w http.ResponseWriter, r *http.Request, apiKeyStr string, keyInfo *APIKey, cached bool, now time.Time) (*APIKey, bool) {
+	if !cached || keyInfo.recordRef == "" || now.Sub(keyInfo.validatedAt) < apiKeyRevalidateInterval {
+		return keyInfo, true
+	}
+	refreshed, err := s.revalidateCachedAPIKey(r.Context(), apiKeyStr, keyInfo, now)
+	switch {
+	case err == nil:
+		return refreshed, true
+	case errors.Is(err, errAPIKeyRevoked):
+		s.logger.Info("Cached API key no longer in secret store; evicted",
+			"id", logging.SanitizeLogValue(keyInfo.ID),
+			"tenant_id", logging.SanitizeLogValue(keyInfo.TenantID))
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
+		return nil, false
+	case now.Sub(keyInfo.validatedAt) < apiKeyMaxStaleness:
+		s.logger.Warn("API key re-validation failed; serving cached entry within the staleness bound",
+			"id", logging.SanitizeLogValue(keyInfo.ID),
+			"last_validated", keyInfo.validatedAt.Format(time.RFC3339),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return keyInfo, true
+	default:
+		s.logger.Error("API key re-validation failed past the staleness bound; refusing request",
+			"id", logging.SanitizeLogValue(keyInfo.ID),
+			"last_validated", keyInfo.validatedAt.Format(time.RFC3339),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusServiceUnavailable,
+			"API key could not be validated; retry later", "KEY_VALIDATION_UNAVAILABLE")
+		return nil, false
+	}
 }
 
 // errAPIKeyRevoked reports that a cached API key's durable record is gone from the
