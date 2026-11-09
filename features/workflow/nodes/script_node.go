@@ -120,6 +120,11 @@ type ScriptNode struct {
 	// refuses every form of script a grant must not reach (see executeRestricted).
 	restricted *workflow.RestrictedRun
 	approver   workflow.ScriptApprover
+	// published is true for a script step of an execution whose workflow version a
+	// human published (Publication verified at start), set by the engine through the
+	// step executor. A published node takes only the queue path and runs the
+	// library script pinned by id and version in its tenant (see executePublished).
+	published bool
 	// resultWait bounds how long a restricted step waits for the queued results.
 	resultWait time.Duration
 }
@@ -234,10 +239,30 @@ func (n *ScriptNode) SetTenantID(tenantID string) {
 	n.tenantID = tenantID
 }
 
+// resolveInlineContent resolves the content of the inline execution path: the
+// step's inline script, or the library script it names. On failure errMsg is the
+// step's error text.
+func (n *ScriptNode) resolveInlineContent() (content string, meta *script.ScriptMetadata, errMsg string, err error) {
+	if n.config.InlineScript != "" {
+		return n.config.InlineScript, nil, "", nil
+	}
+	if n.config.ScriptID == "" {
+		return "", nil, "either script_id or inline_script must be specified", fmt.Errorf("no script specified")
+	}
+	s, getErr := n.repository.Get(n.config.ScriptID, n.config.ScriptVersion)
+	if getErr != nil {
+		return "", nil, fmt.Sprintf("failed to get script: %v", getErr), getErr
+	}
+	return s.Content, s.Metadata, "", nil
+}
+
 // Execute implements workflow.Node interface
 func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (workflow.NodeOutput, error) {
 	if n.restricted != nil {
 		return n.executeRestricted(ctx, input)
+	}
+	if n.published {
+		return n.executePublished(ctx, input)
 	}
 
 	// Resolve device IDs — re-evaluated on each Execute for recurring workflows.
@@ -266,26 +291,9 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 	}
 
 	// Inline execution path (no queue configured): resolve content and execute immediately.
-	var scriptContent string
-	var scriptMeta *script.ScriptMetadata
-
-	if n.config.InlineScript != "" {
-		scriptContent = n.config.InlineScript
-	} else if n.config.ScriptID != "" {
-		s, err := n.repository.Get(n.config.ScriptID, n.config.ScriptVersion)
-		if err != nil {
-			return workflow.NodeOutput{
-				Success: false,
-				Error:   fmt.Sprintf("failed to get script: %v", err),
-			}, err
-		}
-		scriptContent = s.Content
-		scriptMeta = s.Metadata
-	} else {
-		return workflow.NodeOutput{
-			Success: false,
-			Error:   "either script_id or inline_script must be specified",
-		}, fmt.Errorf("no script specified")
+	scriptContent, scriptMeta, errMsg, err := n.resolveInlineContent()
+	if err != nil {
+		return workflow.NodeOutput{Success: false, Error: errMsg}, err
 	}
 
 	// Inject parameters
@@ -907,6 +915,16 @@ func (n *ScriptNode) restrictedQueuedExecution(executionID string, vs *script.Ve
 // cancels what this step already queued, so a refused step leaves nothing behind.
 // A device whose identical command is already queued is returned in deduped.
 func (n *ScriptNode) queueRestricted(ctx context.Context, input workflow.NodeInput, vs *script.VersionedScript, d workflow.ScriptApprovalDecision, deviceIDs []string) (runs []restrictedRun, deduped []string, err error) {
+	return n.queueCommands(ctx, input, deviceIDs, func(executionID string, meta map[string]interface{}) *script.QueuedExecution {
+		return n.restrictedQueuedExecution(executionID, vs, d, meta)
+	})
+}
+
+// queueCommands queues one command per device, built by build from the device's
+// execution id and the metadata shared by the step. A failure cancels what this
+// step already queued, so a refused step leaves nothing behind. A device whose
+// identical command is already queued is returned in deduped.
+func (n *ScriptNode) queueCommands(ctx context.Context, input workflow.NodeInput, deviceIDs []string, build func(executionID string, meta map[string]interface{}) *script.QueuedExecution) (runs []restrictedRun, deduped []string, err error) {
 	// The library is resolved from the run's tenant, never from workflow input.
 	meta := map[string]interface{}{"tenant_id": n.tenantID}
 	if runID, ok := input.Context["workflow_run_id"]; ok {
@@ -921,7 +939,7 @@ func (n *ScriptNode) queueRestricted(ctx context.Context, input workflow.NodeInp
 			n.cancelRestricted(runs)
 			return nil, nil, fmt.Errorf("failed to start execution monitoring: %w", startErr)
 		}
-		queueErr := n.executionQueue.QueueExecution(deviceID, n.restrictedQueuedExecution(execution.ID, vs, d, meta))
+		queueErr := n.executionQueue.QueueExecution(deviceID, build(execution.ID, meta))
 		if queueErr == script.ErrDuplicateExecution {
 			// Identical script+device+params already queued: drop the orphaned
 			// monitor entry and do not wait on a run this step does not own.
@@ -1034,6 +1052,116 @@ func (n *ScriptNode) restrictedOutput(runs []restrictedRun, deduped []string, re
 		return workflow.NodeOutput{Success: false, Data: data, Error: err.Error()}, err
 	}
 	return workflow.NodeOutput{Success: true, Data: data}, nil
+}
+
+// executePublished runs the script step of an execution whose workflow version a
+// human published. The publisher's tap covers the step, so there is no per-step
+// presence check and no approval evaluation (that is the grant path). The step
+// still fails closed: it takes only the queue path, runs only the library script
+// pinned by id and version in the execution's authenticated tenant, carries no
+// secret bindings and selects devices only through the fleet query inside that
+// tenant: a filter or device naming another tenant refuses the whole step.
+// Every refusal happens with nothing queued. The step queues its commands and does
+// not wait for their results, as an unrestricted queued step never did.
+func (n *ScriptNode) executePublished(ctx context.Context, input workflow.NodeInput) (workflow.NodeOutput, error) {
+	if err := n.checkPublishedConfig(); err != nil {
+		return refuseStep(err)
+	}
+	vs, err := n.readPublishedScript()
+	if err != nil {
+		return refuseStep(err)
+	}
+	deviceIDs, err := n.resolveRestrictedDevices(ctx)
+	if err != nil {
+		return refuseStep(fmt.Errorf("failed to resolve device IDs: %w", err))
+	}
+	if len(deviceIDs) == 0 {
+		scriptNodeLogger.Warn("fleet filter matched no devices; skipping script dispatch", "node", n.Name)
+		return workflow.NodeOutput{
+			Success: true,
+			Data:    map[string]interface{}{"warning": "fleet filter matched no devices"},
+		}, nil
+	}
+	runs, deduped, err := n.queueCommands(ctx, input, deviceIDs, func(executionID string, meta map[string]interface{}) *script.QueuedExecution {
+		return n.publishedQueuedExecution(executionID, vs, meta)
+	})
+	if err != nil {
+		return refuseStep(err)
+	}
+	data := map[string]interface{}{"queued": len(runs)}
+	if len(runs) > 0 {
+		data["execution_id"] = runs[0].executionID
+	}
+	if len(deduped) > 0 {
+		data["deduplicated"] = deduped
+	}
+	return workflow.NodeOutput{Success: true, Data: data}, nil
+}
+
+// checkPublishedConfig refuses what a published step may not carry and what it
+// cannot run without: no script id, no pinned version (it never runs the latest),
+// an inline script, secret bindings, no authenticated tenant, and a missing queue
+// or tenant-resolved library. Devices are checked separately, through the fleet
+// query scoped to the tenant (resolveRestrictedDevices).
+func (n *ScriptNode) checkPublishedConfig() error {
+	c := n.config
+	switch {
+	case c.ScriptID == "":
+		return fmt.Errorf("a script step of a published workflow needs a script_id")
+	case c.ScriptVersion == "":
+		return fmt.Errorf("a script step of a published workflow needs an explicit script_version; it never runs the latest")
+	case c.InlineScript != "":
+		return fmt.Errorf("a script step of a published workflow does not allow an inline script")
+	case len(c.SecretBindings) > 0:
+		return fmt.Errorf("a script step of a published workflow does not allow secret bindings")
+	case n.tenantID == "":
+		return fmt.Errorf("execution has no authenticated tenant_id; refusing to run a script step")
+	case n.executionQueue == nil || n.monitor == nil:
+		return fmt.Errorf("no execution queue is configured; a script step of a published workflow runs only through the queue")
+	}
+	if _, ok := n.repository.(script.TenantScriptResolver); !ok {
+		return fmt.Errorf("no tenant-resolved script library is configured; a script step of a published workflow cannot run")
+	}
+	return nil
+}
+
+// readPublishedScript reads the pinned version from the library of the
+// execution's authenticated tenant, never from a tenant named in the step.
+func (n *ScriptNode) readPublishedScript() (*script.VersionedScript, error) {
+	vs, err := n.repository.(script.TenantScriptResolver).GetForTenant(n.tenantID, n.config.ScriptID, n.config.ScriptVersion)
+	if err != nil || vs == nil || vs.Metadata == nil || vs.Metadata.Version == nil {
+		return nil, fmt.Errorf("script %q version %q could not be read from the tenant's library; nothing was queued", n.config.ScriptID, n.config.ScriptVersion)
+	}
+	return vs, nil
+}
+
+// publishedQueuedExecution builds the queue entry for one device. The queue keeps no
+// version on an entry, so the step's pin is bound as a pin on the library version
+// just read: at dispatch the queue reads exactly that version from the execution's
+// tenant and refuses when its content hash differs, so a version edited after this
+// step queued never runs. The shell comes from the library script, never from the
+// step. The pin carries no guard: the Publication, not a grant, covers this run.
+func (n *ScriptNode) publishedQueuedExecution(executionID string, vs *script.VersionedScript, meta map[string]interface{}) *script.QueuedExecution {
+	qe := &script.QueuedExecution{
+		ExecutionID:      executionID,
+		ScriptRef:        n.config.ScriptID,
+		ScriptVersion:    n.config.ScriptVersion,
+		Shell:            vs.Metadata.Shell,
+		Parameters:       n.config.Parameters,
+		Timeout:          n.restrictedTimeout(vs),
+		GenerateAPIKey:   n.config.GenerateAPIKey,
+		APIKeyTTL:        n.config.APIKeyTTL,
+		ExecutionContext: n.config.ExecutionContext,
+		Metadata:         meta,
+	}
+	return qe.WithPin(n.tenantID, vs.Metadata.Version.String(), script.ScriptApprovalHash(n.tenantID, vs))
+}
+
+// SetPublished marks the node as the script step of an execution whose workflow
+// version a human published. The engine sets it through the step executor, from
+// the execution and never from step.Config.
+func (n *ScriptNode) SetPublished() {
+	n.published = true
 }
 
 // SetRestricted marks the node as the script step of a restricted automation
@@ -1208,9 +1336,13 @@ func checkRestrictedStep(step workflow.Step, execution *workflow.WorkflowExecuti
 }
 
 // configureRestricted marks the node of a restricted execution and gives it the
-// approver. The restriction comes from the execution, never from step.Config.
+// approver, or marks the node of a publication-verified execution as published.
+// Both come from the execution, never from step.Config.
 func (e *ScriptStepExecutor) configureRestricted(node *ScriptNode, execution *workflow.WorkflowExecution) {
 	if execution.Restricted == nil {
+		if execution.PublicationVerified {
+			node.SetPublished()
+		}
 		return
 	}
 	node.SetRestricted(*execution.Restricted)

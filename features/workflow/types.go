@@ -408,6 +408,14 @@ type WorkflowExecution struct {
 	// leaves it nil.
 	Restricted *RestrictedRun `json:"-"`
 
+	// PublicationVerified is true only for an execution outside an automation
+	// grant whose caller named the stored version it runs (WithExecutingVersion)
+	// and whose Publication the engine verified at start. It is set by the engine
+	// and never from Variables or a step's Config. A nested run, a resumed approval
+	// tail and a run whose caller named no version leave it false. A script step
+	// runs outside a grant only when it is true.
+	PublicationVerified bool `json:"-"`
+
 	// Status is the current execution status
 	Status ExecutionStatus `json:"status"`
 

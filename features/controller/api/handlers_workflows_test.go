@@ -17,7 +17,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/features/workflow"
+	workflownodes "github.com/cfgis/cfgms/features/workflow/nodes"
 	"github.com/cfgis/cfgms/features/workflow/trigger"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -1987,4 +1989,242 @@ func TestWorkflowHandler_ListWorkflows_LastExecutionIsMostRecent(t *testing.T) {
 	got, _ := listWorkflowSummaries(t, router, "test-tenant")
 	require.NotNil(t, got["recent-wf"].LastExecution)
 	assert.Equal(t, resp["execution_id"], got["recent-wf"].LastExecution.ID)
+}
+
+// --- script steps outside an automation grant (Issue #5899) -------------------
+//
+// These tests run the real publish ceremony (a synthetic ECDSA P-256 authenticator whose
+// COSE key is the only thing the account stores), the real workflow engine and handlers,
+// the real tenant script library over real storage, the fleet query and the real
+// execution queue.
+
+const publishedRunDevice = "dev-1"
+
+// publishedRunFleet is a fleet source holding one online device in the publish tenant.
+type publishedRunFleet struct{}
+
+func (publishedRunFleet) GetAllStewards() []fleet.StewardData {
+	return []fleet.StewardData{{ID: publishedRunDevice, TenantID: publishTenant, Status: "online", LastHeartbeat: time.Now()}}
+}
+
+type publishedRunFixture struct {
+	*publishFixture
+	queue *scriptmodule.ExecutionQueue
+}
+
+func newPublishedRunFixture(t *testing.T) *publishedRunFixture {
+	t.Helper()
+	f := newPublishFixture(t)
+	configStore := f.handler.configStore
+
+	library, err := scriptmodule.NewTenantScriptRepository(configStore)
+	require.NoError(t, err)
+	tenantLibrary, err := library.ForTenant(publishTenant)
+	require.NoError(t, err)
+	for _, id := range []string{"inventory", "patch-check"} {
+		require.NoError(t, tenantLibrary.Create(&scriptmodule.VersionedScript{
+			Metadata: &scriptmodule.ScriptMetadata{
+				ID: id, Name: id, Version: &scriptmodule.Version{Major: 1},
+				Shell: scriptmodule.ShellBash, Platform: []string{"linux"},
+			},
+			Content:   "echo " + id + "\n",
+			Signature: &scriptmodule.ScriptSignature{Algorithm: "rsa-sha256", Signature: "c2ln", PublicKey: "pem"},
+		}))
+	}
+
+	monitor := scriptmodule.NewExecutionMonitor()
+	// The shared (durable) queue store needs the cluster PostgreSQL provider; the
+	// library, workflows and accounts here are on real storage, as in the restricted
+	// script step tests, and the queue is the real queue over its in-memory store.
+	queue := scriptmodule.NewExecutionQueue(monitor, nil, 0, "", nil, library, 0)
+	t.Cleanup(queue.Stop)
+
+	executor := workflownodes.NewScriptStepExecutor(library, monitor, nil)
+	executor.SetExecutionQueue(queue)
+	executor.SetFleetQuery(fleet.NewMemoryQuery(publishedRunFleet{}))
+
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logging.NewNoopLogger(), nil, nil, nil, nil, nil,
+		workflow.WithScriptStepExecutor(executor),
+		workflow.WithPublicationVerifier(func(ctx context.Context, vw *workflow.VersionedWorkflow) error {
+			tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
+			return f.server.VerifyWorkflowPublication(ctx, tenantID, vw)
+		}))
+	t.Cleanup(engine.Shutdown)
+
+	f.handler = NewWorkflowHandler(engine, configStore, nil, logging.NewNoopLogger())
+	f.server.workflowHandler = f.handler
+	return &publishedRunFixture{publishFixture: f, queue: queue}
+}
+
+// scriptSteps are two script steps selecting the tenant's devices by a fleet filter.
+func scriptSteps() []workflow.Step {
+	step := func(name, scriptID string) workflow.Step {
+		return workflow.Step{Name: name, Type: workflow.StepTypeScript, Config: map[string]interface{}{
+			"script_id": scriptID, "script_version": "1.0.0",
+			"device_filter": map[string]interface{}{"status": "online"},
+		}}
+	}
+	return []workflow.Step{step("collect", "inventory"), step("check", "patch-check")}
+}
+
+// store stores version of the publish workflow with the given steps and no Publication.
+func (f *publishedRunFixture) store(t *testing.T, version string, steps []workflow.Step) *workflow.VersionedWorkflow {
+	t.Helper()
+	vw := publishTestWorkflow(version)
+	vw.Steps = steps
+	require.NoError(t, f.publishFixture.store.StoreWorkflow(context.Background(), vw))
+	return vw
+}
+
+// execute posts to the execute route as principal and waits for an accepted run to
+// finish. It returns the response and the finished execution (nil when not accepted).
+func (f *publishedRunFixture) execute(t *testing.T, principal *Principal) (*httptest.ResponseRecorder, *workflow.WorkflowExecution) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/workflows/publish-wf/execute", nil)
+	req = withPrincipal(withTenantContext(req, publishTenant), principal)
+	req = mux.SetURLVars(req, map[string]string{"id": "publish-wf"})
+	rec := httptest.NewRecorder()
+	f.handler.handleExecuteWorkflow(rec, req)
+	if rec.Code != http.StatusAccepted {
+		return rec, nil
+	}
+	var resp struct {
+		ExecutionID string `json:"execution_id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	var exec *workflow.WorkflowExecution
+	require.Eventually(t, func() bool {
+		got, err := f.handler.engine.GetExecution(context.Background(), publishTenant, resp.ExecutionID)
+		if err != nil {
+			return false
+		}
+		exec = got
+		return got.EndTime != nil
+	}, 15*time.Second, 10*time.Millisecond, "the workflow did not finish")
+	return rec, exec
+}
+
+func strongHumanPrincipal() *Principal {
+	return &Principal{ID: "human-1", Assurance: session.AssuranceStrong, TenantID: publishTenant, Permissions: []string{"workflow:execute"}}
+}
+
+func scopedKeyPrincipal() *Principal {
+	return &Principal{ID: "api-key-1", Assurance: session.AssuranceMachine, TenantID: publishTenant, Permissions: []string{"workflow:execute"}}
+}
+
+// [REQUIRED TEST] A human-started execution of a published workflow with two script
+// steps queues both library runs with no further presence check, and a scheduled or
+// API-key-started execution of the same published version queues its script steps with
+// no tap. (The tap to start is the route's presence gate, covered by
+// TestPermissionAssurance_WorkflowWriteExecute_FloorEnforced; the handler asks for none.)
+func TestWorkflowExecute_PublishedVersionQueuesScriptSteps(t *testing.T) {
+	for name, principal := range map[string]*Principal{"human session": strongHumanPrincipal(), "scoped API key": scopedKeyPrincipal()} {
+		t.Run(name, func(t *testing.T) {
+			f := newPublishedRunFixture(t)
+			f.store(t, "1.0.0", scriptSteps())
+			require.Equal(t, http.StatusOK, f.publish(t, "1.0.0").Code)
+
+			rec, exec := f.execute(t, principal)
+
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			require.Equal(t, workflow.StatusCompleted, exec.GetStatus(), exec.GetError())
+			assert.Equal(t, 2, f.queue.GetQueueDepth(publishedRunDevice), "both library runs are queued")
+		})
+	}
+}
+
+// [REQUIRED TEST] An execution of a version with a script step and no Publication, a
+// tampered Publication, or a Publication over another version's hash is refused before
+// any step runs, and nothing is queued.
+func TestWorkflowExecute_RefusedWithoutValidPublication(t *testing.T) {
+	f := newPublishedRunFixture(t)
+	f.store(t, "1.0.0", scriptSteps())
+	require.Equal(t, http.StatusOK, f.publish(t, "1.0.0").Code)
+	published := f.stored(t, "1.0.0")
+
+	// Each case stores a newer version than the last: the route runs the latest.
+	cases := []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		{"no publication", func(t *testing.T) {
+			f.store(t, "1.0.1", scriptSteps())
+		}},
+		{"tampered publication", func(t *testing.T) {
+			// The stored definition is edited after it was published; its Publication stays.
+			tampered := f.stored(t, "1.0.0")
+			tampered.Steps[0].Config["script_id"] = "patch-check"
+			tampered.SemanticVersion = workflow.SemanticVersion{Major: 1, Minor: 0, Patch: 2}
+			tampered.Version = "1.0.2"
+			tampered.Publication = published.Publication
+			require.NoError(t, f.publishFixture.store.StoreWorkflow(context.Background(), tampered))
+		}},
+		{"publication over another version", func(t *testing.T) {
+			other := f.store(t, "1.0.3", scriptSteps())
+			other.Publication = published.Publication
+			require.NoError(t, f.publishFixture.store.StoreWorkflow(context.Background(), other))
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup(t)
+
+			rec, exec := f.execute(t, strongHumanPrincipal())
+
+			assert.NotEqual(t, http.StatusAccepted, rec.Code, "the start is refused")
+			assert.Nil(t, exec)
+			assert.Zero(t, f.queue.GetQueueDepth(publishedRunDevice), "nothing is queued")
+			assert.Zero(t, f.queue.GetTotalQueueDepth())
+		})
+	}
+}
+
+// [REQUIRED TEST] Editing a published workflow produces a version that cannot run its
+// script steps outside a grant until it is published again.
+func TestWorkflowExecute_EditedVersionNeedsPublishingAgain(t *testing.T) {
+	f := newPublishedRunFixture(t)
+	f.store(t, "1.0.0", scriptSteps())
+	require.Equal(t, http.StatusOK, f.publish(t, "1.0.0").Code)
+	rec, exec := f.execute(t, strongHumanPrincipal())
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	require.Equal(t, workflow.StatusCompleted, exec.GetStatus(), exec.GetError())
+	depthBefore := f.queue.GetTotalQueueDepth()
+
+	// The edit is a new stored version; the latest version is what the route runs.
+	f.store(t, "1.1.0", append(scriptSteps(), workflow.Step{Name: "pause", Type: workflow.StepTypeDelay, Delay: &workflow.DelayConfig{Duration: time.Millisecond}}))
+	rec, _ = f.execute(t, strongHumanPrincipal())
+	assert.NotEqual(t, http.StatusAccepted, rec.Code)
+	assert.Equal(t, depthBefore, f.queue.GetTotalQueueDepth(), "the edited version queued nothing")
+
+	require.Equal(t, http.StatusOK, f.publish(t, "1.1.0").Code)
+	rec, exec = f.execute(t, strongHumanPrincipal())
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	assert.Equal(t, workflow.StatusCompleted, exec.GetStatus(), exec.GetError())
+	ran := map[string]bool{}
+	for _, entry := range exec.GetExecutionTrace() {
+		ran[entry.StepName] = true
+	}
+	assert.True(t, ran["collect"] && ran["check"], "the republished version ran its script steps")
+	// Identical script, device and parameters are already queued from the first run.
+	assert.Equal(t, depthBefore, f.queue.GetTotalQueueDepth())
+}
+
+// [REQUIRED TEST] The registration approval workflow with a script step is refused:
+// the hook names no version, so even a published version is never publication-verified.
+func TestWorkflowApprovalHook_ScriptStepIsRefused(t *testing.T) {
+	f := newPublishedRunFixture(t)
+	input := sampleInput()
+	input.Token.TenantID = publishTenant
+
+	vw := publishTestWorkflow("1.0.0")
+	vw.Name = registrationWorkflowName
+	vw.Steps = scriptSteps()
+	require.NoError(t, f.publishFixture.store.StoreWorkflow(context.Background(), vw))
+
+	hook := NewWorkflowApprovalHook(f.handler.engine, f.handler.configStore, logging.NewNoopLogger())
+	_, _, err := hook.Evaluate(context.Background(), input)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "script steps run only in restricted automation executions")
+	assert.Zero(t, f.queue.GetTotalQueueDepth())
 }

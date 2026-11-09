@@ -392,6 +392,8 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"automation-grant:create":             true, // Issue #5831: grants standing automation authority
 		"content-approval:approve":            true, // Issue #5831: approves content for automated use
 		"content-library:set-mode":            true, // Issue #5831: switches the content library mode
+		"workflow:write":                      true, // Issue #5899: a tap to save a workflow
+		"workflow:execute":                    true, // Issue #5899: a tap to start a workflow
 	}
 	for perm, req := range permissionAssurance {
 		if catastrophic[perm] {
@@ -458,49 +460,57 @@ func TestPermissionAssurance_ConfigPush_FloorEnforced(t *testing.T) {
 	})
 }
 
-// TestPermissionAssurance_WorkflowWriteExecute_FloorEnforced is a REQUIRED test (Issue #5498):
-// workflow:write and workflow:execute carry a Strong floor for human sessions, keep working
-// for scoped API keys, and need no presence tap. It drives the real requirePermission middleware.
+// TestPermissionAssurance_WorkflowWriteExecute_FloorEnforced is a REQUIRED test (Issues #5498,
+// #5899): workflow:write and workflow:execute carry a Strong floor and a presence tap for human
+// sessions, and keep working with no tap for scoped API keys. It drives the real
+// requirePermission middleware on the real workflow routes: saving a workflow (POST, PUT,
+// DELETE) and starting one each get a presence step-up challenge without a fresh tap and
+// succeed with one.
 func TestPermissionAssurance_WorkflowWriteExecute_FloorEnforced(t *testing.T) {
 	server := setupTestServer(t)
 
-	for _, action := range []string{"write", "execute"} {
-		perm := "workflow:" + action
-		t.Run(perm, func(t *testing.T) {
-			req, found := permissionAssurance[perm]
-			require.True(t, found, "%s must be in permissionAssurance", perm)
-			assert.Equal(t, session.AssuranceStrong, req.Min)
-			assert.True(t, req.AllowMachine)
-			assert.False(t, req.RequireUserPresence)
+	routes := []struct {
+		method, template, path, perm string
+	}{
+		{http.MethodPost, "/api/v1/workflows", "/api/v1/workflows", "workflow:write"},
+		{http.MethodPut, "/api/v1/workflows/{id}", "/api/v1/workflows/wf-1", "workflow:write"},
+		{http.MethodDelete, "/api/v1/workflows/{id}", "/api/v1/workflows/wf-1", "workflow:write"},
+		{http.MethodPost, "/api/v1/workflows/{id}/execute", "/api/v1/workflows/wf-1/execute", "workflow:execute"},
+	}
 
-			reached := false
-			probe := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				reached = true
-				w.WriteHeader(http.StatusOK)
-			})
-			handler := server.requirePermission("workflow", action)(probe)
+	for _, perm := range []string{"workflow:write", "workflow:execute"} {
+		req, found := permissionAssurance[perm]
+		require.True(t, found, "%s must be in permissionAssurance", perm)
+		assert.Equal(t, session.AssuranceStrong, req.Min)
+		assert.True(t, req.AllowMachine, "scoped API keys keep working")
+		assert.True(t, req.RequireUserPresence, "a human takes a passkey tap")
+	}
 
-			serve := func(p *Principal) *httptest.ResponseRecorder {
-				reached = false
-				r := httptest.NewRequest(http.MethodPost, "/api/v1/workflows", nil)
-				r = r.WithContext(context.WithValue(r.Context(), principalContextKey, p))
-				rec := httptest.NewRecorder()
-				handler.ServeHTTP(rec, r)
-				return rec
+	for _, rt := range routes {
+		resource, action, _ := strings.Cut(rt.perm, ":")
+		t.Run(rt.method+" "+rt.template, func(t *testing.T) {
+			newReq := func(p *Principal) *http.Request {
+				r := httptest.NewRequest(rt.method, rt.path, strings.NewReader(`{"name":"wf-1"}`))
+				return withPrincipal(r, p)
+			}
+			serve := func(r *http.Request) *httptest.ResponseRecorder {
+				return serveOnRoute(server, rt.method, rt.template, resource, action, presenceOK, r)
 			}
 
-			rec := serve(&Principal{ID: "basic-user", Assurance: session.AssuranceBasic, Permissions: []string{perm}})
+			rec := serve(newReq(&Principal{ID: "basic-user", Assurance: session.AssuranceBasic, Permissions: []string{rt.perm}, TenantID: "test-tenant"}))
 			assert.Equal(t, http.StatusUnauthorized, rec.Code)
 			assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp")
-			assert.False(t, reached)
 
-			rec = serve(&Principal{ID: "strong-user", Assurance: session.AssuranceStrong, Permissions: []string{perm}})
-			assert.Equal(t, http.StatusOK, rec.Code)
-			assert.True(t, reached)
+			human := &Principal{ID: "strong-user", Assurance: session.AssuranceStrong, Permissions: []string{rt.perm}, TenantID: "test-tenant"}
+			assertPresenceChallenge(t, serve(newReq(human)), rt.perm)
 
-			rec = serve(&Principal{ID: "api-key", Assurance: session.AssuranceMachine, Permissions: []string{perm}})
-			assert.Equal(t, http.StatusOK, rec.Code)
-			assert.True(t, reached)
+			tapped := newReq(human)
+			tapped.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "strong-user", tapped, rt.perm))
+			rec = serve(tapped)
+			assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+			rec = serve(newReq(&Principal{ID: "api-key", Assurance: session.AssuranceMachine, Permissions: []string{rt.perm}, TenantID: "test-tenant"}))
+			assert.Equal(t, http.StatusOK, rec.Code, "a scoped API key needs no tap")
 		})
 	}
 

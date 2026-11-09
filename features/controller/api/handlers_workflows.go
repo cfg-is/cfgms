@@ -757,6 +757,19 @@ type ExecuteWorkflowRequest struct {
 	Inputs map[string]interface{} `json:"inputs,omitempty"`
 }
 
+// suppliedValues merges the request's variables and inputs into one map; an input
+// wins on a name clash.
+func (req ExecuteWorkflowRequest) suppliedValues() map[string]interface{} {
+	supplied := make(map[string]interface{}, len(req.Variables)+len(req.Inputs))
+	for k, v := range req.Variables {
+		supplied[k] = v
+	}
+	for k, v := range req.Inputs {
+		supplied[k] = v
+	}
+	return supplied
+}
+
 // handleExecuteWorkflow handles POST /api/v1/workflows/{id}/execute
 func (h *WorkflowHandler) handleExecuteWorkflow(w http.ResponseWriter, r *http.Request) {
 	if h.engine == nil || h.configStore == nil {
@@ -798,16 +811,13 @@ func (h *WorkflowHandler) handleExecuteWorkflow(w http.ResponseWriter, r *http.R
 	// but not its cancellation, or every execution that outlives its request is
 	// cancelled (Issue #4658).
 	execCtx := context.WithValue(context.WithoutCancel(r.Context()), ctxkeys.TenantID, store.TenantID())
+	// Say which stored version this run is: a script step runs outside an automation
+	// grant only when that version carries a Publication the engine can verify at
+	// start. The engine takes the version out of the context it hands the run.
+	execCtx = workflow.WithExecutingVersion(execCtx, vw)
 
 	nameForLog := logging.SanitizeLogValue(name)
-	supplied := make(map[string]interface{}, len(req.Variables)+len(req.Inputs))
-	for k, v := range req.Variables {
-		supplied[k] = v
-	}
-	for k, v := range req.Inputs {
-		supplied[k] = v
-	}
-	execution, err := h.engine.ExecuteWorkflow(execCtx, vw.Workflow, supplied)
+	execution, err := h.engine.ExecuteWorkflow(execCtx, vw.Workflow, req.suppliedValues())
 	if err != nil {
 		if inputErr, ok := workflow.AsInputsError(err); ok {
 			h.sendJSON(w, http.StatusBadRequest, map[string]interface{}{

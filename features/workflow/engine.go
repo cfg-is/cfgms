@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -124,6 +125,7 @@ type Engine struct {
 	setHARoleExecutor             SetHARoleStepExecutor
 	moveResourceToClusterExecutor MoveResourceToClusterStepExecutor
 	scriptExecutor                ScriptStepExecutor
+	publicationVerifier           PublicationVerifier
 	notifyChannels                NotifyChannelResolver
 
 	// Durable execution history (engine_execution_store.go). A nil store keeps
@@ -216,14 +218,59 @@ func WithScriptStepExecutor(executor ScriptStepExecutor) EngineOption {
 	return func(e *Engine) { e.scriptExecutor = executor }
 }
 
+// PublicationVerifier re-verifies the Publication stored on vw. It is the
+// composition root's wrapper of VerifyPublication: it supplies the signer account
+// and permission lookups and reads the version's tenant from ctx
+// (ctxkeys.TenantID). A nil error means a human published exactly this version.
+type PublicationVerifier func(ctx context.Context, vw *VersionedWorkflow) error
+
+// WithPublicationVerifier gives the engine the verifier that lets a script step
+// run outside an automation grant, from a version a human published. Without one
+// no unrestricted execution is ever publication-verified, so every script step
+// outside a grant is refused.
+func WithPublicationVerifier(verifier PublicationVerifier) EngineOption {
+	return func(e *Engine) { e.publicationVerifier = verifier }
+}
+
+// executingVersionKey keys the stored version a caller says it is running.
+type executingVersionKey struct{}
+
+// WithExecutingVersion returns a context naming vw, the stored version the caller
+// is about to run with ExecuteWorkflow. The engine verifies vw's Publication at
+// start and, only when it verifies, lets the run's script steps queue outside an
+// automation grant. A caller that runs a workflow it did not load as a stored
+// version (the registration approval hook, approval resume, nested runs) names
+// none, and its script steps are refused.
+func WithExecutingVersion(ctx context.Context, vw *VersionedWorkflow) context.Context {
+	if vw == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, executingVersionKey{}, vw)
+}
+
+// takeExecutingVersion returns the version ctx names, and a context that no
+// longer names it. ExecuteWorkflow hands the second one to the execution, so a
+// nested run (workflow, error_workflow, composite component) never inherits the
+// parent's Publication.
+func takeExecutingVersion(ctx context.Context) (*VersionedWorkflow, context.Context) {
+	vw, _ := ctx.Value(executingVersionKey{}).(*VersionedWorkflow)
+	if vw == nil {
+		return nil, ctx
+	}
+	return vw, context.WithValue(ctx, executingVersionKey{}, (*VersionedWorkflow)(nil))
+}
+
 // ErrScriptStepNotRestricted is returned when a script step would run in an
-// execution that is not a restricted automation execution.
-var ErrScriptStepNotRestricted = errors.New("script steps run only in restricted automation executions")
+// execution that is neither a restricted automation execution nor a run of a
+// workflow version a human published.
+var ErrScriptStepNotRestricted = errors.New("script steps run only in restricted automation executions or from a workflow version a human published")
 
 // ExecuteWorkflow starts execution of a workflow. It is the unrestricted path (a
-// human run, a trigger, a composed workflow): a workflow that contains a script
-// step is refused here, because running library scripts from it would bypass the
-// run grant and the script-approval gate.
+// human run, a trigger, a composed workflow). A script step runs here only when
+// the caller named the stored version it runs (WithExecutingVersion) and that
+// version's Publication verifies; otherwise a workflow that contains a script
+// step is refused, because running library scripts from it would bypass the run
+// grant and the script-approval gate.
 func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variables map[string]interface{}) (*WorkflowExecution, error) {
 	return e.startWorkflow(ctx, workflow, variables, nil, RestrictedOptions{})
 }
@@ -249,15 +296,38 @@ func (e *Engine) ExecuteRestrictedWorkflowWithOptions(ctx context.Context, workf
 	return e.startWorkflow(ctx, workflow, variables, &run, opts)
 }
 
-// containsScriptStep reports whether steps, or any step nested inside them,
-// is a script step.
+// maxScriptWalkDepth bounds the walk for a script step. A tree nested deeper than
+// this is treated as containing one, so a hostile definition cannot hide a script
+// step below the bound.
+const maxScriptWalkDepth = 64
+
+// containsScriptStep reports whether steps, or any step nested inside them, is a
+// script step: every child, try, catch and finally block, switch case, retry
+// fallback and fan-out worker template.
 func containsScriptStep(steps []Step) bool {
+	return containsScriptStepAt(steps, 0)
+}
+
+func containsScriptStepAt(steps []Step, depth int) bool {
+	if len(steps) > 0 && depth > maxScriptWalkDepth {
+		return true
+	}
 	for _, step := range steps {
-		if step.Type == StepTypeScript || containsScriptStep(nestedSteps(step)) {
+		if step.Type == StepTypeScript || containsScriptStepAt(scriptCarrierSteps(step), depth+1) {
 			return true
 		}
 	}
 	return false
+}
+
+// scriptCarrierSteps returns every step that can run as part of step: the
+// directly nested steps and the fan-out worker template.
+func scriptCarrierSteps(step Step) []Step {
+	nested := nestedSteps(step)
+	if step.FanOut != nil {
+		nested = append(nested, step.FanOut.WorkerTemplate)
+	}
+	return nested
 }
 
 // nestedSteps returns every step directly nested in step: its child steps, the
@@ -283,12 +353,47 @@ func nestedSteps(step Step) []Step {
 	return nested
 }
 
+// verifyExecutingVersion reports whether workflow is the run of a stored version
+// whose Publication verifies right now. It is asked only for a workflow that
+// contains a script step: a workflow without one needs no Publication. The
+// Publication is verified at each start and nothing is cached: a passkey removed
+// during a run does not stop that run, but the next start is refused. It is false
+// when the caller named no version, the engine has no verifier, the workflow is
+// not the named version's definition, or the verifier refuses.
+func (e *Engine) verifyExecutingVersion(ctx context.Context, workflow Workflow, vw *VersionedWorkflow) bool {
+	if vw == nil || e.publicationVerifier == nil {
+		return false
+	}
+	// The Publication covers the stored version, so it speaks for this run only if
+	// the run is that version's definition.
+	if vw.Name != workflow.Name || !reflect.DeepEqual(vw.Steps, workflow.Steps) {
+		return false
+	}
+	if err := e.publicationVerifier(ctx, vw); err != nil {
+		e.logger.WarnCtx(ctx, "Workflow publication did not verify; script steps will be refused",
+			"operation", "workflow_publication_verify",
+			"workflow", logging.SanitizeLogValue(workflow.Name),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return false
+	}
+	return true
+}
+
 func (e *Engine) startWorkflow(ctx context.Context, workflow Workflow, variables map[string]interface{}, restricted *RestrictedRun, opts RestrictedOptions) (*WorkflowExecution, error) {
-	// A script step runs only in a restricted execution. Refuse before anything
-	// starts so nothing is queued; executeStep checks again for steps reached
-	// through a path this walk cannot see.
+	// The version the caller named is for this execution only: take it out of the
+	// context the execution runs under, so a nested run never inherits it.
+	version, ctx := takeExecutingVersion(ctx)
+
+	// A script step runs only in a restricted execution or from a version a human
+	// published. Refuse before anything starts so nothing is queued;
+	// executeScriptStep checks again for steps reached through a path this walk
+	// cannot see.
+	publicationVerified := false
 	if restricted == nil && containsScriptStep(workflow.Steps) {
-		return e.recordRejectedExecution(ctx, workflow, ErrScriptStepNotRestricted), ErrScriptStepNotRestricted
+		publicationVerified = e.verifyExecutingVersion(ctx, workflow, version)
+		if !publicationVerified {
+			return e.recordRejectedExecution(ctx, workflow, ErrScriptStepNotRestricted), ErrScriptStepNotRestricted
+		}
 	}
 
 	// A restricted execution is validated against the positive step-type
@@ -351,17 +456,18 @@ func (e *Engine) startWorkflow(ctx context.Context, workflow Workflow, variables
 	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
 
 	execution := &WorkflowExecution{
-		ID:           executionID,
-		WorkflowName: workflow.Name,
-		TenantID:     tenantID,
-		Restricted:   restricted,
-		Status:       StatusPending,
-		StartTime:    time.Now(),
-		StepResults:  make(map[string]StepResult),
-		Variables:    mergedVars,
-		Context:      execCtx,
-		Cancel:       cancel,
-		Done:         make(chan struct{}),
+		ID:                  executionID,
+		WorkflowName:        workflow.Name,
+		TenantID:            tenantID,
+		Restricted:          restricted,
+		PublicationVerified: publicationVerified,
+		Status:              StatusPending,
+		StartTime:           time.Now(),
+		StepResults:         make(map[string]StepResult),
+		Variables:           mergedVars,
+		Context:             execCtx,
+		Cancel:              cancel,
+		Done:                make(chan struct{}),
 	}
 
 	// Store execution
@@ -871,12 +977,13 @@ func (e *Engine) executeExtensionStep(ctx context.Context, step Step, execution 
 	return err
 }
 
-// executeScriptStep runs a script step. It runs only in a restricted execution,
-// and only when the engine was built with a script executor; either missing is a
-// clear error.
+// executeScriptStep runs a script step. It runs only in a restricted execution or
+// in one whose version's Publication verified at start, and only when the engine
+// was built with a script executor; either missing is a clear error. This is the
+// backstop behind the start-time walk: a step the walk missed still fails closed.
 func (e *Engine) executeScriptStep(ctx context.Context, step Step, execution *WorkflowExecution, key string) error {
 	switch {
-	case execution.Restricted == nil:
+	case execution.Restricted == nil && !execution.PublicationVerified:
 		return ErrScriptStepNotRestricted
 	case e.scriptExecutor == nil:
 		return fmt.Errorf("script executor not configured")
