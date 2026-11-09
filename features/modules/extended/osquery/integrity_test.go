@@ -14,7 +14,6 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/modules"
-	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	pkgtrust "github.com/cfgis/cfgms/pkg/modules/trust"
 )
@@ -29,7 +28,7 @@ func platformKey() string {
 // identity trusts the signing key. The binary is installed under its os-arch
 // key name and is not marked executable — callers that need to actually run it
 // use installOsqueryBundleAs.
-func installOsqueryBundle(t *testing.T, binaryContent []byte) (string, *bundle.Bundle, *stewardtrust.StewardTrustEnforcer) {
+func installOsqueryBundle(t *testing.T, binaryContent []byte) (string, *bundle.Bundle, *pkgtrust.StewardTrustEnforcer) {
 	t.Helper()
 	return installOsqueryBundleAs(t, platformKey(), binaryContent, 0o600)
 }
@@ -47,7 +46,7 @@ func installOsqueryBundleAs(
 	binaryName string,
 	binaryContent []byte,
 	mode os.FileMode,
-) (string, *bundle.Bundle, *stewardtrust.StewardTrustEnforcer) {
+) (string, *bundle.Bundle, *pkgtrust.StewardTrustEnforcer) {
 	t.Helper()
 
 	root := t.TempDir()
@@ -95,7 +94,7 @@ func installOsqueryBundleAs(
 		Signature: ed25519.Sign(priv, []byte(b.ContentHash)),
 	})
 
-	enforcer := stewardtrust.NewStewardTrustEnforcerWithIdentity(func() pkgtrust.PublisherIdentity {
+	enforcer := pkgtrust.NewStewardTrustEnforcerWithIdentity(func() pkgtrust.PublisherIdentity {
 		return pkgtrust.PublisherIdentity{Name: "cfgms", PublicKey: []byte(pub), Algorithm: "ed25519"}
 	})
 
@@ -158,7 +157,7 @@ func TestVerifyBeforeExec_TamperedBinaryRefusedInControllerMode(t *testing.T) {
 		t.Fatalf("write tampered binary: %v", err)
 	}
 
-	for _, mode := range []stewardtrust.TrustMode{
+	for _, mode := range []pkgtrust.TrustMode{
 		stewardtypes.ModuleTrustModeController,
 		stewardtypes.ModuleTrustModeBypass,
 	} {
@@ -229,7 +228,7 @@ func TestVerifyBeforeExec_AdditionalPublisherResolvesAndLoads(t *testing.T) {
 		Signature: ed25519.Sign(extraPriv, []byte(b.ContentHash)),
 	}}
 
-	enforcer := stewardtrust.NewStewardTrustEnforcerWithKnownPublishers(
+	enforcer := pkgtrust.NewStewardTrustEnforcerWithKnownPublishers(
 		func() pkgtrust.PublisherIdentity {
 			return pkgtrust.PublisherIdentity{Name: "cfgms", PublicKey: []byte(cfgmsPub), Algorithm: "ed25519"}
 		},

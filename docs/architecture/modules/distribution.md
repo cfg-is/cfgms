@@ -264,7 +264,7 @@ Trusting a `ReadInstalled` result therefore requires the step `ReadInstalled` ca
 perform, in this order:
 
 1. **Publisher-signature verification** —
-   `features/steward/modules/trust.StewardTrustEnforcer.VerifyForLoad`, which honours
+   `pkg/modules/trust.StewardTrustEnforcer.VerifyForLoad`, which honours
    `steward.cfg` `module_trust.mode` and checks `Bundle.Signatures` against the trust
    store via `pkg/modules/trust.VerifyBundleSignature`. This makes the expected
    `ContentHash` a *signed* value instead of an unsigned local anchor.

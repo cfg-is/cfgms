@@ -78,9 +78,9 @@ import (
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	modules "github.com/cfgis/cfgms/features/modules"
-	"github.com/cfgis/cfgms/features/steward/modules/trust"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 )
 
 // Sentinel errors. None of them carries a filesystem path.

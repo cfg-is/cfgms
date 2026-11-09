@@ -22,10 +22,10 @@ import (
 
 	proto "github.com/cfgis/cfgms/api/proto/modules"
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
-	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/modules/contract"
+	stewardtrust "github.com/cfgis/cfgms/pkg/modules/trust"
 )
 
 // ErrWrongModuleKind is returned by Start when the bundle's module kind is not

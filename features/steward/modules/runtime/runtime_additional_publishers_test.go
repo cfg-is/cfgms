@@ -20,7 +20,6 @@ import (
 	proto "github.com/cfgis/cfgms/api/proto/modules"
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/steward/modules/runtime"
-	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	pkgtrust "github.com/cfgis/cfgms/pkg/modules/trust"
 )
 
@@ -36,7 +35,7 @@ func testEnforcerRuntimeWithKnownPublishers(
 	t.Helper()
 	return runtime.NewModuleRuntimeWithEnforcer(
 		shortBaseDir(t),
-		stewardtrust.NewStewardTrustEnforcerWithKnownPublishers(
+		pkgtrust.NewStewardTrustEnforcerWithKnownPublishers(
 			func() pkgtrust.PublisherIdentity {
 				return pkgtrust.PublisherIdentity{
 					Name:      "cfgms",
@@ -99,7 +98,7 @@ func TestStrictModeRejectsUnresolvableAdditionalPublisher(t *testing.T) {
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeStrict, []string{"vendor-missing"})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, stewardtrust.ErrAdditionalPublisherUnresolvable)
+	assert.ErrorIs(t, err, pkgtrust.ErrAdditionalPublisherUnresolvable)
 	assert.Contains(t, err.Error(), "vendor-missing", "error must name the unresolvable entry")
 	assert.Nil(t, handle, "no module process may be started when resolution fails")
 }
@@ -121,7 +120,7 @@ func TestStrictModeUnresolvableAdditionalPublisherPrecedesPublisherNotTrusted(t 
 
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeStrict, []string{"vendor-missing"})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, stewardtrust.ErrAdditionalPublisherUnresolvable)
+	assert.ErrorIs(t, err, pkgtrust.ErrAdditionalPublisherUnresolvable)
 	assert.NotErrorIs(t, err, pkgtrust.ErrPublisherNotTrusted,
 		"resolution failure must be reported before signature verification runs")
 	assert.Nil(t, handle)
@@ -142,7 +141,7 @@ func TestWrongModuleKindPrecedesUnresolvableAdditionalPublisher(t *testing.T) {
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeStrict, []string{"vendor-missing"})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, runtime.ErrWrongModuleKind)
-	assert.NotErrorIs(t, err, stewardtrust.ErrAdditionalPublisherUnresolvable)
+	assert.NotErrorIs(t, err, pkgtrust.ErrAdditionalPublisherUnresolvable)
 	assert.Nil(t, handle)
 }
 

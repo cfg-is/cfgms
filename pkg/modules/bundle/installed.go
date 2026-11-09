@@ -380,7 +380,7 @@ type ReadOptions struct {
 //
 // A caller must therefore not treat a successful ReadInstalled as permission to
 // execute. Gate use of the returned Bundle on publisher-signature verification
-// first — features/steward/modules/trust.StewardTrustEnforcer.VerifyForLoad,
+// first — pkg/modules/trust.StewardTrustEnforcer.VerifyForLoad,
 // which checks Bundle.Signatures via pkg/modules/trust.VerifyBundleSignature
 // against the recomputed ContentHash. features/modules/extended/osquery.PreExecVerifier
 // is the worked example of the two steps in the correct order.

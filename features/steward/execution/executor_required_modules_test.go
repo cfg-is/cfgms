@@ -36,7 +36,6 @@ import (
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/features/steward/modules/install"
 	moduleruntime "github.com/cfgis/cfgms/features/steward/modules/runtime"
-	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -182,7 +181,7 @@ func (f *rmFixture) publish(publisher, name, version string) {
 }
 
 func (f *rmFixture) installer(mode stewardtypes.ModuleTrustMode) *install.Installer {
-	return &install.Installer{Root: f.root, Mode: mode, Enforcer: stewardtrust.NewStewardTrustEnforcer(), Client: f.client}
+	return &install.Installer{Root: f.root, Mode: mode, Enforcer: pkgtrust.NewStewardTrustEnforcer(), Client: f.client}
 }
 
 func shortRuntimeDir(t *testing.T) string {

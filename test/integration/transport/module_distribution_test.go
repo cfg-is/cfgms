@@ -47,7 +47,6 @@ import (
 	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/features/steward/modules/install"
 	moduleruntime "github.com/cfgis/cfgms/features/steward/modules/runtime"
-	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -459,7 +458,7 @@ func requireModule(publisherName, name, version string) stewardtypes.RequiredMod
 // stewardTrust builds the steward's trust enforcer. known holds the publisher keys
 // the steward binary was built with (the compiled-in additional publisher registry
 // of Issue #4988, which strict mode resolves by name).
-func stewardTrust(t *testing.T, known ...publisher) *stewardtrust.StewardTrustEnforcer {
+func stewardTrust(t *testing.T, known ...publisher) *pkgtrust.StewardTrustEnforcer {
 	t.Helper()
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
@@ -467,7 +466,7 @@ func stewardTrust(t *testing.T, known ...publisher) *stewardtrust.StewardTrustEn
 	for _, p := range known {
 		ids[p.name] = pkgtrust.PublisherIdentity{Name: p.name, PublicKey: p.pub, Algorithm: "ed25519"}
 	}
-	return stewardtrust.NewStewardTrustEnforcerWithKnownPublishers(func() pkgtrust.PublisherIdentity {
+	return pkgtrust.NewStewardTrustEnforcerWithKnownPublishers(func() pkgtrust.PublisherIdentity {
 		return pkgtrust.PublisherIdentity{Name: "cfgms", PublicKey: pub, Algorithm: "ed25519"}
 	}, ids)
 }
@@ -488,7 +487,7 @@ type distSteward struct {
 	executor  *execution.Executor
 }
 
-func (f *distFixture) newSteward(mode stewardtypes.ModuleTrustMode, enforcer *stewardtrust.StewardTrustEnforcer, additional ...string) *distSteward {
+func (f *distFixture) newSteward(mode stewardtypes.ModuleTrustMode, enforcer *pkgtrust.StewardTrustEnforcer, additional ...string) *distSteward {
 	f.t.Helper()
 	inst := &install.Installer{
 		Root: f.root, Mode: mode, AdditionalPublisherNames: additional,
@@ -602,7 +601,7 @@ func TestModuleDistribution(t *testing.T) {
 
 		// A pending bundle cannot be fetched, even by a steward whose config names it.
 		f.storeConfig(req)
-		s := f.newSteward(stewardtypes.ModuleTrustModeController, stewardtrust.NewStewardTrustEnforcer())
+		s := f.newSteward(stewardtypes.ModuleTrustModeController, pkgtrust.NewStewardTrustEnforcer())
 		_, err = s.installer.Install(context.Background(), distPublisher, distModule, "1.0.0")
 		require.ErrorIs(t, err, install.ErrFetchFailed)
 		requireNothingInstalled(t, f.root)
@@ -739,7 +738,7 @@ func TestModuleDistribution(t *testing.T) {
 				f.requireCacheEmpty()
 
 				f.storeConfig(req)
-				s := f.newSteward(stewardtypes.ModuleTrustModeController, stewardtrust.NewStewardTrustEnforcer())
+				s := f.newSteward(stewardtypes.ModuleTrustModeController, pkgtrust.NewStewardTrustEnforcer())
 				_, err = s.installer.Install(context.Background(), distPublisher, distModule, "1.0.0")
 				require.ErrorIs(t, err, install.ErrFetchFailed)
 				requireNothingInstalled(t, f.root)
@@ -824,7 +823,7 @@ func TestModuleDistribution(t *testing.T) {
 				}
 				f.setHostile(tc.rewrite, mutate)
 
-				s := f.newSteward(stewardtypes.ModuleTrustModeController, stewardtrust.NewStewardTrustEnforcer())
+				s := f.newSteward(stewardtypes.ModuleTrustModeController, pkgtrust.NewStewardTrustEnforcer())
 				_, err := s.installer.Install(context.Background(), distPublisher, distModule, "1.0.0")
 				require.ErrorIs(t, err, tc.want)
 				assert.NotContains(t, err.Error(), f.root, "errors carry no filesystem path")
@@ -850,7 +849,7 @@ func TestModuleDistribution(t *testing.T) {
 		require.NoError(t, f.workflow.Approve(addr))
 		require.NoError(t, f.push(req))
 
-		s := f.newSteward(stewardtypes.ModuleTrustModeController, stewardtrust.NewStewardTrustEnforcer())
+		s := f.newSteward(stewardtypes.ModuleTrustModeController, pkgtrust.NewStewardTrustEnforcer())
 		_, err := s.installer.Install(context.Background(), distPublisher, distModule, "1.0.0")
 		require.NoError(t, err)
 
@@ -862,7 +861,7 @@ func TestModuleDistribution(t *testing.T) {
 
 		// A restarted steward that cannot reach the controller finds the module installed
 		// and starts it: the pre-exec verification refuses the modified binary.
-		offline := f.newSteward(stewardtypes.ModuleTrustModeController, stewardtrust.NewStewardTrustEnforcer())
+		offline := f.newSteward(stewardtypes.ModuleTrustModeController, pkgtrust.NewStewardTrustEnforcer())
 		offline.executor.SetModuleInstaller(nil)
 		report, err := offline.executor.ApplyConfiguration(context.Background(), applyBytes(t, distModule, req), "v1")
 		require.NoError(t, err)
@@ -872,7 +871,7 @@ func TestModuleDistribution(t *testing.T) {
 
 		// With the controller reachable the tree no longer verifies, so it is replaced by
 		// the verified bundle and the module runs from the restored binary.
-		healed := f.newSteward(stewardtypes.ModuleTrustModeController, stewardtrust.NewStewardTrustEnforcer())
+		healed := f.newSteward(stewardtypes.ModuleTrustModeController, pkgtrust.NewStewardTrustEnforcer())
 		report, err = healed.executor.ApplyConfiguration(context.Background(), applyBytes(t, distModule, req), "v1")
 		require.NoError(t, err)
 		assert.Equal(t, 1, report.Modules[distModule].Details["success_count"], "%v", report.Modules[distModule].Details)

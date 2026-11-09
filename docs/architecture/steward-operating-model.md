@@ -903,8 +903,8 @@ execution availability depend on a controller round trip for exactly the case (a
 leaked/stolen operator credential) most likely to coincide with an attacker also
 controlling or blocking that connection.
 
-`VerifyManifest` mirrors `stewardtrust.StewardTrustEnforcer.VerifyForLoad`'s mode dispatch
-(`module_trust.mode`, `features/steward/modules/trust/trust.go`):
+`VerifyManifest` mirrors `pkg/modules/trust.StewardTrustEnforcer.VerifyForLoad`'s mode dispatch
+(`module_trust.mode`, `pkg/modules/trust/trust_enforcer.go`):
 
 - **strict.** The manifest's `signer_certificate_pem` must chain to the steward's pinned
   CA roots with a CodeSigning EKU, and its signature must verify against that certificate
