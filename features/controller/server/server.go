@@ -3818,14 +3818,39 @@ func (s *Server) recordStartupAudit() {
 // decided-but-unresumed runs.
 const approvalRecoveryInterval = 30 * time.Second
 
-// Stop gracefully shuts down the server
+// Stop gracefully shuts down the server. It runs the teardown steps in a fixed
+// order and never returns an error: a failing step logs a warning and the steps
+// after it still run. The order is load-bearing — HA stops before the audit
+// manager, the audit drain runs before the storage manager closes, and the
+// components that read a store stop before the store is released.
 func (s *Server) Stop() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.logger.Info("Shutting down controller server")
 
-	// Stop health collector and alert manager (Story #417)
+	s.stopHealthServices()
+	s.stopApprovalAndSessions()
+	s.stopWorkflowEngineAndTriggers()
+	s.stopDispatchFallbackAndHA()
+	s.drainAuditAndStopWormSink()
+	s.stopControlAndDataPlanes()
+	s.stopCommandAndHeartbeatServices()
+	s.stopJobAndExpiryServices()
+	s.closeLocalStores()
+	s.stopEntityGraphSweeps()
+	s.closeEntityGraphAndSessionStore()
+	s.stopSyncServices()
+	s.stopSigningServices()
+	s.closeCertAndEventStores()
+	s.closeAPIServerAndStorage()
+
+	return nil
+}
+
+// stopHealthServices stops the health collector, system monitor and alert
+// manager (Story #417).
+func (s *Server) stopHealthServices() {
 	if s.healthCollector != nil {
 		if err := s.healthCollector.Stop(); err != nil {
 			s.logger.Warn("Failed to stop health collector", "error", err)
@@ -3843,7 +3868,11 @@ func (s *Server) Stop() error {
 			s.logger.Warn("Failed to stop alert manager", "error", err)
 		}
 	}
+}
 
+// stopApprovalAndSessions stops the manual-review approval hook (Issue #1599)
+// and the terminal session manager.
+func (s *Server) stopApprovalAndSessions() {
 	// Stop manual-review approval hook background goroutine (Issue #1599)
 	if s.manualReviewHook != nil {
 		s.manualReviewHook.Stop()
@@ -3857,7 +3886,11 @@ func (s *Server) Stop() error {
 			s.logger.Warn("Failed to stop terminal session manager", "error", err)
 		}
 	}
+}
 
+// stopWorkflowEngineAndTriggers stops approval recovery and the workflow
+// trigger manager.
+func (s *Server) stopWorkflowEngineAndTriggers() {
 	// Stop approval recovery and cancel runs resumed from approvals; their
 	// claims lapse and another engine finishes them (Issue #4609).
 	if s.workflowEngine != nil {
@@ -3872,7 +3905,11 @@ func (s *Server) Stop() error {
 			s.logger.Warn("Failed to stop trigger manager", "error", err)
 		}
 	}
+}
 
+// stopDispatchFallbackAndHA closes the dispatch fallback's peer connections and
+// then stops the HA manager.
+func (s *Server) stopDispatchFallbackAndHA() {
 	// Close cluster-aware dispatch fallback's dialed peer connections (ADR-031
 	// Decision 3, Issue #3764) before HA manager stops — Close only tears down
 	// this node's outbound clients, independent of HA's own lifecycle.
@@ -3888,7 +3925,11 @@ func (s *Server) Stop() error {
 			s.logger.Warn("Failed to stop HA manager", "error", err)
 		}
 	}
+}
 
+// drainAuditAndStopWormSink records the shutdown audit event, drains the audit
+// write queue and stops the worm sink's reconciliation loop.
+func (s *Server) drainAuditAndStopWormSink() {
 	// Record system shutdown audit event, then drain the audit write queue and
 	// stop the background drain goroutine. Stop must run BEFORE the underlying
 	// storage manager is closed so pending entries can still reach disk.
@@ -3915,7 +3956,11 @@ func (s *Server) Stop() error {
 	if s.wormAuditStore != nil {
 		s.wormAuditStore.Stop()
 	}
+}
 
+// stopControlAndDataPlanes stops the control plane and data plane providers,
+// the shared gRPC server and the QUIC listener.
+func (s *Server) stopControlAndDataPlanes() {
 	// Stop control plane provider (Story #363)
 	if s.controlPlane != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -3941,7 +3986,11 @@ func (s *Server) Stop() error {
 	if s.quicListener != nil {
 		_ = s.quicListener.Close()
 	}
+}
 
+// stopCommandAndHeartbeatServices stops the command publisher and the
+// heartbeat service.
+func (s *Server) stopCommandAndHeartbeatServices() {
 	// Stop command publisher
 	if s.commandPublisher != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -3959,7 +4008,11 @@ func (s *Server) Stop() error {
 			s.logger.Warn("Failed to stop heartbeat service", "error", err)
 		}
 	}
+}
 
+// stopJobAndExpiryServices stops the job dispatcher, the execution queue and
+// the background expiry jobs.
+func (s *Server) stopJobAndExpiryServices() {
 	// Stop job dispatcher and execution queue (Issue #1672)
 	if s.jobDispatcher != nil {
 		s.jobDispatcher.Stop()
@@ -3975,7 +4028,11 @@ func (s *Server) Stop() error {
 	if s.pendingExpiryJob != nil {
 		s.pendingExpiryJob.Stop()
 	}
+}
 
+// closeLocalStores closes the DNA storage manager, run manager, upgrade store
+// and tag store, releasing their SQLite handles.
+func (s *Server) closeLocalStores() {
 	// Close DNA storage manager (releases SQLite DB file handles)
 	if s.dnaStorageManager != nil {
 		if err := s.dnaStorageManager.Close(); err != nil {
@@ -4006,7 +4063,11 @@ func (s *Server) Stop() error {
 			s.logger.Warn("Failed to close tag store", "error", err)
 		}
 	}
+}
 
+// stopEntityGraphSweeps stops the M365 inventory and the entity-graph periodic
+// writer sweeps.
+func (s *Server) stopEntityGraphSweeps() {
 	// Stop the M365 inventory (Issue #5561) before the entity graph and the directory
 	// manager it writes through and reads from close.
 	if s.m365Inventory != nil {
@@ -4037,7 +4098,11 @@ func (s *Server) Stop() error {
 		}
 		stopCancel()
 	}
+}
 
+// closeEntityGraphAndSessionStore closes the entity graph provider and the
+// session store.
+func (s *Server) closeEntityGraphAndSessionStore() {
 	// Close entity graph provider — releases the SQLite or Postgres connection
 	// so temp-directory cleanup succeeds on Windows (Issue #3253).
 	if s.egProvider != nil {
@@ -4046,10 +4111,15 @@ func (s *Server) Stop() error {
 		}
 	}
 
-	// Close session store — releases the connection so temp-directory cleanup
-	// succeeds on Windows (Issue #2774). MemStore.Close() has no error return while
-	// SQLiteSessionTokenStore and DatabaseSessionTokenStore do — use a type switch
-	// since the concrete Close signatures do not unify into a shared interface.
+	s.closeSessionStore()
+}
+
+// closeSessionStore closes the session store — releases the connection so
+// temp-directory cleanup succeeds on Windows (Issue #2774). MemStore.Close() has
+// no error return while SQLiteSessionTokenStore and DatabaseSessionTokenStore do
+// — use a type switch since the concrete Close signatures do not unify into a
+// shared interface.
+func (s *Server) closeSessionStore() {
 	if s.sessionStore != nil {
 		switch st := s.sessionStore.(type) {
 		case *session.MemStore:
@@ -4064,7 +4134,12 @@ func (s *Server) Stop() error {
 			}
 		}
 	}
+}
 
+// stopSyncServices drains the webhook-triggered syncs and stops the git-sync
+// syncer and the tenant config sync service. All three must run before the
+// storage manager closes.
+func (s *Server) stopSyncServices() {
 	// Drain in-flight webhook-triggered syncs before closing storage (Issue #681).
 	// WaitForPendingSyncs must run before storageManager.Close() because webhook
 	// sync goroutines write to the config store.
@@ -4095,7 +4170,11 @@ func (s *Server) Stop() error {
 		}
 		stopCancel()
 	}
+}
 
+// stopSigningServices stops the signing-retirement sweep and the signing and
+// steward migration services before the cert manager they read is closed.
+func (s *Server) stopSigningServices() {
 	// Stop the signing-retirement sweep before the cert manager it reads is closed.
 	if s.signingRetirementSvc != nil {
 		s.signingRetirementSvc.Stop()
@@ -4106,7 +4185,12 @@ func (s *Server) Stop() error {
 	if s.stewardMigrationSvc != nil {
 		s.stewardMigrationSvc.Stop()
 	}
+}
 
+// closeCertAndEventStores closes the cert manager's secret store, the
+// steward-event manager, the directory manager and the config-router secret
+// store.
+func (s *Server) closeCertAndEventStores() {
 	// Release the cert manager's retained vault connection (cluster mode): the
 	// shared signing-key store reads through it for the Manager's whole lifetime
 	// (Issue #4689). Runs after every component that signs has stopped.
@@ -4139,7 +4223,11 @@ func (s *Server) Stop() error {
 			s.logger.Warn("Failed to close config router secret store", "error", err)
 		}
 	}
+}
 
+// closeAPIServerAndStorage closes the REST API server, then the main storage
+// manager, then stops the HTTP server.
+func (s *Server) closeAPIServerAndStorage() {
 	// Close the REST API server — releases the public HTTPS listener and the
 	// private metrics listener it owns.
 	//
@@ -4175,8 +4263,6 @@ func (s *Server) Stop() error {
 			s.logger.Warn("Failed to stop HTTP server", "error", err)
 		}
 	}
-
-	return nil
 }
 
 // pushStoreRequirements declares the storage dependency for the push-resumption
