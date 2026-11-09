@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 
-// Package osquery implements the steward-side ad-hoc osquery query handler for
+// Package osquery implements the controller's ad-hoc osquery query handler for
 // Epic #2855 (Issue #3566).
 //
 // # Security invariants
@@ -26,7 +26,7 @@
 //
 // OsqueryHandler serves two roles in the system:
 //
-//   - Execute: the steward-side execution path. Receives an OsqueryQueryRequest,
+//   - Execute: the query execution path. Receives an OsqueryQueryRequest,
 //     runs the single front-door admission step (catalog lookup + parameter
 //     validation), constructs the final SQL from the bundle-embedded catalog, and
 //     delivers it to runQuery via stdin. Called by the steward's stream handler
@@ -110,7 +110,7 @@ func NewOsqueryHandler(logger logging.Logger, binPath string) *OsqueryHandler {
 	}
 }
 
-// Execute is the steward-side request handler. It performs the front-door
+// Execute is the query request handler. It performs the front-door
 // admission check — catalog-ID lookup and parameter validation in one atomic
 // step — and only calls runQuery after both pass.
 //

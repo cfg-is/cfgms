@@ -20,8 +20,8 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	stewardosquery "github.com/cfgis/cfgms/features/controller/osquery"
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
-	stewardosquery "github.com/cfgis/cfgms/features/steward/osquery"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
