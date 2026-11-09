@@ -287,11 +287,15 @@ var permissionAssurance = map[string]Requirement{
 
 	// workflow:write (Issue #5498) gates POST /api/v1/workflows, PUT /api/v1/workflows/{id}
 	// and DELETE /api/v1/workflows/{id}; workflow:execute gates POST /api/v1/workflows/{id}/execute.
-	// Workflows can run steps that change managed systems, so a human session needs Strong,
-	// as for config:push. Scoped API keys keep working for automation (AllowMachine), with no
-	// presence tap. workflow:read is unchanged.
-	"workflow:write":   {Min: session.AssuranceStrong, AllowMachine: true},
-	"workflow:execute": {Min: session.AssuranceStrong, AllowMachine: true},
+	// Workflows can run steps that change managed systems, so a human session needs Strong.
+	// A human takes a passkey tap to save a workflow and a tap to start one (Issue #5899): a
+	// workflow is one approved composition, so its steps take no per-action approval while it
+	// runs. Scoped API keys and triggers keep working with no tap (AllowMachine; machine
+	// principals are never asked for presence, as with installer:upload). A script step runs
+	// outside an automation grant only from a version a human published (workflow:publish).
+	// workflow:read is unchanged.
+	"workflow:write":   {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true},
+	"workflow:execute": {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true},
 
 	"installer:upload":          {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // PUT /installer/artifacts/{platform}/{arch}
 	"installer:delete":          {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // DELETE /installer/artifacts/{platform}/{arch}

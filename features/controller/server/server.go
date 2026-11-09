@@ -2627,6 +2627,8 @@ func (w *apiWiring) wireWorkflow() error {
 		KeyManager: w.scriptKeyManager,
 		Library:    w.scriptLibrary,
 		Fleet:      controllerFleet.NewMemoryQuery(&serverFleetStewardProvider{svc: s.controllerService}),
+
+		VerifyPublication: s.httpServer.VerifyWorkflowPublication,
 	})
 	w.workflowHandler = workflowHandler
 	// Issue #5562: converge the tenants' declared m365-entra-user/-group resources
@@ -3097,6 +3099,10 @@ type workflowScriptDeps struct {
 	KeyManager *scriptmodule.EphemeralKeyManager
 	Library    *scriptmodule.TenantScriptRepository
 	Fleet      controllerFleet.FleetQuery
+	// VerifyPublication re-verifies the Publication stored on a workflow version held
+	// by tenantID (api.Server.VerifyWorkflowPublication). Without it no script step
+	// runs outside an automation grant.
+	VerifyPublication func(ctx context.Context, tenantID string, vw *workflow.VersionedWorkflow) error
 }
 
 // newWorkflowScriptExecutor builds the script step executor from the queue,
@@ -3158,6 +3164,16 @@ func initializeWorkflowHandler(
 	// refuses to run.
 	scriptExecutor := newWorkflowScriptExecutor(scriptDeps)
 	engineOpts = append(engineOpts, workflow.WithScriptStepExecutor(scriptExecutor))
+	// A script step runs outside an automation grant only from a version a human
+	// published with a tap: the engine verifies the Publication at each start through
+	// the controller's account and permission lookups, in the tenant the caller put on
+	// the context.
+	if verify := scriptDeps.VerifyPublication; verify != nil {
+		engineOpts = append(engineOpts, workflow.WithPublicationVerifier(func(ctx context.Context, vw *workflow.VersionedWorkflow) error {
+			tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
+			return verify(ctx, tenantID, vw)
+		}))
+	}
 	workflowEngine := workflow.NewEngine(moduleFactory, logger, secrets, nil, nil, setHARoleExecutor, moveResourceToClusterExecutor, engineOpts...)
 	// Composed workflows (nested steps, error workflows, components) resolve by
 	// name from the executing tenant's workflow store (Issue #4638).
@@ -3223,6 +3239,10 @@ func (a *workflowEngineAdapter) TriggerWorkflow(ctx context.Context, trig *workf
 	// start does (Issue #4658). The trigger's timeout bounds the execution as the
 	// workflow's own timeout, which the engine enforces and releases.
 	execCtx := context.WithValue(context.WithoutCancel(ctx), ctxkeys.TenantID, trig.TenantID)
+	// A scheduled, webhook or SIEM-fired run may run the script steps of the version a
+	// human published with a tap, with no further tap and no automation grant. The
+	// engine verifies that version's Publication at this start.
+	execCtx = workflow.WithExecutingVersion(execCtx, vw)
 	wf := vw.Workflow
 	if trig.Timeout > 0 && (wf.Timeout == 0 || trig.Timeout < wf.Timeout) {
 		wf.Timeout = trig.Timeout
