@@ -209,7 +209,7 @@ List registered stewards. The returned set depends on the session's tenant scope
 - **Root-scoped session** (web account with `root_scope: true`, or mTLS admin bundle with empty tenant): a session subject to the tenant-crossing boundary (ADR-025) returns the root tenant's own stewards plus the stewards of every tenant covered by an active grant or break-glass crossing; stewards of other tenants are silently omitted, and `total` under pagination counts only the returned set. This applies to the `?q=` selector and filter parameters too. A root session not subject to the boundary (an unbound bootstrap certificate) returns stewards from all tenants.
 - **Tenant-scoped session** (web account with a `tenant_id`): returns only stewards in the session tenant's subtree — path-prefix inclusive, not exact-match. For example, a session scoped to `root/msp-a` sees stewards under `root/msp-a`, `root/msp-a/client-1`, etc.
 
-Use the `?q=` selector parameter to narrow further (e.g. `?q=root/msp-a/all` or `?q=hostname:web-01`). The selector grammar is defined in `pkg/fleet/selector`.
+Use the `?q=` selector parameter to narrow further (e.g. `?q=root/msp-a/all` or `?q=hostname:web-01`). The selector grammar is defined in `features/controller/fleet/selector`.
 
 **Steward reads by ID need a crossing.** For a root session subject to the boundary, every `GET` under `/api/v1/stewards/{id}` — the steward, `/dna`, `/logs`, `/modules`, `/config`, `/config/effective`, `/connection`, `/scripts/executions`, `/scripts/executions/{execution_id}`, `/scripts/metrics`, `/scripts/status`, `/tags`, `/compliance`, `/compliance/report`, `/reboot-window` and `/pending-deliveries` — on a steward owned by a tenant below root returns the `401` tenant-crossing challenge (see [Tenant Scope](#tenant-scope)) instead of data, whether the steward is attached to this node or served from the durable record. With an active crossing on the owning MSP or on that client, the request succeeds as for any other caller. A steward unknown to the controller is `404` for every caller, and a tenant-scoped caller still receives `404` for a steward outside its subtree. The same rule applies to `GET /api/v1/compliance/summary`, `GET /api/v1/stewards/refresh/pending`, `POST /api/v1/fleet/resolve` and the live telemetry stream `GET /api/v1/telemetry/ws/{id}`: client-tenant rows are omitted from the lists, and the stream is refused with the challenge, until a crossing is active.
 
@@ -222,7 +222,7 @@ By default, **operator-hidden** and **quarantined** stewards are excluded from t
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `q` | (none) | Selector string — see `pkg/fleet/selector` |
+| `q` | (none) | Selector string — see `features/controller/fleet/selector` |
 | `limit` | 50 | Page size |
 | `offset` | 0 | Page offset |
 | `include_hidden` | `false` | Set `true` to include operator-hidden stewards |

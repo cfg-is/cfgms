@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/features/controller/fleet/selector"
 	"github.com/cfgis/cfgms/features/controller/push"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/audit"
@@ -21,7 +22,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	configstorewriter "github.com/cfgis/cfgms/pkg/entitygraph/writers/configstore"
-	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"

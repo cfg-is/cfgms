@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/features/controller/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
-	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -207,7 +207,7 @@ func (s *Server) resolveSelectorFilter(ctx context.Context, selectorExpr string)
 // Body: {"selector": "name:es-hv0* os:linux tag:prod"}
 //
 // An empty or missing selector is rejected — use "all" to match all stewards.
-// The expression is parsed by pkg/fleet/selector; unknown keys are a parse error.
+// The expression is parsed by features/controller/fleet/selector; unknown keys are a parse error.
 func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 	var req SelectorResolveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

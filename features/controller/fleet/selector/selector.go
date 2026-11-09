@@ -111,76 +111,103 @@ func tokenize(expr string) ([]term, error) {
 	var terms []term
 	i := 0
 	for i < len(expr) {
-		// Skip whitespace between terms.
-		for i < len(expr) && expr[i] == ' ' {
-			i++
-		}
+		i = skipSpaces(expr, i)
 		if i >= len(expr) {
 			break
 		}
 
-		rest := expr[i:]
-		colonRel := strings.IndexByte(rest, ':')
-		spaceRel := strings.IndexByte(rest, ' ')
-
-		// Bare token: no colon found, or colon appears after the next space.
-		// The whole token becomes an implicit name: value.
-		if colonRel < 0 || (spaceRel >= 0 && spaceRel < colonRel) {
-			end := len(expr)
-			if spaceRel >= 0 {
-				end = i + spaceRel
-			}
-			tok := expr[i:end]
-			key := "name"
-			if stewardIDPattern.MatchString(tok) {
-				key = "id"
-			}
-			terms = append(terms, term{key: key, value: tok})
-			i = end
-			continue
+		t, next, err := nextTerm(expr, i)
+		if err != nil {
+			return nil, err
 		}
-
-		// key:value term — colon appears before the next space.
-		colonIdx := i + colonRel
-		key := expr[i:colonIdx]
-		if key == "" {
-			return nil, fmt.Errorf("empty key in selector near position %d", i)
-		}
-		if strings.ContainsAny(key, " \t") {
-			return nil, fmt.Errorf("invalid selector key %q: keys must not contain spaces", key)
-		}
-
-		i = colonIdx + 1 // advance past the colon
-
-		// Parse the value — quoted or unquoted.
-		var value string
-		if i < len(expr) && expr[i] == '"' {
-			i++ // skip opening quote
-			start := i
-			for i < len(expr) && expr[i] != '"' {
-				i++
-			}
-			if i >= len(expr) {
-				return nil, fmt.Errorf("unterminated quoted value for key %q", key)
-			}
-			value = expr[start:i]
-			i++ // skip closing quote
-		} else {
-			start := i
-			for i < len(expr) && expr[i] != ' ' {
-				i++
-			}
-			value = expr[start:i]
-		}
-
-		if value == "" {
-			return nil, fmt.Errorf("empty value for key %q", key)
-		}
-
-		terms = append(terms, term{key: key, value: value})
+		terms = append(terms, t)
+		i = next
 	}
 
 	return terms, nil
+}
+
+// skipSpaces returns the index of the first non-space byte at or after i.
+func skipSpaces(expr string, i int) int {
+	for i < len(expr) && expr[i] == ' ' {
+		i++
+	}
+	return i
+}
+
+// nextTerm parses the single term starting at expr[i] (which is not a space)
+// and returns it with the index just past it.
+func nextTerm(expr string, i int) (term, int, error) {
+	rest := expr[i:]
+	colonRel := strings.IndexByte(rest, ':')
+	spaceRel := strings.IndexByte(rest, ' ')
+
+	// Bare token: no colon found, or colon appears after the next space.
+	// The whole token becomes an implicit name: value.
+	if colonRel < 0 || (spaceRel >= 0 && spaceRel < colonRel) {
+		return bareTerm(expr, i, spaceRel)
+	}
+
+	// key:value term — colon appears before the next space.
+	return keyValueTerm(expr, i, i+colonRel)
+}
+
+// bareTerm parses a bare token starting at expr[i] as an implicit name or id
+// term. spaceRel is the offset of the next space relative to i, or -1.
+func bareTerm(expr string, i, spaceRel int) (term, int, error) {
+	end := len(expr)
+	if spaceRel >= 0 {
+		end = i + spaceRel
+	}
+	tok := expr[i:end]
+	key := "name"
+	if stewardIDPattern.MatchString(tok) {
+		key = "id"
+	}
+	return term{key: key, value: tok}, end, nil
+}
+
+// keyValueTerm parses a key:value term whose key starts at expr[i] and whose
+// colon is at expr[colonIdx].
+func keyValueTerm(expr string, i, colonIdx int) (term, int, error) {
+	key := expr[i:colonIdx]
+	if key == "" {
+		return term{}, 0, fmt.Errorf("empty key in selector near position %d", i)
+	}
+	if strings.ContainsAny(key, " \t") {
+		return term{}, 0, fmt.Errorf("invalid selector key %q: keys must not contain spaces", key)
+	}
+
+	value, next, err := scanValue(expr, colonIdx+1, key)
+	if err != nil {
+		return term{}, 0, err
+	}
+	if value == "" {
+		return term{}, 0, fmt.Errorf("empty value for key %q", key)
+	}
+	return term{key: key, value: value}, next, nil
+}
+
+// scanValue reads a quoted or unquoted value starting at expr[i] and returns
+// it with the index just past it. key is used only for error messages.
+func scanValue(expr string, i int, key string) (string, int, error) {
+	if i < len(expr) && expr[i] == '"' {
+		i++ // skip opening quote
+		start := i
+		for i < len(expr) && expr[i] != '"' {
+			i++
+		}
+		if i >= len(expr) {
+			return "", 0, fmt.Errorf("unterminated quoted value for key %q", key)
+		}
+		return expr[start:i], i + 1, nil // skip closing quote
+	}
+
+	start := i
+	for i < len(expr) && expr[i] != ' ' {
+		i++
+	}
+	return expr[start:i], i, nil
 }
 
 // applyTerm merges a parsed key:value term into the filter.

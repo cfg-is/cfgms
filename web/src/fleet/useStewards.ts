@@ -129,7 +129,7 @@ export function useStewards(limit: number, offset: number, selector = '', includ
 
   // Issue #2919: when the tenant switcher is narrowed (scope !== rootPath), build
   // a selector with the tenant path prefix so the server applies TenantSubtree
-  // filtering. Reuses the existing ?q= selector grammar (pkg/fleet/selector).
+  // filtering. Reuses the existing ?q= selector grammar (features/controller/fleet/selector).
   //   scope="msp-a", no text   → ?q=msp-a/all
   //   scope="msp-a", text="web" → ?q=msp-a/web
   //   not narrowed             → ?q=<text> (or no ?q)

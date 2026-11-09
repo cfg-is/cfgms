@@ -414,7 +414,7 @@ The `role-policies` ConfigStore namespace stores **role configs**: named objects
 ```
 
 - `name` — unique within the tenant; alphanumerics, hyphens, underscores, and dots only.
-- `selector` — standard fleet selector expression parsed by `pkg/fleet/selector.Parse`; stored verbatim. Validated at author time; an un-parseable selector is rejected with 400.
+- `selector` — standard fleet selector expression parsed by `features/controller/fleet/selector.Parse`; stored verbatim. Validated at author time; an un-parseable selector is rejected with 400.
 - `fragment` — a partial `StewardConfig`; no steward ID is required. Fields that are empty or zero-valued in the fragment are not merged (the field retains the value from the lower-priority layer).
 
 **ConfigKey:**
@@ -425,7 +425,7 @@ ConfigKey{TenantID: "<tenant>", Namespace: "role-policies", Name: "<roleName>"}
 
 **Authoring:** `POST /api/v1/roles` (requires `role:write`), `GET /api/v1/roles` / `GET /api/v1/roles/{name}` (requires `role:read`), `DELETE /api/v1/roles/{name}` (requires `role:write`). Cross-tenant authoring is rejected with 403. See `cfg role --help` for CLI usage.
 
-**Resolution:** `InheritanceResolver.ResolveConfiguration()` applies matching role fragments between cluster-policies and device-level config (Issue #2546). The `roleConfigAdapter` in `config_service_v2.go` lists all `role-policies` entries for the tenant, parses each selector via `pkg/fleet/selector.Parse`, and returns the matching fragments sorted alphabetically by name. Multiple matching roles merge in that order; later names override earlier ones for the same resource. A role-provider error is non-fatal: resolution continues without role fragments and a WARN is emitted.
+**Resolution:** `InheritanceResolver.ResolveConfiguration()` applies matching role fragments between cluster-policies and device-level config (Issue #2546). The `roleConfigAdapter` in `config_service_v2.go` lists all `role-policies` entries for the tenant, parses each selector via `features/controller/fleet/selector.Parse`, and returns the matching fragments sorted alphabetically by name. Multiple matching roles merge in that order; later names override earlier ones for the same resource. A role-provider error is non-fatal: resolution continues without role fragments and a WARN is emitted.
 
 ### Directory Authority, Domain Registry and Owner Immutability (Issue #5551)
 

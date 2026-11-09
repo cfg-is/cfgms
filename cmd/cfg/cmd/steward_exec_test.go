@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/fleet/selector"
+	"github.com/cfgis/cfgms/features/controller/fleet/selector"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

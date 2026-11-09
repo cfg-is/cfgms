@@ -96,7 +96,7 @@ const pinEdgeIdentity: Pin = {
 
 // Authority names that carry a fleet-selector separator. ParseEID forbids only
 // '/' in the authority-name segment, so each of these reaches the card intact:
-//   ','  → pkg/fleet/selector/selector.go splits an `id:` value into an OR set,
+//   ','  → features/controller/fleet/selector/selector.go splits an `id:` value into an OR set,
 //          fanning a "1 host" plan out across several stewards
 //   ' '  → terminates the unquoted `id:` term, so the remainder parses as an
 //          additional selector term (here a tag: match over the whole fleet)
