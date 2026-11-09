@@ -765,7 +765,12 @@ test-go-group-windows-rest:
 # packages measured under -race on a 3-vCPU macos-latest runner), steward
 # (features/steward, cmd) and rest (everything else, sharded across
 # CI-job-level groups, each on its own dedicated runner).
-MACOS_SHIPPED_PKGS = GOOS=darwin go list -deps -f '{{if and (not .Standard) (or .TestGoFiles .XTestGoFiles)}}{{.ImportPath}}{{end}}' ./cmd/steward ./cmd/cfgms-steward-launcher ./cmd/cfg | grep '^github.com/cfgis/cfgms/'
+#
+# MACOS_SHIPPED_ROOTS is the one definition of the three binaries. The PR-side
+# change filter (scripts/macos-pr-filter.sh, Issue #5974) reads it from this
+# file, so the filter's closure cannot drift from the set the legs test.
+MACOS_SHIPPED_ROOTS = ./cmd/steward ./cmd/cfgms-steward-launcher ./cmd/cfg
+MACOS_SHIPPED_PKGS = GOOS=darwin go list -deps -f '{{if and (not .Standard) (or .TestGoFiles .XTestGoFiles)}}{{.ImportPath}}{{end}}' $(MACOS_SHIPPED_ROOTS) | grep '^github.com/cfgis/cfgms/'
 MACOS_PROVIDERS_RE = ^github.com/cfgis/cfgms/(pkg/cert|pkg/controlplane|pkg/storage/providers/sqlite$$)
 MACOS_STEWARD_RE = ^github.com/cfgis/cfgms/(features/steward|cmd/)
 
@@ -872,6 +877,33 @@ test-go-group-macos-rest:
 	else \
 		echo "  Testing macos-rest shard $$shard/$$shards (remaining shipped packages, -race)..."; \
 		go test -race -short -timeout=9m $$pkgs; \
+	fi
+
+# Compile (and link) every test binary of the macOS-shipped set for
+# darwin/arm64 without running a test (Issue #5974). The native macOS legs are
+# skipped on a pull request that does not touch the macOS package closure
+# (scripts/macos-pr-filter.sh), so this Linux job keeps a change that breaks
+# only the darwin test build — for example a helper defined in a
+# `//go:build linux` file and called from an untagged one — failing the PR.
+# `go test -exec /bin/true -run '^$$'` builds and links each test binary and
+# hands it to `true` instead of executing it: `go test -c -o` cannot write
+# several packages' binaries (steward.test collides across packages), and
+# `go vet` only type-checks, so it would miss a link-time failure.
+.PHONY: test-macos-compile
+test-macos-compile:
+	@pkgs=$$($(MACOS_SHIPPED_PKGS)); \
+	if [ -z "$$pkgs" ]; then \
+		echo "❌ test-macos-compile: package enumeration produced no packages - check go list output. Refusing to report a pass."; \
+		exit 1; \
+	fi; \
+	echo "  Compiling $$(echo "$$pkgs" | wc -l | tr -d ' ') macOS-shipped test binaries for darwin/arm64 (not running them)..."; \
+	out=$$(mktemp); \
+	if GOOS=darwin GOARCH=arm64 go test -vet=off -count=1 -exec /bin/true -run '^$$' $$pkgs >"$$out" 2>&1; then \
+		rm -f "$$out"; \
+	else \
+		cat "$$out"; rm -f "$$out"; \
+		echo "❌ test-macos-compile: a macOS-shipped test binary does not compile for darwin/arm64"; \
+		exit 1; \
 	fi
 
 .PHONY: test-scripts

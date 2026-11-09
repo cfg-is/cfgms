@@ -126,6 +126,32 @@ ships on macOS: the in-module packages with test files in the `GOOS=darwin` depe
 position, so `features/workflow` and `pkg/storage/interfaces` land on different shards. Its `go test` runs with
 `-timeout=9m` (under the 15-minute job limit) so a hung package fails by name instead of the job being cancelled. The measurements in the tables above predate this scoping.
 
+**macOS legs run only when the PR touches the macOS package closure (PR side, current state).** The `changes` job in
+`cross-platform-build-pr.yml` emits a second output, `macos` (`true` or `false`), next to `code`; the four macOS legs run when
+`macos == 'true'` and are skipped otherwise. The Windows legs, the e2e leg and the `code` output are unchanged. `macos` comes
+from `scripts/macos-pr-filter.sh`, which runs `GOOS=darwin go list` on the PR merge ref. The closure is (1) the in-module
+packages in the dependency closure of the three macOS binaries (`MACOS_SHIPPED_ROOTS` in the `Makefile`, shared with
+`MACOS_SHIPPED_PKGS`), with no test-file predicate; (2) plus the in-module packages from `go list -deps -test` of those, except
+packages under `features/controller/` or `cmd/controller/` that are not already in (1) — controller code that closure tests
+start in-process and that never ships on macOS; (3) each package's directory, `testdata/` tree and embedded files. A changed
+file triggers `macos=true` when it is in a closure package directory (any file type), under its `testdata/`, or an embedded
+file; renamed files count under both names; `go.mod`, `go.sum`, `Makefile`, `cross-platform-build-pr.yml` and the filter script
+always trigger. Closure tests that read another package's source text (for example `cmd/cfg/cmd/webauthn_test.go`) are not
+triggers: the result does not depend on the OS, and the Linux legs run those tests on every code PR (`cmd/steward` in
+`unit-tests-heavy-providers`, `cmd/cfg` and `cmd/cfg/cmd` in `unit-tests-rest`).
+
+The filter **fails closed**, because macOS does not run in the merge queue: a `go list` error or empty package list, an
+empty or unreadable file list, an unlistable rename set, any `code=true` classification defect, or any unexpected error
+yields `macos=true` (with a `::warning::`); `macos=false` is emitted only when the filter ran to completion and found no
+closure file. `build-gate-pr-stub` accepts a `skipped` macOS leg only through `scripts/macos-gate-rule.sh`: `changes` must have
+concluded `success` and its `macos` output must be exactly `false`; an empty or unexpected output, a `changes` failure, or a
+leg `failure`/`cancelled` fails the gate. `test_macos_gate_rule` and `test_macos_pr_filter` in `scripts/test-scripts.sh` (the
+`unit-tests-scripts` leg) run both scripts against the real repository.
+
+A skipped macOS leg would also skip the darwin test build of closure-reachable controller code, so the Linux job
+`macos-test-compile` (`make test-macos-compile`) compiles and links every macOS-shipped test binary for `darwin/arm64`
+without running it, on every code PR. `build-gate-pr-stub` needs it and accepts `skipped` only on a docs-only PR.
+
 **Queue Linux native build (current state).** `cross-platform-build.yml` runs one `native-builds` job, `Native Build (Linux)`,
 on `merge_group` and `workflow_dispatch`: `make build`, `make test-framework-api-sharded` and
 `make test-go-group-controller-core` against the merge commit. It no longer runs `make test-go-group-heavy-providers`

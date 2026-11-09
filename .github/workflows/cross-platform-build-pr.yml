@@ -70,6 +70,16 @@ jobs:
   # of a `workflow_call` reusable workflow, and this keeps the split structural
   # (see the file-level comment above) without adding a third workflow file.
   # Any edit to test-suite.yml's classification step should be mirrored here.
+  # The `macos` output is specific to this file (Issue #5974): it is not part of
+  # the mirrored classification and test-suite.yml has no counterpart.
+  #
+  # `macos` is `true` when the PR can affect the four native macOS legs and
+  # `false` only when scripts/macos-pr-filter.sh ran to completion and found no
+  # changed file in the macOS package closure. It fails closed: any code=true
+  # classification defect, an unlistable rename set, or any filter defect
+  # yields `true`. macOS runs on the PR side only, so a wrongly skipped leg
+  # would ship untested code. The `Build Gate` accepts a skipped macOS leg only
+  # through scripts/macos-gate-rule.sh.
   changes:
     permissions:
       contents: read
@@ -78,7 +88,34 @@ jobs:
     timeout-minutes: 5
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      macos: ${{ steps.macos.outputs.macos }}
     steps:
+      # Checkout (the PR merge ref) and Go are only for the macOS filter below,
+      # which evaluates the GOOS=darwin package closure with `go list`.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      # Restore-only, same as the legs below (Issue #4234).
+      - name: Restore Go module/build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-modules-
+
+      - name: Download dependencies
+        run: go mod download
+
       - name: Detect non-documentation changes
         id: filter
         env:
@@ -107,6 +144,7 @@ jobs:
           if [ "$api_status" -ne 0 ]; then
             echo "::warning::gh api exited ${api_status} listing PR files — assuming code changes and running the full suite"
             echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "defect=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -117,6 +155,7 @@ jobs:
           if [ "$listed" -eq 0 ]; then
             echo "::warning::PR file list came back empty — assuming code changes and running the full suite"
             echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "defect=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -128,11 +167,13 @@ jobs:
           if ! [ "${PR_CHANGED_FILES:-}" -eq "${PR_CHANGED_FILES:-}" ] 2>/dev/null; then
             echo "::warning::PR payload carried no usable changed_files count — assuming code changes and running the full suite"
             echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "defect=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$listed" -ne "$PR_CHANGED_FILES" ]; then
             echo "::warning::listed ${listed} file(s) but the PR reports ${PR_CHANGED_FILES} (API cap or partial response) — assuming code changes and running the full suite"
             echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "defect=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -152,6 +193,7 @@ jobs:
           if [ "$grep_status" -gt 1 ]; then
             echo "::warning::classifying changed files failed (grep exit ${grep_status}) — assuming code changes and running the full suite"
             echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "defect=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -163,6 +205,51 @@ jobs:
             echo "All ${listed} changed file(s) are documentation — legs will be skipped"
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # Decide whether the four native macOS legs run (Issue #5974). FAILS
+      # CLOSED: every path that is not a completed "no closure file changed"
+      # run of scripts/macos-pr-filter.sh emits macos=true.
+      - name: Detect macOS package closure changes
+        id: macos
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CODE: ${{ steps.filter.outputs.code }}
+          CODE_DEFECT: ${{ steps.filter.outputs.defect }}
+        run: |
+          set -uo pipefail
+
+          if [ "$CODE" = "false" ]; then
+            echo "Documentation-only PR — macOS legs will be skipped"
+            echo "macos=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$CODE" != "true" ] || [ "$CODE_DEFECT" = "true" ]; then
+            echo "::warning::code classification was unresolved or defective (code=${CODE:-<unset>}, defect=${CODE_DEFECT:-<unset>}) — running the macOS legs"
+            echo "macos=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Pre-rename names go in their own file so the `listed ==
+          # changed_files` completeness check above is not affected.
+          rename_status=0
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+            --paginate --jq '.[] | select(.previous_filename != null) | .previous_filename' \
+            > renamed_files.txt || rename_status=$?
+          if [ "$rename_status" -ne 0 ]; then
+            echo "::warning::gh api exited ${rename_status} listing renamed files — running the macOS legs"
+            echo "macos=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          filter_status=0
+          result=$(bash scripts/macos-pr-filter.sh --files changed_files.txt --renamed renamed_files.txt) || filter_status=$?
+          if [ "$filter_status" -ne 0 ] || { [ "$result" != "macos=true" ] && [ "$result" != "macos=false" ]; }; then
+            echo "::warning::macOS filter exited ${filter_status} with unexpected output '${result}' — running the macOS legs"
+            result="macos=true"
+          fi
+          echo "$result"
+          echo "$result" >> "$GITHUB_OUTPUT"
 
   # Fast cross-compilation check (single runner, all platforms not natively
   # tested below)
@@ -473,13 +560,58 @@ jobs:
         CFGMS_TEST_RACE: "0"
       run: make test-go-group-windows-rest
 
+  # Linux compile check of the macOS test binaries (Issue #5974). The four
+  # native macOS legs below are skipped on a PR that does not touch the macOS
+  # package closure (`changes.outputs.macos`), which includes controller code
+  # that closure tests start in-process (features/controller/api, for one). A
+  # change there that compiles on Linux but breaks the darwin test build must
+  # still fail the PR, so this job compiles (does not run) every macOS-shipped
+  # test binary for darwin/arm64 on every code PR.
+  macos-test-compile:
+    name: macOS Test Compile (Linux)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234), see the legs below.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Compile the macOS-shipped test binaries for darwin/arm64
+      run: make test-macos-compile
+
   # Native macOS unit-test legs (Issue #4219, scoped by Issue #5746). -race.
   # They test only the in-module packages with test files in the GOOS=darwin
   # dependency closure of the macOS-shipped binaries (cmd/steward,
   # cmd/cfgms-steward-launcher, cmd/cfg), derived by the Makefile at run time
   # (see MACOS_SHIPPED_PKGS) — no controller-only package runs here. 4 legs,
   # each on its own dedicated 3-vCPU runner: providers, steward, and the
-  # remainder split into 2 shards.
+  # remainder split into 2 shards. They run only when `changes.outputs.macos`
+  # is `true`: a PR whose changed files are all outside the closure cannot
+  # change their result (scripts/macos-pr-filter.sh, fail-closed).
   macos-providers:
     name: macOS Unit Tests (cert, controlplane, sqlite)
     permissions:
@@ -487,7 +619,7 @@ jobs:
     needs: changes
     runs-on: macos-latest
     timeout-minutes: 15
-    if: always() && needs.changes.outputs.code == 'true'
+    if: always() && needs.changes.outputs.macos == 'true'
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
@@ -534,7 +666,7 @@ jobs:
     needs: changes
     runs-on: macos-latest
     timeout-minutes: 15
-    if: always() && needs.changes.outputs.code == 'true'
+    if: always() && needs.changes.outputs.macos == 'true'
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
@@ -581,7 +713,7 @@ jobs:
     needs: changes
     runs-on: macos-latest
     timeout-minutes: 15
-    if: always() && needs.changes.outputs.code == 'true'
+    if: always() && needs.changes.outputs.macos == 'true'
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
@@ -630,7 +762,7 @@ jobs:
     needs: changes
     runs-on: macos-latest
     timeout-minutes: 15
-    if: always() && needs.changes.outputs.code == 'true'
+    if: always() && needs.changes.outputs.macos == 'true'
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
@@ -725,7 +857,8 @@ jobs:
   # for this same context.
   build-gate-pr-stub:
     name: Build Gate
-    permissions: {}
+    permissions:
+      contents: read
     needs:
       - changes
       - cross-compile-check
@@ -734,6 +867,7 @@ jobs:
       - windows-steward
       - windows-cmd
       - windows-rest
+      - macos-test-compile
       - macos-providers
       - macos-steward
       - macos-rest-1
@@ -742,6 +876,12 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     steps:
+    # Only to read scripts/macos-gate-rule.sh, the acceptance rule for a
+    # skipped macOS leg.
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
     - name: Check PR-time Build Results
       env:
         CROSS_COMPILE_RESULT: ${{ needs.cross-compile-check.result }}
@@ -750,6 +890,7 @@ jobs:
         WINDOWS_STEWARD_RESULT: ${{ needs.windows-steward.result }}
         WINDOWS_CMD_RESULT: ${{ needs.windows-cmd.result }}
         WINDOWS_REST_RESULT: ${{ needs.windows-rest.result }}
+        MACOS_COMPILE_RESULT: ${{ needs.macos-test-compile.result }}
         MACOS_PROVIDERS_RESULT: ${{ needs.macos-providers.result }}
         MACOS_STEWARD_RESULT: ${{ needs.macos-steward.result }}
         MACOS_REST_1_RESULT: ${{ needs.macos-rest-1.result }}
@@ -757,6 +898,7 @@ jobs:
         E2E_RESULT: ${{ needs.e2e.result }}
         CHANGES_RESULT: ${{ needs.changes.result }}
         CODE_CHANGES: ${{ needs.changes.outputs.code }}
+        MACOS_CHANGES: ${{ needs.changes.outputs.macos }}
       run: |
         echo "## Build Gate Results (PR)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
@@ -768,13 +910,14 @@ jobs:
         echo "| Windows: steward | $WINDOWS_STEWARD_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Windows: cmd | $WINDOWS_CMD_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Windows: rest + modules | $WINDOWS_REST_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS test compile (Linux) | $MACOS_COMPILE_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: cert/controlplane/sqlite | $MACOS_PROVIDERS_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: steward/cmd | $MACOS_STEWARD_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: rest shard 1/2 | $MACOS_REST_1_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: rest shard 2/2 | $MACOS_REST_2_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| E2E (no Docker) | $E2E_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Docker Integration + Queue Re-validation | deferred to merge queue |" >> $GITHUB_STEP_SUMMARY
-        echo "| Change detection (\`changes\`) | $CHANGES_RESULT (code=${CODE_CHANGES:-<unset>}) |" >> $GITHUB_STEP_SUMMARY
+        echo "| Change detection (\`changes\`) | $CHANGES_RESULT (code=${CODE_CHANGES:-<unset>}, macos=${MACOS_CHANGES:-<unset>}) |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
 
         # THIS AGGREGATION MUST FAIL CLOSED, same as test-suite.yml's
@@ -811,7 +954,7 @@ jobs:
           docs_only=no
         fi
 
-        for result in "$WINDOWS_API_RESULT" "$WINDOWS_CONTROLLER_RESULT" "$WINDOWS_STEWARD_RESULT" "$WINDOWS_CMD_RESULT" "$WINDOWS_REST_RESULT" "$MACOS_PROVIDERS_RESULT" "$MACOS_STEWARD_RESULT" "$MACOS_REST_1_RESULT" "$MACOS_REST_2_RESULT" "$E2E_RESULT"; do
+        for result in "$WINDOWS_API_RESULT" "$WINDOWS_CONTROLLER_RESULT" "$WINDOWS_STEWARD_RESULT" "$WINDOWS_CMD_RESULT" "$WINDOWS_REST_RESULT" "$MACOS_COMPILE_RESULT" "$E2E_RESULT"; do
           if [ "$result" = "success" ]; then
             continue
           fi
@@ -820,6 +963,14 @@ jobs:
           fi
           echo "::error::native leg result '${result:-<unset>}' is not acceptable (docs-only PR: ${docs_only})"
           fail=1
+        done
+
+        # The four macOS unit-test legs have a second legitimate skip: the PR
+        # does not touch the macOS package closure. macos-gate-rule.sh accepts
+        # `skipped` only when `changes` succeeded AND its macos output is
+        # exactly `false` (an empty or unexpected output fails closed).
+        for result in "$MACOS_PROVIDERS_RESULT" "$MACOS_STEWARD_RESULT" "$MACOS_REST_1_RESULT" "$MACOS_REST_2_RESULT"; do
+          bash scripts/macos-gate-rule.sh "$CHANGES_RESULT" "$MACOS_CHANGES" "$result" || fail=1
         done
 
         if [ "$fail" -eq 0 ]; then
