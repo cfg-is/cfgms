@@ -124,6 +124,7 @@ type Engine struct {
 	setHARoleExecutor             SetHARoleStepExecutor
 	moveResourceToClusterExecutor MoveResourceToClusterStepExecutor
 	scriptExecutor                ScriptStepExecutor
+	notifyChannels                NotifyChannelResolver
 
 	// Durable execution history (engine_execution_store.go). A nil store keeps
 	// executions node-local.
@@ -281,6 +282,15 @@ func (e *Engine) startWorkflow(ctx context.Context, workflow Workflow, variables
 	// through a path this walk cannot see.
 	if restricted == nil && containsScriptStep(workflow.Steps) {
 		return e.recordRejectedExecution(ctx, workflow, ErrScriptStepNotRestricted), ErrScriptStepNotRestricted
+	}
+
+	// A restricted execution is validated against the positive step-type
+	// allowlist before anything starts. This is the only start path for a
+	// restricted run, so there is no restricted execution without validation.
+	if restricted != nil {
+		if err := e.validateRestrictedWorkflow(ctx, workflow); err != nil {
+			return e.recordRejectedExecution(ctx, workflow, err), err
+		}
 	}
 
 	// Enforce the workflow's declared inputs. This is the single enforcement
@@ -674,67 +684,7 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 	// Store initial result safely
 	e.recordStepResult(execution, key, result)
 
-	var err error
-	switch step.Type {
-	case StepTypeTask:
-		err = e.executeTaskStep(ctx, step, execution)
-	case StepTypeSequential:
-		err = e.executeSequentialStep(ctx, step, execution)
-	case StepTypeParallel:
-		err = e.executeParallelStep(ctx, step, execution)
-	case StepTypeConditional:
-		err = e.executeConditionalStep(ctx, step, execution)
-	case StepTypeHTTP:
-		err = e.executeHTTPStep(ctx, step, execution)
-	case StepTypeAPI:
-		err = e.executeAPIStep(ctx, step, execution)
-	case StepTypeWebhook:
-		err = e.executeWebhookStep(ctx, step, execution)
-	case StepTypeNotify:
-		err = e.executeNotifyStep(ctx, step, execution)
-	case StepTypeDelay:
-		err = e.executeDelayStep(ctx, step, execution)
-	case StepTypeApproval:
-		err = e.executeApprovalStep(step)
-	case StepTypeFor:
-		err = e.executeForStep(ctx, step, execution)
-	case StepTypeWhile:
-		err = e.executeWhileStep(ctx, step, execution)
-	case StepTypeForeach:
-		err = e.executeForeachStep(ctx, step, execution)
-	case StepTypeSwitch:
-		err = e.executeSwitchStep(ctx, step, execution)
-	case StepTypeTry:
-		err = e.executeTryStep(ctx, step, execution)
-	case StepTypeWorkflow:
-		err = e.executeWorkflowStep(ctx, step, execution)
-	case StepTypeBreak:
-		err = NewBreakError(step.Name)
-	case StepTypeContinue:
-		err = NewContinueError(step.Name)
-	case StepTypeBarrier:
-		err = e.executeBarrierStep(ctx, step, execution)
-	case StepTypeSemaphore:
-		err = e.executeSemaphoreStep(ctx, step, execution)
-	case StepTypeLock:
-		err = e.executeLockStep(ctx, step, execution)
-	case StepTypeWaitGroup:
-		err = e.executeWaitGroupStep(ctx, step, execution)
-	case StepTypeFanOut:
-		err = e.executeFanOutStep(ctx, step, execution)
-	case StepTypeFanIn:
-		err = e.executeFanInStep(ctx, step, execution)
-	case StepTypeErrorWorkflow:
-		err = e.executeErrorWorkflowStep(ctx, step, execution)
-	case StepTypeComposite:
-		err = e.executeCompositeStep(ctx, step, execution)
-	case StepTypeTransform, StepTypeQueryRingHealth, StepTypeSetHARole, StepTypeMoveResourceToCluster:
-		err = e.executeExtensionStep(ctx, step, execution, key)
-	case StepTypeScript:
-		err = e.executeScriptStep(ctx, step, execution, key)
-	default:
-		err = fmt.Errorf("unknown step type: %s", step.Type)
-	}
+	err := e.dispatchStep(ctx, step, execution, key)
 
 	// Get the current result (which may have been updated by the step execution)
 	currentResult, exists := execution.GetStepResult(key)
@@ -776,6 +726,85 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 
 	e.recordStepResult(execution, key, result)
 	return err
+}
+
+// dispatchStep runs step through the executor for its type. A restricted
+// execution first checks the step against the restricted-automation policy, so a
+// step reached through a path the start-time walk cannot see (a step built at
+// run time, a fan-out worker) is refused here before anything runs.
+func (e *Engine) dispatchStep(ctx context.Context, step Step, execution *WorkflowExecution, key string) error {
+	if execution.Restricted != nil {
+		if err := e.checkRestrictedStep(ctx, step, execution.TenantID); err != nil {
+			return err
+		}
+	}
+	run, ok := stepRunners[step.Type]
+	if !ok {
+		return fmt.Errorf("unknown step type: %s", step.Type)
+	}
+	return run(e, ctx, step, execution, key)
+}
+
+// stepRunner runs one step through the executor for its type.
+type stepRunner func(e *Engine, ctx context.Context, step Step, execution *WorkflowExecution, key string) error
+
+// stepRunners maps each step type to its executor. It is filled by init because
+// the executors reach executeStep again (nested steps), which would otherwise be
+// an initialization cycle.
+var stepRunners map[StepType]stepRunner
+
+// plainRunner adapts an executor that does not need the step result key.
+func plainRunner(run func(e *Engine, ctx context.Context, step Step, execution *WorkflowExecution) error) stepRunner {
+	return func(e *Engine, ctx context.Context, step Step, execution *WorkflowExecution, _ string) error {
+		return run(e, ctx, step, execution)
+	}
+}
+
+func init() {
+	extension := func(e *Engine, ctx context.Context, step Step, execution *WorkflowExecution, key string) error {
+		return e.executeExtensionStep(ctx, step, execution, key)
+	}
+	stepRunners = map[StepType]stepRunner{
+		StepTypeTask:        plainRunner((*Engine).executeTaskStep),
+		StepTypeSequential:  plainRunner((*Engine).executeSequentialStep),
+		StepTypeParallel:    plainRunner((*Engine).executeParallelStep),
+		StepTypeConditional: plainRunner((*Engine).executeConditionalStep),
+		StepTypeHTTP:        plainRunner((*Engine).executeHTTPStep),
+		StepTypeAPI:         plainRunner((*Engine).executeAPIStep),
+		StepTypeWebhook:     plainRunner((*Engine).executeWebhookStep),
+		StepTypeNotify:      plainRunner((*Engine).executeNotifyStep),
+		StepTypeDelay:       plainRunner((*Engine).executeDelayStep),
+		StepTypeApproval: plainRunner(func(e *Engine, _ context.Context, step Step, _ *WorkflowExecution) error {
+			return e.executeApprovalStep(step)
+		}),
+		StepTypeFor:      plainRunner((*Engine).executeForStep),
+		StepTypeWhile:    plainRunner((*Engine).executeWhileStep),
+		StepTypeForeach:  plainRunner((*Engine).executeForeachStep),
+		StepTypeSwitch:   plainRunner((*Engine).executeSwitchStep),
+		StepTypeTry:      plainRunner((*Engine).executeTryStep),
+		StepTypeWorkflow: plainRunner((*Engine).executeWorkflowStep),
+		StepTypeBreak: plainRunner(func(_ *Engine, _ context.Context, step Step, _ *WorkflowExecution) error {
+			return NewBreakError(step.Name)
+		}),
+		StepTypeContinue: plainRunner(func(_ *Engine, _ context.Context, step Step, _ *WorkflowExecution) error {
+			return NewContinueError(step.Name)
+		}),
+		StepTypeBarrier:               plainRunner((*Engine).executeBarrierStep),
+		StepTypeSemaphore:             plainRunner((*Engine).executeSemaphoreStep),
+		StepTypeLock:                  plainRunner((*Engine).executeLockStep),
+		StepTypeWaitGroup:             plainRunner((*Engine).executeWaitGroupStep),
+		StepTypeFanOut:                plainRunner((*Engine).executeFanOutStep),
+		StepTypeFanIn:                 plainRunner((*Engine).executeFanInStep),
+		StepTypeErrorWorkflow:         plainRunner((*Engine).executeErrorWorkflowStep),
+		StepTypeComposite:             plainRunner((*Engine).executeCompositeStep),
+		StepTypeTransform:             extension,
+		StepTypeQueryRingHealth:       extension,
+		StepTypeSetHARole:             extension,
+		StepTypeMoveResourceToCluster: extension,
+		StepTypeScript: func(e *Engine, ctx context.Context, step Step, execution *WorkflowExecution, key string) error {
+			return e.executeScriptStep(ctx, step, execution, key)
+		},
+	}
 }
 
 // executeExtensionStep runs a step whose executor the controller injects at
