@@ -31,6 +31,7 @@
  *   /support-access  → AppShell layout → SupportAccessView
  *   /installer       → AppShell layout → InstallerPage
  *   /api-keys        → AppShell layout → ApiKeysView (Issue #5441)
+ *   /automation/grants → AppShell layout → AutomationGrantsView (Issue #5855)
  *   /directory/users, /directory/groups → AppShell layout → UsersPage / GroupsPage (Issue #5565)
  *   /cases           → AppShell layout → CaseListView (Story #3614)
  *   /cases/:id       → AppShell layout → CockpitView (Story #3608)
@@ -87,6 +88,7 @@ import TenantAdminView from './tenants/TenantAdminView.tsx'
 import SupportAccessView from './tenants/SupportAccessView.tsx'
 import InstallerPage from './installer/InstallerPage.tsx'
 import ApiKeysView from './apikeys/ApiKeysView.tsx'
+import AutomationGrantsView from './automation/AutomationGrantsView.tsx'
 import CockpitView from './cockpit/CockpitView.tsx'
 import CaseListView from './cockpit/CaseListView.tsx'
 import UsersPage from './directory/UsersPage.tsx'
@@ -137,6 +139,7 @@ function App() {
                   <Route path="support-access" element={<SupportAccessView />} />
                   <Route path="installer" element={<InstallerPage />} />
                   <Route path="api-keys" element={<ApiKeysView />} />
+                  <Route path="automation/grants" element={<AutomationGrantsView />} />
                   <Route path="directory/users" element={<UsersPage />} />
                   <Route path="directory/groups" element={<GroupsPage />} />
                   <Route path="cases" element={<CaseListView />} />
