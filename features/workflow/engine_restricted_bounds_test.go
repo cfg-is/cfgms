@@ -407,3 +407,31 @@ func TestRestrictedBounds_FirstStopReasonWins(t *testing.T) {
 	assert.Equal(t, StatusCancelled, status)
 	assert.EqualError(t, reason, "first")
 }
+
+func TestPeakFanOut(t *testing.T) {
+	par := func(children ...Step) Step { return Step{Type: StepTypeParallel, Steps: children} }
+	seq := func(children ...Step) Step { return Step{Type: StepTypeSequential, Steps: children} }
+	leaf := Step{Type: StepTypeDelay}
+
+	assert.Equal(t, 0, peakFanOut(leaf))
+	assert.Equal(t, 3, peakFanOut(par(leaf, leaf, leaf)))
+	assert.Equal(t, 6, peakFanOut(par(par(leaf, leaf), par(leaf, leaf))), "nested branches run together")
+	assert.Equal(t, 2, peakFanOut(seq(par(leaf, leaf), par(leaf, leaf))), "sequential steps never overlap")
+	assert.Equal(t, 5, peakFanOut(par(seq(par(leaf, leaf)), leaf, leaf)), "a parallel step inside a sequential branch still counts")
+}
+
+func TestRestrictedBounds_NestedFanOutIsDeterministic(t *testing.T) {
+	// The bound does not depend on which branches have finished when another
+	// starts: run the same nested workflow repeatedly.
+	engine, _ := newRestrictedEngine(t)
+	wf := Workflow{Name: "wf", Steps: []Step{{
+		Name: "outer", Type: StepTypeParallel, Steps: []Step{
+			{Name: "a", Type: StepTypeParallel, Steps: scriptSteps(2)},
+			{Name: "b", Type: StepTypeParallel, Steps: scriptSteps(2)},
+		},
+	}}}
+	for i := 0; i < 20; i++ {
+		exec := runBounded(t, engine, wf, nil, RestrictedOptions{MaxFanOut: 5})
+		assertStoppedWith(t, exec, StatusFailed, ErrRestrictedBoundExceeded, "more than 5 parallel branches")
+	}
+}

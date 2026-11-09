@@ -91,7 +91,6 @@ type restrictedState struct {
 	mu         sync.Mutex
 	steps      int
 	iterations int
-	fanOut     int
 	stopErr    error
 	stopStatus ExecutionStatus
 }
@@ -202,26 +201,35 @@ func (s *restrictedState) admitIteration() error {
 	return nil
 }
 
-// enterFanOut reserves n parallel branches and returns the function that
-// releases them.
-func (s *restrictedState) enterFanOut(n int) (func(), error) {
+// peakFanOut is the most parallel branches step can have running at once: a
+// parallel step runs its branches together with whatever each branch runs, any
+// other step with children runs them one after another. It depends only on the
+// workflow's shape, never on how branches are scheduled.
+func peakFanOut(step Step) int {
+	nested := 0
+	for _, child := range step.Steps {
+		peak := peakFanOut(child)
+		if step.Type == StepTypeParallel {
+			nested += peak
+		} else if peak > nested {
+			nested = peak
+		}
+	}
+	if step.Type == StepTypeParallel {
+		return len(step.Steps) + nested
+	}
+	return nested
+}
+
+// checkFanOut refuses a parallel step whose peak fan-out exceeds the bound.
+func (s *restrictedState) checkFanOut(step Step) error {
 	if _, err := s.stopped(); err != nil {
-		return nil, err
+		return err
 	}
-	s.mu.Lock()
-	s.fanOut += n
-	over := s.fanOut > s.opts.MaxFanOut
-	s.mu.Unlock()
-	release := func() {
-		s.mu.Lock()
-		s.fanOut -= n
-		s.mu.Unlock()
+	if peakFanOut(step) > s.opts.MaxFanOut {
+		return s.exceeded("more than %d parallel branches at once", s.opts.MaxFanOut)
 	}
-	if over {
-		release()
-		return nil, s.exceeded("more than %d parallel branches at once", s.opts.MaxFanOut)
-	}
-	return release, nil
+	return nil
 }
 
 // restrictedStopError wraps a recorded stop reason as a workflow error no error
@@ -275,18 +283,17 @@ func (e *Engine) admitRestrictedIteration(ctx context.Context, steps []Step) err
 	return nil
 }
 
-// restrictedFanOut reserves the branches of a parallel step of a restricted
-// execution. The returned function releases them.
-func (e *Engine) restrictedFanOut(ctx context.Context, step Step) (func(), error) {
+// admitRestrictedFanOut is called before a parallel step of a restricted
+// execution starts its branches.
+func (e *Engine) admitRestrictedFanOut(ctx context.Context, step Step) error {
 	state := restrictedStateFrom(ctx)
 	if state == nil {
-		return func() {}, nil
+		return nil
 	}
-	release, err := state.enterFanOut(len(step.Steps))
-	if err != nil {
-		return nil, restrictedStopError(step, err)
+	if err := state.checkFanOut(step); err != nil {
+		return restrictedStopError(step, err)
 	}
-	return release, nil
+	return nil
 }
 
 // restrictedStop returns the reason and status a restricted execution was

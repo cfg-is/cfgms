@@ -981,11 +981,9 @@ func (e *Engine) executeSequentialStep(ctx context.Context, step Step, execution
 // executeParallelStep executes child steps in parallel
 func (e *Engine) executeParallelStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
 	if execution.Restricted != nil {
-		release, err := e.restrictedFanOut(ctx, step)
-		if err != nil {
+		if err := e.admitRestrictedFanOut(ctx, step); err != nil {
 			return err
 		}
-		defer release()
 	}
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(step.Steps))
