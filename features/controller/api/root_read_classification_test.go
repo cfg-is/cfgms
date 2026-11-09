@@ -68,6 +68,7 @@ var rootReadClassification = map[string]rootReadEntry{
 	"/api/v1/certificates/{serial}":                                  {rootReadCrossing, ""},
 	"/api/v1/automation/approvals/scripts":                           {rootReadOwnScope, ""},
 	"/api/v1/automation/approvals/scripts/pending":                   {rootReadOwnScope, ""},
+	"/api/v1/automation/approvals/workflows":                         {rootReadOwnScope, ""},
 	"/api/v1/cli-login/{id}":                                         {rootReadOwnScope, ""},
 	"/api/v1/cli-presence/{id}":                                      {rootReadOwnScope, ""},
 	"/api/v1/clusters":                                               {rootReadCrossing, ""},
