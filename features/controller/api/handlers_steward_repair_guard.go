@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -111,8 +112,24 @@ type repairGuard struct {
 	evidence bool
 }
 
+// sortRepairEventsOldestFirst orders entries by write order: ascending Timestamp,
+// with the per-tenant SequenceNumber breaking a tie. A coarse wall clock (about
+// 15.6 ms on Windows) gives two events written moments apart the same Timestamp,
+// and the store's timestamp-only sort leaves their relative order undefined; the
+// guard derives its state from event order, so it must not depend on that. The
+// sort is stable, so entries that tie on both keep the order they were read in.
+func sortRepairEventsOldestFirst(entries []*business.AuditEntry) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		if !entries[i].Timestamp.Equal(entries[j].Timestamp) {
+			return entries[i].Timestamp.Before(entries[j].Timestamp)
+		}
+		return entries[i].SequenceNumber < entries[j].SequenceNumber
+	})
+}
+
 // loadRepairGuard reads the steward's repair events. The events are read newest
-// first up to a bound, then folded oldest first.
+// first up to a bound (so the bound keeps the newest events), then folded oldest
+// first.
 func (s *Server) loadRepairGuard(ctx context.Context, record *business.StewardRecord) (*repairGuard, error) {
 	if s.auditManager == nil {
 		return nil, fmt.Errorf("audit manager unavailable")
@@ -133,9 +150,7 @@ func (s *Server) loadRepairGuard(ctx context.Context, record *business.StewardRe
 	if err != nil {
 		return nil, fmt.Errorf("read repair events: %w", err)
 	}
-	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
-		entries[i], entries[j] = entries[j], entries[i]
-	}
+	sortRepairEventsOldestFirst(entries)
 	g := &repairGuard{record: record}
 	g.fold(entries)
 	return g, nil
