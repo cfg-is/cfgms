@@ -1480,125 +1480,16 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, certErr
 	}
 
-	// Initialize HA manager.
-	logger.Info("Initializing HA manager...")
-	haManager, err := initializeHAManager(cfg, logger, storageManager)
+	// Initialize HA manager and wire the DNA storage maintenance sweep lease.
+	haManager, err := newHAManagerWithDNALease(cfg, logger, storageManager, dnaStorageManager)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize HA manager: %w", err)
-	}
-	logger.Info("HA manager initialized successfully")
-
-	// ADR-031 Decision 4: wire the DNA storage maintenance sweep's cluster-
-	// singleton lease claim now that haManager exists. dnaStorageManager is
-	// constructed earlier (before haManager, which itself requires certManager),
-	// so its maintenance goroutine may already be running — SetMaintenanceLease
-	// is safe to call at any time; the next tick reads the newly set lease job.
-	if dnaStorageManager != nil {
-		maintenanceLeaseJob, err := haManager.NewBackgroundLoopLease("controller-dna-storage-maintenance", logger)
-		if err != nil {
-			return nil, fmt.Errorf("failed to construct DNA storage maintenance lease job: %w", err)
-		}
-		dnaStorageManager.SetMaintenanceLease(maintenanceLeaseJob)
+		return nil, err
 	}
 
 	// Initialize registration token store for HTTP-based registration (Story #263)
-	var regStore pkgRegistration.Store
-	regTokenStore := storageManager.GetRegistrationTokenStore()
-	{
-		if regTokenStore == nil {
-			return nil, fmt.Errorf("registration token store is required")
-		}
-		if err := regTokenStore.Initialize(context.Background()); err != nil {
-			return nil, fmt.Errorf("failed to initialize registration token store: %w", err)
-		}
-		regStore = pkgRegistration.NewStorageAdapter(regTokenStore)
-
-		// Seed test tokens only when explicitly requested via environment variable.
-		// Never runs in production — must be set deliberately in test environments.
-		if os.Getenv("CFGMS_SEED_TEST_TOKENS") == "1" {
-			now := time.Now()
-			expiredTime := now.Add(-1 * time.Hour)
-			testTokens := []*pkgRegistration.Token{
-				{
-					Token:         "dockertest_standalone", //nolint:gosec // test-only seeding, env-gated
-					TenantID:      "test-tenant",
-					ControllerURL: "tcp://controller-standalone:1883",
-					Group:         "test-group",
-					CreatedAt:     now,
-					ExpiresAt:     nil,
-					Revoked:       false,
-				},
-				{
-					Token:         "integration_reusable", //nolint:gosec // test-only seeding, env-gated
-					TenantID:      "test-tenant-integration",
-					ControllerURL: "tcp://localhost:1886",
-					Group:         "production",
-					CreatedAt:     now,
-					ExpiresAt:     nil,
-					Revoked:       false,
-				},
-				{
-					Token:         "integration_expired", //nolint:gosec // test-only seeding, env-gated
-					TenantID:      "test-tenant-integration",
-					ControllerURL: "tcp://localhost:1886",
-					Group:         "production",
-					CreatedAt:     now.Add(-2 * time.Hour),
-					ExpiresAt:     &expiredTime,
-					Revoked:       false,
-				},
-				{
-					Token:         "integration_revoked", //nolint:gosec // test-only seeding, env-gated
-					TenantID:      "test-tenant-integration",
-					ControllerURL: "tcp://localhost:1886",
-					Group:         "production",
-					CreatedAt:     now,
-					ExpiresAt:     nil,
-					Revoked:       true,
-					RevokedAt:     &now,
-				},
-				{
-					Token:         "dockertest_fleet", //nolint:gosec // test-only seeding, env-gated
-					TenantID:      "test-tenant-fleet",
-					ControllerURL: "fleet-controller:4433",
-					Group:         "test-group",
-					CreatedAt:     now,
-					ExpiresAt:     nil,
-					Revoked:       false,
-				},
-				{
-					Token:         "dockertest_fleet_child_a", //nolint:gosec // test-only seeding, env-gated
-					TenantID:      "fleet-root/fleet-child-a",
-					ControllerURL: "fleet-controller:4433",
-					Group:         "test-group",
-					CreatedAt:     now,
-					ExpiresAt:     nil,
-					Revoked:       false,
-				},
-				{
-					Token:         "dockertest_fleet_child_b", //nolint:gosec // test-only seeding, env-gated
-					TenantID:      "fleet-root/fleet-child-b",
-					ControllerURL: "fleet-controller:4433",
-					Group:         "test-group",
-					CreatedAt:     now,
-					ExpiresAt:     nil,
-					Revoked:       false,
-				},
-			}
-
-			for _, testToken := range testTokens {
-				redactedToken := logging.RedactedID(testToken.Token)
-				if err := regStore.SaveToken(context.Background(), testToken); err != nil {
-					logger.Warn("Failed to seed test token", "error", err, "token", redactedToken)
-				} else {
-					logger.Info("Seeded test registration token", "token", redactedToken, "tenant", testToken.TenantID)
-				}
-			}
-
-			// Seed fleet cascade tenant hierarchy and MSP-level parent policy (Issue #1723).
-			// Creates fleet-root → fleet-child-a/fleet-child-b so the InheritanceResolver
-			// can walk the ancestor chain and cascade the parent policy to both child tenants.
-			seedFleetCascadeTestData(context.Background(), storageManager, logger)
-		}
+	regTokenStore, regStore, err := newRegistrationTokenStore(logger, storageManager)
+	if err != nil {
+		return nil, err
 	}
 
 	// Initialize shared gRPC-over-QUIC transport (Story #515)
@@ -1659,177 +1550,37 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var signingRetirementSvc *service.SigningRetirementService
 	var stewardMigrationSvc *service.StewardSigningMigrationService
 	if cfg.Transport != nil && certManager != nil {
-		logger.Info("Initializing gRPC control plane provider...", "addr", cfg.Transport.ListenAddr)
-
-		grpcTLSConfig, err := buildGRPCControlPlaneTLSConfig(cfg, certManager, logger)
+		cpStage, err := newControlPlaneStage(&controlPlaneInputs{
+			cfg:               cfg,
+			logger:            logger,
+			certManager:       certManager,
+			storageManager:    storageManager,
+			haManager:         haManager,
+			controllerService: controllerService,
+			auditManager:      auditManager,
+			regTokenStore:     regTokenStore,
+			admissionQueues:   admissionQueues,
+			tamperRelay:       tamperRelay,
+			repairConnect:     repairConnect,
+			repairGuard:       repairGuard,
+		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to build transport TLS config: %w", err)
+			return nil, err
 		}
-
-		// Initialize CP provider (shared gRPC server created fresh in Start).
-		// Issue #1817: Create the signing rotation service before the provider so
-		// we can inject it as the on-connect hook. The publisher is wired after
-		// commandPublisher is constructed below (breaks the init cycle).
-		connRegistry = registry.NewRegistry()
-		stewardStore := storageManager.GetStewardStore()
-		if stewardStore == nil {
-			return nil, fmt.Errorf("steward approval store is required when transport is enabled")
-		}
-		approvalChecker := grpcCP.NewStewardStoreApprovalChecker(stewardStore)
-		lockdown = controllerFleet.NewLockdown(stewardStore, logger)
-		tamperRelay.lockdown = lockdown
-		// Issue #3759: the admission gate keys its buckets on the tenant this
-		// store reports for the mTLS-verified steward CN, never on the tenant
-		// field the steward puts on the wire — otherwise any steward with a
-		// valid certificate could saturate another tenant's shared slots.
-		tenantResolver := grpcCP.NewStewardStoreTenantResolver(stewardStore)
-		// Issue #2008: compose the admin-registry upsert hook alongside the
-		// signing-rotation hook so every authenticated (re)connect repopulates
-		// ControllerService.s.stewards (which backs cfg steward list/status/exec).
-		// A cert-reuse reconnect never re-runs HTTP registration, so without this
-		// the registry stays empty for a reconnecting steward until a restart.
-		registryConnectHook := service.NewStewardRegistryConnectHook(controllerService, logger)
-		// Issue #2050: completion reconciler — flips finalizing→ready when the
-		// newly-registered steward's CN matches the CorrelationID in the provision
-		// record, and sweeps timed-out non-terminal records to failed. A no-op
-		// memProvisionStore is used when the hyperv feature is not configured so
-		// the controller boots cleanly without any hyperv-specific configuration.
-		completionReconciler := hypervcompletion.New(hyperv.NewMemProvisionStore(), logger)
-		// ADR-031 Decision 3, Issue #3764: shared steward-routing table. Composed
-		// into the connect hook chain unconditionally — routingTableConnectHook is
-		// a no-op when routingStore is nil (no provider support / non-cluster
-		// deployment), so this never changes connect behavior outside cluster mode.
-		routingStore = storageManager.GetRoutingStore()
-		routingHook := &routingTableConnectHook{routingStore: routingStore, logger: logger}
-		if haManager != nil {
-			routingHook.localNodeID = haManager.GetLocalNode().ID
-		}
-		// Issue #3757/#3764: drain a reconnecting steward's durable outbox backlog
-		// immediately rather than waiting for the next dispatch attempt. publisher
-		// is nil here (commands.Publisher does not exist yet — same init-cycle
-		// break as signingRotationSvc below) and wired in via SetPublisher once it
-		// does.
-		drainHook := service.NewPendingDeliveryDrainHook(storageManager.GetCommandStore(), stewardStore, nil, logger)
-		if certManager != nil {
-			var svcErr error
-			signingRotationSvc, stewardMigrationSvc, svcErr = newSigningTrustServices(certManager, haManager, storageManager, cfg.Certificate.CAPath, connRegistry, logger)
-			if svcErr != nil {
-				return nil, svcErr
-			}
-			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, stewardMigrationSvc, registryConnectHook, completionReconciler, routingHook, drainHook, lockdown, repairConnect)
-			controlPlane = grpcCP.New(
-				grpcCP.ModeServer,
-				grpcCP.WithOnConnectHook(composite),
-				grpcCP.WithApprovalChecker(approvalChecker),
-				grpcCP.WithRevocationChecker(certManager),
-				// Issue #3759: the connect/heartbeat gate — deliberately NOT the queue
-				// the DNA and bulk handlers use, whose bucket key comes off the wire
-				// (see ingest_admission.go).
-				grpcCP.WithTenantAdmission(admissionQueues.connectHeartbeatQueue()),
-				// Issue #5120: steward events get their own queue so slow handlers
-				// cannot use up connect or heartbeat slots.
-				grpcCP.WithEventAdmission(admissionQueues.eventsQueue()),
-				grpcCP.WithResponseAdmission(admissionQueues.responsesQueue()),
-				grpcCP.WithStewardTenantResolver(tenantResolver),
-				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger).withRepairGuard(repairGuard)),
-				grpcCP.WithPeerCredentialObserver(repairGuard),
-				grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, auditManager, logger)),
-				// Issue #5665: the one default-deny gate on controller-pushed commands.
-				grpcCP.WithLockdown(lockdown, newLockdownAuditObserver(auditManager, stewardStore, logger)),
-			)
-		} else {
-			composite := service.NewCompositeOnConnectHook(logger, registryConnectHook, completionReconciler, routingHook, drainHook, lockdown, repairConnect)
-			controlPlane = grpcCP.New(
-				grpcCP.ModeServer,
-				grpcCP.WithOnConnectHook(composite),
-				grpcCP.WithApprovalChecker(approvalChecker),
-				grpcCP.WithRevocationChecker(certManager),
-				// Issue #3759: the connect/heartbeat gate — deliberately NOT the queue
-				// the DNA and bulk handlers use, whose bucket key comes off the wire
-				// (see ingest_admission.go).
-				grpcCP.WithTenantAdmission(admissionQueues.connectHeartbeatQueue()),
-				// Issue #5120: steward events get their own queue so slow handlers
-				// cannot use up connect or heartbeat slots.
-				grpcCP.WithEventAdmission(admissionQueues.eventsQueue()),
-				grpcCP.WithResponseAdmission(admissionQueues.responsesQueue()),
-				grpcCP.WithStewardTenantResolver(tenantResolver),
-				grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(auditManager, logger).withRepairGuard(repairGuard)),
-				grpcCP.WithPeerCredentialObserver(repairGuard),
-				grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, auditManager, logger)),
-				// Issue #5665: the one default-deny gate on controller-pushed commands.
-				grpcCP.WithLockdown(lockdown, newLockdownAuditObserver(auditManager, stewardStore, logger)),
-			)
-		}
-		if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
-			"mode":                     "server",
-			"addr":                     cfg.Transport.ListenAddr,
-			"tls_config":               grpcTLSConfig,
-			"registry":                 connRegistry,
-			"logger":                   logger,
-			"max_connections":          cfg.Transport.MaxConnections,
-			"registration_token_store": regTokenStore,
-			"require_security_stores":  true,
-		}); err != nil {
-			return nil, fmt.Errorf("failed to initialize gRPC control plane provider: %w", err)
-		}
-		logger.Info("gRPC control plane provider initialized", "provider", controlPlane.Name(), "addr", cfg.Transport.ListenAddr)
-		// Issue #5664: the provider carries TamperState to connected stewards.
-		// Bound before Start, so the first on-connect send already has a sender.
-		lockdown.SetSender(controlPlane)
+		controlPlane = cpStage.provider
+		connRegistry = cpStage.connRegistry
+		routingStore = cpStage.routingStore
+		lockdown = cpStage.lockdown
+		signingRotationSvc, stewardMigrationSvc = cpStage.signingRotationSvc, cpStage.stewardMigrationSvc
+		routingHook, drainHook := cpStage.routingHook, cpStage.drainHook
 
 		// Story #919: Hoist signer construction so the command publisher, config
 		// handler, and job dispatcher all share the same signer instance.
 		// Constructed here — before any publisher or dispatcher — so every
 		// controller-issued command carries a consistent signature.
-		//
-		// The signer MUST use a dedicated, persisted config-signing certificate
-		// (CertificateTypeConfigSigning) in every architecture mode. A steward
-		// caches the controller's signing certificate at registration (and
-		// restores it from disk on a cert-reuse reconnect) and rejects any
-		// command or config signed by a different key. The gRPC server
-		// certificate must never be used as the signer: listing certs by type
-		// returns every Server-typed cert newest-first, and the controller owns
-		// more than one (gRPC transport + HTTP API), so that selection is not
-		// stable across restarts. EnsureSigningCertificate is idempotent — it
-		// generates the signing cert once and reuses it on every later boot.
-		if certManager != nil {
-			if ensureErr := certManager.EnsureSigningCertificate(nil); ensureErr != nil {
-				if cfg.SecurityProfile == config.SecurityProfilePublicBeta {
-					return nil, fmt.Errorf("public-beta signing certificate initialization failed: %w", ensureErr)
-				}
-				if cfg.HA != nil && cfg.HA.IsClusterMode() {
-					// A clustered node must not run without the cluster's signing
-					// identity: nothing falls back to a local key.
-					return nil, fmt.Errorf("cluster signing identity initialization failed: %w", ensureErr)
-				}
-				logger.Warn("Failed to ensure config signing certificate", "error", logging.SanitizeLogValue(ensureErr.Error()))
-			}
-			signerCert, scErr := certManager.GetCurrentCertForPurpose(cert.PurposeSigning)
-			if scErr == nil {
-				hoistedSignerCertSerial = signerCert.SerialNumber
-				certPEM, keyPEM, exportErr := certManager.ExportCertificate(hoistedSignerCertSerial, true, false)
-				if exportErr == nil && len(certPEM) > 0 && len(keyPEM) > 0 {
-					var signerErr error
-					hoistedSigner, signerErr = signature.NewSigner(&signature.SignerConfig{
-						PrivateKeyPEM:  keyPEM,
-						CertificatePEM: certPEM,
-					})
-					if signerErr != nil {
-						logger.Warn("Failed to create config signer", "error", signerErr)
-					} else {
-						logger.Info("Config signer initialized successfully",
-							"algorithm", hoistedSigner.Algorithm(),
-							"fingerprint", hoistedSigner.KeyFingerprint(),
-							"cert_serial", hoistedSignerCertSerial,
-							"cert_type", cert.CertificateTypeConfigSigning.String())
-					}
-				}
-			} else if cfg.SecurityProfile == config.SecurityProfilePublicBeta {
-				return nil, fmt.Errorf("public-beta signing certificate is unavailable: %w", scErr)
-			}
-		}
-		if cfg.SecurityProfile == config.SecurityProfilePublicBeta && hoistedSigner == nil {
-			return nil, fmt.Errorf("public-beta startup requires a valid loaded command-signing certificate and private key")
+		hoistedSigner, hoistedSignerCertSerial, err = hoistConfigSigner(cfg, logger, certManager)
+		if err != nil {
+			return nil, err
 		}
 
 		// Issue #1844: Command publisher and dispatcher use a DynamicSigner that
@@ -1863,58 +1614,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// out.
 		var dispatchControlPlane = controlPlane
 		deliveryServer = newInternalDeliveryServer(cfg, connRegistry, controlPlane, haManager, logger)
-		if haManager != nil && cfg.HA.IsClusterMode() && routingStore != nil && certManager != nil && cfg.InternalDeliveryListenAddr != "" {
-			// Mint a dedicated mTLS CLIENT certificate for outbound delivery
-			// forwarding, exactly as pkg/ha mints one for the Raft peer
-			// transport. Two properties matter and neither holds for the
-			// PurposeTransport certificate this used to present: that cert
-			// carries ExtKeyUsage ServerAuth only, so a peer's
-			// RequireAndVerifyClientCert handshake rejects it outright; and its
-			// CommonName is the fixed "cfgms-internal", which cannot identify
-			// which node is calling. The CommonName here is the local cluster
-			// node ID, which is what the receiving node's PeerAuthorizer
-			// allowlists.
-			localNodeID := haManager.GetLocalNode().ID
-			deliveryClientCert, dErr := certManager.GenerateClientCertificate(&cert.ClientCertConfig{
-				CommonName:   localNodeID,
-				ValidityDays: 365,
-			})
-			if dErr != nil {
-				logger.Warn("internaldelivery: peer client certificate unavailable, cluster dispatch fallback disabled", "error", dErr)
-			} else {
-				caCertPEM, caErr := certManager.GetCACertificate()
-				if caErr != nil {
-					logger.Warn("internaldelivery: CA certificate unavailable, cluster dispatch fallback disabled", "error", caErr)
-				} else {
-					deliveryClientTLS, tlsErr := cert.CreateClientTLSConfig(
-						deliveryClientCert.CertificatePEM, deliveryClientCert.PrivateKeyPEM, caCertPEM, "", tls.VersionTLS13)
-					if tlsErr != nil {
-						logger.Warn("internaldelivery: failed to build client TLS config, cluster dispatch fallback disabled", "error", tlsErr)
-					} else {
-						resolver, resErr := newHAClusterNodeResolver(haManager, cfg.InternalDeliveryListenAddr, logger)
-						if resErr != nil {
-							logger.Warn("internaldelivery: invalid InternalDeliveryListenAddr, cluster dispatch fallback disabled", "error", resErr)
-						} else {
-							clusterAwareSender = internaldelivery.NewClusterAwareSender(
-								controlPlane, haManager.GetLocalNode().ID, routingStore, resolver, deliveryClientTLS, logger)
-							dispatchControlPlane = clusterAwareSender
-							logger.Info("internaldelivery: cluster-aware dispatch fallback enabled",
-								"local_node_id", haManager.GetLocalNode().ID,
-								"delivery_listen_addr", cfg.InternalDeliveryListenAddr)
-						}
-					}
-				}
-			}
+		clusterAwareSender = newClusterDispatchSender(cfg, logger, certManager, haManager, routingStore, controlPlane)
+		if clusterAwareSender != nil {
+			dispatchControlPlane = clusterAwareSender
 		}
-		if routingStore != nil {
-			connRegistry.OnDisconnect(func(stewardID string) {
-				if err := routingStore.RemoveConnection(context.Background(), stewardID, routingHook.localNodeID); err != nil {
-					logger.Warn("internaldelivery: failed to remove routing connection on disconnect",
-						"steward_id", logging.SanitizeLogValue(stewardID),
-						"error", logging.SanitizeLogValue(err.Error()))
-				}
-			})
-		}
+		registerRoutingDisconnectCleanup(connRegistry, routingStore, routingHook.localNodeID, logger)
 
 		// Initialize execution queue and job dispatcher (Issue #1672).
 		// The dispatcher drains the execution queue on every steward heartbeat and
@@ -1974,18 +1678,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// and the OSS composite (flatfile+SQLite, Issue #1900) supply an
 		// IPTrustStore; the evaluator is skipped only when no store is wired.
 		hbStewardStore := storageManager.GetStewardStore()
-		var heartbeatTrustEvaluator heartbeat.TrustEvaluator
-		if ipTrustStore := storageManager.GetIPTrustStore(); ipTrustStore != nil {
-			ipTrustThreshold := cfg.Registration.GetIPTrustThreshold()
-			evaluator := controllerRegistration.NewIPTrustEvaluator(controllerRegistration.IPTrustEvaluatorConfig{
-				Store:     ipTrustStore,
-				Threshold: ipTrustThreshold,
-				Logger:    logger,
-			})
-			heartbeatTrustEvaluator = newStewardIPTrustAdapter(evaluator, hbStewardStore, logger)
-			logger.Info("IP-trust evaluator wired into heartbeat service",
-				"threshold", ipTrustThreshold)
-		}
+		heartbeatTrustEvaluator := newHeartbeatTrustEvaluator(cfg, logger, storageManager, hbStewardStore)
 
 		// Issue #3764: refresh this steward's routing-table liveness timestamp on
 		// every heartbeat, in addition to on connect, so a long-lived connection
@@ -2018,68 +1711,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 		logger.Info("Heartbeat monitoring service initialized successfully")
 
-		// Issue #1986: bridge control-plane heartbeats into the steward registry
-		// the API serves. heartbeat.Service tracks liveness in its own in-memory
-		// map but never updates ControllerService, so GET /api/v1/stewards/{id}
-		// would report a last_seen frozen at registration time and a status stuck
-		// at "registered" even while the steward heartbeats. Register a second
-		// heartbeat handler that advances the registry via RecordHeartbeat.
-		//
-		// The same handler carries Layer-3 instrumentation: it records the
-		// controller-side receipt cadence per steward and warns when a gap exceeds
-		// the expected steward interval, so intermittent heartbeat loss is
-		// observable without changing log levels.
-		if controllerService != nil {
-			var heartbeatGapTracker sync.Map // stewardID -> time.Time (last receipt)
-			const heartbeatGapWarnThreshold = 45 * time.Second
-			if subErr := controlPlane.SubscribeHeartbeats(context.Background(), func(_ context.Context, hb *controlplaneTypes.Heartbeat) error {
-				if hb == nil {
-					return nil
-				}
-				recorded := controllerService.RecordHeartbeat(hb.StewardID, hb.Version, hb.Timestamp)
-
-				now := time.Now()
-				if prev, ok := heartbeatGapTracker.Load(hb.StewardID); ok {
-					gap := now.Sub(prev.(time.Time))
-					if gap > heartbeatGapWarnThreshold {
-						logger.Warn("Steward heartbeat receipt gap exceeded expected interval (Issue #1986 Layer 3)",
-							"steward_id", logging.SanitizeLogValue(hb.StewardID),
-							"gap", gap.Round(time.Millisecond),
-							"recorded", recorded)
-					} else {
-						logger.Debug("heartbeat received",
-							"steward_id", logging.SanitizeLogValue(hb.StewardID),
-							"gap", gap.Round(time.Millisecond),
-							"recorded", recorded)
-					}
-				} else {
-					logger.Debug("heartbeat received (first)",
-						"steward_id", logging.SanitizeLogValue(hb.StewardID),
-						"recorded", recorded)
-				}
-				heartbeatGapTracker.Store(hb.StewardID, now)
-				return nil
-			}); subErr != nil {
-				logger.Warn("Failed to register steward-registry heartbeat bridge", "error", subErr)
-			} else {
-				logger.Info("Steward-registry heartbeat bridge registered (Issue #1986)")
-			}
-		}
+		// Issue #1986: bridge control-plane heartbeats into the steward registry the API serves.
+		registerHeartbeatRegistryBridge(logger, controlPlane, controllerService)
 
 		// Issue #4569: record steward receive-path rejections on the delivery
 		// record. Responses reach only the node holding the steward's stream, so
 		// subscribe on the raw controlPlane (the provider deliveryServer wraps),
 		// never dispatchControlPlane. The command store is shared across nodes.
-		var rejectionRecorder *service.CommandRejectionRecorder
-		if respSub, ok := controlPlane.(controlplaneInterfaces.ResponseSubscriber); ok {
-			if cmdStore := storageManager.GetCommandStore(); cmdStore != nil {
-				rejectionRecorder = service.NewCommandRejectionRecorder(cmdStore, logger)
-				if subErr := rejectionRecorder.Subscribe(context.Background(), respSub); subErr != nil {
-					logger.Warn("Failed to subscribe command rejection recorder",
-						"error", logging.SanitizeLogValue(subErr.Error()))
-				}
-			}
-		}
+		rejectionRecorder := newCommandRejectionRecorder(logger, storageManager, controlPlane)
 
 		// Initialize command publisher (Story #198, Story #363, Story #514, Story #919)
 		// Issue #1844: commandSigner is a DynamicSigner — see block above.
@@ -2116,64 +1755,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			rejectionRecorder.SetRetrier(commandPublisher)
 		}
 
-		// Issue #2524: Wire DNA hash mismatch detection so that a heartbeat
-		// carrying an unexpected DNA hash automatically triggers a full sync.
-		// Guard on both non-nil: transport can be disabled at runtime, so
-		// commandPublisher may be nil in degraded configurations.
-		if heartbeatService != nil && commandPublisher != nil {
-			heartbeatService.SetOnDNAHashMismatch(func(stewardID string) {
-				if _, err := commandPublisher.TriggerDNASync(context.Background(), stewardID); err != nil {
-					logger.Warn("Failed to trigger DNA sync after hash mismatch",
-						"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
-				}
-			})
-			logger.Info("DNA hash mismatch detection wired (Issue #2524)")
-		}
-
-		// Issue #2524: Wire post-DNA-sync hook so each successful full sync
-		// updates the expected hash in the heartbeat service, suppressing
-		// repeated mismatch triggers once the steward's DNA is in sync.
-		// Issue #3329: uses the aggregate-root-first dnaStorage.ContentHash in
-		// place of the retired stewarddna.ComputeHash(dna.Attributes) — the
-		// mismatch-detection wiring above depends on expectedDNAHash actually
-		// being set, or it can never fire (see dna_handler.go HandleHeartbeatRoot).
-		if controllerService != nil && heartbeatService != nil {
-			controllerService.SetPostDNASyncHook(func(stewardID string, dna *common.DNA) {
-				hash, hashErr := dnaStorage.ContentHash(dna)
-				if hashErr != nil {
-					logger.Warn("Failed to compute DNA content hash for expected-hash wiring",
-						"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(hashErr.Error()))
-					return
-				}
-				heartbeatService.SetExpectedDNAHash(stewardID, hash)
-			})
-			logger.Info("Post-DNA-sync hook wired (Issue #2524)")
-		}
-
-		// Issue #2524: Warm expectedDNAHash for every previously-known steward
-		// from durable storage.  Without this, a controller restart silently
-		// disables mismatch detection for all known stewards until each runs a
-		// fresh full sync — even though their DNA is already durably stored and
-		// loaded by LoadFromStorage (ControllerService.LoadFromStorage comment
-		// calls out the identical startup-gap pattern this mirrors).
-		if controllerService != nil && heartbeatService != nil {
-			warmed := 0
-			for _, steward := range controllerService.ListFleetStewards(ctxkeys.WithSystem(context.Background())) {
-				if steward.DNA != nil {
-					hash, hashErr := dnaStorage.ContentHash(steward.DNA)
-					if hashErr != nil {
-						logger.Warn("Failed to compute DNA content hash while warming expected hashes",
-							"steward_id", logging.SanitizeLogValue(steward.ID), "error", logging.SanitizeLogValue(hashErr.Error()))
-						continue
-					}
-					if hash != "" {
-						heartbeatService.SetExpectedDNAHash(steward.ID, hash)
-						warmed++
-					}
-				}
-			}
-			logger.Info("Expected DNA hashes warmed from durable storage (Issue #2524)", "warmed", warmed)
-		}
+		// Issue #2524: wire DNA hash mismatch detection, the post-DNA-sync expected
+		// hash update, and the warm-up of expected hashes from durable storage.
+		wireDNAHashMismatchTrigger(logger, heartbeatService, commandPublisher)
+		wirePostDNASyncExpectedHash(logger, controllerService, heartbeatService)
+		warmExpectedDNAHashes(logger, controllerService, heartbeatService)
 
 	} else {
 		logger.Warn("Transport config not set — gRPC control plane disabled")
@@ -4620,6 +4206,645 @@ func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManag
 		return nil, fmt.Errorf("failed to create HA manager: %w", err)
 	}
 	return haManager, nil
+}
+
+// newHAManagerWithDNALease constructs the HA manager and wires the DNA storage
+// maintenance sweep's cluster-singleton lease claim (ADR-031 Decision 4).
+// dnaStorageManager is constructed before the HA manager (which itself requires
+// certManager), so its maintenance goroutine may already be running —
+// SetMaintenanceLease is safe to call at any time; the next tick reads the newly
+// set lease job.
+func newHAManagerWithDNALease(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager, dnaStorageManager *dnaStorage.Manager) (*ha.Manager, error) {
+	logger.Info("Initializing HA manager...")
+	haManager, err := initializeHAManager(cfg, logger, storageManager)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize HA manager: %w", err)
+	}
+	logger.Info("HA manager initialized successfully")
+
+	if dnaStorageManager != nil {
+		maintenanceLeaseJob, err := haManager.NewBackgroundLoopLease("controller-dna-storage-maintenance", logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to construct DNA storage maintenance lease job: %w", err)
+		}
+		dnaStorageManager.SetMaintenanceLease(maintenanceLeaseJob)
+	}
+	return haManager, nil
+}
+
+// newRegistrationTokenStore initializes the registration token store used for
+// HTTP-based registration (Story #263) and returns it with its registration
+// adapter. Test tokens are seeded only when CFGMS_SEED_TEST_TOKENS=1.
+func newRegistrationTokenStore(logger logging.Logger, storageManager *interfaces.StorageManager) (business.RegistrationTokenStore, pkgRegistration.Store, error) {
+	regTokenStore := storageManager.GetRegistrationTokenStore()
+	if regTokenStore == nil {
+		return nil, nil, fmt.Errorf("registration token store is required")
+	}
+	if err := regTokenStore.Initialize(context.Background()); err != nil {
+		return nil, nil, fmt.Errorf("failed to initialize registration token store: %w", err)
+	}
+	regStore := pkgRegistration.NewStorageAdapter(regTokenStore)
+
+	// Seed test tokens only when explicitly requested via environment variable.
+	// Never runs in production — must be set deliberately in test environments.
+	if os.Getenv("CFGMS_SEED_TEST_TOKENS") == "1" {
+		seedTestRegistrationTokens(logger, regStore)
+
+		// Seed fleet cascade tenant hierarchy and MSP-level parent policy (Issue #1723).
+		// Creates fleet-root → fleet-child-a/fleet-child-b so the InheritanceResolver
+		// can walk the ancestor chain and cascade the parent policy to both child tenants.
+		seedFleetCascadeTestData(context.Background(), storageManager, logger)
+	}
+	return regTokenStore, regStore, nil
+}
+
+// testRegistrationTokens returns the fixed token set seeded for the Docker and
+// integration test environments.
+func testRegistrationTokens() []*pkgRegistration.Token {
+	now := time.Now()
+	expiredTime := now.Add(-1 * time.Hour)
+	testTokens := []*pkgRegistration.Token{
+		{
+			Token:         "dockertest_standalone", //nolint:gosec // test-only seeding, env-gated
+			TenantID:      "test-tenant",
+			ControllerURL: "tcp://controller-standalone:1883",
+			Group:         "test-group",
+			CreatedAt:     now,
+			ExpiresAt:     nil,
+			Revoked:       false,
+		},
+		{
+			Token:         "integration_reusable", //nolint:gosec // test-only seeding, env-gated
+			TenantID:      "test-tenant-integration",
+			ControllerURL: "tcp://localhost:1886",
+			Group:         "production",
+			CreatedAt:     now,
+			ExpiresAt:     nil,
+			Revoked:       false,
+		},
+		{
+			Token:         "integration_expired", //nolint:gosec // test-only seeding, env-gated
+			TenantID:      "test-tenant-integration",
+			ControllerURL: "tcp://localhost:1886",
+			Group:         "production",
+			CreatedAt:     now.Add(-2 * time.Hour),
+			ExpiresAt:     &expiredTime,
+			Revoked:       false,
+		},
+		{
+			Token:         "integration_revoked", //nolint:gosec // test-only seeding, env-gated
+			TenantID:      "test-tenant-integration",
+			ControllerURL: "tcp://localhost:1886",
+			Group:         "production",
+			CreatedAt:     now,
+			ExpiresAt:     nil,
+			Revoked:       true,
+			RevokedAt:     &now,
+		},
+		{
+			Token:         "dockertest_fleet", //nolint:gosec // test-only seeding, env-gated
+			TenantID:      "test-tenant-fleet",
+			ControllerURL: "fleet-controller:4433",
+			Group:         "test-group",
+			CreatedAt:     now,
+			ExpiresAt:     nil,
+			Revoked:       false,
+		},
+		{
+			Token:         "dockertest_fleet_child_a", //nolint:gosec // test-only seeding, env-gated
+			TenantID:      "fleet-root/fleet-child-a",
+			ControllerURL: "fleet-controller:4433",
+			Group:         "test-group",
+			CreatedAt:     now,
+			ExpiresAt:     nil,
+			Revoked:       false,
+		},
+		{
+			Token:         "dockertest_fleet_child_b", //nolint:gosec // test-only seeding, env-gated
+			TenantID:      "fleet-root/fleet-child-b",
+			ControllerURL: "fleet-controller:4433",
+			Group:         "test-group",
+			CreatedAt:     now,
+			ExpiresAt:     nil,
+			Revoked:       false,
+		},
+	}
+	return testTokens
+}
+
+// seedTestRegistrationTokens saves the test token set; a failed save is logged,
+// never fatal.
+func seedTestRegistrationTokens(logger logging.Logger, regStore pkgRegistration.Store) {
+	testTokens := testRegistrationTokens()
+
+	for _, testToken := range testTokens {
+		redactedToken := logging.RedactedID(testToken.Token)
+		if err := regStore.SaveToken(context.Background(), testToken); err != nil {
+			logger.Warn("Failed to seed test token", "error", err, "token", redactedToken)
+		} else {
+			logger.Info("Seeded test registration token", "token", redactedToken, "tenant", testToken.TenantID)
+		}
+	}
+}
+
+// controlPlaneInputs are the already-built services the gRPC control plane
+// stage is constructed from.
+type controlPlaneInputs struct {
+	cfg               *config.Config
+	logger            logging.Logger
+	certManager       *cert.Manager
+	storageManager    *interfaces.StorageManager
+	haManager         *ha.Manager
+	controllerService *service.ControllerService
+	auditManager      *audit.Manager
+	regTokenStore     business.RegistrationTokenStore
+	admissionQueues   *ingestAdmissionQueues
+	tamperRelay       *tamperAlarmRelay
+	repairConnect     *repairConnectHook
+	repairGuard       *repairGuardRelay
+}
+
+// controlPlaneStage holds what the gRPC control plane provider construction
+// hands to the rest of New.
+type controlPlaneStage struct {
+	provider            controlplaneInterfaces.ControlPlaneProvider
+	connRegistry        registry.Registry
+	routingStore        business.RoutingStore
+	routingHook         *routingTableConnectHook
+	drainHook           *service.PendingDeliveryDrainHook
+	lockdown            *controllerFleet.Lockdown
+	signingRotationSvc  *service.SigningRotationService
+	stewardMigrationSvc *service.StewardSigningMigrationService
+}
+
+// newControlPlaneStage builds and initializes the shared gRPC control plane
+// provider (Story #515) together with the connection registry, lockdown and
+// on-connect hooks it is composed from. The shared gRPC server is created fresh
+// in Start.
+func newControlPlaneStage(in *controlPlaneInputs) (*controlPlaneStage, error) {
+	cfg, logger := in.cfg, in.logger
+	logger.Info("Initializing gRPC control plane provider...", "addr", cfg.Transport.ListenAddr)
+
+	grpcTLSConfig, err := buildGRPCControlPlaneTLSConfig(cfg, in.certManager, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build transport TLS config: %w", err)
+	}
+
+	// Issue #1817: Create the signing rotation service before the provider so
+	// we can inject it as the on-connect hook. The publisher is wired after
+	// commandPublisher is constructed (breaks the init cycle).
+	connRegistry := registry.NewRegistry()
+	stewardStore := in.storageManager.GetStewardStore()
+	if stewardStore == nil {
+		return nil, fmt.Errorf("steward approval store is required when transport is enabled")
+	}
+	lockdown := controllerFleet.NewLockdown(stewardStore, logger)
+	in.tamperRelay.lockdown = lockdown
+
+	hooks, err := newConnectHooks(in, connRegistry, stewardStore, lockdown)
+	if err != nil {
+		return nil, err
+	}
+	controlPlane := newGRPCControlPlaneProvider(in, hooks.composite, stewardStore, lockdown)
+	if err := controlPlane.Initialize(context.Background(), map[string]interface{}{
+		"mode":                     "server",
+		"addr":                     cfg.Transport.ListenAddr,
+		"tls_config":               grpcTLSConfig,
+		"registry":                 connRegistry,
+		"logger":                   logger,
+		"max_connections":          cfg.Transport.MaxConnections,
+		"registration_token_store": in.regTokenStore,
+		"require_security_stores":  true,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to initialize gRPC control plane provider: %w", err)
+	}
+	logger.Info("gRPC control plane provider initialized", "provider", controlPlane.Name(), "addr", cfg.Transport.ListenAddr)
+	// Issue #5664: the provider carries TamperState to connected stewards.
+	// Bound before Start, so the first on-connect send already has a sender.
+	lockdown.SetSender(controlPlane)
+
+	return &controlPlaneStage{
+		provider:            controlPlane,
+		connRegistry:        connRegistry,
+		routingStore:        hooks.routingStore,
+		routingHook:         hooks.routingHook,
+		drainHook:           hooks.drainHook,
+		lockdown:            lockdown,
+		signingRotationSvc:  hooks.signingRotationSvc,
+		stewardMigrationSvc: hooks.stewardMigrationSvc,
+	}, nil
+}
+
+// connectHooks is the composed steward on-connect hook with the parts of it the
+// rest of New wires further.
+type connectHooks struct {
+	composite           *service.CompositeOnConnectHook
+	routingStore        business.RoutingStore
+	routingHook         *routingTableConnectHook
+	drainHook           *service.PendingDeliveryDrainHook
+	signingRotationSvc  *service.SigningRotationService
+	stewardMigrationSvc *service.StewardSigningMigrationService
+}
+
+// newConnectHooks composes the on-connect hook chain of the control plane.
+func newConnectHooks(in *controlPlaneInputs, connRegistry registry.Registry, stewardStore business.StewardStore, lockdown *controllerFleet.Lockdown) (*connectHooks, error) {
+	logger := in.logger
+	// Issue #2008: compose the admin-registry upsert hook alongside the
+	// signing-rotation hook so every authenticated (re)connect repopulates
+	// ControllerService.s.stewards (which backs cfg steward list/status/exec).
+	// A cert-reuse reconnect never re-runs HTTP registration, so without this
+	// the registry stays empty for a reconnecting steward until a restart.
+	registryConnectHook := service.NewStewardRegistryConnectHook(in.controllerService, logger)
+	// Issue #2050: completion reconciler — flips finalizing→ready when the
+	// newly-registered steward's CN matches the CorrelationID in the provision
+	// record, and sweeps timed-out non-terminal records to failed. A no-op
+	// memProvisionStore is used when the hyperv feature is not configured so
+	// the controller boots cleanly without any hyperv-specific configuration.
+	completionReconciler := hypervcompletion.New(hyperv.NewMemProvisionStore(), logger)
+	// ADR-031 Decision 3, Issue #3764: shared steward-routing table. Composed
+	// into the connect hook chain unconditionally — routingTableConnectHook is
+	// a no-op when routingStore is nil (no provider support / non-cluster
+	// deployment), so this never changes connect behavior outside cluster mode.
+	routingStore := in.storageManager.GetRoutingStore()
+	routingHook := &routingTableConnectHook{routingStore: routingStore, logger: logger}
+	if in.haManager != nil {
+		routingHook.localNodeID = in.haManager.GetLocalNode().ID
+	}
+	// Issue #3757/#3764: drain a reconnecting steward's durable outbox backlog
+	// immediately rather than waiting for the next dispatch attempt. publisher
+	// is nil here (commands.Publisher does not exist yet — same init-cycle
+	// break as signingRotationSvc) and wired in via SetPublisher once it does.
+	drainHook := service.NewPendingDeliveryDrainHook(in.storageManager.GetCommandStore(), stewardStore, nil, logger)
+	hooks := &connectHooks{routingStore: routingStore, routingHook: routingHook, drainHook: drainHook}
+	if in.certManager == nil {
+		hooks.composite = service.NewCompositeOnConnectHook(logger, registryConnectHook, completionReconciler, routingHook, drainHook, lockdown, in.repairConnect)
+		return hooks, nil
+	}
+	var svcErr error
+	hooks.signingRotationSvc, hooks.stewardMigrationSvc, svcErr = newSigningTrustServices(in.certManager, in.haManager, in.storageManager, in.cfg.Certificate.CAPath, connRegistry, logger)
+	if svcErr != nil {
+		return nil, svcErr
+	}
+	hooks.composite = service.NewCompositeOnConnectHook(logger, hooks.signingRotationSvc, hooks.stewardMigrationSvc, registryConnectHook, completionReconciler, routingHook, drainHook, lockdown, in.repairConnect)
+	return hooks, nil
+}
+
+// newGRPCControlPlaneProvider constructs the server-mode gRPC control plane
+// provider with the connect, admission, approval, revocation, provenance and
+// lockdown gates wired.
+func newGRPCControlPlaneProvider(in *controlPlaneInputs, composite *service.CompositeOnConnectHook, stewardStore business.StewardStore, lockdown *controllerFleet.Lockdown) *grpcCP.Provider {
+	logger := in.logger
+	approvalChecker := grpcCP.NewStewardStoreApprovalChecker(stewardStore)
+	// Issue #3759: the admission gate keys its buckets on the tenant this
+	// store reports for the mTLS-verified steward CN, never on the tenant
+	// field the steward puts on the wire — otherwise any steward with a
+	// valid certificate could saturate another tenant's shared slots.
+	tenantResolver := grpcCP.NewStewardStoreTenantResolver(stewardStore)
+	return grpcCP.New(
+		grpcCP.ModeServer,
+		grpcCP.WithOnConnectHook(composite),
+		grpcCP.WithApprovalChecker(approvalChecker),
+		grpcCP.WithRevocationChecker(in.certManager),
+		// Issue #3759: the connect/heartbeat gate — deliberately NOT the queue
+		// the DNA and bulk handlers use, whose bucket key comes off the wire
+		// (see ingest_admission.go).
+		grpcCP.WithTenantAdmission(in.admissionQueues.connectHeartbeatQueue()),
+		// Issue #5120: steward events get their own queue so slow handlers
+		// cannot use up connect or heartbeat slots.
+		grpcCP.WithEventAdmission(in.admissionQueues.eventsQueue()),
+		grpcCP.WithResponseAdmission(in.admissionQueues.responsesQueue()),
+		grpcCP.WithStewardTenantResolver(tenantResolver),
+		grpcCP.WithIdentityConflictObserver(newIdentityConflictAuditObserver(in.auditManager, logger).withRepairGuard(in.repairGuard)),
+		grpcCP.WithPeerCredentialObserver(in.repairGuard),
+		grpcCP.WithProvenanceChecker(newProvenanceChecker(stewardStore, in.auditManager, logger)),
+		// Issue #5665: the one default-deny gate on controller-pushed commands.
+		grpcCP.WithLockdown(lockdown, newLockdownAuditObserver(in.auditManager, stewardStore, logger)),
+	)
+}
+
+// hoistConfigSigner constructs the signer the config handler falls back to and
+// reports the serial of the signing certificate it was built from (Story #919).
+//
+// The signer MUST use a dedicated, persisted config-signing certificate
+// (CertificateTypeConfigSigning) in every architecture mode. A steward
+// caches the controller's signing certificate at registration (and
+// restores it from disk on a cert-reuse reconnect) and rejects any
+// command or config signed by a different key. The gRPC server
+// certificate must never be used as the signer: listing certs by type
+// returns every Server-typed cert newest-first, and the controller owns
+// more than one (gRPC transport + HTTP API), so that selection is not
+// stable across restarts. EnsureSigningCertificate is idempotent — it
+// generates the signing cert once and reuses it on every later boot.
+func hoistConfigSigner(cfg *config.Config, logger logging.Logger, certManager *cert.Manager) (signature.Signer, string, error) {
+	var hoistedSigner signature.Signer
+	var hoistedSignerCertSerial string
+	if certManager != nil {
+		if err := ensureConfigSigningCertificate(cfg, logger, certManager); err != nil {
+			return nil, "", err
+		}
+		var err error
+		hoistedSigner, hoistedSignerCertSerial, err = loadConfigSigner(cfg, logger, certManager)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	if cfg.SecurityProfile == config.SecurityProfilePublicBeta && hoistedSigner == nil {
+		return nil, "", fmt.Errorf("public-beta startup requires a valid loaded command-signing certificate and private key")
+	}
+	return hoistedSigner, hoistedSignerCertSerial, nil
+}
+
+// ensureConfigSigningCertificate makes sure the signing certificate exists. A
+// failure is fatal under the public-beta profile and in cluster mode, and a
+// warning otherwise.
+func ensureConfigSigningCertificate(cfg *config.Config, logger logging.Logger, certManager *cert.Manager) error {
+	ensureErr := certManager.EnsureSigningCertificate(nil)
+	if ensureErr == nil {
+		return nil
+	}
+	if cfg.SecurityProfile == config.SecurityProfilePublicBeta {
+		return fmt.Errorf("public-beta signing certificate initialization failed: %w", ensureErr)
+	}
+	if cfg.HA != nil && cfg.HA.IsClusterMode() {
+		// A clustered node must not run without the cluster's signing
+		// identity: nothing falls back to a local key.
+		return fmt.Errorf("cluster signing identity initialization failed: %w", ensureErr)
+	}
+	logger.Warn("Failed to ensure config signing certificate", "error", logging.SanitizeLogValue(ensureErr.Error()))
+	return nil
+}
+
+// loadConfigSigner builds the signer from the current signing certificate. The
+// serial is reported even when the signer cannot be built, as before.
+func loadConfigSigner(cfg *config.Config, logger logging.Logger, certManager *cert.Manager) (signature.Signer, string, error) {
+	signerCert, scErr := certManager.GetCurrentCertForPurpose(cert.PurposeSigning)
+	if scErr != nil {
+		if cfg.SecurityProfile == config.SecurityProfilePublicBeta {
+			return nil, "", fmt.Errorf("public-beta signing certificate is unavailable: %w", scErr)
+		}
+		return nil, "", nil
+	}
+	serial := signerCert.SerialNumber
+	certPEM, keyPEM, exportErr := certManager.ExportCertificate(serial, true, false)
+	if exportErr != nil || len(certPEM) == 0 || len(keyPEM) == 0 {
+		return nil, serial, nil
+	}
+	signer, signerErr := signature.NewSigner(&signature.SignerConfig{
+		PrivateKeyPEM:  keyPEM,
+		CertificatePEM: certPEM,
+	})
+	if signerErr != nil {
+		logger.Warn("Failed to create config signer", "error", signerErr)
+		return signer, serial, nil
+	}
+	logger.Info("Config signer initialized successfully",
+		"algorithm", signer.Algorithm(),
+		"fingerprint", signer.KeyFingerprint(),
+		"cert_serial", serial,
+		"cert_type", cert.CertificateTypeConfigSigning.String())
+	return signer, serial, nil
+}
+
+// newClusterDispatchSender returns the cluster-aware dispatch fallback
+// (ADR-031 Decision 3, Issue #3764), or nil when this deployment does not have
+// both a routing store and HA cluster mode with an internal delivery address —
+// a single-node deployment dispatches on the node-local controlPlane exactly as
+// before. Every reason the fallback cannot be built is logged and leaves the
+// node-local path in place.
+func newClusterDispatchSender(cfg *config.Config, logger logging.Logger, certManager *cert.Manager, haManager *ha.Manager, routingStore business.RoutingStore, controlPlane controlplaneInterfaces.ControlPlaneProvider) *internaldelivery.ClusterAwareSender {
+	if haManager == nil || !cfg.HA.IsClusterMode() || routingStore == nil || certManager == nil || cfg.InternalDeliveryListenAddr == "" {
+		return nil
+	}
+	localNodeID := haManager.GetLocalNode().ID
+	deliveryClientTLS := newDeliveryClientTLSConfig(logger, certManager, localNodeID)
+	if deliveryClientTLS == nil {
+		return nil
+	}
+	resolver, resErr := newHAClusterNodeResolver(haManager, cfg.InternalDeliveryListenAddr, logger)
+	if resErr != nil {
+		logger.Warn("internaldelivery: invalid InternalDeliveryListenAddr, cluster dispatch fallback disabled", "error", resErr)
+		return nil
+	}
+	sender := internaldelivery.NewClusterAwareSender(
+		controlPlane, haManager.GetLocalNode().ID, routingStore, resolver, deliveryClientTLS, logger)
+	logger.Info("internaldelivery: cluster-aware dispatch fallback enabled",
+		"local_node_id", haManager.GetLocalNode().ID,
+		"delivery_listen_addr", cfg.InternalDeliveryListenAddr)
+	return sender
+}
+
+// newDeliveryClientTLSConfig mints a dedicated mTLS CLIENT certificate for
+// outbound delivery forwarding, exactly as pkg/ha mints one for the Raft peer
+// transport, and returns the client TLS config built from it (nil, after a
+// logged warning, when any step fails). Two properties matter and neither holds
+// for the PurposeTransport certificate this used to present: that cert carries
+// ExtKeyUsage ServerAuth only, so a peer's RequireAndVerifyClientCert handshake
+// rejects it outright; and its CommonName is the fixed "cfgms-internal", which
+// cannot identify which node is calling. The CommonName here is the local
+// cluster node ID, which is what the receiving node's PeerAuthorizer allowlists.
+func newDeliveryClientTLSConfig(logger logging.Logger, certManager *cert.Manager, localNodeID string) *tls.Config {
+	deliveryClientCert, dErr := certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   localNodeID,
+		ValidityDays: 365,
+	})
+	if dErr != nil {
+		logger.Warn("internaldelivery: peer client certificate unavailable, cluster dispatch fallback disabled", "error", dErr)
+		return nil
+	}
+	caCertPEM, caErr := certManager.GetCACertificate()
+	if caErr != nil {
+		logger.Warn("internaldelivery: CA certificate unavailable, cluster dispatch fallback disabled", "error", caErr)
+		return nil
+	}
+	deliveryClientTLS, tlsErr := cert.CreateClientTLSConfig(
+		deliveryClientCert.CertificatePEM, deliveryClientCert.PrivateKeyPEM, caCertPEM, "", tls.VersionTLS13)
+	if tlsErr != nil {
+		logger.Warn("internaldelivery: failed to build client TLS config, cluster dispatch fallback disabled", "error", tlsErr)
+		return nil
+	}
+	return deliveryClientTLS
+}
+
+// registerRoutingDisconnectCleanup removes a steward's routing-table entry when
+// its connection drops. It does nothing without a routing store.
+func registerRoutingDisconnectCleanup(connRegistry registry.Registry, routingStore business.RoutingStore, localNodeID string, logger logging.Logger) {
+	if routingStore == nil {
+		return
+	}
+	connRegistry.OnDisconnect(func(stewardID string) {
+		if err := routingStore.RemoveConnection(context.Background(), stewardID, localNodeID); err != nil {
+			logger.Warn("internaldelivery: failed to remove routing connection on disconnect",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+	})
+}
+
+// newHeartbeatTrustEvaluator wires the IP-trust evaluator into the heartbeat
+// service when the IP-trust store is available (Issue #1694). Both the database
+// provider and the OSS composite (flatfile+SQLite, Issue #1900) supply an
+// IPTrustStore; the evaluator is skipped (nil) only when no store is wired.
+func newHeartbeatTrustEvaluator(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager, stewardStore business.StewardStore) heartbeat.TrustEvaluator {
+	ipTrustStore := storageManager.GetIPTrustStore()
+	if ipTrustStore == nil {
+		return nil
+	}
+	ipTrustThreshold := cfg.Registration.GetIPTrustThreshold()
+	evaluator := controllerRegistration.NewIPTrustEvaluator(controllerRegistration.IPTrustEvaluatorConfig{
+		Store:     ipTrustStore,
+		Threshold: ipTrustThreshold,
+		Logger:    logger,
+	})
+	adapter := newStewardIPTrustAdapter(evaluator, stewardStore, logger)
+	logger.Info("IP-trust evaluator wired into heartbeat service",
+		"threshold", ipTrustThreshold)
+	return adapter
+}
+
+// registerHeartbeatRegistryBridge bridges control-plane heartbeats into the
+// steward registry the API serves (Issue #1986). heartbeat.Service tracks
+// liveness in its own in-memory map but never updates ControllerService, so
+// GET /api/v1/stewards/{id} would report a last_seen frozen at registration
+// time and a status stuck at "registered" even while the steward heartbeats.
+// A second heartbeat handler advances the registry via RecordHeartbeat.
+func registerHeartbeatRegistryBridge(logger logging.Logger, controlPlane controlplaneInterfaces.ControlPlaneProvider, controllerService *service.ControllerService) {
+	if controllerService == nil {
+		return
+	}
+	if subErr := controlPlane.SubscribeHeartbeats(context.Background(), newHeartbeatRegistryBridgeHandler(logger, controllerService)); subErr != nil {
+		logger.Warn("Failed to register steward-registry heartbeat bridge", "error", subErr)
+	} else {
+		logger.Info("Steward-registry heartbeat bridge registered (Issue #1986)")
+	}
+}
+
+// newHeartbeatRegistryBridgeHandler returns the heartbeat handler behind the
+// registry bridge. It also carries Layer-3 instrumentation: it records the
+// controller-side receipt cadence per steward and warns when a gap exceeds the
+// expected steward interval, so intermittent heartbeat loss is observable
+// without changing log levels.
+func newHeartbeatRegistryBridgeHandler(logger logging.Logger, controllerService *service.ControllerService) func(context.Context, *controlplaneTypes.Heartbeat) error {
+	var heartbeatGapTracker sync.Map // stewardID -> time.Time (last receipt)
+	const heartbeatGapWarnThreshold = 45 * time.Second
+	return func(_ context.Context, hb *controlplaneTypes.Heartbeat) error {
+		if hb == nil {
+			return nil
+		}
+		recorded := controllerService.RecordHeartbeat(hb.StewardID, hb.Version, hb.Timestamp)
+
+		now := time.Now()
+		if prev, ok := heartbeatGapTracker.Load(hb.StewardID); ok {
+			gap := now.Sub(prev.(time.Time))
+			if gap > heartbeatGapWarnThreshold {
+				logger.Warn("Steward heartbeat receipt gap exceeded expected interval (Issue #1986 Layer 3)",
+					"steward_id", logging.SanitizeLogValue(hb.StewardID),
+					"gap", gap.Round(time.Millisecond),
+					"recorded", recorded)
+			} else {
+				logger.Debug("heartbeat received",
+					"steward_id", logging.SanitizeLogValue(hb.StewardID),
+					"gap", gap.Round(time.Millisecond),
+					"recorded", recorded)
+			}
+		} else {
+			logger.Debug("heartbeat received (first)",
+				"steward_id", logging.SanitizeLogValue(hb.StewardID),
+				"recorded", recorded)
+		}
+		heartbeatGapTracker.Store(hb.StewardID, now)
+		return nil
+	}
+}
+
+// newCommandRejectionRecorder records steward receive-path rejections on the
+// delivery record (Issue #4569). Responses reach only the node holding the
+// steward's stream, so it subscribes on the raw controlPlane (the provider the
+// delivery server wraps), never the dispatch control plane. The command store is
+// shared across nodes. It returns nil when the provider cannot deliver
+// responses or no command store is available.
+func newCommandRejectionRecorder(logger logging.Logger, storageManager *interfaces.StorageManager, controlPlane controlplaneInterfaces.ControlPlaneProvider) *service.CommandRejectionRecorder {
+	respSub, ok := controlPlane.(controlplaneInterfaces.ResponseSubscriber)
+	if !ok {
+		return nil
+	}
+	cmdStore := storageManager.GetCommandStore()
+	if cmdStore == nil {
+		return nil
+	}
+	rejectionRecorder := service.NewCommandRejectionRecorder(cmdStore, logger)
+	if subErr := rejectionRecorder.Subscribe(context.Background(), respSub); subErr != nil {
+		logger.Warn("Failed to subscribe command rejection recorder",
+			"error", logging.SanitizeLogValue(subErr.Error()))
+	}
+	return rejectionRecorder
+}
+
+// wireDNAHashMismatchTrigger makes a heartbeat carrying an unexpected DNA hash
+// trigger a full sync (Issue #2524). Guard on both non-nil: transport can be
+// disabled at runtime, so commandPublisher may be nil in degraded configurations.
+func wireDNAHashMismatchTrigger(logger logging.Logger, heartbeatService *heartbeat.Service, commandPublisher *commands.Publisher) {
+	if heartbeatService == nil || commandPublisher == nil {
+		return
+	}
+	heartbeatService.SetOnDNAHashMismatch(func(stewardID string) {
+		if _, err := commandPublisher.TriggerDNASync(context.Background(), stewardID); err != nil {
+			logger.Warn("Failed to trigger DNA sync after hash mismatch",
+				"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+		}
+	})
+	logger.Info("DNA hash mismatch detection wired (Issue #2524)")
+}
+
+// wirePostDNASyncExpectedHash makes each successful full sync update the
+// expected hash in the heartbeat service, suppressing repeated mismatch
+// triggers once the steward's DNA is in sync (Issue #2524).
+// Issue #3329: uses the aggregate-root-first dnaStorage.ContentHash in
+// place of the retired stewarddna.ComputeHash(dna.Attributes) — the
+// mismatch-detection wiring depends on expectedDNAHash actually
+// being set, or it can never fire (see dna_handler.go HandleHeartbeatRoot).
+func wirePostDNASyncExpectedHash(logger logging.Logger, controllerService *service.ControllerService, heartbeatService *heartbeat.Service) {
+	if controllerService == nil || heartbeatService == nil {
+		return
+	}
+	controllerService.SetPostDNASyncHook(func(stewardID string, dna *common.DNA) {
+		hash, hashErr := dnaStorage.ContentHash(dna)
+		if hashErr != nil {
+			logger.Warn("Failed to compute DNA content hash for expected-hash wiring",
+				"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(hashErr.Error()))
+			return
+		}
+		heartbeatService.SetExpectedDNAHash(stewardID, hash)
+	})
+	logger.Info("Post-DNA-sync hook wired (Issue #2524)")
+}
+
+// warmExpectedDNAHashes sets expectedDNAHash for every previously-known steward
+// from durable storage (Issue #2524). Without this, a controller restart
+// silently disables mismatch detection for all known stewards until each runs a
+// fresh full sync — even though their DNA is already durably stored and
+// loaded by LoadFromStorage (ControllerService.LoadFromStorage comment
+// calls out the identical startup-gap pattern this mirrors).
+func warmExpectedDNAHashes(logger logging.Logger, controllerService *service.ControllerService, heartbeatService *heartbeat.Service) {
+	if controllerService == nil || heartbeatService == nil {
+		return
+	}
+	warmed := 0
+	for _, steward := range controllerService.ListFleetStewards(ctxkeys.WithSystem(context.Background())) {
+		if steward.DNA == nil {
+			continue
+		}
+		hash, hashErr := dnaStorage.ContentHash(steward.DNA)
+		if hashErr != nil {
+			logger.Warn("Failed to compute DNA content hash while warming expected hashes",
+				"steward_id", logging.SanitizeLogValue(steward.ID), "error", logging.SanitizeLogValue(hashErr.Error()))
+			continue
+		}
+		if hash != "" {
+			heartbeatService.SetExpectedDNAHash(steward.ID, hash)
+			warmed++
+		}
+	}
+	logger.Info("Expected DNA hashes warmed from durable storage (Issue #2524)", "warmed", warmed)
 }
 
 // buildGRPCControlPlaneTLSConfig creates TLS configuration for the gRPC control plane provider.
