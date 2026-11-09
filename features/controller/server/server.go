@@ -3247,258 +3247,352 @@ func (s *Server) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Start HA manager with timeout
-	if s.haManager != nil {
-		s.logger.Info("Starting HA manager...")
-
-		// The HA manager's context is its LIFETIME, not a startup deadline.
-		//
-		// ha.Manager.Start derives m.ctx from the context passed here and bounds
-		// every background goroutine it launches on it. This used to be a
-		// 30-second context.WithTimeout with a deferred cancel, so the moment
-		// Server.Start returned, that cancel fired and killed the manager's
-		// background work while the manager still reported itself started.
-		//
-		// The visible damage was cluster membership: the node-info replication
-		// goroutine active at the time (since replaced by the node-registry
-		// self-registration loop, Issue #3763) observed the cancelled context
-		// first and returned without registering anything, on every node.
-		// GET /api/v1/ha/cluster reported no members while the cluster was
-		// otherwise healthy — only GET /api/v1/ha/status looked correct, because
-		// it reads leadership state directly rather than through the (empty)
-		// membership view.
-		//
-		// Start does not block on the network, so it needs no timeout of its
-		// own; shutdown is Server.Stop's job, which calls haManager.Stop.
-		if err := s.haManager.Start(context.Background()); err != nil {
-			return fmt.Errorf("failed to start HA manager: %w", err)
-		}
-		s.logger.Info("HA manager started successfully")
+	if err := s.startHAManager(); err != nil {
+		return err
 	}
+	if err := s.startSharedTransport(); err != nil {
+		return err
+	}
+	s.startExpiryJobs()
+	s.startApprovalRecovery()
+	s.startTriggerManager()
+	s.startConfigSync()
+	s.startEntityGraphSweeps()
+	s.startHealthServices()
+	if err := s.startHTTPAPIServer(); err != nil {
+		return err
+	}
+	s.logControllerStarted()
+	s.startLeaderGatedServices()
+	s.recordStartupAudit()
 
-	// Start shared gRPC-over-QUIC transport and wire composite handler (Story #515)
+	return nil
+}
+
+// startHAManager starts the HA manager when one is configured.
+func (s *Server) startHAManager() error {
+	if s.haManager == nil {
+		return nil
+	}
+	s.logger.Info("Starting HA manager...")
+
+	// The HA manager's context is its LIFETIME, not a startup deadline.
+	//
+	// ha.Manager.Start derives m.ctx from the context passed here and bounds
+	// every background goroutine it launches on it. This used to be a
+	// 30-second context.WithTimeout with a deferred cancel, so the moment
+	// Server.Start returned, that cancel fired and killed the manager's
+	// background work while the manager still reported itself started.
+	//
+	// The visible damage was cluster membership: the node-info replication
+	// goroutine active at the time (since replaced by the node-registry
+	// self-registration loop, Issue #3763) observed the cancelled context
+	// first and returned without registering anything, on every node.
+	// GET /api/v1/ha/cluster reported no members while the cluster was
+	// otherwise healthy — only GET /api/v1/ha/status looked correct, because
+	// it reads leadership state directly rather than through the (empty)
+	// membership view.
+	//
+	// Start does not block on the network, so it needs no timeout of its
+	// own; shutdown is Server.Stop's job, which calls haManager.Stop.
+	if err := s.haManager.Start(context.Background()); err != nil {
+		return fmt.Errorf("failed to start HA manager: %w", err)
+	}
+	s.logger.Info("HA manager started successfully")
+	return nil
+}
+
+// startSharedTransport starts the shared gRPC-over-QUIC transport, wires the
+// composite handler and starts the services that ride on it (Story #515).
+func (s *Server) startSharedTransport() error {
 	s.logger.Info("Controller build version", "version", buildVersionCheck)
-	if s.controlPlane != nil {
-		// Build TLS config for the QUIC listener
-		grpcTLSConfig, err := buildGRPCControlPlaneTLSConfig(s.cfg, s.certManager, s.logger)
-		if err != nil {
-			return fmt.Errorf("failed to build transport TLS config: %w", err)
-		}
-
-		// Create fresh shared gRPC server + QUIC listener per Start() cycle.
-		// grpc.Server is not reusable after Stop(), so we create a new one each time.
-		grpcOpts := []grpc.ServerOption{
-			grpc.Creds(quictransport.TransportCredentials()),
-			// Issue #5555: unary calls are logged by method, code and duration only;
-			// IssueInitialCredential never reaches a payload log or a span attribute.
-			grpc.ChainUnaryInterceptor(controllerTransport.NewUnaryAccessLogInterceptor(s.logger)),
-		}
-		grpcOpts = append(grpcOpts, s.revocationServerOptions()...)
-		s.grpcServer = grpc.NewServer(append(grpcOpts, dataplaneGRPC.ServerOptions()...)...)
-		ql, err := quictransport.ListenWithLimits(
-			s.cfg.Transport.ListenAddr,
-			grpcTLSConfig,
-			nil,
-			quictransport.LimitsForMaxConnections(s.cfg.Transport.MaxConnections),
-		)
-		if err != nil {
-			return fmt.Errorf("failed to start shared QUIC listener: %w", err)
-		}
-		s.quicListener = ql
-
-		// Re-initialize CP provider with the fresh gRPC server
-		// Re-initializing creates a fresh registry unless the shared one is
-		// passed back in — keep the same instance the API server holds so
-		// connection_state stays accurate across the Start() re-init (Issue #1572).
-		if err := s.controlPlane.Initialize(context.Background(), map[string]interface{}{
-			"mode":                     "server",
-			"addr":                     s.cfg.Transport.ListenAddr,
-			"tls_config":               grpcTLSConfig,
-			"grpc_server":              s.grpcServer,
-			"registry":                 s.connRegistry,
-			"max_connections":          s.cfg.Transport.MaxConnections,
-			"registration_token_store": s.storageManager.GetRegistrationTokenStore(),
-			"require_security_stores":  true,
-		}); err != nil {
-			return fmt.Errorf("failed to re-initialize CP provider with shared server: %w", err)
-		}
-
-		// Start CP and DP providers (they create their handlers but don't register/listen)
-		if err := s.controlPlane.Start(context.Background()); err != nil {
-			return fmt.Errorf("failed to start control plane provider: %w", err)
-		}
-		s.logger.Info("Control plane provider started")
-
-		if s.dataPlaneProvider != nil {
-			// Re-initialize DP with the fresh gRPC server
-			if err := s.dataPlaneProvider.Initialize(context.Background(), map[string]interface{}{
-				"mode":        "server",
-				"grpc_server": s.grpcServer,
-			}); err != nil {
-				return fmt.Errorf("failed to re-initialize DP provider with shared server: %w", err)
-			}
-			if err := s.dataPlaneProvider.Start(context.Background()); err != nil {
-				return fmt.Errorf("failed to start data plane provider: %w", err)
-			}
-			s.logger.Info("Data plane provider started", "provider", s.dataPlaneProvider.Name())
-		}
-
-		// Build and register composite handler
-		cpProvider, ok := s.controlPlane.(*grpcCP.Provider)
-		if !ok {
-			return fmt.Errorf("control plane provider is not *grpcCP.Provider (got %T)", s.controlPlane)
-		}
-		cpHandler := cpProvider.ServerHandler()
-		if cpHandler == nil {
-			return fmt.Errorf("CP provider ServerHandler() returned nil")
-		}
-
-		// Issue #3759: the DNA and bulk handlers take a dedicated admission queue
-		// instance, separate from the one gating Register/ControlChannel, so a
-		// bucket exhausted here cannot starve a tenant's connects and heartbeats.
-		// See ingest_admission.go.
-		tenantQueue := s.admissionQueues.dnaBulkQueue()
-		dnaHandler := controllerTransport.NewDNAHandler(s.logger, tenantQueue, s.controllerService)
-		// Issue #4346: bind the queue key to the peer's registered tenant rather
-		// than the first chunk's wire-supplied tenant_id, which is steward-supplied
-		// and could otherwise be used to name a victim tenant's bucket.
-		dnaHandler.WithTenantResolver(s.controllerService)
-		// Issue #4444: chain the entity-graph write path so a steward's committed
-		// DNA delta also lands in the entity graph.
-		s.wireDNAEntityGraph(dnaHandler)
-
-		// Wire fragment-root partial-sync detection (Issue #3329). The DNA handler
-		// compares the steward-claimed aggregate root against the stored manifest root
-		// and requests only changed fragments on mismatch (ADR-017 §7). Must be wired
-		// before the heartbeat service starts so no heartbeats are missed.
-		if s.heartbeatService != nil {
-			s.heartbeatService.SetOnFragmentRoot(dnaHandler.HandleHeartbeatRoot)
-			s.logger.Info("Fragment-root partial-sync detection wired (Issue #3329)")
-		}
-		s.wireDNABulkLane(dnaHandler)
-
-		bulkHandler := controllerTransport.NewBulkHandler(s.logger, tenantQueue).WithLockdown(s.lockdown)
-		logStreamHandler := s.newLogStreamHandler()
-		s.logStreamHandler = logStreamHandler
-		telemetryHandler := controllerTransport.NewTelemetryHandler(s.logger, nil).WithLockdown(s.lockdown)
-		composite := newCompositeTransportServer(cpHandler, s.logger)
-		composite.SetConfigHandler(s.configHandler)
-		composite.SetDNAHandler(dnaHandler)
-		composite.SetBulkHandler(bulkHandler)
-		s.wirePullHandlers(composite, tenantQueue)
-		composite.SetLogStreamHandler(logStreamHandler)
-		composite.SetTelemetryHandler(telemetryHandler)
-
-		// Wire terminal relay (Issue #2761). Parse allowed origins from env
-		// (mirrors CFGMS_ALLOWED_ORIGINS: comma-separated, trimmed, empty filtered).
-		var terminalOrigins []string
-		if raw := os.Getenv("CFGMS_TERMINAL_ALLOWED_ORIGINS"); raw != "" {
-			for _, o := range strings.Split(raw, ",") {
-				if trimmed := strings.TrimSpace(o); trimmed != "" {
-					terminalOrigins = append(terminalOrigins, trimmed)
-				}
-			}
-		}
-		// Session recordings capture raw keystrokes and shell output of privileged
-		// admin sessions, so they are stored under the controller's data directory
-		// (same resolution as DNA reports and installer blobs) with owner-only
-		// permissions — never a shared, world-writable location such as /tmp.
-		terminalCfg := terminal.DefaultConfig()
-		terminalCfg.RecordingStoragePath = filepath.Join(resolveDNADataRoot(s.cfg), "terminal-recordings")
-		if s.httpServer == nil || s.httpServer.GetSecretStore() == nil {
-			return fmt.Errorf("failed to create terminal session manager: secrets store is required for the recording HMAC key")
-		}
-		terminalSessionMgr, terminalMgrErr := terminal.NewSessionManager(terminalCfg, s.logger,
-			terminal.WithSecretsStore(s.httpServer.GetSecretStore()))
-		if terminalMgrErr != nil {
-			return fmt.Errorf("failed to create terminal session manager: %w", terminalMgrErr)
-		}
-		// Retained so Stop can finalize recordings of sessions still live at
-		// shutdown; without the finalizing .meta sidecar a recording is treated as
-		// unverifiable and discarded on the next start.
-		s.terminalSessionMgr = terminalSessionMgr
-		// Avoid a non-nil interface with a nil pointer (would bypass the nil-check in ServeWebSocket).
-		var terminalCmdPub controllerTransport.TerminalCommandPublisher
-		if s.commandPublisher != nil {
-			terminalCmdPub = s.commandPublisher
-		}
-		// The audited client IP of a privileged shell session must not be
-		// attacker-controlled, so forwarding headers are believed only from the
-		// configured reverse proxies (same list that gates the registration
-		// IP-trust decision, Issue #1695). Unset means headers are ignored and
-		// the TCP peer address is audited.
-		var terminalTrustedProxies []string
-		if s.cfg.Registration != nil {
-			terminalTrustedProxies = s.cfg.Registration.TrustedProxies
-		}
-		terminalHandler := controllerTransport.NewTerminalHandler(
-			s.logger, terminalCmdPub, terminalSessionMgr, s.auditManager, terminalOrigins,
-			terminalTrustedProxies,
-		)
-		composite.SetTerminalHandler(terminalHandler)
-		if s.httpServer != nil {
-			s.httpServer.SetTerminalHandler(http.HandlerFunc(terminalHandler.ServeWebSocket))
-		}
-
-		// Wire osquery ad-hoc fleet query dispatch (Issue #3569).
-		// The controller side of OsqueryHandler manages the stream registry (HandleGRPC,
-		// QuerySteward); Execute is steward-side only so binPath is irrelevant here.
-		osqueryHandler := stewardosquery.NewOsqueryHandler(s.logger, "").WithLockdown(s.lockdown)
-		composite.SetOsqueryHandler(osqueryHandler)
-		if s.httpServer != nil {
-			s.httpServer.SetOsqueryDispatcher(osqueryHandler)
-		}
-
-		transportpb.RegisterStewardTransportServer(s.grpcServer, composite)
-		// Wire telemetry WebSocket fan-out into the REST API (Issue #2765).
-		if s.httpServer != nil {
-			s.httpServer.SetTelemetryHandler(http.HandlerFunc(telemetryHandler.ServeWebSocket))
-		}
-
-		// Start serving on the shared QUIC listener
-		go func() {
-			if err := s.grpcServer.Serve(s.quicListener); err != nil {
-				s.logger.Error("Shared gRPC server stopped", "error", err)
-			}
-		}()
-		s.logger.Info("Shared gRPC-over-QUIC transport started",
-			"addr", s.quicListener.Addr().String())
-
-		// Subscribe to events from stewards via ControlPlaneProvider
-		if err := s.controlPlane.SubscribeEvents(context.Background(), nil, s.handleEventFromProvider); err != nil {
-			return fmt.Errorf("failed to subscribe to events: %w", err)
-		}
-		s.logger.Info("Subscribed to steward events via gRPC control plane provider")
-
-		// Start heartbeat monitoring service
-		if s.heartbeatService != nil {
-			// Background jobs run system-internal (ctxkeys.WithSystem): a context with
-			// no caller is refused fleet-wide reach, so each job's reach is an explicit
-			// decision rather than the side effect of a bare context (Issue #4665).
-			if err := s.heartbeatService.Start(ctxkeys.WithSystem(context.Background())); err != nil {
-				return fmt.Errorf("failed to start heartbeat service: %w", err)
-			}
-			s.logger.Info("Heartbeat monitoring service started")
-		}
-
-		// Start command publisher
-		if s.commandPublisher != nil {
-			if err := s.commandPublisher.Start(ctxkeys.WithSystem(context.Background())); err != nil {
-				return fmt.Errorf("failed to start command publisher: %w", err)
-			}
-			s.logger.Info("Command publisher started")
-		}
-
-		// Start job dispatcher (Issue #1672)
-		if s.jobDispatcher != nil {
-			if err := s.jobDispatcher.Start(ctxkeys.WithSystem(context.Background())); err != nil {
-				return fmt.Errorf("failed to start job dispatcher: %w", err)
-			}
-			s.logger.Info("Job dispatcher started")
-		}
+	if s.controlPlane == nil {
+		return nil
 	}
 
-	// Start background expiry jobs (Issue #1697).
+	// Build TLS config for the QUIC listener
+	grpcTLSConfig, err := buildGRPCControlPlaneTLSConfig(s.cfg, s.certManager, s.logger)
+	if err != nil {
+		return fmt.Errorf("failed to build transport TLS config: %w", err)
+	}
+	if err := s.listenSharedTransport(grpcTLSConfig); err != nil {
+		return err
+	}
+	if err := s.startTransportProviders(grpcTLSConfig); err != nil {
+		return err
+	}
+	if err := s.wireAndServeComposite(); err != nil {
+		return err
+	}
+
+	// Subscribe to events from stewards via ControlPlaneProvider
+	if err := s.controlPlane.SubscribeEvents(context.Background(), nil, s.handleEventFromProvider); err != nil {
+		return fmt.Errorf("failed to subscribe to events: %w", err)
+	}
+	s.logger.Info("Subscribed to steward events via gRPC control plane provider")
+
+	return s.startTransportServices()
+}
+
+// listenSharedTransport creates the fresh shared gRPC server and QUIC listener
+// for this Start() cycle. grpc.Server is not reusable after Stop(), so a new one
+// is created each time.
+func (s *Server) listenSharedTransport(grpcTLSConfig *tls.Config) error {
+	grpcOpts := []grpc.ServerOption{
+		grpc.Creds(quictransport.TransportCredentials()),
+		// Issue #5555: unary calls are logged by method, code and duration only;
+		// IssueInitialCredential never reaches a payload log or a span attribute.
+		grpc.ChainUnaryInterceptor(controllerTransport.NewUnaryAccessLogInterceptor(s.logger)),
+	}
+	grpcOpts = append(grpcOpts, s.revocationServerOptions()...)
+	s.grpcServer = grpc.NewServer(append(grpcOpts, dataplaneGRPC.ServerOptions()...)...)
+	ql, err := quictransport.ListenWithLimits(
+		s.cfg.Transport.ListenAddr,
+		grpcTLSConfig,
+		nil,
+		quictransport.LimitsForMaxConnections(s.cfg.Transport.MaxConnections),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to start shared QUIC listener: %w", err)
+	}
+	s.quicListener = ql
+	return nil
+}
+
+// startTransportProviders re-initializes and starts the control plane and data
+// plane providers on the fresh shared gRPC server.
+func (s *Server) startTransportProviders(grpcTLSConfig *tls.Config) error {
+	// Re-initialize CP provider with the fresh gRPC server
+	// Re-initializing creates a fresh registry unless the shared one is
+	// passed back in — keep the same instance the API server holds so
+	// connection_state stays accurate across the Start() re-init (Issue #1572).
+	if err := s.controlPlane.Initialize(context.Background(), map[string]interface{}{
+		"mode":                     "server",
+		"addr":                     s.cfg.Transport.ListenAddr,
+		"tls_config":               grpcTLSConfig,
+		"grpc_server":              s.grpcServer,
+		"registry":                 s.connRegistry,
+		"max_connections":          s.cfg.Transport.MaxConnections,
+		"registration_token_store": s.storageManager.GetRegistrationTokenStore(),
+		"require_security_stores":  true,
+	}); err != nil {
+		return fmt.Errorf("failed to re-initialize CP provider with shared server: %w", err)
+	}
+
+	// Start CP and DP providers (they create their handlers but don't register/listen)
+	if err := s.controlPlane.Start(context.Background()); err != nil {
+		return fmt.Errorf("failed to start control plane provider: %w", err)
+	}
+	s.logger.Info("Control plane provider started")
+
+	if s.dataPlaneProvider == nil {
+		return nil
+	}
+	// Re-initialize DP with the fresh gRPC server
+	if err := s.dataPlaneProvider.Initialize(context.Background(), map[string]interface{}{
+		"mode":        "server",
+		"grpc_server": s.grpcServer,
+	}); err != nil {
+		return fmt.Errorf("failed to re-initialize DP provider with shared server: %w", err)
+	}
+	if err := s.dataPlaneProvider.Start(context.Background()); err != nil {
+		return fmt.Errorf("failed to start data plane provider: %w", err)
+	}
+	s.logger.Info("Data plane provider started", "provider", s.dataPlaneProvider.Name())
+	return nil
+}
+
+// wireAndServeComposite builds the composite handler, registers it on the shared
+// gRPC server and starts serving on the shared QUIC listener.
+func (s *Server) wireAndServeComposite() error {
+	// Build and register composite handler
+	cpProvider, ok := s.controlPlane.(*grpcCP.Provider)
+	if !ok {
+		return fmt.Errorf("control plane provider is not *grpcCP.Provider (got %T)", s.controlPlane)
+	}
+	cpHandler := cpProvider.ServerHandler()
+	if cpHandler == nil {
+		return fmt.Errorf("CP provider ServerHandler() returned nil")
+	}
+
+	composite, telemetryHandler := s.newCompositeHandler(cpHandler)
+	if err := s.wireTerminalHandler(composite); err != nil {
+		return err
+	}
+	s.wireOsqueryHandler(composite)
+
+	transportpb.RegisterStewardTransportServer(s.grpcServer, composite)
+	// Wire telemetry WebSocket fan-out into the REST API (Issue #2765).
+	if s.httpServer != nil {
+		s.httpServer.SetTelemetryHandler(http.HandlerFunc(telemetryHandler.ServeWebSocket))
+	}
+
+	// Start serving on the shared QUIC listener
+	go func() {
+		if err := s.grpcServer.Serve(s.quicListener); err != nil {
+			s.logger.Error("Shared gRPC server stopped", "error", err)
+		}
+	}()
+	s.logger.Info("Shared gRPC-over-QUIC transport started",
+		"addr", s.quicListener.Addr().String())
+	return nil
+}
+
+// newCompositeHandler builds the DNA, bulk, log-stream and telemetry handlers
+// and the composite transport server that carries them. It returns the
+// composite and the telemetry handler the REST API also needs.
+func (s *Server) newCompositeHandler(cpHandler transportpb.StewardTransportServer) (*compositeTransportServer, *controllerTransport.TelemetryHandler) {
+	// Issue #3759: the DNA and bulk handlers take a dedicated admission queue
+	// instance, separate from the one gating Register/ControlChannel, so a
+	// bucket exhausted here cannot starve a tenant's connects and heartbeats.
+	// See ingest_admission.go.
+	tenantQueue := s.admissionQueues.dnaBulkQueue()
+	dnaHandler := s.newDNAHandler(tenantQueue)
+
+	bulkHandler := controllerTransport.NewBulkHandler(s.logger, tenantQueue).WithLockdown(s.lockdown)
+	logStreamHandler := s.newLogStreamHandler()
+	s.logStreamHandler = logStreamHandler
+	telemetryHandler := controllerTransport.NewTelemetryHandler(s.logger, nil).WithLockdown(s.lockdown)
+	composite := newCompositeTransportServer(cpHandler, s.logger)
+	composite.SetConfigHandler(s.configHandler)
+	composite.SetDNAHandler(dnaHandler)
+	composite.SetBulkHandler(bulkHandler)
+	s.wirePullHandlers(composite, tenantQueue)
+	composite.SetLogStreamHandler(logStreamHandler)
+	composite.SetTelemetryHandler(telemetryHandler)
+	return composite, telemetryHandler
+}
+
+// newDNAHandler builds the DNA handler on the given admission queue and wires
+// its entity-graph write path, partial-sync detection and bulk lane.
+func (s *Server) newDNAHandler(tenantQueue *controllerTransport.TenantQueue) *controllerTransport.DNAHandler {
+	dnaHandler := controllerTransport.NewDNAHandler(s.logger, tenantQueue, s.controllerService)
+	// Issue #4346: bind the queue key to the peer's registered tenant rather
+	// than the first chunk's wire-supplied tenant_id, which is steward-supplied
+	// and could otherwise be used to name a victim tenant's bucket.
+	dnaHandler.WithTenantResolver(s.controllerService)
+	// Issue #4444: chain the entity-graph write path so a steward's committed
+	// DNA delta also lands in the entity graph.
+	s.wireDNAEntityGraph(dnaHandler)
+
+	// Wire fragment-root partial-sync detection (Issue #3329). The DNA handler
+	// compares the steward-claimed aggregate root against the stored manifest root
+	// and requests only changed fragments on mismatch (ADR-017 §7). Must be wired
+	// before the heartbeat service starts so no heartbeats are missed.
+	if s.heartbeatService != nil {
+		s.heartbeatService.SetOnFragmentRoot(dnaHandler.HandleHeartbeatRoot)
+		s.logger.Info("Fragment-root partial-sync detection wired (Issue #3329)")
+	}
+	s.wireDNABulkLane(dnaHandler)
+	return dnaHandler
+}
+
+// terminalAllowedOrigins parses CFGMS_TERMINAL_ALLOWED_ORIGINS (mirrors
+// CFGMS_ALLOWED_ORIGINS: comma-separated, trimmed, empty filtered).
+func terminalAllowedOrigins() []string {
+	var origins []string
+	if raw := os.Getenv("CFGMS_TERMINAL_ALLOWED_ORIGINS"); raw != "" {
+		for _, o := range strings.Split(raw, ",") {
+			if trimmed := strings.TrimSpace(o); trimmed != "" {
+				origins = append(origins, trimmed)
+			}
+		}
+	}
+	return origins
+}
+
+// wireTerminalHandler wires the terminal relay (Issue #2761) onto the composite
+// handler and the REST API.
+func (s *Server) wireTerminalHandler(composite *compositeTransportServer) error {
+	terminalOrigins := terminalAllowedOrigins()
+	// Session recordings capture raw keystrokes and shell output of privileged
+	// admin sessions, so they are stored under the controller's data directory
+	// (same resolution as DNA reports and installer blobs) with owner-only
+	// permissions — never a shared, world-writable location such as /tmp.
+	terminalCfg := terminal.DefaultConfig()
+	terminalCfg.RecordingStoragePath = filepath.Join(resolveDNADataRoot(s.cfg), "terminal-recordings")
+	if s.httpServer == nil || s.httpServer.GetSecretStore() == nil {
+		return fmt.Errorf("failed to create terminal session manager: secrets store is required for the recording HMAC key")
+	}
+	terminalSessionMgr, terminalMgrErr := terminal.NewSessionManager(terminalCfg, s.logger,
+		terminal.WithSecretsStore(s.httpServer.GetSecretStore()))
+	if terminalMgrErr != nil {
+		return fmt.Errorf("failed to create terminal session manager: %w", terminalMgrErr)
+	}
+	// Retained so Stop can finalize recordings of sessions still live at
+	// shutdown; without the finalizing .meta sidecar a recording is treated as
+	// unverifiable and discarded on the next start.
+	s.terminalSessionMgr = terminalSessionMgr
+	// Avoid a non-nil interface with a nil pointer (would bypass the nil-check in ServeWebSocket).
+	var terminalCmdPub controllerTransport.TerminalCommandPublisher
+	if s.commandPublisher != nil {
+		terminalCmdPub = s.commandPublisher
+	}
+	// The audited client IP of a privileged shell session must not be
+	// attacker-controlled, so forwarding headers are believed only from the
+	// configured reverse proxies (same list that gates the registration
+	// IP-trust decision, Issue #1695). Unset means headers are ignored and
+	// the TCP peer address is audited.
+	var terminalTrustedProxies []string
+	if s.cfg.Registration != nil {
+		terminalTrustedProxies = s.cfg.Registration.TrustedProxies
+	}
+	terminalHandler := controllerTransport.NewTerminalHandler(
+		s.logger, terminalCmdPub, terminalSessionMgr, s.auditManager, terminalOrigins,
+		terminalTrustedProxies,
+	)
+	composite.SetTerminalHandler(terminalHandler)
+	if s.httpServer != nil {
+		s.httpServer.SetTerminalHandler(http.HandlerFunc(terminalHandler.ServeWebSocket))
+	}
+	return nil
+}
+
+// wireOsqueryHandler wires osquery ad-hoc fleet query dispatch (Issue #3569).
+// The controller side of OsqueryHandler manages the stream registry (HandleGRPC,
+// QuerySteward); Execute is steward-side only so binPath is irrelevant here.
+func (s *Server) wireOsqueryHandler(composite *compositeTransportServer) {
+	osqueryHandler := stewardosquery.NewOsqueryHandler(s.logger, "").WithLockdown(s.lockdown)
+	composite.SetOsqueryHandler(osqueryHandler)
+	if s.httpServer != nil {
+		s.httpServer.SetOsqueryDispatcher(osqueryHandler)
+	}
+}
+
+// startTransportServices starts the heartbeat monitor, command publisher and job
+// dispatcher that ride on the shared transport.
+func (s *Server) startTransportServices() error {
+	// Start heartbeat monitoring service
+	if s.heartbeatService != nil {
+		// Background jobs run system-internal (ctxkeys.WithSystem): a context with
+		// no caller is refused fleet-wide reach, so each job's reach is an explicit
+		// decision rather than the side effect of a bare context (Issue #4665).
+		if err := s.heartbeatService.Start(ctxkeys.WithSystem(context.Background())); err != nil {
+			return fmt.Errorf("failed to start heartbeat service: %w", err)
+		}
+		s.logger.Info("Heartbeat monitoring service started")
+	}
+
+	// Start command publisher
+	if s.commandPublisher != nil {
+		if err := s.commandPublisher.Start(ctxkeys.WithSystem(context.Background())); err != nil {
+			return fmt.Errorf("failed to start command publisher: %w", err)
+		}
+		s.logger.Info("Command publisher started")
+	}
+
+	// Start job dispatcher (Issue #1672)
+	if s.jobDispatcher != nil {
+		if err := s.jobDispatcher.Start(ctxkeys.WithSystem(context.Background())); err != nil {
+			return fmt.Errorf("failed to start job dispatcher: %w", err)
+		}
+		s.logger.Info("Job dispatcher started")
+	}
+	return nil
+}
+
+// startExpiryJobs starts the background expiry jobs (Issue #1697).
+func (s *Server) startExpiryJobs() {
 	if s.ipTrustExpiryJob != nil {
 		if err := s.ipTrustExpiryJob.Start(ctxkeys.WithSystem(context.Background())); err != nil {
 			s.logger.Warn("Failed to start IP-trust expiry job", "error", err)
@@ -3513,81 +3607,50 @@ func (s *Server) Start() error {
 			s.logger.Info("Pending-registration expiry job started (Issue #1697)")
 		}
 	}
+}
 
-	// Resume approval-gated runs the previous process left behind and start the
-	// periodic sweep that expires due approvals (Issue #4609). The engine owns the
-	// sweep's lifetime; Stop shuts it down.
+// startApprovalRecovery resumes approval-gated runs the previous process left
+// behind and starts the periodic sweep that expires due approvals (Issue #4609).
+// The engine owns the sweep's lifetime; Stop shuts it down.
+func (s *Server) startApprovalRecovery() {
 	if s.workflowEngine != nil {
 		s.workflowEngine.StartApprovalRecovery(ctxkeys.WithSystem(context.Background()), approvalRecoveryInterval)
 	}
+}
 
-	// Start workflow trigger manager (Issue #414)
-	if s.triggerManager != nil {
-		if err := s.triggerManager.Start(ctxkeys.WithSystem(context.Background())); err != nil {
-			s.logger.Warn("Failed to start trigger manager", "error", err)
-		} else {
-			s.logger.Info("Workflow trigger manager started")
-		}
+// startTriggerManager starts the workflow trigger manager (Issue #414).
+func (s *Server) startTriggerManager() {
+	if s.triggerManager == nil {
+		return
 	}
+	if err := s.triggerManager.Start(ctxkeys.WithSystem(context.Background())); err != nil {
+		s.logger.Warn("Failed to start trigger manager", "error", err)
+	} else {
+		s.logger.Info("Workflow trigger manager started")
+	}
+}
 
-	// Start periodic git-sourced tenant config sync (Issue #4408). Run derives its
-	// own lifetime context from syncCtx and is idempotent; cancelling syncCtx (done
-	// in Stop, tied to this exact context) stops every per-tenant polling goroutine
-	// it owns — the mechanism behind "cancelling the controller's context stops the
-	// polling loop."
-	if s.configSyncService != nil {
-		syncCtx, cancel := context.WithCancel(ctxkeys.WithSystem(context.Background()))
-		s.configSyncCancel = cancel
-		s.configSyncService.Run(syncCtx)
-		s.logger.Info("Config source sync service started (Issue #4408)")
+// startConfigSync starts the periodic git-sourced tenant config sync (Issue
+// #4408). Run derives its own lifetime context from syncCtx and is idempotent;
+// cancelling syncCtx (done in Stop, tied to this exact context) stops every
+// per-tenant polling goroutine it owns — the mechanism behind "cancelling the
+// controller's context stops the polling loop."
+func (s *Server) startConfigSync() {
+	if s.configSyncService == nil {
+		return
 	}
+	syncCtx, cancel := context.WithCancel(ctxkeys.WithSystem(context.Background()))
+	s.configSyncCancel = cancel
+	s.configSyncService.Run(syncCtx)
+	s.logger.Info("Config source sync service started (Issue #4408)")
+}
 
-	// Start the entity-graph tenant-tree mirror's periodic sweep (Issue #4413,
-	// ADR-022 §7). Cadence decision: periodic, not a tenant CRUD hook — no hook
-	// point exists today at the tenant store's create/update/delete call sites,
-	// and adding one to every call site is new plumbing beyond this wiring
-	// story. Ingest's cost is proportional to tenant count, not fleet size, and
-	// a full-tree snapshot is idempotent, so a short bounded interval keeps the
-	// mirror eventually consistent cheaply. Gated on the sweep's own
-	// cluster-singleton lease (ADR-031 Decision 4) so racing full-tree snapshots
-	// from sibling nodes cannot retract and re-assert each other's claim scopes.
-	if s.egTenantSyncWriter != nil {
-		tenantStore := s.storageManager.GetTenantStore()
-		s.egTenantSyncSweeper = newEntityGraphPeriodicSweeper("entitygraph-tenantsync", entityGraphTenantSyncSweepInterval,
-			func(ctx context.Context) error {
-				return s.egTenantSyncWriter.Ingest(ctx, tenantStore)
-			}, s.egTenantSyncLeaseJob, s.logger)
-		s.egTenantSyncSweeper.Start(ctxkeys.WithSystem(context.Background()))
-		s.logger.Info("Entity graph tenant-sync periodic sweep started (Issue #4413)",
-			"interval", entityGraphTenantSyncSweepInterval)
-	}
-
-	// Issue #5555: expire initial credentials and delete their secrets. Gated on
-	// the sweep's own cluster-singleton lease so one node sweeps per tick.
-	if s.credentialService != nil {
-		s.credentialSweeper = newEntityGraphPeriodicSweeper("credential-expiry", credentialSweepInterval,
-			func(ctx context.Context) error {
-				_, err := s.credentialService.Sweep(ctx)
-				return err
-			}, s.credentialLeaseJob, s.logger)
-		s.credentialSweeper.Start(ctxkeys.WithSystem(context.Background()))
-		s.logger.Info("Credential expiry sweep started (Issue #5555)", "interval", credentialSweepInterval)
-	}
-
-	// Start the MAC-identity correlator's periodic sweep (Issue #4413, ADR-022
-	// §3). The correlator has no event source to hook (it correlates across
-	// fleet-wide observations already in the graph), so periodic is the only
-	// viable cadence. Correlate is O(fleet size) per sweep (ADR-022 §9's known
-	// tension), so it is gated on the sweep's own cluster-singleton lease
-	// (ADR-031 Decision 4): without it, an N-node cluster would multiply a
-	// fleet-sized scan of the shared entity graph by N on every tick.
-	if s.egCorrelatorWriter != nil {
-		s.egCorrelatorSweeper = newEntityGraphPeriodicSweeper("entitygraph-correlator", entityGraphCorrelatorSweepInterval,
-			s.egCorrelatorWriter.Correlate, s.egCorrelatorLeaseJob, s.logger)
-		s.egCorrelatorSweeper.Start(ctxkeys.WithSystem(context.Background()))
-		s.logger.Info("Entity graph correlator periodic sweep started (Issue #4413)",
-			"interval", entityGraphCorrelatorSweepInterval)
-	}
+// startEntityGraphSweeps starts the periodic sweeps and inventory that run
+// against the entity graph and the credential store.
+func (s *Server) startEntityGraphSweeps() {
+	s.startTenantSyncSweep()
+	s.startCredentialSweep()
+	s.startCorrelatorSweep()
 
 	// Start the M365 tenant inventory (Issue #5561). It only reads Graph on the
 	// node holding its cluster-singleton lease.
@@ -3595,8 +3658,68 @@ func (s *Server) Start() error {
 		s.m365Inventory.Start(ctxkeys.WithSystem(context.Background()))
 		s.logger.Info("M365 tenant inventory started (Issue #5561)")
 	}
+}
 
-	// Start health collector and alert manager (Story #417)
+// startTenantSyncSweep starts the entity-graph tenant-tree mirror's periodic
+// sweep (Issue #4413, ADR-022 §7). Cadence decision: periodic, not a tenant CRUD
+// hook — no hook point exists today at the tenant store's create/update/delete
+// call sites, and adding one to every call site is new plumbing beyond this
+// wiring story. Ingest's cost is proportional to tenant count, not fleet size,
+// and a full-tree snapshot is idempotent, so a short bounded interval keeps the
+// mirror eventually consistent cheaply. Gated on the sweep's own
+// cluster-singleton lease (ADR-031 Decision 4) so racing full-tree snapshots
+// from sibling nodes cannot retract and re-assert each other's claim scopes.
+func (s *Server) startTenantSyncSweep() {
+	if s.egTenantSyncWriter == nil {
+		return
+	}
+	tenantStore := s.storageManager.GetTenantStore()
+	s.egTenantSyncSweeper = newEntityGraphPeriodicSweeper("entitygraph-tenantsync", entityGraphTenantSyncSweepInterval,
+		func(ctx context.Context) error {
+			return s.egTenantSyncWriter.Ingest(ctx, tenantStore)
+		}, s.egTenantSyncLeaseJob, s.logger)
+	s.egTenantSyncSweeper.Start(ctxkeys.WithSystem(context.Background()))
+	s.logger.Info("Entity graph tenant-sync periodic sweep started (Issue #4413)",
+		"interval", entityGraphTenantSyncSweepInterval)
+}
+
+// startCredentialSweep expires initial credentials and deletes their secrets
+// (Issue #5555). Gated on the sweep's own cluster-singleton lease so one node
+// sweeps per tick.
+func (s *Server) startCredentialSweep() {
+	if s.credentialService == nil {
+		return
+	}
+	s.credentialSweeper = newEntityGraphPeriodicSweeper("credential-expiry", credentialSweepInterval,
+		func(ctx context.Context) error {
+			_, err := s.credentialService.Sweep(ctx)
+			return err
+		}, s.credentialLeaseJob, s.logger)
+	s.credentialSweeper.Start(ctxkeys.WithSystem(context.Background()))
+	s.logger.Info("Credential expiry sweep started (Issue #5555)", "interval", credentialSweepInterval)
+}
+
+// startCorrelatorSweep starts the MAC-identity correlator's periodic sweep
+// (Issue #4413, ADR-022 §3). The correlator has no event source to hook (it
+// correlates across fleet-wide observations already in the graph), so periodic
+// is the only viable cadence. Correlate is O(fleet size) per sweep (ADR-022 §9's
+// known tension), so it is gated on the sweep's own cluster-singleton lease
+// (ADR-031 Decision 4): without it, an N-node cluster would multiply a
+// fleet-sized scan of the shared entity graph by N on every tick.
+func (s *Server) startCorrelatorSweep() {
+	if s.egCorrelatorWriter == nil {
+		return
+	}
+	s.egCorrelatorSweeper = newEntityGraphPeriodicSweeper("entitygraph-correlator", entityGraphCorrelatorSweepInterval,
+		s.egCorrelatorWriter.Correlate, s.egCorrelatorLeaseJob, s.logger)
+	s.egCorrelatorSweeper.Start(ctxkeys.WithSystem(context.Background()))
+	s.logger.Info("Entity graph correlator periodic sweep started (Issue #4413)",
+		"interval", entityGraphCorrelatorSweepInterval)
+}
+
+// startHealthServices starts the health collector, system monitor and alert
+// manager (Story #417).
+func (s *Server) startHealthServices() {
 	if s.healthCollector != nil {
 		if err := s.healthCollector.Start(ctxkeys.WithSystem(context.Background()), 30*time.Second); err != nil {
 			s.logger.Warn("Failed to start health collector", "error", err)
@@ -3618,25 +3741,36 @@ func (s *Server) Start() error {
 			s.logger.Info("Alert manager started")
 		}
 	}
+}
 
-	// Start HTTP API server
-	if s.httpServer != nil {
-		// api.Server.Start performs synchronous TLS preflight before launching
-		// its serving goroutine. Propagate any failure so controller startup
-		// cannot report success while the public API is absent or downgraded.
-		if err := s.httpServer.Start(); err != nil {
-			return fmt.Errorf("failed to start HTTPS API server: %w", err)
-		}
-		s.logger.Info("HTTP API server started")
+// startHTTPAPIServer starts the HTTP API server.
+func (s *Server) startHTTPAPIServer() error {
+	if s.httpServer == nil {
+		return nil
 	}
+	// api.Server.Start performs synchronous TLS preflight before launching
+	// its serving goroutine. Propagate any failure so controller startup
+	// cannot report success while the public API is absent or downgraded.
+	if err := s.httpServer.Start(); err != nil {
+		return fmt.Errorf("failed to start HTTPS API server: %w", err)
+	}
+	s.logger.Info("HTTP API server started")
+	return nil
+}
 
-	// IsRaftLeader() was deleted with the Raft transport it reported on (Issue
-	// #3763); HasLeadership() is now the only is_leader signal, lease-backed
-	// (ADR-031 Decision 5).
+// logControllerStarted logs that the server is up and whether this node holds
+// leadership. IsRaftLeader() was deleted with the Raft transport it reported on
+// (Issue #3763); HasLeadership() is now the only is_leader signal, lease-backed
+// (ADR-031 Decision 5).
+func (s *Server) logControllerStarted() {
 	s.logger.Info("Controller server started (gRPC-over-QUIC transport mode)",
 		"ha_mode", s.haManager.GetDeploymentMode().String(),
 		"is_leader", s.haManager.HasLeadership())
+}
 
+// startLeaderGatedServices replays interrupted pushes and starts the signing
+// retirement, migration and steward-migration loops.
+func (s *Server) startLeaderGatedServices() {
 	// Issue #1320: On startup, if this node holds lease-backed authority, replay any
 	// push operations that were interrupted before a previous leader could complete
 	// delivery. Nil haManager means OSS single-node mode, which is always authoritative.
@@ -3665,18 +3799,19 @@ func (s *Server) Start() error {
 	if s.stewardMigrationSvc != nil {
 		s.stewardMigrationSvc.Start(context.Background())
 	}
+}
 
-	// Record system startup audit event
-	if s.auditManager != nil {
-		ctx := context.Background()
-		// TODO(#751): controller identity as a real tenant — replace audit.SystemTenantID with proper identity.
-		event := audit.SystemEvent(audit.SystemTenantID, "controller_start", fmt.Sprintf("Controller server started on %s", s.cfg.ListenAddr))
-		if err := s.auditManager.RecordEvent(ctx, event); err != nil {
-			s.logger.Warn("Failed to record startup audit event", "error", err)
-		}
+// recordStartupAudit records the system startup audit event.
+func (s *Server) recordStartupAudit() {
+	if s.auditManager == nil {
+		return
 	}
-
-	return nil
+	ctx := context.Background()
+	// TODO(#751): controller identity as a real tenant — replace audit.SystemTenantID with proper identity.
+	event := audit.SystemEvent(audit.SystemTenantID, "controller_start", fmt.Sprintf("Controller server started on %s", s.cfg.ListenAddr))
+	if err := s.auditManager.RecordEvent(ctx, event); err != nil {
+		s.logger.Warn("Failed to record startup audit event", "error", err)
+	}
 }
 
 // approvalRecoveryInterval is how often each node sweeps for expired approvals and
