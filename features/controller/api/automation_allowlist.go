@@ -18,6 +18,16 @@ import (
 // opting in through that helper, never from a path prefix: a route that merely sits
 // under /api/v1/automation/runs/{run_id}/ is not admitted.
 
+// The templates of the workflow routes of a run (ADR-036 section 3). They are
+// registered in routes_automation_workflow_run.go, which admits each into the table
+// below through registerAutomationRoute: a grant starts one pinned workflow version and
+// reads back only the executions its own run started.
+const (
+	automationWorkflowRunTemplate  = "/api/v1/automation/runs/{run_id}/workflows/{name}"
+	automationExecutionsTemplate   = "/api/v1/automation/runs/{run_id}/executions"
+	automationExecutionGetTemplate = "/api/v1/automation/runs/{run_id}/executions/{exec_id}"
+)
+
 type automationRoute struct {
 	method   string
 	template string
