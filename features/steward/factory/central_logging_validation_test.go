@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 
-package logging_test
+package factory_test
 
 import (
 	"context"
@@ -24,6 +24,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/pkg/logging"
+	_ "github.com/cfgis/cfgms/pkg/logging/providers/file" // Register file provider
 )
 
 // TestCentralLoggingValidation validates that all modules support centralized logging
