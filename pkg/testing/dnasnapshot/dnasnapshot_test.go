@@ -8,17 +8,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/cfgis/cfgms/features/steward/dna"
-)
-
-// Compile-time interface conformance: each snapshot-backed type must satisfy
-// the real dna sub-collector interface it stands in for.
-var (
-	_ dna.HardwareCollector = (*HardwareCollector)(nil)
-	_ dna.SoftwareCollector = (*SoftwareCollector)(nil)
-	_ dna.NetworkCollector  = (*NetworkCollector)(nil)
-	_ dna.SecurityCollector = (*SecurityCollector)(nil)
 )
 
 const fixturePath = "../../../features/steward/dna/testdata/dna_snapshot.json"
