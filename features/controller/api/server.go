@@ -370,15 +370,7 @@ func New(
 		return nil, fmt.Errorf("config cannot be nil")
 	}
 
-	// Issue #4208: health.NewHandler's methods (detailed health, metrics, alerts,
-	// traces) existed and were unit-tested but had no caller outside their own
-	// package. Constructed only when all three dependencies are present — some
-	// lightweight test servers intentionally omit them, in which case the
-	// /api/v1/health/... detail routes are simply not registered (registerHealthDetailRoutes).
-	var healthDetailHandler *health.Handler
-	if healthCollector != nil && healthAlertManager != nil && healthTraceManager != nil {
-		healthDetailHandler = health.NewHandler(healthCollector, healthAlertManager, healthTraceManager)
-	}
+	healthDetailHandler := newHealthDetailHandler(healthCollector, healthAlertManager, healthTraceManager)
 
 	// M-AUTH-1: Initialize central secrets provider for API key storage
 	secretStore, err := NewSecretStore(cfg)
@@ -386,41 +378,12 @@ func New(
 		return nil, fmt.Errorf("failed to initialize secret store: %w", err)
 	}
 
-	// ADR-031 Decision 4: cluster-singleton lease claims for the two expiry
-	// sweeps below. NewBackgroundLoopLease is nil-receiver-safe — a nil
-	// haManager (OSS single-node) yields a SingletonJob that always runs,
-	// matching this sweep's pre-#3762 unconditional behavior.
-	tenantCrossingExpirySweepLease, err := haManager.NewBackgroundLoopLease("controller-tenant-crossing-expiry", logger)
+	leases, err := newExpirySweepLeases(haManager, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create tenant-crossing expiry sweep lease: %w", err)
-	}
-	credentialRequestSweepLease, err := haManager.NewBackgroundLoopLease("controller-credential-request-expiry", logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to construct credential-request expiry lease job: %w", err)
-	}
-	cliLoginSweepLease, err := haManager.NewBackgroundLoopLease("controller-cli-login-request-expiry", logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to construct cli-login expiry lease job: %w", err)
-	}
-	cliPresenceSweepLease, err := haManager.NewBackgroundLoopLease("controller-cli-presence-request-expiry", logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to construct cli-presence expiry lease job: %w", err)
+		return nil, err
 	}
 
-	// Issue #1695: Parse TrustedProxies CIDRs once at startup so per-request
-	// extractSourceIP calls never parse strings.
-	var trustedProxies []net.IPNet
-	if cfg.Registration != nil {
-		for _, cidr := range cfg.Registration.TrustedProxies {
-			_, ipNet, parseErr := net.ParseCIDR(cidr)
-			if parseErr != nil {
-				logger.Warn("Invalid trusted_proxy CIDR, skipping",
-					"cidr", logging.SanitizeLogValue(cidr), "error", parseErr)
-				continue
-			}
-			trustedProxies = append(trustedProxies, *ipNet)
-		}
-	}
+	trustedProxies := parseTrustedProxies(cfg, logger)
 
 	server := &Server{
 		cfg:                     cfg,
@@ -460,11 +423,11 @@ func New(
 		credentialRequestLodgeLimiter: newSourceRateLimiter(20, time.Minute),
 		stopCredentialRequestSweep:    make(chan struct{}),
 		credentialRequestSweepDone:    make(chan struct{}),
-		credentialRequestSweepLease:   credentialRequestSweepLease,
+		credentialRequestSweepLease:   leases.credentialRequest,
 
 		stopTenantCrossingExpirySweep:  make(chan struct{}),
 		tenantCrossingExpirySweepDone:  make(chan struct{}),
-		tenantCrossingExpirySweepLease: tenantCrossingExpirySweepLease,
+		tenantCrossingExpirySweepLease: leases.tenantCrossing,
 		// Issue #3719: collect is polled by a waiting machine, so its budget is more
 		// generous than lodge's one-shot allowance.
 		credentialRequestCollectLimiter: newSourceRateLimiter(30, time.Minute),
@@ -474,7 +437,7 @@ func New(
 		cliLoginCollectLimiter: newSourceRateLimiter(30, time.Minute),
 		stopCliLoginSweep:      make(chan struct{}),
 		cliLoginSweepDone:      make(chan struct{}),
-		cliLoginSweepLease:     cliLoginSweepLease,
+		cliLoginSweepLease:     leases.cliLogin,
 		// Issue #4287: per-source rate limits on cli-presence lodge and collect,
 		// mirroring the cli-login lodge/collect budgets — both routes are
 		// authenticated here, but a compromised low-privilege credential is still
@@ -487,7 +450,7 @@ func New(
 		registrationRefreshLimiter: newSourceRateLimiter(240, time.Minute),
 		stopCliPresenceSweep:       make(chan struct{}),
 		cliPresenceSweepDone:       make(chan struct{}),
-		cliPresenceSweepLease:      cliPresenceSweepLease,
+		cliPresenceSweepLease:      leases.cliPresence,
 		// Issue #4572: in-memory WebAuthn ceremony/throttle expiry sweep.
 		stopWebAuthnCeremonySweep: make(chan struct{}),
 		webAuthnCeremonySweepDone: make(chan struct{}),
@@ -508,20 +471,7 @@ func New(
 		certProvisioningService.SetTenantResolver(controllerService)
 	}
 
-	// Story #380: Initialize three-tier auth defense system
-	server.authDefense = authdefense.New(
-		authdefense.DefaultConfig(),
-		logger,
-		// Issue #4573: key Tier-1 per-IP limiting on the trusted-proxy-aware,
-		// IPv6-/64-normalised client address shared with every per-IP throttle.
-		authdefense.WithIPExtractor(serverIPExtractor{s: server}),
-		authdefense.WithTenantExtractor(func(r *http.Request) string {
-			if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok {
-				return tid
-			}
-			return ""
-		}),
-	)
+	server.authDefense = newServerAuthDefense(server, logger)
 
 	// Configure CORS settings (H-AUTH-3)
 	server.configureCORS()
@@ -534,106 +484,9 @@ func New(
 		return nil, err
 	}
 
-	// M-AUTH-1: Load existing API keys from secret store
-	if err := server.loadAPIKeysFromStore(); err != nil {
-		logger.Warn("Failed to load API keys from store", "error", logging.SanitizeLogValue(err.Error()))
-	}
+	server.loadAPIKeysAndScan()
 
-	// Issue #2226: Scan for API keys holding Tier-3 permissions so operators can revoke them.
-	if err := server.scanAPIKeysForPrivilegedAccess(context.Background()); err != nil {
-		logger.Warn("Startup scan for privileged API keys failed; continuing", "error", err)
-	}
-
-	// Issue #3574: Scan for accounts whose stored permissions contain IDs that
-	// isKnownPermission no longer recognizes (stale grants after the permission-ID
-	// rename in #3574). Those grants match nothing hasPermission will honor; this
-	// log makes the break observable to operators instead of silently denying requests.
-	if err := server.scanAccountsForStalePermissions(context.Background()); err != nil {
-		logger.Warn("Startup scan for accounts with stale permissions failed; continuing", "error", err)
-	}
-
-	// Seed test API keys only when explicitly requested via environment variable.
-	// Never runs in production — must be set deliberately in test environments.
-	if os.Getenv("CFGMS_SEED_TEST_API_KEYS") == "1" {
-		for _, envVar := range []string{"CFGMS_API_KEY_EAST", "CFGMS_API_KEY_CENTRAL", "CFGMS_API_KEY_WEST"} {
-			if keyVal := os.Getenv(envVar); keyVal != "" {
-				server.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
-					Key: keyVal,
-					// The ha:read-* grants let test/integration/ha observe the
-					// cluster it just started. Every HA route is permission-gated
-					// (routes_ha.go), so without them the suite's polling helpers
-					// read 403 bodies as "no leader" and "empty node ID" and fail
-					// with assertion messages that never mention authorization.
-					//
-					// steward:read-dna and config:push cover the other endpoints
-					// that suite calls: GET /stewards/{id}/dna for the config hash
-					// and POST /config/push for configuration continuity.
-					Permissions: []string{
-						"steward:read", "steward:read-dna", "steward:auth-refresh",
-						"config:push",
-						"workflow:execute", "workflow:read",
-						"ha:read-status", "ha:read-cluster", "ha:read-leader", "ha:read-nodes",
-					},
-					// Steward lookups are tenant-scoped. These keys exist to observe
-					// the stewards started by the HA compose profile, which register
-					// with the seeded "integration_reusable" token and therefore land
-					// in test-tenant-integration (features/controller/server.Server,
-					// CFGMS_SEED_TEST_TOKENS block). Scoping the keys to "default"
-					// put them in a tenant containing no stewards at all, so
-					// GET /api/v1/stewards/{id} answered STEWARD_NOT_FOUND for a
-					// steward that had registered successfully seconds earlier.
-					TenantID: "test-tenant-integration",
-				}
-			}
-		}
-
-		// Issue #1709: installer key uses a separate block (not the EAST/CENTRAL/WEST loop)
-		// because it requires different permissions and must upload under the root
-		// tenant, whose artifacts the public download endpoint serves. The root tenant
-		// is resolved by position (Issue #4667), as the download resolves it. When
-		// none resolves the key is not seeded (Issue #4673).
-		if keyVal := os.Getenv("CFGMS_API_KEY_INSTALLER"); keyVal != "" {
-			installerTenant := server.rootTenantID(context.Background())
-			if installerTenant == "" {
-				server.logger.Warn("CFGMS_API_KEY_INSTALLER not seeded: no root tenant resolved")
-			} else {
-				server.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
-					Key:         keyVal,
-					Permissions: []string{"installer:upload", "installer:read", "installer:delete", "steward:list"},
-					TenantID:    installerTenant,
-				}
-			}
-		}
-
-		// Issue #1948: upgrade test key — publishes + dispatches under the fleet-child-a
-		// tenant so E2E upgrade tests target real fleet stewards without requiring a
-		// manual API key creation step in every test run.
-		if keyVal := os.Getenv("CFGMS_API_KEY_UPGRADE_TEST"); keyVal != "" {
-			server.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
-				Key:         keyVal,
-				Permissions: []string{"installer:publish:steward", "installer:dispatch:steward", "installer:read"},
-				TenantID:    "fleet-root/fleet-child-a",
-			}
-		}
-
-		// Issue #1948: override the steward binary trust store with a test Ed25519 key,
-		// and enable auto-approval so published binaries can be dispatched immediately.
-		// Both are only active when CFGMS_SEED_TEST_API_KEYS=1 — never in production.
-		if pubKeyBase64 := os.Getenv("CFGMS_TEST_STEWARD_PUBLISHER_KEY"); pubKeyBase64 != "" {
-			pubKeyBytes, decErr := base64.StdEncoding.DecodeString(pubKeyBase64)
-			if decErr == nil && len(pubKeyBytes) == ed25519.PublicKeySize {
-				testTrust := trust.NewInMemoryTrustStore()
-				_ = testTrust.AddPublisher(trust.PublisherIdentity{
-					Name:      "cfgms",
-					PublicKey: pubKeyBytes,
-					Algorithm: "ed25519",
-				})
-				server.stewardBinaryTrustStore = testTrust
-				server.testAutoApproveStewardBinaries = true
-				logger.Info("Test mode: steward binary trust store overridden with test key; auto-approve enabled (Issue #1948)")
-			}
-		}
-	}
+	server.seedTestAPIKeys()
 
 	// M-AUTH-1: Do NOT generate default API keys (security anti-pattern)
 	// API keys must be explicitly created by administrators
@@ -645,67 +498,293 @@ func New(
 	// so a fleet-wide steward list is no longer unsafe to dispatch against.
 	server.fleetQuery = fleet.NewMemoryQuery(&controllerServiceAdapter{svc: controllerService})
 
-	// Issue #1521: register save=deploy fanout callback so every successful SetConfiguration
-	// automatically distributes to all active stewards of the affected tenant.
-	if configService != nil && commandPublisher != nil {
-		configService.RegisterFanoutCallback(func(ctx context.Context, tenantID, cfgID string) {
-			cfg := &push.StewardConfiguration{
-				ConfigID:  cfgID,
-				TenantID:  tenantID,
-				Version:   fmt.Sprintf("%d", time.Now().UnixNano()),
-				AppliedAt: time.Now().UTC(),
-				Source:    "save-deploy",
-			}
-			// Fleet-wide read filtered to tenantID below; system-internal, since a
-			// save=deploy fanout has no caller of its own (Issue #4665).
-			allStewards := controllerService.ListFleetStewards(ctxkeys.WithSystem(ctx))
-			var tenantStewards []*service.StewardInfo
-			for _, st := range allStewards {
-				if st.TenantID == tenantID {
-					tenantStewards = append(tenantStewards, st)
-				}
-			}
-			// #nosec G118 -- save-deploy fan-out is an explicitly asynchronous,
-			// tenant-bounded callback and publisher operations enforce deadlines.
-			go func() {
-				result := push.Fanout(context.Background(), cfg, tenantStewards, commandPublisher, logger)
-				logger.Info("Save=deploy fan-out complete",
-					"tenant_id", logging.SanitizeLogValue(tenantID),
-					"cfg_id", logging.SanitizeLogValue(cfgID),
-					"succeeded", len(result.Succeeded),
-					"failed", len(result.Failed))
-			}()
-		})
-		logger.Info("Save=deploy fanout callback registered on config service")
-	}
+	registerSaveDeployFanout(configService, controllerService, commandPublisher, logger)
 
 	// Issue #4710: build the email notifier from config plus the stored credential.
 	server.initEmailNotifier(context.Background())
 
+	server.startExpirySweeps()
+
+	return server, nil
+}
+
+// newHealthDetailHandler builds the detailed-health handler (Issue #4208).
+// health.NewHandler's methods (detailed health, metrics, alerts, traces) existed
+// and were unit-tested but had no caller outside their own package. Constructed
+// only when all three dependencies are present — some lightweight test servers
+// intentionally omit them, in which case the /api/v1/health/... detail routes are
+// simply not registered (registerHealthDetailRoutes).
+func newHealthDetailHandler(collector *health.Collector, alerts health.AlertManager, traces health.TraceManager) *health.Handler {
+	if collector != nil && alerts != nil && traces != nil {
+		return health.NewHandler(collector, alerts, traces)
+	}
+	return nil
+}
+
+// expirySweepLeases holds the cluster-singleton lease claim of each expiry sweep.
+type expirySweepLeases struct {
+	tenantCrossing    lease.SingletonJob
+	credentialRequest lease.SingletonJob
+	cliLogin          lease.SingletonJob
+	cliPresence       lease.SingletonJob
+}
+
+// newExpirySweepLeases builds the lease claims for the expiry sweeps.
+//
+// ADR-031 Decision 4: cluster-singleton lease claims for the expiry
+// sweeps. NewBackgroundLoopLease is nil-receiver-safe — a nil
+// haManager (OSS single-node) yields a SingletonJob that always runs,
+// matching this sweep's pre-#3762 unconditional behavior.
+func newExpirySweepLeases(haManager *ha.Manager, logger logging.Logger) (expirySweepLeases, error) {
+	var leases expirySweepLeases
+	var err error
+	leases.tenantCrossing, err = haManager.NewBackgroundLoopLease("controller-tenant-crossing-expiry", logger)
+	if err != nil {
+		return leases, fmt.Errorf("failed to create tenant-crossing expiry sweep lease: %w", err)
+	}
+	leases.credentialRequest, err = haManager.NewBackgroundLoopLease("controller-credential-request-expiry", logger)
+	if err != nil {
+		return leases, fmt.Errorf("failed to construct credential-request expiry lease job: %w", err)
+	}
+	leases.cliLogin, err = haManager.NewBackgroundLoopLease("controller-cli-login-request-expiry", logger)
+	if err != nil {
+		return leases, fmt.Errorf("failed to construct cli-login expiry lease job: %w", err)
+	}
+	leases.cliPresence, err = haManager.NewBackgroundLoopLease("controller-cli-presence-request-expiry", logger)
+	if err != nil {
+		return leases, fmt.Errorf("failed to construct cli-presence expiry lease job: %w", err)
+	}
+	return leases, nil
+}
+
+// parseTrustedProxies parses the TrustedProxies CIDRs once at startup so
+// per-request extractSourceIP calls never parse strings (Issue #1695).
+func parseTrustedProxies(cfg *config.Config, logger logging.Logger) []net.IPNet {
+	var trustedProxies []net.IPNet
+	if cfg.Registration == nil {
+		return trustedProxies
+	}
+	for _, cidr := range cfg.Registration.TrustedProxies {
+		_, ipNet, parseErr := net.ParseCIDR(cidr)
+		if parseErr != nil {
+			logger.Warn("Invalid trusted_proxy CIDR, skipping",
+				"cidr", logging.SanitizeLogValue(cidr), "error", parseErr)
+			continue
+		}
+		trustedProxies = append(trustedProxies, *ipNet)
+	}
+	return trustedProxies
+}
+
+// newServerAuthDefense builds the three-tier auth defense system (Story #380).
+func newServerAuthDefense(server *Server, logger logging.Logger) *authdefense.AuthDefenseSystem {
+	return authdefense.New(
+		authdefense.DefaultConfig(),
+		logger,
+		// Issue #4573: key Tier-1 per-IP limiting on the trusted-proxy-aware,
+		// IPv6-/64-normalised client address shared with every per-IP throttle.
+		authdefense.WithIPExtractor(serverIPExtractor{s: server}),
+		authdefense.WithTenantExtractor(func(r *http.Request) string {
+			if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok {
+				return tid
+			}
+			return ""
+		}),
+	)
+}
+
+// loadAPIKeysAndScan loads the persisted API keys and runs the startup scans
+// over them and over stored accounts. Every failure is logged and construction
+// continues.
+func (s *Server) loadAPIKeysAndScan() {
+	// M-AUTH-1: Load existing API keys from secret store
+	if err := s.loadAPIKeysFromStore(); err != nil {
+		s.logger.Warn("Failed to load API keys from store", "error", logging.SanitizeLogValue(err.Error()))
+	}
+
+	// Issue #2226: Scan for API keys holding Tier-3 permissions so operators can revoke them.
+	if err := s.scanAPIKeysForPrivilegedAccess(context.Background()); err != nil {
+		s.logger.Warn("Startup scan for privileged API keys failed; continuing", "error", err)
+	}
+
+	// Issue #3574: Scan for accounts whose stored permissions contain IDs that
+	// isKnownPermission no longer recognizes (stale grants after the permission-ID
+	// rename in #3574). Those grants match nothing hasPermission will honor; this
+	// log makes the break observable to operators instead of silently denying requests.
+	if err := s.scanAccountsForStalePermissions(context.Background()); err != nil {
+		s.logger.Warn("Startup scan for accounts with stale permissions failed; continuing", "error", err)
+	}
+}
+
+// seedTestAPIKeys seeds test API keys only when explicitly requested via environment variable.
+// Never runs in production — must be set deliberately in test environments.
+func (s *Server) seedTestAPIKeys() {
+	if os.Getenv("CFGMS_SEED_TEST_API_KEYS") != "1" {
+		return
+	}
+	s.seedRegionAPIKeys()
+	s.seedInstallerAPIKey()
+	s.seedUpgradeTestAPIKey()
+	s.seedTestStewardPublisher()
+}
+
+func (s *Server) seedRegionAPIKeys() {
+	for _, envVar := range []string{"CFGMS_API_KEY_EAST", "CFGMS_API_KEY_CENTRAL", "CFGMS_API_KEY_WEST"} {
+		if keyVal := os.Getenv(envVar); keyVal != "" {
+			s.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+				Key: keyVal,
+				// The ha:read-* grants let test/integration/ha observe the
+				// cluster it just started. Every HA route is permission-gated
+				// (routes_ha.go), so without them the suite's polling helpers
+				// read 403 bodies as "no leader" and "empty node ID" and fail
+				// with assertion messages that never mention authorization.
+				//
+				// steward:read-dna and config:push cover the other endpoints
+				// that suite calls: GET /stewards/{id}/dna for the config hash
+				// and POST /config/push for configuration continuity.
+				Permissions: []string{
+					"steward:read", "steward:read-dna", "steward:auth-refresh",
+					"config:push",
+					"workflow:execute", "workflow:read",
+					"ha:read-status", "ha:read-cluster", "ha:read-leader", "ha:read-nodes",
+				},
+				// Steward lookups are tenant-scoped. These keys exist to observe
+				// the stewards started by the HA compose profile, which register
+				// with the seeded "integration_reusable" token and therefore land
+				// in test-tenant-integration (features/controller/server.Server,
+				// CFGMS_SEED_TEST_TOKENS block). Scoping the keys to "default"
+				// put them in a tenant containing no stewards at all, so
+				// GET /api/v1/stewards/{id} answered STEWARD_NOT_FOUND for a
+				// steward that had registered successfully seconds earlier.
+				TenantID: "test-tenant-integration",
+			}
+		}
+	}
+}
+
+// seedInstallerAPIKey seeds the Issue #1709 installer key. It is separate from the
+// EAST/CENTRAL/WEST keys because it requires different permissions and must upload under the root
+// tenant, whose artifacts the public download endpoint serves. The root tenant
+// is resolved by position (Issue #4667), as the download resolves it. When
+// none resolves the key is not seeded (Issue #4673).
+func (s *Server) seedInstallerAPIKey() {
+	keyVal := os.Getenv("CFGMS_API_KEY_INSTALLER")
+	if keyVal == "" {
+		return
+	}
+	installerTenant := s.rootTenantID(context.Background())
+	if installerTenant == "" {
+		s.logger.Warn("CFGMS_API_KEY_INSTALLER not seeded: no root tenant resolved")
+		return
+	}
+	s.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+		Key:         keyVal,
+		Permissions: []string{"installer:upload", "installer:read", "installer:delete", "steward:list"},
+		TenantID:    installerTenant,
+	}
+}
+
+// seedUpgradeTestAPIKey seeds the Issue #1948 upgrade test key — publishes + dispatches under the
+// fleet-child-a tenant so E2E upgrade tests target real fleet stewards without requiring a
+// manual API key creation step in every test run.
+func (s *Server) seedUpgradeTestAPIKey() {
+	keyVal := os.Getenv("CFGMS_API_KEY_UPGRADE_TEST")
+	if keyVal == "" {
+		return
+	}
+	s.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+		Key:         keyVal,
+		Permissions: []string{"installer:publish:steward", "installer:dispatch:steward", "installer:read"},
+		TenantID:    "fleet-root/fleet-child-a",
+	}
+}
+
+// seedTestStewardPublisher overrides the steward binary trust store with a test Ed25519 key
+// and enables auto-approval so published binaries can be dispatched immediately (Issue #1948).
+// Both are only active when CFGMS_SEED_TEST_API_KEYS=1 — never in production.
+func (s *Server) seedTestStewardPublisher() {
+	pubKeyBase64 := os.Getenv("CFGMS_TEST_STEWARD_PUBLISHER_KEY")
+	if pubKeyBase64 == "" {
+		return
+	}
+	pubKeyBytes, decErr := base64.StdEncoding.DecodeString(pubKeyBase64)
+	if decErr != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
+		return
+	}
+	testTrust := trust.NewInMemoryTrustStore()
+	_ = testTrust.AddPublisher(trust.PublisherIdentity{
+		Name:      "cfgms",
+		PublicKey: pubKeyBytes,
+		Algorithm: "ed25519",
+	})
+	s.stewardBinaryTrustStore = testTrust
+	s.testAutoApproveStewardBinaries = true
+	s.logger.Info("Test mode: steward binary trust store overridden with test key; auto-approve enabled (Issue #1948)")
+}
+
+// registerSaveDeployFanout registers the save=deploy fanout callback (Issue #1521): every
+// successful SetConfiguration automatically distributes to all active stewards of the
+// affected tenant. Registered only when both the config service and the command publisher
+// are present.
+func registerSaveDeployFanout(configService *service.ConfigurationServiceV2, controllerService *service.ControllerService, commandPublisher *commands.Publisher, logger logging.Logger) {
+	if configService == nil || commandPublisher == nil {
+		return
+	}
+	configService.RegisterFanoutCallback(func(ctx context.Context, tenantID, cfgID string) {
+		cfg := &push.StewardConfiguration{
+			ConfigID:  cfgID,
+			TenantID:  tenantID,
+			Version:   fmt.Sprintf("%d", time.Now().UnixNano()),
+			AppliedAt: time.Now().UTC(),
+			Source:    "save-deploy",
+		}
+		// Fleet-wide read filtered to tenantID below; system-internal, since a
+		// save=deploy fanout has no caller of its own (Issue #4665).
+		allStewards := controllerService.ListFleetStewards(ctxkeys.WithSystem(ctx))
+		var tenantStewards []*service.StewardInfo
+		for _, st := range allStewards {
+			if st.TenantID == tenantID {
+				tenantStewards = append(tenantStewards, st)
+			}
+		}
+		// #nosec G118 -- save-deploy fan-out is an explicitly asynchronous,
+		// tenant-bounded callback and publisher operations enforce deadlines.
+		go func() {
+			result := push.Fanout(context.Background(), cfg, tenantStewards, commandPublisher, logger)
+			logger.Info("Save=deploy fan-out complete",
+				"tenant_id", logging.SanitizeLogValue(tenantID),
+				"cfg_id", logging.SanitizeLogValue(cfgID),
+				"succeeded", len(result.Succeeded),
+				"failed", len(result.Failed))
+		}()
+	})
+	logger.Info("Save=deploy fanout callback registered on config service")
+}
+
+// startExpirySweeps starts the background goroutines New owns.
+func (s *Server) startExpirySweeps() {
 	// Start background cleanup for expired API keys
-	server.startAPIKeyCleanup()
+	s.startAPIKeyCleanup()
 
 	// Issue #3717: background sweep for expired enrolment tokens and pending
 	// credential requests — reaped on a timer, not only lazily on read.
-	server.startCredentialRequestSweep()
+	s.startCredentialRequestSweep()
 
 	// Issue #4874: records the expired crossing meta-log entry once per crossing.
-	server.startTenantCrossingExpirySweep()
+	s.startTenantCrossingExpirySweep()
 
 	// Issue #3721: background sweep for expired cli-login requests — reaped on a
 	// timer, not only lazily on read, so an "expiry" audit event fires even when
 	// nobody is actively polling collect.
-	server.startCliLoginRequestSweep()
+	s.startCliLoginRequestSweep()
 
 	// Issue #4287: background sweep for expired cli-presence requests, mirroring the
 	// cli-login sweep above.
-	server.startCliPresenceRequestSweep()
+	s.startCliPresenceRequestSweep()
 
 	// Issue #4572: background sweep for expired in-memory WebAuthn ceremony and
 	// throttle entries, so an abandoned ceremony does not stay resident forever.
-	server.startWebAuthnCeremonySweep()
-
-	return server, nil
+	s.startWebAuthnCeremonySweep()
 }
 
 // controllerServiceAdapter adapts *service.ControllerService to fleet.StewardProvider.
@@ -1281,247 +1360,238 @@ func (s *Server) validatePublicAPITLSConfig(tlsConfig *tls.Config) error {
 // Close gracefully stops all background goroutines owned by this Server and
 // shuts down the HTTP listener. It is safe to call more than once (idempotent).
 func (s *Server) Close(ctx context.Context) error {
-	var firstErr error
-	s.closeOnce.Do(func() {
-		// Signal the cleanup goroutine to exit — do this before acquiring s.mu
-		// to avoid deadlock: cleanupExpiredAPIKeys also holds s.mu.
-		close(s.stopCleanup)
-		select {
-		case <-s.cleanupDone:
-		case <-ctx.Done():
-			firstErr = fmt.Errorf("api server close: timed out waiting for cleanup goroutine: %w", ctx.Err())
-		}
+	errs := &closeErrors{}
+	s.closeOnce.Do(func() { s.teardown(ctx, errs) })
+	s.closeListeners()
+	return errs.first
+}
 
-		// Issue #3717: signal the credential-request expiry sweep to exit alongside
-		// the API-key cleanup goroutine. Guarded by nil checks (unlike stopCleanup
-		// above) because several tests build a *Server literal directly without
-		// going through New(), and startCredentialRequestSweep — unlike
-		// startAPIKeyCleanup — is never separately special-cased by those helpers.
-		if s.stopCredentialRequestSweep != nil {
-			close(s.stopCredentialRequestSweep)
-			select {
-			case <-s.credentialRequestSweepDone:
-			case <-ctx.Done():
-				if firstErr == nil {
-					firstErr = fmt.Errorf("api server close: timed out waiting for credential-request sweep goroutine: %w", ctx.Err())
-				}
-			}
-		}
+// closeErrors keeps the first error teardown hit; later failures are dropped.
+type closeErrors struct {
+	first error
+}
 
-		// Issue #4874: stop the tenant-crossing expiry sweep. Nil-guarded for tests that
-		// build a *Server literal without New().
-		if s.stopTenantCrossingExpirySweep != nil {
-			close(s.stopTenantCrossingExpirySweep)
-			select {
-			case <-s.tenantCrossingExpirySweepDone:
-			case <-ctx.Done():
-				if firstErr == nil {
-					firstErr = fmt.Errorf("api server close: timed out waiting for tenant-crossing expiry sweep goroutine: %w", ctx.Err())
-				}
-			}
-		}
+func (e *closeErrors) record(err error) {
+	if err != nil && e.first == nil {
+		e.first = err
+	}
+}
 
-		// Issue #3721: signal the cli-login expiry sweep to exit alongside the
-		// credential-request sweep. Guarded by a nil check for the same reason —
-		// several tests build a *Server literal directly without going through New().
-		if s.stopCliLoginSweep != nil {
-			close(s.stopCliLoginSweep)
-			select {
-			case <-s.cliLoginSweepDone:
-			case <-ctx.Done():
-				if firstErr == nil {
-					firstErr = fmt.Errorf("api server close: timed out waiting for cli-login sweep goroutine: %w", ctx.Err())
-				}
-			}
-		}
+// teardown is the once-guarded body of Close: it stops the goroutines, caches and
+// stores this Server owns, then shuts the servers down.
+func (s *Server) teardown(ctx context.Context, errs *closeErrors) {
+	s.stopExpirySweeps(ctx, errs)
 
-		// Issue #4287: signal the cli-presence expiry sweep to exit alongside the
-		// cli-login sweep. Guarded by a nil check for the same reason — several tests
-		// build a *Server literal directly without going through New().
-		if s.stopCliPresenceSweep != nil {
-			close(s.stopCliPresenceSweep)
-			select {
-			case <-s.cliPresenceSweepDone:
-			case <-ctx.Done():
-				if firstErr == nil {
-					firstErr = fmt.Errorf("api server close: timed out waiting for cli-presence sweep goroutine: %w", ctx.Err())
-				}
-			}
-		}
+	// Issue #4713: break-glass announcements write a follow-up audit entry, so
+	// they finish before the audit manager stops. Each is bounded by
+	// tenantCrossingNotifyTimeout.
+	errs.record(waitGroupOrTimeout(ctx, "break-glass notifications", s.crossingNotifyWG.Wait))
 
-		// Issue #4572: signal the WebAuthn ceremony expiry sweep to exit. Guarded by a
-		// nil check for the same reason — several tests build a *Server literal directly
-		// without going through New().
-		if s.stopWebAuthnCeremonySweep != nil {
-			close(s.stopWebAuthnCeremonySweep)
-			select {
-			case <-s.webAuthnCeremonySweepDone:
-			case <-ctx.Done():
-				if firstErr == nil {
-					firstErr = fmt.Errorf("api server close: timed out waiting for WebAuthn ceremony sweep goroutine: %w", ctx.Err())
-				}
-			}
-		}
+	s.stopAuditAndServices(ctx, errs)
 
-		// Issue #4713: break-glass announcements write a follow-up audit entry, so
-		// they finish before the audit manager stops. Each is bounded by
-		// tenantCrossingNotifyTimeout.
-		notifyDone := make(chan struct{})
-		go func() {
-			s.crossingNotifyWG.Wait()
-			close(notifyDone)
-		}()
-		select {
-		case <-notifyDone:
-		case <-ctx.Done():
-			if firstErr == nil {
-				firstErr = fmt.Errorf("api server close: timed out waiting for break-glass notifications: %w", ctx.Err())
-			}
-		}
+	// Issue #3715: wait for any in-flight cert-binding last-used persistence
+	// goroutines (spawned by recordCertBindingUse) to finish before secretStore
+	// is closed below — otherwise a goroutine can still be writing to the store
+	// after Close() returns, racing whatever the caller does next (e.g. a test's
+	// t.TempDir() cleanup deleting the directory out from under an in-flight write).
+	errs.record(waitGroupOrTimeout(ctx, "cert-binding last-used persistence", func() {
+		s.certBindingLastUsedWG.Wait()
+		// Issue #4574: detached API-key index scans read the same store.
+		s.apiKeyIndexWG.Wait()
+	}))
 
-		// Stop audit manager before closing the HTTP server so that any
-		// in-flight audit writes can still reach storage.
-		if s.auditManager != nil {
-			if err := s.auditManager.Stop(ctx); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-		// Stop the execution queue, which also stops its EphemeralKeyManager goroutine.
-		if s.runExecutionQueue != nil {
-			s.runExecutionQueue.Stop()
-		}
+	s.stopAuthDefenseAndSecretStore(ctx, errs)
+	s.shutdownHTTPServers(ctx, errs)
+	s.stopDeliveryServer(ctx, errs)
+}
 
-		// Stop the config service's router cache goroutine (configrouting source cache).
-		if s.configService != nil {
-			s.configService.Close()
-		}
+// awaitDone waits for done, or for ctx to expire, in which case it returns the
+// timeout error for what was being waited on.
+func awaitDone(ctx context.Context, what string, done <-chan struct{}) error {
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("api server close: timed out waiting for %s: %w", what, ctx.Err())
+	}
+}
 
-		// Issue #3715: wait for any in-flight cert-binding last-used persistence
-		// goroutines (spawned by recordCertBindingUse) to finish before secretStore
-		// is closed below — otherwise a goroutine can still be writing to the store
-		// after Close() returns, racing whatever the caller does next (e.g. a test's
-		// t.TempDir() cleanup deleting the directory out from under an in-flight write).
-		certBindingDone := make(chan struct{})
-		go func() {
-			s.certBindingLastUsedWG.Wait()
-			// Issue #4574: detached API-key index scans read the same store.
-			s.apiKeyIndexWG.Wait()
-			close(certBindingDone)
-		}()
-		select {
-		case <-certBindingDone:
-		case <-ctx.Done():
-			if firstErr == nil {
-				firstErr = fmt.Errorf("api server close: timed out waiting for cert-binding last-used persistence: %w", ctx.Err())
-			}
-		}
+// waitGroupOrTimeout runs wait (a WaitGroup wait) and returns the timeout error if
+// ctx expires first. wait keeps running in the background in that case.
+func waitGroupOrTimeout(ctx context.Context, what string, wait func()) error {
+	done := make(chan struct{})
+	go func() {
+		wait()
+		close(done)
+	}()
+	return awaitDone(ctx, what, done)
+}
 
-		s.mu.Lock()
-		defer s.mu.Unlock()
+// stopExpirySweeps signals the cleanup goroutine and each expiry sweep to exit and
+// waits for it.
+func (s *Server) stopExpirySweeps(ctx context.Context, errs *closeErrors) {
+	// Signal the cleanup goroutine to exit — do this before acquiring s.mu
+	// to avoid deadlock: cleanupExpiredAPIKeys also holds s.mu.
+	close(s.stopCleanup)
+	errs.record(awaitDone(ctx, "cleanup goroutine", s.cleanupDone))
 
-		// authDefense.Stop() and secretStore.Close() both call cache.Close() →
-		// c.cleanupDone.Wait() with no built-in timeout. On Windows, slower goroutine
-		// scheduling can cause them to block well past ctx's deadline. Run them in a
-		// single goroutine so Close() always honours the caller's context.
-		authDef := s.authDefense
-		secStore := s.secretStore
-		cacheDone := make(chan error, 1)
-		go func() {
-			// Story #380: Stop auth defense system
-			if authDef != nil {
-				authDef.Stop()
-			}
-			// M-AUTH-1: Close secret store to stop its internal cache cleanup goroutine.
-			var storeErr error
-			if secStore != nil {
-				storeErr = secStore.Close()
-			}
-			cacheDone <- storeErr
-		}()
-		select {
-		case storeErr := <-cacheDone:
-			if storeErr != nil && firstErr == nil {
-				firstErr = storeErr
-			}
-		case <-ctx.Done():
-			if firstErr == nil {
-				firstErr = fmt.Errorf("api server close: timed out stopping auth defense and secret store: %w", ctx.Err())
-			}
-		}
-
-		if s.httpServer != nil {
-			if err := s.httpServer.Shutdown(ctx); err != nil && firstErr == nil {
-				s.logger.Error("Failed to shutdown HTTP server gracefully", "error", err)
-				firstErr = err
-			}
-		}
-		if s.metricsHTTPServer != nil {
-			if err := s.metricsHTTPServer.Shutdown(ctx); err != nil && firstErr == nil {
-				s.logger.Error("Failed to shutdown private metrics server gracefully", "error", err)
-				firstErr = err
-			}
-		}
-		if s.internalHTTPServer != nil {
-			if err := s.internalHTTPServer.Shutdown(ctx); err != nil && firstErr == nil {
-				s.logger.Error("Failed to shutdown private Raft server gracefully", "error", err)
-				firstErr = err
-			}
-		}
-		if s.deliveryGRPCServer != nil {
-			// grpc.Server has no context-aware Shutdown; bound GracefulStop by ctx
-			// the same way the auth-defense/secret-store teardown above does, so a
-			// slow-draining internal delivery RPC cannot hang Close indefinitely.
-			deliveryStopped := make(chan struct{})
-			go func() {
-				s.deliveryGRPCServer.GracefulStop()
-				close(deliveryStopped)
-			}()
-			select {
-			case <-deliveryStopped:
-			case <-ctx.Done():
-				// The hard Stop is deliberately NOT called synchronously here.
-				// grpc-go's stop() holds the server mutex while it waits for
-				// in-flight handlers, and GracefulStop is already inside that
-				// wait — so a synchronous Stop() blocks on that mutex for
-				// exactly as long as the RPC this fallback exists to abandon,
-				// turning the timeout into the indefinite hang it is meant to
-				// prevent. Firing it in the background still force-closes the
-				// connections in the cases where the drain is stuck on a
-				// lingering connection rather than a running handler (there
-				// the mutex is released across the wait), and Close stays
-				// bounded by ctx either way. The listener itself is already
-				// closed: GracefulStop closes listeners before it starts
-				// draining, so no port is held past this point.
-				go s.deliveryGRPCServer.Stop()
-				if firstErr == nil {
-					firstErr = fmt.Errorf("api server close: timed out stopping internal delivery server: %w", ctx.Err())
-				}
-			}
-		}
-
-	})
-
-	// Deliberately OUTSIDE closeOnce. The once above guards one-shot teardown of
-	// caches, stores and goroutines, but listeners are re-created by every Start.
-	// A Server that is stopped and started again therefore holds fresh listeners
-	// that a once-guarded Close could never reach, leaking the socket for the life
-	// of the process.
+	// The sweeps are guarded by nil checks (unlike stopCleanup above) because
+	// several tests build a *Server literal directly without going through New(),
+	// and the sweep starters — unlike startAPIKeyCleanup — are never separately
+	// special-cased by those helpers.
 	//
-	// Shutdown normally closes these already; it only closes listeners its server
-	// is tracking, and tracking starts inside Serve, which runs in a goroutine
-	// spawned just after bind. A Start followed promptly by a Close can outrun it.
-	//
-	// The public and Raft listeners take an OS-assigned port, so a leak there is
-	// invisible and the next Start just binds elsewhere. The metrics listener binds
-	// a FIXED port — ValidatePrivateListenerAddress rejects port 0 — so the same
-	// leak makes the next Start fail with "address already in use".
-	//
-	// Closing an already-closed listener is a harmless no-op error.
-	//
-	// Guarded by s.mu because Start writes these fields under the same lock. The
-	// once-body above releases s.mu via defer before returning, and on a second
-	// Close it never runs at all, so acquiring here cannot deadlock.
+	// Issue #3717: credential-request sweep. Issue #4874: tenant-crossing expiry
+	// sweep. Issue #3721: cli-login sweep. Issue #4287: cli-presence sweep.
+	// Issue #4572: WebAuthn ceremony sweep.
+	sweeps := []struct {
+		stop chan struct{}
+		done chan struct{}
+		what string
+	}{
+		{s.stopCredentialRequestSweep, s.credentialRequestSweepDone, "credential-request sweep goroutine"},
+		{s.stopTenantCrossingExpirySweep, s.tenantCrossingExpirySweepDone, "tenant-crossing expiry sweep goroutine"},
+		{s.stopCliLoginSweep, s.cliLoginSweepDone, "cli-login sweep goroutine"},
+		{s.stopCliPresenceSweep, s.cliPresenceSweepDone, "cli-presence sweep goroutine"},
+		{s.stopWebAuthnCeremonySweep, s.webAuthnCeremonySweepDone, "WebAuthn ceremony sweep goroutine"},
+	}
+	for _, sweep := range sweeps {
+		if sweep.stop != nil {
+			close(sweep.stop)
+			errs.record(awaitDone(ctx, sweep.what, sweep.done))
+		}
+	}
+}
+
+// stopAuditAndServices stops the audit manager, the execution queue and the config
+// service's router cache.
+func (s *Server) stopAuditAndServices(ctx context.Context, errs *closeErrors) {
+	// Stop audit manager before closing the HTTP server so that any
+	// in-flight audit writes can still reach storage.
+	if s.auditManager != nil {
+		errs.record(s.auditManager.Stop(ctx))
+	}
+
+	// Stop the execution queue, which also stops its EphemeralKeyManager goroutine.
+	if s.runExecutionQueue != nil {
+		s.runExecutionQueue.Stop()
+	}
+
+	// Stop the config service's router cache goroutine (configrouting source cache).
+	if s.configService != nil {
+		s.configService.Close()
+	}
+}
+
+// stopAuthDefenseAndSecretStore stops the auth defense system and closes the secret
+// store, bounded by ctx. The caller holds s.mu.
+func (s *Server) stopAuthDefenseAndSecretStore(ctx context.Context, errs *closeErrors) {
+	// authDefense.Stop() and secretStore.Close() both call cache.Close() →
+	// c.cleanupDone.Wait() with no built-in timeout. On Windows, slower goroutine
+	// scheduling can cause them to block well past ctx's deadline. Run them in a
+	// single goroutine so Close() always honours the caller's context.
+	authDef := s.authDefense
+	secStore := s.secretStore
+	cacheDone := make(chan error, 1)
+	go func() {
+		// Story #380: Stop auth defense system
+		if authDef != nil {
+			authDef.Stop()
+		}
+		// M-AUTH-1: Close secret store to stop its internal cache cleanup goroutine.
+		var storeErr error
+		if secStore != nil {
+			storeErr = secStore.Close()
+		}
+		cacheDone <- storeErr
+	}()
+	select {
+	case storeErr := <-cacheDone:
+		errs.record(storeErr)
+	case <-ctx.Done():
+		errs.record(fmt.Errorf("api server close: timed out stopping auth defense and secret store: %w", ctx.Err()))
+	}
+}
+
+// shutdownHTTPServers gracefully shuts down the public API, the private metrics and
+// the private Raft servers. The caller holds s.mu.
+func (s *Server) shutdownHTTPServers(ctx context.Context, errs *closeErrors) {
+	s.shutdownHTTPServer(ctx, errs, s.httpServer, "Failed to shutdown HTTP server gracefully")
+	s.shutdownHTTPServer(ctx, errs, s.metricsHTTPServer, "Failed to shutdown private metrics server gracefully")
+	s.shutdownHTTPServer(ctx, errs, s.internalHTTPServer, "Failed to shutdown private Raft server gracefully")
+}
+
+// shutdownHTTPServer shuts srv down. A failure is logged and kept only when it is the
+// first error teardown hit.
+func (s *Server) shutdownHTTPServer(ctx context.Context, errs *closeErrors, srv *http.Server, failureMsg string) {
+	if srv == nil {
+		return
+	}
+	if err := srv.Shutdown(ctx); err != nil && errs.first == nil {
+		s.logger.Error(failureMsg, "error", err)
+		errs.first = err
+	}
+}
+
+// stopDeliveryServer stops the internal delivery gRPC server. The caller holds s.mu.
+func (s *Server) stopDeliveryServer(ctx context.Context, errs *closeErrors) {
+	if s.deliveryGRPCServer == nil {
+		return
+	}
+	// grpc.Server has no context-aware Shutdown; bound GracefulStop by ctx
+	// the same way the auth-defense/secret-store teardown above does, so a
+	// slow-draining internal delivery RPC cannot hang Close indefinitely.
+	deliveryStopped := make(chan struct{})
+	go func() {
+		s.deliveryGRPCServer.GracefulStop()
+		close(deliveryStopped)
+	}()
+	select {
+	case <-deliveryStopped:
+	case <-ctx.Done():
+		// The hard Stop is deliberately NOT called synchronously here.
+		// grpc-go's stop() holds the server mutex while it waits for
+		// in-flight handlers, and GracefulStop is already inside that
+		// wait — so a synchronous Stop() blocks on that mutex for
+		// exactly as long as the RPC this fallback exists to abandon,
+		// turning the timeout into the indefinite hang it is meant to
+		// prevent. Firing it in the background still force-closes the
+		// connections in the cases where the drain is stuck on a
+		// lingering connection rather than a running handler (there
+		// the mutex is released across the wait), and Close stays
+		// bounded by ctx either way. The listener itself is already
+		// closed: GracefulStop closes listeners before it starts
+		// draining, so no port is held past this point.
+		go s.deliveryGRPCServer.Stop()
+		errs.record(fmt.Errorf("api server close: timed out stopping internal delivery server: %w", ctx.Err()))
+	}
+}
+
+// closeListeners closes the listeners Start created.
+//
+// Deliberately called OUTSIDE closeOnce. The once guards one-shot teardown of
+// caches, stores and goroutines, but listeners are re-created by every Start.
+// A Server that is stopped and started again therefore holds fresh listeners
+// that a once-guarded Close could never reach, leaking the socket for the life
+// of the process.
+//
+// Shutdown normally closes these already; it only closes listeners its server
+// is tracking, and tracking starts inside Serve, which runs in a goroutine
+// spawned just after bind. A Start followed promptly by a Close can outrun it.
+//
+// The public and Raft listeners take an OS-assigned port, so a leak there is
+// invisible and the next Start just binds elsewhere. The metrics listener binds
+// a FIXED port — ValidatePrivateListenerAddress rejects port 0 — so the same
+// leak makes the next Start fail with "address already in use".
+//
+// Closing an already-closed listener is a harmless no-op error.
+//
+// Guarded by s.mu because Start writes these fields under the same lock. The
+// once-body releases s.mu via defer before returning, and on a second
+// Close it never runs at all, so acquiring here cannot deadlock.
+func (s *Server) closeListeners() {
 	s.mu.Lock()
 	listeners := []net.Listener{s.publicTLSListener, s.metricsTLSListener, s.internalTLSListener}
 	s.publicTLSListener, s.metricsTLSListener, s.internalTLSListener = nil, nil, nil
@@ -1531,8 +1601,6 @@ func (s *Server) Close(ctx context.Context) error {
 			_ = l.Close()
 		}
 	}
-
-	return firstErr
 }
 
 // Stop gracefully shuts down the HTTP server. Prefer Close when a context is available.
