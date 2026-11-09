@@ -225,7 +225,7 @@ var ErrScriptStepNotRestricted = errors.New("script steps run only in restricted
 // step is refused here, because running library scripts from it would bypass the
 // run grant and the script-approval gate.
 func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variables map[string]interface{}) (*WorkflowExecution, error) {
-	return e.startWorkflow(ctx, workflow, variables, nil)
+	return e.startWorkflow(ctx, workflow, variables, nil, RestrictedOptions{})
 }
 
 // ExecuteRestrictedWorkflow starts a workflow as a restricted automation
@@ -233,13 +233,20 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 // library scripts under the run's guard reference and the run tenant (the tenant
 // in ctx). It refuses a run without a run id, grant id or authenticated tenant.
 func (e *Engine) ExecuteRestrictedWorkflow(ctx context.Context, workflow Workflow, variables map[string]interface{}, run RestrictedRun) (*WorkflowExecution, error) {
+	return e.ExecuteRestrictedWorkflowWithOptions(ctx, workflow, variables, run, RestrictedOptions{})
+}
+
+// ExecuteRestrictedWorkflowWithOptions is ExecuteRestrictedWorkflow with the
+// run's bounds and run guard. Every restricted run is bounded: a bound left unset
+// in opts takes its default. The guard, when set, runs before every step.
+func (e *Engine) ExecuteRestrictedWorkflowWithOptions(ctx context.Context, workflow Workflow, variables map[string]interface{}, run RestrictedRun, opts RestrictedOptions) (*WorkflowExecution, error) {
 	if run.RunID == "" || run.GrantID == "" {
 		return nil, errors.New("restricted execution needs a run id and a grant id")
 	}
 	if tenantID, _ := ctx.Value(ctxkeys.TenantID).(string); tenantID == "" {
 		return nil, errors.New("restricted execution needs an authenticated tenant")
 	}
-	return e.startWorkflow(ctx, workflow, variables, &run)
+	return e.startWorkflow(ctx, workflow, variables, &run, opts)
 }
 
 // containsScriptStep reports whether steps, or any step nested inside them,
@@ -276,7 +283,7 @@ func nestedSteps(step Step) []Step {
 	return nested
 }
 
-func (e *Engine) startWorkflow(ctx context.Context, workflow Workflow, variables map[string]interface{}, restricted *RestrictedRun) (*WorkflowExecution, error) {
+func (e *Engine) startWorkflow(ctx context.Context, workflow Workflow, variables map[string]interface{}, restricted *RestrictedRun, opts RestrictedOptions) (*WorkflowExecution, error) {
 	// A script step runs only in a restricted execution. Refuse before anything
 	// starts so nothing is queued; executeStep checks again for steps reached
 	// through a path this walk cannot see.
@@ -321,6 +328,10 @@ func (e *Engine) startWorkflow(ctx context.Context, workflow Workflow, variables
 		execCtx, cancel = context.WithCancel(ctx)
 	}
 	execCtx = withComposedWorkflowBudget(execCtx)
+
+	// A restricted run carries its bounds and guard in its context, so every step
+	// reaches them. The wall-time timer starts here and stops with the run.
+	execCtx, releaseRestricted := withRestrictedState(execCtx, cancel, restricted != nil, opts)
 
 	// Merge workflow variables with provided variables
 	mergedVars := make(map[string]interface{})
@@ -374,6 +385,7 @@ func (e *Engine) startWorkflow(ctx context.Context, workflow Workflow, variables
 	go func() {
 		defer e.background.Done()
 		defer stop()
+		defer releaseRestricted()
 		e.executeWorkflowAsync(execution, workflow)
 	}()
 
@@ -432,8 +444,7 @@ func (e *Engine) runWorkflowSteps(execution *WorkflowExecution, workflow Workflo
 	// Execute the root steps
 	err := e.executeSteps(execution.Context, steps, execution)
 
-	if isAwaitingApproval(err) {
-		e.suspendAtApprovalGate(execution, workflow)
+	if e.endEarly(execution, workflow, err) {
 		if onFinished != nil {
 			onFinished()
 		}
@@ -491,8 +502,25 @@ func (e *Engine) runWorkflowSteps(execution *WorkflowExecution, workflow Workflo
 	}
 }
 
+// endEarly ends the run without the failed/completed bookkeeping when it has
+// suspended at an approval gate, or when a restricted run was stopped by its
+// guard or a bound (which ends with the recorded reason even when a try block or
+// an error policy swallowed the step error). It reports whether it did.
+func (e *Engine) endEarly(execution *WorkflowExecution, workflow Workflow, err error) bool {
+	if isAwaitingApproval(err) {
+		e.suspendAtApprovalGate(execution, workflow)
+		return true
+	}
+	return e.finishRestrictedStop(execution)
+}
+
 // executeSteps executes a list of steps based on their type
 func (e *Engine) executeSteps(ctx context.Context, steps []Step, execution *WorkflowExecution) error {
+	if execution.Restricted != nil {
+		if err := e.admitRestrictedIteration(ctx, steps); err != nil {
+			return err
+		}
+	}
 	return e.executeStepsWithRetry(ctx, steps, execution, true)
 }
 
@@ -734,9 +762,13 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 // run time, a fan-out worker) is refused here before anything runs.
 func (e *Engine) dispatchStep(ctx context.Context, step Step, execution *WorkflowExecution, key string) error {
 	if execution.Restricted != nil {
+		if err := e.admitRestrictedStep(ctx, step); err != nil {
+			return err
+		}
 		if err := e.checkRestrictedStep(ctx, step, execution.TenantID); err != nil {
 			return err
 		}
+		ctx = markRestrictedLoopBody(ctx, step)
 	}
 	run, ok := stepRunners[step.Type]
 	if !ok {
@@ -948,6 +980,13 @@ func (e *Engine) executeSequentialStep(ctx context.Context, step Step, execution
 
 // executeParallelStep executes child steps in parallel
 func (e *Engine) executeParallelStep(ctx context.Context, step Step, execution *WorkflowExecution) error {
+	if execution.Restricted != nil {
+		release, err := e.restrictedFanOut(ctx, step)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(step.Steps))
 
