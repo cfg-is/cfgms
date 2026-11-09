@@ -58,6 +58,58 @@ func (s *afterApprovalReadStore) GetConfig(ctx context.Context, key *cfgconfig.C
 	return entry, err
 }
 
+// runGuardHookStore is a real config store that runs a one-shot hook around the first
+// automation-grant read made under a run binding. The restricted run guard is the only
+// reader that does: the auth middleware re-reads the grant before the binding is put in
+// the context, so a hook armed ahead of the start request fires on the guard's first
+// call, which is the one that admits step 1. The hook is cleared before it runs, so
+// whatever it calls does not re-trigger it.
+type runGuardHookStore struct {
+	cfgconfig.ConfigStore
+	mu     sync.Mutex
+	before func()
+	after  func()
+}
+
+// armBefore sets a hook that runs before the guard's first grant read reaches the store.
+func (s *runGuardHookStore) armBefore(hook func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.before = hook
+}
+
+// armAfter sets a hook that runs once the guard's first grant read has returned from
+// the store, so the guard has already seen a valid grant.
+func (s *runGuardHookStore) armAfter(hook func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.after = hook
+}
+
+// take returns and clears the hook for a run-bound grant read, or nil for any other read.
+func (s *runGuardHookStore) take(ctx context.Context, key *cfgconfig.ConfigKey, which func(*runGuardHookStore) *func()) func() {
+	if key == nil || key.Namespace != automationGrantConfigNamespace || automationRunFromContext(ctx) == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	slot := which(s)
+	hook := *slot
+	*slot = nil
+	return hook
+}
+
+func (s *runGuardHookStore) GetConfig(ctx context.Context, key *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
+	if hook := s.take(ctx, key, func(s *runGuardHookStore) *func() { return &s.before }); hook != nil {
+		hook()
+	}
+	entry, err := s.ConfigStore.GetConfig(ctx, key)
+	if hook := s.take(ctx, key, func(s *runGuardHookStore) *func() { return &s.after }); hook != nil {
+		hook()
+	}
+	return entry, err
+}
+
 // workflowRunFixture is a real server with a real workflow engine and store, approval
 // store, script library, run queue and fleet. Workflows and scripts live in the MSP
 // tenant (msp-a, the grant tenant); the run tenant is client-1.
@@ -95,6 +147,19 @@ func newWorkflowRunFixture(t *testing.T) *workflowRunFixture {
 	t.Cleanup(f.engine.Shutdown)
 	f.srv.SetWorkflowHandler(NewWorkflowHandler(f.engine, f.trip, nil, logging.NewNoopLogger()))
 	return f
+}
+
+// hookRunGuard rebuilds the grant store over a hooking wrapper of the same config store
+// and secret store, so the grant and credential stay valid, and installs it. The run guard
+// derives its run and grant reads from the server's grant store, so both go through the
+// wrapper.
+func (f *workflowRunFixture) hookRunGuard(t *testing.T) *runGuardHookStore {
+	t.Helper()
+	hooks := &runGuardHookStore{ConfigStore: f.store.configs}
+	gs, err := NewAutomationGrantStore(hooks, f.store.secrets)
+	require.NoError(t, err)
+	f.srv.SetAutomationGrantStore(gs)
+	return hooks
 }
 
 func delayStep(name string, d time.Duration) workflow.Step {
@@ -490,38 +555,70 @@ func TestAutomationWorkflowRun_InputsAreValidatedAndBounded(t *testing.T) {
 	require.Len(t, f.executionsOfRunTenant(t), 1)
 }
 
+// automationStops are the two ways a run is stopped from outside the workflow.
+var automationStops = map[string]func(t *testing.T, f *workflowRunFixture, runID string){
+	"grant revoked": func(t *testing.T, f *workflowRunFixture, _ string) {
+		_, err := f.store.Revoke(context.Background(), runMSP, f.grant.ID, "admin")
+		require.NoError(t, err)
+	},
+	"run ended": func(t *testing.T, f *workflowRunFixture, runID string) {
+		rec := f.do(http.MethodPost, "/api/v1/automation/runs/"+runID+"/end", f.cred, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	},
+}
+
 // [REQUIRED TEST] Revoking the grant, or ending the run, mid-execution stops the
-// workflow at the next step.
+// workflow at the next step. The stop is issued from a hook that runs straight after the
+// run guard's step-1 grant read returned a valid grant, so step 1 is admitted and the
+// guard call for step 2 is the first to see the stop, with no dependence on timing.
 func TestAutomationWorkflowRun_RevocationOrEndStopsAtTheNextStep(t *testing.T) {
-	for name, stop := range map[string]func(t *testing.T, f *workflowRunFixture, runID string){
-		"grant revoked": func(t *testing.T, f *workflowRunFixture, _ string) {
-			_, err := f.store.Revoke(context.Background(), runMSP, f.grant.ID, "admin")
-			require.NoError(t, err)
-		},
-		"run ended": func(t *testing.T, f *workflowRunFixture, runID string) {
-			rec := f.do(http.MethodPost, "/api/v1/automation/runs/"+runID+"/end", f.cred, nil)
-			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		},
-	} {
+	for name, stop := range automationStops {
 		t.Run(name, func(t *testing.T) {
 			f := newWorkflowRunFixture(t)
 			f.stageApproved(t, versionedWorkflow(t, wfRunName, "1.0.0", nil,
-				delayStep("slow-step", 700*time.Millisecond), delayStep("after-stop", time.Millisecond)))
+				delayStep("slow-step", time.Millisecond), delayStep("after-stop", time.Millisecond)))
 			runID := f.beginOK(t, f.cred, runClient1, "ticket-1")
+			hooks := f.hookRunGuard(t)
+
+			stopped := false
+			hooks.armAfter(func() {
+				stopped = true
+				stop(t, f, runID)
+			})
 			resp := f.startOK(t, runID, wfRunName, "1.0.0", nil)
 
-			require.Eventually(t, func() bool {
-				ex, err := f.engine.GetExecution(context.Background(), runClient1, resp.ExecutionID)
-				return err == nil && ex.CurrentStep != ""
-			}, 5*time.Second, 10*time.Millisecond, "the first step is running")
-			stop(t, f, runID)
-
 			ex := f.waitStatus(t, resp.ExecutionID, finished)
+			assert.True(t, stopped, "the stop was issued after step 1's guard read")
 			assert.Equal(t, workflow.StatusCancelled, ex.Status)
 			assert.Contains(t, ex.Error, "run guard")
 			assert.Equal(t, []string{"slow-step"}, ranSteps(ex), "the step after the stop never ran")
 		})
 	}
+}
+
+// [REQUIRED TEST] The run guard is consulted before the first step too: a revocation that
+// lands before step 1's guard grant read runs no step at all. The hook fires before that
+// read, after the guard's run read, so it can only reach the guard through the grant; an
+// end would be seen by the guard's next call, not this one.
+func TestAutomationWorkflowRun_StopBeforeFirstStep(t *testing.T) {
+	f := newWorkflowRunFixture(t)
+	f.stageApproved(t, versionedWorkflow(t, wfRunName, "1.0.0", nil,
+		delayStep("slow-step", time.Millisecond), delayStep("after-stop", time.Millisecond)))
+	runID := f.beginOK(t, f.cred, runClient1, "ticket-1")
+	hooks := f.hookRunGuard(t)
+
+	stopped := false
+	hooks.armBefore(func() {
+		stopped = true
+		automationStops["grant revoked"](t, f, runID)
+	})
+	resp := f.startOK(t, runID, wfRunName, "1.0.0", nil)
+
+	ex := f.waitStatus(t, resp.ExecutionID, finished)
+	assert.True(t, stopped, "the revocation was issued before step 1's guard grant read")
+	assert.Equal(t, workflow.StatusCancelled, ex.Status)
+	assert.Contains(t, ex.Error, "run guard")
+	assert.Empty(t, ranSteps(ex), "no step ran")
 }
 
 // [REQUIRED TEST] An edit that lands between evaluation and engine start cannot run the
