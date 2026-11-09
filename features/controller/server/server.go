@@ -1487,6 +1487,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var lockdown *controllerFleet.Lockdown
 	var commandPublisher *commands.Publisher
 	var executionQueue *scriptmodule.ExecutionQueue
+	var scriptMonitor *scriptmodule.ExecutionMonitor
+	var scriptKeyManager *scriptmodule.EphemeralKeyManager
 	var scriptLibrary *scriptmodule.TenantScriptRepository
 	var jobDispatcher *dispatcher.Dispatcher
 	// ADR-031 Decision 3, Issue #3764: internal controller-to-controller delivery
@@ -1769,8 +1771,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// via OnHeartbeatReceived so that the queue is drained within one heartbeat
 		// cycle even before the next polling tick.
 		logger.Info("Initializing execution queue and job dispatcher...")
-		monitor := scriptmodule.NewExecutionMonitor()
-		keyManager := scriptmodule.NewEphemeralKeyManager()
+		scriptMonitor = scriptmodule.NewExecutionMonitor()
+		scriptKeyManager = scriptmodule.NewEphemeralKeyManager()
 		// The script library is stored per tenant; the queue resolves a library run
 		// from the run's tenant, and the API server serves the caller's tenant.
 		if cs := storageManager.GetConfigStore(); cs != nil {
@@ -1783,24 +1785,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Issue #4528: in cluster mode the queue is the shared database store, so
 		// the node holding a steward's session dispatches its work whichever node
 		// queued it. Single-node keeps the in-memory store (nil).
-		var queueStore scriptmodule.QueueStore
-		var isLocallyConnected func(string) bool
-		if cfg.HA.IsClusterMode() {
-			if shared := storageManager.GetExecutionQueueStore(); shared != nil {
-				queueStore = controllerrun.NewSharedQueueStore(shared)
-				registryForDispatch := connRegistry
-				isLocallyConnected = func(stewardID string) bool {
-					_, ok := registryForDispatch.Get(stewardID)
-					return ok
-				}
-				logger.Info("Execution queue: using the cluster-shared store")
-			} else {
-				logger.Warn("Execution queue: cluster mode without a shared queue store; exec reaches only runs accepted by this node")
-			}
-		}
+		queueStore, isLocallyConnected := clusterQueueStore(cfg, storageManager, connRegistry, logger)
 		executionQueue = scriptmodule.NewExecutionQueue(
-			monitor,
-			keyManager,
+			scriptMonitor,
+			scriptKeyManager,
 			0,                                 // maxAge — defaults to 24 h
 			cfg.ListenAddr,                    // controllerURL for ephemeral-key callbacks
 			queueStore,                        // store — nil defaults to InMemoryQueueStore
@@ -2628,7 +2616,13 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 	workflowRuntimeDir := filepath.Join(resolveDNADataRoot(cfg), "workflow-runtime")
 	workflowModuleRuntime := workflowruntime.NewModuleRuntime(workflowRuntimeDir)
-	workflowHandler, triggerMgr, workflowEngine, workflowModuleFactory := initializeWorkflowHandler(storageManager, moduleCache, workflowModuleRuntime, logger, httpServer.GetSecretStore(), configService)
+	workflowHandler, triggerMgr, workflowEngine, workflowModuleFactory := initializeWorkflowHandler(storageManager, moduleCache, workflowModuleRuntime, logger, httpServer.GetSecretStore(), configService, workflowScriptDeps{
+		Queue:      executionQueue,
+		Monitor:    scriptMonitor,
+		KeyManager: scriptKeyManager,
+		Library:    scriptLibrary,
+		Fleet:      controllerFleet.NewMemoryQuery(&serverFleetStewardProvider{svc: controllerService}),
+	})
 	// Issue #5562: converge the tenants' declared m365-entra-user/-group resources
 	// after each inventory pass, through the same tenant-scoped module factory the
 	// workflow engine uses.
@@ -3046,6 +3040,50 @@ func reportShareScope(tenantPath func(ctx context.Context, tenantID string) ([]s
 	}
 }
 
+// clusterQueueStore returns the execution queue store and the local-connection
+// check the dispatcher uses. In cluster mode with a shared queue store it is that
+// store, so the node holding a steward's session dispatches its work whichever
+// node queued it (Issue #4528); otherwise both are nil and the queue keeps its
+// in-memory store.
+func clusterQueueStore(cfg *config.Config, storageManager *interfaces.StorageManager, connRegistry registry.Registry, logger logging.Logger) (scriptmodule.QueueStore, func(string) bool) {
+	if !cfg.HA.IsClusterMode() {
+		return nil, nil
+	}
+	shared := storageManager.GetExecutionQueueStore()
+	if shared == nil {
+		logger.Warn("Execution queue: cluster mode without a shared queue store; exec reaches only runs accepted by this node")
+		return nil, nil
+	}
+	logger.Info("Execution queue: using the cluster-shared store")
+	isLocallyConnected := func(stewardID string) bool {
+		_, ok := connRegistry.Get(stewardID)
+		return ok
+	}
+	return controllerrun.NewSharedQueueStore(shared), isLocallyConnected
+}
+
+// workflowScriptDeps are the collaborators the workflow script step executor is
+// built from. Queue and Monitor are nil when the controller runs without a
+// transport; a script step then refuses to run rather than running inline.
+type workflowScriptDeps struct {
+	Queue      *scriptmodule.ExecutionQueue
+	Monitor    *scriptmodule.ExecutionMonitor
+	KeyManager *scriptmodule.EphemeralKeyManager
+	Library    *scriptmodule.TenantScriptRepository
+	Fleet      controllerFleet.FleetQuery
+}
+
+// newWorkflowScriptExecutor builds the script step executor from the queue,
+// library and fleet query the controller already built. No execution tracker is
+// set: the queue's tracker is wired where the script module's audit store is
+// (none in this composition root yet), and the queue records through it.
+func newWorkflowScriptExecutor(deps workflowScriptDeps) *workflownodes.ScriptStepExecutor {
+	executor := workflownodes.NewScriptStepExecutor(scriptRepoForQueue(deps.Library), deps.Monitor, deps.KeyManager)
+	executor.SetExecutionQueue(deps.Queue)
+	executor.SetFleetQuery(deps.Fleet)
+	return executor
+}
+
 // initializeWorkflowHandler creates the workflow engine, trigger manager, and API handler.
 // Returns nil, nil on failure so the controller starts without workflow support rather than failing.
 // secrets is the controller's central secret store (Issue #2374); it is threaded through
@@ -3058,6 +3096,7 @@ func initializeWorkflowHandler(
 	logger logging.Logger,
 	secrets secretsif.SecretStore,
 	configService *service.ConfigurationServiceV2,
+	scriptDeps workflowScriptDeps,
 ) (*api.WorkflowHandler, *workflowtrigger.TriggerManagerImpl, *workflow.Engine, workflow.TenantModuleLoader) {
 	// Workflow module factory: looks up controller-kind module bundles by
 	// name in the controller's module cache (#1883) and fork/execs them as
@@ -3085,6 +3124,14 @@ func initializeWorkflowHandler(
 	if executionStore := storageManager.GetWorkflowExecutionStore(); executionStore != nil {
 		engineOpts = append(engineOpts, workflow.WithExecutionStore(executionStore))
 	}
+	// The script step queues library scripts through the execution queue. The
+	// executor is always built and always passed, so a script step reaches the
+	// engine's own fail-closed refusals (no approver, no queue) rather than "no
+	// executor". No approver is set here: the approver adapter over the content
+	// approval evaluator is wired by its own story, until which a script step
+	// refuses to run.
+	scriptExecutor := newWorkflowScriptExecutor(scriptDeps)
+	engineOpts = append(engineOpts, workflow.WithScriptStepExecutor(scriptExecutor))
 	workflowEngine := workflow.NewEngine(moduleFactory, logger, secrets, nil, nil, setHARoleExecutor, moveResourceToClusterExecutor, engineOpts...)
 	// Composed workflows (nested steps, error workflows, components) resolve by
 	// name from the executing tenant's workflow store (Issue #4638).

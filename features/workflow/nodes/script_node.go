@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
@@ -111,6 +113,15 @@ type ScriptNode struct {
 	tenantID         string
 	executionQueue   *script.ExecutionQueue
 	executionTracker script.ExecutionTracker
+
+	// restricted is non-nil for a script step of a restricted automation
+	// execution, set by the engine through the step executor. A restricted node
+	// takes only the queue path, runs only a script its approver approved, and
+	// refuses every form of script a grant must not reach (see executeRestricted).
+	restricted *workflow.RestrictedRun
+	approver   workflow.ScriptApprover
+	// resultWait bounds how long a restricted step waits for the queued results.
+	resultWait time.Duration
 }
 
 // NewScriptNode creates a new script execution node
@@ -146,6 +157,22 @@ func NewScriptNode(id, name string, config *ScriptStepConfig, repository script.
 // resolved to a target is a configuration error, not an implicit grant of
 // in-process execution on the controller host (Issue #4338).
 func (n *ScriptNode) resolveDeviceIDs(ctx context.Context) ([]string, error) {
+	results, err := n.searchDevices(ctx)
+	if err != nil || len(results) == 0 {
+		// Zero-match from a filter: not an error — the caller logs a warning and
+		// returns success.
+		return nil, err
+	}
+	ids := make([]string, len(results))
+	for i, r := range results {
+		ids[i] = r.ID
+	}
+	return ids, nil
+}
+
+// searchDevices runs the fleet query for the configured targets, scoped to
+// n.tenantID, and returns the matching devices.
+func (n *ScriptNode) searchDevices(ctx context.Context) ([]fleet.StewardResult, error) {
 	switch {
 	case len(n.config.Devices) > 0:
 		if err := n.requireTenantAndFleet(); err != nil {
@@ -155,11 +182,7 @@ func (n *ScriptNode) resolveDeviceIDs(ctx context.Context) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("fleet query failed: %w", err)
 		}
-		ids := make([]string, len(results))
-		for i, r := range results {
-			ids[i] = r.ID
-		}
-		return ids, nil
+		return results, nil
 
 	case n.config.DeviceFilter != nil:
 		if err := n.requireTenantAndFleet(); err != nil {
@@ -178,15 +201,7 @@ func (n *ScriptNode) resolveDeviceIDs(ctx context.Context) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("fleet query failed: %w", err)
 		}
-		if len(results) == 0 {
-			// Zero-match: not an error — caller logs warning and returns success.
-			return nil, nil
-		}
-		ids := make([]string, len(results))
-		for i, r := range results {
-			ids[i] = r.ID
-		}
-		return ids, nil
+		return results, nil
 
 	default:
 		return nil, fmt.Errorf("no devices or device_filter configured; refusing to execute with no resolvable target")
@@ -221,6 +236,10 @@ func (n *ScriptNode) SetTenantID(tenantID string) {
 
 // Execute implements workflow.Node interface
 func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (workflow.NodeOutput, error) {
+	if n.restricted != nil {
+		return n.executeRestricted(ctx, input)
+	}
+
 	// Resolve device IDs — re-evaluated on each Execute for recurring workflows.
 	deviceIDs, err := n.resolveDeviceIDs(ctx)
 	if err != nil {
@@ -242,78 +261,8 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 	}
 
 	// Queue path: enqueue each device; content resolution deferred to dispatch time.
-	// StartExecution is called per device so each queue entry has a unique ExecutionID
-	// (the queue store uses ExecutionID as the map key).
 	if n.executionQueue != nil {
-		// Build shared metadata once — the store deep-copies it on enqueue.
-		queueMeta := make(map[string]interface{})
-		// The library is stored per tenant: the dispatcher resolves the run's script
-		// from the node's authenticated tenant, never from workflow input.
-		queueMeta["tenant_id"] = n.tenantID
-		if runID, ok := input.Context["workflow_run_id"]; ok {
-			queueMeta["workflow_run_id"] = runID
-		}
-		if wfName, ok := input.Context["workflow_name"]; ok {
-			queueMeta["workflow_name"] = wfName
-		}
-		if len(n.config.SecretBindings) > 0 {
-			bindingsJSON, err := json.Marshal(n.config.SecretBindings)
-			if err != nil {
-				return workflow.NodeOutput{
-					Success: false,
-					Error:   fmt.Sprintf("failed to encode secret bindings: %v", err),
-				}, err
-			}
-			queueMeta["secret_bindings"] = string(bindingsJSON)
-		}
-
-		var firstExecutionID string
-		for _, deviceID := range deviceIDs {
-			// Per-device execution so each queue entry gets a unique ExecutionID.
-			execution, err := n.monitor.StartExecution(ctx, n.config.ScriptID, n.Name, "", []string{deviceID})
-			if err != nil {
-				return workflow.NodeOutput{
-					Success: false,
-					Error:   fmt.Sprintf("failed to start execution monitoring: %v", err),
-				}, err
-			}
-			if firstExecutionID == "" {
-				firstExecutionID = execution.ID
-			}
-
-			qe := &script.QueuedExecution{
-				ExecutionID:      execution.ID,
-				ScriptRef:        n.config.ScriptID,
-				ScriptVersion:    n.config.ScriptVersion,
-				Shell:            n.config.Shell,
-				Parameters:       n.config.Parameters,
-				Timeout:          n.config.Timeout,
-				GenerateAPIKey:   n.config.GenerateAPIKey,
-				APIKeyTTL:        n.config.APIKeyTTL,
-				ExecutionContext: n.config.ExecutionContext,
-				Metadata:         queueMeta,
-			}
-			if err := n.executionQueue.QueueExecution(deviceID, qe); err != nil {
-				if err == script.ErrDuplicateExecution {
-					// Dedup: identical script+device+params already queued.
-					// Cancel the orphaned monitor entry to prevent leaks.
-					_ = n.monitor.CancelExecution(execution.ID)
-					continue
-				}
-				return workflow.NodeOutput{
-					Success: false,
-					Error:   fmt.Sprintf("failed to queue execution for device %s: %v", deviceID, err),
-				}, err
-			}
-		}
-
-		return workflow.NodeOutput{
-			Success: true,
-			Data: map[string]interface{}{
-				"execution_id": firstExecutionID,
-				"queued":       len(deviceIDs),
-			},
-		}, nil
+		return n.executeQueued(ctx, input, deviceIDs)
 	}
 
 	// Inline execution path (no queue configured): resolve content and execute immediately.
@@ -504,6 +453,87 @@ ExecutionComplete:
 	}, nil
 }
 
+// executeQueued enqueues each device. StartExecution is called per device so
+// each queue entry has a unique ExecutionID (the queue store uses ExecutionID as
+// the map key).
+func (n *ScriptNode) executeQueued(ctx context.Context, input workflow.NodeInput, deviceIDs []string) (workflow.NodeOutput, error) {
+	queueMeta, err := n.queueMetadata(input)
+	if err != nil {
+		return workflow.NodeOutput{Success: false, Error: err.Error()}, err
+	}
+
+	var firstExecutionID string
+	for _, deviceID := range deviceIDs {
+		// Per-device execution so each queue entry gets a unique ExecutionID.
+		execution, err := n.monitor.StartExecution(ctx, n.config.ScriptID, n.Name, "", []string{deviceID})
+		if err != nil {
+			return workflow.NodeOutput{
+				Success: false,
+				Error:   fmt.Sprintf("failed to start execution monitoring: %v", err),
+			}, err
+		}
+		if firstExecutionID == "" {
+			firstExecutionID = execution.ID
+		}
+
+		qe := &script.QueuedExecution{
+			ExecutionID:      execution.ID,
+			ScriptRef:        n.config.ScriptID,
+			ScriptVersion:    n.config.ScriptVersion,
+			Shell:            n.config.Shell,
+			Parameters:       n.config.Parameters,
+			Timeout:          n.config.Timeout,
+			GenerateAPIKey:   n.config.GenerateAPIKey,
+			APIKeyTTL:        n.config.APIKeyTTL,
+			ExecutionContext: n.config.ExecutionContext,
+			Metadata:         queueMeta,
+		}
+		if err := n.executionQueue.QueueExecution(deviceID, qe); err != nil {
+			if err == script.ErrDuplicateExecution {
+				// Dedup: identical script+device+params already queued.
+				// Cancel the orphaned monitor entry to prevent leaks.
+				_ = n.monitor.CancelExecution(execution.ID)
+				continue
+			}
+			return workflow.NodeOutput{
+				Success: false,
+				Error:   fmt.Sprintf("failed to queue execution for device %s: %v", deviceID, err),
+			}, err
+		}
+	}
+
+	return workflow.NodeOutput{
+		Success: true,
+		Data: map[string]interface{}{
+			"execution_id": firstExecutionID,
+			"queued":       len(deviceIDs),
+		},
+	}, nil
+}
+
+// queueMetadata builds the metadata shared by every queue entry of the step; the
+// store deep-copies it on enqueue.
+func (n *ScriptNode) queueMetadata(input workflow.NodeInput) (map[string]interface{}, error) {
+	queueMeta := make(map[string]interface{})
+	// The library is stored per tenant: the dispatcher resolves the run's script
+	// from the node's authenticated tenant, never from workflow input.
+	queueMeta["tenant_id"] = n.tenantID
+	if runID, ok := input.Context["workflow_run_id"]; ok {
+		queueMeta["workflow_run_id"] = runID
+	}
+	if wfName, ok := input.Context["workflow_name"]; ok {
+		queueMeta["workflow_name"] = wfName
+	}
+	if len(n.config.SecretBindings) > 0 {
+		bindingsJSON, err := json.Marshal(n.config.SecretBindings)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode secret bindings: %w", err)
+		}
+		queueMeta["secret_bindings"] = string(bindingsJSON)
+	}
+	return queueMeta, nil
+}
+
 // SetDNAProvider sets the DNA provider for parameter injection
 func (n *ScriptNode) SetDNAProvider(provider script.DNAProvider) {
 	n.dnaProvider = provider
@@ -548,6 +578,483 @@ func (n *ScriptNode) SetExecutionTracker(t script.ExecutionTracker) {
 	}
 }
 
+// defaultRestrictedResultWait is how long a restricted script step waits for its
+// queued results, on top of the script's own timeout, before it fails. Entries
+// still queued then are cancelled, so nothing runs after the step has failed.
+const defaultRestrictedResultWait = 15 * time.Minute
+
+// restrictedResultPoll is how often a restricted step reads the execution monitor.
+const restrictedResultPoll = 100 * time.Millisecond
+
+// restrictedStepKeys are the only step.Config keys a restricted script step
+// accepts. Everything else is refused, so a key that selects an inline, path or
+// command form (or one added later) never reaches the queue by being ignored.
+var restrictedStepKeys = map[string]bool{
+	"script_id": true, "script_version": true, "parameters": true,
+	"devices": true, "device_filter": true, "timeout": true,
+	"shell": true, "execution_context": true, "capture_output": true,
+}
+
+// restrictedRefusedKeys name the forms a restricted step refuses, for a precise
+// error. A key in neither map is refused as unsupported.
+var restrictedRefusedKeys = map[string]string{
+	"inline_script": "an inline script", "secret_bindings": "secret bindings",
+	"generate_api_key": "an ephemeral API key", "api_key_ttl": "an ephemeral API key",
+	"script": "an inline script", "content": "an inline script",
+	"script_path": "a script path", "path": "a script path", "file": "a script path",
+	"script_file": "a script path", "command": "a command", "cmd": "a command",
+	"args": "a command", "argument_list": "a command",
+}
+
+// validateRestrictedStepConfig refuses a raw step.Config a restricted script step
+// must not run: any key outside restrictedStepKeys, and any parameter value that
+// is not a scalar. It runs on the raw map, before parseScriptStepConfig drops
+// keys it does not know.
+func validateRestrictedStepConfig(raw map[string]interface{}) error {
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if restrictedStepKeys[k] {
+			continue
+		}
+		if what, ok := restrictedRefusedKeys[k]; ok {
+			return fmt.Errorf("a restricted script step does not allow %s (%q)", what, k)
+		}
+		return fmt.Errorf("a restricted script step does not allow the key %q", k)
+	}
+	params, present := raw["parameters"]
+	if !present || params == nil {
+		return nil
+	}
+	m, ok := params.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("a restricted script step needs parameters as a mapping of names to literal values")
+	}
+	for name, v := range m {
+		switch v.(type) {
+		case string, bool, int, int32, int64, uint, uint32, uint64, float32, float64:
+		default:
+			return fmt.Errorf("parameter %q must be a literal value", name)
+		}
+	}
+	return nil
+}
+
+// isLiteralParamValue reports whether v carries no template or variable-reference
+// marker. A restricted step passes only literal values: an expression would be
+// evaluated by something other than the approved script's declared schema.
+func isLiteralParamValue(v string) bool {
+	return !strings.Contains(v, "{{") && !strings.Contains(v, "${")
+}
+
+// restrictedRun is one queued command of a restricted step.
+type restrictedRun struct{ deviceID, executionID string }
+
+func refuseStep(err error) (workflow.NodeOutput, error) {
+	return workflow.NodeOutput{Success: false, Error: err.Error()}, err
+}
+
+// executeRestricted runs the script step of a restricted automation execution.
+// Order matters: the cheap structural refusals first, then the approver, then the
+// parameters against the approved version's schema, then the devices, and only
+// then the queue. Every refusal happens with nothing queued.
+func (n *ScriptNode) executeRestricted(ctx context.Context, input workflow.NodeInput) (workflow.NodeOutput, error) {
+	vs, decision, err := n.authorizeRestricted(ctx)
+	if err != nil {
+		return refuseStep(err)
+	}
+	if err := n.checkRestrictedScript(vs); err != nil {
+		return refuseStep(err)
+	}
+	deviceIDs, err := n.resolveRestrictedDevices(ctx)
+	if err != nil {
+		return refuseStep(fmt.Errorf("failed to resolve device IDs: %w", err))
+	}
+	if len(deviceIDs) == 0 {
+		scriptNodeLogger.Warn("fleet filter matched no devices; skipping script dispatch", "node", n.Name)
+		return workflow.NodeOutput{
+			Success: true,
+			Data:    map[string]interface{}{"warning": "fleet filter matched no devices"},
+		}, nil
+	}
+	runs, deduped, err := n.queueRestricted(ctx, input, vs, decision, deviceIDs)
+	if err != nil {
+		return refuseStep(err)
+	}
+	return n.awaitRestricted(ctx, runs, deduped)
+}
+
+// checkRestrictedConfig refuses what a restricted step may not carry and what it
+// cannot run without. Each refusal fails closed.
+func (n *ScriptNode) checkRestrictedConfig() error {
+	if err := n.checkRestrictedForms(); err != nil {
+		return err
+	}
+	return n.checkRestrictedWiring()
+}
+
+// checkRestrictedForms refuses the forms a grant must not reach: no script id, no
+// pinned version, an inline script, secret bindings, an ephemeral API key.
+func (n *ScriptNode) checkRestrictedForms() error {
+	c := n.config
+	switch {
+	case c.ScriptID == "":
+		return fmt.Errorf("a restricted script step needs a script_id")
+	case c.ScriptVersion == "":
+		return fmt.Errorf("a restricted script step needs an explicit script_version; it never runs the latest")
+	case c.InlineScript != "":
+		return fmt.Errorf("a restricted script step does not allow an inline script")
+	case len(c.SecretBindings) > 0:
+		return fmt.Errorf("a restricted script step does not allow secret bindings")
+	case c.GenerateAPIKey || c.APIKeyTTL != 0:
+		return fmt.Errorf("a restricted script step does not allow an ephemeral API key")
+	}
+	return nil
+}
+
+// checkRestrictedWiring refuses a restricted step that lacks what it cannot run
+// without: the run's ids, an approver, the queue and a tenant-resolved library.
+func (n *ScriptNode) checkRestrictedWiring() error {
+	switch {
+	case n.restricted.RunID == "" || n.restricted.GrantID == "":
+		return fmt.Errorf("a restricted script step needs the run id and grant id of its run")
+	case n.approver == nil:
+		return fmt.Errorf("no script approver is configured; a restricted script step cannot run")
+	case n.executionQueue == nil || n.monitor == nil:
+		return fmt.Errorf("no execution queue is configured; a restricted script step runs only through the queue")
+	}
+	if _, ok := n.repository.(script.TenantScriptResolver); !ok {
+		return fmt.Errorf("no tenant-resolved script library is configured; a restricted script step cannot run")
+	}
+	return nil
+}
+
+// authorizeRestricted asks the approver about the pinned script and returns the
+// approved version with the decision whose pin the queue binds the command to.
+// Pending and denied decisions, an approver error and an incomplete decision all
+// fail the step; a pending decision is first handed to the pending recorder.
+func (n *ScriptNode) authorizeRestricted(ctx context.Context) (*script.VersionedScript, workflow.ScriptApprovalDecision, error) {
+	var d workflow.ScriptApprovalDecision
+	if err := n.checkRestrictedConfig(); err != nil {
+		return nil, d, err
+	}
+	id, version := n.config.ScriptID, n.config.ScriptVersion
+	d, err := n.approver.Approve(ctx, n.tenantID, n.restricted.Ceiling, id, version)
+	if err != nil {
+		scriptNodeLogger.Warn("script approval could not be decided",
+			"script_id", logging.SanitizeLogValue(id), "error", logging.SanitizeLogValue(err.Error()))
+		return nil, d, fmt.Errorf("script %q version %q could not be approved; nothing was queued", id, version)
+	}
+	if err := n.checkDecision(ctx, d); err != nil {
+		return nil, d, err
+	}
+	vs, err := n.readApproved(d)
+	return vs, d, err
+}
+
+// checkDecision accepts only an approved, complete decision. A pending one is
+// handed to the pending recorder first.
+func (n *ScriptNode) checkDecision(ctx context.Context, d workflow.ScriptApprovalDecision) error {
+	id, version := n.config.ScriptID, n.config.ScriptVersion
+	switch d.State {
+	case workflow.ScriptApprovalApproved:
+	case workflow.ScriptApprovalPending:
+		n.recordPending(ctx, d)
+		return fmt.Errorf("script %q version %q is pending approval; nothing was queued", id, version)
+	default:
+		return fmt.Errorf("script %q version %q is not approved; nothing was queued", id, version)
+	}
+	if d.OwnerTenant == "" || d.Version == "" || d.ApprovalHash == "" {
+		return fmt.Errorf("the script approver returned an incomplete decision for %q; nothing was queued", id)
+	}
+	return nil
+}
+
+// readApproved reads the approved version from the decision's owner tenant, to
+// check the step's parameters against its declared schema.
+func (n *ScriptNode) readApproved(d workflow.ScriptApprovalDecision) (*script.VersionedScript, error) {
+	vs, err := n.repository.(script.TenantScriptResolver).GetForTenant(d.OwnerTenant, n.config.ScriptID, d.Version)
+	if err != nil || vs == nil || vs.Metadata == nil {
+		return nil, fmt.Errorf("approved script %q version %q could not be read; nothing was queued", n.config.ScriptID, d.Version)
+	}
+	return vs, nil
+}
+
+// recordPending hands a pending decision to the approver's recorder, if it has
+// one. A failure is logged only: the step has already failed either way.
+func (n *ScriptNode) recordPending(ctx context.Context, d workflow.ScriptApprovalDecision) {
+	rec, ok := n.approver.(workflow.ScriptPendingRecorder)
+	if !ok {
+		return
+	}
+	if err := rec.RecordPending(ctx, n.tenantID, d); err != nil {
+		scriptNodeLogger.Warn("pending script approval could not be recorded",
+			"script_id", logging.SanitizeLogValue(n.config.ScriptID), "error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+// checkRestrictedScript checks the step's shell and parameters against the
+// approved version's declared schema: every parameter name must be declared, a
+// value must be a literal, and a value must be one of the declared AllowedValues.
+func (n *ScriptNode) checkRestrictedScript(vs *script.VersionedScript) error {
+	if sh := n.config.Shell; sh != "" && sh != vs.Metadata.Shell {
+		return fmt.Errorf("shell %q does not match the approved script's shell", sh)
+	}
+	declared := make(map[string]script.ScriptParameter, len(vs.Metadata.Parameters))
+	for _, p := range vs.Metadata.Parameters {
+		declared[p.Name] = p
+	}
+	names := make([]string, 0, len(n.config.Parameters))
+	for name := range n.config.Parameters {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		p, ok := declared[name]
+		if !ok {
+			return fmt.Errorf("parameter %q is not declared by the approved script", name)
+		}
+		value := n.config.Parameters[name]
+		if !isLiteralParamValue(value) {
+			return fmt.Errorf("parameter %q must be a literal value", name)
+		}
+		if len(p.AllowedValues) > 0 && !containsString(p.AllowedValues, value) {
+			return fmt.Errorf("the value of parameter %q is not one of its allowed values", name)
+		}
+	}
+	return nil
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// deviceInRunTenant reports whether a device's own tenant is exactly the run
+// tenant: a descendant, ancestor or sibling tenant does not pass. It is the same
+// rule as runTenantOnly in features/controller/api, which that package does not
+// export.
+func deviceInRunTenant(runTenant, deviceTenantID string) bool {
+	return runTenant != "" && deviceTenantID == runTenant
+}
+
+// resolveRestrictedDevices resolves the step's targets through the fleet query
+// and verifies every returned device against the run tenant. A device outside it,
+// a filter that names a tenant subtree, or an explicit device the fleet does not
+// return for the run tenant refuses the whole step; nothing is silently dropped.
+func (n *ScriptNode) resolveRestrictedDevices(ctx context.Context) ([]string, error) {
+	if f := n.config.DeviceFilter; f != nil && (f.TenantSubtree != "" || len(f.TenantSubtreeIDs) > 0) {
+		return nil, fmt.Errorf("device_filter selects a tenant subtree; a restricted script step runs only in the run tenant")
+	}
+	results, err := n.searchDevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(results))
+	found := make(map[string]bool, len(results))
+	for _, r := range results {
+		if !deviceInRunTenant(n.tenantID, r.TenantID) {
+			return nil, fmt.Errorf("device %q is not in the run tenant; refusing the whole step", r.ID)
+		}
+		if !found[r.ID] {
+			found[r.ID] = true
+			ids = append(ids, r.ID)
+		}
+	}
+	for _, requested := range n.config.Devices {
+		if !found[requested] {
+			return nil, fmt.Errorf("device %q is not in the run tenant; refusing the whole step", requested)
+		}
+	}
+	return ids, nil
+}
+
+// restrictedTimeout is the step's timeout, never above the approved script's own.
+func (n *ScriptNode) restrictedTimeout(vs *script.VersionedScript) time.Duration {
+	t := n.config.Timeout
+	if limit := vs.Metadata.Timeout; limit > 0 && (t == 0 || t > limit) {
+		return limit
+	}
+	return t
+}
+
+// restrictedQueuedExecution builds the queue entry for one device from the
+// approver's decision: the pin is the decision's owner tenant, resolved version
+// and approval hash, and the guard is the run's id and grant id. The shell comes
+// from the approved script, never from the step.
+func (n *ScriptNode) restrictedQueuedExecution(executionID string, vs *script.VersionedScript, d workflow.ScriptApprovalDecision, meta map[string]interface{}) *script.QueuedExecution {
+	qe := &script.QueuedExecution{
+		ExecutionID:      executionID,
+		ScriptRef:        n.config.ScriptID,
+		ScriptVersion:    d.Version,
+		Shell:            vs.Metadata.Shell,
+		Parameters:       n.config.Parameters,
+		Timeout:          n.restrictedTimeout(vs),
+		ExecutionContext: n.config.ExecutionContext,
+		Metadata:         meta,
+	}
+	return qe.WithPin(d.OwnerTenant, d.Version, d.ApprovalHash).WithGuard(n.restricted.RunID, n.restricted.GrantID)
+}
+
+// queueRestricted queues one pinned, guarded command per device. A failure
+// cancels what this step already queued, so a refused step leaves nothing behind.
+// A device whose identical command is already queued is returned in deduped.
+func (n *ScriptNode) queueRestricted(ctx context.Context, input workflow.NodeInput, vs *script.VersionedScript, d workflow.ScriptApprovalDecision, deviceIDs []string) (runs []restrictedRun, deduped []string, err error) {
+	// The library is resolved from the run's tenant, never from workflow input.
+	meta := map[string]interface{}{"tenant_id": n.tenantID}
+	if runID, ok := input.Context["workflow_run_id"]; ok {
+		meta["workflow_run_id"] = runID
+	}
+	if wfName, ok := input.Context["workflow_name"]; ok {
+		meta["workflow_name"] = wfName
+	}
+	for _, deviceID := range deviceIDs {
+		execution, startErr := n.monitor.StartExecution(ctx, n.config.ScriptID, n.Name, n.tenantID, []string{deviceID})
+		if startErr != nil {
+			n.cancelRestricted(runs)
+			return nil, nil, fmt.Errorf("failed to start execution monitoring: %w", startErr)
+		}
+		queueErr := n.executionQueue.QueueExecution(deviceID, n.restrictedQueuedExecution(execution.ID, vs, d, meta))
+		if queueErr == script.ErrDuplicateExecution {
+			// Identical script+device+params already queued: drop the orphaned
+			// monitor entry and do not wait on a run this step does not own.
+			_ = n.monitor.CancelExecution(execution.ID) //nolint:errcheck // the entry was just created
+			deduped = append(deduped, deviceID)
+			continue
+		}
+		if queueErr != nil {
+			_ = n.monitor.CancelExecution(execution.ID) //nolint:errcheck // the entry was just created
+			n.cancelRestricted(runs)
+			return nil, nil, fmt.Errorf("failed to queue execution for device %s: %w", deviceID, queueErr)
+		}
+		runs = append(runs, restrictedRun{deviceID: deviceID, executionID: execution.ID})
+	}
+	return runs, deduped, nil
+}
+
+// cancelRestricted cancels the step's commands that have not finished. A command
+// the steward already holds cannot be recalled; it stays guarded by the run.
+func (n *ScriptNode) cancelRestricted(runs []restrictedRun) {
+	for _, r := range runs {
+		_ = n.executionQueue.CancelExecution(r.deviceID, r.executionID) //nolint:errcheck // the entry may already be terminal
+	}
+}
+
+func terminalStatus(s script.ExecutionStatus) bool {
+	switch s {
+	case script.StatusCompleted, script.StatusFailed, script.StatusTimeout, script.StatusCancelled:
+		return true
+	}
+	return false
+}
+
+// collectRestricted reads each queued command's state from the execution monitor.
+// done is true when every command is terminal; failed counts those not completed.
+func (n *ScriptNode) collectRestricted(runs []restrictedRun) (results map[string]interface{}, done bool, failed int) {
+	results = make(map[string]interface{}, len(runs))
+	done = true
+	for _, r := range runs {
+		dev, err := n.monitor.GetDeviceExecution(r.executionID, r.deviceID)
+		if err != nil {
+			done = false
+			continue
+		}
+		if !terminalStatus(dev.Status) {
+			done = false
+			continue
+		}
+		entry := map[string]interface{}{"status": string(dev.Status), "stdout": dev.Stdout, "stderr": dev.Stderr, "execution_id": r.executionID}
+		if dev.Result != nil {
+			entry["exit_code"] = dev.Result.ExitCode
+		}
+		if dev.Error != "" {
+			entry["error"] = dev.Error
+		}
+		if dev.Status != script.StatusCompleted {
+			failed++
+		}
+		results[r.deviceID] = entry
+	}
+	return results, done, failed
+}
+
+// awaitRestricted waits for every queued command to reach a terminal state, so
+// the step's output carries each device's result for the steps after it. On a
+// cancelled context or a timeout it cancels what is still queued and fails.
+func (n *ScriptNode) awaitRestricted(ctx context.Context, runs []restrictedRun, deduped []string) (workflow.NodeOutput, error) {
+	wait := n.resultWait
+	if wait <= 0 {
+		wait = defaultRestrictedResultWait + n.config.Timeout
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	ticker := time.NewTicker(restrictedResultPoll)
+	defer ticker.Stop()
+
+	for {
+		results, done, failed := n.collectRestricted(runs)
+		if done {
+			return n.restrictedOutput(runs, deduped, results, failed)
+		}
+		select {
+		case <-ctx.Done():
+			n.cancelRestricted(runs)
+			return refuseStep(fmt.Errorf("script step cancelled while waiting for results: %w", ctx.Err()))
+		case <-timer.C:
+			n.cancelRestricted(runs)
+			return refuseStep(fmt.Errorf("timed out waiting for script results from %d device(s)", len(runs)))
+		case <-ticker.C:
+		}
+	}
+}
+
+// restrictedOutput builds the step output. A command that did not complete fails
+// the step with an error (the engine records a step as failed only on an error),
+// while the per-device results stay in the output.
+func (n *ScriptNode) restrictedOutput(runs []restrictedRun, deduped []string, results map[string]interface{}, failed int) (workflow.NodeOutput, error) {
+	data := map[string]interface{}{
+		"queued":  len(runs),
+		"results": results,
+	}
+	if len(runs) > 0 {
+		data["execution_id"] = runs[0].executionID
+	}
+	if len(deduped) > 0 {
+		data["deduplicated"] = deduped
+	}
+	if failed > 0 {
+		err := fmt.Errorf("script execution failed on %d of %d device(s)", failed, len(runs))
+		return workflow.NodeOutput{Success: false, Data: data, Error: err.Error()}, err
+	}
+	return workflow.NodeOutput{Success: true, Data: data}, nil
+}
+
+// SetRestricted marks the node as the script step of a restricted automation
+// execution bound to run. The engine sets it through the step executor, from the
+// execution and never from step.Config.
+func (n *ScriptNode) SetRestricted(run workflow.RestrictedRun) {
+	n.restricted = &run
+}
+
+// SetApprover sets the approver a restricted node asks before queueing. A
+// restricted node without one refuses to run.
+func (n *ScriptNode) SetApprover(a workflow.ScriptApprover) {
+	n.approver = a
+}
+
+// SetResultWaitTimeout overrides how long a restricted node waits for the queued
+// results; zero keeps defaultRestrictedResultWait plus the script's own timeout.
+func (n *ScriptNode) SetResultWaitTimeout(d time.Duration) {
+	n.resultWait = d
+}
+
 // ScriptStepExecutor executes script workflow steps
 type ScriptStepExecutor struct {
 	repository       script.ScriptRepository
@@ -559,6 +1066,8 @@ type ScriptStepExecutor struct {
 	fleetQuery       fleet.FleetQuery
 	executionQueue   *script.ExecutionQueue
 	executionTracker script.ExecutionTracker
+	approver         workflow.ScriptApprover
+	resultWait       time.Duration
 }
 
 // NewScriptStepExecutor creates a new script step executor
@@ -578,6 +1087,16 @@ func NewScriptStepExecutor(repository script.ScriptRepository, monitor *script.E
 // the fleet with an unscoped (all-tenant) query — the same guard the
 // set_ha_role, config_scope_move and ring_health executors use.
 func (e *ScriptStepExecutor) ExecuteStep(ctx context.Context, step workflow.Step, execution *workflow.WorkflowExecution) (workflow.StepResult, error) {
+	// A restricted execution accepts only the literal library form; refuse the
+	// raw config before parseScriptStepConfig drops the keys it does not know.
+	if err := checkRestrictedStep(step, execution); err != nil {
+		return workflow.StepResult{
+			Status:    workflow.StatusFailed,
+			StartTime: time.Now(),
+			Error:     err.Error(),
+		}, err
+	}
+
 	// Parse script config from step config
 	config, err := parseScriptStepConfig(step.Config)
 	if err != nil {
@@ -612,6 +1131,7 @@ func (e *ScriptStepExecutor) ExecuteStep(ctx context.Context, step workflow.Step
 	node.SetTenantID(tenantID)
 	node.SetExecutionQueue(e.executionQueue)
 	node.SetExecutionTracker(e.executionTracker)
+	e.configureRestricted(node, execution)
 
 	variables := execution.GetVariables()
 
@@ -631,6 +1151,8 @@ func (e *ScriptStepExecutor) ExecuteStep(ctx context.Context, step workflow.Step
 		Context: inputCtx,
 	})
 	endTime := time.Now()
+
+	publishRestrictedResult(step, execution, output)
 
 	// Build step result
 	status := workflow.StatusCompleted
@@ -671,6 +1193,48 @@ func (e *ScriptStepExecutor) SetFleetQuery(q fleet.FleetQuery) {
 // SetExecutionQueue sets the durable execution queue propagated to created script nodes.
 func (e *ScriptStepExecutor) SetExecutionQueue(q *script.ExecutionQueue) {
 	e.executionQueue = q
+}
+
+// checkRestrictedStep validates the raw step config of a restricted execution; it
+// accepts any step of an unrestricted one.
+func checkRestrictedStep(step workflow.Step, execution *workflow.WorkflowExecution) error {
+	if execution.Restricted == nil {
+		return nil
+	}
+	if err := validateRestrictedStepConfig(step.Config); err != nil {
+		return fmt.Errorf("script step %q: %w", step.Name, err)
+	}
+	return nil
+}
+
+// configureRestricted marks the node of a restricted execution and gives it the
+// approver. The restriction comes from the execution, never from step.Config.
+func (e *ScriptStepExecutor) configureRestricted(node *ScriptNode, execution *workflow.WorkflowExecution) {
+	if execution.Restricted == nil {
+		return
+	}
+	node.SetRestricted(*execution.Restricted)
+	node.SetApprover(e.approver)
+	node.SetResultWaitTimeout(e.resultWait)
+}
+
+// publishRestrictedResult makes a restricted step's output a variable of the run,
+// <step>_result, which the steps after it read.
+func publishRestrictedResult(step workflow.Step, execution *workflow.WorkflowExecution, output workflow.NodeOutput) {
+	if execution.Restricted != nil && output.Data != nil {
+		execution.SetVariable(step.Name+"_result", output.Data)
+	}
+}
+
+// SetApprover sets the approver propagated to the nodes of restricted
+// executions. Without one a restricted script step fails closed.
+func (e *ScriptStepExecutor) SetApprover(a workflow.ScriptApprover) {
+	e.approver = a
+}
+
+// SetResultWaitTimeout overrides how long a restricted step waits for queued results.
+func (e *ScriptStepExecutor) SetResultWaitTimeout(d time.Duration) {
+	e.resultWait = d
 }
 
 // SetExecutionTracker sets the durable execution tracker propagated to created

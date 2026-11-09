@@ -276,7 +276,23 @@ const (
 	// (stewards/<id>) to cluster-policies scope (<clusterName>), completing FC-role promotion.
 	// Implemented by features/workflow/nodes in S3.
 	StepTypeMoveResourceToCluster StepType = "move_resource_to_cluster"
+
+	// StepTypeScript runs a library script, by id and pinned version, on devices in
+	// the execution's tenant through the execution queue. It runs only in a
+	// restricted automation execution (Engine.ExecuteRestrictedWorkflow); the
+	// unrestricted engine path refuses a workflow that contains one.
+	StepTypeScript StepType = "script"
 )
+
+// RestrictedRun identifies the automation run a restricted execution belongs to.
+// RunID and GrantID are the persisted guard reference a queued command carries, so
+// revoking the grant or ending the run cancels the commands the run queued.
+// Ceiling is the tenant bound the library approval is resolved under.
+type RestrictedRun struct {
+	RunID   string
+	GrantID string
+	Ceiling string
+}
 
 // Condition defines execution conditions for conditional steps
 type Condition struct {
@@ -384,6 +400,13 @@ type WorkflowExecution struct {
 	// it to authorize tenant-scoped actions instead of trusting a workflow-
 	// supplied tenant_id (Issue #4338).
 	TenantID string `json:"tenant_id,omitempty"`
+
+	// Restricted is non-nil only for an execution started through
+	// Engine.ExecuteRestrictedWorkflow. It is set by the engine before the run
+	// starts and never from Variables or a step's Config. Steps that may only run
+	// under a restricted automation run (script) read it; the unrestricted path
+	// leaves it nil.
+	Restricted *RestrictedRun `json:"-"`
 
 	// Status is the current execution status
 	Status ExecutionStatus `json:"status"`
