@@ -17,6 +17,7 @@ import (
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 // BulkHandler handles bulk transfer RPCs.
@@ -30,7 +31,7 @@ import (
 // is used so that no request is rejected purely due to missing context.
 type BulkHandler struct {
 	logger logging.Logger
-	queue  *TenantQueue
+	queue  *tenantqueue.TenantQueue
 	// lockdown, when set, refuses controller-to-steward chunks for a
 	// locked-down steward (Issue #5666).
 	lockdown controlplaneInterfaces.LockdownChecker
@@ -66,7 +67,7 @@ func (s *gatedBulkStream) Send(c *transportpb.BulkChunk) error {
 }
 
 // NewBulkHandler creates a new bulk transfer handler.
-func NewBulkHandler(logger logging.Logger, queue *TenantQueue) *BulkHandler {
+func NewBulkHandler(logger logging.Logger, queue *tenantqueue.TenantQueue) *BulkHandler {
 	return &BulkHandler{logger: logger, queue: queue}
 }
 

@@ -15,11 +15,11 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
-	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -85,7 +85,7 @@ func tokenStoreFor(t *testing.T, tenantByToken map[string]string) *inMemoryToken
 // the admission gate into the Provider struct field.
 func TestWithTenantAdmission_OptionSetsField(t *testing.T) {
 	t.Parallel()
-	queue := controllerTransport.NewTenantQueue()
+	queue := tenantqueue.NewTenantQueue()
 	p := New(ModeServer, WithTenantAdmission(queue))
 	assert.Equal(t, TenantAdmission(queue), p.tenantAdmission)
 }
@@ -203,8 +203,8 @@ func TestRegister_NoTenantAdmissionConfigured_Unaffected(t *testing.T) {
 // caller has proven server-side.
 func TestRegister_TenantAdmissionQueueFull_ResourceExhausted(t *testing.T) {
 	t.Parallel()
-	queue := controllerTransport.NewTenantQueue()
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	queue := tenantqueue.NewTenantQueue()
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, queue.Acquire("tenant-full"))
 	}
 
@@ -246,8 +246,8 @@ func TestRegister_TenantAdmissionQueueFull_ResourceExhausted(t *testing.T) {
 func TestRegister_TenantAdmissionKeyedOnResolvedTenantNotClaimedTenant(t *testing.T) {
 	t.Parallel()
 
-	queue := controllerTransport.NewTenantQueue()
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	queue := tenantqueue.NewTenantQueue()
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, queue.Acquire("tenant-victim"))
 	}
 
@@ -265,7 +265,7 @@ func TestRegister_TenantAdmissionKeyedOnResolvedTenantNotClaimedTenant(t *testin
 	assert.Equal(t, "steward-attacker", resp.GetStewardId())
 
 	// Conversely, the attacker's own bucket is the one that gates it.
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, queue.Acquire("tenant-attacker"))
 	}
 	_, err = server.Register(verifiedPeerContext("steward-attacker"), &controllerpb.RegisterRequest{
@@ -287,7 +287,7 @@ func TestRegister_TenantAdmissionKeyedOnResolvedTenantNotClaimedTenant(t *testin
 func TestRegister_ForgedTenantNeverAllocatesABucket(t *testing.T) {
 	t.Parallel()
 
-	queue := controllerTransport.NewTenantQueue()
+	queue := tenantqueue.NewTenantQueue()
 	resolver := tenantResolverFor(map[string]string{"steward-flood": "tenant-flood"})
 	server := &transportServer{provider: New(ModeServer,
 		WithTenantAdmission(queue),
@@ -306,7 +306,7 @@ func TestRegister_ForgedTenantNeverAllocatesABucket(t *testing.T) {
 
 	// Every slot of the caller's real bucket is free again (nothing leaked), and
 	// the flood never touched any other tenant's budget.
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, queue.Acquire("tenant-flood"))
 		require.NoError(t, queue.Acquire("tenant-victim"))
 	}
@@ -317,7 +317,7 @@ func TestRegister_ForgedTenantNeverAllocatesABucket(t *testing.T) {
 // traffic never accumulates unreleased slots across repeated connects.
 func TestRegister_TenantAdmissionSlotReleasedAfterCall(t *testing.T) {
 	t.Parallel()
-	queue := controllerTransport.NewTenantQueue()
+	queue := tenantqueue.NewTenantQueue()
 	resolver := tenantResolverFor(map[string]string{"steward-cycle": "tenant-cycle"})
 	server := &transportServer{provider: New(ModeServer,
 		WithTenantAdmission(queue),
@@ -327,7 +327,7 @@ func TestRegister_TenantAdmissionSlotReleasedAfterCall(t *testing.T) {
 	// Register well beyond MaxConcurrentPerTenant sequential times for the same
 	// tenant. If a slot leaked on any call, this would eventually fail with
 	// ResourceExhausted.
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant*3; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant*3; i++ {
 		_, err := server.Register(verifiedPeerContext("steward-cycle"), &controllerpb.RegisterRequest{
 			Version:     "1.0.0",
 			Credentials: &commonpb.Credentials{TenantId: "tenant-cycle"},
@@ -336,7 +336,7 @@ func TestRegister_TenantAdmissionSlotReleasedAfterCall(t *testing.T) {
 	}
 
 	// The queue must still have full headroom for tenant-cycle.
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, queue.Acquire("tenant-cycle"))
 	}
 }
@@ -351,7 +351,7 @@ func TestRegister_TenantAdmissionQueueFull_OverRealTransport(t *testing.T) {
 
 	tc := newTestCA(t)
 	reg := registry.NewRegistry()
-	queue := controllerTransport.NewTenantQueue()
+	queue := tenantqueue.NewTenantQueue()
 	resolver := tenantResolverFor(map[string]string{
 		"steward-wire-full": "tenant-wire-full",
 		"steward-wire-ok":   "tenant-wire-ok",
@@ -367,7 +367,7 @@ func TestRegister_TenantAdmissionQueueFull_OverRealTransport(t *testing.T) {
 	require.NoError(t, server.Start(context.Background()))
 	t.Cleanup(server.ForceStop)
 
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, queue.Acquire("tenant-wire-full"))
 	}
 
@@ -399,11 +399,11 @@ type admissionEnv struct {
 	server  *Provider
 	clientA *Provider
 	clientB *Provider
-	queue   *controllerTransport.TenantQueue
+	queue   *tenantqueue.TenantQueue
 	// eventQueue is the events-only gate, a different instance from queue.
-	eventQueue *controllerTransport.TenantQueue
+	eventQueue *tenantqueue.TenantQueue
 	// responseQueue is the responses-only gate.
-	responseQueue *controllerTransport.TenantQueue
+	responseQueue *tenantqueue.TenantQueue
 	logger        *verbatimLogger
 	reg           *registry.InMemoryRegistry
 	tc            *testCA
@@ -419,14 +419,14 @@ func newAdmissionEnv(t *testing.T) *admissionEnv {
 
 	tc := newTestCA(t)
 	reg := registry.NewRegistry()
-	queue := controllerTransport.NewTenantQueue()
+	queue := tenantqueue.NewTenantQueue()
 	resolver := tenantResolverFor(map[string]string{
 		"steward-adm-a": admissionTenantA,
 		"steward-adm-b": admissionTenantB,
 		"steward-adm-c": admissionTenantA,
 	})
-	eventQueue := controllerTransport.NewTenantQueue()
-	responseQueue := controllerTransport.NewTenantQueue()
+	eventQueue := tenantqueue.NewTenantQueue()
+	responseQueue := tenantqueue.NewTenantQueue()
 	vl := &verbatimLogger{Logger: logging.NewNoopLogger()}
 
 	server := New(ModeServer, WithTenantAdmission(queue), WithEventAdmission(eventQueue), WithResponseAdmission(responseQueue), WithStewardTenantResolver(resolver))
@@ -486,7 +486,7 @@ func TestControlChannel_Heartbeat_TenantAdmissionQueueFull_DroppedWithoutStarvin
 	}))
 
 	// steward-adm-a's tenant, as the controller's own fleet record reports it.
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, env.queue.Acquire(admissionTenantA))
 	}
 
@@ -548,7 +548,7 @@ func TestControlChannel_Heartbeat_AdmissionKeyedOnResolvedTenantNotPayload(t *te
 	}))
 
 	// Saturate steward-adm-b's tenant. steward-adm-a is in tenant-adm-a.
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, env.queue.Acquire(admissionTenantB))
 	}
 
@@ -637,7 +637,7 @@ func (c *concurrencyProbe) enter() {
 
 // tenantSlotsFree reports whether every admission slot for tenant is free,
 // leaving the queue as it found it.
-func tenantSlotsFree(q *controllerTransport.TenantQueue, tenant string) bool {
+func tenantSlotsFree(q *tenantqueue.TenantQueue, tenant string) bool {
 	var got int
 	for q.Acquire(tenant) == nil {
 		got++
@@ -645,13 +645,13 @@ func tenantSlotsFree(q *controllerTransport.TenantQueue, tenant string) bool {
 	for i := 0; i < got; i++ {
 		q.Release(tenant)
 	}
-	return got == controllerTransport.MaxConcurrentPerTenant
+	return got == tenantqueue.MaxConcurrentPerTenant
 }
 
 // requireTenantSlotsFree waits until no handler holds a slot of tenant in q.
 // Handlers free their stream slot before their tenant slot, so this also
 // proves the stream's in-flight slots have been returned.
-func requireTenantSlotsFree(t *testing.T, q *controllerTransport.TenantQueue, tenant string, msgAndArgs ...interface{}) {
+func requireTenantSlotsFree(t *testing.T, q *tenantqueue.TenantQueue, tenant string, msgAndArgs ...interface{}) {
 	t.Helper()
 	require.Eventually(t, func() bool { return tenantSlotsFree(q, tenant) }, 5*time.Second, 10*time.Millisecond, msgAndArgs...)
 }
@@ -733,7 +733,7 @@ func TestControlChannel_Event_FloodDoesNotStarveConnectOrHeartbeat(t *testing.T)
 
 	// Fill the rest of the tenant's event slots from other streams' point of
 	// view: the events queue is exhausted for tenant A.
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant-maxInFlightEventsPerStream; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant-maxInFlightEventsPerStream; i++ {
 		require.NoError(t, env.eventQueue.Acquire(admissionTenantA))
 	}
 	require.Error(t, env.eventQueue.Acquire(admissionTenantA), "tenant A's event slots are exhausted")
@@ -810,7 +810,7 @@ func TestControlChannel_Heartbeat_TenantAdmissionSlotHeldUntilHandlerReturns(t *
 	for env.queue.Acquire(admissionTenantA) == nil {
 		held++
 	}
-	assert.Equal(t, controllerTransport.MaxConcurrentPerTenant-1, held, "slot must be held while the handler runs")
+	assert.Equal(t, tenantqueue.MaxConcurrentPerTenant-1, held, "slot must be held while the handler runs")
 	for i := 0; i < held; i++ {
 		env.queue.Release(admissionTenantA)
 	}
@@ -824,7 +824,7 @@ func TestControlChannel_Heartbeat_TenantAdmissionSlotHeldUntilHandlerReturns(t *
 		for i := 0; i < got; i++ {
 			env.queue.Release(admissionTenantA)
 		}
-		return got == controllerTransport.MaxConcurrentPerTenant
+		return got == tenantqueue.MaxConcurrentPerTenant
 	}, 5*time.Second, 20*time.Millisecond, "slot must be free after the handler returns")
 }
 
@@ -884,7 +884,7 @@ func TestControlChannel_DropsAreCountedAndLogRateLimited(t *testing.T) {
 	}))
 
 	// Tenant gate: saturate tenant B's event queue; clientB's events drop.
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, env.eventQueue.Acquire(admissionTenantB))
 	}
 	publishEvents(t, env.clientB, "steward-adm-b", 3)
@@ -892,7 +892,7 @@ func TestControlChannel_DropsAreCountedAndLogRateLimited(t *testing.T) {
 	assert.Zero(t, probe.started.Load())
 
 	// Tenant gate on heartbeats.
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, env.queue.Acquire(admissionTenantB))
 	}
 	require.NoError(t, env.clientB.SendHeartbeat(context.Background(), testHeartbeat("steward-adm-b", admissionTenantB)))
@@ -932,7 +932,7 @@ func TestDropLogLimiter_FirstThenOncePerInterval(t *testing.T) {
 
 func TestWithEventAdmission_OptionSetsField(t *testing.T) {
 	t.Parallel()
-	q := controllerTransport.NewTenantQueue()
+	q := tenantqueue.NewTenantQueue()
 	p := New(ModeServer, WithEventAdmission(q))
 	assert.Same(t, q, p.eventAdmission)
 }

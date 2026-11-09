@@ -32,6 +32,7 @@ import (
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/entitygraph/writers/dnasync"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 // ---------------------------------------------------------------------------
@@ -321,7 +322,7 @@ func newBulkEnv(t *testing.T, opts ...envOpt) *bulkEnv {
 }
 
 func (e *bulkEnv) newHandler(store FragmentDeltaStore, pub CommandPublisher) *DNAHandler {
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil).
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil).
 		WithPartialSync(store, pub).
 		WithTenantResolver(e.tenants).
 		WithBulkLane(staticKinds{kinds: e.kinds}, e.sink, e.dirAuth)

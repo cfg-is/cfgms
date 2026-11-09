@@ -24,6 +24,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 // maxConcurrentModuleStreams bounds how many FetchModuleBundle streams the
@@ -71,7 +72,7 @@ type ModuleStewardRegistry interface {
 //     (quictransport.PeerStewardID). The request carries no steward id and no
 //     content hash; nothing in it names a caller or a bundle by hash.
 //  2. Admission: the steward's registered tenant is resolved from the fleet
-//     registry; the per-tenant TenantQueue and the global
+//     registry; the per-tenant tenant queue and the global
 //     maxConcurrentModuleStreams limit are taken without blocking.
 //  3. Requirement: the steward's CURRENT effective configuration (tenant
 //     cascade, resolved from the registry's tenant, never from the request) must
@@ -104,7 +105,7 @@ type ModuleBundleHandler struct {
 	store   ModuleBundleStore
 	config  EffectiveConfigSource
 	tenants ModuleStewardRegistry
-	queue   *TenantQueue
+	queue   *tenantqueue.TenantQueue
 	logger  logging.Logger
 	// streams is the global concurrent-stream semaphore, capacity
 	// maxConcurrentModuleStreams.
@@ -118,7 +119,7 @@ func NewModuleBundleHandler(
 	store ModuleBundleStore,
 	config EffectiveConfigSource,
 	tenants ModuleStewardRegistry,
-	queue *TenantQueue,
+	queue *tenantqueue.TenantQueue,
 	logger logging.Logger,
 ) *ModuleBundleHandler {
 	return &ModuleBundleHandler{

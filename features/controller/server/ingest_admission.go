@@ -4,7 +4,7 @@
 package server
 
 import (
-	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 // ingestAdmissionQueues holds the per-tenant admission gates for the steward
@@ -52,10 +52,10 @@ import (
 // The split is by key trust level, not by path count: a third path may share
 // connectHeartbeat only once its bucket key is derived server-side the same way.
 type ingestAdmissionQueues struct {
-	connectHeartbeat *controllerTransport.TenantQueue
-	events           *controllerTransport.TenantQueue
-	responses        *controllerTransport.TenantQueue
-	dnaBulk          *controllerTransport.TenantQueue
+	connectHeartbeat *tenantqueue.TenantQueue
+	events           *tenantqueue.TenantQueue
+	responses        *tenantqueue.TenantQueue
+	dnaBulk          *tenantqueue.TenantQueue
 }
 
 // newIngestAdmissionQueues builds the ingest admission gates. Both queues are
@@ -63,45 +63,45 @@ type ingestAdmissionQueues struct {
 // key space differs.
 func newIngestAdmissionQueues() *ingestAdmissionQueues {
 	return &ingestAdmissionQueues{
-		connectHeartbeat: controllerTransport.NewTenantQueue(),
-		events:           controllerTransport.NewTenantQueue(),
-		responses:        controllerTransport.NewTenantQueue(),
-		dnaBulk:          controllerTransport.NewTenantQueue(),
+		connectHeartbeat: tenantqueue.NewTenantQueue(),
+		events:           tenantqueue.NewTenantQueue(),
+		responses:        tenantqueue.NewTenantQueue(),
+		dnaBulk:          tenantqueue.NewTenantQueue(),
 	}
 }
 
 // connectHeartbeatQueue returns the gate for the server-verified-key paths,
 // tolerating a Server assembled without New (queues absent).
-func (q *ingestAdmissionQueues) connectHeartbeatQueue() *controllerTransport.TenantQueue {
+func (q *ingestAdmissionQueues) connectHeartbeatQueue() *tenantqueue.TenantQueue {
 	if q == nil {
-		return controllerTransport.NewTenantQueue()
+		return tenantqueue.NewTenantQueue()
 	}
 	return q.connectHeartbeat
 }
 
 // dnaBulkQueue returns the gate for the wire-keyed paths, tolerating a Server
 // assembled without New (queues absent).
-func (q *ingestAdmissionQueues) dnaBulkQueue() *controllerTransport.TenantQueue {
+func (q *ingestAdmissionQueues) dnaBulkQueue() *tenantqueue.TenantQueue {
 	if q == nil {
-		return controllerTransport.NewTenantQueue()
+		return tenantqueue.NewTenantQueue()
 	}
 	return q.dnaBulk
 }
 
 // eventsQueue returns the gate for steward events, tolerating a Server
 // assembled without New (queues absent).
-func (q *ingestAdmissionQueues) eventsQueue() *controllerTransport.TenantQueue {
+func (q *ingestAdmissionQueues) eventsQueue() *tenantqueue.TenantQueue {
 	if q == nil {
-		return controllerTransport.NewTenantQueue()
+		return tenantqueue.NewTenantQueue()
 	}
 	return q.events
 }
 
 // responsesQueue returns the gate for steward responses, tolerating a Server
 // assembled without New (queues absent).
-func (q *ingestAdmissionQueues) responsesQueue() *controllerTransport.TenantQueue {
+func (q *ingestAdmissionQueues) responsesQueue() *tenantqueue.TenantQueue {
 	if q == nil {
-		return controllerTransport.NewTenantQueue()
+		return tenantqueue.NewTenantQueue()
 	}
 	return q.responses
 }

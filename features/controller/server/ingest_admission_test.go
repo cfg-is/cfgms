@@ -9,10 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/config"
-	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
 	"github.com/cfgis/cfgms/pkg/cert"
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 // TestIngestAdmissionQueues_WireKeyedFloodCannotStarveConnectOrHeartbeat is the
@@ -40,31 +40,31 @@ func TestIngestAdmissionQueues_WireKeyedFloodCannotStarveConnectOrHeartbeat(t *t
 
 	// Saturate the wire-keyed queue under the victim's tenant ID, as a hostile
 	// steward would by opening concurrent SyncDNA streams naming that tenant.
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, queues.dnaBulkQueue().Acquire(victimTenant),
 			"DNA queue must admit up to its per-tenant limit")
 	}
-	require.ErrorIs(t, queues.dnaBulkQueue().Acquire(victimTenant), controllerTransport.ErrTenantQueueFull,
+	require.ErrorIs(t, queues.dnaBulkQueue().Acquire(victimTenant), tenantqueue.ErrTenantQueueFull,
 		"the flood must be bounded by the DNA queue's own per-tenant limit")
 
 	// The victim tenant's connect and heartbeat capacity must be untouched.
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, queues.connectHeartbeatQueue().Acquire(victimTenant),
 			"a DNA flood must not consume the victim tenant's connect/heartbeat slots")
 	}
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		queues.connectHeartbeatQueue().Release(victimTenant)
 		queues.dnaBulkQueue().Release(victimTenant)
 	}
 
 	// And the converse: a connect storm must not consume DNA-sync capacity.
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, queues.connectHeartbeatQueue().Acquire(victimTenant))
 	}
 	assert.NoError(t, queues.dnaBulkQueue().Acquire(victimTenant),
 		"a connect storm must not consume the tenant's DNA/bulk slots")
 	queues.dnaBulkQueue().Release(victimTenant)
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		queues.connectHeartbeatQueue().Release(victimTenant)
 	}
 }
@@ -167,10 +167,10 @@ func TestIngestAdmissionQueues_EventsQueueIsolatedFromConnectHeartbeat(t *testin
 	queues := newIngestAdmissionQueues()
 	const tenant = "root/msp-a/client-1"
 
-	for i := 0; i < controllerTransport.MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, queues.eventsQueue().Acquire(tenant))
 	}
-	require.ErrorIs(t, queues.eventsQueue().Acquire(tenant), controllerTransport.ErrTenantQueueFull)
+	require.ErrorIs(t, queues.eventsQueue().Acquire(tenant), tenantqueue.ErrTenantQueueFull)
 
 	assert.NoError(t, queues.connectHeartbeatQueue().Acquire(tenant), "events must not use connect/heartbeat slots")
 	assert.NoError(t, queues.dnaBulkQueue().Acquire(tenant), "events must not use DNA/bulk slots")

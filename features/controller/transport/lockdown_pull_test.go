@@ -28,6 +28,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/testutil"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 // lockdownStore returns the real predicate over a real steward store, with
@@ -150,7 +151,7 @@ func TestIssueInitialCredential_Lockdown(t *testing.T) {
 func TestBulkTransfer_Lockdown(t *testing.T) {
 	ld, _ := lockdownStore(t)
 	ca := newTestCA(t)
-	h := NewBulkHandler(logging.NewNoopLogger(), NewTenantQueue()).WithLockdown(ld)
+	h := NewBulkHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue()).WithLockdown(ld)
 	upload := &transportpb.BulkChunk{TransferId: "report-1", Data: []byte("report"), TotalSize: 6, IsLast: true}
 
 	t.Run("tampered steward upload is accepted", func(t *testing.T) {
@@ -168,7 +169,7 @@ func TestBulkTransfer_Lockdown(t *testing.T) {
 
 	t.Run("HandleGRPC installs the gate on the stream handed to the send path", func(t *testing.T) {
 		var sendErr error
-		hd := NewBulkHandler(logging.NewNoopLogger(), NewTenantQueue()).WithLockdown(ld)
+		hd := NewBulkHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue()).WithLockdown(ld)
 		hd.downstream = func(s grpc.BidiStreamingServer[transportpb.BulkChunk, transportpb.BulkChunk]) error {
 			sendErr = s.Send(&transportpb.BulkChunk{TransferId: "pkg-1", Data: []byte("x")})
 			return nil

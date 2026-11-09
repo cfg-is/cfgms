@@ -28,6 +28,7 @@ import (
 	dptypes "github.com/cfgis/cfgms/pkg/dataplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 // registeredService returns a real *service.ControllerService with stewardID
@@ -139,7 +140,7 @@ func dnaChunksFor(t *testing.T, stewardID string, attrs map[string]string, parts
 func TestDNAHandler_PersistsReassembledDNA(t *testing.T) {
 	ca := newTestCA(t)
 	svc := registeredService(t, "steward-persist")
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), svc)
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), svc)
 
 	attrs := map[string]string{"hostname": "cfg-70-02", "os": "windows", "cpu_count": "8"}
 	ctx := peerContextWithCA(t, ca, "steward-persist")
@@ -325,7 +326,7 @@ func TestReassembleDNA_RejectsOversizedFragment(t *testing.T) {
 func TestDNAHandler_RejectsChunkFlood(t *testing.T) {
 	ca := newTestCA(t)
 	persister := &stubPersister{}
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), persister)
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), persister)
 
 	total := maxDNAChunks + 10
 	chunks := make([]*transportpb.DNAChunk, 0, total)
@@ -351,7 +352,7 @@ func TestDNAHandler_RejectsChunkFlood(t *testing.T) {
 func TestDNAHandler_RejectsOversizedSnapshot(t *testing.T) {
 	ca := newTestCA(t)
 	persister := &stubPersister{}
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), persister)
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), persister)
 
 	const chunkSize = 64 * 1024
 	total := (maxReassembledDNABytes / chunkSize) + 2 // just over the byte cap, under maxDNAChunks
@@ -404,7 +405,7 @@ func (p *stubPersister) SyncDNA(_ context.Context, dna *common.DNA) (*common.Sta
 func TestDNAHandler_MultiChunkReassembly(t *testing.T) {
 	ca := newTestCA(t)
 	svc := registeredService(t, "steward-multi")
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), svc)
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), svc)
 
 	attrs := map[string]string{"hostname": "cfg-ab-02", "os": "windows", "primary_mac": "00:15:5d:ea:a3:35", "memory_bytes": "17179869184"}
 	chunks := dnaChunksFor(t, "steward-multi", attrs, 3)
@@ -435,7 +436,7 @@ func TestDNAHandler_MultiChunkReassembly(t *testing.T) {
 func TestDNAHandler_PersistStatusNotFound_FailsRPC(t *testing.T) {
 	ca := newTestCA(t)
 	svc := service.NewControllerService(logging.NewNoopLogger())
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), svc)
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), svc)
 
 	ctx := peerContextWithCA(t, ca, "steward-not-found")
 	stream := newTestDNAStream(ctx, dnaChunksFor(t, "steward-not-found", map[string]string{"hostname": "h", "os": "linux"}, 1)...)
@@ -459,7 +460,7 @@ func TestDNAHandler_PersistStatusOK_Accepted(t *testing.T) {
 		"steward-ok", "t1", "", "active",
 		map[string]string{"hostname": "h", "os": "linux"},
 	))
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), svc)
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), svc)
 
 	ctx := peerContextWithCA(t, ca, "steward-ok")
 	stream := newTestDNAStream(ctx, dnaChunksFor(t, "steward-ok", map[string]string{"hostname": "h", "os": "linux"}, 1)...)
@@ -597,7 +598,7 @@ func newRoundTripEnv(t *testing.T, stewardID string) *roundTripEnv {
 		grpc.Creds(quictransport.TransportCredentials()),
 		grpc.MaxRecvMsgSize(8*1024*1024),
 	)
-	queue := NewTenantQueue()
+	queue := tenantqueue.NewTenantQueue()
 	srv := &testTransportSrv{
 		dnaHandler:  NewDNAHandler(logging.NewNoopLogger(), queue, nil),
 		bulkHandler: NewBulkHandler(logging.NewNoopLogger(), queue),
@@ -631,7 +632,7 @@ func newRoundTripEnv(t *testing.T, stewardID string) *roundTripEnv {
 // TestDNAHandler_MissingPeerCert verifies that a request with no mTLS peer
 // info in context is rejected with Unauthenticated.
 func TestDNAHandler_MissingPeerCert(t *testing.T) {
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil)
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil)
 	stream := newTestDNAStream(context.Background())
 
 	err := h.HandleGRPC(stream)
@@ -644,7 +645,7 @@ func TestDNAHandler_MissingPeerCert(t *testing.T) {
 // does not match the mTLS peer CN is rejected with PermissionDenied.
 func TestDNAHandler_StewardIDMismatch(t *testing.T) {
 	ca := newTestCA(t)
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil)
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil)
 
 	ctx := peerContextWithCA(t, ca, "steward-alice")
 	stream := newTestDNAStream(ctx, &transportpb.DNAChunk{
@@ -670,7 +671,7 @@ func TestDNAHandler_StewardIDMismatch(t *testing.T) {
 // passes validation and the handler sends an accepted response.
 func TestDNAHandler_MatchingStewardIDAccepted(t *testing.T) {
 	ca := newTestCA(t)
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil)
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil)
 
 	ctx := peerContextWithCA(t, ca, "steward-match")
 	stream := newTestDNAStream(ctx,
@@ -690,7 +691,7 @@ func TestDNAHandler_MatchingStewardIDAccepted(t *testing.T) {
 // accepted and returns a valid response.
 func TestDNAHandler_EmptyStream(t *testing.T) {
 	ca := newTestCA(t)
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil)
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil)
 
 	ctx := peerContextWithCA(t, ca, "steward-empty")
 	stream := newTestDNAStream(ctx) // zero chunks
@@ -706,7 +707,7 @@ func TestDNAHandler_EmptyStream(t *testing.T) {
 // HandleGRPC to return a wrapped error with the expected message.
 func TestDNAHandler_RecvError(t *testing.T) {
 	ca := newTestCA(t)
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil)
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil)
 
 	ctx := peerContextWithCA(t, ca, "steward-recv-err")
 	injectedErr := errors.New("recv failed: connection reset by peer")
@@ -723,11 +724,11 @@ func TestDNAHandler_RecvError(t *testing.T) {
 // tenant's queue is at capacity the handler returns codes.ResourceExhausted.
 func TestDNAHandler_QueueFull_ReturnsResourceExhausted(t *testing.T) {
 	ca := newTestCA(t)
-	queue := NewTenantQueue()
+	queue := tenantqueue.NewTenantQueue()
 	h := NewDNAHandler(logging.NewNoopLogger(), queue, nil)
 
 	// No resolver is wired, so the stream is counted against the quarantine bucket.
-	for i := 0; i < MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, queue.Acquire(quarantineQueueKey))
 	}
 
@@ -759,8 +760,8 @@ func TestDNAHandler_QueueKeyIgnoresWireTenant(t *testing.T) {
 	svc := registeredService(t, "steward-tenant-claim") // registered under tenant "t1"
 
 	t.Run("resolved tenant bucket full is honoured over the wire claim", func(t *testing.T) {
-		queue := NewTenantQueue()
-		for i := 0; i < MaxConcurrentPerTenant; i++ {
+		queue := tenantqueue.NewTenantQueue()
+		for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 			require.NoError(t, queue.Acquire("t1"))
 		}
 		h := NewDNAHandler(logging.NewNoopLogger(), queue, svc).WithTenantResolver(svc)
@@ -774,8 +775,8 @@ func TestDNAHandler_QueueKeyIgnoresWireTenant(t *testing.T) {
 	})
 
 	t.Run("wire-claimed tenant bucket full does not gate the request", func(t *testing.T) {
-		queue := NewTenantQueue()
-		for i := 0; i < MaxConcurrentPerTenant; i++ {
+		queue := tenantqueue.NewTenantQueue()
+		for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 			require.NoError(t, queue.Acquire("tenant-victim"))
 		}
 		h := NewDNAHandler(logging.NewNoopLogger(), queue, svc).WithTenantResolver(svc)
@@ -853,7 +854,7 @@ func TestSyncDNA_RoundTrip_StewardIDMismatch(t *testing.T) {
 func TestSyncDNA_FragmentsOnly_NoAttributesOnWire(t *testing.T) {
 	ca := newTestCA(t)
 	svc := registeredService(t, "steward-frags-only")
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), svc)
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), svc)
 
 	// Build a transfer with identity fragments (hostname + host:os) but no Attributes.
 	// The identity fragments are required by the DNA integrity check in SyncDNA;
@@ -951,7 +952,7 @@ func TestSyncDNA_OversizedMessageRejected(t *testing.T) {
 // a real steward command handler in dna_handler_partialsync_realcp_test.go, so
 // nothing here needs to stand in for it.
 func deltaReceiveHandler(store FragmentDeltaStore) *DNAHandler {
-	return NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil).
+	return NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil).
 		WithPartialSync(store, nil)
 }
 
@@ -1271,7 +1272,7 @@ func TestDNAHandler_DeltaGRPC_PartialSyncNotConfigured_NotAccepted(t *testing.T)
 	frags := makeTestFragments(2)
 
 	// NewDNAHandler with no WithPartialSync — the default production wiring.
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(),
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(),
 		registeredService(t, "steward-unconfigured"))
 
 	ctx := peerContextWithCA(t, ca, "steward-unconfigured")
@@ -1595,8 +1596,8 @@ func TestDNAHandler_UnknownPeerUsesQuarantineBucket(t *testing.T) {
 	svc := registeredService(t, "steward-someone-else") // does not know "steward-unknown"
 
 	t.Run("claimed tenants share the quarantine bucket", func(t *testing.T) {
-		queue := NewTenantQueue()
-		for i := 0; i < MaxConcurrentPerTenant; i++ {
+		queue := tenantqueue.NewTenantQueue()
+		for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 			require.NoError(t, queue.Acquire(quarantineQueueKey))
 		}
 		h := NewDNAHandler(logging.NewNoopLogger(), queue, svc).WithTenantResolver(svc)
@@ -1609,9 +1610,9 @@ func TestDNAHandler_UnknownPeerUsesQuarantineBucket(t *testing.T) {
 	})
 
 	t.Run("full claimed-tenant queue does not reject", func(t *testing.T) {
-		queue := NewTenantQueue()
+		queue := tenantqueue.NewTenantQueue()
 		for _, claimed := range []string{"tenant-a", "tenant-b"} {
-			for i := 0; i < MaxConcurrentPerTenant; i++ {
+			for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 				require.NoError(t, queue.Acquire(claimed))
 			}
 		}

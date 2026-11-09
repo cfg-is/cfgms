@@ -27,6 +27,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 // ---------------------------------------------------------------------------
@@ -105,7 +106,7 @@ func newLockdownEnv(t *testing.T) *lockdownEnv {
 	ld := fleet.NewLockdown(store, logger)
 	cp := newRecordingHandler()
 	c := newCompositeTransportServer(cp, logger)
-	queue := controllerTransport.NewTenantQueue()
+	queue := tenantqueue.NewTenantQueue()
 	c.SetConfigHandler(controllerTransport.NewConfigHandler(nil, logger, nil).WithLockdown(ld))
 	c.SetModuleBundleHandler(controllerTransport.NewModuleBundleHandler(nil, nil, nil, queue, logger).WithLockdown(ld))
 	c.SetCredentialHandler(controllerTransport.NewCredentialHandler(nil, nil, nil, logger).WithLockdown(ld))

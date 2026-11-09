@@ -55,6 +55,7 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/testutil"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 // Module distribution, publish to execute (Issue #4990, epic #4654).
@@ -372,7 +373,7 @@ func newDistFixture(t *testing.T, tools distTools, controllerTrusted []publisher
 		PeerCertificates: []*x509.Certificate{x509Cert}, VerifiedChains: [][]*x509.Certificate{{x509Cert}}, HandshakeComplete: true,
 	}}})
 
-	f.handler = controllertransport.NewModuleBundleHandler(f.cache, f.cfgSvc, ctrl, controllertransport.NewTenantQueue(), logging.NewNoopLogger())
+	f.handler = controllertransport.NewModuleBundleHandler(f.cache, f.cfgSvc, ctrl, tenantqueue.NewTenantQueue(), logging.NewNoopLogger())
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
 	transportpb.RegisterStewardTransportServer(srv, &distService{f: f})

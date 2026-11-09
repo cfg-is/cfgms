@@ -37,6 +37,7 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/testutil"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 const testStewardID = "steward-install"
@@ -122,7 +123,7 @@ func newFixture(t *testing.T) *fixture {
 
 	f := &fixture{
 		t: t, cache: mc, workflow: approval.New(mc), ctrl: ctrl, cfgSvc: cfgSvc, peerCtx: peerCtx,
-		handler: controllertransport.NewModuleBundleHandler(mc, cfgSvc, ctrl, controllertransport.NewTenantQueue(), logging.NewNoopLogger()),
+		handler: controllertransport.NewModuleBundleHandler(mc, cfgSvc, ctrl, tenantqueue.NewTenantQueue(), logging.NewNoopLogger()),
 		root:    filepath.Join(t.TempDir(), "modules"),
 	}
 

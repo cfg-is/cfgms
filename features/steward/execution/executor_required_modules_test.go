@@ -43,6 +43,7 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/testutil"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 const rmStewardID = "steward-required-modules"
@@ -136,7 +137,7 @@ func newRMFixture(t *testing.T) *rmFixture {
 	svc := &countingService{
 		f:       f,
 		ctx:     peerCtx,
-		handler: controllertransport.NewModuleBundleHandler(mc, cfgSvc, ctrl, controllertransport.NewTenantQueue(), logging.NewNoopLogger()),
+		handler: controllertransport.NewModuleBundleHandler(mc, cfgSvc, ctrl, tenantqueue.NewTenantQueue(), logging.NewNoopLogger()),
 	}
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()

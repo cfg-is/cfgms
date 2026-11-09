@@ -33,6 +33,7 @@ import (
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/entitygraph/writers/dnasync"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 // newTestEGProvider opens a fresh SQLite entity graph provider backed by a temp file.
@@ -102,7 +103,7 @@ func TestDNAHandler_DeltaGRPC_EntityGraph_B1_AdversarialFragmentID(t *testing.T)
 	store := NewInMemoryFragmentDeltaStore()
 	store.SetManifest("steward-A", manifest)
 
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil).
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil).
 		WithPartialSync(store, nil).
 		WithEntityGraph(egWriter, taxonomy)
 	h.recordDeltaRequest("steward-A", claimedRoot, manifestIDs(manifest))
@@ -156,7 +157,7 @@ func TestDNAHandler_DeltaGRPC_EntityGraph_NormalFragmentsLandCorrectly(t *testin
 	store := NewInMemoryFragmentDeltaStore()
 	store.SetManifest("steward-Z", manifest)
 
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil).
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil).
 		WithPartialSync(store, nil).
 		WithEntityGraph(egWriter, taxonomy)
 	h.recordDeltaRequest("steward-Z", claimedRoot, manifestIDs(manifest))
@@ -202,7 +203,7 @@ func TestDNAHandler_DeltaGRPC_EntityGraph_WriterFailureNonFatal(t *testing.T) {
 	store := NewInMemoryFragmentDeltaStore()
 	store.SetManifest("steward-nonfatal", manifest)
 
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil).
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil).
 		WithPartialSync(store, nil).
 		WithEntityGraph(egWriter, taxonomy)
 	h.recordDeltaRequest("steward-nonfatal", claimedRoot, manifestIDs(manifest))
@@ -237,7 +238,7 @@ func TestDNAHandler_DeltaGRPC_EntityGraph_NoWriterSkipsGracefully(t *testing.T) 
 	store.SetManifest("steward-nowire", manifest)
 
 	// Handler with WithPartialSync but no WithEntityGraph.
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil).
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil).
 		WithPartialSync(store, nil)
 	h.recordDeltaRequest("steward-nowire", claimedRoot, manifestIDs(manifest))
 
@@ -316,7 +317,7 @@ func TestDNAHandler_DeltaGRPC_DriftDiff_RoundTrip(t *testing.T) {
 	store := NewInMemoryFragmentDeltaStore()
 	store.SetManifest(peerID, manifest)
 
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil).
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil).
 		WithPartialSync(store, nil).
 		WithEntityGraph(egWriter, taxonomy)
 	h.recordDeltaRequest(peerID, claimedRoot, manifestIDs(manifest))
@@ -408,7 +409,7 @@ func TestDNAHandler_DeltaGRPC_DriftDiff_NonFatalOnWriteFailure(t *testing.T) {
 	store := NewInMemoryFragmentDeltaStore()
 	store.SetManifest(peerID, manifest)
 
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil).
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil).
 		WithPartialSync(store, nil).
 		WithEntityGraph(egWriter, taxonomy)
 	h.recordDeltaRequest(peerID, claimedRoot, manifestIDs(manifest))
@@ -473,7 +474,7 @@ func TestDNAHandler_FullSyncGRPC_DriftDiff_RoundTrip(t *testing.T) {
 		},
 	})
 
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), registeredService(t, peerID)).
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), registeredService(t, peerID)).
 		WithEntityGraph(egWriter, taxonomy)
 
 	stream := newTestDNAStream(peerContextWithCA(t, ca, peerID), chunks...)
@@ -525,7 +526,7 @@ func TestDNAHandler_FullSyncGRPC_DriftDiff_NonFatalOnWriteFailure(t *testing.T) 
 		Fields:         []*common.DriftDiffField{{Attribute: "running", Desired: true, Actual: false}},
 	}})
 
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), svc).
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), svc).
 		WithEntityGraph(egWriter, egtypes.DefaultTaxonomy())
 
 	stream := newTestDNAStream(peerContextWithCA(t, ca, peerID), chunks...)
@@ -566,7 +567,7 @@ func TestDNAHandler_FullSyncGRPC_DriftDiff_HostileFragmentIDRejected(t *testing.
 			Fields: []*common.DriftDiffField{{Attribute: "enabled", Desired: true, Actual: false}}},
 	})
 
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), registeredService(t, peerID)).
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), registeredService(t, peerID)).
 		WithEntityGraph(egWriter, egtypes.DefaultTaxonomy())
 
 	stream := newTestDNAStream(peerContextWithCA(t, ca, peerID), chunks...)
@@ -748,7 +749,7 @@ func TestDNAHandler_DeltaGRPC_EntityGraph_PartialDeltaKeepsUnchangedFragments(t 
 	store := NewInMemoryFragmentDeltaStore()
 	store.SetManifest("steward-P", manifest)
 
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil).
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil).
 		WithPartialSync(store, nil).
 		WithEntityGraph(egWriter, egtypes.DefaultTaxonomy())
 	ctx := peerContextWithCA(t, ca, "steward-P")
