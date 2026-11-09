@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cfgis/cfgms/features/modules/stdlib/script"
 )
 
 // SemanticVersion represents a semantic version following semver.org specification
@@ -160,6 +162,28 @@ type VersionedWorkflow struct {
 	// Publication is the stored passkey assertion that publishes this exact version. It
 	// is set only by the publish ceremony and is not part of the canonical form it signs.
 	Publication *Publication `yaml:"publication,omitempty" json:"publication,omitempty"`
+	// PreapprovedForAutomation is the opt-in to unattended, grant-run use: the workflow
+	// equivalent of the script header request. Every approval mode requires it, a
+	// published version included: publishing lets people run the workflow, it does not
+	// make it automation-runnable. It is part of the canonical form, so changing it
+	// invalidates a Publication and a Signature made over the version.
+	PreapprovedForAutomation bool `yaml:"preapproved_for_automation,omitempty" json:"preapproved_for_automation,omitempty"`
+	// Signature is a detached signature over WorkflowSignatureMessage of the canonical
+	// content hash, in the script signature format. It is how a git-synced version
+	// carries its publisher's signature in signed mode. It cannot be part of the form
+	// it signs, so it is excluded from the canonical form (canonicalExcludedFields).
+	Signature *script.ScriptSignature `yaml:"signature,omitempty" json:"signature,omitempty"`
+}
+
+// WorkflowSignatureDomain is the fixed prefix of the message a workflow signature
+// covers. Script signatures cover the raw script content with no prefix, so a
+// signature made for one kind never verifies as the other.
+const WorkflowSignatureDomain = "cfgms-workflow-signature-v1"
+
+// WorkflowSignatureMessage returns the bytes a workflow signature covers: the
+// domain prefix, a newline and the canonical content hash (CanonicalWorkflowHash).
+func WorkflowSignatureMessage(contentHash string) []byte {
+	return []byte(WorkflowSignatureDomain + "\n" + contentHash)
 }
 
 // Publication is the stored proof that an admin published one workflow version with a

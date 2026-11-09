@@ -15,6 +15,7 @@ import (
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
@@ -104,12 +105,18 @@ func trustedKeyEntries(cfg stewardtypes.ScriptSigningConfig) []script.TrustedKey
 	return out
 }
 
-// ContentApprovalEvaluator decides whether one resolved script version may run
-// under a grant. Evaluate is side-effect free.
+// WorkflowPublicationVerifier re-verifies the stored Publication of a workflow
+// version held by tenantID. Server.VerifyWorkflowPublication is the production
+// implementation; any error means the version is not published.
+type WorkflowPublicationVerifier func(ctx context.Context, tenantID string, vw *workflow.VersionedWorkflow) error
+
+// ContentApprovalEvaluator decides whether one resolved script or workflow version
+// may run under a grant. Evaluate and EvaluateWorkflow are side-effect free.
 type ContentApprovalEvaluator struct {
-	store     *ContentApprovalStore
-	keys      ScriptTrustedKeyResolver
-	privilege cfgconfig.ConfigStore
+	store       *ContentApprovalStore
+	keys        ScriptTrustedKeyResolver
+	privilege   cfgconfig.ConfigStore
+	publication WorkflowPublicationVerifier
 }
 
 // NewContentApprovalEvaluator builds an evaluator over the approval store, a
@@ -119,6 +126,14 @@ func NewContentApprovalEvaluator(store *ContentApprovalStore, keys ScriptTrusted
 		return nil, errors.New("content approval evaluator: approval store, key resolver and privilege store are required")
 	}
 	return &ContentApprovalEvaluator{store: store, keys: keys, privilege: privilege}, nil
+}
+
+// WithWorkflowPublicationVerifier wires the verifier EvaluateWorkflow uses for a
+// version that carries a Publication and returns the evaluator. Without it such a
+// version is denied: a publication that cannot be verified is not trusted.
+func (e *ContentApprovalEvaluator) WithWorkflowPublicationVerifier(v WorkflowPublicationVerifier) *ContentApprovalEvaluator {
+	e.publication = v
+	return e
 }
 
 // Evaluate decides whether vs, resolved from ownerTenant's library, may run for
@@ -233,14 +248,24 @@ func (e *ContentApprovalEvaluator) evaluateApprove(ctx context.Context, d Decisi
 // no trusted keys, or a version with no detached signature, falls back to the
 // approve logic. A signature that is present and does not verify is denied.
 func (e *ContentApprovalEvaluator) evaluateSigned(ctx context.Context, d Decision, runTenant string, vs *script.VersionedScript) (Decision, error) {
+	return e.decideSigned(ctx, d, runTenant, vs.Signature,
+		func(keys []script.TrustedKeyEntry) error { return verifyUnderKeys(vs, keys) },
+		func(d Decision) (Decision, error) { return e.evaluateApprove(ctx, d, vs) })
+}
+
+// decideSigned is the signed mode shared by both kinds. verify checks the
+// version's signature against a key allowlist and fallback is the approve logic
+// used when the owner trusts no keys or the version carries no signature.
+func (e *ContentApprovalEvaluator) decideSigned(ctx context.Context, d Decision, runTenant string, sig *script.ScriptSignature,
+	verify func([]script.TrustedKeyEntry) error, fallback func(Decision) (Decision, error)) (Decision, error) {
 	ownerKeys, err := e.keys(ctx, d.OwnerTenant)
 	if err != nil {
 		return failClosed(d, "trusted keys of the owner tenant could not be resolved", err)
 	}
-	if len(ownerKeys) == 0 || !hasDetachedMaterial(vs.Signature) {
-		return e.evaluateApprove(ctx, d, vs)
+	if len(ownerKeys) == 0 || !hasDetachedMaterial(sig) {
+		return fallback(d)
 	}
-	if err := verifyUnderKeys(vs, ownerKeys); err != nil {
+	if err := verify(ownerKeys); err != nil {
 		d.Reason = "signature does not verify under the trusted keys of the owner tenant"
 		return d, nil
 	}
@@ -250,7 +275,7 @@ func (e *ContentApprovalEvaluator) evaluateSigned(ctx context.Context, d Decisio
 			return failClosed(d, "trusted keys of the run tenant could not be resolved", err)
 		}
 		if len(runKeys) > 0 {
-			if err := verifyUnderKeys(vs, runKeys); err != nil {
+			if err := verify(runKeys); err != nil {
 				d.Reason = "signature does not verify under the trusted keys of the run tenant"
 				return d, nil
 			}
@@ -272,6 +297,130 @@ func hasDetachedMaterial(sig *script.ScriptSignature) bool {
 // Windows controller is never taken. Nothing is cached.
 func verifyUnderKeys(vs *script.VersionedScript, keys []script.TrustedKeyEntry) error {
 	return script.VerifyScriptSignature([]byte(vs.Content), vs.Signature, vs.Metadata.Shell, script.ModuleSigningConfig{
+		TrustMode:   script.TrustModeTrustedKeys,
+		TrustedKeys: keys,
+	})
+}
+
+// EvaluateWorkflow decides whether vw, resolved from ownerTenant's workflow
+// library, may run for runTenant under a grant. The mode, approval records and
+// trusted keys are the owner's. It never resolves a version itself and never
+// writes or sends anything.
+//
+// The order is: the canonical content hash is recomputed; a stored Publication
+// must verify (a bad one is denied, never a fallback); the version must opt in
+// with preapproved_for_automation in every mode; a verified Publication then
+// approves in every mode, and an unpublished version follows the owner's library
+// mode (signed, approve or comment). Sub-workflow steps do not exist in
+// restricted runs, so only the one version is evaluated.
+//
+// Every infrastructure failure returns a denied Decision together with the
+// error; a caller must treat either as "do not run".
+func (e *ContentApprovalEvaluator) EvaluateWorkflow(ctx context.Context, runTenant string, vw *workflow.VersionedWorkflow, ownerTenant string) (Decision, error) {
+	d := Decision{State: ContentDecisionDenied, OwnerTenant: ownerTenant}
+	if reason := checkWorkflowEvaluationInput(runTenant, vw, ownerTenant); reason != "" {
+		d.Reason = reason
+		return d, errors.New("content approval evaluator: " + reason)
+	}
+	hash, err := workflow.CanonicalWorkflowHash(vw)
+	if err != nil {
+		return failClosed(d, "workflow content hash could not be computed", err)
+	}
+	d.ContentHash = hash
+	d.ApprovalHash = WorkflowApprovalHash(ownerTenant, vw.Name, vw.SemanticVersion.String(), hash)
+
+	published := vw.Publication != nil
+	if published {
+		if denied, err := e.checkPublication(ctx, &d, ownerTenant, vw); denied {
+			return d, err
+		}
+	}
+	if !vw.PreapprovedForAutomation {
+		d.State, d.Reason = ContentDecisionPending, "workflow does not request pre-approval for automation"
+		return d, nil
+	}
+	if published {
+		d.State, d.Method, d.Reason = ContentDecisionApproved, ApprovalMethodWorkflowPublish, "workflow version is published and requests pre-approval for automation"
+		return d, nil
+	}
+
+	return e.evaluateUnpublishedWorkflow(ctx, d, runTenant, vw)
+}
+
+// evaluateUnpublishedWorkflow decides an opted-in, unpublished version by the
+// owner's library mode (comment, approve or signed). d carries the content hash
+// and approval hash computed by EvaluateWorkflow.
+func (e *ContentApprovalEvaluator) evaluateUnpublishedWorkflow(ctx context.Context, d Decision, runTenant string, vw *workflow.VersionedWorkflow) (Decision, error) {
+	mode, err := e.store.GetMode(ctx, d.OwnerTenant, LibraryKindWorkflow)
+	if err != nil {
+		return failClosed(d, "library approval mode could not be read", err)
+	}
+	switch mode {
+	case ApprovalModeComment:
+		d.State, d.Method, d.Reason = ContentDecisionApproved, ApprovalMethodComment, "workflow requests pre-approval and the library mode is comment"
+		return d, nil
+	case ApprovalModeApprove:
+		return e.evaluateWorkflowApprove(ctx, d, vw)
+	case ApprovalModeSigned:
+		return e.decideSigned(ctx, d, runTenant, vw.Signature,
+			func(keys []script.TrustedKeyEntry) error { return verifyWorkflowUnderKeys(vw, d.ContentHash, keys) },
+			func(d Decision) (Decision, error) { return e.evaluateWorkflowApprove(ctx, d, vw) })
+	}
+	d.Reason = "library approval mode is not recognised"
+	return d, nil
+}
+
+// checkWorkflowEvaluationInput returns why the call cannot be evaluated, or "".
+func checkWorkflowEvaluationInput(runTenant string, vw *workflow.VersionedWorkflow, ownerTenant string) string {
+	switch {
+	case runTenant == "":
+		return "run tenant is required"
+	case ownerTenant == "":
+		return "owner tenant is required"
+	case vw == nil || vw.Name == "":
+		return "a resolved workflow version is required"
+	}
+	return ""
+}
+
+// checkPublication denies a version whose stored Publication does not verify for
+// the owner tenant. It reports whether d is now final.
+func (e *ContentApprovalEvaluator) checkPublication(ctx context.Context, d *Decision, ownerTenant string, vw *workflow.VersionedWorkflow) (bool, error) {
+	if e.publication == nil {
+		var err error
+		*d, err = failClosed(*d, "workflow publication verifier is not available", errors.New("verifier is not wired"))
+		return true, err
+	}
+	if err := e.publication(ctx, ownerTenant, vw); err != nil {
+		d.Reason = "workflow publication does not verify"
+		return true, nil
+	}
+	return false, nil
+}
+
+// evaluateWorkflowApprove approves only on an approval record of kind workflow
+// bound to the owner-tenant approval hash.
+func (e *ContentApprovalEvaluator) evaluateWorkflowApprove(ctx context.Context, d Decision, vw *workflow.VersionedWorkflow) (Decision, error) {
+	rec, err := e.store.GetApproval(ctx, d.OwnerTenant, LibraryKindWorkflow, vw.Name, vw.SemanticVersion.String(), d.ApprovalHash)
+	if err != nil {
+		return failClosed(d, "approval record could not be read", err)
+	}
+	if rec == nil {
+		d.State, d.Reason, d.AwaitingApproval = ContentDecisionPending, "no approval exists for this exact version and content", true
+		return d, nil
+	}
+	d.State, d.Method, d.Reason = ContentDecisionApproved, rec.Method, "an approval is recorded for this exact version and content"
+	return d, nil
+}
+
+// verifyWorkflowUnderKeys verifies the workflow's detached signature over the
+// domain-separated message for contentHash against a trusted key allowlist. The
+// message carries the workflow domain prefix, so a script signature never
+// verifies here and a workflow signature never verifies as a script's. The shell
+// is empty: a workflow is never a PowerShell script, so only the detached path
+// runs.
+func verifyWorkflowUnderKeys(vw *workflow.VersionedWorkflow, contentHash string, keys []script.TrustedKeyEntry) error {
+	return script.VerifyScriptSignature(workflow.WorkflowSignatureMessage(contentHash), vw.Signature, "", script.ModuleSigningConfig{
 		TrustMode:   script.TrustModeTrustedKeys,
 		TrustedKeys: keys,
 	})
