@@ -308,7 +308,7 @@ func TestAutomationRun_EveryRouteRefusesWithoutAValidRun(t *testing.T) {
 		}
 		checked++
 		pathFor := func(runID string) string {
-			return strings.Replace(rt.template, "{run_id}", runID, 1)
+			return automationTemplatePath(rt.template, runID)
 		}
 		hitsBefore := f.hits
 
@@ -339,7 +339,7 @@ func TestAutomationRun_EveryRouteRefusesWithoutAValidRun(t *testing.T) {
 		if !strings.Contains(rt.template, "{run_id}") {
 			continue
 		}
-		rec := f.do(rt.method, strings.Replace(rt.template, "{run_id}", expiring, 1), f.cred, nil)
+		rec := f.do(rt.method, automationTemplatePath(rt.template, expiring), f.cred, nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "expired: %s %s", rt.method, rt.template)
 	}
 	assert.Equal(t, 0, f.hits)
@@ -637,7 +637,7 @@ func TestAutomationRun_RegisteredRoutesAreWrappedAndInTheTable(t *testing.T) {
 		if rt.template == automationBeginTemplate {
 			continue
 		}
-		rec := f.do(rt.method, strings.Replace(rt.template, "{run_id}", strings.Repeat("0", 32), 1), f.cred, nil)
+		rec := f.do(rt.method, automationTemplatePath(rt.template, strings.Repeat("0", 32)), f.cred, nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%s %s", rt.method, rt.template)
 		assert.Equal(t, "AUTOMATION_RUN_DENIED", codeOf(t, rec), "%s %s", rt.method, rt.template)
 	}
