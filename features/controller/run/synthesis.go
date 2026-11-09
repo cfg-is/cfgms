@@ -178,17 +178,72 @@ func SynthesizeScriptRunForDevices(
 	paramPlatformBindings map[string]string,
 	requiredAPIScope []string,
 ) (string, error) {
+	return synthesizeScriptRun(ctx, manager, executionQueue, devices, tenantID, createdBy, filter,
+		scriptRef, scriptVersion, shell, runtimeParams, scriptMeta, paramPlatformBindings, requiredAPIScope, nil)
+}
+
+// ScriptRunPin binds a synthesized run to the library object an approval
+// evaluation decided on and to the automation run that started it (ADR-036).
+// OwnerTenant, Version and ApprovalHash pin every queued command to exactly that
+// owner-library version; GuardRunID and GuardGrantID are the persisted guard
+// reference the queue re-checks at dequeue and before dispatch.
+type ScriptRunPin struct {
+	OwnerTenant  string
+	Version      string
+	ApprovalHash string
+	GuardRunID   string
+	GuardGrantID string
+}
+
+// SynthesizeScriptRunForDevicesPinned is SynthesizeScriptRunForDevices for a run
+// started under an automation grant: every queued command carries pin (the
+// evaluated owner tenant, version and approval hash) and the guard reference, and
+// scriptVersion is pin.Version. The run is not stamped with an operator principal,
+// since a grant is not an operator and must not pass the locked-steward operator
+// gate. A pin missing any field is refused before anything is created.
+func SynthesizeScriptRunForDevicesPinned(
+	ctx context.Context,
+	manager *Manager,
+	executionQueue *scriptmodule.ExecutionQueue,
+	devices []fleet.StewardResult,
+	tenantID, createdBy string,
+	filter fleet.Filter,
+	scriptRef string,
+	shell scriptmodule.ShellType,
+	runtimeParams map[string]string,
+	scriptMeta *scriptmodule.ScriptMetadata,
+	pin ScriptRunPin,
+) (string, error) {
+	if pin.OwnerTenant == "" || pin.Version == "" || pin.ApprovalHash == "" || pin.GuardRunID == "" || pin.GuardGrantID == "" {
+		return "", errors.New("synthesize script run: a pinned run needs owner tenant, version, approval hash, run id and grant id")
+	}
+	return synthesizeScriptRun(ctx, manager, executionQueue, devices, tenantID, createdBy, filter,
+		scriptRef, pin.Version, shell, runtimeParams, scriptMeta, nil, nil, &pin)
+}
+
+// synthesizeScriptRun is the shared body: pin is nil for an operator run.
+func synthesizeScriptRun(
+	ctx context.Context,
+	manager *Manager,
+	executionQueue *scriptmodule.ExecutionQueue,
+	devices []fleet.StewardResult,
+	tenantID, createdBy string,
+	filter fleet.Filter,
+	scriptRef, scriptVersion string,
+	shell scriptmodule.ShellType,
+	runtimeParams map[string]string,
+	scriptMeta *scriptmodule.ScriptMetadata,
+	paramPlatformBindings map[string]string,
+	requiredAPIScope []string,
+	pin *ScriptRunPin,
+) (string, error) {
 	filter.TenantID = tenantID
 
 	// Resolve every device's parameters before creating anything, so a resolution
 	// failure leaves no run, job or queued execution behind.
-	resolvedByDevice := make(map[string]map[string]string, len(devices))
-	for _, device := range devices {
-		resolved, err := ResolveParams(nil, scriptMeta, paramPlatformBindings, runtimeParams, device.DNAAttributes)
-		if err != nil {
-			return "", fmt.Errorf("synthesize script run: resolve params for device %s: %w", device.ID, err)
-		}
-		resolvedByDevice[device.ID] = resolved
+	resolvedByDevice, err := resolveDeviceParams(devices, scriptMeta, paramPlatformBindings, runtimeParams)
+	if err != nil {
+		return "", err
 	}
 
 	runID := uuid.New().String()
@@ -229,29 +284,11 @@ func SynthesizeScriptRunForDevices(
 			return "", rollbackSynthesis(manager, executionQueue, runID, progress, fmt.Errorf("synthesize script run: create job for device %s: %w", device.ID, err))
 		}
 
-		resolved := resolvedByDevice[device.ID]
-
-		meta := map[string]interface{}{
-			"workflow_run_id": runID,
-			"job_id":          jobID,
-			"tenant_id":       tenantID,
-		}
-		if idempotent {
-			meta["idempotent"] = true
-		}
-		stampOperatorPrincipal(meta, createdBy)
-		if len(requiredAPIScope) > 0 {
-			meta["required_api_scope"] = requiredAPIScope
-		}
-
-		qe := &scriptmodule.QueuedExecution{
-			ExecutionID:   executionID,
-			ScriptRef:     scriptRef,
-			ScriptVersion: scriptVersion,
-			Shell:         shell,
-			Parameters:    resolved,
-			Metadata:      meta,
-		}
+		qe := newScriptExecution(scriptExecutionSpec{
+			executionID: executionID, runID: runID, jobID: jobID, tenantID: tenantID, createdBy: createdBy,
+			scriptRef: scriptRef, scriptVersion: scriptVersion, shell: shell, params: resolvedByDevice[device.ID],
+			idempotent: idempotent, requiredAPIScope: requiredAPIScope, pin: pin,
+		})
 		if err := progress.enqueue(executionQueue, device.ID, qe); err != nil {
 			return "", rollbackSynthesis(manager, executionQueue, runID, progress, fmt.Errorf("synthesize script run: enqueue for device %s: %w", device.ID, err))
 		}
@@ -262,6 +299,64 @@ func SynthesizeScriptRunForDevices(
 	}
 
 	return runID, nil
+}
+
+// resolveDeviceParams resolves the parameters of every device, failing on the first
+// device whose parameters cannot be resolved.
+func resolveDeviceParams(devices []fleet.StewardResult, scriptMeta *scriptmodule.ScriptMetadata, paramPlatformBindings, runtimeParams map[string]string) (map[string]map[string]string, error) {
+	resolvedByDevice := make(map[string]map[string]string, len(devices))
+	for _, device := range devices {
+		resolved, err := ResolveParams(nil, scriptMeta, paramPlatformBindings, runtimeParams, device.DNAAttributes)
+		if err != nil {
+			return nil, fmt.Errorf("synthesize script run: resolve params for device %s: %w", device.ID, err)
+		}
+		resolvedByDevice[device.ID] = resolved
+	}
+	return resolvedByDevice, nil
+}
+
+// scriptExecutionSpec is what one queued script execution of a synthesized run is
+// built from. pin is nil for an operator run.
+type scriptExecutionSpec struct {
+	executionID, runID, jobID, tenantID, createdBy string
+	scriptRef, scriptVersion                       string
+	shell                                          scriptmodule.ShellType
+	params                                         map[string]string
+	idempotent                                     bool
+	requiredAPIScope                               []string
+	pin                                            *ScriptRunPin
+}
+
+// newScriptExecution builds the queue entry of one device. An operator run records
+// the operator on it; a pinned (grant) run carries the pin and the guard reference
+// instead and is never stamped with an operator principal.
+func newScriptExecution(spec scriptExecutionSpec) *scriptmodule.QueuedExecution {
+	meta := map[string]interface{}{
+		"workflow_run_id": spec.runID,
+		"job_id":          spec.jobID,
+		"tenant_id":       spec.tenantID,
+	}
+	if spec.idempotent {
+		meta["idempotent"] = true
+	}
+	if spec.pin == nil {
+		stampOperatorPrincipal(meta, spec.createdBy)
+	}
+	if len(spec.requiredAPIScope) > 0 {
+		meta["required_api_scope"] = spec.requiredAPIScope
+	}
+	qe := &scriptmodule.QueuedExecution{
+		ExecutionID:   spec.executionID,
+		ScriptRef:     spec.scriptRef,
+		ScriptVersion: spec.scriptVersion,
+		Shell:         spec.shell,
+		Parameters:    spec.params,
+		Metadata:      meta,
+	}
+	if spec.pin != nil {
+		qe.WithPin(spec.pin.OwnerTenant, spec.pin.Version, spec.pin.ApprovalHash).WithGuard(spec.pin.GuardRunID, spec.pin.GuardGrantID)
+	}
+	return qe
 }
 
 // SynthesizeCommandRun resolves matching devices and creates a RunRecord plus one

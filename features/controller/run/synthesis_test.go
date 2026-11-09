@@ -584,3 +584,54 @@ func TestSynthesizeCommandRunForDevices_SetsQueuedTimeout(t *testing.T) {
 	require.Len(t, queued, 1)
 	assert.Equal(t, 170*time.Second, queued[0].Timeout)
 }
+
+func TestSynthesizeScriptRunForDevicesPinned_CarriesPinAndGuard(t *testing.T) {
+	manager := newTestSynthesisManager(t)
+	queue := newTestExecutionQueue()
+	pin := ScriptRunPin{OwnerTenant: "msp", Version: "1.0.0", ApprovalHash: "hash-1", GuardRunID: "run-1", GuardGrantID: "grant-1"}
+
+	runID, err := SynthesizeScriptRunForDevicesPinned(context.Background(), manager, queue, rollbackDevices(), "t", "grant-1",
+		fleet.Filter{}, "s1", scriptmodule.ShellBash, map[string]string{"p": "a; rm -rf /"}, nil, pin)
+	require.NoError(t, err)
+
+	for _, dev := range []string{"device-001", "device-002"} {
+		queued := queue.PeekForDevice(dev)
+		require.Len(t, queued, 1)
+		md := queued[0].Metadata
+		assert.Equal(t, "msp", md[scriptmodule.MetaPinOwnerTenant])
+		assert.Equal(t, "1.0.0", md[scriptmodule.MetaPinVersion])
+		assert.Equal(t, "hash-1", md[scriptmodule.MetaPinApprovalHash])
+		assert.Equal(t, "run-1", md[scriptmodule.MetaGuardRunID])
+		assert.Equal(t, "grant-1", md[scriptmodule.MetaGuardGrantID])
+		assert.NotContains(t, md, scriptmodule.MetaOperatorPrincipal, "a grant is not an operator")
+		assert.Equal(t, "a; rm -rf /", queued[0].Parameters["p"], "the value stays data")
+	}
+	rec, err := manager.GetRun(context.Background(), runID)
+	require.NoError(t, err)
+	assert.Equal(t, "grant-1", rec.CreatedBy)
+}
+
+func TestSynthesizeScriptRunForDevicesPinned_IncompletePinCreatesNothing(t *testing.T) {
+	complete := ScriptRunPin{OwnerTenant: "msp", Version: "1.0.0", ApprovalHash: "h", GuardRunID: "r", GuardGrantID: "g"}
+	for name, mutate := range map[string]func(*ScriptRunPin){
+		"owner":    func(p *ScriptRunPin) { p.OwnerTenant = "" },
+		"version":  func(p *ScriptRunPin) { p.Version = "" },
+		"hash":     func(p *ScriptRunPin) { p.ApprovalHash = "" },
+		"run id":   func(p *ScriptRunPin) { p.GuardRunID = "" },
+		"grant id": func(p *ScriptRunPin) { p.GuardGrantID = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			manager := newTestSynthesisManager(t)
+			queue := newTestExecutionQueue()
+			pin := complete
+			mutate(&pin)
+			_, err := SynthesizeScriptRunForDevicesPinned(context.Background(), manager, queue, rollbackDevices(), "t", "g",
+				fleet.Filter{}, "s1", scriptmodule.ShellBash, nil, nil, pin)
+			require.Error(t, err)
+			runs, lerr := manager.store.ListRuns("t", 10, 0)
+			require.NoError(t, lerr)
+			assert.Empty(t, runs)
+			assert.Empty(t, queue.PeekForDevice("device-001"))
+		})
+	}
+}

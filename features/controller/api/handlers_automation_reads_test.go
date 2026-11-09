@@ -172,7 +172,10 @@ func TestAutomationReads_RouteTableIsTheClosedSet(t *testing.T) {
 		}
 		got = append(got, rt.method+" "+rt.template)
 	}
-	want := []string{"POST " + automationBeginTemplate, "POST " + automationEndTemplate}
+	want := []string{
+		"POST " + automationBeginTemplate, "POST " + automationEndTemplate,
+		"POST " + automationScriptsTemplate, "GET " + automationScriptsTemplate, // handlers_automation_script_run_test.go
+	}
 	for _, tpl := range automationReadTemplates {
 		want = append(want, "GET "+tpl)
 	}
@@ -396,8 +399,8 @@ func TestAutomationReads_NoSecretBearingFields(t *testing.T) {
 
 	checked := 0
 	for _, rt := range automationRouteTable() {
-		if rt.method != http.MethodGet || !strings.HasPrefix(rt.template, readsPathPrefix) {
-			continue
+		if rt.method != http.MethodGet || !strings.HasPrefix(rt.template, readsPathPrefix) || rt.template == automationScriptsTemplate {
+			continue // the script list needs a library; handlers_automation_script_run_test.go covers it
 		}
 		path := strings.NewReplacer("{run_id}", runID, "{id}", f.c1Steward, "{result_run_id}", "mine").Replace(rt.template)
 		rec := f.get(path, f.cred)
