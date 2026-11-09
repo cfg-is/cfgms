@@ -4,18 +4,24 @@ package nodes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/secrets/providers/steward"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
@@ -1583,4 +1589,740 @@ func TestScriptNode_Execute_LibraryRunCarriesTenantID(t *testing.T) {
 	entries := q.PeekForDevice("device-1")
 	require.Len(t, entries, 1)
 	assert.Equal(t, "tenant-lib", entries[0].Metadata["tenant_id"])
+}
+
+// --- Restricted script step (Issue #5851) -----------------------------------
+//
+// These tests run the real execution queue, execution monitor, tenant script
+// library (over real storage), fleet query and workflow engine. The "steward" is a
+// goroutine that does what a connected steward's session does on the controller:
+// dequeue, prepare the payload, and acknowledge the result.
+
+const (
+	rsRunTenant   = "client-1"
+	rsOwnerTenant = "msp"
+	rsDevice      = "dev-1"
+)
+
+// libraryApprover is a ScriptApprover over the real tenant library: it resolves
+// the owner's version and returns the pin the queue verifies. It stands in for
+// the evaluator-backed adapter, which is built by its own story.
+type libraryApprover struct {
+	repo  *script.TenantScriptRepository
+	owner string
+	state workflow.ScriptApprovalState
+	err   error
+
+	mu       sync.Mutex
+	asked    int
+	pendings []workflow.ScriptApprovalDecision
+}
+
+func (a *libraryApprover) Approve(_ context.Context, runTenant, ceiling, id, version string) (workflow.ScriptApprovalDecision, error) {
+	a.mu.Lock()
+	a.asked++
+	a.mu.Unlock()
+	if a.err != nil {
+		return workflow.ScriptApprovalDecision{}, a.err
+	}
+	vs, err := a.repo.GetForTenant(a.owner, id, version)
+	if err != nil {
+		return workflow.ScriptApprovalDecision{State: workflow.ScriptApprovalDenied, Reason: "not in library"}, nil
+	}
+	return workflow.ScriptApprovalDecision{
+		State:        a.state,
+		OwnerTenant:  a.owner,
+		Version:      vs.Metadata.Version.String(),
+		ApprovalHash: script.ScriptApprovalHash(a.owner, vs),
+	}, nil
+}
+
+func (a *libraryApprover) RecordPending(_ context.Context, _ string, d workflow.ScriptApprovalDecision) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.pendings = append(a.pendings, d)
+	return nil
+}
+
+func (a *libraryApprover) askedCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.asked
+}
+
+func (a *libraryApprover) pendingCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.pendings)
+}
+
+type restrictedFixture struct {
+	repo     *script.TenantScriptRepository
+	queue    *script.ExecutionQueue
+	monitor  *script.ExecutionMonitor
+	approver *libraryApprover
+	revoked  atomic.Bool
+}
+
+func newRestrictedFixture(t *testing.T) *restrictedFixture {
+	t.Helper()
+	sm := pkgtesting.SetupTestStorage(t)
+	repo, err := script.NewTenantScriptRepository(sm.GetConfigStore())
+	require.NoError(t, err)
+	f := &restrictedFixture{repo: repo, monitor: script.NewExecutionMonitor()}
+	f.queue = script.NewExecutionQueue(f.monitor, nil, 0, "", nil, repo, 0)
+	t.Cleanup(f.queue.Stop)
+	f.queue.SetGuardResolver(func(_ context.Context, runID, grantID string) error {
+		if f.revoked.Load() {
+			return fmt.Errorf("grant %s of run %s is revoked", grantID, runID)
+		}
+		return nil
+	})
+	f.approver = &libraryApprover{repo: repo, owner: rsOwnerTenant, state: workflow.ScriptApprovalApproved}
+	return f
+}
+
+func libraryScript(id, content string, params ...script.ScriptParameter) *script.VersionedScript {
+	return &script.VersionedScript{
+		Metadata: &script.ScriptMetadata{
+			ID: id, Name: id, Version: &script.Version{Major: 1},
+			Shell: script.ShellBash, Platform: []string{"linux"}, Parameters: params,
+		},
+		Content:   content,
+		Signature: &script.ScriptSignature{Algorithm: "rsa-sha256", Signature: "c2ln", PublicKey: "pem"},
+	}
+}
+
+func (f *restrictedFixture) put(t *testing.T, tenant, id, content string, params ...script.ScriptParameter) *script.VersionedScript {
+	t.Helper()
+	gr, err := f.repo.ForTenant(tenant)
+	require.NoError(t, err)
+	require.NoError(t, gr.Create(libraryScript(id, content, params...)))
+	vs, err := gr.Get(id, "1.0.0")
+	require.NoError(t, err)
+	return vs
+}
+
+func (f *restrictedFixture) replace(t *testing.T, tenant, id, content string) {
+	t.Helper()
+	gr, err := f.repo.ForTenant(tenant)
+	require.NoError(t, err)
+	require.NoError(t, gr.Delete(id, "1.0.0"))
+	require.NoError(t, gr.Create(libraryScript(id, content)))
+}
+
+// fleetOf is a real in-memory fleet query holding the given devices, by tenant.
+func fleetOf(devicesByTenant map[string]string) fleet.FleetQuery {
+	var stewards []fleet.StewardData
+	for id, tenant := range devicesByTenant {
+		stewards = append(stewards, fleet.StewardData{ID: id, TenantID: tenant, Status: "online", LastHeartbeat: time.Now()})
+	}
+	return fleet.NewMemoryQuery(&testStewardProvider{stewards: stewards})
+}
+
+// unscopedFleet is a fleet source that fails to apply the tenant scope: it runs the
+// real query with the filter's tenant removed. It models a backend bug the node's
+// own device check must still catch.
+type unscopedFleet struct{ inner fleet.FleetQuery }
+
+func (u unscopedFleet) Search(ctx context.Context, f fleet.Filter) ([]fleet.StewardResult, error) {
+	f.TenantID = ""
+	return u.inner.Search(ctx, f)
+}
+
+func (u unscopedFleet) Count(ctx context.Context, f fleet.Filter) (int, error) {
+	f.TenantID = ""
+	return u.inner.Count(ctx, f)
+}
+
+func (f *restrictedFixture) config(version string) *ScriptStepConfig {
+	return &ScriptStepConfig{ScriptID: "inventory", ScriptVersion: version, Devices: []string{rsDevice}}
+}
+
+func (f *restrictedFixture) node(cfg *ScriptStepConfig, fq fleet.FleetQuery) *ScriptNode {
+	n := NewScriptNode("collect", "collect", cfg, f.repo, f.monitor, nil)
+	n.SetExecutionQueue(f.queue)
+	n.SetFleetQuery(fq)
+	n.SetTenantID(rsRunTenant)
+	n.SetRestricted(workflow.RestrictedRun{RunID: "run-1", GrantID: "grant-1", Ceiling: rsOwnerTenant})
+	n.SetApprover(f.approver)
+	n.SetResultWaitTimeout(10 * time.Second)
+	return n
+}
+
+func (f *restrictedFixture) executor() *ScriptStepExecutor {
+	e := NewScriptStepExecutor(f.repo, f.monitor, nil)
+	e.SetExecutionQueue(f.queue)
+	e.SetFleetQuery(fleetOf(map[string]string{rsDevice: rsRunTenant}))
+	e.SetApprover(f.approver)
+	e.SetResultWaitTimeout(10 * time.Second)
+	return e
+}
+
+func (f *restrictedFixture) queued() int { return f.queue.GetTotalQueueDepth() }
+
+type stewardRun struct {
+	entry    *script.QueuedExecution
+	prepared *script.PreparedExecution
+	prepErr  error
+}
+
+// serveSteward drains the device's queue the way a steward session does: dequeue,
+// prepare the payload (the second guard check and the pin verification happen
+// here), and acknowledge the result. A failed prepare is acknowledged as a failure.
+func (f *restrictedFixture) serveSteward(t *testing.T, device, stdout string) <-chan stewardRun {
+	t.Helper()
+	runs := make(chan stewardRun, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	t.Cleanup(func() { cancel(); <-done })
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			entries, err := f.queue.DequeueForDevice(device)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				prep, prepErr := f.queue.PrepareExecutionForDevice(ctx, device, rsRunTenant, e)
+				runs <- stewardRun{entry: e, prepared: prep, prepErr: prepErr}
+				state, result := script.QueueStateCompleted, &script.ExecutionResult{ExitCode: 0, Stdout: stdout}
+				if prepErr != nil {
+					state, result = script.QueueStateFailed, &script.ExecutionResult{ExitCode: 1, Stderr: "refused"}
+				}
+				_ = f.queue.AcknowledgeCompletion(e.ExecutionID, device, state, result) //nolint:errcheck // a guard-cancelled entry is already terminal
+			}
+		}
+	}()
+	return runs
+}
+
+// waitQueued waits until the device has one queued entry and returns it.
+func (f *restrictedFixture) waitQueued(t *testing.T, device string) *script.QueuedExecution {
+	t.Helper()
+	var got *script.QueuedExecution
+	require.Eventually(t, func() bool {
+		if peek := f.queue.PeekForDevice(device); len(peek) == 1 {
+			got = peek[0]
+			return true
+		}
+		return false
+	}, 5*time.Second, 5*time.Millisecond, "the step never queued a command")
+	return got
+}
+
+type nodeResult struct {
+	out workflow.NodeOutput
+	err error
+}
+
+func runNodeAsync(n *ScriptNode) <-chan nodeResult {
+	ch := make(chan nodeResult, 1)
+	go func() {
+		out, err := n.Execute(context.Background(), workflow.NodeInput{Context: map[string]interface{}{"workflow_run_id": "run-1"}})
+		ch <- nodeResult{out, err}
+	}()
+	return ch
+}
+
+func receive[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out")
+		panic("unreachable")
+	}
+}
+
+// [REQUIRED TEST] A restricted node refuses an empty version, SecretBindings, an
+// undeclared param name, a value outside AllowedValues, and an inline form, and
+// queues nothing.
+func TestRestrictedNode_RefusesForbiddenForms(t *testing.T) {
+	mode := script.ScriptParameter{Name: "mode", Type: "string", AllowedValues: []string{"fast", "full"}}
+	free := script.ScriptParameter{Name: "label", Type: "string"}
+	cases := []struct {
+		name    string
+		mutate  func(c *ScriptStepConfig)
+		wantErr string
+	}{
+		{"empty version", func(c *ScriptStepConfig) { c.ScriptVersion = "" }, "explicit script_version"},
+		{"secret bindings", func(c *ScriptStepConfig) {
+			c.SecretBindings = []script.ParamBinding{{Name: "TOKEN", From: script.ParamSourceSecretStore, Key: "k"}}
+		}, "secret bindings"},
+		{"inline script", func(c *ScriptStepConfig) { c.InlineScript = "echo hi" }, "inline script"},
+		{"undeclared param", func(c *ScriptStepConfig) { c.Parameters = map[string]string{"extra": "x"} }, "not declared"},
+		{"value outside AllowedValues", func(c *ScriptStepConfig) { c.Parameters = map[string]string{"mode": "wipe"} }, "allowed values"},
+		{"template value", func(c *ScriptStepConfig) { c.Parameters = map[string]string{"label": "{{ .inputs.x }}"} }, "literal"},
+		{"variable reference value", func(c *ScriptStepConfig) { c.Parameters = map[string]string{"label": "${HOME}"} }, "literal"},
+		{"ephemeral API key", func(c *ScriptStepConfig) { c.GenerateAPIKey = true }, "ephemeral API key"},
+		{"shell differs from the approved script", func(c *ScriptStepConfig) { c.Shell = script.ShellPowerShell }, "shell"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRestrictedFixture(t)
+			f.put(t, rsOwnerTenant, "inventory", "echo ok\n", mode, free)
+			cfg := f.config("1.0.0")
+			tc.mutate(cfg)
+			n := f.node(cfg, fleetOf(map[string]string{rsDevice: rsRunTenant}))
+
+			out, err := n.Execute(context.Background(), workflow.NodeInput{})
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.False(t, out.Success)
+			assert.Zero(t, f.queued(), "a refused step queues nothing")
+		})
+	}
+}
+
+// [REQUIRED TEST] The path and command forms, and any key the restricted step does
+// not know, are refused on the raw step config, before parsing drops them.
+func TestValidateRestrictedStepConfig_RefusesPathAndCommandForms(t *testing.T) {
+	good := map[string]interface{}{
+		"script_id": "inventory", "script_version": "1.0.0",
+		"parameters": map[string]interface{}{"mode": "fast", "n": 3, "on": true},
+		"devices":    []interface{}{"d1"},
+	}
+	require.NoError(t, validateRestrictedStepConfig(good))
+
+	for _, key := range []string{
+		"inline_script", "script_path", "path", "file", "script_file", "command", "cmd", "args",
+		"argument_list", "secret_bindings", "generate_api_key", "api_key_ttl", "on_success", "surprise",
+	} {
+		t.Run(key, func(t *testing.T) {
+			cfg := map[string]interface{}{"script_id": "inventory", "script_version": "1.0.0", key: "x"}
+			err := validateRestrictedStepConfig(cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), key)
+		})
+	}
+
+	t.Run("non-scalar parameter", func(t *testing.T) {
+		cfg := map[string]interface{}{"parameters": map[string]interface{}{"x": []interface{}{"a"}}}
+		require.Error(t, validateRestrictedStepConfig(cfg))
+	})
+	t.Run("parameters not a mapping", func(t *testing.T) {
+		require.Error(t, validateRestrictedStepConfig(map[string]interface{}{"parameters": "x"}))
+	})
+}
+
+// [REQUIRED TEST] The step executor of a restricted execution refuses a command
+// form before the node exists, and queues nothing.
+func TestRestrictedStepExecutor_RefusesCommandForm(t *testing.T) {
+	f := newRestrictedFixture(t)
+	f.put(t, rsOwnerTenant, "inventory", "echo ok\n")
+	exec := &workflow.WorkflowExecution{
+		ID: "x1", TenantID: rsRunTenant, Variables: map[string]interface{}{},
+		Restricted: &workflow.RestrictedRun{RunID: "run-1", GrantID: "grant-1"},
+	}
+	step := workflow.Step{Name: "collect", Type: workflow.StepTypeScript, Config: map[string]interface{}{
+		"script_id": "inventory", "script_version": "1.0.0", "command": "rm -rf /", "devices": []interface{}{rsDevice},
+	}}
+
+	res, err := f.executor().ExecuteStep(context.Background(), step, exec)
+
+	require.Error(t, err)
+	assert.Equal(t, workflow.StatusFailed, res.Status)
+	assert.Contains(t, err.Error(), "command")
+	assert.Zero(t, f.queued())
+}
+
+// [REQUIRED TEST] A restricted node with no approver refuses; a pending or denied
+// decision, an approver error and an incomplete decision fail the step with nothing
+// queued, and a pending decision is recorded.
+func TestRestrictedNode_ApprovalGate(t *testing.T) {
+	devices := map[string]string{rsDevice: rsRunTenant}
+
+	t.Run("no approver", func(t *testing.T) {
+		f := newRestrictedFixture(t)
+		f.put(t, rsOwnerTenant, "inventory", "echo ok\n")
+		n := f.node(f.config("1.0.0"), fleetOf(devices))
+		n.SetApprover(nil)
+
+		_, err := n.Execute(context.Background(), workflow.NodeInput{})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no script approver")
+		assert.Zero(t, f.queued())
+	})
+
+	t.Run("pending is recorded and queues nothing", func(t *testing.T) {
+		f := newRestrictedFixture(t)
+		f.put(t, rsOwnerTenant, "inventory", "echo ok\n")
+		f.approver.state = workflow.ScriptApprovalPending
+		n := f.node(f.config("1.0.0"), fleetOf(devices))
+
+		out, err := n.Execute(context.Background(), workflow.NodeInput{})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "pending approval")
+		assert.False(t, out.Success)
+		assert.Equal(t, 1, f.approver.pendingCount(), "a pending decision goes to the record-and-notify hook once")
+		assert.Zero(t, f.queued())
+	})
+
+	t.Run("denied queues nothing and records nothing", func(t *testing.T) {
+		f := newRestrictedFixture(t)
+		f.put(t, rsOwnerTenant, "inventory", "echo ok\n")
+		f.approver.state = workflow.ScriptApprovalDenied
+		n := f.node(f.config("1.0.0"), fleetOf(devices))
+
+		_, err := n.Execute(context.Background(), workflow.NodeInput{})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not approved")
+		assert.Zero(t, f.approver.pendingCount())
+		assert.Zero(t, f.queued())
+	})
+
+	t.Run("approver error fails closed without leaking the cause", func(t *testing.T) {
+		f := newRestrictedFixture(t)
+		f.put(t, rsOwnerTenant, "inventory", "echo ok\n")
+		f.approver.err = errors.New("store at /secret/path exploded")
+		n := f.node(f.config("1.0.0"), fleetOf(devices))
+
+		_, err := n.Execute(context.Background(), workflow.NodeInput{})
+
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "/secret/path")
+		assert.Zero(t, f.queued())
+	})
+
+	t.Run("unknown script is denied", func(t *testing.T) {
+		f := newRestrictedFixture(t)
+		n := f.node(f.config("1.0.0"), fleetOf(devices))
+
+		_, err := n.Execute(context.Background(), workflow.NodeInput{})
+
+		require.Error(t, err)
+		assert.Zero(t, f.queued())
+	})
+}
+
+// [REQUIRED TEST] A restricted node passes the approver's owner tenant, version and
+// approval hash to the queue, plus the guard reference, so an edit between approval
+// and queue prepare makes the queue refuse.
+func TestRestrictedNode_PinAndGuardReachTheQueue_EditBeforePrepareRefuses(t *testing.T) {
+	f := newRestrictedFixture(t)
+	vs := f.put(t, rsOwnerTenant, "inventory", "echo ok\n")
+	n := f.node(f.config("1.0.0"), fleetOf(map[string]string{rsDevice: rsRunTenant}))
+
+	result := runNodeAsync(n)
+	entry := f.waitQueued(t, rsDevice)
+
+	assert.Equal(t, rsOwnerTenant, entry.Metadata[script.MetaPinOwnerTenant])
+	assert.Equal(t, "1.0.0", entry.Metadata[script.MetaPinVersion])
+	assert.Equal(t, script.ScriptApprovalHash(rsOwnerTenant, vs), entry.Metadata[script.MetaPinApprovalHash])
+	assert.Equal(t, "run-1", entry.Metadata[script.MetaGuardRunID], "the persisted guard reference carries the run id")
+	assert.Equal(t, "grant-1", entry.Metadata[script.MetaGuardGrantID], "and the grant id")
+	assert.Equal(t, rsRunTenant, entry.Metadata["tenant_id"])
+	assert.Equal(t, script.ShellBash, entry.Shell, "the shell comes from the approved script")
+
+	// The script is edited after the approval and before the queue prepares it.
+	f.replace(t, rsOwnerTenant, "inventory", "echo evil\n")
+	steward := f.serveSteward(t, rsDevice, "")
+
+	run := receive(t, steward)
+	require.ErrorIs(t, run.prepErr, script.ErrPinMismatch)
+	assert.Nil(t, run.prepared, "the edited script is never sent")
+
+	res := receive(t, result)
+	require.Error(t, res.err)
+	assert.False(t, res.out.Success)
+}
+
+// [REQUIRED TEST] The persisted guard reference is set on commands the node queues,
+// so revoking the grant cancels the queued commands of the workflow.
+func TestRestrictedNode_RevokingCancelsQueuedCommands(t *testing.T) {
+	f := newRestrictedFixture(t)
+	f.put(t, rsOwnerTenant, "inventory", "echo ok\n")
+	n := f.node(f.config("1.0.0"), fleetOf(map[string]string{rsDevice: rsRunTenant}))
+
+	result := runNodeAsync(n)
+	f.waitQueued(t, rsDevice)
+	f.revoked.Store(true)
+	steward := f.serveSteward(t, rsDevice, "")
+
+	// The queue evaluates the guard at dequeue: the revoked run's command is
+	// cancelled and never handed to the steward.
+	res := receive(t, result)
+	require.Error(t, res.err)
+	assert.False(t, res.out.Success)
+	select {
+	case run := <-steward:
+		t.Fatalf("a revoked run's command reached the steward: %+v", run.prepErr)
+	default:
+	}
+	devResults := res.out.Data["results"].(map[string]interface{})
+	assert.Equal(t, string(script.StatusCancelled), devResults[rsDevice].(map[string]interface{})["status"])
+	assert.Zero(t, f.queued())
+}
+
+// [REQUIRED TEST] Devices the fleet filter produces are checked against the run
+// tenant: a client-2 device, or a descendant device, refuses the whole step even
+// when the fleet source did not scope the query.
+func TestRestrictedNode_DevicesCheckedAgainstRunTenant(t *testing.T) {
+	devices := map[string]string{
+		"dev-ok":      "client-1",
+		"dev-client2": "client-2",
+		"dev-site":    "client-1/site-a",
+	}
+	cases := []struct {
+		name string
+		cfg  func(c *ScriptStepConfig)
+		fq   fleet.FleetQuery
+	}{
+		{"filter spanning tenants (client-2 device)", func(c *ScriptStepConfig) {
+			c.Devices = nil
+			c.DeviceFilter = &fleet.Filter{Status: "online"}
+		}, unscopedFleet{fleetOf(devices)}},
+		{"filter selecting a descendant (runTenantOnly)", func(c *ScriptStepConfig) {
+			c.Devices = nil
+			c.DeviceFilter = &fleet.Filter{Status: "online"}
+		}, unscopedFleet{fleetOf(map[string]string{"dev-ok": "client-1", "dev-site": "client-1/site-a"})}},
+		{"filter naming a tenant subtree", func(c *ScriptStepConfig) {
+			c.Devices = nil
+			c.DeviceFilter = &fleet.Filter{TenantSubtree: "client-1", TenantSubtreeIDs: []string{"client-1/site-a"}}
+		}, fleetOf(devices)},
+		{"explicit descendant device", func(c *ScriptStepConfig) { c.Devices = []string{"dev-site"} }, fleetOf(devices)},
+		{"explicit other-tenant device", func(c *ScriptStepConfig) { c.Devices = []string{"dev-client2"} }, fleetOf(devices)},
+		{"explicit mix refuses the whole step", func(c *ScriptStepConfig) { c.Devices = []string{"dev-ok", "dev-client2"} }, fleetOf(devices)},
+		{"explicit mix against an unscoped source", func(c *ScriptStepConfig) { c.Devices = []string{"dev-ok", "dev-client2"} }, unscopedFleet{fleetOf(devices)}},
+		{"filter naming another tenant", func(c *ScriptStepConfig) {
+			c.Devices = nil
+			c.DeviceFilter = &fleet.Filter{TenantID: "client-2"}
+		}, fleetOf(devices)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRestrictedFixture(t)
+			f.put(t, rsOwnerTenant, "inventory", "echo ok\n")
+			cfg := f.config("1.0.0")
+			tc.cfg(cfg)
+			n := f.node(cfg, tc.fq)
+
+			out, err := n.Execute(context.Background(), workflow.NodeInput{})
+
+			require.Error(t, err)
+			assert.False(t, out.Success)
+			assert.Zero(t, f.queued(), "nothing is queued, not even for the in-tenant device")
+		})
+	}
+
+	t.Run("in-tenant filter still runs", func(t *testing.T) {
+		f := newRestrictedFixture(t)
+		f.put(t, rsOwnerTenant, "inventory", "echo ok\n")
+		cfg := f.config("1.0.0")
+		cfg.Devices = nil
+		cfg.DeviceFilter = &fleet.Filter{Status: "online"}
+		n := f.node(cfg, fleetOf(devices))
+		steward := f.serveSteward(t, "dev-ok", "fine")
+
+		res := receive(t, runNodeAsync(n))
+
+		require.NoError(t, res.err)
+		assert.True(t, res.out.Success)
+		assert.Equal(t, 1, res.out.Data["queued"])
+		assert.Equal(t, rsRunTenant, receive(t, steward).entry.Metadata["tenant_id"])
+	})
+}
+
+// A fleet filter matching no devices is a success with a warning and nothing queued.
+func TestRestrictedNode_ZeroMatchQueuesNothing(t *testing.T) {
+	f := newRestrictedFixture(t)
+	f.put(t, rsOwnerTenant, "inventory", "echo ok\n")
+	cfg := f.config("1.0.0")
+	cfg.Devices = nil
+	cfg.DeviceFilter = &fleet.Filter{Hostname: "nothing-like-this"}
+	n := f.node(cfg, fleetOf(map[string]string{rsDevice: rsRunTenant}))
+
+	out, err := n.Execute(context.Background(), workflow.NodeInput{})
+
+	require.NoError(t, err)
+	assert.True(t, out.Success)
+	assert.Contains(t, out.Data["warning"], "no devices")
+	assert.Zero(t, f.queued())
+}
+
+// A restricted node with no queue or no tenant-resolved library never falls back to
+// the inline path.
+func TestRestrictedNode_NoQueueNeverRunsInline(t *testing.T) {
+	f := newRestrictedFixture(t)
+	f.put(t, rsOwnerTenant, "inventory", "echo ok\n")
+	n := f.node(f.config("1.0.0"), fleetOf(map[string]string{rsDevice: rsRunTenant}))
+	n.executionQueue = nil
+
+	_, err := n.Execute(context.Background(), workflow.NodeInput{})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "execution queue")
+	assert.Empty(t, f.monitor.ListExecutions(""), "nothing was started or run")
+}
+
+// A restricted step that never gets a result fails after the wait bound and
+// cancels what it queued, so nothing runs after the step has failed.
+func TestRestrictedNode_ResultTimeoutCancelsQueuedCommands(t *testing.T) {
+	f := newRestrictedFixture(t)
+	f.put(t, rsOwnerTenant, "inventory", "echo ok\n")
+	n := f.node(f.config("1.0.0"), fleetOf(map[string]string{rsDevice: rsRunTenant}))
+	n.SetResultWaitTimeout(300 * time.Millisecond)
+
+	_, err := n.Execute(context.Background(), workflow.NodeInput{})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timed out")
+	assert.Zero(t, f.queued(), "the queued command was cancelled")
+}
+
+// --- through the real engine ---
+
+func scriptWorkflow() workflow.Workflow {
+	return workflow.Workflow{
+		Name: "gather-inventory",
+		Steps: []workflow.Step{
+			{Name: "collect", Type: workflow.StepTypeScript, Config: map[string]interface{}{
+				"script_id": "inventory", "script_version": "1.0.0", "devices": []interface{}{rsDevice},
+			}},
+			{
+				Name: "next", Type: workflow.StepTypeConditional,
+				Condition: &workflow.Condition{Type: workflow.ConditionTypeVariable, Variable: "collect_result", Operator: workflow.OperatorExists},
+				Steps:     []workflow.Step{{Name: "saw-output", Type: workflow.StepTypeDelay, Delay: &workflow.DelayConfig{Duration: time.Millisecond}}},
+			},
+		},
+	}
+}
+
+func tenantCtx() context.Context {
+	return context.WithValue(context.Background(), ctxkeys.TenantID, rsRunTenant)
+}
+
+func waitExecution(t *testing.T, e *workflow.WorkflowExecution) {
+	t.Helper()
+	select {
+	case <-e.Done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the workflow did not finish")
+	}
+}
+
+func traceHas(e *workflow.WorkflowExecution, name string) bool {
+	for _, s := range e.GetExecutionTrace() {
+		if s.StepName == name {
+			return true
+		}
+	}
+	return false
+}
+
+// [REQUIRED TEST] End to end: a workflow with a script step queues a library run
+// through the real execution queue, a steward result comes back, and the next step
+// sees the output.
+func TestEngine_ScriptStepRunsLibraryScriptAndNextStepSeesOutput(t *testing.T) {
+	f := newRestrictedFixture(t)
+	vs := f.put(t, rsOwnerTenant, "inventory", "echo hello\n")
+	engine := workflow.NewEngine(nil, logging.NewNoopLogger(), nil, nil, nil, nil, nil, workflow.WithScriptStepExecutor(f.executor()))
+	t.Cleanup(engine.Shutdown)
+	steward := f.serveSteward(t, rsDevice, "hello\n")
+
+	exec, err := engine.ExecuteRestrictedWorkflow(tenantCtx(), scriptWorkflow(), nil,
+		workflow.RestrictedRun{RunID: "run-1", GrantID: "grant-1", Ceiling: rsOwnerTenant})
+	require.NoError(t, err)
+	waitExecution(t, exec)
+
+	require.Equal(t, workflow.StatusCompleted, exec.GetStatus(), exec.GetError())
+
+	run := receive(t, steward)
+	require.NoError(t, run.prepErr)
+	assert.Equal(t, vs.Content, run.prepared.ScriptContent, "the pinned library script is what the steward is sent")
+	assert.Equal(t, "run-1", run.entry.Metadata[script.MetaGuardRunID])
+
+	collected, ok := exec.GetVariable("collect_result")
+	require.True(t, ok, "the step's output is a variable of the run")
+	results := collected.(map[string]interface{})["results"].(map[string]interface{})
+	dev := results[rsDevice].(map[string]interface{})
+	assert.Equal(t, "hello\n", dev["stdout"])
+	assert.Equal(t, 0, dev["exit_code"])
+	assert.True(t, traceHas(exec, "saw-output"), "the step after the script step ran because it saw the output")
+}
+
+// [REQUIRED TEST] A workflow with a script step cannot start on an engine built
+// without the executor: it fails closed with a clear error, not a nil dereference.
+func TestEngine_ScriptStepWithoutExecutorFailsClosed(t *testing.T) {
+	engine := workflow.NewEngine(nil, logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+	t.Cleanup(engine.Shutdown)
+
+	exec, err := engine.ExecuteRestrictedWorkflow(tenantCtx(), scriptWorkflow(), nil,
+		workflow.RestrictedRun{RunID: "run-1", GrantID: "grant-1"})
+	require.NoError(t, err)
+	waitExecution(t, exec)
+
+	assert.Equal(t, workflow.StatusFailed, exec.GetStatus())
+	assert.Contains(t, exec.GetError(), "script executor not configured")
+}
+
+// [REQUIRED TEST] A workflow containing a script step, started through the
+// unrestricted engine path, is refused with a clear error and nothing is queued.
+func TestEngine_UnrestrictedPathRefusesScriptStep(t *testing.T) {
+	f := newRestrictedFixture(t)
+	f.put(t, rsOwnerTenant, "inventory", "echo hello\n")
+	engine := workflow.NewEngine(nil, logging.NewNoopLogger(), nil, nil, nil, nil, nil, workflow.WithScriptStepExecutor(f.executor()))
+	t.Cleanup(engine.Shutdown)
+
+	nested := workflow.Workflow{Name: "nested", Steps: []workflow.Step{
+		{Name: "outer", Type: workflow.StepTypeSequential, Steps: scriptWorkflow().Steps},
+	}}
+	for name, wf := range map[string]workflow.Workflow{"top level": scriptWorkflow(), "nested": nested} {
+		t.Run(name, func(t *testing.T) {
+			exec, err := engine.ExecuteWorkflow(tenantCtx(), wf, nil)
+
+			require.ErrorIs(t, err, workflow.ErrScriptStepNotRestricted)
+			assert.Contains(t, err.Error(), "restricted automation executions")
+			require.NotNil(t, exec)
+			assert.Equal(t, workflow.StatusFailed, exec.GetStatus())
+			assert.Zero(t, f.queued())
+			assert.Zero(t, f.approver.askedCount(), "the approver is never consulted")
+		})
+	}
+}
+
+// A restricted engine run without a run id, grant id or tenant never starts.
+func TestEngine_RestrictedRunNeedsRunGrantAndTenant(t *testing.T) {
+	engine := workflow.NewEngine(nil, logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+	t.Cleanup(engine.Shutdown)
+
+	_, err := engine.ExecuteRestrictedWorkflow(tenantCtx(), scriptWorkflow(), nil, workflow.RestrictedRun{GrantID: "g"})
+	require.Error(t, err)
+	_, err = engine.ExecuteRestrictedWorkflow(tenantCtx(), scriptWorkflow(), nil, workflow.RestrictedRun{RunID: "r"})
+	require.Error(t, err)
+	_, err = engine.ExecuteRestrictedWorkflow(context.Background(), scriptWorkflow(), nil, workflow.RestrictedRun{RunID: "r", GrantID: "g"})
+	require.Error(t, err)
+}
+
+// A restricted run on an engine whose executor has no approver (the production
+// state until the approver adapter is wired) fails the step with nothing queued.
+func TestEngine_RestrictedScriptStepWithoutApproverFailsClosed(t *testing.T) {
+	f := newRestrictedFixture(t)
+	f.put(t, rsOwnerTenant, "inventory", "echo hello\n")
+	executor := f.executor()
+	executor.SetApprover(nil)
+	engine := workflow.NewEngine(nil, logging.NewNoopLogger(), nil, nil, nil, nil, nil, workflow.WithScriptStepExecutor(executor))
+	t.Cleanup(engine.Shutdown)
+
+	exec, err := engine.ExecuteRestrictedWorkflow(tenantCtx(), scriptWorkflow(), nil,
+		workflow.RestrictedRun{RunID: "run-1", GrantID: "grant-1"})
+	require.NoError(t, err)
+	waitExecution(t, exec)
+
+	assert.Equal(t, workflow.StatusFailed, exec.GetStatus())
+	assert.Contains(t, exec.GetError(), "no script approver")
+	assert.Zero(t, f.queued())
 }

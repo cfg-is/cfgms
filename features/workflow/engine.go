@@ -4,6 +4,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -56,6 +57,55 @@ type MoveResourceToClusterStepExecutor interface {
 	ExecuteMoveResourceToClusterStep(ctx context.Context, step Step, execution *WorkflowExecution) (StepResult, error)
 }
 
+// ScriptStepExecutor executes a workflow step of type script.
+//
+// Declared here rather than importing features/workflow/nodes to avoid an import
+// cycle. Concrete callers pass *nodes.ScriptStepExecutor. The engine calls it only
+// for a restricted execution (execution.Restricted is non-nil).
+type ScriptStepExecutor interface {
+	StepExecutor
+}
+
+// ScriptApprovalState is the outcome of approving one library script version for
+// a restricted run.
+type ScriptApprovalState string
+
+const (
+	// ScriptApprovalApproved means the version may be queued under the run's grant.
+	ScriptApprovalApproved ScriptApprovalState = "approved"
+	// ScriptApprovalPending means the version awaits an approval; nothing is queued.
+	ScriptApprovalPending ScriptApprovalState = "pending"
+	// ScriptApprovalDenied means the version must not run; nothing is queued.
+	ScriptApprovalDenied ScriptApprovalState = "denied"
+)
+
+// ScriptApprovalDecision is what a ScriptApprover returns for one library script.
+// OwnerTenant, Version and ApprovalHash are the pin the queue binds the command to:
+// at prepare time the queue resolves exactly that owner's version and refuses when
+// the recomputed approval hash differs.
+type ScriptApprovalDecision struct {
+	State        ScriptApprovalState
+	Reason       string
+	OwnerTenant  string
+	Version      string
+	ApprovalHash string
+}
+
+// ScriptApprover decides whether the library script id at version may run for
+// runTenant under a restricted run whose library resolution is bounded by ceiling.
+// A script step fails closed without one. An error is treated as a denial.
+type ScriptApprover interface {
+	Approve(ctx context.Context, runTenant, ceiling, id, version string) (ScriptApprovalDecision, error)
+}
+
+// ScriptPendingRecorder is an optional extension of ScriptApprover. When the
+// approver implements it, a pending decision is passed to RecordPending so the
+// pending change is recorded and the owner tenant's administrators are notified
+// once. Whatever it returns, the step has already failed with nothing queued.
+type ScriptPendingRecorder interface {
+	RecordPending(ctx context.Context, runTenant string, decision ScriptApprovalDecision) error
+}
+
 // Engine implements the WorkflowEngine interface
 type Engine struct {
 	moduleFactory                 ModuleLoader
@@ -73,6 +123,7 @@ type Engine struct {
 	ringHealthExecutor            RingHealthStepExecutor
 	setHARoleExecutor             SetHARoleStepExecutor
 	moveResourceToClusterExecutor MoveResourceToClusterStepExecutor
+	scriptExecutor                ScriptStepExecutor
 
 	// Durable execution history (engine_execution_store.go). A nil store keeps
 	// executions node-local.
@@ -158,8 +209,80 @@ func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secret
 	return engine
 }
 
-// ExecuteWorkflow starts execution of a workflow
+// WithScriptStepExecutor gives the engine the executor for StepTypeScript steps.
+// Without one a workflow containing a script step fails closed with a clear error.
+func WithScriptStepExecutor(executor ScriptStepExecutor) EngineOption {
+	return func(e *Engine) { e.scriptExecutor = executor }
+}
+
+// ErrScriptStepNotRestricted is returned when a script step would run in an
+// execution that is not a restricted automation execution.
+var ErrScriptStepNotRestricted = errors.New("script steps run only in restricted automation executions")
+
+// ExecuteWorkflow starts execution of a workflow. It is the unrestricted path (a
+// human run, a trigger, a composed workflow): a workflow that contains a script
+// step is refused here, because running library scripts from it would bypass the
+// run grant and the script-approval gate.
 func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variables map[string]interface{}) (*WorkflowExecution, error) {
+	return e.startWorkflow(ctx, workflow, variables, nil)
+}
+
+// ExecuteRestrictedWorkflow starts a workflow as a restricted automation
+// execution bound to run. Only this path lets a script step run: the step queues
+// library scripts under the run's guard reference and the run tenant (the tenant
+// in ctx). It refuses a run without a run id, grant id or authenticated tenant.
+func (e *Engine) ExecuteRestrictedWorkflow(ctx context.Context, workflow Workflow, variables map[string]interface{}, run RestrictedRun) (*WorkflowExecution, error) {
+	if run.RunID == "" || run.GrantID == "" {
+		return nil, errors.New("restricted execution needs a run id and a grant id")
+	}
+	if tenantID, _ := ctx.Value(ctxkeys.TenantID).(string); tenantID == "" {
+		return nil, errors.New("restricted execution needs an authenticated tenant")
+	}
+	return e.startWorkflow(ctx, workflow, variables, &run)
+}
+
+// containsScriptStep reports whether steps, or any step nested inside them,
+// is a script step.
+func containsScriptStep(steps []Step) bool {
+	for _, step := range steps {
+		if step.Type == StepTypeScript || containsScriptStep(nestedSteps(step)) {
+			return true
+		}
+	}
+	return false
+}
+
+// nestedSteps returns every step directly nested in step: its child steps, the
+// try, catch and finally blocks, the switch cases and default, and the fallback.
+func nestedSteps(step Step) []Step {
+	nested := append([]Step(nil), step.Steps...)
+	if t := step.Try; t != nil {
+		nested = append(nested, t.Try...)
+		nested = append(nested, t.Finally...)
+		for _, c := range t.Catch {
+			nested = append(nested, c.Steps...)
+		}
+	}
+	if sw := step.Switch; sw != nil {
+		nested = append(nested, sw.Default...)
+		for _, c := range sw.Cases {
+			nested = append(nested, c.Steps...)
+		}
+	}
+	if eh := step.ErrorHandling; eh != nil && eh.FallbackStep != nil {
+		nested = append(nested, *eh.FallbackStep)
+	}
+	return nested
+}
+
+func (e *Engine) startWorkflow(ctx context.Context, workflow Workflow, variables map[string]interface{}, restricted *RestrictedRun) (*WorkflowExecution, error) {
+	// A script step runs only in a restricted execution. Refuse before anything
+	// starts so nothing is queued; executeStep checks again for steps reached
+	// through a path this walk cannot see.
+	if restricted == nil && containsScriptStep(workflow.Steps) {
+		return e.recordRejectedExecution(ctx, workflow, ErrScriptStepNotRestricted), ErrScriptStepNotRestricted
+	}
+
 	// Enforce the workflow's declared inputs. This is the single enforcement
 	// point: triggers and sub-workflow calls reach here without the HTTP
 	// handler. A violating run never starts; a failed execution carrying the
@@ -210,6 +333,7 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 		ID:           executionID,
 		WorkflowName: workflow.Name,
 		TenantID:     tenantID,
+		Restricted:   restricted,
 		Status:       StatusPending,
 		StartTime:    time.Now(),
 		StepResults:  make(map[string]StepResult),
@@ -604,38 +728,10 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		err = e.executeErrorWorkflowStep(ctx, step, execution)
 	case StepTypeComposite:
 		err = e.executeCompositeStep(ctx, step, execution)
-	case StepTypeTransform:
-		if e.transformExecutor == nil {
-			err = fmt.Errorf("transform executor not configured")
-		} else {
-			var transformResult StepResult
-			transformResult, err = e.transformExecutor.ExecuteTransformStep(ctx, step, execution)
-			e.recordStepResult(execution, key, transformResult)
-		}
-	case StepTypeQueryRingHealth:
-		if e.ringHealthExecutor == nil {
-			err = fmt.Errorf("ring health executor not configured")
-		} else {
-			var rhResult StepResult
-			rhResult, err = e.ringHealthExecutor.ExecuteRingHealthStep(ctx, step, execution)
-			e.recordStepResult(execution, key, rhResult)
-		}
-	case StepTypeSetHARole:
-		if e.setHARoleExecutor == nil {
-			err = fmt.Errorf("set_ha_role executor not configured")
-		} else {
-			var haResult StepResult
-			haResult, err = e.setHARoleExecutor.ExecuteSetHARoleStep(ctx, step, execution)
-			e.recordStepResult(execution, key, haResult)
-		}
-	case StepTypeMoveResourceToCluster:
-		if e.moveResourceToClusterExecutor == nil {
-			err = fmt.Errorf("move_resource_to_cluster executor not configured")
-		} else {
-			var moveResult StepResult
-			moveResult, err = e.moveResourceToClusterExecutor.ExecuteMoveResourceToClusterStep(ctx, step, execution)
-			e.recordStepResult(execution, key, moveResult)
-		}
+	case StepTypeTransform, StepTypeQueryRingHealth, StepTypeSetHARole, StepTypeMoveResourceToCluster:
+		err = e.executeExtensionStep(ctx, step, execution, key)
+	case StepTypeScript:
+		err = e.executeScriptStep(ctx, step, execution, key)
 	default:
 		err = fmt.Errorf("unknown step type: %s", step.Type)
 	}
@@ -678,6 +774,53 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 	// Add execution trace entry
 	AddExecutionTrace(execution, key, step.Name, step.Type, result.Status, result.Duration, execution.Variables, "", 0)
 
+	e.recordStepResult(execution, key, result)
+	return err
+}
+
+// executeExtensionStep runs a step whose executor the controller injects at
+// construction (transform, ring health, set_ha_role, move_resource_to_cluster).
+// An unset executor is a clear error, never a nil dereference.
+func (e *Engine) executeExtensionStep(ctx context.Context, step Step, execution *WorkflowExecution, key string) error {
+	var result StepResult
+	var err error
+	switch step.Type {
+	case StepTypeTransform:
+		if e.transformExecutor == nil {
+			return fmt.Errorf("transform executor not configured")
+		}
+		result, err = e.transformExecutor.ExecuteTransformStep(ctx, step, execution)
+	case StepTypeQueryRingHealth:
+		if e.ringHealthExecutor == nil {
+			return fmt.Errorf("ring health executor not configured")
+		}
+		result, err = e.ringHealthExecutor.ExecuteRingHealthStep(ctx, step, execution)
+	case StepTypeSetHARole:
+		if e.setHARoleExecutor == nil {
+			return fmt.Errorf("set_ha_role executor not configured")
+		}
+		result, err = e.setHARoleExecutor.ExecuteSetHARoleStep(ctx, step, execution)
+	default:
+		if e.moveResourceToClusterExecutor == nil {
+			return fmt.Errorf("move_resource_to_cluster executor not configured")
+		}
+		result, err = e.moveResourceToClusterExecutor.ExecuteMoveResourceToClusterStep(ctx, step, execution)
+	}
+	e.recordStepResult(execution, key, result)
+	return err
+}
+
+// executeScriptStep runs a script step. It runs only in a restricted execution,
+// and only when the engine was built with a script executor; either missing is a
+// clear error.
+func (e *Engine) executeScriptStep(ctx context.Context, step Step, execution *WorkflowExecution, key string) error {
+	switch {
+	case execution.Restricted == nil:
+		return ErrScriptStepNotRestricted
+	case e.scriptExecutor == nil:
+		return fmt.Errorf("script executor not configured")
+	}
+	result, err := e.scriptExecutor.ExecuteStep(ctx, step, execution)
 	e.recordStepResult(execution, key, result)
 	return err
 }
