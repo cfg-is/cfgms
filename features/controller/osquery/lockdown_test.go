@@ -13,7 +13,7 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/controller/fleet"
-	"github.com/cfgis/cfgms/features/steward/osquery"
+	"github.com/cfgis/cfgms/features/controller/osquery"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"

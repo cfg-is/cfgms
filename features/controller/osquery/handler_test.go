@@ -27,7 +27,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
-	"github.com/cfgis/cfgms/features/steward/osquery"
+	"github.com/cfgis/cfgms/features/controller/osquery"
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 )

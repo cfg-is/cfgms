@@ -13,7 +13,7 @@ import (
 	// features/controller/transport importing features/steward/dna: the
 	// controller-side stream handler (HandleGRPC) and the steward-side execution
 	// path (Execute) share one type. Splitting them is tracked as future work.
-	stewardosquery "github.com/cfgis/cfgms/features/steward/osquery"
+	stewardosquery "github.com/cfgis/cfgms/features/controller/osquery"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"google.golang.org/grpc"
 )

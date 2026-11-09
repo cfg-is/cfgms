@@ -9,8 +9,8 @@ import (
 
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
+	stewardosquery "github.com/cfgis/cfgms/features/controller/osquery"
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
-	stewardosquery "github.com/cfgis/cfgms/features/steward/osquery"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

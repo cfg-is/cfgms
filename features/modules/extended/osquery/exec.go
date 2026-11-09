@@ -55,7 +55,7 @@ import (
 // RunQuery is the exported entry point for the RPC handler (Story #3566). The
 // function is intentionally query-string-agnostic: callers are responsible for
 // all catalog-ID lookup and parameter validation before constructing the query
-// string. See features/steward/osquery/handler.go for the admission check.
+// string. See features/controller/osquery/handler.go for the admission check.
 func RunQuery(ctx context.Context, binPath, query string) ([]map[string]string, error) {
 	return runQuery(ctx, binPath, query)
 }
