@@ -1961,6 +1961,11 @@ func (s *Server) enrollmentConfinementMiddleware(next http.Handler) http.Handler
 // requirePermission creates middleware that enforces specific permission requirements.
 // Implicit-admin principals (ImplicitAdmin: true) are authorized for every permission;
 // all other principals are held to their Permissions slice verbatim.
+//
+// The returned handler runs these stages in order, each of which writes its own
+// rejection and reports whether to continue: the permission, the assurance floor, the
+// user-presence token, the ADR-025 root<->MSP boundary and tenant isolation. The order is
+// part of the contract: a caller is told about the first gate it fails.
 func (s *Server) requirePermission(resourceType, action string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1968,410 +1973,453 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			// principals are the sole exception: their grant-derived permission
 			// set is independently verified inline.
 			if s.rbacService == nil {
-				if _, isRelay := r.Context().Value(relayPrincipalKey).(*Principal); isRelay {
-					p, _ := r.Context().Value(principalContextKey).(*Principal)
-					permID := s.buildPermissionID(resourceType, action)
-					if !s.hasPermission(p, permID) {
-						s.writeErrorResponse(w, http.StatusForbidden, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS")
-						return
-					}
-					next.ServeHTTP(w, r)
-					return
-				}
-				s.logger.Error("RBAC service not available; denying request")
-				s.writeErrorResponse(w, http.StatusServiceUnavailable,
-					"Authorization service unavailable", "AUTHORIZATION_UNAVAILABLE")
+				s.serveWithoutAuthorizationService(w, r, next, resourceType, action)
 				return
 			}
 
-			// Get authenticated principal from context (set by authenticationMiddleware).
-			principal, ok := r.Context().Value(principalContextKey).(*Principal)
+			pr, ok := s.newPermissionRequest(w, r, resourceType, action)
 			if !ok {
-				s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 				return
 			}
 
-			userID, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
-			tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-
-			// Build resource identifier from URL path variables
-			resource := s.buildResourceIdentifier(r, resourceType)
-
-			permissionID := s.buildPermissionID(resourceType, action)
-			if !s.hasPermission(principal, permissionID) {
-				decision := &AuthorizationDecision{
-					Granted:      false,
-					PermissionID: permissionID,
-					Resource:     resource,
-					Action:       action,
-					Decision:     "DENY",
-					Reason:       "Principal lacks required permission: " + permissionID,
-					CheckedAt:    time.Now(),
-					SubjectID:    userID,
-					TenantID:     tenantID,
-				}
-
-				s.auditAuthorizationDecision(r, decision)
-				s.writeAuthorizationError(w, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS", decision)
-				return
+			if s.checkPermissionHeld(w, r, pr) &&
+				s.resolveAssuranceRequirementFor(w, r, pr) &&
+				s.checkAssuranceFloor(w, r, pr) &&
+				s.checkUserPresence(w, r, pr) &&
+				s.checkTenantCrossingBoundary(w, r, pr) &&
+				s.checkTenantIsolation(w, r, pr) {
+				s.grantPermission(w, r, pr, next)
 			}
-
-			// Assurance check (ADR-021 Decision 2): after confirming the principal
-			// holds the permission, verify the assurance level meets the minimum for
-			// this route. This replaces requireTier(TierMTLSOnly) entirely.
-			// resolveAssuranceRequirement composes the global floor with any per-tenant
-			// overrides declared by ancestors of tenantID (root→leaf), taking the max
-			// of all Min values and OR-ing RequireUserPresence (ADR-021, Issue #2839).
-			assuranceReq, assuranceFound, assuranceErr := s.resolveAssuranceRequirement(r.Context(), tenantID, permissionID)
-			if assuranceErr != nil {
-				s.logger.Error("Failed to resolve assurance requirement",
-					"permission_id", logging.SanitizeLogValue(permissionID),
-					"tenant_id", logging.SanitizeLogValue(tenantID), "error", logging.SanitizeLogValue(assuranceErr.Error()))
-				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
-				return
-			}
-			// AllowMachine (code-only opt-in, never set by assurance-policy overrides): an
-			// API-key principal that holds the permission skips both the Min floor and the
-			// presence check. Human principals are unaffected. RBAC and tenant scoping above
-			// still apply.
-			machineAllowed := assuranceFound && assuranceReq.AllowMachine && principal.Assurance == session.AssuranceMachine
-			if assuranceFound && !machineAllowed && principal.Assurance < assuranceReq.Min {
-				decision := &AuthorizationDecision{
-					Granted:      false,
-					PermissionID: permissionID,
-					Resource:     resource,
-					Action:       action,
-					Decision:     "DENY",
-					Reason:       fmt.Sprintf("Insufficient assurance: %s < %s required for %s", principal.Assurance, assuranceReq.Min, permissionID),
-					CheckedAt:    time.Now(),
-					SubjectID:    userID,
-					TenantID:     tenantID,
-				}
-				s.auditAuthorizationDecision(r, decision)
-
-				if principal.Assurance == session.AssuranceMachine {
-					// API-key principals can never step up; send a plain 403.
-					s.writeAuthorizationError(w, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS", decision)
-					return
-				}
-				// All other callers (AssuranceBasic+) receive a step-up challenge (ADR-021 Decision 6).
-				levelName := assuranceReq.Min.String()
-				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s"`, levelName))
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnauthorized)
-				s.encodeJSONBody(w, struct {
-					Error             string `json:"error"`
-					RequiredAssurance string `json:"required_assurance"`
-				}{
-					Error:             "step_up_required",
-					RequiredAssurance: levelName,
-				}, "step_up_required")
-				return
-			}
-
-			// User-presence check (ADR-021 Decision 4): a fresh per-action WebAuthn assertion
-			// is required for catastrophic permissions (RequireUserPresence: true in permissionAssurance).
-			// This runs only after the assurance check above has confirmed the principal holds at least
-			// req.Min assurance, so AssuranceMachine principals are already rejected above (they never
-			// reach this branch). The presence token was minted by POST /api/v1/webauthn/presence/finish
-			// and is passed in X-Presence-Token. It is single-use (LoadAndDelete) and short-lived
-			// (presenceTokenTTL). Continuity / LastProvenAt alone is insufficient — a hijacked-but-
-			// continuous session cannot fake a present human (ADR-021 Decision 4 threat model).
-			if assuranceFound && !machineAllowed && assuranceReq.RequireUserPresence && !presenceExemptForRequest(r, assuranceReq) {
-				levelName := assuranceReq.Min.String()
-
-				presenceToken := r.Header.Get(presenceTokenHeader)
-				if presenceToken == "" {
-					// No presence token: step-up challenge including presence="required" (ADR-021 Decision 6).
-					// permission names the gated permission (Issue #4287) so a CLI-side step-up
-					// handler can lodge a CLI presence-relay request bound to it.
-					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusUnauthorized)
-					s.encodeJSONBody(w, struct {
-						Error             string `json:"error"`
-						RequiredAssurance string `json:"required_assurance"`
-						PresenceRequired  bool   `json:"presence_required"`
-					}{
-						Error:             "step_up_required",
-						RequiredAssurance: levelName,
-						PresenceRequired:  true,
-					}, "step_up_required")
-					return
-				}
-
-				// Validate and atomically consume the token (single-use via LoadAndDelete).
-				tokenHash := hashPresenceToken(presenceToken)
-				record, tokenOutcome := s.takePresenceToken(r.Context(), tokenHash)
-				if tokenOutcome == ceremonyUnavailable {
-					s.writeCeremonyUnavailable(w)
-					return
-				}
-				if tokenOutcome != ceremonyOK {
-					// Token not found (already used, never issued, or tampered).
-					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusUnauthorized)
-					s.encodeJSONBody(w, struct {
-						Error            string `json:"error"`
-						PresenceRequired bool   `json:"presence_required"`
-					}{
-						Error:            "presence_token_invalid",
-						PresenceRequired: true,
-					}, "presence_token_invalid")
-					return
-				}
-				if time.Now().After(record.expires) {
-					// Expired token (already removed from map above).
-					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusUnauthorized)
-					s.encodeJSONBody(w, struct {
-						Error            string `json:"error"`
-						PresenceRequired bool   `json:"presence_required"`
-					}{
-						Error:            "presence_token_expired",
-						PresenceRequired: true,
-					}, "presence_token_expired")
-					return
-				}
-				// Bind the presence proof to the acting principal (ADR-021 Decision 4):
-				// the token is only valid for the principal that ran the WebAuthn ceremony.
-				// A proof performed by principal A must never satisfy the gate for principal
-				// B's catastrophic action. The token was already consumed by LoadAndDelete,
-				// so a mismatch cannot be retried with the same token.
-				if record.principalID != principal.ID {
-					s.logger.Warn("Presence token principal mismatch",
-						"token_principal_id", logging.SanitizeLogValue(record.principalID),
-						"request_principal_id", logging.SanitizeLogValue(principal.ID),
-						"permission_id", permissionID,
-					)
-					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusUnauthorized)
-					s.encodeJSONBody(w, struct {
-						Error            string `json:"error"`
-						PresenceRequired bool   `json:"presence_required"`
-					}{
-						Error:            "presence_token_principal_mismatch",
-						PresenceRequired: true,
-					}, "presence_token_principal_mismatch")
-					return
-				}
-
-				// Action binding (Issues #4287, #5142, ADR-021 Amendment 7): every presence
-				// token carries the exact method/path/body-hash/permission of the one
-				// request its gesture authorized, whether minted through the CLI presence
-				// relay or the browser step-up flow. A token with an empty binding is
-				// refused for every RequireUserPresence permission.
-				bodyHash, hashErr := hashRequestBodyForPresenceBinding(r)
-				if hashErr != nil {
-					s.logger.Error("Failed to read request body for presence binding check",
-						"error", logging.SanitizeLogValue(hashErr.Error()))
-					s.writeErrorResponse(w, http.StatusInternalServerError,
-						"Failed to verify presence token", "PRESENCE_TOKEN_BINDING_ERROR")
-					return
-				}
-				if record.boundPermissionID == "" || record.boundMethod != r.Method ||
-					record.boundPath != canonicalRequestTarget(r.URL.Path, r.URL.RawQuery) || record.boundBodyHash != bodyHash ||
-					record.boundPermissionID != permissionID {
-					s.logger.Warn("Presence token action-binding mismatch",
-						"token_permission_id", logging.SanitizeLogValue(record.boundPermissionID),
-						"permission_id", permissionID,
-					)
-					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusUnauthorized)
-					s.encodeJSONBody(w, struct {
-						Error            string `json:"error"`
-						PresenceRequired bool   `json:"presence_required"`
-					}{
-						Error:            "presence_token_action_mismatch",
-						PresenceRequired: true,
-					}, "presence_token_action_mismatch")
-					return
-				}
-
-				s.logger.Debug("Presence token accepted",
-					"principal_id", logging.SanitizeLogValue(principal.ID),
-					"permission_id", permissionID,
-				)
-			}
-
-			// ADR-025 Decision 1 root<->MSP boundary for principals subject to it.
-			//
-			// This must sit outside the tenant-scoped block below: a boundary-subject
-			// principal presents GlobalScope == true (its TenantID is the root tenant,
-			// Issue #4665), and that block runs only for !GlobalScope principals, so it is
-			// structurally unreachable for it. Enforcing the boundary only inside the
-			// handlers that happen to call authorizeTenantAccess left every other
-			// tenant-targeting route open — tenant:manage's suspend and config-source/test,
-			// and the per-tenant refresh-policy and assurance-policy endpoints — letting a
-			// root-scoped SaaS-operator suspend an MSP tenant or drive a config-source test
-			// against that tenant's git credential with no active grant and no break-glass
-			// record. Checking here covers every current and future tenant-targeting route
-			// by construction rather than by handler-by-handler discipline.
-			//
-			// subjectToTenantCrossingBoundary (not principal.RootScoped directly, Issue
-			// #4337): RootScoped alone would let a bound root-scope account's session
-			// silently skip this entire block — and the GlobalScope-gated tenant-isolation
-			// check below — the moment its current assurance drops below phishing-resistant,
-			// since RootScoped's session-path derivation is re-evaluated against that
-			// assurance on every request while the account's actual scope has not changed.
-			if subjectToTenantCrossingBoundary(principal) && !tenantCrossingRemedyPermissions[permissionID] {
-				if targetTenant := s.extractBoundaryTenantFromRequest(r, resourceType); targetTenant != "" {
-					switch s.authorizeTenantAccess(r.Context(), principal, targetTenant) {
-					case tenantAuthAllowed:
-						// Root itself, or a tenant covered by an active crossing.
-					case tenantAuthNeedsCrossing:
-						s.auditAuthorizationDecision(r, &AuthorizationDecision{
-							Granted:      false,
-							PermissionID: permissionID,
-							Resource:     resource,
-							Action:       action,
-							Decision:     "DENY",
-							Reason:       "Root-scoped principal has no active tenant crossing for target tenant",
-							CheckedAt:    time.Now(),
-							SubjectID:    userID,
-							TenantID:     tenantID,
-						})
-						// The tenant is real and inside root's own subtree, so a challenge
-						// discloses nothing this caller cannot already learn, and it is the
-						// only way a legitimate break-glass invocation learns its remedy
-						// (ADR-025 Decision 3).
-						s.writeTenantCrossingChallenge(w, targetTenant)
-						return
-					default:
-						isoDecision := &AuthorizationDecision{
-							Granted:      false,
-							PermissionID: permissionID,
-							Resource:     resource,
-							Action:       action,
-							Decision:     "DENY",
-							Reason:       "Target tenant is outside the root-scoped principal's boundary",
-							CheckedAt:    time.Now(),
-							SubjectID:    userID,
-							TenantID:     tenantID,
-						}
-						s.auditAuthorizationDecision(r, isoDecision)
-						// Same existence-oracle stance as handleGetTenant/handleUpdateTenant:
-						// a tenant outside root's subtree must not be distinguishable from one
-						// that does not exist.
-						if resourceType == "tenant" {
-							s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
-							return
-						}
-						s.writeAuthorizationError(w, "Cross-tenant access denied", "CROSS_TENANT_ACCESS_DENIED", isoDecision)
-						return
-					}
-				}
-			}
-
-			// Tenant isolation check for tenant-scoped (non-global) principals.
-			s.mu.RLock()
-			engine := s.isolationEngine
-			s.mu.RUnlock()
-			if !principal.GlobalScope && principal.TenantID != "" {
-				targetTenant := s.extractTargetTenantFromRequest(r, resourceType)
-				// Real tenant IDs are flat, ParentID-linked tokens, never hierarchical
-				// paths, so subtree containment resolves through the tenant manager's
-				// ancestry. The tenant resource type additionally honours the ADR-025
-				// crossing boundary via isCallerAuthorizedForTenant.
-				var inTargetScope bool
-				if targetTenant == "" || targetTenant == principal.TenantID {
-					inTargetScope = true
-				} else if resourceType == "tenant" {
-					inTargetScope = s.isCallerAuthorizedForTenant(r.Context(), principal, targetTenant)
-				} else {
-					inTargetScope = s.tenantSubtreeContains(r.Context(), principal.TenantID, targetTenant)
-				}
-				if !inTargetScope {
-					isoDecision := &AuthorizationDecision{
-						Granted:      false,
-						PermissionID: permissionID,
-						Resource:     resource,
-						Action:       action,
-						Decision:     "DENY",
-						Reason:       "Target tenant is outside principal tenant subtree",
-						CheckedAt:    time.Now(),
-						SubjectID:    userID,
-						TenantID:     tenantID,
-					}
-					s.auditAuthorizationDecision(r, isoDecision)
-					// tenant:read, tenant:update and tenant:manage (suspend, config-source/test)
-					// all resolve a single tenant by ID and must return an identical 404 for
-					// "doesn't exist" and "exists but out of my subtree" (ADR-025 existence-oracle
-					// prevention, Issue #3125; extended to tenant:manage by Issue #3181 and to
-					// tenant:billing-read by ADR-025 Amendment 6) — a 403
-					// here would let a caller distinguish the two cases via status code alone,
-					// before ever reaching the handler's own isCallerAuthorizedForTenant check.
-					if resourceType == "tenant" && (action == "read" || action == "update" || action == "manage" || action == "billing-read") {
-						s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
-						return
-					}
-					s.writeAuthorizationError(w, "Cross-tenant access denied", "CROSS_TENANT_ACCESS_DENIED", isoDecision)
-					return
-				}
-				if engine != nil && targetTenant != "" && targetTenant != principal.TenantID {
-					isoResp, isoErr := engine.ValidateTenantAccess(r.Context(), &tenantsecurity.TenantAccessRequest{
-						SubjectID:       principal.ID,
-						SubjectTenantID: principal.TenantID,
-						TargetTenantID:  targetTenant,
-						ResourceID:      resource,
-						AccessLevel:     tenantsecurity.CrossTenantLevelRead,
-					})
-					if isoErr != nil || isoResp == nil || !isoResp.Granted {
-						isoDecision := &AuthorizationDecision{
-							Granted:      false,
-							PermissionID: permissionID,
-							Resource:     resource,
-							Action:       action,
-							Decision:     "DENY",
-							Reason:       "Cross-tenant access denied by isolation engine",
-							CheckedAt:    time.Now(),
-							SubjectID:    userID,
-							TenantID:     tenantID,
-						}
-						s.auditAuthorizationDecision(r, isoDecision)
-						s.writeAuthorizationError(w, "Cross-tenant access denied", "CROSS_TENANT_ACCESS_DENIED", isoDecision)
-						return
-					}
-				}
-			}
-
-			// Principal has required permission — grant access.
-			reason := "API key has required permission: " + permissionID
-			if principal.Assurance >= session.AssuranceBasic {
-				reason = "principal assurance sufficient for full access"
-			}
-			decision := &AuthorizationDecision{
-				Granted:      true,
-				PermissionID: permissionID,
-				Resource:     resource,
-				Action:       action,
-				Decision:     "ALLOW",
-				Reason:       reason,
-				CheckedAt:    time.Now(),
-				SubjectID:    userID,
-				TenantID:     tenantID,
-			}
-
-			// Add decision to context
-			ctx := context.WithValue(r.Context(), authDecisionContextKey, decision)
-
-			s.logger.Debug("Access granted",
-				"subject_id", userID,
-				"assurance_sufficient", principal.Assurance >= session.AssuranceBasic,
-				"permission_id", permissionID,
-				"resource", logging.SanitizeLogValue(resource),
-			)
-
-			// Audit the authorization decision
-			s.auditAuthorizationDecision(r, decision)
-
-			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// permissionRequest is the per-request state the requirePermission stages share.
+type permissionRequest struct {
+	resourceType string
+	action       string
+	principal    *Principal
+	userID       string
+	tenantID     string
+	resource     string
+	permissionID string
+
+	// Set by resolveAssuranceRequirementFor.
+	assuranceReq   Requirement
+	assuranceFound bool
+	// machineAllowed: AllowMachine (code-only opt-in, never set by assurance-policy
+	// overrides) lets an API-key principal that holds the permission skip both the Min
+	// floor and the presence check. Human principals are unaffected. RBAC and tenant
+	// scoping still apply.
+	machineAllowed bool
+}
+
+// serveWithoutAuthorizationService handles a request when the authorization service was
+// not wired: a relay principal is held to its grant-derived permissions, anything else
+// is refused with 503.
+func (s *Server) serveWithoutAuthorizationService(w http.ResponseWriter, r *http.Request, next http.Handler, resourceType, action string) {
+	if _, isRelay := r.Context().Value(relayPrincipalKey).(*Principal); !isRelay {
+		s.logger.Error("RBAC service not available; denying request")
+		s.writeErrorResponse(w, http.StatusServiceUnavailable,
+			"Authorization service unavailable", "AUTHORIZATION_UNAVAILABLE")
+		return
+	}
+	p, _ := r.Context().Value(principalContextKey).(*Principal)
+	permID := s.buildPermissionID(resourceType, action)
+	if !s.hasPermission(p, permID) {
+		s.writeErrorResponse(w, http.StatusForbidden, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS")
+		return
+	}
+	next.ServeHTTP(w, r)
+}
+
+// newPermissionRequest reads the authenticated principal (set by authenticationMiddleware)
+// and builds the request state; it writes 401 and reports false when there is none.
+func (s *Server) newPermissionRequest(w http.ResponseWriter, r *http.Request, resourceType, action string) (*permissionRequest, bool) {
+	principal, ok := r.Context().Value(principalContextKey).(*Principal)
+	if !ok {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+		return nil, false
+	}
+
+	userID, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
+	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+
+	return &permissionRequest{
+		resourceType: resourceType,
+		action:       action,
+		principal:    principal,
+		userID:       userID,
+		tenantID:     tenantID,
+		// Resource identifier from URL path variables.
+		resource:     s.buildResourceIdentifier(r, resourceType),
+		permissionID: s.buildPermissionID(resourceType, action),
+	}, true
+}
+
+// denyAuthorization builds a DENY decision for pr with reason and audits it.
+func (s *Server) denyAuthorization(r *http.Request, pr *permissionRequest, reason string) *AuthorizationDecision {
+	decision := &AuthorizationDecision{
+		Granted:      false,
+		PermissionID: pr.permissionID,
+		Resource:     pr.resource,
+		Action:       pr.action,
+		Decision:     "DENY",
+		Reason:       reason,
+		CheckedAt:    time.Now(),
+		SubjectID:    pr.userID,
+		TenantID:     pr.tenantID,
+	}
+	s.auditAuthorizationDecision(r, decision)
+	return decision
+}
+
+// checkPermissionHeld writes 403 unless the principal holds the permission.
+func (s *Server) checkPermissionHeld(w http.ResponseWriter, r *http.Request, pr *permissionRequest) bool {
+	if s.hasPermission(pr.principal, pr.permissionID) {
+		return true
+	}
+	decision := s.denyAuthorization(r, pr, "Principal lacks required permission: "+pr.permissionID)
+	s.writeAuthorizationError(w, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS", decision)
+	return false
+}
+
+// resolveAssuranceRequirementFor looks up the assurance requirement for the permission
+// (ADR-021 Decision 2) once the principal is known to hold it. resolveAssuranceRequirement
+// composes the global floor with any per-tenant overrides declared by ancestors of
+// tenantID (root→leaf), taking the max of all Min values and OR-ing RequireUserPresence
+// (ADR-021, Issue #2839). It writes 503 and reports false when the overrides cannot be read.
+func (s *Server) resolveAssuranceRequirementFor(w http.ResponseWriter, r *http.Request, pr *permissionRequest) bool {
+	req, found, err := s.resolveAssuranceRequirement(r.Context(), pr.tenantID, pr.permissionID)
+	if err != nil {
+		s.logger.Error("Failed to resolve assurance requirement",
+			"permission_id", logging.SanitizeLogValue(pr.permissionID),
+			"tenant_id", logging.SanitizeLogValue(pr.tenantID), "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
+		return false
+	}
+	pr.assuranceReq = req
+	pr.assuranceFound = found
+	pr.machineAllowed = found && req.AllowMachine && pr.principal.Assurance == session.AssuranceMachine
+	return true
+}
+
+// checkAssuranceFloor (ADR-021 Decision 2) verifies the principal's assurance level meets
+// the minimum for the route. This replaces requireTier(TierMTLSOnly) entirely. An API-key
+// principal below the floor gets a plain 403 because it can never step up; every other
+// caller gets a step-up challenge (ADR-021 Decision 6).
+func (s *Server) checkAssuranceFloor(w http.ResponseWriter, r *http.Request, pr *permissionRequest) bool {
+	req := pr.assuranceReq
+	if !pr.assuranceFound || pr.machineAllowed || pr.principal.Assurance >= req.Min {
+		return true
+	}
+	decision := s.denyAuthorization(r, pr,
+		fmt.Sprintf("Insufficient assurance: %s < %s required for %s", pr.principal.Assurance, req.Min, pr.permissionID))
+
+	if pr.principal.Assurance == session.AssuranceMachine {
+		// API-key principals can never step up; send a plain 403.
+		s.writeAuthorizationError(w, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS", decision)
+		return false
+	}
+	// All other callers (AssuranceBasic+) receive a step-up challenge (ADR-021 Decision 6).
+	levelName := req.Min.String()
+	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s"`, levelName))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	s.encodeJSONBody(w, struct {
+		Error             string `json:"error"`
+		RequiredAssurance string `json:"required_assurance"`
+	}{
+		Error:             "step_up_required",
+		RequiredAssurance: levelName,
+	}, "step_up_required")
+	return false
+}
+
+// writePresenceChallenge writes the 401 step-up challenge that names the gated
+// permission (Issue #4287) so a CLI-side step-up handler can lodge a CLI presence-relay
+// request bound to it. body is the JSON payload, encoded under errorCode.
+func (s *Server) writePresenceChallenge(w http.ResponseWriter, levelName, permissionID, errorCode string, body interface{}) {
+	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	s.encodeJSONBody(w, body, errorCode)
+}
+
+// writePresenceRejection is writePresenceChallenge for a presence token that was
+// presented and refused, answering with errorCode.
+func (s *Server) writePresenceRejection(w http.ResponseWriter, levelName, permissionID, errorCode string) {
+	s.writePresenceChallenge(w, levelName, permissionID, errorCode, struct {
+		Error            string `json:"error"`
+		PresenceRequired bool   `json:"presence_required"`
+	}{
+		Error:            errorCode,
+		PresenceRequired: true,
+	})
+}
+
+// checkUserPresence (ADR-021 Decision 4) requires a fresh per-action WebAuthn assertion
+// for catastrophic permissions (RequireUserPresence: true in permissionAssurance).
+// This runs only after the assurance check has confirmed the principal holds at least
+// req.Min assurance, so AssuranceMachine principals are already rejected there (they never
+// reach this gate). The presence token was minted by POST /api/v1/webauthn/presence/finish
+// and is passed in X-Presence-Token. It is single-use (taken atomically) and short-lived
+// (presenceTokenTTL). Continuity / LastProvenAt alone is insufficient — a hijacked-but-
+// continuous session cannot fake a present human (ADR-021 Decision 4 threat model).
+func (s *Server) checkUserPresence(w http.ResponseWriter, r *http.Request, pr *permissionRequest) bool {
+	req := pr.assuranceReq
+	if !pr.assuranceFound || pr.machineAllowed || !req.RequireUserPresence || presenceExemptForRequest(r, req) {
+		return true
+	}
+	levelName := req.Min.String()
+
+	presenceToken := r.Header.Get(presenceTokenHeader)
+	if presenceToken == "" {
+		// No presence token: step-up challenge including presence="required" (ADR-021 Decision 6).
+		s.writePresenceChallenge(w, levelName, pr.permissionID, "step_up_required", struct {
+			Error             string `json:"error"`
+			RequiredAssurance string `json:"required_assurance"`
+			PresenceRequired  bool   `json:"presence_required"`
+		}{
+			Error:             "step_up_required",
+			RequiredAssurance: levelName,
+			PresenceRequired:  true,
+		})
+		return false
+	}
+
+	record, ok := s.takeLivePresenceToken(w, r, pr, levelName, presenceToken)
+	if !ok || !s.checkPresencePrincipal(w, pr, levelName, record) || !s.checkPresenceAction(w, r, pr, levelName, record) {
+		return false
+	}
+
+	s.logger.Debug("Presence token accepted",
+		"principal_id", logging.SanitizeLogValue(pr.principal.ID),
+		"permission_id", logging.SanitizeLogValue(pr.permissionID),
+	)
+	return true
+}
+
+// takeLivePresenceToken validates and atomically consumes the token (single-use), so a
+// token that is then refused for any reason cannot be retried. It writes the rejection and
+// reports false when the store is unavailable or the token is unknown or expired.
+func (s *Server) takeLivePresenceToken(w http.ResponseWriter, r *http.Request, pr *permissionRequest, levelName, presenceToken string) (*presenceTokenRecord, bool) {
+	tokenHash := hashPresenceToken(presenceToken)
+	record, tokenOutcome := s.takePresenceToken(r.Context(), tokenHash)
+	if tokenOutcome == ceremonyUnavailable {
+		s.writeCeremonyUnavailable(w)
+		return nil, false
+	}
+	if tokenOutcome != ceremonyOK {
+		// Token not found (already used, never issued, or tampered).
+		s.writePresenceRejection(w, levelName, pr.permissionID, "presence_token_invalid")
+		return nil, false
+	}
+	if time.Now().After(record.expires) {
+		// Expired token (already removed from the store above).
+		s.writePresenceRejection(w, levelName, pr.permissionID, "presence_token_expired")
+		return nil, false
+	}
+	return record, true
+}
+
+// checkPresencePrincipal binds the presence proof to the acting principal (ADR-021
+// Decision 4): the token is only valid for the principal that ran the WebAuthn ceremony.
+// A proof performed by principal A must never satisfy the gate for principal B's
+// catastrophic action. The token was already consumed, so a mismatch cannot be retried
+// with the same token.
+func (s *Server) checkPresencePrincipal(w http.ResponseWriter, pr *permissionRequest, levelName string, record *presenceTokenRecord) bool {
+	if record.principalID == pr.principal.ID {
+		return true
+	}
+	s.logger.Warn("Presence token principal mismatch",
+		"token_principal_id", logging.SanitizeLogValue(record.principalID),
+		"request_principal_id", logging.SanitizeLogValue(pr.principal.ID),
+		"permission_id", logging.SanitizeLogValue(pr.permissionID),
+	)
+	s.writePresenceRejection(w, levelName, pr.permissionID, "presence_token_principal_mismatch")
+	return false
+}
+
+// checkPresenceAction enforces the action binding (Issues #4287, #5142, ADR-021
+// Amendment 7): every presence token carries the exact method/path/body-hash/permission
+// of the one request its gesture authorized, whether minted through the CLI presence
+// relay or the browser step-up flow. A token with an empty binding is refused for every
+// RequireUserPresence permission.
+func (s *Server) checkPresenceAction(w http.ResponseWriter, r *http.Request, pr *permissionRequest, levelName string, record *presenceTokenRecord) bool {
+	bodyHash, hashErr := hashRequestBodyForPresenceBinding(r)
+	if hashErr != nil {
+		s.logger.Error("Failed to read request body for presence binding check",
+			"error", logging.SanitizeLogValue(hashErr.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to verify presence token", "PRESENCE_TOKEN_BINDING_ERROR")
+		return false
+	}
+	if record.boundPermissionID != "" && record.boundMethod == r.Method &&
+		record.boundPath == canonicalRequestTarget(r.URL.Path, r.URL.RawQuery) && record.boundBodyHash == bodyHash &&
+		record.boundPermissionID == pr.permissionID {
+		return true
+	}
+	s.logger.Warn("Presence token action-binding mismatch",
+		"token_permission_id", logging.SanitizeLogValue(record.boundPermissionID),
+		"permission_id", logging.SanitizeLogValue(pr.permissionID),
+	)
+	s.writePresenceRejection(w, levelName, pr.permissionID, "presence_token_action_mismatch")
+	return false
+}
+
+// checkTenantCrossingBoundary applies the ADR-025 Decision 1 root<->MSP boundary for
+// principals subject to it.
+//
+// This must sit outside the tenant-isolation check: a boundary-subject principal presents
+// GlobalScope == true (its TenantID is the root tenant, Issue #4665), and that check runs
+// only for !GlobalScope principals, so it is structurally unreachable for it. Enforcing the
+// boundary only inside the handlers that happen to call authorizeTenantAccess left every
+// other tenant-targeting route open — tenant:manage's suspend and config-source/test, and
+// the per-tenant refresh-policy and assurance-policy endpoints — letting a root-scoped
+// SaaS-operator suspend an MSP tenant or drive a config-source test against that tenant's
+// git credential with no active grant and no break-glass record. Checking here covers every
+// current and future tenant-targeting route by construction rather than by
+// handler-by-handler discipline.
+//
+// subjectToTenantCrossingBoundary (not principal.RootScoped directly, Issue #4337):
+// RootScoped alone would let a bound root-scope account's session silently skip this entire
+// check — and the GlobalScope-gated tenant-isolation check — the moment its current
+// assurance drops below phishing-resistant, since RootScoped's session-path derivation is
+// re-evaluated against that assurance on every request while the account's actual scope has
+// not changed.
+func (s *Server) checkTenantCrossingBoundary(w http.ResponseWriter, r *http.Request, pr *permissionRequest) bool {
+	if !subjectToTenantCrossingBoundary(pr.principal) || tenantCrossingRemedyPermissions[pr.permissionID] {
+		return true
+	}
+	targetTenant := s.extractBoundaryTenantFromRequest(r, pr.resourceType)
+	if targetTenant == "" {
+		return true
+	}
+	switch s.authorizeTenantAccess(r.Context(), pr.principal, targetTenant) {
+	case tenantAuthAllowed:
+		// Root itself, or a tenant covered by an active crossing.
+		return true
+	case tenantAuthNeedsCrossing:
+		s.denyAuthorization(r, pr, "Root-scoped principal has no active tenant crossing for target tenant")
+		// The tenant is real and inside root's own subtree, so a challenge
+		// discloses nothing this caller cannot already learn, and it is the
+		// only way a legitimate break-glass invocation learns its remedy
+		// (ADR-025 Decision 3).
+		s.writeTenantCrossingChallenge(w, targetTenant)
+	default:
+		isoDecision := s.denyAuthorization(r, pr, "Target tenant is outside the root-scoped principal's boundary")
+		// Same existence-oracle stance as handleGetTenant/handleUpdateTenant:
+		// a tenant outside root's subtree must not be distinguishable from one
+		// that does not exist.
+		if pr.resourceType == "tenant" {
+			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+			return false
+		}
+		s.writeAuthorizationError(w, "Cross-tenant access denied", "CROSS_TENANT_ACCESS_DENIED", isoDecision)
+	}
+	return false
+}
+
+// checkTenantIsolation enforces tenant isolation for tenant-scoped (non-global) principals.
+func (s *Server) checkTenantIsolation(w http.ResponseWriter, r *http.Request, pr *permissionRequest) bool {
+	principal := pr.principal
+	s.mu.RLock()
+	engine := s.isolationEngine
+	s.mu.RUnlock()
+	if principal.GlobalScope || principal.TenantID == "" {
+		return true
+	}
+	targetTenant := s.extractTargetTenantFromRequest(r, pr.resourceType)
+	if !s.targetTenantInScope(r.Context(), pr, targetTenant) {
+		isoDecision := s.denyAuthorization(r, pr, "Target tenant is outside principal tenant subtree")
+		// tenant:read, tenant:update and tenant:manage (suspend, config-source/test)
+		// all resolve a single tenant by ID and must return an identical 404 for
+		// "doesn't exist" and "exists but out of my subtree" (ADR-025 existence-oracle
+		// prevention, Issue #3125; extended to tenant:manage by Issue #3181 and to
+		// tenant:billing-read by ADR-025 Amendment 6) — a 403
+		// here would let a caller distinguish the two cases via status code alone,
+		// before ever reaching the handler's own isCallerAuthorizedForTenant check.
+		if pr.resourceType == "tenant" && (pr.action == "read" || pr.action == "update" || pr.action == "manage" || pr.action == "billing-read") {
+			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+			return false
+		}
+		s.writeAuthorizationError(w, "Cross-tenant access denied", "CROSS_TENANT_ACCESS_DENIED", isoDecision)
+		return false
+	}
+	return s.checkIsolationEngine(w, r, pr, engine, targetTenant)
+}
+
+// targetTenantInScope reports whether targetTenant is inside the tenant-scoped principal's
+// reach. Real tenant IDs are flat, ParentID-linked tokens, never hierarchical paths, so
+// subtree containment resolves through the tenant manager's ancestry. The tenant resource
+// type additionally honours the ADR-025 crossing boundary via isCallerAuthorizedForTenant.
+func (s *Server) targetTenantInScope(ctx context.Context, pr *permissionRequest, targetTenant string) bool {
+	switch {
+	case targetTenant == "" || targetTenant == pr.principal.TenantID:
+		return true
+	case pr.resourceType == "tenant":
+		return s.isCallerAuthorizedForTenant(ctx, pr.principal, targetTenant)
+	default:
+		return s.tenantSubtreeContains(ctx, pr.principal.TenantID, targetTenant)
+	}
+}
+
+// checkIsolationEngine asks the tenant isolation engine, when one is wired, to validate a
+// tenant-scoped principal's access to another tenant.
+func (s *Server) checkIsolationEngine(w http.ResponseWriter, r *http.Request, pr *permissionRequest, engine *tenantsecurity.TenantIsolationEngine, targetTenant string) bool {
+	if engine == nil || targetTenant == "" || targetTenant == pr.principal.TenantID {
+		return true
+	}
+	isoResp, isoErr := engine.ValidateTenantAccess(r.Context(), &tenantsecurity.TenantAccessRequest{
+		SubjectID:       pr.principal.ID,
+		SubjectTenantID: pr.principal.TenantID,
+		TargetTenantID:  targetTenant,
+		ResourceID:      pr.resource,
+		AccessLevel:     tenantsecurity.CrossTenantLevelRead,
+	})
+	if isoErr == nil && isoResp != nil && isoResp.Granted {
+		return true
+	}
+	isoDecision := s.denyAuthorization(r, pr, "Cross-tenant access denied by isolation engine")
+	s.writeAuthorizationError(w, "Cross-tenant access denied", "CROSS_TENANT_ACCESS_DENIED", isoDecision)
+	return false
+}
+
+// grantPermission records the ALLOW decision on the request context, audits it and hands
+// the request to next: the principal holds the permission and passed every gate.
+func (s *Server) grantPermission(w http.ResponseWriter, r *http.Request, pr *permissionRequest, next http.Handler) {
+	principal := pr.principal
+	reason := "API key has required permission: " + pr.permissionID
+	if principal.Assurance >= session.AssuranceBasic {
+		reason = "principal assurance sufficient for full access"
+	}
+	decision := &AuthorizationDecision{
+		Granted:      true,
+		PermissionID: pr.permissionID,
+		Resource:     pr.resource,
+		Action:       pr.action,
+		Decision:     "ALLOW",
+		Reason:       reason,
+		CheckedAt:    time.Now(),
+		SubjectID:    pr.userID,
+		TenantID:     pr.tenantID,
+	}
+
+	// Add decision to context
+	ctx := context.WithValue(r.Context(), authDecisionContextKey, decision)
+
+	s.logger.Debug("Access granted",
+		"subject_id", logging.SanitizeLogValue(pr.userID),
+		"assurance_sufficient", principal.Assurance >= session.AssuranceBasic,
+		"permission_id", logging.SanitizeLogValue(pr.permissionID),
+		"resource", logging.SanitizeLogValue(pr.resource),
+	)
+
+	// Audit the authorization decision
+	s.auditAuthorizationDecision(r, decision)
+
+	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
 // buildResourceIdentifier constructs a resource identifier from the request
