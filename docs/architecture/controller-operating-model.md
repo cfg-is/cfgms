@@ -2022,6 +2022,96 @@ For the operator-facing CLI workflow (first connect, reconnect, session status, 
 - Session durability follows `storage.sqlite_path`: when SQLite is configured, sessions survive a controller restart and the `cfg` CLI can reconnect without re-authenticating; when SQLite is absent, an in-memory store is used and sessions are lost on restart. The store selection happens at bootstrap (`initializeSessionStore`, story #2774) using the same config signal as the upgrade-store and tag-store fallback paths.
 - The `cfg` CLI stores the session token in the OS-native secret store (Windows Credential Manager, macOS Keychain, Linux Secret Service or kernel keyring) — never in a file on disk. The encrypted admin bundle stored alongside it is machine-bound and cannot be reused from another machine.
 
+### Automation Grants and Pre-Approved Content (ADR-036)
+
+[ADR-036](decisions/036-scoped-automation-grants-and-pre-approved-content.md) is the decision record; the [automation grants security guide](../security/automation-grants.md) holds the threat model and residual risks. This section describes what the controller does today.
+
+Content (a library script or a workflow version) needs a per-action human tap to run unless it is pre-approved. An **automation grant** is the one machine principal that may run pre-approved content with no human present. Every route a grant can reach is listed in the [REST API guide](../api/rest-api.md#automation-grants-and-approvals).
+
+**Wiring status.** The grant store, the script-step approver that restricted workflow runs use and the tenant notify channel resolver are implemented in `features/controller/api` and `features/workflow` but are not installed by the controller composition root (`features/controller/server/server.go`). Until they are, grant routes answer `503`, a request that carries a grant credential is refused with `401`, and a script step or notify step of a grant-started workflow refuses to run. The approval store, library modes, approvals and workflow publication are installed.
+
+#### Principal type
+
+- A grant is created at one tenant with a presence tap (`automation-grant:create`, strong assurance) and has a mandatory expiry of at most 90 days. The credential is `cfgag_<id>_<secret>`, returned once in the create response; the controller keeps the grant record in the config store and only the SHA-256 of the secret in the secrets provider.
+- The credential is accepted only as `Authorization: Bearer`. A request that also carries `X-API-Key` is refused with `400`. Failed attempts are throttled per source address.
+- The principal has channel `automation_grant`, machine assurance, no permissions, never root scope and never implicit admin. Its tenant is the grant tenant. It cannot reach any permission that requires presence.
+- Nothing is cached. Every call re-reads the grant, so a revocation or expiry takes effect on the next call. Revoking needs strong assurance but no tap, because it only removes power. Revoke is audited before it is applied and ends every open run of the grant.
+- Both changes are audited. Create removes the new grant again and never returns the credential if its audit event cannot be recorded; revoke records its audit event first and leaves the grant unchanged if it cannot.
+
+#### Run binding
+
+A grant can act only inside a run. `POST /api/v1/automation/runs` opens a run for one tenant and one triggering event (`tenant_id`, `event_ref`, `event_source`).
+
+- The declared tenant must be the grant tenant or a descendant of it. The controller cannot verify the external event; it only checks the declaration against the grant subtree.
+- The event `(grant, event_source, event_ref)` is bound to its first tenant. A later begin for the same event on another tenant is refused with `409`.
+- A grant has at most 5 open runs (`429`) and at most 20 begin attempts per minute, counted whether accepted or refused (`429`). A run lasts at most one hour and can be ended earlier with `POST /api/v1/automation/runs/{run_id}/end`.
+- Every later call names the run in the URL path only. The binding wrapper loads the run, requires it to belong to the calling grant and to be open, re-reads the grant, refuses a request whose query or JSON body names a tenant other than the run tenant, and replaces the principal with a copy confined to the run tenant. Every refusal is a uniform `403`.
+- A device is in scope only when its own tenant is exactly the run tenant. A descendant, ancestor or sibling tenant is refused, not narrowed.
+
+#### Route allowlist
+
+A router-level guard refuses a grant principal with `403` unless the matched route template and method are in a closed table. A route joins the table only by registering through the automation route helper; a path prefix never admits a route. The table holds: begin and end of a run, five reads (`stewards`, `stewards/{id}`, `stewards/{id}/dna`, `results/{result_run_id}` and `results/{result_run_id}/jobs`), the script list and script start routes, and the workflow start, execution list and execution read routes. Reads of runs, jobs and executions are limited to those the run itself started. A script is never returned as text by any grant route. Everything else, including config push, service control, terminal and every human run or execute route, stays human-only.
+
+#### Evaluator order
+
+The evaluator decides whether one exact resolved version may run for the run tenant. It is side-effect free and fails closed: every infrastructure failure is a denied decision, and a caller must not run on a denied decision or an error. The mode, approvals and trusted keys are those of the **owner** tenant, the tenant whose library holds the content.
+
+Scripts:
+
+1. The stored content hash is recomputed from the content; a mismatch is denied.
+2. Privilege metadata that names required API scopes is denied: automation never runs such a script.
+3. The owner's library mode is read.
+4. The header declaration `cfgms-preapproved: automation` must be present in the leading comment block. A malformed `cfgms-` header line is denied. A script without the declaration is pending and no approval can change that; it is required in every mode.
+5. By mode: `comment` approves on the declaration. `approve` approves only on an approval record bound to the approval hash. `signed` approves a signature that verifies under the owner's effective trusted keys and, when the run tenant has trusted keys of its own, under those too; a version with no signature, or an owner with no trusted keys, falls back to `approve`; a signature that is present and does not verify is denied.
+
+Workflows:
+
+1. The canonical content hash is recomputed.
+2. A stored publication must verify (see [workflow publication](#workflow-publication)); a publication that does not verify is denied, never a fallback.
+3. The version must carry `preapproved_for_automation` in every mode; otherwise it is pending.
+4. A verified publication approves in every mode. An unpublished version follows the owner's workflow library mode (`comment`, `approve`, `signed`) as for scripts.
+
+The default mode of each library is `signed`. The mode is per tenant and per kind (script or workflow) and is set only through `PUT /api/v1/automation/libraries/{kind}/mode` for the caller's own tenant, with a presence tap and an audit event written first. There is no parent floor: a tenant sets the mode of its own library.
+
+#### Approvals and pending change handling
+
+An approval is a record bound to the approval hash of one exact version (script: owner tenant, content, shell, timeout and parameters; workflow: owner tenant, name, version and canonical hash). It never carries to another version. Approve takes a presence tap, withdrawal takes strong assurance and no tap, and both are audited before they change anything. Only a human channel can approve or withdraw; a grant principal never can.
+
+When a script that was approved earlier has a new version evaluated under `approve` mode, the run is refused with `409` (`APPROVAL_PENDING`) and the controller records one pending change for the owner tenant and emails the owner tenant's administrators. The notice carries identifiers and the two approval hashes, never script text; the unified diff against the previously approved version is shown only to an administrator of the owner tenant in `GET /api/v1/automation/approvals/scripts/pending`. At most 10 pending changes per owner tenant and hour are recorded and mailed; the first change beyond that sends one summary notice, and later ones are refused without a notice. A refused run never falls back to an older approved version. A first approval of a script is not a change and records nothing; a workflow that awaits approval is refused without a pending record.
+
+#### Script and workflow runs
+
+- **Script run** (`POST .../runs/{run_id}/scripts`): the script is resolved once through the run tenant's library chain (the run tenant, then each ancestor up to and including the grant tenant) and that exact version is evaluated, pinned and audited. The queue entry carries the owner tenant, version and approval hash, and a guard reference to the run and grant; the guard is checked at dequeue and again before dispatch, and cancels the command when the run has ended or the grant is revoked or expired. Params are literal strings for declared parameters only, checked against the declared type and allowed values. Targets that reach a device outside the run tenant refuse the whole request, and the device count is bounded by the tenant's target limit.
+- **Workflow run** (`POST .../runs/{run_id}/workflows/{name}`): the version is required (there is no latest), resolved through the same chain, evaluated, and started only through the restricted engine entry point. Inputs must be declared by the workflow and are bounded in count and size.
+
+#### Restricted workflow runs
+
+A workflow started by a grant runs in restricted mode. Before the first step starts the engine validates every step, including nested bodies, against a positive step-type allowlist; a step type that is not classified is denied. In v1 the allowed types are:
+
+- the control-flow types (`sequential`, `parallel`, `conditional`, `for`, `while`, `foreach`, `switch`, `try`, `break`, `continue`) and `delay`;
+- `notify`, only to a literal destination that is a channel configured for the run tenant;
+- the library-script step (`script`).
+
+Automated workflow runs refuse sub-workflow steps in v1, together with `composite`, `error_workflow` and workflow-level error workflows. Task, HTTP, API, webhook, approval, transform and the remaining step types are refused. A refused workflow answers `422` (`WORKFLOW_NOT_RESTRICTED_SAFE`) and nothing runs.
+
+A restricted run is bounded: 500 steps (nested steps, loop-body steps and retries counted), 250 loop iterations in total, 10 parallel branches at once and 15 minutes of wall time. The run guard (run open, grant neither revoked nor expired) is checked before every step, so a revocation or an end reaches a running workflow at its next step. A step already dispatched to a steward is not recalled.
+
+The script step of a restricted run is the library-script step only: it needs `script_id` and an explicit `script_version`, takes literal parameters for parameters the script declares, and refuses an inline script, a path, a command, secret bindings and an ephemeral API key. Each script step is judged again by the script evaluator under its own owner tenant's mode and records; approving a workflow does not approve the scripts its steps name.
+
+#### Workflow publication
+
+Publishing a workflow version takes a passkey tap: `POST /api/v1/workflows/{id}/versions/{version}/publish/begin` issues a WebAuthn challenge over the operator-payload envelope of the exact version (tenant, name, version, canonical content hash, nonce and expiry), and `.../finish` verifies the assertion under the account's registered credential and stores it as the version's publication. The controller holds no workflow-signing key. The publication is re-verified at every evaluation and every start and nothing is cached. It applies no maximum age. It stops verifying when the version changed or moved tenant, or when the signer's credential, account or `workflow:publish` permission in the workflow's tenant is gone.
+
+A human also takes a passkey tap to save a workflow (`workflow:write`) and a tap to start one (`workflow:execute`); the steps of a running workflow take no per-step tap. A script step runs outside an automation grant only from a version published with a tap, and that version's publication is verified at each start. A scheduled, webhook or API-key run of such a version needs no tap. Script steps of nested workflows, of a resumed approval tail and of any run whose caller did not name the stored version are refused outside a grant in v1.
+
+#### Steward final say
+
+Every script a grant can start is a library run. The controller forwards the library script identity and its signature, and the steward verifies the signature against its own trusted keys. A steward refuses a library script without a valid signature from a trusted key under every `script_signing.policy` and trust mode, so controller approval cannot make unsigned library content run on an endpoint.
+
+#### Audit
+
+Every call on an automation route, accepted or refused, is recorded under the grant identity, the run and the event reference (`automation.call`, with `reason` on a refusal), together with `automation.run.begin`, `automation.run.end`, `automation.script.run`, `automation.script.list` and `automation.workflow.run`. Grant create and revoke (`automation_grant.create`, `automation_grant.revoke`), approvals (`content_approval.approve`, `content_approval.revoke`), library mode changes (`content_library.mode_change`) and `workflow.publish` are recorded under the acting human. The credential never appears in a record.
+
 ## Multi-Tenancy
 
 The controller enforces strict tenant isolation across all operations.
@@ -2352,6 +2442,7 @@ The REST API is the admin interface to the controller. All operations are authen
 | **Compliance** | Compliance status, reports |
 | **HA** | Cluster status, leader info, node list |
 | **Workflows** | Create, trigger, monitor workflows |
+| **Automation** | Automation grants, runs, approvals, library approval modes and workflow publication; see [Automation Grants and Pre-Approved Content](#automation-grants-and-pre-approved-content-adr-036) |
 | **Orchestration** | Initiate and monitor multi-node operations |
 | **Modules** | List cached modules, approve queued bundles |
 | **Live telemetry** | `GET /api/v1/telemetry/ws/{steward_id}` — WebSocket endpoint that fans steward telemetry snapshots (process/service) to browser subscribers in real time. Requires `steward:telemetry` permission. The controller subscribes upstream to the steward (via `TelemetryRequest{subscribe=true}`) on the first browser connection and unsubscribes on the last browser disconnect, preserving the "collect only while watched" property. |

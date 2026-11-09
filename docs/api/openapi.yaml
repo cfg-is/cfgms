@@ -2044,6 +2044,1041 @@ paths:
         '409':
           description: Account concurrently modified
 
+  /automation/grants:
+    post:
+      summary: Create an automation grant
+      description: >-
+        Creates a scoped machine principal for a tenant. Requires
+        automation-grant:create at strong assurance with a presence tap. The
+        expiry is required and at most 90 days ahead. The plaintext credential
+        is returned once and cannot be read again; the response carries
+        Cache-Control no-store. The create event is audited before the response;
+        if it cannot be recorded the grant is removed and 503 AUDIT_UNAVAILABLE
+        is returned. A tenant outside the caller's subtree is a 404
+        TENANT_NOT_FOUND. A root-scoped caller must supply tenant_id.
+      operationId: createAutomationGrant
+      tags:
+        - Automation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AutomationGrantCreateRequest'
+      responses:
+        '201':
+          description: Grant created
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/AutomationGrantCreated'
+                    timestamp:
+                      type: string
+                      format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: Automation grants or the audit trail are not available (SERVICE_UNAVAILABLE, AUDIT_UNAVAILABLE)
+    get:
+      summary: List automation grants
+      description: >-
+        Lists the grants inside the caller's tenant subtree. A grant record never
+        contains the credential. A root-scoped caller lists one tenant with the
+        tenant query parameter (default the root tenant). Requires
+        automation-grant:read.
+      operationId: listAutomationGrants
+      tags:
+        - Automation
+      parameters:
+        - name: tenant
+          in: query
+          required: false
+          description: Tenant to list, for root-scoped callers only
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Grants
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      type: object
+                      properties:
+                        grants:
+                          type: array
+                          items:
+                            $ref: '#/components/schemas/AutomationGrant'
+                        count:
+                          type: integer
+                    timestamp:
+                      type: string
+                      format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: Automation grants are not available
+
+  /automation/grants/{id}:
+    delete:
+      summary: Revoke an automation grant
+      description: >-
+        Revokes the grant and ends its open runs. Requires
+        automation-grant:revoke at strong assurance with no presence tap. The
+        revoke event is audited before it is applied; if it cannot be recorded
+        the grant is left unchanged (503 AUDIT_UNAVAILABLE). A grant outside the
+        caller's subtree is a 404 GRANT_NOT_FOUND. Repeating the request keeps the
+        original revocation record and ends any run still open.
+      operationId: revokeAutomationGrant
+      tags:
+        - Automation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Grant revoked
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/AutomationGrantRevoked'
+                    timestamp:
+                      type: string
+                      format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          description: The grant was revoked but its open runs could not all be ended; repeat the request
+        '503':
+          description: Automation grants or the audit trail are not available
+
+  /automation/runs:
+    post:
+      summary: Begin an automation run
+      description: >-
+        Opens a run bound to one tenant and one triggering event. Reachable only
+        by an automation grant principal (Authorization Bearer cfgag_ credential);
+        any other principal receives 403. The declared tenant must be the grant
+        tenant or a descendant of it; the controller cannot verify the external
+        event. The event (grant, event_source, event_ref) is bound to its first
+        tenant. A grant has at most 5 open runs and at most 20 begin attempts per
+        minute, accepted or refused. A run lasts at most one hour.
+      operationId: beginAutomationRun
+      tags:
+        - Automation
+      security:
+        - AutomationGrantAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AutomationRunBeginRequest'
+      responses:
+        '201':
+          description: Run opened
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/AutomationRun'
+                    timestamp:
+                      type: string
+                      format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Not a grant principal, or the tenant is outside the grant's tenant (TENANT_OUT_OF_SCOPE)
+        '409':
+          description: The event is already bound to another tenant (EVENT_BOUND_TO_OTHER_TENANT)
+        '429':
+          description: Open-run cap (OPEN_RUN_CAP) or begin rate limit (RATE_LIMITED)
+
+  /automation/runs/{run_id}/end:
+    post:
+      summary: End an automation run
+      description: >-
+        Ends the run. Ending an ended run keeps the original end time. Every call
+        on a run route is refused with a uniform 403 AUTOMATION_RUN_DENIED when
+        the run is unknown, belongs to another grant, has ended or expired, when
+        the grant is revoked or expired, or when the query or JSON body names a
+        tenant other than the run tenant.
+      operationId: endAutomationRun
+      tags:
+        - Automation
+      parameters:
+        - $ref: '#/components/parameters/automationRunId'
+      security:
+        - AutomationGrantAuth: []
+      responses:
+        '200':
+          description: Run ended
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/AutomationRun'
+                    timestamp:
+                      type: string
+                      format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /automation/runs/{run_id}/stewards:
+    get:
+      summary: List the stewards of the run tenant
+      description: >-
+        Returns the stewards whose own tenant is exactly the run tenant; stewards of a descendant tenant are dropped, and pagination counts only the returned set. Reachable only by an automation grant principal within an open run.
+      operationId: listAutomationRunStewards
+      tags:
+        - Automation
+      security:
+        - AutomationGrantAuth: []
+      parameters:
+        - $ref: '#/components/parameters/automationRunId'
+      responses:
+        '200':
+          description: The read result, in the standard data envelope
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /automation/runs/{run_id}/stewards/{id}:
+    get:
+      summary: Get one steward of the run tenant
+      description: >-
+        A steward that does not exist or whose own tenant is not exactly the run tenant is a 404. Reachable only by an automation grant principal within an open run.
+      operationId: getAutomationRunSteward
+      tags:
+        - Automation
+      security:
+        - AutomationGrantAuth: []
+      parameters:
+        - $ref: '#/components/parameters/automationRunId'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The read result, in the standard data envelope
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /automation/runs/{run_id}/stewards/{id}/dna:
+    get:
+      summary: Get the DNA of one steward of the run tenant
+      description: >-
+        A steward that does not exist or whose own tenant is not exactly the run tenant is a 404. Reachable only by an automation grant principal within an open run.
+      operationId: getAutomationRunStewardDNA
+      tags:
+        - Automation
+      security:
+        - AutomationGrantAuth: []
+      parameters:
+        - $ref: '#/components/parameters/automationRunId'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The read result, in the standard data envelope
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /automation/runs/{run_id}/results/{result_run_id}:
+    get:
+      summary: Get a script run this run started
+      description: >-
+        Unknown, another run's and out-of-tenant runs all answer the same 404. Reachable only by an automation grant principal within an open run.
+      operationId: getAutomationRunResult
+      tags:
+        - Automation
+      security:
+        - AutomationGrantAuth: []
+      parameters:
+        - $ref: '#/components/parameters/automationRunId'
+        - name: result_run_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The read result, in the standard data envelope
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /automation/runs/{run_id}/results/{result_run_id}/jobs:
+    get:
+      summary: List the jobs of a script run this run started
+      description: >-
+        Jobs on devices outside exactly the run tenant, and jobs whose device cannot be resolved, are dropped. Unknown, another run's and out-of-tenant runs all answer the same 404. Reachable only by an automation grant principal within an open run.
+      operationId: getAutomationRunResultJobs
+      tags:
+        - Automation
+      security:
+        - AutomationGrantAuth: []
+      parameters:
+        - $ref: '#/components/parameters/automationRunId'
+        - name: result_run_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The read result, in the standard data envelope
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /automation/runs/{run_id}/executions:
+    get:
+      summary: List the workflow executions this run started
+      description: >-
+        Newest first. At most the newest 500 executions of the run tenant are checked against the run's records. Reachable only by an automation grant principal within an open run.
+      operationId: listAutomationRunExecutions
+      tags:
+        - Automation
+      security:
+        - AutomationGrantAuth: []
+      parameters:
+        - $ref: '#/components/parameters/automationRunId'
+      responses:
+        '200':
+          description: The read result, in the standard data envelope
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /automation/runs/{run_id}/executions/{exec_id}:
+    get:
+      summary: Get one workflow execution this run started
+      description: >-
+        Unknown, another run's and another tenant's executions all answer the same 404. Reachable only by an automation grant principal within an open run.
+      operationId: getAutomationRunExecution
+      tags:
+        - Automation
+      security:
+        - AutomationGrantAuth: []
+      parameters:
+        - $ref: '#/components/parameters/automationRunId'
+        - name: exec_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The read result, in the standard data envelope
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /automation/runs/{run_id}/scripts:
+    get:
+      summary: List the scripts visible to a run
+      description: >-
+        Lists the scripts the run tenant sees through its library chain (the run
+        tenant, then each ancestor up to and including the grant tenant), each
+        with its owner tenant and the evaluator's state for its latest version.
+        It never returns script text. Audited as automation.script.list.
+      operationId: listAutomationRunScripts
+      tags:
+        - Automation
+      security:
+        - AutomationGrantAuth: []
+      parameters:
+        - $ref: '#/components/parameters/automationRunId'
+      responses:
+        '200':
+          description: Scripts
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      type: array
+                      items:
+                        $ref: '#/components/schemas/AutomationScriptEntry'
+                    timestamp:
+                      type: string
+                      format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: Authorization data is temporarily unavailable
+    post:
+      summary: Start a pre-approved library script under a run
+      description: >-
+        Starts one library script on devices of the run tenant. The script is
+        resolved once through the run tenant's library chain; that exact version
+        is evaluated, pinned and audited. A pending version (no approval, or no
+        cfgms-preapproved header declaration) is 409 APPROVAL_PENDING and an
+        earlier approved version is never used instead; a denied version is 403
+        CONTENT_NOT_APPROVED. params accepts literal strings for declared
+        parameters only. A target that reaches a device outside the run tenant
+        refuses the whole request (403 TARGET_OUT_OF_TENANT). Every queued command
+        carries a guard reference to the run and grant and is cancelled when the
+        run ends or the grant is revoked or expires. The steward verifies the
+        library script signature against its own trusted keys. Audited as
+        automation.script.run.
+      operationId: startAutomationRunScript
+      tags:
+        - Automation
+      security:
+        - AutomationGrantAuth: []
+      parameters:
+        - $ref: '#/components/parameters/automationRunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AutomationScriptRunRequest'
+      responses:
+        '201':
+          description: Script run queued
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/AutomationScriptRun'
+                    timestamp:
+                      type: string
+                      format: date-time
+        '400':
+          description: MISSING_SCRIPT_ID, INVALID_REQUEST, INVALID_VERSION, INVALID_TARGET or PARAM_REFUSED
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: CONTENT_NOT_APPROVED, TARGET_OUT_OF_TENANT or AUTOMATION_RUN_DENIED
+        '404':
+          description: SCRIPT_NOT_FOUND or NO_TARGETS
+        '409':
+          description: APPROVAL_PENDING
+        '422':
+          description: 'TOO_MANY_TARGETS: the target matches more devices than the tenant''s limit'
+        '503':
+          description: A dependency is not wired or authorization data is unavailable
+
+  /automation/runs/{run_id}/workflows/{name}:
+    post:
+      summary: Start a pinned workflow version under a run
+      description: >-
+        Starts one workflow version as a restricted execution under the run
+        tenant. The version is required and must be an exact semantic version;
+        there is no latest. The version is resolved once through the run tenant's
+        library chain and evaluated under the owner tenant's mode and records. A
+        stored publication must verify, and the version must carry
+        preapproved_for_automation in every mode. The restricted step set in v1
+        is the control-flow types, delay, notify to a channel configured for the
+        run tenant and the library-script step; sub-workflow steps are refused
+        (422 WORKFLOW_NOT_RESTRICTED_SAFE) and nothing runs. A restricted run is
+        bounded to 500 steps, 250 loop iterations, 10 parallel branches and 15
+        minutes, and the run guard is checked before every step. Audited as
+        automation.workflow.run.
+      operationId: startAutomationRunWorkflow
+      tags:
+        - Automation
+      security:
+        - AutomationGrantAuth: []
+      parameters:
+        - $ref: '#/components/parameters/automationRunId'
+        - name: name
+          in: path
+          required: true
+          description: Workflow name
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AutomationWorkflowRunRequest'
+      responses:
+        '202':
+          description: Execution started
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/AutomationWorkflowRun'
+                    timestamp:
+                      type: string
+                      format: date-time
+        '400':
+          description: INVALID_REQUEST, MISSING_VERSION, INVALID_VERSION, INPUT_REFUSED or INVALID_INPUTS
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: CONTENT_NOT_APPROVED or AUTOMATION_RUN_DENIED
+        '404':
+          description: WORKFLOW_NOT_FOUND
+        '409':
+          description: 'APPROVAL_PENDING: the version awaits approval or does not opt in with preapproved_for_automation'
+        '422':
+          description: WORKFLOW_NOT_RESTRICTED_SAFE
+        '503':
+          description: A dependency is not wired or authorization data is unavailable
+
+  /automation/approvals/scripts:
+    get:
+      summary: List script versions with their approval state
+      description: >-
+        Lists every script version in the caller's own tenant's library with its
+        content hash, approval hash and evaluator state (approved or pending), and
+        the library's approval mode. Requires automation-approval:read.
+      operationId: listAutomationScriptApprovals
+      tags:
+        - Automation
+      responses:
+        '200':
+          description: Library approval state
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      type: object
+                      properties:
+                        mode:
+                          $ref: '#/components/schemas/AutomationApprovalMode'
+                        scripts:
+                          type: array
+                          items:
+                            $ref: '#/components/schemas/AutomationApprovalEntry'
+                    timestamp:
+                      type: string
+                      format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: Approvals are not available
+    post:
+      summary: Approve one script version
+      description: >-
+        Approves one exact version by its approval hash. Requires
+        content-approval:approve at strong assurance with a presence tap. Only a
+        human channel may approve; a grant, API key or relay principal is refused.
+        The approval never carries to another version or hash. The audit event is
+        written before the approval is stored. Audit action content_approval.approve.
+      operationId: approveAutomationScript
+      tags:
+        - Automation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [script_id, version, approval_hash]
+              properties:
+                script_id:
+                  type: string
+                version:
+                  type: string
+                approval_hash:
+                  type: string
+                  description: The approval hash the presence tap covers
+                content_hash:
+                  type: string
+                  description: Optional; must equal the stored content hash
+      responses:
+        '201':
+          description: Approval recorded
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/AutomationApprovalEntry'
+                    timestamp:
+                      type: string
+                      format: date-time
+        '400':
+          description: MISSING_FIELDS or INVALID_REQUEST
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 'HASH_MISMATCH: the body no longer names what the controller holds'
+        '422':
+          description: NOT_APPROVABLE
+        '500':
+          description: 'AUDIT_UNAVAILABLE: nothing was changed'
+
+  /automation/approvals/scripts/{id}/{version}/{approval_hash}:
+    delete:
+      summary: Withdraw the approval of one script version
+      description: >-
+        Withdraws an approval found by its stored key, so the approval of a
+        version that has since changed can still be withdrawn. Requires
+        content-approval:revoke at strong assurance with no presence tap. Audit
+        action content_approval.revoke.
+      operationId: revokeAutomationScriptApproval
+      tags:
+        - Automation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: approval_hash
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Approval withdrawn
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /automation/approvals/scripts/pending:
+    get:
+      summary: List approved scripts whose new version awaits approval
+      description: >-
+        Each change carries the previous approved version and a unified diff of the
+        previously approved content against the new content. The diff is shown only
+        to an administrator of the owner tenant; the notice email carries
+        identifiers only. Requires automation-approval:read.
+      operationId: listPendingScriptChanges
+      tags:
+        - Automation
+      responses:
+        '200':
+          description: Pending changes
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      type: object
+                      properties:
+                        changes:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              script_id: {type: string}
+                              version: {type: string}
+                              content_hash: {type: string}
+                              approval_hash: {type: string}
+                              previous_version: {type: string}
+                              previous_approval_hash: {type: string}
+                              first_seen: {type: string}
+                              diff: {type: string}
+                              diff_unavailable: {type: string}
+                    timestamp:
+                      type: string
+                      format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /automation/approvals/workflows:
+    get:
+      summary: List workflow versions with their approval state
+      description: >-
+        Lists every workflow version in the caller's own tenant's library with its
+        content hash, approval hash and evaluator state (approved or pending), and
+        the library's approval mode. Requires automation-approval:read.
+      operationId: listAutomationWorkflowApprovals
+      tags:
+        - Automation
+      responses:
+        '200':
+          description: Library approval state
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      type: object
+                      properties:
+                        mode:
+                          $ref: '#/components/schemas/AutomationApprovalMode'
+                        workflows:
+                          type: array
+                          items:
+                            $ref: '#/components/schemas/AutomationApprovalEntry'
+                    timestamp:
+                      type: string
+                      format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: Approvals are not available
+    post:
+      summary: Approve one workflow version
+      description: >-
+        Approves one exact version by its approval hash. Requires
+        content-approval:approve at strong assurance with a presence tap. Only a
+        human channel may approve; a grant, API key or relay principal is refused.
+        The approval never carries to another version or hash. The audit event is
+        written before the approval is stored. Audit action content_approval.approve.
+      operationId: approveAutomationWorkflow
+      tags:
+        - Automation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workflow_id, version, approval_hash]
+              properties:
+                workflow_id:
+                  type: string
+                version:
+                  type: string
+                approval_hash:
+                  type: string
+                  description: The approval hash the presence tap covers
+                content_hash:
+                  type: string
+                  description: Optional; must equal the stored content hash
+      responses:
+        '201':
+          description: Approval recorded
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/AutomationApprovalEntry'
+                    timestamp:
+                      type: string
+                      format: date-time
+        '400':
+          description: MISSING_FIELDS or INVALID_REQUEST
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 'HASH_MISMATCH: the body no longer names what the controller holds'
+        '422':
+          description: NOT_APPROVABLE
+        '500':
+          description: 'AUDIT_UNAVAILABLE: nothing was changed'
+
+  /automation/approvals/workflows/{id}/{version}/{approval_hash}:
+    delete:
+      summary: Withdraw the approval of one workflow version
+      description: >-
+        Withdraws an approval found by its stored key, so the approval of a
+        version that has since changed can still be withdrawn. Requires
+        content-approval:revoke at strong assurance with no presence tap. Audit
+        action content_approval.revoke.
+      operationId: revokeAutomationWorkflowApproval
+      tags:
+        - Automation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: approval_hash
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Approval withdrawn
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /automation/libraries/{kind}/mode:
+    get:
+      summary: Get the approval mode of a library
+      description: >-
+        Returns the approval mode of the caller's own tenant's script or workflow
+        library. Requires content-library:read.
+      operationId: getLibraryMode
+      tags:
+        - Automation
+      parameters:
+        - $ref: '#/components/parameters/libraryKind'
+      responses:
+        '200':
+          description: Library mode
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/AutomationLibraryMode'
+                    timestamp:
+                      type: string
+                      format: date-time
+        '400':
+          description: INVALID_KIND
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: The content approval store is not available
+    put:
+      summary: Set the approval mode of a library
+      description: >-
+        Sets the mode of the caller's own tenant's library. Requires
+        content-library:set-mode at strong assurance with a presence tap. There is
+        no parent floor: the tenant that owns the library sets its mode. The audit
+        event content_library.mode_change is written before the change; if it
+        cannot be recorded the mode is left unchanged (503 AUDIT_UNAVAILABLE).
+        Setting the mode the library already has goes through the same
+        permission, tap and audit.
+      operationId: setLibraryMode
+      tags:
+        - Automation
+      parameters:
+        - $ref: '#/components/parameters/libraryKind'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode:
+                  $ref: '#/components/schemas/AutomationApprovalMode'
+      responses:
+        '200':
+          description: Library mode set
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/AutomationLibraryMode'
+                    timestamp:
+                      type: string
+                      format: date-time
+        '400':
+          description: INVALID_KIND, INVALID_MODE or INVALID_REQUEST
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: The audit trail or the content approval store is not available
+
+  /workflows/{id}/versions/{version}/publish/begin:
+    post:
+      summary: Begin publishing a workflow version
+      description: >-
+        Loads the exact stored version and returns a WebAuthn challenge over its
+        envelope (tenant, name, version, canonical content hash, nonce and
+        expiry). Requires workflow:publish at strong assurance, a
+        cookie-authenticated web session and a registered passkey. The signer must
+        hold workflow:publish in the workflow's tenant.
+      operationId: beginWorkflowPublish
+      tags:
+        - Workflows
+      parameters:
+        - $ref: '#/components/parameters/workflowPublishId'
+        - $ref: '#/components/parameters/workflowPublishVersion'
+      responses:
+        '200':
+          description: Challenge issued
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      type: object
+                      properties:
+                        assertion:
+                          type: object
+                          description: WebAuthn credential assertion options
+                        name: {type: string}
+                        version: {type: string}
+                        content_hash: {type: string}
+                    timestamp:
+                      type: string
+                      format: date-time
+        '400':
+          description: INVALID_VERSION or SESSION_REQUIRED
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 'NO_CREDENTIALS: enroll a passkey first'
+        '503':
+          description: WEBAUTHN_NOT_CONFIGURED or the workflow engine is not available
+
+  /workflows/{id}/versions/{version}/publish/finish:
+    post:
+      summary: Finish publishing a workflow version
+      description: >-
+        Takes the WebAuthn assertion produced for the begin challenge. The
+        controller reloads the version, rebuilds the envelope from its current
+        canonical hash and refuses with 409 VERSION_CHANGED if it no longer equals
+        the issued one, verifies the assertion under the account's registered
+        credential and stores it as the version's publication. The controller
+        holds no workflow-signing key. A publication is re-verified at every
+        evaluation and start, applies no maximum age, and stops verifying when the
+        version changes or moves tenant, or when the signer's credential, account
+        or workflow:publish permission is gone. A ceremony is single use. Audit
+        action workflow.publish.
+      operationId: finishWorkflowPublish
+      tags:
+        - Workflows
+      parameters:
+        - $ref: '#/components/parameters/workflowPublishId'
+        - $ref: '#/components/parameters/workflowPublishVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: The WebAuthn PublicKeyCredential assertion
+      responses:
+        '200':
+          description: Version published
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      type: object
+                      properties:
+                        name: {type: string}
+                        version: {type: string}
+                        content_hash: {type: string}
+                        signer_account_id: {type: string}
+                        signed_at: {type: string, format: date-time}
+                    timestamp:
+                      type: string
+                      format: date-time
+        '400':
+          description: NO_ACTIVE_PUBLISH_SESSION, SESSION_EXPIRED or WEBAUTHN_VERIFY_ERROR
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: VERSION_CHANGED or INVALID_ENVELOPE
+        '429':
+          description: THROTTLED
+
 components:
   securitySchemes:
     BearerAuth:
@@ -2060,8 +3095,45 @@ components:
       in: header
       name: X-API-Key
       description: API key authentication via X-API-Key header
+    AutomationGrantAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: cfgag_<id>_<secret>
+      description: >-
+        Automation grant credential (ADR-036). Accepted only as Authorization Bearer and only on
+        the /automation/runs routes; a grant is refused on every other route. Sending X-API-Key as
+        well is 400 CONFLICTING_CREDENTIALS.
 
   parameters:
+    automationRunId:
+      name: run_id
+      in: path
+      required: true
+      description: Automation run ID returned by begin
+      schema:
+        type: string
+    libraryKind:
+      name: kind
+      in: path
+      required: true
+      description: Library kind
+      schema:
+        type: string
+        enum: [script, workflow]
+    workflowPublishId:
+      name: id
+      in: path
+      required: true
+      description: Workflow name
+      schema:
+        type: string
+    workflowPublishVersion:
+      name: version
+      in: path
+      required: true
+      description: Semantic version of the stored workflow version
+      schema:
+        type: string
     stewardId:
       name: stewardId
       in: path
@@ -2327,6 +3399,165 @@ components:
           type: string
           format: date-time
 
+    AutomationApprovalMode:
+      type: string
+      enum: [signed, approve, comment]
+      description: >-
+        signed (default): a signature from a trusted key of the owner tenant, falling back to approve
+        when the version is unsigned or the owner trusts no keys. approve: an approval bound to the
+        approval hash. comment: the declaration alone. The declaration (header comment or
+        preapproved_for_automation) is required in every mode.
+    AutomationGrant:
+      type: object
+      properties:
+        id: {type: string}
+        tenant_id: {type: string}
+        name: {type: string}
+        created_by: {type: string}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+        revoked_at: {type: string, format: date-time}
+        revoked_by: {type: string}
+    AutomationGrantCreateRequest:
+      type: object
+      required: [name, expires_at]
+      properties:
+        name: {type: string}
+        tenant_id:
+          type: string
+          description: Defaults to the caller's tenant; required for a root-scoped caller
+        expires_at:
+          type: string
+          format: date-time
+          description: In the future and at most 90 days ahead
+    AutomationGrantCreated:
+      type: object
+      properties:
+        grant:
+          $ref: '#/components/schemas/AutomationGrant'
+        credential:
+          type: string
+          description: cfgag_<id>_<secret>, returned once
+    AutomationGrantRevoked:
+      type: object
+      properties:
+        grant:
+          $ref: '#/components/schemas/AutomationGrant'
+        runs_ended: {type: integer}
+    AutomationRunBeginRequest:
+      type: object
+      required: [tenant_id, event_ref, event_source]
+      properties:
+        tenant_id:
+          type: string
+          description: The grant tenant or a descendant of it
+        event_ref:
+          type: string
+          maxLength: 128
+          description: 'Starts with a letter or digit; A-Z a-z 0-9 . _ : / # - only'
+        event_source:
+          type: string
+          maxLength: 128
+    AutomationRun:
+      type: object
+      properties:
+        run_id: {type: string}
+        tenant_id: {type: string}
+        event_ref: {type: string}
+        event_source: {type: string}
+        expires_at: {type: string, format: date-time}
+        ended: {type: boolean}
+    AutomationScriptEntry:
+      type: object
+      properties:
+        script_id: {type: string}
+        name: {type: string}
+        version: {type: string}
+        owner_tenant: {type: string}
+        state:
+          type: string
+          enum: [approved, pending, denied]
+        reason: {type: string}
+        approval_hash: {type: string}
+    AutomationScriptRunRequest:
+      type: object
+      required: [script_id]
+      properties:
+        target:
+          type: string
+          description: Fleet selector; empty or all means every device of the run tenant
+        script_id: {type: string}
+        version:
+          type: string
+          description: Optional; when empty the latest is resolved once and pinned
+        params:
+          type: object
+          description: Literal string values for declared parameters only
+          additionalProperties:
+            type: string
+    AutomationScriptRun:
+      type: object
+      properties:
+        run_id:
+          type: string
+          description: The result run, readable under /automation/runs/{run_id}/results/{run_id}
+        tenant_id: {type: string}
+        owner_tenant: {type: string}
+        script_id: {type: string}
+        version: {type: string}
+        approval_hash: {type: string}
+        device_count: {type: integer}
+    AutomationWorkflowRunRequest:
+      type: object
+      required: [version]
+      properties:
+        version:
+          type: string
+          description: Exact semantic version; there is no latest
+        inputs:
+          type: object
+          description: Values for the workflow's declared inputs (at most 64, each at most 4096 encoded bytes)
+          additionalProperties: true
+    AutomationWorkflowRun:
+      type: object
+      properties:
+        execution_id: {type: string}
+        tenant_id: {type: string}
+        owner_tenant: {type: string}
+        workflow_name: {type: string}
+        version: {type: string}
+        approval_hash: {type: string}
+        status: {type: string}
+    AutomationApprovalEntry:
+      type: object
+      properties:
+        script_id: {type: string}
+        workflow_id: {type: string}
+        version: {type: string}
+        content_hash: {type: string}
+        approval_hash: {type: string}
+        state:
+          type: string
+          enum: [approved, pending]
+        reason:
+          type: string
+          description: Present on workflow entries
+        approval:
+          type: object
+          properties:
+            approved_by: {type: string}
+            approved_at: {type: string}
+            method:
+              type: string
+              enum: [approve-tap, signature, workflow-publish]
+    AutomationLibraryMode:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum: [script, workflow]
+        mode:
+          $ref: '#/components/schemas/AutomationApprovalMode'
     StewardInfo:
       type: object
       properties:
