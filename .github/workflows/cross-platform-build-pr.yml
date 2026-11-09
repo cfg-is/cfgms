@@ -512,6 +512,106 @@ jobs:
         CFGMS_TEST_RACE: "0"
       run: make test-go-group-windows-cmd
 
+  # Issue #6010: cmd/steward runs in two name shards, one job each, so each
+  # test binary gets a -timeout=6m budget that fires before the 15-minute job
+  # cancel (-timeout counts from the binary start, ~7.2 minutes after the job
+  # starts). See the comment above GO_GROUP_WINDOWS_CMD_STEWARD in the Makefile.
+  windows-cmd-steward-1:
+    name: Windows Unit Tests (cmd/steward 1/2)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: windows-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run cmd/steward shard 1/2 (no -race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+        CFGMS_TEST_RACE: "0"
+      run: make test-go-group-windows-cmd-steward-1
+
+  windows-cmd-steward-2:
+    name: Windows Unit Tests (cmd/steward 2/2)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: windows-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run cmd/steward shard 2/2 (no -race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+        CFGMS_TEST_RACE: "0"
+      run: make test-go-group-windows-cmd-steward-2
+
   windows-rest:
     name: Windows Unit Tests (rest + modules)
     permissions:
@@ -866,6 +966,8 @@ jobs:
       - windows-controller
       - windows-steward
       - windows-cmd
+      - windows-cmd-steward-1
+      - windows-cmd-steward-2
       - windows-rest
       - macos-test-compile
       - macos-providers
@@ -889,6 +991,8 @@ jobs:
         WINDOWS_CONTROLLER_RESULT: ${{ needs.windows-controller.result }}
         WINDOWS_STEWARD_RESULT: ${{ needs.windows-steward.result }}
         WINDOWS_CMD_RESULT: ${{ needs.windows-cmd.result }}
+        WINDOWS_CMD_STEWARD_1_RESULT: ${{ needs.windows-cmd-steward-1.result }}
+        WINDOWS_CMD_STEWARD_2_RESULT: ${{ needs.windows-cmd-steward-2.result }}
         WINDOWS_REST_RESULT: ${{ needs.windows-rest.result }}
         MACOS_COMPILE_RESULT: ${{ needs.macos-test-compile.result }}
         MACOS_PROVIDERS_RESULT: ${{ needs.macos-providers.result }}
@@ -908,7 +1012,9 @@ jobs:
         echo "| Windows: controller/api | $WINDOWS_API_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Windows: controller/cert/controlplane/sqlite | $WINDOWS_CONTROLLER_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Windows: steward | $WINDOWS_STEWARD_RESULT |" >> $GITHUB_STEP_SUMMARY
-        echo "| Windows: cmd | $WINDOWS_CMD_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| Windows: cmd (without cmd/steward) | $WINDOWS_CMD_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| Windows: cmd/steward shard 1/2 | $WINDOWS_CMD_STEWARD_1_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| Windows: cmd/steward shard 2/2 | $WINDOWS_CMD_STEWARD_2_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Windows: rest + modules | $WINDOWS_REST_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS test compile (Linux) | $MACOS_COMPILE_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: cert/controlplane/sqlite | $MACOS_PROVIDERS_RESULT |" >> $GITHUB_STEP_SUMMARY
@@ -954,7 +1060,7 @@ jobs:
           docs_only=no
         fi
 
-        for result in "$WINDOWS_API_RESULT" "$WINDOWS_CONTROLLER_RESULT" "$WINDOWS_STEWARD_RESULT" "$WINDOWS_CMD_RESULT" "$WINDOWS_REST_RESULT" "$MACOS_COMPILE_RESULT" "$E2E_RESULT"; do
+        for result in "$WINDOWS_API_RESULT" "$WINDOWS_CONTROLLER_RESULT" "$WINDOWS_STEWARD_RESULT" "$WINDOWS_CMD_RESULT" "$WINDOWS_CMD_STEWARD_1_RESULT" "$WINDOWS_CMD_STEWARD_2_RESULT" "$WINDOWS_REST_RESULT" "$MACOS_COMPILE_RESULT" "$E2E_RESULT"; do
           if [ "$result" = "success" ]; then
             continue
           fi

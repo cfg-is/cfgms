@@ -2495,7 +2495,7 @@ test_macos_gate_rule() {
             return
         fi
     done
-    for leg in windows-api windows-controller windows-steward windows-cmd windows-rest e2e; do
+    for leg in windows-api windows-controller windows-steward windows-cmd windows-cmd-steward-1 windows-cmd-steward-2 windows-rest e2e; do
         if ! awk -v job="  ${leg}:" '$0 == job { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on && /^    if:/ { print }' "$wf" \
             | grep -qF "needs.changes.outputs.code == 'true'"; then
             log_fail "$leg is no longer gated on needs.changes.outputs.code == 'true'"
@@ -2841,7 +2841,7 @@ test_macos_groups_cover_exactly_shipped_packages() {
 }
 
 test_windows_steward_groups_cover_exactly_steward_and_cmd() {
-    log_test "Testing Windows steward groups: union equals ./features/steward/... plus ./cmd/... exactly..."
+    log_test "Testing Windows steward groups: union equals ./features/steward/... plus ./cmd/... exactly, cmd/steward shards partition its tests..."
 
     local expected expected_rc=0
     expected=$(go list ./features/steward/... ./cmd/... 2>&1 | sort -u) || expected_rc=$?
@@ -2859,7 +2859,15 @@ test_windows_steward_groups_cover_exactly_steward_and_cmd() {
         return
     fi
 
-    local actual="" out rc
+    # cmd/steward (Issue #6010) is the one package that may appear in several
+    # targets, and only as name shards: a target whose package list is exactly
+    # cmd/steward and whose go test line carries a -run pattern. A target that
+    # lists cmd/steward together with other packages, or without -run, is an
+    # ordinary group, so a second appearance is a duplicate.
+    local steward_pkg="github.com/cfgis/cfgms/cmd/steward"
+    local actual="" out rc pkgs gotest pattern
+    local -a shard_targets=() shard_patterns=()
+    local steward_targets=0 plain_steward_targets=0
     for target in $targets; do
         rc=0
         out=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make --no-print-directory "$target" 2>&1) || rc=$?
@@ -2868,8 +2876,28 @@ test_windows_steward_groups_cover_exactly_steward_and_cmd() {
             echo "$out" | tail -10
             return
         fi
-        actual+=$(echo "$out" | grep -E '^github\.com/cfgis/cfgms/')$'\n'
+        pkgs=$(echo "$out" | grep -E '^github\.com/cfgis/cfgms/' || true)
+        if grep -qxF "$steward_pkg" <<< "$pkgs"; then
+            steward_targets=$((steward_targets + 1))
+            gotest=$(make -n --no-print-directory "$target" 2>&1 | grep -oE 'go test [^;]*' | head -1)
+            pattern=$(sed -nE "s/.* -run '([^']*)'.*/\1/p" <<< "$gotest")
+            if [[ "$(wc -l <<< "$pkgs" | tr -d ' ')" == "1" && -n "$pattern" ]]; then
+                shard_targets+=("$target")
+                shard_patterns+=("$pattern")
+                # cmd/steward is listed once however many shards run it.
+                continue
+            fi
+            plain_steward_targets=$((plain_steward_targets + 1))
+        fi
+        actual+="$pkgs"$'\n'
     done
+    if [[ ${#shard_targets[@]} -gt 0 ]]; then
+        if [[ $plain_steward_targets -gt 0 ]]; then
+            log_fail "cmd/steward is name-sharded (${shard_targets[*]}) but also appears in a target that is not a -run shard of cmd/steward alone"
+            return
+        fi
+        actual+="$steward_pkg"$'\n'
+    fi
 
     local dups extra missing
     dups=$(echo "$actual" | grep . | sort | uniq -d)
@@ -2889,7 +2917,134 @@ test_windows_steward_groups_cover_exactly_steward_and_cmd() {
         return
     fi
 
-    log_pass "Windows steward groups: $(echo "$actual" | wc -l | tr -d ' ') packages, exactly features/steward + cmd, no duplicates"
+    if [[ ${#shard_targets[@]} -eq 1 ]]; then
+        log_fail "cmd/steward has one -run shard (${shard_targets[0]}); a single shard is not a partition"
+        return
+    fi
+    local shard_note=""
+    if [[ ${#shard_targets[@]} -gt 1 ]]; then
+        # go test -run has no "everything else", so the shards are explicit
+        # patterns; every probe test name must match exactly one of them. The
+        # probes are Test followed by every combination of up to three
+        # characters from A-Z a-z 0-9 _ and two non-ASCII letters (the
+        # patterns look at no more than three), plus bare "Test" (a valid test
+        # name). Example*/Fuzz*/Benchmark* names would not match any shard, so
+        # the package must have none, or those tests would be dropped.
+        if grep -qE '^func (Example|Fuzz|Benchmark)' cmd/steward/*_test.go; then
+            log_fail "cmd/steward has Example/Fuzz/Benchmark functions that no ^Test shard runs"
+            return
+        fi
+        local probes matched dist_counts probe_count matched_distinct
+        probes=$(awk 'BEGIN {
+            n = split("A B C D E F G H I J K L M N O P Q R S T U V W X Y Z a b c d e f g h i j k l m n o p q r s t u v w x y z 0 1 2 3 4 5 6 7 8 9 _ é Ω", c, " ")
+            print "Test"
+            for (i = 1; i <= n; i++) {
+                print "Test" c[i]
+                for (j = 1; j <= n; j++) {
+                    print "Test" c[i] c[j]
+                    for (k = 1; k <= n; k++) print "Test" c[i] c[j] c[k]
+                }
+            }
+            print "TestRegisterAndConnect_X"; print "TestRunSteward_X"; print "TestRepair_X"
+        }')
+        probe_count=$(printf '%s\n' "$probes" | LC_ALL=C sort -u | wc -l | tr -d ' ')
+        matched=$(
+            for pattern in "${shard_patterns[@]}"; do
+                printf '%s\n' "$probes" | LC_ALL=C.UTF-8 grep -E -- "$pattern" || true
+            done | LC_ALL=C sort
+        )
+        # A name matching two shards appears twice in the match stream; a name
+        # matching none does not appear, so the distinct count falls short.
+        dist_counts=$(uniq -c <<< "$matched" | awk '{print $1}' | sort -u | tr '\n' ' ')
+        matched_distinct=$(uniq <<< "$matched" | wc -l | tr -d ' ')
+        if [[ "$dist_counts" != "1 " || "$matched_distinct" != "$probe_count" ]]; then
+            log_fail "cmd/steward shard patterns are not an exact partition of ^Test names (${matched_distinct} of ${probe_count} probe names matched; matches-per-name values: ${dist_counts}); patterns: ${shard_patterns[*]}"
+            return
+        fi
+        for pattern in "${shard_patterns[@]}"; do
+            if printf '%s\n' ExampleFoo FuzzFoo BenchmarkFoo | grep -qE -- "$pattern"; then
+                log_fail "cmd/steward shard pattern '${pattern}' matches a non-Test name"
+                return
+            fi
+        done
+        shard_note=", cmd/steward in ${#shard_targets[@]} -run shards that exactly partition ^Test names"
+    fi
+
+    log_pass "Windows steward groups: $(echo "$actual" | wc -l | tr -d ' ') packages, exactly features/steward + cmd, no duplicates${shard_note}"
+}
+
+# Issue #6010. A Windows job that runs cmd/steward must end in Go's own
+# "panic: test timed out" naming the running test, not in a job cancel with no
+# output. -timeout counts from the test binary's start, which is up to ~7.2
+# minutes after the job starts (setup up to 152s plus ~280s from the make step
+# to the binary start), so -timeout must be at most the job's timeout-minutes
+# minus 9; and go test streams -v output only for a single package or with
+# -json, so cmd/steward must not share an invocation with other packages
+# unless -json is set.
+test_windows_cmd_steward_timeout_and_streaming() {
+    log_test "Testing Windows jobs running cmd/steward: go test -timeout <= timeout-minutes - 9, streamed output..."
+
+    local wf=.github/workflows/cross-platform-build-pr.yml
+    local steward_pkg="github.com/cfgis/cfgms/cmd/steward"
+    local jobs job
+    # job|timeout-minutes|make target for every runs-on: windows-latest job.
+    jobs=$(awk '
+        function flush() { if (job != "" && win) print job "|" tmo "|" tgt }
+        /^  [a-z0-9-]+:[[:space:]]*$/ { flush(); job = $1; sub(/:$/, "", job); win = 0; tmo = ""; tgt = ""; next }
+        /^[^ #]/ { flush(); job = "" }
+        job != "" && /^    runs-on:[[:space:]]*windows-latest/ { win = 1 }
+        job != "" && /^    timeout-minutes:/ { tmo = $2 }
+        job != "" && /run:[[:space:]]*make[[:space:]]+[a-z0-9-]+/ { for (i = 1; i <= NF; i++) if ($i == "make") tgt = $(i + 1) }
+        END { flush() }
+    ' "$wf")
+    if [[ -z "$jobs" ]]; then
+        log_fail "no runs-on: windows-latest jobs found in $wf"
+        return
+    fi
+
+    local checked=0 tmo tgt out rc pkgs gotest n npkgs
+    while IFS='|' read -r job tmo tgt; do
+        [[ -z "$tgt" ]] && continue
+        rc=0
+        out=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make --no-print-directory "$tgt" 2>&1) || rc=$?
+        if [[ $rc -ne 0 ]]; then
+            log_fail "${job}: make ${tgt} failed in list-only mode"
+            return
+        fi
+        pkgs=$(echo "$out" | grep -E '^github\.com/cfgis/cfgms/' || true)
+        grep -qxF "$steward_pkg" <<< "$pkgs" || continue
+        checked=$((checked + 1))
+
+        if [[ ! "$tmo" =~ ^[0-9]+$ ]]; then
+            log_fail "${job}: no integer timeout-minutes (got '${tmo}')"
+            return
+        fi
+        gotest=$(make -n --no-print-directory "$tgt" 2>&1 | grep -oE 'go test [^;]*' | head -1)
+        if [[ -z "$gotest" ]]; then
+            log_fail "${job}: make ${tgt} has no go test invocation"
+            return
+        fi
+        n=$(sed -nE 's/.* -timeout=([0-9]+)m( .*|$)/\1/p' <<< "$gotest")
+        if [[ -z "$n" ]]; then
+            log_fail "${job}: ${tgt} has no go test -timeout=<N>m (${gotest})"
+            return
+        fi
+        if (( n > tmo - 9 )); then
+            log_fail "${job}: ${tgt} -timeout=${n}m exceeds timeout-minutes ${tmo} minus 9 (${tmo}-9=$((tmo - 9))m); the timeout panic would land at or after the job cancel"
+            return
+        fi
+        npkgs=$(wc -l <<< "$pkgs" | tr -d ' ')
+        if (( npkgs > 1 )) && ! grep -qE ' -json( |$)' <<< "$gotest"; then
+            log_fail "${job}: ${tgt} runs cmd/steward with ${npkgs} packages without -json, so go test buffers its output until the package ends"
+            return
+        fi
+    done <<< "$jobs"
+
+    if (( checked == 0 )); then
+        log_fail "no Windows job in $wf runs cmd/steward"
+        return
+    fi
+    log_pass "Windows jobs running cmd/steward (${checked}): -timeout at most timeout-minutes minus 9, output streamed"
 }
 
 test_resource_sampler_no_placeholder() {
@@ -3321,6 +3476,7 @@ DISPATCH_TABLE=(
     "test_macos_pr_filter:core"
     "test_build_gate_requires_macos_test_compile:core"
     "test_windows_steward_groups_cover_exactly_steward_and_cmd:core"
+    "test_windows_cmd_steward_timeout_and_streaming:core"
     "test_queue_native_build_runs_only_shard_1_content:core"
     "test_no_tracked_file_mutation:core"
 )

@@ -1,4 +1,4 @@
-.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-cmd test-go-group-windows-rest test-go-group-macos-providers test-go-group-macos-steward test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection complexity-report complexity-check complexity-replay duplication-report duplication-replay duplication-check clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
+.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-cmd test-go-group-windows-cmd-steward-1 test-go-group-windows-cmd-steward-2 test-go-group-windows-rest test-go-group-macos-providers test-go-group-macos-steward test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection complexity-report complexity-check complexity-replay duplication-report duplication-replay duplication-check clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -701,7 +701,7 @@ test-go-group-windows-controller:
 # ./cmd/... sequentially (11m44s-12m16s, cancelled at its 15-minute limit when
 # cmd/steward ran slow). It is split on that seam into two jobs so each has
 # headroom: this target runs ./features/steward/..., test-go-group-windows-cmd
-# runs ./cmd/.... Both package sets are asserted by scripts/test-scripts.sh.
+# runs ./cmd/... (Issue #6010 then split cmd/steward out of it). Both package sets are asserted by scripts/test-scripts.sh.
 .PHONY: test-go-group-windows-steward
 test-go-group-windows-steward:
 	@race_flag="-race"; \
@@ -713,20 +713,85 @@ test-go-group-windows-steward:
 		go test $$race_flag -short -timeout=10m $(GO_GROUP_WINDOWS_STEWARD); \
 	fi
 
-# -v is scoped to ./cmd/... (matching cross-platform-build.yml's queue job,
-# Issue #3470): cmd/cfgms-steward-launcher's Windows-only SCM tests need
-# per-test output to tell a passing test from one that skipped for lack of
-# Administrator rights — a non-verbose run only prints one "ok <package>" line
-# per package with no per-test result.
+# Issue #6010: cmd/steward alone ran 439-511s on windows-latest (109s on
+# 2026-10-30) and the former single ./cmd/... leg was cancelled at its
+# 15-minute job limit three times on 2026-11-09 with no output naming the
+# stalled test. Two measured causes, both fixed here:
+#   1. go test buffers each package's -v output until the package finishes
+#      when several packages run, so a cancelled job printed no "=== RUN"
+#      line for cmd/steward. A single-package invocation (the shards below)
+#      streams; the multi-package remainder uses -json, which also streams.
+#   2. -timeout counts from the test binary's start, which is up to ~7.2
+#      minutes after the job starts (setup up to 152s, then ~280s from the
+#      make step to the binary start). -timeout=10m therefore fired at or
+#      after the 15-minute cancel. -timeout must be at most the job's
+#      timeout-minutes minus 9 (15-minute job: 6m) so Go's own "panic: test
+#      timed out" with the running-tests list lands first. The guard is
+#      scripts/test-scripts.sh test_windows_cmd_steward_timeout_and_streaming.
+# cmd/steward does not fit one 15-minute job with that margin, so it runs as
+# two name shards, each in its own job (separate runners, so shards never share
+# Windows resources), and every other ./cmd/... package runs in
+# test-go-group-windows-cmd.
+#
+# The shards partition the top-level test names. The go test -run
+# pattern cannot express "everything else", so shard 2 is written out as the
+# explicit complement of shard 1; test_windows_steward_groups_cover_exactly_
+# steward_and_cmd asserts over a probe set that every name matches exactly one
+# shard. Go streams a single package's output, so no -json is needed here.
+#
+# Shard weights. Sum of top-level test durations of cmd/steward -short on a
+# Linux host (2026-11-09, 276 tests, 292s): TestRegister* 163s (27 tests),
+# TestRun* 40s, everything else 89s (TestIdentity* 28s, TestTamperAlarm* 21s,
+# TestConnect* 10s, TestRepair* 12s ...). Windows ran 439-511s for the same 276
+# tests; its per-test times differ most in the TestRepair* and
+# TestConnectReportOnly* families, which sit in shard 2 together with the
+# remainder. Estimated split of the 439-511s: shard 1 about 200s, shard 2 about
+# 240-300s, within 1.5x. Re-weigh from the PR's Windows job logs if either
+# shard nears 6m.
+GO_GROUP_WINDOWS_CMD_STEWARD := ./cmd/steward
+GO_GROUP_WINDOWS_CMD_STEWARD_RUN_1 := ^Test(Reg|Run)
+GO_GROUP_WINDOWS_CMD_STEWARD_RUN_2 := ^Test($$|[^R]|R($$|[^eu]|e($$|[^g])|u($$|[^n])))
+
+.PHONY: test-go-group-windows-cmd-steward-1
+test-go-group-windows-cmd-steward-1:
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $(GO_GROUP_WINDOWS_CMD_STEWARD); \
+	else \
+		echo "  Testing windows-cmd-steward-1 group (cmd/steward, TestReg*/TestRun*)..."; \
+		go test -v $$race_flag -short -timeout=6m -run '$(GO_GROUP_WINDOWS_CMD_STEWARD_RUN_1)' $(GO_GROUP_WINDOWS_CMD_STEWARD); \
+	fi
+
+.PHONY: test-go-group-windows-cmd-steward-2
+test-go-group-windows-cmd-steward-2:
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $(GO_GROUP_WINDOWS_CMD_STEWARD); \
+	else \
+		echo "  Testing windows-cmd-steward-2 group (cmd/steward, every other test)..."; \
+		go test -v $$race_flag -short -timeout=6m -run '$(GO_GROUP_WINDOWS_CMD_STEWARD_RUN_2)' $(GO_GROUP_WINDOWS_CMD_STEWARD); \
+	fi
+
+# Every ./cmd/... package except cmd/steward (the two shards above). -json
+# instead of -v streams per-test events although several packages run (go test
+# streams only a single package, -p 1, or -json), and keeps the per-test
+# pass/skip result: cmd/cfgms-steward-launcher's Windows-only SCM tests need it
+# to tell a passing test from one that skipped for lack of Administrator rights
+# (Issue #3470) - a non-verbose run only prints one "ok <package>" line per
+# package. cmd/steward/service is a different package and stays here.
 .PHONY: test-go-group-windows-cmd
 test-go-group-windows-cmd:
 	@race_flag="-race"; \
 	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	pkgs=$$(go list $(GO_GROUP_WINDOWS_CMD) | grep -v '^github.com/cfgis/cfgms/cmd/steward$$'); \
+	if [ -z "$$pkgs" ]; then echo "no ./cmd/... packages found"; exit 1; fi; \
 	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
-		go list $(GO_GROUP_WINDOWS_CMD); \
+		echo "$$pkgs"; \
 	else \
-		echo "  Testing windows-cmd group (cmd, verbose)..."; \
-		go test -v $$race_flag -short -timeout=10m $(GO_GROUP_WINDOWS_CMD); \
+		echo "  Testing windows-cmd group (cmd minus cmd/steward, json)..."; \
+		go test -json $$race_flag -short -timeout=6m $$pkgs; \
 	fi
 
 # Everything the queue's former Native Build (Windows) job tested (./pkg/...
