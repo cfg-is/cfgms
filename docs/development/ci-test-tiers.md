@@ -126,6 +126,28 @@ ships on macOS: the in-module packages with test files in the `GOOS=darwin` depe
 position, so `features/workflow` and `pkg/storage/interfaces` land on different shards. Its `go test` runs with
 `-timeout=9m` (under the 15-minute job limit) so a hung package fails by name instead of the job being cancelled. The measurements in the tables above predate this scoping.
 
+**Native Windows cmd legs (PR side, current state).** `cross-platform-build-pr.yml` runs three Windows jobs for `./cmd/...`,
+each with `timeout-minutes: 15` and no `-race`: `windows-cmd` (`make test-go-group-windows-cmd`, every `./cmd/...` package except
+`cmd/steward`) and `windows-cmd-steward-1` / `windows-cmd-steward-2` (`make test-go-group-windows-cmd-steward-1` / `-2`, the
+two name shards of `cmd/steward`). Every one of them runs `go test -short -timeout=6m`.
+- **Why `-timeout=6m`.** `-timeout` counts from the test binary's start, not the job's. Measured on windows-latest
+  (2026-11-09): job setup up to 152 s, then about 280 s from the `make` step to the binary start, about 7.2 minutes in all. A
+  `-timeout=10m` in a 15-minute job therefore fired at or after the cancel, so a stalled test ended in `The operation was
+  canceled` with no output naming it. The rule is `-timeout` at most `timeout-minutes` minus 9 (15-minute job: 6m), so Go's own
+  `panic: test timed out` with the `running tests:` list and a goroutine dump comes first and the job concludes `failure`.
+  `test_windows_cmd_steward_timeout_and_streaming` in `scripts/test-scripts.sh` enforces it for every Windows job that runs
+  `cmd/steward`.
+- **Streaming rule.** `go test` streams output only for a single package, with `-p 1`, or with `-json`; with several packages
+  it holds each package's `-v` output until the package ends. The `cmd/steward` shards are single-package `-v` invocations;
+  the multi-package `windows-cmd` remainder uses `-json`, which also keeps the per-test pass/skip result that
+  `cmd/cfgms-steward-launcher` needs. The guard fails a `cmd/steward` invocation that shares a `go test` run with other
+  packages and has no `-json`.
+- **Why two shards.** `cmd/steward` alone ran 439-511 s on Windows (109 s on 2026-10-30; the growth is 146 tests added since,
+  and is not Windows-specific: 391 s on Linux), which does not fit a 6-minute `-timeout` in one job. The shards split the
+  top-level test names with `-run`: shard 1 is `^Test(Reg|Run)` and shard 2 its explicit complement (`go test -run` has no
+  negation). The `Makefile` comment above `GO_GROUP_WINDOWS_CMD_STEWARD` records the weights.
+  `test_windows_steward_groups_cover_exactly_steward_and_cmd` asserts that each probe test name matches exactly one shard.
+
 **macOS legs run only when the PR touches the macOS package closure (PR side, current state).** The `changes` job in
 `cross-platform-build-pr.yml` emits a second output, `macos` (`true` or `false`), next to `code`; the four macOS legs run when
 `macos == 'true'` and are skipped otherwise. The Windows legs, the e2e leg and the `code` output are unchanged. `macos` comes
