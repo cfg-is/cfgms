@@ -24,7 +24,6 @@ import (
 	featuremodules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/steward/modules/install"
 	"github.com/cfgis/cfgms/features/steward/modules/runtime"
-	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	pkgtrust "github.com/cfgis/cfgms/pkg/modules/trust"
 	"github.com/cfgis/cfgms/pkg/testutil"
@@ -311,7 +310,7 @@ func testEnforcerRuntimeWithKey(t *testing.T, cfgmsPub ed25519.PublicKey) *runti
 	t.Helper()
 	rt := runtime.NewModuleRuntimeWithEnforcer(
 		shortBaseDir(t),
-		stewardtrust.NewStewardTrustEnforcerWithIdentity(func() pkgtrust.PublisherIdentity {
+		pkgtrust.NewStewardTrustEnforcerWithIdentity(func() pkgtrust.PublisherIdentity {
 			return pkgtrust.PublisherIdentity{
 				Name:      "cfgms",
 				PublicKey: []byte(cfgmsPub),

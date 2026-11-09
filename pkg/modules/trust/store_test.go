@@ -17,7 +17,7 @@ import (
 // item 3: a trust store must not let a second registration under an
 // already-used publisher name silently overwrite the first — the exact
 // behavior that let a supplied "additional publisher" displace the baked-in
-// CFGMS identity in features/steward/modules/trust.verifyStrict.
+// CFGMS identity in pkg/modules/trust.StewardTrustEnforcer.verifyStrict.
 func TestInMemoryTrustStore_AddPublisher_RejectsDuplicateName(t *testing.T) {
 	store := trust.NewInMemoryTrustStore()
 

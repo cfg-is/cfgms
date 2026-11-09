@@ -49,7 +49,7 @@ $(error STEWARD_CONTROLLER_ROOT_FP must be 1-4 comma-separated entries of 64 low
 endif
 STEWARD_ROOT_FP_LDFLAG = -X main.ControllerRootFingerprints=$(STEWARD_CONTROLLER_ROOT_FP)
 endif
-STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CONTROLLER_URL) -X main.SecurityProfile=$(STEWARD_SECURITY_PROFILE) -X github.com/cfgis/cfgms/pkg/version.Version=$(or $(VERSION),0.5.0-dev) -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$(or $(STEWARD_PUBLISHER_KEY),AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=) -X github.com/cfgis/cfgms/features/steward/modules/trust.additionalPublisherKeyMaterial=$(STEWARD_ADDITIONAL_PUBLISHER_KEYS) $(STEWARD_ROOT_FP_LDFLAG)"
+STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CONTROLLER_URL) -X main.SecurityProfile=$(STEWARD_SECURITY_PROFILE) -X github.com/cfgis/cfgms/pkg/version.Version=$(or $(VERSION),0.5.0-dev) -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$(or $(STEWARD_PUBLISHER_KEY),AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=) -X github.com/cfgis/cfgms/pkg/modules/trust.additionalPublisherKeyMaterial=$(STEWARD_ADDITIONAL_PUBLISHER_KEYS) $(STEWARD_ROOT_FP_LDFLAG)"
 
 # Binary names
 STEWARD_BINARY=cfgms-steward

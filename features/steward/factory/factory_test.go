@@ -21,7 +21,6 @@ import (
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	moduleruntime "github.com/cfgis/cfgms/features/steward/modules/runtime"
-	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	"github.com/cfgis/cfgms/pkg/logging"
 	maintinterfaces "github.com/cfgis/cfgms/pkg/maintenance/interfaces"
 	pkgtrust "github.com/cfgis/cfgms/pkg/modules/trust"
@@ -732,7 +731,7 @@ func testEnforcerRuntimeWithKnownPublishers(
 	t.Helper()
 	return moduleruntime.NewModuleRuntimeWithEnforcer(
 		shortRuntimeDir(t),
-		stewardtrust.NewStewardTrustEnforcerWithKnownPublishers(
+		pkgtrust.NewStewardTrustEnforcerWithKnownPublishers(
 			func() pkgtrust.PublisherIdentity {
 				return pkgtrust.PublisherIdentity{Name: "cfgms", PublicKey: []byte(cfgmsPub), Algorithm: "ed25519"}
 			},

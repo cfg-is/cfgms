@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 CFGMS Contributors
 
-// Package trust enforces module trust policy on behalf of the steward runtime.
-// It bridges steward.cfg ModuleTrustMode settings with the cryptographic
-// verification primitives in pkg/modules/trust.
 package trust
 
 import (
@@ -14,14 +11,10 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
-	pkgtrust "github.com/cfgis/cfgms/pkg/modules/trust"
 )
 
 // TrustMode aliases stewardtypes.ModuleTrustMode for use in the runtime API.
 type TrustMode = stewardtypes.ModuleTrustMode
-
-// PublisherIdentity aliases the pkg-level type for use in the runtime API.
-type PublisherIdentity = pkgtrust.PublisherIdentity
 
 // ed25519PublicKeySize duplicates crypto/ed25519.PublicKeySize to avoid pulling
 // in the crypto/ed25519 import solely for a size constant.
@@ -31,9 +24,9 @@ const ed25519PublicKeySize = 32
 // publisher name -> base64-encoded Ed25519 public key pairs, injected by the
 // release pipeline via -ldflags:
 //
-//	go build -ldflags "-X .../trust.additionalPublisherKeyMaterial=name1=<b64key1>,name2=<b64key2>"
+//	go build -ldflags "-X github.com/cfgis/cfgms/pkg/modules/trust.additionalPublisherKeyMaterial=name1=<b64key1>,name2=<b64key2>"
 //
-// mirroring pkg/modules/trust.cfgmsPublisherPublicKey. The Makefile variable
+// mirroring cfgmsPublisherPublicKey. The Makefile variable
 // STEWARD_ADDITIONAL_PUBLISHER_KEYS supplies this value. Per ADR-006, publisher
 // key material is baked into the steward binary at build time and never
 // injected via steward.cfg or any other runtime configuration path — this
@@ -54,36 +47,51 @@ const reservedPublisherName = "cfgms"
 // bug this resolution step exists to close (Issue #4398).
 var ErrAdditionalPublisherUnresolvable = errors.New("additional_publishers entry could not be resolved to key material")
 
+// registryEntryKey parses one "name=base64key" registry entry. named reports
+// whether the entry's name half equals name; keyBytes is the decoded key, or nil
+// when the entry is named but its key is not valid base64 or not an Ed25519
+// public key size.
+func registryEntryKey(entry, name string) (keyBytes []byte, named bool) {
+	entryName, b64Key, ok := strings.Cut(entry, "=")
+	if !ok || entryName != name {
+		return nil, false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(b64Key)
+	if err != nil || len(decoded) != ed25519PublicKeySize {
+		return nil, true
+	}
+	return decoded, true
+}
+
 // defaultResolveKnownPublisher resolves name against the compiled-in
 // additionalPublisherKeyMaterial registry described above.
-func defaultResolveKnownPublisher(name string) (pkgtrust.PublisherIdentity, bool) {
+func defaultResolveKnownPublisher(name string) (PublisherIdentity, bool) {
 	// An empty name is never resolvable: without this guard a malformed registry
 	// entry whose name half is empty ("=<b64key>") would match an empty
 	// additional_publishers entry and grant trust to key material the operator
 	// never named. The reserved name "cfgms" belongs to the baked-in CFGMS key.
 	if name == "" || name == reservedPublisherName || additionalPublisherKeyMaterial == "" {
-		return pkgtrust.PublisherIdentity{}, false
+		return PublisherIdentity{}, false
 	}
-	var found pkgtrust.PublisherIdentity
+	var found PublisherIdentity
 	matches := 0
 	for _, entry := range strings.Split(additionalPublisherKeyMaterial, ",") {
-		entryName, b64Key, ok := strings.Cut(entry, "=")
-		if !ok || entryName != name {
+		keyBytes, named := registryEntryKey(entry, name)
+		if !named {
 			continue
 		}
 		matches++
-		keyBytes, err := base64.StdEncoding.DecodeString(b64Key)
-		if err != nil || len(keyBytes) != ed25519PublicKeySize {
+		if keyBytes == nil {
 			continue
 		}
-		found = pkgtrust.PublisherIdentity{Name: name, PublicKey: keyBytes, Algorithm: "ed25519"}
+		found = PublisherIdentity{Name: name, PublicKey: keyBytes, Algorithm: "ed25519"}
 	}
 	// A name listed more than once is ambiguous: which key anchors trust would
 	// depend on list order, so it never resolves. A key that is a small-order
 	// point (including the all-zero placeholder) would accept forged signatures,
 	// so it never anchors trust either.
-	if matches != 1 || !pkgtrust.IsUsableIdentityKey(found) {
-		return pkgtrust.PublisherIdentity{}, false
+	if matches != 1 || !IsUsableIdentityKey(found) {
+		return PublisherIdentity{}, false
 	}
 	return found, true
 }
@@ -98,22 +106,22 @@ func defaultResolveKnownPublisher(name string) (pkgtrust.PublisherIdentity, bool
 // In controller or bypass mode, no verification is performed.
 type StewardTrustEnforcer struct {
 	// getCFGMSIdentity returns the CFGMS publisher identity used in strict mode.
-	// Production code uses pkgtrust.CFGMSPublisherIdentity(); tests inject a
+	// Production code uses CFGMSPublisherIdentity(); tests inject a
 	// known key pair via NewStewardTrustEnforcerWithIdentity.
-	getCFGMSIdentity func() pkgtrust.PublisherIdentity
+	getCFGMSIdentity func() PublisherIdentity
 
 	// resolveKnownPublisher resolves an additional_publishers name to key
 	// material. Production code walks the compiled-in
 	// additionalPublisherKeyMaterial registry; tests inject a known set via
 	// NewStewardTrustEnforcerWithKnownPublishers.
-	resolveKnownPublisher func(name string) (pkgtrust.PublisherIdentity, bool)
+	resolveKnownPublisher func(name string) (PublisherIdentity, bool)
 }
 
 // NewStewardTrustEnforcer returns a production-ready StewardTrustEnforcer that
 // uses the baked-in CFGMS publisher identity from the build pipeline.
 func NewStewardTrustEnforcer() *StewardTrustEnforcer {
 	return &StewardTrustEnforcer{
-		getCFGMSIdentity:      pkgtrust.CFGMSPublisherIdentity,
+		getCFGMSIdentity:      CFGMSPublisherIdentity,
 		resolveKnownPublisher: defaultResolveKnownPublisher,
 	}
 }
@@ -121,7 +129,7 @@ func NewStewardTrustEnforcer() *StewardTrustEnforcer {
 // NewStewardTrustEnforcerWithIdentity returns a StewardTrustEnforcer that calls
 // identityFn to obtain the CFGMS publisher identity. Use in tests to inject a
 // known key pair; use NewStewardTrustEnforcer in production code.
-func NewStewardTrustEnforcerWithIdentity(identityFn func() pkgtrust.PublisherIdentity) *StewardTrustEnforcer {
+func NewStewardTrustEnforcerWithIdentity(identityFn func() PublisherIdentity) *StewardTrustEnforcer {
 	return &StewardTrustEnforcer{
 		getCFGMSIdentity:      identityFn,
 		resolveKnownPublisher: defaultResolveKnownPublisher,
@@ -134,12 +142,12 @@ func NewStewardTrustEnforcerWithIdentity(identityFn func() pkgtrust.PublisherIde
 // given publisher name without an ldflags-injected build; production code uses
 // NewStewardTrustEnforcer or NewStewardTrustEnforcerWithIdentity.
 func NewStewardTrustEnforcerWithKnownPublishers(
-	identityFn func() pkgtrust.PublisherIdentity,
-	knownPublishers map[string]pkgtrust.PublisherIdentity,
+	identityFn func() PublisherIdentity,
+	knownPublishers map[string]PublisherIdentity,
 ) *StewardTrustEnforcer {
 	return &StewardTrustEnforcer{
 		getCFGMSIdentity: identityFn,
-		resolveKnownPublisher: func(name string) (pkgtrust.PublisherIdentity, bool) {
+		resolveKnownPublisher: func(name string) (PublisherIdentity, bool) {
 			id, ok := knownPublishers[name]
 			return id, ok
 		},
@@ -198,7 +206,7 @@ func (e *StewardTrustEnforcer) VerifyForLoad(b *bundle.Bundle, mode TrustMode, a
 // verifyStrict verifies that at least one bundle signature matches a trusted
 // publisher (CFGMS identity or additionalPublishers).
 func (e *StewardTrustEnforcer) verifyStrict(b *bundle.Bundle, additionalPublishers []PublisherIdentity) error {
-	store := pkgtrust.NewInMemoryTrustStore()
+	store := NewInMemoryTrustStore()
 
 	// The baked-in CFGMS publisher identity is registered first and can never
 	// be displaced: AddPublisher rejects any later registration under the same
@@ -225,12 +233,12 @@ func (e *StewardTrustEnforcer) verifyStrict(b *bundle.Bundle, additionalPublishe
 	}
 
 	if len(b.Signatures) == 0 {
-		return fmt.Errorf("%w: bundle %q has no signatures", pkgtrust.ErrPublisherNotTrusted, bundleName)
+		return fmt.Errorf("%w: bundle %q has no signatures", ErrPublisherNotTrusted, bundleName)
 	}
 
 	var lastErr error
 	for _, sig := range b.Signatures {
-		if err := pkgtrust.VerifyBundleSignature(b, sig, store); err == nil {
+		if err := VerifyBundleSignature(b, sig, store); err == nil {
 			return nil
 		} else {
 			lastErr = err

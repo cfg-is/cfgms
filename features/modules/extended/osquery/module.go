@@ -31,8 +31,8 @@ import (
 	"errors"
 
 	"github.com/cfgis/cfgms/features/modules"
-	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	stewardtrust "github.com/cfgis/cfgms/pkg/modules/trust"
 )
 
 // pinnedVersion is the osquery release this bundle ships. S9 of epic #2855

@@ -621,7 +621,7 @@ Child tenants inherit the parent's script signing config. Policy may only be **t
 #### `steward.module_trust`
 
 `features/config/stewardtypes/types.go` `ModuleTrustConfig`. Validated by
-`ValidateModuleTrustConfig`; consumed by `features/steward/modules/trust/trust.go`.
+`ValidateModuleTrustConfig`; consumed by `pkg/modules/trust/trust_enforcer.go`.
 
 | YAML field | Type | Default | Req | Description |
 |---|---|---|---|---|

@@ -27,7 +27,6 @@ import (
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	featuremodules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
-	pkgtrust "github.com/cfgis/cfgms/pkg/modules/trust"
 )
 
 // setKeyMaterial replaces the ldflags-injected registry for the duration of one
@@ -58,8 +57,8 @@ func newRegistryKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey, string
 // (defaultResolveKnownPublisher) with an injected CFGMS identity, so strict-mode
 // verification can be driven end to end without a build-time CFGMS key.
 func registryTestEnforcer(cfgmsPub ed25519.PublicKey) *StewardTrustEnforcer {
-	return NewStewardTrustEnforcerWithIdentity(func() pkgtrust.PublisherIdentity {
-		return pkgtrust.PublisherIdentity{Name: "cfgms", PublicKey: []byte(cfgmsPub), Algorithm: "ed25519"}
+	return NewStewardTrustEnforcerWithIdentity(func() PublisherIdentity {
+		return PublisherIdentity{Name: "cfgms", PublicKey: []byte(cfgmsPub), Algorithm: "ed25519"}
 	})
 }
 
@@ -127,7 +126,7 @@ func TestDefaultResolveKnownPublisher_UnknownNameIsUnresolved(t *testing.T) {
 
 	id, ok := defaultResolveKnownPublisher("vendor-z")
 	assert.False(t, ok)
-	assert.Equal(t, pkgtrust.PublisherIdentity{}, id)
+	assert.Equal(t, PublisherIdentity{}, id)
 }
 
 // TestDefaultResolveKnownPublisher_EmptyRegistryIsUnresolved: an unconfigured
@@ -137,7 +136,7 @@ func TestDefaultResolveKnownPublisher_EmptyRegistryIsUnresolved(t *testing.T) {
 
 	id, ok := defaultResolveKnownPublisher("vendor-a")
 	assert.False(t, ok)
-	assert.Equal(t, pkgtrust.PublisherIdentity{}, id)
+	assert.Equal(t, PublisherIdentity{}, id)
 }
 
 // TestDefaultResolveKnownPublisher_EntryWithoutSeparatorIsSkipped: a malformed
@@ -259,7 +258,7 @@ func TestCompiledInRegistry_ResolvedPublisherDoesNotTrustOtherKeys(t *testing.T)
 	signRegistryTestBundle(forged, "vendor-a", impostorPriv)
 	err = enforcer.VerifyForLoad(forged, stewardtypes.ModuleTrustModeStrict, resolved)
 	require.Error(t, err, "a bundle signed by a key other than the compiled-in one must not load")
-	assert.ErrorIs(t, err, pkgtrust.ErrInvalidSignature)
+	assert.ErrorIs(t, err, ErrInvalidSignature)
 }
 
 // TestCompiledInRegistry_MalformedEntryNamesEntryInError: when the compiled-in
@@ -343,9 +342,9 @@ func TestDefaultResolveKnownPublisher_MakeFlagTextResolves(t *testing.T) {
 		// Makefile wiring is still verified on the Linux legs.
 		t.Skip("make not available on this platform")
 	}
-	out, err := exec.Command(makePath, "-n", "-C", "../../../..", "build-steward",
+	out, err := exec.Command(makePath, "-n", "-C", "../../..", "build-steward",
 		"STEWARD_ADDITIONAL_PUBLISHER_KEYS="+flagText).CombinedOutput()
 	require.NoError(t, err, string(out))
 	assert.Contains(t, string(out),
-		"features/steward/modules/trust.additionalPublisherKeyMaterial="+flagText)
+		"pkg/modules/trust.additionalPublisherKeyMaterial="+flagText)
 }

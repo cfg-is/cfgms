@@ -29,7 +29,6 @@ import (
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
 	"github.com/cfgis/cfgms/features/controller/service"
 	controllertransport "github.com/cfgis/cfgms/features/controller/transport"
-	"github.com/cfgis/cfgms/features/steward/modules/trust"
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -223,9 +222,9 @@ func onHeader(fn func(*transportpb.ModuleBundleHeader)) func(*transportpb.Module
 	}
 }
 
-func (f *fixture) installer(mode stewardtypes.ModuleTrustMode, enforcer *trust.StewardTrustEnforcer, additional ...string) *Installer {
+func (f *fixture) installer(mode stewardtypes.ModuleTrustMode, enforcer *pkgtrust.StewardTrustEnforcer, additional ...string) *Installer {
 	if enforcer == nil {
-		enforcer = trust.NewStewardTrustEnforcer()
+		enforcer = pkgtrust.NewStewardTrustEnforcer()
 	}
 	return &Installer{Root: f.root, Mode: mode, AdditionalPublisherNames: additional, Enforcer: enforcer, Client: f.client}
 }
@@ -432,7 +431,7 @@ func TestInstall_StrictMode(t *testing.T) {
 			}
 			return true
 		})
-		enforcer := trust.NewStewardTrustEnforcerWithIdentity(func() pkgtrust.PublisherIdentity {
+		enforcer := pkgtrust.NewStewardTrustEnforcerWithIdentity(func() pkgtrust.PublisherIdentity {
 			return pkgtrust.PublisherIdentity{Name: "acme-corp", PublicKey: sb.PublicKey, Algorithm: "ed25519"}
 		})
 		_, err := f.installer(stewardtypes.ModuleTrustModeStrict, enforcer).Install(context.Background(), "acme-corp", "widget", "1.0.0")
@@ -445,7 +444,7 @@ func TestInstall_StrictMode(t *testing.T) {
 		sb := f.ingest(testutil.BundleOptions{})
 		f.require(widget("1.0.0"))
 		f.setMutate(onHeader(func(h *transportpb.ModuleBundleHeader) { h.ContentHash = strings.Repeat("a", 64) }))
-		enforcer := trust.NewStewardTrustEnforcerWithIdentity(func() pkgtrust.PublisherIdentity {
+		enforcer := pkgtrust.NewStewardTrustEnforcerWithIdentity(func() pkgtrust.PublisherIdentity {
 			return pkgtrust.PublisherIdentity{Name: "acme-corp", PublicKey: sb.PublicKey, Algorithm: "ed25519"}
 		})
 		_, err := f.installer(stewardtypes.ModuleTrustModeStrict, enforcer).Install(context.Background(), "acme-corp", "widget", "1.0.0")
@@ -457,7 +456,7 @@ func TestInstall_StrictMode(t *testing.T) {
 		f := newFixture(t)
 		sb := f.ingest(testutil.BundleOptions{Publisher: "cfgms", Name: "widget"})
 		f.require(stewardtypes.RequiredModule{Name: "cfgms/widget", Version: "1.0.0"})
-		enforcer := trust.NewStewardTrustEnforcerWithIdentity(func() pkgtrust.PublisherIdentity {
+		enforcer := pkgtrust.NewStewardTrustEnforcerWithIdentity(func() pkgtrust.PublisherIdentity {
 			return pkgtrust.PublisherIdentity{Name: "cfgms", PublicKey: sb.PublicKey, Algorithm: "ed25519"}
 		})
 		_, err := f.installer(stewardtypes.ModuleTrustModeStrict, enforcer).Install(context.Background(), "cfgms", "widget", "1.0.0")
@@ -471,7 +470,7 @@ func TestInstall_StrictMode(t *testing.T) {
 		f := newFixture(t)
 		sb := f.ingest(testutil.BundleOptions{})
 		f.require(widget("1.0.0"))
-		enforcer := trust.NewStewardTrustEnforcerWithKnownPublishers(pkgtrust.CFGMSPublisherIdentity,
+		enforcer := pkgtrust.NewStewardTrustEnforcerWithKnownPublishers(pkgtrust.CFGMSPublisherIdentity,
 			map[string]pkgtrust.PublisherIdentity{
 				"acme-corp": {Name: "acme-corp", PublicKey: sb.PublicKey, Algorithm: "ed25519"},
 			})
@@ -484,7 +483,7 @@ func TestInstall_StrictMode(t *testing.T) {
 		f.ingest(testutil.BundleOptions{})
 		f.require(widget("1.0.0"))
 		_, err := f.installer(stewardtypes.ModuleTrustModeStrict, nil, "vendor-a").Install(context.Background(), "acme-corp", "widget", "1.0.0")
-		require.ErrorIs(t, err, trust.ErrAdditionalPublisherUnresolvable)
+		require.ErrorIs(t, err, pkgtrust.ErrAdditionalPublisherUnresolvable)
 		assertNothingInstalled(t, f.root)
 	})
 }

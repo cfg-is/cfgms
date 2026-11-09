@@ -8,8 +8,8 @@ import (
 	goruntime "runtime"
 
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
-	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	stewardtrust "github.com/cfgis/cfgms/pkg/modules/trust"
 )
 
 // PreExecVerifier re-verifies the installed osquery bundle before every osquery

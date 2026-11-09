@@ -11,8 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
-	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
-	pkgtrust "github.com/cfgis/cfgms/pkg/modules/trust"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 )
 
 // TestStrictMode_RefusesAdditionalPublisherSigningCFGMSNamedBundle: a trusted
@@ -27,12 +26,12 @@ func TestStrictMode_RefusesAdditionalPublisherSigningCFGMSNamedBundle(t *testing
 	b := makeTestBundleFor("cfgms")
 	signBundle(b, "extra-vendor", extraPriv)
 
-	additional := []stewardtrust.PublisherIdentity{
+	additional := []trust.PublisherIdentity{
 		{Name: "extra-vendor", PublicKey: []byte(extraPub), Algorithm: "ed25519"},
 	}
 	err = testEnforcer(cfgmsPub).VerifyForLoad(b, stewardtypes.ModuleTrustModeStrict, additional)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, pkgtrust.ErrPublisherManifestMismatch)
+	assert.ErrorIs(t, err, trust.ErrPublisherManifestMismatch)
 }
 
 // TestStrictMode_StdlibStyleBundleStillVerifies: a bundle whose manifest names cfgms

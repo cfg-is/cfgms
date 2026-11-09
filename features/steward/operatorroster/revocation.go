@@ -53,7 +53,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
-	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
+	stewardtrust "github.com/cfgis/cfgms/pkg/modules/trust"
 )
 
 // revocationManifestKind mirrors RevocationManifestKind in

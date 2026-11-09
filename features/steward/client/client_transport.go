@@ -48,7 +48,6 @@ import (
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/features/steward/modules/install"
-	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	"github.com/cfgis/cfgms/features/steward/operatorroster"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -4365,7 +4364,7 @@ func (c *TransportClient) newModuleInstaller() execution.ModuleInstaller {
 	return &install.Installer{
 		Mode:                     mode,
 		AdditionalPublisherNames: c.moduleTrustAdditionalPublishers,
-		Enforcer:                 stewardtrust.NewStewardTrustEnforcer(),
+		Enforcer:                 trust.NewStewardTrustEnforcer(),
 		Client:                   lockdownWatchingClient{inner: tc, onErr: c.HandleLockedDown},
 		Logger:                   c.logger,
 	}

@@ -12,16 +12,15 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	featuremodules "github.com/cfgis/cfgms/features/modules"
-	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
-	pkgtrust "github.com/cfgis/cfgms/pkg/modules/trust"
+	"github.com/cfgis/cfgms/pkg/modules/trust"
 )
 
 // testEnforcer returns a StewardTrustEnforcer whose CFGMS identity uses the
 // provided public key, so tests can sign bundles with the matching private key.
-func testEnforcer(cfgmsPub ed25519.PublicKey) *stewardtrust.StewardTrustEnforcer {
-	return stewardtrust.NewStewardTrustEnforcerWithIdentity(func() pkgtrust.PublisherIdentity {
-		return pkgtrust.PublisherIdentity{
+func testEnforcer(cfgmsPub ed25519.PublicKey) *trust.StewardTrustEnforcer {
+	return trust.NewStewardTrustEnforcerWithIdentity(func() trust.PublisherIdentity {
+		return trust.PublisherIdentity{
 			Name:      "cfgms",
 			PublicKey: []byte(cfgmsPub),
 			Algorithm: "ed25519",
@@ -80,7 +79,7 @@ func TestStrictModeRejectsUnsignedBundle(t *testing.T) {
 	enforcer := testEnforcer(cfgmsPub)
 	err = enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustModeStrict, nil)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, pkgtrust.ErrPublisherNotTrusted)
+	assert.ErrorIs(t, err, trust.ErrPublisherNotTrusted)
 }
 
 // TestStrictModeRejectsUnknownPublisher: bundle signed by an unknown publisher
@@ -98,13 +97,13 @@ func TestStrictModeRejectsUnknownPublisher(t *testing.T) {
 	enforcer := testEnforcer(cfgmsPub)
 	err = enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustModeStrict, nil)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, pkgtrust.ErrPublisherNotTrusted)
+	assert.ErrorIs(t, err, trust.ErrPublisherNotTrusted)
 }
 
 // TestControllerModePassesUnsignedBundle: controller mode is a no-op.
 func TestControllerModePassesUnsignedBundle(t *testing.T) {
 	b := makeTestBundle()
-	enforcer := stewardtrust.NewStewardTrustEnforcer()
+	enforcer := trust.NewStewardTrustEnforcer()
 	assert.NoError(t, enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustModeController, nil))
 }
 
@@ -116,7 +115,7 @@ func TestBypassModeRejectedInReleaseBuild(t *testing.T) {
 		t.Skip("covered by trust_bypass_allowed_test.go in a cfgms_dev_bypass build")
 	}
 	b := makeTestBundle()
-	enforcer := stewardtrust.NewStewardTrustEnforcer()
+	enforcer := trust.NewStewardTrustEnforcer()
 	err := enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustModeBypass, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unavailable in a release build")
@@ -135,7 +134,7 @@ func TestStrictModeAcceptsAdditionalPublisher(t *testing.T) {
 	signBundle(b, "extra-vendor", extraPriv)
 
 	enforcer := testEnforcer(cfgmsPub)
-	additional := []stewardtrust.PublisherIdentity{
+	additional := []trust.PublisherIdentity{
 		{Name: "extra-vendor", PublicKey: []byte(extraPub), Algorithm: "ed25519"},
 	}
 	assert.NoError(t, enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustModeStrict, additional))
@@ -158,7 +157,7 @@ func TestStrictModeAdditionalPublisherCannotDisplaceCFGMSIdentity(t *testing.T) 
 	require.NoError(t, err)
 	require.NotEqual(t, []byte(cfgmsPub), []byte(attackerPub))
 
-	colliding := []stewardtrust.PublisherIdentity{
+	colliding := []trust.PublisherIdentity{
 		{Name: "cfgms", PublicKey: []byte(attackerPub), Algorithm: "ed25519"},
 	}
 	enforcer := testEnforcer(cfgmsPub)
@@ -178,7 +177,7 @@ func TestStrictModeAdditionalPublisherCannotDisplaceCFGMSIdentity(t *testing.T) 
 	signBundle(forged, "cfgms", attackerPriv)
 	err = enforcer.VerifyForLoad(forged, stewardtypes.ModuleTrustModeStrict, colliding)
 	require.Error(t, err, "a bundle signed by the colliding additional publisher's key must not verify")
-	assert.ErrorIs(t, err, pkgtrust.ErrInvalidSignature)
+	assert.ErrorIs(t, err, trust.ErrInvalidSignature)
 }
 
 // [REQUIRED TEST] TestResolveAdditionalPublishers_KnownNameLoadsUnderStrict:
@@ -192,11 +191,11 @@ func TestResolveAdditionalPublishers_KnownNameLoadsUnderStrict(t *testing.T) {
 	extraPub, extraPriv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
-	enforcer := stewardtrust.NewStewardTrustEnforcerWithKnownPublishers(
-		func() pkgtrust.PublisherIdentity {
-			return pkgtrust.PublisherIdentity{Name: "cfgms", PublicKey: []byte(cfgmsPub), Algorithm: "ed25519"}
+	enforcer := trust.NewStewardTrustEnforcerWithKnownPublishers(
+		func() trust.PublisherIdentity {
+			return trust.PublisherIdentity{Name: "cfgms", PublicKey: []byte(cfgmsPub), Algorithm: "ed25519"}
 		},
-		map[string]pkgtrust.PublisherIdentity{
+		map[string]trust.PublisherIdentity{
 			"extra-vendor": {Name: "extra-vendor", PublicKey: []byte(extraPub), Algorithm: "ed25519"},
 		},
 	)
@@ -221,11 +220,11 @@ func TestResolveAdditionalPublishers_NotListedNameIsRejected(t *testing.T) {
 	extraPub, extraPriv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
-	enforcer := stewardtrust.NewStewardTrustEnforcerWithKnownPublishers(
-		func() pkgtrust.PublisherIdentity {
-			return pkgtrust.PublisherIdentity{Name: "cfgms", PublicKey: []byte(cfgmsPub), Algorithm: "ed25519"}
+	enforcer := trust.NewStewardTrustEnforcerWithKnownPublishers(
+		func() trust.PublisherIdentity {
+			return trust.PublisherIdentity{Name: "cfgms", PublicKey: []byte(cfgmsPub), Algorithm: "ed25519"}
 		},
-		map[string]pkgtrust.PublisherIdentity{
+		map[string]trust.PublisherIdentity{
 			"extra-vendor": {Name: "extra-vendor", PublicKey: []byte(extraPub), Algorithm: "ed25519"},
 		},
 	)
@@ -239,7 +238,7 @@ func TestResolveAdditionalPublishers_NotListedNameIsRejected(t *testing.T) {
 	signBundle(b, "extra-vendor", extraPriv)
 	err = enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustModeStrict, resolved)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, pkgtrust.ErrPublisherNotTrusted)
+	assert.ErrorIs(t, err, trust.ErrPublisherNotTrusted)
 }
 
 // [REQUIRED TEST] TestResolveAdditionalPublishers_UnresolvableNameNamesEntryInError:
@@ -249,11 +248,11 @@ func TestResolveAdditionalPublishers_NotListedNameIsRejected(t *testing.T) {
 func TestResolveAdditionalPublishers_UnresolvableNameNamesEntryInError(t *testing.T) {
 	// The production resolver (no known-publishers override) has an empty
 	// compiled-in registry, so every name is unresolvable.
-	enforcer := stewardtrust.NewStewardTrustEnforcer()
+	enforcer := trust.NewStewardTrustEnforcer()
 
 	_, err := enforcer.ResolveAdditionalPublishers([]string{"never-heard-of-this-vendor"})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, stewardtrust.ErrAdditionalPublisherUnresolvable)
+	assert.ErrorIs(t, err, trust.ErrAdditionalPublisherUnresolvable)
 	assert.Contains(t, err.Error(), "never-heard-of-this-vendor")
 }
 
@@ -270,11 +269,11 @@ func TestResolveAdditionalPublishers_CollidingNameCannotDisplaceCFGMSIdentity(t 
 	require.NoError(t, err)
 	require.NotEqual(t, []byte(cfgmsPub), []byte(attackerPub))
 
-	enforcer := stewardtrust.NewStewardTrustEnforcerWithKnownPublishers(
-		func() pkgtrust.PublisherIdentity {
-			return pkgtrust.PublisherIdentity{Name: "cfgms", PublicKey: []byte(cfgmsPub), Algorithm: "ed25519"}
+	enforcer := trust.NewStewardTrustEnforcerWithKnownPublishers(
+		func() trust.PublisherIdentity {
+			return trust.PublisherIdentity{Name: "cfgms", PublicKey: []byte(cfgmsPub), Algorithm: "ed25519"}
 		},
-		map[string]pkgtrust.PublisherIdentity{
+		map[string]trust.PublisherIdentity{
 			// The registry itself resolves "cfgms" to the attacker's key — as if
 			// an operator mistakenly (or maliciously) listed "cfgms" in
 			// additional_publishers and a colliding entry existed to resolve it.
@@ -294,13 +293,13 @@ func TestResolveAdditionalPublishers_CollidingNameCannotDisplaceCFGMSIdentity(t 
 	signBundle(forged, "cfgms", attackerPriv)
 	err = enforcer.VerifyForLoad(forged, stewardtypes.ModuleTrustModeStrict, resolved)
 	require.Error(t, err, "a bundle signed by the colliding resolved publisher's key must not verify")
-	assert.ErrorIs(t, err, pkgtrust.ErrInvalidSignature)
+	assert.ErrorIs(t, err, trust.ErrInvalidSignature)
 }
 
 // TestUnknownModeReturnsError: an unrecognised mode string returns an error.
 func TestUnknownModeReturnsError(t *testing.T) {
 	b := makeTestBundle()
-	enforcer := stewardtrust.NewStewardTrustEnforcer()
+	enforcer := trust.NewStewardTrustEnforcer()
 	err := enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustMode("unsupported"), nil)
 	require.Error(t, err)
 }
@@ -313,15 +312,15 @@ func TestUnknownModeReturnsError(t *testing.T) {
 // so a future config path that skips validation still fails closed here,
 // rather than an unrecognised value silently falling through to the
 // bypass/controller no-op arm. The error must name the offending value so an
-// operator can act on it, and must not be pkgtrust.ErrPublisherNotTrusted (a
+// operator can act on it, and must not be trust.ErrPublisherNotTrusted (a
 // strict-mode verification failure) — a distinct failure mode.
 func TestVerifyForLoad_UnknownModeRefusedOutright(t *testing.T) {
 	b := makeTestBundle()
-	enforcer := stewardtrust.NewStewardTrustEnforcer()
+	enforcer := trust.NewStewardTrustEnforcer()
 
 	err := enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustMode("bogus"), nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown module trust mode")
 	assert.Contains(t, err.Error(), "bogus")
-	assert.NotErrorIs(t, err, pkgtrust.ErrPublisherNotTrusted)
+	assert.NotErrorIs(t, err, trust.ErrPublisherNotTrusted)
 }
