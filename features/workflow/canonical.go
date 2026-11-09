@@ -31,6 +31,7 @@ var canonicalExcludedFields = map[string]bool{
 	"VersionedWorkflow.DeprecationNote": true,
 	"VersionedWorkflow.Changelog":       true,
 	"VersionedWorkflow.Publication":     true,
+	"VersionedWorkflow.Signature":       true,
 }
 
 // CanonicalWorkflowBytes returns the deterministic byte form of a workflow version:
