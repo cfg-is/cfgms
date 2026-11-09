@@ -9,8 +9,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,10 +23,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/audit"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/registration/identity"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
 
@@ -146,8 +151,33 @@ func (e *guardEnv) requireContestedEvent(t *testing.T, id, source string) {
 	t.Helper()
 	assert.Equal(t, business.StewardStatusTampered, e.status(t, id))
 	ev := e.events(t, auditActionTamperRepairContested, id)
-	require.NotEmpty(t, ev, "repair.contested is audited")
+	require.NotEmpty(t, ev, "repair.contested is audited; the steward's repair events were:\n%s", e.describeRepairEvents(t, id))
 	assert.Equal(t, source, auditString(ev[len(ev)-1].Details, "source"))
+}
+
+// describeRepairEvents lists the steward's repair audit events, oldest first by
+// write order, for a failure message: action, timestamp and sequence number.
+func (e *guardEnv) describeRepairEvents(t *testing.T, stewardID string) string {
+	t.Helper()
+	var evs []*business.AuditEntry
+	for _, en := range auditEntries(t, e.server, cloneTenant) {
+		if en.ResourceID == stewardID && slices.Contains(repairGuardActions, en.Action) {
+			evs = append(evs, en)
+		}
+	}
+	return formatRepairEvents(evs)
+}
+
+func formatRepairEvents(evs []*business.AuditEntry) string {
+	if len(evs) == 0 {
+		return "  (none)"
+	}
+	sortRepairEventsOldestFirst(evs)
+	var b strings.Builder
+	for _, en := range evs {
+		fmt.Fprintf(&b, "  action=%s timestamp=%s sequence=%d\n", en.Action, en.Timestamp.Format(time.RFC3339Nano), en.SequenceNumber)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (e *guardEnv) requireNotContested(t *testing.T, id string, want business.StewardStatus) {
@@ -393,6 +423,87 @@ func TestRepairGuard_ContestedStewardNeverReturnsToTrusted(t *testing.T) {
 	env.server.HandleRepairHeartbeat(ctx, c.rs.id, c.newSerial, reportCompleted(c.rs.repairID))
 	assert.Equal(t, business.StewardStatusTampered, env.status(t, c.rs.id), "a contested signal ends the quiet window for good")
 	assert.Empty(t, env.events(t, auditActionTamperRepaired, c.rs.id))
+}
+
+// useTiedRepairEvents points the server at its own real audit store and writes a
+// completion event that issued newSerial, then, when seen is true, the first
+// new-serial connection. Every event carries the identical timestamp and
+// increasing sequence numbers in write order, which is what a coarse wall clock
+// produces for two events written moments apart. The timestamp is inside the
+// quiet window, so only the new-serial event can arm the revoked-serial source.
+func (e *guardEnv) useTiedRepairEvents(t *testing.T, stewardID, newSerial string, seen bool) {
+	t.Helper()
+	ctx := context.Background()
+	store := pkgtesting.SetupTestStorage(t).GetAuditStore()
+	mgr, err := audit.NewManager(store, "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mgr.Stop(context.Background()) })
+	e.server.auditManager = mgr
+
+	tied := time.Now().UTC().Add(-time.Minute)
+	write := func(seq uint64, action string, details map[string]interface{}) {
+		require.NoError(t, store.StoreAuditEntry(ctx, &business.AuditEntry{
+			ID: fmt.Sprintf("tied-%s-%d", stewardID, seq), TenantID: cloneTenant, Timestamp: tied, SequenceNumber: seq,
+			EventType: business.AuditEventSecurityEvent, Action: action, Result: business.AuditResultSuccess,
+			Severity: business.AuditSeverityHigh, UserID: stewardID, UserType: business.AuditUserTypeSystem,
+			ResourceType: "steward", ResourceID: stewardID, Details: details,
+		}))
+	}
+	write(1, auditActionTamperRepairCompleted, map[string]interface{}{"repair_id": "r-tied", "new_serial": newSerial})
+	if seen {
+		write(2, auditActionTamperRepairNewSerialSeen, map[string]interface{}{"repair_id": "r-tied", "serial": newSerial})
+	}
+}
+
+// A completion and the first new-serial connection that share one timestamp are
+// folded in write order, so a revoked-serial use afterwards is contested.
+func TestRepairGuard_TiedTimestampsFoldInSequenceOrder(t *testing.T) {
+	ctx := context.Background()
+	t.Run("new serial seen: revoked serial is contested", func(t *testing.T) {
+		env := newGuardEnv(t)
+		env.addTamperedWithKey(t, "s-tied", newDeviceKey(t), "file")
+		env.useTiedRepairEvents(t, "s-tied", "4242", true)
+		env.server.ObserveRevokedPeer(ctx, "s-tied", "1111")
+		env.requireContestedEvent(t, "s-tied", repairContestRevokedSerial)
+		assert.Len(t, env.events(t, auditActionTamperRepairContested, "s-tied"), 1)
+	})
+	t.Run("new serial not seen: stays not armed", func(t *testing.T) {
+		env := newGuardEnv(t)
+		env.addTamperedWithKey(t, "s-tied-unseen", newDeviceKey(t), "file")
+		env.useTiedRepairEvents(t, "s-tied-unseen", "4242", false)
+		env.server.ObserveRevokedPeer(ctx, "s-tied-unseen", "1111")
+		env.requireNotContested(t, "s-tied-unseen", business.StewardStatusTampered)
+	})
+}
+
+func TestSortRepairEventsOldestFirst(t *testing.T) {
+	t0 := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	entry := func(action string, ts time.Time, seq uint64) *business.AuditEntry {
+		return &business.AuditEntry{Action: action, Timestamp: ts, SequenceNumber: seq}
+	}
+	entries := []*business.AuditEntry{
+		entry("c", t0.Add(time.Second), 4),
+		entry("b2", t0, 3),
+		entry("b1", t0, 2),
+		entry("a", t0.Add(-time.Second), 9),
+	}
+	sortRepairEventsOldestFirst(entries)
+	var got []string
+	for _, e := range entries {
+		got = append(got, e.Action)
+	}
+	assert.Equal(t, []string{"a", "b1", "b2", "c"}, got, "timestamp first, sequence number on a tie")
+}
+
+func TestFormatRepairEvents(t *testing.T) {
+	assert.Equal(t, "  (none)", formatRepairEvents(nil))
+	ts := time.Date(2026, 11, 9, 10, 0, 0, 123456789, time.UTC)
+	out := formatRepairEvents([]*business.AuditEntry{
+		{Action: auditActionTamperRepairNewSerialSeen, Timestamp: ts, SequenceNumber: 8},
+		{Action: auditActionTamperRepairCompleted, Timestamp: ts, SequenceNumber: 7},
+	})
+	assert.Equal(t, "  action=steward_tamper_repair_completed timestamp=2026-11-09T10:00:00.123456789Z sequence=7\n"+
+		"  action=steward_tamper_repair_new_serial_seen timestamp=2026-11-09T10:00:00.123456789Z sequence=8", out)
 }
 
 func TestRepairGuard_RepeatedSignalsAreAuditedOnce(t *testing.T) {
