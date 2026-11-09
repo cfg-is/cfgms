@@ -826,129 +826,112 @@ func openSigningTrustAckStore(storageManager *interfaces.StorageManager, caPath 
 	return fileAcks, nil
 }
 
-// New creates a new server instance
-func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
-	if cfg == nil {
-		return nil, ErrNilConfig
-	}
-	if err := cfg.ValidateExecutionSecurity(); err != nil {
-		return nil, fmt.Errorf("execution security validation failed: %w", err)
-	}
+// openedStoreList collects the Close of every store New opens, so a later
+// failure can release them in reverse order (Issue #4058). Helpers register
+// each store the moment it is constructed.
+type openedStoreList []func() error
 
-	// Validate transport config early: refuse to start if 0.0.0.0 bind has no external address.
-	if cfg.Transport != nil && strings.HasPrefix(cfg.Transport.ListenAddr, "0.0.0.0") {
-		externalAddr := cfg.Transport.ExternalAddress
-		if externalAddr == "" {
-			externalAddr = os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
-		}
-		if externalAddr == "" {
-			return nil, fmt.Errorf("transport.listen_addr binds 0.0.0.0 but no external address is configured; set transport.external_address in controller.cfg or CFGMS_EXTERNAL_HOSTNAME env var")
-		}
-	}
+func (l *openedStoreList) add(closeFn func() error) {
+	*l = append(*l, closeFn)
+}
 
-	logger.Info("Config validated, proceeding with storage initialization...")
-
+// openStorageManager creates the storage manager — cluster mode (Postgres),
+// OSS composite (flatfile+SQLite), or legacy database single-provider. The git
+// provider is removed (Issue #664). Each branch registers the storage manager
+// with opened immediately after construction succeeds, so every later failure in
+// New releases it.
+func openStorageManager(cfg *config.Config, logger logging.Logger, opened *openedStoreList) (*interfaces.StorageManager, error) {
 	// Initialize global storage provider system - REQUIRED for all deployments
 	if cfg.Storage == nil {
 		return nil, fmt.Errorf("storage configuration is required for CFGMS operation - configure storage.flatfile_root and storage.sqlite_path (OSS composite). See docs/examples/minimum-storage-config.cfg for examples")
 	}
 
-	// Create storage manager — cluster mode (Postgres), OSS composite (flatfile+SQLite),
-	// or legacy database single-provider. The git provider is removed (Issue #664).
-	//
-	// From the moment any of the three branches below successfully constructs a
-	// storageManager, New holds open SQLite/Postgres handles. Every remaining
-	// failure returns without a Server, so nothing would ever call Stop to
-	// release them — the handles would leak for the process's life. On Windows
-	// that also pins the database files, so a caller cannot delete the data
-	// directory of a controller that refused to start. The defer below is
-	// declared before the branches (not after) and each branch registers its
-	// storageManager immediately after construction succeeds — including the
-	// cluster branch's assertClusterBackendsReady check, which can fail before
-	// any other code runs — so every post-construction failure path is covered.
-	constructed := false
-	var openedStores []func() error
-	defer func() {
-		if constructed {
-			return
-		}
-		// Reverse order, so a store closes before anything it was layered onto.
-		for i := len(openedStores) - 1; i >= 0; i-- {
-			if closeErr := openedStores[i](); closeErr != nil {
-				logger.Warn("Failed to release storage after controller initialization failed",
-					"error", closeErr)
-			}
-		}
-	}()
-
-	var storageManager *interfaces.StorageManager
-	if cfg.HA.IsClusterMode() {
-		// Cluster mode: all business stores backed by shared Postgres so every node
-		// serving the same fleet uses the same state (Issue #2119).
-		pgDSN := ""
-		sessionHMACKey := ""
-		if cfg.Storage.Cluster != nil {
-			pgDSN = cfg.Storage.Cluster.PostgresDSN
-			sessionHMACKey = cfg.Storage.Cluster.SessionHMACKey
-		}
-		var s3Config map[string]interface{}
-		if cfg.Storage.Cluster != nil {
-			s3Config = cfg.Storage.Cluster.S3
-		}
-		logger.Info("Cluster mode: initializing Postgres business store backend...",
-			"ha_mode", cfg.HA.Mode)
-		var clusterErr error
-		storageManager, clusterErr = interfaces.CreateClusterStorageManager(pgDSN, sessionHMACKey, s3Config)
-		if clusterErr != nil {
-			return nil, fmt.Errorf("failed to initialize cluster storage: %w", clusterErr)
-		}
-		openedStores = append(openedStores, storageManager.Close)
-		logger.Info("Cluster storage backend initialized")
-		if backendErr := assertClusterBackendsReady(cfg, storageManager); backendErr != nil {
-			return nil, backendErr
-		}
-	} else if cfg.Storage.FlatfileRoot != "" {
-		logger.Info("Initializing OSS composite storage backend...",
-			"flatfile_root", cfg.Storage.FlatfileRoot,
-			"sqlite_path", cfg.Storage.SQLitePath)
-		var ossErr error
-		storageManager, ossErr = interfaces.CreateOSSStorageManager(cfg.Storage.FlatfileRoot, cfg.Storage.SQLitePath)
-		if ossErr != nil {
-			return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", ossErr)
-		}
-		openedStores = append(openedStores, storageManager.Close)
-		logger.Info("OSS composite storage backend initialized")
-	} else if cfg.Storage.Provider == "database" {
-		logger.Info("Initializing database storage provider (commercial single-provider mode)")
-		var dbErr error
-		// Database provider deliberately uses the legacy single-provider helper: commercial
-		// deployments run all stores through one PostgreSQL backend, which CreateAllStoresFromConfig
-		// is explicitly retained to support (see pkg/storage/interfaces/provider.go).
-		//nolint:staticcheck // SA1019 — retained for database single-provider mode
-		storageManager, dbErr = interfaces.CreateAllStoresFromConfig("database", cfg.Storage.Config)
-		if dbErr != nil {
-			return nil, fmt.Errorf("failed to initialize database storage provider: %w. Verify storage.config contains valid database connection parameters", dbErr)
-		}
-		openedStores = append(openedStores, storageManager.Close)
-	} else {
-		return nil, fmt.Errorf("storage.flatfile_root is required for OSS composite storage, or storage.provider must be 'database' for commercial single-provider mode. The 'git' storage provider has been removed — run 'cfg storage migrate --from git --to flatfile' to migrate existing data")
+	switch {
+	case cfg.HA.IsClusterMode():
+		return openClusterStorageManager(cfg, logger, opened)
+	case cfg.Storage.FlatfileRoot != "":
+		return openOSSStorageManager(cfg, logger, opened)
+	case cfg.Storage.Provider == "database":
+		return openDatabaseStorageManager(cfg, logger, opened)
 	}
+	return nil, fmt.Errorf("storage.flatfile_root is required for OSS composite storage, or storage.provider must be 'database' for commercial single-provider mode. The 'git' storage provider has been removed — run 'cfg storage migrate --from git --to flatfile' to migrate existing data")
+}
 
-	// Validate that the constructed StorageManager supplies every store required by
-	// the enabled subsystems. A missing required store fails closed here — at startup,
-	// before anything tries to use the store — rather than silently producing a nil
-	// that causes a 503 at request time (issue #3400 regression guard).
-	// Registration (#3491) and push (#3492) are wired; workflow-trigger (#3493)
-	// is now wired too — all three subsystems from epic #3406 declare their
-	// required stores below.
+// openClusterStorageManager backs every business store with the shared Postgres
+// so every node serving the same fleet uses the same state (Issue #2119). The
+// storage manager is registered before assertClusterBackendsReady runs, because
+// that check can fail before any other code has run.
+func openClusterStorageManager(cfg *config.Config, logger logging.Logger, opened *openedStoreList) (*interfaces.StorageManager, error) {
+	pgDSN := ""
+	sessionHMACKey := ""
+	var s3Config map[string]interface{}
+	if cfg.Storage.Cluster != nil {
+		pgDSN = cfg.Storage.Cluster.PostgresDSN
+		sessionHMACKey = cfg.Storage.Cluster.SessionHMACKey
+		s3Config = cfg.Storage.Cluster.S3
+	}
+	logger.Info("Cluster mode: initializing Postgres business store backend...",
+		"ha_mode", cfg.HA.Mode)
+	storageManager, clusterErr := interfaces.CreateClusterStorageManager(pgDSN, sessionHMACKey, s3Config)
+	if clusterErr != nil {
+		return nil, fmt.Errorf("failed to initialize cluster storage: %w", clusterErr)
+	}
+	opened.add(storageManager.Close)
+	logger.Info("Cluster storage backend initialized")
+	if backendErr := assertClusterBackendsReady(cfg, storageManager); backendErr != nil {
+		return nil, backendErr
+	}
+	return storageManager, nil
+}
+
+// openOSSStorageManager opens the flatfile + SQLite composite backend.
+func openOSSStorageManager(cfg *config.Config, logger logging.Logger, opened *openedStoreList) (*interfaces.StorageManager, error) {
+	logger.Info("Initializing OSS composite storage backend...",
+		"flatfile_root", cfg.Storage.FlatfileRoot,
+		"sqlite_path", cfg.Storage.SQLitePath)
+	storageManager, ossErr := interfaces.CreateOSSStorageManager(cfg.Storage.FlatfileRoot, cfg.Storage.SQLitePath)
+	if ossErr != nil {
+		return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", ossErr)
+	}
+	opened.add(storageManager.Close)
+	logger.Info("OSS composite storage backend initialized")
+	return storageManager, nil
+}
+
+// openDatabaseStorageManager opens the commercial single-provider database
+// backend.
+func openDatabaseStorageManager(cfg *config.Config, logger logging.Logger, opened *openedStoreList) (*interfaces.StorageManager, error) {
+	logger.Info("Initializing database storage provider (commercial single-provider mode)")
+	// Database provider deliberately uses the legacy single-provider helper: commercial
+	// deployments run all stores through one PostgreSQL backend, which CreateAllStoresFromConfig
+	// is explicitly retained to support (see pkg/storage/interfaces/provider.go).
+	//nolint:staticcheck // SA1019 — retained for database single-provider mode
+	storageManager, dbErr := interfaces.CreateAllStoresFromConfig("database", cfg.Storage.Config)
+	if dbErr != nil {
+		return nil, fmt.Errorf("failed to initialize database storage provider: %w. Verify storage.config contains valid database connection parameters", dbErr)
+	}
+	opened.add(storageManager.Close)
+	return storageManager, nil
+}
+
+// checkStorageRequirements validates that the constructed StorageManager supplies
+// every store required by the enabled subsystems. A missing required store fails
+// closed here — at startup, before anything tries to use the store — rather than
+// silently producing a nil that causes a 503 at request time (issue #3400
+// regression guard). Registration (#3491) and push (#3492) are wired;
+// workflow-trigger (#3493) is now wired too — all three subsystems from epic
+// #3406 declare their required stores.
+//
+// It returns the declared-optional capabilities that are absent in this
+// deployment. They are computed once at composition (Issue #3409): the capability
+// set is fixed at startup and served verbatim by GET /api/v1/ha/status — no
+// per-request recompute.
+func checkStorageRequirements(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager) ([]interfaces.AbsentCapability, error) {
 	activeReqs := collectActiveStorageRequirements(cfg)
 	if reqErr := interfaces.ValidateStorageRequirements(storageManager, activeReqs); reqErr != nil {
 		return nil, reqErr
 	}
 
-	// Collect declared-optional capabilities that are absent in this deployment.
-	// Computed once at composition (Issue #3409): the capability set is fixed at
-	// startup and served verbatim by GET /api/v1/ha/status — no per-request recompute.
 	absentCaps := interfaces.CollectAbsentOptionalCapabilities(storageManager, activeReqs, storageProviderName(cfg))
 	if len(absentCaps) > 0 {
 		for _, cap := range absentCaps {
@@ -960,11 +943,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			)
 		}
 	}
+	return absentCaps, nil
+}
 
-	// Record the configured (never live-peer-count) cluster signal for the shared
-	// atomic-update helper, and warn once if the config store cannot make a
-	// read-modify-write atomic across nodes (Issue #5550). Operations that need
-	// atomicity then fail closed with ErrNotClusterAtomic.
+// recordClusterConfigSignal records the configured (never live-peer-count)
+// cluster signal for the shared atomic-update helper, and warns once if the
+// config store cannot make a read-modify-write atomic across nodes (Issue #5550).
+// Operations that need atomicity then fail closed with ErrNotClusterAtomic.
+func recordClusterConfigSignal(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager) {
 	cfgconfig.SetClusterConfigured(cfg.HA.IsClusterMode())
 	if cfg.HA.IsClusterMode() {
 		if cs := storageManager.GetConfigStore(); cs != nil && !cfgconfig.ClusterAtomic(cs) {
@@ -972,48 +958,59 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				"error", cfgconfig.ErrNotClusterAtomic.Error())
 		}
 	}
+}
 
-	// Resolve the configured audit sink (Issue #4036/#4037/#4039, ADR-033).
-	// "local" is the zero-extra-infrastructure default; "worm" wraps the
-	// durable store with a forward-only shipper to an append-only WORM blob
-	// target plus a buffer-then-flush reconciliation loop for outages (Epic
-	// #4033). This MUST run before storageManager.GetAuditStore() is read for
-	// RBAC or the audit manager below: RBAC builds its own internal audit.Manager
-	// from a captured store reference (rbac.NewManagerWithStorage), so every
-	// reader of the audit store must see the WORM-wrapped instance once
-	// installed, or RBAC-sourced audit entries would silently bypass the WORM
-	// shipper.
-	var wormAuditStore *auditsink.WORMAuditStore
+// resolveAuditSink resolves the configured audit sink (Issue #4036/#4037/#4039,
+// ADR-033). "local" is the zero-extra-infrastructure default; "worm" wraps the
+// durable store with a forward-only shipper to an append-only WORM blob target
+// plus a buffer-then-flush reconciliation loop for outages (Epic #4033). This
+// MUST run before storageManager.GetAuditStore() is read for RBAC or the audit
+// manager: RBAC builds its own internal audit.Manager from a captured store
+// reference (rbac.NewManagerWithStorage), so every reader of the audit store must
+// see the WORM-wrapped instance once installed, or RBAC-sourced audit entries
+// would silently bypass the WORM shipper. The returned store is nil unless the
+// sink is "worm".
+func resolveAuditSink(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager) (*auditsink.WORMAuditStore, error) {
 	auditSinkName := cfg.Audit.ResolvedSink()
 	switch auditSinkName {
 	case config.AuditSinkWORM:
-		wormBlobStore, wormBlobErr := blob.CreateBlobStoreFromConfig("s3", cfg.Audit.WORM)
-		if wormBlobErr != nil {
-			return nil, fmt.Errorf("failed to initialize worm audit sink blob store: %w", wormBlobErr)
-		}
-		markerRoot := resolveWORMMarkerRoot(cfg)
-		markerStore, markerErr := blob.CreateBlobStoreFromConfig("filesystem", map[string]interface{}{"root": markerRoot})
-		if markerErr != nil {
-			return nil, fmt.Errorf("audit worm sink: marker store at %q is not writable: %w", markerRoot, markerErr)
-		}
-		var wormErr error
-		wormAuditStore, wormErr = auditsink.NewWORMAuditStore(context.Background(), storageManager.GetAuditStore(), wormBlobStore, markerStore, logger)
-		if wormErr != nil {
-			return nil, fmt.Errorf("audit worm sink: marker store at %q is not writable: %w", markerRoot, wormErr)
-		}
-		storageManager.SetAuditStore(wormAuditStore)
-		wormAuditStore.Start(context.Background())
-		logger.Info("Audit worm sink reconciliation loop started", "marker_root", markerRoot)
+		return startWORMAuditSink(cfg, logger, storageManager)
 	case config.AuditSinkLocal:
 		logger.Info("Audit sink selected",
 			"sink", auditSinkName,
 			"bound", "ADR-004/ADR-033: a host-compromised controller holds the audit HMAC key and can rewrite history under this sink",
 		)
-	default:
-		return nil, fmt.Errorf("unknown audit sink %q (valid values: %q, %q)",
-			auditSinkName, config.AuditSinkLocal, config.AuditSinkWORM)
+		return nil, nil
 	}
+	return nil, fmt.Errorf("unknown audit sink %q (valid values: %q, %q)",
+		auditSinkName, config.AuditSinkLocal, config.AuditSinkWORM)
+}
 
+// startWORMAuditSink installs the WORM-wrapped audit store on the storage manager
+// and starts its reconciliation loop.
+func startWORMAuditSink(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager) (*auditsink.WORMAuditStore, error) {
+	wormBlobStore, wormBlobErr := blob.CreateBlobStoreFromConfig("s3", cfg.Audit.WORM)
+	if wormBlobErr != nil {
+		return nil, fmt.Errorf("failed to initialize worm audit sink blob store: %w", wormBlobErr)
+	}
+	markerRoot := resolveWORMMarkerRoot(cfg)
+	markerStore, markerErr := blob.CreateBlobStoreFromConfig("filesystem", map[string]interface{}{"root": markerRoot})
+	if markerErr != nil {
+		return nil, fmt.Errorf("audit worm sink: marker store at %q is not writable: %w", markerRoot, markerErr)
+	}
+	wormAuditStore, wormErr := auditsink.NewWORMAuditStore(context.Background(), storageManager.GetAuditStore(), wormBlobStore, markerStore, logger)
+	if wormErr != nil {
+		return nil, fmt.Errorf("audit worm sink: marker store at %q is not writable: %w", markerRoot, wormErr)
+	}
+	storageManager.SetAuditStore(wormAuditStore)
+	wormAuditStore.Start(context.Background())
+	logger.Info("Audit worm sink reconciliation loop started", "marker_root", markerRoot)
+	return wormAuditStore, nil
+}
+
+// newRBACAndAuditManagers builds the RBAC manager and the unified audit manager
+// over the pluggable stores, then seeds the default permissions and roles.
+func newRBACAndAuditManagers(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager) (*rbac.Manager, *audit.Manager, error) {
 	// Initialize RBAC system with pluggable storage only
 	auditStore := storageManager.GetAuditStore()
 	rbacStore := storageManager.GetRBACStore()
@@ -1029,7 +1026,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	logger.Info("Creating audit manager...")
 	auditSecrets, auditSecretsErr := api.NewSecretStore(cfg)
 	if auditSecretsErr != nil {
-		return nil, fmt.Errorf("failed to initialize durable audit signing key store: %w", auditSecretsErr)
+		return nil, nil, fmt.Errorf("failed to initialize durable audit signing key store: %w", auditSecretsErr)
 	}
 	auditManager, auditErr := audit.NewManager(
 		storageManager.GetAuditStore(),
@@ -1038,10 +1035,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	)
 	closeAuditSecretsErr := auditSecrets.Close()
 	if auditErr != nil {
-		return nil, fmt.Errorf("failed to initialize audit manager: %w", auditErr)
+		return nil, nil, fmt.Errorf("failed to initialize audit manager: %w", auditErr)
 	}
 	if closeAuditSecretsErr != nil {
-		return nil, fmt.Errorf("failed to close audit signing key store after initialization: %w", closeAuditSecretsErr)
+		return nil, nil, fmt.Errorf("failed to close audit signing key store after initialization: %w", closeAuditSecretsErr)
 	}
 	logger.Info("Audit manager created")
 
@@ -1055,7 +1052,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Warn("Failed to initialize RBAC configuration", "error", err)
 	}
 	logger.Info("RBAC initialization completed")
+	return rbacManager, auditManager, nil
+}
 
+// newTenantManager builds tenant management over durable storage.
+func newTenantManager(cfg *config.Config, storageManager *interfaces.StorageManager, rbacManager *rbac.Manager, auditManager *audit.Manager) (*tenant.Manager, error) {
 	// Initialize tenant management with durable storage
 	tenantManager := tenant.NewManager(storageManager.GetTenantStore(), rbacManager).
 		WithAuditManager(auditManager)
@@ -1074,21 +1075,19 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// RealmID is deployment-wide config (ADR-032 Decision 3), never stored per-tenant;
 	// QualifiedTenantID computes the qualified form on demand from whatever is configured.
 	tenantManager.RealmID = cfg.RealmID
+	return tenantManager, nil
+}
 
-	// Detect HA cluster mode from cfg.HA (populated by LoadWithPath from ha.mode YAML
-	// key and CFGMS_HA_MODE env var). This is the single source of truth for mode
-	// selection; the separate haEarlyCfg.LoadFromEnvironment() path is no longer needed
-	// because LoadWithPath already applies env-var overrides to cfg.HA (Issue #2119).
-	isClusterMode := cfg.HA.IsClusterMode()
-
-	// DNA storage — durable steward DNA + fleet registry. Shared by the
-	// controller service (warm-loading the steward registry after a restart)
-	// and the reports engine. (Issue #1572)
-	//
-	// Single-node: SQLite at an absolute, CWD-independent path (see resolveDNADataRoot
-	// and Issue #2010). Cluster: PostgreSQL-backed DatabaseBackend shared by all nodes
-	// (connection string from CFGMS_DNA_DATABASE_URL); resolveDNADataRoot is not
-	// called in cluster mode (Issue #2118).
+// newDNAStorageManager opens the durable steward DNA + fleet registry storage.
+// Shared by the controller service (warm-loading the steward registry after a
+// restart) and the reports engine. (Issue #1572)
+//
+// Single-node: SQLite at an absolute, CWD-independent path (see resolveDNADataRoot
+// and Issue #2010). Cluster: PostgreSQL-backed DatabaseBackend shared by all nodes
+// (connection string from CFGMS_DNA_DATABASE_URL); resolveDNADataRoot is not
+// called in cluster mode (Issue #2118). It returns nil, after logging a warning,
+// when the storage cannot be opened.
+func newDNAStorageManager(cfg *config.Config, logger logging.Logger, isClusterMode bool, opened *openedStoreList) *dnaStorage.Manager {
 	dnaStorageConfig := dnaStorage.DefaultConfig()
 	if isClusterMode {
 		dnaStorageConfig.Backend = dnaStorage.BackendDatabase
@@ -1103,12 +1102,17 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Warn("Failed to initialize DNA storage; steward registry will not survive a controller restart", "error", dnaErr)
 	}
 	if dnaStorageManager != nil {
-		openedStores = append(openedStores, dnaStorageManager.Close)
+		opened.add(dnaStorageManager.Close)
 	}
+	return dnaStorageManager
+}
 
-	// Create the controller service. With durable DNA storage its in-memory
-	// steward registry is warm-loaded from a previous run on startup, so a
-	// controller restart does not lose track of connected stewards. (Issue #1572)
+// newControllerService creates the controller service and the durable tag store
+// wired into it. With durable DNA storage its in-memory steward registry is
+// warm-loaded from a previous run on startup, so a controller restart does not
+// lose track of connected stewards. (Issue #1572) The tag store is nil when
+// SQLite is not configured.
+func newControllerService(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager, tenantManager *tenant.Manager, dnaStorageManager *dnaStorage.Manager, opened *openedStoreList) (*service.ControllerService, *tagstore.Store, error) {
 	var controllerService *service.ControllerService
 	if dnaStorageManager != nil {
 		controllerService = service.NewControllerServiceWithStorage(logger, dnaStorageManager)
@@ -1134,10 +1138,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Wire deployment ring config into controller service (Issue #2271).
 	if err := cfg.ValidateDeploymentRings(); err != nil {
-		return nil, fmt.Errorf("invalid deployment_rings config: %w", err)
+		return nil, nil, fmt.Errorf("invalid deployment_rings config: %w", err)
 	}
 	if err := cfg.ValidateModuleTrust(); err != nil {
-		return nil, fmt.Errorf("invalid module config: %w", err)
+		return nil, nil, fmt.Errorf("invalid module config: %w", err)
 	}
 	controllerService.SetRingConfig(cfg.EffectiveRings())
 
@@ -1145,61 +1149,74 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// configured (tags API degrades gracefully; SetTagStore is a no-op on nil).
 	tagStoreInstance := initializeTagStore(context.Background(), cfg, logger)
 	if tagStoreInstance != nil {
-		openedStores = append(openedStores, tagStoreInstance.Close)
+		opened.add(tagStoreInstance.Close)
 		controllerService.SetTagStore(tagStoreInstance)
 	}
+	return controllerService, tagStoreInstance, nil
+}
 
+// newEntityGraphAndDirectory builds the entity graph provider, the dedicated
+// secret store of the git-capable config source router, and the directory
+// manager built over that secret store. Each opened handle is registered with
+// opened as soon as it exists, so a mid-New failure releases it.
+func newEntityGraphAndDirectory(cfg *config.Config, logger logging.Logger, controllerService *service.ControllerService, opened *openedStoreList) (egServerProvider, secretsif.SecretStore, *directoryif.DirectoryProviderManager, error) {
 	// Issue #3253: Construct the entity graph provider, tracking the same
 	// storage backend as the rest of the controller. The provider is registered
 	// in openedStores immediately so a mid-New failure releases its handle.
 	egProvider, egErr := initializeEntityGraphProvider(cfg, logger, controllerService)
 	if egErr != nil {
-		return nil, fmt.Errorf("failed to initialize entity graph provider: %w", egErr)
+		return nil, nil, nil, fmt.Errorf("failed to initialize entity graph provider: %w", egErr)
 	}
-	openedStores = append(openedStores, egProvider.Close)
+	opened.add(egProvider.Close)
 
 	// Issue #4408: dedicated secret store for the git-capable config source router.
-	// A separate instance from the audit signing key store above (closed immediately
+	// A separate instance from the audit signing key store (closed immediately
 	// after use) and from httpServer's own internal secret store (api.New constructs
-	// that one later, after configService below already exists) — same on-disk
+	// that one later, after configService already exists) — same on-disk
 	// backing (api.NewSecretStore(cfg)), kept open for the router's lifetime and
 	// closed explicitly in Stop().
 	routerSecretStore, routerSecretErr := api.NewSecretStore(cfg)
 	if routerSecretErr != nil {
-		return nil, fmt.Errorf("failed to initialize config router secret store: %w", routerSecretErr)
+		return nil, nil, nil, fmt.Errorf("failed to initialize config router secret store: %w", routerSecretErr)
 	}
-	openedStores = append(openedStores, routerSecretStore.Close)
+	opened.add(routerSecretStore.Close)
 
 	// Issue #5431: directory manager with the Entra ID provider registered
 	// unconnected. Its credentials are the tenant M365 connections held in the
 	// same secret store the router store is built over.
 	directoryManager, dirErr := registerDirectoryProviders(routerSecretStore, logger)
 	if dirErr != nil {
-		return nil, fmt.Errorf("failed to initialize directory providers: %w", dirErr)
+		return nil, nil, nil, fmt.Errorf("failed to initialize directory providers: %w", dirErr)
 	}
+	return egProvider, routerSecretStore, directoryManager, nil
+}
 
+// newConfigurationService creates the configuration service (V2: durable storage
+// via StorageManager). WithGitRouter makes the router git-capable (Issue #4408):
+// storeForSource can only reach a *gitprovider.GitConfigStore when it sees a
+// non-nil secret store and a non-empty git work dir — without both,
+// SyncTenantWithRemote silently pulls nothing on every tick.
+func newConfigurationService(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager, controllerService *service.ControllerService, routerSecretStore secretsif.SecretStore) (*service.ConfigurationServiceV2, error) {
 	gitConfigWorkDir := filepath.Join(resolveDNADataRoot(cfg), "config-git-sources")
 	if mkErr := os.MkdirAll(gitConfigWorkDir, 0750); mkErr != nil {
 		return nil, fmt.Errorf("failed to create config git work directory: %w", mkErr)
 	}
 
-	// Create the configuration service (V2: durable storage via StorageManager).
-	// WithGitRouter makes the router git-capable (Issue #4408): storeForSource can
-	// only reach a *gitprovider.GitConfigStore when it sees a non-nil secret store
-	// and a non-empty git work dir — without both, SyncTenantWithRemote (below)
-	// silently pulls nothing on every tick.
-	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService,
-		service.WithGitRouter(routerSecretStore, gitConfigWorkDir))
+	return service.NewConfigurationServiceV2(logger, storageManager, controllerService,
+		service.WithGitRouter(routerSecretStore, gitConfigWorkDir)), nil
+}
 
-	// Issue #4408: wire the periodic git-sourced tenant config sync service.
-	// rootTenantID is resolved through the tenant store (not inlined) so a missing
-	// bootstrap record is visible at startup; cascadeFn mirrors the tenant-only
-	// cascade that on-request resolution already performs for e.g.
-	// GET /api/v1/tenants/{id}/reboot-window (ConfigurationServiceV2.
-	// GetEffectiveConfiguration's own doc comment calls this a "tenant-only
-	// cascade") — distinct from the save=deploy steward fan-out registered
-	// separately below in features/controller/api/server.go, which is a
-	// write-triggered push, not a cascade recompute.
+// newConfigSyncService wires the periodic git-sourced tenant config sync service
+// (Issue #4408) and returns it with the root tenant it is bound to. rootTenantID
+// is resolved through the tenant store (not inlined) so a missing bootstrap
+// record is visible at startup; cascadeFn mirrors the tenant-only cascade that
+// on-request resolution already performs for e.g.
+// GET /api/v1/tenants/{id}/reboot-window (ConfigurationServiceV2.
+// GetEffectiveConfiguration's own doc comment calls this a "tenant-only
+// cascade") — distinct from the save=deploy steward fan-out registered
+// separately in features/controller/api/server.go, which is a write-triggered
+// push, not a cascade recompute.
+func newConfigSyncService(logger logging.Logger, storageManager *interfaces.StorageManager, tenantManager *tenant.Manager, auditManager *audit.Manager, configService *service.ConfigurationServiceV2) (*configrouting.SyncService, string) {
 	rootTenantID := resolveRootTenantID(context.Background(), tenantManager, logger)
 	cascadeFn := func(ctx context.Context, tenantID string) error {
 		_, err := configService.GetEffectiveConfiguration(ctx, tenantID, "")
@@ -1213,120 +1230,254 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		cascadeFn,
 		rootTenantID,
 	)
+	return configSyncService, rootTenantID
+}
+
+// newCertificateServices builds the certificate manager and the services layered
+// on it when certificate management is enabled. All three results are nil when it
+// is disabled.
+func newCertificateServices(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager, tenantManager *tenant.Manager, auditManager *audit.Manager) (*cert.Manager, *service.CertificateProvisioningService, *service.SigningMigrationService, error) {
+	if cfg.Certificate == nil || !cfg.Certificate.EnableCertManagement {
+		return nil, nil, nil, nil
+	}
+
+	if err := requireInitializedController(cfg.Certificate.CAPath, logger); err != nil {
+		return nil, nil, nil, err
+	}
+	certManager, err := loadValidatedCertificateManager(cfg, storageManager, auditManager, logger)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := ensureSeparatedCertificates(cfg, logger, certManager); err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Issue #4796: a cluster-mode node imports its node-local signing
+	// certificates into the shared store's migration namespace, promotes the
+	// elected serial, and removes verified local keys. A failure here is not
+	// fatal: the node keeps signing under its resolved identity and the
+	// background pass started with the server retries.
+	signingMigrationSvc := service.NewSigningMigrationService(certManager, logger)
+	signingMigrationSvc.SetAuditManager(auditManager)
+	if err := signingMigrationSvc.Run(context.Background()); err != nil {
+		logger.Warn("Signing identity migration pass failed at startup",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+
+	// Create certificate provisioning service
+	certProvisioningService := service.NewCertificateProvisioningService(certManager, logger)
+	certProvisioningService.SetTenantAncestry(tenantManager.IsTenantAncestor)
+	if cfg.Certificate.ClientCertValidityDays > 0 {
+		certProvisioningService.SetCertificateDefaults(
+			cfg.Certificate.ClientCertValidityDays,
+			cfg.Certificate.Server.Organization,
+		)
+	}
+	return certManager, certProvisioningService, signingMigrationSvc, nil
+}
+
+// requireInitializedController is the init guard: the controller must be
+// initialized before normal startup. A CA that predates the init marker gets one
+// created for backward compatibility; anything else is ErrNotInitialized.
+func requireInitializedController(caPath string, logger logging.Logger) error {
+	if initialization.IsInitialized(caPath) {
+		return nil
+	}
+	if !initialization.CAFilesExist(caPath) {
+		// Not initialized — refuse to start
+		return ErrNotInitialized
+	}
+	// Legacy: existing CA files but no marker — auto-create marker for backward compat
+	logger.Info("Legacy CA detected without init marker, creating marker for backward compatibility", "ca_path", caPath)
+	if err := initialization.CreateLegacyMarker(caPath); err != nil {
+		return fmt.Errorf("failed to create legacy init marker: %w", err)
+	}
+	return nil
+}
+
+// loadValidatedCertificateManager loads the existing certificate manager and
+// applies the startup checks that need it: single-node signing adoption, the
+// public-beta signing-root check, the legacy architecture rejection and the
+// legacy certificate type block.
+func loadValidatedCertificateManager(cfg *config.Config, storageManager *interfaces.StorageManager, auditManager *audit.Manager, logger logging.Logger) (*cert.Manager, error) {
+	certManager, err := loadExistingCertificateManager(cfg, storageManager, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load certificate manager: %w", err)
+	}
+	// Issue #4864: a single-node controller that predates the signing key store
+	// moves its existing signing certificate and key into the store under the
+	// same serial, before anything provisions a signing certificate. A cluster
+	// uses the signing migration service instead. A failure is not fatal: the
+	// controller keeps signing with its local key and retries on the next start.
+	if !cfg.HA.IsClusterMode() {
+		adoptSingleNodeSigningIdentity(context.Background(), certManager, auditManager, logger)
+	}
+	if cfg.SecurityProfile == config.SecurityProfilePublicBeta {
+		if err := validatePublicBetaControllerRoots(certManager, time.Now()); err != nil {
+			return nil, fmt.Errorf("public-beta signing roots are invalid: %w", err)
+		}
+	}
+
+	// Reject legacy unified-mode config and block on legacy cert types in store
+	if err := cfg.Certificate.ValidateCertificateArchitecture(); err != nil {
+		return nil, err
+	}
+	if err := certManager.CheckForLegacyCertificates(); err != nil {
+		return nil, err
+	}
+	return certManager, nil
+}
+
+// ensureSeparatedCertificates ensures the purpose-specific certificates exist
+// (idempotent first-boot generation). initialization.TransportCertSANs merges
+// transport defaults, operator-configured SANs (server + internal blocks), and
+// CFGMS_EXTERNAL_HOSTNAME so stewards can verify the cert by external hostname.
+// Shared with initialization.Run so that --init mints the cert with the same SAN
+// set this startup path would generate.
+func ensureSeparatedCertificates(cfg *config.Config, logger logging.Logger, certManager *cert.Manager) error {
+	logger.Info("Ensuring separated certificates (internal mTLS + config signing)...")
+	dnsNames, ipAddresses := initialization.TransportCertSANs(cfg)
+	internalCfg := &cert.ServerCertConfig{
+		CommonName:   "cfgms-internal",
+		DNSNames:     dnsNames,
+		IPAddresses:  ipAddresses,
+		ValidityDays: 365,
+	}
+	if cfg.Certificate.Internal != nil && cfg.Certificate.Internal.CommonName != "" {
+		internalCfg.CommonName = cfg.Certificate.Internal.CommonName
+	}
+	if cfg.Certificate.InternalCertValidityDays > 0 {
+		internalCfg.ValidityDays = cfg.Certificate.InternalCertValidityDays
+	}
+
+	signingCfg := &cert.SigningCertConfig{
+		CommonName:   "cfgms-config-signer",
+		ValidityDays: 1095,
+		KeySize:      4096,
+	}
+	if cfg.Certificate.Signing != nil {
+		if cfg.Certificate.Signing.CommonName != "" {
+			signingCfg.CommonName = cfg.Certificate.Signing.CommonName
+		}
+		if cfg.Certificate.Signing.Organization != "" {
+			signingCfg.Organization = cfg.Certificate.Signing.Organization
+		}
+	}
+	if cfg.Certificate.SigningCertValidityDays > 0 {
+		signingCfg.ValidityDays = cfg.Certificate.SigningCertValidityDays
+	}
+
+	if err := certManager.EnsureSeparatedCertificates(internalCfg, signingCfg); err != nil {
+		return fmt.Errorf("failed to ensure separated certificates: %w", err)
+	}
+	logger.Info("Separated certificates ensured (internal mTLS + config signing)")
+	return nil
+}
+
+// New creates a new server instance
+func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
+	if cfg == nil {
+		return nil, ErrNilConfig
+	}
+	if err := cfg.ValidateExecutionSecurity(); err != nil {
+		return nil, fmt.Errorf("execution security validation failed: %w", err)
+	}
+
+	// Validate transport config early: refuse to start if 0.0.0.0 bind has no external address.
+	if cfg.Transport != nil && strings.HasPrefix(cfg.Transport.ListenAddr, "0.0.0.0") {
+		externalAddr := cfg.Transport.ExternalAddress
+		if externalAddr == "" {
+			externalAddr = os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
+		}
+		if externalAddr == "" {
+			return nil, fmt.Errorf("transport.listen_addr binds 0.0.0.0 but no external address is configured; set transport.external_address in controller.cfg or CFGMS_EXTERNAL_HOSTNAME env var")
+		}
+	}
+
+	logger.Info("Config validated, proceeding with storage initialization...")
+
+	// From the moment openStorageManager successfully constructs a
+	// storageManager, New holds open SQLite/Postgres handles. Every remaining
+	// failure returns without a Server, so nothing would ever call Stop to
+	// release them — the handles would leak for the process's life. On Windows
+	// that also pins the database files, so a caller cannot delete the data
+	// directory of a controller that refused to start. The defer below is
+	// declared before openStorageManager (not after) and each of its branches registers its
+	// storageManager immediately after construction succeeds — including the
+	// cluster branch's assertClusterBackendsReady check, which can fail before
+	// any other code runs — so every post-construction failure path is covered.
+	constructed := false
+	var openedStores openedStoreList
+	defer func() {
+		if constructed {
+			return
+		}
+		// Reverse order, so a store closes before anything it was layered onto.
+		for i := len(openedStores) - 1; i >= 0; i-- {
+			if closeErr := openedStores[i](); closeErr != nil {
+				logger.Warn("Failed to release storage after controller initialization failed",
+					"error", closeErr)
+			}
+		}
+	}()
+
+	storageManager, storageErr := openStorageManager(cfg, logger, &openedStores)
+	if storageErr != nil {
+		return nil, storageErr
+	}
+
+	absentCaps, requirementsErr := checkStorageRequirements(cfg, logger, storageManager)
+	if requirementsErr != nil {
+		return nil, requirementsErr
+	}
+	recordClusterConfigSignal(cfg, logger, storageManager)
+
+	wormAuditStore, auditSinkErr := resolveAuditSink(cfg, logger, storageManager)
+	if auditSinkErr != nil {
+		return nil, auditSinkErr
+	}
+
+	rbacManager, auditManager, rbacAuditErr := newRBACAndAuditManagers(cfg, logger, storageManager)
+	if rbacAuditErr != nil {
+		return nil, rbacAuditErr
+	}
+
+	tenantManager, tenantErr := newTenantManager(cfg, storageManager, rbacManager, auditManager)
+	if tenantErr != nil {
+		return nil, tenantErr
+	}
+
+	// Detect HA cluster mode from cfg.HA (populated by LoadWithPath from ha.mode YAML
+	// key and CFGMS_HA_MODE env var). This is the single source of truth for mode
+	// selection; the separate haEarlyCfg.LoadFromEnvironment() path is no longer needed
+	// because LoadWithPath already applies env-var overrides to cfg.HA (Issue #2119).
+	isClusterMode := cfg.HA.IsClusterMode()
+
+	dnaStorageManager := newDNAStorageManager(cfg, logger, isClusterMode, &openedStores)
+
+	controllerService, tagStoreInstance, controllerServiceErr := newControllerService(cfg, logger, storageManager, tenantManager, dnaStorageManager, &openedStores)
+	if controllerServiceErr != nil {
+		return nil, controllerServiceErr
+	}
+
+	egProvider, routerSecretStore, directoryManager, graphErr := newEntityGraphAndDirectory(cfg, logger, controllerService, &openedStores)
+	if graphErr != nil {
+		return nil, graphErr
+	}
+
+	configService, configServiceErr := newConfigurationService(cfg, logger, storageManager, controllerService, routerSecretStore)
+	if configServiceErr != nil {
+		return nil, configServiceErr
+	}
+	configSyncService, rootTenantID := newConfigSyncService(logger, storageManager, tenantManager, auditManager, configService)
 
 	// Create the RBAC service
 	rbacService := service.NewRBACService(rbacManager)
 
 	// Initialize certificate manager if enabled
-	var certManager *cert.Manager
-	var certProvisioningService *service.CertificateProvisioningService
-	var signingMigrationSvc *service.SigningMigrationService
-	if cfg.Certificate != nil && cfg.Certificate.EnableCertManagement {
-		// Init guard: controller must be initialized before normal startup
-		caPath := cfg.Certificate.CAPath
-		if !initialization.IsInitialized(caPath) {
-			if initialization.CAFilesExist(caPath) {
-				// Legacy: existing CA files but no marker — auto-create marker for backward compat
-				logger.Info("Legacy CA detected without init marker, creating marker for backward compatibility", "ca_path", caPath)
-				if err := initialization.CreateLegacyMarker(caPath); err != nil {
-					return nil, fmt.Errorf("failed to create legacy init marker: %w", err)
-				}
-			} else {
-				// Not initialized — refuse to start
-				return nil, ErrNotInitialized
-			}
-		}
-
-		var err error
-		certManager, err = loadExistingCertificateManager(cfg, storageManager, logger)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load certificate manager: %w", err)
-		}
-		// Issue #4864: a single-node controller that predates the signing key store
-		// moves its existing signing certificate and key into the store under the
-		// same serial, before anything provisions a signing certificate. A cluster
-		// uses the signing migration service instead. A failure is not fatal: the
-		// controller keeps signing with its local key and retries on the next start.
-		if !cfg.HA.IsClusterMode() {
-			adoptSingleNodeSigningIdentity(context.Background(), certManager, auditManager, logger)
-		}
-		if cfg.SecurityProfile == config.SecurityProfilePublicBeta {
-			if err := validatePublicBetaControllerRoots(certManager, time.Now()); err != nil {
-				return nil, fmt.Errorf("public-beta signing roots are invalid: %w", err)
-			}
-		}
-
-		// Reject legacy unified-mode config and block on legacy cert types in store
-		if err := cfg.Certificate.ValidateCertificateArchitecture(); err != nil {
-			return nil, err
-		}
-		if err := certManager.CheckForLegacyCertificates(); err != nil {
-			return nil, err
-		}
-
-		// Ensure purpose-specific certificates exist (idempotent first-boot generation).
-		// initialization.TransportCertSANs merges transport defaults, operator-configured
-		// SANs (server + internal blocks), and CFGMS_EXTERNAL_HOSTNAME so stewards can
-		// verify the cert by external hostname. Shared with initialization.Run so that
-		// --init mints the cert with the same SAN set this startup path would generate.
-		logger.Info("Ensuring separated certificates (internal mTLS + config signing)...")
-		dnsNames, ipAddresses := initialization.TransportCertSANs(cfg)
-		internalCfg := &cert.ServerCertConfig{
-			CommonName:   "cfgms-internal",
-			DNSNames:     dnsNames,
-			IPAddresses:  ipAddresses,
-			ValidityDays: 365,
-		}
-		if cfg.Certificate.Internal != nil && cfg.Certificate.Internal.CommonName != "" {
-			internalCfg.CommonName = cfg.Certificate.Internal.CommonName
-		}
-		if cfg.Certificate.InternalCertValidityDays > 0 {
-			internalCfg.ValidityDays = cfg.Certificate.InternalCertValidityDays
-		}
-
-		signingCfg := &cert.SigningCertConfig{
-			CommonName:   "cfgms-config-signer",
-			ValidityDays: 1095,
-			KeySize:      4096,
-		}
-		if cfg.Certificate.Signing != nil {
-			if cfg.Certificate.Signing.CommonName != "" {
-				signingCfg.CommonName = cfg.Certificate.Signing.CommonName
-			}
-			if cfg.Certificate.Signing.Organization != "" {
-				signingCfg.Organization = cfg.Certificate.Signing.Organization
-			}
-		}
-		if cfg.Certificate.SigningCertValidityDays > 0 {
-			signingCfg.ValidityDays = cfg.Certificate.SigningCertValidityDays
-		}
-
-		if err := certManager.EnsureSeparatedCertificates(internalCfg, signingCfg); err != nil {
-			return nil, fmt.Errorf("failed to ensure separated certificates: %w", err)
-		}
-		logger.Info("Separated certificates ensured (internal mTLS + config signing)")
-
-		// Issue #4796: a cluster-mode node imports its node-local signing
-		// certificates into the shared store's migration namespace, promotes the
-		// elected serial, and removes verified local keys. A failure here is not
-		// fatal: the node keeps signing under its resolved identity and the
-		// background pass started with the server retries.
-		signingMigrationSvc = service.NewSigningMigrationService(certManager, logger)
-		signingMigrationSvc.SetAuditManager(auditManager)
-		if err := signingMigrationSvc.Run(context.Background()); err != nil {
-			logger.Warn("Signing identity migration pass failed at startup",
-				"error", logging.SanitizeLogValue(err.Error()))
-		}
-
-		// Create certificate provisioning service
-		certProvisioningService = service.NewCertificateProvisioningService(certManager, logger)
-		certProvisioningService.SetTenantAncestry(tenantManager.IsTenantAncestor)
-		if cfg.Certificate.ClientCertValidityDays > 0 {
-			certProvisioningService.SetCertificateDefaults(
-				cfg.Certificate.ClientCertValidityDays,
-				cfg.Certificate.Server.Organization,
-			)
-		}
+	certManager, certProvisioningService, signingMigrationSvc, certErr := newCertificateServices(cfg, logger, storageManager, tenantManager, auditManager)
+	if certErr != nil {
+		return nil, certErr
 	}
 
 	// Initialize HA manager.
