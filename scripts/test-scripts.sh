@@ -2417,6 +2417,346 @@ STUB
     log_pass "test-framework-api-sharded and the macOS shard groups: injection payloads, non-integer, zero and out-of-range shard values all fail closed; valid counts still run"
 }
 
+# Acceptance rule for a skipped macOS leg at the PR-side Build Gate (Issue
+# #5974). Table-driven over scripts/macos-gate-rule.sh, the script
+# build-gate-pr-stub calls — plus a check that the job's run: block calls it for
+# all four macOS legs, so removing the call (or the script) fails here.
+test_macos_gate_rule() {
+    log_test "Testing macos-gate-rule.sh: skipped macOS legs are accepted only when changes succeeded and macos is exactly false..."
+
+    local rule=scripts/macos-gate-rule.sh
+    if [[ ! -f "$rule" ]]; then
+        log_fail "$rule is missing"
+        return
+    fi
+
+    # changes_result|macos_output|leg_result|expected (pass|fail)
+    local -a table=(
+        "success|false|skipped|pass"
+        "success|true|success|pass"
+        "success|false|success|pass"
+        "success||skipped|fail"
+        "success|maybe|skipped|fail"
+        "failure|false|skipped|fail"
+        "cancelled||skipped|fail"
+        "success|true|skipped|fail"
+        "success|true|failure|fail"
+        "success|false|failure|fail"
+        "success|true|cancelled|fail"
+    )
+    local row changes macos leg want rc
+    for row in "${table[@]}"; do
+        IFS='|' read -r changes macos leg want <<< "$row"
+        rc=0
+        bash "$rule" "$changes" "$macos" "$leg" >/dev/null 2>&1 || rc=$?
+        if [[ "$want" == "pass" && $rc -ne 0 ]] || [[ "$want" == "fail" && $rc -eq 0 ]]; then
+            log_fail "macos-gate-rule.sh changes='${changes}' macos='${macos}' leg='${leg}': want ${want}, exit ${rc}"
+            return
+        fi
+    done
+
+    local wf=.github/workflows/cross-platform-build-pr.yml run_block
+    run_block=$(awk '/^  build-gate-pr-stub:/ { on = 1 } on' "$wf")
+    if [[ -z "$run_block" ]]; then
+        log_fail "build-gate-pr-stub not found in $wf"
+        return
+    fi
+    local leg_var
+    for leg_var in MACOS_PROVIDERS_RESULT MACOS_STEWARD_RESULT MACOS_REST_1_RESULT MACOS_REST_2_RESULT; do
+        if ! grep -qF "\"\$${leg_var}\"" <<< "$run_block"; then
+            log_fail "build-gate-pr-stub does not check ${leg_var}"
+            return
+        fi
+    done
+    # The four legs sit in their own loop whose body calls the rule script;
+    # none of them may also sit in the generic loop that accepts a skipped
+    # result on any docs-only PR, or the rule would be bypassed.
+    local macos_loop_re='for result in "\$MACOS_PROVIDERS_RESULT" "\$MACOS_STEWARD_RESULT" "\$MACOS_REST_1_RESULT" "\$MACOS_REST_2_RESULT"; do'
+    if ! grep -A2 -E "$macos_loop_re" <<< "$run_block" | grep -qE 'macos-gate-rule\.sh "\$CHANGES_RESULT" "\$MACOS_CHANGES" "\$result"'; then
+        log_fail "the four macOS legs are not each passed to macos-gate-rule.sh (changes result, macos output, leg result) in one loop"
+        return
+    fi
+    if grep -E '^[[:space:]]*for result in ' <<< "$run_block" | grep -vE "$macos_loop_re" | grep -qE 'MACOS_(PROVIDERS|STEWARD|REST_1|REST_2)_RESULT'; then
+        log_fail "a macOS leg is also checked by another loop in build-gate-pr-stub"
+        return
+    fi
+    if ! grep -q 'MACOS_CHANGES: \${{ needs.changes.outputs.macos }}' <<< "$run_block"; then
+        log_fail "build-gate-pr-stub does not pass needs.changes.outputs.macos through env:"
+        return
+    fi
+
+    # The four legs themselves are gated on the macos output; the Windows and
+    # e2e legs still on code.
+    local leg
+    for leg in macos-providers macos-steward macos-rest-1 macos-rest-2; do
+        if ! awk -v job="  ${leg}:" '$0 == job { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on && /^    if:/ { print }' "$wf" \
+            | grep -qF "needs.changes.outputs.macos == 'true'"; then
+            log_fail "$leg is not gated on needs.changes.outputs.macos == 'true'"
+            return
+        fi
+    done
+    for leg in windows-api windows-controller windows-steward windows-cmd windows-rest e2e; do
+        if ! awk -v job="  ${leg}:" '$0 == job { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on && /^    if:/ { print }' "$wf" \
+            | grep -qF "needs.changes.outputs.code == 'true'"; then
+            log_fail "$leg is no longer gated on needs.changes.outputs.code == 'true'"
+            return
+        fi
+    done
+
+    log_pass "macos-gate-rule.sh: 11-row table holds; build-gate-pr-stub calls it for all four macOS legs and the legs are gated on the macos output"
+}
+
+# The macOS legs are skipped on a PR outside the macOS package closure, so the
+# Linux compile job is what still fails a PR that breaks only the darwin test
+# build (Issue #5974). The Build Gate must need it, check its result in the
+# leg loop and the job must run `make test-macos-compile`.
+test_build_gate_requires_macos_test_compile() {
+    log_test "Testing build-gate-pr-stub needs macos-test-compile, checks it, and the job runs make test-macos-compile..."
+
+    local wf=.github/workflows/cross-platform-build-pr.yml
+    local gate job
+    gate=$(awk '/^  build-gate-pr-stub:/ { on = 1 } on' "$wf")
+    job=$(awk '$0 == "  macos-test-compile:" { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on' "$wf")
+    if [[ -z "$gate" || -z "$job" ]]; then
+        log_fail "build-gate-pr-stub or macos-test-compile not found in $wf"
+        return
+    fi
+
+    if ! grep -qE '^      - macos-test-compile$' <<< "$gate"; then
+        log_fail "build-gate-pr-stub does not list macos-test-compile in needs:"
+        return
+    fi
+    if ! grep -qF 'MACOS_COMPILE_RESULT: ${{ needs.macos-test-compile.result }}' <<< "$gate"; then
+        log_fail "build-gate-pr-stub does not read needs.macos-test-compile.result"
+        return
+    fi
+    # It sits in the loop that accepts skipped only on a docs-only PR.
+    if ! grep -E '^[[:space:]]*for result in ' <<< "$gate" | grep -qF '"$MACOS_COMPILE_RESULT"'; then
+        log_fail "MACOS_COMPILE_RESULT is not in build-gate-pr-stub's leg loop"
+        return
+    fi
+    if ! grep -qE '^    if: always\(\) && needs\.changes\.outputs\.code == .true.$' <<< "$job"; then
+        log_fail "macos-test-compile is not gated on needs.changes.outputs.code == 'true'"
+        return
+    fi
+    if ! grep -qE '^      run: make test-macos-compile$' <<< "$job"; then
+        log_fail "macos-test-compile does not run make test-macos-compile"
+        return
+    fi
+    if ! grep -qE '^    runs-on: ubuntu-latest$' <<< "$job"; then
+        log_fail "macos-test-compile does not run on ubuntu-latest"
+        return
+    fi
+    if ! grep -qE '^test-macos-compile:' Makefile || ! grep -A12 -E '^test-macos-compile:' Makefile | grep -q 'GOOS=darwin GOARCH=arm64 go test'; then
+        log_fail "Makefile target test-macos-compile does not compile the test binaries with GOOS=darwin GOARCH=arm64 go test"
+        return
+    fi
+
+    log_pass "build-gate-pr-stub needs macos-test-compile and checks its result; the job runs make test-macos-compile on Linux"
+}
+
+# scripts/macos-pr-filter.sh against the real repository (Issue #5974): the
+# four macOS legs may be skipped only when no changed file is in the closure.
+test_macos_pr_filter() {
+    log_test "Testing macos-pr-filter.sh against the real package closure..."
+
+    local filter=scripts/macos-pr-filter.sh
+    if [[ ! -f "$filter" ]]; then
+        log_fail "$filter is missing"
+        return
+    fi
+
+    local tmp
+    tmp=$(mktemp -d)
+
+    # decide <name> <file>...: prints the filter's stdout for that changed set.
+    decide() {
+        local list="$tmp/files.txt"
+        printf '%s\n' "$@" > "$list"
+        bash "$filter" --files "$list" 2>/dev/null
+    }
+
+    local mod=github.com/cfgis/cfgms/
+    local shipped closure
+    shipped=$(bash "$filter" --print-shipped-closure 2>/dev/null) || shipped=""
+    closure=$(bash "$filter" --print-closure 2>/dev/null) || closure=""
+    if [[ -z "$shipped" || -z "$closure" ]]; then
+        log_fail "the filter printed no closure (shipped: $(echo "$shipped" | wc -l), full: $(echo "$closure" | wc -l))"
+        rm -rf "$tmp"
+        return
+    fi
+
+    # features/controller/api must be reached only through test imports, and
+    # features/controller/fleet must be in step 1; the cases below rely on both.
+    local test_deps
+    test_deps=$(GOOS=darwin go list -deps -test -f '{{.ImportPath}}' $(GOOS=darwin go list -deps -f '{{if and (not .Standard) .Module}}{{if .Module.Main}}{{.ImportPath}}{{end}}{{end}}' ./cmd/steward ./cmd/cfgms-steward-launcher ./cmd/cfg) 2>/dev/null) || test_deps=""
+    if grep -qxF "features/controller/api" <<< "$shipped"; then
+        log_fail "features/controller/api is in step 1 (production imports); the controller-exclusion case no longer tests step 2"
+        rm -rf "$tmp"
+        return
+    fi
+    if ! grep -qxF "${mod}features/controller/api" <<< "$test_deps"; then
+        log_fail "features/controller/api is no longer reached through closure test imports; pick another controller package for this case"
+        rm -rf "$tmp"
+        return
+    fi
+    if ! grep -qxF "features/controller/fleet" <<< "$shipped"; then
+        log_fail "features/controller/fleet is not in step 1 any more; pick another production-imported controller package"
+        rm -rf "$tmp"
+        return
+    fi
+
+    local testdata_dir="" d
+    for d in $shipped; do
+        if [[ -d "$d/testdata" ]]; then
+            testdata_dir="$d"
+            break
+        fi
+    done
+    if [[ -z "$testdata_dir" ]]; then
+        log_fail "no closure package has a testdata/ directory to exercise the testdata rule"
+        rm -rf "$tmp"
+        return
+    fi
+
+    local out
+    check() {
+        local want="$1" label="$2"
+        shift 2
+        out=$(decide "$@") || out="<filter error>"
+        if [[ "$out" != "macos=${want}" ]]; then
+            log_fail "macos-pr-filter: ${label}: want macos=${want}, got '${out}'"
+            return 1
+        fi
+    }
+
+    check false "docs-only change" docs/development/ci-test-tiers.md docs/product/vision.md || { rm -rf "$tmp"; return; }
+    check true "Go file in pkg/cert" pkg/cert/zz_changed.go || { rm -rf "$tmp"; return; }
+    check true "non-Go file in a closure package directory" pkg/cert/zz_changed.txt || { rm -rf "$tmp"; return; }
+    check true "file under a closure package's testdata/ (${testdata_dir})" "${testdata_dir}/testdata/zz/nested.json" || { rm -rf "$tmp"; return; }
+    check true "go.mod" go.mod || { rm -rf "$tmp"; return; }
+    check true "go.sum" go.sum || { rm -rf "$tmp"; return; }
+    check true "Makefile" Makefile || { rm -rf "$tmp"; return; }
+    check true "the PR workflow" .github/workflows/cross-platform-build-pr.yml || { rm -rf "$tmp"; return; }
+    check true "the filter script itself" scripts/macos-pr-filter.sh || { rm -rf "$tmp"; return; }
+    check false "Go file in features/controller/api (test-import only)" features/controller/api/zz_changed.go || { rm -rf "$tmp"; return; }
+    check true "Go file in features/controller/fleet (production import)" features/controller/fleet/zz_changed.go || { rm -rf "$tmp"; return; }
+    check true "docs plus one closure file" docs/a.md pkg/cert/zz_changed.go || { rm -rf "$tmp"; return; }
+
+    # Embedded files outside the package directory itself are triggers.
+    local embed_file
+    embed_file=$(GOOS=darwin go list -deps -f '{{if and (not .Standard) .Module}}{{if .Module.Main}}{{$d := .Dir}}{{range .EmbedFiles}}{{$d}}/{{.}}{{"\n"}}{{end}}{{end}}{{end}}' ./cmd/steward ./cmd/cfgms-steward-launcher ./cmd/cfg 2>/dev/null \
+        | grep -E "^$PWD/.+/.+/" | head -1 | sed "s#^$PWD/##") || embed_file=""
+    if [[ -n "$embed_file" ]]; then
+        check true "embedded file ${embed_file}" "$embed_file" || { rm -rf "$tmp"; return; }
+    fi
+
+    # Renamed files: the pre-rename name counts, even when the new name is docs.
+    printf 'docs/moved.md\n' > "$tmp/files.txt"
+    printf 'pkg/cert/zz_old_name.go\n' > "$tmp/renamed.txt"
+    out=$(bash "$filter" --files "$tmp/files.txt" --renamed "$tmp/renamed.txt" 2>/dev/null) || out="<filter error>"
+    if [[ "$out" != "macos=true" ]]; then
+        log_fail "macos-pr-filter: a rename out of a closure package: want macos=true, got '${out}'"
+        rm -rf "$tmp"
+        return
+    fi
+    printf 'docs/old.md\n' > "$tmp/renamed.txt"
+    out=$(bash "$filter" --files "$tmp/files.txt" --renamed "$tmp/renamed.txt" 2>/dev/null) || out="<filter error>"
+    if [[ "$out" != "macos=false" ]]; then
+        log_fail "macos-pr-filter: a docs-to-docs rename: want macos=false, got '${out}'"
+        rm -rf "$tmp"
+        return
+    fi
+
+    # Fail-closed defects: every one must resolve to macos=true.
+    : > "$tmp/empty.txt"
+    out=$(bash "$filter" --files "$tmp/empty.txt" 2>/dev/null) || out="<filter error>"
+    if [[ "$out" != "macos=true" ]]; then
+        log_fail "macos-pr-filter: an empty input list: want macos=true, got '${out}'"
+        rm -rf "$tmp"
+        return
+    fi
+    out=$(bash "$filter" --files "$tmp/does-not-exist.txt" 2>/dev/null) || out="<filter error>"
+    if [[ "$out" != "macos=true" ]]; then
+        log_fail "macos-pr-filter: an unreadable input list: want macos=true, got '${out}'"
+        rm -rf "$tmp"
+        return
+    fi
+    out=$(bash "$filter" 2>/dev/null) || out="<filter error>"
+    if [[ "$out" != "macos=true" ]]; then
+        log_fail "macos-pr-filter: no --files argument: want macos=true, got '${out}'"
+        rm -rf "$tmp"
+        return
+    fi
+    # A forced go list failure: a module root with the Makefile roots but no
+    # go.mod, so `go list` itself errors.
+    mkdir -p "$tmp/nomod"
+    cp Makefile "$tmp/nomod/Makefile"
+    printf 'docs/a.md\n' > "$tmp/files.txt"
+    out=$(bash "$filter" --files "$tmp/files.txt" --root "$tmp/nomod" 2>/dev/null) || out="<filter error>"
+    if [[ "$out" != "macos=true" ]]; then
+        log_fail "macos-pr-filter: a go list failure on a docs-only list: want macos=true, got '${out}'"
+        rm -rf "$tmp"
+        return
+    fi
+    out=$(bash "$filter" --files "$tmp/files.txt" --root "$tmp/missing-dir" 2>/dev/null) || out="<filter error>"
+    if [[ "$out" != "macos=true" ]]; then
+        log_fail "macos-pr-filter: a nonexistent module root: want macos=true, got '${out}'"
+        rm -rf "$tmp"
+        return
+    fi
+    out=$(bash "$filter" --bogus-flag 2>/dev/null) || out="<filter error>"
+    if [[ "$out" != "macos=true" ]]; then
+        log_fail "macos-pr-filter: an unknown flag: want macos=true, got '${out}'"
+        rm -rf "$tmp"
+        return
+    fi
+    # Nothing but the result line may reach stdout, which the workflow appends
+    # to $GITHUB_OUTPUT.
+    out=$(bash "$filter" --files "$tmp/files.txt" 2>/dev/null)
+    if [[ "$(echo "$out" | wc -l | tr -d ' ')" != "1" ]]; then
+        log_fail "macos-pr-filter: stdout is not exactly one line: '${out}'"
+        rm -rf "$tmp"
+        return
+    fi
+
+    # The closure must contain every package the macOS legs test.
+    local legs_pkgs missing="" p rel
+    legs_pkgs=$(GOOS=darwin go list -deps -f '{{if and (not .Standard) (or .TestGoFiles .XTestGoFiles)}}{{.ImportPath}}{{end}}' \
+        ./cmd/steward ./cmd/cfgms-steward-launcher ./cmd/cfg 2>/dev/null | grep -E "^${mod}") || legs_pkgs=""
+    if [[ -z "$legs_pkgs" ]]; then
+        log_fail "GOOS=darwin go list produced no macOS-shipped test packages"
+        rm -rf "$tmp"
+        return
+    fi
+    for p in $legs_pkgs; do
+        rel="${p#"$mod"}"
+        grep -qxF "$rel" <<< "$closure" || missing+="$rel "
+    done
+    if [[ -n "$missing" ]]; then
+        log_fail "package(s) tested by the macOS legs are outside the filter's closure: $missing"
+        rm -rf "$tmp"
+        return
+    fi
+
+    # The roots are defined once, in the Makefile, and used by both.
+    if ! grep -qE '^MACOS_SHIPPED_ROOTS = \./cmd/steward \./cmd/cfgms-steward-launcher \./cmd/cfg$' Makefile \
+        || ! grep -E '^MACOS_SHIPPED_PKGS = ' Makefile | grep -qF '$(MACOS_SHIPPED_ROOTS)' \
+        || grep -E '^MACOS_SHIPPED_PKGS = ' Makefile | grep -qF './cmd/'; then
+        log_fail "MACOS_SHIPPED_PKGS must use the MACOS_SHIPPED_ROOTS variable and not repeat the binary roots"
+        rm -rf "$tmp"
+        return
+    fi
+    if grep -vE '^[[:space:]]*#' "$filter" | grep -qE '\./cmd/(steward|cfg)'; then
+        log_fail "$filter hardcodes a binary root instead of reading MACOS_SHIPPED_ROOTS from the Makefile"
+        rm -rf "$tmp"
+        return
+    fi
+
+    rm -rf "$tmp"
+    log_pass "macos-pr-filter.sh: closure of $(echo "$closure" | wc -l | tr -d ' ') dirs; docs skip, closure/testdata/go.mod trigger, controller test-only skips, every defect fails closed"
+}
+
 # Regression guard for the macOS unit-test legs (Issue #5746): the union of the
 # test-go-group-macos-* package lists must equal the in-module packages with
 # test files in the GOOS=darwin dependency closure of the three macOS-shipped
@@ -2977,6 +3317,9 @@ DISPATCH_TABLE=(
     "test_api_shard_aggregation_fails_closed:core"
     "test_api_shard_count_rejects_non_integer:core"
     "test_macos_groups_cover_exactly_shipped_packages:core"
+    "test_macos_gate_rule:core"
+    "test_macos_pr_filter:core"
+    "test_build_gate_requires_macos_test_compile:core"
     "test_windows_steward_groups_cover_exactly_steward_and_cmd:core"
     "test_queue_native_build_runs_only_shard_1_content:core"
     "test_no_tracked_file_mutation:core"

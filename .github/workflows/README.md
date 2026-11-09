@@ -78,14 +78,17 @@ so it can post nothing in the queue, not even a skipped run.
 
 **Jobs**:
 - `cross-compile-check` — `make build-cross-validate` for all targets (Linux/macOS/Windows AMD64+ARM64)
-- `build-gate-pr-stub` — emits the PR-side `Build Gate` context from the compile check
+- `changes` — classifies the PR's files. Emits `code` (not documentation-only; gates the Windows, e2e and compile legs) and `macos` (Issue #5974)
+- `macos-test-compile` — Linux, every code PR: `make test-macos-compile` compiles and links the macOS-shipped test binaries for `darwin/arm64` without running them, so a darwin-only test-build break fails the PR even when the macOS legs are skipped
+- `macos-providers`, `macos-steward`, `macos-rest-1`, `macos-rest-2` — native macOS unit tests, run only when `changes.outputs.macos == 'true'`. `scripts/macos-pr-filter.sh` sets it to `false` only when it ran to completion and no changed file is in the macOS package closure (the `GOOS=darwin` dependency closure of the macOS binaries, their test-only imports except controller-only packages, their directories, `testdata/` trees and embedded files). Any defect in the file list or in `go list` resolves to `true` (fail closed: macOS does not run in the merge queue)
+- `build-gate-pr-stub` — emits the PR-side `Build Gate` context; accepts a skipped macOS leg only through `scripts/macos-gate-rule.sh` (`changes` succeeded and `macos` exactly `false`)
 
 #### `cross-platform-build.yml` — Cross-Platform Build Validation
 
 **Triggers**: Merge Group, Manual dispatch — deliberately no `pull_request`.
 
 **Jobs**:
-- `native-builds` — Linux only, one job (Issues #4220, #5972): `make build` plus the api and controller-core `make` group targets, run once against the merge commit to catch a PR that breaks only in combination with what merged ahead of it. The heavy-providers and rest groups run on pull requests only (`test-suite.yml`). Windows and macOS run on the PR side only (`cross-platform-build-pr.yml`, Issue #4219).
+- `native-builds` — Linux only, one job (Issues #4220, #5972): `make build` plus the api and controller-core `make` group targets, run once against the merge commit to catch a PR that breaks only in combination with what merged ahead of it. The heavy-providers and rest groups run on pull requests only (`test-suite.yml`). Windows and macOS run on the PR side only (`cross-platform-build-pr.yml`, Issue #4219). The macOS legs are skipped when the PR does not touch the macOS package closure (see `cross-platform-build-pr.yml` above, Issue #5974).
 - `postgres-integration` — the Postgres-backed suites no PR job can run (the `features/controller/server` database subtests, and the integration-tagged cert and database-provider suites); the part of the former `Integration Tests (Docker)` job no other job repeats.
 - `build-gate` — emits the queue-side `Build Gate` context; `needs: [native-builds, postgres-integration]`, so it cannot report before they finish.
 
