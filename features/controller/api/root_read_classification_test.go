@@ -57,6 +57,7 @@ var rootReadClassification = map[string]rootReadEntry{
 	"/api/v1/api-keys":                                               {rootReadCrossing, ""},
 	"/api/v1/api-keys/{id}":                                          {rootReadCrossing, ""},
 	"/api/v1/audit/entries":                                          {rootReadCrossing, ""},
+	"/api/v1/automation/grants":                                      {rootReadOwnScope, ""},
 	"/api/v1/automation/libraries/{kind}/mode":                       {rootReadOwnScope, ""},
 	"/api/v1/automation/runs/{run_id}/results/{result_run_id}":       {rootReadOwnScope, ""},
 	"/api/v1/automation/runs/{run_id}/results/{result_run_id}/jobs":  {rootReadOwnScope, ""},
