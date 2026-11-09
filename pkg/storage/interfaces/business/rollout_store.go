@@ -69,6 +69,12 @@ type RolloutRecord struct {
 	// Error holds the halt or failure reason; empty when Status is in-progress or completed.
 	Error string
 
+	// OwnerNodeID is the ID of the controller node whose goroutine is advancing this
+	// rollout. Empty when the controller runs without an HA manager. A node that
+	// restarts uses it to find the in-progress rollouts whose advancing goroutine
+	// died with the previous process; it must never act on a peer's rollouts.
+	OwnerNodeID string
+
 	// DeferredStewards is the list of steward IDs that failed during this rollout
 	// and are queued for a subsequent retry pass. This list grows monotonically;
 	// it is never cleared automatically.
@@ -107,6 +113,12 @@ type RolloutStore interface {
 	// ListRolloutsByTenant returns all rollout records for the given tenantID.
 	// Returns an empty slice (not an error) when no records exist.
 	ListRolloutsByTenant(ctx context.Context, tenantID string) ([]*RolloutRecord, error)
+
+	// ListInProgressRollouts returns every rollout whose status is
+	// RolloutStatusInProgress, across all tenants. It exists for the startup sweep
+	// and must not be used to serve tenant-facing reads.
+	// Returns an empty slice (not an error) when none exist.
+	ListInProgressRollouts(ctx context.Context) ([]*RolloutRecord, error)
 
 	// HealthCheck verifies the store is reachable and operational.
 	HealthCheck(ctx context.Context) error

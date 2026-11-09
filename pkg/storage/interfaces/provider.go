@@ -145,6 +145,18 @@ type ScriptRunStoreCreator interface {
 	CreateScriptRunStore(config map[string]interface{}) (business.ScriptRunStore, error)
 }
 
+// RolloutStoreCreator is an optional StorageProvider extension for backends that
+// can hold ring-advance rollout records shared across controller nodes (Issue
+// #5976). Cluster mode uses it so a rollout started on one node is readable and
+// haltable from every node and survives a controller restart. Backends that do
+// not implement it leave the store nil and POST /api/v1/rollout answers 503
+// ROLLOUT_STORE_UNAVAILABLE.
+//
+//duplication:justified pkg/storage/interfaces/provider.go -- same optional-creator interface shape as ScriptRunStoreCreator and its siblings; each store keeps its own creator so providers opt in independently
+type RolloutStoreCreator interface {
+	CreateRolloutStore(config map[string]interface{}) (business.RolloutStore, error)
+}
+
 // ExecutionQueueStoreCreator is an optional StorageProvider extension for
 // backends that can hold the execution queue shared across controller nodes
 // (Issue #4528), so the node holding a steward's session dispatches its work
@@ -819,6 +831,7 @@ type StorageManager struct {
 	leaseStore               business.LeaseStore                 // ADR-031 Decision 5: fenced singleton-claim leases
 	routingStore             business.RoutingStore               // ADR-031 Decision 3, Issue #3764: shared steward-routing table
 	scriptRunStore           business.ScriptRunStore             // Issue #4528: shared script runs (cluster mode)
+	rolloutStore             business.RolloutStore               // Issue #5976: shared ring-advance rollouts (cluster mode)
 	executionQueueStore      business.ExecutionQueueStore        // Issue #4528: shared execution queue (cluster mode)
 	nodeRegistryStore        business.NodeRegistryStore          // Issue #3763, ADR-031 Decision 5: post-Raft cluster membership
 	certRevocationStore      certinterfaces.RevocationStore      // Issue #3852, ADR-031: cluster-visible cert revocation list
@@ -1087,6 +1100,19 @@ func (sm *StorageManager) SetScriptRunStore(s business.ScriptRunStore) {
 	sm.scriptRunStore = s
 }
 
+// GetRolloutStore returns the shared rollout store (Issue #5976), or nil when
+// the provider does not implement RolloutStoreCreator.
+//
+//duplication:justified pkg/storage/interfaces/provider.go -- same Get/Set accessor pair as GetScriptRunStore and the other StorageManager stores; the fields are distinct typed interfaces
+func (sm *StorageManager) GetRolloutStore() business.RolloutStore {
+	return sm.rolloutStore
+}
+
+// SetRolloutStore wires the rollout store after construction.
+func (sm *StorageManager) SetRolloutStore(s business.RolloutStore) {
+	sm.rolloutStore = s
+}
+
 // GetExecutionQueueStore returns the shared execution queue store (Issue
 // #4528), or nil when the provider does not implement
 // ExecutionQueueStoreCreator.
@@ -1241,6 +1267,7 @@ func (sm *StorageManager) Close() error {
 		sm.signingTrustAckStore,
 		sm.rateCounterStore,
 		sm.scriptRunStore,
+		sm.rolloutStore,
 		sm.executionQueueStore,
 	}
 	var firstErr error
@@ -1370,13 +1397,14 @@ func wireClusterPolicyStores(w *storageWiring, sm *StorageManager, p StorageProv
 // cluster-visible (ADR-031 Decisions 1, 3 and 5): the nonce store (Issue
 // #3755), lease store (Issue #3756, the substrate pkg/ha's HasLeadership() and
 // GetTerm() run on, so a failure here must not be swallowed), routing store
-// (Issue #3764), the shared script run and execution queue stores (Issue #4528)
-// and the node registry store (Issue #3763).
+// (Issue #3764), the shared script run and execution queue stores (Issue #4528),
+// the rollout store (Issue #5976) and the node registry store (Issue #3763).
 func wireClusterSharedStores(w *storageWiring, sm *StorageManager, p StorageProvider, cfg map[string]interface{}) {
 	wireOptionalStore(w, p, &sm.nonceStore, clusterWiringPrefix+"nonce store", cfg, NonceStoreCreator.CreateNonceStore)
 	wireOptionalStore(w, p, &sm.leaseStore, clusterWiringPrefix+"lease store", cfg, LeaseStoreCreator.CreateLeaseStore)
 	wireOptionalStore(w, p, &sm.routingStore, clusterWiringPrefix+"routing store", cfg, RoutingStoreCreator.CreateRoutingStore)
 	wireOptionalStore(w, p, &sm.scriptRunStore, clusterWiringPrefix+"script run store", cfg, ScriptRunStoreCreator.CreateScriptRunStore)
+	wireOptionalStore(w, p, &sm.rolloutStore, clusterWiringPrefix+"rollout store", cfg, RolloutStoreCreator.CreateRolloutStore)
 	wireOptionalStore(w, p, &sm.executionQueueStore, clusterWiringPrefix+"execution queue store", cfg, ExecutionQueueStoreCreator.CreateExecutionQueueStore)
 	wireOptionalStore(w, p, &sm.nodeRegistryStore, clusterWiringPrefix+"node registry store", cfg, NodeRegistryStoreCreator.CreateNodeRegistryStore)
 }

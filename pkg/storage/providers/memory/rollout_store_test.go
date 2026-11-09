@@ -244,3 +244,9 @@ func TestRolloutStore_Memory_InitiatedByRoundTrips(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "admin-alice", got.InitiatedBy)
 }
+
+// TestRolloutStore_Memory_Contract runs the shared RolloutStore contract against
+// the in-memory store.
+func TestRolloutStore_Memory_Contract(t *testing.T) {
+	business.RolloutStoreContract(t, memory.NewRolloutStore())
+}

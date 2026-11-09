@@ -69,3 +69,11 @@ func newFlatFileRoutingStore(t *testing.T) business.RoutingStore {
 	require.NoError(t, err, "creating flat-file routing store")
 	return st
 }
+
+// newMemoryRolloutStore returns a real in-memory RolloutStore. The concrete
+// memoryprovider import is confined to this allowlisted */providers_test.go path
+// (see scripts/check-providers.sh) so the rollout wiring tests depend on
+// pkg/storage/interfaces only.
+func newMemoryRolloutStore() business.RolloutStore {
+	return memoryprovider.NewRolloutStore()
+}

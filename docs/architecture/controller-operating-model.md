@@ -706,19 +706,42 @@ Health metrics are computed live against the current ring for in-progress rollou
 
 #### Rollout restart behavior
 
-The ring-advance goroutine runs in memory. A controller restart stops that
-orchestration; the operator must re-issue the rollout. The current-ring
+The ring-advance goroutine runs in memory on the node that accepted the request.
+A controller restart stops that orchestration, and nothing resumes it
+automatically: the operator must re-issue the rollout. The current-ring
 `desired_version` update changes this process's configuration in memory, not a
-Git-backed configuration store. `RolloutStore` durably records the rollout and
-progress through the selected business-data provider; it is not a Git provider.
+Git-backed configuration store.
 
-After restart, re-issue `POST /api/v1/rollout` and inspect reported progress and
-endpoint versions. Health/soak checks run again. Do not infer automatic resume
-from a persisted rollout record or promise that only a soak interval is lost.
-The current implementation is `features/controller/api/handlers_rollout.go`
-(`runRollout`, `setRingDesiredVersion`). [ADR-008](decisions/008-durable-execution-substrate.md)
-records the durable execution direction; it does not establish implemented
-crash recovery for this goroutine.
+`RolloutStore` records the rollout durably. In cluster mode the shared database
+provider implements it (`cfgms_rollout_records`), so the record, its ring
+progress, halt metadata and deferred-steward list survive a restart and are
+visible from every node. Each record carries `OwnerNodeID`, the ID of the node
+advancing it. On startup a node halts the in-progress rollouts it owned itself,
+with the recorded reason `advancing node stopped` and a halt time; the sweep
+never touches a rollout owned by a peer node and makes no authority decision.
+The node ID is stable across restarts when it comes from `CFGMS_NODE_ID`, which
+the non-single HA modes require; a single-server controller that generates a
+random ID per start does not match its earlier records, so the sweep leaves
+them alone. A rollout whose owning node never returns is not halted by any
+other node: that needs a liveness decision under
+[ADR-029](decisions/029-controller-leadership-authority.md) or the node
+registry and is not implemented.
+
+Providers without a shared rollout store (the single-node SQLite and flat-file
+providers) leave the store unwired, and `POST /api/v1/rollout`,
+`GET /api/v1/rollout/{id}` and `POST /api/v1/rollout/{id}/halt` answer 503
+`ROLLOUT_STORE_UNAVAILABLE`.
+
+After a restart, inspect a halted rollout's reported progress and endpoint
+versions, then re-issue `POST /api/v1/rollout`; health/soak checks run again. Do
+not infer automatic resume from a persisted rollout record or promise that only
+a soak interval is lost. The current implementation is
+`features/controller/api/handlers_rollout.go` (`runRollout`, `setRingDesiredVersion`,
+`HaltOrphanedRollouts`) with startup wiring in
+`features/controller/server/rollout_wiring.go`.
+[ADR-008](decisions/008-durable-execution-substrate.md) records the durable
+execution direction; it does not establish implemented crash recovery for this
+goroutine.
 
 ### Config Signing
 
