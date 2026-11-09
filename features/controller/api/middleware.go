@@ -911,7 +911,7 @@ func (s *Server) isWithinTenantScope(ctx context.Context, callerTenant, resource
 }
 
 // selectorPathWithinCaller reports whether selectorPath is callerPath or beneath
-// it. It compares slash-separated fleet selector paths (pkg/fleet/selector Parse),
+// it. It compares slash-separated fleet selector paths (features/controller/fleet/selector Parse),
 // NOT tenant IDs; tenant containment goes through tenantSubtreeContains.
 func selectorPathWithinCaller(callerPath, selectorPath string) bool {
 	return selectorPath == callerPath || strings.HasPrefix(selectorPath, callerPath+"/") //architecture:allow-path-prefix -- selector path, not a tenant ID

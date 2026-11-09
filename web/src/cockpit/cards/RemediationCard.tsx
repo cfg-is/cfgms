@@ -140,7 +140,7 @@ const KIND_TO_TARGET_TYPE: Record<string, 'device'> = {
 // authority-name segment, and pkg/registration places no charset constraint on
 // steward/authority ids. The server-side selector DSL treats two of the
 // characters that survive as structure, not data —
-// pkg/fleet/selector/selector.go:177 splits an `id:` value on ',' into an OR set
+// features/controller/fleet/selector/selector.go:177 splits an `id:` value on ',' into an OR set
 // that features/controller/fleet/memory.go matches by any member, and the
 // unquoted-value scanner terminates the term at ' ', so the rest of the string
 // parses as further selector terms. An authority name of "a,b" or "x tag:prod"

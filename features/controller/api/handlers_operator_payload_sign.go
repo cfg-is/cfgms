@@ -100,7 +100,7 @@ func generateOperatorPayloadSignNonce() (string, error) {
 
 // OperatorPayloadSignBeginRequest is the JSON body for POST /api/v1/operator-payload/sign/begin.
 type OperatorPayloadSignBeginRequest struct {
-	// Selector is a pkg/fleet/selector expression resolved server-side into the frozen
+	// Selector is a features/controller/fleet/selector expression resolved server-side into the frozen
 	// Envelope.Targets list — never accepted as a pre-resolved target list from the client.
 	Selector string `json:"selector"`
 	Content  []byte `json:"content"`
