@@ -28,7 +28,7 @@ Three facts shape the decision:
 
 A script or workflow needs a per-action human tap to run or schedule, unless it is **pre-approved**. A pre-approved script or workflow can be run by an automation grant (§3) with no human present.
 
-A script **requests** pre-approval with a declaration in its header comment block. The declaration is a request. Whether it is enough to grant pre-approval depends on the library's approval mode (§2).
+A script **requests** pre-approval with a declaration in its header comment block. The declaration is a request. The declaration is required in every approval mode: content without it is never run by an automation grant, whatever its signature or approval state. Whether it is enough to grant pre-approval depends on the library's approval mode (§2).
 
 ### 2. Each content library has an approval mode
 

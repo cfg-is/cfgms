@@ -2478,6 +2478,8 @@ Trigger immediate execution of a workflow.
 
 **Authentication:** Required
 
+**Required permission:** `workflow:execute`, strong assurance with a presence tap for a human session. Saving a workflow (`POST /api/v1/workflows`, `PUT /api/v1/workflows/{id}`, `DELETE /api/v1/workflows/{id}`, permission `workflow:write`) takes the same tap. Scoped API keys and triggers need no tap. The steps of a running workflow take no per-step tap. A `script` step runs only from a version published with a tap; see [Workflow publication](#workflow-publication) and [Script step](#script-step).
+
 **Parameters:**
 
 - `id` (path): Workflow name
@@ -2925,6 +2927,226 @@ Get execution history for a trigger.
   "limit": 50
 }
 ```
+
+### Automation Grants and Approvals
+
+Automation grants let a machine principal run pre-approved scripts and workflow versions for one tenant per run, with no human present. The model is in the [controller operating model](../architecture/controller-operating-model.md#automation-grants-and-pre-approved-content-adr-036) and the threat model in the [automation grants security guide](../security/automation-grants.md). Every response uses the standard `{ "data": ..., "timestamp": ... }` envelope and the error format above.
+
+Two groups of routes exist. The **management routes** are for humans and are permission gated. The **run routes** are reachable only by a grant principal: a grant credential is refused with `403` (`AUTOMATION_ROUTE_DENIED`) on every other route, and a human credential has no run routes.
+
+The controller must have the automation grant store installed for the grant and run routes; without it the management routes answer `503` and a grant credential is refused with `401` (`INVALID_AUTOMATION_GRANT`).
+
+#### Grant management
+
+| Method and path | Permission | Assurance |
+|---|---|---|
+| `POST /api/v1/automation/grants` | `automation-grant:create` | strong, presence tap |
+| `GET /api/v1/automation/grants` | `automation-grant:read` | none beyond the permission |
+| `DELETE /api/v1/automation/grants/{id}` | `automation-grant:revoke` | strong, no tap |
+
+##### POST /api/v1/automation/grants
+
+Creates a grant. Body: `name` (required), `tenant_id` (optional; defaults to the caller's tenant; a root-scoped caller must supply it and passes the tenant-crossing rule for a client tenant) and `expires_at` (RFC 3339, required, in the future and at most 90 days ahead). Unknown fields are refused.
+
+`201 Created`, with `Cache-Control: no-store`:
+
+```json
+{
+  "data": {
+    "grant": {
+      "id": "3f9c...",
+      "tenant_id": "msp-a",
+      "name": "triage",
+      "created_by": "acct-123",
+      "created_at": "2026-11-09T10:00:00Z",
+      "expires_at": "2026-12-09T10:00:00Z"
+    },
+    "credential": "cfgag_<id>_<secret>"
+  }
+}
+```
+
+`credential` is returned once and cannot be read again. Errors: `400` `INVALID_GRANT_REQUEST`, `INVALID_REQUEST` or `TENANT_REQUIRED`; `404` `TENANT_NOT_FOUND` (a tenant outside the caller's subtree is indistinguishable from an unknown one); `503` `SERVICE_UNAVAILABLE` or `AUDIT_UNAVAILABLE` (the create event could not be recorded; the grant is removed and no credential is returned). Audit event `automation_grant.create` (high).
+
+##### GET /api/v1/automation/grants
+
+Lists the grants inside the caller's tenant subtree: `{ "grants": [...], "count": N }`. A grant record never contains the credential. A root-scoped caller lists one tenant with `?tenant=` (default the root tenant).
+
+##### DELETE /api/v1/automation/grants/{id}
+
+Revokes a grant and ends its open runs: `{ "grant": {...}, "runs_ended": N }`. `404` `GRANT_NOT_FOUND` for an unknown grant or one outside the caller's subtree. The audit event `automation_grant.revoke` is written first; if it cannot be recorded the grant is left unchanged (`503` `AUDIT_UNAVAILABLE`). Repeating the request on a revoked grant keeps the original revocation record and ends any run still open.
+
+#### Authenticating as a grant
+
+Send the credential as `Authorization: Bearer cfgag_<id>_<secret>`. Sending `X-API-Key` as well is refused with `400` `CONFLICTING_CREDENTIALS`. A revoked, expired, unknown or wrong credential is `401` `INVALID_AUTOMATION_GRANT` with no detail; repeated failures from one source address are throttled (`429` `THROTTLED`). The grant principal has no permissions.
+
+#### Run routes
+
+All run routes are under `/api/v1/automation/runs`. After begin, the run id is taken from the URL path only. A call is refused with a uniform `403` `AUTOMATION_RUN_DENIED` when the run is unknown, belongs to another grant, has ended or expired, when the grant is revoked or expired, or when the query or JSON body names a tenant other than the run tenant. Every call, accepted or refused, is audited as `automation.call` under the grant, run and event reference.
+
+##### POST /api/v1/automation/runs
+
+Opens a run bound to one tenant and one triggering event. Body: `tenant_id`, `event_ref` and `event_source`, all required. `event_ref` and `event_source` are at most 128 characters of `A-Z a-z 0-9 . _ : / # -` starting with a letter or digit.
+
+`201 Created`:
+
+```json
+{
+  "data": {
+    "run_id": "9b1d...",
+    "tenant_id": "client-1",
+    "event_ref": "ticket-4711",
+    "event_source": "psa",
+    "expires_at": "2026-11-09T11:00:00Z",
+    "ended": false
+  }
+}
+```
+
+| Status | Code | Meaning |
+|---|---|---|
+| 400 | `INVALID_REQUEST` | Malformed body, missing or invalid field |
+| 403 | `TENANT_OUT_OF_SCOPE` | `tenant_id` is not the grant tenant or a descendant |
+| 409 | `EVENT_BOUND_TO_OTHER_TENANT` | The event is already bound to a different tenant |
+| 429 | `OPEN_RUN_CAP` | The grant already has 5 open runs |
+| 429 | `RATE_LIMITED` | More than 20 begin attempts in a minute (accepted or refused) |
+
+A run lasts at most one hour. Audit event `automation.run.begin`.
+
+##### POST /api/v1/automation/runs/{run_id}/end
+
+Ends the run: `200` with the run record (`ended: true`). Ending an ended run keeps the original end time. Audit event `automation.run.end`.
+
+##### Reads
+
+All reads are `GET` under `/api/v1/automation/runs/{run_id}`. They return what the existing read of the same name returns, narrowed to devices whose own tenant is exactly the run tenant.
+
+| Path | Returns |
+|---|---|
+| `/stewards` | Stewards of the run tenant only (a descendant tenant's stewards are dropped; pagination counts only the returned set) |
+| `/stewards/{id}` | One steward of the run tenant, else `404` |
+| `/stewards/{id}/dna` | The DNA of one steward of the run tenant, else `404` |
+| `/results/{result_run_id}` | A script run this run started, else `404` |
+| `/results/{result_run_id}/jobs` | The jobs of a script run this run started, with jobs on devices outside the run tenant dropped |
+| `/executions` | The workflow executions this run started, newest first (at most the newest 500 of the run tenant are checked) |
+| `/executions/{exec_id}` | One workflow execution this run started, else `404` |
+
+An unknown run, another run's run and an out-of-tenant run all answer the same `404`.
+
+##### GET /api/v1/automation/runs/{run_id}/scripts
+
+Lists the scripts the run tenant sees through its library chain (the run tenant, then each ancestor up to and including the grant tenant). Each entry: `script_id`, `name`, `version` (the latest), `owner_tenant`, `state` (`approved`, `pending` or `denied`, as the evaluator decides the latest version), `reason` and `approval_hash`. It never returns script text. Audit event `automation.script.list`.
+
+##### POST /api/v1/automation/runs/{run_id}/scripts
+
+Starts one pre-approved library script on devices of the run tenant. Body:
+
+| Field | Meaning |
+|---|---|
+| `target` | Fleet selector. Empty or `all` means every device of the run tenant. A selector that reaches a device outside the run tenant refuses the whole request. |
+| `script_id` | Required. |
+| `version` | Optional. When empty, the latest version is resolved once and that exact version is evaluated, pinned and audited. |
+| `params` | Literal string values for parameters the script declares, each matching the declared type and allowed values. A secret binding and an undeclared name are refused. |
+
+`201 Created`: `run_id` (the result run, readable under `/results/{run_id}`), `tenant_id`, `owner_tenant`, `script_id`, `version`, `approval_hash` and `device_count`.
+
+| Status | Code | Meaning |
+|---|---|---|
+| 400 | `MISSING_SCRIPT_ID`, `INVALID_REQUEST`, `INVALID_VERSION`, `INVALID_TARGET` | Request is invalid |
+| 400 | `PARAM_REFUSED` | A param is undeclared, not a literal, mistyped, not an allowed value or a required one is missing |
+| 403 | `CONTENT_NOT_APPROVED` | The evaluator denied this version: a signature that does not verify, a script that requires API scopes, a content hash mismatch or an invalid header |
+| 403 | `TARGET_OUT_OF_TENANT` | The target reaches a device outside the run tenant |
+| 404 | `SCRIPT_NOT_FOUND`, `NO_TARGETS` | No such script in the library chain, or no device matches |
+| 409 | `APPROVAL_PENDING` | The version awaits approval, or its header does not carry the `cfgms-preapproved: automation` declaration; an earlier approved version is never used instead |
+| 422 | `TOO_MANY_TARGETS` | The target matches more devices than the tenant's target limit |
+| 503 | `SERVICE_UNAVAILABLE` | A dependency is not wired or authorization data is unavailable |
+
+Every queued command carries the owner tenant, version and approval hash that were evaluated and a guard reference to the run and grant; the command is cancelled when the run ends or the grant is revoked or expires. The steward verifies the library script signature against its own trusted keys. Audit event `automation.script.run`, success or denied with a `reason`.
+
+##### POST /api/v1/automation/runs/{run_id}/workflows/{name}
+
+Starts one pinned workflow version as a restricted execution under the run tenant. Body: `version` (required, an exact semantic version; there is no latest) and `inputs` (values for the workflow's declared inputs, at most 64, each at most 4096 encoded bytes). The restricted mode, the run, the grant and the ceiling are never request fields.
+
+`202 Accepted`: `execution_id`, `tenant_id`, `owner_tenant`, `workflow_name`, `version`, `approval_hash` and `status`. Read it with `/executions/{exec_id}`.
+
+| Status | Code | Meaning |
+|---|---|---|
+| 400 | `INVALID_REQUEST`, `MISSING_VERSION`, `INVALID_VERSION` | Request is invalid |
+| 400 | `INPUT_REFUSED`, `INVALID_INPUTS` | An input is undeclared, too large, too many, or fails the declared type, options or required rule (the message names the field, never the value) |
+| 403 | `CONTENT_NOT_APPROVED` | The evaluator denied this version (publication does not verify, or the library mode refuses it) |
+| 404 | `WORKFLOW_NOT_FOUND` | No such version in the library chain |
+| 409 | `APPROVAL_PENDING` | The version awaits approval, or does not opt in with `preapproved_for_automation` |
+| 422 | `WORKFLOW_NOT_RESTRICTED_SAFE` | A step type is not allowed in restricted automation; nothing ran |
+| 503 | `SERVICE_UNAVAILABLE` | The workflow engine is not wired or authorization data is unavailable |
+
+The restricted step set in v1 is the control-flow types, `delay`, `notify` to a channel configured for the run tenant and the library-script step. Automated workflow runs refuse sub-workflow steps. A restricted run is bounded to 500 steps, 250 loop iterations, 10 parallel branches at once and 15 minutes, and the run guard is checked before every step. Audit event `automation.workflow.run`.
+
+#### Content approvals
+
+Approval routes act on the caller's own tenant's library. An approval is bound to the approval hash of one exact version and never carries to another. Only a human channel can approve or withdraw; a grant, API key or relay principal is refused. The audit event is written before the change.
+
+| Method and path | Permission | Assurance |
+|---|---|---|
+| `GET /api/v1/automation/approvals/scripts` | `automation-approval:read` | none beyond the permission |
+| `POST /api/v1/automation/approvals/scripts` | `content-approval:approve` | strong, presence tap |
+| `DELETE /api/v1/automation/approvals/scripts/{id}/{version}/{approval_hash}` | `content-approval:revoke` | strong, no tap |
+| `GET /api/v1/automation/approvals/scripts/pending` | `automation-approval:read` | none beyond the permission |
+| `GET /api/v1/automation/approvals/workflows` | `automation-approval:read` | none beyond the permission |
+| `POST /api/v1/automation/approvals/workflows` | `content-approval:approve` | strong, presence tap |
+| `DELETE /api/v1/automation/approvals/workflows/{id}/{version}/{approval_hash}` | `content-approval:revoke` | strong, no tap |
+
+- **List** returns `{ "mode": "...", "scripts": [...] }` (or `"workflows"`): every version in the caller's library with `content_hash`, `approval_hash`, `state` (`approved` or `pending`) and the `approval` record (`approved_by`, `approved_at`, `method`). Workflow entries also carry `reason`.
+- **Approve** takes `script_id` (or `workflow_id`), `version`, `approval_hash` (required) and `content_hash` (optional; must equal the stored one). `201 Created` with the entry. `400` `MISSING_FIELDS`, `404` `NOT_FOUND`, `409` `HASH_MISMATCH` (the body no longer names what the controller holds), `422` `NOT_APPROVABLE`. Audit event `content_approval.approve`.
+- **Withdraw** finds the approval by its stored key, so an approval of a version that has since changed can still be withdrawn. `204 No Content`, or `404` `NOT_FOUND`. Audit event `content_approval.revoke`.
+- **Pending** lists approved scripts whose new version awaits approval: `{ "changes": [...] }` with `script_id`, `version`, `content_hash`, `approval_hash`, `previous_version`, `previous_approval_hash`, `first_seen` and a unified `diff` against the previously approved content. The diff is shown only to an administrator of the owner tenant. The `cfg` command lists a workflow's pending versions from the workflow approvals list.
+
+#### Library approval mode
+
+| Method and path | Permission | Assurance |
+|---|---|---|
+| `GET /api/v1/automation/libraries/{kind}/mode` | `content-library:read` | none beyond the permission |
+| `PUT /api/v1/automation/libraries/{kind}/mode` | `content-library:set-mode` | strong, presence tap |
+
+`{kind}` is `script` or `workflow` (`400` `INVALID_KIND` otherwise). Each tenant has one library per kind, with the mode `signed` (default), `approve` or `comment`. `GET` returns `{ "kind": "script", "mode": "signed" }`. `PUT` takes `{ "mode": "approve" }` (`400` `INVALID_MODE` for any other value) for the caller's own tenant's library; there is no parent floor. Setting the mode the library already has goes through the same permission, tap and audit. Audit event `content_library.mode_change` (high), recorded before the change; `503` `AUDIT_UNAVAILABLE` leaves the mode unchanged.
+
+#### Workflow publication
+
+Publishing a workflow version takes a passkey tap and makes the version eligible for automation and for script steps outside a grant. Both routes need permission `workflow:publish` at strong assurance, a cookie-authenticated web session and a registered passkey; the assertion collected by `finish` is itself the proof, so no separate presence token is sent. The signer must hold `workflow:publish` in the workflow's tenant.
+
+##### POST /api/v1/workflows/{id}/versions/{version}/publish/begin
+
+Loads the exact stored version and returns a WebAuthn challenge over its envelope (tenant, name, version, canonical content hash, nonce and expiry): `{ "assertion": {...}, "name": "...", "version": "...", "content_hash": "..." }`. Errors: `400` `INVALID_VERSION` or `SESSION_REQUIRED`, `403` `FORBIDDEN`, `404` `NOT_FOUND`, `409` `NO_CREDENTIALS`, `503` `WEBAUTHN_NOT_CONFIGURED`.
+
+##### POST /api/v1/workflows/{id}/versions/{version}/publish/finish
+
+Body: the WebAuthn assertion produced for the `begin` challenge. The controller reloads the version, rebuilds the envelope from its current canonical hash and refuses with `409` `VERSION_CHANGED` if it no longer equals the one issued, verifies the assertion under the account's registered credential and stores it as the version's publication. `200` with `name`, `version`, `content_hash`, `signer_account_id` and `signed_at`. A ceremony is single use: `400` `NO_ACTIVE_PUBLISH_SESSION`, `SESSION_EXPIRED` or `WEBAUTHN_VERIFY_ERROR`, `429` `THROTTLED`. Audit event `workflow.publish`.
+
+The controller holds no workflow-signing key. A publication is re-verified at every evaluation and start, applies no maximum age, and stops verifying when the version changes or moves tenant, or when the signer's credential, account or `workflow:publish` permission is gone.
+
+#### Script step
+
+A workflow step of `type: script` runs a library script on devices of the execution's tenant. It runs only in one of two places: a restricted execution started by a grant, or an execution of a workflow version published with a tap. Anywhere else (a nested workflow, a resumed approval tail, an unpublished version) the engine refuses the run with nothing queued.
+
+Step `config` keys in both places: `script_id` (required), `script_version` (required; the step never runs the latest), `parameters`, `devices` or `device_filter` (resolved through the fleet query inside the execution's tenant; a device or filter reaching another tenant refuses the whole step), `timeout`, `shell`, `execution_context` and `capture_output`. An inline script, a script path, a command, secret bindings and an ephemeral API key are refused. In a restricted run parameters must be literal values for parameters the approved version declares, and the step is judged by the script evaluator under the script's owner tenant's mode; the step waits for the queued results and publishes them to later steps as the variable `<step name>_result`. In a published run the publisher's tap covers the step, so there is no evaluator check and no wait for results.
+
+#### cfg commands
+
+`cfg automation` drives the management routes. Presence-gated actions answer the controller's challenge through the presence relay: `cfg` prints a code and a confirmation URL and retries once you touch your key in the browser. The grant credential is printed once to stdout and is never written to disk. Common flags: `--url`, `--tls-insecure`, `--server-name`; `--output json` prints JSON.
+
+| Command | Route |
+|---|---|
+| `cfg automation grant create --name <name> (--expires-in <duration> \| --expires-at <RFC 3339>) [--tenant <id>]` | `POST /api/v1/automation/grants` |
+| `cfg automation grant list [--tenant <id>]` | `GET /api/v1/automation/grants` |
+| `cfg automation grant revoke <id>` | `DELETE /api/v1/automation/grants/{id}` |
+| `cfg automation approve script <script-id> --version <v> --approval-hash <hash> [--content-hash <hash>]` | `POST /api/v1/automation/approvals/scripts` |
+| `cfg automation approve workflow <workflow-id> --version <v> --approval-hash <hash> [--content-hash <hash>]` | `POST /api/v1/automation/approvals/workflows` |
+| `cfg automation approval revoke script <script-id> --version <v> --approval-hash <hash>` | `DELETE /api/v1/automation/approvals/scripts/...` |
+| `cfg automation approval revoke workflow <workflow-id> --version <v> --approval-hash <hash>` | `DELETE /api/v1/automation/approvals/workflows/...` |
+| `cfg automation pending [--kind script\|workflow] [--show-diff]` | `GET /api/v1/automation/approvals/scripts/pending`, or the workflow approvals list with `--kind workflow` |
+| `cfg automation mode get [--kind script\|workflow]` | `GET /api/v1/automation/libraries/{kind}/mode` |
+| `cfg automation mode set <signed\|approve\|comment> [--kind script\|workflow]` | `PUT /api/v1/automation/libraries/{kind}/mode` |
+
+Workflow publication is a web ceremony; `cfg` has no publish command.
 
 ### Cluster Management
 
