@@ -5,11 +5,17 @@ package health
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"reflect"
+	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/version"
 )
 
@@ -382,108 +388,134 @@ func (h *Handler) HandleTraces(w http.ResponseWriter, r *http.Request) {
 	h.writeSuccessResponse(w, response)
 }
 
-// HandlePrometheusMetrics handles GET /metrics
-// Returns metrics in Prometheus format
+// builtinFamily is one metric family rendered from a field of a ControllerMetrics
+// section ("Transport", "Storage", ...). The section and field are looked up by
+// name so the table below stays one short row per family.
+type builtinFamily struct {
+	name    string
+	help    string
+	kind    string
+	section string
+	field   string
+}
+
+// sample returns the formatted value and whether to render the family. A family
+// is skipped when its section is nil (collector not configured) or, for storage,
+// when the value is a negative "not instrumented" sentinel (as
+// UnimplementedStorageStats in the controller server package reports), so a
+// provider with no storage instrumentation exposes no storage series rather than
+// a misleading -1.
+func (f builtinFamily) sample(m *ControllerMetrics) (string, bool) {
+	sec := reflect.ValueOf(m).Elem().FieldByName(f.section)
+	if !sec.IsValid() || sec.Kind() != reflect.Pointer || sec.IsNil() {
+		return "", false
+	}
+	return formatMetricValue(sec.Elem().FieldByName(f.field), f.section == "Storage")
+}
+
+// formatMetricValue formats an integer or float field; skipNegative drops
+// negative values (the storage "not instrumented" sentinels).
+func formatMetricValue(v reflect.Value, skipNegative bool) (string, bool) {
+	switch {
+	case !v.IsValid():
+		return "", false
+	case v.CanInt():
+		return strconv.FormatInt(v.Int(), 10), !skipNegative || v.Int() >= 0
+	case v.CanFloat():
+		return strconv.FormatFloat(v.Float(), 'f', 2, 64), !skipNegative || v.Float() >= 0
+	}
+	return "", false
+}
+
+// builtinFamilies is the set of metric families the exposition renders from the
+// collector snapshot, in output order. SignalRegistry refuses to register a
+// name in this list, so a registered signal can never collide with it.
+var builtinFamilies = slices.Concat(transportFamilies, storageFamilies, applicationFamilies, systemFamilies)
+
+var transportFamilies = []builtinFamily{
+	{"cfgms_transport_connected_stewards", "Number of connected stewards", "gauge", "Transport", "ConnectedStewards"},
+	{"cfgms_transport_stream_errors", "Total transport stream errors", "counter", "Transport", "StreamErrors"},
+	{"cfgms_transport_messages_sent", "Total messages sent", "counter", "Transport", "MessagesSent"},
+	{"cfgms_transport_messages_received", "Total messages received", "counter", "Transport", "MessagesReceived"},
+	{"cfgms_transport_reconnection_attempts", "Total reconnection attempts", "counter", "Transport", "ReconnectionAttempts"},
+}
+
+var storageFamilies = []builtinFamily{
+	{"cfgms_storage_pool_utilization", "Storage connection pool utilization (0-1)", "gauge", "Storage", "PoolUtilization"},
+	{"cfgms_storage_query_latency_avg_ms", "Average storage query latency in milliseconds", "gauge", "Storage", "AvgQueryLatencyMs"},
+	{"cfgms_storage_query_latency_p95_ms", "P95 storage query latency in milliseconds", "gauge", "Storage", "P95QueryLatencyMs"},
+	{"cfgms_storage_slow_queries", "Total slow queries (>1 second)", "counter", "Storage", "SlowQueryCount"},
+}
+
+var applicationFamilies = []builtinFamily{
+	{"cfgms_workflow_queue_depth", "Workflow execution queue depth", "gauge", "Application", "WorkflowQueueDepth"},
+	{"cfgms_script_queue_depth", "Script execution queue depth", "gauge", "Application", "ScriptQueueDepth"},
+	{"cfgms_active_workflows", "Number of active workflow executions", "gauge", "Application", "ActiveWorkflows"},
+	{"cfgms_active_scripts", "Number of active script executions", "gauge", "Application", "ActiveScripts"},
+}
+
+var systemFamilies = []builtinFamily{
+	{"cfgms_cpu_percent", "CPU utilization percentage", "gauge", "System", "CPUPercent"},
+	{"cfgms_memory_percent", "Memory utilization percentage", "gauge", "System", "MemoryPercent"},
+	{"cfgms_memory_bytes", "Memory usage in bytes", "gauge", "System", "MemoryUsedBytes"},
+	{"cfgms_goroutines", "Number of goroutines", "gauge", "System", "GoroutineCount"},
+	{"cfgms_heap_bytes", "Heap memory in bytes", "gauge", "System", "HeapBytes"},
+}
+
+// isBuiltinSeriesName reports whether the exposition already emits name.
+func isBuiltinSeriesName(name string) bool {
+	for _, f := range builtinFamilies {
+		if f.name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// renderBuiltinFamilies writes the collector-snapshot metrics with HELP and TYPE lines.
+func renderBuiltinFamilies(sb *strings.Builder, m *ControllerMetrics) {
+	for _, f := range builtinFamilies {
+		v, ok := f.sample(m)
+		if !ok {
+			continue
+		}
+		sb.WriteString("# HELP " + f.name + " " + escapeHelp(f.help) + "\n")
+		sb.WriteString("# TYPE " + f.name + " " + f.kind + "\n")
+		sb.WriteString(f.name + " " + v + "\n")
+	}
+}
+
+// signalSource is implemented by collectors that carry a SignalRegistry.
+type signalSource interface {
+	Signals() *SignalRegistry
+}
+
+// HandlePrometheusMetrics handles GET /api/v1/health/metrics/prometheus.
+// It renders the collector snapshot followed by the service-level signal
+// registry in Prometheus text format. The output carries no tenant, steward or
+// path data: built-in values are controller-wide and registry labels are drawn
+// from closed, code-declared sets. Storage values the provider has not
+// instrumented are omitted. Before the collector's first snapshot exists only
+// the registry is rendered.
 func (h *Handler) HandlePrometheusMetrics(w http.ResponseWriter, r *http.Request) {
-	metrics, err := h.collector.GetCurrentMetrics()
-	if err != nil {
-		h.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get metrics", err.Error())
-		return
+	var sb strings.Builder
+
+	// An error here only means no snapshot has been collected yet.
+	if metrics, err := h.collector.GetCurrentMetrics(); err == nil && metrics != nil {
+		renderBuiltinFamilies(&sb, metrics)
+	}
+	if src, ok := h.collector.(signalSource); ok {
+		if reg := src.Signals(); reg != nil {
+			reg.render(&sb)
+		}
 	}
 
-	// Build Prometheus format output
-	var output string
-
-	// Transport metrics
-	if metrics.Transport != nil {
-		output += "# HELP cfgms_transport_connected_stewards Number of connected stewards\n"
-		output += "# TYPE cfgms_transport_connected_stewards gauge\n"
-		output += fmt.Sprintf("cfgms_transport_connected_stewards %d\n", metrics.Transport.ConnectedStewards)
-
-		output += "# HELP cfgms_transport_stream_errors Total transport stream errors\n"
-		output += "# TYPE cfgms_transport_stream_errors counter\n"
-		output += fmt.Sprintf("cfgms_transport_stream_errors %d\n", metrics.Transport.StreamErrors)
-
-		output += "# HELP cfgms_transport_messages_sent Total messages sent\n"
-		output += "# TYPE cfgms_transport_messages_sent counter\n"
-		output += fmt.Sprintf("cfgms_transport_messages_sent %d\n", metrics.Transport.MessagesSent)
-
-		output += "# HELP cfgms_transport_messages_received Total messages received\n"
-		output += "# TYPE cfgms_transport_messages_received counter\n"
-		output += fmt.Sprintf("cfgms_transport_messages_received %d\n", metrics.Transport.MessagesReceived)
-
-		output += "# HELP cfgms_transport_reconnection_attempts Total reconnection attempts\n"
-		output += "# TYPE cfgms_transport_reconnection_attempts counter\n"
-		output += fmt.Sprintf("cfgms_transport_reconnection_attempts %d\n", metrics.Transport.ReconnectionAttempts)
-	}
-
-	// Storage metrics
-	if metrics.Storage != nil {
-		output += "# HELP cfgms_storage_pool_utilization Storage connection pool utilization (0-1)\n"
-		output += "# TYPE cfgms_storage_pool_utilization gauge\n"
-		output += fmt.Sprintf("cfgms_storage_pool_utilization %.2f\n", metrics.Storage.PoolUtilization)
-
-		output += "# HELP cfgms_storage_query_latency_avg_ms Average storage query latency in milliseconds\n"
-		output += "# TYPE cfgms_storage_query_latency_avg_ms gauge\n"
-		output += fmt.Sprintf("cfgms_storage_query_latency_avg_ms %.2f\n", metrics.Storage.AvgQueryLatencyMs)
-
-		output += "# HELP cfgms_storage_query_latency_p95_ms P95 storage query latency in milliseconds\n"
-		output += "# TYPE cfgms_storage_query_latency_p95_ms gauge\n"
-		output += fmt.Sprintf("cfgms_storage_query_latency_p95_ms %.2f\n", metrics.Storage.P95QueryLatencyMs)
-
-		output += "# HELP cfgms_storage_slow_queries Total slow queries (>1 second)\n"
-		output += "# TYPE cfgms_storage_slow_queries counter\n"
-		output += fmt.Sprintf("cfgms_storage_slow_queries %d\n", metrics.Storage.SlowQueryCount)
-	}
-
-	// Application metrics
-	if metrics.Application != nil {
-		output += "# HELP cfgms_workflow_queue_depth Workflow execution queue depth\n"
-		output += "# TYPE cfgms_workflow_queue_depth gauge\n"
-		output += fmt.Sprintf("cfgms_workflow_queue_depth %d\n", metrics.Application.WorkflowQueueDepth)
-
-		output += "# HELP cfgms_script_queue_depth Script execution queue depth\n"
-		output += "# TYPE cfgms_script_queue_depth gauge\n"
-		output += fmt.Sprintf("cfgms_script_queue_depth %d\n", metrics.Application.ScriptQueueDepth)
-
-		output += "# HELP cfgms_active_workflows Number of active workflow executions\n"
-		output += "# TYPE cfgms_active_workflows gauge\n"
-		output += fmt.Sprintf("cfgms_active_workflows %d\n", metrics.Application.ActiveWorkflows)
-
-		output += "# HELP cfgms_active_scripts Number of active script executions\n"
-		output += "# TYPE cfgms_active_scripts gauge\n"
-		output += fmt.Sprintf("cfgms_active_scripts %d\n", metrics.Application.ActiveScripts)
-	}
-
-	// System metrics
-	if metrics.System != nil {
-		output += "# HELP cfgms_cpu_percent CPU utilization percentage\n"
-		output += "# TYPE cfgms_cpu_percent gauge\n"
-		output += fmt.Sprintf("cfgms_cpu_percent %.2f\n", metrics.System.CPUPercent)
-
-		output += "# HELP cfgms_memory_percent Memory utilization percentage\n"
-		output += "# TYPE cfgms_memory_percent gauge\n"
-		output += fmt.Sprintf("cfgms_memory_percent %.2f\n", metrics.System.MemoryPercent)
-
-		output += "# HELP cfgms_memory_bytes Memory usage in bytes\n"
-		output += "# TYPE cfgms_memory_bytes gauge\n"
-		output += fmt.Sprintf("cfgms_memory_bytes %d\n", metrics.System.MemoryUsedBytes)
-
-		output += "# HELP cfgms_goroutines Number of goroutines\n"
-		output += "# TYPE cfgms_goroutines gauge\n"
-		output += fmt.Sprintf("cfgms_goroutines %d\n", metrics.System.GoroutineCount)
-
-		output += "# HELP cfgms_heap_bytes Heap memory in bytes\n"
-		output += "# TYPE cfgms_heap_bytes gauge\n"
-		output += fmt.Sprintf("cfgms_heap_bytes %d\n", metrics.System.HeapBytes)
-	}
-
-	// Write Prometheus format response
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write([]byte(output)); err != nil {
-		// Log error but can't return HTTP error after WriteHeader
-		fmt.Printf("Failed to write Prometheus metrics: %v\n", err)
+	if _, err := io.WriteString(w, sb.String()); err != nil {
+		// Can't return an HTTP error after WriteHeader.
+		logging.ForModule("controller.health").Warn("Failed to write Prometheus metrics",
+			"error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 

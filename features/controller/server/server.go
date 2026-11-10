@@ -3752,6 +3752,9 @@ func (s *Server) startCorrelatorSweep() {
 // manager (Story #417).
 func (s *Server) startHealthServices() {
 	if s.healthCollector != nil {
+		// Sources register signals and samplers, so they run before the
+		// collector's first tick.
+		s.runSignalSources()
 		if err := s.healthCollector.Start(ctxkeys.WithSystem(context.Background()), 30*time.Second); err != nil {
 			s.logger.Warn("Failed to start health collector", "error", err)
 		} else {

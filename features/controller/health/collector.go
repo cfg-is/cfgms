@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"slices"
 	"sync"
 	"time"
 
@@ -68,6 +69,10 @@ type Collector struct {
 	metricsHistory  []*ControllerMetrics
 	retentionPeriod time.Duration
 
+	// Service-level signals and the samplers that refresh them each tick.
+	signals  *SignalRegistry
+	samplers []func(ctx context.Context)
+
 	// Collection control
 	ctx        context.Context
 	cancelFunc context.CancelFunc
@@ -93,7 +98,28 @@ func NewCollector(
 		retentionPeriod:      7 * 24 * time.Hour,                   // 7 days
 		metricsHistory:       make([]*ControllerMetrics, 0, 20160), // 7 days * 24 hours * 60 minutes * 2 (30-second intervals)
 		startTime:            time.Now(),
+		signals:              NewSignalRegistry(),
 	}
+}
+
+// Signals returns the registry of service-level signals exposed alongside the
+// collector's own metrics on the Prometheus endpoint.
+func (c *Collector) Signals() *SignalRegistry {
+	return c.signals
+}
+
+// RegisterSampler adds a function that runs on every collection tick, including
+// the initial collection at Start, to refresh signals that are read rather than
+// pushed (queue depths, pool sizes). The context is cancelled when the collector
+// stops, and Stop waits for running samplers. A nil sampler is ignored and a
+// panicking sampler is recovered so it cannot end collection.
+func (c *Collector) RegisterSampler(sampler func(ctx context.Context)) {
+	if sampler == nil {
+		return
+	}
+	c.mu.Lock()
+	c.samplers = append(c.samplers, sampler)
+	c.mu.Unlock()
 }
 
 // Start begins metric collection with the specified interval
@@ -226,25 +252,13 @@ func (c *Collector) collectMetrics() error {
 		go collectWithTimeout(c.systemCollector, "System")
 	}
 
+	// Samplers run beside the component collectors.
+	c.startSamplers(&wg)
+
 	// Wait for all collections to complete
 	wg.Wait()
 
-	// Aggregate metrics — nil collectors produce nil metric sections
-	metrics := &ControllerMetrics{
-		Timestamp: timestamp,
-	}
-	if c.transportCollector != nil {
-		metrics.Transport = c.transportCollector.GetMetrics()
-	}
-	if c.storageCollector != nil {
-		metrics.Storage = c.storageCollector.GetMetrics()
-	}
-	if c.applicationCollector != nil {
-		metrics.Application = c.applicationCollector.GetMetrics()
-	}
-	if c.systemCollector != nil {
-		metrics.System = c.systemCollector.GetMetrics()
-	}
+	metrics := c.snapshot(timestamp)
 
 	// Store metrics
 	c.mu.Lock()
@@ -261,6 +275,55 @@ func (c *Collector) collectMetrics() error {
 	}
 
 	return nil
+}
+
+// snapshot aggregates the component collectors' latest values. A nil collector
+// produces a nil metric section.
+func (c *Collector) snapshot(timestamp time.Time) *ControllerMetrics {
+	metrics := &ControllerMetrics{
+		Timestamp: timestamp,
+	}
+	if c.transportCollector != nil {
+		metrics.Transport = c.transportCollector.GetMetrics()
+	}
+	if c.storageCollector != nil {
+		metrics.Storage = c.storageCollector.GetMetrics()
+	}
+	if c.applicationCollector != nil {
+		metrics.Application = c.applicationCollector.GetMetrics()
+	}
+	if c.systemCollector != nil {
+		metrics.System = c.systemCollector.GetMetrics()
+	}
+	return metrics
+}
+
+// startSamplers launches every registered sampler into wg, each under the same
+// timeout as a component collector.
+func (c *Collector) startSamplers(wg *sync.WaitGroup) {
+	c.mu.RLock()
+	samplers := slices.Clone(c.samplers)
+	c.mu.RUnlock()
+	for _, sampler := range samplers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.runSampler(sampler)
+		}()
+	}
+}
+
+// runSampler runs one sampler, recovering a panic so it cannot end collection.
+func (c *Collector) runSampler(sampler func(ctx context.Context)) {
+	defer func() {
+		if r := recover(); r != nil {
+			logging.ForModule("controller.health").Error("Signal sampler panicked",
+				"panic", logging.SanitizeLogValue(fmt.Sprint(r)))
+		}
+	}()
+	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+	defer cancel()
+	sampler(ctx)
 }
 
 // cleanupOldMetrics removes metrics older than the retention period
