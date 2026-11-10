@@ -157,6 +157,19 @@ type RolloutStoreCreator interface {
 	CreateRolloutStore(config map[string]interface{}) (business.RolloutStore, error)
 }
 
+// UpgradeStoreCreator is an optional StorageProvider extension for backends that
+// can hold steward upgrade records durably (Issue #5977). The shared database
+// provider implements it so every controller node reads the same records and an
+// upgrade dispatched on one node can be rolled back from another; the SQLite
+// provider implements it for a single node. Backends that do not implement it
+// leave the store nil and the steward upgrade endpoints answer 503
+// UPGRADE_STORE_UNAVAILABLE — there is no in-memory fallback.
+//
+//duplication:justified pkg/storage/interfaces/provider.go -- same optional-creator interface shape as ScriptRunStoreCreator and its siblings; each store keeps its own creator so providers opt in independently
+type UpgradeStoreCreator interface {
+	CreateUpgradeStore(config map[string]interface{}) (business.UpgradeStore, error)
+}
+
 // ExecutionQueueStoreCreator is an optional StorageProvider extension for
 // backends that can hold the execution queue shared across controller nodes
 // (Issue #4528), so the node holding a steward's session dispatches its work
@@ -759,6 +772,7 @@ func wireAllOptionalStores(w *storageWiring, sm *StorageManager, p StorageProvid
 	wireOptionalStore(w, p, &sm.leaseStore, "failed to create lease store", cfg, LeaseStoreCreator.CreateLeaseStore)
 	wireOptionalStore(w, p, &sm.routingStore, "failed to create routing store", cfg, RoutingStoreCreator.CreateRoutingStore)
 	wireOptionalStore(w, p, &sm.nodeRegistryStore, "failed to create node registry store", cfg, NodeRegistryStoreCreator.CreateNodeRegistryStore)
+	wireOptionalStore(w, p, &sm.upgradeStore, "failed to create upgrade store", cfg, UpgradeStoreCreator.CreateUpgradeStore)
 }
 
 func CreateAllStoresFromConfig(providerName string, config map[string]interface{}) (*StorageManager, error) {
@@ -832,6 +846,7 @@ type StorageManager struct {
 	routingStore             business.RoutingStore               // ADR-031 Decision 3, Issue #3764: shared steward-routing table
 	scriptRunStore           business.ScriptRunStore             // Issue #4528: shared script runs (cluster mode)
 	rolloutStore             business.RolloutStore               // Issue #5976: shared ring-advance rollouts (cluster mode)
+	upgradeStore             business.UpgradeStore               // Issue #5977: durable steward upgrade records
 	executionQueueStore      business.ExecutionQueueStore        // Issue #4528: shared execution queue (cluster mode)
 	nodeRegistryStore        business.NodeRegistryStore          // Issue #3763, ADR-031 Decision 5: post-Raft cluster membership
 	certRevocationStore      certinterfaces.RevocationStore      // Issue #3852, ADR-031: cluster-visible cert revocation list
@@ -1113,6 +1128,19 @@ func (sm *StorageManager) SetRolloutStore(s business.RolloutStore) {
 	sm.rolloutStore = s
 }
 
+// GetUpgradeStore returns the durable steward upgrade store (Issue #5977), or nil
+// when the provider does not implement UpgradeStoreCreator.
+//
+//duplication:justified pkg/storage/interfaces/provider.go -- same Get/Set accessor pair as GetScriptRunStore and the other StorageManager stores; the fields are distinct typed interfaces
+func (sm *StorageManager) GetUpgradeStore() business.UpgradeStore {
+	return sm.upgradeStore
+}
+
+// SetUpgradeStore wires the upgrade store after construction.
+func (sm *StorageManager) SetUpgradeStore(s business.UpgradeStore) {
+	sm.upgradeStore = s
+}
+
 // GetExecutionQueueStore returns the shared execution queue store (Issue
 // #4528), or nil when the provider does not implement
 // ExecutionQueueStoreCreator.
@@ -1268,6 +1296,7 @@ func (sm *StorageManager) Close() error {
 		sm.rateCounterStore,
 		sm.scriptRunStore,
 		sm.rolloutStore,
+		sm.upgradeStore,
 		sm.executionQueueStore,
 	}
 	var firstErr error
@@ -1385,6 +1414,7 @@ func wireClusterBusinessStores(w *storageWiring, sm *StorageManager, p StoragePr
 // policy (Issue #3698), tenant crossing (ADR-025) and case (ADR-022 §8,
 // Issue #3602).
 func wireClusterPolicyStores(w *storageWiring, sm *StorageManager, p StorageProvider, cfg map[string]interface{}) {
+	//duplication:justified pkg/storage/interfaces/provider.go -- one wireOptionalStore call per optional store; the calls share a shape by design and differ only in the store field, label and creator
 	wireOptionalStore(w, p, &sm.refreshPolicyStore, clusterWiringPrefix+"refresh policy store", cfg, RefreshStoreCreator.CreateRefreshPolicyStore)
 	wireOptionalStore(w, p, &sm.pendingRefreshStore, clusterWiringPrefix+"pending refresh store", cfg, RefreshStoreCreator.CreatePendingRefreshStore)
 	wireOptionalStore(w, p, &sm.assurancePolicyStore, clusterWiringPrefix+"assurance policy store", cfg, AssuranceStoreCreator.CreateAssurancePolicyStore)
@@ -1398,13 +1428,16 @@ func wireClusterPolicyStores(w *storageWiring, sm *StorageManager, p StorageProv
 // #3755), lease store (Issue #3756, the substrate pkg/ha's HasLeadership() and
 // GetTerm() run on, so a failure here must not be swallowed), routing store
 // (Issue #3764), the shared script run and execution queue stores (Issue #4528),
-// the rollout store (Issue #5976) and the node registry store (Issue #3763).
+// the rollout store (Issue #5976), the upgrade store (Issue #5977) and the node
+// registry store (Issue #3763).
 func wireClusterSharedStores(w *storageWiring, sm *StorageManager, p StorageProvider, cfg map[string]interface{}) {
+	//duplication:justified pkg/storage/interfaces/provider.go -- one wireOptionalStore call per optional store; the calls share a shape by design and differ only in the store field, label and creator
 	wireOptionalStore(w, p, &sm.nonceStore, clusterWiringPrefix+"nonce store", cfg, NonceStoreCreator.CreateNonceStore)
 	wireOptionalStore(w, p, &sm.leaseStore, clusterWiringPrefix+"lease store", cfg, LeaseStoreCreator.CreateLeaseStore)
 	wireOptionalStore(w, p, &sm.routingStore, clusterWiringPrefix+"routing store", cfg, RoutingStoreCreator.CreateRoutingStore)
 	wireOptionalStore(w, p, &sm.scriptRunStore, clusterWiringPrefix+"script run store", cfg, ScriptRunStoreCreator.CreateScriptRunStore)
 	wireOptionalStore(w, p, &sm.rolloutStore, clusterWiringPrefix+"rollout store", cfg, RolloutStoreCreator.CreateRolloutStore)
+	wireOptionalStore(w, p, &sm.upgradeStore, clusterWiringPrefix+"upgrade store", cfg, UpgradeStoreCreator.CreateUpgradeStore)
 	wireOptionalStore(w, p, &sm.executionQueueStore, clusterWiringPrefix+"execution queue store", cfg, ExecutionQueueStoreCreator.CreateExecutionQueueStore)
 	wireOptionalStore(w, p, &sm.nodeRegistryStore, clusterWiringPrefix+"node registry store", cfg, NodeRegistryStoreCreator.CreateNodeRegistryStore)
 }
@@ -1549,6 +1582,7 @@ func wireOSSSQLiteExtraStores(w *storageWiring, sm *StorageManager, p StoragePro
 	wireOptionalStore(w, p, &sm.leaseStore, "failed to create lease store (sqlite)", cfg, LeaseStoreCreator.CreateLeaseStore)
 	wireOptionalStore(w, p, &sm.routingStore, "failed to create routing store (sqlite)", cfg, RoutingStoreCreator.CreateRoutingStore)
 	wireOptionalStore(w, p, &sm.nodeRegistryStore, "failed to create node registry store (sqlite)", cfg, NodeRegistryStoreCreator.CreateNodeRegistryStore)
+	wireOptionalStore(w, p, &sm.upgradeStore, "failed to create upgrade store (sqlite)", cfg, UpgradeStoreCreator.CreateUpgradeStore)
 }
 
 // CreateOSSStorageManager composes the OSS storage tier from a flatfile provider (for
@@ -1606,6 +1640,12 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	if opener, ok := sqProvider.(BusinessStoreOpener); ok {
 		if err := applyOSSBundle(sm, opener, sqliteConnStr); err != nil {
 			return nil, err
+		}
+		// The bundle carries no upgrade store; it comes from the provider's own
+		// creator on the same file (Issue #5977).
+		wireOptionalStore(w, sqProvider, &sm.upgradeStore, "failed to create upgrade store (sqlite)", sqliteCfg, UpgradeStoreCreator.CreateUpgradeStore)
+		if w.err != nil {
+			return nil, w.err
 		}
 		constructed = true
 		return sm, nil

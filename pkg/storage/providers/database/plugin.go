@@ -57,6 +57,7 @@ var (
 	_ interfaces.RoutingStoreCreator         = (*DatabaseProvider)(nil)
 	_ interfaces.ScriptRunStoreCreator       = (*DatabaseProvider)(nil)
 	_ interfaces.RolloutStoreCreator         = (*DatabaseProvider)(nil)
+	_ interfaces.UpgradeStoreCreator         = (*DatabaseProvider)(nil)
 	_ interfaces.ExecutionQueueStoreCreator  = (*DatabaseProvider)(nil)
 	_ interfaces.CertRevocationStoreCreator  = (*DatabaseProvider)(nil)
 	_ interfaces.SigningCursorStoreCreator   = (*DatabaseProvider)(nil)
@@ -409,6 +410,22 @@ func (p *DatabaseProvider) CreateRolloutStore(config map[string]interface{}) (bu
 	store, err := NewDatabaseRolloutStore(db, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database rollout store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateUpgradeStore creates the PostgreSQL-backed UpgradeStore shared by every
+// controller node (Issue #5977). Implements interfaces.UpgradeStoreCreator.
+//
+//duplication:justified pkg/storage/providers/database/plugin.go -- same sharedPool-then-construct shape as CreateScriptRunStore and the other Create*Store methods; each returns a different store type
+func (p *DatabaseProvider) CreateUpgradeStore(config map[string]interface{}) (business.UpgradeStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseUpgradeStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database upgrade store: %w", err)
 	}
 	return store, nil
 }

@@ -34,6 +34,9 @@ var (
 	// build at the call site (Issue #3755).
 	_ interfaces.NonceStoreCreator   = (*SQLiteProvider)(nil)
 	_ interfaces.RoutingStoreCreator = (*SQLiteProvider)(nil)
+
+	// SQLite holds steward upgrade records in its own file (Issue #5977).
+	_ interfaces.UpgradeStoreCreator = (*SQLiteProvider)(nil)
 )
 
 // SQLiteProvider implements the StorageProvider interface using SQLite for persistence.
@@ -228,6 +231,28 @@ func getPath(config map[string]interface{}) string {
 		return v
 	}
 	return ":memory:"
+}
+
+// CreateUpgradeStore returns a SQLite-backed UpgradeStore (Issue #5977), the
+// single-node home of steward upgrade records. It opens its own connection to the
+// configured file, as the controller did before the store moved behind the
+// provider. Implements interfaces.UpgradeStoreCreator.
+func (p *SQLiteProvider) CreateUpgradeStore(config map[string]interface{}) (business.UpgradeStore, error) {
+	return openUpgradeStore(context.Background(), "file:"+getPath(config))
+}
+
+// openUpgradeStore opens the upgrade store at dsn and creates its schema,
+// closing the handle again when the schema cannot be created.
+func openUpgradeStore(ctx context.Context, dsn string) (business.UpgradeStore, error) {
+	store, err := NewUpgradeStoreSQLFromDSN(dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.Initialize(ctx); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	return store, nil
 }
 
 // nowUTC returns the current time in UTC (facilitates testing overrides if needed).

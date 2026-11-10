@@ -108,6 +108,7 @@ and fall back to a node-local default:
 | `SigningCursorStoreCreator` | `certinterfaces.SigningCursorStore` | `pkg/cert`'s node-local file-backed signing cursor (ADR-031 Decision 1, Issue #3852) |
 | `ModuleApprovalStoreCreator` | `business.ModuleApprovalStore` | `ModuleCache`'s node-local file-backed `approval.yaml` (ADR-031 Decision 1, Issue #3886) |
 | `RateCounterStoreCreator` | `business.RateCounterStore` | the per-source rate limiters' and the operator-payload sign throttle's node-local in-memory counters (ADR-031 Decision 1, Issue #3896) |
+| `UpgradeStoreCreator` | `business.UpgradeStore` | nothing — no in-memory fallback; the steward upgrade endpoints answer `503 UPGRADE_STORE_UNAVAILABLE`. The database provider shares records across nodes; the SQLite provider serves a single node (Issue #5977) |
 
 `RateCounterStoreCreator` backs cluster-visible, fixed-window abuse-budget
 counters — the durable replacement for Issue #3761's `clusterBudgetDivisor`,

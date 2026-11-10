@@ -1805,6 +1805,67 @@ func (s DatabaseSchemas) CreateRolloutRecordsTable(ctx context.Context, db *sql.
 	return nil
 }
 
+// CreateUpgradeRecordsTable creates the cfgms_upgrade_records table with RLS
+// (Issue #5977): the durable state of steward upgrades and rollbacks, shared by
+// every controller node. Idempotent and additive only. Migration 016 documents
+// this schema. The (steward_id, created_at) and (tenant_id, created_at) indexes
+// serve the per-steward and per-tenant listings, newest first.
+func (s DatabaseSchemas) CreateUpgradeRecordsTable(ctx context.Context, db *sql.DB) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS cfgms_upgrade_records (
+			id                       TEXT NOT NULL PRIMARY KEY,
+			steward_id               TEXT NOT NULL,
+			tenant_id                TEXT NOT NULL,
+			version                  TEXT NOT NULL,
+			platform                 TEXT NOT NULL,
+			arch                     TEXT NOT NULL,
+			sha256                   TEXT NOT NULL,
+			status                   TEXT NOT NULL,
+			initiated_by_subject     TEXT NOT NULL,
+			initiated_by_tenant      TEXT NOT NULL,
+			initiated_by_auth_method TEXT NOT NULL,
+			publisher                TEXT NOT NULL,
+			signature_digest         TEXT NOT NULL,
+			bundle_signature         BYTEA NOT NULL,
+			created_at               TIMESTAMP WITH TIME ZONE NOT NULL,
+			operation_nonce          BYTEA,
+			dispatched_at            TIMESTAMP WITH TIME ZONE NOT NULL,
+			completed_at             TIMESTAMP WITH TIME ZONE,
+			error_message            TEXT NOT NULL DEFAULT ''
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_upgrade_records_steward_created ON cfgms_upgrade_records(steward_id, created_at DESC);",
+		"CREATE INDEX IF NOT EXISTS idx_upgrade_records_tenant_created ON cfgms_upgrade_records(tenant_id, created_at DESC);",
+		`ALTER TABLE cfgms_upgrade_records ENABLE ROW LEVEL SECURITY;`,
+		`ALTER TABLE cfgms_upgrade_records FORCE ROW LEVEL SECURITY;`,
+		`DROP POLICY IF EXISTS rls_read   ON cfgms_upgrade_records;`,
+		`DROP POLICY IF EXISTS rls_write  ON cfgms_upgrade_records;`,
+		`DROP POLICY IF EXISTS rls_update ON cfgms_upgrade_records;`,
+		`DROP POLICY IF EXISTS rls_delete ON cfgms_upgrade_records;`,
+		// SELECT: permissive when no tenant context (the by-ID read), filtered
+		// when a context is set.
+		`CREATE POLICY rls_read ON cfgms_upgrade_records FOR SELECT USING (
+			coalesce(current_setting('app.current_tenant', true), '') = ''
+			OR tenant_id = current_setting('app.current_tenant', true)
+		);`,
+		// INSERT/UPDATE/DELETE: the row must belong to the caller's current
+		// tenant; an unset tenant matches nothing (fail closed).
+		`CREATE POLICY rls_write ON cfgms_upgrade_records FOR INSERT WITH CHECK (
+			tenant_id = current_setting('app.current_tenant', true)
+		);`,
+		`CREATE POLICY rls_update ON cfgms_upgrade_records FOR UPDATE
+			USING (tenant_id = current_setting('app.current_tenant', true))
+			WITH CHECK (tenant_id = current_setting('app.current_tenant', true));`,
+		`CREATE POLICY rls_delete ON cfgms_upgrade_records FOR DELETE
+			USING (tenant_id = current_setting('app.current_tenant', true));`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("failed to create cfgms_upgrade_records table: %w", err)
+		}
+	}
+	return nil
+}
+
 // BackfillCommandRecordsDeliveryStatus adds the outbox delivery-lifecycle columns
 // to a pre-existing command_records table (Issue #3757, ADR-031 Decision 2,
 // migration 011). Safe to call on a table that already has these columns —
@@ -1965,6 +2026,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS cfgms_execution_queue;",
 		"DROP TABLE IF EXISTS cfgms_execution_grants;",
 		"DROP TABLE IF EXISTS cfgms_rollout_records;",
+		"DROP TABLE IF EXISTS cfgms_upgrade_records;",
 		"DROP TABLE IF EXISTS cfgms_script_run_jobs;",
 		"DROP TABLE IF EXISTS cfgms_script_runs;",
 		"DROP TABLE IF EXISTS cfgms_node_registry;",
