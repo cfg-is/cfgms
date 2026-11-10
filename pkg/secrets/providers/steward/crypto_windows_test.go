@@ -118,7 +118,9 @@ func TestUserEncryptor_BlobIsUserScopedAndMachineBound(t *testing.T) {
 	dir := t.TempDir()
 	plaintext := []byte("admin credential bundle")
 
-	enc, err := NewUserEncryptor(dir)
+	// The raw platform encryptor: NewUserEncryptor prepends the format header,
+	// and the DPAPI header assertions below need the headerless DPAPI blob.
+	enc, err := newUserEncryptor(dir)
 	require.NoError(t, err)
 	blob, err := enc.Encrypt(plaintext)
 	require.NoError(t, err)

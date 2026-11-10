@@ -26,6 +26,52 @@ import (
 // ErrLocked is returned when the credential exists but is currently locked and cannot be read.
 var ErrLocked = errors.New("credential: credential is locked")
 
+// storeError is returned by Unlock when a stored credential cannot be decrypted. It
+// carries an operator-facing message and matches its steward sentinel and ErrLocked
+// under errors.Is. It deliberately does not wrap the platform error, whose text may
+// carry system detail.
+type storeError struct {
+	msg      string
+	sentinel error
+}
+
+func (e *storeError) Error() string { return e.msg }
+
+func (e *storeError) Is(target error) bool {
+	return target == e.sentinel || target == ErrLocked
+}
+
+// IsStoreFormatError reports whether err is one of the three specific store errors
+// (older format, different user or machine, corrupt) whose message already tells the
+// operator what to do.
+func IsStoreFormatError(err error) bool {
+	return errors.Is(err, steward.ErrLegacyFormat) ||
+		errors.Is(err, steward.ErrWrongProtectionScope) ||
+		errors.Is(err, steward.ErrCorrupt)
+}
+
+// decryptError maps a steward decrypt error to the operator-facing store error.
+func decryptError(name string, err error) error {
+	switch {
+	case errors.Is(err, steward.ErrLegacyFormat):
+		return &storeError{
+			msg:      fmt.Sprintf("credential store entry %q was written by an older cfg format and is not migrated; re-run cfg connect or cfg credential request-signing-cert", name),
+			sentinel: steward.ErrLegacyFormat,
+		}
+	case errors.Is(err, steward.ErrWrongProtectionScope):
+		return &storeError{
+			msg:      fmt.Sprintf("credential store entry %q is protected for a different user or machine; run cfg as the user who stored it, or store it again here", name),
+			sentinel: steward.ErrWrongProtectionScope,
+		}
+	case errors.Is(err, steward.ErrCorrupt):
+		return &storeError{
+			msg:      fmt.Sprintf("credential store entry %q is corrupt or unreadable; remove it and store it again", name),
+			sentinel: steward.ErrCorrupt,
+		}
+	}
+	return fmt.Errorf("%w: decrypt failed for %q: %w", ErrLocked, name, err)
+}
+
 // ErrNoUnlocker is returned when no unlocker is configured for the requested connection.
 var ErrNoUnlocker = errors.New("credential: no unlocker configured for this connection")
 
@@ -67,9 +113,9 @@ func ValidateCredentialName(name string) error {
 // credential store's user encryptor (user-scope DPAPI bound to the machine's MachineGuid on
 // Windows, AES-256-GCM with HKDF on Linux/macOS).
 // dir is the credentials directory where <name>.enc files reside; a salt file for key
-// derivation is also maintained within dir. A credential written under the earlier
-// machine-scope DPAPI scheme does not decrypt and Unlock reports ErrLocked; there is no
-// fallback decryption path.
+// derivation is also maintained within dir. A credential written by an older cfg
+// (no format header, including the earlier machine-scope DPAPI scheme) does not decrypt
+// and Unlock reports steward.ErrLegacyFormat; there is no fallback decryption path.
 func NewMachineUnlocker(dir string) (CredentialUnlocker, error) {
 	enc, err := steward.NewUserEncryptor(dir)
 	if err != nil {
@@ -87,7 +133,10 @@ type machineUnlocker struct {
 }
 
 // Unlock reads <dir>/<name>.enc, decrypts it with the machine-bound key, and returns
-// the plaintext bundle bytes. Returns ErrLocked when the file is missing or decryption fails.
+// the plaintext bundle bytes. Returns ErrLocked when the file is missing. When decryption
+// fails the error names the credential and matches steward.ErrLegacyFormat (older cfg
+// format), steward.ErrWrongProtectionScope (different user or machine) or
+// steward.ErrCorrupt; each also matches ErrLocked.
 func (m *machineUnlocker) Unlock(_ context.Context, name string) ([]byte, error) {
 	if err := ValidateCredentialName(name); err != nil {
 		return nil, err
@@ -103,7 +152,7 @@ func (m *machineUnlocker) Unlock(_ context.Context, name string) ([]byte, error)
 	}
 	plain, err := m.enc.Decrypt(ciphertext)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decrypt failed for %q: %w", ErrLocked, name, err)
+		return nil, decryptError(name, err)
 	}
 	return plain, nil
 }

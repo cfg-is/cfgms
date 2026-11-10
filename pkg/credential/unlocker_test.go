@@ -7,7 +7,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -97,49 +96,95 @@ func TestMachineUnlocker_MissingFileReturnsErrLocked(t *testing.T) {
 	assert.ErrorIs(t, err, credential.ErrLocked)
 }
 
-// TestMachineUnlocker_TamperedCiphertextReturnsErrLocked verifies Unlock wraps ErrLocked
-// when decryption fails due to a corrupted .enc file.
-func TestMachineUnlocker_TamperedCiphertextReturnsErrLocked(t *testing.T) {
+// writeStoreBlob writes blob as <dir>/<name>.enc.
+func writeStoreBlob(t *testing.T, dir, name string, blob []byte) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name+".enc"), blob, 0600))
+}
+
+// requireStoreError asserts err is the specific store error: the message text, the
+// matching sentinel only, and none of the bare locked text or raw platform text.
+func requireStoreError(t *testing.T, err error, sentinel error, wantMsg string) {
+	t.Helper()
+	require.Error(t, err)
+	assert.Equal(t, wantMsg, err.Error())
+	assert.ErrorIs(t, err, sentinel)
+	for _, other := range []error{steward.ErrLegacyFormat, steward.ErrWrongProtectionScope, steward.ErrCorrupt} {
+		if other != sentinel {
+			assert.NotErrorIs(t, err, other)
+		}
+	}
+	assert.True(t, credential.IsStoreFormatError(err))
+	assert.NotContains(t, err.Error(), "credential is locked")
+	for _, raw := range []string{"decryption failed", "message authentication", "CryptUnprotectData", "data is invalid"} {
+		assert.NotContains(t, err.Error(), raw)
+	}
+}
+
+// TestMachineUnlocker_CorruptBlobReturnsCorruptError covers a damaged .enc file
+// (flipped byte, truncated, empty).
+func TestMachineUnlocker_CorruptBlobReturnsCorruptError(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	enc, err := steward.NewUserEncryptor(tmpDir)
 	require.NoError(t, err)
-	ct, err := enc.Encrypt([]byte("original"))
+	good, err := enc.Encrypt([]byte("original"))
 	require.NoError(t, err)
 
-	// Tamper: flip last byte.
-	ct[len(ct)-1] ^= 0xFF
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "ctrl.enc"), ct, 0600))
+	flipped := append([]byte(nil), good...)
+	flipped[len(flipped)-1] ^= 0xFF
+	blobs := map[string][]byte{"flipped": flipped, "truncated": good[:len(good)-1], "empty": {}}
 
 	unlocker, err := credential.NewMachineUnlocker(tmpDir)
 	require.NoError(t, err)
-
-	_, err = unlocker.Unlock(context.Background(), "ctrl")
-	require.Error(t, err)
-	assert.ErrorIs(t, err, credential.ErrLocked)
+	for name, blob := range blobs {
+		t.Run(name, func(t *testing.T) {
+			writeStoreBlob(t, tmpDir, "ctrl", blob)
+			_, err := unlocker.Unlock(context.Background(), "ctrl")
+			requireStoreError(t, err, steward.ErrCorrupt,
+				`credential store entry "ctrl" is corrupt or unreadable; remove it and store it again`)
+		})
+	}
 }
 
-// TestMachineUnlocker_OldMachineScopeCredentialReturnsErrLocked verifies that a credential
-// written under the earlier machine-scope DPAPI scheme (the steward's encryptor) is not
-// silently decrypted: Unlock reports ErrLocked so the admin stores it again.
-func TestMachineUnlocker_OldMachineScopeCredentialReturnsErrLocked(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("only Windows has a separate machine-scope scheme; on Linux/macOS both encryptors are the same AES-256-GCM key")
-	}
+// TestMachineUnlocker_HeaderlessBlobReturnsOlderFormatError covers a blob written
+// by an older cfg (no format header), including the earlier machine-scope DPAPI
+// scheme on Windows: it is reported, never decrypted by a fallback.
+func TestMachineUnlocker_HeaderlessBlobReturnsOlderFormatError(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	old, err := steward.NewPlatformEncryptor(tmpDir)
 	require.NoError(t, err)
-	ct, err := old.Encrypt([]byte("bundle stored before the user-scope change"))
+	ct, err := old.Encrypt([]byte("bundle stored by an older cfg"))
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "ctrl.enc"), ct, 0600))
+	writeStoreBlob(t, tmpDir, "ctrl", ct)
 
 	unlocker, err := credential.NewMachineUnlocker(tmpDir)
 	require.NoError(t, err)
 
 	_, err = unlocker.Unlock(context.Background(), "ctrl")
-	require.Error(t, err)
-	assert.ErrorIs(t, err, credential.ErrLocked)
+	requireStoreError(t, err, steward.ErrLegacyFormat,
+		`credential store entry "ctrl" was written by an older cfg format and is not migrated; re-run cfg connect or cfg credential request-signing-cert`)
+}
+
+// TestMachineUnlocker_OtherScopeBlobReturnsWrongScopeError covers an intact blob
+// that this store's key cannot open: it was protected under another salt (and so
+// another user or machine).
+func TestMachineUnlocker_OtherScopeBlobReturnsWrongScopeError(t *testing.T) {
+	otherDir, tmpDir := t.TempDir(), t.TempDir()
+
+	other, err := steward.NewUserEncryptor(otherDir)
+	require.NoError(t, err)
+	blob, err := other.Encrypt([]byte("bundle stored elsewhere"))
+	require.NoError(t, err)
+	writeStoreBlob(t, tmpDir, "ctrl", blob)
+
+	unlocker, err := credential.NewMachineUnlocker(tmpDir)
+	require.NoError(t, err)
+
+	_, err = unlocker.Unlock(context.Background(), "ctrl")
+	requireStoreError(t, err, steward.ErrWrongProtectionScope,
+		`credential store entry "ctrl" is protected for a different user or machine; run cfg as the user who stored it, or store it again here`)
 }
 
 // TestMachineUnlocker_PathTraversalRejected verifies Unlock rejects names containing
