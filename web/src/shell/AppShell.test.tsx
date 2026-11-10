@@ -3,7 +3,7 @@
 
 import { useEffect, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { AuthProvider, useAuth } from '../auth/AuthContext.tsx'
 import FleetOverview from '../fleet/FleetOverview.tsx'
@@ -84,7 +84,7 @@ describe('AppShell', () => {
   it('renders sidebar navigation with Fleet, Modules, Config, Workflows, Scripts, Registration, Reports, Audit, and Accounts as links', () => {
     renderShell()
     expect(screen.getByRole('navigation')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /fleet/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /^fleet$/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /modules/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /config/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /workflows/i })).toBeInTheDocument()
@@ -106,6 +106,15 @@ describe('AppShell', () => {
     expect(screen.getByRole('link', { name: /^approvals$/i })).toHaveAttribute('href', '/approvals')
   })
 
+  it('renders the Fleet query entry directly under Fleet as a link to /osquery (Issue #5460)', () => {
+    renderShell()
+    const query = screen.getByRole('link', { name: /^fleet query$/i })
+    expect(query).toHaveAttribute('href', '/osquery')
+    const links = within(screen.getByRole('navigation')).getAllByRole('link')
+    const fleetIndex = links.indexOf(screen.getByRole('link', { name: /^fleet$/i }))
+    expect(links[fleetIndex + 1]).toBe(query)
+  })
+
   it('renders the API keys entry as a link to /api-keys (Issue #5441)', () => {
     renderShell()
     expect(screen.getByRole('link', { name: /^api keys$/i })).toHaveAttribute('href', '/api-keys')
@@ -122,7 +131,7 @@ describe('AppShell', () => {
   it('all nav items are real links; no soon-tagged placeholders remain (Issue #2732, #2934, #2935)', () => {
     renderShell()
     expect(screen.queryAllByText(/soon/i)).toHaveLength(0)
-    expect(screen.getByRole('link', { name: /fleet/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /^fleet$/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /modules/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /config/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /workflows/i })).toBeInTheDocument()
