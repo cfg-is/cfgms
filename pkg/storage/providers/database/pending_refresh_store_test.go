@@ -330,10 +330,10 @@ func seedLegacyPendingRefreshRequestsTable(t *testing.T) (*sql.DB, context.Conte
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
 
-	_, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS pending_refresh_requests")
+	err := dropTableForTest(ctx, db, "pending_refresh_requests")
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, _ = db.ExecContext(context.Background(), "DROP TABLE IF EXISTS pending_refresh_requests")
+		_ = dropTableForTest(context.Background(), db, "pending_refresh_requests")
 	})
 
 	_, err = db.ExecContext(ctx, legacyPendingRefreshRequestsSchemaPG)

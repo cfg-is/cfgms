@@ -637,10 +637,10 @@ func seedLegacyPendingRegistrationsTable(t *testing.T) (*sql.DB, context.Context
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
 
-	_, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS cfgms_pending_registrations")
+	err := dropTableForTest(ctx, db, "cfgms_pending_registrations")
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, _ = db.ExecContext(context.Background(), "DROP TABLE IF EXISTS cfgms_pending_registrations")
+		_ = dropTableForTest(context.Background(), db, "cfgms_pending_registrations")
 	})
 
 	_, err = db.ExecContext(ctx, legacyCfgmsPendingRegistrationsSchemaPG)
@@ -760,7 +760,7 @@ func TestCreatePendingRegistrationsTable_FreshTable(t *testing.T) {
 	schemas := NewDatabaseSchemas()
 	require.NoError(t, schemas.CreatePendingRegistrationsTable(ctx, db), "fresh table creation")
 	t.Cleanup(func() {
-		_, _ = db.ExecContext(context.Background(), "DROP TABLE IF EXISTS cfgms_pending_registrations")
+		_ = dropTableForTest(context.Background(), db, "cfgms_pending_registrations")
 	})
 
 	for _, col := range pgPendingDeviceIdentityColumns {
@@ -791,7 +791,7 @@ func TestCreatePendingRegistrationsTable_AlterFailurePropagates(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
 
-	_, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS cfgms_pending_registrations")
+	err := dropTableForTest(ctx, db, "cfgms_pending_registrations")
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `
 		CREATE VIEW cfgms_pending_registrations AS

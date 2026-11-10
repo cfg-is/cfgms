@@ -126,8 +126,15 @@ func TestStewardSignalsScrape(t *testing.T) {
 	// The built-in renderer still emits the connected-stewards series, so the
 	// full exposition has it exactly once alongside the new signals.
 	h := health.NewHandler(srv.healthCollector, health.NewAlertManager(health.DefaultThresholds(), health.SMTPConfig{}), health.NewTraceManager(time.Hour))
-	rec := httptest.NewRecorder()
-	h.HandlePrometheusMetrics(rec, httptest.NewRequest(http.MethodGet, "/api/v1/health/metrics/prometheus", nil))
+	// The collector runs its samplers before it stores the snapshot the
+	// built-in renderer reads, so the signal can be visible a moment before
+	// the snapshot is: wait for the snapshot rather than assume it.
+	var rec *httptest.ResponseRecorder
+	require.Eventually(t, func() bool {
+		rec = httptest.NewRecorder()
+		h.HandlePrometheusMetrics(rec, httptest.NewRequest(http.MethodGet, "/api/v1/health/metrics/prometheus", nil))
+		return strings.Contains(rec.Body.String(), "# TYPE cfgms_transport_connected_stewards ")
+	}, 5*time.Second, 10*time.Millisecond, "the collector must publish its first snapshot")
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, 1, strings.Count(rec.Body.String(), "# TYPE cfgms_transport_connected_stewards "))
 	assert.Contains(t, rec.Body.String(), "cfgms_stewards_heartbeat_fresh 2\n")

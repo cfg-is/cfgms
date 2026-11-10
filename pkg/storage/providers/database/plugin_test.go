@@ -11,10 +11,11 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
-	_ "github.com/lib/pq" // PostgreSQL driver
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -92,19 +93,103 @@ func getTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// setupTestDatabase creates a clean test database
+// keepSchemaEnv selects keep-schema mode. See the header of
+// schema_compat_apply_test.go for how it is used.
+const keepSchemaEnv = "CFGMS_TEST_KEEP_SCHEMA"
+
+// keepSchemaMode reports whether the package is running against a schema that a
+// different revision created, which tests must keep and only clear of data.
+func keepSchemaMode() bool {
+	return os.Getenv(keepSchemaEnv) == "1"
+}
+
+// skipInKeepSchemaMode skips the calling test in keep-schema mode. Tests that
+// need a fresh database or mutate shared schema state call it: in keep mode the
+// schema belongs to another revision and must survive the run untouched.
+func skipInKeepSchemaMode(t *testing.T, reason string) {
+	t.Helper()
+	if keepSchemaMode() {
+		t.Skip(reason)
+	}
+}
+
+// resetSchemaForTest returns the database to an empty state in the way the current
+// mode requires. By default every provider table is dropped, so the code under test
+// rebuilds the schema. In keep-schema mode no schema object is dropped: every table
+// in the current schema is truncated instead, except cfgms_schema_version so the
+// recorded version survives. Table names are read from information_schema at run
+// time rather than from a Go list, so tables belonging to the other revision, and
+// tables this revision's code does not know about, are cleared too.
+func resetSchemaForTest(ctx context.Context, db *sql.DB) error {
+	if !keepSchemaMode() {
+		// Every statement in DropAllTables uses IF EXISTS, so an absent table is not
+		// an error.
+		return NewDatabaseSchemas().DropAllTables(ctx, db)
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT table_name FROM information_schema.tables
+		WHERE table_schema = current_schema()
+		  AND table_type = 'BASE TABLE'
+		  AND table_name <> 'cfgms_schema_version'
+		ORDER BY table_name`)
+	if err != nil {
+		return fmt.Errorf("listing tables to truncate: %w", err)
+	}
+	var quoted []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scanning table name: %w", err)
+		}
+		quoted = append(quoted, pq.QuoteIdentifier(name))
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("listing tables to truncate: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("listing tables to truncate: %w", err)
+	}
+	if len(quoted) == 0 {
+		return nil
+	}
+
+	if _, err := db.ExecContext(ctx,
+		"TRUNCATE "+strings.Join(quoted, ", ")+" RESTART IDENTITY CASCADE"); err != nil {
+		return fmt.Errorf("truncating tables: %w", err)
+	}
+	return nil
+}
+
+// dropTableForTest drops one table, or in keep-schema mode truncates it (when it
+// exists) so the table's structure is left alone.
+func dropTableForTest(ctx context.Context, db *sql.DB, table string) error {
+	if !keepSchemaMode() {
+		_, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS "+pq.QuoteIdentifier(table))
+		return err
+	}
+	var regclass sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT to_regclass($1)::text`, pq.QuoteIdentifier(table)).Scan(&regclass); err != nil {
+		return err
+	}
+	if !regclass.Valid {
+		return nil
+	}
+	_, err := db.ExecContext(ctx, "TRUNCATE "+pq.QuoteIdentifier(table)+" RESTART IDENTITY CASCADE")
+	return err
+}
+
+// setupTestDatabase returns a connection to a clean test database: the schema is
+// dropped by default, or kept and emptied in keep-schema mode (resetSchemaForTest).
 func setupTestDatabase(t *testing.T) *sql.DB {
 	db := getTestDB(t)
 
-	// Clean up any existing tables
-	schemas := NewDatabaseSchemas()
-	ctx := context.Background()
-
-	// Every statement in DropAllTables uses IF EXISTS, so an absent table is not
-	// an error. Any failure here (locks, permissions, lost connection) leaves the
-	// database dirty and makes every later test fail with a misleading
-	// "already exists"; surface it as the real root cause instead.
-	require.NoError(t, schemas.DropAllTables(ctx, db), "failed to drop existing test tables")
+	// Any failure here (locks, permissions, lost connection) leaves the database
+	// dirty and makes every later test fail with a misleading "already exists";
+	// surface it as the real root cause instead.
+	require.NoError(t, resetSchemaForTest(context.Background(), db), "failed to reset test database")
 
 	return db
 }
@@ -634,6 +719,10 @@ func BenchmarkDatabaseProvider_CreateStores(b *testing.B) {
 // omitting a table the provider creates (Issue #4519): a leftover table makes a
 // second run of the package against the same database fail on stale rows.
 func TestDropAllTables_RemovesEveryProviderTable(t *testing.T) {
+	// This tests the destructive clean-reinstall code path, not the compat
+	// contract, and it drops every provider table out from under the revision
+	// whose schema a keep-mode run is exercising.
+	skipInKeepSchemaMode(t, "tests destructive DropAllTables clean-reinstall code, not the schema compat contract")
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 
