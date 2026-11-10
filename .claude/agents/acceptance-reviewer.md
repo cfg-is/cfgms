@@ -323,7 +323,7 @@ PASS requires BOTH: the Findings table is empty AND every Code-Reference Verific
 
 ```
 
-If `po-act.sh enqueue` exits non-zero (`ENQUEUE_FAILED`), do NOT mark the story Done. Surface the failure: post a one-line comment on the PR noting the enqueue gate refused. Common causes the script's retry can't recover from: required reviewer not yet assigned, CODEOWNERS gate, or a CI check newly going red between PASS verdict and enqueue call.
+If `po-act.sh enqueue` exits non-zero (`ENQUEUE_FAILED`), do NOT mark the story Done. Surface the failure: post a one-line comment on the PR noting the enqueue gate refused. Common causes the script's retry can't recover from: required reviewer not yet assigned, CODEOWNERS gate, or a CI check newly going red between PASS verdict and enqueue call. `ENQUEUED:<PR>` now means the PR is in the merge queue or auto-merge is armed with SQUASH; an auto-merge armed with MERGE or REBASE (which the SQUASH-only queue silently never admits) is re-armed as SQUASH once and reported as `AUTOMERGE_METHOD_FIXED:<PR>:<old>->SQUASH` before `ENQUEUED:<PR>` — that line is not a failure. If it cannot be switched, the script exits non-zero with `ENQUEUE_FAILED`.
 
 Mark the story as done in the project queue:
 ```bash
