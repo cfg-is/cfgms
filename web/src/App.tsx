@@ -33,6 +33,7 @@
  *   /api-keys        → AppShell layout → ApiKeysView (Issue #5441)
  *   /automation/grants → AppShell layout → AutomationGrantsView (Issue #5855)
  *   /directory/users, /directory/groups → AppShell layout → UsersPage / GroupsPage (Issue #5565)
+ *   /directory/credentials → AppShell layout → CredentialsPage (Issue #5566)
  *   /osquery         → AppShell layout → OsqueryView (Issue #5460)
  *   /cases           → AppShell layout → CaseListView (Story #3614)
  *   /cases/:id       → AppShell layout → CockpitView (Story #3608)
@@ -95,6 +96,7 @@ import CockpitView from './cockpit/CockpitView.tsx'
 import CaseListView from './cockpit/CaseListView.tsx'
 import UsersPage from './directory/UsersPage.tsx'
 import GroupsPage from './directory/GroupsPage.tsx'
+import CredentialsPage from './directory/CredentialsPage.tsx'
 
 function App() {
   return (
@@ -144,6 +146,7 @@ function App() {
                   <Route path="automation/grants" element={<AutomationGrantsView />} />
                   <Route path="directory/users" element={<UsersPage />} />
                   <Route path="directory/groups" element={<GroupsPage />} />
+                  <Route path="directory/credentials" element={<CredentialsPage />} />
                   <Route path="osquery" element={<OsqueryView />} />
                   <Route path="cases" element={<CaseListView />} />
                   <Route path="cases/:id" element={<CockpitView />} />
