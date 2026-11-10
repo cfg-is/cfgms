@@ -439,6 +439,31 @@ nav a.soon .tag {
   max-width: 340px;
 }
 
+/* Show-once secret panels (automation grant credential, registration token modal). */
+.notice-warn {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--state-warn-bg);
+  color: var(--state-warn);
+  border: 1px solid var(--state-warn);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+.secret-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.secret-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  white-space: normal;
+}
+
 @media (min-width: 1024px) {
   .shell {
     grid-template-columns: 250px 1fr;

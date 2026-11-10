@@ -47,6 +47,7 @@ const NAV_ITEMS = [
   { label: 'Certificates', to: '/certificates', soon: false },
   { label: 'Installer', to: '/installer', soon: false },
   { label: 'API keys', to: '/api-keys', soon: false },
+  { label: 'Automation grants', to: '/automation/grants', soon: false },
   { label: 'Tenants', to: '/tenants', soon: false },
   { label: 'Support access', to: '/support-access', soon: false },
 ] as const
