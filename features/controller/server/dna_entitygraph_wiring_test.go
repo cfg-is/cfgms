@@ -54,6 +54,7 @@ import (
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/entitygraph/writers/dnasync"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 // ─── test doubles: mTLS peer context ───────────────────────────────────────
@@ -313,7 +314,7 @@ func TestWireDNAEntityGraph_DeltaCommitReachesEntityGraph(t *testing.T) {
 	claimedRoot, err := stewarddna.AggregateRoot(prospective)
 	require.NoError(t, err)
 
-	dnaHandler := controllerTransport.NewDNAHandler(logging.NewNoopLogger(), controllerTransport.NewTenantQueue(), nil).
+	dnaHandler := controllerTransport.NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil).
 		WithPartialSync(store, wiringNoopPublisher{}).
 		WithHostPartialSync(true)
 	svc.wireDNAEntityGraph(dnaHandler)
@@ -372,7 +373,7 @@ func TestWireDNAEntityGraph_ClusteredVMRecordedUnderClusterAuthority(t *testing.
 	claimedRoot, err := stewarddna.AggregateRoot(prospective)
 	require.NoError(t, err)
 
-	dnaHandler := controllerTransport.NewDNAHandler(logging.NewNoopLogger(), controllerTransport.NewTenantQueue(), nil).
+	dnaHandler := controllerTransport.NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil).
 		WithPartialSync(store, wiringNoopPublisher{}).
 		WithHostPartialSync(true)
 	svc.wireDNAEntityGraph(dnaHandler)
@@ -408,7 +409,7 @@ func TestWireDNAEntityGraph_NilWriter_LogsWarningAndSkipsSilently(t *testing.T) 
 	logger := logging.NewCapturingLogger()
 	svc := &Server{logger: logger}
 
-	dnaHandler := controllerTransport.NewDNAHandler(logger, controllerTransport.NewTenantQueue(), nil)
+	dnaHandler := controllerTransport.NewDNAHandler(logger, tenantqueue.NewTenantQueue(), nil)
 	svc.wireDNAEntityGraph(dnaHandler)
 
 	assert.Equal(t, 1, logger.WarnCount(),
@@ -448,7 +449,7 @@ func TestWireDNAEntityGraph_WiredPath_NoWarning(t *testing.T) {
 	require.NoError(t, err)
 	svc.egDNAWriter = writer
 
-	dnaHandler := controllerTransport.NewDNAHandler(logger, controllerTransport.NewTenantQueue(), nil)
+	dnaHandler := controllerTransport.NewDNAHandler(logger, tenantqueue.NewTenantQueue(), nil)
 	svc.wireDNAEntityGraph(dnaHandler)
 
 	assert.Equal(t, 0, logger.WarnCount(),

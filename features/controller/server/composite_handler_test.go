@@ -12,6 +12,7 @@ import (
 	stewardosquery "github.com/cfgis/cfgms/features/controller/osquery"
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -197,7 +198,7 @@ func TestComposite_SyncDNA_NilHandler(t *testing.T) {
 func TestComposite_SyncDNA_WithHandler(t *testing.T) {
 	cp := newRecordingHandler()
 	logger := logging.NewNoopLogger()
-	dnaHandler := controllerTransport.NewDNAHandler(logger, controllerTransport.NewTenantQueue(), nil)
+	dnaHandler := controllerTransport.NewDNAHandler(logger, tenantqueue.NewTenantQueue(), nil)
 	composite := newCompositeTransportServer(cp, logger)
 	composite.SetDNAHandler(dnaHandler)
 
@@ -220,7 +221,7 @@ func TestComposite_BulkTransfer_NilHandler(t *testing.T) {
 func TestComposite_BulkTransfer_WithHandler(t *testing.T) {
 	cp := newRecordingHandler()
 	logger := logging.NewNoopLogger()
-	bulkHandler := controllerTransport.NewBulkHandler(logger, controllerTransport.NewTenantQueue())
+	bulkHandler := controllerTransport.NewBulkHandler(logger, tenantqueue.NewTenantQueue())
 	composite := newCompositeTransportServer(cp, logger)
 	composite.SetBulkHandler(bulkHandler)
 
@@ -239,7 +240,7 @@ func TestComposite_FetchModuleBundle_Routing(t *testing.T) {
 	assert.Equal(t, codes.Unimplemented, status.Code(err))
 
 	// Unwired dependencies are fine here: authentication fails before any is used.
-	composite.SetModuleBundleHandler(controllerTransport.NewModuleBundleHandler(nil, nil, nil, controllerTransport.NewTenantQueue(), logging.NewNoopLogger()))
+	composite.SetModuleBundleHandler(controllerTransport.NewModuleBundleHandler(nil, nil, nil, tenantqueue.NewTenantQueue(), logging.NewNoopLogger()))
 	err = composite.FetchModuleBundle(&transportpb.FetchModuleBundleRequest{}, &emptyModuleBundleStream{ctx: context.Background()})
 	require.Error(t, err)
 	assert.Equal(t, codes.Unauthenticated, status.Code(err))

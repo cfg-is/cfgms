@@ -18,14 +18,14 @@ import (
 // TenantAdmission enforces a per-tenant concurrency limit on the steward
 // connect (Register) and heartbeat (ControlChannel) ingest paths, composing with
 // the same admission mechanism the DNA sync path already uses
-// (features/controller/transport.TenantQueue) so one tenant cannot exhaust a
+// (pkg/transport/tenantqueue.TenantQueue) so one tenant cannot exhaust a
 // shared cell's connect/heartbeat capacity (Issue #3759, ADR-031 Decision 6).
 //
-// The interface is declared here rather than importing TenantQueue directly:
-// pkg/controlplane is a central provider (CLAUDE.md Central Provider System) and
-// must never depend on a features/ package. *TenantQueue already exposes exactly
-// this Acquire/Release shape for the DNA path, so it satisfies TenantAdmission
-// without any change — server.go wires a *TenantQueue in here.
+// The interface is declared here so the provider depends only on the narrow
+// Acquire/Release shape it uses, not on the queue implementation.
+// *tenantqueue.TenantQueue already exposes exactly this shape for the DNA path,
+// so it satisfies TenantAdmission without any change — server.go wires a
+// *tenantqueue.TenantQueue in here.
 //
 // "Composing with" means the same type, the same per-tenant limit and the same
 // acquire/release discipline — not the same instance. server.go deliberately

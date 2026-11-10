@@ -31,6 +31,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/entitygraph/writers/dnasync"
 	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 // CommandPublisher is the narrow slice of *commands.Publisher needed by
@@ -122,7 +123,7 @@ type DNAPersister interface {
 // DNAHandler handles DNA sync RPCs from stewards.
 type DNAHandler struct {
 	logger    logging.Logger
-	queue     *TenantQueue
+	queue     *tenantqueue.TenantQueue
 	persister DNAPersister
 
 	// Partial-sync protocol fields (ADR-017 §7). Both nil when partial-sync
@@ -195,7 +196,7 @@ func (h *DNAHandler) recordDeltaRequest(stewardID, claimedRoot string, requested
 
 // NewDNAHandler creates a new DNA sync handler. persister may be nil to disable
 // persistence (the handler then only receives + validates the stream).
-func NewDNAHandler(logger logging.Logger, queue *TenantQueue, persister DNAPersister) *DNAHandler {
+func NewDNAHandler(logger logging.Logger, queue *tenantqueue.TenantQueue, persister DNAPersister) *DNAHandler {
 	return &DNAHandler{logger: logger, queue: queue, persister: persister}
 }
 
@@ -432,7 +433,7 @@ func (b *dnaStreamBudget) admit(chunk *transportpb.DNAChunk) error {
 // Per-tenant back-pressure: after steward ID validation on the first chunk,
 // Acquire is called with the registry-resolved tenant (or quarantineQueueKey for
 // unresolved peers, never the wire tenant_id). If that queue is full
-// (MaxConcurrentPerTenant in-flight), the RPC is rejected with ResourceExhausted.
+// (tenantqueue.MaxConcurrentPerTenant in-flight), the RPC is rejected with ResourceExhausted.
 //
 // Branch on is_delta:
 //   - false (full snapshot): reassembled and persisted via the configured DNAPersister.

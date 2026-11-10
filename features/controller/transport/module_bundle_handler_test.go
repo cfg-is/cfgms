@@ -41,6 +41,7 @@ import (
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/testutil"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 // ---------------------------------------------------------------------------
@@ -94,7 +95,7 @@ type moduleFixture struct {
 	cache    *cache.ModuleCache
 	workflow *approval.ApprovalWorkflow
 	store    *failableApprovalStore
-	queue    *TenantQueue
+	queue    *tenantqueue.TenantQueue
 	h        *ModuleBundleHandler
 }
 
@@ -113,7 +114,7 @@ func newModuleFixture(t *testing.T) *moduleFixture {
 	store := &failableApprovalStore{ModuleApprovalStore: pkgtesting.SetupTestModuleApprovalStore()}
 	mc.SetApprovalStore(store)
 
-	queue := NewTenantQueue()
+	queue := tenantqueue.NewTenantQueue()
 	return &moduleFixture{
 		t:        t,
 		ca:       newTestCA(t),
@@ -529,13 +530,13 @@ func TestModuleBundle_ConcurrentStreamLimit(t *testing.T) {
 	require.NoError(t, err, "slots are released when streams finish")
 }
 
-// TenantQueue back-pressure applies per tenant.
-func TestModuleBundle_TenantQueueBackPressure(t *testing.T) {
+// tenant queue back-pressure applies per tenant.
+func TestModuleBundle_TenantBackPressure(t *testing.T) {
 	f := newModuleFixture(t)
 	f.ingest(testutil.BundleOptions{}, true)
 	f.steward("steward-a", "tenant-x", requireWidget)
 
-	for i := 0; i < MaxConcurrentPerTenant; i++ {
+	for i := 0; i < tenantqueue.MaxConcurrentPerTenant; i++ {
 		require.NoError(t, f.queue.Acquire("tenant-x"))
 	}
 	st, err := f.fetch("steward-a", req("1.0.0", "linux-amd64"))

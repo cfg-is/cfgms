@@ -1145,7 +1145,7 @@ These fields must remain distinct. `HeartbeatTimeout` is intentionally short for
 ### Per-Tenant Ingest Admission Control (Issue #3759, ADR-031 Decision 6)
 
 Steward ingest is admission-controlled per tenant by
-`features/controller/transport.TenantQueue` — a per-tenant concurrency
+`pkg/transport/tenantqueue.TenantQueue` — a per-tenant concurrency
 semaphore, `MaxConcurrentPerTenant` (32) in-flight slots per tenant, non-blocking
 `Acquire`/`Release`. Five entry points are gated on a cell: **connect**
 (`Register`), **heartbeat** (`ControlChannel`'s Heartbeat message), **event**
@@ -1192,11 +1192,10 @@ split by how much the controller trusts the bucket key each path uses:
   and heartbeat paths above compose with, by reusing the same type, the same
   limit and the same acquire/release discipline.
 
-Because `pkg/controlplane` is a central provider and must never import a
-`features/` package (Central Provider System, CLAUDE.md), the gRPC provider
-declares its own narrow `TenantAdmission` interface (`Acquire`/`Release`) rather
-than importing `TenantQueue` directly; `*TenantQueue` satisfies it structurally
-with no changes. `grpc.WithTenantAdmission(queue)` injects the gate — nil (the
+The gRPC provider declares its own narrow `TenantAdmission` interface
+(`Acquire`/`Release`) rather than depending on the queue type; `*TenantQueue`
+(`pkg/transport/tenantqueue`) satisfies it structurally with no changes.
+`grpc.WithTenantAdmission(queue)` injects the gate — nil (the
 default) disables admission control entirely, matching pre-#3759 behavior.
 
 **Why two instances and not one.** A shared queue makes the bucket key an

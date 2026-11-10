@@ -21,6 +21,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/cfgis/cfgms/pkg/testutil"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 // bulkWiringCP is the control plane under both the heartbeat service and the
@@ -113,7 +114,7 @@ func TestWireDNABulkLane_HeartbeatReachesHandlerAndCommandIsPublished(t *testing
 		observeManifestProvider: &moduleManifestAdapter{cache: perObjectCache(t)},
 	}
 
-	h := controllerTransport.NewDNAHandler(logging.NewNoopLogger(), controllerTransport.NewTenantQueue(), nil).
+	h := controllerTransport.NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil).
 		WithTenantResolver(wiringTenants{"steward-1": "tenant-1"})
 	srv.wireDNABulkLane(h)
 
@@ -138,7 +139,7 @@ func TestWireDNABulkLane_MissingDependencyLeavesLaneOff(t *testing.T) {
 	t.Cleanup(func() { _ = hb.Stop(context.Background()) })
 
 	srv := &Server{logger: logging.NewNoopLogger(), heartbeatService: hb} // no storage, no publisher
-	h := controllerTransport.NewDNAHandler(logging.NewNoopLogger(), controllerTransport.NewTenantQueue(), nil)
+	h := controllerTransport.NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil)
 	srv.wireDNABulkLane(h)
 
 	require.NoError(t, cp.hbHandle(context.Background(), &cpTypes.Heartbeat{

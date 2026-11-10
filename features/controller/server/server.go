@@ -21,6 +21,7 @@ import (
 	"time"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -3485,7 +3486,7 @@ func (s *Server) newCompositeHandler(cpHandler transportpb.StewardTransportServe
 
 // newDNAHandler builds the DNA handler on the given admission queue and wires
 // its entity-graph write path, partial-sync detection and bulk lane.
-func (s *Server) newDNAHandler(tenantQueue *controllerTransport.TenantQueue) *controllerTransport.DNAHandler {
+func (s *Server) newDNAHandler(tenantQueue *tenantqueue.TenantQueue) *controllerTransport.DNAHandler {
 	dnaHandler := controllerTransport.NewDNAHandler(s.logger, tenantQueue, s.controllerService)
 	// Issue #4346: bind the queue key to the peer's registered tenant rather
 	// than the first chunk's wire-supplied tenant_id, which is steward-supplied
@@ -6794,7 +6795,7 @@ func newDataPlaneConfigHandler(
 
 // wirePullHandlers wires the steward-initiated pull RPCs whose dependencies are
 // optional, each gated on the lockdown predicate (Issue #5666).
-func (s *Server) wirePullHandlers(composite *compositeTransportServer, tenantQueue *controllerTransport.TenantQueue) {
+func (s *Server) wirePullHandlers(composite *compositeTransportServer, tenantQueue *tenantqueue.TenantQueue) {
 	// Issue #4985: FetchModuleBundle serves approved bundles to the steward
 	// whose own configuration requires them. It shares the DNA/bulk admission
 	// queue so a bucket exhausted by module fetches cannot starve connects.

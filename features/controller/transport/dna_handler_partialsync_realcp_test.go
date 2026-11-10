@@ -34,6 +34,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
+	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
 )
 
 // nonDispatchWindow is how long a test waits before concluding that no command was
@@ -215,7 +216,7 @@ func newPartialSyncEnv(t *testing.T, stewardID string) *partialSyncEnv {
 // handler returns a DNAHandler wired for partial sync against store and this
 // environment's real signing publisher.
 func (e *partialSyncEnv) handler(store FragmentDeltaStore) *DNAHandler {
-	return NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil).
+	return NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil).
 		WithPartialSync(store, e.publisher).
 		WithHostPartialSync(true)
 }
@@ -492,7 +493,7 @@ func TestDNAHandler_HeartbeatRoot_RealChain_DispatchFailure_ClearsClaim(t *testi
 	store := NewInMemoryFragmentDeltaStore()
 	store.SetManifest(stewardID, fragmentsToManifest(makeTestFragments(2)))
 
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil).
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil).
 		WithPartialSync(store, publisher).
 		WithHostPartialSync(true)
 
@@ -511,7 +512,7 @@ func TestDNAHandler_HeartbeatRoot_NoPublisher_SendsNothing(t *testing.T) {
 	store := NewInMemoryFragmentDeltaStore()
 	store.SetManifest("steward-nopub", fragmentsToManifest(makeTestFragments(2)))
 
-	h := NewDNAHandler(logging.NewNoopLogger(), NewTenantQueue(), nil)
+	h := NewDNAHandler(logging.NewNoopLogger(), tenantqueue.NewTenantQueue(), nil)
 	h.HandleHeartbeatRoot(context.Background(), "steward-nopub",
 		"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
 
