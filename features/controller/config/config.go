@@ -996,8 +996,7 @@ type ClusterStorageConfig struct {
 // StorageConfig contains global storage provider configuration
 type StorageConfig struct {
 	// Provider specifies which storage provider to use (database, flatfile, sqlite).
-	// The "git" provider is no longer supported; run "cfg storage migrate --from git --to flatfile"
-	// to migrate an existing git-backed deployment.
+	// The "git" provider was removed and is no longer supported.
 	Provider string `yaml:"provider"`
 
 	// Configuration options passed to the storage provider

@@ -91,6 +91,16 @@ Blue/green operation:
 	return root
 }
 
+// rejectRemovedGitStorage returns an error when the configuration selects the
+// removed git storage provider.
+func rejectRemovedGitStorage(cfg *config.Config) error {
+	if cfg != nil && cfg.Storage != nil && cfg.Storage.Provider == "git" {
+		return fmt.Errorf("the 'git' storage provider has been removed; " +
+			"set storage.provider to 'flatfile', 'sqlite' or 'database'")
+	}
+	return nil
+}
+
 // runController starts the controller server (or runs --init and exits).
 //
 // listenAPIAddr / listenTransportAddr — when non-empty — override the
@@ -119,10 +129,8 @@ func runController(configPath string, initMode bool, listenAPIAddr, listenTransp
 	applyListenOverrides(cfg, listenAPIAddr, listenTransportAddr)
 
 	// Guard: reject deprecated git provider before any initialization
-	if cfg.Storage != nil && cfg.Storage.Provider == "git" {
-		return fmt.Errorf("the 'git' storage provider has been removed; " +
-			"run 'cfg storage migrate --from git --to flatfile' to migrate your data, " +
-			"then update your configuration to use 'flatfile' or 'database'")
+	if err := rejectRemovedGitStorage(cfg); err != nil {
+		return err
 	}
 
 	secretStore, err := controllerapi.NewSecretStore(cfg)

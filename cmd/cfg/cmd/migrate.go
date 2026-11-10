@@ -41,10 +41,10 @@ currently registered providers so the operator can correct the invocation.
 
 Examples:
   # Preview what would be migrated (no writes)
-  cfg migrate --provider storage --from git --to flatfile --dry-run
+  cfg migrate --provider storage --from oss --to database --dry-run
 
   # Execute migration
-  cfg migrate --provider storage --from git --to flatfile`,
+  cfg migrate --provider storage --from oss --to database`,
 	RunE: runMigrate,
 }
 
@@ -69,30 +69,55 @@ func clusterCapableMigrationBackend(name string) bool {
 	return strings.ToLower(name) == "database"
 }
 
-func runMigrate(cmd *cobra.Command, _ []string) error {
-	// CFGMS_HA_MODE is the canonical cluster-mode signal in the CLI context —
-	// consistent with features/controller/config/config.go. No controller config
-	// file is loaded; the env var alone determines mode.
+// checkMigrateClusterGate rejects a non-cluster-capable target when the CLI
+// environment signals cluster mode.
+// CFGMS_HA_MODE is the canonical cluster-mode signal in the CLI context —
+// consistent with features/controller/config/config.go. No controller config
+// file is loaded; the env var alone determines mode.
+func checkMigrateClusterGate(target string) error {
 	haConfig := ha.DefaultConfig()
 	if err := haConfig.LoadFromEnvironment(); err != nil {
 		return fmt.Errorf("failed to read HA configuration from environment: %w", err)
 	}
-	if haConfig.IsClusterMode() && !clusterCapableMigrationBackend(migrateTo2) {
+	if haConfig.IsClusterMode() && !clusterCapableMigrationBackend(target) {
 		return fmt.Errorf("cfg migrate: target backend %q is not cluster-capable; "+
 			"in cluster mode only cluster-capable backends may be used "+
 			"(cluster-capable: database)",
-			logging.SanitizeLogValue(migrateTo2))
+			logging.SanitizeLogValue(target))
+	}
+	return nil
+}
+
+// newProviderMigrator resolves the migrator for --provider, rejecting a removed
+// git source for the storage provider before the factory is consulted.
+func newProviderMigrator() (migrate.Migrator, error) {
+	if migrateProvider == "storage" {
+		if err := rejectRemovedGitSource(migrateFrom2); err != nil {
+			return nil, err
+		}
 	}
 
 	factory, err := migrate.Lookup(migrateProvider)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	m, err := factory(migrateFrom2, migrateTo2)
 	if err != nil {
-		return fmt.Errorf("failed to create migrator for provider %q: %w",
+		return nil, fmt.Errorf("failed to create migrator for provider %q: %w",
 			logging.SanitizeLogValue(migrateProvider), err)
+	}
+	return m, nil
+}
+
+func runMigrate(cmd *cobra.Command, _ []string) error {
+	if err := checkMigrateClusterGate(migrateTo2); err != nil {
+		return err
+	}
+
+	m, err := newProviderMigrator()
+	if err != nil {
+		return err
 	}
 
 	ctx := context.Background()
