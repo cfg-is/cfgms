@@ -32,7 +32,7 @@ name: Cross-Platform Build Validation (PR)
 # features/controller/fleet/storage, features/workflow/trigger) with no small
 # Windows-specific subset that would have caught them. This file now also runs
 # the unit suite natively on windows-latest (4 legs, no -race, matching the
-# queue job) and macos-latest (4 legs, -race, macOS-shipped packages only — split
+# queue job) and macos-latest (6 legs, -race, macOS-shipped packages only — split
 # finer than Windows because macos-latest's 3 vCPUs make -race much more
 # expensive per leg; see the "Native macOS unit-test legs" comment below),
 # plus the non-Docker e2e suite on ubuntu-latest — so a Windows- or macOS-only failure
@@ -73,7 +73,7 @@ jobs:
   # The `macos` output is specific to this file (Issue #5974): it is not part of
   # the mirrored classification and test-suite.yml has no counterpart.
   #
-  # `macos` is `true` when the PR can affect the four native macOS legs and
+  # `macos` is `true` when the PR can affect the six native macOS legs and
   # `false` only when scripts/macos-pr-filter.sh ran to completion and found no
   # changed file in the macOS package closure. It fails closed: any code=true
   # classification defect, an unlistable rename set, or any filter defect
@@ -206,7 +206,7 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Decide whether the four native macOS legs run (Issue #5974). FAILS
+      # Decide whether the six native macOS legs run (Issue #5974). FAILS
       # CLOSED: every path that is not a completed "no closure file changed"
       # run of scripts/macos-pr-filter.sh emits macos=true.
       - name: Detect macOS package closure changes
@@ -660,7 +660,7 @@ jobs:
         CFGMS_TEST_RACE: "0"
       run: make test-go-group-windows-rest
 
-  # Linux compile check of the macOS test binaries (Issue #5974). The four
+  # Linux compile check of the macOS test binaries (Issue #5974). The six
   # native macOS legs below are skipped on a PR that does not touch the macOS
   # package closure (`changes.outputs.macos`), which includes controller code
   # that closure tests start in-process (features/controller/api, for one). A
@@ -707,9 +707,13 @@ jobs:
   # They test only the in-module packages with test files in the GOOS=darwin
   # dependency closure of the macOS-shipped binaries (cmd/steward,
   # cmd/cfgms-steward-launcher, cmd/cfg), derived by the Makefile at run time
-  # (see MACOS_SHIPPED_PKGS) — no controller-only package runs here. 4 legs,
-  # each on its own dedicated 3-vCPU runner: providers, steward, and the
-  # remainder split into 2 shards. They run only when `changes.outputs.macos`
+  # (see MACOS_SHIPPED_PKGS) — no controller-only package runs here. 6 legs,
+  # each on its own dedicated 3-vCPU runner: providers, steward (features/steward
+  # plus cmd without cmd/steward), cmd/steward in 2 name shards (-timeout at
+  # most timeout-minutes minus 9, so a stall ends in Go's own timeout panic
+  # naming the test instead of a job cancel; see the Makefile comment above
+  # GO_GROUP_MACOS_CMD_STEWARD), and the remainder split into 2 shards. They
+  # run only when `changes.outputs.macos`
   # is `true`: a PR whose changed files are all outside the closure cannot
   # change their result (scripts/macos-pr-filter.sh, fail-closed).
   macos-providers:
@@ -760,7 +764,7 @@ jobs:
       run: make test-go-group-macos-providers
 
   macos-steward:
-    name: macOS Unit Tests (steward, cmd)
+    name: macOS Unit Tests (steward, cmd without cmd/steward)
     permissions:
       contents: read
     needs: changes
@@ -800,11 +804,105 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
-    - name: Run features/steward, cmd (-race)
+    - name: Run features/steward, cmd without cmd/steward (-race)
       shell: bash
       env:
         CFGMS_TEST_INTEGRATION: "0"
       run: make test-go-group-macos-steward
+
+  macos-cmd-steward-1:
+    name: macOS Unit Tests (cmd/steward, shard 1/2)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: macos-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.macos == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run cmd/steward TestReg* shard (-race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test-go-group-macos-cmd-steward-1
+
+  macos-cmd-steward-2:
+    name: macOS Unit Tests (cmd/steward, shard 2/2)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: macos-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.macos == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run cmd/steward every other test shard (-race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test-go-group-macos-cmd-steward-2
 
   macos-rest-1:
     name: macOS Unit Tests (rest, shard 1/2)
@@ -972,6 +1070,8 @@ jobs:
       - macos-test-compile
       - macos-providers
       - macos-steward
+      - macos-cmd-steward-1
+      - macos-cmd-steward-2
       - macos-rest-1
       - macos-rest-2
       - e2e
@@ -997,6 +1097,8 @@ jobs:
         MACOS_COMPILE_RESULT: ${{ needs.macos-test-compile.result }}
         MACOS_PROVIDERS_RESULT: ${{ needs.macos-providers.result }}
         MACOS_STEWARD_RESULT: ${{ needs.macos-steward.result }}
+        MACOS_CMD_STEWARD_1_RESULT: ${{ needs.macos-cmd-steward-1.result }}
+        MACOS_CMD_STEWARD_2_RESULT: ${{ needs.macos-cmd-steward-2.result }}
         MACOS_REST_1_RESULT: ${{ needs.macos-rest-1.result }}
         MACOS_REST_2_RESULT: ${{ needs.macos-rest-2.result }}
         E2E_RESULT: ${{ needs.e2e.result }}
@@ -1018,7 +1120,9 @@ jobs:
         echo "| Windows: rest + modules | $WINDOWS_REST_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS test compile (Linux) | $MACOS_COMPILE_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: cert/controlplane/sqlite | $MACOS_PROVIDERS_RESULT |" >> $GITHUB_STEP_SUMMARY
-        echo "| macOS: steward/cmd | $MACOS_STEWARD_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: steward + cmd (without cmd/steward) | $MACOS_STEWARD_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: cmd/steward shard 1/2 | $MACOS_CMD_STEWARD_1_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: cmd/steward shard 2/2 | $MACOS_CMD_STEWARD_2_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: rest shard 1/2 | $MACOS_REST_1_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: rest shard 2/2 | $MACOS_REST_2_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| E2E (no Docker) | $E2E_RESULT |" >> $GITHUB_STEP_SUMMARY
@@ -1071,11 +1175,11 @@ jobs:
           fail=1
         done
 
-        # The four macOS unit-test legs have a second legitimate skip: the PR
+        # The six macOS unit-test legs have a second legitimate skip: the PR
         # does not touch the macOS package closure. macos-gate-rule.sh accepts
         # `skipped` only when `changes` succeeded AND its macos output is
         # exactly `false` (an empty or unexpected output fails closed).
-        for result in "$MACOS_PROVIDERS_RESULT" "$MACOS_STEWARD_RESULT" "$MACOS_REST_1_RESULT" "$MACOS_REST_2_RESULT"; do
+        for result in "$MACOS_PROVIDERS_RESULT" "$MACOS_STEWARD_RESULT" "$MACOS_CMD_STEWARD_1_RESULT" "$MACOS_CMD_STEWARD_2_RESULT" "$MACOS_REST_1_RESULT" "$MACOS_REST_2_RESULT"; do
           bash scripts/macos-gate-rule.sh "$CHANGES_RESULT" "$MACOS_CHANGES" "$result" || fail=1
         done
 

@@ -172,7 +172,7 @@ Docker-dependent checks to CI. Neither substitutes for native Windows/macOS CI
 or every hosted security check. Read the current Makefile and workflow results;
 record skipped, deferred and unavailable checks explicitly.
 
-**Native macOS legs:** 4 (`macos-providers`, `macos-steward`, `macos-rest-1/2`). They test only
+**Native macOS legs:** 6 (`macos-providers`, `macos-steward`, `macos-cmd-steward-1/2`, `macos-rest-1/2`). They test only
 the in-module packages with test files in the `GOOS=darwin` dependency closure of the
 macOS-shipped binaries (`MACOS_SHIPPED_PKGS` in the `Makefile`); see
 [CI test tiers](docs/development/ci-test-tiers.md).

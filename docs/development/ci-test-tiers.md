@@ -114,8 +114,9 @@ Queries: `gh run list --workflow cross-platform-build.yml --event merge_group --
 | `integration-tests` (Docker) | queue real | ubuntu-latest | via `needs` of ✅ `Build Gate` | 50 | 443s / 7.38m | 456s / 7.60m |
 | `build-gate` | queue real, `needs: [native-builds, integration-tests]` | ubuntu-latest | ✅ `Build Gate` | 50 | own step 3s / 0.05m; **effective (gated) time = 1060s / 17.66m** | own step 4s / 0.07m; **effective = 1172s / 19.54m** |
 
-**Native macOS unit-test legs (PR side, current state).** `cross-platform-build-pr.yml` runs 4 native macOS
-legs (`macos-providers`, `macos-steward`, `macos-rest-1`, `macos-rest-2`), all `-race`. They test only code that
+**Native macOS unit-test legs (PR side, current state).** `cross-platform-build-pr.yml` runs 6 native macOS
+legs (`macos-providers`, `macos-steward`, `macos-cmd-steward-1`, `macos-cmd-steward-2`, `macos-rest-1`, `macos-rest-2`), all
+`-race`, each with `timeout-minutes: 15`. They test only code that
 ships on macOS: the in-module packages with test files in the `GOOS=darwin` dependency closure of
 `./cmd/steward`, `./cmd/cfgms-steward-launcher` and `./cmd/cfg`, derived by the Makefile at run time
 (`MACOS_SHIPPED_PKGS`). Controller packages that no macOS binary contains are not tested there; the few
@@ -125,6 +126,20 @@ ships on macOS: the in-module packages with test files in the `GOOS=darwin` depe
 (`MACOS_REST_WEIGHTS` in the `Makefile`, longest-first onto the least-loaded shard) rather than by list
 position, so `features/workflow` and `pkg/storage/interfaces` land on different shards. Its `go test` runs with
 `-timeout=9m` (under the 15-minute job limit) so a hung package fails by name instead of the job being cancelled. The measurements in the tables above predate this scoping.
+- **`cmd/steward` has its own two legs.** `cmd/steward` grew from about 200 s (2026-11-05) to 403-515 s under `-race -short` on
+  macOS, and the shared steward leg was cancelled at its 15-minute cap on 2026-11-10 with no output naming a test. It now runs
+  as two name shards, each a single-package `go test -v -race -short -timeout=6m` in its own job: `macos-cmd-steward-1`
+  (`make test-go-group-macos-cmd-steward-1`, `^TestReg`) and `macos-cmd-steward-2` (its explicit complement,
+  `go test -run` has no negation). `macos-steward` (`make test-go-group-macos-steward`) keeps `features/steward` and every other
+  shipped `cmd` package, uses `-json` because it runs several packages, and also uses `-timeout=6m`. The
+  `-timeout` and streaming rules and their measured basis are the ones in the Windows cmd paragraph below: `-timeout` at most
+  `timeout-minutes` minus 9, and `-json` or a single package so output streams. On macOS the preamble measured 51-65 s of job setup
+  plus 179-268 s from the `make` step to the `cmd/steward` binary start. `test_macos_cmd_steward_timeout_and_streaming` enforces
+  both rules for every macOS job that runs `cmd/steward`.
+- **Shard weights.** macOS runs the unix test set, the same set Linux runs, so the Linux per-test weights apply. They are
+  recorded with the expected per-shard macOS seconds in the `Makefile` comment above `MACOS_CMD_STEWARD_RUN_1`. The Windows
+  split `^Test(Reg|Run)` is not reused: on the unix set it would hold about 70% of the weight.
+  `test_macos_groups_cover_exactly_shipped_packages` asserts over a probe set that each `^Test` name matches exactly one shard.
 
 **Native Windows cmd legs (PR side, current state).** `cross-platform-build-pr.yml` runs three Windows jobs for `./cmd/...`,
 each with `timeout-minutes: 15` and no `-race`: `windows-cmd` (`make test-go-group-windows-cmd`, every `./cmd/...` package except
@@ -149,7 +164,7 @@ two name shards of `cmd/steward`). Every one of them runs `go test -short -timeo
   `test_windows_steward_groups_cover_exactly_steward_and_cmd` asserts that each probe test name matches exactly one shard.
 
 **macOS legs run only when the PR touches the macOS package closure (PR side, current state).** The `changes` job in
-`cross-platform-build-pr.yml` emits a second output, `macos` (`true` or `false`), next to `code`; the four macOS legs run when
+`cross-platform-build-pr.yml` emits a second output, `macos` (`true` or `false`), next to `code`; the six macOS legs run when
 `macos == 'true'` and are skipped otherwise. The Windows legs, the e2e leg and the `code` output are unchanged. `macos` comes
 from `scripts/macos-pr-filter.sh`, which runs `GOOS=darwin go list` on the PR merge ref. The closure is (1) the in-module
 packages in the dependency closure of the three macOS binaries (`MACOS_SHIPPED_ROOTS` in the `Makefile`, shared with
