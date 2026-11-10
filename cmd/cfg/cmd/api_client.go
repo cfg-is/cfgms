@@ -624,15 +624,7 @@ func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBy
 			// of the CFGMS-StepUp scheme in WWW-Authenticate routes here; plain 401s
 			// (session expired/revoked) route to onUnauthorized below.
 			if c.onStepUpRequired != nil {
-				_ = resp.Body.Close()
-				token, stepUpErr := c.onStepUpRequired(wwwAuth, method, path, bodyBytes)
-				if stepUpErr != nil {
-					return nil, stepUpErr
-				}
-				if token != "" {
-					return c.execRequest(ctx, method, path, bodyBytes, contentType, false, token)
-				}
-				return nil, fmt.Errorf("step-up required")
+				return c.handleStepUp(ctx, resp, wwwAuth, method, path, bodyBytes, contentType)
 			}
 			return resp, nil
 		}
@@ -649,6 +641,24 @@ func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBy
 	}
 
 	return resp, nil
+}
+
+// handleStepUp resolves a CFGMS-StepUp 401 through the step-up callback and replays
+// the request with the token it returns. A tenant-crossing challenge never reaches
+// the callback: it is not an assurance level, and its remedy needs the response body.
+func (c *APIClient) handleStepUp(ctx context.Context, resp *http.Response, wwwAuth, method, path string, bodyBytes []byte, contentType string) (*http.Response, error) {
+	if crossingErr := tenantCrossingStepUpError(wwwAuth, resp); crossingErr != nil {
+		return nil, crossingErr
+	}
+	_ = resp.Body.Close()
+	token, stepUpErr := c.onStepUpRequired(wwwAuth, method, path, bodyBytes)
+	if stepUpErr != nil {
+		return nil, stepUpErr
+	}
+	if token != "" {
+		return c.execRequest(ctx, method, path, bodyBytes, contentType, false, token)
+	}
+	return nil, fmt.Errorf("step-up required")
 }
 
 // APITenantCreateRequest is the request body for POST /api/v1/tenants.
@@ -845,19 +855,17 @@ type APIBreakGlassRequest struct {
 	Justification  string `json:"justification"`
 }
 
-// crossingError turns a non-success tenant-crossing response into an error that
-// carries the server's message and code. A crossing challenge (401 or 403 body
-// with break_glass_endpoint) points the operator at `cfg tenant break-glass`.
-func crossingError(resp *http.Response, action string) error {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+// crossingChallengeBody is the challenge part of a crossing response body.
+type crossingChallengeBody struct {
+	RequiredAssurance  string `json:"required_assurance"`
+	BreakGlassEndpoint string `json:"break_glass_endpoint"`
+}
 
+// parseCrossingBody extracts the server's message and code (error is either a
+// string or a {code, message} object) and the crossing challenge fields.
+func parseCrossingBody(body []byte) (msg, code string, challenge crossingChallengeBody) {
 	var env struct {
 		Error json.RawMessage `json:"error"`
-	}
-	var msg, code string
-	var challenge struct {
-		RequiredAssurance  string `json:"required_assurance"`
-		BreakGlassEndpoint string `json:"break_glass_endpoint"`
 	}
 	if json.Unmarshal(body, &env) == nil && len(env.Error) > 0 {
 		var obj struct {
@@ -871,12 +879,24 @@ func crossingError(resp *http.Response, action string) error {
 		}
 	}
 	_ = json.Unmarshal(body, &challenge)
+	return msg, code, challenge
+}
 
-	if challenge.BreakGlassEndpoint != "" {
+// crossingError turns a non-success tenant-crossing response into an error that
+// carries the server's message and code. A crossing challenge (401 or 403 body
+// with required_assurance "tenant-crossing", a tenant-crossing WWW-Authenticate
+// header or a break_glass_endpoint) names the crossing remedy: a grant or
+// `cfg tenant break-glass`.
+func crossingError(resp *http.Response, action string) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+
+	msg, code, challenge := parseCrossingBody(body)
+
+	if isCrossingChallenge(resp, challenge.RequiredAssurance, challenge.BreakGlassEndpoint) {
 		if msg == "" {
 			msg = "access to this tenant requires an active crossing"
 		}
-		return fmt.Errorf("%s: %s; run `cfg tenant break-glass <tenant> --reason <reason> --justification \"...\"` to gain access", action, msg)
+		return fmt.Errorf("%s: %s; %s", action, msg, crossingRemedy(challenge.BreakGlassEndpoint))
 	}
 	if msg == "" {
 		switch resp.StatusCode {
