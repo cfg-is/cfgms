@@ -410,13 +410,17 @@ func TestWireUpgradeStore_LegacyNoticeOnlyWithStore(t *testing.T) {
 	sm, err := interfaces.CreateOSSStorageManager(t.TempDir(), filepath.Join(t.TempDir(), "notice.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sm.Close() })
-	require.NotNil(t, sm.GetUpgradeStore())
+	upgradeStore := sm.GetUpgradeStore()
+	require.NotNil(t, upgradeStore)
 
 	logger := &recordingLogger{}
 	wireUpgradeStore(newBareAPIServer(t), sm, cfg, logger)
 	assert.Zero(t, legacyUpgradeLogCount(logger), "the SQLite provider is not the database provider")
 
+	// Detaching the store removes it from the manager's Close list, so the test
+	// closes the handle itself: Windows cannot delete an open notice.db.
 	sm.SetUpgradeStore(nil)
+	require.NoError(t, upgradeStore.Close())
 	wireUpgradeStore(newBareAPIServer(t), sm, cfg, logger)
 	assert.Zero(t, legacyUpgradeLogCount(logger))
 }
