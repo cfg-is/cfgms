@@ -17,7 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/windows"
 
-	"github.com/cfgis/cfgms/pkg/credential"
 	"github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 	"github.com/cfgis/cfgms/pkg/testutil/winacct"
 )
@@ -151,8 +150,9 @@ func TestCredentialStore_WindowsRefusesFileAsDir(t *testing.T) {
 }
 
 // TestCredentialStore_OldMachineScopeCredentialAsksToStoreAgain covers a
-// credential written before the user-scope change: Load reports ErrLocked and
-// tells the admin how to store it again, with no fallback decryption.
+// credential written before the user-scope change (no format header): Load
+// reports the older-format error and tells the admin how to store it again,
+// with no fallback decryption.
 func TestCredentialStore_OldMachineScopeCredentialAsksToStoreAgain(t *testing.T) {
 	credDir := filepath.Join(t.TempDir(), "credentials")
 	overrideCredentialsDir(t, credDir)
@@ -167,7 +167,8 @@ func TestCredentialStore_OldMachineScopeCredentialAsksToStoreAgain(t *testing.T)
 
 	_, err = store.Load(context.Background(), "ctrl")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, credential.ErrLocked)
+	assert.ErrorIs(t, err, steward.ErrLegacyFormat)
+	assert.Contains(t, err.Error(), "older cfg format")
 	assert.Contains(t, err.Error(), "cfg connect")
-	assert.Contains(t, err.Error(), "cfg credential enroll")
+	assert.Contains(t, err.Error(), "cfg credential request-signing-cert")
 }

@@ -121,6 +121,24 @@ naming the exported path.
 | `--tls-insecure` | false | Skip TLS certificate verification (development only, env: `CFGMS_TLS_INSECURE`) |
 | `--server-name` | — | Override the TLS server name used for certificate verification |
 
+### Credential store errors
+
+`cfg` keeps the admin bundle and the signing key encrypted under
+`<user config dir>/cfgms/credentials/<name>.enc`. Every blob starts with a format
+version header. When `cfg` cannot read an entry it reports one of three errors, and the
+message names the entry:
+
+| Message | Meaning | Remedy |
+|---------|---------|--------|
+| `credential store entry "<name>" was written by an older cfg format and is not migrated; re-run cfg connect or cfg credential request-signing-cert` | The file has no format header, so an older `cfg` wrote it (for example before the move to user-scope DPAPI on Windows). | Re-run `cfg connect` for a connection, or `cfg credential request-signing-cert` for the signing key. |
+| `credential store entry "<name>" is protected for a different user or machine; run cfg as the user who stored it, or store it again here` | The file is intact but this user and machine cannot decrypt it. On Windows, DPAPI cannot tell a different user from a different machine, so the message covers both. | Run `cfg` as the user who stored the entry, or store the entry again on this machine. |
+| `credential store entry "<name>" is corrupt or unreadable; remove it and store it again` | The file is empty, truncated, altered or has an unknown format version. | Remove the `.enc` file and store the entry again. |
+
+Older-format entries are not decrypted by a fallback and are not migrated; the entry
+has to be stored again. The messages contain no key material, entropy or platform
+error text. A missing entry is reported separately as a locked credential and
+asks you to store it with `cfg connect` or `cfg credential enroll`.
+
 ## Enrolment Tokens and the Pending Credential-Request Queue (Issue #3717)
 
 Story #3717 (Epic #3711 — browser-authenticated CLI enrolment) adds the first half of

@@ -9,6 +9,7 @@
 package steward
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -45,8 +46,17 @@ func NewPlatformEncryptor(dir string) (Encryptor, error) {
 // encryptor as NewPlatformEncryptor (key from the machine ID and the salt in
 // dir); the files' 0600 mode in the user's config directory binds it to the user.
 // Steward callers keep NewPlatformEncryptor.
+//
+// Every blob it writes starts with a format-version header (see versionedEncryptor),
+// and Decrypt reports ErrLegacyFormat, ErrCorrupt or ErrWrongProtectionScope so a
+// caller can tell an older-format store, a damaged file and a store protected for
+// another user or machine apart.
 func NewUserEncryptor(dir string) (Encryptor, error) {
-	return newUserEncryptor(dir)
+	inner, err := newUserEncryptor(dir)
+	if err != nil {
+		return nil, err
+	}
+	return &versionedEncryptor{inner: inner}, nil
 }
 
 // NewEncryptorFromBytes creates an AES-256-GCM encryptor using the supplied machineID bytes
@@ -54,6 +64,75 @@ func NewUserEncryptor(dir string) (Encryptor, error) {
 // /etc/machine-id or the platform equivalent is unavailable.
 func NewEncryptorFromBytes(machineID []byte, dir string) (Encryptor, error) {
 	return newAesGcmEncryptor(machineID, dir)
+}
+
+// Errors returned by the Decrypt method of the encryptor from NewUserEncryptor.
+// Callers test them with errors.Is. Their messages carry no key material, entropy
+// or platform error text.
+var (
+	// ErrLegacyFormat means the blob has no format header: it was written by an
+	// older cfg. It is never migrated or decrypted by a fallback.
+	ErrLegacyFormat = errors.New("credential blob was written by an older cfg format")
+	// ErrCorrupt means the blob is empty, or has the format header but is
+	// truncated, altered or of an unknown version.
+	ErrCorrupt = errors.New("credential blob is corrupt or unreadable")
+	// ErrWrongProtectionScope means the blob is intact but the platform could not
+	// decrypt it: it is protected for a different user or machine. DPAPI cannot
+	// tell a wrong user from a wrong machine or salt.
+	ErrWrongProtectionScope = errors.New("credential blob is protected for a different user or machine")
+)
+
+// Layout of a versioned blob: magic, format version, SHA-256 of the body, body.
+// The body is the platform encryptor's ciphertext. The checksum is for
+// classification only (a damaged file versus an intact blob protected for someone
+// else); it is not a security control and no key material enters the header.
+const (
+	blobMagic         = "CFGS"
+	blobFormatVersion = byte(1)
+	blobHeaderSize    = len(blobMagic) + 1 + sha256.Size
+)
+
+// versionedEncryptor wraps a platform encryptor with the versioned blob header.
+// It is the single header codec for every platform.
+type versionedEncryptor struct {
+	inner platformEncryptor
+}
+
+// Encrypt encrypts plaintext with the platform encryptor and prepends the header.
+func (v *versionedEncryptor) Encrypt(plaintext []byte) ([]byte, error) {
+	body, err := v.inner.Encrypt(plaintext)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(body)
+	blob := make([]byte, 0, blobHeaderSize+len(body))
+	blob = append(blob, blobMagic...)
+	blob = append(blob, blobFormatVersion)
+	blob = append(blob, sum[:]...)
+	return append(blob, body...), nil
+}
+
+// Decrypt classifies the blob before decrypting it; see the sentinel errors.
+func (v *versionedEncryptor) Decrypt(blob []byte) ([]byte, error) {
+	if len(blob) == 0 {
+		return nil, ErrCorrupt
+	}
+	if !bytes.HasPrefix(blob, []byte(blobMagic)) {
+		return nil, ErrLegacyFormat
+	}
+	if len(blob) <= blobHeaderSize || blob[len(blobMagic)] != blobFormatVersion {
+		return nil, ErrCorrupt
+	}
+	body := blob[blobHeaderSize:]
+	sum := sha256.Sum256(body)
+	if !bytes.Equal(sum[:], blob[len(blobMagic)+1:blobHeaderSize]) {
+		return nil, ErrCorrupt
+	}
+	plain, err := v.inner.Decrypt(body)
+	if err != nil {
+		return nil, ErrWrongProtectionScope
+	}
+	return plain, nil
 }
 
 // platformEncryptor abstracts OS-native encryption for secret storage.

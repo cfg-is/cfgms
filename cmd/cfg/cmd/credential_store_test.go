@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/credential"
+	"github.com/cfgis/cfgms/pkg/secrets/providers/steward"
 )
 
 // overrideCredentialsDir replaces credentialsDirFn for the duration of the test and
@@ -241,4 +242,120 @@ func TestCredentialStore_OverwriteExisting(t *testing.T) {
 	got, err := store.Load(ctx, "ctrl")
 	require.NoError(t, err)
 	assert.Equal(t, []byte("second"), got)
+}
+
+// storeBlobCases writes one .enc file for each decrypt failure class into dir and
+// returns the expected sentinel and message for the credential named name.
+type storeBlobCase struct {
+	name     string
+	write    func(t *testing.T, dir, name string)
+	sentinel error
+	message  string
+}
+
+func storeBlobCases() []storeBlobCase {
+	write := func(t *testing.T, dir, name string, blob []byte) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name+".enc"), blob, 0600))
+	}
+	return []storeBlobCase{
+		{
+			name: "older format (headerless)",
+			write: func(t *testing.T, dir, name string) {
+				old, err := steward.NewPlatformEncryptor(dir)
+				require.NoError(t, err)
+				ct, err := old.Encrypt([]byte("bundle stored by an older cfg"))
+				require.NoError(t, err)
+				write(t, dir, name, ct)
+			},
+			sentinel: steward.ErrLegacyFormat,
+			message:  `credential store entry "ctrl" was written by an older cfg format and is not migrated; re-run cfg connect or cfg credential request-signing-cert`,
+		},
+		{
+			name: "different user or machine",
+			write: func(t *testing.T, dir, name string) {
+				other, err := steward.NewUserEncryptor(t.TempDir())
+				require.NoError(t, err)
+				ct, err := other.Encrypt([]byte("bundle stored elsewhere"))
+				require.NoError(t, err)
+				write(t, dir, name, ct)
+			},
+			sentinel: steward.ErrWrongProtectionScope,
+			message:  `credential store entry "ctrl" is protected for a different user or machine; run cfg as the user who stored it, or store it again here`,
+		},
+		{
+			name: "corrupt",
+			write: func(t *testing.T, dir, name string) {
+				enc, err := steward.NewUserEncryptor(dir)
+				require.NoError(t, err)
+				ct, err := enc.Encrypt([]byte("bundle"))
+				require.NoError(t, err)
+				write(t, dir, name, ct[:len(ct)-1])
+			},
+			sentinel: steward.ErrCorrupt,
+			message:  `credential store entry "ctrl" is corrupt or unreadable; remove it and store it again`,
+		},
+	}
+}
+
+func assertSpecificStoreError(t *testing.T, err error, c storeBlobCase) {
+	t.Helper()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, c.sentinel)
+	assert.Contains(t, err.Error(), c.message)
+	assert.NotContains(t, err.Error(), "credential is locked")
+	assert.NotContains(t, err.Error(), "cfg credential enroll", "the generic hint must not be appended")
+	for _, raw := range []string{"decryption failed", "message authentication", "CryptUnprotectData"} {
+		assert.NotContains(t, err.Error(), raw)
+	}
+}
+
+// TestCredentialStore_LoadReportsEachStoreFailureDistinctly covers the three cases
+// the store tells apart: older format, different user or machine, corrupt.
+func TestCredentialStore_LoadReportsEachStoreFailureDistinctly(t *testing.T) {
+	for _, c := range storeBlobCases() {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			overrideCredentialsDir(t, dir)
+			store, err := newCredentialStore()
+			require.NoError(t, err)
+			c.write(t, dir, "ctrl")
+
+			_, err = store.Load(context.Background(), "ctrl")
+			assertSpecificStoreError(t, err, c)
+		})
+	}
+}
+
+// TestCredentialStore_LoadMissingKeepsGenericHint keeps the missing-file path as it was.
+func TestCredentialStore_LoadMissingKeepsGenericHint(t *testing.T) {
+	overrideCredentialsDir(t, t.TempDir())
+	store, err := newCredentialStore()
+	require.NoError(t, err)
+
+	_, err = store.Load(context.Background(), "nonexistent")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cfg connect")
+	assert.Contains(t, err.Error(), "cfg credential enroll")
+}
+
+// TestSignCommandContent_SurfacesStoreFailure runs the command path that loads the
+// signing credential and checks the specific store message reaches the operator for
+// each case, including a headerless .enc file on disk.
+func TestSignCommandContent_SurfacesStoreFailure(t *testing.T) {
+	for _, c := range storeBlobCases() {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			overrideCredentialsDir(t, dir)
+			// Create the store first so the salt exists, then place the blob.
+			_, err := newCredentialStore()
+			require.NoError(t, err)
+			signingCase := c
+			signingCase.message = strings.ReplaceAll(c.message, `"ctrl"`, `"`+signingCredentialName+`"`)
+			c.write(t, dir, signingCredentialName)
+
+			_, err = signCommandContent([]byte("content"))
+			assertSpecificStoreError(t, err, signingCase)
+		})
+	}
 }

@@ -4,6 +4,7 @@
 package steward
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -195,4 +196,110 @@ func TestLoadOrGenerateSalt_WrongLengthRefusedAndKept(t *testing.T) {
 	got, rerr := os.ReadFile(saltPath)
 	require.NoError(t, rerr)
 	assert.Equal(t, "short", string(got))
+}
+
+// versionedAesGcm builds a versionedEncryptor over the AES-256-GCM encryptor for
+// the given machine identity, so the header codec is testable on every platform.
+func versionedAesGcm(t *testing.T, machineID, dir string) *versionedEncryptor {
+	t.Helper()
+	inner, err := newAesGcmEncryptor([]byte(machineID), dir)
+	require.NoError(t, err)
+	return &versionedEncryptor{inner: inner}
+}
+
+func TestVersionedEncryptor_RoundTripWritesHeader(t *testing.T) {
+	enc := versionedAesGcm(t, "machine-a", t.TempDir())
+	plaintext := []byte("admin credential bundle")
+
+	blob, err := enc.Encrypt(plaintext)
+	require.NoError(t, err)
+	assert.True(t, bytes.HasPrefix(blob, []byte(blobMagic)), "blob must start with the magic")
+	assert.Equal(t, blobFormatVersion, blob[len(blobMagic)], "blob must carry the format version")
+	assert.NotContains(t, string(blob), string(plaintext))
+
+	got, err := enc.Decrypt(blob)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, got)
+}
+
+func TestNewUserEncryptor_WritesVersionedBlobs(t *testing.T) {
+	enc, err := NewUserEncryptor(t.TempDir())
+	require.NoError(t, err)
+	blob, err := enc.Encrypt([]byte("bundle"))
+	require.NoError(t, err)
+	assert.True(t, bytes.HasPrefix(blob, []byte(blobMagic)))
+
+	got, err := enc.Decrypt(blob)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("bundle"), got)
+}
+
+func TestVersionedEncryptor_HeaderlessBlobIsLegacyFormat(t *testing.T) {
+	dir := t.TempDir()
+	// The platform encryptor alone writes the pre-header format.
+	legacy, err := newUserEncryptor(dir)
+	require.NoError(t, err)
+	blob, err := legacy.Encrypt([]byte("written by an older cfg"))
+	require.NoError(t, err)
+
+	enc, err := NewUserEncryptor(dir)
+	require.NoError(t, err)
+	_, err = enc.Decrypt(blob)
+	require.ErrorIs(t, err, ErrLegacyFormat)
+	assert.NotErrorIs(t, err, ErrCorrupt)
+	assert.NotErrorIs(t, err, ErrWrongProtectionScope)
+}
+
+func TestVersionedEncryptor_WrongMachineIdentityIsWrongProtectionScope(t *testing.T) {
+	dir := t.TempDir()
+	blob, err := versionedAesGcm(t, "machine-a", dir).Encrypt([]byte("secret"))
+	require.NoError(t, err)
+
+	_, err = versionedAesGcm(t, "machine-b", dir).Decrypt(blob)
+	require.ErrorIs(t, err, ErrWrongProtectionScope)
+	assert.NotErrorIs(t, err, ErrCorrupt)
+	assert.NotErrorIs(t, err, ErrLegacyFormat)
+}
+
+func TestVersionedEncryptor_CorruptBlobs(t *testing.T) {
+	enc := versionedAesGcm(t, "machine-a", t.TempDir())
+	good, err := enc.Encrypt([]byte("secret"))
+	require.NoError(t, err)
+
+	mutate := func(f func(b []byte) []byte) []byte {
+		return f(append([]byte(nil), good...))
+	}
+	cases := map[string][]byte{
+		"empty file":          {},
+		"magic only":          []byte(blobMagic),
+		"shorter than header": good[:blobHeaderSize-1],
+		"header without body": good[:blobHeaderSize],
+		"truncated body":      good[:len(good)-1],
+		"flipped body byte":   mutate(func(b []byte) []byte { b[len(b)-1] ^= 0xFF; return b }),
+		"flipped checksum":    mutate(func(b []byte) []byte { b[len(blobMagic)+1] ^= 0xFF; return b }),
+		"unknown version":     mutate(func(b []byte) []byte { b[len(blobMagic)] = 2; return b }),
+		"version zero":        mutate(func(b []byte) []byte { b[len(blobMagic)] = 0; return b }),
+	}
+	for name, blob := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := enc.Decrypt(blob)
+			require.ErrorIs(t, err, ErrCorrupt)
+			assert.NotErrorIs(t, err, ErrLegacyFormat)
+			assert.NotErrorIs(t, err, ErrWrongProtectionScope)
+		})
+	}
+}
+
+// TestVersionedEncryptor_ErrorsCarryNoPlatformText checks the sentinel messages are
+// fixed text: no platform error, key or entropy detail leaks through them.
+func TestVersionedEncryptor_ErrorsCarryNoPlatformText(t *testing.T) {
+	dir := t.TempDir()
+	blob, err := versionedAesGcm(t, "machine-a", dir).Encrypt([]byte("secret"))
+	require.NoError(t, err)
+
+	_, err = versionedAesGcm(t, "machine-b", dir).Decrypt(blob)
+	require.Error(t, err)
+	assert.Equal(t, ErrWrongProtectionScope.Error(), err.Error())
+	assert.NotContains(t, err.Error(), "decryption failed")
+	assert.NotContains(t, err.Error(), "authentication")
 }

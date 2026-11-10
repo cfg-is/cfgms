@@ -108,12 +108,13 @@ func (s *CredentialStore) Store(_ context.Context, name string, bundleBytes []by
 }
 
 // Load decrypts and returns the credential bytes for the named connection.
-// Returns a wrapped credential.ErrLocked on decrypt failure or when the credential is absent,
-// including a credential written under an earlier encryption scheme; the message tells the
-// admin to store it again.
+// Returns a wrapped credential.ErrLocked when the credential is absent; the message tells the
+// admin to store it again. A credential that exists but cannot be read returns the unlocker's
+// specific error unchanged in meaning (older cfg format, different user or machine, or
+// corrupt), which already carries its own remedy.
 func (s *CredentialStore) Load(ctx context.Context, name string) ([]byte, error) {
 	plain, err := s.unlocker.Unlock(ctx, name)
-	if errors.Is(err, credential.ErrLocked) {
+	if errors.Is(err, credential.ErrLocked) && !credential.IsStoreFormatError(err) {
 		return nil, fmt.Errorf("credential store: load %q: %w (store the credential again with 'cfg connect' or 'cfg credential enroll')", name, err)
 	}
 	if err != nil {
