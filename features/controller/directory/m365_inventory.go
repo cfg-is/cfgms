@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
-	stewarddna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	dirif "github.com/cfgis/cfgms/pkg/directory/interfaces"
+	stewarddna "github.com/cfgis/cfgms/pkg/dna"
 	egif "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/lease"

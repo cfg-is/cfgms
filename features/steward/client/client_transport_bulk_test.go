@@ -16,9 +16,9 @@ import (
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/steward/commands"
-	"github.com/cfgis/cfgms/features/steward/dna"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dpTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
+	"github.com/cfgis/cfgms/pkg/dna"
 )
 
 // kindObjectModule is a real per-kind module: Get(kind) returns the objects
@@ -388,4 +388,64 @@ func TestObserveSweep_OmittedPerObjectKindIsRetired(t *testing.T) {
 	defer c.dnaMu.RUnlock()
 	assert.Empty(t, c.currentBulkFragments)
 	assert.Empty(t, c.currentBulkRoot)
+}
+
+// TestParseBucketNumbers_AcceptedShapesAndBounds pins every shape the buckets
+// param crosses the wire in, and the rejections for each.
+func TestParseBucketNumbers_AcceptedShapesAndBounds(t *testing.T) {
+	for _, raw := range []interface{}{nil, ""} {
+		got, err := parseBucketNumbers(raw)
+		require.NoError(t, err)
+		assert.Empty(t, got)
+	}
+
+	got, err := parseBucketNumbers("[0, 7, 255]")
+	require.NoError(t, err)
+	assert.Equal(t, []int{0, 7, 255}, got)
+
+	got, err = parseBucketNumbers([]int{3, 4})
+	require.NoError(t, err)
+	assert.Equal(t, []int{3, 4}, got)
+
+	got, err = parseBucketNumbers([]interface{}{float64(1), float64(2)})
+	require.NoError(t, err)
+	assert.Equal(t, []int{1, 2}, got)
+
+	_, err = parseBucketNumbers("not json")
+	assert.ErrorContains(t, err, "not a JSON number array")
+	_, err = parseBucketNumbers([]interface{}{1.5})
+	assert.ErrorContains(t, err, "not an integer")
+	_, err = parseBucketNumbers([]interface{}{"3"})
+	assert.ErrorContains(t, err, "not an integer")
+	_, err = parseBucketNumbers([]int{dna.BucketCount})
+	assert.ErrorContains(t, err, "out of range")
+	_, err = parseBucketNumbers(map[string]string{})
+	assert.ErrorContains(t, err, "unsupported type")
+}
+
+// TestChunkFragmentsByBytes_SplitsOnObjectBoundaries proves a chunk never splits a
+// fragment, an oversized fragment gets a chunk of its own, and an empty selection
+// still yields one (empty) chunk so the controller gets a reply.
+func TestChunkFragmentsByBytes_SplitsOnObjectBoundaries(t *testing.T) {
+	frag := func(id string, n int) *commonpb.Fragment {
+		return &commonpb.Fragment{FragmentId: id, CanonicalBytes: make([]byte, n)}
+	}
+
+	chunks := chunkFragmentsByBytes(nil, 10)
+	require.Len(t, chunks, 1)
+	assert.Empty(t, chunks[0])
+
+	chunks = chunkFragmentsByBytes([]*commonpb.Fragment{frag("a", 6), frag("b", 6), frag("c", 4), frag("d", 25)}, 10)
+	require.Len(t, chunks, 3)
+	assert.Equal(t, []string{"a"}, fragIDs(chunks[0]))
+	assert.Equal(t, []string{"b", "c"}, fragIDs(chunks[1]))
+	assert.Equal(t, []string{"d"}, fragIDs(chunks[2]), "an oversized fragment is never split")
+}
+
+func fragIDs(frags []*commonpb.Fragment) []string {
+	ids := make([]string, 0, len(frags))
+	for _, f := range frags {
+		ids = append(ids, f.GetFragmentId())
+	}
+	return ids
 }

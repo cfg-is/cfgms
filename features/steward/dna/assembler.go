@@ -14,6 +14,7 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/modules"
+	pkgdna "github.com/cfgis/cfgms/pkg/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -234,32 +235,14 @@ func (a *Assembler) buildObjectFragments(
 	envs := make(map[string]*commonpb.FragmentEnvelope, len(raw))
 	skipped := 0
 	for _, entry := range raw {
-		obj, _ := entry.(map[string]interface{})
-		id, _ := obj["id"].(string)
-		attrs, attrsOK := obj["attrs"].(map[string]interface{})
-		if obj == nil || !attrsOK || !validObjectID(id) || seen[id] {
-			skipped++
-			continue
-		}
-		st := &objectState{attrs: attrs}
-		if !a.objectHasRequiredFields(decl, st) {
-			skipped++
-			continue
-		}
-		canonical, err := CanonicalizeFragment(decl.Kind, moduleName, st)
-		if err != nil {
+		id, frag, ok := a.buildObjectFragment(moduleName, decl, entry, seen)
+		if !ok {
 			skipped++
 			continue
 		}
 		seen[id] = true
-		fragID := decl.Kind + ":" + id
-		frags = append(frags, &commonpb.Fragment{
-			FragmentId:     fragID,
-			Authority:      moduleName,
-			CanonicalBytes: canonical,
-			FragmentHash:   FragmentHash(canonical),
-		})
-		envs[fragID] = &commonpb.FragmentEnvelope{
+		frags = append(frags, frag)
+		envs[frag.FragmentId] = &commonpb.FragmentEnvelope{
 			Source:     "module:" + moduleName,
 			ObservedAt: timestamppb.New(observedAt),
 			Confidence: confidence,
@@ -271,6 +254,50 @@ func (a *Assembler) buildObjectFragments(
 	}
 	sort.Slice(frags, func(i, j int) bool { return frags[i].FragmentId < frags[j].FragmentId })
 	return frags, envs, true
+}
+
+// buildObjectFragment validates one entry of a per-object Get list and builds its
+// fragment. It returns the object ID, the fragment (ID "<kind>:<id>") and true,
+// or false when the entry is malformed, duplicates an ID already in seen, lacks a
+// required field or cannot be canonicalized; the caller counts those skips.
+func (a *Assembler) buildObjectFragment(
+	moduleName string,
+	decl modules.OwnershipDeclaration,
+	entry interface{},
+	seen map[string]bool,
+) (string, *commonpb.Fragment, bool) {
+	obj, _ := entry.(map[string]interface{})
+	id, _ := obj["id"].(string)
+	attrs, attrsOK := obj["attrs"].(map[string]interface{})
+	if obj == nil || !attrsOK || !validObjectID(id) || seen[id] {
+		return "", nil, false
+	}
+	st := &objectState{attrs: attrs}
+	if !a.objectHasRequiredFields(decl, st) {
+		return "", nil, false
+	}
+	frag, err := canonicalFragment(decl.Kind+":"+id, decl.Kind, moduleName, st)
+	if err != nil {
+		return "", nil, false
+	}
+	return id, frag, true
+}
+
+// canonicalFragment canonicalizes state (S2) and hashes it (S3) into the Fragment
+// the assembler emits for a module-authored kind. The single place the assembler
+// pairs CanonicalizeFragment with FragmentHash, so the bytes and the hash cannot
+// be produced from different encodings.
+func canonicalFragment(fragmentID, kind, authority string, state modules.ConfigState) (*commonpb.Fragment, error) {
+	canonical, err := pkgdna.CanonicalizeFragment(kind, authority, state)
+	if err != nil {
+		return nil, err
+	}
+	return &commonpb.Fragment{
+		FragmentId:     fragmentID,
+		Authority:      authority,
+		CanonicalBytes: canonical,
+		FragmentHash:   pkgdna.FragmentHash(canonical),
+	}, nil
 }
 
 // objectHasRequiredFields applies decl.RequiredFields to one object's attrs
@@ -332,14 +359,12 @@ func (a *Assembler) buildModuleFragment(
 		return nil, nil, false
 	}
 
-	canonical, err := CanonicalizeFragment(decl.Kind, moduleName, state)
+	frag, err := canonicalFragment(decl.Kind, decl.Kind, moduleName, state)
 	if err != nil {
 		a.logger.Error("CanonicalizeFragment failed — fragment skipped",
 			"module", moduleName, "kind", decl.Kind, "error", err)
 		return nil, nil, false
 	}
-
-	hash := FragmentHash(canonical)
 
 	confidence := "high"
 	if cr, ok := state.(ConfidenceReporter); ok {
@@ -348,12 +373,6 @@ func (a *Assembler) buildModuleFragment(
 		}
 	}
 
-	frag := &commonpb.Fragment{
-		FragmentId:     decl.Kind,
-		Authority:      moduleName,
-		CanonicalBytes: canonical,
-		FragmentHash:   hash,
-	}
 	env := &commonpb.FragmentEnvelope{
 		Source:     "module:" + moduleName,
 		ObservedAt: timestamppb.New(observedAt),

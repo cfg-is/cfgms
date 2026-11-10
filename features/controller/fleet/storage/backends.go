@@ -17,12 +17,11 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/lib/pq"
-
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
-	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	sdna "github.com/cfgis/cfgms/pkg/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/pgopen"
 )
 
 // NewBackend creates a new storage backend based on the configuration
@@ -385,7 +384,7 @@ func NewDatabaseBackend(config *Config, logger logging.Logger) (*DatabaseBackend
 	}
 
 	// Open PostgreSQL connection
-	db, err := sql.Open("postgres", connString)
+	db, err := pgopen.Open(connString)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open PostgreSQL database: %w", err)
 	}

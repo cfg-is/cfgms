@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	sdna "github.com/cfgis/cfgms/pkg/dna"
 )
 
 // TestE2E_ComplianceWorkflow_CompliantSystem tests the full compliance workflow

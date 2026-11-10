@@ -57,6 +57,7 @@ import (
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider
 	dpTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
+	pkgdna "github.com/cfgis/cfgms/pkg/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
@@ -113,7 +114,7 @@ const maxRequestedFragmentIDs = 10000
 // Bulk-lane request bounds and reply sizing.
 const (
 	// maxRequestedBuckets bounds the buckets list of a bulk=manifest request.
-	maxRequestedBuckets = dna.BucketCount
+	maxRequestedBuckets = pkgdna.BucketCount
 	// maxBulkReplyBytes is the canonical-byte budget of one bulk=fragments reply
 	// transfer. Replies split on object boundaries, never inside one object.
 	maxBulkReplyBytes = 8 << 20
@@ -2807,7 +2808,7 @@ func (c *TransportClient) storeDNAFragments(fragments []*commonpb.Fragment, keep
 	}
 	c.dnaMu.RUnlock()
 
-	root, err := dna.AggregateRoot(manifestOf(host))
+	root, err := pkgdna.AggregateRoot(manifestOf(host))
 	if err != nil {
 		c.logger.Warn("failed to compute aggregate root; partial-sync root not updated", "error", logging.SanitizeLogValue(err.Error()))
 		return
@@ -2826,7 +2827,7 @@ func (c *TransportClient) storeDNAFragments(fragments []*commonpb.Fragment, keep
 	}
 	c.currentBulkFragments = bulk
 	c.currentBulkByID = byID
-	c.currentBulkRoot = dna.BulkRoot(manifestOf(bulk))
+	c.currentBulkRoot = pkgdna.BulkRoot(manifestOf(bulk))
 }
 
 // PublishCurrentDNA collects the FULL composite DNA (hardware facts + module
@@ -4375,41 +4376,65 @@ func (c *TransportClient) newModuleInstaller() execution.ModuleInstaller {
 // []interface{} of numbers, or a native []int are all accepted. Out-of-range
 // numbers and lists over maxRequestedBuckets are rejected.
 func parseBucketNumbers(raw interface{}) ([]int, error) {
-	var nums []int
-	switch v := raw.(type) {
-	case nil:
-		return nil, nil
-	case string:
-		if v == "" {
-			return nil, nil
-		}
-		if err := json.Unmarshal([]byte(v), &nums); err != nil {
-			return nil, fmt.Errorf("buckets is not a JSON number array: %w", err)
-		}
-	case []int:
-		nums = v
-	case []interface{}:
-		if len(v) > maxRequestedBuckets {
-			return nil, fmt.Errorf("buckets contains %d entries, limit is %d", len(v), maxRequestedBuckets)
-		}
-		nums = make([]int, 0, len(v))
-		for i, elem := range v {
-			f, isNum := elem.(float64)
-			if !isNum || f != float64(int(f)) {
-				return nil, fmt.Errorf("buckets[%d] is not an integer", i)
-			}
-			nums = append(nums, int(f))
-		}
-	default:
-		return nil, fmt.Errorf("buckets has unsupported type %T", raw)
+	nums, err := decodeBucketNumbers(raw)
+	if err != nil {
+		return nil, err
 	}
 	if len(nums) > maxRequestedBuckets {
 		return nil, fmt.Errorf("buckets contains %d entries, limit is %d", len(nums), maxRequestedBuckets)
 	}
 	for i, n := range nums {
-		if n < 0 || n >= dna.BucketCount {
+		if n < 0 || n >= pkgdna.BucketCount {
 			return nil, fmt.Errorf("buckets[%d] is out of range", i)
 		}
+	}
+	return nums, nil
+}
+
+// decodeBucketNumbers converts the raw buckets param into a number list without
+// range-checking its values: nil and "" are an empty list, a string is a JSON
+// number array, and a []interface{} must hold only integral numbers and may not
+// exceed maxRequestedBuckets.
+func decodeBucketNumbers(raw interface{}) ([]int, error) {
+	switch v := raw.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		return decodeBucketNumbersJSON(v)
+	case []int:
+		return v, nil
+	case []interface{}:
+		return decodeBucketNumbersList(v)
+	default:
+		return nil, fmt.Errorf("buckets has unsupported type %T", raw)
+	}
+}
+
+// decodeBucketNumbersJSON parses a JSON number array; "" is an empty list.
+func decodeBucketNumbersJSON(v string) ([]int, error) {
+	if v == "" {
+		return nil, nil
+	}
+	var nums []int
+	if err := json.Unmarshal([]byte(v), &nums); err != nil {
+		return nil, fmt.Errorf("buckets is not a JSON number array: %w", err)
+	}
+	return nums, nil
+}
+
+// decodeBucketNumbersList converts a JSON-decoded []interface{} of float64 into
+// ints, rejecting non-integral elements and lists over maxRequestedBuckets.
+func decodeBucketNumbersList(v []interface{}) ([]int, error) {
+	if len(v) > maxRequestedBuckets {
+		return nil, fmt.Errorf("buckets contains %d entries, limit is %d", len(v), maxRequestedBuckets)
+	}
+	nums := make([]int, 0, len(v))
+	for i, elem := range v {
+		f, isNum := elem.(float64)
+		if !isNum || f != float64(int(f)) {
+			return nil, fmt.Errorf("buckets[%d] is not an integer", i)
+		}
+		nums = append(nums, int(f))
 	}
 	return nums, nil
 }
@@ -4422,110 +4447,141 @@ func (c *TransportClient) handleSyncDNABulk(ctx context.Context, session datapla
 	sid, tid string, cmd *cpTypes.Command, rawMode interface{}) error {
 	mode, _ := rawMode.(string)
 
-	reject := func(err error) error {
-		c.logger.Error("sync_dna bulk request rejected",
-			"command_id", logging.SanitizeLogValue(cmd.ID),
-			"error", logging.SanitizeLogValue(err.Error()))
-		return fmt.Errorf("sync_dna bulk request rejected: %w", err)
-	}
-
 	c.dnaMu.RLock()
 	bulk := make([]*commonpb.Fragment, len(c.currentBulkFragments))
 	copy(bulk, c.currentBulkFragments)
 	byID := c.currentBulkByID
 	c.dnaMu.RUnlock()
 
-	newTransfer := func(kind string) *dpTypes.DNATransfer {
-		return &dpTypes.DNATransfer{
-			ID:        fmt.Sprintf("dna_bulk_%s_%d", kind, time.Now().UnixNano()),
-			StewardID: sid,
-			TenantID:  tid,
-			Timestamp: time.Now(),
-			Bulk:      true,
-			Metadata:  map[string]string{"command_id": cmd.ID},
-		}
-	}
-
 	switch mode {
 	case cpTypes.SyncDNABulkBuckets:
-		t := newTransfer("buckets")
-		t.BucketRoots = dna.BucketRoots(manifestOf(bulk))
-		if err := session.SendDNA(ctx, t); err != nil {
-			return fmt.Errorf("failed to send bulk bucket roots: %w", err)
-		}
-		c.logger.Info("Bulk bucket roots sent", "command_id", logging.SanitizeLogValue(cmd.ID),
-			"fragment_count", len(bulk))
-		return nil
-
+		return c.sendBulkBucketRoots(ctx, session, sid, tid, cmd, bulk)
 	case cpTypes.SyncDNABulkManifest:
-		buckets, err := parseBucketNumbers(cmd.Params[cpTypes.SyncDNAParamBuckets])
-		if err != nil {
-			return reject(err)
-		}
-		wanted := make(map[int]bool, len(buckets))
-		for _, b := range buckets {
-			wanted[b] = true
-		}
-		var entries []*commonpb.ManifestEntry
-		for _, e := range manifestOf(bulk) {
-			if wanted[dna.BucketOf(e.GetFragmentId())] {
-				entries = append(entries, e)
-			}
-		}
-		sort.Slice(entries, func(i, j int) bool { return entries[i].GetFragmentId() < entries[j].GetFragmentId() })
-		t := newTransfer("manifest")
-		t.Manifest = entries
-		if err := session.SendDNA(ctx, t); err != nil {
-			return fmt.Errorf("failed to send bulk manifest: %w", err)
-		}
-		c.logger.Info("Bulk manifest sent", "command_id", logging.SanitizeLogValue(cmd.ID),
-			"bucket_count", len(wanted), "entry_count", len(entries))
-		return nil
-
+		return c.sendBulkManifest(ctx, session, sid, tid, cmd, bulk)
 	case cpTypes.SyncDNABulkFragments:
-		ids, err := parseFragmentIDs(cmd.Params[cpTypes.SyncDNAParamFragmentIDs])
-		if err != nil {
-			return reject(err)
-		}
-		// Unknown ids are skipped: the controller diffed against a manifest that
-		// may have moved on, and a fallback to full sync would drag in host data.
-		selected := make([]*commonpb.Fragment, 0, len(ids))
-		seen := make(map[string]bool, len(ids))
-		for _, id := range ids {
-			if f, ok := byID[id]; ok && !seen[id] {
-				seen[id] = true
-				selected = append(selected, f)
-			}
-		}
-		// Split on object boundaries so every transfer is a valid delta.
-		var chunks [][]*commonpb.Fragment
-		var cur []*commonpb.Fragment
-		curBytes := 0
-		for _, f := range selected {
-			n := len(f.GetCanonicalBytes())
-			if len(cur) > 0 && curBytes+n > maxBulkReplyBytes {
-				chunks = append(chunks, cur)
-				cur, curBytes = nil, 0
-			}
-			cur = append(cur, f)
-			curBytes += n
-		}
-		if len(cur) > 0 || len(chunks) == 0 {
-			chunks = append(chunks, cur)
-		}
-		for i, chunk := range chunks {
-			t := newTransfer("fragments")
-			t.ID = fmt.Sprintf("%s_%d", t.ID, i)
-			t.Delta = true
-			t.Fragments = chunk
-			t.Metadata["fragment_count"] = fmt.Sprintf("%d", len(chunk))
-			if err := session.SendDNA(ctx, t); err != nil {
-				return fmt.Errorf("failed to send bulk fragments: %w", err)
-			}
-		}
-		c.logger.Info("Bulk fragments sent", "command_id", logging.SanitizeLogValue(cmd.ID),
-			"requested_count", len(ids), "fragment_count", len(selected), "transfer_count", len(chunks))
-		return nil
+		return c.sendBulkFragments(ctx, session, sid, tid, cmd, byID)
 	}
-	return reject(fmt.Errorf("unknown bulk mode"))
+	return c.rejectBulk(cmd, fmt.Errorf("unknown bulk mode"))
+}
+
+// rejectBulk logs a rejected bulk-lane request and returns the error the command
+// handler reports.
+func (c *TransportClient) rejectBulk(cmd *cpTypes.Command, err error) error {
+	c.logger.Error("sync_dna bulk request rejected",
+		"command_id", logging.SanitizeLogValue(cmd.ID),
+		"error", logging.SanitizeLogValue(err.Error()))
+	return fmt.Errorf("sync_dna bulk request rejected: %w", err)
+}
+
+// newBulkTransfer starts a bulk-lane DNATransfer for the command; kind names the
+// reply ("buckets", "manifest", "fragments") in the transfer ID.
+func newBulkTransfer(kind, sid, tid string, cmd *cpTypes.Command) *dpTypes.DNATransfer {
+	return &dpTypes.DNATransfer{
+		ID:        fmt.Sprintf("dna_bulk_%s_%d", kind, time.Now().UnixNano()),
+		StewardID: sid,
+		TenantID:  tid,
+		Timestamp: time.Now(),
+		Bulk:      true,
+		Metadata:  map[string]string{"command_id": cmd.ID},
+	}
+}
+
+// sendBulkBucketRoots answers bulk=buckets with the 256 bucket roots of the held
+// per-object fragments.
+func (c *TransportClient) sendBulkBucketRoots(ctx context.Context, session dataplaneInterfaces.DataPlaneSession,
+	sid, tid string, cmd *cpTypes.Command, bulk []*commonpb.Fragment) error {
+	t := newBulkTransfer("buckets", sid, tid, cmd)
+	t.BucketRoots = pkgdna.BucketRoots(manifestOf(bulk))
+	if err := session.SendDNA(ctx, t); err != nil {
+		return fmt.Errorf("failed to send bulk bucket roots: %w", err)
+	}
+	c.logger.Info("Bulk bucket roots sent", "command_id", logging.SanitizeLogValue(cmd.ID),
+		"fragment_count", len(bulk))
+	return nil
+}
+
+// sendBulkManifest answers bulk=manifest with the manifest entries that fall in
+// the requested buckets, sorted by fragment id.
+func (c *TransportClient) sendBulkManifest(ctx context.Context, session dataplaneInterfaces.DataPlaneSession,
+	sid, tid string, cmd *cpTypes.Command, bulk []*commonpb.Fragment) error {
+	buckets, err := parseBucketNumbers(cmd.Params[cpTypes.SyncDNAParamBuckets])
+	if err != nil {
+		return c.rejectBulk(cmd, err)
+	}
+	wanted := make(map[int]bool, len(buckets))
+	for _, b := range buckets {
+		wanted[b] = true
+	}
+	var entries []*commonpb.ManifestEntry
+	for _, e := range manifestOf(bulk) {
+		if wanted[pkgdna.BucketOf(e.GetFragmentId())] {
+			entries = append(entries, e)
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].GetFragmentId() < entries[j].GetFragmentId() })
+	t := newBulkTransfer("manifest", sid, tid, cmd)
+	t.Manifest = entries
+	if err := session.SendDNA(ctx, t); err != nil {
+		return fmt.Errorf("failed to send bulk manifest: %w", err)
+	}
+	c.logger.Info("Bulk manifest sent", "command_id", logging.SanitizeLogValue(cmd.ID),
+		"bucket_count", len(wanted), "entry_count", len(entries))
+	return nil
+}
+
+// sendBulkFragments answers bulk=fragments with the requested held fragments,
+// split into transfers on object boundaries.
+func (c *TransportClient) sendBulkFragments(ctx context.Context, session dataplaneInterfaces.DataPlaneSession,
+	sid, tid string, cmd *cpTypes.Command, byID map[string]*commonpb.Fragment) error {
+	ids, err := parseFragmentIDs(cmd.Params[cpTypes.SyncDNAParamFragmentIDs])
+	if err != nil {
+		return c.rejectBulk(cmd, err)
+	}
+	// Unknown ids are skipped: the controller diffed against a manifest that
+	// may have moved on, and a fallback to full sync would drag in host data.
+	selected := make([]*commonpb.Fragment, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if f, ok := byID[id]; ok && !seen[id] {
+			seen[id] = true
+			selected = append(selected, f)
+		}
+	}
+	chunks := chunkFragmentsByBytes(selected, maxBulkReplyBytes)
+	for i, chunk := range chunks {
+		t := newBulkTransfer("fragments", sid, tid, cmd)
+		t.ID = fmt.Sprintf("%s_%d", t.ID, i)
+		t.Delta = true
+		t.Fragments = chunk
+		t.Metadata["fragment_count"] = fmt.Sprintf("%d", len(chunk))
+		if err := session.SendDNA(ctx, t); err != nil {
+			return fmt.Errorf("failed to send bulk fragments: %w", err)
+		}
+	}
+	c.logger.Info("Bulk fragments sent", "command_id", logging.SanitizeLogValue(cmd.ID),
+		"requested_count", len(ids), "fragment_count", len(selected), "transfer_count", len(chunks))
+	return nil
+}
+
+// chunkFragmentsByBytes splits fragments on object boundaries so no chunk's
+// canonical bytes exceed maxBytes (a single larger fragment gets a chunk of its
+// own, never split). It always returns at least one chunk, so an empty selection
+// still produces one empty reply.
+func chunkFragmentsByBytes(fragments []*commonpb.Fragment, maxBytes int) [][]*commonpb.Fragment {
+	var chunks [][]*commonpb.Fragment
+	var cur []*commonpb.Fragment
+	curBytes := 0
+	for _, f := range fragments {
+		n := len(f.GetCanonicalBytes())
+		if len(cur) > 0 && curBytes+n > maxBytes {
+			chunks = append(chunks, cur)
+			cur, curBytes = nil, 0
+		}
+		cur = append(cur, f)
+		curBytes += n
+	}
+	if len(cur) > 0 || len(chunks) == 0 {
+		chunks = append(chunks, cur)
+	}
+	return chunks
 }

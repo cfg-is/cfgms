@@ -19,9 +19,9 @@ import (
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/controller/directory"
-	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dptypes "github.com/cfgis/cfgms/pkg/dataplane/types"
+	sdna "github.com/cfgis/cfgms/pkg/dna"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/entitygraph/writers/dnasync"
 	"github.com/cfgis/cfgms/pkg/logging"

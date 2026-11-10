@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
-	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	sdna "github.com/cfgis/cfgms/pkg/dna"
 )
 
 // DeadOwnerStaleThreshold is the age of a steward's last heartbeat after which

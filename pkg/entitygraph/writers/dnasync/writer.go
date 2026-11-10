@@ -57,6 +57,7 @@ import (
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	pkgdna "github.com/cfgis/cfgms/pkg/dna"
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	"github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -449,7 +450,7 @@ func buildPayload(frag *commonpb.Fragment, confidence types.Confidence) map[stri
 	// bytes are malformed or use an unknown encoding the payload still carries
 	// the mandatory fragment metadata below.
 	if cb := frag.GetCanonicalBytes(); len(cb) > 0 {
-		if fields, err := decodeCanonicalFragment(cb); err == nil {
+		if fields, err := pkgdna.DecodeCanonicalFragment(cb); err == nil {
 			for k, v := range fields {
 				payload[k] = v
 			}

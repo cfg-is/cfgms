@@ -21,7 +21,7 @@
 // reporting peer's host namespace, even when the named cluster genuinely exists.
 //
 // Fixtures come from the real emission paths: hyperv.VMConfig.AsMap and
-// hyperv.ClusterStatus.AsMap canonicalized by features/steward/dna.NewFragment, ingested
+// hyperv.ClusterStatus.AsMap canonicalized by pkg/dna.NewFragment, ingested
 // by the real dnasync writer, and registered through the controller service's real
 // registration API. The forged-membership fixture is hand-built on purpose — it models a
 // compromised steward, which is not bound to the module's emission code.
@@ -38,8 +38,8 @@ import (
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/modules/hyperv"
-	stewarddna "github.com/cfgis/cfgms/features/steward/dna"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	stewarddna "github.com/cfgis/cfgms/pkg/dna"
 	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	egsqlite "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"

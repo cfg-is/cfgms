@@ -45,10 +45,10 @@ import (
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	controllerTransport "github.com/cfgis/cfgms/features/controller/transport"
-	stewarddna "github.com/cfgis/cfgms/features/steward/dna"
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dptypes "github.com/cfgis/cfgms/pkg/dataplane/types"
+	stewarddna "github.com/cfgis/cfgms/pkg/dna"
 	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	egsqlite "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
@@ -243,7 +243,7 @@ func wiringEGProvider(t *testing.T) *egsqlite.SQLiteEntityGraphProvider {
 }
 
 // plainFragmentForTest builds a simple host-scoped fragment via the real
-// steward-side canonicalization path (features/steward/dna.NewFragment).
+// steward-side canonicalization path (pkg/dna.NewFragment).
 func plainFragmentForTest(t *testing.T, fragmentID string, content map[string]interface{}) *commonpb.Fragment {
 	t.Helper()
 	frag, err := stewarddna.NewFragment(fragmentID, "test-authority", stewarddna.MapState(content))

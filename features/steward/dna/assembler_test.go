@@ -15,6 +15,7 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/modules"
+	pkgdna "github.com/cfgis/cfgms/pkg/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -75,13 +76,13 @@ func stateFixture(data map[string]interface{}) *asmFakeModule {
 func hostFactFrag(t *testing.T, kind string, data map[string]interface{}) *commonpb.Fragment {
 	t.Helper()
 	state := &asmFakeState{data: data}
-	canonical, err := CanonicalizeFragment(kind, "gatherer", state)
+	canonical, err := pkgdna.CanonicalizeFragment(kind, "gatherer", state)
 	require.NoError(t, err)
 	return &commonpb.Fragment{
 		FragmentId:     kind,
 		Authority:      "gatherer",
 		CanonicalBytes: canonical,
-		FragmentHash:   FragmentHash(canonical),
+		FragmentHash:   pkgdna.FragmentHash(canonical),
 	}
 }
 
@@ -473,13 +474,13 @@ func TestAssembler_OsqueryAuthorityPreemptedByModule(t *testing.T) {
 func osqueryHostFactFrag(t *testing.T, kind string, data map[string]interface{}) *commonpb.Fragment {
 	t.Helper()
 	state := &asmFakeState{data: data}
-	canonical, err := CanonicalizeFragment(kind, "osquery", state)
+	canonical, err := pkgdna.CanonicalizeFragment(kind, "osquery", state)
 	require.NoError(t, err)
 	return &commonpb.Fragment{
 		FragmentId:     kind,
 		Authority:      "osquery",
 		CanonicalBytes: canonical,
-		FragmentHash:   FragmentHash(canonical),
+		FragmentHash:   pkgdna.FragmentHash(canonical),
 	}
 }
 
@@ -706,7 +707,7 @@ func TestAssemble_PerObject_StableHashAcrossRuns(t *testing.T) {
 		for _, f := range fs {
 			m = append(m, &commonpb.ManifestEntry{FragmentId: f.FragmentId, FragmentHash: f.FragmentHash})
 		}
-		r, err := AggregateRoot(m)
+		r, err := pkgdna.AggregateRoot(m)
 		require.NoError(t, err)
 		return r
 	}

@@ -24,7 +24,6 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
-	"github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/modules/install"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
@@ -32,6 +31,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/controlplane/providers/memory"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dpTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
+	"github.com/cfgis/cfgms/pkg/dna"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 )

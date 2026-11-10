@@ -25,7 +25,8 @@ import (
 //   - []interface{} for L-tagged slices
 //   - nil for N-tagged null values
 //
-// Used by the cluster registry to extract resource_owner from cluster:* fragments.
+// Used by the cluster registry to extract resource_owner from cluster:* fragments,
+// and by the DNA entity-graph writer to project fragment fields.
 //
 // # Hostile-input handling
 //
@@ -153,7 +154,8 @@ func decodeCanonMap(b []byte, depth int) (map[string]interface{}, int, error) {
 }
 
 // decodeCanonValue decodes one type-tagged value from b at the given nesting depth.
-// Returns the value, bytes consumed, and any error.
+// Returns the value, bytes consumed, and any error. It dispatches on the wire tag;
+// each tag's layout lives in its own helper.
 func decodeCanonValue(b []byte, depth int) (interface{}, int, error) {
 	if depth > maxCanonDecodeDepth {
 		return nil, 0, fmt.Errorf("decodeCanonValue: nesting depth exceeds %d", maxCanonDecodeDepth)
@@ -164,13 +166,30 @@ func decodeCanonValue(b []byte, depth int) (interface{}, int, error) {
 	switch b[0] {
 	case canonTagNull:
 		return nil, 1, nil
+	case canonTagBool, canonTagInt, canonTagUint:
+		return decodeCanonFixed(b)
+	case canonTagFloat:
+		return decodeCanonFloat(b)
+	case canonTagString, canonTagOther:
+		return decodeCanonString(b)
+	case canonTagMap:
+		return decodeCanonNestedMap(b, depth)
+	case canonTagSlice:
+		return decodeCanonSlice(b, depth)
+	default:
+		return nil, 0, fmt.Errorf("decodeCanonValue: unknown tag 0x%02x", b[0])
+	}
+}
 
+// decodeCanonFixed decodes the fixed-width scalar tags: a bool (tag + 1 byte), an
+// int64 or a uint64 (tag + 8 big-endian bytes). b[0] must be one of those tags.
+func decodeCanonFixed(b []byte) (interface{}, int, error) {
+	switch b[0] {
 	case canonTagBool:
 		if len(b) < 2 {
 			return nil, 0, fmt.Errorf("decodeCanonValue: bool truncated")
 		}
 		return b[1] != 0x00, 2, nil
-
 	case canonTagInt:
 		if len(b) < 9 {
 			return nil, 0, fmt.Errorf("decodeCanonValue: int64 truncated")
@@ -179,76 +198,83 @@ func decodeCanonValue(b []byte, depth int) (interface{}, int, error) {
 		// it reads back the same two's-complement bit pattern that was written, so
 		// all 64 bits are preserved. This is a reinterpretation, not a narrowing.
 		return int64(binary.BigEndian.Uint64(b[1:9])), 9, nil
-
-	case canonTagUint:
+	default:
 		if len(b) < 9 {
 			return nil, 0, fmt.Errorf("decodeCanonValue: uint64 truncated")
 		}
 		return binary.BigEndian.Uint64(b[1:9]), 9, nil
-
-	case canonTagFloat:
-		if len(b) < 5 {
-			return nil, 0, fmt.Errorf("decodeCanonValue: float length truncated")
-		}
-		slen, ok := canonSpan(binary.BigEndian.Uint32(b[1:5]), len(b)-5)
-		if !ok {
-			return nil, 0, fmt.Errorf("decodeCanonValue: float string truncated")
-		}
-		s := string(b[5 : 5+slen])
-		v, err := strconv.ParseFloat(s, 64)
-		if err != nil {
-			return nil, 0, fmt.Errorf("decodeCanonValue: parse float %q: %w", s, err)
-		}
-		return v, 5 + slen, nil
-
-	case canonTagString, canonTagOther:
-		if len(b) < 5 {
-			return nil, 0, fmt.Errorf("decodeCanonValue: string/other length truncated")
-		}
-		slen, ok := canonSpan(binary.BigEndian.Uint32(b[1:5]), len(b)-5)
-		if !ok {
-			return nil, 0, fmt.Errorf("decodeCanonValue: string/other bytes truncated")
-		}
-		return string(b[5 : 5+slen]), 5 + slen, nil
-
-	case canonTagMap:
-		m, n, err := decodeCanonMap(b[1:], depth+1)
-		if err != nil {
-			return nil, 0, fmt.Errorf("decodeCanonValue: nested map: %w", err)
-		}
-		return m, 1 + n, nil
-
-	case canonTagSlice:
-		if len(b) < 5 {
-			return nil, 0, fmt.Errorf("decodeCanonValue: slice count truncated")
-		}
-		declaredCount := binary.BigEndian.Uint32(b[1:5])
-		pos := 5
-		// Every element consumes at least one type-tag byte, so a count larger than
-		// the remaining buffer is structurally impossible. Rejecting it here (rather
-		// than discovering the truncation mid-loop) keeps a hostile header from
-		// driving an allocation before a single element has been read.
-		count, ok := canonSpan(declaredCount, len(b)-pos)
-		if !ok {
-			return nil, 0, fmt.Errorf("decodeCanonValue: declared %d slice elements exceeds %d remaining bytes",
-				declaredCount, len(b)-pos)
-		}
-		// Grown incrementally rather than pre-sized from the declared count, so the
-		// allocation tracks elements actually decoded instead of the declared header.
-		elems := make([]interface{}, 0)
-		for i := 0; i < count; i++ {
-			v, n, err := decodeCanonValue(b[pos:], depth+1)
-			if err != nil {
-				return nil, 0, fmt.Errorf("decodeCanonValue: slice element %d: %w", i, err)
-			}
-			elems = append(elems, v)
-			pos += n
-		}
-		return elems, pos, nil
-
-	default:
-		return nil, 0, fmt.Errorf("decodeCanonValue: unknown tag 0x%02x", b[0])
 	}
+}
+
+// decodeCanonFloat decodes [F][uint32 length][shortest-round-trip decimal string].
+func decodeCanonFloat(b []byte) (interface{}, int, error) {
+	if len(b) < 5 {
+		return nil, 0, fmt.Errorf("decodeCanonValue: float length truncated")
+	}
+	slen, ok := canonSpan(binary.BigEndian.Uint32(b[1:5]), len(b)-5)
+	if !ok {
+		return nil, 0, fmt.Errorf("decodeCanonValue: float string truncated")
+	}
+	s := string(b[5 : 5+slen])
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return nil, 0, fmt.Errorf("decodeCanonValue: parse float %q: %w", s, err)
+	}
+	return v, 5 + slen, nil
+}
+
+// decodeCanonString decodes [S or O][uint32 length][bytes]; both tags decode to a
+// Go string.
+func decodeCanonString(b []byte) (interface{}, int, error) {
+	if len(b) < 5 {
+		return nil, 0, fmt.Errorf("decodeCanonValue: string/other length truncated")
+	}
+	slen, ok := canonSpan(binary.BigEndian.Uint32(b[1:5]), len(b)-5)
+	if !ok {
+		return nil, 0, fmt.Errorf("decodeCanonValue: string/other bytes truncated")
+	}
+	return string(b[5 : 5+slen]), 5 + slen, nil
+}
+
+// decodeCanonNestedMap decodes an M-tagged value: the tag byte followed by a map
+// one nesting level deeper than the value that holds it.
+func decodeCanonNestedMap(b []byte, depth int) (interface{}, int, error) {
+	m, n, err := decodeCanonMap(b[1:], depth+1)
+	if err != nil {
+		return nil, 0, fmt.Errorf("decodeCanonValue: nested map: %w", err)
+	}
+	return m, 1 + n, nil
+}
+
+// decodeCanonSlice decodes [L][uint32 count][elements...], one nesting level
+// deeper than the value that holds it.
+func decodeCanonSlice(b []byte, depth int) (interface{}, int, error) {
+	if len(b) < 5 {
+		return nil, 0, fmt.Errorf("decodeCanonValue: slice count truncated")
+	}
+	declaredCount := binary.BigEndian.Uint32(b[1:5])
+	pos := 5
+	// Every element consumes at least one type-tag byte, so a count larger than
+	// the remaining buffer is structurally impossible. Rejecting it here (rather
+	// than discovering the truncation mid-loop) keeps a hostile header from
+	// driving an allocation before a single element has been read.
+	count, ok := canonSpan(declaredCount, len(b)-pos)
+	if !ok {
+		return nil, 0, fmt.Errorf("decodeCanonValue: declared %d slice elements exceeds %d remaining bytes",
+			declaredCount, len(b)-pos)
+	}
+	// Grown incrementally rather than pre-sized from the declared count, so the
+	// allocation tracks elements actually decoded instead of the declared header.
+	elems := make([]interface{}, 0)
+	for i := 0; i < count; i++ {
+		v, n, err := decodeCanonValue(b[pos:], depth+1)
+		if err != nil {
+			return nil, 0, fmt.Errorf("decodeCanonValue: slice element %d: %w", i, err)
+		}
+		elems = append(elems, v)
+		pos += n
+	}
+	return elems, pos, nil
 }
 
 // Wire-format type tags for CanonicalizeFragment's length-prefix encoding.
@@ -365,101 +391,149 @@ func canonEncodeMap(m map[string]interface{}) ([]byte, error) {
 	return buf, nil
 }
 
-// canonEncodeValue encodes a single value with its type tag.
+// canonEncodeValue encodes a single value with its type tag. Scalars are routed to
+// the width-specific helpers below; containers are normalised to the
+// map[string]interface{} / []interface{} encodings so equivalent Go types produce
+// identical bytes.
 func canonEncodeValue(v interface{}) ([]byte, error) {
 	switch val := v.(type) {
 	case nil:
 		return []byte{canonTagNull}, nil
-
 	case bool:
-		b := byte(0x00)
-		if val {
-			b = 0x01
-		}
-		return []byte{canonTagBool, b}, nil
-
-	case int:
-		return canonEncodeInt64(int64(val)), nil
-	case int8:
-		return canonEncodeInt64(int64(val)), nil
-	case int16:
-		return canonEncodeInt64(int64(val)), nil
-	case int32:
-		return canonEncodeInt64(int64(val)), nil
-	case int64:
-		return canonEncodeInt64(val), nil
-
-	case uint:
-		return canonEncodeUint64(uint64(val)), nil
-	case uint8:
-		return canonEncodeUint64(uint64(val)), nil
-	case uint16:
-		return canonEncodeUint64(uint64(val)), nil
-	case uint32:
-		return canonEncodeUint64(uint64(val)), nil
-	case uint64:
-		return canonEncodeUint64(val), nil
-
-	case float32:
-		return canonEncodeFloat(float64(val))
-	case float64:
-		return canonEncodeFloat(val)
-
+		return canonEncodeBool(val), nil
 	case string:
 		return canonEncodeStringTag(canonTagString, []byte(val))
-
 	case map[string]interface{}:
-		inner, err := canonEncodeMap(val)
-		if err != nil {
-			return nil, err
-		}
-		return append([]byte{canonTagMap}, inner...), nil
-
+		return canonEncodeMapValue(val)
 	case map[string]string:
-		// Normalise to map[string]interface{} so the encoding is identical to the
-		// map[string]interface{} path (sorted keys, length-prefix entries, decodable).
-		// Without this case, map[string]string falls to the default/O path which
-		// produces Go's fmt.Sprintf("%v") string — opaque and not decodable.
-		converted := make(map[string]interface{}, len(val))
-		for k, v := range val {
-			converted[k] = v
-		}
-		inner, err := canonEncodeMap(converted)
-		if err != nil {
-			return nil, err
-		}
-		return append([]byte{canonTagMap}, inner...), nil
-
+		return canonEncodeStringMap(val)
 	case []interface{}:
 		return canonEncodeSlice(val)
-
 	case []string:
-		// Normalise to []interface{} so element encoding is identical to the
-		// []interface{} path — same type tag, same byte layout.
-		elems := make([]interface{}, len(val))
-		for i, s := range val {
-			elems[i] = s
-		}
-		return canonEncodeSlice(elems)
-
+		return canonEncodeStringSlice(val)
 	case []map[string]interface{}:
-		// ADQueryResult.GenericObjects uses this type; %v on a slice of maps is
-		// collision-prone (space separator), so encode explicitly.
-		elems := make([]interface{}, len(val))
-		for i, m := range val {
-			elems[i] = m
-		}
-		return canonEncodeSlice(elems)
-
-	default:
-		// Fallback for any unexpected concrete type: encode as its %v string with
-		// a distinct tag so it cannot collide with a real string value.
-		// Known slice types that land here: []DirectoryUser, []DirectoryGroup,
-		// []OrganizationalUnit — struct %v wraps each element in {}, providing
-		// a higher collision bar than plain string slices, but new slice-of-struct
-		// types appearing in AsMap() implementations should be given explicit cases.
-		return canonEncodeStringTag(canonTagOther, []byte(fmt.Sprintf("%v", val)))
+		return canonEncodeMapSlice(val)
 	}
+	return canonEncodeNumberOrOther(v)
+}
+
+// canonEncodeStringMap normalises a map[string]string to map[string]interface{}
+// so the encoding is identical to the map[string]interface{} path (sorted keys,
+// length-prefix entries, decodable). Without it, map[string]string would fall to
+// the O path, which produces Go's fmt.Sprintf("%v") string — opaque and not
+// decodable.
+func canonEncodeStringMap(m map[string]string) ([]byte, error) {
+	converted := make(map[string]interface{}, len(m))
+	for k, e := range m {
+		converted[k] = e
+	}
+	return canonEncodeMapValue(converted)
+}
+
+// canonEncodeStringSlice normalises a []string to []interface{} so element
+// encoding is identical to the []interface{} path — same type tag, same byte
+// layout.
+func canonEncodeStringSlice(v []string) ([]byte, error) {
+	elems := make([]interface{}, len(v))
+	for i, e := range v {
+		elems[i] = e
+	}
+	return canonEncodeSlice(elems)
+}
+
+// canonEncodeMapSlice encodes a []map[string]interface{} explicitly.
+// ADQueryResult.GenericObjects uses this type; %v on a slice of maps is
+// collision-prone (space separator).
+func canonEncodeMapSlice(v []map[string]interface{}) ([]byte, error) {
+	elems := make([]interface{}, len(v))
+	for i, e := range v {
+		elems[i] = e
+	}
+	return canonEncodeSlice(elems)
+}
+
+// canonEncodeNumberOrOther encodes the numeric kinds, and falls back to the O tag
+// for any other concrete type.
+func canonEncodeNumberOrOther(v interface{}) ([]byte, error) {
+	if n, ok := canonSignedInt(v); ok {
+		return canonEncodeInt64(n), nil
+	}
+	if n, ok := canonUnsignedInt(v); ok {
+		return canonEncodeUint64(n), nil
+	}
+	if f, ok := canonFloatValue(v); ok {
+		return canonEncodeFloat(f)
+	}
+	// Fallback for any unexpected concrete type: encode as its %v string with
+	// a distinct tag so it cannot collide with a real string value.
+	// Known slice types that land here: []DirectoryUser, []DirectoryGroup,
+	// []OrganizationalUnit — struct %v wraps each element in {}, providing
+	// a higher collision bar than plain string slices, but new slice-of-struct
+	// types appearing in AsMap() implementations should be given explicit cases.
+	return canonEncodeStringTag(canonTagOther, []byte(fmt.Sprintf("%v", v)))
+}
+
+// canonSignedInt widens the built-in signed integer types to int64.
+func canonSignedInt(v interface{}) (int64, bool) {
+	switch n := v.(type) {
+	case int:
+		return int64(n), true
+	case int8:
+		return int64(n), true
+	case int16:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case int64:
+		return n, true
+	}
+	return 0, false
+}
+
+// canonUnsignedInt widens the built-in unsigned integer types to uint64.
+func canonUnsignedInt(v interface{}) (uint64, bool) {
+	switch n := v.(type) {
+	case uint:
+		return uint64(n), true
+	case uint8:
+		return uint64(n), true
+	case uint16:
+		return uint64(n), true
+	case uint32:
+		return uint64(n), true
+	case uint64:
+		return n, true
+	}
+	return 0, false
+}
+
+// canonFloatValue widens the built-in float types to float64.
+func canonFloatValue(v interface{}) (float64, bool) {
+	switch f := v.(type) {
+	case float32:
+		return float64(f), true
+	case float64:
+		return f, true
+	}
+	return 0, false
+}
+
+// canonEncodeBool encodes a bool as [B][0x00|0x01].
+func canonEncodeBool(v bool) []byte {
+	b := byte(0x00)
+	if v {
+		b = 0x01
+	}
+	return []byte{canonTagBool, b}
+}
+
+// canonEncodeMapValue encodes a nested map as [canonTagMap] + its sorted entries.
+func canonEncodeMapValue(m map[string]interface{}) ([]byte, error) {
+	inner, err := canonEncodeMap(m)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte{canonTagMap}, inner...), nil
 }
 
 // canonEncodeSlice encodes a []interface{} as [canonTagSlice][uint32 count][elements...].

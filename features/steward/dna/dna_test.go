@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/modules"
+	pkgdna "github.com/cfgis/cfgms/pkg/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/testing/dnasnapshot"
 )
@@ -296,18 +297,18 @@ func defaultDNAOsquerySource() *dnaOsquerySource {
 	return &dnaOsquerySource{
 		healthy: true,
 		data: map[string]modules.ConfigState{
-			"host:cpu": MapState(map[string]interface{}{
+			"host:cpu": pkgdna.MapState(map[string]interface{}{
 				"cpu_brand":          "Intel(R) Xeon(R) Gold 6154",
 				"cpu_physical_cores": "18",
 			}),
-			"host:memory": MapState(map[string]interface{}{
+			"host:memory": pkgdna.MapState(map[string]interface{}{
 				"physical_memory": "137438953472",
 			}),
-			"host:os": MapState(map[string]interface{}{
+			"host:os": pkgdna.MapState(map[string]interface{}{
 				"os":       "Ubuntu",
 				"hostname": "steward-01",
 			}),
-			"host:bios": MapState(map[string]interface{}{
+			"host:bios": pkgdna.MapState(map[string]interface{}{
 				"hardware_vendor": "ACME Corp",
 				"uuid":            "AAAABBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF",
 			}),

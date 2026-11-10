@@ -26,8 +26,8 @@ import (
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
-	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	dptypes "github.com/cfgis/cfgms/pkg/dataplane/types"
+	sdna "github.com/cfgis/cfgms/pkg/dna"
 	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	sqliteprovider "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"

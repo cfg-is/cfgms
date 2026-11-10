@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
-	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	sdna "github.com/cfgis/cfgms/pkg/dna"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
