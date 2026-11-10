@@ -6,6 +6,9 @@
  * Fetches GET /api/v1/scripts, renders a library table, and opens RunPanel
  * when an operator selects a script row.
  *
+ * The Approvals toggle opens the library mode, pending changes and per-version
+ * approvals below the table (Issue #5856).
+ *
  * Security A9.1: script names and descriptions are untrusted-origin data.
  * Every value reaches the DOM as a JSX text node — never dangerouslySetInnerHTML.
  */
@@ -13,6 +16,9 @@ import { useState } from 'react'
 import { useScriptList, type ScriptMetadata } from './useScripts.ts'
 import RunPanel from './RunPanel.tsx'
 import ScriptPrivilegePanel from './ScriptPrivilegePanel.tsx'
+import ScriptApprovalPanel from './ScriptApprovalPanel.tsx'
+import LibraryModePanel from './LibraryModePanel.tsx'
+import { useScriptApprovals } from './useScriptApprovals.ts'
 import RunsView from './RunsView.tsx'
 import ErrorCard from '../shell/ErrorCard.tsx'
 
@@ -78,10 +84,23 @@ function ScriptRow({
   )
 }
 
+// Mounted only while the approvals toggle is on, so the library mode and the
+// approval lists are fetched when an admin asks for them.
+function ApprovalsSection({ scriptId }: { scriptId: string | null }) {
+  const approvals = useScriptApprovals()
+  return (
+    <>
+      <LibraryModePanel kind="script" onChanged={approvals.retry} />
+      <ScriptApprovalPanel approvals={approvals} scriptId={scriptId} />
+    </>
+  )
+}
+
 export default function ScriptsView() {
   const { scripts, loading, error, retry } = useScriptList()
   const [selectedScript, setSelectedScript] = useState<ScriptMetadata | null>(null)
   const [showHistory, setShowHistory] = useState(false)
+  const [showApprovals, setShowApprovals] = useState(false)
 
   function handleRowClick(script: ScriptMetadata) {
     setSelectedScript((prev) => (prev?.id === script.id ? null : script))
@@ -107,6 +126,14 @@ export default function ScriptsView() {
             data-testid="toggle-history-btn"
           >
             {showHistory ? 'Close history' : 'Run history'}
+          </button>
+          <button
+            type="button"
+            className={showApprovals ? 'wf-btn' : 'wf-btn-secondary'}
+            onClick={() => setShowApprovals((v) => !v)}
+            data-testid="toggle-approvals-btn"
+          >
+            {showApprovals ? 'Close approvals' : 'Approvals'}
           </button>
           {!loading && error === null && (
             <span className="cnt" data-testid="script-count">
@@ -158,6 +185,8 @@ export default function ScriptsView() {
       {selectedScript !== null && (
         <ScriptPrivilegePanel key={selectedScript.id} script={selectedScript} />
       )}
+
+      {showApprovals && <ApprovalsSection scriptId={selectedScript?.id ?? null} />}
     </>
   )
 }
