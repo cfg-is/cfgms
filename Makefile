@@ -1,4 +1,4 @@
-.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-cmd test-go-group-windows-cmd-steward-1 test-go-group-windows-cmd-steward-2 test-go-group-windows-rest test-go-group-macos-providers test-go-group-macos-steward test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection complexity-report complexity-check complexity-replay duplication-report duplication-replay duplication-check clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
+.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-cmd test-go-group-windows-cmd-steward-1 test-go-group-windows-cmd-steward-2 test-go-group-windows-rest test-go-group-macos-providers test-go-group-macos-steward test-go-group-macos-cmd-steward-1 test-go-group-macos-cmd-steward-2 test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection complexity-report complexity-check complexity-replay duplication-report duplication-replay duplication-check clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -825,10 +825,11 @@ test-go-group-windows-rest:
 # time, never hand-listed; a controller package leaves it automatically when
 # the last macOS binary stops importing it.
 #
-# The set is partitioned across the three targets below: providers
+# The set is partitioned across the targets below: providers
 # (pkg/cert, pkg/controlplane, pkg/storage/providers/sqlite — the heaviest
 # packages measured under -race on a 3-vCPU macos-latest runner), steward
-# (features/steward, cmd) and rest (everything else, sharded across
+# (features/steward, cmd without cmd/steward), cmd/steward (two name shards,
+# Issue #6033) and rest (everything else, sharded across
 # CI-job-level groups, each on its own dedicated runner).
 #
 # MACOS_SHIPPED_ROOTS is the one definition of the three binaries. The PR-side
@@ -853,9 +854,20 @@ test-go-group-macos-providers:
 		go test -race -short -timeout=10m $$pkgs; \
 	fi
 
+# Every macOS-shipped features/steward and cmd package except cmd/steward (the
+# two shards below). Issue #6033: the former single leg ran cmd/steward with
+# the other 22 packages under `-timeout=10m` without -json, and was cancelled
+# at its 15-minute job limit with no output naming a test. -json streams
+# per-test events although several packages run (go test streams only a single
+# package, -p 1, or -json), and -timeout is at most the job's timeout-minutes
+# minus 9 (15-minute job: 6m) so Go's own "panic: test timed out" lands before
+# the cancel. The largest packages here ran 157s (features/steward/commands) and
+# 121s (features/steward/client) in the cancelled job; -timeout is per test
+# binary. Guard: scripts/test-scripts.sh
+# test_macos_cmd_steward_timeout_and_streaming.
 .PHONY: test-go-group-macos-steward
 test-go-group-macos-steward:
-	@pkgs=$$($(MACOS_SHIPPED_PKGS) | grep -E '$(MACOS_STEWARD_RE)'); \
+	@pkgs=$$($(MACOS_SHIPPED_PKGS) | grep -E '$(MACOS_STEWARD_RE)' | grep -vx '$(MACOS_CMD_STEWARD_PKG)'); \
 	if [ -z "$$pkgs" ]; then \
 		echo "❌ macos-steward: package enumeration produced no packages - check go list output. Refusing to report a pass."; \
 		exit 1; \
@@ -863,8 +875,68 @@ test-go-group-macos-steward:
 	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
 		echo "$$pkgs"; \
 	else \
-		echo "  Testing macos-steward group (features/steward, cmd, -race)..."; \
-		go test -race -short -timeout=10m $$pkgs; \
+		echo "  Testing macos-steward group (features/steward, cmd without cmd/steward, -race, json)..."; \
+		go test -json -race -short -timeout=6m $$pkgs; \
+	fi
+
+# Issue #6033: cmd/steward alone ran 403-515s on macos-latest (178-210s until
+# 2026-11-05) and the shared steward leg was cancelled at its 15-minute job
+# limit on 2026-11-10 with no output naming the stalled test. Same two causes
+# and same fix as the Windows legs (Issue #6010, see the comment above
+# GO_GROUP_WINDOWS_CMD_STEWARD): a single-package `go test -v` streams its
+# "=== RUN" lines, and -timeout=6m (timeout-minutes 15 minus 9) lets Go's own
+# timeout panic with the running-tests list land before the job cancel.
+# cmd/steward does not fit one job with that margin, so it runs as two name
+# shards, each in its own job.
+#
+# The shards partition the top-level test names. go test -run has no negation,
+# so shard 2 is the explicit complement of shard 1;
+# test_macos_groups_cover_exactly_shipped_packages asserts over a probe set
+# that every name matches exactly one shard, so a test added later (including
+# in a future darwin-only file) lands in exactly one.
+#
+# Shard weights. macOS runs the unix test set, the same set Linux runs (no
+# *_darwin_test.go file, no darwin-only build tag in cmd/steward today), so
+# the Linux weights apply. Sum of top-level test durations of cmd/steward
+# -short on a Linux host (2026-11-10, 276 tests, 287s): ^TestReg 162s (27
+# tests, all TestRegister* and TestRegToken*), everything else 125s (249 tests:
+# TestRun* 39s, TestIdentity* 29s, TestTamperAlarm* 19s, TestRepair* 11s,
+# TestConnect* 9s ...). The Windows split ^Test(Reg|Run)
+# is not reused: on the unix set it would put about 70% of the weight (about
+# 200 of 287s) in shard 1. Scaled by 515/287 to the 515s macOS maximum, shard 1
+# is expected to take about 291s and shard 2 about 224s (1.3x apart, both under
+# 300s of the 6m -timeout). Re-weigh from the PR's macOS job logs if either
+# shard nears 6m.
+MACOS_CMD_STEWARD_PKG := github.com/cfgis/cfgms/cmd/steward
+MACOS_CMD_STEWARD_RUN_1 := ^TestReg
+MACOS_CMD_STEWARD_RUN_2 := ^Test($$|[^R]|R($$|[^e]|e($$|[^g])))
+
+.PHONY: test-go-group-macos-cmd-steward-1
+test-go-group-macos-cmd-steward-1:
+	@pkgs=$$($(MACOS_SHIPPED_PKGS) | grep -x '$(MACOS_CMD_STEWARD_PKG)'); \
+	if [ -z "$$pkgs" ]; then \
+		echo "❌ macos-cmd-steward-1: $(MACOS_CMD_STEWARD_PKG) is not in the macOS-shipped package set. Refusing to report a pass."; \
+		exit 1; \
+	fi; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		echo "$$pkgs"; \
+	else \
+		echo "  Testing macos-cmd-steward-1 group (cmd/steward, TestReg*, -race)..."; \
+		go test -v -race -short -timeout=6m -run '$(MACOS_CMD_STEWARD_RUN_1)' $$pkgs; \
+	fi
+
+.PHONY: test-go-group-macos-cmd-steward-2
+test-go-group-macos-cmd-steward-2:
+	@pkgs=$$($(MACOS_SHIPPED_PKGS) | grep -x '$(MACOS_CMD_STEWARD_PKG)'); \
+	if [ -z "$$pkgs" ]; then \
+		echo "❌ macos-cmd-steward-2: $(MACOS_CMD_STEWARD_PKG) is not in the macOS-shipped package set. Refusing to report a pass."; \
+		exit 1; \
+	fi; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		echo "$$pkgs"; \
+	else \
+		echo "  Testing macos-cmd-steward-2 group (cmd/steward, every other test, -race)..."; \
+		go test -v -race -short -timeout=6m -run '$(MACOS_CMD_STEWARD_RUN_2)' $$pkgs; \
 	fi
 
 # Measured `-race -short` seconds per package (CI run 42289478500 jobs 128145605948 and 128145605883), used to
