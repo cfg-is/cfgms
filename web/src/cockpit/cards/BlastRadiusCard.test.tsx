@@ -13,7 +13,7 @@
  * test setup file's cleanup hook.
  */
 import { describe, expect, it, vi, afterEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import BlastRadiusCard from './BlastRadiusCard.tsx'
 import type { Pin } from '../evidenceTypes.ts'
 
@@ -255,5 +255,124 @@ describe('BlastRadiusCard', () => {
     await waitFor(() => {
       expect(screen.getByText('1 dependent')).toBeInTheDocument()
     })
+  })
+
+  // ── Assert relationship (Story #5464) ─────────────────────────────────────
+  const ROOT = 'eid:root/msp-a/client-1/sql-primary'
+  const NEW_DEP = 'eid:root/msp-a/client-1/cache-03'
+
+  const MOCK_NEIGHBORHOOD_AFTER = {
+    ...MOCK_NEIGHBORHOOD_POPULATED,
+    Nodes: [...MOCK_NEIGHBORHOOD_POPULATED.Nodes, { EID: NEW_DEP, Kind: 'host' }],
+    Edges: [...MOCK_NEIGHBORHOOD_POPULATED.Edges, { Type: 'depends-on', From: NEW_DEP, To: ROOT }],
+  }
+
+  // Routes the card's neighborhood GET, the drawer's entity search and the
+  // assertion POST. The first neighborhood answer is the "before" graph; any
+  // later one is the "after" graph.
+  function makeAssertFetch(edges: () => Response) {
+    let neighborhoodCalls = 0
+    const stub = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/neighborhood')) {
+        neighborhoodCalls += 1
+        const body = neighborhoodCalls === 1 ? MOCK_NEIGHBORHOOD_POPULATED : MOCK_NEIGHBORHOOD_AFTER
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }))
+      }
+      if (url.startsWith('/api/v1/entities/edges')) return Promise.resolve(edges())
+      if (url.startsWith('/api/v1/entities?')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ Entities: [{ Entity: { EID: NEW_DEP, Kind: 'host' } }], NextToken: '' }),
+            { status: 200 },
+          ),
+        )
+      }
+      return Promise.reject(new Error(`unexpected request ${url}`))
+    })
+    vi.stubGlobal('fetch', stub)
+    return stub
+  }
+
+  const urlsOf = (stub: ReturnType<typeof makeAssertFetch>) =>
+    (stub.mock.calls as unknown as string[][]).map((c) => String(c[0]))
+  const neighborhoodCount = (stub: ReturnType<typeof makeAssertFetch>) =>
+    urlsOf(stub).filter((u) => u.includes('/neighborhood')).length
+
+  async function openAndFill() {
+    await screen.findByRole('img', { name: /dependency graph/i })
+    fireEvent.click(screen.getByRole('button', { name: /Assert relationship/ }))
+    const dialog = screen.getByRole('dialog', { name: 'Assert relationship' })
+    fireEvent.change(within(dialog).getByLabelText(/^Relationship/), { target: { value: 'depends-on' } })
+    fireEvent.change(within(dialog).getByLabelText('Search entities'), { target: { value: 'cache' } })
+    fireEvent.click(await within(dialog).findByRole('option', { name: /cache-03/ }))
+    return dialog
+  }
+
+  it('opens the assert drawer from the card header with the pinned entity as From', async () => {
+    makeAssertFetch(() => new Response(null, { status: 201 }))
+    render(<BlastRadiusCard pins={[pinEID]} />)
+    await screen.findByRole('img', { name: /dependency graph/i })
+
+    expect(screen.queryByRole('dialog')).toBeNull()
+    const header = document.querySelector('.blast-radius-card__header') as HTMLElement
+    fireEvent.click(within(header).getByRole('button', { name: /Assert relationship/ }))
+
+    const dialog = screen.getByRole('dialog', { name: 'Assert relationship' })
+    expect(within(dialog).getByText(ROOT)).toBeInTheDocument()
+    // The pinned entity's kind comes from the neighborhood node.
+    expect(within(dialog).getByText(ROOT).parentElement).toHaveTextContent('host')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('does not offer the action when the card renders nothing', () => {
+    render(<BlastRadiusCard pins={[pinEdgeIdentity]} />)
+    expect(screen.queryByRole('button', { name: /Assert relationship/ })).toBeNull()
+  })
+
+  // ── REQUIRED TEST ─────────────────────────────────────────────────────────
+  it('BlastRadiusCard re-fetches the neighborhood after a successful assert', async () => {
+    // 201 with no body: the hook must not parse a response body.
+    const stub = makeAssertFetch(() => new Response(null, { status: 201 }))
+    render(<BlastRadiusCard pins={[pinEID]} />)
+    const dialog = await openAndFill()
+    expect(screen.getByText('2 dependents')).toBeInTheDocument()
+    expect(neighborhoodCount(stub)).toBe(1)
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Assert relationship' }))
+
+    // The same /neighborhood path is fetched again — no second fetch path.
+    await waitFor(() => expect(neighborhoodCount(stub)).toBe(2))
+    const neighborhoodUrls = urlsOf(stub).filter((u) => u.includes('/neighborhood'))
+    expect(neighborhoodUrls[1]).toBe(neighborhoodUrls[0])
+    // The graph shows the new dependent while the drawer is still open.
+    expect(await screen.findByText('3 dependents')).toBeInTheDocument()
+    expect(screen.getByText('Relationship recorded')).toBeInTheDocument()
+
+    const post = (stub.mock.calls as unknown as Array<[string, RequestInit]>).find(
+      ([u]) => u === '/api/v1/entities/edges',
+    )!
+    expect(JSON.parse(post[1].body as string)).toEqual({
+      edge_type: 'depends-on',
+      from_eid: ROOT,
+      to_eid: NEW_DEP,
+      attributes: {},
+    })
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('does not re-fetch the neighborhood when the assertion is refused', async () => {
+    const stub = makeAssertFetch(() => new Response('not found\n', { status: 404 }))
+    render(<BlastRadiusCard pins={[pinEID]} />)
+    const dialog = await openAndFill()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Assert relationship' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('404')
+    expect(neighborhoodCount(stub)).toBe(1)
+    expect(screen.getByText('2 dependents')).toBeInTheDocument()
   })
 })
