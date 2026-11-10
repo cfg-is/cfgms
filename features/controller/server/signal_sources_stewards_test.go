@@ -70,7 +70,7 @@ func newStewardSignalsTestServer(t *testing.T, offlineTimeout time.Duration) (*S
 	return srv, cp
 }
 
-func scrapeSignals(t *testing.T, srv *Server) string {
+func scrapeStewardSignals(t *testing.T, srv *Server) string {
 	t.Helper()
 	var sb strings.Builder
 	require.NoError(t, srv.healthCollector.Signals().WriteText(&sb))
@@ -105,10 +105,10 @@ func TestStewardSignalsScrape(t *testing.T) {
 	t.Cleanup(srv.stopHealthServices)
 
 	require.Eventually(t, func() bool {
-		return strings.Contains(scrapeSignals(t, srv), "cfgms_stewards_heartbeat_fresh 2\n")
+		return strings.Contains(scrapeStewardSignals(t, srv), "cfgms_stewards_heartbeat_fresh 2\n")
 	}, 5*time.Second, 10*time.Millisecond, "the initial collection must sample the fresh count")
 
-	body := scrapeSignals(t, srv)
+	body := scrapeStewardSignals(t, srv)
 	assert.Contains(t, body, "# TYPE cfgms_stewards_heartbeat_fresh gauge\n")
 	for _, want := range []string{
 		"# TYPE cfgms_transport_delivery_failures_total counter\ncfgms_transport_delivery_failures_total 3\n",
@@ -158,11 +158,11 @@ func TestStewardTransportCountersAreCumulative(t *testing.T) {
 	eventuallyScrapes(t, srv, "cfgms_transport_heartbeats_dropped_total 4\n")
 	// Many further ticks with an unchanged value must not double count.
 	time.Sleep(200 * time.Millisecond)
-	assert.Contains(t, scrapeSignals(t, srv), "cfgms_transport_heartbeats_dropped_total 4\n")
+	assert.Contains(t, scrapeStewardSignals(t, srv), "cfgms_transport_heartbeats_dropped_total 4\n")
 
 	cp.setStats(controlplaneTypes.ControlPlaneStats{HeartbeatsDropped: 9, EventsDropped: 1})
 	eventuallyScrapes(t, srv, "cfgms_transport_heartbeats_dropped_total 9\n")
-	assert.Contains(t, scrapeSignals(t, srv), "cfgms_transport_events_dropped_total 1\n")
+	assert.Contains(t, scrapeStewardSignals(t, srv), "cfgms_transport_events_dropped_total 1\n")
 
 	// Provider restarted its counts: 2 new drops since the restart.
 	cp.setStats(controlplaneTypes.ControlPlaneStats{HeartbeatsDropped: 2})
@@ -171,7 +171,7 @@ func TestStewardTransportCountersAreCumulative(t *testing.T) {
 	// A stats error leaves the counters where they were.
 	cp.setErr(errors.New("stats unavailable"))
 	time.Sleep(200 * time.Millisecond)
-	assert.Contains(t, scrapeSignals(t, srv), "cfgms_transport_heartbeats_dropped_total 11\n")
+	assert.Contains(t, scrapeStewardSignals(t, srv), "cfgms_transport_heartbeats_dropped_total 11\n")
 }
 
 // TestStewardSignalsAbsentComponents proves a missing component registers
@@ -179,12 +179,12 @@ func TestStewardTransportCountersAreCumulative(t *testing.T) {
 func TestStewardSignalsAbsentComponents(t *testing.T) {
 	srv := newSignalSourceTestServer(t)
 	require.NoError(t, registerStewardSignals(srv))
-	assert.Empty(t, scrapeSignals(t, srv))
+	assert.Empty(t, scrapeStewardSignals(t, srv))
 
 	srv, _ = newStewardSignalsTestServer(t, time.Minute)
 	srv.controlPlane = nil
 	require.NoError(t, registerStewardSignals(srv))
-	body := scrapeSignals(t, srv)
+	body := scrapeStewardSignals(t, srv)
 	assert.Contains(t, body, "# TYPE cfgms_stewards_heartbeat_fresh gauge")
 	assert.NotContains(t, body, "cfgms_transport_")
 }
@@ -209,6 +209,6 @@ func startFastCollector(t *testing.T, srv *Server) {
 func eventuallyScrapes(t *testing.T, srv *Server, want string) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		return strings.Contains(scrapeSignals(t, srv), want)
-	}, 5*time.Second, 10*time.Millisecond, "expected scrape to contain %q, got:\n%s", want, scrapeSignals(t, srv))
+		return strings.Contains(scrapeStewardSignals(t, srv), want)
+	}, 5*time.Second, 10*time.Millisecond, "expected scrape to contain %q, got:\n%s", want, scrapeStewardSignals(t, srv))
 }
