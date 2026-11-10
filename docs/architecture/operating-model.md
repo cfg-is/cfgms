@@ -439,9 +439,19 @@ Terminal states (`committed`, `rolled_back`, `failed`) unblock re-dispatch to th
 
 ### Durable store requirement
 
-The controller refuses dispatch with `503 Service Unavailable` if no durable `UpgradeStore` is
-configured at server startup. There is no silent in-memory fallback — durable state is required
+The `UpgradeStore` is created by the configured storage provider, like the other business stores,
+through the optional `UpgradeStoreCreator` extension. In a controller cluster it is the shared
+database provider's store, so every node reads the same upgrade records and an upgrade dispatched on
+one node can be read and rolled back (by `upgrade_id`) from any other. On a single node it is the
+SQLite provider's store in the configured SQLite file.
+
+The controller refuses upgrade requests with `503 Service Unavailable` (`UPGRADE_STORE_UNAVAILABLE`)
+when the provider supplies no store. There is no silent in-memory fallback — durable state is required
 to survive controller restarts and HA failover replay.
+
+Upgrade records that an earlier release kept in a node's own SQLite file are not migrated. A
+controller on the shared database provider does not read them; at startup it logs once, at info
+level, when the configured SQLite file exists and may hold such legacy records.
 
 ### Rollback
 

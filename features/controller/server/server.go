@@ -115,7 +115,7 @@ import (
 	dbprovider "github.com/cfgis/cfgms/pkg/storage/providers/database"    // Postgres-backed stores; used by initializeSessionStore in cluster mode (Issue #2775)
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"             // register flatfile provider for OSS composite manager
 	memoryprovider "github.com/cfgis/cfgms/pkg/storage/providers/memory"  // in-memory fallback stores (Issue #1948, #2296)
-	sqliteprovider "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"  // register sqlite provider; provides SQLiteUpgradeStore (Issue #2464)
+	sqliteprovider "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"  // register sqlite provider
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 	"gopkg.in/yaml.v3"
@@ -247,7 +247,6 @@ type Server struct {
 	executionQueue          *scriptmodule.ExecutionQueue             // Issue #1672: persistent queue for script executions
 	jobDispatcher           *dispatcher.Dispatcher                   // Issue #1672: job dispatcher for script executions
 	runManager              *controllerrun.Manager                   // Issue #1673: run/job tracking (must be closed on Stop to release SQLite handle)
-	upgradeStore            business.UpgradeStore                    // Issue #2464: durable upgrade store (must be closed on Stop to release SQLite handle)
 	tagStore                *tagstore.Store                          // Issue #2542: durable tag store (must be closed on Stop to release SQLite handle)
 	sessionStore            session.Store                            // Issue #2774: durable session token store (must be closed on Stop to release SQLite handle)
 	ipTrustExpiryJob        *controllerRegistration.IPTrustExpiryJob // Issue #1697: 30-day dark-window expiry
@@ -2314,11 +2313,10 @@ func (w *apiWiring) wireDurableStores() {
 	// Issue #5976: wire the shared rollout store and halt this node's orphaned rollouts.
 	wireRolloutStore(httpServer, storageManager, logger)
 
-	// Issue #2464: Wire durable SQLite-backed upgrade store; falls back to in-memory
-	// when SQLite is not configured so controller startup is never blocked on storage.
-	// The store is held in srv.upgradeStore so Stop() can close the SQLite handle.
-	s.upgradeStore = initializeUpgradeStore(context.Background(), s.cfg, logger)
-	httpServer.SetUpgradeStore(s.upgradeStore)
+	// Issue #5977: wire the upgrade store the storage provider created (shared
+	// database in a cluster, SQLite on a single node). No store means the upgrade
+	// endpoints answer 503; there is no in-memory fallback.
+	wireUpgradeStore(httpServer, storageManager, s.cfg, logger)
 
 	// Issue #2774: Wire durable SQLite-backed session token store; falls back to
 	// in-memory when SQLite is not configured. SetDurableSessionStore wires both the
@@ -4078,14 +4076,6 @@ func (s *Server) closeLocalStores() {
 	if s.runManager != nil {
 		if err := s.runManager.Close(); err != nil {
 			s.logger.Warn("Failed to close run manager", "error", err)
-		}
-	}
-
-	// Close upgrade store — releases the SQLite connection so temp-directory cleanup
-	// succeeds on Windows (Issue #2464).
-	if s.upgradeStore != nil {
-		if err := s.upgradeStore.Close(); err != nil {
-			s.logger.Warn("Failed to close upgrade store", "error", err)
 		}
 	}
 
@@ -6226,40 +6216,6 @@ func initializeRunManager(
 	return controllerrun.NewManager(store, executionQueue)
 }
 
-// initializeUpgradeStore opens a SQLite-backed UpgradeStore at cfg.Storage.SQLitePath,
-// initializes its schema, and returns it as the interface. Falls back to an in-memory
-// store (logging a warning, no startup failure) when SQLitePath is empty or either
-// open/Initialize fails — mirroring the degrade-gracefully pattern of initializeRunManager.
-func initializeUpgradeStore(
-	ctx context.Context,
-	cfg *config.Config,
-	logger logging.Logger,
-) business.UpgradeStore {
-	if cfg.Storage == nil || cfg.Storage.SQLitePath == "" {
-		logger.Warn("Upgrade store: SQLite path not configured, using in-memory store (records will not survive restart)")
-		return memoryprovider.NewUpgradeStore()
-	}
-
-	dsn := cfg.Storage.SQLitePath
-	if !strings.HasPrefix(dsn, "file:") {
-		dsn = "file:" + dsn
-	}
-
-	store, err := sqliteprovider.NewUpgradeStoreSQLFromDSN(dsn)
-	if err != nil {
-		logger.Warn("Upgrade store: failed to open SQLite, falling back to in-memory store", "error", err)
-		return memoryprovider.NewUpgradeStore()
-	}
-	if err := store.Initialize(ctx); err != nil {
-		logger.Warn("Upgrade store: failed to initialize schema, falling back to in-memory store", "error", err)
-		_ = store.Close()
-		return memoryprovider.NewUpgradeStore()
-	}
-
-	logger.Info("Upgrade store initialized with SQLite backend (Issue #2464)", "sqlite_path", cfg.Storage.SQLitePath)
-	return store
-}
-
 // initializeTagStore opens a SQLite-backed tag store at cfg.Storage.SQLitePath,
 // initializes its schema, and returns it. Returns nil (logging a warning) when
 // SQLitePath is empty or either open/Initialize fails — controller startup is
@@ -6438,7 +6394,7 @@ func initializeSessionStore(
 	cfg *config.Config,
 	logger logging.Logger,
 ) session.Store {
-	_ = ctx // reserved for future use (consistent with initializeUpgradeStore)
+	_ = ctx // reserved for future use (consistent with initializeRunManager)
 
 	// Cluster mode: use the shared Postgres backend for cross-node session validation.
 	if cfg.HA.IsClusterMode() {

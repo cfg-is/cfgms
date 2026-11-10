@@ -155,6 +155,13 @@ cfg steward upgrade status --upgrade-id <id>
 Pass either a positional selector argument or `--upgrade-id`. If a selector is
 given, the most recent upgrade record per matching steward is returned.
 
+Upgrade records are stored by the controller's storage provider. In a controller
+cluster on the shared database every node reads the same records, so an
+`--upgrade-id` lookup works against any node, including one that did not
+dispatch the upgrade. If the controller has no upgrade store, status and
+dispatch requests return `503 UPGRADE_STORE_UNAVAILABLE` rather than using
+node-local memory.
+
 ### Examples
 
 ```bash
@@ -197,6 +204,10 @@ cfg steward upgrade rollback --upgrade-id <id> [--to-version <ver>]
 Rollback requires an explicit `--upgrade-id`. There is no selector-based
 most-recent rollback — the upgrade record must be identified explicitly to
 prevent accidental fleet-wide rollbacks.
+
+In a controller cluster the rollback can be sent to any node: it needs only the
+upgrade record, which every node reads from the shared database. Without an
+upgrade store the request returns `503 UPGRADE_STORE_UNAVAILABLE`.
 
 ### Examples
 

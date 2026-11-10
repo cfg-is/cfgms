@@ -38,15 +38,6 @@ func newFlatFileIPTrustStore(t *testing.T, root string) business.IPTrustStore {
 	return st
 }
 
-// requireInMemoryUpgradeStore asserts that store is the in-memory fallback
-// UpgradeStore. The concrete memoryprovider import is confined to this
-// allowlisted */providers_test.go path (see scripts/check-providers.sh) so that
-// business-logic tests depend on pkg/storage/interfaces only.
-func requireInMemoryUpgradeStore(t *testing.T, store business.UpgradeStore, msgAndArgs ...interface{}) {
-	t.Helper()
-	require.IsType(t, (*memoryprovider.UpgradeStore)(nil), store, msgAndArgs...)
-}
-
 // newFlatFileLeaseStore returns a real flat-file LeaseStore rooted at a
 // t.TempDir(), closed on test cleanup — the durable substrate a real
 // lease.Manager needs to exercise cluster-singleton gating without external

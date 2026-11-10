@@ -255,3 +255,40 @@ func TestUpgradeStore_DurabilityAcrossRestart(t *testing.T) {
 	require.Len(t, list, 1)
 	assert.Equal(t, "upg-persist", list[0].ID)
 }
+
+// TestUpgradeStore_Contract runs the shared UpgradeStore contract against the
+// SQLite store.
+func TestUpgradeStore_Contract(t *testing.T) {
+	business.UpgradeStoreContract(t, newTestUpgradeStore(t))
+}
+
+// TestSQLiteProvider_CreateUpgradeStore proves the provider creator returns an
+// initialised, durable store: a record written through one creator handle is
+// readable through a second one on the same file.
+func TestSQLiteProvider_CreateUpgradeStore(t *testing.T) {
+	cfg := map[string]interface{}{"path": filepath.Join(t.TempDir(), "creator.db")}
+	provider := &SQLiteProvider{}
+	ctx := context.Background()
+
+	first, err := provider.CreateUpgradeStore(cfg)
+	require.NoError(t, err)
+	rec := testUpgradeRecord("upg-creator")
+	require.NoError(t, first.CreateUpgrade(ctx, rec))
+	require.NoError(t, first.Close())
+
+	second, err := provider.CreateUpgradeStore(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = second.Close() })
+	got, err := second.GetUpgrade(ctx, "upg-creator")
+	require.NoError(t, err)
+	assert.Equal(t, rec.BundleSignature, got.BundleSignature)
+}
+
+// TestSQLiteProvider_CreateUpgradeStore_OpenFailure proves an unopenable path is
+// reported rather than swallowed, so the manager never holds a half-open store.
+func TestSQLiteProvider_CreateUpgradeStore_OpenFailure(t *testing.T) {
+	// A directory can never be opened as a SQLite database file.
+	store, err := (&SQLiteProvider{}).CreateUpgradeStore(map[string]interface{}{"path": t.TempDir()})
+	require.Error(t, err)
+	assert.Nil(t, store)
+}
