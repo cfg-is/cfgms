@@ -583,11 +583,8 @@ func setupTestDatabaseForBench(tb testingTB) *sql.DB {
 		tb.Skip("PostgreSQL test database not reachable:", err)
 	}
 
-	// Clean up any existing tables
-	schemas := NewDatabaseSchemas()
-	ctx := context.Background()
-
-	if err := schemas.DropAllTables(ctx, db); err != nil {
+	// Clean up any existing tables (dropped, or truncated in keep-schema mode)
+	if err := resetSchemaForTest(context.Background(), db); err != nil {
 		// Ignore errors on cleanup
 		_ = err
 	}
