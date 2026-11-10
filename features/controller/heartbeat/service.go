@@ -497,6 +497,28 @@ func (s *Service) GetHealthyStewards() []string {
 	return healthy
 }
 
+// FreshHeartbeatCount returns how many stewards have a heartbeat whose
+// controller receipt time is within StewardOfflineTimeout of now. It is computed
+// from the receipt time (never the steward-supplied LastHeartbeat) and does not
+// read Healthy, which only flips on the monitorHeartbeats tick and so lags a
+// steward that has gone silent by up to CheckInterval.
+func (s *Service) FreshHeartbeatCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	now := time.Now()
+	fresh := 0
+	for _, status := range s.stewards {
+		if status.receivedAt.IsZero() {
+			continue
+		}
+		if now.Sub(status.receivedAt) <= s.stewardOfflineTimeout {
+			fresh++
+		}
+	}
+	return fresh
+}
+
 // SetExpectedDNAHash records the hash the controller expects the steward to report
 // in future heartbeats.  Call this after a successful full DNA sync via the data
 // plane so that subsequent heartbeats can be validated against the known-good hash.
