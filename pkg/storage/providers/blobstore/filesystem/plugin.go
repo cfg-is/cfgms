@@ -377,7 +377,7 @@ func (s *FilesystemBlobStore) GetBlob(ctx context.Context, key blob.BlobKey) (io
 		return nil, blob.BlobMeta{}, err
 	}
 
-	metaBytes, err := os.ReadFile(s.metaPath(key))
+	metaBytes, err := atomicfile.ReadFile(s.metaPath(key))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, blob.BlobMeta{}, blob.ErrBlobNotFound
@@ -429,6 +429,54 @@ func (s *FilesystemBlobStore) DeleteBlob(ctx context.Context, key blob.BlobKey) 
 	return nil
 }
 
+// readContainedSidecar reads one sidecar found while walking a ListBlobs search
+// directory. Containment: the entry is resolved through os.Root and must be a
+// regular file, so a symlinked sidecar cannot redirect the read out of the
+// search directory. The read itself goes through atomicfile.ReadFile, which
+// retries Windows sharing violations raised while a concurrent writer swaps the
+// sidecar in. Genuine read errors are returned; they are never skipped.
+func readContainedSidecar(metadataRoot *os.Root, relativePath, fullPath string) ([]byte, error) {
+	info, err := metadataRoot.Lstat(relativePath)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", filepath.ToSlash(relativePath))
+	}
+	return atomicfile.ReadFile(fullPath)
+}
+
+// keyFromSidecarPath reconstructs the blob key for a sidecar found at
+// relativePath under the ListBlobs search directory. It reports false when the
+// path has no namespace segment to split off.
+//
+// The key is rebuilt from relativePath (relative to searchDir, which
+// is already rooted at <root>/<TenantID>[/<Namespace>]). This must not
+// re-derive TenantID by splitting the full path on "/": TenantID
+// itself legitimately contains "/" for a hierarchical tenant (e.g.
+// "root/msp-a/client-1" — CLAUDE.md's recursive parent-child tenant
+// model), and a fixed SplitN(rel, "/", 3) silently misassigns segments
+// of the tenant path into Namespace/Name for any TenantID with more
+// than one segment. Using searchDir — which was built from the
+// already-known prefix.TenantID — as the split point sidesteps that
+// entirely, since nothing downstream needs to reparse TenantID out of
+// the full path.
+func keyFromSidecarPath(prefix blob.BlobKey, relativePath string) (blob.BlobKey, bool) {
+	name := strings.TrimSuffix(filepath.ToSlash(relativePath), ".meta.json")
+	namespace := prefix.Namespace
+	if namespace == "" {
+		// searchDir omitted Namespace, so relativePath is
+		// "<namespace>/<name>" — split off exactly the first segment.
+		idx := strings.Index(name, "/")
+		if idx < 0 {
+			return blob.BlobKey{}, false
+		}
+		namespace = name[:idx]
+		name = name[idx+1:]
+	}
+	return blob.BlobKey{TenantID: prefix.TenantID, Namespace: namespace, Name: name}, true
+}
+
 // ListBlobs returns all blobs whose key matches the non-empty prefix fields.
 // TenantID must be set. If Namespace is set, only blobs in that namespace are returned.
 // If Name is set, only blobs whose Name has that prefix are returned.
@@ -473,7 +521,7 @@ func (s *FilesystemBlobStore) ListBlobs(ctx context.Context, prefix blob.BlobKey
 		if err != nil {
 			return fmt.Errorf("list blobs: resolve metadata path: %w", err)
 		}
-		metaBytes, err := metadataRoot.ReadFile(relativePath)
+		metaBytes, err := readContainedSidecar(metadataRoot, relativePath, path)
 		if err != nil {
 			return fmt.Errorf("list blobs: failed to read metadata: %w", err)
 		}
@@ -483,34 +531,9 @@ func (s *FilesystemBlobStore) ListBlobs(ctx context.Context, prefix blob.BlobKey
 			return fmt.Errorf("list blobs: failed to parse metadata: %w", err)
 		}
 
-		// Reconstruct the key from relativePath (relative to searchDir, which
-		// is already rooted at <root>/<TenantID>[/<Namespace>]). This must not
-		// re-derive TenantID by splitting the full path on "/": TenantID
-		// itself legitimately contains "/" for a hierarchical tenant (e.g.
-		// "root/msp-a/client-1" — CLAUDE.md's recursive parent-child tenant
-		// model), and a fixed SplitN(rel, "/", 3) silently misassigns segments
-		// of the tenant path into Namespace/Name for any TenantID with more
-		// than one segment. Using searchDir — which was built from the
-		// already-known prefix.TenantID — as the split point sidesteps that
-		// entirely, since nothing downstream needs to reparse TenantID out of
-		// the full path.
-		name := strings.TrimSuffix(filepath.ToSlash(relativePath), ".meta.json")
-		namespace := prefix.Namespace
-		if namespace == "" {
-			// searchDir omitted Namespace, so relativePath is
-			// "<namespace>/<name>" — split off exactly the first segment.
-			idx := strings.Index(name, "/")
-			if idx < 0 {
-				return nil
-			}
-			namespace = name[:idx]
-			name = name[idx+1:]
-		}
-
-		key := blob.BlobKey{
-			TenantID:  prefix.TenantID,
-			Namespace: namespace,
-			Name:      name,
+		key, ok := keyFromSidecarPath(prefix, relativePath)
+		if !ok {
+			return nil
 		}
 
 		if prefix.Name != "" && !strings.HasPrefix(key.Name, prefix.Name) {
