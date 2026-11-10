@@ -7,7 +7,10 @@
 //	go build -ldflags "-X github.com/cfgis/cfgms/pkg/version.Version=v0.5.0"
 package version
 
-import "fmt"
+import (
+	"fmt"
+	"runtime/debug"
+)
 
 // EnvStewardLauncherManaged is the environment variable the steward launcher
 // (cmd/cfgms-steward-launcher) sets on its steward child process. When its value
@@ -36,6 +39,40 @@ var (
 	// GoVersion is the Go version used for build (e.g., "go1.23.5")
 	GoVersion = "unknown"
 )
+
+// readBuildInfo is the build-info reader Revision consults; tests replace it.
+var readBuildInfo = debug.ReadBuildInfo
+
+// Revision returns the build's source revision. The ldflags GitCommit wins when
+// set (scripts/release/build-binaries.sh stamps it for deploy builds). Otherwise
+// it falls back to the toolchain's vcs.revision build setting, suffixed with
+// "-dirty" when vcs.modified is "true", which serves Makefile dev builds. It
+// returns "unknown" when neither is available.
+func Revision() string {
+	if GitCommit != "" && GitCommit != "unknown" {
+		return GitCommit
+	}
+	info, ok := readBuildInfo()
+	if !ok || info == nil {
+		return "unknown"
+	}
+	var revision, modified string
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.modified":
+			modified = s.Value
+		}
+	}
+	if revision == "" {
+		return "unknown"
+	}
+	if modified == "true" {
+		return revision + "-dirty"
+	}
+	return revision
+}
 
 // Info returns formatted version information.
 func Info() string {
