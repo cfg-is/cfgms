@@ -25,6 +25,9 @@ import WorkflowDrawer from './WorkflowDrawer.tsx'
 import NewWorkflowDialog from './NewWorkflowDialog.tsx'
 import ImportYamlDialog from './ImportYamlDialog.tsx'
 import ErrorCard from '../shell/ErrorCard.tsx'
+import LibraryModePanel from '../scripts/LibraryModePanel.tsx'
+import WorkflowApprovalPanel from './WorkflowApprovalPanel.tsx'
+import { useWorkflowApprovals } from './useWorkflowApprovals.ts'
 import './Workflow.css'
 
 // ── Loading skeleton ──────────────────────────────────────────────────────────
@@ -174,6 +177,24 @@ function WorkflowRow({
   )
 }
 
+// Mounted only while the approvals toggle is on, so the library mode and the
+// approval list are fetched when an admin asks for them (Issue #5861).
+function ApprovalsSection({
+  workflows,
+  workflowId,
+}: {
+  workflows: VersionedWorkflow[]
+  workflowId: string | null
+}) {
+  const approvals = useWorkflowApprovals()
+  return (
+    <>
+      <LibraryModePanel kind="workflow" onChanged={approvals.retry} />
+      <WorkflowApprovalPanel approvals={approvals} workflows={workflows} workflowId={workflowId} />
+    </>
+  )
+}
+
 // ── Main view ─────────────────────────────────────────────────────────────────
 
 export default function WorkflowListView() {
@@ -187,6 +208,7 @@ export default function WorkflowListView() {
   const [togglingWorkflow, setTogglingWorkflow] = useState<VersionedWorkflow | null>(null)
   const [toggleBusy, setToggleBusy] = useState(false)
   const [toggleError, setToggleError] = useState<string | null>(null)
+  const [showApprovals, setShowApprovals] = useState(false)
 
   const selectedWorkflow = workflows.find((w) => w.name === selectedName) ?? null
 
@@ -283,8 +305,16 @@ export default function WorkflowListView() {
             )}
             <button
               type="button"
-              className="wf-btn-secondary"
+              className={showApprovals ? 'wf-btn' : 'wf-btn-secondary'}
               style={{ marginLeft: 'auto' }}
+              onClick={() => setShowApprovals((v) => !v)}
+              data-testid="toggle-workflow-approvals-btn"
+            >
+              {showApprovals ? 'Close library approvals' : 'Library approvals'}
+            </button>
+            <button
+              type="button"
+              className="wf-btn-secondary"
               onClick={() => setImporting(true)}
               data-testid="import-yaml-btn"
             >
@@ -363,6 +393,8 @@ export default function WorkflowListView() {
           />
         )}
       </div>
+
+      {showApprovals && <ApprovalsSection workflows={workflows} workflowId={selectedName} />}
 
       {creating && (
         <NewWorkflowDialog
