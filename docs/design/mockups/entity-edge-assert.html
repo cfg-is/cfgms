@@ -1,0 +1,750 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CFGMS Assert Relationship — mockup</title>
+<!--
+  Entity edge assert (Epic #5300 · Story #5464). Placement: an "Assert
+  relationship" action in the header of the cockpit's Blast-radius evidence card
+  (web/src/cockpit/cards/BlastRadiusCard.tsx, route /cases/:id) — the one shipped
+  screen that already shows an entity and its relationships. It opens a right-hand
+  drawer (the fleet asset-DNA drawer's .det pattern) with the card's pinned entity
+  pre-filled as `from`. No new route, no nav entry.
+
+  API: POST /api/v1/entities/edges {edge_type, from_eid, to_eid, attributes} →
+  201 with no body (the card re-fetches its neighborhood). entity:write has no
+  permissionAssurance entry: no step-up, no presence tap. The client rejects '|'
+  in edge_type, from_eid and to_eid (the controller's subject delimiter).
+  To-picker: GET /api/v1/entities?text_query=&kind=&page_size= (tenant-scoped).
+  Refusals: 404 "not found" (endpoint outside the caller's tenants, or gone —
+  deliberately indistinguishable); 401 tenant_crossing_required (crossing needed);
+  400 validation text; 500 "assertion failed" / "lookup failed"; 503 "entity
+  graph unavailable".
+
+  Design tokens are inlined from docs/design/web-ui-design-tokens.css (source of
+  truth). Standalone and interactive: the dashed top strip is a review harness
+  (state + theme), not product UI. URL params ?state=<name>&theme=light|dark.
+-->
+<style>
+/*
+ * CFGMS Web UI — Design Tokens
+ * ----------------------------------------------------------------------------
+ * Machine-readable token layer for the controller-served web app (Epic #2344).
+ * Values are lifted verbatim from the public brand style guide
+ * (https://cfg.is/style-guide) so the app and the marketing site share one
+ * source of truth for colour. See docs/design/web-ui-design-system.md for the
+ * rationale, usage rules, and open items.
+ *
+ * Identity in one line: a WARM TERMINAL — near-black / near-white grounds that
+ * hold a trace of warmth, STONE-NEUTRAL text, muted slate-blue accent,
+ * desaturated earth-tone semantics, and a palette of muted card tints. Ground
+ * and ink sit in different hue bands on purpose: when both were warm the whole
+ * surface read rust. State owns the colour budget; the accent is reserved for
+ * interaction; mono carries all machine data.
+ *
+ * Theme model: default tokens are light. `@media (prefers-color-scheme: dark)`
+ * supplies dark. `:root[data-theme="light"|"dark"]` overrides the media query
+ * in both directions (the app's own theme control stamps data-theme on :root).
+ * ==========================================================================*/
+
+:root {
+  /* --- Background & structure --- */
+  --bg-primary:   #f5f4f3;  /* app ground */
+  --bg-surface:   #ffffff;  /* panels, cards */
+  --bg-elevated:  #ececea;  /* raised / inset chrome */
+  --bg-sunk:      #ececea;  /* wells, code blocks */
+  --border:       #d0cfcd;
+
+  /* --- Text & accent --- */
+  --text-primary:   #5f5e58; /* stone (was warm taupe; see design-system §1) */
+  --text-secondary: #6e6d68;
+  --text-faint:     #82807a; /* micro-labels (contrast-tuned vs guide) */
+  --accent:         #4a6b7c; /* muted slate blue — INTERACTION ONLY */
+  --accent-ink:     #ffffff; /* text/icon on accent fill */
+
+  /* --- Semantic state (desaturated earth tones) --- */
+  --state-ok:        #507055;  --state-ok-bg:    #e8f0e9; /* converged / success */
+  --state-warn:      #7b5d1e;  --state-warn-bg:  #f2eadb; /* drift / warning (ochre) */
+  --state-crit:      #965044;  --state-crit-bg:  #f0e6e4; /* error (terracotta) */
+  --state-mauve:     #7a5f6e;                              /* alt error (guide) */
+  --state-neutral:   #605f5a;  --state-neutral-bg:#e2e1df; /* queued / inert */
+
+  /* --- Card tints (background only; meaning-encoding, not decoration) --- */
+  --tint-red:    #f0e6e4;  /* a problem / failing surface */
+  --tint-green:  #e8f0e9;  /* a fix / resolved surface */
+  --tint-orange: #f2eadb;  /* attention / dependency */
+  --tint-blue:   #e6eef2;  /* neutral context / timeline */
+  --tint-brown:  #e2e1df;  /* metadata / reference */
+  --tint-cream:  #f8f8f7;  /* summary / verdict */
+
+  /* --- Type --- */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, "SF Mono", "SFMono-Regular", Menlo, monospace;
+  --font-display: 'Ubuntu Mono', var(--font-mono); /* logo / terminal accent */
+
+  /* Type scale (1.20 minor-third, 13.5px base) */
+  --text-xs:   10px;   /* uppercase micro-labels */
+  --text-sm:   11.5px;
+  --text-base: 13.5px;
+  --text-md:   14px;
+  --text-lg:   16px;
+  --text-xl:   19px;
+  --text-2xl:  26px;   /* stat numerals */
+  --tracking-label: 0.09em; /* uppercase labels */
+
+  /* --- Spacing (4px base) --- */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px;
+  --space-4: 16px; --space-5: 20px; --space-6: 24px;
+
+  /* --- Radii --- */
+  --radius-sm: 7px;   /* pills-in-buttons, chips */
+  --radius:    9px;   /* buttons, inputs */
+  --radius-lg: 13px;  /* cards */
+  --radius-pill: 20px;
+
+  /* --- Elevation --- */
+  --shadow: 0 18px 50px -22px rgba(42, 42, 40, 0.40);
+
+  /* --- Data-viz: sequential ramp (ordinal, magnitude, H≈234 slate) --- */
+  /* Validated: lightness monotone, adjacent ΔL≥0.06, contrast ≥2.0:1, spread 1° */
+  --ordinal-1: #96bad0;  /* lowest */
+  --ordinal-2: #659dbd;
+  --ordinal-3: #2e80a9;
+  --ordinal-4: #0a6388;
+  --ordinal-5: #054561;  /* highest */
+
+  /* --- Data-viz: categorical theme (identity, brand-anchored, 4 slots max) --- */
+  /* Validated: adjacent CVD ΔE 18.5, normal 19.7; all-pairs slots 1-3 CVD 18.5 */
+  --cat-1: #0171a3;  /* slate */
+  --cat-2: #4f9d60;  /* green */
+  --cat-3: #7e3e1b;  /* amber */
+  --cat-4: #c27fb0;  /* mauve — adjacent forms only, not all-pairs (3-slot validated set) */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-primary:  #1a1a1a;
+    --bg-surface:  #242426;
+    --bg-elevated: #323231;
+    --bg-sunk:     #101010;
+    --border:      #535352;
+
+    --text-primary:   #bcbbb5;
+    --text-secondary: #9c9b96;
+    --text-faint:     #8d8c86;
+    --accent:         #7b9fb0;
+    --accent-ink:     #16202a;
+
+    --state-ok:      #7fa985;  --state-ok-bg:     #1a2e1d;
+    --state-warn:    #bd9547;  --state-warn-bg:   #2f2718;
+    --state-crit:    #d0846f;  --state-crit-bg:   #2b201e;
+    --state-mauve:   #a58198;
+    --state-neutral: #9c9b96;  --state-neutral-bg:#262624;
+
+    --tint-red:    #2b201e;
+    --tint-green:  #1a2e1d;
+    --tint-orange: #2f2718;
+    --tint-blue:   #1e2528;
+    --tint-brown:  #262624;
+    --tint-cream:  #232323;
+
+    --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+
+    /* --- Data-viz: sequential ramp (dark mode) --- */
+    --ordinal-1: #095b7e;
+    --ordinal-2: #0475a1;
+    --ordinal-3: #378eba;
+    --ordinal-4: #62a8ce;
+    --ordinal-5: #93c0da;
+
+    /* --- Data-viz: categorical theme (dark mode) --- */
+    /* Validated: adjacent CVD ΔE 8.2, normal 18.4; all-pairs slots 1-3 CVD 8.2 */
+    --cat-1: #3674a5;  /* slate */
+    --cat-2: #5ba269;  /* green */
+    --cat-3: #d57018;  /* amber */
+    --cat-4: #a55e93;  /* mauve */
+  }
+}
+
+/* Explicit overrides — the app's theme control stamps data-theme on :root and
+   must win over the OS media query in BOTH directions. */
+:root[data-theme="light"] {
+  --bg-primary: #f5f4f3; --bg-surface: #ffffff; --bg-elevated: #ececea; --bg-sunk: #ececea; --border: #d0cfcd;
+  --text-primary: #5f5e58; --text-secondary: #6e6d68; --text-faint: #82807a; --accent: #4a6b7c; --accent-ink: #ffffff;
+  --state-ok: #507055; --state-ok-bg: #e8f0e9; --state-warn: #7b5d1e; --state-warn-bg: #f2eadb;
+  --state-crit: #965044; --state-crit-bg: #f0e6e4; --state-mauve: #7a5f6e; --state-neutral: #605f5a; --state-neutral-bg: #e2e1df;
+  --tint-red: #f0e6e4; --tint-green: #e8f0e9; --tint-orange: #f2eadb; --tint-blue: #e6eef2; --tint-brown: #e2e1df; --tint-cream: #f8f8f7;
+  --shadow: 0 18px 50px -22px rgba(42, 42, 40, 0.40);
+  --ordinal-1: #96bad0; --ordinal-2: #659dbd; --ordinal-3: #2e80a9; --ordinal-4: #0a6388; --ordinal-5: #054561;
+  --cat-1: #0171a3; --cat-2: #4f9d60; --cat-3: #7e3e1b; --cat-4: #c27fb0;
+}
+
+:root[data-theme="dark"] {
+  --bg-primary: #1a1a1a; --bg-surface: #242426; --bg-elevated: #323231; --bg-sunk: #101010; --border: #535352;
+  --text-primary: #bcbbb5; --text-secondary: #9c9b96; --text-faint: #8d8c86; --accent: #7b9fb0; --accent-ink: #16202a;
+  --state-ok: #7fa985; --state-ok-bg: #1a2e1d; --state-warn: #bd9547; --state-warn-bg: #2f2718;
+  --state-crit: #d0846f; --state-crit-bg: #2b201e; --state-mauve: #a58198; --state-neutral: #9c9b96; --state-neutral-bg: #262624;
+  --tint-red: #2b201e; --tint-green: #1a2e1d; --tint-orange: #2f2718; --tint-blue: #1e2528; --tint-brown: #262624; --tint-cream: #232323;
+  --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+  --ordinal-1: #095b7e; --ordinal-2: #0475a1; --ordinal-3: #378eba; --ordinal-4: #62a8ce; --ordinal-5: #93c0da;
+  --cat-1: #3674a5; --cat-2: #5ba269; --cat-3: #d57018; --cat-4: #a55e93;
+}
+
+
+/* ---- mockup base + app shell (mirrors web/src/shell/AppShell.css) ---- */
+*{box-sizing:border-box;}
+html,body{margin:0;}
+body{background:var(--bg-primary); color:var(--text-primary); font-family:var(--font-sans); font-size:var(--text-base);
+  line-height:1.45; -webkit-font-smoothing:antialiased; position:relative; min-height:100dvh; overflow-x:hidden;}
+.mono{font-family:var(--font-mono);}
+button, input, select{font:inherit;}
+[hidden]{display:none !important;}
+
+/* harness strip — review affordance, not product UI */
+.harness{display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 16px; background:var(--bg-sunk);
+  border-bottom:1px dashed var(--border); font-size:var(--text-sm); color:var(--text-faint); position:relative; z-index:60;}
+.harness .hl{font-family:var(--font-mono); letter-spacing:.04em; text-transform:uppercase; font-size:var(--text-xs);}
+.harness .grp{display:inline-flex; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius); padding:2px; flex-wrap:wrap;}
+.harness .grp button{appearance:none; border:0; background:transparent; color:var(--text-secondary); font-size:var(--text-sm);
+  font-weight:600; padding:5px 10px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+.harness .grp button[aria-pressed="true"]{background:var(--accent); color:var(--accent-ink);}
+.harness .sp{flex:1;}
+
+.shell{display:grid; grid-template-columns:1fr; min-height:calc(100dvh - 44px); position:relative;}
+.side{display:none; flex-direction:column; background:var(--bg-surface); border-right:1px solid var(--border);}
+.side .logo{display:flex; align-items:baseline; gap:7px; padding:var(--space-4) var(--space-4) var(--space-3);}
+.side .logo b{font-size:var(--text-md); letter-spacing:.13em; text-transform:uppercase;}
+.side .logo i{font-style:normal; font-size:var(--text-xs); color:var(--text-faint); letter-spacing:.05em;}
+.side nav{display:flex; flex-direction:column; gap:2px; padding:6px var(--space-3);}
+.side nav a{display:flex; align-items:center; gap:11px; padding:8px 11px; border-radius:var(--radius-sm); color:var(--text-secondary);
+  text-decoration:none; font-weight:500; font-size:var(--text-base);}
+.side nav a.active{background:var(--tint-blue); color:var(--accent); font-weight:600;}
+.main{min-width:0; display:flex; flex-direction:column;}
+.appbar{display:flex; align-items:center; gap:var(--space-2); padding:var(--space-2) var(--space-3); background:var(--bg-primary);
+  border-bottom:1px solid var(--border);}
+.chipbtn{display:inline-flex; align-items:center; gap:7px; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-secondary);
+  border-radius:var(--radius); padding:7px 11px; font-size:var(--text-sm); white-space:nowrap;}
+.chipbtn b{color:var(--text-primary); font-family:var(--font-mono); font-weight:600;}
+.searchbox{flex:1; max-width:420px; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-faint);
+  border-radius:var(--radius); padding:7px 11px; font-size:var(--text-sm);}
+.abspacer{flex:1;}
+.avatar{width:32px; height:32px; border-radius:50%; background:var(--bg-elevated); border:1px solid var(--border); display:grid;
+  place-items:center; font-size:var(--text-sm); font-weight:700; color:var(--text-secondary); flex:none;}
+
+/* ---- cockpit context (mirrors web/src/cockpit/CockpitView.css) ---- */
+.cbar{display:flex; align-items:center; gap:var(--space-3); flex-wrap:wrap; padding:10px var(--space-4); background:var(--bg-surface);
+  border-bottom:1px solid var(--border);}
+.cid{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-right:auto; min-width:0;}
+.cid__num{font-family:var(--font-mono); font-size:var(--text-sm); font-weight:700; letter-spacing:.05em; color:var(--accent);}
+.cid__asset{font-family:var(--font-mono); font-size:var(--text-md); font-weight:700;}
+.cid__path{font-family:var(--font-mono); font-size:var(--text-sm); color:var(--text-faint); overflow-wrap:anywhere;}
+.pill{display:inline-flex; align-items:center; gap:6px; padding:3px 9px; border-radius:var(--radius-pill); font-size:11px; font-weight:700; white-space:nowrap;}
+.pill__dot{width:6px; height:6px; border-radius:50%; background:currentColor;}
+.pill--ok{background:var(--state-ok-bg); color:var(--state-ok);}
+.pill--warn{background:var(--state-warn-bg); color:var(--state-warn);}
+.pill--crit{background:var(--state-crit-bg); color:var(--state-crit);}
+.pill--neu{background:var(--state-neutral-bg); color:var(--state-neutral);}
+.cockpit-canvas{padding:var(--space-4); display:grid; grid-template-columns:minmax(0,1fr); gap:var(--space-4); align-content:start;}
+
+/* blast-radius card (mirrors web/src/cockpit/cards/BlastRadiusCard.css) + new header action */
+.blast-radius-card{background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-lg); overflow:hidden;}
+.blast-radius-card__header{margin:0; padding:9px var(--space-4); font-size:var(--text-sm); font-weight:700; border-bottom:1px solid var(--border);
+  display:flex; align-items:center; gap:var(--space-3); min-height:44px;}
+.blast-radius-card__sub{font-size:var(--text-xs); font-weight:600; letter-spacing:var(--tracking-label); text-transform:uppercase; color:var(--text-faint);}
+.blast-radius-card__action{margin-left:auto;}
+.blast-radius-card__gwrap{padding:var(--space-3) var(--space-4);}
+.blast-radius-card__svg{width:100%; max-width:560px; display:block; margin:0 auto;}
+.blast-radius-card__edge{stroke:var(--border); stroke-width:1.5;}
+.blast-radius-card__edge--new{stroke:var(--accent); stroke-width:2; stroke-dasharray:4 3;}
+.blast-radius-card__node-root{fill:var(--tint-blue); stroke:var(--accent); stroke-width:2;}
+.blast-radius-card__node{fill:var(--bg-elevated); stroke:var(--border); stroke-width:1.5;}
+.blast-radius-card__node--new{fill:var(--tint-blue); stroke:var(--accent); stroke-width:1.5;}
+.blast-radius-card__label-root{fill:var(--accent);}
+.blast-radius-card__label{fill:var(--text-secondary);}
+.blast-radius-card__etype{fill:var(--text-faint);}
+.blast-radius-card__etype--new{fill:var(--accent); font-weight:700;}
+.ctxcard{background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-lg); overflow:hidden;}
+.ctxcard h3{margin:0; padding:11px var(--space-4); font-size:var(--text-sm); font-weight:700; border-bottom:1px solid var(--border);}
+.ctxcard .rows{padding:var(--space-3) var(--space-4); display:flex; flex-direction:column; gap:10px;}
+.ctxcard .r{display:flex; gap:10px; font-size:12.5px; color:var(--text-secondary);}
+.ctxcard .r .t{font-family:var(--font-mono); color:var(--text-faint); width:44px; flex:none;}
+.anno{margin:0 var(--space-4) var(--space-3); padding:8px 11px; border:1px dashed var(--border); border-radius:var(--radius); font-size:var(--text-sm);
+  color:var(--text-faint); background:var(--bg-sunk);}
+.anno b{color:var(--text-secondary);}
+
+/* buttons */
+.btn{appearance:none; border:1px solid var(--accent); background:var(--accent); color:var(--accent-ink); font-size:var(--text-sm);
+  font-weight:600; padding:7px 14px; border-radius:var(--radius); cursor:pointer; white-space:nowrap; display:inline-flex; align-items:center; gap:7px;}
+.btn:disabled{opacity:.45; cursor:not-allowed;}
+.btn-sec{appearance:none; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-secondary); font-size:var(--text-sm);
+  font-weight:600; padding:7px 13px; border-radius:var(--radius); cursor:pointer; white-space:nowrap; display:inline-flex; align-items:center; gap:6px;}
+.btn-sec:disabled{opacity:.45; cursor:not-allowed;}
+.btn-sm{font-size:11px; padding:5px 10px; border-radius:var(--radius-sm);}
+.icobtn{appearance:none; border:1px solid transparent; background:transparent; color:var(--text-faint); width:30px; height:30px; border-radius:var(--radius-sm);
+  display:grid; place-items:center; cursor:pointer; flex:none;}
+.icobtn:hover{border-color:var(--border); color:var(--text-primary);}
+.linkbtn{appearance:none; border:0; background:transparent; color:var(--accent); font-size:var(--text-sm); font-weight:600; padding:0; cursor:pointer;}
+button:focus-visible, select:focus-visible, input:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+
+/* drawer (mirrors web/src/fleet/FleetOverview.css .det / .det-scrim) */
+.scrim{position:fixed; inset:0; background:rgba(16,16,16,.32); z-index:44;}
+.det{position:fixed; top:0; right:0; bottom:0; width:440px; max-width:92%; background:var(--bg-surface); border-left:1px solid var(--border);
+  z-index:45; display:flex; flex-direction:column; box-shadow:var(--shadow);}
+.det .dh{display:flex; align-items:flex-start; gap:10px; padding:14px 14px 12px 18px; border-bottom:1px solid var(--border);}
+.det .dh .nm{flex:1; min-width:0;}
+.det .dh h2{margin:0; font-size:var(--text-lg); font-weight:700;}
+.det .dh p{margin:2px 0 0; font-size:var(--text-sm); color:var(--text-faint);}
+.dbody{flex:1; overflow-y:auto; padding:16px 18px 20px; display:flex; flex-direction:column; gap:18px;}
+.dfoot{border-top:1px solid var(--border); padding:12px 18px; display:flex; flex-direction:column; gap:10px; background:var(--bg-surface);}
+.dfoot .acts{display:flex; gap:8px; justify-content:flex-end; align-items:center;}
+.dfoot .acts .sp{flex:1;}
+
+/* form */
+.field{display:flex; flex-direction:column; gap:6px; min-width:0;}
+.lbl{font-size:var(--text-xs); letter-spacing:var(--tracking-label); text-transform:uppercase; color:var(--text-faint); font-weight:600;
+  display:flex; align-items:center; gap:8px;}
+.lbl .opt{text-transform:none; letter-spacing:0; font-weight:500;}
+.lbl .req{color:var(--state-crit);}
+.lbl .end{margin-left:auto;}
+select, input[type=text]{appearance:none; width:100%; background:var(--bg-surface); color:var(--text-primary);
+  border:1px solid var(--border); border-radius:var(--radius); padding:8px 11px; font-size:var(--text-base); min-width:0;}
+input::placeholder{color:var(--text-faint);}
+select{background-image:linear-gradient(45deg,transparent 50%,var(--text-faint) 50%),linear-gradient(135deg,var(--text-faint) 50%,transparent 50%);
+  background-position:calc(100% - 15px) 52%, calc(100% - 10px) 52%; background-size:5px 5px; background-repeat:no-repeat; padding-right:30px;}
+select:disabled, input:disabled{background-color:var(--bg-sunk); color:var(--text-secondary);}
+.field.bad select, .field.bad input, .prefixed.bad{border-color:var(--state-crit);}
+.hint{font-size:var(--text-sm); color:var(--text-faint);}
+.hint code, .ferr code{font-family:var(--font-mono); font-size:11px;}
+.ferr{display:flex; gap:6px; align-items:flex-start; font-size:var(--text-sm); color:var(--state-crit); font-weight:600;}
+.ferr svg{flex:none; margin-top:2px;}
+.prefixed{display:flex; align-items:stretch; border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; background:var(--bg-surface);}
+.prefixed span{display:flex; align-items:center; padding:0 9px; background:var(--bg-sunk); color:var(--text-secondary); font-family:var(--font-mono);
+  font-size:12.5px; border-right:1px solid var(--border);}
+.prefixed input{border:0; border-radius:0; font-family:var(--font-mono); font-size:12.5px;}
+.prefixed input:focus-visible{outline:none;}
+.prefixed:focus-within{outline:2px solid var(--accent); outline-offset:2px;}
+.badchar{background:var(--state-crit-bg); color:var(--state-crit); border-radius:3px; padding:0 2px; font-weight:700;}
+
+/* entity card (from / selected to) */
+.ent{display:flex; align-items:center; gap:10px; padding:9px 10px 9px 12px; border:1px solid var(--border); border-radius:var(--radius);
+  background:var(--bg-sunk); min-width:0;}
+.ent .ic{width:30px; height:30px; border-radius:8px; background:var(--tint-blue); color:var(--accent); display:grid; place-items:center; flex:none;}
+.ent .tx{flex:1; min-width:0;}
+.ent .tx b{display:flex; align-items:center; gap:7px; font-size:13px; flex-wrap:wrap;}
+.ent .tx .eid{display:block; font-family:var(--font-mono); font-size:11px; color:var(--text-faint); overflow-wrap:anywhere; margin-top:1px;}
+.ent.bad{border-color:var(--state-crit); background:var(--state-crit-bg);}
+.ent.bad .ic{background:var(--bg-surface); color:var(--state-crit);}
+.ent.warn{border-color:var(--state-warn); background:var(--state-warn-bg);}
+.ent.warn .ic{background:var(--bg-surface); color:var(--state-warn);}
+.kpill{display:inline-flex; padding:1px 7px; border-radius:var(--radius-pill); background:var(--state-neutral-bg); color:var(--state-neutral);
+  font-family:var(--font-mono); font-size:10.5px; font-weight:600;}
+.lockt{font-size:var(--text-xs); color:var(--text-faint); white-space:nowrap;}
+.swaprow{display:flex; justify-content:center; margin:-8px 0;}
+
+/* to-picker */
+.picker{border:1px solid var(--border); border-radius:var(--radius); overflow:hidden;}
+.picker .q{display:grid; grid-template-columns:minmax(0,1fr) 128px; gap:0; border-bottom:1px solid var(--border);}
+.picker .q .qi{display:flex; align-items:center; gap:7px; padding:0 0 0 10px; color:var(--text-faint); min-width:0;}
+.picker .q input{border:0; border-radius:0; padding:9px 8px 9px 0;}
+.picker .q select{border:0; border-left:1px solid var(--border); border-radius:0; font-size:var(--text-sm);}
+.picker .q input:focus-visible, .picker .q select:focus-visible{outline:2px solid var(--accent); outline-offset:-2px;}
+.res{list-style:none; margin:0; padding:4px; max-height:240px; overflow-y:auto;}
+.res li{display:flex; align-items:center; gap:10px; padding:7px 8px; border-radius:var(--radius-sm); cursor:pointer;}
+.res li:hover{background:var(--bg-sunk);}
+.res li[aria-selected="true"]{background:var(--tint-blue);}
+.res li .tx{flex:1; min-width:0;}
+.res li .tx b{font-size:13px; font-weight:600;}
+.res li .tx .eid{display:block; font-family:var(--font-mono); font-size:11px; color:var(--text-faint); overflow-wrap:anywhere;}
+.res li .ck{color:var(--accent); flex:none; width:16px;}
+.res .rmeta{padding:6px 8px 4px; font-size:var(--text-xs); color:var(--text-faint); letter-spacing:var(--tracking-label); text-transform:uppercase; font-weight:600;}
+.res .rmore{padding:6px 8px; font-size:var(--text-sm); color:var(--text-faint);}
+.pempty{padding:14px 12px; font-size:var(--text-sm); color:var(--text-faint); text-align:center;}
+
+/* preview sentence */
+.pv{display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px 12px; border-radius:var(--radius); background:var(--tint-cream);
+  border:1px solid var(--border); font-size:12.5px;}
+.pv .lbl{width:100%;}
+.pv .nd{font-family:var(--font-mono); font-weight:700; padding:2px 8px; border-radius:var(--radius-sm); background:var(--bg-surface); border:1px solid var(--border);}
+.pv .nd.root{color:var(--accent); border-color:var(--accent); background:var(--tint-blue);}
+.pv .nd.ph{color:var(--text-faint); border-style:dashed; font-weight:500;}
+.pv .ar{display:inline-flex; align-items:center; gap:4px; font-family:var(--font-mono); color:var(--text-secondary);}
+.pv .ar i{font-style:normal; color:var(--text-faint);}
+.pv .ar b{color:var(--text-primary); font-weight:700;}
+
+/* attributes */
+.attrs{display:flex; flex-direction:column; gap:6px;}
+.arow{display:grid; grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr) 30px; gap:6px; align-items:center;}
+.arow input{font-family:var(--font-mono); font-size:12.5px; padding:7px 9px;}
+.ahead{display:grid; grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr) 30px; gap:6px; font-size:var(--text-xs); color:var(--text-faint);}
+
+/* messages */
+.msg{display:flex; align-items:flex-start; gap:9px; padding:10px 12px; border-radius:var(--radius); font-size:12.5px; line-height:1.45;}
+.msg svg{flex:none; margin-top:2px;}
+.msg .mt{flex:1; min-width:0;}
+.msg b{font-weight:700;}
+.msg .mt p{margin:3px 0 0;}
+.msg .mt .code{display:inline-block; margin-top:4px; font-family:var(--font-mono); font-size:11px; opacity:.9;}
+.msg .mt .ma{margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;}
+.msg-crit{background:var(--state-crit-bg); color:var(--state-crit); border:1px solid var(--state-crit);}
+.msg-warn{background:var(--state-warn-bg); color:var(--state-warn); border:1px solid var(--state-warn);}
+.msg-info{background:var(--tint-blue); color:var(--text-primary); border:1px solid var(--border);}
+.msg-info svg{color:var(--accent);}
+.msg-info .mt span{color:var(--text-secondary);}
+
+.spin{width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:sp .7s linear infinite; flex:none; display:inline-block;}
+@keyframes sp{to{transform:rotate(360deg);}}
+@media (prefers-reduced-motion: reduce){.spin{animation:none;}}
+
+/* success */
+.done{display:flex; flex-direction:column; gap:16px;}
+.done .hero{display:flex; gap:12px; align-items:flex-start;}
+.done .hero .ic{width:40px; height:40px; border-radius:11px; background:var(--state-ok-bg); color:var(--state-ok); display:grid; place-items:center; flex:none;}
+.done .hero h3{margin:0; font-size:var(--text-md);}
+.done .hero p{margin:3px 0 0; color:var(--text-secondary); font-size:12.5px;}
+.edgeviz{border:1px solid var(--border); border-radius:var(--radius); overflow:hidden;}
+.edgeviz .ends{display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr); gap:8px; align-items:center; padding:14px 12px;}
+.edgeviz .end{min-width:0; text-align:center;}
+.edgeviz .end b{display:block; font-family:var(--font-mono); font-size:13px;}
+.edgeviz .end span{display:block; font-family:var(--font-mono); font-size:10.5px; color:var(--text-faint); overflow-wrap:anywhere;}
+.edgeviz .mid{display:flex; flex-direction:column; align-items:center; color:var(--accent); font-family:var(--font-mono); font-size:11.5px; font-weight:700;}
+.kv{display:grid; grid-template-columns:auto minmax(0,1fr); gap:6px 14px; padding:10px 12px; border-top:1px solid var(--border); background:var(--bg-sunk); font-size:12px;}
+.kv dt{color:var(--text-faint); font-size:var(--text-xs); letter-spacing:var(--tracking-label); text-transform:uppercase; font-weight:600; padding-top:1px;}
+.kv dd{margin:0; font-family:var(--font-mono); overflow-wrap:anywhere; color:var(--text-secondary);}
+
+.toast{position:fixed; left:50%; top:64px; transform:translateX(-50%); background:var(--bg-elevated); border:1px solid var(--border);
+  color:var(--text-primary); padding:9px 16px; border-radius:var(--radius); font-size:12.5px; font-weight:600; box-shadow:var(--shadow); z-index:300; display:none;}
+.toast.show{display:block;}
+
+@media (min-width:1024px){
+  .shell{grid-template-columns:230px 1fr;}
+  .side{display:flex;}
+  .cockpit-canvas{grid-template-columns:minmax(0,1.5fr) minmax(0,1fr); padding:var(--space-5) var(--space-6) 40px;}
+}
+@media (max-width:640px){
+  .searchbox{display:none;}
+  .harness{padding:8px 12px;}
+  .det{width:100%; max-width:100%; border-left:0;}
+  .dbody{padding:14px 16px 18px;}
+  .dfoot{padding:12px 16px;}
+  .picker .q{grid-template-columns:minmax(0,1fr) 108px;}
+}
+</style>
+</head>
+<body class="st-entry">
+<div class="harness" role="toolbar" aria-label="Review harness">
+  <span class="hl">State</span>
+  <div class="grp" id="stategrp">
+    <button data-st="entry" aria-pressed="true">Entry point</button>
+    <button data-st="empty">Empty</button>
+    <button data-st="filled">Filled</button>
+    <button data-st="pipe">Pipe rejected</button>
+    <button data-st="submitting">Submitting</button>
+    <button data-st="success">Success</button>
+    <button data-st="crosstenant">Cross-tenant 404</button>
+    <button data-st="crossing">Crossing required</button>
+    <button data-st="error">Server error</button>
+  </div>
+  <span class="sp"></span>
+  <span class="hl">Theme</span>
+  <div class="grp" id="themegrp">
+    <button data-th="light" aria-pressed="true">Light</button>
+    <button data-th="dark">Dark</button>
+  </div>
+</div>
+
+<div class="shell">
+  <aside class="side">
+    <div class="logo"><b>cfgms</b><i>controller</i></div>
+    <nav>
+      <a href="#">Fleet</a><a href="#" class="active">Cases</a><a href="#">Modules</a><a href="#">Config</a><a href="#">Workflows</a>
+      <a href="#">Approvals</a><a href="#">Scripts</a><a href="#">Registration</a><a href="#">Reports</a><a href="#">Audit</a>
+      <a href="#">Accounts</a><a href="#">Tenants</a>
+    </nav>
+  </aside>
+  <div class="main">
+    <div class="appbar">
+      <span class="chipbtn">Tenant <b>msp-a</b></span>
+      <span class="searchbox">Search stewards, cases, entities…</span>
+      <span class="abspacer"></span>
+      <span class="avatar">AK</span>
+    </div>
+    <div class="cbar">
+      <div class="cid">
+        <span class="cid__num">CASE 1042</span>
+        <span class="cid__asset">web-01</span>
+        <span class="cid__path">root/msp-a/acme-corp</span>
+      </div>
+      <span class="pill pill--warn"><span class="pill__dot"></span>Investigating</span>
+    </div>
+    <main class="cockpit-canvas">
+      <section class="blast-radius-card" aria-label="Blast radius">
+        <h3 class="blast-radius-card__header">
+          <span>Blast radius</span>
+          <span class="blast-radius-card__sub" id="depcount">3 dependents</span>
+          <button class="btn-sec btn-sm blast-radius-card__action" id="openassert">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            Assert relationship
+          </button>
+        </h3>
+        <div class="blast-radius-card__gwrap" id="graph"></div>
+        <p class="anno" id="anno"><b>Mockup note:</b> the action opens the drawer with this card’s pinned entity (<span class="mono">web-01</span>) as <b>From</b>. The card re-fetches its neighborhood after a successful assertion.</p>
+      </section>
+      <section class="ctxcard" aria-label="Change timeline">
+        <h3>Change timeline</h3>
+        <div class="rows">
+          <div class="r"><span class="t">09:41</span><span>Drift on <span class="mono">service/vendor-a-web</span> — state changed</span></div>
+          <div class="r"><span class="t">09:12</span><span>Config push <span class="mono">web-tier v14</span> applied</span></div>
+          <div class="r"><span class="t">08:55</span><span>Heartbeat gap, 4 min</span></div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="det" id="det" role="dialog" aria-modal="true" aria-labelledby="dtitle" hidden>
+  <div class="dh">
+    <div class="nm">
+      <h2 id="dtitle">Assert relationship</h2>
+      <p>Adds a typed link between two entities in the knowledge graph.</p>
+    </div>
+    <button class="icobtn" id="closedet" aria-label="Close">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="dbody" id="dbody"></div>
+  <div class="dfoot" id="dfoot"></div>
+</aside>
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  var root = document.documentElement;
+  var I = {
+    host:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
+    vm:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>',
+    service:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg>',
+    search:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
+    check:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg>',
+    x:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+    swap:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v16M7 20l-3-3M7 20l3-3M17 20V4M17 4l-3 3M17 4l3 3"/></svg>',
+    crit:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>',
+    lock:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
+    info:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>',
+    plus:'<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>'
+  };
+  var EDGE_TYPES = ['contains','runs-on','member-of','depends-on','serves','connects-to','manages','managed-by','assigned-to','delegated-access','reports-to','same-as'];
+  var FROM = { name:'web-01', kind:'host', eid:'host:7f3a21c4' };
+  var RESULTS = [
+    { name:'sql-02', kind:'vm',      eid:'cluster:hv-clu-01/vm/sql-02' },
+    { name:'sql-02', kind:'host',    eid:'host:b19e0d72' },
+    { name:'vendor-a-db', kind:'service', eid:'host:b19e0d72/service/vendor-a-db' },
+    { name:'sql-01', kind:'vm',      eid:'cluster:hv-clu-01/vm/sql-01' }
+  ];
+  var TO = RESULTS[0];
+  var ATTRS = [ ['reason','web.config points at the sql-02 listener'], ['ticket','INC-1042'] ];
+
+  function esc(x){ return String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  /* ---- blast-radius graph (layout mirrors BlastRadiusCard buildLayout, radial) ---- */
+  function graph(withNew){
+    var cx=200, cy=104, r=78;
+    var nb = [ {l:'hv-node-03', t:'runs-on'}, {l:'app-pool-02', t:'serves'}, {l:'dns-01', t:'depends-on'} ];
+    if (withNew) nb.push({l:'sql-02', t:'depends-on', isNew:true});
+    var s = '<svg viewBox="0 0 400 208" role="img" aria-label="Dependency graph" class="blast-radius-card__svg">';
+    var pts = nb.map(function(n,i){ var a = (2*Math.PI*i)/nb.length - Math.PI/2; return {x:cx + r*1.55*Math.cos(a), y:cy + r*Math.sin(a), n:n}; });
+    pts.forEach(function(p){
+      s += '<line x1="'+cx+'" y1="'+cy+'" x2="'+p.x.toFixed(1)+'" y2="'+p.y.toFixed(1)+'" class="blast-radius-card__edge'+(p.n.isNew?' blast-radius-card__edge--new':'')+'"/>';
+      var mx=(cx+p.x)/2, my=(cy+p.y)/2;
+      s += '<text x="'+mx.toFixed(1)+'" y="'+(my-4).toFixed(1)+'" text-anchor="middle" font-family="var(--font-mono)" font-size="8.5" class="blast-radius-card__etype'+(p.n.isNew?' blast-radius-card__etype--new':'')+'">'+p.n.t+'</text>';
+    });
+    s += '<g font-family="var(--font-mono)" font-size="9">';
+    s += '<circle cx="'+cx+'" cy="'+cy+'" r="27" class="blast-radius-card__node-root"/><text x="'+cx+'" y="'+(cy+3)+'" text-anchor="middle" font-weight="700" class="blast-radius-card__label-root">web-01</text>';
+    pts.forEach(function(p){
+      s += '<circle cx="'+p.x.toFixed(1)+'" cy="'+p.y.toFixed(1)+'" r="22" class="'+(p.n.isNew?'blast-radius-card__node--new':'blast-radius-card__node')+'"/>';
+      s += '<text x="'+p.x.toFixed(1)+'" y="'+(p.y+3).toFixed(1)+'" text-anchor="middle" class="'+(p.n.isNew?'blast-radius-card__label-root':'blast-radius-card__label')+'"'+(p.n.isNew?' font-weight="700"':'')+'>'+(p.n.l.length>11?p.n.l.slice(0,10)+'…':p.n.l)+'</text>';
+    });
+    s += '</g></svg>';
+    document.getElementById('graph').innerHTML = s;
+    document.getElementById('depcount').textContent = nb.length + ' dependents';
+  }
+
+  /* ---- drawer pieces ---- */
+  function entCard(e, opts){
+    opts = opts || {};
+    var cls = 'ent' + (opts.bad ? ' bad' : '') + (opts.warn ? ' warn' : '');
+    var ic = opts.bad || opts.warn ? I.lock : (I[e.kind] || I.host);
+    return '<div class="'+cls+'"><span class="ic">'+ic+'</span><span class="tx"><b>'+esc(e.name)+' <span class="kpill">'+esc(e.kind)+'</span></b><span class="eid">'+esc(e.eid)+'</span></span>'
+      + (opts.right || '') + '</div>';
+  }
+  function fromField(dis){
+    return '<div class="field"><span class="lbl">From<span class="end lockt">pinned on this case</span></span>'
+      + entCard(FROM) + '</div>'
+      + '<div class="swaprow"><button class="btn-sec btn-sm" title="Swap From and To"'+(dis?' disabled':'')+'>'+I.swap+'Swap direction</button></div>';
+  }
+  function edgeField(val, custom, dis){
+    var opts = '<option value=""'+(val?'':' selected')+'>Choose a relationship…</option><optgroup label="Standard">';
+    EDGE_TYPES.forEach(function(t){ opts += '<option'+(t===val?' selected':'')+'>'+t+'</option>'; });
+    opts += '</optgroup><optgroup label="Custom"><option value="related"'+(val==='related'?' selected':'')+'>related:&lt;name&gt; — your own type</option></optgroup>';
+    var h = '<div class="field"><label class="lbl" for="etype">Relationship <span class="req">*</span></label>'
+      + '<select id="etype"'+(dis?' disabled':'')+'>'+opts+'</select>';
+    if (val === 'related'){
+      var bad = custom && custom.indexOf('|') >= 0;
+      h += '<div class="prefixed'+(bad?' bad':'')+'"><span>related:</span><input type="text" aria-label="Custom relationship name" value="'+esc(custom||'')+'"'+(bad?' aria-invalid="true" aria-describedby="perr"':'')+(dis?' disabled':'')+'></div>';
+      if (bad){
+        h += '<div class="ferr" id="perr">'+I.crit+'<span>Remove the <code>|</code> character. The controller uses it to separate the parts of a relationship, so it can’t appear in a relationship type or an entity ID.</span></div>';
+      } else {
+        h += '<span class="hint">Lower-case name for a link the standard types don’t cover, e.g. <code>related:backs-up</code>.</span>';
+      }
+    }
+    return h + '</div>';
+  }
+  function toPicker(q, sel){
+    var h = '<div class="field"><span class="lbl">To <span class="req">*</span><span class="end opt">entities in your tenants</span></span><div class="picker">'
+      + '<div class="q"><label class="qi">'+I.search+'<input type="text" placeholder="Search by name or paste an entity ID" value="'+esc(q)+'" aria-label="Search entities"></label>'
+      + '<select aria-label="Kind"><option>Any kind</option><option>host</option><option>vm</option><option>service</option><option>user</option><option>group</option><option>application</option></select></div>';
+    if (!q){
+      h += '<div class="pempty">Type to search the knowledge graph.</div>';
+    } else {
+      h += '<ul class="res" role="listbox" aria-label="Matching entities"><li class="rmeta" role="presentation">4 matches</li>';
+      RESULTS.forEach(function(e){
+        var on = sel && e.eid === sel.eid;
+        h += '<li role="option" aria-selected="'+on+'"><span class="ent-ic" style="color:var(--text-faint);display:grid">'+(I[e.kind]||I.host)+'</span>'
+          + '<span class="tx"><b>'+esc(e.name)+'</b> <span class="kpill">'+esc(e.kind)+'</span><span class="eid">'+esc(e.eid)+'</span></span>'
+          + '<span class="ck">'+(on?I.check:'')+'</span></li>';
+      });
+      h += '</ul>';
+    }
+    return h + '</div></div>';
+  }
+  function toChosen(opts, dis){
+    opts = opts || {};
+    return '<div class="field"><span class="lbl">To <span class="req">*</span></span>'
+      + entCard(TO, {bad:opts.bad, warn:opts.warn, right: dis ? '' : '<button class="linkbtn">Change</button>'}) + '</div>';
+  }
+  function preview(edge, to){
+    var e = edge ? '<b>'+esc(edge)+'</b>' : '<i>relationship</i>';
+    return '<div class="pv"><span class="lbl">Will record</span><span class="nd root">'+esc(FROM.name)+'</span>'
+      + '<span class="ar"><i>—</i>'+e+'<i>→</i></span>'
+      + (to ? '<span class="nd">'+esc(to.name)+'</span>' : '<span class="nd ph">choose an entity</span>') + '</div>';
+  }
+  function attrsField(rows, dis){
+    var h = '<div class="field"><span class="lbl">Attributes <span class="opt">optional</span></span><div class="attrs">';
+    if (rows.length){
+      h += '<div class="ahead"><span>Key</span><span>Value</span><span></span></div>';
+      rows.forEach(function(r){
+        h += '<div class="arow"><input type="text" value="'+esc(r[0])+'" aria-label="Attribute key"'+(dis?' disabled':'')+'><input type="text" value="'+esc(r[1])+'" aria-label="Attribute value"'+(dis?' disabled':'')+'>'
+          + '<button class="icobtn" aria-label="Remove attribute"'+(dis?' disabled':'')+'>'+I.x+'</button></div>';
+      });
+    }
+    h += '<div><button class="btn-sec btn-sm"'+(dis?' disabled':'')+'>'+I.plus+'Add attribute</button></div>'
+      + '<span class="hint">Up to 32. Keys the controller manages itself, such as <code>tenant_path</code> or <code>hostname</code>, are refused.</span>';
+    return h + '</div></div>';
+  }
+  var NOTE = '<div class="msg msg-info">'+I.info+'<span class="mt"><b>No passkey needed.</b> <span>Recorded as an operator assertion by you, in the audit log of each tenant involved. Observations from stewards and directories outrank it.</span></span></div>';
+
+  function foot(state){
+    var primary, extra = '';
+    if (state === 'submitting'){
+      primary = '<button class="btn" disabled><span class="spin"></span>Asserting…</button>';
+    } else if (state === 'empty' || state === 'pipe'){
+      primary = '<button class="btn" disabled>Assert relationship</button>';
+    } else if (state === 'error'){
+      primary = '<button class="btn">Try again</button>';
+    } else if (state === 'crosstenant'){
+      primary = '<button class="btn" disabled>Assert relationship</button>';
+    } else if (state === 'crossing'){
+      primary = '<button class="btn" disabled>Assert relationship</button>';
+    } else {
+      primary = '<button class="btn" id="submit">Assert relationship</button>';
+    }
+    if (state === 'crosstenant'){
+      extra = '<div class="msg msg-crit" role="alert">'+I.crit+'<span class="mt"><b>One of these entities isn’t in a tenant you can reach.</b>'
+        + '<p>It may have been removed, or it belongs to a tenant outside yours. The controller doesn’t say which entity or why, so it never reveals another tenant’s entities. Nothing was recorded.</p>'
+        + '<span class="code">404 · not found</span><span class="ma"><button class="btn-sec btn-sm">Choose another entity</button></span></span></div>';
+    }
+    if (state === 'crossing'){
+      extra = '<div class="msg msg-warn" role="alert">'+I.lock+'<span class="mt"><b>This link reaches into msp-b.</b>'
+        + '<p>Linking an entity under msp-b needs support access from that MSP, or break-glass. Nothing was recorded.</p>'
+        + '<span class="code">401 · tenant_crossing_required</span><span class="ma"><button class="btn-sec btn-sm">Request access…</button></span></span></div>';
+    }
+    if (state === 'error'){
+      extra = '<div class="msg msg-crit" role="alert">'+I.crit+'<span class="mt"><b>The relationship wasn’t recorded.</b>'
+        + '<p>The controller couldn’t complete the request. Your entries are kept; try again in a moment.</p>'
+        + '<span class="code">500 · assertion failed</span></span></div>';
+    }
+    return extra + '<div class="acts"><button class="btn-sec"'+(state==='submitting'?' disabled':'')+' data-close>Cancel</button>'+primary+'</div>';
+  }
+
+  function successBody(){
+    return '<div class="done"><div class="hero"><span class="ic">'+I.check+'</span><span><h3>Relationship recorded</h3>'
+      + '<p>The blast-radius card now shows the new link.</p></span></div>'
+      + '<div class="edgeviz"><div class="ends"><span class="end"><b>'+esc(FROM.name)+'</b><span>'+esc(FROM.eid)+'</span></span>'
+      + '<span class="mid">depends-on<svg width="56" height="12" viewBox="0 0 56 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 6h50M46 2l6 4-6 4"/></svg></span>'
+      + '<span class="end"><b>'+esc(TO.name)+'</b><span>'+esc(TO.eid)+'</span></span></div>'
+      + '<dl class="kv"><dt>Source</dt><dd>operator-assertion:a.kim@msp-a</dd><dt>reason</dt><dd>'+esc(ATTRS[0][1])+'</dd><dt>ticket</dt><dd>'+esc(ATTRS[1][1])+'</dd></dl></div>'
+      + '</div>';
+  }
+
+  function render(state){
+    var det = document.getElementById('det'), scrim = document.getElementById('scrim');
+    var open = state !== 'entry';
+    det.hidden = !open; scrim.hidden = !open;
+    document.getElementById('anno').hidden = open;
+    graph(state === 'success');
+    if (!open) return;
+    var body = '', dis = state === 'submitting';
+    if (state === 'success'){
+      body = successBody();
+      document.getElementById('dfoot').innerHTML = '<div class="acts"><button class="btn-sec">Assert another</button><button class="btn" data-close>Done</button></div>';
+      document.getElementById('dbody').innerHTML = body;
+      return;
+    }
+    if (state === 'empty'){
+      body = fromField() + edgeField('') + toPicker('', null) + preview('', null) + attrsField([]) + NOTE;
+    } else if (state === 'filled'){
+      body = fromField() + edgeField('depends-on') + toPicker('sql', TO) + preview('depends-on', TO) + attrsField(ATTRS) + NOTE;
+    } else if (state === 'pipe'){
+      body = fromField() + edgeField('related', 'replica|primary') + toChosen() + preview('related:replica|primary', TO) + attrsField(ATTRS.slice(0,1)) + NOTE;
+    } else {
+      body = fromField(dis) + edgeField('depends-on', '', dis)
+        + toChosen({}, dis)
+        + preview('depends-on', TO) + attrsField(ATTRS, dis) + NOTE;
+    }
+    document.getElementById('dbody').innerHTML = body;
+    document.getElementById('dfoot').innerHTML = foot(state);
+  }
+
+  function setState(s){
+    document.body.className = 'st-' + s;
+    document.querySelectorAll('#stategrp button').forEach(function(b){ b.setAttribute('aria-pressed', b.dataset.st===s ? 'true':'false'); });
+    render(s);
+  }
+  function setTheme(t){
+    root.setAttribute('data-theme', t);
+    document.querySelectorAll('#themegrp button').forEach(function(b){ b.setAttribute('aria-pressed', b.dataset.th===t ? 'true':'false'); });
+  }
+  window.setState = setState; window.setTheme = setTheme;
+  // harness offset: the review strip is not product UI, so the drawer and scrim start below it
+  function offset(){ var h = document.querySelector('.harness').offsetHeight + 'px';
+    document.getElementById('det').style.top = h; document.getElementById('scrim').style.top = h; }
+  window.addEventListener('resize', offset); offset();
+
+  document.body.addEventListener('click', function(e){
+    var b;
+    if ((b = e.target.closest('#stategrp button'))){ setState(b.dataset.st); return; }
+    if ((b = e.target.closest('#themegrp button'))){ setTheme(b.dataset.th); return; }
+    if ((b = e.target.closest('#openassert'))){ setState('empty'); return; }
+    if ((b = e.target.closest('[data-close], #closedet, #scrim'))){ setState('entry'); return; }
+    if ((b = e.target.closest('#submit'))){ setState('submitting'); setTimeout(function(){ setState('success'); }, 1200); return; }
+  });
+
+  var p = new URLSearchParams(location.search);
+  var th = p.get('theme') || (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  setTheme(th);
+  setState(p.get('state') || 'entry');
+})();
+</script>
+</body>
+</html>

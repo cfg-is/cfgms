@@ -1,0 +1,733 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CFGMS Fleet Query — mockup</title>
+<!--
+  Osquery ad-hoc query screen (Epic #5300 · Story #5460), route /osquery, nav
+  entry "Fleet query". The admin picks a catalog query from
+  GET /api/v1/osquery/catalog ({id, params:[{name, type:"enum"|"charset",
+  allowed_values?}]}), fills the inputs built from that entry's schema (enum ->
+  select, charset -> text field; no free-text SQL, no typed catalog id), enters
+  a fleet selector (the shared SelectorInput grammar), and runs
+  POST /api/v1/osquery/query {catalog_id, params, selector}. The route needs a
+  passkey presence tap (osquery:execute, RequireUserPresence): the StepUpModal
+  shows, then the request is replayed with X-Presence-Token. The response is
+  {results:[{steward_id, rows?:[{col:value}], error?}]}: one card per steward,
+  where rows -> table, no rows and no error -> "Ran, no rows", error -> error
+  card. Every cell value and error string is rendered as text, never markup.
+  States: Ready / Loading catalog / Catalog error / Running / Passkey /
+  Passkey cancelled / Rejected (400) / Not allowed (403) / Unavailable (503) /
+  Error (500 or network) / Empty (selector matched no stewards).
+  Design tokens are inlined from docs/design/web-ui-design-tokens.css (source of
+  truth); shell chrome mirrors web/src/shell/AppShell.css. Standalone and
+  interactive: the dashed top strip is a review harness (state + theme), not
+  product UI. URL params ?state=<name>&theme=light|dark preselect a state.
+-->
+<style>
+/*
+ * CFGMS Web UI — Design Tokens
+ * ----------------------------------------------------------------------------
+ * Machine-readable token layer for the controller-served web app (Epic #2344).
+ * Values are lifted verbatim from the public brand style guide
+ * (https://cfg.is/style-guide) so the app and the marketing site share one
+ * source of truth for colour. See docs/design/web-ui-design-system.md for the
+ * rationale, usage rules, and open items.
+ *
+ * Identity in one line: a WARM TERMINAL — near-black / near-white grounds that
+ * hold a trace of warmth, STONE-NEUTRAL text, muted slate-blue accent,
+ * desaturated earth-tone semantics, and a palette of muted card tints. Ground
+ * and ink sit in different hue bands on purpose: when both were warm the whole
+ * surface read rust. State owns the colour budget; the accent is reserved for
+ * interaction; mono carries all machine data.
+ *
+ * Theme model: default tokens are light. `@media (prefers-color-scheme: dark)`
+ * supplies dark. `:root[data-theme="light"|"dark"]` overrides the media query
+ * in both directions (the app's own theme control stamps data-theme on :root).
+ * ==========================================================================*/
+
+:root {
+  /* --- Background & structure --- */
+  --bg-primary:   #f5f4f3;  /* app ground */
+  --bg-surface:   #ffffff;  /* panels, cards */
+  --bg-elevated:  #ececea;  /* raised / inset chrome */
+  --bg-sunk:      #ececea;  /* wells, code blocks */
+  --border:       #d0cfcd;
+
+  /* --- Text & accent --- */
+  --text-primary:   #5f5e58; /* stone (was warm taupe; see design-system §1) */
+  --text-secondary: #6e6d68;
+  --text-faint:     #82807a; /* micro-labels (contrast-tuned vs guide) */
+  --accent:         #4a6b7c; /* muted slate blue — INTERACTION ONLY */
+  --accent-ink:     #ffffff; /* text/icon on accent fill */
+
+  /* --- Semantic state (desaturated earth tones) --- */
+  --state-ok:        #507055;  --state-ok-bg:    #e8f0e9; /* converged / success */
+  --state-warn:      #7b5d1e;  --state-warn-bg:  #f2eadb; /* drift / warning (ochre) */
+  --state-crit:      #965044;  --state-crit-bg:  #f0e6e4; /* error (terracotta) */
+  --state-mauve:     #7a5f6e;                              /* alt error (guide) */
+  --state-neutral:   #605f5a;  --state-neutral-bg:#e2e1df; /* queued / inert */
+
+  /* --- Card tints (background only; meaning-encoding, not decoration) --- */
+  --tint-red:    #f0e6e4;  /* a problem / failing surface */
+  --tint-green:  #e8f0e9;  /* a fix / resolved surface */
+  --tint-orange: #f2eadb;  /* attention / dependency */
+  --tint-blue:   #e6eef2;  /* neutral context / timeline */
+  --tint-brown:  #e2e1df;  /* metadata / reference */
+  --tint-cream:  #f8f8f7;  /* summary / verdict */
+
+  /* --- Type --- */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, "SF Mono", "SFMono-Regular", Menlo, monospace;
+  --font-display: 'Ubuntu Mono', var(--font-mono); /* logo / terminal accent */
+
+  /* Type scale (1.20 minor-third, 13.5px base) */
+  --text-xs:   10px;   /* uppercase micro-labels */
+  --text-sm:   11.5px;
+  --text-base: 13.5px;
+  --text-md:   14px;
+  --text-lg:   16px;
+  --text-xl:   19px;
+  --text-2xl:  26px;   /* stat numerals */
+  --tracking-label: 0.09em; /* uppercase labels */
+
+  /* --- Spacing (4px base) --- */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px;
+  --space-4: 16px; --space-5: 20px; --space-6: 24px;
+
+  /* --- Radii --- */
+  --radius-sm: 7px;   /* pills-in-buttons, chips */
+  --radius:    9px;   /* buttons, inputs */
+  --radius-lg: 13px;  /* cards */
+  --radius-pill: 20px;
+
+  /* --- Elevation --- */
+  --shadow: 0 18px 50px -22px rgba(42, 42, 40, 0.40);
+
+  /* --- Data-viz: sequential ramp (ordinal, magnitude, H≈234 slate) --- */
+  /* Validated: lightness monotone, adjacent ΔL≥0.06, contrast ≥2.0:1, spread 1° */
+  --ordinal-1: #96bad0;  /* lowest */
+  --ordinal-2: #659dbd;
+  --ordinal-3: #2e80a9;
+  --ordinal-4: #0a6388;
+  --ordinal-5: #054561;  /* highest */
+
+  /* --- Data-viz: categorical theme (identity, brand-anchored, 4 slots max) --- */
+  /* Validated: adjacent CVD ΔE 18.5, normal 19.7; all-pairs slots 1-3 CVD 18.5 */
+  --cat-1: #0171a3;  /* slate */
+  --cat-2: #4f9d60;  /* green */
+  --cat-3: #7e3e1b;  /* amber */
+  --cat-4: #c27fb0;  /* mauve — adjacent forms only, not all-pairs (3-slot validated set) */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-primary:  #1a1a1a;
+    --bg-surface:  #242426;
+    --bg-elevated: #323231;
+    --bg-sunk:     #101010;
+    --border:      #535352;
+
+    --text-primary:   #bcbbb5;
+    --text-secondary: #9c9b96;
+    --text-faint:     #8d8c86;
+    --accent:         #7b9fb0;
+    --accent-ink:     #16202a;
+
+    --state-ok:      #7fa985;  --state-ok-bg:     #1a2e1d;
+    --state-warn:    #bd9547;  --state-warn-bg:   #2f2718;
+    --state-crit:    #d0846f;  --state-crit-bg:   #2b201e;
+    --state-mauve:   #a58198;
+    --state-neutral: #9c9b96;  --state-neutral-bg:#262624;
+
+    --tint-red:    #2b201e;
+    --tint-green:  #1a2e1d;
+    --tint-orange: #2f2718;
+    --tint-blue:   #1e2528;
+    --tint-brown:  #262624;
+    --tint-cream:  #232323;
+
+    --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+
+    /* --- Data-viz: sequential ramp (dark mode) --- */
+    --ordinal-1: #095b7e;
+    --ordinal-2: #0475a1;
+    --ordinal-3: #378eba;
+    --ordinal-4: #62a8ce;
+    --ordinal-5: #93c0da;
+
+    /* --- Data-viz: categorical theme (dark mode) --- */
+    /* Validated: adjacent CVD ΔE 8.2, normal 18.4; all-pairs slots 1-3 CVD 8.2 */
+    --cat-1: #3674a5;  /* slate */
+    --cat-2: #5ba269;  /* green */
+    --cat-3: #d57018;  /* amber */
+    --cat-4: #a55e93;  /* mauve */
+  }
+}
+
+/* Explicit overrides — the app's theme control stamps data-theme on :root and
+   must win over the OS media query in BOTH directions. */
+:root[data-theme="light"] {
+  --bg-primary: #f5f4f3; --bg-surface: #ffffff; --bg-elevated: #ececea; --bg-sunk: #ececea; --border: #d0cfcd;
+  --text-primary: #5f5e58; --text-secondary: #6e6d68; --text-faint: #82807a; --accent: #4a6b7c; --accent-ink: #ffffff;
+  --state-ok: #507055; --state-ok-bg: #e8f0e9; --state-warn: #7b5d1e; --state-warn-bg: #f2eadb;
+  --state-crit: #965044; --state-crit-bg: #f0e6e4; --state-mauve: #7a5f6e; --state-neutral: #605f5a; --state-neutral-bg: #e2e1df;
+  --tint-red: #f0e6e4; --tint-green: #e8f0e9; --tint-orange: #f2eadb; --tint-blue: #e6eef2; --tint-brown: #e2e1df; --tint-cream: #f8f8f7;
+  --shadow: 0 18px 50px -22px rgba(42, 42, 40, 0.40);
+  --ordinal-1: #96bad0; --ordinal-2: #659dbd; --ordinal-3: #2e80a9; --ordinal-4: #0a6388; --ordinal-5: #054561;
+  --cat-1: #0171a3; --cat-2: #4f9d60; --cat-3: #7e3e1b; --cat-4: #c27fb0;
+}
+
+:root[data-theme="dark"] {
+  --bg-primary: #1a1a1a; --bg-surface: #242426; --bg-elevated: #323231; --bg-sunk: #101010; --border: #535352;
+  --text-primary: #bcbbb5; --text-secondary: #9c9b96; --text-faint: #8d8c86; --accent: #7b9fb0; --accent-ink: #16202a;
+  --state-ok: #7fa985; --state-ok-bg: #1a2e1d; --state-warn: #bd9547; --state-warn-bg: #2f2718;
+  --state-crit: #d0846f; --state-crit-bg: #2b201e; --state-mauve: #a58198; --state-neutral: #9c9b96; --state-neutral-bg: #262624;
+  --tint-red: #2b201e; --tint-green: #1a2e1d; --tint-orange: #2f2718; --tint-blue: #1e2528; --tint-brown: #262624; --tint-cream: #232323;
+  --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+  --ordinal-1: #095b7e; --ordinal-2: #0475a1; --ordinal-3: #378eba; --ordinal-4: #62a8ce; --ordinal-5: #93c0da;
+  --cat-1: #3674a5; --cat-2: #5ba269; --cat-3: #d57018; --cat-4: #a55e93;
+}
+/* ---- mockup base + app shell (mirrors web/src/shell/AppShell.css) ---- */
+*{box-sizing:border-box;}
+html,body{margin:0;}
+body{background:var(--bg-primary); color:var(--text-primary); font-family:var(--font-sans); font-size:var(--text-base);
+  line-height:1.45; -webkit-font-smoothing:antialiased; position:relative; min-height:100dvh;}
+.mono{font-family:var(--font-mono);}
+button{font:inherit;}
+[hidden]{display:none !important;}
+
+/* harness strip — review affordance, not product UI */
+.harness{display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 16px; background:var(--bg-sunk);
+  border-bottom:1px dashed var(--border); font-size:var(--text-sm); color:var(--text-faint);}
+.harness .hl{font-family:var(--font-mono); letter-spacing:.04em; text-transform:uppercase; font-size:var(--text-xs);}
+.harness .grp{display:inline-flex; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius); padding:2px; flex-wrap:wrap;}
+.harness .grp button{appearance:none; border:0; background:transparent; color:var(--text-secondary); font-size:var(--text-sm);
+  font-weight:600; padding:5px 10px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+.harness .grp button[aria-pressed="true"]{background:var(--accent); color:var(--accent-ink);}
+.harness .sp{flex:1;}
+
+.shell{display:grid; grid-template-columns:1fr; min-height:calc(100dvh - 44px); position:relative;}
+.side{display:none; flex-direction:column; background:var(--bg-surface); border-right:1px solid var(--border);}
+.side .logo{display:flex; align-items:baseline; gap:7px; padding:var(--space-4) var(--space-4) var(--space-3);}
+.side .logo b{font-size:var(--text-md); letter-spacing:.13em; text-transform:uppercase;}
+.side .logo i{font-style:normal; font-size:var(--text-xs); color:var(--text-faint); letter-spacing:.05em;}
+.side nav{display:flex; flex-direction:column; gap:2px; padding:6px var(--space-3);}
+.side nav a{display:flex; align-items:center; gap:11px; padding:9px 11px; border-radius:var(--radius-sm); color:var(--text-secondary);
+  text-decoration:none; font-weight:500; font-size:var(--text-base);}
+.side nav a.active{background:var(--tint-blue); color:var(--accent); font-weight:600;}
+.side nav a .new{margin-left:auto; font-size:9px; letter-spacing:.06em; text-transform:uppercase; color:var(--accent);
+  border:1px solid var(--accent); border-radius:var(--radius-pill); padding:0 6px;}
+.main{min-width:0; display:flex; flex-direction:column;}
+.appbar{display:flex; align-items:center; gap:var(--space-2); padding:var(--space-2) var(--space-3); background:var(--bg-primary);
+  border-bottom:1px solid var(--border);}
+.chipbtn{display:inline-flex; align-items:center; gap:7px; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-secondary);
+  border-radius:var(--radius); padding:7px 11px; font-size:var(--text-sm); white-space:nowrap;}
+.chipbtn b{color:var(--text-primary); font-family:var(--font-mono); font-weight:600;}
+.searchbox{flex:1; max-width:420px; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-faint);
+  border-radius:var(--radius); padding:7px 11px; font-size:var(--text-sm);}
+.abspacer{flex:1;}
+.avatar{width:32px; height:32px; border-radius:50%; background:var(--bg-elevated); border:1px solid var(--border); display:grid;
+  place-items:center; font-size:var(--text-sm); font-weight:700; color:var(--text-secondary); flex:none;}
+.content{padding:var(--space-4); display:flex; flex-direction:column; gap:var(--space-4); max-width:1180px; width:100%;}
+.htitle{display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap;}
+.htitle h1{margin:0; font-size:var(--text-xl); font-weight:700; letter-spacing:-.01em;}
+.htitle p{margin:3px 0 0; color:var(--text-secondary); max-width:640px;}
+
+.panel{background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-lg); overflow:hidden;}
+.phead{display:flex; align-items:center; gap:9px; padding:12px 16px; border-bottom:1px solid var(--border); flex-wrap:wrap;}
+.phead h2{margin:0; font-size:var(--text-md); font-weight:700;}
+.phead .sub{color:var(--text-faint); font-size:var(--text-sm);}
+.phead .cnt{margin-left:auto; font-size:var(--text-sm); color:var(--text-faint); font-variant-numeric:tabular-nums;}
+.pbody{padding:14px 16px;}
+
+table.tbl{width:100%; border-collapse:collapse; font-size:13px;}
+.tbl th{text-align:left; font-size:10.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--text-faint); font-weight:600;
+  padding:9px 14px; border-bottom:1px solid var(--border); white-space:nowrap;}
+.tbl td{padding:10px 14px; border-bottom:1px solid var(--border); vertical-align:top;}
+.tbl tbody tr:last-child > td{border-bottom:0;}
+
+.pill{display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:var(--radius-pill); font-size:11px; font-weight:700; white-space:nowrap;}
+.pill svg{flex:none;}
+.pill-ok{background:var(--state-ok-bg); color:var(--state-ok);}
+.pill-warn{background:var(--state-warn-bg); color:var(--state-warn);}
+.pill-crit{background:var(--state-crit-bg); color:var(--state-crit);}
+.pill-neutral{background:var(--state-neutral-bg); color:var(--state-neutral);}
+.pill-acc{background:var(--tint-blue); color:var(--accent);}
+
+.btn{appearance:none; border:1px solid var(--accent); background:var(--accent); color:var(--accent-ink); font-size:var(--text-sm);
+  font-weight:600; padding:7px 14px; border-radius:var(--radius); cursor:pointer; white-space:nowrap; display:inline-flex; align-items:center; gap:7px;}
+.btn:disabled{opacity:.45; cursor:not-allowed;}
+.btn-sec{appearance:none; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-secondary); font-size:var(--text-sm);
+  font-weight:600; padding:7px 13px; border-radius:var(--radius); cursor:pointer; white-space:nowrap;}
+.btn-danger{appearance:none; border:1px solid var(--state-crit); background:var(--state-crit); color:var(--bg-surface); font-size:var(--text-sm);
+  font-weight:700; padding:7px 14px; border-radius:var(--radius); cursor:pointer; white-space:nowrap; display:inline-flex; align-items:center; gap:7px;}
+.btn-danger:disabled{opacity:.45; cursor:not-allowed;}
+.btn-danger-soft{appearance:none; border:1px solid var(--state-crit); background:var(--state-crit-bg); color:var(--state-crit); font-size:11px;
+  font-weight:600; padding:5px 11px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+.btn-sm{font-size:11px; padding:5px 11px; border-radius:var(--radius-sm);}
+button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+
+.field{display:flex; flex-direction:column; gap:5px; min-width:0;}
+.field label, .lbl{font-size:var(--text-xs); letter-spacing:var(--tracking-label); text-transform:uppercase; color:var(--text-faint); font-weight:600;}
+.field .req{color:var(--state-crit);}
+select, textarea, input[type=text], input[type=email]{appearance:none; width:100%; background:var(--bg-surface); color:var(--text-primary);
+  border:1px solid var(--border); border-radius:var(--radius); padding:8px 11px; font:inherit; font-size:var(--text-base);}
+select{background-image:linear-gradient(45deg,transparent 50%,var(--text-faint) 50%),linear-gradient(135deg,var(--text-faint) 50%,transparent 50%);
+  background-position:calc(100% - 15px) 52%, calc(100% - 10px) 52%; background-size:5px 5px; background-repeat:no-repeat; padding-right:30px;}
+textarea{resize:vertical; min-height:92px; line-height:1.5;}
+.field.bad select, .field.bad textarea, .field.bad input{border-color:var(--state-crit);}
+.hint{font-size:var(--text-sm); color:var(--text-faint);}
+.hint b{color:var(--text-secondary); font-weight:600;}
+
+.msg{display:flex; align-items:flex-start; gap:8px; padding:9px 12px; border-radius:var(--radius); font-size:12.5px; line-height:1.45;}
+.msg svg{flex:none; margin-top:2px;}
+.msg-crit{background:var(--state-crit-bg); color:var(--state-crit); border:1px solid var(--state-crit);}
+.msg-warn{background:var(--state-warn-bg); color:var(--state-warn); border:1px solid var(--state-warn);}
+.msg-info{background:var(--tint-blue); color:var(--text-primary); border:1px solid var(--border);}
+.msg b{font-weight:700;}
+
+.spin{width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:sp .7s linear infinite; flex:none; display:inline-block;}
+@keyframes sp{to{transform:rotate(360deg);}}
+@media (prefers-reduced-motion: reduce){.spin{animation:none;}}
+.skel{background:var(--bg-elevated); border-radius:6px; height:12px;}
+
+.toast{position:absolute; left:50%; top:80px; transform:translateX(-50%); background:var(--bg-elevated); border:1px solid var(--border);
+  color:var(--text-primary); padding:9px 16px; border-radius:var(--radius); font-size:12.5px; font-weight:600; box-shadow:var(--shadow);
+  z-index:300; max-width:88%; display:none;}
+.toast.show{display:block;}
+
+@media (min-width:1024px){
+  .shell{grid-template-columns:230px 1fr;}
+  .side{display:flex;}
+  .content{padding:var(--space-5) var(--space-6) 40px;}
+}
+@media (max-width:640px){
+  .searchbox{display:none;}
+  .harness{padding:8px 12px;}
+}
+
+/* ---- fleet query page (Story #5460) ---- */
+.qform{display:grid; grid-template-columns:minmax(0,260px) minmax(0,1fr); gap:14px 16px; align-items:start;}
+.qform .full{grid-column:1 / -1;}
+.params{display:flex; flex-wrap:wrap; gap:12px 16px; min-width:0;}
+.params .field{flex:1 1 200px; max-width:320px;}
+.params .none{font-size:var(--text-sm); color:var(--text-faint); padding:8px 0;}
+.ptype{font-family:var(--font-mono); font-size:10px; letter-spacing:0; text-transform:none; color:var(--text-faint); font-weight:500; margin-left:6px;}
+input.mono-in, select.mono-in{font-family:var(--font-mono); font-size:13px;}
+.selrow{display:flex; flex-direction:column; gap:5px;}
+.selbox{display:flex; align-items:center; gap:9px; border:1px solid var(--border); background:var(--bg-surface); border-radius:var(--radius); padding:0 11px;}
+.selbox svg{flex:none; color:var(--text-faint);}
+.selbox input{border:0; padding:8px 0; background:transparent; font-family:var(--font-mono); font-size:13px; min-width:0;}
+.selbox input:focus-visible{outline:none;}
+.selbox:focus-within{outline:2px solid var(--accent); outline-offset:2px;}
+.field.bad .selbox{border-color:var(--state-crit);}
+.search-hint{font-family:var(--font-mono); font-size:11px; color:var(--text-faint); white-space:nowrap;}
+.fmsg{font-size:var(--text-sm); color:var(--state-crit); font-weight:600;}
+.runbar{display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding-top:12px; border-top:1px solid var(--border);}
+.runbar .hint{flex:1; min-width:220px; display:inline-flex; gap:7px; align-items:flex-start;}
+.runbar .hint svg{flex:none; margin-top:2px;}
+
+.ran{display:flex; flex-wrap:wrap; gap:4px 10px; align-items:center; font-size:var(--text-sm); color:var(--text-faint);}
+.ran .mono{color:var(--text-secondary); font-size:11.5px;}
+.tally{display:flex; flex-wrap:wrap; gap:6px; align-items:center;}
+.tally .muted{font-size:var(--text-sm);}
+
+.sres-list{display:flex; flex-direction:column; gap:10px; padding:14px 16px;}
+.sres{border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; background:var(--bg-surface);}
+.sres-head{display:flex; align-items:center; gap:10px; padding:9px 12px; flex-wrap:wrap; background:var(--bg-primary);}
+.sres-head .sid{font-family:var(--font-mono); font-size:12.5px; font-weight:600; color:var(--text-primary); overflow-wrap:anywhere; min-width:0; flex:1 1 260px;}
+.sres-head .meta{font-size:var(--text-sm); color:var(--text-faint); font-variant-numeric:tabular-nums; white-space:nowrap;}
+.sres.is-err{border-color:var(--state-crit);}
+.sres.is-err .sres-head{background:var(--tint-red);}
+.sres.is-none .sres-head{background:var(--bg-primary);}
+.errtext{margin:0; padding:10px 12px; border-top:1px solid var(--state-crit); background:var(--state-crit-bg); color:var(--state-crit);
+  font-family:var(--font-mono); font-size:12px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere;}
+.errtext .lbl{display:block; color:var(--state-crit); margin-bottom:2px; font-family:var(--font-sans);}
+.nonetext{margin:0; padding:10px 12px; border-top:1px dashed var(--border); color:var(--text-secondary); font-size:12.5px;}
+.twrap{overflow-x:auto; border-top:1px solid var(--border);}
+.tbl.cells{font-size:12px;}
+.tbl.cells th{padding:7px 12px; background:var(--bg-surface); font-family:var(--font-mono); text-transform:none; letter-spacing:0; font-size:11px;}
+.tbl.cells td{padding:7px 12px; font-family:var(--font-mono); white-space:nowrap;}
+.tbl.cells td.long{white-space:normal; min-width:200px; max-width:320px; overflow-wrap:anywhere;} /* values over 24 chars wrap; short ones never split */
+.tbl.cells td.nil{color:var(--text-faint);}
+.tbl.cells tbody tr:nth-child(even) > td{background:var(--bg-primary);}
+.more{display:flex; align-items:center; gap:10px; padding:7px 12px; border-top:1px solid var(--border); font-size:var(--text-sm); color:var(--text-faint);}
+.filt{display:inline-flex; gap:4px; flex-wrap:wrap;}
+.filt button{appearance:none; border:1px solid var(--border); background:transparent; color:var(--text-secondary); font-size:11px; font-weight:600;
+  padding:4px 10px; border-radius:var(--radius-pill); cursor:pointer;}
+.filt button[aria-pressed="true"]{background:var(--tint-blue); color:var(--accent); border-color:var(--accent);}
+.linkbtn{appearance:none; border:0; background:transparent; color:var(--accent); font-size:var(--text-sm); font-weight:600; cursor:pointer; padding:2px 4px; border-radius:var(--radius-sm);}
+.caret{appearance:none; border:1px solid transparent; background:transparent; color:var(--text-faint); width:26px; height:26px; border-radius:var(--radius-sm);
+  display:grid; place-items:center; cursor:pointer; flex:none;}
+.caret:hover{border-color:var(--border);}
+.sres.collapsed .twrap, .sres.collapsed .more{display:none;}
+.sres.collapsed .caret svg{transform:rotate(-90deg);}
+
+.notice{padding:38px var(--space-5); text-align:center; display:flex; flex-direction:column; align-items:center; gap:9px;}
+.notice h3{margin:0; font-size:var(--text-lg); font-weight:700;}
+.notice p{margin:0; color:var(--text-secondary); font-size:var(--text-base); max-width:420px;}
+.notice .ic{width:40px; height:40px; border-radius:11px; background:var(--state-neutral-bg); color:var(--state-neutral); display:grid; place-items:center;}
+.notice .ic.acc{background:var(--tint-blue); color:var(--accent);}
+.notice .mono{font-size:12.5px; color:var(--text-primary);}
+.errcard{display:flex; align-items:center; gap:12px; padding:16px; flex-wrap:wrap;}
+.errcard .t{flex:1; min-width:200px;}
+.errcard .t b{display:block; color:var(--state-crit);}
+.errcard .t span{color:var(--text-secondary); font-size:12.5px;}
+.runwait{display:flex; align-items:center; gap:10px; padding:14px 16px 0; color:var(--text-secondary); font-size:12.5px;}
+.runwait .spin{color:var(--accent);}
+.skcard{border:1px solid var(--border); border-radius:var(--radius); padding:12px; display:flex; gap:12px; align-items:center;}
+
+/* dialogs (overlay + passkey wait from tamper-restore-ban.html; StepUpModal shape) */
+.overlay{position:absolute; inset:0; background:rgba(0,0,0,.55); z-index:200; display:flex; justify-content:center;
+  align-items:flex-start; padding:150px 16px 32px;}
+.dlg{width:100%; max-width:560px; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-lg);
+  overflow:hidden; box-shadow:var(--shadow);}
+.dlg-title{display:flex; align-items:center; padding:10px 13px; background:var(--bg-elevated); border-bottom:1px solid var(--border);}
+.dlg-title span{font-family:var(--font-mono); font-size:var(--text-sm); color:var(--text-faint); margin:0 auto; letter-spacing:.02em;}
+.dlg-foot{display:flex; justify-content:center; align-items:center; gap:8px; padding:12px 24px; border-top:1px solid var(--border); background:var(--bg-primary);}
+.pk{max-width:380px;}
+.pkwait{display:flex; flex-direction:column; align-items:center; text-align:center; gap:10px; padding:26px 24px 20px;}
+.pkwait .big{width:58px; height:58px; border-radius:50%; background:var(--tint-blue); color:var(--accent); display:grid; place-items:center; position:relative;}
+.pkwait .big .spin{position:absolute; inset:-5px; width:auto; height:auto; border-width:2px; border-radius:50%; color:var(--accent); border-right-color:transparent;}
+.pkwait h3{margin:6px 0 0; font-size:var(--text-lg);}
+.pkwait p{margin:0; color:var(--text-secondary); font-size:13px; line-height:1.55; max-width:300px;}
+.pkwait p .mono{color:var(--text-primary); font-size:12px;}
+
+/* state switching — body classes are all s-*, no element class uses that prefix */
+[data-s]{display:none;}
+body.s-ready [data-s~="ready"], body.s-idle [data-s~="idle"], body.s-catload [data-s~="catload"], body.s-caterr [data-s~="caterr"],
+body.s-running [data-s~="running"], body.s-passkey [data-s~="passkey"], body.s-cancelled [data-s~="cancelled"],
+body.s-rejected [data-s~="rejected"], body.s-forbidden [data-s~="forbidden"], body.s-unavail [data-s~="unavail"],
+body.s-error [data-s~="error"], body.s-empty [data-s~="empty"]{display:revert;}
+body.s-ready .flexs[data-s~="ready"], body.s-idle .flexs[data-s~="idle"], body.s-catload .flexs[data-s~="catload"], body.s-caterr .flexs[data-s~="caterr"],
+body.s-running .flexs[data-s~="running"], body.s-passkey .flexs[data-s~="passkey"], body.s-cancelled .flexs[data-s~="cancelled"],
+body.s-rejected .flexs[data-s~="rejected"], body.s-forbidden .flexs[data-s~="forbidden"], body.s-unavail .flexs[data-s~="unavail"],
+body.s-error .flexs[data-s~="error"], body.s-empty .flexs[data-s~="empty"]{display:flex;}
+
+@media (max-width:780px){
+  .qform{grid-template-columns:1fr;}
+  .params .field{max-width:none;}
+  .runbar > span[data-s]{width:100%;}
+  .runbar .btn{width:100%; justify-content:center;}
+  .search-hint{white-space:normal;}
+  .sres-list{padding:12px;}
+  .phead .cnt{margin-left:0; width:100%;}
+}
+</style>
+</head>
+<body class="s-ready">
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-key" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></g></symbol>
+  <symbol id="i-err" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></g></symbol>
+  <symbol id="i-ok" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></g></symbol>
+  <symbol id="i-dash" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 12h12"/></g></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></g></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v16l13-8z"/></g></symbol>
+  <symbol id="i-caret" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></g></symbol>
+  <symbol id="i-db" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></g></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></g></symbol>
+</svg>
+
+<div class="harness" role="group" aria-label="Mockup controls">
+  <span class="hl">Mockup · #5460 fleet query</span>
+  <div class="grp" id="stateGrp">
+    <button data-state="ready" aria-pressed="true">Ready</button>
+    <button data-state="idle" aria-pressed="false">First visit</button>
+    <button data-state="catload" aria-pressed="false">Loading catalog</button>
+    <button data-state="caterr" aria-pressed="false">Catalog error</button>
+    <button data-state="passkey" aria-pressed="false">Passkey</button>
+    <button data-state="cancelled" aria-pressed="false">Passkey cancelled</button>
+    <button data-state="running" aria-pressed="false">Running</button>
+    <button data-state="rejected" aria-pressed="false">Rejected 400</button>
+    <button data-state="forbidden" aria-pressed="false">Not allowed 403</button>
+    <button data-state="unavail" aria-pressed="false">Unavailable 503</button>
+    <button data-state="error" aria-pressed="false">Error</button>
+    <button data-state="empty" aria-pressed="false">Empty</button>
+  </div>
+  <span class="sp"></span>
+  <div class="grp" id="themeGrp">
+    <button data-theme-mode="auto" aria-pressed="true">Auto</button>
+    <button data-theme-mode="light" aria-pressed="false">Light</button>
+    <button data-theme-mode="dark" aria-pressed="false">Dark</button>
+  </div>
+</div>
+
+<div class="shell">
+  <aside class="side">
+    <div class="logo"><b>CFGMS</b><i>controller</i></div>
+    <nav>
+      <a>Fleet</a><a class="active">Fleet query</a><a>Cases</a><a>Modules</a><a>Config</a><a>Workflows</a><a>Approvals</a><a>Scripts</a>
+      <a>Registration</a><a>Refresh Requests</a><a>Reports</a><a>Audit</a><a>Accounts</a><a>Certificates</a><a>Installer</a>
+      <a>Tenants</a>
+    </nav>
+  </aside>
+  <div class="main">
+    <div class="appbar">
+      <span class="chipbtn">Tenant <b>acme-corp</b></span>
+      <span class="searchbox">Search…</span>
+      <span class="abspacer"></span>
+      <span class="avatar">JR</span>
+    </div>
+
+    <div class="content">
+      <div class="htitle">
+        <div>
+          <h1>Fleet query</h1>
+          <p>Run a query from the controller's catalog on the stewards a selector matches, and read what each one returns. Queries are read-only. Each run needs your passkey and is audited.</p>
+        </div>
+      </div>
+
+      <!-- ===== 1. query form ===== -->
+      <div class="panel">
+        <div class="phead"><h2>Query</h2><span class="sub">Only catalog queries can run. There is no free-form query.</span></div>
+        <div class="pbody">
+
+          <div class="errcard flexs" data-s="caterr" style="padding:0 0 14px">
+            <svg width="18" height="18" style="color:var(--state-crit)"><use href="#i-err"/></svg>
+            <div class="t"><b>Could not load the query catalog.</b><span>Nothing can run until the catalog loads.</span></div>
+            <button class="btn-sec">Try again</button>
+          </div>
+
+          <div class="qform">
+            <div class="field">
+              <label for="cat">Catalog query</label>
+              <select id="cat" class="mono-in" data-s="ready idle passkey cancelled running rejected forbidden unavail error empty"></select>
+              <select class="mono-in" disabled data-s="caterr"><option>Catalog not loaded</option></select>
+              <div class="skel" data-s="catload" style="height:36px; border-radius:var(--radius)"></div>
+            </div>
+            <div class="field">
+              <span class="lbl">Parameters</span>
+              <div class="params flexs" id="params" data-s="ready idle passkey cancelled running rejected forbidden unavail error empty"></div>
+              <div class="params flexs" data-s="catload"><div class="skel" style="height:36px; width:220px; border-radius:var(--radius)"></div></div>
+              <div class="params flexs" data-s="caterr"><span class="none">—</span></div>
+            </div>
+
+            <div class="field full" id="selField">
+              <label for="sel">Stewards</label>
+              <div class="selbox">
+                <svg width="14" height="14"><use href="#i-search"/></svg>
+                <input id="sel" type="text" role="textbox" aria-describedby="oq-sel-hint" placeholder="Selector, e.g. tag:edge os:linux" value="acme-corp/tag:edge">
+              </div>
+              <div class="selrow">
+                <span id="oq-sel-hint" class="search-hint" aria-label="Selector syntax">id: name: os: tag: dna.&lt;key&gt;:</span>
+                <span class="fmsg" data-s="rejected">The controller rejected this selector. Check the syntax and try again.</span>
+              </div>
+            </div>
+
+            <div class="full msg msg-crit flexs" data-s="cancelled"><svg width="14" height="14"><use href="#i-err"/></svg>
+              <span><b>Not run.</b> The passkey check was cancelled. Nothing was sent to any steward.</span></div>
+            <div class="full msg msg-crit flexs" data-s="forbidden"><svg width="14" height="14"><use href="#i-err"/></svg>
+              <span><b>Not run.</b> Target tenant is outside your authorized tenants. Remove the tenant prefix to query all of <span class="mono">acme-corp</span>.</span></div>
+          </div>
+
+          <div class="runbar" style="margin-top:14px">
+            <span class="hint"><svg width="13" height="13"><use href="#i-key"/></svg>
+              <span>Runs on every steward the selector matches. You confirm with your passkey.</span></span>
+            <span data-s="ready idle passkey cancelled rejected forbidden unavail error empty"><button class="btn" id="runBtn"><svg width="13" height="13"><use href="#i-play"/></svg>Run query</button></span>
+            <span data-s="running"><button class="btn" disabled><span class="spin"></span>Running…</button></span>
+            <span data-s="catload caterr"><button class="btn" disabled><svg width="13" height="13"><use href="#i-play"/></svg>Run query</button></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== 2. results ===== -->
+      <div class="panel" data-s="ready running error empty unavail idle catload caterr passkey cancelled rejected forbidden">
+        <div class="phead"><h2>Results</h2>
+          <span class="ran flexs" data-s="ready"><span class="mono">process_list</span><span class="mono">name_prefix=cfgms</span><span class="mono">acme-corp/tag:edge</span><span>· ran 10:42</span></span>
+          <span class="cnt flexs tally" data-s="ready" id="tally"></span>
+        </div>
+
+        <div class="flexs" data-s="ready" style="padding:12px 16px 0; gap:8px; align-items:center; flex-wrap:wrap">
+          <div class="filt" id="filt">
+            <button aria-pressed="true" data-f="all">All</button>
+            <button aria-pressed="false" data-f="rows">With rows</button>
+            <button aria-pressed="false" data-f="none">No rows</button>
+            <button aria-pressed="false" data-f="err">Errors</button>
+          </div>
+        </div>
+        <div class="sres-list flexs" id="results" data-s="ready"></div>
+
+        <div data-s="running">
+          <div class="runwait"><span class="spin"></span><span>Waiting for every matched steward to answer. Results show together when the last one replies or times out.</span></div>
+          <div class="sres-list">
+            <div class="skcard"><div class="skel" style="width:60px"></div><div class="skel" style="width:300px"></div></div>
+            <div class="skcard"><div class="skel" style="width:60px"></div><div class="skel" style="width:260px"></div></div>
+            <div class="skcard"><div class="skel" style="width:60px"></div><div class="skel" style="width:280px"></div></div>
+          </div>
+        </div>
+
+        <div class="notice flexs" data-s="idle catload caterr passkey cancelled rejected forbidden">
+          <span class="ic acc"><svg width="18" height="18"><use href="#i-db"/></svg></span>
+          <h3>No results yet</h3>
+          <p>Pick a catalog query, enter a selector and run it. Each matched steward gets its own result.</p>
+        </div>
+
+        <div class="notice flexs" data-s="empty">
+          <span class="ic"><svg width="18" height="18"><use href="#i-search"/></svg></span>
+          <h3>No stewards matched</h3>
+          <p><span class="mono">acme-corp/tag:edge</span> matched no stewards you can see, so nothing ran. Try the same selector in Fleet to see what it matches.</p>
+          <button class="btn-sec">Open in Fleet</button>
+        </div>
+
+        <div class="errcard flexs" data-s="error">
+          <svg width="18" height="18" style="color:var(--state-crit)"><use href="#i-err"/></svg>
+          <div class="t"><b>Could not run the query.</b><span>The controller failed to resolve the selector, so no steward was queried. Try again in a moment.</span></div>
+          <button class="btn-sec">Try again</button>
+        </div>
+
+        <div class="errcard flexs" data-s="unavail">
+          <svg width="18" height="18" style="color:var(--state-crit)"><use href="#i-lock"/></svg>
+          <div class="t"><b>Fleet query is not available.</b><span>This controller is not set up to send queries to stewards. Nothing ran.</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- passkey presence step-up (StepUpModal, waiting phase) -->
+  <div class="overlay flexs" data-s="passkey">
+    <div class="dlg pk" role="dialog" aria-modal="true" aria-labelledby="pkh">
+      <div class="dlg-title"><span>cfgms · secure session</span></div>
+      <div class="pkwait">
+        <span class="big"><svg width="22" height="22"><use href="#i-key"/></svg><span class="spin"></span></span>
+        <h3 id="pkh">Touch your passkey…</h3>
+        <p>Confirm running <span class="mono">process_list</span> on the stewards matched by <span class="mono">acme-corp/tag:edge</span>. Your browser may show its own prompt.</p>
+      </div>
+      <div class="dlg-foot"><button class="btn-sec" id="pkCancel">Cancel</button></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var root = document.documentElement;
+  var $ = function(id){ return document.getElementById(id); };
+  function svg(id, s){ return '<svg width="'+(s||12)+'" height="'+(s||12)+'"><use href="#'+id+'"/></svg>'; }
+  // every cell value and error string goes through esc() — mirrors JSX text-node rendering
+  function esc(x){ return String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  // GET /api/v1/osquery/catalog — verbatim shape of osquerymodule.ListCatalog()
+  var catalog = [
+    { id:'file_info', params:[{ name:'path', type:'charset' }] },
+    { id:'host_info', params:[] },
+    { id:'installed_packages', params:[] },
+    { id:'listening_ports', params:[{ name:'protocol_num', type:'enum', allowed_values:['6','17'] }] },
+    { id:'process_list', params:[{ name:'name_prefix', type:'enum', allowed_values:['cfgms','osquery','steward','controller'] }] }
+  ];
+  var chosen = 'process_list', paramVals = { name_prefix:'cfgms' };
+
+  function renderCatalog(){
+    $('cat').innerHTML = catalog.map(function(c){ return '<option value="'+esc(c.id)+'"'+(c.id===chosen?' selected':'')+'>'+esc(c.id)+'</option>'; }).join('');
+    var e = catalog.filter(function(c){ return c.id===chosen; })[0];
+    if (!e.params.length){ $('params').innerHTML = '<span class="none">This query takes no parameters.</span>'; return; }
+    $('params').innerHTML = e.params.map(function(p){
+      var id = 'p-'+p.name, v = paramVals[p.name] || '';
+      var ctl = p.type==='enum'
+        ? '<select id="'+id+'" class="mono-in" data-p="'+esc(p.name)+'">'+p.allowed_values.map(function(a){ return '<option'+(a===v?' selected':'')+'>'+esc(a)+'</option>'; }).join('')+'</select>'
+        : '<input type="text" id="'+id+'" class="mono-in" data-p="'+esc(p.name)+'" value="'+esc(v)+'" placeholder="/etc/hosts" spellcheck="false">';
+      var hint = p.type==='enum' ? '' : '<span class="hint">Checked by the controller before it runs.</span>';
+      return '<div class="field"><label for="'+id+'">'+esc(p.name)+'<span class="ptype">'+(p.type==='enum'?'one of '+p.allowed_values.length:'text')+'</span></label>'+ctl+hint+'</div>';
+    }).join('');
+  }
+
+  // POST /api/v1/osquery/query response — results[] in server order
+  var CMD = '/opt/cfgms/bin/cfgms-steward --config /etc/cfgms/steward.cfg';
+  var results = [
+    { steward_id:'steward-1787449304425826730-0a1b2c3d4e5f6a7b', rows:[
+      { cmdline:CMD, name:'cfgms-steward', path:'/opt/cfgms/bin/cfgms-steward', pid:'1184', resident_size:'48234496', state:'S', uid:'0' },
+      { cmdline:'/var/lib/cfgms/modules/file/cfgms-module-file --grpc-socket /run/cfgms/m-file.sock', name:'cfgms-module-file', path:'/var/lib/cfgms/modules/file/cfgms-module-file', pid:'1203', resident_size:'17952768', state:'S', uid:'0' },
+      { cmdline:'/var/lib/cfgms/modules/service/cfgms-module-service --grpc-socket /run/cfgms/m-svc.sock', name:'cfgms-module-service', path:'/var/lib/cfgms/modules/service/cfgms-module-service', pid:'1207', resident_size:'16384000', state:'S', uid:'0' }
+    ]},
+    { steward_id:'steward-1787449304425826731-5e6f7a8b9c0d1e2f', error:'steward did not respond: context deadline exceeded' },
+    { steward_id:'steward-1787449310007731902-9c8b7a6f5e4d3c2b', rows:[
+      { cmdline:'cfgms-steward --label "<b>edge-a</b>"', name:'cfgms-steward', path:'/opt/cfgms/bin/cfgms-steward', pid:'902', resident_size:'51380224', state:'S', uid:'0' },
+      { cmdline:'/var/lib/cfgms/modules/file/cfgms-module-file --grpc-socket /run/cfgms/m-file.sock', name:'cfgms-module-file', path:'/var/lib/cfgms/modules/file/cfgms-module-file', pid:'915', resident_size:'18087936', state:'S', uid:'0' },
+      { cmdline:'/var/lib/cfgms/modules/package/cfgms-module-package', name:'cfgms-module-package', path:'/var/lib/cfgms/modules/package/cfgms-module-package', pid:'918', resident_size:'21495808', state:'S', uid:'0' },
+      { cmdline:'/var/lib/cfgms/modules/script/cfgms-module-script', name:'cfgms-module-script', path:'/var/lib/cfgms/modules/script/cfgms-module-script', pid:'921', resident_size:'14680064', state:'S', uid:'0' },
+      { cmdline:'/var/lib/cfgms/modules/service/cfgms-module-service', name:'cfgms-module-service', path:'/var/lib/cfgms/modules/service/cfgms-module-service', pid:'924', resident_size:'16121856', state:'S', uid:'0' },
+      { cmdline:'/var/lib/cfgms/modules/firewall/cfgms-module-firewall', name:'cfgms-module-firewall', path:'/var/lib/cfgms/modules/firewall/cfgms-module-firewall', pid:'927', resident_size:'15335424', state:'S', uid:'0' },
+      { cmdline:'/var/lib/cfgms/modules/time/cfgms-module-time', name:'cfgms-module-time', path:'/var/lib/cfgms/modules/time/cfgms-module-time', pid:'931', resident_size:'12058624', state:'S', uid:'0' },
+      { cmdline:'', name:'cfgms-updater', path:'/opt/cfgms/bin/cfgms-updater', pid:'2210', resident_size:'9437184', state:'Z', uid:'0' }
+    ]},
+    { steward_id:'steward-1787449322118804417-3d2c1b0a9f8e7d6c' },
+    { steward_id:'steward-1787449335590012233-7f6e5d4c3b2a1908', rows:[
+      { cmdline:'"C:\\Program Files\\CFGMS\\cfgms-steward.exe" --service', name:'cfgms-steward.exe', path:'C:\\Program Files\\CFGMS\\cfgms-steward.exe', pid:'4412', resident_size:'61865984', state:'STILL_ACTIVE', uid:'-1' },
+      { cmdline:'"C:\\ProgramData\\CFGMS\\modules\\file\\cfgms-module-file.exe"', name:'cfgms-module-file.exe', path:'C:\\ProgramData\\CFGMS\\modules\\file\\cfgms-module-file.exe', pid:'4530', resident_size:'22020096', state:'STILL_ACTIVE', uid:'-1' }
+    ]}
+  ];
+  var PREVIEW = 5, expanded = {}, collapsed = {}, filter = 'all';
+  function kind(r){ return r.error ? 'err' : (r.rows && r.rows.length ? 'rows' : 'none'); }
+
+  function renderResults(){
+    var n = { rows:0, none:0, err:0 }, totalRows = 0;
+    results.forEach(function(r){ n[kind(r)]++; if (r.rows) totalRows += r.rows.length; });
+    $('tally').innerHTML = '<span class="muted">'+results.length+' stewards ·</span>'
+      + '<span class="pill pill-ok">'+svg('i-ok',10)+n.rows+' with rows</span>'
+      + '<span class="pill pill-neutral">'+svg('i-dash',10)+n.none+' no rows</span>'
+      + '<span class="pill pill-crit">'+svg('i-err',10)+n.err+' error</span>';
+    var h = '';
+    results.forEach(function(r){
+      var k = kind(r);
+      if (filter !== 'all' && filter !== k) return;
+      var sid = esc(r.steward_id);
+      if (k === 'err'){
+        h += '<section class="sres is-err"><div class="sres-head"><span class="pill pill-crit">'+svg('i-err',11)+'Error</span><span class="sid">'+sid+'</span></div>'
+          + '<p class="errtext"><span class="lbl">Steward error</span>'+esc(r.error)+'</p></section>';
+        return;
+      }
+      if (k === 'none'){
+        h += '<section class="sres is-none"><div class="sres-head"><span class="pill pill-neutral">'+svg('i-dash',11)+'No rows</span><span class="sid">'+sid+'</span></div>'
+          + '<p class="nonetext">The query ran on this steward and returned nothing.</p></section>';
+        return;
+      }
+      var cols = Object.keys(r.rows[0]).sort();
+      var show = expanded[r.steward_id] ? r.rows : r.rows.slice(0, PREVIEW);
+      h += '<section class="sres'+(collapsed[r.steward_id]?' collapsed':'')+'"><div class="sres-head">'
+        + '<button class="caret" aria-label="Collapse" data-col="'+sid+'">'+svg('i-caret',14)+'</button>'
+        + '<span class="pill pill-ok">'+svg('i-ok',11)+r.rows.length+' row'+(r.rows.length===1?'':'s')+'</span>'
+        + '<span class="sid">'+sid+'</span></div>'
+        + '<div class="twrap"><table class="tbl cells"><thead><tr>'+cols.map(function(c){ return '<th>'+esc(c)+'</th>'; }).join('')+'</tr></thead><tbody>'
+        + show.map(function(row){ return '<tr>'+cols.map(function(c){ var v = row[c];
+            return v === '' || v == null ? '<td class="nil" title="empty value">—</td>' : '<td'+(String(v).length>24?' class="long"':'')+'>'+esc(v)+'</td>'; }).join('')+'</tr>'; }).join('')
+        + '</tbody></table></div>'
+        + (r.rows.length > PREVIEW ? '<div class="more"><span>'+(expanded[r.steward_id]?'Showing all '+r.rows.length:'Showing '+PREVIEW+' of '+r.rows.length)+' rows</span>'
+            + '<button class="linkbtn" data-exp="'+sid+'">'+(expanded[r.steward_id]?'Show fewer':'Show all')+'</button></div>' : '')
+        + '</section>';
+    });
+    $('results').innerHTML = h || '<div class="nonetext" style="border:0">No stewards in this group.</div>';
+  }
+
+  function press(grp, btn){ grp.querySelectorAll('button').forEach(function(b){ b.setAttribute('aria-pressed', b===btn ? 'true':'false'); }); }
+  var stateGrp = $('stateGrp');
+  function setState(s){
+    document.body.className = 's-' + s;
+    $('selField').classList.toggle('bad', s==='rejected' || s==='forbidden');
+    $('sel').value = s==='rejected' ? 'acme-corp/tag:edge os:' : (s==='forbidden' ? 'vendor-a/tag:edge' : 'acme-corp/tag:edge');
+    var b = stateGrp.querySelector('[data-state="'+s+'"]'); if (b) press(stateGrp, b);
+  }
+  window.__setState = setState;
+
+  document.body.addEventListener('click', function(e){
+    var b;
+    if ((b = e.target.closest('#filt button'))){ filter = b.dataset.f; press(b.parentNode, b); renderResults(); return; }
+    if ((b = e.target.closest('[data-exp]'))){ var k = b.dataset.exp; expanded[k] = !expanded[k]; renderResults(); return; }
+    if ((b = e.target.closest('[data-col]'))){ var c = b.dataset.col; collapsed[c] = !collapsed[c]; renderResults(); return; }
+    if ((b = e.target.closest('#runBtn'))){ setState('passkey'); return; }
+    if ((b = e.target.closest('#pkCancel'))){ setState('cancelled'); return; }
+  });
+  $('cat').addEventListener('change', function(){ chosen = this.value; paramVals = {}; renderCatalog(); });
+  stateGrp.addEventListener('click', function(e){ var b = e.target.closest('button'); if (b) setState(b.dataset.state); });
+  var themeGrp = $('themeGrp');
+  themeGrp.addEventListener('click', function(e){ var b = e.target.closest('button'); if (!b) return; press(themeGrp, b);
+    if (b.dataset.themeMode === 'auto') root.removeAttribute('data-theme'); else root.setAttribute('data-theme', b.dataset.themeMode); });
+
+  renderCatalog(); renderResults();
+  var q = new URLSearchParams(location.search);
+  if (q.get('theme')) root.setAttribute('data-theme', q.get('theme'));
+  setState(q.get('state') || 'ready');
+})();
+</script>
+</body>
+</html>
