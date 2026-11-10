@@ -265,14 +265,20 @@ func TestRestrictedBounds_GuardErrorStopsAtNextStep(t *testing.T) {
 
 func TestRestrictedBounds_GuardErrorStopsNestedAndLoopSteps(t *testing.T) {
 	engine, scripts := newRestrictedEngine(t)
-	var revoked atomic.Bool
+	var calls atomic.Int32
+	// The guard decides from the script counter, which the engine advances
+	// synchronously before the next guard call, so the stopping point is the
+	// same for any scheduling. Guard-call order: loop, iteration 1 work
+	// (runs becomes 1), arm, revoke-after, iteration 2 work (runs becomes 2),
+	// iteration 2 arm, where the guard fails: a nested conditional in the
+	// second loop iteration.
 	guard := func(context.Context) error {
-		if revoked.Load() {
+		calls.Add(1)
+		if scripts.runs.Load() >= 2 {
 			return errors.New("run ended")
 		}
 		return nil
 	}
-	// The guard fails once the second loop iteration's script step is reached.
 	wf := Workflow{Name: "wf", Steps: []Step{{
 		Name: "loop", Type: StepTypeFor,
 		Loop: &LoopConfig{Type: LoopTypeFor, Variable: "i", Start: 1, End: 5},
@@ -283,16 +289,11 @@ func TestRestrictedBounds_GuardErrorStopsNestedAndLoopSteps(t *testing.T) {
 			}, Steps: []Step{restrictedDelayStep("revoke-after")}},
 		},
 	}}}
-	go func() {
-		for scripts.runs.Load() < 1 {
-			time.Sleep(time.Millisecond)
-		}
-		revoked.Store(true)
-	}()
 	exec := runBounded(t, engine, wf, nil, RestrictedOptions{RunGuard: guard})
 
 	assertStoppedWith(t, exec, StatusCancelled, ErrRestrictedRunGuardStopped, "run ended")
-	assert.Less(t, scripts.runs.Load(), int32(5), "the loop does not run to completion")
+	assert.EqualValues(t, 2, scripts.runs.Load(), "the loop stops in its second iteration")
+	assert.EqualValues(t, 6, calls.Load(), "no step is attempted after the guard fails")
 }
 
 func TestRestrictedBounds_GuardErrorSurvivesTryBlock(t *testing.T) {
