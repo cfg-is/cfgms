@@ -160,6 +160,18 @@ describe('App', () => {
     expect(screen.getByRole('navigation')).toBeInTheDocument()
   })
 
+  it('the cluster route is reachable when signed in', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, { nodes: [], count: 0 })))
+    render(
+      <MemoryRouter initialEntries={['/cluster']}>
+        <App />
+      </MemoryRouter>,
+    )
+    expect(await screen.findByRole('heading', { name: 'Cluster nodes', level: 1 })).toBeInTheDocument()
+    expect(await screen.findByTestId('nodes-empty')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /^cluster nodes$/i })).toHaveAttribute('href', '/cluster')
+  })
+
   it('the osquery route is reachable when signed in', async () => {
     fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, { data: [] })))
     render(

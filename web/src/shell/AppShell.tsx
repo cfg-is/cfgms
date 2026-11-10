@@ -47,6 +47,7 @@ const NAV_ITEMS = [
   { label: 'Audit', to: '/audit', soon: false },
   { label: 'Accounts', to: '/accounts', soon: false },
   { label: 'Certificates', to: '/certificates', soon: false },
+  { label: 'Cluster nodes', to: '/cluster', soon: false },
   { label: 'Installer', to: '/installer', soon: false },
   { label: 'API keys', to: '/api-keys', soon: false },
   { label: 'Automation grants', to: '/automation/grants', soon: false },

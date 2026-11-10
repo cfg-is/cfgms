@@ -21,6 +21,7 @@
  *   /workflows/:name/builder, /workflows/new/builder → WorkflowBuilder (full-screen, no shell; Issue #4615)
  *   /accounts        → AppShell layout → AccountsView
  *   /certificates    → AppShell layout → CertificatesView
+ *   /cluster         → AppShell layout → ClusterNodesView
  *   /registration    → AppShell layout → RegistrationConsolePage
  *   /refresh         → AppShell layout → RefreshQueuePage
  *   /passkeys        → AppShell layout → PasskeysView (self-service passkey management)
@@ -75,6 +76,7 @@ import WorkflowListView from './workflow/WorkflowListView.tsx'
 import ApprovalsView from './workflow/ApprovalsView.tsx'
 import AccountsView from './accounts/AccountsView.tsx'
 import CertificatesView from './certificates/CertificatesView.tsx'
+import ClusterNodesView from './cluster/ClusterNodesView.tsx'
 import ModuleReviewQueue from './modules/ModuleReviewQueue.tsx'
 import ScriptsView from './scripts/ScriptsView.tsx'
 import RegistrationConsolePage from './registration/RegistrationConsolePage.tsx'
@@ -132,6 +134,7 @@ function App() {
                   <Route path="approvals" element={<ApprovalsView />} />
                   <Route path="accounts" element={<AccountsView />} />
                   <Route path="certificates" element={<CertificatesView />} />
+                  <Route path="cluster" element={<ClusterNodesView />} />
                   <Route path="scripts" element={<ScriptsView />} />
                   <Route path="registration" element={<RegistrationConsolePage />} />
                   <Route path="refresh" element={<RefreshQueuePage />} />
