@@ -226,6 +226,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
+	hijacked   bool // set once the connection is taken over (WebSocket); the signals middleware skips latency for it
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
@@ -239,7 +240,11 @@ func (rw *responseWriter) WriteHeader(code int) {
 // the type assertion w.(http.Hijacker) returns false on the wrapped writer.
 func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if h, ok := rw.ResponseWriter.(http.Hijacker); ok {
-		return h.Hijack()
+		conn, buf, err := h.Hijack()
+		if err == nil {
+			rw.hijacked = true
+		}
+		return conn, buf, err
 	}
 	return nil, nil, fmt.Errorf("responseWriter: underlying ResponseWriter does not implement http.Hijacker")
 }
@@ -315,7 +320,7 @@ func (s *Server) securityHeadersMiddleware(next http.Handler) http.Handler {
 // gates it for matched routes: this handler by construction never serves anything but a
 // 404 body, so there is no path under it that is ever legitimately cacheable.
 func (s *Server) notFoundHandler() http.Handler {
-	return s.securityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	inner := s.securityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Pragma", "no-cache")
 		if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -332,6 +337,11 @@ func (s *Server) notFoundHandler() http.Handler {
 		}
 		http.NotFound(w, r)
 	}))
+	// Use() middleware never runs for an unmatched route, so the API request
+	// signals (Issue #6055) are recorded here, under the "other" route class.
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.serveWithSignals(w, r, routeClassOther, inner)
+	})
 }
 
 // allowedMethodsForPath returns the methods for which the root router has a real
@@ -356,7 +366,7 @@ func (s *Server) allowedMethodsForPath(r *http.Request) []string {
 // methodNotAllowedHandler is the router.MethodNotAllowedHandler counterpart to
 // notFoundHandler (Issue #4183) — same unreachable-by-Use() gap, same fix.
 func (s *Server) methodNotAllowedHandler() http.Handler {
-	return s.securityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	inner := s.securityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Pragma", "no-cache")
 		if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -365,6 +375,9 @@ func (s *Server) methodNotAllowedHandler() http.Handler {
 		}
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.serveWithSignals(w, r, routeClassOther, inner)
+	})
 }
 
 // contentTypeMiddleware sets appropriate content type headers
