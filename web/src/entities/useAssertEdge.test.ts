@@ -81,6 +81,37 @@ describe('useAssertEdge', () => {
     expect(fetchStub).not.toHaveBeenCalled()
   })
 
+  it('surfaces cross-tenant refusals', async () => {
+    // A cross-tenant endpoint is a 404 that names nothing.
+    vi.stubGlobal('fetch', respond(404, 'not found\n'))
+    const notFound = renderHook(() => useAssertEdge())
+    await act(async () => {
+      await notFound.result.current.assertEdge(input)
+    })
+    expect(notFound.result.current.state).toEqual({ kind: 'not-found' })
+
+    // A tenant-crossing challenge is a 401 naming the tenant to request.
+    vi.stubGlobal(
+      'fetch',
+      respond(
+        401,
+        JSON.stringify({
+          error: 'tenant_crossing_required',
+          break_glass_endpoint: '/api/v1/tenants/msp-b/break-glass',
+        }),
+        {
+          'Content-Type': 'application/json',
+          'WWW-Authenticate': 'CFGMS-StepUp required="tenant-crossing"',
+        },
+      ),
+    )
+    const crossing = renderHook(() => useAssertEdge())
+    await act(async () => {
+      await crossing.result.current.assertEdge(input)
+    })
+    expect(crossing.result.current.state).toEqual({ kind: 'crossing', tenantId: 'msp-b' })
+  })
+
   it('surfaces a cross-tenant 404 as not-found without naming an endpoint', async () => {
     vi.stubGlobal('fetch', respond(404, 'not found\n'))
     const { result } = renderHook(() => useAssertEdge())
