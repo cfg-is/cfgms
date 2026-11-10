@@ -23,6 +23,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -104,6 +105,19 @@ func (s *testRolloutStore) ListRolloutsByTenant(_ context.Context, tenantID stri
 	var out []*business.RolloutRecord
 	for _, r := range s.records {
 		if r.TenantID == tenantID {
+			cp := *r
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
+func (s *testRolloutStore) ListInProgressRollouts(_ context.Context) ([]*business.RolloutRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []*business.RolloutRecord
+	for _, r := range s.records {
+		if r.Status == business.RolloutStatusInProgress {
 			cp := *r
 			out = append(out, &cp)
 		}
@@ -1308,4 +1322,185 @@ func TestRollout_HaltIsAuditedOnce(t *testing.T) {
 	require.Equal(t, http.StatusOK, doHaltRollout(server, tenantID, rolloutID).Code)
 	assert.Len(t, queryRolloutAudit(t, mgr, tenantID, "rollout_halted"), 1,
 		"halting an already-halted rollout must not record a second event")
+}
+
+// --- Owner node and startup sweep (Issue #5976) ---
+
+// newRolloutHAManager returns a real single-server ha.Manager whose local node ID is
+// nodeID, which stands in for a controller node's stable CFGMS_NODE_ID.
+func newRolloutHAManager(t *testing.T, nodeID string) *ha.Manager {
+	t.Helper()
+	cfg := ha.DefaultConfig()
+	cfg.Mode = ha.SingleServerMode
+	cfg.Node.ID = nodeID
+	manager, err := ha.NewManager(cfg, logging.NewNoopLogger(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
+	return manager
+}
+
+func seedSweepRollout(t *testing.T, store business.RolloutStore, id, owner string, status business.RolloutStatus) {
+	t.Helper()
+	require.NoError(t, store.CreateRollout(context.Background(), &business.RolloutRecord{
+		ID:             id,
+		TenantID:       "tenant-" + id,
+		TargetVersion:  "v9.9.9",
+		CurrentRing:    "stable",
+		RingsCompleted: 1,
+		RingsTotal:     2,
+		Status:         status,
+		StartedAt:      time.Now().UTC().Add(-time.Minute),
+		OwnerNodeID:    owner,
+	}))
+}
+
+// TestStartRollout_RecordsOwnerNode proves the advancing node's ID is persisted on
+// the record, which the startup sweep keys on.
+func TestStartRollout_RecordsOwnerNode(t *testing.T) {
+	const tenantID = "tenant-a"
+	cases := []struct {
+		name      string
+		haManager func(t *testing.T) *ha.Manager
+		wantOwner string
+	}{
+		{"with an HA manager the local node ID", func(t *testing.T) *ha.Manager { return newRolloutHAManager(t, "node-a-0001") }, "node-a-0001"},
+		{"without an HA manager the owner is empty", func(*testing.T) *ha.Manager { return nil }, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+			server.haManager = tc.haManager(t)
+
+			rec := doStartRollout(server, tenantID, "v1.2.3")
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			rolloutID := parseStartRolloutID(t, rec)
+			waitForRolloutStatus(t, rolloutStore, rolloutID, 5*time.Second)
+
+			got, err := rolloutStore.GetRollout(context.Background(), rolloutID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantOwner, got.OwnerNodeID)
+		})
+	}
+}
+
+// TestHaltOrphanedRollouts_HaltsOnlyLocalNodeInProgress is the [REQUIRED TEST] for the
+// sweep: node A halts its own in-progress rollout with the recorded reason and a
+// HaltedAt, and leaves a peer's in-progress rollout and its own completed rollout alone.
+func TestHaltOrphanedRollouts_HaltsOnlyLocalNodeInProgress(t *testing.T) {
+	server := newMinimalServerForRollout(t)
+	store := newTestRolloutStore()
+	server.rolloutStore = store
+	server.haManager = newRolloutHAManager(t, "node-a-0001")
+
+	seedSweepRollout(t, store, "owned-active", "node-a-0001", business.RolloutStatusInProgress)
+	seedSweepRollout(t, store, "owned-active-2", "node-a-0001", business.RolloutStatusInProgress)
+	seedSweepRollout(t, store, "peer-active", "node-b-0002", business.RolloutStatusInProgress)
+	seedSweepRollout(t, store, "owned-done", "node-a-0001", business.RolloutStatusCompleted)
+	ctx := context.Background()
+	peerBefore, err := store.GetRollout(ctx, "peer-active")
+	require.NoError(t, err)
+	doneBefore, err := store.GetRollout(ctx, "owned-done")
+	require.NoError(t, err)
+
+	halted, err := server.HaltOrphanedRollouts(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 2, halted)
+
+	for _, id := range []string{"owned-active", "owned-active-2"} {
+		got, err := store.GetRollout(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, business.RolloutStatusHalted, got.Status)
+		assert.Equal(t, "advancing node stopped", got.Error)
+		require.NotNil(t, got.HaltedAt)
+		assert.Equal(t, "stable", got.CurrentRing, "ring progress is preserved")
+		assert.Equal(t, 1, got.RingsCompleted, "ring progress is preserved")
+	}
+	peerAfter, err := store.GetRollout(ctx, "peer-active")
+	require.NoError(t, err)
+	assert.Equal(t, peerBefore, peerAfter, "a peer node's rollout is never touched")
+	doneAfter, err := store.GetRollout(ctx, "owned-done")
+	require.NoError(t, err)
+	assert.Equal(t, doneBefore, doneAfter, "a completed rollout is never touched")
+
+	again, err := server.HaltOrphanedRollouts(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, again, "the sweep is idempotent")
+}
+
+// TestHaltOrphanedRollouts_NoHAManagerSweepsEmptyOwner covers a single server without an
+// HA manager: the owner is empty, so only empty-owner rollouts are halted.
+func TestHaltOrphanedRollouts_NoHAManagerSweepsEmptyOwner(t *testing.T) {
+	server := newMinimalServerForRollout(t)
+	store := newTestRolloutStore()
+	server.rolloutStore = store
+
+	seedSweepRollout(t, store, "no-owner", "", business.RolloutStatusInProgress)
+	seedSweepRollout(t, store, "other-owner", "node-b-0002", business.RolloutStatusInProgress)
+
+	halted, err := server.HaltOrphanedRollouts(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, halted)
+
+	got, err := store.GetRollout(context.Background(), "no-owner")
+	require.NoError(t, err)
+	assert.Equal(t, business.RolloutStatusHalted, got.Status)
+	other, err := store.GetRollout(context.Background(), "other-owner")
+	require.NoError(t, err)
+	assert.Equal(t, business.RolloutStatusInProgress, other.Status)
+}
+
+func TestHaltOrphanedRollouts_NoStoreIsNoop(t *testing.T) {
+	server := newMinimalServerForRollout(t)
+	halted, err := server.HaltOrphanedRollouts(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, halted)
+}
+
+// failingRolloutStore fails the calls a store outage would fail, delegating the rest.
+type failingRolloutStore struct {
+	*testRolloutStore
+	failList     bool
+	failUpdateID string
+}
+
+func (f *failingRolloutStore) ListInProgressRollouts(ctx context.Context) ([]*business.RolloutRecord, error) {
+	if f.failList {
+		return nil, fmt.Errorf("store unavailable")
+	}
+	return f.testRolloutStore.ListInProgressRollouts(ctx)
+}
+
+func (f *failingRolloutStore) UpdateRolloutProgress(ctx context.Context, id string, status business.RolloutStatus, ring string, done int, haltedAt *time.Time, msg string) error {
+	if id == f.failUpdateID {
+		return fmt.Errorf("write failed")
+	}
+	return f.testRolloutStore.UpdateRolloutProgress(ctx, id, status, ring, done, haltedAt, msg)
+}
+
+func TestHaltOrphanedRollouts_StoreErrors(t *testing.T) {
+	t.Run("a list failure is returned", func(t *testing.T) {
+		server := newMinimalServerForRollout(t)
+		server.rolloutStore = &failingRolloutStore{testRolloutStore: newTestRolloutStore(), failList: true}
+		halted, err := server.HaltOrphanedRollouts(context.Background())
+		require.Error(t, err)
+		assert.Equal(t, 0, halted)
+	})
+
+	t.Run("one failed halt does not stop the others", func(t *testing.T) {
+		server := newMinimalServerForRollout(t)
+		inner := newTestRolloutStore()
+		server.rolloutStore = &failingRolloutStore{testRolloutStore: inner, failUpdateID: "bad"}
+		seedSweepRollout(t, inner, "bad", "", business.RolloutStatusInProgress)
+		seedSweepRollout(t, inner, "good", "", business.RolloutStatusInProgress)
+
+		halted, err := server.HaltOrphanedRollouts(context.Background())
+		require.Error(t, err)
+		assert.Equal(t, 1, halted)
+		good, getErr := inner.GetRollout(context.Background(), "good")
+		require.NoError(t, getErr)
+		assert.Equal(t, business.RolloutStatusHalted, good.Status)
+		bad, getErr := inner.GetRollout(context.Background(), "bad")
+		require.NoError(t, getErr)
+		assert.Equal(t, business.RolloutStatusInProgress, bad.Status)
+	})
 }

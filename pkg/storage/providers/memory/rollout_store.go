@@ -93,6 +93,19 @@ func (s *RolloutStore) ListRolloutsByTenant(_ context.Context, tenantID string) 
 	return out, nil
 }
 
+// ListInProgressRollouts returns deep copies of every in-progress rollout across all tenants.
+func (s *RolloutStore) ListInProgressRollouts(_ context.Context) ([]*business.RolloutRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []*business.RolloutRecord
+	for _, r := range s.records {
+		if r.Status == business.RolloutStatusInProgress {
+			out = append(out, copyRollout(r))
+		}
+	}
+	return out, nil
+}
+
 func (s *RolloutStore) HealthCheck(_ context.Context) error { return nil }
 func (s *RolloutStore) Initialize(_ context.Context) error  { return nil }
 func (s *RolloutStore) Close() error                        { return nil }

@@ -2301,6 +2301,8 @@ func (w *apiWiring) wireDurableStores() {
 	if cmdStore := storageManager.GetCommandStore(); cmdStore != nil {
 		httpServer.SetCommandStore(cmdStore)
 	}
+	// Issue #5976: wire the shared rollout store and halt this node's orphaned rollouts.
+	wireRolloutStore(httpServer, storageManager, logger)
 
 	// Issue #2464: Wire durable SQLite-backed upgrade store; falls back to in-memory
 	// when SQLite is not configured so controller startup is never blocked on storage.

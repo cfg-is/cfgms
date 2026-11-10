@@ -123,29 +123,9 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tenant scope: a caller may only target its own tenant subtree via req.TenantID; a
-	// caller that supplies a tenant outside that subtree is rejected rather than silently
-	// redirected. Only an unscoped caller (empty tenant — mTLS admin) may target any tenant.
-	// The principal's GlobalScope flag is deliberately NOT consulted: GlobalScope is a
-	// read-visibility axis (cross-tenant fleet queries), not an authorization gate for
-	// which tenants a caller may target. Both session paths now compute it from actual
-	// scope — web-session from acct.RootScope (middleware.go:433), cfg-CLI Bearer from
-	// sess.TenantID=="" (middleware.go:357) — but using it for write isolation would be
-	// the wrong signal. The explicit callerTenantID + isWithinTenantScope check was the
-	// fix for Issue #3143 (a tenant-scoped caller could drive another tenant's rollout
-	// when GlobalScope was relied on) and is the correct isolation mechanism here. This
-	// mirrors the cross-tenant guard in handlers_upgrade.go (Issue #2340).
-	tenantID := callerTenantID
-	if req.TenantID != "" && req.TenantID != callerTenantID {
-		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), req.TenantID, "POST /api/v1/rollout"); access != tenantAuthAllowed {
-			if !s.writeTenantCrossingIfNeeded(w, access, req.TenantID) {
-				s.writeErrorResponse(w, http.StatusForbidden,
-					"Cannot start a rollout for another tenant",
-					"CROSS_TENANT")
-			}
-			return
-		}
-		tenantID = req.TenantID
+	tenantID, ok := s.resolveRolloutTenant(w, r, callerTenantID, req.TenantID)
+	if !ok {
+		return
 	}
 
 	rings := s.effectiveRings()
@@ -167,6 +147,7 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 		RingsTotal:     len(rings.Rings),
 		Status:         business.RolloutStatusInProgress,
 		StartedAt:      time.Now().UTC(),
+		OwnerNodeID:    s.rolloutOwnerNodeID(),
 	}
 
 	if err := s.rolloutStore.CreateRollout(r.Context(), record); err != nil {
@@ -203,6 +184,36 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 		RolloutID: rolloutID,
 		Status:    string(business.RolloutStatusInProgress),
 	})
+}
+
+// resolveRolloutTenant returns the tenant a rollout targets, or false after writing
+// the rejection response.
+//
+// Tenant scope: a caller may only target its own tenant subtree via req.TenantID; a
+// caller that supplies a tenant outside that subtree is rejected rather than silently
+// redirected. Only an unscoped caller (empty tenant — mTLS admin) may target any tenant.
+// The principal's GlobalScope flag is deliberately NOT consulted: GlobalScope is a
+// read-visibility axis (cross-tenant fleet queries), not an authorization gate for
+// which tenants a caller may target. Both session paths now compute it from actual
+// scope — web-session from acct.RootScope (middleware.go:433), cfg-CLI Bearer from
+// sess.TenantID=="" (middleware.go:357) — but using it for write isolation would be
+// the wrong signal. The explicit callerTenantID + isWithinTenantScope check was the
+// fix for Issue #3143 (a tenant-scoped caller could drive another tenant's rollout
+// when GlobalScope was relied on) and is the correct isolation mechanism here. This
+// mirrors the cross-tenant guard in handlers_upgrade.go (Issue #2340).
+func (s *Server) resolveRolloutTenant(w http.ResponseWriter, r *http.Request, callerTenantID, reqTenantID string) (string, bool) {
+	if reqTenantID == "" || reqTenantID == callerTenantID {
+		return callerTenantID, true
+	}
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), reqTenantID, "POST /api/v1/rollout"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, reqTenantID) {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"Cannot start a rollout for another tenant",
+				"CROSS_TENANT")
+		}
+		return "", false
+	}
+	return reqTenantID, true
 }
 
 // handleGetRollout handles GET /api/v1/rollout/{rollout_id}.
@@ -398,14 +409,87 @@ func (s *Server) handleHaltRollout(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// RolloutStore returns the wired rollout store, or nil when none is wired and the
+// rollout endpoints answer 503 ROLLOUT_STORE_UNAVAILABLE.
+func (s *Server) RolloutStore() business.RolloutStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.rolloutStore
+}
+
+// rolloutOwnerNodeID returns the ID recorded as the owner of a rollout this node
+// starts: the local HA node ID, or empty when the controller runs without an HA
+// manager. In the non-single HA modes the ID comes from CFGMS_NODE_ID and is
+// stable across restarts of the same node.
+func (s *Server) rolloutOwnerNodeID() string {
+	if s.haManager == nil {
+		return ""
+	}
+	return s.haManager.GetLocalNode().ID
+}
+
+// rolloutOrphanedReason is the halt reason recorded by HaltOrphanedRollouts.
+const rolloutOrphanedReason = "advancing node stopped"
+
+// HaltOrphanedRollouts transitions every in-progress rollout owned by this node to
+// halted, recording rolloutOrphanedReason. It is the controller-startup sweep: the
+// goroutine advancing those rollouts died with the previous process, so without it
+// they would read in-progress forever.
+//
+// The sweep makes no authority decision across nodes. It touches only rollouts whose
+// OwnerNodeID equals this node's ID (empty for a controller without an HA manager)
+// and never a peer's, so it needs neither HasLeadership nor the raw Raft primitive.
+// It returns the number of rollouts halted. A failure on one rollout is logged and
+// does not stop the others; the first error is returned alongside the count.
+// Automatic resumption is out of scope.
+func (s *Server) HaltOrphanedRollouts(ctx context.Context) (int, error) {
+	s.mu.RLock()
+	store := s.rolloutStore
+	s.mu.RUnlock()
+	if store == nil {
+		return 0, nil
+	}
+	owner := s.rolloutOwnerNodeID()
+	records, err := store.ListInProgressRollouts(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list in-progress rollouts: %w", err)
+	}
+	var halted int
+	var firstErr error
+	for _, rec := range records {
+		if rec.OwnerNodeID != owner {
+			continue
+		}
+		now := time.Now().UTC()
+		if err := store.UpdateRolloutProgress(ctx, rec.ID, business.RolloutStatusHalted,
+			rec.CurrentRing, rec.RingsCompleted, &now, rolloutOrphanedReason); err != nil {
+			s.logger.Warn("Failed to halt orphaned rollout",
+				"rollout_id", logging.SanitizeLogValue(rec.ID),
+				"error", logging.SanitizeLogValue(err.Error()))
+			if firstErr == nil {
+				firstErr = fmt.Errorf("halt rollout %s: %w", logging.SanitizeLogValue(rec.ID), err)
+			}
+			continue
+		}
+		halted++
+		s.logger.Info("Halted rollout orphaned by a restart of its advancing node",
+			"rollout_id", logging.SanitizeLogValue(rec.ID),
+			"target_version", logging.SanitizeLogValue(rec.TargetVersion),
+			"current_ring", logging.SanitizeLogValue(rec.CurrentRing))
+	}
+	return halted, firstErr
+}
+
 // runRollout is the background ring-advance goroutine. It processes rings in order:
 // soak, check health, halt or advance. See handlers_rollout_test.go for the required tests.
 //
-// Durability note (v1): this goroutine runs in memory. A controller restart during a
-// rollout loses orchestration state; the operator re-issues the rollout. Ring
-// desired_version mutations persisted via setRingDesiredVersion survive (they are
-// git-backed); only the progress tracking is lost. See ADR-008 for the durable
-// workflow execution roadmap.
+// Durability note: the rollout record, ring progress, halt metadata and deferred
+// stewards are persisted in the shared RolloutStore, so they survive a controller
+// restart and are visible from every node. This goroutine is not: it runs in memory
+// on the node that accepted the request, which the record names in OwnerNodeID. When
+// that node restarts, HaltOrphanedRollouts halts its in-progress rollouts with a
+// recorded reason; nothing resumes automatically, and the operator re-issues the
+// rollout. See ADR-008 for the durable workflow execution roadmap.
 func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord, rings []controllerconfig.RingSpec, haltCh <-chan struct{}) {
 	defer s.rolloutHaltChans.Delete(record.ID)
 

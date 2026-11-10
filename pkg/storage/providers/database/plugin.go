@@ -56,6 +56,7 @@ var (
 	_ interfaces.LeaseStoreCreator           = (*DatabaseProvider)(nil)
 	_ interfaces.RoutingStoreCreator         = (*DatabaseProvider)(nil)
 	_ interfaces.ScriptRunStoreCreator       = (*DatabaseProvider)(nil)
+	_ interfaces.RolloutStoreCreator         = (*DatabaseProvider)(nil)
 	_ interfaces.ExecutionQueueStoreCreator  = (*DatabaseProvider)(nil)
 	_ interfaces.CertRevocationStoreCreator  = (*DatabaseProvider)(nil)
 	_ interfaces.SigningCursorStoreCreator   = (*DatabaseProvider)(nil)
@@ -392,6 +393,22 @@ func (p *DatabaseProvider) CreateScriptRunStore(config map[string]interface{}) (
 	store, err := NewDatabaseScriptRunStore(db, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database script run store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateRolloutStore creates the PostgreSQL-backed RolloutStore shared by every
+// controller node (Issue #5976). Implements interfaces.RolloutStoreCreator.
+//
+//duplication:justified pkg/storage/providers/database/plugin.go -- same sharedPool-then-construct shape as CreateScriptRunStore and the other Create*Store methods; each returns a different store type
+func (p *DatabaseProvider) CreateRolloutStore(config map[string]interface{}) (business.RolloutStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseRolloutStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database rollout store: %w", err)
 	}
 	return store, nil
 }
