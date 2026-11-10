@@ -188,7 +188,9 @@ func TestEveryHTTPRouteHasSecurityClassification(t *testing.T) {
 		"GET /api/v1/health/metrics/history",
 		"GET /api/v1/health/metrics/prometheus",
 		"GET /api/v1/monitoring/components/{component}/metrics",
+		"GET /api/v1/monitoring/markers",
 		"GET /api/v1/monitoring/metrics",
+		"POST /api/v1/monitoring/markers",
 	}
 	if len(metricsEntries) != len(wantMetricsEntries) {
 		t.Fatalf("unexpected private metrics route set: %v", metricsEntries)

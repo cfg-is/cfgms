@@ -285,6 +285,12 @@ var permissionAssurance = map[string]Requirement{
 	// keys keep working for automation (AllowMachine), with no presence tap.
 	"config:push": {Min: session.AssuranceStrong, AllowMachine: true},
 
+	// monitoring:write-markers gates POST /api/v1/monitoring/markers on the private metrics
+	// listener. The deploy agent holds an API key and cannot tap a passkey, so the
+	// requirement is Strong with AllowMachine and no presence tap. monitoring:read-markers is
+	// a read and intentionally absent (ADR-021 Decision 2).
+	"monitoring:write-markers": {Min: session.AssuranceStrong, AllowMachine: true},
+
 	// workflow:write (Issue #5498) gates POST /api/v1/workflows, PUT /api/v1/workflows/{id}
 	// and DELETE /api/v1/workflows/{id}; workflow:execute gates POST /api/v1/workflows/{id}/execute.
 	// Workflows can run steps that change managed systems, so a human session needs Strong.

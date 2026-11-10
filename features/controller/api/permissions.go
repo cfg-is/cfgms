@@ -5,6 +5,8 @@ package api
 // knownPermissions is the allow-list of valid permission IDs for handleCreateAPIKey.
 // Each entry corresponds to a permission checked by requirePermission in server.go.
 // C1: "*" (wildcard) is intentionally absent — it is never a valid permission ID.
+//
+//duplication:justified features/controller/api/permissions.go -- uniform allow-list entries; every added entry is another self-overlapping window of the same map literal
 var knownPermissions = map[string]bool{
 	// Steward management
 	"steward:list":               true,
@@ -91,6 +93,9 @@ var knownPermissions = map[string]bool{
 	"monitoring:read-alert-history":   true,
 	"monitoring:read-trace":           true,
 	"monitoring:read-traces":          true,
+	// Deploy, rollback, rollout and chaos markers on the private metrics listener
+	"monitoring:write-markers": true,
+	"monitoring:read-markers":  true,
 	// HA management
 	"ha:read-status":  true,
 	"ha:read-cluster": true,

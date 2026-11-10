@@ -106,6 +106,7 @@ func TestMachineAllowed_OnlyTheInstallerPermissionsAndConfigPush(t *testing.T) {
 		"installer:publish:steward": true, "installer:dispatch:steward": true,
 		"config:push":    true,                           // Issue #5419: scoped API keys keep pushing config
 		"workflow:write": true, "workflow:execute": true, // Issue #5498: scoped API keys keep running workflows
+		"monitoring:write-markers": true, // Issue #6063: the deploy agent records markers with an API key
 	}
 	for perm, req := range permissionAssurance {
 		assert.Equal(t, want[perm], req.AllowMachine, "AllowMachine on %q", perm)

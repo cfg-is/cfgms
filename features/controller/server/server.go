@@ -118,6 +118,7 @@ import (
 	sqliteprovider "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"  // register sqlite provider
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
+	"github.com/cfgis/cfgms/pkg/version"
 	"gopkg.in/yaml.v3"
 )
 
@@ -3842,7 +3843,8 @@ func (s *Server) recordStartupAudit() {
 	}
 	ctx := context.Background()
 	// TODO(#751): controller identity as a real tenant — replace audit.SystemTenantID with proper identity.
-	event := audit.SystemEvent(audit.SystemTenantID, "controller_start", fmt.Sprintf("Controller server started on %s", s.cfg.ListenAddr))
+	event := audit.SystemEvent(audit.SystemTenantID, "controller_start", fmt.Sprintf("Controller server started on %s", s.cfg.ListenAddr)).
+		Detail("revision", version.Revision())
 	if err := s.auditManager.RecordEvent(ctx, event); err != nil {
 		s.logger.Warn("Failed to record startup audit event", "error", err)
 	}

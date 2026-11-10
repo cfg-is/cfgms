@@ -1530,6 +1530,128 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /monitoring/markers:
+    servers:
+      - url: https://{hostname}:{port}/api/v1
+        description: Private metrics listener; use configured address and authorized credentials.
+        variables:
+          hostname:
+            default: localhost
+          port:
+            default: '9090'
+            description: Port from metrics_listen_addr or CFGMS_METRICS_LISTEN_ADDR; it has no built-in default, and 9090 is only the container example
+    post:
+      summary: Record a deploy, rollback or chaos marker
+      description: |
+        Records a time-stamped marker carrying a revision, as an audit event under the system
+        tenant (action `marker_<kind>`, with the principal and revision in the details).
+        Served on the private metrics listener only; the public product listener returns 404.
+        Requires `monitoring:write-markers`, which needs strong assurance but accepts an API key
+        with no presence tap. Automation grant credentials are refused.
+      operationId: recordMarker
+      tags:
+        - Monitoring
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, revision]
+              additionalProperties: false
+              properties:
+                kind:
+                  type: string
+                  enum: [deploy, rollback, chaos_start, chaos_end]
+                revision:
+                  type: string
+                  maxLength: 64
+                  description: Hex commit id (7 to 64 digits) or semantic version
+                  pattern: '^([0-9a-fA-F]{7,64}|v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$'
+                note:
+                  type: string
+                  maxLength: 256
+                  description: Optional note; control characters are rejected
+      responses:
+        '201':
+          description: Marker recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Marker'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          description: Request body larger than 4 KiB
+    get:
+      summary: List markers
+      description: |
+        Returns, oldest first, the `marker_*` and `controller_start` audit rows of the system
+        tenant. `resource` is a marker or rollout id, never a tenant path. At most 1000 markers
+        are returned; when more match, the newest are kept. Served on the private metrics
+        listener only. Requires `monitoring:read-markers`.
+      operationId: listMarkers
+      tags:
+        - Monitoring
+      parameters:
+        - name: since
+          in: query
+          required: false
+          description: Earliest marker time (RFC 3339, inclusive)
+          schema:
+            type: string
+            format: date-time
+        - name: until
+          in: query
+          required: false
+          description: Latest marker time (RFC 3339, inclusive)
+          schema:
+            type: string
+            format: date-time
+        - name: kind
+          in: query
+          required: false
+          description: Only markers of this kind, for example `deploy`, `rollback`, `chaos_start`, `chaos_end`, `rollout_start` or `controller_start`
+          schema:
+            type: string
+            maxLength: 32
+            pattern: '^[a-z][a-z0-9_]*$'
+      responses:
+        '200':
+          description: Markers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [markers]
+                    properties:
+                      markers:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Marker'
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
   /monitoring/components/{component}/health:
     get:
       summary: Get component health
@@ -3143,6 +3265,30 @@ components:
         type: string
 
   schemas:
+    Marker:
+      type: object
+      required: [time, kind, revision, principal, resource]
+      properties:
+        id:
+          type: string
+          description: Marker id; present on the create response
+        time:
+          type: string
+          format: date-time
+        kind:
+          type: string
+          description: Marker kind, the audit action without its `marker_` prefix, or `controller_start`
+        revision:
+          type: string
+          description: Build revision; empty on a `controller_start` row recorded before revisions were added
+        principal:
+          type: string
+        resource:
+          type: string
+          description: Marker or rollout id
+        note:
+          type: string
+
     BillingMetrics:
       type: object
       properties:

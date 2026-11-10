@@ -17,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"github.com/cfgis/cfgms/pkg/version"
 )
 
 // Characterization tests for Server.Start (Issue #5865). They pin the observable
@@ -163,13 +164,17 @@ func TestServerstartChar_StartupAuditEvent(t *testing.T) {
 	srv, _ := serverstartCharNewServer(t)
 	require.NoError(t, srv.Start())
 
+	var started []*business.AuditEntry
 	require.Eventually(t, func() bool {
 		entries, err := srv.auditManager.QueryEntries(context.Background(), &business.AuditFilter{
 			TenantID: audit.SystemTenantID,
 			Actions:  []string{"controller_start"},
 		})
+		started = entries
 		return err == nil && len(entries) > 0
 	}, 10*time.Second, 50*time.Millisecond, "Start records a controller_start audit event")
+	// Issue #6063: the running build revision is a detail of the start marker.
+	require.Equal(t, version.Revision(), started[0].Details["revision"])
 }
 
 func TestServerstartChar_HAManager(t *testing.T) {
