@@ -95,6 +95,7 @@ type Server struct {
 	rbacManager                     *rbac.Manager
 	systemMonitor                   *monitoring.SystemMonitor
 	healthCollector                 *health.Collector
+	apiSignals                      apiSignals      // Issue #6055: API request latency and count instruments, registered on healthCollector on first use
 	healthDetailHandler             *health.Handler // Issue #4208: detailed health/metrics/alerts/trace handler; nil when constructed without a collector, alert manager and trace manager
 	haManager                       *ha.Manager
 	rateCounterStore                business.RateCounterStore                // Issue #3896, ADR-031: cluster-visible fixed-window abuse-budget counter store (nil: every consumer below uses its in-memory default)
@@ -846,6 +847,7 @@ func (s *Server) setupRouter() {
 	s.router.Use(s.authDefense.Middleware) // Per-source budget covers public and authenticated surfaces.
 	s.router.Use(s.requestBodyLimitMiddleware)
 	s.router.Use(s.loggingMiddleware)
+	s.router.Use(s.signalsMiddleware) // Issue #6055: outside authenticationMiddleware so 401/403 count
 	s.router.Use(s.corsMiddleware)
 	s.router.Use(s.contentTypeMiddleware)
 
@@ -864,6 +866,7 @@ func (s *Server) setupRouter() {
 	s.metricsRouter.Use(s.authDefense.Middleware)
 	s.metricsRouter.Use(s.requestBodyLimitMiddleware)
 	s.metricsRouter.Use(s.loggingMiddleware)
+	s.metricsRouter.Use(s.signalsMiddleware) // Issue #6055
 	s.metricsRouter.Use(s.contentTypeMiddleware)
 	registerPrivateMetricsRoutes(s, s.metricsRouter)
 
