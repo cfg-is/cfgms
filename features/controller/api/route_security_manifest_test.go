@@ -186,6 +186,7 @@ func TestEveryHTTPRouteHasSecurityClassification(t *testing.T) {
 		"* /api/v1/monitoring",
 		"GET /api/v1/health/metrics",
 		"GET /api/v1/health/metrics/history",
+		"GET /api/v1/health/metrics/prometheus",
 		"GET /api/v1/monitoring/components/{component}/metrics",
 		"GET /api/v1/monitoring/metrics",
 	}
