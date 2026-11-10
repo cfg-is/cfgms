@@ -33,6 +33,7 @@
  *   /api-keys        → AppShell layout → ApiKeysView (Issue #5441)
  *   /automation/grants → AppShell layout → AutomationGrantsView (Issue #5855)
  *   /directory/users, /directory/groups → AppShell layout → UsersPage / GroupsPage (Issue #5565)
+ *   /osquery         → AppShell layout → OsqueryView (Issue #5460)
  *   /cases           → AppShell layout → CaseListView (Story #3614)
  *   /cases/:id       → AppShell layout → CockpitView (Story #3608)
  *
@@ -89,6 +90,7 @@ import SupportAccessView from './tenants/SupportAccessView.tsx'
 import InstallerPage from './installer/InstallerPage.tsx'
 import ApiKeysView from './apikeys/ApiKeysView.tsx'
 import AutomationGrantsView from './automation/AutomationGrantsView.tsx'
+import OsqueryView from './osquery/OsqueryView.tsx'
 import CockpitView from './cockpit/CockpitView.tsx'
 import CaseListView from './cockpit/CaseListView.tsx'
 import UsersPage from './directory/UsersPage.tsx'
@@ -142,6 +144,7 @@ function App() {
                   <Route path="automation/grants" element={<AutomationGrantsView />} />
                   <Route path="directory/users" element={<UsersPage />} />
                   <Route path="directory/groups" element={<GroupsPage />} />
+                  <Route path="osquery" element={<OsqueryView />} />
                   <Route path="cases" element={<CaseListView />} />
                   <Route path="cases/:id" element={<CockpitView />} />
                 </Route>
