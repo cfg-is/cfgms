@@ -111,6 +111,14 @@ describe('AppShell', () => {
     expect(screen.getByRole('link', { name: /^api keys$/i })).toHaveAttribute('href', '/api-keys')
   })
 
+  it('renders the Automation grants entry as a link to /automation/grants (Issue #6035)', () => {
+    renderShell()
+    expect(screen.getByRole('link', { name: /^automation grants$/i })).toHaveAttribute(
+      'href',
+      '/automation/grants',
+    )
+  })
+
   it('all nav items are real links; no soon-tagged placeholders remain (Issue #2732, #2934, #2935)', () => {
     renderShell()
     expect(screen.queryAllByText(/soon/i)).toHaveLength(0)
