@@ -5422,6 +5422,9 @@ func (s *Server) handleEventFromProvider(ctx context.Context, event *controlplan
 		return s.handleConfigAppliedEvent(ctx, event)
 	case controlplaneTypes.EventObserveSweepRequest:
 		return s.handleObserveSweepRequest(ctx, event)
+	case controlplaneTypes.EventCommandCompleted, controlplaneTypes.EventCommandFailed:
+		// Convergence signals: measured off the command id; never fails the event.
+		s.observeConvergence(ctx, event)
 	default:
 		// Log unhandled event types for debugging
 		s.logger.Debug("Received event from steward",
