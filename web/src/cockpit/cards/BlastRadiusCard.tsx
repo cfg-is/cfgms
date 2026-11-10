@@ -18,6 +18,11 @@
  * Nodes render in neutral (non-health-colored) state only. Health coloring is
  * deferred to DEX epics.
  *
+ * Assert relationship (Story #5464): a header action opens AssertEdgeForm, a
+ * right-hand drawer with the pinned entity pre-filled as From. The assertion
+ * answers 201 with no body, so a success bumps `refreshKey` and the one
+ * neighborhood effect below re-runs — there is no second fetch path.
+ *
  * Visual design: docs/design/mockups/troubleshooting-cockpit.html §.card.graph
  *   and the SVG dependency-graph illustration earlier in that file.
  * Colour tokens: docs/design/web-ui-design-tokens.css.
@@ -25,6 +30,7 @@
 import { useEffect, useState } from 'react'
 import type { EvidenceCardProps, Pin } from '../evidenceTypes.ts'
 import { apiFetch } from '../../api/client.ts'
+import AssertEdgeForm from '../../entities/AssertEdgeForm.tsx'
 import './BlastRadiusCard.css'
 
 // ── API response shapes ───────────────────────────────────────────────────────
@@ -222,6 +228,9 @@ function NeighborhoodGraph({ neighborhood }: { neighborhood: NeighborhoodRespons
 export default function BlastRadiusCard({ pins }: EvidenceCardProps) {
   const eid = extractEID(pins)
   const [phase, setPhase] = useState<CardPhase>({ kind: 'loading' })
+  // Bumped after a successful edge assertion to re-run the neighborhood fetch.
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [assertOpen, setAssertOpen] = useState(false)
 
   useEffect(() => {
     if (!eid) return
@@ -271,17 +280,53 @@ export default function BlastRadiusCard({ pins }: EvidenceCardProps) {
     return () => {
       cancelled = true
     }
-  }, [eid])
+  }, [eid, refreshKey])
 
   if (!eid) return null
+
+  const rootKind =
+    phase.kind === 'ready' ? phase.neighborhood.Nodes.find((n) => n.EID === eid)?.Kind : undefined
+
+  const assertAction = (
+    <button
+      type="button"
+      className="blast-radius-card__action"
+      style={{
+        marginLeft: 'auto',
+        font: 'inherit',
+        fontSize: 'var(--text-sm)',
+        fontWeight: 600,
+        padding: '3px 10px',
+        borderRadius: 'var(--radius)',
+        border: '1px solid var(--border)',
+        background: 'var(--bg-surface)',
+        color: 'var(--text-primary)',
+        cursor: 'pointer',
+      }}
+      onClick={() => setAssertOpen(true)}
+    >
+      + Assert relationship
+    </button>
+  )
+
+  const drawer = assertOpen ? (
+    <AssertEdgeForm
+      fromEid={eid}
+      fromKind={rootKind}
+      onClose={() => setAssertOpen(false)}
+      onAsserted={() => setRefreshKey((k) => k + 1)}
+    />
+  ) : null
 
   if (phase.kind === 'error') {
     return (
       <section className="blast-radius-card blast-radius-card--error" aria-label="Blast radius">
         <h3 className="blast-radius-card__header">
           <span>Blast radius</span>
+          {assertAction}
         </h3>
         <p className="blast-radius-card__error">{phase.message}</p>
+        {drawer}
       </section>
     )
   }
@@ -291,10 +336,12 @@ export default function BlastRadiusCard({ pins }: EvidenceCardProps) {
       <section className="blast-radius-card" aria-label="Blast radius">
         <h3 className="blast-radius-card__header">
           <span>Blast radius</span>
+          {assertAction}
         </h3>
         <p className="blast-radius-card__loading" aria-label="Loading neighborhood">
           Loading…
         </p>
+        {drawer}
       </section>
     )
   }
@@ -312,8 +359,10 @@ export default function BlastRadiusCard({ pins }: EvidenceCardProps) {
             {dependentCount} {dependentCount === 1 ? 'dependent' : 'dependents'}
           </span>
         )}
+        {assertAction}
       </h3>
       <NeighborhoodGraph neighborhood={neighborhood} />
+      {drawer}
     </section>
   )
 }
