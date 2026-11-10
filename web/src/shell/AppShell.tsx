@@ -39,6 +39,7 @@ const NAV_ITEMS = [
   { label: 'Workflows', to: '/workflows', soon: false },
   { label: 'Approvals', to: '/approvals', soon: false },
   { label: 'Scripts', to: '/scripts', soon: false },
+  { label: 'Hyper-V profiles', to: '/hyperv/profiles', soon: false },
   { label: 'Registration', to: '/registration', soon: false },
   { label: 'Refresh Requests', to: '/refresh', soon: false },
   { label: 'Reports', to: '/reports', soon: false },
