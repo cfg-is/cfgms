@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/atomicfile"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 )
 
@@ -185,10 +186,6 @@ func (s *FilesystemBlobStore) PutBlob(ctx context.Context, key blob.BlobKey, r i
 	}
 
 	checksum := hex.EncodeToString(h.Sum(nil))
-	contentType := meta.ContentType
-	if contentType == "" {
-		contentType = defaultContentType
-	}
 
 	// Atomic rename to the final path.
 	if err := os.Rename(tmpPath, s.blobPath(key)); err != nil {
@@ -197,32 +194,92 @@ func (s *FilesystemBlobStore) PutBlob(ctx context.Context, key blob.BlobKey, r i
 	success = true
 
 	// Write sidecar metadata after blob is safely in place.
-	sidecar := blobMetaSidecar{
-		ContentType: contentType,
-		Size:        written,
-		Checksum:    checksum,
-		CreatedAt:   time.Now().UTC(),
-		Labels:      meta.Labels,
-	}
-	metaJSON, err := json.Marshal(sidecar)
+	metaJSON, err := marshalSidecar(meta, written, checksum)
 	if err != nil {
 		return fmt.Errorf("blob put: failed to marshal metadata: %w", err)
 	}
-	if err := os.WriteFile(s.metaPath(key), metaJSON, 0o600); err != nil {
-		return fmt.Errorf("blob put: failed to write metadata sidecar: %w", err)
+	if err := replaceSidecar(dir, s.metaPath(key), metaJSON); err != nil {
+		return fmt.Errorf("blob put: failed to publish metadata sidecar: %w", err)
 	}
 
 	return nil
 }
 
+// marshalSidecar builds the metadata sidecar JSON for a blob of the given size
+// and checksum, applying the default content type when meta names none.
+func marshalSidecar(meta blob.BlobMeta, size int64, checksum string) ([]byte, error) {
+	contentType := meta.ContentType
+	if contentType == "" {
+		contentType = defaultContentType
+	}
+	return json.Marshal(blobMetaSidecar{
+		ContentType: contentType,
+		Size:        size,
+		Checksum:    checksum,
+		CreatedAt:   time.Now().UTC(),
+		Labels:      meta.Labels,
+	})
+}
+
+// replaceSidecar publishes metaJSON at metaFilePath with one rename, so a
+// concurrent reader sees either the previous complete sidecar or the new
+// complete one, never a truncated or partly written file. The temp file is
+// removed if it cannot be published.
+func replaceSidecar(dir, metaFilePath string, metaJSON []byte) error {
+	tmpSidecar, err := writeSidecarTemp(dir, metaJSON)
+	if err != nil {
+		return err
+	}
+	if err := atomicfile.AtomicReplace(tmpSidecar, metaFilePath); err != nil {
+		_ = os.Remove(tmpSidecar)
+		return err
+	}
+	return nil
+}
+
+// sidecarTempPattern names temporary sidecar files. It must not end in
+// ".meta.json": ListBlobs treats every file with that suffix as a published
+// sidecar, so a temp file with that suffix would be listed while incomplete.
+const sidecarTempPattern = ".meta-tmp-*"
+
+// writeSidecarTemp writes metaJSON in full to a new temp file in dir and returns
+// its path. The file is closed and complete on success; on failure it is removed.
+// The caller owns the returned path and must publish or remove it. Because it
+// lives in the same directory as the final sidecar, a rename or hard link from
+// it to the final path stays on one filesystem.
+func writeSidecarTemp(dir string, metaJSON []byte) (string, error) {
+	f, err := os.CreateTemp(dir, sidecarTempPattern)
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp sidecar: %w", err)
+	}
+	path := f.Name()
+	if _, err := f.Write(metaJSON); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", fmt.Errorf("failed to write temp sidecar: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("failed to close temp sidecar: %w", err)
+	}
+	return path, nil
+}
+
 // PutBlobIfAbsent stores a blob only if no blob currently exists for key,
 // atomic with respect to concurrent PutBlob/PutBlobIfAbsent calls for the same
-// key (Issue #3895). The metadata sidecar file's O_CREATE|O_EXCL create is the
-// atomicity point: exactly one concurrent caller can create it for a given
-// key, so blob data is written to the temp file first (harmless if this
-// caller loses) and only renamed into the final blob path after this caller
-// wins the sidecar create — the loser's temp file is discarded without ever
-// touching the final blob path.
+// key (Issue #3895). The hard link that publishes the metadata sidecar is the
+// atomicity point: the complete sidecar JSON is first written to a temp file in
+// the same directory, then link(2) makes it visible at <name>.meta.json in one
+// operation. link fails with EEXIST when the target exists, so exactly one
+// concurrent caller can publish the sidecar for a given key, and a concurrent
+// reader sees either no sidecar or the complete one, never a partial file. Blob
+// data is written to the temp file first (harmless if this caller loses) and
+// only renamed into the final blob path after this caller wins the link — the
+// loser's temp files are discarded without ever touching the final blob path.
+//
+// The sidecar publication needs a filesystem with hard-link support (on Windows
+// NTFS or ReFS). Any link failure other than "already exists" is returned as an
+// error; there is no fallback that opens the final sidecar path for writing.
 //
 // A process crash between winning the sidecar create and completing the
 // rename leaves a metadata sidecar with no corresponding blob file, which
@@ -268,23 +325,12 @@ func (s *FilesystemBlobStore) PutBlobIfAbsent(ctx context.Context, key blob.Blob
 	}
 
 	checksum := hex.EncodeToString(h.Sum(nil))
-	contentType := meta.ContentType
-	if contentType == "" {
-		contentType = defaultContentType
-	}
-	sidecar := blobMetaSidecar{
-		ContentType: contentType,
-		Size:        written,
-		Checksum:    checksum,
-		CreatedAt:   time.Now().UTC(),
-		Labels:      meta.Labels,
-	}
-	metaJSON, err := json.Marshal(sidecar)
+	metaJSON, err := marshalSidecar(meta, written, checksum)
 	if err != nil {
 		return fmt.Errorf("blob put-if-absent: failed to marshal metadata: %w", err)
 	}
 
-	if err := createSidecarExclusive(metaFilePath, metaJSON); err != nil {
+	if err := createSidecarExclusive(dir, metaFilePath, metaJSON); err != nil {
 		return err
 	}
 
@@ -299,26 +345,25 @@ func (s *FilesystemBlobStore) PutBlobIfAbsent(ctx context.Context, key blob.Blob
 }
 
 // createSidecarExclusive is the PutBlobIfAbsent atomicity point: exactly one
-// concurrent caller wins the O_EXCL create of the metadata sidecar for a given
-// key. It returns blob.ErrBlobAlreadyExists when the sidecar already exists and
-// removes a partially written sidecar on write or close failure. metaFilePath
-// must come from resolveKeyPaths.
-func createSidecarExclusive(metaFilePath string, metaJSON []byte) error {
-	metaFile, err := os.OpenFile(metaFilePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- metaFilePath verified inside store root by resolveKeyPaths
+// concurrent caller wins the hard-link publication of the metadata sidecar for
+// a given key. The sidecar JSON is written completely to a temp file in dir
+// first and then linked to metaFilePath, so the final path never exists with
+// partial content. It returns blob.ErrBlobAlreadyExists when the sidecar already
+// exists (os.Link reports EEXIST, or ERROR_ALREADY_EXISTS on Windows, both of
+// which satisfy os.IsExist) and always removes the temp file. dir and
+// metaFilePath must come from resolveKeyPaths.
+func createSidecarExclusive(dir, metaFilePath string, metaJSON []byte) error {
+	tmpSidecar, err := writeSidecarTemp(dir, metaJSON)
 	if err != nil {
+		return fmt.Errorf("blob put-if-absent: failed to write metadata sidecar: %w", err)
+	}
+	defer func() { _ = os.Remove(tmpSidecar) }()
+
+	if err := os.Link(tmpSidecar, metaFilePath); err != nil {
 		if os.IsExist(err) {
 			return blob.ErrBlobAlreadyExists
 		}
-		return fmt.Errorf("blob put-if-absent: failed to create metadata sidecar: %w", err)
-	}
-	if _, err := metaFile.Write(metaJSON); err != nil {
-		_ = metaFile.Close()
-		_ = os.Remove(metaFilePath)
-		return fmt.Errorf("blob put-if-absent: failed to write metadata sidecar: %w", err)
-	}
-	if err := metaFile.Close(); err != nil {
-		_ = os.Remove(metaFilePath)
-		return fmt.Errorf("blob put-if-absent: failed to close metadata sidecar: %w", err)
+		return fmt.Errorf("blob put-if-absent: failed to publish metadata sidecar: %w", err)
 	}
 	return nil
 }
