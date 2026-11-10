@@ -183,6 +183,18 @@ describe('App', () => {
     expect(await screen.findByTestId('credentials-empty')).toBeInTheDocument()
   })
 
+  it('the Hyper-V profiles route is reachable when signed in', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, { data: { profiles: [] } })))
+    render(
+      <MemoryRouter initialEntries={['/hyperv/profiles']}>
+        <App />
+      </MemoryRouter>,
+    )
+    expect(await screen.findByRole('heading', { name: 'Hyper-V profiles', level: 1 })).toBeInTheDocument()
+    expect(screen.getByRole('navigation')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /^hyper-v profiles$/i })).toHaveAttribute('href', '/hyperv/profiles')
+  })
+
   it('a 401 on the fleet data call drops to the expired login screen', async () => {
     const MOCK_PASSKEY_BEGIN = {
       publicKey: {

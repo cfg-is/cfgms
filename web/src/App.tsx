@@ -35,6 +35,7 @@
  *   /directory/users, /directory/groups → AppShell layout → UsersPage / GroupsPage (Issue #5565)
  *   /directory/credentials → AppShell layout → CredentialsPage (Issue #5566)
  *   /osquery         → AppShell layout → OsqueryView (Issue #5460)
+ *   /hyperv/profiles → AppShell layout → ProfilesView (Issue #5461)
  *   /cases           → AppShell layout → CaseListView (Story #3614)
  *   /cases/:id       → AppShell layout → CockpitView (Story #3608)
  *
@@ -92,6 +93,7 @@ import InstallerPage from './installer/InstallerPage.tsx'
 import ApiKeysView from './apikeys/ApiKeysView.tsx'
 import AutomationGrantsView from './automation/AutomationGrantsView.tsx'
 import OsqueryView from './osquery/OsqueryView.tsx'
+import ProfilesView from './hyperv/ProfilesView.tsx'
 import CockpitView from './cockpit/CockpitView.tsx'
 import CaseListView from './cockpit/CaseListView.tsx'
 import UsersPage from './directory/UsersPage.tsx'
@@ -148,6 +150,7 @@ function App() {
                   <Route path="directory/groups" element={<GroupsPage />} />
                   <Route path="directory/credentials" element={<CredentialsPage />} />
                   <Route path="osquery" element={<OsqueryView />} />
+                  <Route path="hyperv/profiles" element={<ProfilesView />} />
                   <Route path="cases" element={<CaseListView />} />
                   <Route path="cases/:id" element={<CockpitView />} />
                 </Route>

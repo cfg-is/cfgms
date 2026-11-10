@@ -116,6 +116,14 @@ describe('AppShell', () => {
     expect(links[fleetIndex + 1]).toBe(query)
   })
 
+  it('renders the Hyper-V profiles entry after Scripts as a link to /hyperv/profiles (Issue #5461)', () => {
+    renderShell()
+    const entry = screen.getByRole('link', { name: /^hyper-v profiles$/i })
+    expect(entry).toHaveAttribute('href', '/hyperv/profiles')
+    const links = within(screen.getByRole('navigation')).getAllByRole('link')
+    expect(links[links.indexOf(screen.getByRole('link', { name: /^scripts$/i })) + 1]).toBe(entry)
+  })
+
   it('renders the API keys entry as a link to /api-keys (Issue #5441)', () => {
     renderShell()
     expect(screen.getByRole('link', { name: /^api keys$/i })).toHaveAttribute('href', '/api-keys')
