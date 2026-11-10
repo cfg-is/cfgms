@@ -19,13 +19,17 @@
 // When the server returns a 401 + WWW-Authenticate: CFGMS-StepUp response,
 // defaultStepUpHandler routes to one of three paths:
 //
-//  1. Non-interactive (stdin is not a TTY): fail immediately with an actionable
+//  1. presence="required": run the presence relay (runPresenceBrowserFlow), with or
+//     without a terminal. The relay only lodges a request, prints the confirmation URL
+//     and polls, so it needs no input from stdin. It opens a browser only when stdin is
+//     a TTY; otherwise (scripted and agent sessions) the URL is printed and a human or
+//     configured authenticator confirms it out of band.
+//
+//  2. No presence="required", stdin is not a TTY: fail immediately with an actionable
 //     error naming the required assurance level. cfg never blocks on input it
 //     cannot receive.
 //
-//  2. Interactive + presence="required": run the presence relay (runPresenceBrowserFlow).
-//
-//  3. Interactive + no presence="required": the assurance level cannot be raised
+//  3. No presence="required", interactive: the assurance level cannot be raised
 //     programmatically; fail with an actionable error naming the web UI path.
 //
 // This follows the callback-injection shape of OnUnauthorized (api_client.go) — no
@@ -77,17 +81,16 @@ var presenceOpenBrowserFn = openBrowser
 
 // defaultStepUpHandler returns an OnStepUpRequired callback for the given APIClient.
 // The returned function parses the WWW-Authenticate header and either runs the CLI
-// presence relay (interactive TTY + presence="required") or fails with an actionable
+// presence relay (presence="required", with or without a TTY) or fails with an actionable
 // error (non-interactive or assurance level cannot be raised programmatically).
 func defaultStepUpHandler(client *APIClient) func(wwwAuthenticate, method, path string, bodyBytes []byte) (string, error) {
 	return func(wwwAuthenticate, method, path string, bodyBytes []byte) (string, error) {
 		required, presenceRequired, permission := parseStepUpHeader(wwwAuthenticate)
 
-		if !isTerminalFn() {
-			return "", fmt.Errorf("step-up required: %s assurance needed for this action; re-run interactively or use an mTLS-authenticated session", required)
-		}
-
 		if !presenceRequired {
+			if !isTerminalFn() {
+				return "", fmt.Errorf("step-up required: %s assurance needed for this action; re-run interactively or use an mTLS-authenticated session", required)
+			}
 			// The session assurance level cannot be raised programmatically in the CLI.
 			// The operator must log in via the web UI or use an mTLS-authenticated session.
 			return "", fmt.Errorf("step-up required: %s assurance needed for this action; log in via the web UI to elevate the session or use an mTLS-authenticated session", required)
@@ -226,8 +229,9 @@ func classifyPresenceCtxErr(ctx context.Context) error {
 
 // runPresenceBrowserFlow is the CLI presence relay (Issue #4287, ADR-021 Amendment 4/6):
 // lodges a presence request bound to (method, path, sha256(bodyBytes), permission),
-// opens the controller's own relay page for the admin to run the WebAuthn ceremony,
-// and polls collect until the resulting single-use presence token is available.
+// prints the controller's own relay page URL (and, on a TTY, opens it) for the admin to
+// run the WebAuthn ceremony, and polls collect until the resulting single-use presence
+// token is available.
 func runPresenceBrowserFlow(client *APIClient, method, path string, bodyBytes []byte, permission string) (string, error) {
 	lodged, err := client.LodgeCliPresence(context.Background(), LodgeCliPresenceRequestBody{
 		Method:     method,
@@ -246,8 +250,12 @@ func runPresenceBrowserFlow(client *APIClient, method, path string, bodyBytes []
 	fmt.Fprintf(os.Stderr, "Approve this action by visiting: %s\n", confirmURL)
 	fmt.Fprintf(os.Stderr, "Expires: %s\n", logging.SanitizeLogValue(lodged.ExpiresAt))
 
-	if browserErr := presenceOpenBrowserFn(confirmURL); browserErr != nil {
-		fmt.Fprintln(os.Stderr, "Could not open a browser automatically — open the URL above manually.")
+	// Without a terminal (scripted and agent sessions) never launch a browser: the URL
+	// above is the only channel, confirmed out of band while this process polls.
+	if isTerminalFn() {
+		if browserErr := presenceOpenBrowserFn(confirmURL); browserErr != nil {
+			fmt.Fprintln(os.Stderr, "Could not open a browser automatically — open the URL above manually.")
+		}
 	}
 
 	signalCtx, stopSignal := presenceSignalContextFn()
