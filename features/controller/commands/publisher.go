@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/pkg/cache"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/controlplane/signerchain"
@@ -73,6 +74,10 @@ type Publisher struct {
 
 	// Logger
 	logger logging.Logger
+
+	// signals records send outcomes and completion latency. Nil records
+	// nothing. Guarded by mu.
+	signals *Signals
 
 	// Fence retry state (Issue #4866), guarded by mu.
 	fenceRetryDelay time.Duration
@@ -149,6 +154,120 @@ func New(cfg *Config) (*Publisher, error) {
 		}),
 		fenceTimers: make(map[*time.Timer]struct{}),
 	}, nil
+}
+
+// Command signal outcomes. Send outcomes are recorded where the command leaves
+// the publisher; completion outcomes where its pending entry resolves.
+const (
+	OutcomeSent       = "sent"
+	OutcomeSendFailed = "send_failed"
+	OutcomeCompleted  = "completed"
+	OutcomeFailed     = "failed"
+	OutcomeTimeout    = "timeout"
+
+	// commandTypeOther labels a command type outside the closed set below, so
+	// series cardinality never depends on what a caller passes.
+	commandTypeOther = "other"
+)
+
+// signalCommandTypes is the closed set of command types a signal may carry.
+var signalCommandTypes = []controlplaneTypes.CommandType{
+	controlplaneTypes.CommandSyncConfig,
+	controlplaneTypes.CommandSyncDNA,
+	controlplaneTypes.CommandReconnect,
+	controlplaneTypes.CommandExecuteScript,
+	controlplaneTypes.CommandRelayResponse,
+	controlplaneTypes.CommandPushSigningCert,
+	controlplaneTypes.CommandPushStewardBinary,
+	controlplaneTypes.CommandOpenTerminal,
+	controlplaneTypes.CommandStewardAction,
+	controlplaneTypes.CommandObserveModules,
+}
+
+// completionLatencyBuckets are upper bounds in seconds.
+var completionLatencyBuckets = []float64{0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300}
+
+// Signals records command send outcomes and completion latency into a health
+// signal registry. Labels are the command type (a closed set; anything else is
+// "other") and the outcome, never a command, steward or tenant identifier.
+type Signals struct {
+	sends       *health.Counter
+	completions *health.Histogram
+}
+
+// NewSignals registers the command signals on reg. It fails if reg is nil or
+// the metric names are already registered.
+func NewSignals(reg *health.SignalRegistry) (*Signals, error) {
+	if reg == nil {
+		return nil, fmt.Errorf("signal registry is required")
+	}
+	types := []string{commandTypeOther}
+	for _, t := range signalCommandTypes {
+		types = append(types, string(t))
+	}
+
+	sends, err := reg.RegisterCounter("cfgms_command_send_total",
+		"Commands handed to the control plane, by command type and send outcome.",
+		map[string][]string{
+			"command_type": types,
+			"outcome":      {OutcomeSent, OutcomeSendFailed},
+		})
+	if err != nil {
+		return nil, fmt.Errorf("register command send signal: %w", err)
+	}
+	completions, err := reg.RegisterHistogram("cfgms_command_completion_seconds",
+		"Seconds from command send to a terminal steward event or timeout, by command type and outcome.",
+		completionLatencyBuckets,
+		map[string][]string{
+			"command_type": types,
+			"outcome":      {OutcomeCompleted, OutcomeFailed, OutcomeTimeout},
+		})
+	if err != nil {
+		return nil, fmt.Errorf("register command completion signal: %w", err)
+	}
+	return &Signals{sends: sends, completions: completions}, nil
+}
+
+func signalCommandType(t controlplaneTypes.CommandType) string {
+	for _, known := range signalCommandTypes {
+		if t == known {
+			return string(t)
+		}
+	}
+	return commandTypeOther
+}
+
+// recordSend records a send outcome. A nil receiver records nothing. Labels are
+// from closed sets, so a record error cannot occur and a metric must never
+// affect command delivery.
+func (s *Signals) recordSend(t controlplaneTypes.CommandType, outcome string) {
+	if s == nil {
+		return
+	}
+	_ = s.sends.Inc(map[string]string{"command_type": signalCommandType(t), "outcome": outcome})
+}
+
+// recordCompletion records the time since sentAt for a resolved command.
+func (s *Signals) recordCompletion(t controlplaneTypes.CommandType, outcome string, sentAt time.Time) {
+	if s == nil {
+		return
+	}
+	_ = s.completions.Observe(time.Since(sentAt).Seconds(),
+		map[string]string{"command_type": signalCommandType(t), "outcome": outcome})
+}
+
+// SetSignals sets the recorder for send outcomes and completion latency. A nil
+// recorder records nothing.
+func (p *Publisher) SetSignals(s *Signals) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.signals = s
+}
+
+func (p *Publisher) currentSignals() *Signals {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.signals
 }
 
 // RetryFenced schedules one re-send of a command the steward rejected on its
@@ -267,8 +386,10 @@ func (p *Publisher) PublishCommandWithSigner(ctx context.Context, stewardID stri
 	}
 
 	if err := p.controlPlane.SendCommand(ctx, sc); err != nil {
+		p.currentSignals().recordSend(cmdType, OutcomeSendFailed)
 		return "", fmt.Errorf("failed to send command: %w", err)
 	}
+	p.currentSignals().recordSend(cmdType, OutcomeSent)
 
 	p.logger.Info("Sent command to steward",
 		"command_id", commandID,
@@ -314,8 +435,10 @@ func (p *Publisher) PublishCommandWithID(ctx context.Context, commandID, steward
 	}
 
 	if err := p.controlPlane.SendCommand(ctx, sc); err != nil {
+		p.currentSignals().recordSend(cmdType, OutcomeSendFailed)
 		return fmt.Errorf("failed to send command: %w", err)
 	}
+	p.currentSignals().recordSend(cmdType, OutcomeSent)
 
 	p.logger.Info("Sent command to steward",
 		"command_id", logging.SanitizeLogValue(commandID),
@@ -422,8 +545,10 @@ func (p *Publisher) PublishCommandWithSignerAndCallback(
 			pending.cancelTimer.Stop()
 		}
 		p.mu.Unlock()
+		p.currentSignals().recordSend(cmdType, OutcomeSendFailed)
 		return "", fmt.Errorf("failed to send command: %w", err)
 	}
+	p.currentSignals().recordSend(cmdType, OutcomeSent)
 
 	p.logger.Info("Sent command to steward",
 		"command_id", commandID,
@@ -441,6 +566,8 @@ func (p *Publisher) HandleEventUpdate(ctx context.Context, event *controlplaneTy
 	if event.CommandID != "" {
 		p.mu.Lock()
 		pending, exists := p.pending[event.CommandID]
+		signals := p.signals
+		terminalOutcome := ""
 		if exists {
 			// Cancel timeout timer
 			if pending.cancelTimer != nil {
@@ -448,11 +575,22 @@ func (p *Publisher) HandleEventUpdate(ctx context.Context, event *controlplaneTy
 			}
 
 			// Remove from pending if command completed or failed
-			if event.Type == controlplaneTypes.EventCommandCompleted || event.Type == controlplaneTypes.EventCommandFailed {
+			switch event.Type {
+			case controlplaneTypes.EventCommandCompleted:
+				terminalOutcome = OutcomeCompleted
+			case controlplaneTypes.EventCommandFailed:
+				terminalOutcome = OutcomeFailed
+			}
+			if terminalOutcome != "" {
 				delete(p.pending, event.CommandID)
 			}
 		}
 		p.mu.Unlock()
+
+		// Latency is recorded once, by whichever path removed the pending entry.
+		if terminalOutcome != "" {
+			signals.recordCompletion(pending.Type, terminalOutcome, pending.SentAt)
+		}
 
 		// Call completion callback if exists
 		if exists && pending.OnComplete != nil {
@@ -479,6 +617,7 @@ func (p *Publisher) handleCommandTimeout(commandID string) {
 	p.mu.Unlock()
 
 	if exists {
+		p.currentSignals().recordCompletion(pending.Type, OutcomeTimeout, pending.SentAt)
 		p.logger.Warn("Command timed out",
 			"command_id", commandID,
 			"steward_id", logging.SanitizeLogValue(pending.StewardID),
