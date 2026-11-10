@@ -383,3 +383,84 @@ func TestRunPresenceBrowserFlow_Expired(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "timed out waiting")
 }
+
+// --- Tenant-crossing challenge: routed to the crossing remedy, never to step-up ---
+
+// newCrossingChallengeClient builds a client wired to defaultStepUpHandler against a
+// server answering every request with the controller's tenant-crossing 401 envelope.
+func newCrossingChallengeClient(t *testing.T, body string) (*APIClient, *int) {
+	t.Helper()
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("WWW-Authenticate", `CFGMS-StepUp realm="cfgms", required="tenant-crossing"`)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+
+	var client *APIClient
+	var err error
+	client, err = NewAPIClient(&APIClientConfig{
+		BaseURL:     server.URL,
+		TLSInsecure: true,
+		OnStepUpRequired: func(wwwAuth, method, path string, bodyBytes []byte) (string, error) {
+			return defaultStepUpHandler(client)(wwwAuth, method, path, bodyBytes)
+		},
+	})
+	require.NoError(t, err)
+	return client, &requestCount
+}
+
+func TestStepUp_TenantCrossing_NamesCrossingRemedy(t *testing.T) {
+	const body = `{"error":"tenant_crossing_required","required_assurance":"tenant-crossing","break_glass_endpoint":"/api/v1/tenants/msp-a/break-glass","reason_categories":["account_recovery"]}`
+
+	for _, interactive := range []bool{true, false} {
+		origTerm, origFlow := isTerminalFn, presenceBrowserFlowFn
+		isTerminalFn = func() bool { return interactive }
+		flowCalled := false
+		presenceBrowserFlowFn = func(*APIClient, string, string, []byte, string) (string, error) {
+			flowCalled = true
+			return "", nil
+		}
+
+		client, requestCount := newCrossingChallengeClient(t, body)
+		_, err := client.doRequest(context.Background(), "GET", "/api/v1/anything", nil)
+		isTerminalFn, presenceBrowserFlowFn = origTerm, origFlow
+
+		require.Error(t, err, "interactive=%v", interactive)
+		msg := err.Error()
+		assert.Contains(t, msg, "tenant_crossing_required")
+		assert.Contains(t, msg, "grant")
+		assert.Contains(t, msg, "cfg tenant break-glass")
+		assert.Contains(t, msg, "/api/v1/tenants/msp-a/break-glass")
+		assert.NotContains(t, msg, "mTLS")
+		assert.NotContains(t, msg, "web UI")
+		assert.False(t, flowCalled, "presence relay must not run for a crossing challenge")
+		assert.Equal(t, 1, *requestCount, "a crossing is not retried")
+	}
+}
+
+func TestStepUp_TenantCrossing_WithoutBreakGlassEndpoint(t *testing.T) {
+	for _, body := range []string{
+		`{"error":"tenant_crossing_required","required_assurance":"tenant-crossing","reason_categories":[]}`,
+		``,
+		`not json`,
+	} {
+		origTerm := isTerminalFn
+		isTerminalFn = func() bool { return true }
+		client, _ := newCrossingChallengeClient(t, body)
+		_, err := client.doRequest(context.Background(), "GET", "/api/v1/anything", nil)
+		isTerminalFn = origTerm
+
+		require.Error(t, err, "body %q", body)
+		msg := err.Error()
+		assert.Contains(t, msg, "grant", "body %q", body)
+		assert.Contains(t, msg, "cfg tenant break-glass", "body %q", body)
+		assert.NotContains(t, msg, "break-glass endpoint:", "body %q", body)
+		for _, banned := range []string{"mTLS", "web UI", "log in again"} {
+			assert.NotContains(t, msg, banned, "body %q", body)
+		}
+	}
+}

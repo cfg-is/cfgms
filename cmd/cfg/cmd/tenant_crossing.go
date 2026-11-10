@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -31,6 +32,52 @@ const (
 // crossingReasonCategories mirrors the controller's break-glass reason identifiers;
 // the API stays the authority and rejects anything else with INVALID_REASON_CATEGORY.
 var crossingReasonCategories = []string{"account_recovery", "security_incident", "legal_request", "billing_dispute"}
+
+// crossingChallengeRequired is the `required` value of the controller's
+// tenant-crossing challenge. It is a tenant-boundary decision (ADR-025), not an
+// assurance level, so no step-up, presence or mTLS path satisfies it.
+const crossingChallengeRequired = "tenant-crossing"
+
+// isCrossingChallengeHeader reports whether a CFGMS-StepUp WWW-Authenticate value
+// is the tenant-crossing challenge.
+func isCrossingChallengeHeader(wwwAuthenticate string) bool {
+	if !strings.HasPrefix(wwwAuthenticate, "CFGMS-StepUp") {
+		return false
+	}
+	required, _, _ := parseStepUpHeader(wwwAuthenticate)
+	return required == crossingChallengeRequired
+}
+
+// isCrossingChallenge reports whether a response is a tenant-crossing challenge:
+// the WWW-Authenticate header, the body's required_assurance or its
+// break_glass_endpoint says so, so a body without the endpoint still counts.
+func isCrossingChallenge(resp *http.Response, requiredAssurance, breakGlassEndpoint string) bool {
+	return breakGlassEndpoint != "" || requiredAssurance == crossingChallengeRequired ||
+		isCrossingChallengeHeader(resp.Header.Get("WWW-Authenticate"))
+}
+
+// crossingRemedy names both ways across a tenant boundary, plus the controller's
+// break_glass_endpoint when it resolved one.
+func crossingRemedy(breakGlassEndpoint string) string {
+	remedy := "ask an administrator of the target tenant for a grant (`cfg tenant grant <tenant> --duration <duration>`) " +
+		"or, where you hold it, run `cfg tenant break-glass <tenant> --reason <reason> --justification \"...\"`"
+	if breakGlassEndpoint != "" {
+		remedy += " (break-glass endpoint: " + breakGlassEndpoint + ")"
+	}
+	return remedy
+}
+
+// tenantCrossingStepUpError returns the crossing remedy error when wwwAuthenticate
+// is a tenant-crossing challenge, closing resp.Body; otherwise nil with resp
+// untouched. It runs before any assurance or presence handling: the response body
+// carries break_glass_endpoint, which the step-up callback never sees.
+func tenantCrossingStepUpError(wwwAuthenticate string, resp *http.Response) error {
+	if !isCrossingChallengeHeader(wwwAuthenticate) {
+		return nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return crossingError(resp, "request refused")
+}
 
 var (
 	tenantBreakGlassJustification string
