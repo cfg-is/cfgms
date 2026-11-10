@@ -13,15 +13,16 @@
  * StepUpModal. Layout follows ScriptPrivilegePanel (panel) and the workflow
  * ApprovalsView (inbox).
  *
- * The diff is a plain-text unified diff shown in a <pre> text node. The cockpit
- * DriftDiffCard renders structured desired-versus-actual field comparisons from
- * an entity pin, so it cannot show a text diff as it is; that gap is reported
- * for the founder design gate.
+ * The diff is a plain-text unified diff rendered line by line by the shared
+ * TextDiff, which colours added and removed lines. The cockpit DriftDiffCard
+ * renders structured desired-versus-actual field comparisons from an entity pin,
+ * so it cannot show a text diff.
  *
  * Security A9.1: script ids, versions, reasons and diff text are untrusted-origin
  * data and render as JSX text only, never as HTML.
  */
 import { useState } from 'react'
+import TextDiff from '../shell/TextDiff.tsx'
 import type {
   ApprovalState,
   PendingScriptChange,
@@ -69,9 +70,7 @@ function PendingChangeCard({
       </span>
       {change.first_seen !== '' && <span className="mut">First seen {change.first_seen}</span>}
       {change.diff !== '' ? (
-        <pre className="mono2" style={{ overflowX: 'auto' }} data-testid="pending-diff">
-          {change.diff}
-        </pre>
+        <TextDiff diff={change.diff} data-testid="pending-diff" />
       ) : (
         <span className="mut" data-testid="pending-diff-unavailable">
           {change.diff_unavailable || 'No diff is available for this change.'}
