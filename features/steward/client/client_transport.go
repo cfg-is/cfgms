@@ -218,6 +218,13 @@ type TransportClient struct {
 	signingTrustGen            uint64
 	refetchConfigOnTrustChange bool
 
+	// signingTrustMu serializes the push_signing_cert read-compute-persist-apply
+	// sequence so concurrent pushes each start from the previous result and
+	// neither the identity file nor signingCertPEMs loses an update. It is
+	// separate from mu, which hot-path readers take, and is always acquired
+	// before mu.
+	signingTrustMu sync.Mutex
+
 	// identityPersistFunc is called by the push-signing-cert handler to atomically
 	// persist updated signing cert PEMs before in-memory state is updated (Issue #1816).
 	// If nil, persistence is skipped and the cert is learned in memory only.
@@ -3509,6 +3516,34 @@ func parseRetireSerials(v interface{}) (map[string]bool, error) {
 	return out, nil
 }
 
+// nextSigningCertPEMs computes the trust set that results from pushing leafPEM
+// onto existing. retireOld replaces the set with the pushed leaf; otherwise the
+// leaf is appended and any certs whose serial is in retireSerials are dropped
+// (never the pushed cert itself). It refuses a result that would be empty.
+func nextSigningCertPEMs(existing []string, leafPEM string, pushed *x509.Certificate, retireOld bool, retireSerials map[string]bool) ([]string, error) {
+	if retireOld {
+		return []string{leafPEM}, nil
+	}
+	newPEMs := dedupeSigningCertPEMs(append(existing, leafPEM))
+	if len(retireSerials) == 0 {
+		return newPEMs, nil
+	}
+	pushedFP := certFingerprint(pushed.Raw)
+	kept := make([]string, 0, len(newPEMs))
+	for _, p := range newPEMs {
+		parsed, perr := cert.ParseCertificateFromPEM([]byte(p))
+		if perr == nil && certFingerprint(parsed.Raw) != pushedFP &&
+			retireSerials[parsed.SerialNumber.String()] {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	if len(kept) == 0 {
+		return nil, fmt.Errorf("push_signing_cert: retire_serials would leave the trust set empty")
+	}
+	return kept, nil
+}
+
 // handlePushSigningCert processes a COMMAND_TYPE_PUSH_SIGNING_CERT command from the
 // controller. It validates the pushed cert, persists it atomically (persist-before-ack),
 // then updates the in-memory signing cert set and rebuilds the MultiVerifier (Issue #1816).
@@ -3574,6 +3609,9 @@ func (c *TransportClient) handlePushSigningCert(_ context.Context, cmd *cpTypes.
 	// Build updated cert PEMs slice: retire_old=true replaces; otherwise append.
 	retireOld, _ := cmd.Params["retire_old"].(bool)
 
+	c.signingTrustMu.Lock()
+	defer c.signingTrustMu.Unlock()
+
 	c.mu.RLock()
 	existing := make([]string, len(c.signingCertPEMs))
 	copy(existing, c.signingCertPEMs)
@@ -3581,27 +3619,9 @@ func (c *TransportClient) handlePushSigningCert(_ context.Context, cmd *cpTypes.
 
 	// Persist only the leaf; any chain carried in the bundle is verification input.
 	leafPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: x509Cert.Raw}))
-	var newPEMs []string
-	if retireOld {
-		newPEMs = []string{leafPEM}
-	} else {
-		newPEMs = dedupeSigningCertPEMs(append(existing, leafPEM))
-		if len(retireSerials) > 0 {
-			pushedFP := certFingerprint(x509Cert.Raw)
-			kept := make([]string, 0, len(newPEMs))
-			for _, p := range newPEMs {
-				parsed, perr := cert.ParseCertificateFromPEM([]byte(p))
-				if perr == nil && certFingerprint(parsed.Raw) != pushedFP &&
-					retireSerials[parsed.SerialNumber.String()] {
-					continue
-				}
-				kept = append(kept, p)
-			}
-			if len(kept) == 0 {
-				return fmt.Errorf("push_signing_cert: retire_serials would leave the trust set empty")
-			}
-			newPEMs = kept
-		}
+	newPEMs, err := nextSigningCertPEMs(existing, leafPEM, x509Cert, retireOld, retireSerials)
+	if err != nil {
+		return err
 	}
 
 	// Persist BEFORE updating in-memory state (persist-before-ack).
