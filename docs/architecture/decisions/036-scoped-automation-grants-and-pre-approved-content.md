@@ -1,12 +1,12 @@
 # ADR-036: Scoped Automation Grants and Pre-Approved Content
 
-**Status:** Accepted
+**Status:** Accepted; amended 2026-11-10 (Amendment 1)
 
 **Date:** 2026-10-23
 
 **Deciders:** Founder, Architecture
 
-**Related:** ADR-021 §8 (automation terminal at `AssuranceMachine`), ADR-021 Amendment 2 and the operator-payload signing cross-reference (#3695), ADR-025 (tenant access boundary), ADR-022 (entity graph / case workflow), Epic #5300 (web admin parity), Epic [#5421](https://github.com/cfg-is/cfgms/issues/5421).
+**Related:** ADR-021 §8 (automation terminal at `AssuranceMachine`), ADR-021 Amendment 2 and the operator-payload signing cross-reference (#3695), ADR-025 (tenant access boundary), ADR-022 (entity graph / case workflow), Epic #5300 (web admin parity), Epic [#5421](https://github.com/cfg-is/cfgms/issues/5421), Epic [#5980](https://github.com/cfg-is/cfgms/issues/5980) (Amendment 1).
 
 ---
 
@@ -65,7 +65,9 @@ Workflows synced from git follow the same three approval modes as scripts.
 
 ### 5. ADR-021 §8 is amended
 
-§8's "no exception mechanism" is replaced by this ADR. Automation grants are the only machine-elevation path. They never reach a permission that requires presence.
+§8's "no exception mechanism" is replaced by this ADR. Machine principals have exactly two elevation paths: automation grants (§3) and the rollout credential ([Amendment 1](#amendment-1-2026-11-10-rollout-credential-for-continuous-deployment)). Automation grants never reach a permission that requires presence.
+
+This ADR governs machine principals only. AI agents that act as operators are treated as users with their own accounts, not as machine principals; that model needs its own decision (see the roadmap entry for agent user accounts).
 
 ## Non-Goals
 
@@ -88,3 +90,40 @@ Workflows synced from git follow the same three approval modes as scripts.
 ## Prerequisite
 
 Saved-script (library) runs must work end to end before any of this is built: the controller must wire the script library and forward the library script's identity and signature to the steward (Issue #5422).
+
+---
+
+## Amendment 1 (2026-11-10): Rollout credential for continuous deployment
+
+**Implementation status:** not yet built. Delivered by fix [#6053](https://github.com/cfg-is/cfgms/issues/6053) (binary approval) and stories [#6065](https://github.com/cfg-is/cfgms/issues/6065), [#6066](https://github.com/cfg-is/cfgms/issues/6066), [#6067](https://github.com/cfg-is/cfgms/issues/6067), [#6068](https://github.com/cfg-is/cfgms/issues/6068) and [#6069](https://github.com/cfg-is/cfgms/issues/6069) under Epic #5980.
+
+### Context
+
+Continuous deployment publishes a steward binary, approves it and rolls it out with no human acting per build. Ordinary API keys can already publish binaries, dispatch upgrades and start rollouts (#5298 kept them working). They cannot approve a binary: the approve route requires a presence tap and refuses machine principals (#6053), and every upgrade path requires an approved binary. §3 grants do not cover this either, because their actions are limited to reads and pre-approved content.
+
+### Decision
+
+1. **Rollout credential.** A rollout credential is an API key with the explicit kind `rollout`, stored on the key record. Only a dedicated route sets the kind; the generic API-key route cannot. An admin mints it once with a presence tap and must already hold every permission it receives. It is bound to the admin's tenant, has a required expiry within a fixed maximum, is shown once and can be revoked at once. The kind is never inferred from a permission set.
+2. **Permissions.** Exactly `installer:publish:steward`, `installer:dispatch:steward`, `installer:read` and `monitoring:write-markers`. It cannot approve a binary through the approve route, change any setting or mint credentials.
+3. **Per-cell opt-in.** Each controller cell has an "unattended rollouts" setting. It is off by default, changing it requires a presence tap, and every change is audited. While it is off, the rollout credential is refused on binary publish, upgrade dispatch and rollout start. The setting does not affect other API keys.
+4. **Automatic approval.** A binary published by the rollout credential while the setting is on, whose publisher signature verified at publish, is approved automatically. The approval is a durable record bound to the SHA-256 of those bytes, with `approved_by` set to `unattended:<credential-id>`, and it is audited as its own action. Different bytes need a new approval. Turning the setting off later does not revoke approvals already recorded.
+5. **Accepted for any deployment.** This is the accepted continuous-deployment path for every cell, including hosted SaaS cells. Each cell opts in through its own setting.
+
+### Threat-model bounds
+
+A stolen rollout credential:
+
+- can roll out only binaries signed by a publisher key the controller already trusts; the credential holds no signing key;
+- cannot reach a steward that verifies signatures itself (`module_trust.mode: strict`) with anything that steward does not trust;
+- acts only within its tenant;
+- stops working when it expires, is revoked, or the cell's setting is turned off;
+- leaves an audit record and a deploy marker for every publish, approval, rollout and halt.
+
+The cell setting is the rarely touched control that bounds this. A phished admin who turns it on must tap, and the change is audited.
+
+### Consequences
+
+- Continuous deployment needs one tapped setup step per cell (mint the credential and turn the setting on), then runs with no human per build.
+- A second machine principal kind exists beside automation grants, and RBAC, assurance and audit treat it explicitly.
+- The publisher signing key, not the credential, is the trust root for what reaches stewards. Protecting that key is the deployment pipeline's responsibility.
+
