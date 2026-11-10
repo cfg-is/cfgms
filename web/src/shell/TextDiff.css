@@ -1,0 +1,33 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright 2026 Jordan Ritz */
+
+/* TextDiff (Issue #6036) — added/removed line colouring. Tokens only. */
+.textdiff {
+  margin: 0;
+  padding: var(--space-2) 0;
+  max-width: 100%;
+  overflow-x: auto;
+  background: var(--bg-sunk);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+.textdiff-line {
+  display: block;
+  min-width: max-content;
+  padding: 0 var(--space-3);
+  white-space: pre;
+}
+.textdiff-added {
+  background: var(--state-ok-bg);
+  color: var(--state-ok);
+}
+.textdiff-removed {
+  background: var(--state-crit-bg);
+  color: var(--state-crit);
+}
+.textdiff-header {
+  color: var(--text-faint);
+}

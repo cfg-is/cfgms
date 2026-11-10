@@ -178,7 +178,9 @@ describe('ScriptApprovalPanel pending diff', () => {
     expect(diff.textContent).toBe(pendingChange.diff)
     expect(diff.textContent).toContain('<img src=x onerror=alert(1)>')
     expect(diff.querySelector('img')).toBeNull()
-    expect(diff.children).toHaveLength(0)
+    // TextDiff renders one <span> per diff line; no other element is injected.
+    expect(Array.from(diff.children).every((c) => c.tagName === 'SPAN')).toBe(true)
+    expect(diff.children).toHaveLength(pendingChange.diff.split('\n').length)
     expect(screen.getByTestId('script-approval-panel').querySelector('img')).toBeNull()
   })
 
