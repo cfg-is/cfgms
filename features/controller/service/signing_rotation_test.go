@@ -26,6 +26,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
 	"github.com/cfgis/cfgms/pkg/controlplane/providers/memory"
+	"github.com/cfgis/cfgms/pkg/controlplane/signerchain"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -897,7 +898,7 @@ func newChainedRotationFixture(t *testing.T, stewardID string) *chainedRotationF
 	publisher, err := commands.New(&commands.Config{
 		ControlPlane: server,
 		Logger:       logger,
-		SignerChains: commands.NewSignerChainBuilder(certMgr),
+		SignerChains: signerchain.NewSignerChainBuilder(certMgr),
 	})
 	require.NoError(t, err)
 

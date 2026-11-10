@@ -20,10 +20,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/config/signature"
-	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/controlplane/signerchain"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration/identity"
@@ -97,7 +97,7 @@ func newRepairEnv(t *testing.T) *repairEnv {
 
 	signer := signature.NewDynamicSigner(service.NewSigningResolver(certMgr))
 	sender := &recordingRepairSender{}
-	server.SetRepairDelivery(sender, signer, commands.NewSignerChainBuilder(certMgr))
+	server.SetRepairDelivery(sender, signer, signerchain.NewSignerChainBuilder(certMgr))
 	return &repairEnv{
 		tamperEnv: &tamperEnv{cloneEnv: base, lockdown: ld, sender: tsender},
 		sender:    sender, signer: signer, certDir: certDir,

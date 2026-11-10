@@ -20,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/pkg/cache"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	"github.com/cfgis/cfgms/pkg/controlplane/signerchain"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -61,7 +62,7 @@ type Publisher struct {
 
 	// signerChains attaches the signer certificate chain at signing time (#5724).
 	// Nil sends commands without a chain.
-	signerChains *SignerChainBuilder
+	signerChains *signerchain.SignerChainBuilder
 
 	// termSource stamps the current Raft term onto outbound commands (#3390).
 	// When nil the term field is zero (pre-fencing behaviour).
@@ -103,7 +104,7 @@ type Config struct {
 
 	// SignerChains attaches the signer certificate chain to each signed command
 	// so a locked-down steward can verify it. Nil sends commands without a chain.
-	SignerChains *SignerChainBuilder
+	SignerChains *signerchain.SignerChainBuilder
 
 	// TermSource stamps the current Raft term onto every outbound command (#3390).
 	// When nil the term field is zero (pre-fencing behaviour).
