@@ -1,0 +1,4 @@
+file: entity-edge-assert.html
+order: 20
+status: **Reference**
+what: **Assert relationship** (Epic #5300 · #5464) — no new route: an action in the cockpit **Blast radius** card header (`/cases/:id`) opens a right-hand drawer with the card's pinned entity pre-filled and locked as **From** (with Swap direction). Relationship picker (the 12 standard types plus a custom `related:<name>`), a tenant-scoped **To** entity search, a "Will record" preview, optional key/value attributes, and a no-passkey note — `entity:write` asks for no step-up or presence tap. States: entry point, empty, filled (search results), pipe character rejected client-side, submitting, success (edge shown and the graph re-drawn), cross-tenant 404 (the controller never says which entity), crossing required (401) and server error. Renders directly with its own **State / Theme** strip; both themes.

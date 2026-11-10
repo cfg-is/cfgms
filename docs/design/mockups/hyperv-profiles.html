@@ -1,0 +1,885 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CFGMS Hyper-V Profiles — mockup</title>
+<!--
+  Hyper-V provisioning profiles (Epic #5300 · Story #5461), route /hyperv/profiles.
+  List, view, create and delete unattend profiles (GET list, GET /{name}, POST, DELETE /{name}).
+  A profile template runs as root (Linux) / SYSTEM (Windows) on the first boot of every new
+  VM whose source names it, so create is two steps: Edit, then Review (the whole template as
+  literal text, enrollment called out, an explicit "I read it" check) before the passkey tap.
+  Create and delete need a passkey tap (AssuranceStrong + user presence). Delete is an inline
+  confirm. States: Ready / Empty / Loading / Error / View / Create-edit / Create-review /
+  Passkey / Validation error / Delete confirm.
+  Design tokens are inlined from docs/design/web-ui-design-tokens.css (source of truth); shell
+  chrome mirrors web/src/shell/AppShell.css; the passkey dialog mirrors web/src/auth/StepUpModal.css.
+  Standalone and interactive: the dashed top strip is a review harness (state + theme), not
+  product UI. URL params ?state=<name>&theme=light|dark preselect a state.
+-->
+<style>
+/*
+ * CFGMS Web UI — Design Tokens
+ * ----------------------------------------------------------------------------
+ * Machine-readable token layer for the controller-served web app (Epic #2344).
+ * Values are lifted verbatim from the public brand style guide
+ * (https://cfg.is/style-guide) so the app and the marketing site share one
+ * source of truth for colour. See docs/design/web-ui-design-system.md for the
+ * rationale, usage rules, and open items.
+ *
+ * Identity in one line: a WARM TERMINAL — near-black / near-white grounds that
+ * hold a trace of warmth, STONE-NEUTRAL text, muted slate-blue accent,
+ * desaturated earth-tone semantics, and a palette of muted card tints. Ground
+ * and ink sit in different hue bands on purpose: when both were warm the whole
+ * surface read rust. State owns the colour budget; the accent is reserved for
+ * interaction; mono carries all machine data.
+ *
+ * Theme model: default tokens are light. `@media (prefers-color-scheme: dark)`
+ * supplies dark. `:root[data-theme="light"|"dark"]` overrides the media query
+ * in both directions (the app's own theme control stamps data-theme on :root).
+ * ==========================================================================*/
+
+:root {
+  /* --- Background & structure --- */
+  --bg-primary:   #f5f4f3;  /* app ground */
+  --bg-surface:   #ffffff;  /* panels, cards */
+  --bg-elevated:  #ececea;  /* raised / inset chrome */
+  --bg-sunk:      #ececea;  /* wells, code blocks */
+  --border:       #d0cfcd;
+
+  /* --- Text & accent --- */
+  --text-primary:   #5f5e58; /* stone (was warm taupe; see design-system §1) */
+  --text-secondary: #6e6d68;
+  --text-faint:     #82807a; /* micro-labels (contrast-tuned vs guide) */
+  --accent:         #4a6b7c; /* muted slate blue — INTERACTION ONLY */
+  --accent-ink:     #ffffff; /* text/icon on accent fill */
+
+  /* --- Semantic state (desaturated earth tones) --- */
+  --state-ok:        #507055;  --state-ok-bg:    #e8f0e9; /* converged / success */
+  --state-warn:      #7b5d1e;  --state-warn-bg:  #f2eadb; /* drift / warning (ochre) */
+  --state-crit:      #965044;  --state-crit-bg:  #f0e6e4; /* error (terracotta) */
+  --state-mauve:     #7a5f6e;                              /* alt error (guide) */
+  --state-neutral:   #605f5a;  --state-neutral-bg:#e2e1df; /* queued / inert */
+
+  /* --- Card tints (background only; meaning-encoding, not decoration) --- */
+  --tint-red:    #f0e6e4;  /* a problem / failing surface */
+  --tint-green:  #e8f0e9;  /* a fix / resolved surface */
+  --tint-orange: #f2eadb;  /* attention / dependency */
+  --tint-blue:   #e6eef2;  /* neutral context / timeline */
+  --tint-brown:  #e2e1df;  /* metadata / reference */
+  --tint-cream:  #f8f8f7;  /* summary / verdict */
+
+  /* --- Type --- */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, "SF Mono", "SFMono-Regular", Menlo, monospace;
+  --font-display: 'Ubuntu Mono', var(--font-mono); /* logo / terminal accent */
+
+  /* Type scale (1.20 minor-third, 13.5px base) */
+  --text-xs:   10px;   /* uppercase micro-labels */
+  --text-sm:   11.5px;
+  --text-base: 13.5px;
+  --text-md:   14px;
+  --text-lg:   16px;
+  --text-xl:   19px;
+  --text-2xl:  26px;   /* stat numerals */
+  --tracking-label: 0.09em; /* uppercase labels */
+
+  /* --- Spacing (4px base) --- */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px;
+  --space-4: 16px; --space-5: 20px; --space-6: 24px;
+
+  /* --- Radii --- */
+  --radius-sm: 7px;   /* pills-in-buttons, chips */
+  --radius:    9px;   /* buttons, inputs */
+  --radius-lg: 13px;  /* cards */
+  --radius-pill: 20px;
+
+  /* --- Elevation --- */
+  --shadow: 0 18px 50px -22px rgba(42, 42, 40, 0.40);
+
+  /* --- Data-viz: sequential ramp (ordinal, magnitude, H≈234 slate) --- */
+  /* Validated: lightness monotone, adjacent ΔL≥0.06, contrast ≥2.0:1, spread 1° */
+  --ordinal-1: #96bad0;  /* lowest */
+  --ordinal-2: #659dbd;
+  --ordinal-3: #2e80a9;
+  --ordinal-4: #0a6388;
+  --ordinal-5: #054561;  /* highest */
+
+  /* --- Data-viz: categorical theme (identity, brand-anchored, 4 slots max) --- */
+  /* Validated: adjacent CVD ΔE 18.5, normal 19.7; all-pairs slots 1-3 CVD 18.5 */
+  --cat-1: #0171a3;  /* slate */
+  --cat-2: #4f9d60;  /* green */
+  --cat-3: #7e3e1b;  /* amber */
+  --cat-4: #c27fb0;  /* mauve — adjacent forms only, not all-pairs (3-slot validated set) */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-primary:  #1a1a1a;
+    --bg-surface:  #242426;
+    --bg-elevated: #323231;
+    --bg-sunk:     #101010;
+    --border:      #535352;
+
+    --text-primary:   #bcbbb5;
+    --text-secondary: #9c9b96;
+    --text-faint:     #8d8c86;
+    --accent:         #7b9fb0;
+    --accent-ink:     #16202a;
+
+    --state-ok:      #7fa985;  --state-ok-bg:     #1a2e1d;
+    --state-warn:    #bd9547;  --state-warn-bg:   #2f2718;
+    --state-crit:    #d0846f;  --state-crit-bg:   #2b201e;
+    --state-mauve:   #a58198;
+    --state-neutral: #9c9b96;  --state-neutral-bg:#262624;
+
+    --tint-red:    #2b201e;
+    --tint-green:  #1a2e1d;
+    --tint-orange: #2f2718;
+    --tint-blue:   #1e2528;
+    --tint-brown:  #262624;
+    --tint-cream:  #232323;
+
+    --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+
+    /* --- Data-viz: sequential ramp (dark mode) --- */
+    --ordinal-1: #095b7e;
+    --ordinal-2: #0475a1;
+    --ordinal-3: #378eba;
+    --ordinal-4: #62a8ce;
+    --ordinal-5: #93c0da;
+
+    /* --- Data-viz: categorical theme (dark mode) --- */
+    /* Validated: adjacent CVD ΔE 8.2, normal 18.4; all-pairs slots 1-3 CVD 8.2 */
+    --cat-1: #3674a5;  /* slate */
+    --cat-2: #5ba269;  /* green */
+    --cat-3: #d57018;  /* amber */
+    --cat-4: #a55e93;  /* mauve */
+  }
+}
+
+/* Explicit overrides — the app's theme control stamps data-theme on :root and
+   must win over the OS media query in BOTH directions. */
+:root[data-theme="light"] {
+  --bg-primary: #f5f4f3; --bg-surface: #ffffff; --bg-elevated: #ececea; --bg-sunk: #ececea; --border: #d0cfcd;
+  --text-primary: #5f5e58; --text-secondary: #6e6d68; --text-faint: #82807a; --accent: #4a6b7c; --accent-ink: #ffffff;
+  --state-ok: #507055; --state-ok-bg: #e8f0e9; --state-warn: #7b5d1e; --state-warn-bg: #f2eadb;
+  --state-crit: #965044; --state-crit-bg: #f0e6e4; --state-mauve: #7a5f6e; --state-neutral: #605f5a; --state-neutral-bg: #e2e1df;
+  --tint-red: #f0e6e4; --tint-green: #e8f0e9; --tint-orange: #f2eadb; --tint-blue: #e6eef2; --tint-brown: #e2e1df; --tint-cream: #f8f8f7;
+  --shadow: 0 18px 50px -22px rgba(42, 42, 40, 0.40);
+  --ordinal-1: #96bad0; --ordinal-2: #659dbd; --ordinal-3: #2e80a9; --ordinal-4: #0a6388; --ordinal-5: #054561;
+  --cat-1: #0171a3; --cat-2: #4f9d60; --cat-3: #7e3e1b; --cat-4: #c27fb0;
+}
+
+:root[data-theme="dark"] {
+  --bg-primary: #1a1a1a; --bg-surface: #242426; --bg-elevated: #323231; --bg-sunk: #101010; --border: #535352;
+  --text-primary: #bcbbb5; --text-secondary: #9c9b96; --text-faint: #8d8c86; --accent: #7b9fb0; --accent-ink: #16202a;
+  --state-ok: #7fa985; --state-ok-bg: #1a2e1d; --state-warn: #bd9547; --state-warn-bg: #2f2718;
+  --state-crit: #d0846f; --state-crit-bg: #2b201e; --state-mauve: #a58198; --state-neutral: #9c9b96; --state-neutral-bg: #262624;
+  --tint-red: #2b201e; --tint-green: #1a2e1d; --tint-orange: #2f2718; --tint-blue: #1e2528; --tint-brown: #262624; --tint-cream: #232323;
+  --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+  --ordinal-1: #095b7e; --ordinal-2: #0475a1; --ordinal-3: #378eba; --ordinal-4: #62a8ce; --ordinal-5: #93c0da;
+  --cat-1: #3674a5; --cat-2: #5ba269; --cat-3: #d57018; --cat-4: #a55e93;
+}
+
+/* ---- mockup base + app shell (mirrors web/src/shell/AppShell.css) ---- */
+*{box-sizing:border-box;}
+html,body{margin:0;}
+body{background:var(--bg-primary); color:var(--text-primary); font-family:var(--font-sans); font-size:var(--text-base);
+  line-height:1.45; -webkit-font-smoothing:antialiased; position:relative; min-height:100dvh;}
+.mono{font-family:var(--font-mono);}
+button{font:inherit;}
+[hidden]{display:none !important;}
+
+/* harness strip — review affordance, not product UI */
+.harness{display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 16px; background:var(--bg-sunk);
+  border-bottom:1px dashed var(--border); font-size:var(--text-sm); color:var(--text-faint);}
+.harness .hl{font-family:var(--font-mono); letter-spacing:.04em; text-transform:uppercase; font-size:var(--text-xs);}
+.harness .grp{display:inline-flex; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius); padding:2px; flex-wrap:wrap;}
+.harness .grp button{appearance:none; border:0; background:transparent; color:var(--text-secondary); font-size:var(--text-sm);
+  font-weight:600; padding:5px 10px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+.harness .grp button[aria-pressed="true"]{background:var(--accent); color:var(--accent-ink);}
+.harness .sp{flex:1;}
+
+.shell{display:grid; grid-template-columns:1fr; min-height:calc(100dvh - 44px); position:relative;}
+.side{display:none; flex-direction:column; background:var(--bg-surface); border-right:1px solid var(--border);}
+.side .logo{display:flex; align-items:baseline; gap:7px; padding:var(--space-4) var(--space-4) var(--space-3);}
+.side .logo b{font-size:var(--text-md); letter-spacing:.13em; text-transform:uppercase;}
+.side .logo i{font-style:normal; font-size:var(--text-xs); color:var(--text-faint); letter-spacing:.05em;}
+.side nav{display:flex; flex-direction:column; gap:2px; padding:6px var(--space-3);}
+.side nav a{display:flex; align-items:center; gap:11px; padding:9px 11px; border-radius:var(--radius-sm); color:var(--text-secondary);
+  text-decoration:none; font-weight:500; font-size:var(--text-base);}
+.side nav a.active{background:var(--tint-blue); color:var(--accent); font-weight:600;}
+.side nav a .new{margin-left:auto; font-size:9px; letter-spacing:.06em; text-transform:uppercase; color:var(--accent);
+  border:1px solid var(--accent); border-radius:var(--radius-pill); padding:0 6px;}
+.main{min-width:0; display:flex; flex-direction:column;}
+.appbar{display:flex; align-items:center; gap:var(--space-2); padding:var(--space-2) var(--space-3); background:var(--bg-primary);
+  border-bottom:1px solid var(--border);}
+.chipbtn{display:inline-flex; align-items:center; gap:7px; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-secondary);
+  border-radius:var(--radius); padding:7px 11px; font-size:var(--text-sm); white-space:nowrap;}
+.chipbtn b{color:var(--text-primary); font-family:var(--font-mono); font-weight:600;}
+.searchbox{flex:1; max-width:420px; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-faint);
+  border-radius:var(--radius); padding:7px 11px; font-size:var(--text-sm);}
+.abspacer{flex:1;}
+.avatar{width:32px; height:32px; border-radius:50%; background:var(--bg-elevated); border:1px solid var(--border); display:grid;
+  place-items:center; font-size:var(--text-sm); font-weight:700; color:var(--text-secondary); flex:none;}
+.content{padding:var(--space-4); display:flex; flex-direction:column; gap:var(--space-4); max-width:1180px; width:100%;}
+.htitle{display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap;}
+.htitle h1{margin:0; font-size:var(--text-xl); font-weight:700; letter-spacing:-.01em;}
+.htitle p{margin:3px 0 0; color:var(--text-secondary); max-width:640px;}
+
+.panel{background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-lg); overflow:hidden;}
+.phead{display:flex; align-items:center; gap:9px; padding:12px 16px; border-bottom:1px solid var(--border); flex-wrap:wrap;}
+.phead h2{margin:0; font-size:var(--text-md); font-weight:700;}
+.phead .sub{color:var(--text-faint); font-size:var(--text-sm);}
+.phead .cnt{margin-left:auto; font-size:var(--text-sm); color:var(--text-faint); font-variant-numeric:tabular-nums;}
+.pbody{padding:14px 16px;}
+
+table.tbl{width:100%; border-collapse:collapse; font-size:13px;}
+.tbl th{text-align:left; font-size:10.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--text-faint); font-weight:600;
+  padding:9px 14px; border-bottom:1px solid var(--border); white-space:nowrap;}
+.tbl td{padding:10px 14px; border-bottom:1px solid var(--border); vertical-align:top;}
+.tbl tbody tr:last-child > td{border-bottom:0;}
+
+.pill{display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:var(--radius-pill); font-size:11px; font-weight:700; white-space:nowrap;}
+.pill svg{flex:none;}
+.pill-ok{background:var(--state-ok-bg); color:var(--state-ok);}
+.pill-warn{background:var(--state-warn-bg); color:var(--state-warn);}
+.pill-crit{background:var(--state-crit-bg); color:var(--state-crit);}
+.pill-neutral{background:var(--state-neutral-bg); color:var(--state-neutral);}
+.pill-acc{background:var(--tint-blue); color:var(--accent);}
+
+.btn{appearance:none; border:1px solid var(--accent); background:var(--accent); color:var(--accent-ink); font-size:var(--text-sm);
+  font-weight:600; padding:7px 14px; border-radius:var(--radius); cursor:pointer; white-space:nowrap; display:inline-flex; align-items:center; gap:7px;}
+.btn:disabled{opacity:.45; cursor:not-allowed;}
+.btn-sec{appearance:none; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-secondary); font-size:var(--text-sm);
+  font-weight:600; padding:7px 13px; border-radius:var(--radius); cursor:pointer; white-space:nowrap;}
+.btn-danger{appearance:none; border:1px solid var(--state-crit); background:var(--state-crit); color:var(--bg-surface); font-size:var(--text-sm);
+  font-weight:700; padding:7px 14px; border-radius:var(--radius); cursor:pointer; white-space:nowrap; display:inline-flex; align-items:center; gap:7px;}
+.btn-danger:disabled{opacity:.45; cursor:not-allowed;}
+.btn-danger-soft{appearance:none; border:1px solid var(--state-crit); background:var(--state-crit-bg); color:var(--state-crit); font-size:11px;
+  font-weight:600; padding:5px 11px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+.btn-sm{font-size:11px; padding:5px 11px; border-radius:var(--radius-sm);}
+button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+
+.field{display:flex; flex-direction:column; gap:5px; min-width:0;}
+.field label, .lbl{font-size:var(--text-xs); letter-spacing:var(--tracking-label); text-transform:uppercase; color:var(--text-faint); font-weight:600;}
+.field .req{color:var(--state-crit);}
+select, textarea, input[type=text], input[type=email]{appearance:none; width:100%; background:var(--bg-surface); color:var(--text-primary);
+  border:1px solid var(--border); border-radius:var(--radius); padding:8px 11px; font:inherit; font-size:var(--text-base);}
+select{background-image:linear-gradient(45deg,transparent 50%,var(--text-faint) 50%),linear-gradient(135deg,var(--text-faint) 50%,transparent 50%);
+  background-position:calc(100% - 15px) 52%, calc(100% - 10px) 52%; background-size:5px 5px; background-repeat:no-repeat; padding-right:30px;}
+textarea{resize:vertical; min-height:92px; line-height:1.5;}
+.field.bad select, .field.bad textarea, .field.bad input{border-color:var(--state-crit);}
+.hint{font-size:var(--text-sm); color:var(--text-faint);}
+.hint b{color:var(--text-secondary); font-weight:600;}
+
+.msg{display:flex; align-items:flex-start; gap:8px; padding:9px 12px; border-radius:var(--radius); font-size:12.5px; line-height:1.45;}
+.msg svg{flex:none; margin-top:2px;}
+.msg-crit{background:var(--state-crit-bg); color:var(--state-crit); border:1px solid var(--state-crit);}
+.msg-warn{background:var(--state-warn-bg); color:var(--state-warn); border:1px solid var(--state-warn);}
+.msg-info{background:var(--tint-blue); color:var(--text-primary); border:1px solid var(--border);}
+.msg b{font-weight:700;}
+
+.spin{width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:sp .7s linear infinite; flex:none; display:inline-block;}
+@keyframes sp{to{transform:rotate(360deg);}}
+@media (prefers-reduced-motion: reduce){.spin{animation:none;}}
+.skel{background:var(--bg-elevated); border-radius:6px; height:12px;}
+
+.toast{position:absolute; left:50%; top:80px; transform:translateX(-50%); background:var(--bg-elevated); border:1px solid var(--border);
+  color:var(--text-primary); padding:9px 16px; border-radius:var(--radius); font-size:12.5px; font-weight:600; box-shadow:var(--shadow);
+  z-index:300; max-width:88%; display:none;}
+.toast.show{display:block;}
+
+@media (min-width:1024px){
+  .shell{grid-template-columns:230px 1fr;}
+  .side{display:flex;}
+  .content{padding:var(--space-5) var(--space-6) 40px;}
+}
+@media (max-width:640px){
+  .searchbox{display:none;}
+  .harness{padding:8px 12px;}
+}
+
+
+/* ---- hyper-v profiles page (Story #5461) ---- */
+.split{display:grid; grid-template-columns:minmax(0,1fr); gap:var(--space-4); align-items:start;}
+.htitle .acts{display:flex; gap:8px; align-items:center;}
+.muted{color:var(--text-faint);}
+
+/* list */
+.tbl tr.prow{cursor:pointer;}
+.tbl tr.prow:hover > td{background:var(--bg-sunk);}
+.tbl tr.prow.sel > td{background:var(--tint-blue);}
+.tbl tr.prow.sel .pname{color:var(--accent);}
+.pname{font-family:var(--font-mono); font-weight:600; font-size:12.5px; overflow-wrap:anywhere;}
+.pref{display:block; font-family:var(--font-mono); font-size:11px; color:var(--text-faint); margin-top:2px; overflow-wrap:anywhere;}
+.c-act{text-align:right; width:1%; white-space:nowrap;}
+tr.confirm > td{background:var(--bg-sunk); padding:0;}
+.confirm-in{padding:12px 14px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
+.confirm-in .t{flex:1 1 100%; font-size:12.5px; color:var(--state-crit);}
+.confirm-in .t b{font-weight:700;}
+.confirm-in .t .s{display:block; color:var(--text-secondary); font-size:11.5px; margin-top:4px;}
+.confirm-in .gap{flex:1;}
+.skrow td{padding:13px 14px;}
+.empty{display:flex; flex-direction:column; align-items:center; text-align:center; gap:8px; padding:34px 20px;}
+.empty .ic{width:40px; height:40px; border-radius:11px; background:var(--state-neutral-bg); color:var(--state-neutral); display:grid; place-items:center;}
+.empty h3{margin:0; font-size:var(--text-md);}
+.empty p{margin:0; color:var(--text-secondary); font-size:12.5px; max-width:440px;}
+.empty .btn{margin-top:6px;}
+.errcard{display:flex; align-items:center; gap:12px; padding:16px; flex-wrap:wrap;}
+.errcard .t{flex:1; min-width:200px;}
+.errcard .t b{display:block; color:var(--state-crit);}
+.errcard .t span{color:var(--text-secondary); font-size:12.5px;}
+.pick{padding:44px 20px; text-align:center; color:var(--text-faint); font-size:12.5px;}
+
+/* profile detail */
+.dhead{display:flex; align-items:flex-start; gap:10px; padding:14px 16px; border-bottom:1px solid var(--border); flex-wrap:wrap;}
+.dhead .nm{flex:1; min-width:200px;}
+.dhead h2{margin:0; font-family:var(--font-mono); font-size:var(--text-lg); font-weight:700; overflow-wrap:anywhere;}
+.dhead .pref{font-size:var(--text-sm);}
+.dhead .pills{display:flex; gap:6px; margin-top:8px; flex-wrap:wrap;}
+.facts{display:grid; grid-template-columns:max-content minmax(0,1fr); gap:6px 14px; margin:0; font-size:12.5px;}
+.facts dt{font-size:var(--text-xs); letter-spacing:var(--tracking-label); text-transform:uppercase; color:var(--text-faint); font-weight:600; padding-top:2px;}
+.facts dd{margin:0; overflow-wrap:anywhere;}
+.facts dd.mono{font-size:12px;}
+.dbody{padding:14px 16px; display:flex; flex-direction:column; gap:14px;}
+.sect-h{display:flex; align-items:baseline; gap:8px; flex-wrap:wrap;}
+.sect-h h3{margin:0; font-size:var(--text-md); font-weight:700;}
+.sect-h .sub{color:var(--text-faint); font-size:var(--text-sm);}
+.sect-h .cnt{margin-left:auto; font-size:var(--text-sm); color:var(--text-faint); font-variant-numeric:tabular-nums;}
+
+/* enrollment call-out */
+.enroll{border:1px solid var(--accent); background:var(--tint-blue); border-radius:var(--radius); padding:12px 14px; display:flex; flex-direction:column; gap:9px;}
+.enroll .eh{display:flex; align-items:center; gap:8px; font-weight:700; font-size:13px; color:var(--text-primary);}
+.enroll .eh svg{color:var(--accent); flex:none;}
+.enroll .eh .pill{margin-left:auto;}
+.enroll .hint{margin:0;}
+.enroll.off{border-color:var(--state-warn); background:var(--state-warn-bg);}
+.enroll.off .eh svg{color:var(--state-warn);}
+
+/* template text (rendered as literal text, never as markup) */
+.tpl{background:var(--bg-sunk); border:1px solid var(--border); border-radius:var(--radius); font-family:var(--font-mono); font-size:12px;
+  line-height:1.55; padding:10px 0; margin:0; color:var(--text-primary);}
+.tpl .ln{display:grid; grid-template-columns:3.4em minmax(0,1fr); padding-right:12px;}
+.tpl .ln .n{color:var(--text-faint); text-align:right; padding-right:12px; user-select:none; font-variant-numeric:tabular-nums;}
+.tpl .ln .c{white-space:pre-wrap; overflow-wrap:anywhere; min-height:1.55em; padding-left:4ch; text-indent:-4ch;}
+.tpl .tk{background:var(--tint-blue); color:var(--accent); border-radius:3px; box-shadow:0 0 0 1px var(--border);}
+.tpl .tk.sec{background:var(--state-warn-bg); color:var(--state-warn);}
+.tpl .ln.bad{background:var(--state-crit-bg);}
+.tpl .ln.bad .n{color:var(--state-crit); font-weight:700;}
+
+/* placeholders found in the template */
+.vars{display:flex; flex-direction:column; gap:6px; margin:0; padding:0; list-style:none;}
+.vars li{display:flex; flex-direction:column; align-items:flex-start; gap:3px; font-size:12px;}
+.vars code{font-family:var(--font-mono); font-size:11.5px; background:var(--tint-blue); color:var(--accent); padding:1px 6px; border-radius:var(--radius-sm); overflow-wrap:anywhere;}
+.vars li.sec code{background:var(--state-warn-bg); color:var(--state-warn);}
+.vars span{color:var(--text-secondary);}
+
+/* create flow */
+.steps{display:flex; gap:6px; align-items:center; flex-wrap:wrap; font-size:var(--text-sm); color:var(--text-faint); padding:12px 16px; border-bottom:1px solid var(--border);}
+.steps .st{display:inline-flex; align-items:center; gap:7px; font-weight:600;}
+.steps .st i{font-style:normal; width:20px; height:20px; border-radius:50%; border:1px solid var(--border); display:grid; place-items:center; font-size:11px;
+  font-variant-numeric:tabular-nums; background:var(--bg-surface);}
+.steps .st.now{color:var(--text-primary);}
+.steps .st.now i{background:var(--accent); color:var(--accent-ink); border-color:var(--accent);}
+.steps .st.done{color:var(--text-secondary);}
+.steps .st.done i{background:var(--state-ok-bg); color:var(--state-ok); border-color:var(--state-ok);}
+.steps .bar{width:22px; height:1px; background:var(--border);}
+.steps .x{margin-left:auto;}
+.form{display:grid; grid-template-columns:minmax(0,1fr); gap:14px;}
+.row3{display:grid; grid-template-columns:minmax(0,1fr); gap:14px;}
+.seg{display:inline-flex; background:var(--bg-sunk); border:1px solid var(--border); border-radius:var(--radius); padding:2px; width:100%;}
+.seg button{flex:1; appearance:none; border:0; background:transparent; color:var(--text-secondary); font-size:var(--text-sm); font-weight:600;
+  padding:7px 0; border-radius:var(--radius-sm); cursor:pointer;}
+.seg button[aria-pressed="true"]{background:var(--bg-surface); color:var(--text-primary); box-shadow:0 0 0 1px var(--border);}
+input.mono, textarea.mono{font-family:var(--font-mono); font-size:12.5px;}
+textarea.tpl-in{min-height:340px; line-height:1.55; white-space:pre; overflow:auto; tab-size:2;}
+.fmeta{display:flex; gap:10px; flex-wrap:wrap; align-items:baseline;}
+.fmeta .sp{flex:1;}
+.ferr{font-size:12px; color:var(--state-crit); font-family:var(--font-mono); overflow-wrap:anywhere;}
+fieldset.enf{border:1px solid var(--border); border-radius:var(--radius); padding:12px 14px 14px; margin:0; display:flex; flex-direction:column; gap:12px; min-width:0;}
+fieldset.enf legend{padding:0 6px; font-size:var(--text-sm); font-weight:700; color:var(--text-primary);}
+.fbar{display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:12px 16px; border-top:1px solid var(--border); background:var(--bg-primary);}
+.fbar .sp{flex:1;}
+
+.rv{display:grid; grid-template-columns:minmax(0,1fr); grid-template-areas:"warn" "sum" "tpl" "ack"; gap:14px; padding:14px 16px;}
+.rv-warn{grid-area:warn;}
+.rv-sum{grid-area:sum; display:flex; flex-direction:column; gap:12px;}
+.rv-tpl{grid-area:tpl; display:flex; flex-direction:column; gap:8px; min-width:0;}
+.rv-ack{grid-area:ack; display:flex; flex-direction:column; gap:10px; border:1px solid var(--border); border-radius:var(--radius); padding:12px 14px; background:var(--bg-primary);}
+.card{border:1px solid var(--border); border-radius:var(--radius); padding:12px 14px; display:flex; flex-direction:column; gap:10px;}
+.card h4{margin:0; font-size:var(--text-xs); letter-spacing:var(--tracking-label); text-transform:uppercase; color:var(--text-faint); font-weight:600;}
+.chk{display:flex; gap:9px; align-items:flex-start; font-size:12.5px; cursor:pointer;}
+.chk input{margin:2px 0 0; width:15px; height:15px; accent-color:var(--accent); flex:none;}
+.ackbtns{display:flex; gap:8px; flex-wrap:wrap;}
+.ackbtns .btn{flex:1; justify-content:center;}
+.msg code{font-family:var(--font-mono); font-size:11.5px;}
+.msg .srv{display:block; margin-top:4px; font-family:var(--font-mono); font-size:11.5px; color:var(--text-primary); overflow-wrap:anywhere;}
+
+/* passkey step-up (mirrors web/src/auth/StepUpModal.css) */
+.step-up-overlay{position:fixed; inset:0; background:rgba(0,0,0,0.55); display:grid; place-items:center; z-index:200; padding:var(--space-4) 18px;}
+.step-up-modal{width:100%; max-width:400px; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-lg); overflow:hidden; box-shadow:var(--shadow);}
+.step-up-titlebar{display:flex; align-items:center; padding:10px 13px; background:var(--bg-elevated); border-bottom:1px solid var(--border);}
+.step-up-title{font-family:var(--font-mono); font-size:var(--text-sm); color:var(--text-faint); margin:0 auto; letter-spacing:.02em;}
+.step-up-body{padding:26px 26px 22px; display:flex; flex-direction:column; gap:var(--space-4); align-items:center; text-align:center;}
+.step-up-body .big{position:relative; width:56px; height:56px; border-radius:50%; background:var(--tint-blue); color:var(--accent); display:grid; place-items:center;}
+.step-up-body .big .spin{position:absolute; inset:-4px; width:auto; height:auto; border-width:2px; color:var(--accent);}
+.step-up-body h3{margin:0; font-size:var(--text-lg);}
+.step-up-body p{margin:0; color:var(--text-secondary); font-size:12.5px; line-height:1.5;}
+
+@media (min-width:1024px){
+  .split.two{grid-template-columns:minmax(260px,330px) minmax(0,1fr);}
+  .row3{grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) minmax(0,1.2fr);}
+  .enf .row3{grid-template-columns:minmax(0,1fr) minmax(0,1.4fr) minmax(0,1fr);}
+  .rv{grid-template-columns:minmax(0,1fr) 330px; grid-template-areas:"warn warn" "tpl sum" "tpl ack"; align-items:start;}
+  .rv-tpl{grid-row:2 / span 2;}
+}
+@media (max-width:640px){
+  .htitle .acts{width:100%;}
+  .htitle .acts .btn{flex:1; justify-content:center;}
+  .steps .bar{width:10px;}
+  .tpl{font-size:11.5px;}
+  .tpl .ln{grid-template-columns:2.6em minmax(0,1fr); padding-right:8px;}
+  .tpl .ln .n{padding-right:8px;}
+}
+</style>
+</head>
+<body class="s-ready">
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-key" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></g></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></g></symbol>
+    <symbol id="i-err" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></g></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></g></symbol>
+    <symbol id="i-disk" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h8M6 12h12M6 16h7"/></g></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+
+<div class="harness" role="group" aria-label="Mockup controls">
+  <span class="hl">Mockup · #5461 hyper-v profiles</span>
+  <div class="grp" id="stateGrp">
+    <button data-state="ready" aria-pressed="true">Ready</button>
+    <button data-state="empty" aria-pressed="false">Empty</button>
+    <button data-state="loading" aria-pressed="false">Loading</button>
+    <button data-state="error" aria-pressed="false">Error</button>
+    <button data-state="view" aria-pressed="false">View</button>
+    <button data-state="edit" aria-pressed="false">Create · edit</button>
+    <button data-state="review" aria-pressed="false">Create · review</button>
+    <button data-state="passkey" aria-pressed="false">Passkey</button>
+    <button data-state="invalid" aria-pressed="false">Validation error</button>
+    <button data-state="delete" aria-pressed="false">Delete confirm</button>
+  </div>
+  <span class="sp"></span>
+  <div class="grp" id="themeGrp">
+    <button data-theme-mode="auto" aria-pressed="true">Auto</button>
+    <button data-theme-mode="light" aria-pressed="false">Light</button>
+    <button data-theme-mode="dark" aria-pressed="false">Dark</button>
+  </div>
+</div>
+
+<div class="shell">
+  <aside class="side">
+    <div class="logo"><b>CFGMS</b><i>controller</i></div>
+    <nav>
+      <a>Fleet</a><a>Cases</a><a>Modules</a><a>Config</a><a>Workflows</a><a>Approvals</a><a>Scripts</a>
+      <a class="active">Hyper-V profiles</a><a>Registration</a><a>Refresh Requests</a><a>Reports</a><a>Audit</a>
+      <a>Accounts</a><a>Certificates</a><a>Installer</a><a>Tenants</a>
+    </nav>
+  </aside>
+  <div class="main">
+    <div class="appbar">
+      <span class="chipbtn">Tenant <b>acme-corp</b></span>
+      <span class="searchbox">Search…</span>
+      <span class="abspacer"></span>
+      <span class="avatar">JR</span>
+    </div>
+
+    <div class="content">
+      <div class="htitle">
+        <div>
+          <h1>Hyper-V profiles</h1>
+          <p>Unattended install files for new Hyper-V VMs in <b class="mono">acme-corp</b>. A VM source names one as <span class="mono">profile://&lt;name&gt;</span>. The template runs as root (Linux) or SYSTEM (Windows) when each new VM first boots.</p>
+        </div>
+        <div class="acts" data-s="ready view delete error">
+          <button class="btn" data-go="edit"><svg width="14" height="14"><use href="#i-plus"/></svg>New profile</button>
+        </div>
+      </div>
+
+      <div class="split" id="split">
+        <!-- ===== list ===== -->
+        <div class="panel" data-s="ready empty loading error view delete">
+          <div class="phead"><h2>Profiles</h2><span class="cnt" data-s="ready view delete" id="cnt">4</span></div>
+          <table class="tbl" data-s="ready view delete loading">
+            <thead><tr><th>Name</th><th></th></tr></thead>
+            <tbody id="rows" data-s="ready view delete"></tbody>
+            <tbody data-s="loading">
+              <tr class="skrow"><td><div class="skel" style="width:120px"></div><div class="skel" style="width:170px;margin-top:6px;height:9px"></div></td><td></td></tr>
+              <tr class="skrow"><td><div class="skel" style="width:100px"></div><div class="skel" style="width:150px;margin-top:6px;height:9px"></div></td><td></td></tr>
+              <tr class="skrow"><td><div class="skel" style="width:130px"></div><div class="skel" style="width:180px;margin-top:6px;height:9px"></div></td><td></td></tr>
+            </tbody>
+          </table>
+          <div class="errcard" data-s="error">
+            <svg width="18" height="18" style="color:var(--state-crit);flex:none"><use href="#i-err"/></svg>
+            <div class="t"><b>Could not load profiles.</b><span>The controller did not answer. No profile has changed.</span></div>
+            <button class="btn-sec">Try again</button>
+          </div>
+          <div class="empty" data-s="empty">
+            <span class="ic"><svg width="18" height="18"><use href="#i-disk"/></svg></span>
+            <h3>No profiles in acme-corp</h3>
+            <p>Add a profile when new VMs in this tenant need their own install and first-boot steps. A VM source then names it as <span class="mono">profile://&lt;name&gt;</span>.</p>
+            <button class="btn" data-go="edit"><svg width="14" height="14"><use href="#i-plus"/></svg>New profile</button>
+          </div>
+        </div>
+
+        <!-- ===== right pane: nothing selected ===== -->
+        <div class="panel" data-s="ready">
+          <div class="pick">Select a profile to see its template.</div>
+        </div>
+
+        <!-- ===== right pane: profile detail ===== -->
+        <div class="panel" data-s="view delete">
+          <div class="dhead">
+            <div class="nm">
+              <h2 id="dName">win2025-std</h2>
+              <span class="pref" id="dRef">profile://win2025-std</span>
+              <div class="pills" id="dPills"></div>
+            </div>
+            <button class="btn-danger-soft" data-del-detail>Delete</button>
+          </div>
+          <div class="dbody">
+            <div id="dEnroll"></div>
+            <div class="sect-h"><h3>Template</h3><span class="sub">Shown exactly as stored. Runs on first boot of each new VM that names this profile.</span><span class="cnt" id="dMeta"></span></div>
+            <div class="tpl" id="dTpl" role="region" aria-label="Template text"></div>
+            <p class="hint" style="margin:0">Profiles cannot be edited. To change one, create a new profile, point the VM source at it, then delete the old one.</p>
+          </div>
+        </div>
+
+        <!-- ===== create: step 1 edit ===== -->
+        <div class="panel" data-s="edit invalid">
+          <div class="steps">
+            <span class="st now"><i>1</i>Write</span><span class="bar"></span>
+            <span class="st"><i>2</i>Review what runs as root</span><span class="bar"></span>
+            <span class="st"><i>3</i>Confirm with passkey</span>
+            <button class="btn-sec btn-sm x" data-go="ready">Cancel</button>
+          </div>
+          <div class="pbody form">
+            <div class="msg msg-crit" data-s="invalid"><svg width="14" height="14"><use href="#i-err"/></svg>
+              <span><b>Not created. Nothing was saved.</b> The controller could not read the template. Fix it and review again.
+              <span class="srv">INVALID_TEMPLATE · hyperv: invalid profile template: profile "linux-cloud-base": template: linux-cloud-base:14: function "secrt" not defined</span></span></div>
+            <div class="row3">
+              <div class="field">
+                <label for="fName">Name <span class="req">*</span></label>
+                <input type="text" class="mono" id="fName" value="linux-cloud-base" spellcheck="false">
+                <span class="hint">Letters, digits, <b>-</b> and <b>_</b>, up to 64. VM sources use <span class="mono">profile://linux-cloud-base</span>.</span>
+              </div>
+              <div class="field">
+                <span class="lbl">OS family <span class="req">*</span></span>
+                <div class="seg" id="fOs" role="group" aria-label="OS family">
+                  <button aria-pressed="true" data-os="linux">linux</button><button aria-pressed="false" data-os="windows">windows</button>
+                </div>
+                <span class="hint">Runs as <b id="fRunAs">root</b> on first boot.</span>
+              </div>
+              <div class="field">
+                <label for="fFmt">Answer format <span class="req">*</span></label>
+                <select id="fFmt"></select>
+                <span class="hint" id="fFmtHint"></span>
+              </div>
+            </div>
+            <div class="field" id="fTplField">
+              <div class="fmeta"><label for="fTpl">Template <span class="req">*</span></label><span class="sp"></span><span class="hint" id="fTplMeta"></span></div>
+              <textarea class="mono tpl-in" id="fTpl" spellcheck="false" aria-describedby="fTplHint"></textarea>
+              <span class="ferr" data-s="invalid">Line 14: function "secrt" not defined</span>
+              <span class="hint" id="fTplHint">Filled in when each VM is created: <span class="mono">{{ .VMName }}</span> <span class="mono">{{ .CorrelationID }}</span> <span class="mono">{{ .EnrollTokenFile }}</span> <span class="mono">{{ .CAFingerprint }}</span> <span class="mono">{{ .BundleURL }}</span>. Secrets: <span class="mono">{{ secret "key" }}</span> reads the value from the secret store; never paste a password here.</span>
+            </div>
+            <fieldset class="enf">
+              <legend>Enrollment — how the new VM joins CFGMS</legend>
+              <div class="row3">
+                <div class="field">
+                  <label for="fKey">Token secret key</label>
+                  <input type="text" class="mono" id="fKey" value="hyperv/enroll/regtoken" spellcheck="false">
+                  <span class="hint">The secret store key name, not the token.</span>
+                </div>
+                <div class="field">
+                  <label for="fUrl">Bundle URL</label>
+                  <input type="text" class="mono" id="fUrl" value="https://controller.acme-corp.example/bundles/steward-linux-amd64" spellcheck="false">
+                  <span class="hint">Fills <span class="mono">{{ .BundleURL }}</span>.</span>
+                </div>
+                <div class="field">
+                  <label for="fLabel">Correlation label</label>
+                  <input type="text" class="mono" id="fLabel" value="vm-build" spellcheck="false">
+                  <span class="hint">Ties the VM to its build request.</span>
+                </div>
+              </div>
+              <span class="hint">Leave all three empty if VMs from this profile should not join CFGMS.</span>
+            </fieldset>
+          </div>
+          <div class="fbar">
+            <span class="hint">Nothing is saved until you confirm on the next step.</span><span class="sp"></span>
+            <button class="btn-sec" data-go="ready">Cancel</button>
+            <button class="btn" data-go="review">Review template</button>
+          </div>
+        </div>
+
+        <!-- ===== create: step 2 review ===== -->
+        <div class="panel" data-s="review passkey">
+          <div class="steps">
+            <span class="st done"><i><svg width="11" height="11"><use href="#i-check"/></svg></i>Write</span><span class="bar"></span>
+            <span class="st now"><i>2</i>Review what runs as root</span><span class="bar"></span>
+            <span class="st"><i>3</i>Confirm with passkey</span>
+          </div>
+          <div class="rv">
+            <div class="msg msg-warn rv-warn"><svg width="14" height="14"><use href="#i-warn"/></svg>
+              <span><b>This text runs as root on first boot.</b> Every new VM whose source names <span class="mono">profile://linux-cloud-base</span> runs it with full control of the machine. Read all of it before you create the profile.</span></div>
+
+            <div class="rv-sum">
+              <div class="card">
+                <h4>Profile</h4>
+                <dl class="facts">
+                  <dt>Name</dt><dd class="mono">linux-cloud-base</dd>
+                  <dt>Tenant</dt><dd class="mono">acme-corp</dd>
+                  <dt>OS family</dt><dd class="mono">linux</dd>
+                  <dt>Format</dt><dd class="mono">cloud-init</dd>
+                  <dt>Runs as</dt><dd><b>root</b>, on first boot</dd>
+                </dl>
+              </div>
+              <div id="rEnroll"></div>
+              <div class="card">
+                <h4>Filled in when each VM is created</h4>
+                <ul class="vars" id="rVars"></ul>
+              </div>
+            </div>
+
+            <div class="rv-tpl">
+              <div class="sect-h"><h3>Template</h3><span class="sub">Exactly what will be stored. Highlighted parts are filled in per VM.</span><span class="cnt" id="rMeta"></span></div>
+              <div class="tpl" id="rTpl" role="region" aria-label="Template text"></div>
+            </div>
+
+            <div class="rv-ack">
+              <label class="chk"><input type="checkbox" id="ack"><span>I read the whole template. It is what should run as root on new VMs in <b class="mono">acme-corp</b>.</span></label>
+              <div class="ackbtns">
+                <button class="btn-sec" data-go="edit">Back to edit</button>
+                <button class="btn" id="createBtn" disabled><svg width="14" height="14"><use href="#i-key"/></svg>Create — tap passkey</button>
+              </div>
+              <span class="hint">Creating is recorded in the audit log under your name.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- passkey step-up (StepUpModal) -->
+<div class="step-up-overlay" data-s="passkey" role="dialog" aria-modal="true" aria-labelledby="suh">
+  <div class="step-up-modal">
+    <div class="step-up-titlebar"><span class="step-up-title">confirm with passkey</span></div>
+    <div class="step-up-body">
+      <span class="big"><svg width="22" height="22"><use href="#i-key"/></svg><span class="spin"></span></span>
+      <h3 id="suh">Touch your passkey…</h3>
+      <p id="suText">Confirm creating <span class="mono">linux-cloud-base</span>. It will run as root on first boot of new VMs that name it. Your browser may show its own prompt.</p>
+      <button class="btn-sec" data-go="review">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  var root = document.documentElement, body = document.body;
+  var $ = function(id){ return document.getElementById(id); };
+
+  // Seed data. GET /api/v1/hyperv/profiles returns names only; the detail comes from GET /{name}.
+  var TPL_CLOUD = [
+    '#cloud-config',
+    '# acme-corp Linux cloud image: base packages, internal mirror, CFGMS enrollment.',
+    'hostname: {{ .CorrelationID }}',
+    'package_update: true',
+    'packages:',
+    '  - ca-certificates',
+    '  - chrony',
+    'write_files:',
+    '  - path: /etc/apt/auth.conf.d/acme-mirror.conf',
+    '    permissions: "0600"',
+    '    content: |',
+    '      machine mirror.acme-corp.example',
+    '      login vm-build',
+    '      password {{ secret "hyperv/apt-mirror-password" }}',
+    'runcmd:',
+    '  - [ mkdir, -p, /mnt/cidata ]',
+    '  - [ mount, /dev/disk/by-label/CIDATA, /mnt/cidata ]',
+    '  - [ curl, -fsSL, -o, /opt/cfgms-steward, "{{ .BundleURL }}" ]',
+    '  - [ chmod, "0755", /opt/cfgms-steward ]',
+    '  - [ cp, /mnt/cidata/regtoken, "{{ .EnrollTokenFile }}" ]',
+    '  - [ chmod, "0600", "{{ .EnrollTokenFile }}" ]',
+    '  - [ /opt/cfgms-steward, install, --regtoken-file, "{{ .EnrollTokenFile }}", --controller-ca, /mnt/cidata/controller-ca.crt, --fingerprint, "{{ .CAFingerprint }}" ]',
+    '  - [ rm, -f, "{{ .EnrollTokenFile }}", /mnt/cidata/regtoken ]',
+    '  - [ umount, /mnt/cidata ]'
+  ].join('\n');
+  var TPL_BAD = TPL_CLOUD.replace('{{ secret "hyperv', '{{ secrt "hyperv');
+  var TPL_WIN = [
+    '<?xml version="1.0" encoding="utf-8"?>',
+    '<unattend xmlns="urn:schemas-microsoft-com:unattend">',
+    '  <settings pass="windowsPE">',
+    '    <component name="Microsoft-Windows-Setup" processorArchitecture="amd64">',
+    '      <ImageInstall><OSImage><InstallFrom><MetaData>',
+    '        <Key>/IMAGE/NAME</Key><Value>{{ .ProductEdition }}</Value>',
+    '      </MetaData></InstallFrom></OSImage></ImageInstall>',
+    '      <UserData><AcceptEula>true</AcceptEula><Organization>{{ .CorrelationID }}</Organization></UserData>',
+    '    </component>',
+    '  </settings>',
+    '  <settings pass="oobeSystem">',
+    '    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64">',
+    '      <ComputerName>{{ .VMName }}</ComputerName>',
+    '      <AutoLogon><Enabled>true</Enabled><LogonCount>1</LogonCount><Username>Administrator</Username>',
+    '        <Password><Value>{{ .AdminPassword }}</Value><PlainText>true</PlainText></Password></AutoLogon>',
+    '      <FirstLogonCommands>',
+    '        <SynchronousCommand><Order>1</Order>',
+    '          <CommandLine>D:\\cfgms-steward.exe install --regtoken-file {{ .EnrollTokenFile }} --fingerprint {{ .CAFingerprint }}</CommandLine>',
+    '        </SynchronousCommand>',
+    '      </FirstLogonCommands>',
+    '    </component>',
+    '  </settings>',
+    '</unattend>'
+  ].join('\n');
+  var PROFILES = {
+    'linux-netinst-base':  { os:'linux',   fmt:'preseed',      tpl:'# preseed netinst\nd-i debian-installer/locale string en_US.UTF-8\nd-i netcfg/get_hostname string {{ .CorrelationID }}\nd-i preseed/late_command string in-target /usr/local/bin/cfgms-steward install --regtoken-file {{ .EnrollTokenFile }}', enroll:{ key:'hyperv/enroll/regtoken', url:'https://controller.acme-corp.example/bundles/steward-linux-amd64', label:'vm-build' } },
+    'lab-scratch':     { os:'linux',   fmt:'cloud-init',   tpl:'#cloud-config\nhostname: {{ .VMName }}\npackage_update: true', enroll:null },
+    'linux-cloud-base': { os:'linux',   fmt:'cloud-init',   tpl:TPL_CLOUD, enroll:{ key:'hyperv/enroll/regtoken', url:'https://controller.acme-corp.example/bundles/steward-linux-amd64', label:'vm-build' } },
+    'win2025-std':     { os:'windows', fmt:'autounattend', tpl:TPL_WIN, enroll:{ key:'hyperv/enroll/regtoken', url:'https://controller.acme-corp.example/bundles/steward-windows-amd64', label:'srv-build' } }
+  };
+  var VAR_DESC = {
+    '.VMName':'VM name on the Hyper-V host', '.CorrelationID':'ID that ties the VM to its build request', '.EnrollTokenFile':'Path of the one-time join token on the VM',
+    '.CAFingerprint':'Controller CA fingerprint', '.BundleURL':'Bundle URL from Enrollment', '.ProductEdition':'Windows edition picked by the VM source',
+    '.AdminPassword':'Random one-time Administrator password, never stored', '.EnrollToken':'One-time join token'
+  };
+  var FMTS = { linux:[['cloud-init','Linux cloud image (NoCloud seed).'],['preseed','Debian-family netinst ISO.']], windows:[['autounattend','Windows Setup answer file.']] };
+  var MAX = 256 * 1024;
+
+  var state = 'ready', selected = null, confirming = null, os = 'linux', fmt = 'cloud-init';
+
+  function esc(x){ return String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); } // mirrors JSX text-node rendering
+  function bytes(t){ return new TextEncoder().encode(t).length; }
+  function kb(n){ return n < 1024 ? n + ' B' : (n/1024).toFixed(1) + ' KB'; }
+  function meta(t){ return t.split('\n').length + ' lines · ' + kb(bytes(t)); }
+
+  // Template is shown as literal text. Highlighting wraps already-escaped {{ … }} runs only.
+  function tplHtml(t, badLine){
+    return t.split('\n').map(function(line, i){
+      var c = esc(line).replace(/\{\{.*?\}\}/g, function(m){ return '<span class="tk'+(/secre?t\s/.test(m)?' sec':'')+'">'+m+'</span>'; });
+      return '<div class="ln'+(badLine===i+1?' bad':'')+'"><span class="n">'+(i+1)+'</span><span class="c">'+c+'</span></div>';
+    }).join('');
+  }
+  function varsOf(t){
+    var seen = {}, out = [];
+    (t.match(/\{\{.*?\}\}/g) || []).forEach(function(m){
+      var s = m.replace(/^\{\{\s*|\s*\}\}$/g, ''); if (seen[s]) return; seen[s] = 1;
+      var sec = /^secret\s/.test(s);
+      out.push('<li'+(sec?' class="sec"':'')+'><code>'+esc(s)+'</code><span>'+(sec ? 'Read from the secret store when the VM is created. Not stored in the profile.' : esc(VAR_DESC[s] || 'Per-VM value'))+'</span></li>');
+    });
+    return out.join('');
+  }
+  function enrollHtml(e){
+    if (!e) return '<div class="enroll off"><div class="eh"><svg width="16" height="16"><use href="#i-warn"/></svg>Enrollment: off<span class="pill pill-warn">Not set</span></div>'
+      + '<p class="hint">VMs built from this profile do not join CFGMS unless the template does it itself.</p></div>';
+    return '<div class="enroll"><div class="eh"><svg width="16" height="16"><use href="#i-link"/></svg>Enrollment: joins acme-corp<span class="pill pill-acc">On</span></div>'
+      + '<dl class="facts"><dt>Token key</dt><dd class="mono">'+esc(e.key)+'</dd><dt>Bundle URL</dt><dd class="mono">'+esc(e.url)+'</dd><dt>Label</dt><dd class="mono">'+esc(e.label)+'</dd></dl>'
+      + '<p class="hint">Only the key name is stored. The token itself is put on the VM when it is created and removed after it joins.</p></div>';
+  }
+
+  function renderRows(){
+    var names = Object.keys(PROFILES).sort(), h = '';
+    $('cnt').textContent = names.length;
+    names.forEach(function(n){
+      h += '<tr class="prow'+(selected===n?' sel':'')+'" data-pick="'+esc(n)+'"><td><span class="pname">'+esc(n)+'</span><span class="pref">profile://'+esc(n)+'</span></td>'
+        + '<td class="c-act"><button class="btn-danger-soft" data-del="'+esc(n)+'">Delete</button></td></tr>';
+      if (confirming === n){
+        h += '<tr class="confirm"><td colspan="2"><div class="confirm-in"><span class="t"><b>Delete '+esc(n)+'?</b> VMs already built from it are not changed. A VM source that still names <span class="mono">profile://'+esc(n)+'</span> cannot build new VMs until it names another profile.'
+          + '<span class="s">You confirm with your passkey. Recorded in the audit log.</span></span><span class="gap"></span>'
+          + '<button class="btn-sec btn-sm" data-keep>Keep</button><button class="btn-danger btn-sm" data-do="'+esc(n)+'"><svg width="12" height="12"><use href="#i-key"/></svg>Delete — tap passkey</button></div></td></tr>';
+      }
+    });
+    $('rows').innerHTML = h;
+  }
+  function renderDetail(){
+    var n = selected || 'win2025-std', p = PROFILES[n];
+    $('dName').textContent = n; $('dRef').textContent = 'profile://' + n;
+    $('dPills').innerHTML = '<span class="pill pill-neutral">'+esc(p.os)+'</span><span class="pill pill-neutral">'+esc(p.fmt)+'</span><span class="pill pill-warn">runs as '+(p.os==='windows'?'SYSTEM':'root')+'</span>';
+    $('dEnroll').innerHTML = enrollHtml(p.enroll);
+    $('dMeta').textContent = meta(p.tpl);
+    $('dTpl').innerHTML = tplHtml(p.tpl);
+  }
+  function renderForm(){
+    $('fFmt').innerHTML = FMTS[os].map(function(f){ return '<option value="'+f[0]+'"'+(f[0]===fmt?' selected':'')+'>'+f[0]+'</option>'; }).join('');
+    $('fFmtHint').textContent = (FMTS[os].filter(function(f){ return f[0]===fmt; })[0] || FMTS[os][0])[1];
+    $('fRunAs').textContent = os==='windows' ? 'SYSTEM' : 'root';
+    $('fTplMeta').textContent = meta($('fTpl').value) + ' of 256 KB';
+  }
+  function renderReview(){
+    var t = TPL_CLOUD;
+    $('rMeta').textContent = meta(t);
+    $('rTpl').innerHTML = tplHtml(t);
+    $('rVars').innerHTML = varsOf(t);
+    $('rEnroll').innerHTML = enrollHtml(PROFILES['linux-cloud-base'].enroll);
+  }
+
+  function apply(){
+    body.className = 's-' + state;
+    document.querySelectorAll('[data-s]').forEach(function(el){ el.hidden = el.getAttribute('data-s').split(' ').indexOf(state) < 0; });
+    $('split').classList.toggle('two', ['ready','view','delete'].indexOf(state) >= 0);
+    if (state === 'view' && !selected) selected = 'win2025-std';
+    if (state === 'delete'){ selected = 'lab-scratch'; confirming = 'lab-scratch'; }
+    if (state === 'ready') { selected = null; confirming = null; }
+    if (state === 'view') confirming = null;
+    if (state === 'edit' || state === 'invalid'){
+      if (state === 'edit') delete PROFILES['linux-cloud-base'].created;
+      os = 'linux'; fmt = 'cloud-init';
+      $('fTpl').value = state === 'invalid' ? TPL_BAD : TPL_CLOUD;
+      $('fTplField').classList.toggle('bad', state === 'invalid');
+      renderForm();
+    }
+    if (state === 'review') { $('ack').checked = false; $('createBtn').disabled = true; }
+    if (state === 'passkey') { $('ack').checked = true; $('createBtn').disabled = false; }
+    renderRows(); renderDetail(); renderReview();
+    var sb = $('stateGrp').querySelector('[data-state="'+state+'"]'); if (sb) press($('stateGrp'), sb);
+  }
+  function go(s){ state = s; apply(); }
+  function toast(t){ var el = $('toast'); el.textContent = t; el.classList.add('show'); setTimeout(function(){ el.classList.remove('show'); }, 2400); }
+  function press(grp, btn){ grp.querySelectorAll('button').forEach(function(b){ b.setAttribute('aria-pressed', b===btn ? 'true':'false'); }); }
+
+  document.body.addEventListener('click', function(e){
+    var b;
+    if (e.target.closest('.harness')) return;
+    if ((b = e.target.closest('[data-del]'))){ e.stopPropagation(); confirming = b.dataset.del; selected = b.dataset.del; state = 'delete'; body.className = 's-delete';
+      document.querySelectorAll('[data-s]').forEach(function(el){ el.hidden = el.getAttribute('data-s').split(' ').indexOf('delete') < 0; });
+      press($('stateGrp'), $('stateGrp').querySelector('[data-state="delete"]')); renderRows(); renderDetail(); return; }
+    if ((b = e.target.closest('[data-del-detail]'))){ confirming = selected || 'win2025-std'; renderRows(); return; }
+    if ((b = e.target.closest('[data-keep]'))){ confirming = null; renderRows(); return; }
+    if ((b = e.target.closest('[data-do]'))){ var n = b.dataset.do; delete PROFILES[n]; confirming = null; selected = null; go('ready'); toast('Profile ' + n + ' deleted.'); return; }
+    if ((b = e.target.closest('[data-pick]'))){ selected = b.dataset.pick; confirming = null; state = 'view'; body.className = 's-view';
+      document.querySelectorAll('[data-s]').forEach(function(el){ el.hidden = el.getAttribute('data-s').split(' ').indexOf('view') < 0; });
+      $('split').classList.add('two'); press($('stateGrp'), $('stateGrp').querySelector('[data-state="view"]')); renderRows(); renderDetail(); return; }
+    if ((b = e.target.closest('#fOs button'))){ os = b.dataset.os; fmt = FMTS[os][0][0]; press(b.parentNode, b); renderForm(); return; }
+    if ((b = e.target.closest('#createBtn'))){ go('passkey'); setTimeout(function(){ if (state === 'passkey'){ selected = 'linux-cloud-base'; go('view'); toast('Profile linux-cloud-base created.'); } }, 2600); return; }
+    if ((b = e.target.closest('[data-go]'))){ go(b.dataset.go); window.scrollTo(0,0); return; }
+  });
+  $('ack').addEventListener('change', function(){ $('createBtn').disabled = !this.checked; });
+  $('fFmt').addEventListener('change', function(){ fmt = this.value; renderForm(); });
+  $('fTpl').addEventListener('input', renderForm);
+
+  $('stateGrp').addEventListener('click', function(e){ var b = e.target.closest('button'); if (!b) return; selected = null; go(b.dataset.state); });
+  $('themeGrp').addEventListener('click', function(e){ var b = e.target.closest('button'); if (!b) return; press($('themeGrp'), b);
+    if (b.dataset.themeMode === 'auto') root.removeAttribute('data-theme'); else root.setAttribute('data-theme', b.dataset.themeMode); });
+
+  var q = new URLSearchParams(location.search);
+  if (q.get('theme')) root.setAttribute('data-theme', q.get('theme'));
+  go(q.get('state') || 'ready');
+})();
+</script>
+</body>
+</html>
