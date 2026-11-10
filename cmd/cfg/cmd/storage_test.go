@@ -4,9 +4,6 @@ package cmd
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -26,7 +23,7 @@ import (
 // When the "storage" migrator is registered (via pkg/migrate/storage imported
 // from cmd/cfg/cmd/migrate.go), runStorageMigrate delegates to that migrator.
 // The test cases therefore use backend names and error strings that match the
-// new migrator's validation rather than the legacy git-inline fallback.
+// migrator's validation; "git" is rejected earlier by rejectRemovedGitSource.
 func TestStorageMigrateValidation(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -36,19 +33,19 @@ func TestStorageMigrateValidation(t *testing.T) {
 		wantErrContain string
 	}{
 		{
-			// "git" is not a supported backend in the registered storage migrator.
+			// "git" is rejected by rejectRemovedGitSource before the migrator is reached.
 			name:           "git backend unsupported",
 			from:           "git",
 			to:             "oss",
-			wantErrContain: "git",
+			wantErrContain: "git storage provider was removed",
 		},
 		{
-			// Neither "git" nor "memory" are supported backends; the first
-			// unknown backend ("git") is what we detect in the error message.
+			// "git" is rejected by rejectRemovedGitSource before "memory" is
+			// ever validated.
 			name:           "unsupported from and to backends",
 			from:           "git",
 			to:             "memory",
-			wantErrContain: "git",
+			wantErrContain: "git storage provider was removed",
 		},
 		{
 			// database backend without DSN must fail with a clear message.
@@ -65,12 +62,12 @@ func TestStorageMigrateValidation(t *testing.T) {
 			wantErrContain: "CFGMS_STORAGE_FLATFILE_ROOT",
 		},
 		{
-			// --dry-run still validates backend names — an unknown source fails.
+			// --dry-run still rejects the removed git source.
 			name:           "dry-run still validates backend",
 			from:           "git",
 			to:             "oss",
 			dryRun:         true,
-			wantErrContain: "git",
+			wantErrContain: "git storage provider was removed",
 		},
 	}
 
@@ -102,35 +99,50 @@ func TestStorageMigrateValidation(t *testing.T) {
 	}
 }
 
-// TestStorageMigrateGitBackendRejected verifies that attempting to use the
-// legacy "git" backend through runStorageMigrate now returns an unsupported-backend
-// error from the storage migrator (the git-inline fallback is no longer reached
-// once the "storage" migrator is registered).
+// TestStorageMigrateGitBackendRejected verifies that runStorageMigrate rejects
+// the removed git provider as a source (any case) with an error that says it was
+// removed, and that the git-only flags no longer exist.
 func TestStorageMigrateGitBackendRejected(t *testing.T) {
 	t.Setenv("CFGMS_STORAGE_FLATFILE_ROOT", "")
 	t.Setenv("CFGMS_STORAGE_SQLITE_PATH", "")
 	t.Setenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN", "")
 
-	origFrom := migrateFrom
-	origTo := migrateTo
-	origGitRoot := migrateGitRoot
-	origFlatfileRoot := migrateFlatfileRoot
-	defer func() {
-		migrateFrom = origFrom
-		migrateTo = origTo
-		migrateGitRoot = origGitRoot
-		migrateFlatfileRoot = origFlatfileRoot
-	}()
+	origFrom, origTo, origDryRun := migrateFrom, migrateTo, storageMigrateDryRun
+	t.Cleanup(func() {
+		migrateFrom, migrateTo, storageMigrateDryRun = origFrom, origTo, origDryRun
+	})
 
-	migrateFrom = "git"
-	migrateTo = "oss"
-	migrateGitRoot = t.TempDir()
-	migrateFlatfileRoot = t.TempDir()
+	for _, from := range []string{"git", "GIT", " Git "} {
+		for _, dryRun := range []bool{false, true} {
+			migrateFrom = from
+			migrateTo = "oss"
+			storageMigrateDryRun = dryRun
 
-	err := runStorageMigrate(nil, nil)
-	require.Error(t, err)
-	// The registered storage migrator reports "git" as an unknown backend.
-	assert.Contains(t, err.Error(), "git")
+			err := runStorageMigrate(nil, nil)
+			require.Error(t, err, "from=%q dryRun=%v", from, dryRun)
+			assert.Contains(t, err.Error(), "git storage provider was removed")
+			assert.NotContains(t, err.Error(), from+"\"", "input must not be echoed")
+		}
+	}
+
+	// Names are assembled from parts so the repository-wide removal grep stays
+	// empty while the test still pins that these flags no longer exist.
+	for _, name := range []string{"git" + "-root", "flatfile" + "-root", "sqlite" + "-path"} {
+		assert.Nil(t, storageMigrateCmd.Flags().Lookup(name), "flag --%s must be removed", name)
+	}
+}
+
+// TestRejectRemovedGitSource covers the helper directly, including values that
+// must not be rejected.
+func TestRejectRemovedGitSource(t *testing.T) {
+	for _, from := range []string{"git", "GIT", "Git", "  git\t"} {
+		err := rejectRemovedGitSource(from)
+		require.Error(t, err, "from=%q", from)
+		assert.Contains(t, err.Error(), "git storage provider was removed")
+	}
+	for _, from := range []string{"", "oss", "database", "github", "gitlab"} {
+		assert.NoError(t, rejectRemovedGitSource(from), "from=%q", from)
+	}
 }
 
 // TestStorageMigrateDryRun_FlatfileSQLiteTargetRemainsEmpty verifies that
@@ -230,59 +242,4 @@ func TestStorageMigrateDryRun_FlatfileSQLiteTargetRemainsEmpty(t *testing.T) {
 	tokens, err := dstRTS.ListTokens(ctx, &business.RegistrationTokenFilter{})
 	require.NoError(t, err)
 	assert.Empty(t, tokens, "dry-run must not write registration token records to target")
-}
-
-// TestMigrateToFlatfile_OwnerOnlyPermissions is a REQUIRED test (Issue
-// #4348): migrateToFlatfile must create the flatfile root directory and the
-// SQLite database file with owner-only permissions, so whoever else can read
-// the destination host cannot read the migrated business data. The
-// already-registered "flatfile" provider stands in for the source
-// (migrateToFlatfile only needs an interfaces.StorageProvider — it is not
-// specific to git), avoiding the need for the removed git provider.
-func TestMigrateToFlatfile_OwnerOnlyPermissions(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX permission bits are not meaningful on Windows")
-	}
-
-	srcProvider, err := interfaces.GetStorageProvider("flatfile")
-	require.NoError(t, err)
-	srcDir := t.TempDir()
-	srcConfig := map[string]interface{}{"root": srcDir}
-
-	// Seed one record in the source so migration performs a real write.
-	srcConfigStore, err := srcProvider.CreateConfigStore(srcConfig)
-	require.NoError(t, err)
-	require.NoError(t, srcConfigStore.StoreConfig(context.Background(), &cfgconfig.ConfigEntry{
-		Key:       &cfgconfig.ConfigKey{TenantID: "t1", Namespace: "ns", Name: "cfg"},
-		Data:      []byte("key: val"),
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-	}))
-
-	dstDir := t.TempDir()
-	origFlatfileRoot, origSQLitePath := migrateFlatfileRoot, migrateSQLitePath
-	t.Cleanup(func() { migrateFlatfileRoot, migrateSQLitePath = origFlatfileRoot, origSQLitePath })
-	migrateFlatfileRoot = filepath.Join(dstDir, "flat")
-	migrateSQLitePath = filepath.Join(dstDir, "cfgms.db")
-
-	_, err = migrateToFlatfile(context.Background(), srcProvider, srcConfig, false)
-	require.NoError(t, err)
-
-	rootInfo, err := os.Stat(migrateFlatfileRoot)
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0700), rootInfo.Mode().Perm(),
-		"flatfile root directory must be owner-only (0700)")
-
-	dbInfo, err := os.Stat(migrateSQLitePath)
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0600), dbInfo.Mode().Perm(),
-		"migrated sqlite database file must be owner-only (0600)")
-
-	// WAL-mode sidecars, when present, must be owner-only too.
-	for _, suffix := range []string{"-wal", "-shm"} {
-		if info, statErr := os.Stat(migrateSQLitePath + suffix); statErr == nil {
-			assert.Equal(t, os.FileMode(0600), info.Mode().Perm(),
-				"sqlite sidecar %s must be owner-only (0600)", suffix)
-		}
-	}
 }

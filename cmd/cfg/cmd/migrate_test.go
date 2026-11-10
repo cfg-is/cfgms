@@ -180,8 +180,8 @@ func TestRunMigrate_ClusterModeRejectsNonClusterCapableTarget(t *testing.T) {
 	})
 
 	// sub-case 2: cluster mode + cluster-capable backend -> gate passes.
-	// The storage migrator will still fail (openBackend rejects "git" as a source),
-	// but the error must NOT name the cluster-capable gate.
+	// rejectRemovedGitSource still rejects "git" as a source, but the error must
+	// NOT name the cluster-capable gate.
 	t.Run("cluster_mode_database_passes_gate", func(t *testing.T) {
 		t.Setenv("CFGMS_HA_MODE", "cluster")
 		migrateProvider = "storage"
@@ -190,14 +190,13 @@ func TestRunMigrate_ClusterModeRejectsNonClusterCapableTarget(t *testing.T) {
 		migrateDryRun = false
 
 		err := runMigrate(migrateCmd, nil)
-		require.Error(t, err, "storage migrator rejects unknown source backend")
+		require.Error(t, err, "rejectRemovedGitSource rejects the git source")
 		assert.NotContains(t, err.Error(), "not cluster-capable",
 			"cluster-capable backend must pass the gate")
 	})
 
 	// sub-case 3: no CFGMS_HA_MODE set -> gate is a no-op regardless of --to.
-	// The storage migrator still fails (unknown source backend), but that is not
-	// the cluster-capable gate.
+	// rejectRemovedGitSource still fails, but that is not the cluster-capable gate.
 	t.Run("single_mode_no_gate_error", func(t *testing.T) {
 		migrateProvider = "storage"
 		migrateFrom2 = "git"
@@ -205,7 +204,7 @@ func TestRunMigrate_ClusterModeRejectsNonClusterCapableTarget(t *testing.T) {
 		migrateDryRun = false
 
 		err := runMigrate(migrateCmd, nil)
-		require.Error(t, err, "storage migrator rejects unknown source backend")
+		require.Error(t, err, "rejectRemovedGitSource rejects the git source")
 		assert.NotContains(t, err.Error(), "not cluster-capable",
 			"non-cluster mode must not trigger the cluster-capable gate")
 	})
@@ -233,7 +232,7 @@ func TestRunMigrate_ClusterModeRejectsNonClusterCapableTarget(t *testing.T) {
 		migrateDryRun = false
 
 		err := runMigrate(migrateCmd, nil)
-		require.Error(t, err, "storage migrator rejects unknown source backend")
+		require.Error(t, err, "rejectRemovedGitSource rejects the git source")
 		assert.NotContains(t, err.Error(), "not cluster-capable",
 			"blue-green mode must not trigger the cluster-capable gate")
 	})
@@ -247,7 +246,7 @@ func TestRunMigrate_ClusterModeRejectsNonClusterCapableTarget(t *testing.T) {
 		migrateDryRun = false
 
 		err := runMigrate(migrateCmd, nil)
-		require.Error(t, err, "storage migrator rejects unknown source backend")
+		require.Error(t, err, "rejectRemovedGitSource rejects the git source")
 		assert.NotContains(t, err.Error(), "not cluster-capable",
 			"case-insensitive match must pass the gate for DATABASE")
 	})
@@ -283,4 +282,57 @@ func TestMigrateCmd_RunWritesRecords(t *testing.T) {
 	// Run must write all 3 records.
 	assert.Equal(t, 3, importer.count(), "Run must write all exported records to the target")
 	assert.Contains(t, buf.String(), "Migration complete")
+}
+
+// TestRunMigrate_StorageRejectsRemovedGitSource verifies that runMigrate rejects
+// the removed git provider as a storage source in dry-run and normal mode, that
+// other providers are unaffected, and that the cluster-mode gate error still
+// wins over the git rejection.
+func TestRunMigrate_StorageRejectsRemovedGitSource(t *testing.T) {
+	origProvider, origFrom, origTo, origDryRun := migrateProvider, migrateFrom2, migrateTo2, migrateDryRun
+	t.Cleanup(func() {
+		migrateProvider, migrateFrom2, migrateTo2, migrateDryRun = origProvider, origFrom, origTo, origDryRun
+	})
+
+	for _, dryRun := range []bool{false, true} {
+		for _, from := range []string{"git", "GIT"} {
+			migrateProvider = "storage"
+			migrateFrom2 = from
+			migrateTo2 = "database"
+			migrateDryRun = dryRun
+
+			err := runMigrate(migrateCmd, nil)
+			require.Error(t, err, "from=%q dryRun=%v", from, dryRun)
+			assert.Contains(t, err.Error(), "git storage provider was removed")
+		}
+	}
+
+	t.Run("other_provider_not_rejected", func(t *testing.T) {
+		migrate.Register("git-source-other-provider", func(_, _ string) (migrate.Migrator, error) {
+			return migrate.NewBaseMigrator(&cmdMemExporter{}, newCmdMemImporter()), nil
+		})
+		migrateProvider = "git-source-other-provider"
+		migrateFrom2 = "git"
+		migrateTo2 = "dst"
+		migrateDryRun = true
+
+		var buf bytes.Buffer
+		migrateCmd.SetOut(&buf)
+		defer migrateCmd.SetOut(nil)
+
+		require.NoError(t, runMigrate(migrateCmd, nil))
+	})
+
+	t.Run("cluster_gate_wins", func(t *testing.T) {
+		t.Setenv("CFGMS_HA_MODE", "cluster")
+		migrateProvider = "storage"
+		migrateFrom2 = "git"
+		migrateTo2 = "oss"
+		migrateDryRun = false
+
+		err := runMigrate(migrateCmd, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not cluster-capable")
+		assert.NotContains(t, err.Error(), "git storage provider was removed")
+	})
 }

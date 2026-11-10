@@ -855,7 +855,7 @@ func openStorageManager(cfg *config.Config, logger logging.Logger, opened *opene
 	case cfg.Storage.Provider == "database":
 		return openDatabaseStorageManager(cfg, logger, opened)
 	}
-	return nil, fmt.Errorf("storage.flatfile_root is required for OSS composite storage, or storage.provider must be 'database' for commercial single-provider mode. The 'git' storage provider has been removed — run 'cfg storage migrate --from git --to flatfile' to migrate existing data")
+	return nil, fmt.Errorf("storage.flatfile_root is required for OSS composite storage, or storage.provider must be 'database' for commercial single-provider mode. The 'git' storage provider has been removed")
 }
 
 // openClusterStorageManager backs every business store with the shared Postgres

@@ -228,11 +228,8 @@ holds fails closed at startup rather than replacing the cluster's published CA i
 Setting `flatfile_root` and `sqlite_path` together activates the OSS composite storage manager
 (flat-file + SQLite). If only one is set the provider falls through to the single-provider path.
 
-The `git` provider is no longer supported and no longer ships in `pkg/storage/providers`.
-An existing git-backed deployment is migrated once with
-`cfg migrate --provider storage --from git --to flatfile` (`cmd/cfg/cmd/migrate.go`
-`migrateCmd`) or the legacy alias `cfg storage migrate --from git --to flatfile`
-(`cmd/cfg/cmd/storage.go`).
+The `git` provider was removed and no longer ships in `pkg/storage/providers`.
+No migration path from it is supported.
 
 **Environment overrides for `storage`:**
 

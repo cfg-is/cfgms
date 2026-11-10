@@ -665,3 +665,19 @@ func TestRunController_WebAuthnWiring_UnsetConfigLeaves503(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
 		"an unset webauthn config must leave the passkey login begin endpoint at 503; body: %s", rec.Body.String())
 }
+
+// TestRejectRemovedGitStorage verifies the startup guard rejects the removed git
+// storage provider without pointing at a migration command, and accepts every
+// other configuration.
+func TestRejectRemovedGitStorage(t *testing.T) {
+	err := rejectRemovedGitStorage(&config.Config{Storage: &config.StorageConfig{Provider: "git"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "has been removed")
+	assert.NotContains(t, err.Error(), "migrate")
+
+	assert.NoError(t, rejectRemovedGitStorage(nil), "nil config")
+	assert.NoError(t, rejectRemovedGitStorage(&config.Config{}), "nil storage")
+	for _, provider := range []string{"flatfile", "sqlite", "database", ""} {
+		assert.NoError(t, rejectRemovedGitStorage(&config.Config{Storage: &config.StorageConfig{Provider: provider}}), "provider %q", provider)
+	}
+}
