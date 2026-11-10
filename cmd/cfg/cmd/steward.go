@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -778,6 +777,7 @@ func init() {
 	stewardRunCommandCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardRunCommandCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 	stewardRunCommandCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
+	stewardRunCommandCmd.Flags().StringVar(&signingCredentialSelector, "signing-credential", "", signingCredentialFlagUsage)
 	stewardRunCommandCmd.Flags().StringVar(&stewardRunTarget, "target", "", "Fleet selector (e.g. os:linux, group:prod)")
 	stewardRunCommandCmd.Flags().StringVar(&stewardRunShell, "shell", "", "Shell to use (bash, sh, powershell, pwsh, cmd)")
 	stewardRunCommandCmd.Flags().StringArrayVar(&stewardRunParams, "param", nil, "Parameter key=value (repeatable)")
@@ -791,6 +791,7 @@ func init() {
 	stewardExecCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardExecCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 	stewardExecCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
+	stewardExecCmd.Flags().StringVar(&signingCredentialSelector, "signing-credential", "", signingCredentialFlagUsage)
 	stewardExecCmd.Flags().StringVar(&stewardExecCommand, "command", "", "Command to execute on the steward (inline string or file path)")
 	stewardExecCmd.Flags().StringVar(&stewardExecShell, "shell", "", "Shell to use (bash, sh, powershell, pwsh, cmd)")
 	stewardExecCmd.Flags().DurationVar(&stewardExecTimeout, "timeout", defaultStewardExecTimeout, "Execution timeout for the command on the steward (the CLI waits this long plus a dispatch margin)")
@@ -2204,29 +2205,11 @@ func readCommandContent(arg string) ([]byte, error) {
 // generates locally and never transmits, distinct from the admin bundle used for mTLS
 // transport authentication. The controller never holds this private key at any point:
 // it signed only the public half at issuance (features/controller/api/handlers_signing_credential.go).
+// The credential is chosen by --signing-credential or the active connection (signing_credential.go).
 func signCommandContent(content []byte) (*commandSignature, error) {
-	credStore, err := newCredentialStore()
-	if err != nil {
-		return nil, fmt.Errorf("credential store unavailable: %w", err)
-	}
-
-	keyPEM, err := credStore.Load(context.Background(), signingCredentialName)
-	if err != nil {
-		return nil, fmt.Errorf("no payload-signing credential found: run 'cfg credential request-signing-cert' first: %w", err)
-	}
-
-	privKey, err := parsePrivKeyFromPEM(string(keyPEM))
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse payload-signing credential private key: %w", err)
-	}
-
-	certPath, err := signingCertPath()
+	privKey, certPEM, err := loadSigningCredential()
 	if err != nil {
 		return nil, err
-	}
-	certPEM, err := os.ReadFile(certPath) // #nosec G304 -- fixed default location or an operator-set CFGMS_SIGNING_CERT path, not user/network input
-	if err != nil {
-		return nil, fmt.Errorf("no payload-signing certificate found at %s: run 'cfg credential request-signing-cert' first: %w", certPath, err)
 	}
 
 	var algorithm string
@@ -2254,21 +2237,6 @@ func signCommandContent(content []byte) (*commandSignature, error) {
 		Value:     base64.StdEncoding.EncodeToString(sigBytes),
 		PublicKey: string(certPEM),
 	}, nil
-}
-
-// signingCertPath resolves the payload-signing certificate location: the
-// CFGMS_SIGNING_CERT environment variable when set to a non-empty value, otherwise the
-// default location 'cfg credential request-signing-cert' writes to when run without
-// --cert-out (<user config dir>/cfgms/signing-cert.pem).
-func signingCertPath() (string, error) {
-	if p, ok := os.LookupEnv("CFGMS_SIGNING_CERT"); ok && p != "" {
-		return p, nil
-	}
-	configDir, err := userConfigDirFn()
-	if err != nil {
-		return "", fmt.Errorf("cannot determine user config directory: %w", err)
-	}
-	return filepath.Join(configDir, "cfgms", "signing-cert.pem"), nil
 }
 
 // generateOperatorNonce returns a fresh operatorpayload.Envelope nonce: at least

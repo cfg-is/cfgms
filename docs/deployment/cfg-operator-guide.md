@@ -505,8 +505,9 @@ not inferred from an old copied lifetime table.
 
 An operator can start, stop or restart a service, or end, suspend or resume a
 process, on the stewards a selector matches. The action is signed with your
-payload-signing credential (`cfg credential request-signing-cert` creates one);
-the steward verifies that signature itself, so the controller cannot alter the
+payload-signing credential (`cfg credential request-signing-cert` creates one per
+connection; it is chosen from the active connection, or with
+`--signing-credential <name>`); the steward verifies that signature itself, so the controller cannot alter the
 action in transit.
 
 ```sh
