@@ -34,6 +34,7 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/modules"
+	pkgdna "github.com/cfgis/cfgms/pkg/dna"
 	entitygraphtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -265,7 +266,7 @@ func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 	aggregateRoot := ""
 	if len(manifest) > 0 {
 		var rootErr error
-		aggregateRoot, rootErr = AggregateRoot(manifest)
+		aggregateRoot, rootErr = pkgdna.AggregateRoot(manifest)
 		if rootErr != nil {
 			c.logger.Error("Failed to compute DNA aggregate root", "error", rootErr)
 		}

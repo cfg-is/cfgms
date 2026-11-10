@@ -15,8 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
-	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	sdna "github.com/cfgis/cfgms/pkg/dna"
 )
 
 // E2ETestSuite provides comprehensive end-to-end testing scenarios

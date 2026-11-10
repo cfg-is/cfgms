@@ -28,6 +28,13 @@ from desired-state comparison. Raw host collection can contain timestamps and
 process state; that does not make those values valid governed-resource fields.
 Observation time, synchronization state and current live state are distinct.
 
+The canonical fragment encoding and decoding, fragment and aggregate hashing,
+bucket hashing and the fragment constructors (`CanonicalizeFragment`,
+`DecodeCanonicalFragment`, `FragmentHash`, `AggregateRoot`, `BucketRoots`,
+`BulkRoot`, `NewFragment`, `FlattenFragments`, `MapState`) live in
+[`pkg/dna`](../../../pkg/dna), which the controller imports; this package keeps
+the collector, the assembler and the host-fact partitioning.
+
 ## Sensitivity and logs
 
 Inventory can expose host identifiers, usernames, addresses and installed software.

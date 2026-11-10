@@ -13,7 +13,7 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	steward "github.com/cfgis/cfgms/features/steward"
-	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	sdna "github.com/cfgis/cfgms/pkg/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 

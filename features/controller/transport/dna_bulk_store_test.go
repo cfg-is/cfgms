@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	stewarddna "github.com/cfgis/cfgms/features/steward/dna"
+	stewarddna "github.com/cfgis/cfgms/pkg/dna"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )

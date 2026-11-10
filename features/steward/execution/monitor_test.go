@@ -24,9 +24,9 @@ import (
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/modules"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/features/steward/factory"
+	sdna "github.com/cfgis/cfgms/pkg/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 

@@ -15,7 +15,7 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/controller/fleet"
-	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	sdna "github.com/cfgis/cfgms/pkg/dna"
 )
 
 const clusterFragmentPrefix = "cluster:"

@@ -16,8 +16,9 @@ import (
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
-	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	stewarddna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	sdna "github.com/cfgis/cfgms/pkg/dna"
 	entitygraphtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -38,7 +39,7 @@ func realGathererInitialDNA(t *testing.T, id, hostname, osName string) *commonpb
 		"hostname": hostname,
 		"os":       osName,
 	}
-	fragments, envelopes, err := sdna.PartitionHostFacts(attrs, entitygraphtypes.DefaultTaxonomy(), nil)
+	fragments, envelopes, err := stewarddna.PartitionHostFacts(attrs, entitygraphtypes.DefaultTaxonomy(), nil)
 	require.NoError(t, err)
 	return &commonpb.DNA{
 		Id:              id,
@@ -541,7 +542,7 @@ func TestSyncDNA_WarnLogContainsStewardIDAndMissingFields(t *testing.T) {
 func realFirstSyncRaceDNA(t *testing.T, id, hostname string) *commonpb.DNA {
 	t.Helper()
 	attrs := map[string]string{"hostname": hostname}
-	fragments, envelopes, err := sdna.PartitionHostFacts(attrs, entitygraphtypes.DefaultTaxonomy(), nil)
+	fragments, envelopes, err := stewarddna.PartitionHostFacts(attrs, entitygraphtypes.DefaultTaxonomy(), nil)
 	require.NoError(t, err)
 	return &commonpb.DNA{
 		Id:              id,

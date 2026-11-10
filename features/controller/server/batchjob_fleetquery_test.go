@@ -15,7 +15,7 @@ import (
 	controllerFleet "github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/controller/tagstore"
-	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	sdna "github.com/cfgis/cfgms/pkg/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 

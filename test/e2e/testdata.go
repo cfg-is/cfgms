@@ -12,7 +12,7 @@ import (
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/steward/config"
-	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	sdna "github.com/cfgis/cfgms/pkg/dna"
 )
 
 // TestDataGenerator provides lightweight test data generation optimized for CI environments

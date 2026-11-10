@@ -3,7 +3,11 @@
 
 package dnasync
 
-import "fmt"
+import (
+	"fmt"
+
+	pkgdna "github.com/cfgis/cfgms/pkg/dna"
+)
 
 // osqueryDefaultMaxFieldBytes is the default per-field byte limit for
 // string values in osquery-authority host:* fragments.
@@ -63,7 +67,7 @@ func validateOsqueryCanonicalBytes(fragID string, canonBytes []byte) error {
 		return nil
 	}
 
-	fields, err := decodeCanonicalFragment(canonBytes)
+	fields, err := pkgdna.DecodeCanonicalFragment(canonBytes)
 	if err != nil {
 		return fmt.Errorf("osquery fragment %q: malformed canonical bytes: %w", fragID, err)
 	}

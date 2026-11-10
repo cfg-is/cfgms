@@ -19,8 +19,8 @@ import (
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/features/controller/service"
-	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	sdna "github.com/cfgis/cfgms/pkg/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )

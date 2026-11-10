@@ -14,8 +14,8 @@ import (
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/controller/service"
-	stewardDNA "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
+	stewardDNA "github.com/cfgis/cfgms/pkg/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 

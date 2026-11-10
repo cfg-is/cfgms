@@ -22,6 +22,7 @@ import (
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	dpTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
+	pkgdna "github.com/cfgis/cfgms/pkg/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/version"
 	"github.com/stretchr/testify/assert"
@@ -185,7 +186,7 @@ func newTestLogger(t *testing.T) logging.Logger {
 // Panics on error (test helper).
 func mustTestFragment(t *testing.T, id string, fields map[string]interface{}) *commonpb.Fragment {
 	t.Helper()
-	f, err := dna.NewFragment(id, "test", dna.MapState(fields))
+	f, err := pkgdna.NewFragment(id, "test", pkgdna.MapState(fields))
 	require.NoError(t, err)
 	return f
 }
@@ -446,7 +447,7 @@ func TestSyncDNAHandler_SendsFullDNAOverDataPlane(t *testing.T) {
 
 // fragmentDNACollector is a real DNACollector that returns both attributes and
 // ADR-017 fragments. It is not a mock: the fragments it returns are built by the
-// production constructor dna.NewFragment (same code path *execution.Executor's
+// production constructor pkgdna.NewFragment (same code path *execution.Executor's
 // CollectModuleFragments uses), so canonical bytes and fragment hash are genuine.
 type fragmentDNACollector struct {
 	attrs map[string]string
@@ -472,7 +473,7 @@ func (f *fragmentDNACollector) CollectFragments(_ context.Context) []*commonpb.F
 // (clusterregistry.BuildRegistry) was always empty in production.
 func TestSyncDNAHandler_IncludesModuleFragments(t *testing.T) {
 	// Build a genuine cluster fragment through the production constructor.
-	frag, err := dna.NewFragment("cluster:cfg-lab", "hyperv",
+	frag, err := pkgdna.NewFragment("cluster:cfg-lab", "hyperv",
 		execution.NewConfigState(map[string]interface{}{
 			"name":           "cfg-lab",
 			"cno_owner_node": "CFG-70-02",
@@ -1217,7 +1218,7 @@ func makeClientFragments(t *testing.T, n int) ([]*commonpb.Fragment, string) {
 	manifest := make([]*commonpb.ManifestEntry, n)
 	for i := 0; i < n; i++ {
 		canonical := []byte(fmt.Sprintf(`{"id":%d,"v":"val%d"}`, i, i))
-		h := dna.FragmentHash(canonical)
+		h := pkgdna.FragmentHash(canonical)
 		frags[i] = &commonpb.Fragment{
 			FragmentId:     fmt.Sprintf("frag-%d", i),
 			Authority:      "test",
@@ -1226,7 +1227,7 @@ func makeClientFragments(t *testing.T, n int) ([]*commonpb.Fragment, string) {
 		}
 		manifest[i] = &commonpb.ManifestEntry{FragmentId: frags[i].FragmentId, FragmentHash: h}
 	}
-	root, err := dna.AggregateRoot(manifest)
+	root, err := pkgdna.AggregateRoot(manifest)
 	require.NoError(t, err)
 	return frags, root
 }
