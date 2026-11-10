@@ -29,15 +29,7 @@ var (
 	credentialRequestSigningCertKeyOut      string
 	credentialRequestSigningCertCertOut     string
 	credentialRequestSigningCertExportPlain bool
-	credentialRequestSigningCertCredential  string
 )
-
-// signingCredentialName is the CredentialStore entry the signing private key is
-// persisted under, as <user config dir>/cfgms/credentials/<name>.enc, encrypted
-// with the machine-bound key. It shares the namespace used by connection
-// credentials (cfg connect), so --credential-name exists for the rare case where
-// an operator has a connection registered under this name.
-const signingCredentialName = "signing-key"
 
 // credentialCmd is the parent command: cfg credential ...
 var credentialCmd = &cobra.Command{
@@ -63,6 +55,14 @@ authenticate cfg itself (see 'cfg connect'): it exists specifically to sign
 operatorpayload.Envelopes (a future 'cfg payload sign' command), never for
 mTLS session authentication.
 
+The credential is stored per controller connection: by default the key is named
+signing-key.<active connection> and the certificate is written to
+<user config dir>/cfgms/signing-cert.<active connection>.pem, and signing commands
+('cfg steward exec', 'cfg steward run-command', 'cfg steward service|process')
+pick it automatically while that connection is active. Without a session the
+legacy name signing-key is used. --signing-credential <name> stores (and later
+selects) the credential under an explicit name instead.
+
 Requires an existing admin mTLS bundle or active session (see 'cfg connect')
 that holds the signing-credential:request permission, plus a fresh WebAuthn
 presence assertion — the CLI opens a browser automatically if one is needed.
@@ -78,10 +78,10 @@ func init() {
 	credentialRequestSigningCertCmd.Flags().StringVar(&credentialRequestSigningCertAPIURL, "url", "", "Controller REST API URL (env: CFGMS_API_URL)")
 	credentialRequestSigningCertCmd.Flags().BoolVar(&credentialRequestSigningCertTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
 	credentialRequestSigningCertCmd.Flags().StringVar(&credentialRequestSigningCertServerName, "server-name", "", "Override TLS server name for certificate verification")
-	credentialRequestSigningCertCmd.Flags().StringVar(&credentialRequestSigningCertKeyOut, "key-out", "", "path for the cleartext private key PEM export; requires --export-plaintext-key (default: <user config dir>/cfgms/signing-key.pem)")
+	credentialRequestSigningCertCmd.Flags().StringVar(&credentialRequestSigningCertKeyOut, "key-out", "", "path for the cleartext private key PEM export; requires --export-plaintext-key (default: <user config dir>/cfgms/<signing credential name>.pem)")
 	credentialRequestSigningCertCmd.Flags().BoolVar(&credentialRequestSigningCertExportPlain, "export-plaintext-key", false, "also export the private key as a cleartext PEM file (development only; the key is always stored encrypted regardless)")
-	credentialRequestSigningCertCmd.Flags().StringVar(&credentialRequestSigningCertCertOut, "cert-out", "", "path to write the issued certificate PEM (default: <user config dir>/cfgms/signing-cert.pem)")
-	credentialRequestSigningCertCmd.Flags().StringVar(&credentialRequestSigningCertCredential, "credential-name", signingCredentialName, "name the encrypted signing key is stored under in the credential store")
+	credentialRequestSigningCertCmd.Flags().StringVar(&credentialRequestSigningCertCertOut, "cert-out", "", "path to write the issued certificate PEM (default: <user config dir>/cfgms/signing-cert.<connection>.pem; signing-cert.pem for the legacy signing-key)")
+	credentialRequestSigningCertCmd.Flags().StringVar(&signingCredentialSelector, "signing-credential", "", "name the encrypted signing key is stored under; select it with the same flag when signing (default: signing-key.<active connection>, or the legacy signing-key when no session is active)")
 
 	credentialCmd.AddCommand(credentialRequestSigningCertCmd)
 	rootCmd.AddCommand(credentialCmd)
@@ -119,14 +119,43 @@ func getCredentialAPIClient() (*APIClient, error) {
 	return requireSessionOrBundleClient(apiURL, tlsInsecure, credentialRequestSigningCertServerName)
 }
 
+// requestSigningCertificate submits pubPEM — the only field the request carries — to
+// the CSR issuance endpoint and returns the issued certificate response.
+func requestSigningCertificate(client *APIClient, pubPEM []byte) (signingCredentialResponseBody, error) {
+	reqBody, err := json.Marshal(signingCredentialRequestBody{PublicKeyPEM: string(pubPEM)})
+	if err != nil {
+		return signingCredentialResponseBody{}, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/signing-credential/request", bytes.NewReader(reqBody))
+	if err != nil {
+		return signingCredentialResponseBody{}, fmt.Errorf("request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return signingCredentialResponseBody{}, fmt.Errorf("signing-credential request failed (%s): %s", resp.Status, string(body))
+	}
+
+	var envelope struct {
+		Data signingCredentialResponseBody `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return signingCredentialResponseBody{}, fmt.Errorf("failed to parse response: %w", err)
+	}
+	return envelope.Data, nil
+}
+
 func runCredentialRequestSigningCert(cmd *cobra.Command, _ []string) error {
-	keyOutPath, certOutPath, err := resolveSigningCredentialOutputPaths()
+	ref, err := resolveSigningCredentialRef()
 	if err != nil {
 		return err
 	}
-	credName := credentialRequestSigningCertCredential
-	if credName == "" {
-		credName = signingCredentialName
+	credName := ref.KeyName
+	keyOutPath, certOutPath, err := resolveSigningCredentialOutputPaths(ref)
+	if err != nil {
+		return err
 	}
 
 	// Open the encrypted credential store before generating or requesting
@@ -156,27 +185,9 @@ func runCredentialRequestSigningCert(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	reqBody, err := json.Marshal(signingCredentialRequestBody{PublicKeyPEM: string(pubPEM)})
+	issued, err := requestSigningCertificate(client, pubPEM)
 	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	resp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/signing-credential/request", bytes.NewReader(reqBody))
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("signing-credential request failed (%s): %s", resp.Status, string(body))
-	}
-
-	var envelope struct {
-		Data signingCredentialResponseBody `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
+		return err
 	}
 
 	// Persist the private key before the certificate: the key was generated
@@ -192,14 +203,11 @@ func runCredentialRequestSigningCert(cmd *cobra.Command, _ []string) error {
 	if err := credStore.Store(context.Background(), credName, keyPEM); err != nil {
 		return fmt.Errorf("failed to store private key: %w", err)
 	}
-	if err := writeCredentialFile(certOutPath, []byte(envelope.Data.CertificatePEM)); err != nil {
+	if err := writeCredentialFile(certOutPath, []byte(issued.CertificatePEM)); err != nil {
 		return fmt.Errorf("failed to write certificate: %w", err)
 	}
 
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Signing credential issued (serial: %s, expires: %s)\n",
-		envelope.Data.SerialNumber, envelope.Data.ExpiresAt.Format(time.RFC3339))
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Private key: stored encrypted as credential %q\n", credName)
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Certificate: %s\n", certOutPath)
+	printSigningCredentialIssued(cmd.OutOrStdout(), ref, certOutPath, issued)
 
 	// Cleartext export is opt-in only, and happens last so a failed export never
 	// costs the operator the encrypted copy.
@@ -211,6 +219,19 @@ func runCredentialRequestSigningCert(cmd *cobra.Command, _ []string) error {
 			"WARNING: cleartext private key exported to %s — it is unencrypted at rest; delete it once consumed\n", keyOutPath)
 	}
 	return nil
+}
+
+// printSigningCredentialIssued reports where the credential landed and the selector
+// that signing commands use to pick it.
+func printSigningCredentialIssued(w io.Writer, ref signingCredentialRef, certOutPath string, issued signingCredentialResponseBody) {
+	_, _ = fmt.Fprintf(w, "Signing credential issued (serial: %s, expires: %s)\n",
+		issued.SerialNumber, issued.ExpiresAt.Format(time.RFC3339))
+	_, _ = fmt.Fprintf(w, "Private key: stored encrypted as credential %q\n", ref.KeyName)
+	_, _ = fmt.Fprintf(w, "Certificate: %s\n", certOutPath)
+	_, _ = fmt.Fprintf(w, "Select this credential with: --signing-credential %s\n", ref.KeyName)
+	if ref.Connection != "" {
+		_, _ = fmt.Fprintf(w, "It is chosen automatically while connection %q is active.\n", ref.Connection)
+	}
 }
 
 // writeCredentialFile creates path's parent directory (mode 0700) and writes data
@@ -232,29 +253,21 @@ func writeCredentialFile(path string, data []byte) error {
 // stored encrypted by default, and a cleartext copy is written only on explicit
 // opt-in. Passing --key-out without that opt-in is an error rather than a silent
 // downgrade to a cleartext key on disk.
-func resolveSigningCredentialOutputPaths() (keyPath, certPath string, err error) {
+func resolveSigningCredentialOutputPaths(ref signingCredentialRef) (keyPath, certPath string, err error) {
 	if credentialRequestSigningCertKeyOut != "" && !credentialRequestSigningCertExportPlain {
 		return "", "", fmt.Errorf(
 			"--key-out writes an unencrypted private key: pass --export-plaintext-key to confirm, " +
 				"or omit --key-out to keep the key encrypted in the credential store")
 	}
+	certPath = credentialRequestSigningCertCertOut
+	if certPath == "" {
+		certPath = ref.CertPath
+	}
 	if credentialRequestSigningCertExportPlain {
 		keyPath = credentialRequestSigningCertKeyOut
-	}
-	certPath = credentialRequestSigningCertCertOut
-	needsDefault := certPath == "" || (credentialRequestSigningCertExportPlain && keyPath == "")
-	if !needsDefault {
-		return keyPath, certPath, nil
-	}
-	configDir, dirErr := userConfigDirFn()
-	if dirErr != nil {
-		return "", "", fmt.Errorf("cannot determine user config directory: %w", dirErr)
-	}
-	if credentialRequestSigningCertExportPlain && keyPath == "" {
-		keyPath = filepath.Join(configDir, "cfgms", "signing-key.pem")
-	}
-	if certPath == "" {
-		certPath = filepath.Join(configDir, "cfgms", "signing-cert.pem")
+		if keyPath == "" {
+			keyPath = filepath.Join(filepath.Dir(ref.CertPath), ref.KeyName+".pem")
+		}
 	}
 	return keyPath, certPath, nil
 }

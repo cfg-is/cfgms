@@ -104,6 +104,7 @@ func init() {
 		c.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 		c.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 		c.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
+		c.Flags().StringVar(&signingCredentialSelector, "signing-credential", "", signingCredentialFlagUsage)
 		c.Flags().StringVar(&stewardActionJustification, "justification", "", "Why this action is being taken (required, recorded in the audit log)")
 		c.Flags().DurationVar(&stewardActionWaitTimeout, "wait-timeout", stewardActionDefaultWait, "Maximum time to wait for each steward's result")
 		c.Flags().BoolVar(&stewardActionJSON, "json", false, "Emit a JSON result keyed by steward instead of plain text")

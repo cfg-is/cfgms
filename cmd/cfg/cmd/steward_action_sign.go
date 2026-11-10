@@ -11,7 +11,8 @@ import (
 // buildAndSignActionEnvelope signs one operator envelope for a steward action. The
 // content comes from operatorpayload.ActionContent, the shell is
 // operatorpayload.ActionShell, and the signed targets are exactly stewardID, so the
-// API's one-target rule holds. The expiry is operatorEnvelopeExpiry, which equals the
+// API's one-target rule holds. The signing credential is the one selected by
+// --signing-credential, else the active connection's (see signing_credential.go). The expiry is operatorEnvelopeExpiry, which equals the
 // API's operatorpayload.ActionEnvelopeMaxTTL. Every call draws a fresh nonce.
 func buildAndSignActionEnvelope(action operatorpayload.Action, stewardID string) (*commandSignature, operatorpayload.Envelope, error) {
 	content, err := operatorpayload.ActionContent(action)

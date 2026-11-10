@@ -24,6 +24,8 @@ cfg credential request-signing-cert
 cfg credential request-signing-cert \
   --cert-out ~/.config/cfgms/signing-cert.pem
 
+# store under an explicit name instead of the active connection's default
+cfg credential request-signing-cert --signing-credential ops-laptop
 ```
 
 The private key is generated on the operator's machine and never transmitted —
@@ -35,19 +37,46 @@ not the admin marker used by mTLS transport bundles, so the two credential types
 remain distinguishable by construction. The resulting keypair signs
 `operatorpayload.Envelope`s; it is never used for mTLS session authentication.
 
-**Consumers (Issue #3696):** `cfg steward run-command` and `cfg steward exec` sign
-the inline command's operator envelope with this credential — loaded from the
-credential store under the default `signing-key` entry (neither command exposes a
-`--credential-name` override; that flag only applies to `request-signing-cert`
-itself) and the certificate at `CFGMS_SIGNING_CERT` or the default `--cert-out`
-path above. Neither command reads the admin bundle's key for this signature: the
+**Per-connection credentials:** a signing credential (key plus certificate) belongs to
+one controller connection, so an operator who works with more than one connection or
+account keeps a separate credential for each. With a live session the key is stored
+in the credential store as `signing-key.<connection>` (the connection name `cfg
+connect` registered) and the certificate is written to
+`<user config dir>/cfgms/signing-cert.<connection>.pem`. `--signing-credential
+<name>` stores the key as `<name>` instead, with the certificate at
+`signing-cert.<name>.pem` (a `<name>` of the form `signing-key.<x>` uses
+`signing-cert.<x>.pem`, matching the derived form). `--cert-out` and
+`CFGMS_SIGNING_CERT` override only the certificate path. The command prints the
+selector to use.
+
+**Consumers (Issue #3696):** `cfg steward run-command`, `cfg steward exec` and the
+signed steward actions (`cfg steward service`, `cfg steward process`) sign the
+operator envelope with this credential. The credential is resolved in this order:
+
+1. the `--signing-credential <name>` flag, accepted by all of these commands;
+2. `signing-key.<connection>` for the active session's connection;
+3. with no session (for example bundle-only use), the legacy `signing-key`.
+
+Key and certificate are loaded together and the certificate's public key must match
+the private key, otherwise signing is refused — a `CFGMS_SIGNING_CERT` from another
+account cannot be paired with this key. If the selected credential does not exist the
+error names the selector (or the derived name) and `cfg credential
+request-signing-cert`; `cfg` never falls back to a different account's key.
+
+**Legacy `signing-key`:** a credential stored before credentials were scoped per
+connection is unchanged on disk (key `signing-key`, certificate `signing-cert.pem`).
+It keeps signing when no session is active, and is selected explicitly with
+`--signing-credential signing-key` under a session. With a session and no selector it
+is not used silently, because it may belong to a different account; the error says so.
+
+Neither command reads the admin bundle's key for this signature: the
 admin bundle (or an active
 session) is still required to authenticate the API connection itself, but the
 controller never holds the payload-signing private key at any point — the
 zero-custody property this credential exists for is enforced end-to-end only once
 these commands stop accepting an admin-bundle-signed envelope, which this story
-completes. Run `cfg credential request-signing-cert` once per operator machine
-before using either command; a missing credential fails fast with an error naming
+completes. Run `cfg credential request-signing-cert` once per connection
+before using these commands; a missing credential fails fast with an error naming
 the command to run.
 
 All three enforcement points on this path require the same credential type, so an
@@ -67,7 +96,7 @@ presence gesture — complete the presence-gated action from the controller web 
 instead.
 
 **Where the private key is kept:** the generated key is stored encrypted at rest in
-the machine-bound credential store — `<user config dir>/cfgms/credentials/signing-key.enc`,
+the machine-bound credential store — `<user config dir>/cfgms/credentials/signing-key.<connection>.enc` (`signing-key.enc` for the legacy name),
 the same store `cfg connect` uses for the admin bundle's private key — not as a
 cleartext PEM file. Mode 0600 alone is access control, not encryption at rest: it
 does not protect the key from another process running as the operator, from a
@@ -84,10 +113,10 @@ naming the exported path.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--cert-out` | `<user config dir>/cfgms/signing-cert.pem` | Path to write the issued certificate PEM (mode 0600) |
-| `--credential-name` | `signing-key` | Name the encrypted signing key is stored under in the credential store |
+| `--cert-out` | `<user config dir>/cfgms/signing-cert.<connection>.pem` (`signing-cert.pem` for the legacy `signing-key`) | Path to write the issued certificate PEM (mode 0600) |
+| `--signing-credential` | `signing-key.<active connection>`; `signing-key` with no session | Name the encrypted signing key is stored under; pass the same flag to the signing commands to select it. Replaces the removed `--credential-name` |
 | `--export-plaintext-key` | false | Also export the private key as a cleartext PEM (development only); required to use `--key-out` |
-| `--key-out` | `<user config dir>/cfgms/signing-key.pem` | Path for the cleartext key export; ignored unless `--export-plaintext-key` is passed, and an error if passed without it |
+| `--key-out` | `<user config dir>/cfgms/<signing credential name>.pem` | Path for the cleartext key export; ignored unless `--export-plaintext-key` is passed, and an error if passed without it |
 | `--url` | — | Controller REST API URL (env: `CFGMS_API_URL`). Use the controller's configured API listener address (`--listen-api-addr`, `CFGMS_HTTP_LISTEN_ADDR` or the config file; default port `9080`). Examples below write it as `https://<controller-api>`. |
 | `--tls-insecure` | false | Skip TLS certificate verification (development only, env: `CFGMS_TLS_INSECURE`) |
 | `--server-name` | — | Override the TLS server name used for certificate verification |

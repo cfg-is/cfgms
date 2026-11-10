@@ -33,6 +33,12 @@ func setCredentialRequestSigningCertFlags(t *testing.T, url string) func() {
 	bundleFilePath := filepath.Join(t.TempDir(), "admin.bundle.yaml")
 	generateTestBundleFile(t, bundleFilePath, "https://placeholder.local:9443")
 	overrideCredentialsDir(t, t.TempDir())
+	// No session: the key is stored under the legacy name and the developer's real OS
+	// keychain is never read.
+	overrideSessionStore(t, nil)
+	origSelector := signingCredentialSelector
+	signingCredentialSelector = ""
+	t.Cleanup(func() { signingCredentialSelector = origSelector })
 
 	origURL := credentialRequestSigningCertAPIURL
 	origInsecure := credentialRequestSigningCertTLSInsecure
@@ -65,14 +71,6 @@ func setSigningCertOutputFlags(t *testing.T, keyOut, certOut string, exportPlain
 		credentialRequestSigningCertCertOut = origCertOut
 		credentialRequestSigningCertExportPlain = origExport
 	})
-}
-
-// setSigningCredentialName overrides --credential-name for the duration of the test.
-func setSigningCredentialName(t *testing.T, name string) {
-	t.Helper()
-	orig := credentialRequestSigningCertCredential
-	credentialRequestSigningCertCredential = name
-	t.Cleanup(func() { credentialRequestSigningCertCredential = orig })
 }
 
 // TestCredentialRequestSigningCertCmd_HappyPath is a [REQUIRED TEST]: it captures the
@@ -111,7 +109,6 @@ func TestCredentialRequestSigningCertCmd_HappyPath(t *testing.T) {
 	keyOut := filepath.Join(tmpDir, "signing-key.pem")
 	certOut := filepath.Join(tmpDir, "signing-cert.pem")
 	setSigningCertOutputFlags(t, "", certOut, false)
-	setSigningCredentialName(t, signingCredentialName)
 
 	output := captureStdout(t, func() {
 		err := runCredentialRequestSigningCert(credentialRequestSigningCertCmd, nil)
@@ -236,7 +233,6 @@ func TestCredentialRequestSigningCertCmd_PlaintextExportOptIn(t *testing.T) {
 	tmpDir := t.TempDir()
 	keyOut := filepath.Join(tmpDir, "signing-key.pem")
 	setSigningCertOutputFlags(t, keyOut, filepath.Join(tmpDir, "signing-cert.pem"), true)
-	setSigningCredentialName(t, signingCredentialName)
 
 	output := captureStdout(t, func() {
 		require.NoError(t, runCredentialRequestSigningCert(credentialRequestSigningCertCmd, nil))
@@ -276,7 +272,6 @@ func TestCredentialRequestSigningCertCmd_ServerError(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	setSigningCertOutputFlags(t, "", filepath.Join(tmpDir, "signing-cert.pem"), false)
-	setSigningCredentialName(t, signingCredentialName)
 
 	err := runCredentialRequestSigningCert(credentialRequestSigningCertCmd, nil)
 	require.Error(t, err)
@@ -321,7 +316,9 @@ func TestResolveSigningCredentialOutputPaths_Defaults(t *testing.T) {
 
 	setSigningCertOutputFlags(t, "", "", false)
 
-	keyPath, certPath, err := resolveSigningCredentialOutputPaths()
+	ref, err := newSigningCredentialRef(signingCredentialName, "")
+	require.NoError(t, err)
+	keyPath, certPath, err := resolveSigningCredentialOutputPaths(ref)
 	require.NoError(t, err)
 	assert.Empty(t, keyPath, "no cleartext key path may be defaulted without the export opt-in")
 	assert.Equal(t, filepath.Join(tmpDir, "cfgms", "signing-cert.pem"), certPath)
@@ -337,16 +334,18 @@ func TestResolveSigningCredentialOutputPaths_ExportDefaults(t *testing.T) {
 
 	setSigningCertOutputFlags(t, "", "", true)
 
-	keyPath, certPath, err := resolveSigningCredentialOutputPaths()
+	ref, err := newSigningCredentialRef("signing-key.conn-a", "conn-a")
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(tmpDir, "cfgms", "signing-key.pem"), keyPath)
-	assert.Equal(t, filepath.Join(tmpDir, "cfgms", "signing-cert.pem"), certPath)
+	keyPath, certPath, err := resolveSigningCredentialOutputPaths(ref)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(tmpDir, "cfgms", "signing-key.conn-a.pem"), keyPath)
+	assert.Equal(t, filepath.Join(tmpDir, "cfgms", "signing-cert.conn-a.pem"), certPath)
 }
 
 func TestResolveSigningCredentialOutputPaths_ExplicitFlags(t *testing.T) {
 	setSigningCertOutputFlags(t, "/tmp/explicit-key.pem", "/tmp/explicit-cert.pem", true)
 
-	keyPath, certPath, err := resolveSigningCredentialOutputPaths()
+	keyPath, certPath, err := resolveSigningCredentialOutputPaths(signingCredentialRef{KeyName: signingCredentialName})
 	require.NoError(t, err)
 	assert.Equal(t, "/tmp/explicit-key.pem", keyPath)
 	assert.Equal(t, "/tmp/explicit-cert.pem", certPath)
@@ -357,7 +356,120 @@ func TestResolveSigningCredentialOutputPaths_ExplicitFlags(t *testing.T) {
 func TestResolveSigningCredentialOutputPaths_KeyOutWithoutOptIn(t *testing.T) {
 	setSigningCertOutputFlags(t, "/tmp/explicit-key.pem", "/tmp/explicit-cert.pem", false)
 
-	_, _, err := resolveSigningCredentialOutputPaths()
+	_, _, err := resolveSigningCredentialOutputPaths(signingCredentialRef{KeyName: signingCredentialName})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--export-plaintext-key")
+}
+
+func TestResolveSigningCredentialRef_Order(t *testing.T) {
+	env := newSigningTestEnv(t)
+
+	// No session, no selector: the legacy name and legacy certificate path.
+	ref, err := resolveSigningCredentialRef()
+	require.NoError(t, err)
+	assert.Equal(t, signingCredentialName, ref.KeyName)
+	assert.Equal(t, filepath.Join(env.configDir, "cfgms", "signing-cert.pem"), ref.CertPath)
+	assert.Empty(t, ref.Connection)
+
+	// Live session: derived from the active connection.
+	env.connect(t, "conn-a")
+	ref, err = resolveSigningCredentialRef()
+	require.NoError(t, err)
+	assert.Equal(t, "signing-key.conn-a", ref.KeyName)
+	assert.Equal(t, filepath.Join(env.configDir, "cfgms", "signing-cert.conn-a.pem"), ref.CertPath)
+	assert.Equal(t, "conn-a", ref.Connection)
+
+	// Explicit selector wins over the session.
+	signingCredentialSelector = "ops-laptop"
+	ref, err = resolveSigningCredentialRef()
+	require.NoError(t, err)
+	assert.Equal(t, "ops-laptop", ref.KeyName)
+	assert.Equal(t, filepath.Join(env.configDir, "cfgms", "signing-cert.ops-laptop.pem"), ref.CertPath)
+
+	// A connection name that is not a valid credential filename is refused.
+	signingCredentialSelector = ""
+	env.connect(t, "a/b")
+	_, err = resolveSigningCredentialRef()
+	require.Error(t, err)
+}
+
+// TestCredentialRequestSigningCertCmd_StoresUnderSelector proves the key lands under
+// the selected name, that a signing command selecting the same name can use it, and
+// that the command prints the selector to use.
+func TestCredentialRequestSigningCertCmd_StoresUnderSelector(t *testing.T) {
+	var pubPEM string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body signingCredentialRequestBody
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		pubPEM = body.PublicKeyPEM
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
+			"certificate_pem": "unused", "serial_number": "7",
+			"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		}})
+	}))
+	defer srv.Close()
+
+	cleanup := setCredentialRequestSigningCertFlags(t, srv.URL)
+	defer cleanup()
+	env := newSigningTestEnv(t)
+	overrideCredentialsDir(t, filepath.Join(t.TempDir(), "credentials"))
+	setSigningCertOutputFlags(t, "", "", false)
+	signingCredentialSelector = "ops-laptop"
+
+	output := captureStdout(t, func() {
+		require.NoError(t, runCredentialRequestSigningCert(credentialRequestSigningCertCmd, nil))
+	})
+	assert.Contains(t, output, "--signing-credential ops-laptop")
+
+	store, err := newCredentialStore()
+	require.NoError(t, err)
+	keyPEM, err := store.Load(context.Background(), "ops-laptop")
+	require.NoError(t, err)
+	priv, err := parsePrivKeyFromPEM(string(keyPEM))
+	require.NoError(t, err)
+	block, _ := pem.Decode([]byte(pubPEM))
+	require.NotNil(t, block)
+	sentPub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	require.NoError(t, err)
+	assert.True(t, priv.(*ecdsa.PrivateKey).PublicKey.Equal(sentPub))
+
+	_, statErr := os.Stat(filepath.Join(env.configDir, "cfgms", "signing-cert.ops-laptop.pem"))
+	assert.NoError(t, statErr, "certificate must land at the selector's default path")
+}
+
+// TestCredentialRequestSigningCertCmd_DefaultsToActiveConnection proves that with a
+// live session the key is stored as signing-key.<connection>.
+func TestCredentialRequestSigningCertCmd_DefaultsToActiveConnection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
+			"certificate_pem": "unused", "serial_number": "8",
+			"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		}})
+	}))
+	defer srv.Close()
+
+	cleanup := setCredentialRequestSigningCertFlags(t, srv.URL)
+	defer cleanup()
+	env := newSigningTestEnv(t)
+	overrideCredentialsDir(t, filepath.Join(t.TempDir(), "credentials"))
+	setSigningCertOutputFlags(t, "", "", false)
+	env.connect(t, "conn-a")
+
+	output := captureStdout(t, func() {
+		require.NoError(t, runCredentialRequestSigningCert(credentialRequestSigningCertCmd, nil))
+	})
+	assert.Contains(t, output, "--signing-credential signing-key.conn-a")
+
+	store, err := newCredentialStore()
+	require.NoError(t, err)
+	_, err = store.Load(context.Background(), "signing-key.conn-a")
+	require.NoError(t, err, "key must be stored under the active connection's derived name")
+	_, err = store.Load(context.Background(), signingCredentialName)
+	assert.Error(t, err, "the legacy name must not be written when a session is active")
+	_, statErr := os.Stat(filepath.Join(env.configDir, "cfgms", "signing-cert.conn-a.pem"))
+	assert.NoError(t, statErr)
 }

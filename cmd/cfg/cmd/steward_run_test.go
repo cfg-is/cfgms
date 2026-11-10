@@ -8,6 +8,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	certbundle "github.com/cfgis/cfgms/pkg/cert/bundle"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -117,6 +119,12 @@ func generateTestSigningCredential(t *testing.T) {
 func saveStewardRunGlobals(t *testing.T) {
 	t.Helper()
 	generateTestSigningCredential(t)
+	// No active session: signing resolves the legacy signing-key credential and never
+	// reads the developer's real OS keychain.
+	overrideSessionStore(t, nil)
+	origSelector := signingCredentialSelector
+	signingCredentialSelector = ""
+	t.Cleanup(func() { signingCredentialSelector = origSelector })
 	origURL := stewardURL
 	origInsecure := stewardTLSInsecure
 	origTarget := stewardRunTarget
@@ -1145,4 +1153,240 @@ func TestRunCommand_JSONOutput_KeyedBySteward(t *testing.T) {
 	}
 	assert.True(t, keys["host-one#s1"], "output must contain key 'host-one#s1'")
 	assert.True(t, keys["host-two#s2"], "output must contain key 'host-two#s2'")
+}
+
+// ---------------------------------------------------------------------------
+// per-connection signing credential selection
+// ---------------------------------------------------------------------------
+
+// signingTestEnv isolates the credential store and the user config directory (the
+// default certificate location) in temp directories, with no session and no
+// CFGMS_SIGNING_CERT override.
+type signingTestEnv struct {
+	configDir string
+	sessions  *testSessionStore
+}
+
+func newSigningTestEnv(t *testing.T) *signingTestEnv {
+	t.Helper()
+	configDir := t.TempDir()
+	origConfigDir := userConfigDirFn
+	userConfigDirFn = func() (string, error) { return configDir, nil }
+	t.Cleanup(func() { userConfigDirFn = origConfigDir })
+	overrideCredentialsDir(t, filepath.Join(configDir, "cfgms", "credentials"))
+	t.Setenv("CFGMS_SIGNING_CERT", "")
+
+	origSelector := signingCredentialSelector
+	signingCredentialSelector = ""
+	t.Cleanup(func() { signingCredentialSelector = origSelector })
+
+	sessions := newTestSessionStore()
+	overrideSessionStore(t, sessions)
+	return &signingTestEnv{configDir: configDir, sessions: sessions}
+}
+
+// connect records an active session for the named connection.
+func (e *signingTestEnv) connect(t *testing.T, connection string) {
+	t.Helper()
+	require.NoError(t, storeSessionToken(&sessionRecord{
+		Token:          "tok",
+		SessionID:      "sess",
+		ControllerURL:  "https://controller.invalid",
+		ConnectionName: connection,
+		AbsoluteExpiry: time.Now().Add(time.Hour),
+	}))
+}
+
+// issue stores a fresh ECDSA key under keyName through the real credential store and
+// writes a self-signed certificate for it to certPath (the default location of
+// keyName when empty). Returns the key.
+func (e *signingTestEnv) issue(t *testing.T, keyName, certPath string) *ecdsa.PrivateKey {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	require.NoError(t, err)
+	store, err := newCredentialStore()
+	require.NoError(t, err)
+	require.NoError(t, store.Store(context.Background(), keyName, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})))
+	if certPath == "" {
+		ref, err := newSigningCredentialRef(keyName, "")
+		require.NoError(t, err)
+		certPath = ref.CertPath
+	}
+	writeSelfSignedCert(t, certPath, priv)
+	return priv
+}
+
+// writeSelfSignedCert writes a certificate carrying priv's public key to path.
+func writeSelfSignedCert(t *testing.T, path string, priv *ecdsa.PrivateKey) {
+	t.Helper()
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test-signing-credential"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0700))
+	require.NoError(t, os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), 0600))
+}
+
+// requireSignedBy asserts sig verifies over content against the public key of the
+// certificate it carries, and that this public key is want's.
+func requireSignedBy(t *testing.T, sig *commandSignature, content []byte, want *ecdsa.PrivateKey) {
+	t.Helper()
+	require.NotNil(t, sig)
+	assert.Equal(t, "ecdsa-sha256", sig.Algorithm)
+	block, _ := pem.Decode([]byte(sig.PublicKey))
+	require.NotNil(t, block)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	require.NoError(t, err)
+	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	require.True(t, ok)
+	assert.True(t, pub.Equal(&want.PublicKey), "signature must carry the selected credential's certificate")
+	raw, err := base64.StdEncoding.DecodeString(sig.Value)
+	require.NoError(t, err)
+	digest := sha256.Sum256(content)
+	assert.True(t, ecdsa.VerifyASN1(pub, digest[:], raw), "signature must verify against the certificate public key")
+}
+
+func TestSignCommandContent_PerConnectionCredentials(t *testing.T) {
+	env := newSigningTestEnv(t)
+	keyA := env.issue(t, "signing-key.conn-a", "")
+	keyB := env.issue(t, "signing-key.conn-b", "")
+	content := []byte("echo hi")
+
+	env.connect(t, "conn-a")
+	sig, err := signCommandContent(content)
+	require.NoError(t, err)
+	requireSignedBy(t, sig, content, keyA)
+
+	env.connect(t, "conn-b")
+	sig, err = signCommandContent(content)
+	require.NoError(t, err)
+	requireSignedBy(t, sig, content, keyB)
+
+	// An explicit selector overrides the active connection's default.
+	signingCredentialSelector = "signing-key.conn-a"
+	sig, err = signCommandContent(content)
+	require.NoError(t, err)
+	requireSignedBy(t, sig, content, keyA)
+
+	// A free-form selector stores and loads under its own name, with signing-cert.<name>.pem.
+	keyCustom := env.issue(t, "ops-laptop", "")
+	signingCredentialSelector = "ops-laptop"
+	sig, err = signCommandContent(content)
+	require.NoError(t, err)
+	requireSignedBy(t, sig, content, keyCustom)
+	_, statErr := os.Stat(filepath.Join(env.configDir, "cfgms", "signing-cert.ops-laptop.pem"))
+	require.NoError(t, statErr)
+}
+
+func TestSignCommandContent_MissingCredentialNeverFallsBack(t *testing.T) {
+	env := newSigningTestEnv(t)
+	env.issue(t, "signing-key.conn-a", "")
+	env.connect(t, "conn-b")
+
+	// Derived name for the active connection is absent although conn-a has a credential.
+	sig, err := signCommandContent([]byte("echo hi"))
+	require.Error(t, err)
+	assert.Nil(t, sig, "no signature may be produced with another connection's key")
+	assert.Contains(t, err.Error(), "signing-key.conn-b")
+	assert.Contains(t, err.Error(), "cfg credential request-signing-cert")
+
+	// An explicit selector that is absent names the selector and the creating command.
+	signingCredentialSelector = "missing-cred"
+	sig, err = signCommandContent([]byte("echo hi"))
+	require.Error(t, err)
+	assert.Nil(t, sig)
+	assert.Contains(t, err.Error(), "--signing-credential missing-cred")
+	assert.Contains(t, err.Error(), "cfg credential request-signing-cert")
+}
+
+func TestSignCommandContent_MissingCertificateIsAnError(t *testing.T) {
+	env := newSigningTestEnv(t)
+	env.issue(t, "signing-key.conn-a", "")
+	require.NoError(t, os.Remove(filepath.Join(env.configDir, "cfgms", "signing-cert.conn-a.pem")))
+	env.connect(t, "conn-a")
+
+	sig, err := signCommandContent([]byte("echo hi"))
+	require.Error(t, err)
+	assert.Nil(t, sig)
+	assert.Contains(t, err.Error(), "signing-cert.conn-a.pem")
+	assert.Contains(t, err.Error(), "cfg credential request-signing-cert")
+}
+
+func TestSignCommandContent_LegacyCredential(t *testing.T) {
+	env := newSigningTestEnv(t)
+	legacy := env.issue(t, signingCredentialName, "")
+	content := []byte("echo hi")
+
+	// No session: the legacy credential signs, with the legacy certificate path.
+	_, statErr := os.Stat(filepath.Join(env.configDir, "cfgms", "signing-cert.pem"))
+	require.NoError(t, statErr)
+	sig, err := signCommandContent(content)
+	require.NoError(t, err)
+	requireSignedBy(t, sig, content, legacy)
+
+	// Session, no selector: the legacy credential is not silently used.
+	env.connect(t, "conn-a")
+	sig, err = signCommandContent(content)
+	require.Error(t, err)
+	assert.Nil(t, sig)
+	assert.Contains(t, err.Error(), "--signing-credential signing-key")
+	assert.Contains(t, err.Error(), "cfg credential request-signing-cert")
+
+	// Session, explicit legacy selector: it signs.
+	signingCredentialSelector = signingCredentialName
+	sig, err = signCommandContent(content)
+	require.NoError(t, err)
+	requireSignedBy(t, sig, content, legacy)
+}
+
+func TestSignCommandContent_CertificateKeyMismatchRefused(t *testing.T) {
+	env := newSigningTestEnv(t)
+	env.issue(t, "signing-key.conn-a", "")
+	other := env.issue(t, "signing-key.conn-b", "")
+	env.connect(t, "conn-a")
+
+	// The default certificate file holds another account's certificate.
+	writeSelfSignedCert(t, filepath.Join(env.configDir, "cfgms", "signing-cert.conn-a.pem"), other)
+	sig, err := signCommandContent([]byte("echo hi"))
+	require.Error(t, err)
+	assert.Nil(t, sig)
+	assert.Contains(t, err.Error(), "does not match")
+
+	// So does a CFGMS_SIGNING_CERT override pointing at another account's certificate.
+	env.issue(t, "signing-key.conn-a", "") // restore a matching default certificate
+	override := filepath.Join(t.TempDir(), "other.pem")
+	writeSelfSignedCert(t, override, other)
+	t.Setenv("CFGMS_SIGNING_CERT", override)
+	sig, err = signCommandContent([]byte("echo hi"))
+	require.Error(t, err)
+	assert.Nil(t, sig)
+	assert.Contains(t, err.Error(), "does not match")
+}
+
+func TestSignCommandContent_InvalidSelectorRefused(t *testing.T) {
+	newSigningTestEnv(t)
+	signingCredentialSelector = "../escape"
+	sig, err := signCommandContent([]byte("echo hi"))
+	require.Error(t, err)
+	assert.Nil(t, sig)
+	assert.Contains(t, err.Error(), "invalid signing credential name")
+}
+
+func TestSigningCertFileName(t *testing.T) {
+	assert.Equal(t, "signing-cert.pem", signingCertFileName("signing-key"))
+	assert.Equal(t, "signing-cert.conn-a.pem", signingCertFileName("signing-key.conn-a"))
+	assert.Equal(t, "signing-cert.ops.pem", signingCertFileName("ops"))
+}
+
+func TestSigningCredentialFlag_RegisteredOnSigningCommands(t *testing.T) {
+	for _, c := range []*cobra.Command{stewardExecCmd, stewardRunCommandCmd, stewardServiceCmd, stewardProcessCmd, credentialRequestSigningCertCmd} {
+		assert.NotNil(t, c.Flags().Lookup("signing-credential"), "%s must accept --signing-credential", c.Name())
+	}
+	assert.Nil(t, credentialRequestSigningCertCmd.Flags().Lookup("credential-name"), "--credential-name was removed")
 }
