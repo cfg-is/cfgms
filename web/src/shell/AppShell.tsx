@@ -155,6 +155,9 @@ export default function AppShell() {
                 <NavLink to="/directory/groups" className="nav-sub">
                   Groups
                 </NavLink>
+                <NavLink to="/directory/credentials" className="nav-sub">
+                  Credentials
+                </NavLink>
               </>
             )}
           </nav>

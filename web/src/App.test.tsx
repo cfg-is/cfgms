@@ -172,6 +172,17 @@ describe('App', () => {
     expect(screen.getByRole('link', { name: /^fleet query$/i })).toHaveAttribute('href', '/osquery')
   })
 
+  it('the directory credentials route is reachable when signed in', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, { data: { items: [] } })))
+    render(
+      <MemoryRouter initialEntries={['/directory/credentials']}>
+        <App />
+      </MemoryRouter>,
+    )
+    expect(await screen.findByRole('heading', { name: 'Credentials', level: 1 })).toBeInTheDocument()
+    expect(await screen.findByTestId('credentials-empty')).toBeInTheDocument()
+  })
+
   it('a 401 on the fleet data call drops to the expired login screen', async () => {
     const MOCK_PASSKEY_BEGIN = {
       publicKey: {

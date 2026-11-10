@@ -74,11 +74,12 @@ describe('AppShell', () => {
     expect(screen.queryByRole('link', { name: 'Directory' })).toBeNull()
   })
 
-  it('lists Directory with Users and Groups links when access is granted', async () => {
+  it('lists Directory with Users, Groups and Credentials links when access is granted', async () => {
     renderShell()
     expect(await screen.findByRole('link', { name: 'Directory' })).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Users' }).getAttribute('href')).toBe('/directory/users')
     expect(screen.getByRole('link', { name: 'Groups' }).getAttribute('href')).toBe('/directory/groups')
+    expect(screen.getByRole('link', { name: 'Credentials' }).getAttribute('href')).toBe('/directory/credentials')
   })
 
   it('renders sidebar navigation with Fleet, Modules, Config, Workflows, Scripts, Registration, Reports, Audit, and Accounts as links', () => {
