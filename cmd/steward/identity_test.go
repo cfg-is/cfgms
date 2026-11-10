@@ -5,9 +5,12 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -283,4 +286,91 @@ func TestSaveIdentity_ConcurrentReadersNeverBlockOrSeePartialFile(t *testing.T) 
 	wg.Wait()
 	require.NoError(t, loadErr)
 	assert.Positive(t, loads)
+}
+
+// TestSaveIdentity_ConcurrentWritersNeverCorrupt runs many concurrent saves of
+// differently sized identities. A shared temp path let the shorter payload land
+// over a longer one (trailing bytes after the JSON object) and made one writer's
+// rename fail after another had consumed the temp file.
+func TestSaveIdentity_ConcurrentWritersNeverCorrupt(t *testing.T) {
+	const (
+		writers    = 16
+		iterations = 40
+	)
+	dir := t.TempDir()
+
+	written := make([]StewardIdentity, writers)
+	for w := range written {
+		pems := make([]string, w+1)
+		for i := range pems {
+			pems[i] = strings.Repeat("x", 64*(w+1)) + fmt.Sprintf("-w%d-c%d", w, i)
+		}
+		written[w] = StewardIdentity{
+			StewardID:        fmt.Sprintf("steward-%d", w),
+			TransportAddress: "controller:4433",
+			SigningCertPEMs:  pems,
+		}
+	}
+	require.NoError(t, saveIdentity(dir, written[0]))
+
+	start := make(chan struct{})
+	errs := make(chan error, writers*iterations)
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			<-start
+			for i := 0; i < iterations; i++ {
+				if err := saveIdentity(dir, written[w]); err != nil {
+					errs <- fmt.Errorf("writer %d iteration %d: %w", w, i, err)
+				}
+			}
+		}(w)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+
+	got, err := loadIdentity(dir)
+	require.NoError(t, err, "identity file must load after concurrent saves")
+	require.NotNil(t, got)
+	matched := false
+	for _, want := range written {
+		if reflect.DeepEqual(*got, want) {
+			matched = true
+			break
+		}
+	}
+	assert.True(t, matched, "loaded identity %q must equal exactly one written value", got.StewardID)
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		assert.Equal(t, identityFileName, e.Name(), "no temp file may be left behind")
+	}
+}
+
+// TestSaveIdentity_FailureLeavesNoTempFile verifies a failed commit removes its
+// per-call temp file and leaves the existing identity intact.
+func TestSaveIdentity_FailureLeavesNoTempFile(t *testing.T) {
+	dir := t.TempDir()
+	orig := StewardIdentity{StewardID: "orig", TransportAddress: "ctrl:4433"}
+	require.NoError(t, saveIdentity(dir, orig))
+
+	// A directory at the destination path makes the final replace fail.
+	blocked := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(blocked, identityFileName), 0700))
+	require.Error(t, saveIdentity(blocked, orig))
+
+	entries, err := os.ReadDir(blocked)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "failed save must remove its temp file")
+
+	got, err := loadIdentity(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "orig", got.StewardID)
 }

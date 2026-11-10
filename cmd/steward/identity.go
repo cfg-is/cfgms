@@ -196,8 +196,16 @@ func saveIdentity(dir string, id StewardIdentity) error {
 		return fmt.Errorf("marshal identity: %w", err)
 	}
 	path := filepath.Join(dir, identityFileName)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	// Each call writes its own temp file so concurrent saves never share a path:
+	// a shared one let the shorter payload land over a longer one and let one
+	// writer's rename consume another's temp file.
+	f, err := os.CreateTemp(dir, identityFileName+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create identity temp file: %w", err)
+	}
+	tmp := f.Name()
+	if err := writeSyncClose(f, data); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write identity file: %w", err)
 	}
 	if err := atomicfile.AtomicReplace(tmp, path); err != nil {
@@ -205,6 +213,24 @@ func saveIdentity(dir string, id StewardIdentity) error {
 		return fmt.Errorf("commit identity file: %w", err)
 	}
 	return nil
+}
+
+// writeSyncClose writes data to f, flushes it to stable storage, restricts it
+// to owner read/write and closes it. f is closed on every path.
+func writeSyncClose(f *os.File, data []byte) error {
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Chmod(0600); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // loadIdentity reads dir/steward-identity.json.

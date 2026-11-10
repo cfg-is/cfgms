@@ -21,7 +21,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"os"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -616,4 +619,120 @@ func TestPushSigningCertRequiresSignatureAndChain(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, trustSet(c), 2)
 	})
+}
+
+// fileBackedTrustPersist returns a persist func that does a real load, modify,
+// write-temp and rename round trip on a JSON identity file under dir, as the
+// steward's identity persistence does.
+func fileBackedTrustPersist(t *testing.T, dir string) func([]string, *time.Time) error {
+	t.Helper()
+	path := filepath.Join(dir, "identity.json")
+	return func(pems []string, _ *time.Time) error {
+		doc := map[string]interface{}{}
+		raw, err := os.ReadFile(path) // #nosec G304 -- path is inside t.TempDir()
+		if err == nil {
+			if err := json.Unmarshal(raw, &doc); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		doc["signing_cert_pems"] = pems
+		out, err := json.Marshal(doc)
+		if err != nil {
+			return err
+		}
+		tmp, err := os.CreateTemp(dir, "identity.json.*.tmp")
+		if err != nil {
+			return err
+		}
+		if _, err := tmp.Write(out); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			return err
+		}
+		if err := tmp.Close(); err != nil {
+			_ = os.Remove(tmp.Name())
+			return err
+		}
+		return os.Rename(tmp.Name(), path)
+	}
+}
+
+// TestPushSigningCertConcurrentPushesBothApplied verifies two simultaneous pushes
+// of different certs are serialized: each starts from the previous result, so
+// both serials end up in memory and in the persisted set.
+func TestPushSigningCertConcurrentPushesBothApplied(t *testing.T) {
+	ca := newTestCA(t)
+	certA := newCodeSigningCert(t, ca)
+	certB := newCodeSigningCert(t, ca)
+	serialA, serialB := parseSerial(t, certA), parseSerial(t, certB)
+	require.NotEqual(t, serialA, serialB)
+
+	dir := t.TempDir()
+	filePersist := fileBackedTrustPersist(t, dir)
+
+	// The first persist call holds until a second call enters persist, which can
+	// only happen when the handler does not serialize the trust-set update. The
+	// bounded wait keeps the serialized (correct) case from deadlocking.
+	var calls atomic.Int32
+	secondEntered := make(chan struct{})
+	var overlapped atomic.Bool
+
+	c := minimalClientForPushTest(t)
+	pinCA(t, c, ca)
+	c.identityPersistFunc = func(pems []string, at *time.Time) error {
+		if calls.Add(1) == 1 {
+			select {
+			case <-secondEntered:
+				overlapped.Store(true)
+			case <-time.After(time.Second):
+			}
+		} else {
+			close(secondEntered)
+		}
+		return filePersist(pems, at)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i, pemBytes := range [][]byte{certA, certB} {
+		wg.Add(1)
+		go func(i int, pemBytes []byte) {
+			defer wg.Done()
+			<-start
+			errs <- c.handlePushSigningCert(context.Background(),
+				pushCmd("cmd-concurrent-"+string(rune('a'+i)), map[string]interface{}{"cert_pem": b64(pemBytes)}))
+		}(i, pemBytes)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	assert.False(t, overlapped.Load(), "two trust-set updates ran at the same time")
+	assert.Equal(t, int32(2), calls.Load())
+
+	inMemory := map[string]bool{}
+	for _, p := range trustSet(c) {
+		inMemory[parseSerial(t, []byte(p))] = true
+	}
+	assert.True(t, inMemory[serialA], "serial A missing from in-memory trust set")
+	assert.True(t, inMemory[serialB], "serial B missing from in-memory trust set")
+
+	raw, err := os.ReadFile(filepath.Join(dir, "identity.json")) // #nosec G304 -- inside t.TempDir()
+	require.NoError(t, err)
+	var persisted struct {
+		SigningCertPEMs []string `json:"signing_cert_pems"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &persisted), "persisted identity must be valid JSON")
+	onDisk := map[string]bool{}
+	for _, p := range persisted.SigningCertPEMs {
+		onDisk[parseSerial(t, []byte(p))] = true
+	}
+	assert.True(t, onDisk[serialA], "serial A missing from persisted set")
+	assert.True(t, onDisk[serialB], "serial B missing from persisted set")
 }
