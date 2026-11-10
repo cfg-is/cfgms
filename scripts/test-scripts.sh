@@ -785,35 +785,36 @@ test_check_no_python_in_core() {
     rm -f "$out_file"
 }
 
-# Fixture suite for scripts/check-steward-no-controller-deps.sh — the gate that
-# keeps controller code out of the steward binary (Issue #5747). Delegates to
-# scripts/check-steward-no-controller-deps_test.sh, which builds throwaway Go
-# modules and asserts exit 0 on a clean steward, exit 1 (naming the package)
-# for a direct or transitive features/controller import, and the fail-closed
-# path. Also runs the gate against the real repo.
-test_check_steward_no_controller_deps() {
-    log_test "Testing check-steward-no-controller-deps.sh..."
+# Fixture suite for scripts/check-build-boundary.sh — the gate that keeps
+# controller code out of the steward binary, steward code out of the controller
+# binary, and features/controller and features/steward imports out of pkg/
+# (Issues #5747, #5887). Delegates to scripts/check-build-boundary_test.sh,
+# which builds throwaway Go modules and asserts exit 0 on a clean tree, exit 1
+# (naming the package) for each rule's violations, and the fail-closed path for
+# each rule. Also runs the gate against the real repo.
+test_check_build_boundary() {
+    log_test "Testing check-build-boundary.sh..."
 
-    local gate_script="scripts/check-steward-no-controller-deps.sh"
-    local test_script="scripts/check-steward-no-controller-deps_test.sh"
+    local gate_script="scripts/check-build-boundary.sh"
+    local test_script="scripts/check-build-boundary_test.sh"
 
     if [[ ! -f "$gate_script" ]]; then
-        log_fail "check-steward-no-controller-deps.sh: Not found"
+        log_fail "check-build-boundary.sh: Not found"
         return
     fi
 
     if [[ ! -x "$gate_script" ]]; then
-        log_fail "check-steward-no-controller-deps.sh: Not executable (chmod +x needed)"
+        log_fail "check-build-boundary.sh: Not executable (chmod +x needed)"
         return
     fi
 
     if [[ ! -f "$test_script" ]]; then
-        log_fail "check-steward-no-controller-deps_test.sh: Not found"
+        log_fail "check-build-boundary_test.sh: Not found"
         return
     fi
 
     if [[ ! -x "$test_script" ]]; then
-        log_fail "check-steward-no-controller-deps_test.sh: Not executable (chmod +x needed)"
+        log_fail "check-build-boundary_test.sh: Not executable (chmod +x needed)"
         return
     fi
 
@@ -822,9 +823,9 @@ test_check_steward_no_controller_deps() {
     bash "$test_script" >"$out_file" 2>&1 || rc=$?
 
     if [[ $rc -eq 0 ]]; then
-        log_pass "check-steward-no-controller-deps_test.sh: All fixture tests passed"
+        log_pass "check-build-boundary_test.sh: All fixture tests passed"
     else
-        log_fail "check-steward-no-controller-deps_test.sh: Fixture tests failed (exit $rc)"
+        log_fail "check-build-boundary_test.sh: Fixture tests failed (exit $rc)"
         sed 's/^/    /' "$out_file" >&2
     fi
     rm -f "$out_file"
@@ -833,9 +834,9 @@ test_check_steward_no_controller_deps() {
     out_file=$(mktemp)
     bash "$gate_script" >"$out_file" 2>&1 || rc=$?
     if [[ $rc -eq 0 ]]; then
-        log_pass "check-steward-no-controller-deps.sh: Real repo tree is clean"
+        log_pass "check-build-boundary.sh: Real repo tree is clean"
     else
-        log_fail "check-steward-no-controller-deps.sh: Real repo tree failed the gate (exit $rc)"
+        log_fail "check-build-boundary.sh: Real repo tree failed the gate (exit $rc)"
         sed 's/^/    /' "$out_file" >&2
     fi
     rm -f "$out_file"
@@ -3546,7 +3547,7 @@ DISPATCH_TABLE=(
     "test_check_binary_artifacts:core"
     "test_check_docs_boundary:core"
     "test_check_no_python_in_core:core"
-    "test_check_steward_no_controller_deps:core"
+    "test_check_build_boundary:core"
     "test_check_no_banned_exec_patterns:core"
     "test_check_dead_packages:core"
     "test_unit_tests_aggregator_no_python_gate:core"

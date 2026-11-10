@@ -11,6 +11,10 @@ This directory contains **Central Providers** - shared packages that provide cro
    - Exception: True utilities or proven single-implementation cases
    - **When in doubt: Make it pluggable** - removing abstraction is harder than adding it
 
+3. **`pkg/` code never imports `features/controller` or `features/steward`** (test files included)
+   - Code both the steward and the controller need lives in `pkg/` or in a shared feature package
+   - Enforced by `make check-architecture` (`scripts/check-build-boundary.sh`), which also keeps `cmd/steward` free of `features/controller` and `cmd/controller` free of `features/steward`
+
 ### Why Pluggable by Default?
 
 - **Backend categories**: Even "single implementation" providers often need alternatives:
