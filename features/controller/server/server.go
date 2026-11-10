@@ -83,6 +83,7 @@ import (
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // gRPC control plane provider
+	"github.com/cfgis/cfgms/pkg/controlplane/signerchain"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
@@ -675,7 +676,7 @@ func wireHTTPConfigNamespaceStores(httpServer *api.Server, cs cfgconfig.ConfigSt
 // to a reconnecting steward by the on-connect hook. Without a control plane and
 // lockdown predicate (no transport configured) there is nothing to deliver over.
 func bindRepairDelivery(s *api.Server, hook *repairConnectHook, cp controlplaneInterfaces.ControlPlaneProvider,
-	lockdown *controllerFleet.Lockdown, signer signature.Signer, chains *commands.SignerChainBuilder) {
+	lockdown *controllerFleet.Lockdown, signer signature.Signer, chains *signerchain.SignerChainBuilder) {
 	if cp == nil || lockdown == nil {
 		return
 	}
@@ -1375,6 +1376,22 @@ func ensureSeparatedCertificates(cfg *config.Config, logger logging.Logger, cert
 	return nil
 }
 
+// validateTransportExternalAddress refuses to start when the transport binds
+// 0.0.0.0 without an external address to advertise.
+func validateTransportExternalAddress(cfg *config.Config) error {
+	if cfg.Transport == nil || !strings.HasPrefix(cfg.Transport.ListenAddr, "0.0.0.0") {
+		return nil
+	}
+	externalAddr := cfg.Transport.ExternalAddress
+	if externalAddr == "" {
+		externalAddr = os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
+	}
+	if externalAddr == "" {
+		return fmt.Errorf("transport.listen_addr binds 0.0.0.0 but no external address is configured; set transport.external_address in controller.cfg or CFGMS_EXTERNAL_HOSTNAME env var")
+	}
+	return nil
+}
+
 // New creates a new server instance
 func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if cfg == nil {
@@ -1384,15 +1401,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		return nil, fmt.Errorf("execution security validation failed: %w", err)
 	}
 
-	// Validate transport config early: refuse to start if 0.0.0.0 bind has no external address.
-	if cfg.Transport != nil && strings.HasPrefix(cfg.Transport.ListenAddr, "0.0.0.0") {
-		externalAddr := cfg.Transport.ExternalAddress
-		if externalAddr == "" {
-			externalAddr = os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
-		}
-		if externalAddr == "" {
-			return nil, fmt.Errorf("transport.listen_addr binds 0.0.0.0 but no external address is configured; set transport.external_address in controller.cfg or CFGMS_EXTERNAL_HOSTNAME env var")
-		}
+	if err := validateTransportExternalAddress(cfg); err != nil {
+		return nil, err
 	}
 
 	logger.Info("Config validated, proceeding with storage initialization...")
@@ -1524,7 +1534,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// return to trusted).
 	repairGuard := &repairGuardRelay{logger: logger}
 	var repairSigner signature.Signer
-	var repairChains *commands.SignerChainBuilder
+	var repairChains *signerchain.SignerChainBuilder
 	// Issue #5664: the single lockdown predicate and tamper-state sender. Built
 	// once the steward store exists; nil when no transport is configured.
 	var lockdown *controllerFleet.Lockdown
@@ -1857,7 +1867,7 @@ type apiWiringInputs struct {
 	tamperRelay             *tamperAlarmRelay
 	repairConnect           *repairConnectHook
 	repairSigner            signature.Signer
-	repairChains            *commands.SignerChainBuilder
+	repairChains            *signerchain.SignerChainBuilder
 	lockdown                *controllerFleet.Lockdown
 	routingStore            business.RoutingStore
 	deliveryServer          *internaldelivery.Server
@@ -6756,11 +6766,11 @@ func scriptRepoForQueue(r *scriptmodule.TenantScriptRepository) scriptmodule.Scr
 // newCommandSigning returns the command signer and, for Issue #5724, the signer
 // chain builder a locked-down steward verifies commands with. Both are nil
 // without a certificate manager (unsigned deployments).
-func newCommandSigning(certManager *cert.Manager) (signature.Signer, *commands.SignerChainBuilder) {
+func newCommandSigning(certManager *cert.Manager) (signature.Signer, *signerchain.SignerChainBuilder) {
 	if certManager == nil {
 		return nil, nil
 	}
-	return signature.NewDynamicSigner(service.NewSigningResolver(certManager)), commands.NewSignerChainBuilder(certManager)
+	return signature.NewDynamicSigner(service.NewSigningResolver(certManager)), signerchain.NewSignerChainBuilder(certManager)
 }
 
 // lockdownChecker returns the predicate as an interface, or a true nil interface

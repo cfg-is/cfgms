@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/controller/commands"
+	"github.com/cfgis/cfgms/pkg/controlplane/signerchain"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -22,7 +22,7 @@ func TestBindRepairDelivery_NoTransportBindsNothing(t *testing.T) {
 	h := &repairConnectHook{logger: logging.NewNoopLogger()}
 	// Without a control plane and lockdown predicate there is nothing to deliver
 	// over: the hook stays unbound and connects are not affected.
-	bindRepairDelivery(nil, h, nil, nil, nil, (*commands.SignerChainBuilder)(nil))
+	bindRepairDelivery(nil, h, nil, nil, nil, (*signerchain.SignerChainBuilder)(nil))
 	require.Nil(t, h.target.Load())
 	assert.NoError(t, h.OnConnect(context.Background(), "steward-1"))
 }

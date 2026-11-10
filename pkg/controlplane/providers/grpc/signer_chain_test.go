@@ -15,9 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/config/signature"
-	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	"github.com/cfgis/cfgms/pkg/controlplane/signerchain"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 )
 
@@ -42,7 +42,7 @@ func signedChainedCommand(t *testing.T, steward string) (*types.SignedCommand, *
 		Params: map[string]interface{}{"k": "v"}}
 	sc, err := types.SignCommand(cmd, signer)
 	require.NoError(t, err)
-	require.NoError(t, commands.NewSignerChainBuilder(m).Attach(sc, signer))
+	require.NoError(t, signerchain.NewSignerChainBuilder(m).Attach(sc, signer))
 	require.NotEmpty(t, sc.SignerChainPEM, "set at signing")
 	return sc, m
 }

@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/config/signature"
-	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/controlplane/signerchain"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -108,12 +108,12 @@ type RepairSender interface {
 type repairDelivery struct {
 	sender RepairSender
 	signer signature.Signer
-	chains *commands.SignerChainBuilder
+	chains *signerchain.SignerChainBuilder
 }
 
 // SetRepairDelivery binds the sender, the signer and the signer-chain builder
 // used to deliver repair requests. Call after New() returns and before Start().
-func (s *Server) SetRepairDelivery(sender RepairSender, signer signature.Signer, chains *commands.SignerChainBuilder) {
+func (s *Server) SetRepairDelivery(sender RepairSender, signer signature.Signer, chains *signerchain.SignerChainBuilder) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if sender == nil || signer == nil || chains == nil {

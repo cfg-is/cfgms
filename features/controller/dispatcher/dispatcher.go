@@ -25,6 +25,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/commands"
 	script "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	"github.com/cfgis/cfgms/pkg/controlplane/signerchain"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -71,10 +72,10 @@ type lockMetaEntry struct {
 type Dispatcher struct {
 	queue              *script.ExecutionQueue
 	controlPlane       controlplaneInterfaces.ControlPlaneProvider
-	signer             signature.Signer             // optional; when nil commands are sent unsigned
-	signerChains       *commands.SignerChainBuilder // optional; attaches the signer chain (#5724)
-	isLocallyConnected func(stewardID string) bool  // optional; nil = dispatch to every queued device
-	termSource         TermSource                   // optional; when nil commands carry term 0
+	signer             signature.Signer                // optional; when nil commands are sent unsigned
+	signerChains       *signerchain.SignerChainBuilder // optional; attaches the signer chain (#5724)
+	isLocallyConnected func(stewardID string) bool     // optional; nil = dispatch to every queued device
+	termSource         TermSource                      // optional; when nil commands carry term 0
 	requireSignedAdhoc bool
 	// deviceLocks maps deviceID → chan struct{} (capacity 1).
 	// A non-blocking send acquires the slot; a receive releases it.
@@ -219,7 +220,7 @@ type Config struct {
 	Signer signature.Signer
 	// SignerChains attaches the signer certificate chain to each signed command so
 	// a locked-down steward can verify it. Nil sends commands without a chain.
-	SignerChains *commands.SignerChainBuilder
+	SignerChains *signerchain.SignerChainBuilder
 	// RequireSignedAdhoc makes a signer mandatory and prevents unsigned
 	// execute_script delivery. Public-beta deployments must set this true.
 	RequireSignedAdhoc bool

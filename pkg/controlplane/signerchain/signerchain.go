@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 
-package commands
+package signerchain
 
 import (
 	"crypto/sha256"
