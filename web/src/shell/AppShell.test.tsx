@@ -137,6 +137,11 @@ describe('AppShell', () => {
     )
   })
 
+  it('renders the Cluster nodes entry as a link to /cluster (Issue #5462)', () => {
+    renderShell()
+    expect(screen.getByRole('link', { name: /^cluster nodes$/i })).toHaveAttribute('href', '/cluster')
+  })
+
   it('all nav items are real links; no soon-tagged placeholders remain (Issue #2732, #2934, #2935)', () => {
     renderShell()
     expect(screen.queryAllByText(/soon/i)).toHaveLength(0)
