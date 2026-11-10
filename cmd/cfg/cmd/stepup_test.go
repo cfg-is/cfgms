@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,7 +78,7 @@ func TestStepUp_NonInteractive_ProducesActionableError(t *testing.T) {
 	requestCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
-		w.Header().Set("WWW-Authenticate", `CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="module:approve"`)
+		w.Header().Set("WWW-Authenticate", `CFGMS-StepUp realm="cfgms", required="strong"`)
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer server.Close()
@@ -318,6 +319,10 @@ func jsonCollectResponse(status, token string) func(w http.ResponseWriter) {
 }
 
 func TestRunPresenceBrowserFlow_Success(t *testing.T) {
+	origTerm := isTerminalFn
+	isTerminalFn = func() bool { return true }
+	defer func() { isTerminalFn = origTerm }()
+
 	origBrowser := presenceOpenBrowserFn
 	var openedURL string
 	presenceOpenBrowserFn = func(u string) error { openedURL = u; return nil }
@@ -382,6 +387,138 @@ func TestRunPresenceBrowserFlow_Expired(t *testing.T) {
 	_, err = runPresenceBrowserFlow(client, "POST", "/api/v1/modules/approvals/test/approve", nil, "module:approve")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "timed out waiting")
+}
+
+// --- No terminal: the presence relay still runs, printing the URL and polling, never opening a browser ---
+
+const noTTYPresenceToken = "collected-no-tty-token"
+
+// noTTYPresenceClient wires one httptest server that serves both the presence relay
+// endpoints (through a real presenceRelayTestServer) and a guarded endpoint that answers
+// the presence challenge until a request carries noTTYPresenceToken. The client's
+// step-up handler is defaultStepUpHandler. The test state is: no TTY, a browser opener
+// that fails the test if called, and a short poll interval.
+func noTTYPresenceClient(t *testing.T, collectResponses ...func(w http.ResponseWriter)) (client *APIClient, rts *presenceRelayTestServer, guardedCalls *int) {
+	t.Helper()
+	origTerm, origBrowser, origInterval := isTerminalFn, presenceOpenBrowserFn, presencePollInterval
+	t.Cleanup(func() {
+		isTerminalFn, presenceOpenBrowserFn, presencePollInterval = origTerm, origBrowser, origInterval
+	})
+	isTerminalFn = func() bool { return false }
+	presenceOpenBrowserFn = func(u string) error {
+		t.Errorf("a browser must not be launched without a terminal (url %q)", u)
+		return nil
+	}
+	presencePollInterval = 5 * time.Millisecond
+
+	rts = newPresenceRelayTestServer(t, "cli-presence-notty", "WXYZ-1234", collectResponses...)
+	relayHandler := rts.server.Config.Handler
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/cli-presence/") {
+			relayHandler.ServeHTTP(w, r)
+			return
+		}
+		calls++
+		if r.Header.Get("X-Presence-Token") == noTTYPresenceToken {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tokens":[],"total":0}`))
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="module:approve"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(server.Close)
+
+	var err error
+	client, err = NewAPIClient(&APIClientConfig{
+		BaseURL:     server.URL,
+		TLSInsecure: true,
+		OnStepUpRequired: func(wwwAuth, method, path string, bodyBytes []byte) (string, error) {
+			return defaultStepUpHandler(client)(wwwAuth, method, path, bodyBytes)
+		},
+	})
+	require.NoError(t, err)
+	return client, rts, &calls
+}
+
+func TestStepUp_NoTTY_PresenceRequired_RunsRelayWithoutBrowser(t *testing.T) {
+	client, rts, guardedCalls := noTTYPresenceClient(t,
+		jsonCollectResponse("pending", ""),
+		jsonCollectResponse("collected", noTTYPresenceToken),
+	)
+
+	_, err := client.ListTokens(context.Background(), "")
+	require.NoError(t, err, "the original request is replayed with the collected token")
+
+	assert.Equal(t, 2, *guardedCalls, "the request is sent once, then replayed once with the collected token")
+	assert.Equal(t, "module:approve", rts.lodgedBody.Permission, "the presence request is lodged for the named permission")
+	assert.Equal(t, 2, rts.collectCalls, "the relay polls until the request is confirmed")
+	// A browser launch fails the test inside the presenceOpenBrowserFn the harness installs.
+}
+
+func TestStepUp_NoTTY_PresenceRequired_NoPermission_Errors(t *testing.T) {
+	origTerm, origFlow := isTerminalFn, presenceBrowserFlowFn
+	isTerminalFn = func() bool { return false }
+	presenceBrowserFlowFn = func(*APIClient, string, string, []byte, string) (string, error) {
+		t.Error("the relay must not start when the challenge names no permission")
+		return "", nil
+	}
+	defer func() { isTerminalFn, presenceBrowserFlowFn = origTerm, origFlow }()
+
+	_, err := defaultStepUpHandler(nil)(`CFGMS-StepUp realm="cfgms", required="strong", presence="required"`, "GET", "/api/v1/anything", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not name a permission")
+}
+
+func TestStepUp_NoTTY_NonPresenceStrong_KeepsNonInteractiveError(t *testing.T) {
+	origTerm, origFlow := isTerminalFn, presenceBrowserFlowFn
+	isTerminalFn = func() bool { return false }
+	presenceBrowserFlowFn = func(*APIClient, string, string, []byte, string) (string, error) {
+		t.Error("the relay must not start for a non-presence challenge")
+		return "", nil
+	}
+	defer func() { isTerminalFn, presenceBrowserFlowFn = origTerm, origFlow }()
+
+	_, err := defaultStepUpHandler(nil)(`CFGMS-StepUp realm="cfgms", required="strong"`, "GET", "/api/v1/anything", nil)
+	require.Error(t, err)
+	assert.EqualError(t, err, "step-up required: strong assurance needed for this action; re-run interactively or use an mTLS-authenticated session")
+}
+
+func TestStepUp_NoTTY_PresenceRequired_PollTimeout(t *testing.T) {
+	client, rts, guardedCalls := noTTYPresenceClient(t, jsonCollectResponse("pending", ""))
+
+	origWait := presenceWaitTimeout
+	presenceWaitTimeout = 50 * time.Millisecond
+	defer func() { presenceWaitTimeout = origWait }()
+
+	_, err := client.ListTokens(context.Background(), "")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errPresenceTimedOut)
+	assert.Equal(t, 1, *guardedCalls, "the request is not replayed without a collected token")
+	assert.Positive(t, rts.collectCalls, "the relay polled before timing out")
+}
+
+func TestStepUp_NoTTY_PresenceRequired_PollCancelled(t *testing.T) {
+	origSignal := presenceSignalContextFn
+	var cancelPoll context.CancelFunc
+	presenceSignalContextFn = func() (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelPoll = cancel
+		return ctx, cancel
+	}
+	defer func() { presenceSignalContextFn = origSignal }()
+
+	// The first collect call simulates an operator interrupt (Ctrl-C) mid-poll.
+	client, _, guardedCalls := noTTYPresenceClient(t, func(w http.ResponseWriter) {
+		cancelPoll()
+		jsonCollectResponse("pending", "")(w)
+	})
+
+	_, err := client.ListTokens(context.Background(), "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "presence ceremony interrupted")
+	assert.Equal(t, 1, *guardedCalls, "the guarded action is not retried after an interrupt")
 }
 
 // --- Tenant-crossing challenge: routed to the crossing remedy, never to step-up ---

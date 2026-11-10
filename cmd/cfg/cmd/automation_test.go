@@ -397,14 +397,17 @@ func TestAutomationApprove_HashMismatchAndNonInteractive(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Hash does not match")
 
-	// Without a terminal the presence relay is never started: the action fails closed.
-	origTerminal := isTerminalFn
-	t.Cleanup(func() { isTerminalFn = origTerminal })
+	// Without a terminal the presence relay still runs (it only prints a URL and polls):
+	// the step-up handler routes the presence challenge to it for the named permission.
+	permission := answerPresenceWith(t, automationTestPresenceToken)
 	isTerminalFn = func() bool { return false }
 	err = runAutomationApprove(h.cmd, automationKindWorkflow, "w-1")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "step-up required")
-	assert.Equal(t, 1, presenceChallenges, "the request is not retried without a presence token")
+	assert.Equal(t, "content-approval:approve", *permission, "the relay is invoked for the named permission without a terminal")
+	// The request was replayed with the collected token: it got past the presence
+	// challenge (still counted once) and reached the server's hash-mismatch rejection.
+	assert.Contains(t, err.Error(), "Hash does not match")
+	assert.Equal(t, 1, presenceChallenges, "only the first, token-less request was challenged")
 }
 
 func TestAutomationApprovalRevoke(t *testing.T) {
