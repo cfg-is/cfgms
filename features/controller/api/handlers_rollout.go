@@ -162,14 +162,20 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.emitOperatorAudit(r, principal, rolloutAuditTenant(tenantID),
-		business.AuditEventConfiguration, "rollout_started", "rollout", rolloutID,
-		business.AuditResultSuccess, business.AuditSeverityHigh,
-		map[string]interface{}{
+	s.emitOperatorDeployEvent(r, principal, rolloutAuditEvent{
+		tenantID:     tenantID,
+		action:       auditRolloutStarted,
+		markerKind:   markerKindRolloutStarted,
+		resourceType: "rollout",
+		resourceID:   rolloutID,
+		revision:     req.TargetVersion,
+		severity:     business.AuditSeverityHigh,
+		details: map[string]interface{}{
 			"rollout_id":     rolloutID,
 			"target_version": req.TargetVersion,
 			"tenant_id":      tenantID,
-		})
+		},
+	})
 
 	haltCh := make(chan struct{})
 	s.rolloutHaltChans.Store(rolloutID, haltCh)
@@ -385,32 +391,47 @@ func (s *Server) handleHaltRollout(w http.ResponseWriter, r *http.Request) {
 	// Fast-path signal for the case where this node happens to be the one running the
 	// rollout goroutine: closing the channel wakes it immediately rather than waiting
 	// for the next rolloutHaltPollInterval re-read of the now-halted store record.
-	if ch, loaded := s.rolloutHaltChans.Load(rolloutID); loaded {
-		select {
-		case <-ch.(chan struct{}):
-			// already closed
-		default:
-			close(ch.(chan struct{}))
-		}
-	}
+	s.signalRolloutHalt(rolloutID)
 
 	s.logger.Info("Rollout halted by operator",
 		"rollout_id", logging.SanitizeLogValue(rolloutID),
 		"target_version", logging.SanitizeLogValue(record.TargetVersion))
 
-	s.emitOperatorAudit(r, principal, rolloutAuditTenant(record.TenantID),
-		business.AuditEventConfiguration, "rollout_halted", "rollout", rolloutID,
-		business.AuditResultSuccess, business.AuditSeverityHigh,
-		map[string]interface{}{
+	s.emitOperatorDeployEvent(r, principal, rolloutAuditEvent{
+		tenantID:     record.TenantID,
+		action:       auditRolloutHalted,
+		markerKind:   markerKindRolloutHalted,
+		resourceType: "rollout",
+		resourceID:   rolloutID,
+		revision:     record.TargetVersion,
+		severity:     business.AuditSeverityHigh,
+		details: map[string]interface{}{
 			"rollout_id":     rolloutID,
 			"target_version": record.TargetVersion,
 			"tenant_id":      record.TenantID,
-		})
+		},
+	})
 
 	s.writeSuccessResponse(w, startRolloutResponse{
 		RolloutID: rolloutID,
 		Status:    string(business.RolloutStatusHalted),
 	})
+}
+
+// signalRolloutHalt wakes the runRollout goroutine for rolloutID when this node runs it,
+// by closing its halt channel. It is a no-op when no channel is registered or the channel
+// is already closed.
+func (s *Server) signalRolloutHalt(rolloutID string) {
+	ch, loaded := s.rolloutHaltChans.Load(rolloutID)
+	if !loaded {
+		return
+	}
+	select {
+	case <-ch.(chan struct{}):
+		// already closed
+	default:
+		close(ch.(chan struct{}))
+	}
 }
 
 // RolloutStore returns the wired rollout store, or nil when none is wired and the
@@ -516,17 +537,8 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 		}
 
 		// Soak: wait the ring's configured soak duration; skip if zero.
-		soakDur := time.Duration(ring.Soak)
-		if soakDur > 0 {
-			// Signal that this ring's in-progress state is committed and the goroutine is
-			// about to block on the soak. Tests use this to synchronize an operator halt
-			// deterministically; nil in production.
-			if s.onRolloutSoak != nil {
-				s.onRolloutSoak(record.ID)
-			}
-			if s.waitOutSoak(ctx, haltCh, record.ID, soakDur) {
-				return
-			}
+		if s.soakRing(ctx, haltCh, record.ID, time.Duration(ring.Soak)) {
+			return
 		}
 
 		// Query ring health after soak.
@@ -536,13 +548,15 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 				"rollout_id", logging.SanitizeLogValue(record.ID),
 				"ring", ring.Name,
 				"error", logging.SanitizeLogValue(err.Error()))
-			now := time.Now().UTC()
-			if updErr := s.rolloutStore.UpdateRolloutProgress(ctx, record.ID,
-				business.RolloutStatusHalted, ring.Name, i, &now,
-				"ring health query failed: "+err.Error()); updErr != nil {
-				s.logger.Error("Failed to persist halted rollout status after ring health query failure",
-					"rollout_id", logging.SanitizeLogValue(record.ID), "ring", ring.Name, "error", logging.SanitizeLogValue(updErr.Error()))
-			}
+			s.persistRolloutHalt(ctx, record.ID, ring.Name, i,
+				"ring health query failed: "+err.Error(),
+				"Failed to persist halted rollout status after ring health query failure")
+			s.emitSystemRolloutEvent(ctx, record, auditRolloutAutoHalted, markerKindRolloutAutoHalt,
+				business.AuditSeverityHigh, map[string]interface{}{
+					"halt_reason_class": haltClassRingHealthQueryFailed,
+					"ring":              ring.Name,
+					"rings_completed":   i,
+				})
 			s.notifyRolloutTerminal(record.ID)
 			return
 		}
@@ -565,7 +579,6 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 		}
 		denominator := float64(onVersion + failed)
 		if denominator > 0 && float64(failed)/denominator > threshold {
-			now := time.Now().UTC()
 			haltMsg := fmt.Sprintf(
 				"ring %q failure rate %.1f%% (failed=%d, on_version=%d) exceeds halt_threshold %.1f%%; pending=%d",
 				ring.Name,
@@ -580,11 +593,18 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 				"failed", failed,
 				"on_version", onVersion,
 				"threshold", threshold)
-			if updErr := s.rolloutStore.UpdateRolloutProgress(ctx, record.ID,
-				business.RolloutStatusHalted, ring.Name, i, &now, haltMsg); updErr != nil {
-				s.logger.Error("Failed to persist halted rollout status after failure-rate threshold exceeded",
-					"rollout_id", logging.SanitizeLogValue(record.ID), "ring", ring.Name, "error", logging.SanitizeLogValue(updErr.Error()))
-			}
+			s.persistRolloutHalt(ctx, record.ID, ring.Name, i, haltMsg,
+				"Failed to persist halted rollout status after failure-rate threshold exceeded")
+			s.emitSystemRolloutEvent(ctx, record, auditRolloutAutoHalted, markerKindRolloutAutoHalt,
+				business.AuditSeverityHigh, map[string]interface{}{
+					"halt_reason_class": haltClassFailureRateExceeded,
+					"ring":              ring.Name,
+					"rings_completed":   i,
+					"failed":            failed,
+					"on_version":        onVersion,
+					"pending":           pending,
+					"halt_threshold":    threshold,
+				})
 			s.notifyRolloutTerminal(record.ID)
 			return
 		}
@@ -612,7 +632,38 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 	s.logger.Info("Rollout completed",
 		"rollout_id", logging.SanitizeLogValue(record.ID),
 		"target_version", logging.SanitizeLogValue(record.TargetVersion))
+	s.emitSystemRolloutEvent(ctx, record, auditRolloutCompleted, markerKindRolloutCompleted,
+		business.AuditSeverityHigh, map[string]interface{}{
+			"rings_completed": len(rings),
+		})
 	s.notifyRolloutTerminal(record.ID)
+}
+
+// soakRing waits out a ring's configured soak duration and reports whether the rollout
+// must stop (halted, or the context ended) while it waited. A zero duration returns false
+// immediately.
+func (s *Server) soakRing(ctx context.Context, haltCh <-chan struct{}, rolloutID string, soakDur time.Duration) bool {
+	if soakDur <= 0 {
+		return false
+	}
+	// Signal that this ring's in-progress state is committed and the goroutine is
+	// about to block on the soak. Tests use this to synchronize an operator halt
+	// deterministically; nil in production.
+	if s.onRolloutSoak != nil {
+		s.onRolloutSoak(rolloutID)
+	}
+	return s.waitOutSoak(ctx, haltCh, rolloutID, soakDur)
+}
+
+// persistRolloutHalt records an automatic halt in the rollout store. A write failure is
+// logged with failMsg and dropped: the caller still notifies and stops.
+func (s *Server) persistRolloutHalt(ctx context.Context, rolloutID, ringName string, ringsCompleted int, reason, failMsg string) {
+	now := time.Now().UTC()
+	if updErr := s.rolloutStore.UpdateRolloutProgress(ctx, rolloutID,
+		business.RolloutStatusHalted, ringName, ringsCompleted, &now, reason); updErr != nil {
+		s.logger.Error(failMsg,
+			"rollout_id", logging.SanitizeLogValue(rolloutID), "ring", ringName, "error", logging.SanitizeLogValue(updErr.Error()))
+	}
 }
 
 // rolloutShouldStop reports whether the runRollout goroutine for rolloutID must stop
