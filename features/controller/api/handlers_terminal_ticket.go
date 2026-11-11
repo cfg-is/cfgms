@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/features/terminal"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 const terminalTicketMaxBodyBytes = 64 * 1024
@@ -145,8 +147,10 @@ func (s *Server) handleTerminalTicket(w http.ResponseWriter, r *http.Request) {
 		refuse(err.Error())
 		return
 	}
-	if _, err := s.verifyOperatorEnvelope(r.Context(), stewardID, content, operatorpayload.TerminalShell,
-		operatorpayload.TerminalEnvelopeMaxTTL, req.Targets, req.Nonce, expiresAt, proof); err != nil {
+	signerID, err := s.verifyOperatorEnvelope(r.Context(), stewardID, content, operatorpayload.TerminalShell,
+		operatorpayload.TerminalEnvelopeMaxTTL, req.Targets, req.Nonce, expiresAt, proof)
+	if err != nil {
+		s.emitTerminalTicketDenied(r, principal, stewardID, signerID, err)
 		refuse(err.Error())
 		return
 	}
@@ -170,16 +174,8 @@ func (s *Server) handleTerminalTicket(w http.ResponseWriter, r *http.Request) {
 		x509:          proof.X509,
 		webAuthn:      proof.WebAuthn,
 	}
-	if proof.WebAuthn != nil {
-		manifest, err := s.buildWebAuthnManifestForSteward(r.Context(), stewardID)
-		if err != nil {
-			s.logger.Error("Terminal ticket not minted: WebAuthn manifest unavailable",
-				"steward_id", logging.SanitizeLogValue(stewardID),
-				"error", logging.SanitizeLogValue(err.Error()))
-			s.writeErrorResponse(w, http.StatusServiceUnavailable, "Operator credential manifest not available", "MANIFEST_UNAVAILABLE")
-			return
-		}
-		rec.manifest = manifest
+	if !s.attachTerminalTicketManifest(r.Context(), w, stewardID, proof, rec) {
+		return
 	}
 
 	ticket, ticketHash, err := newTerminalTicket()
@@ -192,6 +188,44 @@ func (s *Server) handleTerminalTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeSuccessResponse(w, terminalTicketResponse{Ticket: ticket})
+}
+
+// attachTerminalTicketManifest stores the WebAuthn credential manifest on the ticket record
+// when the proof is a WebAuthn assertion. It writes the refusal and returns false when the
+// manifest is unavailable.
+func (s *Server) attachTerminalTicketManifest(ctx context.Context, w http.ResponseWriter, stewardID string, proof OperatorProof, rec *terminalTicketRecord) bool {
+	if proof.WebAuthn == nil {
+		return true
+	}
+	manifest, err := s.buildWebAuthnManifestForSteward(ctx, stewardID)
+	if err != nil {
+		s.logger.Error("Terminal ticket not minted: WebAuthn manifest unavailable",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Operator credential manifest not available", "MANIFEST_UNAVAILABLE")
+		return false
+	}
+	rec.manifest = manifest
+	return true
+}
+
+// emitTerminalTicketDenied audits a refused terminal ticket whose X.509 signing certificate
+// failed its binding to the requesting principal or its owner's operator-payload signing
+// grant (verifyErr carries that reason; any other refusal is not audited here). The record
+// carries the principal ID (as the actor) and the certificate serial ("signer_id": the audit
+// manager redacts any key containing "credential"), and no certificate content.
+func (s *Server) emitTerminalTicketDenied(r *http.Request, principal *Principal, stewardID, signerID string, verifyErr error) {
+	reason := operatorCertBindingReason(verifyErr)
+	if reason == "" {
+		return
+	}
+	s.emitOperatorAudit(r, principal, auditTenantOrSystem(principal.TenantID), business.AuditEventSystemAccess,
+		"terminal_ticket.request", "steward", stewardID,
+		business.AuditResultDenied, business.AuditSeverityCritical,
+		map[string]interface{}{
+			"signer_id":        logging.SanitizeLogValue(signerID),
+			"rejection_reason": reason,
+		})
 }
 
 // webSessionIDFromContext returns the cookie session ID of the request, or "" for a

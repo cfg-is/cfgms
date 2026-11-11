@@ -679,8 +679,15 @@ The proof carries one credential block, never both:
 
 - **X.509** (`algorithm`, `value`, `public_key`): the signature is over the canonical
   envelope bytes. The certificate must chain to the controller CA, carry the
-  payload-signing marker, and not be revoked. The credential identifier recorded is the
-  certificate serial.
+  payload-signing marker, and not be revoked. It must also be bound to the authenticated
+  caller: the account ID in its account-binding extension (not its `CommonName`) must equal
+  the caller's account ID, and that account must be enabled and hold
+  `operator-payload:sign`, re-checked on every request. A certificate with no binding, and
+  a caller that is not account-bound (the bootstrap mTLS admin, an API key, an unbound CLI
+  session), are refused. The credential identifier recorded is the certificate serial.
+  Every X.509 failure is answered with the generic `invalid operator signature` /
+  `INVALID_SIGNATURE`; the detail is logged and, for a binding or grant failure, recorded
+  in a denied audit entry carrying the caller's ID and the certificate serial.
 - **WebAuthn** (`authenticator_data`, `client_data_json`, `signature`, `credential_id`):
   the raw assertion returned by `POST /api/v1/operator-payload/sign/finish`. The credential
   must be registered to the authenticated caller, and its account must hold
@@ -1144,6 +1151,13 @@ a private key for this credential.
 identity (`CommonName`/`ClientID` are always the authenticated principal's own, never
 request-supplied) — there is no separate target resource to contain. An unset
 caller scope is refused with `403 FORBIDDEN` (Issue #4316 fail-closed contract).
+
+**Account binding:** the certificate carries the caller's account ID in a CFGMS
+account-binding extension; verifiers authorize against that ID, and the `CommonName` is
+display-only. A caller that is not account-bound (the bootstrap mTLS admin, an API key, a
+CLI session with no bound account) is refused with `403 ACCOUNT_BINDING_REQUIRED` and
+nothing is issued. A certificate issued without the extension is refused by the
+controller and the steward; request a new credential.
 
 **Request Body:**
 

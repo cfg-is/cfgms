@@ -296,24 +296,25 @@ func TestValidateCommandSignature_RevocationCheckFailure_FailsClosed(t *testing.
 
 	content := []byte("hostname")
 	targets := []string{"steward-1"}
-	fields := signedOperatorEnvelopeFields(t, server, content, "bash", targets)
+	fields := signedOperatorEnvelopeFields(t, server, "outage-operator", content, "bash", targets)
 	sig, nonce, expiresAt := envelopeSignatureFields(t, fields)
+	ctx := context.WithValue(context.Background(), principalContextKey, &Principal{ID: "outage-operator", AccountBound: true})
 
 	// Control: the signature validates while the revocation store is healthy.
-	_, err := server.validatePublicBetaCommandSignature(content, "bash", targets, nonce, expiresAt, sig)
+	_, err := server.validatePublicBetaCommandSignature(ctx, content, "bash", targets, nonce, expiresAt, sig)
 	require.NoError(t, err,
 		"sanity: a well-formed operator signature must validate while the store is healthy")
 
 	revStore.arm()
 
-	_, err = server.validatePublicBetaCommandSignature(content, "bash", targets, nonce, expiresAt, sig)
+	_, err = server.validatePublicBetaCommandSignature(ctx, content, "bash", targets, nonce, expiresAt, sig)
 	require.Error(t, err,
 		"an unreadable revocation store must fail the signature check closed, not authorise the command")
 	assert.ErrorIs(t, err, errRevocationStoreOutage,
 		"the failure must be the revocation-store error, not an unrelated validation failure")
 
 	revStore.disarm()
-	_, err = server.validatePublicBetaCommandSignature(content, "bash", targets, nonce, expiresAt, sig)
+	_, err = server.validatePublicBetaCommandSignature(ctx, content, "bash", targets, nonce, expiresAt, sig)
 	assert.NoError(t, err,
 		"the same signature must validate again once the revocation store recovers")
 }

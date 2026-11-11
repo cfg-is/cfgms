@@ -96,14 +96,21 @@ func collectSecretMatches(raw, storedHash string) bool {
 // exactly markers, verbatim, in whatever combination was recorded at approval (Issue
 // #3718). It reads nothing else — no account field, no caller input — that could ever
 // widen this set.
-func credentialMarkerModifier(markers []string) func(*x509.Certificate) {
+//
+// A payload-signing marker is stamped together with the account binding for accountID (the
+// request's bound account), because a payload-signing certificate without one is refused by
+// every verifier. A failure to bind leaves the marker unstamped, so the certificate is then
+// not a payload-signing credential at all rather than an unusable one.
+func credentialMarkerModifier(markers []string, accountID string) func(*x509.Certificate) {
 	return func(template *x509.Certificate) {
 		for _, m := range markers {
 			switch m {
 			case credentialMarkerAdmin:
 				cert.SetAdminMarker(template)
 			case credentialMarkerPayloadSigning:
-				cert.SetPayloadSigningMarker(template)
+				if cert.SetAccountBinding(template, accountID) == nil {
+					cert.SetPayloadSigningMarker(template)
+				}
 			case credentialMarkerRootScope:
 				cert.SetRootScopeMarker(template)
 			}
@@ -174,7 +181,7 @@ func (s *Server) signAndBindCollectedCertificate(ctx context.Context, claimed *p
 		Organization:     "CFGMS",
 		ClientID:         acct.ID,
 		ValidityDays:     credentialCollectValidityDays,
-		TemplateModifier: credentialMarkerModifier(claimed.GrantedMarkers),
+		TemplateModifier: credentialMarkerModifier(claimed.GrantedMarkers, claimed.BoundAccountID),
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to sign collected certificate: %w", err)

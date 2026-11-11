@@ -60,7 +60,7 @@ type actionFixture struct {
 func newActionFixture(t *testing.T) *actionFixture {
 	t.Helper()
 	ca, caPool := sigTestCA(t)
-	signer := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+	signer := sigTestOperatorCert(t, ca, boundPayloadSigning)
 	var mu sync.Mutex
 	events := []*cpTypes.Event{}
 	h, err := New(&Config{
@@ -70,8 +70,9 @@ func newActionFixture(t *testing.T) *actionFixture {
 			defer mu.Unlock()
 			events = append(events, e)
 		},
-		Logger:            newTestLogger(t),
-		ControllerCARoots: caPool,
+		Logger:             newTestLogger(t),
+		ControllerCARoots:  caPool,
+		RevocationVerifier: newRosterVerifier(t, ca, caPool, rootScopeSignerEntry(signer)),
 	})
 	require.NoError(t, err)
 	ctrl := &recordingServiceController{self: map[string]bool{"cfgms-steward.service": true, "cfgms-steward": true}}

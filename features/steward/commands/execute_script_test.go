@@ -152,7 +152,7 @@ func TestApplyOutputCap_EmptyInputs_NoChange(t *testing.T) {
 // truncation marker. Verified via the full stdout field in EventScriptCompleted.
 func TestExecuteScriptHandler_OutputOverCap_TruncatedWithMarker(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -181,7 +181,7 @@ func TestExecuteScriptHandler_OutputOverCap_TruncatedWithMarker(t *testing.T) {
 // an exec command producing under 1 MB of output must be captured fully without a truncation marker.
 func TestExecuteScriptHandler_OutputUnderCap_CapturedFully(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -239,7 +239,7 @@ func TestExecuteScriptHandler_WindowsPowerShell51_ExplicitShell(t *testing.T) {
 	}
 
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -271,7 +271,7 @@ func TestExecuteScriptHandler_WindowsCmd_ExplicitShell(t *testing.T) {
 	}
 
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -303,7 +303,7 @@ func TestExecuteScriptHandler_WindowsCmd_ExplicitShell(t *testing.T) {
 // TestDispatcher_CommandFailedMarksRunFailedAndReleasesLock in dispatcher_test.go.
 func TestExecuteScriptHandler_UnsupportedShell_SurfacesClearError(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -433,7 +433,7 @@ func runScriptProbe(t *testing.T, h *Handler, getEvents func() []*cpTypes.Event,
 // relay socket — i.e. the relay IS created.
 func TestExecuteScriptHandler_LibraryScriptWithScope_CreatesRelaySocket(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -452,7 +452,7 @@ func TestExecuteScriptHandler_LibraryScriptWithScope_CreatesRelaySocket(t *testi
 // library script with an EMPTY required_api_scope does NOT get a relay socket.
 func TestExecuteScriptHandler_LibraryScriptNoScope_NoRelaySocket(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -667,11 +667,11 @@ func TestExecuteScriptHandler_InlineScript_AdminBundleCert_RejectedForPayloadSig
 // TestExecuteScriptHandler_InlineScript_PayloadSigningCert_Accepted is a
 // REQUIRED test (Issue #3696 AC): a genuine S10-issued payload-signing
 // credential — chained to the controller CA, unexpired, carrying
-// cert.PayloadSigningMarkerOID via cert.SetPayloadSigningMarker — is accepted
+// cert.PayloadSigningMarkerOID via boundPayloadSigning — is accepted
 // end-to-end through the real dispatch path (h.HandleCommand).
 func TestExecuteScriptHandler_InlineScript_PayloadSigningCert_Accepted(t *testing.T) {
 	ca, caPool := sigTestCA(t)
-	signingCert := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+	signingCert := sigTestOperatorCert(t, ca, boundPayloadSigning)
 
 	cb, getEvents := collectEvents()
 	h, err := New(&Config{
@@ -680,6 +680,7 @@ func TestExecuteScriptHandler_InlineScript_PayloadSigningCert_Accepted(t *testin
 		Logger:             newTestLogger(t),
 		RequireSignedAdhoc: true,
 		ControllerCARoots:  caPool,
+		RevocationVerifier: newRosterVerifier(t, ca, caPool, rootScopeSignerEntry(signingCert)),
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
@@ -694,6 +695,36 @@ func TestExecuteScriptHandler_InlineScript_PayloadSigningCert_Accepted(t *testin
 
 	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
 	require.NotNil(t, evt, "inline command signed by a genuine payload-signing credential must be accepted")
+}
+
+// A payload-signing credential with no account binding is refused through the real dispatch
+// path even when the roster lists its serial, and the script never runs.
+func TestExecuteScriptHandler_InlineScript_UnboundPayloadSigningCert_Rejected(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	legacy := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{
+		StewardID:          "steward-test",
+		OnStatus:           cb,
+		Logger:             newTestLogger(t),
+		RequireSignedAdhoc: true,
+		ControllerCARoots:  caPool,
+		RevocationVerifier: newRosterVerifier(t, ca, caPool, rootScopeSignerEntry(legacy)),
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	body, markerPath := createMarkerScript(t)
+	params := sigTestOperatorEnvelopeParams(t, legacy.PrivateKeyPEM, string(legacy.CertificatePEM), []byte(body), platformShell(), "steward-test")
+	params["execution_id"] = "sig-unbound-001"
+	err = h.HandleCommand(context.Background(), testSignedCommandWithParams("sig-unbound-001", cpTypes.CommandExecuteScript, params))
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+	h.Wait()
+
+	_, statErr := os.Stat(markerPath)
+	require.True(t, os.IsNotExist(statErr), "a script signed by an unbound certificate must not run")
+	require.Nil(t, firstEventOfType(getEvents(), cpTypes.EventScriptCompleted))
 }
 
 // ---------------------------------------------------------------------------
@@ -1179,7 +1210,7 @@ func TestExecuteScriptHandler_InlineScript_NoCARoots_Refused(t *testing.T) {
 // delivered execution_context must match the one the operator signed.
 func TestExecuteScriptHandler_InlineScript_ExecutionContextBoundToSignature(t *testing.T) {
 	ca, caPool := sigTestCA(t)
-	signer := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+	signer := sigTestOperatorCert(t, ca, boundPayloadSigning)
 	content := []byte(echoScriptBody("ctx"))
 
 	tests := []struct {
@@ -1197,6 +1228,7 @@ func TestExecuteScriptHandler_InlineScript_ExecutionContextBoundToSignature(t *t
 	for i, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHandlerWithSigning(t, nil, true, caPool)
+			authorizeOperators(t, h, ca, caPool, signer)
 			h.RegisterExecuteScriptHandler()
 			params := signedContextParams(t, signer, content, platformShell(), tc.signed)
 			id := fmt.Sprintf("sig-exec-ctx-%d", i)
@@ -1228,7 +1260,7 @@ func longRunningScriptBody(secs int) string {
 // generic 30s fallback must not kill it.
 func TestExecuteScriptHandler_TimeoutSeconds45_RunsPast30s(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -1249,7 +1281,7 @@ func TestExecuteScriptHandler_TimeoutSeconds45_RunsPast30s(t *testing.T) {
 // states the timeout that actually fired (Issue #5393).
 func TestExecuteScriptHandler_Timeout_ErrorNamesFiredTimeout(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 

@@ -182,6 +182,16 @@ func markersFromCertificate(peerCert *x509.Certificate) []string {
 	return markers
 }
 
+// findCertBinding returns the account's binding for serial, or nil when it has none.
+func findCertBinding(acct *account, serial string) *CertBinding {
+	for i := range acct.CertBindings {
+		if acct.CertBindings[i].Serial == serial {
+			return &acct.CertBindings[i]
+		}
+	}
+	return nil
+}
+
 // renewBoundCertificate performs the issue-and-rebind sequence. It first claims
 // exclusive renewal rights over oldSerial via claimCertificateRenewal — a durable
 // compare-and-set create-if-absent record — before signing anything, so two
@@ -243,13 +253,7 @@ func (s *Server) renewBoundCertificate(
 		// anything here would mint a second certificate for one renewal.
 		return nil, nil, false, errCredentialRenewalNoAccountBinding
 	}
-	var oldBinding *CertBinding
-	for i := range fresh.CertBindings {
-		if fresh.CertBindings[i].Serial == oldSerial {
-			oldBinding = &fresh.CertBindings[i]
-			break
-		}
-	}
+	oldBinding := findCertBinding(fresh, oldSerial)
 	if oldBinding == nil {
 		// getAccountByCertSerial resolves by scanning CertBindings, so this is
 		// unreachable via that path today; kept as a fail-closed guard so a future
@@ -263,7 +267,7 @@ func (s *Server) renewBoundCertificate(
 		Organization:     "CFGMS",
 		ClientID:         fresh.ID,
 		ValidityDays:     credentialCollectValidityDays,
-		TemplateModifier: credentialMarkerModifier(markers),
+		TemplateModifier: credentialMarkerModifier(markers, fresh.ID),
 	})
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("failed to sign renewed certificate: %w", err)

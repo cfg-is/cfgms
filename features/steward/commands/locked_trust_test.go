@@ -22,6 +22,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
+	"github.com/cfgis/cfgms/features/steward/operatorroster"
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
@@ -78,7 +79,7 @@ func newLockedFx(t *testing.T, withIntermediate bool) *lockedFx {
 	})
 	require.NoError(t, err)
 	fx.operator, err = fx.issuer.GenerateClientCertificate(&cert.ClientCertConfig{
-		CommonName: "operator.test", ValidityDays: 365, KeySize: 2048, TemplateModifier: cert.SetPayloadSigningMarker,
+		CommonName: "operator.test", ValidityDays: 365, KeySize: 2048, TemplateModifier: boundPayloadSigning,
 	})
 	require.NoError(t, err)
 	srv, err := fx.issuer.GenerateServerCertificate(&cert.ServerCertConfig{
@@ -152,15 +153,17 @@ func lockedCmd(id string, typ cpTypes.CommandType, params map[string]interface{}
 // manifest returns a signed revocation manifest issued at issuedAt.
 func (fx *lockedFx) manifest(t *testing.T, issuedAt time.Time, revoked ...string) []byte {
 	t.Helper()
-	return signManifestWith(t, fx.signing, issuedAt, revoked)
+	// The roster authorizes the fixture's operator, as the controller's manifest does for an
+	// account holding operator-payload:sign.
+	return signManifestWith(t, fx.signing, issuedAt, revoked, rootScopeSignerEntry(fx.operator))
 }
 
-func signManifestWith(t *testing.T, signingCert *cert.Certificate, issuedAt time.Time, revoked []string) []byte {
+func signManifestWith(t *testing.T, signingCert *cert.Certificate, issuedAt time.Time, revoked []string, signers ...operatorroster.AuthorizedX509Signer) []byte {
 	t.Helper()
 	if revoked == nil {
 		revoked = []string{}
 	}
-	m := revocationManifestPayload{Kind: revocationManifestKind, Version: int64(len(revoked)), IssuedAt: issuedAt, RevokedSerials: revoked}
+	m := revocationManifestPayload{Kind: revocationManifestKind, Version: int64(len(revoked)), IssuedAt: issuedAt, RevokedSerials: revoked, AuthorizedX509Signers: signers}
 	data, err := json.Marshal(m)
 	require.NoError(t, err)
 	signer, err := signature.NewSigner(&signature.SignerConfig{
@@ -570,7 +573,7 @@ func (lh *lockedHarness) requireRefusedKeepCalls(t *testing.T, sc *cpTypes.Signe
 func TestLocked_HandlerWithNeitherVerifierNorLockedRefusesEverything(t *testing.T) {
 	fx := newLockedFx(t, false)
 	lh := newLockedHarness(t, fx, harnessOpts{})
-	plain, err := New(&Config{StewardID: lockedStewardID, OnStatus: noopStatus, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	plain, err := New(&Config{StewardID: lockedStewardID, OnStatus: noopStatus, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t)})
 	require.NoError(t, err)
 	plain.RegisterExecuteScriptHandler()
 	plain.RegisterOpenTerminalHandler(newRecordingDialer())
@@ -652,7 +655,7 @@ func TestLocked_ConfigCanOnlyRestrict(t *testing.T) {
 	h.Wait()
 
 	// A locked handler takes no verifier, store or CA of its own.
-	_, terr = New(&Config{StewardID: lockedStewardID, OnStatus: noopStatus, Logger: newTestLogger(t), Locked: trust, ControllerCARoots: inlineTestCARoots(t)})
+	_, terr = New(&Config{StewardID: lockedStewardID, OnStatus: noopStatus, Logger: newTestLogger(t), Locked: trust, ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t)})
 	assert.Error(t, terr)
 	mv, terr := signature.NewMultiVerifier([]*x509.Certificate{fx.root})
 	require.NoError(t, terr)

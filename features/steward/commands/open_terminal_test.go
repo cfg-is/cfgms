@@ -101,8 +101,10 @@ var _ TerminalDialer = (*recordingDialer)(nil)
 func newOpenTerminalHandler(t *testing.T) (*Handler, *cert.Certificate) {
 	t.Helper()
 	ca, caPool := sigTestCA(t)
-	signer := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
-	return newHandlerWithSigning(t, nil, true, caPool), signer
+	signer := sigTestOperatorCert(t, ca, boundPayloadSigning)
+	h := newHandlerWithSigning(t, nil, true, caPool)
+	authorizeOperators(t, h, ca, caPool, signer)
+	return h, signer
 }
 
 // terminalParams returns open_terminal params carrying an X.509-signed envelope over
@@ -304,13 +306,14 @@ func TestOpenTerminal_CommandCompletesBeforeBridgeDone(t *testing.T) {
 		}
 	}
 	ca, caPool := sigTestCA(t)
-	signer := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+	signer := sigTestOperatorCert(t, ca, boundPayloadSigning)
 	h2, err := New(&Config{
 		StewardID:          "steward-test",
 		OnStatus:           cb,
 		Logger:             newTestLogger(t),
 		RequireSignedAdhoc: true,
 		ControllerCARoots:  caPool,
+		RevocationVerifier: newRosterVerifier(t, ca, caPool, rootScopeSignerEntry(signer)),
 	})
 	require.NoError(t, err)
 	h2.RegisterOpenTerminalHandler(dialer)
@@ -335,7 +338,7 @@ func TestOpenTerminal_CommandCompletesBeforeBridgeDone(t *testing.T) {
 func TestOpenTerminal_NoControllerCARoots_FailsClosed(t *testing.T) {
 	// Signer from an unrelated CA: the signature is valid, the chain is not trusted.
 	otherCA, _ := sigTestCA(t)
-	rogue := sigTestOperatorCert(t, otherCA, cert.SetPayloadSigningMarker)
+	rogue := sigTestOperatorCert(t, otherCA, boundPayloadSigning)
 
 	roots := map[string]*x509.CertPool{"nil": nil, "empty": x509.NewCertPool()}
 	for name, pool := range roots {

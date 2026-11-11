@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,7 +19,6 @@ import (
 
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
-	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -69,7 +69,7 @@ func (n *actionNode) peer() *actionNode {
 }
 
 func actionPrincipal(id string) *Principal {
-	return &Principal{ID: id, Name: id, TenantID: saTenant, Assurance: session.AssuranceStrong, ImplicitAdmin: true}
+	return &Principal{ID: id, Name: id, TenantID: saTenant, Assurance: session.AssuranceStrong, ImplicitAdmin: true, AccountBound: true}
 }
 
 func (n *actionNode) do(method, path string, p *Principal, body interface{}) *httptest.ResponseRecorder {
@@ -99,6 +99,7 @@ type actionOpts struct {
 	targets   []string // overrides the signed and sent targets
 	expiresIn time.Duration
 	signAs    *operatorpayload.Action // sign this action instead of the one requested
+	account   string                  // account the signing certificate is bound to (default testSignerAccountID)
 }
 
 func (n *actionNode) serviceAction(word, name string, o actionOpts) signedAction {
@@ -130,7 +131,10 @@ func (n *actionNode) signAction(a operatorpayload.Action, body map[string]interf
 	exp := time.Now().Add(o.expiresIn).UTC().Truncate(time.Second)
 	nonce := "nonce-" + time.Now().Format("150405.000000000")
 	env := actionEnvelope(n.t, a, o.targets, nonce, exp)
-	proof, serial := signActionX509(n.t, n.server, env, cert.SetPayloadSigningMarker)
+	if o.account == "" {
+		o.account = testSignerAccountID
+	}
+	proof, serial := signActionX509Bound(n.t, n.server, o.account, env)
 	body["justification"] = "restore service after incident"
 	body["nonce"] = nonce
 	body["expires_at"] = exp.Format(time.RFC3339)
@@ -364,7 +368,7 @@ func TestStewardAction_PrepareRoundTripsToVerifierContent(t *testing.T) {
 	// And an envelope signed over the prepared content is accepted by the POST.
 	exp := time.Now().Add(2 * time.Minute).UTC().Truncate(time.Second)
 	env := operatorpayload.Envelope{Content: got, Shell: operatorpayload.ActionShell, Targets: []string{saSteward}, Nonce: "n-prepare", ExpiresAt: exp}
-	proof, _ := signActionX509(t, n.server, env, cert.SetPayloadSigningMarker)
+	proof, _ := signActionX509Bound(t, n.server, testSignerAccountID, env)
 	post := n.do(http.MethodPost, "/stewards/"+saSteward+"/processes/4242/actions", p, map[string]interface{}{
 		"action": "end", "image": "notepad.exe", "justification": "runaway", "nonce": "n-prepare",
 		"expires_at": exp.Format(time.RFC3339), "targets": []string{saSteward}, "signature": proof.X509,
@@ -456,17 +460,17 @@ func TestStewardAction_BudgetSharedAcrossNodesAndRefusalQueuesNothing(t *testing
 	}
 	p := actionPrincipal("op-budget")
 
-	decodeRunID(t, a.postService(p, "spooler", a.serviceAction("restart", "spooler", actionOpts{})))
-	decodeRunID(t, b.postService(p, "spooler", b.serviceAction("stop", "spooler", actionOpts{})))
+	decodeRunID(t, a.postService(p, "spooler", a.serviceAction("restart", "spooler", actionOpts{account: "op-budget"})))
+	decodeRunID(t, b.postService(p, "spooler", b.serviceAction("stop", "spooler", actionOpts{account: "op-budget"})))
 	require.Equal(t, 2, a.queued())
 
-	rec := a.postService(p, "spooler", a.serviceAction("start", "spooler", actionOpts{}))
+	rec := a.postService(p, "spooler", a.serviceAction("start", "spooler", actionOpts{account: "op-budget"}))
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
 	assert.Equal(t, "ACTION_BUDGET_EXCEEDED", errorCode(t, rec))
 	assert.Equal(t, 2, a.queued(), "the over-budget request must queue nothing")
 
 	// Another principal has its own budget.
-	decodeRunID(t, a.postService(actionPrincipal("op-other"), "spooler", a.serviceAction("start", "spooler", actionOpts{})))
+	decodeRunID(t, a.postService(actionPrincipal("op-other"), "spooler", a.serviceAction("start", "spooler", actionOpts{account: "op-other"})))
 }
 
 func TestStewardAction_BudgetHoldsWithoutSharedStore(t *testing.T) {
@@ -477,8 +481,8 @@ func TestStewardAction_BudgetHoldsWithoutSharedStore(t *testing.T) {
 	n.server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{saTenant: {saTenant}}))
 	p := actionPrincipal("op-local")
 
-	decodeRunID(t, n.postService(p, "spooler", n.serviceAction("restart", "spooler", actionOpts{})))
-	rec := n.postService(p, "spooler", n.serviceAction("stop", "spooler", actionOpts{}))
+	decodeRunID(t, n.postService(p, "spooler", n.serviceAction("restart", "spooler", actionOpts{account: "op-local"})))
+	rec := n.postService(p, "spooler", n.serviceAction("stop", "spooler", actionOpts{account: "op-local"}))
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
 	assert.Equal(t, 1, n.queued())
 }
@@ -569,4 +573,62 @@ func TestStewardAction_WebAuthnProofCarriesManifest(t *testing.T) {
 	assert.Equal(t, base64.StdEncoding.EncodeToString(proof.WebAuthn.CredentialID), md["webauthn_credential_id"])
 	assert.NotEmpty(t, md["webauthn_manifest"])
 	assert.NotContains(t, md, "signature_value")
+}
+
+// [REQUIRED TEST] a steward action authenticated as principal B carrying a valid certificate
+// bound to principal A is refused with the generic error and a denied audit record naming B and
+// the certificate serial; authenticated as A it is accepted.
+func TestStewardAction_CertificateBoundToAnotherPrincipalRefused(t *testing.T) {
+	n := newActionNode(t)
+	seedOperatorAccount(t, n.server, "op-b", true)
+	sa := n.serviceAction("restart", "spooler", actionOpts{account: "op-a"})
+
+	rec := n.postService(actionPrincipal("op-b"), "spooler", sa)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, "INVALID_SIGNATURE", errorCode(t, rec))
+	assert.Contains(t, rec.Body.String(), "invalid operator signature")
+	assert.NotContains(t, strings.ToLower(rec.Body.String()), "bound")
+	assert.Zero(t, n.queued(), "a refused proof must queue nothing")
+
+	audits := n.auditEntries("steward_action.request")
+	require.Len(t, audits, 1)
+	assert.Equal(t, business.AuditResultDenied, audits[0].Result)
+	assert.Equal(t, "op-b", audits[0].UserID)
+	assert.Equal(t, sa.serial, audits[0].Details["signer_id"], "the denied record carries the certificate serial")
+	assert.Equal(t, "signing certificate is not bound to the dispatching principal", audits[0].Details["rejection_reason"])
+
+	decodeRunID(t, n.postService(actionPrincipal("op-a"), "spooler", sa))
+	assert.Equal(t, 1, n.queued())
+}
+
+// The successful audit record carries both the dispatching principal and the signing serial.
+func TestStewardAction_SuccessAuditNamesPrincipalAndSerial(t *testing.T) {
+	n := newActionNode(t)
+	sa := n.serviceAction("restart", "spooler", actionOpts{})
+	decodeRunID(t, n.postService(actionPrincipal(testSignerAccountID), "spooler", sa))
+
+	audits := n.auditEntries("steward_action.request")
+	require.Len(t, audits, 1)
+	assert.Equal(t, business.AuditResultSuccess, audits[0].Result)
+	assert.Equal(t, testSignerAccountID, audits[0].UserID)
+	assert.Equal(t, sa.serial, audits[0].Details["signer_id"])
+}
+
+// The owner lost operator-payload:sign after issuance: refused, and audited as a grant failure.
+func TestStewardAction_OwnerLostGrantRefused(t *testing.T) {
+	n := newActionNode(t)
+	sa := n.serviceAction("restart", "spooler", actionOpts{})
+	acct, err := n.server.getAccountByID(context.Background(), testSignerAccountID)
+	require.NoError(t, err)
+	acct.Permissions = nil
+	require.NoError(t, n.server.persistAccount(context.Background(), acct, "test"))
+	n.server.cacheAccount(acct)
+
+	rec := n.postService(actionPrincipal(testSignerAccountID), "spooler", sa)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, "INVALID_SIGNATURE", errorCode(t, rec))
+	assert.Zero(t, n.queued())
+	audits := n.auditEntries("steward_action.request")
+	require.Len(t, audits, 1)
+	assert.Contains(t, audits[0].Details["rejection_reason"], OperatorPayloadSignGrant)
 }

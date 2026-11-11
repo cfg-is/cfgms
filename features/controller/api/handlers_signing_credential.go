@@ -49,7 +49,8 @@ type SigningCredentialResponse struct {
 // for it.
 //
 // The issued certificate carries cert.PayloadSigningMarkerOID (via
-// cert.SetPayloadSigningMarker), never cert.AdminMarkerOID. This is a distinct
+// cert.SetPayloadSigningMarker) and cert.AccountBindingOID naming the owning account (via
+// cert.SetAccountBinding), never cert.AdminMarkerOID. This is a distinct
 // credential purpose from the mTLS admin transport bundle: it authenticates
 // payload-signing (operatorpayload.Envelope, stories S5b/S8), never mTLS session
 // auth, and must remain distinguishable from an ordinary admin bundle at verification
@@ -114,15 +115,8 @@ func (s *Server) handleRequestSigningCredential(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// The certificate's identity is the authenticated principal's own identity, never
-	// a client-supplied field — a caller-chosen CommonName would let any principal
-	// holding this permission mint a signing credential impersonating someone else.
-	commonName := principal.Name
-	if commonName == "" {
-		commonName = principal.ID
-	}
-	if commonName == "" {
-		s.writeErrorResponse(w, http.StatusForbidden, "Authenticated identity required", "MISSING_IDENTITY")
+	commonName, ok := s.signingCredentialCommonName(w, principal)
+	if !ok {
 		return
 	}
 
@@ -131,7 +125,7 @@ func (s *Server) handleRequestSigningCredential(w http.ResponseWriter, r *http.R
 		Organization:     "CFGMS",
 		ClientID:         principal.ID,
 		ValidityDays:     signingCredentialValidityDays,
-		TemplateModifier: cert.SetPayloadSigningMarker,
+		TemplateModifier: payloadSigningTemplateModifier(principal.ID),
 	})
 	if err != nil {
 		s.logger.Error("Failed to issue payload-signing credential",
@@ -165,6 +159,51 @@ func (s *Server) handleRequestSigningCredential(w http.ResponseWriter, r *http.R
 		SerialNumber:     issuedCert.SerialNumber,
 		ExpiresAt:        issuedCert.ExpiresAt,
 	})
+}
+
+// signingCredentialCommonName resolves the display name for a payload-signing credential and
+// refuses (writing the error response, returning false) a principal that cannot be issued one.
+//
+// Every payload-signing credential traces to an account: the account ID goes into the
+// certificate (cert.SetAccountBinding), and verification compares it with the dispatching
+// principal's account. A principal with no durable account — the bootstrap mTLS admin, an
+// API key, a CLI session with no bound account — has nothing to bind, so it is refused
+// here rather than issued a credential every verifier would reject. Checked before any
+// certificate is signed, so a refusal leaves nothing in the certificate store.
+//
+// The certificate's identity is the authenticated principal's own identity, never a
+// client-supplied field — a caller-chosen CommonName would let any principal holding this
+// permission mint a signing credential impersonating someone else.
+func (s *Server) signingCredentialCommonName(w http.ResponseWriter, principal *Principal) (string, bool) {
+	if !principal.AccountBound || principal.ID == "" {
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"A payload-signing credential can only be issued to an account-bound principal", "ACCOUNT_BINDING_REQUIRED")
+		return "", false
+	}
+	if err := cert.ValidateAccountBindingID(principal.ID); err != nil {
+		s.logger.Error("Refused to issue payload-signing credential: principal account ID cannot be bound",
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusForbidden, "Authenticated identity required", "MISSING_IDENTITY")
+		return "", false
+	}
+	commonName := principal.Name
+	if commonName == "" {
+		commonName = principal.ID
+	}
+	return commonName, true
+}
+
+// payloadSigningTemplateModifier stamps a payload-signing credential: the marker that makes it
+// one, and the binding to the owning account's ID. The CommonName stays the display name; the
+// account ID in the extension is what verifiers authorize against. accountID has been checked
+// with cert.SetAccountBinding by the caller, so the binding cannot fail here.
+func payloadSigningTemplateModifier(accountID string) func(*x509.Certificate) {
+	return func(template *x509.Certificate) {
+		cert.SetPayloadSigningMarker(template)
+		// An error is impossible for an ID the caller already validated; had it occurred the
+		// certificate would carry no binding and every verifier would reject it (fail closed).
+		_ = cert.SetAccountBinding(template, accountID)
+	}
 }
 
 // parseSigningCredentialPublicKey decodes a PEM-encoded PKIX SubjectPublicKeyInfo and

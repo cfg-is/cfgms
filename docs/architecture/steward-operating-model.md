@@ -787,7 +787,10 @@ command:
   zero-custody credential `cfg credential request-signing-cert` issues (Issue #3696);
   the certificate must chain to the steward's configured controller CA and carry the
   payload-signing marker (`cert.HasPayloadSigningMarker`) — an admin mTLS bundle no
-  longer qualifies.
+  longer qualifies. The certificate must also carry the account-binding extension
+  (`cert.AccountBindingOID`, the owning account's ID) and be listed in the verified
+  X.509 signer roster described below; a payload-signing certificate with no binding
+  is refused, with no unbound fallback.
 - **WebAuthn assertion (Issue #3697).** A browser-only operator with no mTLS bundle
   signs via the controller's `/api/v1/operator-payload/sign/begin`/`finish` ceremony
   (Issue #3695): the assertion's `clientDataJSON.challenge` must equal
@@ -894,6 +897,25 @@ different, steward-initiated delivery route) against the steward's own pinned CA
 and `verifyOperatorCert` adds `IsRevoked(serial)` as a final check after the marker check
 succeeds — so that once a manifest reaches the steward, a certificate that is otherwise
 perfectly valid is rejected when its serial appears in it.
+
+The same manifest carries the X.509 signer roster, `authorized_x509_signers`: one
+Kind-discriminated entry (`x509-signing-certificate`) per live payload-signing
+certificate whose owning account currently holds `operator-payload:sign`, naming the
+certificate serial, the owning account ID, the account's tenant or root scope, its grants
+and the descendant tenants it covers. It is built from current account authority, the
+same way the WebAuthn roster is, and narrowed per steward to the signers whose tenant
+covers the steward's own. `RevocationVerifier` keeps it only from a manifest whose signer
+chain-verified against the pinned roots (in `controller` trust mode a manifest is still
+applied for revocation, but its roster is dropped unless the same check succeeds), and a
+newer roster replaces the held one wholesale, so a signer the controller dropped stops
+being accepted; an older manifest cannot roll it back. `authorizeX509Signer` then accepts
+an X.509 operator signature only when the certificate carries the account binding, the
+roster is no older than the 15-minute freshness bound the WebAuthn roster uses, and an
+entry for the certificate's serial names the same account, grants `operator-payload:sign`
+and covers this steward's tenant. A steward with no verified roster, or an expired one,
+refuses X.509 operator signatures. The steward does not claim to verify the principal
+that dispatched the command; binding the signature to that principal is the
+controller's check.
 
 Deliberately, this is never a live controller assertion made at verification time: the
 steward checks the last manifest it independently verified for itself, using the same

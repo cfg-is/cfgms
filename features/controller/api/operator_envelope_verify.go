@@ -57,6 +57,11 @@ type OperatorProof struct {
 // assertion. The caller is the authenticated principal in ctx, never a client-supplied
 // account, and the credential must be one of that account's own.
 //
+// The X.509 branch is bound to the same caller: the certificate must carry the account ID of
+// the authenticated principal in ctx and that account must hold operator-payload:sign. The
+// returned identifier accompanies a binding or grant failure (see operatorCertBindingReason),
+// so a caller can audit the refusal against the certificate that was presented.
+//
 // Callers report a failure to the client as "invalid operator signature" without
 // detail, and log the returned error through logging.SanitizeLogValue.
 func (s *Server) verifyOperatorActionEnvelope(ctx context.Context, stewardID string, action operatorpayload.Action, targets []string, nonce string, expiresAt time.Time, proof OperatorProof) (string, error) {
@@ -95,12 +100,17 @@ func (s *Server) verifyOperatorEnvelope(ctx context.Context, stewardID string, c
 	}
 
 	if proof.X509 != nil {
-		return s.verifyActionX509(envelope, proof.X509)
+		return s.verifyActionX509(ctx, envelope, proof.X509)
 	}
 	return s.verifyActionWebAuthn(ctx, envelope, proof.WebAuthn)
 }
 
-func (s *Server) verifyActionX509(envelope operatorpayload.Envelope, proof *OperatorX509Proof) (string, error) {
+// verifyActionX509 verifies the signature over envelope, then the signing certificate and its
+// binding to the authenticated principal in ctx (verifyOperatorSigningCertificate). Like the
+// WebAuthn branch it names the caller from ctx, never from the request: a certificate bound to
+// another account, or whose owner no longer holds operator-payload:sign, is refused. The
+// certificate serial accompanies a binding or grant error so the refusal can be audited.
+func (s *Server) verifyActionX509(ctx context.Context, envelope operatorpayload.Envelope, proof *OperatorX509Proof) (string, error) {
 	if proof.Algorithm == "" || proof.Value == "" || proof.PublicKey == "" {
 		return "", fmt.Errorf("incomplete x509 operator proof")
 	}
@@ -115,7 +125,7 @@ func (s *Server) verifyActionX509(envelope operatorpayload.Envelope, proof *Oper
 	}, scriptmodule.ShellType(envelope.Shell), scriptmodule.ModuleSigningConfig{TrustMode: scriptmodule.TrustModeAnyValid}); err != nil {
 		return "", fmt.Errorf("invalid operator signature: %w", err)
 	}
-	return s.verifyOperatorSigningCertificate(proof.PublicKey)
+	return s.verifyOperatorSigningCertificate(ctx, proof.PublicKey)
 }
 
 func (s *Server) verifyActionWebAuthn(ctx context.Context, envelope operatorpayload.Envelope, proof *OperatorWebAuthnProof) (string, error) {

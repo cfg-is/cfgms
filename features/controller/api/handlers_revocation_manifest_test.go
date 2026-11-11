@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -827,4 +828,142 @@ func TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_CarriesCovere
 	assert.Equal(t, []string{"client-1"}, byCred["manifest-cred-covered"].CoveredTenantIDs,
 		"msp-a's entry covers its child client-1 and neither msp-b nor msp-ab")
 	assert.Empty(t, byCred["manifest-cred-covered-root"].CoveredTenantIDs)
+}
+
+// --- X.509 signer roster ---
+
+// issueRosterCert issues a payload-signing certificate to the named account, bound to accountID
+// as handleRequestSigningCredential binds it, and returns its serial. marker overrides what is
+// stamped, for the shapes the roster must refuse.
+func issueRosterCert(t *testing.T, certMgr *cert.Manager, accountID string, marker func(*x509.Certificate)) string {
+	t.Helper()
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName: "roster-signer", ValidityDays: 30, KeySize: 2048, ClientID: accountID, TemplateModifier: marker,
+	})
+	require.NoError(t, err)
+	return issued.SerialNumber
+}
+
+func accountIDOf(t *testing.T, server *Server, username string) string {
+	t.Helper()
+	acct, err := server.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	return acct.ID
+}
+
+func rosterSerials(entries []AuthorizedX509Signer) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.Serial)
+	}
+	return out
+}
+
+func TestHandleGetRevocationManifest_AuthorizedX509Signers_ListsBoundCertificatesOfAuthorizedAccounts(t *testing.T) {
+	server, certMgr := setupManifestServerWithoutAccount(t)
+	seedTenantTree(t, server)
+	createManifestAccount(t, server, AccountRequest{Username: "roster-msp-a", TenantID: "msp-a", Permissions: []string{OperatorPayloadSignGrant}})
+	createManifestAccount(t, server, AccountRequest{Username: "roster-no-grant", TenantID: "msp-a", Permissions: []string{"steward:read-scripts"}})
+	createManifestAccount(t, server, AccountRequest{Username: "roster-root", RootScope: true})
+	idA, idNoGrant, idRoot := accountIDOf(t, server, "roster-msp-a"), accountIDOf(t, server, "roster-no-grant"), accountIDOf(t, server, "roster-root")
+
+	listed := issueRosterCert(t, certMgr, idA, boundSigningMarker(idA))
+	rootSerial := issueRosterCert(t, certMgr, idRoot, boundSigningMarker(idRoot))
+	noGrant := issueRosterCert(t, certMgr, idNoGrant, boundSigningMarker(idNoGrant))
+	unbound := issueRosterCert(t, certMgr, idA, cert.SetPayloadSigningMarker)                // marker only: issued before the binding existed
+	adminOnly := issueRosterCert(t, certMgr, idA, cert.SetAdminMarker)                       // not a payload-signing credential
+	mismatched := issueRosterCert(t, certMgr, idA, boundSigningMarker("some-other-account")) // ClientID says A, the binding says otherwise
+
+	rec, body := getRevocationManifest(t, server, certMgr)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	serials := rosterSerials(body.Manifest.AuthorizedX509Signers)
+	assert.ElementsMatch(t, []string{listed, rootSerial}, serials,
+		"only bound certificates of accounts holding operator-payload:sign belong on the roster")
+	for _, excluded := range []string{noGrant, unbound, adminOnly, mismatched} {
+		assert.NotContains(t, serials, excluded)
+	}
+	assert.True(t, sort.StringsAreSorted(serials), "entries are sorted so the manifest signs identical bytes")
+
+	byAccount := map[string]AuthorizedX509Signer{}
+	for _, e := range body.Manifest.AuthorizedX509Signers {
+		byAccount[e.AccountID] = e
+	}
+	entry := byAccount[idA]
+	assert.Equal(t, AuthorizedX509SignerKind, entry.Kind)
+	assert.Equal(t, listed, entry.Serial)
+	assert.Equal(t, "msp-a", entry.TenantID)
+	assert.False(t, entry.RootScope)
+	assert.Equal(t, []string{OperatorPayloadSignGrant}, entry.Grants)
+	assert.Contains(t, entry.CoveredTenantIDs, "client-1", "the entry carries the descendant tenants it covers")
+	root := byAccount[idRoot]
+	assert.True(t, root.RootScope)
+	assert.Empty(t, root.TenantID)
+
+	// The signature covers the roster: the manifest verifies with the roster present.
+	signingCert, err := certMgr.GetCurrentCertForPurpose(cert.PurposeSigning)
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(signingCert.CertificatePEM)
+	require.NoError(t, err)
+	verifier, err := signature.NewVerifierFromCertificate(x509Cert)
+	require.NoError(t, err)
+	data, err := json.Marshal(body.Manifest)
+	require.NoError(t, err)
+	assert.NoError(t, verifier.Verify(data, body.Signature))
+}
+
+func TestHandleGetRevocationManifest_AuthorizedX509Signers_DisabledOrDemotedAccountDropsOut(t *testing.T) {
+	server, certMgr := setupManifestServerWithoutAccount(t)
+	seedTenantTree(t, server)
+	createManifestAccount(t, server, AccountRequest{Username: "roster-demoted", TenantID: "msp-a", Permissions: []string{OperatorPayloadSignGrant}})
+	id := accountIDOf(t, server, "roster-demoted")
+	serial := issueRosterCert(t, certMgr, id, boundSigningMarker(id))
+
+	_, body := getRevocationManifest(t, server, certMgr)
+	require.Equal(t, []string{serial}, rosterSerials(body.Manifest.AuthorizedX509Signers), "sanity: listed while authorized")
+
+	disabled := true
+	require.Equal(t, http.StatusOK, putAccount(t, server, testAdminPrincipal(), "roster-demoted", AccountUpdateRequest{Disabled: &disabled}).Code)
+	_, body = getRevocationManifest(t, server, certMgr)
+	assert.Empty(t, body.Manifest.AuthorizedX509Signers, "a disabled account's certificates must stop being authorized")
+
+	enabled := false
+	require.Equal(t, http.StatusOK, putAccount(t, server, testAdminPrincipal(), "roster-demoted", AccountUpdateRequest{Disabled: &enabled}).Code)
+	_, body = getRevocationManifest(t, server, certMgr)
+	require.Equal(t, []string{serial}, rosterSerials(body.Manifest.AuthorizedX509Signers), "sanity: listed again once enabled")
+
+	acct, err := server.getAccount(context.Background(), "roster-demoted")
+	require.NoError(t, err)
+	acct.Permissions = nil
+	require.NoError(t, server.persistAccount(context.Background(), acct, "test"))
+	server.cacheAccount(acct)
+	_, body = getRevocationManifest(t, server, certMgr)
+	assert.Empty(t, body.Manifest.AuthorizedX509Signers, "an account that lost the grant must stop being authorized")
+}
+
+func TestHandleGetStewardRevocationManifest_TenantIsolation_X509Signers(t *testing.T) {
+	server, certMgr := setupManifestServerWithoutAccount(t)
+	seedTenantTree(t, server)
+	const stewardID = "steward-x509-isolation"
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "client-1", "", "active"))
+
+	for _, req := range []AccountRequest{
+		{Username: "x509-msp-a", TenantID: "msp-a", Permissions: []string{OperatorPayloadSignGrant}},
+		{Username: "x509-msp-b", TenantID: "msp-b", Permissions: []string{OperatorPayloadSignGrant}},
+		{Username: "x509-root", RootScope: true},
+	} {
+		createManifestAccount(t, server, req)
+	}
+	idA, idB, idRoot := accountIDOf(t, server, "x509-msp-a"), accountIDOf(t, server, "x509-msp-b"), accountIDOf(t, server, "x509-root")
+	serialA := issueRosterCert(t, certMgr, idA, boundSigningMarker(idA))
+	serialB := issueRosterCert(t, certMgr, idB, boundSigningMarker(idB))
+	serialRoot := issueRosterCert(t, certMgr, idRoot, boundSigningMarker(idRoot))
+
+	rec, body := getStewardRevocationManifest(t, server, certMgr, stewardID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	serials := rosterSerials(body.Manifest.AuthorizedX509Signers)
+	assert.Contains(t, serials, serialA, "a steward receives signers whose tenant covers its own")
+	assert.Contains(t, serials, serialRoot, "a steward receives root-scope signers")
+	assert.NotContains(t, serials, serialB, "a steward must not receive another tenant's operator signers")
 }

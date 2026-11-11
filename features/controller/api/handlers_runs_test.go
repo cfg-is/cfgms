@@ -169,11 +169,33 @@ func setupRunServer(t *testing.T, stewards []fleet.StewardResult) (*Server, *con
 	return server, manager, queue
 }
 
+// seedOperatorAccount makes accountID an enabled account holding operator-payload:sign
+// (grant true) or nothing (grant false), persisted and cached the way a created account is, so
+// the controller's binding check finds it. It returns the account.
+func seedOperatorAccount(t *testing.T, server *Server, accountID string, grant bool) *account {
+	t.Helper()
+	acct := &account{ID: accountID, Username: "user-" + accountID, TenantID: "test-tenant", CreatedAt: time.Now()}
+	if grant {
+		acct.Permissions = []string{OperatorPayloadSignGrant}
+	}
+	require.NoError(t, server.persistAccount(context.Background(), acct, "test"))
+	server.cacheAccount(acct)
+	return acct
+}
+
+// boundSigningMarker is the template modifier handleRequestSigningCredential applies: the
+// payload-signing marker plus the binding to accountID.
+func boundSigningMarker(accountID string) func(*x509.Certificate) {
+	return payloadSigningTemplateModifier(accountID)
+}
+
 // signedOperatorEnvelopeFields signs content as an operator envelope bound to
-// targets and returns the request-body fields handlePostRunCommand now requires
+// targets and returns the request-body fields handlePostRunCommand requires
 // unconditionally (Issue #3694): signature, targets, nonce, expires_at. The operator
 // cert is issued by server's own certManager so it chains to the CA the controller
-// verifies against, and carries the payload-signing marker.
+// verifies against, carries the payload-signing marker, and is bound to principalID's
+// account — the account is created, holding operator-payload:sign, when it does not
+// exist yet, so a request authenticated as that principal passes the binding check.
 //
 // Payload-signing marker, not admin (Issue #3696): validatePublicBetaCommandSignature
 // requires the same credential type cfg now signs with and the steward now verifies on
@@ -181,14 +203,18 @@ func setupRunServer(t *testing.T, stewards []fleet.StewardResult) (*Server, *con
 // pass CI while the real end-to-end path is inoperable. Test files are exempt from
 // SetPayloadSigningMarker's restricted-caller allow-list
 // (TestSetPayloadSigningMarker_Architecture).
-func signedOperatorEnvelopeFields(t *testing.T, server *Server, content []byte, shell string, targets []string) map[string]interface{} {
+func signedOperatorEnvelopeFields(t *testing.T, server *Server, principalID string, content []byte, shell string, targets []string) map[string]interface{} {
 	t.Helper()
-	return signedOperatorEnvelopeFieldsWithMarker(t, server, content, shell, targets, cert.SetPayloadSigningMarker)
+	if acct, err := server.getAccountByID(context.Background(), principalID); err != nil || acct == nil {
+		seedOperatorAccount(t, server, principalID, true)
+	}
+	return signedOperatorEnvelopeFieldsWithMarker(t, server, content, shell, targets, boundSigningMarker(principalID))
 }
 
 // signedOperatorEnvelopeFieldsWithMarker is signedOperatorEnvelopeFields with the
 // issued operator cert's marker under test control, so the negative case (an
-// admin-bundle-shaped credential) can be driven through the real request path.
+// admin-bundle-shaped credential, or one bound to another account) can be driven through
+// the real request path.
 func signedOperatorEnvelopeFieldsWithMarker(t *testing.T, server *Server, content []byte, shell string, targets []string, marker func(*x509.Certificate)) map[string]interface{} {
 	t.Helper()
 	require.NotNil(t, server.certManager, "test server must have a certManager to sign an operator envelope")
@@ -254,7 +280,7 @@ func withEnvelopeFields(body map[string]interface{}, envelopeFields map[string]i
 // tests: hasPermission is checked before the assurance floor, so a principal missing
 // the relevant permission still gets 403 regardless of its assurance level.
 func runPrincipal(id string, perms []string, tenantID string) *Principal {
-	return &Principal{ID: id, Assurance: session.AssuranceStrong, Permissions: perms, TenantID: tenantID}
+	return &Principal{ID: id, Assurance: session.AssuranceStrong, Permissions: perms, TenantID: tenantID, AccountBound: true}
 }
 
 // postRunScript sends POST /api/v1/runs/script through the same
@@ -400,9 +426,9 @@ func TestRunCommand_AdminMTLSEmptyTenant_NotUnauthorized(t *testing.T) {
 		"target":  "id:steward-1",
 		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
 		"shell":   "pwsh",
-	}, signedOperatorEnvelopeFields(t, server, []byte("hostname"), "pwsh", []string{"steward-1"}))
+	}, signedOperatorEnvelopeFields(t, server, "cfgms-admin", []byte("hostname"), "pwsh", []string{"steward-1"}))
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
-		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}, body)
+		signingAdminPrincipal(), body)
 
 	require.NotEqual(t, http.StatusUnauthorized, rec.Code,
 		"admin mTLS principal (empty tenant) must not be rejected as unauthenticated; body: %s", rec.Body.String())
@@ -418,7 +444,7 @@ func TestRunCommandRequiresAndPreservesOperatorSignature(t *testing.T) {
 	const content = "hostname"
 	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
 	server, _, queue := setupRunServer(t, stewards)
-	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true}
+	admin := signingAdminPrincipal()
 
 	// Well-formed targets/nonce/expires_at but no signature — isolates the
 	// signature-required check from the expires_at parse check.
@@ -434,7 +460,7 @@ func TestRunCommandRequiresAndPreservesOperatorSignature(t *testing.T) {
 	assert.Contains(t, unsigned.Body.String(), "INVALID_SIGNATURE")
 	assert.Empty(t, queue.PeekForDevice("steward-1"), "unsigned command must not reach the execution queue")
 
-	envelopeFields := signedOperatorEnvelopeFields(t, server, []byte(content), "pwsh", []string{"steward-1"})
+	envelopeFields := signedOperatorEnvelopeFields(t, server, "cfgms-admin", []byte(content), "pwsh", []string{"steward-1"})
 	signed := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, withEnvelopeFields(map[string]interface{}{
 		"target":  "id:steward-1",
 		"content": base64.StdEncoding.EncodeToString([]byte(content)),
@@ -463,7 +489,7 @@ func TestRunScript_AdminMTLSEmptyTenant_NotUnauthorized(t *testing.T) {
 
 	body := map[string]interface{}{"target": "all", "script_id": "scripts/check.sh"}
 	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
-		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}, body)
+		signingAdminPrincipal(), body)
 
 	require.NotEqual(t, http.StatusUnauthorized, rec.Code,
 		"admin mTLS principal (empty tenant) must not be rejected; body: %s", rec.Body.String())
@@ -501,7 +527,7 @@ func TestRunCommand_NonAdminEmptyTenant_StillUnauthorized(t *testing.T) {
 func TestRunCommand_AdminMarkerOnlyCredential_Rejected(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
 	server, _, _ := setupRunServer(t, stewards)
-	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
+	admin := signingAdminPrincipal()
 
 	envelope := signedOperatorEnvelopeFieldsWithMarker(t, server, []byte("hostname"), "pwsh",
 		[]string{"steward-1"}, cert.SetAdminMarker)
@@ -514,8 +540,9 @@ func TestRunCommand_AdminMarkerOnlyCredential_Rejected(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, rec.Code,
 		"an admin-marked credential without the payload-signing marker must not authorize an operator payload; body: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "payload-signing",
-		"rejection must name the missing credential type")
+	assert.Contains(t, rec.Body.String(), "invalid operator signature",
+		"the refusal is the generic response: it must not name the missing credential type")
+	assert.NotContains(t, rec.Body.String(), "payload-signing")
 }
 
 // TestRunCommand_PayloadSigningCredential_Accepted is the positive half of the same
@@ -526,10 +553,11 @@ func TestRunCommand_AdminMarkerOnlyCredential_Rejected(t *testing.T) {
 func TestRunCommand_PayloadSigningCredential_Accepted(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
 	server, _, _ := setupRunServer(t, stewards)
-	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
+	admin := signingAdminPrincipal()
 
+	seedOperatorAccount(t, server, admin.ID, true)
 	envelope := signedOperatorEnvelopeFieldsWithMarker(t, server, []byte("hostname"), "pwsh",
-		[]string{"steward-1"}, cert.SetPayloadSigningMarker)
+		[]string{"steward-1"}, boundSigningMarker(admin.ID))
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin,
 		withEnvelopeFields(map[string]interface{}{
 			"target":  "id:steward-1",
@@ -549,14 +577,14 @@ func TestRunCommand_PayloadSigningCredential_Accepted(t *testing.T) {
 func TestRunLifecycle_AdminMTLSEmptyTenant(t *testing.T) {
 	stewards := []fleet.StewardResult{{ID: "steward-1", TenantID: "infra-hyperv"}}
 	server, _, _ := setupRunServer(t, stewards)
-	admin := &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
+	admin := signingAdminPrincipal()
 
 	// 1. Dispatch (POST) as admin.
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", admin, withEnvelopeFields(map[string]interface{}{
 		"target":  "id:steward-1",
 		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
 		"shell":   "pwsh",
-	}, signedOperatorEnvelopeFields(t, server, []byte("hostname"), "pwsh", []string{"steward-1"})))
+	}, signedOperatorEnvelopeFields(t, server, "cfgms-admin", []byte("hostname"), "pwsh", []string{"steward-1"})))
 	require.Equal(t, http.StatusOK, rec.Code, "dispatch body: %s", rec.Body.String())
 	var resp APIResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
@@ -591,11 +619,11 @@ func TestGetRun_NonAdminCrossTenant_NotFound(t *testing.T) {
 
 	// Admin dispatches a run owned by the global/empty tenant.
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
-		&Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}, withEnvelopeFields(map[string]interface{}{
+		signingAdminPrincipal(), withEnvelopeFields(map[string]interface{}{
 			"target":  "id:steward-1",
 			"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
 			"shell":   "pwsh",
-		}, signedOperatorEnvelopeFields(t, server, []byte("hostname"), "pwsh", []string{"steward-1"})))
+		}, signedOperatorEnvelopeFields(t, server, "cfgms-admin", []byte("hostname"), "pwsh", []string{"steward-1"})))
 	require.Equal(t, http.StatusOK, rec.Code)
 	var resp APIResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
@@ -883,7 +911,7 @@ func TestPostRunCommand_TwoStewardFanout(t *testing.T) {
 		"target":  "all",
 		"content": content,
 		"shell":   "bash",
-	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", []string{"cmd-dev-1", "cmd-dev-2"})))
+	}, signedOperatorEnvelopeFields(t, server, execPrincipal.ID, rawContent, "bash", []string{"cmd-dev-1", "cmd-dev-2"})))
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
 	var resp APIResponse
@@ -961,7 +989,7 @@ func TestPostRunCommand_ExceedsBlastRadius_Rejected(t *testing.T) {
 		"target":  "all",
 		"content": content,
 		"shell":   "bash",
-	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", targets)))
+	}, signedOperatorEnvelopeFields(t, server, execPrincipal.ID, rawContent, "bash", targets)))
 
 	require.Equal(t, http.StatusBadRequest, rec.Code,
 		"a validly signed payload over the tenant's blast-radius bound must be hard rejected; body: %s", rec.Body.String())
@@ -1009,7 +1037,7 @@ func TestPostRunCommand_ChildTenantNarrowerOverride_Enforced(t *testing.T) {
 		"target":  "all",
 		"content": content,
 		"shell":   "bash",
-	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", targets)))
+	}, signedOperatorEnvelopeFields(t, server, execPrincipal.ID, rawContent, "bash", targets)))
 
 	require.Equal(t, http.StatusBadRequest, rec.Code,
 		"the child tenant's narrower override must be enforced even though the parent's default would allow this request; body: %s", rec.Body.String())
@@ -1045,7 +1073,7 @@ func TestPostRunCommand_RejectedBlastRadius_AuditedAsBoundViolation(t *testing.T
 		"target":  "all",
 		"content": content,
 		"shell":   "bash",
-	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", targets)))
+	}, signedOperatorEnvelopeFields(t, server, execPrincipal.ID, rawContent, "bash", targets)))
 	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
 
 	require.NoError(t, server.auditManager.Flush(context.Background()))
@@ -1307,7 +1335,7 @@ func TestRunCommandSingle_RejectsBannedPattern_ControllerSide(t *testing.T) {
 				"target":  "id:steward-abc",
 				"content": base64.StdEncoding.EncodeToString(rawContent),
 				"shell":   "bash",
-			}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", []string{"steward-abc"})))
+			}, signedOperatorEnvelopeFields(t, server, execPrincipal.ID, rawContent, "bash", []string{"steward-abc"})))
 			assert.Equal(t, http.StatusBadRequest, rec.Code,
 				"command with pattern %q must return 400, body: %s", tc.name, rec.Body.String())
 
@@ -1340,7 +1368,7 @@ func TestRunCommandSingle_RejectsCrossTenantSteward(t *testing.T) {
 		"target":  "id:steward-cross",
 		"content": base64.StdEncoding.EncodeToString(rawContent),
 		"shell":   "bash",
-	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", []string{"steward-cross"})))
+	}, signedOperatorEnvelopeFields(t, server, execPrincipal.ID, rawContent, "bash", []string{"steward-cross"})))
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"cross-tenant exec must return 403; body: %s", rec.Body.String())
 
@@ -1384,7 +1412,7 @@ func TestEnforceExecTenantScope_FleetQueryError_DeniesDistinguishablyFromForbidd
 		"target":  "id:some-steward",
 		"content": base64.StdEncoding.EncodeToString(rawContent),
 		"shell":   "bash",
-	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", []string{"some-steward"})))
+	}, signedOperatorEnvelopeFields(t, server, execPrincipal.ID, rawContent, "bash", []string{"some-steward"})))
 
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
 		"a fleet-query error must deny, surfaced as 503 (could-not-verify), not silently permit; body: %s", rec.Body.String())
@@ -1611,7 +1639,7 @@ func TestPostRunCommand_StorageErrorDuringBlastRadiusResolution_DoesNotFailClose
 		"target":  "all",
 		"content": content,
 		"shell":   "bash",
-	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", targets)))
+	}, signedOperatorEnvelopeFields(t, server, execPrincipal.ID, rawContent, "bash", targets)))
 
 	require.Equal(t, http.StatusOK, rec.Code,
 		"a blast-radius-resolution storage error must not fail the dispatch closed "+
@@ -1706,6 +1734,13 @@ func TestHandleListRuns_NilManager_Returns503(t *testing.T) {
 // adminRunPrincipal returns a global-admin principal for run handler tests.
 func adminRunPrincipal() *Principal {
 	return &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
+}
+
+// signingAdminPrincipal is the admin-shaped principal for tests that sign an operator payload.
+// It is account-bound (its ID is the account the certificate is bound to): the bootstrap mTLS
+// admin has no account, and an accountless principal cannot sign an operator payload.
+func signingAdminPrincipal() *Principal {
+	return &Principal{ID: "cfgms-admin", Assurance: session.AssuranceBasic, TenantID: "", AccountBound: true}
 }
 
 // failingListRunStore is a real RunStore test implementation (not a mock of a
@@ -1924,17 +1959,26 @@ func grantRunCrossing(t *testing.T, server *Server, principalID, tenantID string
 	}))
 }
 
-func signedCommandBody(t *testing.T, server *Server, target string, targets []string) map[string]interface{} {
+func signedCommandBody(t *testing.T, server *Server, principalID, target string, targets []string) map[string]interface{} {
 	t.Helper()
 	return withEnvelopeFields(map[string]interface{}{
 		"target":  target,
 		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
 		"shell":   "pwsh",
-	}, signedOperatorEnvelopeFields(t, server, []byte("hostname"), "pwsh", targets))
+	}, signedOperatorEnvelopeFields(t, server, principalID, []byte("hostname"), "pwsh", targets))
 }
 
 func runScriptBody(target string) map[string]interface{} {
 	return map[string]interface{}{"target": target, "script_id": "scripts/check.sh"}
+}
+
+// boundRootScopedPrincipal is rootScopedPrincipal resolved from an account (as a session or a
+// bound certificate would be), so it can sign an operator payload. Its GlobalScope is true, so
+// it stays subject to the ADR-025 boundary exactly as the unbound form is.
+func boundRootScopedPrincipal(id string) *Principal {
+	p := rootScopedPrincipal(id)
+	p.AccountBound = true
+	return p
 }
 
 var (
@@ -1949,7 +1993,7 @@ var (
 func TestRunCommand_RootScopedWithoutCrossing_Challenged(t *testing.T) {
 	server, manager, _ := setupCrossingRunServer(t, []fleet.StewardData{runStewardMSP})
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
-		rootScopedPrincipal("root-operator-run"), signedCommandBody(t, server, "id:steward-msp", []string{"steward-msp"}))
+		boundRootScopedPrincipal("root-operator-run"), signedCommandBody(t, server, "root-operator-run", "id:steward-msp", []string{"steward-msp"}))
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`)
@@ -1961,7 +2005,7 @@ func TestRunCommand_RootScopedWithoutCrossing_Challenged(t *testing.T) {
 func TestRunCommand_RootScopedSelector_Challenged(t *testing.T) {
 	server, manager, _ := setupCrossingRunServer(t, []fleet.StewardData{runStewardRoot, runStewardMSP})
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
-		rootScopedPrincipal("root-operator-run"), signedCommandBody(t, server, "all", []string{"steward-root", "steward-msp"}))
+		boundRootScopedPrincipal("root-operator-run"), signedCommandBody(t, server, "root-operator-run", "all", []string{"steward-root", "steward-msp"}))
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
 	assertNoRunCreated(t, manager)
@@ -1972,11 +2016,11 @@ func TestRunCommand_RootScopedSelector_Challenged(t *testing.T) {
 // targets are resolved once.
 func TestRunCommand_RootScopedWithCrossing_Allowed(t *testing.T) {
 	server, manager, counting := setupCrossingRunServer(t, []fleet.StewardData{runStewardMSP})
-	caller := rootScopedPrincipal("root-operator-run")
+	caller := boundRootScopedPrincipal("root-operator-run")
 	grantRunCrossing(t, server, caller.ID, "msp-run")
 
 	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
-		caller, signedCommandBody(t, server, "id:steward-msp", []string{"steward-msp"}))
+		caller, signedCommandBody(t, server, caller.ID, "id:steward-msp", []string{"steward-msp"}))
 
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, int32(1), counting.searches.Load(), "the authorized target list is the dispatched list: one fleet search")
@@ -2081,7 +2125,7 @@ func TestPostRunCommand_Timeout(t *testing.T) {
 			"target":  "id:steward-1",
 			"content": base64.StdEncoding.EncodeToString([]byte(content)),
 			"shell":   "bash",
-		}, signedOperatorEnvelopeFields(t, server, []byte(content), "bash", []string{"steward-1"}))
+		}, signedOperatorEnvelopeFields(t, server, principal.ID, []byte(content), "bash", []string{"steward-1"}))
 		if timeout != nil {
 			body["timeout_seconds"] = timeout
 		}

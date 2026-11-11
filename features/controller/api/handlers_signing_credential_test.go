@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -58,10 +59,27 @@ func issueSigningCredentialAdminCert(t *testing.T, certMgr *cert.Manager, common
 	return x509Cert
 }
 
+// bindSigningCredentialAdminCert binds adminCert's serial to a new root-scope account and
+// returns the account ID, so a request presenting the certificate resolves to an
+// account-bound principal (extractAdminPrincipal's bound branch, principal ID = account ID) —
+// the only kind of principal that may be issued a payload-signing credential.
+func bindSigningCredentialAdminCert(t *testing.T, server *Server, adminCert *x509.Certificate) string {
+	t.Helper()
+	id := "acct-" + adminCert.Subject.CommonName
+	acct := &account{
+		ID: id, Username: "user-" + id, RootScope: true, CreatedAt: time.Now(),
+		CertBindings: []CertBinding{{Serial: adminCert.SerialNumber.String(), BoundAt: time.Now().UTC()}},
+	}
+	require.NoError(t, server.persistAccount(context.Background(), acct, "test"))
+	server.cacheAccount(acct)
+	return id
+}
+
 func TestHandleRequestSigningCredential_Success(t *testing.T) {
 	server, certMgr := setupCertTestServer(t)
 
 	adminCert := issueSigningCredentialAdminCert(t, certMgr, "operator-admin")
+	accountID := bindSigningCredentialAdminCert(t, server, adminCert)
 	priv, pubPEM := generateSigningCredentialTestKey(t)
 
 	body, err := json.Marshal(SigningCredentialRequest{PublicKeyPEM: pubPEM})
@@ -70,7 +88,7 @@ func TestHandleRequestSigningCredential_Success(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
 	// The bootstrap-fallback principal ID is the cert's CommonName (extractAdminPrincipal).
-	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "operator-admin", req, "signing-credential:request"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, accountID, req, "signing-credential:request"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -128,6 +146,7 @@ func TestHandleRequestSigningCredential_ResponseNeverCarriesPrivateKeyMaterial(t
 	server, certMgr := setupCertTestServer(t)
 
 	adminCert := issueSigningCredentialAdminCert(t, certMgr, "operator-admin-2")
+	accountID := bindSigningCredentialAdminCert(t, server, adminCert)
 	_, pubPEM := generateSigningCredentialTestKey(t)
 
 	body, err := json.Marshal(SigningCredentialRequest{PublicKeyPEM: pubPEM})
@@ -135,7 +154,7 @@ func TestHandleRequestSigningCredential_ResponseNeverCarriesPrivateKeyMaterial(t
 
 	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
-	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "operator-admin-2", req, "signing-credential:request"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, accountID, req, "signing-credential:request"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -439,6 +458,7 @@ func TestRequestSigningCredential_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	server.haManager = newNonAuthoritativeHAManager(t)
 
 	adminCert := issueSigningCredentialAdminCert(t, certMgr, "operator-admin-any-node")
+	accountID := bindSigningCredentialAdminCert(t, server, adminCert)
 	priv, pubPEM := generateSigningCredentialTestKey(t)
 
 	body, err := json.Marshal(SigningCredentialRequest{PublicKeyPEM: pubPEM})
@@ -446,7 +466,7 @@ func TestRequestSigningCredential_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
-	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "operator-admin-any-node", req, "signing-credential:request"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, accountID, req, "signing-credential:request"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -495,13 +515,14 @@ func auditEntriesByAction(t *testing.T, server *Server, action string) []*busine
 func TestHandleRequestSigningCredential_RecordsAuditEvent(t *testing.T) {
 	server, certMgr := setupCertTestServer(t)
 	adminCert := issueSigningCredentialAdminCert(t, certMgr, "operator-admin")
+	accountID := bindSigningCredentialAdminCert(t, server, adminCert)
 	_, pubPEM := generateSigningCredentialTestKey(t)
 
 	body, err := json.Marshal(SigningCredentialRequest{PublicKeyPEM: pubPEM})
 	require.NoError(t, err)
 	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
-	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "operator-admin", req, "signing-credential:request"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, accountID, req, "signing-credential:request"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -516,7 +537,7 @@ func TestHandleRequestSigningCredential_RecordsAuditEvent(t *testing.T) {
 	e := entries[0]
 	assert.Equal(t, business.AuditEventSecurityEvent, e.EventType)
 	assert.Equal(t, business.AuditSeverityHigh, e.Severity)
-	assert.Equal(t, "operator-admin", e.UserID)
+	assert.Equal(t, accountID, e.UserID)
 	assert.Equal(t, resp.Data.SerialNumber, e.ResourceID)
 	assert.Equal(t, resp.Data.SerialNumber, e.Details["serial_number"])
 	raw, err := json.Marshal(e)
@@ -529,10 +550,11 @@ func TestHandleRequestSigningCredential_RecordsAuditEvent(t *testing.T) {
 func TestHandleRequestSigningCredential_Failure_RecordsNoAuditEvent(t *testing.T) {
 	server, certMgr := setupCertTestServer(t)
 	adminCert := issueSigningCredentialAdminCert(t, certMgr, "operator-admin")
+	accountID := bindSigningCredentialAdminCert(t, server, adminCert)
 
 	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", strings.NewReader(`{"public_key_pem":"not-a-key"}`))
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
-	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, "operator-admin", req, "signing-credential:request"))
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, accountID, req, "signing-credential:request"))
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
