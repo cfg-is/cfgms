@@ -347,6 +347,7 @@ func seedLegacyPendingRefreshRequestsTable(t *testing.T) (*sql.DB, context.Conte
 // its next AddPendingRefresh with "column csr_pem of relation
 // pending_refresh_requests does not exist".
 func TestCreatePendingRefreshRequestsTable_MigratesLegacyTable(t *testing.T) {
+	skipInKeepSchemaMode(t, "seeds a legacy pending_refresh_requests table the applied schema already holds")
 	db, ctx := seedLegacyPendingRefreshRequestsTable(t)
 
 	// A pre-#3781 row must survive the migration and take the column default.
@@ -393,6 +394,7 @@ func TestCreatePendingRefreshRequestsTable_MigratesLegacyTable(t *testing.T) {
 // migration runs on every store open, so a non-idempotent pass would break every
 // controller restart.
 func TestCreatePendingRefreshRequestsTable_MigrationIsIdempotent(t *testing.T) {
+	skipInKeepSchemaMode(t, "seeds a legacy pending_refresh_requests table the applied schema already holds")
 	db, ctx := seedLegacyPendingRefreshRequestsTable(t)
 
 	schemas := NewDatabaseSchemas()

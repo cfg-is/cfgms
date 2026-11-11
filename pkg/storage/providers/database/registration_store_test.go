@@ -356,6 +356,7 @@ func TestDatabaseRegistrationStore_RotateToken_AssignsID(t *testing.T) {
 // without it, legacy tokens report an empty token_id and can never be revoked or deleted
 // from the web UI.
 func TestDatabaseRegistrationStore_BackfillLegacyRows(t *testing.T) {
+	skipInKeepSchemaMode(t, "builds a legacy cfgms_registration_tokens table the applied schema already holds")
 	db := setupTestDatabase(t)
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
@@ -471,6 +472,7 @@ func TestDatabaseRegistrationStore_LabelRoundTrip(t *testing.T) {
 // TestDatabaseRegistrationStore_LabelMigration verifies a table created before
 // the label column gains it with an empty default.
 func TestDatabaseRegistrationStore_LabelMigration(t *testing.T) {
+	skipInKeepSchemaMode(t, "builds a pre-label cfgms_registration_tokens table the applied schema already holds")
 	db := setupTestDatabase(t)
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()

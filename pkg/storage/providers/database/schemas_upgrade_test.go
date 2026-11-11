@@ -114,6 +114,7 @@ func TestCreateAuditEntriesTable_LegacyZeroSequencesDoNotBlockIndex(t *testing.T
 // building idx_command_records_steward_delivery failed with 42703 and the
 // controller could not start.
 func TestCreateCommandRecordsTable_UpgradesPreOutboxTable(t *testing.T) {
+	skipInKeepSchemaMode(t, "builds a pre-outbox command_records table the applied schema already holds")
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()

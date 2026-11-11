@@ -653,6 +653,7 @@ func seedLegacyPendingRegistrationsTable(t *testing.T) (*sql.DB, context.Context
 // cannot add columns, so without the ALTER sequence every upgrading Postgres deployment
 // would fail its next AddPending with "column device_id of relation ... does not exist".
 func TestCreatePendingRegistrationsTable_MigratesLegacyTable(t *testing.T) {
+	skipInKeepSchemaMode(t, "seeds a legacy cfgms_pending_registrations table the applied schema already holds")
 	db, ctx := seedLegacyPendingRegistrationsTable(t)
 
 	// A pre-#3403 row must survive the migration and take the column defaults.
@@ -705,6 +706,7 @@ func TestCreatePendingRegistrationsTable_MigratesLegacyTable(t *testing.T) {
 // duplicate) and that rows written between the passes survive. The migration runs on
 // every store open, so a non-idempotent pass would break every controller restart.
 func TestCreatePendingRegistrationsTable_MigrationIsIdempotent(t *testing.T) {
+	skipInKeepSchemaMode(t, "seeds a legacy cfgms_pending_registrations table the applied schema already holds")
 	db, ctx := seedLegacyPendingRegistrationsTable(t)
 
 	schemas := NewDatabaseSchemas()
@@ -728,6 +730,7 @@ func TestCreatePendingRegistrationsTable_MigrationIsIdempotent(t *testing.T) {
 // case: a deployment whose ALTER sequence died part-way through leaves some of the five
 // columns present. IF NOT EXISTS must add only the missing ones rather than failing.
 func TestCreatePendingRegistrationsTable_PartialLegacyTable(t *testing.T) {
+	skipInKeepSchemaMode(t, "seeds a legacy cfgms_pending_registrations table the applied schema already holds")
 	db, ctx := seedLegacyPendingRegistrationsTable(t)
 
 	_, err := db.ExecContext(ctx,
@@ -787,6 +790,7 @@ func TestCreatePendingRegistrationsTable_PropagatesFailure(t *testing.T) {
 // take ADD COLUMN, and that failure must surface rather than leaving a controller
 // running against a relation the store cannot write.
 func TestCreatePendingRegistrationsTable_AlterFailurePropagates(t *testing.T) {
+	skipInKeepSchemaMode(t, "shadows cfgms_pending_registrations with a view, replacing the applied table")
 	db := setupTestDatabase(t)
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
