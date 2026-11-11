@@ -45,4 +45,5 @@ The four upgrade documents cover distinct scopes; start here to pick the right o
 
 - [Production Runbooks](production-runbooks.md) - Production operations runbook
 - [Monitoring Guide](../monitoring.md) - Tracing, logging, metrics, and third-party integration
+- [Service-Level Signals and Markers](service-level-signals.md) - Exported signal names, labels and limits, and the deploy, rollback and chaos marker routes
 - [Trivy Rollback Runbook](../runbooks/trivy-rollback.md) - What to do if the pinned Trivy release is compromised

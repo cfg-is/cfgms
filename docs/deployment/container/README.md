@@ -98,7 +98,9 @@ curl --fail --cacert ./ca.crt \
 
 Do not proxy or publish port 9090 on a non-loopback host address. Remote
 monitoring systems should reach it through an authenticated host-local tunnel
-or an equivalently restricted private network path.
+or an equivalently restricted private network path. The signals at
+`/api/v1/health/metrics/prometheus` and the marker routes on that listener are
+listed in [Service-Level Signals and Markers](../../operations/service-level-signals.md).
 
 The runtime uses a fixed non-root UID/GID, a read-only root filesystem,
 no Linux capabilities, `no-new-privileges`, bounded PID/CPU/memory resources,
