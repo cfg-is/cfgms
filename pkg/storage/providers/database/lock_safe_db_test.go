@@ -12,6 +12,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -85,8 +86,9 @@ type namedSchemaMethod struct {
 	run  func(ctx context.Context, db schemaExecutor) error
 }
 
-// allSchemaMethods lists every Create* and Backfill* method of DatabaseSchemas, tables
-// first, so each Backfill* finds the table it alters.
+// allSchemaMethods lists every Create*, Backfill* and Setup* method of DatabaseSchemas,
+// tables first, so each Backfill* finds the table it alters.
+// TestAllSchemaMethodsListsEveryMethod fails when a new one is missing.
 func allSchemaMethods(s DatabaseSchemas) []namedSchemaMethod {
 	return []namedSchemaMethod{
 		{"CreateConfigsTable", s.CreateConfigsTable},
@@ -94,6 +96,12 @@ func allSchemaMethods(s DatabaseSchemas) []namedSchemaMethod {
 		{"CreateAuditEntriesTable", s.CreateAuditEntriesTable},
 		{"CreateAuditChainHeadsTable", s.CreateAuditChainHeadsTable},
 		{"CreateAuditStatsView", s.CreateAuditStatsView},
+		// SetupHealthMonitoring does not wrap its executor itself: CreateAllTables hands
+		// it an already lock-safe one. Wrap it here the same way so a standalone run of
+		// it is checked as the production path runs it.
+		{"SetupHealthMonitoring", func(ctx context.Context, db schemaExecutor) error {
+			return s.SetupHealthMonitoring(ctx, lockSafe(db))
+		}},
 		{"CreateRBACTables", s.CreateRBACTables},
 		{"CreatePendingDeletionsTable", s.CreatePendingDeletionsTable},
 		{"CreateTenantTables", s.CreateTenantTables},
@@ -140,6 +148,32 @@ func allSchemaMethods(s DatabaseSchemas) []namedSchemaMethod {
 		{"BackfillCommandRecordsDeliveryStatus", s.BackfillCommandRecordsDeliveryStatus},
 		{"BackfillSessionTokenStoreContinuity", s.BackfillSessionTokenStoreContinuity},
 		{"CreateAllTables", s.CreateAllTables},
+	}
+}
+
+// TestAllSchemaMethodsListsEveryMethod keeps allSchemaMethods in step with
+// DatabaseSchemas: every method that creates or alters schema (Create*, Backfill*,
+// Setup*) must be listed, so the up-to-date and lock tests cannot silently skip a
+// table a non-Create* method owns.
+func TestAllSchemaMethodsListsEveryMethod(t *testing.T) {
+	listed := map[string]bool{}
+	for _, m := range allSchemaMethods(NewDatabaseSchemas()) {
+		listed[m.name] = true
+	}
+	typ := reflect.TypeOf(NewDatabaseSchemas())
+	checked := 0
+	for i := 0; i < typ.NumMethod(); i++ {
+		name := typ.Method(i).Name
+		if !strings.HasPrefix(name, "Create") && !strings.HasPrefix(name, "Backfill") && !strings.HasPrefix(name, "Setup") {
+			continue
+		}
+		checked++
+		assert.True(t, listed[name], "allSchemaMethods does not list %s", name)
+	}
+	assert.Greater(t, checked, 40)
+	for name := range listed {
+		_, ok := typ.MethodByName(name)
+		assert.True(t, ok, "allSchemaMethods lists %s, which DatabaseSchemas does not have", name)
 	}
 }
 
