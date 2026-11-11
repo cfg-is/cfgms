@@ -388,6 +388,7 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"installer:upload":                    true, // Issue #5298: per-action tap for human sessions
 		"installer:delete":                    true, // Issue #5298
 		"installer:publish:steward":           true, // Issue #5298
+		"installer:approve:steward":           true, // Issue #6053: a tap to approve a steward binary
 		"installer:dispatch:steward":          true, // Issue #5298: start and dispatch gated, halt and rollback exempt
 		"automation-grant:create":             true, // Issue #5831: grants standing automation authority
 		"content-approval:approve":            true, // Issue #5831: approves content for automated use

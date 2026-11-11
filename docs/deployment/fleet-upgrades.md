@@ -8,7 +8,7 @@ The upgrade workflow has five steps:
 
 1. **Sign** — produce the publisher signature over the binary.
 2. **Publish** — upload the steward binary and its signature to the controller's blob store.
-3. **Approve** — approve the published blob before dispatch (separate approval step).
+3. **Approve** — approve the published binary, bound to its SHA-256, before it can be handed to any steward.
 4. **Dispatch** — send the upgrade command to matching stewards.
 5. **Monitor or rollback** — check per-steward status, and roll back if needed.
 
@@ -52,8 +52,9 @@ The version, platform, and arch **must** match the values the binary was signed 
 the controller rejects the upload with `SIGNATURE_VERIFICATION_FAILED`. Add `--force` to
 overwrite an existing binary at the same coordinates.
 
-The command prints the blob ID on success. The blob starts in `published` state
-and must be approved before it can be dispatched.
+The command prints the published version, platform, arch, size and SHA-256 on success. The
+binary starts without an approval and must be approved before it can be dispatched, rolled
+out or fetched by a steward.
 
 ### Migrating binaries signed before coordinate binding
 
@@ -62,12 +63,45 @@ re-publish (with `--force`) every steward binary the fleet may still converge to
 rolling out a controller/steward build that enforces the new scheme — otherwise every
 upgrade fails closed until the re-publish completes.
 
-## Step 3: Approve the binary (separate approval step)
+## Step 3: Approve the binary
 
-Approval is performed via the controller API or admin tooling. A blob in
-`published` state cannot be dispatched — dispatch returns 403 until the blob
-transitions to `approved`. See the controller administration guide for the
-approval workflow.
+Approve the published binary with `cfg installer approve`, giving the binary you reviewed
+(`--binary`, whose SHA-256 is sent) or the SHA-256 you reviewed (`--sha256`, for example
+the hash `cfg installer publish` printed):
+
+```
+cfg installer approve \
+  --kind steward \
+  --version v0.5.12 \
+  --platform linux \
+  --arch amd64 \
+  --binary /path/to/steward-linux-amd64
+```
+
+The command calls `POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}/approve`
+with `{"sha256": "<hex>"}`. It needs the `installer:approve:steward` permission and a
+passkey tap: a human session is required and API keys are refused. The approval is audited
+with the approver, version, platform, arch and SHA-256.
+
+**Approval is bound to the SHA-256.** The controller recomputes the SHA-256 of the stored
+binary and refuses a mismatch with 409 `HASH_MISMATCH`, recording nothing, so an approval
+never covers bytes the approver did not review. A binary counts as approved only while a
+record exists for its tenant, version, platform, arch and the SHA-256 of its stored bytes. If
+you re-publish with `--force` and different bytes, the earlier approval no longer matches and
+the new bytes must be approved again. Approving bytes that are already approved succeeds and
+keeps the first approver and time. Approving a version/platform/arch that was never published
+returns 404.
+
+Until a binary is approved, every path that hands it to a steward refuses it:
+
+| Path | Unapproved result |
+|------|-------------------|
+| `POST /api/v1/stewards/upgrade` and its rollback | 403 `NOT_APPROVED` |
+| `POST /api/v1/rollout` (rollout start) | 403 `NOT_APPROVED`, and no rollout is created. Every platform and arch among the stewards in the rollout's tenant needs an approved binary for the target version. |
+| steward self-fetch (`GET /api/v1/public/steward-binaries/...`) | 404 |
+
+If the approval store is not configured or cannot be read, these paths refuse with 503
+`APPROVAL_UNAVAILABLE` rather than treating the binary as approved.
 
 ## Step 4: Dispatch the upgrade
 

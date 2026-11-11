@@ -152,7 +152,7 @@ type Server struct {
 	moduleTrustStore                trust.TrustStore                         // Issue #1884: publisher trust store consulted during approval
 	moduleBundleReviewer            resolution.BundleReviewer                // Issue #2728: human approve/reject for queued module bundles
 	stewardBinaryTrustStore         trust.TrustStore                         // Issue #1944: overridable trust store for steward binary signature verification (injected in tests)
-	testAutoApproveStewardBinaries  bool                                     // Issue #1948: when true, publish sets approved_by automatically (test-only, CFGMS_SEED_TEST_API_KEYS gate)
+	testAutoApproveStewardBinaries  bool                                     // Issue #1948: when true, publish records an approval for the published bytes automatically (test-only, CFGMS_SEED_TEST_API_KEYS gate)
 	upgradeStore                    business.UpgradeStore                    // Issue #1945: durable per-steward upgrade state; nil means dispatch is refused with 503
 	stewardStore                    business.StewardStore                    // Issue #2096: durable fleet-registry store for device-ID refresh gate
 	pendingRefreshStore             business.PendingRefreshStore             // Issue #2096: durable pending-refresh queue
@@ -186,6 +186,7 @@ type Server struct {
 	automationGrantStore            *AutomationGrantStore                    // ADR-036 section 3: authenticates cfgag_ grant credentials (nil: every grant credential is refused)
 	contentApprovalStore            *ContentApprovalStore                    // Issue #5840: library approval modes (sole writer of the mode namespace)
 	unattendedRolloutStore          *UnattendedRolloutStore                  // Issue #6065: unattended rollout cell setting (sole writer of its namespace)
+	stewardBinaryApprovalStore      *StewardBinaryApprovalStore              // Issue #6053: steward binary approvals bound to the binary SHA-256 (sole writer of its namespace)
 	tagStore                        *tagstore.Store                          // Issue #2545: steward tag store for tag: selector support
 	webAuthn                        *webauthn.WebAuthn                       // Issue #2782: WebAuthn RP instance; nil → endpoints return 503
 	webAuthnSessions                sync.Map                                 // Issue #2782: pending registration sessions (non-ClusterMode only; ClusterMode uses NonceStore, Issue #4527); key=username, value=*webAuthnPendingSession

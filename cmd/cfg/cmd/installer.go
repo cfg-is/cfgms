@@ -3,14 +3,18 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -32,6 +36,12 @@ var (
 	publishBinary    string
 	publishSignature string
 	publishForce     bool
+
+	// approve subcommand flags
+	approveKind    string
+	approveVersion string
+	approveBinary  string
+	approveSHA256  string
 
 	// upload subcommand flags
 	uploadSignature string
@@ -94,6 +104,28 @@ Examples:
 	RunE: runInstallerPublish,
 }
 
+var installerApproveCmd = &cobra.Command{
+	Use:   "approve",
+	Short: "Approve a published steward binary so it can be handed to stewards",
+	Long: `Approve a published steward binary.
+
+Sends POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}/approve with
+the SHA-256 of the binary you reviewed. The approval is bound to those exact bytes: the
+controller recomputes the SHA-256 of the stored binary and refuses a mismatch, and a
+binary re-published with different bytes must be approved again. The command needs the
+installer:approve:steward permission and a passkey tap.
+
+Give the binary itself with --binary (the SHA-256 of the file is sent), or the SHA-256
+you reviewed with --sha256, for example the hash printed by cfg installer publish.
+
+Examples:
+  cfg installer approve --kind steward --version v0.5.12 --platform linux --arch amd64 \
+      --binary ./cfgms-steward
+  cfg installer approve --kind steward --version v0.5.12 --platform linux --arch amd64 \
+      --sha256 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08`,
+	RunE: runInstallerApprove,
+}
+
 var installerDownloadURLCmd = &cobra.Command{
 	Use:   "download-url",
 	Short: "Print the download URL for an installer artifact",
@@ -147,9 +179,25 @@ func init() {
 	_ = installerPublishCmd.MarkFlagRequired("binary")
 	_ = installerPublishCmd.MarkFlagRequired("signature")
 
+	installerApproveCmd.Flags().StringVar(&approveKind, "kind", "", "Binary kind: steward (required)")
+	installerApproveCmd.Flags().StringVar(&approveVersion, "version", "", "Semantic version, e.g. v0.5.12 (required)")
+	installerApproveCmd.Flags().StringVar(&installerPlatform, "platform", "", "Target platform: windows, darwin, linux (required)")
+	installerApproveCmd.Flags().StringVar(&installerArch, "arch", "", "Target architecture: amd64, arm64 (required)")
+	installerApproveCmd.Flags().StringVar(&approveBinary, "binary", "", "Path to the binary file reviewed; its SHA-256 is sent (one of --binary or --sha256)")
+	installerApproveCmd.Flags().StringVar(&approveSHA256, "sha256", "", "Hex SHA-256 of the binary reviewed (one of --binary or --sha256)")
+	installerApproveCmd.Flags().StringVar(&installerAPIURL, "url", "", "Controller API URL (env: CFGMS_API_URL)")
+	installerApproveCmd.Flags().StringVar(&installerTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
+	installerApproveCmd.Flags().BoolVar(&installerTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only)")
+	installerApproveCmd.Flags().StringVar(&installerServerName, "server-name", "", "Override TLS server name for certificate verification")
+	_ = installerApproveCmd.MarkFlagRequired("kind")
+	_ = installerApproveCmd.MarkFlagRequired("version")
+	_ = installerApproveCmd.MarkFlagRequired("platform")
+	_ = installerApproveCmd.MarkFlagRequired("arch")
+
 	installerCmd.AddCommand(installerUploadCmd)
 	installerCmd.AddCommand(installerDownloadURLCmd)
 	installerCmd.AddCommand(installerPublishCmd)
+	installerCmd.AddCommand(installerApproveCmd)
 }
 
 func getInstallerClient() (*APIClient, error) {
@@ -304,6 +352,123 @@ func runInstallerPublish(cmd *cobra.Command, args []string) error {
 
 	return client.PublishStewardBinary(context.Background(),
 		publishVersion, installerPlatform, installerArch, sigBytes, publishForce, f)
+}
+
+// runInstallerApprove approves the published steward binary named by the flags,
+// sending the SHA-256 of the file or the hash given.
+func runInstallerApprove(cmd *cobra.Command, args []string) error {
+	if approveKind != "steward" {
+		return fmt.Errorf("--kind must be %q; got %q", "steward", approveKind)
+	}
+	if !validInstallerPlatforms[installerPlatform] {
+		return fmt.Errorf("unknown platform %q; valid values: windows, darwin, linux", installerPlatform)
+	}
+	if !validInstallerArchs[installerArch] {
+		return fmt.Errorf("unknown arch %q; valid values: amd64, arm64", installerArch)
+	}
+	sum, err := approvalSHA256(approveBinary, approveSHA256)
+	if err != nil {
+		return err
+	}
+	client, err := getInstallerClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+	return client.ApproveStewardBinary(context.Background(), approveVersion, installerPlatform, installerArch, sum)
+}
+
+// approvalSHA256 returns the lowercase hex SHA-256 to approve: the hash of the file
+// at binaryPath, or the hash given. Exactly one of them must be set.
+func approvalSHA256(binaryPath, hash string) (string, error) {
+	switch {
+	case binaryPath != "" && hash != "":
+		return "", fmt.Errorf("give either --binary or --sha256, not both")
+	case binaryPath == "" && hash == "":
+		return "", fmt.Errorf("one of --binary or --sha256 is required")
+	case hash != "":
+		return normalizeApprovalHash(hash)
+	}
+	return fileSHA256(binaryPath)
+}
+
+// normalizeApprovalHash lowercases hash, drops an optional "sha256:" prefix and
+// requires a 64-character hex SHA-256.
+func normalizeApprovalHash(hash string) (string, error) {
+	hash = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(hash), "sha256:"))
+	if !approvalSHA256Re.MatchString(hash) {
+		return "", fmt.Errorf("--sha256 must be a 64-character hex SHA-256")
+	}
+	return hash, nil
+}
+
+// fileSHA256 returns the lowercase hex SHA-256 of the non-empty file at path.
+func fileSHA256(path string) (string, error) {
+	// #nosec G304 - file path provided by user via CLI flag
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("binary file not found: %s", path)
+		}
+		return "", fmt.Errorf("cannot open binary file %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return "", fmt.Errorf("cannot read binary file %s: %w", path, err)
+	}
+	if n == 0 {
+		return "", fmt.Errorf("binary file is empty: %s", path)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+var approvalSHA256Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// stewardBinaryApproveAPIResponse mirrors the server-side stewardBinaryApproveResponse wrapped in APIResponse.
+type stewardBinaryApproveAPIResponse struct {
+	Data struct {
+		Version    string `json:"version"`
+		Platform   string `json:"platform"`
+		Arch       string `json:"arch"`
+		SHA256     string `json:"sha256"`
+		ApprovedBy string `json:"approved_by"`
+		ApprovedAt string `json:"approved_at"`
+		Created    bool   `json:"created"`
+	} `json:"data"`
+}
+
+// ApproveStewardBinary posts the SHA-256 reviewed to
+// POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}/approve and
+// prints the approval on success. Approving bytes that are already approved succeeds
+// and reports the first approval.
+func (c *APIClient) ApproveStewardBinary(ctx context.Context, version, platform, arch, sha string) error {
+	body, err := json.Marshal(map[string]string{"sha256": sha})
+	if err != nil {
+		return fmt.Errorf("failed to encode approval: %w", err)
+	}
+	path := "/api/v1/installer/steward-binaries/" + url.PathEscape(version) + "/" + url.PathEscape(platform) + "/" + url.PathEscape(arch) + "/approve"
+	resp, err := c.doRequest(ctx, "POST", path, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to approve steward binary: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return c.parseError(resp)
+	}
+	var apiResp stewardBinaryApproveAPIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+	verb := "Approved"
+	if !apiResp.Data.Created {
+		verb = "Already approved"
+	}
+	fmt.Printf("%s steward binary %s %s/%s (sha256: %s, approved_by: %s, approved_at: %s)\n",
+		verb, apiResp.Data.Version, apiResp.Data.Platform, apiResp.Data.Arch,
+		apiResp.Data.SHA256, apiResp.Data.ApprovedBy, apiResp.Data.ApprovedAt)
+	return nil
 }
 
 // stewardBinaryPublishAPIResponse mirrors the server-side stewardBinaryPublishResponse wrapped in APIResponse.

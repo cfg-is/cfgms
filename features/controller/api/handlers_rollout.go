@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,6 +19,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -85,6 +87,29 @@ func rolloutAuditTenant(tenantID string) string {
 	return tenantID
 }
 
+// decodeStartRolloutRequest reads the start rollout body and validates
+// target_version, writing the 400 response when it is rejected.
+func (s *Server) decodeStartRolloutRequest(w http.ResponseWriter, r *http.Request) (startRolloutRequest, bool) {
+	var req startRolloutRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logger.Warn("Failed to decode start rollout body", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", "INVALID_BODY")
+		return req, false
+	}
+
+	if req.TargetVersion == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "target_version is required", "MISSING_FIELDS")
+		return req, false
+	}
+	if !stewardBinaryVersionRe.MatchString(req.TargetVersion) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Invalid target_version: "+logging.SanitizeLogValue(req.TargetVersion)+"; must match ^v\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?",
+			"INVALID_VERSION")
+		return req, false
+	}
+	return req, true
+}
+
 // handleStartRollout handles POST /api/v1/rollout.
 //
 // Creates a RolloutRecord in the store and starts a background goroutine that advances
@@ -105,21 +130,8 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req startRolloutRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.logger.Warn("Failed to decode start rollout body", "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", "INVALID_BODY")
-		return
-	}
-
-	if req.TargetVersion == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "target_version is required", "MISSING_FIELDS")
-		return
-	}
-	if !stewardBinaryVersionRe.MatchString(req.TargetVersion) {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Invalid target_version: "+logging.SanitizeLogValue(req.TargetVersion)+"; must match ^v\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?",
-			"INVALID_VERSION")
+	req, ok := s.decodeStartRolloutRequest(w, r)
+	if !ok {
 		return
 	}
 
@@ -129,6 +141,12 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.refuseUnattendedRollout(w, r, principal, tenantID, gateRouteStartRollout) {
+		return
+	}
+
+	// Refuse before any record exists: every platform and arch the rollout reaches
+	// must have an approved binary for the target version (Issue #6053).
+	if s.refuseUnapprovedRolloutTarget(w, r, tenantID, req.TargetVersion) {
 		return
 	}
 
@@ -194,6 +212,166 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 		RolloutID: rolloutID,
 		Status:    string(business.RolloutStatusInProgress),
 	})
+}
+
+// rolloutBinaryTarget names the stored binary a steward reaches: the blob tenant
+// its own tenant maps to, with its platform and arch.
+type rolloutBinaryTarget struct{ tenant, platform, arch string }
+
+// Fixed, caller-safe refusals of the rollout approval check's fleet lookup.
+var (
+	errRolloutFleetQueryNotConfigured = errors.New("fleet query not configured; cannot verify the target version is approved")
+	errRolloutFleetQueryFailed        = errors.New("fleet query failed; cannot verify the target version is approved")
+)
+
+// rolloutBinaryTargets returns the distinct (blob tenant, platform, arch) targets
+// of the stewards the rollout's tenant scope matches, in a stable order. A steward
+// that has not reported its platform and arch cannot be matched to a binary here;
+// nothing is handed to it without approval regardless, because self-fetch and
+// dispatch each check the approval record themselves.
+func (s *Server) rolloutBinaryTargets(ctx context.Context, tenantID string) ([]rolloutBinaryTarget, error) {
+	if s.fleetQuery == nil {
+		return nil, errRolloutFleetQueryNotConfigured
+	}
+	stewards, err := s.fleetQuery.Search(ctx, fleet.Filter{TenantID: tenantID})
+	if err != nil {
+		s.logger.Error("Fleet query failed during rollout approval check", "error", logging.SanitizeLogValue(err.Error()))
+		return nil, errRolloutFleetQueryFailed
+	}
+	seen := make(map[rolloutBinaryTarget]bool)
+	var targets []rolloutBinaryTarget
+	for _, st := range stewards {
+		platform, arch := stewardBinaryPlatform(st)
+		t := rolloutBinaryTarget{tenant: installerBlobTenant(st.TenantID), platform: platform, arch: arch}
+		if platform == "" || arch == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		targets = append(targets, t)
+	}
+	sortRolloutBinaryTargets(targets)
+	return targets, nil
+}
+
+func sortRolloutBinaryTargets(targets []rolloutBinaryTarget) {
+	sort.Slice(targets, func(i, j int) bool {
+		a, b := targets[i], targets[j]
+		if a.platform != b.platform {
+			return a.platform < b.platform
+		}
+		if a.arch != b.arch {
+			return a.arch < b.arch
+		}
+		return a.tenant < b.tenant
+	})
+}
+
+// rolloutApprovalCheck answers whether a target has an approved binary for one
+// version, remembering each stored blob's state so the shared "default" binary is
+// read once per platform and arch.
+type rolloutApprovalCheck struct {
+	s       *Server
+	ctx     context.Context
+	version string
+	memo    map[rolloutBinaryTarget]bool
+}
+
+// blobApproved reports the approval state of the one blob stored for t.
+func (c *rolloutApprovalCheck) blobApproved(t rolloutBinaryTarget) (bool, error) {
+	if v, ok := c.memo[t]; ok {
+		return v, nil
+	}
+	v, err := c.s.stewardBinaryBlobApproved(c.ctx, t.tenant, c.version, t.platform, t.arch)
+	if err == nil {
+		c.memo[t] = v
+	}
+	return v, err
+}
+
+// covered reports whether t has an approved binary in the order a steward fetches
+// it: its own tenant's blob, then "default".
+func (c *rolloutApprovalCheck) covered(t rolloutBinaryTarget) (bool, error) {
+	approved, err := c.blobApproved(t)
+	if err == nil && !approved && t.tenant != "default" {
+		approved, err = c.blobApproved(rolloutBinaryTarget{tenant: "default", platform: t.platform, arch: t.arch})
+	}
+	return approved, err
+}
+
+// refuseUnapprovedRolloutTarget checks that every (platform, arch) pair among the
+// stewards the rollout's tenant scope matches has an approved steward binary for
+// version, and writes the refusal and returns true when it does not. A steward
+// fetches its own tenant's binary and falls back to "default" when that one is
+// absent (installerBlobTenant, client_transport_upgrade.go), so a pair is covered
+// when the first blob in that order that has an approval record for its recomputed
+// SHA-256 exists. No matching stewards means nothing to check. An unavailable
+// fleet query, binary store or approval store, or a failed read, refuses with 503:
+// the check fails closed.
+func (s *Server) refuseUnapprovedRolloutTarget(w http.ResponseWriter, r *http.Request, tenantID, version string) bool {
+	targets, err := s.rolloutBinaryTargets(r.Context(), tenantID)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, err.Error(), "FLEET_QUERY_UNAVAILABLE")
+		return true
+	}
+	if len(targets) == 0 {
+		return false
+	}
+	if s.blobStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable,
+			"Binary storage not available", "BINARY_STORE_UNAVAILABLE")
+		return true
+	}
+	if s.StewardBinaryApprovalStore() == nil {
+		s.writeApprovalUnavailable(w, errStewardBinaryApprovalUnavailable)
+		return true
+	}
+	check := &rolloutApprovalCheck{s: s, ctx: r.Context(), version: version, memo: make(map[rolloutBinaryTarget]bool)}
+	for _, t := range targets {
+		approved, err := check.covered(t)
+		if err != nil {
+			s.writeApprovalUnavailable(w, err)
+			return true
+		}
+		if !approved {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				fmt.Sprintf("No approved steward binary for %s on %s/%s; approve the published binary before starting a rollout",
+					logging.SanitizeLogValue(version), logging.SanitizeLogValue(t.platform), logging.SanitizeLogValue(t.arch)),
+				"NOT_APPROVED")
+			return true
+		}
+	}
+	return false
+}
+
+// stewardBinaryPlatform returns the platform and arch of the binary a steward runs:
+// the runtime_os and runtime_arch it reported from the Go runtime, else the os and
+// arch DNA attributes. Either is empty when the steward has not reported it.
+func stewardBinaryPlatform(st fleet.StewardResult) (platform, arch string) {
+	platform, arch = st.DNAAttributes["runtime_os"], st.DNAAttributes["runtime_arch"]
+	if platform == "" {
+		platform = st.OS
+	}
+	if arch == "" {
+		arch = st.Architecture
+	}
+	return platform, arch
+}
+
+// stewardBinaryBlobApproved reports whether the blob stored under blobTenant for
+// version, platform and arch exists and has an approval record for its recomputed
+// SHA-256. A missing blob is not approved and is not an error.
+func (s *Server) stewardBinaryBlobApproved(ctx context.Context, blobTenant, version, platform, arch string) (bool, error) {
+	if !validPlatforms[platform] || !validArchs[arch] {
+		return false, nil
+	}
+	sum, err := s.storedStewardBinarySHA256(ctx, stewardBinaryBlobKey(blobTenant, version, platform, arch))
+	if err != nil {
+		if errors.Is(err, blob.ErrBlobNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%w: %v", errStewardBinaryApprovalRead, err)
+	}
+	return s.stewardBinaryApproved(ctx, blobTenant, version, platform, arch, sum)
 }
 
 // resolveRolloutTenant returns the tenant a rollout targets, or false after writing

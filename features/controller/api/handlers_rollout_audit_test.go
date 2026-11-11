@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -31,6 +32,19 @@ func rolloutAuditSteward(id, tenantID, ring, runningVersion string) fleet.Stewar
 		attrs["steward.version"] = runningVersion
 	}
 	return fleet.StewardData{ID: id, TenantID: tenantID, Status: "online", DNAAttributes: attrs}
+}
+
+// ringHealthFailingFleet is a real in-memory fleet query that fails every
+// per-ring search (the ring health query) and answers every other search. Rollout
+// start reads the fleet to check approval, so a nil fleet query now refuses the
+// start; this makes only the ring health query fail.
+type ringHealthFailingFleet struct{ fleet.FleetQuery }
+
+func (f ringHealthFailingFleet) Search(ctx context.Context, filter fleet.Filter) ([]fleet.StewardResult, error) {
+	if _, ring := filter.DNAAttributes["deployment_ring"]; ring {
+		return nil, errors.New("ring health query unavailable")
+	}
+	return f.FleetQuery.Search(ctx, filter)
 }
 
 // runAuditedRollout starts a rollout as tenantID's principal and waits for its terminal
@@ -108,7 +122,7 @@ func TestRolloutAutoHaltAuditedOnFailureRate(t *testing.T) {
 func TestRolloutAutoHaltAuditedOnHealthQueryFailure(t *testing.T) {
 	const tenantID = "tenant-a"
 	server, store, _ := setupRolloutServer(t, tenantID, nil)
-	server.fleetQuery = nil // every ring health query now fails
+	server.fleetQuery = ringHealthFailingFleet{server.fleetQuery} // every ring health query now fails
 	mgr := attachRolloutAuditManager(t, server)
 
 	id := runAuditedRollout(t, server, store, tenantID)
@@ -259,9 +273,9 @@ func TestMarkersListRolloutAndUpgradeEvents(t *testing.T) {
 		Rings:        []controllerconfig.RingSpec{{Name: "pre-release"}},
 		FallbackRing: "pre-release",
 	}
-	// With no fleet query the ring health check fails, so the rollout halts automatically.
+	// With a failing ring health query the rollout halts automatically.
 	fleetQuery := server.fleetQuery
-	server.fleetQuery = nil
+	server.fleetQuery = ringHealthFailingFleet{fleetQuery}
 	server.onRolloutTerminal = func(id string) { rolloutStore.terminalC <- id }
 	publishApprovedBinary(t, server, tenantID, "v0.5.12", "linux", "amd64")
 	publishApprovedBinary(t, server, tenantID, "v0.5.11", "linux", "amd64")

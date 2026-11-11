@@ -96,8 +96,17 @@ type createdUpgrade struct {
 	upgradeID string
 }
 
+// writeApprovalUnavailable answers an approval check that could not be made: 503
+// with APPROVAL_UNAVAILABLE. The check fails closed and never reads as approved.
+func (s *Server) writeApprovalUnavailable(w http.ResponseWriter, err error) {
+	if !errors.Is(err, errStewardBinaryApprovalUnavailable) {
+		s.logger.Error("Steward binary approval check failed", "error", logging.SanitizeLogValue(err.Error()))
+	}
+	s.writeErrorResponse(w, http.StatusServiceUnavailable, "Steward binary approval status unavailable", "APPROVAL_UNAVAILABLE")
+}
+
 // loadApprovedBinary fetches the steward binary blob, recomputes its SHA-256 from
-// the stored content, enforces the approval label and extracts publisher
+// the stored content, requires an approval record for that SHA-256 and extracts publisher
 // provenance. On failure it writes the error response and returns false.
 func (s *Server) loadApprovedBinary(w http.ResponseWriter, r *http.Request, blobTenantID, version, platform, arch string, msgs approvedBinaryMessages) (approvedBinary, bool) {
 	var bin approvedBinary
@@ -126,8 +135,15 @@ func (s *Server) loadApprovedBinary(w http.ResponseWriter, r *http.Request, blob
 	blobSum := sha256.Sum256(blobContent)
 	bin.sha256 = hex.EncodeToString(blobSum[:])
 
-	// Approval gate: approved_by label must be present.
-	if blobMeta.Labels["approved_by"] == "" {
+	// Approval gate: an approval record must exist for the SHA-256 just recomputed
+	// from the stored bytes, so a binary re-published with different bytes is no
+	// longer approved. Any read failure, or no approval store, refuses (Issue #6053).
+	approved, err := s.stewardBinaryApproved(r.Context(), blobTenantID, version, platform, arch, bin.sha256)
+	if err != nil {
+		s.writeApprovalUnavailable(w, err)
+		return bin, false
+	}
+	if !approved {
 		s.writeErrorResponse(w, http.StatusForbidden, msgs.notApproved, "NOT_APPROVED")
 		return bin, false
 	}

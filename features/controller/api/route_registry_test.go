@@ -331,6 +331,7 @@ var goldenRouteTable = []string{
 	"POST /api/v1/fleet/resolve",
 	"POST /api/v1/hyperv/profiles",
 	"POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}",
+	"POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}/approve",
 	"POST /api/v1/jobs",
 	"POST /api/v1/modules/approvals/{address}/approve",
 	"POST /api/v1/modules/approvals/{address}/reject",

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -1503,4 +1505,189 @@ func TestHaltOrphanedRollouts_StoreErrors(t *testing.T) {
 		require.NoError(t, getErr)
 		assert.Equal(t, business.RolloutStatusInProgress, bad.Status)
 	})
+}
+
+// ---- Rollout start approval check (Issue #6053) ----
+
+const rolloutApprovalVersion = "v1.2.3"
+
+// rolloutApprovalSteward is a steward in the pre-release ring that reports the
+// platform and arch of the binary it runs.
+func rolloutApprovalSteward(id, tenantID, platform, arch string) fleet.StewardData {
+	return fleet.StewardData{
+		ID: id, TenantID: tenantID, Status: "online",
+		DNAAttributes: map[string]string{
+			"deployment_ring": "pre-release", "runtime_os": platform, "runtime_arch": arch,
+		},
+	}
+}
+
+// setupRolloutApprovalServer is setupRolloutServer plus a real blob store and a
+// durable approval store.
+func setupRolloutApprovalServer(t *testing.T, tenantID string, stewards []fleet.StewardData) (*Server, *testRolloutStore) {
+	t.Helper()
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, stewards)
+	server.blobStore = newFSBlobStore(t)
+	wireTestStewardBinaryApprovalStore(t, server)
+	return server, rolloutStore
+}
+
+// rolloutRecords counts the rollout records a test store holds.
+type rolloutRecords struct{ store *testRolloutStore }
+
+func (f rolloutRecords) count() int {
+	f.store.mu.RLock()
+	defer f.store.mu.RUnlock()
+	return len(f.store.records)
+}
+
+// putRolloutBinary stores a steward binary and, when approved, records an approval
+// for the SHA-256 of its bytes.
+func putRolloutBinary(t *testing.T, server *Server, blobTenant, platform, arch string, approved bool) {
+	t.Helper()
+	if approved {
+		publishApprovedBinary(t, server, blobTenant, rolloutApprovalVersion, platform, arch)
+		return
+	}
+	publishUnapprovedBinary(t, server, blobTenant, rolloutApprovalVersion, platform, arch)
+}
+
+func TestRolloutStartRefusesUnapprovedTargetVersion(t *testing.T) {
+	const tenantID = "tenant-a"
+	stewards := []fleet.StewardData{rolloutApprovalSteward("steward-1", tenantID, "linux", "amd64")}
+	server, rolloutStore := setupRolloutApprovalServer(t, tenantID, stewards)
+	putRolloutBinary(t, server, tenantID, "linux", "amd64", false)
+
+	rec := doStartRollout(server, tenantID, rolloutApprovalVersion)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "NOT_APPROVED")
+	assert.Contains(t, rec.Body.String(), "linux/amd64")
+	assert.Zero(t, rolloutRecords{rolloutStore}.count(), "no rollout record is created")
+
+	// A version with no published binary at all is not approved either.
+	rec = doStartRollout(server, tenantID, "v9.9.9")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Zero(t, rolloutRecords{rolloutStore}.count())
+
+	// After approval the same start goes through.
+	sha, err := server.storedStewardBinarySHA256(context.Background(), stewardBinaryBlobKey(tenantID, rolloutApprovalVersion, "linux", "amd64"))
+	require.NoError(t, err)
+	_, err = server.approveStewardBinary(context.Background(), tenantID, rolloutApprovalVersion, "linux", "amd64", sha, "approver@example.com")
+	require.NoError(t, err)
+	rec = doStartRollout(server, tenantID, rolloutApprovalVersion)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	assert.Equal(t, 1, rolloutRecords{rolloutStore}.count())
+	waitForRolloutStatus(t, rolloutStore, parseStartRolloutID(t, rec), 2*time.Second)
+}
+
+// TestRolloutStartChecksEveryPlatformAndArch: one approved platform does not cover
+// a steward on another; each distinct (platform, arch) of the matched stewards needs
+// an approved binary, and a steward's own tenant is tried before "default".
+func TestRolloutStartChecksEveryPlatformAndArch(t *testing.T) {
+	const tenantID = "tenant-a"
+	stewards := []fleet.StewardData{
+		rolloutApprovalSteward("steward-1", tenantID, "linux", "amd64"),
+		rolloutApprovalSteward("steward-2", tenantID, "linux", "amd64"),
+		rolloutApprovalSteward("steward-3", tenantID, "windows", "amd64"),
+	}
+	server, rolloutStore := setupRolloutApprovalServer(t, tenantID, stewards)
+	putRolloutBinary(t, server, tenantID, "linux", "amd64", true)
+
+	rec := doStartRollout(server, tenantID, rolloutApprovalVersion)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "windows/amd64")
+	assert.NotContains(t, rec.Body.String(), "linux/amd64", "the approved pair is not named")
+	assert.Zero(t, rolloutRecords{rolloutStore}.count())
+
+	// The fleet-wide "default" binary covers a steward whose own tenant has none, and an
+	// unapproved override in the steward's own tenant falls through to it, as the
+	// steward's self-fetch does on a 404.
+	putRolloutBinary(t, server, tenantID, "windows", "amd64", false)
+	rec = doStartRollout(server, tenantID, rolloutApprovalVersion)
+	require.Equal(t, http.StatusForbidden, rec.Code, "an unapproved binary in the steward's tenant is not approval")
+	putRolloutBinary(t, server, "default", "windows", "amd64", true)
+	rec = doStartRollout(server, tenantID, rolloutApprovalVersion)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	waitForRolloutStatus(t, rolloutStore, parseStartRolloutID(t, rec), 2*time.Second)
+}
+
+func TestRolloutStartRefusedWhenOwnAndDefaultBinariesUnapproved(t *testing.T) {
+	const tenantID = "tenant-a"
+	stewards := []fleet.StewardData{rolloutApprovalSteward("steward-1", tenantID, "linux", "amd64")}
+	server, rolloutStore := setupRolloutApprovalServer(t, tenantID, stewards)
+	putRolloutBinary(t, server, "default", "linux", "amd64", false)
+	putRolloutBinary(t, server, tenantID, "linux", "amd64", false)
+
+	rec := doStartRollout(server, tenantID, rolloutApprovalVersion)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Zero(t, rolloutRecords{rolloutStore}.count())
+}
+
+func TestRolloutStartNoStewardsNoCheck(t *testing.T) {
+	const tenantID = "tenant-a"
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	// No blob store and no approval store: with nothing to reach there is nothing to check.
+	require.Nil(t, server.blobStore)
+	require.Nil(t, server.StewardBinaryApprovalStore())
+
+	rec := doStartRollout(server, tenantID, rolloutApprovalVersion)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	waitForRolloutStatus(t, rolloutStore, parseStartRolloutID(t, rec), 2*time.Second)
+
+	// Stewards that have not reported a platform cannot be matched to a binary either.
+	unreported := []fleet.StewardData{{ID: "steward-x", TenantID: tenantID, Status: "online", DNAAttributes: map[string]string{"deployment_ring": "pre-release"}}}
+	server, rolloutStore = setupRolloutApprovalServer(t, tenantID, unreported)
+	rec = doStartRollout(server, tenantID, rolloutApprovalVersion)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	waitForRolloutStatus(t, rolloutStore, parseStartRolloutID(t, rec), 2*time.Second)
+}
+
+func TestRolloutStartFailsClosedWhenFleetQueryUnavailable(t *testing.T) {
+	const tenantID = "tenant-a"
+	stewards := []fleet.StewardData{rolloutApprovalSteward("steward-1", tenantID, "linux", "amd64")}
+	server, rolloutStore := setupRolloutApprovalServer(t, tenantID, stewards)
+	putRolloutBinary(t, server, tenantID, "linux", "amd64", true)
+
+	server.fleetQuery = nil
+	rec := doStartRollout(server, tenantID, rolloutApprovalVersion)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "FLEET_QUERY_UNAVAILABLE")
+
+	server.fleetQuery = &failingFleetQuery{}
+	rec = doStartRollout(server, tenantID, rolloutApprovalVersion)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "forced fleet query failure", "the backend error is not disclosed")
+	assert.Zero(t, rolloutRecords{rolloutStore}.count(), "nothing is created")
+}
+
+// readFailingConfigStore is a real flatfile config store whose reads fail.
+type readFailingConfigStore struct{ cfgconfig.ConfigStore }
+
+func (readFailingConfigStore) GetConfig(context.Context, *cfgconfig.ConfigKey) (*cfgconfig.ConfigEntry, error) {
+	return nil, errors.New("config backend down")
+}
+
+func TestRolloutStartFailsClosedOnApprovalReadError(t *testing.T) {
+	const tenantID = "tenant-a"
+	stewards := []fleet.StewardData{rolloutApprovalSteward("steward-1", tenantID, "linux", "amd64")}
+	server, rolloutStore := setupRolloutApprovalServer(t, tenantID, stewards)
+	putRolloutBinary(t, server, tenantID, "linux", "amd64", true)
+
+	_, cs := newTestStewardBinaryApprovalStore(t)
+	broken, err := NewStewardBinaryApprovalStore(readFailingConfigStore{cs})
+	require.NoError(t, err)
+	server.SetStewardBinaryApprovalStore(broken)
+
+	rec := doStartRollout(server, tenantID, rolloutApprovalVersion)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "APPROVAL_UNAVAILABLE")
+	assert.NotContains(t, rec.Body.String(), "config backend down")
+	assert.Zero(t, rolloutRecords{rolloutStore}.count())
+
+	// No approval store at all fails closed the same way.
+	server.SetStewardBinaryApprovalStore(nil)
+	rec = doStartRollout(server, tenantID, rolloutApprovalVersion)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "APPROVAL_UNAVAILABLE")
+	assert.Zero(t, rolloutRecords{rolloutStore}.count())
 }

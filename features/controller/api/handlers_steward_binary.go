@@ -4,21 +4,29 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
+	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // stewardBinaryVersionRe validates semantic version strings like v0.5.12 or v0.5.12-rc1.
@@ -120,6 +128,30 @@ func (s *Server) validateStewardBinaryCoordinates(w http.ResponseWriter, version
 	return true
 }
 
+// publishSignatureParam returns the publisher signature from the query string or a
+// multipart "signature" field, writing the 400 response when there is none.
+func (s *Server) publishSignatureParam(w http.ResponseWriter, r *http.Request) (string, bool) {
+	sigBase64 := r.URL.Query().Get("signature")
+	if sigBase64 == "" {
+		// Also check multipart form field (used when binary is uploaded as multipart).
+		// Keep a handler-local bound in addition to the global request-body middleware:
+		// ParseMultipartForm may otherwise allocate before the later binary read.
+		r.Body = http.MaxBytesReader(w, r.Body, maxBinaryRequestBodyBytes)
+		// #nosec G120 -- both the global middleware and the immediately preceding
+		// MaxBytesReader cap the request at 64 MiB; in-memory form parts cap at 32 MiB.
+		if parseErr := r.ParseMultipartForm(32 << 20); parseErr == nil {
+			sigBase64 = r.FormValue("signature")
+		}
+	}
+	if sigBase64 == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Signature required; provide ?signature=<base64> or a multipart 'signature' field",
+			"SIGNATURE_REQUIRED")
+		return "", false
+	}
+	return sigBase64, true
+}
+
 // handlePublishStewardBinary handles POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}.
 // Verifies the Ed25519 publisher signature against CFGMSPublisherIdentity before storing the blob.
 // Returns 400 if signature is absent or invalid, 409 if the binary already exists (use ?force=true to overwrite).
@@ -160,22 +192,8 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Require a publisher signature — unsigned uploads are rejected.
-	sigBase64 := r.URL.Query().Get("signature")
-	if sigBase64 == "" {
-		// Also check multipart form field (used when binary is uploaded as multipart).
-		// Keep a handler-local bound in addition to the global request-body middleware:
-		// ParseMultipartForm may otherwise allocate before the later binary read.
-		r.Body = http.MaxBytesReader(w, r.Body, maxBinaryRequestBodyBytes)
-		// #nosec G120 -- both the global middleware and the immediately preceding
-		// MaxBytesReader cap the request at 64 MiB; in-memory form parts cap at 32 MiB.
-		if parseErr := r.ParseMultipartForm(32 << 20); parseErr == nil {
-			sigBase64 = r.FormValue("signature")
-		}
-	}
-	if sigBase64 == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Signature required; provide ?signature=<base64> or a multipart 'signature' field",
-			"SIGNATURE_REQUIRED")
+	sigBase64, sigOK := s.publishSignatureParam(w, r)
+	if !sigOK {
 		return
 	}
 
@@ -237,12 +255,6 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 		"signature":        base64.RawURLEncoding.EncodeToString(sigBytes),
 		"publisher_tenant": tenantID,
 	}
-	// Issue #1948: auto-approve when test mode is active (CFGMS_SEED_TEST_API_KEYS=1 +
-	// CFGMS_TEST_STEWARD_PUBLISHER_KEY set). Production binaries require a separate
-	// approval step; this path is never reachable in production.
-	if s.testAutoApproveStewardBinaries {
-		labels["approved_by"] = "auto-approved-test"
-	}
 	meta := blob.BlobMeta{
 		ContentType: "application/octet-stream",
 		Labels:      labels,
@@ -276,6 +288,10 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 	}
 	s.publicDownloadCache.invalidate(stewardBinaryDownloadCacheKey(tenantID, version, platform, arch))
 
+	if !s.autoApproveTestPublish(w, r, tenantID, version, platform, arch, contentHash) {
+		return
+	}
+
 	// Retrieve stored metadata — provider populates Checksum and Size during PutBlob.
 	rc, storedMeta, err := s.blobStore.GetBlob(r.Context(), key)
 	if err != nil {
@@ -298,6 +314,201 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 		PublishedBy:     publishedBy,
 		Publisher:       "cfgms",
 		SignatureDigest: sigDigest,
+	})
+}
+
+// autoApproveTestPublish records the approval of a just-published binary when test
+// mode is active (Issue #1948: CFGMS_SEED_TEST_API_KEYS=1 +
+// CFGMS_TEST_STEWARD_PUBLISHER_KEY set). Production binaries require a separate
+// approval step; this path is never reachable in production. The approval is a
+// record bound to the SHA-256 of the bytes just stored (Issue #6053). It writes the
+// 500 response and returns false when the record cannot be written.
+func (s *Server) autoApproveTestPublish(w http.ResponseWriter, r *http.Request, tenantID, version, platform, arch, contentHash string) bool {
+	if !s.testAutoApproveStewardBinaries {
+		return true
+	}
+	_, err := s.approveStewardBinary(r.Context(), tenantID, version, platform, arch, contentHash, stewardBinaryTestApprover)
+	if err == nil {
+		return true
+	}
+	s.logger.Error("Failed to record test auto-approval of steward binary",
+		"error", logging.SanitizeLogValue(err.Error()),
+		"version", logging.SanitizeLogValue(version),
+		"platform", logging.SanitizeLogValue(platform),
+		"arch", logging.SanitizeLogValue(arch))
+	s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to record approval", "APPROVAL_ERROR")
+	return false
+}
+
+// stewardBinaryApproveRequest is the body of the approve route: the SHA-256 of the
+// bytes the approver reviewed.
+type stewardBinaryApproveRequest struct {
+	SHA256 string `json:"sha256"`
+}
+
+// stewardBinaryApproveResponse is the JSON body returned by the approve route.
+// ApprovedBy and ApprovedAt are those of the first approval of these bytes.
+type stewardBinaryApproveResponse struct {
+	Version    string    `json:"version"`
+	Platform   string    `json:"platform"`
+	Arch       string    `json:"arch"`
+	SHA256     string    `json:"sha256"`
+	ApprovedBy string    `json:"approved_by"`
+	ApprovedAt time.Time `json:"approved_at"`
+	Created    bool      `json:"created"`
+}
+
+// errStewardBinaryApprovalRead marks a failed approval read on the self-fetch path.
+var errStewardBinaryApprovalRead = errors.New("steward binary approval read failed")
+
+// stewardBinaryApproveMaxBody bounds the approve request body.
+const stewardBinaryApproveMaxBody = 4 << 10
+
+// auditActionStewardBinaryApprove is the audit action of the approve route.
+const auditActionStewardBinaryApprove = "steward_binary.approve"
+
+// sha256HexRe matches a lowercase hex SHA-256.
+var sha256HexRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// decodeStewardBinaryApproveRequest reads exactly one JSON object with a hex
+// SHA-256 and no unknown fields, writing the 400 response when it is rejected.
+func (s *Server) decodeStewardBinaryApproveRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
+	var req stewardBinaryApproveRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, stewardBinaryApproveMaxBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", "INVALID_REQUEST")
+		return "", false
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", "INVALID_REQUEST")
+		return "", false
+	}
+	sum := strings.ToLower(strings.TrimSpace(req.SHA256))
+	if !sha256HexRe.MatchString(sum) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "sha256 must be a 64-character hex SHA-256", "INVALID_REQUEST")
+		return "", false
+	}
+	return sum, true
+}
+
+// recordStewardBinaryApprovalAudit records the approval event naming the
+// principal, version, platform, arch and blob SHA-256. It returns the error: the
+// caller must not record the approval without the event.
+func (s *Server) recordStewardBinaryApprovalAudit(r *http.Request, principal *Principal, blobTenant, version, platform, arch, sum string) error {
+	if s.auditManager == nil {
+		return errors.New("audit manager not configured")
+	}
+	b := audit.NewEventBuilder().
+		Tenant(blobTenant).
+		Type(business.AuditEventConfiguration).
+		Action(auditActionStewardBinaryApprove).
+		User(principal.ID, principalAuditUserType(principal)).
+		Resource("steward_binary", version+"-"+platform+"-"+arch, "").
+		Result(business.AuditResultSuccess).
+		Severity(business.AuditSeverityHigh).
+		Detail("principal", logging.SanitizeLogValue(principal.ID)).
+		Detail("version", logging.SanitizeLogValue(version)).
+		Detail("platform", logging.SanitizeLogValue(platform)).
+		Detail("arch", logging.SanitizeLogValue(arch)).
+		Detail("sha256", sum)
+	auditCtx, cancel := detachedAuditContext(r.Context())
+	defer cancel()
+	return s.auditManager.RecordEvent(auditCtx, b)
+}
+
+// storedStewardBinarySHA256 returns the hex SHA-256 recomputed from the stored
+// bytes of the blob at key; BlobMeta.Checksum is not trusted. A missing blob is
+// reported as an error wrapping blob.ErrBlobNotFound.
+func (s *Server) storedStewardBinarySHA256(ctx context.Context, key blob.BlobKey) (string, error) {
+	rc, _, err := s.blobStore.GetBlob(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = rc.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, rc); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// approveStewardBinaryCaller checks the approve route has its stores and returns the
+// authenticated principal and the blob tenant of the caller's scope, writing the
+// refusal when it cannot.
+func (s *Server) approveStewardBinaryCaller(w http.ResponseWriter, r *http.Request) (*Principal, string, bool) {
+	if s.blobStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Binary storage not available", "SERVICE_UNAVAILABLE")
+		return nil, "", false
+	}
+	if s.StewardBinaryApprovalStore() == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Steward binary approval not available", "APPROVAL_UNAVAILABLE")
+		return nil, "", false
+	}
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	if principal == nil || principal.ID == "" {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+		return nil, "", false
+	}
+	tenantID, tenantOK := s.installerBlobTenantForCallerScope(r)
+	if !tenantOK {
+		s.writeErrorResponse(w, http.StatusForbidden, "Tenant scope required", "FORBIDDEN")
+		return nil, "", false
+	}
+	return principal, tenantID, true
+}
+
+// handleApproveStewardBinary handles
+// POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}/approve.
+//
+// The approval is a durable record bound to the SHA-256 of the stored bytes. The
+// body carries the hash the approver reviewed; the controller recomputes the hash
+// of the stored blob and refuses a mismatch, so an approval can never cover bytes
+// the approver did not see. Approving the same bytes again keeps the first record.
+func (s *Server) handleApproveStewardBinary(w http.ResponseWriter, r *http.Request) {
+	principal, tenantID, ok := s.approveStewardBinaryCaller(w, r)
+	if !ok {
+		return
+	}
+	vars := mux.Vars(r)
+	version, platform, arch := vars["version"], vars["platform"], vars["arch"]
+	if !s.validateStewardBinaryCoordinates(w, version, platform, arch) {
+		return
+	}
+	want, ok := s.decodeStewardBinaryApproveRequest(w, r)
+	if !ok {
+		return
+	}
+
+	got, err := s.storedStewardBinarySHA256(r.Context(), stewardBinaryBlobKey(tenantID, version, platform, arch))
+	if err != nil {
+		if errors.Is(err, blob.ErrBlobNotFound) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward binary not found", "BINARY_NOT_FOUND")
+			return
+		}
+		s.logger.Error("Failed to read steward binary for approval", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read binary", "GET_ERROR")
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+		s.writeErrorResponse(w, http.StatusConflict, "sha256 does not match the stored binary", "HASH_MISMATCH")
+		return
+	}
+
+	if err := s.recordStewardBinaryApprovalAudit(r, principal, tenantID, version, platform, arch, got); err != nil {
+		s.logger.Error("Steward binary approval refused: audit event not recorded", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Audit trail unavailable; nothing was changed", "AUDIT_UNAVAILABLE")
+		return
+	}
+	rec, created, err := s.putStewardBinaryApproval(r.Context(), tenantID, version, platform, arch, got, principal.ID)
+	if err != nil {
+		s.logger.Error("Failed to record steward binary approval", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to record approval", "APPROVAL_ERROR")
+		return
+	}
+	s.writeSuccessResponse(w, stewardBinaryApproveResponse{
+		Version: version, Platform: platform, Arch: arch, SHA256: rec.SHA256,
+		ApprovedBy: rec.ApprovedBy, ApprovedAt: rec.ApprovedAt, Created: created,
 	})
 }
 
@@ -444,6 +655,8 @@ func (s *Server) handleGetStewardBinaryPublic(w http.ResponseWriter, r *http.Req
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward binary not found", "BINARY_NOT_FOUND")
 		case errors.Is(err, errPublicDownloadTooLarge):
 			s.writeErrorResponse(w, http.StatusRequestEntityTooLarge, "Steward binary too large", "BINARY_TOO_LARGE")
+		case errors.Is(err, errStewardBinaryApprovalUnavailable), errors.Is(err, errStewardBinaryApprovalRead):
+			s.writeApprovalUnavailable(w, err)
 		default:
 			s.logger.Error("Failed to get steward binary (public)",
 				"error", logging.SanitizeLogValue(err.Error()),
@@ -482,6 +695,35 @@ func (s *Server) buildPublicStewardBinary(
 		return nil, errPublicDownloadTooLarge
 	}
 
+	// Serve only bytes an approval record covers: the SHA-256 is recomputed from
+	// what was read, not taken from BlobMeta. An unapproved binary is reported as
+	// absent so nothing is cached for it (Issue #6053).
+	if err := s.requireApprovedPublicBinary(r.Context(), tenantID, version, platform, arch, body); err != nil {
+		return nil, err
+	}
+	return newPublicStewardBinaryAsset(body, &meta), nil
+}
+
+// requireApprovedPublicBinary returns nil only when an approval record covers the
+// SHA-256 of body. An unapproved binary is blob.ErrBlobNotFound; a failed or
+// unavailable approval read is an error the handler answers with 503.
+func (s *Server) requireApprovedPublicBinary(ctx context.Context, tenantID, version, platform, arch string, body []byte) error {
+	sum := sha256.Sum256(body)
+	approved, err := s.stewardBinaryApproved(ctx, tenantID, version, platform, arch, hex.EncodeToString(sum[:]))
+	if err != nil {
+		if errors.Is(err, errStewardBinaryApprovalUnavailable) {
+			return err
+		}
+		return fmt.Errorf("%w: %v", errStewardBinaryApprovalRead, err)
+	}
+	if !approved {
+		return blob.ErrBlobNotFound
+	}
+	return nil
+}
+
+// newPublicStewardBinaryAsset builds the anonymous download asset for body.
+func newPublicStewardBinaryAsset(body []byte, meta *blob.BlobMeta) *publicDownloadAsset {
 	contentType := meta.ContentType
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -504,5 +746,5 @@ func (s *Server) buildPublicStewardBinary(
 	if pub := meta.Labels["publisher"]; pub != "" {
 		asset.headers["X-CFGMS-Publisher"] = pub
 	}
-	return asset, nil
+	return asset
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -194,9 +195,10 @@ func upgradeWiringRecord(id string) *business.UpgradeRecord {
 	}
 }
 
-// putRollbackTarget stores an approved steward binary where the controller reads
-// rollback targets: its installer blob store, in the caller's tenant namespace.
-func putRollbackTarget(t *testing.T, cfg *config.Config, version string) {
+// putRollbackTarget stores a steward binary where the controller reads rollback
+// targets (its installer blob store, in the caller's tenant namespace) and records
+// an approval for its SHA-256 in the controller's config store.
+func putRollbackTarget(t *testing.T, srv *Server, cfg *config.Config, version string) {
 	t.Helper()
 	root := filepath.Join(filepath.Dir(cfg.Storage.FlatfileRoot), "installers")
 	store, err := blob.CreateBlobStoreFromConfig("filesystem", map[string]interface{}{"root": root})
@@ -222,9 +224,15 @@ func putRollbackTarget(t *testing.T, cfg *config.Config, version string) {
 			"signature":        base64.RawURLEncoding.EncodeToString(sig),
 			"signature_digest": hex.EncodeToString(sigDigest[:]),
 			"sha256":           hex.EncodeToString(sum[:]),
-			"approved_by":      "approver@example.com",
 		},
 	}))
+	approvals, err := api.NewStewardBinaryApprovalStore(srv.storageManager.GetConfigStore())
+	require.NoError(t, err)
+	_, _, err = approvals.Put(context.Background(), api.StewardBinaryApproval{
+		TenantID: upgradeWiringTenant, Version: version, Platform: "linux", Arch: "amd64",
+		SHA256: hex.EncodeToString(sum[:]), ApprovedBy: "approver@example.com",
+	})
+	require.NoError(t, err)
 }
 
 // requireCrossNodeRollback is the shared body of the two-node tests. nodeA and
@@ -276,7 +284,7 @@ func upgradeNode(t *testing.T, sm *interfaces.StorageManager) (*Server, business
 	t.Helper()
 	cfg := servernewCharConfig(t)
 	srv := upgradeWiringServer(t, cfg)
-	putRollbackTarget(t, cfg, "v1.0.0")
+	putRollbackTarget(t, srv, cfg, "v1.0.0")
 	wireUpgradeStore(srv.httpServer, sm, srv.cfg, logging.NewNoopLogger())
 	store := sm.GetUpgradeStore()
 	require.NotNil(t, store)

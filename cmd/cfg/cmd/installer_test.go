@@ -735,3 +735,150 @@ func TestPublishCLI_DuplicateReturns409(t *testing.T) {
 	assert.True(t, strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "DUPLICATE") || strings.Contains(err.Error(), "Conflict"),
 		"expected 409/conflict in error: %v", err)
 }
+
+// resetApproveFlags restores the package-level flag vars the approve subcommand uses.
+func resetApproveFlags(t *testing.T) {
+	t.Helper()
+	origNoBundle := noBundle
+	t.Cleanup(func() {
+		approveKind = ""
+		approveVersion = ""
+		approveBinary = ""
+		approveSHA256 = ""
+		installerPlatform = ""
+		installerArch = ""
+		installerAPIURL = ""
+		noBundle = origNoBundle
+	})
+}
+
+// TestApproveCLI_SendsSHA256OfFile: --binary sends the SHA-256 of the file to the
+// approve route and prints the approval.
+func TestApproveCLI_SendsSHA256OfFile(t *testing.T) {
+	resetApproveFlags(t)
+	content := []byte("cfgms-steward-approve-binary")
+	binaryPath := filepath.Join(t.TempDir(), "cfgms-steward")
+	require.NoError(t, os.WriteFile(binaryPath, content, 0600))
+	sum := sha256.Sum256(content)
+	want := hex.EncodeToString(sum[:])
+
+	var gotMethod, gotPath string
+	var gotBody map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
+			"version": "v1.2.3", "platform": "linux", "arch": "amd64", "sha256": want,
+			"approved_by": "alice", "approved_at": "2026-11-11T10:00:00Z", "created": true,
+		}})
+	}))
+	defer server.Close()
+
+	approveKind, approveVersion = "steward", "v1.2.3"
+	installerPlatform, installerArch = "linux", "amd64"
+	approveBinary = binaryPath
+	installerAPIURL = server.URL
+
+	output := captureStdout(t, func() {
+		require.NoError(t, runInstallerApprove(installerApproveCmd, nil))
+	})
+	assert.Equal(t, http.MethodPost, gotMethod)
+	assert.Equal(t, "/api/v1/installer/steward-binaries/v1.2.3/linux/amd64/approve", gotPath)
+	assert.Equal(t, map[string]string{"sha256": want}, gotBody)
+	assert.Contains(t, output, "Approved steward binary v1.2.3 linux/amd64")
+	assert.Contains(t, output, want)
+	assert.Contains(t, output, "alice")
+}
+
+// TestApproveCLI_SHA256FlagAndAlreadyApproved: --sha256 is sent as given (lowercased,
+// "sha256:" prefix dropped) and an idempotent repeat is reported as already approved.
+func TestApproveCLI_SHA256FlagAndAlreadyApproved(t *testing.T) {
+	resetApproveFlags(t)
+	want := strings.Repeat("ab", 32)
+	var gotBody map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
+			"version": "v1.0.0", "platform": "windows", "arch": "arm64", "sha256": want,
+			"approved_by": "first-approver", "approved_at": "2026-01-01T00:00:00Z", "created": false,
+		}})
+	}))
+	defer server.Close()
+
+	approveKind, approveVersion = "steward", "v1.0.0"
+	installerPlatform, installerArch = "windows", "arm64"
+	approveSHA256 = "sha256:" + strings.ToUpper(want)
+	installerAPIURL = server.URL
+
+	output := captureStdout(t, func() {
+		require.NoError(t, runInstallerApprove(installerApproveCmd, nil))
+	})
+	assert.Equal(t, want, gotBody["sha256"])
+	assert.Contains(t, output, "Already approved")
+	assert.Contains(t, output, "first-approver")
+}
+
+func TestApproveCLI_ValidatesFlags(t *testing.T) {
+	good := strings.Repeat("0", 64)
+	missing := filepath.Join(t.TempDir(), "nope")
+	empty := filepath.Join(t.TempDir(), "empty")
+	require.NoError(t, os.WriteFile(empty, nil, 0600))
+	for name, tc := range map[string]struct {
+		kind, platform, arch, binary, sha, wantErr string
+	}{
+		"kind":          {"outpost", "linux", "amd64", "", good, "--kind"},
+		"platform":      {"steward", "plan9", "amd64", "", good, "unknown platform"},
+		"arch":          {"steward", "linux", "mips", "", good, "unknown arch"},
+		"neither":       {"steward", "linux", "amd64", "", "", "one of --binary or --sha256"},
+		"both":          {"steward", "linux", "amd64", empty, good, "not both"},
+		"short sha":     {"steward", "linux", "amd64", "", "abcd", "64-character"},
+		"non hex sha":   {"steward", "linux", "amd64", "", strings.Repeat("z", 64), "64-character"},
+		"missing file":  {"steward", "linux", "amd64", missing, "", "binary file not found"},
+		"empty file":    {"steward", "linux", "amd64", empty, "", "empty"},
+		"directory arg": {"steward", "linux", "amd64", t.TempDir(), "", "cannot read binary file"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetApproveFlags(t)
+			approveKind, approveVersion = tc.kind, "v1.0.0"
+			installerPlatform, installerArch = tc.platform, tc.arch
+			approveBinary, approveSHA256 = tc.binary, tc.sha
+			err := runInstallerApprove(installerApproveCmd, nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+// TestApproveCLI_ServerRefusalIsAnError: a hash mismatch (409) or a missing blob (404)
+// is returned to the caller, never swallowed.
+func TestApproveCLI_ServerRefusalIsAnError(t *testing.T) {
+	for _, status := range []int{http.StatusConflict, http.StatusNotFound, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			resetApproveFlags(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]string{"code": "HASH_MISMATCH", "message": "sha256 does not match the stored binary"},
+				})
+			}))
+			defer server.Close()
+			approveKind, approveVersion = "steward", "v1.0.0"
+			installerPlatform, installerArch = "linux", "amd64"
+			approveSHA256 = strings.Repeat("1", 64)
+			installerAPIURL = server.URL
+			assert.Error(t, runInstallerApprove(installerApproveCmd, nil))
+		})
+	}
+}
+
+func TestApproveCLI_RegisteredUnderInstaller(t *testing.T) {
+	cmd, _, err := installerCmd.Find([]string{"approve"})
+	require.NoError(t, err)
+	assert.Same(t, installerApproveCmd, cmd)
+	for _, flag := range []string{"kind", "version", "platform", "arch", "binary", "sha256"} {
+		assert.NotNil(t, installerApproveCmd.Flags().Lookup(flag), "--%s", flag)
+	}
+}
