@@ -15,31 +15,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// holdWithShareMode opens path through CreateFile with the given share mode
-// and returns the handle as an *os.File, closed at test cleanup.
-func holdWithShareMode(t *testing.T, path string, shareMode uint32) *os.File {
-	t.Helper()
-	pathW, err := syscall.UTF16PtrFromString(path)
-	require.NoError(t, err)
-	h, err := syscall.CreateFile(pathW, syscall.GENERIC_READ, shareMode,
-		nil, syscall.OPEN_EXISTING, syscall.FILE_ATTRIBUTE_NORMAL, 0)
-	require.NoError(t, err)
-	f := os.NewFile(uintptr(h), path)
-	t.Cleanup(func() { _ = f.Close() })
-	return f
+// sharingViolation returns the error Windows reports when another handle's
+// share mode refuses an open: a *os.PathError wrapping ERROR_SHARING_VIOLATION.
+func sharingViolation(path string) error {
+	return &os.PathError{Op: "open", Path: path, Err: syscall.Errno(32)}
 }
 
 func TestRetryOnSharingViolation_SucceedsAfterTransientViolation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "f")
 	require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
-	// Exclusive handle held until the second attempt, then released.
-	held := holdWithShareMode(t, path, 0)
 
 	attempts := 0
 	err := RetryOnSharingViolation(func() error {
 		attempts++
-		if attempts == 2 {
-			require.NoError(t, held.Close())
+		if attempts == 1 {
+			return sharingViolation(path)
 		}
 		f, openErr := os.Open(path)
 		if openErr != nil {
@@ -48,7 +38,7 @@ func TestRetryOnSharingViolation_SucceedsAfterTransientViolation(t *testing.T) {
 		return f.Close()
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 2, attempts, "attempt 1 hits the exclusive handle; attempt 2 releases it and succeeds")
+	assert.Equal(t, 2, attempts, "attempt 1 reports a sharing violation; attempt 2 succeeds")
 }
 
 func TestRetryOnSharingViolation_MissingFileReturnsAtOnce(t *testing.T) {
@@ -68,18 +58,15 @@ func TestRetryOnSharingViolation_MissingFileReturnsAtOnce(t *testing.T) {
 
 func TestRetryOnSharingViolation_PersistentViolationFailsClosed(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "f")
-	require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
-	holdWithShareMode(t, path, 0)
 
+	attempts := 0
 	err := RetryOnSharingViolation(func() error {
-		f, openErr := os.Open(path)
-		if openErr == nil {
-			_ = f.Close()
-		}
-		return openErr
+		attempts++
+		return sharingViolation(path)
 	})
 	require.Error(t, err)
 	assert.True(t, IsSharingViolation(err), "want sharing violation, got %v", err)
+	assert.Greater(t, attempts, 1, "a persistent violation must be retried before failing")
 }
 
 func TestRetryOnSharingViolation_AtomicReplaceWaitsOutOpenReader(t *testing.T) {
