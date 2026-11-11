@@ -1693,6 +1693,13 @@ Full cluster topology.
 **Authentication:** Required  
 **Required permission:** `ha:read-cluster`
 
+**Node schema fields:** each node object carries the database schema range the node reports through the shared node registry, so the mixed-version state of a rolling deploy can be read from one response:
+
+- `schema_required`: the database schema version the node requires.
+- `schema_min_tolerated`: the oldest database schema version the node tolerates.
+
+Both are integers and always present. `0` means the registry provider does not track a schema range, or the node predates these fields; treat `0` as unknown, not as "no requirement".
+
 #### GET /api/v1/ha/leader
 
 Current leader identity.

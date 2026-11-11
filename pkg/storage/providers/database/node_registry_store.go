@@ -41,7 +41,10 @@ func NewDatabaseNodeRegistryStore(db *sql.DB, config map[string]interface{}) (*D
 	return store, nil
 }
 
-// RegisterNode implements business.NodeRegistryStore.RegisterNode. The
+// RegisterNode implements business.NodeRegistryStore.RegisterNode. The schema
+// range is written from this package's constants (SchemaVersion,
+// MinToleratedSchemaVersion), never from self: the provider is the source of
+// truth for what this build requires. The
 // liveness timestamp is derived server-side (now()), never from a caller
 // clock, for the same reason RoutingStore.RecordConnection derives it
 // server-side: a caller's clock offset must never enter a decision another
@@ -57,15 +60,18 @@ func (s *DatabaseNodeRegistryStore) RegisterNode(ctx context.Context, self busin
 	}
 
 	const query = `
-		INSERT INTO cfgms_node_registry (node_id, address, version, started_at, updated_at)
-		VALUES ($1, $2, $3, $4, now())
+		INSERT INTO cfgms_node_registry (node_id, address, version, started_at, schema_required, schema_min_tolerated, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, now())
 		ON CONFLICT (node_id) DO UPDATE SET
-			address    = EXCLUDED.address,
-			version    = EXCLUDED.version,
-			started_at = EXCLUDED.started_at,
-			updated_at = now()
+			address              = EXCLUDED.address,
+			version              = EXCLUDED.version,
+			started_at           = EXCLUDED.started_at,
+			schema_required      = EXCLUDED.schema_required,
+			schema_min_tolerated = EXCLUDED.schema_min_tolerated,
+			updated_at           = now()
 	`
-	if _, err := s.db.ExecContext(ctx, query, self.ID, self.Address, self.Version, startedAt); err != nil {
+	if _, err := s.db.ExecContext(ctx, query, self.ID, self.Address, self.Version, startedAt,
+		SchemaVersion, MinToleratedSchemaVersion); err != nil {
 		return fmt.Errorf("failed to register cluster node %q: %w", self.ID, err)
 	}
 	return nil
@@ -77,7 +83,7 @@ func (s *DatabaseNodeRegistryStore) RegisterNode(ctx context.Context, self busin
 // like a never-registered node.
 func (s *DatabaseNodeRegistryStore) ListNodes(ctx context.Context) ([]business.NodeRecord, error) {
 	const query = `
-		SELECT node_id, address, version, started_at, updated_at
+		SELECT node_id, address, version, started_at, schema_required, schema_min_tolerated, updated_at
 		FROM cfgms_node_registry
 		WHERE updated_at >= now() - ($1::double precision * interval '1 second')
 	`
@@ -91,7 +97,7 @@ func (s *DatabaseNodeRegistryStore) ListNodes(ctx context.Context) ([]business.N
 	for rows.Next() {
 		var r business.NodeRecord
 		var startedAt sql.NullTime
-		if err := rows.Scan(&r.ID, &r.Address, &r.Version, &startedAt, &r.LastSeen); err != nil {
+		if err := rows.Scan(&r.ID, &r.Address, &r.Version, &startedAt, &r.SchemaRequired, &r.SchemaMinTolerated, &r.LastSeen); err != nil {
 			return nil, fmt.Errorf("failed to scan cluster node row: %w", err)
 		}
 		if startedAt.Valid {

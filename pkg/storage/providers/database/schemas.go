@@ -981,10 +981,17 @@ func (s DatabaseSchemas) CreateNodeRegistryTable(ctx context.Context, db *sql.DB
 			address    TEXT NOT NULL,
 			version    TEXT NOT NULL DEFAULT '',
 			started_at TIMESTAMP WITH TIME ZONE,
-			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+			schema_required      INTEGER NOT NULL DEFAULT 0,
+			schema_min_tolerated INTEGER NOT NULL DEFAULT 0
 		);
 		ALTER TABLE cfgms_node_registry ADD COLUMN IF NOT EXISTS version TEXT NOT NULL DEFAULT '';
 		ALTER TABLE cfgms_node_registry ADD COLUMN IF NOT EXISTS started_at TIMESTAMP WITH TIME ZONE;
+		-- Expand-only: a node that predates these columns never writes them, so its
+		-- row keeps the default 0. A later contract step reads 0 as "unknown" and
+		-- blocks (fail closed). migrations/018_node_registry_schema_range.sql mirrors this.
+		ALTER TABLE cfgms_node_registry ADD COLUMN IF NOT EXISTS schema_required INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE cfgms_node_registry ADD COLUMN IF NOT EXISTS schema_min_tolerated INTEGER NOT NULL DEFAULT 0;
 	`
 	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
 		return fmt.Errorf("failed to create cfgms_node_registry table: %w", err)

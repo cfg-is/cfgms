@@ -5,6 +5,7 @@ package ha
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -1714,5 +1715,23 @@ func TestManager_Stop_ReturnsWithFailoverInFlight(t *testing.T) {
 	case <-failoverDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("in-flight failover did not finish")
+	}
+}
+
+func TestNodeInfoFromRecord_CarriesSchemaRange(t *testing.T) {
+	info := nodeInfoFromRecord(business.NodeRecord{ID: "node-a", SchemaRequired: 3, SchemaMinTolerated: 2})
+	assert.Equal(t, 3, info.SchemaRequired)
+	assert.Equal(t, 2, info.SchemaMinTolerated)
+}
+
+func TestNodeInfo_JSONIncludesSchemaRange(t *testing.T) {
+	// Zero must still be encoded: 0 means "not tracked" and has to be visible.
+	for _, tc := range []struct{ required, min int }{{3, 2}, {0, 0}} {
+		raw, err := json.Marshal(&NodeInfo{ID: "node-a", SchemaRequired: tc.required, SchemaMinTolerated: tc.min})
+		require.NoError(t, err)
+		var decoded map[string]interface{}
+		require.NoError(t, json.Unmarshal(raw, &decoded))
+		assert.Equal(t, float64(tc.required), decoded["schema_required"])
+		assert.Equal(t, float64(tc.min), decoded["schema_min_tolerated"])
 	}
 }

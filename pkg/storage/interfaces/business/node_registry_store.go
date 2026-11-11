@@ -36,6 +36,19 @@ type NodeRecord struct {
 	// StartedAt is when the node's process started, as reported by the node.
 	StartedAt time.Time
 
+	// SchemaRequired is the database schema version the node requires. It is
+	// set by the store, never by the caller: RegisterNode ignores any value
+	// passed in and records the provider's own constant, so a node cannot
+	// misreport the version it was built for. Zero means the provider does not
+	// track a schema range (or the row was written by a node that predates
+	// the field).
+	SchemaRequired int
+
+	// SchemaMinTolerated is the oldest database schema version the node
+	// tolerates. Set by the store like SchemaRequired; zero means "not
+	// tracked".
+	SchemaMinTolerated int
+
 	// LastSeen is when the node last refreshed its record. It is set by the
 	// store from its own clock when ListNodes returns the record; any
 	// caller-supplied value passed to RegisterNode is ignored. ListNodes omits
