@@ -29,9 +29,11 @@ If a CVE is in the advisory database but no CI check has surfaced it, this is **
 
 This applies only to the `go-toolchain` pin. The vulnerable Go standard library is already compiled into the controller, steward and CLI binaries we ship. The 3-day soak protects against a regression in a fresh release; here it would only extend the window in which the shipped binaries carry a known vulnerability. All three of these must hold:
 
-1. A Go vulnerability database entry (`GO-YYYY-NNNN`, package `stdlib`) affects the `current` toolchain version and lists a fixed version in the same minor line. Verify this against OSV: `curl -fsSL -X POST https://api.osv.dev/v1/query -d '{"package":{"name":"stdlib","ecosystem":"Go"},"version":"<current>"}'`.
+1. A Go vulnerability database entry (`GO-YYYY-NNNN`, package `stdlib`) affects the `current` toolchain version and lists a fixed version in the same minor line. Verify this against OSV: `curl -fsSL -X POST -H 'Content-Type: application/json' https://api.osv.dev/v1/query -d '{"package":{"name":"stdlib","ecosystem":"Go"},"version":"<current>"}'`.
 2. `govulncheck ./...` (Phase 2b) reports that entry as reachable from our code (symbol-level, under "Vulnerability"), not only as imported.
 3. The bump target is that fixed patch version, not a new minor.
+
+The 6-hour minimum release age in `cooldown-policy.md` still applies to this row.
 
 The Go vulnerability database does not assign CVSS severity, so reachability is the bar here, not `HIGH`/`CRITICAL`. A stdlib entry that `govulncheck` reports as not reachable follows the normal rows: **BUMP** after the cooldown.
 

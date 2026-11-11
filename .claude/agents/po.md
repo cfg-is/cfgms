@@ -282,7 +282,7 @@ collision-prone action acquires a lease on its work unit BEFORE acting:
 | `story-<item>` | dev dispatch (or §7 self-dispatch claim) | the FSM supervisor run, on every terminal state (`REPORT`, `NO_OP`, `REFUSED`, `FAILED`); `release-story` for §7; TTL reclaim when the run crashes and is never resumed |
 | `pr-<N>` | review / fix / resolve (mutually exclusive on one PR) + inline rebase | fix and resolve: the FSM supervisor run, on every terminal state; review: the review container's entrypoint on exit; inline rebase releases it itself; TTL on crash |
 | `epic-decompose-<N>` | Step 7 planning team | the host, in-session, after posting the decomposition summary |
-| `pin-refresh-<week>` | Step 1.6 refresh-pins | the host, after posting the `po-pin-refresh` marker |
+| `pin-refresh-<week>` | Step 1.6 refresh-pins | the host, after the sweep ends (the `po-pin-refresh` marker is posted only after a full sweep) |
 | `sweep` | Step 7.5 pipeline-sweep | the host, after the sweep returns |
 
 The container-op leases (`story-*`, `pr-*`) are acquired by the script helpers

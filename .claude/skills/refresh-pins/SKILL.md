@@ -192,7 +192,7 @@ For each of these pins (run in parallel where independent — separate Bash call
      }
    }
    ```
-   For Go stdlib use ecosystem `GO`, package `stdlib`. For tools that don't resolve cleanly through GHSA, fall back to a `WebFetch` of their release notes for the latest version and look for "CVE" mentions.
+   For Go stdlib use ecosystem `GO`, package `stdlib`. GHSA may not carry new stdlib entries: on 2026-11-11 it returned nothing while OSV listed one. Treat OSV (ecosystem `Go`, see decision-matrix.md row 1a) as authoritative for `stdlib`. For tools that don't resolve cleanly through GHSA, fall back to a `WebFetch` of their release notes for the latest version and look for "CVE" mentions.
 3. **CI-driven signal** — check whether the current pin is actively blocking CI:
    ```bash
    gh run list --repo cfg-is/cfgms --workflow docker-security.yml --status failure --limit 5 \
