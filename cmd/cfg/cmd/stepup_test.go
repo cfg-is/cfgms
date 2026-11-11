@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -415,6 +416,126 @@ func TestRunPresenceBrowserFlow_Expired(t *testing.T) {
 	_, err = runPresenceBrowserFlow(client, "POST", "/api/v1/modules/approvals/test/approve", nil, "module:approve")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "timed out waiting")
+}
+
+// --- --no-browser: with a terminal, the URL and code are printed and no browser is launched ---
+
+// captureStderr runs fn and returns what it wrote to os.Stderr.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = w
+	done := make(chan string)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+	func() {
+		defer func() { os.Stderr = orig }()
+		fn()
+	}()
+	require.NoError(t, w.Close())
+	return <-done
+}
+
+// runTTYPresenceFlow runs the presence relay with a terminal and a recording browser
+// opener, returning the stderr output and the URLs the opener was called with.
+func runTTYPresenceFlow(t *testing.T) (stderr string, opened []string) {
+	t.Helper()
+	origTerm, origBrowser, origInterval := isTerminalFn, presenceOpenBrowserFn, presencePollInterval
+	t.Cleanup(func() {
+		isTerminalFn, presenceOpenBrowserFn, presencePollInterval = origTerm, origBrowser, origInterval
+	})
+	isTerminalFn = func() bool { return true }
+	presenceOpenBrowserFn = func(u string) error { opened = append(opened, u); return nil }
+	presencePollInterval = 5 * time.Millisecond
+
+	rts := newPresenceRelayTestServer(t, "cli-presence-nobrowser", "WXYZ-1234",
+		jsonCollectResponse("collected", "tok"))
+	client, err := NewAPIClient(&APIClientConfig{BaseURL: rts.server.URL, TLSInsecure: true})
+	require.NoError(t, err)
+
+	stderr = captureStderr(t, func() {
+		token, flowErr := runPresenceBrowserFlow(client, "POST", "/api/v1/modules/approvals/test/approve", []byte(`{}`), "module:approve")
+		require.NoError(t, flowErr)
+		assert.Equal(t, "tok", token)
+	})
+	return stderr, opened
+}
+
+func setPresenceNoBrowserFlag(t *testing.T, v bool) {
+	t.Helper()
+	orig := presenceNoBrowser
+	t.Cleanup(func() { presenceNoBrowser = orig })
+	presenceNoBrowser = v
+}
+
+func TestRunPresenceBrowserFlow_NoBrowserFlag_TTY_PrintsURLWithoutLaunch(t *testing.T) {
+	setPresenceNoBrowserFlag(t, true)
+	t.Setenv("CFGMS_NO_BROWSER", "")
+
+	stderr, opened := runTTYPresenceFlow(t)
+
+	assert.Empty(t, opened, "--no-browser must suppress the browser launch even with a terminal")
+	assert.Contains(t, stderr, "Code: WXYZ-1234")
+	assert.Contains(t, stderr, "Approve this action by visiting: ")
+	assert.Contains(t, stderr, "cli-presence-nobrowser")
+	assert.Contains(t, stderr, "/cli/presence")
+}
+
+func TestRunPresenceBrowserFlow_NoBrowserEnv_TTY_PrintsURLWithoutLaunch(t *testing.T) {
+	setPresenceNoBrowserFlag(t, false)
+	t.Setenv("CFGMS_NO_BROWSER", "1")
+
+	stderr, opened := runTTYPresenceFlow(t)
+
+	assert.Empty(t, opened, "CFGMS_NO_BROWSER must suppress the browser launch even with a terminal")
+	assert.Contains(t, stderr, "Code: WXYZ-1234")
+	assert.Contains(t, stderr, "Approve this action by visiting: ")
+}
+
+func TestRunPresenceBrowserFlow_NoBrowserNotSet_TTY_LaunchesBrowser(t *testing.T) {
+	setPresenceNoBrowserFlag(t, false)
+	t.Setenv("CFGMS_NO_BROWSER", "")
+
+	stderr, opened := runTTYPresenceFlow(t)
+
+	require.Len(t, opened, 1, "without the flag or env a terminal session still launches the browser")
+	assert.Contains(t, opened[0], "cli-presence-nobrowser")
+	assert.Contains(t, stderr, "Code: WXYZ-1234")
+}
+
+func TestPresenceBrowserSuppressed_EnvValues(t *testing.T) {
+	setPresenceNoBrowserFlag(t, false)
+	for value, want := range map[string]bool{"": false, "0": false, "1": true, "true": true, "yes": true} {
+		t.Run("env="+value, func(t *testing.T) {
+			t.Setenv("CFGMS_NO_BROWSER", value)
+			assert.Equal(t, want, presenceBrowserSuppressed())
+		})
+	}
+}
+
+// The root persistent --no-browser flag and cfg login's own local --no-browser share a
+// name; the local flag shadows the persistent one for login, so each command binds to its
+// own variable.
+func TestNoBrowserFlag_RootPersistentAndLoginLocalCoexist(t *testing.T) {
+	pf := rootCmd.PersistentFlags().Lookup("no-browser")
+	require.NotNil(t, pf, "root must declare a persistent --no-browser flag")
+
+	t.Cleanup(func() {
+		loginNoBrowser, presenceNoBrowser = false, false
+		_ = loginCmd.Flags().Set("no-browser", "false")
+		_ = rootCmd.PersistentFlags().Set("no-browser", "false")
+	})
+
+	require.NoError(t, loginCmd.ParseFlags([]string{"--no-browser"}))
+	assert.True(t, loginNoBrowser, "cfg login --no-browser still sets login's own flag")
+	assert.False(t, presenceNoBrowser, "the login-local flag shadows the root persistent one")
+
+	require.NoError(t, rootCmd.PersistentFlags().Parse([]string{"--no-browser"}))
+	assert.True(t, presenceNoBrowser, "the root persistent flag sets the presence relay flag")
 }
 
 // --- No terminal: the presence relay still runs, printing the URL and polling, never opening a browser ---
