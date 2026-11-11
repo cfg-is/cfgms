@@ -28,6 +28,9 @@ Use the actual configured hostname, ports and CA.
 | `/api/v1/monitoring/metrics` | Private metrics listener; authorized metrics access |
 | `/api/v1/monitoring/components/{component}/metrics` | Private metrics listener; route-specific metrics permission |
 | `/api/v1/health/metrics`, `/health/metrics/history` | Private metrics listener; route-specific health metrics permission |
+| `GET /api/v1/health/metrics/prometheus` | Private metrics listener; `monitoring:read-metrics` |
+| `POST /api/v1/monitoring/markers` | Private metrics listener; `monitoring:write-markers` |
+| `GET /api/v1/monitoring/markers` | Private metrics listener; `monitoring:read-markers` |
 
 The canonical private metrics listener is host-loopback HTTPS on `9090`. It is
 not registered on the public product listener; startup validates private listener
@@ -44,6 +47,16 @@ cfg controller metrics --url https://localhost:9090 --tls-ca-cert /path/to/contr
 that command. A development credential or a root principal does not bypass the
 registered permission/assurance checks. Never expose the metrics listener by
 copying a wildcard bind from an old example.
+
+## Service-level signals and markers
+
+`GET /api/v1/health/metrics/prometheus` returns the collector snapshot and the
+controller's service-level signals in Prometheus text format. The marker routes
+record and list deploy, rollback and chaos markers so a change can be lined up
+against those signals. All three routes exist only on the private metrics
+listener. [Service-Level Signals and Markers](operations/service-level-signals.md)
+lists every metric name, type, label and limit, and the marker request rules.
+Signal values are per controller node; the collector sums them for a cluster.
 
 ## Logging and tracing
 
