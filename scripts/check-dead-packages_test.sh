@@ -357,6 +357,121 @@ else
 fi
 rm -rf "$repo"
 
+# --- 10. A package imported only by a `//go:build windows` _test.go file of --
+#         a reachable package is test-support on every host GOOS (Issue #6161).
+#         The gate unions linux/windows/darwin, so the verdict must not depend
+#         on the GOOS exported in the environment. The package's own files are
+#         windows-only too (like pkg/testutil/winacct), so it has no buildable
+#         file on the other OSes.
+repo="$(make_fixture)"
+mkdir -p "$repo/wintestsupport"
+cat >"$repo/wintestsupport/wintestsupport_windows.go" <<'EOF'
+//go:build windows
+
+package wintestsupport
+
+func Helper() {}
+EOF
+cat >"$repo/live/live_wintest_test.go" <<'EOF'
+//go:build windows
+
+package live
+
+import _ "fixture.test/app/wintestsupport"
+EOF
+write_allowlist "$repo/allow.yaml" \
+    "deadparent" "chaina" "chainb" "chainc"
+outdir="$(mktemp -d)"
+for host_os in linux windows darwin; do
+    GOOS="$host_os" run_checker "$repo" "allow.yaml"
+    if [ "$RC" -eq 0 ]; then
+        pass "windows-test-only import is test-support, not unreachable (GOOS=$host_os)"
+    else
+        fail "windows-test-only import must not fail the gate (GOOS=$host_os, rc=$RC, stdout: $STDOUT, stderr: $STDERR)"
+    fi
+    case "$STDOUT" in
+        *"fixture.test/app/wintestsupport"*) pass "reports wintestsupport in the test-support bucket (GOOS=$host_os)" ;;
+        *) fail "expected wintestsupport in the test-support bucket (GOOS=$host_os, stdout: $STDOUT)" ;;
+    esac
+    case "$STDERR" in
+        *"fixture.test/app/wintestsupport"*) fail "wintestsupport must not be reported unreachable or stale (GOOS=$host_os, stderr: $STDERR)" ;;
+        *) pass "wintestsupport is not reported unreachable (GOOS=$host_os)" ;;
+    esac
+    printf '%s\n' "$STDOUT" >"$outdir/out.$host_os"
+done
+# The buckets must be byte-identical whatever the host GOOS.
+if cmp -s "$outdir/out.linux" "$outdir/out.windows" && cmp -s "$outdir/out.linux" "$outdir/out.darwin"; then
+    pass "gate output is identical under GOOS=linux, windows and darwin"
+else
+    fail "gate output differs between host GOOS values"
+fi
+rm -rf "$outdir"
+
+# An allowlist entry for it is stale on every host (it is test-support).
+write_allowlist "$repo/allow.yaml" \
+    "deadparent" "chaina" "chainb" "chainc" "wintestsupport"
+for host_os in linux windows; do
+    GOOS="$host_os" run_checker "$repo" "allow.yaml"
+    if [ "$RC" -eq 1 ]; then
+        pass "allowlisting the windows-only test-support package is stale (GOOS=$host_os)"
+    else
+        fail "stale wintestsupport entry must fail the gate (GOOS=$host_os, rc=$RC, stdout: $STDOUT, stderr: $STDERR)"
+    fi
+    case "$STDERR" in
+        *"Stale"*"fixture.test/app/wintestsupport"*) pass "names wintestsupport as stale (GOOS=$host_os)" ;;
+        *) fail "expected a stale-entry message naming wintestsupport (GOOS=$host_os, stderr: $STDERR)" ;;
+    esac
+done
+rm -rf "$repo"
+
+# --- 11. A package whose every file is tagged for one OS stays in `all` -----
+#         on the others: a windows-only package nothing reaches is still dead
+#         when the checker runs with GOOS=linux.
+repo="$(make_fixture)"
+mkdir -p "$repo/windead"
+cat >"$repo/windead/windead_windows.go" <<'EOF'
+//go:build windows
+
+package windead
+
+func Dead() {}
+EOF
+write_allowlist "$repo/allow.yaml" \
+    "deadparent" "chaina" "chainb" "chainc"
+for host_os in linux windows; do
+    GOOS="$host_os" run_checker "$repo" "allow.yaml"
+    if [ "$RC" -eq 1 ]; then
+        pass "windows-only unreachable package fails the gate (GOOS=$host_os)"
+    else
+        fail "windows-only dead package must be reported (GOOS=$host_os, rc=$RC, stdout: $STDOUT, stderr: $STDERR)"
+    fi
+    case "$STDERR" in
+        *"fixture.test/app/windead"*) pass "names windead as unreachable (GOOS=$host_os)" ;;
+        *) fail "expected windead named as unreachable (GOOS=$host_os, stderr: $STDERR)" ;;
+    esac
+done
+rm -rf "$repo"
+
+# --- 12. A go list failure under a foreign GOOS still fails closed ----------
+#         (an unresolvable import in a darwin-only file is invisible on linux).
+repo="$(make_fixture)"
+cat >"$repo/live/live_darwin.go" <<'EOF'
+//go:build darwin
+
+package live
+
+import _ "fixture.test/app/does-not-exist"
+EOF
+write_allowlist "$repo/allow.yaml" \
+    "deadparent" "chaina" "chainb" "chainc"
+GOOS=linux run_checker "$repo" "allow.yaml"
+if [ "$RC" -eq 2 ]; then
+    pass "go list failure under a foreign GOOS fails closed (exit 2)"
+else
+    fail "foreign-GOOS go list failure must exit 2 (rc=$RC, stdout: $STDOUT, stderr: $STDERR)"
+fi
+rm -rf "$repo"
+
 echo ""
 echo "Passed: $PASS  Failed: $FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
