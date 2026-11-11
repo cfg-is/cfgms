@@ -76,10 +76,14 @@ func TestEnsureAdminOnlyDir_FreshDirectory(t *testing.T) {
 }
 
 func TestEnsureAdminOnlyDir_CorrectsExistingTreeInPlace(t *testing.T) {
-	// A t.TempDir() tree inherits a permissive DACL but is owned by the test
-	// user, which EnsureAdminOnlyDir refuses; hand it to Administrators (an
-	// elevated member may assign that group as owner) so only the DACL differs.
+	// Give the root an inheritable Users ACE before the child and file are
+	// created, so the file starts with a non-admin ACE whatever the temp
+	// directory hands down (under SYSTEM, C:\Windows\Temp passes down only
+	// SYSTEM and Administrators). The tree is owned by the test user, which
+	// EnsureAdminOnlyDir refuses; hand it to Administrators (an elevated
+	// member may assign that group as owner) so only the DACL differs.
 	dir := t.TempDir()
+	setProtectedDACL(t, dir, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)")
 	child := filepath.Join(dir, "child")
 	require.NoError(t, os.Mkdir(child, 0755))
 	file := filepath.Join(child, "old.bin")
@@ -87,6 +91,8 @@ func TestEnsureAdminOnlyDir_CorrectsExistingTreeInPlace(t *testing.T) {
 	for _, p := range []string{dir, child, file} {
 		setOwnerAdministrators(t, p)
 	}
+	before, _ := daclSIDs(t, file)
+	require.Contains(t, before, sidUsers, "precondition: the file inherits the root's Users ACE")
 
 	require.NoError(t, EnsureAdminOnlyDir(dir))
 
@@ -171,13 +177,21 @@ func TestEnsureAdminOnlyDir_RefusesRootSymlink(t *testing.T) {
 	base := t.TempDir()
 	target := filepath.Join(base, "target")
 	require.NoError(t, os.Mkdir(target, 0755))
+	// An explicit Users ACE on the target, so "left untouched" does not depend
+	// on what the temp directory hands down.
+	setProtectedDACL(t, target, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)")
+	sidsBefore, protectedBefore := daclSIDs(t, target)
+	require.Contains(t, sidsBefore, sidUsers, "precondition: the target carries a Users ACE")
+	before := securitySnapshot(t, target)
 	link := filepath.Join(base, "cfgms")
 	require.NoError(t, os.Symlink(target, link))
 
 	err := EnsureAdminOnlyDir(link)
 	require.Error(t, err)
-	sids, _ := daclSIDs(t, target)
-	assert.NotElementsMatch(t, []string{sidSystem, sidAdministrators}, sids, "link target must be left untouched")
+	assert.Equal(t, before, securitySnapshot(t, target), "link target must be left untouched")
+	sids, protected := daclSIDs(t, target)
+	assert.Contains(t, sids, sidUsers, "the target's Users ACE must remain")
+	assert.Equal(t, protectedBefore, protected, "the target's protected flag must not change")
 }
 
 func TestEnsureAdminOnlyDir_RefusesChildReparsePoint(t *testing.T) {
