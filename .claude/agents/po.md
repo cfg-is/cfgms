@@ -529,6 +529,23 @@ Runs in both `cron` and `cycle` modes. It is **orchestrator-only** — the no-do
    `.claude/skills/refresh-pins/SKILL.md` and run its steps INLINE with Bash.**
    Do not spawn a nested runner for it, for the reasons in §4.
 
+   **Always run the FULL sweep. Never narrow it to the pins the weekly comment
+   names.** The weekly comment is only the trigger. When it flags anything, run
+   every phase with empty args: the per-pin research, and also the Phase 2a/2b
+   bulk scans (`go list -m -u all`, `npm outdated`, `govulncheck`, `trivy fs` and
+   the image scan). The weekly job cannot see transitive modules or CVEs in the
+   stdlib or base images; only the bulk scans can. On 2026-11-11 a cycle
+   researched only the flagged pins, skipped the bulk scans and posted the marker
+   anyway. About 100 pins then went unchecked for the week while looking
+   processed. If a bulk scan cannot run, its pins are `UNKNOWN`. Say so in the
+   marker; do not report them as up to date.
+
+   **A stdlib CVE fixed in a newer Go release skips the cooldown.** The vulnerable
+   toolchain is already compiled into shipped binaries, which is the skill's
+   "Dependency CVEs skip cooldown too" rule. Do not hold a `go-toolchain` bump only
+   because no CI gate is failing. Verify every advisory you cite against OSV
+   (`api.osv.dev`, package `stdlib`, ecosystem `Go`) before quoting a count.
+
    **If you spawn anyway and get no result back:** do not wait, and do not invent
    bump-story numbers for the marker. Record the step as `UNKNOWN — no result
    received`, **release the lease** —
@@ -539,11 +556,11 @@ Runs in both `cron` and `cycle` modes. It is **orchestrator-only** — the no-do
    the retry. The lease must be released on **every** exit path, including this
    one — a stranded `pin-refresh-*` lease blocks the other host for its full TTL.
 
-4. After it returns, record the marker so later cycles (and the other host) don't re-sweep the same weekly check. Include the story numbers the skill reported:
+4. After a FULL sweep returns, record the marker so later cycles (and the other host) don't re-sweep the same weekly check. Include the story numbers the skill reported. Do **not** post the marker after a partial sweep: a marker suppresses the retry.
    ```bash
    ./.claude/tooling/scripts/po-act.sh log <PIN_ISSUE> - <<'EOF'
    <!-- po-pin-refresh -->
-   Processed weekly pin check via refresh-pins. Bump stories created/updated: <#NNNN, #NNNN or "none — all pins within cooldown/up to date">. Drafts enter the Tech Lead queue (Step 2).
+   Processed weekly pin check via a FULL refresh-pins sweep (all pins + bulk scans). Bump stories created/updated: <#NNNN, #NNNN or "none — all pins within cooldown/up to date">. UNKNOWN (scan could not run): <pins + reason, or "none">. Drafts enter the Tech Lead queue (Step 2).
    EOF
    ```
    Then **release the lease**: `./.claude/tooling/scripts/pipeline-helper.sh lease-release "pin-refresh-<latest_check>"`.
