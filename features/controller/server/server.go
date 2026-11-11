@@ -668,6 +668,11 @@ func wireHTTPConfigNamespaceStores(httpServer *api.Server, cs cfgconfig.ConfigSt
 		return fmt.Errorf("failed to create content approval store: %w", err)
 	}
 	httpServer.SetContentApprovalStore(approvalStore)
+	unattendedStore, err := api.NewUnattendedRolloutStore(cs)
+	if err != nil {
+		return fmt.Errorf("failed to create unattended rollout store: %w", err)
+	}
+	httpServer.SetUnattendedRolloutStore(unattendedStore)
 	return nil
 }
 

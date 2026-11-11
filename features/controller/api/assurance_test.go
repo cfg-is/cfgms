@@ -392,6 +392,7 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"automation-grant:create":             true, // Issue #5831: grants standing automation authority
 		"content-approval:approve":            true, // Issue #5831: approves content for automated use
 		"content-library:set-mode":            true, // Issue #5831: switches the content library mode
+		"rollout-automation:set":              true, // Issue #6065: a tap to turn unattended rollouts on or off
 		"workflow:write":                      true, // Issue #5899: a tap to save a workflow
 		"workflow:execute":                    true, // Issue #5899: a tap to start a workflow
 	}

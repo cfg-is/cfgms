@@ -185,6 +185,7 @@ type Server struct {
 	hypervProfileConfigStore        cfgconfig.ConfigStore                    // Issue #3785: hyperv profile storage under hyperv-profiles namespace
 	automationGrantStore            *AutomationGrantStore                    // ADR-036 section 3: authenticates cfgag_ grant credentials (nil: every grant credential is refused)
 	contentApprovalStore            *ContentApprovalStore                    // Issue #5840: library approval modes (sole writer of the mode namespace)
+	unattendedRolloutStore          *UnattendedRolloutStore                  // Issue #6065: unattended rollout cell setting (sole writer of its namespace)
 	tagStore                        *tagstore.Store                          // Issue #2545: steward tag store for tag: selector support
 	webAuthn                        *webauthn.WebAuthn                       // Issue #2782: WebAuthn RP instance; nil → endpoints return 503
 	webAuthnSessions                sync.Map                                 // Issue #2782: pending registration sessions (non-ClusterMode only; ClusterMode uses NonceStore, Issue #4527); key=username, value=*webAuthnPendingSession
@@ -1855,6 +1856,14 @@ func (s *Server) SetContentApprovalStore(st *ContentApprovalStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.contentApprovalStore = st
+}
+
+// SetUnattendedRolloutStore wires the store that holds the cell's unattended rollout
+// setting (Issue #6065). Until it is set the setting routes answer 503.
+func (s *Server) SetUnattendedRolloutStore(st *UnattendedRolloutStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.unattendedRolloutStore = st
 }
 
 // SetAutomationGrantStore wires the store that authenticates automation grant

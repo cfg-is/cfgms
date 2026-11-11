@@ -3094,6 +3094,83 @@ paths:
         '503':
           description: The audit trail or the content approval store is not available
 
+  /rollout-settings/unattended:
+    get:
+      summary: Get the unattended rollout setting
+      description: >-
+        Returns whether unattended (machine-initiated) rollouts are enabled for the
+        cell. The setting is off by default: with no stored record the response is
+        enabled false with no changed_by or changed_at. Requires
+        rollout-automation:read. The path is outside /rollout because
+        GET /rollout/{rollout_id} would match "unattended".
+      operationId: getUnattendedRolloutSetting
+      tags:
+        - Rollout
+      responses:
+        '200':
+          description: Unattended rollout setting
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/UnattendedRolloutSetting'
+                    timestamp:
+                      type: string
+                      format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: The unattended rollout store is not available
+    put:
+      summary: Turn unattended rollouts on or off
+      description: >-
+        Sets the cell's unattended rollout setting. Requires
+        rollout-automation:set at strong assurance with a presence tap; an API key
+        (machine principal) is refused. The audit event unattended_rollouts_changed
+        (principal, previous and new value) is written before the change; if it
+        cannot be recorded the setting is left unchanged (503 AUDIT_UNAVAILABLE).
+        Setting the value the cell already has goes through the same permission,
+        tap and audit. This setting only records the choice; it does not itself
+        start or stop any rollout.
+      operationId: setUnattendedRolloutSetting
+      tags:
+        - Rollout
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled:
+                  type: boolean
+      responses:
+        '200':
+          description: Setting stored
+          content:
+            application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/UnattendedRolloutSetting'
+                    timestamp:
+                      type: string
+                      format: date-time
+        '400':
+          description: INVALID_REQUEST
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: The audit trail or the unattended rollout store is not available
+
   /workflows/{id}/versions/{version}/publish/begin:
     post:
       summary: Begin publishing a workflow version
@@ -3704,6 +3781,17 @@ components:
           enum: [script, workflow]
         mode:
           $ref: '#/components/schemas/AutomationApprovalMode'
+    UnattendedRolloutSetting:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        changed_by:
+          type: string
+        changed_at:
+          type: string
+          format: date-time
+          nullable: true
     StewardInfo:
       type: object
       properties:

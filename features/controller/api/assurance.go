@@ -328,6 +328,11 @@ var permissionAssurance = map[string]Requirement{
 	"content-library:set-mode": {Min: session.AssuranceStrong, RequireUserPresence: true},
 	"workflow:publish":         {Min: session.AssuranceStrong},
 	"content-approval:revoke":  {Min: session.AssuranceStrong},
+
+	// rollout-automation:set gates PUT /rollout-settings/unattended (Issue #6065): turning
+	// machine-initiated rollouts on is a tap-gated human decision, so no API key may use it.
+	// rollout-automation:read is intentionally absent (a read).
+	"rollout-automation:set": {Min: session.AssuranceStrong, RequireUserPresence: true},
 }
 
 // legacyPermissionIDs maps a current permission ID to the historical IDs that named the

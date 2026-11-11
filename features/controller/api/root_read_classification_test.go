@@ -160,6 +160,7 @@ var rootReadClassification = map[string]rootReadEntry{
 	"/api/v1/rollback/history":                                       {rootReadCrossing, ""},
 	"/api/v1/rollback/points":                                        {rootReadCrossing, ""},
 	"/api/v1/rollback/{rollback_id}/status":                          {rootReadCrossing, ""},
+	"/api/v1/rollout-settings/unattended":                            {rootReadSharedReference, "the unattended rollout switch is one cell-wide setting with no owning tenant"},
 	"/api/v1/rollout/{rollout_id}":                                   {rootReadCrossing, ""},
 	"/api/v1/runs":                                                   {rootReadCrossing, ""},
 	"/api/v1/runs/{run_id}":                                          {rootReadCrossing, ""},

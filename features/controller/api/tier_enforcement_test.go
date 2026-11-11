@@ -207,6 +207,8 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	// Script approval (Issue #5839, Epic #5421): approve is presence-gated, withdrawal is not.
 	{"POST", "/api/v1/automation/approvals/scripts", "content-approval:approve"},
 	{"DELETE", "/api/v1/automation/approvals/scripts/test-script/1.0.0/test-hash", "content-approval:revoke"},
+	// Unattended rollout cell setting (Issue #6065): presence-gated, no machine access.
+	{"PUT", "/api/v1/rollout-settings/unattended", "rollout-automation:set"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine
