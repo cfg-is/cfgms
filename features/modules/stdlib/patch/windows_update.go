@@ -8,10 +8,15 @@ package patch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
@@ -88,29 +93,149 @@ func (w *WindowsUpdateManager) Close() error {
 	return nil
 }
 
-// searchPollInterval is how often searchWithContext checks a running search job
-// for completion and the caller's context for cancellation.
+// searchPollInterval is how often searchWithContext re-checks a running search
+// job. The completion callback normally wakes the wait sooner; the poll is the
+// safety net if a callback is never delivered.
 const searchPollInterval = 100 * time.Millisecond
 
+// iidSearchCompletedCallback is IID_ISearchCompletedCallback from wuapi.h.
+var iidSearchCompletedCallback = ole.NewGUID("{88AEE058-D4B0-4725-A2F1-814A67AE964C}")
+
+// searchCallback is a minimal in-process COM object implementing
+// ISearchCompletedCallback (IUnknown plus Invoke). IUpdateSearcher.BeginSearch
+// rejects a null onCompleted argument (VT_NULL fails with DISP_E_TYPEMISMATCH,
+// a null IDispatch with DISP_E_EXCEPTION), so a real object is passed. Its
+// Invoke only signals done; all COM calls stay on the polling goroutine.
+//
+// The vtable pointer must be the first field: COM reads it from the object's
+// address.
+type searchCallback struct {
+	vtbl *searchCallbackVtbl
+	refs int32
+	done chan struct{} // capacity 1; Invoke never blocks on it
+}
+
+type searchCallbackVtbl struct {
+	queryInterface uintptr
+	addRef         uintptr
+	release        uintptr
+	invoke         uintptr
+}
+
+var (
+	searchCallbackVtblOnce sync.Once
+	searchCallbackVtblPtr  *searchCallbackVtbl
+
+	// liveSearchCallbacks keeps every callback object reachable while COM may
+	// still hold a reference: the Go collector cannot see pointers held by
+	// Windows Update. An entry is removed when its reference count reaches zero.
+	liveSearchCallbacksMu sync.Mutex
+	liveSearchCallbacks   = map[*searchCallback]struct{}{}
+)
+
+// newSearchCallback returns a callback object holding one reference, owned by
+// the caller, who must Release it.
+func newSearchCallback() *searchCallback {
+	// syscall.NewCallback slots are never freed, so the vtable is built once.
+	searchCallbackVtblOnce.Do(func() {
+		searchCallbackVtblPtr = &searchCallbackVtbl{
+			queryInterface: syscall.NewCallback(searchCallbackQueryInterface),
+			addRef:         syscall.NewCallback(searchCallbackAddRef),
+			release:        syscall.NewCallback(searchCallbackRelease),
+			invoke:         syscall.NewCallback(searchCallbackInvoke),
+		}
+	})
+	cb := &searchCallback{vtbl: searchCallbackVtblPtr, refs: 1, done: make(chan struct{}, 1)}
+	liveSearchCallbacksMu.Lock()
+	liveSearchCallbacks[cb] = struct{}{}
+	liveSearchCallbacksMu.Unlock()
+	return cb
+}
+
+// Release drops the caller's reference.
+func (cb *searchCallback) Release() {
+	searchCallbackRelease(cb)
+}
+
+// asDispatch returns the object as the *ole.IDispatch go-ole needs to marshal it
+// as an object argument (VT_DISPATCH). Only its address is used: it is never
+// called through IDispatch, and Windows Update queries the interfaces it needs.
+func (cb *searchCallback) asDispatch() *ole.IDispatch {
+	return (*ole.IDispatch)(unsafe.Pointer(cb))
+}
+
+func searchCallbackQueryInterface(cb *searchCallback, riid *ole.GUID, ppv **searchCallback) uintptr {
+	if ppv == nil {
+		return ole.E_POINTER
+	}
+	if riid != nil && (ole.IsEqualGUID(riid, ole.IID_IUnknown) || ole.IsEqualGUID(riid, iidSearchCompletedCallback)) {
+		atomic.AddInt32(&cb.refs, 1)
+		*ppv = cb
+		return ole.S_OK
+	}
+	*ppv = nil
+	return ole.E_NOINTERFACE
+}
+
+func searchCallbackAddRef(cb *searchCallback) uintptr {
+	return uintptr(atomic.AddInt32(&cb.refs, 1))
+}
+
+func searchCallbackRelease(cb *searchCallback) uintptr {
+	n := atomic.AddInt32(&cb.refs, -1)
+	if n == 0 {
+		liveSearchCallbacksMu.Lock()
+		delete(liveSearchCallbacks, cb)
+		liveSearchCallbacksMu.Unlock()
+	}
+	return uintptr(n)
+}
+
+// searchCallbackInvoke is ISearchCompletedCallback::Invoke. It runs on a thread
+// owned by Windows Update, so it only does a non-blocking send.
+func searchCallbackInvoke(cb *searchCallback, _, _ uintptr) uintptr {
+	select {
+	case cb.done <- struct{}{}:
+	default:
+	}
+	return ole.S_OK
+}
+
+// comErrorDetail renders the HRESULT and EXCEPINFO behind a go-ole error. go-ole
+// reports only the generic HRESULT text (for example "Exception occurred"),
+// which hides the Windows Update status code that explains it.
+func comErrorDetail(err error) string {
+	var oleErr *ole.OleError
+	if !errors.As(err, &oleErr) {
+		return "no COM error detail"
+	}
+	detail := fmt.Sprintf("hresult=%#x", uint32(oleErr.Code()))
+	if excep, ok := oleErr.SubError().(ole.EXCEPINFO); ok {
+		detail += ", excepinfo={" + excep.String() + "}"
+	}
+	return detail
+}
+
 // searchWithContext runs an IUpdateSearcher search bounded by ctx. It uses the
-// asynchronous BeginSearch/EndSearch pair and polls ISearchJob.IsCompleted on a
-// ticker so a cancelled context or elapsed deadline is observed promptly. On
-// cancellation the job is aborted and cleaned up, and the returned error wraps
-// ctx.Err(). The caller owns the returned ISearchResult variant and must Clear it.
+// asynchronous BeginSearch/EndSearch pair and waits for the completion callback,
+// a poll tick or ctx, whichever comes first, so a cancelled context or elapsed
+// deadline is observed promptly. On cancellation the job is aborted and cleaned
+// up, and the returned error wraps ctx.Err(). The caller owns the returned
+// ISearchResult variant and must Clear it.
 func searchWithContext(ctx context.Context, searcher *ole.IDispatch, criteria string) (*ole.VARIANT, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("search not started: %w", err)
 	}
 
-	// onCompleted is an ISearchCompletedCallback and WUA rejects VT_NULL for it
-	// with DISP_E_TYPEMISMATCH, which is what a bare Go nil marshals to. A typed
-	// nil *ole.IDispatch marshals to VT_DISPATCH with a null pointer (the
-	// scripting "Nothing"), meaning no callback; completion is polled instead.
-	// The state argument is unused and takes the same null object.
-	var noCallback *ole.IDispatch
-	jobVariant, err := oleutil.CallMethod(searcher, "BeginSearch", criteria, noCallback, noCallback)
+	// onCompleted is a real ISearchCompletedCallback object (see searchCallback).
+	// state is opaque caller data handed back to the callback; it is unused, and
+	// an empty string is a non-null VARIANT that WUA accepts.
+	cb := newSearchCallback()
+	defer cb.Release()
+
+	jobVariant, err := oleutil.CallMethod(searcher, "BeginSearch", criteria, cb.asDispatch(), "")
 	if err != nil {
-		return nil, fmt.Errorf("failed to begin search: %w", err)
+		return nil, fmt.Errorf("failed to begin search: %w (%s)", err, comErrorDetail(err))
 	}
 	defer func() { _ = jobVariant.Clear() }()
 	job := jobVariant.ToIDispatch()
@@ -122,7 +247,7 @@ func searchWithContext(ctx context.Context, searcher *ole.IDispatch, criteria st
 		completedVariant, err := oleutil.GetProperty(job, "IsCompleted")
 		if err != nil {
 			abortSearchJob(job)
-			return nil, fmt.Errorf("failed to poll search job: %w", err)
+			return nil, fmt.Errorf("failed to poll search job: %w (%s)", err, comErrorDetail(err))
 		}
 		completed, _ := completedVariant.Value().(bool)
 		_ = completedVariant.Clear()
@@ -134,6 +259,7 @@ func searchWithContext(ctx context.Context, searcher *ole.IDispatch, criteria st
 		case <-ctx.Done():
 			abortSearchJob(job)
 			return nil, fmt.Errorf("search aborted: %w", ctx.Err())
+		case <-cb.done:
 		case <-ticker.C:
 		}
 	}
@@ -141,7 +267,7 @@ func searchWithContext(ctx context.Context, searcher *ole.IDispatch, criteria st
 	searchResult, err := oleutil.CallMethod(searcher, "EndSearch", job)
 	if err != nil {
 		abortSearchJob(job)
-		return nil, fmt.Errorf("failed to end search: %w", err)
+		return nil, fmt.Errorf("failed to end search: %w (%s)", err, comErrorDetail(err))
 	}
 	// The job is finished; release its resources.
 	_, _ = oleutil.CallMethod(job, "CleanUp")

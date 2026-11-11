@@ -456,3 +456,45 @@ func TestWindowsUpdateManager_GetLastPatchDate_HonoursContext(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, context.Canceled), "error must wrap context.Canceled, got: %v", err)
 }
+
+// TestWindowsUpdateManager_Search_AcceptsCompletionCallback runs real searches to
+// completion. BeginSearch rejects a null completion callback (VT_NULL fails with
+// a type mismatch, a null dispatch with an exception), so a successful offline
+// and online search proves the in-process callback object is accepted and the
+// job completes.
+func TestWindowsUpdateManager_Search_AcceptsCompletionCallback(t *testing.T) {
+	manager, err := patch.NewWindowsUpdateManager()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	installed, err := manager.ListInstalledPatches(ctx)
+	require.NoError(t, err, "offline installed-update search must complete")
+	assert.NotNil(t, installed)
+
+	available, err := manager.ListAvailablePatches(ctx, "all")
+	require.NoError(t, err, "online available-update search must complete")
+	assert.NotNil(t, available)
+}
+
+// TestWindowsUpdateManager_ListInstalledPatches_DeadlineDuringSearch gives a
+// running search a deadline that expires while it is in flight. The search either
+// finishes first or is aborted; an abort must surface as an error wrapping
+// context.DeadlineExceeded and return promptly, never block.
+func TestWindowsUpdateManager_ListInstalledPatches_DeadlineDuringSearch(t *testing.T) {
+	manager, err := patch.NewWindowsUpdateManager()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err = manager.ListInstalledPatches(ctx)
+	if err != nil {
+		assert.True(t, errors.Is(err, context.DeadlineExceeded), "error must wrap context.DeadlineExceeded, got: %v", err)
+	}
+	assert.Less(t, time.Since(start), 30*time.Second, "search must return promptly after the deadline")
+}
