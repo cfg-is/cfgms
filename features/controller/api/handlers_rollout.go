@@ -128,6 +128,10 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.refuseUnattendedRollout(w, r, principal, tenantID, gateRouteStartRollout) {
+		return
+	}
+
 	rings := s.effectiveRings()
 	if len(rings.Rings) == 0 {
 		s.writeErrorResponse(w, http.StatusInternalServerError,

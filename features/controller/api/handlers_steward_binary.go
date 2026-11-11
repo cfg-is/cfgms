@@ -95,6 +95,31 @@ func (s *Server) installerBlobTenantForCallerScope(r *http.Request) (tenantID st
 	}
 }
 
+// validateStewardBinaryCoordinates checks a release's version, platform and arch, writing
+// the 400 response and returning false on the first invalid one. Publish and upgrade
+// dispatch share it so both refuse the same coordinates with the same error codes.
+func (s *Server) validateStewardBinaryCoordinates(w http.ResponseWriter, version, platform, arch string) bool {
+	if !stewardBinaryVersionRe.MatchString(version) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Invalid version: "+logging.SanitizeLogValue(version)+"; must match ^v\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?",
+			"INVALID_VERSION")
+		return false
+	}
+	if !validPlatforms[platform] {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Unknown platform: "+logging.SanitizeLogValue(platform)+"; valid values: windows, darwin, linux",
+			"INVALID_PLATFORM")
+		return false
+	}
+	if !validArchs[arch] {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Unknown arch: "+logging.SanitizeLogValue(arch)+"; valid values: amd64, arm64",
+			"INVALID_ARCH")
+		return false
+	}
+	return true
+}
+
 // handlePublishStewardBinary handles POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}.
 // Verifies the Ed25519 publisher signature against CFGMSPublisherIdentity before storing the blob.
 // Returns 400 if signature is absent or invalid, 409 if the binary already exists (use ?force=true to overwrite).
@@ -106,7 +131,7 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 	// Admin mTLS principals carry global scope with an empty tenant (middleware.go:173)
 	// and publish into the global namespace; only a NON-admin caller with no tenant is a
 	// genuine auth failure (Issue #1999, same pattern as #1990's authRunAccess).
-	_, _, ok := s.authRunAccess(w, r)
+	principal, callerTenantID, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -127,22 +152,10 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 	platform := vars["platform"]
 	arch := vars["arch"]
 
-	if !stewardBinaryVersionRe.MatchString(version) {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Invalid version: "+logging.SanitizeLogValue(version)+"; must match ^v\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?",
-			"INVALID_VERSION")
+	if !s.validateStewardBinaryCoordinates(w, version, platform, arch) {
 		return
 	}
-	if !validPlatforms[platform] {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Unknown platform: "+logging.SanitizeLogValue(platform)+"; valid values: windows, darwin, linux",
-			"INVALID_PLATFORM")
-		return
-	}
-	if !validArchs[arch] {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Unknown arch: "+logging.SanitizeLogValue(arch)+"; valid values: amd64, arm64",
-			"INVALID_ARCH")
+	if s.refuseUnattendedRollout(w, r, principal, callerTenantID, gateRoutePublishBinary) {
 		return
 	}
 
