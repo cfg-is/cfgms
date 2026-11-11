@@ -167,3 +167,16 @@ func TestWireRolloutStore_FailedSweepDoesNotBlockWiring(t *testing.T) {
 	assert.NotNil(t, httpServer.RolloutStore(), "the store is wired even when the sweep fails")
 	assert.True(t, logger.containsAny("Startup rollout sweep did not finish; continuing"))
 }
+
+// TestStewardBinaryApprovalStoreWiredAtStartup: controller startup builds the steward
+// binary approval store over the config store and sets it on the API server, so the
+// approval checks on dispatch, rollout start and self-fetch have a store to read.
+func TestStewardBinaryApprovalStoreWiredAtStartup(t *testing.T) {
+	srv, _ := rolloutWiringServer(t)
+	assert.NotNil(t, srv.httpServer.StewardBinaryApprovalStore())
+
+	// Without a config store nothing is wired: the approval checks stay closed.
+	bare := newBareAPIServer(t)
+	require.NoError(t, wireHTTPConfigNamespaceStores(bare, nil))
+	assert.Nil(t, bare.StewardBinaryApprovalStore())
+}

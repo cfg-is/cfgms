@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -25,12 +26,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/trust"
 	"github.com/cfgis/cfgms/pkg/session"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // stewardBinaryTestFixture holds a generated Ed25519 key pair and the trust store
@@ -65,6 +68,7 @@ func setupStewardBinaryServer(t *testing.T) (*Server, stewardBinaryTestFixture) 
 	fix := newStewardBinaryFixture(t)
 	server, _ := setupTestServerWithBlobStore(t)
 	server.stewardBinaryTrustStore = fix.store
+	wireTestStewardBinaryApprovalStore(t, server)
 	return server, fix
 }
 
@@ -215,6 +219,7 @@ func TestGetStewardBinaryPublic_ServesSignatureHeaders(t *testing.T) {
 
 	pubRec := doPublish(server, "v1.0.0", "linux", "amd64", "test-tenant", sigBase64, content)
 	require.Equal(t, http.StatusOK, pubRec.Code, "publish must succeed: %s", pubRec.Body.String())
+	approveStewardBinaryBytes(t, server, "test-tenant", "v1.0.0", "linux", "amd64", content)
 
 	getRec := doGetStewardBinaryPublic(server, "v1.0.0", "linux", "amd64", "test-tenant")
 	require.Equal(t, http.StatusOK, getRec.Code, "public GET must succeed: %s", getRec.Body.String())
@@ -234,6 +239,7 @@ func TestGetStewardBinaryPublic_CacheValidatorsRangesAndPublishInvalidation(t *t
 	signature := fix.signContent(content, "v1.0.0", "linux", "amd64")
 	pubRec := doPublish(server, "v1.0.0", "linux", "amd64", "test-tenant", signature, content)
 	require.Equal(t, http.StatusOK, pubRec.Code)
+	approveStewardBinaryBytes(t, server, "test-tenant", "v1.0.0", "linux", "amd64", content)
 
 	request := func(rangeHeader, etag string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(
@@ -289,6 +295,11 @@ func TestGetStewardBinaryPublic_CacheValidatorsRangesAndPublishInvalidation(t *t
 	server.handlePublishStewardBinary(replaceRec, req)
 	require.Equal(t, http.StatusOK, replaceRec.Code)
 
+	// Different bytes are not covered by the first approval: the replacement is
+	// not served until it is approved itself.
+	require.Equal(t, http.StatusNotFound, request("", "").Code)
+	approveStewardBinaryBytes(t, server, "test-tenant", "v1.0.0", "linux", "amd64", replacement)
+
 	updated := request("", "")
 	require.Equal(t, http.StatusOK, updated.Code)
 	assert.Equal(t, replacement, updated.Body.Bytes())
@@ -308,6 +319,7 @@ func TestGetStewardBinaryPublic_DoesNotLeakSensitiveLabels(t *testing.T) {
 
 	pubRec := doPublish(server, "v1.0.0", "linux", "amd64", "test-tenant", sigBase64, content)
 	require.Equal(t, http.StatusOK, pubRec.Code, "publish must succeed: %s", pubRec.Body.String())
+	approveStewardBinaryBytes(t, server, "test-tenant", "v1.0.0", "linux", "amd64", content)
 
 	getRec := doGetStewardBinaryPublic(server, "v1.0.0", "linux", "amd64", "test-tenant")
 	require.Equal(t, http.StatusOK, getRec.Code, "public GET must succeed: %s", getRec.Body.String())
@@ -903,4 +915,378 @@ func TestPublishStewardBinary_SucceedsOnAuthoritativeNode(t *testing.T) {
 	sigBase64 := fix.signContent(content, "v1.2.0", "linux", "amd64")
 	rec := doPublish(server, "v1.2.0", "linux", "amd64", "test-tenant", sigBase64, content)
 	assert.Equal(t, http.StatusOK, rec.Code, "publish must succeed on an authoritative node: %s", rec.Body.String())
+}
+
+// ---- Steward binary approval (Issue #6053) ----
+
+const approveTestTenant = "tenant-a"
+
+// approveStewardBinaryBytes records an approval for the SHA-256 of content, as the
+// approve route would after a reviewer confirmed those bytes.
+func approveStewardBinaryBytes(t *testing.T, server *Server, tenantID, version, platform, arch string, content []byte) {
+	t.Helper()
+	_, err := server.approveStewardBinary(context.Background(), tenantID, version, platform, arch, hexSHA256(content), "approver@example.com")
+	require.NoError(t, err)
+}
+
+// approveFixture serves the real approve route behind the real requirePermission
+// middleware on a server with a real blob store, config store and audit manager.
+type approveFixture struct {
+	t      *testing.T
+	srv    *Server
+	fix    stewardBinaryTestFixture
+	router *mux.Router
+}
+
+func newApproveFixture(t *testing.T) *approveFixture {
+	t.Helper()
+	srv, fix := setupStewardBinaryServer(t)
+	return newApproveFixtureOn(t, srv, fix)
+}
+
+func newApproveFixtureOn(t *testing.T, srv *Server, fix stewardBinaryTestFixture) *approveFixture {
+	t.Helper()
+	srv.stewardBinaryTrustStore = fix.store
+	r := mux.NewRouter()
+	registerStewardBinaryRoutes(srv, r.PathPrefix("/api/v1").Subrouter())
+	return &approveFixture{t: t, srv: srv, fix: fix, router: r}
+}
+
+func approverPrincipal(id string) *Principal {
+	return &Principal{
+		ID: id, Assurance: session.AssuranceStrong, TenantID: approveTestTenant,
+		Permissions: []string{"installer:approve:steward"},
+	}
+}
+
+// publish publishes content through the real publish handler and returns its SHA-256.
+func (f *approveFixture) publish(version, platform, arch string, content []byte, force bool) string {
+	f.t.Helper()
+	sig := f.fix.signContent(content, version, platform, arch)
+	q := url.Values{}
+	q.Set("signature", sig)
+	if force {
+		q.Set("force", "true")
+	}
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/installer/steward-binaries/"+version+"/"+platform+"/"+arch+"?"+q.Encode(), bytes.NewReader(content))
+	req = withScopedPrincipal(req, approveTestTenant)
+	req = mux.SetURLVars(req, map[string]string{"version": version, "platform": platform, "arch": arch})
+	rec := httptest.NewRecorder()
+	f.srv.handlePublishStewardBinary(rec, req)
+	require.Equal(f.t, http.StatusOK, rec.Code, rec.Body.String())
+	return hexSHA256(content)
+}
+
+func (f *approveFixture) approve(p *Principal, version, platform, arch, body string, presence bool) *httptest.ResponseRecorder {
+	f.t.Helper()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/installer/steward-binaries/"+version+"/"+platform+"/"+arch+"/approve", strings.NewReader(body))
+	req = withPrincipal(req, p)
+	if presence {
+		req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(f.t, f.srv, p.ID, req, "installer:approve:steward"))
+	}
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	return rec
+}
+
+func (f *approveFixture) approveHash(p *Principal, version, platform, arch, sha string) *httptest.ResponseRecorder {
+	f.t.Helper()
+	return f.approve(p, version, platform, arch, `{"sha256":"`+sha+`"}`, true)
+}
+
+func (f *approveFixture) approved(version, platform, arch, sha string) bool {
+	f.t.Helper()
+	ok, err := f.srv.stewardBinaryApproved(context.Background(), approveTestTenant, version, platform, arch, sha)
+	require.NoError(f.t, err)
+	return ok
+}
+
+type approveResponse struct {
+	Data stewardBinaryApproveResponse `json:"data"`
+}
+
+func TestApproveThenDispatchSucceeds(t *testing.T) {
+	stewards := []fleet.StewardData{{ID: "steward-1", TenantID: approveTestTenant, Status: "online"}}
+	server, _ := setupUpgradeServer(t, approveTestTenant, stewards)
+	require.False(t, server.testAutoApproveStewardBinaries, "the test auto-approve flag stays off")
+	f := newApproveFixtureOn(t, server, newStewardBinaryFixture(t))
+	sha := f.publish("v1.0.0", "linux", "amd64", []byte("dispatch me"), false)
+
+	rec := doDispatchUpgrade(server, approveTestTenant, "id:steward-1", "v1.0.0", "linux", "amd64")
+	require.Equal(t, http.StatusForbidden, rec.Code, "a published binary is not dispatchable")
+	assert.Contains(t, rec.Body.String(), "NOT_APPROVED")
+
+	rec = f.approveHash(approverPrincipal("alice"), "v1.0.0", "linux", "amd64", sha)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp approveResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "alice", resp.Data.ApprovedBy)
+	assert.Equal(t, sha, resp.Data.SHA256)
+	assert.True(t, resp.Data.Created)
+	assert.False(t, resp.Data.ApprovedAt.IsZero())
+
+	rec = doDispatchUpgrade(server, approveTestTenant, "id:steward-1", "v1.0.0", "linux", "amd64")
+	assert.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+}
+
+func TestApproveRequiresPresenceToken(t *testing.T) {
+	f := newApproveFixture(t)
+	sha := f.publish("v1.0.0", "linux", "amd64", []byte("presence"), false)
+
+	// A basic-assurance human is challenged for step-up and nothing is recorded.
+	basic := approverPrincipal("basic-user")
+	basic.Assurance = session.AssuranceBasic
+	rec := f.approveHash(basic, "v1.0.0", "linux", "amd64", sha)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp")
+	assert.False(t, f.approved("v1.0.0", "linux", "amd64", sha))
+
+	// A strong-assurance human without a tap is challenged for presence.
+	rec = f.approve(approverPrincipal("alice"), "v1.0.0", "linux", "amd64", `{"sha256":"`+sha+`"}`, false)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `presence="required"`)
+	assert.False(t, f.approved("v1.0.0", "linux", "amd64", sha))
+
+	// A strong-assurance human with a tap approves.
+	rec = f.approveHash(approverPrincipal("alice"), "v1.0.0", "linux", "amd64", sha)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.True(t, f.approved("v1.0.0", "linux", "amd64", sha))
+
+	// The permission is gated at Strong, with a tap, and with no machine access.
+	req := permissionAssurance["installer:approve:steward"]
+	assert.Equal(t, session.AssuranceStrong, req.Min)
+	assert.True(t, req.RequireUserPresence)
+	assert.False(t, req.AllowMachine)
+}
+
+func TestApproveRefusesMachinePrincipal(t *testing.T) {
+	f := newApproveFixture(t)
+	sha := f.publish("v1.0.0", "linux", "amd64", []byte("machine"), false)
+
+	machine := approverPrincipal("api-key:tenant-a")
+	machine.Assurance = session.AssuranceMachine
+	for _, presence := range []bool{false, true} {
+		rec := f.approve(machine, "v1.0.0", "linux", "amd64", `{"sha256":"`+sha+`"}`, presence)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "presence=%v: %s", presence, rec.Body.String())
+		assert.Empty(t, rec.Header().Get("WWW-Authenticate"), "a machine principal is refused, not challenged")
+	}
+	assert.False(t, f.approved("v1.0.0", "linux", "amd64", sha))
+	assert.Empty(t, auditEntriesByAction(t, f.srv, auditActionStewardBinaryApprove))
+}
+
+func TestApproveUnknownBlob404(t *testing.T) {
+	f := newApproveFixture(t)
+	rec := f.approveHash(approverPrincipal("alice"), "v9.9.9", "linux", "amd64", hexSHA256([]byte("nothing")))
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "BINARY_NOT_FOUND")
+	assert.False(t, f.approved("v9.9.9", "linux", "amd64", hexSHA256([]byte("nothing"))))
+
+	// A blob published for another platform is not the blob named.
+	f.publish("v1.0.0", "linux", "amd64", []byte("linux"), false)
+	rec = f.approveHash(approverPrincipal("alice"), "v1.0.0", "windows", "amd64", hexSHA256([]byte("linux")))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestApproveIdempotentKeepsFirstApprover(t *testing.T) {
+	f := newApproveFixture(t)
+	sha := f.publish("v1.0.0", "linux", "amd64", []byte("twice"), false)
+
+	first := f.approveHash(approverPrincipal("alice"), "v1.0.0", "linux", "amd64", sha)
+	require.Equal(t, http.StatusOK, first.Code, first.Body.String())
+	var a approveResponse
+	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &a))
+	assert.True(t, a.Data.Created)
+
+	second := f.approveHash(approverPrincipal("bob"), "v1.0.0", "linux", "amd64", sha)
+	require.Equal(t, http.StatusOK, second.Code, second.Body.String())
+	var b approveResponse
+	require.NoError(t, json.Unmarshal(second.Body.Bytes(), &b))
+	assert.False(t, b.Data.Created)
+	assert.Equal(t, "alice", b.Data.ApprovedBy, "the first approver is kept")
+	assert.True(t, a.Data.ApprovedAt.Equal(b.Data.ApprovedAt), "the first approval time is kept")
+
+	rec, err := f.srv.stewardBinaryApproval(context.Background(), approveTestTenant, "v1.0.0", "linux", "amd64", sha)
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	assert.Equal(t, "alice", rec.ApprovedBy)
+}
+
+func TestApproveHashMismatchRefused(t *testing.T) {
+	f := newApproveFixture(t)
+	f.publish("v1.0.0", "linux", "amd64", []byte("reviewed bytes"), false)
+	other := hexSHA256([]byte("different bytes"))
+
+	rec := f.approveHash(approverPrincipal("alice"), "v1.0.0", "linux", "amd64", other)
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "HASH_MISMATCH")
+	assert.False(t, f.approved("v1.0.0", "linux", "amd64", other), "no record for the hash named")
+	assert.False(t, f.approved("v1.0.0", "linux", "amd64", hexSHA256([]byte("reviewed bytes"))), "nor for the stored bytes")
+	assert.Empty(t, auditEntriesByAction(t, f.srv, auditActionStewardBinaryApprove), "a refused approval is not audited as made")
+
+	for name, body := range map[string]string{
+		"missing":        `{}`,
+		"not hex":        `{"sha256":"zz"}`,
+		"short":          `{"sha256":"abcd"}`,
+		"unknown field":  `{"sha256":"` + other + `","tenant":"x"}`,
+		"trailing value": `{"sha256":"` + other + `"}{}`,
+		"not json":       `sha256=abc`,
+	} {
+		rec := f.approve(approverPrincipal("alice"), "v1.0.0", "linux", "amd64", body, true)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", name, rec.Body.String())
+	}
+	rec = f.approve(approverPrincipal("alice"), "bad", "linux", "amd64", `{"sha256":"`+other+`"}`, true)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "coordinates are validated as on publish")
+}
+
+func TestApproveUppercaseHashAccepted(t *testing.T) {
+	f := newApproveFixture(t)
+	sha := f.publish("v1.0.0", "linux", "amd64", []byte("case"), false)
+	rec := f.approveHash(approverPrincipal("alice"), "v1.0.0", "linux", "amd64", strings.ToUpper(sha))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.True(t, f.approved("v1.0.0", "linux", "amd64", sha))
+}
+
+func TestApproveFailsClosedWithoutStores(t *testing.T) {
+	f := newApproveFixture(t)
+	sha := f.publish("v1.0.0", "linux", "amd64", []byte("no store"), false)
+
+	f.srv.SetStewardBinaryApprovalStore(nil)
+	rec := f.approveHash(approverPrincipal("alice"), "v1.0.0", "linux", "amd64", sha)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), "APPROVAL_UNAVAILABLE")
+
+	wireTestStewardBinaryApprovalStore(t, f.srv)
+	f.srv.auditManager = nil
+	rec = f.approveHash(approverPrincipal("alice"), "v1.0.0", "linux", "amd64", sha)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "no audit trail, no approval")
+	assert.Contains(t, rec.Body.String(), "AUDIT_UNAVAILABLE")
+	assert.False(t, f.approved("v1.0.0", "linux", "amd64", sha))
+}
+
+func TestApprovalAudited(t *testing.T) {
+	f := newApproveFixture(t)
+	sha := f.publish("v1.2.3", "darwin", "arm64", []byte("audited"), false)
+	rec := f.approveHash(approverPrincipal("alice"), "v1.2.3", "darwin", "arm64", sha)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	entries := auditEntriesByAction(t, f.srv, auditActionStewardBinaryApprove)
+	require.Len(t, entries, 1)
+	e := entries[0]
+	assert.Equal(t, "alice", e.UserID)
+	assert.Equal(t, business.AuditResultSuccess, e.Result)
+	assert.Equal(t, "alice", e.Details["principal"])
+	assert.Equal(t, "v1.2.3", e.Details["version"])
+	assert.Equal(t, "darwin", e.Details["platform"])
+	assert.Equal(t, "arm64", e.Details["arch"])
+	assert.Equal(t, sha, e.Details["sha256"])
+}
+
+// TestForceRepublishWithDifferentBytesUnapproves: an approval is bound to the bytes
+// approved. After a force re-publish with different bytes no path hands the binary
+// out, while the old record still exists but no longer matches.
+func TestForceRepublishWithDifferentBytesUnapproves(t *testing.T) {
+	stewards := []fleet.StewardData{{
+		ID: "steward-1", TenantID: approveTestTenant, Status: "online",
+		DNAAttributes: map[string]string{"runtime_os": "linux", "runtime_arch": "amd64", "deployment_ring": "pre-release"},
+	}}
+	server, _ := setupUpgradeServer(t, approveTestTenant, stewards)
+	server.rolloutStore = newTestRolloutStore()
+	f := newApproveFixtureOn(t, server, newStewardBinaryFixture(t))
+
+	oldSHA := f.publish("v1.0.0", "linux", "amd64", []byte("original bytes"), false)
+	require.Equal(t, http.StatusOK, f.approveHash(approverPrincipal("alice"), "v1.0.0", "linux", "amd64", oldSHA).Code)
+	require.Equal(t, http.StatusOK, doGetStewardBinaryPublic(server, "v1.0.0", "linux", "amd64", approveTestTenant).Code)
+
+	newSHA := f.publish("v1.0.0", "linux", "amd64", []byte("replacement bytes"), true)
+	require.NotEqual(t, oldSHA, newSHA)
+
+	rec := doDispatchUpgrade(server, approveTestTenant, "id:steward-1", "v1.0.0", "linux", "amd64")
+	assert.Equal(t, http.StatusForbidden, rec.Code, "dispatch is refused: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "NOT_APPROVED")
+
+	assert.Equal(t, http.StatusNotFound, doGetStewardBinaryPublic(server, "v1.0.0", "linux", "amd64", approveTestTenant).Code,
+		"self-fetch no longer serves the replaced bytes")
+
+	rec = doStartRollout(server, approveTestTenant, "v1.0.0")
+	assert.Equal(t, http.StatusForbidden, rec.Code, "rollout start is refused: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "NOT_APPROVED")
+
+	old, err := server.stewardBinaryApproval(context.Background(), approveTestTenant, "v1.0.0", "linux", "amd64", oldSHA)
+	require.NoError(t, err)
+	require.NotNil(t, old, "the old record still exists")
+	assert.Equal(t, "alice", old.ApprovedBy)
+	approved, err := server.stewardBinaryApproved(context.Background(), approveTestTenant, "v1.0.0", "linux", "amd64", newSHA)
+	require.NoError(t, err)
+	assert.False(t, approved, "but it no longer matches the stored bytes")
+
+	// Approving the replacement bytes restores every path.
+	require.Equal(t, http.StatusOK, f.approveHash(approverPrincipal("alice"), "v1.0.0", "linux", "amd64", newSHA).Code)
+	assert.Equal(t, http.StatusAccepted, doDispatchUpgrade(server, approveTestTenant, "id:steward-1", "v1.0.0", "linux", "amd64").Code)
+	assert.Equal(t, http.StatusOK, doGetStewardBinaryPublic(server, "v1.0.0", "linux", "amd64", approveTestTenant).Code)
+}
+
+func TestSelfFetchUnapprovedNotFoundThenServedAfterApproval(t *testing.T) {
+	f := newApproveFixture(t)
+	content := []byte("self-fetch me")
+	sha := f.publish("v1.0.0", "linux", "amd64", content, false)
+
+	rec := doGetStewardBinaryPublic(f.srv, "v1.0.0", "linux", "amd64", approveTestTenant)
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "BINARY_NOT_FOUND")
+	assert.Empty(t, rec.Header().Get("X-CFGMS-Signature"), "an unapproved binary's metadata is not served")
+
+	cacheKey := stewardBinaryDownloadCacheKey(approveTestTenant, "v1.0.0", "linux", "amd64")
+	f.srv.publicDownloadCache.mu.Lock()
+	_, cached := f.srv.publicDownloadCache.entries[cacheKey]
+	f.srv.publicDownloadCache.mu.Unlock()
+	assert.False(t, cached, "the 404 is not cached")
+
+	require.Equal(t, http.StatusOK, f.approveHash(approverPrincipal("alice"), "v1.0.0", "linux", "amd64", sha).Code)
+	rec = doGetStewardBinaryPublic(f.srv, "v1.0.0", "linux", "amd64", approveTestTenant)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, content, rec.Body.Bytes())
+}
+
+func TestSelfFetchFailsClosedWithoutApprovalStore(t *testing.T) {
+	f := newApproveFixture(t)
+	f.publish("v1.0.0", "linux", "amd64", []byte("no store"), false)
+	f.srv.SetStewardBinaryApprovalStore(nil)
+
+	rec := doGetStewardBinaryPublic(f.srv, "v1.0.0", "linux", "amd64", approveTestTenant)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), "APPROVAL_UNAVAILABLE")
+	f.srv.publicDownloadCache.mu.Lock()
+	assert.Empty(t, f.srv.publicDownloadCache.entries, "nothing is cached for a failed check")
+	f.srv.publicDownloadCache.mu.Unlock()
+}
+
+// TestTestAutoApproveRecordsApproval: the CFGMS_SEED_TEST_API_KEYS publish path
+// approves through the same helper, as "auto-approved-test", with no blob label.
+func TestTestAutoApproveRecordsApproval(t *testing.T) {
+	f := newApproveFixture(t)
+	f.srv.testAutoApproveStewardBinaries = true
+	content := []byte("auto approved")
+	sha := f.publish("v1.0.0", "linux", "amd64", content, false)
+
+	rec, err := f.srv.stewardBinaryApproval(context.Background(), approveTestTenant, "v1.0.0", "linux", "amd64", sha)
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	assert.Equal(t, "auto-approved-test", rec.ApprovedBy)
+	assert.Equal(t, http.StatusOK, doGetStewardBinaryPublic(f.srv, "v1.0.0", "linux", "amd64", approveTestTenant).Code)
+
+	rc, meta, err := f.srv.blobStore.GetBlob(context.Background(), stewardBinaryBlobKey(approveTestTenant, "v1.0.0", "linux", "amd64"))
+	require.NoError(t, err)
+	_ = rc.Close()
+	assert.NotContains(t, meta.Labels, "approved_by", "the approval is a record, not a blob label")
+
+	// Without an approval store the test mode cannot approve and publish reports it.
+	f.srv.SetStewardBinaryApprovalStore(nil)
+	req := httptest.NewRequest(http.MethodPost, "/x?signature="+f.fix.signContent([]byte("two"), "v1.0.1", "linux", "amd64"), bytes.NewReader([]byte("two")))
+	req = withScopedPrincipal(req, approveTestTenant)
+	req = mux.SetURLVars(req, map[string]string{"version": "v1.0.1", "platform": "linux", "arch": "amd64"})
+	w := httptest.NewRecorder()
+	f.srv.handlePublishStewardBinary(w, req)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }

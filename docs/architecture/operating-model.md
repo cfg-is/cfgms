@@ -399,14 +399,15 @@ The flow enforces an approval gate before dispatch and records per-steward lifec
 
 1. **Publish**: operator calls `POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}`.
    The controller verifies the Ed25519 publisher signature and stores the blob with `publisher`, `publisher_tenant`, and `signature` labels.
-2. **Approve**: a separate operator (with `installer:approve:steward` permission) sets the `approved_by` label on the blob.
-   The controller records the approver identity in `BlobMeta.Labels["approved_by"]`.
+2. **Approve**: an operator with the `installer:approve:steward` permission (a human session with a passkey tap; API keys are refused) calls `POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}/approve` with the SHA-256 of the bytes they reviewed.
+   The controller recomputes the SHA-256 of the stored blob, refuses a mismatch (409 `HASH_MISMATCH`), and records an approval in the `steward-binary-approval` config-store namespace keyed by blob tenant, version, platform, arch and SHA-256.
+   The record holds the SHA-256, `approved_by` and `approved_at`; approving the same bytes again keeps the first record. The approval is audited.
 3. **Dispatch**: operator calls `POST /api/v1/stewards/upgrade` with a fleet selector (e.g. `id:steward-abc`), version, platform, and arch.
    The controller:
    a. Parses the selector and applies the caller's tenant scope.
    b. Resolves matching stewards via `FleetQuery.Search`; drops stewards from other tenants (403 if none remain).
-   c. Verifies the blob's `approved_by` label is non-empty (403 if missing — "published but not approved").
-   d. Recomputes SHA-256 from the stored blob bytes (does not trust `BlobMeta.Checksum`).
+   c. Recomputes SHA-256 from the stored blob bytes (does not trust `BlobMeta.Checksum`).
+   d. Requires an approval record for that recomputed SHA-256 (403 `NOT_APPROVED` if missing — "published but not approved"; 503 `APPROVAL_UNAVAILABLE` if the approval store cannot be read).
    e. Checks for non-terminal upgrade records per steward; returns 409 if any exist.
    f. Creates one `UpgradeRecord` per steward (status: `dispatched`) with publisher provenance fields (`Publisher`, `BundleSignature`, `SignatureDigest`) and a 32-byte `OperationNonce` for replay defense.
    g. Fans out `CommandPushStewardBinary` to each steward via the control plane (fire-and-forget goroutine).
@@ -421,11 +422,15 @@ published ──► approved ──► dispatchable
        blocked         unblocked
 ```
 
-| Blob label       | Meaning |
-|-----------------|---------|
-| (absent)         | Not yet published (blob does not exist) |
-| `published_by`   | Binary has been published; awaiting approval |
-| `approved_by`    | Binary is approved and dispatchable |
+| State | Meaning |
+|-------|---------|
+| no blob | Not yet published |
+| blob, no approval record for its SHA-256 | Published; awaiting approval |
+| blob with an approval record for its SHA-256 | Approved and dispatchable |
+
+The approval is a record bound to the exact bytes approved, not a blob label. A `force=true` re-publish with different bytes hashes differently, so the earlier record no longer matches and the binary is unapproved until the new bytes are approved.
+
+Every path that hands a steward binary to a steward requires a matching approval record: upgrade dispatch and rollback, rollout start (every platform and arch among the stewards the rollout's tenant matches must have an approved binary for the target version, otherwise 403 `NOT_APPROVED` and no rollout is created) and the steward self-fetch (`GET /api/v1/public/steward-binaries/...` answers 404 for unapproved bytes). With no approval store, or when an approval read fails, each of these refuses (503 `APPROVAL_UNAVAILABLE`).
 
 ### UpgradeRecord lifecycle
 

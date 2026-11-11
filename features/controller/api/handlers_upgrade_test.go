@@ -130,14 +130,15 @@ var _ business.UpgradeStore = (*testUpgradeStore)(nil)
 func setupUpgradeServer(t *testing.T, tenantID string, stewards []fleet.StewardData) (*Server, *testUpgradeStore) {
 	t.Helper()
 	server, _ := setupTestServerWithBlobStore(t)
+	wireTestStewardBinaryApprovalStore(t, server)
 	store := newTestUpgradeStore()
 	server.upgradeStore = store
 	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: stewards})
 	return server, store
 }
 
-// publishApprovedBinary puts a steward binary blob with approved_by label set.
-// This simulates a binary that has been published AND approved for dispatch.
+// publishApprovedBinary puts a steward binary blob and records an approval for its
+// SHA-256. This simulates a binary that has been published AND approved for dispatch.
 func publishApprovedBinary(t *testing.T, server *Server, tenantID, version, platform, arch string) []byte {
 	t.Helper()
 	content := []byte(fmt.Sprintf("cfgms-steward-binary-%s-%s-%s", version, platform, arch))
@@ -163,15 +164,19 @@ func publishApprovedBinary(t *testing.T, server *Server, tenantID, version, plat
 			"signature":        base64.RawURLEncoding.EncodeToString(fakeSig),
 			"signature_digest": hex.EncodeToString(sigDigest[:]),
 			"sha256":           hex.EncodeToString(sum[:]),
-			"approved_by":      "approver@example.com",
 		},
 	}
 	err := server.blobStore.PutBlob(context.Background(), key, bytes.NewReader(content), meta)
 	require.NoError(t, err, "publishApprovedBinary: PutBlob must not fail")
+	if server.StewardBinaryApprovalStore() == nil {
+		wireTestStewardBinaryApprovalStore(t, server)
+	}
+	_, err = server.approveStewardBinary(context.Background(), tenantID, version, platform, arch, hex.EncodeToString(sum[:]), "approver@example.com")
+	require.NoError(t, err, "publishApprovedBinary: recording the approval must not fail")
 	return content
 }
 
-// publishUnapprovedBinary puts a steward binary blob WITHOUT approved_by label.
+// publishUnapprovedBinary puts a steward binary blob with no approval record.
 func publishUnapprovedBinary(t *testing.T, server *Server, tenantID, version, platform, arch string) {
 	t.Helper()
 	content := []byte(fmt.Sprintf("cfgms-steward-binary-%s-%s-%s-unapproved", version, platform, arch))
@@ -190,7 +195,7 @@ func publishUnapprovedBinary(t *testing.T, server *Server, tenantID, version, pl
 			"publisher_tenant": tenantID,
 			"signature":        base64.RawURLEncoding.EncodeToString(fakeSig),
 			"signature_digest": hex.EncodeToString(sigDigest[:]),
-			// approved_by intentionally absent
+			// no approval record is written
 		},
 	}
 	err := server.blobStore.PutBlob(context.Background(), key, bytes.NewReader(content), meta)
@@ -326,7 +331,7 @@ func TestDispatch_ExplicitTenantPrefix_ScopesToSubtree(t *testing.T) {
 }
 
 // TestDispatch_RejectsUnapprovedBlob verifies that a blob in published state
-// (approved_by label absent) returns 403.
+// (no approval record) returns 403.
 func TestDispatch_RejectsUnapprovedBlob(t *testing.T) {
 	stewards := []fleet.StewardData{
 		{ID: "steward-1", TenantID: "tenant-a", Status: "online"},
@@ -1187,8 +1192,8 @@ func TestAdminDispatch_EndToEndDeliveryPath_DefaultNamespace(t *testing.T) {
 	pubRec := publishWithPrincipal(server, withAdminPrincipal, "v0.5.12", "linux", "amd64", sigBase64, content)
 	require.Equal(t, http.StatusOK, pubRec.Code, "admin publish must succeed: %s", pubRec.Body.String())
 
-	// The publish path does not auto-approve; dispatch requires approved_by. Re-publish the
-	// same content with the approved label into "default" so dispatch's approval gate passes.
+	// The publish path does not auto-approve; dispatch requires an approval record. Re-publish the
+	// same content with an approval record into "default" so dispatch's approval gate passes.
 	approvedContent := publishApprovedBinary(t, server, "default", "v0.5.12", "linux", "amd64")
 
 	// 2. Admin dispatches the upgrade.

@@ -21,6 +21,15 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
+// handlersupgradeCharPutApprovedBlob stores a steward binary with explicit labels and
+// records an approval for the SHA-256 of its bytes.
+func handlersupgradeCharPutApprovedBlob(t *testing.T, server *Server, tenantID, version string, content []byte, labels map[string]string) {
+	t.Helper()
+	handlersupgradeCharPutBlob(t, server, tenantID, version, content, labels)
+	_, err := server.approveStewardBinary(context.Background(), tenantID, version, "linux", "amd64", hexSHA256(content), "approver@example.com")
+	require.NoError(t, err)
+}
+
 // handlersupgradeCharPutBlob stores a steward binary with explicit labels.
 func handlersupgradeCharPutBlob(t *testing.T, server *Server, tenantID, version string, content []byte, labels map[string]string) {
 	t.Helper()
@@ -50,8 +59,7 @@ func handlersupgradeCharServer(t *testing.T) (*Server, *testUpgradeStore) {
 func TestHandlersUpgradeChar_Dispatch_ChecksumRecomputedFromBlob(t *testing.T) {
 	server, store := handlersupgradeCharServer(t)
 	content := []byte("real-content")
-	handlersupgradeCharPutBlob(t, server, "tenant-a", "v0.5.12", content, map[string]string{
-		"approved_by":      "approver@example.com",
+	handlersupgradeCharPutApprovedBlob(t, server, "tenant-a", "v0.5.12", content, map[string]string{
 		"publisher":        "cfgms",
 		"signature":        "AQID",
 		"signature_digest": "dig",
@@ -70,7 +78,7 @@ func TestHandlersUpgradeChar_Dispatch_ChecksumRecomputedFromBlob(t *testing.T) {
 	assert.Equal(t, "api_key", recs[0].InitiatedBy.AuthMethod)
 }
 
-func TestHandlersUpgradeChar_Dispatch_MissingApprovedLabelRefused(t *testing.T) {
+func TestHandlersUpgradeChar_Dispatch_MissingApprovalRecordRefused(t *testing.T) {
 	server, store := handlersupgradeCharServer(t)
 	handlersupgradeCharPutBlob(t, server, "tenant-a", "v0.5.12", []byte("x"), map[string]string{"signature": "AQID"})
 	rec := doDispatchUpgrade(server, "tenant-a", "id:steward-1", "v0.5.12", "linux", "amd64")
@@ -82,8 +90,8 @@ func TestHandlersUpgradeChar_Dispatch_MissingApprovedLabelRefused(t *testing.T) 
 
 func TestHandlersUpgradeChar_Dispatch_BadSignatureLabel500(t *testing.T) {
 	server, _ := handlersupgradeCharServer(t)
-	handlersupgradeCharPutBlob(t, server, "tenant-a", "v0.5.12", []byte("x"),
-		map[string]string{"approved_by": "a", "signature": "!!not-base64!!"})
+	handlersupgradeCharPutApprovedBlob(t, server, "tenant-a", "v0.5.12", []byte("x"),
+		map[string]string{"signature": "!!not-base64!!"})
 	rec := doDispatchUpgrade(server, "tenant-a", "id:steward-1", "v0.5.12", "linux", "amd64")
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Contains(t, rec.Body.String(), "SIGNATURE_DECODE_ERROR")
@@ -178,8 +186,7 @@ func TestHandlersUpgradeChar_Rollback_ChecksumRecomputedAndRecordShape(t *testin
 	server, store := handlersupgradeCharServer(t)
 	publishApprovedBinary(t, server, "tenant-a", "v0.5.12", "linux", "amd64")
 	content := []byte("rollback-content")
-	handlersupgradeCharPutBlob(t, server, "tenant-a", "v0.5.11", content, map[string]string{
-		"approved_by":      "a",
+	handlersupgradeCharPutApprovedBlob(t, server, "tenant-a", "v0.5.11", content, map[string]string{
 		"publisher":        "cfgms",
 		"signature":        "AQID",
 		"signature_digest": "dig",
@@ -203,7 +210,7 @@ func TestHandlersUpgradeChar_Rollback_ChecksumRecomputedAndRecordShape(t *testin
 	assert.Equal(t, []byte{1, 2, 3}, rb.BundleSignature)
 }
 
-func TestHandlersUpgradeChar_Rollback_MissingApprovedAndBadSignature(t *testing.T) {
+func TestHandlersUpgradeChar_Rollback_MissingApprovalAndBadSignature(t *testing.T) {
 	server, store := handlersupgradeCharServer(t)
 	publishApprovedBinary(t, server, "tenant-a", "v0.5.12", "linux", "amd64")
 	id := handlersupgradeCharCommit(t, server, store)
@@ -213,8 +220,8 @@ func TestHandlersUpgradeChar_Rollback_MissingApprovedAndBadSignature(t *testing.
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NOT_APPROVED")
 
-	handlersupgradeCharPutBlob(t, server, "tenant-a", "v0.5.9", []byte("x"),
-		map[string]string{"approved_by": "a", "signature": "!!bad!!"})
+	handlersupgradeCharPutApprovedBlob(t, server, "tenant-a", "v0.5.9", []byte("x"),
+		map[string]string{"signature": "!!bad!!"})
 	rec = doUpgradeRollback(server, "tenant-a", id, "v0.5.9")
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Contains(t, rec.Body.String(), "SIGNATURE_DECODE_ERROR")

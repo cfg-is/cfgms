@@ -176,9 +176,19 @@ func TestFleetStewardUpgradeBrokenBinaryRollback(t *testing.T) {
 	client := insecureHTTPClient()
 	waitForControllerAPI(t, client)
 
+	// Approval is bound to the SHA-256 of the stored bytes, so the corrupted bytes
+	// written below only reach the steward if they were approved. Publish the
+	// corrupted content first (the test seed mode records an approval for its hash),
+	// then force re-publish the known-good binary so the stored signature is the one
+	// for the original content. The approval record for the corrupted hash outlives
+	// the re-publish; the corruption step then puts those bytes back in the blob.
+	corruptedContent := []byte("CORRUPTED-BY-E2E-TEST")
+	code := publishStewardBin(t, client, "v0.5.100-broken", corruptedContent, true)
+	require.Equal(t, http.StatusOK, code, "publish of the to-be-corrupted bytes must return 200")
+
 	// Publish a known-good binary (force=true for idempotency on reruns).
 	origContent := []byte("cfgms-steward-upgrade-e2e-broken-binary-original-content")
-	code := publishStewardBin(t, client, "v0.5.100-broken", origContent, true)
+	code = publishStewardBin(t, client, "v0.5.100-broken", origContent, true)
 	require.Equal(t, http.StatusOK, code, "publish v0.5.100-broken must return 200")
 
 	// Corrupt the stored blob. The metadata signature remains valid for the ORIGINAL
@@ -190,7 +200,6 @@ func TestFleetStewardUpgradeBrokenBinaryRollback(t *testing.T) {
 	// We update the checksum so the read succeeds; the controller then recomputes
 	// SHA-256 from the corrupted content and sends it with the original signature.
 	// The steward's Ed25519 verification fails → EventCommandFailed → status "failed".
-	corruptedContent := []byte("CORRUPTED-BY-E2E-TEST")
 	dockerExecRoot(t, "fleet-controller", "sh", "-c",
 		"printf 'CORRUPTED-BY-E2E-TEST' > "+blobPath("v0.5.100-broken"))
 	corruptedSum := sha256.Sum256(corruptedContent)

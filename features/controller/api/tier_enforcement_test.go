@@ -210,6 +210,8 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"DELETE", "/api/v1/automation/approvals/scripts/test-script/1.0.0/test-hash", "content-approval:revoke"},
 	// Unattended rollout cell setting (Issue #6065): presence-gated, no machine access.
 	{"PUT", "/api/v1/rollout-settings/unattended", "rollout-automation:set"},
+	// Steward binary approval (Issue #6053): presence-gated, no machine access.
+	{"POST", "/api/v1/installer/steward-binaries/v1.0.0/linux/amd64/approve", "installer:approve:steward"},
 	// Rollout credential mint (Issue #6066): presence-gated, no machine access.
 	{"POST", "/api/v1/rollout-credentials", "rollout-credential:create"},
 }

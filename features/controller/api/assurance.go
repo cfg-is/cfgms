@@ -306,6 +306,10 @@ var permissionAssurance = map[string]Requirement{
 	"installer:upload":          {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // PUT /installer/artifacts/{platform}/{arch}
 	"installer:delete":          {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // DELETE /installer/artifacts/{platform}/{arch}
 	"installer:publish:steward": {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // steward binary publish (routes_steward_binaries.go)
+	// installer:approve:steward gates the steward binary approve route (Issue #6053). The
+	// approval is what lets a binary reach stewards, so it is a human decision: a tap, and
+	// no machine principal (AllowMachine is not set).
+	"installer:approve:steward": {Min: session.AssuranceStrong, RequireUserPresence: true},
 	// installer:dispatch:steward gates POST /rollout (start), POST /rollout/{rollout_id}/halt,
 	// POST /stewards/upgrade (dispatch) and POST /stewards/upgrade/{upgrade_id}/rollback.
 	// Halt and rollback are stop actions used during an incident and stay fast: no tap.
