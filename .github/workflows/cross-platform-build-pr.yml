@@ -80,6 +80,12 @@ jobs:
   # yields `true`. macOS runs on the PR side only, so a wrongly skipped leg
   # would ship untested code. The `Build Gate` accepts a skipped macOS leg only
   # through scripts/macos-gate-rule.sh.
+  #
+  # `postgres` (Issue #6133) is `true` when the PR can affect the real-Postgres
+  # database provider tests and `false` only when scripts/pr-postgres-filter.sh
+  # ran to completion over a non-empty list and matched no trigger path. It
+  # fails closed the same way. It gates only the advisory
+  # `postgres-integration-pr` job, which is not a `Build Gate` input.
   changes:
     permissions:
       contents: read
@@ -89,6 +95,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       macos: ${{ steps.macos.outputs.macos }}
+      postgres: ${{ steps.postgres.outputs.postgres }}
     steps:
       # Checkout (the PR merge ref) and Go are only for the macOS filter below,
       # which evaluates the GOOS=darwin package closure with `go list`.
@@ -247,6 +254,49 @@ jobs:
           if [ "$filter_status" -ne 0 ] || { [ "$result" != "macos=true" ] && [ "$result" != "macos=false" ]; }; then
             echo "::warning::macOS filter exited ${filter_status} with unexpected output '${result}' — running the macOS legs"
             result="macos=true"
+          fi
+          echo "$result"
+          echo "$result" >> "$GITHUB_OUTPUT"
+
+      # Decide whether the real-Postgres database provider job runs (Issue
+      # #6133). FAILS CLOSED: every path that is not a completed "no trigger
+      # path changed" run of scripts/pr-postgres-filter.sh emits postgres=true.
+      - name: Detect database provider changes
+        id: postgres
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CODE: ${{ steps.filter.outputs.code }}
+          CODE_DEFECT: ${{ steps.filter.outputs.defect }}
+        run: |
+          set -uo pipefail
+
+          # A defective or unresolved file listing leaves changed_files.txt
+          # untrustworthy: run the job rather than guess.
+          if { [ "$CODE" != "true" ] && [ "$CODE" != "false" ]; } || [ "$CODE_DEFECT" = "true" ]; then
+            echo "::warning::file listing was unresolved or defective (code=${CODE:-<unset>}, defect=${CODE_DEFECT:-<unset>}) — running the Postgres job"
+            echo "postgres=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Pre-rename names, so a file moved out of a trigger path still
+          # triggers. Separate from changed_files.txt, which the completeness
+          # check above compares against the PR's file count.
+          pg_rename_status=0
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+            --paginate --jq '.[] | select(.previous_filename != null) | .previous_filename' \
+            > pg_renamed_files.txt || pg_rename_status=$?
+          if [ "$pg_rename_status" -ne 0 ]; then
+            echo "::warning::gh api exited ${pg_rename_status} listing renamed files — running the Postgres job"
+            echo "postgres=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          pg_filter_status=0
+          result=$(bash scripts/pr-postgres-filter.sh --files changed_files.txt --renamed pg_renamed_files.txt) || pg_filter_status=$?
+          if [ "$pg_filter_status" -ne 0 ] || { [ "$result" != "postgres=true" ] && [ "$result" != "postgres=false" ]; }; then
+            echo "::warning::Postgres filter exited ${pg_filter_status} with unexpected output '${result}' — running the Postgres job"
+            result="postgres=true"
           fi
           echo "$result"
           echo "$result" >> "$GITHUB_OUTPUT"
@@ -1048,6 +1098,66 @@ jobs:
 
     - name: Run Full E2E Test Suite (no Docker)
       run: go test -v -race -timeout=20m ./test/e2e/... -run "TestE2EScenarios"
+
+  # Real-Postgres run of the database provider on pull requests that change it
+  # (Issue #6133). Until now these tests ran only in the merge queue
+  # (cross-platform-build.yml `postgres-integration`), so a database PR reached
+  # review with its Postgres tests never executed.
+  #
+  # ADVISORY: this job is deliberately NOT in `build-gate-pr-stub`'s `needs:`
+  # and does not carry the name of any required context. A skipped run
+  # therefore satisfies nothing and the queue-side `Build Gate` topology is
+  # untouched. Making it required is a separate decision.
+  #
+  # Setup is the same make targets as the queue job; the credentials are
+  # generated into `.env.test` at run time, so no repository secret is used and
+  # the job also runs on fork pull requests.
+  postgres-integration-pr:
+    name: Postgres Integration Tests (PR)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    if: needs.changes.outputs.postgres == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234), same key as the queue job.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Start Docker test services
+      run: make test-integration-setup
+
+    - name: Run Postgres-backed database provider tests
+      run: |
+        set -a
+        source .env.test
+        set +a
+        go test -v -race -p 1 -tags=integration -timeout=20m ./pkg/storage/providers/database/...
+
+    - name: Stop Docker test services
+      if: always()
+      run: make test-integration-cleanup
 
   # PR-side `Build Gate` context. Docker integration tests and the queue's own
   # re-validation of the merge commit remain deferred to the merge queue, where
