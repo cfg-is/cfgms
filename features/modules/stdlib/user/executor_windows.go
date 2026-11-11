@@ -38,6 +38,7 @@ var (
 	procNetLocalGroupAddMembers = modnetapi32.NewProc("NetLocalGroupAddMembers")
 	procNetLocalGroupDelMembers = modnetapi32.NewProc("NetLocalGroupDelMembers")
 	procNetUserAdd              = modnetapi32.NewProc("NetUserAdd")
+	procNetUserDel              = modnetapi32.NewProc("NetUserDel")
 	procNetUserSetInfo          = modnetapi32.NewProc("NetUserSetInfo")
 )
 
@@ -58,6 +59,8 @@ const (
 )
 
 // userInfo1 is USER_INFO_1, the level NetUserAdd creates an account with.
+//
+//duplication:justified pkg/testutil/winacct/winacct_windows.go -- the test helper package cannot import this unexported production type, and production code must not import a test helper
 type userInfo1 struct {
 	name        *uint16
 	password    *uint16
@@ -326,7 +329,8 @@ func generatePassword() ([]byte, error) {
 // createLocalUser creates username with NetUserAdd (USER_INFO_1) and a random
 // password nobody knows, disabled if desired.Locked, then sets the full name
 // (possibly empty) with NetUserSetInfo and adds the account to the built-in
-// Users group, as net user /add did. The password is never logged,
+// Users group, as net user /add did. If either step fails, the new account is
+// deleted again. The password is never logged,
 // returned or stored, and its buffers are zeroed before returning.
 func createLocalUser(username string, desired userState) error {
 	name, err := windows.UTF16PtrFromString(username)
@@ -364,6 +368,22 @@ func createLocalUser(username string, desired userState) error {
 		return fmt.Errorf("create local user %s (parm_err %d): %w", username, parmErr, windows.Errno(r))
 	}
 
+	// The account now exists. If configuring it fails, remove it again so the
+	// next run creates it cleanly instead of finding a half-configured account
+	// that setState treats as existing.
+	if err := configureCreatedUser(name, username, desired); err != nil {
+		if r, _, _ := procNetUserDel.Call(0, uintptr(unsafe.Pointer(name))); r != nerrSuccess {
+			return fmt.Errorf("%w; removing the partly created account also failed: %w", err, windows.Errno(r))
+		}
+		return err
+	}
+	return nil
+}
+
+// configureCreatedUser sets the full name (possibly empty) of an account
+// createLocalUser just created and adds it to the built-in Users group.
+func configureCreatedUser(name *uint16, username string, desired userState) error {
+	var parmErr uint32
 	// Always set the full name, even when none is declared: USER_INFO_1 has
 	// no full-name field, and the account would otherwise not read back with
 	// the declared (possibly empty) full name.
@@ -372,7 +392,7 @@ func createLocalUser(username string, desired userState) error {
 		return fmt.Errorf("invalid full name for %s: %w", username, err)
 	}
 	fn := userInfo1011{fullName: fullName}
-	r, _, _ = procNetUserSetInfo.Call(0, uintptr(unsafe.Pointer(name)), userInfoLevelFull,
+	r, _, _ := procNetUserSetInfo.Call(0, uintptr(unsafe.Pointer(name)), userInfoLevelFull,
 		uintptr(unsafe.Pointer(&fn)), uintptr(unsafe.Pointer(&parmErr)))
 	runtime.KeepAlive(&fn)
 	if r != nerrSuccess {

@@ -87,7 +87,7 @@ modules:
 
 - All usernames and group names are validated against a strict pattern (`^[a-zA-Z_][a-zA-Z0-9_.-]{0,31}$`) before being passed to OS commands, preventing flag injection and command injection.
 - The module never accepts a password from configuration, and never logs, stores, returns or transmits password material. `has_credential` is a read-only observation.
-- On Windows, a new account is created with `NetUserAdd` and a 32-character random password from `crypto/rand` that nobody knows, so no account is ever created with a blank password. The password exists only in memory for the call and its buffers are zeroed afterwards. A new account is added to the built-in Users group (S-1-5-32-545).
+- On Windows, a new account is created with `NetUserAdd` and a 32-character random password from `crypto/rand` that nobody knows, so no account is ever created with a blank password. The password exists only in memory for the call and its buffers are zeroed afterwards. A new account is added to the built-in Users group (S-1-5-32-545). If setting the full name or the Users membership fails after the account was created, the account is deleted again so the next run recreates it.
 - On Linux, `userdel -r` removes the user's home directory. Ensure data is backed up before removing accounts.
 - On Linux and macOS, group removal (removing a user from a group that is no longer in `groups`) is not performed in v1 to avoid disrupting groups managed outside `cfg`.
 - On Windows, a non-empty `groups` list is exclusive: the user is added to every declared group and removed from every other group it is a direct member of. Two exceptions apply:
