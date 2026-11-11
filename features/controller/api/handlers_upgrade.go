@@ -497,6 +497,22 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		s.fanOutUpgradeCommands(created, params, req.Version)
 	}
 
+	s.emitOperatorDeployEvent(r, principal, rolloutAuditEvent{
+		tenantID:     callerTenantID,
+		action:       auditUpgradeDispatched,
+		markerKind:   markerKindUpgradeDispatch,
+		resourceType: "upgrade",
+		resourceID:   returnUpgradeID,
+		revision:     req.Version,
+		severity:     business.AuditSeverityHigh,
+		details: map[string]interface{}{
+			"upgrade_id":    returnUpgradeID,
+			"version":       req.Version,
+			"steward_count": len(created),
+			"tenant_id":     callerTenantID,
+		},
+	})
+
 	s.writeResponse(w, http.StatusAccepted, dispatchUpgradeResponse{
 		UpgradeID:    returnUpgradeID,
 		StewardCount: len(created),
@@ -692,7 +708,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 
 	// An empty callerTenantID (mTLS admin) has unrestricted rollback access; only a
 	// NON-admin caller with no tenant is a genuine auth failure (Issue #1999).
-	_, callerTenantID, ok := s.authRunAccess(w, r)
+	principal, callerTenantID, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -739,6 +755,23 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 		params := s.pushStewardBinaryParams(req.Version, original.Platform, original.Arch, rollbackBlobTenant, bin)
 		s.publishRollbackCommand(original.StewardID, rollbackUpgradeID, req.Version, params)
 	}
+
+	s.emitOperatorDeployEvent(r, principal, rolloutAuditEvent{
+		tenantID:     callerTenantID,
+		action:       auditUpgradeRolledBack,
+		markerKind:   markerKindUpgradeRollback,
+		resourceType: "upgrade",
+		resourceID:   rollbackUpgradeID,
+		revision:     req.Version,
+		severity:     business.AuditSeverityHigh,
+		details: map[string]interface{}{
+			"upgrade_id":          rollbackUpgradeID,
+			"original_upgrade_id": upgradeID,
+			"version":             req.Version,
+			"steward_count":       1,
+			"tenant_id":           callerTenantID,
+		},
+	})
 
 	s.writeResponse(w, http.StatusAccepted, dispatchUpgradeResponse{
 		UpgradeID:    rollbackUpgradeID,
