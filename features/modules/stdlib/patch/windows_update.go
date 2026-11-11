@@ -102,9 +102,13 @@ func searchWithContext(ctx context.Context, searcher *ole.IDispatch, criteria st
 		return nil, fmt.Errorf("search not started: %w", err)
 	}
 
-	// A Go nil is marshalled as VT_NULL, which the WUA API accepts for the
-	// onCompleted and state arguments (no callback object is needed).
-	jobVariant, err := oleutil.CallMethod(searcher, "BeginSearch", criteria, nil, nil)
+	// onCompleted is an ISearchCompletedCallback and WUA rejects VT_NULL for it
+	// with DISP_E_TYPEMISMATCH, which is what a bare Go nil marshals to. A typed
+	// nil *ole.IDispatch marshals to VT_DISPATCH with a null pointer (the
+	// scripting "Nothing"), meaning no callback; completion is polled instead.
+	// The state argument is unused and takes the same null object.
+	var noCallback *ole.IDispatch
+	jobVariant, err := oleutil.CallMethod(searcher, "BeginSearch", criteria, noCallback, noCallback)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin search: %w", err)
 	}
