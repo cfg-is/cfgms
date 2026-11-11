@@ -6,9 +6,11 @@
 package user
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"unsafe"
@@ -18,9 +20,10 @@ import (
 
 // windowsExecutor manages local user accounts on Windows. State is read and
 // group membership is changed through the in-process NetUser*/NetLocalGroup*
-// APIs, which are locale-independent; account creation, deletion, full name
-// and enabled state are written with net.exe. All write operations require
-// Administrator privileges.
+// APIs, which are locale-independent. Accounts are created in-process with
+// NetUserAdd and a random password nobody knows; deletion, and the full name
+// and enabled state of an existing account, are written with net.exe. All
+// write operations require Administrator privileges.
 type windowsExecutor struct{}
 
 func newExecutor() userExecutor {
@@ -34,6 +37,8 @@ var (
 	procNetUserGetLocalGroups   = modnetapi32.NewProc("NetUserGetLocalGroups")
 	procNetLocalGroupAddMembers = modnetapi32.NewProc("NetLocalGroupAddMembers")
 	procNetLocalGroupDelMembers = modnetapi32.NewProc("NetLocalGroupDelMembers")
+	procNetUserAdd              = modnetapi32.NewProc("NetUserAdd")
+	procNetUserSetInfo          = modnetapi32.NewProc("NetUserSetInfo")
 )
 
 const (
@@ -44,8 +49,30 @@ const (
 	maxPreferredLength   = 0xFFFFFFFF // MAX_PREFERRED_LENGTH
 	ufAccountDisable     = 0x0002     // UF_ACCOUNTDISABLE
 	ufPasswdNotRequired  = 0x0020     // UF_PASSWD_NOTREQD
+	ufScript             = 0x0001     // UF_SCRIPT
+	ufNormalAccount      = 0x0200     // UF_NORMAL_ACCOUNT
+	userPrivUser         = 1          // USER_PRIV_USER
 	userInfoLevelWithSID = 23
+	userInfoLevelCreate  = 1
+	userInfoLevelFull    = 1011
 )
+
+// userInfo1 is USER_INFO_1, the level NetUserAdd creates an account with.
+type userInfo1 struct {
+	name        *uint16
+	password    *uint16
+	passwordAge uint32
+	priv        uint32
+	homeDir     *uint16
+	comment     *uint16
+	flags       uint32
+	scriptPath  *uint16
+}
+
+// userInfo1011 is USER_INFO_1011 (full name).
+type userInfo1011 struct {
+	fullName *uint16
+}
 
 // userInfo23 is USER_INFO_23.
 type userInfo23 struct {
@@ -155,7 +182,8 @@ func builtinUsersGroupName() (string, error) {
 
 // setState creates, modifies, or deletes the local user account to match desired.
 // All write operations require Administrator privileges. HasCredential in desired
-// is always ignored — this module never manages password material.
+// is always ignored: a new account gets a random password that is never
+// stored or returned, and the module never sets a usable password.
 //
 // Direct local group membership converges to desired.Groups: declared groups
 // are added and every other direct group is removed, except the built-in Users
@@ -177,17 +205,12 @@ func (e *windowsExecutor) setState(username string, desired userState) error {
 	}
 
 	if !current.Exists {
-		// Create account with no password (password management is out of scope).
-		args := []string{"user", username, "/add", "/active:yes"}
-		if desired.FullName != "" {
-			args = append(args, "/fullname:"+desired.FullName)
-		}
-		if out, err := exec.Command("net", args...).CombinedOutput(); err != nil { // #nosec G204 - username validated by caller
-			return fmt.Errorf("net user %s /add: %w (output: %s)", username, err, strings.TrimSpace(string(out)))
+		if err := createLocalUser(username, desired); err != nil {
+			return err
 		}
 		current.Exists = true
 		current.FullName = desired.FullName
-		current.Locked = false
+		current.Locked = desired.Locked
 	} else if desired.FullName != current.FullName {
 		if out, err := exec.Command("net", "user", username, "/fullname:"+desired.FullName).CombinedOutput(); err != nil { // #nosec G204 - username validated by caller
 			return fmt.Errorf("net user %s /fullname: %w (output: %s)", username, err, strings.TrimSpace(string(out)))
@@ -235,6 +258,142 @@ func (e *windowsExecutor) setState(username string, desired userState) error {
 		if missing, extra := groupChanges(after.Groups, desired.Groups, usersGroup); len(missing) > 0 || len(extra) > 0 {
 			return fmt.Errorf("local groups of %s did not converge: missing %v, not declared %v", username, missing, extra)
 		}
+	}
+	return nil
+}
+
+// passwordLength is the length of the random password a new account is created
+// with. Nobody learns it; it exists so that no account is created blank.
+const passwordLength = 32
+
+// Character classes for generatePassword. Every generated password contains at
+// least one character from each class.
+var passwordClasses = [...]string{
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+	"abcdefghijklmnopqrstuvwxyz",
+	"0123456789",
+	"!#$%&()*+,-./:;<=>?@[]^_{}~",
+}
+
+// randIndex returns a uniformly distributed integer in [0, n) from crypto/rand,
+// using rejection sampling so that no value is favoured. n must be in [1, 256].
+func randIndex(n int) (int, error) {
+	limit := 256 - 256%n
+	var b [1]byte
+	for {
+		if _, err := rand.Read(b[:]); err != nil {
+			return 0, err
+		}
+		if int(b[0]) < limit {
+			return int(b[0]) % n, nil
+		}
+	}
+}
+
+// generatePassword returns passwordLength random ASCII characters from
+// crypto/rand containing at least one upper-case letter, lower-case letter,
+// digit and symbol. The caller must zero the result after use; it is a byte
+// slice so that it never becomes an immutable Go string.
+func generatePassword() ([]byte, error) {
+	all := strings.Join(passwordClasses[:], "")
+	pw := make([]byte, passwordLength)
+	fail := func(err error) ([]byte, error) {
+		clear(pw)
+		return nil, fmt.Errorf("generate password: %w", err)
+	}
+	for i := range pw {
+		set := all
+		if i < len(passwordClasses) {
+			set = passwordClasses[i]
+		}
+		j, err := randIndex(len(set))
+		if err != nil {
+			return fail(err)
+		}
+		pw[i] = set[j]
+	}
+	// Fisher-Yates shuffle so the guaranteed classes are not at fixed positions.
+	for i := len(pw) - 1; i > 0; i-- {
+		j, err := randIndex(i + 1)
+		if err != nil {
+			return fail(err)
+		}
+		pw[i], pw[j] = pw[j], pw[i]
+	}
+	return pw, nil
+}
+
+// createLocalUser creates username with NetUserAdd (USER_INFO_1) and a random
+// password nobody knows, disabled if desired.Locked, then sets the full name
+// (possibly empty) with NetUserSetInfo and adds the account to the built-in
+// Users group, as net user /add did. The password is never logged,
+// returned or stored, and its buffers are zeroed before returning.
+func createLocalUser(username string, desired userState) error {
+	name, err := windows.UTF16PtrFromString(username)
+	if err != nil {
+		return fmt.Errorf("invalid user name %q: %w", username, err)
+	}
+	pw, err := generatePassword()
+	if err != nil {
+		return err
+	}
+	defer clear(pw)
+	// ASCII only, so each byte is one UTF-16 code unit; NUL-terminated.
+	pw16 := make([]uint16, len(pw)+1)
+	defer clear(pw16)
+	for i, c := range pw {
+		pw16[i] = uint16(c)
+	}
+
+	flags := uint32(ufScript | ufNormalAccount)
+	if desired.Locked {
+		flags |= ufAccountDisable
+	}
+	info := userInfo1{
+		name:     name,
+		password: &pw16[0],
+		priv:     userPrivUser,
+		flags:    flags,
+	}
+	var parmErr uint32
+	r, _, _ := procNetUserAdd.Call(0, userInfoLevelCreate,
+		uintptr(unsafe.Pointer(&info)), uintptr(unsafe.Pointer(&parmErr)))
+	runtime.KeepAlive(&info)
+	runtime.KeepAlive(pw16)
+	if r != nerrSuccess {
+		return fmt.Errorf("create local user %s (parm_err %d): %w", username, parmErr, windows.Errno(r))
+	}
+
+	// Always set the full name, even when none is declared: USER_INFO_1 has
+	// no full-name field, and the account would otherwise not read back with
+	// the declared (possibly empty) full name.
+	fullName, err := windows.UTF16PtrFromString(desired.FullName)
+	if err != nil {
+		return fmt.Errorf("invalid full name for %s: %w", username, err)
+	}
+	fn := userInfo1011{fullName: fullName}
+	r, _, _ = procNetUserSetInfo.Call(0, uintptr(unsafe.Pointer(name)), userInfoLevelFull,
+		uintptr(unsafe.Pointer(&fn)), uintptr(unsafe.Pointer(&parmErr)))
+	runtime.KeepAlive(&fn)
+	if r != nerrSuccess {
+		return fmt.Errorf("set full name of local user %s: %w", username, windows.Errno(r))
+	}
+
+	// net user /add put every new account in the built-in Users group;
+	// NetUserAdd does not, so add it explicitly (by SID, locale-independent).
+	acct, err := readAccount(username)
+	if err != nil {
+		return fmt.Errorf("read created local user %s: %w", username, err)
+	}
+	if !acct.state.Exists {
+		return fmt.Errorf("local user %s does not exist after it was created", username)
+	}
+	users, err := builtinUsersGroupName()
+	if err != nil {
+		return fmt.Errorf("resolve the built-in Users group: %w", err)
+	}
+	if err := changeLocalGroupMember(procNetLocalGroupAddMembers, users, acct.sid, errorMemberInLG); err != nil {
+		return fmt.Errorf("add local user %s to the built-in Users group: %w", username, err)
 	}
 	return nil
 }

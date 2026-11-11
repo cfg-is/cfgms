@@ -4,7 +4,10 @@ description: >
   Manages local user accounts and group membership on the system.
   Provides idempotent Get/Set management of account existence, group membership,
   lock/disable state, and password presence (observed only) via native OS account
-  management tools (net.exe on Windows, useradd/usermod/userdel on Linux, dscl on macOS).
+  management tools (NetUserAdd and net.exe on Windows, useradd/usermod/userdel on Linux,
+  dscl on macOS). On Windows, accounts are created in-process with NetUserAdd and a
+  random password nobody knows (never blank); deletion, and the full name and enabled
+  state of an existing account, use net.exe.
   On Windows, account state and direct local group membership are read with the
   locale-independent NetUserGetInfo and NetUserGetLocalGroups APIs. A non-empty
   groups list is exclusive: membership converges to it with
@@ -19,8 +22,9 @@ description: >
   (staff, everyone, localaccounts) are never removed. After applying, groups are
   re-read and any difference from the declared list is returned as an error.
   Password setting is intentionally out of scope — the module reports whether an
-  account has a password (has_credential, Get-only) but never accepts, stores, or
-  transmits password material.
+  account has a password (has_credential, Get-only) but never accepts a password from
+  configuration, and never stores, returns, or transmits password material. Another
+  channel must set a usable password before interactive logon.
 
 publisher: cfgms
 
@@ -59,7 +63,7 @@ security:
 
 behavioral_envelope:
   shells_out_to:
-    - net.exe    # Windows: net user (create, delete, full name, enable/disable); reads and group changes use netapi32 in-process
+    - net.exe    # Windows: net user (delete; full name and enable/disable of an existing account); creation, reads and group changes use netapi32 in-process
     - useradd    # Linux: create local user accounts
     - usermod    # Linux: modify local user accounts (full name, groups, lock state)
     - userdel    # Linux: delete local user accounts
