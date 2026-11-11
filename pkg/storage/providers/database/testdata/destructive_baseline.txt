@@ -1,0 +1,14 @@
+# Frozen grandfather list for schema_contract_check_test.go (Epic #5978).
+#
+# Each line is <file>|<function or ->|<normalised statement>: a destructive or
+# narrowing schema statement that already existed before the contract check did.
+#
+# This list may only shrink. Entries may only be removed: the check fails when a line
+# matches no statement in the tree, so deleting a statement forces deleting its line.
+# Adding a line is a reviewed exception, the same posture as
+# scripts/complexity/manifest.json. A new destructive statement is declared as a
+# ContractStep (Go) or with a "-- schema:contract unused-since=<n>" comment (SQL)
+# instead. A moved or edited statement is a new statement and needs one of those.
+schemas.go|dropSingleColumnRegistrationClaimKey|DROP TABLE cfgms_registration_token_claims
+schemas.go|CreateStewardRecordsTable|DROP INDEX IF EXISTS uq_steward_records_tenant_device
+schemas.go|CreateRateCountersTable|ALTER TABLE cfgms_rate_counters ALTER COLUMN expires_at SET NOT NULL
