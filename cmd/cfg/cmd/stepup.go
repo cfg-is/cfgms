@@ -79,6 +79,27 @@ var presenceSignalContextFn = func() (context.Context, context.CancelFunc) {
 // presenceOpenBrowserFn opens url in the operator's default browser. Overridable in tests.
 var presenceOpenBrowserFn = openBrowser
 
+// presenceNoBrowser is the root persistent --no-browser flag. It keeps the presence relay
+// from launching a local browser even on a terminal, so a person can open the printed URL
+// on another device. cfg login declares its own local --no-browser, which shadows this
+// flag for that command (loginNoBrowser).
+var presenceNoBrowser bool
+
+func init() {
+	rootCmd.PersistentFlags().BoolVar(&presenceNoBrowser, "no-browser", false,
+		"Never launch a local browser for presence approval; print the URL and code only (env: CFGMS_NO_BROWSER)")
+}
+
+// presenceBrowserSuppressed reports whether the presence relay must not launch a browser:
+// the --no-browser flag, or CFGMS_NO_BROWSER set to any non-empty value other than "0".
+func presenceBrowserSuppressed() bool {
+	if presenceNoBrowser {
+		return true
+	}
+	v := os.Getenv("CFGMS_NO_BROWSER")
+	return v != "" && v != "0"
+}
+
 // defaultStepUpHandler returns an OnStepUpRequired callback for the given APIClient.
 // The returned function parses the WWW-Authenticate header and either runs the CLI
 // presence relay (presence="required", with or without a TTY) or fails with an actionable
@@ -250,9 +271,10 @@ func runPresenceBrowserFlow(client *APIClient, method, path string, bodyBytes []
 	fmt.Fprintf(os.Stderr, "Approve this action by visiting: %s\n", confirmURL)
 	fmt.Fprintf(os.Stderr, "Expires: %s\n", logging.SanitizeLogValue(lodged.ExpiresAt))
 
-	// Without a terminal (scripted and agent sessions) never launch a browser: the URL
-	// above is the only channel, confirmed out of band while this process polls.
-	if isTerminalFn() {
+	// Without a terminal (scripted and agent sessions), or with --no-browser, never launch
+	// a browser: the URL above is the only channel, confirmed out of band (on this machine
+	// or another device) while this process polls.
+	if isTerminalFn() && !presenceBrowserSuppressed() {
 		if browserErr := presenceOpenBrowserFn(confirmURL); browserErr != nil {
 			fmt.Fprintln(os.Stderr, "Could not open a browser automatically — open the URL above manually.")
 		}
