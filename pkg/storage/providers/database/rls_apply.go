@@ -386,8 +386,8 @@ type rlsLivePolicy struct {
 	permissive bool
 	command    string
 	roles      string
-	qual       string
-	withCheck  string
+	qual       string // stored pg_node_tree text of USING
+	withCheck  string // stored pg_node_tree text of WITH CHECK
 	comment    string
 }
 
@@ -441,7 +441,12 @@ type rlsQuerier interface {
 
 // readTenantRLSState reads the table's RLS flags and policies from the catalog.
 // quotedTable is resolved through the connection's search_path, the same way the
-// DDL that created the table resolved it. No lock is taken on the table.
+// DDL that created the table resolved it. No lock is taken on the table: the
+// policy expressions are read as their stored pg_node_tree text, never through
+// pg_get_expr, which opens the relation (AccessShareLock) to deparse column
+// references and would queue behind a concurrent ACCESS EXCLUSIVE holder. The
+// stored text is only ever compared with itself through the hash, so it needs
+// to be stable for an unchanged policy, not human readable.
 func readTenantRLSState(ctx context.Context, q rlsQuerier, quotedTable string) (rlsTableState, error) {
 	state := rlsTableState{policies: map[string]rlsLivePolicy{}}
 	err := q.QueryRowContext(ctx,
@@ -461,8 +466,8 @@ func readTenantRLSState(ctx context.Context, q rlsQuerier, quotedTable string) (
 		       array_to_string(ARRAY(
 		           SELECT CASE WHEN r = 0 THEN 'public' ELSE pg_get_userbyid(r) END
 		           FROM unnest(p.polroles) AS r ORDER BY 1), ','),
-		       coalesce(pg_get_expr(p.polqual, p.polrelid), ''),
-		       coalesce(pg_get_expr(p.polwithcheck, p.polrelid), ''),
+		       coalesce(p.polqual::text, ''),
+		       coalesce(p.polwithcheck::text, ''),
 		       coalesce(obj_description(p.oid, 'pg_policy'), '')
 		FROM pg_policy p
 		WHERE p.polrelid = to_regclass($1)`, quotedTable)
