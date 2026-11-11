@@ -65,6 +65,30 @@ func signActionX509(t *testing.T, server *Server, env operatorpayload.Envelope, 
 	}}, operator.SerialNumber
 }
 
+// testSignerAccountID is the account the action and terminal tests' operator certificates are
+// bound to; it is also the principal ID those tests authenticate as.
+const testSignerAccountID = "op-1"
+
+// signActionX509Bound is signActionX509 with a certificate bound to accountID, the shape
+// handleRequestSigningCredential issues. The account is created holding operator-payload:sign
+// when it does not exist yet, so a request authenticated as it passes the binding check.
+func signActionX509Bound(t *testing.T, server *Server, accountID string, env operatorpayload.Envelope) (*OperatorProof, string) {
+	t.Helper()
+	if acct, err := server.getAccountByID(context.Background(), accountID); err != nil || acct == nil {
+		seedOperatorAccount(t, server, accountID, true)
+	}
+	return signActionX509(t, server, env, boundSigningMarker(accountID))
+}
+
+// signerCtx is the request context of the principal the test certificates are bound to.
+func signerCtx() context.Context {
+	return ctxWithPrincipal(&Principal{ID: testSignerAccountID, Name: "session:" + testSignerAccountID, AccountBound: true})
+}
+
+func ctxWithPrincipal(p *Principal) context.Context {
+	return context.WithValue(context.Background(), principalContextKey, p)
+}
+
 func newActionX509Server(t *testing.T) *Server {
 	t.Helper()
 	server := setupTestServer(t)
@@ -76,9 +100,9 @@ func TestVerifyOperatorActionEnvelope_X509_ReturnsSerial(t *testing.T) {
 	server := newActionX509Server(t)
 	exp := time.Now().Add(3 * time.Minute)
 	env := actionEnvelope(t, testAction(), []string{actionTestSteward}, "nonce-1", exp)
-	proof, serial := signActionX509(t, server, env, cert.SetPayloadSigningMarker)
+	proof, serial := signActionX509Bound(t, server, testSignerAccountID, env)
 
-	got, err := server.verifyOperatorActionEnvelope(context.Background(), actionTestSteward, testAction(), env.Targets, env.Nonce, exp, *proof)
+	got, err := server.verifyOperatorActionEnvelope(signerCtx(), actionTestSteward, testAction(), env.Targets, env.Nonce, exp, *proof)
 	require.NoError(t, err)
 	assert.Equal(t, serial, got)
 }
@@ -87,11 +111,11 @@ func TestVerifyOperatorActionEnvelope_X509_ChangedActionRefused(t *testing.T) {
 	server := newActionX509Server(t)
 	exp := time.Now().Add(3 * time.Minute)
 	env := actionEnvelope(t, testAction(), []string{actionTestSteward}, "nonce-1", exp)
-	proof, _ := signActionX509(t, server, env, cert.SetPayloadSigningMarker)
+	proof, _ := signActionX509Bound(t, server, testSignerAccountID, env)
 
 	other := testAction()
 	other.Verb = "stop"
-	_, err := server.verifyOperatorActionEnvelope(context.Background(), actionTestSteward, other, env.Targets, env.Nonce, exp, *proof)
+	_, err := server.verifyOperatorActionEnvelope(signerCtx(), actionTestSteward, other, env.Targets, env.Nonce, exp, *proof)
 	require.Error(t, err)
 }
 
@@ -112,8 +136,8 @@ func TestVerifyOperatorActionEnvelope_AdmissionWindowAndTargets(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			env := actionEnvelope(t, testAction(), tc.targets, "nonce-1", tc.exp)
-			proof, _ := signActionX509(t, server, env, cert.SetPayloadSigningMarker)
-			_, err := server.verifyOperatorActionEnvelope(context.Background(), tc.steward, testAction(), tc.targets, env.Nonce, tc.exp, *proof)
+			proof, _ := signActionX509Bound(t, server, testSignerAccountID, env)
+			_, err := server.verifyOperatorActionEnvelope(signerCtx(), tc.steward, testAction(), tc.targets, env.Nonce, tc.exp, *proof)
 			require.Error(t, err)
 		})
 	}
@@ -125,15 +149,15 @@ func TestVerifyOperatorActionEnvelope_X509_RevokedAndNonSigningCertRefused(t *te
 	env := actionEnvelope(t, testAction(), []string{actionTestSteward}, "nonce-1", exp)
 
 	t.Run("revoked", func(t *testing.T) {
-		proof, serial := signActionX509(t, server, env, cert.SetPayloadSigningMarker)
+		proof, serial := signActionX509Bound(t, server, testSignerAccountID, env)
 		require.NoError(t, server.certManager.Revoke(serial))
-		_, err := server.verifyOperatorActionEnvelope(context.Background(), actionTestSteward, testAction(), env.Targets, env.Nonce, exp, *proof)
+		_, err := server.verifyOperatorActionEnvelope(signerCtx(), actionTestSteward, testAction(), env.Targets, env.Nonce, exp, *proof)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "revoked")
 	})
 	t.Run("not a payload-signing certificate", func(t *testing.T) {
 		proof, _ := signActionX509(t, server, env, nil)
-		_, err := server.verifyOperatorActionEnvelope(context.Background(), actionTestSteward, testAction(), env.Targets, env.Nonce, exp, *proof)
+		_, err := server.verifyOperatorActionEnvelope(signerCtx(), actionTestSteward, testAction(), env.Targets, env.Nonce, exp, *proof)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "payload-signing")
 	})
@@ -143,14 +167,14 @@ func TestVerifyOperatorActionEnvelope_ProofMustCarryExactlyOneCredential(t *test
 	server := newActionX509Server(t)
 	exp := time.Now().Add(time.Minute)
 	env := actionEnvelope(t, testAction(), []string{actionTestSteward}, "nonce-1", exp)
-	proof, _ := signActionX509(t, server, env, cert.SetPayloadSigningMarker)
+	proof, _ := signActionX509Bound(t, server, testSignerAccountID, env)
 
-	_, err := server.verifyOperatorActionEnvelope(context.Background(), actionTestSteward, testAction(), env.Targets, env.Nonce, exp, OperatorProof{})
+	_, err := server.verifyOperatorActionEnvelope(signerCtx(), actionTestSteward, testAction(), env.Targets, env.Nonce, exp, OperatorProof{})
 	require.Error(t, err)
 
 	both := *proof
 	both.WebAuthn = &OperatorWebAuthnProof{AuthenticatorData: []byte{1}, ClientDataJSON: []byte{1}, Signature: []byte{1}, CredentialID: []byte{1}}
-	_, err = server.verifyOperatorActionEnvelope(context.Background(), actionTestSteward, testAction(), env.Targets, env.Nonce, exp, both)
+	_, err = server.verifyOperatorActionEnvelope(signerCtx(), actionTestSteward, testAction(), env.Targets, env.Nonce, exp, both)
 	require.Error(t, err)
 }
 
@@ -356,4 +380,107 @@ func TestBuildWebAuthnManifestForSteward_UnknownStewardRefused(t *testing.T) {
 	f.server.certManager = newTLSTestCertManager(t)
 	_, err := f.server.buildWebAuthnManifestForSteward(context.Background(), "no-such-steward")
 	require.Error(t, err)
+}
+
+// --- X.509 binding to the authenticated principal ---
+
+func TestVerifyOperatorActionEnvelope_X509_BoundToTheAuthenticatedPrincipal(t *testing.T) {
+	server := newActionX509Server(t)
+	exp := time.Now().Add(3 * time.Minute)
+	env := actionEnvelope(t, testAction(), []string{actionTestSteward}, "nonce-1", exp)
+	proof, serial := signActionX509Bound(t, server, "acct-a", env)
+	seedOperatorAccount(t, server, "acct-b", true)
+
+	verifyAs := func(p *Principal) (string, error) {
+		return server.verifyOperatorActionEnvelope(ctxWithPrincipal(p), actionTestSteward, testAction(), env.Targets, env.Nonce, exp, *proof)
+	}
+
+	t.Run("owner is accepted", func(t *testing.T) {
+		got, err := verifyAs(&Principal{ID: "acct-a", AccountBound: true})
+		require.NoError(t, err)
+		assert.Equal(t, serial, got)
+	})
+	t.Run("another account is refused with the serial for the audit", func(t *testing.T) {
+		got, err := verifyAs(&Principal{ID: "acct-b", AccountBound: true})
+		require.Error(t, err)
+		assert.Equal(t, serial, got, "the serial accompanies a binding refusal so it can be audited")
+		assert.Equal(t, "signing certificate is not bound to the dispatching principal", operatorCertBindingReason(err))
+	})
+	t.Run("a different session of the owning account is accepted: binding is the account ID, not the name", func(t *testing.T) {
+		_, err := verifyAs(&Principal{ID: "acct-a", Name: "a-completely-different-display-name", Channel: AuthChannelWebCookie, AccountBound: true})
+		require.NoError(t, err)
+	})
+	t.Run("principal that is not account-bound is refused", func(t *testing.T) {
+		_, err := verifyAs(&Principal{ID: "acct-a", AccountBound: false})
+		require.Error(t, err)
+		assert.NotEmpty(t, operatorCertBindingReason(err))
+	})
+	t.Run("no principal in the context is refused", func(t *testing.T) {
+		_, err := server.verifyOperatorActionEnvelope(context.Background(), actionTestSteward, testAction(), env.Targets, env.Nonce, exp, *proof)
+		require.Error(t, err)
+		assert.NotEmpty(t, operatorCertBindingReason(err))
+	})
+	t.Run("the account named by the certificate no longer exists", func(t *testing.T) {
+		_, err := verifyAs(&Principal{ID: "acct-a", AccountBound: true})
+		require.NoError(t, err)
+		other := newActionX509Server(t) // a server that has never heard of acct-a
+		other.certManager = server.certManager
+		_, err = other.verifyOperatorActionEnvelope(ctxWithPrincipal(&Principal{ID: "acct-a", AccountBound: true}),
+			actionTestSteward, testAction(), env.Targets, env.Nonce, exp, *proof)
+		require.Error(t, err)
+		assert.NotEmpty(t, operatorCertBindingReason(err))
+	})
+}
+
+func TestVerifyOperatorActionEnvelope_X509_OwnerAuthorityIsRecheckedPerRequest(t *testing.T) {
+	exp := time.Now().Add(3 * time.Minute)
+	env := actionEnvelope(t, testAction(), []string{actionTestSteward}, "nonce-1", exp)
+
+	for name, mutate := range map[string]func(*account){
+		"disabled":      func(a *account) { a.Disabled = true },
+		"grant removed": func(a *account) { a.Permissions = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := newActionX509Server(t)
+			proof, _ := signActionX509Bound(t, server, "acct-a", env)
+			ctx := ctxWithPrincipal(&Principal{ID: "acct-a", AccountBound: true})
+			_, err := server.verifyOperatorActionEnvelope(ctx, actionTestSteward, testAction(), env.Targets, env.Nonce, exp, *proof)
+			require.NoError(t, err, "sanity: accepted while authorized")
+
+			acct, err := server.getAccountByID(context.Background(), "acct-a")
+			require.NoError(t, err)
+			mutate(acct)
+			require.NoError(t, server.persistAccount(context.Background(), acct, "test"))
+			server.cacheAccount(acct)
+
+			_, err = server.verifyOperatorActionEnvelope(ctx, actionTestSteward, testAction(), env.Targets, env.Nonce, exp, *proof)
+			require.Error(t, err)
+			assert.Contains(t, operatorCertBindingReason(err), OperatorPayloadSignGrant)
+		})
+	}
+
+	t.Run("root-scope account holds the grant implicitly", func(t *testing.T) {
+		server := newActionX509Server(t)
+		acct := &account{ID: "acct-root", Username: "user-acct-root", RootScope: true, CreatedAt: time.Now()}
+		require.NoError(t, server.persistAccount(context.Background(), acct, "test"))
+		server.cacheAccount(acct)
+		proof, _ := signActionX509(t, server, env, boundSigningMarker("acct-root"))
+		_, err := server.verifyOperatorActionEnvelope(ctxWithPrincipal(&Principal{ID: "acct-root", AccountBound: true}),
+			actionTestSteward, testAction(), env.Targets, env.Nonce, exp, *proof)
+		require.NoError(t, err)
+	})
+}
+
+func TestVerifyOperatorActionEnvelope_X509_CertificateWithoutBindingRefused(t *testing.T) {
+	server := newActionX509Server(t)
+	seedOperatorAccount(t, server, "acct-a", true)
+	exp := time.Now().Add(3 * time.Minute)
+	env := actionEnvelope(t, testAction(), []string{actionTestSteward}, "nonce-1", exp)
+	proof, serial := signActionX509(t, server, env, cert.SetPayloadSigningMarker) // marker only, as issued before the binding existed
+
+	got, err := server.verifyOperatorActionEnvelope(ctxWithPrincipal(&Principal{ID: "acct-a", AccountBound: true}),
+		actionTestSteward, testAction(), env.Targets, env.Nonce, exp, *proof)
+	require.Error(t, err)
+	assert.Equal(t, serial, got)
+	assert.Equal(t, "signing certificate is not bound to an account", operatorCertBindingReason(err))
 }

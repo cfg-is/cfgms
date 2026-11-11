@@ -156,6 +156,35 @@ func (s *Server) handlePrepareStewardAction(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+// stewardActionProof selects the operator proof a steward action request carries and the
+// matching run command signature. It writes the refusal and returns false unless the request
+// carries exactly one proof.
+func (s *Server) stewardActionProof(w http.ResponseWriter, req *stewardActionRequest) (OperatorProof, *controllerrun.CommandSignature, bool) {
+	var proof OperatorProof
+	switch {
+	case req.Signature != nil && req.WebAuthn != nil:
+		s.writeErrorResponse(w, http.StatusBadRequest, "provide exactly one operator proof", "INVALID_SIGNATURE")
+		return proof, nil, false
+	case req.Signature != nil:
+		proof.X509 = req.Signature
+		return proof, &controllerrun.CommandSignature{
+			Algorithm: req.Signature.Algorithm, Value: req.Signature.Value, PublicKey: req.Signature.PublicKey,
+		}, true
+	case req.WebAuthn != nil:
+		proof.WebAuthn = req.WebAuthn
+		b64 := base64.StdEncoding.EncodeToString
+		return proof, &controllerrun.CommandSignature{
+			WebAuthnAuthenticatorData: b64(req.WebAuthn.AuthenticatorData),
+			WebAuthnClientDataJSON:    b64(req.WebAuthn.ClientDataJSON),
+			WebAuthnSignature:         b64(req.WebAuthn.Signature),
+			WebAuthnCredentialID:      b64(req.WebAuthn.CredentialID),
+		}, true
+	default:
+		s.writeErrorResponse(w, http.StatusForbidden, "operator signature is required", "OPERATOR_SIGNATURE_REQUIRED")
+		return proof, nil, false
+	}
+}
+
 // handlePostStewardAction handles the service and process action endpoints. The
 // route wrapper has already authorized the permission, the caller's tenant scope and
 // the ADR-025 crossing for the {id} steward. This handler validates the request,
@@ -224,28 +253,8 @@ func (s *Server) handlePostStewardAction(kind string) http.HandlerFunc {
 			return
 		}
 
-		var proof OperatorProof
-		var commandSignature *controllerrun.CommandSignature
-		switch {
-		case req.Signature != nil && req.WebAuthn != nil:
-			s.writeErrorResponse(w, http.StatusBadRequest, "provide exactly one operator proof", "INVALID_SIGNATURE")
-			return
-		case req.Signature != nil:
-			proof.X509 = req.Signature
-			commandSignature = &controllerrun.CommandSignature{
-				Algorithm: req.Signature.Algorithm, Value: req.Signature.Value, PublicKey: req.Signature.PublicKey,
-			}
-		case req.WebAuthn != nil:
-			proof.WebAuthn = req.WebAuthn
-			b64 := base64.StdEncoding.EncodeToString
-			commandSignature = &controllerrun.CommandSignature{
-				WebAuthnAuthenticatorData: b64(req.WebAuthn.AuthenticatorData),
-				WebAuthnClientDataJSON:    b64(req.WebAuthn.ClientDataJSON),
-				WebAuthnSignature:         b64(req.WebAuthn.Signature),
-				WebAuthnCredentialID:      b64(req.WebAuthn.CredentialID),
-			}
-		default:
-			s.writeErrorResponse(w, http.StatusForbidden, "operator signature is required", "OPERATOR_SIGNATURE_REQUIRED")
+		proof, commandSignature, ok := s.stewardActionProof(w, &req)
+		if !ok {
 			return
 		}
 
@@ -262,8 +271,12 @@ func (s *Server) handlePostStewardAction(kind string) http.HandlerFunc {
 				"steward_id", logging.SanitizeLogValue(stewardID),
 				"principal_id", logging.SanitizeLogValue(principal.ID),
 				"error", logging.SanitizeLogValue(err.Error()))
-			s.emitStewardActionAudit(r.Context(), stewardTenant, principal.ID, stewardID, action, justification, "", "",
-				business.AuditResultDenied, "operator envelope not verified")
+			reason := "operator envelope not verified"
+			if bindingReason := operatorCertBindingReason(err); bindingReason != "" {
+				reason = bindingReason
+			}
+			s.emitStewardActionAudit(r.Context(), stewardTenant, principal.ID, stewardID, action, justification, credentialID, "",
+				business.AuditResultDenied, reason)
 			s.writeErrorResponse(w, http.StatusForbidden, "invalid operator signature", "INVALID_SIGNATURE")
 			return
 		}

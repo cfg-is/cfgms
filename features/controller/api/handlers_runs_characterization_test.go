@@ -51,7 +51,7 @@ func TestHandlersrunsChar_ForgedSignatureRejectedBeforeBlastRadius(t *testing.T)
 	server, targets := handlersrunsCharBlastServer(t, 2)
 	p := runPrincipal("char-caller", []string{"steward:execute-scripts"}, "test-tenant")
 	raw := []byte("echo hi")
-	fields := signedOperatorEnvelopeFields(t, server, raw, "bash", targets)
+	fields := signedOperatorEnvelopeFields(t, server, p.ID, raw, "bash", targets)
 	fields["signature"] = map[string]interface{}{"algorithm": "a", "value": "forged", "public_key": "k"}
 
 	rec := postRunCommand(t, server, p, withEnvelopeFields(map[string]interface{}{
@@ -68,7 +68,7 @@ func TestHandlersrunsChar_OversizedSignedTargetSetRejectedAfterGoodSignature(t *
 
 	rec := postRunCommand(t, server, p, withEnvelopeFields(map[string]interface{}{
 		"target": "all", "content": base64.StdEncoding.EncodeToString(raw), "shell": "bash",
-	}, signedOperatorEnvelopeFields(t, server, raw, "bash", targets)))
+	}, signedOperatorEnvelopeFields(t, server, p.ID, raw, "bash", targets)))
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Equal(t, "BLAST_RADIUS_EXCEEDED", handlersrunsCharErrCode(t, rec.Body.Bytes()))
 }
@@ -80,7 +80,7 @@ func TestHandlersrunsChar_BannedPatternRejected(t *testing.T) {
 
 	rec := postRunCommand(t, server, p, withEnvelopeFields(map[string]interface{}{
 		"target": "id:char-1", "content": base64.StdEncoding.EncodeToString(raw), "shell": "bash",
-	}, signedOperatorEnvelopeFields(t, server, raw, "bash", []string{"char-1"})))
+	}, signedOperatorEnvelopeFields(t, server, p.ID, raw, "bash", []string{"char-1"})))
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Equal(t, "BANNED_PATTERN", handlersrunsCharErrCode(t, rec.Body.Bytes()))
 }
@@ -95,7 +95,7 @@ func TestHandlersrunsChar_IDTargetOutsideTenantDenied(t *testing.T) {
 	t.Run("command", func(t *testing.T) {
 		rec := postRunCommand(t, server, p, withEnvelopeFields(map[string]interface{}{
 			"target": "id:char-other", "content": base64.StdEncoding.EncodeToString(raw), "shell": "bash",
-		}, signedOperatorEnvelopeFields(t, server, raw, "bash", []string{"char-other"})))
+		}, signedOperatorEnvelopeFields(t, server, p.ID, raw, "bash", []string{"char-other"})))
 		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		assert.Equal(t, "FORBIDDEN", handlersrunsCharErrCode(t, rec.Body.Bytes()))
 	})
@@ -117,7 +117,7 @@ func TestHandlersrunsChar_UnverifiableScopeDeniedDistinctly(t *testing.T) {
 	t.Run("command", func(t *testing.T) {
 		rec := postRunCommand(t, server, p, withEnvelopeFields(map[string]interface{}{
 			"target": "id:char-1", "content": base64.StdEncoding.EncodeToString(raw), "shell": "bash",
-		}, signedOperatorEnvelopeFields(t, server, raw, "bash", []string{"char-1"})))
+		}, signedOperatorEnvelopeFields(t, server, p.ID, raw, "bash", []string{"char-1"})))
 		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 		assert.Equal(t, "SERVICE_UNAVAILABLE", handlersrunsCharErrCode(t, rec.Body.Bytes()))
 	})

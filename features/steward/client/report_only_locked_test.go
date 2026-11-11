@@ -129,7 +129,10 @@ func startLockedCtl(t *testing.T, mgr *cert.Manager, addr string, acceptClientCA
 	require.NoError(t, err)
 	operator, err := mgr.GenerateClientCertificate(&cert.ClientCertConfig{
 		CommonName: "operator.test", ValidityDays: 30, KeySize: 2048, ClientID: "operator.test",
-		TemplateModifier: cert.SetPayloadSigningMarker,
+		TemplateModifier: func(template *x509.Certificate) {
+			cert.SetPayloadSigningMarker(template)
+			require.NoError(t, cert.SetAccountBinding(template, lockedOperatorAccountID))
+		},
 	})
 	require.NoError(t, err)
 
@@ -172,19 +175,36 @@ func (c *lockedCtl) waitConnected(t *testing.T) {
 	require.Eventually(t, func() bool { _, ok := c.reg.Get(reportOnlyStewardID); return ok }, 15*time.Second, 20*time.Millisecond)
 }
 
-// manifestServer serves the signed revocation manifest the way the controller does.
+// lockedOperatorAccountID is the account the locked-steward tests' operator certificates are
+// bound to, and that the manifest server's signer roster names as their owner.
+const lockedOperatorAccountID = "acct-locked-operator"
+
+// manifestServer serves the signed revocation manifest the way the controller does, including
+// the X.509 signer roster for the operators it was built to authorize.
 type manifestServer struct {
-	srv      *httptest.Server
-	mu       sync.Mutex
-	issuedAt func() time.Time
-	revoked  []string
-	signer   *cert.Certificate
-	hits     atomic.Int64
+	srv       *httptest.Server
+	mu        sync.Mutex
+	issuedAt  func() time.Time
+	revoked   []string
+	signer    *cert.Certificate
+	authorize []*cert.Certificate
+	hits      atomic.Int64
 }
 
-func newManifestServer(t *testing.T, signer *cert.Certificate) *manifestServer {
+type manifestSigner struct {
+	Kind      string   `json:"kind"`
+	Serial    string   `json:"serial"`
+	AccountID string   `json:"account_id"`
+	TenantID  string   `json:"tenant_id"`
+	RootScope bool     `json:"root_scope"`
+	Grants    []string `json:"grants"`
+}
+
+// newManifestServer serves manifests signed by signer whose roster authorizes operators as
+// root-scope holders of operator-payload:sign.
+func newManifestServer(t *testing.T, signer *cert.Certificate, operators ...*cert.Certificate) *manifestServer {
 	t.Helper()
-	m := &manifestServer{signer: signer, issuedAt: func() time.Time { return time.Now() }}
+	m := &manifestServer{signer: signer, authorize: operators, issuedAt: func() time.Time { return time.Now() }}
 	m.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != operatorroster.ManifestPath {
 			http.NotFound(w, r)
@@ -194,11 +214,18 @@ func newManifestServer(t *testing.T, signer *cert.Certificate) *manifestServer {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		manifest := struct {
-			Kind           string    `json:"kind"`
-			Version        int64     `json:"version"`
-			IssuedAt       time.Time `json:"issued_at"`
-			RevokedSerials []string  `json:"revoked_serials"`
-		}{"operator-cert-revocation", int64(len(m.revoked)), m.issuedAt().UTC().Truncate(time.Second), append([]string{}, m.revoked...)}
+			Kind                  string           `json:"kind"`
+			Version               int64            `json:"version"`
+			IssuedAt              time.Time        `json:"issued_at"`
+			RevokedSerials        []string         `json:"revoked_serials"`
+			AuthorizedX509Signers []manifestSigner `json:"authorized_x509_signers,omitempty"`
+		}{Kind: "operator-cert-revocation", Version: int64(len(m.revoked)), IssuedAt: m.issuedAt().UTC().Truncate(time.Second), RevokedSerials: append([]string{}, m.revoked...)}
+		for _, op := range m.authorize {
+			manifest.AuthorizedX509Signers = append(manifest.AuthorizedX509Signers, manifestSigner{
+				Kind: "x509-signing-certificate", Serial: op.SerialNumber, AccountID: lockedOperatorAccountID,
+				RootScope: true, Grants: []string{"operator-payload:sign"},
+			})
+		}
 		data, _ := json.Marshal(manifest)
 		s, _ := signature.NewSigner(&signature.SignerConfig{CertificatePEM: m.signer.CertificatePEM, PrivateKeyPEM: m.signer.PrivateKeyPEM})
 		sig, _ := s.Sign(data)
@@ -513,7 +540,7 @@ func listTree(t *testing.T, dir string) []string {
 
 func TestLockedTools_RunsEachKindWithChainFromController(t *testing.T) {
 	ctl := startLockedCtl(t, nil, "127.0.0.1:0")
-	ms := newManifestServer(t, ctl.signing)
+	ms := newManifestServer(t, ctl.signing, ctl.operator)
 	certStore, dataDir := t.TempDir(), t.TempDir()
 	c := newLockedClient(t, ctl, lockedClientOpts{manifest: ms, certStore: certStore})
 	ctl.waitConnected(t)
@@ -537,7 +564,7 @@ func TestLockedTools_RunsEachKindWithChainFromController(t *testing.T) {
 
 func TestLockedTools_PlantedTrustInDataFolderRefusedForAllKinds(t *testing.T) {
 	ctl := startLockedCtl(t, nil, "127.0.0.1:0")
-	ms := newManifestServer(t, ctl.signing)
+	ms := newManifestServer(t, ctl.signing, ctl.operator)
 	planted := startLockedCtl(t, nil, "127.0.0.1:0")
 	certStore := t.TempDir()
 	// The data folder holds a planted CA and signing certificate.
@@ -560,7 +587,7 @@ func TestLockedTools_PlantedTrustInDataFolderRefusedForAllKinds(t *testing.T) {
 
 func TestLockedTools_RelayAndSwappedPinAttackersRefused(t *testing.T) {
 	real := startLockedCtl(t, nil, "127.0.0.1:0")
-	ms := newManifestServer(t, real.signing)
+	ms := newManifestServer(t, real.signing, real.operator)
 	// The attacker's server certificate chains to its own CA, which the steward's
 	// stored pin was swapped to trust; it holds the stolen client certificate.
 	proxy := startLockedCtl(t, nil, "127.0.0.1:0", real.caPEM)
@@ -595,7 +622,7 @@ func TestLockedTools_RelayAndSwappedPinAttackersRefused(t *testing.T) {
 
 func TestLockedTools_ReconnectChecksTheNewSessionsCertificate(t *testing.T) {
 	a := startLockedCtl(t, nil, "127.0.0.1:0")
-	ms := newManifestServer(t, a.signing)
+	ms := newManifestServer(t, a.signing, a.operator)
 	b := startLockedCtl(t, nil, "127.0.0.1:0", a.caPEM)
 	// The steward's TLS pin trusts both servers; only A's root is baked.
 	anchor := append(append([]byte{}, a.caPEM...), b.caPEM...)
@@ -628,7 +655,7 @@ func TestLockedTools_RevokedCertificateAndStaleManifest(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("revoked", func(t *testing.T) {
-		ms := newManifestServer(t, ctl.signing)
+		ms := newManifestServer(t, ctl.signing, ctl.operator)
 		ms.revoke(opCert.SerialNumber.String())
 		_ = newLockedClient(t, ctl, lockedClientOpts{manifest: ms})
 		ctl.waitConnected(t)
@@ -638,7 +665,7 @@ func TestLockedTools_RevokedCertificateAndStaleManifest(t *testing.T) {
 		ctl.noEvent(t, 300*time.Millisecond, "revoked-1")
 	})
 	t.Run("stale manifest", func(t *testing.T) {
-		ms := newManifestServer(t, ctl.signing)
+		ms := newManifestServer(t, ctl.signing, ctl.operator)
 		ms.issuedAt = func() time.Time { return time.Now().Add(-time.Hour) }
 		c := newLockedClient(t, ctl, lockedClientOpts{manifest: ms, interval: time.Minute})
 		ctl.waitConnected(t)
@@ -674,7 +701,7 @@ func TestLockedTools_BakedRootStatesRefuseCommandsButSignalsStillArrive(t *testi
 	for code, tools := range cases {
 		t.Run(code, func(t *testing.T) {
 			ctl := startLockedCtl(t, nil, "127.0.0.1:0")
-			ms := newManifestServer(t, ctl.signing)
+			ms := newManifestServer(t, ctl.signing, ctl.operator)
 			c := newLockedClient(t, ctl, lockedClientOpts{manifest: ms, tools: tools})
 			ctl.waitConnected(t)
 
@@ -703,7 +730,7 @@ func TestLockedTools_BakedRootStatesRefuseCommandsButSignalsStillArrive(t *testi
 
 func TestLockedTools_LargeTermDoesNotMoveTheFence(t *testing.T) {
 	ctl := startLockedCtl(t, nil, "127.0.0.1:0")
-	ms := newManifestServer(t, ctl.signing)
+	ms := newManifestServer(t, ctl.signing, ctl.operator)
 	c := newLockedClient(t, ctl, lockedClientOpts{manifest: ms})
 	ctl.waitConnected(t)
 	ctl.send(t, buildCommand(t, kindAction, "term-1", ctl.operator, ctl.signing, ctl.chainPEM, 1<<62))
@@ -719,7 +746,7 @@ func TestLockedTools_LargeTermDoesNotMoveTheFence(t *testing.T) {
 
 func TestLockedTools_ConfigCanOnlyRestrict(t *testing.T) {
 	ctl := startLockedCtl(t, nil, "127.0.0.1:0")
-	ms := newManifestServer(t, ctl.signing)
+	ms := newManifestServer(t, ctl.signing, ctl.operator)
 	c := newLockedClient(t, ctl, lockedClientOpts{manifest: ms, tools: LockedToolsConfig{DisableRemoteTerminal: true}})
 	ctl.waitConnected(t)
 	ctl.send(t, ctl.genuine(t, kindTerminal, "noterm"))

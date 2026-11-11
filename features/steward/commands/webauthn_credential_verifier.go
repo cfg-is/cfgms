@@ -29,6 +29,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol/webauthncose"
 
 	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/steward/operatorroster"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 )
 
@@ -91,12 +92,13 @@ type webauthnRelyingParty struct {
 // field-for-field (name, order, json tags) — required so json.Marshal of this struct
 // reproduces the exact bytes the controller signed.
 type revocationManifestPayload struct {
-	Kind                          string                         `json:"kind"`
-	Version                       int64                          `json:"version"`
-	IssuedAt                      time.Time                      `json:"issued_at"`
-	RevokedSerials                []string                       `json:"revoked_serials"`
-	AuthorizedWebAuthnCredentials []authorizedWebAuthnCredential `json:"authorized_webauthn_credentials,omitempty"`
-	WebAuthnRelyingParty          *webauthnRelyingParty          `json:"webauthn_relying_party,omitempty"`
+	Kind                          string                                `json:"kind"`
+	Version                       int64                                 `json:"version"`
+	IssuedAt                      time.Time                             `json:"issued_at"`
+	RevokedSerials                []string                              `json:"revoked_serials"`
+	AuthorizedWebAuthnCredentials []authorizedWebAuthnCredential        `json:"authorized_webauthn_credentials,omitempty"`
+	WebAuthnRelyingParty          *webauthnRelyingParty                 `json:"webauthn_relying_party,omitempty"`
+	AuthorizedX509Signers         []operatorroster.AuthorizedX509Signer `json:"authorized_x509_signers,omitempty"`
 }
 
 // signedRevocationManifest mirrors features/controller/api.SignedRevocationManifest.
@@ -427,11 +429,21 @@ func entryGrantsOperatorPayloadSigning(entry *authorizedWebAuthnCredential) bool
 // tenant-bound principal's reach. Descent is never inferred from the shape of a tenant
 // ID, and an entry carrying no covered IDs covers its own tenant only.
 func (v *webauthnOperatorCredentialVerifier) entryAuthorizedForTenant(entry *authorizedWebAuthnCredential) bool {
-	if entry.RootScope {
-		return entry.TenantID == ""
+	return rosterEntryCoversTenant(entry.RootScope, entry.TenantID, entry.CoveredTenantIDs, v.stewardTenant)
+}
+
+// rosterEntryCoversTenant is the tenant rule every roster entry type is held to: an entry owned
+// by a root-scope account (carrying no tenant path) covers the whole fleet, and any other entry
+// covers its own tenant path and the descendant tenants the controller resolved into the signed
+// entry. An entry or steward with no tenant path covers nothing, and a root-scope entry that
+// also names a tenant is self-contradictory and covers nothing. Kept identical to the
+// controller's rosterEntryCoversSteward.
+func rosterEntryCoversTenant(rootScope bool, entryTenant string, covered []string, stewardTenant string) bool {
+	if rootScope {
+		return entryTenant == ""
 	}
-	if entry.TenantID == "" || v.stewardTenant == "" {
+	if entryTenant == "" || stewardTenant == "" {
 		return false
 	}
-	return v.stewardTenant == entry.TenantID || slices.Contains(entry.CoveredTenantIDs, v.stewardTenant)
+	return stewardTenant == entryTenant || slices.Contains(covered, stewardTenant)
 }

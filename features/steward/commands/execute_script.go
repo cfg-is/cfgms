@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -464,6 +465,7 @@ func (h *Handler) verifyX509OperatorSignature(roots, intermediates *x509.CertPoo
 		caRoots:            roots,
 		intermediates:      intermediates,
 		revocationVerifier: revocation,
+		stewardTenant:      h.tenantID,
 	})
 	if err := credVerifier.Verify(envelope, []byte(sigPublicKey)); err != nil {
 		return fmt.Errorf("%w: operator cert: %v", ErrUnauthenticatedCommand, err)
@@ -606,10 +608,22 @@ type x509OperatorCredentialVerifier struct {
 	// (Issue #3699). Nil disables the check — the same degrade-safe default as an
 	// unconfigured controllerCARoots elsewhere in this file.
 	revocationVerifier *operatorroster.RevocationVerifier
+
+	// stewardTenant is this steward's own tenant path, used to confine a fleet-wide X.509
+	// signer roster entry to the tenant subtree its owning account belongs to — see
+	// webauthnOperatorCredentialVerifier.stewardTenant, which applies the same rule. Empty
+	// means the steward does not know its tenant; only a root-scope entry is accepted then.
+	stewardTenant string
 }
 
+// Verify implements OperatorCredentialVerifier: the certificate must pass verifyOperatorCert
+// and its signer must be authorized by the verified signer roster (authorizeX509Signer).
 func (v *x509OperatorCredentialVerifier) Verify(_ operatorpayload.Envelope, proof []byte) error {
-	return verifyOperatorCert(string(proof), v.caRoots, v.intermediates, v.revocationVerifier)
+	parsedCert, err := verifyOperatorCert(string(proof), v.caRoots, v.intermediates, v.revocationVerifier)
+	if err != nil {
+		return err
+	}
+	return authorizeX509Signer(parsedCert, v.revocationVerifier, v.stewardTenant, time.Now())
 }
 
 // verifyOperatorCert parses publicKeyPEM as an X.509 certificate and verifies that it
@@ -618,15 +632,17 @@ func (v *x509OperatorCredentialVerifier) Verify(_ operatorpayload.Envelope, proo
 // admin-bundle certificate — carrying AdminMarkerOID but not PayloadSigningMarkerOID —
 // chains and has the right EKU but is rejected here: it authenticates mTLS transport,
 // not operator payload signing. intermediates, when non-nil, are certificates the
-// operator certificate may chain through to caRoots.
-func verifyOperatorCert(publicKeyPEM string, caRoots, intermediates *x509.CertPool, revocationVerifier *operatorroster.RevocationVerifier) error {
+// operator certificate may chain through to caRoots. It returns the parsed certificate so the
+// caller can authorize its signer (authorizeX509Signer): chain, marker and revocation say the
+// key is one the controller issued and has not withdrawn, not that its owner may sign here.
+func verifyOperatorCert(publicKeyPEM string, caRoots, intermediates *x509.CertPool, revocationVerifier *operatorroster.RevocationVerifier) (*x509.Certificate, error) {
 	block, _ := pem.Decode([]byte(publicKeyPEM))
 	if block == nil {
-		return fmt.Errorf("no PEM block found in signature_public_key")
+		return nil, fmt.Errorf("no PEM block found in signature_public_key")
 	}
 	parsedCert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return fmt.Errorf("parse certificate: %w", err)
+		return nil, fmt.Errorf("parse certificate: %w", err)
 	}
 	opts := x509.VerifyOptions{
 		Roots:         caRoots,
@@ -634,13 +650,71 @@ func verifyOperatorCert(publicKeyPEM string, caRoots, intermediates *x509.CertPo
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
 	if _, err := parsedCert.Verify(opts); err != nil {
-		return fmt.Errorf("certificate chain verification: %w", err)
+		return nil, fmt.Errorf("certificate chain verification: %w", err)
 	}
 	if !cert.HasPayloadSigningMarker(parsedCert) {
-		return fmt.Errorf("operator certificate is not a payload-signing certificate")
+		return nil, fmt.Errorf("operator certificate is not a payload-signing certificate")
 	}
 	if revocationVerifier != nil && revocationVerifier.IsRevoked(parsedCert.SerialNumber.String()) {
-		return fmt.Errorf("operator certificate has been revoked")
+		return nil, fmt.Errorf("operator certificate has been revoked")
 	}
-	return nil
+	return parsedCert, nil
+}
+
+// authorizeX509Signer decides whether the owner of a chain-verified operator certificate may
+// sign an operator payload on this steward — the X.509 counterpart of the roster checks in
+// webauthnOperatorCredentialVerifier.resolveCredential, applied to the same kind of signed
+// manifest under the same freshness bound (webauthnManifestMaxAge). It requires, in order:
+//
+//   - the certificate names an owning account in its account-binding extension. A payload-signing
+//     certificate without one (issued before the extension existed, or by any path that does
+//     not bind) is refused outright; there is no unbound fallback;
+//   - a signer roster this steward verified itself and that is no older than the freshness
+//     bound. The roster is the only source of the signer's authority, so its absence is a
+//     refusal, never a pass;
+//   - a roster entry for this certificate's serial that names the same account, grants
+//     operator-payload:sign, and whose tenant (or root scope, or covered tenants) covers this
+//     steward's tenant. Every matching entry is examined and the first that authorizes wins.
+//
+// The steward does not claim to verify the principal that dispatched the command: binding the
+// signature to the dispatching principal is the controller's check. What this establishes is
+// that the key's owner is an account the controller currently authorizes to sign for this
+// steward's tenant.
+func authorizeX509Signer(parsedCert *x509.Certificate, revocation *operatorroster.RevocationVerifier, stewardTenant string, now time.Time) error {
+	accountID, bound := cert.AccountBindingFromCertificate(parsedCert)
+	if !bound {
+		return fmt.Errorf("operator certificate is not bound to an account")
+	}
+	if revocation == nil {
+		return fmt.Errorf("no operator signer roster is available")
+	}
+	roster, ok := revocation.X509SignerRoster()
+	if !ok {
+		return fmt.Errorf("no verified operator signer roster is available")
+	}
+	if age := now.Sub(roster.IssuedAt()); age > webauthnManifestMaxAge {
+		return fmt.Errorf("operator signer roster is older than the %s freshness window", webauthnManifestMaxAge)
+	}
+	entries := roster.SignersForSerial(parsedCert.SerialNumber.String())
+	if len(entries) == 0 {
+		return fmt.Errorf("operator certificate is not in the authorized signer roster")
+	}
+	var matchErr error
+	for i := range entries {
+		entry := &entries[i]
+		if entry.AccountID != accountID {
+			matchErr = fmt.Errorf("roster entry names a different owning account")
+			continue
+		}
+		if !slices.Contains(entry.Grants, operatorPayloadSignGrant) {
+			matchErr = fmt.Errorf("signer is not granted %s", operatorPayloadSignGrant)
+			continue
+		}
+		if !rosterEntryCoversTenant(entry.RootScope, entry.TenantID, entry.CoveredTenantIDs, stewardTenant) {
+			matchErr = fmt.Errorf("signer is scoped to a tenant that does not cover this steward")
+			continue
+		}
+		return nil
+	}
+	return matchErr
 }

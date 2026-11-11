@@ -5,7 +5,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"sort"
@@ -45,6 +47,10 @@ const RevocationManifestKind = "operator-cert-revocation"
 // future manifest entry type sitting alongside RevokedSerials — a Kind-discriminated
 // sibling entry type (Issue #3697).
 const AuthorizedWebAuthnCredentialKind = "webauthn-credential"
+
+// AuthorizedX509SignerKind discriminates AuthorizedX509Signer from the other roster entry
+// types sitting alongside RevokedSerials.
+const AuthorizedX509SignerKind = "x509-signing-certificate"
 
 // OperatorPayloadSignGrant is the permission ID whose presence in
 // AuthorizedWebAuthnCredential.Grants authorizes the credential to sign an operator
@@ -89,6 +95,36 @@ type AuthorizedWebAuthnCredential struct {
 	CoveredTenantIDs []string `json:"covered_tenant_ids,omitempty"`
 }
 
+// AuthorizedX509Signer is a CA-signed roster entry naming one payload-signing certificate that
+// its owning account may currently use to sign an operator payload. It is the X.509 sibling of
+// AuthorizedWebAuthnCredential and carries the same authority predicates, for the same reason:
+// a certificate that chains to the CA and carries the payload-signing marker proves who owns
+// the key, not that its owner may still execute on this steward, nor in which tenant.
+//
+//   - Serial is the certificate's serial number in the decimal form x509.Certificate.SerialNumber
+//     and the revocation list use. A steward accepts a signing certificate only when its serial
+//     is listed here, so a certificate the roster has never enumerated authorizes nothing.
+//   - AccountID is the owning account, read from the certificate's own account-binding
+//     extension (cert.AccountBindingOID) at build time. The steward requires the certificate to
+//     present the same ID, so an entry cannot be satisfied by a certificate naming another
+//     account.
+//   - TenantID, RootScope, Grants and CoveredTenantIDs are the owning account's current
+//     authority, exactly as AuthorizedWebAuthnCredential defines them, and are applied the same
+//     way: the steward accepts the entry only when it grants OperatorPayloadSignGrant and its
+//     tenant (or root scope, or covered tenants) covers the steward's own tenant.
+//
+// The roster is built from current account authority, so disabling an account or removing its
+// grant removes its entries from the next manifest.
+type AuthorizedX509Signer struct {
+	Kind             string   `json:"kind"`
+	Serial           string   `json:"serial"`
+	AccountID        string   `json:"account_id"`
+	TenantID         string   `json:"tenant_id"`
+	RootScope        bool     `json:"root_scope"`
+	Grants           []string `json:"grants"`
+	CoveredTenantIDs []string `json:"covered_tenant_ids,omitempty"`
+}
+
 // WebAuthnRelyingParty carries the controller's WebAuthn relying-party binding in the
 // signed manifest (Issue #3697) so a steward can perform the W3C WebAuthn §7.2 checks
 // that need it — rpIdHash against sha256(ID), and clientDataJSON.origin against Origins
@@ -119,6 +155,11 @@ type RevocationManifest struct {
 	RevokedSerials                []string                       `json:"revoked_serials"`
 	AuthorizedWebAuthnCredentials []AuthorizedWebAuthnCredential `json:"authorized_webauthn_credentials,omitempty"`
 	WebAuthnRelyingParty          *WebAuthnRelyingParty          `json:"webauthn_relying_party,omitempty"`
+	// AuthorizedX509Signers is the roster of payload-signing certificates whose owners may
+	// currently sign an operator payload, sorted by Serial. It is a separate field from the
+	// WebAuthn roster so each credential type keeps its own entry shape; a steward looks a
+	// certificate up here only after chain-verifying the manifest itself.
+	AuthorizedX509Signers []AuthorizedX509Signer `json:"authorized_x509_signers,omitempty"`
 }
 
 // SignedRevocationManifest is the JSON body served by
@@ -235,30 +276,14 @@ func accountHoldsOperatorPayloadSigning(acct *account) bool {
 // yields an empty roster, not an error — a manifest with no WebAuthn credentials is a
 // valid, signable state.
 func (s *Server) buildAuthorizedWebAuthnCredentials(ctx context.Context) ([]AuthorizedWebAuthnCredential, error) {
-	if s.secretStore == nil {
-		return nil, nil
-	}
-	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
-		Metadata: map[string]string{secretsif.MetadataKeySecretType: accountSecretType},
-	})
+	accounts, err := s.accountsHoldingOperatorPayloadSigning(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list accounts: %w", err)
+		return nil, err
 	}
 
 	var entries []AuthorizedWebAuthnCredential
 	coveredByTenant := map[string][]string{}
-	for _, meta := range metas {
-		username := meta.Metadata["username"]
-		if username == "" {
-			continue
-		}
-		acct, err := s.getAccount(ctx, username)
-		if err != nil || acct == nil {
-			continue
-		}
-		if !accountHoldsOperatorPayloadSigning(acct) {
-			continue
-		}
+	for _, acct := range accounts {
 		covered := s.signedCoveredTenantIDs(ctx, acct, coveredByTenant)
 		for _, credential := range acct.Credentials {
 			entries = append(entries, AuthorizedWebAuthnCredential{
@@ -276,6 +301,118 @@ func (s *Server) buildAuthorizedWebAuthnCredentials(ctx context.Context) ([]Auth
 		return bytes.Compare(entries[i].CredentialID, entries[j].CredentialID) < 0
 	})
 	return entries, nil
+}
+
+// accountsHoldingOperatorPayloadSigning lists every account whose own authority allows it to
+// sign an operator payload (accountHoldsOperatorPayloadSigning), the population both roster
+// builders enumerate. A nil secretStore (e.g. some test servers) yields none, not an error.
+func (s *Server) accountsHoldingOperatorPayloadSigning(ctx context.Context) ([]*account, error) {
+	if s.secretStore == nil {
+		return nil, nil
+	}
+	metas, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+		Metadata: map[string]string{secretsif.MetadataKeySecretType: accountSecretType},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list accounts: %w", err)
+	}
+	var accounts []*account
+	for _, meta := range metas {
+		username := meta.Metadata["username"]
+		if username == "" {
+			continue
+		}
+		acct, err := s.getAccount(ctx, username)
+		if err != nil || acct == nil {
+			continue
+		}
+		if !accountHoldsOperatorPayloadSigning(acct) {
+			continue
+		}
+		accounts = append(accounts, acct)
+	}
+	return accounts, nil
+}
+
+// buildAuthorizedX509Signers flattens the live payload-signing certificates of every account
+// that actually holds operator-payload signing authority into CA-signed roster entries, the
+// X.509 counterpart of buildAuthorizedWebAuthnCredentials. Like that roster it is built from
+// account authority, not from the existence of a certificate: a disabled or zero-privilege
+// account contributes nothing, and each entry states the owner's tenant and grant for the
+// steward to re-check.
+//
+// A certificate is listed only when it is unexpired, carries the payload-signing marker and
+// names the owning account in its own account-binding extension; a certificate with no
+// binding (issued before the extension existed) is never listed, matching the verifiers that
+// refuse it. A nil certManager or secretStore yields an empty roster, which is a valid,
+// signable state. Entries are sorted by Serial so the manifest serializes to identical bytes
+// regardless of enumeration order.
+func (s *Server) buildAuthorizedX509Signers(ctx context.Context) ([]AuthorizedX509Signer, error) {
+	if s.certManager == nil {
+		return nil, nil
+	}
+	accounts, err := s.accountsHoldingOperatorPayloadSigning(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(accounts) == 0 {
+		return nil, nil
+	}
+	infos, err := s.certManager.ListCertificates()
+	if err != nil {
+		return nil, fmt.Errorf("list certificates: %w", err)
+	}
+	byOwner := make(map[string]*account, len(accounts))
+	for _, acct := range accounts {
+		byOwner[acct.ID] = acct
+	}
+
+	var entries []AuthorizedX509Signer
+	coveredByTenant := map[string][]string{}
+	for _, info := range infos {
+		acct := byOwner[info.ClientID]
+		parsed := s.boundSigningCertificate(info, acct)
+		if parsed == nil {
+			continue
+		}
+		entries = append(entries, AuthorizedX509Signer{
+			Kind:             AuthorizedX509SignerKind,
+			Serial:           parsed.SerialNumber.String(),
+			AccountID:        acct.ID,
+			TenantID:         acct.TenantID,
+			RootScope:        acct.RootScope,
+			Grants:           []string{OperatorPayloadSignGrant},
+			CoveredTenantIDs: s.signedCoveredTenantIDs(ctx, acct, coveredByTenant),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Serial < entries[j].Serial })
+	return entries, nil
+}
+
+// boundSigningCertificate returns the parsed certificate for info when it is a live
+// payload-signing certificate whose account-binding extension names acct, and nil otherwise
+// (no owning account, expired, unreadable, not a payload-signing certificate, or bound to a
+// different account or to none).
+func (s *Server) boundSigningCertificate(info *cert.CertificateInfo, acct *account) *x509.Certificate {
+	if acct == nil || !info.IsValid {
+		return nil
+	}
+	stored, err := s.certManager.GetCertificate(info.SerialNumber)
+	if err != nil || stored == nil {
+		return nil
+	}
+	block, _ := pem.Decode(stored.CertificatePEM)
+	if block == nil {
+		return nil
+	}
+	parsed, err := x509.ParseCertificate(block.Bytes)
+	if err != nil || !cert.HasPayloadSigningMarker(parsed) {
+		return nil
+	}
+	if bound, ok := cert.AccountBindingFromCertificate(parsed); !ok || bound != acct.ID {
+		return nil
+	}
+	return parsed
 }
 
 // signedCoveredTenantIDs returns the sorted descendant tenant IDs a roster entry for
@@ -371,6 +508,13 @@ func (s *Server) handleGetRevocationManifest(w http.ResponseWriter, r *http.Requ
 	}
 	manifest.AuthorizedWebAuthnCredentials = webauthnCreds
 	manifest.WebAuthnRelyingParty = s.webAuthnRelyingPartyBinding()
+	x509Signers, err := s.buildAuthorizedX509Signers(r.Context())
+	if err != nil {
+		s.logger.Error("Failed to build authorized X.509 signers", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to build revocation manifest", "INTERNAL_ERROR")
+		return
+	}
+	manifest.AuthorizedX509Signers = x509Signers
 
 	sig, err := signRevocationManifest(s.certManager, manifest)
 	if err != nil {
@@ -517,13 +661,36 @@ func (s *Server) filterWebAuthnCredentialsForSteward(ctx context.Context, creds 
 // this after verifying the manifest signature, and a server filter that admitted more
 // than the steward accepts would be a disclosure with no corresponding capability.
 func (s *Server) webauthnCredentialAuthorizedForSteward(ctx context.Context, credential AuthorizedWebAuthnCredential, stewardTenant string) bool {
-	if credential.RootScope {
-		return credential.TenantID == ""
+	return s.rosterEntryCoversSteward(ctx, credential.RootScope, credential.TenantID, stewardTenant)
+}
+
+// filterX509SignersForSteward narrows signers to the entries whose owning tenant covers a
+// steward at stewardTenant — the same rule and the same reason as
+// filterWebAuthnCredentialsForSteward: a steward is never sent another tenant's operator
+// signers, and the steward re-applies the rule to the manifest it verified itself.
+func (s *Server) filterX509SignersForSteward(ctx context.Context, signers []AuthorizedX509Signer, stewardTenant string) []AuthorizedX509Signer {
+	if len(signers) == 0 {
+		return signers
 	}
-	if credential.TenantID == "" || stewardTenant == "" {
+	filtered := make([]AuthorizedX509Signer, 0, len(signers))
+	for _, signer := range signers {
+		if s.rosterEntryCoversSteward(ctx, signer.RootScope, signer.TenantID, stewardTenant) {
+			filtered = append(filtered, signer)
+		}
+	}
+	return filtered
+}
+
+// rosterEntryCoversSteward is the tenant rule shared by every roster entry type: whether an
+// entry owned by tenantID (or by a root-scope account) covers a steward at stewardTenant.
+func (s *Server) rosterEntryCoversSteward(ctx context.Context, rootScope bool, tenantID, stewardTenant string) bool {
+	if rootScope {
+		return tenantID == ""
+	}
+	if tenantID == "" || stewardTenant == "" {
 		return false
 	}
-	return s.isWithinTenantScope(ctx, credential.TenantID, stewardTenant) //architecture:allow-root-scope -- compares a roster entry with a steward, not a caller
+	return s.isWithinTenantScope(ctx, tenantID, stewardTenant) //architecture:allow-root-scope -- compares a roster entry with a steward, not a caller
 }
 
 // handleGetStewardRevocationManifest handles GET /api/v1/public/steward-revocation-manifest
@@ -580,6 +747,13 @@ func (s *Server) handleGetStewardRevocationManifest(w http.ResponseWriter, r *ht
 	}
 	manifest.AuthorizedWebAuthnCredentials = s.filterWebAuthnCredentialsForSteward(r.Context(), webauthnCreds, stewardTenant)
 	manifest.WebAuthnRelyingParty = s.webAuthnRelyingPartyBinding()
+	x509Signers, err := s.buildAuthorizedX509Signers(r.Context())
+	if err != nil {
+		s.logger.Error("Failed to build authorized X.509 signers", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to build revocation manifest", "INTERNAL_ERROR")
+		return
+	}
+	manifest.AuthorizedX509Signers = s.filterX509SignersForSteward(r.Context(), x509Signers, stewardTenant)
 
 	sig, err := signRevocationManifest(s.certManager, manifest)
 	if err != nil {

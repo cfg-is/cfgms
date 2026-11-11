@@ -992,7 +992,7 @@ func TestExecuteScriptHandler_Success(t *testing.T) {
 		StewardID:         "steward-test",
 		OnStatus:          cb,
 		Logger:            newTestLogger(t),
-		ControllerCARoots: inlineTestCARoots(t),
+		ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t),
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
@@ -1026,7 +1026,7 @@ func TestExecuteScriptHandler_NonZeroExitCode(t *testing.T) {
 		StewardID:         "steward-test",
 		OnStatus:          cb,
 		Logger:            newTestLogger(t),
-		ControllerCARoots: inlineTestCARoots(t),
+		ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t),
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
@@ -1061,7 +1061,7 @@ func TestExecuteScriptHandler_StdoutTruncated(t *testing.T) {
 		StewardID:         "steward-test",
 		OnStatus:          cb,
 		Logger:            newTestLogger(t),
-		ControllerCARoots: inlineTestCARoots(t),
+		ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t),
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
@@ -1096,7 +1096,7 @@ func TestExecuteScriptHandler_NoContentLogged(t *testing.T) {
 		StewardID:         "steward-test",
 		OnStatus:          cb,
 		Logger:            capLog,
-		ControllerCARoots: inlineTestCARoots(t),
+		ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t),
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
@@ -1205,6 +1205,9 @@ type sharedInlineOperatorFixture struct {
 	roots   *x509.CertPool
 	keyPEM  []byte
 	certPEM string
+	// revocation holds a verified signer roster authorizing the operator certificate, so a
+	// handler built with it accepts envelopes signed by the fixture's operator.
+	revocation *operatorroster.RevocationVerifier
 }
 
 var (
@@ -1218,11 +1221,12 @@ func sharedInlineOperator(t *testing.T) sharedInlineOperatorFixture {
 	t.Helper()
 	sharedInlineOperatorOnce.Do(func() {
 		ca, pool := sigTestCA(t)
-		op := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+		op := sigTestOperatorCert(t, ca, boundPayloadSigning)
 		sharedInlineOperatorFx = sharedInlineOperatorFixture{
-			roots:   pool,
-			keyPEM:  op.PrivateKeyPEM,
-			certPEM: string(op.CertificatePEM),
+			roots:      pool,
+			keyPEM:     op.PrivateKeyPEM,
+			certPEM:    string(op.CertificatePEM),
+			revocation: newRosterVerifier(t, ca, pool, rootScopeSignerEntry(op)),
 		}
 	})
 	require.NotNil(t, sharedInlineOperatorFx.roots, "shared inline operator fixture failed to build")
@@ -1234,6 +1238,14 @@ func sharedInlineOperator(t *testing.T) sharedInlineOperatorFixture {
 func inlineTestCARoots(t *testing.T) *x509.CertPool {
 	t.Helper()
 	return sharedInlineOperator(t).roots
+}
+
+// inlineTestRevocationVerifier returns the verifier whose verified signer roster authorizes the
+// shared inline operator — the counterpart of inlineTestCARoots for a handler's
+// Config.RevocationVerifier.
+func inlineTestRevocationVerifier(t *testing.T) *operatorroster.RevocationVerifier {
+	t.Helper()
+	return sharedInlineOperator(t).revocation
 }
 
 // signedInlineEnvelopeParamsFull is the fully-parameterized envelope builder every
@@ -1317,7 +1329,7 @@ func sigTestManifestSigningCert(t *testing.T, ca *cert.CA) *cert.Certificate {
 // import features/controller/api), matching operatorroster's own local duplicate and
 // webauthn_credential_verifier.go's revocationManifestPayload.
 //
-// All six fields are declared, including the two WebAuthn roster fields this test never
+// All seven fields are declared, including the two WebAuthn roster fields this test never
 // populates. A verifier re-marshals the payload it unmarshalled to recompute the signed
 // bytes, so a mirror missing a field the controller signs makes that round trip lossy —
 // and a test fixture that omits the same field as the code under test hides the defect
@@ -1329,6 +1341,7 @@ type revocationManifestForTest struct {
 	RevokedSerials                []string                              `json:"revoked_serials"`
 	AuthorizedWebAuthnCredentials []authorizedWebAuthnCredentialForTest `json:"authorized_webauthn_credentials,omitempty"`
 	WebAuthnRelyingParty          *webauthnRelyingPartyForTest          `json:"webauthn_relying_party,omitempty"`
+	AuthorizedX509Signers         []operatorroster.AuthorizedX509Signer `json:"authorized_x509_signers,omitempty"`
 }
 
 // authorizedWebAuthnCredentialForTest mirrors
@@ -1364,17 +1377,18 @@ type signedRevocationManifestForTest struct {
 // this is the shape a real controller serves. A fixture that left them unset would only
 // exercise the subset of the payload the consumer happens to read, and would pass against
 // a consumer whose local mirror silently drops the rest.
-func sigTestSignRevocationManifest(t *testing.T, signingCert *cert.Certificate, version int64, revokedSerials []string) []byte {
+func sigTestSignRevocationManifest(t *testing.T, signingCert *cert.Certificate, version int64, revokedSerials []string, signers ...operatorroster.AuthorizedX509Signer) []byte {
 	t.Helper()
 	if revokedSerials == nil {
 		// buildRevocationManifest always emits a non-nil slice.
 		revokedSerials = []string{}
 	}
 	manifest := revocationManifestForTest{
-		Kind:           "operator-cert-revocation",
-		Version:        version,
-		IssuedAt:       time.Now().UTC().Truncate(time.Second),
-		RevokedSerials: revokedSerials,
+		Kind:                  "operator-cert-revocation",
+		Version:               version,
+		IssuedAt:              time.Now().UTC().Truncate(time.Second),
+		RevokedSerials:        revokedSerials,
+		AuthorizedX509Signers: signers,
 		AuthorizedWebAuthnCredentials: []authorizedWebAuthnCredentialForTest{{
 			Kind:         "webauthn-credential",
 			CredentialID: []byte{0x01, 0x02, 0x03},
@@ -1585,6 +1599,7 @@ func TestExecuteScriptHandler_LibraryScript_UntrustedKey_Rejected(t *testing.T) 
 // canonical bytes and the signature no longer verifies.
 func TestExecuteScriptHandler_TamperedContent_Rejected(t *testing.T) {
 	h := newHandlerWithSigning(t, nil, true, inlineTestCARoots(t))
+	h.revocationVerifier = inlineTestRevocationVerifier(t)
 
 	// Sign an envelope built from the original content, but deliver tampered content.
 	original := []byte("#!/bin/bash\necho hello")
@@ -1702,7 +1717,7 @@ func TestExecuteScriptHandler_InlineScript_ValidOperatorCert_Accepted(t *testing
 	// (cfg credential request-signing-cert) rather than the admin bundle. Test files
 	// are exempt from SetPayloadSigningMarker's restricted-caller allow-list
 	// (TestSetPayloadSigningMarker_Architecture).
-	operatorCert := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker) // valid, chained, not expired, payload-signing-marked
+	operatorCert := sigTestOperatorCert(t, ca, boundPayloadSigning) // valid, chained, not expired, payload-signing-marked
 
 	cb, getEvents := collectEvents()
 	h, err := New(&Config{
@@ -1711,6 +1726,7 @@ func TestExecuteScriptHandler_InlineScript_ValidOperatorCert_Accepted(t *testing
 		Logger:             newTestLogger(t),
 		RequireSignedAdhoc: true,
 		ControllerCARoots:  caPool,
+		RevocationVerifier: newRosterVerifier(t, ca, caPool, rootScopeSignerEntry(operatorCert)),
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
@@ -1767,12 +1783,12 @@ func TestExecuteScriptHandler_InlineScript_NonAdminCert_Rejected(t *testing.T) {
 // and a full authorized-key roster fail identically against that threat class.
 func TestExecuteScriptHandler_RevokedOperatorCert_RejectedAfterRefetch(t *testing.T) {
 	ca, caPool := sigTestCA(t)
-	operatorCert := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+	operatorCert := sigTestOperatorCert(t, ca, boundPayloadSigning)
 	signingCert := sigTestManifestSigningCert(t, ca)
 
 	// First fetch: the certificate is not yet revoked.
 	var currentManifest []byte
-	currentManifest = sigTestSignRevocationManifest(t, signingCert, 1, nil)
+	currentManifest = sigTestSignRevocationManifest(t, signingCert, 1, nil, rootScopeSignerEntry(operatorCert))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(currentManifest)
@@ -1806,7 +1822,7 @@ func TestExecuteScriptHandler_RevokedOperatorCert_RejectedAfterRefetch(t *testin
 
 	// Simulate the controller's certificate:revoke flow having run: the next
 	// manifest served now lists the certificate's real serial, at a higher version.
-	currentManifest = sigTestSignRevocationManifest(t, signingCert, 2, []string{operatorCert.SerialNumber})
+	currentManifest = sigTestSignRevocationManifest(t, signingCert, 2, []string{operatorCert.SerialNumber}, rootScopeSignerEntry(operatorCert))
 	require.NoError(t, revocationVerifier.FetchAndVerify(context.Background(), srv.Client(), srv.URL, stewardtypes.ModuleTrustModeStrict))
 
 	err = dispatch("sig-revoke-after-001")
@@ -1826,7 +1842,7 @@ func TestExecuteScriptHandler_RevokedOperatorCert_RejectedAfterRefetch(t *testin
 // cryptographically valid.
 func TestExecuteScriptHandler_TargetMismatch_Rejected(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "host-B", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	h, err := New(&Config{StewardID: "host-B", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -1849,7 +1865,7 @@ func TestExecuteScriptHandler_TargetMismatch_Rejected(t *testing.T) {
 // AC): an envelope whose ExpiresAt is in the past is rejected even though the
 // signature is cryptographically valid and the steward is a correct target.
 func TestExecuteScriptHandler_ExpiredEnvelope_Rejected(t *testing.T) {
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: noopStatus, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: noopStatus, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -1874,7 +1890,7 @@ func TestExecuteScriptHandler_ExpiredEnvelope_Rejected(t *testing.T) {
 // produces: the outer envelope is fresh, but the inner operator-signed nonce is not.
 func TestExecuteScriptHandler_EnvelopeNonceReplay_RejectedIndependentlyOfOuterReplayCache(t *testing.T) {
 	cb, getEvents := collectEvents()
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
@@ -1919,7 +1935,7 @@ func TestExecuteScriptHandler_EnvelopeNonceReplay_RejectedIndependentlyOfOuterRe
 // present and well-formed. This confirms no remaining code path in
 // preflightScriptSignature accepts a content-only digest.
 func TestExecuteScriptHandler_LegacyContentOnlySignature_Rejected(t *testing.T) {
-	h, err := New(&Config{StewardID: "steward-test", OnStatus: noopStatus, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t)})
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: noopStatus, Logger: newTestLogger(t), ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t)})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 

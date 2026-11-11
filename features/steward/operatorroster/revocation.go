@@ -93,7 +93,7 @@ type webauthnRelyingParty struct {
 }
 
 // revocationManifest mirrors features/controller/api.RevocationManifest field-for-field
-// (name, order, json tags) — ALL six fields, not just the ones this package reads.
+// (name, order, json tags) — ALL seven fields, not just the ones this package reads.
 //
 // Completeness is a correctness requirement, not tidiness. The controller signs
 // json.Marshal of the full struct (handlers_revocation_manifest.go's
@@ -114,6 +114,7 @@ type revocationManifest struct {
 	RevokedSerials                []string                       `json:"revoked_serials"`
 	AuthorizedWebAuthnCredentials []authorizedWebAuthnCredential `json:"authorized_webauthn_credentials,omitempty"`
 	WebAuthnRelyingParty          *webauthnRelyingParty          `json:"webauthn_relying_party,omitempty"`
+	AuthorizedX509Signers         []AuthorizedX509Signer         `json:"authorized_x509_signers,omitempty"`
 }
 
 // signedRevocationManifest mirrors SignedRevocationManifest.
@@ -140,6 +141,7 @@ type RevocationVerifier struct {
 	lastVersion   int64
 	newestIssued  time.Time
 	revoked       map[string]struct{}
+	x509Roster    x509RosterState
 }
 
 // RevocationOption tunes NewRevocationVerifier.
@@ -237,10 +239,9 @@ func (v *RevocationVerifier) VerifyManifest(raw []byte, mode stewardtrust.TrustM
 		return fmt.Errorf("unexpected manifest kind %q", manifest.Manifest.Kind)
 	}
 
-	if mode == stewardtypes.ModuleTrustModeStrict {
-		if err := v.verifyStrict(&manifest); err != nil {
-			return err
-		}
+	signerVerified, err := v.verifyManifestSigner(&manifest, mode)
+	if err != nil {
+		return err
 	}
 
 	v.mu.Lock()
@@ -261,20 +262,42 @@ func (v *RevocationVerifier) VerifyManifest(raw []byte, mode stewardtrust.TrustM
 	// to silently un-revoke a certificate this verifier already knew was bad.
 	// Binding to current revocation state means the accepted state can only
 	// expand.
-	revoked := make(map[string]struct{}, len(v.revoked)+len(manifest.Manifest.RevokedSerials))
-	for serial := range v.revoked {
-		revoked[serial] = struct{}{}
-	}
-	for _, serial := range manifest.Manifest.RevokedSerials {
-		revoked[serial] = struct{}{}
-	}
-	v.revoked = revoked
+	v.revoked = unionRevokedSerials(v.revoked, manifest.Manifest.RevokedSerials)
 	v.lastVersion = manifest.Manifest.Version
 	if manifest.Manifest.IssuedAt.After(v.newestIssued) {
 		v.newestIssued = manifest.Manifest.IssuedAt
 	}
 	v.hasVerified = true
+	if signerVerified {
+		v.x509Roster.apply(manifest.Manifest.IssuedAt, manifest.Manifest.AuthorizedX509Signers)
+	}
 	return nil
+}
+
+// verifyManifestSigner reports whether the manifest's signer chained to the pinned roots and
+// its signature verified. The X.509 signer roster is authority, not a revocation hint: it
+// decides who may sign an operator payload, so it is only ever taken from a manifest that
+// passed this check. Strict mode requires it (an error refuses the manifest); in controller
+// mode the manifest is still applied for revocation, and its roster is kept only if the same
+// check happens to succeed.
+func (v *RevocationVerifier) verifyManifestSigner(manifest *signedRevocationManifest, mode stewardtrust.TrustMode) (bool, error) {
+	err := v.verifyStrict(manifest)
+	if mode == stewardtypes.ModuleTrustModeStrict && err != nil {
+		return false, err
+	}
+	return err == nil, nil
+}
+
+// unionRevokedSerials returns a new set holding every serial in known and in serials.
+func unionRevokedSerials(known map[string]struct{}, serials []string) map[string]struct{} {
+	revoked := make(map[string]struct{}, len(known)+len(serials))
+	for serial := range known {
+		revoked[serial] = struct{}{}
+	}
+	for _, serial := range serials {
+		revoked[serial] = struct{}{}
+	}
+	return revoked
 }
 
 // verifyStrict chain-verifies the manifest's signer against the pinned roots and

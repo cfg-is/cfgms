@@ -18,9 +18,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	"github.com/cfgis/cfgms/pkg/session"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 const ttSteward = "steward-1"
@@ -80,7 +80,7 @@ func (n *ticketNode) signedTicketBody(steward, shell string) map[string]interfac
 	n.t.Helper()
 	exp := time.Now().Add(2 * time.Minute).UTC().Truncate(time.Second)
 	env := terminalEnvelope(n.t, steward, shell, []string{steward}, "n-term", exp)
-	proof, _ := signActionX509(n.t, n.server, env, cert.SetPayloadSigningMarker)
+	proof, _ := signActionX509Bound(n.t, n.server, testSignerAccountID, env)
 	return ticketBody(shell, "n-term", exp, []string{steward}, proof)
 }
 
@@ -115,7 +115,7 @@ func TestTerminalTicket_NoProofAndWrongShellRefused(t *testing.T) {
 
 	// A proof signed for the steward-action shell over the same steward.
 	env := actionEnvelope(t, testAction(), []string{ttSteward}, "n1", exp)
-	proof, _ := signActionX509(t, n.server, env, cert.SetPayloadSigningMarker)
+	proof, _ := signActionX509Bound(t, n.server, testSignerAccountID, env)
 	rec = n.do("/terminal/tickets/"+ttSteward, p, ticketBody("bash", "n1", exp, []string{ttSteward}, proof))
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Equal(t, "INVALID_SIGNATURE", errorCode(t, rec))
@@ -134,20 +134,20 @@ func TestTerminalTicket_ProofFailuresAre403AndStoreNothing(t *testing.T) {
 		"expired": func() map[string]interface{} {
 			exp := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
 			env := terminalEnvelope(t, ttSteward, "bash", []string{ttSteward}, "n", exp)
-			proof, _ := signActionX509(t, n.server, env, cert.SetPayloadSigningMarker)
+			proof, _ := signActionX509Bound(t, n.server, testSignerAccountID, env)
 			return ticketBody("bash", "n", exp, []string{ttSteward}, proof)
 		},
 		"ttl too long": func() map[string]interface{} {
 			exp := time.Now().Add(operatorpayload.TerminalEnvelopeMaxTTL + time.Hour).UTC().Truncate(time.Second)
 			env := terminalEnvelope(t, ttSteward, "bash", []string{ttSteward}, "n", exp)
-			proof, _ := signActionX509(t, n.server, env, cert.SetPayloadSigningMarker)
+			proof, _ := signActionX509Bound(t, n.server, testSignerAccountID, env)
 			return ticketBody("bash", "n", exp, []string{ttSteward}, proof)
 		},
 		"extra target": func() map[string]interface{} {
 			exp := time.Now().Add(time.Minute).UTC().Truncate(time.Second)
 			tg := []string{ttSteward, "other"}
 			env := terminalEnvelope(t, ttSteward, "bash", tg, "n", exp)
-			proof, _ := signActionX509(t, n.server, env, cert.SetPayloadSigningMarker)
+			proof, _ := signActionX509Bound(t, n.server, testSignerAccountID, env)
 			return ticketBody("bash", "n", exp, tg, proof)
 		},
 		"shell differs from signed": func() map[string]interface{} {
@@ -461,4 +461,41 @@ func TestTerminalTicket_WebAuthnProofForOtherStewardOrShellRefused(t *testing.T)
 		assert.Equal(t, "INVALID_SIGNATURE", errorCode(t, rec))
 		assert.Zero(t, ticketCount(server))
 	})
+}
+
+// [REQUIRED TEST] a terminal ticket requested as principal B with a valid certificate bound to
+// principal A is refused with the generic error and a denied audit record naming B and the
+// certificate serial; requested as A it is minted.
+func TestTerminalTicket_CertificateBoundToAnotherPrincipalRefused(t *testing.T) {
+	n := newTicketX509Node(t)
+	seedOperatorAccount(t, n.server, "op-b", true)
+	exp := time.Now().Add(2 * time.Minute).UTC().Truncate(time.Second)
+	env := terminalEnvelope(t, ttSteward, "bash", []string{ttSteward}, "n-bound", exp)
+	proof, serial := signActionX509Bound(t, n.server, "op-a", env)
+	body := ticketBody("bash", "n-bound", exp, []string{ttSteward}, proof)
+
+	foreign := actionPrincipal("op-b")
+	rec := n.do("/terminal/tickets/"+ttSteward, foreign, body)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, "INVALID_SIGNATURE", errorCode(t, rec))
+	assert.Contains(t, rec.Body.String(), "invalid operator signature")
+	assert.Zero(t, ticketCount(n.server), "a refused proof must mint nothing")
+
+	require.NoError(t, n.server.auditManager.Flush(context.Background()))
+	entries, err := n.server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{TenantID: saTenant})
+	require.NoError(t, err)
+	var denied []*business.AuditEntry
+	for _, e := range entries {
+		if e.Action == "terminal_ticket.request" {
+			denied = append(denied, e)
+		}
+	}
+	require.Len(t, denied, 1, "a binding failure must be audited")
+	assert.Equal(t, business.AuditResultDenied, denied[0].Result)
+	assert.Equal(t, "op-b", denied[0].UserID)
+	assert.Equal(t, serial, denied[0].Details["signer_id"])
+
+	owner := actionPrincipal("op-a")
+	assert.Equal(t, http.StatusOK, n.do("/terminal/tickets/"+ttSteward, owner, body).Code)
+	assert.Equal(t, 1, ticketCount(n.server))
 }

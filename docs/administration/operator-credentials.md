@@ -34,8 +34,23 @@ only the PEM-encoded public key crosses the wire, in a `POST
 controller signs the submitted public key (never generating or seeing a private
 key for it) and returns a certificate carrying the CFGMS payload-signing marker —
 not the admin marker used by mTLS transport bundles, so the two credential types
-remain distinguishable by construction. The resulting keypair signs
-`operatorpayload.Envelope`s; it is never used for mTLS session authentication.
+remain distinguishable by construction. The certificate also names the owning account
+in an account-binding extension; the `CommonName` is display-only and is never used for
+authorization. The resulting keypair signs `operatorpayload.Envelope`s; it is never used
+for mTLS session authentication.
+
+**Who can sign.** Every signer traces to an account. The request is refused
+(`ACCOUNT_BINDING_REQUIRED`) for a principal with no account — the bootstrap mTLS admin
+or a CLI session with no bound account — and such a principal cannot sign an operator
+payload. When a command is submitted, the controller requires that the certificate's
+account is the account of the authenticated session (a credential issued through a CLI
+session works from a web session of the same account), and that the account is enabled
+and still holds `operator-payload:sign`; disabling the account or removing the grant takes
+effect on the next request, not at certificate expiry. The steward independently accepts
+the signature only when the controller's signed signer roster lists the certificate under
+an account that holds the grant and whose tenant covers the steward. A payload-signing
+certificate issued before the binding existed is refused everywhere; request a new
+credential with `cfg credential request-signing-cert`.
 
 **Per-connection credentials:** a signing credential (key plus certificate) belongs to
 one controller connection, so an operator who works with more than one connection or

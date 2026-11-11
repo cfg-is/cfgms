@@ -17,6 +17,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"runtime"
 	"testing"
@@ -25,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
@@ -60,10 +62,13 @@ func echoScriptBody(s string) string {
 // certificate and signer: once a CA is configured the steward verifies the outer
 // command signature too.
 type inlineExecuteScriptFixture struct {
-	params         map[string]interface{}
-	caPEM          string
-	signingCertPEM string
-	signer         signature.Signer
+	// signedRosterManifest is a signed manifest listing the operator certificate as an
+	// authorized signer, for the handler's revocation verifier to verify itself.
+	signedRosterManifest []byte
+	params               map[string]interface{}
+	caPEM                string
+	signingCertPEM       string
+	signer               signature.Signer
 }
 
 func signedInlineExecuteScriptParams(t *testing.T, content []byte, shell, stewardID, executionID string) inlineExecuteScriptFixture {
@@ -92,10 +97,13 @@ func signedInlineExecuteScriptParams(t *testing.T, content []byte, shell, stewar
 	require.NoError(t, err)
 
 	operator, err := ca.GenerateClientCertificate(&cert.ClientCertConfig{
-		CommonName:       "operator.test",
-		ValidityDays:     365,
-		KeySize:          2048,
-		TemplateModifier: cert.SetPayloadSigningMarker,
+		CommonName:   "operator.test",
+		ValidityDays: 365,
+		KeySize:      2048,
+		TemplateModifier: func(template *x509.Certificate) {
+			cert.SetPayloadSigningMarker(template)
+			require.NoError(t, cert.SetAccountBinding(template, "acct-operator-test"))
+		},
 	})
 	require.NoError(t, err)
 	keyBlock, _ := pem.Decode(operator.PrivateKeyPEM)
@@ -132,11 +140,45 @@ func signedInlineExecuteScriptParams(t *testing.T, content []byte, shell, stewar
 		"nonce":                env.Nonce,
 		"expires_at":           env.ExpiresAt.UTC().Format(time.RFC3339),
 	}
+	// The signer roster the controller serves for an account holding operator-payload:sign: the
+	// steward accepts the operator's signature only because this signed manifest lists it.
+	rosterManifest := struct {
+		Kind                  string    `json:"kind"`
+		Version               int64     `json:"version"`
+		IssuedAt              time.Time `json:"issued_at"`
+		RevokedSerials        []string  `json:"revoked_serials"`
+		AuthorizedX509Signers []struct {
+			Kind      string   `json:"kind"`
+			Serial    string   `json:"serial"`
+			AccountID string   `json:"account_id"`
+			TenantID  string   `json:"tenant_id"`
+			RootScope bool     `json:"root_scope"`
+			Grants    []string `json:"grants"`
+		} `json:"authorized_x509_signers,omitempty"`
+	}{Kind: "operator-cert-revocation", Version: 0, IssuedAt: time.Now().UTC().Truncate(time.Second), RevokedSerials: []string{}}
+	rosterManifest.AuthorizedX509Signers = append(rosterManifest.AuthorizedX509Signers, struct {
+		Kind      string   `json:"kind"`
+		Serial    string   `json:"serial"`
+		AccountID string   `json:"account_id"`
+		TenantID  string   `json:"tenant_id"`
+		RootScope bool     `json:"root_scope"`
+		Grants    []string `json:"grants"`
+	}{"x509-signing-certificate", operator.SerialNumber, "acct-operator-test", "", true, []string{"operator-payload:sign"}})
+	manifestBytes, err := json.Marshal(rosterManifest)
+	require.NoError(t, err)
+	manifestSig, err := signer.Sign(manifestBytes)
+	require.NoError(t, err)
+	signedManifest, err := json.Marshal(map[string]interface{}{
+		"manifest": rosterManifest, "signature": manifestSig, "signer_certificate_pem": string(signingCert.CertificatePEM),
+	})
+	require.NoError(t, err)
+
 	return inlineExecuteScriptFixture{
-		params:         params,
-		caPEM:          string(caPEM),
-		signingCertPEM: string(signingCert.CertificatePEM),
-		signer:         signer,
+		signedRosterManifest: signedManifest,
+		params:               params,
+		caPEM:                string(caPEM),
+		signingCertPEM:       string(signingCert.CertificatePEM),
+		signer:               signer,
 	}
 }
 
@@ -160,6 +202,8 @@ func TestSetupCommandHandler_RegistersExecuteScript(t *testing.T) {
 
 	handler, err := c.setupCommandHandler(context.Background(), "steward-exec-script")
 	require.NoError(t, err)
+	// Take the signer roster the way the steward does: from a manifest it chain-verifies itself.
+	require.NoError(t, handler.RevocationVerifier().VerifyManifest(fx.signedRosterManifest, stewardtypes.ModuleTrustModeStrict))
 
 	cmd := &cpTypes.Command{
 		ID:        "cmd-exec-script-1",

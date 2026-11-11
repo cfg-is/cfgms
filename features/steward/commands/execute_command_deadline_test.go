@@ -37,7 +37,7 @@ func TestExecuteCommand_CommandExecuteScript_DefaultInlineDeadline(t *testing.T)
 		StewardID:         "steward-test",
 		OnStatus:          noopStatus,
 		Logger:            newTestLogger(t),
-		ControllerCARoots: inlineTestCARoots(t),
+		ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t),
 	})
 	require.NoError(t, err)
 
@@ -96,7 +96,7 @@ func TestExecuteCommand_CommandExecuteScript_TimeoutSecondsOverrideUnaffected(t 
 		StewardID:         "steward-test",
 		OnStatus:          noopStatus,
 		Logger:            newTestLogger(t),
-		ControllerCARoots: inlineTestCARoots(t),
+		ControllerCARoots: inlineTestCARoots(t), RevocationVerifier: inlineTestRevocationVerifier(t),
 	})
 	require.NoError(t, err)
 

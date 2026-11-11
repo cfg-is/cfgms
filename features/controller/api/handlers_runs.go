@@ -129,8 +129,9 @@ const (
 // of POST /api/v1/runs/command (Issue #3694): the prior SecurityProfilePublicBeta gate
 // is gone, so this now changes behavior for every deployment, not just public-beta
 // ones. It performs cryptographic verification plus operator-credential trust
-// (CA chain, payload-signing marker, revocation); expiry and nonce-replay enforcement
-// are the steward's responsibility (independent of the outer command's own replay
+// (CA chain, payload-signing marker, revocation) and the binding of the certificate to the
+// authenticated principal in ctx (verifyOperatorSigningCertificate); expiry and
+// nonce-replay enforcement are the steward's responsibility (independent of the outer command's own replay
 // window), not re-checked here.
 //
 // The marker requirement is HasPayloadSigningMarker, not HasAdminMarker (Issue #3696).
@@ -144,7 +145,7 @@ const (
 // signing-credential identifier the Issue #3698 audit trail records — so callers
 // never need to re-parse sig.PublicKey just to learn which credential authorized
 // the dispatch.
-func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string, targets []string, nonce string, expiresAt time.Time, sig *execCommandSignature) (string, error) {
+func (s *Server) validatePublicBetaCommandSignature(ctx context.Context, content []byte, shell string, targets []string, nonce string, expiresAt time.Time, sig *execCommandSignature) (string, error) {
 	if sig == nil || sig.Algorithm == "" || sig.Value == "" || sig.PublicKey == "" {
 		return "", fmt.Errorf("ad-hoc execution requires an operator signature")
 	}
@@ -178,7 +179,7 @@ func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string
 		return "", fmt.Errorf("invalid operator signature: %w", err)
 	}
 
-	return s.verifyOperatorSigningCertificate(sig.PublicKey)
+	return s.verifyOperatorSigningCertificate(ctx, sig.PublicKey)
 }
 
 // verifyCommandWebAuthn verifies a passkey operator proof over an inline command's
@@ -210,12 +211,51 @@ func (s *Server) verifyCommandWebAuthn(ctx context.Context, content []byte, shel
 	}, proof)
 }
 
+// operatorCertBindingError is a refusal to treat a chain-valid operator signing certificate
+// as the authorization of the dispatching principal: the certificate names no account, names
+// another principal's account, or names an account that no longer holds operator-payload
+// signing authority. reason is a fixed phrase safe to record in an audit entry; it carries no
+// certificate, chain or revocation detail. Callers answer the client with the generic
+// "invalid operator signature" and audit the refusal with the principal and serial.
+type operatorCertBindingError struct{ reason string }
+
+func (e *operatorCertBindingError) Error() string { return e.reason }
+
+// operatorCertBindingReason returns the audit reason when err is a binding or grant refusal,
+// and "" for any other failure.
+func operatorCertBindingReason(err error) string {
+	var bindingErr *operatorCertBindingError
+	if errors.As(err, &bindingErr) {
+		return bindingErr.reason
+	}
+	return ""
+}
+
+// parseOperatorSigningCertificate decodes the PEM certificate an operator envelope carries.
+func parseOperatorSigningCertificate(publicKeyPEM string) (*x509.Certificate, error) {
+	block, _ := pem.Decode([]byte(publicKeyPEM))
+	if block == nil {
+		return nil, fmt.Errorf("operator signing certificate is not valid PEM")
+	}
+	operatorCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("operator signing certificate is invalid: %w", err)
+	}
+	return operatorCert, nil
+}
+
 // verifyOperatorSigningCertificate applies the operator-credential trust checks shared
 // by every X.509-signed operator envelope: the certificate chains to the controller CA
-// for client authentication, carries the payload-signing marker, and is not revoked. It
+// for client authentication, carries the payload-signing marker, is not revoked, and is
+// bound to the authenticated principal in ctx (verifyOperatorCertificateBinding). It
 // returns the certificate's serial number. The signature itself is verified by the
-// caller; this establishes only that the key that made it is one the controller trusts.
-func (s *Server) verifyOperatorSigningCertificate(publicKeyPEM string) (string, error) {
+// caller; this establishes only that the key that made it is one the controller trusts
+// and that its owner is the principal making the request.
+//
+// The serial is returned together with a binding or grant error so the caller can audit
+// the refusal against the certificate that was presented; every earlier failure returns
+// "" because the certificate was never established as one of ours.
+func (s *Server) verifyOperatorSigningCertificate(ctx context.Context, publicKeyPEM string) (string, error) {
 	if s.certManager == nil {
 		return "", fmt.Errorf("operator signing requires loaded controller signing roots")
 	}
@@ -231,13 +271,9 @@ func (s *Server) verifyOperatorSigningCertificate(publicKeyPEM string) (string, 
 	if err != nil {
 		return "", fmt.Errorf("controller signing roots are invalid: %w", err)
 	}
-	block, _ := pem.Decode([]byte(publicKeyPEM))
-	if block == nil {
-		return "", fmt.Errorf("operator signing certificate is not valid PEM")
-	}
-	operatorCert, err := x509.ParseCertificate(block.Bytes)
+	operatorCert, err := parseOperatorSigningCertificate(publicKeyPEM)
 	if err != nil {
-		return "", fmt.Errorf("operator signing certificate is invalid: %w", err)
+		return "", err
 	}
 	if _, err := operatorCert.Verify(x509.VerifyOptions{
 		Roots:     roots,
@@ -248,14 +284,53 @@ func (s *Server) verifyOperatorSigningCertificate(publicKeyPEM string) (string, 
 	if !cert.HasPayloadSigningMarker(operatorCert) {
 		return "", fmt.Errorf("operator signing certificate is not a payload-signing certificate")
 	}
-	revoked, err := s.certManager.IsRevoked(operatorCert.SerialNumber.String())
+	serial := operatorCert.SerialNumber.String()
+	revoked, err := s.certManager.IsRevoked(serial)
 	if err != nil {
 		return "", fmt.Errorf("failed to check operator signing certificate revocation status: %w", err)
 	}
 	if revoked {
 		return "", fmt.Errorf("operator signing certificate is revoked")
 	}
-	return operatorCert.SerialNumber.String(), nil
+	if err := s.verifyOperatorCertificateBinding(ctx, operatorCert); err != nil {
+		return serial, err
+	}
+	return serial, nil
+}
+
+// verifyOperatorCertificateBinding requires that the certificate belongs to the account of the
+// authenticated principal in ctx and that the account still holds operator-payload signing
+// authority — the controller-side counterpart of what verifyActionWebAuthn requires of a
+// passkey. The owner is read from the account-binding extension, never from the CommonName
+// (display-only), so a certificate issued through one session of an account is accepted from
+// another session of the same account, and one issued to a different account is not.
+//
+// A certificate with no binding (issued before the extension existed) and a principal that is
+// not account-bound (the bootstrap mTLS admin, an API key, an unbound CLI session) are refused
+// outright: every signer must trace to an account, and there is no unbound fallback. The
+// account is loaded fresh on each call, so disabling it or removing its grant takes effect on
+// the next request instead of at certificate expiry. A failure to load the account is not a
+// binding refusal: it is reported as an ordinary error and fails closed.
+func (s *Server) verifyOperatorCertificateBinding(ctx context.Context, operatorCert *x509.Certificate) error {
+	principal, _ := ctx.Value(principalContextKey).(*Principal)
+	if principal == nil || !principal.AccountBound || principal.ID == "" {
+		return &operatorCertBindingError{reason: "operator signing requires an account-bound principal"}
+	}
+	boundAccountID, ok := cert.AccountBindingFromCertificate(operatorCert)
+	if !ok {
+		return &operatorCertBindingError{reason: "signing certificate is not bound to an account"}
+	}
+	if boundAccountID != principal.ID {
+		return &operatorCertBindingError{reason: "signing certificate is not bound to the dispatching principal"}
+	}
+	acct, err := s.getAccountByID(ctx, boundAccountID)
+	if err != nil {
+		return fmt.Errorf("load signing certificate owner account: %w", err)
+	}
+	if !accountHoldsOperatorPayloadSigning(acct) {
+		return &operatorCertBindingError{reason: "signing certificate owner does not hold " + OperatorPayloadSignGrant}
+	}
+	return nil
 }
 
 // authRunAccess authenticates a request to the ad-hoc run API and returns the
@@ -585,7 +660,12 @@ func (s *Server) parseRunCommandTiming(w http.ResponseWriter, req *postRunComman
 // verifyRunCommandProof verifies exactly one operator proof (WebAuthn or X.509
 // signature) over the signed envelope and returns the signing credential id. It
 // writes the response and returns ok=false on refusal.
-func (s *Server) verifyRunCommandProof(w http.ResponseWriter, ctx context.Context, principal *Principal, req *postRunCommandRequest, inlineContent []byte, expiresAt time.Time) (string, bool) {
+//
+// An X.509 verification failure is answered with the generic "invalid operator signature",
+// whatever the cause: the detail (chain, revocation, binding) is logged through
+// logging.SanitizeLogValue and never reaches the client. A binding or grant failure is also
+// audited as a denied dispatch carrying the dispatching principal and the certificate serial.
+func (s *Server) verifyRunCommandProof(w http.ResponseWriter, ctx context.Context, principal *Principal, tenantID string, req *postRunCommandRequest, inlineContent []byte, expiresAt time.Time) (string, bool) {
 	switch {
 	case req.Signature != nil && req.WebAuthn != nil:
 		s.writeErrorResponse(w, http.StatusBadRequest, "provide exactly one operator proof", "INVALID_SIGNATURE")
@@ -600,13 +680,23 @@ func (s *Server) verifyRunCommandProof(w http.ResponseWriter, ctx context.Contex
 			return "", false
 		}
 		return credentialID, true
+	case req.Signature == nil:
+		s.writeErrorResponse(w, http.StatusBadRequest, "ad-hoc execution requires an operator signature", "INVALID_SIGNATURE")
+		return "", false
 	default:
-		credentialID, err := s.validatePublicBetaCommandSignature(inlineContent, req.Shell, req.Targets, req.Nonce, expiresAt, req.Signature)
+		serial, err := s.validatePublicBetaCommandSignature(ctx, inlineContent, req.Shell, req.Targets, req.Nonce, expiresAt, req.Signature)
 		if err != nil {
-			s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_SIGNATURE")
+			s.logger.Warn("Run command refused: operator envelope not verified",
+				"principal_id", logging.SanitizeLogValue(principal.ID),
+				"error", logging.SanitizeLogValue(err.Error()))
+			if reason := operatorCertBindingReason(err); reason != "" {
+				s.emitOperatorPayloadDispatchAudit(ctx, tenantID, principal.ID, string(inlineContent),
+					serial, req.Targets, "", business.AuditResultDenied, reason)
+			}
+			s.writeErrorResponse(w, http.StatusBadRequest, "invalid operator signature", "INVALID_SIGNATURE")
 			return "", false
 		}
-		return credentialID, true
+		return serial, true
 	}
 }
 
@@ -700,6 +790,21 @@ func (s *Server) buildRunWebAuthnManifests(w http.ResponseWriter, ctx context.Co
 	return manifests, true
 }
 
+// enforceCallerRunIDTargetScope applies the tenant RBAC check for id: targets — enforce
+// admin.tenant_path is a prefix of steward.tenant_path. Applied to every caller that is not
+// root-scoped; a root caller has fleet-wide reach (Issue #4665). selector.Parse populates
+// filter.IDs (comma-OR list); filter.DeviceID is the legacy query-param path only. It writes
+// the refusal and returns false when a target is outside the caller's scope.
+func (s *Server) enforceCallerRunIDTargetScope(w http.ResponseWriter, r *http.Request, filter fleet.Filter) bool {
+	execTenant := callerTenantFilter(r.Context())
+	if execTenant == "" { //architecture:allow-root-scope -- tenant callers' id: targets; a root caller's targets pass resolveAuthorizedRunTargets
+		return true
+	}
+	return s.enforceRunIDTargetScope(w, filter, func(deviceID string) execTenantScopeDecision {
+		return s.enforceExecTenantScope(r.Context(), deviceID, execTenant)
+	})
+}
+
 // handlePostRunCommand handles POST /api/v1/runs/command.
 // Creates a run record for an inline (ad-hoc) script and fans out one
 // QueuedExecution per matched steward.
@@ -722,7 +827,7 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	credentialID, ok := s.verifyRunCommandProof(w, r.Context(), principal, &req, inlineContent, expiresAt)
+	credentialID, ok := s.verifyRunCommandProof(w, r.Context(), principal, tenantID, &req, inlineContent, expiresAt)
 	if !ok {
 		return
 	}
@@ -735,17 +840,8 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tenant RBAC check for id: targets — enforce admin.tenant_path is a prefix of
-	// steward.tenant_path. Applied to every caller that is not root-scoped; a root
-	// caller has fleet-wide reach (Issue #4665).
-	// selector.Parse populates filter.IDs (comma-OR list); filter.DeviceID is the
-	// legacy query-param path only.
-	if execTenant := callerTenantFilter(r.Context()); execTenant != "" { //architecture:allow-root-scope -- tenant callers' id: targets; a root caller's targets pass resolveAuthorizedRunTargets
-		if !s.enforceRunIDTargetScope(w, filter, func(deviceID string) execTenantScopeDecision {
-			return s.enforceExecTenantScope(r.Context(), deviceID, execTenant)
-		}) {
-			return
-		}
+	if !s.enforceCallerRunIDTargetScope(w, r, filter) {
+		return
 	}
 
 	// Resolve the run's targets once and authorize them against ADR-025's
