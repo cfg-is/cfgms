@@ -187,8 +187,13 @@ func (s *FilesystemBlobStore) PutBlob(ctx context.Context, key blob.BlobKey, r i
 
 	checksum := hex.EncodeToString(h.Sum(nil))
 
-	// Atomic rename to the final path.
-	if err := os.Rename(tmpPath, s.blobPath(key)); err != nil {
+	// Atomically replace the final path. AtomicReplace swaps the name in one
+	// operation even while a reader has the old blob open (a plain os.Rename
+	// fails on Windows then); the retry rides out a reader that holds the file
+	// without FILE_SHARE_DELETE for the moment it takes to open it.
+	if err := atomicfile.RetryOnSharingViolation(func() error {
+		return atomicfile.AtomicReplace(tmpPath, s.blobPath(key))
+	}); err != nil {
 		return fmt.Errorf("blob put: failed to rename to final path: %w", err)
 	}
 	success = true
@@ -230,7 +235,9 @@ func replaceSidecar(dir, metaFilePath string, metaJSON []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := atomicfile.AtomicReplace(tmpSidecar, metaFilePath); err != nil {
+	if err := atomicfile.RetryOnSharingViolation(func() error {
+		return atomicfile.AtomicReplace(tmpSidecar, metaFilePath)
+	}); err != nil {
 		_ = os.Remove(tmpSidecar)
 		return err
 	}
@@ -390,7 +397,14 @@ func (s *FilesystemBlobStore) GetBlob(ctx context.Context, key blob.BlobKey) (io
 		return nil, blob.BlobMeta{}, fmt.Errorf("blob get: failed to parse metadata sidecar: %w", err)
 	}
 
-	f, err := atomicfile.Open(s.blobPath(key))
+	// The open is retried on a Windows sharing violation raised while a
+	// concurrent PutBlob swaps the blob file; a persistent violation is returned.
+	var f *os.File
+	err = atomicfile.RetryOnSharingViolation(func() error {
+		var openErr error
+		f, openErr = os.Open(s.blobPath(key))
+		return openErr
+	})
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, blob.BlobMeta{}, blob.ErrBlobNotFound
@@ -430,20 +444,19 @@ func (s *FilesystemBlobStore) DeleteBlob(ctx context.Context, key blob.BlobKey) 
 }
 
 // readContainedSidecar reads one sidecar found while walking a ListBlobs search
-// directory. Containment: the entry is resolved through os.Root and must be a
-// regular file, so a symlinked sidecar cannot redirect the read out of the
-// search directory. The read itself goes through atomicfile.ReadFile, which
-// retries Windows sharing violations raised while a concurrent writer swaps the
-// sidecar in. Genuine read errors are returned; they are never skipped.
-func readContainedSidecar(metadataRoot *os.Root, relativePath, fullPath string) ([]byte, error) {
-	info, err := metadataRoot.Lstat(relativePath)
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", filepath.ToSlash(relativePath))
-	}
-	return atomicfile.ReadFile(fullPath)
+// directory. The read goes through os.Root, so a symlinked sidecar cannot
+// redirect it out of the search directory and no check-then-use window exists.
+// A Windows sharing violation raised while a concurrent writer swaps the
+// sidecar in is retried; any other error, and a violation that persists, is
+// returned and never skipped.
+func readContainedSidecar(metadataRoot *os.Root, relativePath string) ([]byte, error) {
+	var data []byte
+	err := atomicfile.RetryOnSharingViolation(func() error {
+		var readErr error
+		data, readErr = metadataRoot.ReadFile(relativePath)
+		return readErr
+	})
+	return data, err
 }
 
 // keyFromSidecarPath reconstructs the blob key for a sidecar found at
@@ -521,7 +534,7 @@ func (s *FilesystemBlobStore) ListBlobs(ctx context.Context, prefix blob.BlobKey
 		if err != nil {
 			return fmt.Errorf("list blobs: resolve metadata path: %w", err)
 		}
-		metaBytes, err := readContainedSidecar(metadataRoot, relativePath, path)
+		metaBytes, err := readContainedSidecar(metadataRoot, relativePath)
 		if err != nil {
 			return fmt.Errorf("list blobs: failed to read metadata: %w", err)
 		}

@@ -13,9 +13,9 @@ func ReadFile(path string) ([]byte, error) {
 	return os.ReadFile(path) //#nosec G304 -- caller validates path
 }
 
-// Open opens path for reading. Concurrent rename-over of the target never
-// blocks an open-for-read on POSIX, so this is a plain os.Open. The caller
-// closes the returned file.
-func Open(path string) (*os.File, error) {
-	return os.Open(path) //#nosec G304 -- caller validates path
+// RetryOnSharingViolation runs op once. POSIX opens and renames have no share
+// modes, so no error here is a sharing violation and no retry is needed. See
+// read_windows.go.
+func RetryOnSharingViolation(op func() error) error {
+	return op()
 }

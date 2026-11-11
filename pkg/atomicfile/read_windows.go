@@ -32,36 +32,39 @@ import (
 // defense-in-depth for transient FS-driver glitches during the rename
 // window. With the share flags above, retries should be rare.
 func ReadFile(path string) ([]byte, error) {
-	return retrySharing(func() ([]byte, error) { return readWithShareFlags(path) })
+	var data []byte
+	err := RetryOnSharingViolation(func() error {
+		var readErr error
+		data, readErr = readWithShareFlags(path)
+		return readErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
-// Open opens path for reading with the same share flags and sharing-violation
-// retry as ReadFile, so a streaming reader never blocks a concurrent
-// AtomicReplace of the file. A missing file returns an error satisfying
-// os.IsNotExist; a violation that persists past the retries is returned as an
-// error. The caller closes the returned file.
-func Open(path string) (*os.File, error) {
-	return retrySharing(func() (*os.File, error) { return openWithShareFlags(path) })
-}
-
-// retrySharing runs op, retrying with jittered exponential backoff while it
-// fails with a transient sharing violation. Any other error returns at once.
-func retrySharing[T any](op func() (T, error)) (T, error) {
+// RetryOnSharingViolation runs op, retrying with jittered exponential backoff
+// while it fails with a transient Windows sharing violation or access-denied
+// error (another handle to the file is open without the share flags op needs).
+// Any other error returns at once; a violation that persists past the retry
+// budget is returned, so callers fail closed. The helper opens no file itself:
+// the caller keeps its own open or replace inside op.
+func RetryOnSharingViolation(op func() error) error {
 	const (
 		maxAttempts = 12
 		baseDelay   = 1 * time.Millisecond
 		maxDelay    = 50 * time.Millisecond
 	)
-	var zero T
 	var lastErr error
 	delay := baseDelay
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		v, err := op()
+		err := op()
 		if err == nil {
-			return v, nil
+			return nil
 		}
 		if !isRetryableRenameError(err) {
-			return zero, err
+			return err
 		}
 		lastErr = err
 		time.Sleep(jitter(delay))
@@ -72,24 +75,14 @@ func retrySharing[T any](op func() (T, error)) (T, error) {
 			}
 		}
 	}
-	return zero, lastErr
+	return lastErr
 }
 
-// readWithShareFlags opens path with openWithShareFlags, reads the whole
-// file, and closes. Equivalent to os.ReadFile except for the share-mode
-// override that lets a concurrent writer's ReplaceFileW succeed.
+// readWithShareFlags opens path with FILE_SHARE_READ | FILE_SHARE_WRITE |
+// FILE_SHARE_DELETE, reads the whole file, and closes. Equivalent to
+// os.ReadFile except for the share-mode override that lets a concurrent
+// writer's ReplaceFileW succeed.
 func readWithShareFlags(path string) ([]byte, error) {
-	f, err := openWithShareFlags(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	return io.ReadAll(f)
-}
-
-// openWithShareFlags opens path for reading with FILE_SHARE_READ |
-// FILE_SHARE_WRITE | FILE_SHARE_DELETE.
-func openWithShareFlags(path string) (*os.File, error) {
 	pathW, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
@@ -108,5 +101,7 @@ func openWithShareFlags(path string) (*os.File, error) {
 		// isRetryableRenameError / os.IsNotExist work uniformly.
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
-	return os.NewFile(uintptr(handle), path), nil
+	f := os.NewFile(uintptr(handle), path)
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(f)
 }

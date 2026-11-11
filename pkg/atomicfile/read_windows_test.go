@@ -6,7 +6,6 @@
 package atomicfile
 
 import (
-	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -30,59 +29,94 @@ func holdWithShareMode(t *testing.T, path string, shareMode uint32) *os.File {
 	return f
 }
 
-func TestOpen_ReadsContent(t *testing.T) {
+func TestRetryOnSharingViolation_SucceedsAfterTransientViolation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "f")
-	require.NoError(t, os.WriteFile(path, []byte("hello"), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
+	// Exclusive handle held until the second attempt, then released.
+	held := holdWithShareMode(t, path, 0)
 
-	f, err := Open(path)
+	attempts := 0
+	err := RetryOnSharingViolation(func() error {
+		attempts++
+		if attempts == 2 {
+			require.NoError(t, held.Close())
+		}
+		f, openErr := os.Open(path)
+		if openErr != nil {
+			return openErr
+		}
+		return f.Close()
+	})
 	require.NoError(t, err)
-	defer func() { _ = f.Close() }()
-
-	got, err := io.ReadAll(f)
-	require.NoError(t, err)
-	assert.Equal(t, "hello", string(got))
+	assert.Equal(t, 2, attempts, "attempt 1 hits the exclusive handle; attempt 2 releases it and succeeds")
 }
 
-func TestOpen_AtomicReplaceSucceedsWhileOpenHandleHeld(t *testing.T) {
+func TestRetryOnSharingViolation_MissingFileReturnsAtOnce(t *testing.T) {
+	attempts := 0
+	err := RetryOnSharingViolation(func() error {
+		attempts++
+		f, openErr := os.Open(filepath.Join(t.TempDir(), "absent"))
+		if openErr == nil {
+			_ = f.Close()
+		}
+		return openErr
+	})
+	require.Error(t, err)
+	assert.True(t, os.IsNotExist(err), "want not-exist error, got %v", err)
+	assert.Equal(t, 1, attempts, "a missing file is not a sharing violation and must not be retried")
+}
+
+func TestRetryOnSharingViolation_PersistentViolationFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f")
+	require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
+	holdWithShareMode(t, path, 0)
+
+	err := RetryOnSharingViolation(func() error {
+		f, openErr := os.Open(path)
+		if openErr == nil {
+			_ = f.Close()
+		}
+		return openErr
+	})
+	require.Error(t, err)
+	assert.True(t, IsSharingViolation(err), "want sharing violation, got %v", err)
+}
+
+func TestRetryOnSharingViolation_AtomicReplaceWaitsOutOpenReader(t *testing.T) {
 	dir := t.TempDir()
 	src, dst := filepath.Join(dir, "src"), filepath.Join(dir, "dst")
 	require.NoError(t, os.WriteFile(dst, []byte("old"), 0o600))
 	require.NoError(t, os.WriteFile(src, []byte("new"), 0o600))
 
-	f, err := Open(dst)
+	// A plain os.Open reader omits FILE_SHARE_DELETE, so the replace is refused
+	// until the reader closes; the retry wrapper rides that out.
+	reader, err := os.Open(dst)
 	require.NoError(t, err)
-	defer func() { _ = f.Close() }()
+	t.Cleanup(func() { _ = reader.Close() })
 
-	// The streaming handle carries FILE_SHARE_DELETE, so the replace must not
-	// hit a sharing violation, and the open handle keeps reading the old data.
-	require.NoError(t, AtomicReplace(src, dst))
-
-	oldBytes, err := io.ReadAll(f)
+	attempts := 0
+	err = RetryOnSharingViolation(func() error {
+		attempts++
+		if attempts == 2 {
+			_ = reader.Close()
+		}
+		return AtomicReplace(src, dst)
+	})
 	require.NoError(t, err)
-	assert.Equal(t, "old", string(oldBytes))
 
-	newBytes, err := ReadFile(dst)
+	got, err := ReadFile(dst)
 	require.NoError(t, err)
-	assert.Equal(t, "new", string(newBytes))
+	assert.Equal(t, "new", string(got))
 }
 
-func TestOpen_MissingFileIsNotExist(t *testing.T) {
-	f, err := Open(filepath.Join(t.TempDir(), "absent"))
-	require.Error(t, err)
-	assert.Nil(t, f)
-	assert.True(t, os.IsNotExist(err), "want not-exist error, got %v", err)
-}
-
-func TestOpen_PersistentSharingViolationFailsClosed(t *testing.T) {
+func TestReadFile_ReadsContentAndMissingIsNotExist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "f")
-	require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte("hello"), 0o600))
+	got, err := ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "hello", string(got))
 
-	// An exclusive handle (share mode 0) refuses every other open, including
-	// ours, for the whole retry budget.
-	holdWithShareMode(t, path, 0)
-
-	f, err := Open(path)
+	_, err = ReadFile(filepath.Join(t.TempDir(), "absent"))
 	require.Error(t, err)
-	assert.Nil(t, f)
-	assert.True(t, IsSharingViolation(err), "want sharing violation, got %v", err)
+	assert.True(t, os.IsNotExist(err), "want not-exist error, got %v", err)
 }
