@@ -1,0 +1,57 @@
+# Every table the schema creates, with the schema version that introduced it
+# (schema_lock_check_test.go, Epic #5978).
+#
+# Each line is <table> <version>. New tables add a line with the current
+# SchemaVersion in the same change that adds their CREATE TABLE; the check fails for a
+# table with no line. Existing lines are never edited: a table's version is the fact
+# that makes a schema:new-table marker valid, so it must not change.
+assurance_policy_overrides 1
+audit_chain_heads 1
+audit_entries 1
+blast_radius_policy_overrides 1
+case_content 1
+case_pins 1
+cases 1
+cfgms_alert_states 1
+cfgms_cert_revocations 1
+cfgms_execution_grants 1
+cfgms_execution_queue 1
+cfgms_ip_trust_ranges 1
+cfgms_leases 1
+cfgms_module_approvals 1
+cfgms_node_registry 1
+cfgms_pending_registrations 1
+cfgms_push_records 1
+cfgms_rate_counters 1
+cfgms_registration_token_claims 1
+cfgms_registration_tokens 1
+cfgms_report_templates 1
+cfgms_rollout_records 1
+cfgms_routing 1
+cfgms_schema_version 1
+cfgms_script_run_jobs 1
+cfgms_script_runs 1
+cfgms_signing_cursor 1
+cfgms_signing_trust_acks 1
+cfgms_tenant_pending_deletions 1
+cfgms_tenants 1
+cfgms_triggers 1
+cfgms_upgrade_records 1
+cfgms_workflow_approvals 1
+cfgms_workflow_executions 1
+command_records 1
+command_transitions 1
+config_history 1
+configs 1
+pending_refresh_requests 1
+rbac_permissions 1
+rbac_role_assignments 1
+rbac_roles 1
+rbac_subjects 1
+refresh_nonces 1
+refresh_policies 1
+session_token_store 1
+sessions 1
+steward_records 1
+storage_health 1
+tenant_crossings 1
