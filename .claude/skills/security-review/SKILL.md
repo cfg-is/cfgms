@@ -120,6 +120,19 @@ in-container ollama daemon and needs the same `ollama signin` session as `ollama
 model (`ollama:glm-5.3-flash:cloud,opencode_agent:glm-5.3-flash:cloud`) compares the two loops on
 identical steps.
 
+**Ollama Cloud ends every response at 65,536 output tokens, thinking included.** A request's
+`num_predict` cannot raise it. The `ollama` lane numbers each file's lines in its prompt so the
+model does not spend that budget numbering them itself. A step that still hits the cap with no
+readable findings is recorded `failed` with `stop_reason_raw: output_cap`, counted in its own
+`Output cap` column of the report's coverage table, and never retried on the same lane. Set
+`CFGMS_SECURITY_REVIEW_OUTPUT_CAP_FALLBACK` to one `harness:model` pair (for example
+`opencode_agent:glm-5.3-flash:cloud`) and `launch`/`resume` run those steps, and only those, on
+that pair as its own lane: its findings land in its own `lanes/<lane-id>/` directory, so
+attribution and lane independence hold. The assignment is written to
+`plan/output_cap_fallback.json`; the report names each capped step a fallback completed. Unset,
+`output_cap` steps stay failed and keep the sweep incomplete. A fallback pair that is already in
+the roster runs every step anyway and is not restricted.
+
 **`ollama` needs an `ollama signin` session** before it can be used — the same "subscription
 session, never an API key" contract every other harness follows. Without it, `--harness ollama`
 fails closed as a recorded, skippable `credential_unavailable` dispatch outcome; every other
