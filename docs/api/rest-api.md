@@ -3109,6 +3109,15 @@ Approval routes act on the caller's own tenant's library. An approval is bound t
 
 `{kind}` is `script` or `workflow` (`400` `INVALID_KIND` otherwise). Each tenant has one library per kind, with the mode `signed` (default), `approve` or `comment`. `GET` returns `{ "kind": "script", "mode": "signed" }`. `PUT` takes `{ "mode": "approve" }` (`400` `INVALID_MODE` for any other value) for the caller's own tenant's library; there is no parent floor. Setting the mode the library already has goes through the same permission, tap and audit. Audit event `content_library.mode_change` (high), recorded before the change; `503` `AUDIT_UNAVAILABLE` leaves the mode unchanged.
 
+#### Unattended rollout setting
+
+| Method and path | Permission | Assurance |
+|---|---|---|
+| `GET /api/v1/rollout-settings/unattended` | `rollout-automation:read` | none beyond the permission |
+| `PUT /api/v1/rollout-settings/unattended` | `rollout-automation:set` | strong, presence tap, no API key |
+
+One setting for the whole cell, off by default. `GET` returns `{ "enabled": false, "changed_by": "", "changed_at": null }` until a value is stored. `PUT` takes `{ "enabled": true }` (`400` `INVALID_REQUEST` for a missing or non-boolean value) and returns the stored setting. Setting the value the cell already has goes through the same permission, tap and audit. Audit event `unattended_rollouts_changed` (high; principal, previous and new value), recorded before the change; `503` `AUDIT_UNAVAILABLE` leaves the setting unchanged. The setting only records the choice; it does not itself start or stop a rollout.
+
 #### Workflow publication
 
 Publishing a workflow version takes a passkey tap and makes the version eligible for automation and for script steps outside a grant. Both routes need permission `workflow:publish` at strong assurance, a cookie-authenticated web session and a registered passkey; the assertion collected by `finish` is itself the proof, so no separate presence token is sent. The signer must hold `workflow:publish` in the workflow's tenant.

@@ -323,7 +323,7 @@ var knownPermissions = map[string]bool{
 }
 
 // automationPermissions are the automation epic's permission IDs (Issue #5831, Epic #5421).
-// The strong ones are in permissionAssurance; the three reads are not (ADR-021 Decision 2).
+// The strong ones are in permissionAssurance; the reads are not (ADR-021 Decision 2).
 // No default role holds any of them. They are kept as a list and merged into
 // knownPermissions by init rather than appended to the map literal: knownPermissions is a
 // single homogeneous literal, and every entry added to it lengthens the clone the
@@ -338,6 +338,8 @@ var automationPermissions = []string{
 	"content-library:set-mode",
 	"content-library:read",
 	"workflow:publish",
+	"rollout-automation:set",
+	"rollout-automation:read",
 }
 
 func init() {
