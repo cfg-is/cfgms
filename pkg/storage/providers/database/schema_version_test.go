@@ -44,12 +44,23 @@ func countVersionRows(t *testing.T, db *sql.DB) int {
 // prepareVersionRow makes sure the version row exists, snapshots it and restores the
 // snapshot in t.Cleanup: keep-schema mode does not truncate cfgms_schema_version, so a
 // test that edits the row must put it back for the tests that follow.
+//
+// The restore runs on its own connection. Callers close the db handle they pass in with
+// a defer, which runs before t.Cleanup functions, so restoring through that handle would
+// fail with "sql: database is closed".
 func prepareVersionRow(t *testing.T, db *sql.DB) {
 	t.Helper()
 	require.NoError(t, checkSchemaVersion(context.Background(), db, currentSchemaRange()))
 	orig := readVersionRow(t, db)
+
+	cfg := getTestConfig()
+	dsn := fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
+		cfg["host"], cfg["port"], cfg["database"], cfg["username"], cfg["password"], cfg["sslmode"])
+	restoreDB, err := sql.Open("postgres", dsn)
+	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, err := db.ExecContext(context.Background(), `
+		defer func() { _ = restoreDB.Close() }()
+		_, err := restoreDB.ExecContext(context.Background(), `
 			UPDATE cfgms_schema_version SET version = $1, min_node_version = $2, contract_applied = $3,
 				recent_gate_required = $4, recent_gate_at = $5 WHERE id = 1`,
 			orig.version, orig.minNode, orig.contractApplied, orig.recentRequired, orig.recentAt)
