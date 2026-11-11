@@ -744,6 +744,20 @@ func (p *DatabaseProvider) sharedPool(config map[string]interface{}) (*sql.DB, e
 		return nil, err
 	}
 
+	// Apply contract steps no live node still needs the old shape for. A step that is
+	// merely blocked by an older live node is the normal state of a rolling deploy: log
+	// it and start. Any other failure (a statement error, a lock timeout) refuses the
+	// pool, which is closed and not cached so a retry re-runs the steps.
+	if err := ApplyContractSteps(context.Background(), db, rng, contractSteps); err != nil {
+		if !errors.Is(err, ErrContractStepBlocked) {
+			_ = db.Close()
+			return nil, err
+		}
+		logging.ForComponent("storage_database").Warn(
+			"database contract step not applied yet; it applies on a later node start once older nodes are gone",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+
 	if p.pools == nil {
 		p.pools = make(map[string]*sql.DB, 1)
 	}
