@@ -331,8 +331,8 @@ func (s *FleetTestSuite) testRefreshArchived(t *testing.T) {
 	// (The steward polls until it gets the approved cert bundle.)
 	if !s.waitForNewStewardLogEntry(t, container, approvedBefore, 90*time.Second, readmissionApproved) {
 		log, _ := s.readStewardLog(t, container)
-		t.Fatalf("Archived: steward did not log refresh approval within 90s after admin approve\nlog tail:\n%s",
-			lastLines(log, 40))
+		t.Fatalf("Archived: steward did not log refresh approval within 90s after admin approve\nlog tail:\n%s\n%s",
+			lastLines(log, 40), s.controllerStallDiagnostics(stewardID))
 	}
 	t.Log("Archived: steward received approved cert bundle and reconnected")
 

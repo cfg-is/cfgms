@@ -16,6 +16,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -752,8 +753,10 @@ func (s *FleetTestSuite) approveRefreshViaCLI(t *testing.T, pendingID string) {
 		"--bundle", s.bundlePath,
 		"--url", s.controllerURL)
 	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "approveRefreshViaCLI: cfg steward refresh approve %s failed: %s",
-		pendingID, strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatalf("approveRefreshViaCLI: cfg steward refresh approve %s failed: %v: %s\n%s",
+			pendingID, err, strings.TrimSpace(string(out)), s.controllerStallDiagnostics(""))
+	}
 	t.Logf("Approved pending refresh %s via cfg steward refresh approve: %s",
 		pendingID, strings.TrimSpace(string(out)))
 }
@@ -798,4 +801,226 @@ func TestFleetWalkthrough(t *testing.T) {
 	t.Run("DeferredConfig", func(t *testing.T) { suite.testDeferredConfig(t, cfg) })
 	t.Run("DriftAutoCorrection", func(t *testing.T) { suite.testDriftAutoCorrection(t, cfg) })
 	t.Run("ConfigCascade", func(t *testing.T) { suite.testConfigCascade(t) })
+}
+
+// diagnosticsSectionTimeout bounds each section of a stalled-state capture. The
+// capture runs exactly when the controller may be unresponsive, so no section may
+// wait on it for longer than this.
+const diagnosticsSectionTimeout = 10 * time.Second
+
+// diagnosticsLogKeywords select the controller log lines that matter to a
+// control-session stall, besides the lines that name the steward itself.
+var diagnosticsLogKeywords = []string{
+	"timeout", "timed out", "DeadlineExceeded", "refused", "ControlChannel",
+	"on-connect", "disconnect", "push_signing_cert", "sync_dna", "identity",
+}
+
+// diagnosticsSection is one piece of stalled-state evidence. collect must honour
+// ctx; gatherDiagnostics returns without it when a collector ignores the deadline.
+type diagnosticsSection struct {
+	title   string
+	collect func(ctx context.Context) (string, error)
+}
+
+// gatherDiagnostics runs every section with its own timeout and renders the
+// results under their titles. A failing or hanging section is reported in place
+// and never stops the others, so one dead dependency cannot hide the rest.
+func gatherDiagnostics(timeout time.Duration, sections []diagnosticsSection) string {
+	var b strings.Builder
+	for _, sec := range sections {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		type result struct {
+			out string
+			err error
+		}
+		done := make(chan result, 1)
+		go func() {
+			out, err := sec.collect(ctx)
+			done <- result{out, err}
+		}()
+		fmt.Fprintf(&b, "── %s ──\n", sec.title)
+		select {
+		case r := <-done:
+			if r.err != nil {
+				fmt.Fprintf(&b, "(unavailable: %v)\n", r.err)
+			}
+			if out := strings.TrimRight(r.out, "\n"); out != "" {
+				b.WriteString(out + "\n")
+			}
+		case <-ctx.Done():
+			fmt.Fprintf(&b, "(timed out after %v)\n", timeout)
+		}
+		cancel()
+	}
+	return b.String()
+}
+
+// fetchDiagnosticsBody GETs target with client and returns the status line and body.
+// A non-2xx status is returned as content, not as an error: the body of a refusal
+// is evidence.
+func fetchDiagnosticsBody(ctx context.Context, client *http.Client, target string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return "", fmt.Errorf("read body: %w", err)
+	}
+	return fmt.Sprintf("HTTP %d\n%s", resp.StatusCode, strings.TrimSpace(string(body))), nil
+}
+
+// filterLogLines keeps the lines of log that contain any of needles, then the
+// last max of those.
+func filterLogLines(log string, max int, needles ...string) string {
+	var kept []string
+	for _, line := range strings.Split(log, "\n") {
+		for _, n := range needles {
+			if n != "" && strings.Contains(line, n) {
+				kept = append(kept, line)
+				break
+			}
+		}
+	}
+	if len(kept) > max {
+		kept = kept[len(kept)-max:]
+	}
+	return strings.Join(kept, "\n")
+}
+
+// controllerStallDiagnostics captures what the controller reports about
+// stewardID's control session when a wait on the controller fails: the steward
+// record, its session-table entry (connected_at, remote_addr, last_activity), the
+// whole session table, and the controller's log lines about sessions, timeouts and
+// refusals. stewardID may be empty for a failure that names no steward.
+//
+// It cannot dump the controller's goroutines: the controller exposes no debug
+// endpoint, and signalling it would kill the process every later test depends on.
+func (s *FleetTestSuite) controllerStallDiagnostics(stewardID string) string {
+	get := func(path string) func(context.Context) (string, error) {
+		return func(ctx context.Context) (string, error) {
+			return fetchDiagnosticsBody(ctx, s.httpClient, s.controllerURL+path)
+		}
+	}
+	var sections []diagnosticsSection
+	if stewardID != "" {
+		sections = append(sections,
+			diagnosticsSection{"controller steward record " + stewardID, get("/api/v1/stewards/" + url.PathEscape(stewardID))},
+			diagnosticsSection{"controller session " + stewardID, get("/api/v1/stewards/" + url.PathEscape(stewardID) + "/connection")},
+		)
+	}
+	sections = append(sections,
+		diagnosticsSection{"controller session table", get("/api/v1/stewards/connections/all")},
+		diagnosticsSection{"controller log (sessions, timeouts, refusals)", func(ctx context.Context) (string, error) {
+			if err := validateFleetContainer("fleet-controller"); err != nil {
+				return "", err
+			}
+			out, err := exec.CommandContext(ctx, "docker", "logs", "--tail", "2000", "fleet-controller").CombinedOutput()
+			needles := append([]string{stewardID}, diagnosticsLogKeywords...)
+			return filterLogLines(string(out), 80, needles...), err
+		}},
+	)
+	return gatherDiagnostics(diagnosticsSectionTimeout, sections)
+}
+
+// requireStewardConnected fails the calling test, at the calling step, when
+// stewardID is not connection_state=connected within timeout. what names the
+// process that was expected to connect; the failure carries the controller's
+// view of the session so a stall is named at its first step rather than surfacing
+// as timeouts in later tests.
+func (s *FleetTestSuite) requireStewardConnected(t *testing.T, container, stewardID string, timeout time.Duration, what string) {
+	t.Helper()
+	if s.waitForConvergence(t, stewardID, timeout) {
+		return
+	}
+	state, err := s.getStewardConnectionState(t, stewardID)
+	t.Fatalf("%s did not reconnect: steward %s in %s was not connection_state=connected within %v (last state %q, last error %v)\n%s\n%s",
+		what, stewardID, container, timeout, state, err,
+		s.controllerStallDiagnostics(stewardID), s.launcherDiagnostics(t, container))
+}
+
+// TestGatherDiagnosticsReportsEverySection proves the stalled-state capture
+// returns the evidence it can get and names what it cannot: a failing collector
+// and a collector that never returns each appear in the output, and neither stops
+// the sections after it. It needs no Docker or controller.
+func TestGatherDiagnosticsReportsEverySection(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	sections := []diagnosticsSection{
+		{"first", func(context.Context) (string, error) { return "evidence-one\n", nil }},
+		{"failing", func(context.Context) (string, error) { return "", fmt.Errorf("docker: no such container") }},
+		{"stalled", func(context.Context) (string, error) { <-release; return "never", nil }},
+		{"last", func(context.Context) (string, error) { return "evidence-two", nil }},
+	}
+
+	start := time.Now()
+	out := gatherDiagnostics(100*time.Millisecond, sections)
+	require.Less(t, time.Since(start), 5*time.Second, "a hung collector must be abandoned at its timeout")
+
+	require.Contains(t, out, "── first ──\nevidence-one\n")
+	require.Contains(t, out, "── failing ──\n(unavailable: docker: no such container)")
+	require.Contains(t, out, "── stalled ──\n(timed out after 100ms)")
+	require.NotContains(t, out, "never")
+	require.Contains(t, out, "── last ──\nevidence-two", "a section after a stalled one must still be captured")
+}
+
+// TestFetchDiagnosticsBodyKeepsRefusalBody proves an error response is returned as
+// evidence rather than dropped, and that a server that never answers is bounded by
+// the caller's context.
+func TestFetchDiagnosticsBodyKeepsRefusalBody(t *testing.T) {
+	release := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/refused", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "steward not found", http.StatusNotFound)
+	})
+	mux.HandleFunc("/hang", func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(func() { close(release); srv.Close() })
+
+	out, err := fetchDiagnosticsBody(context.Background(), srv.Client(), srv.URL+"/refused")
+	require.NoError(t, err)
+	require.Equal(t, "HTTP 404\nsteward not found", out)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err = fetchDiagnosticsBody(ctx, srv.Client(), srv.URL+"/hang")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	_, err = fetchDiagnosticsBody(context.Background(), srv.Client(), "://bad url")
+	require.Error(t, err)
+}
+
+// TestFilterLogLinesKeepsRelevantTail proves the controller-log filter keeps lines
+// naming the steward or a stall keyword and bounds the result to the newest lines.
+func TestFilterLogLinesKeepsRelevantTail(t *testing.T) {
+	log := strings.Join([]string{
+		`{"msg":"heartbeat ok"}`,
+		`{"msg":"steward connected to ControlChannel","steward_id":"abc"}`,
+		`{"msg":"unrelated"}`,
+		`{"msg":"command push_signing_cert timed out"}`,
+		`{"msg":"sync_dna failed","error":"DeadlineExceeded"}`,
+	}, "\n")
+
+	got := filterLogLines(log, 10, append([]string{"abc"}, diagnosticsLogKeywords...)...)
+	require.Equal(t, strings.Join([]string{
+		`{"msg":"steward connected to ControlChannel","steward_id":"abc"}`,
+		`{"msg":"command push_signing_cert timed out"}`,
+		`{"msg":"sync_dna failed","error":"DeadlineExceeded"}`,
+	}, "\n"), got)
+
+	got = filterLogLines(log, 1, "ControlChannel", "timed out", "DeadlineExceeded")
+	require.Equal(t, `{"msg":"sync_dna failed","error":"DeadlineExceeded"}`, got)
+
+	require.Empty(t, filterLogLines(log, 10, ""), "an empty needle (no steward ID) must not match every line")
 }
