@@ -5,8 +5,6 @@ package user
 import (
 	"context"
 	"errors"
-	"os"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -15,24 +13,6 @@ import (
 	"github.com/cfgis/cfgms/features/modules/stdlib/file"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
-
-// currentTestUser returns a username that reliably exists on the current
-// platform for read-only conformance testing. It never modifies any account.
-func currentTestUser() string {
-	switch runtime.GOOS {
-	case "windows":
-		if u := os.Getenv("USERNAME"); u != "" {
-			return u
-		}
-		return "Administrator"
-	default:
-		// Linux/macOS: $USER is set by the shell; "root" is the universal fallback.
-		if u := os.Getenv("USER"); u != "" {
-			return u
-		}
-		return "root"
-	}
-}
 
 // TestUserModule_New verifies the module constructor returns a non-nil Module.
 func TestUserModule_New(t *testing.T) {
@@ -403,11 +383,22 @@ func TestUserModule_LoggingInjection(t *testing.T) {
 	}
 }
 
+// TestCurrentTestUser_PassesUsernameValidation verifies that the account the
+// conformance tests read is one Get accepts, whoever runs the test binary. On
+// Windows under SYSTEM, %USERNAME% is the machine account (for example
+// "HOST-01$"), which validateUsername rejects by design.
+func TestCurrentTestUser_PassesUsernameValidation(t *testing.T) {
+	username := currentTestUser(t)
+	if err := validateUsername(username); err != nil {
+		t.Fatalf("currentTestUser returned %q, which fails username validation: %v", username, err)
+	}
+}
+
 // TestUserModule_ConformanceDeterministicGet verifies that Get() produces
 // byte-for-byte identical output on consecutive calls (ADR-016 clause 4).
 // Uses an existing account (the current user) so no write privileges are needed.
 func TestUserModule_ConformanceDeterministicGet(t *testing.T) {
-	username := currentTestUser()
+	username := currentTestUser(t)
 	m := New()
 	state, err := m.Get(context.Background(), username)
 	if err != nil {
@@ -425,7 +416,7 @@ func TestUserModule_ConformanceDeterministicGet(t *testing.T) {
 // TestUserModule_ConformanceNoEphemeralFields verifies that the UserConfig
 // returned by Get() contains no banned ephemeral fields (ADR-016 clause 4).
 func TestUserModule_ConformanceNoEphemeralFields(t *testing.T) {
-	username := currentTestUser()
+	username := currentTestUser(t)
 	m := New()
 	state, err := m.Get(context.Background(), username)
 	if err != nil {

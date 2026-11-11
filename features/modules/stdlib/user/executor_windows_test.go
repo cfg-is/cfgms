@@ -109,9 +109,11 @@ func TestWindowsGetState_DisabledAccountWithNonASCIIGroup(t *testing.T) {
 	assert.Equal(t, want, got.Groups, "the exact direct local-group list")
 }
 
-func TestWindowsGetState_BuiltinGuestReadsDisabled(t *testing.T) {
-	// The built-in Guest account is disabled by default and has a localized
-	// name; reading it needs no elevation.
+// builtinGuestName resolves the local built-in Guest account by its
+// well-known RID (501) rather than by name, because the name is localized.
+// It only reads the account database; it needs no elevation.
+func builtinGuestName(t *testing.T) string {
+	t.Helper()
 	computer, err := windows.ComputerName()
 	require.NoError(t, err)
 	domain, _, _, err := windows.LookupSID("", computer)
@@ -120,6 +122,29 @@ func TestWindowsGetState_BuiltinGuestReadsDisabled(t *testing.T) {
 	require.NoError(t, err)
 	guest, _, _, err := sid.LookupAccount("")
 	require.NoError(t, err)
+	return guest
+}
+
+// currentTestUser returns an existing local account for the read-only
+// conformance tests. It uses the built-in Guest account, which exists on every
+// Windows installation, instead of %USERNAME%: under SYSTEM (the identity the
+// steward runs as) %USERNAME% is the machine account, such as "HOST-01$",
+// which the module rejects as an invalid username.
+func currentTestUser(t *testing.T) string {
+	t.Helper()
+	guest := builtinGuestName(t)
+	if err := validateUsername(guest); err != nil {
+		// Localized installations can name Guest with non-ASCII characters,
+		// which the module's ASCII username rule rejects by design.
+		t.Skipf("built-in Guest account resolves to %q, which fails the module's ASCII username rule: %v", guest, err)
+	}
+	return guest
+}
+
+func TestWindowsGetState_BuiltinGuestReadsDisabled(t *testing.T) {
+	// The built-in Guest account is disabled by default and has a localized
+	// name; reading it needs no elevation.
+	guest := builtinGuestName(t)
 
 	got, err := (&windowsExecutor{}).getState(guest)
 	require.NoError(t, err)
