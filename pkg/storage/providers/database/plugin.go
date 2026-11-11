@@ -5,6 +5,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -43,6 +44,11 @@ type DatabaseProvider struct {
 	// pools maps a resolved DSN to the pool opened for it. Never reuse an entry
 	// for a DSN that is not byte-identical to its key.
 	pools map[string]*sql.DB
+
+	// schemaRange is the schema version range this provider tolerates. The zero
+	// value means the package constants (SchemaVersion, MinToleratedSchemaVersion);
+	// tests set it to exercise the gate with other ranges end to end.
+	schemaRange schemaRange
 }
 
 // Compile-time assertions. The optional store-creator extensions are wired by
@@ -725,6 +731,17 @@ func (p *DatabaseProvider) sharedPool(config map[string]interface{}) (*sql.DB, e
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	// Refuse a database whose recorded schema version this node does not tolerate.
+	// A refused pool is closed and not cached, so a retry re-runs the gate.
+	rng := p.schemaRange
+	if rng == (schemaRange{}) {
+		rng = currentSchemaRange()
+	}
+	if err := checkSchemaVersion(context.Background(), db, rng); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 
 	if p.pools == nil {

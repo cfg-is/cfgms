@@ -2069,6 +2069,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS blast_radius_policy_overrides;",
 		"DROP TABLE IF EXISTS cfgms_tenant_pending_deletions;",
 		"DROP TABLE IF EXISTS cfgms_tenants;",
+		"DROP TABLE IF EXISTS cfgms_schema_version;",
 	}
 
 	for _, query := range dropQueries {
