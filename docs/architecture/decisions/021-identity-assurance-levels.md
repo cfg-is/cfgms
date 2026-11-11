@@ -6,7 +6,7 @@
 
 **Deciders:** Founder, Architecture
 
-**Related:** [014](014-cfg-sessions-and-credential-unlock.md) (`cfg` admin sessions — Bearer-token principals gain an assurance level here; its `IdleTimeout`/`AbsoluteTimeout` remain and cover the walked-away case). [018](018-web-session-semantics.md) (web-session semantics — the cookie session this ADR levels). [006](006-module-packaging-and-distribution.md) (module approval is the highest-blast-radius action gated by this ADR). Auth-tier policy epic #1419 (`authTier` / `tier3Permissions` — **superseded by this ADR**, see Migration). Epic #2713 (web UI management — surfaced the gap this ADR closes). Epic #2051 (SaaS cluster — **closed without covering sessions**; `pkg/session/contract.go:95` still defers the durable store to it, incorrectly — see Sequencing). Epic #2735 / story #2736 (durable session store — **this ADR's epic is blocked on it**). Epic #2737 (implements this ADR). Stories #2728, #2732 (module approval REST + UI — **held pending this ADR**). `features/rbac/jit` (unwired JIT access — complementary, not superseded; see Context).
+**Related:** Epic #6075 (Amendment 10 — software authenticators for dedicated agent accounts). [014](014-cfg-sessions-and-credential-unlock.md) (`cfg` admin sessions — Bearer-token principals gain an assurance level here; its `IdleTimeout`/`AbsoluteTimeout` remain and cover the walked-away case). [018](018-web-session-semantics.md) (web-session semantics — the cookie session this ADR levels). [006](006-module-packaging-and-distribution.md) (module approval is the highest-blast-radius action gated by this ADR). Auth-tier policy epic #1419 (`authTier` / `tier3Permissions` — **superseded by this ADR**, see Migration). Epic #2713 (web UI management — surfaced the gap this ADR closes). Epic #2051 (SaaS cluster — **closed without covering sessions**; `pkg/session/contract.go:95` still defers the durable store to it, incorrectly — see Sequencing). Epic #2735 / story #2736 (durable session store — **this ADR's epic is blocked on it**). Epic #2737 (implements this ADR). Stories #2728, #2732 (module approval REST + UI — **held pending this ADR**). `features/rbac/jit` (unwired JIT access — complementary, not superseded; see Context).
 
 ---
 
@@ -1334,3 +1334,37 @@ Founder decision, 2026-10-21, superseding Amendment 8's relay-required decision:
 ### Note (2026-10-21): Scoped API keys keep installer and upgrade automation; `AllowMachine` (Issue #5298)
 
 Founder decision Q1 (a): human sessions need a per-action passkey tap for installer writes, steward binary publish, rollout start and upgrade dispatch, while scoped API keys keep working for installer upload, upgrade dispatch and config push. `Requirement.AllowMachine` records this in code: when true, an `AssuranceMachine` principal holding the permission skips both the `Min` and presence checks in `requirePermission`; human principals keep the full floor. It is set only in `permissionAssurance`, never by assurance-policy overrides, and `scanAPIKeysForPrivilegedAccess` does not report such permissions. Halt and rollback are `PresenceExemptRoutes` of `installer:dispatch:steward` and need no tap.
+
+## Amendment 10 (2026-11-11): Software authenticators for dedicated agent accounts (Epic #6075)
+
+### Context
+
+An agent operations session has no TTY and no browser, but it must drive the whole product on a test cell: passkey enrollment and login, creating tenants and users, signing and running commands as a tenant user, publishing workflows and approving modules. §8 and ADR-036 give automation no path to any permission that requires presence, and this amendment does not change that. API-key principals stay terminal at `AssuranceMachine`.
+
+The agent instead holds an account of its own with a passkey, like a human administrator. The passkey is a software WebAuthn authenticator that `cfg` runs. Every assurance, presence and tenant-crossing rule applies to that account exactly as it applies to a human.
+
+### What a software authenticator proves
+
+A software authenticator reports user verification (UV) without a human gesture. For an account that uses one, a presence token proves that the holder of a non-exportable authenticator key approved the exact bound action. It does not prove that a human was present. This is a deliberate, opt-in narrowing of what presence means, and it is limited to the accounts below.
+
+The controller requests no attestation (go-webauthn default conveyance `none`). So the AAGUID that an authenticator reports is a claim, not a verified fact. Anyone who already holds enrollment rights for an account can register any software authenticator today. The policy below cannot prevent that. It governs the authenticator that CFGMS ships, it makes software-authenticator use visible, and it does not make the AAGUID a security boundary. Verified attestation is a separate decision.
+
+### Decision
+
+Founder decisions D1–D3 on epic #6075 (2026-11-10).
+
+1. **Dedicated agent accounts only (D1).** `cfg authenticator` creates a software authenticator for one dedicated agent account. The authenticator uses a P-256 key. Where the platform key provider offers a non-exportable key, the key is created there. Otherwise it is held in OS-native secret storage. It is never stored in cleartext. Its responses carry UV=1, BE=0 and the distinct CFGMS AAGUID. `cfg` always emits that AAGUID and offers no option to change it, so the authenticator CFGMS ships is always visible as software.
+2. **Two switches, both required, default off.** The controller accepts the CFGMS software AAGUID for an account only when both of these are true:
+   - The account's tenant is listed in `webauthn.allow_software_authenticators.tenants` in `controller.cfg`. The match is exact: a listed tenant does not cover its child tenants, so each tenant is listed on its own. This is a rarely-touched setting on the controller host, so a phished tenant admin cannot enable it through the API (tenant metadata is API-writable and is not used for this).
+   - The account carries the per-account software-authenticator flag. Setting or clearing the flag needs a fresh presence tap and writes an audit record.
+
+   The controller never honours the setting for an account that can reach the whole fleet: an account with `RootScope`, an account with an empty `TenantID`, or an account whose `TenantID` is the root tenant. If the root tenant ID cannot be resolved, the controller refuses. The controller checks the setting at registration and again at every use: passkey login, step-up elevation, presence, every WebAuthn operator-proof verification (run-command dispatch, workflow publish and stored-publication re-verification) and live session revalidation. So turning either switch off makes existing software credentials, and sessions they minted, inert at the next request without deleting them.
+3. **Recorded and audited.** The controller stores the AAGUID and the attestation format of every credential at registration. A credential with the CFGMS software AAGUID is flagged on the account and in every audit record of its registration and use.
+4. **No crossing carve-out (D2).** The first account in a client tenant is created by root break-glass, which stays loud and audited. That account then enrolls the agent authenticator through the public enrollment link. After that, the tenant-scoped agent account works in its own tenant and needs no crossing.
+5. **Credential store skew is an error (D3).** A credential store written by a different `cfg` format version gives a clear versioned-header error. There is no fallback and no migration (consistent with #5200 and #6074).
+
+### Consequences
+
+- An agent session can test continuously deployed cells end to end without any gate being weakened for automation in general.
+- **Accepted residual risk:** whoever controls the agent host can use the authenticator key for every presence-gated action that the agent account holds, within its tenant. These bounds limit the risk: the account never reaches the whole fleet, the tenant switch lives in `controller.cfg` and the account switch needs a presence tap, every use is audited and flagged, and disabling the account, deleting the credential or turning either switch off revokes it at the next request.
+- §8 stands. An agent account is a passkey account at the assurance level its authenticator earns. It is not a machine principal, and it gains no machine exception.
