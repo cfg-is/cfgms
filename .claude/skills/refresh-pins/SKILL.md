@@ -212,6 +212,7 @@ Apply the matrix per pin. The summary table:
 | Has active CVE blocking CI? | Cooldown elapsed? | Decision |
 |---|---|---|
 | Yes | (override) | **BUMP NOW** + audit log entry |
+| Shipped-stdlib vulnerability (`go-toolchain` only; see decision-matrix.md row 1a) | (override) | **BUMP NOW** + audit log entry |
 | Yes | Yes | **BUMP** |
 | No | Yes | **BUMP** |
 | No | No | **HOLD** until cooldown elapses |
@@ -390,6 +391,7 @@ Single Markdown summary, sections in this order (omit empty sections):
 - **One story per logical pin**, not per file. `go-toolchain` is one story that touches all 13 file:line locations in lockstep.
 - **No code edits**: this skill creates stories, it does not edit go.mod / workflows / Dockerfiles directly. Dispatched dev agents apply the bumps under the regular pipeline.
 - **CI-blocking pins skip cooldown**: a vulnerability that's actively failing required CI is its own justification — don't wait the 3 days.
+- **A reachable stdlib vulnerability skips cooldown for `go-toolchain`**: if OSV lists a `stdlib` entry against the current toolchain with a fixed patch release, and `govulncheck` reports it reachable, the verdict is BUMP NOW (decision-matrix.md row 1a), even with every CI gate green. The vulnerable stdlib is already compiled into shipped binaries.
 - **Dependency CVEs skip cooldown too**: a `Dependency CVEs` finding is published against code already merged, so the vulnerable version is the status quo, not the risk being soaked against. Bump to the first patched version and log the override.
 - **Never report a scan that could not run as clean**: if `make security-deps` reports a missing `GUIDE_TOKEN`, or the weekly `dependency-cve-scan` job failed before scanning, say so explicitly. Nancy returns 401 without a Sonatype Guide token, and an unauthenticated run produces no evidence rather than a clean result.
 - **This applies to every bulk command in Phase 2, not just Nancy.** All of them
