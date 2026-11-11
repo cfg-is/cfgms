@@ -241,3 +241,76 @@ func TestGroupChanges(t *testing.T) {
 	assert.Equal(t, []string{"Remote Desktop Users"}, add)
 	assert.Equal(t, []string{"Backup Operators"}, remove, "Users is never removed; names compare case-insensitively")
 }
+
+func TestWindowsSetState_CreatesAccountWithGeneratedPassword(t *testing.T) {
+	requireElevated(t)
+	cases := []struct {
+		name     string
+		locked   bool
+		fullName bool
+	}{
+		{"enabled", false, true},
+		{"disabled", true, true},
+		{"no full name", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &windowsExecutor{}
+			name := testUser(t, e)
+			desired := userState{Exists: true, Locked: tc.locked}
+			if tc.fullName {
+				desired.FullName = "CFGMS Test " + name
+			}
+
+			require.NoError(t, e.setState(name, desired))
+
+			got, err := e.getState(name)
+			require.NoError(t, err)
+			assert.True(t, got.Exists)
+			assert.True(t, got.HasCredential, "a created account must not be marked password-not-required")
+			assert.Equal(t, tc.locked, got.Locked)
+			assert.Equal(t, desired.FullName, got.FullName)
+			assert.Equal(t, []string{usersGroup(t)}, got.Groups, "a new account is a member of the built-in Users group only")
+		})
+	}
+}
+
+func TestWindowsSetState_FailedCreationLeavesNoAccount(t *testing.T) {
+	requireElevated(t)
+	e := &windowsExecutor{}
+	name := testUser(t, e)
+
+	// A NUL in the full name fails after NetUserAdd has created the account,
+	// so the partly created account must be removed again.
+	err := e.setState(name, userState{Exists: true, FullName: "bad\x00name"})
+	require.Error(t, err)
+
+	got, err := e.getState(name)
+	require.NoError(t, err)
+	assert.False(t, got.Exists, "a creation that failed part-way must not leave the account behind")
+
+	// The next run then creates the account fully, including Users membership.
+	require.NoError(t, e.setState(name, userState{Exists: true}))
+	got, err = e.getState(name)
+	require.NoError(t, err)
+	assert.True(t, got.Exists)
+	assert.Equal(t, []string{usersGroup(t)}, got.Groups)
+}
+
+func TestGeneratePassword_MeetsPolicyRequirements(t *testing.T) {
+	seen := make(map[string]bool)
+	for i := 0; i < 200; i++ {
+		pw, err := generatePassword()
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(pw), 32)
+		for c, class := range passwordClasses {
+			assert.True(t, strings.ContainsAny(string(pw), class), "password %d lacks a character from class %d", i, c)
+		}
+		for _, b := range pw {
+			assert.True(t, b > 0x20 && b < 0x7f, "non-printable or non-ASCII byte %#x", b)
+		}
+		key := string(pw)
+		assert.False(t, seen[key], "duplicate password generated")
+		seen[key] = true
+	}
+}

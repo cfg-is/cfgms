@@ -2,7 +2,7 @@
 
 ## Overview
 
-The user module manages local OS user accounts and group membership on managed endpoints. It supports account creation, full-name management, group membership, and lock/disable state. Password setting is intentionally out of scope — the module observes whether an account has a password (`has_credential`, returned by `Get`) but never accepts, stores, or transmits password material.
+The user module manages local OS user accounts and group membership on managed endpoints. It supports account creation, full-name management, group membership, and lock/disable state. Password setting is intentionally out of scope — the module observes whether an account has a password (`has_credential`, returned by `Get`) but never accepts a password from configuration. On Windows, an account the module creates gets a random password generated in memory that nobody knows; it is never logged, stored or returned. Another channel must set a usable password before the account can log on interactively.
 
 ## Implementation References
 
@@ -14,7 +14,7 @@ The user module manages local OS user accounts and group membership on managed e
 | Platform | Create | Modify | Delete | Lock | Groups | Tool used |
 |----------|--------|--------|--------|------|--------|-----------|
 | Linux    | ✓ | ✓ | ✓ | ✓ | ✓ | `useradd`, `usermod`, `userdel` |
-| Windows  | ✓ | ✓ | ✓ | ✓ | ✓ | `net.exe` (account writes); `NetUserGetInfo`, `NetUserGetLocalGroups`, `NetLocalGroupAddMembers`, `NetLocalGroupDelMembers` (in-process) |
+| Windows  | ✓ | ✓ | ✓ | ✓ | ✓ | `NetUserAdd`, `NetUserSetInfo` (account creation, in-process); `net.exe` (delete, and full name and enabled state of an existing account); `NetUserGetInfo`, `NetUserGetLocalGroups`, `NetLocalGroupAddMembers`, `NetLocalGroupDelMembers` (in-process) |
 | macOS    | ✓ | ✓ | ✓ | ✓ | ✓ | `dscl`, `dseditgroup`, `pwpolicy` |
 
 All write operations require the steward to run with Administrator / root privileges.
@@ -36,7 +36,7 @@ The resource ID is the OS-level username (e.g., `alice`, `svc-backup`).
 `has_credential` is a read-only observed field returned by `Get`. It reports the OS-level password state:
 
 - **Linux**: derived from `/etc/shadow` when readable (requires root); defaults to `false` when shadow is not accessible.
-- **Windows**: `true` unless the account carries the "password not required" flag (`UF_PASSWD_NOTREQD`), read with `NetUserGetInfo`.
+- **Windows**: `true` unless the account carries the "password not required" flag (`UF_PASSWD_NOTREQD`), read with `NetUserGetInfo`. An account the module creates is never marked password-not-required, so it reads `true`.
 - **macOS**: always `false` in this version (shadow password inspection requires root and is out of scope).
 
 `Set` silently ignores `has_credential` if it appears in the config.
@@ -86,7 +86,8 @@ modules:
 ## Security Notes
 
 - All usernames and group names are validated against a strict pattern (`^[a-zA-Z_][a-zA-Z0-9_.-]{0,31}$`) before being passed to OS commands, preventing flag injection and command injection.
-- The module never accepts, logs, stores, or transmits password material. `has_credential` is a read-only observation.
+- The module never accepts a password from configuration, and never logs, stores, returns or transmits password material. `has_credential` is a read-only observation.
+- On Windows, a new account is created with `NetUserAdd` and a 32-character random password from `crypto/rand` that nobody knows, so no account is ever created with a blank password. The password exists only in memory for the call and its buffers are zeroed afterwards. A new account is added to the built-in Users group (S-1-5-32-545). If setting the full name or the Users membership fails after the account was created, the account is deleted again so the next run recreates it.
 - On Linux, `userdel -r` removes the user's home directory. Ensure data is backed up before removing accounts.
 - On Linux and macOS, group removal (removing a user from a group that is no longer in `groups`) is not performed in v1 to avoid disrupting groups managed outside `cfg`.
 - On Windows, a non-empty `groups` list is exclusive: the user is added to every declared group and removed from every other group it is a direct member of. Two exceptions apply:
@@ -98,6 +99,6 @@ modules:
 
 ## Out of Scope
 
-- Password setting/changing — requires a secrets-distribution design not yet landed.
+- Setting or changing a usable password — requires a secrets-distribution design not yet landed. A Windows account the module creates has an unknown random password until another channel sets one.
 - Domain / Active Directory user management — that is `extended/activedirectory`'s territory.
 - Group creation — groups must already exist before being assigned.
