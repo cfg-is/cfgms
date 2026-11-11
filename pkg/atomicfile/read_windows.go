@@ -32,6 +32,25 @@ import (
 // defense-in-depth for transient FS-driver glitches during the rename
 // window. With the share flags above, retries should be rare.
 func ReadFile(path string) ([]byte, error) {
+	var data []byte
+	err := RetryOnSharingViolation(func() error {
+		var readErr error
+		data, readErr = readWithShareFlags(path)
+		return readErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// RetryOnSharingViolation runs op, retrying with jittered exponential backoff
+// while it fails with a transient Windows sharing violation or access-denied
+// error (another handle to the file is open without the share flags op needs).
+// Any other error returns at once; a violation that persists past the retry
+// budget is returned, so callers fail closed. The helper opens no file itself:
+// the caller keeps its own open or replace inside op.
+func RetryOnSharingViolation(op func() error) error {
 	const (
 		maxAttempts = 12
 		baseDelay   = 1 * time.Millisecond
@@ -40,12 +59,12 @@ func ReadFile(path string) ([]byte, error) {
 	var lastErr error
 	delay := baseDelay
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		data, err := readWithShareFlags(path)
+		err := op()
 		if err == nil {
-			return data, nil
+			return nil
 		}
 		if !isRetryableRenameError(err) {
-			return nil, err
+			return err
 		}
 		lastErr = err
 		time.Sleep(jitter(delay))
@@ -56,7 +75,7 @@ func ReadFile(path string) ([]byte, error) {
 			}
 		}
 	}
-	return nil, lastErr
+	return lastErr
 }
 
 // readWithShareFlags opens path with FILE_SHARE_READ | FILE_SHARE_WRITE |

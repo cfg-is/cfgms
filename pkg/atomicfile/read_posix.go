@@ -12,3 +12,10 @@ import "os"
 func ReadFile(path string) ([]byte, error) {
 	return os.ReadFile(path) //#nosec G304 -- caller validates path
 }
+
+// RetryOnSharingViolation runs op once. POSIX opens and renames have no share
+// modes, so no error here is a sharing violation and no retry is needed. See
+// read_windows.go.
+func RetryOnSharingViolation(op func() error) error {
+	return op()
+}

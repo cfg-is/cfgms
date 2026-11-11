@@ -5,11 +5,13 @@ package filesystem
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/atomicfile"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 )
 
@@ -650,4 +653,242 @@ func TestResolveKeyPaths_GuardsRoot(t *testing.T) {
 	_, b, m, err := s.resolveKeyPaths(testKey("ok"))
 	require.NoError(t, err)
 	assert.Equal(t, b+".meta.json", m)
+}
+
+// bigLabels returns a label set whose sidecar JSON is hundreds of KiB, so
+// writing the sidecar takes long enough for concurrent readers to land inside
+// the write if the final sidecar path is ever opened for writing.
+func bigLabels() map[string]string {
+	labels := make(map[string]string, 256)
+	filler := strings.Repeat("x", 1024)
+	for i := 0; i < 256; i++ {
+		labels[fmt.Sprintf("label-%03d", i)] = filler
+	}
+	return labels
+}
+
+// TestFilesystemBlobStore_ReadersNeverSeePartialSidecar verifies that ListBlobs,
+// GetBlob and a raw directory scan never observe an empty or partly written
+// sidecar while PutBlobIfAbsent races and PutBlob overwrites run in the same
+// namespace. A read may report the blob as absent or return complete metadata;
+// any other error, or any *.meta.json that is empty or not valid JSON, fails.
+func TestFilesystemBlobStore_ReadersNeverSeePartialSidecar(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	labels := bigLabels()
+	nsDir := filepath.Join(s.root, "tenant-a", "installers")
+
+	const (
+		rounds          = 12
+		writersPerKey   = 3
+		overwriteKeys   = 2
+		overwriteRounds = 12
+		readerLoops     = 2 // reader goroutines of each kind
+	)
+
+	raceKey := func(round int) blob.BlobKey { return testKey(fmt.Sprintf("race-%d.bin", round)) }
+	overwriteKey := func(i int) blob.BlobKey { return testKey(fmt.Sprintf("overwrite-%d.bin", i)) }
+
+	allKeys := make([]blob.BlobKey, 0, rounds+overwriteKeys)
+	for r := 0; r < rounds; r++ {
+		allKeys = append(allKeys, raceKey(r))
+	}
+	for i := 0; i < overwriteKeys; i++ {
+		allKeys = append(allKeys, overwriteKey(i))
+	}
+
+	start := make(chan struct{})
+	done := make(chan struct{})
+	var readers, writers sync.WaitGroup
+
+	okReadErr := func(err error) bool { return err == nil || errors.Is(err, blob.ErrBlobNotFound) }
+
+	for i := 0; i < readerLoops; i++ {
+		readers.Add(3)
+		go func() { // ListBlobs on the namespace prefix
+			defer readers.Done()
+			<-start
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				if _, err := s.ListBlobs(ctx, blob.BlobKey{TenantID: "tenant-a", Namespace: "installers"}); err != nil {
+					t.Errorf("ListBlobs returned an error during concurrent writes: %v", err)
+					return
+				}
+			}
+		}()
+		go func() { // GetBlob on the keys being written
+			defer readers.Done()
+			<-start
+			for {
+				for _, k := range allKeys {
+					select {
+					case <-done:
+						return
+					default:
+					}
+					rc, _, err := s.GetBlob(ctx, k)
+					if err == nil {
+						_ = rc.Close()
+					}
+					if !okReadErr(err) {
+						t.Errorf("GetBlob(%s) returned an error during concurrent writes: %v", k.Name, err)
+						return
+					}
+					if _, err := s.BlobExists(ctx, k); err != nil {
+						t.Errorf("BlobExists(%s) returned an error during concurrent writes: %v", k.Name, err)
+						return
+					}
+				}
+			}
+		}()
+		go func() { // raw scan: every *.meta.json visible on disk must be complete
+			defer readers.Done()
+			<-start
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				entries, err := os.ReadDir(nsDir)
+				if err != nil {
+					if os.IsNotExist(err) {
+						continue
+					}
+					t.Errorf("ReadDir: %v", err)
+					return
+				}
+				for _, e := range entries {
+					if !strings.HasSuffix(e.Name(), ".meta.json") {
+						continue
+					}
+					data, err := atomicfile.ReadFile(filepath.Join(nsDir, e.Name()))
+					if err != nil {
+						if os.IsNotExist(err) {
+							continue
+						}
+						t.Errorf("read %s: %v", e.Name(), err)
+						return
+					}
+					if len(data) == 0 || !json.Valid(data) {
+						t.Errorf("sidecar %s visible at its final path is incomplete (%d bytes)", e.Name(), len(data))
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	// PutBlobIfAbsent races: several writers with distinct content per key.
+	wins := make([]int, rounds)
+	var winsMu sync.Mutex
+	for r := 0; r < rounds; r++ {
+		for w := 0; w < writersPerKey; w++ {
+			writers.Add(1)
+			go func(r, w int) {
+				defer writers.Done()
+				<-start
+				content := []byte(fmt.Sprintf("round-%d-writer-%d", r, w))
+				err := s.PutBlobIfAbsent(ctx, raceKey(r), bytes.NewReader(content), blob.BlobMeta{Labels: labels})
+				switch {
+				case err == nil:
+					winsMu.Lock()
+					wins[r]++
+					winsMu.Unlock()
+				case errors.Is(err, blob.ErrBlobAlreadyExists):
+				default:
+					t.Errorf("PutBlobIfAbsent round %d writer %d: %v", r, w, err)
+				}
+			}(r, w)
+		}
+	}
+
+	// PutBlob overwrites of keys in the same namespace.
+	for i := 0; i < overwriteKeys; i++ {
+		writers.Add(1)
+		go func(i int) {
+			defer writers.Done()
+			<-start
+			for n := 0; n < overwriteRounds; n++ {
+				content := []byte(fmt.Sprintf("overwrite-%d-%d", i, n))
+				if err := s.PutBlob(ctx, overwriteKey(i), bytes.NewReader(content), blob.BlobMeta{Labels: labels}); err != nil {
+					t.Errorf("PutBlob overwrite %d/%d: %v", i, n, err)
+					return
+				}
+			}
+		}(i)
+	}
+
+	close(start)
+	writers.Wait()
+	close(done)
+	readers.Wait()
+
+	for r, n := range wins {
+		assert.Equal(t, 1, n, "round %d: exactly one PutBlobIfAbsent must win", r)
+	}
+
+	// Every sidecar left behind is complete, and no temp sidecar leaked.
+	entries, err := os.ReadDir(nsDir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		assert.False(t, strings.HasPrefix(e.Name(), ".meta-tmp-"), "temp sidecar %s leaked", e.Name())
+	}
+	infos, err := s.ListBlobs(ctx, blob.BlobKey{TenantID: "tenant-a", Namespace: "installers"})
+	require.NoError(t, err)
+	assert.Len(t, infos, rounds+overwriteKeys)
+}
+
+// TestFilesystemBlobStore_CorruptSidecarOnDiskStillErrors guards against a
+// fail-open fix: a sidecar that is really on disk with invalid JSON (not a
+// write in progress) must still make ListBlobs and GetBlob return an error
+// instead of being skipped.
+func TestFilesystemBlobStore_CorruptSidecarOnDiskStillErrors(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	good := testKey("good.bin")
+	bad := testKey("bad.bin")
+
+	require.NoError(t, s.PutBlob(ctx, good, bytes.NewReader([]byte("ok")), blob.BlobMeta{}))
+	require.NoError(t, s.PutBlob(ctx, bad, bytes.NewReader([]byte("data")), blob.BlobMeta{}))
+	require.NoError(t, os.WriteFile(s.metaPath(bad), []byte(`{"content_type": "trunc`), 0o600))
+
+	_, err := s.ListBlobs(ctx, blob.BlobKey{TenantID: "tenant-a", Namespace: "installers"})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, blob.ErrBlobNotFound)
+
+	_, _, err = s.GetBlob(ctx, bad)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, blob.ErrBlobNotFound)
+
+	// An empty sidecar on disk is also corrupt, not absent.
+	require.NoError(t, os.WriteFile(s.metaPath(bad), nil, 0o600))
+	_, err = s.ListBlobs(ctx, blob.BlobKey{TenantID: "tenant-a", Namespace: "installers"})
+	require.Error(t, err)
+	_, _, err = s.GetBlob(ctx, bad)
+	require.Error(t, err)
+}
+
+// TestFilesystemBlobStore_SidecarTempFilesNotLeaked verifies the temp sidecar
+// is removed after both publication paths, including the PutBlobIfAbsent loser.
+func TestFilesystemBlobStore_SidecarTempFilesNotLeaked(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	key := testKey("tmp.bin")
+
+	require.NoError(t, s.PutBlobIfAbsent(ctx, key, bytes.NewReader([]byte("a")), blob.BlobMeta{}))
+	require.ErrorIs(t, s.PutBlobIfAbsent(ctx, key, bytes.NewReader([]byte("b")), blob.BlobMeta{}), blob.ErrBlobAlreadyExists)
+	require.NoError(t, s.PutBlob(ctx, key, bytes.NewReader([]byte("c")), blob.BlobMeta{}))
+
+	entries, err := os.ReadDir(filepath.Join(s.root, "tenant-a", "installers"))
+	require.NoError(t, err)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	assert.ElementsMatch(t, []string{"tmp.bin", "tmp.bin.meta.json"}, names)
 }
