@@ -34,7 +34,7 @@ const (
 // minimal INSERT ($1 = id, $2 = tenant) that satisfies its NOT NULL columns.
 type rlsApplyTable struct {
 	name     string
-	create   func(ctx context.Context, db *sql.DB) error
+	create   func(ctx context.Context, db schemaExecutor) error
 	policies func() []tenantRLSPolicy
 	idColumn string
 	insert   string

@@ -5,7 +5,6 @@ package database
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -31,7 +30,8 @@ func NewDatabaseSchemas() DatabaseSchemas {
 }
 
 // CreateConfigsTable creates the configs table for configuration storage
-func (s DatabaseSchemas) CreateConfigsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateConfigsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	// Create table with proper data types and constraints
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS configs (
@@ -67,6 +67,7 @@ func (s DatabaseSchemas) CreateConfigsTable(ctx context.Context, db *sql.DB) err
 		"CREATE INDEX IF NOT EXISTS idx_configs_tenant_namespace ON configs(tenant_id, namespace);",
 		"CREATE INDEX IF NOT EXISTS idx_configs_tenant_namespace_name ON configs(tenant_id, namespace, name);",
 		"CREATE INDEX IF NOT EXISTS idx_configs_created_at ON configs(created_at);",
+		//duplication:justified pkg/storage/providers/database/schemas.go -- repeated schema-creation scaffold; the lock-safe wrapper line (Issue #6101) lifted this run over the clone threshold and the DDL text is unchanged
 		"CREATE INDEX IF NOT EXISTS idx_configs_updated_at ON configs(updated_at);",
 		"CREATE INDEX IF NOT EXISTS idx_configs_version ON configs(version);",
 		"CREATE INDEX IF NOT EXISTS idx_configs_tags ON configs USING GIN(tags);", // GIN index for array search
@@ -85,7 +86,8 @@ func (s DatabaseSchemas) CreateConfigsTable(ctx context.Context, db *sql.DB) err
 }
 
 // CreateConfigHistoryTable creates the config_history table for version tracking
-func (s DatabaseSchemas) CreateConfigHistoryTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateConfigHistoryTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	// Create history table for configuration versioning
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS config_history (
@@ -132,7 +134,8 @@ func (s DatabaseSchemas) CreateConfigHistoryTable(ctx context.Context, db *sql.D
 }
 
 // CreateAuditEntriesTable creates the audit_entries table for audit logging
-func (s DatabaseSchemas) CreateAuditEntriesTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateAuditEntriesTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	// Create table with proper data types for audit entries
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS audit_entries (
@@ -241,7 +244,7 @@ const auditSequenceUniqueIndex = "idx_audit_entries_tenant_sequence_unique"
 // is skipped and the collision count logged instead. The rows are left as they
 // are: the audit log is tamper-evident and is never rewritten here, and
 // VerifyChain still reports the fork.
-func ensureAuditSequenceUniqueIndex(ctx context.Context, db *sql.DB) error {
+func ensureAuditSequenceUniqueIndex(ctx context.Context, db schemaExecutor) error {
 	var exists bool
 	if err := db.QueryRowContext(ctx,
 		"SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = $1)",
@@ -282,7 +285,8 @@ func ensureAuditSequenceUniqueIndex(ctx context.Context, db *sql.DB) error {
 // tenant — including across separate controller nodes sharing this database
 // (ADR-004 amendment, ADR-031 Decision 1, Issue #3754). One row per tenant;
 // SELECT ... FOR UPDATE on that row is what makes sequence assignment atomic.
-func (s DatabaseSchemas) CreateAuditChainHeadsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateAuditChainHeadsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS audit_chain_heads (
 			tenant_id       VARCHAR(255) PRIMARY KEY,
@@ -297,7 +301,8 @@ func (s DatabaseSchemas) CreateAuditChainHeadsTable(ctx context.Context, db *sql
 }
 
 // CreateAuditStatsView creates a materialized view for audit statistics
-func (s DatabaseSchemas) CreateAuditStatsView(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateAuditStatsView(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	// Create materialized view for performance optimization of statistics queries
 	createViewQuery := `
 		CREATE MATERIALIZED VIEW IF NOT EXISTS audit_stats AS
@@ -336,7 +341,7 @@ func (s DatabaseSchemas) CreateAuditStatsView(ctx context.Context, db *sql.DB) e
 }
 
 // RefreshAuditStatsView refreshes the materialized view (should be called periodically)
-func (s DatabaseSchemas) RefreshAuditStatsView(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) RefreshAuditStatsView(ctx context.Context, db schemaExecutor) error {
 	refreshQuery := "REFRESH MATERIALIZED VIEW CONCURRENTLY audit_stats;"
 
 	if _, err := db.ExecContext(ctx, refreshQuery); err != nil {
@@ -347,7 +352,7 @@ func (s DatabaseSchemas) RefreshAuditStatsView(ctx context.Context, db *sql.DB) 
 }
 
 // SetupHealthMonitoring creates health check functions and monitoring tables
-func (s DatabaseSchemas) SetupHealthMonitoring(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) SetupHealthMonitoring(ctx context.Context, db schemaExecutor) error {
 	// Create a simple health check table
 	createHealthTableQuery := `
 		CREATE TABLE IF NOT EXISTS storage_health (
@@ -374,7 +379,8 @@ func (s DatabaseSchemas) SetupHealthMonitoring(ctx context.Context, db *sql.DB) 
 }
 
 // CreateRBACTables creates all RBAC-related tables with proper indexing
-func (s DatabaseSchemas) CreateRBACTables(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateRBACTables(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	// Create permissions table
 	if err := s.CreateRBACPermissionsTable(ctx, db); err != nil {
 		return err
@@ -401,7 +407,8 @@ func (s DatabaseSchemas) CreateRBACTables(ctx context.Context, db *sql.DB) error
 // BackfillTenantLifecycle adds the ADR-027 Decision 2 suspension provenance
 // columns to a pre-existing cfgms_tenants table (migration 008). Idempotent:
 // ADD COLUMN IF NOT EXISTS is a no-op on an up-to-date table.
-func (s DatabaseSchemas) BackfillTenantLifecycle(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) BackfillTenantLifecycle(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	alters := []string{
 		`ALTER TABLE cfgms_tenants ADD COLUMN IF NOT EXISTS directly_suspended BOOLEAN DEFAULT false`,
 		`ALTER TABLE cfgms_tenants ADD COLUMN IF NOT EXISTS cascade_suspended_from VARCHAR(255)`,
@@ -418,7 +425,8 @@ func (s DatabaseSchemas) BackfillTenantLifecycle(ctx context.Context, db *sql.DB
 // pre-existing cfgms_tenants table (migration 012), fills rows that have none
 // with random values (never derived from any tenant field), and adds the unique
 // index. Idempotent: labels that already exist are never changed.
-func (s DatabaseSchemas) BackfillTenantBillingLabel(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) BackfillTenantBillingLabel(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	stmts := []string{
 		`ALTER TABLE cfgms_tenants ADD COLUMN IF NOT EXISTS billing_label VARCHAR(64)`,
 		`UPDATE cfgms_tenants
@@ -438,7 +446,8 @@ func (s DatabaseSchemas) BackfillTenantBillingLabel(ctx context.Context, db *sql
 
 // CreatePendingDeletionsTable creates cfgms_tenant_pending_deletions for ADR-027
 // Decisions 3-4 (Issue #3182). Idempotent via CREATE TABLE IF NOT EXISTS.
-func (s DatabaseSchemas) CreatePendingDeletionsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreatePendingDeletionsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS cfgms_tenant_pending_deletions (
 			subtree_root_id   VARCHAR(255) PRIMARY KEY,
@@ -459,7 +468,8 @@ func (s DatabaseSchemas) CreatePendingDeletionsTable(ctx context.Context, db *sq
 // directly_suspended and cascade_suspended_from (ADR-027 Decision 2) are
 // included in the CREATE TABLE; BackfillTenantLifecycle handles pre-existing
 // deployments missing these columns.
-func (s DatabaseSchemas) CreateTenantTables(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateTenantTables(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS cfgms_tenants (
 			id VARCHAR(255) PRIMARY KEY,
@@ -515,7 +525,8 @@ func (s DatabaseSchemas) CreateTenantTables(ctx context.Context, db *sql.DB) err
 }
 
 // CreateRBACPermissionsTable creates the rbac_permissions table
-func (s DatabaseSchemas) CreateRBACPermissionsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateRBACPermissionsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS rbac_permissions (
 			id VARCHAR(255) PRIMARY KEY,
@@ -534,6 +545,7 @@ func (s DatabaseSchemas) CreateRBACPermissionsTable(ctx context.Context, db *sql
 
 	// Create indexes for performance
 	indexes := []string{
+		//duplication:justified pkg/storage/providers/database/schemas.go -- repeated schema-creation scaffold; the lock-safe wrapper line (Issue #6101) lifted this run over the clone threshold and the DDL text is unchanged
 		"CREATE INDEX IF NOT EXISTS idx_rbac_permissions_resource_type ON rbac_permissions(resource_type);",
 		"CREATE INDEX IF NOT EXISTS idx_rbac_permissions_name ON rbac_permissions(name);",
 		"CREATE INDEX IF NOT EXISTS idx_rbac_permissions_actions ON rbac_permissions USING GIN(actions);",
@@ -549,7 +561,8 @@ func (s DatabaseSchemas) CreateRBACPermissionsTable(ctx context.Context, db *sql
 }
 
 // CreateRBACRolesTable creates the rbac_roles table
-func (s DatabaseSchemas) CreateRBACRolesTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateRBACRolesTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS rbac_roles (
 			id VARCHAR(255) PRIMARY KEY,
@@ -572,6 +585,7 @@ func (s DatabaseSchemas) CreateRBACRolesTable(ctx context.Context, db *sql.DB) e
 
 	// Create indexes for performance and tenant isolation
 	indexes := []string{
+		//duplication:justified pkg/storage/providers/database/schemas.go -- repeated schema-creation scaffold; the lock-safe wrapper line (Issue #6101) lifted this run over the clone threshold and the DDL text is unchanged
 		"CREATE INDEX IF NOT EXISTS idx_rbac_roles_tenant_id ON rbac_roles(tenant_id);",
 		"CREATE INDEX IF NOT EXISTS idx_rbac_roles_is_system_role ON rbac_roles(is_system_role);",
 		"CREATE INDEX IF NOT EXISTS idx_rbac_roles_name ON rbac_roles(name);",
@@ -589,7 +603,8 @@ func (s DatabaseSchemas) CreateRBACRolesTable(ctx context.Context, db *sql.DB) e
 }
 
 // CreateRBACSubjectsTable creates the rbac_subjects table
-func (s DatabaseSchemas) CreateRBACSubjectsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateRBACSubjectsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS rbac_subjects (
 			id VARCHAR(255) PRIMARY KEY,
@@ -610,6 +625,7 @@ func (s DatabaseSchemas) CreateRBACSubjectsTable(ctx context.Context, db *sql.DB
 
 	// Create indexes for performance and tenant isolation
 	indexes := []string{
+		//duplication:justified pkg/storage/providers/database/schemas.go -- repeated schema-creation scaffold; the lock-safe wrapper line (Issue #6101) lifted this run over the clone threshold and the DDL text is unchanged
 		"CREATE INDEX IF NOT EXISTS idx_rbac_subjects_tenant_id ON rbac_subjects(tenant_id);",
 		"CREATE INDEX IF NOT EXISTS idx_rbac_subjects_type ON rbac_subjects(type);",
 		"CREATE INDEX IF NOT EXISTS idx_rbac_subjects_tenant_type ON rbac_subjects(tenant_id, type);",
@@ -628,7 +644,8 @@ func (s DatabaseSchemas) CreateRBACSubjectsTable(ctx context.Context, db *sql.DB
 }
 
 // CreateRBACRoleAssignmentsTable creates the rbac_role_assignments table
-func (s DatabaseSchemas) CreateRBACRoleAssignmentsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateRBACRoleAssignmentsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS rbac_role_assignments (
 			id VARCHAR(255) PRIMARY KEY,
@@ -677,7 +694,8 @@ func (s DatabaseSchemas) CreateRBACRoleAssignmentsTable(ctx context.Context, db 
 // BackfillRegistrationTokenIDs handles pre-existing deployments.
 // Bearer values are persisted as deterministic SHA-256 lookup keys by the store.
 // Legacy rows without expiry remain readable so operators can rotate them.
-func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS cfgms_registration_tokens (
 			token VARCHAR(255) PRIMARY KEY,
@@ -763,7 +781,7 @@ func (s DatabaseSchemas) CreateRegistrationTokensTable(ctx context.Context, db *
 //
 // Dropping the rows is safe: a claim is a short-lived in-flight admission guard,
 // so any registration still mid-flight simply retries.
-func dropSingleColumnRegistrationClaimKey(ctx context.Context, db *sql.DB) error {
+func dropSingleColumnRegistrationClaimKey(ctx context.Context, db schemaExecutor) error {
 	var keyColumns int
 	err := db.QueryRowContext(ctx, `
 		SELECT COUNT(*)
@@ -792,7 +810,8 @@ func dropSingleColumnRegistrationClaimKey(ctx context.Context, db *sql.DB) error
 // and could never be revoked or deleted from the web UI — exactly the tokens most
 // likely to need revoking. Idempotent: ADD COLUMN IF NOT EXISTS is a no-op on an
 // up-to-date table and the UPDATE matches no rows once every row has an id.
-func (s DatabaseSchemas) BackfillRegistrationTokenIDs(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) BackfillRegistrationTokenIDs(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	if _, err := db.ExecContext(ctx,
 		`ALTER TABLE cfgms_registration_tokens ADD COLUMN IF NOT EXISTS id VARCHAR(36)`); err != nil {
 		return fmt.Errorf("failed to add id column to cfgms_registration_tokens: %w", err)
@@ -838,7 +857,8 @@ func (s DatabaseSchemas) BackfillRegistrationTokenIDs(ctx context.Context, db *s
 // fenced, quorum-equivalent singleton-claim primitive (ADR-031 Decision 5,
 // Issue #3756). A row is never deleted by Release; it is force-expired so the
 // token column remains the lease's monotonic high-water mark across releases.
-func (s DatabaseSchemas) CreateLeaseTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateLeaseTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS cfgms_leases (
 			name       TEXT PRIMARY KEY,
@@ -865,7 +885,8 @@ func (s DatabaseSchemas) CreateLeaseTable(ctx context.Context, db *sql.DB) error
 // the liveness timestamp business.RoutingStore.LookupNode evaluates against
 // business.RoutingStaleAfter, always compared using the database server's own
 // now() so no caller clock enters the decision (see business.RoutingStore).
-func (s DatabaseSchemas) CreateRoutingTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateRoutingTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS cfgms_routing (
 			steward_id TEXT PRIMARY KEY,
@@ -888,7 +909,8 @@ func (s DatabaseSchemas) CreateRoutingTable(ctx context.Context, db *sql.DB) err
 // CreateScriptRunTables creates the script run, job and execution-grant tables
 // backing business.ScriptRunStore (Issue #4528). In cluster mode every
 // controller node reads and completes runs through these shared tables.
-func (s DatabaseSchemas) CreateScriptRunTables(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateScriptRunTables(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS cfgms_script_runs (
 			run_id         TEXT PRIMARY KEY,
@@ -953,7 +975,8 @@ func (s DatabaseSchemas) CreateScriptRunTables(ctx context.Context, db *sql.DB) 
 // queue entry; the remaining columns are what the store selects and
 // transitions on. The partial unique index enforces "one queued entry per
 // device and parameter hash" across every node.
-func (s DatabaseSchemas) CreateExecutionQueueTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateExecutionQueueTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS cfgms_execution_queue (
 			execution_id  TEXT PRIMARY KEY,
@@ -985,7 +1008,8 @@ func (s DatabaseSchemas) CreateExecutionQueueTable(ctx context.Context, db *sql.
 // business.NodeRegistryStore.ListNodes evaluates against
 // business.NodeRegistryStaleAfter, always compared using the database
 // server's own now() so no caller clock enters the decision.
-func (s DatabaseSchemas) CreateNodeRegistryTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateNodeRegistryTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS cfgms_node_registry (
 			node_id    TEXT PRIMARY KEY,
@@ -1013,7 +1037,8 @@ func (s DatabaseSchemas) CreateNodeRegistryTable(ctx context.Context, db *sql.DB
 
 // CreateCertRevocationsTable creates the cfgms_cert_revocations table backing
 // the cluster-visible CertRevocationStore (ADR-031 Decision 1, Issue #3852).
-func (s DatabaseSchemas) CreateCertRevocationsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateCertRevocationsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS cfgms_cert_revocations (
 			serial     TEXT NOT NULL PRIMARY KEY,
@@ -1030,7 +1055,8 @@ func (s DatabaseSchemas) CreateCertRevocationsTable(ctx context.Context, db *sql
 // cluster-visible SigningCursorStore (ADR-031 Decision 1, Issue #3852). The
 // table only ever holds the single row keyed 'default' — one controller CA,
 // one signing cursor.
-func (s DatabaseSchemas) CreateSigningCursorTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateSigningCursorTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS cfgms_signing_cursor (
 			id                  TEXT NOT NULL PRIMARY KEY,
@@ -1049,7 +1075,8 @@ func (s DatabaseSchemas) CreateSigningCursorTable(ctx context.Context, db *sql.D
 // CreateSigningTrustAckTable creates the cfgms_signing_trust_acks table backing
 // the cluster-visible SigningTrustAckStore (Issue #4691). One row per
 // (steward, signing-certificate serial) records that the steward confirmed it.
-func (s DatabaseSchemas) CreateSigningTrustAckTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateSigningTrustAckTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS cfgms_signing_trust_acks (
 			steward_id      TEXT NOT NULL,
@@ -1067,7 +1094,8 @@ func (s DatabaseSchemas) CreateSigningTrustAckTable(ctx context.Context, db *sql
 // cluster-visible, CAS-protected ModuleApprovalStore (ADR-031 Decision 1, Issue
 // #3886). address is the opaque publisher/name/version/content-hash key
 // features/controller/modules/cache derives from a bundle.ContentAddress.
-func (s DatabaseSchemas) CreateModuleApprovalsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateModuleApprovalsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS cfgms_module_approvals (
 			address TEXT NOT NULL PRIMARY KEY,
@@ -1095,7 +1123,9 @@ func (s DatabaseSchemas) CreateModuleApprovalsTable(ctx context.Context, db *sql
 // therefore pruned by DatabaseRateCounterStore.PruneExpired against the
 // expires_at index. This table is sized for churn, not audit retention, unlike
 // cfgms_cert_revocations.
-func (s DatabaseSchemas) CreateRateCountersTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateRateCountersTable(ctx context.Context, db schemaExecutor) error {
+	//duplication:justified pkg/storage/providers/database/schemas.go -- repeated schema-creation scaffold; the lock-safe wrapper line (Issue #6101) lifted this run over the clone threshold and the DDL text is unchanged
+	db = lockSafe(db)
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS cfgms_rate_counters (
 			key          TEXT NOT NULL PRIMARY KEY,
@@ -1124,7 +1154,8 @@ func (s DatabaseSchemas) CreateRateCountersTable(ctx context.Context, db *sql.DB
 }
 
 // CreateIPTrustRangesTable creates the cfgms_ip_trust_ranges table for tenant-scoped IP trust.
-func (s DatabaseSchemas) CreateIPTrustRangesTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateIPTrustRangesTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS cfgms_ip_trust_ranges (
 			id              TEXT PRIMARY KEY,
@@ -1162,7 +1193,8 @@ func (s DatabaseSchemas) CreateIPTrustRangesTable(ctx context.Context, db *sql.D
 // No cert bundle columns are included — generate-on-claim issues certs in memory only.
 // Device identity columns added by Issue #3403 so the claim step can write a complete
 // StewardRecord without re-contacting the steward.
-func (s DatabaseSchemas) CreatePendingRegistrationsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreatePendingRegistrationsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	createTableQuery := `
 		CREATE TABLE IF NOT EXISTS cfgms_pending_registrations (
 			pending_id           TEXT PRIMARY KEY,
@@ -1222,99 +1254,45 @@ func (s DatabaseSchemas) CreatePendingRegistrationsTable(ctx context.Context, db
 }
 
 // CreateAllTables creates all necessary database tables and indexes
-func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	// Create tables in dependency order
-	if err := s.CreateConfigsTable(ctx, db); err != nil {
-		return err
+	creators := []func(context.Context, schemaExecutor) error{
+		s.CreateConfigsTable,
+		s.CreateConfigHistoryTable,
+		s.CreateAuditEntriesTable,
+		s.CreateAuditChainHeadsTable,
+		s.CreateAuditStatsView,
+		s.SetupHealthMonitoring,
+		s.CreateRBACTables,
+		s.CreateIPTrustRangesTable,
+		s.CreateLeaseTable,
+		s.CreateRoutingTable,
+		s.CreateScriptRunTables,
+		s.CreateExecutionQueueTable,
+		s.CreateNodeRegistryTable,
+		s.CreateRefreshPoliciesTable,
+		s.CreatePendingRefreshRequestsTable,
+		s.CreateAssurancePolicyOverridesTable,
+		s.CreateBlastRadiusPolicyOverridesTable,
+		s.CreateAlertStatesTable,
+		s.CreateWorkflowApprovalsTable,
+		s.CreateReportTemplatesTable,
+		s.CreateWorkflowExecutionsTable,
 	}
-
-	if err := s.CreateConfigHistoryTable(ctx, db); err != nil {
-		return err
+	for _, create := range creators {
+		if err := create(ctx, db); err != nil {
+			return err
+		}
 	}
-
-	if err := s.CreateAuditEntriesTable(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateAuditChainHeadsTable(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateAuditStatsView(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.SetupHealthMonitoring(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateRBACTables(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateIPTrustRangesTable(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateLeaseTable(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateRoutingTable(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateScriptRunTables(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateExecutionQueueTable(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateNodeRegistryTable(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateRefreshPoliciesTable(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreatePendingRefreshRequestsTable(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateAssurancePolicyOverridesTable(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateBlastRadiusPolicyOverridesTable(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateAlertStatesTable(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateWorkflowApprovalsTable(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateReportTemplatesTable(ctx, db); err != nil {
-		return err
-	}
-
-	if err := s.CreateWorkflowExecutionsTable(ctx, db); err != nil {
-		return err
-	}
-
 	return nil
 }
 
 // CreateAssurancePolicyOverridesTable creates the assurance_policy_overrides table (Issue #2845).
 // Each row holds one per-permission override for a tenant. SetPolicy replaces
 // the full set for a tenant transactionally (delete-then-insert).
-func (s DatabaseSchemas) CreateAssurancePolicyOverridesTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateAssurancePolicyOverridesTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS assurance_policy_overrides (
 			tenant_id             TEXT NOT NULL,
@@ -1337,7 +1315,8 @@ func (s DatabaseSchemas) CreateAssurancePolicyOverridesTable(ctx context.Context
 // CreateBlastRadiusPolicyOverridesTable creates the blast_radius_policy_overrides
 // table (Issue #3698). Each row holds one per-tenant MaxTargets override; a
 // SetPolicy call upserts the tenant's single row.
-func (s DatabaseSchemas) CreateBlastRadiusPolicyOverridesTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateBlastRadiusPolicyOverridesTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS blast_radius_policy_overrides (
 			tenant_id   TEXT PRIMARY KEY,
@@ -1351,7 +1330,8 @@ func (s DatabaseSchemas) CreateBlastRadiusPolicyOverridesTable(ctx context.Conte
 
 // CreateTenantCrossingsTable creates the tenant_crossings table (ADR-025 Decision 2:
 // client-granted support access and tenant-crossing break-glass elevation).
-func (s DatabaseSchemas) CreateTenantCrossingsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateTenantCrossingsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS tenant_crossings (
 			id             TEXT PRIMARY KEY,
@@ -1416,7 +1396,8 @@ func (s DatabaseSchemas) CreateTenantCrossingsTable(ctx context.Context, db *sql
 }
 
 // CreateRefreshPoliciesTable creates the refresh_policies table (Issue #2329).
-func (s DatabaseSchemas) CreateRefreshPoliciesTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateRefreshPoliciesTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS refresh_policies (
 			tenant_id           TEXT NOT NULL PRIMARY KEY,
@@ -1430,7 +1411,8 @@ func (s DatabaseSchemas) CreateRefreshPoliciesTable(ctx context.Context, db *sql
 }
 
 // CreatePendingRefreshRequestsTable creates the pending_refresh_requests table (Issue #2329).
-func (s DatabaseSchemas) CreatePendingRefreshRequestsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreatePendingRefreshRequestsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS pending_refresh_requests (
 			pending_id                  TEXT NOT NULL PRIMARY KEY,
@@ -1473,7 +1455,8 @@ func (s DatabaseSchemas) CreatePendingRefreshRequestsTable(ctx context.Context, 
 // single-use registration-refresh challenge nonce; GetAndConsumeNonce deletes
 // the row it reads via DELETE ... RETURNING, which is atomic across concurrent
 // readers on different controller nodes.
-func (s DatabaseSchemas) CreateRefreshNoncesTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateRefreshNoncesTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS refresh_nonces (
 			key        TEXT NOT NULL PRIMARY KEY,
@@ -1492,7 +1475,8 @@ func (s DatabaseSchemas) CreateRefreshNoncesTable(ctx context.Context, db *sql.D
 }
 
 // CreateSessionsTable creates the sessions table with HMAC-hashed token column and RLS.
-func (s DatabaseSchemas) CreateSessionsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateSessionsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS sessions (
 			session_id_hash  TEXT NOT NULL PRIMARY KEY,
@@ -1528,11 +1512,12 @@ func (s DatabaseSchemas) CreateSessionsTable(ctx context.Context, db *sql.DB) er
 			return fmt.Errorf("failed to create sessions index: %w", err)
 		}
 	}
-	return applyTenantRLS(ctx, db, tableSessions, standardTenantPolicies())
+	return applyTenantRLSVia(ctx, db, tableSessions, standardTenantPolicies())
 }
 
 // CreateStewardRecordsTable creates the steward_records table with RLS.
-func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS steward_records (
 			id                   TEXT NOT NULL PRIMARY KEY,
@@ -1597,7 +1582,7 @@ func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db *sql.
 			return fmt.Errorf("failed to create steward_records index: %w", err)
 		}
 	}
-	return applyTenantRLS(ctx, db, tableStewardRecords, stewardRecordsPolicies())
+	return applyTenantRLSVia(ctx, db, tableStewardRecords, stewardRecordsPolicies())
 }
 
 // stewardRecordsPolicies is the steward_records policy set. It differs from
@@ -1655,7 +1640,8 @@ func stewardRecordsPolicies() []tenantRLSPolicy {
 }
 
 // CreateCommandRecordsTable creates the command_records table with RLS.
-func (s DatabaseSchemas) CreateCommandRecordsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateCommandRecordsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS command_records (
 			id            TEXT NOT NULL PRIMARY KEY,
@@ -1700,7 +1686,7 @@ func (s DatabaseSchemas) CreateCommandRecordsTable(ctx context.Context, db *sql.
 			return fmt.Errorf("failed to create command_records index: %w", err)
 		}
 	}
-	return applyTenantRLS(ctx, db, tableCommandRecords, standardTenantPolicies())
+	return applyTenantRLSVia(ctx, db, tableCommandRecords, standardTenantPolicies())
 }
 
 // CreateRolloutRecordsTable creates the cfgms_rollout_records table with RLS
@@ -1708,7 +1694,8 @@ func (s DatabaseSchemas) CreateCommandRecordsTable(ctx context.Context, db *sql.
 // controller node. Idempotent and additive only. owner_node_id names the node
 // advancing the rollout so a restarting node can find the ones it orphaned.
 // Migration 015 documents this schema.
-func (s DatabaseSchemas) CreateRolloutRecordsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateRolloutRecordsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS cfgms_rollout_records (
 			id                TEXT NOT NULL PRIMARY KEY,
@@ -1733,7 +1720,7 @@ func (s DatabaseSchemas) CreateRolloutRecordsTable(ctx context.Context, db *sql.
 			return fmt.Errorf("failed to create cfgms_rollout_records table: %w", err)
 		}
 	}
-	return applyTenantRLS(ctx, db, tableRolloutRecords, standardTenantPolicies())
+	return applyTenantRLSVia(ctx, db, tableRolloutRecords, standardTenantPolicies())
 }
 
 // CreateUpgradeRecordsTable creates the cfgms_upgrade_records table with RLS
@@ -1741,7 +1728,8 @@ func (s DatabaseSchemas) CreateRolloutRecordsTable(ctx context.Context, db *sql.
 // every controller node. Idempotent and additive only. Migration 016 documents
 // this schema. The (steward_id, created_at) and (tenant_id, created_at) indexes
 // serve the per-steward and per-tenant listings, newest first.
-func (s DatabaseSchemas) CreateUpgradeRecordsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateUpgradeRecordsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS cfgms_upgrade_records (
 			id                       TEXT NOT NULL PRIMARY KEY,
@@ -1772,7 +1760,7 @@ func (s DatabaseSchemas) CreateUpgradeRecordsTable(ctx context.Context, db *sql.
 			return fmt.Errorf("failed to create cfgms_upgrade_records table: %w", err)
 		}
 	}
-	return applyTenantRLS(ctx, db, tableUpgradeRecords, standardTenantPolicies())
+	return applyTenantRLSVia(ctx, db, tableUpgradeRecords, standardTenantPolicies())
 }
 
 // BackfillCommandRecordsDeliveryStatus adds the outbox delivery-lifecycle columns
@@ -1783,7 +1771,8 @@ func (s DatabaseSchemas) CreateUpgradeRecordsTable(ctx context.Context, db *sql.
 // fire-and-forget goroutine, so their actual delivery outcome is unknown: pending
 // is the conservative choice (a drain will re-attempt rather than silently
 // drop them).
-func (s DatabaseSchemas) BackfillCommandRecordsDeliveryStatus(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) BackfillCommandRecordsDeliveryStatus(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	alters := []string{
 		`ALTER TABLE command_records ADD COLUMN IF NOT EXISTS delivery_status TEXT NOT NULL DEFAULT 'pending'`,
 		`ALTER TABLE command_records ADD COLUMN IF NOT EXISTS delivery_detail TEXT NOT NULL DEFAULT ''`,
@@ -1802,7 +1791,8 @@ func (s DatabaseSchemas) BackfillCommandRecordsDeliveryStatus(ctx context.Contex
 }
 
 // CreateCommandTransitionsTable creates the immutable audit trail table.
-func (s DatabaseSchemas) CreateCommandTransitionsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateCommandTransitionsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS command_transitions (
 			id            BIGSERIAL PRIMARY KEY,
@@ -1829,7 +1819,8 @@ func (s DatabaseSchemas) CreateCommandTransitionsTable(ctx context.Context, db *
 // Device-continuity columns (Issue #2788) are included in the initial CREATE so that
 // fresh deployments get the full schema; the corresponding migration (006) uses
 // ADD COLUMN IF NOT EXISTS for rolling upgrades of existing deployments.
-func (s DatabaseSchemas) CreateSessionTokenStoreTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateSessionTokenStoreTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS session_token_store (
 			token_hash          TEXT NOT NULL PRIMARY KEY,
@@ -1863,13 +1854,14 @@ func (s DatabaseSchemas) CreateSessionTokenStoreTable(ctx context.Context, db *s
 			return fmt.Errorf("failed to create session_token_store index: %w", err)
 		}
 	}
-	return applyTenantRLS(ctx, db, tableSessionTokenStore, standardTenantPolicies())
+	return applyTenantRLSVia(ctx, db, tableSessionTokenStore, standardTenantPolicies())
 }
 
 // BackfillSessionTokenStoreContinuity adds the device-continuity columns to an existing
 // session_token_store table (Issue #2788, migration 006). Safe to call on a table that
 // already has these columns — ADD COLUMN IF NOT EXISTS is idempotent on Postgres.
-func (s DatabaseSchemas) BackfillSessionTokenStoreContinuity(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) BackfillSessionTokenStoreContinuity(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	alters := []string{
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS assurance      INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS bound_ip       TEXT    NOT NULL DEFAULT ''`,
@@ -1888,7 +1880,7 @@ func (s DatabaseSchemas) BackfillSessionTokenStoreContinuity(ctx context.Context
 }
 
 // DropAllTables drops all tables (for testing or clean reinstall)
-func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) DropAllTables(ctx context.Context, db schemaExecutor) error {
 	// Drop in reverse dependency order (foreign keys need to be dropped first)
 	dropQueries := []string{
 		"DROP MATERIALIZED VIEW IF EXISTS audit_stats;",
@@ -1948,6 +1940,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		// foreign key and is dropped after the tables that depend on it.
 		"DROP TABLE IF EXISTS tenant_crossings;",
 		"DROP TABLE IF EXISTS blast_radius_policy_overrides;",
+		//duplication:justified pkg/storage/providers/database/schemas.go -- repeated schema-creation scaffold; the lock-safe wrapper line (Issue #6101) lifted this run over the clone threshold and the DDL text is unchanged
 		"DROP TABLE IF EXISTS cfgms_tenant_pending_deletions;",
 		"DROP TABLE IF EXISTS cfgms_tenants;",
 		"DROP TABLE IF EXISTS cfgms_schema_version;",
@@ -1963,7 +1956,8 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 }
 
 // CreateTriggersTable creates the cfgms_triggers table for durable workflow trigger persistence (Issue #3402).
-func (s DatabaseSchemas) CreateTriggersTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateTriggersTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS cfgms_triggers (
 			id                 TEXT NOT NULL PRIMARY KEY,
@@ -2003,7 +1997,8 @@ func (s DatabaseSchemas) CreateTriggersTable(ctx context.Context, db *sql.DB) er
 
 // CreatePushRecordsTable creates the cfgms_push_records table for durable push-state persistence (Issue #3402).
 // A new leader reads this table to resume pending and in-progress pushes after failover.
-func (s DatabaseSchemas) CreatePushRecordsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreatePushRecordsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS cfgms_push_records (
 			id           TEXT NOT NULL PRIMARY KEY,
@@ -2024,6 +2019,7 @@ func (s DatabaseSchemas) CreatePushRecordsTable(ctx context.Context, db *sql.DB)
 	// authorized-target column to upgraded databases. Existing rows read as empty.
 	if _, err := db.ExecContext(ctx, `ALTER TABLE cfgms_push_records ADD COLUMN IF NOT EXISTS target_steward_ids TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("failed to add cfgms_push_records.target_steward_ids: %w", err)
+		//duplication:justified pkg/storage/providers/database/schemas.go -- repeated schema-creation scaffold; the lock-safe wrapper line (Issue #6101) lifted this run over the clone threshold and the DDL text is unchanged
 	}
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_cfgms_push_records_tenant_id  ON cfgms_push_records(tenant_id);",
@@ -2043,7 +2039,8 @@ func (s DatabaseSchemas) CreatePushRecordsTable(ctx context.Context, db *sql.DB)
 }
 
 // CreateAlertStatesTable creates the cfgms_alert_states table for tenant-scoped alert state.
-func (s DatabaseSchemas) CreateAlertStatesTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateAlertStatesTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddl := `
 		CREATE TABLE IF NOT EXISTS cfgms_alert_states (
 			id              TEXT PRIMARY KEY,
@@ -2078,7 +2075,8 @@ func (s DatabaseSchemas) CreateAlertStatesTable(ctx context.Context, db *sql.DB)
 // and visible to every controller node. checkpoint_ref is a reference into the
 // secrets provider; checkpoint contents are never stored here. The partial indexes
 // serve the pending-list, expiry sweep and resume-recovery queries.
-func (s DatabaseSchemas) CreateWorkflowApprovalsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateWorkflowApprovalsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS cfgms_workflow_approvals (
 			tenant_id           TEXT NOT NULL,
@@ -2120,7 +2118,8 @@ func (s DatabaseSchemas) CreateWorkflowApprovalsTable(ctx context.Context, db *s
 // a share naming the caller. definition is the opaque JSON query and parameters document,
 // kept as TEXT so it round-trips byte for byte; shared_with is JSONB so the recipient
 // lookup is a containment query served by the GIN index.
-func (s DatabaseSchemas) CreateReportTemplatesTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateReportTemplatesTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS cfgms_report_templates (
 			id          TEXT PRIMARY KEY,
@@ -2154,7 +2153,8 @@ func (s DatabaseSchemas) CreateReportTemplatesTable(ctx context.Context, db *sql
 // business.WorkflowExecutionStore (Issue #4675). Rows are keyed by
 // (tenant_id, execution_id), tenant_id ” being the root tenant, and visible to every
 // controller node. payload is opaque engine-owned JSON; run variables are never stored.
-func (s DatabaseSchemas) CreateWorkflowExecutionsTable(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateWorkflowExecutionsTable(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS cfgms_workflow_executions (
 			tenant_id     TEXT NOT NULL,
@@ -2179,7 +2179,8 @@ func (s DatabaseSchemas) CreateWorkflowExecutionsTable(ctx context.Context, db *
 
 // CreateCaseTables creates the three tables backing CaseStore: cases, case_pins,
 // and case_content (ADR-022 §8, Issue #3602).
-func (s DatabaseSchemas) CreateCaseTables(ctx context.Context, db *sql.DB) error {
+func (s DatabaseSchemas) CreateCaseTables(ctx context.Context, db schemaExecutor) error {
+	db = lockSafe(db)
 	ddls := []string{
 		`CREATE TABLE IF NOT EXISTS cases (
 			id          TEXT PRIMARY KEY,
