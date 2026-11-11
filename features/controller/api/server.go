@@ -299,6 +299,9 @@ type APIKey struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	TenantID    string     `json:"tenant_id"`
+	// Kind is the key's durable credential kind, read from its secret-store record
+	// (Issue #6066). Empty for an ordinary key; see isRolloutCredential.
+	Kind string `json:"-"`
 
 	// recordRef names the durable secret-store record this cache entry mirrors: the
 	// record's key (the SHA-256 of the API key) within TenantID. Every key minted by

@@ -340,6 +340,7 @@ var automationPermissions = []string{
 	"workflow:publish",
 	"rollout-automation:set",
 	"rollout-automation:read",
+	"rollout-credential:create",
 }
 
 func init() {

@@ -333,6 +333,10 @@ var permissionAssurance = map[string]Requirement{
 	// machine-initiated rollouts on is a tap-gated human decision, so no API key may use it.
 	// rollout-automation:read is intentionally absent (a read).
 	"rollout-automation:set": {Min: session.AssuranceStrong, RequireUserPresence: true},
+
+	// rollout-credential:create gates POST /rollout-credentials (Issue #6066): minting the
+	// scoped rollout credential is a tap-gated human act, so no API key may mint one.
+	"rollout-credential:create": {Min: session.AssuranceStrong, RequireUserPresence: true},
 }
 
 // legacyPermissionIDs maps a current permission ID to the historical IDs that named the

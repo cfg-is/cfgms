@@ -178,69 +178,17 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate new API key (256-bit cryptographically secure)
-	keyBytes := make([]byte, 32)
-	if _, err := rand.Read(keyBytes); err != nil {
-		s.logger.Error("Failed to generate API key", "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to generate API key", "INTERNAL_ERROR")
-		return
-	}
-
-	// Encode as base64
-	keyString := base64.URLEncoding.EncodeToString(keyBytes)
-	keyID := uuid.New().String()
-
-	// Hash the key for storage (SHA-256)
-	keyHash := hashAPIKey(keyString)
-
-	// Create API key object for in-memory cache
-	apiKey := &APIKey{
-		ID:          keyID,
-		Key:         keyString,
+	minted, err := s.mintAPIKey(r.Context(), apiKeyMintSpec{
 		Name:        createReq.Name,
 		Permissions: createReq.Permissions,
-		CreatedAt:   time.Now().UTC(),
+		TenantID:    tenantID,
 		ExpiresAt:   createReq.ExpiresAt,
-		TenantID:    tenantID,
-		recordRef:   keyHash,
-		validatedAt: s.apiKeyNow(),
-	}
-
-	// Store API key in memory cache
-	s.mu.Lock()
-	s.apiKeys[keyString] = apiKey
-	s.mu.Unlock()
-
-	// M-AUTH-1: Store API key hash in secret store with metadata
-	secretReq := &secretsif.SecretRequest{
-		Key:         keyHash, // Store hash as key for lookup
-		Value:       keyHash, // Store hash as value (we never store plaintext keys)
-		TenantID:    tenantID,
-		CreatedBy:   "api-admin", // TODO: Get from authenticated user context
-		Description: createReq.Name,
-		Tags:        []string{"api-key"},
-		Metadata: map[string]string{
-			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
-			"id":                            keyID,
-			"permissions":                   serializePermissions(createReq.Permissions),
-		},
-	}
-
-	// Set TTL if expiration is specified
-	if createReq.ExpiresAt != nil {
-		secretReq.TTL = time.Until(*createReq.ExpiresAt)
-	}
-
-	if err := s.secretStore.StoreSecret(r.Context(), secretReq); err != nil {
-		s.logger.Error("Failed to persist API key to secret store", "error", logging.SanitizeLogValue(err.Error()), "id", keyID)
-		// Remove from memory cache since we couldn't persist
-		s.mu.Lock()
-		delete(s.apiKeys, keyString)
-		s.mu.Unlock()
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to persist API key", "STORE_ERROR")
+	})
+	if err != nil {
+		s.writeMintAPIKeyError(w, err)
 		return
 	}
-	s.apiKeyIdx.put(keyHash, apiKeyIndexEntry{TenantID: tenantID, ID: keyID})
+	keyID := minted.apiKey.ID
 
 	// Create response (includes the actual key only on creation)
 	result := APIKeyCreateResult{
@@ -248,11 +196,11 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 			ID:          keyID,
 			Name:        createReq.Name,
 			Permissions: createReq.Permissions,
-			CreatedAt:   apiKey.CreatedAt,
+			CreatedAt:   minted.apiKey.CreatedAt,
 			ExpiresAt:   createReq.ExpiresAt,
 			TenantID:    tenantID,
 		},
-		Key: keyString,
+		Key: minted.plaintext,
 	}
 
 	// Bind the API key to the requested role via RBAC role assignment so that
@@ -288,6 +236,125 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		map[string]interface{}{"key_id": keyID})
 
 	s.writeResponse(w, http.StatusCreated, result)
+}
+
+// apiKeyMintSpec describes one API key for mintAPIKey. ExtraMetadata is merged into the
+// secret-store record's Metadata beneath the core fields (type, id, permissions), which it
+// can never override. Only a route that owns a durable key attribute passes it:
+// handleCreateAPIKey passes none, so a request body cannot reach the record's metadata.
+type apiKeyMintSpec struct {
+	Name          string
+	Permissions   []string
+	TenantID      string
+	ExpiresAt     *time.Time
+	ExtraMetadata map[string]string
+}
+
+// mintedAPIKey is the outcome of mintAPIKey: the cache entry and the plaintext, which
+// exists only here and in the response the caller writes.
+type mintedAPIKey struct {
+	apiKey    *APIKey
+	plaintext string
+}
+
+// mintAPIKeyError says which step of mintAPIKey failed, so the caller maps it to a
+// response without the helper writing one.
+type mintAPIKeyError struct {
+	generate bool
+}
+
+func (e *mintAPIKeyError) Error() string {
+	if e.generate {
+		return "failed to generate API key"
+	}
+	return "failed to persist API key"
+}
+
+// mintAPIKey generates an API key (256-bit, cryptographically secure), caches it and
+// persists its hash to the secret store. It is the only key-generation and storage path
+// (handleCreateAPIKey and handleCreateRolloutCredential both use it). The caller has
+// already validated the permissions, tenant and expiry.
+func (s *Server) mintAPIKey(ctx context.Context, spec apiKeyMintSpec) (*mintedAPIKey, error) {
+	keyBytes := make([]byte, 32)
+	if _, err := rand.Read(keyBytes); err != nil {
+		s.logger.Error("Failed to generate API key", "error", logging.SanitizeLogValue(err.Error()))
+		return nil, &mintAPIKeyError{generate: true}
+	}
+
+	keyString := base64.URLEncoding.EncodeToString(keyBytes)
+	keyID := uuid.New().String()
+
+	// Hash the key for storage (SHA-256)
+	keyHash := hashAPIKey(keyString)
+
+	apiKey := &APIKey{
+		ID:          keyID,
+		Key:         keyString,
+		Name:        spec.Name,
+		Permissions: spec.Permissions,
+		CreatedAt:   time.Now().UTC(),
+		ExpiresAt:   spec.ExpiresAt,
+		TenantID:    spec.TenantID,
+		Kind:        spec.ExtraMetadata[metadataKeyCredentialKind],
+		recordRef:   keyHash,
+		validatedAt: s.apiKeyNow(),
+	}
+
+	// Store API key in memory cache
+	s.mu.Lock()
+	s.apiKeys[keyString] = apiKey
+	s.mu.Unlock()
+
+	secretReq := apiKeySecretRequest(spec, keyID, keyHash)
+
+	if err := s.secretStore.StoreSecret(ctx, secretReq); err != nil {
+		s.logger.Error("Failed to persist API key to secret store", "error", logging.SanitizeLogValue(err.Error()), "id", keyID)
+		// Remove from memory cache since we couldn't persist
+		s.mu.Lock()
+		delete(s.apiKeys, keyString)
+		s.mu.Unlock()
+		return nil, &mintAPIKeyError{}
+	}
+	s.apiKeyIdx.put(keyHash, apiKeyIndexEntry{TenantID: spec.TenantID, ID: keyID})
+	return &mintedAPIKey{apiKey: apiKey, plaintext: keyString}, nil
+}
+
+// apiKeySecretRequest builds the secret-store record for a minted key (M-AUTH-1): the
+// hash is the record's key and value (plaintext keys are never stored), and the metadata
+// carries the type, id and permissions over any spec.ExtraMetadata.
+func apiKeySecretRequest(spec apiKeyMintSpec, keyID, keyHash string) *secretsif.SecretRequest {
+	metadata := make(map[string]string, len(spec.ExtraMetadata)+3)
+	for k, v := range spec.ExtraMetadata {
+		metadata[k] = v
+	}
+	metadata[secretsif.MetadataKeySecretType] = string(secretsif.SecretTypeAPIKey)
+	metadata["id"] = keyID
+	metadata["permissions"] = serializePermissions(spec.Permissions)
+
+	req := &secretsif.SecretRequest{
+		Key:         keyHash,
+		Value:       keyHash,
+		TenantID:    spec.TenantID,
+		CreatedBy:   "api-admin", // TODO: Get from authenticated user context
+		Description: spec.Name,
+		Tags:        []string{"api-key"},
+		Metadata:    metadata,
+	}
+	// Set TTL if expiration is specified
+	if spec.ExpiresAt != nil {
+		req.TTL = time.Until(*spec.ExpiresAt)
+	}
+	return req
+}
+
+// writeMintAPIKeyError writes the response for a mintAPIKey failure.
+func (s *Server) writeMintAPIKeyError(w http.ResponseWriter, err error) {
+	var mintErr *mintAPIKeyError
+	if errors.As(err, &mintErr) && mintErr.generate {
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to generate API key", "INTERNAL_ERROR")
+		return
+	}
+	s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to persist API key", "STORE_ERROR")
 }
 
 // handleGetAPIKey handles GET /api/v1/api-keys/{id}
