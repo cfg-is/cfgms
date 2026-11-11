@@ -74,6 +74,7 @@ func TestRequirePermission_PresenceBrowserTap_EveryPresenceGatedPermission(t *te
 		}
 		// serve binds a token to `bound`, then presents it on `actual`.
 		serve := func(s *Server, bound, actual *http.Request, permID string, relay bool, expires time.Time) *httptest.ResponseRecorder {
+			bindTestAdminCertOn(t, s, adminCert)
 			actual.Header.Set(presenceTokenHeader, storeBoundTokenWithExpiry(t, s, bound, permID, relay, expires))
 			rec := httptest.NewRecorder()
 			wrapWithAuth(s, parts[0], parts[1],
@@ -122,6 +123,7 @@ func TestRequirePermission_PresenceBrowserTap_EveryPresenceGatedPermission(t *te
 
 		t.Run(id+"/second-use-refused", func(t *testing.T) {
 			s := setupTestServer(t)
+			bindTestAdminCertOn(t, s, adminCert)
 			token := storeBoundTokenWithExpiry(t, s, newReq(http.MethodPost, path, ""), id, false, valid)
 			handler := wrapWithAuth(s, parts[0], parts[1],
 				func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })

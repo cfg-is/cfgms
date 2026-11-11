@@ -7,9 +7,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"math/big"
 	"net/http"
@@ -23,6 +25,7 @@ import (
 
 	controllerapi "github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
@@ -272,7 +275,11 @@ func TestStewardDecommissionCycle_FullControllerStack(t *testing.T) {
 	server.SetStewardStore(stewardStore)
 
 	const stewardID = "s-decomm-integration"
-	const tenantID = "integration-tenant"
+	// The administrator is a root-scope account (ADR-025 Amendment 3); the Decision 1
+	// boundary confines it to the root tenant itself, so the steward lives there.
+	const tenantID = "root"
+	_, err = tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID})
+	require.NoError(t, err)
 
 	// Seed the durable and in-memory representations of a registered steward.
 	require.NoError(t, stewardStore.RegisterSteward(ctx, &business.StewardRecord{
@@ -284,7 +291,16 @@ func TestStewardDecommissionCycle_FullControllerStack(t *testing.T) {
 
 	// Drive the DELETE through the production router with an admin mTLS principal.
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/stewards/"+stewardID, nil)
-	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{newAdminPeerCert(t)}}
+	adminCert := newAdminPeerCert(t)
+	// ADR-025 Amendment 3: the certificate authenticates, the account it is bound to
+	// authorizes. Bind it exactly as bootstrap does, in the store the server reads.
+	accountStore, err := controllerapi.NewSecretStore(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = accountStore.Close() })
+	fingerprint := sha256.Sum256(adminCert.Raw)
+	require.NoError(t, initialization.BindAdminCertificate(ctx, accountStore, "integration-admin",
+		adminCert.SerialNumber.String(), hex.EncodeToString(fingerprint[:])))
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
 	rec := httptest.NewRecorder()
 	server.GetRouter().ServeHTTP(rec, req)
 

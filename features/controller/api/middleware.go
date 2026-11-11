@@ -165,9 +165,10 @@ type Principal struct {
 	// rootScopeFromAssertion. Always false for API-key and relay principals.
 	RootScoped bool
 	// ImplicitAdmin marks a principal as having unrestricted permission breadth (ADR-025
-	// Amendment 3). Exactly three construction sites set this: mTLS admin certs
-	// (extractAdminPrincipal), CLI Bearer sessions with no bound account or a root-scope
-	// account, and root-scope web accounts. All other principals — API keys, relay
+	// Amendment 3). Exactly three construction sites set this: mTLS admin certs bound to a
+	// root-scope account (extractAdminPrincipal), CLI Bearer sessions with no bound account
+	// or a root-scope account, and root-scope web accounts. An admin certificate with no
+	// bound account never sets it. All other principals — API keys, relay
 	// principals, tenant-scoped accounts, zero-valued Principal{} — are denied any
 	// permission unless it appears in Permissions verbatim.
 	//
@@ -177,14 +178,15 @@ type Principal struct {
 	ImplicitAdmin bool
 	// AccountBound is true when this principal was resolved from a durable account record
 	// (extractAdminPrincipal's bound-cert branch, or a Bearer/web session with a resolvable
-	// account) rather than the no-binding bootstrap fallback (Issue #4337, ADR-025
-	// Amendment 5). It is the signal subjectToTenantCrossingBoundary uses to decide whether
-	// GlobalScope (acct.RootScope, durable) or RootScoped (per-credential, and for sessions
-	// re-derived from the current request's assurance) governs the ADR-025 root<->MSP
-	// crossing boundary for this principal: GlobalScope only when AccountBound, because for
-	// an unbound principal GlobalScope carries no account-level root-scope signal at all
-	// (it is unconditionally true for the mTLS bootstrap fallback, and merely mirrors tenant
-	// emptiness for an unbound session) — see authorizeTenantAccess's doc comment.
+	// account) rather than an unbound principal (Issue #4337, ADR-025 Amendment 5). It is the
+	// signal subjectToTenantCrossingBoundary uses to decide whether GlobalScope
+	// (acct.RootScope, durable) or RootScoped (per-credential, and for sessions re-derived
+	// from the current request's assurance) governs the ADR-025 root<->MSP crossing boundary
+	// for this principal: GlobalScope only when AccountBound, because for an unbound
+	// principal GlobalScope carries no account-level root-scope signal at all (it merely
+	// mirrors tenant emptiness for an unbound session) — see authorizeTenantAccess's doc
+	// comment. An admin certificate with no bound account is never AccountBound and holds
+	// no permission (ADR-025 Amendment 3).
 	AccountBound bool
 }
 
@@ -403,13 +405,15 @@ func (s *Server) contentTypeMiddleware(next http.Handler) http.Handler {
 // serial is in the revoked-serials list (Story D: C2 fix), the cert is bound to a
 // disabled account, or the account-lookup store is unavailable (fail closed).
 //
-// Resolution rule (ADR-025 Amendment 3):
+// Resolution rule (ADR-025 Amendment 3 — a certificate authenticates, an account authorizes):
 //   - Bound, active account: principal derives from account (ID, TenantID, GlobalScope,
 //     Permissions). RootScoped derives from cert.HasRootScopeMarker alone — never from
 //     the account (ADR-025 A2.1/A2.2).
-//   - Bound, disabled account: returns nil; does not fall back to bootstrap.
-//   - Account lookup error: returns nil (fail closed); does not fall back to bootstrap.
-//   - No binding found: bootstrap fallback — implicit root, audited on every use.
+//   - Bound, disabled account: returns nil.
+//   - Account lookup error: returns nil (fail closed).
+//   - No binding found: a principal with a non-nil empty Permissions, ImplicitAdmin false,
+//     GlobalScope false and an empty TenantID. It holds no permission; the denial is
+//     audited and names the local bootstrap-admin recovery path.
 func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		return nil
@@ -424,8 +428,8 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 // principalFromAdminCert resolves the principal for an admin-marked peer certificate
 // (everything extractAdminPrincipal does after its TLS peer checks). recordUse is true
 // only for a request that authenticates with the certificate: it records the binding's
-// last use and emits the bootstrap-fallback audit. A keepalive re-check passes false so
-// a tick never writes either.
+// last use and emits the unbound-certificate denial audit. A keepalive re-check passes
+// false so a tick never writes either.
 func (s *Server) principalFromAdminCert(ctx context.Context, peerCert *x509.Certificate, recordUse bool) *Principal {
 	serial := peerCert.SerialNumber.String()
 	// Story D: C2 fix — check revocation on every cert-auth request.
@@ -449,12 +453,10 @@ func (s *Server) principalFromAdminCert(ctx context.Context, peerCert *x509.Cert
 	fp := hex.EncodeToString(fpSum[:])
 
 	// ADR-025 Amendment 3: resolve the principal from the account bound to this serial.
-	// Fail-closed default: non-nil empty slice as working permissions value, matching
-	// the web-session branch's documented fail-closed default.
 	acct, err := s.getAccountByCertSerial(ctx, serial)
 	if err != nil {
-		// Fail closed: a store outage must not fall through to the bootstrap fallback
-		// and grant unscoped root to a cert whose account scope cannot be verified.
+		// Fail closed: a store outage must not be read as "no binding" — the certificate
+		// may well be bound to an account whose scope cannot be verified right now.
 		s.logger.Error("Cert serial account lookup failed; failing closed",
 			"cert_serial", logging.SanitizeLogValue(serial),
 			"error", logging.SanitizeLogValue(err.Error()))
@@ -462,9 +464,9 @@ func (s *Server) principalFromAdminCert(ctx context.Context, peerCert *x509.Cert
 	}
 	if acct != nil {
 		if acct.Disabled {
-			// Disabled account: reject; do not fall back to bootstrap.
-			// An admin must not regain access by presenting a cert bound to a
-			// disabled account.
+			// Disabled account: reject. Disabling the account renders its
+			// certificates inert (ADR-025 Amendment 3); the certificate must not
+			// be read as unbound and handled like one.
 			return nil
 		}
 		// Bound, active account: derive the principal from account fields.
@@ -482,8 +484,8 @@ func (s *Server) principalFromAdminCert(ctx context.Context, peerCert *x509.Cert
 		var permissions []string
 		implicitAdmin := false
 		if acct.RootScope {
-			// Root-scope account: implicit admin (same breadth as the bootstrap fallback);
-			// Permissions is nil — ImplicitAdmin is the gate (ADR-025 Amendment 3).
+			// Root-scope account: implicit admin; Permissions is nil — ImplicitAdmin
+			// is the gate (ADR-025 Amendment 3).
 			permissions = nil
 			implicitAdmin = true
 		} else {
@@ -512,34 +514,28 @@ func (s *Server) principalFromAdminCert(ctx context.Context, peerCert *x509.Cert
 		}
 	}
 
-	// No binding found: bootstrap fallback (ADR-025 Amendment 3).
-	// An admin-marked certificate with no bound account keeps implicit root indefinitely.
-	// Every use of this path is audited; the combination with accounts_in_cache > 0
-	// is anomalous and separately detectable in monitoring.
+	// No binding found (ADR-025 Amendment 3): the certificate authenticates and confers
+	// nothing. Permissions is a non-nil empty slice, ImplicitAdmin and GlobalScope are
+	// false and TenantID is empty, so every permission check fails closed and
+	// refuseUnscopedPrincipal answers the request with the unbound-certificate error.
+	// Recovery is local: `bootstrap-admin` on the controller host binds a fresh certificate.
 	if recordUse {
-		s.emitBootstrapFallbackAudit(ctx, serial, peerCert.Subject.CommonName)
+		s.emitUnboundAdminCertDenied(serial, peerCert.Subject.CommonName)
 	}
 
 	return &Principal{
-		Channel: AuthChannelMTLS,
-		ID:      peerCert.Subject.CommonName,
-		Name:    "mtls-admin:" + peerCert.Subject.CommonName,
-		// The bootstrap admin is root: its identity tenant is the deployment's
-		// root tenant and its reach comes from GlobalScope (root TenantScope),
-		// never from an empty tenant (Issue #4665).
+		Channel:         AuthChannelMTLS,
+		ID:              peerCert.Subject.CommonName,
+		Name:            "mtls-admin:" + peerCert.Subject.CommonName,
 		Assurance:       session.AssuranceStrong,
-		GlobalScope:     true,
-		TenantID:        s.rootTenantID(ctx),
+		Permissions:     []string{},
 		CertSerial:      serial,
 		CertFingerprint: fp,
 		CertNotAfter:    peerCert.NotAfter,
 		// RootScoped is read from an explicit certificate extension (ADR-025 Amendment 1
-		// A1.3) — never inferred from TenantID being empty. Absent on every admin cert
-		// issued before this marker existed, so existing deployments are unaffected.
+		// A1.3) and stays a property of the certificate (Amendment 3); on its own it
+		// grants nothing.
 		RootScoped: cert.HasRootScopeMarker(peerCert),
-		// mTLS admin certs are one of the three implicit-admin construction sites
-		// (ADR-025 Amendment 3). Permissions is left nil; ImplicitAdmin is the gate.
-		ImplicitAdmin: true,
 	}
 }
 
@@ -652,9 +648,8 @@ func (s *Server) findCertBindingLastUsedRecord(ctx context.Context, username, st
 // recordCertBindingUse asynchronously records that serial was just used to authenticate
 // on username's account (Issue #3715). It MUST be called only after extractAdminPrincipal
 // has fully resolved a bound, active-account principal — every rejection branch (revoked
-// serial, disabled account) returns before reaching this call, and the bootstrap-fallback
-// (no binding found) branch never calls it either, so a rejected or unbound request
-// produces zero store writes.
+// serial, disabled account) returns before reaching this call, and the unbound-certificate
+// branch never calls it either, so a rejected or unbound request produces zero store writes.
 //
 // Coalesced to at most one store write per certBindingLastUsedCoalesceWindow per serial,
 // tracked in s.certBindingLastUsedThrottle independently of s.mu — a busy credential
@@ -771,29 +766,23 @@ func (s *Server) loadCertBindingLastUsed(ctx context.Context, username, tenantID
 	return uses, nil
 }
 
-// emitBootstrapFallbackAudit logs the admin.bootstrap_fallback_used audit event.
-// Called every time an mTLS admin cert with no bound account is accepted via the
-// bootstrap fallback (ADR-025 Amendment 3). The accounts_in_cache field makes the
-// anomalous combination — bootstrap path used while accounts exist — separately
-// detectable in monitoring without a store query on the auth hot path.
-func (s *Server) emitBootstrapFallbackAudit(ctx context.Context, serial, commonName string) {
-	s.mu.RLock()
-	accountsInCache := len(s.accounts)
-	s.mu.RUnlock()
-
-	s.logger.Warn("admin.bootstrap_fallback_used: mTLS cert has no bound account; treating as unscoped root (ADR-025 Amendment 3)",
-		"event_type", "admin.bootstrap_fallback_used",
-		"auth_path", "bootstrap-fallback",
+// emitUnboundAdminCertDenied logs the admin.unbound_cert_denied event. Called every time
+// an admin-marked mTLS certificate with no bound account authenticates: it is denied
+// everything (ADR-025 Amendment 3), and a stale bundle being presented after its account
+// was deleted, or a bundle issued before binding existed, is worth seeing.
+func (s *Server) emitUnboundAdminCertDenied(serial, commonName string) {
+	s.logger.Warn("admin.unbound_cert_denied: mTLS admin certificate is not bound to an account; granting no permissions (ADR-025 Amendment 3)",
+		"event_type", "admin.unbound_cert_denied",
+		"auth_path", "mtls-unbound",
 		"cert_serial", logging.SanitizeLogValue(serial),
 		"cert_cn", logging.SanitizeLogValue(commonName),
-		"accounts_in_cache", accountsInCache,
 	)
 }
 
 // principalTenantScope is the ctxkeys.TenantScope for an authenticated
 // principal (Issue #4665). A principal is root-scoped only by its explicit
-// GlobalScope flag — a root-scope account (any credential) or the bootstrap
-// admin certificate — and otherwise confined to its tenant. Proof strength is a
+// GlobalScope flag — a root-scope account (any credential) — and otherwise
+// confined to its tenant. Proof strength is a
 // separate layer: requirePermission still applies permissionAssurance, so
 // AssuranceStrong permissions still force a WebAuthn step-up. A principal with
 // neither flag nor tenant gets an empty-path tenant scope, which
@@ -1038,6 +1027,10 @@ func (s *Server) refuseUnscopedPrincipal(w http.ResponseWriter, principal *Princ
 	if principal != nil && (principal.GlobalScope || principal.TenantID != "") {
 		return false
 	}
+	if isUnboundAdminCertPrincipal(principal) {
+		s.writeUnboundAdminCertError(w)
+		return true
+	}
 	id := ""
 	if principal != nil {
 		id = principal.ID
@@ -1046,6 +1039,24 @@ func (s *Server) refuseUnscopedPrincipal(w http.ResponseWriter, principal *Princ
 		"principal_id", logging.SanitizeLogValue(id))
 	s.writeErrorResponse(w, http.StatusForbidden, "Credential is not bound to a tenant", "NO_TENANT_SCOPE")
 	return true
+}
+
+// unboundAdminCertMessage is the whole of what a caller authenticated by an unbound admin
+// certificate is told: that the certificate is not bound, and the one recovery path.
+const unboundAdminCertMessage = "This certificate is not bound to an account. " +
+	"Run `bootstrap-admin` on the controller host to issue a bound certificate."
+
+// isUnboundAdminCertPrincipal reports whether principal was authenticated by an
+// admin-marked mTLS certificate that has no bound account (ADR-025 Amendment 3). Every
+// principal extractAdminPrincipal builds from an account has AccountBound set.
+func isUnboundAdminCertPrincipal(principal *Principal) bool {
+	return principal != nil && principal.Channel == AuthChannelMTLS && !principal.AccountBound
+}
+
+// writeUnboundAdminCertError answers a request authenticated by an unbound admin
+// certificate with 403 ADMIN_CERT_UNBOUND, naming the local recovery path.
+func (s *Server) writeUnboundAdminCertError(w http.ResponseWriter) {
+	s.writeErrorResponse(w, http.StatusForbidden, unboundAdminCertMessage, "ADMIN_CERT_UNBOUND")
 }
 
 // hasHeaderCredentials reports whether the request carries an API key or Bearer token header.
@@ -2098,6 +2109,10 @@ func (s *Server) checkPermissionHeld(w http.ResponseWriter, r *http.Request, pr 
 		return true
 	}
 	decision := s.denyAuthorization(r, pr, "Principal lacks required permission: "+pr.permissionID)
+	if isUnboundAdminCertPrincipal(pr.principal) {
+		s.writeUnboundAdminCertError(w)
+		return false
+	}
 	s.writeAuthorizationError(w, "Insufficient permissions", "INSUFFICIENT_PERMISSIONS", decision)
 	return false
 }

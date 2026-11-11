@@ -47,9 +47,18 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// init registers NewSecretStore as the store the bootstrap paths bind admin certificates
+// in (ADR-025 Amendment 3). initialization cannot call it directly — this package
+// imports initialization — and binding through the server's own constructor guarantees
+// bootstrap-admin and first boot write the accounts the server later reads.
+func init() {
+	initialization.RegisterSecretStoreOpener(NewSecretStore)
+}
 
 // Sentinel errors returned by bindCertOnAccount and removeCertBindingFromAccount.
 // Callers switch on these to translate binding-layer outcomes to HTTP responses.
@@ -361,10 +370,11 @@ func (s *Server) handleListCertBindings(w http.ResponseWriter, r *http.Request) 
 // which would silently leave a valid credential with no associated account record.
 //
 // If certManager is nil (no cert management configured) the request is refused with 503.
-// Removing a binding without revoking would leave a still-valid admin-marked certificate
-// with no bound account, which extractAdminPrincipal resolves through the bootstrap
-// fallback as unscoped root — so an unrevokable unbind is a privilege escalation, not a
-// partial success. Revocation is authoritative on this path or the path is closed.
+// Removing a binding without revoking would leave a certificate that is still valid at
+// the CA but bound to nothing: inert under ADR-025 Amendment 3 (an unbound admin
+// certificate authenticates and confers nothing), yet still listed as valid and free to
+// be bound again. Revocation stays authoritative on this path, so an unrevokable unbind
+// is refused rather than reported as a partial success.
 func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request) {
 
 	username := mux.Vars(r)["username"]
@@ -426,9 +436,9 @@ func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request)
 	// Step 1: Revoke the certificate BEFORE removing the binding (fail-closed ordering).
 	// If revocation fails, we return 500 with the binding intact — the caller can retry.
 	// If certManager is nil the certificate cannot be revoked at all, so the unbind is
-	// refused: an unbound-but-valid admin certificate resolves through extractAdminPrincipal's
-	// bootstrap fallback as unscoped root, which would make the unbind an escalation for a
-	// tenant-scoped account. The binding stays intact and the caller gets 503.
+	// refused: a certificate unbound but not revoked is inert (ADR-025 Amendment 3) yet
+	// still valid at the CA, which is not what a revoke-binding request asks for. The
+	// binding stays intact and the caller gets 503.
 	if s.certManager == nil {
 		s.logger.Error("Refusing to remove certificate binding: certManager not configured, "+
 			"certificate cannot be revoked",
@@ -568,8 +578,8 @@ func (s *Server) bindCertOnAccount(ctx context.Context, username string, newBind
 // revoke-cert and remove-binding).
 //
 // Must be called AFTER certManager.Revoke(serial) — removing the binding before
-// revoking the certificate would leave a valid credential that resolves through
-// extractAdminPrincipal's bootstrap fallback as unscoped root for tenant-scoped accounts.
+// revoking the certificate would leave a certificate that is still valid at the CA but
+// bound to nothing (inert under ADR-025 Amendment 3, yet not revoked).
 func (s *Server) removeCertBindingFromAccount(ctx context.Context, username, serial, actingPrincipalID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -115,14 +115,12 @@ const (
 // changed — silently exempting a legitimate, still-root-scoped caller from the boundary
 // (and from the crossing audit record) exactly when their proof of identity is weakest.
 //
-// For a principal that is NOT AccountBound (the mTLS bootstrap fallback with no bound
-// account, or a Bearer session with no resolvable account — middleware.go:425, :859),
-// GlobalScope carries no account-level root-scope signal at all: it is unconditionally
-// true for the former and merely mirrors sess.TenantID == "" for the latter — the exact
-// ambiguity ADR-025 Amendment 1 A1.3 introduced RootScoped to resolve. Collapsing that
-// case onto GlobalScope too would pull every legacy unscoped admin cert into the crossing
-// boundary, which authorizeTenantAccess's cert-authenticated branch below documents as
-// provably unchanged. So an unbound principal is still judged on RootScoped alone.
+// For a principal that is NOT AccountBound (a Bearer session with no resolvable
+// account, or an admin certificate with no bound account — which holds no permission at
+// all, ADR-025 Amendment 3), GlobalScope carries no account-level root-scope signal: it
+// merely mirrors sess.TenantID == "" — the exact ambiguity ADR-025 Amendment 1 A1.3
+// introduced RootScoped to resolve. So an unbound principal is still judged on
+// RootScoped alone.
 func subjectToTenantCrossingBoundary(principal *Principal) bool {
 	if principal == nil {
 		return false
@@ -135,17 +133,12 @@ func subjectToTenantCrossingBoundary(principal *Principal) bool {
 
 // authorizeTenantAccess decides whether principal may act on resourceTenant.
 //
-//   - An unscoped, certificate-authenticated principal (TenantID == "", CertSerial != "")
-//     that is not subjectToTenantCrossingBoundary has unrestricted access — today's exact
-//     behavior, unchanged for every admin cert issued before the ADR-025 Amendment 1 A1.3
-//     root-scope marker existed, and for the 31 pre-existing callerTenant=="" branches
-//     elsewhere in this package (none of which call this function). The certificate
-//     authentication path is out of scope for ADR-025 Amendment 4 and must be provably
-//     unchanged by it.
-//   - An unscoped, NON-certificate-authenticated principal (session, API key, or any
-//     future auth path) that is not subjectToTenantCrossingBoundary is denied (ADR-025
-//     Amendment 4 A4.2): the absence of the explicit marker must not be read as
-//     unrestricted access for a caller that never went through certificate authentication.
+//   - A root principal (GlobalScope) that is not subjectToTenantCrossingBoundary is denied
+//     (ADR-025 Amendment 4 A4.2): the absence of the explicit marker must not be read as
+//     unrestricted access. The one retained exception, a hand-built certificate-authenticated
+//     principal, is described at the branch itself: ADR-025 Amendment 3 removed implicit
+//     root by possession of a certificate, and a certificate bound to a root-scope account is
+//     AccountBound, so GlobalScope itself decides its boundary.
 //   - A tenant-scoped principal must have resourceTenant equal to or a genuine
 //     ParentID-chain descendant of its own TenantID (ADR-025 Amendment 1 A1.2) — never
 //     a string-prefix match against tenant IDs. Real tenant IDs are flat, validated
@@ -159,24 +152,24 @@ func subjectToTenantCrossingBoundary(principal *Principal) bool {
 //     assurance level (Issue #4337).
 func (s *Server) authorizeTenantAccess(ctx context.Context, principal *Principal, resourceTenant string) tenantAuthDecision {
 	var callerTenant, principalID string
-	var certAuthenticated bool
 	rootScoped := subjectToTenantCrossingBoundary(principal)
 	if principal != nil {
 		callerTenant = principal.TenantID
 		principalID = principal.ID
-		// CertSerial is set in exactly two places, both inside extractAdminPrincipal
-		// (middleware.go), both after its revocation check and only when the
-		// certificate itself authenticated the request — see
-		// TestCertSerial_OnlySetByExtractAdminPrincipal. A session, API-key, or relay
-		// principal never has it set.
-		certAuthenticated = principal.CertSerial != ""
 	}
 
 	// A root principal is recognised by its explicit GlobalScope flag; its
 	// TenantID is the deployment's root tenant, never "" (Issue #4665).
 	if principal != nil && principal.GlobalScope {
 		if !rootScoped {
-			if certAuthenticated {
+			// A certificate-authenticated root principal with no boundary marker is
+			// unrestricted. Production no longer builds one — a certificate bound to a
+			// root-scope account is AccountBound (so GlobalScope itself is the boundary
+			// signal) and an unbound certificate holds no scope at all (ADR-025
+			// Amendment 3) — so this branch is reachable only by a hand-built principal.
+			// It is kept because the package's tests build such principals as their
+			// administrator fixture; the follow-up is to move those fixtures and delete it.
+			if principal.CertSerial != "" {
 				return tenantAuthAllowed
 			}
 			// ADR-025 Amendment 4 A4.2: an unmarked, non-certificate root caller

@@ -28,7 +28,7 @@ import (
 	controllerConfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/features/controller/server"
-	"github.com/cfgis/cfgms/pkg/cert"
+	certbundle "github.com/cfgis/cfgms/pkg/cert/bundle"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/testutil"
 )
@@ -163,15 +163,14 @@ func startHealthTestControllerWithConfig(t *testing.T, beforeStart func(cfg *con
 	certMgr := ctrl.GetCertificateManager()
 	require.NotNil(t, certMgr, "controller certificate manager")
 
-	adminBundle, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
-		CommonName:       "integ-health-admin",
-		Organization:     "CFGMS",
-		ValidityDays:     1,
-		KeySize:          2048,
-		TemplateModifier: cert.SetAdminMarker,
-	})
-	require.NoError(t, err, "GenerateClientCertificate")
-	adminTLSCert, err := tls.X509KeyPair(adminBundle.CertificatePEM, adminBundle.PrivateKeyPEM)
+	// The admin credential is issued the way an operator gets one — bootstrap-admin
+	// binds the certificate to an administrator account in the same operation (ADR-025
+	// Amendment 3); an admin certificate with no bound account authorizes nothing.
+	adminBundlePath := filepath.Join(t.TempDir(), "integ-health-admin.bundle.yaml")
+	require.NoError(t, initialization.IssueAdminBundle(cfg, logging.NewNoopLogger(), "integ-health-admin", adminBundlePath, false), "IssueAdminBundle")
+	adminBundle, err := certbundle.Read(adminBundlePath)
+	require.NoError(t, err, "read admin bundle")
+	adminTLSCert, err := tls.X509KeyPair([]byte(adminBundle.CertPEM), []byte(adminBundle.KeyPEM))
 	require.NoError(t, err, "X509KeyPair")
 
 	caPEM, err := certMgr.GetCACertificate()

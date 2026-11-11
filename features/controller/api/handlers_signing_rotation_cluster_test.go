@@ -67,6 +67,7 @@ func adminCertRequest(t *testing.T, m *cert.Manager) *http.Request {
 	require.NoError(t, err)
 	x509Cert, err := cert.ParseCertificateFromPEM(issued.CertificatePEM)
 	require.NoError(t, err)
+	bindTestAdminCert(t, x509Cert)
 	req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate", nil)
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
 	return req

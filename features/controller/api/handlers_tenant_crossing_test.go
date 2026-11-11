@@ -351,7 +351,8 @@ func TestEmptyCallerTenant_NoRootScopeMarker_RetainsUnscopedAccess(t *testing.T)
 
 // TestExtractAdminPrincipal_RootScopeMarker verifies extractAdminPrincipal reads
 // RootScoped from the certificate extension (ADR-025 Amendment 1 A1.3) — never
-// inferred from TenantID, which is always "" for every admin cert regardless.
+// inferred from TenantID, which is always "" for every admin cert regardless. Both
+// certificates are bound to a root-scope account (ADR-025 Amendment 3).
 func TestExtractAdminPrincipal_RootScopeMarker(t *testing.T) {
 	server := setupTestServer(t)
 
@@ -363,6 +364,7 @@ func TestExtractAdminPrincipal_RootScopeMarker(t *testing.T) {
 	assert.Equal(t, testRootTenantID, ordinaryPrincipal.TenantID, "a root admin is bound to the root tenant (Issue #4665)")
 
 	rootScopedCert := makeRootScopedAdminTestCert(t)
+	bindTestAdminCertOn(t, server, rootScopedCert)
 	rootScopedReq := requestWithTLSCert(http.MethodGet, "/api/v1/tenants/x", rootScopedCert)
 	rootScopedPrincipalGot := server.extractAdminPrincipal(rootScopedReq)
 	require.NotNil(t, rootScopedPrincipalGot)

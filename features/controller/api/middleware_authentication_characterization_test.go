@@ -163,6 +163,7 @@ func TestMiddlewareAuthenticationChar_RelayPrincipal(t *testing.T) {
 func TestMiddlewareAuthenticationChar_AdminCert(t *testing.T) {
 	srv := setupTestServer(t)
 	adminCert := makeSelfSignedAdminCert(t)
+	bindTestAdminCertOn(t, srv, adminCert)
 
 	t.Run("certificate plus API key header is rejected", func(t *testing.T) {
 		req := requestWithTLSCert(http.MethodGet, "/api/v1/stewards", adminCert)
@@ -203,6 +204,7 @@ func TestMiddlewareAuthenticationChar_AdminCert(t *testing.T) {
 
 	t.Run("certificate wins over a web session cookie", func(t *testing.T) {
 		webSrv, mgr, _ := setupTestServerWithWebSession(t, time.Now)
+		bindTestAdminCertOn(t, webSrv, adminCert)
 		cookie := issueWebSession(t, webSrv, mgr, "cert-vs-cookie", "tenant-a")
 		req := requestWithTLSCert(http.MethodGet, "/api/v1/stewards", adminCert)
 		req.AddCookie(cookie)

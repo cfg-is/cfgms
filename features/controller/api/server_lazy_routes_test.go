@@ -209,11 +209,12 @@ func TestServer_SetTerminalHandler_RegistersRBACGatedRoute(t *testing.T) {
 	// terminal:create assurance gate. certManager is nil in setupTestServer, so
 	// extractAdminPrincipal skips revocation and admits the admin marker directly.
 	adminCert := makeSelfSignedAdminCert(t)
+	bindTestAdminCertOn(t, server, adminCert)
 
-	// Register the target steward so the tenant-scoping wrapper resolves it. The
-	// admin principal has TenantID "" (GlobalScope), so the wrapper only checks
-	// existence — any tenant is acceptable here.
-	err := server.controllerService.RegisterSteward(stewardID, "test-tenant", "localhost:0", "active")
+	// Register the target steward so the tenant-scoping wrapper resolves it, in the
+	// root tenant: the bound root-scope admin is confined by the Decision 1 boundary to the
+	// root tenant itself.
+	err := server.controllerService.RegisterSteward(stewardID, testRootTenantID, "localhost:0", "active")
 	require.NoError(t, err, "test setup: RegisterSteward must not fail")
 
 	// (1) Pre-wiring: terminalHandler is nil. The authorized admin clears
@@ -227,7 +228,7 @@ func TestServer_SetTerminalHandler_RegistersRBACGatedRoute(t *testing.T) {
 		ticket, hash, err := newTerminalTicket()
 		require.NoError(t, err)
 		require.Equal(t, ceremonyOK, server.putTerminalTicket(context.Background(), hash, &terminalTicketRecord{
-			principalID: principal.ID, tenantID: "test-tenant", stewardID: stewardID,
+			principalID: principal.ID, tenantID: testRootTenantID, stewardID: stewardID,
 			terminalShell: "bash", expires: time.Now().Add(time.Minute),
 		}))
 		req.Header.Set("Sec-WebSocket-Protocol", "cfgms.terminal.v1, cfgms.ticket."+ticket)

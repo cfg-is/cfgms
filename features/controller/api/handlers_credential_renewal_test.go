@@ -425,26 +425,26 @@ func TestRenewCredential_RequestNamingAccountIsRefused(t *testing.T) {
 	assert.Equal(t, fxA.accountID, resp.AccountID)
 }
 
-// TestRenewCredential_NoAccountBindingRefusedNotBootstrapFallback is the other half of
-// the [REQUIRED TEST]: a presented certificate with no account binding at all — the
-// bootstrap-fallback case in extractAdminPrincipal — is refused outright by the
-// renewal handler rather than being allowed to "renew into" the fallback.
-func TestRenewCredential_NoAccountBindingRefusedNotBootstrapFallback(t *testing.T) {
+// TestRenewCredential_NoAccountBindingRefused is the other half of the [REQUIRED TEST]: a
+// presented certificate with no account binding at all — an unbound admin certificate,
+// which ADR-025 Amendment 3 leaves authenticated but holding nothing — is refused
+// outright rather than being allowed to "renew into" an account.
+func TestRenewCredential_NoAccountBindingRefused(t *testing.T) {
 	server := setupRenewalTestServer(t)
-	// An admin-marked certificate that authenticates via the bootstrap fallback: no
-	// account in the store has ever been bound to this serial.
-	unbound := makeSelfSignedAdminCert(t)
+	// An admin-marked certificate that no account in the store has ever been bound to.
+	unbound := makeAdminCertWithAttrs(t, 9981, "renew-unbound-admin", false)
 	unbound = withNotAfter(unbound, time.Now().UTC().Add(10*24*time.Hour))
 
-	// Sanity: this certificate really does authenticate via the bootstrap fallback.
+	// Sanity: this certificate really does authenticate, with nothing behind it.
 	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", unbound)
 	principal := server.extractAdminPrincipal(req)
-	require.NotNil(t, principal, "an admin-marked certificate with no binding must still authenticate via the bootstrap fallback")
-	require.True(t, principal.ImplicitAdmin)
+	require.NotNil(t, principal, "an admin-marked certificate with no binding still authenticates")
+	require.False(t, principal.ImplicitAdmin)
+	require.False(t, principal.AccountBound)
 
 	rec, _ := renewCredential(t, server, unbound)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Equal(t, "NO_ACCOUNT_BINDING", errCode(t, rec.Body.Bytes()))
+	assert.Contains(t, []string{"NO_ACCOUNT_BINDING", "ADMIN_CERT_UNBOUND"}, errCode(t, rec.Body.Bytes()))
 }
 
 // ---- [REQUIRED TEST] old serial revoked+unbound; failure mid-sequence keeps a working credential --

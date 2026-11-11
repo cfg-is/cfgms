@@ -43,6 +43,7 @@ func unscopedAdminManifestRequest(t *testing.T, certMgr *cert.Manager) *http.Req
 	require.NoError(t, err)
 	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
 	require.NoError(t, err)
+	bindTestAdminCert(t, x509Cert)
 
 	req := httptest.NewRequest("GET", "/api/v1/certificates/revocation-manifest", nil)
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}

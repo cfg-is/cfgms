@@ -24,6 +24,16 @@ not a second bootstrap route — only `bootstrap-admin` creates the very first
 credential on a controller. Every credential after the first one should come
 from `cfg login` or headless enrolment, not another bundle.
 
+**A bundle is only useful once its certificate is bound to an account.** An admin
+certificate authenticates and confers nothing on its own: authority comes from the
+administrator account it is bound to (ADR-025 Amendment 3). `controller --init`
+and `controller bootstrap-admin` therefore create the administrator account and
+bind the certificate they issue to it in the same operation, before the bundle
+is written; if either write fails, no bundle is written. A bundle whose
+certificate is not bound — one issued before binding existed, or one whose
+account was deleted — still authenticates, but every request is refused with
+`403 ADMIN_CERT_UNBOUND` and a message naming `bootstrap-admin`.
+
 > Signer verification on both the steward (`features/steward/commands/execute_script.go`)
 > and the controller (`features/controller/api/handlers_runs.go`) requires the
 > payload-signing marker (`cert.HasPayloadSigningMarker`); an admin-marked bundle
@@ -37,7 +47,9 @@ from `cfg login` or headless enrolment, not another bundle.
 - The controller has been initialised (`controller --init`) and the admin bundle
   has been written to the platform-default path or another location you know.
   The bundle file contains your mTLS client certificate, private key, and the
-  controller CA — all inline in a single YAML file.
+  controller CA — all inline in a single YAML file. The certificate in it is
+  already bound to an administrator account (`cfgms-admin` for the system
+  bundle).
 - `cfg` CLI is installed. See the [cfg Install Guide](cfg-install.md).
 
 ## 1. Installing `cfg`
@@ -58,6 +70,40 @@ cfg version
 ```
 
 ## 2. First Connect (Bootstrap Bundle — One Time Only)
+
+### Issuing, regenerating and recovering a bundle
+
+Run `bootstrap-admin` on the controller host, as a user who can read the
+controller config and the CA directory. It opens the controller's secret store
+to create the account, so the environment must carry the same secret-store
+settings as the controller service (`CFGMS_SECRETS_KEY_FILE`, and
+`CFGMS_SECRETS_REPO_PATH` when you set it for the service).
+
+```bash
+# A named operator bundle: creates (or reuses) the account "alice" and binds the certificate
+cfgms-controller bootstrap-admin --name alice --output /tmp/alice.bundle.yaml
+
+# The same, with the root-scope marker on the certificate
+cfgms-controller bootstrap-admin --name alice --root-scoped --output /tmp/alice.bundle.yaml
+
+# A new system bundle, bound to the existing cfgms-admin account
+cfgms-controller bootstrap-admin --regenerate
+```
+
+`--name` is also the account username (3–64 characters: letters, digits and
+hyphens). An existing account is reused only if it is an enabled root-scope
+account; otherwise the command refuses and writes nothing. `--regenerate` leaves
+the previous certificate valid until you revoke it with
+`bootstrap-admin --revoke <serial>`.
+
+**Recovery.** If a deployment loses its accounts, or a bundle's account was
+deleted or disabled, its certificates stop authorizing and no remote
+credential can repair that. Run `bootstrap-admin --regenerate` (or `--name`)
+on the controller host: it needs shell access to the controller and no network
+authentication, which is what keeps a stale bundle in a remote attacker's hands
+useless.
+
+### Importing the bundle
 
 The first time you connect from a workstation — before any account exists on
 the controller — you import the bootstrap admin bundle and register the

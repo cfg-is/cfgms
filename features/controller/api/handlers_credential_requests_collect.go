@@ -26,9 +26,8 @@
 // request. The account binding is written before the certificate is returned to the
 // caller; any failure after signing revokes the just-issued certificate immediately, so
 // a signed certificate is never observable without an account it resolves through — an
-// admin-marked certificate with no binding would otherwise fall through
-// extractAdminPrincipal's bootstrap fallback and be granted implicit root
-// (middleware.go, ADR-025 Amendment 3).
+// admin-marked certificate with no binding authenticates and confers nothing
+// (middleware.go, ADR-025 Amendment 3), so handing one out would be a dead credential.
 package api
 
 import (
@@ -160,8 +159,8 @@ func (s *Server) claimCredentialRequestForCollection(ctx context.Context, id str
 // marker set and binds the result to its recorded account, in that order (Issue #3719
 // amendment). Any failure after signing revokes the just-issued certificate before
 // returning: a signed certificate must never be observable with no account binding,
-// because extractAdminPrincipal's bootstrap fallback (middleware.go, ADR-025 Amendment
-// 3) would otherwise resolve it as implicit root.
+// because an admin-marked certificate with no binding is inert (middleware.go, ADR-025
+// Amendment 3): the caller would hold a credential that authenticates and does nothing.
 func (s *Server) signAndBindCollectedCertificate(ctx context.Context, claimed *pendingCredentialRequest) (*cert.Certificate, *account, error) {
 	csr, err := parseAndVerifyCSR(claimed.CSRPEM)
 	if err != nil {

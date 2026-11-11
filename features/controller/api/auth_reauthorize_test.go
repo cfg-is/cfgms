@@ -164,9 +164,10 @@ func TestAuthzRecheck_APIKeyPrincipal(t *testing.T) {
 }
 
 func TestAuthzRecheck_AdminCertPrincipal(t *testing.T) {
-	t.Run("unbound implicit-admin certificate passes repeatedly", func(t *testing.T) {
+	t.Run("bound root-scope certificate passes repeatedly", func(t *testing.T) {
 		srv := setupTestServer(t)
 		c := makeAdminCertWithAttrs(t, 51001, "authz-bootstrap-admin", false)
+		bindTestAdminCertOn(t, srv, c)
 		recheck := captureAuthzRecheck(t, srv, adminCertTLSRequest(c), "case:read", testRootTenantID)
 		for i := 0; i < 3; i++ {
 			assert.True(t, recheck(context.Background()), "tick %d", i)
@@ -181,6 +182,7 @@ func TestAuthzRecheck_AdminCertPrincipal(t *testing.T) {
 		require.NoError(t, err)
 
 		c := makeAdminCertWithAttrs(t, 51003, "authz-root-operator", true)
+		bindTestAdminCertOn(t, srv, c)
 		recheck := captureAuthzRecheck(t, srv, adminCertTLSRequest(c), "case:read", "msp-authz")
 		assert.False(t, recheck(ctx), "no crossing yet")
 

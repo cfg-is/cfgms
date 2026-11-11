@@ -503,6 +503,7 @@ func TestTerminalWS_AdminCertRecheckFollowsRevocation(t *testing.T) {
 	require.NotNil(t, block)
 	peer, err := x509.ParseCertificate(block.Bytes)
 	require.NoError(t, err)
+	bindTestAdminCert(t, peer)
 	n.credRecheck = n.server.adminCertRecheck(peer)
 
 	tk := n.seed("op-1", ttSteward, "")

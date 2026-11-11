@@ -321,6 +321,7 @@ func TestHandleRevokeSigningCert_RoutedThroughAdminCertificate(t *testing.T) {
 	require.NoError(t, err)
 	x509Cert, err := cert.ParseCertificateFromPEM(issued.CertificatePEM)
 	require.NoError(t, err)
+	bindTestAdminCert(t, x509Cert)
 
 	req := httptest.NewRequest("POST", "/api/v1/certificates/signing/revoke",
 		bytes.NewBufferString(`{"serial":"`+f.rotated.SerialNumber+`","reason":"via router"}`))

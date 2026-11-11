@@ -216,15 +216,16 @@ func TestModuleListAndApprove_EndToEnd(t *testing.T) {
 		approver, approverCert := newAdminMTLSClient(t, ctrl, "presence-relay-approver")
 
 		// Create a real account and bind this test's own admin cert to it, so every
-		// subsequent request from `approver` resolves to this account's principal
-		// (not the certless bootstrap-fallback admin) — the presence relay's account
-		// checks (Desired State 3) require a real, resolvable account on both ends.
+		// subsequent request from `approver` resolves to this account's principal — the
+		// presence relay's account checks (Desired State 3) require a real, resolvable
+		// account on both ends. The new certificate is unbound until then and authorizes
+		// nothing (ADR-025 Amendment 3), so the system admin (`client`) does the binding.
 		createAcctBody, err := json.Marshal(map[string]interface{}{
 			"username":   "presence-relay-approver",
 			"root_scope": true,
 		})
 		require.NoError(t, err)
-		acctResp, err := approver.Post(base+"/api/v1/accounts", "application/json", bytes.NewReader(createAcctBody))
+		acctResp, err := client.Post(base+"/api/v1/accounts", "application/json", bytes.NewReader(createAcctBody))
 		require.NoError(t, err)
 		acctBody, err := io.ReadAll(acctResp.Body)
 		require.NoError(t, err)
@@ -237,7 +238,7 @@ func TestModuleListAndApprove_EndToEnd(t *testing.T) {
 			"label":       "presence-relay integration test",
 		})
 		require.NoError(t, err)
-		bindResp, err := approver.Post(base+"/api/v1/accounts/presence-relay-approver/certs/bind", "application/json", bytes.NewReader(bindBody))
+		bindResp, err := client.Post(base+"/api/v1/accounts/presence-relay-approver/certs/bind", "application/json", bytes.NewReader(bindBody))
 		require.NoError(t, err)
 		bindRespBody, err := io.ReadAll(bindResp.Body)
 		require.NoError(t, err)
