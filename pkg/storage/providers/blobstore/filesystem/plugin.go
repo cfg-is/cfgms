@@ -390,7 +390,7 @@ func (s *FilesystemBlobStore) GetBlob(ctx context.Context, key blob.BlobKey) (io
 		return nil, blob.BlobMeta{}, fmt.Errorf("blob get: failed to parse metadata sidecar: %w", err)
 	}
 
-	f, err := os.Open(s.blobPath(key))
+	f, err := atomicfile.Open(s.blobPath(key))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, blob.BlobMeta{}, blob.ErrBlobNotFound
