@@ -7,6 +7,7 @@ The full bump-or-hold rationale that backs the summary table in SKILL.md. Loaded
 | # | Has active CVE blocking required CI? | Cooldown elapsed? | Newer release exists? | Verdict | Notes |
 |---|---|---|---|---|---|
 | 1 | Yes | (any) | Yes | **BUMP NOW** | Cooldown overridden — vulnerability is its own justification. Write audit-log entry. |
+| 1a | Shipped-stdlib vulnerability (below) | (any) | Yes | **BUMP NOW** | `go-toolchain` only. Cooldown overridden. Write audit-log entry. |
 | 2 | No  | Yes | Yes | **BUMP** | Routine refresh. No urgency. |
 | 3 | No  | No  | Yes | **HOLD** | Within cooldown window. Report the unlock date in the founder summary. |
 | 4 | No  | (n/a) | No  | **OK** | Up to date. |
@@ -22,7 +23,35 @@ Concrete evidence — not just "this version has a CVE in some advisory database
 
 Evidence for criterion 3 is the Trivy SARIF artifact downloaded in Phase 2's CI-driven-signal step. If the SARIF lists `Installed Version: <current>` for a HIGH/CRITICAL CVE, criterion 3 is met.
 
-If a CVE is in the advisory database but no CI check has surfaced it, this is **BUMP** (eligible normally) not **BUMP NOW** — wait for the cooldown.
+If a CVE is in the advisory database but no CI check has surfaced it, this is **BUMP** (eligible normally) not **BUMP NOW** — wait for the cooldown. The one exception is row 1a.
+
+## What counts as a "shipped-stdlib vulnerability" (row 1a)
+
+This applies only to the `go-toolchain` pin. The vulnerable Go standard library is already compiled into the controller, steward and CLI binaries we ship. The 3-day soak protects against a regression in a fresh release; here it would only extend the window in which the shipped binaries carry a known vulnerability. All three of these must hold:
+
+1. A Go vulnerability database entry (`GO-YYYY-NNNN`, package `stdlib`) affects the `current` toolchain version and lists a fixed version in the same minor line. Verify this against OSV: `curl -fsSL -X POST -H 'Content-Type: application/json' https://api.osv.dev/v1/query -d '{"package":{"name":"stdlib","ecosystem":"Go"},"version":"<current>"}'`.
+2. `govulncheck ./...` (Phase 2b) reports that entry as reachable from our code (symbol-level, under "Vulnerability"), not only as imported.
+3. The bump target is that fixed patch version, not a new minor.
+
+The 6-hour minimum release age in `cooldown-policy.md` still applies to this row.
+
+The Go vulnerability database does not assign CVSS severity, so reachability is the bar here, not `HIGH`/`CRITICAL`. A stdlib entry that `govulncheck` reports as not reachable follows the normal rows: **BUMP** after the cooldown.
+
+Quote advisory counts only from the OSV or `govulncheck` output. Never quote a count from a summary that cannot be traced to one of them.
+
+### Example 1a — the 2026-11-11 case (Verdict: BUMP NOW)
+
+- Pin: `go-toolchain`, current `1.27.3`
+- Latest: `1.27.4`, published 2026-11-10 (1 day ago)
+- OSV for `stdlib` at 1.27.3: one entry, GO-2026-6859 (CVE-2026-97054), net/http HTTP/1 server crash, fixed in 1.27.4
+- `govulncheck`: GO-2026-6859 reachable
+- CI signal: none. The required checks are green, and the local Trivy database had not picked it up yet.
+
+Verdict: **BUMP NOW** under row 1a. Audit log:
+
+```
+2026-11-11T18:30:00Z  go-toolchain  1.27.3→1.27.4  GO-2026-6859/CVE-2026-97054 reachable (shipped stdlib)  story:#NNNN
+```
 
 ## What counts as "cooldown elapsed"
 

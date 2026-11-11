@@ -83,6 +83,7 @@ The cooldown is overridden when ANY of these are true:
 1. **Active CVE blocking required CI** — see `decision-matrix.md` for the precise definition. This is the common case.
 2. **`--urgent` flag** at invocation time — founder asserts urgency from external knowledge (Trivy DB lag, supply-chain announcement, etc.).
 3. **Cooldown override file exists with `force: true`** — emergency mode, set by the founder for a specific pin. Documented in the audit log immediately. Removed after the bump lands.
+4. **Reachable shipped-stdlib vulnerability** (`go-toolchain` only). See `decision-matrix.md` row 1a: an OSV `stdlib` entry against the current toolchain, a fixed patch release, and `govulncheck` reporting it reachable. This overrides any per-pin `go-toolchain` cooldown, including a longer one set in the overrides file.
 
 When the cooldown is overridden, **the audit log entry is mandatory**.
 
@@ -116,8 +117,8 @@ Claude appends via `printf '...' >> .claude/scratch/pin-overrides.log` — never
 
 Even with these signals, do NOT skip cooldown when:
 
-- The CVE severity is `MEDIUM` or `LOW` (only HIGH/CRITICAL justifies the override)
-- The CVE is in a code path the project doesn't exercise (mark as `accept-risk` in a tracking issue rather than racing to bump)
+- The CVE severity is `MEDIUM` or `LOW` (only HIGH/CRITICAL justifies the override). Condition 4 is the exception: the Go vulnerability database assigns no CVSS severity, so `govulncheck` reachability takes the place of severity there.
+- The CVE is in a code path the project doesn't exercise (mark as `accept-risk` in a tracking issue rather than racing to bump). For condition 4 this is exactly what `govulncheck` reachability decides: an unreachable stdlib entry does not override.
 - The release was published less than 6 hours ago — `published_at < 6 hours` is too fresh even with a CVE; wait the minimum 6h for any obvious supply-chain yank to surface
 
-The 6-hour minimum is hard-coded; it's not configurable per pin. A release that's been out less than 6 hours is too fresh to trust, full stop.
+The 6-hour minimum is hard-coded; it's not configurable per pin, and it applies to every override condition, including condition 4. A release that's been out less than 6 hours is too fresh to trust, full stop.

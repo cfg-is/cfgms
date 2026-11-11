@@ -282,7 +282,7 @@ collision-prone action acquires a lease on its work unit BEFORE acting:
 | `story-<item>` | dev dispatch (or §7 self-dispatch claim) | the FSM supervisor run, on every terminal state (`REPORT`, `NO_OP`, `REFUSED`, `FAILED`); `release-story` for §7; TTL reclaim when the run crashes and is never resumed |
 | `pr-<N>` | review / fix / resolve (mutually exclusive on one PR) + inline rebase | fix and resolve: the FSM supervisor run, on every terminal state; review: the review container's entrypoint on exit; inline rebase releases it itself; TTL on crash |
 | `epic-decompose-<N>` | Step 7 planning team | the host, in-session, after posting the decomposition summary |
-| `pin-refresh-<week>` | Step 1.6 refresh-pins | the host, after posting the `po-pin-refresh` marker |
+| `pin-refresh-<week>` | Step 1.6 refresh-pins | the host, after the sweep ends (the `po-pin-refresh` marker is posted only after a full sweep) |
 | `sweep` | Step 7.5 pipeline-sweep | the host, after the sweep returns |
 
 The container-op leases (`story-*`, `pr-*`) are acquired by the script helpers
@@ -493,7 +493,7 @@ Locks open pipeline PRs (`feature/story-*` / `feature/item-*`) + tags them `inte
 
 The `dependency-pin-check` GitHub Actions workflow posts a `## Weekly Pin Check — <date>` comment (authored by `github-actions`) on the `dependency-pins`-labelled issue whenever a pinned tool/toolchain has a newer upstream release — whether that issue already existed (comment appended to it) or had to be created fresh for this run (the same comment is posted as a follow-up right after creation, Issue #4468), so the signal shape is always a comment, never only the issue body. This step turns that signal into dispatchable bump stories by running the `refresh-pins` skill — which researches every pin against upstream, applies the cooldown + CVE policy, and creates one Draft `story,dependencies` issue per pin that should bump. Those drafts are then promoted by the Tech Lead pass (Step 2) in this same cycle.
 
-Runs in both `cron` and `cycle` modes. It is **orchestrator-only** — the no-docker self-dispatch hosts do not run §4 steps. It needs no Docker (just `gh`/`curl`/`WebFetch`), so the remote `po-cron` trigger can run it too.
+Runs in both `cron` and `cycle` modes. It is **orchestrator-only** — the no-docker self-dispatch hosts do not run §4 steps. The full sweep needs Docker (the image scan), `go`, `govulncheck`, `trivy` and `npm`, so only a host that has all of them runs this step. A host without them (the remote `po-cron` trigger, a containerised `po-live` session) reports "pin refresh needs a Docker host — skipped" and does not take the lease or post the marker.
 
 **Idempotency gate (do this BEFORE invoking the skill — the skill does a full network sweep, so don't run it every cycle):**
 
@@ -516,7 +516,7 @@ Runs in both `cron` and `cycle` modes. It is **orchestrator-only** — the no-do
 3. **Acquire the inline lease** so a second host doesn't sweep the same weekly
    check concurrently. Key on the check timestamp (sanitized):
    ```bash
-   ./.claude/tooling/scripts/pipeline-helper.sh lease-acquire "pin-refresh-<latest_check>" 1200
+   ./.claude/tooling/scripts/pipeline-helper.sh lease-acquire "pin-refresh-<latest_check>" 3600
    ```
    On `HELD:*` another host owns this sweep — report "pin refresh in flight on
    another host" and skip the step. On `ACQUIRED`/`RECLAIMED`, run the skill
@@ -529,6 +529,31 @@ Runs in both `cron` and `cycle` modes. It is **orchestrator-only** — the no-do
    `.claude/skills/refresh-pins/SKILL.md` and run its steps INLINE with Bash.**
    Do not spawn a nested runner for it, for the reasons in §4.
 
+   **Always run the FULL sweep. Never narrow it to the pins the weekly comment
+   names.** The weekly comment is only the trigger; it cannot see transitive
+   modules or vulnerabilities in the stdlib and base images. A sweep is **full**
+   only when every one of these ran to completion:
+   - the Phase 2a staleness scans (`go list -m -u all`, `npm ci` + `npm outdated`);
+   - the Phase 2b vulnerability scans (`govulncheck ./...`, `trivy fs`, and the
+     controller image build + `trivy image`);
+   - the Phase 2c digest check of every `docker` pin;
+   - the Phase 2d per-pin research.
+
+   If any of these could not run, the sweep is **partial**. The affected pins are
+   `UNKNOWN`, not up to date. Create the stories the completed phases justify,
+   report the UNKNOWN pins and their reasons in the cycle summary, and **do not
+   post the marker**. The next cycle then retries the same weekly check. The one
+   standing exception is Nancy (`make security-deps`): without `GUIDE_TOKEN` it
+   skips by design. Record it as `SKIPPED (no GUIDE_TOKEN)` in the marker. It
+   does not make the sweep partial, because `govulncheck` and `trivy fs` cover
+   the same module graph.
+
+   **A reachable stdlib vulnerability makes a `go-toolchain` bump BUMP NOW, even
+   with every CI gate green.** This is the skill's decision-matrix row 1a: OSV
+   lists a `stdlib` entry against the current toolchain with a fixed patch
+   release, and `govulncheck` reports it reachable. Write the Phase 5 audit-log
+   line. Quote advisory counts only from OSV or `govulncheck` output.
+
    **If you spawn anyway and get no result back:** do not wait, and do not invent
    bump-story numbers for the marker. Record the step as `UNKNOWN — no result
    received`, **release the lease** —
@@ -539,14 +564,14 @@ Runs in both `cron` and `cycle` modes. It is **orchestrator-only** — the no-do
    the retry. The lease must be released on **every** exit path, including this
    one — a stranded `pin-refresh-*` lease blocks the other host for its full TTL.
 
-4. After it returns, record the marker so later cycles (and the other host) don't re-sweep the same weekly check. Include the story numbers the skill reported:
+4. After a **full** sweep, record the marker so later cycles (and the other host) don't re-sweep the same weekly check. Include the story numbers the skill reported. After a partial sweep, skip the marker and go straight to releasing the lease.
    ```bash
    ./.claude/tooling/scripts/po-act.sh log <PIN_ISSUE> - <<'EOF'
    <!-- po-pin-refresh -->
-   Processed weekly pin check via refresh-pins. Bump stories created/updated: <#NNNN, #NNNN or "none — all pins within cooldown/up to date">. Drafts enter the Tech Lead queue (Step 2).
+   Processed weekly pin check via a full refresh-pins sweep (Phases 2a–2d). Bump stories created/updated: <#NNNN, #NNNN or "none — all pins within cooldown/up to date">. Nancy: <ran | SKIPPED (no GUIDE_TOKEN)>. Drafts enter the Tech Lead queue (Step 2).
    EOF
    ```
-   Then **release the lease**: `./.claude/tooling/scripts/pipeline-helper.sh lease-release "pin-refresh-<latest_check>"`.
+   Then **release the lease** on both paths: `./.claude/tooling/scripts/pipeline-helper.sh lease-release "pin-refresh-<latest_check>"`.
    If the marker post fails (network, etc.), the next cycle re-sweeps the same
    check — harmless, because `refresh-pins` is idempotent (it comments on, never
    duplicates, an existing bump story); the only cost is one redundant network
