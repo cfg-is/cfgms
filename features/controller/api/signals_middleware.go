@@ -48,7 +48,7 @@ var apiRouteClassAllowlist = []string{
 	"directory", "enrolment-tokens", "entities", "fleet", "ha", "health", "hyperv",
 	"installer", "jobs", "modules", "monitoring", "notifications", "operator-payload",
 	"osquery", "public", "rbac", "ready", "register", "registration", "reports",
-	"rollback", "roles", "rollout", "rollout-settings", "runs", "scripts", "sessions", "signing-credential",
+	"rollback", "roles", "rollout", "rollout-credentials", "rollout-settings", "runs", "scripts", "sessions", "signing-credential",
 	"stewards", "tenant-crossings", "tenants", "terminal", "triggers", "web",
 	"webauthn", "webhooks", "workflows",
 }

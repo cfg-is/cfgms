@@ -18,6 +18,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -209,6 +210,8 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"DELETE", "/api/v1/automation/approvals/scripts/test-script/1.0.0/test-hash", "content-approval:revoke"},
 	// Unattended rollout cell setting (Issue #6065): presence-gated, no machine access.
 	{"PUT", "/api/v1/rollout-settings/unattended", "rollout-automation:set"},
+	// Rollout credential mint (Issue #6066): presence-gated, no machine access.
+	{"POST", "/api/v1/rollout-credentials", "rollout-credential:create"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine
@@ -307,10 +310,15 @@ func TestF2_AssuranceGate_ParityWithPermissionRegistry(t *testing.T) {
 	// (not 401 step-up, because Machine principals cannot interactively prove user presence).
 	apiKey := NewTestKey(t, server, allStrongAssurancePermissions())
 
-	for _, entry := range strongAssuranceRouteTable {
+	for i, entry := range strongAssuranceRouteTable {
 		entry := entry
+		// Each request comes from its own source address: the table is longer than the
+		// per-IP request budget (authdefense.DefaultConfig IPRateLimit), so one address
+		// would be answered 429 before the gate under test.
+		remoteAddr := fmt.Sprintf("198.51.%d.%d:40000", i/250, i%250+1)
 		t.Run("c_machine_403/"+entry.method+" "+entry.path, func(t *testing.T) {
 			req := httptest.NewRequest(entry.method, entry.path, nil)
+			req.RemoteAddr = remoteAddr
 			req.Header.Set("X-API-Key", apiKey)
 			rec := httptest.NewRecorder()
 			server.router.ServeHTTP(rec, req)

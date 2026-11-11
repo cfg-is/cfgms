@@ -139,6 +139,10 @@ type Principal struct {
 	LastProvenAt time.Time // time of last strong-factor proof; set by mTLS path (others: follow-on story)
 	Permissions  []string
 	TenantID     string
+	// CredentialKind is the durable kind of the API key behind this principal, copied
+	// from the key record by apiKeyPrincipal (Issue #6066). Empty for every other
+	// principal and for an ordinary key. Gate on isRolloutCredential, never on Permissions.
+	CredentialKind string
 	// Cert-auth fields — non-empty only for mTLS principals (Assurance == AssuranceStrong, H3)
 	CertSerial      string
 	CertFingerprint string
@@ -1772,6 +1776,7 @@ func apiKeyFromSecret(apiKey string, rec *secretsif.Secret, validatedAt time.Tim
 		CreatedAt:   rec.CreatedAt,
 		ExpiresAt:   rec.ExpiresAt,
 		TenantID:    rec.TenantID,
+		Kind:        rec.Metadata[metadataKeyCredentialKind],
 		recordRef:   rec.Key,
 		validatedAt: validatedAt,
 	}

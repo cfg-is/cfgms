@@ -107,13 +107,14 @@ func (s *Server) adminCertRefresh(peerCert *x509.Certificate) principalRefresh {
 // truth for its permissions and tenant.
 func apiKeyPrincipal(keyInfo *APIKey) *Principal {
 	return &Principal{
-		Channel:     AuthChannelAPIKey,
-		ID:          keyInfo.ID,
-		Name:        keyInfo.Name,
-		Assurance:   session.AssuranceMachine,
-		GlobalScope: false,
-		Permissions: keyInfo.Permissions,
-		TenantID:    keyInfo.TenantID,
+		Channel:        AuthChannelAPIKey,
+		ID:             keyInfo.ID,
+		Name:           keyInfo.Name,
+		Assurance:      session.AssuranceMachine,
+		GlobalScope:    false,
+		Permissions:    keyInfo.Permissions,
+		TenantID:       keyInfo.TenantID,
+		CredentialKind: keyInfo.Kind,
 	}
 }
 
