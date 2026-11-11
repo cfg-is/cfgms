@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -57,6 +58,22 @@ func (c *countingExecutor) addColumnCount() int {
 	n := 0
 	for _, q := range c.issued() {
 		if addColumnTextRe.MatchString(q) {
+			n++
+		}
+	}
+	return n
+}
+
+var (
+	createIndexTextRe = regexp.MustCompile(`(?i)CREATE\s+(UNIQUE\s+)?INDEX`)
+	setNotNullTextRe  = regexp.MustCompile(`(?i)SET\s+NOT\s+NULL`)
+)
+
+// countMatching is the number of issued queries that match re.
+func (c *countingExecutor) countMatching(re *regexp.Regexp) int {
+	n := 0
+	for _, q := range c.issued() {
+		if re.MatchString(q) {
 			n++
 		}
 	}
@@ -382,7 +399,7 @@ func TestLockSafeDBSplitsMultiStatementStrings(t *testing.T) {
 
 // TestSchemaMethodsIssueNoAddColumnWhenUpToDate runs every Create* and Backfill*
 // method against a database that already holds the full schema and asserts that
-// no ADD COLUMN statement reaches the database.
+// no ADD COLUMN, CREATE INDEX or SET NOT NULL statement reaches the database.
 func TestSchemaMethodsIssueNoAddColumnWhenUpToDate(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer func() { _ = db.Close() }()
@@ -395,8 +412,12 @@ func TestSchemaMethodsIssueNoAddColumnWhenUpToDate(t *testing.T) {
 	}
 	for _, q := range counter.issued() {
 		assert.NotRegexp(t, addColumnTextRe, q, "an ADD COLUMN reached the database on an up-to-date schema")
+		assert.NotRegexp(t, createIndexTextRe, q, "a CREATE INDEX reached the database on an up-to-date schema")
+		assert.NotRegexp(t, setNotNullTextRe, q, "a SET NOT NULL reached the database on an up-to-date schema")
 	}
 	assert.Zero(t, counter.addColumnCount())
+	assert.Zero(t, counter.countMatching(createIndexTextRe))
+	assert.Zero(t, counter.countMatching(setNotNullTextRe))
 	assert.NotEmpty(t, counter.issued(), "the other statements still run")
 }
 
@@ -455,14 +476,7 @@ func addColumnLockCases() []struct {
 		{"cfgms_node_registry", s.CreateNodeRegistryTable},
 		{"cfgms_pending_registrations", s.CreatePendingRegistrationsTable},
 		{"cfgms_push_records", s.CreatePushRecordsTable},
-		{"cfgms_rate_counters", func(ctx context.Context, db schemaExecutor) error {
-			// CreateRateCountersTable also runs ALTER COLUMN ... SET NOT NULL, which takes
-			// the same lock and belongs to the next story in the epic. This case covers
-			// the ADD COLUMN statement it holds.
-			_, err := lockSafe(db).ExecContext(ctx,
-				"ALTER TABLE cfgms_rate_counters ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP WITH TIME ZONE;")
-			return err
-		}},
+		{"cfgms_rate_counters", s.CreateRateCountersTable},
 		{"cfgms_registration_tokens", both(s.BackfillRegistrationTokenIDs, s.CreateRegistrationTokensTable)},
 		{"cfgms_script_run_jobs", s.CreateScriptRunTables},
 		{"cfgms_script_runs", s.CreateScriptRunTables},
@@ -538,5 +552,319 @@ func TestReapplyAddColumnTakesNoConflictingLock(t *testing.T) {
 			defer cancel()
 			require.NoError(t, tc.run(ctx, db), "re-applying %s must not wait on the reader's lock", tc.table)
 		})
+	}
+}
+
+func TestParseCreateIndexIfNotExists(t *testing.T) {
+	tests := []struct {
+		name  string
+		stmt  string
+		index string
+		ok    bool
+	}{
+		{"plain", "CREATE INDEX IF NOT EXISTS idx_a ON t (a)", "idx_a", true},
+		{"unique", "CREATE UNIQUE INDEX IF NOT EXISTS idx_a ON t (a)", "idx_a", true},
+		{"concurrently", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_a ON t (a)", "idx_a", true},
+		{"lower case, tabs and newlines", "create\tunique\nindex if not exists  Idx_A\nON t(a)", "idx_a", true},
+		{"quoted name keeps case", `CREATE INDEX IF NOT EXISTS "Idx_A" ON t (a)`, "Idx_A", true},
+		{"quoted name with doubled quote", `CREATE INDEX IF NOT EXISTS "a""b" ON t (a)`, `a"b`, true},
+		{"leading comment", "-- why\nCREATE INDEX IF NOT EXISTS idx_a ON t (a)", "idx_a", true},
+		{"partial index", "CREATE INDEX IF NOT EXISTS idx_a ON t (a) WHERE a <> ''", "idx_a", true},
+		{"no IF NOT EXISTS", "CREATE INDEX idx_a ON t (a)", "", false},
+		{"not an index", "CREATE TABLE IF NOT EXISTS idx_a (a INT)", "", false},
+		{"drop index", "DROP INDEX IF EXISTS idx_a", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			index, ok := parseCreateIndexIfNotExists(tc.stmt)
+			assert.Equal(t, tc.ok, ok)
+			assert.Equal(t, tc.index, index)
+		})
+	}
+}
+
+func TestParseSetNotNull(t *testing.T) {
+	tests := []struct {
+		name          string
+		stmt          string
+		table, column string
+		ok            bool
+	}{
+		{"plain", "ALTER TABLE t ALTER COLUMN c SET NOT NULL", "t", "c", true},
+		{"trailing semicolon", "ALTER TABLE t ALTER COLUMN c SET NOT NULL;", "t", "c", true},
+		{"COLUMN keyword optional", "ALTER TABLE t ALTER c SET NOT NULL", "t", "c", true},
+		{"folds case", "ALTER TABLE T ALTER COLUMN C SET NOT NULL", "t", "c", true},
+		{"quoted keeps case", `ALTER TABLE "T" ALTER COLUMN "C" SET NOT NULL`, "T", "C", true},
+		{"leading comment", "-- why\nALTER TABLE t ALTER COLUMN c SET NOT NULL", "t", "c", true},
+		{"schema qualified table", "ALTER TABLE s.t ALTER COLUMN c SET NOT NULL", "", "", false},
+		{"ONLY", "ALTER TABLE ONLY t ALTER COLUMN c SET NOT NULL", "", "", false},
+		{"second action", "ALTER TABLE t ALTER COLUMN c SET NOT NULL, ALTER COLUMN d SET NOT NULL", "", "", false},
+		{"drop not null", "ALTER TABLE t ALTER COLUMN c DROP NOT NULL", "", "", false},
+		{"set default", "ALTER TABLE t ALTER COLUMN c SET DEFAULT 1", "", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			table, column, ok := parseSetNotNull(tc.stmt)
+			assert.Equal(t, tc.ok, ok)
+			assert.Equal(t, tc.table, table)
+			assert.Equal(t, tc.column, column)
+		})
+	}
+}
+
+func indexValidity(t *testing.T, db *sql.DB, index string) (exists, valid bool) {
+	t.Helper()
+	err := db.QueryRowContext(context.Background(),
+		`SELECT i.indisvalid FROM pg_index i
+			JOIN pg_class c ON c.oid = i.indexrelid
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname = current_schema() AND c.relname = $1`, index).Scan(&valid)
+	if err == sql.ErrNoRows {
+		return false, false
+	}
+	require.NoError(t, err)
+	return true, valid
+}
+
+func columnIsNullable(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+	var nullable string
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		`SELECT is_nullable FROM information_schema.columns
+			WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2`,
+		table, column).Scan(&nullable))
+	return nullable == "YES"
+}
+
+func TestLockSafeDBCreatesMissingIndex(t *testing.T) {
+	db := getTestDB(t)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+	lockSafeScratchTable(t, db, "lock_safe_idx", "id INT PRIMARY KEY, a INT, b INT")
+
+	counter := newCountingExecutor(db)
+	safe := lockSafe(counter)
+
+	_, err := safe.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS lock_safe_idx_a ON lock_safe_idx (a)")
+	require.NoError(t, err)
+	assert.Equal(t, 1, counter.countMatching(createIndexTextRe), "a missing index must reach the database")
+	exists, valid := indexValidity(t, db, "lock_safe_idx_a")
+	assert.True(t, exists, "the index must be created")
+	assert.True(t, valid)
+
+	// A unique index, a quoted mixed-case name and a partial index are created too.
+	_, err = safe.ExecContext(ctx, "CREATE UNIQUE INDEX IF NOT EXISTS lock_safe_idx_b ON lock_safe_idx (b) WHERE b IS NOT NULL")
+	require.NoError(t, err)
+	_, err = safe.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS "Lock_Safe_Idx_Mixed" ON lock_safe_idx (a, b)`)
+	require.NoError(t, err)
+	assert.Equal(t, 3, counter.countMatching(createIndexTextRe))
+	exists, _ = indexValidity(t, db, "lock_safe_idx_b")
+	assert.True(t, exists)
+	exists, _ = indexValidity(t, db, "Lock_Safe_Idx_Mixed")
+	assert.True(t, exists, "a quoted name keeps its case")
+
+	// Every index now exists and is valid: nothing further reaches the database,
+	// whatever the case of an unquoted name.
+	for _, q := range []string{
+		"CREATE INDEX IF NOT EXISTS lock_safe_idx_a ON lock_safe_idx (a)",
+		"CREATE INDEX IF NOT EXISTS LOCK_SAFE_IDX_A ON lock_safe_idx (a)",
+		"CREATE UNIQUE INDEX IF NOT EXISTS lock_safe_idx_b ON lock_safe_idx (b) WHERE b IS NOT NULL",
+		`CREATE INDEX IF NOT EXISTS "Lock_Safe_Idx_Mixed" ON lock_safe_idx (a, b)`,
+	} {
+		_, err := safe.ExecContext(ctx, q)
+		require.NoError(t, err, q)
+	}
+	assert.Equal(t, 3, counter.countMatching(createIndexTextRe), "an existing valid index must not be issued again")
+
+	t.Run("a missing index in a multi-statement string is kept in order", func(t *testing.T) {
+		counter := newCountingExecutor(db)
+		_, err := lockSafe(counter).ExecContext(ctx, `
+			CREATE INDEX IF NOT EXISTS lock_safe_idx_a ON lock_safe_idx (a);
+			ALTER TABLE lock_safe_idx ADD COLUMN IF NOT EXISTS c INT;
+			CREATE INDEX IF NOT EXISTS lock_safe_idx_c ON lock_safe_idx (c);`)
+		require.NoError(t, err)
+		issued := counter.issued()
+		require.Len(t, issued, 1)
+		assert.NotContains(t, issued[0], "lock_safe_idx_a")
+		assert.Less(t, strings.Index(issued[0], "ADD COLUMN"), strings.Index(issued[0], "lock_safe_idx_c"))
+		exists, valid := indexValidity(t, db, "lock_safe_idx_c")
+		assert.True(t, exists && valid)
+	})
+	t.Run("a statement error is returned", func(t *testing.T) {
+		_, err := safe.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS lock_safe_idx_bad ON lock_safe_idx (no_such_column)")
+		require.Error(t, err)
+	})
+	t.Run("a cancelled context fails the catalog read", func(t *testing.T) {
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+		_, err := safe.ExecContext(cancelled, "CREATE INDEX IF NOT EXISTS lock_safe_idx_a ON lock_safe_idx (a)")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to check for index")
+	})
+}
+
+func TestLockSafeDBSetsNotNullWhenNullable(t *testing.T) {
+	db := getTestDB(t)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+	lockSafeScratchTable(t, db, "lock_safe_nn", "id INT PRIMARY KEY, c INT, d INT NOT NULL DEFAULT 0")
+
+	counter := newCountingExecutor(db)
+	safe := lockSafe(counter)
+	require.True(t, columnIsNullable(t, db, "lock_safe_nn", "c"))
+
+	_, err := safe.ExecContext(ctx, "ALTER TABLE lock_safe_nn ALTER COLUMN c SET NOT NULL;")
+	require.NoError(t, err)
+	assert.Equal(t, 1, counter.countMatching(setNotNullTextRe), "a nullable column must be altered")
+	assert.False(t, columnIsNullable(t, db, "lock_safe_nn", "c"), "the column must become NOT NULL")
+
+	// Already NOT NULL, by this statement or by its definition: nothing is issued,
+	// and an unquoted name folds to lower case.
+	_, err = safe.ExecContext(ctx, "ALTER TABLE lock_safe_nn ALTER COLUMN c SET NOT NULL;")
+	require.NoError(t, err)
+	_, err = safe.ExecContext(ctx, "ALTER TABLE LOCK_SAFE_NN ALTER COLUMN D SET NOT NULL")
+	require.NoError(t, err)
+	_, err = safe.ExecContext(ctx, "ALTER TABLE lock_safe_nn ALTER COLUMN id SET NOT NULL")
+	require.NoError(t, err)
+	assert.Equal(t, 1, counter.countMatching(setNotNullTextRe), "an already NOT NULL column must not be issued again")
+
+	t.Run("a column that cannot take NOT NULL reports the error", func(t *testing.T) {
+		lockSafeScratchTable(t, db, "lock_safe_nn_rows", "id INT PRIMARY KEY, c INT")
+		_, err := db.ExecContext(ctx, "INSERT INTO lock_safe_nn_rows (id) VALUES (1)")
+		require.NoError(t, err)
+		_, err = lockSafe(newCountingExecutor(db)).ExecContext(ctx, "ALTER TABLE lock_safe_nn_rows ALTER COLUMN c SET NOT NULL")
+		require.Error(t, err)
+		assert.True(t, columnIsNullable(t, db, "lock_safe_nn_rows", "c"))
+	})
+	t.Run("a missing column is passed through and fails as before", func(t *testing.T) {
+		counter := newCountingExecutor(db)
+		_, err := lockSafe(counter).ExecContext(ctx, "ALTER TABLE lock_safe_nn ALTER COLUMN no_such SET NOT NULL")
+		require.Error(t, err)
+		assert.Equal(t, 1, counter.countMatching(setNotNullTextRe))
+	})
+	t.Run("a cancelled context fails the catalog read", func(t *testing.T) {
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+		_, err := safe.ExecContext(cancelled, "ALTER TABLE lock_safe_nn ALTER COLUMN c SET NOT NULL")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to check nullability")
+	})
+}
+
+func TestLockSafeDBInvalidIndexPassesThrough(t *testing.T) {
+	db := getTestDB(t)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+	lockSafeScratchTable(t, db, "lock_safe_invalid", "id INT PRIMARY KEY, a INT")
+
+	// A unique index built CONCURRENTLY over duplicate rows fails and leaves an
+	// INVALID index behind.
+	_, err := db.ExecContext(ctx, "INSERT INTO lock_safe_invalid (id, a) VALUES (1, 7), (2, 7)")
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, "CREATE UNIQUE INDEX CONCURRENTLY lock_safe_invalid_a ON lock_safe_invalid (a)")
+	require.Error(t, err, "duplicate rows must fail the concurrent build")
+	exists, valid := indexValidity(t, db, "lock_safe_invalid_a")
+	require.True(t, exists, "the failed build leaves its index behind")
+	require.False(t, valid, "the leftover index is invalid")
+
+	counter := newCountingExecutor(db)
+	stmt := "CREATE UNIQUE INDEX IF NOT EXISTS lock_safe_invalid_a ON lock_safe_invalid (a)"
+	_, err = lockSafe(counter).ExecContext(ctx, stmt)
+	require.NoError(t, err, "IF NOT EXISTS on the existing relation is a no-op for the database")
+	assert.Equal(t, []string{stmt}, counter.issued(), "an invalid index passes through byte for byte")
+
+	// Not re-created or repaired here: that is a deliberate rebuild.
+	_, valid = indexValidity(t, db, "lock_safe_invalid_a")
+	assert.False(t, valid)
+}
+
+var createTableNameRe = regexp.MustCompile(`(?is)CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+(` + sqlIdentPattern + `)`)
+
+// tablesCreatedBySchemaMethods maps each table to the schema methods that issue its
+// CREATE TABLE IF NOT EXISTS. It runs every method against an up-to-date database
+// and reads what reaches it, so a new table is covered without a hand-kept list.
+func tablesCreatedBySchemaMethods(t *testing.T, db *sql.DB) map[string][]namedSchemaMethod {
+	t.Helper()
+	out := map[string][]namedSchemaMethod{}
+	for _, m := range allSchemaMethods(NewDatabaseSchemas()) {
+		if m.name == "CreateAllTables" {
+			continue // it only calls the others
+		}
+		counter := newCountingExecutor(db)
+		require.NoError(t, m.run(context.Background(), counter), m.name)
+		seen := map[string]bool{}
+		for _, q := range counter.issued() {
+			for _, match := range createTableNameRe.FindAllStringSubmatch(q, -1) {
+				table := foldIdentifier(match[1])
+				if !seen[table] {
+					seen[table] = true
+					out[table] = append(out[table], m)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// TestReapplyTakesNoConflictingLock holds, for every table the schema creates, an
+// open transaction on a second connection that has read the table (ACCESS SHARE) and,
+// in a second variant, one that has written to it (ROW EXCLUSIVE, the lock a write
+// takes), then re-applies the schema methods that create that table under a 2s
+// deadline. Any statement that reaches the database and needs a conflicting lock
+// (ALTER TABLE ... ADD COLUMN or SET NOT NULL needs ACCESS EXCLUSIVE, CREATE INDEX
+// needs SHARE, which a writer blocks) queues behind the holder and the deadline
+// expires.
+func TestReapplyTakesNoConflictingLock(t *testing.T) {
+	db := setupTestDatabase(t)
+	defer func() { _ = db.Close() }()
+	createEverything(t, db)
+
+	creators := tablesCreatedBySchemaMethods(t, db)
+	var tables []string
+	for table := range creators {
+		tables = append(tables, table)
+	}
+	sort.Strings(tables)
+	require.GreaterOrEqual(t, len(tables), 40, "the schema methods create many tables; found %v", tables)
+
+	// Every table schemas.go creates with a literal name must be among them.
+	for _, st := range collectPackageStatements(t) {
+		if st.File != "schemas.go" {
+			continue
+		}
+		if m := createTableNameRe.FindStringSubmatch(st.Text); m != nil {
+			assert.Contains(t, creators, foldIdentifier(m[1]), "no schema method re-applies %s", m[1])
+		}
+	}
+
+	variants := []struct {
+		name string
+		hold func(ctx context.Context, tx *sql.Tx, quotedTable string) error
+	}{
+		{"read", func(ctx context.Context, tx *sql.Tx, quotedTable string) error {
+			var n int
+			return tx.QueryRowContext(ctx, "SELECT count(*) FROM "+quotedTable).Scan(&n)
+		}},
+		{"write", func(ctx context.Context, tx *sql.Tx, quotedTable string) error {
+			// Takes the ROW EXCLUSIVE table lock of any write without touching a row.
+			_, err := tx.ExecContext(ctx, "DELETE FROM "+quotedTable+" WHERE false")
+			return err
+		}},
+	}
+	for _, table := range tables {
+		for _, v := range variants {
+			t.Run(table+"/"+v.name, func(t *testing.T) {
+				holder, err := db.BeginTx(context.Background(), nil)
+				require.NoError(t, err)
+				defer func() { _ = holder.Rollback() }()
+				require.NoError(t, v.hold(context.Background(), holder, pq.QuoteIdentifier(table)))
+
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				for _, m := range creators[table] {
+					require.NoError(t, m.run(ctx, db), "re-applying %s for %s must not wait on the %s lock", m.name, table, v.name)
+				}
+			})
+		}
 	}
 }

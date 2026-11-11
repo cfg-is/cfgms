@@ -5,17 +5,29 @@ package database
 // Lock-safe schema re-apply (Epic #5978, zero-downtime schema evolution, N / N-1).
 //
 // Postgres takes the table lock for an ALTER TABLE before it evaluates IF NOT
-// EXISTS on an ADD COLUMN. Re-running such a statement against an up-to-date
-// table therefore queues an ACCESS EXCLUSIVE lock request behind any long
-// transaction on the table, and every query that arrives after that request
-// queues behind it. A controller node restarting in a rolling upgrade would stall
-// live traffic on each such table for no change at all.
+// EXISTS on an ADD COLUMN, and takes a SHARE lock for CREATE INDEX IF NOT EXISTS
+// and an ACCESS EXCLUSIVE lock for ALTER COLUMN ... SET NOT NULL before it checks
+// whether there is anything to do. Re-running such a statement against an
+// up-to-date table therefore queues a lock request behind any long transaction on
+// the table, and every query that arrives after that request queues behind it. A
+// controller node restarting in a rolling upgrade would stall live traffic on each
+// such table for no change at all.
 //
-// lockSafeDB wraps the executor the schema functions receive. Before it runs an
-// ALTER TABLE <t> ADD COLUMN IF NOT EXISTS <c> ... statement it reads
-// information_schema.columns, which takes no table lock, and issues nothing when
-// the column already exists. Every other statement passes through unchanged and in
-// order. When the column is missing the statement runs as before.
+// lockSafeDB wraps the executor the schema functions receive. Before it runs one
+// of these statements it reads the catalog, which takes no table lock, and issues
+// nothing when the statement would change nothing:
+//
+//   - ALTER TABLE <t> ADD COLUMN IF NOT EXISTS <c> ...: the column exists
+//     (information_schema.columns).
+//   - CREATE [UNIQUE] INDEX IF NOT EXISTS <i> ON <t> ...: the index exists and is
+//     valid (pg_index.indisvalid). An INVALID index is passed through unchanged:
+//     the fix for it is a deliberate rebuild, not something start-up decides.
+//   - ALTER TABLE <t> ALTER COLUMN <c> SET NOT NULL: the column is already NOT NULL
+//     (information_schema.columns).
+//
+// Every other statement passes through unchanged and in order. When the column,
+// index or constraint is missing the statement runs as before. Names come from the
+// statement text and reach the catalog as bind parameters.
 
 import (
 	"context"
@@ -41,8 +53,8 @@ type sqlDBSource interface {
 	sqlDB() *sql.DB
 }
 
-// lockSafeDB is a schemaExecutor that skips ADD COLUMN IF NOT EXISTS statements
-// whose column already exists.
+// lockSafeDB is a schemaExecutor that skips ADD COLUMN IF NOT EXISTS, CREATE INDEX
+// IF NOT EXISTS and SET NOT NULL statements that would change nothing.
 type lockSafeDB struct {
 	schemaExecutor
 }
@@ -93,8 +105,19 @@ const sqlIdentPattern = `"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*`
 var addColumnIfNotExistsRe = regexp.MustCompile(
 	`(?is)^ALTER\s+TABLE\s+(` + sqlIdentPattern + `)\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+(` + sqlIdentPattern + `)(?:\s|$)`)
 
-// ExecContext skips the ADD COLUMN IF NOT EXISTS statements of query whose column
-// exists and issues the rest in order. A query with arguments is a single
+// createIndexIfNotExistsRe matches CREATE [UNIQUE] INDEX [CONCURRENTLY] IF NOT
+// EXISTS <name>. An index name cannot be schema-qualified.
+var createIndexIfNotExistsRe = regexp.MustCompile(
+	`(?is)^CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?IF\s+NOT\s+EXISTS\s+(` + sqlIdentPattern + `)(?:\s|$)`)
+
+// alterColumnSetNotNullRe matches an unqualified single-action SET NOT NULL statement. A
+// schema-qualified table, ONLY, IF EXISTS or a trailing action do not match and so
+// pass through untouched.
+var alterColumnSetNotNullRe = regexp.MustCompile(
+	`(?is)^ALTER\s+TABLE\s+(` + sqlIdentPattern + `)\s+ALTER\s+(?:COLUMN\s+)?(` + sqlIdentPattern + `)\s+SET\s+NOT\s+NULL\s*;?\s*$`)
+
+// ExecContext skips the statements of query that would change nothing (see the
+// file comment) and issues the rest in order. A query with arguments is a single
 // statement and is passed through; so is a query from which nothing is skipped,
 // byte for byte.
 func (l *lockSafeDB) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
@@ -105,16 +128,13 @@ func (l *lockSafeDB) ExecContext(ctx context.Context, query string, args ...any)
 	kept := make([]string, 0, len(statements))
 	skipped := false
 	for _, stmt := range statements {
-		table, column, ok := parseAddColumnIfNotExists(stmt)
-		if ok {
-			exists, err := l.columnExists(ctx, table, column)
-			if err != nil {
-				return nil, err
-			}
-			if exists {
-				skipped = true
-				continue
-			}
+		noop, err := l.isNoop(ctx, stmt)
+		if err != nil {
+			return nil, err
+		}
+		if noop {
+			skipped = true
+			continue
 		}
 		kept = append(kept, stmt)
 	}
@@ -127,6 +147,53 @@ func (l *lockSafeDB) ExecContext(ctx context.Context, query string, args ...any)
 	// One call, as before, so the remaining statements keep the implicit
 	// transaction the simple query protocol gives a multi-statement string.
 	return l.schemaExecutor.ExecContext(ctx, strings.Join(kept, ";\n")+";")
+}
+
+// isNoop reports whether stmt is one of the statements lockSafeDB recognises and
+// the catalog shows it would change nothing. It reads the catalog only.
+func (l *lockSafeDB) isNoop(ctx context.Context, stmt string) (bool, error) {
+	if table, column, ok := parseAddColumnIfNotExists(stmt); ok {
+		return l.columnExists(ctx, table, column)
+	}
+	if index, ok := parseCreateIndexIfNotExists(stmt); ok {
+		return l.validIndexExists(ctx, index)
+	}
+	if table, column, ok := parseSetNotNull(stmt); ok {
+		return l.columnNotNull(ctx, table, column)
+	}
+	return false, nil
+}
+
+// validIndexExists reports whether index exists in the current schema and is
+// valid. An invalid index reports false so the statement passes through.
+func (l *lockSafeDB) validIndexExists(ctx context.Context, index string) (bool, error) {
+	var valid bool
+	err := l.schemaExecutor.QueryRowContext(ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_index i"+
+			" JOIN pg_class c ON c.oid = i.indexrelid"+
+			" JOIN pg_namespace n ON n.oid = c.relnamespace"+
+			" WHERE n.nspname = current_schema() AND c.relname = $1 AND i.indisvalid)",
+		index).Scan(&valid)
+	if err != nil {
+		return false, fmt.Errorf("failed to check for index %s: %w", index, err)
+	}
+	return valid, nil
+}
+
+// columnNotNull reports whether the column exists and is already NOT NULL. A
+// missing column reports false so the statement passes through and fails as it
+// always did.
+func (l *lockSafeDB) columnNotNull(ctx context.Context, table, column string) (bool, error) {
+	var notNull bool
+	err := l.schemaExecutor.QueryRowContext(ctx,
+		"SELECT EXISTS (SELECT 1 FROM information_schema.columns"+
+			" WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2"+
+			" AND is_nullable = 'NO')",
+		table, column).Scan(&notNull)
+	if err != nil {
+		return false, fmt.Errorf("failed to check nullability of %s.%s: %w", table, column, err)
+	}
+	return notNull, nil
 }
 
 // columnExists reads the catalog only; it takes no lock on the table.
@@ -156,6 +223,26 @@ func parseAddColumnIfNotExists(stmt string) (table, column string, ok bool) {
 	// (ADD COLUMN IF NOT EXISTS a INT, ADD COLUMN IF NOT EXISTS b INT), which one
 	// catalog lookup cannot stand in for.
 	if hasTopLevelComma(body) {
+		return "", "", false
+	}
+	return foldIdentifier(m[1]), foldIdentifier(m[2]), true
+}
+
+// parseCreateIndexIfNotExists reports whether stmt is CREATE [UNIQUE] INDEX IF NOT
+// EXISTS <i> ... and returns the index name as the catalog stores it.
+func parseCreateIndexIfNotExists(stmt string) (index string, ok bool) {
+	m := createIndexIfNotExistsRe.FindStringSubmatch(trimLeadingSpaceAndComments(stmt))
+	if m == nil {
+		return "", false
+	}
+	return foldIdentifier(m[1]), true
+}
+
+// parseSetNotNull reports whether stmt is ALTER TABLE <t> ALTER COLUMN <c> SET NOT
+// NULL and returns the table and column as the catalog stores them.
+func parseSetNotNull(stmt string) (table, column string, ok bool) {
+	m := alterColumnSetNotNullRe.FindStringSubmatch(trimLeadingSpaceAndComments(stmt))
+	if m == nil {
 		return "", "", false
 	}
 	return foldIdentifier(m[1]), foldIdentifier(m[2]), true
