@@ -11,6 +11,17 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// Tenant-isolated tables. These constants are the only table names handed to
+// applyTenantRLS (rls_apply.go).
+const (
+	tableSessions          = "sessions"
+	tableStewardRecords    = "steward_records"
+	tableCommandRecords    = "command_records"
+	tableRolloutRecords    = "cfgms_rollout_records"
+	tableUpgradeRecords    = "cfgms_upgrade_records"
+	tableSessionTokenStore = "session_token_store"
+)
+
 // DatabaseSchemas manages database schema creation and migrations
 type DatabaseSchemas struct{}
 
@@ -1517,38 +1528,7 @@ func (s DatabaseSchemas) CreateSessionsTable(ctx context.Context, db *sql.DB) er
 			return fmt.Errorf("failed to create sessions index: %w", err)
 		}
 	}
-	rls := []string{
-		`ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;`,
-		`ALTER TABLE sessions FORCE ROW LEVEL SECURITY;`,
-		`DROP POLICY IF EXISTS tenant_isolation_policy ON sessions;`,
-		`DROP POLICY IF EXISTS rls_read   ON sessions;`,
-		`DROP POLICY IF EXISTS rls_write  ON sessions;`,
-		`DROP POLICY IF EXISTS rls_update ON sessions;`,
-		`DROP POLICY IF EXISTS rls_delete ON sessions;`,
-		// SELECT: permissive when no tenant context (auth lookups), filtered when context is set.
-		`CREATE POLICY rls_read ON sessions FOR SELECT USING (
-			coalesce(current_setting('app.current_tenant', true), '') = ''
-			OR tenant_id = current_setting('app.current_tenant', true)
-		);`,
-		// INSERT: tenant must be set in the transaction before inserting.
-		`CREATE POLICY rls_write ON sessions FOR INSERT WITH CHECK (
-			tenant_id = current_setting('app.current_tenant', true)
-		);`,
-		// UPDATE/DELETE (Issue #4321): the target row must belong to the caller's
-		// current tenant, and an UPDATE may not move a row to a different tenant --
-		// an unset tenant matches nothing (fail closed), not every row.
-		`CREATE POLICY rls_update ON sessions FOR UPDATE
-			USING (tenant_id = current_setting('app.current_tenant', true))
-			WITH CHECK (tenant_id = current_setting('app.current_tenant', true));`,
-		`CREATE POLICY rls_delete ON sessions FOR DELETE
-			USING (tenant_id = current_setting('app.current_tenant', true));`,
-	}
-	for _, stmt := range rls {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("failed to configure sessions RLS: %w", err)
-		}
-	}
-	return nil
+	return applyTenantRLS(ctx, db, tableSessions, standardTenantPolicies())
 }
 
 // CreateStewardRecordsTable creates the steward_records table with RLS.
@@ -1617,14 +1597,13 @@ func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db *sql.
 			return fmt.Errorf("failed to create steward_records index: %w", err)
 		}
 	}
-	rls := []string{
-		`ALTER TABLE steward_records ENABLE ROW LEVEL SECURITY;`,
-		`ALTER TABLE steward_records FORCE ROW LEVEL SECURITY;`,
-		`DROP POLICY IF EXISTS tenant_isolation_policy ON steward_records;`,
-		`DROP POLICY IF EXISTS rls_read   ON steward_records;`,
-		`DROP POLICY IF EXISTS rls_write  ON steward_records;`,
-		`DROP POLICY IF EXISTS rls_update ON steward_records;`,
-		`DROP POLICY IF EXISTS rls_delete ON steward_records;`,
+	return applyTenantRLS(ctx, db, tableStewardRecords, stewardRecordsPolicies())
+}
+
+// stewardRecordsPolicies is the steward_records policy set. It differs from
+// standardTenantPolicies in the app.tenant_move_target clauses.
+func stewardRecordsPolicies() []tenantRLSPolicy {
+	return []tenantRLSPolicy{
 		// SELECT: permissive when no tenant context (fleet management), filtered when
 		// context is set. The app.tenant_move_target clause exists for
 		// UpdateStewardTenant (Issue #4321): an UPDATE whose WHERE reads the row also
@@ -1633,16 +1612,18 @@ func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db *sql.
 		// security policy". The clause admits exactly one extra tenant, the one the
 		// transaction named as its move target -- no wider than setting
 		// app.current_tenant to that tenant, which any session can already do.
-		`CREATE POLICY rls_read ON steward_records FOR SELECT USING (
-			coalesce(current_setting('app.current_tenant', true), '') = ''
+		{
+			Name: "rls_read", Command: "SELECT",
+			Using: `coalesce(current_setting('app.current_tenant', true), '') = ''
 			OR tenant_id = current_setting('app.current_tenant', true)
 			OR (coalesce(current_setting('app.tenant_move_target', true), '') <> ''
-				AND tenant_id = current_setting('app.tenant_move_target', true))
-		);`,
+				AND tenant_id = current_setting('app.tenant_move_target', true))`,
+		},
 		// INSERT: tenant must be set in the transaction before inserting.
-		`CREATE POLICY rls_write ON steward_records FOR INSERT WITH CHECK (
-			tenant_id = current_setting('app.current_tenant', true)
-		);`,
+		{
+			Name: "rls_write", Command: "INSERT",
+			WithCheck: `tenant_id = current_setting('app.current_tenant', true)`,
+		},
 		// UPDATE (Issue #4321): the target row must belong to the caller's current
 		// tenant -- an unset tenant matches nothing (fail closed), not every row.
 		// WITH CHECK allows a row to keep its own tenant, OR to move to exactly the
@@ -1659,22 +1640,18 @@ func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db *sql.
 		// TestRLSWritePolicy_StewardRecordsTenantMove_IntentionallyAllowed,
 		// TestRLSWritePolicy_StewardRecordsTenantMove_UnauthorizedRefused and
 		// TestRLSWritePolicy_StewardRecordsTenantMove_NonTargetTenantRefused.
-		`CREATE POLICY rls_update ON steward_records FOR UPDATE
-			USING (tenant_id = current_setting('app.current_tenant', true))
-			WITH CHECK (
-				tenant_id = current_setting('app.current_tenant', true)
+		{
+			Name: "rls_update", Command: "UPDATE",
+			Using: `tenant_id = current_setting('app.current_tenant', true)`,
+			WithCheck: `tenant_id = current_setting('app.current_tenant', true)
 				OR (coalesce(current_setting('app.tenant_move_target', true), '') <> ''
-					AND tenant_id = current_setting('app.tenant_move_target', true))
-			);`,
-		`CREATE POLICY rls_delete ON steward_records FOR DELETE
-			USING (tenant_id = current_setting('app.current_tenant', true));`,
+					AND tenant_id = current_setting('app.tenant_move_target', true))`,
+		},
+		{
+			Name: "rls_delete", Command: "DELETE",
+			Using: `tenant_id = current_setting('app.current_tenant', true)`,
+		},
 	}
-	for _, stmt := range rls {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("failed to configure steward_records RLS: %w", err)
-		}
-	}
-	return nil
 }
 
 // CreateCommandRecordsTable creates the command_records table with RLS.
@@ -1723,38 +1700,7 @@ func (s DatabaseSchemas) CreateCommandRecordsTable(ctx context.Context, db *sql.
 			return fmt.Errorf("failed to create command_records index: %w", err)
 		}
 	}
-	rls := []string{
-		`ALTER TABLE command_records ENABLE ROW LEVEL SECURITY;`,
-		`ALTER TABLE command_records FORCE ROW LEVEL SECURITY;`,
-		`DROP POLICY IF EXISTS tenant_isolation_policy ON command_records;`,
-		`DROP POLICY IF EXISTS rls_read   ON command_records;`,
-		`DROP POLICY IF EXISTS rls_write  ON command_records;`,
-		`DROP POLICY IF EXISTS rls_update ON command_records;`,
-		`DROP POLICY IF EXISTS rls_delete ON command_records;`,
-		// SELECT: permissive when no tenant context, filtered when context is set.
-		`CREATE POLICY rls_read ON command_records FOR SELECT USING (
-			coalesce(current_setting('app.current_tenant', true), '') = ''
-			OR tenant_id = current_setting('app.current_tenant', true)
-		);`,
-		// INSERT: tenant must be set in the transaction before inserting.
-		`CREATE POLICY rls_write ON command_records FOR INSERT WITH CHECK (
-			tenant_id = current_setting('app.current_tenant', true)
-		);`,
-		// UPDATE/DELETE (Issue #4321): the target row must belong to the caller's
-		// current tenant, and an UPDATE may not move a row to a different tenant --
-		// an unset tenant matches nothing (fail closed), not every row.
-		`CREATE POLICY rls_update ON command_records FOR UPDATE
-			USING (tenant_id = current_setting('app.current_tenant', true))
-			WITH CHECK (tenant_id = current_setting('app.current_tenant', true));`,
-		`CREATE POLICY rls_delete ON command_records FOR DELETE
-			USING (tenant_id = current_setting('app.current_tenant', true));`,
-	}
-	for _, stmt := range rls {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("failed to configure command_records RLS: %w", err)
-		}
-	}
-	return nil
+	return applyTenantRLS(ctx, db, tableCommandRecords, standardTenantPolicies())
 }
 
 // CreateRolloutRecordsTable creates the cfgms_rollout_records table with RLS
@@ -1781,35 +1727,13 @@ func (s DatabaseSchemas) CreateRolloutRecordsTable(ctx context.Context, db *sql.
 		);`,
 		"CREATE INDEX IF NOT EXISTS idx_rollout_records_tenant_id ON cfgms_rollout_records(tenant_id);",
 		"CREATE INDEX IF NOT EXISTS idx_rollout_records_in_progress ON cfgms_rollout_records(owner_node_id) WHERE status = 'in-progress';",
-		`ALTER TABLE cfgms_rollout_records ENABLE ROW LEVEL SECURITY;`,
-		`ALTER TABLE cfgms_rollout_records FORCE ROW LEVEL SECURITY;`,
-		`DROP POLICY IF EXISTS rls_read   ON cfgms_rollout_records;`,
-		`DROP POLICY IF EXISTS rls_write  ON cfgms_rollout_records;`,
-		`DROP POLICY IF EXISTS rls_update ON cfgms_rollout_records;`,
-		`DROP POLICY IF EXISTS rls_delete ON cfgms_rollout_records;`,
-		// SELECT: permissive when no tenant context (the by-ID read and the
-		// cross-tenant startup sweep), filtered when a context is set.
-		`CREATE POLICY rls_read ON cfgms_rollout_records FOR SELECT USING (
-			coalesce(current_setting('app.current_tenant', true), '') = ''
-			OR tenant_id = current_setting('app.current_tenant', true)
-		);`,
-		// INSERT/UPDATE/DELETE: the row must belong to the caller's current
-		// tenant; an unset tenant matches nothing (fail closed).
-		`CREATE POLICY rls_write ON cfgms_rollout_records FOR INSERT WITH CHECK (
-			tenant_id = current_setting('app.current_tenant', true)
-		);`,
-		`CREATE POLICY rls_update ON cfgms_rollout_records FOR UPDATE
-			USING (tenant_id = current_setting('app.current_tenant', true))
-			WITH CHECK (tenant_id = current_setting('app.current_tenant', true));`,
-		`CREATE POLICY rls_delete ON cfgms_rollout_records FOR DELETE
-			USING (tenant_id = current_setting('app.current_tenant', true));`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("failed to create cfgms_rollout_records table: %w", err)
 		}
 	}
-	return nil
+	return applyTenantRLS(ctx, db, tableRolloutRecords, standardTenantPolicies())
 }
 
 // CreateUpgradeRecordsTable creates the cfgms_upgrade_records table with RLS
@@ -1842,35 +1766,13 @@ func (s DatabaseSchemas) CreateUpgradeRecordsTable(ctx context.Context, db *sql.
 		);`,
 		"CREATE INDEX IF NOT EXISTS idx_upgrade_records_steward_created ON cfgms_upgrade_records(steward_id, created_at DESC);",
 		"CREATE INDEX IF NOT EXISTS idx_upgrade_records_tenant_created ON cfgms_upgrade_records(tenant_id, created_at DESC);",
-		`ALTER TABLE cfgms_upgrade_records ENABLE ROW LEVEL SECURITY;`,
-		`ALTER TABLE cfgms_upgrade_records FORCE ROW LEVEL SECURITY;`,
-		`DROP POLICY IF EXISTS rls_read   ON cfgms_upgrade_records;`,
-		`DROP POLICY IF EXISTS rls_write  ON cfgms_upgrade_records;`,
-		`DROP POLICY IF EXISTS rls_update ON cfgms_upgrade_records;`,
-		`DROP POLICY IF EXISTS rls_delete ON cfgms_upgrade_records;`,
-		// SELECT: permissive when no tenant context (the by-ID read), filtered
-		// when a context is set.
-		`CREATE POLICY rls_read ON cfgms_upgrade_records FOR SELECT USING (
-			coalesce(current_setting('app.current_tenant', true), '') = ''
-			OR tenant_id = current_setting('app.current_tenant', true)
-		);`,
-		// INSERT/UPDATE/DELETE: the row must belong to the caller's current
-		// tenant; an unset tenant matches nothing (fail closed).
-		`CREATE POLICY rls_write ON cfgms_upgrade_records FOR INSERT WITH CHECK (
-			tenant_id = current_setting('app.current_tenant', true)
-		);`,
-		`CREATE POLICY rls_update ON cfgms_upgrade_records FOR UPDATE
-			USING (tenant_id = current_setting('app.current_tenant', true))
-			WITH CHECK (tenant_id = current_setting('app.current_tenant', true));`,
-		`CREATE POLICY rls_delete ON cfgms_upgrade_records FOR DELETE
-			USING (tenant_id = current_setting('app.current_tenant', true));`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("failed to create cfgms_upgrade_records table: %w", err)
 		}
 	}
-	return nil
+	return applyTenantRLS(ctx, db, tableUpgradeRecords, standardTenantPolicies())
 }
 
 // BackfillCommandRecordsDeliveryStatus adds the outbox delivery-lifecycle columns
@@ -1961,35 +1863,7 @@ func (s DatabaseSchemas) CreateSessionTokenStoreTable(ctx context.Context, db *s
 			return fmt.Errorf("failed to create session_token_store index: %w", err)
 		}
 	}
-	rls := []string{
-		`ALTER TABLE session_token_store ENABLE ROW LEVEL SECURITY;`,
-		`ALTER TABLE session_token_store FORCE ROW LEVEL SECURITY;`,
-		`DROP POLICY IF EXISTS rls_read   ON session_token_store;`,
-		`DROP POLICY IF EXISTS rls_write  ON session_token_store;`,
-		`DROP POLICY IF EXISTS rls_update ON session_token_store;`,
-		`DROP POLICY IF EXISTS rls_delete ON session_token_store;`,
-		`CREATE POLICY rls_read ON session_token_store FOR SELECT USING (
-			coalesce(current_setting('app.current_tenant', true), '') = ''
-			OR tenant_id = current_setting('app.current_tenant', true)
-		);`,
-		`CREATE POLICY rls_write ON session_token_store FOR INSERT WITH CHECK (
-			tenant_id = current_setting('app.current_tenant', true)
-		);`,
-		// UPDATE/DELETE (Issue #4321): the target row must belong to the caller's
-		// current tenant, and an UPDATE may not move a row to a different tenant --
-		// an unset tenant matches nothing (fail closed), not every row.
-		`CREATE POLICY rls_update ON session_token_store FOR UPDATE
-			USING (tenant_id = current_setting('app.current_tenant', true))
-			WITH CHECK (tenant_id = current_setting('app.current_tenant', true));`,
-		`CREATE POLICY rls_delete ON session_token_store FOR DELETE
-			USING (tenant_id = current_setting('app.current_tenant', true));`,
-	}
-	for _, stmt := range rls {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("failed to configure session_token_store RLS: %w", err)
-		}
-	}
-	return nil
+	return applyTenantRLS(ctx, db, tableSessionTokenStore, standardTenantPolicies())
 }
 
 // BackfillSessionTokenStoreContinuity adds the device-continuity columns to an existing
