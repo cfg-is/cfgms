@@ -8,6 +8,7 @@ package patch_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -372,4 +373,86 @@ func TestWindowsUpdateManager_ConcurrentOperations(t *testing.T) {
 	for err := range errors {
 		assert.NoError(t, err, "Concurrent operations should not fail")
 	}
+}
+
+// TestWindowsUpdateManager_ListInstalledPatches_HonoursContext verifies that the
+// installed-update search is bounded by the caller's context: an already-cancelled
+// context and an already-elapsed deadline each surface as an error wrapping the
+// context error instead of being ignored.
+func TestWindowsUpdateManager_ListInstalledPatches_HonoursContext(t *testing.T) {
+	manager, err := patch.NewWindowsUpdateManager()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+
+	const bound = 30 * time.Second
+
+	t.Run("cancelled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		start := time.Now()
+		patches, err := manager.ListInstalledPatches(ctx)
+		require.Error(t, err, "cancelled context must fail the search")
+		assert.True(t, errors.Is(err, context.Canceled), "error must wrap context.Canceled, got: %v", err)
+		assert.Nil(t, patches)
+		assert.Less(t, time.Since(start), bound)
+	})
+
+	t.Run("elapsed deadline", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+
+		start := time.Now()
+		patches, err := manager.ListInstalledPatches(ctx)
+		require.Error(t, err, "elapsed deadline must fail the search")
+		assert.True(t, errors.Is(err, context.DeadlineExceeded), "error must wrap context.DeadlineExceeded, got: %v", err)
+		assert.Nil(t, patches)
+		assert.Less(t, time.Since(start), bound)
+	})
+}
+
+// TestWindowsUpdateManager_ListAvailablePatches_HonoursContext verifies the
+// available-updates search is bounded by the caller's context.
+func TestWindowsUpdateManager_ListAvailablePatches_HonoursContext(t *testing.T) {
+	manager, err := patch.NewWindowsUpdateManager()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	patches, err := manager.ListAvailablePatches(ctx, "all")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.Canceled), "error must wrap context.Canceled, got: %v", err)
+	assert.Nil(t, patches)
+}
+
+// TestWindowsUpdateManager_InstallPatches_HonoursContext verifies the search
+// phase of InstallPatches is bounded by the caller's context.
+func TestWindowsUpdateManager_InstallPatches_HonoursContext(t *testing.T) {
+	manager, err := patch.NewWindowsUpdateManager()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = manager.InstallPatches(ctx, &patch.Config{PatchType: "all", TestMode: true})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.Canceled), "error must wrap context.Canceled, got: %v", err)
+}
+
+// TestWindowsUpdateManager_GetLastPatchDate_HonoursContext verifies the history
+// query refuses to start on an already-cancelled context.
+func TestWindowsUpdateManager_GetLastPatchDate_HonoursContext(t *testing.T) {
+	manager, err := patch.NewWindowsUpdateManager()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = manager.GetLastPatchDate(ctx)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.Canceled), "error must wrap context.Canceled, got: %v", err)
 }

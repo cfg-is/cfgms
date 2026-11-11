@@ -88,6 +88,70 @@ func (w *WindowsUpdateManager) Close() error {
 	return nil
 }
 
+// searchPollInterval is how often searchWithContext checks a running search job
+// for completion and the caller's context for cancellation.
+const searchPollInterval = 100 * time.Millisecond
+
+// searchWithContext runs an IUpdateSearcher search bounded by ctx. It uses the
+// asynchronous BeginSearch/EndSearch pair and polls ISearchJob.IsCompleted on a
+// ticker so a cancelled context or elapsed deadline is observed promptly. On
+// cancellation the job is aborted and cleaned up, and the returned error wraps
+// ctx.Err(). The caller owns the returned ISearchResult variant and must Clear it.
+func searchWithContext(ctx context.Context, searcher *ole.IDispatch, criteria string) (*ole.VARIANT, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("search not started: %w", err)
+	}
+
+	// A Go nil is marshalled as VT_NULL, which the WUA API accepts for the
+	// onCompleted and state arguments (no callback object is needed).
+	jobVariant, err := oleutil.CallMethod(searcher, "BeginSearch", criteria, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin search: %w", err)
+	}
+	defer func() { _ = jobVariant.Clear() }()
+	job := jobVariant.ToIDispatch()
+
+	ticker := time.NewTicker(searchPollInterval)
+	defer ticker.Stop()
+
+	for {
+		completedVariant, err := oleutil.GetProperty(job, "IsCompleted")
+		if err != nil {
+			abortSearchJob(job)
+			return nil, fmt.Errorf("failed to poll search job: %w", err)
+		}
+		completed, _ := completedVariant.Value().(bool)
+		_ = completedVariant.Clear()
+		if completed {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			abortSearchJob(job)
+			return nil, fmt.Errorf("search aborted: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+
+	searchResult, err := oleutil.CallMethod(searcher, "EndSearch", job)
+	if err != nil {
+		abortSearchJob(job)
+		return nil, fmt.Errorf("failed to end search: %w", err)
+	}
+	// The job is finished; release its resources.
+	_, _ = oleutil.CallMethod(job, "CleanUp")
+	return searchResult, nil
+}
+
+// abortSearchJob asks a running ISearchJob to stop and releases its resources.
+// Failures are ignored: the job is being abandoned and the caller already holds
+// the error that matters.
+func abortSearchJob(job *ole.IDispatch) {
+	_, _ = oleutil.CallMethod(job, "RequestAbort")
+	_, _ = oleutil.CallMethod(job, "CleanUp")
+}
+
 // ListAvailablePatches returns available patches using Windows Update COM API
 func (w *WindowsUpdateManager) ListAvailablePatches(ctx context.Context, patchType string) ([]PatchInfo, error) {
 	// Create IUpdateSearcher
@@ -103,8 +167,8 @@ func (w *WindowsUpdateManager) ListAvailablePatches(ctx context.Context, patchTy
 		return nil, fmt.Errorf("unsupported patch type %q: %w", patchType, err)
 	}
 
-	// Search for updates
-	searchResult, err := oleutil.CallMethod(searcher.ToIDispatch(), "Search", criteria)
+	// Search for updates (online, bounded by ctx)
+	searchResult, err := searchWithContext(ctx, searcher.ToIDispatch(), criteria)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search for updates: %w", err)
 	}
@@ -152,9 +216,16 @@ func (w *WindowsUpdateManager) ListInstalledPatches(ctx context.Context) ([]Patc
 	}
 	defer func() { _ = searcher.Clear() }()
 
-	// Search for installed updates
+	// Installed updates are answered from the local update store: keep the
+	// searcher offline so the query never waits on the Windows Update service
+	// or network.
+	if _, err := oleutil.PutProperty(searcher.ToIDispatch(), "Online", false); err != nil {
+		return nil, fmt.Errorf("failed to set searcher offline: %w", err)
+	}
+
+	// Search for installed updates (bounded by ctx)
 	criteria := "IsInstalled=1"
-	searchResult, err := oleutil.CallMethod(searcher.ToIDispatch(), "Search", criteria)
+	searchResult, err := searchWithContext(ctx, searcher.ToIDispatch(), criteria)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search for installed updates: %w", err)
 	}
@@ -209,8 +280,8 @@ func (w *WindowsUpdateManager) InstallPatches(ctx context.Context, config *Confi
 		return fmt.Errorf("unsupported patch type %q: %w", config.PatchType, err)
 	}
 
-	// Search for updates
-	searchResult, err := oleutil.CallMethod(searcher.ToIDispatch(), "Search", criteria)
+	// Search for updates (online, bounded by ctx)
+	searchResult, err := searchWithContext(ctx, searcher.ToIDispatch(), criteria)
 	if err != nil {
 		return fmt.Errorf("failed to search for updates: %w", err)
 	}
@@ -241,6 +312,12 @@ func (w *WindowsUpdateManager) InstallPatches(ctx context.Context, config *Confi
 		return nil // No updates to install
 	}
 
+	return w.downloadAndInstall(updatesToInstall, config)
+}
+
+// downloadAndInstall downloads and installs the already-filtered updates. In
+// TestMode the downloader and installer are configured but not executed.
+func (w *WindowsUpdateManager) downloadAndInstall(updatesToInstall *ole.IDispatch, config *Config) error {
 	// Create IUpdateDownloader
 	downloader, err := oleutil.CallMethod(w.session, "CreateUpdateDownloader")
 	if err != nil {
@@ -314,6 +391,12 @@ func (w *WindowsUpdateManager) CheckRebootRequired(ctx context.Context) (bool, e
 
 // GetLastPatchDate returns the date of the last successful patch operation
 func (w *WindowsUpdateManager) GetLastPatchDate(ctx context.Context) (time.Time, error) {
+	// The history query reads local state, but never start it for a caller that
+	// has already given up.
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, fmt.Errorf("update history query not started: %w", err)
+	}
+
 	// Get update history
 	historyCount := 1 // Get just the most recent update
 
