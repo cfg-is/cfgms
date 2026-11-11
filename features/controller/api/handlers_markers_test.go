@@ -268,14 +268,41 @@ func TestMarkerListsMarkerRowsAndControllerStart(t *testing.T) {
 	_, none := f.list(t, "kind=chaos_end")
 	assert.Empty(t, none)
 
-	// since and until bound the window on the row time.
+	// since and until bound the window on the row time, inclusive at both ends. The audit
+	// manager stamps each row with the wall clock, so on a coarse clock consecutive rows can
+	// share a time. The expected window is therefore derived from the returned times rather
+	// than from fixed row counts.
+	kinds := func(rows []markerRecord) []string {
+		out := make([]string, len(rows))
+		for i, m := range rows {
+			out[i] = m.Kind
+		}
+		return out
+	}
 	cut := markers[1].Time
+	var wantAfter, wantBefore []markerRecord
+	for _, m := range markers {
+		if !m.Time.Before(cut) {
+			wantAfter = append(wantAfter, m)
+		}
+		if !m.Time.After(cut) {
+			wantBefore = append(wantBefore, m)
+		}
+	}
+	require.NotEmpty(t, wantAfter)
+	require.NotEmpty(t, wantBefore)
+
 	_, after := f.list(t, "since="+cut.Format(time.RFC3339Nano))
-	require.Len(t, after, 2)
-	assert.Equal(t, "rollout_start", after[0].Kind)
+	assert.Equal(t, kinds(wantAfter), kinds(after), "since is inclusive of the boundary row")
 	_, before := f.list(t, "until="+cut.Format(time.RFC3339Nano))
-	require.Len(t, before, 2)
-	assert.Equal(t, "rollout_start", before[1].Kind)
+	assert.Equal(t, kinds(wantBefore), kinds(before), "until is inclusive of the boundary row")
+
+	// A bound one nanosecond outside the recorded rows excludes all of them, whatever the
+	// clock resolution.
+	_, past := f.list(t, "since="+markers[2].Time.Add(time.Nanosecond).Format(time.RFC3339Nano))
+	assert.Empty(t, past, "since after the newest row")
+	_, preceding := f.list(t, "until="+markers[0].Time.Add(-time.Nanosecond).Format(time.RFC3339Nano))
+	assert.Empty(t, preceding, "until before the oldest row")
 }
 
 func TestMarkerExcludesTenantScopedRolloutAudit(t *testing.T) {
