@@ -542,12 +542,14 @@ func issueAdminBundle(bundlePath string, cfg *config.Config, certManager *cert.M
 	//
 	// Deliberately NOT the root-scope marker (pkg/cert's SetRootScopeMarker; see its own
 	// architecture allow-list test) — ADR-025 Amendment 1 A1.3, founder decision
-	// 2026-08-09, PR #3215. This is the system admin bundle, the deployment's only admin
-	// credential on every single-root and on-prem install. Marking it would subject that
-	// admin to the ADR-025 Decision 1 root<->MSP boundary and lock it out of everything
-	// below "root" with no way to grant itself a crossing — a lockout, not hardening.
-	// Unmarked stays the default everywhere; the opt-in lives only on the named-operator
-	// path (IssueAdminBundle in admin_bundle.go, via bootstrap-admin --root-scoped).
+	// 2026-08-09, PR #3215: the marker stays an opt-in on the named-operator path
+	// (IssueAdminBundle in admin_bundle.go, via bootstrap-admin --root-scoped).
+	//
+	// The bound account is root-scope all the same (BindAdminCertificate), and for an
+	// account-bound principal GlobalScope, not the marker, decides the root<->MSP crossing
+	// boundary (ADR-025 Amendment 5). The system bundle therefore reaches the root tenant
+	// directly and a tenant below root through a grant or break-glass crossing, like any
+	// root-scope operator; the marker is not needed for either.
 	//
 	// ADR-025 Amendment 3: the certificate is bound to the system administrator account
 	// before the bundle is written; an unbound certificate confers nothing.

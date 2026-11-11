@@ -34,6 +34,11 @@ certificate is not bound — one issued before binding existed, or one whose
 account was deleted — still authenticates, but every request is refused with
 `403 ADMIN_CERT_UNBOUND` and a message naming `bootstrap-admin`.
 
+The account `bootstrap-admin` binds to is a root-scope account, so the bundle is
+subject to the root<->MSP crossing boundary (ADR-025 Amendment 5): it reaches the
+root tenant directly, and a tenant below root only through an active grant or
+break-glass crossing (`cfg tenant grant`, `cfg tenant break-glass`).
+
 > Signer verification on both the steward (`features/steward/commands/execute_script.go`)
 > and the controller (`features/controller/api/handlers_runs.go`) requires the
 > payload-signing marker (`cert.HasPayloadSigningMarker`); an admin-marked bundle
