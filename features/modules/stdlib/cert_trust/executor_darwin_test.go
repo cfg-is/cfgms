@@ -177,7 +177,7 @@ func TestNewExecutor_StagingBase(t *testing.T) {
 // directory are removed when the security command fails (invalid DER is
 // rejected by security add-trusted-cert).
 func TestDarwinInstall_FailureLeavesNoStagedFile(t *testing.T) {
-	base := t.TempDir()
+	base := privateStagingBase(t)
 	e := &darwinExecutor{tmpDir: base}
 
 	if err := e.install([]byte("not a certificate")); err == nil {

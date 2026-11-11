@@ -12,6 +12,18 @@ import (
 // legacyStagedName is the predictable name the old darwin executor used.
 func legacyStagedName(fp string) string { return "cfgms-cert-install-" + fp + ".pem" }
 
+// privateStagingBase returns a temporary directory with an explicit 0o700 mode.
+// t.TempDir creates directories as 0777 &^ umask, so under a umask such as 0002
+// the result is group-writable and checkStagingBase correctly refuses it.
+func privateStagingBase(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatalf("chmod staging base: %v", err)
+	}
+	return base
+}
+
 func TestStageForTrustCommand_WritesExactPEM(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "staging")
 	want := []byte("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")
@@ -32,7 +44,7 @@ func TestStageForTrustCommand_WritesExactPEM(t *testing.T) {
 }
 
 func TestStageForTrustCommand_PreexistingFileAtOldNameUntouched(t *testing.T) {
-	base := t.TempDir()
+	base := privateStagingBase(t)
 	_, der := generateTestCAPEM(t)
 	old := filepath.Join(base, legacyStagedName(certFingerprint(der)))
 	if err := os.WriteFile(old, []byte("planted"), 0o600); err != nil {
@@ -58,7 +70,7 @@ func TestStageForTrustCommand_PreexistingFileAtOldNameUntouched(t *testing.T) {
 }
 
 func TestStageForTrustCommand_UniquePathsAndCleanup(t *testing.T) {
-	base := t.TempDir()
+	base := privateStagingBase(t)
 	p1, c1, err := stageForTrustCommand(base, []byte("a"))
 	if err != nil {
 		t.Fatal(err)

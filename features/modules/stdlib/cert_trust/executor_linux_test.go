@@ -256,6 +256,12 @@ func TestLinuxExecutor_RemoveRefreshFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// install and the restore both write with 0644 subject to the runner's
+	// umask, so the restored mode must equal the installed mode, not a fixed 0644.
+	beforeInfo, err := os.Stat(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	e.refresh = func() error { return errors.New("boom") }
 	if err := e.remove(fp); err == nil {
@@ -272,8 +278,8 @@ func TestLinuxExecutor_RemoveRefreshFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0644 {
-		t.Errorf("restored mode = %v, want 0644", info.Mode().Perm())
+	if info.Mode().Perm() != beforeInfo.Mode().Perm() {
+		t.Errorf("restored mode = %v, want installed mode %v", info.Mode().Perm(), beforeInfo.Mode().Perm())
 	}
 }
 

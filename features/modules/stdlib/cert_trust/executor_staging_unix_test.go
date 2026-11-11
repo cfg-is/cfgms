@@ -12,7 +12,7 @@ import (
 )
 
 func TestStageForTrustCommand_SymlinkAtOldNameNotFollowed(t *testing.T) {
-	base := t.TempDir()
+	base := privateStagingBase(t)
 	target := filepath.Join(t.TempDir(), "victim")
 	if err := os.WriteFile(target, []byte("victim"), 0o600); err != nil {
 		t.Fatal(err)
