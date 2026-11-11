@@ -6,7 +6,7 @@
 # Multi-platform index digests are pinned so a mutable registry tag cannot alter
 # a release build. Dependabot (or an explicit release change) must update both
 # the human-readable tag and digest together.
-FROM ghcr.io/cfg-is/ci-mirror/golang:1.27.3-alpine3.24@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS builder
+FROM ghcr.io/cfg-is/ci-mirror/golang:1.27.4-alpine3.24@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates
