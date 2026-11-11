@@ -118,6 +118,15 @@ packages:
       cannot see them as test-support importers. It must never be reachable
       from a main package: it creates local accounts.
 
+  - path: pkg/softauthn
+    reason: >
+      Issue #6135 (Epic #6075): software WebAuthn authenticator core with no
+      consumer yet — key storage, the cfg CLI commands, the shared test
+      support and the server's AAGUID check are later stories of the same
+      epic. Pending wiring: delete this entry in the change that first
+      imports pkg/softauthn from a main package (the stale-entry check
+      fails the gate once it is reachable).
+
   # --- DELETE (Issue #4345): superseded, orphaned, or abandoned — a ---------
   # --- capability-map-then-delete follow-up is drafted in the #4345 ---------
   # --- classification comment, pending PO creation. Deleting any of these ---
