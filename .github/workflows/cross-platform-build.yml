@@ -108,17 +108,31 @@ jobs:
   # pkg/cert/interfaces' database contract case and the database provider's
   # setupTestDatabase drop and recreate the same schema; concurrent packages
   # would drop tables from under each other's tests.
+  #
+  # It also proves both directions of the N / N-1 schema contract on this same
+  # Postgres (Issue #6097, Epic #5978) after the suites above, in two steps that
+  # reset the database first: scripts/check-schema-compat.sh runs the base
+  # revision's database suite against the head revision's schema and the head
+  # revision's suite against the base revision's schema, and
+  # scripts/check-schema-compat_test.sh proves the check itself fails closed.
+  # The base commit has to be in the clone, hence fetch-depth: 0 (the checkout
+  # does not persist credentials, so a single-SHA fetch can fail).
+  #
+  # timeout-minutes is the sum of the step limits: the original 30 for the
+  # steps above, 35 for the compat check (two suite runs capped at 15 minutes
+  # each, plus both apply steps and builds) and 20 for its self-test.
   postgres-integration:
     name: Postgres Integration Tests (Linux)
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 85
     if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
+        fetch-depth: 0
 
     - name: Set up Go
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -152,6 +166,32 @@ jobs:
         set +a
         go test -race -timeout=10m ./pkg/testing/storage/... ./features/controller/server/...
         go test -v -race -p 1 -tags=integration -timeout=20m ./pkg/cert/... ./pkg/storage/providers/database/... ./features/controller/run/...
+
+    # The base is the merge group's base commit; a manual dispatch uses the
+    # merge-base with develop. The script resets the database itself.
+    - name: Check schema compatibility (N / N-1)
+      timeout-minutes: 35
+      env:
+        MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+      run: |
+        set -a
+        source .env.test
+        set +a
+        if [[ -n "$MERGE_GROUP_BASE_SHA" ]]; then
+          CFGMS_SCHEMA_COMPAT_BASE_SHA="$MERGE_GROUP_BASE_SHA"
+        else
+          CFGMS_SCHEMA_COMPAT_BASE_SHA="$(git merge-base origin/develop HEAD)"
+        fi
+        export CFGMS_SCHEMA_COMPAT_BASE_SHA
+        scripts/check-schema-compat.sh
+
+    - name: Test the schema compatibility check
+      timeout-minutes: 20
+      run: |
+        set -a
+        source .env.test
+        set +a
+        scripts/check-schema-compat_test.sh
 
     - name: Cleanup Docker services
       if: always()
