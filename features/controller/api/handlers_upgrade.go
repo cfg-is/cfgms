@@ -236,33 +236,19 @@ func (s *Server) upgradeCallbacks(noun, upgradeID string, okStatus business.Upgr
 }
 
 // validateDispatchRequest checks the required fields and their formats, writing a
-// 400 response on the first failure.
-func (s *Server) validateDispatchRequest(w http.ResponseWriter, req dispatchUpgradeRequest) bool {
+// 400 response on the first failure, then applies the unattended-rollouts gate so the
+// scoped rollout credential is refused before any record is created.
+func (s *Server) validateDispatchRequest(w http.ResponseWriter, r *http.Request, principal *Principal, callerTenantID string, req dispatchUpgradeRequest) bool {
 	if req.Selector == "" || req.Version == "" || req.Platform == "" || req.Arch == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"selector, version, platform, and arch are required",
 			"MISSING_FIELDS")
 		return false
 	}
-	if !stewardBinaryVersionRe.MatchString(req.Version) {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Invalid version: "+logging.SanitizeLogValue(req.Version)+"; must match ^v\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?",
-			"INVALID_VERSION")
+	if !s.validateStewardBinaryCoordinates(w, req.Version, req.Platform, req.Arch) {
 		return false
 	}
-	if !validPlatforms[req.Platform] {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Unknown platform: "+logging.SanitizeLogValue(req.Platform)+"; valid values: windows, darwin, linux",
-			"INVALID_PLATFORM")
-		return false
-	}
-	if !validArchs[req.Arch] {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Unknown arch: "+logging.SanitizeLogValue(req.Arch)+"; valid values: amd64, arm64",
-			"INVALID_ARCH")
-		return false
-	}
-	return true
+	return !s.refuseUnattendedRollout(w, r, principal, callerTenantID, gateRouteDispatchUpgrade)
 }
 
 // scopeDispatchSelector parses the selector and applies the tenant subtree scope.
@@ -426,6 +412,24 @@ func (s *Server) fanOutUpgradeCommands(created []createdUpgrade, params map[stri
 	}()
 }
 
+// dispatchStoresAvailable writes a 503 and returns false when the durable upgrade store
+// or the binary blob store is not configured.
+func (s *Server) dispatchStoresAvailable(w http.ResponseWriter) bool {
+	if s.upgradeStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable,
+			"Upgrade store not configured; durable UpgradeStore is required",
+			"UPGRADE_STORE_UNAVAILABLE")
+		return false
+	}
+	if s.blobStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable,
+			"Binary storage not available",
+			"BINARY_STORE_UNAVAILABLE")
+		return false
+	}
+	return true
+}
+
 // handleDispatchUpgrade handles POST /api/v1/stewards/upgrade.
 //
 // Resolves the selector against the fleet, enforces tenant isolation, verifies the
@@ -433,23 +437,14 @@ func (s *Server) fanOutUpgradeCommands(created []createdUpgrade, params map[stri
 // in the durable store, and fans out CommandPushStewardBinary to matching stewards.
 // Returns 202 Accepted immediately; fan-out runs in a background goroutine.
 func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
-	if s.upgradeStore == nil {
-		s.writeErrorResponse(w, http.StatusServiceUnavailable,
-			"Upgrade store not configured; durable UpgradeStore is required",
-			"UPGRADE_STORE_UNAVAILABLE")
-		return
-	}
-	if s.blobStore == nil {
-		s.writeErrorResponse(w, http.StatusServiceUnavailable,
-			"Binary storage not available",
-			"BINARY_STORE_UNAVAILABLE")
+	if !s.dispatchStoresAvailable(w) {
 		return
 	}
 
 	// An empty callerTenantID (mTLS admin) yields an unscoped fleet search; the
 	// per-tenant isolation filter below is skipped for admins. Only a NON-admin caller
 	// with no tenant is a genuine auth failure (Issue #1999, same pattern as #1990).
-	_, callerTenantID, ok := s.authRunAccess(w, r)
+	principal, callerTenantID, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -465,7 +460,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", "INVALID_BODY")
 		return
 	}
-	if !s.validateDispatchRequest(w, req) {
+	if !s.validateDispatchRequest(w, r, principal, callerTenantID, req) {
 		return
 	}
 
