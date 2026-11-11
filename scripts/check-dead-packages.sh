@@ -20,6 +20,18 @@
 #   3. all        = go list ./...                    (every module package)
 #   unreachable = all - reachable
 #
+# Cross-OS union (Issue #6161): build constraints decide which files — and so
+# which imports — `go list` sees, so a single-GOOS scan gives a verdict that
+# depends on the host. Every `go list` call therefore runs once per shipped
+# GOOS (linux, windows, darwin), with GOOS set explicitly (never inherited
+# from the environment) and CGO_ENABLED=0, and the outputs are merged with
+# `sort -u`. `all`, `mains`, the production-reachable set and the _test.go
+# import edges are each the union over the three OSes: a package is reachable
+# if a main package reaches it on ANY shipped OS, and is test-support if a
+# reachable package imports it from a _test.go file on ANY of them. The result
+# is identical whichever GOOS the caller exported. A `go list` failure under
+# any of the three OSes fails closed (exit 2).
+#
 # Matching is by exact import path (a flat set), never by string prefix, so
 # a parent package being unreachable never marks a reachable child
 # unreachable — each is its own entry in `go list ./...`, and `comm` compares
@@ -82,82 +94,135 @@ trap 'rm -rf "$workdir"' EXIT
 
 MODPATH="$(go list -m)"
 
-# --- 1. every non-test package the module currently contains ---------------
-if ! go list ./... >"$workdir/all_raw.txt" 2>"$workdir/all.err"; then
-    echo "ERROR: go list ./... failed:" >&2
-    cat "$workdir/all.err" >&2
+# Operating systems CFGMS ships binaries for. Reachability is computed under
+# each one and unioned, so the verdict does not depend on the host's GOOS.
+SHIPPED_GOOS="linux windows darwin"
+
+# golist <goos> <go list args...> — runs `go list` for one target OS. GOOS is
+# always set explicitly (never inherited from the host) and CGO_ENABLED=0 keeps
+# a cgo-only file set from changing the result between hosts. A failure is the
+# caller's to turn into exit 2.
+golist() {
+    local os="$1"
+    shift
+    GOOS="$os" CGO_ENABLED=0 go list "$@"
+}
+
+# --- per-OS passes -----------------------------------------------------------
+# For each GOOS, in $workdir/<goos>/:
+#   all_mod.txt         every module package with a buildable file on that OS
+#   mains.txt           every `main` package on that OS
+#   prod_reachable.txt  transitive production-import closure of those mains
+#   test_edges.tsv      importer<TAB>imported for every _test.go import
+for os in $SHIPPED_GOOS; do
+    d="$workdir/$os"
+    mkdir -p "$d"
+
+    # 1. every non-test package the module contains on this OS
+    if ! golist "$os" ./... >"$d/all_raw.txt" 2>"$d/all.err"; then
+        echo "ERROR: go list ./... failed (GOOS=$os):" >&2
+        cat "$d/all.err" >&2
+        exit 2
+    fi
+    # `go list ./...` descends into vendored third-party trees. `web/node_modules`
+    # ships Go sample files inside npm packages: unreachable by definition, not this
+    # repository's code, and impossible to either wire in or delete. They are excluded
+    # here rather than allowlisted, because the allowlist records deliberate choices
+    # about our own packages. `vendor/` needs no exclusion — module mode already omits it.
+    awk -v pre="$MODPATH/" -v mod="$MODPATH" \
+        '(index($0, pre) == 1 || $0 == mod) && $0 !~ /(^|\/)node_modules(\/|$)/' \
+        "$d/all_raw.txt" | sort -u >"$d/all_mod.txt"
+
+    # 2. every `main` package on this OS: the binaries this module can ship
+    if ! golist "$os" -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./... \
+        >"$d/mains_raw.txt" 2>"$d/mains.err"; then
+        echo "ERROR: go list (main packages) failed (GOOS=$os):" >&2
+        cat "$d/mains.err" >&2
+        exit 2
+    fi
+    grep . "$d/mains_raw.txt" | sort -u >"$d/mains.txt" || true
+
+    # 3. transitive production-import closure of every main package. An OS
+    # with no main package contributes nothing here; the union check below
+    # rejects a module with no main package on any OS.
+    : >"$d/prod_reachable.txt"
+    if [ -s "$d/mains.txt" ]; then
+        if ! xargs env GOOS="$os" CGO_ENABLED=0 go list -deps <"$d/mains.txt" \
+            >"$d/prod_reachable_raw.txt" 2>"$d/deps.err"; then
+            echo "ERROR: go list -deps failed (GOOS=$os):" >&2
+            cat "$d/deps.err" >&2
+            exit 2
+        fi
+        awk -v pre="$MODPATH/" -v mod="$MODPATH" 'index($0, pre) == 1 || $0 == mod' \
+            "$d/prod_reachable_raw.txt" | sort -u >"$d/prod_reachable.txt"
+    fi
+
+    # 4. _test.go import edges on this OS (build-tagged test files only
+    # appear under the OS their tags select)
+    if ! golist "$os" -json ./... >"$d/all.json" 2>"$d/json.err"; then
+        echo "ERROR: go list -json ./... failed (GOOS=$os):" >&2
+        cat "$d/json.err" >&2
+        exit 2
+    fi
+    jq -r --arg mod "$MODPATH" '
+      .ImportPath as $ip
+      | ((.TestImports // []) + (.XTestImports // []))
+      | .[]
+      | select(startswith($mod + "/") or . == $mod)
+      | "\($ip)\t\(.)"
+    ' "$d/all.json" >"$d/test_edges.tsv"
+done
+
+# --- union across the shipped OSes ------------------------------------------
+# A package counts as production-reachable if a main package reaches it on any
+# shipped GOOS; a package that exists on only one OS must not drop out of `all`
+# on the others.
+for f in all_mod.txt mains.txt prod_reachable.txt test_edges.tsv; do
+    for os in $SHIPPED_GOOS; do cat "$workdir/$os/$f"; done | sort -u >"$workdir/$f"
+done
+
+if [ ! -s "$workdir/mains.txt" ]; then
+    echo "ERROR: no main packages found in module; cannot compute reachability" >&2
     exit 2
 fi
-# `go list ./...` descends into vendored third-party trees. `web/node_modules`
-# ships Go sample files inside npm packages: unreachable by definition, not this
-# repository's code, and impossible to either wire in or delete. They are excluded
-# here rather than allowlisted, because the allowlist records deliberate choices
-# about our own packages. `vendor/` needs no exclusion — module mode already omits it.
-awk -v pre="$MODPATH/" -v mod="$MODPATH" \
-    '(index($0, pre) == 1 || $0 == mod) && $0 !~ /(^|\/)node_modules(\/|$)/' \
-    "$workdir/all_raw.txt" | sort -u >"$workdir/all.txt"
 
 # Scan tracked files only: an untracked .go file (a stray generated
 # steward/steward.pb.go, say) makes `go list` see a package CI never sees. Drop
 # packages whose directory has no tracked .go file. Skipped outside a git
 # checkout, where there is no tracked set to compare against.
+cp "$workdir/all_mod.txt" "$workdir/all.txt"
 if git ls-files --error-unmatch go.mod >/dev/null 2>&1; then
     git ls-files -- '*.go' | sed -E 's|/?[^/]+$||; s|^$|.|' | sort -u >"$workdir/tracked_dirs.txt"
     awk -v mod="$MODPATH" 'NR==FNR{t[$0]=1; next}
         { d = ($0 == mod) ? "." : substr($0, length(mod) + 2); if (d in t) print }' \
-        "$workdir/tracked_dirs.txt" "$workdir/all.txt" >"$workdir/all_tracked.txt"
-    mv "$workdir/all_tracked.txt" "$workdir/all.txt"
+        "$workdir/tracked_dirs.txt" "$workdir/all_mod.txt" >"$workdir/all.txt"
 fi
-
-# --- 2. every `main` package: the set of binaries this module ships --------
-go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./... 2>"$workdir/mains.err" \
-    | grep . >"$workdir/mains.txt" || true
-if [ ! -s "$workdir/mains.txt" ]; then
-    echo "ERROR: no main packages found in module; cannot compute reachability" >&2
-    cat "$workdir/mains.err" >&2
-    exit 2
-fi
-
-# --- 3. transitive production-import closure of every main package ---------
-if ! xargs go list -deps <"$workdir/mains.txt" >"$workdir/prod_reachable_raw.txt" 2>"$workdir/deps.err"; then
-    echo "ERROR: go list -deps failed:" >&2
-    cat "$workdir/deps.err" >&2
-    exit 2
-fi
-awk -v pre="$MODPATH/" -v mod="$MODPATH" 'index($0, pre) == 1 || $0 == mod' \
-    "$workdir/prod_reachable_raw.txt" | sort -u >"$workdir/prod_reachable.txt"
 
 comm -23 "$workdir/all.txt" "$workdir/prod_reachable.txt" >"$workdir/unreachable.txt"
 
 # --- test-support frontier: packages imported by _test.go files of a -------
-# --- package that IS production-reachable -----------------------------------
-if ! go list -json ./... >"$workdir/all.json" 2>"$workdir/json.err"; then
-    echo "ERROR: go list -json ./... failed:" >&2
-    cat "$workdir/json.err" >&2
-    exit 2
-fi
-jq -r --arg mod "$MODPATH" '
-  .ImportPath as $ip
-  | ((.TestImports // []) + (.XTestImports // []))
-  | .[]
-  | select(startswith($mod + "/") or . == $mod)
-  | "\($ip)\t\(.)"
-' "$workdir/all.json" >"$workdir/test_edges.tsv"
-
+# --- package that IS production-reachable (on any shipped GOOS) -------------
 awk -F'\t' 'NR==FNR{prod[$1]=1; next} ($1 in prod){print $2}' \
     "$workdir/prod_reachable.txt" "$workdir/test_edges.tsv" | sort -u >"$workdir/frontier.txt"
 
-if [ -s "$workdir/frontier.txt" ]; then
-    if ! xargs go list -deps <"$workdir/frontier.txt" >"$workdir/frontier_deps_raw.txt" 2>"$workdir/fdeps.err"; then
-        echo "ERROR: go list -deps (test-support frontier) failed:" >&2
-        cat "$workdir/fdeps.err" >&2
+# The frontier's own dependencies are walked per OS, restricted to frontier
+# packages that have a buildable file there: `go list -deps` on a package whose
+# files are all excluded by build constraints (a windows-only helper, seen from
+# linux) is an error, not an empty result.
+: >"$workdir/frontier_deps.txt"
+for os in $SHIPPED_GOOS; do
+    d="$workdir/$os"
+    comm -12 "$workdir/frontier.txt" "$d/all_mod.txt" >"$d/frontier.txt"
+    [ -s "$d/frontier.txt" ] || continue
+    if ! xargs env GOOS="$os" CGO_ENABLED=0 go list -deps <"$d/frontier.txt" \
+        >"$d/frontier_deps_raw.txt" 2>"$d/fdeps.err"; then
+        echo "ERROR: go list -deps (test-support frontier) failed (GOOS=$os):" >&2
+        cat "$d/fdeps.err" >&2
         exit 2
     fi
     awk -v pre="$MODPATH/" -v mod="$MODPATH" 'index($0, pre) == 1 || $0 == mod' \
-        "$workdir/frontier_deps_raw.txt" >"$workdir/frontier_deps.txt"
-else
-    : >"$workdir/frontier_deps.txt"
-fi
+        "$d/frontier_deps_raw.txt" >>"$workdir/frontier_deps.txt"
+done
 cat "$workdir/frontier.txt" "$workdir/frontier_deps.txt" | sort -u >"$workdir/test_reachable.txt"
 
 comm -12 "$workdir/unreachable.txt" "$workdir/test_reachable.txt" >"$workdir/test_only.txt"

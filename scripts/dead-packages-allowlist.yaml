@@ -17,6 +17,14 @@
 # each entry with a line-oriented match — keep one entry's `path` on its own
 # list-item line, exactly as below.
 #
+# Reachability is computed as the union over every OS CFGMS ships for (linux,
+# windows, darwin; Issue #6161), so it does not depend on the host running the
+# gate. A package is unreachable only if no main package reaches it on any of
+# those OSes, and a package imported by the build-tagged _test.go files of a
+# reachable package (a windows-only test helper, say) is test-support there and
+# needs no entry. An entry that only existed because a single-OS scan could not
+# see such an importer is stale and must be deleted.
+#
 # A package leaving this list because it was wired into a main package or
 # removed should have its entry deleted in the same change — a stale entry
 # (allowlisting a package the gate no longer finds unreachable) fails the
@@ -108,15 +116,6 @@ packages:
       files imports it. features/modules/extended/activedirectory itself
       (the module, not this tests package) is registered in the steward
       factory by this same story and is no longer unreachable.
-
-  - path: pkg/testutil/winacct
-    reason: >
-      Issue #5119: Windows-only test support (local account SIDs, a
-      temporary local administrator, owner assignment) imported only by
-      `//go:build windows` _test.go files in pkg/security and cmd/steward.
-      The gate runs on Linux, where those test files are excluded, so it
-      cannot see them as test-support importers. It must never be reachable
-      from a main package: it creates local accounts.
 
   - path: pkg/softauthn
     reason: >
