@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -261,17 +263,36 @@ func TestStepUp_Interactive_PresenceRequired_NoPermission_FailsWithActionableErr
 
 // presenceRelayTestServer wires the lodge/collect endpoints the relay drives, plus a
 // hook for the caller to inspect what was lodged and to control the collect response
-// sequence.
+// sequence. The handler goroutines can outlive the client call that triggered them
+// (a cancelled poll abandons its in-flight request), so every field a handler writes
+// is guarded by mu and tests read it through Lodged and CollectCalls.
 type presenceRelayTestServer struct {
-	server     *httptest.Server
+	server *httptest.Server
+
+	mu         sync.Mutex
 	lodgedBody LodgeCliPresenceRequestBody
 	// lodgedRaw is the exact JSON the CLI put on the wire, so a test can assert on
 	// fields the typed body does not declare.
 	lodgedRaw    []byte
 	collectCalls int
+
 	// collectResponses is served in order, one per collect call; the last entry
 	// repeats for any call beyond len(collectResponses).
 	collectResponses []func(w http.ResponseWriter)
+}
+
+// Lodged returns a copy of the lodge body the CLI sent and the raw JSON it put on the wire.
+func (rts *presenceRelayTestServer) Lodged() (LodgeCliPresenceRequestBody, []byte) {
+	rts.mu.Lock()
+	defer rts.mu.Unlock()
+	return rts.lodgedBody, append([]byte(nil), rts.lodgedRaw...)
+}
+
+// CollectCalls returns the number of collect requests the handler has started serving.
+func (rts *presenceRelayTestServer) CollectCalls() int {
+	rts.mu.Lock()
+	defer rts.mu.Unlock()
+	return rts.collectCalls
 }
 
 func newPresenceRelayTestServer(t *testing.T, requestID, userCode string, collectResponses ...func(w http.ResponseWriter)) *presenceRelayTestServer {
@@ -282,8 +303,12 @@ func newPresenceRelayTestServer(t *testing.T, requestID, userCode string, collec
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/cli-presence/lodge":
 			raw, readErr := io.ReadAll(r.Body)
 			require.NoError(t, readErr)
+			var body LodgeCliPresenceRequestBody
+			require.NoError(t, json.Unmarshal(raw, &body))
+			rts.mu.Lock()
 			rts.lodgedRaw = raw
-			require.NoError(t, json.Unmarshal(raw, &rts.lodgedBody))
+			rts.lodgedBody = body
+			rts.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
 			resp := map[string]interface{}{
@@ -295,11 +320,13 @@ func newPresenceRelayTestServer(t *testing.T, requestID, userCode string, collec
 			}
 			require.NoError(t, json.NewEncoder(w).Encode(resp))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/cli-presence/"+requestID+"/collect":
+			rts.mu.Lock()
 			idx := rts.collectCalls
 			if idx >= len(rts.collectResponses) {
 				idx = len(rts.collectResponses) - 1
 			}
 			rts.collectCalls++
+			rts.mu.Unlock()
 			rts.collectResponses[idx](w)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -344,15 +371,16 @@ func TestRunPresenceBrowserFlow_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "the-real-presence-token", token)
 
-	assert.Equal(t, "POST", rts.lodgedBody.Method)
-	assert.Equal(t, "/api/v1/modules/approvals/test/approve", rts.lodgedBody.Path)
-	assert.Equal(t, "module:approve", rts.lodgedBody.Permission)
-	assert.Equal(t, sha256Hex([]byte(`{}`)), rts.lodgedBody.BodyHash)
+	lodgedBody, lodgedRaw := rts.Lodged()
+	assert.Equal(t, "POST", lodgedBody.Method)
+	assert.Equal(t, "/api/v1/modules/approvals/test/approve", lodgedBody.Path)
+	assert.Equal(t, "module:approve", lodgedBody.Permission)
+	assert.Equal(t, sha256Hex([]byte(`{}`)), lodgedBody.BodyHash)
 
 	// The lodge body carries the four bound values and no display text: the
 	// confirmation page renders the action from the binding the controller persisted,
 	// so the CLI never gets to describe one action while binding another.
-	assert.NotContains(t, string(rts.lodgedRaw), "description",
+	assert.NotContains(t, string(lodgedRaw), "description",
 		"lodge must not send caller-authored consent text")
 
 	assert.Contains(t, openedURL, "cli-presence-abc", "the opened URL must reference the lodged request ID")
@@ -398,7 +426,7 @@ const noTTYPresenceToken = "collected-no-tty-token"
 // the presence challenge until a request carries noTTYPresenceToken. The client's
 // step-up handler is defaultStepUpHandler. The test state is: no TTY, a browser opener
 // that fails the test if called, and a short poll interval.
-func noTTYPresenceClient(t *testing.T, collectResponses ...func(w http.ResponseWriter)) (client *APIClient, rts *presenceRelayTestServer, guardedCalls *int) {
+func noTTYPresenceClient(t *testing.T, collectResponses ...func(w http.ResponseWriter)) (client *APIClient, rts *presenceRelayTestServer, guardedCalls *atomic.Int32) {
 	t.Helper()
 	origTerm, origBrowser, origInterval := isTerminalFn, presenceOpenBrowserFn, presencePollInterval
 	t.Cleanup(func() {
@@ -413,13 +441,13 @@ func noTTYPresenceClient(t *testing.T, collectResponses ...func(w http.ResponseW
 
 	rts = newPresenceRelayTestServer(t, "cli-presence-notty", "WXYZ-1234", collectResponses...)
 	relayHandler := rts.server.Config.Handler
-	calls := 0
+	calls := &atomic.Int32{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/v1/cli-presence/") {
 			relayHandler.ServeHTTP(w, r)
 			return
 		}
-		calls++
+		calls.Add(1)
 		if r.Header.Get("X-Presence-Token") == noTTYPresenceToken {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"tokens":[],"total":0}`))
@@ -439,7 +467,7 @@ func noTTYPresenceClient(t *testing.T, collectResponses ...func(w http.ResponseW
 		},
 	})
 	require.NoError(t, err)
-	return client, rts, &calls
+	return client, rts, calls
 }
 
 func TestStepUp_NoTTY_PresenceRequired_RunsRelayWithoutBrowser(t *testing.T) {
@@ -451,9 +479,10 @@ func TestStepUp_NoTTY_PresenceRequired_RunsRelayWithoutBrowser(t *testing.T) {
 	_, err := client.ListTokens(context.Background(), "")
 	require.NoError(t, err, "the original request is replayed with the collected token")
 
-	assert.Equal(t, 2, *guardedCalls, "the request is sent once, then replayed once with the collected token")
-	assert.Equal(t, "module:approve", rts.lodgedBody.Permission, "the presence request is lodged for the named permission")
-	assert.Equal(t, 2, rts.collectCalls, "the relay polls until the request is confirmed")
+	assert.Equal(t, int32(2), guardedCalls.Load(), "the request is sent once, then replayed once with the collected token")
+	lodgedBody, _ := rts.Lodged()
+	assert.Equal(t, "module:approve", lodgedBody.Permission, "the presence request is lodged for the named permission")
+	assert.Equal(t, 2, rts.CollectCalls(), "the relay polls until the request is confirmed")
 	// A browser launch fails the test inside the presenceOpenBrowserFn the harness installs.
 }
 
@@ -495,8 +524,8 @@ func TestStepUp_NoTTY_PresenceRequired_PollTimeout(t *testing.T) {
 	_, err := client.ListTokens(context.Background(), "")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errPresenceTimedOut)
-	assert.Equal(t, 1, *guardedCalls, "the request is not replayed without a collected token")
-	assert.Positive(t, rts.collectCalls, "the relay polled before timing out")
+	assert.Equal(t, int32(1), guardedCalls.Load(), "the request is not replayed without a collected token")
+	assert.Positive(t, rts.CollectCalls(), "the relay polled before timing out")
 }
 
 func TestStepUp_NoTTY_PresenceRequired_PollCancelled(t *testing.T) {
@@ -518,7 +547,7 @@ func TestStepUp_NoTTY_PresenceRequired_PollCancelled(t *testing.T) {
 	_, err := client.ListTokens(context.Background(), "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "presence ceremony interrupted")
-	assert.Equal(t, 1, *guardedCalls, "the guarded action is not retried after an interrupt")
+	assert.Equal(t, int32(1), guardedCalls.Load(), "the guarded action is not retried after an interrupt")
 }
 
 // --- Tenant-crossing challenge: routed to the crossing remedy, never to step-up ---
