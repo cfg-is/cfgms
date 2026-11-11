@@ -931,6 +931,9 @@ func nodeInfoFromRecord(r business.NodeRecord) *NodeInfo {
 		Version:   r.Version,
 		StartedAt: r.StartedAt,
 		LastSeen:  r.LastSeen,
+
+		SchemaRequired:     r.SchemaRequired,
+		SchemaMinTolerated: r.SchemaMinTolerated,
 	}
 }
 

@@ -84,18 +84,24 @@ func (r NodeRole) String() string {
 
 // NodeInfo represents information about a controller node
 type NodeInfo struct {
-	ID               string                   `json:"id"`
-	Address          string                   `json:"address"`
-	State            NodeState                `json:"state"`
-	Role             NodeRole                 `json:"role"`
-	LastSeen         time.Time                `json:"last_seen"`
-	Version          string                   `json:"version"`
-	StartedAt        time.Time                `json:"started_at"`
-	Capabilities     []string                 `json:"capabilities"`
-	Region           string                   `json:"region,omitempty"`
-	AvailabilityZone string                   `json:"availability_zone,omitempty"`
-	Coordinates      *GeographicCoordinates   `json:"coordinates,omitempty"`
-	Latency          map[string]time.Duration `json:"latency,omitempty"` // Latency to other nodes
+	ID        string    `json:"id"`
+	Address   string    `json:"address"`
+	State     NodeState `json:"state"`
+	Role      NodeRole  `json:"role"`
+	LastSeen  time.Time `json:"last_seen"`
+	Version   string    `json:"version"`
+	StartedAt time.Time `json:"started_at"`
+	// SchemaRequired and SchemaMinTolerated are the database schema version the
+	// node requires and the oldest it tolerates, as recorded in the shared node
+	// registry. Zero means "not tracked" (the registry provider keeps no range,
+	// or the node predates the fields). Always serialised so zero is visible.
+	SchemaRequired     int                      `json:"schema_required"`
+	SchemaMinTolerated int                      `json:"schema_min_tolerated"`
+	Capabilities       []string                 `json:"capabilities"`
+	Region             string                   `json:"region,omitempty"`
+	AvailabilityZone   string                   `json:"availability_zone,omitempty"`
+	Coordinates        *GeographicCoordinates   `json:"coordinates,omitempty"`
+	Latency            map[string]time.Duration `json:"latency,omitempty"` // Latency to other nodes
 }
 
 // ClusterManager handles high availability operations

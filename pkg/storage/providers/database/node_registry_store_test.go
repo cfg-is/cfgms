@@ -111,3 +111,76 @@ func TestDatabaseNodeRegistryStore_VersionStartedAtLastSeen_RoundTrip(t *testing
 	assert.False(t, nodes[0].LastSeen.IsZero())
 	assert.WithinDuration(t, time.Now(), nodes[0].LastSeen, time.Minute, "LastSeen must come from the store clock, not the caller")
 }
+
+func TestNodeRegistryStore_ReportsSchemaRange(t *testing.T) {
+	store := newTestNodeRegistryStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.RegisterNode(ctx, business.NodeRecord{ID: "node-a", Address: "10.0.0.1:9080"}))
+
+	nodes, err := store.ListNodes(ctx)
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	assert.Equal(t, SchemaVersion, nodes[0].SchemaRequired)
+	assert.Equal(t, MinToleratedSchemaVersion, nodes[0].SchemaMinTolerated)
+}
+
+func TestNodeRegistryStore_RegisterIgnoresCallerSchemaRange(t *testing.T) {
+	store := newTestNodeRegistryStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.RegisterNode(ctx, business.NodeRecord{
+		ID: "node-a", Address: "10.0.0.1:9080",
+		SchemaRequired: SchemaVersion + 41, SchemaMinTolerated: SchemaVersion + 40,
+	}))
+
+	nodes, err := store.ListNodes(ctx)
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	assert.Equal(t, SchemaVersion, nodes[0].SchemaRequired, "provider constant must win over the caller's value")
+	assert.Equal(t, MinToleratedSchemaVersion, nodes[0].SchemaMinTolerated, "provider constant must win over the caller's value")
+
+	// A node upgraded in place re-registers: the stored range is refreshed.
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE cfgms_node_registry SET schema_required = 99, schema_min_tolerated = 98 WHERE node_id = $1`, "node-a")
+	require.NoError(t, err)
+	require.NoError(t, store.RegisterNode(ctx, business.NodeRecord{ID: "node-a", Address: "10.0.0.1:9080"}))
+
+	nodes, err = store.ListNodes(ctx)
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	assert.Equal(t, SchemaVersion, nodes[0].SchemaRequired)
+	assert.Equal(t, MinToleratedSchemaVersion, nodes[0].SchemaMinTolerated)
+}
+
+func TestNodeRegistryStore_LegacyRowReadsZero(t *testing.T) {
+	store := newTestNodeRegistryStore(t)
+	ctx := context.Background()
+
+	// An older node knows nothing of the schema columns, so its INSERT omits them.
+	_, err := store.db.ExecContext(ctx,
+		`INSERT INTO cfgms_node_registry (node_id, address, version, updated_at) VALUES ($1, $2, $3, now())`,
+		"legacy-node", "10.0.0.9:9080", "v0.old")
+	require.NoError(t, err)
+
+	nodes, err := store.ListNodes(ctx)
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	assert.Equal(t, "legacy-node", nodes[0].ID)
+	assert.Equal(t, 0, nodes[0].SchemaRequired)
+	assert.Equal(t, 0, nodes[0].SchemaMinTolerated)
+}
+
+func TestNodeRegistryStore_SchemaColumnsMigrationIdempotent(t *testing.T) {
+	store := newTestNodeRegistryStore(t)
+	ctx := context.Background()
+
+	// Re-running the table creation (as every controller start does) must keep rows.
+	require.NoError(t, store.RegisterNode(ctx, business.NodeRecord{ID: "node-a", Address: "10.0.0.1:9080"}))
+	require.NoError(t, store.schemas.CreateNodeRegistryTable(ctx, store.db))
+
+	nodes, err := store.ListNodes(ctx)
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	assert.Equal(t, SchemaVersion, nodes[0].SchemaRequired)
+}
