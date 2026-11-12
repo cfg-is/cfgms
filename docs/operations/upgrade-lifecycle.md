@@ -11,6 +11,7 @@ or [fleet steward](../deployment/fleet-upgrades.md) procedure.
 | Supported controller restart | CLI result, service logs, HTTPS `/api/v1/ready`, steward reconnect/query checks | Does not append to the cutover history file or create an experimental quarantine slot. |
 | Steward upgrade dispatch | Returned `upgrade_id` and `GET /api/v1/stewards/upgrade/{upgrade_id}` | Durable dispatch/status records are distinct from launcher event ingestion. |
 | Ringed fleet rollout | `rollout_id` and `GET /api/v1/rollout/{rollout_id}` | Stored progress does not establish automatic resumption after controller restart. |
+| Unattended test-cell rollout | Same `rollout_id` status plus audit events and `marker_*` rows | See [Test-Cell Deploy Agent](test-cell-deploy-agent.md); every deploy, rollback and halt is audited with principal and revision. |
 | Steward launcher | Local launcher state and upgrade flag events | Local retention and failure counters are not controller cutover history. |
 | Experimental controller port swap | Local `cutover.history.jsonl` and cutover state | Frozen experimental path; not the supported production procedure. |
 

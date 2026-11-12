@@ -19,7 +19,7 @@ bin/
 # Compiled test binaries
 test-controller
 test-steward
-test-*
+/test-*
 # Shell test scripts in devcontainer are not binaries — allow them
 !.claude/tooling/devcontainer/scripts/test-*.sh
 # Shell test scripts in .claude/tooling/scripts/tests/ are not binaries — allow them

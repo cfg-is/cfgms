@@ -4,12 +4,13 @@ Runbooks and operator references for running CFGMS in production.
 
 ## Upgrades
 
-The four upgrade documents cover distinct scopes; start here to pick the right one.
+The upgrade documents cover distinct scopes; start here to pick the right one.
 
 - [Upgrade Lifecycle Runbook](upgrade-lifecycle.md) - Operator reference for the upgrade pipeline: lifecycle states and audit events
 - [Controller Upgrade Runbook](controller-upgrade.md) - Supported single-controller restart, readiness checks and recovery
 - [Rolling Cluster Upgrade Runbook](rolling-cluster-upgrade.md) - Draining, replacing and validating one controller node at a time
 - [Fleet Upgrades](../deployment/fleet-upgrades.md) - Upgrading steward binaries across a fleet with the `cfg` CLI
+- [Test-Cell Deploy Agent](test-cell-deploy-agent.md) - Unattended rollouts setting, rollout credential, publish, rollout, halt, rollback and deploy markers for a test cell
 
 ## Cluster Configuration
 
