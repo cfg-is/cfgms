@@ -83,6 +83,11 @@ var (
 	repairRetryBase = 30 * time.Second
 	repairRetryMax  = 5 * time.Minute
 
+	// repairOutcomeResendInterval and repairOutcomeResends pace the repeat of the
+	// repair outcome on a freshly opened link (confirmOutcome).
+	repairOutcomeResendInterval = 2 * time.Second
+	repairOutcomeResends        = 5
+
 	// repairTakeOver resets the rights of the declared paths (N8). Tests that run
 	// without root substitute the owner it assigns; nothing else is replaced.
 	repairTakeOver = security.TakeOverForRepair
@@ -647,6 +652,46 @@ func (r *repairer) republish(tc *client.TransportClient) {
 	for _, reason := range r.reasons.List() {
 		tc.SetHealthReason(reason.Component, reason.Code, reason.Message)
 	}
+}
+
+// confirmOutcome reports the repair outcome again on a link opened after the
+// repair. A link announces itself with one heartbeat that nothing acknowledges,
+// and its next heartbeat is 20 to 30 s later, so a send that fails or that the
+// controller does not take would leave the outcome unreported for that long. The
+// outcome is repeated a bounded number of times a few seconds apart; the
+// controller reads the same reason each time. It stops when ctx ends.
+func (r *repairer) confirmOutcome(ctx context.Context, tc *client.TransportClient) {
+	if r == nil || tc == nil || !r.hasOutcome() {
+		return
+	}
+	// Read once here: the alarm loop owns these, the goroutine below outlives it.
+	resends, interval := repairOutcomeResends, repairOutcomeResendInterval
+	go func() {
+		for i := 0; i < resends; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(interval):
+			}
+			sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err := tc.SendHeartbeat(sctx, string(cpTypes.StatusError), nil)
+			cancel()
+			if err != nil {
+				r.logger.Debug("Repair outcome heartbeat not sent", "operation", "repair",
+					"error", logging.SanitizeLogValue(err.Error()))
+			}
+		}
+	}()
+}
+
+// hasOutcome reports whether a repair outcome is held for the next link.
+func (r *repairer) hasOutcome() bool {
+	for _, reason := range r.reasons.List() {
+		if reason.Component == cpTypes.HealthComponentRepair {
+			return true
+		}
+	}
+	return false
 }
 
 // clearAll drops every repair reason; the latch has been released.

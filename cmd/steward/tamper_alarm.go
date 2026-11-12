@@ -397,6 +397,7 @@ func (a *tamperAlarm) run(ctx context.Context) (bool, error) {
 				return false, nil
 			}
 			a.reportQuarantined(tc)
+			a.repair.confirmOutcome(ctx, tc)
 		}
 
 		if a.tryRelease(tc) {
