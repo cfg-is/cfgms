@@ -78,15 +78,19 @@ var usernameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}$`)
 // credentials. It does not remove RBAC role assignments or WebAuthn credentials
 // (Issue #3126: it is a login gate, not a data-removal operation).
 type account struct {
-	ID           string
-	Username     string
-	TenantID     string
-	RootScope    bool // true when TenantID == "" by explicit grant (Issue #2919)
-	Permissions  []string
-	Disabled     bool // Issue #3126: login gate — does not remove credentials or roles
-	CreatedAt    time.Time
-	Credentials  []WebAuthnCredential // Issue #2782: registered WebAuthn credentials (public keys only)
-	CertBindings []CertBinding        // Issue #3578: bound mTLS admin certificates, keyed by serial
+	ID          string
+	Username    string
+	TenantID    string
+	RootScope   bool // true when TenantID == "" by explicit grant (Issue #2919)
+	Permissions []string
+	Disabled    bool // Issue #3126: login gate — does not remove credentials or roles
+	// AllowSoftwareAuthenticator is the account half of the software-authenticator
+	// policy (Issue #6140, ADR-021 Amendment 10): necessary, never sufficient — the
+	// account's tenant must also be listed in controller.cfg.
+	AllowSoftwareAuthenticator bool
+	CreatedAt                  time.Time
+	Credentials                []WebAuthnCredential // Issue #2782: registered WebAuthn credentials (public keys only)
+	CertBindings               []CertBinding        // Issue #3578: bound mTLS admin certificates, keyed by serial
 	// RevokedCredentialIDs lists passkey credential IDs removed from this account.
 	// A revoked ID is never accepted again, so re-registering the same authenticator
 	// cannot bring the web sessions its revocation ended back to life (Issue #5166).
@@ -394,26 +398,12 @@ func (s *Server) loadAccountFromStore(ctx context.Context, username, tenantHint 
 	}
 	// Issue #3126: restore the disabled flag. Absent key means not disabled.
 	acct.Disabled = m.Metadata["disabled"] == "true"
+	acct.AllowSoftwareAuthenticator = m.Metadata["allow_software_authenticator"] == "true" // Issue #6140
 	// Issue #2782: deserialize stored WebAuthn credentials (public keys; non-secret).
-	if credsJSON, ok := m.Metadata["credentials"]; ok && credsJSON != "" {
-		var creds []WebAuthnCredential
-		if err := json.Unmarshal([]byte(credsJSON), &creds); err == nil {
-			acct.Credentials = creds
-		}
-	}
-	if revJSON, ok := m.Metadata["revoked_credentials"]; ok && revJSON != "" {
-		var revoked [][]byte
-		if err := json.Unmarshal([]byte(revJSON), &revoked); err == nil {
-			acct.RevokedCredentialIDs = revoked
-		}
-	}
+	decodeMetadataJSON(m.Metadata, "credentials", &acct.Credentials)
+	decodeMetadataJSON(m.Metadata, "revoked_credentials", &acct.RevokedCredentialIDs)
 	// Issue #3578: deserialize bound mTLS certificate bindings (public metadata; non-secret).
-	if bindJSON, ok := m.Metadata["cert_bindings"]; ok && bindJSON != "" {
-		var bindings []CertBinding
-		if err := json.Unmarshal([]byte(bindJSON), &bindings); err == nil {
-			acct.CertBindings = bindings
-		}
-	}
+	decodeMetadataJSON(m.Metadata, "cert_bindings", &acct.CertBindings)
 	// Issue #2974: restore enrollment magic link state (hash only — never plaintext).
 	acct.EnrollmentLinkHash = m.Metadata["enrollment_link_hash"]
 	acct.EnrollmentLinkRevoked = m.Metadata["enrollment_link_revoked"] == "true"
@@ -444,6 +434,27 @@ func (s *Server) persistAccountCAS(ctx context.Context, acct *account, createdBy
 	return s.secretStore.CompareAndSwapSecret(ctx, accountStorageTenant(acct.TenantID)+"/"+req.Key, acct.Version, req)
 }
 
+// decodeMetadataJSON restores a JSON-encoded account field from record metadata.
+// An absent, empty or undecodable value leaves dst untouched, as before.
+func decodeMetadataJSON[T any](metadata map[string]string, key string, dst *T) {
+	raw := metadata[key]
+	if raw == "" {
+		return
+	}
+	var v T
+	if err := json.Unmarshal([]byte(raw), &v); err == nil {
+		*dst = v
+	}
+}
+
+// setMetadataJSON stores v JSON-encoded under key; a value that cannot be
+// marshalled is omitted, as before.
+func setMetadataJSON(meta map[string]string, key string, v any) {
+	if b, err := json.Marshal(v); err == nil {
+		meta[key] = string(b)
+	}
+}
+
 func buildAccountSecretRequest(acct *account, createdBy string) *secretsif.SecretRequest {
 	meta := map[string]string{
 		secretsif.MetadataKeySecretType: accountSecretType,
@@ -462,24 +473,20 @@ func buildAccountSecretRequest(acct *account, createdBy string) *secretsif.Secre
 	if acct.Disabled {
 		meta["disabled"] = "true"
 	}
+	// Issue #6140: persist the software-authenticator flag; sparse like disabled.
+	if acct.AllowSoftwareAuthenticator {
+		meta["allow_software_authenticator"] = "true"
+	}
 	// Issue #2782: persist WebAuthn credentials (public keys) in metadata.
 	if len(acct.Credentials) > 0 {
-		credsJSON, err := json.Marshal(acct.Credentials)
-		if err == nil {
-			meta["credentials"] = string(credsJSON)
-		}
+		setMetadataJSON(meta, "credentials", acct.Credentials)
 	}
 	if len(acct.RevokedCredentialIDs) > 0 {
-		if revJSON, err := json.Marshal(acct.RevokedCredentialIDs); err == nil {
-			meta["revoked_credentials"] = string(revJSON)
-		}
+		setMetadataJSON(meta, "revoked_credentials", acct.RevokedCredentialIDs)
 	}
 	// Issue #3578: persist bound mTLS certificate bindings (public metadata) in metadata.
 	if len(acct.CertBindings) > 0 {
-		bindJSON, err := json.Marshal(acct.CertBindings)
-		if err == nil {
-			meta["cert_bindings"] = string(bindJSON)
-		}
+		setMetadataJSON(meta, "cert_bindings", acct.CertBindings)
 	}
 	// Issue #2974: persist enrollment magic link state (hash only — never plaintext).
 	if acct.EnrollmentLinkHash != "" {
@@ -790,6 +797,9 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		// passkeys — under an account.reset audit action that never reads as an enable.
 		// Re-enabling is an explicit PUT {"disabled": false}, which emits account.enabled.
 		acct.Disabled = existing.Disabled
+		// Issue #6140: the software-authenticator flag is deliberately not carried
+		// forward. A reset re-provisions the account to zero authenticators, and the
+		// flag must be granted again for the account to enrol a software one.
 		// Issue #3578: a reset must never drop the account's mTLS certificate bindings.
 		// The bindings are what scope a bound certificate in extractAdminPrincipal; an
 		// account with no bindings sends every one of its still-valid certificates back

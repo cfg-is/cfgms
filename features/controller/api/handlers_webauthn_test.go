@@ -2628,10 +2628,8 @@ func TestPasskeyAuditEvents_Characterization(t *testing.T) {
 // --- Issue #6137: AAGUID and attestation format recorded at registration ---
 
 const (
-	aaguidRPID    = "cfgms.example.org"
-	aaguidOrigin  = "https://cfgms.example.org"
-	aaguidWebUser = "aaguid-admin-route-user"
-	aaguidEnrUser = "aaguid-enroll-user"
+	aaguidRPID   = "cfgms.example.org"
+	aaguidOrigin = "https://cfgms.example.org"
 )
 
 // newSoftAuthenticator builds a pkg/softauthn authenticator with a key generated
@@ -2728,16 +2726,17 @@ func assertSoftwareAuthenticatorDetail(t *testing.T, persisted map[string]interf
 }
 
 func TestPasskeyEnroll_RecordsSoftwareAuthenticatorAAGUID(t *testing.T) {
-	server, _, rawToken := setupEnrollServer(t, aaguidRPID, []string{aaguidOrigin}, aaguidEnrUser)
+	// A software authenticator needs a permitted account (Issue #6140).
+	server, rawToken := newPolicyServer(t, []string{"msp-a"}, policyAccountSpec{tenantID: "msp-a", flag: true})
 	registerViaEnrollment(t, server, rawToken, newSoftAuthenticator(t, nil))
 
-	acct, cred := storedCredentialFromStore(t, server, aaguidEnrUser)
+	acct, cred := storedCredentialFromStore(t, server, policyUser)
 	assert.Equal(t, softauthn.AAGUID[:], cred.AAGUID, "AAGUID survives the durable store round trip")
 	assert.Equal(t, "none", cred.AttestationFormat)
 	assert.True(t, cred.isSoftwareAuthenticator())
 	assert.True(t, acct.hasSoftwareCredential())
 
-	rec := doListCredentials(t, server, aaguidEnrUser)
+	rec := doListCredentials(t, server, policyUser)
 	require.Equal(t, http.StatusOK, rec.Code)
 	infos := listCredentialInfos(t, rec)
 	require.Len(t, infos, 1)
@@ -2777,10 +2776,11 @@ func TestWebAuthnRegister_RecordsNonCFGMSAAGUID(t *testing.T) {
 }
 
 func TestWebAuthnRegister_SoftwareAAGUIDAuditViaAdminRoute(t *testing.T) {
-	server, username := setupWebAuthnServer(t, aaguidRPID, []string{aaguidOrigin})
-	registerViaAdminRoute(t, server, username, newSoftAuthenticator(t, nil))
+	// A software authenticator needs a permitted account (Issue #6140).
+	server, _ := newPolicyServer(t, []string{"msp-a"}, policyAccountSpec{tenantID: "msp-a", flag: true})
+	registerViaAdminRoute(t, server, policyUser, newSoftAuthenticator(t, nil))
 
-	acct, cred := storedCredentialFromStore(t, server, username)
+	acct, cred := storedCredentialFromStore(t, server, policyUser)
 	assert.True(t, cred.isSoftwareAuthenticator())
 	assert.True(t, acct.hasSoftwareCredential())
 

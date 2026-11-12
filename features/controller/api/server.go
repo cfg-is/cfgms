@@ -188,6 +188,7 @@ type Server struct {
 	unattendedRolloutStore          *UnattendedRolloutStore                  // Issue #6065: unattended rollout cell setting (sole writer of its namespace)
 	stewardBinaryApprovalStore      *StewardBinaryApprovalStore              // Issue #6053: steward binary approvals bound to the binary SHA-256 (sole writer of its namespace)
 	tagStore                        *tagstore.Store                          // Issue #2545: steward tag store for tag: selector support
+	softwareAuthenticatorTenants    map[string]struct{}                      // Issue #6140: controller.cfg tenant list (exact match); empty → off
 	webAuthn                        *webauthn.WebAuthn                       // Issue #2782: WebAuthn RP instance; nil → endpoints return 503
 	webAuthnSessions                sync.Map                                 // Issue #2782: pending registration sessions (non-ClusterMode only; ClusterMode uses NonceStore, Issue #4527); key=username, value=*webAuthnPendingSession
 	webAuthnPresenceSessions        sync.Map                                 // Issue #2784: pending presence-assertion sessions; key=principalID, value=*webAuthnPendingSession

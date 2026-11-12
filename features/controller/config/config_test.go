@@ -1505,3 +1505,78 @@ func TestModuleSources_BadBaseFailsValidation(t *testing.T) {
 	ok := &Config{ModuleSources: map[string]ModuleSourceConfig{"acme-corp": {Type: "git", Base: "https://git.acme-corp.example/m"}}}
 	require.NoError(t, ok.ValidateModuleTrust())
 }
+
+// --- Issue #6140: webauthn.allow_software_authenticators ---
+
+func TestWebAuthnConfig_AllowSoftwareAuthenticators_YAML(t *testing.T) {
+	var cfg Config
+	content := `
+webauthn:
+  rp_id: cfgms.example.com
+  rp_origins:
+    - "https://cfgms.example.com"
+  allow_software_authenticators:
+    tenants:
+      - msp-a
+      - client-2
+`
+	require.NoError(t, yaml.Unmarshal([]byte(content), &cfg))
+	assert.Equal(t, []string{"msp-a", "client-2"}, cfg.SoftwareAuthenticatorTenants())
+	assert.NoError(t, cfg.ValidateWebAuthn())
+}
+
+func TestWebAuthnConfig_AllowSoftwareAuthenticators_DefaultsToEmpty(t *testing.T) {
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal([]byte("webauthn:\n  rp_id: cfgms.example.com\n  rp_origins: [\"https://cfgms.example.com\"]\n"), &cfg))
+	assert.Empty(t, cfg.SoftwareAuthenticatorTenants())
+	assert.NoError(t, cfg.ValidateWebAuthn())
+
+	assert.Empty(t, (&Config{}).SoftwareAuthenticatorTenants(), "no webauthn block")
+	assert.Empty(t, (*Config)(nil).SoftwareAuthenticatorTenants(), "nil config")
+}
+
+func TestConfig_ValidateWebAuthn_SoftwareAuthenticatorTenants(t *testing.T) {
+	build := func(tenants []string) *Config {
+		return &Config{WebAuthn: &WebAuthnConfig{
+			AllowSoftwareAuthenticators: &AllowSoftwareAuthenticatorsConfig{Tenants: tenants},
+		}}
+	}
+
+	t.Run("empty list is valid and means off", func(t *testing.T) {
+		assert.NoError(t, build(nil).ValidateWebAuthn())
+		assert.NoError(t, build([]string{}).ValidateWebAuthn())
+		assert.NoError(t, (&Config{WebAuthn: &WebAuthnConfig{AllowSoftwareAuthenticators: &AllowSoftwareAuthenticatorsConfig{}}}).ValidateWebAuthn())
+	})
+	t.Run("valid list", func(t *testing.T) {
+		assert.NoError(t, build([]string{"msp-a", "client-1"}).ValidateWebAuthn())
+	})
+	for name, tenants := range map[string][]string{
+		"empty entry":              {"msp-a", ""},
+		"whitespace entry":         {"   "},
+		"tab entry":                {"\t"},
+		"entry with padding":       {" msp-a"},
+		"entry with trailing pad":  {"msp-a "},
+		"blank entry among others": {"msp-a", "client-1", " "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := build(tenants).ValidateWebAuthn()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "webauthn.allow_software_authenticators.tenants")
+		})
+	}
+	t.Run("validated without a relying party", func(t *testing.T) {
+		// rp_id unset must not skip the list: an invalid list is a startup error.
+		cfg := build([]string{""})
+		assert.Empty(t, cfg.WebAuthn.RPID)
+		assert.Error(t, cfg.ValidateWebAuthn())
+	})
+}
+
+func TestLoadWithPath_RejectsInvalidSoftwareAuthenticatorTenants(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "controller.cfg")
+	require.NoError(t, os.WriteFile(path, []byte("listen_addr: 127.0.0.1:8443\nwebauthn:\n  allow_software_authenticators:\n    tenants: [\"\"]\n"), 0o600))
+	_, err := LoadWithPath(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "allow_software_authenticators")
+}

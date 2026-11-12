@@ -681,3 +681,56 @@ func TestRejectRemovedGitStorage(t *testing.T) {
 		assert.NoError(t, rejectRemovedGitStorage(&config.Config{Storage: &config.StorageConfig{Provider: provider}}), "provider %q", provider)
 	}
 }
+
+// --- Issue #6140: software-authenticator tenant list wiring ---
+
+// TestConfigureWebAuthn_SoftwareAuthenticatorTenantsReachAPIServer is a REQUIRED test
+// (Issue #6140 AC): webauthn.allow_software_authenticators.tenants from
+// controller.cfg reaches the API server, exact-match, and the default is empty
+// whether or not a relying party is configured.
+func TestConfigureWebAuthn_SoftwareAuthenticatorTenantsReachAPIServer(t *testing.T) {
+	newAPIServer := func(t *testing.T, webAuthn *config.WebAuthnConfig) (*config.Config, *server.Server) {
+		t.Helper()
+		cfg := newTestControllerServerConfig(t, webAuthn)
+		srv, err := server.New(cfg, logging.NewNoopLogger())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = srv.Stop() })
+		return cfg, srv
+	}
+
+	t.Run("listed tenants reach the server", func(t *testing.T) {
+		cfg, srv := newAPIServer(t, &config.WebAuthnConfig{
+			RPID:      "cfgms.example.com",
+			RPOrigins: []string{"https://cfgms.example.com"},
+			AllowSoftwareAuthenticators: &config.AllowSoftwareAuthenticatorsConfig{
+				Tenants: []string{"msp-a"},
+			},
+		})
+		require.NoError(t, configureWebAuthn(srv.GetAPIServer(), cfg))
+		assert.True(t, srv.GetAPIServer().SoftwareAuthenticatorTenantListed("msp-a"))
+		assert.False(t, srv.GetAPIServer().SoftwareAuthenticatorTenantListed("client-1"), "a listed tenant does not cover its children")
+	})
+
+	t.Run("default is empty", func(t *testing.T) {
+		cfg, srv := newAPIServer(t, &config.WebAuthnConfig{
+			RPID:      "cfgms.example.com",
+			RPOrigins: []string{"https://cfgms.example.com"},
+		})
+		require.NoError(t, configureWebAuthn(srv.GetAPIServer(), cfg))
+		assert.False(t, srv.GetAPIServer().SoftwareAuthenticatorTenantListed("msp-a"))
+	})
+
+	t.Run("list applies without a relying party", func(t *testing.T) {
+		cfg, srv := newAPIServer(t, &config.WebAuthnConfig{
+			AllowSoftwareAuthenticators: &config.AllowSoftwareAuthenticatorsConfig{Tenants: []string{"msp-a"}},
+		})
+		require.NoError(t, configureWebAuthn(srv.GetAPIServer(), cfg))
+		assert.True(t, srv.GetAPIServer().SoftwareAuthenticatorTenantListed("msp-a"))
+	})
+
+	t.Run("an invalid relying party is an error", func(t *testing.T) {
+		cfg, srv := newAPIServer(t, nil)
+		cfg.WebAuthn = &config.WebAuthnConfig{RPID: "cfgms.example.com"}
+		assert.Error(t, configureWebAuthn(srv.GetAPIServer(), cfg))
+	})
+}
