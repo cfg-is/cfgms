@@ -1559,8 +1559,9 @@ func (c *TransportClient) commandScriptEmitter(existingEmitter *EventEmitter, st
 // returning: execution availability must not depend on a controller round trip,
 // exactly the case this control exists for (a leaked operator credential coinciding
 // with an attacker blocking the connection). A fetch failure only logs; the
-// verifier keeps answering IsRevoked from whatever manifest, if any, it last
-// verified (RunPeriodicRefresh's contract).
+// verifier keeps answering from whatever manifest, if any, it last verified
+// (RunPeriodicRefresh's contract) — and X.509 operator payloads are refused once that
+// manifest is older than operatorroster.ManifestMaxAge.
 func (c *TransportClient) startRevocationManifestRefresh(ctx context.Context, revocationVerifier *operatorroster.RevocationVerifier) {
 	moduleTrustMode := c.moduleTrustMode
 	if moduleTrustMode == "" {
@@ -1620,9 +1621,9 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	// (Issue #3699), independently verified against the same controllerCARoots
 	// chain-of-trust used above. Constructed unconditionally (even when
 	// controllerCARoots is nil — VerifyManifest then rejects every strict-mode manifest
-	// on its nil-roots guard, so IsRevoked never sees one verify successfully and answers
-	// false, the same degrade-safe posture as the rest of operator-cert verification when
-	// no usable CA bundle is configured).
+	// on its nil-roots guard, so the verifier never holds a manifest and X.509 operator
+	// payloads are refused as "revocation state unknown", as they are whenever the last
+	// verified manifest is older than operatorroster.ManifestMaxAge).
 	revocationVerifier := operatorroster.NewRevocationVerifier(controllerCARoots)
 	c.startRevocationManifestRefresh(ctx, revocationVerifier)
 

@@ -881,9 +881,10 @@ credentials in the first place. `webauthn_relying_party` is unchanged. Each filt
 response is signed fresh with the controller's current signing certificate, so
 per-steward filtering never requires an unsigned or re-signed-by-a-relay payload.
 
-A fetch failure only logs and leaves `IsRevoked` answering from whatever manifest, if
-any, was last verified — execution availability never depends on this round trip
-succeeding, matching every other design choice on this path (see below). Epic #3571,
+A fetch failure only logs and leaves the verifier holding whatever manifest, if any, it
+last verified — script execution availability never depends on this round trip
+succeeding. X.509 operator payloads do depend on a recent success: they are refused once
+the last verified manifest is older than the freshness bound (see below). Epic #3571,
 previously cited here as the tracker for this gap, is closed with all sub-issues
 complete and did not add this delivery path; #4400 is the issue that did.
 
@@ -894,9 +895,25 @@ revocation is deliberately independent of the certificate's own claims about its
 gap: it verifies the signed revocation manifest fetched as described above (the same
 manifest shape the WebAuthn path's embedded-manifest roster is drawn from, just a
 different, steward-initiated delivery route) against the steward's own pinned CA roots,
-and `verifyOperatorCert` adds `IsRevoked(serial)` as a final check after the marker check
-succeeds — so that once a manifest reaches the steward, a certificate that is otherwise
-perfectly valid is rejected when its serial appears in it.
+and `verifyOperatorCert` adds `CheckRevocation(serial, now)` as a final check after the
+marker check succeeds — so that once a manifest reaches the steward, a certificate that is
+otherwise perfectly valid is rejected when its serial appears in it.
+
+The check **fails closed**. An X.509 operator signature is accepted only while the steward
+holds a revocation manifest it verified for itself whose signed issuance instant
+(`NewestIssuedAt()`) is no more than `operatorroster.ManifestMaxAge` (15 minutes, the same
+bound the WebAuthn credential roster and the X.509 signer roster use) old. With no verified
+manifest — a failed first fetch, nil CA roots, a strict-mode verification failure — or only
+an older one, the steward refuses the payload with "revocation state unknown"
+(`operatorroster.ErrRevocationStateUnknown`) and publishes a status event
+(`error`, `details.reason: operator_revocation_state_unknown`) so the condition is visible
+fleet-side. Recovery is automatic: the next manifest that verifies refreshes the age, and
+the periodic refresh (5 minutes) keeps a healthy steward well inside the bound. A serial
+listed in the manifest is refused as revoked whatever the manifest's age. A handler
+configured with controller CA roots but no revocation verifier is a construction error
+(`commands.New` fails); the check is never silently skipped. Publisher-signed library
+scripts and module signatures do not consult the revocation manifest and are unaffected by
+its state.
 
 The same manifest carries the X.509 signer roster, `authorized_x509_signers`: one
 Kind-discriminated entry (`x509-signing-certificate`) per live payload-signing
@@ -939,17 +956,16 @@ controlling or blocking that connection.
 - **controller** (default). The manifest is applied without independently verifying its
   signature — the steward has already decided to trust the controller's own judgment for
   other artifacts under this mode, so it does the same here.
-- **bypass.** A genuine no-op (development use only): the manifest is never applied and
-  `IsRevoked` stays inert.
+- **bypass.** A genuine no-op (development use only): the manifest is never applied, so
+  X.509 operator payloads stay refused as "revocation state unknown".
 
 In strict and controller mode, anti-rollback is enforced on `version` (the manifest's own
 revoked-serial count, which `Manager.Revoke` only ever grows): a manifest older than the
 last one this steward accepted is rejected, so a captured, still-validly-signed older
 manifest — one missing revocations the steward has already learned about — cannot roll it
-back. `IsRevoked` answers `false` until the first manifest is successfully verified,
-matching the same graceful-degradation posture as an unconfigured `controllerCARoots`
-elsewhere in this verification path: it is a defense-in-depth layer on top of chain/EKU/
-marker verification, not the only check standing between an attacker and execution.
+back. `IsRevoked` is a pure membership test over the last verified manifest (false before
+the first one verifies) and does not gate authorization; `CheckRevocation` is the
+fail-closed check described above.
 
 ### Remote Terminal
 

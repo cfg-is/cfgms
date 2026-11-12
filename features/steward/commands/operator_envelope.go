@@ -4,10 +4,13 @@
 package commands
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
 
+	"github.com/cfgis/cfgms/features/steward/operatorroster"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 )
@@ -56,9 +59,34 @@ func (h *Handler) verifyOperatorEnvelope(cmd *cpTypes.Command, content []byte, s
 			proof.webauthnAuthDataB64, proof.webauthnClientDataB64, proof.webauthnSigB64, proof.webauthnCredIDB64, proof.webauthnManifestJSON)
 	}
 	if err != nil {
+		if errors.Is(err, operatorroster.ErrRevocationStateUnknown) {
+			h.reportRevocationStateUnknown(cmd)
+		}
 		return err
 	}
 	return h.checkEnvelopeBinding(envelope)
+}
+
+// revocationStateUnknownReason is the Details["reason"] of the status event emitted when an
+// X.509 operator payload is refused because the steward cannot say whether the signing
+// certificate has been revoked.
+const revocationStateUnknownReason = "operator_revocation_state_unknown"
+
+// reportRevocationStateUnknown publishes a status event so a steward refusing X.509 operator
+// payloads for lack of fresh revocation state is visible fleet-side, not only in the failed
+// command's own result. The event carries no certificate material.
+func (h *Handler) reportRevocationStateUnknown(cmd *cpTypes.Command) {
+	h.sendStatus(context.Background(), &cpTypes.Event{
+		ID:        newEventID(),
+		Type:      cpTypes.EventError,
+		StewardID: h.stewardID,
+		CommandID: cmd.ID,
+		Timestamp: time.Now(),
+		Details: map[string]interface{}{
+			"reason": revocationStateUnknownReason,
+			"error":  "operator payload refused: revocation state unknown or stale",
+		},
+	})
 }
 
 // operatorProof is the credential half of an operator envelope as it arrives in

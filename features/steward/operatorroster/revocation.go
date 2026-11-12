@@ -42,6 +42,7 @@ package operatorroster
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -55,6 +56,24 @@ import (
 	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	stewardtrust "github.com/cfgis/cfgms/pkg/modules/trust"
 )
+
+// ManifestMaxAge bounds how old a signed manifest may be when it is used to authorize
+// execution. Without an upper bound the manifest is a bearer artifact that never
+// expires: revoking a compromised credential (or removing it from a roster) could
+// never take effect on a steward that holds, or can only be shown, an older copy.
+// Above the operator envelope's own 5-minute validity so a legitimately-signed
+// envelope never outlives the manifest fetched alongside it. The WebAuthn credential
+// roster, the X.509 signer roster and the revocation check all use this one bound.
+const ManifestMaxAge = 15 * time.Minute
+
+// ErrRevocationStateUnknown is returned by CheckRevocation when the verifier holds no
+// verified manifest, or only one older than ManifestMaxAge: the steward cannot say
+// whether a certificate has been revoked, so it must not accept it.
+var ErrRevocationStateUnknown = errors.New("revocation state unknown")
+
+// ErrCertificateRevoked is returned by CheckRevocation for a serial the last verified
+// manifest lists as revoked.
+var ErrCertificateRevoked = errors.New("operator certificate has been revoked")
 
 // revocationManifestKind mirrors RevocationManifestKind in
 // features/controller/api/handlers_revocation_manifest.go.
@@ -179,8 +198,8 @@ func (v *RevocationVerifier) NewestIssuedAt() (time.Time, bool) {
 // controller CA pool verifyOperatorCert already verifies operator certificates
 // against — a manifest and the certificates it revokes come from the same issuing
 // authority. A nil caRoots is accepted rather than panicking, so a steward not yet
-// holding a usable CA bundle can still construct the verifier and have IsRevoked
-// answer false until one is available; VerifyManifest then rejects every strict-mode
+// holding a usable CA bundle can still construct the verifier (CheckRevocation then
+// refuses every certificate as "revocation state unknown" until a manifest verifies); VerifyManifest then rejects every strict-mode
 // manifest outright (see its nil-roots guard — a nil pool must never reach
 // x509.VerifyOptions.Roots, where it would mean "use the host's system roots").
 func NewRevocationVerifier(caRoots *x509.CertPool, opts ...RevocationOption) *RevocationVerifier {
@@ -352,11 +371,10 @@ func (v *RevocationVerifier) verifyStrict(manifest *signedRevocationManifest) er
 // IsRevoked reports whether serial (an x509 certificate serial number in the same
 // decimal string form as (*big.Int).String() — the form
 // pkg/cert.Manager.Revoke/ListRevoked and x509.Certificate.SerialNumber both
-// produce) appears in the last manifest this verifier successfully verified. It
-// answers false, not an error, when no manifest has been verified yet: this is an
-// additional, defense-in-depth check layered onto verification that already independently
-// confirms the certificate's chain, EKU, expiry, and payload-signing marker, not
-// the only check standing between an attacker and execution.
+// produce) appears in the last manifest this verifier successfully verified. It is a
+// pure membership test: it answers false when no manifest has been verified and
+// applies no freshness bound, so it must NOT gate an authorization decision.
+// CheckRevocation is the fail-closed check.
 func (v *RevocationVerifier) IsRevoked(serial string) bool {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -365,6 +383,29 @@ func (v *RevocationVerifier) IsRevoked(serial string) bool {
 	}
 	_, revoked := v.revoked[serial]
 	return revoked
+}
+
+// CheckRevocation is the fail-closed revocation check for authorizing an operator
+// certificate. It returns nil only when this verifier holds a manifest verified for
+// itself whose signed issuance instant is no more than ManifestMaxAge before now and
+// that does not list serial. It returns ErrRevocationStateUnknown when no manifest
+// has verified or the newest one is older than the bound, and ErrCertificateRevoked
+// when serial is listed (a listed serial is refused whatever the manifest's age).
+// Recovery is automatic: the next manifest that verifies refreshes the age.
+func (v *RevocationVerifier) CheckRevocation(serial string, now time.Time) error {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	if !v.hasVerified {
+		return fmt.Errorf("%w: no revocation manifest has been verified", ErrRevocationStateUnknown)
+	}
+	if _, revoked := v.revoked[serial]; revoked {
+		return ErrCertificateRevoked
+	}
+	if now.Sub(v.newestIssued) > ManifestMaxAge {
+		return fmt.Errorf("%w: newest verified revocation manifest is older than the %s freshness window",
+			ErrRevocationStateUnknown, ManifestMaxAge)
+	}
+	return nil
 }
 
 // FetchAndVerify fetches the signed revocation manifest from manifestURL using
