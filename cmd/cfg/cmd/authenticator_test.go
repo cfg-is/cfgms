@@ -94,7 +94,7 @@ func TestAuthenticatorCommandsRegisteredOnRoot(t *testing.T) {
 	for _, c := range authenticatorCmd.Commands() {
 		verbs[c.Name()] = true
 	}
-	assert.Equal(t, map[string]bool{"create": true, "list": true, "delete": true}, verbs)
+	assert.Equal(t, map[string]bool{"create": true, "list": true, "delete": true, "enroll": true}, verbs)
 }
 
 // Required: after create the credentials directory holds authenticator.<name>.enc and
