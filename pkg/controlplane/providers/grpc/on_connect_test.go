@@ -41,6 +41,14 @@ func (h *captureHook) CalledWith() []string {
 // newTestEnvWithOnConnectHook creates a server+client pair with the given hook injected.
 func newTestEnvWithOnConnectHook(t *testing.T, stewardID string, hook StewardOnConnectHook) (*Provider, registry.Registry) {
 	t.Helper()
+	server, _, reg := newOnConnectHookEnv(t, stewardID, hook)
+	return server, reg
+}
+
+// newOnConnectHookEnv is newTestEnvWithOnConnectHook that also returns the
+// steward-side client provider.
+func newOnConnectHookEnv(t *testing.T, stewardID string, hook StewardOnConnectHook) (*Provider, *Provider, registry.Registry) {
+	t.Helper()
 
 	serverTLS, clientTLS := newTestTLSConfigs(t, stewardID)
 	reg := registry.NewRegistry()
@@ -70,7 +78,7 @@ func newTestEnvWithOnConnectHook(t *testing.T, stewardID string, hook StewardOnC
 		return ok
 	}, 5*time.Second, 10*time.Millisecond, "steward should be registered before proceeding")
 
-	return server, reg
+	return server, client, reg
 }
 
 // TestOnConnectHookCalledOnConnect verifies that the hook is invoked with the
@@ -139,4 +147,122 @@ func TestOnConnectHookNotCalledWhenNil(t *testing.T) {
 	env := newTestEnv(t, "steward-no-hook")
 	_, ok := env.registry.Get("steward-no-hook")
 	assert.True(t, ok, "steward should be admitted when no hook is set")
+}
+
+// hookResult is how a gated hook ended.
+type hookResult struct {
+	err        error
+	ctxStopped bool
+}
+
+// gatedHook blocks in OnConnect until open is closed or its context ends, and
+// reports how it ended on done.
+type gatedHook struct {
+	entered chan struct{}
+	open    chan struct{}
+	done    chan hookResult
+}
+
+func newGatedHook() *gatedHook {
+	return &gatedHook{
+		entered: make(chan struct{}, 1),
+		open:    make(chan struct{}),
+		done:    make(chan hookResult, 1),
+	}
+}
+
+func (h *gatedHook) OnConnect(ctx context.Context, _ string) error {
+	h.entered <- struct{}{}
+	select {
+	case <-h.open:
+		h.done <- hookResult{}
+		return nil
+	case <-ctx.Done():
+		h.done <- hookResult{err: ctx.Err(), ctxStopped: true}
+		return ctx.Err()
+	}
+}
+
+// TestOnConnectHookCanWaitOnReceiveLoop reproduces a hook that waits for a
+// message only the receive loop can read. The hooks used to run on the stream
+// handler before the receive loop started, so such a hook never returned and
+// the steward's session stayed unread.
+func TestOnConnectHookCanWaitOnReceiveLoop(t *testing.T) {
+	t.Parallel()
+	const stewardID = "steward-hook-waits-on-recv"
+	hook := newGatedHook()
+
+	server, client, _ := newOnConnectHookEnv(t, stewardID, hook)
+
+	heartbeatSeen := make(chan struct{})
+	var once sync.Once
+	require.NoError(t, server.SubscribeHeartbeats(context.Background(), func(_ context.Context, hb *types.Heartbeat) error {
+		if hb.StewardID == stewardID {
+			once.Do(func() { close(heartbeatSeen) })
+		}
+		return nil
+	}))
+	go func() {
+		<-heartbeatSeen
+		close(hook.open)
+	}()
+
+	select {
+	case <-hook.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("hook was never called")
+	}
+
+	// The steward's heartbeat reaches the server only through the receive loop.
+	hb := &types.Heartbeat{StewardID: stewardID, Status: types.StatusHealthy, Timestamp: time.Now(), Version: "1.0.0"}
+	require.Eventually(t, func() bool {
+		_ = client.SendHeartbeat(context.Background(), hb)
+		select {
+		case <-heartbeatSeen:
+			return true
+		default:
+			return false
+		}
+	}, 5*time.Second, 50*time.Millisecond, "the receive loop must read while the on-connect hook runs")
+
+	select {
+	case res := <-hook.done:
+		assert.NoError(t, res.err, "hook should return once its reply is read")
+	case <-time.After(5 * time.Second):
+		t.Fatal("hook never returned")
+	}
+}
+
+// TestOnConnectHookEndsWhenSessionEvicted verifies that evicting a session whose
+// hook is still running ends the stream and cancels the hook's context. The
+// handler used to sit inside the hook and never reach the eviction.
+func TestOnConnectHookEndsWhenSessionEvicted(t *testing.T) {
+	t.Parallel()
+	const stewardID = "steward-hook-evicted"
+	hook := newGatedHook()
+	t.Cleanup(func() { close(hook.open) })
+
+	_, reg := newTestEnvWithOnConnectHook(t, stewardID, hook)
+
+	select {
+	case <-hook.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("hook was never called")
+	}
+
+	conn, ok := reg.Get(stewardID)
+	require.True(t, ok)
+	require.NotNil(t, conn.Evict)
+	conn.Evict(errors.New("superseded"))
+
+	select {
+	case res := <-hook.done:
+		assert.True(t, res.ctxStopped, "evicting the session must cancel the hook's context")
+	case <-time.After(5 * time.Second):
+		t.Fatal("hook context was not cancelled after eviction")
+	}
+	require.Eventually(t, func() bool {
+		cur, ok := reg.Get(stewardID)
+		return !ok || cur != conn
+	}, 5*time.Second, 10*time.Millisecond, "evicted session should leave the registry")
 }

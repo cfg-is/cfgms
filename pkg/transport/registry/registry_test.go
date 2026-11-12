@@ -697,3 +697,147 @@ func TestRegistry_HookPanicDoesNotCrash(t *testing.T) {
 		t.Errorf("Get() returned wrong connection")
 	}
 }
+
+// =============================================================================
+// Stalled-send tests
+// =============================================================================
+
+// blockingSender models a stream whose peer has stopped reading: SendMsg blocks
+// until release is closed, then fails the way a torn-down stream does.
+type blockingSender struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	calls   atomic.Int32
+}
+
+func newBlockingSender() *blockingSender {
+	return &blockingSender{entered: make(chan struct{}, 16), release: make(chan struct{})}
+}
+
+func (b *blockingSender) SendMsg(interface{}) error {
+	b.calls.Add(1)
+	b.entered <- struct{}{}
+	<-b.release
+	return errors.New("stream closed")
+}
+
+// unblock ends every blocked and future SendMsg, as cancelling the stream does.
+func (b *blockingSender) unblock() { b.once.Do(func() { close(b.release) }) }
+
+// completes reports whether fn returns within d.
+func completes(d time.Duration, fn func()) bool {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// TestStewardConnection_UpdateActivityNotBlockedBySend reproduces the stall
+// where a Send blocked on a stream whose peer stopped reading held the mutex
+// that UpdateActivity shares, so the receive loop (which calls UpdateActivity
+// per message) stopped reading too and the two ends deadlocked.
+func TestStewardConnection_UpdateActivityNotBlockedBySend(t *testing.T) {
+	sender := newBlockingSender()
+	t.Cleanup(sender.unblock)
+	conn := &StewardConnection{StewardID: "s1", Sender: sender, SendStallTimeout: time.Minute}
+
+	go func() { _ = conn.Send("stuck") }()
+	select {
+	case <-sender.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Send never reached the sender")
+	}
+
+	if !completes(2*time.Second, conn.UpdateActivity) {
+		t.Fatal("UpdateActivity blocked behind an in-flight Send")
+	}
+	if !completes(2*time.Second, func() { _ = conn.GetLastActivity() }) {
+		t.Fatal("GetLastActivity blocked behind an in-flight Send")
+	}
+}
+
+// TestStewardConnection_StalledSendEvictsConnection verifies that a Send that
+// does not return within SendStallTimeout evicts the connection, so the stream
+// handler tears the dead stream down instead of leaving the registry entry
+// blocking every later send.
+func TestStewardConnection_StalledSendEvictsConnection(t *testing.T) {
+	sender := newBlockingSender()
+	t.Cleanup(sender.unblock)
+	var evictErr atomic.Value
+	conn := &StewardConnection{
+		StewardID:        "s1",
+		Sender:           sender,
+		SendStallTimeout: 50 * time.Millisecond,
+		Evict: func(err error) {
+			evictErr.Store(err)
+			sender.unblock() // the handler returning cancels the stream
+		},
+	}
+
+	var sendErr error
+	if !completes(5*time.Second, func() { sendErr = conn.Send("stuck") }) {
+		t.Fatal("Send did not return after the stall timeout")
+	}
+	if sendErr == nil {
+		t.Fatal("Send on a stalled stream returned nil")
+	}
+	got, _ := evictErr.Load().(error)
+	if !errors.Is(got, ErrSendStalled) {
+		t.Fatalf("Evict called with %v, want ErrSendStalled", got)
+	}
+}
+
+// TestStewardConnection_QueuedSendFailsAfterStall verifies that a Send queued
+// behind a stuck one gives up after the stall timeout instead of waiting for
+// the stream forever, including on a connection that cannot be evicted.
+func TestStewardConnection_QueuedSendFailsAfterStall(t *testing.T) {
+	sender := newBlockingSender()
+	t.Cleanup(sender.unblock)
+	conn := &StewardConnection{StewardID: "s1", Sender: sender, SendStallTimeout: 50 * time.Millisecond}
+
+	go func() { _ = conn.Send("stuck") }()
+	select {
+	case <-sender.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first Send never reached the sender")
+	}
+
+	var err error
+	if !completes(5*time.Second, func() { err = conn.Send("queued") }) {
+		t.Fatal("queued Send did not return after the stall timeout")
+	}
+	if !errors.Is(err, ErrSendStalled) {
+		t.Fatalf("queued Send error = %v, want ErrSendStalled", err)
+	}
+	if n := sender.calls.Load(); n != 1 {
+		t.Fatalf("sender saw %d SendMsg calls, want 1 (queued send must not reach the stream)", n)
+	}
+}
+
+// TestStewardConnection_SlowSendIsNotEvicted verifies that a send which
+// completes inside the timeout does not evict the connection.
+func TestStewardConnection_SlowSendIsNotEvicted(t *testing.T) {
+	var evicted atomic.Bool
+	conn := &StewardConnection{
+		StewardID:        "s1",
+		Sender:           &mockSender{},
+		SendStallTimeout: time.Minute,
+		Evict:            func(error) { evicted.Store(true) },
+	}
+	for i := 0; i < 10; i++ {
+		if err := conn.Send(i); err != nil {
+			t.Fatalf("Send() error = %v", err)
+		}
+	}
+	if evicted.Load() {
+		t.Fatal("healthy connection was evicted")
+	}
+}
