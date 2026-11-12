@@ -26,7 +26,9 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/features/steward/operatorroster"
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -867,6 +869,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_Accepted(t *testing.T) {
 		Logger:             newTestLogger(t),
 		RequireSignedAdhoc: true,
 		ControllerCARoots:  caPool,
+		RevocationVerifier: operatorroster.NewRevocationVerifier(caPool),
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
@@ -923,7 +926,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_TargetMismatch_Rejected(t *t
 		sigTestAuthorizedEntry(credID, pubKey),
 	})
 
-	cb, err := New(&Config{StewardID: "host-B", OnStatus: noopStatus, Logger: newTestLogger(t), RequireSignedAdhoc: true, ControllerCARoots: caPool})
+	cb, err := New(&Config{StewardID: "host-B", OnStatus: noopStatus, Logger: newTestLogger(t), RequireSignedAdhoc: true, ControllerCARoots: caPool, RevocationVerifier: operatorroster.NewRevocationVerifier(caPool)})
 	require.NoError(t, err)
 	cb.RegisterExecuteScriptHandler()
 
@@ -981,6 +984,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_NonceReplay_Rejected(t *test
 		Logger:             newTestLogger(t),
 		RequireSignedAdhoc: true,
 		ControllerCARoots:  caPool,
+		RevocationVerifier: operatorroster.NewRevocationVerifier(caPool),
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
@@ -1071,6 +1075,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_ForeignTenantCredential_Reje
 		Logger:             newTestLogger(t),
 		RequireSignedAdhoc: true,
 		ControllerCARoots:  caPool,
+		RevocationVerifier: operatorroster.NewRevocationVerifier(caPool),
 		TenantID:           "root/msp-a/client-1",
 	})
 	require.NoError(t, err)
@@ -1109,6 +1114,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_UnauthorizedGrant_Rejected(t
 		Logger:             newTestLogger(t),
 		RequireSignedAdhoc: true,
 		ControllerCARoots:  caPool,
+		RevocationVerifier: operatorroster.NewRevocationVerifier(caPool),
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
@@ -1146,6 +1152,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_StaleManifest_Rejected(t *te
 		Logger:             newTestLogger(t),
 		RequireSignedAdhoc: true,
 		ControllerCARoots:  caPool,
+		RevocationVerifier: operatorroster.NewRevocationVerifier(caPool),
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
@@ -1184,6 +1191,8 @@ func TestExecuteScriptHandler_InlineScript_NoCARoots_Refused(t *testing.T) {
 				OnStatus:          cb,
 				Logger:            newTestLogger(t),
 				ControllerCARoots: tc.roots,
+				// Non-nil whenever roots are configured; with empty roots the verifier is never reached.
+				RevocationVerifier: operatorroster.NewRevocationVerifier(tc.roots),
 			})
 			require.NoError(t, err)
 			h.RegisterExecuteScriptHandler()
@@ -1297,4 +1306,147 @@ func TestExecuteScriptHandler_Timeout_ErrorNamesFiredTimeout(t *testing.T) {
 	require.NotNil(t, evt, "timed-out script must emit a failure event")
 	assert.Contains(t, evt.Details["error"], "timed out after 2s")
 	assert.Equal(t, 2, evt.Details["timeout_seconds"])
+}
+
+// newRevocationGateHandler builds a handler with controller CA roots and the given revocation
+// verifier, collecting the status events it publishes.
+func newRevocationGateHandler(t *testing.T, caPool *x509.CertPool, rev *operatorroster.RevocationVerifier, trusted ...script.TrustedKeyEntry) (*Handler, func() []*cpTypes.Event) {
+	t.Helper()
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{
+		StewardID: "steward-test",
+		OnStatus:  cb,
+		Logger:    newTestLogger(t),
+		SigningConfig: script.ModuleSigningConfig{
+			TrustMode:   script.TrustModeTrustedKeys,
+			TrustedKeys: trusted,
+		},
+		RequireSignedAdhoc: true,
+		ControllerCARoots:  caPool,
+		RevocationVerifier: rev,
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+	return h, getEvents
+}
+
+// TestX509OperatorPayload_NoVerifiedRevocationManifest_Rejected is a REQUIRED test: with no
+// verified revocation manifest an otherwise valid X.509 operator payload is refused, a status
+// event makes the condition visible fleet-side, and once a valid manifest verifies the same
+// signer is accepted.
+func TestX509OperatorPayload_NoVerifiedRevocationManifest_Rejected(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	signer := sigTestOperatorCert(t, ca, boundPayloadSigning)
+	rev := operatorroster.NewRevocationVerifier(caPool)
+	h, getEvents := newRevocationGateHandler(t, caPool, rev)
+
+	err := verifyActionAs(t, h, signer)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+	require.ErrorIs(t, err, operatorroster.ErrRevocationStateUnknown)
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventError)
+	require.NotNil(t, evt, "a refusal for unknown revocation state must publish a status event")
+	assert.Equal(t, revocationStateUnknownReason, evt.Details["reason"])
+	assert.Equal(t, "steward-test", evt.StewardID)
+
+	require.NoError(t, rev.VerifyManifest(
+		signRosterManifest(t, ca, 1, time.Now(), nil, rootScopeSignerEntry(signer)), stewardtypes.ModuleTrustModeStrict))
+	require.NoError(t, verifyActionAs(t, h, signer), "a fresh verified manifest must restore acceptance")
+}
+
+// TestX509OperatorPayload_StaleRevocationManifest_Rejected is a REQUIRED test: a manifest older
+// than the freshness bound causes rejection; a fresh one restores acceptance.
+func TestX509OperatorPayload_StaleRevocationManifest_Rejected(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	signer := sigTestOperatorCert(t, ca, boundPayloadSigning)
+	rev := operatorroster.NewRevocationVerifier(caPool)
+	h, getEvents := newRevocationGateHandler(t, caPool, rev)
+
+	stale := time.Now().Add(-operatorroster.ManifestMaxAge - time.Minute)
+	require.NoError(t, rev.VerifyManifest(
+		signRosterManifest(t, ca, 1, stale, nil, rootScopeSignerEntry(signer)), stewardtypes.ModuleTrustModeStrict))
+
+	err := verifyActionAs(t, h, signer)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+	require.ErrorIs(t, err, operatorroster.ErrRevocationStateUnknown)
+	assert.NotNil(t, firstEventOfType(getEvents(), cpTypes.EventError))
+
+	require.NoError(t, rev.VerifyManifest(
+		signRosterManifest(t, ca, 2, time.Now(), nil, rootScopeSignerEntry(signer)), stewardtypes.ModuleTrustModeStrict))
+	require.NoError(t, verifyActionAs(t, h, signer), "a fresh manifest must restore acceptance")
+}
+
+// TestX509OperatorPayload_RevokedCertificate_FreshManifest_Rejected is a REQUIRED test: a
+// revoked certificate is refused with a fresh manifest, as "revoked" and not as unknown state,
+// and without the revocation-state status event.
+func TestX509OperatorPayload_RevokedCertificate_FreshManifest_Rejected(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	signer := sigTestOperatorCert(t, ca, boundPayloadSigning)
+	rev := operatorroster.NewRevocationVerifier(caPool)
+	require.NoError(t, rev.VerifyManifest(
+		signRosterManifest(t, ca, 1, time.Now(), []string{signer.SerialNumber}, rootScopeSignerEntry(signer)), stewardtypes.ModuleTrustModeStrict))
+	h, getEvents := newRevocationGateHandler(t, caPool, rev)
+
+	err := verifyActionAs(t, h, signer)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+	require.ErrorIs(t, err, operatorroster.ErrCertificateRevoked)
+	assert.NotErrorIs(t, err, operatorroster.ErrRevocationStateUnknown)
+	assert.Nil(t, firstEventOfType(getEvents(), cpTypes.EventError))
+}
+
+// TestX509OperatorVerifier_NilRevocationVerifier_ConstructionFails is a REQUIRED test: a nil
+// revocation verifier is a construction error, both for the X.509 operator verifier and for the
+// handler that holds controller CA roots, never a silent skip of the check.
+func TestX509OperatorVerifier_NilRevocationVerifier_ConstructionFails(t *testing.T) {
+	_, caPool := sigTestCA(t)
+
+	v, err := newX509OperatorCredentialVerifier(caPool, nil, nil, "")
+	require.Error(t, err)
+	require.ErrorIs(t, err, errNoRevocationVerifier)
+	assert.Nil(t, v)
+
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: noopStatus, Logger: newTestLogger(t), ControllerCARoots: caPool})
+	require.ErrorIs(t, err, errNoRevocationVerifier)
+	assert.Nil(t, h)
+
+	// verifyOperatorCert has no skip path either.
+	_, err = verifyOperatorCert("", caPool, nil, nil, time.Now())
+	require.Error(t, err)
+}
+
+// TestLibraryScript_UnaffectedByRevocationManifestState is a REQUIRED test: a publisher-signed
+// library script runs whether the revocation verifier holds no manifest or only a stale one.
+func TestLibraryScript_UnaffectedByRevocationManifestState(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	key := sigTestRSAKey(t)
+	pubKeyPEM := sigTestPubKeyPEM(key)
+	trusted := script.TrustedKeyEntry{Name: "ci-signing-key", Thumbprint: computeThumbprintFromPEM(pubKeyPEM)}
+
+	stale := operatorroster.NewRevocationVerifier(caPool)
+	require.NoError(t, stale.VerifyManifest(
+		signRosterManifest(t, ca, 1, time.Now().Add(-operatorroster.ManifestMaxAge-time.Hour), nil), stewardtypes.ModuleTrustModeStrict))
+
+	for name, rev := range map[string]*operatorroster.RevocationVerifier{
+		"never verified": operatorroster.NewRevocationVerifier(caPool),
+		"stale manifest": stale,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, getEvents := newRevocationGateHandler(t, caPool, rev, trusted)
+
+			content := []byte(echoScriptBody("lib-revocation-independent"))
+			sc := testSignedCommandWithParams("lib-rev-"+name, cpTypes.CommandExecuteScript, map[string]interface{}{
+				"script_content":       base64.StdEncoding.EncodeToString(content),
+				"shell":                platformShell(),
+				"execution_id":         "lib-rev-" + name,
+				"script_id":            "trusted-lib-001",
+				"signature_algorithm":  "rsa-sha256",
+				"signature_value":      sigTestSignRSASHA256(t, key, content),
+				"signature_public_key": pubKeyPEM,
+			})
+			require.NoError(t, h.HandleCommand(context.Background(), sc))
+			h.Wait()
+			assert.NotNil(t, firstEventOfType(getEvents(), cpTypes.EventScriptCompleted))
+			assert.Nil(t, firstEventOfType(getEvents(), cpTypes.EventError))
+		})
+	}
 }

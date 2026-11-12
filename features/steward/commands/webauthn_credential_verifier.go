@@ -54,7 +54,10 @@ const operatorPayloadSignGrant = "operator-payload:sign"
 // presenting the copy that still lists the credential. Above the operator envelope's own
 // 5-minute validity so a legitimately-signed envelope never outlives the manifest
 // fetched alongside it.
-const webauthnManifestMaxAge = 15 * time.Minute
+//
+// The bound is operatorroster.ManifestMaxAge, shared with the X.509 revocation check so
+// every operator-credential freshness decision uses one number.
+const webauthnManifestMaxAge = operatorroster.ManifestMaxAge
 
 // webauthnManifestClockSkew is how far a manifest's issuance instant may sit in this
 // steward's future before it is refused, covering ordinary controller/steward clock

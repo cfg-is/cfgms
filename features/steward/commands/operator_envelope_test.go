@@ -457,16 +457,17 @@ func TestVerifyOperatorEnvelope_X509SignerAbsentFromRosterRejected(t *testing.T)
 	})
 	t.Run("no revocation verifier configured", func(t *testing.T) {
 		h := newHandlerWithSigning(t, nil, true, caPool)
+		h.revocationVerifier = nil
 		err := verifyActionAs(t, h, signer)
 		require.ErrorIs(t, err, ErrUnauthenticatedCommand)
-		assert.Contains(t, err.Error(), "no operator signer roster")
+		assert.Contains(t, err.Error(), "requires a revocation verifier")
 	})
 	t.Run("no manifest verified yet", func(t *testing.T) {
 		h := newHandlerWithSigning(t, nil, true, caPool)
 		h.revocationVerifier = operatorroster.NewRevocationVerifier(caPool)
 		err := verifyActionAs(t, h, signer)
 		require.ErrorIs(t, err, ErrUnauthenticatedCommand)
-		assert.Contains(t, err.Error(), "no verified operator signer roster")
+		require.ErrorIs(t, err, operatorroster.ErrRevocationStateUnknown)
 	})
 }
 

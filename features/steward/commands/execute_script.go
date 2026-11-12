@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -461,14 +462,12 @@ func (h *Handler) verifyX509OperatorSignature(roots, intermediates *x509.CertPoo
 	// (Issue #3694 Implementation Notes): x509OperatorCredentialVerifier and
 	// webauthnOperatorCredentialVerifier (webauthn_credential_verifier.go, Issue #3697)
 	// are its two implementations.
-	credVerifier := OperatorCredentialVerifier(&x509OperatorCredentialVerifier{
-		caRoots:            roots,
-		intermediates:      intermediates,
-		revocationVerifier: revocation,
-		stewardTenant:      h.tenantID,
-	})
-	if err := credVerifier.Verify(envelope, []byte(sigPublicKey)); err != nil {
-		return fmt.Errorf("%w: operator cert: %v", ErrUnauthenticatedCommand, err)
+	x509Verifier, err := newX509OperatorCredentialVerifier(roots, intermediates, revocation, h.tenantID)
+	if err != nil {
+		return fmt.Errorf("%w: operator cert: %w", ErrUnauthenticatedCommand, err)
+	}
+	if err := OperatorCredentialVerifier(x509Verifier).Verify(envelope, []byte(sigPublicKey)); err != nil {
+		return fmt.Errorf("%w: operator cert: %w", ErrUnauthenticatedCommand, err)
 	}
 	return nil
 }
@@ -605,8 +604,8 @@ type x509OperatorCredentialVerifier struct {
 	intermediates *x509.CertPool
 
 	// revocationVerifier answers whether the certificate's serial has been revoked
-	// (Issue #3699). Nil disables the check — the same degrade-safe default as an
-	// unconfigured controllerCARoots elsewhere in this file.
+	// (Issue #3699) and whether the steward's revocation state is fresh enough to
+	// say so. Never nil: newX509OperatorCredentialVerifier refuses to build without it.
 	revocationVerifier *operatorroster.RevocationVerifier
 
 	// stewardTenant is this steward's own tenant path, used to confine a fleet-wide X.509
@@ -616,26 +615,49 @@ type x509OperatorCredentialVerifier struct {
 	stewardTenant string
 }
 
+// errNoRevocationVerifier is the construction error for an X.509 operator verifier built
+// without a revocation verifier. A missing verifier is never a silent skip: without it
+// the steward could not know whether the signing certificate had been revoked.
+var errNoRevocationVerifier = errors.New("x509 operator verification requires a revocation verifier")
+
+// newX509OperatorCredentialVerifier builds the X.509 OperatorCredentialVerifier. A nil
+// revocation verifier is a construction error.
+func newX509OperatorCredentialVerifier(caRoots, intermediates *x509.CertPool, revocation *operatorroster.RevocationVerifier, stewardTenant string) (*x509OperatorCredentialVerifier, error) {
+	if revocation == nil {
+		return nil, errNoRevocationVerifier
+	}
+	return &x509OperatorCredentialVerifier{
+		caRoots:            caRoots,
+		intermediates:      intermediates,
+		revocationVerifier: revocation,
+		stewardTenant:      stewardTenant,
+	}, nil
+}
+
 // Verify implements OperatorCredentialVerifier: the certificate must pass verifyOperatorCert
 // and its signer must be authorized by the verified signer roster (authorizeX509Signer).
 func (v *x509OperatorCredentialVerifier) Verify(_ operatorpayload.Envelope, proof []byte) error {
-	parsedCert, err := verifyOperatorCert(string(proof), v.caRoots, v.intermediates, v.revocationVerifier)
+	now := time.Now()
+	parsedCert, err := verifyOperatorCert(string(proof), v.caRoots, v.intermediates, v.revocationVerifier, now)
 	if err != nil {
 		return err
 	}
-	return authorizeX509Signer(parsedCert, v.revocationVerifier, v.stewardTenant, time.Now())
+	return authorizeX509Signer(parsedCert, v.revocationVerifier, v.stewardTenant, now)
 }
 
 // verifyOperatorCert parses publicKeyPEM as an X.509 certificate and verifies that it
 // chains to caRoots with client-auth EKU, has not expired, carries the CFGMS
-// payload-signing marker (Issue #3696), and has not been revoked (Issue #3699). An
+// payload-signing marker (Issue #3696), and has not been revoked (Issue #3699). The
+// revocation check fails closed: with no verified revocation manifest, or one older than
+// operatorroster.ManifestMaxAge, the certificate is refused with an error wrapping
+// operatorroster.ErrRevocationStateUnknown. An
 // admin-bundle certificate — carrying AdminMarkerOID but not PayloadSigningMarkerOID —
 // chains and has the right EKU but is rejected here: it authenticates mTLS transport,
 // not operator payload signing. intermediates, when non-nil, are certificates the
 // operator certificate may chain through to caRoots. It returns the parsed certificate so the
 // caller can authorize its signer (authorizeX509Signer): chain, marker and revocation say the
 // key is one the controller issued and has not withdrawn, not that its owner may sign here.
-func verifyOperatorCert(publicKeyPEM string, caRoots, intermediates *x509.CertPool, revocationVerifier *operatorroster.RevocationVerifier) (*x509.Certificate, error) {
+func verifyOperatorCert(publicKeyPEM string, caRoots, intermediates *x509.CertPool, revocationVerifier *operatorroster.RevocationVerifier, now time.Time) (*x509.Certificate, error) {
 	block, _ := pem.Decode([]byte(publicKeyPEM))
 	if block == nil {
 		return nil, fmt.Errorf("no PEM block found in signature_public_key")
@@ -655,8 +677,11 @@ func verifyOperatorCert(publicKeyPEM string, caRoots, intermediates *x509.CertPo
 	if !cert.HasPayloadSigningMarker(parsedCert) {
 		return nil, fmt.Errorf("operator certificate is not a payload-signing certificate")
 	}
-	if revocationVerifier != nil && revocationVerifier.IsRevoked(parsedCert.SerialNumber.String()) {
-		return nil, fmt.Errorf("operator certificate has been revoked")
+	if revocationVerifier == nil {
+		return nil, errNoRevocationVerifier
+	}
+	if err := revocationVerifier.CheckRevocation(parsedCert.SerialNumber.String(), now); err != nil {
+		return nil, err
 	}
 	return parsedCert, nil
 }

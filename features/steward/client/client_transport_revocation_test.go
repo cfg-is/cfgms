@@ -84,6 +84,9 @@ func TestSetupCommandHandler_RevocationManifestFetchedOnStartup(t *testing.T) {
 
 	assert.False(t, handler.RevocationVerifier().IsRevoked("not-in-the-manifest"),
 		"a serial absent from the fetched manifest must not be reported as revoked")
+	assert.NoError(t, handler.RevocationVerifier().CheckRevocation("not-in-the-manifest", time.Now()),
+		"a fresh fetched manifest must restore acceptance of a serial it does not list")
+	assert.ErrorIs(t, handler.RevocationVerifier().CheckRevocation(revokedSerial, time.Now()), operatorroster.ErrCertificateRevoked)
 }
 
 // TestSetupCommandHandler_RevocationManifestFetch_NoBaseURL_DegradesSafe verifies that
@@ -100,6 +103,6 @@ func TestSetupCommandHandler_RevocationManifestFetch_NoBaseURL_DegradesSafe(t *t
 	handler, err := c.setupCommandHandler(t.Context(), "steward-revocation-no-url")
 	require.NoError(t, err)
 	require.NotNil(t, handler.RevocationVerifier())
-	assert.False(t, handler.RevocationVerifier().IsRevoked("anything"),
-		"with no manifest ever fetched, IsRevoked must answer false, not error or panic")
+	assert.ErrorIs(t, handler.RevocationVerifier().CheckRevocation("anything", time.Now()), operatorroster.ErrRevocationStateUnknown,
+		"with no manifest ever fetched, the revocation check must fail closed, not pass")
 }

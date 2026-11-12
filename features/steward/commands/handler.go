@@ -124,10 +124,9 @@ type Handler struct {
 
 	// revocationVerifier answers whether an operator certificate's serial has been
 	// revoked, from the last signed revocation manifest this steward independently
-	// verified for itself (Issue #3699). nil is treated as "no manifest verified
-	// yet" — the same graceful-degradation behavior as an unset revocationVerifier
-	// field, since operatorroster.RevocationVerifier.IsRevoked already answers
-	// false when it has never verified a manifest.
+	// verified for itself (Issue #3699). New refuses a handler with controller CA
+	// roots (the only configuration that verifies X.509 operator signatures) and no
+	// verifier, so it is non-nil wherever X.509 operator payloads can be accepted.
 	revocationVerifier *operatorroster.RevocationVerifier
 
 	// Issue #1675: per-execution relay registry.
@@ -224,8 +223,9 @@ type Config struct {
 
 	// RevocationVerifier answers whether an operator certificate has been revoked,
 	// from the last signed revocation manifest independently verified against this
-	// steward's controller CA (Issue #3699). Nil disables the revocation check —
-	// the same degrade-safe default as an unconfigured controllerCARoots.
+	// steward's controller CA (Issue #3699). Required whenever ControllerCARoots is
+	// set: New fails otherwise. An X.509 operator payload is accepted only while the
+	// verifier holds a manifest no older than operatorroster.ManifestMaxAge.
 	RevocationVerifier *operatorroster.RevocationVerifier
 
 	// Locked builds a locked-trust handler (report-only link). It is a separate
@@ -266,14 +266,8 @@ const (
 // never touched by this sweep — a restart never fails a queued delivery
 // (ADR-031 Decision 2).
 func New(cfg *Config) (*Handler, error) {
-	if cfg.StewardID == "" {
-		return nil, fmt.Errorf("steward ID is required")
-	}
-	if cfg.OnStatus == nil {
-		return nil, fmt.Errorf("status callback is required")
-	}
-	if cfg.Logger == nil {
-		return nil, fmt.Errorf("logger is required")
+	if err := cfg.validateRequired(); err != nil {
+		return nil, err
 	}
 
 	replayWindow := cfg.ReplayWindow
@@ -292,6 +286,10 @@ func New(cfg *Config) (*Handler, error) {
 	local := *cfg // applyLocked narrows the copy, never the caller's Config
 	cfg = &local
 	if err := cfg.applyLocked(); err != nil {
+		return nil, err
+	}
+
+	if err := cfg.requireRevocationVerifier(); err != nil {
 		return nil, err
 	}
 
@@ -329,6 +327,31 @@ func New(cfg *Config) (*Handler, error) {
 	}
 
 	return h, nil
+}
+
+// validateRequired rejects a Config missing a field every handler needs.
+func (cfg *Config) validateRequired() error {
+	if cfg.StewardID == "" {
+		return fmt.Errorf("steward ID is required")
+	}
+	if cfg.OnStatus == nil {
+		return fmt.Errorf("status callback is required")
+	}
+	if cfg.Logger == nil {
+		return fmt.Errorf("logger is required")
+	}
+	return nil
+}
+
+// requireRevocationVerifier fails construction when the handler can verify X.509
+// operator signatures (controller CA roots configured) but has no revocation
+// verifier; the absence is a construction error, never a silent skip of the
+// revocation check.
+func (cfg *Config) requireRevocationVerifier() error {
+	if cfg.ControllerCARoots != nil && cfg.RevocationVerifier == nil {
+		return fmt.Errorf("controller CA roots require a revocation verifier: %w", errNoRevocationVerifier)
+	}
+	return nil
 }
 
 // Wait blocks until all in-flight executeCommand goroutines have finished.

@@ -397,6 +397,85 @@ func TestRevocationVerifier_IsRevoked_NeverVerified_ReturnsFalse(t *testing.T) {
 	assert.False(t, v.IsRevoked("anything"))
 }
 
+// revTestSignManifestAt is revTestSignManifest with a caller-chosen issuance instant.
+func revTestSignManifestAt(t *testing.T, signingCert *cert.Certificate, version int64, issuedAt time.Time, revokedSerials []string) []byte {
+	t.Helper()
+	if revokedSerials == nil {
+		revokedSerials = []string{}
+	}
+	return revTestSignControllerManifest(t, signingCert, revTestControllerManifest{
+		Kind:           revocationManifestKind,
+		Version:        version,
+		IssuedAt:       issuedAt.UTC().Truncate(time.Second),
+		RevokedSerials: revokedSerials,
+	})
+}
+
+// TestRevocationVerifier_CheckRevocation_NeverVerified_FailsClosed is a REQUIRED test: with no
+// verified manifest the steward cannot say a certificate is unrevoked, so the check refuses it;
+// once a valid manifest verifies, the same serial passes.
+func TestRevocationVerifier_CheckRevocation_NeverVerified_FailsClosed(t *testing.T) {
+	ca, caPool := revTestCA(t)
+	signingCert := revTestSigningCert(t, ca)
+
+	v := NewRevocationVerifier(caPool)
+	err := v.CheckRevocation("12345", time.Now())
+	require.ErrorIs(t, err, ErrRevocationStateUnknown)
+
+	require.NoError(t, v.VerifyManifest(revTestSignManifest(t, signingCert, 1, nil), stewardtypes.ModuleTrustModeStrict))
+	assert.NoError(t, v.CheckRevocation("12345", time.Now()))
+}
+
+// TestRevocationVerifier_CheckRevocation_NilRoots_FailsClosed covers the nil-CA-roots
+// construction: no strict manifest can verify, so the check never passes.
+func TestRevocationVerifier_CheckRevocation_NilRoots_FailsClosed(t *testing.T) {
+	ca, _ := revTestCA(t)
+	signingCert := revTestSigningCert(t, ca)
+
+	v := NewRevocationVerifier(nil)
+	require.Error(t, v.VerifyManifest(revTestSignManifest(t, signingCert, 1, nil), stewardtypes.ModuleTrustModeStrict))
+	require.ErrorIs(t, v.CheckRevocation("12345", time.Now()), ErrRevocationStateUnknown)
+}
+
+// TestRevocationVerifier_CheckRevocation_Stale is a REQUIRED test: a manifest older than
+// ManifestMaxAge is refused; a fresh one restores acceptance automatically.
+func TestRevocationVerifier_CheckRevocation_Stale(t *testing.T) {
+	ca, caPool := revTestCA(t)
+	signingCert := revTestSigningCert(t, ca)
+	now := time.Now()
+
+	v := NewRevocationVerifier(caPool)
+	require.NoError(t, v.VerifyManifest(
+		revTestSignManifestAt(t, signingCert, 1, now.Add(-ManifestMaxAge-time.Minute), nil), stewardtypes.ModuleTrustModeStrict))
+	err := v.CheckRevocation("12345", now)
+	require.ErrorIs(t, err, ErrRevocationStateUnknown)
+	assert.Contains(t, err.Error(), "freshness window")
+
+	// Just inside the bound the same manifest is acceptable.
+	assert.NoError(t, v.CheckRevocation("12345", now.Add(-2*time.Minute)))
+
+	// A replayed older manifest does not refresh the age: the issuance instant is signed.
+	require.NoError(t, v.VerifyManifest(
+		revTestSignManifestAt(t, signingCert, 1, now.Add(-ManifestMaxAge-2*time.Minute), nil), stewardtypes.ModuleTrustModeStrict))
+	require.ErrorIs(t, v.CheckRevocation("12345", now), ErrRevocationStateUnknown)
+
+	// Recovery: a fresh manifest verifies and acceptance resumes.
+	require.NoError(t, v.VerifyManifest(revTestSignManifestAt(t, signingCert, 2, now, nil), stewardtypes.ModuleTrustModeStrict))
+	assert.NoError(t, v.CheckRevocation("12345", now))
+}
+
+// TestRevocationVerifier_CheckRevocation_Revoked is a REQUIRED test: a serial listed in a
+// fresh manifest is refused with ErrCertificateRevoked (not "state unknown").
+func TestRevocationVerifier_CheckRevocation_Revoked(t *testing.T) {
+	ca, caPool := revTestCA(t)
+	signingCert := revTestSigningCert(t, ca)
+
+	v := NewRevocationVerifier(caPool)
+	require.NoError(t, v.VerifyManifest(revTestSignManifest(t, signingCert, 1, []string{"666"}), stewardtypes.ModuleTrustModeStrict))
+	require.ErrorIs(t, v.CheckRevocation("666", time.Now()), ErrCertificateRevoked)
+	assert.NoError(t, v.CheckRevocation("777", time.Now()))
+}
+
 // TestRevocationVerifier_FetchAndVerify_EndToEnd is the [REQUIRED TEST] for Issue
 // #3699: revoking a certificate, re-fetching the manifest, and observing that the
 // certificate's serial is now rejected — end to end through the real HTTP fetch

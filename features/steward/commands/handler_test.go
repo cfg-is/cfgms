@@ -1472,6 +1472,12 @@ func sigTestSignWithCert(t *testing.T, keyPEM []byte, content []byte) string {
 // newHandlerWithSigning creates a handler configured for script signature enforcement.
 func newHandlerWithSigning(t *testing.T, trustedKeys []script.TrustedKeyEntry, requireSignedAdhoc bool, caRoots *x509.CertPool) *Handler {
 	t.Helper()
+	// A handler with controller CA roots must carry a revocation verifier; this one has
+	// verified no manifest, so a test that needs X.509 acceptance installs a verified one.
+	var revocation *operatorroster.RevocationVerifier
+	if caRoots != nil {
+		revocation = operatorroster.NewRevocationVerifier(caRoots)
+	}
 	h, err := New(&Config{
 		StewardID: "steward-test",
 		OnStatus:  noopStatus,
@@ -1482,6 +1488,7 @@ func newHandlerWithSigning(t *testing.T, trustedKeys []script.TrustedKeyEntry, r
 		},
 		RequireSignedAdhoc: requireSignedAdhoc,
 		ControllerCARoots:  caRoots,
+		RevocationVerifier: revocation,
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
