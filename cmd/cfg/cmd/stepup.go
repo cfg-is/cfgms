@@ -16,6 +16,10 @@
 //  3. Polls and collects the resulting single-use presence token over its own
 //     already-authenticated connection, then retries the original request with it.
 //
+// A session opened with --authenticator never uses the relay: authenticatorStepUpHandler
+// answers a presence challenge itself with the controller's direct presence begin/finish
+// calls and the software authenticator (Issue #6146).
+//
 // When the server returns a 401 + WWW-Authenticate: CFGMS-StepUp response,
 // defaultStepUpHandler routes to one of three paths:
 //
@@ -51,6 +55,7 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/softauthn"
 )
 
 // isTerminalFn is overridable in tests to simulate interactive/non-interactive environments.
@@ -106,22 +111,80 @@ func presenceBrowserSuppressed() bool {
 // error (non-interactive or assurance level cannot be raised programmatically).
 func defaultStepUpHandler(client *APIClient) func(wwwAuthenticate, method, path string, bodyBytes []byte) (string, error) {
 	return func(wwwAuthenticate, method, path string, bodyBytes []byte) (string, error) {
-		required, presenceRequired, permission := parseStepUpHeader(wwwAuthenticate)
-
-		if !presenceRequired {
-			if !isTerminalFn() {
-				return "", fmt.Errorf("step-up required: %s assurance needed for this action; re-run interactively or use an mTLS-authenticated session", required)
-			}
-			// The session assurance level cannot be raised programmatically in the CLI.
-			// The operator must log in via the web UI or use an mTLS-authenticated session.
-			return "", fmt.Errorf("step-up required: %s assurance needed for this action; log in via the web UI to elevate the session or use an mTLS-authenticated session", required)
+		permission, err := presencePermissionFromChallenge(wwwAuthenticate)
+		if err != nil {
+			return "", err
 		}
-
-		if permission == "" {
-			return "", fmt.Errorf("cfg cannot start the presence relay: the controller's step-up challenge did not name a permission (the controller may be running an older version)")
-		}
-
 		return presenceBrowserFlowFn(client, method, path, bodyBytes, permission)
+	}
+}
+
+// presencePermissionFromChallenge returns the permission a presence-required step-up
+// challenge names. It fails with the actionable error for a challenge that is not a
+// presence challenge (the assurance level cannot be raised programmatically) or that
+// names no permission; both step-up handlers share it so neither starts a ceremony it
+// cannot bind.
+func presencePermissionFromChallenge(wwwAuthenticate string) (string, error) {
+	required, presenceRequired, permission := parseStepUpHeader(wwwAuthenticate)
+
+	if !presenceRequired {
+		if !isTerminalFn() {
+			return "", fmt.Errorf("step-up required: %s assurance needed for this action; re-run interactively or use an mTLS-authenticated session", required)
+		}
+		// The session assurance level cannot be raised programmatically in the CLI.
+		// The operator must log in via the web UI or use an mTLS-authenticated session.
+		return "", fmt.Errorf("step-up required: %s assurance needed for this action; log in via the web UI to elevate the session or use an mTLS-authenticated session", required)
+	}
+
+	if permission == "" {
+		return "", fmt.Errorf("cfg cannot start the presence relay: the controller's step-up challenge did not name a permission (the controller may be running an older version)")
+	}
+	return permission, nil
+}
+
+// presenceCeremonyTimeout bounds one direct presence begin/finish exchange. The
+// controller's presence token lives only presenceTokenTTL (30 s), and the ceremony
+// needs no human, so it either completes promptly or is not going to.
+const presenceCeremonyTimeout = 30 * time.Second
+
+// authenticatorStepUpHandler returns the OnStepUpRequired callback for a client that
+// logged in with the software authenticator auth (--authenticator). A presence-required
+// challenge is answered with the controller's direct presence begin/finish calls: begin
+// names the exact guarded request (method, path, SHA-256 of the body, permission), auth
+// signs the challenge, and finish returns the single-use token the client replays the
+// request with. No browser and no human are involved, and nothing is cached: every
+// guarded request runs its own full ceremony.
+//
+// Challenges that are not presence challenges, or that name no permission, fail exactly
+// as they do for defaultStepUpHandler.
+func authenticatorStepUpHandler(client *APIClient, auth *softauthn.Authenticator) func(wwwAuthenticate, method, path string, bodyBytes []byte) (string, error) {
+	return func(wwwAuthenticate, method, path string, bodyBytes []byte) (string, error) {
+		permission, err := presencePermissionFromChallenge(wwwAuthenticate)
+		if err != nil {
+			return "", err
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), presenceCeremonyTimeout)
+		defer cancel()
+		options, err := client.WebAuthnPresenceBeginForAction(ctx, PresenceActionBinding{
+			Method:       method,
+			Path:         path,
+			BodyHash:     sha256Hex(bodyBytes),
+			PermissionID: permission,
+		})
+		if err != nil {
+			return "", fmt.Errorf("presence ceremony failed at begin: %w", err)
+		}
+		// softauthn refuses options whose rpId is not the record's before it signs.
+		assertion, err := auth.Assert(options)
+		if err != nil {
+			return "", fmt.Errorf("presence refused: %w", err)
+		}
+		token, err := client.WebAuthnPresenceFinish(ctx, assertion)
+		if err != nil {
+			return "", fmt.Errorf("presence ceremony failed at finish: %w", err)
+		}
+		return token, nil
 	}
 }
 

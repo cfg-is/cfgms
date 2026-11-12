@@ -223,6 +223,18 @@ func resolveAuthenticatorClient(name, apiURL string, tlsInsecure bool, serverNam
 		return nil, err
 	}
 	registerWebSessionCloser(closeFn)
+
+	// The session answers presence challenges itself with the same authenticator, so
+	// a guarded request never needs a browser or a human.
+	rec, err := loadRegisteredAuthenticator(context.Background(), name)
+	if err != nil {
+		return nil, err
+	}
+	auth, err := rec.authenticator()
+	if err != nil {
+		return nil, err
+	}
+	client.onStepUpRequired = authenticatorStepUpHandler(client, auth)
 	return client, nil
 }
 

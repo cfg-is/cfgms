@@ -1603,12 +1603,39 @@ func (c *APIClient) WebAuthnFinishRegistration(ctx context.Context, username, la
 	return &result, nil
 }
 
-// WebAuthnPresenceBegin calls POST /api/v1/webauthn/presence/begin to start a
-// presence assertion ceremony. Returns the raw PublicKeyCredentialRequestOptions JSON
+// PresenceActionBinding names the one guarded request a presence ceremony authorizes:
+// the body of POST /api/v1/webauthn/presence/begin for a direct (non-relay) ceremony.
+// The controller binds the minted token to exactly these values and refuses it for any
+// other method, path, body or permission. Field names are the controller's wire names.
+type PresenceActionBinding struct {
+	Method       string `json:"method"`
+	Path         string `json:"path"`
+	BodyHash     string `json:"body_hash"`
+	PermissionID string `json:"permission_id"`
+}
+
+// WebAuthnPresenceBegin calls POST /api/v1/webauthn/presence/begin with no body to start
+// a presence assertion ceremony for the CLI presence relay, whose binding is carried by
+// the lodged request instead. Returns the raw PublicKeyCredentialRequestOptions JSON
 // (the data field from the APIResponse envelope). The caller passes this JSON to the
 // browser's navigator.credentials.get() to produce an authenticator assertion.
 func (c *APIClient) WebAuthnPresenceBegin(ctx context.Context) (json.RawMessage, error) {
-	resp, err := c.doRequest(ctx, "POST", "/api/v1/webauthn/presence/begin", nil)
+	return c.webAuthnPresenceBegin(ctx, nil)
+}
+
+// WebAuthnPresenceBeginForAction starts a presence ceremony bound to binding, the exact
+// guarded request the resulting token will be attached to (method, path, body hash and
+// permission id). The controller refuses a begin whose binding is incomplete.
+func (c *APIClient) WebAuthnPresenceBeginForAction(ctx context.Context, binding PresenceActionBinding) (json.RawMessage, error) {
+	body, err := json.Marshal(binding)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode presence binding: %w", err)
+	}
+	return c.webAuthnPresenceBegin(ctx, bytes.NewReader(body))
+}
+
+func (c *APIClient) webAuthnPresenceBegin(ctx context.Context, body io.Reader) (json.RawMessage, error) {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/webauthn/presence/begin", body)
 	if err != nil {
 		return nil, err
 	}
@@ -1642,16 +1669,19 @@ func (c *APIClient) WebAuthnPresenceFinish(ctx context.Context, assertionRespons
 		return "", c.parseError(resp)
 	}
 
-	var result struct {
-		PresenceToken string `json:"presence_token"`
+	// The controller wraps the result in the APIResponse envelope (data field).
+	var envelope struct {
+		Data struct {
+			PresenceToken string `json:"presence_token"`
+		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		return "", fmt.Errorf("failed to decode presence finish response: %w", err)
 	}
-	if result.PresenceToken == "" {
+	if envelope.Data.PresenceToken == "" {
 		return "", fmt.Errorf("server returned empty presence token")
 	}
-	return result.PresenceToken, nil
+	return envelope.Data.PresenceToken, nil
 }
 
 // --- Enrolment tokens and headless credential enrolment (Issue #3720) ---
