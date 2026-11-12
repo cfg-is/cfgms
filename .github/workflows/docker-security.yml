@@ -35,7 +35,7 @@ env:
   GO_VERSION: '1.27.4'
   REGISTRY: ghcr.io
   IMAGE_PREFIX: cfg-is/cfgms
-  TRIVY_VERSION: 'v0.76.1'
+  TRIVY_VERSION: 'v0.76.2'
 
 permissions: {}
 
@@ -118,7 +118,7 @@ jobs:
       # aquasecurity/setup-trivy, which runs contrib/install.sh from Trivy's
       # default branch, so an upstream change reaches CI unreviewed (Issue #5757).
       env:
-        TRIVY_SHA256: 'c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0'
+        TRIVY_SHA256: 'bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf'
       run: sudo .github/scripts/install-trivy.sh "$TRIVY_VERSION" "$TRIVY_SHA256"
 
     - name: Cache Trivy vulnerability database
@@ -227,7 +227,7 @@ jobs:
       # aquasecurity/setup-trivy, which runs contrib/install.sh from Trivy's
       # default branch, so an upstream change reaches CI unreviewed (Issue #5757).
       env:
-        TRIVY_SHA256: 'c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0'
+        TRIVY_SHA256: 'bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf'
       run: sudo .github/scripts/install-trivy.sh "$TRIVY_VERSION" "$TRIVY_SHA256"
 
     - name: Cache Trivy vulnerability database
