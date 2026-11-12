@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"strings"
@@ -74,6 +75,8 @@ func requireTLSInsecureForSession() error {
 type APIClient struct {
 	baseURL          string
 	bearerToken      string
+	webSession       bool   // cookie-session mode (APIClientConfig.WebSession)
+	csrfToken        string // sent as X-CSRF-Token on unsafe methods in web-session mode
 	httpClient       *http.Client
 	onTokenRenewed   func(newToken string) error
 	onUnauthorized   func() (*APIClient, error)
@@ -97,6 +100,16 @@ type APIClientConfig struct {
 	ClientKeyPEM  []byte // Client private key for mTLS authentication
 	TLSInsecure   bool   // Skip TLS verification (development only)
 	ServerName    string // Server name for TLS verification (extracted from URL if empty)
+
+	// WebSession selects the web-session mode: the client holds an in-memory cookie
+	// jar (never persisted) and sends the session's CSRF token as X-CSRF-Token on
+	// unsafe methods. It is mutually exclusive with BearerToken and a client
+	// certificate, requires an https BaseURL, and refuses TLSInsecure: a session
+	// cookie is a replayable credential and must only go to a TLS-verified
+	// controller. Redirects are not followed, so neither the cookies nor the CSRF
+	// header can be forwarded to another host. The login ceremony that produces the
+	// session lives in authenticator_login.go.
+	WebSession bool
 
 	// OnTokenRenewed is called after each response when the server issues a renewed
 	// session token via the X-Session-Token response header. Nil = no-op.
@@ -161,63 +174,111 @@ func NewAPIClient(cfg *APIClientConfig) (*APIClient, error) {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
 
-	// Build TLS configuration using pkg/cert
-	var tlsConfig *tls.Config
-	var err error
+	if cfg.WebSession {
+		if err := validateWebSessionConfig(cfg); err != nil {
+			return nil, err
+		}
+	}
 
-	if cfg.TLSInsecure {
-		// Development mode: skip server certificate verification.
-		// When client certs are provided (mTLS), still include them so the server
-		// can authenticate the client; server-side auth is unaffected by InsecureSkipVerify.
-		// #nosec G402 - InsecureSkipVerify explicitly requested via --tls-insecure flag
-		var insecureCfg tls.Config
-		insecureCfg.MinVersion = tls.VersionTLS12
-		insecureCfg.InsecureSkipVerify = true // #nosec G402
-		if cfg.ServerName != "" {
-			insecureCfg.ServerName = cfg.ServerName
+	tlsConfig, err := buildClientTLSConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: tlsConfig,
+		},
+	}
+	if cfg.WebSession {
+		jar, jarErr := cookiejar.New(nil)
+		if jarErr != nil {
+			return nil, fmt.Errorf("failed to create session cookie jar: %w", jarErr)
 		}
-		if cfg.ClientCertPEM != nil && cfg.ClientKeyPEM != nil {
-			_, _ = fmt.Fprint(tlsInsecureWriter, tlsInsecureMTLSWarning)
-			clientCert, certErr := tls.X509KeyPair(cfg.ClientCertPEM, cfg.ClientKeyPEM)
-			if certErr != nil {
-				return nil, fmt.Errorf("failed to load client certificate: %w", certErr)
-			}
-			insecureCfg.Certificates = []tls.Certificate{clientCert}
-		}
-		tlsConfig = &insecureCfg
-	} else if cfg.ClientCertPEM != nil && cfg.ClientKeyPEM != nil {
-		// mTLS mode: mutual TLS with client certificate and optional CA cert
-		tlsConfig, err = cert.CreateClientTLSConfig(cfg.ClientCertPEM, cfg.ClientKeyPEM, cfg.CACertPEM, cfg.ServerName, tls.VersionTLS12)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create mTLS config: %w", err)
-		}
-	} else if cfg.CACertPEM != nil {
-		// Server-auth only: use CA cert for server verification via pkg/cert helper
-		tlsConfig, err = cert.CreateClientTLSConfig(nil, nil, cfg.CACertPEM, cfg.ServerName, tls.VersionTLS12)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create TLS config: %w", err)
-		}
-	} else {
-		// Default: use system CA pool via pkg/cert helper (nil certs, nil CA)
-		tlsConfig, err = cert.CreateClientTLSConfig(nil, nil, nil, cfg.ServerName, tls.VersionTLS12)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create TLS config: %w", err)
-		}
+		httpClient.Jar = jar
+		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	}
 
 	return &APIClient{
 		baseURL:          cfg.BaseURL,
 		bearerToken:      cfg.BearerToken,
+		webSession:       cfg.WebSession,
 		onTokenRenewed:   cfg.OnTokenRenewed,
 		onUnauthorized:   cfg.OnUnauthorized,
 		onStepUpRequired: cfg.OnStepUpRequired,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: tlsConfig,
-			},
-		},
+		httpClient:       httpClient,
 	}, nil
+}
+
+// buildClientTLSConfig builds the TLS configuration for cfg using pkg/cert.
+func buildClientTLSConfig(cfg *APIClientConfig) (*tls.Config, error) {
+	if cfg.TLSInsecure {
+		return insecureClientTLSConfig(cfg)
+	}
+	return verifiedClientTLSConfig(cfg)
+}
+
+// insecureClientTLSConfig skips server certificate verification (development only).
+// When client certs are provided (mTLS), they are still included so the server can
+// authenticate the client; server-side auth is unaffected by InsecureSkipVerify.
+func insecureClientTLSConfig(cfg *APIClientConfig) (*tls.Config, error) {
+	// #nosec G402 - InsecureSkipVerify explicitly requested via --tls-insecure flag
+	var insecureCfg tls.Config
+	insecureCfg.MinVersion = tls.VersionTLS12
+	insecureCfg.InsecureSkipVerify = true // #nosec G402
+	if cfg.ServerName != "" {
+		insecureCfg.ServerName = cfg.ServerName
+	}
+	if cfg.ClientCertPEM != nil && cfg.ClientKeyPEM != nil {
+		_, _ = fmt.Fprint(tlsInsecureWriter, tlsInsecureMTLSWarning)
+		clientCert, certErr := tls.X509KeyPair(cfg.ClientCertPEM, cfg.ClientKeyPEM)
+		if certErr != nil {
+			return nil, fmt.Errorf("failed to load client certificate: %w", certErr)
+		}
+		insecureCfg.Certificates = []tls.Certificate{clientCert}
+	}
+	return &insecureCfg, nil
+}
+
+// verifiedClientTLSConfig verifies the server against the CA certificate (or the
+// system pool when none is given), with mutual TLS when a client certificate is set.
+func verifiedClientTLSConfig(cfg *APIClientConfig) (*tls.Config, error) {
+	if cfg.ClientCertPEM != nil && cfg.ClientKeyPEM != nil {
+		tlsConfig, err := cert.CreateClientTLSConfig(cfg.ClientCertPEM, cfg.ClientKeyPEM, cfg.CACertPEM, cfg.ServerName, tls.VersionTLS12)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create mTLS config: %w", err)
+		}
+		return tlsConfig, nil
+	}
+	// Server-auth only: CA cert when given, else the system CA pool.
+	tlsConfig, err := cert.CreateClientTLSConfig(nil, nil, cfg.CACertPEM, cfg.ServerName, tls.VersionTLS12)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create TLS config: %w", err)
+	}
+	return tlsConfig, nil
+}
+
+// validateWebSessionConfig refuses a web-session configuration that would weaken
+// the credential: a second credential, an unverified server or a non-https URL.
+func validateWebSessionConfig(cfg *APIClientConfig) error {
+	if cfg.BearerToken != "" || cfg.ClientCertPEM != nil || cfg.ClientKeyPEM != nil {
+		return fmt.Errorf("a web session cannot be combined with another credential: provide exactly one credential")
+	}
+	if cfg.TLSInsecure {
+		return fmt.Errorf("a web session is never used over an unverified TLS connection")
+	}
+	u, err := url.Parse(cfg.BaseURL)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+		return fmt.Errorf("a web session requires an https controller URL")
+	}
+	return nil
+}
+
+// unsafeMethod reports whether method is subject to the controller's CSRF check:
+// every method other than GET and HEAD.
+func unsafeMethod(method string) bool {
+	return method != http.MethodGet && method != http.MethodHead
 }
 
 // CreateToken creates a new registration token via the controller API
@@ -600,12 +661,7 @@ func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBy
 
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Accept", "application/json")
-	if c.bearerToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.bearerToken)
-	}
-	if presenceToken != "" {
-		req.Header.Set("X-Presence-Token", presenceToken)
-	}
+	c.setCredentialHeaders(req, presenceToken)
 
 	resp, err := c.httpClient.Do(req) // #nosec G704 — see comment above
 	if err != nil {
@@ -641,6 +697,21 @@ func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBy
 	}
 
 	return resp, nil
+}
+
+// setCredentialHeaders attaches the credential the client holds: the bearer token,
+// or in web-session mode the CSRF token on unsafe methods (the session cookie rides
+// in the jar), plus the presence token on a step-up retry.
+func (c *APIClient) setCredentialHeaders(req *http.Request, presenceToken string) {
+	if c.bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearerToken)
+	}
+	if c.webSession && c.csrfToken != "" && unsafeMethod(req.Method) {
+		req.Header.Set("X-CSRF-Token", c.csrfToken)
+	}
+	if presenceToken != "" {
+		req.Header.Set("X-Presence-Token", presenceToken)
+	}
 }
 
 // handleStepUp resolves a CFGMS-StepUp 401 through the step-up callback and replays

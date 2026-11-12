@@ -1251,3 +1251,122 @@ func TestAPIClientCollectCredentialRequest(t *testing.T) {
 		})
 	}
 }
+
+// webSessionTestClient returns a web-session client for srv, trusting its certificate.
+func webSessionTestClient(t *testing.T, srv *httptest.Server) *APIClient {
+	t.Helper()
+	client, err := NewAPIClient(&APIClientConfig{
+		BaseURL:    srv.URL,
+		CACertPEM:  pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}),
+		WebSession: true,
+	})
+	require.NoError(t, err)
+	return client
+}
+
+func TestNewAPIClient_WebSessionRefusesWeakeningConfig(t *testing.T) {
+	cases := map[string]*APIClientConfig{
+		"bearer token":   {BaseURL: "https://c.example.test", WebSession: true, BearerToken: "t"},
+		"client cert":    {BaseURL: "https://c.example.test", WebSession: true, ClientCertPEM: []byte("c"), ClientKeyPEM: []byte("k")},
+		"tls insecure":   {BaseURL: "https://c.example.test", WebSession: true, TLSInsecure: true},
+		"http url":       {BaseURL: "http://c.example.test", WebSession: true},
+		"no scheme":      {BaseURL: "c.example.test", WebSession: true},
+		"empty base url": {WebSession: true},
+	}
+	for name, cfg := range cases {
+		t.Run(name, func(t *testing.T) {
+			client, err := NewAPIClient(cfg)
+			require.Error(t, err)
+			assert.Nil(t, client)
+		})
+	}
+}
+
+// The CSRF header goes on unsafe methods only, and only in web-session mode.
+func TestAPIClient_WebSessionSendsCSRFOnUnsafeMethodsOnly(t *testing.T) {
+	var seen []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+":"+r.Header.Get("X-CSRF-Token"))
+		_, _ = w.Write([]byte("{}"))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := webSessionTestClient(t, srv)
+	client.csrfToken = "csrf-value"
+	for _, m := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		resp, err := client.doRequest(context.Background(), m, "/x", nil)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+	}
+	assert.Equal(t, []string{"GET:", "HEAD:", "POST:csrf-value", "PUT:csrf-value", "PATCH:csrf-value", "DELETE:csrf-value"}, seen)
+
+	// Bearer and bundle clients never carry it.
+	seen = nil
+	bearer, err := NewAPIClient(&APIClientConfig{
+		BaseURL:     srv.URL,
+		BearerToken: "tok",
+		CACertPEM:   pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}),
+	})
+	require.NoError(t, err)
+	bearer.csrfToken = "must-not-be-sent"
+	resp, err := bearer.doRequest(context.Background(), http.MethodPost, "/x", nil)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, []string{"POST:"}, seen)
+}
+
+// A redirect is not followed, so neither the session cookies nor the CSRF header can
+// reach another host.
+func TestAPIClient_WebSessionDoesNotFollowRedirects(t *testing.T) {
+	var otherHits int
+	other := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		otherHits++
+	}))
+	t.Cleanup(other.Close)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/steal", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := webSessionTestClient(t, srv)
+	client.csrfToken = "csrf-value"
+	resp, err := client.doRequest(context.Background(), http.MethodPost, "/x", strings.NewReader("{}"))
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
+	assert.Zero(t, otherHits)
+}
+
+// Cookies the controller sets are held in the client's in-memory jar and returned on
+// later requests; a client that is not in web-session mode has no jar.
+func TestAPIClient_WebSessionHoldsCookiesInMemory(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/set" {
+			http.SetCookie(w, &http.Cookie{Name: "k", Value: "v", Path: "/", Secure: true})
+			return
+		}
+		if c, err := r.Cookie("k"); err == nil {
+			_, _ = w.Write([]byte(c.Value))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := webSessionTestClient(t, srv)
+	resp, err := client.doRequest(context.Background(), http.MethodGet, "/set", nil)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, "v", client.cookieValue("k"))
+	resp, err = client.doRequest(context.Background(), http.MethodGet, "/get", nil)
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	assert.Equal(t, "v", string(body))
+
+	client.forgetWebSession()
+	assert.Empty(t, client.cookieValue("k"))
+	assert.Empty(t, client.csrfToken)
+
+	plain, err := NewAPIClient(&APIClientConfig{BaseURL: srv.URL})
+	require.NoError(t, err)
+	assert.Nil(t, plain.httpClient.Jar)
+}

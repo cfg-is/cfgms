@@ -165,3 +165,36 @@ func TestRequireTLSInsecureForSession(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+// resolveSessionOrBundleClient routes to the authenticator login only when one is
+// selected; otherwise the bearer/bundle behavior is unchanged.
+func TestResolveSessionOrBundleClient_NoAuthenticatorSelectedKeepsBundleBehavior(t *testing.T) {
+	orig := authenticatorSelection
+	t.Cleanup(func() { authenticatorSelection = orig })
+	authenticatorSelection = ""
+	t.Setenv(authenticatorEnvVar, "")
+	t.Setenv("CFGMS_ADMIN_BUNDLE", "")
+	overrideSessionStore(t, newTestSessionStore())
+
+	client, err := resolveSessionOrBundleClient("", false, "")
+	require.NoError(t, err)
+	assert.Nil(t, client, "an empty CFGMS_ADMIN_BUNDLE opts out of bundle discovery, as before")
+
+	_, err = requireSessionOrBundleClient("", false, "")
+	assert.ErrorIs(t, err, errNoCredential)
+}
+
+// An authenticator failure is reported as one, not as a bundle lookup failure.
+func TestRequireSessionOrBundleClient_AuthenticatorErrorsNameTheAuthenticator(t *testing.T) {
+	origSel, origBundle := authenticatorSelection, bundlePath
+	t.Cleanup(func() { authenticatorSelection, bundlePath = origSel, origBundle })
+	authenticatorSelection = "agent-1"
+	bundlePath = filepath.Join(t.TempDir(), "admin.bundle.yaml")
+
+	client, err := requireSessionOrBundleClient("", false, "")
+	require.Error(t, err)
+	assert.Nil(t, client)
+	assert.Contains(t, err.Error(), "authenticator login failed")
+	assert.Contains(t, err.Error(), "provide exactly one credential")
+	assert.NotContains(t, err.Error(), "bundle lookup failed")
+}

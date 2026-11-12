@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -133,6 +134,12 @@ func resolveBundleClient(apiURL string, tlsInsecure bool, serverName string) (*A
 // resolveSessionOrBundleClient tries the active OS-keychain session token first,
 // then falls through to resolveBundleClient.
 //
+// When an authenticator is selected (--authenticator or CFGMS_AUTHENTICATOR) it is
+// the only credential: the passkey login ceremony runs first and the resulting web
+// session (held in memory, never stored) is used for the command. The session is
+// ended on the controller when the command finishes (see closeWebSessions).
+// Combining it with --bundle or --no-bundle is refused.
+//
 // Falls through to bundle auth unconditionally when:
 //   - bundlePath is set (--bundle flag)
 //   - noBundle is set (--no-bundle flag)
@@ -150,6 +157,10 @@ func resolveBundleClient(apiURL string, tlsInsecure bool, serverName string) (*A
 // because a session token is a replayable bearer credential.
 // serverName overrides the TLS server name for certificate verification.
 func resolveSessionOrBundleClient(apiURL string, tlsInsecure bool, serverName string) (*APIClient, error) {
+	if name := selectedAuthenticator(); name != "" {
+		return resolveAuthenticatorClient(name, apiURL, tlsInsecure, serverName)
+	}
+
 	// Explicit one-shot overrides bypass the session entirely.
 	if bundlePath != "" || noBundle || apiURL != "" {
 		return resolveBundleClient(apiURL, tlsInsecure, serverName)
@@ -159,7 +170,11 @@ func resolveSessionOrBundleClient(apiURL string, tlsInsecure bool, serverName st
 	if err != nil || rec == nil || time.Now().After(rec.AbsoluteExpiry) {
 		return resolveBundleClient(apiURL, tlsInsecure, serverName)
 	}
+	return newSessionTokenClient(rec, tlsInsecure, serverName)
+}
 
+// newSessionTokenClient builds the bearer-session client for the stored session rec.
+func newSessionTokenClient(rec *sessionRecord, tlsInsecure bool, serverName string) (*APIClient, error) {
 	// Session token is a replayable bearer credential: require explicit confirmation
 	// before allowing the server certificate to go unverified.
 	if tlsInsecure {
@@ -195,8 +210,20 @@ func resolveSessionOrBundleClient(apiURL string, tlsInsecure bool, serverName st
 			return defaultStepUpHandler(client)(wwwAuthenticate, method, path, bodyBytes)
 		},
 	}
+	var err error
 	client, err = NewAPIClient(cfg)
 	return client, err
+}
+
+// resolveAuthenticatorClient logs in with the named authenticator and queues the
+// logout that ends its session when the command finishes (see closeWebSessions).
+func resolveAuthenticatorClient(name, apiURL string, tlsInsecure bool, serverName string) (*APIClient, error) {
+	client, closeFn, err := loginWithAuthenticator(context.Background(), name, apiURL, tlsInsecure, serverName)
+	if err != nil {
+		return nil, err
+	}
+	registerWebSessionCloser(closeFn)
+	return client, nil
 }
 
 // errNoCredential is returned when neither an active session nor an admin mTLS bundle
@@ -213,6 +240,9 @@ var errNoCredential = fmt.Errorf("no credential found: provide an admin mTLS bun
 func requireSessionOrBundleClient(apiURL string, tlsInsecure bool, serverName string) (*APIClient, error) {
 	client, err := resolveSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 	if err != nil {
+		if selectedAuthenticator() != "" {
+			return nil, fmt.Errorf("authenticator login failed: %w", err)
+		}
 		return nil, fmt.Errorf("bundle lookup failed: %w", err)
 	}
 	if client == nil {
