@@ -4,7 +4,7 @@
 services:
   # PostgreSQL database for database provider testing
   postgres-test:
-    image: ghcr.io/cfg-is/ci-mirror/postgres:15-alpine@sha256:54e0dd8e8cddcdbb9156c2486eed5a43eccb7214d7c6828097d41ce049fb3984
+    image: ghcr.io/cfg-is/ci-mirror/postgres:15-alpine@sha256:eab009ce9447a891d9482702d370bbf132c18563bb87cfdcc2b815c6d3b0372f
     container_name: cfgms-postgres-test
     environment:
       POSTGRES_DB: cfgms_test
@@ -64,7 +64,7 @@ services:
 
   # Redis for session/cache testing (future Epic support)
   redis-test:
-    image: ghcr.io/cfg-is/ci-mirror/redis:7-alpine@sha256:8da19c7399dca900c6822a1cf30f9d2285585e2c4b457ff4095b0f4500054d3f
+    image: ghcr.io/cfg-is/ci-mirror/redis:7-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7
     container_name: cfgms-redis-test
     ports:
       - "6380:6379"  # Use non-standard port
