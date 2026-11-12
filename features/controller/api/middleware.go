@@ -1069,13 +1069,15 @@ func hasHeaderCredentials(r *http.Request) bool {
 
 // accountHoldsCredential reports whether id is a non-empty credential ID present
 // on the account.
-func accountHoldsCredential(acct *account, id []byte) bool {
+// A software-authenticator credential counts only while softwareCredentialsPermitted
+// is true (Issue #6143); any other credential is unaffected by that flag.
+func accountHoldsCredential(acct *account, id []byte, softwareCredentialsPermitted bool) bool {
 	if len(id) == 0 {
 		return false
 	}
 	for _, c := range acct.Credentials {
 		if bytes.Equal(c.ID, id) {
-			return true
+			return softwareCredentialsPermitted || !c.isSoftwareAuthenticator()
 		}
 	}
 	return false
@@ -1385,7 +1387,10 @@ func (s *Server) resolveBearerSessionAccount(w http.ResponseWriter, r *http.Requ
 			"Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
 		return nil, false
 	}
-	if cliLoginSessionRefused(sess, acct) {
+	// Issue #6143: a CLI-login session approved with a software credential ends when the
+	// policy stops permitting it (unresolved root tenant fails closed).
+	softwarePermitted, _ := s.softwareCredentialsUsable(r.Context(), acct)
+	if cliLoginSessionRefused(sess, acct, softwarePermitted) {
 		s.endBearerSession(w, r, sess, "Failed to revoke cli-login session with a revoked credential")
 		return nil, false
 	}
@@ -1403,13 +1408,13 @@ func (s *Server) resolveBearerSessionAccount(w http.ResponseWriter, r *http.Requ
 // session with no recorded credential is refused too (fail closed; the user re-runs CLI
 // login once) rather than kept until expiry. A missing account is refused the same way.
 // Sessions from POST /api/v1/sessions use other connection names and are unaffected.
-func cliLoginSessionRefused(sess *session.Session, acct *account) bool {
+func cliLoginSessionRefused(sess *session.Session, acct *account, softwareCredentialsPermitted bool) bool {
 	if sess.ConnectionName != cliLoginConnectionName {
 		return false
 	}
 	return acct == nil ||
-		!accountHoldsCredential(acct, sess.LoginCredentialID) ||
-		(len(sess.CredentialID) > 0 && !accountHoldsCredential(acct, sess.CredentialID))
+		!accountHoldsCredential(acct, sess.LoginCredentialID, softwareCredentialsPermitted) ||
+		(len(sess.CredentialID) > 0 && !accountHoldsCredential(acct, sess.CredentialID, softwareCredentialsPermitted))
 }
 
 // endBearerSession answers a refused Bearer session with SESSION_REVOKED. Best-effort
@@ -1543,12 +1548,15 @@ func (s *Server) authenticateWebCookie(w http.ResponseWriter, r *http.Request) (
 			"Authorization data is temporarily unavailable", "SERVICE_UNAVAILABLE")
 		return r, authSourceRejected
 	}
-	if reason := webSessionRefusal(webSess, webAcct); reason != "" {
+	// Issue #6143: a web session created by a software-authenticator login ends when the
+	// policy stops permitting the credential (unresolved root tenant fails closed).
+	softwarePermitted, _ := s.softwareCredentialsUsable(r.Context(), webAcct)
+	if reason := webSessionRefusal(webSess, webAcct, softwarePermitted); reason != "" {
 		s.endWebSession(w, r, webSess, reason)
 		return r, authSourceRejected
 	}
 	scope := s.accountSessionScope(r.Context(), webAcct)
-	webPrincipal := webSessionPrincipal(webSess, webAcct, scope)
+	webPrincipal := webSessionPrincipal(webSess, webAcct, scope, softwarePermitted)
 	if s.refuseUnscopedPrincipal(w, webPrincipal) {
 		return r, authSourceRejected
 	}
@@ -1571,14 +1579,14 @@ func (s *Server) authenticateWebCookie(w http.ResponseWriter, r *http.Request) (
 // the login passkey and the last proving passkey must still be on the account; an empty
 // ID is refused, because passkey login, the only issuer of web sessions, always records
 // both.
-func webSessionRefusal(webSess *session.Session, acct *account) string {
+func webSessionRefusal(webSess *session.Session, acct *account, softwareCredentialsPermitted bool) string {
 	switch {
 	case acct == nil:
 		return "unbound"
 	case acct.Disabled:
 		return "disabled-account"
-	case !accountHoldsCredential(acct, webSess.LoginCredentialID) ||
-		!accountHoldsCredential(acct, webSess.CredentialID):
+	case !accountHoldsCredential(acct, webSess.LoginCredentialID, softwareCredentialsPermitted) ||
+		!accountHoldsCredential(acct, webSess.CredentialID, softwareCredentialsPermitted):
 		return "revoked-passkey"
 	}
 	return ""
@@ -1601,7 +1609,7 @@ func (s *Server) endWebSession(w http.ResponseWriter, r *http.Request, webSess *
 // session principal. Assurance and LastProvenAt are read from session state so that
 // IP-change downgrades and WebAuthn upgrades (Issue #2965) are reflected on every
 // request (ADR-021 Decision 3/5).
-func webSessionPrincipal(webSess *session.Session, webAcct *account, scope sessionPrincipalScope) *Principal {
+func webSessionPrincipal(webSess *session.Session, webAcct *account, scope sessionPrincipalScope, softwareCredentialsPermitted bool) *Principal {
 	return &Principal{
 		Channel:            AuthChannelWebCookie,
 		ID:                 webSess.PrincipalID,
@@ -1611,7 +1619,7 @@ func webSessionPrincipal(webSess *session.Session, webAcct *account, scope sessi
 		GlobalScope:        scope.globalScope,
 		Permissions:        scope.permissions,
 		TenantID:           scope.tenantID,
-		AuthenticatorCount: len(webAcct.Credentials),
+		AuthenticatorCount: webAcct.usableCredentialCount(softwareCredentialsPermitted),
 		ImplicitAdmin:      scope.implicitAdmin,
 		// RootScoped is derived per request from the bound account's RootScope
 		// flag and this session's current assurance being phishing-resistant

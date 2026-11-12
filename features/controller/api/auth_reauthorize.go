@@ -77,7 +77,9 @@ func (s *Server) sessionPrincipalRefresh(orig *Principal, sessionRootScoped bool
 		p := *orig
 		p.TenantID = s.accountPrincipalTenant(ctx, acct)
 		p.GlobalScope = acct.RootScope
-		p.AuthenticatorCount = len(acct.Credentials)
+		// Issue #6143: software credentials the policy no longer permits do not count.
+		softwarePermitted, _ := s.softwareCredentialsUsable(ctx, acct)
+		p.AuthenticatorCount = acct.usableCredentialCount(softwarePermitted)
 		p.RootScoped = sessionRootScoped || rootScopeFromAssertion(acct, orig.Assurance)
 		p.AccountBound = true
 		if acct.RootScope {

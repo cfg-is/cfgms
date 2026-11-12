@@ -631,37 +631,20 @@ func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
 			"Account not found — WebAuthn credential required for presence ceremony", "ACCOUNT_NOT_FOUND")
 		return
 	}
-	if len(acct.Credentials) == 0 {
+	// Issue #6143: only credentials the software-authenticator policy permits.
+	permitted, _ := s.permittedAccountView(r.Context(), acct)
+	if len(permitted.Credentials) == 0 {
 		s.writeErrorResponse(w, http.StatusConflict,
 			"No WebAuthn credentials registered — enroll a passkey first", "NO_CREDENTIALS")
 		return
 	}
 
-	// Issue #5142: the browser step-up flow names the guarded request it is about to
-	// retry. An absent body is allowed here because the CLI presence relay begins
-	// without one (its binding comes from the lodged request at finish); finish
-	// refuses to mint a token when neither source supplied a binding.
-	var action *presenceActionBinding
-	if r.Body != nil {
-		var in presenceActionBinding
-		dec := json.NewDecoder(io.LimitReader(r.Body, 4096))
-		if err := dec.Decode(&in); err != nil && err != io.EOF {
-			s.writeErrorResponse(w, http.StatusBadRequest,
-				"Invalid presence begin body", "INVALID_REQUEST")
-			return
-		} else if err == nil {
-			if !in.valid() {
-				s.writeErrorResponse(w, http.StatusBadRequest,
-					"Presence binding requires method, path, body_hash and permission_id", "INVALID_REQUEST")
-				return
-			}
-			in.Method = strings.ToUpper(in.Method)
-			in.Path = canonicalizeBindingTarget(in.Path)
-			action = &in
-		}
+	action, ok := s.decodePresenceBinding(w, r)
+	if !ok {
+		return
 	}
 
-	user := buildWebauthnUser(acct)
+	user := buildWebauthnUser(permitted)
 
 	// BeginLogin with userVerification=required: the authenticator MUST verify the
 	// user (PIN, biometric) — "discouraged" or "preferred" are insufficient here.
@@ -746,49 +729,14 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	acct, err := s.getAccountByID(r.Context(), principal.ID)
-	if err != nil {
-		s.logger.Error("Failed to look up account for presence finish",
-			"principal_id", logging.SanitizeLogValue(principal.ID),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to look up account", "STORE_ERROR")
-		return
-	}
-	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound,
-			"Account not found", "ACCOUNT_NOT_FOUND")
+	acct, ok := s.loadPresenceFinishAccount(w, r, principal)
+	if !ok {
 		return
 	}
 
-	// Issue #4287: resolve the CLI presence-relay request (if any) before consuming
-	// the single-use WebAuthn session below — an unknown/expired/mismatched-account
-	// request must fail before the ceremony is spent, not after.
-	var cliPresenceReq *pendingCliPresenceRequest
-	if reqID := r.URL.Query().Get(cliPresenceRequestIDParam); reqID != "" {
-		var cpErr error
-		cliPresenceReq, cpErr = s.getCliPresenceRequestByID(r.Context(), reqID)
-		if cpErr != nil {
-			s.logger.Error("Failed to look up cli-presence request for presence finish",
-				"error", logging.SanitizeLogValue(cpErr.Error()))
-			s.writeErrorResponse(w, http.StatusInternalServerError,
-				"Failed to look up presence request", "STORE_ERROR")
-			return
-		}
-		if cliPresenceReq == nil || cliPresenceReq.Status != cliPresenceRequestStatusPending ||
-			time.Now().UTC().After(cliPresenceReq.ExpiresAt) {
-			s.writeErrorResponse(w, http.StatusNotFound,
-				"Presence request not found or expired", "REQUEST_NOT_FOUND")
-			return
-		}
-		// Desired State 3 [REQUIRED TEST]: the browser session running this ceremony
-		// must resolve to the same account that lodged the request — never a
-		// different one, even if that other account also holds AssuranceStrong.
-		if cliPresenceReq.LodgedByPrincipalID != principal.ID {
-			s.writeErrorResponse(w, http.StatusForbidden,
-				"Presence request was lodged by a different account", "REQUEST_ACCOUNT_MISMATCH")
-			return
-		}
+	cliPresenceReq, ok := s.resolveCliPresenceRequest(w, r, principal)
+	if !ok {
+		return
 	}
 
 	// Load and unconditionally delete the pending session (single-use enforcement).
@@ -803,17 +751,7 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if pending.relayRequestID != r.URL.Query().Get(cliPresenceRequestIDParam) {
-		// The take above is the only read the stores offer, so a refused mismatch puts
-		// the ceremony back: the legitimate finish must still be possible afterwards.
-		if remaining := time.Until(pending.expires); remaining > 0 {
-			if restoreOut := s.putPendingSession(r.Context(), &s.webAuthnPresenceSessions, ceremonyPrefixPresence, principal.ID, pending, remaining); restoreOut != ceremonyOK {
-				s.logger.Warn("Failed to restore presence ceremony after request mismatch",
-					"principal_id", logging.SanitizeLogValue(principal.ID))
-			}
-		}
-		s.writeErrorResponse(w, http.StatusForbidden,
-			"Presence request does not belong to this ceremony", "REQUEST_CEREMONY_MISMATCH")
+	if s.rejectPresenceRelayMismatch(w, r, principal, pending) {
 		return
 	}
 
@@ -823,7 +761,8 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user := buildWebauthnUser(acct)
+	permitted, _ := s.permittedAccountView(r.Context(), acct) // Issue #6143
+	user := buildWebauthnUser(permitted)
 
 	// Full server-side assertion verification: challenge, origin, RP-ID, signature.
 	// The library enforces userVerification=required (set at begin time) via SessionData.
@@ -880,30 +819,8 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if cliPresenceReq != nil {
-		// Hand the minted token to the durable request record for the waiting CLI's
-		// collect poll (mirrors handleApproveCliLoginRequest minting a session onto
-		// pendingCliLoginRequest). Best-effort revert of the just-minted token if this
-		// fails, so a persist failure never strands an unreachable-but-live token.
-		now := time.Now().UTC()
-		cliPresenceReq.Status = cliPresenceRequestStatusApproved
-		cliPresenceReq.ApprovedAt = &now
-		cliPresenceReq.ApprovedBy = principal.ID
-		cliPresenceReq.PresenceToken = token
-		if err := s.persistCliPresenceRequest(r.Context(), cliPresenceReq); err != nil {
-			s.logger.Error("Failed to persist cli-presence approval",
-				"request_id", logging.SanitizeLogValue(cliPresenceReq.ID),
-				"error", logging.SanitizeLogValue(err.Error()))
-			s.discardPresenceToken(r.Context(), tokenHash)
-			s.writeErrorResponse(w, http.StatusInternalServerError,
-				"Failed to complete presence request", "STORE_ERROR")
-			return
-		}
-		s.logger.Info("Cli-presence request approved",
-			"request_id", logging.SanitizeLogValue(cliPresenceReq.ID),
-			"principal_id", logging.SanitizeLogValue(principal.ID))
-		s.emitCliPresenceAudit(r.Context(), "cli_presence.approved", principal.ID, business.AuditUserTypeHuman,
-			cliPresenceReq.ID, business.AuditResultSuccess, business.AuditSeverityHigh)
+	if cliPresenceReq != nil && !s.approveCliPresenceRequest(w, r, cliPresenceReq, principal, token, tokenHash) {
+		return
 	}
 
 	s.logger.Info("Presence token minted",
@@ -914,6 +831,139 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		PresenceToken: token,
 		ExpiresIn:     int(presenceTokenTTL.Seconds()),
 	})
+}
+
+// decodePresenceBinding reads the optional action binding from the presence begin
+// body. Issue #5142: the browser step-up flow names the guarded request it is about
+// to retry. An absent body is allowed here because the CLI presence relay begins
+// without one (its binding comes from the lodged request at finish); finish refuses
+// to mint a token when neither source supplied a binding. On a malformed or invalid
+// binding it writes the 400 response and returns ok=false.
+func (s *Server) decodePresenceBinding(w http.ResponseWriter, r *http.Request) (action *presenceActionBinding, ok bool) {
+	if r.Body == nil {
+		return nil, true
+	}
+	var in presenceActionBinding
+	dec := json.NewDecoder(io.LimitReader(r.Body, 4096))
+	err := dec.Decode(&in)
+	if err == io.EOF {
+		return nil, true
+	}
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Invalid presence begin body", "INVALID_REQUEST")
+		return nil, false
+	}
+	if !in.valid() {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Presence binding requires method, path, body_hash and permission_id", "INVALID_REQUEST")
+		return nil, false
+	}
+	in.Method = strings.ToUpper(in.Method)
+	in.Path = canonicalizeBindingTarget(in.Path)
+	return &in, true
+}
+
+// loadPresenceFinishAccount loads the principal's account for the presence finish
+// handler. On failure it writes the response and returns ok=false.
+func (s *Server) loadPresenceFinishAccount(w http.ResponseWriter, r *http.Request, principal *Principal) (*account, bool) {
+	acct, err := s.getAccountByID(r.Context(), principal.ID)
+	if err != nil {
+		s.logger.Error("Failed to look up account for presence finish",
+			"principal_id", logging.SanitizeLogValue(principal.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to look up account", "STORE_ERROR")
+		return nil, false
+	}
+	if acct == nil {
+		s.writeErrorResponse(w, http.StatusNotFound,
+			"Account not found", "ACCOUNT_NOT_FOUND")
+		return nil, false
+	}
+	return acct, true
+}
+
+// resolveCliPresenceRequest resolves the CLI presence-relay request (if any) named by
+// the request's query parameter. Issue #4287: it runs before the single-use WebAuthn
+// session is consumed — an unknown/expired/mismatched-account request must fail before
+// the ceremony is spent, not after. It returns (nil, true) when no request is named; on
+// failure it writes the response and returns ok=false.
+func (s *Server) resolveCliPresenceRequest(w http.ResponseWriter, r *http.Request, principal *Principal) (*pendingCliPresenceRequest, bool) {
+	reqID := r.URL.Query().Get(cliPresenceRequestIDParam)
+	if reqID == "" {
+		return nil, true
+	}
+	cliPresenceReq, cpErr := s.getCliPresenceRequestByID(r.Context(), reqID)
+	if cpErr != nil {
+		s.logger.Error("Failed to look up cli-presence request for presence finish",
+			"error", logging.SanitizeLogValue(cpErr.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to look up presence request", "STORE_ERROR")
+		return nil, false
+	}
+	if cliPresenceReq == nil || cliPresenceReq.Status != cliPresenceRequestStatusPending ||
+		time.Now().UTC().After(cliPresenceReq.ExpiresAt) {
+		s.writeErrorResponse(w, http.StatusNotFound,
+			"Presence request not found or expired", "REQUEST_NOT_FOUND")
+		return nil, false
+	}
+	// Desired State 3 [REQUIRED TEST]: the browser session running this ceremony
+	// must resolve to the same account that lodged the request — never a
+	// different one, even if that other account also holds AssuranceStrong.
+	if cliPresenceReq.LodgedByPrincipalID != principal.ID {
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"Presence request was lodged by a different account", "REQUEST_ACCOUNT_MISMATCH")
+		return nil, false
+	}
+	return cliPresenceReq, true
+}
+
+// rejectPresenceRelayMismatch refuses a finish whose relay request ID differs from the
+// one the ceremony was begun with, writing the 403 response and returning true. The take
+// of the pending session is the only read the stores offer, so a refused mismatch puts
+// the ceremony back: the legitimate finish must still be possible afterwards.
+func (s *Server) rejectPresenceRelayMismatch(w http.ResponseWriter, r *http.Request, principal *Principal, pending *webAuthnPendingSession) bool {
+	if pending.relayRequestID == r.URL.Query().Get(cliPresenceRequestIDParam) {
+		return false
+	}
+	if remaining := time.Until(pending.expires); remaining > 0 {
+		if restoreOut := s.putPendingSession(r.Context(), &s.webAuthnPresenceSessions, ceremonyPrefixPresence, principal.ID, pending, remaining); restoreOut != ceremonyOK {
+			s.logger.Warn("Failed to restore presence ceremony after request mismatch",
+				"principal_id", logging.SanitizeLogValue(principal.ID))
+		}
+	}
+	s.writeErrorResponse(w, http.StatusForbidden,
+		"Presence request does not belong to this ceremony", "REQUEST_CEREMONY_MISMATCH")
+	return true
+}
+
+// approveCliPresenceRequest hands the minted token to the durable request record for the
+// waiting CLI's collect poll (mirrors handleApproveCliLoginRequest minting a session onto
+// pendingCliLoginRequest). Issue #4287. Best-effort revert of the just-minted token if the
+// persist fails, so a persist failure never strands an unreachable-but-live token; in that
+// case it writes the 500 response and returns false.
+func (s *Server) approveCliPresenceRequest(w http.ResponseWriter, r *http.Request, cliPresenceReq *pendingCliPresenceRequest, principal *Principal, token, tokenHash string) bool {
+	now := time.Now().UTC()
+	cliPresenceReq.Status = cliPresenceRequestStatusApproved
+	cliPresenceReq.ApprovedAt = &now
+	cliPresenceReq.ApprovedBy = principal.ID
+	cliPresenceReq.PresenceToken = token
+	if err := s.persistCliPresenceRequest(r.Context(), cliPresenceReq); err != nil {
+		s.logger.Error("Failed to persist cli-presence approval",
+			"request_id", logging.SanitizeLogValue(cliPresenceReq.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.discardPresenceToken(r.Context(), tokenHash)
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to complete presence request", "STORE_ERROR")
+		return false
+	}
+	s.logger.Info("Cli-presence request approved",
+		"request_id", logging.SanitizeLogValue(cliPresenceReq.ID),
+		"principal_id", logging.SanitizeLogValue(principal.ID))
+	s.emitCliPresenceAudit(r.Context(), "cli_presence.approved", principal.ID, business.AuditUserTypeHuman,
+		cliPresenceReq.ID, business.AuditResultSuccess, business.AuditSeverityHigh)
+	return true
 }
 
 // handleWebAuthnListCredentials handles

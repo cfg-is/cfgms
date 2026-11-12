@@ -171,58 +171,20 @@ func (s *Server) handleOperatorPayloadSignBegin(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	if principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized,
-			"Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, sessID, acct, ok := s.loadCeremonyAccount(w, r, "Operator-payload sign begin", signSessionRequiredMsg)
+	if !ok {
 		return
 	}
-
-	sessID, _ := r.Context().Value(webSessionIDContextKey).(string)
-	if sessID == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Operator-payload signing requires a cookie-authenticated web session", "SESSION_REQUIRED")
-		return
-	}
-
-	acct, err := s.getAccountByID(r.Context(), principal.ID)
-	if err != nil {
-		s.logger.Error("Operator-payload sign begin: failed to load account",
-			"principal_id", logging.SanitizeLogValue(principal.ID),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to load account", "STORE_ERROR")
-		return
-	}
-	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound,
-			"Account not found", "ACCOUNT_NOT_FOUND")
-		return
-	}
-	if len(acct.Credentials) == 0 {
+	// Issue #6143: only credentials the software-authenticator policy permits.
+	permitted, _ := s.permittedAccountView(r.Context(), acct)
+	if len(permitted.Credentials) == 0 {
 		s.writeErrorResponse(w, http.StatusConflict,
 			"No WebAuthn credentials registered — enroll a passkey first", "NO_CREDENTIALS")
 		return
 	}
 
-	var req OperatorPayloadSignBeginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
-		return
-	}
-	if len(req.Content) == 0 {
-		s.writeErrorResponse(w, http.StatusBadRequest, "content is required", "MISSING_CONTENT")
-		return
-	}
-	if req.Shell == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "shell is required", "MISSING_SHELL")
-		return
-	}
-	switch req.ExecutionContext {
-	case "", string(scriptmodule.ExecutionContextSystem), string(scriptmodule.ExecutionContextLoggedInUser):
-	default:
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"execution_context must be \"system\", \"logged_in_user\" or empty", "INVALID_EXECUTION_CONTEXT")
+	req, ok := s.decodeSignBeginRequest(w, r)
+	if !ok {
 		return
 	}
 
@@ -303,7 +265,7 @@ func (s *Server) handleOperatorPayloadSignBegin(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	user := buildWebauthnUser(acct)
+	user := buildWebauthnUser(permitted)
 
 	assertion, sessionData, err := wa.BeginLogin(user,
 		webauthn.WithUserVerification(protocol.VerificationRequired),
@@ -357,32 +319,9 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	if principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized,
-			"Authentication required", "AUTHENTICATION_REQUIRED")
-		return
-	}
-
-	sessID, _ := r.Context().Value(webSessionIDContextKey).(string)
-	if sessID == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Operator-payload signing requires a cookie-authenticated web session", "SESSION_REQUIRED")
-		return
-	}
-
-	acct, err := s.getAccountByID(r.Context(), principal.ID)
-	if err != nil {
-		s.logger.Error("Operator-payload sign finish: failed to load account",
-			"principal_id", logging.SanitizeLogValue(principal.ID),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to load account", "STORE_ERROR")
-		return
-	}
-	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound,
-			"Account not found", "ACCOUNT_NOT_FOUND")
+	//duplication:justified features/controller/api/handlers_webauthn_elevate.go -- parallel finish prologue of handleStepUpFinish: the two ceremonies hold distinct session stores and error codes, and a shared helper would need a generic over both pending-session types
+	principal, sessID, acct, ok := s.loadCeremonyAccount(w, r, "Operator-payload sign finish", signSessionRequiredMsg)
+	if !ok {
 		return
 	}
 
@@ -412,26 +351,13 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 	sourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 	ipKey := s.clientIPKey(r) // Issue #4573: trusted-proxy-aware, IPv6 /64-bucketed
 
-	if blocked, wait := s.checkSignThrottle(signSessionThrottleKey(sessID)); blocked {
-		s.logger.Warn("Operator-payload sign finish: per-session throttle active",
-			"session_id", logging.SanitizeLogValue(sessID),
-			"retry_after_seconds", int(wait.Seconds()))
-		s.writeErrorResponse(w, http.StatusTooManyRequests,
-			"Too many failed attempts — try again later", "THROTTLED")
+	if s.signThrottled(w, sessID, ipKey, sourceIP) {
 		return
 	}
-	if ipKey != "" {
-		if blocked, wait := s.checkSignThrottle(signIPThrottleKey(ipKey)); blocked {
-			s.logger.Warn("Operator-payload sign finish: per-IP throttle active",
-				"source_ip", logging.SanitizeLogValue(sourceIP),
-				"retry_after_seconds", int(wait.Seconds()))
-			s.writeErrorResponse(w, http.StatusTooManyRequests,
-				"Too many failed attempts — try again later", "THROTTLED")
-			return
-		}
-	}
 
-	user := buildWebauthnUser(acct)
+	// Issue #6143: acct stays the full record for the sign-count persist below.
+	permitted, _ := s.permittedAccountView(r.Context(), acct)
+	user := buildWebauthnUser(permitted)
 
 	body, err := readAllAndClose(r)
 	if err != nil {
@@ -511,6 +437,77 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 		Signature:         []byte(parsedResponse.Raw.AssertionResponse.Signature),
 		CredentialID:      parsedResponse.RawID,
 	})
+}
+
+// signSessionRequiredMsg is the 400 message for a sign request without a web session.
+const signSessionRequiredMsg = "Operator-payload signing requires a cookie-authenticated web session"
+
+// loadCeremonyAccount resolves the caller's principal, cookie-session ID and full
+// account record shared by the sign and step-up handlers. On any failure it writes the
+// response and returns ok=false. op names the handler in log lines; sessionRequiredMsg
+// is the 400 message when the request is not cookie-authenticated.
+func (s *Server) loadCeremonyAccount(w http.ResponseWriter, r *http.Request, op, sessionRequiredMsg string) (principal *Principal, sessID string, acct *account, ok bool) {
+	principal, _ = r.Context().Value(principalContextKey).(*Principal)
+	if principal == nil {
+		s.writeErrorResponse(w, http.StatusUnauthorized,
+			"Authentication required", "AUTHENTICATION_REQUIRED")
+		return nil, "", nil, false
+	}
+
+	sessID, _ = r.Context().Value(webSessionIDContextKey).(string)
+	if sessID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			sessionRequiredMsg, "SESSION_REQUIRED")
+		return nil, "", nil, false
+	}
+
+	acct, err := s.getAccountByID(r.Context(), principal.ID)
+	if err != nil {
+		s.logger.Error(op+": failed to load account",
+			"principal_id", logging.SanitizeLogValue(principal.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to load account", "STORE_ERROR")
+		return nil, "", nil, false
+	}
+	if acct == nil {
+		s.writeErrorResponse(w, http.StatusNotFound,
+			"Account not found", "ACCOUNT_NOT_FOUND")
+		return nil, "", nil, false
+	}
+	return principal, sessID, acct, true
+}
+
+// decodeSignBeginRequest decodes and validates the sign begin request body. On any
+// failure it writes the response and returns ok=false.
+func (s *Server) decodeSignBeginRequest(w http.ResponseWriter, r *http.Request) (req OperatorPayloadSignBeginRequest, ok bool) {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
+		return req, false
+	}
+	if len(req.Content) == 0 {
+		s.writeErrorResponse(w, http.StatusBadRequest, "content is required", "MISSING_CONTENT")
+		return req, false
+	}
+	if req.Shell == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "shell is required", "MISSING_SHELL")
+		return req, false
+	}
+	switch req.ExecutionContext {
+	case "", string(scriptmodule.ExecutionContextSystem), string(scriptmodule.ExecutionContextLoggedInUser):
+	default:
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"execution_context must be \"system\", \"logged_in_user\" or empty", "INVALID_EXECUTION_CONTEXT")
+		return req, false
+	}
+	return req, true
+}
+
+// signThrottled applies the per-session and per-IP sign throttles. When either is
+// active it writes the 429 response and returns true.
+func (s *Server) signThrottled(w http.ResponseWriter, sessID, ipKey, sourceIP string) bool {
+	return s.ceremonyThrottled(w, "Operator-payload sign finish", s.checkSignThrottle,
+		signSessionThrottleKey(sessID), signIPThrottleKey(ipKey), sessID, ipKey, sourceIP)
 }
 
 // checkSignThrottle returns (true, retryAfter) when key is currently throttled, or

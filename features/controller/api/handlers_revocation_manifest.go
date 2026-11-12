@@ -283,7 +283,10 @@ func (s *Server) buildAuthorizedWebAuthnCredentials(ctx context.Context) ([]Auth
 
 	var entries []AuthorizedWebAuthnCredential
 	coveredByTenant := map[string][]string{}
-	for _, acct := range accounts {
+	for _, listed := range accounts {
+		// A software credential the policy no longer permits is absent from the roster
+		// (Issue #6143); the stored credential is untouched.
+		acct, _ := s.permittedAccountView(ctx, listed)
 		covered := s.signedCoveredTenantIDs(ctx, acct, coveredByTenant)
 		for _, credential := range acct.Credentials {
 			entries = append(entries, AuthorizedWebAuthnCredential{
