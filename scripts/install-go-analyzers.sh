@@ -20,6 +20,10 @@ GOSEC_VERSION="v2.30.0"
 STATICCHECK_VERSION="2026.2.2"
 XTOOLS_VERSION="v0.52.0"
 
+# Resolve before cd: every network-touching go command below goes through the
+# retry wrapper so a transient module-proxy error does not fail the install.
+fetch="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/go-fetch-retry.sh"
+
 work="$(mktemp -d)"
 trap 'chmod -R u+w "$work" 2>/dev/null; rm -rf "$work"' EXIT
 
@@ -34,8 +38,8 @@ import (
 )
 GO
 
-go get "github.com/securego/gosec/v2@${GOSEC_VERSION}" \
+bash "$fetch" get "github.com/securego/gosec/v2@${GOSEC_VERSION}" \
 	"honnef.co/go/tools@${STATICCHECK_VERSION}" \
 	"golang.org/x/tools@${XTOOLS_VERSION}"
-go mod tidy
-go install github.com/securego/gosec/v2/cmd/gosec honnef.co/go/tools/cmd/staticcheck
+bash "$fetch" mod tidy
+bash "$fetch" install github.com/securego/gosec/v2/cmd/gosec honnef.co/go/tools/cmd/staticcheck

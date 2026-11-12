@@ -103,8 +103,13 @@ jobs:
         env:
           GOTOOLCHAIN: go${{ env.GO_VERSION }}
         run: |
-          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"
+          bash scripts/go-fetch-retry.sh install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"
           golangci-lint --version
+
+      # golangci-lint's typecheck shells out to `go list`, which fetches missing
+      # modules with no retry. Warm the module cache here, with retries, first.
+      - name: Download dependencies
+        run: bash scripts/go-fetch-retry.sh mod download
 
       - name: Run golangci-lint (GOOS=${{ matrix.goos }})
         id: lint

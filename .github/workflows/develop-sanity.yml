@@ -138,7 +138,7 @@ jobs:
 
       - name: Download dependencies
         continue-on-error: true
-        run: go mod download
+        run: bash scripts/go-fetch-retry.sh mod download
 
       - name: Warm build cache
         continue-on-error: true

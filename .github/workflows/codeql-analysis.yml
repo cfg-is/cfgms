@@ -116,7 +116,7 @@ jobs:
 
     - name: Download dependencies
       if: matrix.language == 'go'
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     # Initialize CodeQL tools for scanning.
     #

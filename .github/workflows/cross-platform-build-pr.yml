@@ -121,7 +121,7 @@ jobs:
             ${{ runner.os }}-go-modules-
 
       - name: Download dependencies
-        run: go mod download
+        run: bash scripts/go-fetch-retry.sh mod download
 
       - name: Detect non-documentation changes
         id: filter
@@ -347,7 +347,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Validate Cross-Platform Compilation
       run: make build-cross-validate
@@ -410,7 +410,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run features/controller/api (sharded, no -race)
       shell: bash
@@ -457,7 +457,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run controller (minus api), cert, controlplane, storage/sqlite (no -race)
       shell: bash
@@ -505,7 +505,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run features/steward (no -race)
       shell: bash
@@ -553,7 +553,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run cmd (no -race)
       shell: bash
@@ -605,7 +605,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run cmd/steward shard 1/2 (no -race)
       shell: bash
@@ -653,7 +653,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run cmd/steward shard 2/2 (no -race)
       shell: bash
@@ -701,7 +701,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run remaining pkg/features/cmd packages, including modules (no -race)
       shell: bash
@@ -748,7 +748,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Compile the macOS-shipped test binaries for darwin/arm64
       run: make test-macos-compile
@@ -805,7 +805,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run pkg/cert, pkg/controlplane, pkg/storage/sqlite (-race)
       shell: bash
@@ -852,7 +852,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run features/steward, cmd without cmd/steward (-race)
       shell: bash
@@ -899,7 +899,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run cmd/steward TestReg* shard (-race)
       shell: bash
@@ -946,7 +946,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run cmd/steward every other test shard (-race)
       shell: bash
@@ -993,7 +993,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run remaining macOS-shipped packages shard 1/2 (-race)
       shell: bash
@@ -1042,7 +1042,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run remaining macOS-shipped packages shard 2/2 (-race)
       shell: bash
@@ -1094,7 +1094,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run Full E2E Test Suite (no Docker)
       run: go test -v -race -timeout=20m ./test/e2e/... -run "TestE2EScenarios"
@@ -1143,7 +1143,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Start Docker test services
       run: make test-integration-setup
