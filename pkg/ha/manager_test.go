@@ -1118,14 +1118,35 @@ func TestNewManager_ClusterMode_WiresLeaseStoreFromStorageManager(t *testing.T) 
 	require.Eventually(t, manager.HasLeadership, 5*time.Second, 5*time.Millisecond,
 		"HasLeadership must become true from the constructor-wired lease, with no explicit SetLeaseStore call")
 
-	token := manager.GetTerm()
-	require.NotZero(t, token,
-		"GetTerm must stamp a non-zero fencing token; term 0 is read as 'unstamped' by the steward fence ratchet")
+	// GetTerm and GetLease are two separate reads, so a single equality across
+	// them is not atomic: with FastElectionConfig's 200ms TTL, a stall on a loaded
+	// runner can let the lease be re-acquired under a new store token between the
+	// reads. (The manager itself cannot report a stale non-zero term: its cached
+	// authority lapses before the store row can expire, so GetTerm reports 0 or the
+	// new token.) Bracket the store read with two GetTerm reads and accept only a
+	// read where both agree with the store token; a stall that straddles a
+	// re-acquisition makes them disagree and the loop retries. The equality, not
+	// NotZero, is what this test proves.
+	var term, storeToken uint64
+	var holder string
+	require.Eventually(t, func() bool {
+		before := manager.GetTerm()
+		state, getErr := storageManager.GetLeaseStore().GetLease(context.Background(), clusterLeadershipLeaseName)
+		after := manager.GetTerm()
+		if getErr != nil || state == nil || before == 0 {
+			return false
+		}
+		if before != after || before != LeaseTermFloor+state.Token || state.HolderID != nodeID {
+			return false
+		}
+		term, storeToken, holder = before, state.Token, state.HolderID
+		return true
+	}, 5*time.Second, 5*time.Millisecond,
+		"GetTerm must stamp a non-zero fencing token (term 0 is read as 'unstamped' by the steward fence ratchet) equal to the wired store's own current token offset by LeaseTermFloor")
 
-	state, err := storageManager.GetLeaseStore().GetLease(context.Background(), clusterLeadershipLeaseName)
-	require.NoError(t, err)
-	assert.Equal(t, LeaseTermFloor+state.Token, token, "GetTerm must equal the wired store's own current token offset by LeaseTermFloor")
-	assert.Equal(t, nodeID, state.HolderID)
+	assert.NotZero(t, term)
+	assert.Equal(t, LeaseTermFloor+storeToken, term, "GetTerm must equal the wired store's own current token offset by LeaseTermFloor")
+	assert.Equal(t, nodeID, holder)
 }
 
 // TestManager_Start_ClusterMode_WithoutLeaseStore_Fails proves a cluster Manager
