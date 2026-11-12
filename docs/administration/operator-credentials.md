@@ -1248,3 +1248,5 @@ is bound to. When the command ends, whether it succeeded or failed, `cfg` calls
   enroll`.
 - **RP ID check.** The login is refused, and nothing is signed, when the
   controller's challenge names an RP ID different from the authenticator's.
+
+To sign `cfg steward exec` with the authenticator's passkey instead of the X.509 signing credential, see [Passkey-signed exec](steward-management.md#passkey-signed-exec).

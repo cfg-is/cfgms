@@ -255,12 +255,20 @@ cmd (Windows); pwsh is also valid on Unix (PowerShell Core is cross-platform).
 PowerShell Core install. There is no automatic fallback between shells — pick
 the one installed on the target host.
 
+With --passkey the command is signed by a passkey instead of the X.509 signing
+credential: the controller issues the envelope to sign, and the software
+authenticator named by --authenticator signs it. The command runs under the
+steward's default execution context. See docs/administration/steward-management.md.
+
 Output is capped at 64 KB per steward in the CLI display. If the output for a
 steward exceeds the cap a truncation warning is printed to stderr.
 
 Examples:
   # Exact hostname (bare token) — single-host, no confirmation prompt
   cfg steward exec web-01 --command "hostname" --shell bash
+
+  # Sign with a passkey from a software authenticator
+  cfg steward exec web-01 --command "hostname" --shell bash --passkey --authenticator agent-1
 
   # Hostname glob — fan out to all hosts starting with 'web-' (must quote; requires --yes)
   cfg steward exec 'web-*' --command "uptime" --shell bash --yes
@@ -1862,6 +1870,56 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 // If the output exceeds this cap, a truncation warning is printed to stderr.
 const execCLIOutputCap = 64 * 1024
 
+// buildExecRequestJSON returns the POST /api/v1/runs/command body for `steward exec`:
+// signed by the passkey sign ceremony with --passkey, by the X.509 signing credential
+// otherwise.
+func buildExecRequestJSON(ctx context.Context, client *APIClient, selector string, content []byte, targetIDs []string, execTimeout time.Duration) ([]byte, error) {
+	var reqBody map[string]interface{}
+	var err error
+	if stewardExecPasskey {
+		reqBody, err = passkeyExecRequestBody(ctx, client, selector, content, stewardExecShell, targetIDs)
+	} else {
+		reqBody, err = x509ExecRequestBody(selector, content, stewardExecShell, targetIDs)
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Not part of the signed envelope; the steward clamps it to 60m.
+	reqBody["timeout_seconds"] = int((execTimeout + time.Second - 1) / time.Second)
+
+	bodyJSON, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode request: %w", err)
+	}
+	return bodyJSON, nil
+}
+
+// x509ExecRequestBody signs the envelope with the X.509 signing credential and returns
+// the request body that carries the signature.
+func x509ExecRequestBody(selector string, content []byte, shell string, targetIDs []string) (map[string]interface{}, error) {
+	sig, envelope, err := buildAndSignEnvelope(content, shell, targetIDs)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"target":     selector,
+		"content":    base64.StdEncoding.EncodeToString(content),
+		"shell":      shell,
+		"signature":  sig,
+		"targets":    envelope.Targets,
+		"nonce":      envelope.Nonce,
+		"expires_at": envelope.ExpiresAt.Format(time.RFC3339),
+	}, nil
+}
+
+// effectiveExecTimeout is --timeout, or the default when it is not positive.
+func effectiveExecTimeout() time.Duration {
+	if stewardExecTimeout <= 0 {
+		return defaultStewardExecTimeout
+	}
+	return stewardExecTimeout
+}
+
 func runRunCommandSingle(_ *cobra.Command, args []string) error {
 	selector := args[0]
 
@@ -1871,16 +1929,16 @@ func runRunCommandSingle(_ *cobra.Command, args []string) error {
 	if stewardExecShell == "" {
 		return fmt.Errorf("--shell is required")
 	}
+	if err := checkPasskeyExecFlags(); err != nil {
+		return err
+	}
 
 	content, err := readCommandContent(stewardExecCommand)
 	if err != nil {
 		return err
 	}
 
-	execTimeout := stewardExecTimeout
-	if execTimeout <= 0 {
-		execTimeout = defaultStewardExecTimeout
-	}
+	execTimeout := effectiveExecTimeout()
 	// The CLI waits for the steward to finish, so its wait covers the execution
 	// timeout plus the time to dispatch and report.
 	waitTimeout := execTimeout + stewardExecDispatchMargin
@@ -1907,26 +1965,9 @@ func runRunCommandSingle(_ *cobra.Command, args []string) error {
 	for i, m := range matches {
 		targetIDs[i] = m.ID
 	}
-	sig, envelope, err := buildAndSignEnvelope(content, stewardExecShell, targetIDs)
+	bodyJSON, err := buildExecRequestJSON(context.Background(), client, selector, content, targetIDs, execTimeout)
 	if err != nil {
 		return err
-	}
-
-	reqBody := map[string]interface{}{
-		"target":     selector,
-		"content":    base64.StdEncoding.EncodeToString(content),
-		"shell":      stewardExecShell,
-		"signature":  sig,
-		"targets":    envelope.Targets,
-		"nonce":      envelope.Nonce,
-		"expires_at": envelope.ExpiresAt.Format(time.RFC3339),
-		// Not part of the signed envelope; the steward clamps it to 60m.
-		"timeout_seconds": int((execTimeout + time.Second - 1) / time.Second),
-	}
-
-	bodyJSON, err := json.Marshal(reqBody)
-	if err != nil {
-		return fmt.Errorf("failed to encode request: %w", err)
 	}
 
 	resp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/runs/command", bytes.NewReader(bodyJSON))

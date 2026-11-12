@@ -167,6 +167,25 @@ operations as the `cfg` commands above:
 - **Refresh auth** — asks the steward to refresh its authentication and reports
   `refresh_requested`. This route has no step-up requirement.
 
+## Passkey-signed exec
+
+`cfg steward exec` signs the command with the operator's X.509 payload-signing credential by default. With `--passkey` it is signed by a passkey from a software authenticator instead:
+
+```
+cfg steward exec web-01 --command "hostname" --shell bash --passkey --authenticator agent-1
+```
+
+`--passkey` requires `--authenticator <name>` (or `CFGMS_AUTHENTICATOR`); without it the command fails before any network call. It cannot be combined with `--signing-credential`. See [Agent software authenticator](operator-credentials.md#agent-software-authenticator) for creating and enrolling the authenticator.
+
+The CLI resolves the selector and applies the `--yes` confirmation as usual, then:
+
+1. Calls `POST /api/v1/operator-payload/sign/begin` with the selector, command and shell. The controller resolves the selector itself and returns the envelope to sign (targets, nonce, expiry, command, shell) and a WebAuthn challenge.
+2. Checks the response before signing anything. It refuses, and makes no sign finish call, when the command or shell differs from the request, the envelope sets an execution context, any target is not a steward the CLI resolved, or the challenge is not the hash of the returned envelope.
+3. Signs the challenge with the authenticator and calls `POST /api/v1/operator-payload/sign/finish`.
+4. Dispatches `POST /api/v1/runs/command` with the envelope from the begin response and the passkey proof as `webauthn`. The request carries no `signature`; exactly one operator proof is sent. The controller rejects a proof that does not match the envelope, and the CLI reports its error.
+
+The command runs under the steward's default execution context: SYSTEM on Windows, root on Linux and macOS. The dispatch carries no `execution_context`, and `features/steward/commands/execute_script.go` maps a missing `execution_context` to the system context; only `logged_in_user` changes it. `cfg steward exec` has no flag to select a different context.
+
 ## Reboot window
 
 The steward detail drawer has a **Reboot window** section beside the `cfg` reboot-window commands. It edits the schedule declared for this one steward as YAML text, overriding the tenant window, and shows the returned status (`scheduled` or `unrestricted`) and next occurrence. A schedule the controller rejects shows the validation message verbatim and saves nothing. There is no timezone field here; the timezone is set on the tenant. Saving needs `reboot_window:override` and asks for no passkey tap.
