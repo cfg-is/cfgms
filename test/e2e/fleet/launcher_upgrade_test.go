@@ -195,9 +195,9 @@ func waitForLauncherCurrentVersion(t *testing.T, container, wantVersion string, 
 // restoreBareStewdInContainer returns container to its docker-compose baseline:
 // it kills the launcher and its supervised steward, empties launcherRoot (the
 // image ships it empty, and a later test must not inherit launcher version state),
-// and releases the hold so the PID 1 wrapper restarts the one bare steward. Used
-// in t.Cleanup; failures are logged so a broken cleanup is visible.
-func restoreBareStewdInContainer(t *testing.T, container string) {
+// and releases the hold so the PID 1 wrapper restarts the one bare steward. It
+// returns an error when the baseline was not restored.
+func restoreBareStewdInContainer(t *testing.T, container string) error {
 	t.Helper()
 	script := "pkill -9 -f '[c]fgms-launcher'; pkill -9 -f '[c]fgms-steward'; " +
 		"for i in $(seq 1 20); do pgrep -f '[c]fgms-launcher|[c]fgms-steward' >/dev/null || break; sleep 0.5; done; " +
@@ -205,10 +205,57 @@ func restoreBareStewdInContainer(t *testing.T, container string) {
 		"rm -f " + bareHoldFile + "; " +
 		"for i in $(seq 1 30); do pgrep -x steward >/dev/null && exit 0; sleep 0.5; done; exit 1"
 	if out, err := containerShell(container, script, 30*time.Second); err != nil {
-		t.Logf("cleanup: restore bare steward in %s failed: %v (output: %s)", container, err, out)
-		return
+		return fmt.Errorf("restore bare steward in %s: %w (output: %s)", container, err, out)
 	}
 	t.Logf("Restored bare steward in %s", container)
+	return nil
+}
+
+// Waits that prove the restored bare steward is back on the controller. They are
+// the cleanup's own bounds, so a launcher test that left the fleet without a
+// working steward session fails here, at its own cleanup.
+const (
+	restoredSessionWindow = 60 * time.Second
+	restoredConnectWindow = 30 * time.Second
+)
+
+// restoreBareSteward returns container to the compose baseline (see
+// restoreBareStewdInContainer) and then requires the restored bare steward to
+// open a new control session and the controller to report stewardID connected.
+// A launcher test's cleanup used to return as soon as the bare steward process
+// existed, so a steward the controller never saw reconnect was inherited by the
+// next test and surfaced there as an unrelated timeout. A failure here is
+// reported as a test error with the controller's view of the session.
+func (s *FleetTestSuite) restoreBareSteward(t *testing.T, container, stewardID string) {
+	t.Helper()
+	sessionsBefore := s.stewardLogCount(t, container, stewardSessionMarkers...)
+	if err := restoreBareStewdInContainer(t, container); err != nil {
+		t.Errorf("cleanup: %v\n%s", err, s.launcherDiagnostics(t, container))
+		return
+	}
+	if !s.waitForNewStewardLogEntry(t, container, sessionsBefore, restoredSessionWindow, stewardSessionMarkers...) {
+		t.Errorf("cleanup: restored bare steward in %s did not open a new control session within %v\n%s\n%s",
+			container, restoredSessionWindow, s.controllerStallDiagnostics(stewardID), s.launcherDiagnostics(t, container))
+		return
+	}
+	if !s.waitForConvergence(t, stewardID, restoredConnectWindow) {
+		t.Errorf("cleanup: controller did not report restored bare steward %s in %s connected within %v\n%s\n%s",
+			stewardID, container, restoredConnectWindow, s.controllerStallDiagnostics(stewardID), s.launcherDiagnostics(t, container))
+	}
+}
+
+// requireLauncherSession fails the calling test when the launcher-supervised
+// steward in container does not log a new control session (marker count above
+// before) within 60 s of the swap, with the launcher, steward and controller
+// state that explains it.
+func (s *FleetTestSuite) requireLauncherSession(t *testing.T, container, stewardID string, before int) {
+	t.Helper()
+	const window = 60 * time.Second
+	if s.waitForNewStewardLogEntry(t, container, before, window, stewardSessionMarkers...) {
+		return
+	}
+	t.Fatalf("launcher-supervised steward in %s must open a new control session within %v\n%s\n%s",
+		container, window, s.launcherDiagnostics(t, container), s.controllerStallDiagnostics(stewardID))
 }
 
 // TestFleetLauncherManagedUpgradeHappyPath runs a steward under cfgms-steward-launcher
@@ -236,7 +283,7 @@ func TestFleetLauncherManagedUpgradeHappyPath(t *testing.T) {
 	// ── Step 1: Transition from bare steward to launcher-supervised steward ───────
 	// Register cleanup before any destructive action so the container is restored
 	// even if the test fails mid-way.
-	t.Cleanup(func() { restoreBareStewdInContainer(t, launcherTestContainer) })
+	t.Cleanup(func() { suite.restoreBareSteward(t, launcherTestContainer, stewardID) })
 
 	// The controller keeps the killed process's connection_state=connected until it
 	// notices the drop, so convergence alone would let the upgrade be sent to the
@@ -246,13 +293,12 @@ func TestFleetLauncherManagedUpgradeHappyPath(t *testing.T) {
 	killBareSteward(t, launcherTestContainer)
 	installLauncherLayout(t, launcherTestContainer, launcherInitialVersion)
 	startLauncherSupervised(t, launcherTestContainer, launcherRegistrationToken)
-	require.True(t, suite.waitForNewStewardLogEntry(t, launcherTestContainer, sessionsBefore, 60*time.Second, stewardSessionMarkers...),
-		"launcher-supervised steward must open a new control session within 60 s")
+	suite.requireLauncherSession(t, launcherTestContainer, stewardID, sessionsBefore)
 
 	// The launcher sets CFGMS_STEWARD_LAUNCHER_MANAGED=1 on its child automatically
 	// (see lifecycle.go:execOnce); we just wait for the steward to reconnect.
-	require.True(t, suite.waitForConvergence(t, stewardID, 60*time.Second),
-		"launcher-supervised steward must reconnect within 60 s using same identity")
+	suite.requireStewardConnected(t, launcherTestContainer, stewardID, 60*time.Second,
+		"launcher-supervised steward (bare-to-launcher swap)")
 	requireNoBareSteward(t, launcherTestContainer)
 	t.Logf("Launcher-supervised steward connected (steward_id=%s)", stewardID)
 
@@ -299,8 +345,8 @@ func TestFleetLauncherManagedUpgradeHappyPath(t *testing.T) {
 	// binary from /opt/cfgms/versions/launcherHappyVersion/cfgms-steward.
 	// We verify reconnect with the SAME steward ID (cert/registration unchanged).
 	// (Issue #2005 AC1)
-	require.True(t, suite.waitForConvergence(t, stewardID, 90*time.Second),
-		"steward must reconnect after launcher re-exec with same identity within 90 s")
+	suite.requireStewardConnected(t, launcherTestContainer, stewardID, 90*time.Second,
+		"steward after launcher re-exec")
 	t.Logf("Steward reconnected after launcher re-exec (steward_id=%s)", stewardID)
 
 	// ── Step 6 (AC3): Assert no re-dispatch loop after reconnect ─────────────────
@@ -344,7 +390,7 @@ func TestFleetLauncherManagedUpgradeBrokenBinaryRollback(t *testing.T) {
 	require.NotEmpty(t, stewardID, "%s must have a registered steward ID", launcherTestContainer)
 
 	// ── Step 1: Transition to launcher-supervised steward ────────────────────────
-	t.Cleanup(func() { restoreBareStewdInContainer(t, launcherTestContainer) })
+	t.Cleanup(func() { suite.restoreBareSteward(t, launcherTestContainer, stewardID) })
 
 	// The controller keeps the killed process's connection_state=connected until it
 	// notices the drop, so convergence alone would let the upgrade be sent to the
@@ -354,11 +400,10 @@ func TestFleetLauncherManagedUpgradeBrokenBinaryRollback(t *testing.T) {
 	killBareSteward(t, launcherTestContainer)
 	installLauncherLayout(t, launcherTestContainer, launcherInitialVersion)
 	startLauncherSupervised(t, launcherTestContainer, launcherRegistrationToken)
-	require.True(t, suite.waitForNewStewardLogEntry(t, launcherTestContainer, sessionsBefore, 60*time.Second, stewardSessionMarkers...),
-		"launcher-supervised steward must open a new control session within 60 s")
+	suite.requireLauncherSession(t, launcherTestContainer, stewardID, sessionsBefore)
 
-	require.True(t, suite.waitForConvergence(t, stewardID, 60*time.Second),
-		"launcher-supervised steward must connect within 60 s")
+	suite.requireStewardConnected(t, launcherTestContainer, stewardID, 60*time.Second,
+		"launcher-supervised steward (bare-to-launcher swap)")
 	requireNoBareSteward(t, launcherTestContainer)
 	t.Logf("Launcher-supervised steward connected (steward_id=%s)", stewardID)
 
@@ -401,8 +446,8 @@ func TestFleetLauncherManagedUpgradeBrokenBinaryRollback(t *testing.T) {
 	// ── Step 5: Verify the steward reconnects on the restored version ─────────────
 	// The launcher re-execs launcherInitialVersion (the real steward binary) after
 	// rollback. The steward reconnects with the same identity. (Issue #2005 AC2)
-	require.True(t, suite.waitForConvergence(t, stewardID, 60*time.Second),
-		"steward must reconnect on restored version within 60 s")
+	suite.requireStewardConnected(t, launcherTestContainer, stewardID, 60*time.Second,
+		"steward on the restored version after launcher rollback")
 
 	state, err := suite.getStewardConnectionState(t, stewardID)
 	require.NoError(t, err, "steward must be reachable after launcher rollback")

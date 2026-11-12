@@ -45,7 +45,7 @@ func (s *FleetTestSuite) rotateSigningCert(t *testing.T, overlapDays int) signin
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		t.Fatalf("POST signing/rotate: %v", err)
+		t.Fatalf("POST signing/rotate: %v\n%s", err, s.controllerStallDiagnostics(""))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
