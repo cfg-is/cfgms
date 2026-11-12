@@ -222,8 +222,8 @@ if ($goBinDir) {
         },
         @{
             Name   = 'trufflehog'
-            Url    = 'https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.7/trufflehog_3.99.7_windows_amd64.tar.gz'
-            Sha256 = '16e85ace8d7724774559d418e1bd876ae410a684321c1c44a34c499b03703d9d'
+            Url    = 'https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.8/trufflehog_3.99.8_windows_amd64.tar.gz'
+            Sha256 = '89415ee864cf343bd37633645ef04f87493aed3a52fc4529ae8f25828f4004d2'
             Member = 'trufflehog.exe'
         },
         @{
