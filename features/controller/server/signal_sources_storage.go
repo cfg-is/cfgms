@@ -102,13 +102,12 @@ func (p *storageProbe) run(ctx context.Context) error {
 
 	done := make(chan error, 1)
 	go func() {
-		defer p.inFlight.Store(false)
-		defer func() {
-			if r := recover(); r != nil {
-				done <- errors.New("storage probe panicked")
-			}
-		}()
-		done <- p.check(probeCtx)
+		err := p.safeCheck(probeCtx)
+		// Release before publishing: once run receives from done its caller may
+		// sample again, and that sample must not see this probe as in flight.
+		// A check that never returns keeps inFlight held, as intended.
+		p.inFlight.Store(false)
+		done <- err
 	}()
 
 	select {
@@ -117,4 +116,14 @@ func (p *storageProbe) run(ctx context.Context) error {
 	case <-probeCtx.Done():
 		return probeCtx.Err()
 	}
+}
+
+// safeCheck runs the check and converts a panic into a failed probe.
+func (p *storageProbe) safeCheck(ctx context.Context) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = errors.New("storage probe panicked")
+		}
+	}()
+	return p.check(ctx)
 }
