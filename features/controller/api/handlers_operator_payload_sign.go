@@ -199,7 +199,9 @@ func (s *Server) handleOperatorPayloadSignBegin(w http.ResponseWriter, r *http.R
 			"Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
-	if len(acct.Credentials) == 0 {
+	// Issue #6143: only credentials the software-authenticator policy permits.
+	permitted, _ := s.permittedAccountView(r.Context(), acct)
+	if len(permitted.Credentials) == 0 {
 		s.writeErrorResponse(w, http.StatusConflict,
 			"No WebAuthn credentials registered — enroll a passkey first", "NO_CREDENTIALS")
 		return
@@ -303,7 +305,7 @@ func (s *Server) handleOperatorPayloadSignBegin(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	user := buildWebauthnUser(acct)
+	user := buildWebauthnUser(permitted)
 
 	assertion, sessionData, err := wa.BeginLogin(user,
 		webauthn.WithUserVerification(protocol.VerificationRequired),
@@ -431,7 +433,9 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 		}
 	}
 
-	user := buildWebauthnUser(acct)
+	// Issue #6143: acct stays the full record for the sign-count persist below.
+	permitted, _ := s.permittedAccountView(r.Context(), acct)
+	user := buildWebauthnUser(permitted)
 
 	body, err := readAllAndClose(r)
 	if err != nil {

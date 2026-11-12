@@ -631,7 +631,9 @@ func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
 			"Account not found — WebAuthn credential required for presence ceremony", "ACCOUNT_NOT_FOUND")
 		return
 	}
-	if len(acct.Credentials) == 0 {
+	// Issue #6143: only credentials the software-authenticator policy permits.
+	permitted, _ := s.permittedAccountView(r.Context(), acct)
+	if len(permitted.Credentials) == 0 {
 		s.writeErrorResponse(w, http.StatusConflict,
 			"No WebAuthn credentials registered — enroll a passkey first", "NO_CREDENTIALS")
 		return
@@ -661,7 +663,7 @@ func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	user := buildWebauthnUser(acct)
+	user := buildWebauthnUser(permitted)
 
 	// BeginLogin with userVerification=required: the authenticator MUST verify the
 	// user (PIN, biometric) — "discouraged" or "preferred" are insufficient here.
@@ -823,7 +825,8 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user := buildWebauthnUser(acct)
+	permitted, _ := s.permittedAccountView(r.Context(), acct) // Issue #6143
+	user := buildWebauthnUser(permitted)
 
 	// Full server-side assertion verification: challenge, origin, RP-ID, signature.
 	// The library enforces userVerification=required (set at begin time) via SessionData.

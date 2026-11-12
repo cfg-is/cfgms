@@ -144,7 +144,10 @@ func (s *Server) verifyActionWebAuthn(ctx context.Context, envelope operatorpayl
 		return "", fmt.Errorf("operator account not found")
 	}
 
-	stored, err := s.VerifyAssertion(acct, envelope, proof)
+	// Issue #6143: a software credential the policy no longer permits is not registered
+	// as far as the proof is concerned.
+	permitted, _ := s.permittedAccountView(ctx, acct)
+	stored, err := s.VerifyAssertion(permitted, envelope, proof)
 	if err != nil {
 		return "", err
 	}

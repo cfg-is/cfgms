@@ -76,5 +76,16 @@ webauthn:
   that reports any other AAGUID registers on the ordinary path and receives no
   different trust, assurance or exemption.
 
-This policy applies at registration. It does not change credentials already
-registered.
+The same decision is applied every time a registered software credential is used.
+When it stops being true (the tenant is removed from the list, the account flag is
+cleared, or the account is or becomes a root-scope, empty-tenant or root-tenant
+account, or the root tenant cannot be resolved) the credential is ignored at once:
+it cannot log in, step up, give presence, sign an operator payload, publish a
+workflow or authorize a run command. Web and CLI-login sessions that rest on it end
+on their next request. A workflow publication it signed stops verifying, and a
+steward roster manifest no longer lists it. The stored credential is not deleted: it
+is still listed and can be revoked, and it works again when the policy is turned back
+on. A credential with any other AAGUID on the same account is unaffected. An account
+whose only credential is a software credential reports no usable authenticator while
+the policy is off; that does not reopen first-passkey enrollment, because the stored
+credential still counts as enrolled.

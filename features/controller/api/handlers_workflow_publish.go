@@ -163,7 +163,10 @@ func (s *Server) VerifyWorkflowPublication(ctx context.Context, tenantID string,
 			if err != nil || acct == nil {
 				return nil, err
 			}
-			return publicationSigner{s: s, acct: acct}, nil
+			// Issue #6143: a publication signed by a software credential the policy no
+			// longer permits stops verifying (and verifies again when it is back on).
+			permitted, _ := s.permittedAccountView(ctx, acct)
+			return publicationSigner{s: s, acct: permitted}, nil
 		},
 		func(ctx context.Context, accountID, permissionID, tenantID string) bool {
 			if permissionID != workflow.PublishPermission {
@@ -214,7 +217,8 @@ func (s *Server) handleWorkflowPublishBegin(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if len(acct.Credentials) == 0 {
+	permitted, _ := s.permittedAccountView(r.Context(), acct)
+	if len(permitted.Credentials) == 0 {
 		s.writeErrorResponse(w, http.StatusConflict,
 			"No WebAuthn credentials registered — enroll a passkey first", "NO_CREDENTIALS")
 		return
@@ -235,7 +239,7 @@ func (s *Server) handleWorkflowPublishBegin(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	assertion, sessionData, err := wa.BeginLogin(buildWebauthnUser(acct),
+	assertion, sessionData, err := wa.BeginLogin(buildWebauthnUser(permitted),
 		webauthn.WithUserVerification(protocol.VerificationRequired),
 		webauthn.WithChallenge(hash[:]))
 	if err != nil {
@@ -369,7 +373,10 @@ func (s *Server) verifyPublishAssertion(w http.ResponseWriter, r *http.Request, 
 		Signature:         []byte(raw.Signature),
 		CredentialID:      parsed.RawID,
 	}
-	credential, err := s.VerifyAssertion(acct, envelope, proof)
+	// Issue #6143: verify against the permitted view; acct stays the full record for the
+	// sign-count persist.
+	permitted, _ := s.permittedAccountView(r.Context(), acct)
+	credential, err := s.VerifyAssertion(permitted, envelope, proof)
 	if err != nil {
 		s.logger.Warn("Workflow publish finish: assertion verification failed",
 			"principal_id", logging.SanitizeLogValue(principalID),

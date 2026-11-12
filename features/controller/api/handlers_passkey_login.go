@@ -321,7 +321,10 @@ func (s *Server) passkeyLoginUserResolver(ctx context.Context, resolved **accoun
 			return nil, err
 		}
 		*resolved = found
-		return buildWebauthnUser(found), nil
+		// Issue #6143: the library may only match a credential the policy permits;
+		// *resolved keeps the full record for the sign-count persist path.
+		view, _ := s.permittedAccountView(ctx, found)
+		return buildWebauthnUser(view), nil
 	}
 }
 

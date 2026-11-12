@@ -141,3 +141,102 @@ func (s *Server) auditSoftwareAuthenticatorRefused(ctx context.Context, acct *ac
 			"error", logging.SanitizeLogValue(err.Error()))
 	}
 }
+
+// softwareCredentialsUsable reports whether acct's CFGMS software-authenticator
+// credentials may be used right now (Issue #6143, ADR-021 Amendment 10 use-time half).
+// An account that holds no software credential is always true and pays no policy
+// lookup, so rootTenantID stays off its hot path. Otherwise the answer is
+// softwareAuthenticatorPermitted, which fails closed: an unresolved root tenant
+// returns (false, errRootTenantUnresolved).
+func (s *Server) softwareCredentialsUsable(ctx context.Context, acct *account) (bool, error) {
+	if acct == nil || !acct.hasSoftwareCredential() {
+		return true, nil
+	}
+	return s.softwareAuthenticatorPermitted(ctx, acct)
+}
+
+// permittedAccountView returns the account as ceremony and session code may read its
+// credentials: while softwareAuthenticatorPermitted is true (or the account holds no
+// software credential) it is acct itself; otherwise it is a COPY with every software
+// credential removed, so a credential the policy no longer permits cannot log in,
+// elevate, give presence, sign, publish, be accepted by VerifyAssertion, or be listed
+// in a roster. Credentials with any other AAGUID pass through untouched and gain
+// nothing. acct is never modified and the stored credential is never deleted: it
+// works again when the policy is turned back on.
+//
+// It fails closed. When the root tenant cannot be resolved the returned view still
+// has the software credentials removed and the error is errRootTenantUnresolved
+// (callers read the view and may ignore the error; it is logged here once).
+//
+// The view is for READ-ONLY use. A write that loads and stores the account (sign-count
+// compare-and-swap, registration, revoke, relabel, enrollment) must use the FULL record
+// so a write never drops a credential; that is why the filtering is not done in the
+// account-load layer.
+//
+// Sites that read acct.Credentials in non-test code, and how each is treated:
+//
+// Filtered through this helper:
+//   - handlers_passkey_login.go passkeyLoginUserResolver (user handed to
+//     FinishDiscoverableLogin)
+//   - handlers_webauthn.go handlePresenceBegin / handlePresenceFinish (user and the
+//     NO_CREDENTIALS check)
+//   - handlers_webauthn_elevate.go handleStepUpBegin / handleStepUpFinish (user and
+//     the NO_CREDENTIALS check)
+//   - handlers_operator_payload_sign.go sign begin / finish (user and the
+//     NO_CREDENTIALS check)
+//   - handlers_workflow_publish.go publish begin (user, NO_CREDENTIALS),
+//     verifyPublishAssertion (VerifyAssertion) and the publicationSigner built by
+//     VerifyWorkflowPublication (stored publication re-verification)
+//   - operator_envelope_verify.go verifyActionWebAuthn (run-command proof)
+//   - handlers_revocation_manifest.go steward roster build
+//   - middleware.go webSessionRefusal / cliLoginSessionRefused (through
+//     softwareCredentialsUsable), webSessionPrincipal and the principal refresh
+//     AuthenticatorCount (auth_reauthorize.go)
+//
+// Deliberately the FULL set:
+//   - handlers_webauthn.go registration begin/finish, enrollment begin/finish,
+//     credential list, relabel and revoke (exclusions must hold every existing ID;
+//     admins must still see and revoke software credentials), and
+//     checkEnrollmentPreconditions (a software-only account whose policy is off is
+//     still "already enrolled", so the zero-credential bootstrap stays closed)
+//   - handlers_passkey_login.go recordAssertionSignCount and
+//     operator_ceremony_core.go withAdvancedSignCount/persistAdvancedSignCount
+//     (persist paths on the fresh record)
+//   - handlers_accounts.go (storage encode/decode, reset, enrollment-link minting)
+//   - webauthn_types.go hasSoftwareCredential (the predicate itself)
+func (s *Server) permittedAccountView(ctx context.Context, acct *account) (*account, error) {
+	usable, err := s.softwareCredentialsUsable(ctx, acct)
+	if usable {
+		return acct, nil
+	}
+	if err != nil {
+		s.logger.Warn("Software authenticator credentials ignored: root tenant unresolved",
+			"account_id", logging.SanitizeLogValue(acct.ID))
+	}
+	view := *acct
+	view.Credentials = make([]WebAuthnCredential, 0, len(acct.Credentials))
+	for _, c := range acct.Credentials {
+		if !c.isSoftwareAuthenticator() {
+			view.Credentials = append(view.Credentials, c)
+		}
+	}
+	return &view, err
+}
+
+// usableCredentialCount is the number of registered credentials that count toward
+// the account's authenticator count: every credential, minus the CFGMS software
+// authenticators when softwareCredentialsPermitted is false (Issue #6143). A
+// software-only account whose policy is off therefore reports 0 and is held to the
+// zero-authenticator confinement (fail closed); the stored credentials are untouched.
+func (a *account) usableCredentialCount(softwareCredentialsPermitted bool) int {
+	if softwareCredentialsPermitted {
+		return len(a.Credentials)
+	}
+	n := 0
+	for _, c := range a.Credentials {
+		if !c.isSoftwareAuthenticator() {
+			n++
+		}
+	}
+	return n
+}
