@@ -2072,17 +2072,6 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	// UnregisterConn only removes this exact connection if it is still current.
 	defer s.provider.registry.UnregisterConn(conn)
 
-	// Issue #1817: fire the on-connect hook after successful registration, before
-	// the receive loop, so the refresh push reaches the steward before any
-	// controller-originated commands begin flowing. Fail-open: a missed refresh is
-	// recoverable via the overlap window; refusing the stream is not.
-	if s.provider.onConnectHook != nil {
-		if hookErr := s.provider.onConnectHook.OnConnect(stream.Context(), stewardID); hookErr != nil {
-			s.provider.logger.Warn("on-connect hook error, steward continues (fail-open)",
-				"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(hookErr.Error()))
-		}
-	}
-
 	s.provider.logger.Info("steward connected to ControlChannel", "steward_id", logging.SanitizeLogValue(stewardID), "remote_addr", logging.SanitizeLogValue(p.Addr.String()))
 
 	// Receive loop: authenticated-CN-wins contract — the mTLS peer CN is the
@@ -2094,6 +2083,17 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 		defer close(recvDone)
 		s.controlChannelRecvLoop(stream, stewardID, conn, heartbeatBucket, newStreamIngest())
 	}()
+
+	// Issue #1817: fire the on-connect hook after successful registration so the
+	// refresh push goes out first on the stream. It runs beside the receive loop,
+	// not before it, and off this handler: a hook that blocks on a send the peer
+	// is not reading, or waits for a reply only the receive loop can read, must
+	// not leave the session unread and unable to be evicted or revoked. Its
+	// context ends with the stream. Fail-open: a missed refresh is recoverable via
+	// the overlap window; refusing the stream is not.
+	if s.provider.onConnectHook != nil {
+		go s.runOnConnectHook(stream.Context(), stewardID)
+	}
 
 	// Close the stream if the peer serial is revoked while it is open. Returning
 	// from the handler cancels the stream context, which unblocks Recv.
@@ -2126,6 +2126,22 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 				return status.Error(codes.PermissionDenied, "client certificate revoked")
 			}
 		}
+	}
+}
+
+// runOnConnectHook runs the on-connect hook for an admitted ControlChannel. A
+// hook error or panic is logged and never ends the stream.
+func (s *transportServer) runOnConnectHook(ctx context.Context, stewardID string) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.provider.logger.Error("on-connect hook panicked, steward continues (fail-open)",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"panic", logging.SanitizeLogValue(fmt.Sprint(r)))
+		}
+	}()
+	if err := s.provider.onConnectHook.OnConnect(ctx, stewardID); err != nil {
+		s.provider.logger.Warn("on-connect hook error, steward continues (fail-open)",
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 

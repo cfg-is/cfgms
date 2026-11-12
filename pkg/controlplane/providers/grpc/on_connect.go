@@ -6,9 +6,12 @@ package grpc
 import "context"
 
 // StewardOnConnectHook is called after a steward successfully registers on the
-// ControlChannel, before the receive loop begins. The controller uses it to push
-// state that must be current on every (re)connect — e.g. the latest signing cert
-// set (Issue #1817).
+// ControlChannel. The controller uses it to push state that must be current on
+// every (re)connect — e.g. the latest signing cert set (Issue #1817).
+//
+// The hook runs on its own goroutine beside the stream's receive loop, so it may
+// wait on a reply from the steward. Its context ends when the stream does:
+// implementations must return when it is cancelled.
 //
 // Errors are logged at Warn and do not tear down the stream (fail-open). A missed
 // refresh push is recoverable via the overlap window; refusing the stream is not.
@@ -22,8 +25,8 @@ type StewardOnConnectHook interface {
 }
 
 // WithOnConnectHook injects a StewardOnConnectHook into the Provider.
-// The hook fires after registry.Register succeeds and before the receive loop,
-// ensuring the refresh push reaches the steward before any commands begin flowing.
+// The hook fires after registry.Register succeeds, as the receive loop starts, so
+// the refresh push is the first thing the hook sends on the stream.
 // Following the WithApprovalChecker pattern (approval.go).
 func WithOnConnectHook(hook StewardOnConnectHook) option {
 	return func(p *Provider) {
