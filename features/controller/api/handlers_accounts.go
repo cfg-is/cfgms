@@ -153,6 +153,15 @@ type AccountInfo struct {
 	Roles *[]string `json:"roles,omitempty"`
 }
 
+// AccountDetail is the GET /api/v1/accounts/{username} result: AccountInfo plus the
+// software-authenticator flag (Issue #6141). The flag is read-only here: only
+// PUT /accounts/{username}/software-authenticator sets it, and it has no effect
+// unless the account's tenant is also listed in controller.cfg.
+type AccountDetail struct {
+	AccountInfo
+	AllowSoftwareAuthenticator bool `json:"allow_software_authenticator"`
+}
+
 // AccountUpdateRequest is the PUT /api/v1/accounts/{username} body (Issue #3126).
 // All fields are optional — omitted fields retain their current values, allowing
 // independent update of permissions, disabled state, and credentials without
@@ -797,9 +806,10 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		// passkeys — under an account.reset audit action that never reads as an enable.
 		// Re-enabling is an explicit PUT {"disabled": false}, which emits account.enabled.
 		acct.Disabled = existing.Disabled
-		// Issue #6140: the software-authenticator flag is deliberately not carried
-		// forward. A reset re-provisions the account to zero authenticators, and the
-		// flag must be granted again for the account to enrol a software one.
+		// Issue #6140/#6141: the software-authenticator flag is carried forward only
+		// where it is decided below, after the final scope is known. A request body
+		// cannot set it (AccountRequest has no such field); it is granted only by
+		// PUT /accounts/{username}/software-authenticator.
 		// Issue #3578: a reset must never drop the account's mTLS certificate bindings.
 		// The bindings are what scope a bound certificate in extractAdminPrincipal; an
 		// account with no bindings sends every one of its still-valid certificates back
@@ -850,6 +860,9 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	if acct.Permissions == nil {
 		acct.Permissions = []string{}
 	}
+	// Issue #6141: the upsert leaves the software-authenticator flag as it was, except
+	// where carrySoftwareAuthenticatorFlag clears it.
+	flagCleared := carrySoftwareAuthenticatorFlag(existing, acct, req.ResetCredentials)
 
 	// Issue #2974/#4334: enforce tenant-subtree scope via the fail-closed
 	// isAuthorizedForTenant (Issue #4316), matching handleRevokeEnrollmentLink and
@@ -986,11 +999,8 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 
 	// Audit records account + whether a link was minted and how it is delivered.
 	// The raw token is NEVER logged or audited.
-	auditDetails := map[string]interface{}{"enrollment_link_minted": rawToken != ""}
-	if rawToken != "" {
-		auditDetails["delivery_method"] = "ui-shown"
-	}
-	s.emitAccountAudit(r.Context(), action, acct.TenantID, actingPrincipalID, acct.Username, auditDetails)
+	s.emitAccountAudit(r.Context(), action, acct.TenantID, actingPrincipalID, acct.Username,
+		accountMintAuditDetails(rawToken, flagCleared))
 	s.logger.Info("Web admin account provisioned",
 		"action", action,
 		"username", logging.SanitizeLogValue(acct.Username),
@@ -1396,15 +1406,18 @@ func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeSuccessResponse(w, AccountInfo{
-		ID:                           acct.ID,
-		Username:                     acct.Username,
-		TenantID:                     s.accountPrincipalTenant(r.Context(), acct),
-		RootScope:                    acct.RootScope,
-		Permissions:                  acct.Permissions,
-		Disabled:                     acct.Disabled,
-		CreatedAt:                    acct.CreatedAt,
-		HasOutstandingEnrollmentLink: enrollmentLinkOutstanding(acct),
+	s.writeSuccessResponse(w, AccountDetail{
+		AccountInfo: AccountInfo{
+			ID:                           acct.ID,
+			Username:                     acct.Username,
+			TenantID:                     s.accountPrincipalTenant(r.Context(), acct),
+			RootScope:                    acct.RootScope,
+			Permissions:                  acct.Permissions,
+			Disabled:                     acct.Disabled,
+			CreatedAt:                    acct.CreatedAt,
+			HasOutstandingEnrollmentLink: enrollmentLinkOutstanding(acct),
+		},
+		AllowSoftwareAuthenticator: acct.AllowSoftwareAuthenticator,
 	})
 }
 
@@ -1498,8 +1511,12 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 	// mirroring handleCreateAccount's ResetCredentials path. Independent of
 	// permissions/disabled changes above.
 	var rawToken string
+	flagCleared := false
 	if req.ResetCredentials {
 		updated.Credentials = nil
+		// Issue #6141: a reset is a fresh start; re-enabling needs the tap route again.
+		flagCleared = updated.AllowSoftwareAuthenticator
+		updated.AllowSoftwareAuthenticator = false
 		tokenHash := ""
 		var mintErr error
 		rawToken, tokenHash, mintErr = mintEnrollmentToken()
@@ -1565,38 +1582,9 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 			"revoked_sessions", revoked)
 	}
 
-	// Emit granular audit events. A disable/enable transition and a credential reset
-	// are independent operations that one request can perform together, so each emits
-	// its own event: a first-match switch would let a combined request bury the
-	// credential reset behind account.disabled, leaving the passkey wipe and the
-	// bearer enrollment-link mint with no audit trace at all — an audit-evasion path
-	// for a privileged actor. Other field changes fall back to the generic action.
-	var actions []string
-	if disabledChanged {
-		action := "account.enabled"
-		if updated.Disabled {
-			action = "account.disabled"
-		}
-		actions = append(actions, action)
-		s.emitAccountAudit(r.Context(), action, updated.TenantID, actingPrincipalID, username, nil)
-	}
-	if req.ResetCredentials {
-		// Mirrors handleCreateAccount: minting a bearer enrollment credential records
-		// that it was minted and how it is delivered (Issue #2974). The raw token is
-		// NEVER logged or audited.
-		actions = append(actions, "account.credentials_reset")
-		s.emitAccountAudit(r.Context(), "account.credentials_reset", updated.TenantID,
-			actingPrincipalID, username, map[string]interface{}{
-				"enrollment_link_minted": rawToken != "",
-				"delivery_method":        "ui-shown",
-			})
-	}
-	if len(actions) == 0 {
-		actions = append(actions, "account.updated")
-		s.emitAccountAudit(r.Context(), "account.updated", updated.TenantID, actingPrincipalID, username, nil)
-	}
+	actions := s.emitAccountUpdateAudits(r.Context(), &updated, actingPrincipalID, disabledChanged, req.ResetCredentials, rawToken, flagCleared)
 	s.logger.Info("Web admin account updated",
-		"actions", strings.Join(actions, ","),
+		"actions", logging.SanitizeLogValue(strings.Join(actions, ",")),
 		"username", logging.SanitizeLogValue(username),
 		"tenant_id", logging.SanitizeLogValue(updated.TenantID),
 		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
@@ -1614,6 +1602,71 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		},
 		EnrollmentMagicLink: rawToken,
 	})
+}
+
+// carrySoftwareAuthenticatorFlag decides the software-authenticator flag of acct, the
+// record an upsert is about to write over existing (Issue #6141). The flag is not a
+// request field, so the upsert leaves it as it was, with two exceptions that clear it:
+// a credential reset re-provisions the account to zero authenticators, so the flag
+// must be granted again with a tap; and a move to another tenant or scope is a
+// different account for the policy, because the tap that granted the flag named the
+// account in its old tenant. It reports whether an enabled flag was cleared.
+func carrySoftwareAuthenticatorFlag(existing, acct *account, reset bool) (cleared bool) {
+	if existing == nil || !existing.AllowSoftwareAuthenticator {
+		return false
+	}
+	if reset || existing.RootScope != acct.RootScope || existing.TenantID != acct.TenantID {
+		return true
+	}
+	acct.AllowSoftwareAuthenticator = true
+	return false
+}
+
+// accountMintAuditDetails are the audit details of an account write that may have
+// minted a bearer enrollment credential: whether one was minted and how it is
+// delivered (Issue #2974), and whether the software-authenticator flag was cleared
+// (Issue #6141). The raw token is NEVER logged or audited. The flag key is not named
+// after the flag because the audit redactor withholds the value of any key containing
+// "auth".
+func accountMintAuditDetails(rawToken string, flagCleared bool) map[string]interface{} {
+	details := map[string]interface{}{"enrollment_link_minted": rawToken != ""}
+	if rawToken != "" {
+		details["delivery_method"] = "ui-shown"
+	}
+	if flagCleared {
+		details["flag_cleared"] = "allow_software_authenticator"
+	}
+	return details
+}
+
+// emitAccountUpdateAudits emits the audit events of PUT /accounts/{username} and
+// returns the action names. A disable/enable transition and a credential reset
+// are independent operations that one request can perform together, so each emits
+// its own event: a first-match switch would let a combined request bury the
+// credential reset behind account.disabled, leaving the passkey wipe and the
+// bearer enrollment-link mint with no audit trace at all — an audit-evasion path
+// for a privileged actor. Other field changes fall back to the generic action.
+func (s *Server) emitAccountUpdateAudits(ctx context.Context, updated *account, actingPrincipalID string, disabledChanged, reset bool, rawToken string, flagCleared bool) []string {
+	var actions []string
+	if disabledChanged {
+		action := "account.enabled"
+		if updated.Disabled {
+			action = "account.disabled"
+		}
+		actions = append(actions, action)
+		s.emitAccountAudit(ctx, action, updated.TenantID, actingPrincipalID, updated.Username, nil)
+	}
+	if reset {
+		// Mirrors handleCreateAccount: minting a bearer enrollment credential.
+		actions = append(actions, "account.credentials_reset")
+		s.emitAccountAudit(ctx, "account.credentials_reset", updated.TenantID,
+			actingPrincipalID, updated.Username, accountMintAuditDetails(rawToken, flagCleared))
+	}
+	if len(actions) == 0 {
+		actions = append(actions, "account.updated")
+		s.emitAccountAudit(ctx, "account.updated", updated.TenantID, actingPrincipalID, updated.Username, nil)
+	}
+	return actions
 }
 
 // handleDeleteAccount handles DELETE /api/v1/accounts/{username} (Tier-3).
