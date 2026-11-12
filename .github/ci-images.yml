@@ -11,13 +11,13 @@
 # reference in docker-compose.test.yml, a Dockerfile FROM line or a workflow
 # pull_with_retry step is missing from this file or carries a different digest.
 # See docs/development/ci-infrastructure-setup.md.
-- upstream: postgres:15-alpine@sha256:54e0dd8e8cddcdbb9156c2486eed5a43eccb7214d7c6828097d41ce049fb3984
+- upstream: postgres:15-alpine@sha256:eab009ce9447a891d9482702d370bbf132c18563bb87cfdcc2b815c6d3b0372f
   mirror: postgres
 - upstream: timescale/timescaledb:latest-pg15@sha256:6343bdc87ca132c6b53acb26113a6bad1821d188fa39975a745f32ddd9757634
   mirror: timescaledb
 - upstream: gitea/gitea:1.21@sha256:0056032dc8c6ab70583e4a105b9ee0dc72dce4f4fbc8022c98bcec46b0273883
   mirror: gitea
-- upstream: redis:7-alpine@sha256:8da19c7399dca900c6822a1cf30f9d2285585e2c4b457ff4095b0f4500054d3f
+- upstream: redis:7-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7
   mirror: redis
 - upstream: openbao/openbao:latest@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f
   mirror: openbao
@@ -25,9 +25,9 @@
   mirror: golang
 - upstream: golang:1.27.4-trixie@sha256:b54b2639de8c1bfe538ec5ffc45f29b1932235ac5f6d63c059853646677112d9
   mirror: golang
-- upstream: alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+- upstream: alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
   mirror: alpine
-- upstream: debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+- upstream: debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
   mirror: debian
 - upstream: ghcr.io/versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
   mirror: versitygw
