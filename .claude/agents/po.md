@@ -310,7 +310,7 @@ defaults (7200s / 3600s).
 
 **Per-host resource admission gate (replaces the old container-count cap).** A new
 agent container is admitted only while the host stays under its ceilings — RAM and
-disk below 90% utilization, committed CPU below 75% of cores, with a `2×ncpu`
+disk below 90% utilization, measured CPU load below 90% of cores, with a `2×ncpu`
 count as a runaway backstop. This is **per-host and self-tuning**: a big box runs
 more agents, a laptop fewer, and it adapts to whatever else is running. It is the
 correct shape for multi-host — resource exhaustion is inherently per-host, so each
@@ -331,7 +331,16 @@ no hand-tuned magic number).
   `CFGMS_AGENT_CPU_LOAD` (1.5) is the expected sustained cores per agent measured
   against the live 1-min load average, not a per-core reservation. Ceilings
   `CFGMS_AGENT_MEM_CEIL` (0.90), `CFGMS_AGENT_DISK_CEIL` (0.90), `CFGMS_AGENT_CPU_CEIL`
-  (0.75); bypass `CFGMS_AGENT_CAPACITY_GATE=off` (tests only).
+  (0.90); review reserve `CFGMS_AGENT_REVIEW_RESERVE` (1); bypass
+  `CFGMS_AGENT_CAPACITY_GATE=off` (tests only).
+- **One slot is held for acceptance reviews.** Dev, fix, resolve-conflict and resume
+  launches (`po-act.sh`, the FSM supervisor) are admitted only while
+  `CFGMS_AGENT_REVIEW_RESERVE` slots stay free after them; `agent-dispatch review-pr`
+  needs one free slot. So with N raw slots, at most N−1 dev/fix runs start and a
+  green PR's review can always launch. The reserve is skipped on an idle host. A
+  launch refused only by the reserve reports `CAPACITY_FULL:review_reserve:slots=0`;
+  treat it like any other deferral. `capacity --kind review` (or `--json`, which
+  also reports `raw_free_slots` and `reserve_applied`) shows review headroom.
 
 **Expired-lease GC** runs inside `agent-dispatch.sh cleanup-stale` (Step 1.5) — no
 separate call needed.
