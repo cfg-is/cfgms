@@ -89,3 +89,34 @@ on. A credential with any other AAGUID on the same account is unaffected. An acc
 whose only credential is a software credential reports no usable authenticator while
 the policy is off; that does not reopen first-passkey enrollment, because the stored
 credential still counts as enrolled.
+
+### Audit trail for software authenticators
+
+Every use of a registered credential that is audited carries these detail fields, so
+a reviewer can pick every software-authenticator action out of the trail:
+
+| Field | Value |
+|-------|-------|
+| `software_authenticator` | `true` when the credential's recorded AAGUID is the CFGMS AAGUID, `false` for every other credential |
+| `aaguid` | the credential's recorded AAGUID, hex-encoded |
+| `credential_id` | the credential ID, base64url-encoded (hex-encoded on `operator_payload.dispatch`, which has always recorded it that way) |
+
+The events are `web.passkey.login.success` and `.failure`, `web.presence.success`,
+`web.stepup.success`, `workflow.publish`, and `operator_payload.dispatch` (the sign
+ceremony's finish and a WebAuthn-proved run command). The fields are present only when
+the credential named by the request is one of the account's, so an event never claims a
+marker for a credential it cannot identify. `software_authenticator` is a label from a
+self-asserted AAGUID, not proof of what produced the credential.
+
+A use that does not succeed is audited too. A failed login is audited whichever
+credential it names. For presence, step-up, sign finish, workflow publish and a
+run-command proof, a failed use is audited only when the credential is a software
+authenticator (`web.presence.failure`, `web.stepup.failure`, `workflow.publish.failure`,
+and `operator_payload.dispatch` with a failed result); what those ceremonies record for
+other credentials is unchanged. When the policy refuses the use, the event's result is
+`denied` and its reason is `software_authenticator_policy` (`reason` on login, presence,
+step-up and publish events; `rejection_reason` on `operator_payload.dispatch`).
+
+The audit manager's redaction (`pkg/audit` `RedactedKeys`) matches `auth` and `credential`
+as substrings, so it exempts the exact keys `software_authenticator` and `credential_id`;
+both are stored with their values. Similar keys such as `credential_ids` stay redacted.

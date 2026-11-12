@@ -39,6 +39,10 @@ import (
 // workflowPublishAuditAction is the audit action recorded for a completed publish.
 const workflowPublishAuditAction = "workflow.publish"
 
+// workflowPublishAuditActionFailure is the audit action for a publish assertion by a
+// software authenticator that did not verify (Issue #6144).
+const workflowPublishAuditActionFailure = "workflow.publish.failure"
+
 // workflowPublishSessionKey keys a publish ceremony apart from a payload-sign ceremony
 // of the same web session, so neither can consume or replace the other.
 func workflowPublishSessionKey(sessID string) string { return "workflow-publish:" + sessID }
@@ -381,6 +385,7 @@ func (s *Server) verifyPublishAssertion(w http.ResponseWriter, r *http.Request, 
 		s.logger.Warn("Workflow publish finish: assertion verification failed",
 			"principal_id", logging.SanitizeLogValue(principalID),
 			"error", logging.SanitizeLogValue(err.Error()))
+		s.auditSoftwareAuthenticatorFailure(r.Context(), acct, proof.CredentialID, workflowPublishAuditActionFailure)
 		fail(http.StatusBadRequest, "WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 		return nil, false
 	}
@@ -388,6 +393,7 @@ func (s *Server) verifyPublishAssertion(w http.ResponseWriter, r *http.Request, 
 	if !signCountAdvances(credential.SignCount, newCount) {
 		s.logger.Warn("Workflow publish finish: sign count not advancing — potential authenticator clone",
 			"principal_id", logging.SanitizeLogValue(principalID))
+		s.auditSoftwareAuthenticatorFailure(r.Context(), acct, proof.CredentialID, workflowPublishAuditActionFailure)
 		fail(http.StatusBadRequest, "WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 		return nil, false
 	}
@@ -397,14 +403,14 @@ func (s *Server) verifyPublishAssertion(w http.ResponseWriter, r *http.Request, 
 // storePublication stores published over target's version and audits it. An unaudited
 // publish must not stand, so an audit failure puts the version back as it was. It
 // writes the response and returns false on failure.
-func (s *Server) storePublication(w http.ResponseWriter, r *http.Request, target *publishTarget, tenantID, principalID string, published *workflow.VersionedWorkflow) bool {
+func (s *Server) storePublication(w http.ResponseWriter, r *http.Request, target *publishTarget, tenantID string, acct *account, published *workflow.VersionedWorkflow) bool {
 	if err := target.store.StoreWorkflow(r.Context(), published); err != nil {
 		s.logger.Error("Workflow publish finish: failed to store publication",
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store publication", "STORE_ERROR")
 		return false
 	}
-	if err := s.auditWorkflowPublish(r.Context(), tenantID, principalID, published); err != nil {
+	if err := s.auditWorkflowPublish(r.Context(), tenantID, acct, published); err != nil {
 		s.logger.Error("Workflow publish finish: audit failed, withdrawing publication",
 			"error", logging.SanitizeLogValue(err.Error()))
 		if rbErr := target.store.StoreWorkflow(r.Context(), target.vw); rbErr != nil {
@@ -474,7 +480,7 @@ func (s *Server) handleWorkflowPublishFinish(w http.ResponseWriter, r *http.Requ
 		SignerAccountID:   acct.ID,
 		SignedAt:          signedAt,
 	}
-	if !s.storePublication(w, r, target, tenantID, principal.ID, &published) {
+	if !s.storePublication(w, r, target, tenantID, acct, &published) {
 		return
 	}
 
@@ -488,11 +494,15 @@ func (s *Server) handleWorkflowPublishFinish(w http.ResponseWriter, r *http.Requ
 }
 
 // auditWorkflowPublish records workflow.publish naming the workflow, version, content
-// hash and signer. A failure is returned: an unaudited publish fails.
-func (s *Server) auditWorkflowPublish(ctx context.Context, tenantID, signerID string, vw *workflow.VersionedWorkflow) error {
+// hash and signer, plus the software-authenticator fields for the signing credential
+// (Issue #6144). A failure is returned: an unaudited publish fails. signer is the full
+// record of the signing account.
+func (s *Server) auditWorkflowPublish(ctx context.Context, tenantID string, signer *account, vw *workflow.VersionedWorkflow) error {
 	if s.auditManager == nil {
 		return errors.New("audit manager unavailable")
 	}
+	signerID := signer.ID
+	signingCredential, _ := base64.RawURLEncoding.DecodeString(vw.Publication.CredentialID)
 	b := audit.NewEventBuilder().
 		Tenant(tenantID).
 		Type(business.AuditEventDataModification).
@@ -507,6 +517,7 @@ func (s *Server) auditWorkflowPublish(ctx context.Context, tenantID, signerID st
 			"hash":          vw.Publication.ContentHash,
 			"signer":        signerID,
 			"credential_id": vw.Publication.CredentialID,
-		})
+		}).
+		Details(softwareAuthenticatorAuditDetails(signer, signingCredential))
 	return s.auditManager.RecordEvent(ctx, b)
 }

@@ -80,6 +80,13 @@ The exemption is exact-match and fail-closed: anything else containing `auth` is
 redacted, including `Authorization` and `authentication` headers. Only the whole
 key is exempt — `author_token` is still redacted, by the `token` term.
 
+Two further exact keys are exempt, each from one term only: `software_authenticator`
+(from `auth`) and `credential_id` (from `credential`). They carry a boolean marker and an
+opaque credential identifier, written so software-authenticator actions can be picked out of
+the trail. The match is exact on the lowercased key, with no separator stripping, so
+`credential_ids`, `credentials`, `credential_id_secret` and `software_authenticator_token`
+stay redacted.
+
 ### Checking Whether a Key Will Be Redacted
 
 ```go

@@ -676,6 +676,7 @@ func (s *Server) verifyRunCommandProof(w http.ResponseWriter, ctx context.Contex
 			s.logger.Warn("Run command refused: operator envelope not verified",
 				"principal_id", logging.SanitizeLogValue(principal.ID),
 				"error", logging.SanitizeLogValue(err.Error()))
+			s.auditRunProofFailure(ctx, principal.ID, tenantID, req, inlineContent)
 			s.writeErrorResponse(w, http.StatusBadRequest, "invalid operator signature", "INVALID_SIGNATURE")
 			return "", false
 		}
@@ -698,6 +699,16 @@ func (s *Server) verifyRunCommandProof(w http.ResponseWriter, ctx context.Contex
 		}
 		return serial, true
 	}
+}
+
+// auditRunProofFailure records a WebAuthn run-command proof that did not verify when the
+// credential it names is a CFGMS software authenticator (Issue #6144).
+func (s *Server) auditRunProofFailure(ctx context.Context, principalID, tenantID string, req *postRunCommandRequest, inlineContent []byte) {
+	acct, err := s.getAccountByID(ctx, principalID)
+	if err != nil || acct == nil {
+		return
+	}
+	s.auditDispatchCredentialFailure(ctx, acct, tenantID, principalID, string(inlineContent), req.WebAuthn.CredentialID, req.Targets)
 }
 
 // enforceRunBlastRadius applies the blast-radius bound (Issue #3698): a hard reject
@@ -1384,6 +1395,9 @@ func (s *Server) emitOperatorPayloadDispatchAudit(ctx context.Context, tenantID,
 	if rejectionReason != "" {
 		b = b.Detail("rejection_reason", rejectionReason)
 	}
+	// Issue #6144: software_authenticator, aaguid and credential_id for a credential on
+	// the caller's account. The event's own credential_id (hex) is kept as recorded.
+	b = b.Details(s.dispatchCredentialAuditDetails(ctx, callerID, credentialID))
 
 	for _, d := range extra {
 		b = b.Detail(d.Key, logging.SanitizeLogValue(d.Value))
@@ -1404,6 +1418,43 @@ func (s *Server) emitOperatorPayloadDispatchAudit(ctx context.Context, tenantID,
 			"run_id", logging.SanitizeLogValue(runID),
 		)
 	}
+}
+
+// dispatchCredentialAuditDetails returns the software-authenticator audit fields for the
+// credential a dispatch event names (Issue #6144). credentialID is the hex form the
+// event records; callerID is the account the credential belongs to. It returns nil
+// when the ID is not hex, the caller has no account, or the credential is not one of
+// that account's (an X.509 certificate serial, for one), so those events are unchanged.
+// credential_id is left out: the dispatch event records it itself, in hex.
+func (s *Server) dispatchCredentialAuditDetails(ctx context.Context, callerID, credentialID string) map[string]interface{} {
+	raw, err := hex.DecodeString(credentialID)
+	if err != nil || len(raw) == 0 || callerID == "" {
+		return nil
+	}
+	acct, err := s.getAccountByID(ctx, callerID)
+	if err != nil {
+		return nil
+	}
+	details := softwareAuthenticatorAuditDetails(acct, raw)
+	delete(details, auditKeyCredentialID)
+	return details
+}
+
+// auditDispatchCredentialFailure records a WebAuthn operator proof that did not verify
+// when the credential it named is a CFGMS software authenticator: denied when the policy
+// refuses the credential, failed otherwise. A failed proof by any other credential records
+// nothing here, as before. acct is the full record of the caller's account.
+func (s *Server) auditDispatchCredentialFailure(ctx context.Context, acct *account, tenantID, callerID, payloadText string, credentialID []byte, targets []string, extra ...auditDetail) {
+	result, _, software := s.softwareAuthenticatorFailedUse(ctx, acct, credentialID)
+	if !software {
+		return
+	}
+	reason := "operator proof not verified"
+	if result == business.AuditResultDenied {
+		reason = "software authenticator policy refused the credential"
+	}
+	s.emitOperatorPayloadDispatchAudit(ctx, tenantID, callerID, payloadText,
+		hex.EncodeToString(credentialID), targets, "", result, reason, extra...)
 }
 
 // loadPrivilegeMetadata retrieves ScriptPrivilegeMetadata for the given script from

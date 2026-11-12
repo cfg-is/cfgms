@@ -209,12 +209,13 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 	// The handler resolves the account from the authenticator-provided userHandle,
 	// which the authenticator stores as the account UUID at registration time.
 	var acct *account
-	credential, finishErr := wa.FinishDiscoverableLogin(s.passkeyLoginUserResolver(r.Context(), &acct), pending.data, r)
+	var assertedID []byte // the credential ID the assertion named, set once the library has parsed it
+	credential, finishErr := wa.FinishDiscoverableLogin(s.passkeyLoginUserResolver(r.Context(), &acct, &assertedID), pending.data, r)
 	if finishErr != nil {
 		s.logger.Warn("Passkey login finish: FinishDiscoverableLogin failed",
 			"source_ip", logging.SanitizeLogValue(sourceIP),
 			"error", logging.SanitizeLogValue(finishErr.Error()))
-		s.rejectPasskeyLoginVerification(w, r, pending, acct, ipKey)
+		s.rejectPasskeyLoginVerification(w, r, pending, acct, assertedID, ipKey)
 		return
 	}
 
@@ -228,7 +229,8 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.success", business.AuditResultSuccess)
+	s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.success", business.AuditResultSuccess,
+		softwareAuthenticatorAuditDetails(acct, credential.ID))
 	s.logger.Info("Passkey login successful",
 		"username", logging.SanitizeLogValue(acct.Username),
 		"source_ip", logging.SanitizeLogValue(sourceIP))
@@ -310,8 +312,10 @@ func (s *Server) passkeyLoginClientAllowed(w http.ResponseWriter, r *http.Reques
 }
 
 // passkeyLoginUserResolver returns the FinishDiscoverableLogin user handler. It resolves
-// the account from the authenticator-provided userHandle and stores it in *resolved.
-func (s *Server) passkeyLoginUserResolver(ctx context.Context, resolved **account) func(rawID, userHandle []byte) (webauthn.User, error) {
+// the account from the authenticator-provided userHandle and stores it in *resolved,
+// and the credential ID the assertion named in *assertedID (Issue #6144: a failed login
+// is attributed to that credential even though the library never returned it).
+func (s *Server) passkeyLoginUserResolver(ctx context.Context, resolved **account, assertedID *[]byte) func(rawID, userHandle []byte) (webauthn.User, error) {
 	return func(rawID, userHandle []byte) (webauthn.User, error) {
 		if len(userHandle) == 0 {
 			return nil, fmt.Errorf("blank user handle")
@@ -321,6 +325,7 @@ func (s *Server) passkeyLoginUserResolver(ctx context.Context, resolved **accoun
 			return nil, err
 		}
 		*resolved = found
+		*assertedID = append([]byte(nil), rawID...)
 		// Issue #6143: the library may only match a credential the policy permits;
 		// *resolved keeps the full record for the sign-count persist path.
 		view, _ := s.permittedAccountView(ctx, found)
@@ -330,8 +335,11 @@ func (s *Server) passkeyLoginUserResolver(ctx context.Context, resolved **accoun
 
 // rejectPasskeyLoginVerification records a failed assertion against the throttles and the
 // audit log and writes the verification error. acct is nil when the assertion failed
-// before the user-handler callback resolved an account.
-func (s *Server) rejectPasskeyLoginVerification(w http.ResponseWriter, r *http.Request, pending *passkeyLoginSession, acct *account, ipKey string) {
+// before the user-handler callback resolved an account. assertedID is the credential ID
+// the assertion named (nil when none was read): a software authenticator the policy does
+// not permit is audited as denied, any other failed use as a failure, both carrying the
+// software-authenticator fields when the credential is one of acct's.
+func (s *Server) rejectPasskeyLoginVerification(w http.ResponseWriter, r *http.Request, pending *passkeyLoginSession, acct *account, assertedID []byte, ipKey string) {
 	if ipKey != "" {
 		s.recordPasskeyLoginFailure("ip:" + ipKey)
 	}
@@ -344,7 +352,8 @@ func (s *Server) rejectPasskeyLoginVerification(w http.ResponseWriter, r *http.R
 	if acct != nil {
 		auditUsername = acct.Username
 	}
-	s.emitWebLoginAudit(r.Context(), auditUsername, "", "web.passkey.login.failure", business.AuditResultFailure)
+	result, details, _ := s.softwareAuthenticatorFailedUse(r.Context(), acct, assertedID)
+	s.emitWebLoginAudit(r.Context(), auditUsername, "", "web.passkey.login.failure", result, details)
 	s.writeErrorResponse(w, http.StatusBadRequest,
 		"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 }
@@ -372,7 +381,8 @@ func (s *Server) rejectNonAdvancingSignCount(w http.ResponseWriter, r *http.Requ
 		s.recordPasskeyLoginFailure("ip:" + ipKey)
 	}
 	s.recordPasskeyLoginFailure("account:" + acct.Username)
-	s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.failure", business.AuditResultFailure)
+	s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.failure", business.AuditResultFailure,
+		softwareAuthenticatorAuditDetails(acct, credential.ID))
 	s.writeErrorResponse(w, http.StatusBadRequest,
 		"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 	return true
@@ -392,7 +402,8 @@ func (s *Server) verifyPasskeyLoginAccount(w http.ResponseWriter, r *http.Reques
 	// so the response does not disclose the reason for rejection.
 	if credErr := s.VerifyCredential(acct); credErr != nil {
 		s.recordPasskeyLoginFailure("account:" + acct.Username)
-		s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.failure", business.AuditResultFailure)
+		s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.failure", business.AuditResultFailure,
+			softwareAuthenticatorAuditDetails(acct, credential.ID))
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 		return nil, false
@@ -413,7 +424,8 @@ func (s *Server) verifyPasskeyLoginAccount(w http.ResponseWriter, r *http.Reques
 			"username", logging.SanitizeLogValue(acct.Username),
 			"error", logging.SanitizeLogValue(recordErr.Error()))
 		s.recordPasskeyLoginFailure("account:" + acct.Username)
-		s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.failure", business.AuditResultFailure)
+		s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.failure", business.AuditResultFailure,
+			softwareAuthenticatorAuditDetails(acct, credential.ID))
 		s.writeErrorResponse(w, http.StatusUnauthorized,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 		return nil, false

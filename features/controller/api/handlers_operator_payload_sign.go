@@ -319,32 +319,13 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 		return
 	}
 
-	//duplication:justified features/controller/api/handlers_webauthn_elevate.go -- parallel finish prologue of handleStepUpFinish: the two ceremonies hold distinct session stores and error codes, and a shared helper would need a generic over both pending-session types
 	principal, sessID, acct, ok := s.loadCeremonyAccount(w, r, "Operator-payload sign finish", signSessionRequiredMsg)
 	if !ok {
 		return
 	}
 
-	// Load and unconditionally delete the pending session (single-use enforcement).
-	pending, out := s.takePayloadSignSession(r.Context(), sessID)
-	if out == ceremonyUnavailable {
-		s.writeCeremonyUnavailable(w)
-		return
-	}
-	if out != ceremonyOK {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"No active sign session — call begin first", "NO_ACTIVE_SIGN_SESSION")
-		return
-	}
-	// Bind at begin, check at finish: only the principal that began may finish.
-	if pending.accountID != "" && pending.accountID != principal.ID {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"No active sign session — call begin first", "NO_ACTIVE_SIGN_SESSION")
-		return
-	}
-	if time.Now().After(pending.expires) {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Sign session expired — restart with begin", "SESSION_EXPIRED")
+	pending, ok := s.takeSignPending(w, r, sessID, principal.ID)
+	if !ok {
 		return
 	}
 
@@ -390,6 +371,7 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 			"source_ip", logging.SanitizeLogValue(sourceIP),
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.recordSignFailures(sessID, ipKey)
+		s.auditSignFinishFailure(r.Context(), acct, principal.ID, pending, parsedResponse.RawID)
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 		return
@@ -406,6 +388,7 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 			"stored_count", storedCount,
 			"response_count", newSignCount)
 		s.recordSignFailures(sessID, ipKey)
+		s.auditSignFinishFailure(r.Context(), acct, principal.ID, pending, credential.ID)
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 		return
@@ -437,6 +420,38 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 		Signature:         []byte(parsedResponse.Raw.AssertionResponse.Signature),
 		CredentialID:      parsedResponse.RawID,
 	})
+}
+
+// takeSignPending loads and unconditionally deletes the pending sign session (single-use
+// enforcement), requires that the principal that began the ceremony is the one finishing it
+// (bind at begin, check at finish) and that it has not expired. On refusal it writes the
+// response and returns ok=false.
+func (s *Server) takeSignPending(w http.ResponseWriter, r *http.Request, sessID, principalID string) (*operatorPayloadSignSession, bool) {
+	pending, out := s.takePayloadSignSession(r.Context(), sessID)
+	if out == ceremonyUnavailable {
+		s.writeCeremonyUnavailable(w)
+		return nil, false
+	}
+	if out != ceremonyOK || (pending.accountID != "" && pending.accountID != principalID) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"No active sign session — call begin first", "NO_ACTIVE_SIGN_SESSION")
+		return nil, false
+	}
+	if time.Now().After(pending.expires) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Sign session expired — restart with begin", "SESSION_EXPIRED")
+		return nil, false
+	}
+	return pending, true
+}
+
+// auditSignFinishFailure records a sign assertion that did not verify when the credential
+// it named is a CFGMS software authenticator (Issue #6144): denied when the policy refuses
+// it, failed otherwise. The event is the dispatch event the success path writes.
+func (s *Server) auditSignFinishFailure(ctx context.Context, acct *account, principalID string, pending *operatorPayloadSignSession, credentialID []byte) {
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
+	s.auditDispatchCredentialFailure(ctx, acct, tenantID, principalID, string(pending.envelope.Content), credentialID,
+		pending.envelope.Targets, auditDetail{Key: "execution_context", Value: pending.envelope.ExecutionContext})
 }
 
 // signSessionRequiredMsg is the 400 message for a sign request without a web session.
