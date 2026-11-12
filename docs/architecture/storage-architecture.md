@@ -389,6 +389,166 @@ Controllers in cluster mode require a storage backend that supports shared state
 
 The startup gate (sibling Story B) uses `ClusterCapable()` to reject misconfigured cluster deployments early, before any state is written.
 
+## Schema evolution (N / N-1)
+
+This section applies to the PostgreSQL provider (`pkg/storage/providers/database`)
+only. The flat-file and SQLite providers are outside this contract.
+
+During a rolling controller upgrade two revisions share one database: the revision
+being rolled out (N) and the previous one (N-1). N-1 means the previous revision on
+`develop`, not a release tag. Every schema change is built so both revisions run
+against the same database at the same time, and so one version of rollback needs no
+schema rollback.
+
+### Versions and the floor
+
+Each build carries two constants in `schema_version.go`, and the database records two
+matching numbers in the single-row table `cfgms_schema_version`:
+
+| Name | Where | Meaning |
+|------|-------|---------|
+| `SchemaVersion` | build constant | The schema version this build creates and expects. |
+| `MinToleratedSchemaVersion` | build constant | The oldest recorded schema version this build still starts against. |
+| `version` | `cfgms_schema_version` | The highest `SchemaVersion` any node has applied. It only rises. |
+| `min_node_version` | `cfgms_schema_version` | The floor: the lowest node `SchemaVersion` that may still use the database. Only a contract step raises it. |
+
+Each node also reports its own `SchemaVersion` and `MinToleratedSchemaVersion` in the
+shared node registry (`cfgms_node_registry.schema_required` and
+`schema_min_tolerated`). `GET /api/v1/ha/cluster` returns them per node as
+`schema_required` and `schema_min_tolerated` (see the
+[REST API reference](../api/rest-api.md#get-apiv1hacluster)).
+
+### The gate
+
+`checkSchemaVersion` runs when the provider opens its connection pool, before any store
+is created. In one transaction it creates the version record if absent, locks the row,
+and refuses to continue when:
+
+- the recorded `version` is below this build's `MinToleratedSchemaVersion`, or
+- `min_node_version` is above this build's `SchemaVersion`.
+
+A refusal returns an error wrapping `ErrSchemaVersionOutOfRange`; the pool is closed
+and not cached, so the node does not start. Otherwise the gate raises `version` to this
+build's `SchemaVersion` (never lowers it) and records that the node passed the gate
+(`recent_gate_required`, `recent_gate_at`), so the contract guard can see a node that
+has passed the gate but has not yet registered. A database with no recorded row counts
+as version 0.
+
+### The expand/contract rule
+
+A schema change is one of two kinds. An expansion adds schema. A contraction removes,
+renames or narrows it. The contract has four rules:
+
+1. **Expand first, compatibly.** An expansion (a new table, a nullable or defaulted
+   column, a new index, a new constraint added `NOT VALID`) ships first and must be
+   readable and writable by the previous revision.
+2. **Contract later.** A column, table, constraint, index or enum value is removed,
+   renamed or narrowed only in a later schema version, as a `ContractStep`
+   (`schema_contract.go`), after the last revision that reads or writes it.
+3. **Backfill online.** Backfills run in small batches, are idempotent and resumable by
+   selecting only unfilled rows, and are never one long transaction.
+4. **No blocking locks.** No schema change takes a table lock that blocks live traffic
+   across a rolling deploy:
+   - a new index on an existing table uses `CREATE INDEX CONCURRENTLY`, as its own
+     statement and never inside a transaction, because Postgres refuses
+     `CREATE INDEX CONCURRENTLY` inside a transaction block;
+   - a new foreign key or check constraint is added `NOT VALID` and validated in a later
+     statement; a unique or primary key constraint uses `USING INDEX` on an index built
+     beforehand with `CONCURRENTLY`;
+   - a table created in the same schema version is exempt (it was empty when the
+     statement ran), declared with a `schema:new-table` marker;
+   - start-up DDL on row-level-security tables issues no policy DDL when nothing
+     changed.
+
+A failed `CREATE INDEX CONCURRENTLY` leaves an INVALID index. `CREATE INDEX IF NOT
+EXISTS` then skips it, because the name exists. An invalid index must be dropped and
+rebuilt as its own contract-class change; start-up does not repair it.
+
+### Contract steps and the floor
+
+A `ContractStep` carries `Version`, `UnusedSince` (the contract marker), a description
+and the statements. It is valid only when `1 <= UnusedSince < Version <= SchemaVersion`.
+`ApplyContractSteps` runs after the gate, in ascending `Version` order, each step in its
+own transaction under a 5 second `lock_timeout`. The production list `contractSteps` is
+empty today.
+
+The floor is the marker. A step is applied only when no live node has a schema version
+below `UnusedSince`. A node exactly at `UnusedSince` does not block, so N-1 beside N
+keeps running and rollback by one version works. Applying a step raises
+`min_node_version` to `UnusedSince`, so a node below the marker that starts later is
+refused by the gate.
+
+A step is blocked by:
+
+- a live row in `cfgms_node_registry` with `schema_required` below `UnusedSince` (a row
+  of 0, from a node that predates the column, blocks: the check fails closed), and
+- a node that passed the gate within `business.NodeRegistryStaleAfter` (90 seconds)
+  but has not registered yet.
+
+A blocked step changes nothing, logs a warning and lets the node start. Nothing retries
+it on a timer. It is retried on a later node start, once the older nodes' registry rows
+have gone stale; the restarting node's own pre-restart row also blocks it for up to the
+staleness window. A contract therefore ships a release after the expansion it follows.
+Any other step failure (a statement error, a lock timeout) rolls the step back and
+refuses the pool.
+
+### Markers
+
+| Marker | Form | Meaning |
+|--------|------|---------|
+| Contract (Go) | the statement is an element of the `Statements` field of a `ContractStep` literal | Declares a destructive statement with an integer-literal `UnusedSince`. |
+| Contract (SQL) | `-- schema:contract unused-since=<n>` on the line before the statement in `migrations/*.sql` | Declares a destructive statement, with `1 <= n < SchemaVersion`. |
+| New table | `// schema:new-table <table> since=<n>` (Go) or `-- schema:new-table <table> since=<n>` (SQL) directly above the statement | Exempts a statement on a table created in the same schema version from the lock-hazard rules. |
+
+A new-table marker is valid only when `testdata/table_versions_baseline.txt` records the
+table at version `n`, `n <= SchemaVersion`, and the statement targets that table. A new
+`CREATE TABLE` adds its own line with the current `SchemaVersion` in the same change;
+existing lines are never edited, so a table recorded at an earlier version can not be
+claimed new later.
+
+### Grandfathering
+
+Two frozen baselines in `pkg/storage/providers/database/testdata` record the statements
+that existed before the checks did:
+
+- `destructive_baseline.txt`: three destructive statements.
+- `lock_hazard_baseline.txt`: the existing `CREATE INDEX` statements that do not use
+  `CONCURRENTLY`.
+
+Both may only shrink. A line that matches no statement fails the check, so removing or
+rewriting a statement forces removing its line. Adding a line is a reviewed exception. A
+moved or edited statement is a new statement and needs a marker or the online form.
+
+### How each control is enforced
+
+Automatic:
+
+| Control | Mechanism |
+|---------|-----------|
+| Version gate | `checkSchemaVersion` on every node start; refuses a node outside the recorded range. |
+| Contract guard | `ApplyContractSteps` on every node start; blocks a step while a live or just-admitted older node needs the old shape. |
+| Destructive-statement check | `TestSchemaContractCheck_CurrentTreePasses` scans every non-test `.go` file of the package and every `migrations/*.sql` file; a destructive statement without a contract marker, or not in the baseline, fails. |
+| Lock-hazard check | `TestSchemaLockCheck_CurrentTreePasses` scans the same files for `CREATE INDEX` without `CONCURRENTLY`, `ADD CONSTRAINT` without `NOT VALID` or `USING INDEX`, and `CONCURRENTLY` inside a multi-statement literal or after `Begin`/`BeginTx`. A `CREATE TABLE` with no line in the table baseline also fails. |
+| Lock-safe re-apply | `lockSafe` in `lock_safe_db.go` reads the catalog before `ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS` and `SET NOT NULL`, and issues nothing when it would change nothing. An up-to-date database re-apply takes none of these locks. |
+| Policy re-apply | `applyTenantRLS` in `rls_apply.go` compares a hash stored on each policy and issues no DDL in steady state; a real change runs in one transaction with `ALTER POLICY`. A node still running the older inline drop-and-create can open the deny-all window when it restarts. |
+| Mixed-revision compat run | `scripts/check-schema-compat.sh` runs the base revision's database suite against the head revision's schema, and the head revision's suite against the base revision's schema. |
+
+The compat run executes in the `postgres-integration` job of
+`.github/workflows/cross-platform-build.yml`, which runs for a merge group and for a
+manual dispatch, not on every pull request push. The static checks are Go tests in the
+database provider package and run with its test suite.
+
+Review-only:
+
+- Rule 3 (backfills): batch size, idempotence and resumability are not checked by any
+  tool.
+- Rule 1 beyond what the existing test suites exercise: the compat run proves the two
+  revisions pass each other's tests, not that every column access is compatible.
+- Whether a contract step's `UnusedSince` names the right version.
+
+The operator view of this contract is in the
+[rolling cluster upgrade runbook](../operations/rolling-cluster-upgrade.md#mixed-version-rollout-n-and-n-1).
+
 ## References
 
 - [ADR-003: Storage Data Taxonomy](decisions/003-storage-data-taxonomy.md) — authoritative design document
