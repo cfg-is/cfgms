@@ -28,10 +28,10 @@ require (
 	github.com/lib/pq v1.12.3
 	github.com/mattn/go-isatty v0.0.24
 	github.com/openbao/openbao/api/v2 v2.7.1
-	github.com/quic-go/quic-go v0.64.1
+	github.com/quic-go/quic-go v0.65.0
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/spf13/cobra v1.10.2
-	github.com/spf13/pflag v1.0.10
+	github.com/spf13/pflag v1.1.0
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.47.0
@@ -41,7 +41,7 @@ require (
 	go.opentelemetry.io/proto/otlp v1.11.1
 	go.uber.org/goleak v1.3.0
 	golang.org/x/crypto v0.58.0
-	golang.org/x/sys v0.49.0
+	golang.org/x/sys v0.50.0
 	golang.org/x/text v0.43.0
 	golang.org/x/time v0.16.0
 	google.golang.org/grpc v1.85.0
@@ -51,7 +51,7 @@ require (
 	software.sslmate.com/src/go-pkcs12 v0.7.4
 )
 
-require github.com/ebitengine/purego v0.11.2
+require github.com/ebitengine/purego v0.11.3
 
 require golang.org/x/term v0.47.0
 
