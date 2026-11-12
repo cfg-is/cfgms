@@ -1206,8 +1206,6 @@ is bound to. When the command ends, whether it succeeded or failed, `cfg` calls
   the OS keychain or the `cfg connect` session store, and the next command logs in
   again. A failed logout prints a warning that names no cookie or token value and
   does not change the command's result; the session then ends when it expires.
-  `cfg config diff` exits the process directly when it finds differences, so its
-  session is not ended by `cfg` and also ends when it expires.
 - **Exactly one credential.** `--authenticator` cannot be combined with `--bundle`
   or `--no-bundle`; the command fails before any network call with an error that
   says to provide exactly one credential. `--authenticator` takes the place of the

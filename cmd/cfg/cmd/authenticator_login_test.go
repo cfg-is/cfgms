@@ -74,7 +74,10 @@ type webLoginServer struct {
 	finishMessage string // when set, finish answers 401 with this error text
 }
 
-const webLoginCommandPath = "/api/v1/things"
+const (
+	webLoginCommandPath       = "/api/v1/things"
+	webLoginStewardConfigPath = "/api/v1/stewards/steward-1/config"
+)
 
 func newWebLoginServer(t *testing.T) *webLoginServer {
 	t.Helper()
@@ -177,6 +180,8 @@ func (s *webLoginServer) serve(w http.ResponseWriter, r *http.Request) {
 		s.logout(w, r)
 	case r.URL.Path == webLoginCommandPath:
 		s.command(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == webLoginStewardConfigPath:
+		s.stewardConfig(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -289,6 +294,17 @@ func (s *webLoginServer) command(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.reply(w, http.StatusOK, map[string]any{"data": map[string]bool{"ok": true}})
+}
+
+// stewardConfig serves the stored config `cfg config diff` fetches.
+func (s *webLoginServer) stewardConfig(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.session(r); !ok {
+		s.fail(w, http.StatusUnauthorized, "Session expired or invalid")
+		return
+	}
+	s.reply(w, http.StatusOK, map[string]any{"data": map[string]any{
+		"config": map[string]any{"hostname": "stored-host"},
+	}})
 }
 
 // stats returns a consistent snapshot of the counters.
@@ -871,4 +887,43 @@ func TestAuthenticatorFlag_DrivesRealCommandThroughRoot(t *testing.T) {
 	assert.Equal(t, 1, finishes, "the persistent flag selected the authenticator")
 	assert.Equal(t, 1, logouts, "the session ended with the command")
 	assertNoSecrets(t, f.secrets(), out.String(), err.Error())
+}
+
+// `cfg config diff` exits the process directly when it finds differences, which skips
+// cobra's finalizers. The session must already be ended on the controller at that point.
+func TestAuthenticatorLogin_ConfigDiffEndsSessionBeforeExit(t *testing.T) {
+	f := newWebLoginFixture(t, nil)
+	authenticatorSelection = ""
+
+	localCfg := filepath.Join(t.TempDir(), "new.yaml")
+	require.NoError(t, os.WriteFile(localCfg, []byte("hostname: local-host\n"), 0o600))
+
+	origExit := exitProcess
+	t.Cleanup(func() {
+		exitProcess = origExit
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+	})
+	exitCode, logoutsAtExit, exits := -1, -1, 0
+	exitProcess = func(code int) {
+		exits++
+		exitCode = code
+		_, _, logoutsAtExit = f.stats()
+	}
+
+	var out bytes.Buffer
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	rootCmd.SetArgs([]string{"config", "diff", "steward-1", localCfg, "--authenticator", f.name})
+	_ = rootCmd.Execute()
+
+	require.Equal(t, 1, exits, "differences must reach the exit path")
+	assert.Equal(t, 1, exitCode)
+	assert.Equal(t, 1, logoutsAtExit, "the session is revoked before the process exits")
+	for _, tok := range f.sessionTokens() {
+		assert.Equal(t, http.StatusUnauthorized, f.replay(t, tok), "replayed session cookie is refused")
+	}
+	_, _, logouts := f.stats()
+	assert.Equal(t, 1, logouts, "the session is ended exactly once")
 }
