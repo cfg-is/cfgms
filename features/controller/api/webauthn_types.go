@@ -7,10 +7,13 @@
 package api
 
 import (
+	"bytes"
 	"sync/atomic"
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
+
+	"github.com/cfgis/cfgms/pkg/softauthn"
 )
 
 // WebAuthnCredential is a stored WebAuthn passkey / FIDO2 credential record.
@@ -31,6 +34,55 @@ type WebAuthnCredential struct {
 	LastUsedAt     *time.Time `json:"last_used_at,omitempty"`    // nil = never used after registration; updated by assertion handlers
 	BackupEligible bool       `json:"backup_eligible,omitempty"` // W3C WebAuthn BE flag (stored at registration)
 	BackupState    bool       `json:"backup_state,omitempty"`    // W3C WebAuthn BS flag (stored at registration)
+
+	// AAGUID is the authenticator model identifier the authenticator reported at
+	// registration (16 bytes; all zero when it reports none). With attestation
+	// "none" it is self-asserted, so it labels the credential but proves nothing.
+	AAGUID []byte `json:"aaguid,omitempty"`
+	// AttestationFormat is the attestation statement format ("none", "packed", ...)
+	// of the registration response.
+	AttestationFormat string `json:"attestation_format,omitempty"`
+}
+
+// isSoftwareAuthenticator reports whether the credential's recorded AAGUID equals
+// softauthn.AAGUID. The AAGUID is self-asserted under attestation "none", so this
+// is a label, not proof of what produced the credential.
+func (c WebAuthnCredential) isSoftwareAuthenticator() bool {
+	return len(c.AAGUID) == len(softauthn.AAGUID) && bytes.Equal(c.AAGUID, softauthn.AAGUID[:])
+}
+
+// hasSoftwareCredential reports whether any registered credential carries the
+// CFGMS software-authenticator AAGUID. The AAGUID is self-asserted, so the result
+// is a label for policy decisions, not proof.
+func (a *account) hasSoftwareCredential() bool {
+	for _, c := range a.Credentials {
+		if c.isSoftwareAuthenticator() {
+			return true
+		}
+	}
+	return false
+}
+
+// newStoredCredential builds the stored record for a credential the library has
+// just verified at registration. Both registration-finish handlers use it so the
+// field copy exists in one place.
+func newStoredCredential(cred *webauthn.Credential, label string, now time.Time) WebAuthnCredential {
+	transports := make([]string, 0, len(cred.Transport))
+	for _, t := range cred.Transport {
+		transports = append(transports, string(t))
+	}
+	return WebAuthnCredential{
+		ID:                cred.ID,
+		PublicKey:         cred.PublicKey,
+		SignCount:         cred.Authenticator.SignCount,
+		Transport:         transports,
+		Label:             label,
+		RegisteredAt:      now,
+		BackupEligible:    cred.Flags.BackupEligible,
+		BackupState:       cred.Flags.BackupState,
+		AAGUID:            append([]byte(nil), cred.Authenticator.AAGUID...),
+		AttestationFormat: cred.AttestationFormat,
+	}
 }
 
 // webAuthnSessionTTL is the maximum age of a pending WebAuthn registration session.
@@ -57,7 +109,7 @@ type WebAuthnCredentialInfo struct {
 	RegisteredAt time.Time  `json:"registered_at"`
 	LastUsedAt   *time.Time `json:"last_used_at,omitempty"` // nil = never used after registration
 
-	// DeviceType is a Transport heuristic (attachment and AAGUID are not stored):
+	// DeviceType is a Transport heuristic (attachment is not stored):
 	// "platform" (transports include internal), "security_key" (usb/nfc/ble),
 	// "phone_or_other" (hybrid), or "unknown" (empty or unrecognised).
 	DeviceType string `json:"device_type"`
@@ -65,6 +117,12 @@ type WebAuthnCredentialInfo struct {
 	Synced bool `json:"synced"`
 	// SyncCapable is the stored W3C BE (backup eligible) flag.
 	SyncCapable bool `json:"sync_capable"`
+	// AAGUID is the hex-encoded authenticator AAGUID recorded at registration;
+	// empty for credentials registered before it was recorded.
+	AAGUID string `json:"aaguid,omitempty"`
+	// Software is true when the recorded AAGUID equals softauthn.AAGUID. It is a
+	// label derived from a self-asserted value, not proof of the authenticator.
+	Software bool `json:"software"`
 	// Current is true for the credential that last proved the caller's web session.
 	// Always false for Bearer, API-key and mTLS callers (no web session).
 	Current bool `json:"current"`

@@ -17,6 +17,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -38,6 +41,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
+	"github.com/cfgis/cfgms/pkg/softauthn"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -2581,7 +2585,9 @@ func TestPasskeyAuditEvents_Characterization(t *testing.T) {
 		severity business.AuditSeverity
 		emit     func(context.Context, *account, string, string)
 	}{
-		{"account.passkey_added", business.AuditSeverityMedium, server.emitPasskeyAddedAudit},
+		{"account.passkey_added", business.AuditSeverityMedium, func(ctx context.Context, a *account, credID, principalID string) {
+			server.emitPasskeyAddedAudit(ctx, a, credID, principalID, &WebAuthnCredential{})
+		}},
 		{"account.passkey_revoked", business.AuditSeverityHigh, server.emitPasskeyRevokedAudit},
 	}
 
@@ -2617,4 +2623,203 @@ func TestPasskeyAuditEvents_Characterization(t *testing.T) {
 			assert.Contains(t, byCred["false"].Details, "credential_id")
 		})
 	}
+}
+
+// --- Issue #6137: AAGUID and attestation format recorded at registration ---
+
+const (
+	aaguidRPID    = "cfgms.example.org"
+	aaguidOrigin  = "https://cfgms.example.org"
+	aaguidWebUser = "aaguid-admin-route-user"
+	aaguidEnrUser = "aaguid-enroll-user"
+)
+
+// newSoftAuthenticator builds a pkg/softauthn authenticator with a key generated
+// at test time. aaguid nil means the CFGMS AAGUID.
+func newSoftAuthenticator(t *testing.T, aaguid *[16]byte) *softauthn.Authenticator {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	credID := make([]byte, 32)
+	_, err = rand.Read(credID)
+	require.NoError(t, err)
+	a, err := softauthn.New(softauthn.Config{
+		Signer:       key,
+		RPID:         aaguidRPID,
+		Origin:       aaguidOrigin,
+		CredentialID: credID,
+		AAGUID:       aaguid,
+	})
+	require.NoError(t, err)
+	return a
+}
+
+// beginData returns the "data" member of a successful begin response, which is the
+// creation options the authenticator answers.
+func beginData(t *testing.T, rec *httptest.ResponseRecorder) []byte {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code, "begin: %s", rec.Body.String())
+	var outer struct {
+		Data json.RawMessage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &outer))
+	require.NotEmpty(t, outer.Data)
+	return outer.Data
+}
+
+// registerViaAdminRoute runs begin, the authenticator and finish on the admin route.
+func registerViaAdminRoute(t *testing.T, server *Server, username string, auth *softauthn.Authenticator) {
+	t.Helper()
+	resp, err := auth.Register(beginData(t, doBegin(t, server, username)))
+	require.NoError(t, err)
+	rec := doFinish(t, server, username, bytes.NewReader(resp))
+	require.Equal(t, http.StatusCreated, rec.Code, "finish: %s", rec.Body.String())
+}
+
+// registerViaEnrollment runs begin, the authenticator and finish on the
+// enrollment-token route.
+func registerViaEnrollment(t *testing.T, server *Server, rawToken string, auth *softauthn.Authenticator) {
+	t.Helper()
+	resp, err := auth.Register(beginData(t, doEnrollBegin(t, server, rawToken)))
+	require.NoError(t, err)
+	rec := doEnrollFinish(t, server, rawToken, bytes.NewReader(resp))
+	require.Equal(t, http.StatusCreated, rec.Code, "finish: %s", rec.Body.String())
+}
+
+// storedCredentialFromStore reads the account's only credential from the durable
+// store, not the cache.
+func storedCredentialFromStore(t *testing.T, server *Server, username string) (*account, WebAuthnCredential) {
+	t.Helper()
+	cached, err := server.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	fresh, err := server.loadAccountFromStore(context.Background(), username, accountStorageTenant(cached.TenantID))
+	require.NoError(t, err)
+	require.NotNil(t, fresh)
+	require.Len(t, fresh.Credentials, 1)
+	return fresh, fresh.Credentials[0]
+}
+
+// auditDetailsFor returns the details of the single audit event with action.
+func auditDetailsFor(t *testing.T, server *Server, action string) map[string]interface{} {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, server.auditManager.Flush(ctx))
+	entries, err := server.auditManager.QueryEntries(ctx, &business.AuditFilter{Actions: []string{action}})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	return entries[0].Details
+}
+
+// assertSoftwareAuthenticatorDetail checks the software_authenticator audit detail.
+// The audit manager's deny-list matches "auth" as a substring of every key not on
+// its attribution allow-list, so the persisted value of this key reads
+// "[REDACTED]" (pkg/audit/manager.go, outside this story's scope). The key must be
+// present on the persisted event; its value is asserted on the details the handler
+// builds, before the audit layer redacts them.
+func assertSoftwareAuthenticatorDetail(t *testing.T, persisted map[string]interface{}, want bool) {
+	t.Helper()
+	assert.Contains(t, persisted, "software_authenticator")
+	cred := WebAuthnCredential{}
+	if want {
+		cred.AAGUID = softauthn.AAGUID[:]
+	}
+	built := registrationAuditDetails(map[string]interface{}{}, &cred)
+	assert.Equal(t, want, built["software_authenticator"])
+}
+
+func TestPasskeyEnroll_RecordsSoftwareAuthenticatorAAGUID(t *testing.T) {
+	server, _, rawToken := setupEnrollServer(t, aaguidRPID, []string{aaguidOrigin}, aaguidEnrUser)
+	registerViaEnrollment(t, server, rawToken, newSoftAuthenticator(t, nil))
+
+	acct, cred := storedCredentialFromStore(t, server, aaguidEnrUser)
+	assert.Equal(t, softauthn.AAGUID[:], cred.AAGUID, "AAGUID survives the durable store round trip")
+	assert.Equal(t, "none", cred.AttestationFormat)
+	assert.True(t, cred.isSoftwareAuthenticator())
+	assert.True(t, acct.hasSoftwareCredential())
+
+	rec := doListCredentials(t, server, aaguidEnrUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	infos := listCredentialInfos(t, rec)
+	require.Len(t, infos, 1)
+	for _, info := range infos {
+		assert.True(t, info.Software, "list reports the CFGMS AAGUID as software")
+		assert.Equal(t, hex.EncodeToString(softauthn.AAGUID[:]), info.AAGUID)
+	}
+
+	details := auditDetailsFor(t, server, "account.passkey_enrolled")
+	assert.Equal(t, hex.EncodeToString(softauthn.AAGUID[:]), details["aaguid"])
+	assert.Equal(t, "none", details["attestation_format"])
+	assertSoftwareAuthenticatorDetail(t, details, true)
+}
+
+func TestWebAuthnRegister_RecordsNonCFGMSAAGUID(t *testing.T) {
+	server, username := setupWebAuthnServer(t, aaguidRPID, []string{aaguidOrigin})
+	other := [16]byte{0xde, 0xad, 0xbe, 0xef, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+	registerViaAdminRoute(t, server, username, newSoftAuthenticator(t, &other))
+
+	acct, cred := storedCredentialFromStore(t, server, username)
+	assert.Equal(t, other[:], cred.AAGUID)
+	assert.Equal(t, "none", cred.AttestationFormat)
+	assert.False(t, cred.isSoftwareAuthenticator())
+	assert.False(t, acct.hasSoftwareCredential())
+
+	infos := listCredentialInfos(t, doListCredentials(t, server, username))
+	require.Len(t, infos, 1)
+	for _, info := range infos {
+		assert.False(t, info.Software)
+		assert.Equal(t, hex.EncodeToString(other[:]), info.AAGUID)
+	}
+
+	details := auditDetailsFor(t, server, "account.passkey_added")
+	assert.Equal(t, hex.EncodeToString(other[:]), details["aaguid"])
+	assert.Equal(t, "none", details["attestation_format"])
+	assertSoftwareAuthenticatorDetail(t, details, false)
+}
+
+func TestWebAuthnRegister_SoftwareAAGUIDAuditViaAdminRoute(t *testing.T) {
+	server, username := setupWebAuthnServer(t, aaguidRPID, []string{aaguidOrigin})
+	registerViaAdminRoute(t, server, username, newSoftAuthenticator(t, nil))
+
+	acct, cred := storedCredentialFromStore(t, server, username)
+	assert.True(t, cred.isSoftwareAuthenticator())
+	assert.True(t, acct.hasSoftwareCredential())
+
+	details := auditDetailsFor(t, server, "account.passkey_added")
+	assert.Equal(t, hex.EncodeToString(softauthn.AAGUID[:]), details["aaguid"])
+	assert.Equal(t, "none", details["attestation_format"])
+	assertSoftwareAuthenticatorDetail(t, details, true)
+}
+
+func TestWebAuthnCredential_LegacyRecordIsNotSoftware(t *testing.T) {
+	// Records written before the AAGUID was recorded carry none.
+	var cred WebAuthnCredential
+	require.NoError(t, json.Unmarshal([]byte(`{"id":"AQ==","public_key":"Ag=="}`), &cred))
+	assert.Empty(t, cred.AAGUID)
+	assert.False(t, cred.isSoftwareAuthenticator())
+	assert.False(t, (&account{Credentials: []WebAuthnCredential{cred}}).hasSoftwareCredential())
+
+	short := WebAuthnCredential{AAGUID: softauthn.AAGUID[:4]}
+	assert.False(t, short.isSoftwareAuthenticator(), "a truncated AAGUID is not the CFGMS AAGUID")
+}
+
+func TestNewStoredCredential_CopiesAllFields(t *testing.T) {
+	now := time.Now().UTC()
+	in := &webauthn.Credential{
+		ID:                []byte("id"),
+		PublicKey:         []byte("pk"),
+		Transport:         []protocol.AuthenticatorTransport{protocol.Internal},
+		Flags:             webauthn.CredentialFlags{BackupEligible: true, BackupState: true},
+		Authenticator:     webauthn.Authenticator{SignCount: 7, AAGUID: append([]byte(nil), softauthn.AAGUID[:]...)},
+		AttestationFormat: "packed",
+	}
+	got := newStoredCredential(in, "my key", now)
+	assert.Equal(t, WebAuthnCredential{
+		ID: []byte("id"), PublicKey: []byte("pk"), SignCount: 7,
+		Transport: []string{"internal"}, Label: "my key", RegisteredAt: now,
+		BackupEligible: true, BackupState: true,
+		AAGUID: softauthn.AAGUID[:], AttestationFormat: "packed",
+	}, got)
+
+	in.Authenticator.AAGUID[0] ^= 0xff
+	assert.Equal(t, softauthn.AAGUID[0], got.AAGUID[0], "the stored AAGUID is a copy")
 }

@@ -55,6 +55,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -424,20 +425,7 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 	// which is consumed by FinishRegistration above).
 	label := logging.SanitizeLogValue(r.URL.Query().Get("label"))
 
-	transports := make([]string, 0, len(credential.Transport))
-	for _, t := range credential.Transport {
-		transports = append(transports, string(t))
-	}
-	stored := WebAuthnCredential{
-		ID:             credential.ID,
-		PublicKey:      credential.PublicKey,
-		SignCount:      credential.Authenticator.SignCount,
-		Transport:      transports,
-		Label:          label,
-		RegisteredAt:   time.Now().UTC(),
-		BackupEligible: credential.Flags.BackupEligible,
-		BackupState:    credential.Flags.BackupState,
-	}
+	stored := newStoredCredential(credential, label, time.Now().UTC())
 
 	// Reload from the durable store (not the cache) so a concurrent admin change
 	// made since the request began is not overwritten, then write with
@@ -497,7 +485,7 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 		"label", logging.SanitizeLogValue(label))
 
 	// Audit: record passkey addition (Issue #2992).
-	s.emitPasskeyAddedAudit(r.Context(), &updatedAcct, base64.RawURLEncoding.EncodeToString(stored.ID), actingPrincipalID)
+	s.emitPasskeyAddedAudit(r.Context(), &updatedAcct, base64.RawURLEncoding.EncodeToString(stored.ID), actingPrincipalID, &stored)
 
 	// Response contains only the credential ID and metadata — no private-key-adjacent
 	// material (the server never holds the authenticator private key).
@@ -922,6 +910,8 @@ func (s *Server) handleWebAuthnListCredentials(w http.ResponseWriter, r *http.Re
 		infos = append(infos, WebAuthnCredentialInfo{
 			DeviceType:   passkeyDeviceType(c.Transport),
 			Synced:       c.BackupState,
+			AAGUID:       hex.EncodeToString(c.AAGUID),
+			Software:     c.isSoftwareAuthenticator(),
 			SyncCapable:  c.BackupEligible,
 			Current:      len(currentCred) > 0 && bytes.Equal(currentCred, c.ID),
 			ID:           base64.RawURLEncoding.EncodeToString(c.ID),
@@ -1316,20 +1306,7 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 
 	label := logging.SanitizeLogValue(r.URL.Query().Get("label"))
 
-	transports := make([]string, 0, len(credential.Transport))
-	for _, t := range credential.Transport {
-		transports = append(transports, string(t))
-	}
-	stored := WebAuthnCredential{
-		ID:             credential.ID,
-		PublicKey:      credential.PublicKey,
-		SignCount:      credential.Authenticator.SignCount,
-		Transport:      transports,
-		Label:          label,
-		RegisteredAt:   time.Now().UTC(),
-		BackupEligible: credential.Flags.BackupEligible,
-		BackupState:    credential.Flags.BackupState,
-	}
+	stored := newStoredCredential(credential, label, time.Now().UTC())
 
 	// CAS reload: re-read from the durable store (not cache) to detect any
 	// admin-mediated mutations that occurred between begin and finish.
@@ -1388,7 +1365,7 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 
 	// Audit: record account, credential ID, and delivery channel.
 	credIDStr := base64.RawURLEncoding.EncodeToString(stored.ID)
-	s.emitEnrollmentAudit(r.Context(), &updatedAcct, credIDStr)
+	s.emitEnrollmentAudit(r.Context(), &updatedAcct, credIDStr, &stored)
 	s.logger.Info("First passkey enrolled via magic link",
 		"account_id", logging.SanitizeLogValue(updatedAcct.ID),
 		"username", logging.SanitizeLogValue(updatedAcct.Username))
@@ -1400,8 +1377,18 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// registrationAuditDetails adds the authenticator facts recorded at registration
+// to an audit event's details. software_authenticator reflects a self-asserted
+// AAGUID: it labels the credential and is not proof of what produced it.
+func registrationAuditDetails(details map[string]interface{}, cred *WebAuthnCredential) map[string]interface{} {
+	details["aaguid"] = hex.EncodeToString(cred.AAGUID)
+	details["attestation_format"] = cred.AttestationFormat
+	details["software_authenticator"] = cred.isSoftwareAuthenticator()
+	return details
+}
+
 // emitEnrollmentAudit records a first-passkey enrollment audit event.
-func (s *Server) emitEnrollmentAudit(ctx context.Context, acct *account, credentialID string) {
+func (s *Server) emitEnrollmentAudit(ctx context.Context, acct *account, credentialID string, cred *WebAuthnCredential) {
 	if s.auditManager == nil {
 		return
 	}
@@ -1417,10 +1404,10 @@ func (s *Server) emitEnrollmentAudit(ctx context.Context, acct *account, credent
 		Resource("account", logging.SanitizeLogValue(acct.Username), "").
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityHigh).
-		Details(map[string]interface{}{
+		Details(registrationAuditDetails(map[string]interface{}{
 			"credential_id":    logging.SanitizeLogValue(credentialID),
 			"delivery_channel": "magic_link",
-		})
+		}, cred))
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
 		s.logger.Warn("Failed to emit enrollment audit event",
 			"account_id", logging.SanitizeLogValue(acct.ID),
@@ -1554,20 +1541,21 @@ func (s *Server) handleWebAuthnRevokeCredential(w http.ResponseWriter, r *http.R
 // Called after a successful additional registration (not first-enrollment — that is
 // covered by emitEnrollmentAudit). actingPrincipalID is the session principal UUID,
 // which may differ from acct.ID when an mTLS admin adds a credential on behalf of a user.
-func (s *Server) emitPasskeyAddedAudit(ctx context.Context, acct *account, credentialID, actingPrincipalID string) {
-	s.emitPasskeyAudit(ctx, acct, credentialID, actingPrincipalID, "passkey_added", business.AuditSeverityMedium)
+func (s *Server) emitPasskeyAddedAudit(ctx context.Context, acct *account, credentialID, actingPrincipalID string, cred *WebAuthnCredential) {
+	s.emitPasskeyAudit(ctx, acct, credentialID, actingPrincipalID, "passkey_added", business.AuditSeverityMedium, cred)
 }
 
 // emitPasskeyRevokedAudit records a passkey-revoked audit event (Issue #2992).
 // actingPrincipalID is the session principal UUID, which may differ from acct.ID when
 // an mTLS admin revokes a credential on behalf of a user.
 func (s *Server) emitPasskeyRevokedAudit(ctx context.Context, acct *account, credentialID, actingPrincipalID string) {
-	s.emitPasskeyAudit(ctx, acct, credentialID, actingPrincipalID, "passkey_revoked", business.AuditSeverityHigh)
+	s.emitPasskeyAudit(ctx, acct, credentialID, actingPrincipalID, "passkey_revoked", business.AuditSeverityHigh, nil)
 }
 
 // emitPasskeyAudit records an account.<event> audit event for a credential change.
-// The added and revoked events differ only in event name and severity.
-func (s *Server) emitPasskeyAudit(ctx context.Context, acct *account, credentialID, actingPrincipalID, event string, severity business.AuditSeverity) {
+// The added and revoked events differ only in event name and severity; cred is
+// the newly registered credential for the added event and nil for revocation.
+func (s *Server) emitPasskeyAudit(ctx context.Context, acct *account, credentialID, actingPrincipalID, event string, severity business.AuditSeverity, cred *WebAuthnCredential) {
 	if s.auditManager == nil {
 		return
 	}
@@ -1580,6 +1568,9 @@ func (s *Server) emitPasskeyAudit(ctx context.Context, acct *account, credential
 	}
 	if actingPrincipalID != acct.ID {
 		details["acting_principal"] = logging.SanitizeLogValue(actingPrincipalID)
+	}
+	if cred != nil {
+		registrationAuditDetails(details, cred)
 	}
 	b := audit.NewEventBuilder().
 		Tenant(tenantID).
