@@ -468,6 +468,8 @@ test_executable_permissions() {
         "scripts/tier1-bootstrap_test.sh"
         "scripts/check-binary-artifacts.sh"
         "scripts/check-binary-artifacts_test.sh"
+        "scripts/go-fetch-retry.sh"
+        "scripts/go-fetch-retry_test.sh"
         "scripts/check-docs-boundary.sh"
         "scripts/check-docs-boundary_test.sh"
         "scripts/install-git-hooks.sh"
@@ -662,6 +664,48 @@ test_check_binary_artifacts() {
         log_pass "check-binary-artifacts_test.sh: All fixture tests passed"
     else
         log_fail "check-binary-artifacts_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Fixture suite for scripts/go-fetch-retry.sh — the retry wrapper for transient
+# Go module proxy errors. Delegates to scripts/go-fetch-retry_test.sh, which puts
+# a stub `go` on PATH and asserts retry, give-up, fail-fast and exit-code behaviour.
+test_go_fetch_retry() {
+    log_test "Testing go-fetch-retry.sh..."
+
+    local wrapper="scripts/go-fetch-retry.sh"
+    local test_script="scripts/go-fetch-retry_test.sh"
+
+    if [[ ! -f "$wrapper" ]]; then
+        log_fail "go-fetch-retry.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$wrapper" ]]; then
+        log_fail "go-fetch-retry.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "go-fetch-retry_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "go-fetch-retry_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "go-fetch-retry_test.sh: All tests passed"
+    else
+        log_fail "go-fetch-retry_test.sh: Tests failed (exit $rc)"
         sed 's/^/    /' "$out_file" >&2
     fi
     rm -f "$out_file"
@@ -3545,6 +3589,7 @@ DISPATCH_TABLE=(
     "test_executable_permissions:core"
     "test_check_providers:core"
     "test_check_binary_artifacts:core"
+    "test_go_fetch_retry:core"
     "test_check_docs_boundary:core"
     "test_check_no_python_in_core:core"
     "test_check_build_boundary:core"

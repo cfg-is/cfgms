@@ -56,10 +56,10 @@ jobs:
           ${{ runner.os }}-go-licenses-
 
     - name: Install go-licenses tool
-      run: go install github.com/google/go-licenses/v2@v2.0.1
+      run: bash scripts/go-fetch-retry.sh install github.com/google/go-licenses/v2@v2.0.1
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     # Check for forbidden/restricted licenses
     - name: Check for forbidden licenses

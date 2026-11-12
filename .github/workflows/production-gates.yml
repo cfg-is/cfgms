@@ -318,7 +318,7 @@ jobs:
         cache: true
 
     - name: Install dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Set up Docker Test Infrastructure
       run: |
@@ -437,7 +437,7 @@ jobs:
         cache: true
 
     - name: Install dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Set up Docker test infrastructure
       run: |
@@ -540,7 +540,7 @@ jobs:
             set -e
 
             echo "📦 Installing Go dependencies..."
-            go mod download
+            bash scripts/go-fetch-retry.sh mod download
 
             echo ""
             echo "🧪 Running integration tests (container-to-container networking)..."

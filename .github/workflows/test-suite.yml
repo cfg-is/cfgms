@@ -190,7 +190,7 @@ jobs:
         cache: false
 
     - name: Install dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Check architecture
       run: make check-architecture
@@ -222,7 +222,7 @@ jobs:
         cache: false
 
     - name: Install dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Check complexity
       run: make complexity-check
@@ -253,7 +253,7 @@ jobs:
         cache: false
 
     - name: Install dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Check duplication
       run: make duplication-check
@@ -332,7 +332,7 @@ jobs:
       continue-on-error: true
 
     - name: Install dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run controller-core group (server, initialization, workflow)
       env:
@@ -375,7 +375,7 @@ jobs:
       continue-on-error: true
 
     - name: Install dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run heavy-providers group (cert, controlplane/grpc, steward/client, storage/sqlite, cmd/steward)
       env:
@@ -418,7 +418,7 @@ jobs:
       continue-on-error: true
 
     - name: Install dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Stdlib completeness gate (ADR-016 clause 6)
       run: make check-stdlib-completeness
@@ -495,7 +495,7 @@ jobs:
       continue-on-error: true
 
     - name: Install dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run features/controller/api (sharded)
       env:
@@ -538,7 +538,7 @@ jobs:
       continue-on-error: true
 
     - name: Install dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Run shell-script test suite
       run: make test-scripts
@@ -714,7 +714,7 @@ jobs:
       continue-on-error: true
 
     - name: Install dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Start Linux resource sampler (self-hosted only, best-effort)
       if: github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)

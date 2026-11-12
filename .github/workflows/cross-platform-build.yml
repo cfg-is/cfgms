@@ -81,7 +81,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     # The same make targets, and so the same packages and flags (-race -short),
     # as test-suite.yml's unit-tests-api / -controller-core legs.
@@ -152,7 +152,7 @@ jobs:
           ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
-      run: go mod download
+      run: bash scripts/go-fetch-retry.sh mod download
 
     - name: Start Docker test services
       run: make test-integration-setup
