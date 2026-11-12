@@ -110,6 +110,64 @@ Cancelled execution exec_1782879897336049056_1
 | `--tls-insecure` | false | Skip TLS verification (development only, env: CFGMS_TLS_INSECURE) |
 | `--server-name` | — | Override TLS server name for certificate verification |
 
+### cfg workflow publish
+
+Publish one stored workflow version by driving the controller's publish ceremony
+(`POST /api/v1/workflows/{id}/versions/{version}/publish/begin` and `/finish`) with a
+software authenticator, then print the resulting publication: name, version, content
+hash and signer.
+
+```bash
+cfg workflow publish <id> <version> --authenticator <name>
+cfg workflow publish nightly-patch 1.2.0 --authenticator agent-1 --json
+```
+
+**Requires a passkey-authenticated web session.** The controller accepts a publish
+ceremony only over a cookie session established by a passkey login, so an mTLS bundle
+or a bearer session token cannot publish. `--authenticator <name>` (or
+`CFGMS_AUTHENTICATOR`) is therefore required; without it the command fails before any
+network call. The command logs in with that authenticator (see
+[Agent software authenticator](operator-credentials.md#agent-software-authenticator)),
+signs the publish challenge exactly as the controller issued it, and ends the session
+when it finishes. The authenticator's account must hold `workflow:publish` for the
+workflow's tenant, and the controller must have publishing enabled.
+
+The command does not create or edit the version, and it does not unpublish or list
+versions. It refuses to sign if the controller begins a ceremony for a different
+workflow name or version than the one named.
+
+The printed content hash is the canonical hash of the version the controller will
+publish. The CLI has no route that reads one named version, so it cannot compare the
+hash itself: compare it with the hash you expect. The signature covers that hash, the
+tenant, the workflow name and the version. A version edited between begin and finish is
+refused by the controller (`VERSION_CHANGED`) and nothing is published.
+
+On success:
+
+```
+Workflow published
+  Name:         nightly-patch
+  Version:      1.2.0
+  Content hash: 3f5a…
+  Signer:       account-1
+  Signed at:    2026-11-12T09:40:00Z
+```
+
+A refusal from the controller exits non-zero and names the step, the HTTP status and the
+server's error code, for example `publish refused at begin (status 403): FORBIDDEN: Insufficient permissions`
+or `publish refused at finish (status 409): VERSION_CHANGED: …`.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--authenticator` | — | Software authenticator to log in with (required; env: CFGMS_AUTHENTICATOR) |
+| `--url` | the authenticator's controller | Must be omitted or equal the controller the authenticator is bound to |
+| `--server-name` | — | Override TLS server name for certificate verification |
+| `--json` | false | Print the publication as JSON (`name`, `version`, `content_hash`, `signer_account_id`, `signed_at`) |
+
+`--bundle`, `--no-bundle` and `--tls-insecure` cannot be combined with `--authenticator`.
+
 ### cfg workflow promote-hv-role
 
 Promote a Hyper-V VM from standalone to Failover Cluster role by submitting the
