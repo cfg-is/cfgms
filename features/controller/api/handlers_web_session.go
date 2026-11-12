@@ -150,8 +150,9 @@ func clearWebSessionCookies(w http.ResponseWriter) {
 
 // emitWebLoginAudit records a web-login lifecycle audit event.
 // Fields: sanitized username, tenant, outcome. Credential material is never included.
+// details are optional extra fields (a passkey login passes softwareAuthenticatorAuditDetails).
 // No-op when auditManager is nil.
-func (s *Server) emitWebLoginAudit(ctx context.Context, username, tenantID, action string, result business.AuditResult) {
+func (s *Server) emitWebLoginAudit(ctx context.Context, username, tenantID, action string, result business.AuditResult, details ...map[string]interface{}) {
 	if s.auditManager == nil {
 		return
 	}
@@ -171,6 +172,9 @@ func (s *Server) emitWebLoginAudit(ctx context.Context, username, tenantID, acti
 		Resource("web-session", logging.SanitizeLogValue(username), "").
 		Result(result).
 		Severity(severity)
+	for _, d := range details {
+		b = b.Details(d)
+	}
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
 		s.logger.Warn("Failed to emit web login audit event",
 			"action", action,

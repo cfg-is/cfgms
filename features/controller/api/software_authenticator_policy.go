@@ -18,10 +18,15 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"net/http"
+
+	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -239,4 +244,144 @@ func (a *account) usableCredentialCount(softwareCredentialsPermitted bool) int {
 		}
 	}
 	return n
+}
+
+// Audit actions for a presence ceremony's credential use (Issue #6144).
+const (
+	presenceAuditActionSuccess = "web.presence.success"
+	presenceAuditActionFailure = "web.presence.failure"
+)
+
+// Audit actions for a step-up elevation's credential use (Issue #6144).
+const (
+	stepUpAuditActionSuccess = "web.stepup.success"
+	stepUpAuditActionFailure = "web.stepup.failure"
+)
+
+// Audit detail keys written for every audited use of a credential (Issue #6144).
+const (
+	auditKeySoftwareAuthenticator = "software_authenticator"
+	auditKeyAAGUID                = "aaguid"
+	auditKeyCredentialID          = "credential_id"
+	auditKeyReason                = "reason"
+
+	// auditReasonSoftwareAuthenticatorPolicy is the reason on a use the policy refused.
+	auditReasonSoftwareAuthenticatorPolicy = "software_authenticator_policy"
+)
+
+// softwareAuthenticatorAuditDetails is the one place that turns "this credential was
+// used on this account" into audit detail fields (Issue #6144): software_authenticator
+// (true when the recorded AAGUID is softauthn.AAGUID, false for every other
+// credential), aaguid (hex) and credential_id (base64url, the form the credential
+// list and the registration events use). It returns nil when the credential is not
+// one of acct's, so an event never claims a marker for a credential it cannot
+// identify. acct must be the full record, not permittedAccountView's copy: a
+// credential the policy has stopped permitting is still on the full record, which is
+// what lets a refused use be attributed.
+//
+// The marker reflects a self-asserted AAGUID: it labels the credential and is not
+// proof of what produced it.
+func softwareAuthenticatorAuditDetails(acct *account, credentialID []byte) map[string]interface{} {
+	if acct == nil || len(credentialID) == 0 {
+		return nil
+	}
+	for i := range acct.Credentials {
+		c := &acct.Credentials[i]
+		if !bytes.Equal(c.ID, credentialID) {
+			continue
+		}
+		return map[string]interface{}{
+			auditKeySoftwareAuthenticator: c.isSoftwareAuthenticator(),
+			auditKeyAAGUID:                hex.EncodeToString(c.AAGUID),
+			auditKeyCredentialID:          base64.RawURLEncoding.EncodeToString(c.ID),
+		}
+	}
+	return nil
+}
+
+// softwareAuthenticatorFailedUse classifies a use of credentialID on acct that did not
+// succeed. It returns business.AuditResultDenied with the policy reason when the
+// credential is a CFGMS software authenticator the policy does not permit right now
+// (the library never saw it, so a bad signature cannot be told from a refusal),
+// business.AuditResultFailure otherwise. details are softwareAuthenticatorAuditDetails
+// plus the reason on a refusal (nil when the credential is not identifiable) and
+// software reports whether the credential is a software authenticator.
+func (s *Server) softwareAuthenticatorFailedUse(ctx context.Context, acct *account, credentialID []byte) (result business.AuditResult, details map[string]interface{}, software bool) {
+	details = softwareAuthenticatorAuditDetails(acct, credentialID)
+	software, _ = details[auditKeySoftwareAuthenticator].(bool)
+	if !software {
+		return business.AuditResultFailure, details, false
+	}
+	if usable, _ := s.softwareCredentialsUsable(ctx, acct); !usable {
+		details[auditKeyReason] = auditReasonSoftwareAuthenticatorPolicy
+		return business.AuditResultDenied, details, true
+	}
+	return business.AuditResultFailure, details, true
+}
+
+// emitCredentialUseAudit records one use of a credential by acct under action: the
+// outcome plus the softwareAuthenticatorAuditDetails fields. It is the event for the
+// ceremonies that have no audit event of their own (presence, step-up elevation, and a
+// publish assertion that did not verify). details, when non-nil, replaces the default
+// softwareAuthenticatorAuditDetails (a failed use passes the ones that carry the reason).
+func (s *Server) emitCredentialUseAudit(ctx context.Context, acct *account, credentialID []byte, action string, result business.AuditResult, details map[string]interface{}) {
+	if s.auditManager == nil || acct == nil {
+		return
+	}
+	tenantID := acct.TenantID
+	if tenantID == "" {
+		tenantID = audit.SystemTenantID
+	}
+	severity := business.AuditSeverityHigh
+	if result == business.AuditResultSuccess {
+		severity = business.AuditSeverityLow
+	}
+	if details == nil {
+		details = softwareAuthenticatorAuditDetails(acct, credentialID)
+	}
+	b := audit.NewEventBuilder().
+		Tenant(tenantID).
+		Type(business.AuditEventAuthentication).
+		Action(action).
+		User(acct.ID, business.AuditUserTypeHuman).
+		Resource("account", logging.SanitizeLogValue(acct.Username), "").
+		Result(result).
+		Severity(severity).
+		Details(details)
+	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
+		s.logger.Warn("Failed to emit credential use audit event",
+			"action", action,
+			"account_id", logging.SanitizeLogValue(acct.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+// auditCredentialUseSuccess records a verified use of credentialID by acct under action,
+// whatever kind of credential it is.
+func (s *Server) auditCredentialUseSuccess(ctx context.Context, acct *account, credentialID []byte, action string) {
+	s.emitCredentialUseAudit(ctx, acct, credentialID, action, business.AuditResultSuccess, nil)
+}
+
+// auditSoftwareAuthenticatorFailure records a failed or policy-refused use of a CFGMS
+// software authenticator under action. A use of any other credential is not recorded:
+// the ceremonies that had no failure event keep none for hardware credentials, so
+// what they record for those does not change.
+func (s *Server) auditSoftwareAuthenticatorFailure(ctx context.Context, acct *account, credentialID []byte, action string) {
+	result, details, software := s.softwareAuthenticatorFailedUse(ctx, acct, credentialID)
+	if software {
+		s.emitCredentialUseAudit(ctx, acct, credentialID, action, result, details)
+	}
+}
+
+// finishLoginWithCredentialID is webauthn.FinishLogin (parse the assertion, then
+// ValidateLogin) that also returns the credential ID the assertion named, so a failed
+// verification can still be attributed to the credential. The ID is nil when the body
+// did not parse.
+func finishLoginWithCredentialID(wa *webauthn.WebAuthn, user webauthn.User, data webauthn.SessionData, r *http.Request) (*webauthn.Credential, []byte, error) {
+	parsed, err := protocol.ParseCredentialRequestResponse(r)
+	if err != nil {
+		return nil, nil, err
+	}
+	credential, err := wa.ValidateLogin(user, data, parsed)
+	return credential, parsed.RawID, err
 }

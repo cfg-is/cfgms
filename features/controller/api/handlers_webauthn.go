@@ -766,10 +766,12 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 
 	// Full server-side assertion verification: challenge, origin, RP-ID, signature.
 	// The library enforces userVerification=required (set at begin time) via SessionData.
-	if _, err := wa.FinishLogin(user, pending.data, r); err != nil {
+	credential, assertedID, err := finishLoginWithCredentialID(wa, user, pending.data, r)
+	if err != nil {
 		s.logger.Warn("WebAuthn FinishLogin failed for presence ceremony",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
 			"error", logging.SanitizeLogValue(err.Error()))
+		s.auditSoftwareAuthenticatorFailure(r.Context(), acct, assertedID, presenceAuditActionFailure)
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 		return
@@ -781,39 +783,11 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mint a 32-byte cryptographically random presence token.
-	tokenBytes := make([]byte, 32)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		s.logger.Error("Failed to generate presence token",
-			"principal_id", logging.SanitizeLogValue(principal.ID),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to generate presence token", "TOKEN_GEN_ERROR")
+	token, tokenHash, ok := s.mintPresenceToken(w, principal.ID)
+	if !ok {
 		return
 	}
-	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
-	tokenHash := hashPresenceToken(token)
-
-	record := &presenceTokenRecord{
-		principalID: principal.ID,
-		expires:     time.Now().Add(presenceTokenTTL),
-	}
-	if cliPresenceReq != nil {
-		// Issue #4287, ADR-021 Amendment 7: bind the token to the exact action the CLI
-		// lodged — copied verbatim from the durable request record, never from
-		// anything this browser request supplied directly.
-		record.boundMethod = cliPresenceReq.Method
-		record.boundPath = cliPresenceReq.Path
-		record.boundBodyHash = cliPresenceReq.BodyHash
-		record.boundPermissionID = cliPresenceReq.PermissionID
-	} else {
-		// Issue #5142: the browser step-up flow binds the token to the action named at
-		// begin. No unbound token is ever minted.
-		record.boundMethod = pending.action.Method
-		record.boundPath = pending.action.Path
-		record.boundBodyHash = pending.action.BodyHash
-		record.boundPermissionID = pending.action.PermissionID
-	}
+	record := newPresenceTokenRecord(principal.ID, cliPresenceReq, pending.action)
 	if out := s.putPresenceToken(r.Context(), tokenHash, record); out != ceremonyOK {
 		s.writeCeremonyUnavailable(w)
 		return
@@ -823,6 +797,7 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.auditCredentialUseSuccess(r.Context(), acct, credential.ID, presenceAuditActionSuccess)
 	s.logger.Info("Presence token minted",
 		"principal_id", logging.SanitizeLogValue(principal.ID),
 		"permission_id", logging.SanitizeLogValue(record.boundPermissionID))
@@ -831,6 +806,46 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		PresenceToken: token,
 		ExpiresIn:     int(presenceTokenTTL.Seconds()),
 	})
+}
+
+// mintPresenceToken mints a 32-byte cryptographically random presence token and returns
+// it with its hash. On failure it writes the response and returns ok=false.
+func (s *Server) mintPresenceToken(w http.ResponseWriter, principalID string) (token, tokenHash string, ok bool) {
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		s.logger.Error("Failed to generate presence token",
+			"principal_id", logging.SanitizeLogValue(principalID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to generate presence token", "TOKEN_GEN_ERROR")
+		return "", "", false
+	}
+	token = base64.RawURLEncoding.EncodeToString(tokenBytes)
+	return token, hashPresenceToken(token), true
+}
+
+// newPresenceTokenRecord builds the record a minted presence token is stored under. With
+// a CLI presence request (Issue #4287, ADR-021 Amendment 7) the token is bound to the exact
+// action the CLI lodged — copied verbatim from the durable request record, never from
+// anything the browser request supplied directly. Otherwise (Issue #5142) the browser
+// step-up flow binds it to the action named at begin. No unbound token is ever minted.
+func newPresenceTokenRecord(principalID string, cliPresenceReq *pendingCliPresenceRequest, action *presenceActionBinding) *presenceTokenRecord {
+	record := &presenceTokenRecord{
+		principalID: principalID,
+		expires:     time.Now().Add(presenceTokenTTL),
+	}
+	if cliPresenceReq != nil {
+		record.boundMethod = cliPresenceReq.Method
+		record.boundPath = cliPresenceReq.Path
+		record.boundBodyHash = cliPresenceReq.BodyHash
+		record.boundPermissionID = cliPresenceReq.PermissionID
+		return record
+	}
+	record.boundMethod = action.Method
+	record.boundPath = action.Path
+	record.boundBodyHash = action.BodyHash
+	record.boundPermissionID = action.PermissionID
+	return record
 }
 
 // decodePresenceBinding reads the optional action binding from the presence begin

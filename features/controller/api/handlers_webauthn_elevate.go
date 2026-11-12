@@ -161,34 +161,14 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	//duplication:justified features/controller/api/handlers_operator_payload_sign.go -- parallel finish prologue of handleOperatorPayloadSignFinish: the two ceremonies hold distinct session stores and error codes, and a shared helper would need a generic over both pending-session types
 	principal, sessID, acct, ok := s.loadCeremonyAccount(w, r, "Step-up finish",
 		"Step-up elevation requires a cookie-authenticated web session")
 	if !ok {
 		return
 	}
 
-	// Load and unconditionally delete the pending session (single-use enforcement).
-	pending, out := s.takeElevateSession(r.Context(), sessID)
-	if out == ceremonyUnavailable {
-		s.writeCeremonyUnavailable(w)
-		return
-	}
-	if out != ceremonyOK {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"No active elevation session — call begin first", "NO_ACTIVE_ELEVATION_SESSION")
-		return
-	}
-	// Bind at begin, check at finish: the ceremony must be finished by the principal
-	// that began it (the entry is already consumed either way).
-	if pending.accountID != "" && pending.accountID != principal.ID {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"No active elevation session — call begin first", "NO_ACTIVE_ELEVATION_SESSION")
-		return
-	}
-	if time.Now().After(pending.expires) {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Elevation session expired — restart with begin", "SESSION_EXPIRED")
+	pending, ok := s.takeStepUpPending(w, r, sessID, principal.ID)
+	if !ok {
 		return
 	}
 
@@ -207,7 +187,7 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 
 	// Full server-side assertion verification: challenge (against the server-stored session
 	// value, never the client-echoed field), origin, RP-ID, and ECDSA/RS256 signature.
-	credential, err := wa.FinishLogin(user, pending.data, r)
+	credential, assertedID, err := finishLoginWithCredentialID(wa, user, pending.data, r)
 	if err != nil {
 		s.logger.Warn("Step-up finish: FinishLogin failed",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
@@ -215,6 +195,7 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 			"source_ip", logging.SanitizeLogValue(sourceIP),
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.recordElevateFailures(sessID, ipKey)
+		s.auditSoftwareAuthenticatorFailure(r.Context(), acct, assertedID, stepUpAuditActionFailure)
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 		return
@@ -233,6 +214,7 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 			"stored_count", storedCount,
 			"response_count", newSignCount)
 		s.recordElevateFailures(sessID, ipKey)
+		s.auditSoftwareAuthenticatorFailure(r.Context(), acct, credential.ID, stepUpAuditActionFailure)
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 		return
@@ -247,6 +229,7 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 				"session_id", logging.SanitizeLogValue(sessID),
 				"error", logging.SanitizeLogValue(recordErr.Error()))
 			s.recordElevateFailures(sessID, ipKey)
+			s.auditSoftwareAuthenticatorFailure(r.Context(), acct, credential.ID, stepUpAuditActionFailure)
 			s.writeErrorResponse(w, http.StatusForbidden,
 				"Credential is no longer valid", "CREDENTIAL_REVOKED")
 			return
@@ -281,6 +264,7 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 	})
 
 	now := time.Now().UTC()
+	s.auditCredentialUseSuccess(r.Context(), acct, credential.ID, stepUpAuditActionSuccess)
 	s.logger.Info("WebAuthn step-up elevation successful",
 		"principal_id", logging.SanitizeLogValue(principal.ID),
 		"session_id", logging.SanitizeLogValue(sessID),
@@ -292,6 +276,29 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 		Assurance:  "strong",
 		ElevatedAt: now,
 	})
+}
+
+// takeStepUpPending loads and unconditionally deletes the pending elevation session
+// (single-use enforcement), requires that the principal that began the ceremony is the
+// one finishing it (bind at begin, check at finish; the entry is already consumed either
+// way) and that it has not expired. On refusal it writes the response and returns ok=false.
+func (s *Server) takeStepUpPending(w http.ResponseWriter, r *http.Request, sessID, principalID string) (*webAuthnElevateSession, bool) {
+	pending, out := s.takeElevateSession(r.Context(), sessID)
+	if out == ceremonyUnavailable {
+		s.writeCeremonyUnavailable(w)
+		return nil, false
+	}
+	if out != ceremonyOK || (pending.accountID != "" && pending.accountID != principalID) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"No active elevation session — call begin first", "NO_ACTIVE_ELEVATION_SESSION")
+		return nil, false
+	}
+	if time.Now().After(pending.expires) {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Elevation session expired — restart with begin", "SESSION_EXPIRED")
+		return nil, false
+	}
+	return pending, true
 }
 
 // stepUpThrottled applies the per-session and per-IP step-up throttles. When either is
