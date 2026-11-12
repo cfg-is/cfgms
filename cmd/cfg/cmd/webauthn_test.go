@@ -13,6 +13,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -20,13 +21,19 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/webauthn"
 
 	certbundle "github.com/cfgis/cfgms/pkg/cert/bundle"
 	"github.com/stretchr/testify/assert"
@@ -160,6 +167,7 @@ func saveWebAuthnFlags(t *testing.T) func() {
 	origAPIURL := webAuthnAPIURL
 	origUsername := webAuthnUsername
 	origLabel := webAuthnLabel
+	origAuthenticator := webAuthnAuthenticator
 	origForce := webAuthnForce
 	origJSON := webAuthnJSON
 	origNoBundle := noBundle
@@ -169,6 +177,7 @@ func saveWebAuthnFlags(t *testing.T) func() {
 		webAuthnAPIURL = origAPIURL
 		webAuthnUsername = origUsername
 		webAuthnLabel = origLabel
+		webAuthnAuthenticator = origAuthenticator
 		webAuthnForce = origForce
 		webAuthnJSON = origJSON
 		noBundle = origNoBundle
@@ -276,6 +285,218 @@ func TestWebAuthnRegisterFailsFast(t *testing.T) {
 	assert.Contains(t, err.Error(), "web UI", "error must name the web UI as the alternative")
 	assert.NotContains(t, strings.ToLower(err.Error()), "unsupported configuration",
 		"error must name the alternative explicitly, not say \"unsupported configuration\"")
+}
+
+// --- cfg webauthn register --authenticator ---
+
+// registerTestServer serves the admin register begin/finish routes with real
+// go-webauthn registration verification, and records what the CLI sent.
+type registerTestServer struct {
+	srv *httptest.Server
+	wa  *webauthn.WebAuthn
+
+	mu         sync.Mutex
+	session    *webauthn.SessionData
+	begins     int
+	beginBody  []byte
+	finishes   int
+	finishURL  string
+	finishBody []byte
+	registered *webauthn.Credential
+	failBegin  bool
+}
+
+func newRegisterTestServer(t *testing.T) *registerTestServer {
+	t.Helper()
+	rs := &registerTestServer{}
+	wa, err := webauthn.New(&webauthn.Config{
+		RPID:          testAuthRPID,
+		RPDisplayName: "CFGMS test",
+		RPOrigins:     []string{testAuthOrigin},
+	})
+	require.NoError(t, err)
+	rs.wa = wa
+	user := &authTestUser{}
+
+	rs.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rs.mu.Lock()
+		defer rs.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/accounts/alice/webauthn/register/begin":
+			rs.begins++
+			rs.beginBody, _ = io.ReadAll(r.Body)
+			if rs.failBegin {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":{"code":"ACCOUNT_DISABLED","message":"Account is disabled"}}`))
+				return
+			}
+			creation, session, err := wa.BeginRegistration(user,
+				webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
+					UserVerification:   protocol.VerificationRequired,
+					ResidentKey:        protocol.ResidentKeyRequirementRequired,
+					RequireResidentKey: protocol.ResidentKeyRequired(),
+				}))
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			rs.session = session
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": creation})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/accounts/alice/webauthn/register/finish":
+			rs.finishes++
+			rs.finishURL = r.URL.String()
+			rs.finishBody, _ = io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(rs.finishBody))
+			if rs.session == nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			cred, err := wa.FinishRegistration(user, *rs.session, r)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"code":"WEBAUTHN_VERIFY_ERROR","message":"WebAuthn verification failed"}}`))
+				return
+			}
+			rs.registered = cred
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"credential_id": cred.ID}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(rs.srv.Close)
+	return rs
+}
+
+// Required: with --authenticator, register runs begin, signs with softauthn and runs
+// finish against real registration verification; the record then shows registered.
+func TestWebAuthnRegisterAuthenticator_SucceedsAgainstRealVerification(t *testing.T) {
+	rs := newRegisterTestServer(t)
+	restore := saveWebAuthnFlags(t)
+	defer restore()
+	_, store := authTestStore(t)
+	createAuth(t, "agent-1")
+
+	bundlePath = writeBundleFile(t, generateWebAuthnBundle(t), rs.srv.URL)
+	webAuthnUsername = "alice"
+	webAuthnAuthenticator = "agent-1"
+	webAuthnLabel = "agent one"
+
+	var out bytes.Buffer
+	webAuthnRegisterCmd.SetOut(&out)
+	t.Cleanup(func() { webAuthnRegisterCmd.SetOut(nil) })
+
+	require.NoError(t, runWebAuthnRegister(webAuthnRegisterCmd, nil))
+	assert.Contains(t, out.String(), "agent-1")
+
+	rec, err := loadAuthenticatorRecord(context.Background(), store, "agent-1")
+	require.NoError(t, err)
+	assert.True(t, rec.Registered)
+	assert.Equal(t, (&authTestUser{}).WebAuthnID(), rec.UserHandle)
+
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	require.NotNil(t, rs.registered, "the server's real verification accepted the registration")
+	assert.Equal(t, rec.CredentialID, rs.registered.ID)
+	assert.Equal(t, 1, rs.begins)
+	assert.Empty(t, rs.beginBody, "begin carries no body")
+	assert.Equal(t, 1, rs.finishes)
+	assert.Contains(t, rs.finishURL, "label=agent+one", "--label passes through to finish")
+
+	var finish struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Response struct {
+			ClientDataJSON    string `json:"clientDataJSON"`
+			AttestationObject string `json:"attestationObject"`
+		} `json:"response"`
+	}
+	require.NoError(t, json.Unmarshal(rs.finishBody, &finish))
+	assert.Equal(t, "public-key", finish.Type)
+	assert.NotEmpty(t, finish.ID)
+	assert.NotEmpty(t, finish.Response.ClientDataJSON)
+	assert.NotEmpty(t, finish.Response.AttestationObject)
+}
+
+// Required: without --authenticator the explicit refusal stays, before any
+// controller call; with a bearer-only client the mTLS error still wins, with or
+// without --authenticator.
+func TestWebAuthnRegister_WithoutAuthenticatorKeepsRefusalAndMTLSError(t *testing.T) {
+	rs := newRegisterTestServer(t)
+	restore := saveWebAuthnFlags(t)
+	defer restore()
+
+	bundlePath = writeBundleFile(t, generateWebAuthnBundle(t), rs.srv.URL)
+	webAuthnUsername = "alice"
+	webAuthnAuthenticator = ""
+	err := runWebAuthnRegister(webAuthnRegisterCmd, nil)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errWebAuthnRegisterUnsupported), "got %v", err)
+	rs.mu.Lock()
+	assert.Zero(t, rs.begins)
+	rs.mu.Unlock()
+
+	origUserConfigDirFn := userConfigDirFn
+	origSystemBundlePathFn := systemBundlePathFn
+	t.Cleanup(func() {
+		userConfigDirFn = origUserConfigDirFn
+		systemBundlePathFn = origSystemBundlePathFn
+	})
+	userConfigDirFn = func() (string, error) { return t.TempDir(), nil }
+	systemBundlePathFn = func() string { return "/nonexistent/admin.bundle.yaml" }
+	noBundle = true
+	bundlePath = ""
+	for _, name := range []string{"", "agent-1"} {
+		webAuthnAuthenticator = name
+		err := runWebAuthnRegister(webAuthnRegisterCmd, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "mTLS certificate", "authenticator=%q", name)
+	}
+}
+
+func TestWebAuthnRegisterAuthenticator_ControllerRefusalLeavesRecordUnregistered(t *testing.T) {
+	rs := newRegisterTestServer(t)
+	rs.failBegin = true
+	restore := saveWebAuthnFlags(t)
+	defer restore()
+	_, store := authTestStore(t)
+	createAuth(t, "agent-1")
+
+	bundlePath = writeBundleFile(t, generateWebAuthnBundle(t), rs.srv.URL)
+	webAuthnUsername = "alice"
+	webAuthnAuthenticator = "agent-1"
+
+	err := runWebAuthnRegister(webAuthnRegisterCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ACCOUNT_DISABLED")
+	rec, err := loadAuthenticatorRecord(context.Background(), store, "agent-1")
+	require.NoError(t, err)
+	assert.False(t, rec.Registered)
+	assert.Empty(t, rec.UserHandle)
+}
+
+func TestWebAuthnRegisterAuthenticator_MissingAuthenticatorFailsBeforeBegin(t *testing.T) {
+	rs := newRegisterTestServer(t)
+	restore := saveWebAuthnFlags(t)
+	defer restore()
+	authTestStore(t)
+
+	bundlePath = writeBundleFile(t, generateWebAuthnBundle(t), rs.srv.URL)
+	webAuthnUsername = "alice"
+	for _, name := range []string{"nope", "../escape"} {
+		webAuthnAuthenticator = name
+		require.Error(t, runWebAuthnRegister(webAuthnRegisterCmd, nil), name)
+	}
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	assert.Zero(t, rs.begins)
+}
+
+func TestWebAuthnRegister_AuthenticatorFlagDeclared(t *testing.T) {
+	f := webAuthnRegisterCmd.Flags().Lookup("authenticator")
+	require.NotNil(t, f)
+	assert.Empty(t, f.DefValue)
 }
 
 // --- AC: last-credential guard ---

@@ -9,14 +9,17 @@
 // token alone cannot use these commands even though the underlying server endpoints
 // accept any AssuranceStrong principal (mTLS certs are AssuranceStrong by construction).
 //
-// `cfg webauthn register` cannot run the WebAuthn ceremony itself: a browser refuses
+// `cfg webauthn register` cannot run the WebAuthn ceremony itself without a software
+// authenticator (--authenticator <name>, see `cfg authenticator`): a browser refuses
 // navigator.credentials.create() unless the calling origin's effective domain matches
 // (or is a registrable suffix of) the relying party's rp_id, and a CLI-served loopback
 // page can never satisfy a real rp_id — see ADR-021 Amendment 4
 // (docs/architecture/decisions/021-identity-assurance-levels.md). The command fails
 // fast with an actionable error pointing the operator at browser passkey enrollment via
 // the web UI (ADR-021 Amendment 1 self-enrollment, Amendment 3 self-service passkey
-// management) instead of attempting a ceremony that cannot complete.
+// management) instead of attempting a ceremony that cannot complete. With
+// --authenticator the CLI runs the ceremony itself through the stored software
+// authenticator; the admin register routes and the admin-bundle requirement are unchanged.
 package cmd
 
 import (
@@ -34,8 +37,10 @@ var (
 	webAuthnAPIURL   string
 	webAuthnUsername string
 	webAuthnLabel    string
-	webAuthnForce    bool
-	webAuthnJSON     bool
+	// webAuthnAuthenticator names the stored software authenticator register signs with.
+	webAuthnAuthenticator string
+	webAuthnForce         bool
+	webAuthnJSON          bool
 )
 
 // webAuthnCmd is the root command: cfg webauthn ...
@@ -60,7 +65,12 @@ var webAuthnRegisterCmd = &cobra.Command{
 	Short: "Register a new WebAuthn passkey",
 	Long: `Register a new WebAuthn passkey (FIDO2 credential) for a web admin account.
 
-This command cannot complete: a WebAuthn ceremony served from a CLI-local loopback page
+With --authenticator <name> the command registers that software authenticator
+(cfg authenticator create) on the account through the admin register routes: it asks
+the controller to begin a registration, signs it with the stored key and finishes it.
+The record then shows registered. --label is stored on the credential.
+
+Without --authenticator this command cannot complete: a WebAuthn ceremony served from a CLI-local loopback page
 can never satisfy a configured relying party (ADR-021 Amendment 4) — the browser itself
 refuses navigator.credentials.create() because a 127.0.0.1 origin can never match a real
 rp_id. Register a passkey from the controller web UI instead, at the /passkeys page
@@ -69,6 +79,7 @@ rp_id. Register a passkey from the controller web UI instead, at the /passkeys p
 Examples:
   cfg webauthn register --username alice
   cfg webauthn register --username alice --label "YubiKey 5C"
+  cfg webauthn register --username alice --authenticator agent-1 --label "agent-1"
   cfg webauthn register --username alice --bundle /path/to/admin.bundle.yaml`,
 	RunE: runWebAuthnRegister,
 }
@@ -113,6 +124,7 @@ func init() {
 	webAuthnCmd.PersistentFlags().StringVar(&webAuthnUsername, "username", "", "Web account username")
 
 	webAuthnRegisterCmd.Flags().StringVar(&webAuthnLabel, "label", "", "Human-readable label for the new credential")
+	webAuthnRegisterCmd.Flags().StringVar(&webAuthnAuthenticator, "authenticator", "", "Name of the software authenticator to register (see 'cfg authenticator')")
 
 	webAuthnListCmd.Flags().BoolVar(&webAuthnJSON, "json", false, "Emit JSON output")
 
@@ -164,11 +176,52 @@ func runWebAuthnRegister(cmd *cobra.Command, args []string) error {
 
 	// Enforce the ADR-021 §7 cert-path requirement before failing fast, so a bearer-only
 	// caller still sees the mTLS error rather than the unrelated ceremony error.
-	if _, err := getWebAuthnClient(); err != nil {
+	client, err := getWebAuthnClient()
+	if err != nil {
 		return err
 	}
 
-	return errWebAuthnRegisterUnsupported
+	if webAuthnAuthenticator == "" {
+		return errWebAuthnRegisterUnsupported
+	}
+	return registerSoftwareAuthenticatorOnAccount(cmd, client)
+}
+
+// registerSoftwareAuthenticatorOnAccount registers the --authenticator record on
+// webAuthnUsername through the admin register begin/finish routes.
+func registerSoftwareAuthenticatorOnAccount(cmd *cobra.Command, client *APIClient) error {
+	ctx := context.Background()
+	if err := validateAuthenticatorName(webAuthnAuthenticator); err != nil {
+		return err
+	}
+	store, err := newCredentialStore()
+	if err != nil {
+		return fmt.Errorf("failed to open credential store: %w", err)
+	}
+	rec, err := loadAuthenticatorRecord(ctx, store, webAuthnAuthenticator)
+	if err != nil {
+		return err
+	}
+
+	if err := registerAuthenticator(ctx, store, rec,
+		func(ctx context.Context) (json.RawMessage, error) {
+			opts, err := client.WebAuthnBeginRegistration(ctx, webAuthnUsername)
+			if err != nil {
+				return nil, fmt.Errorf("failed to begin WebAuthn registration: %w", err)
+			}
+			return opts, nil
+		},
+		func(ctx context.Context, body []byte) error {
+			if _, err := client.WebAuthnFinishRegistration(ctx, webAuthnUsername, webAuthnLabel, body); err != nil {
+				return fmt.Errorf("failed to finish WebAuthn registration: %w", err)
+			}
+			return nil
+		}); err != nil {
+		return err
+	}
+
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Authenticator %q registered for %s.\n", rec.Name, webAuthnUsername)
+	return nil
 }
 
 func runWebAuthnList(cmd *cobra.Command, args []string) error {

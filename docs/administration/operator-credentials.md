@@ -1113,14 +1113,16 @@ cfg account rotate-cert <username> <old_serial> --new-serial <s> [--force]
 
 `cfg authenticator` manages software WebAuthn authenticators: P-256 keys bound to
 one controller's RP ID and origin, for operators and agents that have no hardware
-key or browser. This section covers creating, listing and deleting them; later
-steps (registration, headless login) are documented under their own sub-headings
+key or browser. This section covers creating, listing, deleting and registering
+them; later steps (headless login) are documented under their own sub-headings
 here as they ship.
 
 ```
 cfg authenticator create <name> --url <controller URL> [--rp-id <id>] [--origin <origin>] [--ca-cert <file>] [--label <text>]
 cfg authenticator list [--json]
 cfg authenticator delete <name> [--force]
+cfg authenticator enroll <name> (--link-file <path> | --link-stdin)
+cfg webauthn register --username <user> --authenticator <name> [--label <text>]
 ```
 
 **`create`** generates a P-256 key and a random credential ID and stores them as
@@ -1145,6 +1147,31 @@ and no way to export the key.
 authenticator is registered, and its protection level (`store`: the key is in the
 encrypted credential store). `--json` prints the same fields, plus the label and
 controller URL, as a JSON array. Key material is never printed by any command.
+
+**Registering with a controller.** A new authenticator is registered by one of two
+paths. Either way the controller must allow software authenticators for the
+account, and on success `cfg authenticator list` shows the record as registered and
+the record holds the account's user handle. If the controller refuses (for example
+HTTP 403 `SOFTWARE_AUTHENTICATOR_NOT_ALLOWED`), the record stays unregistered, the
+command exits non-zero and prints the server's code.
+
+- **`cfg authenticator enroll <name>`** completes first-passkey enrollment for the
+  account an enrollment link was issued for (`cfg account create` prints the link).
+  It runs the controller's `/api/v1/web/passkey/enroll/begin` and `/finish` routes,
+  sending the token in the `X-Enrollment-Token` header, and verifies the controller
+  with the record's `ca_cert_pem`. The link is a single-use bearer secret, so
+  there is no flag that takes it as a value: give it with `--link-file <path>`,
+  with `--link-stdin`, or in the `CFGMS_ENROLLMENT_LINK` environment variable
+  (used when neither flag is given; the two flags cannot be combined). The link's
+  scheme and host must match the authenticator's origin, otherwise `enroll`
+  refuses before any network call. The token is never printed, logged or stored.
+  The record's `--label`, if any, is stored on the credential.
+- **`cfg webauthn register --username <user> --authenticator <name>`** registers the
+  authenticator on an existing account through the admin register routes. It still
+  needs the admin bundle (mTLS certificate); a Bearer session alone fails with the
+  mTLS requirement error (ADR-021 §7). `--label` is passed through to the
+  controller. Without `--authenticator` the command keeps refusing and points at
+  browser enrollment.
 
 **`delete`** removes the record after a confirmation prompt (`--force` skips it).
 It does not contact the controller: the controller keeps listing the credential
