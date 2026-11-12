@@ -675,6 +675,7 @@ func TestHandleListCertificates_TenantScope_StewardNotInStore_VisibleToUnscopedA
 	require.NoError(t, err)
 	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
 	require.NoError(t, err)
+	bindTestAdminCert(t, x509Cert)
 
 	req := httptest.NewRequest("GET", "/api/v1/certificates", nil)
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
@@ -832,20 +833,12 @@ func TestHandleListCertificates_TenantScope_NilStewardStore_UnscopedAdminStillLi
 	})
 	require.NoError(t, err)
 
-	adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
-		CommonName:       "operator-admin",
-		Organization:     "CFGMS",
-		ValidityDays:     1,
-		TemplateModifier: cert.SetAdminMarker,
-	})
-	require.NoError(t, err)
-	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
-	require.NoError(t, err)
-
 	server.SetStewardStore(nil)
 
-	req := httptest.NewRequest("GET", "/api/v1/certificates", nil)
-	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+	// A root-scope account bound to a certificate is judged by the Decision 1 boundary
+	// (ADR-025 Amendment 5), which a tenant-scope listing needs the steward store for. The
+	// unrestricted administrator this test is about is the makeAdminRequest fixture.
+	req := makeAdminRequest(t, "GET", "/api/v1/certificates", nil)
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -1011,6 +1004,7 @@ func TestHandleRotateSigningCert_AdminSuccess(t *testing.T) {
 
 	x509Cert, err := cert.ParseCertificateFromPEM(issuedCert.CertificatePEM)
 	require.NoError(t, err)
+	bindTestAdminCert(t, x509Cert)
 
 	req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate", nil)
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
@@ -1047,6 +1041,7 @@ func TestHandleRotateSigningCert_ZeroOverlapPreserved(t *testing.T) {
 	require.NoError(t, err)
 	x509Cert, err := cert.ParseCertificateFromPEM(issuedCert.CertificatePEM)
 	require.NoError(t, err)
+	bindTestAdminCert(t, x509Cert)
 
 	req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate",
 		strings.NewReader(`{"overlap_days":0}`))
@@ -1082,6 +1077,7 @@ func TestHandleRotateSigningCert_ForceBypassesInProgress(t *testing.T) {
 	require.NoError(t, err)
 	x509Cert, err := cert.ParseCertificateFromPEM(issuedCert.CertificatePEM)
 	require.NoError(t, err)
+	bindTestAdminCert(t, x509Cert)
 
 	do := func(body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate",
@@ -1131,6 +1127,7 @@ func TestHandleRotateSigningCert_NegativeOverlapRejected(t *testing.T) {
 	require.NoError(t, err)
 	x509Cert, err := cert.ParseCertificateFromPEM(issuedCert.CertificatePEM)
 	require.NoError(t, err)
+	bindTestAdminCert(t, x509Cert)
 
 	req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate",
 		strings.NewReader(`{"overlap_days":-1}`))
@@ -1283,6 +1280,7 @@ func newAdminPeerCert(t *testing.T, certMgr *cert.Manager) *x509.Certificate {
 	require.NoError(t, err)
 	parsed, err := cert.ParseCertificateFromPEM(issued.CertificatePEM)
 	require.NoError(t, err)
+	bindTestAdminCert(t, parsed)
 	return parsed
 }
 
@@ -2008,6 +2006,7 @@ func TestHandleRevokeCertificate_Success(t *testing.T) {
 	require.NoError(t, err)
 	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
 	require.NoError(t, err)
+	bindTestAdminCert(t, x509Cert)
 
 	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
@@ -2056,6 +2055,7 @@ func TestHandleRevokeCertificate_RevokedCertReportsCorrectly(t *testing.T) {
 	require.NoError(t, err)
 	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
 	require.NoError(t, err)
+	bindTestAdminCert(t, x509Cert)
 
 	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
@@ -2109,6 +2109,7 @@ func TestHandleRevokeCertificate_UnknownSerial_Returns404(t *testing.T) {
 	require.NoError(t, err)
 	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
 	require.NoError(t, err)
+	bindTestAdminCert(t, x509Cert)
 
 	req := httptest.NewRequest("POST", "/api/v1/certificates/99999999999999999999/revoke", nil)
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
@@ -2138,6 +2139,7 @@ func TestHandleRevokeCertificate_NilCertManager_Returns503(t *testing.T) {
 	require.NoError(t, err)
 	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
 	require.NoError(t, err)
+	bindTestAdminCert(t, x509Cert)
 
 	req := httptest.NewRequest("POST", "/api/v1/certificates/12345678901234567890/revoke", nil)
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
@@ -2604,18 +2606,11 @@ func TestHandleListCertificates_TenantAndIssuedAt_BothBranches(t *testing.T) {
 		created[ci.SerialNumber] = ci.CreatedAt
 	}
 
-	adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
-		CommonName: "operator-admin", Organization: "CFGMS", ValidityDays: 1,
-		TemplateModifier: cert.SetAdminMarker,
-	})
-	require.NoError(t, err)
-	adminX509, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
-	require.NoError(t, err)
-
 	get := func(t *testing.T, url, key string) []CertificateInfo {
 		req := httptest.NewRequest("GET", url, nil)
 		if key == "" {
-			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminX509}}
+			// The unrestricted administrator fixture; see makeAdminRequest.
+			req = makeAdminRequest(t, "GET", url, nil)
 		} else {
 			req.Header.Set("X-API-Key", key)
 		}

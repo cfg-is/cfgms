@@ -56,6 +56,7 @@ func issueSigningCredentialAdminCert(t *testing.T, certMgr *cert.Manager, common
 	require.NoError(t, err)
 	x509Cert, err := cert.ParseCertificateFromPEM(issued.CertificatePEM)
 	require.NoError(t, err)
+	bindTestAdminCert(t, x509Cert)
 	return x509Cert
 }
 

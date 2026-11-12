@@ -454,13 +454,12 @@ func TestCollectCredentialRequest_SucceedsOnAuthoritativeNode(t *testing.T) {
 
 // ---- [REQUIRED TEST] no certificate observable without its account binding --------
 
-// TestCollectCredentialRequest_BindFailureRevokesCertificateAndDeniesBootstrapFallback
+// TestCollectCredentialRequest_BindFailureRevokesCertificateAndDeniesAuthentication
 // injects a failure between signing and binding (the account already holds the maximum
 // number of certificate bindings) and asserts: the certificate is revoked, unusable,
-// and — because extractAdminPrincipal checks IsRevoked before ever reaching the
-// bootstrap-fallback branch — a revoked certificate carrying the admin marker can never
-// resolve through that fallback as implicit root.
-func TestCollectCredentialRequest_BindFailureRevokesCertificateAndDeniesBootstrapFallback(t *testing.T) {
+// and — because extractAdminPrincipal checks IsRevoked before it resolves any account — a
+// revoked certificate carrying the admin marker never authenticates at all.
+func TestCollectCredentialRequest_BindFailureRevokesCertificateAndDeniesAuthentication(t *testing.T) {
 	server := setupCollectTestServer(t)
 	fx := lodgeAndApprove(t, server, "collect-bind-fail", "collect-bind-fail-owner", ApproveCredentialRequestBody{
 		GrantAdminMarker: true,
@@ -511,7 +510,7 @@ func TestCollectCredentialRequest_BindFailureRevokesCertificateAndDeniesBootstra
 	// the actual collected certificate did — and present it at the TLS layer. Chain
 	// verification happens at the TLS layer (extractAdminPrincipal's own doc comment),
 	// so a synthetic self-signed certificate with the same serial exercises exactly the
-	// revocation-lookup branch that must fire before the bootstrap fallback ever runs.
+	// revocation-lookup branch that must fire before any account lookup runs.
 	serialInt, ok := new(big.Int).SetString(stored.CollectedSerial, 10)
 	require.True(t, ok, "collected serial must be a base-10 integer")
 	synthetic := makeAdminCertWithAttrs(t, 0, "irrelevant", false)
@@ -519,7 +518,7 @@ func TestCollectCredentialRequest_BindFailureRevokesCertificateAndDeniesBootstra
 
 	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", synthetic)
 	principal := server.extractAdminPrincipal(req)
-	assert.Nil(t, principal, "a revoked certificate must never authenticate — including through the bootstrap fallback")
+	assert.Nil(t, principal, "a revoked certificate must never authenticate")
 }
 
 // ---- [REQUIRED TEST] marker set is verbatim from the recorded decision ------------

@@ -22,6 +22,7 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/pkg/transport/tenantqueue"
+	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -6514,6 +6515,56 @@ resources:
 		logger.Warn("fleet cascade seed: failed to store MSP-level parent policy", "error", err)
 	} else {
 		logger.Info("fleet cascade seed: MSP-level parent policy stored under fleet-root")
+	}
+
+	seedFleetCrossingGrants(ctx, sm, logger, []string{"fleet-root/fleet-child-a", "fleet-root/fleet-child-b"})
+}
+
+// fleetSeedGrantDuration is the lifetime of the seeded fleet crossing grants: the 24h
+// maximum a tenant administrator can grant through `cfg tenant grant`.
+const fleetSeedGrantDuration = 24 * time.Hour
+
+// fleetSeedGrantor is the GrantedBy value of the seeded grants. The store requires a
+// principal ID to probe, and a grant admits any principal, so it doubles as the probe ID.
+const fleetSeedGrantor = "fleet-e2e-seed"
+
+// seedFleetCrossingGrants records an active access grant (ADR-025 Decision 2) on each
+// seeded fleet child tenant. The fleet E2E harness operates as the system admin bundle,
+// which is bound to a root-scope account (ADR-025 Amendment 3) and is therefore subject
+// to the root<->MSP crossing boundary: it needs a crossing into every tenant below root
+// it acts on. In a real deployment a tenant administrator issues that grant; the seeded
+// tenants have no administrator, so the seed stands in for one. The boundary itself is
+// unchanged. A tenant that already holds an active grant is left alone, so a controller
+// restart does not accumulate records.
+func seedFleetCrossingGrants(ctx context.Context, sm *interfaces.StorageManager, logger logging.Logger, tenantIDs []string) {
+	store := sm.GetTenantCrossingStore()
+	if store == nil {
+		logger.Warn("fleet cascade seed: tenant crossing store unavailable; fleet admin cannot cross into child tenants")
+		return
+	}
+	for _, tenantID := range tenantIDs {
+		active, err := store.HasActiveTenantCrossing(ctx, fleetSeedGrantor, tenantID)
+		if err != nil {
+			logger.Warn("fleet cascade seed: failed to check crossing grant", "tenant_id", tenantID, "error", logging.SanitizeLogValue(err.Error()))
+			continue
+		}
+		if active {
+			continue
+		}
+		now := time.Now().UTC()
+		if err := store.CreateTenantCrossing(ctx, &business.TenantCrossing{
+			ID:            uuid.New().String(),
+			TenantID:      tenantID,
+			Kind:          business.TenantCrossingKindGrant,
+			GrantedBy:     fleetSeedGrantor,
+			Justification: "fleet E2E: seeded access grant for the system admin bundle",
+			CreatedAt:     now,
+			ExpiresAt:     now.Add(fleetSeedGrantDuration),
+		}); err != nil {
+			logger.Warn("fleet cascade seed: failed to create crossing grant", "tenant_id", tenantID, "error", logging.SanitizeLogValue(err.Error()))
+			continue
+		}
+		logger.Info("fleet cascade seed: crossing grant created", "tenant_id", tenantID)
 	}
 }
 

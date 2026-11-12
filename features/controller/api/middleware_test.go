@@ -13,6 +13,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -512,9 +513,64 @@ func TestAuditAuthorizationDecision_SanitizesNestedConditionalVars(t *testing.T)
 
 // makeSelfSignedAdminCert creates a self-signed cert with the CFGMS admin marker.
 // The TLS chain verification is bypassed in middleware unit tests (done at TLS layer in prod).
+//
+// ADR-025 Amendment 3: an admin certificate authenticates and confers nothing until it is
+// bound to an account, so the helper also binds the certificate's serial to a root-scope
+// administrator account in the secret store the test's server reads (bindTestAdminCert).
+// Tests that need an UNBOUND admin certificate build one with makeAdminCertWithAttrs.
 func makeSelfSignedAdminCert(t *testing.T) *x509.Certificate {
 	t.Helper()
-	return makeAdminTestCert(t, true)
+	adminCert := makeAdminTestCert(t, true)
+	bindTestAdminCert(t, adminCert)
+	return adminCert
+}
+
+// testAdminAccount returns the root-scope administrator account the test fixtures bind
+// adminCert's serial to. The account ID is the certificate's CN: the ID is the principal ID
+// that presence tokens and audit actors are keyed on, and these fixtures name the principal
+// by CN. The username carries the serial's tail so two certificates with one CN never
+// collide on one account record.
+func testAdminAccount(adminCert *x509.Certificate) *account {
+	serial := adminCert.SerialNumber.String()
+	tail := serial
+	if len(tail) > 12 {
+		tail = tail[len(tail)-12:]
+	}
+	return &account{
+		ID:        adminCert.Subject.CommonName,
+		Username:  adminCert.Subject.CommonName + "-" + tail,
+		RootScope: true,
+		CreatedAt: time.Now().UTC(),
+		CertBindings: []CertBinding{{
+			Serial:      serial,
+			Fingerprint: "test-fingerprint",
+			BoundAt:     time.Now().UTC(),
+		}},
+	}
+}
+
+// bindTestAdminCert persists a root-scope administrator account bound to adminCert's
+// serial through the same NewSecretStore the server under test is built on — the store is
+// resolved from the test's CFGMS_SECRETS_* environment (setTestSecretsEnv), exactly as
+// bootstrap-admin and first boot resolve it. It is a real account record found by the
+// server's own cert-serial lookup, not a switch that skips the binding rule. Use
+// bindTestAdminCertOn when the server is at hand: it does not depend on the environment
+// of the test that built the server.
+func bindTestAdminCert(t *testing.T, adminCert *x509.Certificate) {
+	t.Helper()
+	store, err := NewSecretStore(config.DefaultConfig())
+	require.NoError(t, err, "test admin account: open secret store")
+	defer func() { _ = store.Close() }()
+	require.NoError(t, store.StoreSecret(context.Background(), buildAccountSecretRequest(testAdminAccount(adminCert), "test")),
+		"test admin account: persist")
+}
+
+// bindTestAdminCertOn binds adminCert's serial to a root-scope administrator account in
+// srv's own secret store.
+func bindTestAdminCertOn(t *testing.T, srv *Server, adminCert *x509.Certificate) {
+	t.Helper()
+	require.NoError(t, srv.persistAccount(context.Background(), testAdminAccount(adminCert), "test"),
+		"test admin account: persist")
 }
 
 // makeSelfSignedCert creates a self-signed cert WITHOUT the admin marker.
@@ -575,14 +631,42 @@ func requestWithTLSCert(method, path string, peerCert *x509.Certificate) *http.R
 // Pass a non-nil body for requests that require a payload (json-encoded etc.).
 // Use this helper in tests that call Tier-3 endpoints — those require IsAdmin: true which
 // only an mTLS admin cert provides.
+//
+// ADR-025 Amendment 3 removed the unbound-certificate fallback these fixtures used to
+// rely on: an admin certificate authenticates and holds nothing until it is bound to an
+// account, and no bound account is unrestricted across arbitrary tenant IDs. The request
+// therefore carries a fixture principal — a root-tenant administrator holding every
+// permission (GlobalScope, ImplicitAdmin), the same shape testAdminPrincipal builds for
+// handler-level tests — through the in-process principal seam the relay uses, so the
+// handler under test is exercised through the real router and middleware chain. Tests of
+// the certificate authentication path itself (binding, unbound, disabled, revoked) do not
+// use this helper: they present a real certificate bound with bindTestAdminCert and assert
+// on the result.
 func makeAdminRequest(t *testing.T, method, path string, body io.Reader) *http.Request {
 	t.Helper()
-	adminCert := makeSelfSignedAdminCert(t)
+	adminCert := makeAdminTestCert(t, true)
 	req := httptest.NewRequest(method, path, body)
 	req.TLS = &tls.ConnectionState{
 		PeerCertificates: []*x509.Certificate{adminCert},
 	}
-	return req
+	fixture := &Principal{
+		Channel:         AuthChannelMTLS,
+		ID:              adminCert.Subject.CommonName,
+		Name:            "mtls-admin:" + adminCert.Subject.CommonName,
+		Assurance:       session.AssuranceStrong,
+		GlobalScope:     true,
+		TenantID:        testRootTenantID,
+		CertSerial:      adminCert.SerialNumber.String(),
+		CertFingerprint: "test-fingerprint",
+		CertNotAfter:    adminCert.NotAfter,
+		ImplicitAdmin:   true,
+	}
+	ctx := req.Context()
+	ctx = context.WithValue(ctx, relayPrincipalKey, fixture)
+	ctx = context.WithValue(ctx, principalContextKey, fixture)
+	ctx = context.WithValue(ctx, ctxkeys.UserIDKey, fixture.ID)
+	ctx = withCallerTenant(ctx, "")
+	return req.WithContext(ctx)
 }
 
 // wrapWithAuth wraps handler with authenticationMiddleware then requirePermission.
@@ -1015,7 +1099,7 @@ func TestAuthMiddleware_SetsUserIDKey_CertAuth(t *testing.T) {
 }
 
 // TestAuthMiddleware_SetsRootScope_CertAuth verifies that a verified mTLS admin
-// certificate with no bound tenant (the bootstrap-fallback path) is the one place
+// certificate bound to a root-scope account is the one place
 // that produces ctxkeys.NewRootScope() (Issue #4316) — the restricted-caller
 // architecture test (pkg/ctxkeys' TestNewRootScope_RestrictedCaller) proves no other
 // file calls it; this proves the one allowed call site actually fires for a
@@ -1038,7 +1122,7 @@ func TestAuthMiddleware_SetsRootScope_CertAuth(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.True(t, capturedScope.IsRoot(),
-		"an unscoped mTLS admin cert (bootstrap fallback) must produce root scope")
+		"an mTLS admin cert bound to a root-scope account must produce root scope")
 }
 
 // TestAuthMiddleware_APIKeyNeverRootScoped verifies that an API-key principal never
@@ -1227,10 +1311,11 @@ func TestTenantIsolation_AgentDevKey(t *testing.T) {
 	}
 
 	// Full-admin mTLS key must pass ALL tenants (TenantID == "" skips isolation check).
-	adminCert := makeSelfSignedAdminCert(t)
 	for _, target := range []string{ownTenant, "agent-test/2", "team-root/", "infra-hyperv/"} {
 		t.Run("admin passes "+target, func(t *testing.T) {
-			req := requestWithTLSCert(http.MethodGet, "/api/v1/stewards", adminCert)
+			// The unrestricted administrator fixture: a bound root-scope account is held
+			// to the Decision 1 crossing boundary (ADR-025 Amendment 5) instead.
+			req := makeAdminRequest(t, http.MethodGet, "/api/v1/stewards", nil)
 			req = req.WithContext(context.WithValue(req.Context(), targetTenantContextKey, target))
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
@@ -3312,25 +3397,146 @@ func TestExtractAdminPrincipal_BoundAccount_CrossProduct(t *testing.T) {
 	}
 }
 
-// TestExtractAdminPrincipal_Unbound_Bootstrap verifies that a cert with no bound account
-// follows the bootstrap fallback path: GlobalScope=true, TenantID="", ImplicitAdmin=true,
-// and Principal.ID equals the certificate CommonName (ADR-025 Amendment 3).
-func TestExtractAdminPrincipal_Unbound_Bootstrap(t *testing.T) {
+// TestExtractAdminPrincipal_Unbound_ConfersNothing is the [REQUIRED TEST] for ADR-025
+// Amendment 3: an admin-marked certificate with no bound account authenticates, and its
+// principal holds nothing — a non-nil empty Permissions, no implicit admin, no global scope,
+// no tenant — so every permission check fails closed.
+func TestExtractAdminPrincipal_Unbound_ConfersNothing(t *testing.T) {
 	srv := setupTestServer(t)
-	adminCert := makeSelfSignedAdminCert(t) // serial 1234, no bound account
+	// No account is bound to this serial, whether or not other accounts exist.
+	adminCert := makeAdminCertWithAttrs(t, 9990, "unbound-admin", false)
 
 	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", adminCert)
 	p := srv.extractAdminPrincipal(req)
 
-	require.NotNil(t, p)
-	assert.Equal(t, "test-admin", p.ID, "bootstrap fallback: ID must be the cert CN")
-	assert.True(t, p.GlobalScope)
-	assert.Equal(t, testRootTenantID, p.TenantID, "the bootstrap admin is bound to the root tenant (Issue #4665)")
-	assert.True(t, p.ImplicitAdmin)
+	require.NotNil(t, p, "an unbound admin certificate still authenticates")
+	assert.Equal(t, "unbound-admin", p.ID)
+	assert.Equal(t, AuthChannelMTLS, p.Channel)
+	assert.NotNil(t, p.Permissions, "Permissions must be a non-nil empty slice, never the nil zero value")
+	assert.Empty(t, p.Permissions)
+	assert.False(t, p.ImplicitAdmin)
+	assert.False(t, p.GlobalScope)
+	assert.False(t, p.AccountBound)
+	assert.Empty(t, p.TenantID)
+
+	for _, permissionID := range []string{"tenant:create", "steward:read", "account:create", "certificate:rotate"} {
+		assert.False(t, srv.hasPermission(p, permissionID), "%s must be denied", permissionID)
+	}
+}
+
+// TestUnboundAdminCert_DeniedTenantCreateNamesRecoveryPath is the [REQUIRED TEST] that an
+// admin-marked certificate with no bound account is denied a specific permission
+// (tenant:create) through the real route, and that the response states the certificate is
+// not bound to an account and names the local bootstrap-admin recovery path — and nothing
+// else about why.
+func TestUnboundAdminCert_DeniedTenantCreateNamesRecoveryPath(t *testing.T) {
+	server := setupTestServer(t)
+	unbound := makeAdminCertWithAttrs(t, 9991, "unbound-operator", false)
+
+	body, err := json.Marshal(map[string]string{"id": "must-not-be-created"})
+	require.NoError(t, err)
+	req := requestWithTLSCert(http.MethodPost, "/api/v1/tenants", unbound)
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	var resp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "ADMIN_CERT_UNBOUND", resp.Error.Code)
+	assert.Contains(t, resp.Error.Message, "not bound to an account")
+	assert.Contains(t, resp.Error.Message, "bootstrap-admin")
+	assert.Equal(t, unboundAdminCertMessage, resp.Error.Message, "the message names the recovery path and carries no other detail")
+
+	_, getErr := server.tenantManager.GetTenant(context.Background(), "must-not-be-created")
+	assert.Error(t, getErr, "the denied request must not have created the tenant")
+}
+
+// TestUnboundAdminCert_PermissionGateNamesRecoveryPath covers the permission gate itself
+// for a principal that reaches it unbound: requirePermission answers with the same
+// recovery-path error rather than a bare "insufficient permissions".
+func TestUnboundAdminCert_PermissionGateNamesRecoveryPath(t *testing.T) {
+	server := setupTestServer(t)
+	unbound := &Principal{
+		Channel: AuthChannelMTLS, ID: "unbound-operator", Assurance: session.AssuranceStrong,
+		Permissions: []string{}, CertSerial: "9992",
+	}
+
+	handler := server.requirePermission("tenant", "create")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("an unbound principal must not reach the handler")
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants", nil)
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, unbound))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ADMIN_CERT_UNBOUND")
+	assert.Contains(t, rec.Body.String(), "bootstrap-admin")
+}
+
+// TestBoundAdminCert_DeletedOrDisabledAccountRendersCertInert is the [REQUIRED TEST] that
+// deleting or disabling the bound account makes its certificate inert (ADR-025 Amendment
+// 3): the certificate is still chain-valid and unrevoked, yet it stops authorizing.
+func TestBoundAdminCert_DeletedOrDisabledAccountRendersCertInert(t *testing.T) {
+	createTenant := func(t *testing.T, server *Server, peer *x509.Certificate, id string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"id": id, "parent_id": testRootTenantID})
+		require.NoError(t, err)
+		req := requestWithTLSCert(http.MethodPost, "/api/v1/tenants", peer)
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("disabled account", func(t *testing.T) {
+		server := setupTestServer(t)
+		peer := makeAdminCertWithAttrs(t, 9993, "inert-by-disable", false)
+		acct := testAdminAccount(peer)
+		require.NoError(t, server.persistAccount(context.Background(), acct, "test"))
+
+		require.Equal(t, http.StatusCreated, createTenant(t, server, peer, "inert-before").Code,
+			"the bound certificate authorizes while its account is enabled")
+
+		acct.Disabled = true
+		require.NoError(t, server.persistAccount(context.Background(), acct, "test"))
+
+		rec := createTenant(t, server, peer, "inert-after")
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "a certificate bound to a disabled account no longer authenticates: %s", rec.Body.String())
+		_, err := server.tenantManager.GetTenant(context.Background(), "inert-after")
+		assert.Error(t, err)
+	})
+
+	t.Run("deleted account", func(t *testing.T) {
+		server := setupTestServer(t)
+		peer := makeAdminCertWithAttrs(t, 9994, "inert-by-delete", false)
+		acct := testAdminAccount(peer)
+		require.NoError(t, server.persistAccount(context.Background(), acct, "test"))
+		require.Equal(t, http.StatusCreated, createTenant(t, server, peer, "inert-del-before").Code)
+
+		require.NoError(t, server.secretStore.DeleteSecret(context.Background(),
+			accountStorageTenant(acct.TenantID)+"/"+accountStoreKey(acct.Username)))
+		dropAccountCache(server)
+
+		rec := createTenant(t, server, peer, "inert-del-after")
+		assert.Equal(t, http.StatusForbidden, rec.Code, "a certificate whose account is gone is an unbound certificate: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "ADMIN_CERT_UNBOUND")
+		_, err := server.tenantManager.GetTenant(context.Background(), "inert-del-after")
+		assert.Error(t, err)
+	})
 }
 
 // TestExtractAdminPrincipal_DisabledAccount_RejectsWithNil verifies that a cert bound to
-// a disabled account returns nil — not the bootstrap fallback (ADR-025 Amendment 3).
+// a disabled account returns nil — not an unbound principal (ADR-025 Amendment 3).
 func TestExtractAdminPrincipal_DisabledAccount_RejectsWithNil(t *testing.T) {
 	srv := setupTestServer(t)
 
@@ -3350,12 +3556,12 @@ func TestExtractAdminPrincipal_DisabledAccount_RejectsWithNil(t *testing.T) {
 	p := srv.extractAdminPrincipal(req)
 
 	assert.Nil(t, p,
-		"a cert bound to a disabled account must be rejected; must not fall through to bootstrap")
+		"a cert bound to a disabled account must be rejected outright")
 }
 
 // TestExtractAdminPrincipal_AccountLookupError_FailsClosed verifies that a store error
 // during getAccountByCertSerial causes extractAdminPrincipal to return nil, not fall
-// through to the bootstrap fallback (ADR-025 Amendment 3 fail-closed requirement).
+// through as an unbound certificate (ADR-025 Amendment 3 fail-closed requirement).
 func TestExtractAdminPrincipal_AccountLookupError_FailsClosed(t *testing.T) {
 	capLog := &auditCapturingLogger{}
 	srv := setupTestServerWithLogger(t, capLog)
@@ -3381,64 +3587,60 @@ func TestExtractAdminPrincipal_AccountLookupError_FailsClosed(t *testing.T) {
 	p := srv.extractAdminPrincipal(req)
 
 	assert.Nil(t, p,
-		"account lookup error must fail closed — must not fall through to bootstrap fallback")
+		"account lookup error must fail closed — must not be read as an unbound certificate")
 
-	// Verify the error was logged and the bootstrap audit was NOT emitted.
+	// Verify the error was logged and the unbound-certificate denial was NOT emitted.
 	out := capLog.formattedOutput()
 	assert.Contains(t, out, "Cert serial account lookup failed",
 		"store error must be logged")
-	assert.NotContains(t, out, "admin.bootstrap_fallback_used",
-		"bootstrap audit must NOT fire when lookup fails (fail closed)")
+	assert.NotContains(t, out, "admin.unbound_cert_denied",
+		"the unbound-certificate event must NOT fire when lookup fails (fail closed)")
 }
 
-// TestExtractAdminPrincipal_BootstrapFallback_EmitsAudit verifies that an unbound
-// admin cert emits the admin.bootstrap_fallback_used audit event with the required
-// auth_path field (ADR-025 Amendment 3 audit requirement).
-func TestExtractAdminPrincipal_BootstrapFallback_EmitsAudit(t *testing.T) {
+// TestExtractAdminPrincipal_UnboundCert_EmitsDeniedAudit verifies that an unbound admin
+// certificate emits the admin.unbound_cert_denied event, with the serial and the
+// auth_path field, and never the retired bootstrap-fallback event (ADR-025 Amendment 3).
+func TestExtractAdminPrincipal_UnboundCert_EmitsDeniedAudit(t *testing.T) {
 	capLog := &auditCapturingLogger{}
 	srv := setupTestServerWithLogger(t, capLog)
 
 	// Unbound cert (no account in cache with matching serial).
-	adminCert := makeSelfSignedAdminCert(t)
+	adminCert := makeAdminCertWithAttrs(t, 9996, "unbound-audit-admin", false)
 
 	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", adminCert)
 	p := srv.extractAdminPrincipal(req)
 
-	require.NotNil(t, p, "unbound cert must succeed via bootstrap fallback")
+	require.NotNil(t, p, "an unbound cert authenticates")
 
 	out := capLog.formattedOutput()
-	assert.Contains(t, out, "admin.bootstrap_fallback_used",
-		"bootstrap fallback must emit the admin.bootstrap_fallback_used audit event")
-	assert.Contains(t, out, "bootstrap-fallback",
-		"audit event must include auth_path=bootstrap-fallback")
+	assert.Contains(t, out, "admin.unbound_cert_denied",
+		"an unbound certificate must emit the admin.unbound_cert_denied audit event")
+	assert.Contains(t, out, "mtls-unbound", "audit event must include auth_path=mtls-unbound")
+	assert.Contains(t, out, adminCert.SerialNumber.String(), "audit event must name the certificate serial")
+	assert.NotContains(t, out, "bootstrap_fallback", "the bootstrap-fallback event is retired")
 }
 
-// TestExtractAdminPrincipal_BootstrapFallback_AnomalousWhenAccountsExist verifies that
-// when accounts exist in the cache, the bootstrap audit event includes accounts_in_cache > 0,
-// making the anomalous combination separately detectable in monitoring (ADR-025 Amendment 3).
-func TestExtractAdminPrincipal_BootstrapFallback_AnomalousWhenAccountsExist(t *testing.T) {
-	capLog := &auditCapturingLogger{}
-	srv := setupTestServerWithLogger(t, capLog)
+// TestExtractAdminPrincipal_UnboundCert_OtherAccountsGrantNothing verifies that the
+// existence of accounts bound to OTHER serials grants an unbound certificate nothing.
+func TestExtractAdminPrincipal_UnboundCert_OtherAccountsGrantNothing(t *testing.T) {
+	srv := setupTestServer(t)
 
 	// Inject an account with a DIFFERENT serial so the presented cert is unbound.
 	srv.cacheAccount(&account{
 		ID:           "existing-acct",
 		Username:     "existing-operator",
-		TenantID:     "msp-a",
+		RootScope:    true,
 		CertBindings: []CertBinding{{Serial: "99999"}}, // different serial
 	})
 
-	// Present a cert with serial 1234 (makeSelfSignedAdminCert's serial) — no binding.
-	adminCert := makeSelfSignedAdminCert(t)
+	adminCert := makeAdminCertWithAttrs(t, 9997, "unbound-neighbour", false)
 	req := requestWithTLSCert(http.MethodGet, "/api/v1/test", adminCert)
 	p := srv.extractAdminPrincipal(req)
 
-	require.NotNil(t, p, "bootstrap fallback still applies")
-	assert.True(t, p.ImplicitAdmin)
-
-	// The audit log must include accounts_in_cache=1 so the anomaly is detectable.
-	assert.Equal(t, 1, capLog.kvValue("accounts_in_cache"),
-		"accounts_in_cache must be >0 when accounts exist, enabling anomaly detection")
+	require.NotNil(t, p)
+	assert.False(t, p.ImplicitAdmin)
+	assert.False(t, p.GlobalScope)
+	assert.False(t, srv.hasPermission(p, "tenant:create"))
 }
 
 // TestExtractAdminPrincipal_CNReuse_ResolvesToDistinctAccountIDs is the [REQUIRED TEST]
@@ -3643,14 +3845,13 @@ func TestIsAuthorizedForTenant(t *testing.T) {
 }
 
 // TestExtractAdminPrincipal_DeprovisioningCannotWidenBoundCert verifies that deleting the
-// account a certificate is bound to cannot move that still-valid certificate back onto the
-// unscoped-root bootstrap fallback.
+// account a certificate is bound to cannot widen that still-valid certificate.
 //
 // The offboarding cascade (Issue #3581) prevents the privilege escalation by disabling the
 // account as its very first step. Even when certificate revocation cannot be completed (e.g.
 // the serial is not registered in certManager's store), the account-disabled check fires
-// before the bootstrap fallback in extractAdminPrincipal, so the certificate cannot resolve
-// to GlobalScope=true. The cascade returns 500 (cert revoke failed) in that scenario, leaving
+// before an unbound principal could be built in extractAdminPrincipal, so the certificate cannot
+// resolve to a principal at all. The cascade returns 500 (cert revoke failed) in that scenario, leaving
 // the account disabled-but-not-deleted — still fail-closed.
 func TestExtractAdminPrincipal_DeprovisioningCannotWidenBoundCert(t *testing.T) {
 	server, _ := setupCertBindingServer(t)
@@ -3692,9 +3893,8 @@ func TestExtractAdminPrincipal_DeprovisioningCannotWidenBoundCert(t *testing.T) 
 		"cascade fails when cert revocation fails (injected store outage): %s", delRec.Body.String())
 	assert.Contains(t, delRec.Body.String(), "CERT_REVOKE_FAILED")
 
-	// The certificate must NOT widen to unscoped root. The account is disabled,
-	// so extractAdminPrincipal returns nil — the disabled-account check fires before
-	// the bootstrap fallback, preventing the escalation.
+	// The certificate must NOT widen. The account is disabled, so
+	// extractAdminPrincipal returns nil.
 	after := server.extractAdminPrincipal(
 		requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert))
 	assert.Nil(t, after,
@@ -3702,8 +3902,8 @@ func TestExtractAdminPrincipal_DeprovisioningCannotWidenBoundCert(t *testing.T) 
 }
 
 // TestExtractAdminPrincipal_AccountResetCannotWidenBoundCert verifies that the
-// POST /api/v1/accounts reset (upsert) path cannot move a still-valid bound certificate
-// back onto the unscoped-root bootstrap fallback.
+// POST /api/v1/accounts reset (upsert) path cannot unbind or widen a still-valid bound
+// certificate.
 //
 // handleCreateAccount builds a fresh account record on every request and carries selected
 // fields forward from the existing one. persistAccount rebuilds the metadata from the record
@@ -3711,8 +3911,7 @@ func TestExtractAdminPrincipal_DeprovisioningCannotWidenBoundCert(t *testing.T) 
 // replaces the in-memory copy that getAccountByCertSerial scans — so an upsert that did not
 // carry CertBindings forward would silently unbind every certificate on the account. A
 // tenant-scoped admin holding account:create could then POST their own username and have
-// their own unrevoked certificate resolve as GlobalScope=true / TenantID="" /
-// ImplicitAdmin=true on the very next request.
+// their own unrevoked certificate stop resolving to the account on the very next request.
 func TestExtractAdminPrincipal_AccountResetCannotWidenBoundCert(t *testing.T) {
 	server, _ := setupCertBindingServer(t)
 
@@ -3763,7 +3962,7 @@ func TestExtractAdminPrincipal_AccountResetCannotWidenBoundCert(t *testing.T) {
 	assert.False(t, after.GlobalScope,
 		"a reset must not widen the certificate to unscoped root")
 	assert.False(t, after.ImplicitAdmin,
-		"a reset must not put the certificate back on the bootstrap fallback")
+		"a reset must not turn the certificate into an implicit admin")
 
 	// The carry-forward must reach the durable record, not just the cache: a controller
 	// restart after the reset must reload the binding.
@@ -3849,7 +4048,7 @@ func TestRecordCertBindingUse_CoalescesRepeatedAuth(t *testing.T) {
 
 // TestRecordCertBindingUse_RejectedOrUnboundAuthProducesZeroWrites is the [REQUIRED TEST]
 // verifying that authentication paths which do not resolve to a bound, active-account
-// principal — a revoked serial, an unbound serial (bootstrap fallback), and a disabled
+// principal — a revoked serial, an unbound serial, and a disabled
 // account — never trigger a durable store write. Asserted by counting StoreSecret calls.
 func TestRecordCertBindingUse_RejectedOrUnboundAuthProducesZeroWrites(t *testing.T) {
 	// assertZeroWrites gives any (incorrectly) spawned last-used-recording goroutine a
@@ -3877,16 +4076,16 @@ func TestRecordCertBindingUse_RejectedOrUnboundAuthProducesZeroWrites(t *testing
 		assertZeroWrites(t, counting)
 	})
 
-	t.Run("unbound serial (bootstrap fallback)", func(t *testing.T) {
+	t.Run("unbound serial", func(t *testing.T) {
 		srv := setupTestServer(t)
-		adminCert := makeSelfSignedAdminCert(t)
+		adminCert := makeAdminCertWithAttrs(t, 87001, "unbound-coalesce-admin", false)
 		req := requestWithTLSCert(http.MethodGet, "/api/v1/test", adminCert)
 
 		counting := &countingStoreSecretStore{SecretStore: srv.secretStore}
 		srv.secretStore = counting
 
 		p := srv.extractAdminPrincipal(req)
-		require.NotNil(t, p, "an unbound cert is accepted via the bootstrap fallback")
+		require.NotNil(t, p, "an unbound cert authenticates (and holds nothing)")
 		assertZeroWrites(t, counting)
 	})
 
@@ -4321,6 +4520,7 @@ func TestCertificateAuthPath_UnchangedByAmendment4(t *testing.T) {
 	t.Run("root-scope-marked certificate", func(t *testing.T) {
 		server := setupTestServer(t)
 		peerCert := makeRootScopedAdminTestCert(t)
+		bindTestAdminCertOn(t, server, peerCert)
 		req := requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert)
 		p := server.extractAdminPrincipal(req)
 		require.NotNil(t, p)
@@ -4337,7 +4537,7 @@ func TestCertificateAuthPath_UnchangedByAmendment4(t *testing.T) {
 		require.NotNil(t, p)
 		assert.False(t, p.RootScoped, "an unmarked admin certificate must still derive RootScoped=false")
 		assert.Equal(t, testRootTenantID, p.TenantID, "the bootstrap admin is bound to the root tenant (Issue #4665)")
-		assert.True(t, p.ImplicitAdmin, "the unbound bootstrap-fallback admin grant must be unaffected")
+		assert.True(t, p.ImplicitAdmin, "a certificate bound to a root-scope account is an implicit admin")
 	})
 
 	t.Run("revoked certificate is rejected outright", func(t *testing.T) {

@@ -5,8 +5,13 @@ package initialization
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,6 +26,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/cert/bundle"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -571,4 +577,373 @@ func TestIssueAdminBundle_NotRootScoped_NoAuditEvent(t *testing.T) {
 	entries, err := sm.GetAuditStore().GetAuditsByAction(context.Background(), "root_scoped_admin_bundle_issued", nil)
 	require.NoError(t, err)
 	assert.Empty(t, entries)
+}
+
+// --- ADR-025 Amendment 3: bootstrap binds the issued certificate to an account ---
+
+// testSecretStoreOpener is the opener the whole package's tests run with. features/controller/api
+// registers NewSecretStore in production; this package cannot import it (import cycle), so the
+// tests open the same kind of store — SOPS over the flatfile backend, encrypted with an
+// external key file — under the controller directory of the config they are given. The store
+// is therefore durable across calls, as the server's is across a restart.
+var testSecretStoreOpener SecretStoreOpener
+
+func TestMain(m *testing.M) {
+	keyDir, err := os.MkdirTemp("", "cfgms-init-test-key-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create key directory: %v\n", err)
+		os.Exit(1)
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		fmt.Fprintf(os.Stderr, "generate key: %v\n", err)
+		os.Exit(1)
+	}
+	keyPath := filepath.Join(keyDir, "secrets.key")
+	if err := os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(key)), 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "write key: %v\n", err)
+		os.Exit(1)
+	}
+	testSecretStoreOpener = func(cfg *config.Config) (secretsinterfaces.SecretStore, error) {
+		return secretsinterfaces.CreateSecretStoreFromConfig("sops", map[string]interface{}{
+			"storage_provider": "flatfile",
+			"storage_config":   map[string]interface{}{"root": filepath.Join(filepath.Dir(cfg.Certificate.CAPath), "test-secrets")},
+			"cache_enabled":    false,
+			"key_file":         keyPath,
+		})
+	}
+	RegisterSecretStoreOpener(testSecretStoreOpener)
+	code := m.Run()
+	_ = os.RemoveAll(keyDir)
+	os.Exit(code)
+}
+
+// useSecretStoreOpener replaces the registered opener for one test.
+func useSecretStoreOpener(t *testing.T, open SecretStoreOpener) {
+	t.Helper()
+	RegisterSecretStoreOpener(open)
+	t.Cleanup(func() { RegisterSecretStoreOpener(testSecretStoreOpener) })
+}
+
+// accountRecord reads username's account record from the store the bootstrap paths write
+// to, or nil when there is none.
+func accountRecord(t *testing.T, cfg *config.Config, username string) *secretsinterfaces.SecretMetadata {
+	t.Helper()
+	store, err := testSecretStoreOpener(cfg)
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+	metas, err := store.ListSecrets(context.Background(), &secretsinterfaces.SecretFilter{
+		Tags: []string{"account"},
+		Metadata: map[string]string{
+			secretsinterfaces.MetadataKeySecretType: "account",
+			"username":                              username,
+		},
+	})
+	require.NoError(t, err)
+	if len(metas) == 0 {
+		return nil
+	}
+	require.Len(t, metas, 1, "exactly one account record per username")
+	return metas[0]
+}
+
+// boundSerials returns the certificate serials bound on an account record.
+func boundSerials(t *testing.T, rec *secretsinterfaces.SecretMetadata) []string {
+	t.Helper()
+	require.NotNil(t, rec, "account record must exist")
+	var bindings []struct {
+		Serial      string `json:"serial"`
+		Fingerprint string `json:"fingerprint"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(rec.Metadata["cert_bindings"]), &bindings))
+	serials := make([]string, 0, len(bindings))
+	for _, b := range bindings {
+		assert.NotEmpty(t, b.Fingerprint, "a binding records the certificate fingerprint")
+		serials = append(serials, b.Serial)
+	}
+	return serials
+}
+
+func bundleSerial(t *testing.T, bundlePath string) string {
+	t.Helper()
+	return parseX509FromBundle(t, bundlePath).SerialNumber.String()
+}
+
+// TestRun_FirstBootBindsSystemBundleToAccount is the [REQUIRED TEST] that first-boot
+// issuance leaves a durable administrator account with the issued serial bound to it.
+func TestRun_FirstBootBindsSystemBundleToAccount(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+
+	rec := accountRecord(t, setup.cfg, systemAdminUsername)
+	require.NotNil(t, rec, "first boot must create the system administrator account")
+	assert.Equal(t, []string{bundleSerial(t, setup.bundlePath)}, boundSerials(t, rec))
+	assert.Equal(t, "true", rec.Metadata["root_scope"], "the bootstrap account is root-scope (ADR-025 Amendment 7)")
+	assert.NotEmpty(t, rec.Metadata["id"])
+	assert.Empty(t, rec.Metadata["permissions"], "breadth comes from root scope, not a stored permission list")
+	assert.NotEqual(t, "true", rec.Metadata["disabled"])
+}
+
+// TestIssueAdminBundle_BindsCertificateToAccount is the [REQUIRED TEST] that
+// bootstrap-admin --name and --root-scoped each leave a durable account with the issued
+// serial bound to it, scoped to match the certificate.
+func TestIssueAdminBundle_BindsCertificateToAccount(t *testing.T) {
+	for _, rootScoped := range []bool{false, true} {
+		name := map[bool]string{false: "default", true: "root-scoped"}[rootScoped]
+		t.Run(name, func(t *testing.T) {
+			setup, cleanup := setupInitializedController(t)
+			defer cleanup()
+			outPath := filepath.Join(setup.tempDir, "alice.bundle.yaml")
+
+			require.NoError(t, IssueAdminBundle(setup.cfg, setup.logger, "alice", outPath, rootScoped))
+
+			rec := accountRecord(t, setup.cfg, "alice")
+			require.NotNil(t, rec, "the named administrator account must exist")
+			assert.Equal(t, []string{bundleSerial(t, outPath)}, boundSerials(t, rec))
+			assert.Equal(t, "true", rec.Metadata["root_scope"], "a bootstrap account is root-scope")
+			assert.Equal(t, rootScoped, cert.HasRootScopeMarker(parseX509FromBundle(t, outPath)),
+				"the root-scope marker is on the certificate only for --root-scoped")
+		})
+	}
+}
+
+// TestRegenerate_BindsNewCertificateToExistingAccount verifies --regenerate reuses the
+// system administrator account and binds the new serial next to the old one (the old
+// certificate stays valid until it is revoked).
+func TestRegenerate_BindsNewCertificateToExistingAccount(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+	oldSerial := bundleSerial(t, setup.bundlePath)
+	before := accountRecord(t, setup.cfg, systemAdminUsername)
+	require.NotNil(t, before)
+
+	require.NoError(t, RegenerateSystemBundle(setup.cfg, setup.logger))
+
+	after := accountRecord(t, setup.cfg, systemAdminUsername)
+	require.NotNil(t, after)
+	assert.Equal(t, before.Metadata["id"], after.Metadata["id"], "the account is reused, not recreated")
+	assert.ElementsMatch(t, []string{oldSerial, bundleSerial(t, setup.bundlePath)}, boundSerials(t, after))
+	assert.NotEqual(t, oldSerial, bundleSerial(t, setup.bundlePath))
+}
+
+// TestBootstrap_RecoveryRecreatesAccountsLostFromStore verifies the local recovery path: a
+// deployment that lost its accounts runs bootstrap-admin on the controller host and gets a
+// working bound certificate without any network authentication.
+func TestBootstrap_RecoveryRecreatesAccountsLostFromStore(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+	require.NoError(t, os.RemoveAll(filepath.Join(setup.tempDir, "test-secrets")), "lose the account store")
+	require.Nil(t, accountRecord(t, setup.cfg, systemAdminUsername))
+
+	require.NoError(t, RegenerateSystemBundle(setup.cfg, setup.logger))
+
+	rec := accountRecord(t, setup.cfg, systemAdminUsername)
+	assert.Equal(t, []string{bundleSerial(t, setup.bundlePath)}, boundSerials(t, rec))
+}
+
+// brokenBackingStoreOpener opens a real store and then replaces its backing directory with
+// a regular file, so the store opens but every read and write against it fails — the
+// account write fails for a real storage reason, not because of an injected error.
+func brokenBackingStoreOpener(cfg *config.Config) (secretsinterfaces.SecretStore, error) {
+	store, err := testSecretStoreOpener(cfg)
+	if err != nil {
+		return nil, err
+	}
+	root := filepath.Join(filepath.Dir(cfg.Certificate.CAPath), "test-secrets")
+	if err := os.RemoveAll(root); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(root, []byte("not a directory"), 0o600); err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+// TestBootstrap_BindFailureWritesNoBundle is the [REQUIRED TEST] that a failure of the
+// account or binding write leaves no bundle on disk and no usable certificate, for every
+// bootstrap path.
+func TestBootstrap_BindFailureWritesNoBundle(t *testing.T) {
+	storeUnavailable := errors.New("secret store unavailable")
+	failures := map[string]SecretStoreOpener{
+		"secret store cannot be opened": func(*config.Config) (secretsinterfaces.SecretStore, error) {
+			return nil, storeUnavailable
+		},
+		"account write fails (backing storage broken)": brokenBackingStoreOpener,
+	}
+	for failure, open := range failures {
+		t.Run(failure, func(t *testing.T) {
+			t.Run("bootstrap-admin --name", func(t *testing.T) {
+				setup, cleanup := setupInitializedController(t)
+				defer cleanup()
+				useSecretStoreOpener(t, open)
+				outPath := filepath.Join(setup.tempDir, "bob.bundle.yaml")
+
+				err := IssueAdminBundle(setup.cfg, setup.logger, "bob", outPath, false)
+
+				require.Error(t, err)
+				assert.NoFileExists(t, outPath, "no bundle may be written when the binding failed")
+			})
+			t.Run("bootstrap-admin --name --root-scoped", func(t *testing.T) {
+				setup, cleanup := setupInitializedController(t)
+				defer cleanup()
+				useSecretStoreOpener(t, open)
+				outPath := filepath.Join(setup.tempDir, "bob.bundle.yaml")
+
+				err := IssueAdminBundle(setup.cfg, setup.logger, "bob", outPath, true)
+
+				require.Error(t, err)
+				assert.NoFileExists(t, outPath)
+			})
+			t.Run("bootstrap-admin --regenerate", func(t *testing.T) {
+				setup, cleanup := setupInitializedController(t)
+				defer cleanup()
+				require.NoError(t, os.Remove(setup.bundlePath))
+				require.NoError(t, os.Remove(bundleMarkerPath(setup.bundlePath)))
+				useSecretStoreOpener(t, open)
+
+				err := RegenerateSystemBundle(setup.cfg, setup.logger)
+
+				require.Error(t, err)
+				assert.NoFileExists(t, setup.bundlePath, "no bundle may be written when the binding failed")
+			})
+			t.Run("first boot", func(t *testing.T) {
+				tempDir := controllerDataRoot(t)
+				caDir := filepath.Join(tempDir, "ca")
+				bundlePath := filepath.Join(tempDir, "admin.bundle.yaml")
+				cfg := makeTestConfig(t, tempDir, caDir, bundlePath)
+				useSecretStoreOpener(t, open)
+
+				_, err := Run(cfg, logging.NewNoopLogger())
+
+				require.Error(t, err)
+				assert.NoFileExists(t, bundlePath, "first boot must not leave an unbound admin bundle")
+			})
+		})
+	}
+}
+
+// TestBootstrap_NoOpenerFailsClosed verifies that with no secret store opener registered
+// nothing is issued: an unbound certificate is never the fallback.
+func TestBootstrap_NoOpenerFailsClosed(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+	useSecretStoreOpener(t, nil)
+	outPath := filepath.Join(setup.tempDir, "carol.bundle.yaml")
+
+	err := IssueAdminBundle(setup.cfg, setup.logger, "carol", outPath, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no secret store opener")
+	assert.NoFileExists(t, outPath)
+}
+
+// TestIssueAdminBundle_BindFailureRevokesTheCertificate verifies a certificate whose bundle
+// was never delivered is revoked rather than left valid at the CA.
+func TestIssueAdminBundle_BindFailureRevokesTheCertificate(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+	before, err := setup.certManager.ListCertificates()
+	require.NoError(t, err)
+	known := map[string]bool{}
+	for _, ci := range before {
+		known[ci.SerialNumber] = true
+	}
+	useSecretStoreOpener(t, brokenBackingStoreOpener)
+
+	require.Error(t, IssueAdminBundle(setup.cfg, setup.logger, "dave", filepath.Join(setup.tempDir, "dave.yaml"), false))
+
+	// A fresh manager reads what IssueAdminBundle's own manager persisted.
+	fresh, err := cert.NewManager(&cert.ManagerConfig{StoragePath: setup.tempDir, LoadExistingCA: true})
+	require.NoError(t, err)
+	after, err := fresh.ListCertificates()
+	require.NoError(t, err)
+	var undelivered int
+	for _, ci := range after {
+		if known[ci.SerialNumber] || ci.CommonName != "dave" {
+			continue
+		}
+		undelivered++
+		revoked, err := fresh.IsRevoked(ci.SerialNumber)
+		require.NoError(t, err)
+		assert.True(t, revoked, "the undelivered certificate must be revoked")
+	}
+	assert.Equal(t, 1, undelivered, "exactly one certificate was issued for the failed bundle")
+}
+
+// TestIssueAdminBundle_RefusesToReuseUnsuitableAccount verifies bootstrap does not widen a
+// tenant-scoped account to root and does not issue a certificate bound to a disabled one.
+func TestIssueAdminBundle_RefusesToReuseUnsuitableAccount(t *testing.T) {
+	seed := func(t *testing.T, cfg *config.Config, username string, meta map[string]string) {
+		t.Helper()
+		store, err := testSecretStoreOpener(cfg)
+		require.NoError(t, err)
+		defer func() { _ = store.Close() }()
+		meta[secretsinterfaces.MetadataKeySecretType] = "account"
+		meta["id"] = "pre-existing-" + username
+		meta["username"] = username
+		meta["permissions"] = "steward:read"
+		meta["created_at"] = time.Now().UTC().Format(time.RFC3339)
+		tenantID := "system"
+		if meta["root_scope"] != "true" {
+			tenantID = "msp-a"
+		}
+		require.NoError(t, store.StoreSecret(context.Background(), &secretsinterfaces.SecretRequest{
+			Key: "account-" + username, TenantID: tenantID, Tags: []string{"account"}, Metadata: meta,
+		}))
+	}
+
+	t.Run("tenant-scoped account", func(t *testing.T) {
+		setup, cleanup := setupInitializedController(t)
+		defer cleanup()
+		seed(t, setup.cfg, "erin", map[string]string{})
+		outPath := filepath.Join(setup.tempDir, "erin.bundle.yaml")
+
+		err := IssueAdminBundle(setup.cfg, setup.logger, "erin", outPath, false)
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not root-scope")
+		assert.NoFileExists(t, outPath)
+		assert.Empty(t, accountRecord(t, setup.cfg, "erin").Metadata["cert_bindings"], "the account was not touched")
+	})
+
+	t.Run("disabled account", func(t *testing.T) {
+		setup, cleanup := setupInitializedController(t)
+		defer cleanup()
+		seed(t, setup.cfg, "frank", map[string]string{"root_scope": "true", "disabled": "true"})
+		outPath := filepath.Join(setup.tempDir, "frank.bundle.yaml")
+
+		err := IssueAdminBundle(setup.cfg, setup.logger, "frank", outPath, false)
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "disabled")
+		assert.NoFileExists(t, outPath)
+	})
+
+	t.Run("enabled root-scope account keeps its other fields", func(t *testing.T) {
+		setup, cleanup := setupInitializedController(t)
+		defer cleanup()
+		seed(t, setup.cfg, "gina", map[string]string{"root_scope": "true", "credentials": "[]"})
+		outPath := filepath.Join(setup.tempDir, "gina.bundle.yaml")
+
+		require.NoError(t, IssueAdminBundle(setup.cfg, setup.logger, "gina", outPath, false))
+
+		rec := accountRecord(t, setup.cfg, "gina")
+		assert.Equal(t, []string{bundleSerial(t, outPath)}, boundSerials(t, rec))
+		assert.Equal(t, "pre-existing-gina", rec.Metadata["id"])
+		assert.Equal(t, "[]", rec.Metadata["credentials"], "binding must not drop the account's other fields")
+	})
+}
+
+// TestIssueAdminBundle_RejectsNameTooShortForAccount verifies a name the account layer
+// would refuse as a username is refused before any certificate is issued.
+func TestIssueAdminBundle_RejectsNameTooShortForAccount(t *testing.T) {
+	setup, cleanup := setupInitializedController(t)
+	defer cleanup()
+	outPath := filepath.Join(setup.tempDir, "ab.bundle.yaml")
+
+	err := IssueAdminBundle(setup.cfg, setup.logger, "ab", outPath, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "administrator account username")
+	assert.NoFileExists(t, outPath)
 }

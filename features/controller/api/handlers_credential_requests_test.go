@@ -893,8 +893,8 @@ func countAuditEntries(t *testing.T, server *Server, tenantID, action, resourceI
 
 // TestSweepOrphanedCollectedCertificates_RevokesUnboundCertificate is the primary test
 // for the sweep: a collected request whose recorded serial appears in no account's
-// bindings is the crash window, and the certificate must be revoked so it can never
-// resolve through extractAdminPrincipal's bootstrap fallback as implicit root.
+// bindings is the crash window, and the certificate must be revoked so a certificate
+// that is bound to nothing does not stay valid at the CA.
 func TestSweepOrphanedCollectedCertificates_RevokesUnboundCertificate(t *testing.T) {
 	server := setupCollectTestServer(t)
 	ctx := context.Background()
@@ -922,7 +922,7 @@ func TestSweepOrphanedCollectedCertificates_RevokesUnboundCertificate(t *testing
 
 	// The whole point of the revocation: the admin-marked certificate the crash left
 	// behind must not authenticate. extractAdminPrincipal checks IsRevoked before it
-	// ever reaches the bootstrap-fallback branch, so a synthetic certificate carrying
+	// resolves any account, so a synthetic certificate carrying
 	// the revoked serial exercises exactly that lookup (chain verification happens at
 	// the TLS layer — see extractAdminPrincipal's doc comment).
 	serialInt, ok := new(big.Int).SetString(fx.serial, 10)

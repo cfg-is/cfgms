@@ -130,6 +130,7 @@ func TestAdminCertRecheck_FollowsRevocation(t *testing.T) {
 	certManager := newSharedTestCertManager(t)
 	srv := setupTestServerWithCertMgr(t, certManager)
 	req, serial := issueCertAndBuildRequest(t, http.MethodGet, "/api/v1/test", certManager)
+	bindTestAdminCertOn(t, srv, req.TLS.PeerCertificates[0])
 
 	var recheck authRecheck
 	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -186,15 +187,17 @@ func TestTelemetryWS_ClosesWhenPermissionRemoved(t *testing.T) {
 	requirePolicyViolationClose(t, conn)
 }
 
-// TestTelemetryWrapper_UnboundAdminCertStaysOpen proves an unchanged admin-certificate
+// TestTelemetryWrapper_BoundAdminCertStaysOpen proves an unchanged bound admin-certificate
 // stream survives several re-check ticks, and that a revoked certificate ends it.
-func TestTelemetryWrapper_UnboundAdminCertStaysOpen(t *testing.T) {
+func TestTelemetryWrapper_BoundAdminCertStaysOpen(t *testing.T) {
 	const stewardID = "telemetry-cert-steward"
 	certManager := newSharedTestCertManager(t)
 	srv := setupTestServerWithCertMgr(t, certManager)
 	srv.setWatchKeepalive(2*time.Second, 20*time.Millisecond)
-	require.NoError(t, srv.controllerService.RegisterSteward(stewardID, "test-tenant", "localhost:0", "active"))
+	seedTestRootTenant(t, srv.tenantManager) // the root-scope account is bound to the root tenant
+	require.NoError(t, srv.controllerService.RegisterSteward(stewardID, testRootTenantID, "localhost:0", "active"))
 	req, serial := issueCertAndBuildRequest(t, http.MethodGet, "/api/v1/telemetry/ws/"+stewardID, certManager)
+	bindTestAdminCertOn(t, srv, req.TLS.PeerCertificates[0])
 	req = mux.SetURLVars(req, map[string]string{"id": stewardID})
 
 	cancelled := make(chan struct{})

@@ -531,7 +531,8 @@ func openStorageManager(cfg *config.Config, logger logging.Logger) (*interfaces.
 }
 
 // issueAdminBundle generates an admin client certificate with the CFGMS admin marker,
-// writes the bundle file, and writes the idempotency marker. Shared by first-run
+// binds it to the system administrator account, writes the bundle file, and writes the
+// idempotency marker. Shared by first-run
 // initialization (Run, above) and RegenerateSystemBundle (admin_bundle.go) — both mint
 // the deployment's one system admin bundle.
 func issueAdminBundle(bundlePath string, cfg *config.Config, certManager *cert.Manager, logger logging.Logger) error {
@@ -541,14 +542,25 @@ func issueAdminBundle(bundlePath string, cfg *config.Config, certManager *cert.M
 	//
 	// Deliberately NOT the root-scope marker (pkg/cert's SetRootScopeMarker; see its own
 	// architecture allow-list test) — ADR-025 Amendment 1 A1.3, founder decision
-	// 2026-08-09, PR #3215. This is the system admin bundle, the deployment's only admin
-	// credential on every single-root and on-prem install. Marking it would subject that
-	// admin to the ADR-025 Decision 1 root<->MSP boundary and lock it out of everything
-	// below "root" with no way to grant itself a crossing — a lockout, not hardening.
-	// Unmarked stays the default everywhere; the opt-in lives only on the named-operator
-	// path (IssueAdminBundle in admin_bundle.go, via bootstrap-admin --root-scoped).
+	// 2026-08-09, PR #3215: the marker stays an opt-in on the named-operator path
+	// (IssueAdminBundle in admin_bundle.go, via bootstrap-admin --root-scoped).
+	//
+	// The bound account is root-scope all the same (BindAdminCertificate), and for an
+	// account-bound principal GlobalScope, not the marker, decides the root<->MSP crossing
+	// boundary (ADR-025 Amendment 5). The system bundle therefore reaches the root tenant
+	// directly and a tenant below root through a grant or break-glass crossing, like any
+	// root-scope operator; the marker is not needed for either.
+	//
+	// ADR-025 Amendment 3: the certificate is bound to the system administrator account
+	// before the bundle is written; an unbound certificate confers nothing.
+	accountStore, err := openAccountStore(cfg)
+	if err != nil {
+		return err
+	}
+	defer closeAccountStore(accountStore, logger)
+
 	adminCert, err := certManager.GenerateClientCertificate(&cert.ClientCertConfig{
-		CommonName:       "cfgms-admin",
+		CommonName:       systemAdminUsername,
 		Organization:     "CFGMS",
 		ValidityDays:     365,
 		TemplateModifier: cert.SetAdminMarker,
@@ -574,7 +586,13 @@ func issueAdminBundle(bundlePath string, cfg *config.Config, certManager *cert.M
 		CertFingerprint: adminCert.Fingerprint,
 	}
 
+	if err := BindAdminCertificate(context.Background(), accountStore, systemAdminUsername, adminCert.SerialNumber, adminCert.Fingerprint); err != nil {
+		revokeUndeliveredCert(certManager, logger, adminCert.SerialNumber)
+		return err
+	}
+
 	if err := bundle.Write(bundlePath, b); err != nil {
+		revokeUndeliveredCert(certManager, logger, adminCert.SerialNumber)
 		return fmt.Errorf("failed to write admin bundle: %w", err)
 	}
 

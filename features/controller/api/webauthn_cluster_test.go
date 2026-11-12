@@ -408,6 +408,7 @@ func TestWebAuthnCluster_PresenceTokenMintedOnAConsumedOnceOnB(t *testing.T) {
 	a := f.join(setupTestServer(t))
 	b := f.join(setupTestServer(t))
 	adminCert := makeSelfSignedAdminCert(t)
+	bindTestAdminCertOn(t, b, adminCert)
 
 	token := "cluster-presence-token"
 	require.Equal(t, ceremonyOK, a.putPresenceToken(context.Background(), hashPresenceToken(token), &presenceTokenRecord{
@@ -574,7 +575,9 @@ func TestWebAuthnCluster_UnwiredNonceStoreReturns503ForEveryCeremony(t *testing.
 		withPresencePermission(t)
 		handler := wrapWithAuth(n, "test", "presence-required",
 			func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-		req := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", makeSelfSignedAdminCert(t))
+		adminCert := makeSelfSignedAdminCert(t)
+		bindTestAdminCertOn(t, n, adminCert)
+		req := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", adminCert)
 		req.Header.Set(presenceTokenHeader, "any-token")
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)

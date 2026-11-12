@@ -7,9 +7,14 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -19,11 +24,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/cert/bundle"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
@@ -85,7 +92,7 @@ func setupCertBindingServer(t *testing.T) (*Server, *cert.Manager) {
 }
 
 // strongPrincipal returns a Principal with AssuranceStrong for mutating operations.
-// ImplicitAdmin mirrors the real bootstrap-fallback mTLS admin shape
+// ImplicitAdmin mirrors the real root-scope-account mTLS admin shape
 // (extractAdminPrincipal, middleware.go), since callers of this helper drive
 // handlers directly — bypassing requirePermission — and request specific
 // permissions with no matching Principal.Permissions entry (Issue #4334).
@@ -612,9 +619,8 @@ func TestHandleCertBinding_PersistedAcrossReload(t *testing.T) {
 // refused with 503 when no certificate manager is configured.
 //
 // Removing the binding while the certificate stays valid is not a partial success: the
-// unbound certificate resolves through extractAdminPrincipal's bootstrap fallback as
-// unscoped root, so an unrevokable unbind would widen a tenant-scoped administrator's
-// certificate rather than retire it.
+// unbound certificate is inert (ADR-025 Amendment 3) but still valid at the CA, so an
+// unrevokable unbind would leave a live certificate rather than retire it.
 func TestHandleCertBinding_RevokeRefusedWithoutCertManager(t *testing.T) {
 	server := setupTestServer(t)
 	require.Nil(t, server.certManager, "this test requires a server with no cert manager")
@@ -696,4 +702,104 @@ func TestCertBindingHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
 		bindings := getCertBindings(t, server, "alice")
 		assert.Empty(t, bindings, "the binding must actually be removed on a non-authoritative node")
 	})
+}
+
+// bootstrapTestConfig is the controller configuration the bootstrap tests initialize and
+// issue bundles against: a real CA directory, admin bundle path and storage under root.
+func bootstrapTestConfig(t *testing.T, root string) *config.Config {
+	t.Helper()
+	caDir := filepath.Join(root, "ca")
+	cfg := config.DefaultConfig()
+	cfg.ExternalURL = "https://controller.test:9080"
+	cfg.CertPath = caDir
+	cfg.AdminBundlePath = filepath.Join(root, "admin.bundle.yaml")
+	cfg.Certificate.EnableCertManagement = true
+	cfg.Certificate.CAPath = caDir
+	cfg.Certificate.Server = &config.ServerCertificateConfig{
+		CommonName:   "test-controller",
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []string{"127.0.0.1"},
+		Organization: "Test Org",
+	}
+	cfg.Storage = &config.StorageConfig{
+		Provider:     "flatfile",
+		FlatfileRoot: filepath.Join(root, "flatfile"),
+		SQLitePath:   filepath.Join(root, "cfgms.db"),
+	}
+	return cfg
+}
+
+func bundleCertificate(t *testing.T, path string) *x509.Certificate {
+	t.Helper()
+	b, err := bundle.Read(path)
+	require.NoError(t, err)
+	block, _ := pem.Decode([]byte(b.CertPEM))
+	require.NotNil(t, block)
+	c, err := x509.ParseCertificate(block.Bytes)
+	require.NoError(t, err)
+	return c
+}
+
+// TestBootstrapBundle_BoundCertAuthenticatesAfterRestart is the [REQUIRED TEST] that the
+// bundles bootstrap issues — first boot, bootstrap-admin --name and --root-scoped — are
+// bound to an administrator account in the secret store the server reads, and that after
+// a controller restart (account cache dropped, secret store reopened from disk) each still
+// authenticates and performs an admin action: creating a tenant (ADR-025 Amendment 3).
+func TestBootstrapBundle_BoundCertAuthenticatesAfterRestart(t *testing.T) {
+	// The server and the bootstrap commands resolve the secret store from the same
+	// CFGMS_SECRETS_* environment, exactly as the controller service and an operator's
+	// shell do.
+	server := setupTestServer(t)
+
+	t.Setenv("ProgramData", t.TempDir())
+	root := initialization.ControllerBaseDir()
+	require.NoError(t, os.MkdirAll(root, 0o700))
+	cfg := bootstrapTestConfig(t, root)
+	logger := logging.NewNoopLogger()
+
+	_, err := initialization.Run(cfg, logger)
+	require.NoError(t, err, "first boot")
+	namedPath := filepath.Join(root, "ops-alice.bundle.yaml")
+	require.NoError(t, initialization.IssueAdminBundle(cfg, logger, "ops-alice", namedPath, false))
+	rootScopedPath := filepath.Join(root, "ops-root.bundle.yaml")
+	require.NoError(t, initialization.IssueAdminBundle(cfg, logger, "ops-root", rootScopedPath, true))
+
+	bundles := map[string]string{
+		"first boot system bundle":      cfg.AdminBundlePath,
+		"bootstrap-admin --name":        namedPath,
+		"bootstrap-admin --root-scoped": rootScopedPath,
+	}
+
+	// Restart: nothing cached, the secret store reopened from what is on disk.
+	require.NoError(t, server.secretStore.Close())
+	reopened, err := NewSecretStore(config.DefaultConfig())
+	require.NoError(t, err)
+	server.secretStore = reopened
+	dropAccountCache(server)
+
+	for name, path := range bundles {
+		t.Run(name, func(t *testing.T) {
+			peer := bundleCertificate(t, path)
+
+			p := server.extractAdminPrincipal(requestWithTLSCert(http.MethodGet, "/api/v1/test", peer))
+			require.NotNil(t, p)
+			assert.True(t, p.AccountBound, "the issued certificate must resolve to a durable account")
+			assert.True(t, p.ImplicitAdmin)
+			assert.True(t, p.GlobalScope, "the bootstrap account is root-scope")
+			assert.Equal(t, testRootTenantID, p.TenantID, "a root-scope account is bound to the root tenant (ADR-025 Amendment 7)")
+			assert.Equal(t, cert.HasRootScopeMarker(peer), p.RootScoped)
+
+			tenantID := "boot-" + strings.ReplaceAll(strings.ReplaceAll(name, " ", "-"), "--", "")
+			body, err := json.Marshal(map[string]string{"id": tenantID, "parent_id": testRootTenantID})
+			require.NoError(t, err)
+			req := requestWithTLSCert(http.MethodPost, "/api/v1/tenants", peer)
+			req.Body = io.NopCloser(bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			server.router.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusCreated, rec.Code, "an admin action must succeed after restart: %s", rec.Body.String())
+			_, err = server.tenantManager.GetTenant(context.Background(), tenantID)
+			assert.NoError(t, err)
+		})
+	}
 }

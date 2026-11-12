@@ -1047,9 +1047,9 @@ func (s *Server) sweepExpiredCredentialRequests(ctx context.Context) {
 // does not appear in its bound account's CertBindings is exactly that window: the
 // process died (or the account changed underneath the request) after the certificate
 // became durable but before the binding did. Left alone, such a certificate resolves
-// through no account and would fall through extractAdminPrincipal's bootstrap fallback
-// as implicit root (middleware.go, ADR-025 Amendment 3) if it happens to carry the
-// admin marker — this sweep closes that window on the same interval as the expiry sweep.
+// through no account, so if it carries the admin marker it authenticates and confers
+// nothing (middleware.go, ADR-025 Amendment 3) — a dead credential that should not stay
+// valid at the CA. This sweep closes that window on the same interval as the expiry sweep.
 func (s *Server) sweepOrphanedCollectedCertificates(ctx context.Context) {
 	if s.secretStore == nil || s.certManager == nil {
 		return
