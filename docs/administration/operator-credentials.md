@@ -1182,3 +1182,42 @@ there is no migration, so delete the authenticator and create it again.
   delete the authenticator and create it again there.
 - The software authenticator's user-verified flag only shows that the holder can
   use the key; it does not verify a person.
+
+### Running commands with `--authenticator`
+
+With `--authenticator <name>` (or `CFGMS_AUTHENTICATOR=<name>`), every `cfg`
+command that uses a session or admin bundle (everything except `cfg webauthn ...`,
+which only ever uses the admin bundle) first logs in with that authenticator and
+uses the resulting web session for the command:
+
+```
+cfg --authenticator agent-1 token list
+CFGMS_AUTHENTICATOR=agent-1 cfg token list
+```
+
+The login is the controller's usernameless passkey login: `cfg` fetches the
+pre-session CSRF token, begins the login, signs the challenge with the
+authenticator's key, and finishes. The controller's session cookie and CSRF token
+are held in memory only and sent over `https` to the controller the authenticator
+is bound to. When the command ends, whether it succeeded or failed, `cfg` calls
+`POST /api/v1/web/logout`, which revokes the session on the controller.
+
+- **One session per command.** Nothing is cached: no session is written to disk,
+  the OS keychain or the `cfg connect` session store, and the next command logs in
+  again. A failed logout prints a warning that names no cookie or token value and
+  does not change the command's result; the session then ends when it expires.
+- **Exactly one credential.** `--authenticator` cannot be combined with `--bundle`
+  or `--no-bundle`; the command fails before any network call with an error that
+  says to provide exactly one credential. `--authenticator` takes the place of the
+  active `cfg connect` session and the default admin bundle.
+- **No TLS-skip.** The controller's certificate is always verified, against the CA
+  certificate stored in the authenticator record or the system pool. `--tls-insecure`
+  and `CFGMS_TLS_INSECURE=true` are refused with `--authenticator`.
+- **Bound to one controller.** `cfg` connects to the controller URL in the record.
+  `--url` or `CFGMS_API_URL` must be omitted or equal to it. A record whose
+  controller URL is not `https` is refused.
+- **Must be registered.** An authenticator that is not yet registered with its
+  controller fails before any network call; the error names `cfg authenticator
+  enroll`.
+- **RP ID check.** The login is refused, and nothing is signed, when the
+  controller's challenge names an RP ID different from the authenticator's.

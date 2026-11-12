@@ -29,6 +29,9 @@ import (
 // matching the conventional diff exit code 1 = "differences exist".
 var errDifferencesFound = errors.New("configurations differ")
 
+// exitProcess ends the process; tests replace it to observe the state at exit.
+var exitProcess = os.Exit
+
 // secretKeyPatterns are case-insensitive substrings that mark a config key as sensitive.
 var secretKeyPatterns = []string{"token", "secret", "password", "credential", "api_key"}
 
@@ -152,7 +155,10 @@ Examples:
 	RunE: func(cmd *cobra.Command, args []string) error {
 		err := runConfigDiff(cmd, args)
 		if errors.Is(err, errDifferencesFound) {
-			os.Exit(1)
+			// os.Exit skips cobra's finalizers, so end any --authenticator web
+			// session here; otherwise it would stay live on the controller.
+			closeWebSessions()
+			exitProcess(1)
 		}
 		return err
 	},
