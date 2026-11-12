@@ -260,35 +260,12 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 		Labels:      labels,
 	}
 
-	// Issue #3895: force=true keeps the unconditional overwrite; the default path
-	// uses PutBlobIfAbsent so the not-found check and the write are one atomic
-	// operation at the storage layer. Two concurrent publishes without force can
-	// no longer both pass a GetBlob pre-check and both PutBlob — the provider's
-	// conditional-create primitive lets exactly one caller win.
-	var putErr error
-	if force {
-		putErr = s.blobStore.PutBlob(r.Context(), key, bytes.NewReader(body), meta)
-	} else {
-		putErr = s.blobStore.PutBlobIfAbsent(r.Context(), key, bytes.NewReader(body), meta)
-	}
-	if putErr != nil {
-		if errors.Is(putErr, blob.ErrBlobAlreadyExists) {
-			s.writeErrorResponse(w, http.StatusConflict,
-				"Steward binary already exists for this version/platform/arch; use --force to overwrite",
-				"DUPLICATE_BINARY")
-			return
-		}
-		s.logger.Error("Failed to store steward binary",
-			"error", logging.SanitizeLogValue(putErr.Error()),
-			"version", logging.SanitizeLogValue(version),
-			"platform", logging.SanitizeLogValue(platform),
-			"arch", logging.SanitizeLogValue(arch))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store binary", "STORE_ERROR")
+	if !s.storeStewardBinaryBlob(w, r, key, body, meta, force, version, platform, arch) {
 		return
 	}
 	s.publicDownloadCache.invalidate(stewardBinaryDownloadCacheKey(tenantID, version, platform, arch))
 
-	if !s.autoApproveTestPublish(w, r, tenantID, version, platform, arch, contentHash) {
+	if !s.autoApprovePublish(w, r, principal, tenantID, version, platform, arch, contentHash) {
 		return
 	}
 
@@ -340,6 +317,87 @@ func (s *Server) autoApproveTestPublish(w http.ResponseWriter, r *http.Request, 
 	return false
 }
 
+// storeStewardBinaryBlob writes the published bytes under key. It writes the 409
+// (DUPLICATE_BINARY, without force) or 500 response and returns false when the blob
+// cannot be stored.
+func (s *Server) storeStewardBinaryBlob(w http.ResponseWriter, r *http.Request, key blob.BlobKey, body []byte, meta blob.BlobMeta, force bool, version, platform, arch string) bool {
+	// Issue #3895: force=true keeps the unconditional overwrite; the default path
+	// uses PutBlobIfAbsent so the not-found check and the write are one atomic
+	// operation at the storage layer. Two concurrent publishes without force can
+	// no longer both pass a GetBlob pre-check and both PutBlob — the provider's
+	// conditional-create primitive lets exactly one caller win.
+	var putErr error
+	if force {
+		putErr = s.blobStore.PutBlob(r.Context(), key, bytes.NewReader(body), meta)
+	} else {
+		putErr = s.blobStore.PutBlobIfAbsent(r.Context(), key, bytes.NewReader(body), meta)
+	}
+	if putErr != nil {
+		if errors.Is(putErr, blob.ErrBlobAlreadyExists) {
+			s.writeErrorResponse(w, http.StatusConflict,
+				"Steward binary already exists for this version/platform/arch; use --force to overwrite",
+				"DUPLICATE_BINARY")
+			return false
+		}
+		s.logger.Error("Failed to store steward binary",
+			"error", logging.SanitizeLogValue(putErr.Error()),
+			"version", logging.SanitizeLogValue(version),
+			"platform", logging.SanitizeLogValue(platform),
+			"arch", logging.SanitizeLogValue(arch))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store binary", "STORE_ERROR")
+		return false
+	}
+	return true
+}
+
+// autoApprovePublish runs the two publish-time auto-approval paths in order: the
+// test-mode flag, then the rollout credential. It writes the 500 response and
+// returns false when either cannot record its approval.
+func (s *Server) autoApprovePublish(w http.ResponseWriter, r *http.Request, principal *Principal, tenantID, version, platform, arch, contentHash string) bool {
+	return s.autoApproveTestPublish(w, r, tenantID, version, platform, arch, contentHash) &&
+		s.autoApproveRolloutPublish(w, r, principal, tenantID, version, platform, arch, contentHash)
+}
+
+// autoApproveRolloutPublish approves the bytes just published when the publisher is
+// the scoped rollout credential (Issue #6069). The credential is identified by its
+// explicit key kind, never its permissions; any other principal is left unapproved.
+// It runs only after the publish-time Ed25519 check against the baked publisher key
+// passed, and contentHash is the hash that check verified. The refusal gate has
+// already required the unattended-rollouts setting to be on, and the approval does
+// not depend on the setting afterwards. The audit event is written first, then the
+// record through approveStewardBinary, as in the approve route. It writes the 500
+// response and returns false when either cannot be written; the blob then stays
+// unapproved. With no approval store wired the publish succeeds unapproved.
+func (s *Server) autoApproveRolloutPublish(w http.ResponseWriter, r *http.Request, principal *Principal, tenantID, version, platform, arch, contentHash string) bool {
+	if !isRolloutCredential(principal) {
+		return true
+	}
+	if s.StewardBinaryApprovalStore() == nil {
+		// Every handout path already fails closed without the store, so the binary
+		// stays unapproved; no event is written for an approval that was not made.
+		s.logger.Warn("Steward binary approval store unavailable; rollout credential publish left unapproved",
+			"version", logging.SanitizeLogValue(version),
+			"platform", logging.SanitizeLogValue(platform),
+			"arch", logging.SanitizeLogValue(arch))
+		return true
+	}
+	err := s.recordStewardBinaryApprovalAudit(r, auditActionStewardBinaryAutoApproved, principal, tenantID, version, platform, arch, contentHash)
+	if err == nil {
+		_, err = s.approveStewardBinary(r.Context(), tenantID, version, platform, arch, contentHash,
+			stewardBinaryUnattendedApproverPrefix+principal.ID)
+	}
+	if err == nil {
+		return true
+	}
+	s.logger.Error("Failed to record auto-approval of steward binary",
+		"error", logging.SanitizeLogValue(err.Error()),
+		"version", logging.SanitizeLogValue(version),
+		"platform", logging.SanitizeLogValue(platform),
+		"arch", logging.SanitizeLogValue(arch))
+	s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to record approval", "APPROVAL_ERROR")
+	return false
+}
+
 // stewardBinaryApproveRequest is the body of the approve route: the SHA-256 of the
 // bytes the approver reviewed.
 type stewardBinaryApproveRequest struct {
@@ -366,6 +424,14 @@ const stewardBinaryApproveMaxBody = 4 << 10
 
 // auditActionStewardBinaryApprove is the audit action of the approve route.
 const auditActionStewardBinaryApprove = "steward_binary.approve"
+
+// auditActionStewardBinaryAutoApproved is the audit action of the approval the publish
+// handler records for a binary published by the rollout credential (Issue #6069).
+const auditActionStewardBinaryAutoApproved = "steward_binary_auto_approved"
+
+// stewardBinaryUnattendedApproverPrefix prefixes the approved_by of an auto-approval,
+// so it can never be mistaken for a human principal id.
+const stewardBinaryUnattendedApproverPrefix = "unattended:"
 
 // sha256HexRe matches a lowercase hex SHA-256.
 var sha256HexRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -395,14 +461,14 @@ func (s *Server) decodeStewardBinaryApproveRequest(w http.ResponseWriter, r *htt
 // recordStewardBinaryApprovalAudit records the approval event naming the
 // principal, version, platform, arch and blob SHA-256. It returns the error: the
 // caller must not record the approval without the event.
-func (s *Server) recordStewardBinaryApprovalAudit(r *http.Request, principal *Principal, blobTenant, version, platform, arch, sum string) error {
+func (s *Server) recordStewardBinaryApprovalAudit(r *http.Request, action string, principal *Principal, blobTenant, version, platform, arch, sum string) error {
 	if s.auditManager == nil {
 		return errors.New("audit manager not configured")
 	}
 	b := audit.NewEventBuilder().
 		Tenant(blobTenant).
 		Type(business.AuditEventConfiguration).
-		Action(auditActionStewardBinaryApprove).
+		Action(action).
 		User(principal.ID, principalAuditUserType(principal)).
 		Resource("steward_binary", version+"-"+platform+"-"+arch, "").
 		Result(business.AuditResultSuccess).
@@ -495,7 +561,7 @@ func (s *Server) handleApproveStewardBinary(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if err := s.recordStewardBinaryApprovalAudit(r, principal, tenantID, version, platform, arch, got); err != nil {
+	if err := s.recordStewardBinaryApprovalAudit(r, auditActionStewardBinaryApprove, principal, tenantID, version, platform, arch, got); err != nil {
 		s.logger.Error("Steward binary approval refused: audit event not recorded", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Audit trail unavailable; nothing was changed", "AUDIT_UNAVAILABLE")
 		return
