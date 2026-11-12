@@ -19,6 +19,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/client"
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/logging/subscribers/systemlog"
 	"github.com/cfgis/cfgms/pkg/registration/identity"
@@ -498,16 +499,40 @@ func TestTamperAlarm_Release_RefetchesConfigFromController(t *testing.T) {
 	withServerCert.ServerCertPEM = string(serverCert.CertificatePEM)
 	require.NoError(t, saveIdentity(e.f.dir, withServerCert))
 
+	// The data plane provider is a process-wide singleton the client never stops
+	// on Disconnect; stop it after the steward has stopped (cleanups run last in,
+	// first out) so a repeated run in the same process can start it again.
+	t.Cleanup(func() {
+		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer dcancel()
+		_ = dataplaneInterfaces.GetProvider("grpc").Stop(dctx)
+	})
+
 	e.dirBad.Store(true)
 	e.runSteward(t, "", nil)
 	tamperHeartbeat(t, e.f.srv, cpTypes.ReasonCodeTamperDataDir)
 	waitConnected(t, e.f.srv)
 	assert.Zero(t, e.f.srv.pulls.Load(), "nothing is pulled while latched")
 
+	alarmLink, ok := e.f.srv.reg.Get(roStewardID)
+	require.True(t, ok, "the alarm link is registered")
+
 	ctx := context.Background()
 	require.NoError(t, e.f.srv.cp.SendTamperState(ctx, roStewardID, true))
 	e.dirBad.Store(false)
 	require.NoError(t, e.f.srv.cp.SendTamperState(ctx, roStewardID, false))
-	require.Eventually(t, func() bool { return e.f.srv.pulls.Load() > 0 }, 60*time.Second, 50*time.Millisecond,
+
+	// The release closes the alarm link and the normal connect registers a new
+	// one. A stored-identity connect treats a silent controller as admission only
+	// after storedIdentityAdmissionWindow (10 s); a real controller sends its
+	// tamper state on connect, which ends the wait. The fixture controller does the
+	// same on the new link, so the test waits on the refetch, not on that window.
+	require.Eventually(t, func() bool {
+		link, ok := e.f.srv.reg.Get(roStewardID)
+		return ok && link != alarmLink
+	}, 20*time.Second, 20*time.Millisecond, "the released steward takes the normal connect")
+	require.NoError(t, e.f.srv.cp.SendTamperState(ctx, roStewardID, false))
+
+	require.Eventually(t, func() bool { return e.f.srv.pulls.Load() > 0 }, 30*time.Second, 50*time.Millisecond,
 		"the released steward refetches config from the controller")
 }
