@@ -5,8 +5,6 @@ package commands
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -19,8 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-webauthn/webauthn/protocol/webauthncbor"
-	"github.com/go-webauthn/webauthn/protocol/webauthncose"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -32,6 +28,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
 // ---------------------------------------------------------------------------
@@ -749,35 +746,6 @@ func sigTestSigningCert(t *testing.T, ca *cert.CA) *cert.Certificate {
 	return c
 }
 
-// sigTestWebAuthnKeypair generates a real ECDSA P-256 keypair and returns it alongside
-// its CBOR COSE-encoded public key bytes — the exact format
-// AuthorizedWebAuthnCredential.PublicKey stores — mirroring generateSyntheticCredential
-// in features/controller/api/handlers_operator_payload_sign_test.go (duplicated here:
-// a different package). Real cryptographic material throughout — no mocks.
-func sigTestWebAuthnKeypair(t *testing.T) (*ecdsa.PrivateKey, []byte) {
-	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-
-	padCoord := func(b []byte) []byte {
-		out := make([]byte, 32)
-		copy(out[32-len(b):], b)
-		return out
-	}
-	coseKey := webauthncose.EC2PublicKeyData{
-		PublicKeyData: webauthncose.PublicKeyData{
-			KeyType:   2, // EC2
-			Algorithm: int64(webauthncose.AlgES256),
-		},
-		Curve:  int64(webauthncose.P256),
-		XCoord: padCoord(priv.X.Bytes()),
-		YCoord: padCoord(priv.Y.Bytes()),
-	}
-	pubKeyBytes, err := webauthncbor.Marshal(coseKey)
-	require.NoError(t, err)
-	return priv, pubKeyBytes
-}
-
 // sigTestSignManifest builds a CA-signed manifest (JSON bytes, ready for the
 // webauthn_manifest param) carrying credEntries, issued now and bound to the test
 // relying party, signed by signingCert via the same signature.NewSigner construction
@@ -856,7 +824,7 @@ func sigTestWebAuthnAssertionParams(t *testing.T, priv *ecdsa.PrivateKey, credID
 func TestExecuteScriptHandler_WebAuthnSignedPayload_Accepted(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("webauthn-cred-accept-001")
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
 		sigTestAuthorizedEntry(credID, pubKey),
@@ -894,7 +862,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_Accepted(t *testing.T) {
 func TestExecuteScriptHandler_WebAuthnSignedPayload_UnauthorizedCredential_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, _ := sigTestWebAuthnKeypair(t)
+	priv, _ := webauthntest.NewKey(t)
 	credID := []byte("webauthn-cred-unauthorized-001")
 	// Empty manifest: this credential ID is not among the authorized entries.
 	manifestJSON := sigTestSignManifest(t, signingCert, nil)
@@ -920,7 +888,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_UnauthorizedCredential_Rejec
 func TestExecuteScriptHandler_WebAuthnSignedPayload_TargetMismatch_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("webauthn-cred-mismatch-001")
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
 		sigTestAuthorizedEntry(credID, pubKey),
@@ -947,7 +915,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_TargetMismatch_Rejected(t *t
 func TestExecuteScriptHandler_WebAuthnSignedPayload_ExpiredEnvelope_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("webauthn-cred-expired-001")
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
 		sigTestAuthorizedEntry(credID, pubKey),
@@ -971,7 +939,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_ExpiredEnvelope_Rejected(t *
 func TestExecuteScriptHandler_WebAuthnSignedPayload_NonceReplay_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("webauthn-cred-replay-001")
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
 		sigTestAuthorizedEntry(credID, pubKey),
@@ -1023,7 +991,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_NonceReplay_Rejected(t *test
 func TestExecuteScriptHandler_WebAuthnSignedPayload_NoCARoots_Rejected(t *testing.T) {
 	ca, _ := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("webauthn-cred-no-ca-roots")
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
 		sigTestAuthorizedEntry(credID, pubKey),
@@ -1060,7 +1028,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_NoCARoots_Rejected(t *testin
 func TestExecuteScriptHandler_WebAuthnSignedPayload_ForeignTenantCredential_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("webauthn-cred-foreign-tenant")
 
 	entry := sigTestAuthorizedEntry(credID, pubKey)
@@ -1100,7 +1068,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_ForeignTenantCredential_Reje
 func TestExecuteScriptHandler_WebAuthnSignedPayload_UnauthorizedGrant_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("webauthn-cred-no-grant")
 
 	entry := sigTestAuthorizedEntry(credID, pubKey)
@@ -1137,7 +1105,7 @@ func TestExecuteScriptHandler_WebAuthnSignedPayload_UnauthorizedGrant_Rejected(t
 func TestExecuteScriptHandler_WebAuthnSignedPayload_StaleManifest_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("webauthn-cred-stale-manifest")
 
 	stale := time.Now().Add(-webauthnManifestMaxAge - time.Minute).UTC().Truncate(time.Second)

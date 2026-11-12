@@ -17,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
+	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
 // ---------------------------------------------------------------------------
@@ -204,7 +205,7 @@ func TestOpenTerminal_ValidEnvelope_DialerCalledOnce(t *testing.T) {
 func TestOpenTerminal_WebAuthnEnvelope_DialerCalled(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("webauthn-cred-terminal-001")
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{sigTestAuthorizedEntry(credID, pubKey)})
 	h := newHandlerWithSigning(t, nil, true, caPool)

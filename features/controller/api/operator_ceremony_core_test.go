@@ -6,9 +6,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -18,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
+	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
 func coreEnvelope(t *testing.T) operatorpayload.Envelope {
@@ -76,7 +74,7 @@ func TestVerifyAssertion_Refusals(t *testing.T) {
 		// UP only; re-signed so only the UV flag is wrong.
 		hash, err := operatorpayload.ChallengeHash(env)
 		require.NoError(t, err)
-		proof := signActionAssertionFlags(t, f, hash, 0x01)
+		proof := actionProof(t, f.priv, f.credID, hash, webauthntest.UserPresenceOnly())
 		_, err = f.server.VerifyAssertion(coreAccount(t, f), env, proof)
 		require.Error(t, err)
 	})
@@ -86,20 +84,6 @@ func TestVerifyAssertion_Refusals(t *testing.T) {
 		_, err := f.server.VerifyAssertion(nil, env, f.proofFor(t, env).WebAuthn)
 		require.Error(t, err)
 	})
-}
-
-// signActionAssertionFlags is signActionAssertion with a caller-chosen authenticator
-// flags byte.
-func signActionAssertionFlags(t *testing.T, f *webAuthnActionFixture, hash [sha256.Size]byte, flags byte) *OperatorWebAuthnProof {
-	t.Helper()
-	p := signActionAssertion(t, f.priv, f.credID, hash)
-	p.AuthenticatorData[32] = flags
-	cdHash := sha256.Sum256(p.ClientDataJSON)
-	digest := sha256.Sum256(append(append([]byte{}, p.AuthenticatorData...), cdHash[:]...))
-	sig, err := ecdsa.SignASN1(rand.Reader, f.priv, digest[:])
-	require.NoError(t, err)
-	p.Signature = sig
-	return p
 }
 
 func TestVerifyAssertion_StillVerifiesAfterCredentialSignsAgain(t *testing.T) {
@@ -116,7 +100,7 @@ func TestVerifyAssertion_StillVerifiesAfterCredentialSignsAgain(t *testing.T) {
 			Data OperatorPayloadSignBeginResponse `json:"data"`
 		}
 		require.NoError(t, json.Unmarshal(beginRec.Body.Bytes(), &begin))
-		body := buildSignAssertionBody(t, f.priv, f.credID, tvRPID, tvOrigin, begin.Data.Assertion.Response.Challenge.String(), count)
+		body := webauthntest.Assert(t, f.priv, f.credID, tvRPID, tvOrigin, begin.Data.Assertion.Response.Challenge.String(), webauthntest.WithSignCount(count)).Reader()
 		rec := doSignFinish(t, f.server, f.principal, sessID, body)
 		var finish struct {
 			Data OperatorPayloadSignFinishResponse `json:"data"`

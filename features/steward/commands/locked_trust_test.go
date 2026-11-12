@@ -26,6 +26,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
+	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
 const lockedStewardID = "steward-test"
@@ -374,7 +375,7 @@ func TestLocked_OperatorCertOrManifestFromAnotherRootRefused(t *testing.T) {
 	lh.requireRefused(t, fx.sign(t, lockedCmd("foreign-act", cpTypes.CommandStewardAction, ap)))
 
 	// A WebAuthn manifest signed under another root.
-	priv, pub := sigTestWebAuthnKeypair(t)
+	priv, pub := webauthntest.NewKey(t)
 	credID := []byte("cred-1")
 	manifest := sigTestSignManifest(t, other.signing, []authorizedWebAuthnCredential{{
 		Kind: authorizedWebAuthnCredentialKind, CredentialID: credID, PublicKey: pub, RootScope: true, Grants: []string{operatorPayloadSignGrant},
@@ -386,7 +387,7 @@ func TestLocked_OperatorCertOrManifestFromAnotherRootRefused(t *testing.T) {
 func TestLocked_WebAuthnManifestUnderBakedRootAccepted(t *testing.T) {
 	fx := newLockedFx(t, false)
 	lh := newLockedHarness(t, fx, harnessOpts{})
-	priv, pub := sigTestWebAuthnKeypair(t)
+	priv, pub := webauthntest.NewKey(t)
 	credID := []byte("cred-1")
 	manifest := sigTestSignManifest(t, fx.signing, []authorizedWebAuthnCredential{{
 		Kind: authorizedWebAuthnCredentialKind, CredentialID: credID, PublicKey: pub, RootScope: true, Grants: []string{operatorPayloadSignGrant},

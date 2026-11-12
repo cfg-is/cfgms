@@ -9,7 +9,6 @@ package commands
 
 import (
 	"crypto/ecdsa"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -22,17 +21,16 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
+	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
 const (
 	// sigTestRPID / sigTestAssertionOrigin are the relying-party binding the signed
 	// test manifests carry and the test assertions are produced under — the same pair
 	// a real controller's webauthn.Config holds.
-	sigTestRPID              = "controller.test"
-	sigTestAssertionOrigin   = "https://controller.test"
-	sigTestStewardTenant     = "client-1"
-	sigTestFlagsUserPresent  = 0x01
-	sigTestFlagsUserVerified = 0x04
+	sigTestRPID            = "controller.test"
+	sigTestAssertionOrigin = "https://controller.test"
+	sigTestStewardTenant   = "client-1"
 )
 
 // sigTestAuthorizedEntry builds a roster entry for a root-scope (platform
@@ -48,32 +46,13 @@ func sigTestAuthorizedEntry(credID, pubKey []byte) authorizedWebAuthnCredential 
 	}
 }
 
-// sigTestAssertionOpts parameterizes sigTestWebAuthnProofOpts so a negative test can
-// move exactly one property away from a valid assertion. The zero value produces the
-// valid assertion every positive test uses.
-type sigTestAssertionOpts struct {
-	flags             byte   // 0 → UP|UV set
-	rpID              string // "" → sigTestRPID
-	origin            string // "" → sigTestAssertionOrigin
-	ceremonyType      string // "" → "webauthn.get"
-	challengeOverride string // "" → the domain-separated envelope challenge
-}
-
-// sigTestWebAuthnProof builds a real ECDSA P-256 assertion over
-// authenticatorData||sha256(clientDataJSON) whose clientDataJSON.challenge equals
-// operatorpayload.ChallengeHash(envelope) — the same bytes and algorithm production
-// verification uses — and returns the envelope alongside the marshaled
-// webauthnAssertionProof JSON bytes. Shared by this file's unit tests and
+// sigTestWebAuthnProof builds a real ECDSA P-256 assertion, through pkg/testutil/webauthntest,
+// whose clientDataJSON.challenge equals operatorpayload.ChallengeHash(envelope) — the same
+// bytes and algorithm production verification uses — and returns the envelope alongside the
+// marshaled webauthnAssertionProof JSON bytes. opts move one property of the assertion away
+// from valid (flags, RP ID, origin, ceremony type). Shared by this file's unit tests and
 // execute_script_test.go's sigTestWebAuthnAssertionParams (dispatch-path tests).
-func sigTestWebAuthnProof(t *testing.T, priv *ecdsa.PrivateKey, credID, manifestJSON, content []byte, shell string, targets []string, nonce string, expiresAt time.Time) (operatorpayload.Envelope, []byte) {
-	t.Helper()
-	return sigTestWebAuthnProofOpts(t, priv, credID, manifestJSON, content, shell, targets, nonce, expiresAt,
-		sigTestAssertionOpts{})
-}
-
-// sigTestWebAuthnProofOpts is sigTestWebAuthnProof with one or more assertion
-// properties overridden (flags, RP ID, origin, ceremony type, challenge).
-func sigTestWebAuthnProofOpts(t *testing.T, priv *ecdsa.PrivateKey, credID, manifestJSON, content []byte, shell string, targets []string, nonce string, expiresAt time.Time, opts sigTestAssertionOpts) (operatorpayload.Envelope, []byte) {
+func sigTestWebAuthnProof(t *testing.T, priv *ecdsa.PrivateKey, credID, manifestJSON, content []byte, shell string, targets []string, nonce string, expiresAt time.Time, opts ...webauthntest.Option) (operatorpayload.Envelope, []byte) {
 	t.Helper()
 	env := operatorpayload.Envelope{
 		Content:   content,
@@ -84,57 +63,24 @@ func sigTestWebAuthnProofOpts(t *testing.T, priv *ecdsa.PrivateKey, credID, mani
 	}
 	challengeHash, err := operatorpayload.ChallengeHash(env)
 	require.NoError(t, err)
-	challengeB64 := base64.RawURLEncoding.EncodeToString(challengeHash[:])
-	if opts.challengeOverride != "" {
-		challengeB64 = opts.challengeOverride
-	}
+	return env, sigTestProofOverChallenge(t, priv, credID, manifestJSON, base64.RawURLEncoding.EncodeToString(challengeHash[:]), opts...)
+}
 
-	flags := opts.flags
-	if flags == 0 {
-		flags = sigTestFlagsUserPresent | sigTestFlagsUserVerified
-	}
-	rpID := opts.rpID
-	if rpID == "" {
-		rpID = sigTestRPID
-	}
-	origin := opts.origin
-	if origin == "" {
-		origin = sigTestAssertionOrigin
-	}
-	ceremonyType := opts.ceremonyType
-	if ceremonyType == "" {
-		ceremonyType = "webauthn.get"
-	}
-
-	// authenticatorData: 32-byte rpIDHash + 1 flags byte + 4-byte sign count.
-	authData := make([]byte, 37)
-	rpIDHash := sha256.Sum256([]byte(rpID))
-	copy(authData[:32], rpIDHash[:])
-	authData[32] = flags
-
-	clientData := struct {
-		Type      string `json:"type"`
-		Challenge string `json:"challenge"`
-		Origin    string `json:"origin"`
-	}{Type: ceremonyType, Challenge: challengeB64, Origin: origin}
-	clientDataJSON, err := json.Marshal(clientData)
-	require.NoError(t, err)
-
-	clientDataHash := sha256.Sum256(clientDataJSON)
-	sigData := append(append([]byte{}, authData...), clientDataHash[:]...)
-	digest := sha256.Sum256(sigData)
-	sigBytes, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
-	require.NoError(t, err)
-
+// sigTestProofOverChallenge is the proof half of sigTestWebAuthnProof with the
+// clientDataJSON challenge chosen by the caller, for tests of a challenge that is not the
+// envelope's domain-separated hash.
+func sigTestProofOverChallenge(t *testing.T, priv *ecdsa.PrivateKey, credID, manifestJSON []byte, challenge string, opts ...webauthntest.Option) []byte {
+	t.Helper()
+	a := webauthntest.Assert(t, priv, credID, sigTestRPID, sigTestAssertionOrigin, challenge, opts...)
 	proof, err := json.Marshal(webauthnAssertionProof{
-		AuthenticatorData:  authData,
-		ClientDataJSON:     clientDataJSON,
-		Signature:          sigBytes,
+		AuthenticatorData:  a.AuthenticatorData,
+		ClientDataJSON:     a.ClientDataJSON,
+		Signature:          a.Signature,
 		CredentialID:       credID,
 		SignedManifestJSON: string(manifestJSON),
 	})
 	require.NoError(t, err)
-	return env, proof
+	return proof
 }
 
 // newSigTestWebAuthnVerifier builds the verifier under test with a fresh (per-test)
@@ -153,7 +99,7 @@ func newSigTestWebAuthnVerifier(caPool *x509.CertPool) *webauthnOperatorCredenti
 func TestWebAuthnOperatorCredentialVerifier_Verify_Success(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-success")
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
 		sigTestAuthorizedEntry(credID, pubKey),
@@ -172,7 +118,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_Success(t *testing.T) {
 func TestWebAuthnOperatorCredentialVerifier_Verify_ChallengeMismatch_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-challenge-mismatch")
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
 		sigTestAuthorizedEntry(credID, pubKey),
@@ -197,7 +143,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_ChallengeMismatch_Rejected(t 
 func TestWebAuthnOperatorCredentialVerifier_Verify_TamperedSignature_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-tampered-sig")
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
 		sigTestAuthorizedEntry(credID, pubKey),
@@ -224,7 +170,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_TamperedSignature_Rejected(t 
 func TestWebAuthnOperatorCredentialVerifier_Verify_UnregisteredCredential_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, _ := sigTestWebAuthnKeypair(t)
+	priv, _ := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-unregistered")
 	manifestJSON := sigTestSignManifest(t, signingCert, nil) // empty roster
 
@@ -243,7 +189,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_UnregisteredCredential_Reject
 func TestWebAuthnOperatorCredentialVerifier_Verify_ManifestSignatureInvalid_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-manifest-tamper")
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
 		sigTestAuthorizedEntry(credID, pubKey),
@@ -273,7 +219,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_ManifestSignatureInvalid_Reje
 func TestWebAuthnOperatorCredentialVerifier_Verify_ManifestWrongKind_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-wrong-kind")
 
 	manifest := revocationManifestPayload{
@@ -313,7 +259,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_SignerNotChainedToCA_Rejected
 	otherCA, _ := sigTestCA(t)
 	untrustedSigningCert := sigTestSigningCert(t, otherCA)
 
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-untrusted-signer")
 	manifestJSON := sigTestSignManifest(t, untrustedSigningCert, []authorizedWebAuthnCredential{
 		sigTestAuthorizedEntry(credID, pubKey),
@@ -337,7 +283,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_SignerWrongEKU_Rejected(t *te
 	// A client-auth cert (sigTestOperatorCert), not a CodeSigning signing cert.
 	clientCert := sigTestOperatorCert(t, ca, nil)
 
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-wrong-eku")
 	manifest := revocationManifestPayload{
 		Kind:                          revocationManifestKind,
@@ -430,18 +376,21 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_OversizedField_Rejected(t *te
 
 // sigTestVerifyWithAssertionOpts is the shared body of the §7.2 negative tests: a valid
 // manifest and credential, with exactly one assertion property moved away from valid.
-func sigTestVerifyWithAssertionOpts(t *testing.T, credIDText string, opts sigTestAssertionOpts) error {
+func sigTestVerifyWithAssertionOpts(t *testing.T, credIDText, challengeOverride string, opts ...webauthntest.Option) error {
 	t.Helper()
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte(credIDText)
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
 		sigTestAuthorizedEntry(credID, pubKey),
 	})
 
-	env, proof := sigTestWebAuthnProofOpts(t, priv, credID, manifestJSON, []byte("echo hi"), "bash",
-		[]string{"steward-test"}, "nonce-1", time.Now().Add(5*time.Minute), opts)
+	env, proof := sigTestWebAuthnProof(t, priv, credID, manifestJSON, []byte("echo hi"), "bash",
+		[]string{"steward-test"}, "nonce-1", time.Now().Add(5*time.Minute), opts...)
+	if challengeOverride != "" {
+		proof = sigTestProofOverChallenge(t, priv, credID, manifestJSON, challengeOverride, opts...)
+	}
 
 	return newSigTestWebAuthnVerifier(caPool).Verify(env, proof)
 }
@@ -450,8 +399,8 @@ func sigTestVerifyWithAssertionOpts(t *testing.T, credIDText string, opts sigTes
 // an assertion produced without user interaction (UP clear) is rejected — the
 // hardware-presence property this path exists to establish.
 func TestWebAuthnOperatorCredentialVerifier_Verify_UserPresentFlagMissing_Rejected(t *testing.T) {
-	err := sigTestVerifyWithAssertionOpts(t, "unit-cred-no-up",
-		sigTestAssertionOpts{flags: sigTestFlagsUserVerified}) // UV only, UP clear
+	err := sigTestVerifyWithAssertionOpts(t, "unit-cred-no-up", "",
+		webauthntest.WithFlags(webauthntest.FlagUV)) // UV only, UP clear
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "authenticatorData verification failed")
 }
@@ -461,8 +410,8 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_UserPresentFlagMissing_Reject
 // controller's own ceremony demands protocol.VerificationRequired, so the steward that
 // exists to check it independently must not accept less.
 func TestWebAuthnOperatorCredentialVerifier_Verify_UserVerifiedFlagMissing_Rejected(t *testing.T) {
-	err := sigTestVerifyWithAssertionOpts(t, "unit-cred-no-uv",
-		sigTestAssertionOpts{flags: sigTestFlagsUserPresent}) // UP only, UV clear
+	err := sigTestVerifyWithAssertionOpts(t, "unit-cred-no-uv", "",
+		webauthntest.UserPresenceOnly()) // UP only, UV clear
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "authenticatorData verification failed")
 }
@@ -471,8 +420,8 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_UserVerifiedFlagMissing_Rejec
 // assertion produced for a different relying party is rejected, even though it is
 // otherwise a well-formed assertion by an authorized credential.
 func TestWebAuthnOperatorCredentialVerifier_Verify_RPIDHashMismatch_Rejected(t *testing.T) {
-	err := sigTestVerifyWithAssertionOpts(t, "unit-cred-wrong-rp",
-		sigTestAssertionOpts{rpID: "attacker.example"})
+	err := sigTestVerifyWithAssertionOpts(t, "unit-cred-wrong-rp", "",
+		webauthntest.WithRPID("attacker.example"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "authenticatorData verification failed")
 }
@@ -481,8 +430,8 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_RPIDHashMismatch_Rejected(t *
 // assertion collected at an origin the manifest's relying-party binding does not name is
 // rejected.
 func TestWebAuthnOperatorCredentialVerifier_Verify_OriginMismatch_Rejected(t *testing.T) {
-	err := sigTestVerifyWithAssertionOpts(t, "unit-cred-wrong-origin",
-		sigTestAssertionOpts{origin: "https://phish.example"})
+	err := sigTestVerifyWithAssertionOpts(t, "unit-cred-wrong-origin", "",
+		webauthntest.WithOrigin("https://phish.example"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "clientDataJSON verification failed")
 }
@@ -491,8 +440,8 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_OriginMismatch_Rejected(t *te
 // assertion whose clientDataJSON type is not "webauthn.get" is rejected — signature
 // confusion between the registration and assertion ceremonies.
 func TestWebAuthnOperatorCredentialVerifier_Verify_WrongCeremonyType_Rejected(t *testing.T) {
-	err := sigTestVerifyWithAssertionOpts(t, "unit-cred-wrong-ceremony",
-		sigTestAssertionOpts{ceremonyType: "webauthn.create"})
+	err := sigTestVerifyWithAssertionOpts(t, "unit-cred-wrong-ceremony", "",
+		webauthntest.WithCeremonyType(webauthntest.CeremonyCreate))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "clientDataJSON verification failed")
 }
@@ -511,9 +460,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_UndomainSeparatedChallenge_Re
 	require.NoError(t, err)
 	bare := sha256.Sum256(canonical)
 
-	err = sigTestVerifyWithAssertionOpts(t, "unit-cred-bare-challenge", sigTestAssertionOpts{
-		challengeOverride: base64.RawURLEncoding.EncodeToString(bare[:]),
-	})
+	err = sigTestVerifyWithAssertionOpts(t, "unit-cred-bare-challenge", base64.RawURLEncoding.EncodeToString(bare[:]))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "challenge")
 }
@@ -529,7 +476,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_UndomainSeparatedChallenge_Re
 func TestWebAuthnOperatorCredentialVerifier_Verify_CredentialWithoutGrant_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-no-grant")
 
 	entry := sigTestAuthorizedEntry(credID, pubKey)
@@ -550,7 +497,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_CredentialWithoutGrant_Reject
 func TestWebAuthnOperatorCredentialVerifier_Verify_ForeignTenantCredential_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-foreign-tenant")
 
 	entry := sigTestAuthorizedEntry(credID, pubKey)
@@ -573,7 +520,7 @@ func verifyTenantScopedEntry(t *testing.T, entryTenant string, covered []string,
 	t.Helper()
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-tenant-scope")
 
 	entry := sigTestAuthorizedEntry(credID, pubKey)
@@ -627,7 +574,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_AncestorEntryWithoutCoveredID
 func TestWebAuthnOperatorCredentialVerifier_Verify_TenantScopedCredential_UnknownStewardTenant_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-unknown-steward-tenant")
 
 	entry := sigTestAuthorizedEntry(credID, pubKey)
@@ -650,7 +597,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_TenantScopedCredential_Unknow
 func TestWebAuthnOperatorCredentialVerifier_Verify_RootScopeEntryWithTenant_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-contradictory-scope")
 
 	entry := sigTestAuthorizedEntry(credID, pubKey)
@@ -676,7 +623,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_RootScopeEntryWithTenant_Reje
 func TestWebAuthnOperatorCredentialVerifier_Verify_StaleManifest_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-stale-manifest")
 
 	stale := time.Now().Add(-webauthnManifestMaxAge - time.Minute).UTC().Truncate(time.Second)
@@ -699,7 +646,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_StaleManifest_Rejected(t *tes
 func TestWebAuthnOperatorCredentialVerifier_Verify_FutureDatedManifest_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-future-manifest")
 
 	future := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
@@ -722,9 +669,9 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_FutureDatedManifest_Rejected(
 func TestWebAuthnOperatorCredentialVerifier_Verify_ManifestRollback_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	revokedCredID := []byte("unit-cred-rollback-removed")
-	keptPriv, keptPubKey := sigTestWebAuthnKeypair(t)
+	keptPriv, keptPubKey := webauthntest.NewKey(t)
 	keptCredID := []byte("unit-cred-rollback-kept")
 
 	rp := &webauthnRelyingParty{ID: sigTestRPID, Origins: []string{sigTestAssertionOrigin}}
@@ -761,7 +708,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_ManifestRollback_Rejected(t *
 func TestWebAuthnOperatorCredentialVerifier_Verify_ManifestWithoutIssuedAt_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-no-issued-at")
 
 	manifestJSON := sigTestSignManifestAt(t, signingCert,
@@ -783,7 +730,7 @@ func TestWebAuthnOperatorCredentialVerifier_Verify_ManifestWithoutIssuedAt_Rejec
 func TestWebAuthnOperatorCredentialVerifier_Verify_ManifestWithoutRelyingParty_Rejected(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("unit-cred-no-rp")
 
 	manifestJSON := sigTestSignManifestAt(t, signingCert,

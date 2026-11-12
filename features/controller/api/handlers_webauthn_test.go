@@ -43,6 +43,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/session"
 	"github.com/cfgis/cfgms/pkg/softauthn"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
 // Test vectors from github.com/go-webauthn/webauthn@v0.17.0/protocol/credential_test.go.
@@ -1119,7 +1120,7 @@ func TestWebAuthnPresenceFinish_CliRelay_Success(t *testing.T) {
 	challengeB64, _ := pk["challenge"].(string)
 	require.NotEmpty(t, challengeB64)
 
-	assertionBody := buildSignAssertionBody(t, priv, credID, tvRPID, tvOrigin, challengeB64, 1)
+	assertionBody := webauthntest.Assert(t, priv, credID, tvRPID, tvOrigin, challengeB64, webauthntest.WithSignCount(1)).Reader()
 
 	rec := doPresenceFinishWithCliRequest(t, server, principal, lodged.RequestID, assertionBody)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
@@ -1180,7 +1181,7 @@ func runBrowserPresenceCeremony(t *testing.T, server *Server, username string, a
 	challengeB64, _ := pk["challenge"].(string)
 	require.NotEmpty(t, challengeB64)
 
-	assertionBody := buildSignAssertionBody(t, priv, credID, tvRPID, tvOrigin, challengeB64, 1)
+	assertionBody := webauthntest.Assert(t, priv, credID, tvRPID, tvOrigin, challengeB64, webauthntest.WithSignCount(1)).Reader()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webauthn/presence/finish", assertionBody)
 	req = withPrincipal(req, principal)
 	rec := httptest.NewRecorder()

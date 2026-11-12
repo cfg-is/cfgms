@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -23,6 +22,7 @@ import (
 	configsignature "github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
+	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
 const actionTestSteward = "steward-1"
@@ -180,24 +180,12 @@ func TestVerifyOperatorActionEnvelope_ProofMustCarryExactlyOneCredential(t *test
 
 // --- WebAuthn ---
 
-// signActionAssertion produces a real ES256 assertion over challengeHash with priv.
-func signActionAssertion(t *testing.T, priv *ecdsa.PrivateKey, credID []byte, challengeHash [sha256.Size]byte) *OperatorWebAuthnProof {
+// actionProof builds an operator WebAuthn proof for the fixture's credential: a real ES256
+// assertion whose challenge is challengeHash, moved off the valid default by opts.
+func actionProof(t *testing.T, priv *ecdsa.PrivateKey, credID []byte, challengeHash [sha256.Size]byte, opts ...webauthntest.Option) *OperatorWebAuthnProof {
 	t.Helper()
-	rpIDHash := sha256.Sum256([]byte(tvRPID))
-	authData := make([]byte, 37)
-	copy(authData, rpIDHash[:])
-	authData[32] = 0x05 // UP | UV
-	clientDataJSON, err := json.Marshal(map[string]string{
-		"type":      "webauthn.get",
-		"challenge": base64.RawURLEncoding.EncodeToString(challengeHash[:]),
-		"origin":    tvOrigin,
-	})
-	require.NoError(t, err)
-	cdHash := sha256.Sum256(clientDataJSON)
-	digest := sha256.Sum256(append(append([]byte{}, authData...), cdHash[:]...))
-	sig, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
-	require.NoError(t, err)
-	return &OperatorWebAuthnProof{AuthenticatorData: authData, ClientDataJSON: clientDataJSON, Signature: sig, CredentialID: credID}
+	a := webauthntest.Assert(t, priv, credID, tvRPID, tvOrigin, base64.RawURLEncoding.EncodeToString(challengeHash[:]), opts...)
+	return &OperatorWebAuthnProof{AuthenticatorData: a.AuthenticatorData, ClientDataJSON: a.ClientDataJSON, Signature: a.Signature, CredentialID: credID}
 }
 
 // webAuthnActionFixture is a WebAuthn-configured server with one account holding one
@@ -236,11 +224,11 @@ func (f *webAuthnActionFixture) ctx() context.Context {
 	return context.WithValue(context.Background(), principalContextKey, f.principal)
 }
 
-func (f *webAuthnActionFixture) proofFor(t *testing.T, env operatorpayload.Envelope) OperatorProof {
+func (f *webAuthnActionFixture) proofFor(t *testing.T, env operatorpayload.Envelope, opts ...webauthntest.Option) OperatorProof {
 	t.Helper()
 	hash, err := operatorpayload.ChallengeHash(env)
 	require.NoError(t, err)
-	return OperatorProof{WebAuthn: signActionAssertion(t, f.priv, f.credID, hash)}
+	return OperatorProof{WebAuthn: actionProof(t, f.priv, f.credID, hash, opts...)}
 }
 
 func TestVerifyOperatorActionEnvelope_WebAuthn_ValidAssertion(t *testing.T) {
@@ -299,8 +287,8 @@ func TestVerifyOperatorActionEnvelope_WebAuthn_RefusalCases(t *testing.T) {
 	t.Run("unexpected origin", func(t *testing.T) {
 		f := newWebAuthnActionFixture(t)
 		env := actionEnvelope(t, testAction(), targets, "nonce-1", exp)
-		proof := f.proofFor(t, env)
-		proof.WebAuthn.ClientDataJSON = bytes.ReplaceAll(proof.WebAuthn.ClientDataJSON, []byte(tvOrigin), []byte("https://evil.example"))
+		// Re-signed over the other origin, so the origin is the only thing wrong.
+		proof := f.proofFor(t, env, webauthntest.WithOrigin("https://evil.example"))
 		_, err := f.server.verifyOperatorActionEnvelope(f.ctx(), actionTestSteward, testAction(), targets, "nonce-1", exp, proof)
 		require.Error(t, err)
 	})
@@ -324,7 +312,7 @@ func TestVerifyOperatorActionEnvelope_WebAuthn_AfterSignCeremony(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(beginRec.Body.Bytes(), &begin))
 
-	finishBody := buildSignAssertionBody(t, f.priv, f.credID, tvRPID, tvOrigin, begin.Data.Assertion.Response.Challenge.String(), 1)
+	finishBody := webauthntest.Assert(t, f.priv, f.credID, tvRPID, tvOrigin, begin.Data.Assertion.Response.Challenge.String(), webauthntest.WithSignCount(1)).Reader()
 	finishRec := doSignFinish(t, f.server, f.principal, sessID, finishBody)
 	require.Equal(t, http.StatusOK, finishRec.Code, "body: %s", finishRec.Body.String())
 	var finish struct {
