@@ -1290,3 +1290,291 @@ func TestTestAutoApproveRecordsApproval(t *testing.T) {
 	f.srv.handlePublishStewardBinary(w, req)
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
+
+// ---- Auto-approval of binaries published by the rollout credential (Issue #6069) ----
+
+const (
+	autoApproveVersion  = "v2.0.0"
+	autoApprovePlatform = "linux"
+	autoApproveArch     = "amd64"
+)
+
+// autoApproveFixture is the real gate fixture (real router and authentication, real
+// blob store, config store and audit manager) with the approval store wired, the
+// unattended-rollouts setting on and the test auto-approve flag off.
+type autoApproveFixture struct {
+	*gateFixture
+}
+
+func newAutoApproveFixture(t *testing.T) *autoApproveFixture {
+	t.Helper()
+	f := &autoApproveFixture{gateFixture: newGateFixture(t)}
+	wireTestStewardBinaryApprovalStore(t, f.srv)
+	require.False(t, f.srv.testAutoApproveStewardBinaries, "the test auto-approve flag stays off")
+	f.setEnabled(t, true)
+	return f
+}
+
+// publishBytes publishes content for a version through the real route as the holder of key.
+func (f *autoApproveFixture) publishBytes(key, version string, content []byte, force bool) *httptest.ResponseRecorder {
+	return f.publishSigned(key, version, content, f.trust.signContent(content, version, autoApprovePlatform, autoApproveArch), force)
+}
+
+func (f *autoApproveFixture) publishSigned(key, version string, content []byte, sig string, force bool) *httptest.ResponseRecorder {
+	q := url.Values{}
+	q.Set("signature", sig)
+	if force {
+		q.Set("force", "true")
+	}
+	path := "/api/v1/installer/steward-binaries/" + version + "/" + autoApprovePlatform + "/" + autoApproveArch + "?" + q.Encode()
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(content))
+	req.Header.Set("X-API-Key", key)
+	rec := httptest.NewRecorder()
+	f.srv.router.ServeHTTP(rec, req)
+	return rec
+}
+
+func (f *autoApproveFixture) approval(t *testing.T, version string, content []byte) *StewardBinaryApproval {
+	t.Helper()
+	rec, err := f.srv.stewardBinaryApproval(t.Context(), rolloutCredTestTenant, version, autoApprovePlatform, autoApproveArch, hexSHA256(content))
+	require.NoError(t, err)
+	return rec
+}
+
+func (f *autoApproveFixture) selfFetch(version string) *httptest.ResponseRecorder {
+	return doGetStewardBinaryPublic(f.srv, version, autoApprovePlatform, autoApproveArch, rolloutCredTestTenant)
+}
+
+func TestPublishAutoApprovesForRolloutCredential(t *testing.T) {
+	f := newAutoApproveFixture(t)
+	key := f.rolloutKey()
+	content := []byte("rollout credential binary")
+
+	rec := f.publishBytes(key, autoApproveVersion, content, false)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	approval := f.approval(t, autoApproveVersion, content)
+	require.NotNil(t, approval, "the bytes just published are approved")
+	assert.Equal(t, hexSHA256(content), approval.SHA256)
+	assert.Equal(t, rolloutCredTestTenant, approval.TenantID)
+	assert.False(t, approval.ApprovedAt.IsZero())
+
+	rc, meta, err := f.srv.blobStore.GetBlob(t.Context(), stewardBinaryBlobKey(rolloutCredTestTenant, autoApproveVersion, autoApprovePlatform, autoApproveArch))
+	require.NoError(t, err)
+	_ = rc.Close()
+	assert.NotContains(t, meta.Labels, "approved_by", "the approval is a record, not a blob label")
+	assert.NotContains(t, meta.Labels, "approved_at")
+}
+
+func TestOrdinaryKeyPublishNotApprovedWhenSettingOn(t *testing.T) {
+	f := newAutoApproveFixture(t)
+	key := f.genericKey([]string{"installer:publish:steward", "installer:read"})
+	content := []byte("ordinary key binary")
+
+	rec := f.publishBytes(key, autoApproveVersion, content, false)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	assert.Nil(t, f.approval(t, autoApproveVersion, content))
+	assert.Equal(t, http.StatusNotFound, f.selfFetch(autoApproveVersion).Code)
+	assert.Empty(t, auditEntriesByAction(t, f.srv, auditActionStewardBinaryAutoApproved))
+}
+
+// TestSupersetKeyPublishNotApproved: the kind is explicit. A key minted through the
+// generic route with exactly the four credential permissions, and one with more, are
+// not rollout credentials, so nothing they publish is approved.
+func TestSupersetKeyPublishNotApproved(t *testing.T) {
+	f := newAutoApproveFixture(t)
+	same := f.genericKey(rolloutCredentialPermissions)
+	superset := f.genericKey(append([]string{"steward:read"}, rolloutCredentialPermissions...))
+
+	for i, key := range []string{same, superset} {
+		version := fmt.Sprintf("v2.1.%d", i)
+		content := []byte("generic binary " + version)
+		rec := f.publishBytes(key, version, content, false)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Nil(t, f.approval(t, version, content), "key %d is not approved", i)
+	}
+	assert.Empty(t, auditEntriesByAction(t, f.srv, auditActionStewardBinaryAutoApproved))
+}
+
+func TestBadSignatureStillRefused(t *testing.T) {
+	f := newAutoApproveFixture(t)
+	key := f.rolloutKey()
+	content := []byte("signed for something else")
+
+	// A signature over other bytes does not verify; nothing is stored or approved.
+	badSig := f.trust.signContent([]byte("other bytes"), autoApproveVersion, autoApprovePlatform, autoApproveArch)
+	rec := f.publishSigned(key, autoApproveVersion, content, badSig, false)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "SIGNATURE_VERIFICATION_FAILED")
+	assert.False(t, f.binaryExists(t, autoApproveVersion))
+	assert.Nil(t, f.approval(t, autoApproveVersion, content))
+
+	// A signature bound to another version does not verify either.
+	wrongVersion := f.trust.signContent(content, "v9.9.9", autoApprovePlatform, autoApproveArch)
+	rec = f.publishSigned(key, autoApproveVersion, content, wrongVersion, false)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Nil(t, f.approval(t, autoApproveVersion, content))
+	assert.Empty(t, auditEntriesByAction(t, f.srv, auditActionStewardBinaryAutoApproved))
+}
+
+func TestAutoApprovedByIsDistinguishable(t *testing.T) {
+	f := newAutoApproveFixture(t)
+	key := f.rolloutKey()
+	credentialID := f.principalFor(key).ID
+	require.NotEmpty(t, credentialID)
+	content := []byte("distinguishable binary")
+	require.Equal(t, http.StatusOK, f.publishBytes(key, autoApproveVersion, content, false).Code)
+
+	approval := f.approval(t, autoApproveVersion, content)
+	require.NotNil(t, approval)
+	assert.Equal(t, "unattended:"+credentialID, approval.ApprovedBy)
+	assert.True(t, strings.HasPrefix(approval.ApprovedBy, "unattended:"))
+
+	// A human approval of other bytes is not mistakable for it.
+	sha := hexSHA256([]byte("human approved"))
+	_, err := f.srv.approveStewardBinary(t.Context(), approveTestTenant, "v2.2.0", "linux", "amd64", sha, "alice")
+	require.NoError(t, err)
+	humanApproval, err := f.srv.stewardBinaryApproval(t.Context(), approveTestTenant, "v2.2.0", "linux", "amd64", sha)
+	require.NoError(t, err)
+	require.NotNil(t, humanApproval)
+	assert.False(t, strings.HasPrefix(humanApproval.ApprovedBy, "unattended:"))
+}
+
+func TestAutoApprovalSurvivesSettingTurnedOff(t *testing.T) {
+	f := newAutoApproveFixture(t)
+	key := f.rolloutKey()
+	content := []byte("approved while on")
+	require.Equal(t, http.StatusOK, f.publishBytes(key, autoApproveVersion, content, false).Code)
+
+	f.setEnabled(t, false)
+
+	assert.NotNil(t, f.approval(t, autoApproveVersion, content), "the record is untouched")
+	assert.Equal(t, http.StatusOK, f.selfFetch(autoApproveVersion).Code, "the binary is still handed out")
+
+	// The credential itself is refused a publish while the setting is off, and that
+	// publish approves nothing.
+	other := []byte("published while off")
+	rec := f.publishBytes(key, "v2.3.0", other, false)
+	assertGateRefusal(t, rec, http.StatusForbidden, "UNATTENDED_ROLLOUTS_DISABLED")
+	assert.Nil(t, f.approval(t, "v2.3.0", other))
+}
+
+func TestForceRepublishOfDifferentBytesNotApprovedByEarlierRecord(t *testing.T) {
+	f := newAutoApproveFixture(t)
+	rolloutKey := f.rolloutKey()
+	ordinaryKey := f.genericKey([]string{"installer:publish:steward", "installer:read"})
+	first := []byte("first bytes")
+	second := []byte("second bytes")
+	third := []byte("third bytes")
+
+	require.Equal(t, http.StatusOK, f.publishBytes(rolloutKey, autoApproveVersion, first, false).Code)
+	require.NotNil(t, f.approval(t, autoApproveVersion, first))
+
+	// Without force the duplicate is refused, as before.
+	rec := f.publishBytes(rolloutKey, autoApproveVersion, second, false)
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "DUPLICATE_BINARY")
+	assert.Nil(t, f.approval(t, autoApproveVersion, second))
+
+	// An ordinary key replaces the bytes: the earlier record does not cover them.
+	require.Equal(t, http.StatusOK, f.publishBytes(ordinaryKey, autoApproveVersion, second, true).Code)
+	assert.Nil(t, f.approval(t, autoApproveVersion, second))
+	assert.Equal(t, http.StatusNotFound, f.selfFetch(autoApproveVersion).Code, "the replaced bytes are not handed out")
+	assert.NotNil(t, f.approval(t, autoApproveVersion, first), "the earlier record still exists")
+
+	// The rollout credential replaces them again and is approved for its own bytes.
+	require.Equal(t, http.StatusOK, f.publishBytes(rolloutKey, autoApproveVersion, third, true).Code)
+	assert.NotNil(t, f.approval(t, autoApproveVersion, third))
+	assert.Nil(t, f.approval(t, autoApproveVersion, second))
+	rec = f.selfFetch(autoApproveVersion)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, third, rec.Body.Bytes())
+}
+
+func TestAutoApprovedBinaryPassesRolloutDispatchAndSelfFetch(t *testing.T) {
+	f := newAutoApproveFixture(t)
+	f.srv.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: []fleet.StewardData{{
+		ID: gateTestSteward, TenantID: rolloutCredTestTenant, Status: "online",
+		DNAAttributes: map[string]string{"runtime_os": "linux", "runtime_arch": "amd64", "deployment_ring": "pre-release"},
+	}}})
+	key := f.rolloutKey()
+	content := []byte("rolls out unattended")
+
+	// Not yet published: the credential cannot start or dispatch it.
+	assert.Equal(t, http.StatusForbidden, f.startRollout(key).Code)
+
+	require.Equal(t, http.StatusOK, f.publishBytes(key, gateTestVersion, content, false).Code)
+
+	rec := f.startRollout(key)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	f.stopRollout(t, gateResponseData(t, rec)["rollout_id"].(string))
+
+	rec = f.dispatch(key, gateTestVersion)
+	assert.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	rec = f.selfFetch(gateTestVersion)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, content, rec.Body.Bytes())
+}
+
+// TestRollbackFindsPriorApprovedBinary publishes two versions through the credential,
+// dispatches the second and rolls back from it to the first.
+func TestRollbackFindsPriorApprovedBinary(t *testing.T) {
+	f := newAutoApproveFixture(t)
+	key := f.rolloutKey()
+	require.Equal(t, http.StatusOK, f.publishBytes(key, gateRollbackVer, []byte("previous"), false).Code)
+	require.Equal(t, http.StatusOK, f.publishBytes(key, gateTestVersion, []byte("current"), false).Code)
+
+	rec := f.dispatch(key, gateTestVersion)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	upgradeID := gateResponseData(t, rec)["upgrade_id"].(string)
+	require.NoError(t, f.upgradeStore.UpdateUpgradeStatus(t.Context(), upgradeID, business.UpgradeStatusCommitted, ""))
+
+	rec = f.rollback(key, upgradeID, gateRollbackVer)
+	assert.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "NOT_APPROVED")
+}
+
+func TestAutoApprovalAudited(t *testing.T) {
+	f := newAutoApproveFixture(t)
+	key := f.rolloutKey()
+	credentialID := f.principalFor(key).ID
+	content := []byte("audited auto approval")
+	require.Equal(t, http.StatusOK, f.publishBytes(key, autoApproveVersion, content, false).Code)
+
+	entries := auditEntriesByAction(t, f.srv, auditActionStewardBinaryAutoApproved)
+	require.Len(t, entries, 1)
+	e := entries[0]
+	assert.Equal(t, credentialID, e.UserID)
+	assert.Equal(t, business.AuditResultSuccess, e.Result)
+	assert.Equal(t, rolloutCredTestTenant, e.TenantID)
+	assert.Equal(t, credentialID, e.Details["principal"])
+	assert.Equal(t, autoApproveVersion, e.Details["version"])
+	assert.Equal(t, autoApprovePlatform, e.Details["platform"])
+	assert.Equal(t, autoApproveArch, e.Details["arch"])
+	assert.Equal(t, hexSHA256(content), e.Details["sha256"])
+	assert.Empty(t, auditEntriesByAction(t, f.srv, auditActionStewardBinaryApprove), "it is its own action, not a human approval")
+
+	// With no audit trail the approval is not recorded and the publish reports it.
+	f.srv.auditManager = nil
+	other := []byte("no audit trail")
+	rec := f.publishBytes(key, "v2.4.0", other, false)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "APPROVAL_ERROR")
+	assert.Nil(t, f.approval(t, "v2.4.0", other), "no event, no approval")
+}
+
+// TestAutoApprovalWithoutApprovalStoreLeavesBinaryUnapproved: with no approval store
+// the publish still succeeds, nothing is approved or audited, and no path hands it out.
+func TestAutoApprovalWithoutApprovalStoreLeavesBinaryUnapproved(t *testing.T) {
+	f := newAutoApproveFixture(t)
+	f.srv.SetStewardBinaryApprovalStore(nil)
+	key := f.rolloutKey()
+
+	rec := f.publishBytes(key, autoApproveVersion, []byte("no store"), false)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.True(t, f.binaryExists(t, autoApproveVersion))
+	assert.Empty(t, auditEntriesByAction(t, f.srv, auditActionStewardBinaryAutoApproved))
+	assert.Equal(t, http.StatusServiceUnavailable, f.selfFetch(autoApproveVersion).Code)
+}
