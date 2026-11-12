@@ -8,6 +8,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
 // handlerspasskeyloginCharStoreCeremony stores a discoverable pending login session under
@@ -342,7 +344,7 @@ func TestHandlerspasskeyloginChar_UnresolvableUserHandleFailsVerification(t *tes
 			id := handlerspasskeyloginCharStoreCeremony(t, srv, username, "", time.Now().Add(time.Minute))
 
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/login/finish",
-				buildAssertionBodyWithUserHandle(t, credID, authData, cdj, sig, handle))
+				bytes.NewReader(webauthntest.RawAssertionBody(credID, authData, cdj, sig, handle)))
 			req.AddCookie(handlerspasskeyloginCharCeremonyCookie(id))
 			rec := httptest.NewRecorder()
 			srv.handlePasskeyLoginFinish(rec, req)

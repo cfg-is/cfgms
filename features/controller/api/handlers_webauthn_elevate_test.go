@@ -35,6 +35,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/session"
+	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
 // W3C Level 3 NoneES256 authentication spec vector.
@@ -118,36 +119,6 @@ func injectCredentialWithPublicKey(t *testing.T, server *Server, username string
 	})
 	require.NoError(t, server.persistAccount(context.Background(), acct, "test-injector"))
 	server.cacheAccount(acct)
-}
-
-// buildAssertionBody constructs a JSON PublicKeyCredential assertion response from raw bytes.
-func buildAssertionBody(t *testing.T, credID, authData, clientDataJSON, signature []byte) *bytes.Reader {
-	t.Helper()
-	type assertionResponse struct {
-		AuthenticatorData string `json:"authenticatorData"`
-		ClientDataJSON    string `json:"clientDataJSON"`
-		Signature         string `json:"signature"`
-	}
-	type assertionCredential struct {
-		ID       string            `json:"id"`
-		RawID    string            `json:"rawId"`
-		Type     string            `json:"type"`
-		Response assertionResponse `json:"response"`
-	}
-	credIDBase64 := base64.RawURLEncoding.EncodeToString(credID)
-	body := assertionCredential{
-		ID:    credIDBase64,
-		RawID: credIDBase64,
-		Type:  "public-key",
-		Response: assertionResponse{
-			AuthenticatorData: base64.RawURLEncoding.EncodeToString(authData),
-			ClientDataJSON:    base64.RawURLEncoding.EncodeToString(clientDataJSON),
-			Signature:         base64.RawURLEncoding.EncodeToString(signature),
-		},
-	}
-	b, err := json.Marshal(body)
-	require.NoError(t, err)
-	return bytes.NewReader(b)
 }
 
 // --- TestStepUpBegin ---
@@ -340,7 +311,7 @@ func TestStepUpFinish_SignCountClone_400(t *testing.T) {
 	const sessID = "clone-detect-sess"
 	injectElevateSession(server, sessID, sd, time.Minute, testAccountID(t, server, username))
 
-	body := buildAssertionBody(t, credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes)
+	body := bytes.NewReader(webauthntest.RawAssertionBody(credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes, nil))
 	principal := &Principal{ID: testAccountID(t, server, username)}
 	rec := doStepUpFinish(t, server, principal, sessID, body)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
@@ -414,7 +385,7 @@ func TestStepUpFinish_Success(t *testing.T) {
 
 	injectElevateSession(server, realSessID, sd, time.Minute, testAccountID(t, server, username))
 
-	body := buildAssertionBody(t, credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes)
+	body := bytes.NewReader(webauthntest.RawAssertionBody(credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes, nil))
 	principal := &Principal{ID: testAccountID(t, server, username)}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webauthn/elevate/finish", body)
@@ -514,7 +485,7 @@ func stepUpRaceFixture(t *testing.T) (*Server, string, *racingSecretStore, *Prin
 	injectElevateSession(server, sessID, sd, time.Minute, testAccountID(t, server, username))
 
 	rs := installRacingStore(t, server)
-	body := buildAssertionBody(t, credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes)
+	body := bytes.NewReader(webauthntest.RawAssertionBody(credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes, nil))
 	return server, username, rs, &Principal{ID: testAccountID(t, server, username)}, sessID, body
 }
 

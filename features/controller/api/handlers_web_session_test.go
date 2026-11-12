@@ -28,6 +28,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
 // --- helpers ---
@@ -102,7 +103,7 @@ func doPasskeyLogin(t *testing.T, srv *Server, username, existingSession string)
 	})
 
 	// Include userHandle so FinishDiscoverableLogin can resolve the account by UUID.
-	body := buildAssertionBodyWithUserHandle(t, credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes, []byte(acct.ID))
+	body := bytes.NewReader(webauthntest.RawAssertionBody(credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes, []byte(acct.ID)))
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/login/finish", body)
 	req.AddCookie(&http.Cookie{Name: cookiePasskeyCeremony, Value: ceremonyID})
 	if existingSession != "" {
@@ -111,40 +112,6 @@ func doPasskeyLogin(t *testing.T, srv *Server, username, existingSession string)
 	rec := httptest.NewRecorder()
 	srv.handlePasskeyLoginFinish(rec, req)
 	return rec
-}
-
-// buildAssertionBodyWithUserHandle constructs a JSON PublicKeyCredential assertion response
-// that includes a userHandle field. Required for discoverable-login flows where
-// FinishDiscoverableLogin resolves the account from the authenticator-reported userHandle.
-func buildAssertionBodyWithUserHandle(t *testing.T, credID, authData, clientDataJSON, signature, userHandle []byte) *bytes.Reader {
-	t.Helper()
-	type assertionResponse struct {
-		AuthenticatorData string `json:"authenticatorData"`
-		ClientDataJSON    string `json:"clientDataJSON"`
-		Signature         string `json:"signature"`
-		UserHandle        string `json:"userHandle"`
-	}
-	type assertionCredential struct {
-		ID       string            `json:"id"`
-		RawID    string            `json:"rawId"`
-		Type     string            `json:"type"`
-		Response assertionResponse `json:"response"`
-	}
-	credIDBase64 := base64.RawURLEncoding.EncodeToString(credID)
-	body := assertionCredential{
-		ID:    credIDBase64,
-		RawID: credIDBase64,
-		Type:  "public-key",
-		Response: assertionResponse{
-			AuthenticatorData: base64.RawURLEncoding.EncodeToString(authData),
-			ClientDataJSON:    base64.RawURLEncoding.EncodeToString(clientDataJSON),
-			Signature:         base64.RawURLEncoding.EncodeToString(signature),
-			UserHandle:        base64.RawURLEncoding.EncodeToString(userHandle),
-		},
-	}
-	b, err := json.Marshal(body)
-	require.NoError(t, err)
-	return bytes.NewReader(b)
 }
 
 // doPasskeyLoginBegin calls handlePasskeyLoginBegin directly with the given pre-session
@@ -1095,7 +1062,7 @@ func TestPasskeyLoginFinish_SignCountClone_400(t *testing.T) {
 
 	// Include userHandle so FinishDiscoverableLogin can resolve the account.
 	// The sign count check fires after cryptographic verification passes.
-	body := buildAssertionBodyWithUserHandle(t, credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes, []byte(reloaded.ID))
+	body := bytes.NewReader(webauthntest.RawAssertionBody(credIDBytes, authDataBytes, clientDataJSONBytes, sigBytes, []byte(reloaded.ID)))
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/web/passkey/login/finish", body)
 	req.AddCookie(&http.Cookie{Name: cookiePasskeyCeremony, Value: ceremonyID})
 	rec := httptest.NewRecorder()

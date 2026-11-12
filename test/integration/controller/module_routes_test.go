@@ -5,12 +5,9 @@ package controller
 import (
 	"bytes"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,8 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-webauthn/webauthn/protocol/webauthncbor"
-	"github.com/go-webauthn/webauthn/protocol/webauthncose"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -31,6 +26,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/testutil"
+	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
 // seedModuleBundle stores a real, signed bundle in c and returns its address.
@@ -249,8 +245,9 @@ func TestModuleListAndApprove_EndToEnd(t *testing.T) {
 		// registration ceremony (begin + a genuine "none"-format attestation) — no
 		// credential is injected directly; every byte here is what a real
 		// authenticator would produce.
-		priv, credID, cosePubKey := generateVirtualAuthenticatorCredential(t)
-		registerVirtualCredential(t, approver, base, "presence-relay-approver", "localhost", presenceRelayOrigin(t, base), credID, cosePubKey)
+		priv, _ := webauthntest.NewKey(t)
+		credID := []byte("presence-relay-virtual-credential-1")
+		registerVirtualCredential(t, approver, base, "presence-relay-approver", "localhost", presenceRelayOrigin(t, base), priv, credID)
 
 		// 1. Lodge a presence request bound to the exact pending action.
 		approvePath := "/api/v1/modules/approvals/" + pendingAddress + "/approve"
@@ -322,7 +319,7 @@ func TestModuleListAndApprove_EndToEnd(t *testing.T) {
 		require.NoError(t, json.Unmarshal(beginRespBody, &beginEnvelope))
 		require.NotEmpty(t, beginEnvelope.Data.PublicKey.Challenge)
 
-		assertionBody := buildVirtualAssertion(t, priv, credID, "localhost", presenceRelayOrigin(t, base), beginEnvelope.Data.PublicKey.Challenge, 1)
+		assertionBody := webauthntest.Assert(t, priv, credID, "localhost", presenceRelayOrigin(t, base), beginEnvelope.Data.PublicKey.Challenge, webauthntest.WithSignCount(1)).Body()
 		finishURL := base + "/api/v1/webauthn/presence/finish?cli_presence_request_id=" + lodged.Data.RequestID
 		finishResp, err := approver.Post(finishURL, "application/json", bytes.NewReader(assertionBody))
 		require.NoError(t, err)
@@ -450,73 +447,11 @@ func certFingerprint(c *x509.Certificate) string {
 	return fmt.Sprintf("%x", sum)
 }
 
-// padCoord left-pads b to 32 bytes — the fixed EC2 coordinate length a P-256 COSE key
-// requires.
-func padCoord(b []byte) []byte {
-	out := make([]byte, 32)
-	copy(out[32-len(b):], b)
-	return out
-}
-
-// generateVirtualAuthenticatorCredential creates a real ECDSA P-256 keypair and
-// returns it alongside a credential ID and the COSE-encoded public key bytes — the
-// same construction technique features/controller/api's own webauthn tests use
-// (generateSyntheticCredential in handlers_operator_payload_sign_test.go), duplicated
-// here because this package cannot import that test-only helper across the package
-// boundary.
-func generateVirtualAuthenticatorCredential(t *testing.T) (*ecdsa.PrivateKey, []byte, []byte) {
-	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-
-	coseKey := webauthncose.EC2PublicKeyData{
-		PublicKeyData: webauthncose.PublicKeyData{
-			KeyType:   2, // EC2
-			Algorithm: int64(webauthncose.AlgES256),
-		},
-		Curve:  int64(webauthncose.P256),
-		XCoord: padCoord(priv.X.Bytes()),
-		YCoord: padCoord(priv.Y.Bytes()),
-	}
-	pubKeyBytes, err := webauthncbor.Marshal(coseKey)
-	require.NoError(t, err)
-
-	credID := []byte("presence-relay-virtual-credential-1")
-	return priv, credID, pubKeyBytes
-}
-
-// buildNoneAttestationObject assembles a real, spec-shaped "none"-format
-// attestationObject: authData (rpIDHash || flags || signCount || AAGUID ||
-// credIDLen || credID || COSE public key) wrapped as {"fmt":"none","attStmt":{},
-// "authData":<bytes>} — the exact CBOR map shape protocol.AttestationObject decodes
-// (attestation.go's attestationObjectEncoded), built with real bytes, not a mock.
-func buildNoneAttestationObject(t *testing.T, rpID string, credID, cosePubKey []byte) []byte {
-	t.Helper()
-	rpIDHash := sha256.Sum256([]byte(rpID))
-
-	authData := make([]byte, 0, 32+1+4+16+2+len(credID)+len(cosePubKey))
-	authData = append(authData, rpIDHash[:]...)
-	authData = append(authData, 0x45) // UP | UV | AT
-	authData = append(authData, 0, 0, 0, 0)
-	authData = append(authData, make([]byte, 16)...) // AAGUID: zeroed (no vendor identity asserted)
-	authData = append(authData, byte(len(credID)>>8), byte(len(credID)))
-	authData = append(authData, credID...)
-	authData = append(authData, cosePubKey...)
-
-	attObj, err := webauthncbor.Marshal(map[string]interface{}{
-		"fmt":      "none",
-		"attStmt":  map[string]interface{}{},
-		"authData": authData,
-	})
-	require.NoError(t, err)
-	return attObj
-}
-
 // registerVirtualCredential drives the real HTTP WebAuthn registration ceremony
 // (begin + finish) for username against a real running controller, using a genuine
-// "none"-format attestation built from credID/cosePubKey — no credential is injected
-// directly into any store.
-func registerVirtualCredential(t *testing.T, client *http.Client, base, username, rpID, origin string, credID, cosePubKey []byte) {
+// "none"-format attestation built by pkg/testutil/webauthntest for credID and priv — no
+// credential is injected directly into any store.
+func registerVirtualCredential(t *testing.T, client *http.Client, base, username, rpID, origin string, priv *ecdsa.PrivateKey, credID []byte) {
 	t.Helper()
 
 	beginResp, err := client.Post(base+"/api/v1/accounts/"+username+"/webauthn/register/begin", "application/json", nil)
@@ -536,77 +471,12 @@ func registerVirtualCredential(t *testing.T, client *http.Client, base, username
 	require.NoError(t, json.Unmarshal(beginBody, &beginEnvelope))
 	require.NotEmpty(t, beginEnvelope.Data.PublicKey.Challenge)
 
-	clientData, err := json.Marshal(map[string]string{
-		"type":      "webauthn.create",
-		"challenge": beginEnvelope.Data.PublicKey.Challenge,
-		"origin":    origin,
-	})
-	require.NoError(t, err)
+	reg := webauthntest.Register(t, priv, credID, rpID, origin, beginEnvelope.Data.PublicKey.Challenge)
 
-	attObj := buildNoneAttestationObject(t, rpID, credID, cosePubKey)
-
-	credIDB64 := base64.RawURLEncoding.EncodeToString(credID)
-	finishBody, err := json.Marshal(map[string]interface{}{
-		"id":    credIDB64,
-		"rawId": credIDB64,
-		"type":  "public-key",
-		"response": map[string]string{
-			"clientDataJSON":    base64.RawURLEncoding.EncodeToString(clientData),
-			"attestationObject": base64.RawURLEncoding.EncodeToString(attObj),
-		},
-	})
-	require.NoError(t, err)
-
-	finishResp, err := client.Post(base+"/api/v1/accounts/"+username+"/webauthn/register/finish", "application/json", bytes.NewReader(finishBody))
+	finishResp, err := client.Post(base+"/api/v1/accounts/"+username+"/webauthn/register/finish", "application/json", reg.Reader())
 	require.NoError(t, err)
 	finishRespBody, err := io.ReadAll(finishResp.Body)
 	require.NoError(t, err)
 	_ = finishResp.Body.Close()
 	require.Equal(t, http.StatusCreated, finishResp.StatusCode, "register finish: %s", string(finishRespBody))
-}
-
-// buildVirtualAssertion signs challengeB64 (the base64url challenge the server
-// issued) with priv and returns a JSON PublicKeyCredential assertion response body,
-// using authenticator flags UP|UV (0x05) and the given sign count — the same real
-// ECDSA-signature construction features/controller/api's own webauthn tests use
-// (buildSignAssertionBody in handlers_operator_payload_sign_test.go), duplicated here
-// for the same package-boundary reason as generateVirtualAuthenticatorCredential.
-func buildVirtualAssertion(t *testing.T, priv *ecdsa.PrivateKey, credID []byte, rpID, origin, challengeB64 string, signCount uint32) []byte {
-	t.Helper()
-
-	rpIDHash := sha256.Sum256([]byte(rpID))
-	authData := make([]byte, 37)
-	copy(authData[:32], rpIDHash[:])
-	authData[32] = 0x05 // UP | UV
-	authData[33] = byte(signCount >> 24)
-	authData[34] = byte(signCount >> 16)
-	authData[35] = byte(signCount >> 8)
-	authData[36] = byte(signCount)
-
-	clientData, err := json.Marshal(map[string]string{
-		"type":      "webauthn.get",
-		"challenge": challengeB64,
-		"origin":    origin,
-	})
-	require.NoError(t, err)
-
-	clientDataHash := sha256.Sum256(clientData)
-	sigData := append(append([]byte{}, authData...), clientDataHash[:]...)
-	digest := sha256.Sum256(sigData)
-	sig, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
-	require.NoError(t, err)
-
-	credIDB64 := base64.RawURLEncoding.EncodeToString(credID)
-	body, err := json.Marshal(map[string]interface{}{
-		"id":    credIDB64,
-		"rawId": credIDB64,
-		"type":  "public-key",
-		"response": map[string]string{
-			"authenticatorData": base64.RawURLEncoding.EncodeToString(authData),
-			"clientDataJSON":    base64.RawURLEncoding.EncodeToString(clientData),
-			"signature":         base64.RawURLEncoding.EncodeToString(sig),
-		},
-	})
-	require.NoError(t, err)
-	return body
 }

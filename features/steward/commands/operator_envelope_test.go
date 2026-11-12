@@ -20,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
+	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
 // testSignerAccountID is the account the test operator certificates are bound to.
@@ -261,7 +262,7 @@ func TestVerifyOperatorEnvelope_StewardActionNoCARootsRefused(t *testing.T) {
 func TestVerifyOperatorEnvelope_WebAuthnActionAccepted(t *testing.T) {
 	ca, caPool := sigTestCA(t)
 	signingCert := sigTestSigningCert(t, ca)
-	priv, pubKey := sigTestWebAuthnKeypair(t)
+	priv, pubKey := webauthntest.NewKey(t)
 	credID := []byte("webauthn-cred-action-001")
 	manifestJSON := sigTestSignManifest(t, signingCert, []authorizedWebAuthnCredential{
 		sigTestAuthorizedEntry(credID, pubKey),

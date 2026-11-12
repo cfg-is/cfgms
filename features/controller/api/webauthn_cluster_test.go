@@ -29,6 +29,7 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 	"github.com/cfgis/cfgms/pkg/testing/storage"
+	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
 // clusterFixture is the shared state every node of one test cluster uses.
@@ -160,7 +161,7 @@ func specLoginBody(t *testing.T, srv *Server, username string) *bytes.Reader {
 	acct, err := srv.getAccount(context.Background(), username)
 	require.NoError(t, err)
 	require.NotNil(t, acct)
-	return buildAssertionBodyWithUserHandle(t, credID, authData, cdj, sig, []byte(acct.ID))
+	return bytes.NewReader(webauthntest.RawAssertionBody(credID, authData, cdj, sig, []byte(acct.ID)))
 }
 
 // --- replay across nodes ---

@@ -26,8 +26,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -39,8 +37,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-webauthn/webauthn/protocol/webauthncbor"
-	"github.com/go-webauthn/webauthn/protocol/webauthncose"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,6 +44,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
 // setupOperatorPayloadSignServer returns a test Server with WebAuthn configured, a
@@ -60,35 +57,12 @@ func setupOperatorPayloadSignServer(t *testing.T) (*Server, string) {
 	return server, username
 }
 
-// padCoord left-pads b to 32 bytes — the fixed EC2 coordinate length validateEC2PublicKey
-// requires for P-256.
-func padCoord(b []byte) []byte {
-	out := make([]byte, 32)
-	copy(out[32-len(b):], b)
-	return out
-}
-
 // generateSyntheticCredential creates a real ECDSA P-256 keypair and returns it alongside
 // the COSE-encoded public key bytes in the exact format WebAuthnCredential.PublicKey stores,
 // enabling real cryptographic assertion verification in tests (no mocks).
 func generateSyntheticCredential(t *testing.T) (*ecdsa.PrivateKey, []byte) {
 	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-
-	coseKey := webauthncose.EC2PublicKeyData{
-		PublicKeyData: webauthncose.PublicKeyData{
-			KeyType:   2, // EC2
-			Algorithm: int64(webauthncose.AlgES256),
-		},
-		Curve:  int64(webauthncose.P256),
-		XCoord: padCoord(priv.X.Bytes()),
-		YCoord: padCoord(priv.Y.Bytes()),
-	}
-	pubKeyBytes, err := webauthncbor.Marshal(coseKey)
-	require.NoError(t, err)
-
-	return priv, pubKeyBytes
+	return webauthntest.NewKey(t)
 }
 
 // injectSignCredential adds a WebAuthn credential with a real public key to an account.
@@ -106,71 +80,6 @@ func injectSignCredential(t *testing.T, server *Server, username string, credID,
 	})
 	require.NoError(t, server.persistAccount(context.Background(), acct, "test-injector"))
 	server.cacheAccount(acct)
-}
-
-// buildSignAssertionBody signs challengeB64 (the base64url challenge string the server
-// issued) with priv and returns a JSON PublicKeyCredential assertion response body, using
-// authenticator flags UP|UV (0x05) and the given sign count.
-func buildSignAssertionBody(t *testing.T, priv *ecdsa.PrivateKey, credID []byte, rpID, origin, challengeB64 string, signCount uint32) *bytes.Reader {
-	t.Helper()
-	return buildSignAssertionBodyFlags(t, priv, credID, rpID, origin, challengeB64, signCount, 0x05)
-}
-
-// buildSignAssertionBodyFlags is buildSignAssertionBody with explicit authenticator flags
-// (0x01 user presence, 0x04 user verification), for tests of an assertion missing one.
-func buildSignAssertionBodyFlags(t *testing.T, priv *ecdsa.PrivateKey, credID []byte, rpID, origin, challengeB64 string, signCount uint32, flags byte) *bytes.Reader {
-	t.Helper()
-
-	rpIDHash := sha256.Sum256([]byte(rpID))
-	authData := make([]byte, 37)
-	copy(authData[:32], rpIDHash[:])
-	authData[32] = flags
-	authData[33] = byte(signCount >> 24)
-	authData[34] = byte(signCount >> 16)
-	authData[35] = byte(signCount >> 8)
-	authData[36] = byte(signCount)
-
-	clientData := struct {
-		Type      string `json:"type"`
-		Challenge string `json:"challenge"`
-		Origin    string `json:"origin"`
-	}{
-		Type:      "webauthn.get",
-		Challenge: challengeB64,
-		Origin:    origin,
-	}
-	clientDataJSON, err := json.Marshal(clientData)
-	require.NoError(t, err)
-
-	clientDataHash := sha256.Sum256(clientDataJSON)
-	sigData := append(append([]byte{}, authData...), clientDataHash[:]...)
-	digest := sha256.Sum256(sigData)
-	sig, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
-	require.NoError(t, err)
-
-	credIDB64 := base64.RawURLEncoding.EncodeToString(credID)
-	type assertionResponse struct {
-		AuthenticatorData string `json:"authenticatorData"`
-		ClientDataJSON    string `json:"clientDataJSON"`
-		Signature         string `json:"signature"`
-	}
-	type assertionCredential struct {
-		ID       string            `json:"id"`
-		RawID    string            `json:"rawId"`
-		Type     string            `json:"type"`
-		Response assertionResponse `json:"response"`
-	}
-	body := assertionCredential{
-		ID: credIDB64, RawID: credIDB64, Type: "public-key",
-		Response: assertionResponse{
-			AuthenticatorData: base64.RawURLEncoding.EncodeToString(authData),
-			ClientDataJSON:    base64.RawURLEncoding.EncodeToString(clientDataJSON),
-			Signature:         base64.RawURLEncoding.EncodeToString(sig),
-		},
-	}
-	b, err := json.Marshal(body)
-	require.NoError(t, err)
-	return bytes.NewReader(b)
 }
 
 func doSignBegin(t *testing.T, server *Server, principal *Principal, sessID string, body *bytes.Reader) *httptest.ResponseRecorder {
@@ -650,15 +559,15 @@ func TestOperatorPayloadSignFinish_ReplayedSession_Rejected(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(beginRec.Body.Bytes(), &begin))
 
-	body := buildSignAssertionBody(t, priv, credID, tvRPID, tvOrigin,
-		begin.Data.Assertion.Response.Challenge.String(), 1)
+	body := webauthntest.Assert(t, priv, credID, tvRPID, tvOrigin,
+		begin.Data.Assertion.Response.Challenge.String(), webauthntest.WithSignCount(1)).Reader()
 	firstRec := doSignFinish(t, server, principal, sessID, body)
 	require.Equal(t, http.StatusOK, firstRec.Code, "body: %s", firstRec.Body.String())
 
 	// Replay: same session ID, second finish attempt must be rejected — the session was
 	// consumed via LoadAndDelete on the first call.
-	replayBody := buildSignAssertionBody(t, priv, credID, tvRPID, tvOrigin,
-		begin.Data.Assertion.Response.Challenge.String(), 2)
+	replayBody := webauthntest.Assert(t, priv, credID, tvRPID, tvOrigin,
+		begin.Data.Assertion.Response.Challenge.String(), webauthntest.WithSignCount(2)).Reader()
 	replayRec := doSignFinish(t, server, principal, sessID, replayBody)
 	assert.Equal(t, http.StatusBadRequest, replayRec.Code)
 	assert.Equal(t, "NO_ACTIVE_SIGN_SESSION", errCode(t, replayRec.Body.Bytes()))
@@ -682,8 +591,8 @@ func TestOperatorPayloadSignFinish_SignCountClone_400(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(beginRec.Body.Bytes(), &begin))
 
-	body := buildSignAssertionBody(t, priv, credID, tvRPID, tvOrigin,
-		begin.Data.Assertion.Response.Challenge.String(), 0)
+	body := webauthntest.Assert(t, priv, credID, tvRPID, tvOrigin,
+		begin.Data.Assertion.Response.Challenge.String()).Reader()
 	rec := doSignFinish(t, server, principal, sessID, body)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
 	assert.Equal(t, "WEBAUTHN_VERIFY_ERROR", errCode(t, rec.Body.Bytes()))
@@ -715,8 +624,8 @@ func TestOperatorPayloadSignFinish_ForgedKey_Rejected(t *testing.T) {
 	// (e.g. from a prior response) but does not hold the corresponding hardware-bound
 	// private key.
 	forgedPriv, _ := generateSyntheticCredential(t)
-	body := buildSignAssertionBody(t, forgedPriv, credID, tvRPID, tvOrigin,
-		begin.Data.Assertion.Response.Challenge.String(), 1)
+	body := webauthntest.Assert(t, forgedPriv, credID, tvRPID, tvOrigin,
+		begin.Data.Assertion.Response.Challenge.String(), webauthntest.WithSignCount(1)).Reader()
 
 	rec := doSignFinish(t, server, principal, sessID, body)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
@@ -741,8 +650,8 @@ func TestOperatorPayloadSignFinish_Success_EndToEnd(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(beginRec.Body.Bytes(), &begin))
 
-	body := buildSignAssertionBody(t, priv, credID, tvRPID, tvOrigin,
-		begin.Data.Assertion.Response.Challenge.String(), 1)
+	body := webauthntest.Assert(t, priv, credID, tvRPID, tvOrigin,
+		begin.Data.Assertion.Response.Challenge.String(), webauthntest.WithSignCount(1)).Reader()
 	rec := doSignFinish(t, server, principal, sessID, body)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
@@ -836,8 +745,8 @@ func TestOperatorPayloadSignFinish_SucceedsOnNonAuthoritativeNode(t *testing.T) 
 	}
 	require.NoError(t, json.Unmarshal(beginRec.Body.Bytes(), &begin))
 
-	body := buildSignAssertionBody(t, priv, credID, tvRPID, tvOrigin,
-		begin.Data.Assertion.Response.Challenge.String(), 1)
+	body := webauthntest.Assert(t, priv, credID, tvRPID, tvOrigin,
+		begin.Data.Assertion.Response.Challenge.String(), webauthntest.WithSignCount(1)).Reader()
 	rec := doSignFinish(t, server, principal, sessID, body)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
@@ -977,8 +886,8 @@ func TestOperatorPayloadSignFinish_AuditCarriesExecutionContext(t *testing.T) {
 			}
 			require.NoError(t, json.Unmarshal(beginRec.Body.Bytes(), &begin))
 
-			body := buildSignAssertionBody(t, priv, credID, tvRPID, tvOrigin,
-				begin.Data.Assertion.Response.Challenge.String(), 1)
+			body := webauthntest.Assert(t, priv, credID, tvRPID, tvOrigin,
+				begin.Data.Assertion.Response.Challenge.String(), webauthntest.WithSignCount(1)).Reader()
 			rec := doSignFinish(t, server, principal, "audit-sess", body)
 			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 

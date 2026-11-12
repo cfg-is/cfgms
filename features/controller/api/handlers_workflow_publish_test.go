@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
 const publishTenant = "tenant-a"
@@ -118,7 +120,8 @@ func (f *publishFixture) begin(t *testing.T, version, sessID string) string {
 
 func (f *publishFixture) assertion(t *testing.T, challenge string, flags byte) *bytes.Reader {
 	f.counter++
-	return buildSignAssertionBodyFlags(t, f.priv, f.credID, tvRPID, tvOrigin, challenge, f.counter, flags)
+	return webauthntest.Assert(t, f.priv, f.credID, tvRPID, tvOrigin, challenge,
+		webauthntest.WithSignCount(f.counter), webauthntest.WithFlags(flags)).Reader()
 }
 
 // publish runs a full begin and finish and returns the finish response.
@@ -247,7 +250,7 @@ func TestWorkflowPublish_SelfGeneratedKeyNotRegisteredIsDenied(t *testing.T) {
 	rogue, _ := generateSyntheticCredential(t)
 
 	challenge := f.begin(t, "1.0.0", "rogue-sess")
-	body := buildSignAssertionBodyFlags(t, rogue, f.credID, tvRPID, tvOrigin, challenge, 1, 0x05)
+	body := webauthntest.Assert(t, rogue, f.credID, tvRPID, tvOrigin, challenge, webauthntest.WithSignCount(1)).Reader()
 	rec := f.call(t, "finish", "1.0.0", "rogue-sess", publishTenant, body)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "an assertion from an unregistered key is refused")
 	assert.Nil(t, f.stored(t, "1.0.0").Publication)
@@ -265,16 +268,8 @@ func TestWorkflowPublish_SelfGeneratedKeyNotRegisteredIsDenied(t *testing.T) {
 // and returns the base64url signature.
 func signWithKey(t *testing.T, key *ecdsa.PrivateKey, f *publishFixture, vw *workflow.VersionedWorkflow) string {
 	t.Helper()
-	body := buildSignAssertionBodyFlags(t, key, f.credID, tvRPID, tvOrigin, "unused", 1, 0x05)
-	var parsed struct {
-		Response struct {
-			Signature string `json:"signature"`
-		} `json:"response"`
-	}
-	buf := make([]byte, body.Size())
-	_, _ = body.ReadAt(buf, 0)
-	require.NoError(t, json.Unmarshal(buf, &parsed))
-	return parsed.Response.Signature
+	a := webauthntest.Assert(t, key, f.credID, tvRPID, tvOrigin, "unused", webauthntest.WithSignCount(1))
+	return base64.RawURLEncoding.EncodeToString(a.Signature)
 }
 
 func TestWorkflowPublish_DeniedAfterSignerLosesCredentialAccountOrPermission(t *testing.T) {
@@ -315,11 +310,13 @@ func TestWorkflowPublish_RefusesUserVerificationUnsetAndWrongOrigin(t *testing.T
 	f.seed(t, "1.0.0")
 
 	challenge := f.begin(t, "1.0.0", "uv-sess")
-	noUV := buildSignAssertionBodyFlags(t, f.priv, f.credID, tvRPID, tvOrigin, challenge, 1, 0x01)
+	noUV := webauthntest.Assert(t, f.priv, f.credID, tvRPID, tvOrigin, challenge,
+		webauthntest.WithSignCount(1), webauthntest.UserPresenceOnly()).Reader()
 	assert.Equal(t, http.StatusBadRequest, f.call(t, "finish", "1.0.0", "uv-sess", publishTenant, noUV).Code)
 
 	challenge = f.begin(t, "1.0.0", "origin-sess")
-	wrongOrigin := buildSignAssertionBodyFlags(t, f.priv, f.credID, tvRPID, "https://evil.example", challenge, 1, 0x05)
+	wrongOrigin := webauthntest.Assert(t, f.priv, f.credID, tvRPID, tvOrigin, challenge,
+		webauthntest.WithSignCount(1), webauthntest.WithOrigin("https://evil.example")).Reader()
 	assert.Equal(t, http.StatusBadRequest, f.call(t, "finish", "1.0.0", "origin-sess", publishTenant, wrongOrigin).Code)
 
 	assert.Nil(t, f.stored(t, "1.0.0").Publication)
