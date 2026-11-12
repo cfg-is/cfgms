@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -750,4 +752,440 @@ func TestStepUp_TenantCrossing_WithoutBreakGlassEndpoint(t *testing.T) {
 			assert.NotContains(t, msg, banned, "body %q", body)
 		}
 	}
+}
+
+// --- Software authenticator: presence challenges answered by direct begin/finish (Issue #6146) ---
+
+const (
+	guardedPresencePath       = "/api/v1/modules/approvals/test-address/approve"
+	guardedPresencePermission = "module:approve"
+	guardedPresenceChallenge  = `CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="module:approve"`
+)
+
+// presenceBegin is one begin call the test controller received.
+type presenceBegin struct {
+	bodyLen int
+	action  PresenceActionBinding
+}
+
+// presenceToken is a minted token and the one request it authorizes.
+type presenceToken struct {
+	principal string
+	action    PresenceActionBinding
+}
+
+// presenceController extends a webLoginServer with the controller's presence endpoints
+// and a presence-guarded route. Begin and finish run the real go-webauthn
+// BeginLogin/FinishLogin with userVerification=required against the credential the
+// fixture registered, and finish mints a single-use token bound to the action named at
+// begin, exactly as handlePresenceBegin/handlePresenceFinish and checkPresenceAction do.
+type presenceController struct {
+	f *webLoginFixture
+
+	mu         sync.Mutex
+	ceremonies map[string]presenceCeremony // session token -> pending presence ceremony
+	tokens     map[string]presenceToken
+	begins     []presenceBegin
+	finishes   int
+	minted     []string
+	guarded    []string // X-Presence-Token of each guarded request ("" for the first try)
+	guardedOK  int
+	beginRPID  string // when set, the begin response names this rpId
+}
+
+type presenceCeremony struct {
+	data   webauthn.SessionData
+	action *PresenceActionBinding
+}
+
+func newPresenceController(t *testing.T) *presenceController {
+	t.Helper()
+	f := newWebLoginFixture(t, nil)
+	pc := &presenceController{
+		f:          f,
+		ceremonies: map[string]presenceCeremony{},
+		tokens:     map[string]presenceToken{},
+	}
+	inner := f.srv.Config.Handler
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/webauthn/presence/begin":
+			pc.begin(w, r)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/webauthn/presence/finish":
+			pc.finish(w, r)
+		case strings.HasPrefix(r.URL.Path, "/api/v1/modules/"):
+			pc.guard(w, r)
+		default:
+			inner.ServeHTTP(w, r)
+		}
+	})
+	return pc
+}
+
+// session authenticates r as the logged-in web session with its CSRF token, as the
+// controller's session middleware does for an unsafe request.
+func (pc *presenceController) session(w http.ResponseWriter, r *http.Request) (string, bool) {
+	pc.f.mu.Lock()
+	defer pc.f.mu.Unlock()
+	session, ok := pc.f.session(r)
+	if !ok {
+		pc.f.fail(w, http.StatusUnauthorized, "Session expired or invalid")
+		return "", false
+	}
+	if !pc.f.csrfOK(r, session) {
+		pc.f.fail(w, http.StatusForbidden, "CSRF token mismatch")
+		return "", false
+	}
+	return session, true
+}
+
+func (pc *presenceController) begin(w http.ResponseWriter, r *http.Request) {
+	session, ok := pc.session(w, r)
+	if !ok {
+		return
+	}
+	raw, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+	var action *PresenceActionBinding
+	if len(raw) > 0 {
+		var in PresenceActionBinding
+		if err := json.Unmarshal(raw, &in); err != nil ||
+			in.Method == "" || in.Path == "" || in.BodyHash == "" || in.PermissionID == "" {
+			pc.f.fail(w, http.StatusBadRequest, "Presence binding requires method, path, body_hash and permission_id")
+			return
+		}
+		in.Method = strings.ToUpper(in.Method)
+		action = &in
+	}
+	assertion, sd, err := pc.f.wa.BeginLogin(pc.f.user, webauthn.WithUserVerification(protocol.VerificationRequired))
+	if err != nil {
+		pc.f.fail(w, http.StatusInternalServerError, "begin failed")
+		return
+	}
+	pc.mu.Lock()
+	pc.begins = append(pc.begins, presenceBegin{bodyLen: len(raw), action: derefBinding(action)})
+	pc.ceremonies[session] = presenceCeremony{data: *sd, action: action}
+	rpID := pc.beginRPID
+	pc.mu.Unlock()
+	if rpID != "" {
+		assertion.Response.RelyingPartyID = rpID
+	}
+	pc.f.reply(w, http.StatusOK, map[string]any{"data": assertion})
+}
+
+func derefBinding(b *PresenceActionBinding) PresenceActionBinding {
+	if b == nil {
+		return PresenceActionBinding{}
+	}
+	return *b
+}
+
+func (pc *presenceController) finish(w http.ResponseWriter, r *http.Request) {
+	session, ok := pc.session(w, r)
+	if !ok {
+		return
+	}
+	pc.mu.Lock()
+	pc.finishes++
+	c, found := pc.ceremonies[session]
+	delete(pc.ceremonies, session)
+	pc.mu.Unlock()
+	if !found {
+		pc.f.fail(w, http.StatusBadRequest, "No active presence session — call begin first")
+		return
+	}
+	if _, err := pc.f.wa.FinishLogin(pc.f.user, c.data, r); err != nil {
+		pc.f.fail(w, http.StatusBadRequest, "WebAuthn verification failed")
+		return
+	}
+	if c.action == nil {
+		pc.f.fail(w, http.StatusBadRequest, "Presence ceremony was begun without an action binding")
+		return
+	}
+	pc.f.mu.Lock()
+	token := pc.f.secret()
+	pc.f.mu.Unlock()
+	pc.mu.Lock()
+	pc.tokens[token] = presenceToken{principal: session, action: *c.action}
+	pc.minted = append(pc.minted, token)
+	pc.mu.Unlock()
+	pc.f.reply(w, http.StatusOK, map[string]any{"data": map[string]any{"presence_token": token, "expires_in": 30}})
+}
+
+// guard is a RequireUserPresence-gated route: without a token it answers the presence
+// challenge; with one it takes the token (single use) and requires the exact method,
+// path, SHA-256 of the body and permission the token was bound to.
+func (pc *presenceController) guard(w http.ResponseWriter, r *http.Request) {
+	session, ok := pc.session(w, r)
+	if !ok {
+		return
+	}
+	body, _ := io.ReadAll(r.Body)
+	token := r.Header.Get("X-Presence-Token")
+	pc.mu.Lock()
+	pc.guarded = append(pc.guarded, token)
+	rec, live := pc.tokens[token]
+	delete(pc.tokens, token)
+	pc.mu.Unlock()
+
+	if token == "" {
+		w.Header().Set("WWW-Authenticate", guardedPresenceChallenge)
+		pc.f.fail(w, http.StatusUnauthorized, "step_up_required")
+		return
+	}
+	want := PresenceActionBinding{
+		Method:       r.Method,
+		Path:         r.URL.Path,
+		BodyHash:     sha256Hex(body),
+		PermissionID: guardedPresencePermission,
+	}
+	if !live || rec.principal != session || rec.action != want {
+		w.Header().Set("WWW-Authenticate", guardedPresenceChallenge)
+		pc.f.fail(w, http.StatusUnauthorized, "presence_token_action_mismatch")
+		return
+	}
+	pc.mu.Lock()
+	pc.guardedOK++
+	pc.mu.Unlock()
+	pc.f.reply(w, http.StatusOK, map[string]any{"data": map[string]bool{"approved": true}})
+}
+
+func (pc *presenceController) snapshot() (begins []presenceBegin, finishes, guardedOK int, guarded, minted []string) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return append([]presenceBegin(nil), pc.begins...), pc.finishes, pc.guardedOK,
+		append([]string(nil), pc.guarded...), append([]string(nil), pc.minted...)
+}
+
+// authenticatorClient resolves the client the way every cfg command does, with
+// --authenticator selected, and forbids the relay and any browser.
+func (pc *presenceController) authenticatorClient(t *testing.T) *APIClient {
+	t.Helper()
+	origFlow, origTerm, origBrowser := presenceBrowserFlowFn, isTerminalFn, presenceOpenBrowserFn
+	t.Cleanup(func() { presenceBrowserFlowFn, isTerminalFn, presenceOpenBrowserFn = origFlow, origTerm, origBrowser })
+	presenceBrowserFlowFn = func(*APIClient, string, string, []byte, string) (string, error) {
+		t.Error("the browser presence relay must not start in --authenticator mode")
+		return "", nil
+	}
+	isTerminalFn = func() bool { return false }
+	presenceOpenBrowserFn = func(u string) error {
+		t.Errorf("a browser must not be launched in --authenticator mode (url %q)", u)
+		return nil
+	}
+	client, err := requireSessionOrBundleClient("", false, "")
+	require.NoError(t, err)
+	return client
+}
+
+func guardedRequest(client *APIClient, path, body string) (*http.Response, error) {
+	return client.doRequest(context.Background(), http.MethodPost, path, strings.NewReader(body))
+}
+
+// [REQUIRED TEST] AC1/AC2: against the real go-webauthn presence verification a guarded
+// request succeeds end to end through direct begin/finish and a single retry carrying
+// the token, with no relay and no browser.
+func TestAuthenticatorStepUp_GuardedRequestSucceedsEndToEnd(t *testing.T) {
+	pc := newPresenceController(t)
+	client := pc.authenticatorClient(t)
+
+	const body = `{"reason":"approve"}`
+	resp, err := guardedRequest(client, guardedPresencePath, body)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	begins, finishes, ok, guarded, minted := pc.snapshot()
+	require.Len(t, begins, 1)
+	assert.Equal(t, 1, finishes)
+	assert.Equal(t, 1, ok)
+	require.Len(t, minted, 1)
+	assert.Equal(t, []string{"", minted[0]}, guarded, "the request is sent once without a token, then retried once with the minted token")
+}
+
+// [REQUIRED TEST] AC3: begin carries method, path, body hash and permission id of the
+// guarded request, bound exactly.
+func TestAuthenticatorStepUp_BeginCarriesTheBinding(t *testing.T) {
+	pc := newPresenceController(t)
+	client := pc.authenticatorClient(t)
+
+	const body = `{"reason":"approve"}`
+	resp, err := guardedRequest(client, guardedPresencePath, body)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+
+	begins, _, _, _, _ := pc.snapshot()
+	require.Len(t, begins, 1)
+	assert.Equal(t, PresenceActionBinding{
+		Method:       http.MethodPost,
+		Path:         guardedPresencePath,
+		BodyHash:     sha256Hex([]byte(body)),
+		PermissionID: guardedPresencePermission,
+	}, begins[0].action)
+}
+
+// [REQUIRED TEST] AC2: the token is bound to the request it was minted for: the
+// controller refuses the same token for a different path or a different body, and a
+// token is not accepted twice.
+func TestAuthenticatorStepUp_TokenIsBoundToPathAndBody(t *testing.T) {
+	pc := newPresenceController(t)
+	client := pc.authenticatorClient(t)
+	rec, err := loadRegisteredAuthenticator(context.Background(), pc.f.name)
+	require.NoError(t, err)
+	auth, err := rec.authenticator()
+	require.NoError(t, err)
+
+	const body = `{"reason":"approve"}`
+	mint := func() string {
+		options, beginErr := client.WebAuthnPresenceBeginForAction(context.Background(), PresenceActionBinding{
+			Method: http.MethodPost, Path: guardedPresencePath,
+			BodyHash: sha256Hex([]byte(body)), PermissionID: guardedPresencePermission,
+		})
+		require.NoError(t, beginErr)
+		assertion, assertErr := auth.Assert(options)
+		require.NoError(t, assertErr)
+		token, finishErr := client.WebAuthnPresenceFinish(context.Background(), assertion)
+		require.NoError(t, finishErr)
+		return token
+	}
+	send := func(token, path, reqBody string) int {
+		req, reqErr := http.NewRequest(http.MethodPost, pc.f.url+path, strings.NewReader(reqBody))
+		require.NoError(t, reqErr)
+		req.Header.Set("X-Presence-Token", token)
+		client.setCredentialHeaders(req, token)
+		resp, doErr := client.httpClient.Do(req)
+		require.NoError(t, doErr)
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	assert.Equal(t, http.StatusUnauthorized, send(mint(), "/api/v1/modules/approvals/other-address/approve", body), "a different path")
+	assert.Equal(t, http.StatusUnauthorized, send(mint(), guardedPresencePath, `{"reason":"other"}`), "a different body")
+
+	token := mint()
+	assert.Equal(t, http.StatusOK, send(token, guardedPresencePath, body), "the exact request")
+	assert.Equal(t, http.StatusUnauthorized, send(token, guardedPresencePath, body), "the same token a second time")
+}
+
+// [REQUIRED TEST] AC4: a second guarded request runs a second full begin/finish and
+// carries a different token; nothing is cached or reused.
+func TestAuthenticatorStepUp_EveryGuardedRequestGetsItsOwnToken(t *testing.T) {
+	pc := newPresenceController(t)
+	client := pc.authenticatorClient(t)
+
+	for _, body := range []string{`{"n":1}`, `{"n":2}`} {
+		resp, err := guardedRequest(client, guardedPresencePath, body)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+
+	begins, finishes, ok, guarded, minted := pc.snapshot()
+	assert.Len(t, begins, 2, "a full begin per guarded request")
+	assert.Equal(t, 2, finishes, "a full finish per guarded request")
+	assert.Equal(t, 2, ok)
+	require.Len(t, minted, 2)
+	assert.NotEqual(t, minted[0], minted[1])
+	assert.Equal(t, []string{"", minted[0], "", minted[1]}, guarded)
+	assert.NotEqual(t, begins[0].action.BodyHash, begins[1].action.BodyHash, "each begin is bound to its own request")
+}
+
+// [REQUIRED TEST] AC3: a challenge that names no permission fails with the existing
+// error, before any presence begin and with no relay or browser started.
+func TestAuthenticatorStepUp_NoPermissionFailsWithoutCeremony(t *testing.T) {
+	pc := newPresenceController(t)
+	client := pc.authenticatorClient(t)
+	rec, err := loadRegisteredAuthenticator(context.Background(), pc.f.name)
+	require.NoError(t, err)
+	auth, err := rec.authenticator()
+	require.NoError(t, err)
+
+	handler := authenticatorStepUpHandler(client, auth)
+	_, err = handler(`CFGMS-StepUp realm="cfgms", required="strong", presence="required"`, http.MethodPost, guardedPresencePath, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not name a permission")
+
+	begins, finishes, _, _, _ := pc.snapshot()
+	assert.Empty(t, begins, "no presence begin without a permission to bind")
+	assert.Zero(t, finishes)
+}
+
+// A challenge that is not a presence challenge fails as it does for the default handler:
+// the authenticator cannot raise the session's assurance, and no ceremony starts.
+func TestAuthenticatorStepUp_NonPresenceChallengeKeepsActionableError(t *testing.T) {
+	pc := newPresenceController(t)
+	client := pc.authenticatorClient(t)
+	rec, err := loadRegisteredAuthenticator(context.Background(), pc.f.name)
+	require.NoError(t, err)
+	auth, err := rec.authenticator()
+	require.NoError(t, err)
+
+	_, err = authenticatorStepUpHandler(client, auth)(`CFGMS-StepUp realm="cfgms", required="strong"`, http.MethodPost, guardedPresencePath, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "step-up required")
+	assert.Contains(t, err.Error(), "strong")
+	begins, _, _, _, _ := pc.snapshot()
+	assert.Empty(t, begins)
+}
+
+// The authenticator is bound to the record's relying party: a begin response naming a
+// different rpId is refused client side, finish is never called and the guarded request
+// is not retried.
+func TestAuthenticatorStepUp_RPIDMismatchRefused(t *testing.T) {
+	pc := newPresenceController(t)
+	client := pc.authenticatorClient(t)
+	pc.mu.Lock()
+	pc.beginRPID = "evil.example"
+	pc.mu.Unlock()
+
+	_, err := guardedRequest(client, guardedPresencePath, `{}`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "presence refused")
+
+	_, finishes, ok, guarded, minted := pc.snapshot()
+	assert.Zero(t, finishes, "nothing is signed for the wrong relying party")
+	assert.Zero(t, ok)
+	assert.Empty(t, minted)
+	assert.Equal(t, []string{""}, guarded, "the guarded request is not retried")
+}
+
+// A controller refusal at finish surfaces as an error that names the step, and the
+// guarded request is not retried.
+func TestAuthenticatorStepUp_FinishRefusedIsNotRetried(t *testing.T) {
+	pc := newPresenceController(t)
+	client := pc.authenticatorClient(t)
+	// Revoke the credential the controller knows: the assertion no longer verifies.
+	pc.f.user.creds = nil
+
+	_, err := guardedRequest(client, guardedPresencePath, `{}`)
+	require.Error(t, err)
+
+	_, _, ok, guarded, _ := pc.snapshot()
+	assert.Zero(t, ok)
+	assert.Equal(t, []string{""}, guarded, "no retry without a token")
+}
+
+// [REQUIRED TEST] AC5: the relay's begin carries no body, still reaches the controller
+// as such, and the client's no-body call is unchanged.
+func TestWebAuthnPresenceBegin_RelayCallSendsNoBody(t *testing.T) {
+	pc := newPresenceController(t)
+	client := pc.authenticatorClient(t)
+
+	options, err := client.WebAuthnPresenceBegin(context.Background())
+	require.NoError(t, err)
+	assert.NotEmpty(t, options)
+
+	begins, _, _, _, _ := pc.snapshot()
+	require.Len(t, begins, 1)
+	assert.Zero(t, begins[0].bodyLen, "the relay begin has no body")
+	assert.Equal(t, PresenceActionBinding{}, begins[0].action)
+}
+
+// A begin the controller rejects as incomplete is refused before anything is signed.
+func TestWebAuthnPresenceBeginForAction_IncompleteBindingRejectedByController(t *testing.T) {
+	pc := newPresenceController(t)
+	client := pc.authenticatorClient(t)
+
+	_, err := client.WebAuthnPresenceBeginForAction(context.Background(), PresenceActionBinding{Method: http.MethodPost})
+	require.Error(t, err)
+	begins, _, _, _, _ := pc.snapshot()
+	assert.Empty(t, begins)
 }

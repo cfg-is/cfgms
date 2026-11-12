@@ -1250,3 +1250,31 @@ is bound to. When the command ends, whether it succeeded or failed, `cfg` calls
   controller's challenge names an RP ID different from the authenticator's.
 
 To sign `cfg steward exec` with the authenticator's passkey instead of the X.509 signing credential, see [Passkey-signed exec](steward-management.md#passkey-signed-exec).
+
+#### Presence-protected actions
+
+Some actions require a fresh proof of presence for each request (the controller
+answers `401` with a `CFGMS-StepUp` challenge that names the permission and sets
+`presence="required"`). In a session opened with `--authenticator`, `cfg` answers
+that challenge itself, with no browser and no person involved:
+
+1. It begins a presence ceremony with `POST /api/v1/webauthn/presence/begin`,
+   naming the exact request it is about to repeat: method, path (with its query),
+   the SHA-256 of the request body and the permission from the challenge.
+2. It signs the controller's challenge with the authenticator's key and finishes
+   with `POST /api/v1/webauthn/presence/finish`, which returns a single-use token.
+3. It repeats the original request once with the token in `X-Presence-Token`.
+
+- **Bound to one request.** The controller accepts the token only for the method,
+  path, body and permission named at begin, and only once; any other request is
+  refused.
+- **Never reused.** Every guarded request runs its own begin and finish. Nothing is
+  cached, so two guarded commands (or two guarded requests in one command) use two
+  tokens.
+- **Same RP ID check.** The presence ceremony is refused, and nothing is signed,
+  when the controller's challenge names an RP ID different from the authenticator's.
+- **Fails closed.** A challenge that names no permission fails with an error and no
+  ceremony starts. A challenge that is not a presence challenge fails with the
+  usual step-up error: the authenticator cannot raise the session's assurance level.
+- **No relay.** The browser presence relay (`cfg` printing an approval URL) is used
+  only by sessions that did not use `--authenticator`.
