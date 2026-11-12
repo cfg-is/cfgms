@@ -214,6 +214,8 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"POST", "/api/v1/installer/steward-binaries/v1.0.0/linux/amd64/approve", "installer:approve:steward"},
 	// Rollout credential mint (Issue #6066): presence-gated, no machine access.
 	{"POST", "/api/v1/rollout-credentials", "rollout-credential:create"},
+	// Software-authenticator account flag (Issue #6141): presence-gated, no machine access.
+	{"PUT", "/api/v1/accounts/test-username/software-authenticator", "account:set-software-authenticator"},
 }
 
 // knownFuturePermissions lists permissionAssurance entries with Min > Machine

@@ -395,6 +395,7 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"content-library:set-mode":            true, // Issue #5831: switches the content library mode
 		"rollout-automation:set":              true, // Issue #6065: a tap to turn unattended rollouts on or off
 		"rollout-credential:create":           true, // Issue #6066: a tap to mint the scoped rollout credential
+		"account:set-software-authenticator":  true, // Issue #6141: a tap to allow a software authenticator for an account
 		"workflow:write":                      true, // Issue #5899: a tap to save a workflow
 		"workflow:execute":                    true, // Issue #5899: a tap to start a workflow
 	}

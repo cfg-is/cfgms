@@ -3430,3 +3430,42 @@ func TestCreateAccount_MovedReset_OldRecordChanged_409(t *testing.T) {
 	assert.Equal(t, "tenant-a", metas[0].TenantID)
 	assert.Equal(t, "true", metas[0].Metadata["disabled"])
 }
+
+// TestAccountGetReturnsSoftwareAuthenticatorFlag verifies GET /accounts/{username}
+// returns allow_software_authenticator, false by default and true once the stored
+// record carries the flag (Issue #6141).
+func TestAccountGetReturnsSoftwareAuthenticatorFlag(t *testing.T) {
+	server := setupTestServer(t)
+	seedTenantTree(t, server)
+	require.Equal(t, http.StatusCreated, postAccount(t, server, testAdminPrincipal(), AccountRequest{
+		Username: "flag-reader", TenantID: "msp-a",
+	}).Code)
+
+	get := func() map[string]interface{} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/flag-reader", nil)
+		req = withVars(withPrincipal(req, testAdminPrincipal()), map[string]string{"username": "flag-reader"})
+		rec := httptest.NewRecorder()
+		server.handleGetAccount(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp APIResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		info, ok := resp.Data.(map[string]interface{})
+		require.True(t, ok)
+		return info
+	}
+
+	info := get()
+	val, present := info["allow_software_authenticator"]
+	require.True(t, present, "the field is always returned")
+	assert.Equal(t, false, val)
+
+	ctx := context.Background()
+	acct, err := server.loadAccountFromStore(ctx, "flag-reader", accountStorageTenant("msp-a"))
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	acct.AllowSoftwareAuthenticator = true
+	require.NoError(t, server.persistAccount(ctx, acct, "test"))
+	dropAccountCache(server)
+
+	assert.Equal(t, true, get()["allow_software_authenticator"])
+}

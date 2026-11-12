@@ -338,6 +338,13 @@ var permissionAssurance = map[string]Requirement{
 	// rollout-automation:read is intentionally absent (a read).
 	"rollout-automation:set": {Min: session.AssuranceStrong, RequireUserPresence: true},
 
+	// account:set-software-authenticator gates PUT /accounts/{username}/software-authenticator
+	// (Issue #6141): allowing an account to enrol a CFGMS software authenticator is a
+	// tap-gated human decision, so no API key may use it. The handler additionally needs
+	// a root-scope caller to enable; clearing is open to a caller who may manage the
+	// account's tenant.
+	"account:set-software-authenticator": {Min: session.AssuranceStrong, RequireUserPresence: true},
+
 	// rollout-credential:create gates POST /rollout-credentials (Issue #6066): minting the
 	// scoped rollout credential is a tap-gated human act, so no API key may mint one.
 	"rollout-credential:create": {Min: session.AssuranceStrong, RequireUserPresence: true},

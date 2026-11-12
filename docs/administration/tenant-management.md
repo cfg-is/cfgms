@@ -118,6 +118,23 @@ A client tenant is connected to Microsoft 365 with `cfg tenant m365`. **A connec
 - **Permissions.** `set`, `delete`, `gdap-customers` and `gdap-link` need `tenant:manage`; `get` needs `tenant:read`. A root-scoped operator needs an active crossing into the MSP.
 - **Audit.** Each write emits one event per affected client tenant: `m365.connection.set`, `m365.connection.delete` or `m365.gdap.link`.
 
+## Software authenticator flag
+
+A CFGMS software authenticator is accepted for an account only when two things hold: the account's tenant is listed in `webauthn.allow_software_authenticators.tenants` in `controller.cfg` (see [Software authenticators](../security/SECURITY_CONFIGURATION.md#software-authenticators)), and the account carries the software-authenticator flag. This section covers the flag. **Setting the flag has no effect until the account's tenant is listed in `controller.cfg`.** No API writes that list.
+
+```text
+PUT /api/v1/accounts/{username}/software-authenticator
+{"enabled": true}
+```
+
+`enabled` is required and must be a boolean; any other field is rejected with 400. The response names the account, its tenant and the resulting `allow_software_authenticator`. `GET /api/v1/accounts/{username}` returns the same field.
+
+- **Tap.** Both directions need a fresh presence tap (`account:set-software-authenticator`, Strong assurance). An API key is refused.
+- **Enabling** needs a root-scope caller; a tenant-scoped caller gets 403. It is refused with 400 for a root-scope account, an account with no tenant and an account in the root tenant, and with 503 when the root tenant cannot be resolved.
+- **Clearing** needs the same tenant scope as `account:update`, so a tenant administrator may clear the flag on an account in their tenant. A caller outside the account's tenant gets 404. Clearing is allowed for every account shape. It does not delete credentials: a software credential already registered stays on the account and is inert while the flag is off.
+- **Audit.** Every change writes `account.software_authenticator_flag_changed` (account, tenant, previous and new value, acting principal) before the flag is written. If the event cannot be recorded the route returns 503 and the flag is unchanged.
+- **No other writer.** `POST /api/v1/accounts` and `PUT /api/v1/accounts/{username}` cannot set the flag and ignore an `allow_software_authenticator` body field. An upsert leaves the flag as it was; `reset_credentials` clears it, and so does an upsert that moves the account to another tenant. After either, the flag has to be set again with the route above.
+
 ## Reboot window
 
 The tenant settings panel has a **Reboot window** section beside the `cfg` reboot-window commands. It edits the tenant's declared schedule as YAML text (the same text the API takes) and the tenant default timezone. It shows the status the controller returns (`scheduled` or `unrestricted`) and the next occurrence. A schedule the controller rejects shows the controller's validation message verbatim under the editor and saves nothing. Saving needs `reboot_window:override` and asks for no passkey tap.

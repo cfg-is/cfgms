@@ -171,6 +171,8 @@ var knownPermissions = map[string]bool{
 	"account:update":                 true, // Issue #3126: update permissions and/or disabled state
 	"account:delete":                 true,
 	"account:revoke-enrollment-link": true, // Issue #2974: revoke an outstanding enrollment magic link
+	// Issue #6141: sets the software-authenticator flag; a tap, and root scope to enable.
+	"account:set-software-authenticator": true,
 	// WebAuthn passkey / FIDO2 registration and credential management (Issue #2782, #2783)
 	"webauthn:register": true,
 	"webauthn:list":     true,

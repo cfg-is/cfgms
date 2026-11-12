@@ -402,6 +402,7 @@ var goldenRouteTable = []string{
 	"POST /api/v1/workflows/{id}/versions/{version}/publish/begin",
 	"POST /api/v1/workflows/{id}/versions/{version}/publish/finish",
 	"PUT /api/v1/accounts/{username}",
+	"PUT /api/v1/accounts/{username}/software-authenticator",
 	"PUT /api/v1/automation/libraries/{kind}/mode",
 	"PUT /api/v1/cases/{id}",
 	"PUT /api/v1/installer/artifacts/{platform}/{arch}",
