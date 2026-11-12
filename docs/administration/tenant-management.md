@@ -127,6 +127,14 @@ PUT /api/v1/accounts/{username}/software-authenticator
 {"enabled": true}
 ```
 
+The command for the route is:
+
+```bash
+cfg account software-authenticator <username> --enabled=true|false [--json]
+```
+
+`--enabled` is required. The command prints the stored state (`--json` prints the response). A refusal from the controller (400 for an account shape that cannot take the flag, 403 for a missing tap or caller scope) is a non-zero exit carrying the controller's message. The command does not write the `controller.cfg` tenant list.
+
 `enabled` is required and must be a boolean; any other field is rejected with 400. The response names the account, its tenant and the resulting `allow_software_authenticator`. `GET /api/v1/accounts/{username}` returns the same field.
 
 - **Tap.** Both directions need a fresh presence tap (`account:set-software-authenticator`, Strong assurance). An API key is refused.
