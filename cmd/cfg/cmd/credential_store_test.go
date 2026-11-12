@@ -359,3 +359,114 @@ func TestSignCommandContent_SurfacesStoreFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestCredentialStore_ListFiltersByPrefixAndSorts(t *testing.T) {
+	tmpDir := t.TempDir()
+	overrideCredentialsDir(t, tmpDir)
+	store, err := newCredentialStore()
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	for _, n := range []string{"authenticator.b", "authenticator.a", "signing-key", "other.x"} {
+		require.NoError(t, store.Store(ctx, n, []byte("v")))
+	}
+	// Leftovers that are not credentials: an interrupted-write temp file and a directory.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "authenticator.c.123.tmp"), []byte("x"), 0o600))
+	require.NoError(t, os.Mkdir(filepath.Join(tmpDir, "authenticator.d.enc"), 0o700))
+
+	got, err := store.List(ctx, "authenticator.")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"authenticator.a", "authenticator.b"}, got)
+
+	all, err := store.List(ctx, "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"authenticator.a", "authenticator.b", "other.x", "signing-key"}, all)
+
+	none, err := store.List(ctx, "nothing.")
+	require.NoError(t, err)
+	assert.Empty(t, none)
+	assert.NotNil(t, none)
+}
+
+func TestCredentialStore_ListRejectsPathPrefix(t *testing.T) {
+	overrideCredentialsDir(t, t.TempDir())
+	store, err := newCredentialStore()
+	require.NoError(t, err)
+
+	for _, p := range []string{"../x", "a/b", `a\b`} {
+		_, err := store.List(context.Background(), p)
+		require.Error(t, err, p)
+	}
+}
+
+func TestCredentialStore_DeleteRemovesFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	overrideCredentialsDir(t, tmpDir)
+	store, err := newCredentialStore()
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	require.NoError(t, store.Store(ctx, "gone", []byte("v")))
+	require.NoError(t, store.Store(ctx, "kept", []byte("v")))
+	require.NoError(t, store.Delete(ctx, "gone"))
+
+	_, err = os.Stat(filepath.Join(tmpDir, "gone.enc"))
+	assert.True(t, os.IsNotExist(err))
+	_, err = store.Load(ctx, "kept")
+	assert.NoError(t, err, "deleting one credential must not touch another")
+
+	err = store.Delete(ctx, "gone")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestCredentialStore_DeleteRejectsTraversalName(t *testing.T) {
+	overrideCredentialsDir(t, t.TempDir())
+	store, err := newCredentialStore()
+	require.NoError(t, err)
+
+	for _, n := range []string{"", "..", "../x", "a/b", `a\b`} {
+		require.Error(t, store.Delete(context.Background(), n), n)
+	}
+}
+
+func TestCredentialStore_DeleteRefusesSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks on Windows needs a privilege the CI runner does not guarantee; Store's symlink refusal is covered by the same Lstat check")
+	}
+	tmpDir := t.TempDir()
+	overrideCredentialsDir(t, tmpDir)
+	store, err := newCredentialStore()
+	require.NoError(t, err)
+
+	target := filepath.Join(t.TempDir(), "target")
+	require.NoError(t, os.WriteFile(target, []byte("keep"), 0o600))
+	require.NoError(t, os.Symlink(target, filepath.Join(tmpDir, "link.enc")))
+
+	err = store.Delete(context.Background(), "link")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "symlink")
+	_, statErr := os.Stat(target)
+	assert.NoError(t, statErr)
+
+	exists, err := store.Exists(context.Background(), "link")
+	require.NoError(t, err)
+	assert.True(t, exists, "a symlink must count as occupied")
+}
+
+func TestCredentialStore_Exists(t *testing.T) {
+	overrideCredentialsDir(t, t.TempDir())
+	store, err := newCredentialStore()
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	ok, err := store.Exists(ctx, "x")
+	require.NoError(t, err)
+	assert.False(t, ok)
+	require.NoError(t, store.Store(ctx, "x", []byte("v")))
+	ok, err = store.Exists(ctx, "x")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	_, err = store.Exists(ctx, "../x")
+	assert.Error(t, err)
+}

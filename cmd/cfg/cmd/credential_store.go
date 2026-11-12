@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/cfgis/cfgms/pkg/credential"
 	"github.com/cfgis/cfgms/pkg/secrets/providers/steward"
@@ -128,4 +130,71 @@ func (s *CredentialStore) Load(ctx context.Context, name string) ([]byte, error)
 // implementations use this to clear cached key material.
 func (s *CredentialStore) Lock(ctx context.Context, name string) error {
 	return s.unlocker.Lock(ctx, name)
+}
+
+// Exists reports whether a credential file for name is present. A symlink at the
+// path counts as present, so a caller that checks before Store never treats a
+// planted link as a free slot. Store and Delete refuse the link themselves.
+func (s *CredentialStore) Exists(_ context.Context, name string) (bool, error) {
+	if err := credential.ValidateCredentialName(name); err != nil {
+		return false, err
+	}
+	if _, err := os.Lstat(filepath.Join(s.dir, name+".enc")); err == nil {
+		return true, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("credential store: stat %q: %w", name, err)
+	}
+	return false, nil
+}
+
+// List returns, sorted, the names of the stored credentials that begin with
+// prefix. An empty prefix lists every credential. Only regular <name>.enc files
+// are reported: temp files from an interrupted Store, the salt, directories and
+// symlinks are skipped. List does not decrypt anything.
+func (s *CredentialStore) List(_ context.Context, prefix string) ([]string, error) {
+	if prefix != "" && strings.ContainsAny(prefix, "/\\") {
+		return nil, fmt.Errorf("credential store: list prefix %q contains invalid path characters", prefix)
+	}
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("credential store: list: %w", err)
+	}
+	names := []string{}
+	for _, e := range entries {
+		fname := e.Name()
+		if !e.Type().IsRegular() || !strings.HasSuffix(fname, ".enc") {
+			continue
+		}
+		name := strings.TrimSuffix(fname, ".enc")
+		if !strings.HasPrefix(name, prefix) || credential.ValidateCredentialName(name) != nil {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// Delete removes <dir>/<name>.enc. It refuses a symlink at that path, as Store
+// does, and returns an error wrapping os.ErrNotExist when there is no such
+// credential.
+func (s *CredentialStore) Delete(_ context.Context, name string) error {
+	if err := credential.ValidateCredentialName(name); err != nil {
+		return err
+	}
+	path := filepath.Join(s.dir, name+".enc")
+	fi, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("credential store: delete %q: %w", name, os.ErrNotExist)
+	}
+	if err != nil {
+		return fmt.Errorf("credential store: stat %q: %w", name, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("credential store: refusing %q: credential path is a symlink", name)
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("credential store: delete %q: %w", name, err)
+	}
+	return nil
 }

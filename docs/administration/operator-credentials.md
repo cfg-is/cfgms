@@ -1108,3 +1108,77 @@ cfg account rotate-cert <username> <old_serial> --new-serial <s> [--force]
 | `--fingerprint` | — | New certificate fingerprint (optional; for audit) |
 | `--force` | false | Skip confirmation prompt |
 | `--url` | env/bundle | Override controller URL |
+
+## Agent software authenticator
+
+`cfg authenticator` manages software WebAuthn authenticators: P-256 keys bound to
+one controller's RP ID and origin, for operators and agents that have no hardware
+key or browser. This section covers creating, listing and deleting them; later
+steps (registration, headless login) are documented under their own sub-headings
+here as they ship.
+
+```
+cfg authenticator create <name> --url <controller URL> [--rp-id <id>] [--origin <origin>] [--ca-cert <file>] [--label <text>]
+cfg authenticator list [--json]
+cfg authenticator delete <name> [--force]
+```
+
+**`create`** generates a P-256 key and a random credential ID and stores them as
+one encrypted record. Nothing is sent to the controller, so a new authenticator is
+listed as not registered.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--url` | — | Controller URL (required, must be `https`) |
+| `--rp-id` | host of `--url` | WebAuthn RP ID |
+| `--origin` | `scheme://host[:port]` of `--url` | WebAuthn origin; must be `https`, with a host that is the RP ID or a subdomain of it |
+| `--ca-cert` | — | PEM file with the CA certificate that signs the controller's TLS certificate; stored in the record |
+| `--label` | — | Free-text label |
+
+Names are 1-64 letters, digits, `.`, `_` or `-`, starting with a letter or digit.
+`create` refuses a name that already exists and leaves the existing record
+untouched; delete it first to replace it. `http://` for `--url` or `--origin` is
+refused before anything is written. There is no option to skip TLS verification
+and no way to export the key.
+
+**`list`** shows name, RP ID, origin, credential ID (base64url), whether the
+authenticator is registered, and its protection level (`store`: the key is in the
+encrypted credential store). `--json` prints the same fields, plus the label and
+controller URL, as a JSON array. Key material is never printed by any command.
+
+**`delete`** removes the record after a confirmation prompt (`--force` skips it).
+It does not contact the controller: the controller keeps listing the credential
+until it is revoked with `cfg webauthn revoke <credential-id>`. A record that
+cannot be read can still be deleted.
+
+**Where the key lives:** `<user config dir>/cfgms/credentials/authenticator.<name>.enc`,
+a versioned JSON record (version, name, credential ID, PKCS#8 key, RP ID, origin,
+controller URL, optional CA certificate, user handle, registered flag, protection)
+encrypted by the same credential store as the signing key above. The directory is
+private to the current user: mode 0700 on Linux and macOS, and an ACL for the
+current user and SYSTEM on Windows. The record has no AAGUID field; every response
+carries the fixed CFGMS AAGUID, and no flag, environment variable or config changes
+it. A record with an unknown `version` is rejected with an error naming the version;
+there is no migration, so delete the authenticator and create it again.
+
+**On-disk protection by OS:**
+
+| OS | Protection of the key file |
+|----|----------------------------|
+| Linux | AES-256-GCM, key derived from the machine ID (`/etc/machine-id`, or a per-directory identity file where it is absent) and a per-store salt; file mode 0600 in a 0700 directory |
+| macOS | AES-256-GCM, key derived from the hardware platform UUID and a per-store salt; file mode 0600 in a 0700 directory |
+| Windows | User-scope DPAPI, with entropy derived from the machine GUID and a per-store salt; protected ACL for the current user and SYSTEM |
+
+**Limits:**
+
+- On Linux and macOS the encryption key is derived from values any process running
+  as the same user can read, so any such process can decrypt the key. The
+  encryption protects against a copied file, a backup or a synced config directory,
+  not against code running as the operator. Treat the authenticator as a credential
+  of that user.
+- The key is not moved to the OS keychain, so it works on headless hosts.
+- A record decrypts only for the same user on the same machine; copy it elsewhere
+  and `list` fails with the credential store's different-user-or-machine error;
+  delete the authenticator and create it again there.
+- The software authenticator's user-verified flag only shows that the holder can
+  use the key; it does not verify a person.
