@@ -177,12 +177,8 @@ func runController(configPath string, initMode bool, listenAPIAddr, listenTransp
 	// server starts serving. cfg.WebAuthn was already validated by config.LoadWithPath
 	// (ValidateWebAuthn); wa is nil, nil when the operator has not configured it, which
 	// leaves the passkey endpoints answering 503 exactly as before this wiring existed.
-	wa, err := buildWebAuthnRelyingParty(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to configure webauthn relying party: %w", err)
-	}
-	if wa != nil {
-		srv.GetAPIServer().SetWebAuthn(wa)
+	if err := configureWebAuthn(srv.GetAPIServer(), cfg); err != nil {
+		return err
 	}
 
 	logger.Info("Starting controller server",
@@ -263,6 +259,23 @@ func applyListenOverrides(cfg *config.Config, listenAPIAddr, listenTransportAddr
 		}
 		cfg.Transport.ListenAddr = listenTransportAddr
 	}
+}
+
+// configureWebAuthn installs the WebAuthn relying party and the software-authenticator
+// tenant list on the API server. The relying party is installed only when configured,
+// which leaves the passkey endpoints answering 503 otherwise. The tenant list comes
+// only from controller.cfg and defaults to empty, which turns software-authenticator
+// registration off (Issue #6140).
+func configureWebAuthn(apiServer *controllerapi.Server, cfg *config.Config) error {
+	wa, err := buildWebAuthnRelyingParty(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to configure webauthn relying party: %w", err)
+	}
+	if wa != nil {
+		apiServer.SetWebAuthn(wa)
+	}
+	apiServer.SetSoftwareAuthenticatorTenants(cfg.SoftwareAuthenticatorTenants())
+	return nil
 }
 
 // buildWebAuthnRelyingParty constructs the WebAuthn relying party from the

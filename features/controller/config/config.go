@@ -305,6 +305,43 @@ type WebAuthnConfig struct {
 	// ceremony against this relying party (e.g. "https://cfgms.example.com").
 	// Required and must be HTTPS when RPID is set — see ValidateWebAuthn.
 	RPOrigins []string `yaml:"rp_origins,omitempty"`
+
+	// AllowSoftwareAuthenticators names the tenants whose accounts may register a
+	// CFGMS software authenticator (ADR-021 Amendment 10). Absent or empty means
+	// off. It lives only here: tenant metadata is API-writable, so it is not a
+	// place an administrator account could widen its own policy.
+	AllowSoftwareAuthenticators *AllowSoftwareAuthenticatorsConfig `yaml:"allow_software_authenticators,omitempty"`
+}
+
+// AllowSoftwareAuthenticatorsConfig is the webauthn.allow_software_authenticators
+// block (Issue #6140).
+type AllowSoftwareAuthenticatorsConfig struct {
+	// Tenants lists tenant IDs, matched exactly: a listed tenant does not cover its
+	// child tenants. The root tenant is never permitted, whether or not it is listed.
+	Tenants []string `yaml:"tenants,omitempty"`
+}
+
+// SoftwareAuthenticatorTenants returns the configured software-authenticator tenant
+// list, nil when the block is absent.
+func (c *Config) SoftwareAuthenticatorTenants() []string {
+	if c == nil || c.WebAuthn == nil || c.WebAuthn.AllowSoftwareAuthenticators == nil {
+		return nil
+	}
+	return c.WebAuthn.AllowSoftwareAuthenticators.Tenants
+}
+
+// validateSoftwareAuthenticatorTenants refuses a blank or whitespace-padded entry
+// in webauthn.allow_software_authenticators.tenants (Issue #6140).
+func (c *Config) validateSoftwareAuthenticatorTenants() error {
+	for i, tenantID := range c.SoftwareAuthenticatorTenants() {
+		if strings.TrimSpace(tenantID) == "" {
+			return fmt.Errorf("webauthn.allow_software_authenticators.tenants[%d] must not be empty", i)
+		}
+		if tenantID != strings.TrimSpace(tenantID) {
+			return fmt.Errorf("webauthn.allow_software_authenticators.tenants[%d]: tenant ID %q must not have surrounding whitespace", i, tenantID)
+		}
+	}
+	return nil
 }
 
 // ValidateWebAuthn enforces the WebAuthn relying-party configuration contract at
@@ -312,7 +349,13 @@ type WebAuthnConfig struct {
 // at least one origin is required and every origin must be HTTPS. There is no
 // local-development bypass — a plausible-looking insecure default here would make a
 // phishing-resistant authenticator verify against the wrong origin (Issue #3713).
+// The software-authenticator tenant list is validated whether or not a relying
+// party is configured: an empty or absent list is valid and means off, and an
+// entry that is blank or padded with whitespace is refused (Issue #6140).
 func (c *Config) ValidateWebAuthn() error {
+	if err := c.validateSoftwareAuthenticatorTenants(); err != nil {
+		return err
+	}
 	if c.WebAuthn == nil || c.WebAuthn.RPID == "" {
 		if c.WebAuthn != nil && len(c.WebAuthn.RPOrigins) > 0 {
 			return fmt.Errorf("webauthn.rp_id must be set when webauthn.rp_origins is provided")

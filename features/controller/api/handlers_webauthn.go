@@ -438,25 +438,7 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to reload account state", "STORE_ERROR")
 		return
 	}
-	if freshAcct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
-		return
-	}
-	if freshAcct.ID != acct.ID {
-		// Deleted and recreated under the same username since the request began.
-		s.writeErrorResponse(w, http.StatusConflict,
-			"Account was concurrently modified; retry the registration", "ACCOUNT_MODIFIED")
-		return
-	}
-	if freshAcct.Disabled {
-		s.writeErrorResponse(w, http.StatusForbidden, "Account is disabled", "ACCOUNT_DISABLED")
-		return
-	}
-
-	if freshAcct.credentialIDRevoked(stored.ID) {
-		// Re-adding a revoked ID would revive the sessions its revocation ended (Issue #5166).
-		s.writeErrorResponse(w, http.StatusConflict,
-			"This authenticator was revoked and cannot be registered again", "CREDENTIAL_REVOKED")
+	if !s.checkReloadedAccountForRegistration(w, r, acct, freshAcct, &stored) {
 		return
 	}
 
@@ -494,6 +476,53 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 		Label:        stored.Label,
 		RegisteredAt: stored.RegisteredAt,
 	})
+}
+
+// checkReloadedAccountForRegistration vets the account record reloaded from the
+// durable store before an admin-route credential is persisted: it must still be the
+// account the request began with, enabled, not have revoked this authenticator, and
+// pass the software-authenticator policy (Issue #6140), which is evaluated on the
+// reloaded record. It writes the refusal and returns false when registration must
+// not proceed.
+func (s *Server) checkReloadedAccountForRegistration(w http.ResponseWriter, r *http.Request, acct, freshAcct *account, stored *WebAuthnCredential) bool {
+	switch {
+	case freshAcct == nil:
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+	case freshAcct.ID != acct.ID:
+		// Deleted and recreated under the same username since the request began.
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Account was concurrently modified; retry the registration", "ACCOUNT_MODIFIED")
+	case freshAcct.Disabled:
+		s.writeErrorResponse(w, http.StatusForbidden, "Account is disabled", "ACCOUNT_DISABLED")
+	case freshAcct.credentialIDRevoked(stored.ID):
+		// Re-adding a revoked ID would revive the sessions its revocation ended (Issue #5166).
+		s.writeErrorResponse(w, http.StatusConflict,
+			"This authenticator was revoked and cannot be registered again", "CREDENTIAL_REVOKED")
+	default:
+		return s.enforceSoftwareAuthenticatorPolicy(w, r, freshAcct, stored)
+	}
+	return false
+}
+
+// checkEnrollmentPreconditions vets the reloaded account for the enrollment-token
+// route before the token is consumed: it must have no credential yet, must not have
+// revoked this authenticator, and must pass the software-authenticator policy
+// (Issue #6140). It writes the refusal and returns false when enrollment must not
+// proceed.
+func (s *Server) checkEnrollmentPreconditions(w http.ResponseWriter, r *http.Request, freshAcct *account, stored *WebAuthnCredential) bool {
+	switch {
+	case len(freshAcct.Credentials) != 0:
+		// Another finish raced ahead (impossible via this path due to LoadAndDelete, but
+		// guards against future code paths or direct-store mutations).
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Account already has enrolled credentials", "ALREADY_ENROLLED")
+	case freshAcct.credentialIDRevoked(stored.ID):
+		s.writeErrorResponse(w, http.StatusConflict,
+			"This authenticator was revoked and cannot be registered again", "CREDENTIAL_REVOKED")
+	default:
+		return s.enforceSoftwareAuthenticatorPolicy(w, r, freshAcct, stored)
+	}
+	return false
 }
 
 // getWebAuthn returns the configured WebAuthn instance, or nil when not configured.
@@ -1326,17 +1355,7 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 			"Enrollment token is no longer valid", "TOKEN_INVALID")
 		return
 	}
-	if len(freshAcct.Credentials) != 0 {
-		// Another finish raced ahead (impossible via this path due to LoadAndDelete, but
-		// guards against future code paths or direct-store mutations).
-		s.writeErrorResponse(w, http.StatusConflict,
-			"Account already has enrolled credentials", "ALREADY_ENROLLED")
-		return
-	}
-
-	if freshAcct.credentialIDRevoked(stored.ID) {
-		s.writeErrorResponse(w, http.StatusConflict,
-			"This authenticator was revoked and cannot be registered again", "CREDENTIAL_REVOKED")
+	if !s.checkEnrollmentPreconditions(w, r, freshAcct, &stored) {
 		return
 	}
 

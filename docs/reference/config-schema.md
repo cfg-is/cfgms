@@ -442,6 +442,7 @@ and passkey step-up answer 503.
 | `rp_id` | string | `""` | optional | Relying-party identifier: the controller's effective domain (e.g. `cfgms.acme-corp.example`). No scheme, no port. |
 | `rp_display_name` | string | `rp_id` | optional | Human-readable name shown by the authenticator during the ceremony |
 | `rp_origins` | list[string] | `[]` | required when `rp_id` is set | Fully qualified origins allowed to complete a ceremony (e.g. `https://cfgms.acme-corp.example`). Every entry must start with `https://`. Setting origins without `rp_id` is rejected. |
+| `allow_software_authenticators.tenants` | list[string] | `[]` | optional | Tenant IDs whose accounts may register a CFGMS software authenticator, exact match (a listed tenant does not cover its children). Empty or absent means off. See [Software authenticators](../security/SECURITY_CONFIGURATION.md#software-authenticators). |
 
 ---
 
@@ -773,7 +774,7 @@ Run inside `LoadWithPath` at startup, in this order:
 | `Config.ValidateDeploymentRings` | Ring names match `^[a-z][a-z0-9-]{0,31}$`, are unique, and `fallback_ring` names a declared ring |
 | `Config.ValidateExecutionSecurity` | `security_profile` is `development`, `test`, or `public-beta`. `public-beta` additionally requires `execution.require_signed_adhoc: true`, a `transport` block, `certificate.enable_cert_management: true`, and `transport.use_cert_manager: true`. |
 | `ValidateCAPath` | The final component of `certificate.ca_path` is `ca` |
-| `Config.ValidateWebAuthn` | `rp_origins` non-empty and all `https://` when `rp_id` is set; `rp_origins` without `rp_id` is rejected |
+| `Config.ValidateWebAuthn` | `rp_origins` non-empty and all `https://` when `rp_id` is set; `rp_origins` without `rp_id` is rejected; no `allow_software_authenticators.tenants` entry is empty or padded with whitespace |
 
 Run later, at server start:
 
