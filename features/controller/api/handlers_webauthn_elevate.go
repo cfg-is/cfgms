@@ -161,32 +161,10 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	if principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized,
-			"Authentication required", "AUTHENTICATION_REQUIRED")
-		return
-	}
-
-	sessID, _ := r.Context().Value(webSessionIDContextKey).(string)
-	if sessID == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"Step-up elevation requires a cookie-authenticated web session", "SESSION_REQUIRED")
-		return
-	}
-
-	acct, err := s.getAccountByID(r.Context(), principal.ID)
-	if err != nil {
-		s.logger.Error("Step-up finish: failed to load account",
-			"principal_id", logging.SanitizeLogValue(principal.ID),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to load account", "STORE_ERROR")
-		return
-	}
-	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound,
-			"Account not found", "ACCOUNT_NOT_FOUND")
+	//duplication:justified features/controller/api/handlers_operator_payload_sign.go -- parallel finish prologue of handleOperatorPayloadSignFinish: the two ceremonies hold distinct session stores and error codes, and a shared helper would need a generic over both pending-session types
+	principal, sessID, acct, ok := s.loadCeremonyAccount(w, r, "Step-up finish",
+		"Step-up elevation requires a cookie-authenticated web session")
+	if !ok {
 		return
 	}
 
@@ -219,23 +197,8 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 	ipKey := s.clientIPKey(r) // Issue #4573: trusted-proxy-aware, IPv6 /64-bucketed
 
 	// Check per-session and per-IP throttle before the expensive FinishLogin call.
-	if blocked, wait := s.checkElevateThrottle("session:" + sessID); blocked {
-		s.logger.Warn("Step-up finish: per-session throttle active",
-			"session_id", logging.SanitizeLogValue(sessID),
-			"retry_after_seconds", int(wait.Seconds()))
-		s.writeErrorResponse(w, http.StatusTooManyRequests,
-			"Too many failed attempts — try again later", "THROTTLED")
+	if s.stepUpThrottled(w, sessID, ipKey, sourceIP) {
 		return
-	}
-	if ipKey != "" {
-		if blocked, wait := s.checkElevateThrottle("ip:" + ipKey); blocked {
-			s.logger.Warn("Step-up finish: per-IP throttle active",
-				"source_ip", logging.SanitizeLogValue(sourceIP),
-				"retry_after_seconds", int(wait.Seconds()))
-			s.writeErrorResponse(w, http.StatusTooManyRequests,
-				"Too many failed attempts — try again later", "THROTTLED")
-			return
-		}
 	}
 
 	// Issue #6143: acct stays the full record for the sign-count persist below.
@@ -251,10 +214,7 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 			"session_id", logging.SanitizeLogValue(sessID),
 			"source_ip", logging.SanitizeLogValue(sourceIP),
 			"error", logging.SanitizeLogValue(err.Error()))
-		s.recordElevateFailure("session:" + sessID)
-		if ipKey != "" {
-			s.recordElevateFailure("ip:" + ipKey)
-		}
+		s.recordElevateFailures(sessID, ipKey)
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 		return
@@ -265,23 +225,14 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 	// the stored count. Authenticators that do not implement sign counters return 0 for both;
 	// the spec permits this (0→0 is allowed, not a suspected clone signal).
 	newSignCount := credential.Authenticator.SignCount
-	var storedSignCount uint32
-	for _, c := range acct.Credentials {
-		if string(c.ID) == string(credential.ID) {
-			storedSignCount = c.SignCount
-			break
-		}
-	}
-	if (storedSignCount > 0 || newSignCount > 0) && newSignCount <= storedSignCount {
+	storedCount := storedSignCount(acct, credential.ID)
+	if !signCountAdvances(storedCount, newSignCount) {
 		s.logger.Warn("Step-up finish: sign count not advancing — potential authenticator clone",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
 			"session_id", logging.SanitizeLogValue(sessID),
-			"stored_count", storedSignCount,
+			"stored_count", storedCount,
 			"response_count", newSignCount)
-		s.recordElevateFailure("session:" + sessID)
-		if ipKey != "" {
-			s.recordElevateFailure("ip:" + ipKey)
-		}
+		s.recordElevateFailures(sessID, ipKey)
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
 		return
@@ -295,10 +246,7 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 				"principal_id", logging.SanitizeLogValue(principal.ID),
 				"session_id", logging.SanitizeLogValue(sessID),
 				"error", logging.SanitizeLogValue(recordErr.Error()))
-			s.recordElevateFailure("session:" + sessID)
-			if ipKey != "" {
-				s.recordElevateFailure("ip:" + ipKey)
-			}
+			s.recordElevateFailures(sessID, ipKey)
 			s.writeErrorResponse(w, http.StatusForbidden,
 				"Credential is no longer valid", "CREDENTIAL_REVOKED")
 			return
@@ -344,6 +292,49 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 		Assurance:  "strong",
 		ElevatedAt: now,
 	})
+}
+
+// stepUpThrottled applies the per-session and per-IP step-up throttles. When either is
+// active it writes the 429 response and returns true.
+func (s *Server) stepUpThrottled(w http.ResponseWriter, sessID, ipKey, sourceIP string) bool {
+	return s.ceremonyThrottled(w, "Step-up finish", s.checkElevateThrottle,
+		"session:"+sessID, "ip:"+ipKey, sessID, ipKey, sourceIP)
+}
+
+// ceremonyThrottled checks the per-session throttle key and, when ipKey is known, the
+// per-IP throttle key through check (a ceremony's own throttle). When either is active
+// it logs under op, writes the 429 response and returns true. Shared by the step-up and
+// operator-payload sign finish handlers.
+func (s *Server) ceremonyThrottled(w http.ResponseWriter, op string, check func(key string) (bool, time.Duration),
+	sessThrottleKey, ipThrottleKey, sessID, ipKey, sourceIP string) bool {
+	if blocked, wait := check(sessThrottleKey); blocked {
+		s.logger.Warn(op+": per-session throttle active",
+			"session_id", logging.SanitizeLogValue(sessID),
+			"retry_after_seconds", int(wait.Seconds()))
+		s.writeErrorResponse(w, http.StatusTooManyRequests,
+			"Too many failed attempts — try again later", "THROTTLED")
+		return true
+	}
+	if ipKey != "" {
+		if blocked, wait := check(ipThrottleKey); blocked {
+			s.logger.Warn(op+": per-IP throttle active",
+				"source_ip", logging.SanitizeLogValue(sourceIP),
+				"retry_after_seconds", int(wait.Seconds()))
+			s.writeErrorResponse(w, http.StatusTooManyRequests,
+				"Too many failed attempts — try again later", "THROTTLED")
+			return true
+		}
+	}
+	return false
+}
+
+// recordElevateFailures counts one failed step-up attempt against the session and, when
+// known, the client IP.
+func (s *Server) recordElevateFailures(sessID, ipKey string) {
+	s.recordElevateFailure("session:" + sessID)
+	if ipKey != "" {
+		s.recordElevateFailure("ip:" + ipKey)
+	}
 }
 
 // checkElevateThrottle returns (true, retryAfter) when the key is currently throttled,
