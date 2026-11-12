@@ -27,34 +27,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
-	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	"github.com/cfgis/cfgms/pkg/session"
 	"github.com/cfgis/cfgms/pkg/softauthn"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
-
-// seeFieldsUnredacted lets a test read the values the handlers put in the audit
-// details. The audit manager redacts the value of every detail key containing "auth" or
-// "credential" (pkg/audit RedactedKeys), which includes software_authenticator and
-// credential_id, so a persisted event carries the key with the value "[REDACTED]".
-// That redaction is outside this story's scope (pkg/audit); until it is addressed the
-// tests drop those two deny-list terms for their own duration so that they can check the
-// values each site passes. It is called before the fixture is built, so its cleanup runs
-// after the fixture's.
-func seeFieldsUnredacted(t *testing.T) {
-	t.Helper()
-	orig := audit.RedactedKeys
-	kept := make([]string, 0, len(orig))
-	for _, k := range orig {
-		if k != "auth" && k != "credential" {
-			kept = append(kept, k)
-		}
-	}
-	audit.RedactedKeys = kept
-	t.Cleanup(func() { audit.RedactedKeys = orig })
-}
 
 // markedEvents returns every audit event that carries the software_authenticator field.
 func (f *enfFixture) markedEvents(t *testing.T) []*business.AuditEntry {
@@ -154,7 +132,6 @@ func assertMarked(t *testing.T, events []*business.AuditEntry, wantSoftware bool
 func TestSoftwareAuthenticatorAudit_SoftwareCredentialUseIsMarked(t *testing.T) {
 	for _, c := range auditCeremonies() {
 		t.Run(c.name, func(t *testing.T) {
-			seeFieldsUnredacted(t)
 			f := newEnfFixture(t, true, true)
 			require.True(t, c.run(t, f, true), "the software credential must be accepted")
 
@@ -169,7 +146,6 @@ func TestSoftwareAuthenticatorAudit_SoftwareCredentialUseIsMarked(t *testing.T) 
 func TestSoftwareAuthenticatorAudit_OtherCredentialUseIsMarkedFalse(t *testing.T) {
 	for _, c := range auditCeremonies() {
 		t.Run(c.name, func(t *testing.T) {
-			seeFieldsUnredacted(t)
 			f := newEnfFixture(t, true, true)
 			require.True(t, c.run(t, f, false), "the other credential must be accepted")
 
@@ -182,7 +158,6 @@ func TestSoftwareAuthenticatorAudit_OtherCredentialUseIsMarkedFalse(t *testing.T
 // [REQUIRED TEST] A login whose assertion carries a bad signature still writes the
 // failure event, marked as a software authenticator.
 func TestSoftwareAuthenticatorAudit_FailedLoginIsMarked(t *testing.T) {
-	seeFieldsUnredacted(t)
 	f := newEnfFixture(t, true, true)
 	rec := f.passkeyLoginWith(t, true, webauthntest.WithCorruptSignature())
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
@@ -195,7 +170,6 @@ func TestSoftwareAuthenticatorAudit_FailedLoginIsMarked(t *testing.T) {
 
 // A failed login by another credential still writes the failure event, marked false.
 func TestSoftwareAuthenticatorAudit_FailedLoginOtherCredentialIsMarkedFalse(t *testing.T) {
-	seeFieldsUnredacted(t)
 	f := newEnfFixture(t, true, true)
 	rec := f.passkeyLoginWith(t, false, webauthntest.WithCorruptSignature())
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
@@ -215,7 +189,6 @@ func TestSoftwareAuthenticatorAudit_PolicyRefusedUseIsDenied(t *testing.T) {
 		for _, mode := range enfCeremonyModes {
 			t.Run(name+"/"+mode.name, func(t *testing.T) {
 				c := byName[name]
-				seeFieldsUnredacted(t)
 				f := newEnfFixture(t, true, true)
 				mode.off(t, f)
 
@@ -237,7 +210,6 @@ func TestSoftwareAuthenticatorAudit_PolicyRefusedUseIsDenied(t *testing.T) {
 // A refused software credential is a denial even when the same account holds a working
 // hardware credential, and the hardware credential's own use is not affected.
 func TestSoftwareAuthenticatorAudit_RefusalDoesNotMarkTheOtherCredential(t *testing.T) {
-	seeFieldsUnredacted(t)
 	f := newEnfFixture(t, true, true)
 	enfFlagCleared.off(t, f)
 
@@ -257,7 +229,6 @@ func TestSoftwareAuthenticatorAudit_NewFailureEventsAreForSoftwareCredentialsOnl
 					c = x
 				}
 			}
-			seeFieldsUnredacted(t)
 			f := newEnfFixture(t, true, true)
 			enfFlagCleared.off(t, f)
 
@@ -293,7 +264,6 @@ func TestSoftwareAuthenticatorAuditDetails(t *testing.T) {
 // An audit event for a credential that is not the account's carries no marker, so a
 // failed login with an unknown credential never claims one.
 func TestSoftwareAuthenticatorAudit_UnidentifiedCredentialIsNotMarked(t *testing.T) {
-	seeFieldsUnredacted(t)
 	f := newEnfFixture(t, true, true)
 	f.softID = []byte("not-registered") // the assertion names a credential the account does not hold
 	rec := f.passkeyLoginWith(t, true)
@@ -336,7 +306,6 @@ func (f *enfFixture) passkeyLoginWith(t *testing.T, soft bool, opts ...webauthnt
 func TestSoftwareAuthenticatorAudit_StepUpBadSignature(t *testing.T) {
 	for _, soft := range []bool{true, false} {
 		t.Run(fmt.Sprintf("software=%v", soft), func(t *testing.T) {
-			seeFieldsUnredacted(t)
 			f := newEnfFixture(t, true, true)
 			sessID := f.webSessionID(t)
 			begin := doStepUpBegin(t, f.server, f.principal(), sessID)

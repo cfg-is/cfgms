@@ -1167,6 +1167,40 @@ func TestRedactMap_AuthDoesNotOverMatchAttributionKeys(t *testing.T) {
 	assert.Equal(t, "[REDACTED]", entry.Details["auth_token"], "auth_token remains sensitive")
 }
 
+// TestRedactMap_SoftwareAuthenticatorFieldsSurviveRedaction checks that the exact keys
+// software_authenticator and credential_id are stored with their values, while keys that
+// merely resemble them, or that contain another deny-list term, stay redacted.
+func TestRedactMap_SoftwareAuthenticatorFieldsSurviveRedaction(t *testing.T) {
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("action").
+		User("user", business.AuditUserTypeHuman).
+		Resource("res", "id", "").
+		Detail("software_authenticator", true).
+		Detail("credential_id", "cred-abc").
+		Detail("aaguid", "00000000-0000-0000-0000-000000000000").
+		Detail("software_authenticator_token", "t1").
+		Detail("software_authenticator_secret", "s1").
+		Detail("credential_id_secret", "s2").
+		Detail("credential_ids", "x").
+		Detail("credentials", "x").
+		Detail("credential", "x").
+		Detail("authenticator", "x").
+		Severity(business.AuditSeverityMedium)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+
+	assert.Equal(t, true, entry.Details["software_authenticator"], "marker must not be redacted")
+	assert.Equal(t, "cred-abc", entry.Details["credential_id"], "credential_id must not be redacted")
+	assert.Equal(t, "00000000-0000-0000-0000-000000000000", entry.Details["aaguid"])
+	for _, k := range []string{"software_authenticator_token", "software_authenticator_secret",
+		"credential_id_secret", "credential_ids", "credentials", "credential", "authenticator"} {
+		assert.Equal(t, "[REDACTED]", entry.Details[k], "%s must remain redacted", k)
+	}
+}
+
 // TestRedactMap_AuthorizationKeysRemainRedacted pins the credential-bearing side
 // of the "auth" deny-list term: exempting attribution keys must never stop
 // "Authorization", "authentication" and friends from being redacted. A

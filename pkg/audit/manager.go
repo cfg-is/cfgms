@@ -89,6 +89,20 @@ var authAttributionKeys = map[string]struct{}{
 	"authorizedbyid": {},
 }
 
+// exemptKeyTerms is the exact-match allow-list of detail keys whose names merely
+// contain a deny-list term while carrying a non-secret marker or identifier. Each
+// key is exempt from the one named term only: the key "credential_id" is an opaque
+// credential identifier (not credential material) and "software_authenticator" is
+// a boolean marker, both emitted so a reviewer can pick software-authenticator
+// actions out of the trail. Keys are compared exactly, after lowercasing, with no
+// separator stripping, and every other deny-list term still applies, so the list is
+// fail-closed: "credential_id_secret", "credentials" and "software_authenticator_token"
+// stay redacted.
+var exemptKeyTerms = map[string]string{
+	"software_authenticator": "auth",
+	"credential_id":          "credential",
+}
+
 // nonAlphanumeric matches the separator characters stripped from a key before it
 // is compared against authAttributionKeys.
 var nonAlphanumeric = regexp.MustCompile(`[^a-z0-9]`)
@@ -103,7 +117,8 @@ func isAuthAttributionKey(lowerKey string) bool {
 // isSensitiveKey reports whether key's lowercased form matches any deny-list term
 // in RedactedKeys. Every term, "auth" included, is matched as a plain substring;
 // the sole exception is that "auth" does not fire for the exact attribution keys
-// in authAttributionKeys, whose over-matching was Issue #4098 item 7. Other
+// in authAttributionKeys, whose over-matching was Issue #4098 item 7, and the exact
+// keys in exemptKeyTerms (software_authenticator, credential_id). Other
 // deny-list terms still apply to those keys, so "author_token" is redacted by
 // "token" even though "author" is exempt from "auth".
 func isSensitiveKey(key string) bool {
@@ -113,6 +128,9 @@ func isSensitiveKey(key string) bool {
 			continue
 		}
 		if deny == "auth" && isAuthAttributionKey(lower) {
+			continue
+		}
+		if exemptKeyTerms[lower] == deny {
 			continue
 		}
 		return true

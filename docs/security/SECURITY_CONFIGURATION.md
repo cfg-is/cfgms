@@ -117,7 +117,6 @@ other credentials is unchanged. When the policy refuses the use, the event's res
 `denied` and its reason is `software_authenticator_policy` (`reason` on login, presence,
 step-up and publish events; `rejection_reason` on `operator_payload.dispatch`).
 
-The audit manager redacts the value of any detail key containing `auth` or `credential`
-(`pkg/audit` `RedactedKeys`), which covers `software_authenticator` and `credential_id`:
-a persisted event currently holds the key with the value `[REDACTED]`. `aaguid`, the
-event action and the result are not redacted.
+The audit manager's redaction (`pkg/audit` `RedactedKeys`) matches `auth` and `credential`
+as substrings, so it exempts the exact keys `software_authenticator` and `credential_id`;
+both are stored with their values. Similar keys such as `credential_ids` stay redacted.
