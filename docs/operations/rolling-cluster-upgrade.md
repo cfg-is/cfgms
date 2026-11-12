@@ -82,6 +82,90 @@ Proceed to the next node only after the upgraded node is healthy and available
 through the routing layer. Keep an independently verified previous binary and
 recoverable storage backup until the full upgrade has been accepted.
 
+## Mixed-version rollout (N and N-1)
+
+During a rolling upgrade, two revisions share one PostgreSQL database: the revision
+being rolled out (N) and the previous revision on `develop` (N-1). The schema is
+changed so both run at once. The rule and how it is enforced are in
+[Schema evolution (N / N-1)](../architecture/storage-architecture.md#schema-evolution-n--n-1).
+This applies to the PostgreSQL provider only.
+
+### Read each node's schema range
+
+Every node reports the database schema version it requires and the oldest it tolerates
+through the shared node registry. Read both for all nodes with one authenticated
+`GET /api/v1/ha/cluster` request (see the [operator guide](../deployment/cfg-operator-guide.md)
+for authentication):
+
+```bash
+curl --fail --cacert /path/to/controller-ca.crt <authentication options> \
+  <controller-url>/api/v1/ha/cluster
+```
+
+The caller needs the `ha:read-cluster` permission. Each node object carries:
+
+- `schema_required`: the schema version that node's build creates and expects.
+- `schema_min_tolerated`: the oldest recorded schema version that node starts against.
+
+A mixed cluster shows two different `schema_required` values. `0` means unknown (the
+node predates the fields or the registry does not track a range), not "no requirement".
+A node's entry goes stale about 90 seconds after its last registry update.
+
+### A refused start
+
+A node refuses to start when the database is outside the range its build tolerates. The
+service log carries an error that begins `database schema version is outside the range
+this controller tolerates`, followed by one of two reasons:
+
+- `recorded schema version is <a> but this controller tolerates <b> through <c>`: the
+  database is older than this build accepts. Upgrade the controllers that last wrote the
+  database, or restore a database at a tolerated schema version.
+- `the database requires controllers at schema version <n> or later but this controller
+  is at <m>`: a contract step has already removed schema this build needs. Upgrade this
+  controller to the current revision, or restore a database at a tolerated schema
+  version.
+
+A refused node does not serve and does not record itself as having passed the gate. The
+rest of the cluster is not affected. Inspect `journalctl -u cfgms-controller`, fix the
+cause above, then restart the node. Do not edit the version record by hand.
+
+### Roll back one version
+
+Rolling one node back from N to N-1 needs no schema rollback. Replace the binary with the
+previous revision using the same drain, replace and validate steps as above. N-1 is
+accepted because the contract floor is the marker of the latest contract step: a node
+at or above the marker keeps running, and only a node below it is refused. The database
+record of the highest applied version (`version`) is never lowered, and N-1 tolerates it.
+
+The contract covers rollback by one version only. If a rolled-back node is refused with
+the second error above, the database floor is above that binary's schema version; restore
+the backup taken before the upgrade together with the matching binary.
+
+### A contract step waits for older nodes
+
+Removing or narrowing schema (a contract step) is applied on a node start, and only when
+no live node still needs the old shape. It is blocked while either of these is true:
+
+- a live node registered with a `schema_required` below the step's marker, including a
+  row with `schema_required` of `0` from a node that predates the column;
+- a node passed the start-up gate within the last 90 seconds and has not registered yet.
+
+A blocked step is not a failure. The node logs `database contract step not applied yet;
+it applies on a later node start once older nodes are gone`, names the blocking nodes,
+and starts normally. Nothing retries the step on a timer: it is applied on a later node
+start, after the older nodes' registry rows have gone stale. The restarting node's own
+row from before the restart also blocks the step for up to the 90 second staleness
+window. A contract step therefore takes effect one rollout after the expansion it
+follows. Finish the rollout so no N-1 node remains, wait out the staleness window, then
+restart one node to apply it.
+
+### Which controls are automatic
+
+The version gate and the contract guard run on every node start. The static checks of
+the schema statements run with the database provider's test suite. The two-revision
+compatibility run happens at merge-queue time, not on every pull request push. Backfill
+design is checked by review only. The architecture document lists each control.
+
 The [cluster service decision](../architecture/decisions/031-controller-cluster-service-model.md)
 owns the any-node/shared-store model. The [upgrade lifecycle reference](upgrade-lifecycle.md)
 explains which history and status surfaces apply.
