@@ -114,6 +114,49 @@ func TestStorageProbeFailureThenRecovery(t *testing.T) {
 	assert.Contains(t, out, "cfgms_storage_probe_failures_total 1")
 }
 
+// TestStorageProbeBackToBackSamplesNeverCountInFlight: a sample that returns
+// must already have released the in-flight guard, so an instantly-succeeding
+// check sampled back to back is never reported as a still-running probe. With
+// the guard released after the result was published, the next sample could
+// win the race against the previous goroutine's release and count a failure.
+func TestStorageProbeBackToBackSamplesNeverCountInFlight(t *testing.T) {
+	srv := newSignalSourceTestServer(t)
+	probe := newTestProbe(t, srv, func(context.Context) error { return nil }, storageProbeTimeout)
+
+	const samples = 20000
+	for i := 0; i < samples; i++ {
+		probe.sample(context.Background())
+		if !probe.inFlight.CompareAndSwap(false, false) {
+			t.Fatalf("sample %d returned while its probe still held the in-flight guard", i)
+		}
+	}
+
+	out := renderSignals(t, srv)
+	assert.Contains(t, out, "cfgms_storage_connected 1")
+	assert.Contains(t, out, "cfgms_storage_probe_failures_total 0")
+}
+
+// TestStorageProbePanicReleasesInFlight: a panicking check releases the guard
+// before its failure is reported, so the next sample runs a fresh probe.
+func TestStorageProbePanicReleasesInFlight(t *testing.T) {
+	srv := newSignalSourceTestServer(t)
+	var calls atomic.Int32
+	probe := newTestProbe(t, srv, func(context.Context) error {
+		if calls.Add(1) == 1 {
+			panic("driver bug")
+		}
+		return nil
+	}, storageProbeTimeout)
+
+	probe.sample(context.Background())
+	probe.sample(context.Background())
+
+	assert.Equal(t, int32(2), calls.Load(), "the sample after a panic must run a fresh probe")
+	out := renderSignals(t, srv)
+	assert.Contains(t, out, "cfgms_storage_connected 1")
+	assert.Contains(t, out, "cfgms_storage_probe_failures_total 1")
+}
+
 // TestStorageProbeErrorTextIsNeverExported: the failure reason carries paths and
 // driver text; none of it may reach the exposition.
 func TestStorageProbeErrorTextIsNeverExported(t *testing.T) {
