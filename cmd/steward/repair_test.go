@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/steward/client"
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -434,14 +435,26 @@ func (f *repairFixture) send(req cpTypes.RepairRequest) {
 // repairReason waits for a heartbeat carrying the repair outcome code.
 func repairReason(t *testing.T, srv *roServer, component, code string) cpTypes.HealthReason {
 	t.Helper()
-	deadline := time.After(30 * time.Second)
+	return repairReasonAfterLoss(t, srv, component, code, 0, 30*time.Second)
+}
+
+// repairReasonAfterLoss is repairReason for a controller that loses the first
+// `lost` heartbeats carrying the reason, and that waits `within` for one more.
+func repairReasonAfterLoss(t *testing.T, srv *roServer, component, code string, lost int, within time.Duration) cpTypes.HealthReason {
+	t.Helper()
+	deadline := time.After(within)
 	for {
 		select {
 		case hb := <-srv.heartbeats:
 			for _, r := range hb.Reasons {
-				if r.Component == component && r.Code == code {
-					return r
+				if r.Component != component || r.Code != code {
+					continue
 				}
+				if lost > 0 {
+					lost--
+					break
+				}
+				return r
 			}
 		case <-deadline:
 			t.Fatalf("no heartbeat carried %s/%s", component, code)
@@ -528,6 +541,36 @@ func TestRepair_CompletesEndToEnd_KeepsStewardIDLogsAndHistory(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(f.env.f.dir, repairStateFileName))
 	assert.NoFileExists(t, filepath.Join(f.env.f.dir, "device_identity.enc.next"))
 	assert.True(t, f.latch.isLatched(), "the steward stays latched until the controller unlocks it")
+}
+
+// The repair outcome reaches the controller on the link opened after the repair.
+// A link's own first heartbeat is a single fire-and-forget send (the next
+// periodic one is 20 to 30 s later), so when the controller does not receive it
+// the steward must still report the outcome within seconds.
+func TestRepair_OutcomeHeartbeatLost_ReportedAgainWithoutWaitingForThePeriodicOne(t *testing.T) {
+	prevInterval := repairOutcomeResendInterval
+	repairOutcomeResendInterval = 200 * time.Millisecond
+	t.Cleanup(func() { repairOutcomeResendInterval = prevInterval })
+
+	f := newRepairFixture(t, repairFixtureOpts{})
+	f.start()
+	f.env.dirBad.Store(false)
+	f.ctrl.allow("repair-lost")
+	f.send(f.request("repair-lost", requestOpts{}))
+
+	// The periodic heartbeat is at least 20 s apart, so a 10 s wait cannot be
+	// satisfied by it.
+	reason := repairReasonAfterLoss(t, f.env.f.srv, cpTypes.HealthComponentRepair, cpTypes.ReasonCodeRepairCompleted, 1, 10*time.Second)
+	assert.Equal(t, "repair-lost", reason.Message, "the outcome carries the repair ID")
+}
+
+// A steward with no repair outcome to report sends nothing extra.
+func TestRepairer_ConfirmOutcome_NothingToReportStartsNothing(t *testing.T) {
+	var r *repairer
+	r.confirmOutcome(context.Background(), nil) // no repairer, no link: must not panic
+
+	r = &repairer{reasons: client.NewHealthReasonRegistry()}
+	r.confirmOutcome(context.Background(), nil)
 }
 
 func TestRepair_ReconnectHold_NoDialPresentsTheOldCertificate(t *testing.T) {
