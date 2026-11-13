@@ -9,3 +9,4 @@ Day-2 administration from the `cfg` CLI.
 
 - [Operator and service credentials](operator-credentials.md) - Enrollment, renewal, containment, accounts and signing credentials
 - [Workflow operations](workflows.md) - Run, inspect, cancel and role-promotion operations
+- [Agent onboarding](agent-onboarding.md) - Give an agent a tenant-scoped account and software authenticator, from the one-time root crossing to headless operation
