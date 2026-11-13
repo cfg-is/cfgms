@@ -204,8 +204,8 @@ func registerSoftwareAuthenticatorOnAccount(cmd *cobra.Command, client *APIClien
 	}
 
 	if err := registerAuthenticator(ctx, store, rec,
-		func(ctx context.Context) (json.RawMessage, error) {
-			opts, err := client.WebAuthnBeginRegistration(ctx, webAuthnUsername)
+		func(ctx context.Context, body []byte) (json.RawMessage, error) {
+			opts, err := client.WebAuthnBeginRegistration(ctx, webAuthnUsername, body)
 			if err != nil {
 				return nil, fmt.Errorf("failed to begin WebAuthn registration: %w", err)
 			}

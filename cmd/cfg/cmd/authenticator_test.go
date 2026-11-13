@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io/fs"
 	"math/big"
 	"net/http"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -657,4 +659,108 @@ func TestAuthenticatorSources_DoNotUseDeviceIdentityKeyStore(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotRegexp(t, forbidden, string(src), f)
 	}
+}
+
+// --key-provider tpm on a host whose TPM cannot be opened is refused with a message
+// that names the requirement, and creates no record and no file.
+func TestAuthenticatorCreate_TPMProviderRefusedWithoutUsableTPM(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "creds")
+	overrideCredentialsDir(t, dir)
+	useTPMOpener(t, noTPM)
+
+	out, err := runAuthenticator(t, "", "create", "agent-1", "--url", testAuthURL, "--key-provider", "tpm")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--key-provider tpm")
+	if runtime.GOOS == "darwin" {
+		// macOS refuses the provider before any TPM is opened.
+		assert.Contains(t, err.Error(), "not supported on macOS")
+		assert.Contains(t, err.Error(), "root agent account")
+		assert.NoDirExists(t, dir)
+		return
+	}
+	assert.Contains(t, err.Error(), "root agent account requires a key held in a TPM")
+	assert.Contains(t, err.Error(), "no software key was created")
+	assert.NotContains(t, out, `Authenticator "agent-1" created`)
+	assert.NoDirExists(t, dir, "a refused create must not create the credentials directory or any record")
+}
+
+// On macOS --key-provider tpm is refused as unsupported before the TPM is touched.
+func TestAuthenticatorCreate_TPMProviderUnsupportedOnMacOS(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "creds")
+	overrideCredentialsDir(t, dir)
+	orig := authenticatorHostOS
+	authenticatorHostOS = "darwin"
+	t.Cleanup(func() { authenticatorHostOS = orig })
+	useTPMOpener(t, func() (transport.TPMCloser, error) {
+		t.Error("the TPM must not be opened when the provider is unsupported")
+		return nil, errors.New("unreachable")
+	})
+
+	_, err := runAuthenticator(t, "", "create", "agent-1", "--url", testAuthURL, "--key-provider", "tpm")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not supported on macOS")
+	assert.Contains(t, err.Error(), "root agent account")
+	assert.NoDirExists(t, dir)
+}
+
+// tpm is an additional provider: store and platform selection, the default and the
+// unknown-value refusal are unchanged.
+func TestResolveAuthenticatorKeyProvider_TPMAndUnchangedChoices(t *testing.T) {
+	c, err := resolveAuthenticatorKeyProvider("tpm")
+	if runtime.GOOS == "darwin" {
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not supported on macOS")
+	} else {
+		require.NoError(t, err)
+		assert.Equal(t, authenticatorKeyChoice{protection: authenticatorProtectionTPM}, c, "tpm never falls back")
+	}
+
+	c, err = resolveAuthenticatorKeyProvider("store")
+	require.NoError(t, err)
+	assert.Equal(t, authenticatorKeyChoice{protection: authenticatorProtectionStore}, c)
+
+	c, err = resolveAuthenticatorKeyProvider("")
+	require.NoError(t, err)
+	if identity.UserKeysSupported() {
+		assert.Equal(t, authenticatorKeyChoice{protection: authenticatorProtectionPlatform, fallback: true}, c,
+			"the Windows default is unchanged")
+	} else {
+		assert.Equal(t, authenticatorKeyChoice{protection: authenticatorProtectionStore}, c)
+	}
+
+	_, err = resolveAuthenticatorKeyProvider("platform")
+	if identity.UserKeysSupported() {
+		require.NoError(t, err)
+	} else {
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not supported on "+runtime.GOOS)
+	}
+
+	_, err = resolveAuthenticatorKeyProvider("hsm")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"tpm"`)
+}
+
+// A tpm record whose blobs are missing is refused with the remedy; one with blobs
+// signs only through the TPM.
+func TestAuthenticatorRecord_TPMBlobsRequired(t *testing.T) {
+	rec, err := newAuthenticatorRecord("x")
+	require.NoError(t, err)
+	rec.RPID, rec.Origin = testAuthRPID, testAuthOrigin
+	rec.KeyPKCS8 = nil
+	rec.Protection = authenticatorProtectionTPM
+
+	_, err = rec.authenticator()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TPM key blobs are missing")
+	assert.Contains(t, err.Error(), "cfg authenticator delete x --force")
+
+	rec.KeyPublicBlob, rec.KeyPrivateBlob = tpmTestPublicBlob(t), []byte("blob")
+	signer, err := rec.signer()
+	require.NoError(t, err)
+	assert.NotNil(t, signer.Public())
+
+	rec.KeyPublicBlob = []byte("garbage")
+	_, err = rec.signer()
+	require.Error(t, err)
 }

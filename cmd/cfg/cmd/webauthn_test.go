@@ -304,6 +304,8 @@ type registerTestServer struct {
 	finishBody []byte
 	registered *webauthn.Credential
 	failBegin  bool
+	// tpm, when set, makes begin and finish follow the TPM wire contract.
+	tpm *tpmPolicy
 }
 
 func newRegisterTestServer(t *testing.T) *registerTestServer {
@@ -326,6 +328,15 @@ func newRegisterTestServer(t *testing.T) *registerTestServer {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/accounts/alice/webauthn/register/begin":
 			rs.begins++
 			rs.beginBody, _ = io.ReadAll(r.Body)
+			var challenge map[string]any
+			if rs.tpm != nil {
+				var refusal *tpmRefusal
+				if challenge, refusal = rs.tpm.begin(rs.beginBody); refusal != nil {
+					w.WriteHeader(refusal.status)
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": refusal.code, "message": refusal.message}})
+					return
+				}
+			}
 			if rs.failBegin {
 				w.WriteHeader(http.StatusForbidden)
 				_, _ = w.Write([]byte(`{"error":{"code":"ACCOUNT_DISABLED","message":"Account is disabled"}}`))
@@ -342,12 +353,15 @@ func newRegisterTestServer(t *testing.T) *registerTestServer {
 				return
 			}
 			rs.session = session
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": creation})
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": withTPMChallenge(creation, challenge)})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/accounts/alice/webauthn/register/finish":
 			rs.finishes++
 			rs.finishURL = r.URL.String()
 			rs.finishBody, _ = io.ReadAll(r.Body)
 			r.Body = io.NopCloser(bytes.NewReader(rs.finishBody))
+			if rs.tpm != nil {
+				rs.tpm.finish(rs.finishBody)
+			}
 			if rs.session == nil {
 				w.WriteHeader(http.StatusBadRequest)
 				return
@@ -585,4 +599,79 @@ func TestNoEmailPasswordRecoveryRoute(t *testing.T) {
 		assert.NotContains(t, content, dp.pattern,
 			"handlers_webauthn.go must not contain %q: %s", dp.pattern, dp.reason)
 	}
+}
+
+// With a "store" record the admin register begin has no body and the finish carries
+// attestation none, even when the controller is TPM-aware but does not require one.
+func TestWebAuthnRegisterAuthenticator_StoreRecordSendsNoBeginBodyAndFmtNone(t *testing.T) {
+	rs := newRegisterTestServer(t)
+	rs.tpm = &tpmPolicy{}
+	restore := saveWebAuthnFlags(t)
+	defer restore()
+	authTestStore(t)
+	createAuth(t, "agent-1")
+
+	bundlePath = writeBundleFile(t, generateWebAuthnBundle(t), rs.srv.URL)
+	webAuthnUsername = "alice"
+	webAuthnAuthenticator = "agent-1"
+	webAuthnLabel = ""
+
+	var out bytes.Buffer
+	webAuthnRegisterCmd.SetOut(&out)
+	t.Cleanup(func() { webAuthnRegisterCmd.SetOut(nil) })
+	require.NoError(t, runWebAuthnRegister(webAuthnRegisterCmd, nil))
+
+	bodies := rs.tpm.beginBodies()
+	require.Len(t, bodies, 1)
+	assert.Empty(t, bodies[0], "a store record sends no begin body")
+	format, activation, _, _ := rs.tpm.finishResult()
+	assert.Equal(t, "none", format)
+	assert.Empty(t, activation)
+}
+
+// A TPM_ATTESTATION_REQUIRED refusal of the admin begin prints the remedy that names
+// --key-provider tpm and leaves the record unregistered.
+func TestWebAuthnRegisterAuthenticator_TPMAttestationRequiredNamesTheRemedy(t *testing.T) {
+	rs := newRegisterTestServer(t)
+	rs.tpm = &tpmPolicy{require: true}
+	restore := saveWebAuthnFlags(t)
+	defer restore()
+	_, store := authTestStore(t)
+	createAuth(t, "agent-1")
+
+	bundlePath = writeBundleFile(t, generateWebAuthnBundle(t), rs.srv.URL)
+	webAuthnUsername = "alice"
+	webAuthnAuthenticator = "agent-1"
+
+	err := runWebAuthnRegister(webAuthnRegisterCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires a TPM-held key")
+	assert.Contains(t, err.Error(), "--key-provider tpm")
+	rec, err := loadAuthenticatorRecord(context.Background(), store, "agent-1")
+	require.NoError(t, err)
+	assert.False(t, rec.Registered)
+}
+
+// APIClient.WebAuthnBeginRegistration sends the body it is given, and none when nil.
+func TestAPIClientWebAuthnBeginRegistration_OptionalBody(t *testing.T) {
+	var gotBodies [][]byte
+	var gotTypes []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBodies = append(gotBodies, b)
+		gotTypes = append(gotTypes, r.Header.Get("Content-Type"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"publicKey":{}}}`))
+	}))
+	defer srv.Close()
+	client := &APIClient{baseURL: srv.URL, httpClient: srv.Client()}
+
+	_, err := client.WebAuthnBeginRegistration(context.Background(), "alice", nil)
+	require.NoError(t, err)
+	_, err = client.WebAuthnBeginRegistration(context.Background(), "alice", []byte(`{"tpm":{}}`))
+	require.NoError(t, err)
+
+	assert.Empty(t, gotBodies[0])
+	assert.Equal(t, `{"tpm":{}}`, string(gotBodies[1]))
+	assert.Equal(t, "application/json", gotTypes[1])
 }

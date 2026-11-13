@@ -5,10 +5,16 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,6 +26,10 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	legacytpm "github.com/google/go-tpm/legacy/tpm2"
+	"github.com/google/go-tpm/legacy/tpm2/credactivation"
+	"github.com/google/go-tpm/tpm2"
+	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -55,6 +65,9 @@ type enrollTestServer struct {
 	finishURL  string
 	refuse     bool // finish answers the software-authenticator policy refusal
 	registered *webauthn.Credential
+	// tpm, when set, makes the begin route behave as the controller does for a
+	// TPM-aware begin (see tpmPolicy); nil leaves begin as it always was.
+	tpm *tpmPolicy
 }
 
 func newEnrollTestServer(t *testing.T) *enrollTestServer {
@@ -100,6 +113,15 @@ func (es *enrollTestServer) handle(w http.ResponseWriter, r *http.Request) {
 	user := &authTestUser{}
 	switch r.URL.Path {
 	case enrollBeginPath:
+		reqBody, _ := io.ReadAll(r.Body)
+		var challenge map[string]any
+		if es.tpm != nil {
+			var refusal *tpmRefusal
+			if challenge, refusal = es.tpm.begin(reqBody); refusal != nil {
+				writeTestAPIError(w, refusal.status, refusal.code, refusal.message)
+				return
+			}
+		}
 		creation, session, err := es.wa.BeginRegistration(user,
 			webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
 				UserVerification:   protocol.VerificationRequired,
@@ -112,7 +134,7 @@ func (es *enrollTestServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		es.sessions[token] = *session
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": creation})
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": withTPMChallenge(creation, challenge)})
 	case enrollFinishPath:
 		session, ok := es.sessions[token]
 		delete(es.sessions, token)
@@ -124,6 +146,9 @@ func (es *enrollTestServer) handle(w http.ResponseWriter, r *http.Request) {
 		_, _ = raw.ReadFrom(r.Body)
 		es.finishRaw = raw.Bytes()
 		es.finishURL = r.URL.String()
+		if es.tpm != nil {
+			es.tpm.finish(es.finishRaw)
+		}
 		r.Body = readCloser{bytes.NewReader(es.finishRaw)}
 		cred, err := es.wa.FinishRegistration(user, session, r)
 		if err != nil {
@@ -369,7 +394,7 @@ func TestAuthenticatorEnroll_DoesNotFollowRedirects(t *testing.T) {
 	c, err := newEnrollClient(rec)
 	require.NoError(t, err)
 
-	_, err = c.begin(context.Background(), testEnrollToken)
+	_, err = c.begin(context.Background(), testEnrollToken, nil)
 	require.Error(t, err)
 	assert.False(t, leaked, "the token header must not follow a redirect")
 }
@@ -485,4 +510,303 @@ func TestEnrollRefusal_SanitisesServerMessage(t *testing.T) {
 
 	err = enrollRefusal("begin", &enrollResponse{status: 502, body: []byte("<html>")})
 	assert.Contains(t, err.Error(), "HTTP 502")
+}
+
+// tpmRefusal is a refusal the fake controller sends.
+type tpmRefusal struct {
+	status        int
+	code, message string
+}
+
+// tpmPolicy is the controller half of the TPM wire contract, shared by the fake
+// enrollment and admin register servers. It checks the begin body's shape, makes
+// the credential challenge with credactivation.Generate for the offered AK and
+// EK, and at finish records the attestation format and the cfgmsActivation the
+// client returned. Real go-webauthn verification of the attestation itself runs
+// in the servers' finish handlers.
+type tpmPolicy struct {
+	// require refuses a begin that carries no TPM body, as for a root agent account.
+	require bool
+	// noChallenge answers a TPM body with plain creation options.
+	noChallenge bool
+	// corruptChallenge makes the credential for an attestation key other than the
+	// one offered, so no TPM can activate it.
+	corruptChallenge bool
+	// ca, when set, must have issued the offered EK certificate.
+	ca *x509.Certificate
+
+	mu         sync.Mutex
+	bodies     [][]byte
+	secret     []byte
+	activation []byte
+	format     string
+	finishes   int
+}
+
+func (p *tpmPolicy) beginBodies() [][]byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([][]byte(nil), p.bodies...)
+}
+
+func (p *tpmPolicy) finishResult() (format string, activation, secret []byte, finishes int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.format, p.activation, p.secret, p.finishes
+}
+
+// begin returns the cfgmsTpm member to add to the options, or a refusal.
+func (p *tpmPolicy) begin(body []byte) (map[string]any, *tpmRefusal) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.bodies = append(p.bodies, append([]byte(nil), body...))
+	if len(body) == 0 {
+		if p.require {
+			return nil, &tpmRefusal{http.StatusForbidden, "TPM_ATTESTATION_REQUIRED",
+				"This account requires a TPM-held authenticator key"}
+		}
+		return nil, nil
+	}
+	challenge, err := p.challenge(body)
+	if err != nil {
+		return nil, &tpmRefusal{http.StatusBadRequest, "TPM_PROOF_INVALID", err.Error()}
+	}
+	if p.noChallenge {
+		return nil, nil
+	}
+	return challenge, nil
+}
+
+// challenge checks the wire shape of body and builds the cfgmsTpm member.
+func (p *tpmPolicy) challenge(body []byte) (map[string]any, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	var req struct {
+		TPM *struct {
+			EKCertChain [][]byte `json:"ek_cert_chain"`
+			AKPublic    []byte   `json:"ak_public"`
+		} `json:"tpm"`
+	}
+	if err := dec.Decode(&req); err != nil || req.TPM == nil {
+		return nil, errors.New("the begin body must be {\"tpm\":{\"ek_cert_chain\":[...],\"ak_public\":\"...\"}}")
+	}
+	if len(req.TPM.EKCertChain) == 0 || len(req.TPM.AKPublic) == 0 {
+		return nil, errors.New("ek_cert_chain and ak_public are required")
+	}
+	ekCert, err := x509.ParseCertificate(req.TPM.EKCertChain[0])
+	if err != nil {
+		return nil, errors.New("ek_cert_chain[0] is not a DER certificate")
+	}
+	if p.ca != nil {
+		if err := ekCert.CheckSignatureFrom(p.ca); err != nil {
+			return nil, errors.New("the EK certificate does not chain to a trusted root")
+		}
+	}
+	ak, err := tpm2.Unmarshal[tpm2.TPMTPublic](req.TPM.AKPublic)
+	if err != nil {
+		return nil, errors.New("ak_public is not a TPMT_PUBLIC")
+	}
+	a := ak.ObjectAttributes
+	if ak.Type != tpm2.TPMAlgECC || !a.FixedTPM || !a.FixedParent || !a.SensitiveDataOrigin || !a.Restricted || !a.SignEncrypt {
+		return nil, errors.New("ak_public is not a restricted, fixed ECC signing key")
+	}
+	name, err := tpm2.ObjectName(ak)
+	if err != nil || len(name.Buffer) <= 2 {
+		return nil, errors.New("ak_public has no name")
+	}
+	p.secret = make([]byte, 32)
+	if _, err := rand.Read(p.secret); err != nil {
+		return nil, err
+	}
+	akName := append([]byte(nil), name.Buffer[2:]...)
+	if p.corruptChallenge {
+		akName[0] ^= 0x01
+	}
+	blob, enc, err := credactivation.Generate(&legacytpm.HashValue{Alg: legacytpm.AlgSHA256, Value: akName},
+		ekCert.PublicKey, 16, p.secret)
+	if err != nil {
+		return nil, errors.New("cannot make a credential for that EK")
+	}
+	return map[string]any{
+		"credential_blob":  base64.StdEncoding.EncodeToString(blob),
+		"encrypted_secret": base64.StdEncoding.EncodeToString(enc),
+	}, nil
+}
+
+// finish records what the finish body carried.
+func (p *tpmPolicy) finish(body []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.finishes++
+	parsed, err := protocol.ParseCredentialCreationResponseBytes(body)
+	if err != nil {
+		return
+	}
+	obj := parsed.Response.AttestationObject
+	p.format = obj.Format
+	p.activation, _ = obj.AttStatement["cfgmsActivation"].([]byte)
+}
+
+// withTPMChallenge adds the cfgmsTpm member to the creation options.
+func withTPMChallenge(creation any, challenge map[string]any) any {
+	if challenge == nil {
+		return creation
+	}
+	raw, err := json.Marshal(creation)
+	if err != nil {
+		return creation
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return creation
+	}
+	m["cfgmsTpm"] = challenge
+	return m
+}
+
+// tpmTestPublicBlob is a marshalled TPM2B_PUBLIC for a fresh P-256 signing key.
+// It is valid to parse; no TPM holds the key. Tests that need a "tpm" record on a
+// host with no TPM use it, since they never reach a TPM operation.
+func tpmTestPublicBlob(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	pt := tpm2.TPMTPublic{
+		Type:    tpm2.TPMAlgECC,
+		NameAlg: tpm2.TPMAlgSHA256,
+		ObjectAttributes: tpm2.TPMAObject{
+			FixedTPM: true, FixedParent: true, SensitiveDataOrigin: true, UserWithAuth: true, SignEncrypt: true,
+		},
+		Parameters: tpm2.NewTPMUPublicParms(tpm2.TPMAlgECC, &tpm2.TPMSECCParms{
+			Scheme: tpm2.TPMTECCScheme{
+				Scheme:  tpm2.TPMAlgECDSA,
+				Details: tpm2.NewTPMUAsymScheme(tpm2.TPMAlgECDSA, &tpm2.TPMSSigSchemeECDSA{HashAlg: tpm2.TPMAlgSHA256}),
+			},
+			CurveID: tpm2.TPMECCNistP256,
+		}),
+		Unique: tpm2.NewTPMUPublicID(tpm2.TPMAlgECC, &tpm2.TPMSECCPoint{
+			X: tpm2.TPM2BECCParameter{Buffer: key.X.FillBytes(make([]byte, 32))},
+			Y: tpm2.TPM2BECCParameter{Buffer: key.Y.FillBytes(make([]byte, 32))},
+		}),
+	}
+	return tpm2.Marshal(tpm2.New2B(pt))
+}
+
+// convertToTPMRecord turns the stored "store" record name into a "tpm" record whose
+// blobs parse but belong to no TPM.
+func convertToTPMRecord(t *testing.T, store *CredentialStore, name string) {
+	t.Helper()
+	rec, err := loadAuthenticatorRecord(context.Background(), store, name)
+	require.NoError(t, err)
+	rec.KeyPKCS8 = nil
+	rec.KeyPublicBlob = tpmTestPublicBlob(t)
+	rec.KeyPrivateBlob = []byte("not-a-real-private-blob")
+	rec.Protection = authenticatorProtectionTPM
+	require.NoError(t, saveAuthenticatorRecord(context.Background(), store, rec))
+}
+
+// useTPMOpener replaces the TPM opener for the test.
+func useTPMOpener(t *testing.T, open func() (transport.TPMCloser, error)) {
+	t.Helper()
+	orig := openAuthenticatorTPM
+	openAuthenticatorTPM = open
+	t.Cleanup(func() { openAuthenticatorTPM = orig })
+}
+
+func noTPM() (transport.TPMCloser, error) { return nil, errors.New("no TPM device on this host") }
+
+// With a "store" record and a controller that offers no TPM challenge, begin has no
+// body and the finish carries attestation none: behaviour is unchanged.
+func TestAuthenticatorEnroll_StoreRecordSendsNoBeginBodyAndFmtNone(t *testing.T) {
+	es := newEnrollTestServer(t)
+	es.tpm = &tpmPolicy{}
+	store := enrollTestRecord(t, es, "agent-1")
+
+	out, err := runEnroll(t, "", "agent-1", "--link-file", writeLinkFile(t, enrollLink(es)))
+	require.NoError(t, err, out)
+
+	bodies := es.tpm.beginBodies()
+	require.Len(t, bodies, 1)
+	assert.Empty(t, bodies[0], "a store record sends no begin body")
+	format, activation, _, finishes := es.tpm.finishResult()
+	assert.Equal(t, 1, finishes)
+	assert.Equal(t, "none", format)
+	assert.Empty(t, activation)
+	rec, err := loadAuthenticatorRecord(context.Background(), store, "agent-1")
+	require.NoError(t, err)
+	assert.True(t, rec.Registered)
+}
+
+// A TPM_ATTESTATION_REQUIRED refusal prints the remedy that names --key-provider tpm,
+// and leaves the record unregistered.
+func TestAuthenticatorEnroll_TPMAttestationRequiredNamesTheRemedy(t *testing.T) {
+	es := newEnrollTestServer(t)
+	es.tpm = &tpmPolicy{require: true}
+	store := enrollTestRecord(t, es, "agent-1")
+
+	_, err := runEnroll(t, "", "agent-1", "--link-file", writeLinkFile(t, enrollLink(es)))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires a TPM-held key")
+	assert.Contains(t, err.Error(), "--key-provider tpm")
+	assert.Contains(t, err.Error(), "TPM_ATTESTATION_REQUIRED")
+	assert.NotContains(t, err.Error(), testEnrollToken)
+	rec, err := loadAuthenticatorRecord(context.Background(), store, "agent-1")
+	require.NoError(t, err)
+	assert.False(t, rec.Registered)
+}
+
+// A "tpm" record on a host whose TPM cannot be opened is refused before any request.
+func TestAuthenticatorEnroll_TPMRecordWithoutUsableTPMRefusedBeforeNetwork(t *testing.T) {
+	es := newEnrollTestServer(t)
+	store := enrollTestRecord(t, es, "agent-1")
+	convertToTPMRecord(t, store, "agent-1")
+	useTPMOpener(t, noTPM)
+
+	_, err := runEnroll(t, "", "agent-1", "--link-file", writeLinkFile(t, enrollLink(es)))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TPM")
+	assert.Contains(t, err.Error(), "cannot be opened")
+	assert.Zero(t, es.requestCount(), "no request may reach the server")
+	rec, err := loadAuthenticatorRecord(context.Background(), store, "agent-1")
+	require.NoError(t, err)
+	assert.False(t, rec.Registered)
+}
+
+func TestParseTPMChallenge(t *testing.T) {
+	c, err := parseTPMChallenge([]byte(`{"publicKey":{}}`))
+	require.NoError(t, err)
+	assert.Nil(t, c, "no cfgmsTpm member means no challenge")
+
+	c, err = parseTPMChallenge([]byte(`{"cfgmsTpm":{"credential_blob":"AQI=","encrypted_secret":"AwQ="}}`))
+	require.NoError(t, err)
+	require.NotNil(t, c)
+	assert.Equal(t, []byte{1, 2}, c.CredentialBlob)
+	assert.Equal(t, []byte{3, 4}, c.EncryptedSecret)
+
+	for name, raw := range map[string]string{
+		"empty member":   `{"cfgmsTpm":{}}`,
+		"missing secret": `{"cfgmsTpm":{"credential_blob":"AQI="}}`,
+		"not base64":     `{"cfgmsTpm":{"credential_blob":"!!","encrypted_secret":"AwQ="}}`,
+		"not an object":  `{"cfgmsTpm":"x"}`,
+		"malformed json": `{`,
+	} {
+		_, err := parseTPMChallenge([]byte(raw))
+		assert.Error(t, err, name)
+	}
+}
+
+func TestExplainTPMRefusal(t *testing.T) {
+	base := errors.New("controller said TPM_ATTESTATION_REQUIRED")
+
+	storeErr := explainTPMRefusal(&authenticatorRecord{Name: "a", Protection: authenticatorProtectionStore}, base)
+	assert.Contains(t, storeErr.Error(), "--key-provider tpm")
+	assert.ErrorIs(t, storeErr, base)
+
+	tpmErr := explainTPMRefusal(&authenticatorRecord{Name: "a", Protection: authenticatorProtectionTPM}, base)
+	assert.Contains(t, tpmErr.Error(), "did not accept the TPM attestation")
+	assert.NotContains(t, tpmErr.Error(), "create a new authenticator")
+
+	other := errors.New("some other failure")
+	assert.Equal(t, other, explainTPMRefusal(&authenticatorRecord{Name: "a"}, other))
+	assert.NoError(t, explainTPMRefusal(&authenticatorRecord{Name: "a"}, nil))
 }
