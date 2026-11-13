@@ -13,11 +13,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 
 	"github.com/cfgis/cfgms/pkg/credential"
 	"github.com/cfgis/cfgms/pkg/registration/identity"
 	"github.com/cfgis/cfgms/pkg/softauthn"
+	"github.com/cfgis/cfgms/pkg/softauthn/tpmkey"
 )
 
 const (
@@ -38,6 +40,12 @@ const (
 	// provider and name, never key bytes.
 	authenticatorProtectionPlatform = "platform"
 
+	// authenticatorProtectionTPM means the key lives inside the host TPM. The
+	// record holds only the TPM-wrapped key blobs, which are useless on any other
+	// TPM, never key bytes. Only this protection can produce the TPM attestation a
+	// root agent account requires.
+	authenticatorProtectionTPM = "tpm"
+
 	authenticatorCredentialIDLen = 32
 )
 
@@ -53,15 +61,19 @@ type authenticatorRecord struct {
 	Name         string `json:"name"`
 	Label        string `json:"label,omitempty"`
 	CredentialID []byte `json:"credential_id"`
-	// KeyPKCS8 is the private key of a "store" record; empty for "platform".
+	// KeyPKCS8 is the private key of a "store" record; empty for "platform" and "tpm".
 	KeyPKCS8 []byte `json:"key_pkcs8,omitempty"`
 	// KeyProvider and KeyName locate the key of a "platform" record.
-	KeyProvider   string `json:"key_provider,omitempty"`
-	KeyName       string `json:"key_name,omitempty"`
-	RPID          string `json:"rp_id"`
-	Origin        string `json:"origin"`
-	ControllerURL string `json:"controller_url"`
-	CACertPEM     string `json:"ca_cert_pem,omitempty"`
+	KeyProvider string `json:"key_provider,omitempty"`
+	KeyName     string `json:"key_name,omitempty"`
+	// KeyPublicBlob and KeyPrivateBlob are the marshalled TPM2B_PUBLIC and
+	// TPM2B_PRIVATE of a "tpm" record's key, wrapped by the TPM that made it.
+	KeyPublicBlob  []byte `json:"key_public_blob,omitempty"`
+	KeyPrivateBlob []byte `json:"key_private_blob,omitempty"`
+	RPID           string `json:"rp_id"`
+	Origin         string `json:"origin"`
+	ControllerURL  string `json:"controller_url"`
+	CACertPEM      string `json:"ca_cert_pem,omitempty"`
 	// UserHandle is empty until the authenticator is registered with a controller.
 	UserHandle []byte `json:"user_handle"`
 	Registered bool   `json:"registered"`
@@ -171,6 +183,72 @@ func (r *authenticatorRecord) setPlatformKey() error {
 	return nil
 }
 
+// openAuthenticatorTPM opens the host TPM. Tests replace it to supply a software
+// TPM, or a failure on a host that has one.
+var openAuthenticatorTPM = tpmkey.OpenDevice
+
+// errTPMKeyRequirement explains why a TPM key was refused. A root agent account
+// requires a TPM-held key, so there is no fallback to another protection.
+func errTPMKeyRequirement(cause error) error {
+	return fmt.Errorf("--key-provider tpm needs a usable TPM 2.0 with an endorsement key certificate in NV storage, "+
+		"and this host has none: %w. A root agent account requires a key held in a TPM, so no software key was "+
+		"created and nothing was stored", cause)
+}
+
+// setTPMKey creates the credential key inside the host TPM and records its
+// wrapped blobs. It refuses, creating nothing, when no TPM can be opened or the
+// TPM has no readable EK certificate (without one it can never attest).
+func (r *authenticatorRecord) setTPMKey() error {
+	t, err := openAuthenticatorTPM()
+	if err != nil {
+		return errTPMKeyRequirement(err)
+	}
+	defer func() { _ = t.Close() }()
+	if err := tpmkey.HasEKCertificate(t); err != nil {
+		return errTPMKeyRequirement(err)
+	}
+	blobs, _, err := tpmkey.Create(t)
+	if err != nil {
+		return errTPMKeyRequirement(err)
+	}
+	r.KeyPKCS8, r.KeyProvider, r.KeyName = nil, "", ""
+	r.KeyPublicBlob, r.KeyPrivateBlob = blobs.Public, blobs.Private
+	r.Protection = authenticatorProtectionTPM
+	return nil
+}
+
+// tpmKeySigner signs with the record's TPM key. It opens the TPM for each
+// signature, so it holds no device handle between uses.
+type tpmKeySigner struct {
+	name  string
+	blobs tpmkey.Blobs
+	pub   *ecdsa.PublicKey
+}
+
+func (s *tpmKeySigner) Public() crypto.PublicKey { return s.pub }
+
+func (s *tpmKeySigner) Sign(rnd io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	t, err := openAuthenticatorTPM()
+	if err != nil {
+		return nil, fmt.Errorf("authenticator %q: open TPM: %w", s.name, err)
+	}
+	defer func() { _ = t.Close() }()
+	key, err := tpmkey.Open(t, s.blobs)
+	if err != nil {
+		return nil, fmt.Errorf("authenticator %q: %w", s.name, err)
+	}
+	return key.Sign(rnd, digest, opts)
+}
+
+// tpmBlobs returns the key blobs of a "tpm" record.
+func (r *authenticatorRecord) tpmBlobs() (tpmkey.Blobs, error) {
+	if len(r.KeyPublicBlob) == 0 || len(r.KeyPrivateBlob) == 0 {
+		return tpmkey.Blobs{}, fmt.Errorf("authenticator %q: the stored TPM key blobs are missing; delete it with "+
+			"'cfg authenticator delete %s --force' and create it again", r.Name, r.Name)
+	}
+	return tpmkey.Blobs{Public: r.KeyPublicBlob, Private: r.KeyPrivateBlob}, nil
+}
+
 // deletePlatformKey deletes the platform key of a "platform" record. It does
 // nothing for any other record.
 func (r *authenticatorRecord) deletePlatformKey() error {
@@ -204,6 +282,16 @@ func (r *authenticatorRecord) signer() (crypto.Signer, error) {
 			return nil, fmt.Errorf("authenticator %q: %w", r.Name, err)
 		}
 		return s, nil
+	case authenticatorProtectionTPM:
+		blobs, err := r.tpmBlobs()
+		if err != nil {
+			return nil, err
+		}
+		pub, err := tpmkey.PublicKey(blobs.Public)
+		if err != nil {
+			return nil, fmt.Errorf("authenticator %q: stored TPM key is not a P-256 key: %w", r.Name, err)
+		}
+		return &tpmKeySigner{name: r.Name, blobs: blobs, pub: pub}, nil
 	default:
 		return nil, fmt.Errorf("authenticator %q: unknown protection %q; delete it with "+
 			"'cfg authenticator delete %s --force' and create it again", r.Name, r.Protection, r.Name)
@@ -218,7 +306,7 @@ func (r *authenticatorRecord) checkBinding() error {
 	if err != nil {
 		return fmt.Errorf("failed to generate probe key: %w", err)
 	}
-	_, err = r.authenticatorWith(probe)
+	_, err = r.authenticatorWith(probe, nil)
 	return err
 }
 
@@ -230,16 +318,19 @@ func (r *authenticatorRecord) authenticator() (*softauthn.Authenticator, error) 
 	if err != nil {
 		return nil, err
 	}
-	return r.authenticatorWith(signer)
+	return r.authenticatorWith(signer, nil)
 }
 
-func (r *authenticatorRecord) authenticatorWith(signer crypto.Signer) (*softauthn.Authenticator, error) {
+// authenticatorWith builds the authenticator over signer. A non-nil attester
+// makes its registration a TPM attestation; every other caller passes nil.
+func (r *authenticatorRecord) authenticatorWith(signer crypto.Signer, attester softauthn.Attester) (*softauthn.Authenticator, error) {
 	a, err := softauthn.New(softauthn.Config{
 		Signer:       signer,
 		RPID:         r.RPID,
 		Origin:       r.Origin,
 		CredentialID: r.CredentialID,
 		UserHandle:   r.UserHandle,
+		Attester:     attester,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("authenticator %q: %w", r.Name, err)

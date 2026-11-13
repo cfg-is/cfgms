@@ -1118,7 +1118,7 @@ them; later steps (headless login) are documented under their own sub-headings
 here as they ship.
 
 ```
-cfg authenticator create <name> --url <controller URL> [--rp-id <id>] [--origin <origin>] [--ca-cert <file>] [--label <text>] [--key-provider platform|store]
+cfg authenticator create <name> --url <controller URL> [--rp-id <id>] [--origin <origin>] [--ca-cert <file>] [--label <text>] [--key-provider platform|store|tpm]
 cfg authenticator list [--json]
 cfg authenticator delete <name> [--force]
 cfg authenticator enroll <name> (--link-file <path> | --link-stdin)
@@ -1137,7 +1137,7 @@ to the controller, so a new authenticator is listed as not registered.
 | `--origin` | `scheme://host[:port]` of `--url` | WebAuthn origin; must be `https`, with a host that is the RP ID or a subdomain of it |
 | `--ca-cert` | — | PEM file with the CA certificate that signs the controller's TLS certificate; stored in the record |
 | `--label` | — | Free-text label |
-| `--key-provider` | `platform` on Windows, `store` elsewhere | `platform`: a non-exportable per-user key in the Windows platform key provider (Windows only; refused elsewhere). `store`: the key is kept in the encrypted credential store |
+| `--key-provider` | `platform` on Windows, `store` elsewhere | `platform`: a non-exportable per-user key in the Windows platform key provider (Windows only; refused elsewhere). `store`: the key is kept in the encrypted credential store. `tpm`: the key is created inside the host TPM 2.0 (Linux with `/dev/tpmrm0`, Windows with a TPM 2.0; refused on macOS), see [`tpm`](#where-the-key-lives) |
 
 Names are 1-64 letters, digits, `.`, `_` or `-`, starting with a letter or digit.
 `create` refuses a name that already exists and leaves the existing record
@@ -1148,7 +1148,7 @@ and no way to export the key.
 **`list`** shows name, RP ID, origin, credential ID (base64url), whether the
 authenticator is registered, and its protection level (`platform`: a
 non-exportable key in the Windows platform key provider; `store`: the key is in
-the encrypted credential store). `--json` prints the same fields, plus the label and
+the encrypted credential store; `tpm`: the key is inside the host TPM). `--json` prints the same fields, plus the label and
 controller URL, as a JSON array. Key material is never printed by any command.
 
 **Root agent accounts.** The controller can also allow a software authenticator for
@@ -1158,18 +1158,34 @@ such as module approval (ADR-021 Amendment 11). It needs
 `controller.cfg` (an operator edit and a controller restart), and the account must
 carry the software-authenticator flag, must not be `cfgms-admin`, must hold no bound
 admin certificate and must hold only software credentials. The controller cannot
-verify where a key is kept, so key protection is your obligation: create a root
-agent account's authenticator with `--key-provider platform`, not `store`. A session
+verify where a `store` or `platform` key is kept, so key protection is your
+obligation there. A root agent account requires a key held in a TPM: create its
+authenticator with `--key-provider tpm`, which makes the key inside the host TPM
+and lets `cfg` prove that to the controller at registration (see
+[Registering with a controller](#registering-with-a-controller)). A host with no
+usable TPM cannot create one, and macOS cannot, so a root agent account is not
+available from macOS. A session
 for a flagged root account holds only a fixed set of 16 permissions rather than full
 administrator breadth, and still needs a crossing to act below the root tenant; see
 [Software authenticators](../security/SECURITY_CONFIGURATION.md#software-authenticators).
 
-**Registering with a controller.** A new authenticator is registered by one of two
+<a id="registering-with-a-controller"></a>**Registering with a controller.** A new authenticator is registered by one of two
 paths. Either way the controller must allow software authenticators for the
 account, and on success `cfg authenticator list` shows the record as registered and
 the record holds the account's user handle. If the controller refuses (for example
 HTTP 403 `SOFTWARE_AUTHENTICATOR_NOT_ALLOWED`), the record stays unregistered, the
 command exits non-zero and prints the server's code.
+
+A `tpm` authenticator sends the controller a TPM proof when it registers: the
+begin request carries the TPM's endorsement key certificate and the public part of
+an attestation key derived from the endorsement hierarchy. When the controller
+answers with a TPM challenge, `cfg` has the TPM activate it and the registration
+carries a TPM attestation (WebAuthn attestation format `tpm`) that certifies the
+credential key. A `store` or `platform` authenticator, or a controller that sends
+no challenge, registers with attestation `none` as before. If the controller
+refuses the registration with `TPM_ATTESTATION_REQUIRED`, the account requires a
+TPM-held key: create a new authenticator with `--key-provider tpm` on a host with a
+TPM and register that one instead.
 
 - **`cfg authenticator enroll <name>`** completes first-passkey enrollment for the
   account an enrollment link was issued for (`cfg account create` prints the link).
@@ -1191,7 +1207,8 @@ command exits non-zero and prints the server's code.
 
 **`delete`** removes the record after a confirmation prompt (`--force` skips it),
 and for a `platform` authenticator first deletes its key from the platform key
-provider. It does not contact the controller: the controller keeps listing the
+provider. A `tpm` authenticator has nothing to remove from the TPM: its key is a
+wrapped blob in the record. It does not contact the controller: the controller keeps listing the
 credential until it is revoked with `cfg webauthn revoke <credential-id>`. A
 record that cannot be read can still be deleted; `delete` then warns that any
 platform key it named could not be located. A key that is already gone, or whose
@@ -1233,9 +1250,32 @@ What non-exportable protects, and what it does not:
 **`store` (Linux, macOS, or `--key-provider store`).** The key is kept,
 PKCS#8-encoded, inside the encrypted record.
 
+**`tpm` (`--key-provider tpm`; Linux and Windows).** `create` makes the P-256
+credential key inside the host TPM 2.0, through `/dev/tpmrm0` on Linux or the TPM
+Base Services on Windows, as a signing key that is fixed to that TPM and its
+parent and generated by the TPM. The record stores only the TPM-wrapped public and
+private key blobs, never key bytes; the blobs are useless on any other TPM, and
+signing happens inside the TPM. There is no fallback: with no usable TPM,
+`--key-provider tpm` refuses with a message that a root agent account needs a
+TPM-held key, and creates nothing. macOS is refused as unsupported. Requirements
+and limits:
+
+- The TPM must hold an endorsement key certificate in NV storage (the TCG
+  locations 0x01C00002 for an RSA 2048 key or 0x01C0000A for an ECC P-256 key). A
+  TPM whose endorsement certificate is not in NV storage is unsupported, and `create`
+  refuses it. Intermediate certificates are not read from the TPM.
+- On Windows the TPM is used directly through TBS, not through the CNG Platform
+  Crypto Provider that `platform` uses. Whether a standard (non-administrator)
+  user may create the endorsement-hierarchy key and read the endorsement
+  certificate depends on the host and has not been measured on real hardware.
+- As with the other protections, any process running as the same user on the
+  same machine can ask the TPM to sign with the key, so treat it as a credential of
+  that user.
+
 **The record:** `<user config dir>/cfgms/credentials/authenticator.<name>.enc`,
-a versioned JSON record (version, name, credential ID, the PKCS#8 key for `store`
-or the provider and key name for `platform`, RP ID, origin, controller URL,
+a versioned JSON record (version, name, credential ID, the PKCS#8 key for `store`,
+the provider and key name for `platform`, or the wrapped public and private key
+blobs for `tpm`, RP ID, origin, controller URL,
 optional CA certificate, user handle, registered flag, protection) encrypted by
 the same credential store as the signing key above. The directory is
 private to the current user: mode 0700 on Linux and macOS, and an ACL for the

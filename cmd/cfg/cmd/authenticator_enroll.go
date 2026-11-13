@@ -20,9 +20,12 @@ import (
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/spf13/cobra"
 
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/softauthn"
+	"github.com/cfgis/cfgms/pkg/softauthn/tpmkey"
 )
 
 const (
@@ -211,8 +214,8 @@ func runAuthenticatorEnroll(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := registerAuthenticator(ctx, store, rec,
-		func(ctx context.Context) (json.RawMessage, error) {
-			return client.begin(ctx, token)
+		func(ctx context.Context, body []byte) (json.RawMessage, error) {
+			return client.begin(ctx, token, body)
 		},
 		func(ctx context.Context, body []byte) error {
 			return client.finish(ctx, token, rec.Label, body)
@@ -224,23 +227,27 @@ func runAuthenticatorEnroll(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// tpmAttestationRequiredCode is the controller's code for refusing a begin (or a
+// finish) because the account requires a TPM-held key and the registration did
+// not prove one.
+const tpmAttestationRequiredCode = "TPM_ATTESTATION_REQUIRED"
+
 // registerAuthenticator runs one registration ceremony for rec and, only when the
 // controller accepts it, marks the record registered with the account's user
-// handle. begin returns the controller's begin-registration options; finish sends
-// the authenticator's response. Both `cfg authenticator enroll` and
+// handle. begin sends the begin-registration request (body is nil, or the JSON
+// TPM proof for a "tpm" record) and returns the controller's options; finish
+// sends the authenticator's response. Both `cfg authenticator enroll` and
 // `cfg webauthn register --authenticator` call it.
 func registerAuthenticator(ctx context.Context, store *CredentialStore, rec *authenticatorRecord,
-	begin func(context.Context) (json.RawMessage, error),
+	begin func(context.Context, []byte) (json.RawMessage, error),
 	finish func(context.Context, []byte) error) error {
 
-	auth, err := rec.authenticator()
+	auth, options, done, err := beginRegistration(ctx, rec, begin)
 	if err != nil {
-		return err
+		return explainTPMRefusal(rec, err)
 	}
-	options, err := begin(ctx)
-	if err != nil {
-		return err
-	}
+	defer done()
+
 	var creation protocol.CredentialCreation
 	if err := json.Unmarshal(options, &creation); err != nil {
 		return errors.New("the controller sent malformed registration options")
@@ -254,7 +261,7 @@ func registerAuthenticator(ctx context.Context, store *CredentialStore, rec *aut
 		return fmt.Errorf("authenticator %q refused the registration options: %w", rec.Name, err)
 	}
 	if err := finish(ctx, body); err != nil {
-		return err
+		return explainTPMRefusal(rec, err)
 	}
 
 	rec.UserHandle = userHandle
@@ -263,6 +270,143 @@ func registerAuthenticator(ctx context.Context, store *CredentialStore, rec *aut
 		return fmt.Errorf("the controller accepted the registration but the local record was not updated: %w", err)
 	}
 	return nil
+}
+
+// beginRegistration builds the authenticator for one ceremony and fetches the
+// controller's options. done releases anything the authenticator needs until
+// Register returns (the TPM, for a "tpm" record).
+func beginRegistration(ctx context.Context, rec *authenticatorRecord,
+	begin func(context.Context, []byte) (json.RawMessage, error)) (auth *softauthn.Authenticator, options json.RawMessage, done func(), err error) {
+
+	if rec.Protection == authenticatorProtectionTPM {
+		return beginTPMRegistration(ctx, rec, begin)
+	}
+	auth, err = rec.authenticator()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	options, err = begin(ctx, nil)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return auth, options, func() {}, nil
+}
+
+// tpmBeginRequest is the begin body that offers the controller a TPM proof: the
+// EK certificate chain and the attestation key's public area. Byte fields are
+// base64 in JSON.
+type tpmBeginRequest struct {
+	TPM tpmBeginProof `json:"tpm"`
+}
+
+type tpmBeginProof struct {
+	EKCertChain [][]byte `json:"ek_cert_chain"`
+	AKPublic    []byte   `json:"ak_public"`
+}
+
+// tpmChallenge is the cfgmsTpm member of the controller's options: a credential
+// challenge only this TPM's endorsement key can open, for this attestation key.
+type tpmChallenge struct {
+	CredentialBlob  []byte `json:"credential_blob"`
+	EncryptedSecret []byte `json:"encrypted_secret"`
+}
+
+// beginTPMRegistration runs the ceremony's TPM half for a "tpm" record: it
+// reads the EK certificate and derives the attestation key, calls begin with
+// them, and, when the controller answers with a cfgmsTpm challenge, activates
+// it and builds an authenticator whose registration is a TPM attestation. A
+// controller that sends no challenge gets the usual attestation "none".
+func beginTPMRegistration(ctx context.Context, rec *authenticatorRecord,
+	begin func(context.Context, []byte) (json.RawMessage, error)) (*softauthn.Authenticator, json.RawMessage, func(), error) {
+
+	blobs, err := rec.tpmBlobs()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	signer, err := rec.signer()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	t, err := openAuthenticatorTPM()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("authenticator %q needs its TPM and it cannot be opened: %w", rec.Name, err)
+	}
+	done := func() { _ = t.Close() }
+	fail := func(err error) (*softauthn.Authenticator, json.RawMessage, func(), error) {
+		done()
+		return nil, nil, nil, err
+	}
+
+	prep, err := tpmkey.Prepare(t)
+	if err != nil {
+		return fail(fmt.Errorf("authenticator %q cannot offer a TPM proof: %w", rec.Name, err))
+	}
+	reqBody, err := json.Marshal(tpmBeginRequest{TPM: tpmBeginProof{EKCertChain: prep.EKCertChain, AKPublic: prep.AKPublic}})
+	if err != nil {
+		return fail(errors.New("failed to encode the TPM proof"))
+	}
+	options, err := begin(ctx, reqBody)
+	if err != nil {
+		return fail(err)
+	}
+
+	attester, err := tpmAttesterFor(t, prep, blobs, options)
+	if err != nil {
+		return fail(err)
+	}
+	auth, err := rec.authenticatorWith(signer, attester)
+	if err != nil {
+		return fail(err)
+	}
+	return auth, options, done, nil
+}
+
+// tpmAttesterFor activates the controller's cfgmsTpm challenge in the options and
+// returns the Attester that answers it, or nil when the controller sent none.
+func tpmAttesterFor(t transport.TPM, prep *tpmkey.Prepared, blobs tpmkey.Blobs, options json.RawMessage) (softauthn.Attester, error) {
+	challenge, err := parseTPMChallenge(options)
+	if err != nil || challenge == nil {
+		return nil, err
+	}
+	secret, err := tpmkey.Activate(t, prep, challenge.CredentialBlob, challenge.EncryptedSecret)
+	if err != nil {
+		return nil, fmt.Errorf("the TPM could not activate the controller's challenge: %w", err)
+	}
+	return tpmkey.NewAttester(t, blobs, secret), nil
+}
+
+// parseTPMChallenge returns the cfgmsTpm member of the begin options, or nil when
+// the controller sent none. A present but malformed member is an error: the
+// registration must not silently fall back to attestation "none".
+func parseTPMChallenge(options json.RawMessage) (*tpmChallenge, error) {
+	var env struct {
+		CfgmsTPM *tpmChallenge `json:"cfgmsTpm"`
+	}
+	if err := json.Unmarshal(options, &env); err != nil {
+		return nil, errors.New("the controller sent malformed registration options")
+	}
+	if env.CfgmsTPM == nil {
+		return nil, nil
+	}
+	if len(env.CfgmsTPM.CredentialBlob) == 0 || len(env.CfgmsTPM.EncryptedSecret) == 0 {
+		return nil, errors.New("the controller's TPM challenge is incomplete")
+	}
+	return env.CfgmsTPM, nil
+}
+
+// explainTPMRefusal turns a TPM_ATTESTATION_REQUIRED refusal into the remedy.
+// Other errors pass through unchanged.
+func explainTPMRefusal(rec *authenticatorRecord, err error) error {
+	if err == nil || !strings.Contains(err.Error(), tpmAttestationRequiredCode) {
+		return err
+	}
+	if rec.Protection == authenticatorProtectionTPM {
+		return fmt.Errorf("the controller did not accept the TPM attestation of authenticator %q (%s): %w",
+			rec.Name, tpmAttestationRequiredCode, err)
+	}
+	return fmt.Errorf("this account requires a TPM-held key and authenticator %q is not one: "+
+		"create a new authenticator on a host with a TPM using 'cfg authenticator create <name> --url <controller URL> "+
+		"--key-provider tpm' and register that instead (%s): %w", rec.Name, tpmAttestationRequiredCode, err)
 }
 
 // registrationUserHandle returns the account user handle from the begin options.
@@ -310,8 +454,10 @@ func newEnrollClient(rec *authenticatorRecord) (*enrollClient, error) {
 	}, nil
 }
 
-func (c *enrollClient) begin(ctx context.Context, token string) (json.RawMessage, error) {
-	resp, err := c.do(ctx, enrollBeginPath, token, nil)
+// begin starts the registration. body is the optional JSON request body (the TPM
+// proof of a "tpm" authenticator); nil sends no body.
+func (c *enrollClient) begin(ctx context.Context, token string, body []byte) (json.RawMessage, error) {
+	resp, err := c.do(ctx, enrollBeginPath, token, body)
 	if err != nil {
 		return nil, err
 	}

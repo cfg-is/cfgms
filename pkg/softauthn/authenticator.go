@@ -3,9 +3,9 @@
 
 // Package softauthn is a software WebAuthn authenticator core. Given a P-256
 // crypto.Signer it produces standards-conformant registration (attestation
-// "none") and assertion responses for a single relying party. It stores no key
-// material and talks to no controller: the caller owns key storage and
-// transport. See README.md for the limits of what a response from this package
+// "none", or "tpm" when an Attester is configured) and assertion responses for
+// a single relying party. It stores no key material and talks to no controller:
+// the caller owns key storage and transport. See README.md for the limits of what a response from this package
 // proves.
 package softauthn
 
@@ -30,8 +30,9 @@ import (
 )
 
 // AAGUID is the fixed CFGMS software-authenticator identifier
-// (50669e9d-c34a-453b-9701-ebe87092fa00). It is self-asserted: the controller
-// requests no attestation, so any client can claim it.
+// (50669e9d-c34a-453b-9701-ebe87092fa00). It is self-asserted: with attestation
+// "none" any client can claim it, and a "tpm" attestation proves where the key is
+// held, not what built the response.
 var AAGUID = [16]byte{
 	0x50, 0x66, 0x9e, 0x9d, 0xc3, 0x4a, 0x45, 0x3b,
 	0x97, 0x01, 0xeb, 0xe8, 0x70, 0x92, 0xfa, 0x00,
@@ -82,6 +83,33 @@ type Config struct {
 	// model a non-CFGMS authenticator; the shipped cfg tool must never set it
 	// (ADR-021 Amendment 10).
 	AAGUID *[16]byte
+	// Attester, when set, makes Register emit attestation format "tpm" with the
+	// statement it returns instead of format "none". The AAGUID is unchanged:
+	// nothing an Attester returns can alter it. Assertions are not affected.
+	Attester Attester
+}
+
+// TPMStatement holds the fields of a WebAuthn "tpm" attestation statement that
+// an Attester supplies. ver ("2.0") and alg (-7) are fixed by this package.
+type TPMStatement struct {
+	// X5C is the certificate chain; X5C[0] is the attestation key's certificate.
+	X5C [][]byte
+	// Sig is the attestation key's signature over CertInfo.
+	Sig []byte
+	// CertInfo is the TPMS_ATTEST structure that certifies the credential key.
+	CertInfo []byte
+	// PubArea is the TPMT_PUBLIC of the credential key.
+	PubArea []byte
+	// Activation is carried as the extra attStmt member "cfgmsActivation".
+	Activation []byte
+}
+
+// Attester produces the "tpm" attestation statement for one registration.
+type Attester interface {
+	// AttestTPM certifies the credential key for the registration whose
+	// authenticator data is authData and whose client data hash is
+	// clientDataHash (SHA-256 of clientDataJSON).
+	AttestTPM(authData, clientDataHash []byte) (*TPMStatement, error)
 }
 
 // Authenticator signs WebAuthn ceremonies for one RP ID, one origin and one
@@ -93,6 +121,7 @@ type Authenticator struct {
 	credentialID []byte
 	aaguid       [16]byte
 	cosePubKey   []byte
+	attester     Attester
 
 	mu         sync.Mutex
 	userHandle []byte
@@ -133,6 +162,7 @@ func New(cfg Config) (*Authenticator, error) {
 		aaguid:       AAGUID,
 		cosePubKey:   encodeCOSEKey(pub),
 		userHandle:   append([]byte(nil), cfg.UserHandle...),
+		attester:     cfg.Attester,
 	}
 	if cfg.AAGUID != nil {
 		a.aaguid = *cfg.AAGUID
@@ -182,6 +212,16 @@ func (a *Authenticator) Register(creationJSON []byte) ([]byte, error) {
 
 	authData := a.authData(flagUP|flagUV|flagAT, true)
 	attObj := encodeAttestationNone(authData)
+	if a.attester != nil {
+		clientDataHash := sha256.Sum256(clientData)
+		stmt, err := a.attester.AttestTPM(authData, clientDataHash[:])
+		if err != nil {
+			return nil, fmt.Errorf("softauthn: attestation failed: %w", err)
+		}
+		if attObj, err = encodeAttestationTPM(authData, stmt); err != nil {
+			return nil, err
+		}
+	}
 
 	a.rememberUser(opts.User.ID)
 
@@ -382,8 +422,9 @@ func cborInt(v int64) []byte {
 	return cborHead(1, uint64(-1-v))
 }
 
-func cborBytes(b []byte) []byte { return append(cborHead(2, uint64(len(b))), b...) }
-func cborText(s string) []byte  { return append(cborHead(3, uint64(len(s))), s...) }
+func cborArrayHead(items [][]byte) []byte { return cborHead(4, uint64(len(items))) }
+func cborBytes(b []byte) []byte           { return append(cborHead(2, uint64(len(b))), b...) }
+func cborText(s string) []byte            { return append(cborHead(3, uint64(len(s))), s...) }
 
 // encodeCOSEKey encodes an EC2 P-256 ES256 COSE_Key (RFC 9053).
 func encodeCOSEKey(pub *ecdsa.PublicKey) []byte {
@@ -416,4 +457,40 @@ func encodeAttestationNone(authData []byte) []byte {
 	b = append(b, cborText("authData")...)
 	b = append(b, cborBytes(authData)...)
 	return b
+}
+
+// encodeAttestationTPM encodes {"fmt":"tpm","attStmt":{ver,alg,x5c,sig,certInfo,
+// pubArea,cfgmsActivation},"authData":h'..'}. cfgmsActivation sits inside attStmt
+// so it survives the relying party's decoding of the attestation object.
+func encodeAttestationTPM(authData []byte, s *TPMStatement) ([]byte, error) {
+	if s == nil || len(s.X5C) == 0 || len(s.Sig) == 0 || len(s.CertInfo) == 0 ||
+		len(s.PubArea) == 0 || len(s.Activation) == 0 {
+		return nil, errors.New("softauthn: the attester returned an incomplete tpm statement")
+	}
+	var b []byte
+	b = append(b, cborHead(5, 3)...)
+	b = append(b, cborText("fmt")...)
+	b = append(b, cborText("tpm")...)
+	b = append(b, cborText("attStmt")...)
+	b = append(b, cborHead(5, 7)...)
+	b = append(b, cborText("ver")...)
+	b = append(b, cborText("2.0")...)
+	b = append(b, cborText("alg")...)
+	b = append(b, cborInt(coseAlgES256)...)
+	b = append(b, cborText("x5c")...)
+	b = append(b, cborArrayHead(s.X5C)...)
+	for _, c := range s.X5C {
+		b = append(b, cborBytes(c)...)
+	}
+	b = append(b, cborText("sig")...)
+	b = append(b, cborBytes(s.Sig)...)
+	b = append(b, cborText("certInfo")...)
+	b = append(b, cborBytes(s.CertInfo)...)
+	b = append(b, cborText("pubArea")...)
+	b = append(b, cborBytes(s.PubArea)...)
+	b = append(b, cborText("cfgmsActivation")...)
+	b = append(b, cborBytes(s.Activation)...)
+	b = append(b, cborText("authData")...)
+	b = append(b, cborBytes(authData)...)
+	return b, nil
 }

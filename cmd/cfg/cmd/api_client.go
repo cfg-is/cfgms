@@ -1551,8 +1551,14 @@ func (c *APIClient) WebAuthnListCredentials(ctx context.Context, username string
 // WebAuthnBeginRegistration calls POST /api/v1/accounts/{username}/webauthn/register/begin
 // and returns the raw PublicKeyCredentialCreationOptions JSON (the data field from the
 // APIResponse envelope). The caller passes this JSON to the browser's navigator.credentials.create().
-func (c *APIClient) WebAuthnBeginRegistration(ctx context.Context, username string) (json.RawMessage, error) {
-	resp, err := c.doRequest(ctx, "POST", "/api/v1/accounts/"+url.PathEscape(username)+"/webauthn/register/begin", nil)
+// body is the optional JSON request body (the TPM proof a software authenticator
+// sends for an account that requires one); nil sends no body.
+func (c *APIClient) WebAuthnBeginRegistration(ctx context.Context, username string, body []byte) (json.RawMessage, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/accounts/"+url.PathEscape(username)+"/webauthn/register/begin", reader)
 	if err != nil {
 		return nil, err
 	}

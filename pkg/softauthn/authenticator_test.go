@@ -9,6 +9,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/protocol/webauthncose"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -498,5 +500,121 @@ func TestNoPrivateKeyMaterialInOutputsOrErrors(t *testing.T) {
 		for _, e := range errTexts {
 			assert.False(t, strings.Contains(e, string(s)), "error contains private scalar")
 		}
+	}
+}
+
+// recordingAttester returns a fixed statement and records what it was asked to
+// certify. The real TPM-backed Attester is exercised against a software TPM in
+// pkg/softauthn/tpmkey; here only the encoding and wiring of Register are checked.
+type recordingAttester struct {
+	stmt           *TPMStatement
+	err            error
+	authData       []byte
+	clientDataHash []byte
+}
+
+func (r *recordingAttester) AttestTPM(authData, clientDataHash []byte) (*TPMStatement, error) {
+	r.authData = append([]byte(nil), authData...)
+	r.clientDataHash = append([]byte(nil), clientDataHash...)
+	return r.stmt, r.err
+}
+
+func cannedStatement() *TPMStatement {
+	return &TPMStatement{
+		X5C:        [][]byte{[]byte("carrier-cert"), []byte("second-cert")},
+		Sig:        []byte("signature"),
+		CertInfo:   []byte("cert-info"),
+		PubArea:    []byte("pub-area"),
+		Activation: []byte("activation-secret"),
+	}
+}
+
+func registerRaw(t *testing.T, a *Authenticator) protocol.CredentialCreationResponse {
+	t.Helper()
+	opts, _ := beginRegistration(t, newRP(t), &testUser{})
+	resp, err := a.Register(opts)
+	require.NoError(t, err)
+	var out protocol.CredentialCreationResponse
+	require.NoError(t, json.Unmarshal(resp, &out))
+	return out
+}
+
+// With no Attester the attestation object is exactly {fmt:none, attStmt:{}, authData}
+// as it has always been, and it carries the CFGMS AAGUID.
+func TestRegisterWithoutAttesterIsByteIdenticalFmtNone(t *testing.T) {
+	a := newAuth(t, newKey(t))
+	out := registerRaw(t, a)
+	authData := out.AttestationResponse.AuthenticatorData
+
+	want := []byte{0xa3}
+	want = append(want, 0x63, 'f', 'm', 't', 0x64, 'n', 'o', 'n', 'e')
+	want = append(want, 0x67, 'a', 't', 't', 'S', 't', 'm', 't', 0xa0)
+	want = append(want, 0x68, 'a', 'u', 't', 'h', 'D', 'a', 't', 'a', 0x58, byte(len(authData)))
+	require.Less(t, len(authData), 256)
+	want = append(want, authData...)
+	assert.Equal(t, want, []byte(out.AttestationResponse.AttestationObject))
+
+	assert.Equal(t, AAGUID[:], []byte(authData[37:53]), "authData carries softauthn.AAGUID")
+}
+
+func TestRegisterWithAttesterEmitsFmtTPM(t *testing.T) {
+	key := newKey(t)
+	att := &recordingAttester{stmt: cannedStatement()}
+	a := newAuth(t, key, func(c *Config) { c.Attester = att })
+
+	opts, _ := beginRegistration(t, newRP(t), &testUser{})
+	resp, err := a.Register(opts)
+	require.NoError(t, err)
+
+	parsed, err := protocol.ParseCredentialCreationResponseBytes(resp)
+	require.NoError(t, err)
+	obj := parsed.Response.AttestationObject
+	assert.Equal(t, "tpm", obj.Format)
+	assert.Equal(t, AAGUID[:], obj.AuthData.AttData.AAGUID, "an attester cannot change the AAGUID")
+	assert.Equal(t, "2.0", obj.AttStatement["ver"])
+	assert.EqualValues(t, -7, obj.AttStatement["alg"])
+	assert.Equal(t, []any{[]byte("carrier-cert"), []byte("second-cert")}, obj.AttStatement["x5c"])
+	assert.Equal(t, []byte("signature"), obj.AttStatement["sig"])
+	assert.Equal(t, []byte("cert-info"), obj.AttStatement["certInfo"])
+	assert.Equal(t, []byte("pub-area"), obj.AttStatement["pubArea"])
+	assert.Equal(t, []byte("activation-secret"), obj.AttStatement["cfgmsActivation"])
+
+	// The credential public key in the attestation is the signer's public key.
+	k, err := webauthncose.ParsePublicKey(obj.AuthData.AttData.CredentialPublicKey)
+	require.NoError(t, err)
+	ec, ok := k.(webauthncose.EC2PublicKeyData)
+	require.True(t, ok)
+	assert.Equal(t, key.X.FillBytes(make([]byte, 32)), ec.XCoord)
+	assert.Equal(t, key.Y.FillBytes(make([]byte, 32)), ec.YCoord)
+
+	// The attester was asked to certify exactly this registration.
+	assert.Equal(t, []byte(parsed.Raw.AttestationResponse.AuthenticatorData), att.authData)
+	cdHash := sha256.Sum256(parsed.Raw.AttestationResponse.ClientDataJSON)
+	assert.Equal(t, cdHash[:], att.clientDataHash)
+}
+
+func TestRegisterWithAttesterRefusals(t *testing.T) {
+	incomplete := func(mutate func(*TPMStatement)) *TPMStatement {
+		s := cannedStatement()
+		mutate(s)
+		return s
+	}
+	cases := map[string]*recordingAttester{
+		"attester error": {err: errors.New("tpm unavailable")},
+		"nil statement":  {},
+		"no chain":       {stmt: incomplete(func(s *TPMStatement) { s.X5C = nil })},
+		"no sig":         {stmt: incomplete(func(s *TPMStatement) { s.Sig = nil })},
+		"no certInfo":    {stmt: incomplete(func(s *TPMStatement) { s.CertInfo = nil })},
+		"no pubArea":     {stmt: incomplete(func(s *TPMStatement) { s.PubArea = nil })},
+		"no activation":  {stmt: incomplete(func(s *TPMStatement) { s.Activation = nil })},
+	}
+	for name, att := range cases {
+		t.Run(name, func(t *testing.T) {
+			a := newAuth(t, newKey(t), func(c *Config) { c.Attester = att })
+			opts, _ := beginRegistration(t, newRP(t), &testUser{})
+			resp, err := a.Register(opts)
+			require.Error(t, err)
+			assert.Nil(t, resp, "a failed attestation must not yield a response that falls back to none")
+		})
 	}
 }

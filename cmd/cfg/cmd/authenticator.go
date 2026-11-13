@@ -42,7 +42,10 @@ present, otherwise the software key provider). Its private bytes never exist
 in cfg or on disk; the encrypted credential store (credential name
 authenticator.<name>) holds only the binding and where the key is. Elsewhere,
 or with --key-provider store, the key itself is kept in the encrypted
-credential store and is never printed or written anywhere else.
+credential store and is never printed or written anywhere else. With
+--key-provider tpm (Linux and Windows) the key is created inside the host TPM
+and the store holds only TPM-wrapped blobs that are useless on any other
+machine; only such a key can register on a root agent account.
 
 Either way, any process running as the same user on this machine can sign with
 the key, so treat it as a credential of that user.
@@ -70,6 +73,11 @@ certificate for later connections. Controller TLS certificates are always verifi
             bytes cannot be read out (Windows only; the Windows default)
   store     a key kept in the encrypted credential store (the default on other
             operating systems)
+  tpm       a key created inside the host TPM 2.0 (Linux /dev/tpmrm0 or Windows
+            TBS; not macOS), as the TPM attestation of a root agent account
+            requires. It refuses, and creates nothing, when there is no usable
+            TPM or the TPM has no endorsement key certificate in NV storage;
+            there is no fallback.
 With no --key-provider, Windows falls back to store only when no platform key
 provider is available, and says so. 'cfg authenticator list' shows which
 protection each authenticator has.
@@ -87,7 +95,7 @@ Examples:
 	create.Flags().String("origin", "", "WebAuthn origin, https (default: scheme://host[:port] of --url)")
 	create.Flags().String("ca-cert", "", "PEM file with the CA certificate that signs the controller's TLS certificate")
 	create.Flags().String("label", "", "free-text label for the authenticator")
-	create.Flags().String("key-provider", "", "where the key lives: platform (Windows) or store (default: platform on Windows, store elsewhere)")
+	create.Flags().String("key-provider", "", "where the key lives: platform (Windows), store or tpm (default: platform on Windows, store elsewhere)")
 
 	list := &cobra.Command{
 		Use:   "list",
@@ -182,11 +190,15 @@ func authenticatorOrigin(override string, u *url.URL) (string, error) {
 
 // authenticatorKeyChoice is where create puts the key.
 type authenticatorKeyChoice struct {
-	protection string // authenticatorProtectionPlatform or authenticatorProtectionStore
+	protection string // authenticatorProtectionPlatform, authenticatorProtectionStore or authenticatorProtectionTPM
 	// fallback allows store when no platform provider is available. It is set
 	// only for the Windows default, never for an explicit --key-provider.
 	fallback bool
 }
+
+// authenticatorHostOS is the operating system key-provider choices are checked
+// against. Tests replace it to exercise the macOS refusal on other hosts.
+var authenticatorHostOS = runtime.GOOS
 
 // resolveAuthenticatorKeyProvider turns the --key-provider value into a choice.
 // It is checked before anything is written.
@@ -205,17 +217,38 @@ func resolveAuthenticatorKeyProvider(flag string) (authenticatorKeyChoice, error
 		return authenticatorKeyChoice{protection: authenticatorProtectionPlatform}, nil
 	case authenticatorProtectionStore:
 		return authenticatorKeyChoice{protection: authenticatorProtectionStore}, nil
+	case authenticatorProtectionTPM:
+		if authenticatorHostOS == "darwin" {
+			return authenticatorKeyChoice{}, errors.New("--key-provider tpm is not supported on macOS: " +
+				"there is no TPM key or attestation there, so a root agent account cannot be used from macOS; " +
+				"use --key-provider store for an authenticator on an account that does not require a TPM")
+		}
+		return authenticatorKeyChoice{protection: authenticatorProtectionTPM}, nil
 	default:
-		return authenticatorKeyChoice{}, fmt.Errorf("--key-provider must be %q or %q (got %q)",
-			authenticatorProtectionPlatform, authenticatorProtectionStore, flag)
+		return authenticatorKeyChoice{}, fmt.Errorf("--key-provider must be %q, %q or %q (got %q)",
+			authenticatorProtectionPlatform, authenticatorProtectionStore, authenticatorProtectionTPM, flag)
 	}
+}
+
+// makeTPMKeyFirst creates the TPM key when choice asks for one. A TPM key is only
+// wrapped blobs in the record, with no state left in the TPM, so it is made before
+// the credential store is opened: a host with no usable TPM is refused before the
+// store is touched, and a key made for a name that turns out to exist is dropped.
+func makeTPMKeyFirst(rec *authenticatorRecord, choice authenticatorKeyChoice) error {
+	if choice.protection != authenticatorProtectionTPM {
+		return nil
+	}
+	return rec.setTPMKey()
 }
 
 // setAuthenticatorKey gives rec its key as choice says. It reports whether the
 // Windows default fell back to the credential store.
 func setAuthenticatorKey(rec *authenticatorRecord, choice authenticatorKeyChoice) (fellBack bool, err error) {
-	if choice.protection == authenticatorProtectionStore {
+	switch choice.protection {
+	case authenticatorProtectionStore:
 		return false, rec.setStoreKey()
+	case authenticatorProtectionTPM:
+		return false, nil // runAuthenticatorCreate made the key before opening the store
 	}
 	err = rec.setPlatformKey()
 	if err == nil {
@@ -287,6 +320,10 @@ func runAuthenticatorCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if err := makeTPMKeyFirst(rec, choice); err != nil {
+		return err
+	}
+
 	ctx := context.Background()
 	store, err := newCredentialStore()
 	if err != nil {
@@ -327,12 +364,16 @@ func printAuthenticatorCreated(out io.Writer, rec *authenticatorRecord, fellBack
 	_, _ = fmt.Fprintf(out, "Origin:        %s\n", s.Origin)
 	_, _ = fmt.Fprintf(out, "Credential ID: %s\n", s.CredentialID)
 	_, _ = fmt.Fprintf(out, "Protection:    %s\n", s.Protection)
-	if rec.Protection == authenticatorProtectionPlatform {
+	switch rec.Protection {
+	case authenticatorProtectionPlatform:
 		_, _ = fmt.Fprintf(out, "Private key:   held by %s as a per-user key that cannot be read out of it\n", rec.KeyProvider)
 		if rec.KeyProvider == softwareKeyProviderName {
 			_, _ = fmt.Fprintln(out, "Note:          the TPM could not hold the key, so the software provider holds it; it is protected by your Windows profile, not by hardware")
 		}
-	} else {
+	case authenticatorProtectionTPM:
+		_, _ = fmt.Fprintf(out, "Private key:   held inside this machine's TPM; credential %q stores only TPM-wrapped blobs that work on this TPM alone\n",
+			authenticatorCredentialName(rec.Name))
+	default:
 		_, _ = fmt.Fprintf(out, "Private key:   stored encrypted as credential %q; it is never displayed or exported\n",
 			authenticatorCredentialName(rec.Name))
 	}
