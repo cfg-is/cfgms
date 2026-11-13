@@ -156,8 +156,6 @@ type swaEnv struct {
 
 	pendingModule string // address of a pending module bundle
 	seq           int
-
-	tpmEnv any // the software TPM a root agent's key is held in (Issue #6227); see swaTPMKey
 }
 
 // swaTapper is the root-scope operator account: it holds the break-glass crossing

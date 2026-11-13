@@ -15,6 +15,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"sync"
 
 	"github.com/stretchr/testify/require"
 
@@ -22,6 +23,11 @@ import (
 	"github.com/cfgis/cfgms/pkg/softauthn/tpmkey"
 	"github.com/cfgis/cfgms/pkg/softauthn/tpmkey/tpmkeytest"
 )
+
+// swaTPMs holds the software TPM of each test controller that has started one. It is
+// keyed by environment rather than kept in a swaEnv field so that no field is dead in
+// the builds without a software TPM.
+var swaTPMs sync.Map // *swaEnv -> *swaTPM
 
 // swaTPM is the software TPM of one test controller.
 type swaTPM struct {
@@ -57,8 +63,10 @@ func (l *swaLateAttester) AttestTPM(authData, clientDataHash []byte) (*softauthn
 // TPM and installing its CA as the controller's only trusted TPM root on first use.
 func (e *swaEnv) newTPMKey() swaTPMKey {
 	t := e.t
-	tpm, _ := e.tpmEnv.(*swaTPM)
-	if tpm == nil {
+	var tpm *swaTPM
+	if v, ok := swaTPMs.Load(e); ok {
+		tpm = v.(*swaTPM)
+	} else {
 		hw := tpmkeytest.Start(t, tpmkeytest.Options{})
 		pool := x509.NewCertPool()
 		pool.AddCert(hw.CA)
@@ -66,7 +74,8 @@ func (e *swaEnv) newTPMKey() swaTPMKey {
 		prepared, err := tpmkey.Prepare(hw)
 		require.NoError(t, err)
 		tpm = &swaTPM{tpm: hw, prepared: prepared}
-		e.tpmEnv = tpm
+		swaTPMs.Store(e, tpm)
+		t.Cleanup(func() { swaTPMs.Delete(e) })
 	}
 
 	blobs, _, err := tpmkey.Create(tpm.tpm)
