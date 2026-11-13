@@ -15,7 +15,7 @@ this page does not define another security-settings hierarchy.
 | Admit module publishers and content | [Module publishing](../operations/module-publishing.md) |
 | Set script signing/trust | [Script reference](../modules/script-module.md#signing-policies) and canonical schema |
 | Review browser sessions/CSRF/CORS and assurance requirements | [Security architecture](architecture.md) and registered API route policy |
-| Permit a CFGMS software authenticator for a tenant's accounts | [Software authenticators](#software-authenticators) |
+| Permit a CFGMS software authenticator for a tenant's accounts | [Software authenticators](#software-authenticators); step-by-step in [Agent onboarding](../administration/agent-onboarding.md) |
 
 ## Credentials and scope
 
@@ -159,6 +159,21 @@ root agent account's authenticator with `--key-provider platform` so the key is
 non-exportable. Within the allowlist the account has fleet-wide reach below the
 root-to-MSP boundary, and whoever controls the agent host can use the key for every
 presence-gated action the account holds.
+
+### Threat-model note
+
+The policy governs the CFGMS-shipped authenticator and makes its use visible; it is not
+a boundary against someone who already holds enrollment rights. The controller requests
+no attestation, so the AAGUID is self-asserted and a different authenticator can be
+enrolled on the ordinary passkey path. On Linux and macOS the key is encrypted at rest
+but is not non-exportable: code running as the agent's user can recover it. The
+signature counter is always 0, so a cloned key cannot be detected by counter regression.
+The enrollment link is a bearer secret and is handled by file or standard input only.
+A tenant-scoped account cannot give presence, so presence-gated actions such as module
+approval stay with the root agent account above. The tenant list is the control an
+operator keeps: it has no API writer, is read at controller startup, and removing a
+tenant from it makes that tenant's software credentials and sessions inert at the next
+request. The operator sequence is in [Agent onboarding](../administration/agent-onboarding.md).
 
 ### Audit trail for software authenticators
 
