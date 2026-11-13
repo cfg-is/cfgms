@@ -210,8 +210,10 @@ State these to whoever approves the setting. The policy governs the CFGMS-shippe
 authenticator and makes its use visible. It is not a boundary against someone who already
 has enrollment rights.
 
-- **The AAGUID is self-asserted.** The controller requests no attestation, so it records
-  whatever AAGUID the client reports. A credential that reports another AAGUID registers
+- **The AAGUID is self-asserted.** For these accounts the controller requests no
+  attestation, so it records whatever AAGUID the client reports. (A root agent account is
+  the exception: its key must be TPM-attested, see
+  [TPM attestation of the key](../security/SECURITY_CONFIGURATION.md#tpm-attestation-of-the-key-required).) A credential that reports another AAGUID registers
   on the ordinary passkey path and receives no different trust, assurance or exemption.
   Anyone who can redeem an enrollment link can enroll any authenticator; the policy only
   controls where the CFGMS software authenticator is accepted and labels its use in the

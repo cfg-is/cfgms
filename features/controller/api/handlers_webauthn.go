@@ -98,6 +98,13 @@ type webAuthnPendingSession struct {
 	// refuses a different (or missing/extra) ID so a relay request attaches only to
 	// the ceremony the relay started.
 	relayRequestID string
+
+	// tpmActivation is set only by a registration begin for a root agent account
+	// (Issue #6227, ADR-021 Amendment 12): the verified attestation key and EK identity
+	// and the one-time secret the TPM must recover. It lives and dies with this
+	// single-use session; finish refuses a ceremony that carries none for such an
+	// account.
+	tpmActivation *tpmActivationState
 }
 
 // presenceActionBinding names the one guarded request a presence token may satisfy.
@@ -298,30 +305,8 @@ func (s *Server) handleWebAuthnRegisterBegin(w http.ResponseWriter, r *http.Requ
 
 	user := buildWebauthnUser(acct)
 
-	creation, sessionData, err := wa.BeginRegistration(user,
-		// userVerification: "required" for the initial enrollment ceremony:
-		// the human-presence gesture is cheap at registration time.
-		// ADR-021 Decision 3 relaxes this only for ongoing continuity checks
-		// (a separate, later story), not the one-time enrollment here.
-		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
-			UserVerification: protocol.VerificationRequired,
-			// Passkey login is usernameless (BeginDiscoverableLogin, empty
-			// allowCredentials), so only a discoverable credential can ever sign
-			// in. Without this, authenticators that default to non-discoverable
-			// (password managers, many security keys) register a passkey that
-			// login can never find (Issue #4505).
-			ResidentKey:        protocol.ResidentKeyRequirementRequired,
-			RequireResidentKey: protocol.ResidentKeyRequired(),
-		}),
-		// Prevent re-registering an authenticator already enrolled for this account.
-		webauthn.WithExclusions(webauthn.Credentials(user.credentials).CredentialDescriptors()),
-	)
-	if err != nil {
-		s.logger.Error("WebAuthn BeginRegistration failed",
-			"username", logging.SanitizeLogValue(username),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to begin WebAuthn registration", "WEBAUTHN_BEGIN_ERROR")
+	creation, sessionData, tpm, ok := s.beginRegistration(w, r, wa, acct, user)
+	if !ok {
 		return
 	}
 
@@ -332,6 +317,8 @@ func (s *Server) handleWebAuthnRegisterBegin(w http.ResponseWriter, r *http.Requ
 		data:    *sessionData,
 		expires: time.Now().Add(webAuthnSessionTTL),
 		binding: beginActor,
+
+		tpmActivation: tpm,
 	}, webAuthnSessionTTL); out != ceremonyOK {
 		s.writeCeremonyUnavailable(w)
 		return
@@ -400,32 +387,15 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	user := buildWebauthnUser(acct)
-
-	// Full server-side verification via the library: parses the request body,
-	// verifies challenge (against the server-stored session.Challenge, not the
-	// client-echoed value), origin, RP-ID, and cryptographic attestation.
-	//
-	// The server assigns AssuranceStrong to this credential because a WebAuthn
-	// authenticator was cryptographically verified — not because the client
-	// supplied any assurance claim. The future assertion handler will set
-	// Principal.Assurance = session.AssuranceStrong after verifying an assertion
-	// against this credential (ADR-021 Decision 1).
-	credential, err := wa.FinishRegistration(user, pending.data, r)
-	if err != nil {
-		s.logger.Warn("WebAuthn FinishRegistration verification failed",
-			"username", logging.SanitizeLogValue(username),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
+	// Full server-side verification via the library and, for a root agent account, of the
+	// TPM attestation. The server assigns AssuranceStrong to this credential because a
+	// WebAuthn authenticator was cryptographically verified — not because the client
+	// supplied any assurance claim (ADR-021 Decision 1).
+	storedCred, ok := s.finishRegistration(w, r, wa, acct, pending)
+	if !ok {
 		return
 	}
-
-	// Optional human-readable label from a query parameter (not the request body,
-	// which is consumed by FinishRegistration above).
-	label := logging.SanitizeLogValue(r.URL.Query().Get("label"))
-
-	stored := newStoredCredential(credential, label, time.Now().UTC())
+	stored := *storedCred
 
 	// Reload from the durable store (not the cache) so a concurrent admin change
 	// made since the request began is not overwritten, then write with
@@ -444,27 +414,14 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 
 	updatedAcct := *freshAcct
 	updatedAcct.Credentials = append(append([]WebAuthnCredential(nil), freshAcct.Credentials...), stored)
-
-	newVersion, swapped, persistErr := s.persistAccountCAS(r.Context(), &updatedAcct, actingPrincipalID)
-	if persistErr != nil {
-		s.logger.Error("Failed to persist WebAuthn credential",
-			"username", logging.SanitizeLogValue(username),
-			"error", logging.SanitizeLogValue(persistErr.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to persist credential", "STORE_ERROR")
+	if !s.persistRegisteredAccount(w, r, &updatedAcct, actingPrincipalID,
+		"Failed to persist WebAuthn credential", "Account was concurrently modified; retry the registration") {
 		return
 	}
-	if !swapped {
-		s.writeErrorResponse(w, http.StatusConflict,
-			"Account was concurrently modified; retry the registration", "ACCOUNT_MODIFIED")
-		return
-	}
-	updatedAcct.Version = newVersion
-	s.cacheAccount(&updatedAcct)
 
 	s.logger.Info("WebAuthn credential registered",
 		"username", logging.SanitizeLogValue(username),
-		"label", logging.SanitizeLogValue(label))
+		"label", stored.Label)
 
 	// Audit: record passkey addition (Issue #2992).
 	s.emitPasskeyAddedAudit(r.Context(), &updatedAcct, base64.RawURLEncoding.EncodeToString(stored.ID), actingPrincipalID, &stored)
@@ -1006,6 +963,7 @@ func (s *Server) handleWebAuthnListCredentials(w http.ResponseWriter, r *http.Re
 			Synced:       c.BackupState,
 			AAGUID:       hex.EncodeToString(c.AAGUID),
 			Software:     c.isSoftwareAuthenticator(),
+			TPMAttested:  c.tpmAttested(),
 			SyncCapable:  c.BackupEligible,
 			Current:      len(currentCred) > 0 && bytes.Equal(currentCred, c.ID),
 			ID:           base64.RawURLEncoding.EncodeToString(c.ID),
@@ -1208,6 +1166,70 @@ func (s *Server) emitPasskeyRenamedAudit(ctx context.Context, acct *account, cre
 // SHA-256 and compares in constant time against the stored hash.
 const enrollmentTokenHeader = "X-Enrollment-Token"
 
+// reloadEnrollmentAccount re-reads acct from the durable store for the enrollment begin
+// and returns the fresh record (acct itself when the store has none). On a store error
+// it answers 500 and returns ok == false.
+func (s *Server) reloadEnrollmentAccount(w http.ResponseWriter, r *http.Request, acct *account) (*account, bool) {
+	fresh, err := s.loadAccountFromStore(r.Context(), acct.Username, accountStorageTenant(acct.TenantID))
+	if err != nil {
+		s.logger.Error("Failed to verify account state for enrollment begin",
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to look up account", "STORE_ERROR")
+		return nil, false
+	}
+	if fresh == nil {
+		return acct, true
+	}
+	return fresh, true
+}
+
+// finishRegistration is the verification both registration-finish handlers share: the
+// library verifies the response body against the pending session (challenge, origin,
+// RP ID, attestation), a root agent account's TPM attestation is verified and recorded,
+// and the credential record is built. The optional label comes from the query string,
+// not the request body, which the library consumed. On failure it audits where
+// applicable, answers and returns ok == false.
+func (s *Server) finishRegistration(w http.ResponseWriter, r *http.Request, wa *webauthn.WebAuthn, acct *account, pending *webAuthnPendingSession) (*WebAuthnCredential, bool) {
+	credential, err := wa.FinishRegistration(buildWebauthnUser(acct), pending.data, r)
+	if err != nil {
+		s.logger.Warn("WebAuthn FinishRegistration verification failed",
+			"account_id", logging.SanitizeLogValue(acct.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.auditRegistrationVerifyFailure(r.Context(), acct, pending)
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
+		return nil, false
+	}
+	stored := newStoredCredential(credential, logging.SanitizeLogValue(r.URL.Query().Get("label")), time.Now().UTC())
+	if !s.applyTPMAttestation(w, r, acct, pending, credential, &stored) {
+		return nil, false
+	}
+	return &stored, true
+}
+
+// persistRegisteredAccount writes the account with its new credential by
+// compare-and-swap, adopts the new version and refreshes the cache. On a store error it
+// answers 500 (logging failMsg) and on a lost race 409 (conflictMsg), returning false.
+func (s *Server) persistRegisteredAccount(w http.ResponseWriter, r *http.Request, updated *account, actingPrincipalID, failMsg, conflictMsg string) bool {
+	newVersion, swapped, err := s.persistAccountCAS(r.Context(), updated, actingPrincipalID)
+	if err != nil {
+		s.logger.Error(failMsg,
+			"account_id", logging.SanitizeLogValue(updated.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to persist credential", "STORE_ERROR")
+		return false
+	}
+	if !swapped {
+		s.writeErrorResponse(w, http.StatusConflict, conflictMsg, "ACCOUNT_MODIFIED")
+		return false
+	}
+	updated.Version = newVersion
+	s.cacheAccount(updated)
+	return true
+}
+
 // handlePasskeyEnrollBegin handles POST /api/v1/web/passkey/enroll/begin.
 //
 // The caller presents the raw enrollment token in X-Enrollment-Token. The server:
@@ -1253,17 +1275,11 @@ func (s *Server) handlePasskeyEnrollBegin(w http.ResponseWriter, r *http.Request
 
 	// The token lookup may be served from the cache; re-read the durable store so a
 	// disable committed by another node or request is honoured.
-	freshAcct, freshErr := s.loadAccountFromStore(r.Context(), acct.Username, accountStorageTenant(acct.TenantID))
-	if freshErr != nil {
-		s.logger.Error("Failed to verify account state for enrollment begin",
-			"error", logging.SanitizeLogValue(freshErr.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to look up account", "STORE_ERROR")
+	fresh, ok := s.reloadEnrollmentAccount(w, r, acct)
+	if !ok {
 		return
 	}
-	if freshAcct != nil {
-		acct = freshAcct
-	}
+	acct = fresh
 
 	// A disabled account must not gain a credential (containment control).
 	if acct.Disabled || !verifyEnrollmentToken(acct, rawToken) {
@@ -1274,25 +1290,8 @@ func (s *Server) handlePasskeyEnrollBegin(w http.ResponseWriter, r *http.Request
 
 	user := buildWebauthnUser(acct)
 
-	creation, sessionData, err := wa.BeginRegistration(user,
-		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
-			UserVerification: protocol.VerificationRequired,
-			// Passkey login is usernameless (BeginDiscoverableLogin, empty
-			// allowCredentials), so only a discoverable credential can ever sign
-			// in. Without this, authenticators that default to non-discoverable
-			// (password managers, many security keys) register a passkey that
-			// login can never find (Issue #4505).
-			ResidentKey:        protocol.ResidentKeyRequirementRequired,
-			RequireResidentKey: protocol.ResidentKeyRequired(),
-		}),
-		webauthn.WithExclusions(webauthn.Credentials(user.credentials).CredentialDescriptors()),
-	)
-	if err != nil {
-		s.logger.Error("WebAuthn BeginRegistration failed for enrollment",
-			"account_id", logging.SanitizeLogValue(acct.ID),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to begin WebAuthn registration", "WEBAUTHN_BEGIN_ERROR")
+	creation, sessionData, tpm, ok := s.beginRegistration(w, r, wa, acct, user)
+	if !ok {
 		return
 	}
 
@@ -1303,6 +1302,8 @@ func (s *Server) handlePasskeyEnrollBegin(w http.ResponseWriter, r *http.Request
 		data:    *sessionData,
 		expires: time.Now().Add(webAuthnSessionTTL),
 		binding: acct.ID,
+
+		tpmActivation: tpm,
 	}, webAuthnSessionTTL); out != ceremonyOK {
 		s.writeCeremonyUnavailable(w)
 		return
@@ -1385,22 +1386,13 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	user := buildWebauthnUser(acct)
-
-	// Full library-level WebAuthn verification (challenge, origin, RP-ID, attestation).
-	credential, err := wa.FinishRegistration(user, pending.data, r)
-	if err != nil {
-		s.logger.Warn("WebAuthn FinishRegistration verification failed for enrollment",
-			"account_id", logging.SanitizeLogValue(acct.ID),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
+	// Full library-level WebAuthn verification (challenge, origin, RP-ID, attestation)
+	// and, for a root agent account, of the TPM attestation.
+	storedCred, ok := s.finishRegistration(w, r, wa, acct, pending)
+	if !ok {
 		return
 	}
-
-	label := logging.SanitizeLogValue(r.URL.Query().Get("label"))
-
-	stored := newStoredCredential(credential, label, time.Now().UTC())
+	stored := *storedCred
 
 	// CAS reload: re-read from the durable store (not cache) to detect any
 	// admin-mediated mutations that occurred between begin and finish.
@@ -1429,23 +1421,10 @@ func (s *Server) handlePasskeyEnrollFinish(w http.ResponseWriter, r *http.Reques
 	updatedAcct.Credentials = []WebAuthnCredential{stored}
 	updatedAcct.EnrollmentLinkRevoked = true
 
-	newVersion, swapped, persistErr := s.persistAccountCAS(r.Context(), &updatedAcct, "")
-	if persistErr != nil {
-		s.logger.Error("Failed to persist enrollment credential",
-			"account_id", logging.SanitizeLogValue(acct.ID),
-			"error", logging.SanitizeLogValue(persistErr.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to persist credential", "STORE_ERROR")
+	if !s.persistRegisteredAccount(w, r, &updatedAcct, "",
+		"Failed to persist enrollment credential", "Account was concurrently modified; restart enrollment") {
 		return
 	}
-	if !swapped {
-		// The ceremony is already consumed; the client restarts enrollment.
-		s.writeErrorResponse(w, http.StatusConflict,
-			"Account was concurrently modified; restart enrollment", "ACCOUNT_MODIFIED")
-		return
-	}
-	updatedAcct.Version = newVersion
-	s.cacheAccount(&updatedAcct)
 
 	// Audit: record account, credential ID, and delivery channel.
 	credIDStr := base64.RawURLEncoding.EncodeToString(stored.ID)
@@ -1468,6 +1447,9 @@ func registrationAuditDetails(details map[string]interface{}, cred *WebAuthnCred
 	details["aaguid"] = hex.EncodeToString(cred.AAGUID)
 	details["attestation_format"] = cred.AttestationFormat
 	details["software_authenticator"] = cred.isSoftwareAuthenticator()
+	if cred.tpmAttested() {
+		tpmAuditDetails(details, cred.TPMAttestation)
+	}
 	return details
 }
 

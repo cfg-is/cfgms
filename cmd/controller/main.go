@@ -3,6 +3,7 @@
 package main
 
 import (
+	"crypto/x509"
 	"fmt"
 	"os"
 	"os/signal"
@@ -267,6 +268,9 @@ func applyListenOverrides(cfg *config.Config, listenAPIAddr, listenTransportAddr
 // only from controller.cfg and defaults to empty, which turns software-authenticator
 // registration off (Issue #6140). The root-agent setting is read the same way and
 // defaults to off (Issue #6225); the controller logs it at startup when it is on.
+// The TPM manufacturer roots a root agent account's registration must chain to are
+// read from the PEM files controller.cfg names; an unreadable file or one with no
+// certificate fails startup (Issue #6227).
 func configureWebAuthn(apiServer *controllerapi.Server, cfg *config.Config) error {
 	wa, err := buildWebAuthnRelyingParty(cfg)
 	if err != nil {
@@ -278,11 +282,44 @@ func configureWebAuthn(apiServer *controllerapi.Server, cfg *config.Config) erro
 	apiServer.SetSoftwareAuthenticatorTenants(cfg.SoftwareAuthenticatorTenants())
 	rootAgents := cfg.SoftwareAuthenticatorRootAgentAccounts()
 	apiServer.SetSoftwareAuthenticatorRootAgentAccounts(rootAgents)
+	tpmRoots, err := loadRootAgentTPMRoots(cfg.SoftwareAuthenticatorRootAgentTPMRoots())
+	if err != nil {
+		return err
+	}
+	apiServer.SetRootAgentTPMRoots(tpmRoots)
 	if rootAgents {
 		logging.ForComponent("controller").Info("Software authenticators are permitted for dedicated root-scope agent accounts",
 			"setting", "webauthn.allow_software_authenticators.root_agent_accounts", "enabled", true)
 	}
 	return nil
+}
+
+// loadRootAgentTPMRoots reads the PEM files named by
+// webauthn.allow_software_authenticators.root_agent_tpm_roots into one verification
+// pool (Issue #6227, ADR-021 Amendment 12). A file that cannot be read or holds no
+// certificate is a startup error: a root the operator named that did not load must
+// never leave the controller running with fewer roots than configured. An empty list
+// returns a nil pool, which refuses every root agent registration.
+func loadRootAgentTPMRoots(paths []string) (*x509.CertPool, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	var all []byte
+	for _, path := range paths {
+		pemData, err := os.ReadFile(filepath.Clean(path)) // #nosec G304 -- operator-configured path in controller.cfg
+		if err != nil {
+			return nil, fmt.Errorf("webauthn.allow_software_authenticators.root_agent_tpm_roots: read %q: %w", path, err)
+		}
+		if _, err := certpkg.CertPoolFromPEM(pemData); err != nil {
+			return nil, fmt.Errorf("webauthn.allow_software_authenticators.root_agent_tpm_roots: %q holds no certificate: %w", path, err)
+		}
+		all = append(append(all, pemData...), '\n')
+	}
+	pool, err := certpkg.CertPoolFromPEM(all)
+	if err != nil {
+		return nil, fmt.Errorf("webauthn.allow_software_authenticators.root_agent_tpm_roots: %w", err)
+	}
+	return pool, nil
 }
 
 // buildWebAuthnRelyingParty constructs the WebAuthn relying party from the

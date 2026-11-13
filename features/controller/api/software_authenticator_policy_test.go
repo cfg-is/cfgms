@@ -13,7 +13,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -71,14 +74,48 @@ type registerRoute struct {
 	run  func(t *testing.T, server *Server, rawToken string, aaguid *[16]byte) *httptest.ResponseRecorder
 }
 
+// creationOptions returns the creation options for a registration on one route. A root
+// agent account's begin refuses a request that carries no TPM material (Issue #6227,
+// TPM_ATTESTATION_REQUIRED), so for such an account the pending session is stored
+// directly, as a begin for any other account would have stored it. That lets these tests
+// reach the finish-side policy with a credential that carries no TPM attestation; the
+// attested path is TestRootAgentRegistration_TPMAttested.
+func creationOptions(t *testing.T, server *Server, username string, begin *httptest.ResponseRecorder, store func(webauthn.SessionData)) []byte {
+	t.Helper()
+	if begin.Code == http.StatusOK {
+		return beginData(t, begin)
+	}
+	require.Equal(t, http.StatusBadRequest, begin.Code, begin.Body.String())
+	require.Equal(t, errCodeTPMAttestationRequired, errCode(t, begin.Body.Bytes()))
+	acct, err := server.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	creation, session, err := server.getWebAuthn().BeginRegistration(buildWebauthnUser(acct),
+		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
+			UserVerification:   protocol.VerificationRequired,
+			ResidentKey:        protocol.ResidentKeyRequirementRequired,
+			RequireResidentKey: protocol.ResidentKeyRequired(),
+		}))
+	require.NoError(t, err)
+	store(*session)
+	raw, err := json.Marshal(creation)
+	require.NoError(t, err)
+	return raw
+}
+
 var registerRoutes = []registerRoute{
 	{"admin register route", func(t *testing.T, server *Server, _ string, aaguid *[16]byte) *httptest.ResponseRecorder {
-		resp, err := newSoftAuthenticator(t, aaguid).Register(beginData(t, doBegin(t, server, policyUser)))
+		opts := creationOptions(t, server, policyUser, doBegin(t, server, policyUser), func(sd webauthn.SessionData) {
+			injectSession(server, policyUser, sd, 10*time.Minute)
+		})
+		resp, err := newSoftAuthenticator(t, aaguid).Register(opts)
 		require.NoError(t, err)
 		return doFinish(t, server, policyUser, bytes.NewReader(resp))
 	}},
 	{"enrollment-token route", func(t *testing.T, server *Server, rawToken string, aaguid *[16]byte) *httptest.ResponseRecorder {
-		resp, err := newSoftAuthenticator(t, aaguid).Register(beginData(t, doEnrollBegin(t, server, rawToken)))
+		opts := creationOptions(t, server, policyUser, doEnrollBegin(t, server, rawToken), func(sd webauthn.SessionData) {
+			injectEnrollSession(server, rawToken, sd, 10*time.Minute)
+		})
+		resp, err := newSoftAuthenticator(t, aaguid).Register(opts)
 		require.NoError(t, err)
 		return doEnrollFinish(t, server, rawToken, bytes.NewReader(resp))
 	}},
@@ -344,7 +381,10 @@ func newRootAgentPolicyServer(t *testing.T, setting bool, spec rootAgentSpec) (*
 // rootAgentRegister runs the admin registration ceremony for username.
 func rootAgentRegister(t *testing.T, server *Server, username string) *httptest.ResponseRecorder {
 	t.Helper()
-	resp, err := newSoftAuthenticator(t, nil).Register(beginData(t, doBegin(t, server, username)))
+	opts := creationOptions(t, server, username, doBegin(t, server, username), func(sd webauthn.SessionData) {
+		injectSession(server, username, sd, 10*time.Minute)
+	})
+	resp, err := newSoftAuthenticator(t, nil).Register(opts)
 	require.NoError(t, err)
 	return doFinish(t, server, username, bytes.NewReader(resp))
 }
@@ -404,25 +444,28 @@ func TestSoftwareAuthenticatorPolicy_RootAgentRegistrationRefusals(t *testing.T)
 	}
 }
 
-func TestSoftwareAuthenticatorPolicy_RootAgentRegisters(t *testing.T) {
+// A root agent account that is eligible under every Issue #6225 condition still cannot
+// register a credential without a verified TPM attestation (Issue #6227): begin refuses a
+// request with no TPM material, and a finish with a "none" attestation is refused, on
+// both routes. The attested registration is TestRootAgentRegistration_TPMAttested.
+func TestSoftwareAuthenticatorPolicy_RootAgentWithoutTPMIsRefused(t *testing.T) {
 	t.Run("admin register route", func(t *testing.T) {
 		server, _ := newRootAgentPolicyServer(t, true, rootAgentSpec{username: "agent-ok", flag: true})
-		rec := rootAgentRegister(t, server, "agent-ok")
-		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		begin := doBegin(t, server, "agent-ok")
+		require.Equal(t, http.StatusBadRequest, begin.Code, begin.Body.String())
+		assert.Equal(t, errCodeTPMAttestationRequired, errCode(t, begin.Body.Bytes()))
 
-		fresh, err := server.loadAccountFromStore(context.Background(), "agent-ok", "")
-		require.NoError(t, err)
-		require.Len(t, fresh.Credentials, 1)
-		assert.True(t, fresh.Credentials[0].isSoftwareAuthenticator())
-		assert.True(t, fresh.AllowSoftwareAuthenticator, "the flag survives the credential write")
+		rec := rootAgentRegister(t, server, "agent-ok")
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Equal(t, errCodeTPMAttestationRequired, errCode(t, rec.Body.Bytes()))
+		assert.Zero(t, rootAgentCredentialCount(t, server, "agent-ok"), "nothing is stored on refusal")
 	})
 	t.Run("enrollment-token route", func(t *testing.T) {
 		server, rawToken := newRootAgentPolicyServer(t, true, rootAgentSpec{username: "agent-enroll", flag: true})
-		resp, err := newSoftAuthenticator(t, nil).Register(beginData(t, doEnrollBegin(t, server, rawToken)))
-		require.NoError(t, err)
-		rec := doEnrollFinish(t, server, rawToken, bytes.NewReader(resp))
-		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-		assert.Equal(t, 1, rootAgentCredentialCount(t, server, "agent-enroll"))
+		begin := doEnrollBegin(t, server, rawToken)
+		require.Equal(t, http.StatusBadRequest, begin.Code, begin.Body.String())
+		assert.Equal(t, errCodeTPMAttestationRequired, errCode(t, begin.Body.Bytes()))
+		assert.Zero(t, rootAgentCredentialCount(t, server, "agent-enroll"))
 	})
 }
 

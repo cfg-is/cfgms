@@ -42,6 +42,33 @@ type WebAuthnCredential struct {
 	// AttestationFormat is the attestation statement format ("none", "packed", ...)
 	// of the registration response.
 	AttestationFormat string `json:"attestation_format,omitempty"`
+
+	// TPMAttestation is set only when the controller verified, at registration, that
+	// the credential key lives in a TPM whose endorsement certificate chains to a
+	// configured manufacturer root (Issue #6227, ADR-021 Amendment 12). It is written
+	// by the server from its own verification, never from a client claim. A root agent
+	// account's credential without it is not usable.
+	TPMAttestation *TPMAttestationRecord `json:"tpm_attestation,omitempty"`
+}
+
+// TPMAttestationRecord is the endorsement-certificate identity of the TPM that holds a
+// credential key, recorded when the registration's TPM attestation verified. Manufacturer,
+// model and firmware come from the certificate's TCG device attributes and are empty when
+// the certificate carries none; issuer, serial and the key hash are always set.
+type TPMAttestationRecord struct {
+	EKManufacturer string    `json:"ek_manufacturer,omitempty"`
+	EKModel        string    `json:"ek_model,omitempty"`
+	EKFirmware     string    `json:"ek_firmware,omitempty"`
+	EKIssuer       string    `json:"ek_issuer"`
+	EKSerial       string    `json:"ek_serial"`
+	EKPublicSHA256 string    `json:"ek_public_sha256"` // hex SHA-256 of the PKIX-encoded EK public key
+	VerifiedAt     time.Time `json:"verified_at"`
+}
+
+// tpmAttested reports whether the controller recorded a verified TPM attestation for
+// the credential.
+func (c WebAuthnCredential) tpmAttested() bool {
+	return c.TPMAttestation != nil
 }
 
 // isSoftwareAuthenticator reports whether the credential's recorded AAGUID equals
@@ -123,6 +150,10 @@ type WebAuthnCredentialInfo struct {
 	// Software is true when the recorded AAGUID equals softauthn.AAGUID. It is a
 	// label derived from a self-asserted value, not proof of the authenticator.
 	Software bool `json:"software"`
+	// TPMAttested is true when the controller verified at registration that the key
+	// lives in a TPM (Issue #6227). A root agent account's credential that is not
+	// TPM-attested is listed but cannot be used.
+	TPMAttested bool `json:"tpm_attested"`
 	// Current is true for the credential that last proved the caller's web session.
 	// Always false for Bearer, API-key and mTLS callers (no web session).
 	Current bool `json:"current"`

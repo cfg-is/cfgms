@@ -1157,14 +1157,23 @@ such as module approval (ADR-021 Amendment 11). It needs
 `webauthn.allow_software_authenticators.root_agent_accounts: true` in
 `controller.cfg` (an operator edit and a controller restart), and the account must
 carry the software-authenticator flag, must not be `cfgms-admin`, must hold no bound
-admin certificate and must hold only software credentials. The controller cannot
-verify where a `store` or `platform` key is kept, so key protection is your
-obligation there. A root agent account requires a key held in a TPM: create its
+admin certificate and must hold only software credentials. A root agent account
+requires a key held in a TPM, and the controller verifies it: create its
 authenticator with `--key-provider tpm`, which makes the key inside the host TPM
 and lets `cfg` prove that to the controller at registration (see
-[Registering with a controller](#registering-with-a-controller)). A host with no
-usable TPM cannot create one, and macOS cannot, so a root agent account is not
-available from macOS. A session
+[Registering with a controller](#registering-with-a-controller)). The controller
+refuses every registration on a root agent account (the account carrying the flag, whatever
+AAGUID the credential claims) that does not carry a TPM attestation whose
+endorsement certificate chains to a TPM manufacturer root the operator configured in
+`controller.cfg` (`webauthn.allow_software_authenticators.root_agent_tpm_roots`, see
+[Root agent accounts](../security/SECURITY_CONFIGURATION.md#root-agent-accounts)); with no
+root configured, every such registration is refused. A host with no usable TPM cannot
+create one, a TPM whose endorsement certificate is not in NV storage is unsupported,
+and macOS cannot, so a root agent account is not available from macOS. A credential on a root
+agent account with no recorded TPM attestation, such as one registered before this
+requirement, is inert and still listed; it also makes the account "already enrolled",
+so a human root caller revokes it (`cfg webauthn revoke`) before the new authenticator
+registers. A session
 for a flagged root account holds only a fixed set of 16 permissions rather than full
 administrator breadth, and still needs a crossing to act below the root tenant; see
 [Software authenticators](../security/SECURITY_CONFIGURATION.md#software-authenticators).

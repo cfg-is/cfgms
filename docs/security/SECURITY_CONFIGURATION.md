@@ -78,9 +78,11 @@ webauthn:
   `account.passkey_registration_denied` audit event naming the account, its tenant
   and the AAGUID. An enrollment token is not consumed by a refusal.
 - **Reset.** Resetting an account clears the flag.
-- **The AAGUID is a claim.** The controller requests no attestation, so a credential
-  that reports any other AAGUID registers on the ordinary path and receives no
-  different trust, assurance or exemption.
+- **The AAGUID is a claim.** For these accounts the controller requests no
+  attestation, so a credential that reports any other AAGUID registers on the
+  ordinary path and receives no different trust, assurance or exemption. A root agent
+  account is the exception: it requires a TPM attestation (see
+  [TPM attestation of the key](#tpm-attestation-of-the-key-required)).
 
 The same decision is applied every time a registered software credential is used.
 When it stops being true (the tenant is removed from the list, the account flag is
@@ -123,6 +125,10 @@ A root-scope account is permitted a software authenticator only when all of thes
 - the account is not `cfgms-admin` and holds no bound admin certificate;
 - every credential the account holds is a CFGMS software credential.
 
+On top of these, every credential registered on a root agent account must carry a
+verified TPM attestation (see
+[TPM attestation of the key](#tpm-attestation-of-the-key-required)).
+
 The same rules run at registration, at flag-set time (the name and certificate rules)
 and at every use. A registration refusal is `403 SOFTWARE_AUTHENTICATOR_NOT_ALLOWED`;
 the `account.passkey_registration_denied` event carries `root_scope: true` and a
@@ -151,21 +157,97 @@ flag. `account:create` is limited to creating a new tenant-scoped account (no
 Tenant crossing is unchanged: the account acts below root only through a crossing
 grant or break-glass, and it cannot create one.
 
-**Key protection is an operator obligation the controller cannot verify.** The
-controller requests no attestation. It records the AAGUID and the attestation format
-`none`, and the CFGMS software AAGUID is the same whether the key sits in a platform
-key provider or in the encrypted credential store; both are self-asserted. Create a
-root agent account's authenticator with `--key-provider platform` so the key is
-non-exportable. Within the allowlist the account has fleet-wide reach below the
-root-to-MSP boundary, and whoever controls the agent host can use the key for every
-presence-gated action the account holds.
+#### TPM attestation of the key (required)
+
+The controller requires cryptographic proof that a root agent account's authenticator
+key lives in a TPM (ADR-021 Amendment 12). The trigger is the account (root scope and
+the software-authenticator flag), not the credential's AAGUID, which a client chooses,
+and not the `root_agent_accounts` setting: switching the setting off does not relax it.
+Every credential registered on such an account, whatever AAGUID or attestation format it
+claims, must carry a TPM attestation the controller verified itself, or registration is
+refused and nothing is stored. Human accounts and tenant-scoped software authenticators
+are unchanged: any passkey is accepted with no attestation required, and their
+registration requests no direct attestation.
+
+How it is verified, on both the admin register route and the enrollment-token route:
+
+1. **Begin.** The client posts its endorsement-key (EK) certificate chain and the public
+   area of an attestation key (AK) in the begin body (`{"tpm":{"ek_cert_chain":[...],
+   "ak_public":"..."}}`, at most 64 KiB). The controller chains the EK certificate to a
+   configured root, requires the AK to be an ECC P-256 restricted signing key fixed to its
+   TPM, and returns the creation options with direct attestation requested for this ceremony
+   only, plus a `cfgmsTpm` member holding a credential-activation challenge that only
+   that TPM's EK and AK can open.
+2. **Finish.** The attestation (format `tpm`) must carry the AK sent at begin, the
+   secret the TPM recovered from the challenge, and a certification of the credential
+   key as fixed to the TPM and its parent, bound to this ceremony's challenge. The
+   challenge and the session are single use.
+
+A valid attestation is recorded on the credential (`tpm_attestation`: the EK
+certificate's manufacturer, model and firmware when it carries them, issuer, serial and
+the SHA-256 of the EK public key); the registration audit event carries the same facts.
+
+**Trusted roots are operator-configured.** The controller ships none: an unverified
+vendor root in the repository would be a supply-chain risk.
+
+```yaml
+webauthn:
+  allow_software_authenticators:
+    root_agent_accounts: true
+    root_agent_tpm_roots:
+      - /etc/cfgms/tpm-roots/vendor-a-ek-root.pem
+      - /etc/cfgms/tpm-roots/vendor-a-ek-intermediate.pem
+```
+
+Obtain each TPM manufacturer's published EK root and intermediate CA certificates from the
+manufacturer and verify them out of band (against a hash or signature the manufacturer
+publishes through a separate channel) before listing them. A certificate in the list is a
+trust anchor, so listing an intermediate trusts everything it issued. Like the tenant list
+the setting has no API writer: update it by editing `controller.cfg` and restarting. A file
+that cannot be read or holds no certificate fails startup. With no root configured, every
+root agent registration is refused (`tpm_no_trusted_roots`).
+
+Refusals are audited as `account.passkey_registration_begin_denied` (refused before the
+ceremony starts) or `account.passkey_registration_denied` (refused at finish), with
+`root_scope: true` and a `reason`: `tpm_attestation_required` (no usable TPM body, or no
+recorded attestation), `tpm_no_trusted_roots`, `tpm_ek_chain`, `tpm_ak_template`,
+`tpm_attestation_format`, `tpm_attestation_invalid`, `tpm_ak_mismatch`,
+`tpm_activation_failed` and `tpm_key_not_fixed`. The response names no reason. Any
+verification error is a refusal; the controller fails closed.
+
+**Use.** A credential on a root agent account without a recorded TPM attestation is
+inert, whatever its AAGUID: it cannot log in, step up, give presence, sign an operator
+payload, publish a workflow or appear in the steward roster, a session that rests on it
+ends at the next request, and it does not count as an authenticator. This includes a
+credential registered before the requirement and one a modified client added. The stored
+credential is not deleted: it is still listed (`tpm_attested: false`) and can be revoked.
+Because it still counts as enrolled, the enrollment link reports `ALREADY_ENROLLED`
+until a human root caller revokes it; then the agent registers a new authenticator with
+`cfg authenticator create --key-provider tpm`. A registration is verified once; the
+recorded result is the evidence at later uses, and the controller does not re-verify it
+or consult a metadata service.
+
+**Unsupported.**
+
+- A TPM whose endorsement certificate is not in NV storage (some firmware TPMs publish
+  it only online) is not supported in this version.
+- macOS cannot hold the key (no TPM attestation exists for it), so a root agent account
+  cannot run from macOS.
+- Hardware EK chains, Windows TBS access for a standard user and firmware TPMs are
+  measured on real machines after release, not proven by the automated tests.
+
+Within the allowlist the account still has fleet-wide reach below the root-to-MSP
+boundary. A TPM-held key cannot be copied to another machine, but whoever controls the
+agent host can still ask the TPM to sign for every presence-gated action the account
+holds.
 
 ### Threat-model note
 
 The policy governs the CFGMS-shipped authenticator and makes its use visible; it is not
-a boundary against someone who already holds enrollment rights. The controller requests
-no attestation, so the AAGUID is self-asserted and a different authenticator can be
-enrolled on the ordinary passkey path. On Linux and macOS the key is encrypted at rest
+a boundary against someone who already holds enrollment rights. For a human or
+tenant-scoped account the controller requests no attestation, so the AAGUID is
+self-asserted and a different authenticator can be enrolled on the ordinary passkey
+path. A root agent account is the exception: its key must be TPM-attested, above. On Linux and macOS the key is encrypted at rest
 but is not non-exportable: code running as the agent's user can recover it. The
 signature counter is always 0, so a cloned key cannot be detected by counter regression.
 The enrollment link is a bearer secret and is handled by file or standard input only.

@@ -327,6 +327,26 @@ type AllowSoftwareAuthenticatorsConfig struct {
 	// any account; the account flag does, and the account must also meet the root
 	// agent conditions in ADR-021 Amendment 11.
 	RootAgentAccounts bool `yaml:"root_agent_accounts,omitempty"`
+
+	// RootAgentTPMRoots lists PEM files holding the TPM manufacturer endorsement-key
+	// root and intermediate CA certificates the controller trusts (Issue #6227,
+	// ADR-021 Amendment 12). A root-scope agent account's software authenticator must
+	// carry TPM attestation whose endorsement certificate chains to one of them. The
+	// controller ships none: the operator obtains each from the manufacturer and
+	// verifies it out of band. Empty means every root agent registration is refused.
+	// Like Tenants it has no API writer: change it by editing controller.cfg and
+	// restarting.
+	RootAgentTPMRoots []string `yaml:"root_agent_tpm_roots,omitempty"`
+}
+
+// SoftwareAuthenticatorRootAgentTPMRoots returns the configured TPM root PEM file
+// paths (webauthn.allow_software_authenticators.root_agent_tpm_roots), nil when the
+// block is absent.
+func (c *Config) SoftwareAuthenticatorRootAgentTPMRoots() []string {
+	if c == nil || c.WebAuthn == nil || c.WebAuthn.AllowSoftwareAuthenticators == nil {
+		return nil
+	}
+	return c.WebAuthn.AllowSoftwareAuthenticators.RootAgentTPMRoots
 }
 
 // SoftwareAuthenticatorRootAgentAccounts reports
