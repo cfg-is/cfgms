@@ -671,6 +671,13 @@ func TestAuthenticatorCreate_TPMProviderRefusedWithoutUsableTPM(t *testing.T) {
 	out, err := runAuthenticator(t, "", "create", "agent-1", "--url", testAuthURL, "--key-provider", "tpm")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--key-provider tpm")
+	if runtime.GOOS == "darwin" {
+		// macOS refuses the provider before any TPM is opened.
+		assert.Contains(t, err.Error(), "not supported on macOS")
+		assert.Contains(t, err.Error(), "root agent account")
+		assert.NoDirExists(t, dir)
+		return
+	}
 	assert.Contains(t, err.Error(), "root agent account requires a key held in a TPM")
 	assert.Contains(t, err.Error(), "no software key was created")
 	assert.NotContains(t, out, `Authenticator "agent-1" created`)
@@ -700,8 +707,13 @@ func TestAuthenticatorCreate_TPMProviderUnsupportedOnMacOS(t *testing.T) {
 // unknown-value refusal are unchanged.
 func TestResolveAuthenticatorKeyProvider_TPMAndUnchangedChoices(t *testing.T) {
 	c, err := resolveAuthenticatorKeyProvider("tpm")
-	require.NoError(t, err)
-	assert.Equal(t, authenticatorKeyChoice{protection: authenticatorProtectionTPM}, c, "tpm never falls back")
+	if runtime.GOOS == "darwin" {
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not supported on macOS")
+	} else {
+		require.NoError(t, err)
+		assert.Equal(t, authenticatorKeyChoice{protection: authenticatorProtectionTPM}, c, "tpm never falls back")
+	}
 
 	c, err = resolveAuthenticatorKeyProvider("store")
 	require.NoError(t, err)
