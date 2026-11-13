@@ -60,7 +60,9 @@ const (
 
 // userInfo1 is USER_INFO_1, the level NetUserAdd creates an account with.
 //
-//duplication:justified pkg/testutil/winacct/winacct_windows.go -- the test helper package cannot import this unexported production type, and production code must not import a test helper
+// This is a copy of userInfo1 in pkg/testutil/winacct/winacct_windows.go: that
+// package cannot import this unexported production type, and production code
+// must not import a test helper.
 type userInfo1 struct {
 	name        *uint16
 	password    *uint16
