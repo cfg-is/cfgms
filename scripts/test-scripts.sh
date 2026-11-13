@@ -2802,6 +2802,26 @@ test_macos_pr_filter() {
     log_pass "macos-pr-filter.sh: closure of $(echo "$closure" | wc -l | tr -d ' ') dirs; docs skip, closure/testdata/go.mod trigger, controller test-only skips, every defect fails closed"
 }
 
+# scripts/agent-image-filter.sh (Issue #6228): the real Agent Image Build must
+# run when a file the Dockerfile COPYs from the cfgms context changes.
+test_agent_image_filter() {
+    log_test "Testing agent-image-filter.sh against fixture and real Dockerfiles..."
+
+    local test_script=scripts/agent-image-filter_test.sh
+    if [[ ! -f scripts/agent-image-filter.sh || ! -f "$test_script" ]]; then
+        log_fail "agent-image-filter.sh or its test is missing"
+        return
+    fi
+
+    local out
+    if out=$(bash "$test_script" 2>&1); then
+        log_pass "agent-image-filter.sh maps changed files to build/skip and fails closed ($(echo "$out" | tail -1))"
+    else
+        log_fail "agent-image-filter_test.sh failed:"
+        echo "$out" | grep -E '❌|passed:' | sed 's/^/    /'
+    fi
+}
+
 # Regression guard for the macOS unit-test legs (Issue #5746): the union of the
 # test-go-group-macos-* package lists must equal the in-module packages with
 # test files in the GOOS=darwin dependency closure of the three macOS-shipped
@@ -3623,6 +3643,7 @@ DISPATCH_TABLE=(
     "test_macos_groups_cover_exactly_shipped_packages:core"
     "test_macos_gate_rule:core"
     "test_macos_pr_filter:core"
+    "test_agent_image_filter:core"
     "test_build_gate_requires_macos_test_compile:core"
     "test_windows_steward_groups_cover_exactly_steward_and_cmd:core"
     "test_windows_cmd_steward_timeout_and_streaming:core"
