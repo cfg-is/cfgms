@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/registration/identity"
 	"github.com/cfgis/cfgms/pkg/softauthn"
 )
 
@@ -66,7 +68,12 @@ func authTestStore(t *testing.T) (string, *CredentialStore) {
 
 func createAuth(t *testing.T, name string, extra ...string) string {
 	t.Helper()
-	out, err := runAuthenticator(t, "", append([]string{"create", name, "--url", testAuthURL}, extra...)...)
+	args := []string{"create", name, "--url", testAuthURL}
+	if !hasFlag(extra, "--key-provider") {
+		// These tests inspect the store-held key; platform keys have their own tests.
+		args = append(args, "--key-provider", "store")
+	}
+	out, err := runAuthenticator(t, "", append(args, extra...)...)
 	require.NoError(t, err, out)
 	return out
 }
@@ -357,7 +364,7 @@ func TestAuthenticatorCreate_DefaultsAndOverrides(t *testing.T) {
 	assert.False(t, def.Registered)
 	assert.Empty(t, def.CACertPEM)
 
-	out, err := runAuthenticator(t, "", "create", "port", "--url", "https://controller.example.test:8443/")
+	out, err := runAuthenticator(t, "", "create", "port", "--url", "https://controller.example.test:8443/", "--key-provider", "store")
 	require.NoError(t, err, out)
 	port, err := loadAuthenticatorRecord(ctx, store, "port")
 	require.NoError(t, err)
@@ -365,7 +372,7 @@ func TestAuthenticatorCreate_DefaultsAndOverrides(t *testing.T) {
 	assert.Equal(t, "https://controller.example.test:8443", port.Origin)
 	assert.Equal(t, "https://controller.example.test:8443", port.ControllerURL)
 
-	out, err = runAuthenticator(t, "", "create", "ov", "--url", "https://10.0.0.5:8443",
+	out, err = runAuthenticator(t, "", "create", "ov", "--url", "https://10.0.0.5:8443", "--key-provider", "store",
 		"--rp-id", "controller.example.test", "--origin", "https://sub.controller.example.test")
 	require.NoError(t, err, out)
 	ov, err := loadAuthenticatorRecord(ctx, store, "ov")
@@ -528,6 +535,31 @@ func TestAuthenticatorDelete(t *testing.T) {
 	assert.FileExists(t, filepath.Join(dir, "authenticator.agent-2.enc"))
 }
 
+// A platform record whose key cannot be deleted (here a reference CreateUserKey
+// never makes, as a hand-edited record would hold) keeps the record unless
+// --force is given; --force deletes the record and warns.
+func TestAuthenticatorDelete_UndeletablePlatformKeyNeedsForce(t *testing.T) {
+	dir, store := authTestStore(t)
+	createAuth(t, "agent-1")
+	path := filepath.Join(dir, "authenticator.agent-1.enc")
+	ctx := context.Background()
+	rec, err := loadAuthenticatorRecord(ctx, store, "agent-1")
+	require.NoError(t, err)
+	rec.Protection = authenticatorProtectionPlatform
+	rec.KeyPKCS8, rec.KeyProvider, rec.KeyName = nil, "Microsoft Software Key Storage Provider", "cfgms-device-key-0"
+	require.NoError(t, saveAuthenticatorRecord(ctx, store, rec))
+
+	out, err := runAuthenticator(t, "y\n", "delete", "agent-1")
+	require.Error(t, err, out)
+	assert.Contains(t, err.Error(), "--force")
+	assert.FileExists(t, path, "the record that locates the key is kept")
+
+	out, err = runAuthenticator(t, "", "delete", "agent-1", "--force")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "Warning: the platform key could not be deleted")
+	assert.NoFileExists(t, path)
+}
+
 func TestAuthenticatorDelete_PromptsWithoutForce(t *testing.T) {
 	dir, _ := authTestStore(t)
 	createAuth(t, "agent-1")
@@ -549,4 +581,80 @@ func TestAuthenticatorDelete_MissingNameDoesNotPrompt(t *testing.T) {
 	out, err := runAuthenticator(t, "y\n", "delete", "ghost")
 	require.Error(t, err)
 	assert.NotContains(t, out, "[y/N]")
+}
+
+// hasFlag reports whether args contains flag, as "--flag value" or "--flag=value".
+func hasFlag(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag || strings.HasPrefix(a, flag+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+// An unknown --key-provider is refused before anything is written.
+func TestAuthenticatorCreate_UnknownKeyProviderRefusedBeforeWriting(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "creds")
+	overrideCredentialsDir(t, dir)
+	_, err := runAuthenticator(t, "", "create", "a", "--url", testAuthURL, "--key-provider", "hsm")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--key-provider")
+	assert.NoDirExists(t, dir, "a refused create must not create the credentials directory")
+}
+
+// Where the OS has no platform user keys, the default is the credential store and
+// --key-provider platform is refused, before anything is written, with an error
+// that names the OS and the alternative. Windows behaviour is covered by
+// authenticator_keystore_windows_test.go.
+func TestAuthenticatorCreate_KeyProviderWithoutPlatformSupport(t *testing.T) {
+	if identity.UserKeysSupported() {
+		t.Skip("this OS supports platform user keys; see authenticator_keystore_windows_test.go")
+	}
+	dir := filepath.Join(t.TempDir(), "creds")
+	overrideCredentialsDir(t, dir)
+	_, err := runAuthenticator(t, "", "create", "a", "--url", testAuthURL, "--key-provider", "platform")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not supported on "+runtime.GOOS)
+	assert.Contains(t, err.Error(), "--key-provider store")
+	assert.NoDirExists(t, dir, "a refused create must not create the credentials directory")
+
+	out, err := runAuthenticator(t, "", "create", "b", "--url", testAuthURL)
+	require.NoError(t, err, out)
+	store, err := newCredentialStore()
+	require.NoError(t, err)
+	rec, err := loadAuthenticatorRecord(context.Background(), store, "b")
+	require.NoError(t, err)
+	assert.Equal(t, authenticatorProtectionStore, rec.Protection, "the default elsewhere is the credential store")
+	assert.NotEmpty(t, rec.KeyPKCS8)
+	assert.Empty(t, rec.KeyName)
+	assert.Contains(t, out, "Protection:    store")
+}
+
+// A record whose protection is not one this cfg knows is refused with the remedy.
+func TestAuthenticatorRecord_UnknownProtectionRefused(t *testing.T) {
+	rec, err := newAuthenticatorRecord("x")
+	require.NoError(t, err)
+	rec.RPID, rec.Origin = testAuthRPID, testAuthOrigin
+	rec.Protection = "hsm"
+	_, err = rec.authenticator()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown protection")
+	assert.Contains(t, err.Error(), "cfg authenticator delete x --force")
+}
+
+// cfg never reaches the identity package's device-key paths (Open, the file key
+// store and its ed25519 fallback): it uses only the user-key signer.
+func TestAuthenticatorSources_DoNotUseDeviceIdentityKeyStore(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	forbidden := regexp.MustCompile(`identity\.(Open|NewFileKeyStore\w*|RemoveAllStoredKeys|RemoveStoredKey|StoredKeyFileName|AlgorithmEd25519)\b`)
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		require.NoError(t, err)
+		assert.NotRegexp(t, forbidden, string(src), f)
+	}
 }
