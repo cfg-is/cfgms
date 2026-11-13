@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gnupg \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Docker CLI from official Docker repository
