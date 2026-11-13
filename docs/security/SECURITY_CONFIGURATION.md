@@ -43,18 +43,22 @@ or an accepted ADR is not end-to-end release evidence.
 ## Software authenticators
 
 A CFGMS software authenticator is a passkey whose private key is held by `cfg`
-rather than a hardware or platform authenticator. The controller registers one only
-when both of these hold:
+rather than a hardware or platform authenticator. For a tenant-scoped account the
+controller registers one only when both of these hold:
 
 1. The account's tenant is listed in `webauthn.allow_software_authenticators.tenants`
    in `controller.cfg`.
 2. The account carries the software-authenticator flag.
+
+A root-scope account follows a separate, stricter path, described under
+[Root agent accounts](#root-agent-accounts).
 
 ```yaml
 webauthn:
   allow_software_authenticators:
     tenants:
       - client-1
+    root_agent_accounts: false   # default; see Root agent accounts
 ```
 
 - **Default is off.** The key is absent by default and an empty list is valid;
@@ -63,9 +67,11 @@ webauthn:
 - **Exact match.** A listed tenant does not cover its child tenants; list each one.
 - **Validation.** An entry that is empty, or has leading or trailing whitespace,
   fails controller startup. The list is checked even when no `rp_id` is set.
-- **Refused regardless of the list or the flag:** a root-scope account, an account
-  with an empty tenant, and an account in the root tenant. When the root tenant
-  cannot be resolved the controller refuses every software registration with `503`.
+- **Refused regardless of the tenant list or the flag:** an account with an empty
+  tenant (and no root scope) and an account in the root tenant. A root-scope account
+  is not covered by the tenant list at all; it is judged by the root agent rules
+  below. When the root tenant cannot be resolved the controller refuses every
+  tenant-path software registration with `503`.
 - **Refusal.** Registration fails with `403 SOFTWARE_AUTHENTICATOR_NOT_ALLOWED`
   before anything is stored, on both the admin register route and the
   enrollment-token route, and the controller writes an
@@ -78,8 +84,9 @@ webauthn:
 
 The same decision is applied every time a registered software credential is used.
 When it stops being true (the tenant is removed from the list, the account flag is
-cleared, or the account is or becomes a root-scope, empty-tenant or root-tenant
-account, or the root tenant cannot be resolved) the credential is ignored at once:
+cleared, or the account is or becomes an empty-tenant or root-tenant account, or it
+becomes a root-scope account that fails the root agent rules, or the root tenant
+cannot be resolved) the credential is ignored at once:
 it cannot log in, step up, give presence, sign an operator payload, publish a
 workflow or authorize a run command. Web and CLI-login sessions that rest on it end
 on their next request. A workflow publication it signed stops verifying, and a
@@ -89,6 +96,69 @@ on. A credential with any other AAGUID on the same account is unaffected. An acc
 whose only credential is a software credential reports no usable authenticator while
 the policy is off; that does not reopen first-passkey enrollment, because the stored
 credential still counts as enrolled.
+
+### Root agent accounts
+
+A dedicated root-scope agent account may hold a software authenticator (ADR-021
+Amendment 11). It is off by default and needs its own setting:
+
+```yaml
+webauthn:
+  allow_software_authenticators:
+    root_agent_accounts: true
+```
+
+Like the tenant list the setting has no API writer. Changing it is an edit of
+`controller.cfg` on the controller host and a controller restart, so a phished
+administrator cannot widen it. The controller logs the effective value at startup
+when it is on.
+
+A root-scope account is permitted a software authenticator only when all of these hold:
+
+- the setting is on;
+- the account is root-scope and carries the software-authenticator flag, set by
+  `PUT /accounts/{username}/software-authenticator` (root-scope caller, Strong
+  assurance and a presence tap; refused with `400` for `cfgms-admin`, for an account
+  with a bound admin certificate, and while the setting is off);
+- the account is not `cfgms-admin` and holds no bound admin certificate;
+- every credential the account holds is a CFGMS software credential.
+
+The same rules run at registration, at flag-set time (the name and certificate rules)
+and at every use. A registration refusal is `403 SOFTWARE_AUTHENTICATOR_NOT_ALLOWED`;
+the `account.passkey_registration_denied` event carries `root_scope: true` and a
+`reason` naming the failed condition (`root_agent_setting_off`,
+`root_agent_flag_unset`, `root_agent_system_admin`, `root_agent_cert_bound`,
+`root_agent_non_software_credential`). Turning the setting off, clearing the flag or
+adding a non-software credential makes the controller ignore the software credentials
+at the next request; the stored credential is not deleted.
+
+**Limited authority.** A session for a root-scope account that carries the flag does
+not receive full administrator breadth. It holds only 16 permissions:
+`webauthn:assert-presence`, `webauthn:elevate`, `tenant:create`, `tenant:list`,
+`tenant:read`, `account:create`, `steward:list`, `steward:read`,
+`steward:read-scripts`, `steward:execute-scripts`, `operator-payload:sign`,
+`workflow:publish`, `workflow:read`, `workflow:list`, `module:approve` and
+`module:list-approvals`. Everything else is refused with `403`, including credential,
+role, API-key, trust and tenant-crossing administration, and the refusal is audited
+(`authorization.root_agent_denied`) with the software-authenticator marker,
+`root_scope: true` and a `reason`. The limit follows the flag, not the credential
+used and not the setting: a human credential added later, or the setting being turned
+off, does not return the account to full administrator. Clearing the flag does, and
+needs another root caller and a presence tap; a flagged account cannot clear its own
+flag. `account:create` is limited to creating a new tenant-scoped account (no
+`root_scope`, no existing username, no `reset_credentials`).
+
+Tenant crossing is unchanged: the account acts below root only through a crossing
+grant or break-glass, and it cannot create one.
+
+**Key protection is an operator obligation the controller cannot verify.** The
+controller requests no attestation. It records the AAGUID and the attestation format
+`none`, and the CFGMS software AAGUID is the same whether the key sits in a platform
+key provider or in the encrypted credential store; both are self-asserted. Create a
+root agent account's authenticator with `--key-provider platform` so the key is
+non-exportable. Within the allowlist the account has fleet-wide reach below the
+root-to-MSP boundary, and whoever controls the agent host can use the key for every
+presence-gated action the account holds.
 
 ### Audit trail for software authenticators
 
@@ -100,6 +170,7 @@ a reviewer can pick every software-authenticator action out of the trail:
 | `software_authenticator` | `true` when the credential's recorded AAGUID is the CFGMS AAGUID, `false` for every other credential |
 | `aaguid` | the credential's recorded AAGUID, hex-encoded |
 | `credential_id` | the credential ID, base64url-encoded (hex-encoded on `operator_payload.dispatch`, which has always recorded it that way) |
+| `root_scope` | `true`, present only when the account is root-scope (a root agent account), which tells its use from tenant use |
 
 The events are `web.passkey.login.success` and `.failure`, `web.presence.success`,
 `web.stepup.success`, `workflow.publish`, and `operator_payload.dispatch` (the sign

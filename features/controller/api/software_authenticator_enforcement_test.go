@@ -33,6 +33,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	"github.com/cfgis/cfgms/pkg/session"
 	"github.com/cfgis/cfgms/pkg/softauthn"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
 )
 
@@ -730,4 +731,310 @@ func TestPermittedAccountView(t *testing.T) {
 		require.NoError(t, err)
 		assert.Nil(t, view)
 	})
+}
+
+// --- Issue #6225: a software authenticator on a dedicated root-scope agent account
+// (ADR-021 Amendment 11) ---
+
+// newAgentFixture is the enforcement fixture with its account turned into a root-scope
+// agent account: root scope, the flag set, one CFGMS software credential, the root-agent
+// setting on. A second, tenant-scoped software account is not part of it; see
+// TestRootAgentEnforcement_TenantSoftwareAccountIsUnaffectedByTheSetting.
+func newAgentFixture(t *testing.T) *enfFixture {
+	t.Helper()
+	f := newEnfFixture(t, true, false)
+	f.edit(t, func(a *account) {
+		a.TenantID, a.RootScope = "", true
+		a.Permissions = nil
+	})
+	f.server.SetSoftwareAuthenticatorRootAgentAccounts(true)
+	return f
+}
+
+// agentPrincipal is the principal the presence and step-up handlers see for the agent.
+func (f *enfFixture) agentPrincipal() *Principal {
+	return &Principal{ID: f.accountID, GlobalScope: true, RootScoped: true, AccountBound: true, RootAgent: true, Assurance: session.AssuranceStrong}
+}
+
+// presenceToken runs the presence ceremony for action with the agent's software
+// credential and returns the response; the token is in the body of a 200.
+func (f *enfFixture) presenceFinish(t *testing.T, action presenceActionBinding, soft bool) *httptest.ResponseRecorder {
+	t.Helper()
+	begin := doPresenceBeginWithAction(t, f.server, f.agentPrincipal(), action)
+	if begin.Code != http.StatusOK {
+		return begin
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webauthn/presence/finish",
+		f.assertion(t, soft, publicKeyChallenge(t, begin)))
+	req = withPrincipal(req, f.agentPrincipal())
+	rec := httptest.NewRecorder()
+	f.server.handlePresenceFinish(rec, req)
+	return rec
+}
+
+var agentModuleApproveAction = presenceActionBinding{
+	Method: http.MethodPost, Path: "/api/v1/modules/approvals/test-address/approve",
+	BodyHash: emptyBodyHashHex, PermissionID: "module:approve",
+}
+
+// agentBearer issues a CLI-login Bearer session bound to the agent's software credential
+// and elevates it with that credential, so it carries phishing-resistant assurance.
+func (f *enfFixture) agentBearer(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	sess, _, err := f.server.sessionManager.IssueBound(ctx, f.accountID, cliLoginConnectionName, "", false, f.softID, nil)
+	require.NoError(t, err)
+	_, token, err := f.server.sessionManager.Elevate(ctx, sess.ID, f.softID, "")
+	require.NoError(t, err)
+	return token
+}
+
+// agentRequest sends one request through the real router as the agent.
+func (f *enfFixture) agentRequest(t *testing.T, token, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	rec := httptest.NewRecorder()
+	f.server.router.ServeHTTP(rec, req)
+	return rec
+}
+
+// [REQUIRED TEST] The agent logs in by passkey, completes the presence ceremony and
+// receives a presence token; a presence-gated request without the token gets the 401
+// presence challenge.
+func TestRootAgentEnforcement_LoginPresenceAndGatedRoute(t *testing.T) {
+	f := newAgentFixture(t)
+
+	login := f.passkeyLogin(t, true)
+	require.Equal(t, http.StatusOK, login.Code, login.Body.String())
+
+	rec := f.presenceFinish(t, agentModuleApproveAction, true)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp struct {
+		Data map[string]interface{} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	token, _ := resp.Data["presence_token"].(string)
+	assert.NotEmpty(t, token, "a presence token is returned")
+
+	bearer := f.agentBearer(t)
+	gated := f.agentRequest(t, bearer, http.MethodPost, "/api/v1/modules/approvals/test-address/approve", "")
+	require.Equal(t, http.StatusUnauthorized, gated.Code, gated.Body.String())
+	assert.Contains(t, gated.Header().Get("WWW-Authenticate"), `presence="required"`)
+	assert.Contains(t, gated.Header().Get("WWW-Authenticate"), `permission="module:approve"`)
+
+	// With the token the request passes the presence gate: module:approve is in the
+	// allowlist, so it is neither 401 nor 403. (The approval itself is proven by #6151.)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/modules/approvals/test-address/approve", nil)
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	req.Header.Set(presenceTokenHeader, token)
+	out := httptest.NewRecorder()
+	f.server.router.ServeHTTP(out, req)
+	assert.NotEqual(t, http.StatusUnauthorized, out.Code, out.Body.String())
+	assert.NotEqual(t, http.StatusForbidden, out.Code, out.Body.String())
+}
+
+// [REQUIRED TEST] Every way the policy can stop permitting the agent's credential
+// refuses the next login and presence attempt, audited as denied with the policy
+// reason; the stored credential stays.
+func TestRootAgentEnforcement_RevocationRefusesNextUse(t *testing.T) {
+	modes := []enfMode{
+		{"setting switched off",
+			func(_ *testing.T, f *enfFixture) { f.server.SetSoftwareAuthenticatorRootAgentAccounts(false) },
+			func(_ *testing.T, f *enfFixture) { f.server.SetSoftwareAuthenticatorRootAgentAccounts(true) }},
+		enfFlagCleared,
+		{"non-software credential added",
+			func(t *testing.T, f *enfFixture) {
+				f.edit(t, func(a *account) {
+					_, pub := webauthntest.NewKey(t)
+					a.Credentials = append(a.Credentials, WebAuthnCredential{
+						ID: []byte("added-human"), PublicKey: pub, Label: "hardware", RegisteredAt: time.Now(), AAGUID: make([]byte, 16),
+					})
+				})
+			}, nil},
+		{"admin certificate bound",
+			func(t *testing.T, f *enfFixture) {
+				f.edit(t, func(a *account) { a.CertBindings = []CertBinding{{Serial: "77", Fingerprint: "fp"}} })
+			}, nil},
+	}
+	for _, mode := range modes {
+		t.Run(mode.name, func(t *testing.T) {
+			f := newAgentFixture(t)
+			require.Equal(t, http.StatusOK, f.passkeyLogin(t, true).Code, "precondition: login works")
+			require.Equal(t, http.StatusOK, f.presenceFinish(t, agentModuleApproveAction, true).Code, "precondition: presence works")
+
+			mode.off(t, f)
+
+			assert.NotEqual(t, http.StatusOK, f.passkeyLogin(t, true).Code, "the next login is refused")
+			assert.NotEqual(t, http.StatusOK, f.presenceFinish(t, agentModuleApproveAction, true).Code, "the next presence attempt is refused")
+
+			var denied int
+			for _, e := range f.markedEvents(t) {
+				if e.Result == business.AuditResultDenied && e.Details[auditKeyReason] == auditReasonSoftwareAuthenticatorPolicy {
+					denied++
+					assert.Equal(t, true, e.Details[auditKeyRootScope], "a root agent's refusal is told from tenant use")
+				}
+			}
+			assert.GreaterOrEqual(t, denied, 1, "the refusal is audited as denied with the policy reason")
+
+			stored := f.storedAccount(t)
+			require.Len(t, stored.Credentials, map[bool]int{true: 2, false: 1}[mode.name == "non-software credential added"])
+			assert.True(t, stored.hasSoftwareCredential(), "the stored software credential is not deleted")
+		})
+	}
+}
+
+// With the setting turned off and on again the same credential works again.
+func TestRootAgentEnforcement_SettingBackOnRestoresUse(t *testing.T) {
+	f := newAgentFixture(t)
+	f.server.SetSoftwareAuthenticatorRootAgentAccounts(false)
+	assert.NotEqual(t, http.StatusOK, f.passkeyLogin(t, true).Code)
+	f.server.SetSoftwareAuthenticatorRootAgentAccounts(true)
+	assert.Equal(t, http.StatusOK, f.passkeyLogin(t, true).Code)
+}
+
+// A tenant-scoped software account follows the tenant list and the flag only: the
+// root-agent setting is not consulted in either direction.
+func TestRootAgentEnforcement_TenantSoftwareAccountIsUnaffectedByTheSetting(t *testing.T) {
+	for _, setting := range []bool{true, false} {
+		t.Run(fmt.Sprintf("root agent setting %v", setting), func(t *testing.T) {
+			f := newEnfFixture(t, true, false)
+			f.server.SetSoftwareAuthenticatorRootAgentAccounts(setting)
+			assert.Equal(t, http.StatusOK, f.passkeyLogin(t, true).Code)
+			begin := doPresenceBeginWithAction(t, f.server, f.principal(), agentModuleApproveAction)
+			assert.Equal(t, http.StatusOK, begin.Code, begin.Body.String())
+
+			enfTenantRemoved.off(t, f)
+			f.server.SetSoftwareAuthenticatorRootAgentAccounts(!setting)
+			assert.NotEqual(t, http.StatusOK, f.passkeyLogin(t, true).Code, "the tenant list still governs a tenant account")
+		})
+	}
+}
+
+// [REQUIRED TEST] Through the real router a flagged root agent session is refused
+// (403, audited with the software-authenticator marker, root_scope and a reason) on the
+// routes outside the allowlist and succeeds on an allowlisted one.
+func TestRootAgentEnforcement_RouterRefusesOutsideTheAllowlist(t *testing.T) {
+	f := newAgentFixture(t)
+	bearer := f.agentBearer(t)
+
+	refused := []struct {
+		name, method, path, body string
+	}{
+		{"set the software-authenticator flag", http.MethodPut, "/api/v1/accounts/other-user/software-authenticator", `{"enabled":false}`},
+		{"register a credential", http.MethodPost, "/api/v1/accounts/other-user/webauthn/register/begin", ""},
+		{"approve a credential request with the root-scope marker", http.MethodPost, "/api/v1/credential-requests/req-1/approve", `{"grant_root_scope_marker":true}`},
+		{"grant a tenant crossing", http.MethodPost, "/api/v1/tenants/msp-a/access-grants", `{}`},
+		{"create an API key", http.MethodPost, "/api/v1/api-keys", `{"name":"k","permissions":["steward:list"]}`},
+		{"create an RBAC role", http.MethodPost, "/api/v1/rbac/roles", `{"name":"r"}`},
+	}
+	for _, tt := range refused {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := f.agentRequest(t, bearer, tt.method, tt.path, tt.body)
+			require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			assert.Equal(t, "INSUFFICIENT_PERMISSIONS", errCode(t, rec.Body.Bytes()))
+		})
+	}
+
+	// One audit event per refusal, each marked.
+	var events []*business.AuditEntry
+	require.NoError(t, f.server.auditManager.Flush(context.Background()))
+	all, err := f.server.auditManager.QueryEntries(context.Background(), &business.AuditFilter{Actions: []string{"authorization.root_agent_denied"}})
+	require.NoError(t, err)
+	events = append(events, all...)
+	require.Len(t, events, len(refused))
+	for _, e := range events {
+		assert.Equal(t, business.AuditResultDenied, e.Result)
+		assert.Equal(t, true, e.Details[auditKeySoftwareAuthenticator], "the session was opened with a software credential")
+		assert.Equal(t, true, e.Details[auditKeyRootScope])
+		assert.Equal(t, reasonRootAgentPermissionNotAllowed, e.Details[auditKeyReason])
+		assert.NotEmpty(t, e.Details["permission_id"])
+	}
+
+	t.Run("an allowlisted route succeeds", func(t *testing.T) {
+		rec := f.agentRequest(t, bearer, http.MethodPost, "/api/v1/tenants",
+			`{"id":"agent-tenant","name":"agent-tenant","parent_id":"`+testRootTenantID+`"}`)
+		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		list := f.agentRequest(t, bearer, http.MethodGet, "/api/v1/tenants", "")
+		assert.Equal(t, http.StatusOK, list.Code, list.Body.String())
+	})
+
+	t.Run("the allowlist does not skip the tenant crossing boundary", func(t *testing.T) {
+		rec := f.agentRequest(t, bearer, http.MethodPost, "/api/v1/tenants",
+			`{"id":"agent-below","name":"agent-below","parent_id":"msp-a"}`)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "tenant_crossing_required", "creating below root needs a crossing")
+	})
+}
+
+// A human root account (no flag) on the same router keeps full admin: the route that
+// refuses the agent for lack of the permission is not refused for that reason here.
+func TestRootAgentEnforcement_HumanRootAccountOnTheSameRoutesIsNotLimited(t *testing.T) {
+	f := newEnfFixture(t, false, true)
+	f.edit(t, func(a *account) {
+		a.TenantID, a.RootScope, a.AllowSoftwareAuthenticator = "", true, false
+		a.Permissions = nil
+	})
+	ctx := context.Background()
+	sess, _, err := f.server.sessionManager.IssueBound(ctx, f.accountID, cliLoginConnectionName, "", false, f.hwID, nil)
+	require.NoError(t, err)
+	_, token, err := f.server.sessionManager.Elevate(ctx, sess.ID, f.hwID, "")
+	require.NoError(t, err)
+
+	for _, path := range []string{"/api/v1/api-keys", "/api/v1/rbac/roles"} {
+		rec := f.agentRequest(t, token, http.MethodPost, path, `{"name":"r","permissions":["steward:list"]}`)
+		assert.NotEqual(t, http.StatusForbidden, rec.Code, "%s: %s", path, rec.Body.String())
+	}
+	list := f.agentRequest(t, token, http.MethodGet, "/api/v1/tenants", "")
+	assert.Equal(t, http.StatusOK, list.Code, list.Body.String())
+}
+
+// [REQUIRED TEST] POST /accounts through the real router: a root agent creates a new
+// tenant-scoped account where it needs no crossing, and a tenant below root still gets
+// the tenant-crossing challenge (the allowlist does not skip crossing).
+func TestRootAgentEnforcement_AccountCreateThroughTheRouter(t *testing.T) {
+	f := newAgentFixture(t)
+	bearer := f.agentBearer(t)
+
+	ok := f.agentRequest(t, bearer, http.MethodPost, "/api/v1/accounts",
+		`{"username":"agent-made","tenant_id":"`+testRootTenantID+`","permissions":["steward:list"]}`)
+	require.Equal(t, http.StatusCreated, ok.Code, ok.Body.String())
+	assert.Contains(t, ok.Body.String(), "enrollment_magic_link")
+
+	below := f.agentRequest(t, bearer, http.MethodPost, "/api/v1/accounts",
+		`{"username":"agent-made-below","tenant_id":"client-1"}`)
+	assert.Equal(t, http.StatusUnauthorized, below.Code, below.Body.String())
+	assert.Contains(t, below.Body.String(), "tenant_crossing_required")
+
+	minted := f.agentRequest(t, bearer, http.MethodPost, "/api/v1/accounts", `{"username":"agent-root-2","root_scope":true}`)
+	assert.Equal(t, http.StatusForbidden, minted.Code, minted.Body.String())
+	assert.Equal(t, errCodeRootAgentLimited, errCode(t, minted.Body.Bytes()))
+}
+
+// A successful use of the agent's software credential is marked and carries
+// root_scope: true, so root agent use is told from tenant use in the audit trail.
+func TestRootAgentEnforcement_SuccessfulUseIsMarkedRootScope(t *testing.T) {
+	f := newAgentFixture(t)
+	require.Equal(t, http.StatusOK, f.passkeyLogin(t, true).Code)
+	require.Equal(t, http.StatusOK, f.presenceFinish(t, agentModuleApproveAction, true).Code)
+
+	var presence *business.AuditEntry
+	for _, e := range f.markedEvents(t) {
+		if e.Action == presenceAuditActionSuccess {
+			presence = e
+		}
+	}
+	require.NotNil(t, presence)
+	assert.Equal(t, true, presence.Details[auditKeySoftwareAuthenticator])
+	assert.Equal(t, true, presence.Details[auditKeyRootScope])
+
+	// A tenant account's event carries no root_scope.
+	tenantFixture := newEnfFixture(t, true, false)
+	require.Equal(t, http.StatusOK, tenantFixture.passkeyLogin(t, true).Code)
+	for _, e := range tenantFixture.markedEvents(t) {
+		assert.NotContains(t, e.Details, auditKeyRootScope)
+	}
 }

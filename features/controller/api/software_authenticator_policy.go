@@ -4,14 +4,18 @@
 // Issue #6140: software-authenticator policy at registration (ADR-021 Amendment 10).
 //
 // A CFGMS software authenticator (pkg/softauthn) is accepted for an account only
-// when both hold: the account's tenant is listed in
-// webauthn.allow_software_authenticators.tenants in controller.cfg, and the
-// account carries the AllowSoftwareAuthenticator flag. It is never accepted for a
-// root-scope account, an account with an empty TenantID, or an account in the root
-// tenant, and it is refused when the root tenant cannot be resolved.
+// on one of two paths, and both need the account's AllowSoftwareAuthenticator flag:
 //
-// The tenant list is exact-match (a listed tenant does not cover its children) and
-// has no API writer. The AAGUID that selects this policy is self-asserted under
+//   - Tenant path: the account's tenant is listed in
+//     webauthn.allow_software_authenticators.tenants in controller.cfg. It is never
+//     accepted for an account with an empty TenantID and no root scope, or an account
+//     in the root tenant, and it is refused when the root tenant cannot be resolved.
+//   - Root agent path (Issue #6225, ADR-021 Amendment 11): the account is root-scope,
+//     webauthn.allow_software_authenticators.root_agent_accounts is on, the account is
+//     not cfgms-admin, holds no bound admin certificate and every credential it holds
+//     is a CFGMS software credential (rootAgentRefusalReason).
+//
+// The tenant list and the root-agent setting are exact and have no API writer. The AAGUID that selects this policy is self-asserted under
 // attestation "none", so a credential with any other AAGUID is registered on the
 // ordinary path and receives no different trust, assurance or exemption.
 
@@ -34,6 +38,24 @@ import (
 )
 
 const errCodeSoftwareAuthenticatorNotAllowed = "SOFTWARE_AUTHENTICATOR_NOT_ALLOWED"
+
+// systemAdminAccountName is the reserved name of the system admin account. It repeats
+// systemAdminUsername in features/controller/initialization/admin_bundle.go, which api
+// cannot import (import cycle); a rename there must be made here too. The account is
+// never a root agent account.
+const systemAdminAccountName = "cfgms-admin"
+
+// Refusal reasons recorded on a refused software-authenticator registration (the
+// "reason" audit detail). reasonPolicy is every refusal that is not a root-agent rule.
+const (
+	reasonPolicy                   = "policy"
+	reasonRootTenantUnresolved     = "root_tenant_unresolved"
+	reasonRootAgentSettingOff      = "root_agent_setting_off"
+	reasonRootAgentFlagUnset       = "root_agent_flag_unset"
+	reasonRootAgentSystemAdmin     = "root_agent_system_admin"
+	reasonRootAgentCertBound       = "root_agent_cert_bound"
+	reasonRootAgentHumanCredential = "root_agent_non_software_credential"
+)
 
 // errRootTenantUnresolved reports that the deployment's root tenant could not be
 // determined, so the policy cannot rule out that the account sits in it.
@@ -65,21 +87,86 @@ func (s *Server) SoftwareAuthenticatorTenantListed(tenantID string) bool {
 	return ok
 }
 
+// SetSoftwareAuthenticatorRootAgentAccounts installs the controller.cfg root-agent
+// setting (webauthn.allow_software_authenticators.root_agent_accounts, Issue #6225).
+// Call after New() and before Start(). False, the default, refuses every root-scope
+// account.
+func (s *Server) SetSoftwareAuthenticatorRootAgentAccounts(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.softwareAuthenticatorRootAgents = enabled
+}
+
+// SoftwareAuthenticatorRootAgentAccounts reports the root-agent setting. It says
+// nothing about any account; softwareAuthenticatorPermitted is the decision.
+func (s *Server) SoftwareAuthenticatorRootAgentAccounts() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.softwareAuthenticatorRootAgents
+}
+
+// rootAgentRefusalReason names the first root-agent condition acct fails, or "" when
+// acct is eligible. The root-agent setting is not part of it (the caller owns that
+// test). The conditions: the flag is set, the account is not cfgms-admin, it holds no
+// bound admin certificate and every credential it holds is a CFGMS software
+// credential. A zero-credential account passes the last one.
+func rootAgentRefusalReason(acct *account) string {
+	switch {
+	case !acct.AllowSoftwareAuthenticator:
+		return reasonRootAgentFlagUnset
+	case acct.Username == systemAdminAccountName:
+		return reasonRootAgentSystemAdmin
+	case len(acct.CertBindings) > 0:
+		return reasonRootAgentCertBound
+	}
+	for i := range acct.Credentials {
+		if !acct.Credentials[i].isSoftwareAuthenticator() {
+			return reasonRootAgentHumanCredential
+		}
+	}
+	return ""
+}
+
 // softwareAuthenticatorPermitted reports whether acct may hold a CFGMS software
 // authenticator. It fails closed: it returns (false, errRootTenantUnresolved) when
-// the root tenant cannot be resolved, and (false, nil) for every refused shape.
+// the root tenant cannot be resolved, and (false, nil) for every refused shape. A
+// root-scope account is judged by the root agent rules (rootAgentRefusalReason plus
+// the controller.cfg setting) and needs no root tenant; every other account by the
+// tenant list.
 func (s *Server) softwareAuthenticatorPermitted(ctx context.Context, acct *account) (bool, error) {
-	if acct == nil || acct.RootScope || acct.TenantID == "" {
-		return false, nil
+	permitted, _, err := s.softwareAuthenticatorDecision(ctx, acct)
+	return permitted, err
+}
+
+// softwareAuthenticatorDecision is softwareAuthenticatorPermitted plus the reason for
+// a refusal, for the registration audit event.
+func (s *Server) softwareAuthenticatorDecision(ctx context.Context, acct *account) (permitted bool, reason string, err error) {
+	if acct == nil {
+		return false, reasonPolicy, nil
+	}
+	if acct.RootScope {
+		if !s.SoftwareAuthenticatorRootAgentAccounts() {
+			return false, reasonRootAgentSettingOff, nil
+		}
+		if reason := rootAgentRefusalReason(acct); reason != "" {
+			return false, reason, nil
+		}
+		return true, "", nil
+	}
+	if acct.TenantID == "" {
+		return false, reasonPolicy, nil
 	}
 	root := s.rootTenantID(ctx)
 	if root == "" {
-		return false, errRootTenantUnresolved
+		return false, reasonRootTenantUnresolved, errRootTenantUnresolved
 	}
 	if acct.TenantID == root {
-		return false, nil
+		return false, reasonPolicy, nil
 	}
-	return s.SoftwareAuthenticatorTenantListed(acct.TenantID) && acct.AllowSoftwareAuthenticator, nil
+	if s.SoftwareAuthenticatorTenantListed(acct.TenantID) && acct.AllowSoftwareAuthenticator {
+		return true, "", nil
+	}
+	return false, reasonPolicy, nil
 }
 
 // enforceSoftwareAuthenticatorPolicy applies the policy to a just-verified
@@ -92,13 +179,9 @@ func (s *Server) enforceSoftwareAuthenticatorPolicy(w http.ResponseWriter, r *ht
 	if !cred.isSoftwareAuthenticator() {
 		return true
 	}
-	permitted, err := s.softwareAuthenticatorPermitted(r.Context(), acct)
+	permitted, reason, err := s.softwareAuthenticatorDecision(r.Context(), acct)
 	if permitted {
 		return true
-	}
-	reason := "policy"
-	if err != nil {
-		reason = "root_tenant_unresolved"
 	}
 	s.auditSoftwareAuthenticatorRefused(r.Context(), acct, cred, reason)
 	if err != nil {
@@ -117,7 +200,8 @@ func (s *Server) enforceSoftwareAuthenticatorPolicy(w http.ResponseWriter, r *ht
 }
 
 // auditSoftwareAuthenticatorRefused records a denied registration naming the
-// account, its tenant and the AAGUID.
+// account, its tenant, the AAGUID and the reason. A root-scope account's event also
+// carries root_scope: true, which tells it from tenant use (Issue #6225).
 func (s *Server) auditSoftwareAuthenticatorRefused(ctx context.Context, acct *account, cred *WebAuthnCredential, reason string) {
 	if s.auditManager == nil {
 		return
@@ -125,6 +209,15 @@ func (s *Server) auditSoftwareAuthenticatorRefused(ctx context.Context, acct *ac
 	tenantID := acct.TenantID
 	if tenantID == "" {
 		tenantID = audit.SystemTenantID
+	}
+	details := map[string]interface{}{
+		"account_id": acct.ID,
+		"tenant_id":  acct.TenantID,
+		"aaguid":     hex.EncodeToString(cred.AAGUID),
+		"reason":     reason,
+	}
+	if acct.RootScope {
+		details[auditKeyRootScope] = true
 	}
 	b := audit.NewEventBuilder().
 		Tenant(tenantID).
@@ -134,12 +227,7 @@ func (s *Server) auditSoftwareAuthenticatorRefused(ctx context.Context, acct *ac
 		Resource("account", logging.SanitizeLogValue(acct.Username), "").
 		Result(business.AuditResultDenied).
 		Severity(business.AuditSeverityHigh).
-		Details(map[string]interface{}{
-			"account_id": acct.ID,
-			"tenant_id":  acct.TenantID,
-			"aaguid":     hex.EncodeToString(cred.AAGUID),
-			"reason":     reason,
-		})
+		Details(details)
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
 		s.logger.Warn("Failed to emit software authenticator refusal audit event",
 			"account_id", logging.SanitizeLogValue(acct.ID),
@@ -264,6 +352,7 @@ const (
 	auditKeyAAGUID                = "aaguid"
 	auditKeyCredentialID          = "credential_id"
 	auditKeyReason                = "reason"
+	auditKeyRootScope             = "root_scope" // true on an event for a root-scope account (Issue #6225)
 
 	// auditReasonSoftwareAuthenticatorPolicy is the reason on a use the policy refused.
 	auditReasonSoftwareAuthenticatorPolicy = "software_authenticator_policy"
@@ -273,7 +362,8 @@ const (
 // used on this account" into audit detail fields (Issue #6144): software_authenticator
 // (true when the recorded AAGUID is softauthn.AAGUID, false for every other
 // credential), aaguid (hex) and credential_id (base64url, the form the credential
-// list and the registration events use). It returns nil when the credential is not
+// list and the registration events use), plus root_scope: true for a root-scope
+// account (Issue #6225), so a root agent's use is told from tenant use. It returns nil when the credential is not
 // one of acct's, so an event never claims a marker for a credential it cannot
 // identify. acct must be the full record, not permittedAccountView's copy: a
 // credential the policy has stopped permitting is still on the full record, which is
@@ -290,11 +380,15 @@ func softwareAuthenticatorAuditDetails(acct *account, credentialID []byte) map[s
 		if !bytes.Equal(c.ID, credentialID) {
 			continue
 		}
-		return map[string]interface{}{
+		details := map[string]interface{}{
 			auditKeySoftwareAuthenticator: c.isSoftwareAuthenticator(),
 			auditKeyAAGUID:                hex.EncodeToString(c.AAGUID),
 			auditKeyCredentialID:          base64.RawURLEncoding.EncodeToString(c.ID),
 		}
+		if acct.RootScope {
+			details[auditKeyRootScope] = true
+		}
+		return details
 	}
 	return nil
 }

@@ -1535,6 +1535,49 @@ func TestWebAuthnConfig_AllowSoftwareAuthenticators_DefaultsToEmpty(t *testing.T
 	assert.Empty(t, (*Config)(nil).SoftwareAuthenticatorTenants(), "nil config")
 }
 
+// --- Issue #6225: webauthn.allow_software_authenticators.root_agent_accounts ---
+
+func TestWebAuthnConfig_RootAgentAccounts(t *testing.T) {
+	const head = "webauthn:\n  rp_id: cfgms.example.com\n  rp_origins: [\"https://cfgms.example.com\"]\n"
+	tests := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{"on", head + "  allow_software_authenticators:\n    root_agent_accounts: true\n", true},
+		{"explicit off", head + "  allow_software_authenticators:\n    root_agent_accounts: false\n", false},
+		{"block with only tenants", head + "  allow_software_authenticators:\n    tenants: [msp-a]\n", false},
+		{"block absent", head, false},
+		{"tenants and setting", head + "  allow_software_authenticators:\n    tenants: [msp-a]\n    root_agent_accounts: true\n", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cfg Config
+			require.NoError(t, yaml.Unmarshal([]byte(tt.yaml), &cfg))
+			assert.Equal(t, tt.want, cfg.SoftwareAuthenticatorRootAgentAccounts())
+			assert.NoError(t, cfg.ValidateWebAuthn())
+		})
+	}
+
+	var both Config
+	require.NoError(t, yaml.Unmarshal([]byte(head+"  allow_software_authenticators:\n    tenants: [msp-a]\n    root_agent_accounts: true\n"), &both))
+	assert.Equal(t, []string{"msp-a"}, both.SoftwareAuthenticatorTenants(), "the tenant list is parsed next to the setting")
+}
+
+func TestWebAuthnConfig_RootAgentAccounts_NilSafe(t *testing.T) {
+	assert.False(t, (*Config)(nil).SoftwareAuthenticatorRootAgentAccounts(), "nil config")
+	assert.False(t, (&Config{}).SoftwareAuthenticatorRootAgentAccounts(), "no webauthn block")
+	assert.False(t, (&Config{WebAuthn: &WebAuthnConfig{}}).SoftwareAuthenticatorRootAgentAccounts(), "no allow block")
+}
+
+func TestWebAuthnConfig_RootAgentAccounts_ValidatesWithoutRPID(t *testing.T) {
+	// allow_software_authenticators validation runs even with no rp_id.
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal([]byte("webauthn:\n  allow_software_authenticators:\n    root_agent_accounts: true\n"), &cfg))
+	assert.True(t, cfg.SoftwareAuthenticatorRootAgentAccounts())
+	assert.NoError(t, cfg.ValidateWebAuthn())
+}
+
 func TestConfig_ValidateWebAuthn_SoftwareAuthenticatorTenants(t *testing.T) {
 	build := func(tenants []string) *Config {
 		return &Config{WebAuthn: &WebAuthnConfig{

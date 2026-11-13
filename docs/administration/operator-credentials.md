@@ -1151,6 +1151,19 @@ non-exportable key in the Windows platform key provider; `store`: the key is in
 the encrypted credential store). `--json` prints the same fields, plus the label and
 controller URL, as a JSON array. Key material is never printed by any command.
 
+**Root agent accounts.** The controller can also allow a software authenticator for
+one dedicated root-scope agent account, so an agent can use presence-gated actions
+such as module approval (ADR-021 Amendment 11). It needs
+`webauthn.allow_software_authenticators.root_agent_accounts: true` in
+`controller.cfg` (an operator edit and a controller restart), and the account must
+carry the software-authenticator flag, must not be `cfgms-admin`, must hold no bound
+admin certificate and must hold only software credentials. The controller cannot
+verify where a key is kept, so key protection is your obligation: create a root
+agent account's authenticator with `--key-provider platform`, not `store`. A session
+for a flagged root account holds only a fixed set of 16 permissions rather than full
+administrator breadth, and still needs a crossing to act below the root tenant; see
+[Software authenticators](../security/SECURITY_CONFIGURATION.md#software-authenticators).
+
 **Registering with a controller.** A new authenticator is registered by one of two
 paths. Either way the controller must allow software authenticators for the
 account, and on success `cfg authenticator list` shows the record as registered and
