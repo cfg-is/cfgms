@@ -1118,16 +1118,17 @@ them; later steps (headless login) are documented under their own sub-headings
 here as they ship.
 
 ```
-cfg authenticator create <name> --url <controller URL> [--rp-id <id>] [--origin <origin>] [--ca-cert <file>] [--label <text>]
+cfg authenticator create <name> --url <controller URL> [--rp-id <id>] [--origin <origin>] [--ca-cert <file>] [--label <text>] [--key-provider platform|store]
 cfg authenticator list [--json]
 cfg authenticator delete <name> [--force]
 cfg authenticator enroll <name> (--link-file <path> | --link-stdin)
 cfg webauthn register --username <user> --authenticator <name> [--label <text>]
 ```
 
-**`create`** generates a P-256 key and a random credential ID and stores them as
-one encrypted record. Nothing is sent to the controller, so a new authenticator is
-listed as not registered.
+**`create`** generates a P-256 key and a random credential ID and stores the
+authenticator as one encrypted record. Where the key itself lives depends on
+`--key-provider` (see [Where the key lives](#where-the-key-lives)). Nothing is sent
+to the controller, so a new authenticator is listed as not registered.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -1136,6 +1137,7 @@ listed as not registered.
 | `--origin` | `scheme://host[:port]` of `--url` | WebAuthn origin; must be `https`, with a host that is the RP ID or a subdomain of it |
 | `--ca-cert` | — | PEM file with the CA certificate that signs the controller's TLS certificate; stored in the record |
 | `--label` | — | Free-text label |
+| `--key-provider` | `platform` on Windows, `store` elsewhere | `platform`: a non-exportable per-user key in the Windows platform key provider (Windows only; refused elsewhere). `store`: the key is kept in the encrypted credential store |
 
 Names are 1-64 letters, digits, `.`, `_` or `-`, starting with a letter or digit.
 `create` refuses a name that already exists and leaves the existing record
@@ -1144,9 +1146,23 @@ refused before anything is written. There is no option to skip TLS verification
 and no way to export the key.
 
 **`list`** shows name, RP ID, origin, credential ID (base64url), whether the
-authenticator is registered, and its protection level (`store`: the key is in the
-encrypted credential store). `--json` prints the same fields, plus the label and
+authenticator is registered, and its protection level (`platform`: a
+non-exportable key in the Windows platform key provider; `store`: the key is in
+the encrypted credential store). `--json` prints the same fields, plus the label and
 controller URL, as a JSON array. Key material is never printed by any command.
+
+**Root agent accounts.** The controller can also allow a software authenticator for
+one dedicated root-scope agent account, so an agent can use presence-gated actions
+such as module approval (ADR-021 Amendment 11). It needs
+`webauthn.allow_software_authenticators.root_agent_accounts: true` in
+`controller.cfg` (an operator edit and a controller restart), and the account must
+carry the software-authenticator flag, must not be `cfgms-admin`, must hold no bound
+admin certificate and must hold only software credentials. The controller cannot
+verify where a key is kept, so key protection is your obligation: create a root
+agent account's authenticator with `--key-provider platform`, not `store`. A session
+for a flagged root account holds only a fixed set of 16 permissions rather than full
+administrator breadth, and still needs a crossing to act below the root tenant; see
+[Software authenticators](../security/SECURITY_CONFIGURATION.md#software-authenticators).
 
 **Registering with a controller.** A new authenticator is registered by one of two
 paths. Either way the controller must allow software authenticators for the
@@ -1173,24 +1189,65 @@ command exits non-zero and prints the server's code.
   controller. Without `--authenticator` the command keeps refusing and points at
   browser enrollment.
 
-**`delete`** removes the record after a confirmation prompt (`--force` skips it).
-It does not contact the controller: the controller keeps listing the credential
-until it is revoked with `cfg webauthn revoke <credential-id>`. A record that
-cannot be read can still be deleted.
+**`delete`** removes the record after a confirmation prompt (`--force` skips it),
+and for a `platform` authenticator first deletes its key from the platform key
+provider. It does not contact the controller: the controller keeps listing the
+credential until it is revoked with `cfg webauthn revoke <credential-id>`. A
+record that cannot be read can still be deleted; `delete` then warns that any
+platform key it named could not be located. A key that is already gone, or whose
+provider is no longer available, does not stop `delete`. If the key exists but
+cannot be deleted, or the record names a key that `cfg` never creates, `delete`
+keeps the record and fails; with `--force` it deletes the record anyway, leaves
+the key, and warns.
 
-**Where the key lives:** `<user config dir>/cfgms/credentials/authenticator.<name>.enc`,
-a versioned JSON record (version, name, credential ID, PKCS#8 key, RP ID, origin,
-controller URL, optional CA certificate, user handle, registered flag, protection)
-encrypted by the same credential store as the signing key above. The directory is
+#### Where the key lives
+
+**Windows (default, `platform`).** `create` makes the P-256 key in a CNG key
+storage provider as a persisted, sign-only, per-user key (not a machine key) with
+export policy none: the Microsoft Platform Crypto Provider (the TPM) when it can
+hold a key, otherwise the Microsoft Software Key Storage Provider. The private key
+bytes never exist in the `cfg` process or on disk; signing happens inside the
+provider. The record stores only the provider name and key name. `create` prints
+which provider holds the key. When no platform key provider is available at all,
+`create` without `--key-provider` falls back to `store` and says so; an explicit
+`--key-provider platform` fails instead. Moving an existing authenticator between
+providers is not supported: delete it and create it again.
+
+What non-exportable protects, and what it does not:
+
+- It keeps the key out of `cfg`: the credential store, a copied record, a backup
+  or a memory dump of `cfg` does not contain the key, and no CNG call returns it.
+- With the Platform Crypto Provider the key never leaves the TPM, so it cannot be
+  used from another machine.
+- With the Software Key Storage Provider, export policy none is enforced by the
+  provider, and the key is persisted in the user's profile under DPAPI. A process
+  running as the same user with tooling that reads DPAPI-protected key files can
+  still recover it. This is stronger than `store` against casual reads, but not
+  hardware protection. `create` says when the TPM could not hold the key, and
+  `list` shows which provider holds each key (the `KEY PROVIDER` column, and
+  `key_provider` in `--json`).
+- Neither provider stops a process running as the same user on the same machine
+  from asking the provider to sign with the key. Treat the authenticator as a
+  credential of that user, as with `store`.
+
+**`store` (Linux, macOS, or `--key-provider store`).** The key is kept,
+PKCS#8-encoded, inside the encrypted record.
+
+**The record:** `<user config dir>/cfgms/credentials/authenticator.<name>.enc`,
+a versioned JSON record (version, name, credential ID, the PKCS#8 key for `store`
+or the provider and key name for `platform`, RP ID, origin, controller URL,
+optional CA certificate, user handle, registered flag, protection) encrypted by
+the same credential store as the signing key above. The directory is
 private to the current user: mode 0700 on Linux and macOS, and an ACL for the
 current user and SYSTEM on Windows. The record has no AAGUID field; every response
 carries the fixed CFGMS AAGUID, and no flag, environment variable or config changes
 it. A record with an unknown `version` is rejected with an error naming the version;
 there is no migration, so delete the authenticator and create it again.
 
-**On-disk protection by OS:**
+**On-disk protection of the record by OS** (for `store`, this is the protection
+of the key itself):
 
-| OS | Protection of the key file |
+| OS | Protection of the record file |
 |----|----------------------------|
 | Linux | AES-256-GCM, key derived from the machine ID (`/etc/machine-id`, or a per-directory identity file where it is absent) and a per-store salt; file mode 0600 in a 0700 directory |
 | macOS | AES-256-GCM, key derived from the hardware platform UUID and a per-store salt; file mode 0600 in a 0700 directory |
@@ -1198,12 +1255,14 @@ there is no migration, so delete the authenticator and create it again.
 
 **Limits:**
 
-- On Linux and macOS the encryption key is derived from values any process running
-  as the same user can read, so any such process can decrypt the key. The
+- On Linux and macOS (and on Windows with `--key-provider store`) the encryption
+  key is derived from values any process running as the same user can read, so
+  any such process can decrypt the key. The
   encryption protects against a copied file, a backup or a synced config directory,
   not against code running as the operator. Treat the authenticator as a credential
   of that user.
-- The key is not moved to the OS keychain, so it works on headless hosts.
+- On Linux and macOS the key is not moved to the TPM, Secure Enclave or OS
+  keychain, so it works on headless hosts.
 - A record decrypts only for the same user on the same machine; copy it elsewhere
   and `list` fails with the credential store's different-user-or-machine error;
   delete the authenticator and create it again there.

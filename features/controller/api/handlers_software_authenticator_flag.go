@@ -165,15 +165,25 @@ func (s *Server) failSoftwareAuthenticatorFlagWrite(w http.ResponseWriter, r *ht
 }
 
 // softwareAuthenticatorFlagRefusal decides whether the flag may be set on acct. A
-// non-zero status means refuse with that status. It applies the root-shape rules of
-// softwareAuthenticatorPermitted (software_authenticator_policy.go) — a RootScope
-// account, an empty TenantID or a root-tenant account is refused with 400, and an
-// unresolvable root tenant fails closed with 503 — but not its tenant-list test: the
-// flag may be set ahead of the tenant being listed, and has no effect until it is.
+// non-zero status means refuse with that status. It applies the shape rules of
+// softwareAuthenticatorPermitted (software_authenticator_policy.go) but not its
+// tenant-list test: the flag may be set ahead of the tenant being listed, and has no
+// effect until it is.
+//
+//   - A root-scope account (Issue #6225) is refused with 400 unless the root-agent
+//     setting is on, the account is not cfgms-admin and it holds no bound admin
+//     certificate. Its credentials need not be software-only here (a zero-credential
+//     account is the normal state before enrolment); that rule is enforced at
+//     registration and at every use.
+//   - An account with an empty TenantID, or in the root tenant, is refused with 400,
+//     and an unresolvable root tenant fails closed with 503.
 func (s *Server) softwareAuthenticatorFlagRefusal(ctx context.Context, acct *account) (status int, code, msg string) {
-	if acct.RootScope || acct.TenantID == "" {
+	if acct.RootScope {
+		return s.rootAgentFlagRefusal(acct)
+	}
+	if acct.TenantID == "" {
 		return http.StatusBadRequest, errCodeSoftwareAuthenticatorNotAllowed,
-			"A software authenticator cannot be allowed for a root-scope account"
+			"A software authenticator cannot be allowed for an account with no tenant"
 	}
 	root := s.rootTenantID(ctx)
 	if root == "" {
@@ -183,6 +193,22 @@ func (s *Server) softwareAuthenticatorFlagRefusal(ctx context.Context, acct *acc
 	if acct.TenantID == root {
 		return http.StatusBadRequest, errCodeSoftwareAuthenticatorNotAllowed,
 			"A software authenticator cannot be allowed for an account in the root tenant"
+	}
+	return 0, "", ""
+}
+
+// rootAgentFlagRefusal is the root-scope branch of softwareAuthenticatorFlagRefusal.
+func (s *Server) rootAgentFlagRefusal(acct *account) (status int, code, msg string) {
+	switch {
+	case !s.SoftwareAuthenticatorRootAgentAccounts():
+		return http.StatusBadRequest, errCodeSoftwareAuthenticatorNotAllowed,
+			"A software authenticator cannot be allowed for a root-scope account unless root agent accounts are enabled in controller.cfg"
+	case acct.Username == systemAdminAccountName:
+		return http.StatusBadRequest, errCodeSoftwareAuthenticatorNotAllowed,
+			"A software authenticator cannot be allowed for the system admin account"
+	case len(acct.CertBindings) > 0:
+		return http.StatusBadRequest, errCodeSoftwareAuthenticatorNotAllowed,
+			"A software authenticator cannot be allowed for an account with a bound admin certificate"
 	}
 	return 0, "", ""
 }

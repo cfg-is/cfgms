@@ -176,6 +176,12 @@ type Principal struct {
 	// permission by construction. Previously, Permissions==nil served as the implicit-admin
 	// marker; that sentinel made a zero-valued principal unintentionally privileged.
 	ImplicitAdmin bool
+	// RootAgent marks a session principal of a root-scope account that carries the
+	// AllowSoftwareAuthenticator flag (Issue #6225, ADR-021 Amendment 11). It replaces
+	// ImplicitAdmin for that account: hasPermission grants only rootAgentPermissions.
+	// GlobalScope, AccountBound and RootScoped are unchanged, so the ADR-025 tenant
+	// crossing boundary treats the principal exactly like any other root account.
+	RootAgent bool
 	// AccountBound is true when this principal was resolved from a durable account record
 	// (extractAdminPrincipal's bound-cert branch, or a Bearer/web session with a resolvable
 	// account) rather than an unbound principal (Issue #4337, ADR-025 Amendment 5). It is the
@@ -1270,7 +1276,11 @@ type sessionPrincipalScope struct {
 	tenantID      string
 	globalScope   bool
 	implicitAdmin bool
-	permissions   []string
+	// rootAgent is set instead of implicitAdmin for a root-scope account carrying the
+	// software-authenticator flag (Issue #6225); permissions is then empty and
+	// hasPermission grants rootAgentPermissions only.
+	rootAgent   bool
+	permissions []string
 }
 
 // accountSessionScope resolves the scope of a session principal from its live bound
@@ -1282,6 +1292,14 @@ func (s *Server) accountSessionScope(ctx context.Context, acct *account) session
 		tenantID:    s.accountPrincipalTenant(ctx, acct),
 		globalScope: acct.RootScope,
 		permissions: []string{},
+	}
+	if rootAgentSession(acct) {
+		// Issue #6225 (ADR-021 Amendment 11): a flagged root-scope account is an agent
+		// account with a fixed allowlist, not a platform administrator. The flag alone
+		// decides this, so it holds for every credential and whatever the root-agent
+		// setting says.
+		scope.rootAgent = true
+		return scope
 	}
 	if acct.RootScope {
 		// Root-scope accounts are platform administrators: they hold every permission,
@@ -1477,6 +1495,7 @@ func bearerSessionPrincipal(sess *session.Session, acct *account, scope sessionP
 		Permissions:   scope.permissions,
 		TenantID:      scope.tenantID,
 		ImplicitAdmin: scope.implicitAdmin,
+		RootAgent:     scope.rootAgent,
 		// AccountBound: true only when a live account was resolved for
 		// sess.PrincipalID (Issue #4337) — the no-account fallback keeps
 		// globalScope's sess.TenantID=="" default, which is not an account-level
@@ -1621,6 +1640,7 @@ func webSessionPrincipal(webSess *session.Session, webAcct *account, scope sessi
 		TenantID:           scope.tenantID,
 		AuthenticatorCount: webAcct.usableCredentialCount(softwareCredentialsPermitted),
 		ImplicitAdmin:      scope.implicitAdmin,
+		RootAgent:          scope.rootAgent,
 		// RootScoped is derived per request from the bound account's RootScope
 		// flag and this session's current assurance being phishing-resistant
 		// (ADR-025 Amendment 4 A4.1) — never stored on the session record, never
@@ -2117,6 +2137,9 @@ func (s *Server) checkPermissionHeld(w http.ResponseWriter, r *http.Request, pr 
 		return true
 	}
 	decision := s.denyAuthorization(r, pr, "Principal lacks required permission: "+pr.permissionID)
+	if pr.principal != nil && pr.principal.RootAgent {
+		s.auditRootAgentRefusal(r, pr.principal, reasonRootAgentPermissionNotAllowed, pr.permissionID)
+	}
 	if isUnboundAdminCertPrincipal(pr.principal) {
 		s.writeUnboundAdminCertError(w)
 		return false
@@ -2651,6 +2674,10 @@ func (s *Server) getAuditSeverity(decision *AuthorizationDecision) string {
 func (s *Server) hasPermission(principal *Principal, permissionID string) bool {
 	if principal == nil {
 		return false
+	}
+	if principal.RootAgent {
+		// Issue #6225: a flagged root agent holds only the named allowlist.
+		return rootAgentPermitted(permissionID)
 	}
 	if principal.ImplicitAdmin {
 		return true

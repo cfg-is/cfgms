@@ -443,6 +443,7 @@ and passkey step-up answer 503.
 | `rp_display_name` | string | `rp_id` | optional | Human-readable name shown by the authenticator during the ceremony |
 | `rp_origins` | list[string] | `[]` | required when `rp_id` is set | Fully qualified origins allowed to complete a ceremony (e.g. `https://cfgms.acme-corp.example`). Every entry must start with `https://`. Setting origins without `rp_id` is rejected. |
 | `allow_software_authenticators.tenants` | list[string] | `[]` | optional | Tenant IDs whose accounts may register a CFGMS software authenticator, exact match (a listed tenant does not cover its children). Empty or absent means off. See [Software authenticators](../security/SECURITY_CONFIGURATION.md#software-authenticators). |
+| `allow_software_authenticators.root_agent_accounts` | bool | `false` | optional | Permits a CFGMS software authenticator for a dedicated root-scope agent account that carries the account flag, is not `cfgms-admin`, holds no bound admin certificate and holds only software credentials. Absent means off. Has no API writer; a change needs a controller restart. A flagged root account's sessions hold a fixed 16-permission set, not full administrator breadth. See [Root agent accounts](../security/SECURITY_CONFIGURATION.md#root-agent-accounts). |
 
 ---
 

@@ -104,11 +104,11 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      # Image build inputs: every path the Dockerfile COPYs that only the image
-      # consumes, plus .dockerignore (it shapes the build context). Go source is
-      # also copied (`COPY . .` in cfg-builder) but is NOT listed: other jobs
-      # build it, and gating on every Go change would build the image on nearly
-      # every PR.
+      # Image build inputs: every cfgms-context path the Dockerfile COPYs, derived
+      # from the Dockerfile by scripts/agent-image-filter.sh, plus .dockerignore
+      # (it shapes the build context). Go source is also copied (`COPY . .` in
+      # cfg-builder) but is NOT a trigger: other jobs build it, and gating on
+      # every Go change would build the image on nearly every PR.
       - name: Detect agent image input changes
         id: gate
         env:
@@ -149,13 +149,10 @@ jobs:
             exit 0
           fi
 
-          if grep -Eq '^(\.claude/tooling$|\.claude/tooling/devcontainer/|go\.mod$|go\.sum$|web/\.nvmrc$|web/package\.json$|web/package-lock\.json$|\.claude/tooling/metrics/token_report\.py$|\.claude/tooling/metrics/pricing\.json$|\.claude/model-routing\.yaml$|\.dockerignore$|\.github/workflows/agent-image-build\.yml$)' changed_files.txt; then
-            echo "Agent image inputs changed — building"
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No agent image inputs changed — skipping build"
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          fi
+          # The filter derives the trigger set from the Dockerfile's COPY
+          # sources (checkout has submodules: true) and fails closed to
+          # build=true on any defect, including an unreadable Dockerfile.
+          bash scripts/agent-image-filter.sh --files changed_files.txt >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         if: steps.gate.outputs.build == 'true'

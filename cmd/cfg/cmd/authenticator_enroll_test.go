@@ -156,7 +156,7 @@ func enrollTestRecord(t *testing.T, es *enrollTestServer, name string) *Credenti
 	caPath := filepath.Join(t.TempDir(), "ca.pem")
 	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: es.srv.Certificate().Raw})
 	require.NoError(t, os.WriteFile(caPath, caPEM, 0o600))
-	out, err := runAuthenticator(t, "", "create", name, "--url", es.srv.URL,
+	out, err := runAuthenticator(t, "", "create", "--key-provider", "store", name, "--url", es.srv.URL,
 		"--rp-id", testAuthRPID, "--origin", es.origin, "--ca-cert", caPath)
 	require.NoError(t, err, out)
 	return store
@@ -231,7 +231,7 @@ func TestAuthenticatorEnroll_PassesRecordLabelToFinish(t *testing.T) {
 	caPath := filepath.Join(t.TempDir(), "ca.pem")
 	require.NoError(t, os.WriteFile(caPath,
 		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: es.srv.Certificate().Raw}), 0o600))
-	out, err := runAuthenticator(t, "", "create", "labelled", "--url", es.srv.URL,
+	out, err := runAuthenticator(t, "", "create", "--key-provider", "store", "labelled", "--url", es.srv.URL,
 		"--rp-id", testAuthRPID, "--origin", es.origin, "--ca-cert", caPath, "--label", "agent one")
 	require.NoError(t, err, out)
 
@@ -338,7 +338,7 @@ func TestAuthenticatorEnroll_BadTokenRefusedByServer(t *testing.T) {
 func TestAuthenticatorEnroll_UntrustedControllerCertificateRefused(t *testing.T) {
 	es := newEnrollTestServer(t)
 	_, store := authTestStore(t)
-	out, err := runAuthenticator(t, "", "create", "no-ca", "--url", es.srv.URL,
+	out, err := runAuthenticator(t, "", "create", "--key-provider", "store", "no-ca", "--url", es.srv.URL,
 		"--rp-id", testAuthRPID, "--origin", es.origin)
 	require.NoError(t, err, out)
 

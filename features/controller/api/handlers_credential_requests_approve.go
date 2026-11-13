@@ -140,6 +140,12 @@ func principalHasCertifiedRootScope(p *Principal) bool {
 	if p == nil || !p.RootScoped {
 		return false
 	}
+	// Issue #6225: a root agent session is RootScoped, GlobalScope and Strong, so it
+	// would pass the account branch below. The route is already closed to it by the
+	// allowlist (credential-request:approve is not a member); this is the second lock.
+	if p.RootAgent {
+		return false
+	}
 	if p.CertSerial != "" {
 		return true
 	}
