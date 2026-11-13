@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"text/tabwriter"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/registration/identity"
 )
 
 // maxAuthenticatorCACertBytes bounds the --ca-cert file read.
@@ -33,10 +36,16 @@ func newAuthenticatorCmd() *cobra.Command {
 		Long: `Manage software WebAuthn authenticators: P-256 keys bound to one controller's
 RP ID and origin, for operators and agents that have no hardware key or browser.
 
-Each key is stored only in the encrypted credential store (credential name
-authenticator.<name>). It is never printed or written anywhere else.
-The key is readable by any process running as the same user on this machine,
-so treat it as a credential of that user.
+On Windows each key is, by default, a non-exportable per-user key in the
+platform key provider (the TPM through the Platform Crypto Provider when
+present, otherwise the software key provider). Its private bytes never exist
+in cfg or on disk; the encrypted credential store (credential name
+authenticator.<name>) holds only the binding and where the key is. Elsewhere,
+or with --key-provider store, the key itself is kept in the encrypted
+credential store and is never printed or written anywhere else.
+
+Either way, any process running as the same user on this machine can sign with
+the key, so treat it as a credential of that user.
 
 Subcommands:
   create  Create an authenticator bound to a controller
@@ -56,6 +65,15 @@ scheme://host[:port]; --rp-id and --origin override them (the origin must be htt
 and its host the RP ID or a subdomain of it). --ca-cert pins the controller's CA
 certificate for later connections. Controller TLS certificates are always verified.
 
+--key-provider chooses where the key lives:
+  platform  a per-user key in the Windows platform key provider whose private
+            bytes cannot be read out (Windows only; the Windows default)
+  store     a key kept in the encrypted credential store (the default on other
+            operating systems)
+With no --key-provider, Windows falls back to store only when no platform key
+provider is available, and says so. 'cfg authenticator list' shows which
+protection each authenticator has.
+
 An existing name is refused; delete it first to replace it.
 
 Examples:
@@ -69,6 +87,7 @@ Examples:
 	create.Flags().String("origin", "", "WebAuthn origin, https (default: scheme://host[:port] of --url)")
 	create.Flags().String("ca-cert", "", "PEM file with the CA certificate that signs the controller's TLS certificate")
 	create.Flags().String("label", "", "free-text label for the authenticator")
+	create.Flags().String("key-provider", "", "where the key lives: platform (Windows) or store (default: platform on Windows, store elsewhere)")
 
 	list := &cobra.Command{
 		Use:   "list",
@@ -88,9 +107,10 @@ Examples:
 	del := &cobra.Command{
 		Use:   "delete <name>",
 		Short: "Delete a software authenticator",
-		Long: `Deletes the authenticator's key from the credential store. The key cannot be
-recovered. This does not touch the controller: it still lists the credential
-until it is revoked (cfg webauthn revoke <credential-id>).
+		Long: `Deletes the authenticator from the credential store and, for a platform key,
+deletes the key from the platform key provider. The key cannot be recovered.
+This does not touch the controller: it still lists the credential until it is
+revoked (cfg webauthn revoke <credential-id>).
 
 Use --force to skip the interactive confirmation prompt.
 
@@ -160,10 +180,57 @@ func authenticatorOrigin(override string, u *url.URL) (string, error) {
 	return origin, nil
 }
 
+// authenticatorKeyChoice is where create puts the key.
+type authenticatorKeyChoice struct {
+	protection string // authenticatorProtectionPlatform or authenticatorProtectionStore
+	// fallback allows store when no platform provider is available. It is set
+	// only for the Windows default, never for an explicit --key-provider.
+	fallback bool
+}
+
+// resolveAuthenticatorKeyProvider turns the --key-provider value into a choice.
+// It is checked before anything is written.
+func resolveAuthenticatorKeyProvider(flag string) (authenticatorKeyChoice, error) {
+	switch flag {
+	case "":
+		if identity.UserKeysSupported() {
+			return authenticatorKeyChoice{protection: authenticatorProtectionPlatform, fallback: true}, nil
+		}
+		return authenticatorKeyChoice{protection: authenticatorProtectionStore}, nil
+	case authenticatorProtectionPlatform:
+		if !identity.UserKeysSupported() {
+			return authenticatorKeyChoice{}, fmt.Errorf("--key-provider platform is not supported on %s: "+
+				"platform keys are Windows only; use --key-provider store", runtime.GOOS)
+		}
+		return authenticatorKeyChoice{protection: authenticatorProtectionPlatform}, nil
+	case authenticatorProtectionStore:
+		return authenticatorKeyChoice{protection: authenticatorProtectionStore}, nil
+	default:
+		return authenticatorKeyChoice{}, fmt.Errorf("--key-provider must be %q or %q (got %q)",
+			authenticatorProtectionPlatform, authenticatorProtectionStore, flag)
+	}
+}
+
+// setAuthenticatorKey gives rec its key as choice says. It reports whether the
+// Windows default fell back to the credential store.
+func setAuthenticatorKey(rec *authenticatorRecord, choice authenticatorKeyChoice) (fellBack bool, err error) {
+	if choice.protection == authenticatorProtectionStore {
+		return false, rec.setStoreKey()
+	}
+	err = rec.setPlatformKey()
+	if err == nil {
+		return false, nil
+	}
+	if choice.fallback && errors.Is(err, identity.ErrUserKeyUnavailable) {
+		return true, rec.setStoreKey()
+	}
+	return false, err
+}
+
 // buildAuthenticatorRecord validates the create flags and returns a new record
-// with a fresh key. It touches no file: a refusal must leave the credentials
-// directory untouched, so the store (which creates the directory and key salt) is
-// not opened until the record is known to be good.
+// with no key yet. It touches no file and creates no key: a refusal must leave
+// the credentials directory and the platform key provider untouched, so neither
+// is used until the record is known to be good.
 func buildAuthenticatorRecord(name string, flags *pflag.FlagSet) (*authenticatorRecord, error) {
 	rawURL, _ := flags.GetString("url")
 	if rawURL == "" {
@@ -189,7 +256,7 @@ func buildAuthenticatorRecord(name string, flags *pflag.FlagSet) (*authenticator
 		}
 	}
 
-	rec, err := newAuthenticatorRecord(name)
+	rec, err := newAuthenticatorRecordWithoutKey(name)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +266,7 @@ func buildAuthenticatorRecord(name string, flags *pflag.FlagSet) (*authenticator
 	rec.CACertPEM = caPEM
 	rec.Label, _ = flags.GetString("label")
 	// softauthn is the authority on whether the RP ID and origin are a valid pair.
-	if _, err := rec.authenticator(); err != nil {
+	if err := rec.checkBinding(); err != nil {
 		return nil, err
 	}
 	return rec, nil
@@ -208,6 +275,11 @@ func buildAuthenticatorRecord(name string, flags *pflag.FlagSet) (*authenticator
 func runAuthenticatorCreate(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	if err := validateAuthenticatorName(name); err != nil {
+		return err
+	}
+	keyProvider, _ := cmd.Flags().GetString("key-provider")
+	choice, err := resolveAuthenticatorKeyProvider(keyProvider)
+	if err != nil {
 		return err
 	}
 	rec, err := buildAuthenticatorRecord(name, cmd.Flags())
@@ -227,19 +299,43 @@ func runAuthenticatorCreate(cmd *cobra.Command, args []string) error {
 	if exists {
 		return fmt.Errorf("authenticator %q already exists; delete it first with 'cfg authenticator delete %s' to replace it", name, name)
 	}
-	if err := saveAuthenticatorRecord(ctx, store, rec); err != nil {
+	fellBack, err := setAuthenticatorKey(rec, choice)
+	if err != nil {
 		return err
 	}
+	if err := saveAuthenticatorRecord(ctx, store, rec); err != nil {
+		// Do not leave a platform key behind that no record points to.
+		return errors.Join(err, rec.deletePlatformKey())
+	}
 
+	printAuthenticatorCreated(cmd.OutOrStdout(), rec, fellBack)
+	return nil
+}
+
+// printAuthenticatorCreated reports a new authenticator. It never prints key material.
+// softwareKeyProviderName is the CNG provider CreateUserKey uses when the
+// Platform Crypto Provider (TPM) cannot hold a key.
+const softwareKeyProviderName = "Microsoft Software Key Storage Provider"
+
+func printAuthenticatorCreated(out io.Writer, rec *authenticatorRecord, fellBack bool) {
 	s := rec.summary()
-	out := cmd.OutOrStdout()
+	if fellBack {
+		_, _ = fmt.Fprintln(out, "No platform key provider is available; the key is kept in the encrypted credential store instead.")
+	}
 	_, _ = fmt.Fprintf(out, "Authenticator %q created (not yet registered with a controller)\n", s.Name)
 	_, _ = fmt.Fprintf(out, "RP ID:         %s\n", s.RPID)
 	_, _ = fmt.Fprintf(out, "Origin:        %s\n", s.Origin)
 	_, _ = fmt.Fprintf(out, "Credential ID: %s\n", s.CredentialID)
-	_, _ = fmt.Fprintf(out, "Private key:   stored encrypted as credential %q; it is never displayed or exported\n",
-		authenticatorCredentialName(name))
-	return nil
+	_, _ = fmt.Fprintf(out, "Protection:    %s\n", s.Protection)
+	if rec.Protection == authenticatorProtectionPlatform {
+		_, _ = fmt.Fprintf(out, "Private key:   held by %s as a per-user key that cannot be read out of it\n", rec.KeyProvider)
+		if rec.KeyProvider == softwareKeyProviderName {
+			_, _ = fmt.Fprintln(out, "Note:          the TPM could not hold the key, so the software provider holds it; it is protected by your Windows profile, not by hardware")
+		}
+	} else {
+		_, _ = fmt.Fprintf(out, "Private key:   stored encrypted as credential %q; it is never displayed or exported\n",
+			authenticatorCredentialName(rec.Name))
+	}
 }
 
 func runAuthenticatorList(cmd *cobra.Command, _ []string) error {
@@ -268,11 +364,36 @@ func runAuthenticatorList(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "NAME\tRP ID\tORIGIN\tCREDENTIAL ID\tREGISTERED\tPROTECTION")
+	_, _ = fmt.Fprintln(tw, "NAME\tRP ID\tORIGIN\tCREDENTIAL ID\tREGISTERED\tPROTECTION\tKEY PROVIDER")
 	for _, s := range summaries {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\t%s\n", s.Name, s.RPID, s.Origin, s.CredentialID, s.Registered, s.Protection)
+		provider := s.KeyProvider
+		if provider == "" {
+			provider = "-"
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\t%s\t%s\n", s.Name, s.RPID, s.Origin, s.CredentialID, s.Registered, s.Protection, provider)
 	}
 	return tw.Flush()
+}
+
+// deleteAuthenticatorPlatformKey deletes the platform key the stored record
+// names, if any. A key that cannot be deleted stops the delete, so the record
+// that locates the key is kept; with force the record is deleted anyway and the
+// key is left behind with a warning.
+func deleteAuthenticatorPlatformKey(ctx context.Context, out io.Writer, store *CredentialStore, name string, force bool) error {
+	rec, err := loadAuthenticatorRecord(ctx, store, name)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "Warning: the stored record could not be read, so any platform key it named was not deleted: %v\n", err)
+		return nil
+	}
+	err = rec.deletePlatformKey()
+	if err == nil {
+		return nil
+	}
+	if !force {
+		return fmt.Errorf("%w; the record was kept. 'cfg authenticator delete %s --force' deletes the record and leaves the platform key", err, name)
+	}
+	_, _ = fmt.Fprintf(out, "Warning: the platform key could not be deleted and is left in its provider: %v\n", err)
+	return nil
 }
 
 func runAuthenticatorDelete(cmd *cobra.Command, args []string) error {
@@ -300,10 +421,17 @@ func runAuthenticatorDelete(cmd *cobra.Command, args []string) error {
 		force); err != nil {
 		return err
 	}
+	out := cmd.OutOrStdout()
+	// The platform key goes first: if deleting the record then fails, running
+	// delete again finds the record and finishes, since an absent key is not an
+	// error. A record that cannot be read is still deleted, but its platform key,
+	// if it had one, cannot be located.
+	if err := deleteAuthenticatorPlatformKey(ctx, out, store, name, force); err != nil {
+		return err
+	}
 	if err := store.Delete(ctx, authenticatorCredentialName(name)); err != nil {
 		return fmt.Errorf("failed to delete authenticator: %w", err)
 	}
-	out := cmd.OutOrStdout()
 	_, _ = fmt.Fprintf(out, "Authenticator %q deleted.\n", name)
 	_, _ = fmt.Fprintln(out, "The controller still lists its credential until it is revoked: cfg webauthn revoke <credential-id>")
 	return nil
