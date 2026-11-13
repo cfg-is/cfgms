@@ -319,6 +319,24 @@ type AllowSoftwareAuthenticatorsConfig struct {
 	// Tenants lists tenant IDs, matched exactly: a listed tenant does not cover its
 	// child tenants. The root tenant is never permitted, whether or not it is listed.
 	Tenants []string `yaml:"tenants,omitempty"`
+
+	// RootAgentAccounts permits a CFGMS software authenticator for a dedicated
+	// root-scope agent account (Issue #6225, ADR-021 Amendment 11). Default false;
+	// absent means off. Like Tenants it has no API writer: changing it is an edit of
+	// controller.cfg on the controller host and a restart. It does not by itself mark
+	// any account; the account flag does, and the account must also meet the root
+	// agent conditions in ADR-021 Amendment 11.
+	RootAgentAccounts bool `yaml:"root_agent_accounts,omitempty"`
+}
+
+// SoftwareAuthenticatorRootAgentAccounts reports
+// webauthn.allow_software_authenticators.root_agent_accounts; false when the block is
+// absent.
+func (c *Config) SoftwareAuthenticatorRootAgentAccounts() bool {
+	if c == nil || c.WebAuthn == nil || c.WebAuthn.AllowSoftwareAuthenticators == nil {
+		return false
+	}
+	return c.WebAuthn.AllowSoftwareAuthenticators.RootAgentAccounts
 }
 
 // SoftwareAuthenticatorTenants returns the configured software-authenticator tenant

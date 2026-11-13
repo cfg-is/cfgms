@@ -82,11 +82,20 @@ func (s *Server) sessionPrincipalRefresh(orig *Principal, sessionRootScoped bool
 		p.AuthenticatorCount = acct.usableCredentialCount(softwarePermitted)
 		p.RootScoped = sessionRootScoped || rootScopeFromAssertion(acct, orig.Assurance)
 		p.AccountBound = true
-		if acct.RootScope {
-			p.ImplicitAdmin = true
-			p.Permissions = nil
-		} else {
+		switch {
+		case rootAgentSession(acct):
+			// Issue #6225: a flagged root account is limited to rootAgentPermissions; the
+			// refresh must not restore ImplicitAdmin that accountSessionScope withheld.
 			p.ImplicitAdmin = false
+			p.RootAgent = true
+			p.Permissions = []string{}
+		case acct.RootScope:
+			p.ImplicitAdmin = true
+			p.RootAgent = false
+			p.Permissions = nil
+		default:
+			p.ImplicitAdmin = false
+			p.RootAgent = false
 			p.Permissions = append([]string{}, acct.Permissions...)
 		}
 		return &p, true

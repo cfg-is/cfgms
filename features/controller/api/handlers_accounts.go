@@ -722,6 +722,63 @@ func verifyEnrollmentToken(acct *account, presentedRaw string) bool {
 	return subtle.ConstantTimeCompare([]byte(presentedHash), []byte(storedHash)) == 1
 }
 
+// firstUnknownPermission returns the first entry of permissions that is not a known,
+// grantable permission ID ("*", reserved IDs and the empty string included); the bool is
+// false when every entry is known.
+func firstUnknownPermission(permissions []string) (string, bool) {
+	for _, p := range permissions {
+		if !isKnownPermission(p) {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+// lookupAccountForWrite loads the account req names (nil when it does not exist yet) and
+// applies the root agent limits to the write. It writes the response and returns false
+// when the lookup failed (500) or the write is refused (403).
+func (s *Server) lookupAccountForWrite(w http.ResponseWriter, r *http.Request, principal *Principal, req *AccountRequest) (*account, bool) {
+	existing, err := s.getAccount(r.Context(), req.Username)
+	if err != nil {
+		s.logger.Error("Failed to look up account", "error", logging.SanitizeLogValue(err.Error()),
+			"username", logging.SanitizeLogValue(req.Username))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
+		return nil, false
+	}
+	if s.refuseRootAgentAccountWrite(w, r, principal, req, existing) {
+		return nil, false
+	}
+	return existing, true
+}
+
+// refuseRootAgentAccountWrite refuses, with 403 ROOT_AGENT_LIMITED, the account writes
+// a root agent principal (Issue #6225, ADR-021 Amendment 11) may not make although it
+// holds account:create: minting a root-scope account, and the upsert path (an existing
+// username, including a reset of its credentials and the new enrollment link). Only
+// the creation of a new tenant-scoped account passes; its permissions are bounded by
+// the allowlist through the PERMISSION_ESCALATION check. It writes the response and
+// returns true when it refused.
+func (s *Server) refuseRootAgentAccountWrite(w http.ResponseWriter, r *http.Request, principal *Principal, req *AccountRequest, existing *account) bool {
+	if principal == nil || !principal.RootAgent {
+		return false
+	}
+	var reason string
+	switch {
+	case req.RootScope:
+		reason = "root_agent_creates_root_scope"
+	case existing != nil:
+		reason = "root_agent_updates_existing_account"
+	case req.ResetCredentials:
+		reason = "root_agent_resets_credentials"
+	default:
+		return false
+	}
+	s.auditRootAgentRefusal(r, principal, reason, "")
+	s.writeErrorResponse(w, http.StatusForbidden,
+		"A root agent account may only create a new tenant-scoped account", errCodeRootAgentLimited)
+	return true
+}
+
 // --- handlers (Tier-3: admin mTLS only; wired in setupRouter) ---
 
 // handleCreateAccount handles POST /api/v1/accounts (Tier-3). It creates a
@@ -748,12 +805,10 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	// Same permission allow-list discipline as API keys ("*" and unknown IDs rejected):
 	// accounts are RBAC-equivalent to API-key principals, not implicit admins.
-	for _, p := range req.Permissions {
-		if !isKnownPermission(p) {
-			s.writeErrorResponse(w, http.StatusBadRequest,
-				"Unknown or reserved permission ID: "+p, "INVALID_PERMISSION")
-			return
-		}
+	if p, unknown := firstUnknownPermission(req.Permissions); unknown {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Unknown or reserved permission ID: "+p, "INVALID_PERMISSION")
+		return
 	}
 	// go/log-injection (CWE-117) + storage-key safety: strip CR/LF from json.Decoded
 	// identifier fields at the source using strings.ReplaceAll — the form CodeQL's
@@ -768,11 +823,8 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		actingPrincipalID = principal.ID
 	}
 
-	existing, err := s.getAccount(r.Context(), req.Username)
-	if err != nil {
-		s.logger.Error("Failed to look up account", "error", logging.SanitizeLogValue(err.Error()),
-			"username", logging.SanitizeLogValue(req.Username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
+	existing, ok := s.lookupAccountForWrite(w, r, principal, &req)
+	if !ok {
 		return
 	}
 
@@ -935,9 +987,10 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	var rawToken string
 	if len(acct.Credentials) == 0 {
 		tokenHash := ""
-		rawToken, tokenHash, err = mintEnrollmentToken()
-		if err != nil {
-			s.logger.Error("Failed to mint enrollment token", "error", logging.SanitizeLogValue(err.Error()),
+		var mintErr error
+		rawToken, tokenHash, mintErr = mintEnrollmentToken()
+		if mintErr != nil {
+			s.logger.Error("Failed to mint enrollment token", "error", logging.SanitizeLogValue(mintErr.Error()),
 				"username", logging.SanitizeLogValue(acct.Username))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to mint enrollment link", "TOKEN_ERROR")
 			return

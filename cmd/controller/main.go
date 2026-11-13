@@ -265,7 +265,8 @@ func applyListenOverrides(cfg *config.Config, listenAPIAddr, listenTransportAddr
 // tenant list on the API server. The relying party is installed only when configured,
 // which leaves the passkey endpoints answering 503 otherwise. The tenant list comes
 // only from controller.cfg and defaults to empty, which turns software-authenticator
-// registration off (Issue #6140).
+// registration off (Issue #6140). The root-agent setting is read the same way and
+// defaults to off (Issue #6225); the controller logs it at startup when it is on.
 func configureWebAuthn(apiServer *controllerapi.Server, cfg *config.Config) error {
 	wa, err := buildWebAuthnRelyingParty(cfg)
 	if err != nil {
@@ -275,6 +276,12 @@ func configureWebAuthn(apiServer *controllerapi.Server, cfg *config.Config) erro
 		apiServer.SetWebAuthn(wa)
 	}
 	apiServer.SetSoftwareAuthenticatorTenants(cfg.SoftwareAuthenticatorTenants())
+	rootAgents := cfg.SoftwareAuthenticatorRootAgentAccounts()
+	apiServer.SetSoftwareAuthenticatorRootAgentAccounts(rootAgents)
+	if rootAgents {
+		logging.ForComponent("controller").Info("Software authenticators are permitted for dedicated root-scope agent accounts",
+			"setting", "webauthn.allow_software_authenticators.root_agent_accounts", "enabled", true)
+	}
 	return nil
 }
 

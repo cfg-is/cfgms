@@ -448,3 +448,102 @@ func TestSoftwareAuthenticatorFlag_OrdinaryWritePathsLeaveItUnlessReset(t *testi
 		assert.False(t, f.flag(flagUser, "msp-b"))
 	})
 }
+
+// --- Issue #6225: root-scope agent accounts (ADR-021 Amendment 11) ---
+
+func (f *flagFixture) createRootAccount(username string) {
+	f.tb.Helper()
+	rec := postAccount(f.tb, f.srv, testAdminPrincipal(), AccountRequest{Username: username, RootScope: true})
+	require.Equal(f.tb, http.StatusCreated, rec.Code, rec.Body.String())
+}
+
+// bindCertificate puts a bound admin certificate on the stored account directly.
+func (f *flagFixture) bindCertificate(username string) {
+	f.tb.Helper()
+	ctx := context.Background()
+	acct, err := f.srv.loadAccountFromStore(ctx, username, "")
+	require.NoError(f.tb, err)
+	require.NotNil(f.tb, acct)
+	acct.CertBindings = []CertBinding{{Serial: "9001", Fingerprint: "fp"}}
+	require.NoError(f.tb, f.srv.persistAccount(ctx, acct, "test"))
+	dropAccountCache(f.srv)
+}
+
+func TestSoftwareAuthenticatorFlag_RootAccountRefusedWhileTheSettingIsOff(t *testing.T) {
+	f := newFlagFixture(t)
+	f.createRootAccount("agent-root")
+
+	rec := f.put("agent-root", `{"enabled":true}`, rootCaller(), true)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Equal(t, errCodeSoftwareAuthenticatorNotAllowed, errCode(t, rec.Body.Bytes()))
+	assert.False(t, f.flag("agent-root", ""))
+	assert.Empty(t, f.auditEntries(), "a refused enable leaves no change record")
+}
+
+func TestSoftwareAuthenticatorFlag_RootAgentShapesRefusedWhileTheSettingIsOn(t *testing.T) {
+	f := newFlagFixture(t)
+	f.srv.SetSoftwareAuthenticatorRootAgentAccounts(true)
+	f.createRootAccount(systemAdminAccountName)
+	f.createRootAccount("agent-cert")
+	f.bindCertificate("agent-cert")
+
+	for _, username := range []string{systemAdminAccountName, "agent-cert"} {
+		t.Run(username, func(t *testing.T) {
+			rec := f.put(username, `{"enabled":true}`, rootCaller(), true)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Equal(t, errCodeSoftwareAuthenticatorNotAllowed, errCode(t, rec.Body.Bytes()))
+			assert.False(t, f.flag(username, ""))
+		})
+	}
+	assert.Empty(t, f.auditEntries())
+}
+
+func TestSoftwareAuthenticatorFlag_EligibleRootAccountEnablesWithAudit(t *testing.T) {
+	f := newFlagFixture(t)
+	f.srv.SetSoftwareAuthenticatorRootAgentAccounts(true)
+	f.createRootAccount("agent-root")
+
+	// Enabling still needs the presence tap (the root-scope caller rule is covered by the
+	// existing tenant-caller tests, whose behaviour this story does not change).
+	assert.Equal(t, http.StatusNotFound, f.put("agent-root", `{"enabled":true}`, tenantCaller("msp-a"), true).Code,
+		"a tenant caller does not even see a root-scope account")
+	rec := f.put("agent-root", `{"enabled":true}`, rootCaller(), false)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "no presence token: the challenge, not the change")
+	assert.False(t, f.flag("agent-root", ""))
+
+	rec = f.put("agent-root", `{"enabled":true}`, rootCaller(), true)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp struct {
+		Data SoftwareAuthenticatorFlagResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.True(t, resp.Data.AllowSoftwareAuthenticator)
+	assert.True(t, f.flag("agent-root", ""), "the flag is durable")
+
+	entries := f.auditEntries()
+	require.Len(t, entries, 1)
+	assert.Equal(t, business.AuditResultSuccess, entries[0].Result)
+	assert.Equal(t, false, entries[0].Details["previous"])
+	assert.Equal(t, true, entries[0].Details["new"])
+
+	// Clearing stays allowed for every shape, with the setting on or off.
+	f.srv.SetSoftwareAuthenticatorRootAgentAccounts(false)
+	rec = f.put("agent-root", `{"enabled":false}`, rootCaller(), true)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.False(t, f.flag("agent-root", ""))
+}
+
+func TestSoftwareAuthenticatorFlag_RootAgentSettingDoesNotChangeOtherShapes(t *testing.T) {
+	f := newFlagFixture(t)
+	f.srv.SetSoftwareAuthenticatorRootAgentAccounts(true)
+	f.createAccount("tenant-user", "msp-a")
+	f.createAccount("root-tenant-user", testRootTenantID)
+	f.srv.cacheAccount(&account{ID: "empty-id", Username: "empty-tenant", TenantID: ""})
+
+	assert.Equal(t, http.StatusOK, f.put("tenant-user", `{"enabled":true}`, rootCaller(), true).Code)
+	for _, username := range []string{"root-tenant-user", "empty-tenant"} {
+		rec := f.put(username, `{"enabled":true}`, rootCaller(), true)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", username, rec.Body.String())
+		assert.Equal(t, errCodeSoftwareAuthenticatorNotAllowed, errCode(t, rec.Body.Bytes()))
+	}
+}

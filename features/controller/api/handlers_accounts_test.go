@@ -3469,3 +3469,116 @@ func TestAccountGetReturnsSoftwareAuthenticatorFlag(t *testing.T) {
 
 	assert.Equal(t, true, get()["allow_software_authenticator"])
 }
+
+// --- Issue #6225: a root agent principal's account writes (ADR-021 Amendment 11) ---
+
+// rootAgentPrincipalFor is the principal of a flagged root-scope account session.
+func rootAgentPrincipalFor(acct *account) *Principal {
+	return &Principal{
+		Channel: AuthChannelCfgBearer, ID: acct.ID, Assurance: session.AssuranceStrong,
+		GlobalScope: true, RootScoped: true, AccountBound: true, RootAgent: true,
+		Permissions: []string{},
+	}
+}
+
+func TestAccounts_RootAgentMayOnlyCreateANewTenantScopedAccount(t *testing.T) {
+	server := setupTestServer(t)
+	seedTenantTree(t, server)
+	agent := storeRootAccount(t, server, "agent-writer", true)
+	admin := storeRootAccount(t, server, "human-admin", false)
+	principal := rootAgentPrincipalFor(agent)
+
+	t.Run("a new tenant-scoped account succeeds and returns an enrollment link", func(t *testing.T) {
+		rec := postAccount(t, server, principal, AccountRequest{
+			Username: "new-tenant-user", TenantID: testRootTenantID, Permissions: []string{"steward:list"},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var outer APIResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &outer))
+		link, _ := outer.Data.(map[string]interface{})["enrollment_magic_link"].(string)
+		assert.NotEmpty(t, link)
+	})
+
+	t.Run("permissions are bounded by the allowlist", func(t *testing.T) {
+		rec := postAccount(t, server, principal, AccountRequest{
+			Username: "escalated-user", TenantID: testRootTenantID, Permissions: []string{"rbac:create-role"},
+		})
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Equal(t, "PERMISSION_ESCALATION", errCode(t, rec.Body.Bytes()))
+	})
+
+	refusals := []struct {
+		name string
+		req  AccountRequest
+	}{
+		{"root_scope true", AccountRequest{Username: "minted-root", RootScope: true}},
+		{"an existing root-scope admin", AccountRequest{Username: "human-admin"}},
+		{"an existing account with a new tenant", AccountRequest{Username: "new-tenant-user", TenantID: testRootTenantID}},
+		{"reset_credentials true", AccountRequest{Username: "reset-target", TenantID: testRootTenantID, ResetCredentials: true}},
+		{"reset_credentials on an existing root admin", AccountRequest{Username: "human-admin", ResetCredentials: true}},
+	}
+	for _, tt := range refusals {
+		t.Run(tt.name, func(t *testing.T) {
+			beforeAdmin, err := server.loadAccountFromStore(context.Background(), "human-admin", "")
+			require.NoError(t, err)
+
+			rec := postAccount(t, server, principal, tt.req)
+			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			assert.Equal(t, errCodeRootAgentLimited, errCode(t, rec.Body.Bytes()))
+
+			afterAdmin, err := server.loadAccountFromStore(context.Background(), "human-admin", "")
+			require.NoError(t, err)
+			assert.Equal(t, beforeAdmin.ID, afterAdmin.ID)
+			assert.Equal(t, beforeAdmin.EnrollmentLinkHash, afterAdmin.EnrollmentLinkHash, "no enrollment link is issued")
+			assert.Equal(t, beforeAdmin.Credentials, afterAdmin.Credentials)
+			assert.Equal(t, admin.RootScope, afterAdmin.RootScope)
+			if tt.req.Username == "minted-root" || tt.req.Username == "reset-target" {
+				got, err := server.getAccount(context.Background(), tt.req.Username)
+				require.NoError(t, err)
+				assert.Nil(t, got, "nothing is created")
+			}
+		})
+	}
+
+	t.Run("each refusal is audited with the marker, root_scope and a reason", func(t *testing.T) {
+		require.NoError(t, server.auditManager.Flush(context.Background()))
+		entries, err := server.auditManager.QueryEntries(context.Background(),
+			&business.AuditFilter{Actions: []string{"authorization.root_agent_denied"}})
+		require.NoError(t, err)
+		require.Len(t, entries, len(refusals))
+		reasons := map[interface{}]bool{}
+		for _, e := range entries {
+			assert.Equal(t, business.AuditResultDenied, e.Result)
+			assert.Contains(t, e.Details, auditKeySoftwareAuthenticator)
+			assert.Equal(t, true, e.Details[auditKeyRootScope])
+			reasons[e.Details[auditKeyReason]] = true
+		}
+		assert.True(t, reasons["root_agent_creates_root_scope"])
+		assert.True(t, reasons["root_agent_updates_existing_account"])
+		assert.True(t, reasons["root_agent_resets_credentials"])
+	})
+
+	t.Run("a human root principal is not limited by the guard", func(t *testing.T) {
+		rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{Username: "human-minted-root", RootScope: true})
+		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		rec = postAccount(t, server, testAdminPrincipal(), AccountRequest{Username: "human-admin", ResetCredentials: true})
+		assert.Equal(t, http.StatusOK, rec.Code, "an upsert reset answers 200: %s", rec.Body.String())
+	})
+}
+
+func TestFirstUnknownPermission(t *testing.T) {
+	p, unknown := firstUnknownPermission([]string{"steward:list", "tenant:read"})
+	assert.False(t, unknown)
+	assert.Empty(t, p)
+
+	for _, bad := range []string{"*", "", "not:a-permission"} {
+		p, unknown := firstUnknownPermission([]string{"steward:list", bad})
+		assert.True(t, unknown, "%q must be reported as unknown", bad)
+		assert.Equal(t, bad, p)
+	}
+
+	server := setupTestServer(t)
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{Username: "empty-perm", TenantID: "default", Permissions: []string{""}})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Equal(t, "INVALID_PERMISSION", errCode(t, rec.Body.Bytes()))
+}
