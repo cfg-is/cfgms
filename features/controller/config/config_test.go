@@ -1623,3 +1623,35 @@ func TestLoadWithPath_RejectsInvalidSoftwareAuthenticatorTenants(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "allow_software_authenticators")
 }
+
+// --- Issue #6227: webauthn.allow_software_authenticators.root_agent_tpm_roots ---
+
+func TestWebAuthnConfig_RootAgentTPMRoots(t *testing.T) {
+	const head = "webauthn:\n  rp_id: cfgms.example.com\n  rp_origins: [\"https://cfgms.example.com\"]\n"
+
+	t.Run("parses a list of PEM file paths", func(t *testing.T) {
+		var cfg Config
+		require.NoError(t, yaml.Unmarshal([]byte(head+"  allow_software_authenticators:\n    root_agent_accounts: true\n    root_agent_tpm_roots:\n      - /etc/cfgms/tpm/vendor-a-root.pem\n      - /etc/cfgms/tpm/vendor-a-intermediate.pem\n"), &cfg))
+		assert.Equal(t, []string{"/etc/cfgms/tpm/vendor-a-root.pem", "/etc/cfgms/tpm/vendor-a-intermediate.pem"}, cfg.SoftwareAuthenticatorRootAgentTPMRoots())
+		assert.True(t, cfg.SoftwareAuthenticatorRootAgentAccounts(), "parsed next to the setting")
+		assert.NoError(t, cfg.ValidateWebAuthn())
+	})
+
+	t.Run("defaults to empty", func(t *testing.T) {
+		for name, content := range map[string]string{
+			"block absent":     head,
+			"block without it": head + "  allow_software_authenticators:\n    tenants: [msp-a]\n",
+			"explicit empty":   head + "  allow_software_authenticators:\n    root_agent_tpm_roots: []\n",
+		} {
+			var cfg Config
+			require.NoError(t, yaml.Unmarshal([]byte(content), &cfg), name)
+			assert.Empty(t, cfg.SoftwareAuthenticatorRootAgentTPMRoots(), name)
+		}
+	})
+
+	t.Run("the accessor is nil-safe", func(t *testing.T) {
+		assert.Nil(t, (*Config)(nil).SoftwareAuthenticatorRootAgentTPMRoots(), "nil config")
+		assert.Nil(t, (&Config{}).SoftwareAuthenticatorRootAgentTPMRoots(), "no webauthn block")
+		assert.Nil(t, (&Config{WebAuthn: &WebAuthnConfig{}}).SoftwareAuthenticatorRootAgentTPMRoots(), "no allow block")
+	})
+}

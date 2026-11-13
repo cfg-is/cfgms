@@ -15,6 +15,11 @@
 //     not cfgms-admin, holds no bound admin certificate and every credential it holds
 //     is a CFGMS software credential (rootAgentRefusalReason).
 //
+// A root agent account (rootAgentSession) has a further requirement (Issue #6227,
+// ADR-021 Amendment 12): every credential registered on it carries a TPM attestation the
+// controller verified (tpm_attestation.go), whatever its AAGUID, and a credential without
+// one is unusable at every use (credentialUsable).
+//
 // The tenant list and the root-agent setting are exact and have no API writer. The AAGUID that selects this policy is self-asserted under
 // attestation "none", so a credential with any other AAGUID is registered on the
 // ordinary path and receives no different trust, assurance or exemption.
@@ -171,17 +176,19 @@ func (s *Server) softwareAuthenticatorDecision(ctx context.Context, acct *accoun
 
 // enforceSoftwareAuthenticatorPolicy applies the policy to a just-verified
 // registration. It returns true when registration may proceed. A credential whose
-// AAGUID is not softauthn.AAGUID is not subject to the policy and is never treated
-// differently for that reason. On refusal it audits the denial, writes the response
-// (403, or 503 when the root tenant cannot be resolved) and returns false; the
+// AAGUID is not softauthn.AAGUID is not subject to the software-authenticator rules and
+// is never treated differently for that reason. A root agent account additionally
+// requires every credential, whatever its AAGUID, to carry a verified TPM attestation
+// (Issue #6227, enforceRootAgentTPM). On refusal it audits the denial, writes the
+// response (403, or 503 when the root tenant cannot be resolved) and returns false; the
 // caller must not persist anything.
 func (s *Server) enforceSoftwareAuthenticatorPolicy(w http.ResponseWriter, r *http.Request, acct *account, cred *WebAuthnCredential) bool {
 	if !cred.isSoftwareAuthenticator() {
-		return true
+		return s.enforceRootAgentTPM(w, r, acct, cred)
 	}
 	permitted, reason, err := s.softwareAuthenticatorDecision(r.Context(), acct)
 	if permitted {
-		return true
+		return s.enforceRootAgentTPM(w, r, acct, cred)
 	}
 	s.auditSoftwareAuthenticatorRefused(r.Context(), acct, cred, reason)
 	if err != nil {
@@ -199,10 +206,24 @@ func (s *Server) enforceSoftwareAuthenticatorPolicy(w http.ResponseWriter, r *ht
 	return false
 }
 
+// Audit actions of a denied registration: at finish, after a credential exists, and at
+// begin, before the ceremony starts (a root agent begin that carries no usable TPM
+// material, Issue #6227).
+const (
+	registrationDeniedAction      = "account.passkey_registration_denied"
+	registrationBeginDeniedAction = "account.passkey_registration_begin_denied"
+)
+
 // auditSoftwareAuthenticatorRefused records a denied registration naming the
-// account, its tenant, the AAGUID and the reason. A root-scope account's event also
-// carries root_scope: true, which tells it from tenant use (Issue #6225).
+// account, its tenant, the AAGUID (when there is a credential) and the reason. A
+// root-scope account's event also carries root_scope: true, which tells it from tenant
+// use (Issue #6225).
 func (s *Server) auditSoftwareAuthenticatorRefused(ctx context.Context, acct *account, cred *WebAuthnCredential, reason string) {
+	s.auditRegistrationDenied(ctx, registrationDeniedAction, acct, cred, reason)
+}
+
+// auditRegistrationDenied records a denied registration under action.
+func (s *Server) auditRegistrationDenied(ctx context.Context, action string, acct *account, cred *WebAuthnCredential, reason string) {
 	if s.auditManager == nil {
 		return
 	}
@@ -213,8 +234,12 @@ func (s *Server) auditSoftwareAuthenticatorRefused(ctx context.Context, acct *ac
 	details := map[string]interface{}{
 		"account_id": acct.ID,
 		"tenant_id":  acct.TenantID,
-		"aaguid":     hex.EncodeToString(cred.AAGUID),
 		"reason":     reason,
+	}
+	// cred is nil for a refusal before any credential exists (a root agent begin).
+	if cred != nil {
+		details["aaguid"] = hex.EncodeToString(cred.AAGUID)
+		details["attestation_format"] = cred.AttestationFormat
 	}
 	if acct.RootScope {
 		details[auditKeyRootScope] = true
@@ -222,7 +247,7 @@ func (s *Server) auditSoftwareAuthenticatorRefused(ctx context.Context, acct *ac
 	b := audit.NewEventBuilder().
 		Tenant(tenantID).
 		Type(business.AuditEventSystemAccess).
-		Action("account.passkey_registration_denied").
+		Action(action).
 		User(acct.ID, business.AuditUserTypeHuman).
 		Resource("account", logging.SanitizeLogValue(acct.Username), "").
 		Result(business.AuditResultDenied).
@@ -253,9 +278,10 @@ func (s *Server) softwareCredentialsUsable(ctx context.Context, acct *account) (
 // software credential) it is acct itself; otherwise it is a COPY with every software
 // credential removed, so a credential the policy no longer permits cannot log in,
 // elevate, give presence, sign, publish, be accepted by VerifyAssertion, or be listed
-// in a roster. Credentials with any other AAGUID pass through untouched and gain
-// nothing. acct is never modified and the stored credential is never deleted: it
-// works again when the policy is turned back on.
+// in a roster. On a root agent account the copy also drops every credential with no
+// recorded TPM attestation, whatever its AAGUID (Issue #6227). Other credentials pass
+// through untouched and gain nothing. acct is never modified and the stored credential
+// is never deleted: a software credential works again when the policy is turned back on.
 //
 // It fails closed. When the root tenant cannot be resolved the returned view still
 // has the software credentials removed and the error is errRootTenantUnresolved
@@ -299,7 +325,7 @@ func (s *Server) softwareCredentialsUsable(ctx context.Context, acct *account) (
 //   - webauthn_types.go hasSoftwareCredential (the predicate itself)
 func (s *Server) permittedAccountView(ctx context.Context, acct *account) (*account, error) {
 	usable, err := s.softwareCredentialsUsable(ctx, acct)
-	if usable {
+	if usable && !acct.holdsTPMUnusableCredential() {
 		return acct, nil
 	}
 	if err != nil {
@@ -308,26 +334,47 @@ func (s *Server) permittedAccountView(ctx context.Context, acct *account) (*acco
 	}
 	view := *acct
 	view.Credentials = make([]WebAuthnCredential, 0, len(acct.Credentials))
-	for _, c := range acct.Credentials {
-		if !c.isSoftwareAuthenticator() {
-			view.Credentials = append(view.Credentials, c)
+	for i := range acct.Credentials {
+		if credentialUsable(acct, &acct.Credentials[i], usable) {
+			view.Credentials = append(view.Credentials, acct.Credentials[i])
 		}
 	}
 	return &view, err
 }
 
+// credentialUsable is the per-credential use-time rule: a CFGMS software credential is
+// usable only while softwareCredentialsPermitted, and on a root agent account every
+// credential, whatever its AAGUID, is usable only with a recorded TPM attestation
+// (Issue #6227).
+func credentialUsable(acct *account, c *WebAuthnCredential, softwareCredentialsPermitted bool) bool {
+	return (softwareCredentialsPermitted || !c.isSoftwareAuthenticator()) && !tpmUnusable(acct, c)
+}
+
+// holdsTPMUnusableCredential reports whether a root agent account holds a credential with
+// no recorded TPM attestation (Issue #6227): one registered before the requirement, or
+// added by a client that did not attest. It is false for every other account.
+func (a *account) holdsTPMUnusableCredential() bool {
+	if a == nil {
+		return false
+	}
+	for i := range a.Credentials {
+		if tpmUnusable(a, &a.Credentials[i]) {
+			return true
+		}
+	}
+	return false
+}
+
 // usableCredentialCount is the number of registered credentials that count toward
 // the account's authenticator count: every credential, minus the CFGMS software
-// authenticators when softwareCredentialsPermitted is false (Issue #6143). A
-// software-only account whose policy is off therefore reports 0 and is held to the
+// authenticators when softwareCredentialsPermitted is false (Issue #6143) and, on a root
+// agent account, minus every credential with no recorded TPM attestation (Issue #6227).
+// A software-only account whose policy is off therefore reports 0 and is held to the
 // zero-authenticator confinement (fail closed); the stored credentials are untouched.
 func (a *account) usableCredentialCount(softwareCredentialsPermitted bool) int {
-	if softwareCredentialsPermitted {
-		return len(a.Credentials)
-	}
 	n := 0
-	for _, c := range a.Credentials {
-		if !c.isSoftwareAuthenticator() {
+	for i := range a.Credentials {
+		if credentialUsable(a, &a.Credentials[i], softwareCredentialsPermitted) {
 			n++
 		}
 	}
@@ -356,6 +403,9 @@ const (
 
 	// auditReasonSoftwareAuthenticatorPolicy is the reason on a use the policy refused.
 	auditReasonSoftwareAuthenticatorPolicy = "software_authenticator_policy"
+	// auditReasonTPMAttestationMissing is the reason on a use of a root agent account's
+	// credential that has no recorded TPM attestation (Issue #6227).
+	auditReasonTPMAttestationMissing = "tpm_attestation_missing"
 )
 
 // softwareAuthenticatorAuditDetails is the one place that turns "this credential was
@@ -394,23 +444,42 @@ func softwareAuthenticatorAuditDetails(acct *account, credentialID []byte) map[s
 }
 
 // softwareAuthenticatorFailedUse classifies a use of credentialID on acct that did not
-// succeed. It returns business.AuditResultDenied with the policy reason when the
-// credential is a CFGMS software authenticator the policy does not permit right now
-// (the library never saw it, so a bad signature cannot be told from a refusal),
-// business.AuditResultFailure otherwise. details are softwareAuthenticatorAuditDetails
-// plus the reason on a refusal (nil when the credential is not identifiable) and
-// software reports whether the credential is a software authenticator.
-func (s *Server) softwareAuthenticatorFailedUse(ctx context.Context, acct *account, credentialID []byte) (result business.AuditResult, details map[string]interface{}, software bool) {
+// succeed. It returns business.AuditResultDenied with the reason when the credential is a
+// CFGMS software authenticator the policy does not permit right now, or a root agent
+// account's credential with no recorded TPM attestation (the library never saw it, so a
+// bad signature cannot be told from a refusal), business.AuditResultFailure otherwise.
+// details are softwareAuthenticatorAuditDetails plus the reason on a refusal (nil when
+// the credential is not identifiable). audited reports whether the credential is one
+// these events record: a software authenticator or a root agent's unattested credential.
+func (s *Server) softwareAuthenticatorFailedUse(ctx context.Context, acct *account, credentialID []byte) (result business.AuditResult, details map[string]interface{}, audited bool) {
 	details = softwareAuthenticatorAuditDetails(acct, credentialID)
-	software, _ = details[auditKeySoftwareAuthenticator].(bool)
-	if !software {
-		return business.AuditResultFailure, details, false
+	software, _ := details[auditKeySoftwareAuthenticator].(bool)
+	if details != nil {
+		if software {
+			if usable, _ := s.softwareCredentialsUsable(ctx, acct); !usable {
+				details[auditKeyReason] = auditReasonSoftwareAuthenticatorPolicy
+				return business.AuditResultDenied, details, true
+			}
+		}
+		if cred := findCredential(acct, credentialID); cred != nil && tpmUnusable(acct, cred) {
+			details[auditKeyReason] = auditReasonTPMAttestationMissing
+			return business.AuditResultDenied, details, true
+		}
 	}
-	if usable, _ := s.softwareCredentialsUsable(ctx, acct); !usable {
-		details[auditKeyReason] = auditReasonSoftwareAuthenticatorPolicy
-		return business.AuditResultDenied, details, true
+	return business.AuditResultFailure, details, software
+}
+
+// findCredential returns acct's credential with the given ID, or nil.
+func findCredential(acct *account, credentialID []byte) *WebAuthnCredential {
+	if acct == nil || len(credentialID) == 0 {
+		return nil
 	}
-	return business.AuditResultFailure, details, true
+	for i := range acct.Credentials {
+		if bytes.Equal(acct.Credentials[i].ID, credentialID) {
+			return &acct.Credentials[i]
+		}
+	}
+	return nil
 }
 
 // emitCredentialUseAudit records one use of a credential by acct under action: the
@@ -457,12 +526,13 @@ func (s *Server) auditCredentialUseSuccess(ctx context.Context, acct *account, c
 }
 
 // auditSoftwareAuthenticatorFailure records a failed or policy-refused use of a CFGMS
-// software authenticator under action. A use of any other credential is not recorded:
-// the ceremonies that had no failure event keep none for hardware credentials, so
-// what they record for those does not change.
+// software authenticator, or a refused use of a root agent's unattested credential,
+// under action. A use of any other credential is not recorded: the ceremonies that had
+// no failure event keep none for hardware credentials, so what they record for those
+// does not change.
 func (s *Server) auditSoftwareAuthenticatorFailure(ctx context.Context, acct *account, credentialID []byte, action string) {
-	result, details, software := s.softwareAuthenticatorFailedUse(ctx, acct, credentialID)
-	if software {
+	result, details, audited := s.softwareAuthenticatorFailedUse(ctx, acct, credentialID)
+	if audited {
 		s.emitCredentialUseAudit(ctx, acct, credentialID, action, result, details)
 	}
 }

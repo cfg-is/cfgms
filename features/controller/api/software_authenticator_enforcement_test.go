@@ -22,6 +22,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -201,8 +204,21 @@ var (
 			f.edit(t, func(a *account) { a.AllowSoftwareAuthenticator = false })
 		},
 		func(t *testing.T, f *enfFixture) { f.edit(t, func(a *account) { a.AllowSoftwareAuthenticator = true }) }}
+	// A root-scope account carrying the flag is a root agent account, whose credentials
+	// are usable only with a recorded TPM attestation (Issue #6227). The credential with
+	// another AAGUID is recorded as attested here so the mode still isolates the software
+	// policy; TestRootAgentTPMEnforcement_* covers the unattested credential.
 	enfRootScope = enfMode{"account becomes root scope",
-		func(t *testing.T, f *enfFixture) { f.edit(t, func(a *account) { a.TenantID, a.RootScope = "", true }) },
+		func(t *testing.T, f *enfFixture) {
+			f.edit(t, func(a *account) {
+				a.TenantID, a.RootScope = "", true
+				for i := range a.Credentials {
+					if !a.Credentials[i].isSoftwareAuthenticator() {
+						a.Credentials[i].TPMAttestation = testTPMAttestation()
+					}
+				}
+			})
+		},
 		enfRestoreShape}
 	enfEmptyTenant = enfMode{"account tenant emptied",
 		func(t *testing.T, f *enfFixture) { f.edit(t, func(a *account) { a.TenantID = "" }) },
@@ -736,9 +752,18 @@ func TestPermittedAccountView(t *testing.T) {
 // --- Issue #6225: a software authenticator on a dedicated root-scope agent account
 // (ADR-021 Amendment 11) ---
 
+// testTPMAttestation is the record the controller stores for a credential whose TPM
+// attestation it verified at registration.
+func testTPMAttestation() *TPMAttestationRecord {
+	return &TPMAttestationRecord{
+		EKManufacturer: "id:4D534654", EKModel: "id:00000000", EKFirmware: "id:20260101",
+		EKIssuer: "CN=acme-corp ek ca", EKSerial: "1a2b3c", EKPublicSHA256: "00ff", VerifiedAt: time.Now().UTC(),
+	}
+}
+
 // newAgentFixture is the enforcement fixture with its account turned into a root-scope
-// agent account: root scope, the flag set, one CFGMS software credential, the root-agent
-// setting on. A second, tenant-scoped software account is not part of it; see
+// agent account: root scope, the flag set, one TPM-attested CFGMS software credential,
+// the root-agent setting on. A second, tenant-scoped software account is not part of it; see
 // TestRootAgentEnforcement_TenantSoftwareAccountIsUnaffectedByTheSetting.
 func newAgentFixture(t *testing.T) *enfFixture {
 	t.Helper()
@@ -746,6 +771,9 @@ func newAgentFixture(t *testing.T) *enfFixture {
 	f.edit(t, func(a *account) {
 		a.TenantID, a.RootScope = "", true
 		a.Permissions = nil
+		for i := range a.Credentials {
+			a.Credentials[i].TPMAttestation = testTPMAttestation()
+		}
 	})
 	f.server.SetSoftwareAuthenticatorRootAgentAccounts(true)
 	return f
@@ -1037,4 +1065,266 @@ func TestRootAgentEnforcement_SuccessfulUseIsMarkedRootScope(t *testing.T) {
 	for _, e := range tenantFixture.markedEvents(t) {
 		assert.NotContains(t, e.Details, auditKeyRootScope)
 	}
+}
+
+// --- Issue #6227: a root agent account's credential is usable only with a recorded TPM
+// attestation (ADR-021 Amendment 12) ---
+
+// newAttestationFixture is a root agent account holding two credentials that both carry
+// the CFGMS AAGUID: the "software" one (f.softID) with a recorded TPM attestation, and the
+// "hardware" one (f.hwID) without, as a credential registered before the requirement or
+// by a client that did not attest would be. The root-agent setting is on.
+func newAttestationFixture(t *testing.T) *enfFixture {
+	t.Helper()
+	f := newEnfFixture(t, true, true)
+	f.edit(t, func(a *account) {
+		a.TenantID, a.RootScope = "", true
+		a.Permissions = nil
+		for i := range a.Credentials {
+			a.Credentials[i].AAGUID = append([]byte(nil), softauthn.AAGUID[:]...)
+			a.Credentials[i].TPMAttestation = nil
+			if bytes.Equal(a.Credentials[i].ID, f.softID) {
+				a.Credentials[i].TPMAttestation = testTPMAttestation()
+			}
+		}
+	})
+	f.server.SetSoftwareAuthenticatorRootAgentAccounts(true)
+	return f
+}
+
+// [REQUIRED TEST] On a root agent account a credential without tpm_attestation cannot
+// log in, give presence, step up or sign (nor publish, prove a run command or appear in
+// the steward roster), whatever its AAGUID; a TPM-attested credential on the same account
+// works in every one of them.
+func TestRootAgentTPMEnforcement_UnattestedCredentialIsRefusedEverywhere(t *testing.T) {
+	for _, c := range enfCeremonies() {
+		t.Run(c.name, func(t *testing.T) {
+			f := newAttestationFixture(t)
+			assert.True(t, c.run(t, f, true), "the TPM-attested credential works")
+			assert.False(t, c.run(t, f, false), "the credential without a TPM attestation is refused")
+		})
+	}
+}
+
+// The trigger is the account, not the AAGUID: a credential that claims any other AAGUID is
+// refused just the same on a root agent account.
+func TestRootAgentTPMEnforcement_AAGUIDDoesNotMatter(t *testing.T) {
+	for _, c := range enfCeremonies() {
+		t.Run(c.name, func(t *testing.T) {
+			f := newEnfFixture(t, false, true) // one credential with the zero AAGUID
+			f.edit(t, func(a *account) {
+				a.TenantID, a.RootScope = "", true
+				a.Permissions = nil
+			})
+			f.server.SetSoftwareAuthenticatorRootAgentAccounts(true)
+			assert.False(t, c.run(t, f, false), "an unattested credential with another AAGUID is refused")
+
+			f.edit(t, func(a *account) { a.Credentials[0].TPMAttestation = testTPMAttestation() })
+			assert.True(t, c.run(t, f, false), "recording the attestation makes it usable")
+		})
+	}
+}
+
+// Turning the root-agent setting off must not relax the requirement: the account flag is
+// the trigger, so an unattested credential stays refused (the policy refuses it too).
+func TestRootAgentTPMEnforcement_SettingOffDoesNotRelaxIt(t *testing.T) {
+	f := newAttestationFixture(t)
+	f.server.SetSoftwareAuthenticatorRootAgentAccounts(false)
+	assert.NotEqual(t, http.StatusOK, f.passkeyLogin(t, false).Code)
+	assert.NotEqual(t, http.StatusOK, f.passkeyLogin(t, true).Code)
+	assert.True(t, rootAgentSession(f.storedAccount(t)), "the account is still a root agent account")
+}
+
+// Each refused use is audited as denied with the reason, marked root_scope, and the
+// stored credential is still on the account.
+func TestRootAgentTPMEnforcement_RefusalsAreAuditedAndTheCredentialStays(t *testing.T) {
+	f := newAttestationFixture(t)
+	require.NotEqual(t, http.StatusOK, f.passkeyLogin(t, false).Code)
+	require.False(t, enfCeremonies()[1].run(t, f, false), "presence")
+	require.False(t, enfCeremonies()[2].run(t, f, false), "step-up")
+
+	denied := map[string]bool{}
+	for _, e := range f.markedEvents(t) {
+		if e.Result == business.AuditResultDenied && e.Details[auditKeyReason] == auditReasonTPMAttestationMissing {
+			denied[e.Action] = true
+			assert.Equal(t, true, e.Details[auditKeyRootScope])
+			assert.Equal(t, base64URLID(f.hwID), e.Details[auditKeyCredentialID])
+		}
+	}
+	assert.True(t, denied["web.passkey.login.failure"], "login refusal is audited")
+	assert.True(t, denied[presenceAuditActionFailure], "presence refusal is audited")
+	assert.True(t, denied[stepUpAuditActionFailure], "step-up refusal is audited")
+
+	stored := f.storedAccount(t)
+	require.Len(t, stored.Credentials, 2, "the unattested credential is not deleted")
+
+	rec := doListCredentials(t, f.server, f.username)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), base64URLID(f.hwID), "it is still listed")
+	assert.Contains(t, rec.Body.String(), `"tpm_attested":false`)
+	assert.Contains(t, rec.Body.String(), `"tpm_attested":true`)
+}
+
+// A stale unattested credential makes the account "already enrolled" for the enrollment
+// link, so a human root caller revokes it to re-register: it stays revocable.
+func TestRootAgentTPMEnforcement_UnattestedCredentialIsStillRevocable(t *testing.T) {
+	f := newAttestationFixture(t)
+
+	rec := doRevokeCredential(t, f.server, f.username, base64URLID(f.hwID))
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	stored := f.storedAccount(t)
+	require.Len(t, stored.Credentials, 1)
+	assert.Equal(t, f.softID, stored.Credentials[0].ID, "the attested credential is untouched")
+}
+
+// A web session and a CLI-login session that rest on an unattested credential end; those
+// resting on the attested credential do not.
+func TestRootAgentTPMEnforcement_SessionsOnAnUnattestedCredentialEnd(t *testing.T) {
+	f := newAttestationFixture(t)
+	ctx := context.Background()
+	acct := f.storedAccount(t)
+	attestedWeb := sessEndLogin(t, f.server.webSessionManager, acct, f.softID)
+	unattestedWeb := sessEndLogin(t, f.server.webSessionManager, acct, f.hwID)
+	_, attestedCLI, err := f.server.sessionManager.IssueBound(ctx, f.accountID, cliLoginConnectionName, "", false, f.softID, nil)
+	require.NoError(t, err)
+	_, unattestedCLI, err := f.server.sessionManager.IssueBound(ctx, f.accountID, cliLoginConnectionName, "", false, f.hwID, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusOK, sessEndRequest(t, f.server, attestedWeb).Code)
+	assert.Equal(t, http.StatusOK, cliBindRequest(t, f.server, attestedCLI).Code)
+	requireSessionRevoked(t, sessEndRequest(t, f.server, unattestedWeb))
+	requireSessionRevoked(t, cliBindRequest(t, f.server, unattestedCLI))
+}
+
+// Only usable credentials count toward the authenticator count.
+func TestRootAgentTPMEnforcement_AuthenticatorCount(t *testing.T) {
+	f := newAttestationFixture(t)
+	refresh := func() int {
+		p, ok := f.server.sessionPrincipalRefresh(&Principal{ID: f.accountID, AccountBound: true}, false)(context.Background())
+		require.True(t, ok)
+		return p.AuthenticatorCount
+	}
+	assert.Equal(t, 1, refresh(), "the unattested credential does not count")
+
+	f.edit(t, func(a *account) {
+		for i := range a.Credentials {
+			a.Credentials[i].TPMAttestation = nil
+		}
+	})
+	assert.Zero(t, refresh(), "no attested credential: the zero-authenticator confinement applies")
+}
+
+func TestRootAgentTPMEnforcement_PermittedAccountView(t *testing.T) {
+	ctx := context.Background()
+	f := newAttestationFixture(t)
+	acct := f.storedAccount(t)
+
+	view, err := f.server.permittedAccountView(ctx, acct)
+	require.NoError(t, err)
+	require.NotSame(t, acct, view)
+	require.Len(t, view.Credentials, 1)
+	assert.Equal(t, f.softID, view.Credentials[0].ID)
+	assert.Len(t, acct.Credentials, 2, "the stored record keeps both")
+
+	t.Run("every credential attested: the account itself", func(t *testing.T) {
+		g := newAgentFixture(t)
+		a := g.storedAccount(t)
+		v, err := g.server.permittedAccountView(ctx, a)
+		require.NoError(t, err)
+		assert.Same(t, a, v)
+	})
+
+	t.Run("a human root account with the same credentials is not subject to it", func(t *testing.T) {
+		g := newEnfFixture(t, false, true)
+		g.edit(t, func(a *account) {
+			a.TenantID, a.RootScope, a.AllowSoftwareAuthenticator = "", true, false
+		})
+		a := g.storedAccount(t)
+		v, err := g.server.permittedAccountView(ctx, a)
+		require.NoError(t, err)
+		assert.Same(t, a, v)
+		assert.Equal(t, 1, a.usableCredentialCount(true))
+	})
+}
+
+// [REQUIRED TEST] Human passkeys and tenant-scoped software authenticators are
+// unchanged: they register with attestation none and log in, and their begin options do
+// not request direct attestation and carry no cfgmsTpm member.
+func TestRootAgentTPMEnforcement_OtherAccountsAreUnchanged(t *testing.T) {
+	notDirect := func(t *testing.T, begin *httptest.ResponseRecorder) {
+		t.Helper()
+		require.Equal(t, http.StatusOK, begin.Code, begin.Body.String())
+		var resp struct {
+			Data map[string]json.RawMessage `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(begin.Body.Bytes(), &resp))
+		assert.NotContains(t, resp.Data, "cfgmsTpm", "no TPM challenge for this account")
+		var opts struct {
+			Attestation string `json:"attestation"`
+		}
+		require.NoError(t, json.Unmarshal(resp.Data["publicKey"], &opts))
+		assert.NotEqual(t, "direct", opts.Attestation, "the attestation preference is the library default")
+	}
+
+	registerAndLogin := func(t *testing.T, f *enfFixture, soft bool) {
+		t.Helper()
+		begin := doBegin(t, f.server, f.username)
+		notDirect(t, begin)
+		key, _ := webauthntest.NewKey(t)
+		credID := []byte("registered-in-test-0123456789ab")
+		var reg *webauthntest.Registration
+		if soft {
+			reg = webauthntest.Register(t, key, credID, tvRPID, tvOrigin, publicKeyChallenge(t, begin), webauthntest.WithCFGMSAAGUID())
+		} else {
+			reg = webauthntest.Register(t, key, credID, tvRPID, tvOrigin, publicKeyChallenge(t, begin))
+		}
+		rec := doFinish(t, f.server, f.username, reg.Reader())
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		stored := f.storedAccount(t)
+		require.Len(t, stored.Credentials, 1)
+		assert.False(t, stored.Credentials[0].tpmAttested(), "no TPM attestation is recorded or required")
+		assert.Equal(t, soft, stored.Credentials[0].isSoftwareAuthenticator())
+
+		f.softKey, f.softID, f.hwKey, f.hwID = key, credID, key, credID
+		login := f.passkeyLogin(t, soft)
+		assert.Equal(t, http.StatusOK, login.Code, login.Body.String())
+	}
+
+	t.Run("human passkey, human root account", func(t *testing.T) {
+		f := newEnfFixture(t, false, false)
+		f.edit(t, func(a *account) { a.TenantID, a.RootScope, a.AllowSoftwareAuthenticator = "", true, false })
+		registerAndLogin(t, f, false)
+	})
+	t.Run("human passkey, tenant account", func(t *testing.T) {
+		f := newEnfFixture(t, false, false)
+		f.edit(t, func(a *account) { a.AllowSoftwareAuthenticator = false })
+		registerAndLogin(t, f, false)
+	})
+	t.Run("tenant-scoped software authenticator with the encrypted store", func(t *testing.T) {
+		f := newEnfFixture(t, false, false) // tenant listed, flag set
+		registerAndLogin(t, f, true)
+	})
+}
+
+// handlers' two begin handlers and two finish handlers share the helpers: the one
+// per-ceremony direct-attestation option has a single non-test call site.
+func TestPreferDirectAttestationHasOneCallSite(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	var sites []string
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		require.NoError(t, err)
+		for i, line := range strings.Split(string(src), "\n") {
+			if strings.Contains(line, "PreferDirectAttestation") && !strings.HasPrefix(strings.TrimSpace(line), "//") {
+				sites = append(sites, fmt.Sprintf("%s:%d", name, i+1))
+			}
+		}
+	}
+	assert.Len(t, sites, 1, "PreferDirectAttestation call sites: %v", sites)
+	assert.True(t, len(sites) == 1 && strings.HasPrefix(sites[0], "tpm_attestation.go:"), "it lives in tpm_attestation.go: %v", sites)
 }

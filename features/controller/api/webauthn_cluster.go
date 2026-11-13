@@ -72,6 +72,8 @@ type webAuthnPendingWire struct {
 	// RelayRequestID is the cli_presence_request_id named at presence/begin (empty for
 	// the browser step-up flow).
 	RelayRequestID string `json:"relay_request_id,omitempty"`
+	// TPMActivation is the root agent registration's TPM challenge state (Issue #6227).
+	TPMActivation *tpmActivationState `json:"tpm_activation,omitempty"`
 }
 
 type passkeyLoginWire struct {
@@ -106,11 +108,13 @@ type operatorPayloadSignWire struct {
 }
 
 func (p *webAuthnPendingSession) toWire() webAuthnPendingWire {
-	return webAuthnPendingWire{Data: p.data, Expires: p.expires, Binding: p.binding, Action: p.action, RelayRequestID: p.relayRequestID}
+	return webAuthnPendingWire{Data: p.data, Expires: p.expires, Binding: p.binding, Action: p.action, RelayRequestID: p.relayRequestID,
+		TPMActivation: p.tpmActivation}
 }
 
 func (w webAuthnPendingWire) toSession() *webAuthnPendingSession {
-	return &webAuthnPendingSession{data: w.Data, expires: w.Expires, binding: w.Binding, action: w.Action, relayRequestID: w.RelayRequestID}
+	return &webAuthnPendingSession{data: w.Data, expires: w.Expires, binding: w.Binding, action: w.Action, relayRequestID: w.RelayRequestID,
+		tpmActivation: w.TPMActivation}
 }
 
 func (p *passkeyLoginSession) toWire() passkeyLoginWire {

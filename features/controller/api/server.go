@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -190,6 +191,7 @@ type Server struct {
 	tagStore                        *tagstore.Store                          // Issue #2545: steward tag store for tag: selector support
 	softwareAuthenticatorTenants    map[string]struct{}                      // Issue #6140: controller.cfg tenant list (exact match); empty → off
 	softwareAuthenticatorRootAgents bool                                     // Issue #6225: controller.cfg root_agent_accounts; false → off
+	rootAgentTPMRoots               *x509.CertPool                           // Issue #6227: controller.cfg root_agent_tpm_roots; nil → every root agent registration refused
 	webAuthn                        *webauthn.WebAuthn                       // Issue #2782: WebAuthn RP instance; nil → endpoints return 503
 	webAuthnSessions                sync.Map                                 // Issue #2782: pending registration sessions (non-ClusterMode only; ClusterMode uses NonceStore, Issue #4527); key=username, value=*webAuthnPendingSession
 	webAuthnPresenceSessions        sync.Map                                 // Issue #2784: pending presence-assertion sessions; key=principalID, value=*webAuthnPendingSession

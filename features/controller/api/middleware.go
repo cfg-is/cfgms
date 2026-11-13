@@ -1076,14 +1076,15 @@ func hasHeaderCredentials(r *http.Request) bool {
 // accountHoldsCredential reports whether id is a non-empty credential ID present
 // on the account.
 // A software-authenticator credential counts only while softwareCredentialsPermitted
-// is true (Issue #6143); any other credential is unaffected by that flag.
+// is true (Issue #6143); any other credential is unaffected by that flag. On a root
+// agent account a credential with no recorded TPM attestation never counts (Issue #6227).
 func accountHoldsCredential(acct *account, id []byte, softwareCredentialsPermitted bool) bool {
 	if len(id) == 0 {
 		return false
 	}
-	for _, c := range acct.Credentials {
-		if bytes.Equal(c.ID, id) {
-			return softwareCredentialsPermitted || !c.isSoftwareAuthenticator()
+	for i := range acct.Credentials {
+		if bytes.Equal(acct.Credentials[i].ID, id) {
+			return credentialUsable(acct, &acct.Credentials[i], softwareCredentialsPermitted)
 		}
 	}
 	return false

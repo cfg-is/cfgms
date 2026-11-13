@@ -5,10 +5,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -732,5 +738,79 @@ func TestConfigureWebAuthn_SoftwareAuthenticatorTenantsReachAPIServer(t *testing
 		cfg, srv := newAPIServer(t, nil)
 		cfg.WebAuthn = &config.WebAuthnConfig{RPID: "cfgms.example.com"}
 		assert.Error(t, configureWebAuthn(srv.GetAPIServer(), cfg))
+	})
+}
+
+// writeTPMRootPEM writes a CA certificate generated now to a PEM file and returns its path.
+func writeTPMRootPEM(t *testing.T, dir, name string) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(time.Now().UnixNano()),
+		Subject:               pkix.Name{CommonName: "acme-corp tpm root " + name},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
+	return path
+}
+
+// Issue #6227: the TPM manufacturer roots a root agent registration must chain to come
+// only from the PEM files controller.cfg names; an unreadable file or one with no
+// certificate fails startup, and an empty list leaves no root installed.
+func TestConfigureWebAuthn_RootAgentTPMRoots(t *testing.T) {
+	newAPIServer := func(t *testing.T, roots []string) (*config.Config, *server.Server) {
+		t.Helper()
+		cfg := newTestControllerServerConfig(t, &config.WebAuthnConfig{
+			RPID:      "cfgms.example.com",
+			RPOrigins: []string{"https://cfgms.example.com"},
+			AllowSoftwareAuthenticators: &config.AllowSoftwareAuthenticatorsConfig{
+				RootAgentAccounts: true,
+				RootAgentTPMRoots: roots,
+			},
+		})
+		srv, err := server.New(cfg, logging.NewNoopLogger())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = srv.Stop() })
+		return cfg, srv
+	}
+
+	t.Run("roots in several files reach the server", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg, srv := newAPIServer(t, []string{writeTPMRootPEM(t, dir, "root.pem"), writeTPMRootPEM(t, dir, "intermediate.pem")})
+		require.NoError(t, configureWebAuthn(srv.GetAPIServer(), cfg))
+		assert.True(t, srv.GetAPIServer().RootAgentTPMRootsConfigured())
+	})
+
+	t.Run("an empty list installs no root", func(t *testing.T) {
+		cfg, srv := newAPIServer(t, nil)
+		require.NoError(t, configureWebAuthn(srv.GetAPIServer(), cfg))
+		assert.False(t, srv.GetAPIServer().RootAgentTPMRootsConfigured(), "every root agent registration is refused")
+	})
+
+	t.Run("a missing file fails startup", func(t *testing.T) {
+		cfg, srv := newAPIServer(t, []string{filepath.Join(t.TempDir(), "absent.pem")})
+		err := configureWebAuthn(srv.GetAPIServer(), cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "root_agent_tpm_roots")
+		assert.False(t, srv.GetAPIServer().RootAgentTPMRootsConfigured())
+	})
+
+	t.Run("a file with no certificate fails startup", func(t *testing.T) {
+		dir := t.TempDir()
+		empty := filepath.Join(dir, "empty.pem")
+		require.NoError(t, os.WriteFile(empty, []byte("not a certificate\n"), 0o600))
+		cfg, srv := newAPIServer(t, []string{writeTPMRootPEM(t, dir, "good.pem"), empty})
+		err := configureWebAuthn(srv.GetAPIServer(), cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty.pem")
+		assert.False(t, srv.GetAPIServer().RootAgentTPMRootsConfigured(), "no partial root set is installed")
 	})
 }

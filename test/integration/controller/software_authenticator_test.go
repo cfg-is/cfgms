@@ -351,7 +351,34 @@ type swaAgent struct {
 	username string
 	token    string
 	auth     *softauthn.Authenticator
-	root     bool // a root-scope agent account rather than a tenant account
+	root     bool      // a root-scope agent account rather than a tenant account
+	tpm      swaTPMKey // the TPM-held key of a root agent account (nil: a software key)
+}
+
+// swaTPMKey is a credential key held in a TPM, with the begin request body and the
+// registration a root agent account requires (Issue #6227, ADR-021 Amendment 12): a
+// root-scope account carrying the flag registers only with a TPM attestation the
+// controller verifies. The implementation is the real client library
+// pkg/softauthn/tpmkey on a software TPM (software_authenticator_tpm_linux_test.go).
+type swaTPMKey interface {
+	// authenticator signs assertions with the TPM-held key.
+	authenticator() *softauthn.Authenticator
+	// beginBody is the enrollment begin request body carrying the EK certificate chain and
+	// the attestation key.
+	beginBody() []byte
+	// register answers the begin's creation options, which must carry the controller's
+	// TPM challenge, with the TPM attestation. The same authenticator signs later assertions.
+	register(options []byte) ([]byte, error)
+}
+
+// agentFor is an agent for an existing account: a root-scope account carrying the flag
+// needs a TPM-held key, every other account a software key.
+func (e *swaEnv) agentFor(username, token string, root bool) *swaAgent {
+	if root {
+		key := e.newTPMKey()
+		return &swaAgent{e: e, username: username, token: token, auth: key.authenticator(), root: true, tpm: key}
+	}
+	return &swaAgent{e: e, username: username, token: token, auth: e.newSoftAuthenticator()}
 }
 
 // newAgent creates a tenant account that holds the agent permissions and a software
@@ -377,7 +404,7 @@ func (e *swaEnv) newRootAgent(prefix string) *swaAgent {
 	token, resp := e.createAccount(map[string]interface{}{"username": username, "root_scope": true})
 	require.Equal(t, http.StatusCreated, resp.Status, "create root agent account: %s", resp)
 	require.NotEmpty(t, token)
-	return &swaAgent{e: e, username: username, token: token, auth: e.newSoftAuthenticator(), root: true}
+	return e.agentFor(username, token, true)
 }
 
 // newSoftAuthenticator is a CFGMS software authenticator with a fresh P-256 key.
@@ -398,11 +425,21 @@ func (a *swaAgent) enroll() swaResp {
 	t := a.e.t
 	hdr := map[string]string{"X-Enrollment-Token": a.token}
 	plain := a.e.plainClient(nil)
-	begin := swaDo(t, plain, http.MethodPost, a.e.base+"/api/v1/web/passkey/enroll/begin", nil, hdr)
+	var beginBody []byte
+	if a.tpm != nil {
+		beginBody = a.tpm.beginBody()
+	}
+	begin := swaDo(t, plain, http.MethodPost, a.e.base+"/api/v1/web/passkey/enroll/begin", beginBody, hdr)
 	require.Equal(t, http.StatusOK, begin.Status, "enroll begin: %s", begin)
 	var options json.RawMessage
 	begin.data(t, &options)
-	registration, err := a.auth.Register(options)
+	var registration []byte
+	var err error
+	if a.tpm != nil {
+		registration, err = a.tpm.register(options)
+	} else {
+		registration, err = a.auth.Register(options)
+	}
 	require.NoError(t, err)
 	return swaDo(t, plain, http.MethodPost, a.e.base+"/api/v1/web/passkey/enroll/finish", registration, hdr)
 }
@@ -1032,9 +1069,11 @@ func TestSoftwareAuthenticator_RegistrationRefusedOutsideThePolicy(t *testing.T)
 	e.mustSetFlag(rootControl.username, true)
 	require.Equal(t, http.StatusCreated, rootControl.enroll().Status, "an eligible root agent account registers")
 
-	refused := func(t *testing.T, username, token string) {
+	// root: the account is root-scope and carries the flag, so its begin requires TPM
+	// material and the registration reaches the policy only with a TPM-held key.
+	refused := func(t *testing.T, username, token string, root bool) {
 		t.Helper()
-		agent := &swaAgent{e: e, username: username, token: token, auth: e.newSoftAuthenticator()}
+		agent := e.agentFor(username, token, root)
 		resp := agent.enroll()
 		assert.Equal(t, http.StatusForbidden, resp.Status, "software enrollment: %s", resp)
 		assert.Equal(t, swaSoftwareCode, resp.errCode())
@@ -1053,7 +1092,7 @@ func TestSoftwareAuthenticator_RegistrationRefusedOutsideThePolicy(t *testing.T)
 		e.mustSetFlag("swa-root-off", true) // the setting is on here, so the flag can be set
 		e.api.SetSoftwareAuthenticatorRootAgentAccounts(false)
 		defer e.api.SetSoftwareAuthenticatorRootAgentAccounts(true)
-		refused(t, "swa-root-off", token)
+		refused(t, "swa-root-off", token, true)
 		flagRefused(t, "swa-root-off")
 	})
 
@@ -1063,7 +1102,7 @@ func TestSoftwareAuthenticator_RegistrationRefusedOutsideThePolicy(t *testing.T)
 		})
 		require.Equal(t, http.StatusOK, resp.Status, "re-issue the system admin enrollment link: %s", resp)
 		flagRefused(t, "cfgms-admin")
-		refused(t, "cfgms-admin", token)
+		refused(t, "cfgms-admin", token, false)
 	})
 
 	t.Run("account with a bound admin certificate, even with the flag set", func(t *testing.T) {
@@ -1072,7 +1111,7 @@ func TestSoftwareAuthenticator_RegistrationRefusedOutsideThePolicy(t *testing.T)
 		e.mustSetFlag("swa-root-cert", true) // no certificate is bound yet
 		_, cert := newAdminMTLSClient(t, e.ctrl, "swa-root-cert")
 		e.bindAdminCert("swa-root-cert", cert)
-		refused(t, "swa-root-cert", token)
+		refused(t, "swa-root-cert", token, true)
 		flagRefused(t, "swa-root-cert")
 	})
 
@@ -1080,21 +1119,21 @@ func TestSoftwareAuthenticator_RegistrationRefusedOutsideThePolicy(t *testing.T)
 		token, resp := e.createAccount(map[string]interface{}{"username": "swa-no-tenant"})
 		require.Equal(t, http.StatusCreated, resp.Status, "%s", resp)
 		flagRefused(t, "swa-no-tenant")
-		refused(t, "swa-no-tenant", token)
+		refused(t, "swa-no-tenant", token, false)
 	})
 
 	t.Run("account in the root tenant", func(t *testing.T) {
 		token, resp := e.createAccount(map[string]interface{}{"username": "swa-root-tenant", "tenant_id": swaRootTenant})
 		require.Equal(t, http.StatusCreated, resp.Status, "%s", resp)
 		flagRefused(t, "swa-root-tenant")
-		refused(t, "swa-root-tenant", token)
+		refused(t, "swa-root-tenant", token, false)
 	})
 
 	t.Run("listed parent does not cover an unlisted child", func(t *testing.T) {
 		token, resp := e.createAccount(map[string]interface{}{"username": "swa-child", "tenant_id": swaChildTenant})
 		require.Equal(t, http.StatusCreated, resp.Status, "%s", resp)
 		e.mustSetFlag("swa-child", true) // the flag may be set ahead of the list
-		refused(t, "swa-child", token)
+		refused(t, "swa-child", token, false)
 
 		// Listing the child is what admits it.
 		e.api.SetSoftwareAuthenticatorTenants([]string{swaTenant, swaChildTenant})
