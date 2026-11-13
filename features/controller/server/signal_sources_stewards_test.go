@@ -104,18 +104,30 @@ func TestStewardSignalsScrape(t *testing.T) {
 	srv.startHealthServices()
 	t.Cleanup(srv.stopHealthServices)
 
-	require.Eventually(t, func() bool {
-		return strings.Contains(scrapeStewardSignals(t, srv), "cfgms_stewards_heartbeat_fresh 2\n")
-	}, 5*time.Second, 10*time.Millisecond, "the initial collection must sample the fresh count")
-
-	body := scrapeStewardSignals(t, srv)
-	assert.Contains(t, body, "# TYPE cfgms_stewards_heartbeat_fresh gauge\n")
-	for _, want := range []string{
-		"# TYPE cfgms_transport_delivery_failures_total counter\ncfgms_transport_delivery_failures_total 3\n",
+	// The gauge sampler and the transport-counter sampler are separate
+	// samplers that finish in no defined order within one collection pass, so
+	// wait for every sample line asserted below, not just the gauge.
+	wantSamples := []string{
+		"cfgms_stewards_heartbeat_fresh 2\n",
+		"cfgms_transport_delivery_failures_total 3\n",
 		"cfgms_transport_heartbeats_dropped_total 5\n",
 		"cfgms_transport_events_dropped_total 7\n",
 		"cfgms_transport_responses_dropped_total 11\n",
-	} {
+	}
+	require.Eventually(t, func() bool {
+		body := scrapeStewardSignals(t, srv)
+		for _, want := range wantSamples {
+			if !strings.Contains(body, want) {
+				return false
+			}
+		}
+		return true
+	}, 5*time.Second, 10*time.Millisecond, "the initial collection must sample the fresh count and all four transport counters")
+
+	body := scrapeStewardSignals(t, srv)
+	assert.Contains(t, body, "# TYPE cfgms_stewards_heartbeat_fresh gauge\n")
+	assert.Contains(t, body, "# TYPE cfgms_transport_delivery_failures_total counter\ncfgms_transport_delivery_failures_total 3\n")
+	for _, want := range wantSamples {
 		assert.Contains(t, body, want)
 	}
 	assert.NotContains(t, body, "cfgms_transport_connected_stewards",
