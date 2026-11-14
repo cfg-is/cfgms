@@ -233,19 +233,19 @@ func validateTriggerID(id string) error {
 	return nil
 }
 
-// getTriggerSecret reads a trigger credential stored under the trigger's tenant.
+// getTriggerCredential reads a trigger credential stored under the trigger's tenant.
 // It addresses the secret by (tenant, ref) through secretsif.TenantSecretAccessor
 // when the store offers it: a tenant ID may contain "/", which makes the combined
 // "<tenant>/<ref>" key the plain SecretStore API takes ambiguous (Issue #4641).
 // Stores without the accessor are addressed by the combined key.
-func (tm *TriggerManagerImpl) getTriggerSecret(ctx context.Context, tenantID, ref string) (*secretsif.Secret, error) {
+func (tm *TriggerManagerImpl) getTriggerCredential(ctx context.Context, tenantID, ref string) (*secretsif.Secret, error) {
 	if acc, ok := tm.secretStore.(secretsif.TenantSecretAccessor); ok {
 		return acc.GetTenantSecret(ctx, tenantID, ref)
 	}
 	return tm.secretStore.GetSecret(ctx, tenantID+"/"+ref)
 }
 
-// deleteTriggerSecret removes a trigger credential, addressed as getTriggerSecret
+// deleteTriggerSecret removes a trigger credential, addressed as getTriggerCredential
 // reads it.
 func (tm *TriggerManagerImpl) deleteTriggerSecret(ctx context.Context, tenantID, ref string) error {
 	if acc, ok := tm.secretStore.(secretsif.TenantSecretAccessor); ok {
@@ -1358,7 +1358,7 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 	hasAuth := false
 
 	if record.BearerTokenRef != "" {
-		secret, err := tm.getTriggerSecret(ctx, record.TenantID, record.BearerTokenRef)
+		secret, err := tm.getTriggerCredential(ctx, record.TenantID, record.BearerTokenRef)
 		if err != nil {
 			tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
 				"trigger_id", logging.SanitizeLogValue(record.ID), "ref", logging.SanitizeLogValue(record.BearerTokenRef), "error", logging.SanitizeLogValue(err.Error()))
@@ -1369,7 +1369,7 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 	}
 
 	if record.HMACSecretRef != "" {
-		secret, err := tm.getTriggerSecret(ctx, record.TenantID, record.HMACSecretRef)
+		secret, err := tm.getTriggerCredential(ctx, record.TenantID, record.HMACSecretRef)
 		if err != nil {
 			tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
 				"trigger_id", logging.SanitizeLogValue(record.ID), "ref", logging.SanitizeLogValue(record.HMACSecretRef), "error", logging.SanitizeLogValue(err.Error()))
@@ -1380,7 +1380,7 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 	}
 
 	if record.APIKeyRef != "" {
-		secret, err := tm.getTriggerSecret(ctx, record.TenantID, record.APIKeyRef)
+		secret, err := tm.getTriggerCredential(ctx, record.TenantID, record.APIKeyRef)
 		if err != nil {
 			tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
 				"trigger_id", logging.SanitizeLogValue(record.ID), "ref", logging.SanitizeLogValue(record.APIKeyRef), "error", logging.SanitizeLogValue(err.Error()))
@@ -1394,7 +1394,7 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 		auth.BasicAuth = &BasicAuth{}
 
 		if record.BasicUsernameRef != "" {
-			secret, err := tm.getTriggerSecret(ctx, record.TenantID, record.BasicUsernameRef)
+			secret, err := tm.getTriggerCredential(ctx, record.TenantID, record.BasicUsernameRef)
 			if err != nil {
 				tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
 					"trigger_id", logging.SanitizeLogValue(record.ID), "ref", logging.SanitizeLogValue(record.BasicUsernameRef), "error", logging.SanitizeLogValue(err.Error()))
@@ -1405,7 +1405,7 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 		}
 
 		if record.BasicPasswordRef != "" {
-			secret, err := tm.getTriggerSecret(ctx, record.TenantID, record.BasicPasswordRef)
+			secret, err := tm.getTriggerCredential(ctx, record.TenantID, record.BasicPasswordRef)
 			if err != nil {
 				tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
 					"trigger_id", logging.SanitizeLogValue(record.ID), "ref", logging.SanitizeLogValue(record.BasicPasswordRef), "error", logging.SanitizeLogValue(err.Error()))

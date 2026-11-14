@@ -305,9 +305,9 @@ func (s *Server) mintAPIKey(ctx context.Context, spec apiKeyMintSpec) (*mintedAP
 	s.apiKeys[keyString] = apiKey
 	s.mu.Unlock()
 
-	secretReq := apiKeySecretRequest(spec, keyID, keyHash)
+	recordReq := keyRequestRecord(spec, keyID, keyHash)
 
-	if err := s.secretStore.StoreSecret(ctx, secretReq); err != nil {
+	if err := s.secretStore.StoreSecret(ctx, recordReq); err != nil {
 		s.logger.Error("Failed to persist API key to secret store", "error", logging.SanitizeLogValue(err.Error()), "id", keyID)
 		// Remove from memory cache since we couldn't persist
 		s.mu.Lock()
@@ -319,10 +319,10 @@ func (s *Server) mintAPIKey(ctx context.Context, spec apiKeyMintSpec) (*mintedAP
 	return &mintedAPIKey{apiKey: apiKey, plaintext: keyString}, nil
 }
 
-// apiKeySecretRequest builds the secret-store record for a minted key (M-AUTH-1): the
+// keyRequestRecord builds the secret-store record for a minted key (M-AUTH-1): the
 // hash is the record's key and value (plaintext keys are never stored), and the metadata
 // carries the type, id and permissions over any spec.ExtraMetadata.
-func apiKeySecretRequest(spec apiKeyMintSpec, keyID, keyHash string) *secretsif.SecretRequest {
+func keyRequestRecord(spec apiKeyMintSpec, keyID, keyHash string) *secretsif.SecretRequest {
 	metadata := make(map[string]string, len(spec.ExtraMetadata)+3)
 	for k, v := range spec.ExtraMetadata {
 		metadata[k] = v
@@ -483,7 +483,7 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 // only through an ADR-025 crossing returns *tenantCrossingRequiredError (Issue #4665).
 // A store read error is returned as-is; it is never treated as not-found.
 func (s *Server) findAPIKeyInScope(ctx context.Context, keyID string, scope ctxkeys.TenantScope, route string) (*secretsif.SecretMetadata, *APIKey, error) {
-	keyHash, entry, found, err := s.locateAPIKeyByID(ctx, keyID)
+	keyHash, entry, found, err := s.locateKeyEntryByID(ctx, keyID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -589,13 +589,13 @@ func (s *Server) deleteAPIKeyRecord(ctx context.Context, tenantID, keyHash strin
 	if acc, ok := s.secretStore.(secretsif.TenantSecretAccessor); ok {
 		return acc.DeleteTenantSecret(ctx, tenantID, keyHash)
 	}
-	return s.secretStore.DeleteSecret(ctx, apiKeyStoreRef(tenantID, keyHash))
+	return s.secretStore.DeleteSecret(ctx, keyRecordRef(tenantID, keyHash))
 }
 
-// apiKeyStoreRef is the secret-store path of an API key's durable record. It is a
+// keyRecordRef is the secret-store path of an API key's durable record. It is a
 // lookup path, not the credential itself. Used only for a store that does not offer
 // secretsif.TenantSecretAccessor; such a store resolves the combined reference itself.
-func apiKeyStoreRef(tenantID, keyHash string) string {
+func keyRecordRef(tenantID, keyHash string) string {
 	return tenantID + "/" + keyHash
 }
 
