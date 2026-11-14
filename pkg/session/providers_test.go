@@ -629,3 +629,58 @@ func TestFreshSessionAfterRevokeIsAccepted(t *testing.T) {
 		t.Errorf("Renew of revoked token: got %v, want revoked/not found", err)
 	}
 }
+
+// sessionPrecisionClock returns a clock whose readings carry a sub-microsecond
+// component, as time.Now does on Linux. A store that keeps microseconds must still
+// validate a session issued at such an instant.
+func sessionPrecisionClock() func() time.Time {
+	base := time.Date(2026, 11, 14, 12, 59, 3, 105573719, time.UTC)
+	return func() time.Time { return base }
+}
+
+// TestManagerValidatesAfterIssueOnPostgres is the regression test for a session that
+// is refused on its first use: Postgres stores timestamps to the microsecond, and the
+// cache-hit check compares the cached set-once fields with the stored row, so a
+// nanosecond IssuedAt never matched and every request after login was a 401.
+func TestManagerValidatesAfterIssueOnPostgres(t *testing.T) {
+	store := newPostgresSessionTokenStore(t)
+	ctx := context.Background()
+	mgr := session.NewManager(session.DefaultConfig(), store, sessionPrecisionClock())
+
+	_, tok, err := mgr.Issue(ctx, "precision-pg", "ctrl", "tenant-1")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	for i := 1; i <= 2; i++ {
+		if _, err := mgr.Validate(ctx, tok); err != nil {
+			t.Fatalf("Validate #%d on the issuing manager: %v", i, err)
+		}
+	}
+	if _, newTok, err := mgr.Renew(ctx, tok); err != nil {
+		t.Fatalf("Renew: %v", err)
+	} else if _, err := mgr.Validate(ctx, newTok); err != nil {
+		t.Fatalf("Validate after Renew: %v", err)
+	}
+}
+
+// TestManagerIssuesAtStorablePrecision pins the invariant the Postgres test depends on
+// without needing a database: the set-once timestamps of an issued session are already
+// at microsecond precision, so a durable store returns them unchanged.
+func TestManagerIssuesAtStorablePrecision(t *testing.T) {
+	ctx := context.Background()
+	mgr := session.NewManager(session.DefaultConfig(), newSQLiteSessionStore(t), sessionPrecisionClock())
+	sess, tok, err := mgr.Issue(ctx, "precision", "ctrl", "tenant-1")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	for name, ts := range map[string]time.Time{
+		"IssuedAt": sess.IssuedAt, "LastActivity": sess.LastActivity, "AbsoluteExpiresAt": sess.AbsoluteExpiresAt,
+	} {
+		if !ts.Equal(ts.Round(time.Microsecond)) {
+			t.Errorf("%s = %s has sub-microsecond precision a durable store cannot keep", name, ts.Format(time.RFC3339Nano))
+		}
+	}
+	if _, err := mgr.Validate(ctx, tok); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
