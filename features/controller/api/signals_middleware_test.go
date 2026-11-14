@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -352,4 +354,41 @@ func TestAPISignalsRegistrationFailureDisablesRecording(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Nil(t, s.apiSignals.instruments)
 	assert.NotContains(t, scrapeSignals(t, collector), "route_class")
+}
+
+// signalDocPath is the canonical service-level signal document, relative to this
+// package.
+const signalDocPath = "../../../docs/operations/service-level-signals.md"
+
+// TestSignalDocListsEveryRouteClass fails when a route class a controller can
+// export is missing from the signal document: every apiRouteClassAllowlist
+// member, plus "static" and "other". An API area added to the allowlist without a
+// matching document change fails here, before any request reaches the registry.
+func TestSignalDocListsEveryRouteClass(t *testing.T) {
+	b, err := os.ReadFile(filepath.FromSlash(signalDocPath))
+	require.NoError(t, err, "the signal document must exist")
+
+	// Read the label rows, not the whole page: "other" and "health" are also
+	// words and values elsewhere in the document.
+	var routeRow, statusRow string
+	for _, line := range strings.Split(string(b), "\n") {
+		switch {
+		case strings.HasPrefix(line, "| `route_class` |"):
+			routeRow = line
+		case strings.HasPrefix(line, "| `status_class` |"):
+			statusRow = line
+		}
+	}
+	require.NotEmpty(t, routeRow, "the Label values table must have a route_class row")
+	require.NotEmpty(t, statusRow, "the Label values table must have a status_class row")
+
+	classes := make([]string, 0, len(apiRouteClassAllowlist)+2)
+	classes = append(classes, apiRouteClassAllowlist...)
+	classes = append(classes, routeClassStatic, routeClassOther)
+	for _, class := range classes {
+		assert.Contains(t, routeRow, "`"+class+"`", "route_class %q is not documented in %s", class, signalDocPath)
+	}
+	for _, class := range apiStatusClasses {
+		assert.Contains(t, statusRow, "`"+class+"`", "status_class %q is not documented in %s", class, signalDocPath)
+	}
 }

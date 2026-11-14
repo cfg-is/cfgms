@@ -31,6 +31,8 @@ signal carries a tenant, steward, command or path identifier.
 
 | Metric | Type | Labels | Buckets (seconds) | Meaning |
 |---|---|---|---|---|
+| `cfgms_api_request_duration_seconds` | histogram | `route_class`, `status_class` | 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30 | API request duration in seconds by route class and status class. |
+| `cfgms_api_requests_total` | counter | `route_class`, `status_class` | — | API requests by route class and status class. |
 | `cfgms_build_info` | gauge | `revision`, `version` | — | Build information of the running controller; the value is always 1. |
 | `cfgms_command_completion_seconds` | histogram | `command_type`, `outcome` | 0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300 | Seconds from command send to a terminal steward event or timeout, by command type and outcome. |
 | `cfgms_command_send_total` | counter | `command_type`, `outcome` | — | Commands handed to the control plane, by command type and send outcome. |
@@ -58,6 +60,8 @@ A histogram is exported as `<name>_bucket` (with an `le` label, cumulative, plus
 | `command_type` | `cfgms_command_send_total`, `cfgms_command_completion_seconds` | `sync_config`, `sync_dna`, `reconnect`, `execute_script`, `relay_response`, `push_signing_cert`, `push_steward_binary`, `open_terminal`, `steward_action`, `observe_modules`, and `other` for any command type outside this set |
 | `outcome` | `cfgms_command_send_total` | `sent`, `send_failed` |
 | `outcome` | `cfgms_command_completion_seconds` | `completed`, `failed`, `timeout` |
+| `route_class` | `cfgms_api_requests_total`, `cfgms_api_request_duration_seconds` | `accounts`, `alerts`, `api-keys`, `audit`, `automation`, `billing`, `cases`, `certificates`, `cli-login`, `cli-presence`, `cluster`, `clusters`, `commands`, `compliance`, `config`, `configs`, `credential-renewal`, `credential-requests`, `directory`, `enrolment-tokens`, `entities`, `fleet`, `ha`, `health`, `hyperv`, `installer`, `jobs`, `modules`, `monitoring`, `notifications`, `operator-payload`, `osquery`, `public`, `rbac`, `ready`, `register`, `registration`, `reports`, `rollback`, `roles`, `rollout`, `rollout-credentials`, `rollout-settings`, `runs`, `scripts`, `sessions`, `signing-credential`, `stewards`, `tenant-crossings`, `tenants`, `terminal`, `triggers`, `web`, `webauthn`, `webhooks`, `workflows`, `static`, `other`. The first segment after `/api/v1` of the matched route when it is in this set (every value but `static` and `other`), `static` for the web application fallback route, and `other` for every route outside the set, an unmatched path and a method mismatch |
+| `status_class` | `cfgms_api_requests_total`, `cfgms_api_request_duration_seconds` | `2xx`, `3xx`, `4xx`, `5xx` |
 | `revision` | `cfgms_build_info` | A hex commit id, optionally suffixed `-dirty`, or `unknown`; any other build value is exported as `unknown` |
 | `version` | `cfgms_build_info` | The controller version string |
 
@@ -120,6 +124,17 @@ signals are rendered.
   a duplicate or redelivered event, including after a restart, records nothing.
   The issued and receipt times can come from different nodes' clocks; a negative
   difference is recorded as 0.
+- **API request signals record the matched route, not the path.** `route_class`
+  comes from the route template mux matched, never from the request path, so no
+  tenant, steward, credential or other identifier is ever a label value. The
+  signals are recorded on the public and the private metrics routers, and a
+  request refused with 401 or 403 is counted. A response whose status is outside
+  200-599 has no `status_class` and records nothing. A request on a hijacked
+  connection (a WebSocket) is counted in `cfgms_api_requests_total` but adds no
+  observation to `cfgms_api_request_duration_seconds`, because the connection
+  lives as long as the session. The instruments register on the first request a
+  controller serves, so a controller that has served none exports no
+  `cfgms_api_*` series.
 - **Tenant-scoped rollouts are not markers.** A rollout scoped to a tenant is an
   audit event under that tenant. Markers are platform signals recorded under
   the system tenant.
