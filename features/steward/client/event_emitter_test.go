@@ -15,7 +15,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
@@ -88,6 +90,9 @@ type testLogStreamServer struct {
 	// received, when non-nil, is closed when the first entry arrives so
 	// tests can synchronize on actual entry receipt before stopping the server.
 	received chan struct{}
+	// refuse, when set, makes the next received entry fail the stream, as a
+	// controller that cannot take logs would.
+	refuse atomic.Bool
 }
 
 func (s *testLogStreamServer) LogStream(
@@ -109,6 +114,9 @@ func (s *testLogStreamServer) LogStream(
 		}
 		if err != nil {
 			return err
+		}
+		if s.refuse.Load() {
+			return status.Error(codes.Unavailable, "log stream refused")
 		}
 		s.mu.Lock()
 		s.entries = append(s.entries, entry)
@@ -486,4 +494,116 @@ func TestEventEmitter_NilClientSource(t *testing.T) {
 	current.Store(&env.client)
 	waitFor(t, "delivery after source yields a client", func() bool { return hasStewardEntry(env.srv, "queued-while-nil") })
 	assert.Zero(t, log.warns.Load())
+}
+
+func startFlushEmitter(t *testing.T, src func() transportpb.StewardTransportClient) *client.EventEmitter {
+	t.Helper()
+	emitter := client.NewEventEmitter(client.EventEmitterConfig{
+		ClientSource: src,
+		StewardID:    "steward-flush",
+		Logger:       logging.NewNoopLogger(),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	emitter.Start(ctx)
+	t.Cleanup(emitter.Close)
+	return emitter
+}
+
+// A nil Flush means the controller already holds the entries: no wait, no Close.
+// The emitter keeps running and delivers what is queued afterwards.
+func TestEventEmitter_Flush_ReturnsOnlyAfterTheControllerHasTheEntries(t *testing.T) {
+	env := newEmitterTestEnv(t)
+	emitter := startFlushEmitter(t, func() transportpb.StewardTransportClient { return env.client })
+	select {
+	case <-env.srv.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for LogStream connection")
+	}
+
+	for _, id := range []string{"one", "two", "three"} {
+		emitter.Enqueue(&transportpb.LogEntry{StewardId: id})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, emitter.Flush(ctx))
+	got := env.srv.Collected()
+	require.Len(t, got, 3, "every entry queued before Flush has been received")
+	assert.Equal(t, "one", got[0].GetStewardId())
+	assert.Zero(t, emitter.Lost())
+
+	// A second stream carries what is queued after the flush.
+	emitter.Enqueue(&transportpb.LogEntry{StewardId: "after"})
+	waitFor(t, "delivery after the flush", func() bool { return hasStewardEntry(env.srv, "after") })
+	require.NoError(t, emitter.Flush(ctx), "Flush with nothing queued still succeeds")
+}
+
+// With no client the stream cannot open. Flush reports it at once and does not
+// wait out the back-off; Close, by contrast, returns silently with the entries
+// undelivered, which is why the repair relies on Flush.
+func TestEventEmitter_Flush_NoOpenStreamFailsFastAndDeliversNothing(t *testing.T) {
+	emitter := startFlushEmitter(t, func() transportpb.StewardTransportClient { return nil })
+	emitter.Enqueue(&transportpb.LogEntry{StewardId: "queued"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := emitter.Flush(ctx)
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 900*time.Millisecond, "Flush does not wait for the 1s back-off")
+	assert.NoError(t, ctx.Err(), "the failure is reported before the deadline")
+}
+
+// The controller took the stream and then failed it: the entries are not
+// confirmed, Flush says so and Lost counts them.
+func TestEventEmitter_Flush_RefusedStreamReportsErrorAndLoss(t *testing.T) {
+	env := newEmitterTestEnv(t)
+	emitter := startFlushEmitter(t, func() transportpb.StewardTransportClient { return env.client })
+	select {
+	case <-env.srv.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for LogStream connection")
+	}
+	env.srv.refuse.Store(true)
+	before := emitter.Lost()
+
+	emitter.Enqueue(&transportpb.LogEntry{StewardId: "refused"})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.Error(t, emitter.Flush(ctx))
+	assert.Greater(t, emitter.Lost(), before, "an unconfirmed entry counts as lost")
+	assert.Empty(t, env.srv.Collected())
+}
+
+func TestEventEmitter_Flush_FullBufferDropCountsAsLoss(t *testing.T) {
+	env := newEmitterTestEnv(t)
+	emitter := client.NewEventEmitter(client.EventEmitterConfig{
+		ClientSource: func() transportpb.StewardTransportClient { return env.client },
+		StewardID:    "steward-full",
+		Logger:       logging.NewNoopLogger(),
+		BufferDepth:  1,
+	})
+	// Not started: nothing drains the one-slot buffer.
+	emitter.Enqueue(&transportpb.LogEntry{StewardId: "kept"})
+	emitter.Enqueue(&transportpb.LogEntry{StewardId: "dropped"})
+	assert.EqualValues(t, 1, emitter.Lost())
+}
+
+func TestEventEmitter_Flush_NotRunning(t *testing.T) {
+	emitter := client.NewEventEmitter(client.EventEmitterConfig{StewardID: "steward-idle", Logger: logging.NewNoopLogger()})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	assert.ErrorIs(t, emitter.Flush(ctx), client.ErrEmitterNotRunning, "before Start")
+
+	env := newEmitterTestEnv(t)
+	started := startFlushEmitter(t, func() transportpb.StewardTransportClient { return env.client })
+	started.Close()
+	assert.ErrorIs(t, started.Flush(ctx), client.ErrEmitterNotRunning, "after Close")
+}
+
+func TestEventEmitter_Flush_HonoursItsContext(t *testing.T) {
+	emitter := startFlushEmitter(t, func() transportpb.StewardTransportClient { return nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	assert.Error(t, emitter.Flush(ctx))
 }

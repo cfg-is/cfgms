@@ -55,6 +55,14 @@ type roServer struct {
 	logs       chan *transportpb.LogEntry
 	pulls      atomic.Int64
 
+	// logMu guards logSeen, every log entry the controller has received, in
+	// order. Unlike the logs channel nothing consumes it, so a test can ask
+	// at any moment what had arrived. refuseLogs makes LogStream fail on the next
+	// entry, as a controller that cannot take the stream would.
+	logMu      sync.Mutex
+	logSeen    []*transportpb.LogEntry
+	refuseLogs atomic.Bool
+
 	// revoked holds the serials (decimal) the server refuses at admission;
 	// handshakes records the serial each client presented, in order.
 	revoked     sync.Map
@@ -118,6 +126,12 @@ func (s *roTransport) LogStream(stream grpc.ClientStreamingServer[transportpb.Lo
 			}
 			return err
 		}
+		if s.srv.refuseLogs.Load() {
+			return status.Error(codes.Unavailable, "log stream refused")
+		}
+		s.srv.logMu.Lock()
+		s.srv.logSeen = append(s.srv.logSeen, entry)
+		s.srv.logMu.Unlock()
 		s.srv.logs <- entry
 	}
 }

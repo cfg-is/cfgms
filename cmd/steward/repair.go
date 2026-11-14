@@ -73,8 +73,10 @@ const (
 	repairFlushMaxBytesPerFile = 1 << 20
 	repairFlushChunkBytes      = 32 << 10
 	repairFlushMaxEntries      = 200
-	repairProbeBytes           = 64 << 10
-	repairMaxHistoryLineBytes  = 1 << 20
+	// repairFlushTimeout bounds the wait for the controller to acknowledge the flush.
+	repairFlushTimeout        = 15 * time.Second
+	repairProbeBytes          = 64 << 10
+	repairMaxHistoryLineBytes = 1 << 20
 )
 
 var (
@@ -823,10 +825,16 @@ func (r *repairer) execute(ctx context.Context, tc *client.TransportClient, id *
 	// credential must never be presented again, and a stream evicted by the
 	// controller must not reconnect with it.
 	r.dialsHeld.Store(true)
+	var flushErr error
 	if len(assessment.Codes) > 0 {
-		r.flushOutbound(tc, assessment, repairID)
+		flushErr = r.flushOutbound(tc, assessment, repairID)
 	}
 	closeTamperLink(tc)
+	if flushErr != nil {
+		// The readable logs did not provably leave the host: nothing is deleted.
+		r.fail(repairID, "readable logs could not be flushed outbound", flushErr)
+		return nil
+	}
 
 	// The flush took time: assess once more, so only what was approved is deleted.
 	again := assessRepairLoss(repairPathsResolver(), r.refusedSnapshot())
@@ -982,42 +990,74 @@ func (r *repairer) discardExposed(id *StewardIdentity) error {
 }
 
 // flushOutbound sends the readable local data of the kinds about to lose items
-// off the host, so the loss is of local copies only. It is best effort per file.
-func (r *repairer) flushOutbound(tc *client.TransportClient, a repairAssessment, repairID string) {
-	if tc == nil {
-		return
+// off the host, so the loss is of local copies only. It returns nil only when
+// the controller acknowledged every entry that was queued (or there was nothing
+// readable to send); otherwise execute deletes nothing. The delivery check sits
+// here, ahead of the delete, because the emitter's Close cannot report: it
+// returns nothing and drains only when a stream is open.
+func (r *repairer) flushOutbound(tc *client.TransportClient, a repairAssessment, repairID string) error {
+	entries := flushEntries(a, repairID)
+	if len(entries) == 0 {
+		return nil
 	}
+	return deliverFlush(tc, entries)
+}
+
+// flushEntries reads the readable local data of the kinds about to lose items
+// into log entries, bounded by repairFlushMaxEntries.
+func flushEntries(a repairAssessment, repairID string) []*transportpb.LogEntry {
 	paths := repairPathsResolver()
-	sent := 0
-	send := func(code, path string) {
+	var entries []*transportpb.LogEntry
+	add := func(code, path string) {
 		for _, chunk := range readTailChunks(path) {
-			if sent >= repairFlushMaxEntries {
+			if len(entries) >= repairFlushMaxEntries {
 				return
 			}
-			entry := &transportpb.LogEntry{
+			entries = append(entries, &transportpb.LogEntry{
 				Level:     transportpb.Severity_SEVERITY_INFO,
 				Message:   chunk,
 				Timestamp: timestamppb.Now(),
 				Fields: map[string]string{
 					"source": "repair_flush", "kind": code, "file": filepath.Base(path), "repair_id": repairID,
 				},
-			}
-			if tc.EnqueueLog(entry) {
-				sent++
-			}
+			})
 		}
 	}
 	if slices.Contains(a.Codes, cpTypes.ReasonCodeRepairLossLocalLogs) && paths.logDir != "" {
 		_ = filepath.WalkDir(paths.logDir, func(path string, d fs.DirEntry, err error) error {
 			if err == nil && d.Type().IsRegular() {
-				send(cpTypes.ReasonCodeRepairLossLocalLogs, path)
+				add(cpTypes.ReasonCodeRepairLossLocalLogs, path)
 			}
 			return nil
 		})
 	}
 	if slices.Contains(a.Codes, cpTypes.ReasonCodeRepairLossActionHistory) {
-		send(cpTypes.ReasonCodeRepairLossActionHistory, paths.actionHistory())
+		add(cpTypes.ReasonCodeRepairLossActionHistory, paths.actionHistory())
 	}
+	return entries
+}
+
+// deliverFlush queues entries on the link and waits for the controller to
+// acknowledge them, failing when any is not provably delivered.
+func deliverFlush(tc *client.TransportClient, entries []*transportpb.LogEntry) error {
+	if tc == nil {
+		return errors.New("no link to the controller")
+	}
+	lostBefore := tc.LogLoss()
+	for _, entry := range entries {
+		if !tc.EnqueueLog(entry) {
+			return errors.New("the link has no event emitter")
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), repairFlushTimeout)
+	defer cancel()
+	if err := tc.FlushLogs(ctx); err != nil {
+		return fmt.Errorf("flush: %w", err)
+	}
+	if lost := tc.LogLoss() - lostBefore; lost > 0 {
+		return fmt.Errorf("%d queued entries were not delivered", lost)
+	}
+	return nil
 }
 
 // readTailChunks reads up to the last repairFlushMaxBytesPerFile bytes of path in

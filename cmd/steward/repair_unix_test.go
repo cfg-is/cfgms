@@ -8,6 +8,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 
@@ -68,10 +69,18 @@ func TestRepair_Loss_ExactApprovalRemovesOnlyThatItemAfterFlushingReadableLogs(t
 	f.env.dirBad.Store(false)
 	srv := f.env.f.srv
 
-	// When the delete happens, the readable log has already left the host.
+	// When the delete happens, the readable log has already reached the
+	// controller: the hook records what the controller had received by then.
+	// The hook runs on the steward goroutine, so what it records is guarded.
+	var mu sync.Mutex
+	var deletes int
 	var flushedBeforeDelete bool
 	repairRemoveItem = func(path string) error {
-		flushedBeforeDelete = len(srv.logs) > 0
+		arrived := srv.receivedRepairFlush("steward.log")
+		mu.Lock()
+		deletes++
+		flushedBeforeDelete = arrived
+		mu.Unlock()
 		return removeRepairItem(path)
 	}
 	approved := []string{cpTypes.ReasonCodeRepairLossLocalLogs}
@@ -79,10 +88,12 @@ func TestRepair_Loss_ExactApprovalRemovesOnlyThatItemAfterFlushingReadableLogs(t
 	f.send(f.request("repair-approved", requestOpts{approved: approved}))
 	awaitOutcome(t, f, cpTypes.ReasonCodeRepairCompleted)
 
-	assert.True(t, flushedBeforeDelete, "readable logs are flushed outbound before an approved delete")
+	mu.Lock()
+	assert.Equal(t, 1, deletes, "exactly the approved item is deleted")
+	assert.True(t, flushedBeforeDelete, "the repair_flush entry for steward.log reached the controller before the delete")
+	mu.Unlock()
 	var flushed []string
-	for len(srv.logs) > 0 {
-		e := <-srv.logs
+	for _, e := range srv.logEntries() {
 		if e.GetFields()["source"] == "repair_flush" {
 			flushed = append(flushed, e.GetFields()["file"]+": "+e.GetMessage())
 		}
@@ -92,6 +103,28 @@ func TestRepair_Loss_ExactApprovalRemovesOnlyThatItemAfterFlushingReadableLogs(t
 	assert.NoFileExists(t, bad, "the approved item is removed")
 	assert.FileExists(t, filepath.Join(f.paths.logDir, "steward.log"), "readable logs are kept")
 	assert.Equal(t, history, readFile(t, f.paths.actionHistory()), "the action history is kept")
+}
+
+func TestRepair_Loss_UndeliverableFlushDeletesNothingAndReportsFailure(t *testing.T) {
+	f := newRepairFixture(t, repairFixtureOpts{})
+	bad := unreadableLog(t, f, "bad.log")
+	f.start()
+	f.env.dirBad.Store(false)
+	srv := f.env.f.srv
+	before := shallowSnapshot(t, f.paths.dataDir, f.paths.logDir, f.env.f.dir)
+
+	// The controller refuses the log stream: the readable logs cannot leave the host.
+	srv.refuseLogs.Store(true)
+	f.ctrl.allow("repair-undeliverable")
+	f.send(f.request("repair-undeliverable", requestOpts{approved: []string{cpTypes.ReasonCodeRepairLossLocalLogs}}))
+	awaitOutcome(t, f, cpTypes.ReasonCodeRepairFailed)
+
+	assert.Empty(t, f.removedPaths(), "not one delete is made when the flush is not confirmed")
+	assert.False(t, srv.receivedRepairFlush("steward.log"))
+	assert.FileExists(t, bad)
+	assert.Equal(t, before, shallowSnapshot(t, f.paths.dataDir, f.paths.logDir, f.env.f.dir), "the tree is untouched")
+	assert.Empty(t, f.ctrl.callList(), "no completion is requested")
+	assert.True(t, f.latch.isLatched())
 }
 
 func TestRepair_Loss_SetChangedBetweenRequestAndExecution_DeletesNothing(t *testing.T) {
