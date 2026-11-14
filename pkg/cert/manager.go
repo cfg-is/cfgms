@@ -53,6 +53,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -477,25 +478,149 @@ func (m *Manager) GenerateInternalServerCertificate(config *ServerCertConfig) (*
 	return cert, nil
 }
 
-// EnsureInternalServerCertificate generates the internal mTLS server
-// certificate if none exists. Idempotent. A nil internalCfg uses the defaults.
-func (m *Manager) EnsureInternalServerCertificate(internalCfg *ServerCertConfig) error {
-	internalCerts, err := m.store.getCertificatesByType(CertificateTypeInternalServer)
-	if err != nil {
-		return fmt.Errorf("failed to check for internal server certificates: %w", err)
+// InternalServerSANCoverage reports how the current InternalServer certificate
+// relates to a requested SAN set.
+type InternalServerSANCoverage struct {
+	// HasCurrent is false when no valid InternalServer certificate exists.
+	HasCurrent bool
+	// MissingDNSNames are requested DNS names the current certificate lacks.
+	MissingDNSNames []string
+	// MissingIPAddresses are requested IP addresses the current certificate lacks.
+	MissingIPAddresses []string
+}
+
+// Covered reports whether a current certificate exists and covers every
+// requested SAN.
+func (c InternalServerSANCoverage) Covered() bool {
+	return c.HasCurrent && len(c.MissingDNSNames) == 0 && len(c.MissingIPAddresses) == 0
+}
+
+// defaultInternalServerCertConfig is the config used when a caller supplies none.
+func defaultInternalServerCertConfig() *ServerCertConfig {
+	return &ServerCertConfig{
+		CommonName:   "cfgms-internal",
+		DNSNames:     []string{"localhost", "cfgms-internal"},
+		IPAddresses:  []string{"127.0.0.1"},
+		ValidityDays: 365,
 	}
-	if len(internalCerts) == 0 {
-		if internalCfg == nil {
-			internalCfg = &ServerCertConfig{
-				CommonName:   "cfgms-internal",
-				DNSNames:     []string{"localhost", "cfgms-internal"},
-				IPAddresses:  []string{"127.0.0.1"},
-				ValidityDays: 365,
+}
+
+// InternalServerSANCoverage evaluates the certificate the transport serves (the
+// newest valid InternalServer certificate, the one GetCurrentCertForPurpose
+// returns) against the DNS names and IP addresses in internalCfg. A nil
+// internalCfg uses the defaults. DNS names compare case-insensitively and IP
+// addresses with net.IP.Equal. Only requested SANs missing from the certificate
+// are reported; extra SANs on the certificate are not a gap.
+func (m *Manager) InternalServerSANCoverage(internalCfg *ServerCertConfig) (InternalServerSANCoverage, error) {
+	if internalCfg == nil {
+		internalCfg = defaultInternalServerCertConfig()
+	}
+	current, err := m.GetCurrentCertForPurpose(PurposeTransport)
+	if err != nil {
+		// No valid InternalServer certificate: nothing covers the request.
+		return InternalServerSANCoverage{
+			MissingDNSNames:    append([]string(nil), internalCfg.DNSNames...),
+			MissingIPAddresses: append([]string(nil), internalCfg.IPAddresses...),
+		}, nil
+	}
+	parsed, err := ParseCertificateFromPEM(current.CertificatePEM)
+	if err != nil {
+		return InternalServerSANCoverage{}, fmt.Errorf("failed to parse current internal server certificate: %w", err)
+	}
+
+	return InternalServerSANCoverage{
+		HasCurrent:         true,
+		MissingDNSNames:    missingDNSNames(internalCfg.DNSNames, parsed.DNSNames),
+		MissingIPAddresses: missingIPAddresses(internalCfg.IPAddresses, parsed.IPAddresses),
+	}, nil
+}
+
+// missingDNSNames returns the wanted names absent from have, comparing
+// case-insensitively.
+func missingDNSNames(wanted, have []string) []string {
+	var missing []string
+	for _, want := range wanted {
+		found := false
+		for _, h := range have {
+			if strings.EqualFold(want, h) {
+				found = true
+				break
 			}
 		}
-		if _, err := m.GenerateInternalServerCertificate(internalCfg); err != nil {
-			return fmt.Errorf("failed to generate internal server certificate: %w", err)
+		if !found {
+			missing = append(missing, want)
 		}
+	}
+	return missing
+}
+
+// missingIPAddresses returns the wanted addresses absent from have, comparing
+// with net.IP.Equal. Unparseable addresses are dropped at issuance, so they can
+// never be covered; skipping them avoids a reissue loop.
+func missingIPAddresses(wanted []string, have []net.IP) []string {
+	var missing []string
+	for _, want := range wanted {
+		ip := net.ParseIP(want)
+		if ip == nil {
+			continue
+		}
+		found := false
+		for _, h := range have {
+			if ip.Equal(h) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, want)
+		}
+	}
+	return missing
+}
+
+// EnsureInternalServerCertificate generates the internal mTLS server
+// certificate if none exists, and reissues it when the current (newest valid)
+// certificate does not cover every DNS name and IP address in internalCfg.
+// Idempotent: a certificate that covers the request is left alone, and extra
+// SANs on the existing certificate never trigger a reissue. A reissue keeps
+// the superseded certificate in the store; the new one is the one
+// GetCurrentCertForPurpose returns. A nil internalCfg uses the defaults.
+func (m *Manager) EnsureInternalServerCertificate(internalCfg *ServerCertConfig) error {
+	if internalCfg == nil {
+		internalCfg = defaultInternalServerCertConfig()
+	}
+	coverage, err := m.InternalServerSANCoverage(internalCfg)
+	if err != nil {
+		return fmt.Errorf("failed to check internal server certificate SAN coverage: %w", err)
+	}
+	if coverage.Covered() {
+		return nil
+	}
+	if err := m.issueInternalServerCertificateAsNewest(internalCfg); err != nil {
+		return fmt.Errorf("failed to generate internal server certificate: %w", err)
+	}
+	return nil
+}
+
+// issueInternalServerCertificateAsNewest issues and stores an InternalServer
+// certificate that deterministically sorts newest in the store. The store orders
+// by CreatedAt (the certificate NotBefore, backdated for clock skew), so two
+// certificates issued close together could otherwise tie or invert; the stored
+// CreatedAt is raised just past the newest existing InternalServer certificate.
+func (m *Manager) issueInternalServerCertificateAsNewest(internalCfg *ServerCertConfig) error {
+	existing, err := m.store.getCertificatesByType(CertificateTypeInternalServer)
+	if err != nil {
+		return fmt.Errorf("failed to list internal server certificates: %w", err)
+	}
+	cert, err := m.ca.GenerateInternalServerCertificate(internalCfg)
+	if err != nil {
+		return err
+	}
+	if len(existing) > 0 && !cert.CreatedAt.After(existing[0].CreatedAt) {
+		cert.CreatedAt = existing[0].CreatedAt.Add(time.Nanosecond)
+	}
+	if err := m.store.StoreCertificate(cert); err != nil {
+		return fmt.Errorf("failed to store internal server certificate: %w", err)
 	}
 	return nil
 }

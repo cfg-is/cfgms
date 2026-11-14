@@ -146,8 +146,8 @@ The controller decoder does not reject unknown keys: a misspelled key is silentl
 | YAML field | Type | Default | Req | Description |
 |---|---|---|---|---|
 | `common_name` | string | `"cfgms-controller"` | optional | CN embedded in the generated server certificate |
-| `dns_names` | list[string] | `["localhost","cfgms-controller","controller-standalone"]` | optional | Subject Alternative Name DNS entries. A changed list takes effect at the next controller start: the API certificate is reissued when it lacks a configured name (ignored when `certificate.enable_cert_management` is false) |
-| `ip_addresses` | list[string] | `["127.0.0.1"]` | optional | Subject Alternative Name IP entries. A changed list takes effect at the next controller start: the API certificate is reissued when it lacks a configured address (ignored when `certificate.enable_cert_management` is false) |
+| `dns_names` | list[string] | `["localhost","cfgms-controller","controller-standalone"]` | optional | Subject Alternative Name DNS entries. A changed list takes effect at the next controller start: the API certificate is reissued when it lacks a configured name (ignored when `certificate.enable_cert_management` is false) The same list is merged into the transport certificate SANs: a name the current transport certificate lacks reissues it on the next controller start (a shorter list does not). |
+| `ip_addresses` | list[string] | `["127.0.0.1"]` | optional | Subject Alternative Name IP entries. A changed list takes effect at the next controller start: the API certificate is reissued when it lacks a configured address (ignored when `certificate.enable_cert_management` is false) The same list is merged into the transport certificate SANs: a name the current transport certificate lacks reissues it on the next controller start (a shorter list does not). |
 | `organization` | string | `"CFGMS"` | optional | Organization name embedded in the certificate |
 
 #### `certificate.public_api`
@@ -169,8 +169,8 @@ The controller decoder does not reject unknown keys: a misspelled key is silentl
 | YAML field | Type | Default | Req | Description |
 |---|---|---|---|---|
 | `common_name` | string | `"cfgms-internal"` | optional | CN for the internal mTLS certificate |
-| `dns_names` | list[string] | `[]` | optional | Subject Alternative Name DNS entries |
-| `ip_addresses` | list[string] | `[]` | optional | Subject Alternative Name IP entries |
+| `dns_names` | list[string] | `[]` | optional | Subject Alternative Name DNS entries. Merged into the transport certificate SANs: a name the current transport certificate lacks reissues it on the next controller start (a shorter list does not) |
+| `ip_addresses` | list[string] | `[]` | optional | Subject Alternative Name IP entries. Merged into the transport certificate SANs; a changed list reissues it on the next controller start as for `dns_names` |
 
 #### `certificate.signing`
 
@@ -337,7 +337,7 @@ compress_rotated: true
 | YAML field | Type | Default | Req | Description |
 |---|---|---|---|---|
 | `listen_addr` | string | `"0.0.0.0:4433"` | **required** | gRPC-over-QUIC listen address (UDP); must not be empty |
-| `external_address` | string | `""` | cond | Hostname or IP advertised to stewards when `listen_addr` binds `0.0.0.0`. Required in that case unless `CFGMS_EXTERNAL_HOSTNAME` is set. Also merged into the transport certificate SANs (`features/controller/initialization/transport_sans.go`). |
+| `external_address` | string | `""` | cond | Hostname or IP advertised to stewards when `listen_addr` binds `0.0.0.0`. Required in that case unless `CFGMS_EXTERNAL_HOSTNAME` is set. Also merged into the transport certificate SANs (`features/controller/initialization/transport_sans.go`). Changing it reissues the transport certificate on the next controller start when the current certificate does not cover the new name; the superseded certificate stays in the certificate store. |
 | `use_cert_manager` | boolean | `true` | optional (required `true` in `public-beta`) | Use the controller's certificate manager for TLS |
 | `max_connections` | integer | `50000` | optional | Maximum number of concurrent steward connections; must be at least 1 |
 | `keepalive_period` | duration | `"30s"` | optional | Interval for keepalive probes to detect dead connections; must be at least `1s` |

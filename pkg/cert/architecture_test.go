@@ -3,6 +3,8 @@
 package cert
 
 import (
+	"fmt"
+	"net"
 	"testing"
 	"time"
 
@@ -60,6 +62,128 @@ func TestEnsureSeparatedCertificates_Idempotent(t *testing.T) {
 	signingCerts, err := manager.GetAllValidCertificatesForPurpose(PurposeSigning)
 	require.NoError(t, err)
 	assert.Len(t, signingCerts, 1)
+}
+
+// TestEnsureInternalServerCertificate_ReissuesWhenSANsMissing verifies that a
+// configured SAN the current InternalServer certificate lacks causes a reissue
+// that is served, while the superseded certificate stays in the store.
+func TestEnsureInternalServerCertificate_ReissuesWhenSANsMissing(t *testing.T) {
+	manager := setupTestManager(t)
+
+	require.NoError(t, manager.EnsureSeparatedCertificates(nil, nil))
+	first, err := manager.GetCurrentCertForPurpose(PurposeTransport)
+	require.NoError(t, err)
+
+	cfg := &ServerCertConfig{
+		CommonName:   "cfgms-internal",
+		DNSNames:     []string{"localhost", "cfgms-internal", "cfgms.shared.test"},
+		IPAddresses:  []string{"127.0.0.1", "10.20.30.40"},
+		ValidityDays: 365,
+	}
+
+	cov, err := manager.InternalServerSANCoverage(cfg)
+	require.NoError(t, err)
+	assert.False(t, cov.Covered())
+	assert.Equal(t, []string{"cfgms.shared.test"}, cov.MissingDNSNames)
+	assert.Equal(t, []string{"10.20.30.40"}, cov.MissingIPAddresses)
+
+	require.NoError(t, manager.EnsureInternalServerCertificate(cfg))
+
+	current, err := manager.GetCurrentCertForPurpose(PurposeTransport)
+	require.NoError(t, err)
+	assert.NotEqual(t, first.SerialNumber, current.SerialNumber)
+
+	parsed, err := ParseCertificateFromPEM(current.CertificatePEM)
+	require.NoError(t, err)
+	assert.Contains(t, parsed.DNSNames, "cfgms.shared.test")
+	assert.Contains(t, parsed.DNSNames, "localhost")
+	foundIP := false
+	for _, ip := range parsed.IPAddresses {
+		if ip.Equal(net.ParseIP("10.20.30.40")) {
+			foundIP = true
+		}
+	}
+	assert.True(t, foundIP, "reissued certificate must carry the requested IP")
+
+	all, err := manager.ListCertificates()
+	require.NoError(t, err)
+	serials := map[string]bool{}
+	for _, c := range all {
+		serials[c.SerialNumber] = true
+	}
+	assert.True(t, serials[first.SerialNumber], "superseded certificate must remain in the store")
+	assert.True(t, serials[current.SerialNumber])
+
+	cov, err = manager.InternalServerSANCoverage(cfg)
+	require.NoError(t, err)
+	assert.True(t, cov.Covered())
+}
+
+// TestEnsureInternalServerCertificate_ReissueWinsOrdering repeats the reissue
+// many times back to back; each new certificate must be the one served.
+func TestEnsureInternalServerCertificate_ReissueWinsOrdering(t *testing.T) {
+	manager := setupTestManager(t)
+	require.NoError(t, manager.EnsureInternalServerCertificate(nil))
+
+	for i := 0; i < 5; i++ {
+		cfg := &ServerCertConfig{
+			CommonName:   "cfgms-internal",
+			DNSNames:     []string{"localhost", fmt.Sprintf("node-%d.shared.test", i)},
+			IPAddresses:  []string{"127.0.0.1"},
+			ValidityDays: 365,
+		}
+		require.NoError(t, manager.EnsureInternalServerCertificate(cfg))
+		current, err := manager.GetCurrentCertForPurpose(PurposeTransport)
+		require.NoError(t, err)
+		parsed, err := ParseCertificateFromPEM(current.CertificatePEM)
+		require.NoError(t, err)
+		assert.Contains(t, parsed.DNSNames, fmt.Sprintf("node-%d.shared.test", i))
+	}
+}
+
+// TestEnsureInternalServerCertificate_NoReissueWhenCovered verifies a covered
+// request, including a strict subset and a case-different name, is a no-op.
+func TestEnsureInternalServerCertificate_NoReissueWhenCovered(t *testing.T) {
+	manager := setupTestManager(t)
+
+	cfg := &ServerCertConfig{
+		CommonName:   "cfgms-internal",
+		DNSNames:     []string{"localhost", "cfgms.shared.test", "other.shared.test"},
+		IPAddresses:  []string{"127.0.0.1", "10.20.30.40"},
+		ValidityDays: 365,
+	}
+	require.NoError(t, manager.EnsureInternalServerCertificate(cfg))
+	served, err := manager.GetCurrentCertForPurpose(PurposeTransport)
+	require.NoError(t, err)
+
+	require.NoError(t, manager.EnsureInternalServerCertificate(cfg))
+
+	subset := &ServerCertConfig{
+		CommonName:   "cfgms-internal",
+		DNSNames:     []string{"cfgms.SHARED.test"},
+		IPAddresses:  []string{"10.20.30.40"},
+		ValidityDays: 365,
+	}
+	require.NoError(t, manager.EnsureInternalServerCertificate(subset))
+
+	current, err := manager.GetCurrentCertForPurpose(PurposeTransport)
+	require.NoError(t, err)
+	assert.Equal(t, served.SerialNumber, current.SerialNumber)
+
+	all, err := manager.ListCertificates()
+	require.NoError(t, err)
+	assert.Len(t, all, 1, "no further certificates may be issued")
+}
+
+// TestEnsureInternalServerCertificate_NilConfigDefaultsAreStable verifies the
+// nil-config defaults are covered by the certificate they produce (no reissue loop).
+func TestEnsureInternalServerCertificate_NilConfigDefaultsAreStable(t *testing.T) {
+	manager := setupTestManager(t)
+	require.NoError(t, manager.EnsureInternalServerCertificate(nil))
+	require.NoError(t, manager.EnsureInternalServerCertificate(nil))
+	all, err := manager.GetAllValidCertificatesForPurpose(PurposeTransport)
+	require.NoError(t, err)
+	assert.Len(t, all, 1)
 }
 
 // TestEnsureSeparatedCertificates_CustomConfig verifies custom config is applied

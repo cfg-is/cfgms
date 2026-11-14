@@ -1343,7 +1343,9 @@ func loadValidatedCertificateManager(cfg *config.Config, storageManager *interfa
 }
 
 // ensureSeparatedCertificates ensures the purpose-specific certificates exist
-// (idempotent first-boot generation). initialization.TransportCertSANs merges
+// (idempotent first-boot generation) and that the transport certificate covers
+// every configured SAN, reissuing it (and logging the added SANs) when it does
+// not. initialization.TransportCertSANs merges
 // transport defaults, operator-configured SANs (server + internal blocks), and
 // CFGMS_EXTERNAL_HOSTNAME so stewards can verify the cert by external hostname.
 // Shared with initialization.Run so that --init mints the cert with the same SAN
@@ -1381,11 +1383,36 @@ func ensureSeparatedCertificates(cfg *config.Config, logger logging.Logger, cert
 		signingCfg.ValidityDays = cfg.Certificate.SigningCertValidityDays
 	}
 
+	// Measured before the ensure so a reissue can name the SANs it adds. A
+	// failed measurement only costs the log line; the ensure re-checks itself.
+	coverage, coverageErr := certManager.InternalServerSANCoverage(internalCfg)
+
 	if err := certManager.EnsureSeparatedCertificates(internalCfg, signingCfg); err != nil {
 		return fmt.Errorf("failed to ensure separated certificates: %w", err)
 	}
+	logTransportCertReissue(logger, coverage, coverageErr)
 	logger.Info("Separated certificates ensured (internal mTLS + config signing)")
 	return nil
+}
+
+// logTransportCertReissue logs the SANs a reissue added. Nothing is logged when
+// the measurement failed or no certificate existed beforehand (a first issue).
+func logTransportCertReissue(logger logging.Logger, coverage cert.InternalServerSANCoverage, coverageErr error) {
+	if coverageErr != nil || !coverage.HasCurrent || coverage.Covered() {
+		return
+	}
+	logger.Info("Transport certificate reissued: configured SANs were not covered; superseded certificate retained in the store",
+		"added_dns_names", sanitizeLogValues(coverage.MissingDNSNames),
+		"added_ip_addresses", sanitizeLogValues(coverage.MissingIPAddresses))
+}
+
+// sanitizeLogValues joins values into one log-safe, comma-separated string.
+func sanitizeLogValues(values []string) string {
+	sanitized := make([]string, 0, len(values))
+	for _, v := range values {
+		sanitized = append(sanitized, logging.SanitizeLogValue(v))
+	}
+	return strings.Join(sanitized, ",")
 }
 
 // validateTransportExternalAddress refuses to start when the transport binds
@@ -5420,6 +5447,23 @@ func buildGRPCControlPlaneTLSConfig(cfg *config.Config, certManager *cert.Manage
 
 	// Set gRPC-over-QUIC ALPN (distinguishes control plane from data plane on same port)
 	tlsConfig.NextProtos = []string{quictransport.ALPNProtocol}
+
+	// Observe-only hook: a client that dials a name the served certificate does
+	// not cover fails its TLS name check on its own side and the controller sees
+	// nothing, so surface it here. Returning (nil, nil) makes crypto/tls fall
+	// back to Certificates, so the served certificate is unchanged.
+	if len(tlsConfig.Certificates) > 0 {
+		if served, parseErr := x509.ParseCertificate(tlsConfig.Certificates[0].Certificate[0]); parseErr == nil {
+			tlsConfig.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				if hello.ServerName != "" && served.VerifyHostname(hello.ServerName) != nil {
+					logger.Warn("TLS client hello server name is not covered by the served transport certificate",
+						"server_name", logging.SanitizeLogValue(hello.ServerName),
+						"serial", serverCert.SerialNumber)
+				}
+				return nil, nil
+			}
+		}
+	}
 
 	logger.Info("gRPC control plane TLS config created", "alpn", quictransport.ALPNProtocol)
 	return tlsConfig, nil
