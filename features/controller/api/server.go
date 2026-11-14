@@ -107,6 +107,8 @@ type Server struct {
 	apiKeyTombstones                map[string]time.Time                     // Issue #4574: key hash → deletion time for keys deleted on this node (guarded by mu, lazily made); blocks a racing load from re-caching a deleted key
 	emailMu                         sync.RWMutex                             // Issue #4710: guards emailNotifier and emailExtra
 	emailNotifier                   notifif.Notifier                         // Issue #4710: nil when email is not configured or the credential is absent
+	mspEmailSenderStore             *MSPEmailSenderStore                     // per-MSP email sender settings (set via SetMSPEmailSenderStore)
+	mspEmailExtra                   map[string]interface{}                   // extra provider keys for the MSP sender (tests only, same role as emailExtra)
 	emailExtra                      map[string]interface{}                   // Issue #4710: extra provider keys (tests only, e.g. root_ca_pem for an in-process SMTP server)
 	secretStore                     secretsif.SecretStore                    // M-AUTH-1: Central secrets provider for API keys
 	accounts                        map[string]*account                      // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
@@ -1855,6 +1857,22 @@ func (s *Server) HypervProfileConfigStore() cfgconfig.ConfigStore {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.hypervProfileConfigStore
+}
+
+// SetMSPEmailSenderStore wires the store holding each MSP tenant's email sender
+// settings. Call this after New() returns but before Start() is called.
+func (s *Server) SetMSPEmailSenderStore(st *MSPEmailSenderStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mspEmailSenderStore = st
+}
+
+// MSPEmailSenderStore returns the wired MSP email sender store, or nil when
+// unwired. Exposed so controller startup wiring can be regression-tested.
+func (s *Server) MSPEmailSenderStore() *MSPEmailSenderStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.mspEmailSenderStore
 }
 
 // SetContentApprovalStore wires the store that holds the approval mode of each

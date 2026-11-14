@@ -656,7 +656,7 @@ func wireHTTPFleetStores(httpServer *api.Server, storageManager *interfaces.Stor
 // wireHTTPConfigNamespaceStores binds the stores that live in namespaces of the
 // controller's config store: role configs and privileges (Issue #2543), hyperv
 // profiles (Issue #3785), library approval modes (Issue #5840), the unattended
-// rollout setting (Issue #6065) and steward binary approvals (Issue #6053). Without
+// rollout setting (Issue #6065), the per-MSP email sender (Issue #6241) and steward binary approvals (Issue #6053). Without
 // a config store their endpoints stay at 503 and the approval checks fail closed.
 func wireHTTPConfigNamespaceStores(httpServer *api.Server, cs cfgconfig.ConfigStore) error {
 	if cs == nil {
@@ -675,6 +675,11 @@ func wireHTTPConfigNamespaceStores(httpServer *api.Server, cs cfgconfig.ConfigSt
 		return fmt.Errorf("failed to create unattended rollout store: %w", err)
 	}
 	httpServer.SetUnattendedRolloutStore(unattendedStore)
+	mspEmailSenderStore, err := api.NewMSPEmailSenderStore(cs)
+	if err != nil {
+		return fmt.Errorf("failed to create MSP email sender store: %w", err)
+	}
+	httpServer.SetMSPEmailSenderStore(mspEmailSenderStore)
 	binaryApprovalStore, err := api.NewStewardBinaryApprovalStore(cs)
 	if err != nil {
 		return fmt.Errorf("failed to create steward binary approval store: %w", err)

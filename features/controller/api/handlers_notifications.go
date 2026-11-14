@@ -43,11 +43,31 @@ func (s *Server) emailConfig() *config.EmailConfig {
 // readEmailCredential reads the stored SMTP password. It addresses the secret by
 // its explicit (tenant, key) pair when the store supports it, so a key containing
 // "/" is never ambiguous and a change made on another controller node is seen.
-func (s *Server) readEmailCredential(ctx context.Context, key string) (*secretsif.Secret, error) {
+func (s *Server) readEmailCredential(ctx context.Context, tenantID, key string) (*secretsif.Secret, error) {
 	if ta, ok := s.secretStore.(secretsif.TenantSecretAccessor); ok {
-		return ta.GetTenantSecret(ctx, emailCredentialTenantID, key)
+		return ta.GetTenantSecret(ctx, tenantID, key)
 	}
-	return s.secretStore.GetSecret(ctx, emailCredentialTenantID+"/"+key)
+	return s.secretStore.GetSecret(ctx, tenantID+"/"+key)
+}
+
+// emailProviderConfig builds the provider config map shared by the controller-wide
+// and the per-MSP senders. A zero port leaves the provider default for the TLS
+// mode; the provider rejects a password without a username, so the password is
+// only passed with one.
+func emailProviderConfig(host, security, from string, port int, username, password string) map[string]interface{} {
+	pcfg := map[string]interface{}{
+		"host":     host,
+		"security": security,
+		"from":     from,
+	}
+	if port != 0 {
+		pcfg["port"] = port
+	}
+	if username != "" {
+		pcfg["username"] = username
+		pcfg["password"] = password
+	}
+	return pcfg
 }
 
 // emailCredentialPresent reports whether a password is stored under the
@@ -56,7 +76,7 @@ func (s *Server) emailCredentialPresent(ctx context.Context, ec *config.EmailCon
 	if ec == nil || ec.PasswordSecretKey == "" || s.secretStore == nil {
 		return false
 	}
-	sec, err := s.readEmailCredential(ctx, ec.PasswordSecretKey)
+	sec, err := s.readEmailCredential(ctx, emailCredentialTenantID, ec.PasswordSecretKey)
 	return err == nil && sec != nil && sec.Value != ""
 }
 
@@ -68,23 +88,11 @@ func (s *Server) buildEmailNotifier(ctx context.Context) (notifif.Notifier, erro
 	if !ec.Configured() || s.secretStore == nil {
 		return nil, nil
 	}
-	sec, err := s.readEmailCredential(ctx, ec.PasswordSecretKey)
+	sec, err := s.readEmailCredential(ctx, emailCredentialTenantID, ec.PasswordSecretKey)
 	if err != nil || sec == nil || sec.Value == "" {
 		return nil, nil
 	}
-	pcfg := map[string]interface{}{
-		"host":     ec.Host,
-		"security": ec.EffectiveTLSMode(),
-		"from":     ec.From,
-	}
-	if ec.Port != 0 {
-		pcfg["port"] = ec.Port
-	}
-	if ec.Username != "" {
-		pcfg["username"] = ec.Username
-		// The provider rejects a password without a username.
-		pcfg["password"] = sec.Value
-	}
+	pcfg := emailProviderConfig(ec.Host, ec.EffectiveTLSMode(), ec.From, ec.Port, ec.Username, sec.Value)
 	s.emailMu.RLock()
 	for k, v := range s.emailExtra {
 		pcfg[k] = v

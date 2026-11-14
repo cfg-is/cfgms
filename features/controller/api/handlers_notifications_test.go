@@ -216,7 +216,7 @@ func TestEmail_CredentialStoredOnlyInSecretStore_ThenTestSendDelivers(t *testing
 	require.NotNil(t, server.EmailNotifier(), "notifier is rebuilt when the credential is stored")
 
 	// Retrievable only through the secret store, under password_secret_key.
-	sec, err := server.readEmailCredential(context.Background(), testPasswordKey)
+	sec, err := server.readEmailCredential(context.Background(), emailCredentialTenantID, testPasswordKey)
 	require.NoError(t, err)
 	assert.Equal(t, testSMTPPassword, sec.Value)
 

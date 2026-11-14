@@ -31,6 +31,7 @@ func newBareAPIServer(t *testing.T) *api.Server {
 	require.Nil(t, srv.PrivilegeStore())
 	require.Nil(t, srv.HypervProfileConfigStore())
 	require.Nil(t, srv.ContentApprovalStore())
+	require.Nil(t, srv.MSPEmailSenderStore())
 	return srv
 }
 
@@ -47,6 +48,7 @@ func TestWireConfigStoreConsumers(t *testing.T) {
 		assert.Nil(t, srv.PrivilegeStore())
 		assert.Nil(t, srv.HypervProfileConfigStore())
 		assert.Nil(t, srv.ContentApprovalStore())
+		assert.Nil(t, srv.MSPEmailSenderStore())
 	})
 
 	t.Run("durable store wires all four consumers", func(t *testing.T) {
@@ -61,6 +63,24 @@ func TestWireConfigStoreConsumers(t *testing.T) {
 		assert.Same(t, cs, srv.HypervProfileConfigStore())
 		require.NotNil(t, srv.ContentApprovalStore(),
 			"script approval routes 503 when the content approval store is unwired")
+		require.NotNil(t, srv.MSPEmailSenderStore(),
+			"the MSP email sender store is unwired when wireHTTPConfigNamespaceStores drops it (Issue #6241)")
+	})
+
+	t.Run("MSP email sender store is built on the wired store", func(t *testing.T) {
+		srv := newBareAPIServer(t)
+		cs := pkgtesting.SetupTestStorage(t).GetConfigStore()
+		require.NoError(t, wireHTTPConfigNamespaceStores(srv, cs))
+
+		ctx := t.Context()
+		_, err := srv.MSPEmailSenderStore().Put(ctx, "msp-a", api.MSPEmailSender{Host: "smtp.acme-corp.example", From: "ops@acme-corp.example"}, "operator-1")
+		require.NoError(t, err)
+		other, err := api.NewMSPEmailSenderStore(cs)
+		require.NoError(t, err)
+		got, err := other.Get(ctx, "msp-a")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, "smtp.acme-corp.example", got.Host)
 	})
 
 	t.Run("content approval store is built on the wired store", func(t *testing.T) {
