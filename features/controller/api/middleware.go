@@ -1093,8 +1093,8 @@ func accountHoldsCredential(acct *account, id []byte, softwareCredentialsPermitt
 // requestAPIKey returns the API key presented on the request: the X-API-Key header,
 // or else the Authorization Bearer token. It returns "" when neither is present.
 func requestAPIKey(r *http.Request) string {
-	if apiKeyStr := r.Header.Get("X-API-Key"); apiKeyStr != "" {
-		return apiKeyStr
+	if presentedKey := r.Header.Get("X-API-Key"); presentedKey != "" {
+		return presentedKey
 	}
 	authHeader := r.Header.Get("Authorization")
 	if strings.HasPrefix(authHeader, "Bearer ") {
@@ -1659,19 +1659,19 @@ func webSessionPrincipal(webSess *session.Session, webAcct *account, scope sessi
 // authenticateAPIKey authenticates the X-API-Key or Bearer API key. It is the last
 // source: a request with no credential at all ends here as MISSING_API_KEY.
 func (s *Server) authenticateAPIKey(w http.ResponseWriter, r *http.Request) (*http.Request, authSourceOutcome) {
-	apiKeyStr := requestAPIKey(r)
-	if apiKeyStr == "" {
+	presentedKey := requestAPIKey(r)
+	if presentedKey == "" {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "API key required", "MISSING_API_KEY")
 		return r, authSourceRejected
 	}
 
 	// A grant credential is never an API key: the prefix is reserved for the grant path.
-	if strings.HasPrefix(apiKeyStr, automationGrantCredentialPrefix) {
+	if strings.HasPrefix(presentedKey, automationGrantCredentialPrefix) {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
 		return r, authSourceRejected
 	}
 
-	keyInfo, cached, ok := s.lookupRequestAPIKey(w, r, apiKeyStr)
+	keyInfo, cached, ok := s.lookupRequestKey(w, r, presentedKey)
 	if !ok {
 		return r, authSourceRejected
 	}
@@ -1683,7 +1683,7 @@ func (s *Server) authenticateAPIKey(w http.ResponseWriter, r *http.Request) (*ht
 		return r, authSourceRejected
 	}
 
-	keyInfo, ok = s.revalidateRequestAPIKey(w, r, apiKeyStr, keyInfo, cached, now)
+	keyInfo, ok = s.revalidateRequestAPIKey(w, r, presentedKey, keyInfo, cached, now)
 	if !ok {
 		return r, authSourceRejected
 	}
@@ -1709,19 +1709,19 @@ func (s *Server) authenticateAPIKey(w http.ResponseWriter, r *http.Request) (*ht
 	return r.WithContext(ctx), authSourceAuthenticated
 }
 
-// lookupRequestAPIKey finds the key in the memory cache, then (M-AUTH-1) the secret
+// lookupRequestKey finds the key in the memory cache, then (M-AUTH-1) the secret
 // store. cached reports a memory-cache hit. ok is false once a 401 has been written.
-func (s *Server) lookupRequestAPIKey(w http.ResponseWriter, r *http.Request, apiKeyStr string) (keyInfo *APIKey, cached, ok bool) {
+func (s *Server) lookupRequestKey(w http.ResponseWriter, r *http.Request, presentedKey string) (keyInfo *APIKey, cached, ok bool) {
 	// Check memory cache first
 	s.mu.RLock()
-	keyInfo, cached = s.apiKeys[apiKeyStr]
+	keyInfo, cached = s.keyCache[presentedKey]
 	s.mu.RUnlock()
 	if cached {
 		return keyInfo, true, true
 	}
 
 	// M-AUTH-1: If not in cache, try to load from secret store
-	loadedKey, err := s.loadAPIKeyFromStore(r.Context(), apiKeyStr)
+	loadedKey, err := s.loadKeyEntryFromStore(r.Context(), presentedKey)
 	if err != nil {
 		s.logger.Debug("Failed to load API key from store", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
@@ -1735,11 +1735,11 @@ func (s *Server) lookupRequestAPIKey(w http.ResponseWriter, r *http.Request, api
 // key deleted on another controller node stops authenticating here within that bound.
 // See apiKeyMaxStaleness for how a store outage is handled. ok is false once a response
 // has been written.
-func (s *Server) revalidateRequestAPIKey(w http.ResponseWriter, r *http.Request, apiKeyStr string, keyInfo *APIKey, cached bool, now time.Time) (*APIKey, bool) {
+func (s *Server) revalidateRequestAPIKey(w http.ResponseWriter, r *http.Request, presentedKey string, keyInfo *APIKey, cached bool, now time.Time) (*APIKey, bool) {
 	if !cached || keyInfo.recordRef == "" || now.Sub(keyInfo.validatedAt) < apiKeyRevalidateInterval {
 		return keyInfo, true
 	}
-	refreshed, err := s.revalidateCachedAPIKey(r.Context(), apiKeyStr, keyInfo, now)
+	refreshed, err := s.revalidateCachedAPIKey(r.Context(), presentedKey, keyInfo, now)
 	switch {
 	case err == nil:
 		return refreshed, true
@@ -1784,7 +1784,7 @@ func (s *Server) readAPIKeyRecord(ctx context.Context, tenantID, keyHash string)
 		rec, err = acc.GetTenantSecret(ctx, tenantID, keyHash)
 	} else {
 		// SecretStore lookup path (tenant + key hash), not the credential itself.
-		rec, err = s.secretStore.GetSecret(ctx, apiKeyStoreRef(tenantID, keyHash))
+		rec, err = s.secretStore.GetSecret(ctx, keyRecordRef(tenantID, keyHash))
 	}
 	if err != nil {
 		switch {
@@ -1806,8 +1806,8 @@ func (s *Server) readAPIKeyRecord(ctx context.Context, tenantID, keyHash string)
 	return rec, nil
 }
 
-// apiKeyFromSecret builds the cache entry for apiKey from its secret-store record.
-func apiKeyFromSecret(apiKey string, rec *secretsif.Secret, validatedAt time.Time) *APIKey {
+// keyFromRecord builds the cache entry for apiKey from its secret-store record.
+func keyFromRecord(apiKey string, rec *secretsif.Secret, validatedAt time.Time) *APIKey {
 	return &APIKey{
 		ID:          rec.Metadata["id"],
 		Key:         apiKey, // Store plaintext key in memory for fast lookup
@@ -1822,13 +1822,13 @@ func apiKeyFromSecret(apiKey string, rec *secretsif.Secret, validatedAt time.Tim
 	}
 }
 
-// M-AUTH-1: loadAPIKeyFromStore loads an API key from the secret store and caches it.
+// M-AUTH-1: loadKeyEntryFromStore loads an API key from the secret store and caches it.
 // Issue #4574: the key's tenant comes from the API-key index (no tenant name is
 // assumed), and the record itself is then read directly. An unknown key costs no store
 // access unless the index is older than apiKeyIndexMissRefreshFloor.
-func (s *Server) loadAPIKeyFromStore(ctx context.Context, apiKey string) (*APIKey, error) {
+func (s *Server) loadKeyEntryFromStore(ctx context.Context, apiKey string) (*APIKey, error) {
 	keyHash := hashAPIKey(apiKey)
-	entry, found, err := s.locateAPIKey(ctx, keyHash)
+	entry, found, err := s.locateKeyEntry(ctx, keyHash)
 	if err != nil {
 		return nil, fmt.Errorf("API key index refresh failed: %w", err)
 	}
@@ -1844,7 +1844,7 @@ func (s *Server) loadAPIKeyFromStore(ctx context.Context, apiKey string) (*APIKe
 		return nil, fmt.Errorf("API key not found in secret store")
 	}
 
-	keyInfo := apiKeyFromSecret(apiKey, rec, s.apiKeyNow())
+	keyInfo := keyFromRecord(apiKey, rec, s.apiKeyNow())
 
 	// Cache in memory for future requests — unless this node deleted the key while
 	// the record was being read (see cacheAPIKeyUnlessDeleted).
@@ -1871,16 +1871,16 @@ func (s *Server) revalidateCachedAPIKey(ctx context.Context, apiKey string, cach
 	}
 	if rec == nil {
 		s.mu.Lock()
-		delete(s.apiKeys, apiKey)
+		delete(s.keyCache, apiKey)
 		s.mu.Unlock()
 		s.apiKeyIdx.remove(cached.recordRef)
 		return nil, errAPIKeyRevoked
 	}
 
-	refreshed := apiKeyFromSecret(apiKey, rec, now)
+	refreshed := keyFromRecord(apiKey, rec, now)
 	if !s.cacheAPIKeyUnlessDeleted(apiKey, cached.recordRef, refreshed) {
 		s.mu.Lock()
-		delete(s.apiKeys, apiKey)
+		delete(s.keyCache, apiKey)
 		s.mu.Unlock()
 		return nil, errAPIKeyRevoked
 	}

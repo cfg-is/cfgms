@@ -114,11 +114,11 @@ func (f *rolloutCredFixture) mintGeneric(perms []string, extra map[string]interf
 func (f *rolloutCredFixture) principalFor(key string) *Principal {
 	f.tb.Helper()
 	f.srv.mu.RLock()
-	info := f.srv.apiKeys[key]
+	info := f.srv.keyCache[key]
 	f.srv.mu.RUnlock()
 	if info == nil {
 		var err error
-		info, err = f.srv.loadAPIKeyFromStore(f.tb.Context(), key)
+		info, err = f.srv.loadKeyEntryFromStore(f.tb.Context(), key)
 		require.NoError(f.tb, err)
 	}
 	return apiKeyPrincipal(info)
@@ -127,7 +127,7 @@ func (f *rolloutCredFixture) principalFor(key string) *Principal {
 // dropCache forgets every cached key and the key index, as a restart does.
 func (f *rolloutCredFixture) dropCache() {
 	f.srv.mu.Lock()
-	f.srv.apiKeys = map[string]*APIKey{}
+	f.srv.keyCache = map[string]*APIKey{}
 	f.srv.mu.Unlock()
 	f.srv.apiKeyIdx = newAPIKeyIndex()
 }
@@ -206,7 +206,7 @@ func TestCreateRolloutCredentialRequiresTap(t *testing.T) {
 	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp")
 	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `presence="required"`)
 	assert.Empty(t, auditEntriesByAction(t, f.srv, "rollout_credential_created"))
-	assert.Empty(t, f.srv.apiKeys, "a challenged request mints nothing")
+	assert.Empty(t, f.srv.keyCache, "a challenged request mints nothing")
 
 	assert.Equal(t, http.StatusCreated, f.post(rolloutBody(time.Now().Add(time.Hour)), p, true).Code)
 
@@ -239,10 +239,10 @@ func TestRolloutCredentialAuditsCreation(t *testing.T) {
 
 	// No audit manager, no credential.
 	f.srv.auditManager = nil
-	before := len(f.srv.apiKeys)
+	before := len(f.srv.keyCache)
 	rec = f.post(rolloutBody(expires), rolloutCredAdmin(), true)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
-	assert.Len(t, f.srv.apiKeys, before)
+	assert.Len(t, f.srv.keyCache, before)
 }
 
 func TestKindSurvivesRestartAndStoreReload(t *testing.T) {
@@ -255,7 +255,7 @@ func TestKindSurvivesRestartAndStoreReload(t *testing.T) {
 
 	// A restart: no cache, no index. The key loads from the store and keeps its kind.
 	f.dropCache()
-	loaded, err := f.srv.loadAPIKeyFromStore(t.Context(), key)
+	loaded, err := f.srv.loadKeyEntryFromStore(t.Context(), key)
 	require.NoError(t, err)
 	assert.Equal(t, "rollout", loaded.Kind)
 	assert.True(t, isRolloutCredential(apiKeyPrincipal(loaded)))
@@ -265,7 +265,7 @@ func TestKindSurvivesRestartAndStoreReload(t *testing.T) {
 	rec := f.callWithKey(f.srv.router, http.MethodGet, "/api/v1/installer/steward-binaries/1.0.0/linux/amd64", key, "")
 	assert.NotEqual(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
 	f.srv.mu.RLock()
-	cached := f.srv.apiKeys[key]
+	cached := f.srv.keyCache[key]
 	f.srv.mu.RUnlock()
 	require.NotNil(t, cached)
 	assert.Equal(t, "rollout", cached.Kind)
@@ -440,7 +440,7 @@ func TestCreateRolloutCredentialRefusesCallerWithoutPermissions(t *testing.T) {
 			assert.Contains(t, rec.Body.String(), "PERMISSION_ESCALATION")
 		})
 	}
-	assert.Empty(t, f.srv.apiKeys, "nothing is minted for a caller without the permissions")
+	assert.Empty(t, f.srv.keyCache, "nothing is minted for a caller without the permissions")
 	assert.Empty(t, auditEntriesByAction(t, f.srv, "rollout_credential_created"))
 
 	// Holding the create permission alone is not enough; an implicit admin is.
@@ -457,7 +457,7 @@ func TestRolloutCredentialRefusesOverLimitExpiry(t *testing.T) {
 	rec := f.post(rolloutBody(time.Now().Add(rolloutCredentialMaxExpiry+time.Hour)), rolloutCredAdmin(), true)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "EXPIRY_TOO_LONG")
-	assert.Empty(t, f.srv.apiKeys)
+	assert.Empty(t, f.srv.keyCache)
 	assert.Empty(t, auditEntriesByAction(t, f.srv, "rollout_credential_created"))
 
 	rec = f.post(rolloutBody(time.Now().Add(rolloutCredentialMaxExpiry-time.Hour)), rolloutCredAdmin(), true)
@@ -500,7 +500,7 @@ func TestRolloutCredentialReachIsLimited(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%s %s: %s", c.method, c.path, rec.Body.String())
 	}
 	f.srv.mu.RLock()
-	before := len(f.srv.apiKeys)
+	before := len(f.srv.keyCache)
 	f.srv.mu.RUnlock()
 	assert.Equal(t, 1, before, "the refused mint routes created no key")
 }

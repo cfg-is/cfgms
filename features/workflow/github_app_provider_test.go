@@ -362,9 +362,9 @@ func TestGitHubAppProvider_ExecuteOperation_E2E(t *testing.T) {
 
 	store := newEmptyTestSecretStore()
 	ctx := context.Background()
-	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: secretKeyGitHubAppID, Value: appID}))
-	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: secretKeyGitHubInstallationID, Value: installID}))
-	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: secretKeyGitHubPrivateKeyPEM, Value: string(privPEM)}))
+	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: storeKeyGitHubAppID, Value: appID}))
+	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: storeKeyGitHubInstallationID, Value: installID}))
+	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: storeKeyGitHubPrivateKeyPEM, Value: string(privPEM)}))
 
 	logger := logging.NewNoopLogger()
 	provider := NewGitHubAppProvider(store, logger, stubServer.Client())
@@ -438,9 +438,9 @@ func TestGitHubAppIntegration(t *testing.T) {
 
 	store := newEmptyTestSecretStore()
 	ctx := context.Background()
-	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: secretKeyGitHubAppID, Value: appID}))
-	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: secretKeyGitHubInstallationID, Value: installID}))
-	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: secretKeyGitHubPrivateKeyPEM, Value: pemRaw}))
+	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: storeKeyGitHubAppID, Value: appID}))
+	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: storeKeyGitHubInstallationID, Value: installID}))
+	require.NoError(t, store.StoreSecret(ctx, &secretsif.SecretRequest{Key: storeKeyGitHubPrivateKeyPEM, Value: pemRaw}))
 
 	logger := logging.NewNoopLogger()
 	provider := NewGitHubAppProvider(store, logger, nil)

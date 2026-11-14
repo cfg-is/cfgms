@@ -475,7 +475,7 @@ func TestTerminalWS_APIKeyRecheckFollowsKeyRevocation(t *testing.T) {
 	n := newWSNode(t)
 	key := &APIKey{ID: "k-1", Key: "terminal-test-key", Name: "k", TenantID: saTenant}
 	n.server.mu.Lock()
-	n.server.apiKeys[key.Key] = key
+	n.server.keyCache[key.Key] = key
 	n.server.mu.Unlock()
 	n.credRecheck = n.server.apiKeyRecheck(key)
 
@@ -485,7 +485,7 @@ func TestTerminalWS_APIKeyRecheckFollowsKeyRevocation(t *testing.T) {
 	assert.True(t, n.recheck(context.Background()))
 
 	n.server.mu.Lock()
-	delete(n.server.apiKeys, key.Key)
+	delete(n.server.keyCache, key.Key)
 	n.server.mu.Unlock()
 	assert.False(t, n.recheck(context.Background()), "a revoked API key must fail the re-check")
 }

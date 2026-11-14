@@ -194,9 +194,9 @@ func (ix *apiKeyIndex) refreshing() bool {
 	return ix.inflight != nil
 }
 
-// locateAPIKey returns the index entry for keyHash. On a miss it refreshes the index
+// locateKeyEntry returns the index entry for keyHash. On a miss it refreshes the index
 // — at most once per apiKeyIndexMissRefreshFloor across all callers — and looks again.
-func (s *Server) locateAPIKey(ctx context.Context, keyHash string) (apiKeyIndexEntry, bool, error) {
+func (s *Server) locateKeyEntry(ctx context.Context, keyHash string) (apiKeyIndexEntry, bool, error) {
 	if e, ok := s.apiKeyIdx.get(keyHash); ok {
 		return e, true, nil
 	}
@@ -211,8 +211,8 @@ func (s *Server) locateAPIKey(ctx context.Context, keyHash string) (apiKeyIndexE
 	return e, ok, nil
 }
 
-// locateAPIKeyByID is locateAPIKey keyed by the key's public ID.
-func (s *Server) locateAPIKeyByID(ctx context.Context, keyID string) (string, apiKeyIndexEntry, bool, error) {
+// locateKeyEntryByID is locateKeyEntry keyed by the key's public ID.
+func (s *Server) locateKeyEntryByID(ctx context.Context, keyID string) (string, apiKeyIndexEntry, bool, error) {
 	if h, e, ok := s.apiKeyIdx.findByID(keyID); ok {
 		return h, e, true, nil
 	}
@@ -257,6 +257,6 @@ func (s *Server) cacheAPIKeyUnlessDeleted(apiKey, keyHash string, key *APIKey) b
 	if at, dead := s.apiKeyTombstones[keyHash]; dead && s.apiKeyNow().Sub(at) < apiKeyTombstoneTTL {
 		return false
 	}
-	s.apiKeys[apiKey] = key
+	s.keyCache[apiKey] = key
 	return true
 }

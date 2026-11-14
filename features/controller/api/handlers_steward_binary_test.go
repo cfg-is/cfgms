@@ -353,7 +353,7 @@ func TestPublishEndpoint_RejectsCrossTenantPublish(t *testing.T) {
 	server, fix := setupStewardBinaryServer(t)
 
 	// Add an API key for tenant-b that only has installer:read, not installer:publish:steward.
-	server.apiKeys["cross-tenant-key"] = &APIKey{
+	server.keyCache["cross-tenant-key"] = &APIKey{
 		ID:          "cross-tenant-key-id",
 		Key:         "cross-tenant-key",
 		Permissions: []string{"installer:read"},

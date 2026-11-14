@@ -79,20 +79,20 @@ func newTestTriggerStore(t *testing.T) *sqlite.SQLiteTriggerStore {
 
 func testTriggerRecord(id, tenantID string) *business.TriggerRecord {
 	return &business.TriggerRecord{
-		ID:               id,
-		TenantID:         tenantID,
-		Name:             "on-push-" + id,
-		Type:             "webhook",
-		Status:           "active",
-		WorkflowName:     "deploy",
-		WebhookPath:      "/hooks/" + id,
-		WebhookMethod:    []string{"POST"},
-		BearerTokenRef:   "secrets/" + tenantID + "/" + id + "/bearer",
-		HMACSecretRef:    "secrets/" + tenantID + "/" + id + "/hmac",
-		APIKeyRef:        "",
-		BasicUsernameRef: "",
-		BasicPasswordRef: "",
-		ConfigPayload:    []byte(`{"timeout":30}`),
+		ID:                 id,
+		TenantID:           tenantID,
+		Name:               "on-push-" + id,
+		Type:               "webhook",
+		Status:             "active",
+		WorkflowName:       "deploy",
+		WebhookPath:        "/hooks/" + id,
+		WebhookMethod:      []string{"POST"},
+		BearerTokenRef:     "secrets/" + tenantID + "/" + id + "/bearer",
+		HMACSecretRef:      "secrets/" + tenantID + "/" + id + "/hmac",
+		APICredentialRef:   "",
+		BasicUsernameRef:   "",
+		BasicCredentialRef: "",
+		ConfigPayload:      []byte(`{"timeout":30}`),
 	}
 }
 
@@ -122,9 +122,9 @@ func TestSQLiteTriggerStoreCRUD(t *testing.T) {
 	assert.Equal(t, []string{"POST"}, got.WebhookMethod)
 	assert.Equal(t, "secrets/tenant-a/trig-001/bearer", got.BearerTokenRef)
 	assert.Equal(t, "secrets/tenant-a/trig-001/hmac", got.HMACSecretRef)
-	assert.Empty(t, got.APIKeyRef)
+	assert.Empty(t, got.APICredentialRef)
 	assert.Empty(t, got.BasicUsernameRef)
-	assert.Empty(t, got.BasicPasswordRef)
+	assert.Empty(t, got.BasicCredentialRef)
 	assert.Equal(t, []byte(`{"timeout":30}`), got.ConfigPayload)
 	assert.False(t, got.CreatedAt.IsZero())
 	assert.False(t, got.UpdatedAt.IsZero())

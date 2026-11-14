@@ -433,7 +433,7 @@ func TestRebootWindowPermissions_GrantableThroughCreateAPIKey(t *testing.T) {
 
 	// The key really is scoped: it must not inherit unrelated authority.
 	server.mu.RLock()
-	stored := server.apiKeys[created.Data.Key]
+	stored := server.keyCache[created.Data.Key]
 	server.mu.RUnlock()
 	require.NotNil(t, stored, "created key must be registered for authentication")
 	assert.NotNil(t, stored.Permissions,

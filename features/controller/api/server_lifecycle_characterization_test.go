@@ -262,7 +262,7 @@ func TestServerlifecycleChar_New_WiresServerState(t *testing.T) {
 	assert.NotNil(t, server.apiKeyIdx)
 	assert.NotNil(t, server.approvalHook)
 	assert.NotNil(t, server.popVerifier)
-	assert.NotNil(t, server.apiKeys)
+	assert.NotNil(t, server.keyCache)
 	assert.Equal(t, defaultRolloutHaltPollInterval, server.rolloutHaltPollInterval)
 	assert.Equal(t, defaultDecommissionTimeout, server.decommissionTimeout)
 
@@ -293,7 +293,7 @@ func TestServerlifecycleChar_New_SeedTestAPIKeys(t *testing.T) {
 	apiKey := func(server *Server, key string) *APIKey {
 		server.mu.RLock()
 		defer server.mu.RUnlock()
-		return server.apiKeys[key]
+		return server.keyCache[key]
 	}
 
 	t.Run("not seeded unless explicitly requested", func(t *testing.T) {

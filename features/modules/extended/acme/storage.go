@@ -101,13 +101,13 @@ func (s *ACMECertStore) emailHash(email string) string {
 	return hash[:16]
 }
 
-// accountSecretKey returns the secret store key for an ACME account private key.
-func (s *ACMECertStore) accountSecretKey(email string) string {
+// accountRecordName returns the secret store key for an ACME account private key.
+func (s *ACMECertStore) accountRecordName(email string) string {
 	return "acme/account-key/" + s.emailHash(email)
 }
 
-// accountDataSecretKey returns the secret store key for ACME account registration data.
-func (s *ACMECertStore) accountDataSecretKey(email string) string {
+// accountDataRecordName returns the secret store key for ACME account registration data.
+func (s *ACMECertStore) accountDataRecordName(email string) string {
 	return "acme/account/" + s.emailHash(email)
 }
 
@@ -148,7 +148,7 @@ func (s *ACMECertStore) StoreAccount(email string, data *AccountData) error {
 	}
 
 	return s.secretStore.StoreSecret(context.Background(), &secretsinterfaces.SecretRequest{
-		Key:         s.accountDataSecretKey(email),
+		Key:         s.accountDataRecordName(email),
 		Value:       string(accountJSON),
 		Metadata:    map[string]string{"type": "acme-account-data"},
 		Tags:        []string{"acme", "account"},
@@ -163,13 +163,13 @@ func (s *ACMECertStore) LoadAccount(email string) (*AccountData, error) {
 		return nil, fmt.Errorf("secret store not configured: cannot load account data without encryption")
 	}
 
-	secret, err := s.secretStore.GetSecret(context.Background(), s.accountDataSecretKey(email))
+	record, err := s.secretStore.GetSecret(context.Background(), s.accountDataRecordName(email))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read account data from secret store: %w", err)
 	}
 
 	var account AccountData
-	if err := json.Unmarshal([]byte(secret.Value), &account); err != nil {
+	if err := json.Unmarshal([]byte(record.Value), &account); err != nil {
 		return nil, fmt.Errorf("failed to parse account data: %w", err)
 	}
 	return &account, nil
@@ -180,7 +180,7 @@ func (s *ACMECertStore) AccountExists(email string) bool {
 	if s.secretStore == nil {
 		return false
 	}
-	_, err := s.secretStore.GetSecretMetadata(context.Background(), s.accountSecretKey(email))
+	_, err := s.secretStore.GetSecretMetadata(context.Background(), s.accountRecordName(email))
 	return err == nil
 }
 
@@ -190,7 +190,7 @@ func (s *ACMECertStore) StoreAccountKey(email string, keyPEM []byte) error {
 		return fmt.Errorf("secret store not configured: cannot store account key without encryption")
 	}
 	return s.secretStore.StoreSecret(context.Background(), &secretsinterfaces.SecretRequest{
-		Key:         s.accountSecretKey(email),
+		Key:         s.accountRecordName(email),
 		Value:       string(keyPEM),
 		Metadata:    map[string]string{"type": "acme-account-key"},
 		Tags:        []string{"acme", "account-key"},
@@ -204,11 +204,11 @@ func (s *ACMECertStore) LoadAccountKey(email string) ([]byte, error) {
 	if s.secretStore == nil {
 		return nil, fmt.Errorf("secret store not configured: cannot load account key without encryption")
 	}
-	secret, err := s.secretStore.GetSecret(context.Background(), s.accountSecretKey(email))
+	record, err := s.secretStore.GetSecret(context.Background(), s.accountRecordName(email))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read account key from secret store: %w", err)
 	}
-	return []byte(secret.Value), nil
+	return []byte(record.Value), nil
 }
 
 // GetBasePath returns the base storage path
