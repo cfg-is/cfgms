@@ -80,7 +80,11 @@ func (m *manager) issue(ctx context.Context, principalID, connectionName, tenant
 		return nil, "", err
 	}
 	hash := HashToken(token)
-	now := m.clockFn()
+	// The set-once fields are compared with the stored row on every cache hit
+	// (mergeStored). A durable store keeps timestamps to the microsecond (a Postgres
+	// timestamptz column), so they start at that precision here; otherwise the cached
+	// copy never equals its own row and every request after issue is refused.
+	now := m.clockFn().Round(time.Microsecond)
 	sess := &Session{
 		ID:                uuid.New().String(),
 		PrincipalID:       principalID,
@@ -88,7 +92,7 @@ func (m *manager) issue(ctx context.Context, principalID, connectionName, tenant
 		TenantID:          tenantID,
 		IssuedAt:          now,
 		LastActivity:      now,
-		AbsoluteExpiresAt: now.Add(m.cfg.AbsoluteTimeout),
+		AbsoluteExpiresAt: now.Add(m.cfg.AbsoluteTimeout).Round(time.Microsecond),
 		// All Manager-issued sessions are human sessions. Assurance starts at Basic;
 		// it is upgraded to Strong by a successful WebAuthn assertion (later story).
 		Assurance:  AssuranceBasic,
