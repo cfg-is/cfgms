@@ -117,24 +117,6 @@ func (s *roTransport) BulkTransfer(grpc.BidiStreamingServer[transportpb.BulkChun
 	return status.Error(codes.Unavailable, "no bulk")
 }
 
-// logEntries returns a copy of every log entry received so far.
-func (s *roServer) logEntries() []*transportpb.LogEntry {
-	s.logMu.Lock()
-	defer s.logMu.Unlock()
-	return append([]*transportpb.LogEntry(nil), s.logSeen...)
-}
-
-// receivedRepairFlush reports whether a repair_flush entry for the named file
-// has reached the controller.
-func (s *roServer) receivedRepairFlush(file string) bool {
-	for _, e := range s.logEntries() {
-		if e.GetFields()["source"] == "repair_flush" && e.GetFields()["file"] == file {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *roTransport) LogStream(stream grpc.ClientStreamingServer[transportpb.LogEntry, transportpb.LogStreamResponse]) error {
 	for {
 		entry, err := stream.Recv()
