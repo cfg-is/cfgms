@@ -208,20 +208,22 @@ func (s *Server) notifyTenantAdmins(ctx context.Context, rule emailSenderRule, t
 
 // logSenderFailure logs a failed send. A failure on an MSP sender is an error
 // that names the MSP tenant, so its administrators can find and fix their sender;
-// it never carries the password.
+// it carries a classified failure kind, never the raw error text, so it cannot
+// carry the password.
 func (s *Server) logSenderFailure(ctx context.Context, msg string, source emailSenderSource, tenantID string, err error) {
+	kind := emailSendFailureKind(err)
 	if source == emailSourceMSP && s.tenantManager != nil {
 		s.logger.Error(msg,
 			"sender", string(source),
 			"msp_tenant_id", logging.SanitizeLogValue(s.tenantManager.ResolveOwningMSPID(ctx, tenantID)),
 			"tenant_id", logging.SanitizeLogValue(tenantID),
-			"error", logging.SanitizeLogValue(err.Error()))
+			"failure", kind)
 		return
 	}
 	s.logger.Warn(msg,
 		"sender", string(source),
 		"tenant_id", logging.SanitizeLogValue(tenantID),
-		"error", logging.SanitizeLogValue(err.Error()))
+		"failure", kind)
 }
 
 // tamperSendOutcome classifies a Send result: no accepted recipient is a

@@ -4,6 +4,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"testing"
@@ -245,6 +247,8 @@ func TestTamperAlert_FailedMSPSendIsNotRetriedOnPlatform(t *testing.T) {
 			logged := f.logs.captured()
 			assert.Contains(t, logged, "ERROR Tamper notification email failed")
 			assert.Contains(t, logged, "msp_tenant_id msp-a")
+			assert.Contains(t, logged, "failure ")
+			assert.NotContains(t, logged, "error ", "the raw send error is not logged, only its kind")
 			assert.NotContains(t, logged, wrongPassword)
 			assert.NotContains(t, logged, testSMTPPassword)
 		})
@@ -328,4 +332,28 @@ func TestTamperAlert_UsesRealAlarmPath(t *testing.T) {
 
 	assert.Len(t, f.msp.Messages(), 1)
 	assert.Empty(t, f.platform.Messages())
+}
+
+func TestEmailSendFailureKind(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		want string
+	}{
+		"nil":                {nil, emailFailOther},
+		"deadline":           {fmt.Errorf("wrapped: %w", context.DeadlineExceeded), emailFailTimeout},
+		"canceled":           {context.Canceled, emailFailCanceled},
+		"provider timeout":   {errors.New("smtp: dial failed: timed out"), emailFailTimeout},
+		"provider canceled":  {errors.New("smtp: auth failed: canceled"), emailFailCanceled},
+		"certificate":        {errors.New("smtp: dial failed: server certificate verification failed"), emailFailCertificate},
+		"server reply":       {errors.New("smtp: auth failed: server replied with code 535"), emailFailRejected},
+		"unclassified":       {errors.New("smtp: dial failed"), emailFailOther},
+		"credential in text": {errors.New("login user=ops password=hunter2 refused"), emailFailOther},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := emailSendFailureKind(tc.err)
+			assert.Equal(t, tc.want, got)
+			assert.NotContains(t, got, "hunter2")
+		})
+	}
 }

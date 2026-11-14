@@ -81,7 +81,7 @@ func (s *Server) sendBreakGlassEmail(ctx context.Context, crossing *business.Ten
 		s.logger.Warn("Break-glass notification email failed",
 			"sender", string(source),
 			"tenant_id", logging.SanitizeLogValue(crossing.TenantID),
-			"error", logging.SanitizeLogValue(err.Error()))
+			"failure", emailSendFailureKind(err))
 	}
 	switch {
 	case accepted == 0:

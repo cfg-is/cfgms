@@ -4,6 +4,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"strings"
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	notifif "github.com/cfgis/cfgms/pkg/notification/interfaces"
@@ -68,4 +70,44 @@ func (s *Server) resolveEmailSender(ctx context.Context, rule emailSenderRule, t
 		return n, emailSourcePlatform
 	}
 	return nil, emailSourceNone
+}
+
+// Send failure kinds. They are the only text a failed send contributes to a log
+// line: a fixed vocabulary, so no SMTP reply text, host detail or credential
+// material from the error chain can reach the log.
+const (
+	emailFailTimeout     = "timeout"
+	emailFailCanceled    = "canceled"
+	emailFailCertificate = "server_certificate_verification"
+	emailFailRejected    = "server_rejected"
+	emailFailOther       = "delivery_failed"
+)
+
+// emailSendFailureKind classifies a Send error into one of the fixed
+// emailFail* kinds. The SMTP provider builds its errors from a stage name and a
+// reply code only; classifying here keeps that contract from being the only
+// thing standing between a credential and the log.
+func emailSendFailureKind(err error) string {
+	if err == nil {
+		return emailFailOther
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return emailFailTimeout
+	}
+	if errors.Is(err, context.Canceled) {
+		return emailFailCanceled
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "timed out"):
+		return emailFailTimeout
+	case strings.Contains(msg, "canceled"):
+		return emailFailCanceled
+	case strings.Contains(msg, "certificate verification failed"):
+		return emailFailCertificate
+	case strings.Contains(msg, "server replied with code"):
+		return emailFailRejected
+	default:
+		return emailFailOther
+	}
 }
