@@ -152,7 +152,7 @@ func newEmailTestServer(t *testing.T, smtp *emailTestSMTPServer) *Server {
 	server := setupTestServer(t)
 	server.cfg.Notifications = &config.NotificationsConfig{Email: &config.EmailConfig{
 		Provider: "smtp", Host: "localhost", Port: smtp.Port, From: "cfgms@acme-corp.example",
-		Username: testSMTPUser, TLSMode: "implicit_tls", PasswordSecretKey: testPasswordKey,
+		Username: testSMTPUser, TLSMode: "implicit_tls", CredentialSecretRef: testPasswordKey,
 	}}
 	server.emailExtra = map[string]interface{}{"root_ca_pem": smtp.CAPEM}
 	server.initEmailNotifier(context.Background())
@@ -216,7 +216,7 @@ func TestEmail_CredentialStoredOnlyInSecretStore_ThenTestSendDelivers(t *testing
 	require.NotNil(t, server.EmailNotifier(), "notifier is rebuilt when the credential is stored")
 
 	// Retrievable only through the secret store, under password_secret_key.
-	sec, err := server.readEmailCredential(context.Background(), testPasswordKey)
+	sec, err := server.readEmailCredential(context.Background(), emailCredentialTenantID, testPasswordKey)
 	require.NoError(t, err)
 	assert.Equal(t, testSMTPPassword, sec.Value)
 
