@@ -4,6 +4,8 @@ package server
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -244,6 +246,14 @@ func TestSignalDocMatchesRegistry(t *testing.T) {
 	}))
 	require.Error(t, srv.commandPublisher.PublishCommandWithID(ctx, "cmd-doc-2", "steward-gone", types.CommandSyncDNA, nil))
 
+	// The API request signals register on the first request through the real API
+	// handler, so send one before scraping. /api/v1/health needs no credential.
+	apiSrv := srv.GetAPIServer()
+	require.NotNil(t, apiSrv, "the server must have built its API handler")
+	rec := httptest.NewRecorder()
+	apiSrv.GetRouter().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/health", nil))
+	require.Equal(t, http.StatusOK, rec.Code, "the seed request must be served")
+
 	// The first collector tick samples the storage probe and heartbeat gauge.
 	var scraped map[string]*scrapedSignal
 	require.Eventually(t, func() bool {
@@ -284,7 +294,12 @@ func TestSignalDocMatchesRegistry(t *testing.T) {
 	}
 
 	// Every observed value of a closed label set is listed in the label tables.
-	for _, name := range []string{"cfgms_command_send_total", "cfgms_command_completion_seconds"} {
+	for _, name := range []string{
+		"cfgms_command_send_total", "cfgms_command_completion_seconds",
+		"cfgms_api_requests_total", "cfgms_api_request_duration_seconds",
+	} {
+		require.NotNil(t, scraped[name], "%s must be registered once an API request has been served", name)
+		require.True(t, scraped[name].hasSeries, "%s must have a series from the seed request", name)
 		for label, values := range scraped[name].labelValues {
 			for v := range values {
 				assert.Contains(t, doc, "`"+v+"`", "%s: %s value %q is not documented", name, label, v)
@@ -293,6 +308,8 @@ func TestSignalDocMatchesRegistry(t *testing.T) {
 	}
 	require.True(t, scraped["cfgms_command_send_total"].labelValues["outcome"]["sent"])
 	require.True(t, scraped["cfgms_command_send_total"].labelValues["outcome"]["send_failed"])
+	require.True(t, scraped["cfgms_api_requests_total"].labelValues["route_class"]["health"])
+	require.True(t, scraped["cfgms_api_requests_total"].labelValues["status_class"]["2xx"])
 
 	// The built-in collector series must not be listed as registered signals.
 	for _, cells := range tableRows(t, doc, "### Built-in collector series") {
