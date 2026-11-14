@@ -80,7 +80,10 @@ event before the next:
    already trusts the shared key.
 2. Otherwise the same push signed by each legacy migration signer in turn. The first that
    completes is the key the steward trusts. A steward drops a command signed by an untrusted
-   key silently, so each candidate is bounded by a 10 second timeout.
+   key silently, so each candidate is bounded by a 10 second timeout. A push carries the
+   signer's certificate chain, built from the certificates this node stores. A legacy
+   candidate whose certificate the node does not store cannot be chained: it is skipped
+   with one warning that names its serial, and the next candidate is tried.
 3. A confirmation push signed by the shared key. Its completion proves the steward trusts
    the shared key.
 4. The confirmation is recorded in the acknowledgement store (keyed by steward and shared

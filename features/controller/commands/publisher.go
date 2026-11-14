@@ -11,6 +11,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -333,6 +334,21 @@ func (p *Publisher) currentTerm() uint64 {
 	return p.termSource.GetTerm()
 }
 
+// ErrSignerChainUnavailable is matched (errors.Is) by the error a publish returns
+// when the signer's certificate chain could not be built and so nothing was sent.
+// A caller choosing among candidate signers can skip such a signer.
+var ErrSignerChainUnavailable = errors.New("signer certificate chain unavailable")
+
+// signerChainError carries the chain builder's own message and matches
+// ErrSignerChainUnavailable.
+type signerChainError struct{ err error }
+
+func (e *signerChainError) Error() string { return e.err.Error() }
+
+func (e *signerChainError) Unwrap() error { return e.err }
+
+func (e *signerChainError) Is(target error) bool { return target == ErrSignerChainUnavailable }
+
 // signCommandWith wraps cmd in a SignedCommand, signing with the provided signer when
 // non-nil. Every command is signed over the v2 payload by
 // controlplaneTypes.SignCommand, the same path the dispatcher and relay handler use.
@@ -354,7 +370,7 @@ func (p *Publisher) signCommandWith(cmd *controlplaneTypes.Command, signer signa
 		p.logger.Error("Signer certificate chain unavailable; command not sent",
 			"command_type", string(cmd.Type),
 			"error", logging.SanitizeLogValue(err.Error()))
-		return nil, fmt.Errorf("attach signer chain: %w", err)
+		return nil, fmt.Errorf("attach signer chain: %w", &signerChainError{err: err})
 	}
 	return sc, nil
 }

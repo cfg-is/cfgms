@@ -86,6 +86,24 @@ func TestPublisher_SignCommand_AttachesChainAndFailsClosed(t *testing.T) {
 	sc, err = failing.signCommand(cmd)
 	require.Error(t, err)
 	assert.Nil(t, sc)
+	assert.ErrorIs(t, err, ErrSignerChainUnavailable, "a chain failure is identifiable by the caller")
+	assert.Contains(t, err.Error(), "boom", "the chain builder's message is kept")
+}
+
+func TestPublisher_SignCommand_NonChainFailureIsNotAChainError(t *testing.T) {
+	m := newChainTestManager(t)
+	cmd := &controlplaneTypes.Command{ID: "c2", Type: controlplaneTypes.CommandSyncDNA, StewardID: "s1"}
+	p := &Publisher{signer: failingSigner{}, signerChains: signerchain.NewSignerChainBuilder(m), logger: logging.NewNoopLogger()}
+	_, err := p.signCommand(cmd)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrSignerChainUnavailable)
+}
+
+// failingSigner cannot sign.
+type failingSigner struct{ signature.Signer }
+
+func (failingSigner) Sign([]byte) (*signature.ConfigSignature, error) {
+	return nil, errors.New("sign refused")
 }
 
 func TestPublisher_ExplicitSignerChainIgnoresOverlapWindowButDefaultFailsClosed(t *testing.T) {

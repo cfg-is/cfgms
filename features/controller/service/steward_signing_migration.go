@@ -386,6 +386,9 @@ func (s *StewardSigningMigrationService) currentPlan(ctx context.Context) (*migr
 		s.mu.Unlock()
 		return nil, nil
 	}
+	if err = s.storeSharedCert(); err != nil {
+		return nil, err
+	}
 	plan, err := s.buildPlan(set)
 	if err != nil {
 		return nil, err
@@ -394,6 +397,19 @@ func (s *StewardSigningMigrationService) currentPlan(ctx context.Context) (*migr
 	s.plan = plan
 	s.mu.Unlock()
 	return plan, nil
+}
+
+// storeSharedCert makes sure this node's certificate store holds the shared
+// signing certificate. The signer chain a push carries is built from that store,
+// and a node that joined after the election has not stored the shared certificate
+// yet: resolving the current signing identity stores it, as the controller's
+// dynamic signer does on its first use. Without it step 1 could not be sent from
+// such a node.
+func (s *StewardSigningMigrationService) storeSharedCert() error {
+	if _, err := s.certManager.GetCurrentCertForPurpose(cert.PurposeSigning); err != nil {
+		return fmt.Errorf("resolve shared signing certificate: %w", err)
+	}
+	return nil
 }
 
 func (s *StewardSigningMigrationService) buildPlan(set *cert.SigningMigrationSet) (*migrationPlan, error) {
@@ -495,13 +511,7 @@ func (s *StewardSigningMigrationService) process(ctx context.Context, stewardID 
 
 	if !s.deliver(ctx, publisher, stewardID, plan.pushParams(false), plan.sharedSigner) {
 		// The steward does not (yet) trust the shared key: find the legacy key it does.
-		proven := false
-		for _, l := range plan.legacy {
-			if s.deliver(ctx, publisher, stewardID, plan.pushParams(false), l.signer) {
-				proven = true
-				break
-			}
-		}
+		proven := s.proveWithLegacy(ctx, publisher, stewardID, plan)
 		if !proven {
 			s.logger.Warn("steward signing migration: no candidate key delivered the shared certificate; steward left unconfirmed",
 				"steward_id", logging.SanitizeLogValue(stewardID),
@@ -525,6 +535,26 @@ func (s *StewardSigningMigrationService) process(ctx context.Context, stewardID 
 		return
 	}
 	s.retire(ctx, publisher, plan, stewardID)
+}
+
+// proveWithLegacy tries each legacy candidate key in turn and reports whether the
+// steward completed a push signed by one of them, which proves it trusts that key.
+func (s *StewardSigningMigrationService) proveWithLegacy(ctx context.Context, publisher *commands.Publisher, stewardID string, plan *migrationPlan) bool {
+	for _, l := range plan.legacy {
+		outcome := s.attempt(ctx, publisher, stewardID, plan.pushParams(false), l.signer)
+		if outcome == deliverChainUnavailable {
+			// A candidate whose certificate this node cannot chain is not a
+			// reason to stop: the steward may trust another candidate.
+			s.logger.Warn("steward signing migration: skipping a legacy candidate whose signer certificate chain is unavailable",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"legacy_serial", logging.SanitizeLogValue(l.serial))
+			continue
+		}
+		if outcome == deliverCompleted {
+			return true
+		}
+	}
+	return false
 }
 
 // retire pushes, signed by the shared key, the retirement of every legacy
@@ -567,31 +597,68 @@ func holdCeiling(stepTimeout time.Duration) time.Duration {
 // (a late completion or failure event, or the hold ceiling), so a slow steward cannot let a worker send the next command while
 // the first is still outstanding.
 func (s *StewardSigningMigrationService) deliver(ctx context.Context, publisher *commands.Publisher, stewardID string, params map[string]interface{}, signer signature.Signer) bool {
+	outcome := s.attempt(ctx, publisher, stewardID, params, signer)
+	if outcome == deliverChainUnavailable {
+		s.logger.Warn("steward signing migration: could not send push; the signer certificate chain is unavailable",
+			"steward_id", logging.SanitizeLogValue(stewardID))
+	}
+	return outcome == deliverCompleted
+}
+
+// deliverOutcome is how one push_signing_cert attempt ended.
+type deliverOutcome int
+
+const (
+	// deliverFailed covers a send error, a failure event and the step timeout.
+	deliverFailed deliverOutcome = iota
+	// deliverCompleted means the steward completed the command.
+	deliverCompleted
+	// deliverChainUnavailable means the signer's certificate chain could not be
+	// built, so nothing was sent.
+	deliverChainUnavailable
+)
+
+// acquireSlot takes one of the service's command slots, when it limits them, and
+// returns the function that frees it. It reports false when ctx ends first.
+func (s *StewardSigningMigrationService) acquireSlot(ctx context.Context, timeout time.Duration) (func(), bool) {
 	s.mu.Lock()
-	timeout := s.stepTimeout
 	slots := s.slots
 	s.mu.Unlock()
+	if slots == nil {
+		return func() {}, true
+	}
+	select {
+	case slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, false
+	}
+	// The publisher stops its timer on any event naming the command, so a steward
+	// that acknowledged receipt and then stalled would hold the slot for good
+	// without this ceiling. It is started before the publish so every callback
+	// sees it, and stopped by release so no timer outlives its command.
+	var once sync.Once
+	var holdTimer *time.Timer
+	release := func() {
+		once.Do(func() {
+			holdTimer.Stop()
+			<-slots
+		})
+	}
+	holdTimer = time.AfterFunc(holdCeiling(timeout), func() { release() })
+	return release, true
+}
 
-	release := func() {}
-	if slots != nil {
-		select {
-		case slots <- struct{}{}:
-		case <-ctx.Done():
-			return false
-		}
-		// The publisher stops its timer on any event naming the command, so a steward
-		// that acknowledged receipt and then stalled would hold the slot for good
-		// without this ceiling. It is started before the publish so every callback
-		// sees it, and stopped by release so no timer outlives its command.
-		var once sync.Once
-		var holdTimer *time.Timer
-		release = func() {
-			once.Do(func() {
-				holdTimer.Stop()
-				<-slots
-			})
-		}
-		holdTimer = time.AfterFunc(holdCeiling(timeout), func() { release() })
+// attempt is deliver reporting how the attempt ended. A send error other than an
+// unavailable signer chain is logged here; the chain failure is left to the caller,
+// which knows whether the signer is a candidate it can skip.
+func (s *StewardSigningMigrationService) attempt(ctx context.Context, publisher *commands.Publisher, stewardID string, params map[string]interface{}, signer signature.Signer) deliverOutcome {
+	s.mu.Lock()
+	timeout := s.stepTimeout
+	s.mu.Unlock()
+
+	release, ok := s.acquireSlot(ctx, timeout)
+	if !ok {
+		return deliverFailed
 	}
 
 	result := make(chan bool, 1)
@@ -627,26 +694,36 @@ func (s *StewardSigningMigrationService) deliver(ctx context.Context, publisher 
 		})
 	if err != nil {
 		release()
+		if errors.Is(err, commands.ErrSignerChainUnavailable) {
+			return deliverChainUnavailable
+		}
 		s.logger.Warn("steward signing migration: could not send push",
 			"steward_id", logging.SanitizeLogValue(stewardID),
 			"error", logging.SanitizeLogValue(err.Error()))
-		return false
+		return deliverFailed
 	}
 	defer func() {
 		if ctx.Err() != nil {
 			release()
 		}
 	}()
+	return awaitOutcome(ctx, result, timeout)
+}
+
+// awaitOutcome waits for the steward's terminal event, the step timeout or ctx,
+// whichever comes first. Only a completion event reports deliverCompleted.
+func awaitOutcome(ctx context.Context, result <-chan bool, timeout time.Duration) deliverOutcome {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case ok := <-result:
-		return ok
+	case completed := <-result:
+		if completed {
+			return deliverCompleted
+		}
 	case <-timer.C:
-		return false
 	case <-ctx.Done():
-		return false
 	}
+	return deliverFailed
 }
 
 // Progress reports how many of the fleet's stewards have confirmed the shared
