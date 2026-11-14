@@ -345,7 +345,7 @@ func TestRootReadPolicy_EndToEnd(t *testing.T) {
 
 	t.Run("4 break-glass with email not configured", func(t *testing.T) {
 		e := newE2ERootRead(t)
-		require.Nil(t, e.server.EmailNotifier(), "email must be unconfigured for this scenario")
+		require.Nil(t, e.server.platformEmailNotifier(), "email must be unconfigured for this scenario")
 		token := e.rootSession(t, "e2e-root-noemail")
 
 		rec := e.breakGlass(t, token, "security_incident")

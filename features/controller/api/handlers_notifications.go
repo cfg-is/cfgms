@@ -249,6 +249,17 @@ type emailTestResponse struct {
 	FailureReason string               `json:"failure_reason,omitempty"`
 }
 
+// emailTestFailureReason is the sanitized reason a test send failed.
+func emailTestFailureReason(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "delivery timed out"
+	}
+	if msg := logging.SanitizeLogValue(err.Error()); msg != "" {
+		return msg
+	}
+	return "delivery failed"
+}
+
 // handleTestEmail handles POST /api/v1/notifications/email/test. It sends a
 // fixed message to the configured from-address. Neither the recipient nor any
 // content comes from the request, so no request value reaches the message.
@@ -273,7 +284,7 @@ func (s *Server) handleTestEmail(w http.ResponseWriter, r *http.Request) {
 	// The recipient is the controller's own configured from-address.
 	recipient := ec.From
 
-	n := s.EmailNotifier()
+	n, _ := s.resolveEmailSender(r.Context(), emailRulePlatformOnly, "")
 	if n == nil {
 		s.writeErrorResponse(w, http.StatusConflict, "email delivery is not configured or its credential has not been stored", "EMAIL_NOT_CONFIGURED")
 		return
@@ -285,13 +296,7 @@ func (s *Server) handleTestEmail(w http.ResponseWriter, r *http.Request) {
 	resp := emailTestResponse{Recipients: []emailTestRecipient{}}
 	if err != nil {
 		s.logger.Warn("Email test send failed", "error", logging.SanitizeLogValue(err.Error()))
-		reason := "delivery failed"
-		if errors.Is(err, context.DeadlineExceeded) {
-			reason = "delivery timed out"
-		} else if msg := logging.SanitizeLogValue(err.Error()); msg != "" {
-			reason = msg
-		}
-		resp.FailureReason = reason
+		resp.FailureReason = emailTestFailureReason(err)
 		s.writeSuccessResponse(w, resp)
 		return
 	}

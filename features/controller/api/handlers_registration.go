@@ -2094,7 +2094,7 @@ func (s *Server) announceLockedAdmission(parent context.Context, token *registra
 	go func() {
 		defer s.crossingNotifyWG.Done()
 		defer cancel()
-		outcome := s.notifyTenantAdmins(ctx, token.TenantID, func() bool { return true },
+		outcome, source := s.notifyTenantAdmins(ctx, emailRuleOwningMSPWithPlatformFallback, token.TenantID, func() bool { return true },
 			func(contacts []string) notifif.Message {
 				label := headerSafe(token.Label)
 				return notifif.Message{
@@ -2118,7 +2118,8 @@ func (s *Server) announceLockedAdmission(parent context.Context, token *registra
 			Result(business.AuditResultSuccess).
 			Severity(business.AuditSeverityMedium).
 			Detail("token_prefix", logging.RedactedID(rawToken)).
-			Detail("notification", outcome)
+			Detail("notification", outcome).
+			Detail("sender", string(source))
 		if err := s.auditManager.RecordEvent(ctx, b); err != nil {
 			s.logger.Warn("Failed to record locked admission notification audit event",
 				"error", logging.SanitizeLogValue(err.Error()))
