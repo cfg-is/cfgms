@@ -50,8 +50,14 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /src/steward .
 
+# Pre-create the steward's state directory and hand it to the cfgms user. The
+# steward runs as non-root and /var/lib is root-owned, so it cannot create
+# /var/lib/cfgms/... at runtime; without it the device identity key store is
+# skipped and registration is rejected. Created empty; no secrets are added.
+RUN mkdir -p /var/lib/cfgms/steward/certs
+
 # Change ownership
-RUN chown -R cfgms:cfgms /app
+RUN chown -R cfgms:cfgms /app /var/lib/cfgms
 
 # Switch to non-root user
 USER cfgms

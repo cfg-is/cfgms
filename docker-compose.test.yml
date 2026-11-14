@@ -555,12 +555,13 @@ services:
     # binary dropped into interactive mode and exited immediately with
     # "failed to read registration token: EOF", so no steward ever joined the
     # cluster. Matches the steward-standalone service below.
-    # Root, like the other steward containers here. The steward derives its
-    # device identity from a machine ID and falls back to generating one
-    # under /var/lib/cfgms when /etc/machine-id is absent, as it is in these
-    # images. As the unprivileged `cfgms` user that mkdir fails, the device
-    # identity key store is skipped, and registration is rejected with
-    # "device_id is required and must be a 64-character lowercase hex string".
+    # Root, like the other steward containers here. The steward image
+    # pre-creates /var/lib/cfgms (the state directory holding the device
+    # identity key store and the generated fallback machine ID) owned by the
+    # `cfgms` user, so the state directory no longer requires root. This
+    # service keeps `user: root` unchanged: the HA stewards are exercised only
+    # by a suite that does not run before merge, and the unprivileged start has
+    # not been proven on them.
     user: root
     command: ["sh", "-c", "mkdir -p /tmp/cfgms && (umask 077; printf %s \"$$CFGMS_REGISTRATION_TOKEN\" > /tmp/cfgms/regtoken) && ./steward --regtoken-file /tmp/cfgms/regtoken"]
     volumes:
@@ -607,12 +608,13 @@ services:
     # binary dropped into interactive mode and exited immediately with
     # "failed to read registration token: EOF", so no steward ever joined the
     # cluster. Matches the steward-standalone service below.
-    # Root, like the other steward containers here. The steward derives its
-    # device identity from a machine ID and falls back to generating one
-    # under /var/lib/cfgms when /etc/machine-id is absent, as it is in these
-    # images. As the unprivileged `cfgms` user that mkdir fails, the device
-    # identity key store is skipped, and registration is rejected with
-    # "device_id is required and must be a 64-character lowercase hex string".
+    # Root, like the other steward containers here. The steward image
+    # pre-creates /var/lib/cfgms (the state directory holding the device
+    # identity key store and the generated fallback machine ID) owned by the
+    # `cfgms` user, so the state directory no longer requires root. This
+    # service keeps `user: root` unchanged: the HA stewards are exercised only
+    # by a suite that does not run before merge, and the unprivileged start has
+    # not been proven on them.
     user: root
     command: ["sh", "-c", "mkdir -p /tmp/cfgms && (umask 077; printf %s \"$$CFGMS_REGISTRATION_TOKEN\" > /tmp/cfgms/regtoken) && ./steward --regtoken-file /tmp/cfgms/regtoken"]
     volumes:
@@ -655,12 +657,13 @@ services:
     # binary dropped into interactive mode and exited immediately with
     # "failed to read registration token: EOF", so no steward ever joined the
     # cluster. Matches the steward-standalone service below.
-    # Root, like the other steward containers here. The steward derives its
-    # device identity from a machine ID and falls back to generating one
-    # under /var/lib/cfgms when /etc/machine-id is absent, as it is in these
-    # images. As the unprivileged `cfgms` user that mkdir fails, the device
-    # identity key store is skipped, and registration is rejected with
-    # "device_id is required and must be a 64-character lowercase hex string".
+    # Root, like the other steward containers here. The steward image
+    # pre-creates /var/lib/cfgms (the state directory holding the device
+    # identity key store and the generated fallback machine ID) owned by the
+    # `cfgms` user, so the state directory no longer requires root. This
+    # service keeps `user: root` unchanged: the HA stewards are exercised only
+    # by a suite that does not run before merge, and the unprivileged start has
+    # not been proven on them.
     user: root
     command: ["sh", "-c", "mkdir -p /tmp/cfgms && (umask 077; printf %s \"$$CFGMS_REGISTRATION_TOKEN\" > /tmp/cfgms/regtoken) && ./steward --regtoken-file /tmp/cfgms/regtoken"]
     volumes:
@@ -833,14 +836,11 @@ services:
       CFGMS_LOG_LEVEL: "debug"
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
-    # Root, for the same two reasons as the HA stewards: the controller's CA
-    # directory is 0700 root-owned private key material, and the steward's
-    # device identity falls back to generating a machine ID under /var/lib/cfgms
-    # when /etc/machine-id is absent. As the unprivileged `cfgms` user this
-    # steward logged "CFGMS_HTTP_CA_CERT_PATH set but file not found, falling
-    # through" and "Failed to create device identity key store", then never
-    # registered — which is what the controller suite's steward assertions were
-    # really failing on.
+    # Root because the controller's CA directory is 0700 root-owned private key
+    # material. As the unprivileged `cfgms` user this steward logged
+    # "CFGMS_HTTP_CA_CERT_PATH set but file not found, falling through" and
+    # never registered. The steward state directory under /var/lib/cfgms is no
+    # longer a reason: the image pre-creates it owned by `cfgms`.
     user: root
     command: ["sh", "-c", "mkdir -p /tmp/cfgms && (umask 077; printf %s \"$$CFGMS_REGISTRATION_TOKEN\" > /tmp/cfgms/regtoken) && ./steward --regtoken-file /tmp/cfgms/regtoken"]
     volumes:

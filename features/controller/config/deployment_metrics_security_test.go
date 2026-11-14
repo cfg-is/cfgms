@@ -5,6 +5,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -135,6 +136,47 @@ func TestRuntimeImagesApplyPendingAlpineSecurityUpdates(t *testing.T) {
 			assert.Contains(t, dockerfile[lastFrom:], "apk --no-cache upgrade",
 				"the runtime stage must apply pending Alpine security updates at build time, "+
 					"because a pinned base digest cannot carry a fix upstream has not rebuilt")
+		})
+	}
+}
+
+// TestStewardImagesPrepareStateDirectoryBeforeDroppingPrivileges locks in the
+// fix for the stock steward image's enrollment failure (Issue #6239). Both
+// steward images end with `USER cfgms`, and /var/lib is root-owned, so the
+// steward cannot create its state directory (device identity key store,
+// generated fallback machine id) at runtime. The directory must be created and
+// handed to cfgms while the build is still root, i.e. before `USER cfgms`.
+// Both Dockerfiles are checked so they cannot drift apart.
+func TestStewardImagesPrepareStateDirectoryBeforeDroppingPrivileges(t *testing.T) {
+	mkdirLine := regexp.MustCompile(`(?m)^\s*(?:RUN\s+)?mkdir\s+-p\b[^\n]*?/var/lib/cfgms/steward/certs\b`)
+	chownLine := regexp.MustCompile(`(?m)^\s*(?:RUN\s+)?chown\s+-R\s+cfgms:cfgms\b[^\n]*?/var/lib/cfgms(?:\s|\\|$)`)
+
+	for _, path := range []string{"cmd/steward/Dockerfile", "cmd/steward/Dockerfile.debian"} {
+		t.Run(path, func(t *testing.T) {
+			dockerfile := readDeploymentFile(t, path)
+
+			// Scope to the runtime stage: state prepared in a builder stage is
+			// not part of the shipped image.
+			lastFrom := strings.LastIndex(dockerfile, "\nFROM ")
+			require.GreaterOrEqual(t, lastFrom, 0, "Dockerfile must declare a runtime stage")
+			stage := dockerfile[lastFrom:]
+
+			userIdx := strings.Index(stage, "\nUSER cfgms")
+			require.GreaterOrEqual(t, userIdx, 0, "runtime stage must drop to USER cfgms")
+
+			mkdir := mkdirLine.FindStringIndex(stage)
+			require.NotNil(t, mkdir,
+				"runtime stage must `mkdir -p /var/lib/cfgms/steward/certs`: /var/lib is root-owned, "+
+					"so the non-root steward cannot create its state directory at runtime")
+			assert.Less(t, mkdir[0], userIdx, "mkdir of the state directory must precede USER cfgms")
+
+			chown := chownLine.FindStringIndex(stage)
+			require.NotNil(t, chown,
+				"runtime stage must `chown -R cfgms:cfgms` /var/lib/cfgms so the non-root steward can write its state")
+			assert.Less(t, chown[0], userIdx, "chown of the state directory must precede USER cfgms")
+
+			assert.Less(t, mkdir[0], chown[0],
+				"the directory must exist before it is chowned, or the chown does not cover it")
 		})
 	}
 }
