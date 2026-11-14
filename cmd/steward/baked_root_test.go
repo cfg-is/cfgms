@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -21,6 +22,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -162,22 +164,25 @@ func TestBakedRootSourceReadsNothingExternal(t *testing.T) {
 	})
 }
 
-func buildStewardForStatus(t *testing.T, ldflags string) string {
-	t.Helper()
+// buildStewardForStatus builds the steward binary with the given ldflags into
+// its own temporary directory. It is safe to call from one goroutine per
+// build: it returns the error so the caller reports it from the test goroutine.
+func buildStewardForStatus(dir, ldflags string) (string, error) {
 	name := "steward-under-test"
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
-	bin := filepath.Join(t.TempDir(), name)
+	bin := filepath.Join(dir, name)
 	args := []string{"build", "-o", bin}
 	if ldflags != "" {
 		args = append(args, "-ldflags", ldflags)
 	}
 	args = append(args, ".")
-	cmd := exec.Command("go", args...)
-	out, err := cmd.CombinedOutput()
-	require.NoErrorf(t, err, "go build: %s", out)
-	return bin
+	out, err := exec.Command("go", args...).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("go build: %w: %s", err, out)
+	}
+	return bin, nil
 }
 
 func statusRootLine(t *testing.T, bin string) string {
@@ -202,12 +207,31 @@ func TestStatusPrintsBakedRootFingerprints(t *testing.T) {
 	a := strings.Repeat("ab", 32)
 	b := strings.Repeat("01", 32)
 
-	stamped := buildStewardForStatus(t, "-X main.ControllerRootFingerprints="+a+","+b)
-	assert.Equal(t, a+","+b, statusRootLine(t, stamped))
+	variants := []struct {
+		name, ldflags, want string
+	}{
+		{"stamped", "-X main.ControllerRootFingerprints=" + a + "," + b, a + "," + b},
+		{"plain", "", "none"},
+		{"malformed", "-X main.ControllerRootFingerprints=NOTHEX", "none"},
+	}
 
-	plain := buildStewardForStatus(t, "")
-	assert.Equal(t, "none", statusRootLine(t, plain))
+	// The three builds are independent compile-and-link runs; build them
+	// concurrently, each into its own temp directory, then assert serially.
+	bins := make([]string, len(variants))
+	errs := make([]error, len(variants))
+	var wg sync.WaitGroup
+	for i, v := range variants {
+		dir := t.TempDir()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			bins[i], errs[i] = buildStewardForStatus(dir, v.ldflags)
+		}()
+	}
+	wg.Wait()
 
-	malformed := buildStewardForStatus(t, "-X main.ControllerRootFingerprints=NOTHEX")
-	assert.Equal(t, "none", statusRootLine(t, malformed))
+	for i, v := range variants {
+		require.NoErrorf(t, errs[i], "build %s", v.name)
+		assert.Equal(t, v.want, statusRootLine(t, bins[i]), v.name)
+	}
 }
