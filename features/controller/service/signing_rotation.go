@@ -43,6 +43,10 @@ type SigningRotationService struct {
 	controllerService *ControllerService
 	logger            logging.Logger
 	nodeID            string
+
+	// noKeyWarned holds the rotating serials whose missing private key was already
+	// reported, so the warning is logged once per serial rather than on every push.
+	noKeyWarned sync.Map
 }
 
 // NewSigningRotationService creates a new SigningRotationService. The publisher
@@ -444,11 +448,17 @@ func (s *SigningRotationService) buildRotatingSigner(serial string) signature.Si
 	}
 	certPEM, keyPEM, err := s.certManager.ExportCertificate(serial, true, false)
 	if err != nil || len(keyPEM) == 0 {
-		s.logger.Warn("signing rotation: could not export rotating cert for push_signing_cert signing; falling back to dynamic signer",
-			"serial", logging.SanitizeLogValue(serial),
-			"error", logging.SanitizeLogValue(errText(err)))
+		// A rotating serial with no private key keeps the controller's pushes on the
+		// dynamic signer for as long as it stays in the cursor, so every push would
+		// repeat this line. Once per serial reports the condition without the noise.
+		if _, seen := s.noKeyWarned.LoadOrStore(serial, struct{}{}); !seen {
+			s.logger.Warn("signing rotation: could not export rotating cert for push_signing_cert signing; falling back to dynamic signer",
+				"serial", logging.SanitizeLogValue(serial),
+				"error", logging.SanitizeLogValue(errText(err)))
+		}
 		return nil
 	}
+	s.noKeyWarned.Delete(serial)
 	signer, err := signature.NewSigner(&signature.SignerConfig{
 		CertificatePEM: certPEM,
 		PrivateKeyPEM:  keyPEM,

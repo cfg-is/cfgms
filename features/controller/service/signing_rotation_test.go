@@ -985,3 +985,74 @@ func TestEnsureStewardCurrentAndRevokedRetirePushCarryChainAfterZeroOverlap(t *t
 		assert.Contains(t, fmt.Sprint(push.Command.Params["retire_serials"]), oldCert.SerialNumber)
 	})
 }
+
+// countText counts the occurrences of needle in everything the logger recorded.
+func (r *recordingLogger) countText(needle string) int {
+	return strings.Count(r.allText(), needle)
+}
+
+// TestEnsureStewardCurrent_WarnsOncePerRotatingSerialWithoutKey proves a rotating
+// serial whose private key cannot be exported is reported once, not on every
+// push, while every push still falls back to the dynamic signer and is sent.
+func TestEnsureStewardCurrent_WarnsOncePerRotatingSerialWithoutKey(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	certMgr := newTestCertManager(t, t.TempDir())
+	current, err := certMgr.GetCurrentCertForPurpose(cert.PurposeSigning)
+	require.NoError(t, err)
+
+	// The cursor names a rotating serial the store has no certificate or key for,
+	// as a rotation left over from before the cluster held the keys does.
+	const missingSerial = "424242424242"
+	cursorJSON, err := json.Marshal(&cert.SigningCertCursor{
+		CurrentSerial:     current.SerialNumber,
+		RotatingSerial:    missingSerial,
+		OverlapWindowDays: 30,
+		RotatedAt:         time.Now().Add(-time.Hour).UTC(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(certMgr.GetStoragePath(), "signing-cursor.json"), cursorJSON, 0600))
+
+	bus := memory.NewBus()
+	server := memory.New(memory.ModeServer)
+	require.NoError(t, server.Initialize(ctx, map[string]interface{}{"bus": bus}))
+	require.NoError(t, server.Start(ctx))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Stop(stopCtx)
+	})
+	client := memory.New(memory.ModeClient)
+	require.NoError(t, client.Initialize(ctx, map[string]interface{}{"bus": bus, "steward_id": "steward-warn-once"}))
+	var received sync.WaitGroup
+	received.Add(3)
+	require.NoError(t, client.SubscribeCommands(ctx, "steward-warn-once", func(_ context.Context, sc *types.SignedCommand) error {
+		if sc.Command.Type == types.CommandPushSigningCert {
+			received.Done()
+		}
+		return nil
+	}))
+	require.NoError(t, client.Start(ctx))
+	t.Cleanup(func() { _ = client.Stop(context.Background()) })
+
+	logger := &recordingLogger{}
+	publisher, err := commands.New(&commands.Config{ControlPlane: server, Logger: logger})
+	require.NoError(t, err)
+	svc := service.NewSigningRotationService(certMgr, logger)
+	svc.SetPublisher(publisher)
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, svc.EnsureStewardCurrent(ctx, "steward-warn-once"), "push %d falls back to the dynamic signer and is sent", i)
+	}
+	done := make(chan struct{})
+	go func() { received.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("every push must still be delivered")
+	}
+
+	assert.Equal(t, 1, logger.countText("could not export rotating cert for push_signing_cert signing"),
+		"the missing key is reported once per rotating serial, not once per push")
+	assert.Contains(t, logger.allText(), missingSerial)
+}

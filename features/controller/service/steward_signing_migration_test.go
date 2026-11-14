@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,9 +20,12 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/commands"
+	stewardcommands "github.com/cfgis/cfgms/features/steward/commands"
 	"github.com/cfgis/cfgms/pkg/cert"
 	certinterfaces "github.com/cfgis/cfgms/pkg/cert/interfaces"
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	grpcprovider "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
+	"github.com/cfgis/cfgms/pkg/controlplane/signerchain"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/testutil"
@@ -575,4 +579,362 @@ func TestStewardMigration_SlowStewardKeepsItsSlotAfterStepTimeout(t *testing.T) 
 	n.cp.mu.Lock()
 	defer n.cp.mu.Unlock()
 	assert.Equal(t, 1, n.cp.maxSeen, "one worker never has two commands outstanding")
+}
+
+// realSteward is a steward whose commands go through the steward's real command
+// handler: the signature is checked against the steward's trust set (a single
+// certificate verifies through a ConfigVerifier, several through a MultiVerifier,
+// as on the steward), then the push_signing_cert handler updates that trust set.
+type realSteward struct {
+	id      string
+	handler *stewardcommands.Handler
+
+	mu      sync.Mutex
+	trusted []*x509.Certificate
+}
+
+func newRealSteward(t *testing.T, id string, pub func() *commands.Publisher, trusted ...*x509.Certificate) *realSteward {
+	t.Helper()
+	st := &realSteward{id: id, trusted: append([]*x509.Certificate{}, trusted...)}
+	handler, err := stewardcommands.New(&stewardcommands.Config{
+		StewardID: id,
+		Logger:    logging.NewNoopLogger(),
+		Verifier:  st.verifier(),
+		OnStatus: func(ctx context.Context, ev *types.Event) {
+			_ = pub().HandleEventUpdate(ctx, ev)
+		},
+	})
+	require.NoError(t, err)
+	handler.RegisterHandler(types.CommandPushSigningCert, st.handlePush)
+	st.handler = handler
+	return st
+}
+
+func (s *realSteward) verifier() signature.Verifier {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.trusted) == 1 {
+		v, err := signature.NewVerifierFromCertificate(s.trusted[0])
+		if err != nil {
+			return nil
+		}
+		return v
+	}
+	v, err := signature.NewMultiVerifier(s.trusted)
+	if err != nil {
+		return nil
+	}
+	return v
+}
+
+// handlePush adds the pushed certificate to the trust set and drops the serials
+// named by retire_serials, then refreshes the handler's verifier.
+func (s *realSteward) handlePush(_ context.Context, cmd *types.Command) error {
+	b64, _ := cmd.Params["cert_pem"].(string)
+	pemBytes, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return fmt.Errorf("decode cert_pem: %w", err)
+	}
+	pushed, err := cert.ParseCertificateFromPEM(pemBytes)
+	if err != nil {
+		return fmt.Errorf("parse cert_pem: %w", err)
+	}
+	var retire []string
+	if list, ok := cmd.Params["retire_serials"].([]interface{}); ok {
+		for _, v := range list {
+			if str, ok := v.(string); ok {
+				retire = append(retire, str)
+			}
+		}
+	}
+	s.mu.Lock()
+	have := false
+	kept := s.trusted[:0:0]
+	for _, c := range s.trusted {
+		if c.Equal(pushed) {
+			have = true
+		}
+		drop := false
+		for _, r := range retire {
+			if c.SerialNumber.String() == r && !c.Equal(pushed) {
+				drop = true
+			}
+		}
+		if !drop {
+			kept = append(kept, c)
+		}
+	}
+	if !have {
+		kept = append(kept, pushed)
+	}
+	s.trusted = kept
+	s.mu.Unlock()
+	s.handler.UpdateVerifier(s.verifier())
+	return nil
+}
+
+func (s *realSteward) trustedSerials() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, c := range s.trusted {
+		out = append(out, c.SerialNumber.String())
+	}
+	sort.Strings(out)
+	return out
+}
+
+// realSend is one command the controller's control plane carried to a steward.
+type realSend struct {
+	cmdType      types.CommandType
+	signerSerial string // serial of the key that signed it
+	rejected     error  // what the steward's handler answered
+	retire       bool
+}
+
+// realStewardCP is a node's control plane towards steward handlers: a command
+// crosses the wire encoding (as it does to a connected steward) and goes through
+// the steward's real HandleCommand.
+type realStewardCP struct {
+	cpinterfaces.ControlPlaneProvider
+	fingerprints map[string]string // key fingerprint -> serial
+
+	mu       sync.Mutex
+	stewards map[string]*realSteward
+	sent     []realSend
+}
+
+func (c *realStewardCP) SendCommand(ctx context.Context, sc *types.SignedCommand) error {
+	c.mu.Lock()
+	st := c.stewards[sc.Command.StewardID]
+	c.mu.Unlock()
+	if st == nil {
+		return assert.AnError
+	}
+	wire := grpcprovider.SignedCommandFromProto(grpcprovider.SignedCommandToProto(sc))
+	err := st.handler.HandleCommand(ctx, wire)
+	_, retire := sc.Command.Params["retire_serials"]
+	c.mu.Lock()
+	c.sent = append(c.sent, realSend{
+		cmdType:      sc.Command.Type,
+		signerSerial: c.fingerprints[sc.Signature.KeyFingerprint],
+		rejected:     err,
+		retire:       retire,
+	})
+	c.mu.Unlock()
+	return nil // a command the steward refuses is dropped on the stream
+}
+
+func (c *realStewardCP) pushes() []realSend {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []realSend
+	for _, s := range c.sent {
+		if s.cmdType == types.CommandPushSigningCert {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// realCluster is nodes that each held their own signing certificate before the
+// shared store existed, plus the means to add a node that joined afterwards.
+type realCluster struct {
+	t       *testing.T
+	secrets *testutil.MemSecretStore
+	cursor  certinterfaces.SigningCursorStore
+	acks    certinterfaces.SigningTrustAckStore
+	nodes   []*cert.Manager
+	legacy  []*x509.Certificate
+	serials []string
+	fingers map[string]string
+}
+
+func newRealCluster(t *testing.T, legacyNodes int) *realCluster {
+	t.Helper()
+	cursor, err := cert.NewFileSigningCursorStore(t.TempDir())
+	require.NoError(t, err)
+	acks, err := cert.NewFileSigningTrustAckStore(t.TempDir())
+	require.NoError(t, err)
+	c := &realCluster{t: t, secrets: testutil.NewMemSecretStore(), cursor: cursor, acks: acks, fingers: map[string]string{}}
+	ctx := context.Background()
+	for i := 0; i < legacyNodes; i++ {
+		dir := t.TempDir()
+		legacy := c.manager(dir, false)
+		require.NoError(t, legacy.EnsureSigningCertificate(&cert.SigningCertConfig{CommonName: "cfgms-config-signer", ValidityDays: 365, KeySize: 2048}))
+		local, err := legacy.GetCurrentCertForPurpose(cert.PurposeSigning)
+		require.NoError(t, err)
+		x, err := cert.ParseCertificateFromPEM(local.CertificatePEM)
+		require.NoError(t, err)
+		v, err := signature.NewVerifierFromCertificate(x)
+		require.NoError(t, err)
+
+		node := c.manager(dir, true)
+		results, err := node.ImportLocalSigningCertificates(ctx)
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		require.True(t, results[0].Imported, results[0].Reason)
+		c.nodes = append(c.nodes, node)
+		c.legacy = append(c.legacy, x)
+		c.serials = append(c.serials, local.SerialNumber)
+		c.fingers[v.KeyFingerprint()] = local.SerialNumber
+	}
+	return c
+}
+
+func (c *realCluster) manager(dir string, withKeys bool) *cert.Manager {
+	c.t.Helper()
+	cfg := &cert.ManagerConfig{
+		StoragePath:        dir,
+		CAConfig:           &cert.CAConfig{Organization: "Test", Country: "US", ValidityDays: 365, KeySize: 2048},
+		SigningCursorStore: c.cursor,
+	}
+	if withKeys {
+		ks, err := cert.NewSecretStoreSigningKeyStore(c.secrets, migrationTestTenant, "")
+		require.NoError(c.t, err)
+		cfg.SigningKeyStore = ks
+	}
+	m, err := cert.NewManagerFromSecretStore(context.Background(), c.secrets, migrationTestTenant, "cluster-ca", cfg)
+	require.NoError(c.t, err)
+	return m
+}
+
+// joinNode adds a node that joined after the shared store existed: it holds no
+// signing certificate of its own and has not seen the shared one locally.
+func (c *realCluster) joinNode() *cert.Manager {
+	c.t.Helper()
+	node := c.manager(c.t.TempDir(), true)
+	c.nodes = append(c.nodes, node)
+	return node
+}
+
+// elect names node 0's certificate as the shared signing certificate.
+func (c *realCluster) elect() string {
+	c.t.Helper()
+	_, created, err := c.nodes[0].ElectSharedSigningSerial(context.Background(), c.serials[0])
+	require.NoError(c.t, err)
+	require.True(c.t, created)
+	return c.serials[0]
+}
+
+// realNode is the migration service of one node, wired as a controller wires it:
+// its publisher attaches the signer certificate chain, and its stewards are real
+// command handlers.
+type realNode struct {
+	svc    *StewardSigningMigrationService
+	reg    *registry.InMemoryRegistry
+	cp     *realStewardCP
+	pub    *commands.Publisher
+	logger *logging.CapturingLogger
+}
+
+type fixedTermSource uint64
+
+func (f fixedTermSource) GetTerm() uint64 { return uint64(f) }
+
+func (c *realCluster) newRealNode(mgr *cert.Manager) *realNode {
+	c.t.Helper()
+	logger := logging.NewCapturingLogger()
+	cp := &realStewardCP{fingerprints: c.fingers, stewards: map[string]*realSteward{}}
+	pub, err := commands.New(&commands.Config{
+		ControlPlane: cp,
+		Logger:       logger,
+		SignerChains: signerchain.NewSignerChainBuilder(mgr),
+		TermSource:   fixedTermSource(3),
+	})
+	require.NoError(c.t, err)
+	svc := NewStewardSigningMigrationService(mgr, c.acks, logger)
+	reg := registry.NewRegistry()
+	svc.SetPublisher(pub)
+	svc.SetConnectedStewards(reg)
+	svc.SetTimings(500*time.Millisecond, time.Hour, time.Hour)
+	svc.planTTL = 10 * time.Millisecond
+	c.t.Cleanup(svc.Stop)
+	return &realNode{svc: svc, reg: reg, cp: cp, pub: pub, logger: logger}
+}
+
+// connect attaches a real steward trusting trusted to the node.
+func (n *realNode) connect(t *testing.T, id string, trusted ...*x509.Certificate) *realSteward {
+	t.Helper()
+	st := newRealSteward(t, id, func() *commands.Publisher { return n.pub }, trusted...)
+	n.cp.mu.Lock()
+	n.cp.stewards[id] = st
+	n.cp.mu.Unlock()
+	require.NoError(t, n.reg.Register(&registry.StewardConnection{StewardID: id, Sender: noopSender{}}))
+	return st
+}
+
+func (c *realCluster) acked(id, serial string) bool {
+	ack, err := c.acks.GetAck(context.Background(), id, serial)
+	return err == nil && ack != nil
+}
+
+// TestStewardMigration_StewardTrustingSharedSerialIsConfirmedByStep1 runs the
+// migration on a node that joined after the election, against a steward whose real
+// command handler verifies signatures and applies push_signing_cert, and that
+// already trusts the shared serial. Step 1 (the shared certificate signed by the
+// shared key) must reach the steward and be verified by it, so the confirmation is
+// recorded from step 1 alone and the steward is not pushed to again.
+func TestStewardMigration_StewardTrustingSharedSerialIsConfirmedByStep1(t *testing.T) {
+	ctx := context.Background()
+	c := newRealCluster(t, 1)
+	shared := c.elect()
+	node := c.newRealNode(c.joinNode())
+	const stewardID = "steward-trusts-shared"
+	st := node.connect(t, stewardID, c.legacy[0])
+
+	node.svc.process(ctx, stewardID)
+
+	pushes := node.cp.pushes()
+	require.Len(t, pushes, 1, "step 1 is the only push: nothing is left to retire and no other step runs")
+	assert.NoError(t, pushes[0].rejected, "the steward's handler verified the step 1 signature")
+	assert.Equal(t, shared, pushes[0].signerSerial, "step 1 is signed by the shared key")
+	assert.False(t, pushes[0].retire)
+	assert.True(t, c.acked(stewardID, shared), "the confirmation is recorded for the shared serial")
+	assert.Equal(t, []string{shared}, st.trustedSerials())
+
+	// A second pass, and the reconciler, leave a confirmed steward alone.
+	node.svc.process(ctx, stewardID)
+	node.svc.reconcile(ctx)
+	assert.Len(t, node.cp.pushes(), 1, "a confirmed steward is not pushed to again")
+	assert.Empty(t, node.svc.queue, "the reconciler does not queue a confirmed steward")
+}
+
+// TestStewardMigration_LegacyCandidateWithoutStoredCertIsSkipped runs the
+// migration on a node that stores only its own legacy certificate. A legacy
+// candidate whose certificate this node cannot chain is skipped with one warning,
+// and the steward, which trusts this node's own legacy key, is still confirmed.
+func TestStewardMigration_LegacyCandidateWithoutStoredCertIsSkipped(t *testing.T) {
+	ctx := context.Background()
+	c := newRealCluster(t, 3) // node 0 is elected; of the other two, one runs the service and the other is the unchainable candidate
+	shared := c.elect()
+	// Candidates are tried in serial order. The unchainable one must come first, so
+	// the skip is reached before the trusted candidate confirms the steward.
+	runner, other := 1, 2
+	if c.serials[runner] < c.serials[other] {
+		runner, other = other, runner
+	}
+	node := c.newRealNode(c.nodes[runner])
+	const stewardID = "steward-legacy-trust"
+	st := node.connect(t, stewardID, c.legacy[runner])
+
+	node.svc.process(ctx, stewardID)
+
+	assert.True(t, c.acked(stewardID, shared), "another candidate still confirms the steward")
+	assert.Equal(t, []string{shared}, st.trustedSerials(), "the steward ends with the shared certificate only")
+
+	var skipped []string
+	for i, msg := range node.logger.WarnMessages {
+		if strings.Contains(msg, "skipping a legacy candidate") {
+			skipped = append(skipped, fmt.Sprint(node.logger.WarnEntries[i]["legacy_serial"]))
+		}
+	}
+	assert.Equal(t, []string{c.serials[other]}, skipped, "one skip line, naming the candidate whose chain cannot be built")
+	for _, msg := range node.logger.WarnMessages {
+		assert.NotContains(t, msg, "could not send push", "a chain failure is a skip, not a send failure")
+		assert.NotContains(t, msg, "no candidate key delivered")
+	}
+	for _, p := range node.cp.pushes() {
+		assert.NotEqual(t, c.serials[other], p.signerSerial, "nothing was sent signed by the skipped candidate")
+	}
 }
