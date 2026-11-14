@@ -209,7 +209,12 @@ func (s *Server) notifyTenantAdmins(ctx context.Context, rule emailSenderRule, t
 // logSenderFailure logs a failed send. A failure on an MSP sender is an error
 // that names the MSP tenant, so its administrators can find and fix their sender;
 // it carries a classified failure kind, never the raw error text, so it cannot
-// carry the password.
+// carry the password. A failure on the controller-wide sender is a warning that
+// names the tenant through logging.RedactedID: CodeQL's go/clear-text-logging
+// follows the tenant id field-insensitively from credential-bearing records that
+// reach this shared helper, and RedactedID is the barrier it recognises. The
+// full tenant id is on the audit entry the caller writes (and in the log with
+// the operator's unredacted-values setting).
 func (s *Server) logSenderFailure(ctx context.Context, msg string, source emailSenderSource, tenantID string, err error) {
 	kind := emailSendFailureKind(err)
 	if source == emailSourceMSP && s.tenantManager != nil {
@@ -222,7 +227,7 @@ func (s *Server) logSenderFailure(ctx context.Context, msg string, source emailS
 	}
 	s.logger.Warn(msg,
 		"sender", string(source),
-		"tenant_id", logging.SanitizeLogValue(tenantID),
+		"tenant_id", logging.RedactedID(tenantID),
 		"failure", kind)
 }
 

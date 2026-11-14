@@ -15,6 +15,8 @@ import (
 
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/logging"
+	notifif "github.com/cfgis/cfgms/pkg/notification/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -253,6 +255,35 @@ func TestTamperAlert_FailedMSPSendIsNotRetriedOnPlatform(t *testing.T) {
 			assert.NotContains(t, logged, testSMTPPassword)
 		})
 	}
+}
+
+// A failed send on the controller-wide sender is a warning, not an error, that
+// carries the redacted tenant id and a failure kind; the full tenant id stays on
+// the audit entry.
+func TestTamperAlert_FailedPlatformSendWarnsWithRedactedTenant(t *testing.T) {
+	const wrongPassword = "Wr0ng-platform-password-must-not-leak"
+	f := newSenderFixture(t)
+	n, err := notifif.CreateNotifierFromConfig("smtp", map[string]interface{}{
+		"host": "localhost", "port": f.platform.Port, "security": "implicit_tls",
+		"from": "cfgms@acme-corp.example", "username": testSMTPUser, "password": wrongPassword,
+		"root_ca_pem": f.platform.CAPEM,
+	})
+	require.NoError(t, err)
+	f.server.emailMu.Lock()
+	f.server.emailNotifier = n
+	f.server.emailMu.Unlock()
+
+	entry := f.alarm(t, "client-1")
+
+	assert.Equal(t, "failed", entry.Details["notification"])
+	assert.Equal(t, "platform", entry.Details["sender"])
+	assert.Equal(t, "client-1", entry.Details["tenant_id"], "the audit entry keeps the full tenant id")
+	logged := f.logs.captured()
+	assert.Contains(t, logged, "Tamper notification email failed sender platform")
+	assert.Contains(t, logged, "tenant_id "+logging.RedactedID("client-1"))
+	assert.Contains(t, logged, "failure ")
+	assert.NotContains(t, logged, "ERROR Tamper notification email failed")
+	assert.NotContains(t, logged, wrongPassword)
 }
 
 func TestBreakGlass_UsesPlatformSenderOnlyAndAuditsIt(t *testing.T) {
