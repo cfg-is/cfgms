@@ -166,14 +166,14 @@ func TestMSPEmailSender_PasswordStoredUnderMSPTenant(t *testing.T) {
 	assert.Empty(t, pw, "no secret reads as no password")
 
 	require.NoError(t, server.storeMSPEmailPassword(ctx, testMSPA, testMSPPassword, "alice"))
-	sec, err := server.readEmailCredential(ctx, testMSPA, mspEmailPasswordKey)
+	sec, err := server.readEmailCredential(ctx, testMSPA, mspEmailCredentialRef)
 	require.NoError(t, err)
 	assert.Equal(t, testMSPPassword, sec.Value)
 
 	pwB, err := server.readMSPEmailPassword(ctx, testMSPB)
 	require.NoError(t, err)
 	assert.Empty(t, pwB, "another MSP has no password")
-	_, err = server.readEmailCredential(ctx, emailCredentialTenantID, mspEmailPasswordKey)
+	_, err = server.readEmailCredential(ctx, emailCredentialTenantID, mspEmailCredentialRef)
 	assert.ErrorIs(t, err, secretsif.ErrSecretNotFound, "the controller-wide tenant is untouched")
 
 	assert.Error(t, server.storeMSPEmailPassword(ctx, testMSPA, "", "alice"))

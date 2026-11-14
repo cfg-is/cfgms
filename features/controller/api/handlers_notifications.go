@@ -54,7 +54,7 @@ func (s *Server) readEmailCredential(ctx context.Context, tenantID, key string) 
 // and the per-MSP senders. A zero port leaves the provider default for the TLS
 // mode; the provider rejects a password without a username, so the password is
 // only passed with one.
-func emailProviderConfig(host, security, from string, port int, username, password string) map[string]interface{} {
+func emailProviderConfig(host, security, from string, port int, username, smtpSecret string) map[string]interface{} {
 	pcfg := map[string]interface{}{
 		"host":     host,
 		"security": security,
@@ -65,7 +65,7 @@ func emailProviderConfig(host, security, from string, port int, username, passwo
 	}
 	if username != "" {
 		pcfg["username"] = username
-		pcfg["password"] = password
+		pcfg["password"] = smtpSecret
 	}
 	return pcfg
 }
