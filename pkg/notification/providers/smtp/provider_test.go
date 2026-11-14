@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/notification/interfaces"
 	"github.com/cfgis/cfgms/pkg/notification/interfaces/contracttest"
 )
@@ -228,4 +229,82 @@ func TestPasswordNotPrinted(t *testing.T) {
 
 func fmtV(v interface{}) string {
 	return fmt.Sprintf("%v %+v %#v", v, v, v)
+}
+
+func TestGuardAddressesMustBeBool(t *testing.T) {
+	s := newTestServer(t, false, nil)
+	for _, v := range []interface{}{"true", 1, nil} {
+		_, err := (&Provider{}).CreateNotifier(cfgFor(s, SecurityStartTLS, map[string]interface{}{"guard_addresses": v}))
+		require.Error(t, err, "%v", v)
+		assert.Contains(t, err.Error(), "guard_addresses must be a boolean")
+	}
+	for _, v := range []bool{true, false} {
+		_, err := (&Provider{}).CreateNotifier(cfgFor(s, SecurityStartTLS, map[string]interface{}{"guard_addresses": v}))
+		require.NoError(t, err)
+	}
+}
+
+func TestGuardedNotifierRefusesLoopbackAtConnect(t *testing.T) {
+	for _, mode := range []string{SecurityStartTLS, SecurityImplicitTLS} {
+		t.Run(mode, func(t *testing.T) {
+			s := newTestServer(t, mode == SecurityImplicitTLS, nil)
+			n := newNotifier(t, cfgFor(s, mode, map[string]interface{}{"guard_addresses": true}))
+			res, err := n.Send(context.Background(), interfaces.Message{To: []string{"a@example.com"}, Subject: "s", Body: "b"})
+			require.Error(t, err)
+			assert.Nil(t, res)
+			assert.Contains(t, err.Error(), "connect")
+			assert.NotContains(t, err.Error(), "127.0.0.1")
+			assert.Zero(t, s.Conns(), "no connection may reach the server")
+		})
+	}
+}
+
+func TestGuardedNotifierRefusesPrivateAndLinkLocalLiterals(t *testing.T) {
+	s := newTestServer(t, false, nil)
+	for _, host := range []string{"10.20.30.40", "192.168.1.1", "172.16.5.5", "169.254.169.254"} {
+		t.Run(host, func(t *testing.T) {
+			cfg := cfgFor(s, SecurityStartTLS, map[string]interface{}{"guard_addresses": true, "host": host})
+			n := newNotifier(t, cfg)
+			res, err := n.Send(context.Background(), interfaces.Message{To: []string{"a@example.com"}, Subject: "s", Body: "b"})
+			require.Error(t, err)
+			assert.Nil(t, res)
+			assert.Contains(t, err.Error(), "connect")
+			assert.NotContains(t, err.Error(), host)
+		})
+	}
+	assert.Zero(t, s.Conns())
+}
+
+func TestGuardedNotifierDeliversWhenLoopbackAllowed(t *testing.T) {
+	for _, mode := range []string{SecurityStartTLS, SecurityImplicitTLS} {
+		t.Run(mode, func(t *testing.T) {
+			t.Cleanup(config.AllowLoopbackForTesting())
+			s := newTestServer(t, mode == SecurityImplicitTLS, nil)
+			n := newNotifier(t, cfgFor(s, mode, map[string]interface{}{"guard_addresses": true}))
+			res, err := n.Send(context.Background(), interfaces.Message{To: []string{"a@example.com"}, Subject: "s", Body: "b"})
+			require.NoError(t, err)
+			assert.Equal(t, []string{"a@example.com"}, res.Accepted())
+			assert.Equal(t, []string{"tls", "auth", "data"}, s.Events())
+		})
+	}
+}
+
+func TestGuardedNotifierKeepsCertificateVerification(t *testing.T) {
+	t.Cleanup(config.AllowLoopbackForTesting())
+	s := newTestServer(t, true, nil)
+	cfg := cfgFor(s, SecurityImplicitTLS, map[string]interface{}{"guard_addresses": true})
+	delete(cfg, "root_ca_pem")
+	n := newNotifier(t, cfg)
+	_, err := n.Send(context.Background(), interfaces.Message{To: []string{"a@example.com"}, Subject: "s", Body: "b"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "certificate verification failed")
+	assert.NotContains(t, s.Events(), "auth")
+}
+
+func TestUnguardedNotifierStillDeliversToLoopback(t *testing.T) {
+	s := newTestServer(t, false, nil)
+	n := newNotifier(t, cfgFor(s, SecurityStartTLS, nil))
+	res, err := n.Send(context.Background(), interfaces.Message{To: []string{"a@example.com"}, Subject: "s", Body: "b"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a@example.com"}, res.Accepted())
 }
