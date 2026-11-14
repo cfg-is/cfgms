@@ -3,6 +3,8 @@
 package server
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"os"
@@ -1247,6 +1249,92 @@ func TestBuildGRPCControlPlaneTLSConfig_DoesNotWriteCertFilesToDisk(t *testing.T
 		"buildGRPCControlPlaneTLSConfig must not write server cert to disk")
 	assert.NoFileExists(t, filepath.Join(tempDir, "server", "server.key"),
 		"buildGRPCControlPlaneTLSConfig must not write server key to disk")
+}
+
+// TestBuildGRPCControlPlaneTLSConfig_ServesReissuedCertAndLogsUncoveredServerName
+// verifies that after a SAN-driven reissue the transport TLS config serves the new
+// certificate, and that a client hello naming a host the certificate does not
+// cover is logged at Warn while covered and empty names are not.
+func TestBuildGRPCControlPlaneTLSConfig_ServesReissuedCertAndLogsUncoveredServerName(t *testing.T) {
+	tempDir := t.TempDir()
+
+	certManager, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: tempDir,
+		CAConfig: &cert.CAConfig{
+			Organization: "CFGMS Test",
+			Country:      "US",
+			ValidityDays: 365,
+			KeySize:      2048,
+		},
+		LoadExistingCA:       false,
+		RenewalThresholdDays: 30,
+	})
+	require.NoError(t, err)
+	require.NoError(t, certManager.EnsureSeparatedCertificates(nil, nil))
+	first, err := certManager.GetCurrentCertForPurpose(cert.PurposeTransport)
+	require.NoError(t, err)
+
+	// Reissue through the startup path with a shared name added to the config.
+	cfg := &config.Config{
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			CAPath:               tempDir,
+			Server:               &config.ServerCertificateConfig{DNSNames: []string{"cfgms.shared.test"}},
+		},
+	}
+	recorder := logging.NewCapturingLogger()
+	require.NoError(t, ensureSeparatedCertificates(cfg, recorder, certManager))
+
+	reissued, found := recorder.FindInfo("Transport certificate reissued: configured SANs were not covered; superseded certificate retained in the store")
+	require.True(t, found, "reissue must be logged at Info")
+	assert.Contains(t, reissued["added_dns_names"], "cfgms.shared.test")
+
+	current, err := certManager.GetCurrentCertForPurpose(cert.PurposeTransport)
+	require.NoError(t, err)
+	require.NotEqual(t, first.SerialNumber, current.SerialNumber)
+
+	// A second startup with the same config must not reissue or log a reissue.
+	again := logging.NewCapturingLogger()
+	require.NoError(t, ensureSeparatedCertificates(cfg, again, certManager))
+	_, found = again.FindInfo("Transport certificate reissued: configured SANs were not covered; superseded certificate retained in the store")
+	assert.False(t, found, "a covered config must not log a reissue")
+	stable, err := certManager.GetCurrentCertForPurpose(cert.PurposeTransport)
+	require.NoError(t, err)
+	assert.Equal(t, current.SerialNumber, stable.SerialNumber)
+
+	logger := logging.NewCapturingLogger()
+	tlsConfig, err := buildGRPCControlPlaneTLSConfig(cfg, certManager, logger)
+	require.NoError(t, err)
+	require.NotEmpty(t, tlsConfig.Certificates)
+	require.NotNil(t, tlsConfig.GetCertificate)
+
+	leaf, err := x509.ParseCertificate(tlsConfig.Certificates[0].Certificate[0])
+	require.NoError(t, err)
+	assert.Equal(t, current.SerialNumber, leaf.SerialNumber.String(), "TLS config must serve the reissued certificate")
+	assert.NoError(t, leaf.VerifyHostname("cfgms.shared.test"))
+
+	warnsBefore := logger.WarnCount()
+
+	// Covered and empty server names are silent and fall back to Certificates.
+	for _, name := range []string{"cfgms.shared.test", "localhost", ""} {
+		got, gerr := tlsConfig.GetCertificate(&tls.ClientHelloInfo{ServerName: name})
+		require.NoError(t, gerr)
+		assert.Nil(t, got, "hook only observes; crypto/tls falls back to Certificates")
+	}
+	assert.Equal(t, warnsBefore, logger.WarnCount(), "covered and empty server names must not log")
+
+	// An uncovered name logs exactly once, sanitized, with the served serial.
+	got, gerr := tlsConfig.GetCertificate(&tls.ClientHelloInfo{ServerName: "unknown.example.test\nforged=1"})
+	require.NoError(t, gerr)
+	assert.Nil(t, got)
+	require.Equal(t, warnsBefore+1, logger.WarnCount())
+	entry, found := logger.FindWarn("TLS client hello server name is not covered by the served transport certificate")
+	require.True(t, found)
+	name, ok := entry["server_name"].(string)
+	require.True(t, ok)
+	assert.Contains(t, name, "unknown.example.test")
+	assert.NotContains(t, name, "\n", "server name must be sanitized")
+	assert.Equal(t, current.SerialNumber, entry["serial"])
 }
 
 // dockerTestDBAddr returns the host:port the Docker test Postgres is expected on.

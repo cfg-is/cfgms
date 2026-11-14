@@ -407,9 +407,10 @@ func signingCertConfig(cfg *config.Config) *cert.SigningCertConfig {
 
 // createSeparatedCertificates validates the certificate architecture and
 // mints the internal mTLS (and, in cluster mode, config-signing) certificates.
-// EnsureSeparatedCertificates is idempotent — if --init mints the cert here,
-// controller startup will not regenerate it, so the SAN set written during
-// --init is what stewards see for the cert's full lifetime.
+// EnsureSeparatedCertificates is idempotent for a certificate that covers the
+// configured SANs. If --init mints the cert here, controller startup reuses it
+// while it covers the SAN set from the config, and reissues it only when a
+// configured SAN is missing.
 func createSeparatedCertificates(cfg *config.Config, certManager *cert.Manager, rollback *RollbackTracker, logger logging.Logger) error {
 	if err := cfg.Certificate.ValidateCertificateArchitecture(); err != nil {
 		executeRollback(rollback, logger, "Rollback failed after architecture validation error")
