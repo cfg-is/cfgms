@@ -35,6 +35,12 @@ verification; any config key outside the list below fails provider creation.
 | `username`, `password` | already-resolved values; the provider never reads files or env |
 | `timeout` | duration string bounding dial plus conversation (default `30s`) |
 | `root_ca_pem` | extra trusted roots, PEM contents (not a path) |
+| `guard_addresses` | optional bool, default `false`. When `true`, every resolved address is vetted at connect time and loopback, private, link-local and unspecified addresses are refused; the vetted IP literal is dialled, and certificate verification still uses the configured host name |
+
+Set `guard_addresses: true` for any host that a tenant supplies, so it cannot
+point the notifier at internal services. Leave it unset for the
+controller-wide sender, which may legitimately use an internal relay. Refusal
+surfaces as a `connect`-stage error that does not name the resolved address.
 
 Bodies are plain text (quoted-printable). Addresses are validated with
 `net/mail`; CR or LF in a subject or address is rejected before any network

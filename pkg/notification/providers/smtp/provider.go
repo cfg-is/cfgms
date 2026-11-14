@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/notification/interfaces"
 )
 
@@ -68,18 +69,24 @@ type notifier struct {
 	password secret
 	timeout  time.Duration
 	tlsCfg   *tls.Config
+	// guard routes the dial through the connect-time SSRF guard.
+	guard bool
 }
 
 var allowedKeys = map[string]bool{
 	"host": true, "port": true, "security": true, "from": true,
 	"username": true, "password": true, "timeout": true, "root_ca_pem": true,
+	"guard_addresses": true,
 }
 
 // CreateNotifier implements interfaces.NotifierProvider.
 //
 // Keys: host (required), port, security ("starttls" default | "implicit_tls"),
 // from (required), username, password (resolved values), timeout (duration
-// string, default 30s), root_ca_pem (extra trusted roots, PEM contents).
+// string, default 30s), root_ca_pem (extra trusted roots, PEM contents),
+// guard_addresses (bool, default false; when true every resolved address is
+// vetted at connect time and loopback, private, link-local and unspecified
+// addresses are refused — set it for hosts supplied by a tenant).
 // Any other key — including anything asking for plaintext or for skipping
 // certificate verification — is rejected.
 func (*Provider) CreateNotifier(config map[string]interface{}) (interfaces.Notifier, error) {
@@ -137,6 +144,9 @@ func (*Provider) CreateNotifier(config map[string]interface{}) (interfaces.Notif
 		return nil, err
 	}
 	n.password = secret(pw)
+	if n.guard, err = boolKey(config, "guard_addresses"); err != nil {
+		return nil, err
+	}
 	if n.username == "" && pw != "" {
 		return nil, errors.New("smtp: password given without username")
 	}
@@ -144,16 +154,8 @@ func (*Provider) CreateNotifier(config map[string]interface{}) (interfaces.Notif
 		return nil, errors.New("smtp: credentials contain forbidden characters")
 	}
 
-	if raw, ok := config["timeout"]; ok {
-		s, isStr := raw.(string)
-		if !isStr {
-			return nil, errors.New("smtp: timeout must be a duration string")
-		}
-		d, err := time.ParseDuration(s)
-		if err != nil || d <= 0 {
-			return nil, errors.New("smtp: timeout must be a positive duration")
-		}
-		n.timeout = d
+	if n.timeout, err = timeoutValue(config, defaultTimeout); err != nil {
+		return nil, err
 	}
 
 	ca, err := stringKey(config, "root_ca_pem")
@@ -178,6 +180,36 @@ func stringKey(config map[string]interface{}, key string) (string, error) {
 		return "", fmt.Errorf("smtp: %s must be a string", key)
 	}
 	return strings.TrimSpace(s), nil
+}
+
+// boolKey returns the boolean at key, false when the key is absent.
+func boolKey(config map[string]interface{}, key string) (bool, error) {
+	raw, ok := config[key]
+	if !ok {
+		return false, nil
+	}
+	b, isBool := raw.(bool)
+	if !isBool {
+		return false, fmt.Errorf("smtp: %s must be a boolean", key)
+	}
+	return b, nil
+}
+
+// timeoutValue returns the "timeout" duration, def when the key is absent.
+func timeoutValue(config map[string]interface{}, def time.Duration) (time.Duration, error) {
+	raw, ok := config["timeout"]
+	if !ok {
+		return def, nil
+	}
+	s, isStr := raw.(string)
+	if !isStr {
+		return 0, errors.New("smtp: timeout must be a duration string")
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 0, errors.New("smtp: timeout must be a positive duration")
+	}
+	return d, nil
 }
 
 func intValue(v interface{}) (int, error) {
@@ -298,8 +330,11 @@ func (n *notifier) Send(ctx context.Context, msg interfaces.Message) (*interface
 
 // connect dials and returns a client that is already protected by TLS.
 func (n *notifier) connect(ctx context.Context, deadline time.Time) (*smtp.Client, net.Conn, error) {
-	var d net.Dialer
-	raw, err := d.DialContext(ctx, "tcp", net.JoinHostPort(n.host, strconv.Itoa(n.port)))
+	dial := (&net.Dialer{}).DialContext
+	if n.guard {
+		dial = config.GuardedDialContext
+	}
+	raw, err := dial(ctx, "tcp", net.JoinHostPort(n.host, strconv.Itoa(n.port)))
 	if err != nil {
 		return nil, nil, stageErr("connect", err)
 	}

@@ -178,3 +178,30 @@ func TestEnsureGuardedGitTransport(t *testing.T) {
 	EnsureGuardedGitTransport()
 	assert.Same(t, guardedGitClient, gitclient.Protocols["https"], "evaluated on every call")
 }
+
+func TestGuardedDialContext_Exported(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:1", "10.1.2.3:1", "192.168.1.1:1", "172.16.0.5:1", "169.254.169.254:1", "0.0.0.0:1"} {
+		conn, err := GuardedDialContext(context.Background(), "tcp", addr)
+		assert.Nil(t, conn, addr)
+		require.ErrorIs(t, err, ErrBlockedAddress, addr)
+	}
+
+	// A host name that resolves to a blocked address is refused without the
+	// resolved address appearing in the error.
+	t.Cleanup(UseHostResolverForTesting(hostResolver{"mail.cfgms.local": ipAddrs("10.9.8.7")}))
+	conn, err := GuardedDialContext(context.Background(), "tcp", "mail.cfgms.local:25")
+	assert.Nil(t, conn)
+	require.ErrorIs(t, err, ErrBlockedAddress)
+	assert.NotContains(t, err.Error(), "10.9.8.7")
+
+	// A public-looking literal passes the guard and reaches the dial step; the
+	// cancelled context makes that step fail without any network traffic, and the
+	// failure is a dial error rather than a refusal.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	conn, err = GuardedDialContext(ctx, "tcp", "203.0.113.10:25")
+	assert.Nil(t, conn)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrBlockedAddress)
+	assert.Contains(t, err.Error(), "could not connect")
+}

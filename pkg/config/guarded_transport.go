@@ -111,6 +111,15 @@ func guardedDialContext(ctx context.Context, network, address string) (net.Conn,
 	return nil, fmt.Errorf("SSRF guard: could not connect to host %q: %w", host, sanitizeDialErr(lastErr))
 }
 
+// GuardedDialContext is the connect-time SSRF guard as a dial function for callers
+// outside this package (for example an SMTP notifier dialling a tenant-supplied
+// host). It resolves the host once, refuses loopback, private, link-local and
+// unspecified addresses, and dials the vetted IP literal. It fails closed; errors
+// never contain a resolved address.
+func GuardedDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return guardedDialContext(ctx, network, address)
+}
+
 // sanitizeDialErr drops the net.OpError text, which embeds the dialled address.
 func sanitizeDialErr(err error) error {
 	var ne net.Error
