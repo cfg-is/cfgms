@@ -426,7 +426,7 @@ type NotificationsConfig struct {
 
 // EmailConfig holds the non-secret SMTP settings. The SMTP password is never a
 // config field: it is written through PUT /api/v1/notifications/email/credential
-// and held in the controller's secret store under PasswordSecretKey.
+// and held in the controller's secret store under CredentialSecretRef.
 type EmailConfig struct {
 	// Provider names the notification provider. Only "smtp" exists; empty means "smtp".
 	Provider string `yaml:"provider,omitempty"`
@@ -440,9 +440,9 @@ type EmailConfig struct {
 	Username string `yaml:"username,omitempty"`
 	// TLSMode is "starttls" (default) or "implicit_tls". There is no plaintext mode.
 	TLSMode string `yaml:"tls_mode,omitempty"`
-	// PasswordSecretKey is the pkg/secrets key holding the SMTP password.
+	// CredentialSecretRef is the pkg/secrets key holding the SMTP password.
 	// Required when Host is set.
-	PasswordSecretKey string `yaml:"password_secret_key,omitempty"`
+	CredentialSecretRef string `yaml:"password_secret_key,omitempty"`
 }
 
 // EmailProvider returns the configured provider name, defaulting to "smtp".
@@ -464,7 +464,7 @@ func (e *EmailConfig) EffectiveTLSMode() string {
 // Configured reports whether the non-secret settings are complete enough to
 // attempt email delivery. It does not say whether a credential is stored.
 func (e *EmailConfig) Configured() bool {
-	return e != nil && e.Host != "" && e.From != "" && e.PasswordSecretKey != ""
+	return e != nil && e.Host != "" && e.From != "" && e.CredentialSecretRef != ""
 }
 
 // ValidateNotifications enforces the notifications.email contract at startup:
@@ -494,7 +494,7 @@ func (c *Config) ValidateNotifications() error {
 	if e.From == "" {
 		return fmt.Errorf("notifications.email.from must be set when notifications.email.host is set")
 	}
-	if e.PasswordSecretKey == "" {
+	if e.CredentialSecretRef == "" {
 		return fmt.Errorf("notifications.email.password_secret_key must be set when notifications.email.host is set")
 	}
 	return nil

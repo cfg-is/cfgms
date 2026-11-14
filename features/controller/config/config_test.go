@@ -1402,7 +1402,7 @@ func TestTenantAdminConfig_GetBreakGlassRequiresSecondApprover(t *testing.T) {
 // TestConfig_ValidateNotifications covers the notifications.email contract (Issue #4710).
 func TestConfig_ValidateNotifications(t *testing.T) {
 	valid := func() *EmailConfig {
-		return &EmailConfig{Host: "smtp.acme-corp.example", From: "cfgms@acme-corp.example", PasswordSecretKey: "notifications.email.password"}
+		return &EmailConfig{Host: "smtp.acme-corp.example", From: "cfgms@acme-corp.example", CredentialSecretRef: "notifications.email.password"}
 	}
 	tests := []struct {
 		name    string
@@ -1415,7 +1415,7 @@ func TestConfig_ValidateNotifications(t *testing.T) {
 		{"valid implicit_tls", &NotificationsConfig{Email: func() *EmailConfig { e := valid(); e.TLSMode = "implicit_tls"; return e }()}, ""},
 		{"invalid tls_mode", &NotificationsConfig{Email: func() *EmailConfig { e := valid(); e.TLSMode = "plaintext"; return e }()}, "tls_mode"},
 		{"missing from", &NotificationsConfig{Email: func() *EmailConfig { e := valid(); e.From = ""; return e }()}, "notifications.email.from"},
-		{"missing password_secret_key", &NotificationsConfig{Email: func() *EmailConfig { e := valid(); e.PasswordSecretKey = ""; return e }()}, "password_secret_key"},
+		{"missing password_secret_key", &NotificationsConfig{Email: func() *EmailConfig { e := valid(); e.CredentialSecretRef = ""; return e }()}, "password_secret_key"},
 		{"unknown provider", &NotificationsConfig{Email: func() *EmailConfig { e := valid(); e.Provider = "carrier-pigeon"; return e }()}, "provider"},
 	}
 	for _, tt := range tests {
@@ -1437,7 +1437,7 @@ func TestEmailConfig_ConfiguredAndDefaults(t *testing.T) {
 	assert.Equal(t, "starttls", nilCfg.EffectiveTLSMode())
 	assert.Equal(t, "smtp", nilCfg.EmailProvider())
 	assert.False(t, (&EmailConfig{Host: "h"}).Configured())
-	assert.True(t, (&EmailConfig{Host: "h", From: "f@x.example", PasswordSecretKey: "k"}).Configured())
+	assert.True(t, (&EmailConfig{Host: "h", From: "f@x.example", CredentialSecretRef: "k"}).Configured())
 }
 
 func moduleTrustKey(t *testing.T) string {

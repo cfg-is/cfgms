@@ -73,10 +73,10 @@ func emailProviderConfig(host, security, from string, port int, username, smtpSe
 // emailCredentialPresent reports whether a password is stored under the
 // configured password_secret_key.
 func (s *Server) emailCredentialPresent(ctx context.Context, ec *config.EmailConfig) bool {
-	if ec == nil || ec.PasswordSecretKey == "" || s.secretStore == nil {
+	if ec == nil || ec.CredentialSecretRef == "" || s.secretStore == nil {
 		return false
 	}
-	sec, err := s.readEmailCredential(ctx, emailCredentialTenantID, ec.PasswordSecretKey)
+	sec, err := s.readEmailCredential(ctx, emailCredentialTenantID, ec.CredentialSecretRef)
 	return err == nil && sec != nil && sec.Value != ""
 }
 
@@ -88,7 +88,7 @@ func (s *Server) buildEmailNotifier(ctx context.Context) (notifif.Notifier, erro
 	if !ec.Configured() || s.secretStore == nil {
 		return nil, nil
 	}
-	sec, err := s.readEmailCredential(ctx, emailCredentialTenantID, ec.PasswordSecretKey)
+	sec, err := s.readEmailCredential(ctx, emailCredentialTenantID, ec.CredentialSecretRef)
 	if err != nil || sec == nil || sec.Value == "" {
 		return nil, nil
 	}
@@ -140,15 +140,15 @@ func emailScopeAllowed(r *http.Request) bool {
 }
 
 type emailSettingsResponse struct {
-	Provider          string `json:"provider"`
-	Host              string `json:"host"`
-	Port              int    `json:"port"`
-	From              string `json:"from"`
-	Username          string `json:"username"`
-	TLSMode           string `json:"tls_mode"`
-	PasswordSecretKey string `json:"password_secret_key"`
-	Configured        bool   `json:"configured"`
-	CredentialPresent bool   `json:"credential_present"`
+	Provider            string `json:"provider"`
+	Host                string `json:"host"`
+	Port                int    `json:"port"`
+	From                string `json:"from"`
+	Username            string `json:"username"`
+	TLSMode             string `json:"tls_mode"`
+	CredentialSecretRef string `json:"password_secret_key"`
+	Configured          bool   `json:"configured"`
+	CredentialPresent   bool   `json:"credential_present"`
 }
 
 // handleGetEmailSettings handles GET /api/v1/notifications/email. It returns the
@@ -167,7 +167,7 @@ func (s *Server) handleGetEmailSettings(w http.ResponseWriter, r *http.Request) 
 	}
 	if ec != nil {
 		resp.Host, resp.Port, resp.From = ec.Host, ec.Port, ec.From
-		resp.Username, resp.PasswordSecretKey = ec.Username, ec.PasswordSecretKey
+		resp.Username, resp.CredentialSecretRef = ec.Username, ec.CredentialSecretRef
 	}
 	s.writeSuccessResponse(w, resp)
 }
@@ -208,7 +208,7 @@ func (s *Server) handlePutEmailCredential(w http.ResponseWriter, r *http.Request
 		createdBy = p.ID
 	}
 	err = s.secretStore.StoreSecret(r.Context(), &secretsif.SecretRequest{
-		Key:         ec.PasswordSecretKey,
+		Key:         ec.CredentialSecretRef,
 		Value:       req.Password,
 		TenantID:    emailCredentialTenantID,
 		CreatedBy:   createdBy,

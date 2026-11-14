@@ -152,7 +152,7 @@ func newEmailTestServer(t *testing.T, smtp *emailTestSMTPServer) *Server {
 	server := setupTestServer(t)
 	server.cfg.Notifications = &config.NotificationsConfig{Email: &config.EmailConfig{
 		Provider: "smtp", Host: "localhost", Port: smtp.Port, From: "cfgms@acme-corp.example",
-		Username: testSMTPUser, TLSMode: "implicit_tls", PasswordSecretKey: testPasswordKey,
+		Username: testSMTPUser, TLSMode: "implicit_tls", CredentialSecretRef: testPasswordKey,
 	}}
 	server.emailExtra = map[string]interface{}{"root_ca_pem": smtp.CAPEM}
 	server.initEmailNotifier(context.Background())
