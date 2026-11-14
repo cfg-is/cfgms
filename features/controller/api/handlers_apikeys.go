@@ -81,7 +81,7 @@ func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	// Local-only entries (recordRef == "": the env-gated test keys seeded in New) have
 	// no durable record, but they authenticate on this node, so they are listed too.
 	s.mu.RLock()
-	for _, key := range s.apiKeys {
+	for _, key := range s.keyCache {
 		if key.recordRef != "" || key.TenantID != tenantID {
 			continue
 		}
@@ -302,7 +302,7 @@ func (s *Server) mintAPIKey(ctx context.Context, spec apiKeyMintSpec) (*mintedAP
 
 	// Store API key in memory cache
 	s.mu.Lock()
-	s.apiKeys[keyString] = apiKey
+	s.keyCache[keyString] = apiKey
 	s.mu.Unlock()
 
 	recordReq := keyRequestRecord(spec, keyID, keyHash)
@@ -311,7 +311,7 @@ func (s *Server) mintAPIKey(ctx context.Context, spec apiKeyMintSpec) (*mintedAP
 		s.logger.Error("Failed to persist API key to secret store", "error", logging.SanitizeLogValue(err.Error()), "id", keyID)
 		// Remove from memory cache since we couldn't persist
 		s.mu.Lock()
-		delete(s.apiKeys, keyString)
+		delete(s.keyCache, keyString)
 		s.mu.Unlock()
 		return nil, &mintAPIKeyError{}
 	}
@@ -522,7 +522,7 @@ func (s *Server) findAPIKeyInScope(ctx context.Context, keyID string, scope ctxk
 
 	s.mu.RLock()
 	var local *APIKey
-	for _, key := range s.apiKeys {
+	for _, key := range s.keyCache {
 		if key.recordRef == "" && key.ID == keyID {
 			local = key
 			break
@@ -552,9 +552,9 @@ func (s *Server) evictCachedAPIKeyByID(keyID, keyHash string) {
 	if keyHash != "" {
 		s.tombstoneAPIKeyLocked(keyHash, s.apiKeyNow())
 	}
-	for keyString, key := range s.apiKeys {
+	for keyString, key := range s.keyCache {
 		if key.ID == keyID {
-			delete(s.apiKeys, keyString)
+			delete(s.keyCache, keyString)
 		}
 	}
 }
@@ -636,7 +636,7 @@ func (s *Server) generateEphemeralKey(name string, permissions []string, ttl tim
 
 	// Store in memory cache
 	s.mu.Lock()
-	s.apiKeys[keyString] = apiKey
+	s.keyCache[keyString] = apiKey
 	s.mu.Unlock()
 
 	// M-AUTH-1: Store in secret store with TTL
@@ -659,7 +659,7 @@ func (s *Server) generateEphemeralKey(name string, permissions []string, ttl tim
 	if err := s.secretStore.StoreSecret(ctx, secretReq); err != nil {
 		// Remove from memory on storage failure
 		s.mu.Lock()
-		delete(s.apiKeys, keyString)
+		delete(s.keyCache, keyString)
 		s.mu.Unlock()
 		return nil, fmt.Errorf("failed to store ephemeral key: %w", err)
 	}

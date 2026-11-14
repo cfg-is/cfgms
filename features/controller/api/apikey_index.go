@@ -257,6 +257,6 @@ func (s *Server) cacheAPIKeyUnlessDeleted(apiKey, keyHash string, key *APIKey) b
 	if at, dead := s.apiKeyTombstones[keyHash]; dead && s.apiKeyNow().Sub(at) < apiKeyTombstoneTTL {
 		return false
 	}
-	s.apiKeys[apiKey] = key
+	s.keyCache[apiKey] = key
 	return true
 }

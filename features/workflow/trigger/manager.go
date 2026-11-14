@@ -1162,7 +1162,7 @@ func (tm *TriggerManagerImpl) saveTriggerToStorage(ctx context.Context, trigger 
 				}); err != nil {
 					return fmt.Errorf("failed to store api key: %w", err)
 				}
-				record.APIKeyRef = refKey
+				record.APICredentialRef = refKey
 			}
 
 			if auth.BasicAuth != nil {
@@ -1193,7 +1193,7 @@ func (tm *TriggerManagerImpl) saveTriggerToStorage(ctx context.Context, trigger 
 					}); err != nil {
 						return fmt.Errorf("failed to store basic password: %w", err)
 					}
-					record.BasicPasswordRef = refKey
+					record.BasicCredentialRef = refKey
 				}
 			}
 		}
@@ -1242,9 +1242,9 @@ func (tm *TriggerManagerImpl) deleteTriggerFromStorage(ctx context.Context, trig
 		for _, refKey := range []string{
 			record.BearerTokenRef,
 			record.HMACSecretRef,
-			record.APIKeyRef,
+			record.APICredentialRef,
 			record.BasicUsernameRef,
-			record.BasicPasswordRef,
+			record.BasicCredentialRef,
 		} {
 			if refKey == "" {
 				continue
@@ -1342,8 +1342,8 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 		return nil, fmt.Errorf("failed to unmarshal config payload for trigger %s: %w", record.ID, err)
 	}
 
-	hasRefs := record.BearerTokenRef != "" || record.HMACSecretRef != "" || record.APIKeyRef != "" ||
-		record.BasicUsernameRef != "" || record.BasicPasswordRef != ""
+	hasRefs := record.BearerTokenRef != "" || record.HMACSecretRef != "" || record.APICredentialRef != "" ||
+		record.BasicUsernameRef != "" || record.BasicCredentialRef != ""
 	if hasRefs && tm.secretStore == nil {
 		return nil, fmt.Errorf("trigger %s has credential refs but no secret store is configured", record.ID)
 	}
@@ -1379,18 +1379,18 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 		hasAuth = true
 	}
 
-	if record.APIKeyRef != "" {
-		secret, err := tm.getTriggerCredential(ctx, record.TenantID, record.APIKeyRef)
+	if record.APICredentialRef != "" {
+		secret, err := tm.getTriggerCredential(ctx, record.TenantID, record.APICredentialRef)
 		if err != nil {
 			tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
-				"trigger_id", logging.SanitizeLogValue(record.ID), "ref", logging.SanitizeLogValue(record.APIKeyRef), "error", logging.SanitizeLogValue(err.Error()))
+				"trigger_id", logging.SanitizeLogValue(record.ID), "ref", logging.SanitizeLogValue(record.APICredentialRef), "error", logging.SanitizeLogValue(err.Error()))
 			return nil, fmt.Errorf("failed to get api key for trigger %s: %w", record.ID, err)
 		}
 		auth.APIKey = secret.Value
 		hasAuth = true
 	}
 
-	if record.BasicUsernameRef != "" || record.BasicPasswordRef != "" {
+	if record.BasicUsernameRef != "" || record.BasicCredentialRef != "" {
 		auth.BasicAuth = &BasicAuth{}
 
 		if record.BasicUsernameRef != "" {
@@ -1404,11 +1404,11 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 			hasAuth = true
 		}
 
-		if record.BasicPasswordRef != "" {
-			secret, err := tm.getTriggerCredential(ctx, record.TenantID, record.BasicPasswordRef)
+		if record.BasicCredentialRef != "" {
+			secret, err := tm.getTriggerCredential(ctx, record.TenantID, record.BasicCredentialRef)
 			if err != nil {
 				tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
-					"trigger_id", logging.SanitizeLogValue(record.ID), "ref", logging.SanitizeLogValue(record.BasicPasswordRef), "error", logging.SanitizeLogValue(err.Error()))
+					"trigger_id", logging.SanitizeLogValue(record.ID), "ref", logging.SanitizeLogValue(record.BasicCredentialRef), "error", logging.SanitizeLogValue(err.Error()))
 				return nil, fmt.Errorf("failed to get basic password for trigger %s: %w", record.ID, err)
 			}
 			auth.BasicAuth.Password = secret.Value

@@ -1121,9 +1121,9 @@ func TestTriggerManagerSaveRedactsAllCredentials(t *testing.T) {
 	// Verify all five ref fields are populated.
 	assert.NotEmpty(t, record.BearerTokenRef, "BearerTokenRef must be set")
 	assert.NotEmpty(t, record.HMACSecretRef, "HMACSecretRef must be set")
-	assert.NotEmpty(t, record.APIKeyRef, "APIKeyRef must be set")
+	assert.NotEmpty(t, record.APICredentialRef, "APICredentialRef must be set")
 	assert.NotEmpty(t, record.BasicUsernameRef, "BasicUsernameRef must be set")
-	assert.NotEmpty(t, record.BasicPasswordRef, "BasicPasswordRef must be set")
+	assert.NotEmpty(t, record.BasicCredentialRef, "BasicCredentialRef must be set")
 
 	// Verify NO plaintext credential appears in ConfigPayload.
 	for _, plaintext := range []string{"secret-bearer", "secret-hmac", "secret-apikey", "secret-user", "secret-pass"} {
@@ -1133,8 +1133,8 @@ func TestTriggerManagerSaveRedactsAllCredentials(t *testing.T) {
 
 	// Verify the *Ref fields themselves do NOT hold the plaintext values.
 	for _, refField := range []string{
-		record.BearerTokenRef, record.HMACSecretRef, record.APIKeyRef,
-		record.BasicUsernameRef, record.BasicPasswordRef,
+		record.BearerTokenRef, record.HMACSecretRef, record.APICredentialRef,
+		record.BasicUsernameRef, record.BasicCredentialRef,
 	} {
 		for _, plaintext := range []string{"secret-bearer", "secret-hmac", "secret-apikey", "secret-user", "secret-pass"} {
 			assert.NotEqual(t, plaintext, refField,
@@ -1366,13 +1366,13 @@ func TestTriggerDeleteCleansSecrets(t *testing.T) {
 	// Simulate by pre-deleting one ref and re-calling deleteTriggerFromStorage on a
 	// fresh record with all refs populated (the method logs WARN and continues).
 	rec := &business.TriggerRecord{
-		ID:               "t-del-partial",
-		TenantID:         "tenant-del",
-		BearerTokenRef:   "partial-bearer",
-		HMACSecretRef:    "partial-hmac",
-		APIKeyRef:        "partial-api",
-		BasicUsernameRef: "partial-user",
-		BasicPasswordRef: "partial-pass",
+		ID:                 "t-del-partial",
+		TenantID:           "tenant-del",
+		BearerTokenRef:     "partial-bearer",
+		HMACSecretRef:      "partial-hmac",
+		APICredentialRef:   "partial-api",
+		BasicUsernameRef:   "partial-user",
+		BasicCredentialRef: "partial-pass",
 	}
 	require.NoError(t, ts.StoreTrigger(ctx, rec))
 	// Only store some of the secrets (simulates partially-missing refs).

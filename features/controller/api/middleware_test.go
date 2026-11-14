@@ -1222,7 +1222,7 @@ func newAgentTestKey(t *testing.T, server *Server, tenantID string) string {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		server.mu.Lock()
-		delete(server.apiKeys, key.Key)
+		delete(server.keyCache, key.Key)
 		server.mu.Unlock()
 	})
 	return key.Key

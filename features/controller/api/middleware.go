@@ -1714,14 +1714,14 @@ func (s *Server) authenticateAPIKey(w http.ResponseWriter, r *http.Request) (*ht
 func (s *Server) lookupRequestKey(w http.ResponseWriter, r *http.Request, presentedKey string) (keyInfo *APIKey, cached, ok bool) {
 	// Check memory cache first
 	s.mu.RLock()
-	keyInfo, cached = s.apiKeys[presentedKey]
+	keyInfo, cached = s.keyCache[presentedKey]
 	s.mu.RUnlock()
 	if cached {
 		return keyInfo, true, true
 	}
 
 	// M-AUTH-1: If not in cache, try to load from secret store
-	loadedKey, err := s.loadAPIKeyFromStore(r.Context(), presentedKey)
+	loadedKey, err := s.loadKeyEntryFromStore(r.Context(), presentedKey)
 	if err != nil {
 		s.logger.Debug("Failed to load API key from store", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
@@ -1822,11 +1822,11 @@ func keyFromRecord(apiKey string, rec *secretsif.Secret, validatedAt time.Time) 
 	}
 }
 
-// M-AUTH-1: loadAPIKeyFromStore loads an API key from the secret store and caches it.
+// M-AUTH-1: loadKeyEntryFromStore loads an API key from the secret store and caches it.
 // Issue #4574: the key's tenant comes from the API-key index (no tenant name is
 // assumed), and the record itself is then read directly. An unknown key costs no store
 // access unless the index is older than apiKeyIndexMissRefreshFloor.
-func (s *Server) loadAPIKeyFromStore(ctx context.Context, apiKey string) (*APIKey, error) {
+func (s *Server) loadKeyEntryFromStore(ctx context.Context, apiKey string) (*APIKey, error) {
 	keyHash := hashAPIKey(apiKey)
 	entry, found, err := s.locateKeyEntry(ctx, keyHash)
 	if err != nil {
@@ -1871,7 +1871,7 @@ func (s *Server) revalidateCachedAPIKey(ctx context.Context, apiKey string, cach
 	}
 	if rec == nil {
 		s.mu.Lock()
-		delete(s.apiKeys, apiKey)
+		delete(s.keyCache, apiKey)
 		s.mu.Unlock()
 		s.apiKeyIdx.remove(cached.recordRef)
 		return nil, errAPIKeyRevoked
@@ -1880,7 +1880,7 @@ func (s *Server) revalidateCachedAPIKey(ctx context.Context, apiKey string, cach
 	refreshed := keyFromRecord(apiKey, rec, now)
 	if !s.cacheAPIKeyUnlessDeleted(apiKey, cached.recordRef, refreshed) {
 		s.mu.Lock()
-		delete(s.apiKeys, apiKey)
+		delete(s.keyCache, apiKey)
 		s.mu.Unlock()
 		return nil, errAPIKeyRevoked
 	}

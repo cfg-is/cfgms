@@ -100,7 +100,7 @@ type Server struct {
 	healthDetailHandler             *health.Handler // Issue #4208: detailed health/metrics/alerts/trace handler; nil when constructed without a collector, alert manager and trace manager
 	haManager                       *ha.Manager
 	rateCounterStore                business.RateCounterStore                // Issue #3896, ADR-031: cluster-visible fixed-window abuse-budget counter store (nil: every consumer below uses its in-memory default)
-	apiKeys                         map[string]*APIKey                       // In-memory cache for fast lookup; the secret store is the source of truth (Issue #4574)
+	keyCache                        map[string]*APIKey                       // In-memory cache for fast lookup; the secret store is the source of truth (Issue #4574)
 	apiKeyClock                     func() time.Time                         // Issue #4574: clock for API-key re-validation; nil → time.Now. Overridable in tests.
 	apiKeyIdx                       *apiKeyIndex                             // Issue #4574: key hash → tenant locator for the durable API-key records
 	apiKeyIndexWG                   sync.WaitGroup                           // Issue #4574: tracks detached API-key index scans so Close() can wait for them before secretStore.Close()
@@ -313,7 +313,7 @@ type APIKey struct {
 	// recordRef names the durable secret-store record this cache entry mirrors: the
 	// record's key (the SHA-256 of the API key) within TenantID. Every key minted by
 	// handleCreateAPIKey or generateEphemeralKey, and every key lazy-loaded by
-	// loadAPIKeyFromStore, carries one, and authenticateMiddleware re-validates such
+	// loadKeyEntryFromStore, carries one, and authenticateMiddleware re-validates such
 	// entries against the store (Issue #4574). Empty only for the env-gated test keys
 	// seeded in New, which have no durable record to revoke.
 	recordRef string
@@ -413,7 +413,7 @@ func New(
 		haManager:               haManager,
 		registrationTokenStore:  registrationTokenStore,
 		signerCertSerial:        signerCertSerial,         // Story #378: For registration handler
-		apiKeys:                 make(map[string]*APIKey), // In-memory cache
+		keyCache:                make(map[string]*APIKey), // In-memory cache
 		apiKeyIdx:               newAPIKeyIndex(),         // Issue #4574: API-key hash → tenant locator
 		secretStore:             secretStore,              // M-AUTH-1: Central secrets provider
 		approvalHook:            &IPTrustApprovalHook{},   // Issue #1695: nil store → fail-closed (quarantine all)
@@ -643,7 +643,7 @@ func (s *Server) seedTestAPIKeys() {
 func (s *Server) seedRegionAPIKeys() {
 	for _, envVar := range []string{"CFGMS_API_KEY_EAST", "CFGMS_API_KEY_CENTRAL", "CFGMS_API_KEY_WEST"} {
 		if keyVal := os.Getenv(envVar); keyVal != "" {
-			s.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+			s.keyCache[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
 				Key: keyVal,
 				// The ha:read-* grants let test/integration/ha observe the
 				// cluster it just started. Every HA route is permission-gated
@@ -689,7 +689,7 @@ func (s *Server) seedInstallerAPIKey() {
 		s.logger.Warn("CFGMS_API_KEY_INSTALLER not seeded: no root tenant resolved")
 		return
 	}
-	s.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+	s.keyCache[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
 		Key:         keyVal,
 		Permissions: []string{"installer:upload", "installer:read", "installer:delete", "steward:list"},
 		TenantID:    installerTenant,
@@ -704,7 +704,7 @@ func (s *Server) seedUpgradeTestAPIKey() {
 	if keyVal == "" {
 		return
 	}
-	s.apiKeys[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+	s.keyCache[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
 		Key:         keyVal,
 		Permissions: []string{"installer:publish:steward", "installer:dispatch:steward", "installer:read"},
 		TenantID:    "fleet-root/fleet-child-a",
@@ -2907,7 +2907,7 @@ func (s *Server) cleanupExpiredAPIKeys() {
 	cleanedCount := 0
 
 	// Find expired keys
-	for keyString, apiKey := range s.apiKeys {
+	for keyString, apiKey := range s.keyCache {
 		if apiKey.ExpiresAt != nil && now.After(*apiKey.ExpiresAt) {
 			expiredKeys = append(expiredKeys, keyString)
 		}
@@ -2915,8 +2915,8 @@ func (s *Server) cleanupExpiredAPIKeys() {
 
 	// Remove expired keys
 	for _, keyString := range expiredKeys {
-		apiKey := s.apiKeys[keyString]
-		delete(s.apiKeys, keyString)
+		apiKey := s.keyCache[keyString]
+		delete(s.keyCache, keyString)
 		cleanedCount++
 
 		s.logger.Debug("Cleaned up expired API key",
@@ -2930,11 +2930,11 @@ func (s *Server) cleanupExpiredAPIKeys() {
 	if cleanedCount > 0 {
 		s.logger.Info("API key cleanup completed",
 			"cleaned_count", cleanedCount,
-			"remaining_keys", len(s.apiKeys),
+			"remaining_keys", len(s.keyCache),
 			"next_cleanup", now.Add(10*time.Minute).Format(time.RFC3339))
 	} else {
 		s.logger.Debug("API key cleanup completed - no expired keys found",
-			"remaining_keys", len(s.apiKeys))
+			"remaining_keys", len(s.keyCache))
 	}
 }
 

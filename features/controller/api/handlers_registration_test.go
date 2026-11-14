@@ -682,7 +682,7 @@ func newRegistrationApprovalServer(t *testing.T) (*Server, *httptest.Server, bus
 	server.SetPendingStore(pendingStore)
 
 	// Add a test API key with all registration approval permissions.
-	server.apiKeys["reg-approval-key"] = &APIKey{
+	server.keyCache["reg-approval-key"] = &APIKey{
 		ID:          "reg-approval-key-id",
 		Key:         "reg-approval-key",
 		Permissions: []string{"registration:list-pending", "registration:approve", "registration:deny"},
@@ -1297,7 +1297,7 @@ func TestHandleDenyRegistration_CrossTenantRefused(t *testing.T) {
 	server, ts, pendingStore := newRegistrationApprovalServer(t)
 	defer ts.Close()
 
-	server.apiKeys["tenant-a-deny-key"] = &APIKey{
+	server.keyCache["tenant-a-deny-key"] = &APIKey{
 		ID:          "tenant-a-deny-key-id",
 		Key:         "tenant-a-deny-key",
 		Permissions: []string{"registration:deny"},
@@ -1798,7 +1798,7 @@ func newBulkApprovalServer(t *testing.T) (*Server, *httptest.Server, business.Pe
 	require.NotNil(t, pendingStore, "test storage must provide a PendingRegistrationStore")
 	server.SetPendingStore(pendingStore)
 
-	server.apiKeys["bulk-key"] = &APIKey{
+	server.keyCache["bulk-key"] = &APIKey{
 		ID:          "bulk-key-id",
 		Key:         "bulk-key",
 		Permissions: []string{"registration:list-pending", "registration:approve", "registration:deny"},
@@ -3802,7 +3802,7 @@ func registerCloneForTest(t *testing.T, cloneOf, ownerTenant string) (PendingReg
 	server.SetPendingStore(sm.GetPendingRegistrationStore())
 	stewardSt := sm.GetStewardStore()
 	server.SetStewardStore(stewardSt)
-	server.apiKeys["reg-approval-key"] = &APIKey{
+	server.keyCache["reg-approval-key"] = &APIKey{
 		ID: "reg-approval-key-id", Key: "reg-approval-key",
 		Permissions: []string{"registration:list-pending"}, TenantID: "default",
 	}
