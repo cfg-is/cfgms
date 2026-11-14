@@ -700,3 +700,33 @@ func refreshRejections(t *testing.T, env *guardEnv) []*business.AuditEntry {
 	}
 	return out
 }
+
+// The repair-contested notice uses the owning MSP's sender when it is complete and
+// the controller-wide sender otherwise. cloneTenant is a seam tenant, so it is its
+// own owning MSP.
+func TestRepairGuard_ContestedNoticeSenderFollowsOwningMSP(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		mspPassword string
+		wantMSP     int
+		wantPlat    int
+	}{
+		{"complete MSP sender carries the notice", testSMTPPassword, 1, 0},
+		{"MSP sender without a password falls back to platform", "", 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newGuardEnv(t)
+			env.withMail(t)
+			mspSMTP := newEmailTestSMTPServer(t)
+			attachMSPSender(t, env.server, cloneTenant, mspSMTP, tc.mspPassword)
+			c := env.completeRepair(t, "s-sender")
+			env.server.ObserveAdmittedPeer(context.Background(), c.rs.id, c.newSerial)
+			env.server.ObserveRevokedPeer(context.Background(), c.rs.id, c.oldSerial)
+			env.requireContested(t, c.rs.id, repairContestRevokedSerial)
+			env.server.crossingNotifyWG.Wait()
+
+			assert.Len(t, mspSMTP.Messages(), tc.wantMSP)
+			assert.Len(t, env.smtp.Messages(), tc.wantPlat)
+		})
+	}
+}

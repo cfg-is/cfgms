@@ -42,31 +42,34 @@ func (s *Server) announceBreakGlassActive(reqCtx context.Context, crossing *busi
 	go func() {
 		defer s.crossingNotifyWG.Done()
 		defer cancel()
-		outcome := s.sendBreakGlassEmail(ctx, &snapshot)
+		outcome, source := s.sendBreakGlassEmail(ctx, &snapshot)
 		s.recordTenantCrossingAuditCtx(ctx, snapshot.TenantID, actorID, business.AuditUserTypeHuman, &snapshot, business.AuditSeverityCritical,
-			"tenant.crossing_break_glass_notified", "", map[string]string{"outcome": outcome})
+			"tenant.crossing_break_glass_notified", "", map[string]string{"outcome": outcome, "sender": string(source)})
 	}()
 }
 
 // sendBreakGlassEmail sends the break-glass email to the tenant's administrator
-// contacts and returns the outcome. Addresses are never logged.
-func (s *Server) sendBreakGlassEmail(ctx context.Context, crossing *business.TenantCrossing) string {
-	notifier := s.EmailNotifier()
+// contacts and returns the outcome and the sender used. The platform owes this
+// notice to the tenant, so it always goes through the controller-wide sender
+// (emailRulePlatformOnly): an MSP's sender, which the MSP can misconfigure or
+// lose, never carries it. Addresses are never logged.
+func (s *Server) sendBreakGlassEmail(ctx context.Context, crossing *business.TenantCrossing) (string, emailSenderSource) {
+	notifier, source := s.resolveEmailSender(ctx, emailRulePlatformOnly, crossing.TenantID)
 	if notifier == nil {
-		return breakGlassNotifyNotConfigured
+		return breakGlassNotifyNotConfigured, source
 	}
 	if s.tenantManager == nil {
-		return breakGlassNotifyNoContacts
+		return breakGlassNotifyNoContacts, source
 	}
 	contacts, err := s.tenantManager.GetAdminContacts(ctx, crossing.TenantID)
 	if err != nil {
 		s.logger.Error("Break-glass notification: reading administrator contacts failed",
 			"tenant_id", logging.SanitizeLogValue(crossing.TenantID),
 			"error", logging.SanitizeLogValue(err.Error()))
-		return breakGlassNotifyFailed
+		return breakGlassNotifyFailed, source
 	}
 	if len(contacts) == 0 {
-		return breakGlassNotifyNoContacts
+		return breakGlassNotifyNoContacts, source
 	}
 
 	result, err := notifier.Send(ctx, s.composeBreakGlassEmail(ctx, crossing, contacts))
@@ -76,16 +79,17 @@ func (s *Server) sendBreakGlassEmail(ctx context.Context, crossing *business.Ten
 	}
 	if err != nil {
 		s.logger.Warn("Break-glass notification email failed",
+			"sender", string(source),
 			"tenant_id", logging.SanitizeLogValue(crossing.TenantID),
 			"error", logging.SanitizeLogValue(err.Error()))
 	}
 	switch {
 	case accepted == 0:
-		return breakGlassNotifyFailed
+		return breakGlassNotifyFailed, source
 	case rejected > 0 || err != nil:
-		return breakGlassNotifyPartial
+		return breakGlassNotifyPartial, source
 	default:
-		return breakGlassNotifySent
+		return breakGlassNotifySent, source
 	}
 }
 
