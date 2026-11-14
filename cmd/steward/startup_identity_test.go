@@ -254,8 +254,9 @@ func TestRunSteward_TokenDefectHeartbeatCarriesReason(t *testing.T) {
 	require.NoError(t, err)
 	serverTLS.NextProtos = []string{quictransport.ALPNProtocol}
 	server := grpcCP.New(grpcCP.ModeServer)
+	reg := registry.NewRegistry()
 	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
-		"mode": "server", "addr": "127.0.0.1:0", "tls_config": serverTLS, "registry": registry.NewRegistry(),
+		"mode": "server", "addr": "127.0.0.1:0", "tls_config": serverTLS, "registry": reg,
 	}))
 	require.NoError(t, server.Start(context.Background()))
 	t.Cleanup(server.ForceStop)
@@ -289,8 +290,33 @@ func TestRunSteward_TokenDefectHeartbeatCarriesReason(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			go func() { done <- runStewardInternal(ctx, token, "", "", nil) }()
+			// A stored-identity connect treats a silent controller as admitted only
+			// after storedIdentityAdmissionWindow (10 s). A real controller sends its
+			// tamper state on connect, which ends the wait; this bare control plane
+			// sends nothing, so answer the new link the same way.
+			answered := make(chan struct{})
+			go func() {
+				defer close(answered)
+				tick := time.NewTicker(20 * time.Millisecond)
+				defer tick.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-tick.C:
+						link, ok := reg.Get(f.stewardID)
+						if !ok || link == nil {
+							continue
+						}
+						if server.SendTamperState(ctx, f.stewardID, false) == nil {
+							return
+						}
+					}
+				}
+			}()
 			t.Cleanup(func() {
 				cancel()
+				<-answered
 				// A cancelled context is a clean shutdown, not an error.
 				assert.NoError(t, <-done)
 				// The client's Disconnect leaves the process-wide data plane provider
