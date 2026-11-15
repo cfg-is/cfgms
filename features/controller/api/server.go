@@ -1736,15 +1736,6 @@ func (s *Server) GetRouter() http.Handler {
 	return s.router
 }
 
-// EmailNotifier returns the configured email sender, or nil when email delivery
-// is not configured or the SMTP credential has not been stored. Callers must
-// treat nil as "skip this channel", never as an error (Issue #4710).
-func (s *Server) EmailNotifier() notifif.Notifier {
-	s.emailMu.RLock()
-	defer s.emailMu.RUnlock()
-	return s.emailNotifier
-}
-
 // GetSecretStore returns the central secrets provider so callers outside the api
 // package (e.g. server.initializeWorkflowHandler) can thread it into subsystems
 // that require secret access (Issue #2374).

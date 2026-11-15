@@ -82,11 +82,12 @@ func (s *Server) sendPendingNotice(parent context.Context, ownerTenant, kind str
 	go func() {
 		defer s.crossingNotifyWG.Done()
 		defer cancel()
-		outcome := s.notifyTenantAdmins(ctx, ownerTenant, func() bool { return true }, compose)
+		outcome, source := s.notifyTenantAdmins(ctx, emailRuleOwningMSPWithPlatformFallback, ownerTenant, func() bool { return true }, compose)
 		s.logger.Info("Content change notice handled",
 			"tenant_id", logging.SanitizeLogValue(ownerTenant),
 			"kind", kind,
-			"outcome", outcome)
+			"outcome", outcome,
+			"sender", string(source))
 	}()
 }
 

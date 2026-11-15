@@ -644,3 +644,34 @@ func TestRecordPending_ScriptNotRequestingPreapprovalRecordsNothing(t *testing.T
 	assert.Empty(t, f.pending(t))
 	assert.Empty(t, f.smtp.Messages())
 }
+
+// [AC] The pending-script-change notice uses the owning MSP's sender when it is
+// complete and the controller-wide sender otherwise.
+func TestRecordPending_NoticeSenderFollowsOwningMSP(t *testing.T) {
+	const ownerUnderMSP = "client-1" // owned by msp-a
+	cases := []struct {
+		name        string
+		mspPassword string // "" leaves the MSP sender without a password
+		wantMSP     int
+		wantPlat    int
+	}{
+		{"complete MSP sender carries the notice", testSMTPPassword, 1, 0},
+		{"MSP sender without a password falls back to platform", "", 0, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPendingFixture(t)
+			f.owner = ownerUnderMSP
+			require.NoError(t, f.store.SetMode(context.Background(), f.owner, LibraryKindScript, ApprovalModeApprove, "admin"))
+			setTenantContacts(t, f.server, f.owner, pendingOwnerTo)
+			mspSMTP := newEmailTestSMTPServer(t)
+			attachMSPSender(t, f.server, pendingRunTen, mspSMTP, tc.mspPassword)
+
+			_, changed := f.seedChanged(t)
+			f.record(t, changed)
+
+			assert.Len(t, mspSMTP.Messages(), tc.wantMSP)
+			assert.Len(t, f.smtp.Messages(), tc.wantPlat)
+		})
+	}
+}

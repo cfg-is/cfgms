@@ -185,7 +185,7 @@ func decodeEmailData(t *testing.T, rec *httptest.ResponseRecorder) map[string]in
 
 func TestEmail_NotConfigured_ReportsFalseAndNilAccessor(t *testing.T) {
 	server := setupTestServer(t)
-	assert.Nil(t, server.EmailNotifier())
+	assert.Nil(t, server.platformEmailNotifier())
 
 	rec := emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodGet, "/api/v1/notifications/email", "", server.handleGetEmailSettings)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -203,7 +203,7 @@ func TestEmail_NotConfigured_ReportsFalseAndNilAccessor(t *testing.T) {
 func TestEmail_CredentialStoredOnlyInSecretStore_ThenTestSendDelivers(t *testing.T) {
 	smtp := newEmailTestSMTPServer(t)
 	server := newEmailTestServer(t, smtp)
-	require.Nil(t, server.EmailNotifier(), "no credential yet, so no notifier")
+	require.Nil(t, server.platformEmailNotifier(), "no credential yet, so no notifier")
 
 	rec := emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodGet, "/x", "", server.handleGetEmailSettings)
 	data := decodeEmailData(t, rec)
@@ -213,7 +213,7 @@ func TestEmail_CredentialStoredOnlyInSecretStore_ThenTestSendDelivers(t *testing
 	rec = emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPut, "/x", `{"password":"`+testSMTPPassword+`"}`, server.handlePutEmailCredential)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), testSMTPPassword)
-	require.NotNil(t, server.EmailNotifier(), "notifier is rebuilt when the credential is stored")
+	require.NotNil(t, server.platformEmailNotifier(), "notifier is rebuilt when the credential is stored")
 
 	// Retrievable only through the secret store, under password_secret_key.
 	sec, err := server.readEmailCredential(context.Background(), emailCredentialTenantID, testPasswordKey)
@@ -311,7 +311,7 @@ func TestEmail_CredentialBodyBoundedAndRequired(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	rec = emailCall(t, server, emailStrongPrincipal(), ctxkeys.NewRootScope(), http.MethodPut, "/x", `{"password":"`+strings.Repeat("a", 8192)+`"}`, server.handlePutEmailCredential)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Nil(t, server.EmailNotifier())
+	assert.Nil(t, server.platformEmailNotifier())
 }
 
 func TestEmail_TenantScopedCallerRefusedOnAllEndpoints(t *testing.T) {
@@ -360,6 +360,6 @@ func TestEmail_StartupBuildsNotifierWhenCredentialAlreadyStored(t *testing.T) {
 	server.emailNotifier = nil
 	server.emailMu.Unlock()
 	server.initEmailNotifier(context.Background())
-	require.NotNil(t, server.EmailNotifier())
-	assert.Equal(t, "smtp", server.EmailNotifier().Name())
+	require.NotNil(t, server.platformEmailNotifier())
+	assert.Equal(t, "smtp", server.platformEmailNotifier().Name())
 }

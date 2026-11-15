@@ -200,7 +200,7 @@ func TestBreakGlassLoud_EmailSent_NamesTenantCategoryExpiryNotJustification(t *t
 func TestBreakGlassLoud_EmailNotConfigured_OtherChannelsStillFire(t *testing.T) {
 	server := breakGlassServer(t)
 	setContacts(t, server, "ops@acme-corp.example")
-	require.Nil(t, server.EmailNotifier())
+	require.Nil(t, server.platformEmailNotifier())
 
 	rec := invokeLoud(t, server, "account_recovery")
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())

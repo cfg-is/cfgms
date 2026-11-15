@@ -133,7 +133,7 @@ func TestHandleStewardTamperAlarm_TransitionsAuditsAndNotifiesOnce(t *testing.T)
 
 func TestHandleStewardTamperAlarm_NotConfigured_StillTransitionsAndAudits(t *testing.T) {
 	f := newTamperFixture(t)
-	require.Nil(t, f.server.EmailNotifier())
+	require.Nil(t, f.server.platformEmailNotifier())
 	id := f.steward(t, "tamper-nc", "msp-a", business.StewardStatusActive)
 
 	f.server.HandleStewardTamperAlarm(context.Background(), id, tamperReasons)
@@ -233,8 +233,8 @@ func TestNotifyStewardTamper_ConcurrentAlarmsSendOnce(t *testing.T) {
 			defer done.Done()
 			ready.Done()
 			<-start
-			outcome := f.server.notifyStewardTamper(context.Background(), id, "msp-a", []string{controlplaneTypes.ReasonCodeTamperDataDir})
-			f.server.recordStewardTamperAudit(context.Background(), id, "msp-a", []string{controlplaneTypes.ReasonCodeTamperDataDir}, outcome)
+			outcome, source := f.server.notifyStewardTamper(context.Background(), id, "msp-a", []string{controlplaneTypes.ReasonCodeTamperDataDir})
+			f.server.recordStewardTamperAudit(context.Background(), id, "msp-a", []string{controlplaneTypes.ReasonCodeTamperDataDir}, outcome, source)
 		}()
 	}
 	ready.Wait()
@@ -450,7 +450,7 @@ func TestHandleFleetHealth_TamperedListedFirst(t *testing.T) {
 			{ID: "m-hidden-tampered", TenantID: "tenant-a", Status: "tampered", LastHeartbeat: now, Hidden: true},
 		},
 	})
-	server.recordStewardTamperAudit(context.Background(), "z-tampered", "tenant-a", []string{"tamper.ca_mismatch"}, "sent")
+	server.recordStewardTamperAudit(context.Background(), "z-tampered", "tenant-a", []string{"tamper.ca_mismatch"}, "sent", emailSourcePlatform)
 	require.NoError(t, server.auditManager.Flush(context.Background()))
 
 	rec := getFleetHealth(server)

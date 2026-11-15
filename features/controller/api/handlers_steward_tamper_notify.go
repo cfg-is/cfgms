@@ -157,15 +157,15 @@ func (s *Server) announceStewardTamper(parent context.Context, stewardID, tenant
 	go func() {
 		defer s.crossingNotifyWG.Done()
 		defer cancel()
-		outcome := s.notifyStewardTamper(ctx, stewardID, tenantID, codes)
-		s.recordStewardTamperAudit(ctx, stewardID, tenantID, codes, outcome)
+		outcome, source := s.notifyStewardTamper(ctx, stewardID, tenantID, codes)
+		s.recordStewardTamperAudit(ctx, stewardID, tenantID, codes, outcome, source)
 	}()
 }
 
 // notifyStewardTamper emails the tenant's administrator contacts and returns the
-// outcome. Addresses are never logged.
-func (s *Server) notifyStewardTamper(ctx context.Context, stewardID, tenantID string, codes []string) string {
-	return s.notifyTenantAdmins(ctx, tenantID,
+// outcome and the sender used. Addresses are never logged.
+func (s *Server) notifyStewardTamper(ctx context.Context, stewardID, tenantID string, codes []string) (string, emailSenderSource) {
+	return s.notifyTenantAdmins(ctx, emailRuleOwningMSPWithPlatformFallback, tenantID,
 		func() bool { return s.tamperNotify.claim(stewardID, time.Now()) },
 		func(contacts []string) notifif.Message {
 			return s.composeStewardTamperEmail(ctx, stewardID, tenantID, codes, contacts)
@@ -173,37 +173,62 @@ func (s *Server) notifyStewardTamper(ctx context.Context, stewardID, tenantID st
 }
 
 // notifyTenantAdmins emails the tenant's administrator contacts a message built
-// by compose and returns the outcome. claim is called only once there is
-// something to send, so not_configured, no_contacts and a failed contact read
-// never start a cooldown; it returns false to suppress the send (cooldown).
-func (s *Server) notifyTenantAdmins(ctx context.Context, tenantID string, claim func() bool, compose func(contacts []string) notifif.Message) string {
-	notifier := s.EmailNotifier()
+// by compose and returns the outcome and which sender carried it. The sender
+// comes from resolveEmailSender under rule; a failed send is never retried on
+// another sender. claim is called only once there is something to send, so
+// not_configured, no_contacts and a failed contact read never start a cooldown;
+// it returns false to suppress the send (cooldown).
+func (s *Server) notifyTenantAdmins(ctx context.Context, rule emailSenderRule, tenantID string, claim func() bool, compose func(contacts []string) notifif.Message) (string, emailSenderSource) {
+	notifier, source := s.resolveEmailSender(ctx, rule, tenantID)
 	if notifier == nil {
-		return tamperNotifyNotConfigured
+		return tamperNotifyNotConfigured, source
 	}
 	if s.tenantManager == nil {
-		return tamperNotifyNoContacts
+		return tamperNotifyNoContacts, source
 	}
 	contacts, err := s.tenantManager.GetAdminContacts(ctx, tenantID)
 	if err != nil {
 		s.logger.Error("Tamper notification: reading administrator contacts failed",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
 			"error", logging.SanitizeLogValue(err.Error()))
-		return tamperNotifyFailed
+		return tamperNotifyFailed, source
 	}
 	if len(contacts) == 0 {
-		return tamperNotifyNoContacts
+		return tamperNotifyNoContacts, source
 	}
 	if !claim() {
-		return tamperNotifyCooldown
+		return tamperNotifyCooldown, source
 	}
 	result, err := notifier.Send(ctx, compose(contacts))
 	if err != nil {
-		s.logger.Warn("Tamper notification email failed",
-			"tenant_id", logging.SanitizeLogValue(tenantID),
-			"error", logging.SanitizeLogValue(err.Error()))
+		s.logSenderFailure(ctx, "Tamper notification email failed", source, tenantID, err)
 	}
-	return tamperSendOutcome(result, err)
+	return tamperSendOutcome(result, err), source
+}
+
+// logSenderFailure logs a failed send. A failure on an MSP sender is an error
+// that names the MSP tenant, so its administrators can find and fix their sender;
+// it carries a classified failure kind, never the raw error text, so it cannot
+// carry the password. A failure on the controller-wide sender is a warning that
+// names the tenant through logging.RedactedID: CodeQL's go/clear-text-logging
+// follows the tenant id field-insensitively from credential-bearing records that
+// reach this shared helper, and RedactedID is the barrier it recognises. The
+// full tenant id is on the audit entry the caller writes (and in the log with
+// the operator's unredacted-values setting).
+func (s *Server) logSenderFailure(ctx context.Context, msg string, source emailSenderSource, tenantID string, err error) {
+	kind := emailSendFailureKind(err)
+	if source == emailSourceMSP && s.tenantManager != nil {
+		s.logger.Error(msg,
+			"sender", string(source),
+			"msp_tenant_id", logging.SanitizeLogValue(s.tenantManager.ResolveOwningMSPID(ctx, tenantID)),
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"failure", kind)
+		return
+	}
+	s.logger.Warn(msg,
+		"sender", string(source),
+		"tenant_id", logging.RedactedID(tenantID),
+		"failure", kind)
 }
 
 // tamperSendOutcome classifies a Send result: no accepted recipient is a
@@ -254,7 +279,7 @@ The steward stays visible in the fleet with status "tampered" until an operator 
 
 // recordStewardTamperAudit writes the alarm event. A failure is logged and goes no
 // further: the status transition has already happened.
-func (s *Server) recordStewardTamperAudit(ctx context.Context, stewardID, tenantID string, codes []string, outcome string) {
+func (s *Server) recordStewardTamperAudit(ctx context.Context, stewardID, tenantID string, codes []string, outcome string, source emailSenderSource) {
 	if s.auditManager == nil {
 		return
 	}
@@ -269,7 +294,8 @@ func (s *Server) recordStewardTamperAudit(ctx context.Context, stewardID, tenant
 		Detail("steward_id", stewardID).
 		Detail("tenant_id", tenantID).
 		Detail("codes", codes).
-		Detail("notification", outcome)
+		Detail("notification", outcome).
+		Detail("sender", string(source))
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
 		s.logger.Warn("Failed to record steward tamper alarm audit event",
 			"steward_id", logging.SanitizeLogValue(stewardID),

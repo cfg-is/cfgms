@@ -4309,3 +4309,45 @@ func TestLockedAdmission_OrdinaryApprovalCannotClaimLockedEntry(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, business.PendingRegistrationStatusPending, after.Status, "approve-all skips locked entries")
 }
+
+// The locked-admission notice uses the owning MSP's sender when it is complete and
+// the controller-wide sender otherwise, and the notified audit event records which.
+// cloneTenant is a seam tenant, so it is its own owning MSP.
+func TestLockedAdmission_NoticeSenderFollowsOwningMSP(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		mspPassword string
+		wantSender  string
+		wantMSP     int
+		wantPlat    int
+	}{
+		{"complete MSP sender carries the notice", testSMTPPassword, "msp", 1, 0},
+		{"MSP sender without a password falls back to platform", "", "platform", 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newCloneEnv(t)
+			env.server.SetApprovalHook(&AlwaysApproveHook{})
+			ctx := context.Background()
+			require.NoError(t, ensureTestRootTenant(ctx, env.server.tenantManager))
+			_, err := env.server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: cloneTenant, ParentID: testRootTenantID})
+			require.NoError(t, err)
+			setTenantContacts(t, env.server, cloneTenant, "admin@acme-corp.example")
+			platformSMTP := newEmailTestSMTPServer(t)
+			attachEmail(t, env.server, platformSMTP)
+			mspSMTP := newEmailTestSMTPServer(t)
+			attachMSPSender(t, env.server, cloneTenant, mspSMTP, tc.mspPassword)
+			env.addSteward(t, "steward-old-ns", cloneTenant, cloneDeviceA, business.StewardStatusActive)
+
+			rec := postRegisterWithBody(env.server, env.lockedRequest(t, "steward-old-ns", cloneReasonBrokenTrust))
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			env.server.crossingNotifyWG.Wait()
+
+			assert.Len(t, mspSMTP.Messages(), tc.wantMSP)
+			assert.Len(t, platformSMTP.Messages(), tc.wantPlat)
+			events := env.auditActions(t, auditActionLockedAdmissionNotified)
+			require.Len(t, events, 1)
+			assert.Equal(t, "sent", events[0].Details["notification"])
+			assert.Equal(t, tc.wantSender, events[0].Details["sender"])
+		})
+	}
+}

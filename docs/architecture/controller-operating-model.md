@@ -915,8 +915,8 @@ steward to `tampered` from `registered`, `active`, `lost` or `archived` only. A
 unchanged, so an alarm can only lower trust. The caller is the steward bound to the
 authenticated mTLS identity, so a steward can alarm only about itself. The status
 write comes first; the transition is mirrored to the node-local registry, audited as
-`steward_tamper_alarm` (codes and notification outcome), and the tenant's
-administrators are emailed, at most once per steward per hour per node (every
+`steward_tamper_alarm` (codes, notification outcome and the `sender` that carried it), and the tenant's
+administrators are emailed through the owning MSP's sender when it has a complete one, otherwise the controller-wide sender, at most once per steward per hour per node (every
 transition is still audited). `tampered` survives reconnects and heartbeat recovery;
 it is never hidden from default steward lists, and fleet health counts it with its
 tamper codes.
@@ -1033,7 +1033,7 @@ The new identity receives nothing but the credential until an operator ends it.
   (`429` beyond that, audited as `registration_rejected` with `locked_admission_cap`).
 - Admissions are audited as `steward_locked_admission`; one notification covers all
   locked admissions on a token in a one-hour window
-  (`steward_locked_admission_notified`).
+  (`steward_locked_admission_notified`, which records the `sender`: `msp`, `platform` or `none`).
 
 **Link** (`POST /api/v1/stewards/{id}/identity/move` with the locked copy's
 `pending_id`; `cfg steward move-identity <id> --to <pending-id>`; AssuranceStrong):

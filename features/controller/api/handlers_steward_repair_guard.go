@@ -356,13 +356,13 @@ func (s *Server) announceRepairContested(parent context.Context, record *busines
 	go func() {
 		defer s.crossingNotifyWG.Done()
 		defer cancel()
-		outcome := s.notifyTenantAdmins(ctx, record.TenantID,
+		outcome, source := s.notifyTenantAdmins(ctx, emailRuleOwningMSPWithPlatformFallback, record.TenantID,
 			func() bool { return s.tamperNotify.claim("repair-contested/"+record.ID, time.Now()) },
 			func(contacts []string) notifif.Message {
 				return s.composeRepairContestedEmail(ctx, record, source, contacts)
 			})
 		s.logger.Info("Repair contested notification",
-			"steward_id", logging.SanitizeLogValue(record.ID), "outcome", outcome)
+			"steward_id", logging.SanitizeLogValue(record.ID), "outcome", outcome, "sender", string(source))
 	}()
 }
 

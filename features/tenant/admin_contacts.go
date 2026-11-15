@@ -118,21 +118,36 @@ func (m *Manager) SetAdminContacts(ctx context.Context, tenantID string, addrs [
 	return normalized, nil
 }
 
-// ResolveMSPAdminContacts returns the administrator contacts of the MSP that owns
-// targetID: the contacts on the tenant in targetID's ancestry whose parent is the
-// deployment root (the MSP seam tenant). It fails closed to an empty list when
-// there is no root, the target is the root or not under it, or nothing is set.
-func (m *Manager) ResolveMSPAdminContacts(ctx context.Context, targetID string) []string {
+// ResolveOwningMSPID returns the ID of the MSP that owns targetID: the tenant in
+// targetID's ancestry whose parent is the deployment root (the MSP seam tenant).
+// The seam tenant owns itself. It fails closed to "" when there is no root, the
+// target is the root, or the target is not under it.
+func (m *Manager) ResolveOwningMSPID(ctx context.Context, targetID string) string {
 	rootID := m.RootTenantID(ctx)
 	if rootID == "" || targetID == "" || targetID == rootID {
-		return []string{}
+		return ""
 	}
 	path, err := m.store.GetTenantPath(ctx, targetID)
 	if err != nil || len(path) < 2 || path[0] != rootID {
-		return []string{}
+		return ""
 	}
 	td, err := m.store.GetTenant(ctx, path[1])
 	if err != nil || td == nil || td.ParentID != rootID {
+		return ""
+	}
+	return td.ID
+}
+
+// ResolveMSPAdminContacts returns the administrator contacts of the MSP that owns
+// targetID (see ResolveOwningMSPID). It fails closed to an empty list when there
+// is no owning MSP or nothing is set.
+func (m *Manager) ResolveMSPAdminContacts(ctx context.Context, targetID string) []string {
+	mspID := m.ResolveOwningMSPID(ctx, targetID)
+	if mspID == "" {
+		return []string{}
+	}
+	td, err := m.store.GetTenant(ctx, mspID)
+	if err != nil || td == nil {
 		return []string{}
 	}
 	return AdminContactsFromMetadata(td.Metadata)
