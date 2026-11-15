@@ -224,6 +224,75 @@ func TestMatchingRoleFragments_DirectoryRoleSelector(t *testing.T) {
 	assert.Empty(t, roleNames(linuxID), "a steward with no directory-role facts matches neither role")
 }
 
+// TestMatchingRoleFragments_WindowsFeatureSelector is the REQUIRED TEST from AC: a
+// role with selector "dna.windows_feature.Microsoft-Hyper-V:enabled" resolves for
+// a steward whose host:os fragment carries that per-feature key (the shape
+// PartitionHostFacts emits for an enabled optional feature) and not for one that
+// lacks it.
+func TestMatchingRoleFragments_WindowsFeatureSelector(t *testing.T) {
+	ctx := ctxkeys.WithSystem(context.Background())
+	logger := logging.NewNoopLogger()
+	sm := pkgtesting.SetupTestStorage(t)
+
+	require.NoError(t, sm.GetTenantStore().CreateTenant(ctx,
+		&business.TenantData{ID: "tenant-a", Name: "Tenant A", Status: business.TenantStatusActive}))
+
+	controllerSvc := NewControllerService(logger)
+	tenantCtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-a")
+
+	register := func(id string, hostOS map[string]interface{}) string {
+		t.Helper()
+		resp, err := controllerSvc.AcceptRegistration(tenantCtx, &controllerpb.RegisterRequest{
+			InitialDna: &commonpb.DNA{
+				Id:              id,
+				SyncFingerprint: "fp-" + id,
+				Fragments: []*commonpb.Fragment{
+					mustFragment("hostname", map[string]interface{}{"hostname": id + "-host"}),
+					mustFragment("host:os", hostOS),
+				},
+			},
+		})
+		require.NoError(t, err)
+		return resp.StewardId
+	}
+
+	hyperVID := register("hv-host", map[string]interface{}{
+		"os":                                   "windows",
+		"windows_feature.Microsoft-Hyper-V":    "enabled",
+		"windows_feature.DNS-Server-Full-Role": "enabled",
+	})
+	noHyperVID := register("dns-only", map[string]interface{}{
+		"os":                                   "windows",
+		"windows_feature.DNS-Server-Full-Role": "enabled",
+	})
+	noFeaturesID := register("plain", map[string]interface{}{"os": "windows"})
+
+	storeRoleConfig(t, sm.GetConfigStore(), "tenant-a", "hyperv-time", "dna.windows_feature.Microsoft-Hyper-V:enabled",
+		stewardtypes.StewardConfig{Resources: []stewardtypes.ResourceConfig{
+			{Name: "hyperv-time-res", Module: "time", Config: map[string]interface{}{"source": "external"}},
+		}})
+
+	adapter := &roleConfigAdapter{
+		controllerSvc: controllerSvc,
+		configStore:   sm.GetConfigStore(),
+		logger:        logger,
+	}
+	roleNames := func(stewardID string) []string {
+		t.Helper()
+		frags, err := adapter.MatchingRoleFragments(ctx, stewardID)
+		require.NoError(t, err)
+		names := make([]string, 0, len(frags))
+		for _, f := range frags {
+			names = append(names, f.Name)
+		}
+		return names
+	}
+
+	assert.Equal(t, []string{"hyperv-time"}, roleNames(hyperVID), "a host with Hyper-V enabled matches")
+	assert.Empty(t, roleNames(noHyperVID), "a host without the Hyper-V feature key does not match")
+	assert.Empty(t, roleNames(noFeaturesID), "a host reporting no features does not match")
+}
+
 // TestGetConfiguration_UntaggingRemovesRoleResource verifies that removing a tag causes
 // the role's resources to be absent on the next GetConfiguration call.
 func TestGetConfiguration_UntaggingRemovesRoleResource(t *testing.T) {

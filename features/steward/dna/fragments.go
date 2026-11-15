@@ -5,6 +5,8 @@ package dna
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -19,11 +21,16 @@ import (
 // the source-envelope category name, and the curated attribute-key allowlist.
 // Keys must be explicitly enumerated per platform file — no prefix-regex substitutes
 // (implementation note: cpu_current_frequency_mhz doesn't share a clean prefix
-// boundary with stable cpu_* keys).
+// boundary with stable cpu_* keys). The one exception is prefixes, reserved for
+// dynamic key families whose members cannot be enumerated.
 type fragmentSpec struct {
 	kind     string   // e.g. "host:cpu"
 	category string   // envelope source suffix, e.g. "hardware" → source="gatherer:hardware"
 	keys     []string // stable, non-ephemeral attribute keys for this kind
+	// prefixes admits every attribute key that starts with one of them, for
+	// key families whose members are dynamic (for example one key per installed
+	// Windows feature). Exact keys still go in keys.
+	prefixes []string
 }
 
 // hostFactFragmentSpecs is the curated allowlist of host:* fragment kinds
@@ -51,7 +58,9 @@ type fragmentSpec struct {
 //     when the host's role or domain membership changes, listed here so a
 //     role config selector (dna.<key>:<value>) can match them. Limitation:
 //     PartitionHostFactsFromOsquery builds host:os from osquery state, so
-//     these four keys are absent on the osquery source path.
+//     these four keys are absent on the osquery source path. Also carries
+//     every windows_feature.<Name> key (enabled Windows optional features) via
+//     the "windows_feature." prefix, since feature names are dynamic.
 //   - host:bios: BIOS, motherboard, and system hardware identity. Includes
 //     virtualization_type/role because they are stable platform identity attributes
 //     (changing only on live migration, not at each collection).
@@ -166,6 +175,8 @@ var hostFactFragmentSpecs = []fragmentSpec{
 			"domain_joined",
 			"domain_name",
 		},
+		// Enabled Windows optional features: windows_feature.<Name>=enabled.
+		prefixes: []string{"windows_feature."},
 	},
 	{
 		kind:     "host:bios",
@@ -273,7 +284,7 @@ func PartitionHostFacts(
 		}
 
 		// Pick the stable, non-ephemeral keys that are actually populated.
-		payload := pickAttributeKeys(attributes, spec.keys)
+		payload := pickAttributeKeys(attributes, spec.keys, spec.prefixes)
 
 		// Fail-closed: no keys present means collection failed; omit fragment.
 		if len(payload) == 0 {
@@ -421,18 +432,50 @@ func buildOwnedKindSet(ownership map[string][]modules.OwnershipDeclaration) map[
 	return owned
 }
 
-// pickAttributeKeys selects keys from attributes that are in the allowlist,
-// non-empty, and not on the partitionEphemeralKeys list. Returns a new map
-// containing only the selected key-value pairs.
-func pickAttributeKeys(attributes map[string]string, allowlist []string) map[string]string {
+// pickAttributeKeys selects keys from attributes that are in the allowlist or
+// start with one of the prefixes, are non-empty, and are not on the
+// partitionEphemeralKeys list. Prefix matches are visited in sorted key order so
+// the selection is deterministic. Returns a new map containing only the selected
+// key-value pairs.
+func pickAttributeKeys(attributes map[string]string, allowlist []string, prefixes []string) map[string]string {
 	result := make(map[string]string)
 	for _, k := range allowlist {
-		if partitionEphemeralKeys[k] {
-			continue
+		if isPickableAttribute(attributes, k) {
+			result[k] = attributes[k]
 		}
-		if v, ok := attributes[k]; ok && v != "" {
-			result[k] = v
+	}
+	for _, k := range sortedKeysWithPrefix(attributes, prefixes) {
+		if isPickableAttribute(attributes, k) {
+			result[k] = attributes[k]
 		}
 	}
 	return result
+}
+
+// isPickableAttribute reports whether key is populated and not ephemeral.
+func isPickableAttribute(attributes map[string]string, key string) bool {
+	return !partitionEphemeralKeys[key] && attributes[key] != ""
+}
+
+// sortedKeysWithPrefix returns, in sorted order, the attribute keys that start
+// with any of the prefixes. It returns nil when prefixes is empty.
+func sortedKeysWithPrefix(attributes map[string]string, prefixes []string) []string {
+	var keys []string
+	for k := range attributes {
+		if hasAnyPrefix(k, prefixes) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// hasAnyPrefix reports whether s starts with any of the prefixes.
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
 }
