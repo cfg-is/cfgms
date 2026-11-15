@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -457,4 +459,320 @@ func TestMSPEmailSender_RoundTripDeliversThroughResolver(t *testing.T) {
 	assert.Equal(t, "sent", entry.Details["notification"])
 	assert.Len(t, f.msp.Messages(), 1, "the removed sender receives nothing more")
 	assert.Len(t, f.platform.Messages(), 1, "the platform server carries the alert after removal")
+}
+
+// ---- POST /tenants/{id}/email-sender/test (Issue #6244) ----
+
+const mspTestSendFrom = "ops@msp-a.example" // the from address attachMSPSender stores
+
+// doTestSend serves POST /tenants/{id}/email-sender/test as principal p.
+func (e *mspSenderEnv) doTestSend(t *testing.T, p *Principal, tenantID, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/tenants/"+tenantID+"/email-sender/test", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx := context.WithValue(req.Context(), principalContextKey, p)
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, p.TenantID)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(p.TenantID))
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req.WithContext(ctx))
+	return rec
+}
+
+func decodeTestSend(t *testing.T, rec *httptest.ResponseRecorder) emailTestResponse {
+	t.Helper()
+	var env struct {
+		Data emailTestResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env), rec.Body.String())
+	return env.Data
+}
+
+// newMSPTestSendEnv is a sender fixture (a platform mail server wired as the
+// controller-wide sender and an MSP mail server) with the MSP routes registered.
+func newMSPTestSendEnv(t *testing.T) (*senderFixture, *mspSenderEnv) {
+	t.Helper()
+	f := newSenderFixture(t)
+	_, cs := newApprovalStore(t)
+	st, err := NewMSPEmailSenderStore(cs)
+	require.NoError(t, err)
+	f.server.SetMSPEmailSenderStore(st)
+	router := mux.NewRouter()
+	registerMSPEmailSenderRoutes(f.server, router)
+	return f, &mspSenderEnv{server: f.server, router: router, logs: f.logs}
+}
+
+// countingListener accepts and immediately closes loopback connections, counting them.
+func countingListener(t *testing.T) (port int, accepted *atomic.Int32) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	accepted = &atomic.Int32{}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			_ = c.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln.Addr().(*net.TCPAddr).Port, accepted
+}
+
+// TestMSPEmailSenderTest_SendsOneMessageToTheFromAddress is a [REQUIRED TEST].
+func TestMSPEmailSenderTest_SendsOneMessageToTheFromAddress(t *testing.T) {
+	f, env := newMSPTestSendEnv(t)
+	attachMSPSender(t, f.server, "msp-a", f.msp, testSMTPPassword)
+
+	rec := env.doTestSend(t, mspSenderAdmin("msp-a"), "msp-a", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got := decodeTestSend(t, rec)
+	assert.True(t, got.Delivered)
+	assert.Empty(t, got.FailureReason)
+	require.Len(t, got.Recipients, 1)
+	assert.Equal(t, mspTestSendFrom, got.Recipients[0].Address)
+	assert.True(t, got.Recipients[0].Accepted)
+
+	msgs := f.msp.Messages()
+	require.Len(t, msgs, 1, "the MSP's own server received exactly one message")
+	assert.Contains(t, msgs[0], emailTestSubject)
+	assert.Empty(t, f.platform.Messages(), "the platform sender is never used")
+	assert.NotContains(t, rec.Body.String(), testSMTPPassword)
+
+	// Whitespace alone is still an empty body.
+	rec = env.doTestSend(t, mspSenderAdmin("msp-a"), "msp-a", " \n")
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Len(t, f.msp.Messages(), 2)
+}
+
+// TestMSPEmailSenderTest_NonEmptyBodyRefused: no request field reaches the message.
+func TestMSPEmailSenderTest_NonEmptyBodyRefused(t *testing.T) {
+	f, env := newMSPTestSendEnv(t)
+	attachMSPSender(t, f.server, "msp-a", f.msp, testSMTPPassword)
+
+	for name, body := range map[string]string{
+		"empty object":      `{}`,
+		"recipient":         `{"to":"victim@evil.example"}`,
+		"subject and body":  `{"subject":"s","body":"b"}`,
+		"not json":          `hello`,
+		"oversized garbage": strings.Repeat("x", 5000),
+	} {
+		rec := env.doTestSend(t, mspSenderAdmin("msp-a"), "msp-a", body)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", name, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "INVALID_REQUEST", name)
+	}
+	assert.Empty(t, f.msp.Messages())
+	assert.Empty(t, f.platform.Messages())
+	assert.Empty(t, auditEntriesByAction(t, f.server, mspEmailSenderAuditTested), "a refused request is not audited")
+}
+
+// TestMSPEmailSenderTest_NotConfigured is a [REQUIRED TEST]: with no sender or no
+// password the route says so and does not fall back to the platform sender.
+func TestMSPEmailSenderTest_NotConfigured(t *testing.T) {
+	f, env := newMSPTestSendEnv(t)
+	admin := mspSenderAdmin("msp-a")
+
+	rec := env.doTestSend(t, admin, "msp-a", "")
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "EMAIL_NOT_CONFIGURED")
+
+	// A record without its password is no sender either.
+	attachMSPSender(t, f.server, "msp-a", f.msp, "")
+	rec = env.doTestSend(t, admin, "msp-a", "")
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "EMAIL_NOT_CONFIGURED")
+
+	// A password without a record neither.
+	require.NoError(t, f.server.MSPEmailSenderStore().Delete(context.Background(), "msp-a"))
+	require.NoError(t, f.server.storeMSPEmailPassword(context.Background(), "msp-a", testSMTPPassword, "alice"))
+	rec = env.doTestSend(t, admin, "msp-a", "")
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+
+	assert.Empty(t, f.platform.Messages(), "no platform-sender message was sent")
+	assert.Empty(t, f.msp.Messages())
+	assert.Empty(t, auditEntriesByAction(t, f.server, mspEmailSenderAuditTested), "nothing was sent, so nothing is audited")
+}
+
+// TestMSPEmailSenderTest_GuardRefusesLoopbackAndPrivateHosts is a [REQUIRED TEST].
+func TestMSPEmailSenderTest_GuardRefusesLoopbackAndPrivateHosts(t *testing.T) {
+	f, env := newMSPTestSendEnv(t)
+	ctx := context.Background()
+	port, accepted := countingListener(t)
+
+	orig := mspEmailAllowedPorts
+	mspEmailAllowedPorts = []int{port, 587}
+	t.Cleanup(func() { mspEmailAllowedPorts = orig })
+	// Loopback is deliberately NOT admitted: the guard is what is under test.
+	require.NoError(t, f.server.storeMSPEmailPassword(ctx, "msp-a", testSMTPPassword, "alice"))
+
+	for name, c := range map[string]struct {
+		host string
+		port int
+		ip   string
+	}{
+		"loopback name":    {"localhost", port, "127.0.0.1"},
+		"loopback literal": {"127.0.0.1", port, "127.0.0.1"},
+		"private literal":  {"10.20.30.40", 587, "10.20.30.40"},
+		"link-local":       {"169.254.169.254", 587, "169.254.169.254"},
+	} {
+		_, err := f.server.MSPEmailSenderStore().Put(ctx, "msp-a", MSPEmailSender{
+			Host: c.host, Port: c.port, TLSMode: "implicit_tls", From: mspTestSendFrom, Username: testSMTPUser,
+		}, "alice")
+		require.NoError(t, err, name)
+
+		rec := env.doTestSend(t, mspSenderAdmin("msp-a"), "msp-a", "")
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", name, rec.Body.String())
+		got := decodeTestSend(t, rec)
+		assert.False(t, got.Delivered, name)
+		assert.NotEmpty(t, got.FailureReason, name)
+		assert.Empty(t, got.Recipients, name)
+		assert.NotContains(t, rec.Body.String(), c.ip, "%s: the failure reason carries no IP text", name)
+		assert.NotRegexp(t, `\d+\.\d+\.\d+\.\d+`, rec.Body.String(), name)
+		assert.NotContains(t, rec.Body.String(), c.host, "%s: nor the host", name)
+	}
+	assert.Zero(t, accepted.Load(), "the loopback server received no connection")
+	assert.Empty(t, f.platform.Messages())
+
+	logs := env.logs.captured()
+	for _, ip := range []string{"127.0.0.1", "10.20.30.40", "169.254.169.254"} {
+		assert.NotContains(t, logs, ip)
+	}
+}
+
+// TestMSPEmailSenderTest_RecipientRejectedAndConnectFailure covers the failure
+// shapes after the guard: a rejected recipient, and a mail server that is down.
+func TestMSPEmailSenderTest_RecipientRejectedAndConnectFailure(t *testing.T) {
+	f, env := newMSPTestSendEnv(t)
+	admin := mspSenderAdmin("msp-a")
+	attachMSPSender(t, f.server, "msp-a", f.msp, testSMTPPassword)
+
+	f.msp.mu.Lock()
+	f.msp.rejectRcpt = true
+	f.msp.mu.Unlock()
+	rec := env.doTestSend(t, admin, "msp-a", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got := decodeTestSend(t, rec)
+	assert.False(t, got.Delivered)
+	assert.NotEmpty(t, got.FailureReason)
+	assert.Empty(t, f.msp.Messages())
+
+	pointMSPSenderAtClosedPort(t, f.server, "msp-a")
+	rec = env.doTestSend(t, admin, "msp-a", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got = decodeTestSend(t, rec)
+	assert.False(t, got.Delivered)
+	assert.NotEmpty(t, got.FailureReason)
+	assert.NotContains(t, rec.Body.String(), testSMTPPassword)
+	assert.Empty(t, f.platform.Messages())
+}
+
+// TestMSPEmailSenderTest_Authorization is a [REQUIRED TEST]: another MSP's admin and
+// a client tenant get 404; a root-scoped caller is refused even with a crossing.
+func TestMSPEmailSenderTest_Authorization(t *testing.T) {
+	// The crossing-capable server: root-scoped callers need a crossing store.
+	env := newMSPSenderEnv(t)
+	smtp := newEmailTestSMTPServer(t)
+	ctx := context.Background()
+	attachMSPSender(t, env.server, "msp-a", smtp, testSMTPPassword)
+
+	for _, target := range []string{"msp-a", "client-1", "no-such-tenant", "root"} {
+		rec := env.doTestSend(t, mspSenderAdmin("msp-b"), target, "")
+		assert.Equal(t, http.StatusNotFound, rec.Code, target)
+		assert.Contains(t, rec.Body.String(), "TENANT_NOT_FOUND", target)
+	}
+	for _, target := range []string{"msp-a", "client-1"} {
+		assert.Equal(t, http.StatusNotFound, env.doTestSend(t, mspSenderAdmin("client-1"), target, "").Code, target)
+	}
+
+	root := rootScopedPrincipal("root-op-1")
+	root.CertSerial = "msp-test-send-serial"
+	rec := env.doTestSend(t, root, "msp-a", "")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "no crossing: the crossing challenge")
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "tenant-crossing")
+
+	now := time.Now().UTC()
+	require.NoError(t, env.server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
+		ID: "grant-1", TenantID: "msp-a", Kind: business.TenantCrossingKindGrant,
+		GrantedBy: "msp-a-admin", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
+	rec = env.doTestSend(t, root, "msp-a", "")
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "ROOT_SCOPED_CANNOT_EDIT_EMAIL_SENDER")
+
+	assert.Empty(t, smtp.Messages(), "no refused caller sent anything")
+	assert.Empty(t, auditEntriesByAction(t, env.server, mspEmailSenderAuditTested))
+
+	// The owning MSP's admin still can.
+	require.Equal(t, http.StatusOK, env.doTestSend(t, mspSenderAdmin("msp-a"), "msp-a", "").Code)
+	assert.Len(t, smtp.Messages(), 1)
+}
+
+func TestMSPEmailSenderTest_PermissionAndAssuranceGate(t *testing.T) {
+	f, env := newMSPTestSendEnv(t)
+	attachMSPSender(t, f.server, "msp-a", f.msp, testSMTPPassword)
+
+	limited := &Principal{ID: "limited", TenantID: "msp-a", Assurance: session.AssuranceStrong,
+		Permissions: []string{"notification:configure"}}
+	assert.Equal(t, http.StatusForbidden, env.doTestSend(t, limited, "msp-a", "").Code)
+
+	basic := mspSenderAdmin("msp-a")
+	basic.Assurance = session.AssuranceBasic
+	assert.Equal(t, http.StatusUnauthorized, env.doTestSend(t, basic, "msp-a", "").Code)
+	assert.Empty(t, f.msp.Messages())
+
+	holder := &Principal{ID: "holder", TenantID: "msp-a", Assurance: session.AssuranceStrong,
+		Permissions: []string{"notification:configure-msp"}}
+	assert.Equal(t, http.StatusOK, env.doTestSend(t, holder, "msp-a", "").Code)
+	assert.Len(t, f.msp.Messages(), 1)
+}
+
+func TestMSPEmailSenderTest_Unwired(t *testing.T) {
+	server := seedRootTenant(t, setupCrossingTestServer(t))
+	seedTenantTree(t, server)
+	router := mux.NewRouter()
+	registerMSPEmailSenderRoutes(server, router)
+	env := &mspSenderEnv{server: server, router: router}
+	rec := env.doTestSend(t, mspSenderAdmin("msp-a"), "msp-a", "")
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// TestMSPEmailSenderTest_AuditNamesPrincipalAndMSPOnly is a [REQUIRED TEST].
+func TestMSPEmailSenderTest_AuditNamesPrincipalAndMSPOnly(t *testing.T) {
+	f, env := newMSPTestSendEnv(t)
+	admin := mspSenderAdmin("msp-a")
+	attachMSPSender(t, f.server, "msp-a", f.msp, testSMTPPassword)
+
+	require.Equal(t, http.StatusOK, env.doTestSend(t, admin, "msp-a", "").Code)
+	events := auditEntriesByAction(t, f.server, mspEmailSenderAuditTested)
+	require.Len(t, events, 1)
+	assert.Equal(t, "tenant.email_sender_tested", events[0].Action)
+	assert.Equal(t, "msp-a", events[0].TenantID)
+	assert.Equal(t, "msp-a-admin", events[0].UserID)
+	assert.Equal(t, "msp-a", events[0].ResourceID)
+	assert.Equal(t, business.AuditResultSuccess, events[0].Result)
+	assert.Equal(t, business.AuditSeverityHigh, events[0].Severity)
+
+	pointMSPSenderAtClosedPort(t, f.server, "msp-a")
+	require.Equal(t, http.StatusOK, env.doTestSend(t, admin, "msp-a", "").Code)
+	events = auditEntriesByAction(t, f.server, mspEmailSenderAuditTested)
+	require.Len(t, events, 2)
+
+	var failures int
+	for _, e := range events {
+		if e.Result == business.AuditResultFailure {
+			failures++
+		}
+		raw, err := json.Marshal(e)
+		require.NoError(t, err)
+		for _, leak := range []string{mspTestSendFrom, "localhost", testSMTPPassword, testSMTPUser, "127.0.0.1"} {
+			assert.NotContains(t, string(raw), leak)
+		}
+	}
+	assert.Equal(t, 1, failures, "the failed send is recorded as a failure")
+
+	logs := f.logs.captured()
+	assert.NotContains(t, logs, testSMTPPassword)
+	assert.NotContains(t, logs, mspTestSendFrom)
 }

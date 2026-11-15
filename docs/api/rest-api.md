@@ -2173,13 +2173,13 @@ On failure `delivered` is `false` and `failure_reason` carries a sanitized reaso
 
 An MSP tenant can have its own email sender. Operational mail for the MSP and its client tenants is sent through it when it is complete; the platform sender (above) carries everything else, including security notices. The settings are held per MSP tenant and the password in the secret store under the same tenant.
 
-All three endpoints take the MSP tenant id in `{id}` (a direct child of the deployment root), require the `notification:configure-msp` permission at `AssuranceStrong` (API keys are refused), and apply the ordinary tenant-scope decision. Viewing the sender needs the same assurance as changing it. Administrators of an MSP hold the permission implicitly.
+The endpoints take the MSP tenant id in `{id}` (a direct child of the deployment root), require the `notification:configure-msp` permission at `AssuranceStrong` (API keys are refused), and apply the ordinary tenant-scope decision. Viewing the sender needs the same assurance as changing it. Administrators of an MSP hold the permission implicitly.
 
 - A tenant outside the caller's subtree, a missing tenant, and a client tenant (a client has no sender of its own) are `404 TENANT_NOT_FOUND`. An administrator of one MSP therefore cannot reach another MSP's sender.
-- A root-scoped caller without an active crossing on the MSP receives the tenant-crossing challenge (`401`) on all three routes. With a crossing it may read the sender (`GET`); `PUT` and `DELETE` are refused with `403 ROOT_SCOPED_CANNOT_EDIT_EMAIL_SENDER` even with a crossing, because the sender is what tells the MSP about root's own access.
+- A root-scoped caller without an active crossing on the MSP receives the tenant-crossing challenge (`401`) on every route. With a crossing it may read the sender (`GET`); `PUT`, `DELETE` and the test send are refused with `403 ROOT_SCOPED_CANNOT_EDIT_EMAIL_SENDER` even with a crossing, because the sender is what tells the MSP about root's own access and sending mail as the MSP is a write.
 - `503 SERVICE_UNAVAILABLE`: the sender store or the secret store is not wired.
 
-All three return the same body, and it never contains the password:
+`GET`, `PUT` and `DELETE` return the same body, and it never contains the password:
 
 ```json
 {"data": {"configured": true, "password_present": true, "host": "smtp.example.com", "port": 587,
@@ -2218,6 +2218,22 @@ Returns `200 OK` with the body above. The password is stored first and the recor
 Removes the password and the record. Removing an absent sender succeeds. Returns `200 OK` with `configured: false`. Mail for the MSP then goes through the platform sender.
 
 Every `PUT` and `DELETE` is audited as `tenant.email_sender_updated` or `tenant.email_sender_removed` (tenant-scoped to the MSP, high severity, naming the acting principal). The detail holds the host, port, TLS mode and `from` address only: never the password or the username.
+
+#### `POST /api/v1/tenants/{id}/email-sender/test`
+
+Sends one fixed message through the MSP's own sender and returns the per-recipient result. The request body must be empty: any content, including `{}`, is `400 INVALID_REQUEST`. The recipient is the sender's configured `from` address and the subject and text are fixed on the server, so no request value reaches the message and the route cannot send arbitrary mail. The platform sender is never used.
+
+```json
+{"data": {"delivered": true,
+          "recipients": [{"address": "ops@example.com", "accepted": true}]}}
+```
+
+- `delivered` is true when the mail server accepted every recipient. When it is false, `failure_reason` is a short fixed phrase (for example `delivery failed`, `delivery timed out`, `recipient not accepted`) and `recipients` lists any per-recipient rejection.
+- The sender connects through the address guard: a host that resolves to a loopback, private, link-local or unspecified address is refused before any connection is made and reports `delivered: false`. The reason never contains the resolved address.
+- `409 EMAIL_NOT_CONFIGURED`: the MSP has no sender record or no stored password. There is no fallback to the platform sender.
+- `503 SERVICE_UNAVAILABLE`: the sender store or the secret store is not wired.
+
+Every test that attempts a send is audited as `tenant.email_sender_tested` (tenant-scoped to the MSP, high severity, naming the acting principal, result `success` when delivered and `failure` otherwise). The event carries no address, host or credential. A request refused before a send is attempted is not audited.
 
 ### Webhooks
 

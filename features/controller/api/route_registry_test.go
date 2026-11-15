@@ -387,6 +387,7 @@ var goldenRouteTable = []string{
 	"POST /api/v1/tenants/{id}/config-source/test",
 	"POST /api/v1/tenants/{id}/delete",
 	"POST /api/v1/tenants/{id}/delete/approve",
+	"POST /api/v1/tenants/{id}/email-sender/test",
 	"POST /api/v1/tenants/{id}/restore",
 	"POST /api/v1/tenants/{id}/m365-gdap-customers",
 	"POST /api/v1/tenants/{id}/m365-gdap-links",

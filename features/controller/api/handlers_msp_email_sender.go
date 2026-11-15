@@ -3,6 +3,8 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
+	notifif "github.com/cfgis/cfgms/pkg/notification/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -24,7 +27,12 @@ const mspEmailSenderMaxBodyBytes = 8 * 1024
 const (
 	mspEmailSenderAuditSet    = "tenant.email_sender_updated"
 	mspEmailSenderAuditRemove = "tenant.email_sender_removed"
+	mspEmailSenderAuditTested = "tenant.email_sender_tested"
 )
+
+// mspEmailTestMaxBodyBytes bounds how much of a test-send body is read before the
+// request is refused; the body must be empty, so any content at all is an error.
+const mspEmailTestMaxBodyBytes = 1024
 
 // mspEmailSenderWriteMu serializes the secret-then-record write pair (and the
 // removal pair) within this process, so a PUT cannot interleave with another PUT or
@@ -144,6 +152,17 @@ func (s *Server) handleGetMSPEmailSender(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.writeSuccessResponse(w, newMSPEmailSenderResponse(sender, present))
+}
+
+// refuseRootScopedEmailSenderSend writes the 403 and returns true for a root-scoped
+// caller, even one holding a crossing: sending mail as the MSP is a write.
+func (s *Server) refuseRootScopedEmailSenderSend(w http.ResponseWriter, principal *Principal) bool {
+	if !subjectToTenantCrossingBoundary(principal) {
+		return false
+	}
+	s.writeErrorResponse(w, http.StatusForbidden,
+		"root-scoped callers cannot send mail as the MSP", "ROOT_SCOPED_CANNOT_EDIT_EMAIL_SENDER")
+	return true
 }
 
 // refuseRootScopedEmailSenderWrite writes the 403 and returns true for a
@@ -274,28 +293,130 @@ func mspEmailSenderActor(principal *Principal) string {
 // change. The detail names the settings (host, port, tls mode, from) only: neither
 // the password nor the username is written. sender is nil when nothing was stored.
 func (s *Server) recordMSPEmailSenderAudit(r *http.Request, mspID string, principal *Principal, action string, sender *MSPEmailSender) {
-	if s.auditManager == nil {
-		return
+	b := newMSPEmailSenderAuditEvent(mspID, principal, action, business.AuditResultSuccess)
+	if sender != nil {
+		b = b.Detail("host", sender.Host).Detail("port", sender.Port).
+			Detail("tls_mode", sender.TLSMode).Detail("from", sender.From)
 	}
+	s.writeMSPEmailSenderAudit(r, mspID, b)
+}
+
+// newMSPEmailSenderAuditEvent starts the tenant-scoped, high-severity audit event
+// for an action on the MSP's sender, naming the acting principal.
+func newMSPEmailSenderAuditEvent(mspID string, principal *Principal, action string, result business.AuditResult) *audit.AuditEventBuilder {
 	var actorID string
 	if principal != nil {
 		actorID = principal.ID
 	}
-	b := audit.NewEventBuilder().
+	return audit.NewEventBuilder().
 		Tenant(mspID).
 		Type(business.AuditEventConfiguration).
 		Action(action).
 		User(actorID, business.AuditUserTypeHuman).
 		Resource("tenant", mspID, "").
-		Result(business.AuditResultSuccess).
+		Result(result).
 		Severity(business.AuditSeverityHigh)
-	if sender != nil {
-		b = b.Detail("host", sender.Host).Detail("port", sender.Port).
-			Detail("tls_mode", sender.TLSMode).Detail("from", sender.From)
+}
+
+func (s *Server) writeMSPEmailSenderAudit(r *http.Request, mspID string, b *audit.AuditEventBuilder) {
+	if s.auditManager == nil {
+		return
 	}
 	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
 		s.logger.Error("Failed to record MSP email sender audit event",
 			"tenant_id", logging.SanitizeLogValue(mspID),
 			"error", logging.SanitizeLogValue(err.Error()))
 	}
+}
+
+// mspEmailTestFailureReason is the short reason a test send reports. It is chosen
+// from the fixed failure kinds, never from the error text, so neither a resolved
+// address nor anything the mail server said can reach the response.
+func mspEmailTestFailureReason(err error) string {
+	switch emailSendFailureKind(err) {
+	case emailFailTimeout:
+		return "delivery timed out"
+	case emailFailCanceled:
+		return "delivery canceled"
+	case emailFailCertificate:
+		return "server certificate verification failed"
+	case emailFailRejected:
+		return "mail server rejected the message"
+	default:
+		return "delivery failed"
+	}
+}
+
+// requireEmptyTestBody writes the 400 and returns false when the request carries
+// any content: the recipient and the message are fixed on the server.
+func (s *Server) requireEmptyTestBody(w http.ResponseWriter, r *http.Request) bool {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, mspEmailTestMaxBodyBytes))
+	if err != nil || len(bytes.TrimSpace(body)) > 0 {
+		s.writeErrorResponse(w, http.StatusBadRequest, "request body must be empty: the recipient and content are fixed", "INVALID_REQUEST")
+		return false
+	}
+	return true
+}
+
+// handleTestMSPEmailSender implements POST /api/v1/tenants/{id}/email-sender/test.
+// It sends one fixed message to the sender's own from-address through the MSP's
+// sender and reports the per-recipient result. The platform sender is never used.
+// The notifier is the guarded one, so a host that resolves to a loopback, private or
+// link-local address is refused and reports delivered=false.
+func (s *Server) handleTestMSPEmailSender(w http.ResponseWriter, r *http.Request) {
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	mspID := s.authorizeMSPEmailSenderAccess(w, r, principal)
+	if mspID == "" || s.refuseRootScopedEmailSenderSend(w, principal) {
+		return
+	}
+	if !s.requireEmptyTestBody(w, r) {
+		return
+	}
+	sender, _, ok := s.mspEmailSenderState(w, r, mspID)
+	if !ok {
+		return
+	}
+	n, err := s.buildMSPEmailNotifier(r.Context(), mspID)
+	if err != nil {
+		s.mspEmailSenderInternal(w, "failed to prepare email sender", mspID, err)
+		return
+	}
+	if n == nil || sender == nil {
+		s.writeErrorResponse(w, http.StatusConflict, "the MSP email sender is not configured or its password has not been stored", "EMAIL_NOT_CONFIGURED")
+		return
+	}
+
+	resp := s.sendMSPEmailTest(r.Context(), mspID, n, sender.From)
+
+	result := business.AuditResultSuccess
+	if !resp.Delivered {
+		result = business.AuditResultFailure
+	}
+	s.writeMSPEmailSenderAudit(r, mspID, newMSPEmailSenderAuditEvent(mspID, principal, mspEmailSenderAuditTested, result))
+	s.writeSuccessResponse(w, resp)
+}
+
+// sendMSPEmailTest sends the fixed test message to the from-address through n and
+// turns the outcome into the response shape. Only fixed failure reasons are
+// reported, never the error text.
+func (s *Server) sendMSPEmailTest(parent context.Context, mspID string, n notifif.Notifier, to string) emailTestResponse {
+	ctx, cancel := context.WithTimeout(parent, emailTestSendTimeout)
+	defer cancel()
+	res, err := n.Send(ctx, notifif.Message{To: []string{to}, Subject: emailTestSubject, Body: emailTestBody})
+	resp := emailTestResponse{Recipients: []emailTestRecipient{}}
+	if err != nil {
+		s.logger.Warn("MSP email sender test send failed",
+			"tenant_id", logging.SanitizeLogValue(mspID),
+			"kind", emailSendFailureKind(err))
+		resp.FailureReason = mspEmailTestFailureReason(err)
+		return resp
+	}
+	for _, rr := range res.Recipients {
+		resp.Recipients = append(resp.Recipients, emailTestRecipient{Address: rr.Address, Accepted: rr.Accepted, Reason: rr.Reason})
+	}
+	resp.Delivered = len(res.Failed()) == 0 && len(res.Recipients) > 0
+	if !resp.Delivered {
+		resp.FailureReason = "recipient not accepted"
+	}
+	return resp
 }
