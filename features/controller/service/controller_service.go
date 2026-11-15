@@ -703,9 +703,34 @@ func (s *ControllerService) ProcessHeartbeat(ctx context.Context, req *controlle
 
 // SyncDNA handles DNA synchronization requests.
 // The full DNA snapshot is written to durable storage on every sync.
+//
+// The registry update and storage write run under s.mu in syncDNALocked; the
+// post-sync hook is called only after s.mu is released. The hook may take other
+// locks (for example heartbeat.Service.mu via SetExpectedDNAHash) that other
+// code holds while calling back into ControllerService, so it must never run
+// under s.mu.
 func (s *ControllerService) SyncDNA(ctx context.Context, dna *common.DNA) (*common.Status, error) {
 	s.logger.Debug("DNA sync request received", "steward_id", logging.SanitizeLogValue(dna.Id))
 
+	status, hook, synced := s.syncDNALocked(ctx, dna)
+
+	// Fire post-sync hook (Issue #2524). Called unconditionally on the success
+	// path — storeDNA logs its own errors and never returns one to callers.
+	if hook != nil {
+		hook(dna.Id, dna)
+	}
+
+	if synced {
+		s.logger.Debug("DNA synchronized successfully", "steward_id", logging.SanitizeLogValue(dna.Id))
+	}
+
+	return status, nil
+}
+
+// syncDNALocked applies the DNA sync under s.mu. It returns the response status,
+// whether the sync was applied and, on that path only, the post-sync hook read
+// while locked (nil when none is wired). It does not call the hook.
+func (s *ControllerService) syncDNALocked(ctx context.Context, dna *common.DNA) (status *common.Status, hook func(stewardID string, dna *common.DNA), synced bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -715,7 +740,7 @@ func (s *ControllerService) SyncDNA(ctx context.Context, dna *common.DNA) (*comm
 		return &common.Status{
 			Code:    common.Status_NOT_FOUND,
 			Message: "Steward not found",
-		}, nil
+		}, nil, false
 	}
 
 	// Validate DNA integrity before writing. A degenerate snapshot (empty or
@@ -755,7 +780,7 @@ func (s *ControllerService) SyncDNA(ctx context.Context, dna *common.DNA) (*comm
 			return &common.Status{
 				Code:    common.Status_OK,
 				Message: "DNA rejected: degenerate snapshot (missing core identity fields)",
-			}, nil
+			}, nil, false
 		}
 		s.logger.Warn("dna_integrity_partial_accept",
 			"steward_id", logging.SanitizeLogValue(dna.Id),
@@ -768,18 +793,10 @@ func (s *ControllerService) SyncDNA(ctx context.Context, dna *common.DNA) (*comm
 	// Persist full DNA snapshot to durable storage
 	s.storeDNA(ctx, dna.Id, steward.TenantID, dna, steward.Status)
 
-	// Fire post-sync hook (Issue #2524).  Called unconditionally — storeDNA
-	// logs its own errors and never returns one to callers.
-	if s.postDNASyncHook != nil {
-		s.postDNASyncHook(dna.Id, dna)
-	}
-
-	s.logger.Debug("DNA synchronized successfully", "steward_id", logging.SanitizeLogValue(dna.Id))
-
 	return &common.Status{
 		Code:    common.Status_OK,
 		Message: "DNA synchronized",
-	}, nil
+	}, s.postDNASyncHook, true
 }
 
 // GetStewardDNA retrieves DNA information for a specific steward
