@@ -38,6 +38,10 @@ type revocationTestEnv struct {
 	addr      string
 	clientTLS func(t *testing.T) *tls.Config
 	handlerCh chan error // receives the handler's return once its context ends
+	// admittedCh receives one signal each time a stream enters the Hold handler,
+	// which runs only after the interceptor has passed the admission check and
+	// started the re-check watcher. A stream refused at admission never signals.
+	admittedCh chan struct{}
 }
 
 // startRevocationServer runs a TCP gRPC server with mTLS from a real
@@ -66,7 +70,7 @@ func startRevocationServer(t *testing.T, checker streamRevocationChecker, interv
 	pool := x509.NewCertPool()
 	require.True(t, pool.AppendCertsFromPEM(caPEM))
 
-	env := &revocationTestEnv{mgr: mgr, handlerCh: make(chan error, 1)}
+	env := &revocationTestEnv{mgr: mgr, handlerCh: make(chan error, 1), admittedCh: make(chan struct{}, 8)}
 	logger := logging.NewLogger("debug")
 	var obs revokedPeerObserver
 	if len(observer) > 0 {
@@ -79,6 +83,10 @@ func startRevocationServer(t *testing.T, checker streamRevocationChecker, interv
 		})),
 		grpc.ChainStreamInterceptor(newStreamRevocationInterceptor(checker, logger, interval, obs)),
 		grpc.UnknownServiceHandler(func(_ interface{}, ss grpc.ServerStream) error {
+			select {
+			case env.admittedCh <- struct{}{}:
+			default:
+			}
 			<-ss.Context().Done()
 			env.handlerCh <- ss.Context().Err()
 			return ss.Context().Err()
@@ -224,7 +232,13 @@ func TestStreamRevocation_ObserverToldOfRevokedAdmissionOnly(t *testing.T) {
 	openSerial, openRecv := env.openStream(t, ctx, false)
 	got := make(chan error, 1)
 	go func() { got <- openRecv() }()
-	time.Sleep(100 * time.Millisecond)
+	// Revoke only once the server has admitted this stream; otherwise the revoke
+	// can land before admission and be reported to the observer as a refusal.
+	select {
+	case <-env.admittedCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream was not admitted")
+	}
 	require.NoError(t, env.mgr.Revoke(openSerial))
 	select {
 	case err := <-got:
