@@ -13,8 +13,10 @@
 # a root-package fixture and a symlinked module root are measured against the
 # logical scan root; a bad threshold fails closed (exit 2); and the wiring —
 # both gosec invocations in security-scan.yml and the Makefile security-gosec
-# target call scripts/run-gosec.sh, which uses /tmp/s and runs the guard
-# before gosec.
+# target call scripts/run-gosec.sh, which builds a private mktemp -d scan root
+# (Issue #6276), verifies the link before cd, runs the guard by an absolute
+# path before gosec and returns gosec's exit code; a stub gosec on PATH
+# exercises the wrapper end to end.
 #
 # Each case runs in a throwaway module so nothing touches the real tree.
 #
@@ -252,17 +254,137 @@ else
     pass "Makefile security-gosec has no bare gosec invocation"
 fi
 
-if grep -q '^SCAN_ROOT="/tmp/s"$' "$WRAPPER"; then
-    pass "run-gosec.sh uses the scan root /tmp/s"
+# The fixed shared path is built from pieces so this file does not name it.
+fixed_root="/tmp"/"s"
+if grep -v '^[[:space:]]*#' "$WRAPPER" | grep -Eq "${fixed_root}([^[:alnum:]_.-]|\$)"; then
+    fail "run-gosec.sh must not reference the fixed shared scan root"
 else
-    fail "run-gosec.sh must set SCAN_ROOT=\"/tmp/s\""
+    pass "run-gosec.sh does not reference a fixed shared scan root"
+fi
+if grep -Eq '^SCAN_DIR="\$\(mktemp -d /tmp/gXXXXXX\)"$' "$WRAPPER"; then
+    pass "run-gosec.sh creates its scan root with mktemp -d /tmp/gXXXXXX"
+else
+    fail "run-gosec.sh must create its scan root with mktemp -d /tmp/gXXXXXX"
+fi
+if grep -Eq '^SCAN_ROOT="\$SCAN_DIR/s"$' "$WRAPPER"; then
+    pass "run-gosec.sh links the repository as a one-character name inside the private directory"
+else
+    fail "run-gosec.sh must set SCAN_ROOT=\"\$SCAN_DIR/s\""
+fi
+readlink_line="$(grep -n 'readlink "\$SCAN_ROOT"' "$WRAPPER" | head -1 | cut -d: -f1)"
+cd_line="$(grep -n '^cd "\$SCAN_ROOT"$' "$WRAPPER" | head -1 | cut -d: -f1)"
+if [ -n "$readlink_line" ] && [ -n "$cd_line" ] && [ "$readlink_line" -lt "$cd_line" ]; then
+    pass "run-gosec.sh verifies the link target before cd"
+else
+    fail "run-gosec.sh must verify readlink (line '${readlink_line:-none}') before cd (line '${cd_line:-none}')"
 fi
 guard_line="$(grep -n 'check-gosec-load-length\.sh' "$WRAPPER" | grep -v '^[0-9]*:#' | head -1 | cut -d: -f1)"
-gosec_line="$(grep -n '^exec gosec ' "$WRAPPER" | head -1 | cut -d: -f1)"
+gosec_line="$(grep -n '^gosec "\$@"' "$WRAPPER" | head -1 | cut -d: -f1)"
+if grep -v '^[[:space:]]*#' "$WRAPPER" | grep -q '"\$REPO_ROOT/scripts/check-gosec-load-length\.sh"'; then
+    pass "run-gosec.sh invokes the guard by an absolute path under the repository root"
+else
+    fail "run-gosec.sh must invoke \"\$REPO_ROOT/scripts/check-gosec-load-length.sh\""
+fi
 if [ -n "$guard_line" ] && [ -n "$gosec_line" ] && [ "$guard_line" -lt "$gosec_line" ]; then
     pass "run-gosec.sh runs the guard before gosec"
 else
-    fail "run-gosec.sh must run the guard (line '${guard_line:-none}') before exec gosec (line '${gosec_line:-none}')"
+    fail "run-gosec.sh must run the guard (line '${guard_line:-none}') before gosec (line '${gosec_line:-none}')"
+fi
+if grep -q '^exec gosec' "$WRAPPER"; then
+    fail "run-gosec.sh must not exec gosec (the EXIT trap would not run)"
+else
+    pass "run-gosec.sh does not exec gosec"
+fi
+
+# --- 10. Behaviour: wrapper with a stub gosec on PATH ------------------------
+# The stub records, from inside the run, its logical $PWD, readlink "$PWD" and
+# the parent of $PWD (the link is gone afterwards), then exits with $STUB_RC.
+stubdir="$(mktemp -d)"
+TMP_DIRS+=("$stubdir")
+cat >"$stubdir/gosec" <<'STUB'
+#!/bin/bash
+{
+    printf 'pwd=%s\n' "$PWD"
+    printf 'target=%s\n' "$(readlink "$PWD")"
+    printf 'parent=%s\n' "$(dirname "$PWD")"
+    printf 'args=%s\n' "$*"
+} >"$STUB_RECORD"
+exit "${STUB_RC:-0}"
+STUB
+chmod +x "$stubdir/gosec"
+
+# run_wrapper <stub rc> [VAR=value ...] — sets RC and STDERR; the record file is
+# $stubdir/record (absent when the stub never ran).
+run_wrapper() {
+    local stub_rc="$1" err
+    shift
+    rm -f "$stubdir/record"
+    err="$(mktemp)"
+    env "PATH=$stubdir:$PATH" "STUB_RC=$stub_rc" "STUB_RECORD=$stubdir/record" "$@" \
+        bash "$WRAPPER" -fmt text ./... >/dev/null 2>"$err"
+    RC=$?
+    STDERR="$(cat "$err")"
+    rm -f "$err"
+}
+
+rec() { sed -n "s/^$1=//p" "$stubdir/record"; }
+
+for want_rc in 0 1; do
+    run_wrapper "$want_rc"
+    if [ "$RC" -eq "$want_rc" ]; then
+        pass "wrapper returns the stub gosec exit code $want_rc"
+    else
+        fail "wrapper should return $want_rc (rc=$RC, stderr: $STDERR)"
+    fi
+    if [ ! -f "$stubdir/record" ]; then
+        fail "stub gosec was not invoked for exit code $want_rc"
+        continue
+    fi
+    parent="$(rec parent)"
+    if [ "$(rec target)" = "$REPO_ROOT" ]; then
+        pass "gosec runs in a link whose target is the repository root"
+    else
+        fail "link target should be $REPO_ROOT (got: $(rec target))"
+    fi
+    case "$(rec pwd)" in
+        "$parent"/s) pass "gosec sees the logical short path $(rec pwd) ($(printf '%s' "$(rec pwd)" | wc -c) characters)" ;;
+        *) fail "logical PWD should be <parent>/s (pwd=$(rec pwd), parent=$parent)" ;;
+    esac
+    case "$parent" in
+        /tmp/g??????) pass "private scan directory is /tmp/gXXXXXX" ;;
+        *) fail "scan directory should match /tmp/gXXXXXX (got: $parent)" ;;
+    esac
+    if [ -n "$parent" ] && [ ! -e "$parent" ]; then
+        pass "private scan directory is removed after the run (exit $want_rc)"
+    else
+        fail "private scan directory $parent still exists after the run"
+        rm -f "$parent/s"
+        rmdir "$parent" 2>/dev/null
+    fi
+done
+
+# Two runs get distinct private directories.
+run_wrapper 0
+first_parent="$(rec parent)"
+run_wrapper 0
+if [ -n "$first_parent" ] && [ "$first_parent" != "$(rec parent)" ]; then
+    pass "each run uses its own scan directory"
+else
+    fail "two runs reused the scan directory $first_parent"
+fi
+
+# A failing guard stops the run before gosec and exits 1.
+run_wrapper 0 GOSEC_LOAD_THRESHOLD=1
+if [ "$RC" -eq 1 ] && [ ! -f "$stubdir/record" ]; then
+    pass "guard failure exits 1 and gosec is never invoked"
+else
+    fail "GOSEC_LOAD_THRESHOLD=1 should exit 1 without invoking gosec (rc=$RC, record exists: $([ -f "$stubdir/record" ] && echo yes || echo no))"
+fi
+leftover="$(find /tmp -maxdepth 1 -name 'g??????' -user "$(id -u)" -newer "$stubdir/gosec" 2>/dev/null | head -1)"
+if [ -z "$leftover" ]; then
+    pass "no scan directory is left behind after a guard failure"
+else
+    fail "scan directory left behind after a guard failure: $leftover"
 fi
 
 echo ""

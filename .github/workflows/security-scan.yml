@@ -253,7 +253,7 @@ jobs:
         echo "🛡️  Running gosec Go Security Analysis"
         mkdir -p sarif-results
 
-        # gosec runs through scripts/run-gosec.sh: fixed short scan root /tmp/s plus a
+        # gosec runs through scripts/run-gosec.sh: private short per-run scan root plus a
         # load-length guard (see docs/development/security-workflow-guide.md, gosec).
         # Run with SARIF output for local artifact storage using our configuration
         # Use -no-fail to prevent SARIF generation from failing the workflow

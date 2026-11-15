@@ -806,7 +806,7 @@ test_check_gosec_load_length() {
 
     rc=0
     out_file=$(mktemp)
-    GOSEC_SCAN_ROOT=/tmp/s bash scripts/check-gosec-load-length.sh >"$out_file" 2>&1 || rc=$?
+    GOSEC_SCAN_ROOT=/tmp/gXXXXXX/s bash scripts/check-gosec-load-length.sh >"$out_file" 2>&1 || rc=$?
     if [[ $rc -eq 0 ]]; then
         log_pass "check-gosec-load-length.sh: Real repo packages are within the gosec load limit"
     else

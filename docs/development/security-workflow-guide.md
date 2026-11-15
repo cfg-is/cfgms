@@ -120,7 +120,7 @@ confirm it still exits non-zero — then discard the scratch change.
 - **Scope**: 127+ security checks for common Go vulnerabilities
 - **Blocking**: No (informational, but tracked)
 - **SARIF Support**: Yes (GitHub Security tab integration)
-- **Invocation**: always through `scripts/run-gosec.sh` (CI and `make security-gosec`). gosec passes the absolute path of every non-test file in a package to `golang.org/x/tools/go/packages`, which splits the list into chunks once it exceeds 16,383 characters; a chunked package fails with `undefined:` type errors rather than findings. The wrapper scans from the short root `/tmp/s` (a symlink to the checkout) and first runs `scripts/check-gosec-load-length.sh`, which fails when any package's file list exceeds 15,000 characters, naming the package, its length and the limit. The remedy is to split the package; do not exclude it from gosec.
+- **Invocation**: always through `scripts/run-gosec.sh` (CI and `make security-gosec`). gosec passes the absolute path of every non-test file in a package to `golang.org/x/tools/go/packages`, which splits the list into chunks once it exceeds 16,383 characters; a chunked package fails with `undefined:` type errors rather than findings. The wrapper scans from a private, per-run short root (`mktemp -d /tmp/gXXXXXX` holding a one-character symlink `s` to the checkout, about 14 characters, removed on exit), verifies the link target, and first runs `scripts/check-gosec-load-length.sh`, which fails when any package's file list exceeds 15,000 characters, naming the package, its length and the limit. The remedy is to split the package; do not exclude it from gosec.
 
 ### 4. staticcheck - Advanced Static Analysis
 
