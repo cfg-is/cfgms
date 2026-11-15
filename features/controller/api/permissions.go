@@ -115,6 +115,8 @@ var knownPermissions = map[string]bool{
 	"tenant:approve-delete": true,
 	// Controller-wide email delivery settings, credential and test-send (Issue #4710)
 	"notification:configure": true,
+	// Per-MSP email sender: view, set and remove (Issue #6243)
+	"notification:configure-msp": true,
 	// Tenant-crossing grant and break-glass (ADR-025 Decision 2, Issue #3125)
 	"tenant:crossing-grant":               true,
 	"tenant:crossing-end":                 true,
