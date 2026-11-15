@@ -11,8 +11,8 @@ import (
 func init() { RegisterRoutes(registerMSPEmailSenderRoutes) }
 
 // registerMSPEmailSenderRoutes registers the per-MSP email sender endpoints
-// (Issue #6243). They sit on the api router directly so routes_tenants.go is
-// untouched. All three share the notification:configure-msp permission
+// (Issues #6243, #6244). They sit on the api router directly so routes_tenants.go is
+// untouched. All four share the notification:configure-msp permission
 // (AssuranceStrong), so viewing the sender asks for the same proof as changing it.
 func registerMSPEmailSenderRoutes(s *Server, api *mux.Router) {
 	api.Handle("/tenants/{id}/email-sender",
@@ -21,4 +21,6 @@ func registerMSPEmailSenderRoutes(s *Server, api *mux.Router) {
 		s.requirePermission("notification", "configure-msp")(http.HandlerFunc(s.handlePutMSPEmailSender))).Methods("PUT")
 	api.Handle("/tenants/{id}/email-sender",
 		s.requirePermission("notification", "configure-msp")(http.HandlerFunc(s.handleDeleteMSPEmailSender))).Methods("DELETE")
+	api.Handle("/tenants/{id}/email-sender/test",
+		s.requirePermission("notification", "configure-msp")(http.HandlerFunc(s.handleTestMSPEmailSender))).Methods("POST")
 }

@@ -55,6 +55,7 @@ var tenantBoundaryRouteTable = []tenantBoundaryRoute{
 	{http.MethodGet, "/api/v1/tenants/{id}/email-sender", "id", "notification:configure-msp", false},
 	{http.MethodPut, "/api/v1/tenants/{id}/email-sender", "id", "notification:configure-msp", false},
 	{http.MethodDelete, "/api/v1/tenants/{id}/email-sender", "id", "notification:configure-msp", false},
+	{http.MethodPost, "/api/v1/tenants/{id}/email-sender/test", "id", "notification:configure-msp", false},
 	{http.MethodPut, "/api/v1/tenants/{id}/config-source/credential", "id", "tenant:manage", false},
 	{http.MethodPut, "/api/v1/tenants/{id}/m365-connection", "id", "tenant:manage", false},
 	{http.MethodGet, "/api/v1/tenants/{id}/m365-connection", "id", "tenant:read", false},
