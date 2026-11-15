@@ -105,12 +105,9 @@ func TestWindowsSoftwareCollector_CollectOS(t *testing.T) {
 }
 
 // TestWindowsSoftwareCollector_CollectPackages runs CollectPackages against the
-// real host, asserts the shape of the registry-sourced inventory, and pins the
-// DISM opt-in gate: Get-WindowsOptionalFeature must not run unless
-// CFGMS_DNA_COLLECT_DISM_FEATURES is set.
+// real host and asserts the shape of the registry-sourced inventory. Enabled
+// optional features are collected on every run, with no opt-in.
 func TestWindowsSoftwareCollector_CollectPackages(t *testing.T) {
-	t.Setenv("CFGMS_DNA_COLLECT_DISM_FEATURES", "")
-
 	col := &WindowsSoftwareCollector{}
 	attrs := make(map[string]string)
 
@@ -148,10 +145,16 @@ func TestWindowsSoftwareCollector_CollectPackages(t *testing.T) {
 		}
 	}
 
-	// The DISM gate is off, so no feature attribute may exist.
-	for key := range attrs {
-		assert.False(t, strings.HasPrefix(key, "windows_features_"),
-			"%s must not be collected unless CFGMS_DNA_COLLECT_DISM_FEATURES is set", key)
+	// Optional features are collected unconditionally. The retired DISM-era
+	// attributes must be gone, and every feature key must carry the value "enabled".
+	assert.NotContains(t, attrs, "windows_features_enabled_count")
+	assert.NotContains(t, attrs, "windows_features_sample")
+	for key, value := range attrs {
+		if strings.HasPrefix(key, windowsFeatureKeyPrefix) {
+			assert.Equal(t, "enabled", value, "%s must be reported as enabled", key)
+			assert.NotContains(t, strings.TrimPrefix(key, windowsFeatureKeyPrefix), " ",
+				"feature names are WMI Name values and contain no spaces")
+		}
 	}
 
 	// Third-party package managers are optional, but a count that is emitted must
@@ -455,4 +458,55 @@ func TestWindowsSoftwareCollector_RegistryHelpersAreIndependent(t *testing.T) {
 	procAttrs := make(map[string]string)
 	col.collectProcessSnapshot(procAttrs)
 	assert.Greater(t, intAttr(t, procAttrs, "total_process_count"), 0)
+}
+
+// TestParseWindowsFeaturesCSV feeds captured Win32_OptionalFeature
+// ConvertTo-Csv output through the parser and checks the windows_feature.* keys,
+// including no truncation beyond the old 10-name cap and the malformed-input
+// error paths.
+func TestParseWindowsFeaturesCSV(t *testing.T) {
+	t.Run("captured output", func(t *testing.T) {
+		out := "\"Name\"\r\n" +
+			"\"DirectoryServices-DomainController\"\r\n" +
+			"\"Microsoft-Hyper-V\"\r\n" +
+			"\"DNS-Server-Full-Role\"\r\n" +
+			"\"NetFx4\"\r\n"
+		got := parseWindowsFeaturesCSV(out)
+		assert.Equal(t, map[string]string{
+			"windows_feature.DirectoryServices-DomainController": "enabled",
+			"windows_feature.Microsoft-Hyper-V":                  "enabled",
+			"windows_feature.DNS-Server-Full-Role":               "enabled",
+			"windows_feature.NetFx4":                             "enabled",
+		}, got)
+	})
+
+	t.Run("no truncation", func(t *testing.T) {
+		var b strings.Builder
+		b.WriteString("\"Name\"\n")
+		for i := 0; i < 40; i++ {
+			b.WriteString("\"Feature" + strconv.Itoa(i) + "\"\n")
+		}
+		assert.Len(t, parseWindowsFeaturesCSV(b.String()), 40)
+	})
+
+	t.Run("byte order mark and blank lines", func(t *testing.T) {
+		got := parseWindowsFeaturesCSV("\ufeff\"Name\"\n\"TelnetClient\"\n\n")
+		assert.Equal(t, map[string]string{"windows_feature.TelnetClient": "enabled"}, got)
+	})
+
+	t.Run("rejects unusable names", func(t *testing.T) {
+		got := parseWindowsFeaturesCSV("\"Name\"\n\"\"\n\"Has Space\"\n\"Good\"\n")
+		assert.Equal(t, map[string]string{"windows_feature.Good": "enabled"}, got)
+	})
+
+	t.Run("error paths yield no keys", func(t *testing.T) {
+		for name, in := range map[string]string{
+			"empty":          "",
+			"header only":    "\"Name\"\n",
+			"no Name column": "\"Other\"\n\"X\"\n",
+			"malformed csv":  "\"Name\"\n\"unterminated\n",
+		} {
+			assert.Empty(t, parseWindowsFeaturesCSV(in), name)
+		}
+	})
 }

@@ -468,6 +468,8 @@ Fragments are sourced by class:
 > Issue #3331; all controller consumers now project attributes from `DNA.Fragments` via
 > `service.FlattenDNAFragments`.
 
+**Prefix-allowlisted keys.** The partition step admits a `host:*` attribute either by exact key or, where a key family is dynamic, by a declared prefix (`fragmentSpec.prefixes`). Matching keys are selected in sorted order, so a fragment hash changes only when its keys or values change. `host:os` carries the prefix `windows_feature.`: every Windows steward reports each enabled optional feature as `windows_feature.<Name>` = `enabled` on every DNA collection, where `<Name>` is the WMI `Name` of `Win32_OptionalFeature` with `InstallState` 1 (for example `windows_feature.Microsoft-Hyper-V`, `windows_feature.DirectoryServices-DomainController`, `windows_feature.DNS-Server-Full-Role`). On Server SKUs, roles such as AD DS, DNS and Hyper-V appear as optional features. The list is not truncated. If the query fails or times out (30 s limit), no `windows_feature.*` key is emitted for that collection. A role selector matches one with `dna.windows_feature.Microsoft-Hyper-V:enabled`. Feature collection runs in the background software pass, not the baseline fast path, and is absent on the osquery source path, which builds `host:os` from osquery state.
+
 Ephemeral runtime values (utilisation, PIDs, per-process metrics, health) are **not DNA** (ADR-017 clause 4) — see [Performance](#performance) below. DNA serves two purposes:
 1. **Device identity** — the typed entity ids the controller uses to identify and classify devices, and the shared join key for the topology graph and DEX
 2. **Drift baseline** — managed fragments whose state diverges from desired trigger drift correction

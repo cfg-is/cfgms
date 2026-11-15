@@ -7,6 +7,7 @@ package dna
 
 import (
 	"context"
+	"encoding/csv"
 	"fmt"
 	"os"
 	"os/user"
@@ -16,6 +17,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
@@ -86,11 +88,7 @@ func (w *WindowsSoftwareCollector) CollectPackages(ctx context.Context, attribut
 		w.collectChocolateyPackages,
 		w.collectWingetPackages,
 		w.collectWindowsStoreApps,
-	}
-
-	// Opt-in: Windows Features via DISM (notoriously slow)
-	if os.Getenv("CFGMS_DNA_COLLECT_DISM_FEATURES") != "" {
-		collectors = append(collectors, w.collectWindowsFeatures)
+		w.collectWindowsFeatures,
 	}
 
 	var wg sync.WaitGroup
@@ -391,29 +389,73 @@ func (w *WindowsSoftwareCollector) collectInstalledUpdates(attributes map[string
 	}
 }
 
-// collectWindowsFeatures collects Windows optional features via DISM PowerShell.
-// Gated behind CFGMS_DNA_COLLECT_DISM_FEATURES env var because
-// Get-WindowsOptionalFeature is notoriously slow.
-func (w *WindowsSoftwareCollector) collectWindowsFeatures(ctx context.Context, attributes map[string]string) {
-	if output, err := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
-		"Get-WindowsOptionalFeature -Online | Where-Object {$_.State -eq 'Enabled'} | Select-Object FeatureName | ConvertTo-Csv -NoTypeInformation"); err == nil {
-		lines := strings.Split(output, "\n")
-		featureCount := len(lines) - 1 // -1 for header
-		if featureCount > 0 {
-			attributes["windows_features_enabled_count"] = fmt.Sprintf("%d", featureCount)
+// windowsFeatureKeyPrefix is the attribute-key prefix of every enabled Windows
+// optional feature. The host:os fragment allowlists it by prefix
+// (hostFactFragmentSpecs), so a role selector such as
+// dna.windows_feature.Microsoft-Hyper-V:enabled can match it.
+const windowsFeatureKeyPrefix = "windows_feature."
 
-			var features []string
-			for i := 1; i <= 10 && i < len(lines); i++ {
-				feature := strings.Trim(strings.TrimSpace(lines[i]), "\"")
-				if feature != "" {
-					features = append(features, feature)
-				}
-			}
-			if len(features) > 0 {
-				attributes["windows_features_sample"] = strings.Join(features, ", ")
-			}
+// windowsFeaturesTimeout bounds the Win32_OptionalFeature query.
+const windowsFeaturesTimeout = 30 * time.Second
+
+// collectWindowsFeatures reports every enabled Windows optional feature as
+// windows_feature.<Name>=enabled, using a fixed Win32_OptionalFeature CIM query
+// (InstallState 1 = enabled). On Server SKUs roles such as AD DS, DNS and
+// Hyper-V appear here as optional features. If the query fails or times out no
+// windows_feature.* key is emitted rather than partial data.
+func (w *WindowsSoftwareCollector) collectWindowsFeatures(ctx context.Context, attributes map[string]string) {
+	ctx, cancel := context.WithTimeout(ctx, windowsFeaturesTimeout)
+	defer cancel()
+
+	output, err := runCommand(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+		"Get-CimInstance -ClassName Win32_OptionalFeature | Where-Object InstallState -eq 1 | Select-Object Name | ConvertTo-Csv -NoTypeInformation")
+	if err != nil {
+		_ = logging.Debug(ctx, "dna: could not query Win32_OptionalFeature; omitting windows_feature.* keys",
+			map[string]interface{}{"error": logging.SanitizeLogValue(err.Error())})
+		return
+	}
+
+	for k, v := range parseWindowsFeaturesCSV(output) {
+		attributes[k] = v
+	}
+}
+
+// parseWindowsFeaturesCSV turns ConvertTo-Csv output of Win32_OptionalFeature
+// (a single "Name" column) into windows_feature.<Name>=enabled attributes.
+// Names are not truncated. Rows with an empty name or a name containing
+// whitespace are skipped; malformed CSV or a missing Name column yields no keys.
+func parseWindowsFeaturesCSV(output string) map[string]string {
+	result := make(map[string]string)
+
+	reader := csv.NewReader(strings.NewReader(strings.TrimPrefix(output, "\ufeff")))
+	reader.FieldsPerRecord = -1
+	records, err := reader.ReadAll()
+	if err != nil || len(records) < 2 {
+		return result
+	}
+
+	nameCol := -1
+	for i, col := range records[0] {
+		if strings.EqualFold(strings.TrimSpace(col), "Name") {
+			nameCol = i
+			break
 		}
 	}
+	if nameCol < 0 {
+		return result
+	}
+
+	for _, rec := range records[1:] {
+		if nameCol >= len(rec) {
+			continue
+		}
+		name := strings.TrimSpace(rec[nameCol])
+		if name == "" || strings.ContainsAny(name, " \t\r\n") {
+			continue
+		}
+		result[windowsFeatureKeyPrefix+name] = "enabled"
+	}
+	return result
 }
 
 // collectChocolateyPackages collects Chocolatey packages if available.

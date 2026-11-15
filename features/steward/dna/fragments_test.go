@@ -359,6 +359,98 @@ func TestPartitionHostFacts_DirectoryRoleFactsInHostOS(t *testing.T) {
 	}
 }
 
+// TestPartitionHostFacts_WindowsFeaturePrefixInHostOS is the REQUIRED test for
+// prefix-allowlisted keys: every windows_feature.<Name> attribute lands in
+// host:os (and only there), each prefix key is carried verbatim, near-miss keys
+// that do not start with the prefix are excluded, and the fragment hash is
+// independent of attribute insertion order.
+func TestPartitionHostFacts_WindowsFeaturePrefixInHostOS(t *testing.T) {
+	features := map[string]string{
+		"windows_feature.Microsoft-Hyper-V":                  "enabled",
+		"windows_feature.DirectoryServices-DomainController": "enabled",
+		"windows_feature.DNS-Server-Full-Role":               "enabled",
+	}
+	build := func(order []string) map[string]string {
+		attrs := map[string]string{
+			"os":                     "windows",
+			"hostname":               "dc01",
+			"cpu_count":              "4",
+			"windows_features":       "not-a-prefix-match",
+			"windows_feature":        "baseline-fact-name-not-a-prefix-match",
+			"installed_update_count": "12",
+		}
+		for _, k := range order {
+			attrs[k] = features[k]
+		}
+		return attrs
+	}
+	orderA := []string{
+		"windows_feature.Microsoft-Hyper-V",
+		"windows_feature.DirectoryServices-DomainController",
+		"windows_feature.DNS-Server-Full-Role",
+	}
+	orderB := []string{orderA[2], orderA[0], orderA[1]}
+
+	fragsA, _, err := PartitionHostFacts(build(orderA), entitygraphtypes.DefaultTaxonomy(), nil)
+	require.NoError(t, err)
+	fragsB, _, err := PartitionHostFacts(build(orderB), entitygraphtypes.DefaultTaxonomy(), nil)
+	require.NoError(t, err)
+
+	for _, f := range fragsA {
+		payload := pkgdna.FlattenFragments([]*commonpb.Fragment{f})
+		for k, v := range features {
+			if f.FragmentId == "host:os" {
+				assert.Equal(t, v, payload[k], "%s must be in host:os", k)
+			} else {
+				assert.NotContains(t, payload, k, "%s must only be in host:os, not %s", k, f.FragmentId)
+			}
+		}
+		if f.FragmentId == "host:os" {
+			assert.NotContains(t, payload, "windows_features", "a key that merely shares a leading substring is not a prefix match")
+			assert.NotContains(t, payload, "windows_feature", "the bare baseline fact name is not a prefix match")
+			assert.NotContains(t, payload, "installed_update_count")
+		}
+	}
+	assert.Equal(t, hashByID(fragsA, "host:os"), hashByID(fragsB, "host:os"),
+		"host:os hash must not depend on attribute insertion order")
+
+	// Removing a feature changes the hash: it only moves when features change.
+	delete(features, "windows_feature.DNS-Server-Full-Role")
+	fragsC, _, err := PartitionHostFacts(build(orderA[:2]), entitygraphtypes.DefaultTaxonomy(), nil)
+	require.NoError(t, err)
+	assert.NotEqual(t, hashByID(fragsA, "host:os"), hashByID(fragsC, "host:os"),
+		"removing a feature must change the host:os hash")
+}
+
+// TestPickAttributeKeys_Prefixes verifies prefix selection: matching keys are
+// included, empty values and ephemeral keys are dropped, and exact-key behaviour
+// is unchanged when no prefixes are given.
+func TestPickAttributeKeys_Prefixes(t *testing.T) {
+	attrs := map[string]string{
+		"os":                    "windows",
+		"windows_feature.A":     "enabled",
+		"windows_feature.B":     "enabled",
+		"windows_feature.Empty": "",
+		"windows_featureX":      "enabled",
+		"unrelated":             "x",
+		"timestamp":             "now",
+	}
+
+	withPrefix := pickAttributeKeys(attrs, []string{"os"}, []string{"windows_feature."})
+	assert.Equal(t, map[string]string{
+		"os":                "windows",
+		"windows_feature.A": "enabled",
+		"windows_feature.B": "enabled",
+	}, withPrefix)
+
+	exactOnly := pickAttributeKeys(attrs, []string{"os"}, nil)
+	assert.Equal(t, map[string]string{"os": "windows"}, exactOnly,
+		"without prefixes only exact allowlist keys are selected")
+
+	ephemeral := pickAttributeKeys(attrs, nil, []string{"time"})
+	assert.NotContains(t, ephemeral, "timestamp", "ephemeral keys are excluded even when a prefix matches")
+}
+
 // TestPartitionHostFacts_HostnameUnconditionallyPresent is the REQUIRED
 // regression test for Issue #3319/#3358: the observed hostname must appear in
 // the host:os fragment even when no hostname module resource is configured
@@ -675,7 +767,7 @@ func TestPickAttributeKeys_EphemeralFiltered(t *testing.T) {
 		"timestamp":     "2026-07-24T00:00:00Z",
 	}
 	allowlist := []string{"cpu_count", "system_uptime", "timestamp"}
-	result := pickAttributeKeys(attrs, allowlist)
+	result := pickAttributeKeys(attrs, allowlist, nil)
 
 	assert.Contains(t, result, "cpu_count", "cpu_count must pass through")
 	assert.NotContains(t, result, "system_uptime",
