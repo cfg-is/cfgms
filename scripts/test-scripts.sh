@@ -481,6 +481,9 @@ test_executable_permissions() {
         "scripts/ha-cluster-node-bootstrap.sh"
         "scripts/ha-cluster-node-bootstrap_test.sh"
         "scripts/cfgms-bundle-load"
+        "scripts/check-gosec-load-length.sh"
+        "scripts/check-gosec-load-length_test.sh"
+        "scripts/run-gosec.sh"
     )
 
     for script in "${critical_scripts[@]}"; do
@@ -764,6 +767,50 @@ test_check_docs_boundary() {
         log_pass "check-docs-boundary.sh: Real docs/ tree is clean"
     else
         log_fail "check-docs-boundary.sh: Real docs/ tree failed the gate (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Fixture suite for scripts/check-gosec-load-length.sh and scripts/run-gosec.sh
+# (Issue #6270). Delegates to scripts/check-gosec-load-length_test.sh, which
+# builds throwaway Go modules and asserts the over/under-threshold exits, the
+# computed length, _test.go exclusion and the wiring of every gosec call site
+# through the wrapper. Also runs the guard against the real repo, so a package
+# that nears the gosec chunk limit fails `make test` rather than gosec in CI.
+test_check_gosec_load_length() {
+    log_test "Testing check-gosec-load-length.sh..."
+
+    local script
+    for script in scripts/check-gosec-load-length.sh scripts/run-gosec.sh scripts/check-gosec-load-length_test.sh; do
+        if [[ ! -f "$script" ]]; then
+            log_fail "$(basename "$script"): Not found"
+            return
+        fi
+        if [[ ! -x "$script" ]]; then
+            log_fail "$(basename "$script"): Not executable (chmod +x needed)"
+            return
+        fi
+    done
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash scripts/check-gosec-load-length_test.sh >"$out_file" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-gosec-load-length_test.sh: All fixture tests passed"
+    else
+        log_fail "check-gosec-load-length_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+
+    rc=0
+    out_file=$(mktemp)
+    GOSEC_SCAN_ROOT=/tmp/s bash scripts/check-gosec-load-length.sh >"$out_file" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-gosec-load-length.sh: Real repo packages are within the gosec load limit"
+    else
+        log_fail "check-gosec-load-length.sh: Real repo failed the guard (exit $rc)"
         sed 's/^/    /' "$out_file" >&2
     fi
     rm -f "$out_file"
@@ -3612,6 +3659,7 @@ DISPATCH_TABLE=(
     "test_go_fetch_retry:core"
     "test_check_docs_boundary:core"
     "test_check_no_python_in_core:core"
+    "test_check_gosec_load_length:core"
     "test_check_build_boundary:core"
     "test_check_no_banned_exec_patterns:core"
     "test_check_dead_packages:core"
