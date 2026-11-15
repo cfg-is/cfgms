@@ -38,14 +38,14 @@ func mintStoreAPIKey(t *testing.T, server *Server, permissions []string, tenantI
 // different cluster node): the key exists only in the secret store.
 func dropFromCache(server *Server, apiKey string) {
 	server.mu.Lock()
-	delete(server.apiKeys, apiKey)
+	delete(server.keyCache, apiKey)
 	server.mu.Unlock()
 }
 
 func isCached(server *Server, apiKey string) bool {
 	server.mu.RLock()
 	defer server.mu.RUnlock()
-	_, ok := server.apiKeys[apiKey]
+	_, ok := server.keyCache[apiKey]
 	return ok
 }
 
@@ -232,7 +232,7 @@ func TestLoadAPIKeyFromStore_FindsKeyInAnyTenant(t *testing.T) {
 	assert.Equal(t, http.StatusOK, authStatus(server, apiKey))
 
 	server.mu.RLock()
-	cached := server.apiKeys[apiKey]
+	cached := server.keyCache[apiKey]
 	server.mu.RUnlock()
 	require.NotNil(t, cached)
 	assert.Equal(t, keyID, cached.ID)

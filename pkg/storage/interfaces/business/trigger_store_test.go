@@ -17,22 +17,22 @@ import (
 // a cleartext credential (all credential-related fields are string refs or bytes).
 func TestTriggerRecordShape(t *testing.T) {
 	r := business.TriggerRecord{
-		ID:               "trig-001",
-		TenantID:         "tenant-a",
-		Name:             "on-push",
-		Type:             "webhook",
-		Status:           "active",
-		WorkflowName:     "deploy",
-		CreatedAt:        time.Now(),
-		UpdatedAt:        time.Now(),
-		WebhookPath:      "/hook/deploy",
-		WebhookMethod:    []string{"POST"},
-		BearerTokenRef:   "secrets/tenant-a/triggers/trig-001/bearer",
-		HMACSecretRef:    "secrets/tenant-a/triggers/trig-001/hmac",
-		APIKeyRef:        "secrets/tenant-a/triggers/trig-001/apikey",
-		BasicUsernameRef: "secrets/tenant-a/triggers/trig-001/basic_user",
-		BasicPasswordRef: "secrets/tenant-a/triggers/trig-001/basic_pass",
-		ConfigPayload:    []byte(`{"timeout":30}`),
+		ID:                 "trig-001",
+		TenantID:           "tenant-a",
+		Name:               "on-push",
+		Type:               "webhook",
+		Status:             "active",
+		WorkflowName:       "deploy",
+		CreatedAt:          time.Now(),
+		UpdatedAt:          time.Now(),
+		WebhookPath:        "/hook/deploy",
+		WebhookMethod:      []string{"POST"},
+		BearerTokenRef:     "secrets/tenant-a/triggers/trig-001/bearer",
+		HMACSecretRef:      "secrets/tenant-a/triggers/trig-001/hmac",
+		APICredentialRef:   "secrets/tenant-a/triggers/trig-001/apikey",
+		BasicUsernameRef:   "secrets/tenant-a/triggers/trig-001/basic_user",
+		BasicCredentialRef: "secrets/tenant-a/triggers/trig-001/basic_pass",
+		ConfigPayload:      []byte(`{"timeout":30}`),
 	}
 
 	assert.Equal(t, "trig-001", r.ID)
@@ -45,9 +45,9 @@ func TestTriggerRecordShape(t *testing.T) {
 	assert.Equal(t, []string{"POST"}, r.WebhookMethod)
 	assert.Equal(t, "secrets/tenant-a/triggers/trig-001/bearer", r.BearerTokenRef)
 	assert.Equal(t, "secrets/tenant-a/triggers/trig-001/hmac", r.HMACSecretRef)
-	assert.Equal(t, "secrets/tenant-a/triggers/trig-001/apikey", r.APIKeyRef)
+	assert.Equal(t, "secrets/tenant-a/triggers/trig-001/apikey", r.APICredentialRef)
 	assert.Equal(t, "secrets/tenant-a/triggers/trig-001/basic_user", r.BasicUsernameRef)
-	assert.Equal(t, "secrets/tenant-a/triggers/trig-001/basic_pass", r.BasicPasswordRef)
+	assert.Equal(t, "secrets/tenant-a/triggers/trig-001/basic_pass", r.BasicCredentialRef)
 	assert.Equal(t, []byte(`{"timeout":30}`), r.ConfigPayload)
 }
 
@@ -62,9 +62,9 @@ func TestTriggerRecordEmptyRefs(t *testing.T) {
 	// All ref fields default to empty string — no credential configured.
 	assert.Empty(t, r.BearerTokenRef)
 	assert.Empty(t, r.HMACSecretRef)
-	assert.Empty(t, r.APIKeyRef)
+	assert.Empty(t, r.APICredentialRef)
 	assert.Empty(t, r.BasicUsernameRef)
-	assert.Empty(t, r.BasicPasswordRef)
+	assert.Empty(t, r.BasicCredentialRef)
 	assert.Nil(t, r.ConfigPayload)
 }
 

@@ -1535,7 +1535,7 @@ func TestHandleCreateAPIKey_AcceptsEntityWrite(t *testing.T) {
 
 	// The scoped key really is scoped: it must not inherit blanket authority.
 	srv.mu.RLock()
-	stored := srv.apiKeys[created.Data.Key]
+	stored := srv.keyCache[created.Data.Key]
 	srv.mu.RUnlock()
 	require.NotNil(t, stored, "created key must be registered for authentication")
 	require.NotNil(t, stored.Permissions,

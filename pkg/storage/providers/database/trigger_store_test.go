@@ -113,9 +113,9 @@ func TestDatabaseTriggerStore_EmptyStringRefsStoredAsNull(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got.BearerTokenRef)
 	assert.Empty(t, got.HMACSecretRef)
-	assert.Empty(t, got.APIKeyRef)
+	assert.Empty(t, got.APICredentialRef)
 	assert.Empty(t, got.BasicUsernameRef)
-	assert.Empty(t, got.BasicPasswordRef)
+	assert.Empty(t, got.BasicCredentialRef)
 	assert.Nil(t, got.ConfigPayload)
 }
 

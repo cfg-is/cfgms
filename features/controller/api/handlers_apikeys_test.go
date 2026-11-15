@@ -35,7 +35,7 @@ func callHandleListAPIKeys(server *Server, contextTenantID string) *httptest.Res
 // so tests can assert on tenant filtering without needing a full secret store round-trip.
 func injectAPIKey(server *Server, key *APIKey) {
 	server.mu.Lock()
-	server.apiKeys[key.Key] = key
+	server.keyCache[key.Key] = key
 	server.mu.Unlock()
 }
 
@@ -115,12 +115,12 @@ func TestHandleListAPIKeys_NoContextTenant_Returns401(t *testing.T) {
 // TestHandleListAPIKeys_RouterPath_FiltersByAuthenticatedTenant verifies tenant isolation
 // through the full router and authentication middleware — not just direct handler invocation.
 // This exercises the path where the auth middleware reads the API key, looks it up in
-// s.apiKeys, sets ctxkeys.TenantID from key.TenantID, and the handler filters on that value.
+// s.keyCache, sets ctxkeys.TenantID from key.TenantID, and the handler filters on that value.
 func TestHandleListAPIKeys_RouterPath_FiltersByAuthenticatedTenant(t *testing.T) {
 	server := setupTestServer(t)
 
 	// Create an API key for tenant-a via generateEphemeralKey, which registers the key in
-	// s.apiKeys with TenantID="tenant-a". The auth middleware uses this TenantID to populate
+	// s.keyCache with TenantID="tenant-a". The auth middleware uses this TenantID to populate
 	// the context, which handleListAPIKeys then reads for filtering.
 	tenantAKey := NewEphemeralTestKey(t, server, []string{"api-key:list"}, "tenant-a", 5*time.Minute)
 
@@ -199,7 +199,7 @@ func TestHandleCreateAPIKey_RejectsWildcard(t *testing.T) {
 	// Secret store must be unchanged — key was not persisted.
 	server.mu.RLock()
 	defer server.mu.RUnlock()
-	for _, key := range server.apiKeys {
+	for _, key := range server.keyCache {
 		assert.NotEqual(t, "test-key", key.Name, "key with wildcard permission must not be stored")
 	}
 }
@@ -318,7 +318,7 @@ func TestHandleDeleteAPIKey_LocalOnlyKey_Returns200(t *testing.T) {
 	// Confirm key is no longer in the in-memory cache.
 	server.mu.RLock()
 	defer server.mu.RUnlock()
-	for _, k := range server.apiKeys {
+	for _, k := range server.keyCache {
 		assert.NotEqual(t, "memory-only-key-id", k.ID, "local-only key must be removed from memory")
 	}
 }
@@ -342,7 +342,7 @@ func TestHandleCreateAPIKey_CannotGrantPermissionCallerDoesNotHold(t *testing.T)
 
 	server.mu.RLock()
 	defer server.mu.RUnlock()
-	for _, k := range server.apiKeys {
+	for _, k := range server.keyCache {
 		assert.NotEqual(t, "escalation-key", k.Name, "no key may be persisted when the caller lacks a requested permission")
 	}
 }
@@ -377,7 +377,7 @@ func TestHandleCreateAPIKey_TenantScope_SiblingTenant_Returns403(t *testing.T) {
 
 	server.mu.RLock()
 	defer server.mu.RUnlock()
-	for _, k := range server.apiKeys {
+	for _, k := range server.keyCache {
 		assert.NotEqual(t, "cross-tenant-key", k.Name, "no key may be persisted for a tenant outside the caller's own subtree")
 	}
 }
@@ -504,7 +504,7 @@ func TestHandleDeleteAPIKey_TenantScope_SiblingTenant_Returns404(t *testing.T) {
 
 	server.mu.RLock()
 	defer server.mu.RUnlock()
-	_, stillExists := server.apiKeys["cross-tenant-delete-secret"]
+	_, stillExists := server.keyCache["cross-tenant-delete-secret"]
 	assert.True(t, stillExists, "a cross-tenant delete attempt must not remove the key")
 }
 

@@ -288,7 +288,7 @@ func NewEphemeralTestKey(t *testing.T, server *Server, permissions []string, ten
 	t.Cleanup(func() {
 		// Clean up the key when test ends
 		server.mu.Lock()
-		delete(server.apiKeys, apiKey.Key)
+		delete(server.keyCache, apiKey.Key)
 		server.mu.Unlock()
 	})
 
@@ -912,7 +912,7 @@ func TestAPIKeyExpiration(t *testing.T) {
 	}
 
 	server.mu.Lock()
-	server.apiKeys[expiredKey.Key] = expiredKey
+	server.keyCache[expiredKey.Key] = expiredKey
 	server.mu.Unlock()
 
 	// Try to use expired key
@@ -948,7 +948,7 @@ func TestEphemeralAPIKeys(t *testing.T) {
 
 		// Verify key has expiration set
 		server.mu.RLock()
-		keyInfo, exists := server.apiKeys[ephemeralKey]
+		keyInfo, exists := server.keyCache[ephemeralKey]
 		server.mu.RUnlock()
 
 		require.True(t, exists, "Ephemeral key should exist")
@@ -979,7 +979,7 @@ func TestEphemeralAPIKeys(t *testing.T) {
 
 		// Verify key has 1-hour TTL
 		server.mu.RLock()
-		keyInfo, exists := server.apiKeys[jitKey]
+		keyInfo, exists := server.keyCache[jitKey]
 		server.mu.RUnlock()
 
 		require.True(t, exists, "JIT key should exist")
@@ -1005,14 +1005,14 @@ func TestEphemeralAPIKeys(t *testing.T) {
 
 		// Verify key exists
 		server.mu.RLock()
-		_, exists := server.apiKeys[ephemeralKey]
+		_, exists := server.keyCache[ephemeralKey]
 		server.mu.RUnlock()
 		require.True(t, exists, "Key should exist initially")
 
 		// Backdate the expiry to the past so cleanupExpiredAPIKeys treats it as expired
 		pastTime := time.Now().Add(-time.Hour)
 		server.mu.Lock()
-		server.apiKeys[ephemeralKey].ExpiresAt = &pastTime
+		server.keyCache[ephemeralKey].ExpiresAt = &pastTime
 		server.mu.Unlock()
 
 		// Manually trigger cleanup (normally happens every 10 minutes)
@@ -1020,7 +1020,7 @@ func TestEphemeralAPIKeys(t *testing.T) {
 
 		// Verify key is cleaned up
 		server.mu.RLock()
-		_, exists = server.apiKeys[ephemeralKey]
+		_, exists = server.keyCache[ephemeralKey]
 		server.mu.RUnlock()
 		assert.False(t, exists, "Expired key should be cleaned up")
 	})
@@ -1812,7 +1812,7 @@ func TestSeedTestAPIKeys(t *testing.T) {
 		server := setupTestServer(t)
 
 		server.mu.RLock()
-		_, exists := server.apiKeys["installer-test-key"]
+		_, exists := server.keyCache["installer-test-key"]
 		server.mu.RUnlock()
 		require.False(t, exists, "installer key must NOT be seeded when CFGMS_SEED_TEST_API_KEYS is unset")
 	})
@@ -1825,7 +1825,7 @@ func TestSeedTestAPIKeys(t *testing.T) {
 
 		server.mu.RLock()
 		// Spot-check: there must not be an installer key with the conventional value
-		_, exists := server.apiKeys["installer-test-key"]
+		_, exists := server.keyCache["installer-test-key"]
 		server.mu.RUnlock()
 		require.False(t, exists, "installer key must NOT be seeded when CFGMS_API_KEY_INSTALLER is empty")
 	})
@@ -1837,7 +1837,7 @@ func TestSeedTestAPIKeys(t *testing.T) {
 		server := setupTestServer(t)
 
 		server.mu.RLock()
-		keyInfo, exists := server.apiKeys["installer-test-key"]
+		keyInfo, exists := server.keyCache["installer-test-key"]
 		server.mu.RUnlock()
 
 		require.True(t, exists, "installer key must be seeded when gate and env var are both set")
@@ -1859,7 +1859,7 @@ func TestSeedTestAPIKeys(t *testing.T) {
 		require.Empty(t, server.rootTenantID(context.Background()), "precondition: no root tenant resolves")
 
 		server.mu.RLock()
-		_, exists := server.apiKeys["installer-test-key"]
+		_, exists := server.keyCache["installer-test-key"]
 		server.mu.RUnlock()
 
 		require.False(t, exists, "installer key must NOT be seeded when no root tenant resolves")
@@ -1875,7 +1875,7 @@ func TestSeedTestAPIKeys(t *testing.T) {
 
 		for _, k := range []string{"east-key", "central-key", "west-key"} {
 			server.mu.RLock()
-			keyInfo, exists := server.apiKeys[k]
+			keyInfo, exists := server.keyCache[k]
 			server.mu.RUnlock()
 			require.True(t, exists, "loop key %s must be seeded", k)
 			require.Equal(t, "test-tenant-integration", keyInfo.TenantID,

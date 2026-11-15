@@ -18,9 +18,9 @@ import (
 
 // Secrets provider key names for GitHub App credentials.
 const (
-	secretKeyGitHubAppID          = "github_app_id"
-	secretKeyGitHubInstallationID = "github_app_installation_id"
-	secretKeyGitHubPrivateKeyPEM  = "github_app_private_key_pem"
+	storeKeyGitHubAppID          = "github_app_id"
+	storeKeyGitHubInstallationID = "github_app_installation_id"
+	storeKeyGitHubPrivateKeyPEM  = "github_app_private_key_pem"
 )
 
 const githubAPIBase = "https://api.github.com"
@@ -129,24 +129,24 @@ func (p *GitHubAppProvider) ExecuteOperation(ctx context.Context, config *APICon
 		baseURL = githubAPIBase
 	}
 
-	appIDSecret, err := p.secrets.GetSecret(ctx, secretKeyGitHubAppID)
+	appIDRecord, err := p.secrets.GetSecret(ctx, storeKeyGitHubAppID)
 	if err != nil {
-		return nil, fmt.Errorf("github provider: loading %s: %w", secretKeyGitHubAppID, err)
+		return nil, fmt.Errorf("github provider: loading %s: %w", storeKeyGitHubAppID, err)
 	}
 
-	installIDSecret, err := p.secrets.GetSecret(ctx, secretKeyGitHubInstallationID)
+	installIDRecord, err := p.secrets.GetSecret(ctx, storeKeyGitHubInstallationID)
 	if err != nil {
-		return nil, fmt.Errorf("github provider: loading %s: %w", secretKeyGitHubInstallationID, err)
+		return nil, fmt.Errorf("github provider: loading %s: %w", storeKeyGitHubInstallationID, err)
 	}
 
-	pemSecret, err := p.secrets.GetSecret(ctx, secretKeyGitHubPrivateKeyPEM)
+	pemRecord, err := p.secrets.GetSecret(ctx, storeKeyGitHubPrivateKeyPEM)
 	if err != nil {
-		return nil, fmt.Errorf("github provider: loading %s: %w", secretKeyGitHubPrivateKeyPEM, err)
+		return nil, fmt.Errorf("github provider: loading %s: %w", storeKeyGitHubPrivateKeyPEM, err)
 	}
 
-	appID := appIDSecret.Value
-	installationID := installIDSecret.Value
-	privateKeyPEM := pemSecret.Value
+	appID := appIDRecord.Value
+	installationID := installIDRecord.Value
+	privateKeyPEM := pemRecord.Value
 
 	appJWT, err := generateGitHubAppJWT(appID, privateKeyPEM)
 	if err != nil {

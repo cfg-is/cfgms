@@ -74,9 +74,9 @@ func (s *SQLiteTriggerStore) StoreTrigger(ctx context.Context, record *business.
 		methodJSON,
 		record.BearerTokenRef,
 		record.HMACSecretRef,
-		record.APIKeyRef,
+		record.APICredentialRef,
 		record.BasicUsernameRef,
-		record.BasicPasswordRef,
+		record.BasicCredentialRef,
 		record.ConfigPayload,
 	)
 	if err != nil {
@@ -191,9 +191,9 @@ func scanTriggerRow(scan func(...interface{}) error) (*business.TriggerRecord, e
 		&methodJSON,
 		&rec.BearerTokenRef,
 		&rec.HMACSecretRef,
-		&rec.APIKeyRef,
+		&rec.APICredentialRef,
 		&rec.BasicUsernameRef,
-		&rec.BasicPasswordRef,
+		&rec.BasicCredentialRef,
 		&payload,
 	)
 	if err != nil {

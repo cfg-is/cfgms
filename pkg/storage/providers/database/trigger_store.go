@@ -110,9 +110,9 @@ func (s *DatabaseTriggerStore) StoreTrigger(ctx context.Context, record *busines
 		methodJSON,
 		nullableString(record.BearerTokenRef),
 		nullableString(record.HMACSecretRef),
-		nullableString(record.APIKeyRef),
+		nullableString(record.APICredentialRef),
 		nullableString(record.BasicUsernameRef),
-		nullableString(record.BasicPasswordRef),
+		nullableString(record.BasicCredentialRef),
 		nullableBytes(record.ConfigPayload),
 	)
 	if err != nil {
@@ -291,9 +291,9 @@ func populateDBTrigger(
 
 	rec.BearerTokenRef = bearerRef.String
 	rec.HMACSecretRef = hmacRef.String
-	rec.APIKeyRef = apikeyRef.String
+	rec.APICredentialRef = apikeyRef.String
 	rec.BasicUsernameRef = basicUser.String
-	rec.BasicPasswordRef = basicPass.String
+	rec.BasicCredentialRef = basicPass.String
 
 	if len(methodJSON) > 0 {
 		if err := json.Unmarshal(methodJSON, &rec.WebhookMethod); err != nil {

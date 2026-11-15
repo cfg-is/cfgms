@@ -297,7 +297,7 @@ func TestMiddlewareAuthenticationChar_BearerSession(t *testing.T) {
 		newBearerSessionForAccount(t, srv, "bearer-43key", nil)
 		key := strings.Repeat("k", 43)
 		srv.mu.Lock()
-		srv.apiKeys[key] = &APIKey{ID: "k43", Key: key, TenantID: "tenant-a", Permissions: []string{"steward:read"}}
+		srv.keyCache[key] = &APIKey{ID: "k43", Key: key, TenantID: "tenant-a", Permissions: []string{"steward:read"}}
 		srv.mu.Unlock()
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
 		req.Header.Set("Authorization", "Bearer "+key)
@@ -312,7 +312,7 @@ func TestMiddlewareAuthenticationChar_BearerSession(t *testing.T) {
 		srv.SetSessionManager(nil)
 		key := strings.Repeat("k", 43)
 		srv.mu.Lock()
-		srv.apiKeys[key] = &APIKey{ID: "k43", Key: key, TenantID: "tenant-a", Permissions: []string{"steward:read"}}
+		srv.keyCache[key] = &APIKey{ID: "k43", Key: key, TenantID: "tenant-a", Permissions: []string{"steward:read"}}
 		srv.mu.Unlock()
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
 		req.Header.Set("Authorization", "Bearer "+key)
@@ -721,11 +721,11 @@ func TestMiddlewareAuthenticationChar_APIKey(t *testing.T) {
 	t.Run("grant-prefixed X-API-Key is never an API key", func(t *testing.T) {
 		key := automationGrantCredentialPrefix + "not-a-grant"
 		srv.mu.Lock()
-		srv.apiKeys[key] = &APIKey{ID: "grant-shaped", Key: key, TenantID: "tenant-a"}
+		srv.keyCache[key] = &APIKey{ID: "grant-shaped", Key: key, TenantID: "tenant-a"}
 		srv.mu.Unlock()
 		t.Cleanup(func() {
 			srv.mu.Lock()
-			delete(srv.apiKeys, key)
+			delete(srv.keyCache, key)
 			srv.mu.Unlock()
 		})
 
@@ -738,11 +738,11 @@ func TestMiddlewareAuthenticationChar_APIKey(t *testing.T) {
 		key := "expired-characterization-key"
 		past := time.Now().Add(-time.Hour)
 		srv.mu.Lock()
-		srv.apiKeys[key] = &APIKey{ID: "expired", Key: key, TenantID: "tenant-a", ExpiresAt: &past}
+		srv.keyCache[key] = &APIKey{ID: "expired", Key: key, TenantID: "tenant-a", ExpiresAt: &past}
 		srv.mu.Unlock()
 		t.Cleanup(func() {
 			srv.mu.Lock()
-			delete(srv.apiKeys, key)
+			delete(srv.keyCache, key)
 			srv.mu.Unlock()
 		})
 
@@ -755,11 +755,11 @@ func TestMiddlewareAuthenticationChar_APIKey(t *testing.T) {
 	t.Run("key with no tenant is refused as unscoped", func(t *testing.T) {
 		key := "unscoped-characterization-key"
 		srv.mu.Lock()
-		srv.apiKeys[key] = &APIKey{ID: "unscoped", Key: key}
+		srv.keyCache[key] = &APIKey{ID: "unscoped", Key: key}
 		srv.mu.Unlock()
 		t.Cleanup(func() {
 			srv.mu.Lock()
-			delete(srv.apiKeys, key)
+			delete(srv.keyCache, key)
 			srv.mu.Unlock()
 		})
 

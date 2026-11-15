@@ -157,7 +157,7 @@ func (t *apiKeyTracker) live(ctx context.Context) bool {
 	if t.current.recordRef == "" {
 		// Env-gated test keys have no durable record: valid while still cached.
 		s.mu.RLock()
-		_, ok := s.apiKeys[t.current.Key]
+		_, ok := s.keyCache[t.current.Key]
 		s.mu.RUnlock()
 		return ok
 	}

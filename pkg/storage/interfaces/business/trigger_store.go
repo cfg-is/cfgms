@@ -35,11 +35,11 @@ type TriggerRecord struct {
 
 	// Secret reference IDs — empty string means no credential of this type configured.
 	// These hold pkg/secrets keys, never credential values.
-	BearerTokenRef   string `json:"bearer_token_ref"`
-	HMACSecretRef    string `json:"hmac_secret_ref"`
-	APIKeyRef        string `json:"apikey_ref"`
-	BasicUsernameRef string `json:"basic_username_ref"`
-	BasicPasswordRef string `json:"basic_password_ref"`
+	BearerTokenRef     string `json:"bearer_token_ref"`
+	HMACSecretRef      string `json:"hmac_secret_ref"`
+	APICredentialRef   string `json:"apikey_ref"`
+	BasicUsernameRef   string `json:"basic_username_ref"`
+	BasicCredentialRef string `json:"basic_password_ref"`
 
 	// ConfigPayload holds the non-sensitive serialized trigger config.
 	// Authentication fields must be zeroed before marshaling into this field.

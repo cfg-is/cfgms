@@ -152,7 +152,7 @@ func (s *AutomationGrantStore) getSecret(ctx context.Context, tenantID, id strin
 	if a, ok := s.secrets.(secretsif.TenantSecretAccessor); ok {
 		return a.GetTenantSecret(ctx, tenantID, key)
 	}
-	return s.secrets.GetSecret(ctx, apiKeyStoreRef(tenantID, key))
+	return s.secrets.GetSecret(ctx, keyRecordRef(tenantID, key))
 }
 
 func (s *AutomationGrantStore) deleteSecret(ctx context.Context, tenantID, id string) error {
@@ -160,7 +160,7 @@ func (s *AutomationGrantStore) deleteSecret(ctx context.Context, tenantID, id st
 	if a, ok := s.secrets.(secretsif.TenantSecretAccessor); ok {
 		return a.DeleteTenantSecret(ctx, tenantID, key)
 	}
-	return s.secrets.DeleteSecret(ctx, apiKeyStoreRef(tenantID, key))
+	return s.secrets.DeleteSecret(ctx, keyRecordRef(tenantID, key))
 }
 
 func randomToken(n int, enc func([]byte) string) (string, error) {
