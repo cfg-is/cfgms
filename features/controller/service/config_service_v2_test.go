@@ -150,6 +150,80 @@ func TestGetConfiguration_TaggedStewardReceivesRoleResource(t *testing.T) {
 	}
 }
 
+// TestMatchingRoleFragments_DirectoryRoleSelector is the REQUIRED TEST from AC: a role
+// with selector "dna.ad_pdc_emulator:true" resolves for a steward whose host:os DNA
+// fragment carries ad_pdc_emulator=true (the shape PartitionHostFacts emits) and not
+// for one carrying ad_pdc_emulator=false or no directory-role fact at all.
+func TestMatchingRoleFragments_DirectoryRoleSelector(t *testing.T) {
+	ctx := ctxkeys.WithSystem(context.Background())
+	logger := logging.NewNoopLogger()
+	sm := pkgtesting.SetupTestStorage(t)
+
+	require.NoError(t, sm.GetTenantStore().CreateTenant(ctx,
+		&business.TenantData{ID: "tenant-a", Name: "Tenant A", Status: business.TenantStatusActive}))
+
+	controllerSvc := NewControllerService(logger)
+	tenantCtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-a")
+
+	register := func(id string, hostOS map[string]interface{}) string {
+		t.Helper()
+		resp, err := controllerSvc.AcceptRegistration(tenantCtx, &controllerpb.RegisterRequest{
+			InitialDna: &commonpb.DNA{
+				Id:              id,
+				SyncFingerprint: "fp-" + id,
+				Fragments: []*commonpb.Fragment{
+					mustFragment("hostname", map[string]interface{}{"hostname": id + "-host"}),
+					mustFragment("host:os", hostOS),
+				},
+			},
+		})
+		require.NoError(t, err)
+		return resp.StewardId
+	}
+
+	pdcID := register("dc-pdc", map[string]interface{}{
+		"os": "windows", "ad_pdc_emulator": "true", "ad_domain_controller": "true",
+	})
+	otherDCID := register("dc-other", map[string]interface{}{
+		"os": "windows", "ad_pdc_emulator": "false", "ad_domain_controller": "true",
+	})
+	memberID := register("member", map[string]interface{}{
+		"os": "windows", "ad_pdc_emulator": "false", "ad_domain_controller": "false",
+	})
+	linuxID := register("linux", map[string]interface{}{"os": "linux"})
+
+	roleFrag := func(name string) stewardtypes.StewardConfig {
+		return stewardtypes.StewardConfig{Resources: []stewardtypes.ResourceConfig{
+			{Name: name, Module: "time", Config: map[string]interface{}{"source": "external"}},
+		}}
+	}
+	storeRoleConfig(t, sm.GetConfigStore(), "tenant-a", "pdc-time", "dna.ad_pdc_emulator:true", roleFrag("pdc-time-res"))
+	storeRoleConfig(t, sm.GetConfigStore(), "tenant-a", "dc-time", "dna.ad_domain_controller:true", roleFrag("dc-time-res"))
+
+	adapter := &roleConfigAdapter{
+		controllerSvc: controllerSvc,
+		configStore:   sm.GetConfigStore(),
+		logger:        logger,
+	}
+	roleNames := func(stewardID string) []string {
+		t.Helper()
+		frags, err := adapter.MatchingRoleFragments(ctx, stewardID)
+		require.NoError(t, err)
+		names := make([]string, 0, len(frags))
+		for _, f := range frags {
+			names = append(names, f.Name)
+		}
+		return names
+	}
+
+	assert.Equal(t, []string{"dc-time", "pdc-time"}, roleNames(pdcID),
+		"the PDC emulator is a domain controller and matches both roles")
+	assert.Equal(t, []string{"dc-time"}, roleNames(otherDCID),
+		"ad_pdc_emulator=false must not match; ad_domain_controller=true must")
+	assert.Empty(t, roleNames(memberID), "a member server matches neither role")
+	assert.Empty(t, roleNames(linuxID), "a steward with no directory-role facts matches neither role")
+}
+
 // TestGetConfiguration_UntaggingRemovesRoleResource verifies that removing a tag causes
 // the role's resources to be absent on the next GetConfiguration call.
 func TestGetConfiguration_UntaggingRemovesRoleResource(t *testing.T) {

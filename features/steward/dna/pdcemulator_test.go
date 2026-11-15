@@ -114,6 +114,52 @@ func TestCollectPDCEmulator_Values(t *testing.T) {
 	}
 }
 
+func TestCollectPDCEmulator_DomainControllerAttr(t *testing.T) {
+	tests := []struct {
+		name     string
+		resolver staticPDCResolver
+		want     string
+	}{
+		{"PDC emulator is a DC", staticPDCResolver{localHost: "dc01.corp.example.com", pdcHost: `\\dc01.corp.example.com`, isDC: true}, "true"},
+		{"other DC is a DC", staticPDCResolver{localHost: "dc02.corp.example.com", pdcHost: `\\dc01.corp.example.com`, isDC: true}, "true"},
+		{"member server is not a DC", staticPDCResolver{localHost: "app01.corp.example.com"}, "false"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			attrs := map[string]string{}
+			require.NoError(t, collectPDCEmulator(context.Background(), tt.resolver, attrs))
+			assert.Equal(t, tt.want, attrs[domainControllerAttr])
+		})
+	}
+}
+
+func TestCollectPDCEmulator_UnknownDCStatusOmitsDomainControllerAttr(t *testing.T) {
+	t.Run("resolver error", func(t *testing.T) {
+		attrs := map[string]string{}
+		err := collectPDCEmulator(context.Background(), staticPDCResolver{isDC: true, err: errors.New("ERROR_NO_SUCH_DOMAIN")}, attrs)
+		require.Error(t, err)
+		_, ok := attrs[domainControllerAttr]
+		assert.False(t, ok, "DC status is unknown after a resolver error")
+		assert.Equal(t, "false", attrs[pdcEmulatorAttr])
+	})
+
+	t.Run("lookup timeout", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		attrs := map[string]string{}
+		require.Error(t, collectPDCEmulator(ctx, blockingPDCResolver{}, attrs))
+		_, ok := attrs[domainControllerAttr]
+		assert.False(t, ok, "DC status is unknown after a lookup timeout")
+	})
+
+	t.Run("nil resolver", func(t *testing.T) {
+		attrs := map[string]string{}
+		require.NoError(t, collectPDCEmulator(context.Background(), nil, attrs))
+		_, ok := attrs[domainControllerAttr]
+		assert.False(t, ok)
+	})
+}
+
 func TestBaselineAttributes_IncludesPDCEmulator(t *testing.T) {
 	logger := logging.NewLogger("debug")
 	ctx := context.Background()
@@ -126,6 +172,7 @@ func TestBaselineAttributes_IncludesPDCEmulator(t *testing.T) {
 		}))
 		attrs := c.RawAttributes(ctx)
 		assert.Equal(t, "true", attrs[pdcEmulatorAttr])
+		assert.Equal(t, "true", attrs[domainControllerAttr])
 	})
 
 	t.Run("unresolved role holder reports false", func(t *testing.T) {

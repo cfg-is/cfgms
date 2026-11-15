@@ -30,7 +30,13 @@ import (
 //	platform:<value>   — exact platform match
 //	arch:<value>       — exact architecture match
 //	tag:<value>        — tag must be present (repeatable)
-//	dna.<key>:<value>  — arbitrary DNA attribute exact match (repeatable)
+//	dna.<key>:<value>  — exact match on a selector-visible DNA attribute (repeatable)
+//
+// dna.<key> matches only selector-visible attributes: the keys a steward
+// reports in its host:* DNA fragments, which are the keys listed in
+// hostFactFragmentSpecs (features/steward/dna/fragments.go). A DNA attribute
+// outside that allowlist is not visible to a selector, so a term on it matches
+// no steward.
 //
 // The special keyword "all" matches all stewards. An empty expression is
 // rejected — fail-closed so a fat-fingered command cannot fan out fleet-wide.

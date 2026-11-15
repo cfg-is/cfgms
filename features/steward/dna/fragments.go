@@ -45,7 +45,13 @@ type fragmentSpec struct {
 //     resource is configured — see Issue #3319/#3358). Excludes
 //     kernel_info/kernel_build_info which embed a build timestamp, making
 //     them ephemeral. Excludes go_version/runtime_* which are
-//     steward-process attributes, not OS attributes.
+//     steward-process attributes, not OS attributes. Also carries the
+//     directory-role facts ad_pdc_emulator, ad_domain_controller,
+//     domain_joined and domain_name: stable identity facts that change only
+//     when the host's role or domain membership changes, listed here so a
+//     role config selector (dna.<key>:<value>) can match them. Limitation:
+//     PartitionHostFactsFromOsquery builds host:os from osquery state, so
+//     these four keys are absent on the osquery source path.
 //   - host:bios: BIOS, motherboard, and system hardware identity. Includes
 //     virtualization_type/role because they are stable platform identity attributes
 //     (changing only on live migration, not at each collection).
@@ -154,6 +160,11 @@ var hostFactFragmentSpecs = []fragmentSpec{
 			"windows_caption",
 			"windows_build_number",
 			"windows_version",
+			// Directory-role facts (Windows): selector-visible identity
+			"ad_pdc_emulator",
+			"ad_domain_controller",
+			"domain_joined",
+			"domain_name",
 		},
 	},
 	{

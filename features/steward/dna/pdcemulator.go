@@ -18,6 +18,12 @@ import (
 // inventory.
 const pdcEmulatorAttr = "ad_pdc_emulator"
 
+// domainControllerAttr is the baseline DNA fact that is "true" on every domain
+// controller and "false" on a host the resolver reports as not a domain
+// controller. It is emitted only when the resolver answered: with the lookup
+// failed, DC status is unknown and the attribute is absent.
+const domainControllerAttr = "ad_domain_controller"
+
 // pdcEmulatorLookupTimeout bounds one PDC-emulator lookup. The attribute sits on
 // the baseline fast path, so a domain whose role holder is unreachable must not
 // stall DNA collection; a lookup that has not answered in time counts as
@@ -78,9 +84,11 @@ func firstLabel(name string) string {
 	return name
 }
 
-// collectPDCEmulator sets ad_pdc_emulator from resolver. A nil resolver (every
-// platform but Windows) emits nothing. A resolver error or timeout emits "false":
-// with the role holder unresolvable, no host reports this cycle.
+// collectPDCEmulator sets ad_pdc_emulator and ad_domain_controller from resolver.
+// A nil resolver (every platform but Windows) emits nothing. A resolver error or
+// timeout emits ad_pdc_emulator "false" (with the role holder unresolvable, no
+// host reports this cycle) and leaves ad_domain_controller unset, because DC
+// status is unknown.
 func collectPDCEmulator(ctx context.Context, resolver PDCEmulatorResolver, attributes map[string]string) error {
 	if resolver == nil {
 		return nil
@@ -113,5 +121,6 @@ func collectPDCEmulator(ctx context.Context, resolver PDCEmulatorResolver, attri
 		return r.err
 	}
 	attributes[pdcEmulatorAttr] = strconv.FormatBool(IsPDCEmulator(r.localHost, r.pdcHost, r.isDC))
+	attributes[domainControllerAttr] = strconv.FormatBool(r.isDC)
 	return nil
 }
