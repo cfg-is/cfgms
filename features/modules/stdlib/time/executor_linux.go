@@ -67,6 +67,10 @@ func (e *linuxExecutor) getState() (timeState, error) {
 // apply it at runtime via timedatectl. File writes always succeed or return
 // an error. timedatectl failures are ignored when systemd is not running.
 func (e *linuxExecutor) setState(desired timeState) error {
+	if err := rejectWindowsOnlyFields(desired); err != nil {
+		return err
+	}
+
 	if err := e.writeTimezone(desired.Timezone); err != nil {
 		return fmt.Errorf("write timezone: %w", err)
 	}

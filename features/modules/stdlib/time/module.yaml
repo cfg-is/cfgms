@@ -3,8 +3,10 @@ version: 0.1.0
 description: >
   Manages host timezone and NTP/time-sync configuration.
   Provides idempotent Get/Set management of timezone (IANA identifier),
-  NTP server list, and NTP sync enabled flag via native OS configuration
-  (timedatectl/systemd-timesyncd on Linux, w32tm/tzutil on Windows,
+  NTP server list, NTP sync enabled flag, NTP source (manual peers or the
+  Windows domain hierarchy), the Windows reliable-time-source flag
+  (ntp_reliable, never set implicitly) and the Hyper-V guest time provider
+  via native OS configuration (timedatectl/systemd-timesyncd on Linux, w32tm/tzutil on Windows,
   systemsetup on macOS). Correct time configuration is foundational:
   time skew breaks Kerberos authentication, TLS certificate validation,
   and log correlation.
@@ -48,14 +50,17 @@ behavioral_envelope:
   shells_out_to:
     - timedatectl  # Linux: runtime timezone and NTP apply
     - tzutil.exe   # Windows: timezone management
-    - w32tm.exe    # Windows: NTP/Windows Time Service management
+    - w32tm.exe    # Windows: NTP/Windows Time Service management (reliable is set only when ntp_reliable is true)
     - systemsetup  # macOS: timezone and network time management
   reads_paths:
     - /etc/timezone                # Linux: current IANA timezone name
     - /etc/systemd/timesyncd.conf  # Linux: NTP server list and sync configuration
+    - HKLM\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\VMICTimeProvider  # Windows: Hyper-V guest time provider Enabled value
+    - HKLM\SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters  # Windows: Hyper-V guest detection (existence only)
   writes_paths:
     - /etc/timezone                # Linux: desired timezone identifier
     - /etc/systemd/timesyncd.conf  # Linux: desired NTP server list and sync state
+    - HKLM\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\VMICTimeProvider  # Windows: Hyper-V guest time provider Enabled value (hyperv_host_time_provider)
 
 documentation:
   api: "docs/modules/time.md"

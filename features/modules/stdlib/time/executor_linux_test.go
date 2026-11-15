@@ -6,11 +6,14 @@
 package timemodule
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // newFixtureExecutor creates a linuxExecutor pointed at temp files inside
@@ -219,4 +222,49 @@ func isFileWriteError(err error) bool {
 	// If the error message mentions timedatectl, it's a runtime-apply failure,
 	// not a file write failure.
 	return !strings.Contains(err.Error(), "timedatectl")
+}
+
+// TestLinuxExecutor_SetState_RejectsWindowsOnlyFields verifies non-default
+// values of the Windows-only fields are rejected with ErrInvalidInput before
+// anything is written.
+func TestLinuxExecutor_SetState_RejectsWindowsOnlyFields(t *testing.T) {
+	cases := []struct {
+		name    string
+		desired timeState
+	}{
+		{"ntp_source domain", timeState{Timezone: "UTC", NTPSyncEnabled: true, NTPSource: "domain"}},
+		{"ntp_reliable", timeState{Timezone: "UTC", NTPSyncEnabled: true, NTPReliable: true}},
+		{"hyperv provider disabled", timeState{Timezone: "UTC", HyperVHostTimeProvider: "disabled"}},
+		{"hyperv provider enabled", timeState{Timezone: "UTC", HyperVHostTimeProvider: "enabled"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e, dir := newFixtureExecutor(t)
+			err := e.setState(tc.desired)
+			if !errors.Is(err, modules.ErrInvalidInput) {
+				t.Fatalf("setState() = %v, want ErrInvalidInput", err)
+			}
+			entries, readErr := os.ReadDir(dir)
+			if readErr != nil {
+				t.Fatalf("ReadDir: %v", readErr)
+			}
+			if len(entries) != 0 {
+				t.Errorf("rejected setState wrote %d file(s); expected none", len(entries))
+			}
+		})
+	}
+}
+
+// TestLinuxExecutor_GetState_ReportsDefaultsForWindowsOnlyFields verifies
+// getState leaves the Windows-only fields at defaults so Get reports no drift
+// against default configs.
+func TestLinuxExecutor_GetState_ReportsDefaultsForWindowsOnlyFields(t *testing.T) {
+	e, _ := newFixtureExecutor(t)
+	st, err := e.getState()
+	if err != nil {
+		t.Fatalf("getState() error: %v", err)
+	}
+	if effectiveNTPSource(st.NTPSource) != "manual" || st.NTPReliable || st.HyperVHostTimeProvider != "" {
+		t.Errorf("getState() Windows-only fields = %q/%v/%q, want defaults", st.NTPSource, st.NTPReliable, st.HyperVHostTimeProvider)
+	}
 }

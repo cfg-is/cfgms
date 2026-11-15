@@ -18,6 +18,9 @@ func (e *stubExecutor) getState() (timeState, error) {
 	return timeState{}, modules.ErrUnsupportedPlatform
 }
 
-func (e *stubExecutor) setState(_ timeState) error {
+func (e *stubExecutor) setState(desired timeState) error {
+	if err := rejectWindowsOnlyFields(desired); err != nil {
+		return err
+	}
 	return modules.ErrUnsupportedPlatform
 }

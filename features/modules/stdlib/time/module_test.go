@@ -5,6 +5,7 @@ package timemodule
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/cfgis/cfgms/features/modules"
@@ -41,6 +42,41 @@ func TestTimeConfig_Validate(t *testing.T) {
 			name:    "with NTP servers is valid",
 			config:  TimeConfig{Timezone: "Europe/London", NTPServers: []string{"pool.ntp.org"}, NTPSyncEnabled: true},
 			wantErr: false,
+		},
+		{
+			name:    "ntp_source domain is valid",
+			config:  TimeConfig{Timezone: "UTC", NTPSource: "domain"},
+			wantErr: false,
+		},
+		{
+			name:    "ntp_source manual is valid",
+			config:  TimeConfig{Timezone: "UTC", NTPSource: "manual"},
+			wantErr: false,
+		},
+		{
+			name:    "unknown ntp_source is invalid",
+			config:  TimeConfig{Timezone: "UTC", NTPSource: "dns"},
+			wantErr: true,
+		},
+		{
+			name:    "ntp_source is case sensitive",
+			config:  TimeConfig{Timezone: "UTC", NTPSource: "Domain"},
+			wantErr: true,
+		},
+		{
+			name:    "hyperv provider enabled is valid",
+			config:  TimeConfig{Timezone: "UTC", HyperVHostTimeProvider: "enabled"},
+			wantErr: false,
+		},
+		{
+			name:    "hyperv provider disabled is valid",
+			config:  TimeConfig{Timezone: "UTC", HyperVHostTimeProvider: "disabled"},
+			wantErr: false,
+		},
+		{
+			name:    "unknown hyperv provider value is invalid",
+			config:  TimeConfig{Timezone: "UTC", HyperVHostTimeProvider: "true"},
+			wantErr: true,
 		},
 		{
 			name:    "empty timezone is invalid",
@@ -132,6 +168,31 @@ func TestTimeConfig_AsMap(t *testing.T) {
 				"ntp_sync_enabled": false,
 			},
 		},
+		{
+			name: "defaults are reported for unset new fields",
+			config: TimeConfig{
+				Timezone: "UTC",
+			},
+			checks: map[string]interface{}{
+				"ntp_source":                "manual",
+				"ntp_reliable":              false,
+				"hyperv_host_time_provider": "",
+			},
+		},
+		{
+			name: "explicit new fields are reported",
+			config: TimeConfig{
+				Timezone:               "UTC",
+				NTPSource:              "domain",
+				NTPReliable:            true,
+				HyperVHostTimeProvider: "disabled",
+			},
+			checks: map[string]interface{}{
+				"ntp_source":                "domain",
+				"ntp_reliable":              true,
+				"hyperv_host_time_provider": "disabled",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -198,6 +259,10 @@ func TestTimeConfig_YAMLRoundTrip(t *testing.T) {
 		Timezone:       "America/Chicago",
 		NTPServers:     []string{"time1.example.com", "time2.example.com"},
 		NTPSyncEnabled: true,
+
+		NTPSource:              "domain",
+		NTPReliable:            true,
+		HyperVHostTimeProvider: "disabled",
 	}
 
 	data, err := original.ToYAML()
@@ -216,6 +281,12 @@ func TestTimeConfig_YAMLRoundTrip(t *testing.T) {
 	if decoded.NTPSyncEnabled != original.NTPSyncEnabled {
 		t.Errorf("NTPSyncEnabled: got %v, want %v", decoded.NTPSyncEnabled, original.NTPSyncEnabled)
 	}
+	if decoded.NTPSource != original.NTPSource || decoded.NTPReliable != original.NTPReliable ||
+		decoded.HyperVHostTimeProvider != original.HyperVHostTimeProvider {
+		t.Errorf("new fields: got %q/%v/%q, want %q/%v/%q",
+			decoded.NTPSource, decoded.NTPReliable, decoded.HyperVHostTimeProvider,
+			original.NTPSource, original.NTPReliable, original.HyperVHostTimeProvider)
+	}
 	if len(decoded.NTPServers) != len(original.NTPServers) {
 		t.Errorf("NTPServers length: got %d, want %d", len(decoded.NTPServers), len(original.NTPServers))
 	}
@@ -230,6 +301,10 @@ func TestTimeConfig_GetManagedFields(t *testing.T) {
 		"timezone":         false,
 		"ntp_servers":      false,
 		"ntp_sync_enabled": false,
+
+		"ntp_source":                false,
+		"ntp_reliable":              false,
+		"hyperv_host_time_provider": false,
 	}
 	for _, f := range fields {
 		required[f] = true
@@ -389,4 +464,102 @@ func TestTimeModule_ConformanceNoEphemeralFields(t *testing.T) {
 		t.Fatal("Get(\"system\") returned nil state with nil error")
 	}
 	conformance.AssertNoEphemeralFields(t, state, conformance.DefaultBannedEphemeralFields)
+}
+
+// TestBuildW32tmConfigArgs covers every combination of ntp_sync_enabled,
+// ntp_source, ntp_reliable and empty/non-empty ntp_servers.
+func TestBuildW32tmConfigArgs(t *testing.T) {
+	disabled := [][]string{{"/config", "/syncfromflags:no", "/update"}}
+	domain := [][]string{{"/config", "/syncfromflags:domhier", "/reliable:no", "/update"}}
+	manual := func(peers, reliable string) [][]string {
+		return [][]string{{"/config", "/manualpeerlist:" + peers, "/syncfromflags:manual", reliable, "/update"}}
+	}
+
+	servers := []string{"a.example.com", "b.example.com"}
+	const joined = "a.example.com b.example.com"
+
+	tests := []struct {
+		name    string
+		desired timeState
+		want    [][]string
+	}{
+		{"disabled, defaults", timeState{}, disabled},
+		{"disabled ignores domain source", timeState{NTPSource: "domain"}, disabled},
+		{"disabled ignores reliable", timeState{NTPReliable: true}, disabled},
+		{"disabled ignores servers", timeState{NTPServers: servers}, disabled},
+		{"disabled ignores everything", timeState{NTPSource: "domain", NTPReliable: true, NTPServers: servers}, disabled},
+
+		{"domain, no servers", timeState{NTPSyncEnabled: true, NTPSource: "domain"}, domain},
+		{"domain ignores servers", timeState{NTPSyncEnabled: true, NTPSource: "domain", NTPServers: servers}, domain},
+		{"domain never reliable", timeState{NTPSyncEnabled: true, NTPSource: "domain", NTPReliable: true}, domain},
+		{"domain never reliable with servers", timeState{NTPSyncEnabled: true, NTPSource: "domain", NTPReliable: true, NTPServers: servers}, domain},
+
+		{"manual, no servers, not reliable", timeState{NTPSyncEnabled: true, NTPSource: "manual"}, manual("time.windows.com,0x9", "/reliable:no")},
+		{"manual, no servers, reliable", timeState{NTPSyncEnabled: true, NTPSource: "manual", NTPReliable: true}, manual("time.windows.com,0x9", "/reliable:yes")},
+		{"manual, servers, not reliable", timeState{NTPSyncEnabled: true, NTPSource: "manual", NTPServers: servers}, manual(joined, "/reliable:no")},
+		{"manual, servers, reliable", timeState{NTPSyncEnabled: true, NTPSource: "manual", NTPReliable: true, NTPServers: servers}, manual(joined, "/reliable:yes")},
+
+		{"empty source means manual, servers only", timeState{NTPSyncEnabled: true, NTPServers: servers}, manual(joined, "/reliable:no")},
+		{"empty source means manual, no servers", timeState{NTPSyncEnabled: true}, manual("time.windows.com,0x9", "/reliable:no")},
+		{"empty source means manual, reliable", timeState{NTPSyncEnabled: true, NTPReliable: true}, manual("time.windows.com,0x9", "/reliable:yes")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildW32tmConfigArgs(tt.desired)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("buildW32tmConfigArgs(%+v) = %q, want %q", tt.desired, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildW32tmConfigArgs_ReliableOnlyWhenRequested guards the regression
+// where every Windows host was declared a reliable time source.
+func TestBuildW32tmConfigArgs_ReliableOnlyWhenRequested(t *testing.T) {
+	for _, source := range []string{"", "manual", "domain"} {
+		for _, reliable := range []bool{false, true} {
+			for _, enabled := range []bool{false, true} {
+				desired := timeState{NTPSyncEnabled: enabled, NTPSource: source, NTPReliable: reliable}
+				wantYes := enabled && reliable && source != "domain"
+				gotYes := false
+				for _, args := range buildW32tmConfigArgs(desired) {
+					for _, a := range args {
+						if a == "/reliable:yes" {
+							gotYes = true
+						}
+					}
+				}
+				if gotYes != wantYes {
+					t.Errorf("%+v: /reliable:yes present = %v, want %v", desired, gotYes, wantYes)
+				}
+			}
+		}
+	}
+}
+
+// TestRejectWindowsOnlyFields verifies the check non-Windows executors use.
+func TestRejectWindowsOnlyFields(t *testing.T) {
+	ok := []timeState{
+		{},
+		{NTPSource: "manual"},
+		{NTPSyncEnabled: true, NTPServers: []string{"pool.ntp.org"}},
+	}
+	for _, st := range ok {
+		if err := rejectWindowsOnlyFields(st); err != nil {
+			t.Errorf("rejectWindowsOnlyFields(%+v) = %v, want nil", st, err)
+		}
+	}
+
+	bad := []timeState{
+		{NTPSource: "domain"},
+		{NTPReliable: true},
+		{HyperVHostTimeProvider: "disabled"},
+		{HyperVHostTimeProvider: "enabled"},
+	}
+	for _, st := range bad {
+		if err := rejectWindowsOnlyFields(st); !errors.Is(err, modules.ErrInvalidInput) {
+			t.Errorf("rejectWindowsOnlyFields(%+v) = %v, want ErrInvalidInput", st, err)
+		}
+	}
 }

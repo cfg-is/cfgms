@@ -40,6 +40,11 @@ func TestExampleTimeSyncConfig_Validates(t *testing.T) {
 		require.NoError(t, cfg.Validate())
 		require.True(t, cfg.NTPSyncEnabled)
 		require.NotEmpty(t, cfg.NTPServers)
+		// The shipped example must not opt in to any Windows-only behaviour:
+		// reliable is never implied, and the new fields stay at their defaults.
+		require.Equal(t, "manual", cfg.AsMap()["ntp_source"])
+		require.Equal(t, false, cfg.AsMap()["ntp_reliable"])
+		require.Equal(t, "", cfg.AsMap()["hyperv_host_time_provider"])
 	}
 	require.True(t, found, "no resource with module \"time\" in example")
 }
