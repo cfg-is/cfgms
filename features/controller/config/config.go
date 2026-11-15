@@ -1205,6 +1205,41 @@ type TransportConfig struct {
 	IdleTimeout Duration `yaml:"idle_timeout"`
 }
 
+// ResolveAdvertisedAddress returns the transport address a steward should dial.
+// It is the single source for registration responses and the on-connect
+// advertisement, so both always carry the same value. A nil receiver, or an empty
+// ListenAddr, yields "localhost:4433". The external address (ExternalAddress,
+// else the CFGMS_EXTERNAL_HOSTNAME env var) replaces a 0.0.0.0 bind; any other
+// ListenAddr is returned unchanged. It returns an error when ListenAddr binds
+// 0.0.0.0 and no external address is configured.
+func (t *TransportConfig) ResolveAdvertisedAddress() (string, error) {
+	addr := "localhost:4433"
+	externalAddress := ""
+	if t != nil {
+		if t.ListenAddr != "" {
+			addr = t.ListenAddr
+		}
+		externalAddress = t.ExternalAddress
+	}
+	if externalAddress == "" {
+		externalAddress = os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
+	}
+	return replaceBindAddress(addr, externalAddress)
+}
+
+// replaceBindAddress substitutes the 0.0.0.0 wildcard with the resolved external address.
+// Returns an error when addr starts with "0.0.0.0:" and externalAddress is empty.
+func replaceBindAddress(addr, externalAddress string) (string, error) {
+	if !strings.HasPrefix(addr, "0.0.0.0:") {
+		return addr, nil
+	}
+	if externalAddress == "" {
+		return "", fmt.Errorf("transport.listen_addr binds 0.0.0.0 but no external address is configured; set transport.external_address in controller.cfg or CFGMS_EXTERNAL_HOSTNAME env var")
+	}
+	port := strings.TrimPrefix(addr, "0.0.0.0:")
+	return externalAddress + ":" + port, nil
+}
+
 // Validate checks the TransportConfig for invalid values.
 // Returns an error if listen_addr is empty, max_connections < 1, or keepalive_period < 1s.
 func (t *TransportConfig) Validate() error {

@@ -15,7 +15,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -1666,34 +1665,7 @@ func (s *Server) writePendingRegistrationResponse(w http.ResponseWriter, entry *
 // Returns an error if ListenAddr binds 0.0.0.0 and neither transport.external_address
 // nor CFGMS_EXTERNAL_HOSTNAME is configured.
 func (s *Server) getTransportAddress() (string, error) {
-	addr := "localhost:4433"
-	if s.cfg.Transport != nil && s.cfg.Transport.ListenAddr != "" {
-		addr = s.cfg.Transport.ListenAddr
-	}
-
-	// Resolve the external address: config file takes precedence over env var.
-	externalAddress := ""
-	if s.cfg.Transport != nil {
-		externalAddress = s.cfg.Transport.ExternalAddress
-	}
-	if externalAddress == "" {
-		externalAddress = os.Getenv("CFGMS_EXTERNAL_HOSTNAME")
-	}
-
-	return replaceBindAddress(addr, externalAddress)
-}
-
-// replaceBindAddress substitutes the 0.0.0.0 wildcard with the resolved external address.
-// Returns an error when addr starts with "0.0.0.0:" and externalAddress is empty.
-func replaceBindAddress(addr, externalAddress string) (string, error) {
-	if !strings.HasPrefix(addr, "0.0.0.0:") {
-		return addr, nil
-	}
-	if externalAddress == "" {
-		return "", fmt.Errorf("transport.listen_addr binds 0.0.0.0 but no external address is configured; set transport.external_address in controller.cfg or CFGMS_EXTERNAL_HOSTNAME env var")
-	}
-	port := strings.TrimPrefix(addr, "0.0.0.0:")
-	return externalAddress + ":" + port, nil
+	return s.cfg.Transport.ResolveAdvertisedAddress()
 }
 
 // extractSourceIP returns the source IP from the HTTP request.

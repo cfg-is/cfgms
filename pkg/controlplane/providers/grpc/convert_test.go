@@ -104,6 +104,8 @@ var allCommandTypes = []types.CommandType{
 	types.CommandOpenTerminal,   // Issue #2760
 	types.CommandObserveModules, // Issue #3104
 	types.CommandStewardAction,  // Issue #4623
+
+	types.CommandAdvertiseTransportAddress, // Issue #6254
 }
 
 func TestCommandTypeRoundTrip(t *testing.T) {

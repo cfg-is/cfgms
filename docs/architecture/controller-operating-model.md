@@ -1503,6 +1503,29 @@ every call (no polling cache, no populate-lag window) and dispatch safety no
 longer depends on which source produced the steward ID at all — it is a property
 of `ClusterAwareSender`, not of the listing method.
 
+#### Outbound Command: Transport Address Advertisement (#6254)
+
+On every authenticated steward connect the controller sends one signed command of
+type `advertise_transport_address` (`types.CommandAdvertiseTransportAddress`, proto
+`COMMAND_TYPE_ADVERTISE_TRANSPORT_ADDRESS = 15`). Its single param,
+`transport_address` (`types.ParamTransportAddress`), is the controller's configured
+transport address as `host:port`: the value
+`TransportConfig.ResolveAdvertisedAddress()` returns, which is also what registration
+and re-admission return. A cluster that changes `transport.external_address` therefore
+reaches already-connected stewards on their next connect.
+
+- **Controller-originated and `LockdownDenied`.** Only the `TransportAddressHook`
+  connect hook sends it, never an operator path. A locked-down steward refuses it; the
+  hook treats that refusal (`ErrStewardLockedDown`) as expected, not as a failure.
+- **Signed only.** The hook is registered only where a command signer is configured
+  (a certificate manager exists).
+- **Unresolvable address sends nothing.** When `listen_addr` binds `0.0.0.0` and
+  neither `transport.external_address` nor `CFGMS_EXTERNAL_HOSTNAME` is set, the hook
+  logs a warning and sends no command.
+- **Older stewards ignore it.** An unknown proto enum value maps to the zero command
+  type, which no handler acts on.
+- **Connect only.** A config change does not push the address to connected stewards.
+
 #### Outbound Command Contract — Fencing Term (#3390, ADR-029 Decision 5)
 
 *Fence rejections are retried (Issue #4866).* When a steward refuses a command on

@@ -350,6 +350,9 @@ var CommandLockdownPolicy = map[types.CommandType]LockdownPolicy{
 	types.CommandSyncConfig:        LockdownDenied,
 	types.CommandPushSigningCert:   LockdownDenied,
 	types.CommandPushStewardBinary: LockdownDenied,
+	// advertise_transport_address is controller-originated on connect; a
+	// locked-down steward is meant to refuse it.
+	types.CommandAdvertiseTransportAddress: LockdownDenied,
 }
 
 type operatorOriginKey struct{}

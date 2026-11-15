@@ -598,7 +598,12 @@ func TestEventEmitter_Flush_NotRunning(t *testing.T) {
 	env := newEmitterTestEnv(t)
 	started := startFlushEmitter(t, func() transportpb.StewardTransportClient { return env.client })
 	started.Close()
-	assert.ErrorIs(t, started.Flush(ctx), client.ErrEmitterNotRunning, "after Close")
+	// A fresh context: the one above began before the test environment was
+	// built, and under load it can already be expired, which makes Flush's
+	// select between the closed emitter and the dead context a coin flip.
+	afterCtx, afterCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer afterCancel()
+	assert.ErrorIs(t, started.Flush(afterCtx), client.ErrEmitterNotRunning, "after Close")
 }
 
 func TestEventEmitter_Flush_HonoursItsContext(t *testing.T) {

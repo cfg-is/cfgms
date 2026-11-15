@@ -49,6 +49,13 @@ const (
 	// fingerprint triggers no disk write on the steward side. (Issue #1817)
 	CommandPushSigningCert CommandType = "push_signing_cert"
 
+	// CommandAdvertiseTransportAddress tells a steward the controller's configured
+	// transport address (host:port). The controller sends it on every steward
+	// connect; it is controller-originated and signed. Params: transport_address
+	// (string, see ParamTransportAddress). A steward that does not know the command
+	// ignores it.
+	CommandAdvertiseTransportAddress CommandType = "advertise_transport_address"
+
 	// CommandPushStewardBinary instructs the steward to download a new binary from the
 	// controller, verify its SHA-256 digest and Ed25519 publisher signature, enforce
 	// version monotonicity and revocation, invoke the launcher swap subcommand, and
@@ -74,6 +81,10 @@ const (
 	// Params: "modules" (JSON array of ObserveModuleSpec: {name, kind}).
 	CommandObserveModules CommandType = "observe_modules"
 )
+
+// ParamTransportAddress is the single param key of CommandAdvertiseTransportAddress:
+// the controller's transport address as a host:port string.
+const ParamTransportAddress = "transport_address"
 
 // ObserveModuleSpec identifies a module+kind pair resolved by the controller for
 // Tier-2 whole-domain observation (Issue #3104, ADR-024 Amendment 1 §3).

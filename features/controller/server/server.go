@@ -1626,7 +1626,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		routingStore = cpStage.routingStore
 		lockdown = cpStage.lockdown
 		signingRotationSvc, stewardMigrationSvc = cpStage.signingRotationSvc, cpStage.stewardMigrationSvc
-		routingHook, drainHook := cpStage.routingHook, cpStage.drainHook
+		routingHook, drainHook, transportAddrHook := cpStage.routingHook, cpStage.drainHook, cpStage.transportAddrHook
 
 		// Story #919: Hoist signer construction so the command publisher, config
 		// handler, and job dispatcher all share the same signer instance.
@@ -1801,13 +1801,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		if stewardMigrationSvc != nil {
 			stewardMigrationSvc.SetPublisher(commandPublisher)
 		}
-		// Issue #3757/#3764: wire the publisher into the pending-delivery drain
-		// hook now that it exists (same init-cycle break as above).
-		drainHook.SetPublisher(commandPublisher)
-		// Issue #4866: let the rejection recorder re-send fence-rejected commands.
-		if rejectionRecorder != nil {
-			rejectionRecorder.SetRetrier(commandPublisher)
-		}
+		// Issue #3757/#3764, #4866, #6254: wire the publisher into the connect
+		// hooks and the rejection recorder now that it exists (same init-cycle
+		// break as above).
+		wireCommandPublisherConsumers(commandPublisher, drainHook, transportAddrHook, rejectionRecorder)
 
 		// Issue #2524: wire DNA hash mismatch detection, the post-DNA-sync expected
 		// hash update, and the warm-up of expected hashes from durable storage.
@@ -4954,6 +4951,7 @@ type controlPlaneStage struct {
 	routingStore        business.RoutingStore
 	routingHook         *routingTableConnectHook
 	drainHook           *service.PendingDeliveryDrainHook
+	transportAddrHook   *service.TransportAddressHook
 	lockdown            *controllerFleet.Lockdown
 	signingRotationSvc  *service.SigningRotationService
 	stewardMigrationSvc *service.StewardSigningMigrationService
@@ -5011,6 +5009,7 @@ func newControlPlaneStage(in *controlPlaneInputs) (*controlPlaneStage, error) {
 		routingStore:        hooks.routingStore,
 		routingHook:         hooks.routingHook,
 		drainHook:           hooks.drainHook,
+		transportAddrHook:   hooks.transportAddrHook,
 		lockdown:            lockdown,
 		signingRotationSvc:  hooks.signingRotationSvc,
 		stewardMigrationSvc: hooks.stewardMigrationSvc,
@@ -5024,6 +5023,7 @@ type connectHooks struct {
 	routingStore        business.RoutingStore
 	routingHook         *routingTableConnectHook
 	drainHook           *service.PendingDeliveryDrainHook
+	transportAddrHook   *service.TransportAddressHook
 	signingRotationSvc  *service.SigningRotationService
 	stewardMigrationSvc *service.StewardSigningMigrationService
 }
@@ -5067,7 +5067,14 @@ func newConnectHooks(in *controlPlaneInputs, connRegistry registry.Registry, ste
 	if svcErr != nil {
 		return nil, svcErr
 	}
-	hooks.composite = service.NewCompositeOnConnectHook(logger, hooks.signingRotationSvc, hooks.stewardMigrationSvc, registryConnectHook, completionReconciler, routingHook, drainHook, lockdown, in.repairConnect)
+	// Issue #6254: advertise the transport address to each connecting steward.
+	// Registered only on this branch: the command publisher signs only when it
+	// has a signer, and the signer is hoisted only when a certManager exists
+	// (hoistConfigSigner). Without a signer commands.SignCommand returns the
+	// command with no signature, and this command is specified as signed, so it
+	// is not advertised unsigned.
+	hooks.transportAddrHook = service.NewTransportAddressHook(in.cfg.Transport, nil, logger)
+	hooks.composite = service.NewCompositeOnConnectHook(logger, hooks.signingRotationSvc, hooks.stewardMigrationSvc, registryConnectHook, completionReconciler, routingHook, drainHook, hooks.transportAddrHook, lockdown, in.repairConnect)
 	return hooks, nil
 }
 
@@ -5335,6 +5342,19 @@ func newHeartbeatRegistryBridgeHandler(logger logging.Logger, controllerService 
 		}
 		heartbeatGapTracker.Store(hb.StewardID, now)
 		return nil
+	}
+}
+
+// wireCommandPublisherConsumers injects the command publisher into the
+// components built before it existed (init-cycle break). Issue #3757/#3764: the
+// pending-delivery drain hook. Issue #6254: the transport-address hook; a nil
+// hook (built only when a signer is configured) ignores it. Issue #4866: the
+// rejection recorder re-sends fence-rejected commands; it may be nil.
+func wireCommandPublisherConsumers(publisher *commands.Publisher, drainHook *service.PendingDeliveryDrainHook, transportAddrHook *service.TransportAddressHook, rejectionRecorder *service.CommandRejectionRecorder) {
+	drainHook.SetPublisher(publisher)
+	transportAddrHook.SetPublisher(publisher)
+	if rejectionRecorder != nil {
+		rejectionRecorder.SetRetrier(publisher)
 	}
 }
 

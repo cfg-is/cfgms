@@ -57,6 +57,10 @@ const (
 	// plus the operator envelope keys: targets, nonce, expires_at and the X.509 or
 	// WebAuthn signature fields. No script text is carried.
 	CommandType_COMMAND_TYPE_STEWARD_ACTION CommandType = 14
+	// Controller-originated, signed: advertises the controller's configured transport
+	// address to a steward on connect. Command.params keys: "transport_address"
+	// (string, host:port). A steward that does not know this value ignores it.
+	CommandType_COMMAND_TYPE_ADVERTISE_TRANSPORT_ADDRESS CommandType = 15
 )
 
 // Enum value maps for CommandType.
@@ -77,23 +81,25 @@ var (
 		12: "COMMAND_TYPE_OPEN_TERMINAL",
 		13: "COMMAND_TYPE_OBSERVE_MODULES",
 		14: "COMMAND_TYPE_STEWARD_ACTION",
+		15: "COMMAND_TYPE_ADVERTISE_TRANSPORT_ADDRESS",
 	}
 	CommandType_value = map[string]int32{
-		"COMMAND_TYPE_UNSPECIFIED":         0,
-		"COMMAND_TYPE_SYNC_CONFIG":         1,
-		"COMMAND_TYPE_SYNC_DNA":            2,
-		"COMMAND_TYPE_CONNECT_DATAPLANE":   3,
-		"COMMAND_TYPE_EXECUTE_TASK":        4,
-		"COMMAND_TYPE_SHUTDOWN":            5,
-		"COMMAND_TYPE_VALIDATE_CONFIG":     6,
-		"COMMAND_TYPE_RECONNECT":           7,
-		"COMMAND_TYPE_EXECUTE_SCRIPT":      8,
-		"COMMAND_TYPE_PUSH_SIGNING_CERT":   9,
-		"COMMAND_TYPE_PUSH_STEWARD_BINARY": 10,
-		"COMMAND_TYPE_RELAY_RESPONSE":      11,
-		"COMMAND_TYPE_OPEN_TERMINAL":       12,
-		"COMMAND_TYPE_OBSERVE_MODULES":     13,
-		"COMMAND_TYPE_STEWARD_ACTION":      14,
+		"COMMAND_TYPE_UNSPECIFIED":                 0,
+		"COMMAND_TYPE_SYNC_CONFIG":                 1,
+		"COMMAND_TYPE_SYNC_DNA":                    2,
+		"COMMAND_TYPE_CONNECT_DATAPLANE":           3,
+		"COMMAND_TYPE_EXECUTE_TASK":                4,
+		"COMMAND_TYPE_SHUTDOWN":                    5,
+		"COMMAND_TYPE_VALIDATE_CONFIG":             6,
+		"COMMAND_TYPE_RECONNECT":                   7,
+		"COMMAND_TYPE_EXECUTE_SCRIPT":              8,
+		"COMMAND_TYPE_PUSH_SIGNING_CERT":           9,
+		"COMMAND_TYPE_PUSH_STEWARD_BINARY":         10,
+		"COMMAND_TYPE_RELAY_RESPONSE":              11,
+		"COMMAND_TYPE_OPEN_TERMINAL":               12,
+		"COMMAND_TYPE_OBSERVE_MODULES":             13,
+		"COMMAND_TYPE_STEWARD_ACTION":              14,
+		"COMMAND_TYPE_ADVERTISE_TRANSPORT_ADDRESS": 15,
 	}
 )
 
@@ -481,7 +487,10 @@ func (*ControlMessage_TamperState) isControlMessage_Payload() {}
 func (*ControlMessage_RepairRequest) isControlMessage_Payload() {}
 
 // TamperState tells a steward whether the controller considers its host locked
-// (tamper detected). It carries no data besides the flag.
+// (tamper detected). It carries no data besides the flag, so the receiver never
+// has anything to parse or apply. locked=true only lowers trust and is always
+// honored; locked=false is honored only on a link whose server certificate
+// verified against the steward's trust anchor.
 type TamperState struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Locked        bool                   `protobuf:"varint,1,opt,name=locked,proto3" json:"locked,omitempty"`
@@ -536,12 +545,9 @@ type RepairRequest struct {
 	LossDigest        string                 `protobuf:"bytes,3,opt,name=loss_digest,json=lossDigest,proto3" json:"loss_digest,omitempty"`
 	ExpiresAtUnix     int64                  `protobuf:"varint,4,opt,name=expires_at_unix,json=expiresAtUnix,proto3" json:"expires_at_unix,omitempty"`
 	Signature         []byte                 `protobuf:"bytes,5,opt,name=signature,proto3" json:"signature,omitempty"`
-	// signer_chain_pem is the PEM chain of the certificate that signed this
-	// command, for hosts that verify operator actions against a baked list.
-	// Absent for commands whose signature does not carry a separate chain.
-	SignerChainPem []byte `protobuf:"bytes,6,opt,name=signer_chain_pem,json=signerChainPem,proto3" json:"signer_chain_pem,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	SignerChainPem    []byte                 `protobuf:"bytes,6,opt,name=signer_chain_pem,json=signerChainPem,proto3" json:"signer_chain_pem,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *RepairRequest) Reset() {
@@ -618,16 +624,22 @@ func (x *RepairRequest) GetSignerChainPem() []byte {
 
 // Command is sent from controller to steward via ControlChannel.
 type Command struct {
-	state                 protoimpl.MessageState `protogen:"open.v1"`
-	Id                    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Type                  CommandType            `protobuf:"varint,2,opt,name=type,proto3,enum=cfgms.transport.CommandType" json:"type,omitempty"`
-	StewardId             string                 `protobuf:"bytes,3,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
-	TenantId              string                 `protobuf:"bytes,4,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	Timestamp             *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	Params                map[string]string      `protobuf:"bytes,6,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Priority              int32                  `protobuf:"varint,7,opt,name=priority,proto3" json:"priority,omitempty"`
-	Term                  uint64                 `protobuf:"varint,8,opt,name=term,proto3" json:"term,omitempty"`
-	SigningPayloadVersion uint32                 `protobuf:"varint,9,opt,name=signing_payload_version,json=signingPayloadVersion,proto3" json:"signing_payload_version,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Id        string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Type      CommandType            `protobuf:"varint,2,opt,name=type,proto3,enum=cfgms.transport.CommandType" json:"type,omitempty"`
+	StewardId string                 `protobuf:"bytes,3,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
+	TenantId  string                 `protobuf:"bytes,4,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	Timestamp *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	Params    map[string]string      `protobuf:"bytes,6,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Priority  int32                  `protobuf:"varint,7,opt,name=priority,proto3" json:"priority,omitempty"`
+	// term is the Raft term at which this command was published (#3390).
+	// Wire-compatible additive field: old stewards that do not understand it
+	// silently ignore the unknown field number. Enforcement is added in #3436.
+	Term uint64 `protobuf:"varint,8,opt,name=term,proto3" json:"term,omitempty"`
+	// signing_payload_version names the signing-payload version the signer used
+	// (#5174). Zero or absent means version 1, which does not cover term; the
+	// verifier never treats an absent value as a newer version.
+	SigningPayloadVersion uint32 `protobuf:"varint,9,opt,name=signing_payload_version,json=signingPayloadVersion,proto3" json:"signing_payload_version,omitempty"`
 	// signer_chain_pem is the PEM chain of the certificate that signed this
 	// command, for hosts that verify operator actions against a baked list.
 	// Absent for commands whose signature does not carry a separate chain.
@@ -729,7 +741,6 @@ func (x *Command) GetSigningPayloadVersion() uint32 {
 	return 0
 }
 
-// Event is sent from steward to controller via ControlChannel.
 func (x *Command) GetSignerChainPem() []byte {
 	if x != nil {
 		return x.SignerChainPem
@@ -737,6 +748,7 @@ func (x *Command) GetSignerChainPem() []byte {
 	return nil
 }
 
+// Event is sent from steward to controller via ControlChannel.
 type Event struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -1186,7 +1198,7 @@ const file_transport_control_proto_rawDesc = "" +
 	"\adetails\x18\x06 \x03(\v2&.cfgms.transport.Response.DetailsEntryR\adetails\x1a:\n" +
 	"\fDetailsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xef\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\x9d\x04\n" +
 	"\vCommandType\x12\x1c\n" +
 	"\x18COMMAND_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18COMMAND_TYPE_SYNC_CONFIG\x10\x01\x12\x19\n" +
@@ -1203,7 +1215,8 @@ const file_transport_control_proto_rawDesc = "" +
 	"\x1bCOMMAND_TYPE_RELAY_RESPONSE\x10\v\x12\x1e\n" +
 	"\x1aCOMMAND_TYPE_OPEN_TERMINAL\x10\f\x12 \n" +
 	"\x1cCOMMAND_TYPE_OBSERVE_MODULES\x10\r\x12\x1f\n" +
-	"\x1bCOMMAND_TYPE_STEWARD_ACTION\x10\x0e*\x9e\x04\n" +
+	"\x1bCOMMAND_TYPE_STEWARD_ACTION\x10\x0e\x12,\n" +
+	"(COMMAND_TYPE_ADVERTISE_TRANSPORT_ADDRESS\x10\x0f*\x9e\x04\n" +
 	"\tEventType\x12\x1a\n" +
 	"\x16EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19EVENT_TYPE_CONFIG_APPLIED\x10\x01\x12\x19\n" +
