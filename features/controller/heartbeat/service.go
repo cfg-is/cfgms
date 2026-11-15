@@ -293,7 +293,89 @@ func (s *Service) Stop(ctx context.Context) error {
 // handleHeartbeatFromProvider processes incoming heartbeats from the ControlPlaneProvider.
 // Story #363: Processes typed heartbeat messages from ControlPlaneProvider.
 // Issue #418: Detects DNA hash mismatches and fires OnDNAHashMismatch callback.
+//
+// It updates the steward status under s.mu and releases the lock before it calls
+// any injected callback (onStatusChange, onHeartbeatReceived, onDNAHashMismatch,
+// onRepairHeartbeat, onFragmentRoot, onBulkRoot) or the trust evaluator, so a
+// callback may take other locks (for example ControllerService.mu) without
+// risking a lock-order inversion. Callbacks receive copies, never pointers into
+// s.stewards. Because the calls happen after unlock, onStatusChange calls for
+// one steward may be ordered differently from the status transitions when a
+// heartbeat races the stale-heartbeat monitor.
 func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlplaneTypes.Heartbeat) error {
+	reasons := controlplaneTypes.TruncateHealthReasons(hb.Reasons)
+	statusCopy, previouslyHealthy, mismatch, cbs := s.applyHeartbeat(hb, reasons)
+
+	if mismatch && cbs.dnaHashMismatch != nil {
+		cbs.dnaHashMismatch(hb.StewardID)
+	}
+
+	// Trigger callback if status changed
+	if !previouslyHealthy && s.onStatusChange != nil {
+		s.onStatusChange(hb.StewardID, true, statusCopy)
+	}
+
+	// Fire unconditional per-heartbeat hook (e.g. for job dispatch).
+	if s.onHeartbeatReceived != nil {
+		s.onHeartbeatReceived(hb.StewardID, reasons)
+	}
+
+	// A heartbeat that reports a finished repair is the signal the repaired
+	// steward may return to trusted; the receiver checks the rest.
+	if s.onRepairHeartbeat != nil && reportsRepairCompleted(reasons) {
+		s.onRepairHeartbeat(ctx, hb.StewardID, hb.PeerSerial, reasons)
+	}
+
+	// Fire fragment-root callback for partial-sync detection (ADR-017 §7).
+	if hb.DNAAggregateRoot != "" && cbs.fragmentRoot != nil {
+		cbs.fragmentRoot(ctx, hb.StewardID, hb.DNAAggregateRoot)
+	}
+
+	// Fire bulk-root callback for the per-object lane. The root arrives on the
+	// heartbeat Metrics side-channel (dna_bulk_root) and is lifted onto
+	// hb.DNABulkRoot by the control-plane provider's heartbeat conversion.
+	if hb.DNABulkRoot != "" && cbs.bulkRoot != nil {
+		cbs.bulkRoot(ctx, hb.StewardID, hb.DNABulkRoot)
+	}
+
+	// Notify the trust evaluator of a healthy liveness event (Issue #1694).
+	s.recordLiveness(ctx, hb.StewardID, true)
+
+	return nil
+}
+
+// recordLiveness reports a liveness event to the trust evaluator, if one is
+// configured, and logs (never returns) its error. It takes no lock; callers must
+// not hold s.mu.
+func (s *Service) recordLiveness(ctx context.Context, stewardID string, healthy bool) {
+	if s.trustEvaluator == nil {
+		return
+	}
+	if err := s.trustEvaluator.RecordLiveness(ctx, stewardID, healthy); err != nil {
+		msg := "Trust evaluator error on healthy heartbeat"
+		if !healthy {
+			msg = "Trust evaluator error on stale detection"
+		}
+		s.logger.Warn(msg,
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+// heartbeatCallbacks holds the settable callbacks (see SetOnDNAHashMismatch,
+// SetOnFragmentRoot, SetOnBulkRoot), read under s.mu so they can be invoked
+// after it is released.
+type heartbeatCallbacks struct {
+	dnaHashMismatch DNAHashMismatchCallback
+	fragmentRoot    FragmentRootCallback
+	bulkRoot        BulkRootCallback
+}
+
+// applyHeartbeat records hb against the steward's status under s.mu. It returns
+// a copy of the updated status, whether the steward was healthy before, whether
+// the DNA hash mismatched the expected hash, and the settable callbacks. It
+// calls nothing outside this package's own state while holding the lock.
+func (s *Service) applyHeartbeat(hb *controlplaneTypes.Heartbeat, reasons []controlplaneTypes.HealthReason) (statusCopy StewardStatus, previouslyHealthy, mismatch bool, cbs heartbeatCallbacks) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -308,7 +390,7 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 		s.logger.Info("New steward registered", "steward_id", logging.SanitizeLogValue(hb.StewardID))
 	}
 
-	previouslyHealthy := status.Healthy
+	previouslyHealthy = status.Healthy
 
 	// Update status. LastHeartbeat records the steward-supplied send time for
 	// observability; receivedAt records the controller receipt time and is the
@@ -324,56 +406,26 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 
 	// Reasons are steward-controlled: re-apply the caps rather than trust the
 	// transport conversion, and replace (never append to) the previous set.
-	reasons := controlplaneTypes.TruncateHealthReasons(hb.Reasons)
 	status.Reasons = reasons
 
 	status.MissedBeats = 0
 	status.Healthy = true
 
-	s.trackDNAHash(status, hb)
+	mismatch = s.trackDNAHash(status, hb)
 
-	// Trigger callback if status changed
-	if !previouslyHealthy && s.onStatusChange != nil {
-		s.onStatusChange(hb.StewardID, true, *status)
+	cbs = heartbeatCallbacks{
+		dnaHashMismatch: s.onDNAHashMismatch,
+		fragmentRoot:    s.onFragmentRoot,
+		bulkRoot:        s.onBulkRoot,
 	}
-
-	// Fire unconditional per-heartbeat hook (e.g. for job dispatch).
-	if s.onHeartbeatReceived != nil {
-		s.onHeartbeatReceived(hb.StewardID, reasons)
-	}
-
-	// A heartbeat that reports a finished repair is the signal the repaired
-	// steward may return to trusted; the receiver checks the rest.
-	if s.onRepairHeartbeat != nil && reportsRepairCompleted(reasons) {
-		s.onRepairHeartbeat(ctx, hb.StewardID, hb.PeerSerial, reasons)
-	}
-
-	// Fire fragment-root callback for partial-sync detection (ADR-017 §7).
-	if hb.DNAAggregateRoot != "" && s.onFragmentRoot != nil {
-		s.onFragmentRoot(ctx, hb.StewardID, hb.DNAAggregateRoot)
-	}
-
-	// Fire bulk-root callback for the per-object lane. The root arrives on the
-	// heartbeat Metrics side-channel (dna_bulk_root) and is lifted onto
-	// hb.DNABulkRoot by the control-plane provider's heartbeat conversion.
-	if hb.DNABulkRoot != "" && s.onBulkRoot != nil {
-		s.onBulkRoot(ctx, hb.StewardID, hb.DNABulkRoot)
-	}
-
-	// Notify the trust evaluator of a healthy liveness event (Issue #1694).
-	if s.trustEvaluator != nil {
-		if err := s.trustEvaluator.RecordLiveness(ctx, hb.StewardID, true); err != nil {
-			s.logger.Warn("Trust evaluator error on healthy heartbeat",
-				"steward_id", logging.SanitizeLogValue(hb.StewardID), "error", logging.SanitizeLogValue(err.Error()))
-		}
-	}
-
-	return nil
+	return *status, previouslyHealthy, mismatch, cbs
 }
 
-// trackDNAHash records the heartbeat's DNA hash and requests a full sync when it
-// differs from the hash the controller expects (Issue #418). The caller holds s.mu.
-func (s *Service) trackDNAHash(status *StewardStatus, hb *controlplaneTypes.Heartbeat) {
+// trackDNAHash records the heartbeat's DNA hash and reports whether it differs
+// from the hash the controller expects (Issue #418), so the caller can request a
+// full sync once it has released s.mu. The caller holds s.mu; trackDNAHash calls
+// no callback.
+func (s *Service) trackDNAHash(status *StewardStatus, hb *controlplaneTypes.Heartbeat) (mismatch bool) {
 	// DNA hash tracking (Issue #418).
 	// Only check for mismatch when:
 	//   1. The heartbeat carries a non-empty DNA hash (backward-compatible with older stewards).
@@ -388,9 +440,7 @@ func (s *Service) trackDNAHash(status *StewardStatus, hb *controlplaneTypes.Hear
 				"steward_id", logging.SanitizeLogValue(hb.StewardID),
 				"heartbeat_hash", logging.SanitizeLogValue(hb.DNAHash),
 				"expected_hash", logging.SanitizeLogValue(status.expectedDNAHash))
-			if s.onDNAHashMismatch != nil {
-				s.onDNAHashMismatch(hb.StewardID)
-			}
+			return true
 		} else if prevHash != hb.DNAHash {
 			s.logger.Debug("Steward DNA hash updated",
 				"steward_id", logging.SanitizeLogValue(hb.StewardID),
@@ -398,6 +448,7 @@ func (s *Service) trackDNAHash(status *StewardStatus, hb *controlplaneTypes.Hear
 				"new_hash", logging.SanitizeLogValue(hb.DNAHash))
 		}
 	}
+	return false
 }
 
 // monitorHeartbeats runs in the background checking for stale heartbeats.
@@ -416,10 +467,21 @@ func (s *Service) monitorHeartbeats() {
 }
 
 // checkStaleHeartbeats checks for stewards with stale heartbeats.
+//
+// It marks stale stewards unhealthy under s.mu, collecting a copy of each, and
+// releases the lock before it calls onStatusChange (a durable store write) and
+// the trust evaluator. It calls nothing outside this package while holding the
+// lock. Because those calls happen after unlock, onStatusChange calls for one
+// steward may be ordered differently from the status transitions when a
+// heartbeat races this monitor.
 func (s *Service) checkStaleHeartbeats() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	type staleEntry struct {
+		id     string
+		status StewardStatus
+	}
+	var stale []staleEntry
 
+	s.mu.Lock()
 	now := time.Now()
 	for stewardID, status := range s.stewards {
 		if status.Healthy {
@@ -438,19 +500,19 @@ func (s *Service) checkStaleHeartbeats() {
 					"last_heartbeat_reported", status.LastHeartbeat,
 					"timeout", timeSinceLastBeat)
 
-				if s.onStatusChange != nil {
-					s.onStatusChange(stewardID, false, *status)
-				}
-
-				// Notify the trust evaluator that this steward went offline (Issue #1694).
-				if s.trustEvaluator != nil {
-					if err := s.trustEvaluator.RecordLiveness(context.Background(), stewardID, false); err != nil {
-						s.logger.Warn("Trust evaluator error on stale detection",
-							"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
-					}
-				}
+				stale = append(stale, staleEntry{id: stewardID, status: *status})
 			}
 		}
+	}
+	s.mu.Unlock()
+
+	for _, e := range stale {
+		if s.onStatusChange != nil {
+			s.onStatusChange(e.id, false, e.status)
+		}
+
+		// Notify the trust evaluator that this steward went offline (Issue #1694).
+		s.recordLiveness(context.Background(), e.id, false)
 	}
 }
 
