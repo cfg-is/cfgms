@@ -6,9 +6,12 @@
 package timemodule
 
 import (
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
 
 // systemsetupAvailable returns true when the systemsetup command is reachable.
@@ -107,4 +110,27 @@ func TestDarwinExecutor_GetState(t *testing.T) {
 	}
 	// NTPServers may be empty (valid when no NTP server is configured).
 	// NTPSyncEnabled is boolean — no assertion on the specific value.
+}
+
+// TestDarwinExecutor_SetState_RejectsWindowsOnlyFields verifies non-default
+// values of the Windows-only fields are rejected with ErrInvalidInput before
+// any systemsetup call is made.
+func TestDarwinExecutor_SetState_RejectsWindowsOnlyFields(t *testing.T) {
+	cases := []struct {
+		name    string
+		desired timeState
+	}{
+		{"ntp_source domain", timeState{Timezone: "UTC", NTPSyncEnabled: true, NTPSource: "domain"}},
+		{"ntp_reliable", timeState{Timezone: "UTC", NTPSyncEnabled: true, NTPReliable: true}},
+		{"hyperv provider disabled", timeState{Timezone: "UTC", HyperVHostTimeProvider: "disabled"}},
+		{"hyperv provider enabled", timeState{Timezone: "UTC", HyperVHostTimeProvider: "enabled"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &darwinExecutor{}
+			if err := e.setState(tc.desired); !errors.Is(err, modules.ErrInvalidInput) {
+				t.Fatalf("setState() = %v, want ErrInvalidInput", err)
+			}
+		})
+	}
 }

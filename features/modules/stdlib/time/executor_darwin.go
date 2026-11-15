@@ -60,6 +60,10 @@ func (e *darwinExecutor) getState() (timeState, error) {
 
 // setState applies the desired timezone and NTP configuration via systemsetup.
 func (e *darwinExecutor) setState(desired timeState) error {
+	if err := rejectWindowsOnlyFields(desired); err != nil {
+		return err
+	}
+
 	if out, err := exec.Command("systemsetup", "-settimezone", desired.Timezone).CombinedOutput(); err != nil { // #nosec G204 - timezone matches ianaTimezonePattern; no shell metacharacters
 		return fmt.Errorf("systemsetup -settimezone %s: %w (output: %s)", desired.Timezone, err, strings.TrimSpace(string(out)))
 	}

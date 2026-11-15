@@ -6,10 +6,12 @@
 package timemodule
 
 import (
+	"errors"
 	"os/exec"
 	"strconv"
-	"strings"
 	"testing"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // w32tmAvailable returns true when the Windows Time Service is available.
@@ -17,98 +19,256 @@ func w32tmAvailable() bool {
 	return exec.Command("w32tm", "/query", "/configuration").Run() == nil
 }
 
-// TestWindowsExecutor_GetNTPConfig_ServerParsing verifies the NtpServer line
-// parsing in getNTPConfig: it must strip trailing parenthetical annotations
-// and comma-delimited polling flags from each server token.
-func TestWindowsExecutor_GetNTPConfig_ServerParsing(t *testing.T) {
-	cases := []struct {
-		name    string
-		line    string
-		want    []string
-		enabled bool
-	}{
-		{
-			name:    "single server with polling flag",
-			line:    "NtpServer: time.windows.com,0x9 (Local)",
-			want:    []string{"time.windows.com"},
-			enabled: false, // type line absent → false default in this test
-		},
-		{
-			name:    "multiple servers with polling flags",
-			line:    "NtpServer: ntp1.example.com,0x9 ntp2.example.com,0x9 (Local)",
-			want:    []string{"ntp1.example.com", "ntp2.example.com"},
-			enabled: false,
-		},
-		{
-			name:    "server without polling flag",
-			line:    "NtpServer: pool.ntp.org (Local)",
-			want:    []string{"pool.ntp.org"},
-			enabled: false,
-		},
-		{
-			name:    "empty NtpServer",
-			line:    "NtpServer:  (Local)",
-			want:    nil,
-			enabled: false,
-		},
-	}
+// capturedW32tmConfiguration is a captured "w32tm /query /configuration"
+// excerpt from a domain-joined member (CRLF line endings, as w32tm emits).
+const capturedW32tmConfiguration = "[Configuration]\r\n\r\n" +
+	"EventLogFlags: 2 (Local)\r\n" +
+	"AnnounceFlags: 10 (Local)\r\n" +
+	"MaxPosPhaseCorrection: 54000 (Local)\r\n\r\n" +
+	"[TimeProviders]\r\n\r\n" +
+	"NtpClient (Local)\r\n" +
+	"DllName: C:\\Windows\\system32\\w32time.DLL (Local)\r\n" +
+	"Enabled: 1 (Local)\r\n" +
+	"NtpServer: time.windows.com,0x9 (Local)\r\n" +
+	"Type: NT5DS (Local)\r\n"
 
+// TestParseW32tmConfiguration_CapturedOutput parses a captured w32tm output.
+func TestParseW32tmConfiguration_CapturedOutput(t *testing.T) {
+	cfg := parseW32tmConfiguration(capturedW32tmConfiguration)
+	if cfg.source != "domain" {
+		t.Errorf("source = %q, want domain (Type: NT5DS)", cfg.source)
+	}
+	if !cfg.syncEnabled {
+		t.Error("syncEnabled = false, want true (NT5DS is syncing)")
+	}
+	if cfg.reliable {
+		t.Error("reliable = true, want false (AnnounceFlags 10 = 0xA has no 0x4 bit)")
+	}
+	if len(cfg.servers) != 1 || cfg.servers[0] != "time.windows.com" {
+		t.Errorf("servers = %v, want [time.windows.com]", cfg.servers)
+	}
+}
+
+// TestParseW32tmConfiguration_Type covers the Type: line: NTP and NT5DS mean
+// sync enabled (manual/domain); NoSync means disabled.
+func TestParseW32tmConfiguration_Type(t *testing.T) {
+	cases := []struct {
+		line       string
+		wantSource string
+		wantSync   bool
+	}{
+		{"Type: NTP (Local)", "manual", true},
+		{"Type: NT5DS (Local)", "domain", true},
+		{"Type: nt5ds", "domain", true},
+		{"Type: NoSync (Local)", "manual", false},
+		{"Type: nosync", "manual", false},
+		{"Type: AllSync (Local)", "manual", true},
+	}
+	for _, tc := range cases {
+		cfg := parseW32tmConfiguration(tc.line + "\r\n")
+		if cfg.source != tc.wantSource || cfg.syncEnabled != tc.wantSync {
+			t.Errorf("%q: got source=%q sync=%v, want source=%q sync=%v",
+				tc.line, cfg.source, cfg.syncEnabled, tc.wantSource, tc.wantSync)
+		}
+	}
+}
+
+// TestParseW32tmConfiguration_AnnounceFlags verifies bit 0x4 means reliable.
+func TestParseW32tmConfiguration_AnnounceFlags(t *testing.T) {
+	cases := []struct {
+		line string
+		want bool
+	}{
+		{"AnnounceFlags: 10 (Local)", false}, // 0xA: member / non-reliable
+		{"AnnounceFlags: 5 (Local)", true},   // 0x5: reliable (forest-root PDC)
+		{"AnnounceFlags: 4 (Local)", true},
+		{"AnnounceFlags: 12 (Local)", true}, // 0xC
+		{"AnnounceFlags: 0 (Local)", false},
+		{"AnnounceFlags: 0x5 (Local)", true},
+		{"AnnounceFlags: garbage (Local)", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		cfg := parseW32tmConfiguration(tc.line + "\r\n")
+		if cfg.reliable != tc.want {
+			t.Errorf("%q: reliable = %v, want %v", tc.line, cfg.reliable, tc.want)
+		}
+	}
+}
+
+// TestParseW32tmConfiguration_ServerParsing verifies the NtpServer line parsing:
+// trailing parenthetical annotations and comma-delimited polling flags are
+// stripped from each server token.
+func TestParseW32tmConfiguration_ServerParsing(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want []string
+	}{
+		{"single server with polling flag", "NtpServer: time.windows.com,0x9 (Local)", []string{"time.windows.com"}},
+		{"multiple servers", "NtpServer: ntp1.example.com,0x9 ntp2.example.com,0x9 (Local)", []string{"ntp1.example.com", "ntp2.example.com"}},
+		{"server without polling flag", "NtpServer: pool.ntp.org (Local)", []string{"pool.ntp.org"}},
+		{"empty NtpServer", "NtpServer:  (Local)", nil},
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var servers []string
-
-			// Replicate the parsing contract from getNTPConfig.
-			ntpLine := strings.TrimSpace(tc.line)
-			if strings.HasPrefix(ntpLine, "NtpServer:") {
-				val := strings.TrimPrefix(ntpLine, "NtpServer:")
-				if idx := strings.Index(val, "("); idx >= 0 {
-					val = val[:idx]
-				}
-				for _, s := range strings.Fields(val) {
-					if comma := strings.Index(s, ","); comma >= 0 {
-						s = s[:comma]
-					}
-					if s != "" {
-						servers = append(servers, s)
-					}
-				}
-			}
-
-			if len(servers) != len(tc.want) {
-				t.Fatalf("server count: got %d (%v), want %d (%v)", len(servers), servers, len(tc.want), tc.want)
+			got := parseW32tmConfiguration(tc.line).servers
+			if len(got) != len(tc.want) {
+				t.Fatalf("servers = %v, want %v", got, tc.want)
 			}
 			for i := range tc.want {
-				if servers[i] != tc.want[i] {
-					t.Errorf("server[%d]: got %q, want %q", i, servers[i], tc.want[i])
+				if got[i] != tc.want[i] {
+					t.Errorf("server[%d] = %q, want %q", i, got[i], tc.want[i])
 				}
 			}
 		})
 	}
 }
 
-// TestWindowsExecutor_GetNTPConfig_TypeParsing verifies the Type: line parsing
-// in getNTPConfig: "NTP" and "NT5DS" mean sync enabled; "NoSync" means disabled.
-func TestWindowsExecutor_GetNTPConfig_TypeParsing(t *testing.T) {
-	cases := []struct {
-		typeLine string
-		enabled  bool
-	}{
-		{"Type: NTP", true},
-		{"Type: NT5DS", true},
-		{"Type: NoSync", false},
-		{"Type: nosync", false}, // case-insensitive
-	}
+// fakeRegistry is a map-backed registryAccess, the test seam for the OS
+// registry. Keys are lower-cased "path|name" for values and bare paths for keys.
+type fakeRegistry struct {
+	keys   map[string]bool
+	values map[string]uint32
+	writes int
+}
 
+func newFakeRegistry(guest bool, enabled *uint32) *fakeRegistry {
+	r := &fakeRegistry{keys: map[string]bool{}, values: map[string]uint32{}}
+	if guest {
+		r.keys[hypervGuestKey] = true
+	}
+	r.keys[vmicTimeProviderKey] = true
+	if enabled != nil {
+		r.values[vmicTimeProviderKey+"|"+vmicEnabledValue] = *enabled
+	}
+	return r
+}
+
+func (r *fakeRegistry) keyExists(path string) (bool, error) { return r.keys[path], nil }
+
+func (r *fakeRegistry) readDWORD(path, name string) (uint32, bool, error) {
+	v, ok := r.values[path+"|"+name]
+	return v, ok, nil
+}
+
+func (r *fakeRegistry) writeDWORD(path, name string, value uint32) error {
+	if !r.keys[path] {
+		return errors.New("key does not exist")
+	}
+	r.values[path+"|"+name] = value
+	r.writes++
+	return nil
+}
+
+func u32(v uint32) *uint32 { return &v }
+
+func newTestExecutor(reg registryAccess, restarts *int) *windowsExecutor {
+	return &windowsExecutor{
+		reg: reg,
+		restartW32Time: func() error {
+			*restarts++
+			return nil
+		},
+		logger: logging.ForModule("time"),
+	}
+}
+
+// TestApplyHyperVTimeProvider covers set / no-op-on-unchanged behaviour.
+func TestApplyHyperVTimeProvider(t *testing.T) {
+	cases := []struct {
+		name         string
+		guest        bool
+		initial      *uint32
+		setting      string
+		wantValue    *uint32
+		wantRestarts int
+	}{
+		{"disable when enabled", true, u32(1), "disabled", u32(0), 1},
+		{"disable when already disabled is a no-op", true, u32(0), "disabled", u32(0), 0},
+		{"disable when value absent is a no-op", true, nil, "disabled", nil, 0},
+		{"enable when disabled", true, u32(0), "enabled", u32(1), 1},
+		{"enable when already enabled is a no-op", true, u32(1), "enabled", u32(1), 0},
+		{"enable when value absent writes", true, nil, "enabled", u32(1), 1},
+		{"unmanaged leaves value alone", true, u32(1), "", u32(1), 0},
+		{"non-guest is a no-op", false, u32(1), "disabled", u32(1), 0},
+	}
 	for _, tc := range cases {
-		trimmed := strings.TrimSpace(tc.typeLine)
-		enabled := true
-		if strings.HasPrefix(trimmed, "Type:") {
-			val := strings.TrimSpace(strings.TrimPrefix(trimmed, "Type:"))
-			enabled = !strings.EqualFold(val, "NoSync")
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newFakeRegistry(tc.guest, tc.initial)
+			restarts := 0
+			e := newTestExecutor(reg, &restarts)
+
+			if err := e.applyHyperVTimeProvider(tc.setting); err != nil {
+				t.Fatalf("applyHyperVTimeProvider: %v", err)
+			}
+			if restarts != tc.wantRestarts {
+				t.Errorf("w32time restarts = %d, want %d", restarts, tc.wantRestarts)
+			}
+			got, found := reg.values[vmicTimeProviderKey+"|"+vmicEnabledValue]
+			if tc.wantValue == nil {
+				if found {
+					t.Errorf("Enabled = %d, want absent", got)
+				}
+			} else if !found || got != *tc.wantValue {
+				t.Errorf("Enabled = %d (found=%v), want %d", got, found, *tc.wantValue)
+			}
+			if tc.wantRestarts == 0 && reg.writes != 0 {
+				t.Errorf("registry writes = %d, want 0 when unchanged", reg.writes)
+			}
+		})
+	}
+}
+
+// TestApplyHyperVTimeProvider_Errors verifies write and restart failures surface.
+func TestApplyHyperVTimeProvider_Errors(t *testing.T) {
+	t.Run("missing provider key fails the write", func(t *testing.T) {
+		reg := newFakeRegistry(true, nil)
+		delete(reg.keys, vmicTimeProviderKey)
+		restarts := 0
+		e := newTestExecutor(reg, &restarts)
+		if err := e.applyHyperVTimeProvider("enabled"); err == nil {
+			t.Fatal("expected an error when the provider key is missing")
 		}
-		if enabled != tc.enabled {
-			t.Errorf("Type parse(%q): got enabled=%v, want enabled=%v", tc.typeLine, enabled, tc.enabled)
+		if restarts != 0 {
+			t.Errorf("restarts = %d, want 0 after failed write", restarts)
 		}
+	})
+
+	t.Run("restart failure is returned", func(t *testing.T) {
+		reg := newFakeRegistry(true, u32(1))
+		e := newTestExecutor(reg, new(int))
+		e.restartW32Time = func() error { return errors.New("scm unavailable") }
+		if err := e.applyHyperVTimeProvider("disabled"); err == nil {
+			t.Fatal("expected restart failure to be returned")
+		}
+	})
+}
+
+// TestGetHyperVTimeProvider verifies getState's read-back of VMICTimeProvider.
+func TestGetHyperVTimeProvider(t *testing.T) {
+	cases := []struct {
+		name    string
+		guest   bool
+		initial *uint32
+		want    string
+	}{
+		{"guest enabled", true, u32(1), "enabled"},
+		{"guest disabled", true, u32(0), "disabled"},
+		{"guest value absent", true, nil, "disabled"},
+		{"non-guest is unreported", false, u32(1), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestExecutor(newFakeRegistry(tc.guest, tc.initial), new(int))
+			got, err := e.getHyperVTimeProvider()
+			if err != nil {
+				t.Fatalf("getHyperVTimeProvider: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -167,7 +327,7 @@ func TestWindowsExecutor_GetState(t *testing.T) {
 		t.Skip("skipping: w32tm not available or Windows Time Service is not running")
 	}
 
-	e := &windowsExecutor{}
+	e := newExecutor()
 	state, err := e.getState()
 	if err != nil {
 		t.Fatalf("getState() error: %v", err)

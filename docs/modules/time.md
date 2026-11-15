@@ -18,9 +18,20 @@ or manual change silently drifts the host clock configuration.
 | `timezone` | string | IANA timezone identifier (e.g. `UTC`, `America/Chicago`) |
 | `ntp_servers` | list of strings | NTP server hostnames or IP addresses (sorted alphabetically) |
 | `ntp_sync_enabled` | bool | Whether automatic NTP synchronisation is enabled |
+| `ntp_source` | `manual` \| `domain` | Where time is synchronised from. Default `manual`. Windows only for `domain` |
+| `ntp_reliable` | bool | Declare the host a reliable time source. Default `false`. Windows only |
+| `hyperv_host_time_provider` | `enabled` \| `disabled` \| empty | Hyper-V guest time provider (`VMICTimeProvider`). Empty means unmanaged. Windows only |
 
 `timezone` is required; `ntp_servers` may be empty; `ntp_sync_enabled` defaults
-to `false` when not specified.
+to `false` when not specified. Unknown `ntp_source` or `hyperv_host_time_provider`
+values are rejected by validation. On Linux and macOS any non-default value of
+`ntp_source`, `ntp_reliable` or `hyperv_host_time_provider` is rejected with an
+invalid-input error.
+
+`reliable` is no longer set implicitly. Earlier versions declared every Windows
+host a reliable time source; that is correct only for the forest-root PDC
+emulator. Hosts must now set `ntp_reliable: true` explicitly. Existing configs
+that set only `ntp_servers` still converge, and now run with `/reliable:no`.
 
 ## Example DNA fragment
 
@@ -79,6 +90,27 @@ is converged to NTP sync disabled. Because `timezone` is required, any declared
   not IANA format. Pass the Windows identifier as the `timezone` field value.
 - **NTP servers**: managed via `w32tm /config /manualpeerlist`.
 - **NTP sync enabled**: managed via `w32tm /config /syncfromflags`.
+- **Precedence**, in order:
+  1. `ntp_sync_enabled: false` runs `/syncfromflags:no`; the other three fields
+     are ignored for sync.
+  2. `ntp_source: domain` runs `w32tm /config /syncfromflags:domhier /reliable:no /update`
+     and ignores `ntp_servers`. Use it for domain members and non-PDC domain
+     controllers.
+  3. `ntp_source: manual` (default) uses `ntp_servers` (default peer
+     `time.windows.com,0x9` when empty) and passes `/reliable:yes` only when
+     `ntp_reliable: true`, `/reliable:no` otherwise.
+- **Hyper-V guest time provider**: `hyperv_host_time_provider` sets the `Enabled`
+  DWORD (`0` for `disabled`, `1` for `enabled`) at
+  `HKLM\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\VMICTimeProvider`
+  and restarts `w32time` only when the value changed. A domain controller
+  running as a Hyper-V guest, the PDC emulator included, should set it to
+  `disabled`; otherwise host time sync overrides the domain hierarchy. A host is
+  a Hyper-V guest when `HKLM\SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters`
+  exists; on any other host the field is a no-op and `Get` reports it empty.
+- **Read-back**: `Get` reports `ntp_source` from `Type` in
+  `w32tm /query /configuration` (`NT5DS` is `domain`, `NTP` is `manual`),
+  `ntp_reliable` from `AnnounceFlags` (bit `0x4` set means reliable) and
+  `hyperv_host_time_provider` from the `Enabled` value on Hyper-V guests.
 
 ### macOS
 
@@ -90,11 +122,25 @@ is converged to NTP sync disabled. Because `timezone` is required, any declared
 - **NTP sync enabled**: managed via `systemsetup -setusingnetworktime` /
   `-getusingnetworktime`.
 
+## Domain controller example
+
+```yaml
+resources:
+  - name: "time-dc"
+    module: "time"
+    config:
+      timezone: "UTC"
+      ntp_sync_enabled: true
+      ntp_source: domain
+      hyperv_host_time_provider: disabled
+```
+
 ## Security notes
 
 - Requires root privileges on all platforms to write time configuration.
 - Shells out to `timedatectl`, `tzutil.exe`, `w32tm.exe`, and `systemsetup`
-  as declared in `module.yaml`'s `behavioral_envelope`.
+  as declared in `module.yaml`'s `behavioral_envelope`. The Windows registry
+  and Service Control Manager are accessed in-process, not through a shell.
 - No credentials or secrets are handled by this module.
 
 ## Determinism

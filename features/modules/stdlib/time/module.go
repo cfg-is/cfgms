@@ -46,6 +46,17 @@ type TimeConfig struct {
 	NTPServers []string `yaml:"ntp_servers"`
 	// NTPSyncEnabled indicates whether automatic NTP synchronisation is enabled.
 	NTPSyncEnabled bool `yaml:"ntp_sync_enabled"`
+	// NTPSource selects the time source: "manual" (default) syncs from
+	// NTPServers; "domain" syncs from the domain hierarchy. Windows only for
+	// "domain".
+	NTPSource string `yaml:"ntp_source"`
+	// NTPReliable declares the host a reliable time source. Default false.
+	// Correct only for the forest-root PDC emulator. Windows only.
+	NTPReliable bool `yaml:"ntp_reliable"`
+	// HyperVHostTimeProvider manages the Hyper-V guest time provider
+	// (VMICTimeProvider): "enabled", "disabled", or empty for unmanaged.
+	// Windows only; a no-op on hosts that are not Hyper-V guests.
+	HyperVHostTimeProvider string `yaml:"hyperv_host_time_provider"`
 }
 
 // AsMap returns the configuration as a map for field-by-field comparison.
@@ -58,6 +69,10 @@ func (c *TimeConfig) AsMap() map[string]interface{} {
 		"timezone":         c.Timezone,
 		"ntp_servers":      servers,
 		"ntp_sync_enabled": c.NTPSyncEnabled,
+		"ntp_source":       effectiveNTPSource(c.NTPSource),
+		"ntp_reliable":     c.NTPReliable,
+
+		"hyperv_host_time_provider": c.HyperVHostTimeProvider,
 	}
 }
 
@@ -84,12 +99,22 @@ func (c *TimeConfig) Validate() error {
 			return fmt.Errorf("%w: NTP server %q contains invalid characters", modules.ErrInvalidInput, srv)
 		}
 	}
+	switch c.NTPSource {
+	case "", ntpSourceManual, ntpSourceDomain:
+	default:
+		return fmt.Errorf("%w: ntp_source %q must be %q or %q", modules.ErrInvalidInput, c.NTPSource, ntpSourceManual, ntpSourceDomain)
+	}
+	switch c.HyperVHostTimeProvider {
+	case "", hypervProviderEnabled, hypervProviderDisabled:
+	default:
+		return fmt.Errorf("%w: hyperv_host_time_provider %q must be %q, %q or empty", modules.ErrInvalidInput, c.HyperVHostTimeProvider, hypervProviderEnabled, hypervProviderDisabled)
+	}
 	return nil
 }
 
 // GetManagedFields returns the list of fields this configuration manages.
 func (c *TimeConfig) GetManagedFields() []string {
-	return []string{"timezone", "ntp_servers", "ntp_sync_enabled"}
+	return []string{"timezone", "ntp_servers", "ntp_sync_enabled", "ntp_source", "ntp_reliable", "hyperv_host_time_provider"}
 }
 
 // timeModule implements modules.Module for host time configuration.
@@ -140,6 +165,10 @@ func (m *timeModule) Get(ctx context.Context, resourceID string) (modules.Config
 		Timezone:       state.Timezone,
 		NTPServers:     servers,
 		NTPSyncEnabled: state.NTPSyncEnabled,
+
+		NTPSource:              effectiveNTPSource(state.NTPSource),
+		NTPReliable:            state.NTPReliable,
+		HyperVHostTimeProvider: state.HyperVHostTimeProvider,
 	}
 
 	logger.InfoCtx(ctx, "Time configuration retrieved",
@@ -183,6 +212,9 @@ func (m *timeModule) Set(ctx context.Context, resourceID string, config modules.
 		"timezone", logging.SanitizeLogValue(tc.Timezone),
 		"ntp_server_count", len(tc.NTPServers),
 		"ntp_sync_enabled", tc.NTPSyncEnabled,
+		"ntp_source", effectiveNTPSource(tc.NTPSource),
+		"ntp_reliable", tc.NTPReliable,
+		"hyperv_host_time_provider", tc.HyperVHostTimeProvider,
 		"resource_type", "time")
 
 	servers := make([]string, len(tc.NTPServers))
@@ -193,6 +225,10 @@ func (m *timeModule) Set(ctx context.Context, resourceID string, config modules.
 		Timezone:       tc.Timezone,
 		NTPServers:     servers,
 		NTPSyncEnabled: tc.NTPSyncEnabled,
+
+		NTPSource:              effectiveNTPSource(tc.NTPSource),
+		NTPReliable:            tc.NTPReliable,
+		HyperVHostTimeProvider: tc.HyperVHostTimeProvider,
 	}
 
 	if err := m.executor.setState(desired); err != nil {
