@@ -2773,8 +2773,21 @@ func (s *Server) extractBoundaryTenantFromRequest(r *http.Request, resourceType 
 	if t := s.extractTargetTenantFromRequest(r, resourceType); t != "" {
 		return t
 	}
+	if boundaryTenantIDResources[resourceType] {
+		if t := mux.Vars(r)["id"]; t != "" {
+			return t
+		}
+	}
 	return mux.Vars(r)["tenant_path"]
 }
+
+// boundaryTenantIDResources are the permission resource types other than "tenant"
+// whose routes name a tenant in the {id} path variable. The boundary check reads {id}
+// for them so a root-scoped caller without a crossing is stopped before the handler
+// (notification: /tenants/{id}/email-sender, Issue #6243). It is read for the
+// boundary check only: the isolation engine keeps answering a tenant-scoped caller's
+// cross-tenant request through the handler's 404.
+var boundaryTenantIDResources = map[string]bool{"notification": true}
 
 // resolveAssuranceRequirement composes the global permissionAssurance floor with any
 // per-tenant overrides declared along the root→leaf path to tenantID (ADR-021, Issue #2839).

@@ -2169,6 +2169,56 @@ On failure `delivered` is `false` and `failure_reason` carries a sanitized reaso
 - `400 Bad Request`: the body names any field (for example `to`, `subject` or `body`), or is not valid JSON.
 - `409 Conflict` (`EMAIL_NOT_CONFIGURED`): email is not configured or no credential has been stored.
 
+### MSP Email Sender
+
+An MSP tenant can have its own email sender. Operational mail for the MSP and its client tenants is sent through it when it is complete; the platform sender (above) carries everything else, including security notices. The settings are held per MSP tenant and the password in the secret store under the same tenant.
+
+All three endpoints take the MSP tenant id in `{id}` (a direct child of the deployment root), require the `notification:configure-msp` permission at `AssuranceStrong` (API keys are refused), and apply the ordinary tenant-scope decision. Viewing the sender needs the same assurance as changing it. Administrators of an MSP hold the permission implicitly.
+
+- A tenant outside the caller's subtree, a missing tenant, and a client tenant (a client has no sender of its own) are `404 TENANT_NOT_FOUND`. An administrator of one MSP therefore cannot reach another MSP's sender.
+- A root-scoped caller without an active crossing on the MSP receives the tenant-crossing challenge (`401`) on all three routes. With a crossing it may read the sender (`GET`); `PUT` and `DELETE` are refused with `403 ROOT_SCOPED_CANNOT_EDIT_EMAIL_SENDER` even with a crossing, because the sender is what tells the MSP about root's own access.
+- `503 SERVICE_UNAVAILABLE`: the sender store or the secret store is not wired.
+
+All three return the same body, and it never contains the password:
+
+```json
+{"data": {"configured": true, "password_present": true, "host": "smtp.example.com", "port": 587,
+          "tls_mode": "starttls", "from": "ops@example.com", "username": "mailer"}}
+```
+
+`configured` is true when a sender record exists; `password_present` is true when a password is stored. An MSP with no sender reads as `configured: false`, `password_present: false` and empty settings.
+
+#### `GET /api/v1/tenants/{id}/email-sender`
+
+Returns the sender's settings and the two flags above.
+
+#### `PUT /api/v1/tenants/{id}/email-sender`
+
+Sets or replaces the sender. Body (limited to 8 KiB; unknown fields are rejected):
+
+```json
+{"host": "smtp.example.com", "port": 587, "tls_mode": "starttls", "from": "ops@example.com",
+ "username": "mailer", "password": "..."}
+```
+
+- `host`: required; no whitespace, control characters or `/`.
+- `port`: empty (the default for the mode) or `465` or `587`.
+- `tls_mode`: `starttls` (default when omitted) or `implicit_tls`. Plaintext is refused.
+- `from`: required; a bare address of at most 254 bytes, no display name.
+- `username`: optional; at most 256 bytes, no control characters.
+- `password`: write-only; at most 1024 bytes, no control characters. It is required when the MSP has no stored password. When one is already stored it may be left out, and a settings-only edit keeps the stored password.
+
+Returns `200 OK` with the body above. The password is stored first and the record second; an invalid body stores neither.
+
+- `400 INVALID_REQUEST`: the body is not JSON, names an unknown field, or exceeds the limit.
+- `400 INVALID_EMAIL_SENDER`: a field failed validation, or the first set has no password.
+
+#### `DELETE /api/v1/tenants/{id}/email-sender`
+
+Removes the password and the record. Removing an absent sender succeeds. Returns `200 OK` with `configured: false`. Mail for the MSP then goes through the platform sender.
+
+Every `PUT` and `DELETE` is audited as `tenant.email_sender_updated` or `tenant.email_sender_removed` (tenant-scoped to the MSP, high severity, naming the acting principal). The detail holds the host, port, TLS mode and `from` address only: never the password or the username.
+
 ### Webhooks
 
 

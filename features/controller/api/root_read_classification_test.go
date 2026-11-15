@@ -196,6 +196,7 @@ var rootReadClassification = map[string]rootReadEntry{
 	"/api/v1/tenants/{id}":                                           {rootReadTenantPathGate, ""},
 	"/api/v1/tenants/{id}/access-grants":                             {rootReadTenantPathGate, ""},
 	"/api/v1/tenants/{id}/admin-contacts":                            {rootReadTenantPathGate, ""},
+	"/api/v1/tenants/{id}/email-sender":                              {rootReadTenantPathGate, ""}, // Issue #6243
 	"/api/v1/tenants/{id}/m365-connection":                           {rootReadTenantPathGate, ""},
 	"/api/v1/tenants/{id}/billing-report":                            {rootReadTenantPathGate, ""},
 	"/api/v1/tenants/{id}/delete":                                    {rootReadTenantPathGate, ""},
