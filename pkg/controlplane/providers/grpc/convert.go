@@ -37,6 +37,8 @@ var commandTypeToProto = map[types.CommandType]transportpb.CommandType{
 	types.CommandOpenTerminal:      transportpb.CommandType_COMMAND_TYPE_OPEN_TERMINAL,   // Issue #2760
 	types.CommandObserveModules:    transportpb.CommandType_COMMAND_TYPE_OBSERVE_MODULES, // Issue #3104
 	types.CommandStewardAction:     transportpb.CommandType_COMMAND_TYPE_STEWARD_ACTION,  // Issue #4623
+
+	types.CommandAdvertiseTransportAddress: transportpb.CommandType_COMMAND_TYPE_ADVERTISE_TRANSPORT_ADDRESS, // Issue #6254
 }
 
 // protoToCommandType maps proto enum to semantic CommandType.
@@ -51,6 +53,8 @@ var protoToCommandType = map[transportpb.CommandType]types.CommandType{
 	transportpb.CommandType_COMMAND_TYPE_OPEN_TERMINAL:       types.CommandOpenTerminal,   // Issue #2760
 	transportpb.CommandType_COMMAND_TYPE_OBSERVE_MODULES:     types.CommandObserveModules, // Issue #3104
 	transportpb.CommandType_COMMAND_TYPE_STEWARD_ACTION:      types.CommandStewardAction,  // Issue #4623
+
+	transportpb.CommandType_COMMAND_TYPE_ADVERTISE_TRANSPORT_ADDRESS: types.CommandAdvertiseTransportAddress, // Issue #6254
 }
 
 func commandToProto(cmd *types.Command) *transportpb.Command {

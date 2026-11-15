@@ -1655,3 +1655,45 @@ func TestWebAuthnConfig_RootAgentTPMRoots(t *testing.T) {
 		assert.Nil(t, (&Config{WebAuthn: &WebAuthnConfig{}}).SoftwareAuthenticatorRootAgentTPMRoots(), "no allow block")
 	})
 }
+
+func TestTransportConfig_ResolveAdvertisedAddress(t *testing.T) {
+	t.Run("external address beats env var", func(t *testing.T) {
+		t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "env.example")
+		tc := &TransportConfig{ListenAddr: "0.0.0.0:4433", ExternalAddress: "cfg.example"}
+		addr, err := tc.ResolveAdvertisedAddress()
+		require.NoError(t, err)
+		assert.Equal(t, "cfg.example:4433", addr)
+	})
+	t.Run("env var used when config value empty", func(t *testing.T) {
+		t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "env.example")
+		tc := &TransportConfig{ListenAddr: "0.0.0.0:4433"}
+		addr, err := tc.ResolveAdvertisedAddress()
+		require.NoError(t, err)
+		assert.Equal(t, "env.example:4433", addr)
+	})
+	t.Run("wildcard bind with no external address errors", func(t *testing.T) {
+		t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "")
+		tc := &TransportConfig{ListenAddr: "0.0.0.0:4433"}
+		addr, err := tc.ResolveAdvertisedAddress()
+		require.Error(t, err)
+		assert.Empty(t, addr)
+		assert.Contains(t, err.Error(), "external address")
+	})
+	t.Run("specific bind returned unchanged", func(t *testing.T) {
+		t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "env.example")
+		tc := &TransportConfig{ListenAddr: "192.168.1.10:4433", ExternalAddress: "cfg.example"}
+		addr, err := tc.ResolveAdvertisedAddress()
+		require.NoError(t, err)
+		assert.Equal(t, "192.168.1.10:4433", addr)
+	})
+	t.Run("nil receiver and empty listen address default to localhost", func(t *testing.T) {
+		t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "")
+		var nilCfg *TransportConfig
+		addr, err := nilCfg.ResolveAdvertisedAddress()
+		require.NoError(t, err)
+		assert.Equal(t, "localhost:4433", addr)
+		addr, err = (&TransportConfig{}).ResolveAdvertisedAddress()
+		require.NoError(t, err)
+		assert.Equal(t, "localhost:4433", addr)
+	})
+}

@@ -183,6 +183,7 @@ var signalCommandTypes = []controlplaneTypes.CommandType{
 	controlplaneTypes.CommandOpenTerminal,
 	controlplaneTypes.CommandStewardAction,
 	controlplaneTypes.CommandObserveModules,
+	controlplaneTypes.CommandAdvertiseTransportAddress,
 }
 
 // completionLatencyBuckets are upper bounds in seconds.
