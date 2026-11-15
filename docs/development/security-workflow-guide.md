@@ -120,6 +120,7 @@ confirm it still exits non-zero — then discard the scratch change.
 - **Scope**: 127+ security checks for common Go vulnerabilities
 - **Blocking**: No (informational, but tracked)
 - **SARIF Support**: Yes (GitHub Security tab integration)
+- **Invocation**: always through `scripts/run-gosec.sh` (CI and `make security-gosec`). gosec passes the absolute path of every non-test file in a package to `golang.org/x/tools/go/packages`, which splits the list into chunks once it exceeds 16,383 characters; a chunked package fails with `undefined:` type errors rather than findings. The wrapper scans from the short root `/tmp/s` (a symlink to the checkout) and first runs `scripts/check-gosec-load-length.sh`, which fails when any package's file list exceeds 15,000 characters, naming the package, its length and the limit. The remedy is to split the package; do not exclude it from gosec.
 
 ### 4. staticcheck - Advanced Static Analysis
 
@@ -477,7 +478,7 @@ make install-nancy
 
 # Install individual tools (Ubuntu/Debian)
 sudo apt-get install trivy
-go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
+go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
 GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
 ```
 

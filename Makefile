@@ -1989,7 +1989,7 @@ security-gosec:
 	@echo "Analyzing Go code for security patterns..."
 	@echo "Using .gosec.json configuration (single source of truth)..."
 	@echo "Public-beta policy: every medium-or-higher candidate is blocking."
-	@gosec -conf .gosec.json -severity medium -confidence medium ./...
+	@scripts/run-gosec.sh -conf .gosec.json -severity medium -confidence medium ./...
 	@echo "✅ gosec analysis completed - no blocking security patterns found"
 
 # staticcheck advanced Go static analysis with curated rules and performance optimization
