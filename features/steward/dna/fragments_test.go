@@ -321,6 +321,44 @@ func TestPartitionHostFacts_ProducesRequiredKinds(t *testing.T) {
 	}
 }
 
+// TestPartitionHostFacts_DirectoryRoleFactsInHostOS verifies the directory-role
+// facts land in host:os (the selector-visible allowlist) and survive the
+// controller-side flatten that role selectors are evaluated against.
+func TestPartitionHostFacts_DirectoryRoleFactsInHostOS(t *testing.T) {
+	roleKeys := map[string]string{
+		"ad_pdc_emulator":      "true",
+		"ad_domain_controller": "true",
+		"domain_joined":        "true",
+		"domain_name":          "corp.example.com",
+	}
+	attrs := map[string]string{"os": "windows", "hostname": "dc01"}
+	for k, v := range roleKeys {
+		attrs[k] = v
+	}
+
+	fragments, _, err := PartitionHostFacts(attrs, entitygraphtypes.DefaultTaxonomy(), nil)
+	require.NoError(t, err)
+
+	// Canonical bytes are an encoded form, not plain JSON; read each fragment's
+	// payload through the same flatten the controller uses.
+	for _, f := range fragments {
+		payload := pkgdna.FlattenFragments([]*commonpb.Fragment{f})
+		for k, v := range roleKeys {
+			if f.FragmentId == "host:os" {
+				assert.Equal(t, v, payload[k], "%s must be in host:os", k)
+			} else {
+				assert.NotContains(t, payload, k, "%s must only be in host:os, not %s", k, f.FragmentId)
+			}
+		}
+	}
+	assert.True(t, fragmentIDSet(fragments)["host:os"], "host:os fragment must be produced")
+
+	flat := pkgdna.FlattenFragments(fragments)
+	for k, v := range roleKeys {
+		assert.Equal(t, v, flat[k], "FlattenFragments (the controller flatten) must return %s", k)
+	}
+}
+
 // TestPartitionHostFacts_HostnameUnconditionallyPresent is the REQUIRED
 // regression test for Issue #3319/#3358: the observed hostname must appear in
 // the host:os fragment even when no hostname module resource is configured
