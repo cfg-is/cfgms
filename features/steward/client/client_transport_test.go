@@ -6,6 +6,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/cert"
+	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -444,4 +446,130 @@ func TestConnect_FatalOnTLSConfigFailure(t *testing.T) {
 	require.Error(t, err, "Connect must return an error when createTLSConfig fails")
 	assert.Contains(t, err.Error(), "failed to create TLS config",
 		"Connect error must wrap the createTLSConfig failure, not obscure it with a downstream provider error")
+}
+
+// advertiseCmd builds an advertise_transport_address command addressed to stewardID.
+func advertiseCmd(id, stewardID string, value interface{}) *cpTypes.Command {
+	return &cpTypes.Command{
+		ID:        id,
+		Type:      cpTypes.CommandAdvertiseTransportAddress,
+		StewardID: stewardID,
+		TenantID:  "tenant-advertise",
+		Timestamp: time.Now(),
+		Params:    map[string]interface{}{cpTypes.ParamTransportAddress: value},
+	}
+}
+
+// newAdvertiseTestClient builds a real client for ControllerURL start whose
+// transport-address persist callback records every call.
+func newAdvertiseTestClient(t *testing.T, start string) (*TransportClient, *[]string, *sync.Mutex) {
+	t.Helper()
+	var mu sync.Mutex
+	var calls []string
+	c, err := NewTransportClient(&TransportConfig{
+		ControllerURL: start,
+		Logger:        newTestLogger(t),
+		TransportAddressPersistFunc: func(addr string) error {
+			mu.Lock()
+			defer mu.Unlock()
+			calls = append(calls, addr)
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	return c, &calls, &mu
+}
+
+// TestAdvertiseTransportAddress_ValidAddressPersisted delivers a command through
+// the handler registered by setupCommandHandler: the persist func runs exactly
+// once with the advertised value, and a repeat of the same value does not call it.
+func TestAdvertiseTransportAddress_ValidAddressPersisted(t *testing.T) {
+	const stewardID = "steward-advertise"
+	c, calls, mu := newAdvertiseTestClient(t, "old.example:4433")
+	handler, err := c.setupCommandHandler(context.Background(), stewardID)
+	require.NoError(t, err)
+	t.Cleanup(handler.Wait)
+
+	deliver := func(id string) {
+		require.NoError(t, handler.HandleCommand(context.Background(), &cpTypes.SignedCommand{Command: *advertiseCmd(id, stewardID, "new.example:4433")}))
+		handler.Wait()
+	}
+	snapshot := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), (*calls)...)
+	}
+
+	deliver("adv-1")
+	assert.Equal(t, []string{"new.example:4433"}, snapshot())
+
+	// The running client keeps the address it was built with.
+	c.mu.RLock()
+	assert.Equal(t, "old.example:4433", c.transportAddress)
+	c.mu.RUnlock()
+
+	// The running client's address is unchanged, so the controller's per-connect
+	// re-advertisement of an address equal to the client's own is skipped.
+	require.NoError(t, c.handleAdvertiseTransportAddress(context.Background(), advertiseCmd("adv-same", stewardID, "old.example:4433")))
+	assert.Equal(t, []string{"new.example:4433"}, snapshot())
+}
+
+// TestAdvertiseTransportAddress_SameAsCurrentNotPersisted: a value equal to the
+// address the client already dials is not persisted again.
+func TestAdvertiseTransportAddress_SameAsCurrentNotPersisted(t *testing.T) {
+	c, calls, _ := newAdvertiseTestClient(t, "new.example:4433")
+	require.NoError(t, c.handleAdvertiseTransportAddress(context.Background(), advertiseCmd("adv-a", "s", "new.example:4433")))
+	require.NoError(t, c.handleAdvertiseTransportAddress(context.Background(), advertiseCmd("adv-b", "s", "new.example:4433")))
+	assert.Empty(t, *calls)
+}
+
+func TestAdvertiseTransportAddress_InvalidValueRefused(t *testing.T) {
+	for _, bad := range []string{"", "no-port", "host:", ":4433", "host:0", "host:70000", "host:abc", "https://host:4433", "host name:4433", "host:44\t33", "host\n:4433"} {
+		t.Run(bad, func(t *testing.T) {
+			c, calls, _ := newAdvertiseTestClient(t, "old.example:4433")
+			err := c.handleAdvertiseTransportAddress(context.Background(), advertiseCmd("adv-bad", "s", bad))
+			require.Error(t, err)
+			assert.Empty(t, *calls, "a refused value must never reach the persist func")
+		})
+	}
+
+	t.Run("missing param", func(t *testing.T) {
+		c, calls, _ := newAdvertiseTestClient(t, "old.example:4433")
+		cmd := advertiseCmd("adv-missing", "s", nil)
+		cmd.Params = map[string]interface{}{}
+		require.Error(t, c.handleAdvertiseTransportAddress(context.Background(), cmd))
+		assert.Empty(t, *calls)
+	})
+
+	t.Run("non-string param", func(t *testing.T) {
+		c, calls, _ := newAdvertiseTestClient(t, "old.example:4433")
+		require.Error(t, c.handleAdvertiseTransportAddress(context.Background(), advertiseCmd("adv-int", "s", 4433)))
+		assert.Empty(t, *calls)
+	})
+}
+
+func TestAdvertiseTransportAddress_AcceptsValidForms(t *testing.T) {
+	for _, good := range []string{"host:1", "host.example:65535", "10.0.0.5:4433", "[2001:db8::1]:4433"} {
+		require.NoError(t, ValidateTransportAddress(good), good)
+	}
+}
+
+func TestAdvertiseTransportAddress_PersistFailureReturned(t *testing.T) {
+	c, err := NewTransportClient(&TransportConfig{
+		ControllerURL: "old.example:4433",
+		Logger:        newTestLogger(t),
+		TransportAddressPersistFunc: func(string) error {
+			return errors.New("disk full")
+		},
+	})
+	require.NoError(t, err)
+	err = c.handleAdvertiseTransportAddress(context.Background(), advertiseCmd("adv-fail", "s", "new.example:4433"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "disk full")
+}
+
+func TestAdvertiseTransportAddress_NilPersistFuncLearnsNothing(t *testing.T) {
+	c, err := NewTransportClient(&TransportConfig{ControllerURL: "old.example:4433", Logger: newTestLogger(t)})
+	require.NoError(t, err)
+	require.NoError(t, c.handleAdvertiseTransportAddress(context.Background(), advertiseCmd("adv-nil", "s", "new.example:4433")))
 }

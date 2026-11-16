@@ -21,14 +21,17 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -229,6 +232,15 @@ type TransportClient struct {
 	// persist updated signing cert PEMs before in-memory state is updated (Issue #1816).
 	// If nil, persistence is skipped and the cert is learned in memory only.
 	identityPersistFunc func(signingCertPEMs []string, overlapExpiresAt *time.Time) error
+
+	// transportAddressPersistFunc is called by the advertise_transport_address
+	// handler to persist the controller's advertised transport address. If nil,
+	// the address is not learned (Issue #6255).
+	transportAddressPersistFunc func(addr string) error
+
+	// advertiseAddressMu serializes advertise_transport_address handler runs so
+	// two commands never interleave their compare-and-persist (Issue #6255).
+	advertiseAddressMu sync.Mutex
 
 	// certManager provides on-demand client certificate loading per TLS handshake (Issue #920).
 	// When non-nil, GetClientCertificate is used instead of static PEM certs.
@@ -588,6 +600,13 @@ type TransportConfig struct {
 	// If nil, persistence is skipped (cert learned in memory only).
 	IdentityPersistFunc func(signingCertPEMs []string, overlapExpiresAt *time.Time) error
 
+	// TransportAddressPersistFunc is called by the advertise_transport_address
+	// handler with a validated host:port that differs from the address this client
+	// was built with. It persists the address for the next stored-identity
+	// reconnect; the running client keeps its current address (Issue #6255).
+	// If nil, the advertised address is not learned.
+	TransportAddressPersistFunc func(addr string) error
+
 	// HeartbeatInterval for periodic heartbeats
 	HeartbeatInterval time.Duration
 
@@ -866,6 +885,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		moduleTrustAdditionalPublishers: cfg.ModuleTrustAdditionalPublishers,
 		publicBeta:                      cfg.PublicBeta,
 		identityPersistFunc:             cfg.IdentityPersistFunc,
+		transportAddressPersistFunc:     cfg.TransportAddressPersistFunc,
 		secretStore:                     cfg.SecretStore,
 		certStoreDir:                    cfg.CertStoreDir,
 		admissionWindow:                 cfg.AdmissionWindow,
@@ -1690,6 +1710,13 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	// or after rotation. The handler persists before updating in-memory state (Issue #1816).
 	handler.RegisterHandler(cpTypes.CommandPushSigningCert, func(ctx context.Context, cmd *cpTypes.Command) error {
 		return c.handlePushSigningCert(ctx, cmd)
+	})
+
+	// Register advertise_transport_address handler — controller advertises its transport
+	// address on connect; the steward persists it for the next stored-identity reconnect
+	// (Issue #6255).
+	handler.RegisterHandler(cpTypes.CommandAdvertiseTransportAddress, func(ctx context.Context, cmd *cpTypes.Command) error {
+		return c.handleAdvertiseTransportAddress(ctx, cmd)
 	})
 
 	// Register push_steward_binary handler — controller pushes a new steward binary.
@@ -3543,6 +3570,71 @@ func nextSigningCertPEMs(existing []string, leafPEM string, pushed *x509.Certifi
 		return nil, fmt.Errorf("push_signing_cert: retire_serials would leave the trust set empty")
 	}
 	return kept, nil
+}
+
+// isForbiddenAddressRune reports whether r may not appear in an advertised transport
+// address: a slash, whitespace or a control character.
+func isForbiddenAddressRune(r rune) bool {
+	return r == '/' || unicode.IsSpace(r) || unicode.IsControl(r)
+}
+
+// ValidateTransportAddress checks that addr is a syntactically valid host:port:
+// non-empty host, numeric port in 1-65535, and no whitespace, control characters
+// or slash (so a URL such as https://host:4433 is refused). It does not resolve
+// or dial the address.
+func ValidateTransportAddress(addr string) error {
+	if addr == "" {
+		return fmt.Errorf("empty address")
+	}
+	if strings.IndexFunc(addr, isForbiddenAddressRune) >= 0 {
+		return fmt.Errorf("address contains a forbidden character")
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("not a host:port address: %w", err)
+	}
+	if host == "" {
+		return fmt.Errorf("empty host")
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || n < 1 {
+		return fmt.Errorf("port must be a number between 1 and 65535")
+	}
+	return nil
+}
+
+// handleAdvertiseTransportAddress processes a COMMAND_TYPE_ADVERTISE_TRANSPORT_ADDRESS
+// command: it validates the advertised host:port and, when it differs from the address
+// this client was built with, persists it for the next stored-identity reconnect. The
+// running client keeps its current address (Issue #6255).
+func (c *TransportClient) handleAdvertiseTransportAddress(_ context.Context, cmd *cpTypes.Command) error {
+	addr, ok := cmd.Params[cpTypes.ParamTransportAddress].(string)
+	if !ok {
+		return fmt.Errorf("advertise_transport_address: missing or non-string %s param", cpTypes.ParamTransportAddress)
+	}
+	if err := ValidateTransportAddress(addr); err != nil {
+		return fmt.Errorf("advertise_transport_address: invalid %s: %w", cpTypes.ParamTransportAddress, err)
+	}
+
+	c.advertiseAddressMu.Lock()
+	defer c.advertiseAddressMu.Unlock()
+
+	if c.transportAddressPersistFunc == nil {
+		return nil
+	}
+	c.mu.RLock()
+	current := c.transportAddress
+	c.mu.RUnlock()
+	if addr == current {
+		return nil
+	}
+	if err := c.transportAddressPersistFunc(addr); err != nil {
+		return fmt.Errorf("advertise_transport_address: persist transport address: %w", err)
+	}
+	c.logger.Info("Learned advertised transport address",
+		"command_id", cmd.ID,
+		"transport_address", logging.SanitizeLogValue(addr))
+	return nil
 }
 
 // handlePushSigningCert processes a COMMAND_TYPE_PUSH_SIGNING_CERT command from the

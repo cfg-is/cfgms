@@ -16,6 +16,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/steward/client"
 )
 
 func TestSaveAndLoadIdentity_RoundTrip(t *testing.T) {
@@ -373,4 +375,103 @@ func TestSaveIdentity_FailureLeavesNoTempFile(t *testing.T) {
 	got, err := loadIdentity(dir)
 	require.NoError(t, err)
 	assert.Equal(t, "orig", got.StewardID)
+}
+
+func advertiseTestIdentity(addr string) StewardIdentity {
+	return StewardIdentity{
+		StewardID:        "steward-advertise",
+		TenantID:         "tenant-advertise",
+		TransportAddress: addr,
+		CACertPEM:        "-----BEGIN CERTIFICATE-----\nfake-ca\n-----END CERTIFICATE-----",
+		ServerCertPEM:    "-----BEGIN CERTIFICATE-----\nfake-server\n-----END CERTIFICATE-----",
+		SigningCertPEMs:  []string{"signing-a", "signing-b"},
+		DeviceID:         "device-1",
+		TrustMode:        "install-pinned",
+		CAPinFingerprint: "abcd",
+	}
+}
+
+// TestPersistAdvertisedTransportAddress_KeepsPrevious: the replaced address is kept
+// as the previous one, nothing else changes, and re-persisting is a no-op.
+func TestPersistAdvertisedTransportAddress_KeepsPrevious(t *testing.T) {
+	dir := t.TempDir()
+	orig := advertiseTestIdentity("a:4433")
+	require.NoError(t, saveIdentity(dir, orig))
+
+	require.NoError(t, persistAdvertisedTransportAddress(dir, "b:4433"))
+
+	got, err := loadIdentity(dir)
+	require.NoError(t, err)
+	want := orig
+	want.TransportAddress = "b:4433"
+	want.PreviousTransportAddress = "a:4433"
+	assert.Equal(t, want, *got)
+	if runtime.GOOS != "windows" {
+		info, statErr := os.Stat(filepath.Join(dir, identityFileName))
+		require.NoError(t, statErr)
+		assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	}
+
+	before, err := os.ReadFile(filepath.Join(dir, identityFileName))
+	require.NoError(t, err)
+	require.NoError(t, persistAdvertisedTransportAddress(dir, "b:4433"))
+	after, err := os.ReadFile(filepath.Join(dir, identityFileName))
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "the same address again leaves the file byte-identical")
+}
+
+func TestPersistAdvertisedTransportAddress_NoIdentity(t *testing.T) {
+	err := persistAdvertisedTransportAddress(t.TempDir(), "b:4433")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "identity not found")
+}
+
+func TestPersistAdvertisedTransportAddress_CorruptIdentity(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, identityFileName), []byte("{not json"), 0600))
+	require.Error(t, persistAdvertisedTransportAddress(dir, "b:4433"))
+}
+
+// TestLoadIdentity_WithoutPreviousTransportAddress_StillLoads: identity files
+// written before the field existed remain valid.
+func TestLoadIdentity_WithoutPreviousTransportAddress_StillLoads(t *testing.T) {
+	dir := t.TempDir()
+	legacy := `{"steward_id":"steward-old","tenant_id":"t","transport_address":"old:4433","ca_cert_pem":"ca"}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, identityFileName), []byte(legacy), 0600))
+
+	got, err := loadIdentity(dir)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "old:4433", got.TransportAddress)
+	assert.Empty(t, got.PreviousTransportAddress)
+
+	require.NoError(t, saveIdentity(dir, *got))
+	data, err := os.ReadFile(filepath.Join(dir, identityFileName))
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "previous_transport_address", "an empty previous address is omitted")
+}
+
+// TestAdvertiseTransportAddress_InvalidValueLeavesIdentityUnchanged applies the
+// handler's gate (client.ValidateTransportAddress) in front of the shared persist
+// function, exactly as the handler does: a refused value never reaches the
+// identity file, whose bytes stay unchanged.
+func TestAdvertiseTransportAddress_InvalidValueLeavesIdentityUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, saveIdentity(dir, advertiseTestIdentity("a:4433")))
+	before, err := os.ReadFile(filepath.Join(dir, identityFileName))
+	require.NoError(t, err)
+
+	for _, bad := range []string{"", "no-port", "host:", ":4433", "host:0", "host:70000", "host:abc", "https://host:4433", "host name:4433"} {
+		require.Error(t, client.ValidateTransportAddress(bad), "value %q must be refused", bad)
+		after, readErr := os.ReadFile(filepath.Join(dir, identityFileName))
+		require.NoError(t, readErr)
+		assert.Equal(t, before, after, "identity file changed after refused value %q", bad)
+	}
+
+	// A valid value passes the gate and is persisted.
+	require.NoError(t, client.ValidateTransportAddress("b:4433"))
+	require.NoError(t, persistAdvertisedTransportAddress(dir, "b:4433"))
+	got, err := loadIdentity(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "b:4433", got.TransportAddress)
 }

@@ -182,6 +182,31 @@ type StewardIdentity struct {
 	// Trust anchor fields (ADR-013 §3, Issue #1517).
 	TrustMode        string `json:"trust_mode,omitempty"`         // "compile-baked", "install-pinned", "tofu"
 	CAPinFingerprint string `json:"ca_pin_fingerprint,omitempty"` // SHA-256 hex of pinned CA cert (install-pinned and TOFU)
+	// PreviousTransportAddress is the address TransportAddress replaced when the
+	// controller advertised a new one (Issue #6255). The stored-identity reconnect
+	// tries it when the advertised address is unreachable. Empty when no address
+	// has been learned; registration and re-admission write identities without it.
+	PreviousTransportAddress string `json:"previous_transport_address,omitempty"`
+}
+
+// persistAdvertisedTransportAddress records a controller-advertised transport
+// address in the stored identity, keeping the address it replaces as
+// PreviousTransportAddress. It writes nothing when addr is already the stored
+// address. The caller validates addr (Issue #6255).
+func persistAdvertisedTransportAddress(dir, addr string) error {
+	cur, err := loadIdentity(dir)
+	if err != nil {
+		return fmt.Errorf("persist transport address: load identity: %w", err)
+	}
+	if cur == nil {
+		return fmt.Errorf("persist transport address: identity not found")
+	}
+	if cur.TransportAddress == addr {
+		return nil
+	}
+	cur.PreviousTransportAddress = cur.TransportAddress
+	cur.TransportAddress = addr
+	return saveIdentity(dir, *cur)
 }
 
 // saveIdentity writes id to dir/steward-identity.json with permissions 0600
