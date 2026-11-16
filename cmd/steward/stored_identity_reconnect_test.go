@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	quicgo "github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -116,6 +117,49 @@ func unusedUDPAddr(t *testing.T) string {
 	addr := conn.LocalAddr().String()
 	require.NoError(t, conn.Close())
 	return addr
+}
+
+// fastReconnectTimings shortens the stored-identity connect budget and admission
+// window for the test. An address that cannot be reached fails fast through
+// refusedQUICAddr, so a budget of this size is spent on retries, not on one
+// handshake that has to time out.
+func fastReconnectTimings(t *testing.T) {
+	t.Helper()
+	prevBudget, prevWindow := storedIdentityConnectBudget, storedIdentityAdmissionWindow
+	storedIdentityConnectBudget = 1500 * time.Millisecond
+	storedIdentityAdmissionWindow = time.Second
+	t.Cleanup(func() {
+		storedIdentityConnectBudget, storedIdentityAdmissionWindow = prevBudget, prevWindow
+	})
+}
+
+// refusedQUICAddr returns the address of a real QUIC listener that refuses every
+// handshake at once (it speaks no ALPN protocol the steward offers). A dial to it
+// fails in milliseconds on every platform, where a dial to a UDP port with
+// nothing behind it waits out the 30 s QUIC handshake timeout (the OS gives no
+// reliable "port closed" signal for UDP, notably on Windows).
+func (f *storedIdentityFixture) refusedQUICAddr(t *testing.T) string {
+	t.Helper()
+	serverCert := f.serverCert(t)
+	tlsCert, err := tls.X509KeyPair(serverCert.CertificatePEM, serverCert.PrivateKeyPEM)
+	require.NoError(t, err)
+	ln, err := quicgo.ListenAddr("127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+		NextProtos:   []string{"cfgms-test-refused-alpn"},
+		MinVersion:   tls.VersionTLS13,
+	}, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln.Addr().String()
+}
+
+// setTransportAddress rewrites the stored identity's transport address.
+func (f *storedIdentityFixture) setTransportAddress(t *testing.T, addr string) {
+	t.Helper()
+	id, err := loadIdentity(f.certStoreDir)
+	require.NoError(t, err)
+	id.TransportAddress = addr
+	require.NoError(t, saveIdentity(f.certStoreDir, *id))
 }
 
 // pointAtRefusingController starts a real gRPC control plane, trusted by the
@@ -256,7 +300,9 @@ func reconnectStored(t *testing.T, f *storedIdentityFixture) (*client.TransportC
 // address persisted through the shared advertise callback is the one the next
 // stored-identity reconnect dials, with the stored steward ID.
 func TestStoredIdentityReconnect_DialsAdvertisedAddress(t *testing.T) {
-	f := newStoredIdentityFixture(t, unusedUDPAddr(t))
+	fastReconnectTimings(t)
+	f := newStoredIdentityFixture(t, "placeholder")
+	require.NoError(t, persistAdvertisedTransportAddress(f.certStoreDir, f.refusedQUICAddr(t)))
 	liveAddr, approval := f.startAcceptingController(t)
 
 	require.NoError(t, persistAdvertisedTransportAddress(f.certStoreDir, liveAddr))
@@ -274,12 +320,11 @@ func TestStoredIdentityReconnect_DialsAdvertisedAddress(t *testing.T) {
 // advertised address that cannot be reached never strands the steward — the
 // previous address is tried before the caller falls back to re-admission.
 func TestStoredIdentityReconnect_FallsBackToPreviousAddress(t *testing.T) {
-	prev := storedIdentityConnectBudget
-	storedIdentityConnectBudget = 4 * time.Second
-	t.Cleanup(func() { storedIdentityConnectBudget = prev })
+	fastReconnectTimings(t)
 
 	t.Run("previous address reachable", func(t *testing.T) {
-		f := newStoredIdentityFixture(t, unusedUDPAddr(t))
+		f := newStoredIdentityFixture(t, "placeholder")
+		f.setTransportAddress(t, f.refusedQUICAddr(t))
 		liveAddr, approval := f.startAcceptingController(t)
 		id, err := loadIdentity(f.certStoreDir)
 		require.NoError(t, err)
@@ -298,10 +343,11 @@ func TestStoredIdentityReconnect_FallsBackToPreviousAddress(t *testing.T) {
 	})
 
 	t.Run("both addresses unreachable", func(t *testing.T) {
-		f := newStoredIdentityFixture(t, unusedUDPAddr(t))
+		f := newStoredIdentityFixture(t, "placeholder")
+		f.setTransportAddress(t, f.refusedQUICAddr(t))
 		id, err := loadIdentity(f.certStoreDir)
 		require.NoError(t, err)
-		id.PreviousTransportAddress = unusedUDPAddr(t)
+		id.PreviousTransportAddress = f.refusedQUICAddr(t)
 		require.NoError(t, saveIdentity(f.certStoreDir, *id))
 		before := f.identityBytes(t)
 
@@ -332,11 +378,10 @@ func TestStoredIdentityReconnect_FallsBackToPreviousAddress(t *testing.T) {
 // TestStoredIdentityReconnect_NoRegistrationOnFallback: the fallback connects
 // without any registration or re-admission request.
 func TestStoredIdentityReconnect_NoRegistrationOnFallback(t *testing.T) {
-	prev := storedIdentityConnectBudget
-	storedIdentityConnectBudget = 4 * time.Second
-	t.Cleanup(func() { storedIdentityConnectBudget = prev })
+	fastReconnectTimings(t)
 
-	f := newStoredIdentityFixture(t, unusedUDPAddr(t))
+	f := newStoredIdentityFixture(t, "placeholder")
+	f.setTransportAddress(t, f.refusedQUICAddr(t))
 	liveAddr, _ := f.startAcceptingController(t)
 	id, err := loadIdentity(f.certStoreDir)
 	require.NoError(t, err)
@@ -344,7 +389,7 @@ func TestStoredIdentityReconnect_NoRegistrationOnFallback(t *testing.T) {
 	require.NoError(t, saveIdentity(f.certStoreDir, *id))
 	srv, httpsCAPEM, hits := registrationCounter(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	tc, err := registerAndConnect(ctx, "one-time-token", srv.URL, trustSourceInstallPinned, httpsCAPEM, nil, false, logging.NewLogger("error"))
 	require.NoError(t, err)

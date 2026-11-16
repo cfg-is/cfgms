@@ -2265,7 +2265,7 @@ func connectWithApprovedRegistration(
 // A refusal (interfaces.ErrIdentityRejected: unknown, deregistered or revoked
 // steward) sends the steward straight to re-admission with its device key; see
 // registerAndConnect and docs/architecture/steward-operating-model.md.
-const storedIdentityAdmissionWindow = 10 * time.Second
+var storedIdentityAdmissionWindow = 10 * time.Second
 
 // storedIdentityConnectBudget bounds how long one stored-identity reconnect keeps
 // dialing an unreachable controller before the steward requests re-admission
