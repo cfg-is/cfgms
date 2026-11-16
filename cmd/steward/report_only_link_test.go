@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	quicgo "github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -136,6 +137,10 @@ func (s *roTransport) LogStream(stream grpc.ClientStreamingServer[transportpb.Lo
 	}
 }
 
+// roListen is the test-file-only seam through which newROServer starts its
+// listener, so a test can observe the tls.Config as Listen receives it.
+var roListen = quictransport.Listen
+
 func newROServer(t *testing.T) *roServer {
 	t.Helper()
 	mgr, err := cert.NewManager(&cert.ManagerConfig{
@@ -153,14 +158,20 @@ func newROServer(t *testing.T) *roServer {
 	require.NoError(t, err)
 	serverTLS.NextProtos = []string{quictransport.ALPNProtocol}
 
-	ln, err := quictransport.Listen("127.0.0.1:0", serverTLS, nil)
-	require.NoError(t, err)
-	grpcSrv := grpc.NewServer(grpc.Creds(quictransport.TransportCredentials()))
+	// The listener shares serverTLS with every handshake it accepts, so the
+	// config is complete, including the admit callback, before Listen and is
+	// never written afterwards. addr is not part of the TLS config and is
+	// filled in once the listener has an address.
 	s := &roServer{
-		mgr: mgr, caPEM: string(caPEM), reg: registry.NewRegistry(), addr: ln.Addr().String(),
+		mgr: mgr, caPEM: string(caPEM), reg: registry.NewRegistry(),
 		heartbeats: make(chan *cpTypes.Heartbeat, 64), events: make(chan *cpTypes.Event, 64), logs: make(chan *transportpb.LogEntry, 64),
 	}
 	serverTLS.VerifyPeerCertificate = s.admit
+
+	ln, err := roListen("127.0.0.1:0", serverTLS, nil)
+	require.NoError(t, err)
+	s.addr = ln.Addr().String()
+	grpcSrv := grpc.NewServer(grpc.Creds(quictransport.TransportCredentials()))
 	s.cp = grpcCP.New(grpcCP.ModeServer)
 	require.NoError(t, s.cp.Initialize(context.Background(), map[string]interface{}{
 		"mode": "server", "grpc_server": grpcSrv, "registry": s.reg,
@@ -178,6 +189,35 @@ func newROServer(t *testing.T) *roServer {
 		return nil
 	}))
 	return s
+}
+
+// TestNewROServer_TLSConfigCompleteBeforeListen pins that newROServer finishes
+// the server tls.Config before the listener exists: once Listen returns, any
+// incoming handshake reads that config concurrently, so a later write is a
+// data race. No test in this package uses t.Parallel, so swapping the package
+// seam is safe.
+func TestNewROServer_TLSConfigCompleteBeforeListen(t *testing.T) {
+	orig := roListen
+	t.Cleanup(func() { roListen = orig })
+
+	var (
+		calls         int
+		hadVerifyPeer bool
+		nextProtos    []string
+	)
+	roListen = func(addr string, tlsConfig *tls.Config, quicConfig *quicgo.Config) (*quictransport.Listener, error) {
+		calls++
+		hadVerifyPeer = tlsConfig.VerifyPeerCertificate != nil
+		nextProtos = append([]string(nil), tlsConfig.NextProtos...)
+		return orig(addr, tlsConfig, quicConfig)
+	}
+
+	srv := newROServer(t)
+
+	require.Equal(t, 1, calls, "newROServer must start exactly one listener")
+	assert.True(t, hadVerifyPeer, "VerifyPeerCertificate must be set before Listen")
+	assert.Equal(t, []string{quictransport.ALPNProtocol}, nextProtos, "NextProtos must be set before Listen")
+	assert.NotEmpty(t, srv.addr, "addr is filled in from the listener")
 }
 
 const roStewardID = "steward-ro-link"
@@ -271,6 +311,10 @@ func waitHeartbeat(t *testing.T, srv *roServer) *cpTypes.Heartbeat {
 }
 
 func TestConnectReportOnly_ConnectsHeartbeatsAndReportsReasons(t *testing.T) {
+	// The assertion below is on the exact reason set, so start from a clean
+	// registry: a startup run in an earlier test (or an earlier -count
+	// iteration) leaves token/trust reasons in the process-wide registry.
+	resetStartupReasons(t)
 	f := newROFixture(t, trustSourceCompileBaked)
 	// The S1 startup reasons are applied to the link before it connects.
 	startupReasons.Set("tamper", "tamper.test", "test tamper reason")
