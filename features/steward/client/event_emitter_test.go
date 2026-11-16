@@ -606,6 +606,23 @@ func TestEventEmitter_Flush_NotRunning(t *testing.T) {
 	assert.ErrorIs(t, started.Flush(afterCtx), client.ErrEmitterNotRunning, "after Close")
 }
 
+// A closed emitter is reported as such whatever the state of ctx: the caller can
+// tell "emitter stopped" from "my deadline passed". Before the fix Flush selected
+// between the closed done channel and the dead context at random.
+func TestEventEmitter_FlushAfterClose_CancelledContext(t *testing.T) {
+	emitter := startFlushEmitter(t, nil)
+	emitter.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.Error(t, ctx.Err(), "the context is already done")
+	assert.ErrorIs(t, emitter.Flush(ctx), client.ErrEmitterNotRunning)
+
+	expired, expiredCancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer expiredCancel()
+	assert.ErrorIs(t, emitter.Flush(expired), client.ErrEmitterNotRunning)
+}
+
 func TestEventEmitter_Flush_HonoursItsContext(t *testing.T) {
 	emitter := startFlushEmitter(t, func() transportpb.StewardTransportClient { return nil })
 	ctx, cancel := context.WithCancel(context.Background())
