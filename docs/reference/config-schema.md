@@ -454,11 +454,11 @@ and passkey step-up answer 503.
 
 | YAML field | Type | Default | Req | Description |
 |---|---|---|---|---|
-| `email` | object | absent | optional | Controller-wide email delivery. Absent, or with an empty `host`, means email is not configured: the controller starts normally and logs once at INFO that email delivery is disabled. |
+| `email` | object | absent | optional | The platform email sender (controller-wide). Absent, or with an empty `host`, means email is not configured: the controller starts normally and logs once at INFO that email delivery is disabled. |
 
 #### `notifications.email`
 
-`EmailConfig`. Holds the non-secret SMTP settings only.
+`EmailConfig`. The **platform sender**: the controller-wide SMTP configuration that carries security notices the platform owes an MSP and is the fallback for mail an MSP's own sender does not carry. An MSP's own sender is not set here; see the [email delivery guide](../operations/email-delivery.md). Holds the non-secret SMTP settings only.
 
 | YAML field | Type | Default | Req | Description |
 |---|---|---|---|---|
@@ -475,7 +475,7 @@ to the config file or any log. Store it with `PUT /api/v1/notifications/email/cr
 (see [REST API](../api/rest-api.md#email-delivery)); it is held in the controller's secret store under
 `password_secret_key`. Email delivery stays off until both the settings and the credential are present.
 
-Break-glass email to MSP administrator contacts uses this channel; see the [tenant support access guide](../operations/tenant-support-access.md#email-delivery).
+Break-glass email to MSP administrator contacts always uses this sender. Which mail uses it and which uses an MSP's sender is in the [email delivery guide](../operations/email-delivery.md#2-which-mail-uses-which-sender).
 
 ---
 
