@@ -143,10 +143,16 @@ publish-time auto-approval.
    ```
 
    The response carries the `rollout_id`. The rollout proceeds ring by ring.
+   A steward is in a ring through its `deployment_ring` DNA attribute. When no
+   steward in the tenant is assigned to any ring, the start is refused with
+   `409` `NO_RING_MEMBERS` and no rollout record exists; nothing would have
+   been upgraded, so do not treat the refusal as a completed rollout.
 3. Poll `GET /api/v1/rollout/{rollout_id}` for `status`, `current_ring`,
    `on_version_pct`, `failed_count` and `pending_count`. The controller can
-   halt a rollout itself when ring health cannot be read or the failure rate
-   is exceeded; that is audited as `rollout_auto_halted`.
+   halt a rollout itself when ring health cannot be read, the failure rate
+   is exceeded, or no steward was counted in any ring by the final ring
+   (membership changed after start); that is audited as `rollout_auto_halted`.
+   The last case ends `halted` with an error, never `completed`.
 
 ### 5. Halt
 
@@ -198,7 +204,7 @@ tenant. Markers are read with `GET /api/v1/monitoring/markers`.
 | `rollout_started` | A rollout starts |
 | `rollout_completed` | A rollout completes |
 | `rollout_halted` | A rollout is halted by a caller |
-| `rollout_auto_halted` | The controller halts a rollout (ring health query failure or failure rate exceeded) |
+| `rollout_auto_halted` | The controller halts a rollout (ring health query failure, failure rate exceeded, or no steward counted in any ring; `halt_reason_class` `ring_health_query_failed`, `failure_rate_exceeded` or `no_ring_members`) |
 | `steward_upgrade_dispatched` | An upgrade is dispatched to a steward |
 | `steward_upgrade_rolled_back` | An upgrade is rolled back |
 

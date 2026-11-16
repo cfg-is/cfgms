@@ -66,7 +66,8 @@ func newGateFixture(t *testing.T) *gateFixture {
 	srv.rolloutStore = f.rolloutStore
 	srv.upgradeStore = f.upgradeStore
 	srv.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: []fleet.StewardData{
-		{ID: gateTestSteward, TenantID: rolloutCredTestTenant, Status: "online"},
+		{ID: gateTestSteward, TenantID: rolloutCredTestTenant, Status: "online",
+			DNAAttributes: map[string]string{"deployment_ring": "pre-release"}},
 	}})
 
 	srv.blobStore = newFSBlobStore(t)
