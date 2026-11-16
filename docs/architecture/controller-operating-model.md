@@ -967,7 +967,9 @@ verbs wins.
 **Restore is refused while the fault is live.** If the steward's last heartbeat
 inside the previous 5 minutes still carries a tamper code, restore returns
 `409 fault_still_reported` with the codes and audits `steward_tamper_restore_refused`.
-No request field overrides it; such a steward is repaired or banned. A locked
+No request field overrides it; such a steward is repaired or banned. A latched
+steward whose local fault has cleared reports `tamper.locked`, which is not a tamper
+code, so it is restorable. A locked
 copy that names an old identity cannot be restored as a new one
 (`409 LINK_REQUIRED`): it is linked or banned. A restored steward that reports a tamper code again
 returns to `tampered` on its next heartbeat.

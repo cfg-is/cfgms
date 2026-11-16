@@ -80,6 +80,10 @@ var tamperMessages = map[string]string{
 	client.ReasonTamperLocked:               "the controller reports this host locked; nothing is enforced",
 }
 
+// tamperClearedMessage accompanies tamper.locked once the local fault has
+// cleared and the latch only waits for an operator restore.
+const tamperClearedMessage = "the local fault has cleared; awaiting operator restore"
+
 // tamperFault is one tamper condition found by a scan.
 type tamperFault struct {
 	code string
@@ -150,6 +154,35 @@ func validLatchCodes(codes []string) bool {
 		}
 	}
 	return true
+}
+
+// holds reports whether the latch holds code.
+func (l *tamperLatch) holds(code string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.latched && containsCode(l.codes, code)
+}
+
+// holdsFault reports whether the latch holds any code other than the
+// controller-lock marker, that is, a fault found on this host.
+func (l *tamperLatch) holdsFault() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, c := range l.codes {
+		if c != client.ReasonTamperLocked {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCode(codes []string, code string) bool {
+	for _, c := range codes {
+		if c == code {
+			return true
+		}
+	}
+	return false
 }
 
 // onlyCode reports whether code is the one and only reason the latch holds.
@@ -365,7 +398,12 @@ type tamperAlarm struct {
 	recovered bool
 	// repair performs a signed RepairRequest while the latch holds.
 	repair *repairer
-	sink   systemLogWriter
+	// faultCleared is set when the last re-check found no local fault and the
+	// latch holds nothing a re-check cannot see. The heartbeat then reports
+	// tamper.locked instead of the fault code, so the controller accepts a
+	// restore. It is read and written on the run goroutine only.
+	faultCleared bool
+	sink         systemLogWriter
 	// sinkFn opens the local system log the first time it is needed.
 	sinkFn func() systemLogWriter
 	logger logging.Logger
@@ -386,6 +424,7 @@ func (a *tamperAlarm) run(ctx context.Context) (bool, error) {
 	defer retry.Stop()
 
 	defer a.repair.clearAll()
+	a.recheckFault()
 	tc = a.repair.start(ctx, tc)
 
 	for {
@@ -411,6 +450,7 @@ func (a *tamperAlarm) run(ctx context.Context) (bool, error) {
 			tc = a.repair.service(ctx, tc)
 		case <-a.latch.wake:
 		case <-recheck.C:
+			a.recheckFault()
 			a.repair.refresh(tc)
 		case <-retry.C:
 		}
@@ -524,18 +564,34 @@ func (a *tamperAlarm) tryRelease(tc *client.TransportClient) bool {
 // localFaultCleared re-checks the local fault. A fault still present is
 // latched again under its own code.
 func (a *tamperAlarm) localFaultCleared() bool {
-	f := a.rescan()
-	if f == nil {
-		return true
-	}
-	a.latch.raise(f.code)
-	return false
+	return a.recheckFault()
 }
 
-// publishReason sets the reason the heartbeat carries.
+// recheckFault re-runs the local checks and updates faultCleared. It returns
+// true when no fault is present. A fault still present is latched again under
+// its own code. A latch holding tamper.trust_downgrade is never marked cleared:
+// that fault can also come from a connect attempt, which a rescan cannot see.
+func (a *tamperAlarm) recheckFault() bool {
+	f := a.rescan()
+	if f != nil {
+		a.latch.raise(f.code)
+		a.faultCleared = false
+		return false
+	}
+	a.faultCleared = !a.latch.holds(cpTypes.ReasonCodeTamperTrustDowngrade)
+	return true
+}
+
+// publishReason sets the reason the heartbeat carries. Once the local fault has
+// cleared it is tamper.locked with the cleared message, so the heartbeat no
+// longer carries a tamper code; a latch that only records a controller lock keeps
+// that lock's own message.
 func (a *tamperAlarm) publishReason(tc *client.TransportClient) {
 	code := a.latch.primaryCode()
 	msg := tamperMessages[code]
+	if a.faultCleared && a.latch.holdsFault() {
+		code, msg = client.ReasonTamperLocked, tamperClearedMessage
+	}
 	startupReasons.Set(tamperReasonComponent, code, msg)
 	if tc != nil {
 		tc.SetHealthReason(tamperReasonComponent, code, msg)
