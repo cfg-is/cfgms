@@ -2135,7 +2135,7 @@ An audit event is recorded with the actor, crossing ID and kind (High severity f
 
 ### Email Delivery
 
-Controller-wide email delivery (one SMTP configuration for the whole controller). The non-secret settings
+Controller-wide email delivery: the **platform sender** (one SMTP configuration for the whole controller). MSPs can also have their own sender, see [MSP Email Sender](#msp-email-sender); the [email delivery guide](../operations/email-delivery.md) says which mail uses which. The non-secret settings
 live in the controller config under `notifications.email` (see
 [config schema](../reference/config-schema.md#notifications)); the SMTP password is written through the
 credential endpoint and held in the controller's secret store under `password_secret_key`.
@@ -2171,7 +2171,7 @@ On failure `delivered` is `false` and `failure_reason` carries a sanitized reaso
 
 ### MSP Email Sender
 
-An MSP tenant can have its own email sender. Operational mail for the MSP and its client tenants is sent through it when it is complete; the platform sender (above) carries everything else, including security notices. The settings are held per MSP tenant and the password in the secret store under the same tenant.
+An MSP tenant can have its own email sender (operator guide: [email delivery](../operations/email-delivery.md)). Operational mail for the MSP and its client tenants is sent through it when it is complete; the platform sender (above) carries everything else, including security notices. The settings are held per MSP tenant and the password in the secret store under the same tenant.
 
 The endpoints take the MSP tenant id in `{id}` (a direct child of the deployment root), require the `notification:configure-msp` permission at `AssuranceStrong` (API keys are refused), and apply the ordinary tenant-scope decision. Viewing the sender needs the same assurance as changing it. Administrators of an MSP hold the permission implicitly.
 
