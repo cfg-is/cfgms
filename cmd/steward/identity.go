@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/atomicfile"
@@ -189,24 +190,55 @@ type StewardIdentity struct {
 	PreviousTransportAddress string `json:"previous_transport_address,omitempty"`
 }
 
+// identityUpdateMu serialises the read-modify-write persist callbacks below. The
+// controller sends a signing-certificate push and a transport-address
+// advertisement back to back on every connect, and the steward runs the two
+// handlers concurrently; without one lock each could load the file before the
+// other saves and write its stale copy of the other's field back (Issue #6255).
+var identityUpdateMu sync.Mutex
+
+// updateStoredIdentity loads the identity in dir, applies mutate and saves it
+// back, all under identityUpdateMu. mutate reports false when it changed nothing,
+// in which case the file is not rewritten. what names the change in errors.
+func updateStoredIdentity(dir, what string, mutate func(cur *StewardIdentity) bool) error {
+	identityUpdateMu.Lock()
+	defer identityUpdateMu.Unlock()
+	cur, err := loadIdentity(dir)
+	if err != nil {
+		return fmt.Errorf("persist %s: load identity: %w", what, err)
+	}
+	if cur == nil {
+		return fmt.Errorf("persist %s: identity not found", what)
+	}
+	if !mutate(cur) {
+		return nil
+	}
+	return saveIdentity(dir, *cur)
+}
+
+// persistSigningTrust records the steward's signing-certificate set and the
+// overlap expiry in the stored identity.
+func persistSigningTrust(dir string, pems []string, at *time.Time) error {
+	return updateStoredIdentity(dir, "signing cert", func(cur *StewardIdentity) bool {
+		cur.SigningCertPEMs = pems
+		cur.OverlapExpiresAt = at
+		return true
+	})
+}
+
 // persistAdvertisedTransportAddress records a controller-advertised transport
 // address in the stored identity, keeping the address it replaces as
 // PreviousTransportAddress. It writes nothing when addr is already the stored
 // address. The caller validates addr (Issue #6255).
 func persistAdvertisedTransportAddress(dir, addr string) error {
-	cur, err := loadIdentity(dir)
-	if err != nil {
-		return fmt.Errorf("persist transport address: load identity: %w", err)
-	}
-	if cur == nil {
-		return fmt.Errorf("persist transport address: identity not found")
-	}
-	if cur.TransportAddress == addr {
-		return nil
-	}
-	cur.PreviousTransportAddress = cur.TransportAddress
-	cur.TransportAddress = addr
-	return saveIdentity(dir, *cur)
+	return updateStoredIdentity(dir, "transport address", func(cur *StewardIdentity) bool {
+		if cur.TransportAddress == addr {
+			return false
+		}
+		cur.PreviousTransportAddress = cur.TransportAddress
+		cur.TransportAddress = addr
+		return true
+	})
 }
 
 // saveIdentity writes id to dir/steward-identity.json with permissions 0600

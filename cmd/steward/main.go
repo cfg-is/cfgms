@@ -2211,16 +2211,7 @@ func connectWithApprovedRegistration(
 		),
 		Logger: logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
-			cur, loadErr := loadIdentity(certStoreDir)
-			if loadErr != nil {
-				return fmt.Errorf("persist signing cert: load identity: %w", loadErr)
-			}
-			if cur == nil {
-				return fmt.Errorf("persist signing cert: identity not found")
-			}
-			cur.SigningCertPEMs = pems
-			cur.OverlapExpiresAt = at
-			return saveIdentity(certStoreDir, *cur)
+			return persistSigningTrust(certStoreDir, pems, at)
 		},
 		TransportAddressPersistFunc: func(addr string) error {
 			return persistAdvertisedTransportAddress(certStoreDir, addr)
@@ -2591,16 +2582,7 @@ func (d storedIdentityDialer) baseConfig(id *StewardIdentity, addr string) *clie
 		DNACollector:           d.dnaAdapter,
 		Logger:                 d.logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
-			cur, loadErr := loadIdentity(d.certStoreDir)
-			if loadErr != nil {
-				return fmt.Errorf("persist signing cert: load identity: %w", loadErr)
-			}
-			if cur == nil {
-				return fmt.Errorf("persist signing cert: identity not found")
-			}
-			cur.SigningCertPEMs = pems
-			cur.OverlapExpiresAt = at
-			return saveIdentity(d.certStoreDir, *cur)
+			return persistSigningTrust(d.certStoreDir, pems, at)
 		},
 		TransportAddressPersistFunc: func(addr string) error {
 			return persistAdvertisedTransportAddress(d.certStoreDir, addr)

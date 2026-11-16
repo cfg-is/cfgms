@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -474,4 +475,52 @@ func TestAdvertiseTransportAddress_InvalidValueLeavesIdentityUnchanged(t *testin
 	got, err := loadIdentity(dir)
 	require.NoError(t, err)
 	assert.Equal(t, "b:4433", got.TransportAddress)
+}
+
+// TestIdentityPersist_SigningTrustAndAddressDoNotLoseEachOther: the controller
+// sends a signing-certificate push and a transport-address advertisement on every
+// connect, and the steward runs both persist callbacks concurrently. Each one
+// rewrites the whole identity file, so without a shared lock one loads the file
+// before the other saves and writes the other's field back stale. After a restart
+// the steward would then trust the old signing set, or dial the old address. Both
+// results must survive in every ordering (Issue #6255).
+func TestIdentityPersist_SigningTrustAndAddressDoNotLoseEachOther(t *testing.T) {
+	expiry := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	for round := 0; round < 200; round++ {
+		dir := t.TempDir()
+		orig := advertiseTestIdentity("a:4433")
+		orig.SigningCertPEMs = []string{"old-cert"}
+		require.NoError(t, saveIdentity(dir, orig))
+
+		var wg sync.WaitGroup
+		errs := make(chan error, 2)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			errs <- persistSigningTrust(dir, []string{"new-cert"}, &expiry)
+		}()
+		go func() {
+			defer wg.Done()
+			errs <- persistAdvertisedTransportAddress(dir, "b:4433")
+		}()
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			require.NoError(t, err)
+		}
+
+		got, err := loadIdentity(dir)
+		require.NoError(t, err)
+		require.Equal(t, []string{"new-cert"}, got.SigningCertPEMs, "round %d: signing set lost to the address persist", round)
+		require.NotNil(t, got.OverlapExpiresAt, "round %d", round)
+		require.True(t, expiry.Equal(*got.OverlapExpiresAt), "round %d", round)
+		require.Equal(t, "b:4433", got.TransportAddress, "round %d: address lost to the signing persist", round)
+		require.Equal(t, "a:4433", got.PreviousTransportAddress, "round %d", round)
+	}
+}
+
+func TestPersistSigningTrust_NoIdentity(t *testing.T) {
+	err := persistSigningTrust(t.TempDir(), []string{"c"}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "identity not found")
 }
