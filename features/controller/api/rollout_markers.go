@@ -32,6 +32,7 @@ const (
 const (
 	haltClassRingHealthQueryFailed = "ring_health_query_failed"
 	haltClassFailureRateExceeded   = "failure_rate_exceeded"
+	haltClassNoRingMembers         = "no_ring_members"
 )
 
 // systemAuditPrincipal attributes a system-initiated event whose rollout record names no

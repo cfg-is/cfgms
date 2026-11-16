@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,13 +36,23 @@ func rolloutAuditSteward(id, tenantID, ring, runningVersion string) fleet.Stewar
 }
 
 // ringHealthFailingFleet is a real in-memory fleet query that fails every
-// per-ring search (the ring health query) and answers every other search. Rollout
-// start reads the fleet to check approval, so a nil fleet query now refuses the
-// start; this makes only the ring health query fail.
-type ringHealthFailingFleet struct{ fleet.FleetQuery }
+// per-ring search after the first passThrough of them (the ring health query) and
+// answers every other search. Rollout start reads the fleet to check approval and
+// counts ring members with one per-ring search each, so a nil fleet query refuses
+// the start and the start-time searches must pass; this makes only the runtime ring
+// health query fail.
+type ringHealthFailingFleet struct {
+	fleet.FleetQuery
+	passThrough int32
+	ringSeen    *atomic.Int32
+}
+
+func newRingHealthFailingFleet(q fleet.FleetQuery, passThrough int) ringHealthFailingFleet {
+	return ringHealthFailingFleet{FleetQuery: q, passThrough: int32(passThrough), ringSeen: new(atomic.Int32)}
+}
 
 func (f ringHealthFailingFleet) Search(ctx context.Context, filter fleet.Filter) ([]fleet.StewardResult, error) {
-	if _, ring := filter.DNAAttributes["deployment_ring"]; ring {
+	if _, ring := filter.DNAAttributes["deployment_ring"]; ring && f.ringSeen.Add(1) > f.passThrough {
 		return nil, errors.New("ring health query unavailable")
 	}
 	return f.FleetQuery.Search(ctx, filter)
@@ -121,8 +132,9 @@ func TestRolloutAutoHaltAuditedOnFailureRate(t *testing.T) {
 
 func TestRolloutAutoHaltAuditedOnHealthQueryFailure(t *testing.T) {
 	const tenantID = "tenant-a"
-	server, store, _ := setupRolloutServer(t, tenantID, nil)
-	server.fleetQuery = ringHealthFailingFleet{server.fleetQuery} // every ring health query now fails
+	server, store, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
+	// The start-time membership count searches each of the two rings once; every ring health query after it fails.
+	server.fleetQuery = newRingHealthFailingFleet(server.fleetQuery, len(server.cfg.DeploymentRings.Rings))
 	mgr := attachRolloutAuditManager(t, server)
 
 	id := runAuditedRollout(t, server, store, tenantID)
@@ -142,7 +154,7 @@ func TestRolloutAutoHaltAuditedOnHealthQueryFailure(t *testing.T) {
 
 func TestUpgradeDispatchAndRollbackAudited(t *testing.T) {
 	const tenantID = "tenant-a"
-	stewards := []fleet.StewardData{{ID: "steward-1", TenantID: tenantID, Status: "online"}}
+	stewards := []fleet.StewardData{rolloutAuditSteward("steward-1", tenantID, "pre-release", "")}
 	server, upgrades := setupUpgradeServer(t, tenantID, stewards)
 	mgr := attachRolloutAuditManager(t, server)
 	publishApprovedBinary(t, server, tenantID, "v0.5.12", "linux", "amd64")
@@ -188,7 +200,7 @@ func TestUpgradeDispatchAndRollbackAudited(t *testing.T) {
 
 func TestRolloutAuditCarriesRevisionAndPrincipal(t *testing.T) {
 	const tenantID = "tenant-a"
-	server, store, _ := setupRolloutServer(t, tenantID, nil)
+	server, store, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
 	server.cfg.DeploymentRings.Rings[0].Soak = 30_000_000_000 // 30s, so the halt lands mid-soak
 	mgr := attachRolloutAuditManager(t, server)
 
@@ -239,7 +251,7 @@ func TestTenantScopedRolloutEmitsSystemMarker(t *testing.T) {
 }
 
 func TestUnscopedRolloutAlsoEmitsMarker(t *testing.T) {
-	server, store, _ := setupRolloutServer(t, "", nil)
+	server, store, _ := setupRolloutServer(t, "", ringMember(""))
 	mgr := attachRolloutAuditManager(t, server)
 
 	// An mTLS admin with no tenant starts an unscoped rollout.
@@ -263,7 +275,7 @@ func TestUnscopedRolloutAlsoEmitsMarker(t *testing.T) {
 
 func TestMarkersListRolloutAndUpgradeEvents(t *testing.T) {
 	const tenantID = "tenant-a"
-	stewards := []fleet.StewardData{{ID: "steward-1", TenantID: tenantID, Status: "online"}}
+	stewards := []fleet.StewardData{rolloutAuditSteward("steward-1", tenantID, "pre-release", "")}
 	server, upgrades := setupUpgradeServer(t, tenantID, stewards)
 	mgr := attachRolloutAuditManager(t, server)
 
@@ -275,7 +287,7 @@ func TestMarkersListRolloutAndUpgradeEvents(t *testing.T) {
 	}
 	// With a failing ring health query the rollout halts automatically.
 	fleetQuery := server.fleetQuery
-	server.fleetQuery = ringHealthFailingFleet{fleetQuery}
+	server.fleetQuery = newRingHealthFailingFleet(fleetQuery, len(server.cfg.DeploymentRings.Rings))
 	server.onRolloutTerminal = func(id string) { rolloutStore.terminalC <- id }
 	publishApprovedBinary(t, server, tenantID, "v0.5.12", "linux", "amd64")
 	publishApprovedBinary(t, server, tenantID, "v0.5.11", "linux", "amd64")
@@ -346,4 +358,30 @@ func TestRolloutWithoutAuditManagerIsNoop(t *testing.T) {
 		server.emitSystemRolloutEvent(context.Background(), &business.RolloutRecord{ID: "r1"},
 			auditRolloutCompleted, markerKindRolloutCompleted, business.AuditSeverityHigh, nil)
 	})
+}
+
+// A rollout whose only member leaves its ring after start counts nothing in any ring.
+// It halts with the no_ring_members class and emits no completion event or marker.
+func TestRolloutAutoHaltAuditedOnZeroRingMembers(t *testing.T) {
+	const tenantID = "tenant-a"
+	server, store, _ := setupRolloutServer(t, tenantID, nil)
+	provider := newMutableStewardProvider(rolloutAuditSteward("s1", tenantID, "pre-release", ""))
+	server.fleetQuery = fleet.NewMemoryQuery(provider)
+	server.cfg.DeploymentRings.Rings[0].Soak = controllerconfig.Duration(time.Millisecond)
+	server.onRolloutSoak = func(string) { provider.clearRing("s1") }
+	mgr := attachRolloutAuditManager(t, server)
+
+	id := runAuditedRollout(t, server, store, tenantID)
+
+	entries := queryRolloutAudit(t, mgr, tenantID, "rollout_auto_halted")
+	require.Len(t, entries, 1)
+	e := entries[0]
+	assert.Equal(t, id, e.ResourceID)
+	assert.Equal(t, "no_ring_members", e.Details["halt_reason_class"])
+	assert.Equal(t, "stable", e.Details["ring"])
+	assert.EqualValues(t, 2, e.Details["rings_completed"])
+	requireRevisionAndController(t, e, rolloutAuditVersion)
+	assert.Empty(t, queryRolloutAudit(t, mgr, tenantID, "rollout_completed"))
+	assert.Empty(t, markerRows(t, mgr, "marker_rollout_completed"), "no completion marker is written")
+	assert.Len(t, markerRows(t, mgr, "marker_rollout_auto_halted"), 1)
 }

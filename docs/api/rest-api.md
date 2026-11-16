@@ -3205,6 +3205,18 @@ Approval routes act on the caller's own tenant's library. An approval is bound t
 
 One setting for the whole cell, off by default. `GET` returns `{ "enabled": false, "changed_by": "", "changed_at": null }` until a value is stored. `PUT` takes `{ "enabled": true }` (`400` `INVALID_REQUEST` for a missing or non-boolean value) and returns the stored setting. Setting the value the cell already has goes through the same permission, tap and audit. Audit event `unattended_rollouts_changed` (high; principal, previous and new value), recorded before the change; `503` `AUDIT_UNAVAILABLE` leaves the setting unchanged. The setting only records the choice; it does not itself start or stop a rollout.
 
+#### Start a rollout
+
+`POST /api/v1/rollout` with `{ "target_version": "1.2.3", "tenant_id": "acme-corp" }` starts a ring-by-ring rollout and returns `202` with `{ "rollout_id": "...", "status": "in_progress" }`. A steward belongs to a ring through its `deployment_ring` DNA attribute. The start is refused, and no rollout record is created, in these cases:
+
+| Status | Code | Meaning |
+|---|---|---|
+| `409` | `NO_RING_MEMBERS` | No steward in the tenant scope is assigned to any deployment ring. Nothing would be rolled out, so the controller does not report a rollout it cannot deliver. |
+| `500` | `RING_QUERY_ERROR` | The fleet query that counts ring members failed. |
+| `500` | `NO_RINGS` | No deployment rings are configured. |
+
+A rollout that starts with members and then finds no steward in any ring by its final ring ends `halted` with an error, not `completed`. It is audited as `rollout_auto_halted` with `halt_reason_class` `no_ring_members`, and no `rollout_completed` event or marker is written. A single empty ring among rings that have members still passes its health gate.
+
 #### Workflow publication
 
 Publishing a workflow version takes a passkey tap and makes the version eligible for automation and for script steps outside a grant. Both routes need permission `workflow:publish` at strong assurance, a cookie-authenticated web session and a registered passkey; the assertion collected by `finish` is itself the proof, so no separate presence token is sent. The signer must hold `workflow:publish` in the workflow's tenant.

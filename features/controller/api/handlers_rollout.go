@@ -158,6 +158,10 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.refuseNoRingMembers(w, r, rings.Rings, tenantID) {
+		return
+	}
+
 	rolloutID := uuid.New().String()
 	record := &business.RolloutRecord{
 		ID:             rolloutID,
@@ -212,6 +216,51 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 		RolloutID: rolloutID,
 		Status:    string(business.RolloutStatusInProgress),
 	})
+}
+
+// refuseNoRingMembers writes the refusal and returns true when the rollout must not
+// start: either the ring membership query failed (500 RING_QUERY_ERROR) or no steward in
+// the tenant scope resolves into any ring (409 NO_RING_MEMBERS). Refusing before any
+// record exists keeps a rollout over an empty fleet from reporting completed with
+// nothing upgraded.
+func (s *Server) refuseNoRingMembers(w http.ResponseWriter, r *http.Request, rings []controllerconfig.RingSpec, tenantID string) bool {
+	members, err := s.countRingMembers(r.Context(), rings, tenantID)
+	if err != nil {
+		s.logger.Error("Ring membership query failed at rollout start",
+			"error", logging.SanitizeLogValue(err.Error()),
+			"tenant_id", logging.SanitizeLogValue(tenantID))
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to query deployment ring membership", "RING_QUERY_ERROR")
+		return true
+	}
+	if members == 0 {
+		s.writeErrorResponse(w, http.StatusConflict,
+			"No steward in the tenant is assigned to a deployment ring",
+			"NO_RING_MEMBERS")
+		return true
+	}
+	return false
+}
+
+// countRingMembers returns how many stewards in the tenant scope resolve into any of
+// the rings. It issues the same per-ring fleet search as queryRingHealthCounts so the
+// start-time check and the runtime health gate cannot disagree about membership.
+func (s *Server) countRingMembers(ctx context.Context, rings []controllerconfig.RingSpec, tenantID string) (int, error) {
+	if s.fleetQuery == nil {
+		return 0, errors.New("fleet query not configured")
+	}
+	total := 0
+	for _, ring := range rings {
+		stewards, err := s.fleetQuery.Search(ctx, fleet.Filter{
+			TenantID:      tenantID,
+			DNAAttributes: map[string]string{"deployment_ring": ring.Name},
+		})
+		if err != nil {
+			return 0, fmt.Errorf("fleet query for ring %q failed: %w", ring.Name, err)
+		}
+		total += len(stewards)
+	}
+	return total, nil
 }
 
 // rolloutBinaryTarget names the stored binary a steward reaches: the blob tenant
@@ -696,6 +745,10 @@ func (s *Server) HaltOrphanedRollouts(ctx context.Context) (int, error) {
 func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord, rings []controllerconfig.RingSpec, haltCh <-chan struct{}) {
 	defer s.rolloutHaltChans.Delete(record.ID)
 
+	// Stewards counted across every ring; zero after the last ring means nothing was
+	// ever eligible to move, so the rollout must not report completed.
+	totalCounted := 0
+
 	for i, ring := range rings {
 		// Check operator halt before processing each ring: either this node served the
 		// halt (haltCh) or a peer node did and persisted it to the shared store.
@@ -738,6 +791,8 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 			s.notifyRolloutTerminal(record.ID)
 			return
 		}
+
+		totalCounted += onVersion + failed + pending
 
 		// Identify failed stewards and add them to the deferred-retry list.
 		failedIDs := s.failedStewardIDs(ctx, ring.Name, record.TargetVersion, record.TenantID)
@@ -801,7 +856,34 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 			"pending", pending)
 	}
 
-	// All rings passed. Mark the rollout completed.
+	s.finishRollout(ctx, record, rings, totalCounted)
+}
+
+// finishRollout records the outcome after the last ring cleared its health gate. When no
+// steward was counted in any ring (membership changed after start) it halts the rollout
+// rather than report a fleet-wide success that moved nothing; otherwise it marks the
+// rollout completed.
+func (s *Server) finishRollout(ctx context.Context, record *business.RolloutRecord, rings []controllerconfig.RingSpec, totalCounted int) {
+	// Every ring passed its gate but none held a steward (membership changed after
+	// start): halt rather than report a fleet-wide success that moved nothing.
+	if totalCounted == 0 {
+		lastRing := rings[len(rings)-1].Name
+		s.logger.Error("Rollout halted: no steward counted in any ring",
+			"rollout_id", logging.SanitizeLogValue(record.ID))
+		s.persistRolloutHalt(ctx, record.ID, lastRing, len(rings),
+			"no steward was counted in any deployment ring",
+			"Failed to persist halted rollout status after zero ring members")
+		s.emitSystemRolloutEvent(ctx, record, auditRolloutAutoHalted, markerKindRolloutAutoHalt,
+			business.AuditSeverityHigh, map[string]interface{}{
+				"halt_reason_class": haltClassNoRingMembers,
+				"ring":              lastRing,
+				"rings_completed":   len(rings),
+			})
+		s.notifyRolloutTerminal(record.ID)
+		return
+	}
+
+	// All rings passed with at least one steward counted. Mark the rollout completed.
 	if updErr := s.rolloutStore.UpdateRolloutProgress(ctx, record.ID,
 		business.RolloutStatusCompleted, "", len(rings), nil, ""); updErr != nil {
 		s.logger.Error("Failed to persist completed rollout status",
