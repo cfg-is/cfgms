@@ -192,6 +192,28 @@ func TestTamperRestore_FaultWindow(t *testing.T) {
 	})
 }
 
+// A latched steward whose local fault has cleared heartbeats tamper.locked, which
+// is not a tamper code, so the restore is accepted; a recent tamper.data_dir is
+// still refused.
+func TestTamperRestore_FaultClearedHeartbeat(t *testing.T) {
+	require.False(t, isTamperCodeForTest("tamper.locked"), "tamper.locked must not be a tamper code")
+	t.Run("tamper.locked only is restored", func(t *testing.T) {
+		env := newTamperEnv(t)
+		env.addTampered(t, "s-cleared", cloneTenant, cloneDeviceA, time.Minute, "tamper.locked")
+		rec := env.post(env.server.handleRestoreTamperedSteward, "restore", "s-cleared", cloneTenant, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, business.StewardStatusActive, env.status(t, "s-cleared"))
+		assert.Equal(t, []bool{false}, env.sender.states("s-cleared"))
+	})
+	t.Run("tamper.data_dir is still refused", func(t *testing.T) {
+		env := newTamperEnv(t)
+		env.addTampered(t, "s-faulted", cloneTenant, cloneDeviceA, time.Minute, types.ReasonCodeTamperDataDir)
+		rec := env.post(env.server.handleRestoreTamperedSteward, "restore", "s-faulted", cloneTenant, nil)
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Equal(t, business.StewardStatusTampered, env.status(t, "s-faulted"))
+	})
+}
+
 func TestTamperRestore_ThenHeartbeatWithCodeReturnsToTampered(t *testing.T) {
 	const code = types.ReasonCodeTamperDataDir
 	env := newTamperEnv(t)

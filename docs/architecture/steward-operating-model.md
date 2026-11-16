@@ -1292,7 +1292,7 @@ file content or token.
 
 | Fault | Steward behavior | Controller-visible reason code | Operator action |
 |-------|------------------|--------------------------------|-----------------|
-| The Windows data directory is not secure (owned by a non-admin principal, holds a link or a foreign write grant), or the tamper latch file is unreadable, corrupt or of an unknown version | Latches. Reads no config, module cache or token from the directory and drops the registration token. Opens the [report-only link](#locked-mode-the-report-only-link) on the stored identity; if no identity loads, the reason goes to the local system log only and the link is retried every 30 s. The fault is re-checked hourly | `tamper.data_dir` | Inspect and remove the foreign entry, then `cfg steward tamper restore`; or `cfg steward tamper repair` (resets rights on the declared paths) when the controller still shows the fault; or `cfg steward tamper ban` |
+| The Windows data directory is not secure (owned by a non-admin principal, holds a link or a foreign write grant), or the tamper latch file is unreadable, corrupt or of an unknown version | Latches. Reads no config, module cache or token from the directory and drops the registration token. Opens the [report-only link](#locked-mode-the-report-only-link) on the stored identity; if no identity loads, the reason goes to the local system log only and the link is retried every 30 s. The fault is re-checked at start and hourly; once it has cleared the steward reports `tamper.locked` until restored | `tamper.data_dir` | Inspect and remove the foreign entry; `cfg steward tamper restore` succeeds once the fault has cleared; or `cfg steward tamper repair` (resets rights on the declared paths) when the controller still shows the fault; or `cfg steward tamper ban` |
 | The configured trust source is weaker than the one the steward enrolled with (`trust downgrade rejected`) | Latches; same alarm behavior as above | `tamper.trust_downgrade` | Reinstall with the trust source the steward enrolled with (or wipe the identity to change the anchor deliberately), then restore; repair is refused with `repair.anchor_untrusted` on a host with no usable baked root (see [Repair](#repair)); or ban |
 | The pinned controller CA is unreadable, or does not re-derive to its pin (including a same-level re-enroll against a different CA) | Latches. With a registration token and a compile-baked or install-pinned trust source, and when this is the only latched code, it re-keys and registers as a new device naming the old one ([Broken Trust](#broken-trust-new-identity)). Otherwise stays latched with the reason kept locally | `tamper.ca_mismatch`; then `identity.broken_trust` after the re-key | Restore the installer CA file and restore; or link or ban the locked new identity |
 | The security profile is invalid, or the environment profile downgrades a compiled `public-beta` profile | Latches; the alarm path runs with the strictest (`public-beta`) settings | `tamper.security_profile` | Correct the profile, then restore; or ban |
@@ -1321,7 +1321,16 @@ written atomically. It holds the codes raised and whether the controller locked
 the host. A latch file that is present but unreadable, not a regular file,
 corrupt or of an unknown version counts as latched under `tamper.data_dir`; a
 missing file is recovered when the controller sends `TamperState{locked: true}`
-on connect. The heartbeat reports the first code raised.
+on connect. While the fault is present the heartbeat reports the first code
+raised. The alarm re-checks the local fault at the start of each run and at the
+hourly interval; once a re-check finds nothing, the heartbeat reports
+`tamper.locked` (a code `IsTamperCode` does not accept) with the message "the
+local fault has cleared; awaiting operator restore", so the controller accepts a
+restore. A fault that reappears is reported under its own code again at the next
+re-check. The exception is `tamper.trust_downgrade`: it can also be raised by a
+connect attempt, which a re-check cannot see, so while the latch holds it the
+heartbeat keeps reporting the code. Nothing is enforced either way until the
+controller restores the host.
 
 The latch releases only when **both** hold:
 

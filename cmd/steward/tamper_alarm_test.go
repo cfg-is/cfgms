@@ -536,3 +536,155 @@ func TestTamperAlarm_Release_RefetchesConfigFromController(t *testing.T) {
 	require.Eventually(t, func() bool { return e.f.srv.pulls.Load() > 0 }, 30*time.Second, 50*time.Millisecond,
 		"the released steward refetches config from the controller")
 }
+
+// reasonWithCode returns the heartbeat reason carrying code, or nil.
+func reasonWithCode(hb *cpTypes.Heartbeat, code string) *cpTypes.HealthReason {
+	for i := range hb.Reasons {
+		if hb.Reasons[i].Code == code {
+			return &hb.Reasons[i]
+		}
+	}
+	return nil
+}
+
+// A latched steward whose local fault has cleared reports tamper.locked, not the
+// fault code; a fault that comes back is reported under its own code again.
+func TestTamperAlarm_FaultCleared_ReportsLockedAndFaultReappears(t *testing.T) {
+	e := newAlarmEnv(t, trustSourceCompileBaked)
+	e.dirBad.Store(true)
+	stop, done := e.runSteward(t, "", e.cf())
+	tamperHeartbeat(t, e.f.srv, cpTypes.ReasonCodeTamperDataDir)
+
+	e.dirBad.Store(false)
+	hb := tamperHeartbeat(t, e.f.srv, client.ReasonTamperLocked)
+	r := reasonWithCode(hb, client.ReasonTamperLocked)
+	require.NotNil(t, r)
+	assert.Equal(t, tamperClearedMessage, r.Message)
+	assert.Equal(t, tamperReasonComponent, r.Component)
+
+	e.dirBad.Store(true)
+	tamperHeartbeat(t, e.f.srv, cpTypes.ReasonCodeTamperDataDir)
+	assertAlive(t, done)
+	require.NoError(t, stop())
+}
+
+// A restart after the operator fixed the host reports tamper.locked from the
+// start-of-run check, never the persisted fault code.
+func TestTamperAlarm_FaultClearedBeforeStart_NeverReportsFaultCode(t *testing.T) {
+	e := newAlarmEnv(t, trustSourceCompileBaked)
+	latch := openTamperLatch(e.f.dir, logging.NewNoopLogger())
+	latch.raise(cpTypes.ReasonCodeTamperDataDir)
+
+	stop, done := e.runSteward(t, "", e.cf())
+	hb := tamperHeartbeat(t, e.f.srv, client.ReasonTamperLocked)
+	assert.Equal(t, tamperClearedMessage, reasonWithCode(hb, client.ReasonTamperLocked).Message)
+	assertAlive(t, done)
+	require.NoError(t, stop())
+}
+
+// Restore end to end: the cleared steward reports no tamper code from its first
+// tamper.locked heartbeat, so the controller can restore it, and it releases.
+func TestTamperAlarm_FaultCleared_RestoreReleasesWithoutTamperCodes(t *testing.T) {
+	e := newAlarmEnv(t, trustSourceCompileBaked)
+	e.dirBad.Store(true)
+	stop, done := e.runSteward(t, "", e.cf())
+	tamperHeartbeat(t, e.f.srv, cpTypes.ReasonCodeTamperDataDir)
+	waitConnected(t, e.f.srv)
+
+	e.dirBad.Store(false)
+	tamperHeartbeat(t, e.f.srv, client.ReasonTamperLocked)
+
+	ctx := context.Background()
+	require.NoError(t, e.f.srv.cp.SendTamperState(ctx, roStewardID, true))
+	require.NoError(t, e.f.srv.cp.SendTamperState(ctx, roStewardID, false))
+	latchPath := filepath.Join(e.f.dir, tamperLatchFileName)
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(latchPath)
+		return os.IsNotExist(err)
+	}, 20*time.Second, 20*time.Millisecond, "the latch is released")
+
+	for {
+		select {
+		case hb := <-e.f.srv.heartbeats:
+			for _, r := range hb.Reasons {
+				assert.False(t, cpTypes.IsTamperCode(r.Code), "no heartbeat after the fault cleared carries tamper code %q", r.Code)
+			}
+		default:
+			assertAlive(t, done)
+			require.NoError(t, stop())
+			return
+		}
+	}
+}
+
+// A latch holding tamper.trust_downgrade is never marked cleared: a rescan cannot
+// see a downgrade raised by a connect attempt.
+func TestTamperAlarm_TrustDowngradeLatch_NilRescan_KeepsReportingFault(t *testing.T) {
+	e := newAlarmEnv(t, trustSourceCompileBaked)
+	latch := openTamperLatch(e.f.dir, logging.NewNoopLogger())
+	latch.raise(cpTypes.ReasonCodeTamperTrustDowngrade)
+	alarm := &tamperAlarm{
+		latch:  latch,
+		rescan: func() *tamperFault { return nil },
+		logger: logging.NewNoopLogger(),
+	}
+
+	assert.True(t, alarm.localFaultCleared(), "the return value is unchanged: a nil rescan is cleared")
+	alarm.publishReason(nil)
+	code, msg := startupReasonFor(t, tamperReasonComponent)
+	assert.Equal(t, cpTypes.ReasonCodeTamperTrustDowngrade, code)
+	assert.Equal(t, tamperMessages[cpTypes.ReasonCodeTamperTrustDowngrade], msg)
+}
+
+func TestTamperAlarm_RecheckFault_Transitions(t *testing.T) {
+	e := newAlarmEnv(t, trustSourceCompileBaked)
+	latch := openTamperLatch(e.f.dir, logging.NewNoopLogger())
+	latch.raise(cpTypes.ReasonCodeTamperDataDir)
+	var fault atomic.Pointer[tamperFault]
+	alarm := &tamperAlarm{latch: latch, rescan: func() *tamperFault { return fault.Load() }, logger: logging.NewNoopLogger()}
+
+	alarm.publishReason(nil)
+	code, _ := startupReasonFor(t, tamperReasonComponent)
+	assert.Equal(t, cpTypes.ReasonCodeTamperDataDir, code)
+
+	assert.True(t, alarm.recheckFault())
+	alarm.publishReason(nil)
+	code, msg := startupReasonFor(t, tamperReasonComponent)
+	assert.Equal(t, client.ReasonTamperLocked, code)
+	assert.Equal(t, tamperClearedMessage, msg)
+	assert.Equal(t, []string{cpTypes.ReasonCodeTamperDataDir}, latch.codesSnapshot(), "the latch codes are unchanged")
+
+	fault.Store(&tamperFault{code: cpTypes.ReasonCodeTamperCAMismatch})
+	assert.False(t, alarm.recheckFault())
+	alarm.publishReason(nil)
+	code, _ = startupReasonFor(t, tamperReasonComponent)
+	assert.Equal(t, cpTypes.ReasonCodeTamperDataDir, code, "the first code raised is still the primary")
+	assert.Contains(t, latch.codesSnapshot(), cpTypes.ReasonCodeTamperCAMismatch)
+}
+
+// A latch that only records a controller lock keeps its own message.
+func TestTamperAlarm_ControllerLockOnly_KeepsLockedMessage(t *testing.T) {
+	e := newAlarmEnv(t, trustSourceCompileBaked)
+	latch := openTamperLatch(e.f.dir, logging.NewNoopLogger())
+	latch.onController(true)
+	alarm := &tamperAlarm{latch: latch, rescan: func() *tamperFault { return nil }, logger: logging.NewNoopLogger()}
+
+	alarm.recheckFault()
+	alarm.publishReason(nil)
+	code, msg := startupReasonFor(t, tamperReasonComponent)
+	assert.Equal(t, client.ReasonTamperLocked, code)
+	assert.Equal(t, tamperMessages[client.ReasonTamperLocked], msg)
+}
+
+// startupReasonFor returns the code and message the process-wide startup reasons
+// hold for component.
+func startupReasonFor(t *testing.T, component string) (code, msg string) {
+	t.Helper()
+	for _, r := range startupReasons.List() {
+		if r.Component == component {
+			return r.Code, r.Message
+		}
+	}
+	t.Fatalf("no startup reason for component %q", component)
+	return "", ""
+}
