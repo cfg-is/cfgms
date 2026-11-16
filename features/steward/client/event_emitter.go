@@ -170,10 +170,19 @@ func (e *EventEmitter) Lost() int64 {
 // and it fails instead of dropping entries silently: it returns an error when no
 // stream can be opened (no client yet, or the open fails), when a send fails, or
 // when ctx ends first. A nil return means the controller received the entries
-// queued before the call.
+// queued before the call. An emitter that was never started or has been closed
+// returns ErrEmitterNotRunning regardless of ctx, so a caller can tell "emitter
+// stopped" from "my deadline passed".
 func (e *EventEmitter) Flush(ctx context.Context) error {
 	if !e.started.Load() {
 		return ErrEmitterNotRunning
+	}
+	// Checked before the blocking select: with both done and ctx.Done() ready,
+	// select would pick one at random.
+	select {
+	case <-e.done:
+		return ErrEmitterNotRunning
+	default:
 	}
 	req := flushRequest{reply: make(chan error, 1)}
 	select {
