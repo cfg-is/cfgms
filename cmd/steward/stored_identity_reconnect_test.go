@@ -11,16 +11,21 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	quicgo "github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/steward/client"
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
+	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/logging"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
@@ -114,6 +119,49 @@ func unusedUDPAddr(t *testing.T) string {
 	return addr
 }
 
+// fastReconnectTimings shortens the stored-identity connect budget and admission
+// window for the test. An address that cannot be reached fails fast through
+// refusedQUICAddr, so a budget of this size is spent on retries, not on one
+// handshake that has to time out.
+func fastReconnectTimings(t *testing.T) {
+	t.Helper()
+	prevBudget, prevWindow := storedIdentityConnectBudget, storedIdentityAdmissionWindow
+	storedIdentityConnectBudget = 1500 * time.Millisecond
+	storedIdentityAdmissionWindow = time.Second
+	t.Cleanup(func() {
+		storedIdentityConnectBudget, storedIdentityAdmissionWindow = prevBudget, prevWindow
+	})
+}
+
+// refusedQUICAddr returns the address of a real QUIC listener that refuses every
+// handshake at once (it speaks no ALPN protocol the steward offers). A dial to it
+// fails in milliseconds on every platform, where a dial to a UDP port with
+// nothing behind it waits out the 30 s QUIC handshake timeout (the OS gives no
+// reliable "port closed" signal for UDP, notably on Windows).
+func (f *storedIdentityFixture) refusedQUICAddr(t *testing.T) string {
+	t.Helper()
+	serverCert := f.serverCert(t)
+	tlsCert, err := tls.X509KeyPair(serverCert.CertificatePEM, serverCert.PrivateKeyPEM)
+	require.NoError(t, err)
+	ln, err := quicgo.ListenAddr("127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+		NextProtos:   []string{"cfgms-test-refused-alpn"},
+		MinVersion:   tls.VersionTLS13,
+	}, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln.Addr().String()
+}
+
+// setTransportAddress rewrites the stored identity's transport address.
+func (f *storedIdentityFixture) setTransportAddress(t *testing.T, addr string) {
+	t.Helper()
+	id, err := loadIdentity(f.certStoreDir)
+	require.NoError(t, err)
+	id.TransportAddress = addr
+	require.NoError(t, saveIdentity(f.certStoreDir, *id))
+}
+
 // pointAtRefusingController starts a real gRPC control plane, trusted by the
 // fixture's CA, whose approval check refuses every steward — the controller's
 // answer to an unknown, deregistered or revoked steward — and points the stored
@@ -185,4 +233,169 @@ func TestRegisterAndConnect_ControllerRejectsIdentity_FallsBackToRegistration(t 
 	require.Error(t, err, "the test controller refuses registration too")
 	assert.NotErrorIs(t, err, errStoredIdentityUnreachable)
 	assert.Positive(t, hits.Load(), "a rejected stored identity must fall back to registration")
+}
+
+// recordingApproval admits every steward and records the IDs whose control
+// channel reached the server.
+type recordingApproval struct {
+	mu  sync.Mutex
+	ids []string
+}
+
+func (r *recordingApproval) IsApproved(_ context.Context, stewardID string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ids = append(r.ids, stewardID)
+	return true, nil
+}
+
+func (r *recordingApproval) seen() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.ids...)
+}
+
+// startAcceptingController starts a real gRPC control plane, trusted by the
+// fixture's CA, that admits every steward, and returns its transport address
+// and the record of stewards that reached it. It does not touch the stored identity.
+func (f *storedIdentityFixture) startAcceptingController(t *testing.T) (string, *recordingApproval) {
+	t.Helper()
+	serverCert := f.serverCert(t)
+	serverTLS, err := cert.CreateServerTLSConfig(serverCert.CertificatePEM, serverCert.PrivateKeyPEM, []byte(f.caPEM), tls.VersionTLS13)
+	require.NoError(t, err)
+	serverTLS.NextProtos = []string{quictransport.ALPNProtocol}
+
+	approval := &recordingApproval{}
+	server := grpcCP.New(grpcCP.ModeServer, grpcCP.WithApprovalChecker(approval))
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       "127.0.0.1:0",
+		"tls_config": serverTLS,
+		"registry":   registry.NewRegistry(),
+	}))
+	require.NoError(t, server.Start(context.Background()))
+	t.Cleanup(server.ForceStop)
+	return server.ListenAddr(), approval
+}
+
+// releaseReconnected disconnects a client returned by tryReconnectWithStoredIdentity
+// and releases the process-global data plane provider for the next test.
+func releaseReconnected(t *testing.T, tc *client.TransportClient) {
+	t.Helper()
+	t.Cleanup(func() {
+		dctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tc.Disconnect(dctx)
+		_ = dataplaneInterfaces.GetProvider("grpc").Stop(dctx)
+	})
+}
+
+func reconnectStored(t *testing.T, f *storedIdentityFixture) (*client.TransportClient, error) {
+	t.Helper()
+	return tryReconnectWithStoredIdentity(context.Background(), f.certStoreDir, "one-time-token",
+		trustSourceInstallPinned, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
+}
+
+// TestStoredIdentityReconnect_DialsAdvertisedAddress guards Issue #6255: an
+// address persisted through the shared advertise callback is the one the next
+// stored-identity reconnect dials, with the stored steward ID.
+func TestStoredIdentityReconnect_DialsAdvertisedAddress(t *testing.T) {
+	fastReconnectTimings(t)
+	f := newStoredIdentityFixture(t, "placeholder")
+	require.NoError(t, persistAdvertisedTransportAddress(f.certStoreDir, f.refusedQUICAddr(t)))
+	liveAddr, approval := f.startAcceptingController(t)
+
+	require.NoError(t, persistAdvertisedTransportAddress(f.certStoreDir, liveAddr))
+
+	tc, err := reconnectStored(t, f)
+	require.NoError(t, err)
+	require.NotNil(t, tc)
+	releaseReconnected(t, tc)
+
+	assert.Equal(t, f.stewardID, tc.GetStewardID())
+	assert.Contains(t, approval.seen(), f.stewardID, "the connection reached the server at the advertised address")
+}
+
+// TestStoredIdentityReconnect_FallsBackToPreviousAddress guards Issue #6255: an
+// advertised address that cannot be reached never strands the steward — the
+// previous address is tried before the caller falls back to re-admission.
+func TestStoredIdentityReconnect_FallsBackToPreviousAddress(t *testing.T) {
+	fastReconnectTimings(t)
+
+	t.Run("previous address reachable", func(t *testing.T) {
+		f := newStoredIdentityFixture(t, "placeholder")
+		f.setTransportAddress(t, f.refusedQUICAddr(t))
+		liveAddr, approval := f.startAcceptingController(t)
+		id, err := loadIdentity(f.certStoreDir)
+		require.NoError(t, err)
+		id.PreviousTransportAddress = liveAddr
+		require.NoError(t, saveIdentity(f.certStoreDir, *id))
+		before := f.identityBytes(t)
+
+		tc, err := reconnectStored(t, f)
+		require.NoError(t, err)
+		require.NotNil(t, tc)
+		releaseReconnected(t, tc)
+
+		assert.Equal(t, f.stewardID, tc.GetStewardID())
+		assert.Contains(t, approval.seen(), f.stewardID)
+		assert.Equal(t, before, f.identityBytes(t), "the stored pair is left as is")
+	})
+
+	t.Run("both addresses unreachable", func(t *testing.T) {
+		f := newStoredIdentityFixture(t, "placeholder")
+		f.setTransportAddress(t, f.refusedQUICAddr(t))
+		id, err := loadIdentity(f.certStoreDir)
+		require.NoError(t, err)
+		id.PreviousTransportAddress = f.refusedQUICAddr(t)
+		require.NoError(t, saveIdentity(f.certStoreDir, *id))
+		before := f.identityBytes(t)
+
+		tc, err := reconnectStored(t, f)
+		assert.Nil(t, tc)
+		require.ErrorIs(t, err, errStoredIdentityUnreachable)
+		assert.NotErrorIs(t, err, controlplaneInterfaces.ErrIdentityRejected)
+		assert.Equal(t, before, f.identityBytes(t), "the stored identity must be retained")
+	})
+
+	t.Run("rejected identity does not fall back", func(t *testing.T) {
+		f := newStoredIdentityFixture(t, "placeholder")
+		f.pointAtRefusingController(t)
+		liveAddr, approval := f.startAcceptingController(t)
+		id, err := loadIdentity(f.certStoreDir)
+		require.NoError(t, err)
+		id.PreviousTransportAddress = liveAddr
+		require.NoError(t, saveIdentity(f.certStoreDir, *id))
+
+		tc, err := reconnectStored(t, f)
+		assert.Nil(t, tc)
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, errStoredIdentityUnreachable)
+		assert.Empty(t, approval.seen(), "a controller that refused the identity is not bypassed through the previous address")
+	})
+}
+
+// TestStoredIdentityReconnect_NoRegistrationOnFallback: the fallback connects
+// without any registration or re-admission request.
+func TestStoredIdentityReconnect_NoRegistrationOnFallback(t *testing.T) {
+	fastReconnectTimings(t)
+
+	f := newStoredIdentityFixture(t, "placeholder")
+	f.setTransportAddress(t, f.refusedQUICAddr(t))
+	liveAddr, _ := f.startAcceptingController(t)
+	id, err := loadIdentity(f.certStoreDir)
+	require.NoError(t, err)
+	id.PreviousTransportAddress = liveAddr
+	require.NoError(t, saveIdentity(f.certStoreDir, *id))
+	srv, httpsCAPEM, hits := registrationCounter(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tc, err := registerAndConnect(ctx, "one-time-token", srv.URL, trustSourceInstallPinned, httpsCAPEM, nil, false, logging.NewLogger("error"))
+	require.NoError(t, err)
+	require.NotNil(t, tc)
+	releaseReconnected(t, tc)
+
+	assert.Equal(t, f.stewardID, tc.GetStewardID())
+	assert.Zero(t, hits.Load(), "the previous-address fallback must not register or re-admit")
 }

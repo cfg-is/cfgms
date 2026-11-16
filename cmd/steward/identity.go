@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/atomicfile"
@@ -182,6 +183,62 @@ type StewardIdentity struct {
 	// Trust anchor fields (ADR-013 §3, Issue #1517).
 	TrustMode        string `json:"trust_mode,omitempty"`         // "compile-baked", "install-pinned", "tofu"
 	CAPinFingerprint string `json:"ca_pin_fingerprint,omitempty"` // SHA-256 hex of pinned CA cert (install-pinned and TOFU)
+	// PreviousTransportAddress is the address TransportAddress replaced when the
+	// controller advertised a new one (Issue #6255). The stored-identity reconnect
+	// tries it when the advertised address is unreachable. Empty when no address
+	// has been learned; registration and re-admission write identities without it.
+	PreviousTransportAddress string `json:"previous_transport_address,omitempty"`
+}
+
+// identityUpdateMu serialises the read-modify-write persist callbacks below. The
+// controller sends a signing-certificate push and a transport-address
+// advertisement back to back on every connect, and the steward runs the two
+// handlers concurrently; without one lock each could load the file before the
+// other saves and write its stale copy of the other's field back (Issue #6255).
+var identityUpdateMu sync.Mutex
+
+// updateStoredIdentity loads the identity in dir, applies mutate and saves it
+// back, all under identityUpdateMu. mutate reports false when it changed nothing,
+// in which case the file is not rewritten. what names the change in errors.
+func updateStoredIdentity(dir, what string, mutate func(cur *StewardIdentity) bool) error {
+	identityUpdateMu.Lock()
+	defer identityUpdateMu.Unlock()
+	cur, err := loadIdentity(dir)
+	if err != nil {
+		return fmt.Errorf("persist %s: load identity: %w", what, err)
+	}
+	if cur == nil {
+		return fmt.Errorf("persist %s: identity not found", what)
+	}
+	if !mutate(cur) {
+		return nil
+	}
+	return saveIdentity(dir, *cur)
+}
+
+// persistSigningTrust records the steward's signing-certificate set and the
+// overlap expiry in the stored identity.
+func persistSigningTrust(dir string, pems []string, at *time.Time) error {
+	return updateStoredIdentity(dir, "signing cert", func(cur *StewardIdentity) bool {
+		cur.SigningCertPEMs = pems
+		cur.OverlapExpiresAt = at
+		return true
+	})
+}
+
+// persistAdvertisedTransportAddress records a controller-advertised transport
+// address in the stored identity, keeping the address it replaces as
+// PreviousTransportAddress. It writes nothing when addr is already the stored
+// address. The caller validates addr (Issue #6255).
+func persistAdvertisedTransportAddress(dir, addr string) error {
+	return updateStoredIdentity(dir, "transport address", func(cur *StewardIdentity) bool {
+		if cur.TransportAddress == addr {
+			return false
+		}
+		cur.PreviousTransportAddress = cur.TransportAddress
+		cur.TransportAddress = addr
+		return true
+	})
 }
 
 // saveIdentity writes id to dir/steward-identity.json with permissions 0600

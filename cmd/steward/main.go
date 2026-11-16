@@ -2211,16 +2211,10 @@ func connectWithApprovedRegistration(
 		),
 		Logger: logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
-			cur, loadErr := loadIdentity(certStoreDir)
-			if loadErr != nil {
-				return fmt.Errorf("persist signing cert: load identity: %w", loadErr)
-			}
-			if cur == nil {
-				return fmt.Errorf("persist signing cert: identity not found")
-			}
-			cur.SigningCertPEMs = pems
-			cur.OverlapExpiresAt = at
-			return saveIdentity(certStoreDir, *cur)
+			return persistSigningTrust(certStoreDir, pems, at)
+		},
+		TransportAddressPersistFunc: func(addr string) error {
+			return persistAdvertisedTransportAddress(certStoreDir, addr)
 		},
 	})
 	if err != nil {
@@ -2262,7 +2256,7 @@ func connectWithApprovedRegistration(
 // A refusal (interfaces.ErrIdentityRejected: unknown, deregistered or revoked
 // steward) sends the steward straight to re-admission with its device key; see
 // registerAndConnect and docs/architecture/steward-operating-model.md.
-const storedIdentityAdmissionWindow = 10 * time.Second
+var storedIdentityAdmissionWindow = 10 * time.Second
 
 // storedIdentityConnectBudget bounds how long one stored-identity reconnect keeps
 // dialing an unreachable controller before the steward requests re-admission
@@ -2477,83 +2471,25 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		}
 	}
 
-	var commandReplayWindow time.Duration
-	var commandMaxParamsBytes int
-	var upgradeAllowDowngradeReconnect bool
-	var dnaRefreshIntervalReconnect time.Duration
-	commandReplayWindow = runtimeCfg.Steward.SignedCommandReplayWindow
-	commandMaxParamsBytes = runtimeCfg.Steward.SignedCommandMaxParamsBytes
-	upgradeAllowDowngradeReconnect = runtimeCfg.Steward.Upgrade.AllowDowngrade
-	dnaRefreshIntervalReconnect = stewardconfig.GetDNARefreshInterval(runtimeCfg)
-	observeSweepNReconnect := stewardconfig.GetObserveSweepN(runtimeCfg)
-
 	// Build the composite DNA collector early so we can wire the executor into it
 	// after InitializeConfigExecutor creates it (Issue #2435).
 	dnaAdapterReconnect := newDNACollectorAdapter(logger, nil)
 
-	transportClient, err := client.NewTransportClient(&client.TransportConfig{
-		ControllerURL:                   id.TransportAddress,
-		ControllerHTTPSBaseURL:          resolveControllerHTTPSBaseURL(logger),
-		RegistrationToken:               token,
-		CACertPEM:                       id.CACertPEM,
-		ServerCertPEM:                   id.ServerCertPEM,
-		SigningCertPEM:                  id.SigningCertPEM,  // backward compat seed; seeded into SigningCertPEMs in NewTransportClient when SigningCertPEMs is empty
-		SigningCertPEMs:                 id.SigningCertPEMs, // Issue #1816: mutable rotation set
-		CertManager:                     certMgr,
-		SecretStore:                     secretStore,
-		SignedCommandReplayWindow:       commandReplayWindow,
-		SignedCommandMaxParamsBytes:     commandMaxParamsBytes,
-		ScriptSigning:                   runtimeCfg.Steward.ScriptSigning,
-		ModuleTrustMode:                 runtimeCfg.Steward.ModuleTrust.Mode,
-		RemoteTerminalDisabled:          !runtimeCfg.Steward.RemoteTerminal.IsEnabled(),
-		ModuleTrustAdditionalPublishers: runtimeCfg.Steward.ModuleTrust.AdditionalPublishers,
-		PublicBeta:                      publicBeta,
-		CertStoreDir:                    certStoreDir,
-		HostAttributes:                  hostAttributes,
-		AdmissionWindow:                 storedIdentityAdmissionWindow,
-		InitialConnectTimeout:           storedIdentityConnectBudget,
-		UpgradeAllowDowngrade:           upgradeAllowDowngradeReconnect,
-		UpgradePublisherTrustStore:      buildTestPublisherTrustStore(logger),
-		DNARefreshInterval:              dnaRefreshIntervalReconnect,
-		DNACollector:                    dnaAdapterReconnect,
-		ObserveSweepN:                   observeSweepNReconnect,
-		ObserveModuleLoader: newObserveModuleLoader(
-			id.StewardID,
-			secretStore,
-			runtimeCfg.Steward.ModuleTrust.Mode,
-			runtimeCfg.Steward.ModuleTrust.AdditionalPublishers,
-			logger,
-		),
-		Logger: logger,
-		IdentityPersistFunc: func(pems []string, at *time.Time) error {
-			cur, loadErr := loadIdentity(certStoreDir)
-			if loadErr != nil {
-				return fmt.Errorf("persist signing cert: load identity: %w", loadErr)
-			}
-			if cur == nil {
-				return fmt.Errorf("persist signing cert: identity not found")
-			}
-			cur.SigningCertPEMs = pems
-			cur.OverlapExpiresAt = at
-			return saveIdentity(certStoreDir, *cur)
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create transport client: %w", err)
+	dials := storedIdentityDialer{
+		token:        token,
+		publicBeta:   publicBeta,
+		certStoreDir: certStoreDir,
+		certMgr:      certMgr,
+		secretStore:  secretStore,
+		runtimeCfg:   runtimeCfg,
+		dnaAdapter:   dnaAdapterReconnect,
+		logger:       logger,
 	}
-
-	transportClient.SetStewardID(id.StewardID)
-	transportClient.SetTenantID(id.TenantID)
-
-	if err := transportClient.Connect(ctx); err != nil {
-		// Stop the control plane so a provider left reconnecting in the background
-		// (a refusal on the first receive starts its reconnect loop) does not keep
-		// dialing with an identity this attempt is abandoning.
-		_ = transportClient.Disconnect(context.Background())
-		if errors.Is(err, controlplaneInterfaces.ErrIdentityRejected) {
-			return nil, fmt.Errorf("failed to connect to controller with stored identity: %w", err)
-		}
-		return nil, fmt.Errorf("%w: %v", errStoredIdentityUnreachable, err)
+	transportClient, err := connectStoredIdentityWithFallback(id, func(addr string) (*client.TransportClient, error) {
+		return dials.connect(ctx, id, addr)
+	}, logger)
+	if err != nil {
+		return nil, err
 	}
 
 	logger.Info("Reconnected to controller via stored identity",
@@ -2582,6 +2518,117 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	dnaAdapterReconnect.setModuleDNASource(transportClient)
 
 	return transportClient, nil
+}
+
+// storedIdentityDialer carries the process-level dependencies a stored-identity
+// reconnect needs to build a transport client for any controller address.
+type storedIdentityDialer struct {
+	token        string
+	publicBeta   bool
+	certStoreDir string
+	certMgr      *cert.Manager
+	secretStore  secretsif.SecretStore
+	runtimeCfg   stewardconfig.StewardConfig
+	dnaAdapter   *dnaCollectorAdapter
+	logger       logging.Logger
+}
+
+// connect builds a transport client for addr with the stored identity and
+// connects it. A connect failure other than a rejected identity wraps
+// errStoredIdentityUnreachable.
+func (d storedIdentityDialer) connect(ctx context.Context, id *StewardIdentity, addr string) (*client.TransportClient, error) {
+	cfg := d.baseConfig(id, addr)
+	d.applyRuntimeConfig(cfg, id)
+	transportClient, err := client.NewTransportClient(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create transport client: %w", err)
+	}
+
+	transportClient.SetStewardID(id.StewardID)
+	transportClient.SetTenantID(id.TenantID)
+
+	if err := transportClient.Connect(ctx); err != nil {
+		// Stop the control plane so a provider left reconnecting in the background
+		// (a refusal on the first receive starts its reconnect loop) does not keep
+		// dialing with an identity this attempt is abandoning.
+		_ = transportClient.Disconnect(context.Background())
+		if errors.Is(err, controlplaneInterfaces.ErrIdentityRejected) {
+			return nil, fmt.Errorf("failed to connect to controller with stored identity: %w", err)
+		}
+		return nil, fmt.Errorf("%w: %v", errStoredIdentityUnreachable, err)
+	}
+
+	return transportClient, nil
+}
+
+// baseConfig returns the transport config for addr built from the stored identity
+// and the process-level dependencies.
+func (d storedIdentityDialer) baseConfig(id *StewardIdentity, addr string) *client.TransportConfig {
+	return &client.TransportConfig{
+		ControllerURL:          addr,
+		ControllerHTTPSBaseURL: resolveControllerHTTPSBaseURL(d.logger),
+		RegistrationToken:      d.token,
+		CACertPEM:              id.CACertPEM,
+		ServerCertPEM:          id.ServerCertPEM,
+		SigningCertPEM:         id.SigningCertPEM,  // backward compat seed; seeded into SigningCertPEMs in NewTransportClient when SigningCertPEMs is empty
+		SigningCertPEMs:        id.SigningCertPEMs, // Issue #1816: mutable rotation set
+		CertManager:            d.certMgr,
+		SecretStore:            d.secretStore,
+		PublicBeta:             d.publicBeta,
+		CertStoreDir:           d.certStoreDir,
+		HostAttributes:         hostAttributes,
+		AdmissionWindow:        storedIdentityAdmissionWindow,
+		InitialConnectTimeout:  storedIdentityConnectBudget,
+		DNACollector:           d.dnaAdapter,
+		Logger:                 d.logger,
+		IdentityPersistFunc: func(pems []string, at *time.Time) error {
+			return persistSigningTrust(d.certStoreDir, pems, at)
+		},
+		TransportAddressPersistFunc: func(addr string) error {
+			return persistAdvertisedTransportAddress(d.certStoreDir, addr)
+		},
+	}
+}
+
+// applyRuntimeConfig sets the fields that come from the runtime steward config.
+func (d storedIdentityDialer) applyRuntimeConfig(cfg *client.TransportConfig, id *StewardIdentity) {
+	st := d.runtimeCfg.Steward
+	cfg.SignedCommandReplayWindow = st.SignedCommandReplayWindow
+	cfg.SignedCommandMaxParamsBytes = st.SignedCommandMaxParamsBytes
+	cfg.ScriptSigning = st.ScriptSigning
+	cfg.ModuleTrustMode = st.ModuleTrust.Mode
+	cfg.RemoteTerminalDisabled = !st.RemoteTerminal.IsEnabled()
+	cfg.ModuleTrustAdditionalPublishers = st.ModuleTrust.AdditionalPublishers
+	cfg.UpgradeAllowDowngrade = st.Upgrade.AllowDowngrade
+	cfg.UpgradePublisherTrustStore = buildTestPublisherTrustStore(d.logger)
+	cfg.DNARefreshInterval = stewardconfig.GetDNARefreshInterval(d.runtimeCfg)
+	cfg.ObserveSweepN = stewardconfig.GetObserveSweepN(d.runtimeCfg)
+	cfg.ObserveModuleLoader = newObserveModuleLoader(id.StewardID, d.secretStore, st.ModuleTrust.Mode, st.ModuleTrust.AdditionalPublishers, d.logger)
+}
+
+// connectStoredIdentityWithFallback connects to the stored transport address. When
+// that attempt fails as unreachable and the identity keeps a different previous
+// address, it tries the previous one once (same budget) before returning, so an
+// advertised address that is wrong never strands the steward (Issue #6255). When
+// both fail the original unreachable error is returned and the caller proceeds to
+// re-admission. On a fallback success id.TransportAddress names the address in use.
+func connectStoredIdentityWithFallback(id *StewardIdentity, connect func(addr string) (*client.TransportClient, error), logger logging.Logger) (*client.TransportClient, error) {
+	transportClient, err := connect(id.TransportAddress)
+	if !errors.Is(err, errStoredIdentityUnreachable) || id.PreviousTransportAddress == "" || id.PreviousTransportAddress == id.TransportAddress {
+		return transportClient, err
+	}
+	logger.Warn("Stored transport address unreachable; trying the previous address",
+		"transport_address", logging.SanitizeLogValue(id.TransportAddress),
+		"previous_transport_address", logging.SanitizeLogValue(id.PreviousTransportAddress))
+	prevClient, prevErr := connect(id.PreviousTransportAddress)
+	if prevErr != nil {
+		logger.Warn("Previous transport address unreachable too",
+			"previous_transport_address", logging.SanitizeLogValue(id.PreviousTransportAddress),
+			"error", logging.SanitizeLogValue(prevErr.Error()))
+		return nil, err
+	}
+	id.TransportAddress = id.PreviousTransportAddress
+	return prevClient, nil
 }
 
 // buildTestPublisherTrustStore reads CFGMS_TEST_STEWARD_PUBLISHER_KEY from the

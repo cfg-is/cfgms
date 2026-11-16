@@ -1157,6 +1157,15 @@ node returns. To keep stewards attached through a node outage, place an LB/VIP
 in front of the cluster and point `--controller-url` at it; see runbook §6 and
 the [controller cluster walkthrough](../deployment/controller-cluster/walkthrough.md).
 
+**Controller URL in a cluster.** In a cluster, the steward's controller URL
+(`--controller-url` or the compiled `ControllerURL`) must name a shared address
+(VIP or load balancer), not a single node. The controller advertises its transport
+address after the steward connects and the steward reconnects to the learned
+address from then on, but a steward whose stored transport address (and previous
+address) is unreachable recovers only through re-admission via the controller URL
+(`registerAndConnect` → `readmitWithDeviceKey`), so that URL must still answer when
+a node is down. See [Reconnecting with a Stored Identity](#reconnecting-with-a-stored-identity).
+
 ### Registration Credentials
 
 Two credential flavors, both flow through the same registration API:
@@ -1219,6 +1228,8 @@ Tests run the same CNG code against the `Microsoft Software Key Storage Provider
 On every subsequent startup the steward first reconnects with its stored identity — the identity record (`steward-identity.json`) and the client certificate in its `cert.Manager` store — skipping HTTP registration (#1719). When that fails, it walks this sequence each connect cycle:
 
 1. **Stored identity.** Dial the controller's control plane with the stored identity for up to a **5-minute connect budget** (the budget is checked between dial attempts, so one cycle can run up to about 20 s past it). The controller refusing the control channel with `PermissionDenied` or `Unauthenticated` — which it does only after authenticating the TLS peer and looking the steward up (unknown, deregistered or revoked steward) — ends this step at once. A refusal that carries the `IDENTITY_IN_USE` reason (`ErrIdentityInUse`) does not go to step 2; see [Refused as a copy](#refused-as-a-copy-identity_in_use).
+
+   The address dialed is the stored `transport_address`. The controller advertises its configured transport address with an `advertise_transport_address` command on every connect; the steward validates it as `host:port` (syntax only — it is not resolved or dialed) and, when it differs from the stored one, rewrites the identity record atomically with the new `transport_address` and the replaced one as `previous_transport_address`. The learned address takes effect the next time the steward reconnects with its stored identity; the running connection keeps the address it was built with. The stored address is refreshed on every controller connect, so a connect through the previous address does not revert the pair. If the connect to the stored address fails as unreachable, the steward tries `previous_transport_address` once, with its own 5-minute budget, before going to step 2 — a wrong advertised address (for example a name the controller's transport certificate does not cover) therefore never strands the steward. A refusal (`ErrIdentityRejected`) is not retried on the previous address. Worst case with a previous address on record: both addresses unreachable for a full budget each, about 10 minutes (plus the same up-to-20 s overrun per address) before step 2. Identities written by registration or re-admission start with no previous address.
 2. **Re-admission with the device key.** If the stored identity was refused, is locally unusable (e.g. an expired client certificate), or stayed unreachable for the whole budget, the steward asks to be re-admitted through the registration-refresh handshake (ADR-011), proving its identity with the device key. It ties back to the same steward record, so it never creates a duplicate. Tenant policy decides:
    - **Issued:** a new certificate; the steward reconnects with it.
    - **Queued for approval:** the steward keeps the pending ID and the private key of the CSR it submitted (`steward-refresh-pending.json`, 0600), and each later cycle collects the outcome through `POST /api/v1/stewards/{device_id}/refresh/claim` instead of filing a new request. Approval delivers the certificate signed from that CSR.
