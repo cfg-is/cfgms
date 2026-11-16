@@ -334,45 +334,15 @@ break-glass can never open.
 
 ### Email delivery
 
-Controller-wide, one SMTP configuration, under `notifications.email`. Only the non-secret settings are in the
-config file:
+Break-glass email is set up and troubleshot in the [email delivery guide](email-delivery.md); the platform
+sender is the controller-wide `notifications.email` configuration described there. What stays specific to
+break-glass:
 
-```yaml
-notifications:
-  email:
-    host: smtp.acme-corp.example
-    port: 587
-    from: cfgms@acme-corp.example
-    username: mailer
-    tls_mode: starttls             # or implicit_tls; there is no plaintext mode
-    password_secret_key: notifications.email.password
-```
-
-Setting `host` requires `from` and `password_secret_key`. The settings are listed in the
-[config schema](../reference/config-schema.md#notifications). The SMTP password is **write-only** through the
-credential endpoint. All three endpoints need `notification:configure`, a root-scoped principal and strong
-assurance (API keys are refused):
-
-```bash
-# store the password; the body is limited to 4 KiB and the password is never returned
-curl -s -X PUT https://<controller>/api/v1/notifications/email/credential \
-  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
-  -d '{"password": "<smtp-password>"}'
-
-# read the non-secret settings: check "configured" and "credential_present" are both true
-curl -s https://<controller>/api/v1/notifications/email -H "Authorization: Bearer <token>"
-
-# send a fixed test message to the configured "from" address (the body must be empty)
-curl -s -X POST https://<controller>/api/v1/notifications/email/test -H "Authorization: Bearer <token>"
-```
-
-`409 EMAIL_NOT_CONFIGURED` means the settings or the credential are missing. A failed test returns
-`delivered: false` with a sanitized `failure_reason`. See [REST API: Email Delivery](../api/rest-api.md#email-delivery).
-
-**Break-glass notices always use the controller-wide sender.** The platform owes this notice to the MSP, so it
-never goes through an MSP's own sender, even when that MSP has one stored: a broken or misconfigured MSP sender
+**Break-glass notices always use the platform sender.** The platform owes this notice to the MSP, so it never
+goes through an MSP's own sender, even when that MSP has one stored: a broken or misconfigured MSP sender
 cannot stop it. The `tenant.crossing_break_glass_notified` audit entry records `sender`: `platform`, or `none`
-when the controller-wide sender is not configured.
+when the platform sender is not configured. See
+[how to read `sender`](email-delivery.md#6-read-sender-on-an-audit-entry).
 
 **An unconfigured email channel does not block break-glass.** The elevation still starts, the console banner
 and the audit entries still fire, and the email outcome is recorded as `not_configured`. Configure email
@@ -414,5 +384,5 @@ crossing while it lasted.
 | `403 NOT_CROSSING_OWNER` on end | You are ending another operator's break-glass. Only its invoker, or an MSP administrator, can. |
 | `403 ROOT_SCOPED_CANNOT_END_GRANT` | Root cannot revoke a grant. Only the MSP can. |
 | `INVALID_REASON_CATEGORY`, `REASON_CATEGORY_REQUIRED` or `JUSTIFICATION_REQUIRED` | The reason must be one of the four categories, and the justification 10-1000 characters. |
-| No email received | Look at `outcome` and `sender` on the `tenant.crossing_break_glass_notified` entry (`sender` is always `platform`, or `none` when the controller-wide sender is missing). `no_contacts`: the MSP has no administrator contacts. `not_configured`: the controller-wide email settings or credential are missing; check `GET /api/v1/notifications/email`. `failed` or `partial`: run the test-send endpoint and read `failure_reason`. The break-glass was not blocked in any case. |
+| No email received | Look at `outcome` and `sender` on the `tenant.crossing_break_glass_notified` entry (`sender` is always `platform`, or `none` when the platform sender is missing). `no_contacts`: the MSP has no administrator contacts. `not_configured`: the platform email settings or credential are missing; see the [email delivery guide](email-delivery.md#3-the-platform-sender). `failed` or `partial`: run the platform test send and read `failure_reason`. The break-glass was not blocked in any case. |
 | The Support access page is empty | Nothing is active. Expired and ended records drop out of the active view; use the filter or `--json` for history. |

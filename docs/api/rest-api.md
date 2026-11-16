@@ -2135,7 +2135,7 @@ An audit event is recorded with the actor, crossing ID and kind (High severity f
 
 ### Email Delivery
 
-Controller-wide email delivery (one SMTP configuration for the whole controller). The non-secret settings
+Controller-wide email delivery: the **platform sender** (one SMTP configuration for the whole controller). MSPs can also have their own sender, see [MSP Email Sender](#msp-email-sender); the [email delivery guide](../operations/email-delivery.md) says which mail uses which. The non-secret settings
 live in the controller config under `notifications.email` (see
 [config schema](../reference/config-schema.md#notifications)); the SMTP password is written through the
 credential endpoint and held in the controller's secret store under `password_secret_key`.
@@ -2171,7 +2171,7 @@ On failure `delivered` is `false` and `failure_reason` carries a sanitized reaso
 
 ### MSP Email Sender
 
-An MSP tenant can have its own email sender. Operational mail for the MSP and its client tenants is sent through it when it is complete; the platform sender (above) carries everything else, including security notices. The settings are held per MSP tenant and the password in the secret store under the same tenant.
+An MSP tenant can have its own email sender (operator guide: [email delivery](../operations/email-delivery.md)). Operational mail for the MSP and its client tenants is sent through it when it is complete; the platform sender (above) carries everything else, including security notices. The settings are held per MSP tenant and the password in the secret store under the same tenant.
 
 The endpoints take the MSP tenant id in `{id}` (a direct child of the deployment root), require the `notification:configure-msp` permission at `AssuranceStrong` (API keys are refused), and apply the ordinary tenant-scope decision. Viewing the sender needs the same assurance as changing it. Administrators of an MSP hold the permission implicitly.
 
@@ -3204,6 +3204,18 @@ Approval routes act on the caller's own tenant's library. An approval is bound t
 | `PUT /api/v1/rollout-settings/unattended` | `rollout-automation:set` | strong, presence tap, no API key |
 
 One setting for the whole cell, off by default. `GET` returns `{ "enabled": false, "changed_by": "", "changed_at": null }` until a value is stored. `PUT` takes `{ "enabled": true }` (`400` `INVALID_REQUEST` for a missing or non-boolean value) and returns the stored setting. Setting the value the cell already has goes through the same permission, tap and audit. Audit event `unattended_rollouts_changed` (high; principal, previous and new value), recorded before the change; `503` `AUDIT_UNAVAILABLE` leaves the setting unchanged. The setting only records the choice; it does not itself start or stop a rollout.
+
+#### Start a rollout
+
+`POST /api/v1/rollout` with `{ "target_version": "1.2.3", "tenant_id": "acme-corp" }` starts a ring-by-ring rollout and returns `202` with `{ "rollout_id": "...", "status": "in_progress" }`. A steward belongs to a ring through its `deployment_ring` DNA attribute. The start is refused, and no rollout record is created, in these cases:
+
+| Status | Code | Meaning |
+|---|---|---|
+| `409` | `NO_RING_MEMBERS` | No steward in the tenant scope is assigned to any deployment ring. Nothing would be rolled out, so the controller does not report a rollout it cannot deliver. |
+| `500` | `RING_QUERY_ERROR` | The fleet query that counts ring members failed. |
+| `500` | `NO_RINGS` | No deployment rings are configured. |
+
+A rollout that starts with members and then finds no steward in any ring by its final ring ends `halted` with an error, not `completed`. It is audited as `rollout_auto_halted` with `halt_reason_class` `no_ring_members`, and no `rollout_completed` event or marker is written. A single empty ring among rings that have members still passes its health gate.
 
 #### Workflow publication
 

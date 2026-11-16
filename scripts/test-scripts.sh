@@ -2421,7 +2421,6 @@ STUB
     #    replacement awk program, whose system() runs arbitrary commands.
     local pair shard_var shards_var target
     for pair in "CFGMS_MACOS_REST_SHARD CFGMS_MACOS_REST_SHARDS test-go-group-macos-rest"; do
-        # shellcheck disable=SC2086 # deliberate word split of the fixture triple
         set -- $pair
         shard_var="$1"; shards_var="$2"; target="$3"
 
@@ -2512,7 +2511,7 @@ STUB
 # Acceptance rule for a skipped macOS leg at the PR-side Build Gate (Issue
 # #5974). Table-driven over scripts/macos-gate-rule.sh, the script
 # build-gate-pr-stub calls — plus a check that the job's run: block calls it for
-# all six macOS legs, so removing the call (or the script) fails here.
+# all seven macOS legs, so removing the call (or the script) fails here.
 test_macos_gate_rule() {
     log_test "Testing macos-gate-rule.sh: skipped macOS legs are accepted only when changes succeeded and macos is exactly false..."
 
@@ -2554,21 +2553,21 @@ test_macos_gate_rule() {
         return
     fi
     local leg_var
-    for leg_var in MACOS_PROVIDERS_RESULT MACOS_STEWARD_RESULT MACOS_CMD_STEWARD_1_RESULT MACOS_CMD_STEWARD_2_RESULT MACOS_REST_1_RESULT MACOS_REST_2_RESULT; do
+    for leg_var in MACOS_PROVIDERS_RESULT MACOS_STEWARD_RESULT MACOS_CMD_STEWARD_1_RESULT MACOS_CMD_STEWARD_2_RESULT MACOS_CMD_STEWARD_3_RESULT MACOS_REST_1_RESULT MACOS_REST_2_RESULT; do
         if ! grep -qF "\"\$${leg_var}\"" <<< "$run_block"; then
             log_fail "build-gate-pr-stub does not check ${leg_var}"
             return
         fi
     done
-    # The six legs sit in their own loop whose body calls the rule script;
+    # The seven legs sit in their own loop whose body calls the rule script;
     # none of them may also sit in the generic loop that accepts a skipped
     # result on any docs-only PR, or the rule would be bypassed.
-    local macos_loop_re='for result in "\$MACOS_PROVIDERS_RESULT" "\$MACOS_STEWARD_RESULT" "\$MACOS_CMD_STEWARD_1_RESULT" "\$MACOS_CMD_STEWARD_2_RESULT" "\$MACOS_REST_1_RESULT" "\$MACOS_REST_2_RESULT"; do'
+    local macos_loop_re='for result in "\$MACOS_PROVIDERS_RESULT" "\$MACOS_STEWARD_RESULT" "\$MACOS_CMD_STEWARD_1_RESULT" "\$MACOS_CMD_STEWARD_2_RESULT" "\$MACOS_CMD_STEWARD_3_RESULT" "\$MACOS_REST_1_RESULT" "\$MACOS_REST_2_RESULT"; do'
     if ! grep -A2 -E "$macos_loop_re" <<< "$run_block" | grep -qE 'macos-gate-rule\.sh "\$CHANGES_RESULT" "\$MACOS_CHANGES" "\$result"'; then
-        log_fail "the six macOS legs are not each passed to macos-gate-rule.sh (changes result, macos output, leg result) in one loop"
+        log_fail "the seven macOS legs are not each passed to macos-gate-rule.sh (changes result, macos output, leg result) in one loop"
         return
     fi
-    if grep -E '^[[:space:]]*for result in ' <<< "$run_block" | grep -vE "$macos_loop_re" | grep -qE 'MACOS_(PROVIDERS|STEWARD|CMD_STEWARD_1|CMD_STEWARD_2|REST_1|REST_2)_RESULT'; then
+    if grep -E '^[[:space:]]*for result in ' <<< "$run_block" | grep -vE "$macos_loop_re" | grep -qE 'MACOS_(PROVIDERS|STEWARD|CMD_STEWARD_1|CMD_STEWARD_2|CMD_STEWARD_3|REST_1|REST_2)_RESULT'; then
         log_fail "a macOS leg is also checked by another loop in build-gate-pr-stub"
         return
     fi
@@ -2577,17 +2576,48 @@ test_macos_gate_rule() {
         return
     fi
 
-    # The six legs themselves are gated on the macos output; the Windows and
+    # Each of the six cmd/steward shard jobs (Issue #6296) is listed in the
+    # Build Gate needs, has its result passed through env: and has a summary
+    # row; the loops are asserted above and below. Without the needs entry the
+    # gate would not wait for the job, without the env entry its result would
+    # read as empty.
+    local shard_os shard_n shard_job shard_var
+    for shard_os in windows macos; do
+        for shard_n in 1 2 3; do
+            shard_job="${shard_os}-cmd-steward-${shard_n}"
+            shard_var="$(tr '[:lower:]' '[:upper:]' <<< "$shard_os")_CMD_STEWARD_${shard_n}_RESULT"
+            if ! grep -qxF "      - ${shard_job}" <<< "$run_block"; then
+                log_fail "build-gate-pr-stub needs does not list ${shard_job}"
+                return
+            fi
+            if ! grep -qF "${shard_var}: \${{ needs.${shard_job}.result }}" <<< "$run_block"; then
+                log_fail "build-gate-pr-stub env does not pass needs.${shard_job}.result as ${shard_var}"
+                return
+            fi
+            if ! grep -qE "echo \"\| .*cmd/steward shard ${shard_n}/3 \| \\\$${shard_var} \|\"" <<< "$run_block"; then
+                log_fail "build-gate-pr-stub summary has no row for ${shard_var} (shard ${shard_n}/3)"
+                return
+            fi
+        done
+    done
+    for shard_n in 1 2 3; do
+        if ! grep -E '^[[:space:]]*for result in ' <<< "$run_block" | grep -qF "\"\$WINDOWS_CMD_STEWARD_${shard_n}_RESULT\""; then
+            log_fail "WINDOWS_CMD_STEWARD_${shard_n}_RESULT is not in the Windows result loop of build-gate-pr-stub"
+            return
+        fi
+    done
+
+    # The seven legs themselves are gated on the macos output; the Windows and
     # e2e legs still on code.
     local leg
-    for leg in macos-providers macos-steward macos-cmd-steward-1 macos-cmd-steward-2 macos-rest-1 macos-rest-2; do
+    for leg in macos-providers macos-steward macos-cmd-steward-1 macos-cmd-steward-2 macos-cmd-steward-3 macos-rest-1 macos-rest-2; do
         if ! awk -v job="  ${leg}:" '$0 == job { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on && /^    if:/ { print }' "$wf" \
             | grep -qF "needs.changes.outputs.macos == 'true'"; then
             log_fail "$leg is not gated on needs.changes.outputs.macos == 'true'"
             return
         fi
     done
-    for leg in windows-api windows-controller windows-steward windows-cmd windows-cmd-steward-1 windows-cmd-steward-2 windows-rest e2e; do
+    for leg in windows-api windows-controller windows-steward windows-cmd windows-cmd-steward-1 windows-cmd-steward-2 windows-cmd-steward-3 windows-rest e2e; do
         if ! awk -v job="  ${leg}:" '$0 == job { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on && /^    if:/ { print }' "$wf" \
             | grep -qF "needs.changes.outputs.code == 'true'"; then
             log_fail "$leg is no longer gated on needs.changes.outputs.code == 'true'"
@@ -2595,7 +2625,7 @@ test_macos_gate_rule() {
         fi
     done
 
-    log_pass "macos-gate-rule.sh: 11-row table holds; build-gate-pr-stub calls it for all six macOS legs and the legs are gated on the macos output"
+    log_pass "macos-gate-rule.sh: 11-row table holds; build-gate-pr-stub calls it for all seven macOS legs and the legs are gated on the macos output"
 }
 
 # The macOS legs are skipped on a PR outside the macOS package closure, so the
@@ -2648,7 +2678,7 @@ test_build_gate_requires_macos_test_compile() {
 }
 
 # scripts/macos-pr-filter.sh against the real repository (Issue #5974): the
-# six macOS legs may be skipped only when no changed file is in the closure.
+# seven macOS legs may be skipped only when no changed file is in the closure.
 test_macos_pr_filter() {
     log_test "Testing macos-pr-filter.sh against the real package closure..."
 
@@ -2874,6 +2904,44 @@ test_agent_image_filter() {
 # test files in the GOOS=darwin dependency closure of the three macOS-shipped
 # binaries — nothing outside it (no controller-only package), nothing in it
 # left out. GOOS=darwin is pinned on both sides so this holds on a Linux host.
+# cmd_steward_shard_probes <GOOS>: prints the test names the cmd/steward name
+# shards are checked against, one per line, besides the generic Test+3-character
+# probes (Issue #6296). The generic probes look at most three characters past
+# "Test", which cannot tell a long prefix such as Tamper from a near miss. So:
+#   (a) every real top-level Test* function of cmd/steward on that platform,
+#       from the TestGoFiles and XTestGoFiles go list reports for GOOS (build
+#       constraints and windows/!windows file pairs resolve per platform;
+#       integration-tagged files are excluded, as in the shard runs), found
+#       with go list rather than go test -list, which would run a cross-built
+#       binary;
+#   (b) near-miss probes for each prefix the shard patterns name: every
+#       truncation of the prefix, bare and with an X appended, and the full
+#       prefix with X appended. TestRegisterAndConnect_ is followed by a
+#       character class in the patterns, so its two sides get probes too.
+# When a shard pattern names a new prefix, add it to prefixes below.
+# Exits non-zero, printing nothing, when go list or the extraction yields no
+# names, so an empty real-name set cannot pass as a partition.
+cmd_steward_shard_probes() {
+    local goos=$1 files names
+    files=$(GOOS="$goos" go list -f '{{$d := .Dir}}{{range .TestGoFiles}}{{$d}}/{{.}}{{"\n"}}{{end}}{{range .XTestGoFiles}}{{$d}}/{{.}}{{"\n"}}{{end}}' ./cmd/steward) || return 1
+    names=$(echo "$files" | grep . | xargs grep -hE '^func Test[A-Za-z0-9_]*\(' | sed -E 's/^func (Test[A-Za-z0-9_]*)\(.*/\1/') || return 1
+    if [[ -z "$names" ]]; then
+        return 1
+    fi
+    echo "$names"
+    awk 'BEGIN {
+        n = split("Tamper Identity RegisterAndConnect_ RegisterAndConnect_U RegisterAndConnect_Unreachable", prefixes, " ")
+        for (p = 1; p <= n; p++) {
+            for (i = 0; i <= length(prefixes[p]); i++) {
+                print "Test" substr(prefixes[p], 1, i)
+                print "Test" substr(prefixes[p], 1, i) "X"
+            }
+        }
+        print "TestRegisterAndConnect_A"; print "TestRegisterAndConnect_u"; print "TestRegisterAndConnect_Z"
+        print "TestRegisterAndConnect"; print "TestRegister"; print "TestRegisterAndConnectX"
+    }'
+}
+
 test_macos_groups_cover_exactly_shipped_packages() {
     log_test "Testing macOS groups: union equals the GOOS=darwin shipped-package set exactly..."
 
@@ -3006,6 +3074,12 @@ test_macos_groups_cover_exactly_shipped_packages() {
         }
         print "TestRegisterAndConnect_X"; print "TestRegTokenX"; print "TestRunSteward_X"; print "TestRepair_X"
     }')
+    local real_names
+    if ! real_names=$(cmd_steward_shard_probes darwin); then
+        log_fail "could not list the cmd/steward top-level tests for GOOS=darwin (go list or the func Test extraction produced nothing)"
+        return
+    fi
+    probes=$(printf '%s\n%s\n' "$probes" "$real_names" | LC_ALL=C sort -u)
     probe_count=$(printf '%s\n' "$probes" | LC_ALL=C sort -u | wc -l | tr -d ' ')
     matched=$(
         for pattern in "${shard_patterns[@]}"; do
@@ -3137,6 +3211,12 @@ test_windows_steward_groups_cover_exactly_steward_and_cmd() {
             }
             print "TestRegisterAndConnect_X"; print "TestRunSteward_X"; print "TestRepair_X"
         }')
+        local real_names
+        if ! real_names=$(cmd_steward_shard_probes windows); then
+            log_fail "could not list the cmd/steward top-level tests for GOOS=windows (go list or the func Test extraction produced nothing)"
+            return
+        fi
+        probes=$(printf '%s\n%s\n' "$probes" "$real_names" | LC_ALL=C sort -u)
         probe_count=$(printf '%s\n' "$probes" | LC_ALL=C sort -u | wc -l | tr -d ' ')
         matched=$(
             for pattern in "${shard_patterns[@]}"; do

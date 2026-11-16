@@ -217,6 +217,53 @@ func setupRolloutServer(t *testing.T, tenantID string, stewards []fleet.StewardD
 	return server, rolloutStore, upgradeStore
 }
 
+// ringMember returns one steward of the tenant in the first ring ("pre-release") of
+// setupRolloutServer's ring set, so a rollout started for that tenant has a member.
+func ringMember(tenantID string) []fleet.StewardData {
+	return []fleet.StewardData{{
+		ID: "ring-member-1", TenantID: tenantID, Status: "online",
+		DNAAttributes: map[string]string{"deployment_ring": "pre-release"},
+	}}
+}
+
+// mutableStewardProvider is a fleet steward source whose stewards a test can change
+// while a rollout goroutine reads them.
+type mutableStewardProvider struct {
+	mu       sync.Mutex
+	stewards []fleet.StewardData
+}
+
+func newMutableStewardProvider(stewards ...fleet.StewardData) *mutableStewardProvider {
+	return &mutableStewardProvider{stewards: stewards}
+}
+
+// GetAllStewards returns a deep copy so readers never share the attribute maps.
+func (p *mutableStewardProvider) GetAllStewards() []fleet.StewardData {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]fleet.StewardData, len(p.stewards))
+	for i, st := range p.stewards {
+		attrs := make(map[string]string, len(st.DNAAttributes))
+		for k, v := range st.DNAAttributes {
+			attrs[k] = v
+		}
+		st.DNAAttributes = attrs
+		out[i] = st
+	}
+	return out
+}
+
+// clearRing removes the deployment_ring attribute of the steward with the given id.
+func (p *mutableStewardProvider) clearRing(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, st := range p.stewards {
+		if st.ID == id {
+			delete(st.DNAAttributes, "deployment_ring")
+		}
+	}
+}
+
 // doStartRollout calls handleStartRollout with the given tenant and target version.
 func doStartRollout(server *Server, tenantID, targetVersion string) *httptest.ResponseRecorder {
 	body := startRolloutRequest{TargetVersion: targetVersion, TenantID: tenantID}
@@ -449,7 +496,7 @@ func TestRollout_OperatorHalt(t *testing.T) {
 	const targetVersion = "v0.5.21"
 
 	// No stewards so the goroutine has nothing to advance — gives us a window to halt.
-	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
 
 	// Use a long soak so the goroutine blocks inside the soak select, giving the test
 	// time to issue the halt before the goroutine finishes.
@@ -499,7 +546,7 @@ func TestRollout_HaltOnPeerNodeStopsTheOwningNodesGoroutine(t *testing.T) {
 	// (denominator-zero) health gate, and promote to ring 2 well within the sleep
 	// below — so promotion happening at all is unambiguous evidence the fix didn't
 	// take effect.
-	owner, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	owner, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
 	owner.rolloutHaltPollInterval = 20 * time.Millisecond
 	owner.cfg.DeploymentRings.Rings[0].Soak = controllerconfig.Duration(300 * time.Millisecond)
 	owner.cfg.DeploymentRings.Rings[1].Soak = controllerconfig.Duration(0)
@@ -559,7 +606,7 @@ func TestHaltRollout_StopsRingAdvancementFromPeerNode(t *testing.T) {
 	// (denominator-zero) health gate, and promote to ring 2 well within the sleep
 	// below — so promotion happening at all is unambiguous evidence the fix didn't
 	// take effect.
-	nodeA, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	nodeA, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
 	nodeA.rolloutHaltPollInterval = 20 * time.Millisecond
 	nodeA.cfg.DeploymentRings.Rings[0].Soak = controllerconfig.Duration(300 * time.Millisecond)
 	nodeA.cfg.DeploymentRings.Rings[1].Soak = controllerconfig.Duration(0)
@@ -622,7 +669,7 @@ func TestRollout_Halt_ReportsFailureWhenTheHaltCannotBePersisted(t *testing.T) {
 	const tenantID = "tenant-a"
 	const targetVersion = "v0.5.21"
 
-	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
 	server.cfg.DeploymentRings.Rings[0].Soak = controllerconfig.Duration(30 * time.Second)
 	server.cfg.DeploymentRings.Rings[1].Soak = controllerconfig.Duration(30 * time.Second)
 	server.rolloutStore = &haltPersistFailingStore{testRolloutStore: rolloutStore}
@@ -680,7 +727,7 @@ func TestRollout_UnreadableStatusStopsTheRollout(t *testing.T) {
 	const tenantID = "tenant-a"
 	const targetVersion = "v0.5.21"
 
-	owner, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	owner, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
 	owner.rolloutHaltPollInterval = 20 * time.Millisecond
 	owner.cfg.DeploymentRings.Rings[0].Soak = controllerconfig.Duration(150 * time.Millisecond)
 	owner.cfg.DeploymentRings.Rings[1].Soak = controllerconfig.Duration(0)
@@ -719,7 +766,7 @@ func TestRollout_UnreadableStatusStopsTheRollout(t *testing.T) {
 // distinguishable 403 — and must not modify the victim's record. This mirrors the GET
 // cross-tenant guard (TestRollout_GetStatus_CrossTenant) for the halt path.
 func TestRollout_Halt_CrossTenantForbidden(t *testing.T) {
-	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", ringMember("tenant-a"))
 
 	// Seed an in-progress rollout owned by tenant-b.
 	require.NoError(t, rolloutStore.CreateRollout(context.Background(), &business.RolloutRecord{
@@ -749,7 +796,7 @@ func TestRollout_Halt_CrossTenantForbidden(t *testing.T) {
 // 404 ROLLOUT_NOT_FOUND for an unknown rollout ID. This mirrors TestRollout_GetStatus_NotFound
 // for the halt path.
 func TestRollout_Halt_NotFound(t *testing.T) {
-	server, _, _ := setupRolloutServer(t, "tenant-a", nil)
+	server, _, _ := setupRolloutServer(t, "tenant-a", ringMember("tenant-a"))
 
 	rec := doHaltRollout(server, "tenant-a", "nonexistent-rollout-id")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -772,7 +819,7 @@ func TestRollout_Halt_IdempotentOnTerminal(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+			server, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
 
 			// Seed a rollout already in a terminal state with distinguishing fields that must
 			// survive an idempotent halt untouched.
@@ -829,7 +876,7 @@ func TestRollout_RequiresRolloutStore(t *testing.T) {
 // TestRollout_GetStatus_NotFound verifies that GET /api/v1/rollout/{rollout_id} returns
 // 404 for an unknown rollout ID.
 func TestRollout_GetStatus_NotFound(t *testing.T) {
-	server, _, _ := setupRolloutServer(t, "tenant-a", nil)
+	server, _, _ := setupRolloutServer(t, "tenant-a", ringMember("tenant-a"))
 
 	rec := doGetRollout(server, "tenant-a", "nonexistent-rollout-id")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -840,7 +887,7 @@ func TestRollout_GetStatus_NotFound(t *testing.T) {
 // another tenant. [REQUIRED TEST] Issue #4335: refused indistinguishably from
 // not-found (404 ROLLOUT_NOT_FOUND), not a distinguishable 403.
 func TestRollout_GetStatus_CrossTenant(t *testing.T) {
-	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", ringMember("tenant-a"))
 
 	// Seed a rollout owned by tenant-b.
 	require.NoError(t, rolloutStore.CreateRollout(context.Background(), &business.RolloutRecord{
@@ -863,7 +910,7 @@ func TestRollout_GetStatus_CrossTenant(t *testing.T) {
 // be rejected with 403 CROSS_TENANT so orchestration cannot be driven against a victim
 // tenant's fleet.
 func TestRollout_Start_CrossTenantRejected(t *testing.T) {
-	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", ringMember("tenant-a"))
 
 	// tenant-a caller attempts to start a rollout for tenant-b.
 	body := startRolloutRequest{TargetVersion: "v0.5.21", TenantID: "tenant-b"}
@@ -886,7 +933,7 @@ func TestRollout_Start_CrossTenantRejected(t *testing.T) {
 // TestRollout_Start_AdminCrossTenantAllowed verifies that an admin mTLS principal may start
 // a rollout for an explicit tenant via req.TenantID (the legitimate admin path).
 func TestRollout_Start_AdminCrossTenantAllowed(t *testing.T) {
-	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", ringMember("tenant-b"))
 
 	body := startRolloutRequest{TargetVersion: "v0.5.21", TenantID: "tenant-b"}
 	b, err := json.Marshal(body)
@@ -916,7 +963,7 @@ func TestRollout_Start_AdminCrossTenantAllowed(t *testing.T) {
 // guard makes the flag irrelevant. withScopedPrincipal (GlobalScope=false) cannot detect
 // a reversion, so this test injects the session-shaped principal explicitly.
 func TestRollout_Start_SessionPrincipal_CrossTenantRejected(t *testing.T) {
-	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", ringMember("tenant-a"))
 
 	body := startRolloutRequest{TargetVersion: "v0.5.21", TenantID: "tenant-b"}
 	b, err := json.Marshal(body)
@@ -945,7 +992,7 @@ func TestRollout_Start_SessionPrincipal_CrossTenantRejected(t *testing.T) {
 // over-restrict: a session principal scoped to msp-a may start a rollout for a
 // descendant tenant, which is inside its authorized subtree.
 func TestRollout_Start_SessionPrincipal_OwnSubtreeAllowed(t *testing.T) {
-	server, rolloutStore, _ := setupRolloutServer(t, "msp-a", nil)
+	server, rolloutStore, _ := setupRolloutServer(t, "msp-a", ringMember("client-1"))
 	withRealTenantManager(t, server)
 	seedTenantTree(t, server)
 
@@ -1018,7 +1065,7 @@ func TestRollout_GetStatus_FleetQueryFailure(t *testing.T) {
 	const tenantID = "tenant-a"
 	const targetVersion = "v0.5.21"
 
-	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
 
 	// Seed an in-progress rollout sitting on a current ring so the live-metrics branch runs.
 	require.NoError(t, rolloutStore.CreateRollout(context.Background(), &business.RolloutRecord{
@@ -1099,7 +1146,7 @@ func TestRollout_GetStatus_FleetQuerySuccessFlagsAvailable(t *testing.T) {
 
 // TestRollout_InvalidVersionRejected verifies that a malformed target_version returns 400.
 func TestRollout_InvalidVersionRejected(t *testing.T) {
-	server, _, _ := setupRolloutServer(t, "tenant-a", nil)
+	server, _, _ := setupRolloutServer(t, "tenant-a", ringMember("tenant-a"))
 
 	rec := doStartRollout(server, "tenant-a", "not-a-semver")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -1112,7 +1159,7 @@ func TestRollout_InvalidVersionRejected(t *testing.T) {
 // rollout record is created for a request that never got past body parsing.
 func TestRollout_Start_InvalidBodyRejected(t *testing.T) {
 	const tenantID = "tenant-a"
-	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
 
 	// Malformed JSON: unterminated object, missing quotes — Decode must fail.
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/rollout",
@@ -1138,7 +1185,7 @@ func TestRollout_Start_InvalidBodyRejected(t *testing.T) {
 // invalid version).
 func TestRollout_Start_MissingTargetVersionRejected(t *testing.T) {
 	const tenantID = "tenant-a"
-	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
 
 	// Well-formed JSON that omits target_version entirely.
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/rollout",
@@ -1163,7 +1210,7 @@ func TestRollout_Start_MissingTargetVersionRejected(t *testing.T) {
 // covers a real operational misconfiguration, not dead code.
 func TestRollout_Start_NoRingsConfigured(t *testing.T) {
 	const tenantID = "tenant-a"
-	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
 
 	// Explicitly configure an empty ring set (non-nil, zero rings).
 	server.cfg.DeploymentRings = &controllerconfig.DeploymentRingConfig{
@@ -1193,7 +1240,7 @@ func TestRollout_Start_NoRingsConfigured(t *testing.T) {
 // the existing logic and durably mutate the store.
 func TestRolloutHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
 	t.Run("handleStartRollout creates the rollout record", func(t *testing.T) {
-		server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+		server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", ringMember("tenant-a"))
 		server.haManager = newNonAuthoritativeHAManager(t)
 
 		rec := doStartRollout(server, "tenant-a", "v1.2.3")
@@ -1208,7 +1255,7 @@ func TestRolloutHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
 	})
 
 	t.Run("handleHaltRollout halts the pre-seeded rollout", func(t *testing.T) {
-		server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+		server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", ringMember("tenant-a"))
 
 		// Pre-seed an in-progress rollout record so we can verify it IS mutated.
 		const rolloutID = "pre-seeded-rollout"
@@ -1240,7 +1287,7 @@ func TestRolloutHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
 // existing start logic unchanged — removing the gate must not have broken the
 // leader path either.
 func TestRolloutHandlers_SucceedOnAuthoritativeNode(t *testing.T) {
-	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
+	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", ringMember("tenant-a"))
 	server.haManager = newAuthoritativeHAManager(t)
 
 	rec := doStartRollout(server, "tenant-a", "v1.2.3")
@@ -1276,7 +1323,7 @@ func queryRolloutAudit(t *testing.T, mgr *audit.Manager, tenantID, action string
 // one audit entry naming the principal and stores the principal as InitiatedBy.
 func TestRollout_StartIsAuditedAndRecordsInitiator(t *testing.T) {
 	const tenantID = "tenant-a"
-	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
 	mgr := attachRolloutAuditManager(t, server)
 
 	rec := doStartRollout(server, tenantID, "v0.5.21")
@@ -1301,7 +1348,7 @@ func TestRollout_StartIsAuditedAndRecordsInitiator(t *testing.T) {
 // that halting an already-halted rollout records none.
 func TestRollout_HaltIsAuditedOnce(t *testing.T) {
 	const tenantID = "tenant-a"
-	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
 	server.cfg.DeploymentRings.Rings[0].Soak = controllerconfig.Duration(30 * time.Second)
 	server.cfg.DeploymentRings.Rings[1].Soak = controllerconfig.Duration(30 * time.Second)
 	mgr := attachRolloutAuditManager(t, server)
@@ -1370,7 +1417,7 @@ func TestStartRollout_RecordsOwnerNode(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+			server, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
 			server.haManager = tc.haManager(t)
 
 			rec := doStartRollout(server, tenantID, "v1.2.3")
@@ -1625,7 +1672,7 @@ func TestRolloutStartRefusedWhenOwnAndDefaultBinariesUnapproved(t *testing.T) {
 
 func TestRolloutStartNoStewardsNoCheck(t *testing.T) {
 	const tenantID = "tenant-a"
-	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
 	// No blob store and no approval store: with nothing to reach there is nothing to check.
 	require.Nil(t, server.blobStore)
 	require.Nil(t, server.StewardBinaryApprovalStore())
@@ -1690,4 +1737,89 @@ func TestRolloutStartFailsClosedOnApprovalReadError(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "APPROVAL_UNAVAILABLE")
 	assert.Zero(t, rolloutRecords{rolloutStore}.count())
+}
+
+// TestRollout_Start_NoRingMembersRefused pins that a start whose tenant has stewards but
+// none carrying a deployment_ring attribute is refused with 409 NO_RING_MEMBERS and
+// leaves no rollout record, instead of running to a vacuous "completed".
+func TestRollout_Start_NoRingMembersRefused(t *testing.T) {
+	const tenantID = "tenant-a"
+	unringed := []fleet.StewardData{
+		{ID: "steward-1", TenantID: tenantID, Status: "online"},
+		{ID: "steward-2", TenantID: tenantID, Status: "online", DNAAttributes: map[string]string{"os": "linux"}},
+	}
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, unringed)
+
+	rec := doStartRollout(server, tenantID, "v0.5.21")
+
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "NO_RING_MEMBERS")
+	assert.Contains(t, rec.Body.String(), "No steward in the tenant is assigned to a deployment ring")
+	assert.Zero(t, rolloutRecords{rolloutStore}.count(), "no rollout record is created")
+}
+
+// TestRollout_Start_RingMembersOfAnotherTenantNotCounted pins that the start-time count
+// uses the rollout's tenant scope: another tenant's ring member does not satisfy it.
+func TestRollout_Start_RingMembersOfAnotherTenantNotCounted(t *testing.T) {
+	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", ringMember("tenant-b"))
+
+	rec := doStartRollout(server, "tenant-a", "v0.5.21")
+
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Zero(t, rolloutRecords{rolloutStore}.count())
+}
+
+// TestRollout_Start_RingMembershipQueryFailure pins that a failing start-time ring
+// search answers 500 RING_QUERY_ERROR and creates no record.
+func TestRollout_Start_RingMembershipQueryFailure(t *testing.T) {
+	const tenantID = "tenant-a"
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID))
+	server.fleetQuery = newRingHealthFailingFleet(server.fleetQuery, 0)
+
+	rec := doStartRollout(server, tenantID, "v0.5.21")
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "RING_QUERY_ERROR")
+	assert.Zero(t, rolloutRecords{rolloutStore}.count())
+}
+
+// TestRollout_RuntimeZeroTotalHaltsInsteadOfCompleting pins that a rollout whose only
+// ring member leaves its ring after start (here: during the first ring's soak) counts
+// no steward in any ring, so it ends halted with an error rather than completed.
+func TestRollout_RuntimeZeroTotalHaltsInsteadOfCompleting(t *testing.T) {
+	const tenantID = "tenant-a"
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	provider := newMutableStewardProvider(ringMember(tenantID)...)
+	server.fleetQuery = fleet.NewMemoryQuery(provider)
+	server.cfg.DeploymentRings.Rings[0].Soak = controllerconfig.Duration(time.Millisecond)
+	// Runs synchronously inside the rollout goroutine, before the post-soak health query.
+	server.onRolloutSoak = func(string) { provider.clearRing("ring-member-1") }
+
+	rec := doStartRollout(server, tenantID, "v0.5.21")
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	rolloutID := parseStartRolloutID(t, rec)
+	waitForRolloutStatus(t, rolloutStore, rolloutID, 2*time.Second)
+
+	stored, err := rolloutStore.GetRollout(context.Background(), rolloutID)
+	require.NoError(t, err)
+	assert.Equal(t, business.RolloutStatusHalted, stored.Status)
+	assert.Contains(t, stored.Error, "no steward was counted in any deployment ring")
+	assert.NotNil(t, stored.HaltedAt)
+}
+
+// TestRollout_EmptyRingAmongPopulatedRingsStillCompletes pins that an individual empty
+// ring is unchanged: with a member in one ring the rollout completes.
+func TestRollout_EmptyRingAmongPopulatedRingsStillCompletes(t *testing.T) {
+	const tenantID = "tenant-a"
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, ringMember(tenantID)) // "stable" has no member
+
+	rec := doStartRollout(server, tenantID, "v0.5.21")
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	rolloutID := parseStartRolloutID(t, rec)
+	waitForRolloutStatus(t, rolloutStore, rolloutID, 2*time.Second)
+
+	stored, err := rolloutStore.GetRollout(context.Background(), rolloutID)
+	require.NoError(t, err)
+	assert.Equal(t, business.RolloutStatusCompleted, stored.Status)
+	assert.Equal(t, 2, stored.RingsCompleted)
 }

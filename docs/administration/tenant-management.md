@@ -118,6 +118,23 @@ A client tenant is connected to Microsoft 365 with `cfg tenant m365`. **A connec
 - **Permissions.** `set`, `delete`, `gdap-customers` and `gdap-link` need `tenant:manage`; `get` needs `tenant:read`. A root-scoped operator needs an active crossing into the MSP.
 - **Audit.** Each write emits one event per affected client tenant: `m365.connection.set`, `m365.connection.delete` or `m365.gdap.link`.
 
+## MSP email sender
+
+An MSP tenant can send its operational mail through its own SMTP sender. Manage it with `cfg tenant email-sender`. The sender exists only on an MSP tenant; a client tenant, the root tenant or an unknown tenant is reported as not found. Removing the sender sends the MSP's mail back through the platform sender.
+
+| Command | What it does |
+|---------|--------------|
+| `cfg tenant email-sender show <msp-tenant>` | Shows the host, port, TLS mode, from-address and username, and `password: present` or `password: absent`; never the password |
+| `cfg tenant email-sender set <msp-tenant> --host <host> --from <address> [--port <port>] [--tls-mode starttls\|implicit_tls] [--username <name>] [--password-stdin]` | Sets or replaces the sender |
+| `cfg tenant email-sender remove <msp-tenant> [--yes]` | Removes the sender and its stored password |
+| `cfg tenant email-sender test <msp-tenant>` | Sends one fixed test message to the sender's own from-address and prints each recipient as `accepted` or `rejected`, then `failure: <reason>` if there is one; exits non-zero when the message was not delivered |
+
+- **Password.** No flag accepts the password; `--password` does not exist. `--password-stdin` reads it as one line from standard input. With no flag and a terminal on standard input, `set` asks at a no-echo prompt. Without a flag and without a terminal, `set` sends no password.
+- **Keeping the password.** `set` replaces every setting, so pass all of them. When the MSP already has a stored password, `set` without `--password-stdin` (or an empty entry at the prompt) keeps it. A first-time sender needs a password.
+- **Confirmation.** `remove` prints what it will remove and prompts `Proceed? [y/N]`. `--yes` (`-y`) skips the prompt. With no terminal and no `--yes` it refuses, sends no request and exits non-zero.
+- **Output.** `--json` prints the response data as received.
+- **Permissions.** All four commands need `notification:configure-msp`. A root-scoped operator needs an active crossing into the MSP to run `show`, and is refused `set`, `remove` and `test` even with a crossing.
+
 ## Software authenticator flag
 
 A CFGMS software authenticator is accepted for a tenant-scoped account only when two things hold: the account's tenant is listed in `webauthn.allow_software_authenticators.tenants` in `controller.cfg` (see [Software authenticators](../security/SECURITY_CONFIGURATION.md#software-authenticators)), and the account carries the software-authenticator flag. A dedicated root-scope agent account instead needs `webauthn.allow_software_authenticators.root_agent_accounts: true` and the flag. This section covers the flag. **Setting the flag has no effect until the account's tenant is listed in `controller.cfg` (or, for a root-scope account, the root-agent setting is on).** No API writes either setting.
