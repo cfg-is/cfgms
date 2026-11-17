@@ -2288,6 +2288,100 @@ func TestHandleRegister_PersistsDeviceIdentity(t *testing.T) {
 	assert.Equal(t, "test-tenant", stored.TenantID)
 }
 
+// registerDirectlyAdmitted registers a fresh device through the direct-admission
+// path (AlwaysApproveHook) with the given hostname and os hints and returns the
+// durable record read back through the steward store.
+func registerDirectlyAdmitted(t *testing.T, server *Server, tokenStore registration.Store, stewardSt business.StewardStore, tokenValue, hostname, osHint string) *business.StewardRecord {
+	t.Helper()
+	tok := &registration.Token{
+		Token:         tokenValue,
+		TenantID:      "test-tenant",
+		ControllerURL: "grpc://controller:7443",
+	}
+	require.NoError(t, tokenStore.SaveToken(context.Background(), tok))
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	rec := postRegisterWithBody(server, RegistrationRequest{
+		Token:          tokenValue,
+		DeviceID:       deviceIDForKey([]byte(pub)),
+		IdentityKeyPub: base64.StdEncoding.EncodeToString([]byte(pub)),
+		CSRPEM:         testValidCSRPEM,
+		Hostname:       hostname,
+		OS:             osHint,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp RegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.StewardID)
+
+	stored, lookupErr := stewardSt.GetSteward(context.Background(), resp.StewardID)
+	require.NoError(t, lookupErr, "StewardRecord must be present in the store after registration")
+	return stored
+}
+
+// TestHandleRegister_DirectAdmission_PersistsHostnameAndPlatform verifies the
+// durable record of a directly-admitted steward carries the hostname and os hints.
+func TestHandleRegister_DirectAdmission_PersistsHostnameAndPlatform(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, newTestCertManager(t))
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	stored := registerDirectlyAdmitted(t, server, tokenStore, stewardSt, "cfgms_reg_direct_hints", "ws-direct-01", "windows")
+	assert.Equal(t, "ws-direct-01", stored.Hostname)
+	assert.Equal(t, "windows", stored.Platform)
+}
+
+// TestHandleRegister_DirectAdmission_NoHintsStoresEmpty verifies the hints stay
+// optional on the direct-admission path.
+func TestHandleRegister_DirectAdmission_NoHintsStoresEmpty(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, newTestCertManager(t))
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	stored := registerDirectlyAdmitted(t, server, tokenStore, stewardSt, "cfgms_reg_direct_nohints", "", "")
+	assert.Empty(t, stored.Hostname)
+	assert.Empty(t, stored.Platform)
+}
+
+// TestHandleRegister_DirectAdmission_SanitisesHostname verifies markup and
+// control characters never reach the durable record on the direct-admission path.
+func TestHandleRegister_DirectAdmission_SanitisesHostname(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, newTestCertManager(t))
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	dirty := "<b>ws</b>\x00-\x07evil\n"
+	stored := registerDirectlyAdmitted(t, server, tokenStore, stewardSt, "cfgms_reg_direct_dirty", dirty, "linux")
+	assert.Equal(t, sanitizeHostnameHint(dirty), stored.Hostname)
+	assert.NotContains(t, stored.Hostname, "<")
+	assert.NotContains(t, stored.Hostname, ">")
+	assert.NotContains(t, stored.Hostname, "\x00")
+	assert.NotContains(t, stored.Hostname, "\n")
+	assert.Equal(t, "linux", stored.Platform)
+}
+
+// TestHandleRegister_DirectAdmission_BillingCountsPlatform verifies a billing
+// rollup buckets a directly-admitted os=windows steward under Windows, not Other.
+func TestHandleRegister_DirectAdmission_BillingCountsPlatform(t *testing.T) {
+	tokenStore := newTestRegistrationStore(t)
+	server, stewardSt := newHandleRegisterServerWithStewardStore(t, tokenStore, newTestCertManager(t))
+	server.SetApprovalHook(&AlwaysApproveHook{})
+
+	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: "test-tenant", Name: "test-tenant"})
+	require.NoError(t, err)
+
+	registerDirectlyAdmitted(t, server, tokenStore, stewardSt, "cfgms_reg_direct_billing", "ws-bill-01", "windows")
+
+	agg, err := server.aggregateBilling(context.Background(), "test-tenant")
+	require.NoError(t, err)
+	assert.Equal(t, 1, agg.EndpointCount)
+	assert.Equal(t, platformCounts{Windows: 1}, agg.Metrics.EndpointsByPlatform,
+		"directly-admitted windows steward must be counted as Windows, not Other")
+}
+
 // TestHandleRegister_MissingDeviceID_400 verifies that a registration request without
 // a DeviceID returns HTTP 400.
 func TestHandleRegister_MissingDeviceID_400(t *testing.T) {
