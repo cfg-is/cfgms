@@ -1,0 +1,760 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CFGMS Email Delivery — mockup</title>
+<!--
+  MSP Email delivery page (Epic #6039 · Story #6247), route /email-delivery, nav
+  entry below Support access. Shows the MSP's own sender (or "No sender: using
+  the platform sender"), sets / replaces / removes it, and sends a test with the
+  per-recipient result. The password is write-only: the form never shows a saved
+  value, only "Password saved". Backed by GET/PUT/DELETE
+  /api/v1/tenants/{id}/email-sender and POST .../email-sender/test (Issues #6243,
+  #6244). Every call needs AssuranceStrong, so a weaker session gets the shell's
+  passkey step-up first.
+  States: Ready / No sender / Incomplete / Edit / First set / Validation error /
+  Saved / Remove confirm / Test running / Delivered / Partial / Failed / Loading /
+  Error / Crossing required (401) / Root with crossing (read-only) / Forbidden
+  (403) / Passkey cancelled.
+  Design tokens are inlined from docs/design/web-ui-design-tokens.css (source of
+  truth); shell chrome mirrors web/src/shell/AppShell.css; the crossing modal
+  reuses crossing-prompt.html. Standalone and interactive: the dashed top strip
+  is a review harness (state + theme), not product UI. URL params
+  ?state=<name>&theme=light|dark preselect a state.
+-->
+<style>
+/*
+ * CFGMS Web UI — Design Tokens
+ * ----------------------------------------------------------------------------
+ * Machine-readable token layer for the controller-served web app (Epic #2344).
+ * Values are lifted verbatim from the public brand style guide
+ * (https://cfg.is/style-guide) so the app and the marketing site share one
+ * source of truth for colour. See docs/design/web-ui-design-system.md for the
+ * rationale, usage rules, and open items.
+ *
+ * Identity in one line: a WARM TERMINAL — near-black / near-white grounds that
+ * hold a trace of warmth, STONE-NEUTRAL text, muted slate-blue accent,
+ * desaturated earth-tone semantics, and a palette of muted card tints. Ground
+ * and ink sit in different hue bands on purpose: when both were warm the whole
+ * surface read rust. State owns the colour budget; the accent is reserved for
+ * interaction; mono carries all machine data.
+ *
+ * Theme model: default tokens are light. `@media (prefers-color-scheme: dark)`
+ * supplies dark. `:root[data-theme="light"|"dark"]` overrides the media query
+ * in both directions (the app's own theme control stamps data-theme on :root).
+ * ==========================================================================*/
+
+:root {
+  /* --- Background & structure --- */
+  --bg-primary:   #f5f4f3;  /* app ground */
+  --bg-surface:   #ffffff;  /* panels, cards */
+  --bg-elevated:  #ececea;  /* raised / inset chrome */
+  --bg-sunk:      #ececea;  /* wells, code blocks */
+  --border:       #d0cfcd;
+
+  /* --- Text & accent --- */
+  --text-primary:   #5f5e58; /* stone (was warm taupe; see design-system §1) */
+  --text-secondary: #6e6d68;
+  --text-faint:     #82807a; /* micro-labels (contrast-tuned vs guide) */
+  --accent:         #4a6b7c; /* muted slate blue — INTERACTION ONLY */
+  --accent-ink:     #ffffff; /* text/icon on accent fill */
+
+  /* --- Semantic state (desaturated earth tones) --- */
+  --state-ok:        #507055;  --state-ok-bg:    #e8f0e9; /* converged / success */
+  --state-warn:      #7b5d1e;  --state-warn-bg:  #f2eadb; /* drift / warning (ochre) */
+  --state-crit:      #965044;  --state-crit-bg:  #f0e6e4; /* error (terracotta) */
+  --state-mauve:     #7a5f6e;                              /* alt error (guide) */
+  --state-neutral:   #605f5a;  --state-neutral-bg:#e2e1df; /* queued / inert */
+
+  /* --- Card tints (background only; meaning-encoding, not decoration) --- */
+  --tint-red:    #f0e6e4;  /* a problem / failing surface */
+  --tint-green:  #e8f0e9;  /* a fix / resolved surface */
+  --tint-orange: #f2eadb;  /* attention / dependency */
+  --tint-blue:   #e6eef2;  /* neutral context / timeline */
+  --tint-brown:  #e2e1df;  /* metadata / reference */
+  --tint-cream:  #f8f8f7;  /* summary / verdict */
+
+  /* --- Type --- */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, "SF Mono", "SFMono-Regular", Menlo, monospace;
+  --font-display: 'Ubuntu Mono', var(--font-mono); /* logo / terminal accent */
+
+  /* Type scale (1.20 minor-third, 13.5px base) */
+  --text-xs:   10px;   /* uppercase micro-labels */
+  --text-sm:   11.5px;
+  --text-base: 13.5px;
+  --text-md:   14px;
+  --text-lg:   16px;
+  --text-xl:   19px;
+  --text-2xl:  26px;   /* stat numerals */
+  --tracking-label: 0.09em; /* uppercase labels */
+
+  /* --- Spacing (4px base) --- */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px;
+  --space-4: 16px; --space-5: 20px; --space-6: 24px;
+
+  /* --- Radii --- */
+  --radius-sm: 7px;   /* pills-in-buttons, chips */
+  --radius:    9px;   /* buttons, inputs */
+  --radius-lg: 13px;  /* cards */
+  --radius-pill: 20px;
+
+  /* --- Elevation --- */
+  --shadow: 0 18px 50px -22px rgba(42, 42, 40, 0.40);
+
+  /* --- Data-viz: sequential ramp (ordinal, magnitude, H≈234 slate) --- */
+  /* Validated: lightness monotone, adjacent ΔL≥0.06, contrast ≥2.0:1, spread 1° */
+  --ordinal-1: #96bad0;  /* lowest */
+  --ordinal-2: #659dbd;
+  --ordinal-3: #2e80a9;
+  --ordinal-4: #0a6388;
+  --ordinal-5: #054561;  /* highest */
+
+  /* --- Data-viz: categorical theme (identity, brand-anchored, 4 slots max) --- */
+  /* Validated: adjacent CVD ΔE 18.5, normal 19.7; all-pairs slots 1-3 CVD 18.5 */
+  --cat-1: #0171a3;  /* slate */
+  --cat-2: #4f9d60;  /* green */
+  --cat-3: #7e3e1b;  /* amber */
+  --cat-4: #c27fb0;  /* mauve — adjacent forms only, not all-pairs (3-slot validated set) */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-primary:  #1a1a1a;
+    --bg-surface:  #242426;
+    --bg-elevated: #323231;
+    --bg-sunk:     #101010;
+    --border:      #535352;
+
+    --text-primary:   #bcbbb5;
+    --text-secondary: #9c9b96;
+    --text-faint:     #8d8c86;
+    --accent:         #7b9fb0;
+    --accent-ink:     #16202a;
+
+    --state-ok:      #7fa985;  --state-ok-bg:     #1a2e1d;
+    --state-warn:    #bd9547;  --state-warn-bg:   #2f2718;
+    --state-crit:    #d0846f;  --state-crit-bg:   #2b201e;
+    --state-mauve:   #a58198;
+    --state-neutral: #9c9b96;  --state-neutral-bg:#262624;
+
+    --tint-red:    #2b201e;
+    --tint-green:  #1a2e1d;
+    --tint-orange: #2f2718;
+    --tint-blue:   #1e2528;
+    --tint-brown:  #262624;
+    --tint-cream:  #232323;
+
+    --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+
+    /* --- Data-viz: sequential ramp (dark mode) --- */
+    --ordinal-1: #095b7e;
+    --ordinal-2: #0475a1;
+    --ordinal-3: #378eba;
+    --ordinal-4: #62a8ce;
+    --ordinal-5: #93c0da;
+
+    /* --- Data-viz: categorical theme (dark mode) --- */
+    /* Validated: adjacent CVD ΔE 8.2, normal 18.4; all-pairs slots 1-3 CVD 8.2 */
+    --cat-1: #3674a5;  /* slate */
+    --cat-2: #5ba269;  /* green */
+    --cat-3: #d57018;  /* amber */
+    --cat-4: #a55e93;  /* mauve */
+  }
+}
+
+/* Explicit overrides — the app's theme control stamps data-theme on :root and
+   must win over the OS media query in BOTH directions. */
+:root[data-theme="light"] {
+  --bg-primary: #f5f4f3; --bg-surface: #ffffff; --bg-elevated: #ececea; --bg-sunk: #ececea; --border: #d0cfcd;
+  --text-primary: #5f5e58; --text-secondary: #6e6d68; --text-faint: #82807a; --accent: #4a6b7c; --accent-ink: #ffffff;
+  --state-ok: #507055; --state-ok-bg: #e8f0e9; --state-warn: #7b5d1e; --state-warn-bg: #f2eadb;
+  --state-crit: #965044; --state-crit-bg: #f0e6e4; --state-mauve: #7a5f6e; --state-neutral: #605f5a; --state-neutral-bg: #e2e1df;
+  --tint-red: #f0e6e4; --tint-green: #e8f0e9; --tint-orange: #f2eadb; --tint-blue: #e6eef2; --tint-brown: #e2e1df; --tint-cream: #f8f8f7;
+  --shadow: 0 18px 50px -22px rgba(42, 42, 40, 0.40);
+  --ordinal-1: #96bad0; --ordinal-2: #659dbd; --ordinal-3: #2e80a9; --ordinal-4: #0a6388; --ordinal-5: #054561;
+  --cat-1: #0171a3; --cat-2: #4f9d60; --cat-3: #7e3e1b; --cat-4: #c27fb0;
+}
+
+:root[data-theme="dark"] {
+  --bg-primary: #1a1a1a; --bg-surface: #242426; --bg-elevated: #323231; --bg-sunk: #101010; --border: #535352;
+  --text-primary: #bcbbb5; --text-secondary: #9c9b96; --text-faint: #8d8c86; --accent: #7b9fb0; --accent-ink: #16202a;
+  --state-ok: #7fa985; --state-ok-bg: #1a2e1d; --state-warn: #bd9547; --state-warn-bg: #2f2718;
+  --state-crit: #d0846f; --state-crit-bg: #2b201e; --state-mauve: #a58198; --state-neutral: #9c9b96; --state-neutral-bg: #262624;
+  --tint-red: #2b201e; --tint-green: #1a2e1d; --tint-orange: #2f2718; --tint-blue: #1e2528; --tint-brown: #262624; --tint-cream: #232323;
+  --shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.80);
+  --ordinal-1: #095b7e; --ordinal-2: #0475a1; --ordinal-3: #378eba; --ordinal-4: #62a8ce; --ordinal-5: #93c0da;
+  --cat-1: #3674a5; --cat-2: #5ba269; --cat-3: #d57018; --cat-4: #a55e93;
+}
+
+/* ---- mockup base + app shell (mirrors web/src/shell/AppShell.css) ---- */
+*{box-sizing:border-box;}
+html,body{margin:0;}
+body{background:var(--bg-primary); color:var(--text-primary); font-family:var(--font-sans); font-size:var(--text-base);
+  line-height:1.45; -webkit-font-smoothing:antialiased; position:relative; min-height:100dvh;}
+.mono{font-family:var(--font-mono);}
+button{font:inherit;}
+[hidden]{display:none !important;}
+
+/* harness strip — review affordance, not product UI */
+.harness{display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 16px; background:var(--bg-sunk);
+  border-bottom:1px dashed var(--border); font-size:var(--text-sm); color:var(--text-faint);}
+.harness .hl{font-family:var(--font-mono); letter-spacing:.04em; text-transform:uppercase; font-size:var(--text-xs);}
+.harness .grp{display:inline-flex; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius); padding:2px; flex-wrap:wrap;}
+.harness .grp button{appearance:none; border:0; background:transparent; color:var(--text-secondary); font-size:var(--text-sm);
+  font-weight:600; padding:5px 10px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+.harness .grp button[aria-pressed="true"]{background:var(--accent); color:var(--accent-ink);}
+.harness .sp{flex:1;}
+
+.shell{display:grid; grid-template-columns:1fr; min-height:calc(100dvh - 44px); position:relative;}
+.side{display:none; flex-direction:column; background:var(--bg-surface); border-right:1px solid var(--border);}
+.side .logo{display:flex; align-items:baseline; gap:7px; padding:var(--space-4) var(--space-4) var(--space-3);}
+.side .logo b{font-size:var(--text-md); letter-spacing:.13em; text-transform:uppercase;}
+.side .logo i{font-style:normal; font-size:var(--text-xs); color:var(--text-faint); letter-spacing:.05em;}
+.side nav{display:flex; flex-direction:column; gap:2px; padding:6px var(--space-3);}
+.side nav a{display:flex; align-items:center; gap:11px; padding:9px 11px; border-radius:var(--radius-sm); color:var(--text-secondary);
+  text-decoration:none; font-weight:500; font-size:var(--text-base);}
+.side nav a.active{background:var(--tint-blue); color:var(--accent); font-weight:600;}
+.side nav a .new{margin-left:auto; font-size:9px; letter-spacing:.06em; text-transform:uppercase; color:var(--accent);
+  border:1px solid var(--accent); border-radius:var(--radius-pill); padding:0 6px;}
+.main{min-width:0; display:flex; flex-direction:column;}
+.appbar{display:flex; align-items:center; gap:var(--space-2); padding:var(--space-2) var(--space-3); background:var(--bg-primary);
+  border-bottom:1px solid var(--border);}
+.chipbtn{display:inline-flex; align-items:center; gap:7px; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-secondary);
+  border-radius:var(--radius); padding:7px 11px; font-size:var(--text-sm); white-space:nowrap;}
+.chipbtn b{color:var(--text-primary); font-family:var(--font-mono); font-weight:600;}
+.searchbox{flex:1; max-width:420px; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-faint);
+  border-radius:var(--radius); padding:7px 11px; font-size:var(--text-sm);}
+.abspacer{flex:1;}
+.avatar{width:32px; height:32px; border-radius:50%; background:var(--bg-elevated); border:1px solid var(--border); display:grid;
+  place-items:center; font-size:var(--text-sm); font-weight:700; color:var(--text-secondary); flex:none;}
+.content{padding:var(--space-4); display:flex; flex-direction:column; gap:var(--space-4); max-width:1180px; width:100%;}
+.htitle{display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap;}
+.htitle h1{margin:0; font-size:var(--text-xl); font-weight:700; letter-spacing:-.01em;}
+.htitle p{margin:3px 0 0; color:var(--text-secondary); max-width:640px;}
+
+.panel{background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-lg); overflow:hidden;}
+.phead{display:flex; align-items:center; gap:9px; padding:12px 16px; border-bottom:1px solid var(--border); flex-wrap:wrap;}
+.phead h2{margin:0; font-size:var(--text-md); font-weight:700;}
+.phead .sub{color:var(--text-faint); font-size:var(--text-sm);}
+.phead .cnt{margin-left:auto; font-size:var(--text-sm); color:var(--text-faint); font-variant-numeric:tabular-nums;}
+.pbody{padding:14px 16px;}
+
+table.tbl{width:100%; border-collapse:collapse; font-size:13px;}
+.tbl th{text-align:left; font-size:10.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--text-faint); font-weight:600;
+  padding:9px 14px; border-bottom:1px solid var(--border); white-space:nowrap;}
+.tbl td{padding:10px 14px; border-bottom:1px solid var(--border); vertical-align:top;}
+.tbl tbody tr:last-child > td{border-bottom:0;}
+
+.pill{display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:var(--radius-pill); font-size:11px; font-weight:700; white-space:nowrap;}
+.pill svg{flex:none;}
+.pill-ok{background:var(--state-ok-bg); color:var(--state-ok);}
+.pill-warn{background:var(--state-warn-bg); color:var(--state-warn);}
+.pill-crit{background:var(--state-crit-bg); color:var(--state-crit);}
+.pill-neutral{background:var(--state-neutral-bg); color:var(--state-neutral);}
+.pill-acc{background:var(--tint-blue); color:var(--accent);}
+
+.btn{appearance:none; border:1px solid var(--accent); background:var(--accent); color:var(--accent-ink); font-size:var(--text-sm);
+  font-weight:600; padding:7px 14px; border-radius:var(--radius); cursor:pointer; white-space:nowrap; display:inline-flex; align-items:center; gap:7px;}
+.btn:disabled{opacity:.45; cursor:not-allowed;}
+.btn-sec{appearance:none; border:1px solid var(--border); background:var(--bg-surface); color:var(--text-secondary); font-size:var(--text-sm);
+  font-weight:600; padding:7px 13px; border-radius:var(--radius); cursor:pointer; white-space:nowrap;}
+.btn-danger{appearance:none; border:1px solid var(--state-crit); background:var(--state-crit); color:var(--bg-surface); font-size:var(--text-sm);
+  font-weight:700; padding:7px 14px; border-radius:var(--radius); cursor:pointer; white-space:nowrap; display:inline-flex; align-items:center; gap:7px;}
+.btn-danger:disabled{opacity:.45; cursor:not-allowed;}
+.btn-danger-soft{appearance:none; border:1px solid var(--state-crit); background:var(--state-crit-bg); color:var(--state-crit); font-size:11px;
+  font-weight:600; padding:5px 11px; border-radius:var(--radius-sm); cursor:pointer; white-space:nowrap;}
+.btn-sm{font-size:11px; padding:5px 11px; border-radius:var(--radius-sm);}
+button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+
+.field{display:flex; flex-direction:column; gap:5px; min-width:0;}
+.field label, .lbl{font-size:var(--text-xs); letter-spacing:var(--tracking-label); text-transform:uppercase; color:var(--text-faint); font-weight:600;}
+.field .req{color:var(--state-crit);}
+select, textarea, input[type=text], input[type=email]{appearance:none; width:100%; background:var(--bg-surface); color:var(--text-primary);
+  border:1px solid var(--border); border-radius:var(--radius); padding:8px 11px; font:inherit; font-size:var(--text-base);}
+select{background-image:linear-gradient(45deg,transparent 50%,var(--text-faint) 50%),linear-gradient(135deg,var(--text-faint) 50%,transparent 50%);
+  background-position:calc(100% - 15px) 52%, calc(100% - 10px) 52%; background-size:5px 5px; background-repeat:no-repeat; padding-right:30px;}
+textarea{resize:vertical; min-height:92px; line-height:1.5;}
+.field.bad select, .field.bad textarea, .field.bad input{border-color:var(--state-crit);}
+.hint{font-size:var(--text-sm); color:var(--text-faint);}
+.hint b{color:var(--text-secondary); font-weight:600;}
+
+.msg{display:flex; align-items:flex-start; gap:8px; padding:9px 12px; border-radius:var(--radius); font-size:12.5px; line-height:1.45;}
+.msg svg{flex:none; margin-top:2px;}
+.msg-crit{background:var(--state-crit-bg); color:var(--state-crit); border:1px solid var(--state-crit);}
+.msg-warn{background:var(--state-warn-bg); color:var(--state-warn); border:1px solid var(--state-warn);}
+.msg-info{background:var(--tint-blue); color:var(--text-primary); border:1px solid var(--border);}
+.msg b{font-weight:700;}
+
+.spin{width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:sp .7s linear infinite; flex:none; display:inline-block;}
+@keyframes sp{to{transform:rotate(360deg);}}
+@media (prefers-reduced-motion: reduce){.spin{animation:none;}}
+.skel{background:var(--bg-elevated); border-radius:6px; height:12px;}
+
+.toast{position:absolute; left:50%; top:80px; transform:translateX(-50%); background:var(--bg-elevated); border:1px solid var(--border);
+  color:var(--text-primary); padding:9px 16px; border-radius:var(--radius); font-size:12.5px; font-weight:600; box-shadow:var(--shadow);
+  z-index:300; max-width:88%; display:none;}
+.toast.show{display:block;}
+
+@media (min-width:1024px){
+  .shell{grid-template-columns:230px 1fr;}
+  .side{display:flex;}
+  .content{padding:var(--space-5) var(--space-6) 40px;}
+}
+@media (max-width:640px){
+  .searchbox{display:none;}
+  .harness{padding:8px 12px;}
+}
+
+
+/* ---- email delivery page (Story #6247) ---- */
+input[type=password]{appearance:none; width:100%; background:var(--bg-surface); color:var(--text-primary);
+  border:1px solid var(--border); border-radius:var(--radius); padding:8px 11px; font:inherit; font-size:var(--text-base);}
+input[readonly]{background:var(--bg-sunk); color:var(--text-secondary);}
+.field .err{font-size:var(--text-sm); color:var(--state-crit); font-weight:600;}
+.muted{color:var(--text-faint);}
+
+.status{display:flex; align-items:flex-start; gap:14px; padding:16px;}
+.status .ic{width:44px; height:44px; border-radius:12px; display:grid; place-items:center; flex:none;}
+.status .ic.ok{background:var(--state-ok-bg); color:var(--state-ok);}
+.status .ic.neutral{background:var(--state-neutral-bg); color:var(--state-neutral);}
+.status .ic.warn{background:var(--state-warn-bg); color:var(--state-warn);}
+.status .t{flex:1; min-width:0;}
+.status h3{margin:0 0 3px; font-size:var(--text-md); display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+.status p{margin:0; color:var(--text-secondary); font-size:13px; line-height:1.55; max-width:640px;}
+.status .acts{display:flex; gap:8px; flex-wrap:wrap; align-self:center;}
+
+dl.kv{margin:0; display:grid; grid-template-columns:repeat(auto-fill, minmax(190px, 1fr)); gap:0; border-top:1px solid var(--border);}
+dl.kv > div{padding:11px 16px; border-bottom:1px solid var(--border); border-right:1px solid var(--border); min-width:0;}
+dl.kv dt{font-size:var(--text-xs); letter-spacing:var(--tracking-label); text-transform:uppercase; color:var(--text-faint); font-weight:600; margin-bottom:3px;}
+dl.kv dd{margin:0; font-family:var(--font-mono); font-size:12.5px; font-weight:600; overflow-wrap:anywhere;}
+dl.kv dd.sans{font-family:var(--font-sans);}
+
+.confirm-in{padding:12px 16px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; background:var(--bg-sunk); border-top:1px solid var(--border);}
+.confirm-in .t{flex:1; min-width:240px; font-size:12.5px; color:var(--state-crit);}
+.confirm-in .t b{font-weight:700;}
+.confirm-in .t .s{display:block; color:var(--text-faint); font-size:11.5px; margin-top:2px;}
+
+.form{display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:14px 16px;}
+.form .wide{grid-column:1 / -1;}
+.form .hp{display:grid; grid-template-columns:minmax(0,1fr) 150px 110px; gap:14px 16px;}
+.pwrow{display:flex; gap:8px; align-items:center;}
+.pwrow input{flex:1;}
+.savedchip{display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:700; color:var(--state-ok); background:var(--state-ok-bg);
+  border-radius:var(--radius-pill); padding:3px 9px; white-space:nowrap;}
+.savebar{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:16px; padding-top:14px; border-top:1px solid var(--border);}
+.savebar .sp{flex:1;}
+
+.testrow{display:flex; align-items:center; gap:12px; flex-wrap:wrap;}
+.testrow .t{flex:1; min-width:240px; font-size:13px; color:var(--text-secondary);}
+.result{margin-top:14px; border:1px solid var(--border); border-radius:var(--radius); overflow:hidden;}
+.result .rh{display:flex; align-items:center; gap:9px; padding:10px 14px; font-size:12.5px; font-weight:700; flex-wrap:wrap;}
+.result .rh .when{margin-left:auto; font-weight:500; color:var(--text-faint); font-size:11.5px; font-variant-numeric:tabular-nums;}
+.result.ok .rh{background:var(--state-ok-bg); color:var(--state-ok);}
+.result.warn .rh{background:var(--state-warn-bg); color:var(--state-warn);}
+.result.crit .rh{background:var(--state-crit-bg); color:var(--state-crit);}
+.result .rh .why{font-weight:500; color:var(--text-secondary);}
+.result table.tbl td{font-size:12.5px;}
+.addr{font-family:var(--font-mono); font-weight:600; overflow-wrap:anywhere;}
+.reason{color:var(--text-secondary); overflow-wrap:anywhere; font-family:var(--font-mono); font-size:12px;}
+.running{display:flex; align-items:center; gap:9px; margin-top:14px; padding:12px 14px; border:1px dashed var(--border); border-radius:var(--radius);
+  color:var(--text-secondary); font-size:12.5px;}
+
+.uses{width:100%; border-collapse:collapse; font-size:12.5px;}
+.uses td{padding:8px 16px; border-bottom:1px solid var(--border);}
+.uses tr:last-child td{border-bottom:0;}
+.uses td:last-child{color:var(--text-secondary); white-space:nowrap;}
+
+.errcard{display:flex; align-items:center; gap:12px; padding:16px; flex-wrap:wrap;}
+.errcard .t{flex:1; min-width:200px;}
+.errcard .t b{display:block; color:var(--state-crit);}
+.errcard .t span{color:var(--text-secondary); font-size:12.5px;}
+.skwrap{padding:16px; display:flex; flex-direction:column; gap:10px;}
+.rootnote{display:flex; gap:14px; align-items:flex-start; padding:20px;}
+.rootnote .ic{width:44px; height:44px; border-radius:12px; background:var(--state-neutral-bg); color:var(--state-neutral); display:grid; place-items:center; flex:none;}
+.rootnote h3{margin:0 0 4px; font-size:var(--text-md);}
+.rootnote p{margin:0 0 6px; color:var(--text-secondary); font-size:13px; line-height:1.55; max-width:620px;}
+
+/* crossing modal (reused from crossing-prompt.html, Story #4723) */
+.overlay{position:absolute; inset:0; background:rgba(0,0,0,.55); z-index:200; display:flex; justify-content:center; align-items:flex-start; padding:56px 16px 32px;}
+.cx{width:100%; max-width:540px; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-lg); overflow:hidden; box-shadow:var(--shadow);}
+.cx-title{display:flex; align-items:center; padding:10px 13px; background:var(--bg-elevated); border-bottom:1px solid var(--border);}
+.cx-title span{font-family:var(--font-mono); font-size:var(--text-sm); color:var(--text-faint); margin:0 auto; letter-spacing:.02em;}
+.cx-body{padding:22px 24px 20px; display:flex; flex-direction:column; gap:16px;}
+.cx-head{display:flex; gap:14px; align-items:flex-start;}
+.cx-ico{width:44px; height:44px; border-radius:12px; background:var(--state-neutral-bg); color:var(--state-neutral); display:grid; place-items:center; flex:none;}
+.cx-head h2{margin:0; font-size:var(--text-lg); font-weight:700;}
+.cx-head p{margin:4px 0 0; color:var(--text-secondary);}
+.cx-head .tid{font-family:var(--font-mono); font-weight:600; color:var(--text-primary);}
+.path{border:1px solid var(--border); border-radius:var(--radius); padding:13px 14px;}
+.path-top{display:flex; align-items:center; gap:8px; margin-bottom:6px;}
+.path-top .num{width:20px; height:20px; border-radius:50%; display:grid; place-items:center; font-size:11px; font-weight:700; flex:none;}
+.path-top h3{margin:0; font-size:var(--text-md); font-weight:700;}
+.path p{margin:0; color:var(--text-secondary); font-size:13px; line-height:1.55;}
+.p1{background:var(--tint-blue);} .p1 .num{background:var(--accent); color:var(--accent-ink);}
+.p2 .num{background:var(--state-crit-bg); color:var(--state-crit); border:1px solid var(--state-crit);}
+.or{display:flex; align-items:center; gap:10px; color:var(--text-faint); font-size:var(--text-xs); letter-spacing:var(--tracking-label); text-transform:uppercase;}
+.or::before, .or::after{content:""; flex:1; height:1px; background:var(--border);}
+.cx-foot{display:flex; justify-content:flex-end; align-items:center; gap:8px; padding:12px 24px; border-top:1px solid var(--border); background:var(--bg-primary); flex-wrap:wrap;}
+.cx-foot .note{margin-right:auto; font-size:var(--text-sm); color:var(--text-faint);}
+
+/* state switching: every element carries data-s with the states it shows in; JS sets [hidden] */
+@media (max-width:780px){
+  .form{grid-template-columns:1fr;}
+  .form .hp{grid-template-columns:1fr 1fr;}
+  .form .hp .host{grid-column:1 / -1;}
+  .status{flex-wrap:wrap;}
+  .status .acts{width:100%;}
+}
+</style>
+</head>
+<body>
+
+<div class="harness" role="group" aria-label="Mockup controls">
+  <span class="hl">Mockup · #6247 email delivery</span>
+  <div class="grp" id="stateGrp">
+    <button data-state="ready">Ready</button>
+    <button data-state="nosender">No sender</button>
+    <button data-state="incomplete">Incomplete</button>
+    <button data-state="edit">Replace</button>
+    <button data-state="firstset">First set</button>
+    <button data-state="invalid">Validation error</button>
+    <button data-state="saved">Saved</button>
+    <button data-state="remove">Remove confirm</button>
+    <button data-state="testrun">Test running</button>
+    <button data-state="testok">Test delivered</button>
+    <button data-state="testpartial">Test partial</button>
+    <button data-state="testfail">Test failed</button>
+    <button data-state="loading">Loading</button>
+    <button data-state="error">Error</button>
+    <button data-state="crossing">Crossing required (401)</button>
+    <button data-state="rootread">Root, crossing active</button>
+    <button data-state="forbidden">Forbidden (403)</button>
+    <button data-state="stepup">Passkey cancelled</button>
+  </div>
+  <span class="sp"></span>
+  <div class="grp" id="themeGrp">
+    <button data-theme-mode="auto" aria-pressed="true">Auto</button>
+    <button data-theme-mode="light" aria-pressed="false">Light</button>
+    <button data-theme-mode="dark" aria-pressed="false">Dark</button>
+  </div>
+</div>
+
+<div class="shell">
+  <aside class="side">
+    <div class="logo"><b>CFGMS</b><i>controller</i></div>
+    <nav>
+      <a>Fleet</a><a>Fleet query</a><a>Cases</a><a>Modules</a><a>Config</a><a>Workflows</a><a>Approvals</a><a>Scripts</a>
+      <a>Registration</a><a>Refresh Requests</a><a>Reports</a><a>Audit</a><a>Accounts</a><a>Certificates</a><a>Installer</a>
+      <a>Tenants</a><a>Support access</a><a class="active">Email delivery</a>
+    </nav>
+  </aside>
+  <div class="main">
+    <div class="appbar">
+      <span class="chipbtn">Tenant <b id="tchip">msp-a</b></span>
+      <span class="searchbox">Search…</span>
+      <span class="abspacer"></span>
+      <span class="avatar" id="av">MO</span>
+    </div>
+
+    <div class="content">
+      <div class="htitle">
+        <div>
+          <h1>Email delivery</h1>
+          <p>Choose the mail server that sends operational mail about <b class="mono">msp-a</b> and its clients. Security notices from CFGMS always come from the platform sender, whatever you set here.</p>
+        </div>
+      </div>
+
+      <!-- ===== forbidden (403: no notification:configure-msp) ===== -->
+      <div class="panel" data-s="forbidden">
+        <div class="rootnote">
+          <span class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
+          <div>
+            <h3>You cannot view or change this sender</h3>
+            <p>Email delivery needs the <span class="mono">notification:configure-msp</span> permission on msp-a. MSP administrators have it. Ask an msp-a administrator if you need it.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== error ===== -->
+      <div class="panel" data-s="error">
+        <div class="errcard">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--state-crit)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+          <div class="t"><b>Could not load the email sender.</b><span>The controller did not answer. Your sender settings have not changed.</span></div>
+          <button class="btn-sec">Try again</button>
+        </div>
+      </div>
+
+      <!-- ===== loading ===== -->
+      <div class="panel" data-s="loading">
+        <div class="phead"><h2>Sender</h2></div>
+        <div class="skwrap"><div class="skel" style="width:240px;height:16px"></div><div class="skel" style="width:420px"></div><div class="skel" style="width:360px"></div></div>
+      </div>
+
+      <!-- ===== root with crossing: read-only ===== -->
+      <div class="msg msg-info" data-s="rootread">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+        <span><b>Read-only.</b> You are signed in at root with access to msp-a. Root can see this sender but cannot change, remove or test it: only an msp-a administrator can.</span>
+      </div>
+
+      <!-- ===== 1. current sender ===== -->
+      <div class="panel" data-s="ready incomplete edit saved remove testrun testok testpartial testfail rootread stepup nosender firstset invalid crossing">
+        <div class="phead"><h2>Sender</h2><span class="sub">Who operational mail for msp-a comes from.</span></div>
+
+        <!-- configured + password present -->
+        <div class="status" data-s="ready edit saved remove testrun testok testpartial testfail rootread stepup">
+          <span class="ic ok"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg></span>
+          <div class="t">
+            <h3>msp-a's own sender <span class="pill pill-ok">In use</span></h3>
+            <p>Operational mail for msp-a and its clients goes out through <span class="mono">smtp.vendor-a.example</span>. If a send fails here it is not retried on the platform sender.</p>
+          </div>
+          <div class="acts" data-s="ready saved testok testpartial testfail stepup">
+            <button class="btn-sec" data-go="edit">Replace</button>
+            <button class="btn-danger-soft" data-go="remove">Remove</button>
+          </div>
+        </div>
+
+        <!-- configured, no password -->
+        <div class="status" data-s="incomplete">
+          <span class="ic warn"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></svg></span>
+          <div class="t">
+            <h3>Sender incomplete: using the platform sender <span class="pill pill-warn">No password</span></h3>
+            <p>Settings are saved but no password is stored, so mail for msp-a goes through the platform sender. Add the password to start using your own sender.</p>
+          </div>
+          <div class="acts">
+            <button class="btn" data-go="edit">Add password</button>
+            <button class="btn-danger-soft" data-go="remove">Remove</button>
+          </div>
+        </div>
+
+        <!-- not configured -->
+        <div class="status" data-s="nosender firstset invalid crossing">
+          <span class="ic neutral"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg></span>
+          <div class="t">
+            <h3>No sender: using the platform sender <span class="pill pill-neutral">Platform</span></h3>
+            <p>Mail for msp-a and its clients comes from the CFGMS platform sender. Set your own mail server so your clients see mail from your domain.</p>
+          </div>
+          <div class="acts" data-s="nosender"><button class="btn" data-go="firstset"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>Set sender</button></div>
+        </div>
+
+        <dl class="kv" data-s="ready incomplete saved remove testrun testok testpartial testfail rootread stepup">
+          <div><dt>Mail server</dt><dd>smtp.vendor-a.example</dd></div>
+          <div><dt>Port · TLS</dt><dd>587 · STARTTLS</dd></div>
+          <div><dt>From</dt><dd>ops@acme-corp.example</dd></div>
+          <div><dt>Username</dt><dd>mailer</dd></div>
+          <div><dt>Password</dt>
+            <dd class="sans" data-s="ready saved remove testrun testok testpartial testfail rootread stepup"><span class="savedchip"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Password saved</span></dd>
+            <dd class="sans" data-s="incomplete"><span class="pill pill-warn">Not saved</span></dd>
+          </div>
+        </dl>
+
+        <div class="confirm-in" data-s="remove">
+          <span class="t"><b>Remove msp-a's sender?</b> The settings and the stored password are deleted. Mail for msp-a and its clients goes through the platform sender from now on.
+            <span class="s">You can set a sender again at any time. This is recorded in your audit log.</span></span>
+          <button class="btn-sec btn-sm" data-go="ready">Keep</button>
+          <button class="btn-danger btn-sm" data-go="nosender">Remove sender</button>
+        </div>
+      </div>
+
+      <!-- ===== 2. set / replace form ===== -->
+      <div class="panel" data-s="edit firstset invalid stepup">
+        <div class="phead"><h2 data-s="edit stepup">Replace sender</h2><h2 data-s="firstset invalid">Set sender</h2>
+          <span class="sub">Saving replaces every setting below.</span></div>
+        <div class="pbody">
+          <form class="form" novalidate onsubmit="return false">
+            <div class="wide hp">
+              <div class="field host" id="fHost"><label for="host">Mail server <span class="req">*</span></label>
+                <input type="text" id="host" class="mono" placeholder="smtp.vendor-a.example" autocomplete="off">
+                <span class="err" data-s="invalid">Enter a host name only: no spaces, no "/".</span></div>
+              <div class="field"><label for="tls">TLS</label>
+                <select id="tls"><option value="starttls">STARTTLS</option><option value="implicit_tls">Implicit TLS</option></select></div>
+              <div class="field"><label for="port">Port</label>
+                <select id="port"><option>587</option><option>465</option></select></div>
+            </div>
+            <div class="field" id="fFrom"><label for="from">From address <span class="req">*</span></label>
+              <input type="email" id="from" class="mono" placeholder="ops@acme-corp.example" autocomplete="off">
+              <span class="hint" data-s="edit firstset stepup">An address only, no display name. Tests are sent here.</span>
+              <span class="err" data-s="invalid">Use a bare address such as ops@acme-corp.example, without a name.</span></div>
+            <div class="field"><label for="user">Username</label>
+              <input type="text" id="user" class="mono" placeholder="Optional" autocomplete="off"></div>
+            <div class="field wide" id="fPw">
+              <label for="pw">Password <span class="req" data-s="firstset invalid">*</span></label>
+              <div class="pwrow">
+                <input type="password" id="pw" autocomplete="new-password" placeholder="">
+                <span class="savedchip" data-s="edit stepup"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Password saved</span>
+              </div>
+              <span class="hint" data-s="edit stepup">Leave empty to keep the saved password. A saved password is never shown again; type a new one to replace it.</span>
+              <span class="hint" data-s="firstset">Required the first time. After you save, it is never shown again.</span>
+              <span class="err" data-s="invalid">A password is required: no password is saved for msp-a yet.</span>
+            </div>
+          </form>
+          <div class="msg msg-crit" data-s="invalid" style="margin-top:14px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+            <span><b>Not saved.</b> Fix the fields marked above. Nothing was stored, and the password field has been cleared.</span></div>
+          <div class="msg msg-crit" data-s="stepup" style="margin-top:14px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+            <span><b>Not saved.</b> The passkey check was cancelled. Your sender has not changed. Type the password again if you want to replace it, then save.</span></div>
+          <div class="savebar">
+            <span class="hint">You confirm with your passkey. The change is recorded in your audit log without the password or username.</span>
+            <span class="sp"></span>
+            <button class="btn-sec" data-go-back>Cancel</button>
+            <button class="btn" id="saveBtn">Save sender</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== 3. test ===== -->
+      <div class="panel" data-s="ready incomplete saved testrun testok testpartial testfail nosender rootread">
+        <div class="phead"><h2>Send a test</h2><span class="sub">One fixed message through msp-a's sender. Nothing you type goes into it.</span></div>
+        <div class="pbody">
+          <div class="testrow">
+            <span class="t" data-s="ready saved testrun testok testpartial testfail">Sends to the sender's own from address, <span class="mono">ops@acme-corp.example</span>. The platform sender is never used for a test.</span>
+            <span class="t" data-s="incomplete nosender">Set a complete sender first. A test never falls back to the platform sender.</span>
+            <span class="t" data-s="rootread">Only an msp-a administrator can send a test.</span>
+            <button class="btn" data-s="ready saved testok testpartial testfail" data-go="testrun">Send test</button>
+            <button class="btn" disabled data-s="testrun"><span class="spin"></span>Sending…</button>
+            <button class="btn" disabled data-s="incomplete nosender rootread">Send test</button>
+          </div>
+
+          <div class="running" data-s="testrun"><span class="spin"></span>Connecting to <span class="mono">smtp.vendor-a.example</span> and sending. This can take up to a minute.</div>
+
+          <div class="result ok" data-s="testok">
+            <div class="rh"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Delivered. The mail server accepted every recipient.<span class="when">Today 10:42</span></div>
+            <table class="tbl"><thead><tr><th>Recipient</th><th>Result</th><th>Reason</th></tr></thead>
+              <tbody><tr><td><span class="addr">ops@acme-corp.example</span></td><td><span class="pill pill-ok">Accepted</span></td><td><span class="muted">—</span></td></tr></tbody></table>
+          </div>
+
+          <div class="result warn" data-s="testpartial">
+            <div class="rh"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></svg>Not delivered to everyone. <span class="why" id="partialWhy"></span><span class="when">Today 10:44</span></div>
+            <table class="tbl"><thead><tr><th>Recipient</th><th>Result</th><th>Reason</th></tr></thead><tbody id="partialRows"></tbody></table>
+          </div>
+
+          <div class="result crit" data-s="testfail">
+            <div class="rh"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>Not delivered. <span class="why">delivery timed out</span><span class="when">Today 10:47</span></div>
+            <table class="tbl"><thead><tr><th>Recipient</th><th>Result</th><th>Reason</th></tr></thead>
+              <tbody><tr><td><span class="addr">ops@acme-corp.example</span></td><td><span class="pill pill-crit">Not sent</span></td><td><span class="reason">delivery timed out</span></td></tr></tbody></table>
+            <div class="pbody hint">Check the mail server, port and TLS mode, then try again. A host that resolves to a private or loopback address is refused before any connection is made.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== 4. what uses this sender ===== -->
+      <div class="panel" data-s="ready nosender incomplete saved testok testpartial testfail rootread">
+        <div class="phead"><h2>What uses this sender</h2></div>
+        <table class="uses"><tbody>
+          <tr><td>Steward tamper alerts, locked-admission notices, pending script changes, repair-contested notices</td><td>msp-a sender, else platform</td></tr>
+          <tr><td>Break-glass notices about root access to msp-a</td><td>Platform, always</td></tr>
+          <tr><td>Test from this page</td><td>msp-a sender only</td></tr>
+        </tbody></table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== crossing required (401): standard crossing prompt over the page ===== -->
+  <div class="overlay" data-s="crossing">
+    <div class="cx" role="dialog" aria-modal="true" aria-labelledby="cxh">
+      <div class="cx-title"><span>tenant access required</span></div>
+      <div class="cx-body">
+        <div class="cx-head">
+          <span class="cx-ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
+          <div>
+            <h2 id="cxh">The MSP controls access to this tenant</h2>
+            <p>You are signed in at root. To see inside <span class="tid">msp-a</span> and its clients, you need access that msp-a gives, or an audited emergency elevation.</p>
+          </div>
+        </div>
+        <div class="path p1">
+          <div class="path-top"><span class="num">1</span><h3>Ask the MSP for support access</h3><span class="pill pill-acc" style="margin-left:auto">Recommended</span></div>
+          <p>An msp-a administrator can turn on <b>support access</b> from their own console, for 1 to 24 hours.</p>
+        </div>
+        <div class="or">or, only in an emergency</div>
+        <div class="path p2">
+          <div class="path-top"><span class="num">2</span><h3>Break-glass</h3></div>
+          <p>Same form as every other MSP page (see <span class="mono">crossing-prompt.html</span>): reason, justification, MSP is told right away.</p>
+        </div>
+      </div>
+      <div class="cx-foot">
+        <span class="note">Even with access, root can only read this sender.</span>
+        <button class="btn-sec">Cancel</button>
+        <button class="btn-danger" disabled>Use break-glass</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  var root = document.documentElement;
+  var ALL = ['ready','nosender','incomplete','edit','firstset','invalid','saved','remove','testrun','testok','testpartial','testfail',
+             'loading','error','crossing','rootread','forbidden','stepup'];
+  var current = 'ready', previous = 'ready';
+
+  function esc(x){ return String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); } // mirrors JSX text-node rendering
+  function toast(t){ var el = document.getElementById('toast'); el.textContent = t; el.classList.add('show'); setTimeout(function(){ el.classList.remove('show'); }, 2400); }
+  function press(grp, btn){ grp.querySelectorAll('button').forEach(function(b){ b.setAttribute('aria-pressed', b===btn ? 'true':'false'); }); }
+
+  // Partial result: server strings render as literal text, including markup.
+  var partial = { failure_reason:'recipient not accepted', recipients:[
+    { address:'ops@acme-corp.example', accepted:true },
+    { address:'alerts@acme-corp.example', accepted:false, reason:'550 5.1.1 <script>alert(1)<\/script> mailbox unavailable' } ] };
+  document.getElementById('partialWhy').textContent = partial.failure_reason;
+  document.getElementById('partialRows').innerHTML = partial.recipients.map(function(r){
+    return '<tr><td><span class="addr">'+esc(r.address)+'</span></td><td>'+(r.accepted ? '<span class="pill pill-ok">Accepted</span>' : '<span class="pill pill-crit">Rejected</span>')
+      +'</td><td>'+(r.reason ? '<span class="reason">'+esc(r.reason)+'</span>' : '<span class="muted">—</span>')+'</td></tr>';
+  }).join('');
+
+  function fillForm(s){
+    var host = document.getElementById('host'), from = document.getElementById('from'), user = document.getElementById('user'), pw = document.getElementById('pw');
+    var edit = (s==='edit' || s==='stepup');
+    host.value = edit ? 'smtp.vendor-a.example' : (s==='invalid' ? 'smtp.vendor-a.example/submit' : '');
+    from.value = edit ? 'ops@acme-corp.example' : (s==='invalid' ? 'Acme Ops <ops@acme-corp.example>' : '');
+    user.value = edit ? 'mailer' : '';
+    pw.value = '';                                      // never pre-filled; cleared after every save attempt
+    pw.placeholder = edit ? 'Leave empty to keep the saved password' : 'Password';
+    document.getElementById('fHost').classList.toggle('bad', s==='invalid');
+    document.getElementById('fFrom').classList.toggle('bad', s==='invalid');
+    document.getElementById('fPw').classList.toggle('bad', s==='invalid');
+  }
+
+  function setState(s){
+    if (ALL.indexOf(s) < 0) s = 'ready';
+    if (s !== current) previous = current;
+    current = s;
+    document.querySelectorAll('[data-s]').forEach(function(el){
+      var on = el.getAttribute('data-s').split(/\s+/).indexOf(s) >= 0;
+      el.hidden = !on;
+    });
+    var rootish = (s==='crossing' || s==='rootread');
+    document.getElementById('tchip').textContent = 'msp-a';
+    document.getElementById('av').textContent = rootish ? 'RO' : 'MO';
+    fillForm(s);
+    var b = document.querySelector('#stateGrp [data-state="'+s+'"]'); if (b) press(document.getElementById('stateGrp'), b);
+  }
+
+  document.body.addEventListener('click', function(e){
+    var b;
+    if ((b = e.target.closest('#stateGrp button'))){ setState(b.dataset.state); return; }
+    if ((b = e.target.closest('[data-go]'))){
+      var to = b.dataset.go; setState(to);
+      if (to==='nosender' && previous==='remove') toast('Sender removed. Mail now goes through the platform sender.');
+      if (to==='testrun') setTimeout(function(){ if (current==='testrun') setState('testok'); }, 1400);
+      return; }
+    if ((b = e.target.closest('[data-go-back]'))){ setState(previous==='nosender' ? 'nosender' : (previous==='incomplete' ? 'incomplete' : 'ready')); return; }
+    if ((b = e.target.closest('#saveBtn'))){
+      if (e.shiftKey){ setState('stepup'); return; }
+      if (current==='firstset' && !document.getElementById('pw').value){ setState('invalid'); return; }
+      document.getElementById('pw').value = ''; setState('saved'); toast('Sender saved. Password saved.'); return; }
+  });
+  document.getElementById('tls').addEventListener('change', function(e){ document.getElementById('port').value = e.target.value==='implicit_tls' ? '465' : '587'; });
+
+  var themeGrp = document.getElementById('themeGrp');
+  themeGrp.addEventListener('click', function(e){ var b = e.target.closest('button'); if (!b) return; press(themeGrp, b);
+    if (b.dataset.themeMode === 'auto') root.removeAttribute('data-theme'); else root.setAttribute('data-theme', b.dataset.themeMode); });
+
+  var q = new URLSearchParams(location.search);
+  if (q.get('theme')) { root.setAttribute('data-theme', q.get('theme')); var tb = themeGrp.querySelector('[data-theme-mode="'+q.get('theme')+'"]'); if (tb) press(themeGrp, tb); }
+  setState(q.get('state') || 'ready');
+})();
+</script>
+</body>
+</html>
