@@ -111,7 +111,7 @@ func (s *DatabaseRBACStore) StoreBulkRoles(ctx context.Context, roles []*common.
 			permissionIDsJSON,
 			role.IsSystemRole,
 			role.TenantId,
-			role.ParentRoleId,
+			nullStringOrEmpty(role.ParentRoleId), // empty means "no parent"; "" must become NULL or the self-referential FK rejects it (same as StoreRole)
 			int32(role.InheritanceType),
 		)
 
