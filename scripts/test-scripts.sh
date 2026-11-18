@@ -2556,7 +2556,7 @@ STUB
 # Acceptance rule for a skipped macOS leg at the PR-side Build Gate (Issue
 # #5974). Table-driven over scripts/macos-gate-rule.sh, the script
 # build-gate-pr-stub calls — plus a check that the job's run: block calls it for
-# all seven macOS legs, so removing the call (or the script) fails here.
+# all eight macOS legs, so removing the call (or the script) fails here.
 test_macos_gate_rule() {
     log_test "Testing macos-gate-rule.sh: skipped macOS legs are accepted only when changes succeeded and macos is exactly false..."
 
@@ -2604,15 +2604,15 @@ test_macos_gate_rule() {
             return
         fi
     done
-    # The seven legs sit in their own loop whose body calls the rule script;
+    # The eight legs sit in their own loop whose body calls the rule script;
     # none of them may also sit in the generic loop that accepts a skipped
     # result on any docs-only PR, or the rule would be bypassed.
-    local macos_loop_re='for result in "\$MACOS_PROVIDERS_RESULT" "\$MACOS_STEWARD_RESULT" "\$MACOS_CMD_STEWARD_1_RESULT" "\$MACOS_CMD_STEWARD_2_RESULT" "\$MACOS_CMD_STEWARD_3_RESULT" "\$MACOS_REST_1_RESULT" "\$MACOS_REST_2_RESULT"; do'
+    local macos_loop_re='for result in "\$MACOS_PROVIDERS_RESULT" "\$MACOS_STEWARD_RESULT" "\$MACOS_CMD_STEWARD_1_RESULT" "\$MACOS_CMD_STEWARD_2_RESULT" "\$MACOS_CMD_STEWARD_3_RESULT" "\$MACOS_CMD_STEWARD_4_RESULT" "\$MACOS_REST_1_RESULT" "\$MACOS_REST_2_RESULT"; do'
     if ! grep -A2 -E "$macos_loop_re" <<< "$run_block" | grep -qE 'macos-gate-rule\.sh "\$CHANGES_RESULT" "\$MACOS_CHANGES" "\$result"'; then
-        log_fail "the seven macOS legs are not each passed to macos-gate-rule.sh (changes result, macos output, leg result) in one loop"
+        log_fail "the eight macOS legs are not each passed to macos-gate-rule.sh (changes result, macos output, leg result) in one loop"
         return
     fi
-    if grep -E '^[[:space:]]*for result in ' <<< "$run_block" | grep -vE "$macos_loop_re" | grep -qE 'MACOS_(PROVIDERS|STEWARD|CMD_STEWARD_1|CMD_STEWARD_2|CMD_STEWARD_3|REST_1|REST_2)_RESULT'; then
+    if grep -E '^[[:space:]]*for result in ' <<< "$run_block" | grep -vE "$macos_loop_re" | grep -qE 'MACOS_(PROVIDERS|STEWARD|CMD_STEWARD_1|CMD_STEWARD_2|CMD_STEWARD_3|CMD_STEWARD_4|REST_1|REST_2)_RESULT'; then
         log_fail "a macOS leg is also checked by another loop in build-gate-pr-stub"
         return
     fi
@@ -2621,14 +2621,14 @@ test_macos_gate_rule() {
         return
     fi
 
-    # Each of the six cmd/steward shard jobs (Issue #6296) is listed in the
+    # Each of the eight cmd/steward shard jobs (Issue #6296) is listed in the
     # Build Gate needs, has its result passed through env: and has a summary
     # row; the loops are asserted above and below. Without the needs entry the
     # gate would not wait for the job, without the env entry its result would
     # read as empty.
     local shard_os shard_n shard_job shard_var
     for shard_os in windows macos; do
-        for shard_n in 1 2 3; do
+        for shard_n in 1 2 3 4; do
             shard_job="${shard_os}-cmd-steward-${shard_n}"
             shard_var="$(tr '[:lower:]' '[:upper:]' <<< "$shard_os")_CMD_STEWARD_${shard_n}_RESULT"
             if ! grep -qxF "      - ${shard_job}" <<< "$run_block"; then
@@ -2639,30 +2639,30 @@ test_macos_gate_rule() {
                 log_fail "build-gate-pr-stub env does not pass needs.${shard_job}.result as ${shard_var}"
                 return
             fi
-            if ! grep -qE "echo \"\| .*cmd/steward shard ${shard_n}/3 \| \\\$${shard_var} \|\"" <<< "$run_block"; then
-                log_fail "build-gate-pr-stub summary has no row for ${shard_var} (shard ${shard_n}/3)"
+            if ! grep -qE "echo \"\| .*cmd/steward shard ${shard_n}/4 \| \\\$${shard_var} \|\"" <<< "$run_block"; then
+                log_fail "build-gate-pr-stub summary has no row for ${shard_var} (shard ${shard_n}/4)"
                 return
             fi
         done
     done
-    for shard_n in 1 2 3; do
+    for shard_n in 1 2 3 4; do
         if ! grep -E '^[[:space:]]*for result in ' <<< "$run_block" | grep -qF "\"\$WINDOWS_CMD_STEWARD_${shard_n}_RESULT\""; then
             log_fail "WINDOWS_CMD_STEWARD_${shard_n}_RESULT is not in the Windows result loop of build-gate-pr-stub"
             return
         fi
     done
 
-    # The seven legs themselves are gated on the macos output; the Windows and
+    # The eight legs themselves are gated on the macos output; the Windows and
     # e2e legs still on code.
     local leg
-    for leg in macos-providers macos-steward macos-cmd-steward-1 macos-cmd-steward-2 macos-cmd-steward-3 macos-rest-1 macos-rest-2; do
+    for leg in macos-providers macos-steward macos-cmd-steward-1 macos-cmd-steward-2 macos-cmd-steward-3 macos-cmd-steward-4 macos-rest-1 macos-rest-2; do
         if ! awk -v job="  ${leg}:" '$0 == job { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on && /^    if:/ { print }' "$wf" \
             | grep -qF "needs.changes.outputs.macos == 'true'"; then
             log_fail "$leg is not gated on needs.changes.outputs.macos == 'true'"
             return
         fi
     done
-    for leg in windows-api windows-controller windows-steward windows-cmd windows-cmd-steward-1 windows-cmd-steward-2 windows-cmd-steward-3 windows-rest e2e; do
+    for leg in windows-api windows-controller windows-steward windows-cmd windows-cmd-steward-1 windows-cmd-steward-2 windows-cmd-steward-3 windows-cmd-steward-4 windows-rest e2e; do
         if ! awk -v job="  ${leg}:" '$0 == job { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on && /^    if:/ { print }' "$wf" \
             | grep -qF "needs.changes.outputs.code == 'true'"; then
             log_fail "$leg is no longer gated on needs.changes.outputs.code == 'true'"
@@ -2670,7 +2670,7 @@ test_macos_gate_rule() {
         fi
     done
 
-    log_pass "macos-gate-rule.sh: 11-row table holds; build-gate-pr-stub calls it for all seven macOS legs and the legs are gated on the macos output"
+    log_pass "macos-gate-rule.sh: 11-row table holds; build-gate-pr-stub calls it for all eight macOS legs and the legs are gated on the macos output"
 }
 
 # The macOS legs are skipped on a PR outside the macOS package closure, so the
@@ -2723,7 +2723,7 @@ test_build_gate_requires_macos_test_compile() {
 }
 
 # scripts/macos-pr-filter.sh against the real repository (Issue #5974): the
-# seven macOS legs may be skipped only when no changed file is in the closure.
+# eight macOS legs may be skipped only when no changed file is in the closure.
 test_macos_pr_filter() {
     log_test "Testing macos-pr-filter.sh against the real package closure..."
 
@@ -2975,7 +2975,7 @@ cmd_steward_shard_probes() {
     fi
     echo "$names"
     awk 'BEGIN {
-        n = split("Tamper Identity RegisterAndConnect_ RegisterAndConnect_U RegisterAndConnect_Unreachable", prefixes, " ")
+        n = split("Tamper Identity Repair RegisterAndConnect_ RegisterAndConnect_U RegisterAndConnect_Unreachable", prefixes, " ")
         for (p = 1; p <= n; p++) {
             for (i = 0; i <= length(prefixes[p]); i++) {
                 print "Test" substr(prefixes[p], 1, i)
@@ -3385,6 +3385,118 @@ test_macos_cmd_steward_timeout_and_streaming() {
     CMD_STEWARD_CHECKED_JOBS=0
     check_cmd_steward_timeout_and_streaming macos-latest macOS || return 0
     log_pass "macOS jobs running cmd/steward (${CMD_STEWARD_CHECKED_JOBS}): -timeout at most timeout-minutes minus 9, output streamed"
+}
+
+# Issue #6328: every cmd/steward shard recipe runs go test through
+# scripts/cmd-steward-shard-budget.sh, which prints the shard's summed
+# top-level test seconds and warns (GitHub annotation, job summary row) above
+# the budget without changing go test's exit status. Exercised with fixture
+# commands; the recipe check reads `make -n`.
+test_cmd_steward_shard_budget_wrapper() {
+    log_test "Testing cmd-steward-shard-budget.sh: sum, over-budget warning, summary row, exit status, recipes call it..."
+
+    local wrapper=scripts/cmd-steward-shard-budget.sh
+    if [[ ! -f "$wrapper" ]]; then
+        log_fail "$wrapper is missing"
+        return
+    fi
+
+    local tmp summary out rc
+    tmp=$(mktemp -d)
+    summary="$tmp/summary.md"
+    : > "$summary"
+
+    # 350.00 s of top-level tests plus an indented subtest that must not count.
+    rc=0
+    out=$(GITHUB_STEP_SUMMARY="$summary" bash "$wrapper" shard-a 300 -- \
+        printf -- '--- PASS: TestA (200.00s)\n--- FAIL: TestB (150.00s)\n    --- PASS: TestB/sub (99.00s)\n' 2>&1) || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        log_fail "wrapper exited ${rc} for a succeeding command"
+        rm -rf "$tmp"
+        return
+    fi
+    if ! grep -qE '^SHARD_BUDGET shard-a sum=350(\.0)?s budget=300s tests=2$' <<< "$out"; then
+        log_fail "wrapper did not print SHARD_BUDGET with sum=350 and 2 tests (subtests must not count): ${out}"
+        rm -rf "$tmp"
+        return
+    fi
+    if ! grep -qE '^::warning title=cmd/steward shard over budget::shard-a summed 350(\.0)?s against 300s$' <<< "$out"; then
+        log_fail "wrapper did not print the ::warning annotation for a 350s sum against 300s: ${out}"
+        rm -rf "$tmp"
+        return
+    fi
+    if ! grep -qE '^\| shard-a \| 350(\.0)?s \| 300s \|$' "$summary"; then
+        log_fail "wrapper did not append the shard row to GITHUB_STEP_SUMMARY: $(cat "$summary")"
+        rm -rf "$tmp"
+        return
+    fi
+
+    # Under budget: sum reported, no warning. CRLF line ends (Windows) count.
+    out=$(GITHUB_STEP_SUMMARY="$summary" bash "$wrapper" shard-b 300 -- \
+        printf -- '--- PASS: TestA (200.00s)\r\n--- PASS: TestB (50.00s)\r\n    --- PASS: TestB/sub (99.00s)\r\n' 2>&1) || true
+    if ! grep -qE '^SHARD_BUDGET shard-b sum=250(\.0)?s budget=300s tests=2$' <<< "$out"; then
+        log_fail "wrapper did not print sum=250 for the under-budget fixture: ${out}"
+        rm -rf "$tmp"
+        return
+    fi
+    if grep -q '::warning' <<< "$out"; then
+        log_fail "wrapper warned for a 250s sum against a 300s budget: ${out}"
+        rm -rf "$tmp"
+        return
+    fi
+
+    # A failing command keeps its exit status, and a timed-out run still
+    # reports the tests that finished.
+    rc=0
+    out=$(bash "$wrapper" shard-c 300 -- bash -c 'echo "--- PASS: TestA (12.00s)"; echo "panic: test timed out after 6m0s"; exit 3' 2>&1) || rc=$?
+    if [[ $rc -ne 3 ]]; then
+        log_fail "wrapper returned exit ${rc} for a command that exited 3"
+        rm -rf "$tmp"
+        return
+    fi
+    if ! grep -qE '^SHARD_BUDGET shard-c sum=12(\.0)?s budget=300s tests=1$' <<< "$out"; then
+        log_fail "wrapper did not report the partial sum of a failed run: ${out}"
+        rm -rf "$tmp"
+        return
+    fi
+
+    # Bad arguments fail closed instead of running the command unbudgeted.
+    rc=0
+    bash "$wrapper" shard-d notanumber -- true >/dev/null 2>&1 || rc=$?
+    if [[ $rc -ne 2 ]]; then
+        log_fail "wrapper accepted a non-numeric budget (exit ${rc})"
+        rm -rf "$tmp"
+        return
+    fi
+    rc=0
+    bash "$wrapper" shard-d 300 true >/dev/null 2>&1 || rc=$?
+    if [[ $rc -ne 2 ]]; then
+        log_fail "wrapper accepted a missing -- separator (exit ${rc})"
+        rm -rf "$tmp"
+        return
+    fi
+    rm -rf "$tmp"
+
+    # Every shard recipe on both platforms goes through the wrapper with the
+    # shared budget variable and its own label.
+    local os n target recipe count=0
+    for os in windows macos; do
+        for target in $(grep -oE "^test-go-group-${os}-cmd-steward-[0-9]+:" Makefile | tr -d ':'); do
+            n=${target##*-}
+            recipe=$(make -n --no-print-directory "$target" 2>&1)
+            if ! grep -qE "bash scripts/cmd-steward-shard-budget\.sh ${os}-cmd-steward-${n} 300 -- " <<< "$recipe"; then
+                log_fail "${target} does not run go test through scripts/cmd-steward-shard-budget.sh ${os}-cmd-steward-${n} 300"
+                return
+            fi
+            count=$((count + 1))
+        done
+    done
+    if [[ $count -ne 8 ]]; then
+        log_fail "found ${count} test-go-group-{windows,macos}-cmd-steward-N targets, want 8"
+        return
+    fi
+
+    log_pass "cmd-steward-shard-budget.sh: sums top-level tests only, warns above budget, writes the summary row, keeps the exit status; all ${count} shard recipes call it"
 }
 
 test_resource_sampler_no_placeholder() {
@@ -3822,6 +3934,7 @@ DISPATCH_TABLE=(
     "test_windows_steward_groups_cover_exactly_steward_and_cmd:core"
     "test_windows_cmd_steward_timeout_and_streaming:core"
     "test_macos_cmd_steward_timeout_and_streaming:core"
+    "test_cmd_steward_shard_budget_wrapper:core"
     "test_queue_native_build_runs_only_shard_1_content:core"
     "test_no_tracked_file_mutation:core"
 )

@@ -1870,6 +1870,15 @@ func (h *actionHarness) lockHeld(device string) bool {
 	return held
 }
 
+// requireLockReleased waits for the device slot to be free. A completion event
+// releases the slot and then starts an asynchronous dispatch for the device's next
+// entry, which holds the slot briefly while it finds the queue empty, so a single
+// immediate read can land inside that window.
+func (h *actionHarness) requireLockReleased(t *testing.T, device, msg string) {
+	t.Helper()
+	require.Eventually(t, func() bool { return !h.lockHeld(device) }, 2*time.Second, 5*time.Millisecond, msg)
+}
+
 func (h *actionHarness) completeAction(t *testing.T, device, executionID string, details map[string]interface{}) {
 	t.Helper()
 	details["execution_id"] = executionID
@@ -2079,7 +2088,7 @@ func TestDispatcher_StewardAction_CompletionRecordsResultCode(t *testing.T) {
 			r, err := h.manager.GetRun(context.Background(), runID)
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantRun, r.Status)
-			assert.False(t, h.lockHeld(device), "completion releases the device slot")
+			h.requireLockReleased(t, device, "completion releases the device slot")
 			assert.Empty(t, h.q.PeekForDevice(device), "the queue entry is acknowledged")
 		})
 	}
@@ -2456,7 +2465,7 @@ func TestDispatcher_LateResultForCancelledStewardActionIsAudited(t *testing.T) {
 	assert.Equal(t, 0, late[0].ReportedExitCode)
 	assert.Equal(t, "ok", late[0].ReportedResultCode)
 	assert.Equal(t, "steward_action", late[0].Kind)
-	assert.False(t, h.lockHeld(device), "a late result still releases the device slot")
+	h.requireLockReleased(t, device, "a late result still releases the device slot")
 }
 
 func TestDispatcherLibraryRunForwardsIdentityAndSignature(t *testing.T) {
