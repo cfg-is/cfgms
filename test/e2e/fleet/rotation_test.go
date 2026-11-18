@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cfgis/cfgms/test/e2e/fleet/fleetkit"
 )
 
 // signingCertRotationResult holds the response fields from POST /api/v1/certificates/signing/rotate.
@@ -31,11 +33,11 @@ type signingCertRotationResult struct {
 // and returns the result. Operator-initiated rotations should bypass the
 // in-progress guard so back-to-back e2e scenarios succeed independent of the
 // cursor state left by the previous test.
-func (s *FleetTestSuite) rotateSigningCert(t *testing.T, overlapDays int) signingCertRotationResult {
+func (s *fleetScenarioSuite) rotateSigningCert(t *testing.T, overlapDays int) signingCertRotationResult {
 	t.Helper()
 
 	reqBody := fmt.Sprintf(`{"overlap_days":%d,"force":true}`, overlapDays)
-	url := fmt.Sprintf("%s/api/v1/certificates/signing/rotate", s.controllerURL)
+	url := fmt.Sprintf("%s/api/v1/certificates/signing/rotate", s.ControllerURL)
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, strings.NewReader(reqBody))
 	if err != nil {
@@ -43,9 +45,9 @@ func (s *FleetTestSuite) rotateSigningCert(t *testing.T, overlapDays int) signin
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.HTTPClient.Do(req)
 	if err != nil {
-		t.Fatalf("POST signing/rotate: %v\n%s", err, s.controllerStallDiagnostics(""))
+		t.Fatalf("POST signing/rotate: %v\n%s", err, s.ControllerStallDiagnostics(""))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -70,11 +72,11 @@ func (s *FleetTestSuite) rotateSigningCert(t *testing.T, overlapDays int) signin
 // tryRotateSigningCert calls the rotation endpoint WITHOUT force and returns any
 // error without failing the test. Used by CrashMidRotation to verify the
 // in-progress guard fires on the second call.
-func (s *FleetTestSuite) tryRotateSigningCert(t *testing.T, overlapDays int) error {
+func (s *fleetScenarioSuite) tryRotateSigningCert(t *testing.T, overlapDays int) error {
 	t.Helper()
 
 	reqBody := fmt.Sprintf(`{"overlap_days":%d}`, overlapDays)
-	url := fmt.Sprintf("%s/api/v1/certificates/signing/rotate", s.controllerURL)
+	url := fmt.Sprintf("%s/api/v1/certificates/signing/rotate", s.ControllerURL)
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, strings.NewReader(reqBody))
 	if err != nil {
@@ -82,7 +84,7 @@ func (s *FleetTestSuite) tryRotateSigningCert(t *testing.T, overlapDays int) err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.HTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("POST signing/rotate: %w", err)
 	}
@@ -104,21 +106,21 @@ type signingCertRevokeResult struct {
 
 // revokeSigningCert calls POST /api/v1/certificates/signing/revoke and returns the
 // HTTP status, the parsed result (zero when the call was refused) and the raw body.
-func (s *FleetTestSuite) revokeSigningCert(t *testing.T, serial, reason string) (int, signingCertRevokeResult, string) {
+func (s *fleetScenarioSuite) revokeSigningCert(t *testing.T, serial, reason string) (int, signingCertRevokeResult, string) {
 	t.Helper()
 
 	reqBody, err := json.Marshal(map[string]string{"serial": serial, "reason": reason})
 	if err != nil {
 		t.Fatalf("marshal revoke request: %v", err)
 	}
-	url := fmt.Sprintf("%s/api/v1/certificates/signing/revoke", s.controllerURL)
+	url := fmt.Sprintf("%s/api/v1/certificates/signing/revoke", s.ControllerURL)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, strings.NewReader(string(reqBody)))
 	if err != nil {
 		t.Fatalf("build revoke request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.HTTPClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST signing/revoke: %v", err)
 	}
@@ -146,15 +148,15 @@ func (s *FleetTestSuite) revokeSigningCert(t *testing.T, serial, reason string) 
 // real rotation. The endpoint returns 4xx (typically 400) when it is registered and
 // 404 when stories B2a (#1815) and B2b (#1816) have not yet been merged. The probe
 // is non-destructive: no rotation primitive runs on a 4xx body-validation failure.
-func (s *FleetTestSuite) rotationEndpointAvailable(t *testing.T) bool {
+func (s *fleetScenarioSuite) rotationEndpointAvailable(t *testing.T) bool {
 	t.Helper()
-	url := fmt.Sprintf("%s/api/v1/certificates/signing/rotate", s.controllerURL)
+	url := fmt.Sprintf("%s/api/v1/certificates/signing/rotate", s.ControllerURL)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, strings.NewReader("{not-json"))
 	if err != nil {
 		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.HTTPClient.Do(req)
 	if err != nil {
 		return false
 	}
@@ -166,9 +168,9 @@ func (s *FleetTestSuite) rotationEndpointAvailable(t *testing.T) bool {
 // waits for it to reach a healthy state. Intended for use as a t.Cleanup so a
 // test that stops a container always leaves it back up, even if the test fails
 // before its happy-path restart call.
-func (s *FleetTestSuite) ensureContainerRunning(t *testing.T, container string, healthTimeout time.Duration) {
+func (s *fleetScenarioSuite) ensureContainerRunning(t *testing.T, container string, healthTimeout time.Duration) {
 	t.Helper()
-	if err := validateFleetContainer(container); err != nil {
+	if err := fleetkit.ValidateFleetContainer(container); err != nil {
 		t.Logf("ensureContainerRunning: %v", err)
 		return
 	}
@@ -179,7 +181,7 @@ func (s *FleetTestSuite) ensureContainerRunning(t *testing.T, container string, 
 		"--format", "{{.Names}}").CombinedOutput()
 	cancel()
 	if err == nil && strings.Contains(string(out), container) {
-		// Already running — nothing to do. Health is verified by setupFleetSuite
+		// Already running — nothing to do. Health is verified by newFleetScenarioSuite
 		// in subsequent tests.
 		return
 	}
@@ -190,7 +192,7 @@ func (s *FleetTestSuite) ensureContainerRunning(t *testing.T, container string, 
 			container, err, strings.TrimSpace(string(out)))
 		return
 	}
-	if !s.waitForContainerHealthy(t, container, healthTimeout) {
+	if !s.WaitForContainerHealthy(t, container, healthTimeout) {
 		t.Logf("ensureContainerRunning: %s did not reach healthy within %v after cleanup restart",
 			container, healthTimeout)
 	}
@@ -199,7 +201,7 @@ func (s *FleetTestSuite) ensureContainerRunning(t *testing.T, container string, 
 // waitForStewardLogEntry polls all steward log files for a line containing want until timeout.
 // It uses docker cp rather than docker exec so it can read logs even when the container is
 // stopped between restart cycles (e.g., steward exiting immediately after ErrRefreshRejected).
-func (s *FleetTestSuite) waitForStewardLogEntry(t *testing.T, container, want string, timeout time.Duration) bool {
+func (s *fleetScenarioSuite) waitForStewardLogEntry(t *testing.T, container, want string, timeout time.Duration) bool {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -213,7 +215,7 @@ func (s *FleetTestSuite) waitForStewardLogEntry(t *testing.T, container, want st
 
 // stewardLogsContain copies all steward log files from the container (docker cp works on
 // running AND stopped containers) and returns true if any file contains want.
-func (s *FleetTestSuite) stewardLogsContain(t *testing.T, container, want string) bool {
+func (s *fleetScenarioSuite) stewardLogsContain(t *testing.T, container, want string) bool {
 	t.Helper()
 	tmpDir := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -235,70 +237,18 @@ func (s *FleetTestSuite) stewardLogsContain(t *testing.T, container, want string
 	return false
 }
 
-// stewardLogCount copies all steward log files from the container and returns how
-// many times any of wants occurs across them. Log files persist across container
-// restarts and subtests, so a wait for an event captures this count before the
-// action that should produce it and waits for it to grow (Issue #4671).
-func (s *FleetTestSuite) stewardLogCount(t *testing.T, container string, wants ...string) int {
-	t.Helper()
-	tmpDir := t.TempDir()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if _, err := exec.CommandContext(ctx, "docker", "cp",
-		container+":/tmp/cfgms/.", tmpDir).CombinedOutput(); err != nil {
-		return 0
-	}
-	entries, _ := os.ReadDir(tmpDir)
-	count := 0
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".log") {
-			continue
-		}
-		content, err := os.ReadFile(filepath.Join(tmpDir, entry.Name()))
-		if err != nil {
-			continue
-		}
-		for _, want := range wants {
-			count += strings.Count(string(content), want)
-		}
-	}
-	return count
-}
-
-// waitForNewStewardLogEntry waits until any of wants occurs more often than the
-// before count captured with stewardLogCount — that is, until the event is logged
-// anew, not merely present from an earlier run (Issue #4671).
-func (s *FleetTestSuite) waitForNewStewardLogEntry(t *testing.T, container string, before int, timeout time.Duration, wants ...string) bool {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if s.stewardLogCount(t, container, wants...) > before {
-			return true
-		}
-		time.Sleep(2 * time.Second)
-	}
-	return false
-}
-
 // requireNewStewardSession waits for container's steward to log a new control
 // session after a restart (session-marker count above before). The controller
 // keeps the stopped process's connection_state=connected until it notices the
 // drop, so a convergence wait alone can return before the new session exists and
 // let a push go to a dead stream (Issue #4676).
-func (s *FleetTestSuite) requireNewStewardSession(t *testing.T, container string, before int) {
+func (s *fleetScenarioSuite) requireNewStewardSession(t *testing.T, container string, before int) {
 	t.Helper()
-	if !s.waitForNewStewardLogEntry(t, container, before, 90*time.Second, stewardSessionMarkers...) {
-		log, _ := s.readStewardLog(t, container)
+	if !s.WaitForNewStewardLogEntry(t, container, before, 90*time.Second, fleetkit.StewardSessionMarkers...) {
+		log, _ := s.ReadStewardLog(t, container)
 		t.Fatalf("%s: steward did not open a new control session within 90s after restart\nlog tail:\n%s",
-			container, lastLines(log, 60))
+			container, fleetkit.LastLines(log, 60))
 	}
-}
-
-// stewardSessionMarkers are the steward log lines written when a control session
-// to the controller is established (cmd/steward/main.go).
-var stewardSessionMarkers = []string{
-	"Connected to controller via gRPC transport",
-	"Reconnected to controller via stored identity",
 }
 
 // TestFleetRotation is the ordered entry point for all signing-cert rotation scenarios.
@@ -311,7 +261,7 @@ var stewardSessionMarkers = []string{
 //
 // Scenarios execute in definition order; each is independently identified via t.Run.
 func TestFleetRotation(t *testing.T) {
-	s := setupFleetSuite(t)
+	s := newFleetScenarioSuite(t)
 
 	// Skip cleanly when the rotation API endpoint is not yet wired up. The endpoint
 	// is implemented by stories B2a (#1815) and B2b (#1816); until both are merged,
@@ -335,7 +285,7 @@ func TestFleetRotation(t *testing.T) {
 // stewards remain connected and continue to accept config pushes during the window.
 // The controller signs outgoing configs with the new cert; stewards that have
 // received the refresh push verify against the new cert and must still converge.
-func (s *FleetTestSuite) testOverlapAccept(t *testing.T) {
+func (s *fleetScenarioSuite) testOverlapAccept(t *testing.T) {
 	t.Helper()
 
 	result := s.rotateSigningCert(t, 30)
@@ -355,8 +305,8 @@ func (s *FleetTestSuite) testOverlapAccept(t *testing.T) {
 
 	// Both stewards must stay connected during the overlap window.
 	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
-		stewardID := s.stewardIDs[container]
-		if !s.waitForConvergence(t, stewardID, 30*time.Second) {
+		stewardID := s.StewardIDs[container]
+		if !s.WaitForConvergence(t, stewardID, 30*time.Second) {
 			t.Errorf("%s (%s): must remain connected after rotation during overlap", container, stewardID)
 		}
 	}
@@ -364,7 +314,7 @@ func (s *FleetTestSuite) testOverlapAccept(t *testing.T) {
 	// Config upload (signed with the new cert by the controller) must converge.
 	const configPath = "configs/fleet-config.yaml"
 	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
-		if err := s.uploadConfig(t, s.stewardIDs[container], configPath); err != nil {
+		if err := s.UploadConfig(t, s.StewardIDs[container], configPath); err != nil {
 			t.Errorf("config upload during overlap for %s: %v", container, err)
 		}
 	}
@@ -381,7 +331,7 @@ func (s *FleetTestSuite) testOverlapAccept(t *testing.T) {
 // overlapExpiresAt is immediately in the past. The test verifies the
 // rotation API returns overlap_days=0 and that no sleep is required for
 // the expiry condition to take effect.
-func (s *FleetTestSuite) testPostExpiryReject(t *testing.T) {
+func (s *fleetScenarioSuite) testPostExpiryReject(t *testing.T) {
 	t.Helper()
 
 	result := s.rotateSigningCert(t, 0)
@@ -401,8 +351,8 @@ func (s *FleetTestSuite) testPostExpiryReject(t *testing.T) {
 	// and reject any payload still signed with the old cert.
 	// After the rotation, the controller must push configs signed with the new cert.
 	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
-		stewardID := s.stewardIDs[container]
-		if !s.waitForConvergence(t, stewardID, 30*time.Second) {
+		stewardID := s.StewardIDs[container]
+		if !s.WaitForConvergence(t, stewardID, 30*time.Second) {
 			t.Errorf("%s (%s): must remain connected after overlap_days=0 rotation", container, stewardID)
 		}
 	}
@@ -422,18 +372,18 @@ func (s *FleetTestSuite) testPostExpiryReject(t *testing.T) {
 // then restarts it while the overlap window is still open. Refresh-on-connect
 // (story B2d) must deliver the new signing cert; the steward must then accept
 // configs signed with the new cert.
-func (s *FleetTestSuite) testOfflineDuringOverlapReconnect(t *testing.T) {
+func (s *fleetScenarioSuite) testOfflineDuringOverlapReconnect(t *testing.T) {
 	t.Helper()
 
 	container := "fleet-steward-2"
-	stewardID := s.stewardIDs[container]
+	stewardID := s.StewardIDs[container]
 
 	// Take steward-2 offline before rotation. Register a cleanup that brings it
 	// back up no matter how the test exits — without this, a t.Fatalf mid-test
 	// would leave the container stopped and break every subsequent test in the
 	// package (notably TestFleetComposeStartup).
-	sessionsBefore := s.stewardLogCount(t, container, stewardSessionMarkers...)
-	s.containerStop(t, container)
+	sessionsBefore := s.StewardLogCount(t, container, fleetkit.StewardSessionMarkers...)
+	s.ContainerStop(t, container)
 	t.Cleanup(func() { s.ensureContainerRunning(t, container, 90*time.Second) })
 	t.Log("OfflineDuringOverlapReconnect: steward-2 stopped before rotation")
 
@@ -442,11 +392,11 @@ func (s *FleetTestSuite) testOfflineDuringOverlapReconnect(t *testing.T) {
 		result.OldSerial, result.NewSerial)
 
 	// Bring steward-2 back online during the overlap window.
-	s.containerStart(t, container, 90*time.Second)
+	s.ContainerStart(t, container, 90*time.Second)
 	s.requireNewStewardSession(t, container, sessionsBefore)
 
 	// The stored cert survives docker stop/start; steward ID must be unchanged.
-	newID, err := s.getStewardIDFromLogs(t, container)
+	newID, err := s.GetStewardIDFromLogs(t, container)
 	if err != nil {
 		t.Fatalf("steward ID not found after %s restart: %v", container, err)
 	}
@@ -454,20 +404,20 @@ func (s *FleetTestSuite) testOfflineDuringOverlapReconnect(t *testing.T) {
 		t.Errorf("steward %s re-registered after restart: %s → %s; expected stored-cert reuse",
 			container, stewardID, newID)
 	}
-	s.stewardIDs[container] = newID
+	s.StewardIDs[container] = newID
 
 	// Refresh-on-connect must deliver the new signing cert automatically.
-	if !s.waitForConvergence(t, newID, 90*time.Second) {
+	if !s.WaitForConvergence(t, newID, 90*time.Second) {
 		t.Fatalf("%s (%s): must reconnect after coming back online during overlap", container, newID)
 	}
 
 	// Config upload after reconnect must converge (controller uses new cert).
-	if err := s.uploadConfig(t, newID, "configs/fleet-config.yaml"); err != nil {
+	if err := s.UploadConfig(t, newID, "configs/fleet-config.yaml"); err != nil {
 		t.Fatalf("config upload for %s after offline-during-overlap reconnect: %v", container, err)
 	}
 	if !s.waitForManagedFile(t, container, 60*time.Second) {
-		log, _ := s.readStewardLog(t, container)
-		t.Errorf("%s: managed-file must appear after reconnect during overlap\nlog tail:\n%s", container, lastLines(log, 60))
+		log, _ := s.ReadStewardLog(t, container)
+		t.Errorf("%s: managed-file must appear after reconnect during overlap\nlog tail:\n%s", container, fleetkit.LastLines(log, 60))
 	}
 	t.Logf("OfflineDuringOverlapReconnect: %s reconnected during overlap and applied config", container)
 }
@@ -476,17 +426,17 @@ func (s *FleetTestSuite) testOfflineDuringOverlapReconnect(t *testing.T) {
 // so the steward is offline through the entire (zero-length) overlap. When it
 // reconnects, refresh-on-connect (story B2d) must deliver a fresh signing cert,
 // allowing the steward to accept configs signed with the new cert.
-func (s *FleetTestSuite) testOfflinePastWindow(t *testing.T) {
+func (s *fleetScenarioSuite) testOfflinePastWindow(t *testing.T) {
 	t.Helper()
 
 	container := "fleet-steward-2"
-	stewardID := s.stewardIDs[container]
+	stewardID := s.StewardIDs[container]
 
 	// Stop steward-2 before rotation. Register a cleanup that brings it back up
 	// regardless of test outcome so a failure mid-test cannot leave the fleet
 	// in a broken state for subsequent tests.
-	sessionsBefore := s.stewardLogCount(t, container, stewardSessionMarkers...)
-	s.containerStop(t, container)
+	sessionsBefore := s.StewardLogCount(t, container, fleetkit.StewardSessionMarkers...)
+	s.ContainerStop(t, container)
 	t.Cleanup(func() { s.ensureContainerRunning(t, container, 90*time.Second) })
 	t.Log("OfflinePastWindow: steward-2 stopped before rotation")
 
@@ -496,10 +446,10 @@ func (s *FleetTestSuite) testOfflinePastWindow(t *testing.T) {
 		result.OldSerial, result.NewSerial)
 
 	// Bring steward-2 back online after overlap has expired.
-	s.containerStart(t, container, 90*time.Second)
+	s.ContainerStart(t, container, 90*time.Second)
 	s.requireNewStewardSession(t, container, sessionsBefore)
 
-	newID, err := s.getStewardIDFromLogs(t, container)
+	newID, err := s.GetStewardIDFromLogs(t, container)
 	if err != nil {
 		t.Fatalf("steward ID not found after %s restart: %v", container, err)
 	}
@@ -507,20 +457,20 @@ func (s *FleetTestSuite) testOfflinePastWindow(t *testing.T) {
 		t.Errorf("steward %s re-registered: %s → %s; expected stored-cert reuse",
 			container, stewardID, newID)
 	}
-	s.stewardIDs[container] = newID
+	s.StewardIDs[container] = newID
 
 	// Refresh-on-connect delivers a fresh signing cert even though the overlap
 	// window has already closed. The steward must reconnect and converge.
-	if !s.waitForConvergence(t, newID, 90*time.Second) {
+	if !s.WaitForConvergence(t, newID, 90*time.Second) {
 		t.Fatalf("%s (%s): must reconnect past overlap window via refresh-on-connect", container, newID)
 	}
 
-	if err := s.uploadConfig(t, newID, "configs/fleet-config.yaml"); err != nil {
+	if err := s.UploadConfig(t, newID, "configs/fleet-config.yaml"); err != nil {
 		t.Fatalf("config upload for %s after offline-past-window reconnect: %v", container, err)
 	}
 	if !s.waitForManagedFile(t, container, 60*time.Second) {
-		log, _ := s.readStewardLog(t, container)
-		t.Errorf("%s: managed-file must appear after past-window reconnect\nlog tail:\n%s", container, lastLines(log, 60))
+		log, _ := s.ReadStewardLog(t, container)
+		t.Errorf("%s: managed-file must appear after past-window reconnect\nlog tail:\n%s", container, fleetkit.LastLines(log, 60))
 	}
 	t.Logf("OfflinePastWindow: %s reconnected past overlap, refresh-on-connect delivered cert, config applied", container)
 }
@@ -528,7 +478,7 @@ func (s *FleetTestSuite) testOfflinePastWindow(t *testing.T) {
 // testCrashMidRotation verifies that when the rotation state machine has
 // RotatingSerial set (a rotation is in progress), a second rotate call returns
 // a "rotation in progress" error rather than starting a second concurrent rotation.
-func (s *FleetTestSuite) testCrashMidRotation(t *testing.T) {
+func (s *fleetScenarioSuite) testCrashMidRotation(t *testing.T) {
 	t.Helper()
 
 	// Start a rotation with a long overlap so the cursor stays in RotatingSerial state.
@@ -556,7 +506,7 @@ func (s *FleetTestSuite) testCrashMidRotation(t *testing.T) {
 // receives the current signing cert via refresh-on-connect on its first
 // ControlChannel connection. This ensures no logic split between registration-time
 // cert pinning and post-registration refresh delivery.
-func (s *FleetTestSuite) testRefreshOnConnectNewSteward(t *testing.T) {
+func (s *fleetScenarioSuite) testRefreshOnConnectNewSteward(t *testing.T) {
 	t.Helper()
 
 	// Rotate the signing cert so there is a "new" cert that differs from the
@@ -567,14 +517,14 @@ func (s *FleetTestSuite) testRefreshOnConnectNewSteward(t *testing.T) {
 	// Both existing stewards must receive the refresh push and remain connected.
 	// Their logs must record a signing-cert refresh within 30 seconds of rotation.
 	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
-		stewardID := s.stewardIDs[container]
-		if !s.waitForConvergence(t, stewardID, 30*time.Second) {
+		stewardID := s.StewardIDs[container]
+		if !s.WaitForConvergence(t, stewardID, 30*time.Second) {
 			t.Errorf("%s (%s): must remain connected after rotation", container, stewardID)
 		}
 		if !s.waitForStewardLogEntry(t, container, result.NewSerial, 30*time.Second) {
-			log, _ := s.readStewardLog(t, container)
+			log, _ := s.ReadStewardLog(t, container)
 			t.Errorf("%s: log must contain new serial %s after refresh-on-connect push\nlog tail:\n%s",
-				container, result.NewSerial, lastLines(log, 60))
+				container, result.NewSerial, fleetkit.LastLines(log, 60))
 		}
 	}
 	t.Logf("RefreshOnConnectNewSteward: both existing stewards received refresh push with new serial %s",
@@ -587,12 +537,12 @@ const signingPushAppliedMarker = "Signing cert push applied"
 
 // requireSigningPushApplied waits for container's steward to apply a push_signing_cert
 // beyond the before count captured with stewardLogCount.
-func (s *FleetTestSuite) requireSigningPushApplied(t *testing.T, container string, before int, timeout time.Duration, what string) {
+func (s *fleetScenarioSuite) requireSigningPushApplied(t *testing.T, container string, before int, timeout time.Duration, what string) {
 	t.Helper()
-	if !s.waitForNewStewardLogEntry(t, container, before, timeout, signingPushAppliedMarker) {
-		log, _ := s.readStewardLog(t, container)
+	if !s.WaitForNewStewardLogEntry(t, container, before, timeout, signingPushAppliedMarker) {
+		log, _ := s.ReadStewardLog(t, container)
 		t.Fatalf("%s: %s: no new %q within %v\nlog tail:\n%s",
-			container, what, signingPushAppliedMarker, timeout, lastLines(log, 60))
+			container, what, signingPushAppliedMarker, timeout, fleetkit.LastLines(log, 60))
 	}
 }
 
@@ -601,7 +551,7 @@ func (s *FleetTestSuite) requireSigningPushApplied(t *testing.T, container strin
 // trust_serials field) holds serial and does not hold retired. Serials are unique
 // to one rotation, so a match is that rotation's retirement outcome regardless of
 // when the line was written or how many other certs the steward retains.
-func (s *FleetTestSuite) waitForSigningTrustSetExcluding(t *testing.T, container, serial, retired string, timeout time.Duration) bool {
+func (s *fleetScenarioSuite) waitForSigningTrustSetExcluding(t *testing.T, container, serial, retired string, timeout time.Duration) bool {
 	t.Helper()
 	trustRe := regexp.MustCompile(`trust_serials"?\s*[=:]\s*"?([0-9,]*)`)
 	deadline := time.Now().Add(timeout)
@@ -642,18 +592,18 @@ func (s *FleetTestSuite) waitForSigningTrustSetExcluding(t *testing.T, container
 
 // requireConfigAccepted uploads the fleet config for the steward in container and
 // waits for it to converge, proving the steward verifies what the controller signs now.
-func (s *FleetTestSuite) requireConfigAccepted(t *testing.T, container string) {
+func (s *fleetScenarioSuite) requireConfigAccepted(t *testing.T, container string) {
 	t.Helper()
-	stewardID := s.stewardIDs[container]
-	if !s.waitForConvergence(t, stewardID, 90*time.Second) {
+	stewardID := s.StewardIDs[container]
+	if !s.WaitForConvergence(t, stewardID, 90*time.Second) {
 		t.Fatalf("%s (%s): must be connected", container, stewardID)
 	}
-	if err := s.uploadConfig(t, stewardID, "configs/fleet-config.yaml"); err != nil {
+	if err := s.UploadConfig(t, stewardID, "configs/fleet-config.yaml"); err != nil {
 		t.Fatalf("%s: config upload: %v", container, err)
 	}
 	if !s.waitForManagedFile(t, container, 60*time.Second) {
-		log, _ := s.readStewardLog(t, container)
-		t.Fatalf("%s: managed-file must exist after config upload\nlog tail:\n%s", container, lastLines(log, 60))
+		log, _ := s.ReadStewardLog(t, container)
+		t.Fatalf("%s: managed-file must exist after config upload\nlog tail:\n%s", container, fleetkit.LastLines(log, 60))
 	}
 	s.verifyManagedFile(t, container)
 }
@@ -663,12 +613,12 @@ func (s *FleetTestSuite) requireConfigAccepted(t *testing.T, container string) {
 // controller's retirement sweep (runs on an interval) must withdraw the superseded
 // certificate from the connected steward-1; steward-2 receives the same retirement
 // in the one push it gets when it reconnects. Both must still accept signed configs.
-func (s *FleetTestSuite) testRetirementAtOverlapEnd(t *testing.T) {
+func (s *fleetScenarioSuite) testRetirementAtOverlapEnd(t *testing.T) {
 	t.Helper()
 
 	connected, away := "fleet-steward-1", "fleet-steward-2"
-	awaySessions := s.stewardLogCount(t, away, stewardSessionMarkers...)
-	s.containerStop(t, away)
+	awaySessions := s.StewardLogCount(t, away, fleetkit.StewardSessionMarkers...)
+	s.ContainerStop(t, away)
 	t.Cleanup(func() { s.ensureContainerRunning(t, away, 90*time.Second) })
 
 	result := s.rotateSigningCert(t, 0)
@@ -688,15 +638,15 @@ func (s *FleetTestSuite) testRetirementAtOverlapEnd(t *testing.T) {
 	// resulting trust set holds the new serial and no longer holds the old one. The
 	// set size is not asserted: earlier subtests leave certs inside their own windows.
 	if !s.waitForSigningTrustSetExcluding(t, connected, result.NewSerial, result.OldSerial, 150*time.Second) {
-		log, _ := s.readStewardLog(t, connected)
+		log, _ := s.ReadStewardLog(t, connected)
 		t.Fatalf("%s: retired serial %s never left the trust set holding %s\nlog tail:\n%s",
-			connected, result.OldSerial, result.NewSerial, lastLines(log, 60))
+			connected, result.OldSerial, result.NewSerial, fleetkit.LastLines(log, 60))
 	}
 	s.requireConfigAccepted(t, connected)
 
 	// The steward that was away reconnects: its single on-connect push carries the retirement.
-	awayApplied := s.stewardLogCount(t, away, signingPushAppliedMarker)
-	s.containerStart(t, away, 90*time.Second)
+	awayApplied := s.StewardLogCount(t, away, signingPushAppliedMarker)
+	s.ContainerStart(t, away, 90*time.Second)
 	s.requireNewStewardSession(t, away, awaySessions)
 	s.requireSigningPushApplied(t, away, awayApplied, 90*time.Second, "on-connect push after retirement")
 	s.requireConfigAccepted(t, away)
@@ -710,12 +660,12 @@ func (s *FleetTestSuite) testRetirementAtOverlapEnd(t *testing.T) {
 // the withdrawal immediately; steward-2 receives it on reconnect. Both must still
 // accept signed configs, which proves the controller signs with the current
 // certificate and not the revoked one.
-func (s *FleetTestSuite) testEmergencyRevoke(t *testing.T) {
+func (s *fleetScenarioSuite) testEmergencyRevoke(t *testing.T) {
 	t.Helper()
 
 	connected, away := "fleet-steward-1", "fleet-steward-2"
-	awaySessions := s.stewardLogCount(t, away, stewardSessionMarkers...)
-	s.containerStop(t, away)
+	awaySessions := s.StewardLogCount(t, away, fleetkit.StewardSessionMarkers...)
+	s.ContainerStop(t, away)
 	t.Cleanup(func() { s.ensureContainerRunning(t, away, 90*time.Second) })
 
 	result := s.rotateSigningCert(t, 30)
@@ -732,7 +682,7 @@ func (s *FleetTestSuite) testEmergencyRevoke(t *testing.T) {
 		t.Fatalf("revoking the current serial %s: status %d, want %d (body: %s)", result.NewSerial, status, http.StatusConflict, body)
 	}
 
-	appliedBefore := s.stewardLogCount(t, connected, signingPushAppliedMarker)
+	appliedBefore := s.StewardLogCount(t, connected, signingPushAppliedMarker)
 	status, revoked, body := s.revokeSigningCert(t, result.OldSerial, "e2e: emergency revoke of the superseded serial")
 	if status != http.StatusOK {
 		t.Fatalf("revoking the superseded serial %s: status %d (body: %s)", result.OldSerial, status, body)
@@ -751,8 +701,8 @@ func (s *FleetTestSuite) testEmergencyRevoke(t *testing.T) {
 	s.requireConfigAccepted(t, connected)
 
 	// The steward that was away receives the withdrawal in its on-connect push.
-	awayApplied := s.stewardLogCount(t, away, signingPushAppliedMarker)
-	s.containerStart(t, away, 90*time.Second)
+	awayApplied := s.StewardLogCount(t, away, signingPushAppliedMarker)
+	s.ContainerStart(t, away, 90*time.Second)
 	s.requireNewStewardSession(t, away, awaySessions)
 	s.requireSigningPushApplied(t, away, awayApplied, 90*time.Second, "on-connect push after revoke")
 	s.requireConfigAccepted(t, away)

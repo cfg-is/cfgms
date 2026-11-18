@@ -25,10 +25,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/modules/trust"
+	"github.com/cfgis/cfgms/test/e2e/fleet/fleetkit"
 )
 
 const (
-	fleetControllerHTTP = "https://localhost:8090"
+	fleetControllerHTTP = fleetkit.FleetControllerHTTP
 	installerAPIKey     = "installer-test-key"
 	installPrefix       = "/tmp/install-test"
 	installWorkDir      = "/tmp/install-work"
@@ -52,7 +53,7 @@ func signInstallerContent(t *testing.T, content []byte, version, platform, arch 
 	sum := sha256.Sum256(content)
 	msg, err := trust.InstallerMessage(hex.EncodeToString(sum[:]), version, platform, arch)
 	require.NoError(t, err)
-	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(testUpgradePrivKey(), []byte(msg)))
+	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(fleetkit.UpgradePrivKey(), []byte(msg)))
 }
 
 // TestFleetInstallPackageFlow exercises the full install-package lifecycle:
@@ -297,7 +298,7 @@ func runInstallScriptInContainer(t *testing.T, container string, archiveData []b
 	require.NoError(t, os.WriteFile(filepath.Join(hostStage, "ca.crt"), caCert, 0644))
 
 	// docker cp the staging dir into the container's work directory.
-	dockerExecRoot(t, container, "mkdir", "-p", workDir)
+	fleetkit.DockerExecRoot(t, container, "mkdir", "-p", workDir)
 	copyToContainer(t, container, hostStage+"/.", workDir)
 
 	// Create INSTALL_PREFIX directory tree and a wrapper binary that exits 0.
@@ -306,9 +307,9 @@ func runInstallScriptInContainer(t *testing.T, container string, archiveData []b
 	// Pre-create the stdlib modules directory so install.sh's `install -d` call
 	// succeeds when running as a non-root user against a root-owned prefix tree.
 	wrapperPath := installPfx + "/usr/local/bin/cfgms-steward"
-	dockerExecRoot(t, container, "mkdir", "-p", installPfx+"/usr/local/bin")
-	dockerExecRoot(t, container, "mkdir", "-p", installPfx+"/usr/local/lib/cfgms/modules")
-	dockerExecRoot(t, container, "sh", "-c",
+	fleetkit.DockerExecRoot(t, container, "mkdir", "-p", installPfx+"/usr/local/bin")
+	fleetkit.DockerExecRoot(t, container, "mkdir", "-p", installPfx+"/usr/local/lib/cfgms/modules")
+	fleetkit.DockerExecRoot(t, container, "sh", "-c",
 		fmt.Sprintf("printf '#!/bin/sh\\nexit 0\\n' > %s && chmod +x %s", wrapperPath, wrapperPath))
 
 	// Run install.sh with CFGMS_INSTALL_PREFIX so it writes to the isolated prefix
@@ -323,7 +324,7 @@ func runInstallScriptInContainer(t *testing.T, container string, archiveData []b
 	idOut, idErr := exec.CommandContext(ctx, "docker", "exec", container,
 		"sh", "-c", "echo $(id -u):$(id -g)").CombinedOutput()
 	require.NoError(t, idErr, "resolving the exec user failed: %s", string(idOut))
-	dockerExecRoot(t, container, "chown", strings.TrimSpace(string(idOut)), workDir)
+	fleetkit.DockerExecRoot(t, container, "chown", strings.TrimSpace(string(idOut)), workDir)
 
 	tokenFile := workDir + "/regtoken"
 	writeOut, writeErr := exec.CommandContext(ctx, "docker", "exec", container,
@@ -352,8 +353,8 @@ func placeCACert(t *testing.T, container string, caCertPEM []byte) {
 	require.NoError(t, os.WriteFile(hostCA, caCertPEM, 0644))
 
 	// Create /etc/cfgms/ inside the container (requires root).
-	dockerExecRoot(t, container, "mkdir", "-p", "/etc/cfgms")
-	dockerExecRoot(t, container, "chmod", "755", "/etc/cfgms")
+	fleetkit.DockerExecRoot(t, container, "mkdir", "-p", "/etc/cfgms")
+	fleetkit.DockerExecRoot(t, container, "chmod", "755", "/etc/cfgms")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -361,17 +362,7 @@ func placeCACert(t *testing.T, container string, caCertPEM []byte) {
 		hostCA, fmt.Sprintf("%s:/etc/cfgms/controller-ca.crt", container)).CombinedOutput()
 	require.NoError(t, err, "docker cp ca cert failed: %s", string(out))
 
-	dockerExecRoot(t, container, "chmod", "644", "/etc/cfgms/controller-ca.crt")
-}
-
-// dockerExecRoot runs a command in the container as root.
-func dockerExecRoot(t *testing.T, container string, args ...string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	cmdArgs := append([]string{"exec", "--user", "root", container}, args...)
-	out, err := exec.CommandContext(ctx, "docker", cmdArgs...).CombinedOutput()
-	require.NoError(t, err, "docker exec root in %s failed: %s", container, string(out))
+	fleetkit.DockerExecRoot(t, container, "chmod", "644", "/etc/cfgms/controller-ca.crt")
 }
 
 // copyToContainer copies src (a path on the host) into container:dst via docker cp.

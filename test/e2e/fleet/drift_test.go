@@ -22,18 +22,18 @@ import (
 //  5. Assert the steward's convergence report records the drift event
 //     (drift_detected), apply mode (drift_setting), and the correction
 //     (convergence_result).
-func (s *FleetTestSuite) testDriftAutoCorrection(t *testing.T, configPath string) {
+func (s *fleetScenarioSuite) testDriftAutoCorrection(t *testing.T, configPath string) {
 	t.Helper()
 
 	container := "fleet-steward-1"
-	stewardID := s.stewardIDs[container]
+	stewardID := s.StewardIDs[container]
 
-	if !s.waitForConvergence(t, stewardID, 60*time.Second) {
+	if !s.WaitForConvergence(t, stewardID, 60*time.Second) {
 		t.Fatalf("steward %s not connected before drift test", stewardID)
 	}
 
 	// Upload config so the managed-file resource is declared.
-	if err := s.uploadConfig(t, stewardID, configPath); err != nil {
+	if err := s.UploadConfig(t, stewardID, configPath); err != nil {
 		t.Fatalf("upload config before drift test: %v", err)
 	}
 
@@ -46,21 +46,21 @@ func (s *FleetTestSuite) testDriftAutoCorrection(t *testing.T, configPath string
 	// managed-file (the initial config apply logs one). The post-correction count
 	// must exceed this baseline, proving the *injected* drift was detected — not
 	// just the initial resource creation.
-	baselineLog, err := s.readStewardLog(t, container)
+	baselineLog, err := s.ReadStewardLog(t, container)
 	if err != nil {
 		t.Fatalf("read steward log baseline: %v", err)
 	}
 	driftBaseline := countLogLinesWith(baselineLog, "drift detected", "managed-file")
 
 	// Inject drift by overwriting the file with unexpected content.
-	if _, err := s.dockerExec(t, container, "sh", "-c",
+	if _, err := s.DockerExec(t, container, "sh", "-c",
 		`echo "drift-injected-content" > /test-workspace/managed-file`); err != nil {
 		t.Fatalf("inject drift: %v", err)
 	}
 	t.Log("Drift injected: managed-file overwritten with unexpected content")
 
 	// Confirm the write was visible (fail fast if docker exec itself errored).
-	got, err := s.dockerExec(t, container, "cat", "/test-workspace/managed-file")
+	got, err := s.DockerExec(t, container, "cat", "/test-workspace/managed-file")
 	if err != nil {
 		t.Fatalf("verify drift injection: %v", err)
 	}
@@ -71,7 +71,7 @@ func (s *FleetTestSuite) testDriftAutoCorrection(t *testing.T, configPath string
 	corrected := false
 	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
-		content, err := s.dockerExec(t, container, "cat", "/test-workspace/managed-file")
+		content, err := s.DockerExec(t, container, "cat", "/test-workspace/managed-file")
 		if err == nil && content == "fleet-managed-content\n" {
 			corrected = true
 			t.Log("Drift corrected: managed-file restored to expected content")
@@ -81,7 +81,7 @@ func (s *FleetTestSuite) testDriftAutoCorrection(t *testing.T, configPath string
 	}
 
 	if !corrected {
-		finalContent, _ := s.dockerExec(t, container, "cat", "/test-workspace/managed-file")
+		finalContent, _ := s.DockerExec(t, container, "cat", "/test-workspace/managed-file")
 		t.Errorf("Drift not corrected within 90s; file content: %q", finalContent)
 	}
 
@@ -98,7 +98,7 @@ func (s *FleetTestSuite) testDriftAutoCorrection(t *testing.T, configPath string
 	flushDeadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(flushDeadline) {
 		var readErr error
-		logContent, readErr = s.readStewardLog(t, container)
+		logContent, readErr = s.ReadStewardLog(t, container)
 		if readErr == nil &&
 			countLogLinesWith(logContent, "drift detected", "managed-file") > driftBaseline {
 			break

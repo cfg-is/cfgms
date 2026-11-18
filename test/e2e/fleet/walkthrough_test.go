@@ -13,12 +13,12 @@ import (
 // and asserts that no managed resources exist yet — the /test-workspace tmpfs is
 // empty at container start, so managed-file, managed-dir, and script-output.txt
 // must all be absent until a config is uploaded.
-func (s *FleetTestSuite) testVanillaState(t *testing.T) {
+func (s *fleetScenarioSuite) testVanillaState(t *testing.T) {
 	t.Helper()
 
 	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
-		stewardID := s.stewardIDs[container]
-		if !s.waitForConvergence(t, stewardID, 30*time.Second) {
+		stewardID := s.StewardIDs[container]
+		if !s.WaitForConvergence(t, stewardID, 30*time.Second) {
 			t.Errorf("steward %s (%s) not connected in vanilla state", container, stewardID)
 		}
 		s.assertNoManagedResources(t, container)
@@ -27,16 +27,16 @@ func (s *FleetTestSuite) testVanillaState(t *testing.T) {
 }
 
 // assertNoManagedResources fails if any managed resource path exists in the container.
-func (s *FleetTestSuite) assertNoManagedResources(t *testing.T, container string) {
+func (s *fleetScenarioSuite) assertNoManagedResources(t *testing.T, container string) {
 	t.Helper()
 	for _, path := range []string{
 		"/test-workspace/managed-file",
 		"/test-workspace/managed-dir",
 		"/test-workspace/script-output.txt",
 	} {
-		// `test -e` exits non-zero (dockerExec returns an error) when the path
+		// `test -e` exits non-zero (DockerExec returns an error) when the path
 		// is absent — which is the expected vanilla state.
-		if _, err := s.dockerExec(t, container, "test", "-e", path); err == nil {
+		if _, err := s.DockerExec(t, container, "test", "-e", path); err == nil {
 			t.Errorf("%s: %s exists before config upload — expected vanilla state with no managed resources", container, path)
 		}
 	}
@@ -44,20 +44,20 @@ func (s *FleetTestSuite) assertNoManagedResources(t *testing.T, container string
 
 // testConfigUploadAndConvergence uploads fleet-config.yaml to both stewards and verifies
 // all three module resources (file, directory, script) are applied within 60 seconds.
-func (s *FleetTestSuite) testConfigUploadAndConvergence(t *testing.T, configPath string) {
+func (s *fleetScenarioSuite) testConfigUploadAndConvergence(t *testing.T, configPath string) {
 	t.Helper()
 
 	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
-		stewardID := s.stewardIDs[container]
-		if err := s.uploadConfig(t, stewardID, configPath); err != nil {
+		stewardID := s.StewardIDs[container]
+		if err := s.UploadConfig(t, stewardID, configPath); err != nil {
 			t.Fatalf("upload config to %s: %v", container, err)
 		}
 	}
 
 	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
-		stewardID := s.stewardIDs[container]
+		stewardID := s.StewardIDs[container]
 
-		if !s.waitForConvergence(t, stewardID, 60*time.Second) {
+		if !s.WaitForConvergence(t, stewardID, 60*time.Second) {
 			t.Errorf("steward %s (%s) did not converge after config upload", container, stewardID)
 			continue
 		}
@@ -75,19 +75,19 @@ func (s *FleetTestSuite) testConfigUploadAndConvergence(t *testing.T, configPath
 }
 
 // testIdempotentReUpload re-uploads the same config and verifies resources remain correct.
-func (s *FleetTestSuite) testIdempotentReUpload(t *testing.T, configPath string) {
+func (s *fleetScenarioSuite) testIdempotentReUpload(t *testing.T, configPath string) {
 	t.Helper()
 
 	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
-		stewardID := s.stewardIDs[container]
-		if err := s.uploadConfig(t, stewardID, configPath); err != nil {
+		stewardID := s.StewardIDs[container]
+		if err := s.UploadConfig(t, stewardID, configPath); err != nil {
 			t.Fatalf("re-upload config to %s: %v", container, err)
 		}
 	}
 
 	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
-		stewardID := s.stewardIDs[container]
-		if !s.waitForConvergence(t, stewardID, 30*time.Second) {
+		stewardID := s.StewardIDs[container]
+		if !s.WaitForConvergence(t, stewardID, 30*time.Second) {
 			t.Errorf("steward %s (%s) disconnected after idempotent re-upload", container, stewardID)
 			continue
 		}
@@ -98,7 +98,7 @@ func (s *FleetTestSuite) testIdempotentReUpload(t *testing.T, configPath string)
 }
 
 // testPerModuleConvergence verifies each module type individually on both stewards.
-func (s *FleetTestSuite) testPerModuleConvergence(t *testing.T) {
+func (s *fleetScenarioSuite) testPerModuleConvergence(t *testing.T) {
 	t.Helper()
 
 	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
@@ -113,28 +113,28 @@ func (s *FleetTestSuite) testPerModuleConvergence(t *testing.T) {
 
 // testControllerRestart restarts fleet-controller, waits for stewards to reconnect,
 // re-uploads configs (controller loses in-memory state on restart), and verifies convergence.
-func (s *FleetTestSuite) testControllerRestart(t *testing.T, configPath string) {
+func (s *fleetScenarioSuite) testControllerRestart(t *testing.T, configPath string) {
 	t.Helper()
 
-	s.containerRestart(t, "fleet-controller", 60*time.Second)
+	s.ContainerRestart(t, "fleet-controller", 60*time.Second)
 
 	// Rebuild HTTP clients — the admin bundle is regenerated on every controller init.
-	if err := s.rebuildClients(t); err != nil {
+	if err := s.RebuildClients(t); err != nil {
 		t.Fatalf("rebuild clients after controller restart: %v", err)
 	}
 
 	// Re-upload configs; the controller does not persist config across restarts
 	// (fleet-controller has no data volume in docker-compose.test.yml).
 	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
-		stewardID := s.stewardIDs[container]
-		if err := s.uploadConfig(t, stewardID, configPath); err != nil {
+		stewardID := s.StewardIDs[container]
+		if err := s.UploadConfig(t, stewardID, configPath); err != nil {
 			t.Fatalf("re-upload config to %s after controller restart: %v", container, err)
 		}
 	}
 
 	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
-		stewardID := s.stewardIDs[container]
-		if !s.waitForConvergence(t, stewardID, 90*time.Second) {
+		stewardID := s.StewardIDs[container]
+		if !s.WaitForConvergence(t, stewardID, 90*time.Second) {
 			t.Errorf("steward %s (%s) did not reconnect after controller restart", container, stewardID)
 			continue
 		}
@@ -146,19 +146,19 @@ func (s *FleetTestSuite) testControllerRestart(t *testing.T, configPath string) 
 
 // testStewardRestart restarts fleet-steward-1, discovers its (possibly new) steward ID,
 // re-uploads config, and verifies the apply-mode steward re-applies resources on reconnect.
-func (s *FleetTestSuite) testStewardRestart(t *testing.T, configPath string) {
+func (s *fleetScenarioSuite) testStewardRestart(t *testing.T, configPath string) {
 	t.Helper()
 
 	container := "fleet-steward-1"
-	oldID := s.stewardIDs[container]
+	oldID := s.StewardIDs[container]
 
-	s.containerRestart(t, container, 60*time.Second)
+	s.ContainerRestart(t, container, 60*time.Second)
 
 	// AC6: the steward must reuse its stored cert and reconnect with the SAME ID.
 	// A docker restart preserves the container's writable layer (where the cert
 	// lives), so re-registration with a new ID indicates the stored-cert reuse
 	// path is broken.
-	newID, err := s.getStewardIDFromLogs(t, container)
+	newID, err := s.GetStewardIDFromLogs(t, container)
 	if err != nil {
 		t.Fatalf("steward ID not found after %s restart: %v", container, err)
 	}
@@ -166,13 +166,13 @@ func (s *FleetTestSuite) testStewardRestart(t *testing.T, configPath string) {
 		t.Errorf("steward %s re-registered after restart: %s → %s; expected stored-cert reuse (no re-registration)",
 			container, oldID, newID)
 	}
-	s.stewardIDs[container] = newID
+	s.StewardIDs[container] = newID
 
-	if err := s.uploadConfig(t, newID, configPath); err != nil {
+	if err := s.UploadConfig(t, newID, configPath); err != nil {
 		t.Fatalf("upload config to %s after restart: %v", container, err)
 	}
 
-	if !s.waitForConvergence(t, newID, 90*time.Second) {
+	if !s.WaitForConvergence(t, newID, 90*time.Second) {
 		t.Fatalf("steward %s (%s) did not reconnect after restart", container, newID)
 	}
 
@@ -189,30 +189,30 @@ func (s *FleetTestSuite) testStewardRestart(t *testing.T, configPath string) {
 // then restarts it and verifies the controller-stored config is delivered and
 // applied on reconnect. The config upload cannot reach the steward live — it must
 // be deferred by the controller until the steward comes back online.
-func (s *FleetTestSuite) testDeferredConfig(t *testing.T, configPath string) {
+func (s *fleetScenarioSuite) testDeferredConfig(t *testing.T, configPath string) {
 	t.Helper()
 
 	container := "fleet-steward-2"
-	stewardID := s.stewardIDs[container]
+	stewardID := s.StewardIDs[container]
 
 	// Take steward-2 offline before uploading so the config cannot be delivered live.
-	s.containerStop(t, container)
+	s.ContainerStop(t, container)
 
 	// Upload while steward-2 is offline — the controller must store the config and
 	// hold it for delivery when the steward reconnects.
-	if err := s.uploadConfig(t, stewardID, configPath); err != nil {
+	if err := s.UploadConfig(t, stewardID, configPath); err != nil {
 		// Restart before failing so later scenarios are not left with a dead container.
-		s.containerStart(t, container, 90*time.Second)
+		s.ContainerStart(t, container, 90*time.Second)
 		t.Fatalf("deferred config upload to %s while offline: %v", container, err)
 	}
 	t.Logf("DeferredConfig: config uploaded for %s while it was offline", container)
 
 	// Bring steward-2 back online. Its /test-workspace tmpfs is recreated empty,
 	// so any managed resources that appear are proof the deferred config was applied.
-	s.containerStart(t, container, 90*time.Second)
+	s.ContainerStart(t, container, 90*time.Second)
 
 	// The stored cert survives docker stop/start, so the ID must be unchanged.
-	newID, err := s.getStewardIDFromLogs(t, container)
+	newID, err := s.GetStewardIDFromLogs(t, container)
 	if err != nil {
 		t.Fatalf("steward ID not found after %s restart: %v", container, err)
 	}
@@ -220,9 +220,9 @@ func (s *FleetTestSuite) testDeferredConfig(t *testing.T, configPath string) {
 		t.Errorf("steward %s re-registered after restart: %s → %s; expected stored-cert reuse",
 			container, stewardID, newID)
 	}
-	s.stewardIDs[container] = newID
+	s.StewardIDs[container] = newID
 
-	if !s.waitForConvergence(t, newID, 90*time.Second) {
+	if !s.WaitForConvergence(t, newID, 90*time.Second) {
 		t.Fatalf("steward %s (%s) did not reconnect after coming back online", container, newID)
 	}
 
@@ -239,11 +239,11 @@ func (s *FleetTestSuite) testDeferredConfig(t *testing.T, configPath string) {
 // --- shared resource verification helpers ---
 
 // waitForManagedFile polls until /test-workspace/managed-file exists or timeout expires.
-func (s *FleetTestSuite) waitForManagedFile(t *testing.T, container string, timeout time.Duration) bool {
+func (s *fleetScenarioSuite) waitForManagedFile(t *testing.T, container string, timeout time.Duration) bool {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if _, err := s.dockerExec(t, container, "test", "-f", "/test-workspace/managed-file"); err == nil {
+		if _, err := s.DockerExec(t, container, "test", "-f", "/test-workspace/managed-file"); err == nil {
 			return true
 		}
 		time.Sleep(2 * time.Second)
@@ -252,10 +252,10 @@ func (s *FleetTestSuite) waitForManagedFile(t *testing.T, container string, time
 }
 
 // verifyManagedFile checks /test-workspace/managed-file content and permissions.
-func (s *FleetTestSuite) verifyManagedFile(t *testing.T, container string) {
+func (s *fleetScenarioSuite) verifyManagedFile(t *testing.T, container string) {
 	t.Helper()
 
-	content, err := s.dockerExec(t, container, "cat", "/test-workspace/managed-file")
+	content, err := s.DockerExec(t, container, "cat", "/test-workspace/managed-file")
 	if err != nil {
 		t.Errorf("%s: managed-file not readable: %v", container, err)
 		return
@@ -264,7 +264,7 @@ func (s *FleetTestSuite) verifyManagedFile(t *testing.T, container string) {
 		t.Errorf("%s: managed-file content = %q, want %q", container, content, "fleet-managed-content\n")
 	}
 
-	perms, err := s.dockerExec(t, container, "stat", "-c", "%a", "/test-workspace/managed-file")
+	perms, err := s.DockerExec(t, container, "stat", "-c", "%a", "/test-workspace/managed-file")
 	if err != nil {
 		t.Errorf("%s: stat managed-file: %v", container, err)
 		return
@@ -276,15 +276,15 @@ func (s *FleetTestSuite) verifyManagedFile(t *testing.T, container string) {
 }
 
 // verifyManagedDir checks /test-workspace/managed-dir existence and permissions.
-func (s *FleetTestSuite) verifyManagedDir(t *testing.T, container string) {
+func (s *fleetScenarioSuite) verifyManagedDir(t *testing.T, container string) {
 	t.Helper()
 
-	if _, err := s.dockerExec(t, container, "test", "-d", "/test-workspace/managed-dir"); err != nil {
+	if _, err := s.DockerExec(t, container, "test", "-d", "/test-workspace/managed-dir"); err != nil {
 		t.Errorf("%s: managed-dir does not exist: %v", container, err)
 		return
 	}
 
-	perms, err := s.dockerExec(t, container, "stat", "-c", "%a", "/test-workspace/managed-dir")
+	perms, err := s.DockerExec(t, container, "stat", "-c", "%a", "/test-workspace/managed-dir")
 	if err != nil {
 		t.Errorf("%s: stat managed-dir: %v", container, err)
 		return
@@ -296,10 +296,10 @@ func (s *FleetTestSuite) verifyManagedDir(t *testing.T, container string) {
 }
 
 // verifyScriptOutput checks that the script module wrote /test-workspace/script-output.txt.
-func (s *FleetTestSuite) verifyScriptOutput(t *testing.T, container string) {
+func (s *fleetScenarioSuite) verifyScriptOutput(t *testing.T, container string) {
 	t.Helper()
 
-	content, err := s.dockerExec(t, container, "cat", "/test-workspace/script-output.txt")
+	content, err := s.DockerExec(t, container, "cat", "/test-workspace/script-output.txt")
 	if err != nil {
 		t.Errorf("%s: script-output.txt not found: %v", container, err)
 		return
