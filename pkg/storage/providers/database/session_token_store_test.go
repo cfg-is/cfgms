@@ -33,10 +33,11 @@ func newTestSessionTokenStore(t *testing.T) *DatabaseSessionTokenStore {
 	}
 	db := getTestDB(t) // skips if postgres not reachable
 	t.Cleanup(func() { _ = db.Close() })
-	// Drop and recreate the table so each test starts clean.
+	// Start clean: outside keep-schema mode this drops every provider table so the
+	// store recreates it; in keep-schema mode it only truncates, leaving the schema
+	// created by the other revision intact.
 	ctx := context.Background()
-	_, dropErr := db.ExecContext(ctx, "DROP TABLE IF EXISTS session_token_store")
-	require.NoError(t, dropErr)
+	require.NoError(t, resetSchemaForTest(ctx, db))
 
 	store, err := NewDatabaseSessionTokenStore(db, getTestConfig())
 	require.NoError(t, err)
@@ -439,7 +440,8 @@ func pgColumnExists(ctx context.Context, t *testing.T, db *sql.DB, column string
 	err := db.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM information_schema.columns
-			WHERE table_name = 'session_token_store' AND column_name = $1
+			WHERE table_schema = current_schema()
+			  AND table_name = 'session_token_store' AND column_name = $1
 		)`, column).Scan(&exists)
 	require.NoError(t, err)
 	return exists
@@ -454,8 +456,10 @@ func TestBackfillSessionTokenStoreContinuity_UpgradePath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping database tests in short mode")
 	}
+	skipInKeepSchemaMode(t, "drops and recreates shared session_token_store")
 	db := getTestDB(t) // skips if postgres not reachable
-	defer func() { _ = db.Close() }()
+	// Registered before the drop cleanup so it runs after it (cleanups run LIFO).
+	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
 
 	// Start from a clean slate, then create the legacy-shaped table.
@@ -695,8 +699,10 @@ func TestBackfillAddsChannelColumn(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping database tests in short mode")
 	}
+	skipInKeepSchemaMode(t, "drops and recreates shared session_token_store")
 	db := getTestDB(t)
-	defer func() { _ = db.Close() }()
+	// Registered before the drop cleanup so it runs after it (cleanups run LIFO).
+	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
 
 	_, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS session_token_store")
