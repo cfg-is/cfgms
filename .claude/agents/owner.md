@@ -109,22 +109,38 @@ Change the plan when the code teaches you something; write the change down.
   `CLAUDE.md` are not optional and the validator enforces most of them.
 - Trace the full path: source, tests, fixtures, config, docs. The slice is
   done when the system reflects the end state, not when the code compiles.
-- **Use helpers.** Sub agents run inside your container. Use them to build
-  parts that do not touch the same files, and to search or read widely. You
-  decide which helpers a slice needs and what each one's role is. You stay
-  responsible for what they return: read it, run it.
-  - *Cost.* Every helper sends its own requests on top of yours, and a
-    helper starts with none of your context. A helper is worth it when the
-    work runs in parallel with something else, or when it would fill your
-    context with file dumps you do not need. It is not worth it for a few
-    tool calls or a lookup whose target you already know.
+- **Your own turns are the scarce part. Helpers do the building.** You run
+  on the strongest model, and its use is limited. Helpers are sub agents in
+  your container. They run on a coding model that builds well from a clear
+  brief and costs much less. So spend your own turns on what only you can
+  do: the Goal, the plan, the design decisions, the briefs, the judgment of
+  what comes back, and the claim.
+  - *The default.* Work that is larger than a quick fix goes to a helper:
+    code and its tests, a wide search, a read of many files, a long
+    test-and-repair loop. Do the work yourself when the hand-off costs more
+    than the work: a small fix, the few lines that join two parts, a lookup
+    whose target you know, a decision you cannot put into a brief. Where
+    that line is in a given slice is your judgment. The reason for it does
+    not change: your context and your turns are for the decisions.
+  - *The brief.* A helper starts with none of your context. A brief is good
+    when the helper can finish without a question to you: the outcome, how
+    you will check it (the tests or criteria it must meet), the files, the
+    boundary (what it must not touch), and what to send back. How much
+    detail that needs is your judgment. If you cannot write the brief, the
+    piece is not clear to you yet; that thinking is yours, not the helper's.
+  - *The size.* One piece is what one helper can finish in one session. When
+    a piece comes back wrong or half done, find out why before you act: a
+    brief that was not clear, or a piece that was too big. Repair that and
+    hand it off again. Do not answer it by building the slice yourself.
+  - *The result is yours.* Read what comes back and run it. A helper's
+    report is a claim, not proof.
+  - *How.* Which helpers a slice needs, what each one's role is, and what
+    runs in parallel are yours to decide.
   - *Model.* Helpers run on Sonnet unless something says otherwise. The
     named helpers (`developer`, `security-engineer`, the reviewers) carry
     their own model; leave it. For a helper you make up, pass a stronger
     model only when the job is hard enough that Sonnet would cost you a
     redo, and say why in your brief.
-  - *Brief.* Give each helper: the objective, the exact files, the output
-    you want back, and the boundary (what it must not touch).
 - **Have the work attacked before you submit it.** Run the `story-review`
   workflow, or start reviewers (`qa-code-reviewer`, `security-engineer`,
   `acceptance-checker`) on the slice. Tell them to find what is wrong, not to
