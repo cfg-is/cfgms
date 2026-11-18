@@ -240,6 +240,20 @@ type ResponseSender interface {
 	SendResponse(ctx context.Context, response *types.Response) error
 }
 
+// CapabilitiesSender is an optional capability of a client-mode provider: it
+// declares the steward's capabilities to the controller as a control message of
+// its own, beside SendHeartbeat. It is not part of ControlPlaneProvider so that
+// existing implementers keep compiling; callers type-assert for it, as for
+// ResponseSender. The controller sends no reply and the caller must not wait for
+// one: a controller that predates declarations ignores the message.
+//
+// An implementation remembers the declaration and sends it again as the first
+// message of every later connection, since each connection starts with the
+// controller assuming nothing.
+type CapabilitiesSender interface {
+	SendCapabilities(ctx context.Context, caps *types.StewardCapabilities) error
+}
+
 // ResponseSubscriber is an optional capability of a server-mode provider: it
 // delivers every response received from a connected steward to the handler.
 // Only server-mode providers may subscribe.

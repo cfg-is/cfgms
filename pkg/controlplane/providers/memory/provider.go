@@ -747,6 +747,26 @@ func (p *Provider) SendHeartbeat(_ context.Context, heartbeat *types.Heartbeat) 
 	return nil
 }
 
+// SendCapabilities declares the steward's capabilities to the controller. The
+// in-memory transport has no connection to settle: the declaration is validated
+// and accepted, and counted as delivered, so a steward built on this provider
+// runs the same send path as one on the gRPC provider. It returns an error when
+// the client is not connected.
+func (p *Provider) SendCapabilities(_ context.Context, caps *types.StewardCapabilities) error {
+	if p.mode != ModeClient {
+		return fmt.Errorf("SendCapabilities is only available in client mode")
+	}
+	if caps == nil {
+		return fmt.Errorf("SendCapabilities: capabilities must not be nil")
+	}
+
+	if _, err := p.serverForSend(); err != nil {
+		p.deliveryFailures.Add(1)
+		return fmt.Errorf("failed to send capabilities: %w", err)
+	}
+	return nil
+}
+
 // receiveHeartbeat is the server-side ingress for a heartbeat.
 func (p *Provider) receiveHeartbeat(hb *types.Heartbeat) {
 	p.heartbeatsReceived.Add(1)

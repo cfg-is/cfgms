@@ -350,6 +350,7 @@ type ControlMessage struct {
 	//	*ControlMessage_Response
 	//	*ControlMessage_TamperState
 	//	*ControlMessage_RepairRequest
+	//	*ControlMessage_Capabilities
 	Payload       isControlMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -446,6 +447,15 @@ func (x *ControlMessage) GetRepairRequest() *RepairRequest {
 	return nil
 }
 
+func (x *ControlMessage) GetCapabilities() *StewardCapabilities {
+	if x != nil {
+		if x, ok := x.Payload.(*ControlMessage_Capabilities); ok {
+			return x.Capabilities
+		}
+	}
+	return nil
+}
+
 type isControlMessage_Payload interface {
 	isControlMessage_Payload()
 }
@@ -474,6 +484,10 @@ type ControlMessage_RepairRequest struct {
 	RepairRequest *RepairRequest `protobuf:"bytes,6,opt,name=repair_request,json=repairRequest,proto3,oneof"`
 }
 
+type ControlMessage_Capabilities struct {
+	Capabilities *StewardCapabilities `protobuf:"bytes,7,opt,name=capabilities,proto3,oneof"`
+}
+
 func (*ControlMessage_Command) isControlMessage_Payload() {}
 
 func (*ControlMessage_Event) isControlMessage_Payload() {}
@@ -485,6 +499,78 @@ func (*ControlMessage_Response) isControlMessage_Payload() {}
 func (*ControlMessage_TamperState) isControlMessage_Payload() {}
 
 func (*ControlMessage_RepairRequest) isControlMessage_Payload() {}
+
+func (*ControlMessage_Capabilities) isControlMessage_Payload() {}
+
+// StewardCapabilities is the first message a steward sends on a new
+// ControlChannel stream: the command types and signing payload versions this
+// build handles. It is a control message of its own, not a Heartbeat field,
+// because heartbeats pass admission queues and can be dropped, and a declaration
+// must not be. The controller sends no reply; the steward never waits for one
+// (an older controller ignores the message). command_types holds CommandType
+// numbers, so a number this build does not know is carried as is and ignored by
+// the receiver.
+type StewardCapabilities struct {
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	CommandTypes           []int32                `protobuf:"varint,1,rep,packed,name=command_types,json=commandTypes,proto3" json:"command_types,omitempty"`
+	SigningPayloadVersions []uint32               `protobuf:"varint,2,rep,packed,name=signing_payload_versions,json=signingPayloadVersions,proto3" json:"signing_payload_versions,omitempty"`
+	// steward_id is checked against the mTLS-authenticated identity; empty is
+	// stamped with it, a different value rejects the declaration.
+	StewardId     string `protobuf:"bytes,3,opt,name=steward_id,json=stewardId,proto3" json:"steward_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StewardCapabilities) Reset() {
+	*x = StewardCapabilities{}
+	mi := &file_transport_control_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StewardCapabilities) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StewardCapabilities) ProtoMessage() {}
+
+func (x *StewardCapabilities) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_control_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StewardCapabilities.ProtoReflect.Descriptor instead.
+func (*StewardCapabilities) Descriptor() ([]byte, []int) {
+	return file_transport_control_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *StewardCapabilities) GetCommandTypes() []int32 {
+	if x != nil {
+		return x.CommandTypes
+	}
+	return nil
+}
+
+func (x *StewardCapabilities) GetSigningPayloadVersions() []uint32 {
+	if x != nil {
+		return x.SigningPayloadVersions
+	}
+	return nil
+}
+
+func (x *StewardCapabilities) GetStewardId() string {
+	if x != nil {
+		return x.StewardId
+	}
+	return ""
+}
 
 // TamperState tells a steward whether the controller considers its host locked
 // (tamper detected). It carries no data besides the flag, so the receiver never
@@ -500,7 +586,7 @@ type TamperState struct {
 
 func (x *TamperState) Reset() {
 	*x = TamperState{}
-	mi := &file_transport_control_proto_msgTypes[1]
+	mi := &file_transport_control_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -512,7 +598,7 @@ func (x *TamperState) String() string {
 func (*TamperState) ProtoMessage() {}
 
 func (x *TamperState) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_control_proto_msgTypes[1]
+	mi := &file_transport_control_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -525,7 +611,7 @@ func (x *TamperState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TamperState.ProtoReflect.Descriptor instead.
 func (*TamperState) Descriptor() ([]byte, []int) {
-	return file_transport_control_proto_rawDescGZIP(), []int{1}
+	return file_transport_control_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *TamperState) GetLocked() bool {
@@ -552,7 +638,7 @@ type RepairRequest struct {
 
 func (x *RepairRequest) Reset() {
 	*x = RepairRequest{}
-	mi := &file_transport_control_proto_msgTypes[2]
+	mi := &file_transport_control_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -564,7 +650,7 @@ func (x *RepairRequest) String() string {
 func (*RepairRequest) ProtoMessage() {}
 
 func (x *RepairRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_control_proto_msgTypes[2]
+	mi := &file_transport_control_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -577,7 +663,7 @@ func (x *RepairRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RepairRequest.ProtoReflect.Descriptor instead.
 func (*RepairRequest) Descriptor() ([]byte, []int) {
-	return file_transport_control_proto_rawDescGZIP(), []int{2}
+	return file_transport_control_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *RepairRequest) GetRepairId() string {
@@ -650,7 +736,7 @@ type Command struct {
 
 func (x *Command) Reset() {
 	*x = Command{}
-	mi := &file_transport_control_proto_msgTypes[3]
+	mi := &file_transport_control_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -662,7 +748,7 @@ func (x *Command) String() string {
 func (*Command) ProtoMessage() {}
 
 func (x *Command) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_control_proto_msgTypes[3]
+	mi := &file_transport_control_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -675,7 +761,7 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Command.ProtoReflect.Descriptor instead.
 func (*Command) Descriptor() ([]byte, []int) {
-	return file_transport_control_proto_rawDescGZIP(), []int{3}
+	return file_transport_control_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Command) GetId() string {
@@ -765,7 +851,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_transport_control_proto_msgTypes[4]
+	mi := &file_transport_control_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -777,7 +863,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_control_proto_msgTypes[4]
+	mi := &file_transport_control_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -790,7 +876,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_transport_control_proto_rawDescGZIP(), []int{4}
+	return file_transport_control_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Event) GetId() string {
@@ -870,7 +956,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_transport_control_proto_msgTypes[5]
+	mi := &file_transport_control_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -882,7 +968,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_control_proto_msgTypes[5]
+	mi := &file_transport_control_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -895,7 +981,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_transport_control_proto_rawDescGZIP(), []int{5}
+	return file_transport_control_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Heartbeat) GetStewardId() string {
@@ -980,7 +1066,7 @@ type HealthReason struct {
 
 func (x *HealthReason) Reset() {
 	*x = HealthReason{}
-	mi := &file_transport_control_proto_msgTypes[6]
+	mi := &file_transport_control_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -992,7 +1078,7 @@ func (x *HealthReason) String() string {
 func (*HealthReason) ProtoMessage() {}
 
 func (x *HealthReason) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_control_proto_msgTypes[6]
+	mi := &file_transport_control_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1005,7 +1091,7 @@ func (x *HealthReason) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthReason.ProtoReflect.Descriptor instead.
 func (*HealthReason) Descriptor() ([]byte, []int) {
-	return file_transport_control_proto_rawDescGZIP(), []int{6}
+	return file_transport_control_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *HealthReason) GetComponent() string {
@@ -1044,7 +1130,7 @@ type Response struct {
 
 func (x *Response) Reset() {
 	*x = Response{}
-	mi := &file_transport_control_proto_msgTypes[7]
+	mi := &file_transport_control_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1056,7 +1142,7 @@ func (x *Response) String() string {
 func (*Response) ProtoMessage() {}
 
 func (x *Response) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_control_proto_msgTypes[7]
+	mi := &file_transport_control_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1069,7 +1155,7 @@ func (x *Response) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Response.ProtoReflect.Descriptor instead.
 func (*Response) Descriptor() ([]byte, []int) {
-	return file_transport_control_proto_rawDescGZIP(), []int{7}
+	return file_transport_control_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Response) GetCommandId() string {
@@ -1118,15 +1204,21 @@ var File_transport_control_proto protoreflect.FileDescriptor
 
 const file_transport_control_proto_rawDesc = "" +
 	"\n" +
-	"\x17transport/control.proto\x12\x0fcfgms.transport\x1a\x1fgoogle/protobuf/timestamp.proto\"\x82\x03\n" +
+	"\x17transport/control.proto\x12\x0fcfgms.transport\x1a\x1fgoogle/protobuf/timestamp.proto\"\xce\x03\n" +
 	"\x0eControlMessage\x124\n" +
 	"\acommand\x18\x01 \x01(\v2\x18.cfgms.transport.CommandH\x00R\acommand\x12.\n" +
 	"\x05event\x18\x02 \x01(\v2\x16.cfgms.transport.EventH\x00R\x05event\x12:\n" +
 	"\theartbeat\x18\x03 \x01(\v2\x1a.cfgms.transport.HeartbeatH\x00R\theartbeat\x127\n" +
 	"\bresponse\x18\x04 \x01(\v2\x19.cfgms.transport.ResponseH\x00R\bresponse\x12A\n" +
 	"\ftamper_state\x18\x05 \x01(\v2\x1c.cfgms.transport.TamperStateH\x00R\vtamperState\x12G\n" +
-	"\x0erepair_request\x18\x06 \x01(\v2\x1e.cfgms.transport.RepairRequestH\x00R\rrepairRequestB\t\n" +
-	"\apayload\"%\n" +
+	"\x0erepair_request\x18\x06 \x01(\v2\x1e.cfgms.transport.RepairRequestH\x00R\rrepairRequest\x12J\n" +
+	"\fcapabilities\x18\a \x01(\v2$.cfgms.transport.StewardCapabilitiesH\x00R\fcapabilitiesB\t\n" +
+	"\apayload\"\x93\x01\n" +
+	"\x13StewardCapabilities\x12#\n" +
+	"\rcommand_types\x18\x01 \x03(\x05R\fcommandTypes\x128\n" +
+	"\x18signing_payload_versions\x18\x02 \x03(\rR\x16signingPayloadVersions\x12\x1d\n" +
+	"\n" +
+	"steward_id\x18\x03 \x01(\tR\tstewardId\"%\n" +
 	"\vTamperState\x12\x16\n" +
 	"\x06locked\x18\x01 \x01(\bR\x06locked\"\xed\x01\n" +
 	"\rRepairRequest\x12\x1b\n" +
@@ -1262,51 +1354,53 @@ func file_transport_control_proto_rawDescGZIP() []byte {
 }
 
 var file_transport_control_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_transport_control_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_transport_control_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_transport_control_proto_goTypes = []any{
 	(CommandType)(0),              // 0: cfgms.transport.CommandType
 	(EventType)(0),                // 1: cfgms.transport.EventType
 	(Severity)(0),                 // 2: cfgms.transport.Severity
 	(StewardStatus)(0),            // 3: cfgms.transport.StewardStatus
 	(*ControlMessage)(nil),        // 4: cfgms.transport.ControlMessage
-	(*TamperState)(nil),           // 5: cfgms.transport.TamperState
-	(*RepairRequest)(nil),         // 6: cfgms.transport.RepairRequest
-	(*Command)(nil),               // 7: cfgms.transport.Command
-	(*Event)(nil),                 // 8: cfgms.transport.Event
-	(*Heartbeat)(nil),             // 9: cfgms.transport.Heartbeat
-	(*HealthReason)(nil),          // 10: cfgms.transport.HealthReason
-	(*Response)(nil),              // 11: cfgms.transport.Response
-	nil,                           // 12: cfgms.transport.Command.ParamsEntry
-	nil,                           // 13: cfgms.transport.Event.DetailsEntry
-	nil,                           // 14: cfgms.transport.Heartbeat.MetricsEntry
-	nil,                           // 15: cfgms.transport.Response.DetailsEntry
-	(*timestamppb.Timestamp)(nil), // 16: google.protobuf.Timestamp
+	(*StewardCapabilities)(nil),   // 5: cfgms.transport.StewardCapabilities
+	(*TamperState)(nil),           // 6: cfgms.transport.TamperState
+	(*RepairRequest)(nil),         // 7: cfgms.transport.RepairRequest
+	(*Command)(nil),               // 8: cfgms.transport.Command
+	(*Event)(nil),                 // 9: cfgms.transport.Event
+	(*Heartbeat)(nil),             // 10: cfgms.transport.Heartbeat
+	(*HealthReason)(nil),          // 11: cfgms.transport.HealthReason
+	(*Response)(nil),              // 12: cfgms.transport.Response
+	nil,                           // 13: cfgms.transport.Command.ParamsEntry
+	nil,                           // 14: cfgms.transport.Event.DetailsEntry
+	nil,                           // 15: cfgms.transport.Heartbeat.MetricsEntry
+	nil,                           // 16: cfgms.transport.Response.DetailsEntry
+	(*timestamppb.Timestamp)(nil), // 17: google.protobuf.Timestamp
 }
 var file_transport_control_proto_depIdxs = []int32{
-	7,  // 0: cfgms.transport.ControlMessage.command:type_name -> cfgms.transport.Command
-	8,  // 1: cfgms.transport.ControlMessage.event:type_name -> cfgms.transport.Event
-	9,  // 2: cfgms.transport.ControlMessage.heartbeat:type_name -> cfgms.transport.Heartbeat
-	11, // 3: cfgms.transport.ControlMessage.response:type_name -> cfgms.transport.Response
-	5,  // 4: cfgms.transport.ControlMessage.tamper_state:type_name -> cfgms.transport.TamperState
-	6,  // 5: cfgms.transport.ControlMessage.repair_request:type_name -> cfgms.transport.RepairRequest
-	0,  // 6: cfgms.transport.Command.type:type_name -> cfgms.transport.CommandType
-	16, // 7: cfgms.transport.Command.timestamp:type_name -> google.protobuf.Timestamp
-	12, // 8: cfgms.transport.Command.params:type_name -> cfgms.transport.Command.ParamsEntry
-	1,  // 9: cfgms.transport.Event.type:type_name -> cfgms.transport.EventType
-	16, // 10: cfgms.transport.Event.timestamp:type_name -> google.protobuf.Timestamp
-	13, // 11: cfgms.transport.Event.details:type_name -> cfgms.transport.Event.DetailsEntry
-	2,  // 12: cfgms.transport.Event.severity:type_name -> cfgms.transport.Severity
-	3,  // 13: cfgms.transport.Heartbeat.status:type_name -> cfgms.transport.StewardStatus
-	16, // 14: cfgms.transport.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
-	14, // 15: cfgms.transport.Heartbeat.metrics:type_name -> cfgms.transport.Heartbeat.MetricsEntry
-	10, // 16: cfgms.transport.Heartbeat.reasons:type_name -> cfgms.transport.HealthReason
-	16, // 17: cfgms.transport.Response.timestamp:type_name -> google.protobuf.Timestamp
-	15, // 18: cfgms.transport.Response.details:type_name -> cfgms.transport.Response.DetailsEntry
-	19, // [19:19] is the sub-list for method output_type
-	19, // [19:19] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	8,  // 0: cfgms.transport.ControlMessage.command:type_name -> cfgms.transport.Command
+	9,  // 1: cfgms.transport.ControlMessage.event:type_name -> cfgms.transport.Event
+	10, // 2: cfgms.transport.ControlMessage.heartbeat:type_name -> cfgms.transport.Heartbeat
+	12, // 3: cfgms.transport.ControlMessage.response:type_name -> cfgms.transport.Response
+	6,  // 4: cfgms.transport.ControlMessage.tamper_state:type_name -> cfgms.transport.TamperState
+	7,  // 5: cfgms.transport.ControlMessage.repair_request:type_name -> cfgms.transport.RepairRequest
+	5,  // 6: cfgms.transport.ControlMessage.capabilities:type_name -> cfgms.transport.StewardCapabilities
+	0,  // 7: cfgms.transport.Command.type:type_name -> cfgms.transport.CommandType
+	17, // 8: cfgms.transport.Command.timestamp:type_name -> google.protobuf.Timestamp
+	13, // 9: cfgms.transport.Command.params:type_name -> cfgms.transport.Command.ParamsEntry
+	1,  // 10: cfgms.transport.Event.type:type_name -> cfgms.transport.EventType
+	17, // 11: cfgms.transport.Event.timestamp:type_name -> google.protobuf.Timestamp
+	14, // 12: cfgms.transport.Event.details:type_name -> cfgms.transport.Event.DetailsEntry
+	2,  // 13: cfgms.transport.Event.severity:type_name -> cfgms.transport.Severity
+	3,  // 14: cfgms.transport.Heartbeat.status:type_name -> cfgms.transport.StewardStatus
+	17, // 15: cfgms.transport.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
+	15, // 16: cfgms.transport.Heartbeat.metrics:type_name -> cfgms.transport.Heartbeat.MetricsEntry
+	11, // 17: cfgms.transport.Heartbeat.reasons:type_name -> cfgms.transport.HealthReason
+	17, // 18: cfgms.transport.Response.timestamp:type_name -> google.protobuf.Timestamp
+	16, // 19: cfgms.transport.Response.details:type_name -> cfgms.transport.Response.DetailsEntry
+	20, // [20:20] is the sub-list for method output_type
+	20, // [20:20] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_transport_control_proto_init() }
@@ -1321,6 +1415,7 @@ func file_transport_control_proto_init() {
 		(*ControlMessage_Response)(nil),
 		(*ControlMessage_TamperState)(nil),
 		(*ControlMessage_RepairRequest)(nil),
+		(*ControlMessage_Capabilities)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1328,7 +1423,7 @@ func file_transport_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transport_control_proto_rawDesc), len(file_transport_control_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   12,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

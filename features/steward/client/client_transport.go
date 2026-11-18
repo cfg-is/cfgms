@@ -1077,25 +1077,15 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 			"and no error was reported; refusing to connect without mutual TLS")
 	}
 
-	// Initialize gRPC control plane provider if not already set
-	if controlPlane == nil {
-		controlPlane, err = c.newControlPlaneProvider(ctx, stewardID, transportAddress, tenantID, tlsConfig)
-		if err != nil {
-			return err
-		}
-		c.mu.Lock()
-		c.controlPlane = controlPlane
-		c.mu.Unlock()
+	// Initialize and start the gRPC control plane provider (connects over QUIC).
+	providerPreset := controlPlane != nil
+	controlPlane, err = c.ensureControlPlane(ctx, controlPlane, stewardID, transportAddress, tenantID, tlsConfig)
+	if err != nil {
+		return err
 	}
 	c.installInboundHooks(controlPlane)
-
-	// Start the control plane (connects to gRPC server over QUIC)
-	if !controlPlane.IsConnected() {
-		c.logger.Info("Starting gRPC control plane connection", "addr", transportAddress)
-		if err := controlPlane.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start gRPC control plane: %w", err)
-		}
-		c.logger.Info("gRPC control plane connection established")
+	if err := c.startControlPlane(ctx, controlPlane, transportAddress, stewardID, providerPreset); err != nil {
+		return err
 	}
 
 	// Initialize gRPC data plane provider eagerly — shares the same transport_address
@@ -1205,6 +1195,56 @@ func (c *TransportClient) autoInitializeConfigExecutor() {
 	}
 }
 
+// ensureControlPlane returns cp, or when it is nil creates the control plane
+// provider and records it on the client.
+func (c *TransportClient) ensureControlPlane(ctx context.Context, cp controlplaneInterfaces.ControlPlaneProvider, stewardID, transportAddress, tenantID string, tlsConfig *tls.Config) (controlplaneInterfaces.ControlPlaneProvider, error) {
+	if cp != nil {
+		return cp, nil
+	}
+	cp, err := c.newControlPlaneProvider(ctx, stewardID, transportAddress, tenantID, tlsConfig)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	c.controlPlane = cp
+	c.mu.Unlock()
+	return cp, nil
+}
+
+// startControlPlane connects cp to the controller when it is not connected yet.
+// A provider that was handed in rather than created here is then told to declare
+// this build's capabilities (a provider created here declares as the first
+// message of each stream it opens).
+func (c *TransportClient) startControlPlane(ctx context.Context, cp controlplaneInterfaces.ControlPlaneProvider, transportAddress, stewardID string, preset bool) error {
+	if !cp.IsConnected() {
+		c.logger.Info("Starting gRPC control plane connection", "addr", transportAddress)
+		if err := cp.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start gRPC control plane: %w", err)
+		}
+		c.logger.Info("gRPC control plane connection established")
+	}
+	if preset {
+		c.declareCapabilities(ctx, cp, stewardID)
+	}
+	return nil
+}
+
+// declareCapabilities declares this build's capabilities on a control plane
+// provider. It never waits for a reply: the controller sends none. A provider
+// that cannot declare, or a failed send, is logged and ignored; the controller
+// then runs the steward on the baseline profile.
+func (c *TransportClient) declareCapabilities(ctx context.Context, cp controlplaneInterfaces.ControlPlaneProvider, stewardID string) {
+	sender, ok := cp.(controlplaneInterfaces.CapabilitiesSender)
+	if !ok {
+		return
+	}
+	caps := grpcCP.LocalCapabilities(stewardID)
+	if err := sender.SendCapabilities(ctx, &caps); err != nil {
+		c.logger.Warn("Failed to declare capabilities to controller",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
 // newControlPlaneProvider creates and initializes the steward's gRPC control
 // plane client provider for transportAddress. mTLS is mandatory: a nil tlsConfig
 // is refused.
@@ -1214,6 +1254,11 @@ func (c *TransportClient) newControlPlaneProvider(ctx context.Context, stewardID
 
 	provider := grpcCP.New(grpcCP.ModeClient, grpcCP.WithHostAttributes(c.hostAttributes),
 		grpcCP.WithOnIdentityRejected(c.fireIdentityRejected),
+		// The first message of every stream, the first and each reconnect, is the
+		// capability declaration, derived from what this build handles. The
+		// controller never replies and nothing here waits for it, so an older
+		// controller, which ignores the message, is unaffected.
+		grpcCP.WithStewardCapabilities(grpcCP.LocalCapabilities(stewardID)),
 		grpcCP.WithPanicHook(func(component string, recovered interface{}) {
 			// The provider has already logged the sanitized panic; only the
 			// fixed-string reason reaches the heartbeat.

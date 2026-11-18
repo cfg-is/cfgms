@@ -922,3 +922,71 @@ func TestSignedCommandFromProto_MarksUnmappedWireType(t *testing.T) {
 		})
 	}
 }
+
+func TestLocalCapabilitiesDerivedFromBuild(t *testing.T) {
+	caps := LocalCapabilities("steward-1")
+
+	assert.Equal(t, "steward-1", caps.StewardID)
+	assert.Equal(t, types.SupportedSigningPayloadVersions(), caps.SigningPayloadVersions)
+	assert.Contains(t, caps.SigningPayloadVersions, types.SigningPayloadV2)
+
+	require.Len(t, caps.CommandTypes, len(protoToCommandType))
+	for i, n := range caps.CommandTypes {
+		_, ok := protoToCommandType[transportpb.CommandType(n)]
+		assert.True(t, ok, "declared command type %d must be one the build maps", n)
+		if i > 0 {
+			assert.Less(t, caps.CommandTypes[i-1], n, "command types are sorted and unique")
+		}
+	}
+}
+
+func TestCapabilitiesRoundTrip(t *testing.T) {
+	in := &types.StewardCapabilities{
+		StewardID:              "steward-1",
+		CommandTypes:           []int32{1, 2, 13},
+		SigningPayloadVersions: []uint32{1, 2},
+	}
+
+	pb := capabilitiesToProto(in)
+	require.NotNil(t, pb)
+	assert.Equal(t, in.CommandTypes, pb.GetCommandTypes())
+	assert.Equal(t, in.SigningPayloadVersions, pb.GetSigningPayloadVersions())
+	assert.Equal(t, "steward-1", pb.GetStewardId())
+
+	out := capabilitiesFromProto(pb)
+	assert.Equal(t, in, out)
+
+	// The copy is independent of the wire message.
+	pb.CommandTypes[0] = 99
+	assert.Equal(t, int32(1), in.CommandTypes[0])
+}
+
+func TestCapabilitiesNil(t *testing.T) {
+	assert.Nil(t, capabilitiesToProto(nil))
+	assert.Nil(t, capabilitiesFromProto(nil))
+}
+
+func TestIsKnownCommandTypeNumber(t *testing.T) {
+	assert.False(t, isKnownCommandTypeNumber(0), "unspecified is not a declarable command type")
+	assert.False(t, isKnownCommandTypeNumber(-1))
+	assert.False(t, isKnownCommandTypeNumber(9999))
+	for n := range transportpb.CommandType_name {
+		if n != 0 {
+			assert.True(t, isKnownCommandTypeNumber(n), "enum number %d", n)
+		}
+	}
+}
+
+func TestControlMessageWithoutCapabilitiesDecodesAsAbsent(t *testing.T) {
+	// A message carrying no capabilities field (what every older steward
+	// sends) decodes with the member absent, and the reserved Heartbeat field and
+	// name are untouched.
+	msg := &transportpb.ControlMessage{Payload: &transportpb.ControlMessage_Heartbeat{Heartbeat: &transportpb.Heartbeat{StewardId: "s"}}}
+	assert.Nil(t, msg.GetCapabilities())
+	assert.NotNil(t, msg.GetHeartbeat())
+	assert.Equal(t, "", (&transportpb.ControlMessage{}).GetCapabilities().GetStewardId())
+
+	desc := (&transportpb.Heartbeat{}).ProtoReflect().Descriptor()
+	assert.True(t, desc.ReservedRanges().Has(10), "Heartbeat field 10 stays reserved")
+	assert.True(t, desc.ReservedNames().Has("signing_payload_versions"), "Heartbeat reserved name stays reserved")
+}

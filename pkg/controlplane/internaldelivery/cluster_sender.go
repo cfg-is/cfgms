@@ -52,6 +52,7 @@ type ClusterAwareSender struct {
 
 // Compile-time assertion.
 var _ controlplaneInterfaces.ControlPlaneProvider = (*ClusterAwareSender)(nil)
+var _ controlplaneInterfaces.CapabilitiesSender = (*ClusterAwareSender)(nil)
 
 // NewClusterAwareSender constructs a ClusterAwareSender. local is the
 // node-local control-plane provider that already handles direct steward
@@ -272,6 +273,14 @@ func (c *ClusterAwareSender) SubscribeEvents(ctx context.Context, filter *types.
 
 func (c *ClusterAwareSender) SendHeartbeat(ctx context.Context, heartbeat *types.Heartbeat) error {
 	return c.local.SendHeartbeat(ctx, heartbeat)
+}
+
+func (c *ClusterAwareSender) SendCapabilities(ctx context.Context, caps *types.StewardCapabilities) error {
+	sender, ok := c.local.(controlplaneInterfaces.CapabilitiesSender)
+	if !ok {
+		return fmt.Errorf("local control plane provider cannot send capabilities")
+	}
+	return sender.SendCapabilities(ctx, caps)
 }
 
 func (c *ClusterAwareSender) SubscribeHeartbeats(ctx context.Context, handler controlplaneInterfaces.HeartbeatHandler) error {

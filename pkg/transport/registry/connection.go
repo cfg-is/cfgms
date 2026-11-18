@@ -66,6 +66,12 @@ type StewardConnection struct {
 	// connection cannot be evicted. Safe to call more than once.
 	Evict func(error)
 
+	// ConnectionID identifies this one connection (stream), as opposed to the
+	// steward: a reconnect gets a new ID. Durable capability writes are keyed to
+	// it so a late write from an old stream cannot overwrite a newer connection's
+	// record. Set by the stream handler before the connection is registered.
+	ConnectionID string
+
 	// SendStallTimeout bounds a Send and the wait to start one. A Send that
 	// exceeds it evicts the connection (see Send). Zero means
 	// DefaultSendStallTimeout.
@@ -75,6 +81,114 @@ type StewardConnection struct {
 	// accepts the message. It is created on first use so the zero value works.
 	slotOnce sync.Once
 	slot     chan struct{}
+
+	// capMu guards the capability state below. The zero value is the pending
+	// state with an open settled signal.
+	capMu           sync.Mutex
+	capState        string
+	capCommandTypes []int32
+	capVersions     []uint32
+	capSettled      chan struct{}
+	capDurableLost  bool
+}
+
+// Capability states of a connection. They match the values of the control-plane
+// types and of the durable record; the registry holds plain strings so it stays
+// free of other CFGMS packages.
+const (
+	CapabilityPending  = "pending"
+	CapabilityDeclared = "declared"
+	CapabilityFloor    = "floor"
+)
+
+// CapabilitySnapshot is a copy of a connection's capability state.
+type CapabilitySnapshot struct {
+	// State is CapabilityPending, CapabilityDeclared or CapabilityFloor.
+	State string
+	// CommandTypes and SigningPayloadVersions are set for declared and floor.
+	CommandTypes           []int32
+	SigningPayloadVersions []uint32
+}
+
+// settledLocked returns the settled channel, creating it on first use.
+// Caller holds capMu.
+func (c *StewardConnection) settledLocked() chan struct{} {
+	if c.capSettled == nil {
+		c.capSettled = make(chan struct{})
+	}
+	return c.capSettled
+}
+
+// CapabilitiesSettled returns a channel that is closed once the connection's
+// capability state leaves pending: on the steward's first declaration, or when
+// the grace period ends without one. It is closed at most once and stays closed.
+func (c *StewardConnection) CapabilitiesSettled() <-chan struct{} {
+	c.capMu.Lock()
+	defer c.capMu.Unlock()
+	return c.settledLocked()
+}
+
+// CapabilitySnapshot returns the connection's current capability state. A
+// connection that has not settled reports CapabilityPending.
+func (c *StewardConnection) CapabilitySnapshot() CapabilitySnapshot {
+	c.capMu.Lock()
+	defer c.capMu.Unlock()
+	state := c.capState
+	if state == "" {
+		state = CapabilityPending
+	}
+	return CapabilitySnapshot{
+		State:                  state,
+		CommandTypes:           append([]int32(nil), c.capCommandTypes...),
+		SigningPayloadVersions: append([]uint32(nil), c.capVersions...),
+	}
+}
+
+// SettleCapabilities moves the connection to state with the given sets and
+// releases the settled signal. Allowed moves are pending to declared, pending to
+// floor, and floor to declared (a declaration that arrives after the grace
+// period); any other request leaves the state unchanged, so a connection's first
+// declaration is final. changed reports whether the state moved, and late
+// whether it moved from floor.
+func (c *StewardConnection) SettleCapabilities(state string, commandTypes []int32, versions []uint32) (changed, late bool) {
+	c.capMu.Lock()
+	defer c.capMu.Unlock()
+
+	cur := c.capState
+	if cur == "" {
+		cur = CapabilityPending
+	}
+	switch {
+	case state == CapabilityDeclared && (cur == CapabilityPending || cur == CapabilityFloor):
+	case state == CapabilityFloor && cur == CapabilityPending:
+	default:
+		return false, false
+	}
+
+	c.capState = state
+	c.capCommandTypes = append([]int32(nil), commandTypes...)
+	c.capVersions = append([]uint32(nil), versions...)
+	if cur == CapabilityPending {
+		close(c.settledLocked())
+	}
+	return true, cur == CapabilityFloor
+}
+
+// MarkCapabilityDurableLost records that the durable reset for this connection
+// failed, so the stored record does not belong to it and must never be read as
+// this connection's profile.
+func (c *StewardConnection) MarkCapabilityDurableLost() {
+	c.capMu.Lock()
+	c.capDurableLost = true
+	c.capMu.Unlock()
+}
+
+// CapabilityDurableLost reports whether the durable reset for this connection
+// failed.
+func (c *StewardConnection) CapabilityDurableLost() bool {
+	c.capMu.Lock()
+	defer c.capMu.Unlock()
+	return c.capDurableLost
 }
 
 func (c *StewardConnection) sendSlot() chan struct{} {

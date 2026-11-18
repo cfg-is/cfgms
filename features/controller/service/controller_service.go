@@ -23,6 +23,7 @@ import (
 	sdna "github.com/cfgis/cfgms/pkg/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -80,6 +81,13 @@ type ControllerService struct {
 	// heartbeat causes no store write. Own mutex: never held across storage I/O.
 	healthReasonsMu sync.Mutex
 	healthReasons   map[string]healthReasonsState
+
+	// capConns holds the live connection this node owns for each steward, with
+	// its in-memory capability state (Issue #6310). Own mutex: never held across
+	// storage I/O.
+	capMu           sync.Mutex
+	capConns        map[string]*registry.StewardConnection
+	capPollInterval time.Duration
 
 	// tenantAncestry resolves tenant subtree containment for ListFleetStewards'
 	// tenant scoping. Wired via SetTenantAncestry; nil denies every non-identical
@@ -1980,4 +1988,180 @@ func (s *ControllerService) ListFleetStewards(ctx context.Context) []*StewardInf
 	}
 
 	return result
+}
+
+// --- Steward capability record (Issue #6310) ---
+
+// defaultCapabilityPollInterval is how often a node that does not own a
+// steward's connection re-reads the durable record while it waits for a pending
+// connection to settle.
+const defaultCapabilityPollInterval = 100 * time.Millisecond
+
+// SetCapabilityPollInterval sets how often a non-owning node re-reads a pending
+// durable record while waiting. A non-positive value restores the default.
+func (s *ControllerService) SetCapabilityPollInterval(d time.Duration) {
+	s.capMu.Lock()
+	s.capPollInterval = d
+	s.capMu.Unlock()
+}
+
+func (s *ControllerService) capabilityPollInterval() time.Duration {
+	s.capMu.Lock()
+	defer s.capMu.Unlock()
+	if s.capPollInterval > 0 {
+		return s.capPollInterval
+	}
+	return defaultCapabilityPollInterval
+}
+
+// ResetCapabilities starts a new connection's capability record: the connection
+// becomes this node's live connection for the steward, and the durable record is
+// replaced by a pending one keyed to the connection. The control plane calls it
+// synchronously in the registration path, before the connection's receive loop
+// starts. An error means the durable record still belongs to an earlier
+// connection; CapabilityProfile and WaitCapabilities never read it for this one.
+func (s *ControllerService) ResetCapabilities(ctx context.Context, conn *registry.StewardConnection) error {
+	s.capMu.Lock()
+	if s.capConns == nil {
+		s.capConns = make(map[string]*registry.StewardConnection)
+	}
+	s.capConns[conn.StewardID] = conn
+	s.capMu.Unlock()
+
+	if s.stewardStore == nil {
+		return nil
+	}
+	return s.stewardStore.ResetCapabilities(ctx, conn.StewardID, conn.ConnectionID)
+}
+
+// DeclareCapabilities writes the connection's declared or floor profile to the
+// durable record as a compare-and-set on the connection ID. applied=false means
+// a newer connection reset the record. It blocks on the store, so the control
+// plane calls it off the receive loop; the connection's in-memory state, which
+// this node's resolver reads, is updated inline by the control plane.
+func (s *ControllerService) DeclareCapabilities(ctx context.Context, conn *registry.StewardConnection, profile types.CapabilityProfile) (bool, error) {
+	if s.stewardStore == nil {
+		return false, nil
+	}
+	return s.stewardStore.DeclareCapabilities(ctx, conn.StewardID, conn.ConnectionID, business.StewardCapabilityRecord{
+		State:                  profile.State,
+		CommandTypes:           profile.CommandTypes,
+		SigningPayloadVersions: profile.SigningPayloadVersions,
+	})
+}
+
+// CapabilityConnectionClosed forgets the connection when its stream ends. A newer
+// connection for the same steward is left alone.
+func (s *ControllerService) CapabilityConnectionClosed(conn *registry.StewardConnection) {
+	s.capMu.Lock()
+	defer s.capMu.Unlock()
+	if s.capConns[conn.StewardID] == conn {
+		delete(s.capConns, conn.StewardID)
+	}
+}
+
+// ownedConnection returns the live connection this node owns for the steward.
+func (s *ControllerService) ownedConnection(stewardID string) *registry.StewardConnection {
+	s.capMu.Lock()
+	defer s.capMu.Unlock()
+	return s.capConns[stewardID]
+}
+
+// pendingProfile is the profile of a connection that has declared nothing.
+func pendingProfile() types.CapabilityProfile {
+	return types.CapabilityProfile{State: types.CapabilityPending}
+}
+
+// profileFromSnapshot converts a connection's in-memory state.
+func profileFromSnapshot(snap registry.CapabilitySnapshot) types.CapabilityProfile {
+	if snap.State == registry.CapabilityFloor {
+		return types.FloorProfile()
+	}
+	if snap.State != registry.CapabilityDeclared {
+		return pendingProfile()
+	}
+	return types.CapabilityProfile{
+		State:                  types.CapabilityDeclared,
+		CommandTypes:           snap.CommandTypes,
+		SigningPayloadVersions: snap.SigningPayloadVersions,
+	}
+}
+
+// profileFromRecord converts the durable record. A missing record, an
+// unreadable one and a pending one all read as pending: nothing is known.
+func profileFromRecord(rec *business.StewardCapabilityRecord) types.CapabilityProfile {
+	if rec == nil {
+		return pendingProfile()
+	}
+	switch rec.State {
+	case business.StewardCapabilityFloor:
+		return types.FloorProfile()
+	case business.StewardCapabilityDeclared:
+		return types.CapabilityProfile{
+			State:                  types.CapabilityDeclared,
+			CommandTypes:           append([]int32(nil), rec.CommandTypes...),
+			SigningPayloadVersions: append([]uint32(nil), rec.SigningPayloadVersions...),
+		}
+	}
+	return pendingProfile()
+}
+
+// CapabilityProfile returns the steward's current capability profile without
+// waiting. On the node that owns the steward's connection it is that
+// connection's in-memory state, which the control plane updates as the
+// declaration arrives; a connection whose durable reset failed is therefore
+// pending until it settles, and the stored record of an earlier connection is
+// never consulted. On any other node it is the durable record, which the owning
+// node's reset replaced with a pending one when the connection opened, so a
+// previous connection's profile is never returned. A steward with no record, or
+// a record that cannot be read, is pending (an error is also returned for the
+// latter): the caller decides what to do while nothing is known.
+func (s *ControllerService) CapabilityProfile(ctx context.Context, stewardID string) (types.CapabilityProfile, error) {
+	if conn := s.ownedConnection(stewardID); conn != nil {
+		return profileFromSnapshot(conn.CapabilitySnapshot()), nil
+	}
+	if s.stewardStore == nil {
+		return pendingProfile(), nil
+	}
+	rec, err := s.stewardStore.GetSteward(ctx, stewardID)
+	if err != nil {
+		if errors.Is(err, business.ErrStewardNotFound) {
+			return pendingProfile(), nil
+		}
+		return pendingProfile(), fmt.Errorf("read steward capability record: %w", err)
+	}
+	return profileFromRecord(rec.Capabilities), nil
+}
+
+// WaitCapabilities returns the steward's capability profile once its connection
+// has left pending, or the pending profile with the context's error when ctx
+// ends first. On the owning node it waits on the connection's settled signal; on
+// any other node it re-reads the durable record until it is no longer pending.
+// It sends nothing and holds nothing the receive loop needs.
+func (s *ControllerService) WaitCapabilities(ctx context.Context, stewardID string) (types.CapabilityProfile, error) {
+	if conn := s.ownedConnection(stewardID); conn != nil {
+		select {
+		case <-conn.CapabilitiesSettled():
+			return profileFromSnapshot(conn.CapabilitySnapshot()), nil
+		case <-ctx.Done():
+			return pendingProfile(), ctx.Err()
+		}
+	}
+
+	ticker := time.NewTicker(s.capabilityPollInterval())
+	defer ticker.Stop()
+	for {
+		profile, err := s.CapabilityProfile(ctx, stewardID)
+		if err != nil {
+			return profile, err
+		}
+		if profile.State != types.CapabilityPending {
+			return profile, nil
+		}
+		select {
+		case <-ctx.Done():
+			return pendingProfile(), ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }

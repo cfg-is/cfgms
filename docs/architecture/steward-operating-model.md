@@ -123,6 +123,32 @@ The steward runs three concurrent activities:
 └─────────────────────────────────────────────┘
 ```
 
+### Capability Declaration (Issue #6310)
+
+The first message a steward sends on every control-channel stream is a
+`StewardCapabilities` control message (`ControlMessage.capabilities`, field 7): the
+command type numbers and signing payload versions this build handles, plus its own
+steward ID. It is a message of its own rather than a heartbeat field because
+heartbeats go through the controller's admission queues and can be dropped, and a
+declaration must not be.
+
+- **Derived from the build.** `grpc.LocalCapabilities` lists the wire numbers in
+  `protoToCommandType` and the versions `types.CommandSigningBytesVersion`
+  accepts (`types.SupportedSigningPayloadVersions`), so the declaration cannot
+  drift from what the code does.
+- **Every stream.** The provider sends the declaration right after it opens a
+  stream, before the stream is used for anything else, on the first connect and on
+  every reconnect the provider makes by itself. Each connection starts with the
+  controller assuming nothing.
+- **No reply, no wait.** The controller sends nothing back and the steward never
+  waits for it. A controller that predates the message ignores it (its receive loop
+  has no `default` that closes the stream), and treats the steward as it always did.
+- **Failure.** A declaration that cannot be sent is logged at debug level and
+  does not fail the connect; the controller settles a silent steward on the
+  baseline profile after its grace period.
+
+A report-only steward declares as well; the message carries no authority.
+
 ### Shutdown
 
 1. Complete any in-progress resource operations

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -21,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // TestControlPlaneProvider_Start_server_logsStarted verifies that a Provider in
@@ -328,4 +330,427 @@ func TestControlChannel_Heartbeat_TamperAlarmAboutAnotherSteward_Rejected(t *tes
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for the steward's own tamper heartbeat")
 	}
+}
+
+// --- Capability declaration on the control channel ---
+
+// capEvent is one call a capRecorder received.
+type capEvent struct {
+	kind         string // "reset" or "declare"
+	connectionID string
+	state        string
+	profile      types.CapabilityProfile
+}
+
+// capRecorder is a CapabilityRecorder that records its calls in order. resetDelay
+// holds the reset open, resetErr fails it, and declareGate (when set) holds every
+// durable write until it is closed.
+type capRecorder struct {
+	mu          sync.Mutex
+	events      []capEvent
+	closed      []string
+	resetDelay  time.Duration
+	resetErr    error
+	declareGate chan struct{}
+}
+
+func (r *capRecorder) ResetCapabilities(_ context.Context, conn *registry.StewardConnection) error {
+	if r.resetDelay > 0 {
+		time.Sleep(r.resetDelay)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.resetErr != nil {
+		return r.resetErr
+	}
+	r.events = append(r.events, capEvent{kind: "reset", connectionID: conn.ConnectionID, state: types.CapabilityPending})
+	return nil
+}
+
+func (r *capRecorder) DeclareCapabilities(ctx context.Context, conn *registry.StewardConnection, profile types.CapabilityProfile) (bool, error) {
+	if r.declareGate != nil {
+		select {
+		case <-r.declareGate:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, capEvent{kind: "declare", connectionID: conn.ConnectionID, state: profile.State, profile: profile})
+	return true, nil
+}
+
+func (r *capRecorder) CapabilityConnectionClosed(conn *registry.StewardConnection) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closed = append(r.closed, conn.ConnectionID)
+}
+
+func (r *capRecorder) snapshot() []capEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]capEvent(nil), r.events...)
+}
+
+func (r *capRecorder) states() []string {
+	var out []string
+	for _, e := range r.snapshot() {
+		out = append(out, e.kind+":"+e.state)
+	}
+	return out
+}
+
+// capEnv is a real in-process server and steward-side client over QUIC+mTLS.
+type capEnv struct {
+	server *Provider
+	client *Provider
+	reg    registry.Registry
+	conn   *registry.StewardConnection
+}
+
+// newCapEnv starts a server with serverOpts and a client with clientOpts, and
+// returns once the steward's connection is registered.
+func newCapEnv(t *testing.T, stewardID string, serverOpts, clientOpts []option) *capEnv {
+	t.Helper()
+	serverTLS, clientTLS := newTestTLSConfigs(t, stewardID)
+	reg := registry.NewRegistry()
+
+	server := New(ModeServer, serverOpts...)
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode": "server", "addr": "127.0.0.1:0", "tls_config": serverTLS, "registry": reg,
+	}))
+	require.NoError(t, server.Start(context.Background()))
+	t.Cleanup(server.ForceStop)
+
+	client := New(ModeClient, clientOpts...)
+	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
+		"mode": "client", "addr": server.ListenAddr(), "tls_config": clientTLS, "steward_id": stewardID,
+	}))
+	require.NoError(t, client.Start(context.Background()))
+	t.Cleanup(func() { _ = client.Stop(context.Background()) })
+
+	var conn *registry.StewardConnection
+	require.Eventually(t, func() bool {
+		c, ok := reg.Get(stewardID)
+		conn = c
+		return ok
+	}, 5*time.Second, 10*time.Millisecond, "steward should be registered")
+	return &capEnv{server: server, client: client, reg: reg, conn: conn}
+}
+
+func requireSettled(t *testing.T, conn *registry.StewardConnection) {
+	t.Helper()
+	select {
+	case <-conn.CapabilitiesSettled():
+	case <-time.After(10 * time.Second):
+		t.Fatal("connection capabilities never settled")
+	}
+}
+
+func TestCapabilitiesDeclaringStewardSettlesOnFirstMessage(t *testing.T) {
+	t.Parallel()
+	rec := &capRecorder{}
+	local := LocalCapabilities("steward-cap-declare")
+	// A long grace proves the signal was released by the declaration, not the timer.
+	env := newCapEnv(t, "steward-cap-declare",
+		[]option{WithCapabilityRecorder(rec), WithCapabilityGrace(time.Minute)},
+		[]option{WithStewardCapabilities(local)})
+
+	requireSettled(t, env.conn)
+	snap := env.conn.CapabilitySnapshot()
+	assert.Equal(t, registry.CapabilityDeclared, snap.State)
+	assert.Equal(t, local.CommandTypes, snap.CommandTypes)
+	assert.Equal(t, local.SigningPayloadVersions, snap.SigningPayloadVersions)
+	assert.Contains(t, snap.SigningPayloadVersions, types.SigningPayloadV2)
+
+	require.Eventually(t, func() bool { return len(rec.snapshot()) == 2 }, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, []string{"reset:pending", "declare:declared"}, rec.states())
+	events := rec.snapshot()
+	assert.NotEmpty(t, events[0].connectionID)
+	assert.Equal(t, events[0].connectionID, events[1].connectionID, "every write carries the connection's ID")
+	assert.Equal(t, env.conn.ConnectionID, events[0].connectionID)
+}
+
+func TestCapabilitiesSilentStewardSettlesAtFloorAfterGrace(t *testing.T) {
+	t.Parallel()
+	rec := &capRecorder{}
+	start := time.Now()
+	env := newCapEnv(t, "steward-cap-silent",
+		[]option{WithCapabilityRecorder(rec), WithCapabilityGrace(300 * time.Millisecond)}, nil)
+
+	select {
+	case <-env.conn.CapabilitiesSettled():
+		assert.GreaterOrEqual(t, time.Since(start), 250*time.Millisecond, "a silent steward waits out the grace")
+	default:
+		// Not settled yet: the grace is still running.
+		assert.Equal(t, registry.CapabilityPending, env.conn.CapabilitySnapshot().State)
+		requireSettled(t, env.conn)
+	}
+
+	floor := types.FloorProfile()
+	snap := env.conn.CapabilitySnapshot()
+	assert.Equal(t, registry.CapabilityFloor, snap.State)
+	assert.Equal(t, floor.CommandTypes, snap.CommandTypes)
+	assert.Equal(t, floor.SigningPayloadVersions, snap.SigningPayloadVersions)
+
+	require.Eventually(t, func() bool { return len(rec.snapshot()) == 2 }, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, []string{"reset:pending", "declare:floor"}, rec.states())
+}
+
+func TestCapabilitiesLateDeclarationMovesFloorToDeclaredOnce(t *testing.T) {
+	t.Parallel()
+	rec := &capRecorder{}
+	var lateMu sync.Mutex
+	var late []string
+	env := newCapEnv(t, "steward-cap-late",
+		[]option{
+			WithCapabilityRecorder(rec),
+			WithCapabilityGrace(100 * time.Millisecond),
+			WithOnLateCapabilities(func(_ context.Context, stewardID string) {
+				lateMu.Lock()
+				late = append(late, stewardID)
+				lateMu.Unlock()
+			}),
+		}, nil)
+
+	requireSettled(t, env.conn)
+	require.Equal(t, registry.CapabilityFloor, env.conn.CapabilitySnapshot().State)
+
+	local := LocalCapabilities("steward-cap-late")
+	require.NoError(t, env.client.SendCapabilities(context.Background(), &local))
+	require.Eventually(t, func() bool {
+		return env.conn.CapabilitySnapshot().State == registry.CapabilityDeclared
+	}, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, local.CommandTypes, env.conn.CapabilitySnapshot().CommandTypes)
+
+	require.Eventually(t, func() bool {
+		lateMu.Lock()
+		defer lateMu.Unlock()
+		return len(late) == 1
+	}, 5*time.Second, 10*time.Millisecond, "late callback runs for the floor to declared move")
+
+	// A second declaration on the same connection changes nothing and does not
+	// call the callback again.
+	other := types.StewardCapabilities{StewardID: "steward-cap-late", CommandTypes: []int32{1}, SigningPayloadVersions: []uint32{1}}
+	require.NoError(t, env.client.SendCapabilities(context.Background(), &other))
+	require.NoError(t, env.client.SendHeartbeat(context.Background(), &types.Heartbeat{StewardID: "steward-cap-late"}))
+	time.Sleep(200 * time.Millisecond)
+
+	lateMu.Lock()
+	assert.Equal(t, []string{"steward-cap-late"}, late)
+	lateMu.Unlock()
+	assert.Equal(t, local.CommandTypes, env.conn.CapabilitySnapshot().CommandTypes, "the first declaration is final")
+
+	require.Eventually(t, func() bool { return len(rec.snapshot()) == 3 }, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, []string{"reset:pending", "declare:floor", "declare:declared"}, rec.states())
+}
+
+func TestCapabilitiesResetCompletesBeforeReceiveLoopStarts(t *testing.T) {
+	t.Parallel()
+	// The reset takes long enough that the steward's first-message declaration is
+	// already queued on the stream when it returns. The reset must not overwrite
+	// the declaration, and no durable write may precede the reset.
+	rec := &capRecorder{resetDelay: 400 * time.Millisecond}
+	local := LocalCapabilities("steward-cap-order")
+	env := newCapEnv(t, "steward-cap-order",
+		[]option{WithCapabilityRecorder(rec), WithCapabilityGrace(time.Minute)},
+		[]option{WithStewardCapabilities(local)})
+
+	requireSettled(t, env.conn)
+	assert.Equal(t, registry.CapabilityDeclared, env.conn.CapabilitySnapshot().State)
+	require.Eventually(t, func() bool { return len(rec.snapshot()) == 2 }, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, []string{"reset:pending", "declare:declared"}, rec.states())
+}
+
+func TestCapabilitiesEveryReconnectResetsAndDeclaresAgain(t *testing.T) {
+	t.Parallel()
+	rec := &capRecorder{}
+	local := LocalCapabilities("steward-cap-reconnect")
+	env := newCapEnv(t, "steward-cap-reconnect",
+		[]option{WithCapabilityRecorder(rec), WithCapabilityGrace(time.Minute)},
+		[]option{WithStewardCapabilities(local)})
+	requireSettled(t, env.conn)
+	first := env.conn.ConnectionID
+
+	require.NoError(t, env.client.Reconnect(context.Background()))
+	require.Eventually(t, func() bool {
+		c, ok := env.reg.Get("steward-cap-reconnect")
+		return ok && c.ConnectionID != first
+	}, 10*time.Second, 20*time.Millisecond, "a new connection registers")
+	next, _ := env.reg.Get("steward-cap-reconnect")
+	requireSettled(t, next)
+
+	assert.NotEqual(t, first, next.ConnectionID)
+	assert.Equal(t, registry.CapabilityDeclared, next.CapabilitySnapshot().State, "the reconnect declared again as its first message")
+	require.Eventually(t, func() bool { return len(rec.snapshot()) >= 4 }, 5*time.Second, 10*time.Millisecond)
+	events := rec.snapshot()
+	assert.Equal(t, "reset", events[2].kind)
+	assert.Equal(t, next.ConnectionID, events[2].connectionID)
+}
+
+func TestCapabilitiesFailedResetStaysPendingAndWritesNothingDurable(t *testing.T) {
+	t.Parallel()
+	rec := &capRecorder{resetErr: errors.New("store unavailable")}
+	env := newCapEnv(t, "steward-cap-resetfail",
+		[]option{WithCapabilityRecorder(rec), WithCapabilityGrace(time.Minute)}, nil)
+
+	assert.True(t, env.conn.CapabilityDurableLost(), "the connection is marked: its record is not the stored one")
+	assert.Equal(t, registry.CapabilityPending, env.conn.CapabilitySnapshot().State)
+	select {
+	case <-env.conn.CapabilitiesSettled():
+		t.Fatal("a connection whose reset failed must stay pending, not settle")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// A declaration still moves the in-memory state (it came from the steward on
+	// this connection) but nothing is written to the record of an older one.
+	local := LocalCapabilities("steward-cap-resetfail")
+	require.NoError(t, env.client.SendCapabilities(context.Background(), &local))
+	requireSettled(t, env.conn)
+	time.Sleep(200 * time.Millisecond)
+	assert.Empty(t, rec.snapshot(), "no durable write after a failed reset")
+}
+
+func TestCapabilitiesReceiveLoopDoesNotBlockOnDurableWrite(t *testing.T) {
+	t.Parallel()
+	gate := make(chan struct{})
+	rec := &capRecorder{declareGate: gate}
+	local := LocalCapabilities("steward-cap-slow")
+	env := newCapEnv(t, "steward-cap-slow",
+		[]option{WithCapabilityRecorder(rec), WithCapabilityGrace(time.Minute)},
+		[]option{WithStewardCapabilities(local)})
+
+	got := make(chan *types.Heartbeat, 1)
+	require.NoError(t, env.server.SubscribeHeartbeats(context.Background(), func(_ context.Context, hb *types.Heartbeat) error {
+		got <- hb
+		return nil
+	}))
+
+	requireSettled(t, env.conn)
+	// The durable write is parked on the gate; the next message must still be read.
+	require.NoError(t, env.client.SendHeartbeat(context.Background(), &types.Heartbeat{StewardID: "steward-cap-slow", Version: "after-declare"}))
+	select {
+	case hb := <-got:
+		assert.Equal(t, "after-declare", hb.Version)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the receive loop was blocked by the durable write")
+	}
+	assert.Equal(t, []string{"reset:pending"}, rec.states(), "the write has not completed")
+
+	close(gate)
+	require.Eventually(t, func() bool { return len(rec.snapshot()) == 2 }, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestCapabilitiesMismatchedStewardIDRejected(t *testing.T) {
+	t.Parallel()
+	env := newCapEnv(t, "steward-cap-mismatch",
+		[]option{WithCapabilityGrace(time.Minute)}, nil)
+
+	forged := types.StewardCapabilities{StewardID: "someone-else", CommandTypes: []int32{1, 2}, SigningPayloadVersions: []uint32{1, 2}}
+	require.NoError(t, env.client.SendCapabilities(context.Background(), &forged))
+
+	require.Eventually(t, func() bool {
+		stats, err := env.server.GetStats(context.Background())
+		return err == nil && stats.IdentityMismatches == 1
+	}, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, registry.CapabilityPending, env.conn.CapabilitySnapshot().State, "a forged declaration changes nothing")
+}
+
+func TestCapabilitiesUnknownAndOversizedListsAreIgnoredOrCapped(t *testing.T) {
+	t.Parallel()
+	t.Run("unknown enum numbers are dropped", func(t *testing.T) {
+		t.Parallel()
+		env := newCapEnv(t, "steward-cap-unknown", []option{WithCapabilityGrace(time.Minute)}, nil)
+		caps := types.StewardCapabilities{CommandTypes: []int32{2, 1, 9999, -4, 0}, SigningPayloadVersions: []uint32{2, 1, 0}}
+		require.NoError(t, env.client.SendCapabilities(context.Background(), &caps))
+		requireSettled(t, env.conn)
+		snap := env.conn.CapabilitySnapshot()
+		assert.Equal(t, []int32{1, 2}, snap.CommandTypes)
+		assert.Equal(t, []uint32{1, 2}, snap.SigningPayloadVersions)
+	})
+
+	t.Run("a declaration with nothing usable is ignored", func(t *testing.T) {
+		t.Parallel()
+		env := newCapEnv(t, "steward-cap-nothing", []option{WithCapabilityGrace(time.Minute)}, nil)
+		caps := types.StewardCapabilities{CommandTypes: []int32{9999}, SigningPayloadVersions: []uint32{1}}
+		require.NoError(t, env.client.SendCapabilities(context.Background(), &caps))
+		// A usable one afterwards still settles the connection: the bad one did not.
+		time.Sleep(200 * time.Millisecond)
+		assert.Equal(t, registry.CapabilityPending, env.conn.CapabilitySnapshot().State)
+		good := types.StewardCapabilities{CommandTypes: []int32{1}, SigningPayloadVersions: []uint32{1}}
+		require.NoError(t, env.client.SendCapabilities(context.Background(), &good))
+		requireSettled(t, env.conn)
+		assert.Equal(t, []int32{1}, env.conn.CapabilitySnapshot().CommandTypes)
+	})
+
+	t.Run("oversized lists are capped", func(t *testing.T) {
+		t.Parallel()
+		env := newCapEnv(t, "steward-cap-oversized", []option{WithCapabilityGrace(time.Minute)}, nil)
+		caps := types.StewardCapabilities{}
+		for i := 1; i <= 3000; i++ {
+			caps.CommandTypes = append(caps.CommandTypes, int32(i))
+			caps.SigningPayloadVersions = append(caps.SigningPayloadVersions, uint32(i))
+		}
+		caps.CommandTypes = append(caps.CommandTypes, 1, 2, 3)
+		require.NoError(t, env.client.SendCapabilities(context.Background(), &caps))
+		requireSettled(t, env.conn)
+		snap := env.conn.CapabilitySnapshot()
+		assert.LessOrEqual(t, len(snap.CommandTypes), types.MaxDeclaredCommandTypes)
+		assert.Len(t, snap.SigningPayloadVersions, types.MaxDeclaredSigningPayloadVersions)
+		for _, n := range snap.CommandTypes {
+			_, ok := transportpb.CommandType_name[n]
+			assert.True(t, ok, "only enum numbers the build knows are kept, got %d", n)
+		}
+	})
+}
+
+// TestUnknownControlPayloadIgnored pins the rollback-safe behaviour of the
+// controller's receive loop: a ControlMessage whose oneof member this build does
+// not know (a newer steward's) decodes with no payload, is ignored, and leaves
+// the stream open. A controller rolled back to a build without the capabilities
+// member therefore tolerates a steward that sends it.
+func TestUnknownControlPayloadIgnored(t *testing.T) {
+	t.Parallel()
+	const stewardID = "steward-unknown-payload"
+	serverTLS, clientTLS := newTestTLSConfigs(t, stewardID)
+	reg := registry.NewRegistry()
+	server := New(ModeServer)
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode": "server", "addr": "127.0.0.1:0", "tls_config": serverTLS, "registry": reg,
+	}))
+	require.NoError(t, server.Start(context.Background()))
+	t.Cleanup(server.ForceStop)
+
+	heartbeats := make(chan *types.Heartbeat, 4)
+	require.NoError(t, server.SubscribeHeartbeats(context.Background(), func(_ context.Context, hb *types.Heartbeat) error {
+		heartbeats <- hb
+		return nil
+	}))
+
+	stream := openStreamFrom(t, "127.0.0.1", server.ListenAddr(), clientTLS, nil)
+	select {
+	case <-heartbeats: // the opening heartbeat openStreamFrom sends
+	case <-time.After(5 * time.Second):
+		t.Fatal("opening heartbeat not received")
+	}
+
+	// A message carrying only a field number this build does not define.
+	unknown := &transportpb.ControlMessage{}
+	raw := protowire.AppendTag(nil, 99, protowire.BytesType)
+	raw = protowire.AppendBytes(raw, []byte("from a newer steward"))
+	unknown.ProtoReflect().SetUnknown(raw)
+	require.NoError(t, stream.Send(unknown))
+	require.NoError(t, stream.Send(&transportpb.ControlMessage{Payload: &transportpb.ControlMessage_Heartbeat{
+		Heartbeat: &transportpb.Heartbeat{StewardId: stewardID, Version: "after-unknown"},
+	}}))
+
+	select {
+	case hb := <-heartbeats:
+		assert.Equal(t, "after-unknown", hb.Version, "a heartbeat after the unknown payload is still processed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream was closed or stalled by an unknown payload")
+	}
+	_, ok := reg.Get(stewardID)
+	assert.True(t, ok, "the steward stays registered")
 }

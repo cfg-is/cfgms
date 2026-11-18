@@ -166,6 +166,27 @@ type Provider struct {
 	// for refresh-on-connect cert delivery (Issue #1817).
 	onConnectHook StewardOnConnectHook
 
+	// capabilityRecorder (server mode) keeps each connection's capability record:
+	// it resets the durable record to pending when a stream is admitted, before
+	// the receive loop starts, and stores what the steward declares or the
+	// grace period settles on. Nil means in-memory state only. Injected via
+	// WithCapabilityRecorder.
+	capabilityRecorder CapabilityRecorder
+	// capabilityGrace is how long a connection may stay pending before it is
+	// settled at the floor profile. Zero means DefaultCapabilityGrace. Injected
+	// via WithCapabilityGrace.
+	capabilityGrace time.Duration
+	// onLateCapabilities is called once when a declaration arrives after the
+	// grace period already settled the connection at the floor profile. Nil is a
+	// no-op. Injected via WithOnLateCapabilities.
+	onLateCapabilities func(ctx context.Context, stewardID string)
+
+	// declaredCaps (client mode) is the capability declaration sent as the first
+	// message of every stream this provider opens, including reconnects. Nil
+	// sends none. Set by WithStewardCapabilities and SendCapabilities.
+	declaredCapsMu sync.Mutex
+	declaredCaps   *types.StewardCapabilities
+
 	// tenantAdmission gates the Register (connect) and ControlChannel heartbeat
 	// paths with a per-tenant concurrency limit. Nil means no admission control
 	// (default). Injected via WithTenantAdmission (Issue #3759, ADR-031 Decision 6).
@@ -279,6 +300,7 @@ var (
 	_ interfaces.InboundController  = (*Provider)(nil)
 	_ interfaces.ResponseSender     = (*Provider)(nil)
 	_ interfaces.ResponseSubscriber = (*Provider)(nil)
+	_ interfaces.CapabilitiesSender = (*Provider)(nil)
 )
 
 // New creates a new gRPC control plane provider.
@@ -806,6 +828,10 @@ func (p *Provider) dialAndOpenStream() error {
 		}
 	}
 	anchorOK := p.anchorCheck(chain)
+
+	// The declaration is the stream's first message, sent before the stream is
+	// published for any other send.
+	p.declareCapabilitiesOnStream(stream)
 
 	p.sendMu.Lock()
 	p.grpcConn = conn
@@ -1593,6 +1619,38 @@ func (p *Provider) SendHeartbeat(ctx context.Context, heartbeat *types.Heartbeat
 	return nil
 }
 
+// SendCapabilities declares the steward's capabilities to the controller (client
+// mode). The declaration is remembered and sent again as the first message of
+// every later stream the provider opens, so a reconnect declares afresh. The
+// controller never replies, and SendCapabilities does not wait for one.
+func (p *Provider) SendCapabilities(ctx context.Context, caps *types.StewardCapabilities) error {
+	if p.mode != ModeClient {
+		return fmt.Errorf("SendCapabilities is only available in client mode")
+	}
+	if caps == nil {
+		return fmt.Errorf("SendCapabilities: capabilities must not be nil")
+	}
+	cp := *caps
+	cp.CommandTypes = append([]int32(nil), caps.CommandTypes...)
+	cp.SigningPayloadVersions = append([]uint32(nil), caps.SigningPayloadVersions...)
+	p.declaredCapsMu.Lock()
+	p.declaredCaps = &cp
+	p.declaredCapsMu.Unlock()
+
+	if err := p.checkClientConnected(); err != nil {
+		p.deliveryFailures.Add(1)
+		return fmt.Errorf("failed to send capabilities: %w", err)
+	}
+	msg := &transportpb.ControlMessage{
+		Payload: &transportpb.ControlMessage_Capabilities{Capabilities: capabilitiesToProto(&cp)},
+	}
+	if err := p.sendControlMessage(msg); err != nil {
+		p.deliveryFailures.Add(1)
+		return fmt.Errorf("failed to send capabilities: %w", err)
+	}
+	return nil
+}
+
 func (p *Provider) SubscribeHeartbeats(ctx context.Context, handler interfaces.HeartbeatHandler) error {
 	if p.mode != ModeServer {
 		return fmt.Errorf("SubscribeHeartbeats is only available in server mode")
@@ -2047,11 +2105,12 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 
 	evictCh := make(chan error, 1)
 	conn := &registry.StewardConnection{
-		StewardID:   stewardID,
-		Sender:      sender,
-		ConnectedAt: time.Now(),
-		RemoteAddr:  p.Addr.String(),
-		PeerSerial:  peerSerial,
+		StewardID:    stewardID,
+		ConnectionID: newConnectionID(),
+		Sender:       sender,
+		ConnectedAt:  time.Now(),
+		RemoteAddr:   p.Addr.String(),
+		PeerSerial:   peerSerial,
 		Evict: func(err error) {
 			select {
 			case evictCh <- err:
@@ -2059,6 +2118,12 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 			}
 		},
 	}
+
+	// Capability record: the new connection starts pending, durably, before it is
+	// registered, before the receive loop can read a declaration and before any
+	// hook runs. The reset therefore cannot overwrite a declaration, and no node
+	// reads the previous connection's record as this one's.
+	defer s.resetConnectionCapabilities(stream.Context(), conn)()
 
 	if err := s.provider.registry.Register(conn); err != nil {
 		return status.Errorf(codes.Internal, "failed to register steward: %v", err)
@@ -2078,10 +2143,13 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	// authoritative steward identity. Empty payload StewardIDs are stamped with
 	// the CN; mismatched payload StewardIDs are rejected and counted without
 	// tearing down the stream (misconfiguration tolerance per Issue #828).
+	capWriter := &capabilityWriter{}
+	go s.runCapabilityGrace(stream.Context(), conn, capWriter)
+
 	recvDone := make(chan struct{})
 	go func() {
 		defer close(recvDone)
-		s.controlChannelRecvLoop(stream, stewardID, conn, heartbeatBucket, newStreamIngest())
+		s.controlChannelRecvLoop(stream, stewardID, conn, heartbeatBucket, newStreamIngest(), capWriter)
 	}()
 
 	// Issue #1817: fire the on-connect hook after successful registration so the
@@ -2097,12 +2165,8 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 
 	// Close the stream if the peer serial is revoked while it is open. Returning
 	// from the handler cancels the stream context, which unblocks Recv.
-	var tick <-chan time.Time
-	if peerSerial != "" && s.provider.revocationChecker != nil {
-		ticker := time.NewTicker(s.provider.recheckInterval())
-		defer ticker.Stop()
-		tick = ticker.C
-	}
+	tick, stopTick := s.revocationTick(peerSerial)
+	defer stopTick()
 	for {
 		select {
 		case <-recvDone:
@@ -2129,6 +2193,17 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	}
 }
 
+// revocationTick returns the channel on which an open stream re-checks its peer
+// serial, and a function that stops it. The channel is nil, and never fires, when
+// there is no serial or no revocation checker.
+func (s *transportServer) revocationTick(peerSerial string) (<-chan time.Time, func()) {
+	if peerSerial == "" || s.provider.revocationChecker == nil {
+		return nil, func() {}
+	}
+	ticker := time.NewTicker(s.provider.recheckInterval())
+	return ticker.C, ticker.Stop
+}
+
 // runOnConnectHook runs the on-connect hook for an admitted ControlChannel. A
 // hook error or panic is logged and never ends the stream.
 func (s *transportServer) runOnConnectHook(ctx context.Context, stewardID string) {
@@ -2146,7 +2221,7 @@ func (s *transportServer) runOnConnectHook(ctx context.Context, stewardID string
 }
 
 // controlChannelRecvLoop is the receive loop of an admitted ControlChannel.
-func (s *transportServer) controlChannelRecvLoop(stream grpc.BidiStreamingServer[transportpb.ControlMessage, transportpb.ControlMessage], stewardID string, conn *registry.StewardConnection, heartbeatBucket string, ingest *streamIngest) {
+func (s *transportServer) controlChannelRecvLoop(stream grpc.BidiStreamingServer[transportpb.ControlMessage, transportpb.ControlMessage], stewardID string, conn *registry.StewardConnection, heartbeatBucket string, ingest *streamIngest, capWriter *capabilityWriter) {
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
@@ -2195,47 +2270,59 @@ func (s *transportServer) controlChannelRecvLoop(stream grpc.BidiStreamingServer
 		case *transportpb.ControlMessage_Heartbeat:
 			s.receiveHeartbeat(payload.Heartbeat, stewardID, conn, heartbeatBucket, ingest)
 
-		case *transportpb.ControlMessage_Response:
-			resp := responseFromProto(payload.Response)
-			if resp.StewardID == "" {
-				resp.StewardID = stewardID
-			} else if resp.StewardID != stewardID {
-				s.provider.logger.Warn("controlchannel response stewardID mismatch",
-					"authenticated_cn", logging.SanitizeLogValue(stewardID),
-					"payload_steward_id", logging.SanitizeLogValue(resp.StewardID))
-				s.provider.identityMismatches.Add(1)
-				continue
-			}
-			// No controller logic awaits responses (epic #747 removed
-			// WaitForResponse); subscribers receive them fire-and-forget, e.g. the
-			// command rejection recorder (Issue #4569).
-			s.provider.responsesReceived.Add(1)
-			s.provider.logger.Debug("controlchannel response received",
-				"command_id", logging.SanitizeLogValue(resp.CommandID),
-				"steward_id", logging.SanitizeLogValue(resp.StewardID))
+		case *transportpb.ControlMessage_Capabilities:
+			// Updated inline and never dropped (unlike a heartbeat): the in-memory
+			// state moves here, the durable write runs off the loop (Issue #5120).
+			s.receiveCapabilities(stream.Context(), payload.Capabilities, stewardID, conn, capWriter)
 
-			// Responses use their own tenant queue and a per-stream in-flight
-			// cap, like events; the receive loop never blocks on a handler.
-			// The bucket is the server-resolved heartbeatBucket, never resp data.
-			if !ingest.tryResponse() {
-				s.provider.dropMessage(ingest.responseDrops, &s.provider.responsesDropped, "response", "stream in-flight limit reached", stewardID, heartbeatBucket)
-				continue
-			}
-			release := ingest.releaseResponse
-			if ra := s.provider.responseAdmission; ra != nil {
-				if aErr := ra.Acquire(heartbeatBucket); aErr != nil {
-					ingest.releaseResponse()
-					s.provider.dropMessage(ingest.responseDrops, &s.provider.responsesDropped, "response", "tenant admission queue full", stewardID, heartbeatBucket)
-					continue
-				}
-				release = func() {
-					ingest.releaseResponse()
-					ra.Release(heartbeatBucket)
-				}
-			}
-			s.provider.dispatchResponse(resp, release)
+		case *transportpb.ControlMessage_Response:
+			s.receiveResponse(payload.Response, stewardID, heartbeatBucket, ingest)
 		}
 	}
+}
+
+// receiveResponse admits one response received on an authenticated ControlChannel
+// and hands it to the response handlers. The authenticated CN wins: a response
+// naming another steward is rejected and counted without ending the stream.
+func (s *transportServer) receiveResponse(pb *transportpb.Response, stewardID, heartbeatBucket string, ingest *streamIngest) {
+	resp := responseFromProto(pb)
+	if resp.StewardID == "" {
+		resp.StewardID = stewardID
+	} else if resp.StewardID != stewardID {
+		s.provider.logger.Warn("controlchannel response stewardID mismatch",
+			"authenticated_cn", logging.SanitizeLogValue(stewardID),
+			"payload_steward_id", logging.SanitizeLogValue(resp.StewardID))
+		s.provider.identityMismatches.Add(1)
+		return
+	}
+	// No controller logic awaits responses (epic #747 removed
+	// WaitForResponse); subscribers receive them fire-and-forget, e.g. the
+	// command rejection recorder (Issue #4569).
+	s.provider.responsesReceived.Add(1)
+	s.provider.logger.Debug("controlchannel response received",
+		"command_id", logging.SanitizeLogValue(resp.CommandID),
+		"steward_id", logging.SanitizeLogValue(resp.StewardID))
+
+	// Responses use their own tenant queue and a per-stream in-flight
+	// cap, like events; the receive loop never blocks on a handler.
+	// The bucket is the server-resolved heartbeatBucket, never resp data.
+	if !ingest.tryResponse() {
+		s.provider.dropMessage(ingest.responseDrops, &s.provider.responsesDropped, "response", "stream in-flight limit reached", stewardID, heartbeatBucket)
+		return
+	}
+	release := ingest.releaseResponse
+	if ra := s.provider.responseAdmission; ra != nil {
+		if aErr := ra.Acquire(heartbeatBucket); aErr != nil {
+			ingest.releaseResponse()
+			s.provider.dropMessage(ingest.responseDrops, &s.provider.responsesDropped, "response", "tenant admission queue full", stewardID, heartbeatBucket)
+			return
+		}
+		release = func() {
+			ingest.releaseResponse()
+			ra.Release(heartbeatBucket)
+		}
+	}
+	s.provider.dispatchResponse(resp, release)
 }
 
 // receiveHeartbeat admits one heartbeat received on an authenticated
