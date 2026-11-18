@@ -97,7 +97,24 @@ message ControlMessage {
     Response response = 4;
     TamperState tamper_state = 5;
     RepairRequest repair_request = 6;
+    StewardCapabilities capabilities = 7;
   }
+}
+
+// StewardCapabilities is the first message a steward sends on a new
+// ControlChannel stream: the command types and signing payload versions this
+// build handles. It is a control message of its own, not a Heartbeat field,
+// because heartbeats pass admission queues and can be dropped, and a declaration
+// must not be. The controller sends no reply; the steward never waits for one
+// (an older controller ignores the message). command_types holds CommandType
+// numbers, so a number this build does not know is carried as is and ignored by
+// the receiver.
+message StewardCapabilities {
+  repeated int32 command_types = 1;
+  repeated uint32 signing_payload_versions = 2;
+  // steward_id is checked against the mTLS-authenticated identity; empty is
+  // stamped with it, a different value rejects the declaration.
+  string steward_id = 3;
 }
 
 // TamperState tells a steward whether the controller considers its host locked

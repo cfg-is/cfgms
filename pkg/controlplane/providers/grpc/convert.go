@@ -6,6 +6,7 @@ package grpc
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
@@ -537,4 +538,61 @@ func RepairRequestToProto(r types.RepairRequest) *transportpb.RepairRequest {
 // RepairRequestFromProto exports repairRequestFromProto for cross-package round-trip tests.
 func RepairRequestFromProto(pb *transportpb.RepairRequest) types.RepairRequest {
 	return repairRequestFromProto(pb)
+}
+
+// --- Capability declaration ---
+
+// LocalCapabilities returns the capabilities this build declares to the
+// controller. Both sets are derived from the build, not listed: the command types
+// are the wire numbers protoToCommandType maps to a Command this build handles,
+// and the signing payload versions are the ones CommandSigningBytesVersion
+// accepts, so a declaration cannot drift from what the code does.
+func LocalCapabilities(stewardID string) types.StewardCapabilities {
+	nums := make([]int32, 0, len(protoToCommandType))
+	for pb := range protoToCommandType {
+		nums = append(nums, int32(pb))
+	}
+	sort.Slice(nums, func(i, j int) bool { return nums[i] < nums[j] })
+	return types.StewardCapabilities{
+		StewardID:              stewardID,
+		CommandTypes:           nums,
+		SigningPayloadVersions: types.SupportedSigningPayloadVersions(),
+	}
+}
+
+// isKnownCommandTypeNumber reports whether n is a CommandType number of this
+// build's wire enum (the unspecified zero value is not). A number outside it
+// comes from a newer steward and is ignored when a declaration is recorded.
+func isKnownCommandTypeNumber(n int32) bool {
+	if n == 0 {
+		return false
+	}
+	_, ok := transportpb.CommandType_name[n]
+	return ok
+}
+
+// capabilitiesToProto maps a declaration to the wire ControlMessage payload.
+func capabilitiesToProto(c *types.StewardCapabilities) *transportpb.StewardCapabilities {
+	if c == nil {
+		return nil
+	}
+	return &transportpb.StewardCapabilities{
+		CommandTypes:           append([]int32(nil), c.CommandTypes...),
+		SigningPayloadVersions: append([]uint32(nil), c.SigningPayloadVersions...),
+		StewardId:              c.StewardID,
+	}
+}
+
+// capabilitiesFromProto maps the wire declaration to its value form, unchanged:
+// it is untrusted steward input, and the receiver validates the steward ID and
+// normalises the lists (types.NormalizeCapabilityLists).
+func capabilitiesFromProto(pb *transportpb.StewardCapabilities) *types.StewardCapabilities {
+	if pb == nil {
+		return nil
+	}
+	return &types.StewardCapabilities{
+		StewardID:              pb.GetStewardId(),
+		CommandTypes:           append([]int32(nil), pb.GetCommandTypes()...),
+		SigningPayloadVersions: append([]uint32(nil), pb.GetSigningPayloadVersions()...),
+	}
 }

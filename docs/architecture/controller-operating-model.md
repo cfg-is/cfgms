@@ -886,6 +886,65 @@ Three endpoints back the operator verbs; the [identity clone runbook](../runbook
 - `POST /api/v1/stewards/{id}/credentials/rotate` (`steward:rotate-credentials`, AssuranceStrong) revokes every client-certificate serial issued for the steward ID through `cert.Manager.Revoke` (refused at admission by the #4930 gate, including open streams) and moves the record to `archived`, so the next refresh is queued for approval. Audit: `steward_credentials_rotated`.
 - `POST /api/v1/stewards/{id}/identity/move` (`steward:move-identity`, AssuranceStrong) takes `{"pending_id"}` of a pending same-tenant copy with `CloneOf` equal to the steward. It calls `StewardStore.RebindStewardIdentity` (honouring the unique `(tenant_id, device_id)` rule), `PendingRegistrationStore.ReassignPendingSteward` and approves the entry; the ordinary claim then signs the certificate with the original ID as CN and takes the existing record whose `DeviceID` now matches as the benign re-claim. Previous serials are revoked. Audit: `steward_identity_moved`. This is the only code path that changes a record's `DeviceID`.
 
+### Steward Capability Record (Issue #6310)
+
+A steward declares which command types and signing payload versions its build
+handles in the first message of each control-channel stream (see the
+[steward operating model](steward-operating-model.md#capability-declaration-issue-6310)).
+The controller keeps one record per connection, in two places:
+
+- **In memory, on the node that owns the connection.** `registry.StewardConnection`
+  holds the state (`pending`, `declared` or `floor`), the declared sets and a
+  settled signal (`CapabilitiesSettled`) that closes the first time the state
+  leaves `pending`. The receive loop updates it inline.
+- **Durably, in the steward record** (`StewardRecord.Capabilities`, keyed to the
+  connection ID). A node that does not own the connection reads this copy.
+
+**State machine.** A new connection is `pending`. Its first valid declaration moves
+it to `declared` and releases the settled signal. If no declaration arrives within
+the grace period (`WithCapabilityGrace`, default `DefaultCapabilityGrace`, 5 s;
+a per-connection goroutine that ends with the stream) it moves to `floor` and
+releases the signal. A declaration after that moves `floor` to `declared` and calls
+the callback set with `WithOnLateCapabilities` once. The first declaration on a
+connection is final: a second one changes nothing and calls nothing. `FloorProfile()`
+is command types 1 to 13 and signing payload version 1.
+
+**Ordering in `ControlChannel`.** The durable reset to `pending` (connection ID and
+connect time) runs synchronously in the registration path, before the connection is
+registered, before the receive-loop goroutine starts and before any on-connect hook
+runs, so a declaration sent immediately after the stream opens cannot be
+overwritten by it. If the reset fails the connection is marked, stays `pending` in
+memory, writes nothing durable, and no resolver ever uses the stored record of the
+earlier connection.
+
+**The receive loop does not block** (Issue #5120). The durable write
+(`StewardStore.DeclareCapabilities`, a compare-and-set on the connection ID) runs
+on a per-connection writer goroutine that keeps only the latest pending write, so a
+slow store neither delays the next message nor lets an earlier state overwrite a
+later one. A write from a stream that a newer connection superseded is refused by
+the compare-and-set.
+
+**Validation.** The declaration's `steward_id` must be empty or equal to the mTLS
+identity; a mismatch is rejected and counted like any other identity mismatch.
+Lists are untrusted: unknown command type numbers are dropped, duplicates removed,
+and the lists capped (`MaxDeclaredCommandTypes`, `MaxDeclaredSigningPayloadVersions`).
+A declaration left with no usable command type or version is ignored.
+
+**Reading it.** `ControllerService.CapabilityProfile` returns the current profile
+without waiting; `WaitCapabilities` waits until it leaves `pending` or the context
+ends. On the owning node both read the in-memory state. On any other node they read
+the durable record and `WaitCapabilities` polls it while it is `pending`. A steward
+with no record reads as `pending`. A non-owning node cannot tell a record whose
+reset failed from a current one; only the owning node fails closed in that case.
+
+**Rollback tolerance.** An unknown `ControlMessage` payload is ignored and the
+stream stays open (`TestUnknownControlPayloadIgnored`), so a controller rolled back
+to a build without this message still accepts a steward that sends it.
+
+**Current scope.** The recorder seam (`grpc.WithCapabilityRecorder`) is implemented
+by `ControllerService`. It is not yet wired into the controller server, and nothing
+signs, waits on the settled signal or gates a command on the profile yet.
+
 ### Tampered State (Epic #5621)
 
 `tampered` is a durable steward status (`StewardStatusTampered`). It means the
