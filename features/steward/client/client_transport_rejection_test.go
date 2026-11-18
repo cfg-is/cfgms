@@ -5,6 +5,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -85,6 +86,9 @@ func TestReceiveCommand_ReportsRejectionReason(t *testing.T) {
 		setup    func(t *testing.T, h *rejectionHarness)
 		build    func() *cpTypes.SignedCommand
 		dispatch func(h *rejectionHarness) func(context.Context, *cpTypes.SignedCommand) error
+		// uncommitted asserts the refusal left the term fence untouched: the ratchet
+		// is unset, the high-water mark is zero and no in-flight term is held.
+		uncommitted bool
 	}{
 		{
 			name:      "term_fenced",
@@ -150,6 +154,34 @@ func TestReceiveCommand_ReportsRejectionReason(t *testing.T) {
 				return func(context.Context, *cpTypes.SignedCommand) error { return errors.New("boom: secret detail") }
 			},
 		},
+		{
+			name:        "unsupported_command_type",
+			reason:      "invalid_command",
+			uncommitted: true,
+			build: func() *cpTypes.SignedCommand {
+				c := rejectionCommand("unsupported")
+				c.Command.Term = 7
+				return c
+			},
+			dispatch: func(*rejectionHarness) func(context.Context, *cpTypes.SignedCommand) error {
+				return func(context.Context, *cpTypes.SignedCommand) error { return commands.ErrUnsupportedCommandType }
+			},
+		},
+		{
+			name:        "unknown_signing_payload_version",
+			reason:      "invalid_command",
+			uncommitted: true,
+			build: func() *cpTypes.SignedCommand {
+				c := rejectionCommand("unknown-version")
+				c.Command.Term = 7
+				return c
+			},
+			dispatch: func(*rejectionHarness) func(context.Context, *cpTypes.SignedCommand) error {
+				return func(context.Context, *cpTypes.SignedCommand) error {
+					return fmt.Errorf("refused command signing payload: %w: 99", cpTypes.ErrUnknownSigningPayloadVersion)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -166,6 +198,15 @@ func TestReceiveCommand_ReportsRejectionReason(t *testing.T) {
 
 			err := h.tc.receiveCommand(context.Background(), sc, dispatch)
 			require.Error(t, err, "the original error must still be returned")
+
+			if tt.uncommitted {
+				h.tc.mu.RLock()
+				set, highest, inflight := h.tc.termRatchetSet, h.tc.highestTermSeen, len(h.tc.inflightTerms)
+				h.tc.mu.RUnlock()
+				assert.False(t, set, "the refusal must not set the term ratchet")
+				assert.Zero(t, highest, "the refusal must not move the high-water mark")
+				assert.Zero(t, inflight, "the refusal must release its in-flight term reservation")
+			}
 
 			select {
 			case resp := <-h.responses:

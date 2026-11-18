@@ -961,6 +961,12 @@ func cloneSignedCommand(cmd *types.SignedCommand) *types.SignedCommand {
 		}
 		out.RawParams = raw
 	}
+	// Carry the unmapped-wire-type marker so an in-process receiver refuses the
+	// command exactly as one decoded from the wire.
+	if cmd.UnmappedWireType != nil {
+		wire := *cmd.UnmappedWireType
+		out.UnmappedWireType = &wire
+	}
 	return out
 }
 

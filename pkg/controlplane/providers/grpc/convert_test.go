@@ -897,3 +897,28 @@ func TestHeartbeatReasonsTruncatedBothDirections(t *testing.T) {
 	}
 	check(t, heartbeatFromProto(raw).Reasons)
 }
+
+// TestSignedCommandFromProto_MarksUnmappedWireType pins that a wire type with no
+// mapping is recorded on the decoded envelope (version skew, Issue #6263) and a
+// mapped one is not.
+func TestSignedCommandFromProto_MarksUnmappedWireType(t *testing.T) {
+	mapped := signedCommandFromProto(&transportpb.Command{
+		Id: "mapped", Type: transportpb.CommandType_COMMAND_TYPE_SYNC_CONFIG,
+	})
+	require.NotNil(t, mapped)
+	assert.Nil(t, mapped.UnmappedWireType)
+	assert.Equal(t, types.CommandSyncConfig, mapped.Command.Type)
+
+	for name, wire := range map[string]transportpb.CommandType{
+		"never assigned": transportpb.CommandType(9999),
+		"unspecified":    transportpb.CommandType_COMMAND_TYPE_UNSPECIFIED,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := signedCommandFromProto(&transportpb.Command{Id: "unmapped", Type: wire})
+			require.NotNil(t, got)
+			require.NotNil(t, got.UnmappedWireType)
+			assert.Equal(t, int32(wire), *got.UnmappedWireType)
+			assert.Empty(t, got.Command.Type)
+		})
+	}
+}

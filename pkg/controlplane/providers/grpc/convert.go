@@ -173,6 +173,13 @@ func signedCommandFromProto(pb *transportpb.Command) *types.SignedCommand {
 		Signature:      sig,
 		SignerChainPEM: cmd.SignerChainPEM,
 	}
+	// A wire type with no mapping decodes to an empty Command.Type, so the signed
+	// bytes cannot be rebuilt. Record it so the receiver refuses the command as
+	// unsupported rather than reporting a signature mismatch (version skew).
+	if _, ok := protoToCommandType[pb.GetType()]; !ok {
+		wire := int32(pb.GetType())
+		sc.UnmappedWireType = &wire
+	}
 	// Preserve the proto-wire string map for signature verification. The handler
 	// must verify against this form, not cmd.Params, because stringMapToInterfaceMap
 	// JSON-decodes numeric-looking strings (e.g. "1.0" → float64) making the bytes

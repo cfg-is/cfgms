@@ -697,6 +697,14 @@ type SignedCommand struct {
 	// Never transmitted on the wire or serialised to JSON.
 	RawParams map[string]string `json:"-"`
 
+	// UnmappedWireType is non-nil when the gRPC transport decoded a command whose
+	// wire type enum this build has no mapping for (a newer peer's command type, or
+	// COMMAND_TYPE_UNSPECIFIED); it holds the raw enum number. Command.Type is then
+	// empty and the signed type string is unknown, so the command cannot be verified
+	// and the steward refuses it as unsupported. Never transmitted on the wire or
+	// serialised to JSON.
+	UnmappedWireType *int32 `json:"-"`
+
 	// SignerChainPEM is the controller's signer certificate chain, with the root
 	// as the last element, set at signing time. The gRPC provider strips it unless
 	// the target steward is locked down, so unlocked traffic is unchanged on the

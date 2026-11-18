@@ -2058,11 +2058,13 @@ func TestHandleCommand_UnknownOrAbsentVersionNeverSelectsV2(t *testing.T) {
 	err = h.HandleCommand(context.Background(), &cpTypes.SignedCommand{Command: cmd, Signature: sig})
 	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
 
-	// A version this build does not know is refused.
+	// A version this build does not know is refused as version skew, not as an
+	// unauthenticated command (Issue #6263).
 	unknown := signTermCommand(t, signer, termTestCommand("unknown", 5), cpTypes.SigningPayloadV1)
 	unknown.Command.SigningPayloadVersion = 77
 	err = h.HandleCommand(context.Background(), unknown)
-	require.ErrorIs(t, err, ErrUnauthenticatedCommand)
+	require.ErrorIs(t, err, cpTypes.ErrUnknownSigningPayloadVersion)
+	require.NotErrorIs(t, err, ErrUnauthenticatedCommand)
 }
 
 // ---------------------------------------------------------------------------
