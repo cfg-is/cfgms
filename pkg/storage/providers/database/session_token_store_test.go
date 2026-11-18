@@ -4,12 +4,15 @@ package database
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -898,9 +901,32 @@ func TestBackfillAddsCSRFTokenHashColumn(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
-	_, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS session_token_store")
+	// Work in a throwaway schema so the shared session_token_store (with the column from
+	// migration 019 and its RLS policies) is never dropped or recreated. One connection
+	// keeps the session-level search_path in effect for every statement below.
+	db.SetMaxOpenConns(1)
+	var suffix [6]byte
+	_, err := rand.Read(suffix[:])
 	require.NoError(t, err)
-	t.Cleanup(func() { _, _ = db.ExecContext(ctx, "DROP TABLE IF EXISTS session_token_store") })
+	schemaName := "csrf_backfill_" + hex.EncodeToString(suffix[:])
+	_, err = db.ExecContext(ctx, "CREATE SCHEMA "+pq.QuoteIdentifier(schemaName))
+	require.NoError(t, err, "create scratch schema")
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+pq.QuoteIdentifier(schemaName)+" CASCADE")
+	})
+	_, err = db.ExecContext(ctx, "SET search_path TO "+pq.QuoteIdentifier(schemaName))
+	require.NoError(t, err, "scope the connection to the scratch schema")
+
+	csrfColumnPresent := func() bool {
+		var exists bool
+		require.NoError(t, db.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = current_schema()
+				  AND table_name = 'session_token_store' AND column_name = 'csrf_token_hash'
+			)`).Scan(&exists))
+		return exists
+	}
 
 	_, err = db.ExecContext(ctx, preChannelSessionTokenSchema)
 	require.NoError(t, err, "create pre-csrf session_token_store")
@@ -911,11 +937,11 @@ func TestBackfillAddsCSRFTokenHashColumn(t *testing.T) {
 		VALUES ('pre-csrf-hash', 'pre-csrf-sess', 'admin', 'ctrl', 'tenant-1',
 			now(), now(), now() + interval '8 hours')`)
 	require.NoError(t, err, "seed pre-csrf row")
-	assert.False(t, pgColumnExists(ctx, t, db, "csrf_token_hash"), "pre-condition: column absent")
+	assert.False(t, csrfColumnPresent(), "pre-condition: column absent")
 
 	schemas := NewDatabaseSchemas()
 	require.NoError(t, schemas.BackfillSessionTokenStoreContinuity(ctx, db), "first back-fill")
-	assert.True(t, pgColumnExists(ctx, t, db, "csrf_token_hash"), "column present after back-fill")
+	assert.True(t, csrfColumnPresent(), "column present after back-fill")
 
 	var hash string
 	require.NoError(t, db.QueryRowContext(ctx,
@@ -923,5 +949,5 @@ func TestBackfillAddsCSRFTokenHashColumn(t *testing.T) {
 	assert.Equal(t, "", hash, "legacy row must default to an empty CSRF hash")
 
 	require.NoError(t, schemas.BackfillSessionTokenStoreContinuity(ctx, db), "second back-fill (idempotency)")
-	assert.True(t, pgColumnExists(ctx, t, db, "csrf_token_hash"))
+	assert.True(t, csrfColumnPresent())
 }
