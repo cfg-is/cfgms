@@ -725,8 +725,11 @@ type SignedCommand struct {
 // setting it to MaxUint64 wedges the steward's persisted high-water mark.
 //
 // Version 2 (commandSigningPayloadV2, #5174) closes that: it covers every v1 field,
-// plus Term and an explicit payload-version field. The controller signs every
-// command over v2 (#5285); nothing is negotiated per steward.
+// plus Term and an explicit payload-version field. The controller signs a
+// command over v2 (#5285) unless the steward's current connection resolves to the
+// floor profile, which it signs over v1 so a steward build that predates v2
+// verifies it. The choice follows controller-held state for the connection
+// (SignCommandVersion, SigningVersionSource), never a field of the command.
 //
 //   - Command.SigningPayloadVersion carries the version the signer used; the
 //     steward verifies against the version the command names. Absent means v1 and
@@ -797,7 +800,7 @@ func InterfaceParamsToStringMap(m map[string]interface{}) map[string]string {
 // CommandSigningBytes returns the version-1 canonical JSON bytes for signing or
 // verifying a Command. It does not cover cmd.Term; use CommandSigningBytesVersion
 // with SigningPayloadV2 for a term-covering payload. Signers should go through
-// SignCommand, which picks the version per steward.
+// SignCommandForSteward, which picks the version per steward connection.
 //
 // rawParams must be the proto-wire string map of cmd.Params — either the map produced
 // by the gRPC transport on receive (RawParams field of SignedCommand), or the result of

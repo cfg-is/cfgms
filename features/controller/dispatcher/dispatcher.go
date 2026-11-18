@@ -72,10 +72,11 @@ type lockMetaEntry struct {
 type Dispatcher struct {
 	queue              *script.ExecutionQueue
 	controlPlane       controlplaneInterfaces.ControlPlaneProvider
-	signer             signature.Signer                // optional; when nil commands are sent unsigned
-	signerChains       *signerchain.SignerChainBuilder // optional; attaches the signer chain (#5724)
-	isLocallyConnected func(stewardID string) bool     // optional; nil = dispatch to every queued device
-	termSource         TermSource                      // optional; when nil commands carry term 0
+	signer             signature.Signer                       // optional; when nil commands are sent unsigned
+	signerChains       *signerchain.SignerChainBuilder        // optional; attaches the signer chain (#5724)
+	isLocallyConnected func(stewardID string) bool            // optional; nil = dispatch to every queued device
+	termSource         TermSource                             // optional; when nil commands carry term 0
+	signingVersions    controlplaneTypes.SigningVersionSource // optional; nil signs every command over v2
 	requireSignedAdhoc bool
 	// deviceLocks maps deviceID → chan struct{} (capacity 1).
 	// A non-blocking send acquires the slot; a receive releases it.
@@ -237,6 +238,10 @@ type Config struct {
 	// Decision 6), so a cluster without it can never run ad-hoc scripts
 	// (Issue #4510). Nil sends term 0 (single-server behaviour).
 	TermSource TermSource
+	// SigningVersions chooses the signing payload version from the target
+	// steward's connection: v1 for a floor-profile steward, v2 for every other.
+	// Optional: nil signs every command over v2.
+	SigningVersions controlplaneTypes.SigningVersionSource
 	// Lockdown is the lockdown predicate. Optional: when nil the dispatcher does
 	// not pre-check, and the control-plane gate alone decides at send time.
 	Lockdown controlplaneInterfaces.LockdownChecker
@@ -289,6 +294,7 @@ func New(cfg *Config) (*Dispatcher, error) {
 		signerChains:        cfg.SignerChains,
 		isLocallyConnected:  cfg.IsLocallyConnected,
 		termSource:          cfg.TermSource,
+		signingVersions:     cfg.SigningVersions,
 		requireSignedAdhoc:  cfg.RequireSignedAdhoc,
 		actionAudit:         cfg.ActionAudit,
 		lockdown:            cfg.Lockdown,
@@ -825,9 +831,12 @@ func (d *Dispatcher) currentTerm() uint64 {
 // signCommand wraps cmd in a SignedCommand, signing it with the controller's
 // command signer when one is configured. The signature covers the whole command
 // as sent; it is the controller's outer layer and is independent of any operator
-// envelope carried in the params.
+// envelope carried in the params. The payload version follows the target steward's
+// connection (v1 on the floor profile, v2 otherwise).
 func (d *Dispatcher) signCommand(cmd *controlplaneTypes.Command) (*controlplaneTypes.SignedCommand, error) {
-	sc, err := controlplaneTypes.SignCommand(cmd, d.signer)
+	// d.ctx ends the resolver's bounded wait for an undeclared connection when the
+	// dispatcher stops.
+	sc, err := controlplaneTypes.SignCommandForSteward(d.ctx, d.signingVersions, cmd, d.signer)
 	if err != nil {
 		return nil, err
 	}

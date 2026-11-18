@@ -70,6 +70,10 @@ type Publisher struct {
 	// When nil the term field is zero (pre-fencing behaviour).
 	termSource TermSource
 
+	// signingVersions chooses the signing payload version per steward
+	// connection. Nil signs every command over v2.
+	signingVersions controlplaneTypes.SigningVersionSource
+
 	// Command tracking
 	pending map[string]*pendingCommand
 
@@ -116,6 +120,11 @@ type Config struct {
 	// When nil the term field is zero (pre-fencing behaviour).
 	TermSource TermSource
 
+	// SigningVersions chooses the signing payload version for each command from
+	// the target steward's connection: v1 for a steward on the floor profile, v2
+	// for every other. Nil signs every command over v2.
+	SigningVersions controlplaneTypes.SigningVersionSource
+
 	// FenceRetryDelay is the delay before a fence-rejected command is re-sent
 	// (Issue #4866). Defaults to 2 seconds when zero.
 	FenceRetryDelay time.Duration
@@ -143,6 +152,7 @@ func New(cfg *Config) (*Publisher, error) {
 		signer:          cfg.Signer,
 		signerChains:    cfg.SignerChains,
 		termSource:      cfg.TermSource,
+		signingVersions: cfg.SigningVersions,
 		pending:         make(map[string]*pendingCommand),
 		logger:          cfg.Logger,
 		fenceRetryDelay: delay,
@@ -351,10 +361,13 @@ func (e *signerChainError) Unwrap() error { return e.err }
 func (e *signerChainError) Is(target error) bool { return target == ErrSignerChainUnavailable }
 
 // signCommandWith wraps cmd in a SignedCommand, signing with the provided signer when
-// non-nil. Every command is signed over the v2 payload by
-// controlplaneTypes.SignCommand, the same path the dispatcher and relay handler use.
-func (p *Publisher) signCommandWith(cmd *controlplaneTypes.Command, signer signature.Signer, explicit bool) (*controlplaneTypes.SignedCommand, error) {
-	sc, err := controlplaneTypes.SignCommand(cmd, signer)
+// non-nil. The payload version follows the target steward's connection
+// (controlplaneTypes.SignCommandForSteward, the same path the dispatcher and relay
+// handler use): v1 for a floor-profile connection, v2 otherwise. Every publish
+// path, including a re-send of a queued command, comes through here, so a replayed
+// command is signed again for the connection it is sent on.
+func (p *Publisher) signCommandWith(ctx context.Context, cmd *controlplaneTypes.Command, signer signature.Signer, explicit bool) (*controlplaneTypes.SignedCommand, error) {
+	sc, err := controlplaneTypes.SignCommandForSteward(ctx, p.signingVersions, cmd, signer)
 	if err != nil {
 		return nil, err
 	}
@@ -377,8 +390,8 @@ func (p *Publisher) signCommandWith(cmd *controlplaneTypes.Command, signer signa
 }
 
 // signCommand wraps cmd in a SignedCommand using the publisher's configured signer.
-func (p *Publisher) signCommand(cmd *controlplaneTypes.Command) (*controlplaneTypes.SignedCommand, error) {
-	return p.signCommandWith(cmd, p.signer, false)
+func (p *Publisher) signCommand(ctx context.Context, cmd *controlplaneTypes.Command) (*controlplaneTypes.SignedCommand, error) {
+	return p.signCommandWith(ctx, cmd, p.signer, false)
 }
 
 // PublishCommandWithSigner publishes a command signed with the provided signer instead
@@ -397,7 +410,7 @@ func (p *Publisher) PublishCommandWithSigner(ctx context.Context, stewardID stri
 		Term:      p.currentTerm(),
 	}
 
-	sc, err := p.signCommandWith(cmd, signer, true)
+	sc, err := p.signCommandWith(ctx, cmd, signer, true)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign command: %w", err)
 	}
@@ -446,7 +459,7 @@ func (p *Publisher) PublishCommandWithID(ctx context.Context, commandID, steward
 		Term:      p.currentTerm(),
 	}
 
-	sc, err := p.signCommand(cmd)
+	sc, err := p.signCommand(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("failed to sign command: %w", err)
 	}
@@ -534,7 +547,7 @@ func (p *Publisher) PublishCommandWithSignerAndCallback(
 		Term:      p.currentTerm(),
 	}
 
-	sc, err := p.signCommandWith(cmd, signer, true)
+	sc, err := p.signCommandWith(ctx, cmd, signer, true)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign command: %w", err)
 	}

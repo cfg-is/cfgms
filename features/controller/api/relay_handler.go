@@ -47,6 +47,9 @@ type RelayHandler struct {
 	// execution an operator started and which is still open (Issue #5665). Nil
 	// never stamps, so every relay_response is then treated as automated.
 	origins RelayOriginSource
+	// versions chooses the signing payload version from the target steward's
+	// connection. Nil signs every relay_response over v2.
+	versions cpTypes.SigningVersionSource
 }
 
 // RelayOriginSource decides whether a relay_response belongs to an open
@@ -59,6 +62,11 @@ type RelayOriginSource interface {
 
 // SetRelayOriginSource binds the source of the operator-origin marker.
 func (h *RelayHandler) SetRelayOriginSource(src RelayOriginSource) { h.origins = src }
+
+// SetSigningVersionSource binds the source that chooses each relay_response's
+// signing payload version from the target steward's connection: v1 for a
+// floor-profile steward, v2 for every other. Unset, every response is signed v2.
+func (h *RelayHandler) SetSigningVersionSource(src cpTypes.SigningVersionSource) { h.versions = src }
 
 // NewRelayHandler creates a RelayHandler wired to the given control plane, run
 // manager, and API HTTP handler. signer may be nil in test or unsecured mode.
@@ -241,7 +249,7 @@ func (h *RelayHandler) sendRelayResponse(
 		},
 	}
 
-	signed, err := cpTypes.SignCommand(cmd, h.signer)
+	signed, err := cpTypes.SignCommandForSteward(ctx, h.versions, cmd, h.signer)
 	if err != nil {
 		return fmt.Errorf("relay: sign response: %w", err)
 	}

@@ -16,12 +16,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	configsignature "github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/controller/commands"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
 	_ "modernc.org/sqlite"
 )
 
@@ -567,5 +569,63 @@ func TestRelayHandler_ResponseSignedOverV2(t *testing.T) {
 		require.NoError(t, err)
 		assert.NoError(t, verifier.Verify(b, got.Signature), "relay response must verify over payload v%d", want)
 		assert.Equal(t, cpTypes.CommandPayloadVersion(&got.Command), want)
+	}
+}
+
+type relayNopSender struct{}
+
+func (relayNopSender) SendMsg(interface{}) error { return nil }
+
+// TestRelayHandler_ResponseVersionFollowsTheStewardConnection proves a relay response
+// to a floor-profile steward is signed over v1 and verifies the v0.10.5 way, while a
+// steward that declared v2 stays on v2.
+func TestRelayHandler_ResponseVersionFollowsTheStewardConnection(t *testing.T) {
+	ca, err := cert.NewCA(&cert.CAConfig{Organization: "Relay Test", Country: "US", ValidityDays: 1, KeySize: 2048})
+	require.NoError(t, err)
+	require.NoError(t, ca.Initialize(nil))
+	sc, err := ca.GenerateServerCertificate(&cert.ServerCertConfig{
+		CommonName: "controller.test", DNSNames: []string{"controller.test"}, ValidityDays: 1, KeySize: 2048,
+	})
+	require.NoError(t, err)
+	signer, err := configsignature.NewSigner(&configsignature.SignerConfig{PrivateKeyPEM: sc.PrivateKeyPEM, CertificatePEM: sc.CertificatePEM})
+	require.NoError(t, err)
+	verifier, err := configsignature.NewVerifier(&configsignature.VerifierConfig{CertificatePEM: sc.CertificatePEM})
+	require.NoError(t, err)
+
+	reg := registry.NewRegistry()
+	floor := &registry.StewardConnection{StewardID: "device-floor", Sender: relayNopSender{}, ConnectionID: "c1", ConnectedAt: time.Now()}
+	floor.SettleCapabilities(registry.CapabilityFloor, []int32{1}, []uint32{1})
+	current := &registry.StewardConnection{StewardID: "device-current", Sender: relayNopSender{}, ConnectionID: "c2", ConnectedAt: time.Now()}
+	current.SettleCapabilities(registry.CapabilityDeclared, []int32{1}, []uint32{1, 2})
+	require.NoError(t, reg.Register(floor))
+	require.NoError(t, reg.Register(current))
+
+	cp := &recordingControlPlane{}
+	handler := NewRelayHandler(cp, newRelayRunManager(t), newRelayTestHandler(), signer, logging.NewNoopLogger())
+	handler.SetSigningVersionSource(commands.NewCapabilityResolver(reg, nil, logging.NewNoopLogger()))
+	ctx := context.Background()
+	require.NoError(t, handler.Start(ctx))
+
+	for _, device := range []string{"device-floor", "device-current"} {
+		require.NoError(t, cp.TriggerEvent(ctx, &cpTypes.Event{
+			Type: cpTypes.EventRelayRequest, StewardID: device, Timestamp: time.Now(),
+			Details: map[string]interface{}{
+				"execution_id": "exec-" + device, "sequence": float64(1), "method": "GET",
+				"path": "/api/v1/runs", "headers": map[string]interface{}{}, "body": "",
+			},
+		}))
+	}
+
+	cmds := cp.SentCommands()
+	require.Len(t, cmds, 2)
+	for _, got := range cmds {
+		want := cpTypes.SigningPayloadV2
+		if got.Command.StewardID == "device-floor" {
+			want = cpTypes.SigningPayloadV1
+			assert.Zero(t, got.Command.SigningPayloadVersion)
+		}
+		b, err := cpTypes.CommandSigningBytesVersion(&got.Command, cpTypes.InterfaceParamsToStringMap(got.Command.Params), want)
+		require.NoError(t, err)
+		assert.NoError(t, verifier.Verify(b, got.Signature), "%s: verifies over payload v%d", got.Command.StewardID, want)
 	}
 }

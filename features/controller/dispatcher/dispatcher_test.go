@@ -17,12 +17,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	configsignature "github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/run"
 	script "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/transport/registry"
 
 	_ "modernc.org/sqlite"
 )
@@ -2500,3 +2502,68 @@ func TestBuildScriptCommandParams_LibraryRunIgnoresMetadataSignature(t *testing.
 	})
 	assert.Equal(t, "stored", params["signature_value"])
 }
+
+// TestDispatcher_SignsPerStewardConnectionVersion proves a command to a steward whose
+// connection resolves to the floor profile is signed over v1 (so a v0.10.5 steward
+// verifies it) and every other steward stays on v2, for execute_script and for
+// steward actions.
+func TestDispatcher_SignsPerStewardConnectionVersion(t *testing.T) {
+	reg := registry.NewRegistry()
+	for id, state := range map[string]string{"steward-floor": registry.CapabilityFloor, "steward-current": registry.CapabilityDeclared} {
+		conn := &registry.StewardConnection{StewardID: id, Sender: nopConnSender{}, ConnectionID: "conn-" + id, ConnectedAt: time.Now()}
+		vers := []uint32{controlplaneTypes.SigningPayloadV1}
+		if state == registry.CapabilityDeclared {
+			vers = []uint32{controlplaneTypes.SigningPayloadV1, controlplaneTypes.SigningPayloadV2}
+		}
+		conn.SettleCapabilities(state, []int32{1}, vers)
+		require.NoError(t, reg.Register(conn))
+	}
+
+	var signed [][]byte
+	controlPlane := &testControlPlane{}
+	d, err := New(&Config{
+		Queue:           newTestQueue(t, nil),
+		ControlPlane:    controlPlane,
+		Signer:          bytesRecordingSigner{signed: &signed},
+		TermSource:      fixedTermSource(11),
+		SigningVersions: commands.NewCapabilityResolver(reg, nil, logging.NewNoopLogger()),
+		Logger:          logging.NewNoopLogger(),
+	})
+	require.NoError(t, err)
+
+	prepared := &script.PreparedExecution{ScriptContent: "hostname"}
+	for _, steward := range []string{"steward-floor", "steward-current"} {
+		exec := &script.QueuedExecution{ExecutionID: "exec-" + steward, Shell: script.ShellBash}
+		require.NoError(t, d.sendCommand(context.Background(), steward, exec, prepared))
+	}
+
+	require.Len(t, controlPlane.sent, 2)
+	require.Len(t, signed, 2)
+
+	floorCmd := controlPlane.sent[0].Command
+	assert.Zero(t, floorCmd.SigningPayloadVersion, "a floor steward gets the pre-#5285 wire form")
+	assert.Equal(t, uint64(11), floorCmd.Term, "the stamped term stays on v1")
+	v1Bytes, err := controlplaneTypes.CommandSigningBytes(&floorCmd, controlplaneTypes.InterfaceParamsToStringMap(floorCmd.Params))
+	require.NoError(t, err)
+	assert.Equal(t, string(v1Bytes), string(signed[0]))
+
+	currentCmd := controlPlane.sent[1].Command
+	assert.Equal(t, controlplaneTypes.SigningPayloadV2, currentCmd.SigningPayloadVersion)
+	v2Bytes, err := controlplaneTypes.CommandSigningBytesVersion(&currentCmd,
+		controlplaneTypes.InterfaceParamsToStringMap(currentCmd.Params), controlplaneTypes.SigningPayloadV2)
+	require.NoError(t, err)
+	assert.Equal(t, string(v2Bytes), string(signed[1]))
+
+	// A steward action takes the same path.
+	signed = nil
+	controlPlane.sent = nil
+	require.NoError(t, d.sendStewardAction(context.Background(), "steward-floor",
+		&script.QueuedExecution{ExecutionID: "exec-action",
+			Action: &script.StewardActionSpec{Verb: "service.start", TargetKind: "service", TargetName: "x"}}))
+	require.Len(t, controlPlane.sent, 1)
+	assert.Zero(t, controlPlane.sent[0].Command.SigningPayloadVersion)
+}
+
+type nopConnSender struct{}
+
+func (nopConnSender) SendMsg(interface{}) error { return nil }

@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"sort"
 
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -66,6 +67,82 @@ type CompositeOnConnectHook struct {
 // only structurally, via the interface).
 type onConnectHook interface {
 	OnConnect(ctx context.Context, stewardID string) error
+}
+
+// ConnectHookSlot names a place in the on-connect chain.
+type ConnectHookSlot string
+
+// The on-connect hooks, by what they do. The first five never sign or send a
+// command; the last four do, and a command they send waits (bounded) for the
+// connection's capability declaration before it is signed.
+const (
+	SlotRegistry            ConnectHookSlot = "registry"
+	SlotCompletionReconcile ConnectHookSlot = "completion_reconciler"
+	SlotRouting             ConnectHookSlot = "routing"
+	SlotLockdown            ConnectHookSlot = "lockdown"
+	SlotRepair              ConnectHookSlot = "repair"
+	SlotSigningRotation     ConnectHookSlot = "signing_rotation"
+	SlotMigration           ConnectHookSlot = "migration"
+	SlotDrain               ConnectHookSlot = "drain"
+	SlotTransportAddress    ConnectHookSlot = "transport_address"
+)
+
+// connectHookOrder is the order the chain runs its hooks in. The chain is
+// sequential, so a hook that waits delays every hook behind it: the hooks that do
+// not sign run first, and the hooks that sign (and so may wait on the connection's
+// capability declaration at the point of signing) run last. Lockdown runs before
+// the signing push, never after it.
+func connectHookOrder() []ConnectHookSlot {
+	return []ConnectHookSlot{
+		SlotRegistry, SlotCompletionReconcile, SlotRouting, SlotLockdown, SlotRepair,
+		SlotSigningRotation, SlotMigration, SlotDrain, SlotTransportAddress,
+	}
+}
+
+// signs reports whether the hook in the slot signs and sends a command.
+func (s ConnectHookSlot) signs() bool {
+	switch s {
+	case SlotSigningRotation, SlotMigration, SlotDrain, SlotTransportAddress:
+		return true
+	}
+	return false
+}
+
+// SlottedConnectHook is a hook with the slot it occupies in the chain.
+type SlottedConnectHook struct {
+	Slot ConnectHookSlot
+	Hook interface {
+		OnConnect(ctx context.Context, stewardID string) error
+	}
+}
+
+// NewOrderedCompositeOnConnectHook builds a composite that runs the given hooks in
+// connectHookOrder, whatever order they are passed in. A nil Hook is skipped. A
+// hook whose slot is not in the order runs last, after the signing hooks, in the
+// order it was given.
+func NewOrderedCompositeOnConnectHook(logger logging.Logger, hooks ...SlottedConnectHook) *CompositeOnConnectHook {
+	rank := make(map[ConnectHookSlot]int)
+	for i, slot := range connectHookOrder() {
+		rank[slot] = i
+	}
+	ordered := make([]SlottedConnectHook, 0, len(hooks))
+	for _, h := range hooks {
+		if h.Hook != nil {
+			ordered = append(ordered, h)
+		}
+	}
+	position := func(h SlottedConnectHook) int {
+		if r, ok := rank[h.Slot]; ok {
+			return r
+		}
+		return len(rank)
+	}
+	sort.SliceStable(ordered, func(i, j int) bool { return position(ordered[i]) < position(ordered[j]) })
+	chain := make([]onConnectHook, 0, len(ordered))
+	for _, h := range ordered {
+		chain = append(chain, h.Hook)
+	}
+	return NewCompositeOnConnectHook(logger, chain...)
 }
 
 // NewCompositeOnConnectHook builds a composite from the given hooks, skipping

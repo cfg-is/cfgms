@@ -4,6 +4,7 @@
 package commands
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -72,7 +73,7 @@ func TestPublisher_SignCommand_AttachesChainAndFailsClosed(t *testing.T) {
 	cmd := &controlplaneTypes.Command{ID: "c1", Type: controlplaneTypes.CommandSyncDNA, StewardID: "s1"}
 
 	p := &Publisher{signer: signer, signerChains: signerchain.NewSignerChainBuilder(m), logger: logging.NewNoopLogger()}
-	sc, err := p.signCommand(cmd)
+	sc, err := p.signCommand(context.Background(), cmd)
 	require.NoError(t, err)
 	require.NotNil(t, sc.Signature)
 	certs := parseChain(t, sc.SignerChainPEM)
@@ -83,7 +84,7 @@ func TestPublisher_SignCommand_AttachesChainAndFailsClosed(t *testing.T) {
 		signerChains: signerchain.NewSignerChainBuilder(chainFailingSource{SignerChainSource: m, rootErr: errors.New("boom")}),
 		logger:       logging.NewNoopLogger(),
 	}
-	sc, err = failing.signCommand(cmd)
+	sc, err = failing.signCommand(context.Background(), cmd)
 	require.Error(t, err)
 	assert.Nil(t, sc)
 	assert.ErrorIs(t, err, ErrSignerChainUnavailable, "a chain failure is identifiable by the caller")
@@ -94,7 +95,7 @@ func TestPublisher_SignCommand_NonChainFailureIsNotAChainError(t *testing.T) {
 	m := newChainTestManager(t)
 	cmd := &controlplaneTypes.Command{ID: "c2", Type: controlplaneTypes.CommandSyncDNA, StewardID: "s1"}
 	p := &Publisher{signer: failingSigner{}, signerChains: signerchain.NewSignerChainBuilder(m), logger: logging.NewNoopLogger()}
-	_, err := p.signCommand(cmd)
+	_, err := p.signCommand(context.Background(), cmd)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrSignerChainUnavailable)
 }
@@ -117,24 +118,24 @@ func TestPublisher_ExplicitSignerChainIgnoresOverlapWindowButDefaultFailsClosed(
 
 	// The default signer path still requires a certificate in the valid set.
 	defaultPath := &Publisher{signer: outgoing, signerChains: signerchain.NewSignerChainBuilder(m), logger: logging.NewNoopLogger()}
-	sc, err := defaultPath.signCommand(cmd)
+	sc, err := defaultPath.signCommand(context.Background(), cmd)
 	require.Error(t, err, "a default signer outside the valid signing set must fail closed")
 	assert.Nil(t, sc)
 
 	// An explicit signer resolves its own stored certificate, window closed or not.
 	explicitPath := &Publisher{signer: incoming, signerChains: signerchain.NewSignerChainBuilder(m), logger: logging.NewNoopLogger()}
-	sc, err = explicitPath.signCommandWith(cmd, outgoing, true)
+	sc, err = explicitPath.signCommandWith(context.Background(), cmd, outgoing, true)
 	require.NoError(t, err)
 	certs := parseChain(t, sc.SignerChainPEM)
 	assert.Equal(t, outgoing.KeyFingerprint(), fingerprintOf(certs[0]))
 	require.NoError(t, certs[len(certs)-1].CheckSignatureFrom(certs[len(certs)-1]))
 
 	// The explicit chain never satisfies the default path afterwards.
-	_, err = explicitPath.signCommandWith(cmd, outgoing, false)
+	_, err = explicitPath.signCommandWith(context.Background(), cmd, outgoing, false)
 	require.Error(t, err)
 
 	// An explicit signer with no stored certificate still fails closed.
 	other := newChainTestManager(t)
-	_, err = explicitPath.signCommandWith(cmd, currentSigner(t, other), true)
+	_, err = explicitPath.signCommandWith(context.Background(), cmd, currentSigner(t, other), true)
 	require.Error(t, err)
 }
