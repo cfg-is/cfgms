@@ -1,4 +1,4 @@
-.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-cmd test-go-group-windows-cmd-steward-1 test-go-group-windows-cmd-steward-2 test-go-group-windows-cmd-steward-3 test-go-group-windows-rest test-go-group-macos-providers test-go-group-macos-steward test-go-group-macos-cmd-steward-1 test-go-group-macos-cmd-steward-2 test-go-group-macos-cmd-steward-3 test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection complexity-report complexity-check complexity-replay duplication-report duplication-replay duplication-check clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
+.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-cmd test-go-group-windows-cmd-steward-1 test-go-group-windows-cmd-steward-2 test-go-group-windows-cmd-steward-3 test-go-group-windows-cmd-steward-4 test-go-group-windows-rest test-go-group-macos-providers test-go-group-macos-steward test-go-group-macos-cmd-steward-1 test-go-group-macos-cmd-steward-2 test-go-group-macos-cmd-steward-3 test-go-group-macos-cmd-steward-4 test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection complexity-report complexity-check complexity-replay duplication-report duplication-replay duplication-check clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -729,46 +729,57 @@ test-go-group-windows-steward:
 #      timed out" with the running-tests list lands first. The guard is
 #      scripts/test-scripts.sh test_windows_cmd_steward_timeout_and_streaming.
 # cmd/steward does not fit one 15-minute job with that margin, so it runs as
-# three name shards, each in its own job (separate runners, so shards never
+# four name shards, each in its own job (separate runners, so shards never
 # share Windows resources), and every other ./cmd/... package runs in
 # test-go-group-windows-cmd. Issue #6296: two shards were not enough once
 # #6291 added the TestTamperAlarm_FaultCleared_* tests; shard 2 (every test but
-# TestReg*/TestRun*) timed out at 6m on PR #6292, so the split is three-way and
-# is rebalanced so that new tests do not all land in one shard.
+# TestReg*/TestRun*) timed out at 6m on PR #6292, so the split became three-way.
+# Issue #6328: the third shard went back over its budget (macOS timed out at 6m
+# on PR #6325) because every new test family lands in the complement, the
+# TestRepair* family above all, so TestRepair* now has a shard of its own.
 #
 # The shards partition the top-level test names. The go test -run
 # pattern cannot express "everything else", so shard 3 is written out as the
-# explicit complement of shards 1 and 2 (a trie over their prefixes: at each
+# explicit complement of shards 1, 2 and 4 (a trie over their prefixes: at each
 # prefix character a name either ends, continues with a different character,
 # or continues down the excluded path; after TestRegisterAndConnect_ only
 # names ending there or starting with U remain). test_windows_steward_groups_
 # cover_exactly_steward_and_cmd asserts that every real cmd/steward test name
 # and a set of near-miss probes around each prefix below match exactly one
-# shard. Changing a prefix in shard 1 or 2 means regenerating shard 3. Go
-# streams a single package's output, so no -json is needed here.
+# shard. Changing a prefix in shard 1, 2 or 4 means regenerating shard 3 and
+# adding the prefix to cmd_steward_shard_probes. Go streams a single package's
+# output, so no -json is needed here.
 #   shard 1: ^TestRegisterAndConnect_[^U]  (every TestRegisterAndConnect_* but
 #            TestRegisterAndConnect_Unreachable*)
 #   shard 2: ^Test(Tamper|Identity)        (TestTamperAlarm*, TestIdentity*)
 #   shard 3: everything else (TestRegisterAndConnect_Unreachable*, the other
-#            TestReg* tests, TestRun*, TestRepair*, TestConnect*, ...)
+#            TestReg* tests, TestRun*, TestConnect*, ...)
+#   shard 4: ^TestRepair                   (TestRepair*)
 #
-# Shard weights. Sum of top-level test durations of cmd/steward -short on a
-# Linux host (2026-11-16, 287 tests, 311s; 288 names on Linux and macOS, 287 on
-# Windows, which has its own windows-only tests): shard 1 112.8s (18 tests),
-# shard 2 106.9s (35 tests: TestTamperAlarm* 76.7s, TestIdentity* 30.2s),
-# shard 3 91.6s (234 tests: TestRegisterAndConnect_Unreachable* 49s, TestRun*
-# 8.8s, TestRepair* 9.2s, TestConnect* 8.7s ...). Most of the long tests wait on
-# real timers, so Windows differs less from Linux there than on CPU-bound
-# tests; the failed PR #6292 shard 2 (everything but TestReg*/TestRun*) summed
-# 344s of passed top-level tests on Windows against about 140s on Linux for
-# the same names, a factor of about 2.5 (a lower bound, the timeout truncated
-# that shard). Applied uniformly, which overstates it for timer-bound tests,
-# the Linux sums above give 282s, 267s and 229s, under the 300s target. Re-weigh from the PR's
-# Windows job logs if any shard nears 6m.
+# Time budget. Each shard's summed top-level test time must stay at or under
+# CMD_STEWARD_SHARD_BUDGET_S, which leaves at least 60s under -timeout=6m
+# (360s). The recipes run go test through scripts/cmd-steward-shard-budget.sh,
+# which prints "SHARD_BUDGET <label> sum=<s>s ..." into the job log and the job
+# summary and raises a "::warning" annotation when a shard exceeds the budget.
+# It warns and does not fail: the same test set varies by up to 125s between
+# runs on one runner, so a fail line under the 360s timeout would flap and one
+# at or above it would only repeat the timeout.
+#
+# Shard weights, summed top-level test seconds measured from the job logs of
+# nine PR runs on 2026-11-18 (runs 43820095360 .. 44277113924): shard 1 121.2
+# to 130.2s (18 tests), shard 2 127.3 to 141.2s (35 to 36 tests); shard 3 as
+# the complement of shards 1 and 2 only was 239.4 to 347.2s (233 to 244
+# tests), of which TestRepair* was 51.0 to 125.9s. Shard 3 without TestRepair*
+# is 171 to 218s and TestRepair* alone 51.0 to 125.9s. The Linux weights that
+# sized the earlier splits (TestRepair* 9.2s on 2026-11-16) understated
+# TestRepair* by more than 5x on Windows, so re-weigh from the SHARD_BUDGET
+# lines of the PR's Windows jobs, not from a Linux run.
+CMD_STEWARD_SHARD_BUDGET_S := 300
 GO_GROUP_WINDOWS_CMD_STEWARD := ./cmd/steward
 GO_GROUP_WINDOWS_CMD_STEWARD_RUN_1 := ^TestRegisterAndConnect_[^U]
 GO_GROUP_WINDOWS_CMD_STEWARD_RUN_2 := ^Test(Tamper|Identity)
-GO_GROUP_WINDOWS_CMD_STEWARD_RUN_3 := ^Test($$|[^IRT]|I($$|[^d]|d($$|[^e]|e($$|[^n]|n($$|[^t]|t($$|[^i]|i($$|[^t]|t($$|[^y])))))))|R($$|[^e]|e($$|[^g]|g($$|[^i]|i($$|[^s]|s($$|[^t]|t($$|[^e]|e($$|[^r]|r($$|[^A]|A($$|[^n]|n($$|[^d]|d($$|[^C]|C($$|[^o]|o($$|[^n]|n($$|[^n]|n($$|[^e]|e($$|[^c]|c($$|[^t]|t($$|[^_]|_($$|U)))))))))))))))))))|T($$|[^a]|a($$|[^m]|m($$|[^p]|p($$|[^e]|e($$|[^r]))))))
+GO_GROUP_WINDOWS_CMD_STEWARD_RUN_3 := ^Test($$|[^IRT]|I($$|[^d]|d($$|[^e]|e($$|[^n]|n($$|[^t]|t($$|[^i]|i($$|[^t]|t($$|[^y])))))))|R($$|[^e]|e($$|[^gp]|g($$|[^i]|i($$|[^s]|s($$|[^t]|t($$|[^e]|e($$|[^r]|r($$|[^A]|A($$|[^n]|n($$|[^d]|d($$|[^C]|C($$|[^o]|o($$|[^n]|n($$|[^n]|n($$|[^e]|e($$|[^c]|c($$|[^t]|t($$|[^_]|_($$|U)))))))))))))))))|p($$|[^a]|a($$|[^i]|i($$|[^r])))))|T($$|[^a]|a($$|[^m]|m($$|[^p]|p($$|[^e]|e($$|[^r]))))))
+GO_GROUP_WINDOWS_CMD_STEWARD_RUN_4 := ^TestRepair
 
 .PHONY: test-go-group-windows-cmd-steward-1
 test-go-group-windows-cmd-steward-1:
@@ -778,7 +789,8 @@ test-go-group-windows-cmd-steward-1:
 		go list $(GO_GROUP_WINDOWS_CMD_STEWARD); \
 	else \
 		echo "  Testing windows-cmd-steward-1 group (cmd/steward, TestRegisterAndConnect_ except Unreachable*)..."; \
-		go test -v $$race_flag -short -timeout=6m -run '$(GO_GROUP_WINDOWS_CMD_STEWARD_RUN_1)' $(GO_GROUP_WINDOWS_CMD_STEWARD); \
+		bash scripts/cmd-steward-shard-budget.sh windows-cmd-steward-1 $(CMD_STEWARD_SHARD_BUDGET_S) -- \
+			go test -v $$race_flag -short -timeout=6m -run '$(GO_GROUP_WINDOWS_CMD_STEWARD_RUN_1)' $(GO_GROUP_WINDOWS_CMD_STEWARD); \
 	fi
 
 .PHONY: test-go-group-windows-cmd-steward-2
@@ -789,7 +801,8 @@ test-go-group-windows-cmd-steward-2:
 		go list $(GO_GROUP_WINDOWS_CMD_STEWARD); \
 	else \
 		echo "  Testing windows-cmd-steward-2 group (cmd/steward, TestTamper*/TestIdentity*)..."; \
-		go test -v $$race_flag -short -timeout=6m -run '$(GO_GROUP_WINDOWS_CMD_STEWARD_RUN_2)' $(GO_GROUP_WINDOWS_CMD_STEWARD); \
+		bash scripts/cmd-steward-shard-budget.sh windows-cmd-steward-2 $(CMD_STEWARD_SHARD_BUDGET_S) -- \
+			go test -v $$race_flag -short -timeout=6m -run '$(GO_GROUP_WINDOWS_CMD_STEWARD_RUN_2)' $(GO_GROUP_WINDOWS_CMD_STEWARD); \
 	fi
 
 .PHONY: test-go-group-windows-cmd-steward-3
@@ -800,7 +813,20 @@ test-go-group-windows-cmd-steward-3:
 		go list $(GO_GROUP_WINDOWS_CMD_STEWARD); \
 	else \
 		echo "  Testing windows-cmd-steward-3 group (cmd/steward, every other test)..."; \
-		go test -v $$race_flag -short -timeout=6m -run '$(GO_GROUP_WINDOWS_CMD_STEWARD_RUN_3)' $(GO_GROUP_WINDOWS_CMD_STEWARD); \
+		bash scripts/cmd-steward-shard-budget.sh windows-cmd-steward-3 $(CMD_STEWARD_SHARD_BUDGET_S) -- \
+			go test -v $$race_flag -short -timeout=6m -run '$(GO_GROUP_WINDOWS_CMD_STEWARD_RUN_3)' $(GO_GROUP_WINDOWS_CMD_STEWARD); \
+	fi
+
+.PHONY: test-go-group-windows-cmd-steward-4
+test-go-group-windows-cmd-steward-4:
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $(GO_GROUP_WINDOWS_CMD_STEWARD); \
+	else \
+		echo "  Testing windows-cmd-steward-4 group (cmd/steward, TestRepair*)..."; \
+		bash scripts/cmd-steward-shard-budget.sh windows-cmd-steward-4 $(CMD_STEWARD_SHARD_BUDGET_S) -- \
+			go test -v $$race_flag -short -timeout=6m -run '$(GO_GROUP_WINDOWS_CMD_STEWARD_RUN_4)' $(GO_GROUP_WINDOWS_CMD_STEWARD); \
 	fi
 
 # Every ./cmd/... package except cmd/steward (the three shards above). -json
@@ -915,13 +941,15 @@ test-go-group-macos-steward:
 # GO_GROUP_WINDOWS_CMD_STEWARD): a single-package `go test -v` streams its
 # "=== RUN" lines, and -timeout=6m (timeout-minutes 15 minus 9) lets Go's own
 # timeout panic with the running-tests list land before the job cancel.
-# cmd/steward does not fit one job with that margin, so it runs as three name
+# cmd/steward does not fit one job with that margin, so it runs as four name
 # shards, each in its own job. Issue #6296: shard 2 of the former two-way split
 # (every test but TestReg*) timed out at 6m on PR #6292 once #6291 added the
-# TestTamperAlarm_FaultCleared_* tests.
+# TestTamperAlarm_FaultCleared_* tests. Issue #6328: shard 3 timed out at 6m on
+# PR #6325 (349.5s of passed top-level tests, TestRepair* 178.6s of them), so
+# TestRepair* now has a shard of its own.
 #
 # The shards partition the top-level test names. go test -run has no negation,
-# so shard 3 is the explicit complement of shards 1 and 2 (generated as
+# so shard 3 is the explicit complement of shards 1, 2 and 4 (generated as
 # described above GO_GROUP_WINDOWS_CMD_STEWARD, and not hand-edited);
 # test_macos_groups_cover_exactly_shipped_packages asserts that every real
 # cmd/steward test name and a set of near-miss probes around each prefix match
@@ -930,24 +958,25 @@ test-go-group-macos-steward:
 #   shard 1: ^TestRegisterAndConnect_[^U]
 #   shard 2: ^Test(Tamper|Identity)
 #   shard 3: everything else
+#   shard 4: ^TestRepair
 #
-# Shard weights. macOS runs the unix test set, the same set Linux runs (no
-# *_darwin_test.go file, no darwin-only build tag in cmd/steward today), so
-# the Linux weights apply: sum of top-level test durations of cmd/steward
-# -short on a Linux host (2026-11-16, 287 tests, 311s): shard 1 112.8s (18
-# tests), shard 2 106.9s (35 tests: TestTamperAlarm* 76.7s, TestIdentity*
-# 30.2s), shard 3 91.6s (234 tests: TestRegisterAndConnect_Unreachable* 49s,
-# TestRun* 8.8s, TestRepair* 9.2s, TestConnect* 8.7s ...). The failed PR
-# #6292 shard 2 (everything but TestReg*) summed 321s of passed top-level
-# tests on macOS against about 149s on Linux for the same names, a factor of
-# about 2.2 (a lower bound, the timeout truncated that shard). Applied
-# uniformly the Linux sums above give 248s, 235s and 201s, under the 300s
-# target. Re-weigh from the PR's macOS job
-# logs if any shard nears 6m.
+# Time budget: CMD_STEWARD_SHARD_BUDGET_S and scripts/cmd-steward-shard-budget.sh,
+# described above GO_GROUP_WINDOWS_CMD_STEWARD; the recipes below use them too.
+#
+# Shard weights, summed top-level test seconds measured from the macOS job logs
+# of the same nine PR runs (2026-11-18): shard 1 117.3 to 122.7s, shard 2 131.0
+# to 171.7s, shard 3 as the complement of shards 1 and 2 only 224.4 to 349.5s
+# (the latter timed out). Shard 3 without TestRepair* is 171 to 218s;
+# TestRepair* alone was 77.6 to 178.6s on macOS in the old shard 3. macOS
+# runs the unix test set (no *_darwin_test.go file, no darwin-only build tag in
+# cmd/steward today), but its -race timing differs from Linux by a factor that
+# is not constant per family, so re-weigh from the SHARD_BUDGET lines of the
+# PR's macOS jobs, not from a Linux run.
 MACOS_CMD_STEWARD_PKG := github.com/cfgis/cfgms/cmd/steward
 MACOS_CMD_STEWARD_RUN_1 := ^TestRegisterAndConnect_[^U]
 MACOS_CMD_STEWARD_RUN_2 := ^Test(Tamper|Identity)
-MACOS_CMD_STEWARD_RUN_3 := ^Test($$|[^IRT]|I($$|[^d]|d($$|[^e]|e($$|[^n]|n($$|[^t]|t($$|[^i]|i($$|[^t]|t($$|[^y])))))))|R($$|[^e]|e($$|[^g]|g($$|[^i]|i($$|[^s]|s($$|[^t]|t($$|[^e]|e($$|[^r]|r($$|[^A]|A($$|[^n]|n($$|[^d]|d($$|[^C]|C($$|[^o]|o($$|[^n]|n($$|[^n]|n($$|[^e]|e($$|[^c]|c($$|[^t]|t($$|[^_]|_($$|U)))))))))))))))))))|T($$|[^a]|a($$|[^m]|m($$|[^p]|p($$|[^e]|e($$|[^r]))))))
+MACOS_CMD_STEWARD_RUN_3 := ^Test($$|[^IRT]|I($$|[^d]|d($$|[^e]|e($$|[^n]|n($$|[^t]|t($$|[^i]|i($$|[^t]|t($$|[^y])))))))|R($$|[^e]|e($$|[^gp]|g($$|[^i]|i($$|[^s]|s($$|[^t]|t($$|[^e]|e($$|[^r]|r($$|[^A]|A($$|[^n]|n($$|[^d]|d($$|[^C]|C($$|[^o]|o($$|[^n]|n($$|[^n]|n($$|[^e]|e($$|[^c]|c($$|[^t]|t($$|[^_]|_($$|U)))))))))))))))))|p($$|[^a]|a($$|[^i]|i($$|[^r])))))|T($$|[^a]|a($$|[^m]|m($$|[^p]|p($$|[^e]|e($$|[^r]))))))
+MACOS_CMD_STEWARD_RUN_4 := ^TestRepair
 
 .PHONY: test-go-group-macos-cmd-steward-1
 test-go-group-macos-cmd-steward-1:
@@ -960,7 +989,8 @@ test-go-group-macos-cmd-steward-1:
 		echo "$$pkgs"; \
 	else \
 		echo "  Testing macos-cmd-steward-1 group (cmd/steward, TestRegisterAndConnect_ except Unreachable*, -race)..."; \
-		go test -v -race -short -timeout=6m -run '$(MACOS_CMD_STEWARD_RUN_1)' $$pkgs; \
+		bash scripts/cmd-steward-shard-budget.sh macos-cmd-steward-1 $(CMD_STEWARD_SHARD_BUDGET_S) -- \
+			go test -v -race -short -timeout=6m -run '$(MACOS_CMD_STEWARD_RUN_1)' $$pkgs; \
 	fi
 
 .PHONY: test-go-group-macos-cmd-steward-2
@@ -974,7 +1004,8 @@ test-go-group-macos-cmd-steward-2:
 		echo "$$pkgs"; \
 	else \
 		echo "  Testing macos-cmd-steward-2 group (cmd/steward, TestTamper*/TestIdentity*, -race)..."; \
-		go test -v -race -short -timeout=6m -run '$(MACOS_CMD_STEWARD_RUN_2)' $$pkgs; \
+		bash scripts/cmd-steward-shard-budget.sh macos-cmd-steward-2 $(CMD_STEWARD_SHARD_BUDGET_S) -- \
+			go test -v -race -short -timeout=6m -run '$(MACOS_CMD_STEWARD_RUN_2)' $$pkgs; \
 	fi
 
 .PHONY: test-go-group-macos-cmd-steward-3
@@ -988,7 +1019,23 @@ test-go-group-macos-cmd-steward-3:
 		echo "$$pkgs"; \
 	else \
 		echo "  Testing macos-cmd-steward-3 group (cmd/steward, every other test, -race)..."; \
-		go test -v -race -short -timeout=6m -run '$(MACOS_CMD_STEWARD_RUN_3)' $$pkgs; \
+		bash scripts/cmd-steward-shard-budget.sh macos-cmd-steward-3 $(CMD_STEWARD_SHARD_BUDGET_S) -- \
+			go test -v -race -short -timeout=6m -run '$(MACOS_CMD_STEWARD_RUN_3)' $$pkgs; \
+	fi
+
+.PHONY: test-go-group-macos-cmd-steward-4
+test-go-group-macos-cmd-steward-4:
+	@pkgs=$$($(MACOS_SHIPPED_PKGS) | grep -x '$(MACOS_CMD_STEWARD_PKG)'); \
+	if [ -z "$$pkgs" ]; then \
+		echo "❌ macos-cmd-steward-4: $(MACOS_CMD_STEWARD_PKG) is not in the macOS-shipped package set. Refusing to report a pass."; \
+		exit 1; \
+	fi; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		echo "$$pkgs"; \
+	else \
+		echo "  Testing macos-cmd-steward-4 group (cmd/steward, TestRepair*, -race)..."; \
+		bash scripts/cmd-steward-shard-budget.sh macos-cmd-steward-4 $(CMD_STEWARD_SHARD_BUDGET_S) -- \
+			go test -v -race -short -timeout=6m -run '$(MACOS_CMD_STEWARD_RUN_4)' $$pkgs; \
 	fi
 
 # Measured `-race -short` seconds per package (CI run 42289478500 jobs 128145605948 and 128145605883), used to

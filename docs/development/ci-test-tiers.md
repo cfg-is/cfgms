@@ -114,8 +114,8 @@ Queries: `gh run list --workflow cross-platform-build.yml --event merge_group --
 | `integration-tests` (Docker) | queue real | ubuntu-latest | via `needs` of ✅ `Build Gate` | 50 | 443s / 7.38m | 456s / 7.60m |
 | `build-gate` | queue real, `needs: [native-builds, integration-tests]` | ubuntu-latest | ✅ `Build Gate` | 50 | own step 3s / 0.05m; **effective (gated) time = 1060s / 17.66m** | own step 4s / 0.07m; **effective = 1172s / 19.54m** |
 
-**Native macOS unit-test legs (PR side, current state).** `cross-platform-build-pr.yml` runs 7 native macOS
-legs (`macos-providers`, `macos-steward`, `macos-cmd-steward-1`, `macos-cmd-steward-2`, `macos-cmd-steward-3`, `macos-rest-1`, `macos-rest-2`), all
+**Native macOS unit-test legs (PR side, current state).** `cross-platform-build-pr.yml` runs 8 native macOS
+legs (`macos-providers`, `macos-steward`, `macos-cmd-steward-1`, `macos-cmd-steward-2`, `macos-cmd-steward-3`, `macos-cmd-steward-4`, `macos-rest-1`, `macos-rest-2`), all
 `-race`, each with `timeout-minutes: 15`. They test only code that
 ships on macOS: the in-module packages with test files in the `GOOS=darwin` dependency closure of
 `./cmd/steward`, `./cmd/cfgms-steward-launcher` and `./cmd/cfg`, derived by the Makefile at run time
@@ -126,33 +126,44 @@ ships on macOS: the in-module packages with test files in the `GOOS=darwin` depe
 (`MACOS_REST_WEIGHTS` in the `Makefile`, longest-first onto the least-loaded shard) rather than by list
 position, so `features/workflow` and `pkg/storage/interfaces` land on different shards. Its `go test` runs with
 `-timeout=9m` (under the 15-minute job limit) so a hung package fails by name instead of the job being cancelled. The measurements in the tables above predate this scoping.
-- **`cmd/steward` has its own three legs.** `cmd/steward` grew from about 200 s (2026-11-05) to 403-515 s under `-race -short` on
+- **`cmd/steward` has its own four legs.** `cmd/steward` grew from about 200 s (2026-11-05) to 403-515 s under `-race -short` on
   macOS, and the shared steward leg was cancelled at its 15-minute cap on 2026-11-10 with no output naming a test. It now runs
-  as three name shards, each a single-package `go test -v -race -short -timeout=6m` in its own job: `macos-cmd-steward-1`
+  as four name shards, each a single-package `go test -v -race -short -timeout=6m` in its own job: `macos-cmd-steward-1`
   (`make test-go-group-macos-cmd-steward-1`, `^TestRegisterAndConnect_[^U]`), `macos-cmd-steward-2`
-  (`^Test(Tamper|Identity)`) and `macos-cmd-steward-3` (the explicit complement of the two, `go test -run` has no negation).
-  The split was two shards until Issue #6296: shard 2 of that split (every test but `TestReg*`) timed out at 6m on PR #6292
-  once the `TestTamperAlarm_FaultCleared_*` tests landed. `macos-steward` (`make test-go-group-macos-steward`) keeps `features/steward` and every other
+  (`^Test(Tamper|Identity)`), `macos-cmd-steward-3` (the explicit complement of shards 1, 2 and 4, `go test -run` has no
+  negation) and `macos-cmd-steward-4` (`^TestRepair`). The split was two shards until Issue #6296: shard 2 of that split (every
+  test but `TestReg*`) timed out at 6m on PR #6292 once the `TestTamperAlarm_FaultCleared_*` tests landed. It became four shards
+  in Issue #6328: shard 3 timed out at 6m on PR #6325 (349.5 s of passed top-level tests, `TestRepair*` 178.6 s of them). `macos-steward` (`make test-go-group-macos-steward`) keeps `features/steward` and every other
   shipped `cmd` package, uses `-json` because it runs several packages, and also uses `-timeout=6m`. The
   `-timeout` and streaming rules and their measured basis are the ones in the Windows cmd paragraph below: `-timeout` at most
   `timeout-minutes` minus 9, and `-json` or a single package so output streams. On macOS the preamble measured 51-65 s of job setup
   plus 179-268 s from the `make` step to the `cmd/steward` binary start. `test_macos_cmd_steward_timeout_and_streaming` enforces
   both rules for every macOS job that runs `cmd/steward`.
-- **Shard weights.** macOS runs the unix test set, the same set Linux runs, so the Linux per-test weights apply. They are
-  recorded with the expected per-shard macOS seconds in the `Makefile` comment above `MACOS_CMD_STEWARD_RUN_1`. Summed
-  top-level test seconds of `cmd/steward -short` on a Linux host (2026-11-16): shard 1 112.8 s, shard 2 106.9 s, shard 3 91.6 s,
-  against the 300 s target (60 s of headroom under the 360 s `-timeout`). The CI logs of the failed PR #6292 run were not
-  available when the split was chosen, so the macOS and Windows seconds are scaled estimates, and the first run of the three
-  shards is the measurement to re-weigh from.
+- **Shard weights and budget.** Each `cmd/steward` shard's summed top-level test time must stay at or under 300 s, which is 60 s
+  of headroom under the 360 s `-timeout`. Summed top-level seconds measured from the macOS job logs of nine PR runs on
+  2026-11-18 (the old three-shard split): shard 1 117.3 to 122.7 s, shard 2 131.0 to 171.7 s, the old shard 3 224.4 to 349.5 s
+  (the maximum timed out). Of the old shard 3, `TestRepair*` was 77.6 to 178.6 s and the rest 171 to 218 s. The same test set
+  varies by up to 125 s between runs on one runner, so one passing run does not show that a shard fits, and the Linux per-test
+  weights (`TestRepair*` 9.2 s on 2026-11-16) understate the macOS and Windows times of the timer-bound and `-race` tests. The
+  `Makefile` comment above `MACOS_CMD_STEWARD_RUN_1` records the weights.
+- **Budget annotation.** Every `cmd/steward` shard recipe (both platforms) runs `go test` through
+  `scripts/cmd-steward-shard-budget.sh <label> $(CMD_STEWARD_SHARD_BUDGET_S) -- go test ...`. The script keeps `go test`'s exit
+  status, sums the `--- PASS|FAIL: Test...` durations of top-level tests (indented subtests are not counted), prints
+  `SHARD_BUDGET <label> sum=<s>s budget=<b>s tests=<n>`, appends a row to the job summary and, above 300 s, raises a
+  `::warning title=cmd/steward shard over budget` annotation that shows on the PR without opening the log. A run that hits
+  `-timeout` still reports the sum of the tests that finished. The script warns and does not fail: the sum varies too much
+  between runs for a fail line below `-timeout`, and a line at or above it would repeat the timeout. When a shard's annotation
+  appears, move a test family into its own shard as Issue #6328 did for `TestRepair*`. `test_cmd_steward_shard_budget_wrapper`
+  covers the script and that every shard recipe calls it.
   `test_macos_groups_cover_exactly_shipped_packages` asserts that every real top-level `Test*` name of `cmd/steward` for
   `GOOS=darwin` (from `go list` TestGoFiles and XTestGoFiles), near-miss probes for each prefix the patterns name
-  (`TestTampe`, `TestTamperX`, `TestRegisterAndConnect_U` and so on) and every `Test` plus up to three characters match
+  (`TestTampe`, `TestTamperX`, `TestRepai`, `TestRepairX`, `TestRegisterAndConnect_U` and so on) and every `Test` plus up to three characters match
   exactly one shard.
 
 **Native Windows cmd legs (PR side, current state).** `cross-platform-build-pr.yml` runs four Windows jobs for `./cmd/...`,
 each with `timeout-minutes: 15` and no `-race`: `windows-cmd` (`make test-go-group-windows-cmd`, every `./cmd/...` package except
-`cmd/steward`) and `windows-cmd-steward-1` / `-2` / `-3` (`make test-go-group-windows-cmd-steward-1` / `-2` / `-3`, the
-three name shards of `cmd/steward`). Every one of them runs `go test -short -timeout=6m`.
+`cmd/steward`) and `windows-cmd-steward-1` / `-2` / `-3` / `-4` (`make test-go-group-windows-cmd-steward-1` / `-2` / `-3` / `-4`, the
+four name shards of `cmd/steward`). Every one of them runs `go test -short -timeout=6m`.
 - **Why `-timeout=6m`.** `-timeout` counts from the test binary's start, not the job's. Measured on windows-latest
   (2026-11-09): job setup up to 152 s, then about 280 s from the `make` step to the binary start, about 7.2 minutes in all. A
   `-timeout=10m` in a 15-minute job therefore fired at or after the cancel, so a stalled test ended in `The operation was
@@ -165,18 +176,21 @@ three name shards of `cmd/steward`). Every one of them runs `go test -short -tim
   the multi-package `windows-cmd` remainder uses `-json`, which also keeps the per-test pass/skip result that
   `cmd/cfgms-steward-launcher` needs. The guard fails a `cmd/steward` invocation that shares a `go test` run with other
   packages and has no `-json`.
-- **Why three shards.** `cmd/steward` alone ran 439-511 s on Windows (109 s on 2026-10-30; the growth is 146 tests added since,
+- **Why four shards.** `cmd/steward` alone ran 439-511 s on Windows (109 s on 2026-10-30; the growth is 146 tests added since,
   and is not Windows-specific: 391 s on Linux), which does not fit a 6-minute `-timeout` in one job. Two shards (`^Test(Reg|Run)`
   and its complement) held until Issue #6296: every new test landed in shard 2, which timed out at 6m on PR #6292. The shards
   split the top-level test names with `-run`: shard 1 is `^TestRegisterAndConnect_[^U]`, shard 2 is `^Test(Tamper|Identity)`
-  and shard 3 is the explicit complement of the two (`go test -run` has no negation), the same split as on macOS. The
-  `Makefile` comment above `GO_GROUP_WINDOWS_CMD_STEWARD` records the weights and how the complement is built.
+  shard 4 is `^TestRepair` and shard 3 is the explicit complement of the three (`go test -run` has no negation), the same split
+  as on macOS. Shard 3 alone reached 239.4 to 347.2 s across nine PR runs (301.8 s on PR #6296 itself); without `TestRepair*`
+  it is 171 to 218 s, and `TestRepair*` alone is 51.0 to 125.9 s on Windows. The `Makefile` comment above
+  `GO_GROUP_WINDOWS_CMD_STEWARD` records the weights and how the complement is built; the budget script is described under the
+  macOS `cmd/steward` legs above.
   `test_windows_steward_groups_cover_exactly_steward_and_cmd` asserts that every real top-level `Test*` name of `cmd/steward`
   for `GOOS=windows`, near-miss probes for each prefix the patterns name and every `Test` plus up to three characters match
   exactly one shard.
 
 **macOS legs run only when the PR touches the macOS package closure (PR side, current state).** The `changes` job in
-`cross-platform-build-pr.yml` emits a second output, `macos` (`true` or `false`), next to `code`; the seven macOS legs run when
+`cross-platform-build-pr.yml` emits a second output, `macos` (`true` or `false`), next to `code`; the eight macOS legs run when
 `macos == 'true'` and are skipped otherwise. The Windows legs, the e2e leg and the `code` output are unchanged. `macos` comes
 from `scripts/macos-pr-filter.sh`, which runs `GOOS=darwin go list` on the PR merge ref. The closure is (1) the in-module
 packages in the dependency closure of the three macOS binaries (`MACOS_SHIPPED_ROOTS` in the `Makefile`, shared with

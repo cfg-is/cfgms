@@ -73,7 +73,7 @@ jobs:
   # The `macos` output is specific to this file (Issue #5974): it is not part of
   # the mirrored classification and test-suite.yml has no counterpart.
   #
-  # `macos` is `true` when the PR can affect the seven native macOS legs and
+  # `macos` is `true` when the PR can affect the eight native macOS legs and
   # `false` only when scripts/macos-pr-filter.sh ran to completion and found no
   # changed file in the macOS package closure. It fails closed: any code=true
   # classification defect, an unlistable rename set, or any filter defect
@@ -213,7 +213,7 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Decide whether the seven native macOS legs run (Issue #5974). FAILS
+      # Decide whether the eight native macOS legs run (Issue #5974). FAILS
       # CLOSED: every path that is not a completed "no closure file changed"
       # run of scripts/macos-pr-filter.sh emits macos=true.
       - name: Detect macOS package closure changes
@@ -562,12 +562,12 @@ jobs:
         CFGMS_TEST_RACE: "0"
       run: make test-go-group-windows-cmd
 
-  # Issue #6010, Issue #6296: cmd/steward runs in three name shards, one job each,
+  # Issue #6010, Issue #6296: cmd/steward runs in four name shards, one job each,
   # so each test binary gets a -timeout=6m budget that fires before the 15-minute
   # job cancel (-timeout counts from the binary start, ~7.2 minutes after the job
   # starts). See the comment above GO_GROUP_WINDOWS_CMD_STEWARD in the Makefile.
   windows-cmd-steward-1:
-    name: Windows Unit Tests (cmd/steward 1/3)
+    name: Windows Unit Tests (cmd/steward 1/4)
     permissions:
       contents: read
     needs: changes
@@ -607,7 +607,7 @@ jobs:
     - name: Download dependencies
       run: bash scripts/go-fetch-retry.sh mod download
 
-    - name: Run cmd/steward shard 1/3 (no -race)
+    - name: Run cmd/steward shard 1/4 (no -race)
       shell: bash
       env:
         CFGMS_TEST_INTEGRATION: "0"
@@ -615,7 +615,7 @@ jobs:
       run: make test-go-group-windows-cmd-steward-1
 
   windows-cmd-steward-2:
-    name: Windows Unit Tests (cmd/steward 2/3)
+    name: Windows Unit Tests (cmd/steward 2/4)
     permissions:
       contents: read
     needs: changes
@@ -655,7 +655,7 @@ jobs:
     - name: Download dependencies
       run: bash scripts/go-fetch-retry.sh mod download
 
-    - name: Run cmd/steward shard 2/3 (no -race)
+    - name: Run cmd/steward shard 2/4 (no -race)
       shell: bash
       env:
         CFGMS_TEST_INTEGRATION: "0"
@@ -663,7 +663,7 @@ jobs:
       run: make test-go-group-windows-cmd-steward-2
 
   windows-cmd-steward-3:
-    name: Windows Unit Tests (cmd/steward 3/3)
+    name: Windows Unit Tests (cmd/steward 3/4)
     permissions:
       contents: read
     needs: changes
@@ -703,12 +703,60 @@ jobs:
     - name: Download dependencies
       run: bash scripts/go-fetch-retry.sh mod download
 
-    - name: Run cmd/steward shard 3/3 (no -race)
+    - name: Run cmd/steward shard 3/4 (no -race)
       shell: bash
       env:
         CFGMS_TEST_INTEGRATION: "0"
         CFGMS_TEST_RACE: "0"
       run: make test-go-group-windows-cmd-steward-3
+
+  windows-cmd-steward-4:
+    name: Windows Unit Tests (cmd/steward 4/4)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: windows-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: bash scripts/go-fetch-retry.sh mod download
+
+    - name: Run cmd/steward shard 4/4 (no -race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+        CFGMS_TEST_RACE: "0"
+      run: make test-go-group-windows-cmd-steward-4
 
   windows-rest:
     name: Windows Unit Tests (rest + modules)
@@ -758,7 +806,7 @@ jobs:
         CFGMS_TEST_RACE: "0"
       run: make test-go-group-windows-rest
 
-  # Linux compile check of the macOS test binaries (Issue #5974). The six
+  # Linux compile check of the macOS test binaries (Issue #5974). The eight
   # native macOS legs below are skipped on a PR that does not touch the macOS
   # package closure (`changes.outputs.macos`), which includes controller code
   # that closure tests start in-process (features/controller/api, for one). A
@@ -909,7 +957,7 @@ jobs:
       run: make test-go-group-macos-steward
 
   macos-cmd-steward-1:
-    name: macOS Unit Tests (cmd/steward, shard 1/3)
+    name: macOS Unit Tests (cmd/steward, shard 1/4)
     permissions:
       contents: read
     needs: changes
@@ -949,14 +997,14 @@ jobs:
     - name: Download dependencies
       run: bash scripts/go-fetch-retry.sh mod download
 
-    - name: Run cmd/steward shard 1/3 (-race)
+    - name: Run cmd/steward shard 1/4 (-race)
       shell: bash
       env:
         CFGMS_TEST_INTEGRATION: "0"
       run: make test-go-group-macos-cmd-steward-1
 
   macos-cmd-steward-2:
-    name: macOS Unit Tests (cmd/steward, shard 2/3)
+    name: macOS Unit Tests (cmd/steward, shard 2/4)
     permissions:
       contents: read
     needs: changes
@@ -996,14 +1044,14 @@ jobs:
     - name: Download dependencies
       run: bash scripts/go-fetch-retry.sh mod download
 
-    - name: Run cmd/steward shard 2/3 (-race)
+    - name: Run cmd/steward shard 2/4 (-race)
       shell: bash
       env:
         CFGMS_TEST_INTEGRATION: "0"
       run: make test-go-group-macos-cmd-steward-2
 
   macos-cmd-steward-3:
-    name: macOS Unit Tests (cmd/steward, shard 3/3)
+    name: macOS Unit Tests (cmd/steward, shard 3/4)
     permissions:
       contents: read
     needs: changes
@@ -1043,11 +1091,58 @@ jobs:
     - name: Download dependencies
       run: bash scripts/go-fetch-retry.sh mod download
 
-    - name: Run cmd/steward shard 3/3 (-race)
+    - name: Run cmd/steward shard 3/4 (-race)
       shell: bash
       env:
         CFGMS_TEST_INTEGRATION: "0"
       run: make test-go-group-macos-cmd-steward-3
+
+  macos-cmd-steward-4:
+    name: macOS Unit Tests (cmd/steward, shard 4/4)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: macos-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.macos == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: bash scripts/go-fetch-retry.sh mod download
+
+    - name: Run cmd/steward shard 4/4 (-race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test-go-group-macos-cmd-steward-4
 
   macos-rest-1:
     name: macOS Unit Tests (rest, shard 1/2)
@@ -1272,6 +1367,7 @@ jobs:
       - windows-cmd-steward-1
       - windows-cmd-steward-2
       - windows-cmd-steward-3
+      - windows-cmd-steward-4
       - windows-rest
       - macos-test-compile
       - macos-providers
@@ -1279,6 +1375,7 @@ jobs:
       - macos-cmd-steward-1
       - macos-cmd-steward-2
       - macos-cmd-steward-3
+      - macos-cmd-steward-4
       - macos-rest-1
       - macos-rest-2
       - e2e
@@ -1301,6 +1398,7 @@ jobs:
         WINDOWS_CMD_STEWARD_1_RESULT: ${{ needs.windows-cmd-steward-1.result }}
         WINDOWS_CMD_STEWARD_2_RESULT: ${{ needs.windows-cmd-steward-2.result }}
         WINDOWS_CMD_STEWARD_3_RESULT: ${{ needs.windows-cmd-steward-3.result }}
+        WINDOWS_CMD_STEWARD_4_RESULT: ${{ needs.windows-cmd-steward-4.result }}
         WINDOWS_REST_RESULT: ${{ needs.windows-rest.result }}
         MACOS_COMPILE_RESULT: ${{ needs.macos-test-compile.result }}
         MACOS_PROVIDERS_RESULT: ${{ needs.macos-providers.result }}
@@ -1308,6 +1406,7 @@ jobs:
         MACOS_CMD_STEWARD_1_RESULT: ${{ needs.macos-cmd-steward-1.result }}
         MACOS_CMD_STEWARD_2_RESULT: ${{ needs.macos-cmd-steward-2.result }}
         MACOS_CMD_STEWARD_3_RESULT: ${{ needs.macos-cmd-steward-3.result }}
+        MACOS_CMD_STEWARD_4_RESULT: ${{ needs.macos-cmd-steward-4.result }}
         MACOS_REST_1_RESULT: ${{ needs.macos-rest-1.result }}
         MACOS_REST_2_RESULT: ${{ needs.macos-rest-2.result }}
         E2E_RESULT: ${{ needs.e2e.result }}
@@ -1324,16 +1423,18 @@ jobs:
         echo "| Windows: controller/cert/controlplane/sqlite | $WINDOWS_CONTROLLER_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Windows: steward | $WINDOWS_STEWARD_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Windows: cmd (without cmd/steward) | $WINDOWS_CMD_RESULT |" >> $GITHUB_STEP_SUMMARY
-        echo "| Windows: cmd/steward shard 1/3 | $WINDOWS_CMD_STEWARD_1_RESULT |" >> $GITHUB_STEP_SUMMARY
-        echo "| Windows: cmd/steward shard 2/3 | $WINDOWS_CMD_STEWARD_2_RESULT |" >> $GITHUB_STEP_SUMMARY
-        echo "| Windows: cmd/steward shard 3/3 | $WINDOWS_CMD_STEWARD_3_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| Windows: cmd/steward shard 1/4 | $WINDOWS_CMD_STEWARD_1_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| Windows: cmd/steward shard 2/4 | $WINDOWS_CMD_STEWARD_2_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| Windows: cmd/steward shard 3/4 | $WINDOWS_CMD_STEWARD_3_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| Windows: cmd/steward shard 4/4 | $WINDOWS_CMD_STEWARD_4_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Windows: rest + modules | $WINDOWS_REST_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS test compile (Linux) | $MACOS_COMPILE_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: cert/controlplane/sqlite | $MACOS_PROVIDERS_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: steward + cmd (without cmd/steward) | $MACOS_STEWARD_RESULT |" >> $GITHUB_STEP_SUMMARY
-        echo "| macOS: cmd/steward shard 1/3 | $MACOS_CMD_STEWARD_1_RESULT |" >> $GITHUB_STEP_SUMMARY
-        echo "| macOS: cmd/steward shard 2/3 | $MACOS_CMD_STEWARD_2_RESULT |" >> $GITHUB_STEP_SUMMARY
-        echo "| macOS: cmd/steward shard 3/3 | $MACOS_CMD_STEWARD_3_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: cmd/steward shard 1/4 | $MACOS_CMD_STEWARD_1_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: cmd/steward shard 2/4 | $MACOS_CMD_STEWARD_2_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: cmd/steward shard 3/4 | $MACOS_CMD_STEWARD_3_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: cmd/steward shard 4/4 | $MACOS_CMD_STEWARD_4_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: rest shard 1/2 | $MACOS_REST_1_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: rest shard 2/2 | $MACOS_REST_2_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| E2E (no Docker) | $E2E_RESULT |" >> $GITHUB_STEP_SUMMARY
@@ -1375,7 +1476,7 @@ jobs:
           docs_only=no
         fi
 
-        for result in "$WINDOWS_API_RESULT" "$WINDOWS_CONTROLLER_RESULT" "$WINDOWS_STEWARD_RESULT" "$WINDOWS_CMD_RESULT" "$WINDOWS_CMD_STEWARD_1_RESULT" "$WINDOWS_CMD_STEWARD_2_RESULT" "$WINDOWS_CMD_STEWARD_3_RESULT" "$WINDOWS_REST_RESULT" "$MACOS_COMPILE_RESULT" "$E2E_RESULT"; do
+        for result in "$WINDOWS_API_RESULT" "$WINDOWS_CONTROLLER_RESULT" "$WINDOWS_STEWARD_RESULT" "$WINDOWS_CMD_RESULT" "$WINDOWS_CMD_STEWARD_1_RESULT" "$WINDOWS_CMD_STEWARD_2_RESULT" "$WINDOWS_CMD_STEWARD_3_RESULT" "$WINDOWS_CMD_STEWARD_4_RESULT" "$WINDOWS_REST_RESULT" "$MACOS_COMPILE_RESULT" "$E2E_RESULT"; do
           if [ "$result" = "success" ]; then
             continue
           fi
@@ -1386,11 +1487,11 @@ jobs:
           fail=1
         done
 
-        # The seven macOS unit-test legs have a second legitimate skip: the PR
+        # The eight macOS unit-test legs have a second legitimate skip: the PR
         # does not touch the macOS package closure. macos-gate-rule.sh accepts
         # `skipped` only when `changes` succeeded AND its macos output is
         # exactly `false` (an empty or unexpected output fails closed).
-        for result in "$MACOS_PROVIDERS_RESULT" "$MACOS_STEWARD_RESULT" "$MACOS_CMD_STEWARD_1_RESULT" "$MACOS_CMD_STEWARD_2_RESULT" "$MACOS_CMD_STEWARD_3_RESULT" "$MACOS_REST_1_RESULT" "$MACOS_REST_2_RESULT"; do
+        for result in "$MACOS_PROVIDERS_RESULT" "$MACOS_STEWARD_RESULT" "$MACOS_CMD_STEWARD_1_RESULT" "$MACOS_CMD_STEWARD_2_RESULT" "$MACOS_CMD_STEWARD_3_RESULT" "$MACOS_CMD_STEWARD_4_RESULT" "$MACOS_REST_1_RESULT" "$MACOS_REST_2_RESULT"; do
           bash scripts/macos-gate-rule.sh "$CHANGES_RESULT" "$MACOS_CHANGES" "$result" || fail=1
         done
 
