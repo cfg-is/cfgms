@@ -127,6 +127,25 @@ func TestHandleGetCommandRecord_ShowsTheReissueDetail(t *testing.T) {
 	assert.Equal(t, "signing_form_refused_reissue", raw["delivery_detail"])
 }
 
+// TestHandleGetCommandRecord_ShowsTheUnsupportedTypeDetail: a pending row whose
+// command type the steward does not support ends rejected with its own detail,
+// and the response shows it under delivery_detail.
+func TestHandleGetCommandRecord_ShowsTheUnsupportedTypeDetail(t *testing.T) {
+	server, store := setupCommandTestServer(t)
+	rec := createCommandRecord(t, store, "cmd-unsupported", "steward-a", "tenant-a")
+	require.NoError(t, store.UpdateDeliveryStatus(context.Background(), rec.ID, business.DeliveryStatusRejected,
+		business.DeliveryDetailCommandTypeUnsupportedByPeer))
+
+	w := httptest.NewRecorder()
+	server.handleGetCommandRecord(w, withScopedPrincipal(newGetCommandRequest(t, rec.ID), "tenant-a"))
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &raw))
+	assert.Equal(t, string(business.DeliveryStatusRejected), raw["delivery_status"])
+	assert.Equal(t, "command_type_unsupported_by_peer", raw["delivery_detail"])
+}
+
 // TestHandleGetCommandRecord_CrossTenantReturn404 is the required cross-tenant
 // isolation test for delivery-record reads by command ID (Issue #3757 AC: "a
 // caller from tenant A cannot read a delivery record belonging to tenant B").

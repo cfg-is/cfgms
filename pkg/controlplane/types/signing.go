@@ -76,3 +76,26 @@ func SignCommandVersion(cmd *Command, signer signature.Signer, version uint32) (
 	sc.Signature = sig
 	return sc, nil
 }
+
+// CommandSupportSource reports whether a steward's current connection handles a
+// command type. Like SigningVersionSource, the answer comes from controller-held
+// state only, never from the command or anything a steward sent in it.
+type CommandSupportSource interface {
+	// SupportsCommandType returns false only when the controller knows the
+	// steward's profile and the profile does not list cmdType. A type the
+	// controller does not know, and a steward with no state, are supported: the
+	// command is not gated. It may wait, bounded, for a connection that has not
+	// declared its capabilities yet; ctx ends that wait.
+	SupportsCommandType(ctx context.Context, stewardID string, cmdType CommandType) bool
+}
+
+// PeerSupportsCommandType asks source, when it also answers command support,
+// whether the steward handles cmdType. A source that does not (including nil)
+// gates nothing.
+func PeerSupportsCommandType(ctx context.Context, source SigningVersionSource, stewardID string, cmdType CommandType) bool {
+	support, ok := source.(CommandSupportSource)
+	if !ok {
+		return true
+	}
+	return support.SupportsCommandType(ctx, stewardID, cmdType)
+}

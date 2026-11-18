@@ -977,6 +977,18 @@ func TestIsKnownCommandTypeNumber(t *testing.T) {
 	}
 }
 
+// The controller gates sends on a steward's declared wire numbers using the table
+// in the types package; it must agree with the table that puts a command on the
+// wire.
+func TestCommandTypeNumbersMatchTheWireEnum(t *testing.T) {
+	for cmdType, pb := range commandTypeToProto {
+		n, ok := types.CommandTypeNumber(cmdType)
+		require.True(t, ok, "types.CommandTypeNumber does not know %q", cmdType)
+		assert.Equal(t, int32(pb), n, "wire number of %q", cmdType)
+	}
+	assert.Len(t, types.KnownCommandTypes(), len(commandTypeToProto), "the two tables list the same types")
+}
+
 func TestControlMessageWithoutCapabilitiesDecodesAsAbsent(t *testing.T) {
 	// A message carrying no capabilities field (what every older steward
 	// sends) decodes with the member absent, and the reserved Heartbeat field and

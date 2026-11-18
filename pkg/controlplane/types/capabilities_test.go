@@ -4,6 +4,7 @@
 package types
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -81,4 +82,62 @@ func TestNormalizeCapabilityLists(t *testing.T) {
 		assert.NotNil(t, vers)
 		assert.Empty(t, vers)
 	})
+}
+
+func TestCommandTypeNumber(t *testing.T) {
+	n, ok := CommandTypeNumber(CommandSyncConfig)
+	assert.True(t, ok)
+	assert.Equal(t, int32(1), n)
+
+	n, ok = CommandTypeNumber(CommandStewardAction)
+	assert.True(t, ok)
+	assert.Equal(t, int32(14), n)
+
+	n, ok = CommandTypeNumber(CommandAdvertiseTransportAddress)
+	assert.True(t, ok)
+	assert.Equal(t, int32(15), n)
+
+	for _, unknown := range []CommandType{"", "from_the_future"} {
+		n, ok = CommandTypeNumber(unknown)
+		assert.False(t, ok)
+		assert.Zero(t, n)
+	}
+}
+
+// Every type above the floor is a type a floor steward does not handle; every
+// type at or below it is one it does. The gate depends on this split.
+func TestKnownCommandTypesSplitAtTheFloor(t *testing.T) {
+	floor := FloorProfile()
+	var above []CommandType
+	for _, cmdType := range KnownCommandTypes() {
+		n, ok := CommandTypeNumber(cmdType)
+		require.True(t, ok)
+		if floor.SupportsCommandType(n) {
+			assert.LessOrEqual(t, n, int32(floorCommandTypeMax))
+		} else {
+			above = append(above, cmdType)
+		}
+	}
+	assert.Equal(t, []CommandType{CommandStewardAction, CommandAdvertiseTransportAddress}, above)
+}
+
+type commandSupportSource struct{ allow bool }
+
+func (commandSupportSource) SigningVersionFor(context.Context, string) uint32 {
+	return SigningPayloadV2
+}
+func (s commandSupportSource) SupportsCommandType(context.Context, string, CommandType) bool {
+	return s.allow
+}
+
+type signingOnlySource struct{}
+
+func (signingOnlySource) SigningVersionFor(context.Context, string) uint32 { return SigningPayloadV2 }
+
+func TestPeerSupportsCommandType(t *testing.T) {
+	ctx := context.Background()
+	assert.True(t, PeerSupportsCommandType(ctx, nil, "s", CommandStewardAction), "nil source gates nothing")
+	assert.True(t, PeerSupportsCommandType(ctx, signingOnlySource{}, "s", CommandStewardAction), "a source that only signs gates nothing")
+	assert.True(t, PeerSupportsCommandType(ctx, commandSupportSource{allow: true}, "s", CommandStewardAction))
+	assert.False(t, PeerSupportsCommandType(ctx, commandSupportSource{allow: false}, "s", CommandStewardAction))
 }

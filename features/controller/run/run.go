@@ -85,10 +85,13 @@ const (
 	ResultCodeOK             = "ok"
 	ResultCodeSelfProtect    = "self_protect"
 	ResultCodeProcessChanged = "process_changed"
-	ResultCodeUnsupported    = "unsupported"
-	ResultCodeFailed         = "failed"
-	ResultCodeExpired        = "expired"
-	ResultCodeNoResult       = "no_result"
+	// ResultCodeUnsupported is reported by a steward that does not handle the verb,
+	// and recorded by the controller (RecordJobUnsupported) when the target's
+	// connection does not handle steward actions at all and nothing was sent.
+	ResultCodeUnsupported = "unsupported"
+	ResultCodeFailed      = "failed"
+	ResultCodeExpired     = "expired"
+	ResultCodeNoResult    = "no_result"
 	// ResultCodeRefused is recorded by the controller when the lockdown gate
 	// refused the command: nothing ran, and it is not a steward failure.
 	ResultCodeRefused = "refused"
@@ -220,12 +223,9 @@ func NewRunStoreSQL(db *sql.DB) *RunStoreSQL {
 // NewRunStoreSQLFromDSN opens a SQLite database at dsn and returns a RunStoreSQL
 // backed by it. The caller must call Init before any other method, and Close when
 // done to release the underlying connection. Use this constructor instead of
-// calling sql.Open directly in callers outside pkg/storage.
+// opening the database directly in callers outside pkg/storage.
 func NewRunStoreSQLFromDSN(dsn string) (*RunStoreSQL, error) {
-	if err := sqlitefile.Prepare(dsn); err != nil {
-		return nil, fmt.Errorf("run store: open sqlite %s: %w", dsn, err)
-	}
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sqlitefile.Open(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("run store: open sqlite %s: %w", dsn, err)
 	}
@@ -1077,6 +1077,22 @@ func (m *Manager) RecordJobRefused(ctx context.Context, runID, jobID, executionI
 	return m.RecordJobResult(ctx, runID, jobID, executionID, true, "", ResultCodeDetail(ResultCodeRefused), 1)
 }
 
+// RecordJobUnsupported ends a job whose command type the target steward's
+// connection does not handle. The job records result code "unsupported" with the
+// controller-assigned detail text and the run advances as for a failed job; the
+// command was never sent, so no steward ran or rejected anything. It is separate
+// from RecordActionResult, whose "unsupported" is what a steward reported.
+func (m *Manager) RecordJobUnsupported(ctx context.Context, runID, jobID, executionID string) error {
+	changed, err := m.store.UpdateJobResultCode(jobID, ResultCodeUnsupported)
+	if err != nil {
+		return fmt.Errorf("record unsupported job: update job %s: %w", jobID, err)
+	}
+	if !changed {
+		return m.alreadyTerminal(runID, jobID)
+	}
+	return m.RecordJobResult(ctx, runID, jobID, executionID, true, "", ResultCodeDetail(ResultCodeUnsupported), 1)
+}
+
 // NormalizeResultCode maps a steward-reported result code to the recorded set.
 // The codes a steward reports are kept; anything else (including empty) is failed.
 func NormalizeResultCode(code string) string {
@@ -1085,6 +1101,9 @@ func NormalizeResultCode(code string) string {
 
 // ResultCodeDetail is the operator-facing text for a result code the controller
 // itself assigns when no steward result arrives; empty for every other code.
+// The "unsupported" text is shown for either source of that code: a steward that
+// reports it does not handle the verb, and the controller assigns it when it
+// refused to send an action to a steward that predates the command.
 func ResultCodeDetail(code string) string {
 	switch code {
 	case ResultCodeExpired:
@@ -1093,6 +1112,8 @@ func ResultCodeDetail(code string) string {
 		return "sent, no result reported"
 	case ResultCodeRefused:
 		return "refused: locked down"
+	case ResultCodeUnsupported:
+		return "steward too old: it does not support this action"
 	}
 	return ""
 }

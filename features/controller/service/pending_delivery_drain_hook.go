@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/cfgis/cfgms/features/controller/commands"
@@ -143,6 +144,12 @@ func (h *PendingDeliveryDrainHook) redeliver(ctx context.Context, publisher *com
 			// Never sent, so there is no floor-form command to recover from.
 			h.floorSent.Untrack(stewardID, rec.ID)
 		}
+		if errors.Is(pubErr, commands.ErrCommandTypeUnsupportedByPeer) {
+			// The connection will never handle this type, so leaving the row
+			// pending would only retry it on every reconnect. End it terminally.
+			h.rejectUnsupported(ctx, stewardID, rec)
+			return
+		}
 		if h.logger != nil {
 			h.logger.Warn("pending-delivery drain: redelivery attempt failed, leaving pending",
 				"steward_id", logging.SanitizeLogValue(stewardID),
@@ -161,6 +168,26 @@ func (h *PendingDeliveryDrainHook) redeliver(ctx context.Context, publisher *com
 				"error", logging.SanitizeLogValue(updErr.Error()))
 		}
 	})
+}
+
+// rejectUnsupported ends a pending row whose command type the steward's
+// connection does not handle: it is rejected with the controller-assigned detail,
+// which is terminal, and the command was never sent.
+func (h *PendingDeliveryDrainHook) rejectUnsupported(ctx context.Context, stewardID string, rec *business.CommandRecord) {
+	if h.logger != nil {
+		h.logger.Info("pending-delivery drain: command not sent, steward does not support its type",
+			"event", EventCommandNotSentPeerUnsupported,
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"command_id", logging.SanitizeLogValue(rec.ID),
+			"command_type", logging.SanitizeLogValue(rec.Type))
+	}
+	err := h.commandStore.UpdateDeliveryStatus(ctx, rec.ID, business.DeliveryStatusRejected, business.DeliveryDetailCommandTypeUnsupportedByPeer)
+	if err != nil && h.logger != nil {
+		h.logger.Warn("pending-delivery drain: failed to record unsupported command type",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"command_id", logging.SanitizeLogValue(rec.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
 }
 
 // trackIfFloor records row id in the floor-sent tracker when the publisher is

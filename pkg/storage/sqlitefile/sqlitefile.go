@@ -6,10 +6,23 @@
 package sqlitefile
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
+
+	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
+
+// Open pre-creates the database file owner-only (see Prepare) and opens it with
+// the "sqlite" driver. Controller-side open sites call it instead of sql.Open so
+// the owner-only step cannot be skipped.
+func Open(dsnOrPath string) (*sql.DB, error) {
+	if err := Prepare(dsnOrPath); err != nil {
+		return nil, err
+	}
+	return sql.Open("sqlite", dsnOrPath)
+}
 
 // Prepare pre-creates the database file owner-only (0600) so that SQLite, which
 // gives the -wal and -shm side files the main file's mode, never creates any of

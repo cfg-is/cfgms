@@ -373,3 +373,41 @@ func TestJobSelectColsQualifiedMatchesJobSelectCols(t *testing.T) {
 		assert.Equal(t, "j."+plain[i], qualified[i])
 	}
 }
+
+// RecordJobUnsupported ends a job the controller refused to send: result code
+// "unsupported" and the controller's text, as a failed job; the code a steward
+// reports for the same word still goes through RecordActionResult unchanged.
+func TestManager_RecordJobUnsupported(t *testing.T) {
+	manager, queue, _ := actionTestManager(t)
+	proof := &CommandSignature{Algorithm: "a", Value: "v", PublicKey: "k"}
+	runID, err := SynthesizeActionRunForDevices(context.Background(), manager, queue,
+		[]fleet.StewardResult{{ID: "dev-a"}}, "t", "admin", fleet.Filter{},
+		scriptmodule.StewardActionSpec{Verb: "service.stop", TargetKind: "service", TargetName: "x"},
+		proof, []string{"dev-a"}, "n", time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	jobs, err := manager.ListRunJobs(context.Background(), runID)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+
+	require.NoError(t, manager.RecordJobUnsupported(context.Background(), runID, jobs[0].JobID, jobs[0].ExecutionID))
+
+	jobs, err = manager.ListRunJobs(context.Background(), runID)
+	require.NoError(t, err)
+	assert.Equal(t, JobStatusFailed, jobs[0].Status)
+	assert.Equal(t, ResultCodeUnsupported, jobs[0].ResultCode)
+	assert.Equal(t, "steward too old: it does not support this action", jobs[0].Stderr)
+	assert.Equal(t, 1, jobs[0].ExitCode)
+
+	err = manager.RecordJobUnsupported(context.Background(), runID, jobs[0].JobID, jobs[0].ExecutionID)
+	var terminal *scriptmodule.JobAlreadyTerminalError
+	require.ErrorAs(t, err, &terminal, "a closed job is not recorded again")
+
+	err = manager.RecordJobUnsupported(context.Background(), runID, "no-such-job", "exec")
+	assert.Error(t, err, "an unknown job is an error")
+}
+
+func TestResultCodeDetail_Unsupported(t *testing.T) {
+	assert.Equal(t, "steward too old: it does not support this action", ResultCodeDetail(ResultCodeUnsupported))
+	assert.Equal(t, "refused: locked down", ResultCodeDetail(ResultCodeRefused))
+	assert.Empty(t, ResultCodeDetail(ResultCodeFailed))
+}

@@ -14,6 +14,11 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// EventCommandNotSentPeerUnsupported is the log event of a controller-originated
+// command the controller did not send because the steward's connection does not
+// support its type.
+const EventCommandNotSentPeerUnsupported = "command_not_sent_peer_unsupported"
+
 // TransportAddressHook advertises the controller's configured transport address
 // to a steward on every authenticated connect (Issue #6254), so a steward that
 // registered earlier learns the cluster's current transport.external_address.
@@ -21,7 +26,9 @@ import (
 // The address comes from TransportConfig.ResolveAdvertisedAddress, the same
 // helper registration and re-admission use, so both always return one value.
 // The command is controller-originated and LockdownDenied: a locked-down
-// steward refuses it, which this hook treats as expected, not as a failure.
+// steward refuses it, which this hook treats as expected, not as a failure. A
+// steward whose connection does not support the command (a floor-profile
+// steward) is skipped quietly: the controller never sends it.
 type TransportAddressHook struct {
 	transport *controllerconfig.TransportConfig
 	logger    logging.Logger
@@ -61,8 +68,8 @@ func (h *TransportAddressHook) currentPublisher() *commands.Publisher {
 // mTLS-authenticated CN of the connecting steward. With no publisher or no
 // transport config it does nothing. When the address cannot be resolved (a
 // wildcard bind with no external address) it logs a warning and sends nothing.
-// A locked-down steward's refusal is not an error; any other publish error is
-// returned for the composite to log.
+// A locked-down steward's refusal and a steward that does not support the
+// command are not errors; any other publish error is returned for the composite to log.
 func (h *TransportAddressHook) OnConnect(ctx context.Context, stewardID string) error {
 	if h == nil || h.transport == nil {
 		return nil
@@ -85,6 +92,18 @@ func (h *TransportAddressHook) OnConnect(ctx context.Context, stewardID string) 
 	params := map[string]interface{}{controlplaneTypes.ParamTransportAddress: addr}
 	if _, err := publisher.PublishCommand(ctx, stewardID, controlplaneTypes.CommandAdvertiseTransportAddress, params); err != nil {
 		if errors.Is(err, controlplaneInterfaces.ErrStewardLockedDown) {
+			return nil
+		}
+		if errors.Is(err, commands.ErrCommandTypeUnsupportedByPeer) {
+			// A steward that predates the command has nothing to learn from it.
+			// Skipping is the expected outcome, not an error, and there is no retry:
+			// a later connect that declares the type sends it.
+			if h.logger != nil {
+				h.logger.Info("transport address advertisement not sent: steward does not support it",
+					"event", EventCommandNotSentPeerUnsupported,
+					"steward_id", logging.SanitizeLogValue(stewardID),
+					"command_type", string(controlplaneTypes.CommandAdvertiseTransportAddress))
+			}
 			return nil
 		}
 		return err

@@ -121,6 +121,10 @@ type Resolution struct {
 	// overturn. It is false for a connection that declared, whatever the set,
 	// and for a decision read from the durable record.
 	Undeclared bool
+	// CommandTypes are the command type numbers the steward's connection handles:
+	// its declared set, or the floor set for a connection that declared nothing.
+	// Nil when the controller holds no state for the steward, which gates nothing.
+	CommandTypes []int32
 }
 
 // SigningVersionFor returns SigningPayloadV1 when the steward's connection
@@ -142,7 +146,28 @@ func (r *CapabilityResolver) Resolve(ctx context.Context, stewardID string) Reso
 			return r.fromConnection(ctx, conn)
 		}
 	}
-	return Resolution{Version: r.fromRecord(ctx, stewardID)}
+	return r.fromRecord(ctx, stewardID)
+}
+
+// SupportsCommandType reports whether the steward's current connection handles
+// cmdType, resolved exactly as the signing version is (so a connection that has
+// not declared is waited on, bounded, then taken at the floor profile for this
+// call). It is false only for a known profile that lacks the type: a type the
+// controller does not know, a steward with no state and a nil resolver are all
+// supported, so nothing is gated on a guess.
+func (r *CapabilityResolver) SupportsCommandType(ctx context.Context, stewardID string, cmdType controlplaneTypes.CommandType) bool {
+	if r == nil {
+		return true
+	}
+	n, known := controlplaneTypes.CommandTypeNumber(cmdType)
+	if !known {
+		return true
+	}
+	res := r.Resolve(ctx, stewardID)
+	if len(res.CommandTypes) == 0 {
+		return true
+	}
+	return controlplaneTypes.CapabilityProfile{CommandTypes: res.CommandTypes}.SupportsCommandType(n)
 }
 
 // ConnectionID returns the ID of the connection this node holds for the steward,
@@ -186,36 +211,47 @@ func (r *CapabilityResolver) fromConnection(ctx context.Context, conn *registry.
 	res := Resolution{ConnectionID: conn.ConnectionID, Undeclared: snap.State != registry.CapabilityDeclared}
 	if snap.State == registry.CapabilityDeclared {
 		res.Version = versionFor(snap.SigningPayloadVersions)
+		res.CommandTypes = snap.CommandTypes
 		return res
 	}
 	res.Version = controlplaneTypes.SigningPayloadV1 // floor, or still pending past the bound
+	res.CommandTypes = controlplaneTypes.FloorProfile().CommandTypes
 	return res
 }
 
 // fromRecord resolves from the durable record, for a steward whose connection
-// another node holds (or that is not connected). No record is current.
-func (r *CapabilityResolver) fromRecord(ctx context.Context, stewardID string) uint32 {
+// another node holds (or that is not connected). No record is current, and
+// carries no command types, so nothing is gated for it.
+func (r *CapabilityResolver) fromRecord(ctx context.Context, stewardID string) Resolution {
 	if r.store == nil {
-		return controlplaneTypes.SigningPayloadV2
+		return Resolution{Version: controlplaneTypes.SigningPayloadV2}
+	}
+	floor := Resolution{
+		Version:      controlplaneTypes.SigningPayloadV1,
+		CommandTypes: controlplaneTypes.FloorProfile().CommandTypes,
 	}
 	firstRead := r.now()
 	for {
 		caps := r.readCapabilities(ctx, stewardID)
 		if caps == nil {
-			return controlplaneTypes.SigningPayloadV2
+			return Resolution{Version: controlplaneTypes.SigningPayloadV2}
 		}
-		if version, settled := recordVersion(caps); settled {
-			return version
-		}
-		// Pending: the record is the new connection's own, since a reset replaces
-		// the previous one, so no earlier sets are carried over. Poll it until
-		// the connection starts plus the resolve wait.
-		started := caps.ConnectedAt
-		if started.IsZero() {
-			started = firstRead
-		}
-		if !r.pause(ctx, r.remaining(started)) {
-			return controlplaneTypes.SigningPayloadV1
+		switch caps.State {
+		case business.StewardCapabilityDeclared:
+			return Resolution{Version: versionFor(caps.SigningPayloadVersions), CommandTypes: caps.CommandTypes}
+		case business.StewardCapabilityPending:
+			// Pending: the record is the new connection's own, since a reset
+			// replaces the previous one, so no earlier sets are carried over. Poll
+			// it until the connection starts plus the resolve wait.
+			started := caps.ConnectedAt
+			if started.IsZero() {
+				started = firstRead
+			}
+			if !r.pause(ctx, r.remaining(started)) {
+				return floor
+			}
+		default: // floor
+			return floor
 		}
 	}
 }
@@ -236,19 +272,6 @@ func (r *CapabilityResolver) readCapabilities(ctx context.Context, stewardID str
 		return nil
 	}
 	return rec.Capabilities
-}
-
-// recordVersion maps a stored record to a version. settled is false for a pending
-// record, which has no profile yet.
-func recordVersion(caps *business.StewardCapabilityRecord) (version uint32, settled bool) {
-	switch caps.State {
-	case business.StewardCapabilityDeclared:
-		return versionFor(caps.SigningPayloadVersions), true
-	case business.StewardCapabilityPending:
-		return 0, false
-	default: // floor
-		return controlplaneTypes.SigningPayloadV1, true
-	}
 }
 
 // pause sleeps one poll interval, never past remaining. It returns false when
