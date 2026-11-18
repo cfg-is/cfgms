@@ -112,8 +112,8 @@ func (s *fleetScenarioSuite) testRefreshAutoAccept(t *testing.T) {
 		t.Fatalf("AutoAccept: steward ID not found after restart: %v", err)
 	}
 	if newID != stewardID {
-		t.Errorf("AutoAccept: steward re-registered with new ID %s → %s; expected refresh reuse (no re-registration)",
-			stewardID, newID)
+		t.Errorf("AutoAccept: steward re-registered with new ID %s → %s; expected refresh reuse (no re-registration)\n%s",
+			stewardID, newID, s.ReconnectDiagnostics(container, stewardID, newID))
 	}
 	s.StewardIDs[container] = newID
 
@@ -125,7 +125,8 @@ func (s *fleetScenarioSuite) testRefreshAutoAccept(t *testing.T) {
 
 	// AC: steward converges after refresh.
 	if !s.WaitForConvergence(t, newID, 60*time.Second) {
-		t.Errorf("AutoAccept: steward %s did not converge after refresh", newID)
+		t.Errorf("AutoAccept: steward %s did not converge after refresh (expected ID %s)\n%s",
+			newID, stewardID, s.ReconnectDiagnostics(container, stewardID, newID))
 	}
 
 	// AC: audit log records exactly one refresh_cert_issued entry for this device.
@@ -334,7 +335,7 @@ func (s *fleetScenarioSuite) testRefreshArchived(t *testing.T) {
 	if !s.WaitForNewStewardLogEntry(t, container, approvedBefore, 90*time.Second, readmissionApproved) {
 		log, _ := s.ReadStewardLog(t, container)
 		t.Fatalf("Archived: steward did not log refresh approval within 90s after admin approve\nlog tail:\n%s\n%s",
-			fleetkit.LastLines(log, 40), s.ControllerStallDiagnostics(stewardID))
+			fleetkit.LastLines(log, 40), s.ReconnectDiagnostics(container, stewardID))
 	}
 	t.Log("Archived: steward received approved cert bundle and reconnected")
 
@@ -344,13 +345,14 @@ func (s *fleetScenarioSuite) testRefreshArchived(t *testing.T) {
 		t.Fatalf("Archived: steward ID not found after reconnect: %v", err)
 	}
 	if newID != stewardID {
-		t.Errorf("Archived: steward re-registered with new ID %s → %s; expected refresh reuse",
-			stewardID, newID)
+		t.Errorf("Archived: steward re-registered with new ID %s → %s; expected refresh reuse\n%s",
+			stewardID, newID, s.ReconnectDiagnostics(container, stewardID, newID))
 	}
 	s.StewardIDs[container] = newID
 
 	if !s.WaitForConvergence(t, newID, 60*time.Second) {
-		t.Errorf("Archived: steward %s did not converge after refresh approval", newID)
+		t.Errorf("Archived: steward %s did not converge after refresh approval (expected ID %s)\n%s",
+			newID, stewardID, s.ReconnectDiagnostics(container, stewardID, newID))
 	}
 
 	// AC: audit log records at least one refresh_admin_approved entry.

@@ -231,35 +231,49 @@ func (s *FleetTestSuite) DockerExec(t *testing.T, container string, args ...stri
 	return string(out), nil
 }
 
-// GetStewardIDFromLogs extracts the steward ID from /tmp/cfgms log files in the container.
-// Uses the same grep pattern as test/integration/transport/module_helpers.go.
+// stewardIDPollAttempts × stewardIDPollInterval = ~90s window. The first
+// registration attempt after distributeControllerCAToStewards may still be
+// in-flight (5s retry loop in the steward command), so we need headroom beyond a
+// single retry cycle. Without this margin the steward ID may not appear before the
+// poll exits — see prior fleet-e2e timing failure on Issue #1709.
+const (
+	stewardIDPollAttempts = 90
+	stewardIDPollInterval = 1 * time.Second
+)
+
+// GetStewardIDFromLogs returns the steward ID from the newest /tmp/cfgms log file
+// in the container. It keeps polling while the log carries only redacted
+// steward_id values (ParseStewardIDFromLogText), so it never returns "steward-…"
+// (Issue #6346). Every caller shares this behaviour.
 func (s *FleetTestSuite) GetStewardIDFromLogs(t *testing.T, container string) (string, error) {
 	t.Helper()
 	if err := ValidateFleetContainer(container); err != nil {
 		return "", err
 	}
+	return pollStewardID(t, container, stewardIDPollAttempts, stewardIDPollInterval, func() (string, error) {
+		return s.ReadStewardLog(t, container)
+	})
+}
 
-	// 90 attempts × ~1s each = ~90s window. The first registration attempt
-	// after distributeControllerCAToStewards may still be in-flight (5s retry
-	// loop in the steward command), so we need headroom beyond a single retry
-	// cycle. Without this margin the steward ID may not appear before the
-	// poll exits — see prior fleet-e2e timing failure on Issue #1709.
-	for attempt := 1; attempt <= 90; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		// #nosec G204 -- docker/tar are fixed binaries; arguments are test-controlled fleet container names and paths, never external input
-		cmd := exec.CommandContext(ctx, "docker", "exec", container, "sh", "-c",
-			`ls -t /tmp/cfgms/cfgms-*.log 2>/dev/null | head -1 | xargs cat 2>/dev/null | grep -o '"steward_id":"[^"]*"' | tail -1 | cut -d'"' -f4`)
-		out, err := cmd.CombinedOutput()
-		cancel()
-		if id := strings.TrimSpace(string(out)); err == nil && id != "" {
-			return id, nil
+// pollStewardID reads the steward log with read up to attempts times, interval
+// apart, and returns the first complete steward ID it finds. A read that fails, or
+// whose log holds no complete ID yet (empty, or only redacted values), is retried.
+func pollStewardID(t *testing.T, container string, attempts int, interval time.Duration, read func() (string, error)) (string, error) {
+	t.Helper()
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if logText, err := read(); err == nil {
+			if id, ok := ParseStewardIDFromLogText(logText); ok {
+				return id, nil
+			}
 		}
 		if attempt%10 == 0 {
-			t.Logf("Waiting for steward ID in %s logs (attempt %d/90)...", container, attempt)
+			t.Logf("Waiting for a complete steward ID in %s logs (attempt %d/%d)...", container, attempt, attempts)
 		}
-		time.Sleep(1 * time.Second)
+		if attempt < attempts {
+			time.Sleep(interval)
+		}
 	}
-	return "", fmt.Errorf("steward ID not found in %s logs after 90 attempts", container)
+	return "", fmt.Errorf("complete steward ID not found in %s logs after %d attempts", container, attempts)
 }
 
 // WaitForContainerHealthy polls docker ps until the container reports healthy or timeout expires.
@@ -766,7 +780,7 @@ func (s *FleetTestSuite) ApproveRefreshViaCLI(t *testing.T, pendingID string) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("approveRefreshViaCLI: cfg steward refresh approve %s failed: %v: %s\n%s",
-			pendingID, err, strings.TrimSpace(string(out)), s.ControllerStallDiagnostics(""))
+			pendingID, err, strings.TrimSpace(string(out)), s.ControllerStallDiagnostics())
 	}
 	t.Logf("Approved pending refresh %s via cfg steward refresh approve: %s",
 		pendingID, strings.TrimSpace(string(out)))
@@ -887,39 +901,206 @@ func filterLogLines(log string, max int, needles ...string) string {
 	return strings.Join(kept, "\n")
 }
 
-// ControllerStallDiagnostics captures what the controller reports about
-// stewardID's control session when a wait on the controller fails: the steward
-// record, its session-table entry (connected_at, remote_addr, last_activity), the
-// whole session table, and the controller's log lines about sessions, timeouts and
-// refusals. stewardID may be empty for a failure that names no steward.
-//
-// It cannot dump the controller's goroutines: the controller exposes no debug
-// endpoint, and signalling it would kill the process every later test depends on.
-func (s *FleetTestSuite) ControllerStallDiagnostics(stewardID string) string {
-	get := func(path string) func(context.Context) (string, error) {
-		return func(ctx context.Context) (string, error) {
+// stewardCertStoreDir and stewardIdentityFile are the steward's cert store and
+// stored identity inside the fleet containers (cmd/steward/identity.go).
+const (
+	stewardCertStoreDir  = "/var/lib/cfgms/steward/certs"
+	stewardIdentityFile  = stewardCertStoreDir + "/steward-identity.json"
+	stewardClientCertsSh = `for f in ` + stewardCertStoreDir + `/*/cert.pem; do [ -f "$f" ] && { echo "== $f"; cat "$f"; }; done; true`
+	stewardNewestLogSh   = `ls -t /tmp/cfgms/cfgms-*.log 2>/dev/null | head -1 | xargs cat 2>/dev/null`
+)
+
+// reconnectPathLogKeywords select the steward log lines that explain which way a
+// restarted steward got back in — the stored identity, the re-admission handshake
+// or a fresh registration — and why it left the stored identity
+// (cmd/steward/main.go registerAndConnect / tryReconnectWithStoredIdentity).
+var reconnectPathLogKeywords = []string{
+	"Starting steward connect sequence", "tored identity", "tored-identity",
+	"e-admission", "efresh", "egistering", "egistered", "egistration",
+	"Controller refused", "Controller has no record", "device key", "device identity",
+	"Connected to controller", "Reconnected to controller",
+	"clone", "falling back", "expired", "no valid client certificate",
+}
+
+// diagnosticsSources are the evidence channels the diagnostics sections read. They
+// are fields so a test can drive every section without Docker or a controller.
+type diagnosticsSources struct {
+	// httpGet fetches path from the controller API.
+	httpGet func(ctx context.Context, path string) (string, error)
+	// controllerLog returns the tail of the controller's log.
+	controllerLog func(ctx context.Context) (string, error)
+	// containerExec runs a fixed command in a fleet container.
+	containerExec func(ctx context.Context, container string, args ...string) (string, error)
+}
+
+// diagnosticsSources returns the live channels of the suite's fleet.
+func (s *FleetTestSuite) diagnosticsSources() diagnosticsSources {
+	return diagnosticsSources{
+		httpGet: func(ctx context.Context, path string) (string, error) {
 			return fetchDiagnosticsBody(ctx, s.HTTPClient, s.ControllerURL+path)
+		},
+		controllerLog: func(ctx context.Context) (string, error) {
+			if err := ValidateFleetContainer("fleet-controller"); err != nil {
+				return "", err
+			}
+			// #nosec G204 -- docker is a fixed binary; the container name is validated against the fleet allowlist above
+			out, err := exec.CommandContext(ctx, "docker", "logs", "--tail", "2000", "fleet-controller").CombinedOutput()
+			return string(out), err
+		},
+		containerExec: func(ctx context.Context, container string, args ...string) (string, error) {
+			if err := ValidateFleetContainer(container); err != nil {
+				return "", err
+			}
+			// #nosec G204 -- docker is a fixed binary; the container is allowlisted and args are fixed commands, never external input
+			out, err := exec.CommandContext(ctx, "docker", append([]string{"exec", container}, args...)...).CombinedOutput()
+			if err != nil {
+				return string(out), fmt.Errorf("docker exec %s: %w (output: %s)", container, err, strings.TrimSpace(string(out)))
+			}
+			return string(out), nil
+		},
+	}
+}
+
+// distinctStewardIDs returns ids without empty entries and duplicates, in order.
+func distinctStewardIDs(ids []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
 		}
 	}
+	return out
+}
+
+// controllerDiagnosticsSections are the controller's view of each of stewardIDs
+// (record and session-table entry), the whole session table, and the controller's
+// log lines naming any of the IDs or a session stall.
+func controllerDiagnosticsSections(src diagnosticsSources, stewardIDs []string) []diagnosticsSection {
+	get := func(path string) func(context.Context) (string, error) {
+		return func(ctx context.Context) (string, error) { return src.httpGet(ctx, path) }
+	}
+	ids := distinctStewardIDs(stewardIDs)
 	var sections []diagnosticsSection
-	if stewardID != "" {
+	for _, id := range ids {
 		sections = append(sections,
-			diagnosticsSection{"controller steward record " + stewardID, get("/api/v1/stewards/" + url.PathEscape(stewardID))},
-			diagnosticsSection{"controller session " + stewardID, get("/api/v1/stewards/" + url.PathEscape(stewardID) + "/connection")},
+			diagnosticsSection{"controller steward record " + id, get("/api/v1/stewards/" + url.PathEscape(id))},
+			diagnosticsSection{"controller session " + id, get("/api/v1/stewards/" + url.PathEscape(id) + "/connection")},
 		)
 	}
 	sections = append(sections,
 		diagnosticsSection{"controller session table", get("/api/v1/stewards/connections/all")},
 		diagnosticsSection{"controller log (sessions, timeouts, refusals)", func(ctx context.Context) (string, error) {
-			if err := ValidateFleetContainer("fleet-controller"); err != nil {
-				return "", err
-			}
-			out, err := exec.CommandContext(ctx, "docker", "logs", "--tail", "2000", "fleet-controller").CombinedOutput()
-			needles := append([]string{stewardID}, diagnosticsLogKeywords...)
-			return filterLogLines(string(out), 80, needles...), err
+			out, err := src.controllerLog(ctx)
+			return filterLogLines(out, 80, append(append([]string{}, ids...), diagnosticsLogKeywords...)...), err
 		}},
 	)
-	return gatherDiagnostics(diagnosticsSectionTimeout, sections)
+	return sections
+}
+
+// stewardDiagnosticsSections are the steward's own state in container: its stored
+// identity and client certificates (values only, never key material), the steward
+// log lines that explain its reconnect path, and the last steward_id fields it
+// logged — the values a log-based ID lookup would have seen.
+func stewardDiagnosticsSections(src diagnosticsSources, container string) []diagnosticsSection {
+	return []diagnosticsSection{
+		{"steward stored identity " + container, func(ctx context.Context) (string, error) {
+			raw, err := src.containerExec(ctx, container, "cat", stewardIdentityFile)
+			if err != nil {
+				return "no stored identity readable at " + stewardIdentityFile, err
+			}
+			return formatStoredIdentity(raw)
+		}},
+		{"steward client certificates " + container, func(ctx context.Context) (string, error) {
+			raw, err := src.containerExec(ctx, container, "sh", "-c", stewardClientCertsSh)
+			if err != nil {
+				return "", err
+			}
+			return formatStoredCerts(raw, time.Now()), nil
+		}},
+		{"steward log: reconnect path " + container, func(ctx context.Context) (string, error) {
+			raw, err := src.containerExec(ctx, container, "sh", "-c", stewardNewestLogSh)
+			return filterLogLines(raw, 60, reconnectPathLogKeywords...), err
+		}},
+		{"steward log: last steward_id fields " + container, func(ctx context.Context) (string, error) {
+			raw, err := src.containerExec(ctx, container, "sh", "-c", stewardNewestLogSh)
+			return filterLogLines(raw, 10, `"steward_id"`), err
+		}},
+	}
+}
+
+// formatStoredIdentity renders the stored-identity fields that show whether a
+// restarted steward is the same steward: steward_id, device_id and
+// overlap_expires_at. Nothing else of the file is printed.
+func formatStoredIdentity(raw string) (string, error) {
+	var id struct {
+		StewardID        string `json:"steward_id"`
+		DeviceID         string `json:"device_id"`
+		OverlapExpiresAt string `json:"overlap_expires_at"`
+	}
+	if err := json.Unmarshal([]byte(raw), &id); err != nil {
+		return "", fmt.Errorf("stored identity is not valid JSON: %w", err)
+	}
+	overlap := id.OverlapExpiresAt
+	if overlap == "" {
+		overlap = "(none)"
+	}
+	return fmt.Sprintf("steward_id: %s\ndevice_id: %s\noverlap_expires_at: %s", id.StewardID, id.DeviceID, overlap), nil
+}
+
+// formatStoredCerts renders, for every certificate in raw (the "== <path>" headed
+// cert.pem files of the cert store), its serial, issuer, subject, expiry and
+// whether it is expired at now. A store with no certificate is reported as such.
+func formatStoredCerts(raw string, now time.Time) string {
+	var b strings.Builder
+	found := 0
+	// "\n"+raw makes the first header a separator too; parts[0] is what precedes it.
+	for _, chunk := range strings.Split("\n"+raw, "\n== ")[1:] {
+		path, pemText, _ := strings.Cut(chunk, "\n")
+		path = strings.TrimSpace(path)
+		block, _ := pem.Decode([]byte(pemText))
+		if block == nil {
+			fmt.Fprintf(&b, "%s: no PEM certificate\n", path)
+			continue
+		}
+		c, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			fmt.Fprintf(&b, "%s: unparseable certificate: %v\n", path, err)
+			continue
+		}
+		found++
+		fmt.Fprintf(&b, "%s: serial=%s issuer=%q subject=%q notAfter=%s expired=%t\n",
+			path, c.SerialNumber.Text(16), c.Issuer.String(), c.Subject.String(),
+			c.NotAfter.UTC().Format(time.RFC3339), now.After(c.NotAfter))
+	}
+	if found == 0 && b.Len() == 0 {
+		return "no certificate present in " + stewardCertStoreDir
+	}
+	return b.String()
+}
+
+// ControllerStallDiagnostics captures what the controller reports about each of
+// stewardIDs' control sessions when a wait on the controller fails: the steward
+// record, its session-table entry (connected_at, remote_addr, last_activity), the
+// whole session table, and the controller's log lines about those IDs, sessions,
+// timeouts and refusals. stewardIDs may be empty, or hold empty strings, for a
+// failure that names no steward.
+//
+// It cannot dump the controller's goroutines: the controller exposes no debug
+// endpoint, and signalling it would kill the process every later test depends on.
+func (s *FleetTestSuite) ControllerStallDiagnostics(stewardIDs ...string) string {
+	return gatherDiagnostics(diagnosticsSectionTimeout, controllerDiagnosticsSections(s.diagnosticsSources(), stewardIDs))
+}
+
+// ReconnectDiagnostics is ControllerStallDiagnostics plus the steward's own state
+// in container (stored identity, certificates, reconnect-path log lines). A test
+// that restarts a steward passes both the ID it expected and the ID it read, so
+// the failure shows whether the controller knows either and what the steward did.
+func (s *FleetTestSuite) ReconnectDiagnostics(container string, stewardIDs ...string) string {
+	src := s.diagnosticsSources()
+	return gatherDiagnostics(diagnosticsSectionTimeout,
+		append(controllerDiagnosticsSections(src, stewardIDs), stewardDiagnosticsSections(src, container)...))
 }
 
 // RequireStewardConnected fails the calling test, at the calling step, when
@@ -935,7 +1116,7 @@ func (s *FleetTestSuite) RequireStewardConnected(t *testing.T, container, stewar
 	state, err := s.GetStewardConnectionState(t, stewardID)
 	t.Fatalf("%s did not reconnect: steward %s in %s was not connection_state=connected within %v (last state %q, last error %v)\n%s\n%s",
 		what, stewardID, container, timeout, state, err,
-		s.ControllerStallDiagnostics(stewardID), s.LauncherDiagnostics(t, container))
+		s.ReconnectDiagnostics(container, stewardID), s.LauncherDiagnostics(t, container))
 }
 
 // DockerExecRoot runs a command in the container as root.
