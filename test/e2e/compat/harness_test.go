@@ -297,15 +297,14 @@ type commandRecord struct {
 	DeliveryDetail string `json:"delivery_detail"`
 }
 
-// decodeCommandRecord decodes the data envelope of GET /api/v1/commands/{id}.
+// decodeCommandRecord decodes the response of GET /api/v1/commands/{id}. The
+// handler writes a bare CommandRecordResponse object, not a data envelope.
 func decodeCommandRecord(body []byte) (*commandRecord, error) {
-	var env struct {
-		Data commandRecord `json:"data"`
-	}
-	if err := json.Unmarshal(body, &env); err != nil {
+	var rec commandRecord
+	if err := json.Unmarshal(body, &rec); err != nil {
 		return nil, fmt.Errorf("decode command record: %w", err)
 	}
-	return &env.Data, nil
+	return &rec, nil
 }
 
 // decodeCommandID extracts command_id from the PUT /api/v1/stewards/{id}/config
