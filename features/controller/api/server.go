@@ -169,7 +169,6 @@ type Server struct {
 	sessionManager                  session.Manager                          // Issue #2232: admin session token issuance/revocation
 	sessionCfg                      session.Config                           // Issue #2232: session lifecycle tunables (idle TTL, absolute cap, grace window)
 	webSessionManager               session.Manager                          // Issue #2492: second session manager for browser cookie auth (ADR-018 §1,2)
-	csrfTokens                      sync.Map                                 // Issue #2493: sessionID → session-bound CSRF token; populated on login, deleted on logout/revoke
 	membershipStore                 cluster.MembershipStore                  // Issue #2283: cluster node membership (nil when cluster not configured)
 	routingStore                    business.RoutingStore                    // Issue #3895: shared steward-routing table (ADR-031 Decision 3), consulted for the decommission drain-wait's target-node session count; nil falls back to the local registry
 	decommissionTimeout             time.Duration                            // Issue #3895: how long the decommission drain-wait polls before forcing decommission; defaults to defaultDecommissionTimeout in NewServer, overridable in tests

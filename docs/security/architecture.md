@@ -168,9 +168,14 @@ POST /api/v1/web/passkey/login/finish (WebAuthn assertion body)
    earns Strong directly in one round trip. The raw token is set in `__Host-cfgms_session`
    (HttpOnly) and never logged.
 
-7. **Session-bound CSRF token:** a second 32-byte `crypto/rand` value is generated,
-   stored server-side keyed by session ID, and written to `__Host-cfgms_csrf` (non-HttpOnly
-   so the SPA can read it and set `X-CSRF-Token` on subsequent mutations).
+7. **Session-bound CSRF token:** a second 32-byte `crypto/rand` value is generated and
+   written to `__Host-cfgms_csrf` (non-HttpOnly so the SPA can read it and set
+   `X-CSRF-Token` on subsequent mutations). Its SHA-256 hash, never the raw token, is
+   stored on the durable session record (`session.Session.CSRFTokenHash`) before the
+   session is elevated, so it survives controller restarts, rolling deploys and
+   fail-over for the session's whole lifetime. A session issued by a controller that
+   predates the stored hash has none and is refused on unsafe methods until the user logs
+   in again.
 
 8. **Response body:** the authenticated `username`, `tenant_id`, and `root_scope` —
    no token is ever included (security A5.5).
@@ -183,8 +188,9 @@ pass through `csrfMiddleware` (applied after `authenticationMiddleware`):
 - Safe methods (GET, HEAD) are exempt.
 - Bearer-token, API-key, and mTLS requests are **never** CSRF-checked — only
   cookie-authenticated requests are in scope.
-- The `X-CSRF-Token` header is compared to the server-side session-bound token
-  (`subtle.ConstantTimeCompare`). Mismatch or absence → 403.
+- The SHA-256 of the `X-CSRF-Token` header is compared to the hash on the durable session
+  record (`subtle.ConstantTimeCompare`), so any controller node answers the same way.
+  Mismatch, absence, or a session with no stored hash → 403.
 - Invariant: at any merge point no unsafe cookie-authenticated method is reachable
   without this protection.
 
@@ -197,7 +203,7 @@ api subrouter middleware chain does not apply to base-router routes (security A5
 
 `POST /api/v1/web/logout` is CSRF-checked (session-bound token required). On success:
 - Revokes the server-side session (subsequent cookie use → 401).
-- Removes the server-side CSRF token for the session.
+- Removes the session record, and with it the stored CSRF token hash.
 - Expires both `__Host-cfgms_session` and `__Host-cfgms_csrf` cookies (`Max-Age=0`).
 
 #### Audit events

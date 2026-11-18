@@ -300,11 +300,7 @@ func backfillSessionTokenRecords(ctx context.Context, db *sql.DB) error {
 	if !exists {
 		return nil
 	}
-	type col struct {
-		name string
-		ddl  string
-	}
-	for _, c := range []col{
+	return addMissingColumns(ctx, db, "session_token_records", []columnDDL{
 		{"assurance", `ALTER TABLE session_token_records ADD COLUMN assurance      INTEGER NOT NULL DEFAULT 1`},
 		{"bound_ip", `ALTER TABLE session_token_records ADD COLUMN bound_ip       TEXT    NOT NULL DEFAULT ''`},
 		{"last_proven_at", `ALTER TABLE session_token_records ADD COLUMN last_proven_at TEXT`},
@@ -312,19 +308,9 @@ func backfillSessionTokenRecords(ctx context.Context, db *sql.DB) error {
 		{"login_credential_id", `ALTER TABLE session_token_records ADD COLUMN login_credential_id BLOB`},
 		{"root_scoped", `ALTER TABLE session_token_records ADD COLUMN root_scoped    INTEGER NOT NULL DEFAULT 0`},
 		{"channel", `ALTER TABLE session_token_records ADD COLUMN channel         TEXT    NOT NULL DEFAULT ''`},
-	} {
-		present, err := columnExists(ctx, db, "session_token_records", c.name)
-		if err != nil {
-			return fmt.Errorf("sqlite: session_token_records back-fill column probe failed (%s): %w", c.name, err)
-		}
-		if present {
-			continue
-		}
-		if _, err := db.ExecContext(ctx, c.ddl); err != nil {
-			return fmt.Errorf("sqlite: session_token_records back-fill failed: %w\nSQL: %s", err, c.ddl)
-		}
-	}
-	return nil
+		// Issue #6321: hex SHA-256 of the web session's CSRF token; '' when none is bound.
+		{"csrf_token_hash", `ALTER TABLE session_token_records ADD COLUMN csrf_token_hash TEXT    NOT NULL DEFAULT ''`},
+	})
 }
 
 // backfillRegistrationTokenID adds the `id` UUID column to a pre-existing
@@ -1292,7 +1278,8 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			credential_id         BLOB,
 			login_credential_id   BLOB,
 			root_scoped           INTEGER NOT NULL DEFAULT 0,
-			channel               TEXT    NOT NULL DEFAULT ''
+			channel               TEXT    NOT NULL DEFAULT '',
+			csrf_token_hash       TEXT    NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_session_token_records_session_id ON session_token_records(session_id)`,
 

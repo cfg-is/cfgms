@@ -184,3 +184,52 @@ func TestMemStore_NotFoundAfterExpiry(t *testing.T) {
 		}
 	}
 }
+
+// TestMemStore_CSRFTokenHashRoundTrip verifies the hash survives Set/Update/Rotate on
+// every row a session has and disappears with Delete (Issue #6321).
+func TestMemStore_CSRFTokenHashRoundTrip(t *testing.T) {
+	cfg := session.DefaultConfig()
+	store := session.NewMemStore(cfg, time.Now)
+	defer store.Close()
+	ctx := context.Background()
+
+	now := time.Now()
+	const hashA, hashB = "hash-a", "hash-b"
+	sess := &session.Session{
+		ID: "csrf-sess", PrincipalID: "admin", IssuedAt: now, LastActivity: now,
+		AbsoluteExpiresAt: now.Add(cfg.AbsoluteTimeout), CSRFTokenHash: "csrf-hash",
+	}
+	if err := store.Set(ctx, hashA, sess); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	got, err := store.Get(ctx, hashA)
+	if err != nil || got.CSRFTokenHash != "csrf-hash" {
+		t.Fatalf("Get after Set = %+v, %v; want hash csrf-hash", got, err)
+	}
+
+	// Rotate carries the session's fields, hash included, to the new row.
+	if err := store.Rotate(ctx, hashA, hashB, sess, now.Add(cfg.GraceWindow)); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	for name, lookup := range map[string]func() (*session.Session, error){
+		"Get(previous)": func() (*session.Session, error) { return store.Get(ctx, hashA) },
+		"Get(new)":      func() (*session.Session, error) { return store.Get(ctx, hashB) },
+		"GetByID":       func() (*session.Session, error) { return store.GetByID(ctx, sess.ID) },
+	} {
+		if got, err := lookup(); err != nil || got.CSRFTokenHash != "csrf-hash" {
+			t.Errorf("%s = %+v, %v; want hash csrf-hash", name, got, err)
+		}
+	}
+
+	all, err := store.ListAll(ctx)
+	if err != nil || len(all) != 1 || all[0].CSRFTokenHash != "csrf-hash" {
+		t.Errorf("ListAll = %+v, %v; want one session with hash csrf-hash", all, err)
+	}
+
+	if err := store.Delete(ctx, sess.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if got, err := store.GetByID(ctx, sess.ID); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("GetByID after Delete = %+v, %v; want ErrSessionNotFound", got, err)
+	}
+}

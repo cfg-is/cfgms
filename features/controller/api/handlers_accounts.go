@@ -1349,16 +1349,15 @@ func (s *Server) VerifyCredential(acct *account) error {
 }
 
 // revokeSessionsForPrincipal revokes every live web session belonging to the
-// given account ID and drops the session-bound CSRF token for each
-// (Issue #3126, retrofitted in Issue #3581). Returns the number of sessions revoked.
+// given account ID (Issue #3126, retrofitted in Issue #3581). The session-bound CSRF
+// token hash lives on the durable session record, so revocation removes it too. Returns the number of sessions revoked.
 //
 // The revocation path calls webSessionManager.RevokeAllForPrincipal, which queries
 // the durable store directly — cluster-safe: sessions issued on other controller nodes
 // are found and revoked regardless of this node's in-memory state (Issue #3581, Story 3).
 //
-// CSRF tokens are node-local (in-process map); a preceding List call collects the
-// session IDs visible on this node so their CSRF entries can be dropped before the
-// durable revocation runs. Cross-node session CSRF tokens do not exist in this map.
+// A preceding List call collects the session IDs visible on this node so they can be
+// marked revoked in this node's in-memory state after the durable revocation runs.
 //
 // A second pass calls mgr.Revoke on each locally-visible session. This is necessary
 // because the cliMgr.RevokeAllForPrincipal step (step 3) may have already deleted the
@@ -1380,17 +1379,16 @@ func (s *Server) revokeSessionsForPrincipal(ctx context.Context, principalID str
 		return 0, nil
 	}
 
-	// Collect locally-visible sessions for CSRF cleanup and in-memory revocation.
+	// Collect locally-visible sessions for in-memory revocation.
 	var localIDs []string
 	if sessions, listErr := mgr.List(ctx); listErr == nil {
 		for _, sess := range sessions {
 			if sess != nil && sess.PrincipalID == principalID {
-				s.csrfTokens.Delete(sess.ID)
 				localIDs = append(localIDs, sess.ID)
 			}
 		}
 	} else {
-		s.logger.Warn("Failed to list web sessions for CSRF cleanup; CSRF tokens for this principal may linger on this node",
+		s.logger.Warn("Failed to list web sessions for local revocation; this node may keep stale in-memory sessions for this principal",
 			"principal_id", logging.SanitizeLogValue(principalID),
 			"error", logging.SanitizeLogValue(listErr.Error()))
 	}

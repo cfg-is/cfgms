@@ -1844,7 +1844,8 @@ func (s DatabaseSchemas) CreateSessionTokenStoreTable(ctx context.Context, db sc
 			credential_id       BYTEA,
 			login_credential_id BYTEA,
 			root_scoped         BOOLEAN NOT NULL DEFAULT FALSE,
-			channel             TEXT    NOT NULL DEFAULT ''
+			channel             TEXT    NOT NULL DEFAULT '',
+			csrf_token_hash     TEXT    NOT NULL DEFAULT ''
 		);`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("failed to create session_token_store table: %w", err)
@@ -1876,6 +1877,7 @@ func (s DatabaseSchemas) BackfillSessionTokenStoreContinuity(ctx context.Context
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS login_credential_id BYTEA`,
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS root_scoped    BOOLEAN NOT NULL DEFAULT FALSE`,
 		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS channel        TEXT    NOT NULL DEFAULT ''`,
+		`ALTER TABLE session_token_store ADD COLUMN IF NOT EXISTS csrf_token_hash TEXT   NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range alters {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {

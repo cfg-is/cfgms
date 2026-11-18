@@ -13,6 +13,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -700,14 +701,18 @@ func TestCSRFMiddleware_SessionBound(t *testing.T) {
 	require.NoError(t, err)
 	sess, _, err := srv.webSessionManager.Issue(context.Background(), acct.ID, "test", acct.TenantID)
 	require.NoError(t, err)
-	_, token, err := srv.webSessionManager.Elevate(context.Background(), sess.ID, credID, "198.51.100.77")
-	require.NoError(t, err)
-	webSess, err := srv.webSessionManager.Validate(context.Background(), token)
-	require.NoError(t, err)
 
+	// Bind the CSRF token hash to the durable session record before Elevate, as the
+	// login path does, so both rows Elevate leaves live carry it (Issue #6321).
 	csrfTok, err := generateCSRFToken()
 	require.NoError(t, err)
-	srv.csrfTokens.Store(webSess.ID, csrfTok)
+	csrfSum := sha256.Sum256([]byte(csrfTok))
+	require.NoError(t, srv.webSessionManager.BindCSRFTokenHash(context.Background(), sess.ID, hex.EncodeToString(csrfSum[:])))
+
+	_, token, err := srv.webSessionManager.Elevate(context.Background(), sess.ID, credID, "198.51.100.77")
+	require.NoError(t, err)
+	_, err = srv.webSessionManager.Validate(context.Background(), token)
+	require.NoError(t, err)
 
 	// Build the handler stack: auth → CSRF → synthetic handler.
 	var reached bool

@@ -87,6 +87,12 @@ type Session struct {
 	// browser-cookie session manager. Sessions predating this field carry an empty channel
 	// and are rejected by Validate and List rather than grandfathered.
 	Channel string
+	// CSRFTokenHash is the hex SHA-256 of the web session's session-bound CSRF token
+	// (Issue #6321); empty when none is bound. Only the hash is ever stored, mirroring
+	// the SHA-256(token) rule for the session token itself. It lives on the durable
+	// session record so any controller node accepts the token for the whole session
+	// lifetime. Set only by Manager.BindCSRFTokenHash; preserved by Renew and Elevate.
+	CSRFTokenHash string
 }
 
 // Config holds the lifecycle tunables for cfg admin sessions (ADR-014 §3).
@@ -209,6 +215,12 @@ type Manager interface {
 	// if the initial Store.ListAll call fails. Delete failures on individual sessions are
 	// logged and do not stop the remaining deletions (best-effort).
 	RevokeAllForPrincipal(ctx context.Context, principalID string) (int, error)
+	// BindCSRFTokenHash records tokenHash (hex SHA-256 of the session-bound CSRF token)
+	// on the session and writes it to the durable store (Issue #6321). It returns
+	// ErrSessionNotFound for a session with no live row and never resurrects a revoked
+	// session. Call it before Elevate: Elevate rotates the token and leaves the
+	// pre-elevation row live for GraceWindow, and copies the bound hash into both rows.
+	BindCSRFTokenHash(ctx context.Context, sessionID, tokenHash string) error
 }
 
 // Store is the backing store for the session Manager (ADR-014 §2).
