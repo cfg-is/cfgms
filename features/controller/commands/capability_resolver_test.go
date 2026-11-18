@@ -128,16 +128,20 @@ func TestCapabilityResolver_PendingConnectionDeclaresDuringTheWait(t *testing.T)
 
 // Rollback reconnect: the stored record says current, the new connection declares
 // nothing. After the bounded wait the command is signed v1.
+//
+// The wait is measured from the connection's ConnectedAt, which the fixture
+// stamps before its durable write and registry insert, so the lower bound is
+// taken against ConnectedAt too. A timer never fires early and ConnectedAt
+// carries a monotonic reading, so this holds however long setup took.
 func TestCapabilityResolver_RollbackReconnectSignsV1AfterTheWait(t *testing.T) {
 	f := newResolverFixture(t)
 	f.seedOld(business.StewardCapabilityDeclared, current())
-	f.connect("conn-new", 0) // pending; never declares
+	conn := f.connect("conn-new", 0) // pending; never declares
 
 	start := time.Now()
 	assert.Equal(t, types.SigningPayloadV1, f.version(context.Background()))
-	elapsed := time.Since(start)
-	assert.GreaterOrEqual(t, elapsed, resolverTestWait/2, "waits for the declaration first")
-	assert.Less(t, elapsed, 3*time.Second)
+	assert.GreaterOrEqual(t, time.Since(conn.ConnectedAt), resolverTestWait, "waits for the declaration first")
+	assert.Less(t, time.Since(start), 3*time.Second)
 }
 
 // The wait is measured from the connection start, not from the call.
