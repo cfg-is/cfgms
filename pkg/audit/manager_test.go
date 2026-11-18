@@ -2685,3 +2685,100 @@ func TestConvenienceBuilderSeverityNotHighOnSuccess(t *testing.T) {
 		})
 	}
 }
+
+// blockingAppendAuditStore wraps a real business.AuditStore (embedded, so every
+// method except AppendChainedEntry passes straight through) and parks each
+// AppendChainedEntry call until the test releases it or the context the manager
+// handed it is cancelled. It reports which of the two ended the call. Fault
+// injection around a real store, not a mock.
+type blockingAppendAuditStore struct {
+	business.AuditStore
+	entered  chan struct{}
+	release  chan struct{}
+	enterOne sync.Once
+	// cancelled receives the context error each time a parked call was ended by
+	// its context.
+	cancelled chan error
+}
+
+func newBlockingAppendAuditStore(inner business.AuditStore) *blockingAppendAuditStore {
+	return &blockingAppendAuditStore{
+		AuditStore: inner,
+		entered:    make(chan struct{}),
+		release:    make(chan struct{}),
+		cancelled:  make(chan error, 8),
+	}
+}
+
+func (s *blockingAppendAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, computeChecksum func(entry *business.AuditEntry) string) error {
+	s.enterOne.Do(func() { close(s.entered) })
+	select {
+	case <-ctx.Done():
+		s.cancelled <- ctx.Err()
+		return ctx.Err()
+	case <-s.release:
+		return s.AuditStore.AppendChainedEntry(ctx, tenantID, entry, computeChecksum)
+	}
+}
+
+// TestManager_StopBoundedByBlockedStore proves that a store write blocked inside
+// the drain goroutine cannot outlive Stop: Stop returns within its context, and
+// the manager then cancels the in-flight write rather than leaving drainLoop
+// parked on writeBatch's context (Issue #6326). The store is released only at
+// cleanup, so the only thing that can end the parked write is cancellation.
+func TestManager_StopBoundedByBlockedStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	blocking := newBlockingAppendAuditStore(storageManager.GetAuditStore())
+	t.Cleanup(func() { close(blocking.release) })
+
+	manager, err := audit.NewManager(blocking, "blocked-store-test")
+	require.NoError(t, err)
+
+	event := audit.NewEventBuilder().
+		Tenant("blocked-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("blocked_action").
+		User("user1", business.AuditUserTypeHuman).
+		Resource("resource", "res-blocked", "").
+		Severity(business.AuditSeverityMedium)
+	require.NoError(t, manager.RecordEvent(context.Background(), event))
+
+	select {
+	case <-blocking.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drain goroutine never entered AppendChainedEntry")
+	}
+
+	// Flush is bounded by its own context while the store is blocked.
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer flushCancel()
+	start := time.Now()
+	err = manager.Flush(flushCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), 2*time.Second, "Flush must return within its context")
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer stopCancel()
+	start = time.Now()
+	err = manager.Stop(stopCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), 2*time.Second, "Stop must return within its context")
+
+	// The parked write must be cancelled by shutdown, not left running.
+	select {
+	case cancelErr := <-blocking.cancelled:
+		assert.ErrorIs(t, cancelErr, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocked store write was not cancelled after Stop gave up: drainLoop is still parked on writeBatch")
+	}
+
+	// The entry that could not be written is reported, not silently dropped.
+	require.Eventually(t, func() bool {
+		lostErr := manager.Stop(context.Background())
+		return lostErr != nil && strings.Contains(lostErr.Error(), "permanently lost 1 entries")
+	}, 5*time.Second, 10*time.Millisecond)
+}
