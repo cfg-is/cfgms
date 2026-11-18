@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +64,33 @@ func (s *FleetTestSuite) WaitForNewStewardLogEntry(t *testing.T, container strin
 var StewardSessionMarkers = []string{
 	"Connected to controller via gRPC transport",
 	"Reconnected to controller via stored identity",
+}
+
+// stewardIDFieldPattern matches one steward_id field of a JSON log line.
+var stewardIDFieldPattern = regexp.MustCompile(`"steward_id"\s*:\s*"([^"]*)"`)
+
+// isCompleteStewardID reports whether id is a steward ID as the controller knows
+// it. The steward logs some steward_id fields through logging.RedactedID, which
+// keeps 8 characters and appends U+2026 ("steward-…", Issue #981); such a value
+// names no steward, so it is never a complete ID. The ellipsis is matched both
+// as the character and as the JSON escape a different encoder would write.
+func isCompleteStewardID(id string) bool {
+	return id != "" && !strings.Contains(id, "…") && !strings.Contains(strings.ToLower(id), `\u2026`)
+}
+
+// ParseStewardIDFromLogText returns the last complete steward ID in steward log
+// text. Redacted and empty steward_id fields are skipped, not returned: which one
+// comes last depends on which line the steward wrote most recently, and a log read
+// between a redacted line and the next full-ID line must not yield "steward-…"
+// (Issue #6346). It reports false when the text carries no complete ID.
+func ParseStewardIDFromLogText(logText string) (string, bool) {
+	matches := stewardIDFieldPattern.FindAllStringSubmatch(logText, -1)
+	for i := len(matches) - 1; i >= 0; i-- {
+		if isCompleteStewardID(matches[i][1]) {
+			return matches[i][1], true
+		}
+	}
+	return "", false
 }
 
 // LastLines returns the last n lines of s.

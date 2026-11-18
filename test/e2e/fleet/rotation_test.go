@@ -47,7 +47,7 @@ func (s *fleetScenarioSuite) rotateSigningCert(t *testing.T, overlapDays int) si
 
 	resp, err := s.HTTPClient.Do(req)
 	if err != nil {
-		t.Fatalf("POST signing/rotate: %v\n%s", err, s.ControllerStallDiagnostics(""))
+		t.Fatalf("POST signing/rotate: %v\n%s", err, s.ControllerStallDiagnostics())
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -307,7 +307,8 @@ func (s *fleetScenarioSuite) testOverlapAccept(t *testing.T) {
 	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
 		stewardID := s.StewardIDs[container]
 		if !s.WaitForConvergence(t, stewardID, 30*time.Second) {
-			t.Errorf("%s (%s): must remain connected after rotation during overlap", container, stewardID)
+			t.Errorf("%s (%s): must remain connected after rotation during overlap\n%s",
+				container, stewardID, s.ReconnectDiagnostics(container, stewardID))
 		}
 	}
 
@@ -353,7 +354,8 @@ func (s *fleetScenarioSuite) testPostExpiryReject(t *testing.T) {
 	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
 		stewardID := s.StewardIDs[container]
 		if !s.WaitForConvergence(t, stewardID, 30*time.Second) {
-			t.Errorf("%s (%s): must remain connected after overlap_days=0 rotation", container, stewardID)
+			t.Errorf("%s (%s): must remain connected after overlap_days=0 rotation\n%s",
+				container, stewardID, s.ReconnectDiagnostics(container, stewardID))
 		}
 	}
 
@@ -401,14 +403,15 @@ func (s *fleetScenarioSuite) testOfflineDuringOverlapReconnect(t *testing.T) {
 		t.Fatalf("steward ID not found after %s restart: %v", container, err)
 	}
 	if newID != stewardID {
-		t.Errorf("steward %s re-registered after restart: %s → %s; expected stored-cert reuse",
-			container, stewardID, newID)
+		t.Errorf("steward %s re-registered after restart: %s → %s; expected stored-cert reuse\n%s",
+			container, stewardID, newID, s.ReconnectDiagnostics(container, stewardID, newID))
 	}
 	s.StewardIDs[container] = newID
 
 	// Refresh-on-connect must deliver the new signing cert automatically.
 	if !s.WaitForConvergence(t, newID, 90*time.Second) {
-		t.Fatalf("%s (%s): must reconnect after coming back online during overlap", container, newID)
+		t.Fatalf("%s (%s): must reconnect after coming back online during overlap (expected ID %s)\n%s",
+			container, newID, stewardID, s.ReconnectDiagnostics(container, stewardID, newID))
 	}
 
 	// Config upload after reconnect must converge (controller uses new cert).
@@ -454,15 +457,16 @@ func (s *fleetScenarioSuite) testOfflinePastWindow(t *testing.T) {
 		t.Fatalf("steward ID not found after %s restart: %v", container, err)
 	}
 	if newID != stewardID {
-		t.Errorf("steward %s re-registered: %s → %s; expected stored-cert reuse",
-			container, stewardID, newID)
+		t.Errorf("steward %s re-registered: %s → %s; expected stored-cert reuse\n%s",
+			container, stewardID, newID, s.ReconnectDiagnostics(container, stewardID, newID))
 	}
 	s.StewardIDs[container] = newID
 
 	// Refresh-on-connect delivers a fresh signing cert even though the overlap
 	// window has already closed. The steward must reconnect and converge.
 	if !s.WaitForConvergence(t, newID, 90*time.Second) {
-		t.Fatalf("%s (%s): must reconnect past overlap window via refresh-on-connect", container, newID)
+		t.Fatalf("%s (%s): must reconnect past overlap window via refresh-on-connect (expected ID %s)\n%s",
+			container, newID, stewardID, s.ReconnectDiagnostics(container, stewardID, newID))
 	}
 
 	if err := s.UploadConfig(t, newID, "configs/fleet-config.yaml"); err != nil {
@@ -519,7 +523,8 @@ func (s *fleetScenarioSuite) testRefreshOnConnectNewSteward(t *testing.T) {
 	for _, container := range []string{"fleet-steward-1", "fleet-steward-2"} {
 		stewardID := s.StewardIDs[container]
 		if !s.WaitForConvergence(t, stewardID, 30*time.Second) {
-			t.Errorf("%s (%s): must remain connected after rotation", container, stewardID)
+			t.Errorf("%s (%s): must remain connected after rotation\n%s",
+				container, stewardID, s.ReconnectDiagnostics(container, stewardID))
 		}
 		if !s.waitForStewardLogEntry(t, container, result.NewSerial, 30*time.Second) {
 			log, _ := s.ReadStewardLog(t, container)
@@ -596,7 +601,7 @@ func (s *fleetScenarioSuite) requireConfigAccepted(t *testing.T, container strin
 	t.Helper()
 	stewardID := s.StewardIDs[container]
 	if !s.WaitForConvergence(t, stewardID, 90*time.Second) {
-		t.Fatalf("%s (%s): must be connected", container, stewardID)
+		t.Fatalf("%s (%s): must be connected\n%s", container, stewardID, s.ReconnectDiagnostics(container, stewardID))
 	}
 	if err := s.UploadConfig(t, stewardID, "configs/fleet-config.yaml"); err != nil {
 		t.Fatalf("%s: config upload: %v", container, err)
