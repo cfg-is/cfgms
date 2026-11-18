@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -564,13 +565,77 @@ func TestRepair_OutcomeHeartbeatLost_ReportedAgainWithoutWaitingForThePeriodicOn
 	assert.Equal(t, "repair-lost", reason.Message, "the outcome carries the repair ID")
 }
 
+// A refusal is reported on the link the alarm already holds. That link opens no
+// new link to confirm the outcome on, so the one send the refusal starts is all
+// there is until the next periodic heartbeat 20 to 30 s later. The refusal must be
+// repeated within seconds when the controller does not take the first copy.
+func TestRepair_RefusalOnOpenLink_ReportedAgainWithoutWaitingForThePeriodicOne(t *testing.T) {
+	prevInterval := repairOutcomeResendInterval
+	repairOutcomeResendInterval = 200 * time.Millisecond
+	t.Cleanup(func() { repairOutcomeResendInterval = prevInterval })
+
+	good := newRepairSigner(t, "controller")
+	f := newRepairFixture(t, repairFixtureOpts{signer: good})
+	f.start()
+	f.ctrl.allow("repair-sig")
+	f.send(f.request("repair-sig", requestOpts{signer: good, badSig: true}))
+
+	// The periodic heartbeat is at least 20 s apart, so a 10 s wait cannot be
+	// satisfied by it.
+	reason := repairReasonAfterLoss(t, f.env.f.srv, cpTypes.HealthComponentRepair, cpTypes.ReasonCodeRepairSignatureInvalid, 1, 10*time.Second)
+	assert.Equal(t, "repair-sig", reason.Message, "the refusal carries the repair ID")
+}
+
+// A repair reason set while no link is open is sent when a link opens, and again
+// when the controller loses that first heartbeat.
+func TestRepair_ReasonSetWhileLinkDown_ReportedAgainOnTheNewLink(t *testing.T) {
+	prevInterval := repairOutcomeResendInterval
+	repairOutcomeResendInterval = 200 * time.Millisecond
+	t.Cleanup(func() { repairOutcomeResendInterval = prevInterval })
+
+	e := newAlarmEnv(t, trustSourceCompileBaked)
+	var storeDir atomic.Pointer[string]
+	absent := t.TempDir()
+	storeDir.Store(&absent)
+	certStoreDirResolver = func() string { return *storeDir.Load() }
+
+	latch := openTamperLatch(e.f.dir, logging.NewNoopLogger())
+	latch.raise(cpTypes.ReasonCodeTamperDataDir)
+	alarm := newTamperAlarm(latch, logging.NewNoopLogger(), "")
+	alarm.sinkFn = func() systemLogWriter { return e.sink }
+	alarm.rescan = func() *tamperFault { return &tamperFault{code: cpTypes.ReasonCodeTamperDataDir} }
+	t.Cleanup(func() {
+		for _, c := range []string{cpTypes.HealthComponentRepair, cpTypes.ReasonCodeRepairLossLocalLogs, cpTypes.ReasonCodeRepairLossActionHistory} {
+			startupReasons.Clear(c)
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = alarm.run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	// No link can open (no identity in the store): the outcome is only recorded.
+	alarm.repair.outcome(nil, cpTypes.ReasonCodeRepairFailed, "repair-down")
+	require.Equal(t, int32(0), e.connect.Load())
+
+	storeDir.Store(&e.f.dir)
+	reason := repairReasonAfterLoss(t, e.f.srv, cpTypes.HealthComponentRepair, cpTypes.ReasonCodeRepairFailed, 1, 10*time.Second)
+	assert.Equal(t, "repair-down", reason.Message)
+}
+
 // A steward with no repair outcome to report sends nothing extra.
 func TestRepairer_ConfirmOutcome_NothingToReportStartsNothing(t *testing.T) {
 	var r *repairer
-	r.confirmOutcome(context.Background(), nil) // no repairer, no link: must not panic
+	r.confirmOutcome(nil) // no repairer, no link: must not panic
 
 	r = &repairer{reasons: client.NewHealthReasonRegistry()}
-	r.confirmOutcome(context.Background(), nil)
+	r.confirmOutcome(nil)
 }
 
 func TestRepair_ReconnectHold_NoDialPresentsTheOldCertificate(t *testing.T) {
@@ -787,6 +852,26 @@ func TestRepair_NotLatched_ReportsNotLocked(t *testing.T) {
 	reason := repairReason(t, f.srv, cpTypes.HealthComponentRepair, cpTypes.ReasonCodeRepairNotLocked)
 	assert.Equal(t, "repair-nl", reason.Message)
 	assert.False(t, latch.isLatched())
+}
+
+// A request that reaches a steward that is not latched is answered with
+// repair.not_locked, and the answer is repeated when the controller loses the
+// first copy.
+func TestRepair_NotLatched_ReportsNotLockedAgainWhenTheFirstHeartbeatIsLost(t *testing.T) {
+	prevInterval := repairOutcomeResendInterval
+	repairOutcomeResendInterval = 200 * time.Millisecond
+	t.Cleanup(func() { repairOutcomeResendInterval = prevInterval })
+
+	f := newROFixture(t, trustSourceCompileBaked)
+	tc := connectRO(t, f, trustSourceCompileBaked)
+	latch := openTamperLatch(f.dir, logging.NewLogger("error")) // never raised
+	watchRepairWhileNotLocked(tc, latch)
+
+	require.NoError(t, f.srv.cp.SendRepair(context.Background(), roStewardID, cpTypes.RepairRequest{
+		RepairID: "repair-nl-lost", LossDigest: cpTypes.LossDigest(nil), ExpiresAtUnix: time.Now().Add(time.Minute).Unix(),
+	}))
+	reason := repairReasonAfterLoss(t, f.srv, cpTypes.HealthComponentRepair, cpTypes.ReasonCodeRepairNotLocked, 1, 10*time.Second)
+	assert.Equal(t, "repair-nl-lost", reason.Message)
 }
 
 func TestRepair_NoBakedList_ExpiredRequestIsNotLocked_CAClassIsAnchorUntrusted(t *testing.T) {
