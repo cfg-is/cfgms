@@ -269,3 +269,60 @@ func TestCapabilityResolver_NilResolverAndNilSourcesAreCurrent(t *testing.T) {
 func TestCapabilityResolver_DefaultWaitIsThreeSeconds(t *testing.T) {
 	assert.Equal(t, 3*time.Second, commands.DefaultCapabilityResolveWait)
 }
+
+func TestResolverResolveReportsTheConnectionAndWhetherItDeclared(t *testing.T) {
+	t.Run("a connection settled at the floor on the grace has not declared", func(t *testing.T) {
+		f := newResolverFixture(t)
+		conn := f.connect("conn-floor", resolverTestWait*2)
+		conn.SettleCapabilities(registry.CapabilityFloor, []int32{1}, []uint32{1})
+
+		res := f.resolver.Resolve(context.Background(), f.id)
+		assert.Equal(t, types.SigningPayloadV1, res.Version)
+		assert.Equal(t, "conn-floor", res.ConnectionID)
+		assert.True(t, res.Undeclared, "a declaration on this connection is still to come")
+		id, declared := f.resolver.Connection(f.id)
+		assert.Equal(t, "conn-floor", id)
+		assert.False(t, declared)
+	})
+
+	t.Run("a connection still pending past the wait has not declared", func(t *testing.T) {
+		f := newResolverFixture(t)
+		f.connect("conn-pending", resolverTestWait*2)
+
+		res := f.resolver.Resolve(context.Background(), f.id)
+		assert.Equal(t, types.SigningPayloadV1, res.Version)
+		assert.Equal(t, "conn-pending", res.ConnectionID)
+		assert.True(t, res.Undeclared)
+	})
+
+	t.Run("a declared connection is reported declared", func(t *testing.T) {
+		f := newResolverFixture(t)
+		f.connect("conn-current", 0).SettleCapabilities(registry.CapabilityDeclared, []int32{1}, current())
+
+		res := f.resolver.Resolve(context.Background(), f.id)
+		assert.Equal(t, types.SigningPayloadV2, res.Version)
+		assert.False(t, res.Undeclared)
+		id, declared := f.resolver.Connection(f.id)
+		assert.Equal(t, "conn-current", id)
+		assert.True(t, declared)
+	})
+
+	t.Run("a steward this node does not hold has no connection ID", func(t *testing.T) {
+		f := newResolverFixture(t)
+		f.seedOld(business.StewardCapabilityFloor, []uint32{1})
+
+		res := f.resolver.Resolve(context.Background(), f.id)
+		assert.Equal(t, types.SigningPayloadV1, res.Version)
+		assert.Empty(t, res.ConnectionID)
+		assert.False(t, res.Undeclared, "nothing here can be tracked for a late declaration")
+		id, declared := f.resolver.Connection(f.id)
+		assert.Empty(t, id)
+		assert.False(t, declared)
+	})
+
+	t.Run("a nil resolver resolves to current with no connection", func(t *testing.T) {
+		var r *commands.CapabilityResolver
+		assert.Equal(t, commands.Resolution{Version: types.SigningPayloadV2}, r.Resolve(context.Background(), "x"))
+		assert.Empty(t, r.ConnectionID("x"))
+	})
+}

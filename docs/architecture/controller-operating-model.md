@@ -945,8 +945,59 @@ to a build without this message still accepts a steward that sends it.
 by `ControllerService` and wired into the controller server. Command signing reads
 the record through `commands.CapabilityResolver` (see the Outbound Command
 Contract) and waits on the settled signal only there. Nothing gates a command type
-on the profile yet, and the late-declaration callback (`WithOnLateCapabilities`) is
-not wired.
+on the profile yet. The late-declaration recovery below is implemented in
+`service.LateDeclarationReplay`; its `OnLateCapabilities` is the callback for
+`WithOnLateCapabilities`. The controller server does not attach it yet: the provider
+callback, the drain hook's resolver (`SetSigningResolver`) and the recorder's tracker
+(`SetFloorSentTracker`) are wired in `features/controller/server`, which this
+mechanism's change did not touch.
+
+**Late declaration.** A current steward on a slow host can declare after the grace
+period already settled its connection at the floor profile. Without recovery it
+would stay on the floor profile for the whole connection, and a command signed for
+it in the floor form (v1) would be refused. When the provider reports such a late
+declaration, `service.LateDeclarationReplay` does two things, once per connection
+(a second declaration on the connection does not call it again, and the replay
+also keeps its own per-connection guard):
+
+1. *Marks the commands sent in the floor form.* The drain hook
+   (`PendingDeliveryDrainHook`) is the only sender that has a delivery row for a
+   command it sends during the grace. Before it publishes a row it asks the
+   resolver (`CapabilityResolver.Resolve`) for the connection's resolution; when
+   the resolution is v1 for a connection that has declared nothing yet, it records
+   the row ID in `FloorSentTracker`: in memory, per connection, bounded (1024 rows
+   per connection, 4096 stewards, oldest dropped first), and dropped again if the
+   publish fails. A command sent in v1 by any other path has no delivery row and is
+   not tracked. On the late declaration each tracked row that is still `pending` or
+   `delivered` is set to `rejected` with the detail
+   `signing_form_refused_reissue` (`business.DeliveryDetailSigningFormRefusedReissue`):
+   the stamped v1 refusal by a current steward is deterministic, so the controller
+   knows the outcome without waiting for the response. Operator text: command was
+   not run and must be re-issued. The detail is written by the controller and is not
+   one of the steward's reason codes (`knownRejectionReasons`).
+2. *Re-runs the replay set once.* `lateReplaySlots` in
+   `features/controller/service/steward_connect_hook.go` is the explicit list:
+   `signing_rotation`, `migration`, `drain`, `transport_address`. These are the
+   hooks that sign. Lockdown, repair, routing, the registry upsert and the
+   completion reconciler do not run again. Each hook in the set is idempotent: the
+   signing-cert push finds the same fingerprint and writes nothing, the transport
+   address handler returns nil for an unchanged address, migration only enqueues,
+   and the drain replays only rows still `pending`. What they send is now signed for
+   the declared profile.
+
+The recorder and the drain hook agree with the replay whichever comes first.
+`CommandRejectionRecorder` writes the same detail itself for an `unauthenticated`
+response to a tracked row when the connection it was sent on has since declared; a
+refusal from a connection that never declared is a real floor steward's and is
+recorded as `unauthenticated`, and a row sent in v1 to such a steward with no
+response is not rewritten. The drain hook does not write `delivered` over a row the
+replay already marked.
+
+*Residual.* The operator sees the distinct detail and re-issues the command. It
+arises only when a current steward declares later than the resolve wait. A command
+sent in v1 by a path with no delivery row is refused and is not marked. The
+tracking is in memory, so a controller restart between the send and the late
+declaration loses it; the steward's own refusal still reaches the recorder.
 
 ### Tampered State (Epic #5621)
 

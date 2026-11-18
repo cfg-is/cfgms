@@ -5,9 +5,12 @@ package service
 
 import (
 	"context"
+	"errors"
 	"sort"
+	"sync"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // StewardRegistryConnectHook upserts a steward into the admin registry on every
@@ -106,6 +109,157 @@ func (s ConnectHookSlot) signs() bool {
 		return true
 	}
 	return false
+}
+
+// lateReplaySlots is the explicit set of hooks re-run once when a steward
+// declares its capabilities after the grace period settled its connection at the
+// floor profile. They are the hooks that sign: what they sent during the grace
+// was signed in the floor form. Lockdown, repair, routing, the registry upsert
+// and the completion reconciler are not in it; each of those has already done its
+// work and re-running it would repeat a side effect, not correct a signing form.
+// Each hook in the set is idempotent: the signing-cert push finds the same
+// fingerprint and writes nothing, the transport address handler returns nil for
+// an unchanged address, migration only enqueues, and the drain replays only rows
+// that are still pending.
+var lateReplaySlots = []ConnectHookSlot{
+	SlotSigningRotation, SlotMigration, SlotDrain, SlotTransportAddress,
+}
+
+// LateReplaySlots returns the slots re-run on a late declaration, in the order
+// they run.
+func LateReplaySlots() []ConnectHookSlot {
+	return append([]ConnectHookSlot(nil), lateReplaySlots...)
+}
+
+func inLateReplay(slot ConnectHookSlot) bool {
+	for _, s := range lateReplaySlots {
+		if s == slot {
+			return true
+		}
+	}
+	return false
+}
+
+// ConnectionIDSource names the connection this node holds for a steward.
+// *commands.CapabilityResolver satisfies it.
+type ConnectionIDSource interface {
+	ConnectionID(stewardID string) string
+}
+
+// LateDeclarationReplay recovers a connection that declared its capabilities
+// after the grace period. Its OnLateCapabilities is the callback of
+// grpc.WithOnLateCapabilities. Running it:
+//
+//  1. marks every drain row sent to the connection in the floor form as rejected
+//     with business.DeliveryDetailSigningFormRefusedReissue: the current steward
+//     refuses the stamped v1 form, so the command did not run and the operator
+//     must re-issue it. Done first, so the drain replay below never sees such a
+//     row as still pending;
+//  2. re-runs the replay set once, so everything it sends is signed for the
+//     steward's real profile.
+type LateDeclarationReplay struct {
+	store     business.CommandStore
+	floorSent *FloorSentTracker
+	conns     ConnectionIDSource
+	replay    *CompositeOnConnectHook
+	logger    logging.Logger
+
+	mu       sync.Mutex
+	replayed map[string]string // steward ID -> connection ID already replayed
+}
+
+// NewLateDeclarationReplay builds the replay over the given hooks. Only hooks in
+// the replay set are kept, and they run in connectHookOrder. store, floorSent and
+// conns may be nil: a nil store or tracker skips step 1, and a nil conns drops the
+// once-per-connection guard.
+func NewLateDeclarationReplay(logger logging.Logger, store business.CommandStore, floorSent *FloorSentTracker, conns ConnectionIDSource, hooks ...SlottedConnectHook) *LateDeclarationReplay {
+	var kept []SlottedConnectHook
+	for _, h := range hooks {
+		if inLateReplay(h.Slot) {
+			kept = append(kept, h)
+		}
+	}
+	return &LateDeclarationReplay{
+		store:     store,
+		floorSent: floorSent,
+		conns:     conns,
+		replay:    NewOrderedCompositeOnConnectHook(logger, kept...),
+		logger:    logger,
+		replayed:  make(map[string]string),
+	}
+}
+
+// OnLateCapabilities runs the recovery for the steward's current connection. It
+// runs at most once per connection.
+func (l *LateDeclarationReplay) OnLateCapabilities(ctx context.Context, stewardID string) {
+	if l == nil {
+		return
+	}
+	connectionID := ""
+	if l.conns != nil {
+		connectionID = l.conns.ConnectionID(stewardID)
+	}
+	if connectionID != "" {
+		l.mu.Lock()
+		if l.replayed[stewardID] == connectionID {
+			l.mu.Unlock()
+			return
+		}
+		l.replayed[stewardID] = connectionID
+		l.mu.Unlock()
+	}
+
+	l.refuseFloorSent(ctx, stewardID, connectionID)
+	if err := l.replay.OnConnect(ctx, stewardID); err != nil && l.logger != nil {
+		l.logger.Warn("late-declaration replay: a hook errored",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+// refuseFloorSent marks the connection's floor-form drain rows rejected.
+func (l *LateDeclarationReplay) refuseFloorSent(ctx context.Context, stewardID, connectionID string) {
+	if l.store == nil || l.floorSent == nil {
+		return
+	}
+	l.floorSent.RefuseAll(stewardID, connectionID, func(id string) { l.markForReissue(ctx, stewardID, id) })
+}
+
+// markForReissue sets one floor-form row rejected with the re-issue detail. A row
+// that already left pending/delivered (the steward answered, or it was
+// acknowledged or failed) keeps its own outcome, and a tracked ID with no
+// delivery row has nothing to mark.
+func (l *LateDeclarationReplay) markForReissue(ctx context.Context, stewardID, id string) {
+	rec, err := l.store.GetCommandRecord(ctx, id)
+	if err != nil {
+		l.warnUnlessGone("command record unreadable", stewardID, id, err)
+		return
+	}
+	if rec.StewardID != stewardID ||
+		(rec.DeliveryStatus != business.DeliveryStatusPending && rec.DeliveryStatus != business.DeliveryStatusDelivered) {
+		return
+	}
+	if err := l.store.UpdateDeliveryStatus(ctx, id, business.DeliveryStatusRejected, business.DeliveryDetailSigningFormRefusedReissue); err != nil {
+		l.warnUnlessGone("failed to mark a floor-form command for re-issue", stewardID, id, err)
+		return
+	}
+	if l.logger != nil {
+		l.logger.Warn("command signed in the floor form for a steward that declared current; it was not run and must be re-issued",
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"command_id", logging.SanitizeLogValue(id))
+	}
+}
+
+// warnUnlessGone logs a store error other than the record being absent or already
+// terminal, which are expected here.
+func (l *LateDeclarationReplay) warnUnlessGone(msg, stewardID, id string, err error) {
+	if l.logger == nil || errors.Is(err, business.ErrCommandNotFound) || errors.Is(err, business.ErrDeliveryStatusTerminal) {
+		return
+	}
+	l.logger.Warn("late-declaration replay: "+msg,
+		"steward_id", logging.SanitizeLogValue(stewardID),
+		"command_id", logging.SanitizeLogValue(id),
+		"error", logging.SanitizeLogValue(err.Error()))
 }
 
 // SlottedConnectHook is a hook with the slot it occupies in the chain.

@@ -107,27 +107,69 @@ func NewCapabilityResolver(conns ConnectionLookup, store StewardRecordReader, lo
 	return r
 }
 
+// Resolution is what the resolver decided for one steward's connection.
+type Resolution struct {
+	// Version is the signing payload version the steward is signed for.
+	Version uint32
+	// ConnectionID identifies the connection the decision was read from. Empty
+	// when it came from the durable record of a connection another node holds,
+	// or from no state at all.
+	ConnectionID string
+	// Undeclared is true while the connection has declared nothing: it is still
+	// pending, or its grace period ended and settled it at the floor profile. A
+	// version of v1 on such a connection is a guess a later declaration can
+	// overturn. It is false for a connection that declared, whatever the set,
+	// and for a decision read from the durable record.
+	Undeclared bool
+}
+
 // SigningVersionFor returns SigningPayloadV1 when the steward's connection
 // resolves to the floor profile and SigningPayloadV2 otherwise. A connection that
 // has not declared is waited on until its start plus the resolve wait, then
 // resolved to the floor for this call only: a later declaration is picked up by
 // the next call. A nil resolver returns v2.
 func (r *CapabilityResolver) SigningVersionFor(ctx context.Context, stewardID string) uint32 {
+	return r.Resolve(ctx, stewardID).Version
+}
+
+// Resolve is SigningVersionFor with the connection the decision was read from.
+func (r *CapabilityResolver) Resolve(ctx context.Context, stewardID string) Resolution {
 	if r == nil {
-		return controlplaneTypes.SigningPayloadV2
+		return Resolution{Version: controlplaneTypes.SigningPayloadV2}
 	}
 	if r.conns != nil {
 		if conn, ok := r.conns.Get(stewardID); ok && conn != nil {
 			return r.fromConnection(ctx, conn)
 		}
 	}
-	return r.fromRecord(ctx, stewardID)
+	return Resolution{Version: r.fromRecord(ctx, stewardID)}
+}
+
+// ConnectionID returns the ID of the connection this node holds for the steward,
+// or "" when it holds none. It reads no capability state and never waits.
+func (r *CapabilityResolver) ConnectionID(stewardID string) string {
+	id, _ := r.Connection(stewardID)
+	return id
+}
+
+// Connection returns the ID of the connection this node holds for the steward
+// and whether that connection has declared its capabilities. It never waits. The
+// ID is "" when this node holds no connection.
+func (r *CapabilityResolver) Connection(stewardID string) (connectionID string, declared bool) {
+	if r == nil || r.conns == nil {
+		return "", false
+	}
+	conn, ok := r.conns.Get(stewardID)
+	if !ok || conn == nil {
+		return "", false
+	}
+	return conn.ConnectionID, conn.CapabilitySnapshot().State == registry.CapabilityDeclared
 }
 
 // fromConnection resolves from the live connection this node holds. Its state is
 // the authority; the durable record is never read, so a record left by an earlier
 // connection cannot be taken for this one.
-func (r *CapabilityResolver) fromConnection(ctx context.Context, conn *registry.StewardConnection) uint32 {
+func (r *CapabilityResolver) fromConnection(ctx context.Context, conn *registry.StewardConnection) Resolution {
 	snap := conn.CapabilitySnapshot()
 	if snap.State == registry.CapabilityPending {
 		if remaining := r.remaining(conn.ConnectedAt); remaining > 0 {
@@ -141,10 +183,13 @@ func (r *CapabilityResolver) fromConnection(ctx context.Context, conn *registry.
 			snap = conn.CapabilitySnapshot()
 		}
 	}
+	res := Resolution{ConnectionID: conn.ConnectionID, Undeclared: snap.State != registry.CapabilityDeclared}
 	if snap.State == registry.CapabilityDeclared {
-		return versionFor(snap.SigningPayloadVersions)
+		res.Version = versionFor(snap.SigningPayloadVersions)
+		return res
 	}
-	return controlplaneTypes.SigningPayloadV1 // floor, or still pending past the bound
+	res.Version = controlplaneTypes.SigningPayloadV1 // floor, or still pending past the bound
+	return res
 }
 
 // fromRecord resolves from the durable record, for a steward whose connection
