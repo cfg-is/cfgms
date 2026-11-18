@@ -403,9 +403,12 @@ type tamperAlarm struct {
 	// tamper.locked instead of the fault code, so the controller accepts a
 	// restore. It is read and written on the run goroutine only.
 	faultCleared bool
-	// published is the code and message last handed to publishReason. It is
+	// published is the code and message last sent on publishedOn, and publishedOn
+	// the link that carried it. A reason is recorded only once a link is open, so
+	// a change made while the link is down is still sent when it opens. Both are
 	// read and written on the run goroutine only.
-	published reasonKey
+	published   reasonKey
+	publishedOn *client.TransportClient
 	// sends tracks the on-change heartbeats publishReason started. run waits for
 	// them before it returns, so none outlives run and reads alarm state the
 	// caller then rewrites.
@@ -603,10 +606,12 @@ type reasonKey struct{ code, msg string }
 // publishReason sets the reason the heartbeat carries. Once the local fault has
 // cleared it is tamper.locked with the cleared message, so the heartbeat no
 // longer carries a tamper code; a latch that only records a controller lock keeps
-// that lock's own message. A reason that changed while the link is open is sent
-// at once: a restore waits on the controller seeing tamper.locked, and a fault
-// that returns must not stay unreported until the next periodic heartbeat (20 s
-// plus up to 10 s of jitter, and none at all if that one fails to send).
+// that lock's own message. A reason that changed, or any reason on a link that
+// has not carried it yet, is sent at once: a restore waits on the controller
+// seeing tamper.locked, and a fault that returns must not stay unreported until
+// the next periodic heartbeat (20 s plus up to 10 s of jitter, and none at all if
+// that one fails to send). While the link is down nothing is recorded as
+// published, so the change is sent as soon as a link opens.
 func (a *tamperAlarm) publishReason(ctx context.Context, tc *client.TransportClient) {
 	code := a.latch.primaryCode()
 	msg := tamperMessages[code]
@@ -615,11 +620,11 @@ func (a *tamperAlarm) publishReason(ctx context.Context, tc *client.TransportCli
 	}
 	startupReasons.Set(tamperReasonComponent, code, msg)
 	key := reasonKey{code: code, msg: msg}
-	changed := key != a.published
-	a.published = key
 	if tc == nil {
 		return
 	}
+	changed := key != a.published || tc != a.publishedOn
+	a.published, a.publishedOn = key, tc
 	tc.SetHealthReason(tamperReasonComponent, code, msg)
 	if changed {
 		// Read on the run goroutine: the caller may replace a.logger once run

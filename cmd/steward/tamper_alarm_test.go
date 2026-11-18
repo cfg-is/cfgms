@@ -611,6 +611,59 @@ func TestTamperAlarm_ReasonChange_IsReportedWithoutWaitingForThePeriodicHeartbea
 	require.NoError(t, stop())
 }
 
+// A reason that changes while the link is down is not recorded as published: the
+// link that opens afterwards reports it at once instead of leaving it to the
+// periodic heartbeat.
+func TestTamperAlarm_ReasonChangedWhileLinkDown_IsReportedWhenLinkOpens(t *testing.T) {
+	e := newAlarmEnv(t, trustSourceCompileBaked)
+	var storeDir atomic.Pointer[string]
+	absent := t.TempDir()
+	storeDir.Store(&absent)
+	certStoreDirResolver = func() string { return *storeDir.Load() }
+
+	latch := openTamperLatch(e.f.dir, logging.NewNoopLogger())
+	latch.raise(cpTypes.ReasonCodeTamperDataDir)
+	var fault atomic.Pointer[tamperFault]
+	fault.Store(&tamperFault{code: cpTypes.ReasonCodeTamperDataDir})
+	alarm := &tamperAlarm{
+		latch:  latch,
+		rescan: func() *tamperFault { return fault.Load() },
+		logger: logging.NewNoopLogger(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = alarm.run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	// The link cannot open (no identity in the store): the fault clears meanwhile.
+	fault.Store(nil)
+	require.Eventually(t, func() bool {
+		for _, r := range startupReasons.List() {
+			if r.Component == tamperReasonComponent {
+				return r.Code == client.ReasonTamperLocked
+			}
+		}
+		return false
+	}, 10*time.Second, 20*time.Millisecond, "the cleared fault is recorded while the link is down")
+	require.Equal(t, int32(0), e.connect.Load())
+	select {
+	case hb := <-e.f.srv.heartbeats:
+		t.Fatalf("a heartbeat arrived while the link was down: %+v", hb)
+	default:
+	}
+
+	storeDir.Store(&e.f.dir)
+	hb := promptHeartbeat(t, e.f.srv, client.ReasonTamperLocked, 10*time.Second)
+	assert.Equal(t, tamperClearedMessage, reasonWithCode(hb, client.ReasonTamperLocked).Message)
+	assert.Equal(t, cpTypes.StatusError, hb.Status)
+}
+
 // A restart after the operator fixed the host reports tamper.locked from the
 // start-of-run check, never the persisted fault code.
 func TestTamperAlarm_FaultClearedBeforeStart_NeverReportsFaultCode(t *testing.T) {
