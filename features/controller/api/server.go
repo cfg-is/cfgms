@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -245,6 +246,8 @@ type Server struct {
 	tamperNotify                    tamperNotifyState                        // Issue #5652: per-steward tamper notification cooldown (node-local)
 	lockedAdmission                 lockedAdmissionState                     // Issue #5671: per-token cap and notification window for broken-trust admissions
 	crossingNotifyWG                sync.WaitGroup                           // Issue #4713: tracks in-flight break-glass announcement goroutines so Close() can wait for them before the audit manager stops
+	shutdownCtx                     context.Context                          // Issue #6326: parent of every detached store-touching goroutine (cert-binding persists, API-key index scans); cancelled at the start of teardown so Close() bounds them
+	shutdownCancel                  context.CancelFunc                       // Issue #6326: cancels shutdownCtx; nil on *Server literals built without New()
 	certBindingLastUsedWG           sync.WaitGroup                           // Issue #3715: tracks in-flight recordCertBindingUse goroutines so Close() can wait for them before secretStore.Close()
 	onCertBindingLastUsedPersisted  func(username, serial string, err error) // Issue #3715: test-only lifecycle hook; nil in production. Fired after each async last-used persist attempt (success or failure).
 	cliLoginLodgeLimiter            *sourceRateLimiter                       // Issue #3721: per-source rate limit on cli-login lodge
@@ -396,6 +399,9 @@ func New(
 
 	trustedProxies := parseTrustedProxies(cfg, logger)
 
+	// Issue #6326: cancelled at the start of teardown (see Server.Close).
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+
 	server := &Server{
 		cfg:                     cfg,
 		logger:                  logger,
@@ -427,6 +433,8 @@ func New(
 		sessionCfg:              session.DefaultConfig(), // Issue #2232: ADR-014 session lifecycle tunables
 		stopCleanup:             make(chan struct{}),
 		cleanupDone:             make(chan struct{}),
+		shutdownCtx:             shutdownCtx,
+		shutdownCancel:          shutdownCancel,
 		// Issue #3717: per-source rate limits on enrolment-token mint and credential-request
 		// lodge. Limits are deliberately generous (mint is an occasional admin action; lodge
 		// is a one-shot per enrolling machine) — they exist to bound abuse, not normal use.
@@ -1376,28 +1384,86 @@ func (s *Server) Close(ctx context.Context) error {
 	errs := &closeErrors{}
 	s.closeOnce.Do(func() { s.teardown(ctx, errs) })
 	s.closeListeners()
-	return errs.first
+	return errs.result(ctx)
 }
 
-// closeErrors keeps the first error teardown hit; later failures are dropped.
+// closeErrors keeps the first error teardown hit; later failures are dropped. It
+// also records when each teardown stage began, so a deadline error can be pinned on
+// the stage that was running when the deadline passed (Issue #6326).
 type closeErrors struct {
-	first error
+	first      error
+	firstStage string
+	stages     []closeStage
+}
+
+// closeStage is one teardown stage and the time it began.
+type closeStage struct {
+	name  string
+	start time.Time
+}
+
+// enter marks the start of the teardown stage called name. Later errors recorded
+// by that stage are attributed to it.
+func (e *closeErrors) enter(name string) {
+	e.stages = append(e.stages, closeStage{name: name, start: time.Now()})
 }
 
 func (e *closeErrors) record(err error) {
 	if err != nil && e.first == nil {
 		e.first = err
+		if n := len(e.stages); n > 0 {
+			e.firstStage = e.stages[n-1].name
+		}
 	}
+}
+
+// result returns the first error teardown hit. When that error is the shared
+// context's expiry, the stage that observed it is not necessarily the one that
+// consumed the budget: a stage that finishes late lets the next one see an
+// already-expired context. The error is then re-attributed to the stage that was
+// running when ctx's deadline passed, keeping the "api server close: timed out
+// waiting for <stage>" text shape.
+func (e *closeErrors) result(ctx context.Context) error {
+	if e.first == nil {
+		return nil
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok || !errors.Is(e.first, context.DeadlineExceeded) {
+		return e.first
+	}
+	running := ""
+	for _, st := range e.stages {
+		if st.start.After(deadline) {
+			break
+		}
+		running = st.name
+	}
+	if running == "" || running == e.firstStage {
+		return e.first
+	}
+	return fmt.Errorf("api server close: timed out waiting for %s: %w", running, context.DeadlineExceeded)
 }
 
 // teardown is the once-guarded body of Close: it stops the goroutines, caches and
 // stores this Server owns, then shuts the servers down.
 func (s *Server) teardown(ctx context.Context, errs *closeErrors) {
+	// Issue #6326: cancel the server-owned shutdown context first. Detached
+	// store-touching goroutines (cert-binding last-used persists, API-key index
+	// scans) derive their contexts from it, so they stop at the store instead of
+	// running to their own 30 s timeouts, and nothing new starts once shutdown has
+	// begun. The WaitGroup wait below then only covers work already unwinding, and
+	// secretStore.Close() still runs after every such goroutine has returned
+	// (Issues #3715, #4574).
+	if s.shutdownCancel != nil {
+		s.shutdownCancel()
+	}
+
 	s.stopExpirySweeps(ctx, errs)
 
 	// Issue #4713: break-glass announcements write a follow-up audit entry, so
 	// they finish before the audit manager stops. Each is bounded by
 	// tenantCrossingNotifyTimeout.
+	errs.enter("break-glass notifications")
 	errs.record(waitGroupOrTimeout(ctx, "break-glass notifications", s.crossingNotifyWG.Wait))
 
 	s.stopAuditAndServices(ctx, errs)
@@ -1407,6 +1473,7 @@ func (s *Server) teardown(ctx context.Context, errs *closeErrors) {
 	// is closed below — otherwise a goroutine can still be writing to the store
 	// after Close() returns, racing whatever the caller does next (e.g. a test's
 	// t.TempDir() cleanup deleting the directory out from under an in-flight write).
+	errs.enter("cert-binding last-used persistence")
 	errs.record(waitGroupOrTimeout(ctx, "cert-binding last-used persistence", func() {
 		s.certBindingLastUsedWG.Wait()
 		// Issue #4574: detached API-key index scans read the same store.
@@ -1416,9 +1483,21 @@ func (s *Server) teardown(ctx context.Context, errs *closeErrors) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	errs.enter("auth defense and secret store")
 	s.stopAuthDefenseAndSecretStore(ctx, errs)
+	errs.enter("http servers")
 	s.shutdownHTTPServers(ctx, errs)
+	errs.enter("delivery server")
 	s.stopDeliveryServer(ctx, errs)
+}
+
+// shutdownContext returns the context cancelled when Close begins. A *Server built
+// as a literal without New() has none, and its goroutines run unbounded as before.
+func (s *Server) shutdownContext() context.Context {
+	if s.shutdownCtx == nil {
+		return context.Background()
+	}
+	return s.shutdownCtx
 }
 
 // awaitDone waits for done, or for ctx to expire, in which case it returns the
@@ -1449,6 +1528,7 @@ func (s *Server) stopExpirySweeps(ctx context.Context, errs *closeErrors) {
 	// Signal the cleanup goroutine to exit — do this before acquiring s.mu
 	// to avoid deadlock: cleanupExpiredAPIKeys also holds s.mu.
 	close(s.stopCleanup)
+	errs.enter("cleanup goroutine")
 	errs.record(awaitDone(ctx, "cleanup goroutine", s.cleanupDone))
 
 	// The sweeps are guarded by nil checks (unlike stopCleanup above) because
@@ -1473,6 +1553,7 @@ func (s *Server) stopExpirySweeps(ctx context.Context, errs *closeErrors) {
 	for _, sweep := range sweeps {
 		if sweep.stop != nil {
 			close(sweep.stop)
+			errs.enter(sweep.what)
 			errs.record(awaitDone(ctx, sweep.what, sweep.done))
 		}
 	}
@@ -1483,10 +1564,12 @@ func (s *Server) stopExpirySweeps(ctx context.Context, errs *closeErrors) {
 func (s *Server) stopAuditAndServices(ctx context.Context, errs *closeErrors) {
 	// Stop audit manager before closing the HTTP server so that any
 	// in-flight audit writes can still reach storage.
+	errs.enter("audit manager")
 	if s.auditManager != nil {
 		errs.record(s.auditManager.Stop(ctx))
 	}
 
+	errs.enter("execution queue and config service")
 	// Stop the execution queue, which also stops its EphemeralKeyManager goroutine.
 	if s.runExecutionQueue != nil {
 		s.runExecutionQueue.Stop()

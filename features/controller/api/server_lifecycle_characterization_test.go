@@ -7,8 +7,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -701,4 +704,174 @@ func TestServerlifecycleChar_Close_DeliveryServerDrainTimeout(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Contains(t, err.Error(), "api server close: timed out stopping internal delivery server")
+}
+
+// serverlifecycleCharGatedSecretStore wraps a real SecretStore and parks every
+// StoreSecret call, and every ListSecrets call that looks up a cert-binding
+// last-used record, until its context is cancelled or the test
+// releases the gate. Fault injection around a real store, not a mock. It counts
+// the writes that actually reached the wrapped store.
+type serverlifecycleCharGatedSecretStore struct {
+	secretsif.SecretStore
+	entered   chan struct{}
+	enterOnce sync.Once
+	release   chan struct{}
+	relOnce   sync.Once
+	mu        sync.Mutex
+	writes    int
+}
+
+func newServerlifecycleCharGatedSecretStore(inner secretsif.SecretStore) *serverlifecycleCharGatedSecretStore {
+	return &serverlifecycleCharGatedSecretStore{
+		SecretStore: inner,
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+}
+
+func (g *serverlifecycleCharGatedSecretStore) releaseGate() {
+	g.relOnce.Do(func() { close(g.release) })
+}
+
+func (g *serverlifecycleCharGatedSecretStore) gate(ctx context.Context) error {
+	g.enterOnce.Do(func() { close(g.entered) })
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-g.release:
+		return nil
+	}
+}
+
+func (g *serverlifecycleCharGatedSecretStore) ListSecrets(ctx context.Context, filter *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
+	// Only the persist path's lookup is gated; the authentication that precedes
+	// it loads the account through other lists and must not park.
+	if filter != nil && filter.Metadata[secretsif.MetadataKeySecretType] == certBindingLastUsedSecretType {
+		if err := g.gate(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return g.SecretStore.ListSecrets(ctx, filter)
+}
+
+func (g *serverlifecycleCharGatedSecretStore) StoreSecret(ctx context.Context, req *secretsif.SecretRequest) error {
+	if err := g.gate(ctx); err != nil {
+		return err
+	}
+	g.mu.Lock()
+	g.writes++
+	g.mu.Unlock()
+	return g.SecretStore.StoreSecret(ctx, req)
+}
+
+func (g *serverlifecycleCharGatedSecretStore) writeCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.writes
+}
+
+// TestServerClose_CancelsInFlightCertBindingPersist proves Close does not wait out
+// a cert-binding last-used persist that is blocked in the store (Issue #6326): the
+// server-owned shutdown context cancels it, Close returns inside its budget, and no
+// store write happens once Close has returned — including for a request that
+// arrives after shutdown began. The gate is only released after Close returns, so
+// the sole thing that can end the parked persist inside Close is cancellation.
+func TestServerClose_CancelsInFlightCertBindingPersist(t *testing.T) {
+	srv := setupTestServer(t)
+
+	peerCert := makeAdminCertWithAttrs(t, 87101, "close-cancel-admin", false)
+	serial := peerCert.SerialNumber.String()
+	srv.cacheAccount(&account{
+		ID:           "acct-close-cancel",
+		Username:     "close-cancel-operator",
+		TenantID:     "msp-a",
+		Permissions:  []string{"steward:read"},
+		CertBindings: []CertBinding{{Serial: serial}},
+	})
+
+	gated := newServerlifecycleCharGatedSecretStore(srv.secretStore)
+	t.Cleanup(gated.releaseGate)
+	srv.secretStore = gated
+
+	persisted := make(chan error, 1)
+	srv.onCertBindingLastUsedPersisted = func(_, _ string, err error) { persisted <- err }
+
+	require.NotNil(t, srv.extractAdminPrincipal(requestWithTLSCert(http.MethodGet, "/api/v1/test", peerCert)))
+	select {
+	case <-gated.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cert-binding persist never reached the store")
+	}
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	require.NoError(t, srv.Close(closeCtx), "Close must cancel the blocked persist instead of waiting on it")
+	assert.Less(t, time.Since(start), 3*time.Second)
+
+	select {
+	case persistErr := <-persisted:
+		assert.ErrorIs(t, persistErr, context.Canceled)
+	default:
+		t.Fatal("Close returned before the in-flight persist finished")
+	}
+
+	// A different serial after shutdown began must not start a persist.
+	lateCert := makeAdminCertWithAttrs(t, 87102, "close-cancel-late", false)
+	srv.cacheAccount(&account{
+		ID:           "acct-close-cancel-late",
+		Username:     "close-cancel-late-operator",
+		TenantID:     "msp-a",
+		Permissions:  []string{"steward:read"},
+		CertBindings: []CertBinding{{Serial: lateCert.SerialNumber.String()}},
+	})
+	_ = srv.extractAdminPrincipal(requestWithTLSCert(http.MethodGet, "/api/v1/test", lateCert))
+
+	// Let anything still parked proceed: if a write was going to happen after
+	// Close returned, it happens now.
+	gated.releaseGate()
+	time.Sleep(150 * time.Millisecond)
+	assert.Equal(t, 0, gated.writeCount(), "no store write may happen after Close returns")
+}
+
+// TestCloseErrors_AttributesDeadlineToRunningStage pins the Issue #6326 error
+// attribution: a deadline error names the stage that was running when the deadline
+// passed, even when a later stage is the one that observed the expiry.
+func TestCloseErrors_AttributesDeadlineToRunningStage(t *testing.T) {
+	base := time.Now()
+	deadline := base.Add(5 * time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+
+	stages := []closeStage{
+		{name: "cleanup goroutine", start: base},
+		{name: "audit manager", start: base.Add(1 * time.Second)},
+		{name: "execution queue and config service", start: base.Add(2 * time.Second)},
+		// The deadline passes inside the stage above, which returns without
+		// error; the next stage starts after it and is the one to see the expiry.
+		{name: "cert-binding last-used persistence", start: base.Add(9 * time.Second)},
+	}
+	observed := fmt.Errorf("api server close: timed out waiting for cert-binding last-used persistence: %w", context.DeadlineExceeded)
+
+	t.Run("re-attributes to the stage running at the deadline", func(t *testing.T) {
+		errs := &closeErrors{stages: stages, first: observed, firstStage: "cert-binding last-used persistence"}
+		err := errs.result(ctx)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.Contains(t, err.Error(), "api server close: timed out waiting for execution queue and config service")
+	})
+
+	t.Run("keeps the error when the observing stage was running at the deadline", func(t *testing.T) {
+		errs := &closeErrors{stages: stages[:2], first: observed, firstStage: "audit manager"}
+		assert.Equal(t, observed, errs.result(ctx))
+	})
+
+	t.Run("leaves non-deadline errors alone", func(t *testing.T) {
+		other := fmt.Errorf("close secret store: boom")
+		errs := &closeErrors{stages: stages, first: other, firstStage: "auth defense and secret store"}
+		assert.Equal(t, other, errs.result(ctx))
+	})
+
+	t.Run("no error stays nil", func(t *testing.T) {
+		assert.NoError(t, (&closeErrors{stages: stages}).result(ctx))
+	})
 }

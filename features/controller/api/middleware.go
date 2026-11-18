@@ -677,13 +677,26 @@ func (s *Server) recordCertBindingUse(username, tenantID, serial string) {
 			return
 		}
 	}
+	// Issue #6326: once Close() has begun, nothing new starts — a persist that
+	// began after teardown cancelled the shutdown context would only race
+	// secretStore.Close(). The last-used timestamp is an observability signal, so
+	// skipping it during shutdown loses nothing that authorization depends on.
+	shutdownCtx := s.shutdownContext()
+	if shutdownCtx.Err() != nil {
+		return
+	}
 	s.certBindingLastUsedThrottle.Store(serial, now)
 
 	s.certBindingLastUsedWG.Add(1)
 	go func() {
 		defer s.certBindingLastUsedWG.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// Derived from the server-owned shutdown context (Issue #6326) so Close()
+		// cancels an in-flight write instead of waiting out the 30 s bound.
+		ctx, cancel := context.WithTimeout(shutdownCtx, 30*time.Second)
 		defer cancel()
+		if ctx.Err() != nil {
+			return
+		}
 		err := s.persistCertBindingLastUsed(ctx, username, tenantID, serial, now)
 		if err != nil {
 			s.logger.Warn("Failed to persist certificate binding last-used timestamp",

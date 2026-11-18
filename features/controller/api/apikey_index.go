@@ -98,8 +98,8 @@ const apiKeyIndexRefreshTimeout = 30 * time.Second
 // waits for the result. Concurrent callers share a single in-flight scan rather than
 // starting scans of their own.
 //
-// The scan runs on its own detached context with apiKeyIndexRefreshTimeout, never on
-// a caller's: a client that aborts the request which happened to start the scan must
+// The scan runs on its own detached context with apiKeyIndexRefreshTimeout (and
+// cancelled when Close() begins), never on a caller's: a client that aborts the request which happened to start the scan must
 // not cancel it for everyone waiting on it. A caller whose own ctx ends stops waiting
 // (and gets ctx.Err()) while the scan carries on. A scan that ends in a context error
 // does not count as an attempt for apiKeyIndexMissRefreshFloor, so it cannot hold
@@ -155,7 +155,9 @@ func (s *Server) runAPIKeyIndexScan(done chan struct{}, prevAttempt time.Time) {
 	defer s.apiKeyIndexWG.Done()
 	ix := s.apiKeyIdx
 
-	scanCtx, cancel := context.WithTimeout(context.Background(), apiKeyIndexRefreshTimeout)
+	// Issue #6326: derived from the server-owned shutdown context, so Close()
+	// cancels the scan rather than waiting out apiKeyIndexRefreshTimeout.
+	scanCtx, cancel := context.WithTimeout(s.shutdownContext(), apiKeyIndexRefreshTimeout)
 	defer cancel()
 	records, err := s.secretStore.ListSecrets(scanCtx, &secretsif.SecretFilter{
 		Metadata: map[string]string{

@@ -298,6 +298,13 @@ type Manager struct {
 	// guarantee the goroutine has returned before returning.
 	done chan struct{}
 
+	// writeCtx bounds every store write drainLoop makes. Stop cancels it when its
+	// own context expires before the drain finishes, so a store call that is
+	// blocked cannot outlive shutdown (Issue #6326). drainLoop cancels it on exit
+	// to release the context.
+	writeCtx    context.Context
+	writeCancel context.CancelFunc
+
 	// stopOnce guarantees Stop is idempotent.
 	stopOnce sync.Once
 
@@ -380,19 +387,23 @@ func NewManager(store business.AuditStore, source string, opts ...managerOption)
 		return nil, fmt.Errorf("audit manager requires non-empty source identifier")
 	}
 
+	writeCtx, writeCancel := context.WithCancel(context.Background())
 	m := &Manager{
-		store:    store,
-		source:   source,
-		queue:    make(chan *business.AuditEntry, defaultQueueCapacity),
-		flushReq: make(chan chan struct{}),
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
-		logger:   slog.Default().With("component", "audit", "source", source),
+		writeCtx:    writeCtx,
+		writeCancel: writeCancel,
+		store:       store,
+		source:      source,
+		queue:       make(chan *business.AuditEntry, defaultQueueCapacity),
+		flushReq:    make(chan chan struct{}),
+		stop:        make(chan struct{}),
+		done:        make(chan struct{}),
+		logger:      slog.Default().With("component", "audit", "source", source),
 	}
 
 	ctx := context.Background()
 	for _, opt := range opts {
 		if err := opt(m, ctx); err != nil {
+			writeCancel()
 			return nil, fmt.Errorf("audit manager option failed: %w", err)
 		}
 	}
@@ -401,6 +412,7 @@ func NewManager(store business.AuditStore, source string, opts ...managerOption)
 	if m.hmacKey == nil {
 		key := make([]byte, 32)
 		if _, err := rand.Read(key); err != nil {
+			writeCancel()
 			return nil, fmt.Errorf("failed to generate audit HMAC key: %w", err)
 		}
 		m.hmacKey = key
@@ -417,6 +429,7 @@ func NewManager(store business.AuditStore, source string, opts ...managerOption)
 // On stop, it drains remaining entries and exits.
 func (m *Manager) drainLoop() {
 	defer close(m.done)
+	defer m.writeCancel()
 
 	for {
 		select {
@@ -493,10 +506,18 @@ const (
 // returned successfully for it, so the loss can no longer reach the original
 // caller directly; Flush and Stop surface the cumulative count instead
 // (Issue #4098, AC9).
+//
+// Writes run under m.writeCtx: once Stop gives up waiting (its context expired),
+// an in-flight append is cancelled and the rest of the batch is counted as lost
+// without touching the store (Issue #6326).
 func (m *Manager) writeBatch(entries []*business.AuditEntry) {
-	ctx := context.Background()
+	ctx := m.writeCtx
 	for _, entry := range entries {
-		if err := m.appendWithRetry(ctx, entry); err != nil {
+		var err error
+		if err = ctx.Err(); err == nil {
+			err = m.appendWithRetry(ctx, entry)
+		}
+		if err != nil {
 			m.lostEntries.Add(1)
 			m.logger.Error("audit entry permanently lost after exhausting append retries",
 				"error", logging.SanitizeLogValue(err.Error()),
@@ -513,7 +534,11 @@ func (m *Manager) appendWithRetry(ctx context.Context, entry *business.AuditEntr
 	var lastErr error
 	for attempt := 0; attempt < maxAppendAttempts; attempt++ {
 		if attempt > 0 {
-			time.Sleep(appendRetryDelay * time.Duration(attempt))
+			select {
+			case <-time.After(appendRetryDelay * time.Duration(attempt)):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 		lastErr = m.store.AppendChainedEntry(ctx, entry.TenantID, entry, m.generateChecksum)
 		if lastErr == nil {
@@ -662,8 +687,9 @@ func (m *Manager) Flush(ctx context.Context) error {
 // lost-entry count (see Flush), not just the first call.
 //
 // If ctx is cancelled before the flush completes, Stop returns the context
-// error but still signals the drain goroutine to exit. The goroutine will
-// continue draining the queue in the background on a best-effort basis.
+// error, signals the drain goroutine to exit and cancels its in-flight store
+// write, so a blocked store call cannot outlive shutdown (Issue #6326). Entries
+// not yet written at that point are counted as lost (see Flush).
 func (m *Manager) Stop(ctx context.Context) error {
 	var ctxErr error
 
@@ -694,6 +720,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	})
 
 	if ctxErr != nil {
+		m.writeCancel()
 		return ctxErr
 	}
 	// Runs on every call, including calls after the first: m.lostEntries is a
