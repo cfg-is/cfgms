@@ -888,6 +888,20 @@ Three endpoints back the operator verbs; the [identity clone runbook](../runbook
 
 ### Steward Capability Record (Issue #6310)
 
+The capability record, the signing-form selection and the command-type gate below
+are the controller's half of the steward command compatibility contract
+([ADR-037](decisions/037-steward-command-compatibility.md)). The **support floor**
+is the oldest steward release the controller must keep serving, currently v0.10.5
+(`test/compat/steward-support.yaml`); `FloorProfile()` is what the controller
+assumes for a connection that never declares. The floor applies to one connection
+only, and for a floor steward the controller, not the steward, produces
+"unsupported". The compat harness covers the type 14 (steward action) check at
+controller-test level and the type 15 (advertise transport address) check at e2e
+level; there is no e2e type-14 scenario. A floor steward connected to a controller
+node that predates the declaration has no record, is treated as current and is
+refused version 2 commands until it reconnects to an upgraded node (a one-time
+window at the first rollout).
+
 A steward declares which command types and signing payload versions its build
 handles in the first message of each control-channel stream (see the
 [steward operating model](steward-operating-model.md#capability-declaration-issue-6310)).

@@ -83,6 +83,7 @@ What becomes easier or harder by making this decision?
 | [034](034-steward-identity-clones.md) | Steward Identity Clones — Detection, Split and Removal | 2026-10-11 | Accepted |
 | [035](035-admin-declared-cluster-membership.md) | Admin-Declared Cluster Membership | 2026-10-21 | Accepted |
 | [036](036-scoped-automation-grants-and-pre-approved-content.md) | Scoped Automation Grants and Pre-Approved Content | 2026-10-23 | Accepted |
+| [037](037-steward-command-compatibility.md) | Steward Command Compatibility — Capability Declaration, Connection-Scoped Floor and the Support-Floor Rule | 2026-11-18 | Accepted |
 
 ### Superseded/Deprecated
 

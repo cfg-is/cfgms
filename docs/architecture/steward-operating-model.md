@@ -149,6 +149,18 @@ declaration must not be.
 
 A report-only steward declares as well; the message carries no authority.
 
+**The contract and the floor.** The declaration is one part of the steward command
+compatibility contract ([ADR-037](decisions/037-steward-command-compatibility.md)):
+the current controller keeps serving the oldest supported steward release, the
+**support floor** (v0.10.5, defined in `test/compat/steward-support.yaml`), without
+that steward changing. A floor steward predates the declaration and sends none, so
+the controller serves it the floor profile (command types 1 to 13, signing payload
+version 1) for that connection only. For a floor steward "unsupported" is produced
+by the controller, never by the steward: steward action (type 14) and advertise
+transport address (type 15) are not sent to it. A current steward refuses a stamped
+version 1 command and an unmapped command type, as described under "Version skew"
+below. Moving the floor is a support-window change; see ADR-037 §8.
+
 ### Shutdown
 
 1. Complete any in-progress resource operations
