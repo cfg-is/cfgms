@@ -1453,6 +1453,8 @@ func (s *Server) recordRegisteredSteward(r *http.Request, adm *registerAdmission
 		IdentityKeyPub:     adm.keyBytes,
 		KeyProtectionLevel: req.KeyProtectionLevel,
 		KeyAlgorithm:       req.KeyAlgorithm,
+		Hostname:           req.Hostname,
+		Platform:           req.OS,
 	}); storeErr != nil {
 		s.logger.Error("Failed to persist device identity to steward store",
 			"steward_id", logging.SanitizeLogValue(stewardID),
