@@ -155,3 +155,64 @@ func TestCompositeOnConnectHook_RealRegistryHookFiresAfterEarlierError(t *testin
 	assert.Equal(t, "active", info.Status)
 	assert.Equal(t, "tenant-a", info.TenantID)
 }
+
+// TestConnectHookOrder_NonSigningHooksPrecedeTheFirstSigningHook proves the chain
+// order: a hook that waits on the connection's capability declaration to sign must
+// not sit ahead of a hook that does not sign, because the chain is sequential.
+func TestConnectHookOrder_NonSigningHooksPrecedeTheFirstSigningHook(t *testing.T) {
+	order := connectHookOrder()
+	require.Len(t, order, 9)
+
+	firstSigning := -1
+	for i, slot := range order {
+		if slot.signs() {
+			firstSigning = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, firstSigning, 0, "the chain has signing hooks")
+	for i, slot := range order {
+		if i > firstSigning {
+			assert.True(t, slot.signs(), "%s follows the first signing hook and must itself sign", slot)
+		} else if i < firstSigning {
+			assert.False(t, slot.signs(), "%s precedes the first signing hook", slot)
+		}
+	}
+
+	seen := map[ConnectHookSlot]bool{}
+	for _, slot := range order {
+		assert.False(t, seen[slot], "%s listed twice", slot)
+		seen[slot] = true
+	}
+	// Lockdown moves ahead of the signing push, the safer direction.
+	assert.Less(t, indexOfSlot(order, SlotLockdown), indexOfSlot(order, SlotSigningRotation))
+}
+
+func indexOfSlot(order []ConnectHookSlot, slot ConnectHookSlot) int {
+	for i, s := range order {
+		if s == slot {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestNewOrderedCompositeOnConnectHook_RunsInConnectHookOrder proves the chain runs
+// in the declared order whatever order the hooks are handed over in, skips a nil
+// hook, and runs a hook with an unknown slot last.
+func TestNewOrderedCompositeOnConnectHook_RunsInConnectHookOrder(t *testing.T) {
+	var calls []string
+	mk := func(slot ConnectHookSlot) SlottedConnectHook {
+		return SlottedConnectHook{Slot: slot, Hook: &stubHook{calls: &calls, name: string(slot)}}
+	}
+	composite := NewOrderedCompositeOnConnectHook(logging.NewNoopLogger(),
+		mk(SlotTransportAddress), mk(SlotSigningRotation), mk("unknown"), mk(SlotRegistry),
+		SlottedConnectHook{Slot: SlotRouting}, mk(SlotDrain), mk(SlotLockdown), mk(SlotMigration), mk(SlotRepair),
+		mk(SlotCompletionReconcile))
+	require.NoError(t, composite.OnConnect(context.Background(), "dev-1"))
+
+	assert.Equal(t, []string{
+		"registry", "completion_reconciler", "lockdown", "repair",
+		"signing_rotation", "migration", "drain", "transport_address", "unknown",
+	}, calls)
+}

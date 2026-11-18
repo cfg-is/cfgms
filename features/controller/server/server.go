@@ -1684,12 +1684,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		scriptKeyManager = scriptmodule.NewEphemeralKeyManager()
 		// The script library is stored per tenant; the queue resolves a library run
 		// from the run's tenant, and the API server serves the caller's tenant.
-		if cs := storageManager.GetConfigStore(); cs != nil {
-			var libErr error
-			scriptLibrary, libErr = scriptmodule.NewTenantScriptRepository(cs)
-			if libErr != nil {
-				return nil, fmt.Errorf("failed to create script library: %w", libErr)
-			}
+		var libErr error
+		if scriptLibrary, libErr = newScriptLibrary(storageManager); libErr != nil {
+			return nil, libErr
 		}
 		// Issue #4528: in cluster mode the queue is the shared database store, so
 		// the node holding a steward's session dispatches its work whichever node
@@ -1704,12 +1701,17 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			scriptRepoForQueue(scriptLibrary), // per-tenant script library (nil when no config store)
 			0,                                 // dispatchTimeout — defaults to 1 h
 		)
+		// Every controller-signed command (publisher, dispatcher, relay) picks its
+		// signing payload version from this resolver: v1 for a steward whose
+		// connection resolves to the floor profile, v2 otherwise.
+		signingVersions := commands.NewCapabilityResolver(connRegistry, storageManager.GetStewardStore(), logger)
 		var dispatcherErr error
 		jobDispatcher, dispatcherErr = dispatcher.New(&dispatcher.Config{
 			Queue:              executionQueue,
 			ControlPlane:       dispatchControlPlane,
 			Signer:             commandSigner,
 			SignerChains:       signerChains,
+			SigningVersions:    signingVersions,
 			RequireSignedAdhoc: cfg.Execution.RequireSignedAdhoc,
 			IsLocallyConnected: isLocallyConnected,
 			// Issue #5665: refuse before preparing a payload for a locked steward.
@@ -1780,11 +1782,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// carries the current Raft term for steward-side fencing (#3436).
 		logger.Info("Initializing command publisher...")
 		commandPublisher, err = commands.New(&commands.Config{
-			ControlPlane: dispatchControlPlane,
-			Signer:       commandSigner,
-			SignerChains: signerChains,
-			TermSource:   ha.CommandTermSource{Manager: haManager},
-			Logger:       logger,
+			ControlPlane:    dispatchControlPlane,
+			Signer:          commandSigner,
+			SignerChains:    signerChains,
+			SigningVersions: signingVersions,
+			TermSource:      ha.CommandTermSource{Manager: haManager},
+			Logger:          logger,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize command publisher: %w", err)
@@ -4957,6 +4960,20 @@ type controlPlaneStage struct {
 	stewardMigrationSvc *service.StewardSigningMigrationService
 }
 
+// newScriptLibrary builds the per-tenant script library over the config store. It
+// returns nil when the storage manager has no config store.
+func newScriptLibrary(storageManager *interfaces.StorageManager) (*scriptmodule.TenantScriptRepository, error) {
+	cs := storageManager.GetConfigStore()
+	if cs == nil {
+		return nil, nil
+	}
+	library, err := scriptmodule.NewTenantScriptRepository(cs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create script library: %w", err)
+	}
+	return library, nil
+}
+
 // newControlPlaneStage builds and initializes the shared gRPC control plane
 // provider (Story #515) together with the connection registry, lockdown and
 // on-connect hooks it is composed from. The shared gRPC server is created fresh
@@ -5059,7 +5076,13 @@ func newConnectHooks(in *controlPlaneInputs, connRegistry registry.Registry, ste
 	drainHook := service.NewPendingDeliveryDrainHook(in.storageManager.GetCommandStore(), stewardStore, nil, logger)
 	hooks := &connectHooks{routingStore: routingStore, routingHook: routingHook, drainHook: drainHook}
 	if in.certManager == nil {
-		hooks.composite = service.NewCompositeOnConnectHook(logger, registryConnectHook, completionReconciler, routingHook, drainHook, lockdown, in.repairConnect)
+		hooks.composite = service.NewOrderedCompositeOnConnectHook(logger,
+			service.SlottedConnectHook{Slot: service.SlotRegistry, Hook: registryConnectHook},
+			service.SlottedConnectHook{Slot: service.SlotCompletionReconcile, Hook: completionReconciler},
+			service.SlottedConnectHook{Slot: service.SlotRouting, Hook: routingHook},
+			service.SlottedConnectHook{Slot: service.SlotLockdown, Hook: lockdown},
+			service.SlottedConnectHook{Slot: service.SlotRepair, Hook: in.repairConnect},
+			service.SlottedConnectHook{Slot: service.SlotDrain, Hook: drainHook})
 		return hooks, nil
 	}
 	var svcErr error
@@ -5074,7 +5097,19 @@ func newConnectHooks(in *controlPlaneInputs, connRegistry registry.Registry, ste
 	// command with no signature, and this command is specified as signed, so it
 	// is not advertised unsigned.
 	hooks.transportAddrHook = service.NewTransportAddressHook(in.cfg.Transport, nil, logger)
-	hooks.composite = service.NewCompositeOnConnectHook(logger, hooks.signingRotationSvc, hooks.stewardMigrationSvc, registryConnectHook, completionReconciler, routingHook, drainHook, hooks.transportAddrHook, lockdown, in.repairConnect)
+	// The order is service's connectHookOrder: the hooks that do not sign run
+	// first, so a signing hook's bounded wait for the connection's capability
+	// declaration never delays registry, routing, lockdown or repair.
+	hooks.composite = service.NewOrderedCompositeOnConnectHook(logger,
+		service.SlottedConnectHook{Slot: service.SlotRegistry, Hook: registryConnectHook},
+		service.SlottedConnectHook{Slot: service.SlotCompletionReconcile, Hook: completionReconciler},
+		service.SlottedConnectHook{Slot: service.SlotRouting, Hook: routingHook},
+		service.SlottedConnectHook{Slot: service.SlotLockdown, Hook: lockdown},
+		service.SlottedConnectHook{Slot: service.SlotRepair, Hook: in.repairConnect},
+		service.SlottedConnectHook{Slot: service.SlotSigningRotation, Hook: hooks.signingRotationSvc},
+		service.SlottedConnectHook{Slot: service.SlotMigration, Hook: hooks.stewardMigrationSvc},
+		service.SlottedConnectHook{Slot: service.SlotDrain, Hook: drainHook},
+		service.SlottedConnectHook{Slot: service.SlotTransportAddress, Hook: hooks.transportAddrHook})
 	return hooks, nil
 }
 
@@ -5089,8 +5124,16 @@ func newGRPCControlPlaneProvider(in *controlPlaneInputs, composite *service.Comp
 	// field the steward puts on the wire — otherwise any steward with a
 	// valid certificate could saturate another tenant's shared slots.
 	tenantResolver := grpcCP.NewStewardStoreTenantResolver(stewardStore)
+	// Issue #6311: the per-connection capability record. It writes the durable
+	// record a node that does not hold a steward's connection resolves the
+	// signing payload version from (commands.CapabilityResolver).
+	var capabilityRecorder grpcCP.CapabilityRecorder
+	if in.controllerService != nil {
+		capabilityRecorder = in.controllerService
+	}
 	return grpcCP.New(
 		grpcCP.ModeServer,
+		grpcCP.WithCapabilityRecorder(capabilityRecorder),
 		grpcCP.WithOnConnectHook(composite),
 		grpcCP.WithApprovalChecker(approvalChecker),
 		grpcCP.WithRevocationChecker(in.certManager),

@@ -942,8 +942,11 @@ stream stays open (`TestUnknownControlPayloadIgnored`), so a controller rolled b
 to a build without this message still accepts a steward that sends it.
 
 **Current scope.** The recorder seam (`grpc.WithCapabilityRecorder`) is implemented
-by `ControllerService`. It is not yet wired into the controller server, and nothing
-signs, waits on the settled signal or gates a command on the profile yet.
+by `ControllerService` and wired into the controller server. Command signing reads
+the record through `commands.CapabilityResolver` (see the Outbound Command
+Contract) and waits on the settled signal only there. Nothing gates a command type
+on the profile yet, and the late-declaration callback (`WithOnLateCapabilities`) is
+not wired.
 
 ### Tampered State (Epic #5621)
 
@@ -1621,18 +1624,43 @@ the **controller-side half** of the command fencing scheme defined in ADR-029:
   signature): a party between signer and steward could raise it to defeat the fence
   or set it to `MaxUint64` to wedge the steward's persisted high-water mark. Version 2
   (`CommandSigningBytesVersion` with `SigningPayloadV2`) signs every v1 field plus
-  `Term` and an explicit `payload_version`. The controller signs every command over v2
-  (#5285); there is no per-steward choice:
-  - *One signing path.* The publisher, the script dispatcher and the relay handler
-    all sign through `types.SignCommand`, which always signs over v2 and sets
-    `Command.signing_payload_version` (field 9) to 2.
+  `Term` and an explicit `payload_version`. The controller signs a command over v2
+  (#5285) unless the steward's current connection resolves to the floor profile
+  (see Capability declaration), which it signs over v1 so a steward build that
+  predates v2 (v0.10.5) verifies it:
+  - *One signing path, one selection.* The publisher (including
+    `PublishCommandWithSigner`, the rotating-cert `push_signing_cert` path), the
+    script dispatcher and the relay handler all sign through
+    `types.SignCommandForSteward`, which asks a `SigningVersionSource` for the
+    steward's version and signs with `types.SignCommandVersion`. `types.SignCommand`
+    is the v2 wrapper for callers with no connection. A v2 command sets
+    `Command.signing_payload_version` (field 9) to 2; a v1 command leaves it unset,
+    the pre-#5285 wire form, and still carries the stamped term, which the
+    signature does not cover.
+  - *The selection reads controller-held state only.* `commands.CapabilityResolver`
+    answers from the live connection's capability state on the node that holds the
+    connection, and from the durable capability record on any other node. A
+    connection that declared a set listing v2 is v2; one that declared only v1, or
+    settled at the floor, is v1; a steward with no record is v2. A connection that
+    has not declared is waited on, at the point of signing, until
+    `commands.DefaultCapabilityResolveWait` (3 s) after the connection started,
+    measured from the connection start and not from the call, then resolved to the
+    floor for that call only; a publish long after connect to a silent steward
+    returns the floor at once. A pending connection never takes the previous
+    connection's record. Neither a forged `signing_payload_version` on a command nor
+    a capability-looking param influences the choice. No connect hook waits: the
+    hooks that do not sign run first (`connectHookOrder`), so the wait delays no
+    other hook. A re-send through `PublishCommandWithID` (fence retry, outbox drain)
+    is signed again for the connection it goes out on.
   - *Verify.* `commands.Handler.HandleCommand` verifies against the version the
     command names. An absent version is v1 and never selects v2; an unknown version
     is refused. A v2 command whose `Term` was altered after signing fails with
     `ErrUnauthenticatedCommand`.
   - *Stamped v1 is always refused.* `HandleCommand` refuses every command that is
     signed over v1 and carries `Term > 0` with `ErrUnauthenticatedCommand`, from
-    first start and before signature verification. No steward state is consulted.
+    first start and before signature verification. No steward state is consulted,
+    so a controller record that says a current steward supports only v1 does not
+    make it accept one.
     A v1 command with `Term == 0` carries no unsigned term and follows the normal
     verification path.
   - The v1 payload remains supported until no supported steward release lacks v2.
