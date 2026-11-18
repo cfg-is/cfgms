@@ -1,0 +1,38 @@
+# Steward compat image (Issue #6314): packages a steward and launcher that
+# scripts/compat/build-tag-steward.sh already built from a release tag. There is
+# no source build here — the binary under test must be the one the tag's own
+# Makefile recipe produced, not a rebuild of the current tree.
+#
+# Build context: the directory `make test-e2e-compat` stages (the two prebuilt
+# binaries plus this file). docker-compose.test.yml reads it from
+# CFGMS_COMPAT_STEWARD_DIR.
+#
+# Same runtime base and layout as cmd/steward/Dockerfile.debian so the floor
+# steward runs where the fleet stewards run.
+FROM ghcr.io/cfg-is/ci-mirror/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -g 1001 cfgms && \
+    useradd -u 1001 -g cfgms -M -s /usr/sbin/nologin cfgms
+
+WORKDIR /app
+
+COPY cfgms-steward /app/steward
+COPY cfgms-steward-launcher /usr/local/bin/cfgms-launcher
+RUN chmod 0755 /app/steward /usr/local/bin/cfgms-launcher
+
+# Certificate store and launcher install root the non-root steward cannot create
+# at runtime (see cmd/steward/Dockerfile.debian).
+RUN mkdir -p /var/lib/cfgms/steward/certs /opt/cfgms && \
+    chown -R cfgms:cfgms /app /var/lib/cfgms /opt/cfgms
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD pgrep -x steward || exit 1
+
+USER cfgms
+
+CMD ["./steward"]

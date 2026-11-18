@@ -99,7 +99,9 @@ so it can post nothing in the queue, not even a skipped run.
 
 **Triggers**: Merge Group only (not pull_request — moved off PR per #2550 audit)
 
-**Jobs**: `fleet-e2e-tests` — runs fleet end-to-end scenario tests; emits the `fleet-e2e-tests` context (required check in develop ruleset via `documentation.yml` stub on docs PRs)
+**Jobs**:
+- `fleet-e2e-tests` — runs fleet end-to-end scenario tests; emits the `fleet-e2e-tests` context (required check in develop ruleset via `documentation.yml` stub on docs PRs)
+- `steward-compat-e2e` — builds the support floor's steward from its release tag (`test/compat/steward-support.yaml`) and runs it against the controller built from the merge commit (`make test-e2e-compat`, Issue #6314); no `needs:` on `fleet-e2e-tests`; advisory (not in the ruleset's required contexts). Its PR-side stub is the `steward-compat-e2e` job in `fleet-e2e-pr-stub.yml` (`pull_request` only, never `merge_group`). See [Steward Compatibility Harness](../../docs/testing/steward-compat.md).
 
 **Runtime**: ~10–20 min
 

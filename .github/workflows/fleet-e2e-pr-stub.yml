@@ -9,6 +9,11 @@ name: Fleet E2E Tests (PR stub)
 # `needs:` and resolves in seconds, and no PR-side real job exists for it to
 # race (the queue-real shape described under "Stub exclusivity" in CLAUDE.md).
 #
+# The same applies to the second job, `steward-compat-e2e` (Issue #6314): the
+# PR-side half of the context fleet-e2e.yml's real `steward-compat-e2e` job
+# posts on `merge_group`. It is advisory when it lands; the stub keeps the
+# context present on the PR so making it required later needs no workflow change.
+#
 # DO NOT add `merge_group:` to this file. On `merge_group` the context must be
 # posted only by fleet-e2e.yml's real job; a stub posting there — even a
 # skipped one — would satisfy the requirement without the suite running.
@@ -28,3 +33,11 @@ jobs:
     steps:
       - name: Fleet E2E runs in the merge queue
         run: echo "fleet-e2e-tests runs for real on merge_group (fleet-e2e.yml); PR-side stub."
+
+  steward-compat-e2e-pr-stub:
+    name: steward-compat-e2e
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Steward compat E2E runs in the merge queue
+        run: echo "steward-compat-e2e runs for real on merge_group (fleet-e2e.yml); PR-side stub."

@@ -8,6 +8,7 @@ Testing strategy, E2E guides, benchmarks, and live-validation runbooks.
 - [Testing Standards](../development/standards/testing-standards.md) - Testing requirements and patterns
 - [E2E Testing Guide](e2e-testing-guide.md) - End-to-end test setup and execution
 - [Fleet E2E Upgrade Tests](e2e-fleet.md) - Docker-based steward upgrade tests in `test/e2e/fleet`
+- [Steward Compatibility Harness](steward-compat.md) - Floor-release steward against the current controller (`make test-e2e-compat`)
 - [Cluster Benchmark](cluster-benchmark.md) - Repeatable controller-cluster benchmarks
 - [Release Validation Checklist](release-validation-checklist.md) - Manual validation procedure to run before every release
 

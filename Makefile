@@ -3148,6 +3148,37 @@ test-e2e-fleet: build-cli
 	@echo ""
 	@echo "✅ FLEET E2E TESTS PASSED"
 
+# Steward compat E2E (Issue #6314) — builds the support floor's steward from its
+# release tag (test/compat/steward-support.yaml, scripts/compat/build-tag-steward.sh),
+# starts it against the controller built from this tree (the `compat` compose
+# profile) and runs ./test/e2e/compat/... Linux only. Mirrors the
+# steward-compat-e2e merge-queue job in fleet-e2e.yml. Needs the floor tag in the
+# local clone (git fetch --tags) and Docker.
+.PHONY: test-e2e-compat
+test-e2e-compat:
+	@echo ""
+	@echo "🧭 STEWARD COMPAT E2E"
+	@echo "====================="
+	@set -e; \
+	floor_tag=$$(awk '$$1 == "floor:" {print $$2}' test/compat/steward-support.yaml); \
+	if [ -z "$$floor_tag" ]; then echo "❌ no floor in test/compat/steward-support.yaml"; exit 1; fi; \
+	echo "Support floor: $$floor_tag"; \
+	stage=$$(mktemp -d); \
+	compat_key=$$(mktemp); \
+	chmod 0600 "$$compat_key"; \
+	head -c 32 /dev/urandom > "$$compat_key"; \
+	export CFGMS_SECRETS_KEY_FILE="$$compat_key"; \
+	export CFGMS_COMPAT_STEWARD_DIR="$$stage"; \
+	trap 'rc=$$?; if [ $$rc -ne 0 ]; then echo ""; echo "❌ Steward compat E2E failed (exit $$rc) — dumping container logs before teardown:"; docker compose --profile compat -f docker-compose.test.yml logs --no-color --tail=200 || true; for c in compat-controller compat-steward-floor; do echo ""; echo "----- $$c : /tmp/cfgms file logs -----"; docker cp "$$c:/tmp/cfgms/." - 2>/dev/null | tar -xOf - 2>/dev/null || echo "(no file logs)"; done; fi; echo ""; echo "🧹 Tearing down compat compose..."; docker compose --profile compat -f docker-compose.test.yml down -v; rm -rf "$$stage"; rm -f "$$compat_key"' EXIT; \
+	STEWARD_CONTROLLER_URL=https://compat-controller:9080 scripts/compat/build-tag-steward.sh "$$floor_tag" "$$stage"; \
+	cp test/compat/Dockerfile.steward "$$stage/Dockerfile.steward"; \
+	docker compose --profile compat -f docker-compose.test.yml up -d --build --wait; \
+	echo ""; \
+	echo "Running steward compat E2E tests..."; \
+	CFGMS_COMPAT_TEST=1 go test -count=1 -v -timeout 600s ./test/e2e/compat/...
+	@echo ""
+	@echo "✅ STEWARD COMPAT E2E PASSED"
+
 # Story completion validation - comprehensive validation for /story-complete
 # Story #315: Now matches ALL CI required checks (100% parity except Windows/macOS native builds)
 # Includes all commit validation PLUS CI integration tests and E2E testing
