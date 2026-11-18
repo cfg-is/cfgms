@@ -8,11 +8,13 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"testing"
 	"time"
 
+	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
@@ -118,8 +120,22 @@ func TestDecodeCommandID(t *testing.T) {
 }
 
 func TestDecodeCommandRecord(t *testing.T) {
-	rec, err := decodeCommandRecord([]byte(`{"data":{"id":"c1","type":"sync_config","steward_id":"s-1","delivery_status":"rejected","delivery_detail":"signature mismatch"}}`))
+	// The fixture is the controller's real wire shape: handleGetCommandRecord
+	// writes a bare CommandRecordResponse object with no data envelope.
+	body, err := json.Marshal(api.CommandRecordResponse{
+		ID:             "c1",
+		Type:           "sync_config",
+		StewardID:      "s-1",
+		DeliveryStatus: "rejected",
+		DeliveryDetail: "signature mismatch",
+	})
 	require.NoError(t, err)
+
+	rec, err := decodeCommandRecord(body)
+	require.NoError(t, err)
+	assert.Equal(t, "c1", rec.ID)
+	assert.Equal(t, "sync_config", rec.Type)
+	assert.Equal(t, "s-1", rec.StewardID)
 	assert.Equal(t, "rejected", rec.DeliveryStatus)
 	assert.Equal(t, "signature mismatch", rec.DeliveryDetail)
 
