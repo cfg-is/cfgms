@@ -1164,6 +1164,107 @@ services:
     profiles:
       - fleet
 
+  # ============================================================================
+  # STEWARD COMPAT SERVICES (Issue #6314)
+  # The controller built from this tree plus a steward built from the support
+  # floor's release tag (test/compat/steward-support.yaml). Run via
+  # `make test-e2e-compat`, which builds the floor steward with
+  # scripts/compat/build-tag-steward.sh and exports CFGMS_COMPAT_STEWARD_DIR.
+  # Own container names, ports, volumes and network: the fleet services above use
+  # fixed container_name values and can run beside these.
+  # ============================================================================
+
+  compat-controller:
+    container_name: compat-controller
+    build:
+      context: .
+      dockerfile: cmd/controller/Dockerfile
+      args:
+        # Same test-endpoint compile gate as fleet-controller.
+        GO_BUILD_TAGS: cfgms_test_endpoints
+      x-bake:
+        cache-from:
+          - type=gha,scope=cfgms-fleet-controller
+    ports:
+      - "4438:4433/udp"   # gRPC-over-QUIC transport
+      - "8091:9080"       # HTTP API
+    environment:
+      CFGMS_SEED_TEST_TOKENS: "1"
+      CFGMS_REGISTRATION_WORKFLOW: "auto-approve"
+      CFGMS_ENABLE_TEST_ENDPOINTS: "true"
+      CFGMS_TRANSPORT_USE_CERT_MANAGER: "true"
+      # The controller rewrites its 0.0.0.0 transport bind address in the
+      # registration response to this hostname (see fleet-controller).
+      CFGMS_EXTERNAL_HOSTNAME: "compat-controller"
+      CFGMS_HTTP_LISTEN_ADDR: "0.0.0.0:9080"
+      CFGMS_LOG_LEVEL: "info"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      CFGMS_SEED_TEST_API_KEYS: "1"
+      CFGMS_EXTERNAL_URL: "https://compat-controller:9080"
+      # Test Ed25519 publisher key (zero-seed public half), as fleet-controller.
+      CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
+      CFGMS_SECRETS_KEY_FILE: "/run/secrets/cfgms-secrets-key"
+      CFGMS_METRICS_LISTEN_ADDR: "127.0.0.1:9099"
+    user: root
+    entrypoint: []
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms /app/data && ./controller --init 2>/dev/null; exec ./controller"]
+    volumes:
+      - compat_controller_certs:/app/certs
+      - compat_controller_data:/app/data
+      - ./test/e2e/fleet/configs/controller.cfg:/app/controller.cfg:ro
+      - ${CFGMS_SECRETS_KEY_FILE:?set CFGMS_SECRETS_KEY_FILE to an ephemeral test key}:/run/secrets/cfgms-secrets-key:ro
+    healthcheck:
+      test: ["CMD", "sh", "-c", "netstat -ln | grep :4433"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cfgms-compat
+    profiles:
+      - compat
+
+  compat-steward-floor:
+    container_name: compat-steward-floor
+    build:
+      # The directory make test-e2e-compat stages: the floor tag's prebuilt
+      # steward and launcher plus Dockerfile.steward. No source build.
+      # Defaulted, not required (`:?`): compose interpolates every service in the
+      # file whatever the profile, so a required variable here would break every
+      # other compose invocation. Unstaged, ./test/compat holds no binary and the
+      # image's COPY fails, naming the missing cfgms-steward.
+      context: ${CFGMS_COMPAT_STEWARD_DIR:-./test/compat}
+      dockerfile: Dockerfile.steward
+    environment:
+      CFGMS_REGISTRATION_TOKEN: "dockertest_fleet_child_a"
+      CFGMS_LOG_LEVEL: "debug"
+      CFGMS_LOG_PROVIDER: "file"
+      CFGMS_LOG_DIR: "/tmp/cfgms"
+      # Same test publisher key as compat-controller so the steward verifies
+      # test-signed content.
+      CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
+    # The floor release takes the registration token as --regtoken (it predates
+    # --regtoken-file). The loop retries until the harness has placed the
+    # controller CA at /etc/cfgms/controller-ca.crt.
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do ./steward --regtoken \"$$CFGMS_REGISTRATION_TOKEN\" && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
+    volumes:
+      - compat_steward_floor_data:/app/data
+    tmpfs:
+      - /test-workspace:uid=1001,gid=1001,mode=0755,exec
+    depends_on:
+      compat-controller:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ps aux | grep steward | grep -v grep"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cfgms-compat
+    profiles:
+      - compat
+
   # OpenBao dev-mode instance for secrets provider integration tests.
   # Uses host port 8201 to avoid collision with any local Vault/OpenBao on 8200.
   # Start with: docker compose --profile openbao -f docker-compose.test.yml up -d openbao-test
@@ -1342,6 +1443,17 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: size=128m
+  compat_controller_certs:
+    driver: local
+    # CA must persist across container restarts, as fleet_controller_certs.
+  compat_controller_data:
+    driver: local
+  compat_steward_floor_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=128m
 
 networks:
   cfgms-test:
@@ -1354,3 +1466,6 @@ networks:
   cfgms-fleet:
     driver: bridge
     name: cfgms-fleet  # Isolated network for fleet test services
+  cfgms-compat:
+    driver: bridge
+    name: cfgms-compat  # Isolated network for steward compat test services

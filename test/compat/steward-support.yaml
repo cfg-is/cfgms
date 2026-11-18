@@ -1,0 +1,23 @@
+# Steward support manifest — the one place the steward compat floor is defined
+# (Issue #6314).
+#
+# `floor` is the oldest released steward the current controller must keep
+# serving. Each entry under `stewards` is a release tag the compat harness
+# (`make test-e2e-compat`, the `steward-compat-e2e` merge-queue job) builds from
+# source with that tag's own Makefile recipe and runs against the controller
+# built from the change under test.
+#
+# Entries are explicit. There is no computed "latest tag": adding a supported
+# release is an edit to this file.
+#
+# `profile` is the capability profile the steward is expected to run under:
+#   floor     — predates capability declaration; the controller must treat it as
+#               the floor profile and sign commands in the oldest payload version
+#   declared  — declares its capabilities on the control channel
+#
+# No entry may sort below `floor` by semantic version. The manifest unit test
+# (test/e2e/compat/manifest_test.go) enforces that without needing git.
+floor: v0.10.5
+stewards:
+  - tag: v0.10.5
+    profile: floor
