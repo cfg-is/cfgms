@@ -9,9 +9,21 @@ React + TypeScript + Vite application for the controller-served web UI
 
 The JS/TS toolchain is fully contained in `web/` and does not participate in
 any Go build or test gate. CI runs the same scripts (`lint`, `typecheck`,
-`test`, `build`, and `npm audit --audit-level=high`) via the dedicated
+`test`, `build`, and the npm audit gate described below) via the dedicated
 [`frontend-ci.yml`](../.github/workflows/frontend-ci.yml) lane, which gates
 merges to `develop` for PRs that touch `web/**`.
+
+The audit step runs [`scripts/npm-audit-gate.sh`](../scripts/npm-audit-gate.sh)
+instead of bare `npm audit --audit-level=high`. It fails on every high or
+critical advisory except those listed in
+[`npm-audit-exceptions.txt`](npm-audit-exceptions.txt) (one
+`GHSA-xxxx-xxxx-xxxx package=<name> until=YYYY-MM-DD` entry per line, exact IDs
+only). An entry stops applying on its `until=` date (UTC), and also as soon as
+the newest published version of its package is newer than the one locked in
+`package-lock.json` (a patched release may exist, so update the lockfile and
+delete the entry). Entries are meant to last at most 15 days; that is a review
+convention, not enforced by the gate. See the
+[security workflow guide](../docs/development/security-workflow-guide.md#npm-audit-gate-web).
 
 ## How the SPA is embedded in the controller binary
 
@@ -89,7 +101,7 @@ All commands run from `web/`:
 | `npm run lint`      | ESLint (flat config) — security rules at error severity             |
 | `npm run typecheck` | TypeScript strict-mode check, no emit                               |
 | `npm run test`      | Vitest run (jsdom + Testing Library)                                |
-| `npm run audit`     | `npm audit --audit-level=high` — fails on high/critical advisories  |
+| `npm run audit`     | `scripts/npm-audit-gate.sh` — high/critical advisories fail, minus unexpired entries in `npm-audit-exceptions.txt` |
 | `npm run preview`   | Serve the production build locally                                  |
 
 ## Design tokens — single source, never fork

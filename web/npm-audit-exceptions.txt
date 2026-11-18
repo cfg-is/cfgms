@@ -1,0 +1,24 @@
+# npm audit exception file for scripts/npm-audit-gate.sh.
+# One entry per line, format: GHSA-xxxx-xxxx-xxxx package=<npm-package> until=YYYY-MM-DD
+# Lines starting with # are comments; a trailing # comment is allowed.
+#
+# An entry applies ONLY while all of the following hold:
+#   - today (UTC) is strictly before until=; on or after that date the gate fails again;
+#   - the newest published version of the package (`npm view <package> version`) is not
+#     newer than the newest version locked in web/package-lock.json (a newer release
+#     means a fix may exist, so the lockfile must be updated instead).
+# The ID must be an exact GHSA literal — no wildcard or prefix. Malformed entries fail the gate.
+#
+# Policy: only add an entry when no patched release exists. Every entry expires at most
+# 15 days after it is added (review convention; the gate cannot know the add date).
+
+# GHSA-fc5q-39xc-vjpf — picomatch vulnerable to ReDoS through single-branch repeated extglobs (HIGH)
+# Decision         : founder, 2026-11-18 (Issue #6306) — time-boxed CI audit exception for this advisory only.
+# Reason           : the advisory covers picomatch <= 4.0.7 and lists no patched version; 4.0.7 is the
+#                    newest release on the registry as of 2026-11-18.
+# Exposure         : picomatch is reached only through dev/build tooling (vite, vitest, fdir, tinyglobby,
+#                    typescript-eslint); it is flagged "dev": true in web/package-lock.json.
+# Removal          : delete this entry once a patched picomatch exists (`cd web && npm update picomatch`).
+#                    The gate also stops honouring it automatically when a newer picomatch is published.
+# Expiry           : 2026-12-02 — on or after this date the gate fails on this advisory again.
+GHSA-fc5q-39xc-vjpf package=picomatch until=2026-12-02

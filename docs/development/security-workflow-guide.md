@@ -114,6 +114,42 @@ module (e.g. `go get github.com/dgrijalva/jwt-go@v3.2.0+incompatible`, which
 carries known, unfixed CVEs) to a scratch `go.mod`, run `make security-deps`, and
 confirm it still exits non-zero — then discard the scratch change.
 
+### npm audit gate (`web/`)
+
+The `Security audit` step of the `frontend-checks` lane (`frontend-ci.yml`) and
+`npm run audit` in `web/` both run `scripts/npm-audit-gate.sh`. The gate runs
+`npm audit --json` and fails on every high or critical advisory, the same
+threshold as `npm audit --audit-level=high`, except advisories covered by an
+active entry in `web/npm-audit-exceptions.txt`.
+
+- **Entry format**: `GHSA-xxxx-xxxx-xxxx package=<npm-package> until=YYYY-MM-DD`
+  with a rationale comment beside it. IDs are exact literals: a wildcard, a
+  prefix, a non-GHSA id, a missing `package=`, or a missing or unparseable
+  `until=` fails the gate.
+- **Expiry**: an entry applies only while today (UTC) is before `until=`. On or
+  after that date the gate fails on the advisory again.
+- **Patched-release rule**: an entry also stops applying when the newest
+  published version of its package (`npm view <package> version`) is newer than
+  the newest version resolved in `web/package-lock.json`. A newer release is the
+  only way an advisory with no fix becomes fixable, so the lockfile must be
+  updated then. `npm audit`'s `fixAvailable` is not used: it can propose a
+  semver-major downgrade.
+- **Dependent packages**: a high/critical finding on a dependent package (its
+  `via` is the name of another vulnerable package) is tolerated only when every
+  advisory it traces to is an active exception. Any other advisory in the chain
+  fails the gate.
+- **Fail closed**: empty `npm audit` output, JSON without `.vulnerabilities`, an
+  unreachable `npm view`, or a package missing from the lockfile fails the gate.
+- **15-day maximum**: every entry should expire at most 15 days after it is added,
+  as with `.nancy-ignore`. This is a review convention; the gate cannot know when
+  an entry was added.
+- **Removal**: when a patched release exists, run `cd web && npm update <package>`
+  and delete the entry.
+
+`scripts/npm-audit-gate_test.sh` covers the gate offline with fixture audit
+documents and an injected date (`NPM_AUDIT_GATE_TODAY`) and newest published
+version (`NPM_AUDIT_GATE_LATEST_<PACKAGE>`); `make test-scripts` runs it.
+
 ### 3. gosec - Go Security Patterns
 
 - **Purpose**: Static analysis for Go security anti-patterns
