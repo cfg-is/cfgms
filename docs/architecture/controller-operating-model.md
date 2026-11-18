@@ -947,10 +947,17 @@ the record through `commands.CapabilityResolver` (see the Outbound Command
 Contract) and waits on the settled signal only there. Nothing gates a command type
 on the profile yet. The late-declaration recovery below is implemented in
 `service.LateDeclarationReplay`; its `OnLateCapabilities` is the callback for
-`WithOnLateCapabilities`. The controller server does not attach it yet: the provider
-callback, the drain hook's resolver (`SetSigningResolver`) and the recorder's tracker
-(`SetFloorSentTracker`) are wired in `features/controller/server`, which this
-mechanism's change did not touch.
+`WithOnLateCapabilities`. `features/controller/server/server.go` wires it: the
+server-mode provider receives the callback through a late-bound relay
+(`lateReplayRelay`, a no-op until bound), and `New` binds one
+`LateDeclarationReplay` to the node's `*commands.CapabilityResolver` and the slotted
+connect hooks the composite on-connect hook is built from, as soon as the resolver
+exists. `wireCommandPublisherConsumers` gives the drain hook the same resolver
+(`SetSigningResolver`) and the rejection recorder the drain hook's floor-sent tracker
+with that resolver (`SetFloorSentTracker`). One resolver serves the publisher, the
+dispatcher, the drain hook, the recorder and the replay. The wiring is exercised
+through `server.New` and real client-mode providers by
+`features/controller/server/capability_wiring_test.go`.
 
 **Late declaration.** A current steward on a slow host can declare after the grace
 period already settled its connection at the floor profile. Without recovery it
