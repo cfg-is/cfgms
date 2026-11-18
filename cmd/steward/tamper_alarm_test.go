@@ -568,6 +568,102 @@ func TestTamperAlarm_FaultCleared_ReportsLockedAndFaultReappears(t *testing.T) {
 	require.NoError(t, stop())
 }
 
+// promptHeartbeat waits up to within for a heartbeat carrying a tamper reason
+// with code. The periodic heartbeat is 20 s plus up to 10 s of jitter, so a
+// bound under 20 s can only be met by a heartbeat sent because the reason
+// changed.
+func promptHeartbeat(t *testing.T, srv *roServer, code string, within time.Duration) *cpTypes.Heartbeat {
+	t.Helper()
+	deadline := time.After(within)
+	for {
+		select {
+		case hb := <-srv.heartbeats:
+			if reasonWithCode(hb, code) != nil {
+				return hb
+			}
+		case <-deadline:
+			t.Fatalf("no heartbeat carried tamper code %q within %s of the reason changing", code, within)
+			return nil
+		}
+	}
+}
+
+// A change in the reason the alarm reports reaches the controller at once, not
+// at the next periodic heartbeat: a restore waits on the controller seeing
+// tamper.locked, and a returning fault must not stay hidden for a heartbeat
+// interval. Windows CI lost the periodic heartbeat that carried the change and
+// the next one came after the wait ended.
+func TestTamperAlarm_ReasonChange_IsReportedWithoutWaitingForThePeriodicHeartbeat(t *testing.T) {
+	e := newAlarmEnv(t, trustSourceCompileBaked)
+	e.dirBad.Store(true)
+	stop, done := e.runSteward(t, "", e.cf())
+	tamperHeartbeat(t, e.f.srv, cpTypes.ReasonCodeTamperDataDir)
+
+	e.dirBad.Store(false)
+	hb := promptHeartbeat(t, e.f.srv, client.ReasonTamperLocked, 10*time.Second)
+	assert.Equal(t, tamperClearedMessage, reasonWithCode(hb, client.ReasonTamperLocked).Message)
+	assert.Equal(t, cpTypes.StatusError, hb.Status)
+
+	e.dirBad.Store(true)
+	hb = promptHeartbeat(t, e.f.srv, cpTypes.ReasonCodeTamperDataDir, 10*time.Second)
+	assert.Nil(t, reasonWithCode(hb, client.ReasonTamperLocked), "a returned fault replaces the cleared report")
+	assertAlive(t, done)
+	require.NoError(t, stop())
+}
+
+// A reason that changes while the link is down is not recorded as published: the
+// link that opens afterwards reports it at once instead of leaving it to the
+// periodic heartbeat.
+func TestTamperAlarm_ReasonChangedWhileLinkDown_IsReportedWhenLinkOpens(t *testing.T) {
+	e := newAlarmEnv(t, trustSourceCompileBaked)
+	var storeDir atomic.Pointer[string]
+	absent := t.TempDir()
+	storeDir.Store(&absent)
+	certStoreDirResolver = func() string { return *storeDir.Load() }
+
+	latch := openTamperLatch(e.f.dir, logging.NewNoopLogger())
+	latch.raise(cpTypes.ReasonCodeTamperDataDir)
+	var fault atomic.Pointer[tamperFault]
+	fault.Store(&tamperFault{code: cpTypes.ReasonCodeTamperDataDir})
+	alarm := &tamperAlarm{
+		latch:  latch,
+		rescan: func() *tamperFault { return fault.Load() },
+		logger: logging.NewNoopLogger(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = alarm.run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	// The link cannot open (no identity in the store): the fault clears meanwhile.
+	fault.Store(nil)
+	require.Eventually(t, func() bool {
+		for _, r := range startupReasons.List() {
+			if r.Component == tamperReasonComponent {
+				return r.Code == client.ReasonTamperLocked
+			}
+		}
+		return false
+	}, 10*time.Second, 20*time.Millisecond, "the cleared fault is recorded while the link is down")
+	require.Equal(t, int32(0), e.connect.Load())
+	select {
+	case hb := <-e.f.srv.heartbeats:
+		t.Fatalf("a heartbeat arrived while the link was down: %+v", hb)
+	default:
+	}
+
+	storeDir.Store(&e.f.dir)
+	hb := promptHeartbeat(t, e.f.srv, client.ReasonTamperLocked, 10*time.Second)
+	assert.Equal(t, tamperClearedMessage, reasonWithCode(hb, client.ReasonTamperLocked).Message)
+	assert.Equal(t, cpTypes.StatusError, hb.Status)
+}
+
 // A restart after the operator fixed the host reports tamper.locked from the
 // start-of-run check, never the persisted fault code.
 func TestTamperAlarm_FaultClearedBeforeStart_NeverReportsFaultCode(t *testing.T) {
@@ -630,7 +726,7 @@ func TestTamperAlarm_TrustDowngradeLatch_NilRescan_KeepsReportingFault(t *testin
 	}
 
 	assert.True(t, alarm.localFaultCleared(), "the return value is unchanged: a nil rescan is cleared")
-	alarm.publishReason(nil)
+	alarm.publishReason(context.Background(), nil)
 	code, msg := startupReasonFor(t, tamperReasonComponent)
 	assert.Equal(t, cpTypes.ReasonCodeTamperTrustDowngrade, code)
 	assert.Equal(t, tamperMessages[cpTypes.ReasonCodeTamperTrustDowngrade], msg)
@@ -643,12 +739,12 @@ func TestTamperAlarm_RecheckFault_Transitions(t *testing.T) {
 	var fault atomic.Pointer[tamperFault]
 	alarm := &tamperAlarm{latch: latch, rescan: func() *tamperFault { return fault.Load() }, logger: logging.NewNoopLogger()}
 
-	alarm.publishReason(nil)
+	alarm.publishReason(context.Background(), nil)
 	code, _ := startupReasonFor(t, tamperReasonComponent)
 	assert.Equal(t, cpTypes.ReasonCodeTamperDataDir, code)
 
 	assert.True(t, alarm.recheckFault())
-	alarm.publishReason(nil)
+	alarm.publishReason(context.Background(), nil)
 	code, msg := startupReasonFor(t, tamperReasonComponent)
 	assert.Equal(t, client.ReasonTamperLocked, code)
 	assert.Equal(t, tamperClearedMessage, msg)
@@ -656,7 +752,7 @@ func TestTamperAlarm_RecheckFault_Transitions(t *testing.T) {
 
 	fault.Store(&tamperFault{code: cpTypes.ReasonCodeTamperCAMismatch})
 	assert.False(t, alarm.recheckFault())
-	alarm.publishReason(nil)
+	alarm.publishReason(context.Background(), nil)
 	code, _ = startupReasonFor(t, tamperReasonComponent)
 	assert.Equal(t, cpTypes.ReasonCodeTamperDataDir, code, "the first code raised is still the primary")
 	assert.Contains(t, latch.codesSnapshot(), cpTypes.ReasonCodeTamperCAMismatch)
@@ -670,7 +766,7 @@ func TestTamperAlarm_ControllerLockOnly_KeepsLockedMessage(t *testing.T) {
 	alarm := &tamperAlarm{latch: latch, rescan: func() *tamperFault { return nil }, logger: logging.NewNoopLogger()}
 
 	alarm.recheckFault()
-	alarm.publishReason(nil)
+	alarm.publishReason(context.Background(), nil)
 	code, msg := startupReasonFor(t, tamperReasonComponent)
 	assert.Equal(t, client.ReasonTamperLocked, code)
 	assert.Equal(t, tamperMessages[client.ReasonTamperLocked], msg)

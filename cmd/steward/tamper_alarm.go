@@ -403,7 +403,17 @@ type tamperAlarm struct {
 	// tamper.locked instead of the fault code, so the controller accepts a
 	// restore. It is read and written on the run goroutine only.
 	faultCleared bool
-	sink         systemLogWriter
+	// published is the code and message last sent on publishedOn, and publishedOn
+	// the link that carried it. A reason is recorded only once a link is open, so
+	// a change made while the link is down is still sent when it opens. Both are
+	// read and written on the run goroutine only.
+	published   reasonKey
+	publishedOn *client.TransportClient
+	// sends tracks the on-change heartbeats publishReason started. run waits for
+	// them before it returns, so none outlives run and reads alarm state the
+	// caller then rewrites.
+	sends sync.WaitGroup
+	sink  systemLogWriter
 	// sinkFn opens the local system log the first time it is needed.
 	sinkFn func() systemLogWriter
 	logger logging.Logger
@@ -418,6 +428,14 @@ func (a *tamperAlarm) run(ctx context.Context) (bool, error) {
 	defer startupReasons.Clear(tamperReasonComponent)
 	defer func() { closeTamperLink(tc) }()
 
+	// On-change heartbeats use the link, so they are cancelled and finished
+	// before it closes and before run returns.
+	ctx, cancelSends := context.WithCancel(ctx)
+	defer func() {
+		cancelSends()
+		a.sends.Wait()
+	}()
+
 	recheck := time.NewTicker(tamperRecheckInterval)
 	defer recheck.Stop()
 	retry := time.NewTimer(0)
@@ -428,7 +446,7 @@ func (a *tamperAlarm) run(ctx context.Context) (bool, error) {
 	tc = a.repair.start(ctx, tc)
 
 	for {
-		a.publishReason(tc)
+		a.publishReason(ctx, tc)
 		a.repair.republish(tc)
 		if tc == nil {
 			tc = a.connectLink(ctx, retry)
@@ -582,19 +600,47 @@ func (a *tamperAlarm) recheckFault() bool {
 	return true
 }
 
+// reasonKey identifies the reason the alarm reports.
+type reasonKey struct{ code, msg string }
+
 // publishReason sets the reason the heartbeat carries. Once the local fault has
 // cleared it is tamper.locked with the cleared message, so the heartbeat no
 // longer carries a tamper code; a latch that only records a controller lock keeps
-// that lock's own message.
-func (a *tamperAlarm) publishReason(tc *client.TransportClient) {
+// that lock's own message. A reason that changed, or any reason on a link that
+// has not carried it yet, is sent at once: a restore waits on the controller
+// seeing tamper.locked, and a fault that returns must not stay unreported until
+// the next periodic heartbeat (20 s plus up to 10 s of jitter, and none at all if
+// that one fails to send). While the link is down nothing is recorded as
+// published, so the change is sent as soon as a link opens.
+func (a *tamperAlarm) publishReason(ctx context.Context, tc *client.TransportClient) {
 	code := a.latch.primaryCode()
 	msg := tamperMessages[code]
 	if a.faultCleared && a.latch.holdsFault() {
 		code, msg = client.ReasonTamperLocked, tamperClearedMessage
 	}
 	startupReasons.Set(tamperReasonComponent, code, msg)
-	if tc != nil {
-		tc.SetHealthReason(tamperReasonComponent, code, msg)
+	key := reasonKey{code: code, msg: msg}
+	if tc == nil {
+		return
+	}
+	changed := key != a.published || tc != a.publishedOn
+	a.published, a.publishedOn = key, tc
+	tc.SetHealthReason(tamperReasonComponent, code, msg)
+	if changed {
+		// Read on the run goroutine: the caller may replace a.logger once run
+		// returns.
+		logger := a.logger
+		a.sends.Add(1)
+		go func() {
+			defer a.sends.Done()
+			hbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			// A report-only link never reports healthy.
+			if err := tc.SendHeartbeat(hbCtx, string(cpTypes.StatusError), nil); err != nil {
+				logger.Warn("Tamper reason heartbeat failed; the periodic heartbeat will carry it",
+					"operation", "tamper_alarm_heartbeat", "error", logging.SanitizeLogValue(err.Error()))
+			}
+		}()
 	}
 }
 
