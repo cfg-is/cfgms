@@ -406,7 +406,11 @@ type tamperAlarm struct {
 	// published is the code and message last handed to publishReason. It is
 	// read and written on the run goroutine only.
 	published reasonKey
-	sink      systemLogWriter
+	// sends tracks the on-change heartbeats publishReason started. run waits for
+	// them before it returns, so none outlives run and reads alarm state the
+	// caller then rewrites.
+	sends sync.WaitGroup
+	sink  systemLogWriter
 	// sinkFn opens the local system log the first time it is needed.
 	sinkFn func() systemLogWriter
 	logger logging.Logger
@@ -420,6 +424,14 @@ func (a *tamperAlarm) run(ctx context.Context) (bool, error) {
 	// process-wide startup reasons.
 	defer startupReasons.Clear(tamperReasonComponent)
 	defer func() { closeTamperLink(tc) }()
+
+	// On-change heartbeats use the link, so they are cancelled and finished
+	// before it closes and before run returns.
+	ctx, cancelSends := context.WithCancel(ctx)
+	defer func() {
+		cancelSends()
+		a.sends.Wait()
+	}()
 
 	recheck := time.NewTicker(tamperRecheckInterval)
 	defer recheck.Stop()
@@ -610,12 +622,17 @@ func (a *tamperAlarm) publishReason(ctx context.Context, tc *client.TransportCli
 	}
 	tc.SetHealthReason(tamperReasonComponent, code, msg)
 	if changed {
+		// Read on the run goroutine: the caller may replace a.logger once run
+		// returns.
+		logger := a.logger
+		a.sends.Add(1)
 		go func() {
+			defer a.sends.Done()
 			hbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			// A report-only link never reports healthy.
 			if err := tc.SendHeartbeat(hbCtx, string(cpTypes.StatusError), nil); err != nil {
-				a.logger.Warn("Tamper reason heartbeat failed; the periodic heartbeat will carry it",
+				logger.Warn("Tamper reason heartbeat failed; the periodic heartbeat will carry it",
 					"operation", "tamper_alarm_heartbeat", "error", logging.SanitizeLogValue(err.Error()))
 			}
 		}()
