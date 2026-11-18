@@ -5,7 +5,9 @@ package business
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -164,6 +166,156 @@ type StewardRecord struct {
 	// replaced by SetHealthReasons and empty when the steward is healthy. Records
 	// written before the field existed read back with no reasons.
 	HealthReasons []HealthReasonRecord `json:"health_reasons,omitempty"`
+
+	// Capabilities is the steward's durable capability record, keyed to the
+	// connection that wrote it. It is nil (absent) for records written before the
+	// field existed and for stewards that have never connected since. Written only
+	// by ResetCapabilities and DeclareCapabilities.
+	Capabilities *StewardCapabilityRecord `json:"capabilities,omitempty"`
+}
+
+// Capability record states.
+const (
+	// StewardCapabilityPending means a connection was opened and the steward has
+	// not declared its capabilities on it yet.
+	StewardCapabilityPending = "pending"
+	// StewardCapabilityDeclared means the steward declared its capability sets.
+	StewardCapabilityDeclared = "declared"
+	// StewardCapabilityFloor means the record holds the baseline (floor) sets
+	// rather than a steward declaration.
+	StewardCapabilityFloor = "floor"
+)
+
+// StewardCapabilityRecord is the durable capability record of a steward. It is
+// shared durable state (not per-process) so any controller node reads the same
+// record. Writes are keyed to ConnectionID so a late write from an old stream
+// cannot overwrite a newer connection's record. It deliberately carries plain
+// integers rather than control-plane types so the storage interfaces stay free
+// of transport imports.
+type StewardCapabilityRecord struct {
+	// State is one of StewardCapabilityPending, StewardCapabilityDeclared or
+	// StewardCapabilityFloor.
+	State string `json:"state"`
+
+	// ConnectionID identifies the connection this record belongs to.
+	ConnectionID string `json:"connection_id"`
+
+	// ConnectedAt is when ResetCapabilities opened this connection's record.
+	ConnectedAt time.Time `json:"connected_at"`
+
+	// CommandTypes is the declared set of command type numbers.
+	CommandTypes []int32 `json:"command_types,omitempty"`
+
+	// SigningPayloadVersions is the declared set of signing payload versions.
+	SigningPayloadVersions []uint32 `json:"signing_payload_versions,omitempty"`
+
+	// UpdatedAt is when the record was last written.
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// ValidStewardCapabilityState reports whether state is one of the defined
+// capability record states.
+func ValidStewardCapabilityState(state string) bool {
+	switch state {
+	case StewardCapabilityPending, StewardCapabilityDeclared, StewardCapabilityFloor:
+		return true
+	}
+	return false
+}
+
+// Clone returns a deep copy of the record, or nil for a nil receiver.
+func (c *StewardCapabilityRecord) Clone() *StewardCapabilityRecord {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	out.CommandTypes = append([]int32(nil), c.CommandTypes...)
+	out.SigningPayloadVersions = append([]uint32(nil), c.SigningPayloadVersions...)
+	return &out
+}
+
+// EncodeStewardCapabilities serialises a capability record as JSON for the SQL
+// providers; a nil record is stored as "" (absent).
+func EncodeStewardCapabilities(c *StewardCapabilityRecord) (string, error) {
+	if c == nil {
+		return "", nil
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode steward capabilities: %w", err)
+	}
+	return string(b), nil
+}
+
+// DecodeStewardCapabilities parses the stored JSON. "" (a record written before
+// the column existed) and malformed data read as absent (nil).
+func DecodeStewardCapabilities(s string) *StewardCapabilityRecord {
+	if s == "" {
+		return nil
+	}
+	var c StewardCapabilityRecord
+	if err := json.Unmarshal([]byte(s), &c); err != nil || !ValidStewardCapabilityState(c.State) {
+		return nil
+	}
+	return &c
+}
+
+// NewDeclaredStewardCapabilities builds the record DeclareCapabilities stores:
+// the argument's sets and state (empty state means declared) bound to
+// connectionID, keeping the connect time of the existing record and stamping
+// UpdatedAt with now. It returns an error for an undefined state.
+func NewDeclaredStewardCapabilities(existing *StewardCapabilityRecord, connectionID string, c StewardCapabilityRecord, now time.Time) (*StewardCapabilityRecord, error) {
+	if connectionID == "" {
+		return nil, fmt.Errorf("connection ID cannot be empty")
+	}
+	if c.State == "" {
+		c.State = StewardCapabilityDeclared
+	}
+	if !ValidStewardCapabilityState(c.State) {
+		return nil, fmt.Errorf("invalid capability state %q", c.State)
+	}
+	out := c.Clone()
+	out.ConnectionID = connectionID
+	out.UpdatedAt = now
+	if existing != nil {
+		out.ConnectedAt = existing.ConnectedAt
+	}
+	return out, nil
+}
+
+// ApplyStewardCapabilityDeclaration is the compare-and-set step of
+// DeclareCapabilities for the providers that store the record as JSON. It
+// validates the arguments, then reports applied=true with the encoded record to
+// store only when existingJSON still belongs to connectionID; otherwise it
+// reports applied=false and the stored record must stay unchanged.
+func ApplyStewardCapabilityDeclaration(existingJSON, connectionID string, c StewardCapabilityRecord, now time.Time) (encoded string, applied bool, err error) {
+	existing := DecodeStewardCapabilities(existingJSON)
+	rec, err := NewDeclaredStewardCapabilities(existing, connectionID, c, now)
+	if err != nil {
+		return "", false, err
+	}
+	if existing == nil || existing.ConnectionID != connectionID {
+		return "", false, nil
+	}
+	encoded, err = EncodeStewardCapabilities(rec)
+	if err != nil {
+		return "", false, err
+	}
+	return encoded, true, nil
+}
+
+// NewPendingStewardCapabilities builds the record ResetCapabilities stores: state
+// pending, bound to connectionID, connected and updated at now, no declared sets.
+func NewPendingStewardCapabilities(connectionID string, now time.Time) (*StewardCapabilityRecord, error) {
+	if connectionID == "" {
+		return nil, fmt.Errorf("connection ID cannot be empty")
+	}
+	return &StewardCapabilityRecord{
+		State:        StewardCapabilityPending,
+		ConnectionID: connectionID,
+		ConnectedAt:  now,
+		UpdatedAt:    now,
+	}, nil
 }
 
 // HealthReasonRecord is one persisted health reason. Values originate from the
@@ -267,6 +419,26 @@ type StewardStore interface {
 	// empty clears it). It touches only that field, so the heartbeat path never
 	// rewrites the whole record. Returns ErrStewardNotFound if no record exists.
 	SetHealthReasons(ctx context.Context, stewardID string, reasons []HealthReasonRecord) error
+
+	// ResetCapabilities starts a new connection's capability record: state
+	// pending, the given connection ID, connect time now, no declared sets. It
+	// replaces any earlier record, so a newer connection always supersedes an
+	// older one. connectionID must be non-empty. It touches only that field.
+	// Returns ErrStewardNotFound if no record exists.
+	ResetCapabilities(ctx context.Context, stewardID, connectionID string) error
+
+	// DeclareCapabilities stores c as the steward's capability record, as a
+	// compare-and-set on the connection: it applies only when the stored
+	// Capabilities.ConnectionID equals connectionID, evaluated atomically with
+	// the write. Otherwise (a newer connection has reset the record, or none was
+	// ever reset) it returns applied=false with a nil error and the record is
+	// unchanged, so a late write from an old stream cannot overwrite a newer
+	// connection. The stored record takes its sets and State from c (empty State
+	// means declared), its ConnectionID from the argument, keeps the connect time
+	// set by ResetCapabilities and stamps UpdatedAt. An undefined State or an
+	// empty connectionID is an error. Returns ErrStewardNotFound if no record
+	// exists. Read the result through GetSteward.
+	DeclareCapabilities(ctx context.Context, stewardID, connectionID string, c StewardCapabilityRecord) (applied bool, err error)
 
 	// SetStewardProvenance replaces the steward's recorded provenance baseline
 	// (LastProvenanceJSON) with provenanceJSON (ADR-034 §2). It is written at

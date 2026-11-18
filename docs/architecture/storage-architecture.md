@@ -252,9 +252,12 @@ Per ADR-003, the providers and interfaces above are **not all implemented today*
 
 **Status values**: `registered` → `active` → `lost` / `deregistered`. Records are never deleted; `lost` and `deregistered` stewards are retained for audit history.
 
+**Capability record**: `StewardRecord.Capabilities` (`StewardCapabilityRecord`: `State` of `pending`, `declared` or `floor`, `ConnectionID`, `ConnectedAt`, `CommandTypes`, `SigningPayloadVersions`, `UpdatedAt`) is shared durable state, so any controller node reads the same record. `ResetCapabilities(stewardID, connectionID)` starts a connection's record as `pending`. `DeclareCapabilities(stewardID, connectionID, record)` is a compare-and-set on the stored connection ID: it applies only while that ID equals the argument and otherwise returns `applied=false` and leaves the record unchanged, so a late write from an old stream cannot overwrite a newer connection. Records written before the field existed read back with `Capabilities == nil`. The store holds the record only; it defines no capability semantics.
+
 **Implementations**:
 - `pkg/storage/providers/flatfile`: one JSON file per steward at `<root>/stewards/<stewardID>.json`. `ListStewards` is O(n) in the number of stewards — a known limitation for large fleets; prefer SQLite for fleets where query performance matters.
-- `pkg/storage/providers/sqlite`: stewards stored in the `stewards` table; `ListStewardsByStatus` uses an indexed query on `status`.
+- `pkg/storage/providers/sqlite`: stewards stored in the `stewards` table; `ListStewardsByStatus` uses an indexed query on `status`. The capability record is a JSON `capabilities` column (empty = absent).
+- `pkg/storage/providers/database`: stewards stored in the `steward_records` table with tenant row-level security; the capability record is a JSON `capabilities` column (empty = absent), and `DeclareCapabilities` holds a row lock for its compare and write.
 
 **Fleet tracker**: `features/controller/fleet/fleet.HealthTracker` wraps a `StewardStore` for durable fields and keeps ephemeral per-process metrics (`HealthMetrics`) in-memory via a `sync.Map`.
 

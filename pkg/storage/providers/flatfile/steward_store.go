@@ -110,31 +110,41 @@ func (s *FlatFileStewardStore) RegisterSteward(_ context.Context, record *busine
 		return business.ErrStewardAlreadyExists
 	}
 
-	// Tenant-scoped device_id uniqueness: a non-empty device_id must not already
-	// be held by a different steward in the same tenant. Empty device_id is exempt
-	// (optional field on stewards registered before ADR-010 was implemented).
-	if record.DeviceID != "" {
-		all, err := s.readAllStewards()
-		if err != nil {
-			return fmt.Errorf("flatfile: failed to scan for device_id conflict: %w", err)
-		}
-		for _, r := range all {
-			// A deregistered record no longer reserves its device_id (Issue #4534).
-			if r.TenantID == record.TenantID && r.DeviceID == record.DeviceID && r.ID != record.ID &&
-				r.Status != business.StewardStatusDeregistered {
-				return business.ErrStewardDeviceIDConflict
-			}
-		}
+	if err := s.checkDeviceIDConflict(record); err != nil {
+		return err
 	}
 
 	now := time.Now().UTC()
 	r := *record
+	r.Capabilities = record.Capabilities.Clone()
 	r.RegisteredAt = now
 	r.LastSeen = now
 	if r.Status == "" {
 		r.Status = business.StewardStatusRegistered
 	}
 	return s.writeSteward(&r)
+}
+
+// checkDeviceIDConflict applies tenant-scoped device_id uniqueness: a non-empty
+// device_id must not already be held by a different steward in the same tenant.
+// Empty device_id is exempt (optional field on stewards registered before
+// ADR-010 was implemented). The caller holds s.mutex.
+func (s *FlatFileStewardStore) checkDeviceIDConflict(record *business.StewardRecord) error {
+	if record.DeviceID == "" {
+		return nil
+	}
+	all, err := s.readAllStewards()
+	if err != nil {
+		return fmt.Errorf("flatfile: failed to scan for device_id conflict: %w", err)
+	}
+	for _, r := range all {
+		// A deregistered record no longer reserves its device_id (Issue #4534).
+		if r.TenantID == record.TenantID && r.DeviceID == record.DeviceID && r.ID != record.ID &&
+			r.Status != business.StewardStatusDeregistered {
+			return business.ErrStewardDeviceIDConflict
+		}
+	}
+	return nil
 }
 
 // UpdateHeartbeat records a heartbeat for the steward, updating last_heartbeat_at and last_seen.
@@ -353,6 +363,53 @@ func (s *FlatFileStewardStore) SetHealthReasons(_ context.Context, stewardID str
 		record.HealthReasons = append([]business.HealthReasonRecord(nil), reasons...)
 	}
 	return s.writeSteward(record)
+}
+
+// ResetCapabilities starts a new connection's capability record (state pending).
+func (s *FlatFileStewardStore) ResetCapabilities(_ context.Context, stewardID, connectionID string) error {
+	rec, err := business.NewPendingStewardCapabilities(connectionID, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("flatfile: %w", err)
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	record, err := s.readSteward(stewardID)
+	if err != nil {
+		return err
+	}
+	record.Capabilities = rec
+	return s.writeSteward(record)
+}
+
+// DeclareCapabilities stores c only while the stored record still belongs to
+// connectionID; the compare and the write happen under one lock.
+func (s *FlatFileStewardStore) DeclareCapabilities(_ context.Context, stewardID, connectionID string, c business.StewardCapabilityRecord) (bool, error) {
+	now := time.Now().UTC()
+	if _, err := business.NewDeclaredStewardCapabilities(nil, connectionID, c, now); err != nil {
+		return false, fmt.Errorf("flatfile: %w", err)
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	record, err := s.readSteward(stewardID)
+	if err != nil {
+		return false, err
+	}
+	if record.Capabilities == nil || record.Capabilities.ConnectionID != connectionID {
+		return false, nil
+	}
+	rec, err := business.NewDeclaredStewardCapabilities(record.Capabilities, connectionID, c, now)
+	if err != nil {
+		return false, fmt.Errorf("flatfile: %w", err)
+	}
+	record.Capabilities = rec
+	if err := s.writeSteward(record); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // SetStewardProvenance replaces the steward's provenance baseline.

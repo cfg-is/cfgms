@@ -214,11 +214,7 @@ func backfillStewardColumns(ctx context.Context, db *sql.DB) error {
 	if !exists {
 		return nil
 	}
-	type col struct {
-		name string
-		ddl  string
-	}
-	for _, c := range []col{
+	return addMissingColumns(ctx, db, "stewards", []columnDDL{
 		{"device_id", `ALTER TABLE stewards ADD COLUMN device_id TEXT NOT NULL DEFAULT ''`},
 		{"identity_key_pub", `ALTER TABLE stewards ADD COLUMN identity_key_pub BLOB NOT NULL DEFAULT ''`},
 		{"key_protection_level", `ALTER TABLE stewards ADD COLUMN key_protection_level TEXT NOT NULL DEFAULT ''`},
@@ -227,16 +223,29 @@ func backfillStewardColumns(ctx context.Context, db *sql.DB) error {
 		{"tenant_id", `ALTER TABLE stewards ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''`},
 		{"hidden", `ALTER TABLE stewards ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0`},
 		{"health_reasons", `ALTER TABLE stewards ADD COLUMN health_reasons TEXT NOT NULL DEFAULT ''`},
-	} {
-		present, err := columnExists(ctx, db, "stewards", c.name)
+		{"capabilities", `ALTER TABLE stewards ADD COLUMN capabilities TEXT NOT NULL DEFAULT ''`},
+	})
+}
+
+// columnDDL names a column and the ALTER TABLE statement that adds it.
+type columnDDL struct {
+	name string
+	ddl  string
+}
+
+// addMissingColumns runs each ALTER TABLE whose column is absent from table.
+// Column existence is checked via PRAGMA first, so the pass is idempotent.
+func addMissingColumns(ctx context.Context, db *sql.DB, table string, cols []columnDDL) error {
+	for _, c := range cols {
+		present, err := columnExists(ctx, db, table, c.name)
 		if err != nil {
-			return fmt.Errorf("sqlite: steward back-fill column probe failed (%s): %w", c.name, err)
+			return fmt.Errorf("sqlite: %s back-fill column probe failed (%s): %w", table, c.name, err)
 		}
 		if present {
 			continue
 		}
 		if _, err := db.ExecContext(ctx, c.ddl); err != nil {
-			return fmt.Errorf("sqlite: stewards back-fill failed: %w\nSQL: %s", err, c.ddl)
+			return fmt.Errorf("sqlite: %s back-fill failed: %w\nSQL: %s", table, err, c.ddl)
 		}
 	}
 	return nil
@@ -928,7 +937,8 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			last_provenance_json TEXT NOT NULL DEFAULT '',
 			tenant_id            TEXT NOT NULL DEFAULT '',
 			hidden               INTEGER NOT NULL DEFAULT 0,
-			health_reasons       TEXT NOT NULL DEFAULT ''
+			health_reasons       TEXT NOT NULL DEFAULT '',
+			capabilities         TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_stewards_status    ON stewards(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_stewards_last_seen ON stewards(last_seen)`,
