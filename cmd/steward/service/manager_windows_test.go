@@ -177,7 +177,7 @@ func TestWindowsInstallLauncherMissing(t *testing.T) {
 // RegistrationTokenConfigured reports only whether the token file exists and is
 // non-empty. It no longer falls back to the service command line.
 func TestRegistrationTokenConfigured_ReadsTokenFileOnly(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	path := tokenPathInExistingDir(t)
 	m := &windowsManager{}
@@ -427,6 +427,7 @@ func TestReplaceServiceDefinition_WaitsForOldServiceToDisappear(t *testing.T) {
 }
 
 func TestPrepareDataDir_ProducesProtectedAdminOnlyDACL(t *testing.T) {
+	requireElevatedToken(t, "the protected DACL grants only SYSTEM and BUILTIN\\Administrators, and a non-elevated token holds Administrators as deny-only, so the test cannot reopen the directory")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	require.NoError(t, prepareDataDir())
 
@@ -477,6 +478,7 @@ func treeOwners(t *testing.T, root string) map[string]string {
 // SYSTEM or Administrators as owner, so every entry must have one of those
 // owners, not the installing user's own account.
 func TestStageDataDir_InstalledTreePassesStewardStartCheck(t *testing.T) {
+	requireElevatedToken(t, "the protected DACL grants only SYSTEM and BUILTIN\\Administrators, and a non-elevated token holds Administrators as deny-only, so the test cannot reopen the directory")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	certPEM, _ := generateTestCACert(t)
 
@@ -495,6 +497,7 @@ func TestStageDataDir_InstalledTreePassesStewardStartCheck(t *testing.T) {
 // as a standard principal (BUILTIN\Users) before install. Staging must refuse
 // it and write no CA cert into it.
 func TestStageDataDir_RefusesTreePrecreatedByNonAdmin(t *testing.T) {
+	requireElevatedToken(t, "assigning a non-admin owner needs SeRestorePrivilege, which a non-elevated token does not hold")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	dir := filepath.Dir(platformCACertPath())
 	require.NoError(t, os.MkdirAll(dir, 0755))
