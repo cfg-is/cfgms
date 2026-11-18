@@ -1616,7 +1616,6 @@ func webSessionRefusal(webSess *session.Session, acct *account, softwareCredenti
 // durable, and answers with the same 401 for every reason: the response must not
 // distinguish "disabled", "passkey revoked" and "revoked".
 func (s *Server) endWebSession(w http.ResponseWriter, r *http.Request, webSess *session.Session, reason string) {
-	s.csrfTokens.Delete(webSess.ID)
 	if revokeErr := s.webSessionManager.Revoke(r.Context(), webSess.ID); revokeErr != nil {
 		s.logger.Warn("Failed to revoke "+logging.SanitizeLogValue(reason)+" web session",
 			"session_id", logging.SanitizeLogValue(webSess.ID),
@@ -2698,7 +2697,8 @@ func (s *Server) hasPermission(principal *Principal, permissionID string) bool {
 //   - Safe methods (GET, HEAD) are always exempt.
 //   - Requests authenticated via Bearer token, API key, or mTLS are exempt (no cookie).
 //   - Cookie-authenticated requests for POST/PUT/PATCH/DELETE must supply X-CSRF-Token
-//     matching the server-side per-session token (constant-time compare).
+//     matching the per-session token, whose SHA-256 hash is stored on the durable
+//     session record so every controller node accepts it (constant-time compare).
 //
 // This is the only middleware that enforces CSRF for the api subrouter. The
 // login and logout endpoints on the base router enforce their own CSRF checks inline.
@@ -2716,15 +2716,30 @@ func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
 		}
 		// Retrieve the session ID set by authenticationMiddleware on cookie-auth success.
 		sessID, _ := r.Context().Value(webSessionIDContextKey).(string)
-		csrfHeader := r.Header.Get(headerCSRFToken)
-		stored, _ := s.csrfTokens.Load(sessID)
-		storedStr, _ := stored.(string)
-		if csrfHeader == "" || storedStr == "" || subtle.ConstantTimeCompare([]byte(csrfHeader), []byte(storedStr)) != 1 {
+		if !s.webCSRFTokenValid(r.Context(), sessID, r.Header.Get(headerCSRFToken)) {
 			s.writeErrorResponse(w, http.StatusForbidden, "CSRF token mismatch", "CSRF_MISMATCH")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// webCSRFTokenValid reports whether csrfToken is the CSRF token bound to the live web
+// session sessID. The session's durable record carries SHA-256(token) (Issue #6321), so
+// the answer is the same on every controller node and across restarts. A missing or
+// revoked session, a session with no bound hash, an empty token and a mismatch all
+// return false. A session issued by a controller that predates the durable hash carries
+// none and is refused on unsafe methods until the user logs in again.
+func (s *Server) webCSRFTokenValid(ctx context.Context, sessID, csrfToken string) bool {
+	if csrfToken == "" || sessID == "" || s.webSessionManager == nil {
+		return false
+	}
+	sess, err := s.webSessionManager.GetByID(ctx, sessID)
+	if err != nil || sess == nil || sess.CSRFTokenHash == "" {
+		return false
+	}
+	sum := sha256.Sum256([]byte(csrfToken))
+	return subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(sess.CSRFTokenHash)) == 1
 }
 
 // isCookieAuthenticated reports whether this request was authenticated via the

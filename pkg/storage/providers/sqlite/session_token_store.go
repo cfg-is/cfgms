@@ -92,6 +92,7 @@ func upsertOn(ctx context.Context, db sqlExecer, tokenHash string, sess *session
 		sess.LoginCredentialID,
 		sess.RootScoped,
 		sess.Channel,
+		sess.CSRFTokenHash,
 	}
 	if requireLive {
 		args = append(args, sess.ID, formatTime(time.Now().UTC()))
@@ -101,8 +102,8 @@ func upsertOn(ctx context.Context, db sqlExecer, tokenHash string, sess *session
 		INSERT INTO session_token_records
 			(token_hash, session_id, principal_id, connection_name, tenant_id,
 			 issued_at, last_activity, absolute_expires_at, hash_expires_at,
-			 assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?
+			 assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel, csrf_token_hash)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE 1 = 1`+guard+`
 		ON CONFLICT(token_hash) DO UPDATE SET
 			session_id          = excluded.session_id,
@@ -118,7 +119,8 @@ func upsertOn(ctx context.Context, db sqlExecer, tokenHash string, sess *session
 			credential_id       = excluded.credential_id,
 			login_credential_id = excluded.login_credential_id,
 			root_scoped         = excluded.root_scoped,
-			channel             = excluded.channel`, args...)
+			channel             = excluded.channel,
+			csrf_token_hash     = excluded.csrf_token_hash`, args...)
 	if err != nil {
 		return fmt.Errorf("sqlite: session token write failed: %w", err)
 	}
@@ -180,7 +182,7 @@ func (s *SQLiteSessionTokenStore) Get(ctx context.Context, tokenHash string) (*s
 	return s.queryLiveSession(ctx, "get", `
 		SELECT session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
+		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel, csrf_token_hash
 		FROM session_token_records
 		WHERE token_hash = ?
 		  AND (hash_expires_at IS NULL OR hash_expires_at > ?)`, tokenHash)
@@ -193,7 +195,7 @@ func (s *SQLiteSessionTokenStore) GetByID(ctx context.Context, id string) (*sess
 	return s.queryLiveSession(ctx, "get by id", `
 		SELECT session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
+		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel, csrf_token_hash
 		FROM session_token_records
 		WHERE session_id = ?
 		  AND (hash_expires_at IS NULL OR hash_expires_at > ?)
@@ -213,7 +215,7 @@ func (s *SQLiteSessionTokenStore) queryLiveSession(ctx context.Context, op, quer
 	err := s.db.QueryRowContext(ctx, query, arg, now).Scan(
 		&sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 		&issuedAt, &lastActivity, &absoluteExpiresAt,
-		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel,
+		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel, &sess.CSRFTokenHash,
 	)
 	if err == sql.ErrNoRows {
 		return nil, session.ErrSessionNotFound
@@ -262,7 +264,7 @@ func (s *SQLiteSessionTokenStore) ListAll(ctx context.Context) ([]*session.Sessi
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT token_hash, session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
+		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel, csrf_token_hash
 		FROM session_token_records
 		WHERE hash_expires_at IS NULL OR hash_expires_at > ?
 		ORDER BY rowid`, now)
@@ -284,7 +286,7 @@ func (s *SQLiteSessionTokenStore) ListAll(ctx context.Context) ([]*session.Sessi
 		if err := rows.Scan(
 			&tokenHash, &sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 			&issuedAt, &lastActivity, &absoluteExpiresAt,
-			&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel,
+			&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel, &sess.CSRFTokenHash,
 		); err != nil {
 			return nil, fmt.Errorf("sqlite: session token list scan failed: %w", err)
 		}

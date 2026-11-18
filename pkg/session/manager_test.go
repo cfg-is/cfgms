@@ -1622,3 +1622,181 @@ func TestCacheHitRejectsStoredImmutableMismatch(t *testing.T) {
 		}
 	}
 }
+
+// ---- Issue #6321: durable CSRF token hash ----
+
+const testCSRFHash = "3f1c5a0e9b7d4c2a8e6f1b0d9c8a7e6f5d4c3b2a1908f7e6d5c4b3a291807f6e"
+
+func csrfTestConfig() session.Config {
+	return session.Config{
+		IdleTimeout:     10 * time.Minute,
+		AbsoluteTimeout: time.Hour,
+		GraceWindow:     30 * time.Second,
+	}
+}
+
+func requireCSRFHash(t *testing.T, label string, sess *session.Session, err error, want string) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
+	if sess.CSRFTokenHash != want {
+		t.Errorf("%s: CSRFTokenHash = %q, want %q", label, sess.CSRFTokenHash, want)
+	}
+}
+
+// TestBindCSRFTokenHash_SurvivesElevateOnEveryRow binds before Elevate, as the login
+// path does: the hash is returned by GetByID, by Get(previousHash) and by Get(newHash),
+// so the answer does not depend on which live row a store's GetByID picks.
+func TestBindCSRFTokenHash_SurvivesElevateOnEveryRow(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	mgr, store := newTestManager(t, csrfTestConfig(), clock)
+	ctx := context.Background()
+
+	sess, oldToken, err := mgr.Issue(ctx, "alice", "web", "tenant-1")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if sess.CSRFTokenHash != "" {
+		t.Fatalf("a new session must carry no CSRF hash, got %q", sess.CSRFTokenHash)
+	}
+	if err := mgr.BindCSRFTokenHash(ctx, sess.ID, testCSRFHash); err != nil {
+		t.Fatalf("BindCSRFTokenHash: %v", err)
+	}
+	_, newToken, err := mgr.Elevate(ctx, sess.ID, []byte("cred"), "192.0.2.1")
+	if err != nil {
+		t.Fatalf("Elevate: %v", err)
+	}
+
+	got, err := store.GetByID(ctx, sess.ID)
+	requireCSRFHash(t, "store.GetByID", got, err, testCSRFHash)
+	got, err = store.Get(ctx, session.HashToken(oldToken))
+	requireCSRFHash(t, "store.Get(previousHash)", got, err, testCSRFHash)
+	got, err = store.Get(ctx, session.HashToken(newToken))
+	requireCSRFHash(t, "store.Get(newHash)", got, err, testCSRFHash)
+	got, err = mgr.GetByID(ctx, sess.ID)
+	requireCSRFHash(t, "mgr.GetByID", got, err, testCSRFHash)
+}
+
+func TestBindCSRFTokenHash_RenewKeepsHash(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	mgr, store := newTestManager(t, csrfTestConfig(), clock)
+	ctx := context.Background()
+
+	sess, token, err := mgr.Issue(ctx, "alice", "web", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if err := mgr.BindCSRFTokenHash(ctx, sess.ID, testCSRFHash); err != nil {
+		t.Fatalf("BindCSRFTokenHash: %v", err)
+	}
+	clock.advance(time.Minute)
+	renewed, newToken, err := mgr.Renew(ctx, token)
+	requireCSRFHash(t, "Renew result", renewed, err, testCSRFHash)
+	if newToken == "" {
+		t.Fatal("Renew must rotate the token")
+	}
+	got, err := store.Get(ctx, session.HashToken(newToken))
+	requireCSRFHash(t, "store.Get(renewed hash)", got, err, testCSRFHash)
+	got, err = store.Get(ctx, session.HashToken(token))
+	requireCSRFHash(t, "store.Get(previous hash)", got, err, testCSRFHash)
+}
+
+// TestBindCSRFTokenHash_VisibleToFreshManager models another node or a restart: a
+// manager with no cached state reads the hash from the shared store.
+func TestBindCSRFTokenHash_VisibleToFreshManager(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	cfg := csrfTestConfig()
+	mgrA, store := newTestManager(t, cfg, clock)
+	mgrB := session.NewManager(cfg, store, clock.Now)
+	ctx := context.Background()
+
+	sess, token, err := mgrA.Issue(ctx, "alice", "web", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	// Node B caches the session before the hash is bound; the durable value must still
+	// reach it through Validate.
+	if _, err := mgrB.Validate(ctx, token); err != nil {
+		t.Fatalf("mgrB.Validate: %v", err)
+	}
+	if err := mgrA.BindCSRFTokenHash(ctx, sess.ID, testCSRFHash); err != nil {
+		t.Fatalf("BindCSRFTokenHash: %v", err)
+	}
+	got, err := mgrB.Validate(ctx, token)
+	requireCSRFHash(t, "mgrB.Validate after bind", got, err, testCSRFHash)
+
+	mgrC := session.NewManager(cfg, store, clock.Now)
+	got, err = mgrC.GetByID(ctx, sess.ID)
+	requireCSRFHash(t, "fresh manager GetByID", got, err, testCSRFHash)
+}
+
+func TestBindCSRFTokenHash_RevokedOrUnknownSessionIsNotResurrected(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	mgr, store := newTestManager(t, csrfTestConfig(), clock)
+	ctx := context.Background()
+
+	if err := mgr.BindCSRFTokenHash(ctx, "no-such-session", testCSRFHash); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("unknown session: got %v, want ErrSessionNotFound", err)
+	}
+
+	sess, _, err := mgr.Issue(ctx, "alice", "web", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if err := mgr.Revoke(ctx, sess.ID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if err := mgr.BindCSRFTokenHash(ctx, sess.ID, testCSRFHash); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("revoked session: got %v, want ErrSessionNotFound", err)
+	}
+	if _, err := store.GetByID(ctx, sess.ID); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("a revoked session must stay gone after a bind attempt, got %v", err)
+	}
+}
+
+// TestBindCSRFTokenHash_DeletedFromStoreByAnotherNode covers a session another node
+// revoked while this node still caches it: the bind must fail and write nothing.
+func TestBindCSRFTokenHash_DeletedFromStoreByAnotherNode(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	mgr, store := newTestManager(t, csrfTestConfig(), clock)
+	ctx := context.Background()
+
+	sess, _, err := mgr.Issue(ctx, "alice", "web", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if err := store.Delete(ctx, sess.ID); err != nil {
+		t.Fatalf("store.Delete: %v", err)
+	}
+	if err := mgr.BindCSRFTokenHash(ctx, sess.ID, testCSRFHash); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("got %v, want ErrSessionNotFound", err)
+	}
+	if _, err := store.GetByID(ctx, sess.ID); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("store must stay empty, got %v", err)
+	}
+}
+
+func TestBindCSRFTokenHash_RevocationRemovesHash(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	mgr, store := newTestManager(t, csrfTestConfig(), clock)
+	ctx := context.Background()
+
+	sess, _, err := mgr.Issue(ctx, "alice", "web", "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if err := mgr.BindCSRFTokenHash(ctx, sess.ID, testCSRFHash); err != nil {
+		t.Fatalf("BindCSRFTokenHash: %v", err)
+	}
+	if n, err := mgr.RevokeAllForPrincipal(ctx, "alice"); err != nil || n != 1 {
+		t.Fatalf("RevokeAllForPrincipal = %d, %v; want 1, nil", n, err)
+	}
+	if got, err := store.GetByID(ctx, sess.ID); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("store.GetByID after revoke = %+v, %v; want ErrSessionNotFound", got, err)
+	}
+	if got, err := mgr.GetByID(ctx, sess.ID); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("mgr.GetByID after revoke = %+v, %v; want ErrSessionNotFound", got, err)
+	}
+}

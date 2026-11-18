@@ -199,28 +199,35 @@ func (m *manager) verifyInStore(ctx context.Context, hash string, ms *managedSes
 // overwrites them with a stale copy. Immutable fields are never merged; a stored row
 // whose immutable fields differ from the cached ones fails with ErrSessionNotFound.
 // Assurance, CredentialID, BoundIP and LastProvenAt are taken from the store as a
-// unit and LastActivity as the later of the two.
+// unit, CSRFTokenHash likewise (Issue #6321), and LastActivity as the later of the two.
 // The caller must hold ms.mu.
 func mergeStored(ms *managedSession, stored *Session) error {
 	cur := ms.session
 	if stored == nil {
 		return nil
 	}
-	if stored.ID != cur.ID || stored.PrincipalID != cur.PrincipalID ||
-		stored.TenantID != cur.TenantID || !stored.IssuedAt.Equal(cur.IssuedAt) ||
-		!stored.AbsoluteExpiresAt.Equal(cur.AbsoluteExpiresAt) ||
-		!bytes.Equal(stored.LoginCredentialID, cur.LoginCredentialID) ||
-		stored.RootScoped != cur.RootScoped || stored.Channel != cur.Channel {
+	if !sameImmutableFields(stored, cur) {
 		return ErrSessionNotFound
 	}
 	cur.Assurance = stored.Assurance
 	cur.CredentialID = append([]byte(nil), stored.CredentialID...)
 	cur.BoundIP = stored.BoundIP
 	cur.LastProvenAt = stored.LastProvenAt
+	cur.CSRFTokenHash = stored.CSRFTokenHash
 	if stored.LastActivity.After(cur.LastActivity) {
 		cur.LastActivity = stored.LastActivity
 	}
 	return nil
+}
+
+// sameImmutableFields reports whether stored and cur agree on every field that is set
+// once at issuance and never changes, i.e. whether they describe the same session.
+func sameImmutableFields(stored, cur *Session) bool {
+	return stored.ID == cur.ID && stored.PrincipalID == cur.PrincipalID &&
+		stored.TenantID == cur.TenantID && stored.IssuedAt.Equal(cur.IssuedAt) &&
+		stored.AbsoluteExpiresAt.Equal(cur.AbsoluteExpiresAt) &&
+		bytes.Equal(stored.LoginCredentialID, cur.LoginCredentialID) &&
+		stored.RootScoped == cur.RootScoped && stored.Channel == cur.Channel
 }
 
 // updateStore writes ms's session under hash to an existing store record. When the
@@ -714,5 +721,35 @@ func (m *manager) Revoke(ctx context.Context, id string) error {
 	if err := m.store.Delete(ctx, id); err != nil && !errors.Is(err, ErrSessionNotFound) {
 		return err
 	}
+	return nil
+}
+
+// BindCSRFTokenHash sets the CSRF token hash on the session and persists it with
+// Store.Update, so a revoked session returns ErrSessionNotFound and is never
+// resurrected (Issue #6321). The session must be known to this node (issued here or
+// loaded by Validate); an unknown ID returns ErrSessionNotFound.
+func (m *manager) BindCSRFTokenHash(ctx context.Context, sessionID, tokenHash string) error {
+	m.mu.RLock()
+	ms := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if ms == nil {
+		return ErrSessionNotFound
+	}
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	if ms.revoked {
+		return ErrSessionNotFound
+	}
+	updated := *ms.session
+	updated.CSRFTokenHash = tokenHash
+	err := m.store.Update(ctx, ms.currentHash, &updated)
+	switch {
+	case errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrSessionRevoked):
+		ms.revoked = true
+		return ErrSessionNotFound
+	case err != nil:
+		return fmt.Errorf("session: bind CSRF token hash: %w", err)
+	}
+	ms.session.CSRFTokenHash = tokenHash
 	return nil
 }

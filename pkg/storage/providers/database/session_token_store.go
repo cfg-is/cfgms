@@ -194,9 +194,9 @@ func writeRow(ctx context.Context, tx *sql.Tx, tokenHash string, sess *session.S
 		INSERT INTO session_token_store
 			(token_hash, session_id, principal_id, connection_name, tenant_id,
 			 issued_at, last_activity, absolute_expires_at, hash_expires_at,
-			 assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel)
+			 assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel, csrf_token_hash)
 		SELECT $1::text, $2::text, $3::text, $4::text, $5::text, $6::timestamptz, $7::timestamptz,
-		       $8::timestamptz, NULL, $9::int, $10::text, $11::timestamptz, $12::bytea, $13::bytea, $14::boolean, $15::text`+guard+`
+		       $8::timestamptz, NULL, $9::int, $10::text, $11::timestamptz, $12::bytea, $13::bytea, $14::boolean, $15::text, $16::text`+guard+`
 		ON CONFLICT(token_hash) DO UPDATE SET
 			session_id          = EXCLUDED.session_id,
 			principal_id        = EXCLUDED.principal_id,
@@ -211,7 +211,8 @@ func writeRow(ctx context.Context, tx *sql.Tx, tokenHash string, sess *session.S
 			credential_id       = EXCLUDED.credential_id,
 			login_credential_id = EXCLUDED.login_credential_id,
 			root_scoped         = EXCLUDED.root_scoped,
-			channel             = EXCLUDED.channel`,
+			channel             = EXCLUDED.channel,
+			csrf_token_hash     = EXCLUDED.csrf_token_hash`,
 		tokenHash,
 		sess.ID,
 		sess.PrincipalID,
@@ -227,6 +228,7 @@ func writeRow(ctx context.Context, tx *sql.Tx, tokenHash string, sess *session.S
 		loginCredentialID,
 		sess.RootScoped,
 		sess.Channel,
+		sess.CSRFTokenHash,
 	)
 	if err != nil {
 		return fmt.Errorf("database: session token write failed: %w", err)
@@ -245,7 +247,7 @@ func (s *DatabaseSessionTokenStore) Get(ctx context.Context, tokenHash string) (
 	return s.queryLiveSession(ctx, "get", `
 		SELECT session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
+		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel, csrf_token_hash
 		FROM session_token_store
 		WHERE token_hash = $1
 		  AND (hash_expires_at IS NULL OR hash_expires_at > NOW())`,
@@ -259,7 +261,7 @@ func (s *DatabaseSessionTokenStore) GetByID(ctx context.Context, id string) (*se
 	return s.queryLiveSession(ctx, "get by id", `
 		SELECT session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
+		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel, csrf_token_hash
 		FROM session_token_store
 		WHERE session_id = $1
 		  AND (hash_expires_at IS NULL OR hash_expires_at > NOW())
@@ -278,7 +280,7 @@ func (s *DatabaseSessionTokenStore) queryLiveSession(ctx context.Context, op, qu
 	err := s.db.QueryRowContext(ctx, query, arg).Scan(
 		&sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 		&sess.IssuedAt, &sess.LastActivity, &sess.AbsoluteExpiresAt,
-		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel,
+		&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel, &sess.CSRFTokenHash,
 	)
 	if err == sql.ErrNoRows {
 		return nil, session.ErrSessionNotFound
@@ -353,7 +355,7 @@ func (s *DatabaseSessionTokenStore) ListAll(ctx context.Context) ([]*session.Ses
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT token_hash, session_id, principal_id, connection_name, tenant_id,
 		       issued_at, last_activity, absolute_expires_at,
-		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel
+		       assurance, bound_ip, last_proven_at, credential_id, login_credential_id, root_scoped, channel, csrf_token_hash
 		FROM session_token_store
 		WHERE hash_expires_at IS NULL OR hash_expires_at > NOW()
 		ORDER BY issued_at`)
@@ -374,7 +376,7 @@ func (s *DatabaseSessionTokenStore) ListAll(ctx context.Context) ([]*session.Ses
 		if err := rows.Scan(
 			&tokenHash, &sess.ID, &sess.PrincipalID, &sess.ConnectionName, &sess.TenantID,
 			&sess.IssuedAt, &sess.LastActivity, &sess.AbsoluteExpiresAt,
-			&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel,
+			&assurance, &sess.BoundIP, &lastProvenAt, &credentialID, &loginCredentialID, &sess.RootScoped, &sess.Channel, &sess.CSRFTokenHash,
 		); err != nil {
 			return nil, fmt.Errorf("database: session token list scan failed: %w", err)
 		}

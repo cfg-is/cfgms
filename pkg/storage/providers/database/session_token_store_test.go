@@ -824,3 +824,104 @@ func TestDatabaseSessionTokenStore_GetAndGetByIDAgree(t *testing.T) {
 		assert.True(t, errors.Is(err, session.ErrSessionNotFound))
 	})
 }
+
+// TestDatabaseSessionTokenStore_CSRFTokenHashRoundTrip verifies the CSRF token hash
+// (Issue #6321) round-trips through Set, Get, GetByID, ListAll and Update, is carried to
+// the new row by Rotate so GetByID, Get(previousHash) and Get(newHash) all agree, and
+// disappears with Delete.
+func TestDatabaseSessionTokenStore_CSRFTokenHashRoundTrip(t *testing.T) {
+	store := newTestSessionTokenStore(t)
+	ctx := context.Background()
+
+	hashA := session.HashToken(mustGenerateToken(t))
+	hashB := session.HashToken(mustGenerateToken(t))
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	sess := &session.Session{
+		ID:                "csrf-roundtrip-pg",
+		PrincipalID:       "carol",
+		ConnectionName:    "ctrl",
+		TenantID:          "tenant-1",
+		IssuedAt:          now,
+		LastActivity:      now,
+		AbsoluteExpiresAt: now.Add(time.Hour),
+		Assurance:         session.AssuranceBasic,
+		Channel:           "web",
+		CSRFTokenHash:     "aa11",
+	}
+	require.NoError(t, store.Set(ctx, hashA, sess))
+
+	got, err := store.Get(ctx, hashA)
+	require.NoError(t, err)
+	assert.Equal(t, "aa11", got.CSRFTokenHash, "Get")
+	got, err = store.GetByID(ctx, sess.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "aa11", got.CSRFTokenHash, "GetByID")
+	all, err := store.ListAll(ctx)
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	assert.Equal(t, "aa11", all[0].CSRFTokenHash, "ListAll")
+
+	// A later Update keeps the column: the upsert's DO UPDATE list names it.
+	sess.CSRFTokenHash = "bb22"
+	require.NoError(t, store.Update(ctx, hashA, sess))
+	got, err = store.Get(ctx, hashA)
+	require.NoError(t, err)
+	assert.Equal(t, "bb22", got.CSRFTokenHash, "Update")
+
+	// Rotate (Renew/Elevate): every live row carries the hash.
+	require.NoError(t, store.Rotate(ctx, hashA, hashB, sess, time.Now().Add(30*time.Second)))
+	for name, lookup := range map[string]func() (*session.Session, error){
+		"GetByID":       func() (*session.Session, error) { return store.GetByID(ctx, sess.ID) },
+		"Get(previous)": func() (*session.Session, error) { return store.Get(ctx, hashA) },
+		"Get(new)":      func() (*session.Session, error) { return store.Get(ctx, hashB) },
+	} {
+		got, err := lookup()
+		require.NoError(t, err, name)
+		assert.Equal(t, "bb22", got.CSRFTokenHash, name)
+	}
+
+	require.NoError(t, store.Delete(ctx, sess.ID))
+	_, err = store.GetByID(ctx, sess.ID)
+	assert.ErrorIs(t, err, session.ErrSessionNotFound)
+	_, err = store.Get(ctx, hashB)
+	assert.ErrorIs(t, err, session.ErrSessionNotFound)
+}
+
+// TestBackfillAddsCSRFTokenHashColumn verifies a session_token_store table that predates
+// csrf_token_hash gains the column from BackfillSessionTokenStoreContinuity, existing
+// rows read back with an empty hash, and the idempotent re-run is safe (Issue #6321).
+func TestBackfillAddsCSRFTokenHashColumn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping database tests in short mode")
+	}
+	db := getTestDB(t) // skips if postgres not reachable
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS session_token_store")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = db.ExecContext(ctx, "DROP TABLE IF EXISTS session_token_store") })
+
+	_, err = db.ExecContext(ctx, preChannelSessionTokenSchema)
+	require.NoError(t, err, "create pre-csrf session_token_store")
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO session_token_store
+			(token_hash, session_id, principal_id, connection_name, tenant_id,
+			 issued_at, last_activity, absolute_expires_at)
+		VALUES ('pre-csrf-hash', 'pre-csrf-sess', 'admin', 'ctrl', 'tenant-1',
+			now(), now(), now() + interval '8 hours')`)
+	require.NoError(t, err, "seed pre-csrf row")
+	assert.False(t, pgColumnExists(ctx, t, db, "csrf_token_hash"), "pre-condition: column absent")
+
+	schemas := NewDatabaseSchemas()
+	require.NoError(t, schemas.BackfillSessionTokenStoreContinuity(ctx, db), "first back-fill")
+	assert.True(t, pgColumnExists(ctx, t, db, "csrf_token_hash"), "column present after back-fill")
+
+	var hash string
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT csrf_token_hash FROM session_token_store WHERE token_hash='pre-csrf-hash'`).Scan(&hash))
+	assert.Equal(t, "", hash, "legacy row must default to an empty CSRF hash")
+
+	require.NoError(t, schemas.BackfillSessionTokenStoreContinuity(ctx, db), "second back-fill (idempotency)")
+	assert.True(t, pgColumnExists(ctx, t, db, "csrf_token_hash"))
+}

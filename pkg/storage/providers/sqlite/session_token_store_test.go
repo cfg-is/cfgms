@@ -4,6 +4,7 @@ package sqlite_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -249,4 +250,116 @@ func TestSQLiteSessionTokenStore_GetAndGetByIDAgree(t *testing.T) {
 		_, err = store.GetByID(ctx, "no-such-id")
 		assert.True(t, errors.Is(err, session.ErrSessionNotFound))
 	})
+}
+
+// TestSQLiteSessionTokenStore_CSRFTokenHashRoundTrip verifies the CSRF token hash
+// (Issue #6321) round-trips through Set, Get, GetByID, ListAll and Update, is carried
+// to the new row by Rotate so GetByID, Get(previousHash) and Get(newHash) all agree, and
+// disappears with Delete.
+func TestSQLiteSessionTokenStore_CSRFTokenHashRoundTrip(t *testing.T) {
+	store := newTestSessionTokenStore(t)
+	ctx := context.Background()
+
+	hashA := session.HashToken(mustToken(t))
+	hashB := session.HashToken(mustToken(t))
+	sess := makeTokenSession("csrf-roundtrip-id", "web")
+	sess.CSRFTokenHash = "aa11"
+	require.NoError(t, store.Set(ctx, hashA, sess))
+
+	got, err := store.Get(ctx, hashA)
+	require.NoError(t, err)
+	assert.Equal(t, "aa11", got.CSRFTokenHash, "Get")
+	got, err = store.GetByID(ctx, sess.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "aa11", got.CSRFTokenHash, "GetByID")
+	all, err := store.ListAll(ctx)
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	assert.Equal(t, "aa11", all[0].CSRFTokenHash, "ListAll")
+
+	// A later Update keeps the column: the upsert's DO UPDATE list names it.
+	sess.CSRFTokenHash = "bb22"
+	require.NoError(t, store.Update(ctx, hashA, sess))
+	got, err = store.Get(ctx, hashA)
+	require.NoError(t, err)
+	assert.Equal(t, "bb22", got.CSRFTokenHash, "Update")
+
+	// Rotate (Renew/Elevate): every live row carries the hash.
+	require.NoError(t, store.Rotate(ctx, hashA, hashB, sess, time.Now().Add(30*time.Second)))
+	for name, lookup := range map[string]func() (*session.Session, error){
+		"GetByID":       func() (*session.Session, error) { return store.GetByID(ctx, sess.ID) },
+		"Get(previous)": func() (*session.Session, error) { return store.Get(ctx, hashA) },
+		"Get(new)":      func() (*session.Session, error) { return store.Get(ctx, hashB) },
+	} {
+		got, err := lookup()
+		require.NoError(t, err, name)
+		assert.Equal(t, "bb22", got.CSRFTokenHash, name)
+	}
+
+	require.NoError(t, store.Delete(ctx, sess.ID))
+	_, err = store.GetByID(ctx, sess.ID)
+	assert.ErrorIs(t, err, session.ErrSessionNotFound)
+	_, err = store.Get(ctx, hashB)
+	assert.ErrorIs(t, err, session.ErrSessionNotFound)
+}
+
+// TestSQLiteSessionTokenStore_NoCSRFTokenHashByDefault verifies a session stored without
+// a hash reads back with none (the column default is the empty string).
+func TestSQLiteSessionTokenStore_NoCSRFTokenHashByDefault(t *testing.T) {
+	store := newTestSessionTokenStore(t)
+	ctx := context.Background()
+
+	hash := session.HashToken(mustToken(t))
+	require.NoError(t, store.Set(ctx, hash, makeTokenSession("no-csrf-id", "web")))
+	got, err := store.Get(ctx, hash)
+	require.NoError(t, err)
+	assert.Empty(t, got.CSRFTokenHash)
+}
+
+func mustToken(t *testing.T) string {
+	t.Helper()
+	tok, err := session.GenerateToken()
+	require.NoError(t, err)
+	return tok
+}
+
+// TestSQLiteSessionTokenStore_BackfillAddsCSRFTokenHash opens a database whose
+// session_token_records table predates the csrf_token_hash column and verifies the
+// provider adds it on open, existing rows read back with no hash, and a new hash can be
+// stored (Issue #6321).
+func TestSQLiteSessionTokenStore_BackfillAddsCSRFTokenHash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy_session_tokens.db")
+	ctx := context.Background()
+
+	legacy, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = legacy.ExecContext(ctx, `CREATE TABLE session_token_records (
+		token_hash TEXT PRIMARY KEY, session_id TEXT NOT NULL, principal_id TEXT NOT NULL,
+		connection_name TEXT NOT NULL, tenant_id TEXT NOT NULL, issued_at TEXT NOT NULL,
+		last_activity TEXT NOT NULL, absolute_expires_at TEXT NOT NULL, hash_expires_at TEXT,
+		assurance INTEGER NOT NULL DEFAULT 1, bound_ip TEXT NOT NULL DEFAULT '',
+		last_proven_at TEXT, credential_id BLOB, login_credential_id BLOB,
+		root_scoped INTEGER NOT NULL DEFAULT 0, channel TEXT NOT NULL DEFAULT '')`)
+	require.NoError(t, err)
+	_, err = legacy.ExecContext(ctx, `INSERT INTO session_token_records
+		(token_hash, session_id, principal_id, connection_name, tenant_id, issued_at, last_activity, absolute_expires_at, channel)
+		VALUES ('legacy-hash', 'legacy-sess', 'admin', 'ctrl', 'tenant-1',
+		        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2099-01-01T00:00:00Z', 'web')`)
+	require.NoError(t, err)
+	require.NoError(t, legacy.Close())
+
+	store, err := sqlite.NewSQLiteProvider(dir).CreateSessionTokenStore(map[string]interface{}{"path": path})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	got, err := store.Get(ctx, "legacy-hash")
+	require.NoError(t, err)
+	assert.Empty(t, got.CSRFTokenHash, "a legacy row carries no CSRF hash")
+
+	got.CSRFTokenHash = "cc33"
+	require.NoError(t, store.Update(ctx, "legacy-hash", got))
+	got, err = store.GetByID(ctx, "legacy-sess")
+	require.NoError(t, err)
+	assert.Equal(t, "cc33", got.CSRFTokenHash)
 }

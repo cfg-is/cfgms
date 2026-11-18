@@ -10,6 +10,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"net/http"
@@ -314,9 +315,10 @@ func TestHandlerspasskeyloginChar_SuccessRevokesPriorSessionAndSetsCookies(t *te
 	require.NoError(t, err)
 	assert.Equal(t, "web", valid.ConnectionName)
 	assert.Equal(t, session.AssuranceStrong, valid.Assurance)
-	stored, ok := srv.csrfTokens.Load(valid.ID)
-	require.True(t, ok)
-	assert.Equal(t, csrf.Value, stored)
+	stored, err := mgr.GetByID(context.Background(), valid.ID)
+	require.NoError(t, err)
+	csrfSum := sha256.Sum256([]byte(csrf.Value))
+	assert.Equal(t, hex.EncodeToString(csrfSum[:]), stored.CSRFTokenHash)
 	assert.Equal(t, 2, handlerspasskeyloginCharAuditCount(t, srv, "web.passkey.login.success"))
 }
 

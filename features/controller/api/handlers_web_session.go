@@ -14,7 +14,6 @@ package api
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"net/http"
@@ -99,16 +98,13 @@ func (s *Server) handleWebLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// CSRF check: X-CSRF-Token header must match the session-bound server-side token.
-	csrfHeader := r.Header.Get(headerCSRFToken)
-	stored, _ := s.csrfTokens.Load(sess.ID)
-	storedStr, _ := stored.(string)
-	if csrfHeader == "" || storedStr == "" || subtle.ConstantTimeCompare([]byte(csrfHeader), []byte(storedStr)) != 1 {
+	// CSRF check: X-CSRF-Token header must match the session-bound token (stored as a hash on the durable session record).
+	if !s.webCSRFTokenValid(r.Context(), sess.ID, r.Header.Get(headerCSRFToken)) {
 		s.writeErrorResponse(w, http.StatusForbidden, "CSRF token mismatch", "CSRF_MISMATCH")
 		return
 	}
 
-	// Revoke session and remove CSRF token entry.
+	// Revoke the session; its durable record, and the CSRF token hash on it, is deleted.
 	if revErr := s.webSessionManager.Revoke(r.Context(), sess.ID); revErr != nil {
 		// Revocation failed: the server-side session persists and remains replayable
 		// by anyone who captured the token, even though we clear the client cookies.
@@ -117,7 +113,6 @@ func (s *Server) handleWebLogout(w http.ResponseWriter, r *http.Request) {
 			"session_id", logging.SanitizeLogValue(sess.ID),
 			"error", logging.SanitizeLogValue(revErr.Error()))
 	}
-	s.csrfTokens.Delete(sess.ID)
 
 	clearWebSessionCookies(w)
 

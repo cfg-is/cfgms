@@ -34,8 +34,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -437,9 +439,9 @@ func (s *Server) verifyPasskeyLoginAccount(w http.ResponseWriter, r *http.Reques
 }
 
 // issuePasskeyLoginSession revokes any pre-existing session cookie, issues a Basic session,
-// elevates it to Strong, mints the CSRF token and sets the response cookies. On failure it
-// revokes the issued session, writes the error and returns false. It returns the
-// elevated session.
+// mints the CSRF token and binds its hash to the session, elevates it to Strong and sets
+// the response cookies. On failure it revokes the issued session, writes the error and
+// returns false. It returns the elevated session.
 func (s *Server) issuePasskeyLoginSession(w http.ResponseWriter, r *http.Request, mgr session.Manager, acct *account, credID []byte, sourceIP string) (*session.Session, bool) {
 	// Session-fixation defence: revoke any pre-existing session cookie before
 	// issuing a new one. Best-effort — a revocation failure does not abort the login.
@@ -461,6 +463,26 @@ func (s *Server) issuePasskeyLoginSession(w http.ResponseWriter, r *http.Request
 		return nil, false
 	}
 
+	// Mint a session-bound CSRF token for subsequent state-mutating requests and bind
+	// its SHA-256 hash to the durable session record (Issue #6321). This must happen
+	// BEFORE Elevate: Elevate rotates the session token and leaves the pre-elevation row
+	// live for GraceWindow, and a store GetByID may return either row. Binding first
+	// lets Elevate copy the hash into both rows.
+	csrfToken, csrfErr := generateCSRFToken()
+	if csrfErr == nil {
+		csrfSum := sha256.Sum256([]byte(csrfToken))
+		csrfErr = mgr.BindCSRFTokenHash(r.Context(), issuedSess.ID, hex.EncodeToString(csrfSum[:]))
+	}
+	if csrfErr != nil {
+		s.logger.Error("Passkey login finish: failed to generate or bind CSRF token",
+			"username", logging.SanitizeLogValue(acct.Username),
+			"error", logging.SanitizeLogValue(csrfErr.Error()))
+		_ = mgr.Revoke(r.Context(), issuedSess.ID)
+		s.writeErrorResponse(w, http.StatusInternalServerError,
+			"Failed to generate CSRF token", "CSRF_GEN_ERROR")
+		return nil, false
+	}
+
 	elevatedSess, newToken, elevateErr := mgr.Elevate(r.Context(), issuedSess.ID, credID, sourceIP)
 	if elevateErr != nil {
 		s.logger.Error("Passkey login finish: failed to elevate session",
@@ -471,19 +493,6 @@ func (s *Server) issuePasskeyLoginSession(w http.ResponseWriter, r *http.Request
 			"Failed to elevate session", "SESSION_ELEVATION_ERROR")
 		return nil, false
 	}
-
-	// Mint and store a session-bound CSRF token for subsequent state-mutating requests.
-	csrfToken, csrfErr := generateCSRFToken()
-	if csrfErr != nil {
-		s.logger.Error("Passkey login finish: failed to generate CSRF token",
-			"username", logging.SanitizeLogValue(acct.Username),
-			"error", logging.SanitizeLogValue(csrfErr.Error()))
-		_ = mgr.Revoke(r.Context(), issuedSess.ID)
-		s.writeErrorResponse(w, http.StatusInternalServerError,
-			"Failed to generate CSRF token", "CSRF_GEN_ERROR")
-		return nil, false
-	}
-	s.csrfTokens.Store(issuedSess.ID, csrfToken)
 
 	setPasskeyLoginCookies(w, newToken, csrfToken)
 	return elevatedSess, true

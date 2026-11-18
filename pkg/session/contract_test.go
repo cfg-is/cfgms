@@ -56,6 +56,7 @@ func (s *stubManager) Elevate(_ context.Context, _ string, _ []byte, _ string) (
 func (s *stubManager) RevokeAllForPrincipal(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }
+func (s *stubManager) BindCSRFTokenHash(_ context.Context, _, _ string) error { return nil }
 
 // stubStore satisfies Store for compile-time interface verification.
 type stubStore struct{}
