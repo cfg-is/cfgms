@@ -26,14 +26,15 @@ const (
 	sidEveryone           = "S-1-1-0"
 )
 
-// requireElevatedToken skips t unless the test runs elevated. writeTokenFile
-// assigns BUILTIN\Administrators as owner and the tests hand files to other
-// principals; both need an elevated administrator, as the installer and the
-// native Windows CI runners are.
-func requireElevatedToken(t *testing.T) {
+// requireElevatedToken skips t unless the test runs with an elevated
+// administrator token, as the installer and the native Windows CI runners do.
+// reason names what the test needs the elevation for and is appended to the
+// skip message. A UAC-filtered token holds Administrators as deny-only and
+// lacks privileges such as SeRestorePrivilege.
+func requireElevatedToken(t *testing.T, reason string) {
 	t.Helper()
 	if !windows.GetCurrentProcessToken().IsElevated() {
-		t.Skip("needs an elevated administrator: the token file is created with BUILTIN\\Administrators as owner")
+		t.Skip("needs an elevated administrator: " + reason)
 	}
 }
 
@@ -93,7 +94,7 @@ func tokenPathInExistingDir(t *testing.T) string {
 }
 
 func TestWriteTokenFile_WindowsDACLIsSystemAndAdministratorsOnly(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	path := tokenPathInExistingDir(t)
 
@@ -109,7 +110,7 @@ func TestWriteTokenFile_WindowsDACLIsSystemAndAdministratorsOnly(t *testing.T) {
 }
 
 func TestWriteTokenFile_ReplacesInheritedUsersReadableDACL(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	path := tokenPathInExistingDir(t)
 	dir := filepath.Dir(path)
@@ -130,7 +131,7 @@ func TestWriteTokenFile_ReplacesInheritedUsersReadableDACL(t *testing.T) {
 }
 
 func TestReadTokenFile_WindowsAcceptsFileWrittenByWriteTokenFile(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	path := tokenPathInExistingDir(t)
 	require.NoError(t, writeTokenFile(path, "tok_round_trip"))
@@ -141,7 +142,7 @@ func TestReadTokenFile_WindowsAcceptsFileWrittenByWriteTokenFile(t *testing.T) {
 }
 
 func TestReadTokenFile_WindowsRefusesFileOwnedByUsers(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	path := tokenPathInExistingDir(t)
 	require.NoError(t, writeTokenFile(path, "tok_owned_by_users"))
@@ -154,7 +155,7 @@ func TestReadTokenFile_WindowsRefusesFileOwnedByUsers(t *testing.T) {
 }
 
 func TestReadTokenFile_WindowsRefusesUsersACE(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	path := tokenPathInExistingDir(t)
 	require.NoError(t, writeTokenFile(path, "tok_users_ace"))
@@ -167,7 +168,7 @@ func TestReadTokenFile_WindowsRefusesUsersACE(t *testing.T) {
 }
 
 func TestReadTokenFile_WindowsRefusesDenyACE(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	path := tokenPathInExistingDir(t)
 	require.NoError(t, writeTokenFile(path, "tok_deny_ace"))
@@ -198,7 +199,7 @@ func TestReadTokenFile_WindowsExplainsDeniedOpen(t *testing.T) {
 }
 
 func TestReadTokenFile_WindowsRefusesNullDACL(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	path := tokenPathInExistingDir(t)
 	require.NoError(t, writeTokenFile(path, "tok_null_dacl"))
@@ -213,7 +214,7 @@ func TestReadTokenFile_WindowsRefusesNullDACL(t *testing.T) {
 }
 
 func TestReadTokenFile_WindowsRefusesSymlink(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	target := tokenPathInExistingDir(t)
 	require.NoError(t, writeTokenFile(target, "tok_behind_link"))
@@ -234,7 +235,7 @@ func TestReadTokenFile_WindowsRefusesDirectory(t *testing.T) {
 }
 
 func TestReadTokenFile_WindowsRefusesBadContent(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	for name, tc := range map[string]struct {
 		content string
 		want    string
@@ -288,7 +289,7 @@ func TestWriteTokenFile_WindowsRejectsWhitespaceToken(t *testing.T) {
 // cert and no pre-existing data directory: the directory is locked down and
 // the file is readable by ReadTokenFile.
 func TestStageRegistrationToken_WithoutCAIsReadable(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 
 	require.NoError(t, stageRegistrationToken("tok_stage_no_ca"))
@@ -306,7 +307,7 @@ func TestStageRegistrationToken_WithoutCAIsReadable(t *testing.T) {
 // directory that grants BUILTIN\Users read access. Staging must lock it down
 // even though no CA cert is staged, so the token never sits under a Users ACE.
 func TestStageRegistrationToken_LocksUnlockedDirBeforeWrite(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	path := platformTokenFilePath()
 	dir := filepath.Dir(path)
@@ -328,7 +329,7 @@ func TestStageRegistrationToken_LocksUnlockedDirBeforeWrite(t *testing.T) {
 // either fail without writing the token or replace it with an admin-owned file
 // carrying no Users entry; the token never ends up in the user-owned file.
 func TestStageRegistrationToken_UserOwnedTokenNeverHoldsToken(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	path := platformTokenFilePath()
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
@@ -358,7 +359,7 @@ func TestStageRegistrationToken_UserOwnedTokenNeverHoldsToken(t *testing.T) {
 // %ProgramData% would. The token must still land in a directory locked down to
 // SYSTEM and Administrators.
 func TestStageDataFiles_NoCALocksDownUsersReadableDir(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	path := platformTokenFilePath()
 	dir := filepath.Dir(path)
@@ -381,7 +382,7 @@ func TestStageDataFiles_NoCALocksDownUsersReadableDir(t *testing.T) {
 // data staging step with a CA cert: both the cert and the token are written,
 // the token is readable, and the tree passes the steward's start-up check.
 func TestStageDataFiles_WithCAStagesBothAndPassesStartCheck(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	certPEM, _ := generateTestCACert(t)
 
@@ -401,7 +402,7 @@ func TestStageDataFiles_WithCAStagesBothAndPassesStartCheck(t *testing.T) {
 // by BUILTIN\Users at the target path and drives the install's data staging
 // step with no CA cert. The new token must never end up in the user-owned file.
 func TestStageDataFiles_UserOwnedTokenAbortsOrReplaces(t *testing.T) {
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	path := platformTokenFilePath()
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
@@ -432,7 +433,7 @@ func TestReadTokenFile_WindowsErrorKinds(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, TokenFileMissing, tfe.Kind)
 
-	requireElevatedToken(t)
+	requireElevatedToken(t, "the token file is created with BUILTIN\\Administrators as owner")
 	t.Setenv("CFGMS_INSTALL_PREFIX", t.TempDir())
 	path := tokenPathInExistingDir(t)
 	require.NoError(t, writeTokenFile(path, "tok_users_ace_kind"))
