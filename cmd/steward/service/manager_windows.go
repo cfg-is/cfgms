@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -238,20 +239,95 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 			return m.stageInstall(launcherSrc, caCertPEM, token)
 		},
 		replaceDefinition: func() error {
+			steps := replaceDefinitionSteps{
+				serviceGone: func() bool {
+					s, err := scm.OpenService(windowsServiceName)
+					if err != nil {
+						// ERROR_SERVICE_DOES_NOT_EXIST means gone; any other
+						// open error ends the wait and CreateService decides.
+						return true
+					}
+					_ = s.Close()
+					return false
+				},
+				create: func() error {
+					return registerAndStartService(scm, platformTokenFilePath(), controllerURL)
+				},
+				now:      time.Now,
+				sleep:    time.Sleep,
+				bound:    30 * time.Second,
+				interval: 250 * time.Millisecond,
+			}
 			if existing != nil {
-				fmt.Println("Removing existing service definition...")
-				err := existing.Delete()
-				// Close before CreateService: an open handle keeps a
-				// deleted service in the marked-for-delete state.
-				_ = existing.Close()
-				existing = nil
-				if err != nil {
-					return fmt.Errorf("failed to delete existing service: %w", err)
+				steps.deleteExisting = func() error {
+					fmt.Println("Removing existing service definition...")
+					err := existing.Delete()
+					// Close before CreateService: an open handle keeps a
+					// deleted service in the marked-for-delete state.
+					_ = existing.Close()
+					existing = nil
+					if err != nil {
+						return fmt.Errorf("failed to delete existing service: %w", err)
+					}
+					return nil
 				}
 			}
-			return registerAndStartService(scm, platformTokenFilePath(), controllerURL)
+			return replaceServiceDefinition(steps)
 		},
 	})
+}
+
+// replaceDefinitionSteps are the parameters of replaceServiceDefinition, so
+// the delete / wait / create retry loop is testable without the SCM.
+type replaceDefinitionSteps struct {
+	// deleteExisting deletes and closes the existing service definition; nil
+	// when there is no existing service.
+	deleteExisting func() error
+	// serviceGone reports whether the old service has left the SCM database.
+	serviceGone func() bool
+	// create registers and starts the new service.
+	create func() error
+	// now and sleep are the clock seam.
+	now   func() time.Time
+	sleep func(time.Duration)
+	// bound caps the wait for the old service plus all create retries;
+	// interval is the poll and retry spacing.
+	bound, interval time.Duration
+}
+
+// replaceServiceDefinition deletes the existing service definition (if any),
+// waits up to the bound for the SCM to remove it, then creates the new one.
+// Delete only marks a service for deletion; it is removed once every handle
+// to it is closed, and another process (the SCM after a stop, an admin tool,
+// a monitoring agent) may still hold one. CreateService fails with
+// ERROR_SERVICE_MARKED_FOR_DELETE meanwhile, so that error is retried within
+// the same bound. Any other create error is returned at once. On exhaustion
+// the staged files and token are left in place so re-running the install
+// succeeds (#6248).
+func replaceServiceDefinition(s replaceDefinitionSteps) error {
+	deadline := s.now().Add(s.bound)
+	if s.deleteExisting != nil {
+		if err := s.deleteExisting(); err != nil {
+			return err
+		}
+		for !s.serviceGone() && s.now().Before(deadline) {
+			s.sleep(s.interval)
+		}
+	}
+	for {
+		err := s.create()
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, windows.ERROR_SERVICE_MARKED_FOR_DELETE) {
+			return err
+		}
+		if !s.now().Before(deadline) {
+			return fmt.Errorf("the previous steward service is still marked for deletion by Windows "+
+				"(another process holds a handle to it); re-run the same install command once it has cleared: %w", err)
+		}
+		s.sleep(s.interval)
+	}
 }
 
 // installSteps are the phases of an install that touch an existing service.

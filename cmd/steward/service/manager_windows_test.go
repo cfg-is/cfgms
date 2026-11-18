@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/stretchr/testify/assert"
@@ -323,6 +324,106 @@ func TestRunInstallSequenceRestartFailureReturnsBoth(t *testing.T) {
 	msg := err.Error()
 	assert.Less(t, strings.Index(msg, "stage failed"), strings.Index(msg, "start refused"))
 	assert.Equal(t, []string{"stop", "stage", "restart-existing"}, calls)
+}
+
+// fakeReplaceClock is an injected clock whose sleep advances now, so the
+// replace-definition wait/retry loop runs instantly in tests.
+type fakeReplaceClock struct{ t time.Time }
+
+func (c *fakeReplaceClock) now() time.Time        { return c.t }
+func (c *fakeReplaceClock) sleep(d time.Duration) { c.t = c.t.Add(d) }
+func markedForDeleteErr() error {
+	return fmt.Errorf("failed to create Windows service: %w", windows.ERROR_SERVICE_MARKED_FOR_DELETE)
+}
+func newReplaceSteps(c *fakeReplaceClock, bound time.Duration, create func() error) replaceDefinitionSteps {
+	return replaceDefinitionSteps{
+		deleteExisting: func() error { return nil },
+		serviceGone:    func() bool { return true },
+		create:         create,
+		now:            c.now,
+		sleep:          c.sleep,
+		bound:          bound,
+		interval:       250 * time.Millisecond,
+	}
+}
+
+// TestReplaceServiceDefinition_RetriesMarkedForDelete verifies that a
+// CreateService failing with ERROR_SERVICE_MARKED_FOR_DELETE is retried until
+// it succeeds within the bound (#6248).
+func TestReplaceServiceDefinition_RetriesMarkedForDelete(t *testing.T) {
+	c := &fakeReplaceClock{t: time.Unix(0, 0)}
+	calls := 0
+	err := replaceServiceDefinition(newReplaceSteps(c, 30*time.Second, func() error {
+		calls++
+		if calls <= 2 {
+			return markedForDeleteErr()
+		}
+		return nil
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, 3, calls)
+}
+
+// TestReplaceServiceDefinition_PersistentMarkedForDeleteNamesRerun verifies
+// that the retry loop stops at the bound and the error names the cause and
+// the remedy (re-run the same command).
+func TestReplaceServiceDefinition_PersistentMarkedForDeleteNamesRerun(t *testing.T) {
+	start := time.Unix(0, 0)
+	c := &fakeReplaceClock{t: start}
+	bound := 2 * time.Second
+	calls := 0
+	err := replaceServiceDefinition(newReplaceSteps(c, bound, func() error {
+		calls++
+		return markedForDeleteErr()
+	}))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, windows.ERROR_SERVICE_MARKED_FOR_DELETE)
+	assert.Contains(t, err.Error(), "re-run")
+	assert.Contains(t, err.Error(), "marked for deletion")
+	// 250 ms interval over a 2 s bound: attempts at 0..2 s inclusive, then stop.
+	assert.Equal(t, 9, calls)
+	assert.False(t, c.now().After(start.Add(bound)), "loop slept past the bound")
+}
+
+// TestReplaceServiceDefinition_NonRetryableErrorNotRetried verifies that any
+// other CreateService error is returned at once without retry.
+func TestReplaceServiceDefinition_NonRetryableErrorNotRetried(t *testing.T) {
+	c := &fakeReplaceClock{t: time.Unix(0, 0)}
+	other := errors.New("access denied")
+	calls := 0
+	err := replaceServiceDefinition(newReplaceSteps(c, 30*time.Second, func() error {
+		calls++
+		return other
+	}))
+	require.ErrorIs(t, err, other)
+	assert.Equal(t, 1, calls)
+}
+
+// TestReplaceServiceDefinition_WaitsForOldServiceToDisappear verifies that
+// after Delete the install polls for the old service to go before creating
+// the new one, and that a Delete failure is returned without creating.
+func TestReplaceServiceDefinition_WaitsForOldServiceToDisappear(t *testing.T) {
+	c := &fakeReplaceClock{t: time.Unix(0, 0)}
+	polls, created := 0, false
+	s := newReplaceSteps(c, 30*time.Second, func() error {
+		assert.Equal(t, 3, polls, "create ran before the old service disappeared")
+		created = true
+		return nil
+	})
+	s.serviceGone = func() bool { polls++; return polls >= 3 }
+	require.NoError(t, replaceServiceDefinition(s))
+	assert.True(t, created)
+
+	delErr := errors.New("delete refused")
+	s = newReplaceSteps(c, 30*time.Second, func() error { t.Fatal("create after failed delete"); return nil })
+	s.deleteExisting = func() error { return delErr }
+	require.ErrorIs(t, replaceServiceDefinition(s), delErr)
+
+	// No existing service: no delete, no wait, straight to create.
+	s = newReplaceSteps(c, 30*time.Second, func() error { return nil })
+	s.deleteExisting = nil
+	s.serviceGone = func() bool { t.Fatal("polled with no existing service"); return true }
+	require.NoError(t, replaceServiceDefinition(s))
 }
 
 func TestPrepareDataDir_ProducesProtectedAdminOnlyDACL(t *testing.T) {
