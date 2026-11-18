@@ -222,6 +222,26 @@ func TestRBACStore_BulkOperations(t *testing.T) {
 	assert.Equal(t, "Bob", gotSubject.DisplayName)
 }
 
+// TestRBACStore_BulkRoles_EmptyParent pins that a role with no parent (the
+// shape of every tenant default role) is stored and read back with an empty
+// ParentRoleId. The SQLite column is NOT NULL with an empty default and no foreign key,
+// so the empty string is stored as-is.
+func TestRBACStore_BulkRoles_EmptyParent(t *testing.T) {
+	store := newRBACStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.StoreBulkRoles(ctx, []*common.Role{
+		{Id: "ep-1.tenant.admin", Name: "Admin", TenantId: "ep-1"},
+		{Id: "ep-1.tenant.viewer", Name: "Viewer", TenantId: "ep-1"},
+	}))
+
+	for _, id := range []string{"ep-1.tenant.admin", "ep-1.tenant.viewer"} {
+		got, err := store.GetRole(ctx, id)
+		require.NoError(t, err)
+		assert.Empty(t, got.ParentRoleId)
+	}
+}
+
 // TestRBACStore_BulkOperations_Upsert covers the ON CONFLICT arm of each bulk
 // writer: re-running a batch with the same IDs must update the existing rows in
 // place rather than inserting duplicates or failing on the primary key. Default
