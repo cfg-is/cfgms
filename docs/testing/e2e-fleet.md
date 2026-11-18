@@ -106,17 +106,22 @@ Expected outcome: second dispatch returns HTTP 409 Conflict.
 
 ## Helper functions
 
+The helpers live in the importable package `test/e2e/fleet/fleetkit`, not in
+`_test.go` files, so other test packages can import them. The scenario methods
+defined in the `fleet` test files embed `fleetkit.FleetTestSuite`.
+
 | Function | Location | Purpose |
 |----------|----------|---------|
-| `fetchUpgradeStatus(t, client, upgradeID, timeout)` | `framework_test.go` | Polls upgrade status until terminal or timeout |
-| `(s) waitForStewardVersion(t, container, version, timeout)` | `framework_test.go` | Polls steward log for a version string |
-| `testUpgradePrivKey()` | `upgrade_test.go` | Returns the zero-seed Ed25519 signing key |
-| `signUploadContent(content)` | `upgrade_test.go` | Signs content; returns base64 signature |
-| `publishStewardBin(t, client, version, content, force)` | `upgrade_test.go` | HTTP publish helper |
-| `doDispatchUpgrade(t, client, stewardID, version)` | `upgrade_test.go` | HTTP dispatch helper; returns (statusCode, upgradeID) |
-| `dispatchUpgrade(t, client, stewardID, version)` | `upgrade_test.go` | Asserts 202; returns upgradeID |
-| `blobPath(version)` | `upgrade_test.go` | Filesystem path of blob inside fleet-controller |
-| `blobMetaPath(version)` | `upgrade_test.go` | Filesystem path of blob metadata JSON |
+| `FetchUpgradeStatus(t, client, upgradeID, timeout)` | `fleetkit/framework.go` | Polls upgrade status until terminal or timeout |
+| `(s) WaitForStewardVersion(t, container, version, timeout)` | `fleetkit/framework.go` | Polls steward log for a version string |
+| `UpgradePrivKey()` | `fleetkit/upgrade.go` | Returns the zero-seed Ed25519 signing key |
+| `SignUploadContent(t, content, version, platform, arch)` | `fleetkit/upgrade.go` | Signs content; returns base64 signature |
+| `PublishStewardBin(t, client, version, content, force)` | `fleetkit/upgrade.go` | HTTP publish helper |
+| `DoDispatchUpgrade(t, client, stewardID, version)` | `fleetkit/upgrade.go` | HTTP dispatch helper; returns (statusCode, upgradeID) |
+| `DispatchUpgrade(t, client, stewardID, version)` | `fleetkit/upgrade.go` | Asserts 202; returns upgradeID |
+| `BlobPath(version)` | `fleetkit/upgrade.go` | Filesystem path of blob inside fleet-controller |
+| `BlobMetaPath(version)` | `fleetkit/upgrade.go` | Filesystem path of blob metadata JSON |
+| `ContainerShell`, `InstallLauncherLayout`, `StartLauncherSupervised` | `fleetkit/launcher_upgrade.go` | Run a script as root in a container; stage and start the launcher-managed steward |
 
 ## Running the tests
 

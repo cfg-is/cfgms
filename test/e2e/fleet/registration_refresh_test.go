@@ -5,6 +5,8 @@ package fleet
 import (
 	"testing"
 	"time"
+
+	"github.com/cfgis/cfgms/test/e2e/fleet/fleetkit"
 )
 
 // The steward's re-admission messages (cmd/steward/main.go, Issue #4532).
@@ -35,7 +37,7 @@ var readmissionPending = []string{
 // Fleet containers must be running (CFGMS_FLEET_TEST=1). Requires
 // CFGMS_ENABLE_TEST_ENDPOINTS=true on fleet-controller (set in docker-compose.test.yml).
 func TestFleetRegistrationRefresh(t *testing.T) {
-	suite := setupFleetSuite(t)
+	suite := newFleetScenarioSuite(t)
 
 	// Top-level cleanup: restore both stewards to "registered" after all subtests so
 	// downstream tests (TestFleetRotation, TestFleetIDSelector) start with both stewards
@@ -43,9 +45,9 @@ func TestFleetRegistrationRefresh(t *testing.T) {
 	// specific mutations, but this catches any residual state from a subtest that panics
 	// or whose cleanup is not yet registered when it fails.
 	t.Cleanup(func() {
-		for _, id := range suite.stewardIDs {
+		for _, id := range suite.StewardIDs {
 			if id != "" {
-				suite.setStewardStatusByID(t, id, "registered")
+				suite.SetStewardStatusByID(t, id, "registered")
 			}
 		}
 	})
@@ -68,44 +70,44 @@ func TestFleetRegistrationRefresh(t *testing.T) {
 //   - Same steward ID in logs; no full re-registration line
 //   - New cert issued with future expiry (controller grants it immediately)
 //   - Audit log records exactly one "refresh_cert_issued" entry for this device
-func (s *FleetTestSuite) testRefreshAutoAccept(t *testing.T) {
+func (s *fleetScenarioSuite) testRefreshAutoAccept(t *testing.T) {
 	t.Helper()
 
 	const container = "fleet-steward-1"
 	// fleet-steward-1 uses tenant fleet-root/fleet-child-a.
 	const tenantID = "fleet-root/fleet-child-a"
 
-	stewardID := s.stewardIDs[container]
-	if !s.waitForConvergence(t, stewardID, 30*time.Second) {
+	stewardID := s.StewardIDs[container]
+	if !s.WaitForConvergence(t, stewardID, 30*time.Second) {
 		t.Fatalf("AutoAccept: steward %s not converged before test", stewardID)
 	}
 
 	// Ensure the refresh policy is auto_accept for this tenant.
-	s.setRefreshPolicy(t, tenantID, "auto_accept")
+	s.SetRefreshPolicy(t, tenantID, "auto_accept")
 
 	// Capture device_id before stopping the container — the identity file persists.
-	deviceID := s.getDeviceIDFromContainer(t, container)
+	deviceID := s.GetDeviceIDFromContainer(t, container)
 	t.Logf("AutoAccept: device_id=%s steward_id=%s", deviceID, stewardID)
 
 	// Stop the container and replace its client cert with an expired one. The
 	// approval count is captured first: the steward's logs survive restarts.
-	approvedBefore := s.stewardLogCount(t, container, readmissionApproved)
-	s.containerStop(t, container)
-	s.expireStewardCerts(t, container)
+	approvedBefore := s.StewardLogCount(t, container, readmissionApproved)
+	s.ContainerStop(t, container)
+	s.ExpireStewardCerts(t, container)
 
 	// Restart — the steward finds no valid cert, finds an expired cert, and performs
 	// the refresh handshake (challenge → complete). The controller auto-accepts
 	// (policy=auto_accept) and issues a new cert.
-	s.containerStart(t, container, 90*time.Second)
+	s.ContainerStart(t, container, 90*time.Second)
 
 	// Wait for the steward to reconnect via the re-admission path (Issue #4532).
-	if !s.waitForNewStewardLogEntry(t, container, approvedBefore, 60*time.Second, readmissionApproved) {
-		log, _ := s.readStewardLog(t, container)
-		t.Fatalf("AutoAccept: steward did not log refresh approval within 60s\nlog tail:\n%s", lastLines(log, 40))
+	if !s.WaitForNewStewardLogEntry(t, container, approvedBefore, 60*time.Second, readmissionApproved) {
+		log, _ := s.ReadStewardLog(t, container)
+		t.Fatalf("AutoAccept: steward did not log refresh approval within 60s\nlog tail:\n%s", fleetkit.LastLines(log, 40))
 	}
 
 	// AC: same steward ID reconnects — no new registration ID.
-	newID, err := s.getStewardIDFromLogs(t, container)
+	newID, err := s.GetStewardIDFromLogs(t, container)
 	if err != nil {
 		t.Fatalf("AutoAccept: steward ID not found after restart: %v", err)
 	}
@@ -113,21 +115,21 @@ func (s *FleetTestSuite) testRefreshAutoAccept(t *testing.T) {
 		t.Errorf("AutoAccept: steward re-registered with new ID %s → %s; expected refresh reuse (no re-registration)",
 			stewardID, newID)
 	}
-	s.stewardIDs[container] = newID
+	s.StewardIDs[container] = newID
 
 	// AC: no full re-registration log line.
-	log, _ := s.readStewardLog(t, container)
+	log, _ := s.ReadStewardLog(t, container)
 	if countLogLinesWith(log, "Steward registered and connected successfully via gRPC transport") > 1 {
 		t.Errorf("AutoAccept: steward logged more than one 'registered and connected' entry — indicates re-registration rather than refresh")
 	}
 
 	// AC: steward converges after refresh.
-	if !s.waitForConvergence(t, newID, 60*time.Second) {
+	if !s.WaitForConvergence(t, newID, 60*time.Second) {
 		t.Errorf("AutoAccept: steward %s did not converge after refresh", newID)
 	}
 
 	// AC: audit log records exactly one refresh_cert_issued entry for this device.
-	auditCount := s.queryAuditActionCount(t, "refresh_cert_issued", deviceID)
+	auditCount := s.QueryAuditActionCount(t, "refresh_cert_issued", deviceID)
 	if auditCount < 1 {
 		t.Errorf("AutoAccept: expected at least 1 'refresh_cert_issued' audit entry for device %s, got %d",
 			deviceID, auditCount)
@@ -140,30 +142,30 @@ func (s *FleetTestSuite) testRefreshAutoAccept(t *testing.T) {
 //   - Expire certs → restart → steward receives 403 → logs "refresh rejected"
 //   - Steward does NOT reconnect (remains offline)
 //   - Audit log records at least one "refresh_challenge_rejected" entry for this device
-func (s *FleetTestSuite) testRefreshRevoked(t *testing.T) {
+func (s *fleetScenarioSuite) testRefreshRevoked(t *testing.T) {
 	t.Helper()
 
 	const container = "fleet-steward-2"
 
-	stewardID := s.stewardIDs[container]
-	if !s.waitForConvergence(t, stewardID, 30*time.Second) {
+	stewardID := s.StewardIDs[container]
+	if !s.WaitForConvergence(t, stewardID, 30*time.Second) {
 		t.Fatalf("Revoked: steward %s not converged before test", stewardID)
 	}
 
-	deviceID := s.getDeviceIDFromContainer(t, container)
+	deviceID := s.GetDeviceIDFromContainer(t, container)
 	t.Logf("Revoked: device_id=%s steward_id=%s", deviceID, stewardID)
 
 	// Stop container, expire certs, mark as revoked, then restart.
-	s.containerStop(t, container)
-	s.expireStewardCerts(t, container)
+	s.ContainerStop(t, container)
+	s.ExpireStewardCerts(t, container)
 
 	// Restore to registered before returning — runs even if t.Fatalf fires below.
 	t.Cleanup(func() {
-		s.setStewardStatusByID(t, stewardID, "registered")
+		s.SetStewardStatusByID(t, stewardID, "registered")
 	})
 
 	// Mark the steward as revoked in the controller DB (via test-mode REST endpoint).
-	s.setStewardStatusByID(t, stewardID, "revoked")
+	s.SetStewardStatusByID(t, stewardID, "revoked")
 	t.Logf("Revoked: marked steward %s as revoked", stewardID)
 
 	// Wait for the controller to detect the container stop and mark the steward as
@@ -181,7 +183,7 @@ func (s *FleetTestSuite) testRefreshRevoked(t *testing.T) {
 	// unaffected.
 	disconnectDeadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(disconnectDeadline) {
-		state, _ := s.getStewardConnectionState(t, stewardID)
+		state, _ := s.GetStewardConnectionState(t, stewardID)
 		if state != "connected" {
 			t.Logf("Revoked: controller detected disconnection (state=%q)", state)
 			break
@@ -190,8 +192,8 @@ func (s *FleetTestSuite) testRefreshRevoked(t *testing.T) {
 	}
 
 	// Restart — steward attempts refresh challenge, controller returns 403 (revoked-before-PoP).
-	refusedBefore := s.stewardLogCount(t, container, readmissionRefused)
-	s.containerStart(t, container, 60*time.Second)
+	refusedBefore := s.StewardLogCount(t, container, readmissionRefused)
+	s.ContainerStart(t, container, 60*time.Second)
 
 	// AC: steward must log the rejection message. The docker-compose retry loop
 	// exits on ErrRefreshRejected so the steward process stops and the container
@@ -204,10 +206,10 @@ func (s *FleetTestSuite) testRefreshRevoked(t *testing.T) {
 	// the rejection can be logged well after a 60s bound (observed 66s). Wait 120s
 	// with the same margin as the disconnection wait above (Issue #2592);
 	// waitForNewStewardLogEntry polls and returns as soon as the line appears.
-	if !s.waitForNewStewardLogEntry(t, container, refusedBefore, 120*time.Second, readmissionRefused) {
-		log, _ := s.readStewardLog(t, container)
+	if !s.WaitForNewStewardLogEntry(t, container, refusedBefore, 120*time.Second, readmissionRefused) {
+		log, _ := s.ReadStewardLog(t, container)
 		t.Fatalf("Revoked: steward did not log %q within 120s\nlog tail:\n%s", readmissionRefused,
-			lastLines(log, 40))
+			fleetkit.LastLines(log, 40))
 	}
 	t.Log("Revoked: steward logged refresh rejection as expected")
 
@@ -215,7 +217,7 @@ func (s *FleetTestSuite) testRefreshRevoked(t *testing.T) {
 	// Poll for 15s to make sure it doesn't eventually reconnect.
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		state, err := s.getStewardConnectionState(t, stewardID)
+		state, err := s.GetStewardConnectionState(t, stewardID)
 		if err == nil && state == "connected" {
 			t.Errorf("Revoked: steward reconnected after revocation — this should not happen")
 			break
@@ -225,7 +227,7 @@ func (s *FleetTestSuite) testRefreshRevoked(t *testing.T) {
 
 	// AC: audit log records at least one refresh_challenge_rejected entry.
 	// The revoked-before-PoP gate fires at the challenge step.
-	auditCount := s.queryAuditActionCount(t, "refresh_challenge_rejected", deviceID)
+	auditCount := s.QueryAuditActionCount(t, "refresh_challenge_rejected", deviceID)
 	if auditCount < 1 {
 		t.Errorf("Revoked: expected at least 1 'refresh_challenge_rejected' audit entry for device %s, got %d",
 			deviceID, auditCount)
@@ -240,36 +242,36 @@ func (s *FleetTestSuite) testRefreshRevoked(t *testing.T) {
 //   - Steward logs "refresh pending" and stays offline
 //   - approve via cfg steward refresh approve API → steward reconnects on retry
 //   - Audit log records refresh_queued and refresh_admin_approved entries
-func (s *FleetTestSuite) testRefreshArchived(t *testing.T) {
+func (s *fleetScenarioSuite) testRefreshArchived(t *testing.T) {
 	t.Helper()
 
 	const container = "fleet-steward-2"
 	const tenantID = "fleet-root/fleet-child-b"
 
-	stewardID := s.stewardIDs[container]
+	stewardID := s.StewardIDs[container]
 
 	// testRefreshRevoked leaves steward-2's status as "registered" and the
 	// container in a restart loop (retrying after revocation). Wait briefly for
 	// convergence — best-effort; we stop the container next regardless.
-	_ = s.waitForConvergence(t, stewardID, 20*time.Second)
+	_ = s.WaitForConvergence(t, stewardID, 20*time.Second)
 
-	deviceID := s.getDeviceIDFromContainer(t, container)
+	deviceID := s.GetDeviceIDFromContainer(t, container)
 	t.Logf("Archived: device_id=%s steward_id=%s", deviceID, stewardID)
 
 	// Stop container, expire certs, mark archived.
-	s.containerStop(t, container)
-	s.expireStewardCerts(t, container)
+	s.ContainerStop(t, container)
+	s.ExpireStewardCerts(t, container)
 
 	// Restore to registered before returning — runs even if t.Fatalf fires below.
 	// Without this cleanup, TestFleetRotation and TestFleetIDSelector fail because
 	// fleet-steward-2 stays archived and never reaches connected state.
 	t.Cleanup(func() {
-		s.setStewardStatusByID(t, stewardID, "registered")
+		s.SetStewardStatusByID(t, stewardID, "registered")
 	})
 
 	// Mark archived — the controller's refresh gate queues archived stewards automatically
 	// (bypasses policy: even auto_accept policy queues archived stewards).
-	s.setStewardStatusByID(t, stewardID, "archived")
+	s.SetStewardStatusByID(t, stewardID, "archived")
 	t.Logf("Archived: marked steward %s as archived", stewardID)
 
 	// Set auto_accept policy so that after admin approval promotes the steward from
@@ -277,19 +279,19 @@ func (s *FleetTestSuite) testRefreshArchived(t *testing.T) {
 	// cert rather than being re-queued by the default require_approval policy.
 	// The archived status is what drives the initial 202 queue — policy is irrelevant
 	// for the first attempt (archived bypasses policy). Policy only applies on retry.
-	s.setRefreshPolicy(t, tenantID, "auto_accept")
+	s.SetRefreshPolicy(t, tenantID, "auto_accept")
 	t.Logf("Archived: set refresh policy for %s to auto_accept", tenantID)
 
 	// Start the container.
-	pendingBefore := s.stewardLogCount(t, container, readmissionPending...)
-	approvedBefore := s.stewardLogCount(t, container, readmissionApproved)
-	s.containerStart(t, container, 60*time.Second)
+	pendingBefore := s.StewardLogCount(t, container, readmissionPending...)
+	approvedBefore := s.StewardLogCount(t, container, readmissionApproved)
+	s.ContainerStart(t, container, 60*time.Second)
 
 	// AC: steward must log the pending message.
-	if !s.waitForNewStewardLogEntry(t, container, pendingBefore, 60*time.Second, readmissionPending...) {
-		log, _ := s.readStewardLog(t, container)
+	if !s.WaitForNewStewardLogEntry(t, container, pendingBefore, 60*time.Second, readmissionPending...) {
+		log, _ := s.ReadStewardLog(t, container)
 		t.Fatalf("Archived: steward did not log a pending re-admission within 60s\nlog tail:\n%s",
-			lastLines(log, 40))
+			fleetkit.LastLines(log, 40))
 	}
 	t.Log("Archived: steward logged refresh queued as expected")
 
@@ -297,7 +299,7 @@ func (s *FleetTestSuite) testRefreshArchived(t *testing.T) {
 	var pendingID string
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		entries := s.listPendingRefreshes(t, tenantID)
+		entries := s.ListPendingRefreshes(t, tenantID)
 		for _, e := range entries {
 			if e.DeviceID == deviceID && e.Status == "pending" {
 				pendingID = e.PendingID
@@ -315,29 +317,29 @@ func (s *FleetTestSuite) testRefreshArchived(t *testing.T) {
 	t.Logf("Archived: pending_id=%s", pendingID)
 
 	// AC: audit log records at least one refresh_queued entry.
-	auditCount := s.queryAuditActionCount(t, "refresh_queued", deviceID)
+	auditCount := s.QueryAuditActionCount(t, "refresh_queued", deviceID)
 	if auditCount < 1 {
 		t.Errorf("Archived: expected at least 1 'refresh_queued' audit entry for device %s, got %d",
 			deviceID, auditCount)
 	}
 
 	// Approve via the admin REST API.
-	s.approveRefreshViaCLI(t, pendingID)
+	s.ApproveRefreshViaCLI(t, pendingID)
 	t.Logf("Archived: approved pending refresh %s", pendingID)
 
 	// Restore steward status to "registered" so the controller accepts the reconnect.
 	// The approve handler re-promotes the status, but marking archived first ensures
 	// the claim bundle delivery path is exercised on the steward's next retry.
 	// (The steward polls until it gets the approved cert bundle.)
-	if !s.waitForNewStewardLogEntry(t, container, approvedBefore, 90*time.Second, readmissionApproved) {
-		log, _ := s.readStewardLog(t, container)
+	if !s.WaitForNewStewardLogEntry(t, container, approvedBefore, 90*time.Second, readmissionApproved) {
+		log, _ := s.ReadStewardLog(t, container)
 		t.Fatalf("Archived: steward did not log refresh approval within 90s after admin approve\nlog tail:\n%s\n%s",
-			lastLines(log, 40), s.controllerStallDiagnostics(stewardID))
+			fleetkit.LastLines(log, 40), s.ControllerStallDiagnostics(stewardID))
 	}
 	t.Log("Archived: steward received approved cert bundle and reconnected")
 
 	// Update local steward ID map (may have changed if the container restarted).
-	newID, err := s.getStewardIDFromLogs(t, container)
+	newID, err := s.GetStewardIDFromLogs(t, container)
 	if err != nil {
 		t.Fatalf("Archived: steward ID not found after reconnect: %v", err)
 	}
@@ -345,52 +347,17 @@ func (s *FleetTestSuite) testRefreshArchived(t *testing.T) {
 		t.Errorf("Archived: steward re-registered with new ID %s → %s; expected refresh reuse",
 			stewardID, newID)
 	}
-	s.stewardIDs[container] = newID
+	s.StewardIDs[container] = newID
 
-	if !s.waitForConvergence(t, newID, 60*time.Second) {
+	if !s.WaitForConvergence(t, newID, 60*time.Second) {
 		t.Errorf("Archived: steward %s did not converge after refresh approval", newID)
 	}
 
 	// AC: audit log records at least one refresh_admin_approved entry.
-	approveCount := s.queryAuditActionCount(t, "refresh_admin_approved", deviceID)
+	approveCount := s.QueryAuditActionCount(t, "refresh_admin_approved", deviceID)
 	if approveCount < 1 {
 		t.Errorf("Archived: expected at least 1 'refresh_admin_approved' audit entry for device %s, got %d",
 			deviceID, approveCount)
 	}
 	t.Logf("Archived: audit refresh_admin_approved count=%d for device %s", approveCount, deviceID)
-}
-
-// lastLines returns the last n lines of s.
-func lastLines(s string, n int) string {
-	lines := splitLines(s)
-	if len(lines) <= n {
-		return s
-	}
-	return joinLines(lines[len(lines)-n:])
-}
-
-func splitLines(s string) []string {
-	var lines []string
-	start := 0
-	for i, c := range s {
-		if c == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
-}
-
-func joinLines(lines []string) string {
-	result := ""
-	for i, l := range lines {
-		if i > 0 {
-			result += "\n"
-		}
-		result += l
-	}
-	return result
 }

@@ -24,20 +24,20 @@ type resolveSelectorResponse struct {
 }
 
 // resolveSelector calls POST /api/v1/fleet/resolve with the given selector expression
-// and returns the list of matching steward IDs. Uses s.httpClient (mTLS admin bundle).
-func (s *FleetTestSuite) resolveSelector(t *testing.T, selector string) ([]string, int) {
+// and returns the list of matching steward IDs. Uses s.HTTPClient (mTLS admin bundle).
+func (s *fleetScenarioSuite) resolveSelector(t *testing.T, selector string) ([]string, int) {
 	t.Helper()
 
 	body, err := json.Marshal(map[string]string{"selector": selector})
 	require.NoError(t, err, "marshal resolve request")
 
-	url := fmt.Sprintf("%s/api/v1/fleet/resolve", s.controllerURL)
+	url := fmt.Sprintf("%s/api/v1/fleet/resolve", s.ControllerURL)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url,
 		bytes.NewReader(body))
 	require.NoError(t, err, "build resolve request")
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.HTTPClient.Do(req)
 	require.NoError(t, err, "POST /api/v1/fleet/resolve")
 	defer func() { _ = resp.Body.Close() }()
 
@@ -69,14 +69,14 @@ func (s *FleetTestSuite) resolveSelector(t *testing.T, selector string) ([]strin
 //   - Unknown ID returns an empty result set (no error)
 //   - Multi-value id:a,b selects both stewards (OR semantics)
 func TestFleetIDSelector(t *testing.T) {
-	s := setupFleetSuite(t)
+	s := newFleetScenarioSuite(t)
 
-	steward1ID := s.stewardIDs["fleet-steward-1"]
-	steward2ID := s.stewardIDs["fleet-steward-2"]
+	steward1ID := s.StewardIDs["fleet-steward-1"]
+	steward2ID := s.StewardIDs["fleet-steward-2"]
 
 	// Both stewards must be connected before selector tests can be meaningful.
 	for _, id := range []string{steward1ID, steward2ID} {
-		if !s.waitForConvergence(t, id, 30*time.Second) {
+		if !s.WaitForConvergence(t, id, 30*time.Second) {
 			t.Fatalf("steward %s not connected within 30s; cannot test id: selector", id)
 		}
 	}

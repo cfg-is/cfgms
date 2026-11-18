@@ -81,6 +81,11 @@ packages:
     reason: test suite entry point (test/e2e), run via `go test`, never imported.
   - path: test/e2e/fleet
     reason: test suite entry point (test/e2e/fleet), run via `go test`, never imported.
+  - path: test/e2e/fleet/fleetkit
+    reason: >
+      fleet e2e helper package (test/e2e/fleet/fleetkit), imported only by the
+      test/e2e/fleet suite and its compat tests, none of which any main package
+      reaches; it is a non-test package only so another test package can import it.
   - path: test/integration
     reason: test suite entry point (test/integration), run via `go test`, never imported.
   - path: test/integration/cluster
