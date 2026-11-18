@@ -478,6 +478,9 @@ func (h *Handler) verifySafely(verifier signature.Verifier, data []byte, sig *si
 // HandleCommand processes an incoming signed command from the controller.
 //
 // Story #919: Before dispatching, the command is authenticated:
+//  0. A command whose wire type this build does not map is refused as
+//     ErrUnsupportedCommandType (version skew), after the stamped-v1 refusal and
+//     before any signing bytes are computed; it is not a signature failure.
 //  1. Signature is verified against the signing payload version the command names
 //     (CommandSigningBytesVersion) when a verifier is configured. A stamped v1 command
 //     (Term > 0) is always refused before verification (Issue #5285).
@@ -504,33 +507,20 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 		return fmt.Errorf("%w: stamped command signed without term coverage", ErrUnauthenticatedCommand)
 	}
 
+	// A wire type this build does not map decodes to an empty Command.Type, so the
+	// signed bytes cannot be rebuilt and the command cannot be verified. Refuse it as
+	// unsupported — not as a signature failure — and execute nothing: no replay-cache
+	// entry, no command record, no dispatch. Fail-closed: it never skips verification.
+	if signed.UnmappedWireType != nil {
+		h.logger.Warn("Refused a command of a type this steward does not support",
+			"command_id", logging.SanitizeLogValue(cmd.ID),
+			"wire_type", int64(*signed.UnmappedWireType))
+		return ErrUnsupportedCommandType
+	}
+
 	// 1. Signature verification (only when a verifier is configured).
-	// Read verifier under the lock because UpdateVerifier may replace it concurrently
-	// after a push_signing_cert delivery (Issue #1844).
-	h.mu.RLock()
-	verifier := h.verifier
-	h.mu.RUnlock()
-	if verifier != nil {
-		if signed.Signature == nil {
-			return ErrUnauthenticatedCommand
-		}
-		// Use the proto-wire string map (RawParams) when available so the canonical
-		// bytes match what the controller signed. Fall back to InterfaceParamsToStringMap
-		// for commands created without a proto round-trip (e.g. tests).
-		rawParams := signed.RawParams
-		if rawParams == nil {
-			rawParams = cpTypes.InterfaceParamsToStringMap(cmd.Params)
-		}
-		// Verify against the payload version the command names. An absent version
-		// is v1 and never selects v2 (Issue #5174).
-		version := cpTypes.CommandPayloadVersion(cmd)
-		cmdBytes, err := cpTypes.CommandSigningBytesVersion(cmd, rawParams, version)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrUnauthenticatedCommand, err)
-		}
-		if err := h.verifySafely(verifier, cmdBytes, signed.Signature); err != nil {
-			return fmt.Errorf("%w: %v", ErrUnauthenticatedCommand, err)
-		}
+	if err := h.verifyCommandSignature(signed); err != nil {
+		return err
 	}
 
 	// 2. StewardID match.
@@ -563,6 +553,43 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 	}
 
 	return h.dispatch(ctx, cmd)
+}
+
+// verifyCommandSignature authenticates signed against the configured verifier. It is
+// a no-op when no verifier is configured.
+func (h *Handler) verifyCommandSignature(signed *cpTypes.SignedCommand) error {
+	cmd := &signed.Command
+	// Read verifier under the lock because UpdateVerifier may replace it concurrently
+	// after a push_signing_cert delivery (Issue #1844).
+	h.mu.RLock()
+	verifier := h.verifier
+	h.mu.RUnlock()
+	if verifier == nil {
+		return nil
+	}
+	if signed.Signature == nil {
+		return ErrUnauthenticatedCommand
+	}
+	// Use the proto-wire string map (RawParams) when available so the canonical
+	// bytes match what the controller signed. Fall back to InterfaceParamsToStringMap
+	// for commands created without a proto round-trip (e.g. tests).
+	rawParams := signed.RawParams
+	if rawParams == nil {
+		rawParams = cpTypes.InterfaceParamsToStringMap(cmd.Params)
+	}
+	// Verify against the payload version the command names. An absent version
+	// is v1 and never selects v2 (Issue #5174).
+	version := cpTypes.CommandPayloadVersion(cmd)
+	cmdBytes, err := cpTypes.CommandSigningBytesVersion(cmd, rawParams, version)
+	if err != nil {
+		// An unknown signing-payload version is version skew, not tampering: keep
+		// the sentinel in the chain and do not report it as unauthenticated.
+		return fmt.Errorf("refused command signing payload: %w", err)
+	}
+	if err := h.verifySafely(verifier, cmdBytes, signed.Signature); err != nil {
+		return fmt.Errorf("%w: %w", ErrUnauthenticatedCommand, err)
+	}
+	return nil
 }
 
 // checkParamsSize refuses a command whose JSON-serialized params exceed the bound.

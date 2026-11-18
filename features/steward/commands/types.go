@@ -22,6 +22,14 @@ var (
 	// signature verification fails.
 	ErrUnauthenticatedCommand = errors.New("unauthenticated command")
 
+	// ErrUnsupportedCommandType is returned when the command's wire type is one this
+	// build has no mapping for, typically because the controller is newer than the
+	// steward (version skew). It is not an authentication failure and does not wrap
+	// ErrUnauthenticatedCommand: the signed type string is unknown, so the command
+	// cannot be verified, and it is refused without being executed. The receive path
+	// reports it as invalid_command.
+	ErrUnsupportedCommandType = errors.New("unsupported command type")
+
 	// ErrCommandReplay is returned when a command timestamp exceeds the replay window
 	// or when the command ID has already been processed within the current window.
 	ErrCommandReplay = errors.New("command replay detected")
