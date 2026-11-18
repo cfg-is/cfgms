@@ -119,6 +119,49 @@ type workflowRunFixture struct {
 	trip   *afterApprovalReadStore
 	raw    cfgconfig.ConfigStore
 	queue2 *script.ExecutionQueue
+	// recorded keeps every entry the run queue accepted. A restricted script step
+	// cancels its queued command once the result wait ends, after which the queue no
+	// longer lists it; the record is what persists.
+	recorded *recordingQueueStore
+}
+
+// recordingQueueStore wraps a real in-memory queue store and keeps a copy of every
+// entry it accepts, so a test can assert on what was enqueued after the entry has
+// been cancelled and is no longer listed.
+type recordingQueueStore struct {
+	script.QueueStore
+	mu      sync.Mutex
+	entries []*script.QueueEntry
+}
+
+func (s *recordingQueueStore) Enqueue(entry *script.QueueEntry) error {
+	if err := s.QueueStore.Enqueue(entry); err != nil {
+		return err
+	}
+	clone := *entry
+	if entry.Metadata != nil {
+		clone.Metadata = make(map[string]interface{}, len(entry.Metadata))
+		for k, v := range entry.Metadata {
+			clone.Metadata[k] = v
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.entries = append(s.entries, &clone)
+	return nil
+}
+
+// enqueued returns the entries accepted for a device, in enqueue order.
+func (f *workflowRunFixture) enqueued(deviceID string) []*script.QueueEntry {
+	f.recorded.mu.Lock()
+	defer f.recorded.mu.Unlock()
+	var out []*script.QueueEntry
+	for _, e := range f.recorded.entries {
+		if e.DeviceID == deviceID {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func newWorkflowRunFixture(t *testing.T) *workflowRunFixture {
@@ -132,7 +175,8 @@ func newWorkflowRunFixture(t *testing.T) *workflowRunFixture {
 	f.srv.SetContentApprovalStore(f.approvals)
 
 	monitor := script.NewExecutionMonitor()
-	f.queue2 = script.NewExecutionQueue(monitor, nil, 0, "", nil, f.repo, 0)
+	f.recorded = &recordingQueueStore{QueueStore: script.NewInMemoryQueueStore()}
+	f.queue2 = script.NewExecutionQueue(monitor, nil, 0, "", f.recorded, f.repo, 0)
 	t.Cleanup(f.queue2.Stop)
 	f.srv.SetRunManager(controllerrun.NewManager(f.runStore, f.queue2), f.queue2)
 
@@ -677,13 +721,15 @@ func TestAutomationWorkflowRun_ExecutionIsAlwaysRestricted(t *testing.T) {
 	// A script step is possible only in a restricted execution; the unrestricted engine
 	// path refuses it, so reaching one through this route proves the restricted entry.
 	f.setMode(t, runMSP, ApprovalModeApprove)
-	f.approve(t, runMSP, f.publish(t, runMSP, wfRunScript, requestedBody, nil))
+	vs := f.publish(t, runMSP, wfRunScript, requestedBody, nil)
+	f.approve(t, runMSP, vs)
 	f.approveWorkflow(t, runMSP, f.putWorkflow(t, runMSP, versionedWorkflow(t, "with-script", "1.0.0", nil, f.scriptStep("collect", wfRunScript, "1.0.0"))))
 	_, err := f.engine.ExecuteWorkflow(runTenantCtx(runClient1), versionedWorkflow(t, "with-script", "1.0.0", nil, f.scriptStep("collect", wfRunScript, "1.0.0")).Workflow, nil)
 	require.ErrorIs(t, err, workflow.ErrScriptStepNotRestricted)
 	resp := f.startOK(t, runID, "with-script", "1.0.0", nil)
-	require.Eventually(t, func() bool { return len(f.queue2.PeekForDevice(f.c1Steward)) == 1 }, 10*time.Second, 20*time.Millisecond)
 	assert.NotEmpty(t, resp.ExecutionID)
+	f.waitStatus(t, resp.ExecutionID, finished)
+	f.assertPinnedEntry(t, runID, vs)
 }
 
 // [REQUIRED TEST] Approving a workflow does not approve its scripts: a script step that
@@ -706,13 +752,42 @@ func TestAutomationWorkflowRun_ScriptStepNeedsItsOwnApproval(t *testing.T) {
 
 	f.approve(t, runMSP, vs)
 	second := f.startOK(t, runID, wfRunName, "1.0.0", nil)
-	require.Eventually(t, func() bool { return len(f.queue2.PeekForDevice(f.c1Steward)) == 1 }, 10*time.Second, 20*time.Millisecond)
-	queued := f.queue2.PeekForDevice(f.c1Steward)[0]
-	assert.Equal(t, runMSP, queued.Metadata[script.MetaPinOwnerTenant])
-	assert.Equal(t, "1.0.0", queued.Metadata[script.MetaPinVersion])
-	assert.Equal(t, script.ScriptApprovalHash(runMSP, vs), queued.Metadata[script.MetaPinApprovalHash])
-	assert.Equal(t, runID, queued.Metadata[script.MetaGuardRunID], "the queued command dies with the run")
 	f.waitStatus(t, second.ExecutionID, finished)
+	f.assertPinnedEntry(t, runID, vs)
+}
+
+// assertPinnedEntry asserts the run queued exactly one command for the client device and
+// that it carries the pinned script version and the run guard.
+func (f *workflowRunFixture) assertPinnedEntry(t *testing.T, runID string, vs *script.VersionedScript) {
+	t.Helper()
+	recorded := f.enqueued(f.c1Steward)
+	require.Len(t, recorded, 1)
+	meta := recorded[0].Metadata
+	assert.Equal(t, runMSP, meta[script.MetaPinOwnerTenant])
+	assert.Equal(t, "1.0.0", meta[script.MetaPinVersion])
+	assert.Equal(t, script.ScriptApprovalHash(runMSP, vs), meta[script.MetaPinApprovalHash])
+	assert.Equal(t, runID, meta[script.MetaGuardRunID], "the queued command dies with the run")
+}
+
+// [REQUIRED TEST] The restricted run cancels its queued command when the result wait
+// ends, so the device queue no longer lists it. The recorded entry is the evidence that
+// outlives that cancellation; this pins down why the queue itself cannot be asserted on.
+func TestAutomationWorkflowRun_ScriptStepQueueEntryIsCancelledAfterResultWait(t *testing.T) {
+	f := newWorkflowRunFixture(t)
+	f.setMode(t, runMSP, ApprovalModeApprove)
+	vs := f.publish(t, runMSP, wfRunScript, requestedBody, nil)
+	f.approve(t, runMSP, vs)
+	f.approveWorkflow(t, runMSP, f.putWorkflow(t, runMSP, versionedWorkflow(t, wfRunName, "1.0.0", nil, f.scriptStep("collect", wfRunScript, "1.0.0"))))
+	require.NoError(t, f.approvals.SetMode(context.Background(), runMSP, LibraryKindWorkflow, ApprovalModeApprove, "admin"))
+	runID := f.beginOK(t, f.cred, runClient1, "ticket-1")
+
+	resp := f.startOK(t, runID, wfRunName, "1.0.0", nil)
+	ex := f.waitStatus(t, resp.ExecutionID, finished)
+	assert.Equal(t, workflow.StatusFailed, ex.Status)
+	assert.Contains(t, ex.Error, "timed out waiting for script results")
+
+	f.assertPinnedEntry(t, runID, vs)
+	assert.Empty(t, f.queue2.PeekForDevice(f.c1Steward), "the result-wait timeout cancelled the queued command")
 }
 
 // The routes are admitted by method and template and nothing else is: the human execute
