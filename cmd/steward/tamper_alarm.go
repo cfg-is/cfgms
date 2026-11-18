@@ -409,11 +409,12 @@ type tamperAlarm struct {
 	// read and written on the run goroutine only.
 	published   reasonKey
 	publishedOn *client.TransportClient
-	// sends tracks the on-change heartbeats publishReason started. run waits for
-	// them before it returns, so none outlives run and reads alarm state the
+	// reporter sends the on-change heartbeats. It is shared with repair, so every
+	// reason the alarm loop changes is reported the same way. run finishes its
+	// sends before it returns, so none outlives run and reads alarm state the
 	// caller then rewrites.
-	sends sync.WaitGroup
-	sink  systemLogWriter
+	reporter *reasonReporter
+	sink     systemLogWriter
 	// sinkFn opens the local system log the first time it is needed.
 	sinkFn func() systemLogWriter
 	logger logging.Logger
@@ -430,11 +431,7 @@ func (a *tamperAlarm) run(ctx context.Context) (bool, error) {
 
 	// On-change heartbeats use the link, so they are cancelled and finished
 	// before it closes and before run returns.
-	ctx, cancelSends := context.WithCancel(ctx)
-	defer func() {
-		cancelSends()
-		a.sends.Wait()
-	}()
+	defer a.ensureReporter().close()
 
 	recheck := time.NewTicker(tamperRecheckInterval)
 	defer recheck.Stop()
@@ -446,15 +443,17 @@ func (a *tamperAlarm) run(ctx context.Context) (bool, error) {
 	tc = a.repair.start(ctx, tc)
 
 	for {
-		a.publishReason(ctx, tc)
+		// Repair reasons are on the link before the heartbeat publishReason sends.
 		a.repair.republish(tc)
+		a.publishReason(tc)
 		if tc == nil {
 			tc = a.connectLink(ctx, retry)
 			if ctx.Err() != nil {
 				return false, nil
 			}
 			a.reportQuarantined(tc)
-			a.repair.confirmOutcome(ctx, tc)
+			a.repair.republish(tc)
+			a.repair.confirmOutcome(tc)
 		}
 
 		if a.tryRelease(tc) {
@@ -473,6 +472,15 @@ func (a *tamperAlarm) run(ctx context.Context) (bool, error) {
 		case <-retry.C:
 		}
 	}
+}
+
+// ensureReporter returns the alarm's reporter, creating it when the alarm was
+// built without one.
+func (a *tamperAlarm) ensureReporter() *reasonReporter {
+	if a.reporter == nil {
+		a.reporter = newReasonReporter(a.logger)
+	}
+	return a.reporter
 }
 
 // reportQuarantined sends the planted links the last rights reset removed to the
@@ -600,6 +608,87 @@ func (a *tamperAlarm) recheckFault() bool {
 	return true
 }
 
+// reasonReporter reports a changed health reason on the open link at once, then
+// again a bounded number of times a few seconds apart. A link announces itself
+// with one heartbeat that nothing acknowledges, and its next heartbeat is 20 to
+// 30 s later, so one send that fails, that the controller does not take or that a
+// reconnect swallows would leave the change unreported for that long. The
+// controller reads the same reasons each time, so a repeat is harmless. The
+// repeat is scheduled by every report and does not depend on the link telling us
+// it reconnected.
+//
+// The status is the caller's: the heartbeat itself carries every reason set on
+// the client. close cancels the sends in flight and waits for them.
+type reasonReporter struct {
+	logger logging.Logger
+
+	// mu guards ctx and the send count against close, which holds it while it
+	// waits. A send never takes mu, so close cannot deadlock on one.
+	mu     sync.Mutex
+	ctx    context.Context
+	cancel context.CancelFunc
+	sends  sync.WaitGroup
+}
+
+func newReasonReporter(logger logging.Logger) *reasonReporter {
+	r := &reasonReporter{logger: logger}
+	r.ctx, r.cancel = context.WithCancel(context.Background())
+	return r
+}
+
+// report sends a heartbeat with status on tc now and repeats it. It returns at
+// once. With no reporter or no link there is nothing to report on.
+func (r *reasonReporter) report(tc *client.TransportClient, status cpTypes.HeartbeatStatus) {
+	if r == nil || tc == nil {
+		return
+	}
+	// Read on the caller's goroutine: the repeat outlives the call.
+	resends, interval := repairOutcomeResends, repairOutcomeResendInterval
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ctx := r.ctx
+	r.sends.Add(1)
+	go func() {
+		defer r.sends.Done()
+		r.send(ctx, tc, status)
+		for i := 0; i < resends; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(interval):
+			}
+			// A link that was closed on purpose has nothing to repeat to.
+			if tc.IsConnected() {
+				r.send(ctx, tc, status)
+			}
+		}
+	}()
+}
+
+func (r *reasonReporter) send(ctx context.Context, tc *client.TransportClient, status cpTypes.HeartbeatStatus) {
+	sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	// The provider's SendHeartbeat does not honour sctx, so a send that hangs holds
+	// this goroutine until the link closes.
+	if err := tc.SendHeartbeat(sctx, string(status), nil); err != nil && ctx.Err() == nil {
+		r.logger.Warn("Reason heartbeat failed; a repeat or the periodic heartbeat will carry it",
+			"operation", "reason_heartbeat", "error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+// close cancels the sends in flight and waits for them. The reporter can be used
+// again afterwards.
+func (r *reasonReporter) close() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cancel()
+	r.sends.Wait()
+	r.ctx, r.cancel = context.WithCancel(context.Background())
+}
+
 // reasonKey identifies the reason the alarm reports.
 type reasonKey struct{ code, msg string }
 
@@ -612,7 +701,7 @@ type reasonKey struct{ code, msg string }
 // the next periodic heartbeat (20 s plus up to 10 s of jitter, and none at all if
 // that one fails to send). While the link is down nothing is recorded as
 // published, so the change is sent as soon as a link opens.
-func (a *tamperAlarm) publishReason(ctx context.Context, tc *client.TransportClient) {
+func (a *tamperAlarm) publishReason(tc *client.TransportClient) {
 	code := a.latch.primaryCode()
 	msg := tamperMessages[code]
 	if a.faultCleared && a.latch.holdsFault() {
@@ -627,20 +716,8 @@ func (a *tamperAlarm) publishReason(ctx context.Context, tc *client.TransportCli
 	a.published, a.publishedOn = key, tc
 	tc.SetHealthReason(tamperReasonComponent, code, msg)
 	if changed {
-		// Read on the run goroutine: the caller may replace a.logger once run
-		// returns.
-		logger := a.logger
-		a.sends.Add(1)
-		go func() {
-			defer a.sends.Done()
-			hbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
-			// A report-only link never reports healthy.
-			if err := tc.SendHeartbeat(hbCtx, string(cpTypes.StatusError), nil); err != nil {
-				logger.Warn("Tamper reason heartbeat failed; the periodic heartbeat will carry it",
-					"operation", "tamper_alarm_heartbeat", "error", logging.SanitizeLogValue(err.Error()))
-			}
-		}()
+		// A report-only link never reports healthy.
+		a.reporter.report(tc, cpTypes.StatusError)
 	}
 }
 
@@ -732,15 +809,13 @@ func watchControllerLock(tc *client.TransportClient, latch *tamperLatch) <-chan 
 // is not latched: it reports repair.not_locked and changes nothing. A latched
 // steward's request is the alarm's (repair.go).
 func watchRepairWhileNotLocked(tc *client.TransportClient, latch *tamperLatch) {
+	// Each report is bounded and ends with the link, so this reporter is never closed.
+	reporter := newReasonReporter(logging.NewLogger(logLevelFromEnv()))
 	tc.SetRepairHandler(func(req cpTypes.RepairRequest) {
 		if validRepairID(req.RepairID) && !latch.isLatched() {
 			tc.SetHealthReason(cpTypes.HealthComponentRepair, cpTypes.ReasonCodeRepairNotLocked, req.RepairID)
 			// Report it now rather than at the next periodic heartbeat.
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				_ = tc.SendHeartbeat(ctx, string(cpTypes.StatusDegraded), nil)
-			}()
+			reporter.report(tc, cpTypes.StatusDegraded)
 		}
 	})
 }
@@ -783,7 +858,9 @@ func newTamperAlarm(latch *tamperLatch, logger logging.Logger, controllerURL str
 		sinkFn: newSystemLogSink,
 		logger: logger,
 	}
+	alarm.reporter = newReasonReporter(logger)
 	alarm.repair = newRepairer(latch, alarm.rescan, controllerURL, logger)
+	alarm.repair.reporter = alarm.reporter
 	alarm.resetDerived = func() { resetDerivedState(logger) }
 	alarm.brokenTrust = func(ctx context.Context) bool {
 		return rekeyFromAlarm(ctx, latch, controllerURL, alarm.logger)

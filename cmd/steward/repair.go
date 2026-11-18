@@ -487,6 +487,10 @@ type repairer struct {
 	// completion has finished: nothing may dial in between.
 	dialsHeld atomic.Bool
 
+	// reporter sends the on-change heartbeats; the alarm that runs the repairer
+	// owns it and finishes its sends before the alarm returns.
+	reporter *reasonReporter
+
 	mu      sync.Mutex
 	reasons *client.HealthReasonRegistry
 	// refused remembers entries an earlier reset could not take over, so the next
@@ -506,6 +510,7 @@ func newRepairer(latch *tamperLatch, rescan func() *tamperFault, controllerURL s
 		requests: make(chan cpTypes.RepairRequest, 1),
 		wake:     make(chan struct{}, 1),
 		reasons:  client.NewHealthReasonRegistry(),
+		reporter: newReasonReporter(logger),
 	}
 }
 
@@ -604,18 +609,9 @@ func (r *repairer) clearReason(tc *client.TransportClient, component string) {
 // outcome reports the repair's progress or result, carrying the repair ID.
 func (r *repairer) outcome(tc *client.TransportClient, code, repairID string) {
 	r.setReason(tc, cpTypes.HealthComponentRepair, code, repairID)
-	if tc != nil {
-		// A report-only link always reports error status. The operator should not
-		// wait for the next periodic heartbeat to read the result.
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := tc.SendHeartbeat(ctx, string(cpTypes.StatusError), nil); err != nil {
-				r.logger.Debug("Repair outcome heartbeat not sent", "operation", "repair",
-					"error", logging.SanitizeLogValue(err.Error()))
-			}
-		}()
-	}
+	// A report-only link always reports error status. The operator should not
+	// wait for the next periodic heartbeat to read the result.
+	r.reporter.report(tc, cpTypes.StatusError)
 }
 
 // publishLoss makes the heartbeat list exactly the codes in a, one component per
@@ -656,34 +652,13 @@ func (r *repairer) republish(tc *client.TransportClient) {
 	}
 }
 
-// confirmOutcome reports the repair outcome again on a link opened after the
-// repair. A link announces itself with one heartbeat that nothing acknowledges,
-// and its next heartbeat is 20 to 30 s later, so a send that fails or that the
-// controller does not take would leave the outcome unreported for that long. The
-// outcome is repeated a bounded number of times a few seconds apart; the
-// controller reads the same reason each time. It stops when ctx ends.
-func (r *repairer) confirmOutcome(ctx context.Context, tc *client.TransportClient) {
+// confirmOutcome reports the repair outcome on a link opened after the repair,
+// through the shared reporter: at once, and again a few seconds apart.
+func (r *repairer) confirmOutcome(tc *client.TransportClient) {
 	if r == nil || tc == nil || !r.hasOutcome() {
 		return
 	}
-	// Read once here: the alarm loop owns these, the goroutine below outlives it.
-	resends, interval := repairOutcomeResends, repairOutcomeResendInterval
-	go func() {
-		for i := 0; i < resends; i++ {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(interval):
-			}
-			sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			err := tc.SendHeartbeat(sctx, string(cpTypes.StatusError), nil)
-			cancel()
-			if err != nil {
-				r.logger.Debug("Repair outcome heartbeat not sent", "operation", "repair",
-					"error", logging.SanitizeLogValue(err.Error()))
-			}
-		}
-	}()
+	r.reporter.report(tc, cpTypes.StatusError)
 }
 
 // hasOutcome reports whether a repair outcome is held for the next link.

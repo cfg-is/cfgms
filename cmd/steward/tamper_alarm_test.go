@@ -726,7 +726,7 @@ func TestTamperAlarm_TrustDowngradeLatch_NilRescan_KeepsReportingFault(t *testin
 	}
 
 	assert.True(t, alarm.localFaultCleared(), "the return value is unchanged: a nil rescan is cleared")
-	alarm.publishReason(context.Background(), nil)
+	alarm.publishReason(nil)
 	code, msg := startupReasonFor(t, tamperReasonComponent)
 	assert.Equal(t, cpTypes.ReasonCodeTamperTrustDowngrade, code)
 	assert.Equal(t, tamperMessages[cpTypes.ReasonCodeTamperTrustDowngrade], msg)
@@ -739,12 +739,12 @@ func TestTamperAlarm_RecheckFault_Transitions(t *testing.T) {
 	var fault atomic.Pointer[tamperFault]
 	alarm := &tamperAlarm{latch: latch, rescan: func() *tamperFault { return fault.Load() }, logger: logging.NewNoopLogger()}
 
-	alarm.publishReason(context.Background(), nil)
+	alarm.publishReason(nil)
 	code, _ := startupReasonFor(t, tamperReasonComponent)
 	assert.Equal(t, cpTypes.ReasonCodeTamperDataDir, code)
 
 	assert.True(t, alarm.recheckFault())
-	alarm.publishReason(context.Background(), nil)
+	alarm.publishReason(nil)
 	code, msg := startupReasonFor(t, tamperReasonComponent)
 	assert.Equal(t, client.ReasonTamperLocked, code)
 	assert.Equal(t, tamperClearedMessage, msg)
@@ -752,7 +752,7 @@ func TestTamperAlarm_RecheckFault_Transitions(t *testing.T) {
 
 	fault.Store(&tamperFault{code: cpTypes.ReasonCodeTamperCAMismatch})
 	assert.False(t, alarm.recheckFault())
-	alarm.publishReason(context.Background(), nil)
+	alarm.publishReason(nil)
 	code, _ = startupReasonFor(t, tamperReasonComponent)
 	assert.Equal(t, cpTypes.ReasonCodeTamperDataDir, code, "the first code raised is still the primary")
 	assert.Contains(t, latch.codesSnapshot(), cpTypes.ReasonCodeTamperCAMismatch)
@@ -766,7 +766,7 @@ func TestTamperAlarm_ControllerLockOnly_KeepsLockedMessage(t *testing.T) {
 	alarm := &tamperAlarm{latch: latch, rescan: func() *tamperFault { return nil }, logger: logging.NewNoopLogger()}
 
 	alarm.recheckFault()
-	alarm.publishReason(context.Background(), nil)
+	alarm.publishReason(nil)
 	code, msg := startupReasonFor(t, tamperReasonComponent)
 	assert.Equal(t, client.ReasonTamperLocked, code)
 	assert.Equal(t, tamperMessages[client.ReasonTamperLocked], msg)
