@@ -79,6 +79,11 @@ func (s *DatabaseStewardStore) RegisterSteward(ctx context.Context, record *busi
 		keyPub = []byte{}
 	}
 
+	capabilitiesJSON, err := business.EncodeStewardCapabilities(record.Capabilities)
+	if err != nil {
+		return fmt.Errorf("database: %w", err)
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("database: failed to begin register steward tx: %w", err)
@@ -93,8 +98,8 @@ func (s *DatabaseStewardStore) RegisterSteward(ctx context.Context, record *busi
 		INSERT INTO steward_records
 			(id, tenant_id, hostname, platform, arch, version, ip_address, status,
 			 registered_at, last_seen, last_heartbeat_at,
-			 device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,$11,$12,$13,$14,$15,$16,$17)`,
+			 device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons, capabilities)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,$11,$12,$13,$14,$15,$16,$17,$18)`,
 		record.ID,
 		record.TenantID,
 		record.Hostname,
@@ -112,6 +117,7 @@ func (s *DatabaseStewardStore) RegisterSteward(ctx context.Context, record *busi
 		record.LastProvenanceJSON,
 		record.Hidden,
 		encodeHealthReasons(record.HealthReasons),
+		capabilitiesJSON,
 	)
 	if err != nil {
 		return s.classifyRegisterError(ctx, record.ID, err)
@@ -196,7 +202,7 @@ func (s *DatabaseStewardStore) GetSteward(ctx context.Context, stewardID string)
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons, capabilities
 		FROM steward_records WHERE id = $1`, stewardID)
 	return scanStewardDBRow(row)
 }
@@ -218,7 +224,7 @@ func (s *DatabaseStewardStore) GetStewardByDeviceID(ctx context.Context, deviceI
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons, capabilities
 		FROM steward_records WHERE device_id = $1 ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`, deviceID)
 	return scanStewardDBRow(row)
 }
@@ -234,7 +240,7 @@ func (s *DatabaseStewardStore) GetStewardByDeviceIDForTenant(ctx context.Context
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons, capabilities
 		FROM steward_records WHERE device_id = $1 AND tenant_id = $2 ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`,
 		deviceID, tenantID)
 	return scanStewardDBRow(row)
@@ -245,7 +251,7 @@ func (s *DatabaseStewardStore) ListStewards(ctx context.Context) ([]*business.St
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons, capabilities
 		FROM steward_records ORDER BY registered_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("database: failed to list stewards: %w", err)
@@ -259,7 +265,7 @@ func (s *DatabaseStewardStore) ListStewardsByStatus(ctx context.Context, status 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons, capabilities
 		FROM steward_records WHERE status = $1 ORDER BY registered_at ASC`,
 		string(status))
 	if err != nil {
@@ -392,6 +398,88 @@ func (s *DatabaseStewardStore) SetHealthReasons(ctx context.Context, stewardID s
 		return business.ErrStewardNotFound
 	}
 	return tx.Commit()
+}
+
+// ResetCapabilities starts a new connection's capability record (state pending).
+func (s *DatabaseStewardStore) ResetCapabilities(ctx context.Context, stewardID, connectionID string) error {
+	rec, err := business.NewPendingStewardCapabilities(connectionID, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("database: %w", err)
+	}
+	encoded, err := business.EncodeStewardCapabilities(rec)
+	if err != nil {
+		return fmt.Errorf("database: %w", err)
+	}
+	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin reset capabilities tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE steward_records SET capabilities = $2 WHERE id = $1`,
+		stewardID, encoded)
+	if err != nil {
+		return fmt.Errorf("database: failed to reset capabilities for steward %s: %w", stewardID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return business.ErrStewardNotFound
+	}
+	return tx.Commit()
+}
+
+// DeclareCapabilities stores c only while the stored record still belongs to
+// connectionID. The row is locked (FOR UPDATE) for the compare and the write, so
+// a concurrent ResetCapabilities cannot interleave between them.
+func (s *DatabaseStewardStore) DeclareCapabilities(ctx context.Context, stewardID, connectionID string, c business.StewardCapabilityRecord) (bool, error) {
+	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
+	if err != nil {
+		return false, err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("database: failed to begin declare capabilities tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return false, fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	var existingJSON string
+	err = tx.QueryRowContext(ctx,
+		`SELECT capabilities FROM steward_records WHERE id = $1 FOR UPDATE`, stewardID).Scan(&existingJSON)
+	if err == sql.ErrNoRows {
+		return false, business.ErrStewardNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("database: failed to read capabilities for steward %s: %w", stewardID, err)
+	}
+	encoded, applied, err := business.ApplyStewardCapabilityDeclaration(existingJSON, connectionID, c, time.Now().UTC())
+	if err != nil {
+		return false, fmt.Errorf("database: %w", err)
+	}
+	if !applied {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE steward_records SET capabilities = $2 WHERE id = $1`, stewardID, encoded); err != nil {
+		return false, fmt.Errorf("database: failed to declare capabilities for steward %s: %w", stewardID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("database: failed to commit declare capabilities for steward %s: %w", stewardID, err)
+	}
+	return true, nil
 }
 
 // encodeHealthReasons serialises reasons as JSON; an empty set is stored as ”.
@@ -594,7 +682,7 @@ func (s *DatabaseStewardStore) GetStewardsSeen(ctx context.Context, since time.T
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
-		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons
+		       device_id, identity_key_pub, key_protection_level, key_algorithm, last_provenance_json, hidden, health_reasons, capabilities
 		FROM steward_records WHERE last_seen > $1 ORDER BY last_seen DESC`,
 		since)
 	if err != nil {
@@ -617,12 +705,12 @@ func scanStewardDBRow(row *sql.Row) (*business.StewardRecord, error) {
 	var registeredAt, lastSeen time.Time
 	var lastHeartbeat sql.NullTime
 	var keyPub []byte
-	var reasonsJSON string
+	var reasonsJSON, capabilitiesJSON string
 
 	err := row.Scan(
 		&r.ID, &r.TenantID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
 		&statusStr, &registeredAt, &lastSeen, &lastHeartbeat,
-		&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON, &r.Hidden, &reasonsJSON,
+		&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON, &r.Hidden, &reasonsJSON, &capabilitiesJSON,
 	)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrStewardNotFound
@@ -638,6 +726,7 @@ func scanStewardDBRow(row *sql.Row) (*business.StewardRecord, error) {
 	}
 	r.IdentityKeyPub = keyPub
 	r.HealthReasons = decodeHealthReasons(reasonsJSON)
+	r.Capabilities = business.DecodeStewardCapabilities(capabilitiesJSON)
 	return r, nil
 }
 
@@ -649,12 +738,12 @@ func scanStewardDBRows(rows *sql.Rows) ([]*business.StewardRecord, error) {
 		var registeredAt, lastSeen time.Time
 		var lastHeartbeat sql.NullTime
 		var keyPub []byte
-		var reasonsJSON string
+		var reasonsJSON, capabilitiesJSON string
 
 		if err := rows.Scan(
 			&r.ID, &r.TenantID, &r.Hostname, &r.Platform, &r.Arch, &r.Version, &r.IPAddress,
 			&statusStr, &registeredAt, &lastSeen, &lastHeartbeat,
-			&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON, &r.Hidden, &reasonsJSON,
+			&r.DeviceID, &keyPub, &r.KeyProtectionLevel, &r.KeyAlgorithm, &r.LastProvenanceJSON, &r.Hidden, &reasonsJSON, &capabilitiesJSON,
 		); err != nil {
 			return nil, fmt.Errorf("database: failed to scan steward row: %w", err)
 		}
@@ -666,6 +755,7 @@ func scanStewardDBRows(rows *sql.Rows) ([]*business.StewardRecord, error) {
 		}
 		r.IdentityKeyPub = keyPub
 		r.HealthReasons = decodeHealthReasons(reasonsJSON)
+		r.Capabilities = business.DecodeStewardCapabilities(capabilitiesJSON)
 		records = append(records, r)
 	}
 	return records, rows.Err()

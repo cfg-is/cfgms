@@ -38,7 +38,7 @@ pkg/storage/interfaces/
 | `rbac_store.go` | `RBACStore` | RBAC policy and role data |
 | `registration_store.go` | `RegistrationTokenStore`, `RegistrationTokenData` | Steward registration tokens |
 | `session_store.go` | `SessionStore`, `Session`, `SessionType`, `SessionStatus`, `ClientInfo`, `SessionFilter`, `RuntimeStoreStats`, plus typed session-data payloads (terminal, JIT, API, websocket) | Durable session state |
-| `steward_store.go` | `StewardStore`, `StewardRecord`, `StewardStatus` | Durable fleet registry |
+| `steward_store.go` | `StewardStore`, `StewardRecord`, `StewardStatus`, `StewardCapabilityRecord` | Durable fleet registry, including the per-connection capability record (`ResetCapabilities`, compare-and-set `DeclareCapabilities`) |
 | `command_store.go` | `CommandStore`, `CommandRecord`, `CommandStatus`, `CommandTransition` | Durable command dispatch state |
 | `dna_history_store.go` | `DNAHistoryStore` | DNA history access interface used by drift detection |
 | `batch_job_store.go` | `BatchJobStore`, `ErrBatchJobNotFound`, `BatchJob`, `BatchJobConfig`, `BatchStep`, `BatchJobStatus*`, `BatchStepStatus*` | Fleet rolling-batch update job persistence (types and store contract defined here) |
@@ -321,6 +321,11 @@ The established pattern, and where each variant lives:
   - `business.StewardStore.UpdateStewardTenant(ctx, stewardID,
     expectedTenantID, newTenantID)` (Issue #3895) applies the same guard to
     steward tenant moves.
+  - `business.StewardStore.DeclareCapabilities(ctx, stewardID, connectionID,
+    record)` applies only while the stored capability record's
+    `ConnectionID` equals `connectionID` and returns `applied=false`
+    otherwise, so a late write from an old connection cannot overwrite a
+    newer one reset by `ResetCapabilities`.
 - **Conditional-create write** — no existing record to version; the write
   itself must be atomic with the "does not exist" check, rather than a
   separate existence read followed by an unconditional write (a TOCTOU gap).
