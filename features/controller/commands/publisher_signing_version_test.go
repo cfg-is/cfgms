@@ -109,7 +109,7 @@ func TestPublisher_PushSigningCertToFloorStewardIsSignedV1(t *testing.T) {
 
 func TestPublisher_DeclaredCurrentStewardIsSignedV2(t *testing.T) {
 	h := newSigningVersionHarness(t)
-	h.connect("conn-1", 0).SettleCapabilities(registry.CapabilityDeclared, []int32{1}, current())
+	h.connect("conn-1", 0).SettleCapabilities(registry.CapabilityDeclared, []int32{1, 9}, current())
 
 	_, err := h.pub.PublishCommandWithSigner(context.Background(), h.id, types.CommandPushSigningCert, nil, h.signer)
 	require.NoError(t, err)

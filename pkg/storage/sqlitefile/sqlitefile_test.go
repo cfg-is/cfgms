@@ -71,3 +71,21 @@ func TestPrepare_DSNResolution(t *testing.T) {
 func TestPrepare_MissingDirectoryErrors(t *testing.T) {
 	assert.Error(t, Prepare(filepath.Join(t.TempDir(), "nodir", "x.db")))
 }
+
+func TestOpen_CreatesOwnerOnlyAndUsable(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "open.db")
+	db, err := Open(p)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	_, err = db.Exec("CREATE TABLE t (id INTEGER)")
+	require.NoError(t, err)
+	fi, err := os.Stat(p)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+}
+
+func TestOpen_PrepareFailureIsReturned(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "missing-dir", "x.db"))
+	require.Error(t, err)
+	assert.Nil(t, db)
+}

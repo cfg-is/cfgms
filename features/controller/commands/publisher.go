@@ -350,6 +350,24 @@ func (p *Publisher) currentTerm() uint64 {
 // A caller choosing among candidate signers can skip such a signer.
 var ErrSignerChainUnavailable = errors.New("signer certificate chain unavailable")
 
+// ErrCommandTypeUnsupportedByPeer is matched (errors.Is) by the error a publish
+// returns when the target steward's connection does not handle the command's
+// type, so nothing was signed or sent. It is a refusal by the controller, not a
+// transport failure: retrying on the same connection cannot succeed.
+var ErrCommandTypeUnsupportedByPeer = errors.New("command type not supported by the steward")
+
+// checkPeerSupports returns an ErrCommandTypeUnsupportedByPeer error when the
+// steward's connection is known not to handle cmdType. The answer comes from the
+// same controller-held state the signing version does (the SigningVersions
+// source, when it also answers command support); a type the controller does not
+// know and a steward with no state pass.
+func (p *Publisher) checkPeerSupports(ctx context.Context, stewardID string, cmdType controlplaneTypes.CommandType) error {
+	if controlplaneTypes.PeerSupportsCommandType(ctx, p.signingVersions, stewardID, cmdType) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", ErrCommandTypeUnsupportedByPeer, string(cmdType))
+}
+
 // signerChainError carries the chain builder's own message and matches
 // ErrSignerChainUnavailable.
 type signerChainError struct{ err error }
@@ -399,6 +417,9 @@ func (p *Publisher) signCommand(ctx context.Context, cmd *controlplaneTypes.Comm
 // with the rotating (previous) cert so stewards can verify it before their trust set
 // is updated (Issue #1844).
 func (p *Publisher) PublishCommandWithSigner(ctx context.Context, stewardID string, cmdType controlplaneTypes.CommandType, params map[string]interface{}, signer signature.Signer) (string, error) {
+	if err := p.checkPeerSupports(ctx, stewardID, cmdType); err != nil {
+		return "", err
+	}
 	commandID := uuid.New().String()
 
 	cmd := &controlplaneTypes.Command{
@@ -448,6 +469,9 @@ func (p *Publisher) PublishCommand(ctx context.Context, stewardID string, cmdTyp
 func (p *Publisher) PublishCommandWithID(ctx context.Context, commandID, stewardID string, cmdType controlplaneTypes.CommandType, params map[string]interface{}) error {
 	if commandID == "" {
 		return fmt.Errorf("command ID must not be empty")
+	}
+	if err := p.checkPeerSupports(ctx, stewardID, cmdType); err != nil {
+		return err
 	}
 
 	cmd := &controlplaneTypes.Command{
@@ -536,6 +560,9 @@ func (p *Publisher) PublishCommandWithSignerAndCallback(
 	onComplete func(event *controlplaneTypes.Event),
 	onTimeout func(),
 ) (string, error) {
+	if err := p.checkPeerSupports(ctx, stewardID, cmdType); err != nil {
+		return "", err
+	}
 	commandID := uuid.New().String()
 
 	cmd := &controlplaneTypes.Command{

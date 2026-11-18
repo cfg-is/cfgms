@@ -59,7 +59,8 @@ const (
 	CommandType_COMMAND_TYPE_STEWARD_ACTION CommandType = 14
 	// Controller-originated, signed: advertises the controller's configured transport
 	// address to a steward on connect. Command.params keys: "transport_address"
-	// (string, host:port). A steward that does not know this value ignores it.
+	// (string, host:port). The controller does not send it to a steward whose
+	// connection does not support this command type.
 	CommandType_COMMAND_TYPE_ADVERTISE_TRANSPORT_ADDRESS CommandType = 15
 )
 

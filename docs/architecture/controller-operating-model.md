@@ -999,6 +999,32 @@ sent in v1 by a path with no delivery row is refused and is not marked. The
 tracking is in memory, so a controller restart between the send and the late
 declaration loses it; the steward's own refusal still reaches the recorder.
 
+#### Command types outside the steward's profile (Issue #6313)
+
+The controller never sends a command whose type the target connection's profile
+does not list. For a steward on the floor profile that is steward action (type 14)
+and advertise transport address (type 15): the floor lists types 1..13. The
+steward therefore never receives them and never logs a signature rejection for
+them. The same resolver that picks the signing version answers this
+(`commands.CapabilityResolver.SupportsCommandType`, through
+`types.CommandSupportSource`), from the same controller-held state: the live
+connection on the node that holds it, the durable record on any other node. A
+connection that has not declared is taken at the floor after the same bounded
+wait. A type the controller does not know and a steward with no state are not
+gated.
+
+The refusal is reported where the command's tracking lives:
+
+| Path | Outcome |
+|---|---|
+| Steward action (type 14), `Dispatcher` | Refused before signing. The job ends result code `unsupported` with the text "steward too old: it does not support this action" (`run.Manager.RecordJobUnsupported`), the queue entry is cancelled and the device released. A steward-reported `unsupported` keeps its own path through `RecordActionResult`. |
+| Controller-originated command (advertise transport address, type 15), `TransportAddressHook` | Quiet skip: an Info log with the event `command_not_sent_peer_unsupported`, no error, no retry. |
+| Any other `Publisher` entry point | `commands.ErrCommandTypeUnsupportedByPeer`; nothing is signed or sent. |
+| Pending delivery row, `PendingDeliveryDrainHook` | Terminal: `DeliveryStatusRejected` with `business.DeliveryDetailCommandTypeUnsupportedByPeer` (`command_type_unsupported_by_peer`), shown as `delivery_detail` by the command record API. It is not retried on a later reconnect. |
+
+A late declaration does not reopen a skipped or terminal item: the next connect
+or the operator's re-issue sends it to the now-current steward.
+
 ### Tampered State (Epic #5621)
 
 `tampered` is a durable steward status (`StewardStatusTampered`). It means the

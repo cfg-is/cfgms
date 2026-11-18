@@ -1795,7 +1795,7 @@ const testActionTerm = uint64(1)<<32 + 9
 
 // newActionHarness wires a dispatcher, a run manager over a single-connection
 // sqlite store, a real queue and a recording audit sink.
-func newActionHarness(t *testing.T) *actionHarness {
+func newActionHarness(t *testing.T, opts ...func(*Config)) *actionHarness {
 	t.Helper()
 	db := mustOpenMemDB(t)
 	db.SetMaxOpenConns(1) // an in-memory sqlite database is per connection
@@ -1808,14 +1808,18 @@ func newActionHarness(t *testing.T) *actionHarness {
 	t.Cleanup(q.Stop)
 
 	cp := &testControlPlane{}
-	d, err := New(&Config{
+	cfg := &Config{
 		Queue:        q,
 		ControlPlane: cp,
 		Signer:       testCommandSigner{},
 		TermSource:   staticTermSource{term: testActionTerm},
 		PollInterval: 24 * time.Hour,
 		Logger:       logging.NewNoopLogger(),
-	})
+	}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	d, err := New(cfg)
 	require.NoError(t, err)
 	manager := run.NewManager(store, q)
 	manager.SetDeviceLockReleaser(d)

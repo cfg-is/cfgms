@@ -101,6 +101,40 @@ func (p CapabilityProfile) SupportsCommandType(n int32) bool {
 	return false
 }
 
+// commandTypeNumbers maps each CommandType the controller sends to its wire
+// CommandType enum number. The gRPC provider's own table is checked against this
+// one by a test, so the two cannot drift.
+var commandTypeNumbers = map[CommandType]int32{
+	CommandSyncConfig:                1,
+	CommandSyncDNA:                   2,
+	CommandReconnect:                 7,
+	CommandExecuteScript:             8,
+	CommandPushSigningCert:           9,
+	CommandPushStewardBinary:         10,
+	CommandRelayResponse:             11,
+	CommandOpenTerminal:              12,
+	CommandObserveModules:            13,
+	CommandStewardAction:             14,
+	CommandAdvertiseTransportAddress: 15,
+}
+
+// CommandTypeNumber returns the wire CommandType enum number of t. ok is false
+// for a type this controller does not know.
+func CommandTypeNumber(t CommandType) (n int32, ok bool) {
+	n, ok = commandTypeNumbers[t]
+	return n, ok
+}
+
+// KnownCommandTypes returns every CommandType the controller sends.
+func KnownCommandTypes() []CommandType {
+	out := make([]CommandType, 0, len(commandTypeNumbers))
+	for t := range commandTypeNumbers {
+		out = append(out, t)
+	}
+	sort.Slice(out, func(i, j int) bool { return commandTypeNumbers[out[i]] < commandTypeNumbers[out[j]] })
+	return out
+}
+
 // SupportsSigningPayloadVersion reports whether the profile lists the version.
 func (p CapabilityProfile) SupportsSigningPayloadVersion(v uint32) bool {
 	for _, c := range p.SigningPayloadVersions {

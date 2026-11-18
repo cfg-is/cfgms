@@ -148,6 +148,10 @@ type RunCompletionSink interface {
 	// with result code "refused" and the text "refused: locked down", not as a
 	// steward failure (Issue #5665).
 	RecordJobRefused(ctx context.Context, runID, jobID, executionID string) error
+	// RecordJobUnsupported records that the target steward's connection does not
+	// handle the command type: the job ends with result code "unsupported" and
+	// the controller-assigned "steward too old" text, and nothing was sent.
+	RecordJobUnsupported(ctx context.Context, runID, jobID, executionID string) error
 	// ExpireActionJobs closes steward-action jobs that will never report — pending
 	// past their TTL ("expired"), or dispatched but unreported past their bound
 	// ("no_result") — and returns the jobs this caller closed. The transition is a
@@ -520,17 +524,38 @@ func (d *Dispatcher) refuseLockedDown(ctx context.Context, deviceID string, exec
 	d.logger.Warn("Execution refused: steward is locked down",
 		"device_id", logging.SanitizeLogValue(deviceID),
 		"execution_id", logging.SanitizeLogValue(exec.ExecutionID))
+	d.endRefused(ctx, deviceID, exec, "refused", RunCompletionSink.RecordJobRefused)
+}
+
+// refuseUnsupported ends a steward action the target's connection cannot handle,
+// before it is signed or sent. It is a refusal by the controller, not a failure
+// to retry: the job records result code "unsupported" ("steward too old"), the
+// queue entry is removed so it is not re-queued, and the device slot is freed.
+func (d *Dispatcher) refuseUnsupported(ctx context.Context, deviceID string, exec *script.QueuedExecution) {
+	d.logger.Warn("Execution refused: steward does not support this command type",
+		"event", "command_not_sent_peer_unsupported",
+		"command_type", string(controlplaneTypes.CommandStewardAction),
+		"device_id", logging.SanitizeLogValue(deviceID),
+		"execution_id", logging.SanitizeLogValue(exec.ExecutionID))
+	d.endRefused(ctx, deviceID, exec, "unsupported", RunCompletionSink.RecordJobUnsupported)
+}
+
+// endRefused closes an execution the controller refused to send: record writes
+// the job's outcome (when the entry is tracked by a run), the queue entry is
+// removed, and the device slot is freed. outcome names the refusal in the logs.
+func (d *Dispatcher) endRefused(ctx context.Context, deviceID string, exec *script.QueuedExecution, outcome string,
+	record func(sink RunCompletionSink, ctx context.Context, runID, jobID, executionID string) error) {
 	runID, _ := exec.Metadata["workflow_run_id"].(string)
 	jobID, _ := exec.Metadata["job_id"].(string)
 	if d.runSink != nil && runID != "" && jobID != "" {
-		if err := d.runSink.RecordJobRefused(ctx, runID, jobID, exec.ExecutionID); err != nil {
-			d.logger.Warn("Failed to record refused job",
+		if err := record(d.runSink, ctx, runID, jobID, exec.ExecutionID); err != nil {
+			d.logger.Warn("Failed to record "+outcome+" job",
 				"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
 				"error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
 	if err := d.queue.CancelExecution(deviceID, exec.ExecutionID); err != nil {
-		d.logger.Warn("Failed to remove refused execution from the queue",
+		d.logger.Warn("Failed to remove "+outcome+" execution from the queue",
 			"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
 			"error", logging.SanitizeLogValue(err.Error()))
 	}
@@ -1410,8 +1435,7 @@ func (d *Dispatcher) dispatchStewardAction(ctx context.Context, deviceID string,
 		return
 	}
 
-	if d.refusesLockedDown(ctx, deviceID, controlplaneTypes.CommandStewardAction) {
-		d.refuseLockedDown(ctx, deviceID, exec)
+	if d.refuseStewardAction(ctx, deviceID, exec) {
 		return
 	}
 
@@ -1427,6 +1451,21 @@ func (d *Dispatcher) dispatchStewardAction(ctx context.Context, deviceID string,
 			"error", logging.SanitizeLogValue(err.Error()))
 		d.releaseDevice(deviceID)
 	}
+}
+
+// refuseStewardAction applies the gates that end a steward action before it is
+// signed or sent, and reports whether one did: the lockdown gate, then the
+// check that the target's connection handles steward actions at all.
+func (d *Dispatcher) refuseStewardAction(ctx context.Context, deviceID string, exec *script.QueuedExecution) bool {
+	if d.refusesLockedDown(ctx, deviceID, controlplaneTypes.CommandStewardAction) {
+		d.refuseLockedDown(ctx, deviceID, exec)
+		return true
+	}
+	if !controlplaneTypes.PeerSupportsCommandType(ctx, d.signingVersions, deviceID, controlplaneTypes.CommandStewardAction) {
+		d.refuseUnsupported(ctx, deviceID, exec)
+		return true
+	}
+	return false
 }
 
 // claimStewardAction wins the job's pending -> dispatched compare-and-set and

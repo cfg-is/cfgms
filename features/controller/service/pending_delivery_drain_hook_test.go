@@ -55,6 +55,13 @@ func newDrainHookTestPublisher(t *testing.T, stewardID string) (*commands.Publis
 // caller-supplied steward-side subscriber in place of the channel subscriber.
 func newDrainHookTestPublisherWithHandler(t *testing.T, stewardID string, handler cpinterfaces.CommandHandler) *commands.Publisher {
 	t.Helper()
+	return newDrainHookTestPublisherWithConfig(t, stewardID, handler, nil)
+}
+
+// newDrainHookTestPublisherWithConfig is newDrainHookTestPublisherWithHandler
+// with a hook to adjust the publisher's configuration before it is built.
+func newDrainHookTestPublisherWithConfig(t *testing.T, stewardID string, handler cpinterfaces.CommandHandler, adjust func(*commands.Config)) *commands.Publisher {
+	t.Helper()
 	ctx := context.Background()
 	bus := memory.NewBus()
 
@@ -78,7 +85,11 @@ func newDrainHookTestPublisherWithHandler(t *testing.T, stewardID string, handle
 
 	require.NoError(t, client.SubscribeCommands(ctx, stewardID, handler))
 
-	publisher, err := commands.New(&commands.Config{ControlPlane: server, Logger: logging.NewNoopLogger()})
+	cfg := &commands.Config{ControlPlane: server, Logger: logging.NewNoopLogger()}
+	if adjust != nil {
+		adjust(cfg)
+	}
+	publisher, err := commands.New(cfg)
 	require.NoError(t, err)
 	return publisher
 }

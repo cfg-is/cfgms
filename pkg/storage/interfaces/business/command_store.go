@@ -56,6 +56,14 @@ const (
 // rejection reason codes.
 const DeliveryDetailSigningFormRefusedReissue = "signing_form_refused_reissue"
 
+// DeliveryDetailCommandTypeUnsupportedByPeer is the DeliveryDetail of a rejected
+// record whose command type the target steward's connection does not handle: the
+// controller did not send it, and it ends here instead of staying pending for
+// every reconnect. Operator text: "steward too old for this command". It is
+// written by the controller itself, never taken from a steward's report, so it is
+// not one of the steward rejection reason codes.
+const DeliveryDetailCommandTypeUnsupportedByPeer = "command_type_unsupported_by_peer"
+
 // CommandRecord persists the full lifecycle of a command dispatched to a steward.
 // It is the durable state backing the steward command handler so that dispatch
 // state survives a process restart and forms a crash-survivable audit trail.
