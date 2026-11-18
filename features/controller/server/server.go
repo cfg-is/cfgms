@@ -503,6 +503,25 @@ func newHeartbeatReceivedHook(dispatcher *dispatcher.Dispatcher, controllerServi
 	}
 }
 
+// lateReplayRelay late-binds the late-declaration recovery as the callback the
+// server-mode control plane provider calls when a steward declares its
+// capabilities after the grace period (Issue #6337). The provider is built before
+// the capability resolver the replay needs, so the callback is handed to the
+// provider unbound; until Set is called it does nothing.
+type lateReplayRelay struct {
+	target atomic.Pointer[service.LateDeclarationReplay]
+}
+
+// Set binds the replay that owns the recovery.
+func (r *lateReplayRelay) Set(l *service.LateDeclarationReplay) { r.target.Store(l) }
+
+// OnLateCapabilities is the grpcCP.WithOnLateCapabilities callback.
+func (r *lateReplayRelay) OnLateCapabilities(ctx context.Context, stewardID string) {
+	if l := r.target.Load(); l != nil {
+		l.OnLateCapabilities(ctx, stewardID)
+	}
+}
+
 // repairGuardRelay late-binds the API server as the target of the guards of a
 // finished repair (Issue #5727): the revoked and admitted peer certificates seen
 // at admission, an identity conflict, and the heartbeat that may return a
@@ -1577,6 +1596,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Issue #5727: late-bound guards of a finished repair (contested signal and
 	// return to trusted).
 	repairGuard := &repairGuardRelay{logger: logger}
+	lateReplay := &lateReplayRelay{}
 	var repairSigner signature.Signer
 	var repairChains *signerchain.SignerChainBuilder
 	// Issue #5664: the single lockdown predicate and tamper-state sender. Built
@@ -1617,6 +1637,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			tamperRelay:       tamperRelay,
 			repairConnect:     repairConnect,
 			repairGuard:       repairGuard,
+			lateReplay:        lateReplay,
 		})
 		if err != nil {
 			return nil, err
@@ -1666,12 +1687,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// wrapping the cluster-aware sender here would let a delivery attempt for
 		// a steward this node does not have recurse into forwarding it right back
 		// out.
-		var dispatchControlPlane = controlPlane
 		deliveryServer = newInternalDeliveryServer(cfg, connRegistry, controlPlane, haManager, logger)
 		clusterAwareSender = newClusterDispatchSender(cfg, logger, certManager, haManager, routingStore, controlPlane)
-		if clusterAwareSender != nil {
-			dispatchControlPlane = clusterAwareSender
-		}
+		dispatchControlPlane := selectDispatchControlPlane(controlPlane, clusterAwareSender)
 		registerRoutingDisconnectCleanup(connRegistry, routingStore, routingHook.localNodeID, logger)
 
 		// Initialize execution queue and job dispatcher (Issue #1672).
@@ -1705,6 +1723,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// signing payload version from this resolver: v1 for a steward whose
 		// connection resolves to the floor profile, v2 otherwise.
 		signingVersions := commands.NewCapabilityResolver(connRegistry, storageManager.GetStewardStore(), logger)
+		// Issue #6337: a steward that declares after the grace settled it at the
+		// floor profile gets its floor-form drain rows marked for re-issue and the
+		// replay set re-run. The same resolver and the same slotted hooks as the
+		// composite on-connect hook are used.
+		lateReplay.Set(service.NewLateDeclarationReplay(logger, storageManager.GetCommandStore(), drainHook.FloorSent(), signingVersions, cpStage.slottedHooks...))
 		var dispatcherErr error
 		jobDispatcher, dispatcherErr = dispatcher.New(&dispatcher.Config{
 			Queue:              executionQueue,
@@ -1807,7 +1830,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// Issue #3757/#3764, #4866, #6254: wire the publisher into the connect
 		// hooks and the rejection recorder now that it exists (same init-cycle
 		// break as above).
-		wireCommandPublisherConsumers(commandPublisher, drainHook, transportAddrHook, rejectionRecorder)
+		wireCommandPublisherConsumers(commandPublisher, drainHook, transportAddrHook, rejectionRecorder, signingVersions)
 
 		// Issue #2524: wire DNA hash mismatch detection, the post-DNA-sync expected
 		// hash update, and the warm-up of expected hashes from durable storage.
@@ -4944,6 +4967,7 @@ type controlPlaneInputs struct {
 	tamperRelay       *tamperAlarmRelay
 	repairConnect     *repairConnectHook
 	repairGuard       *repairGuardRelay
+	lateReplay        *lateReplayRelay
 }
 
 // controlPlaneStage holds what the gRPC control plane provider construction
@@ -4955,6 +4979,7 @@ type controlPlaneStage struct {
 	routingHook         *routingTableConnectHook
 	drainHook           *service.PendingDeliveryDrainHook
 	transportAddrHook   *service.TransportAddressHook
+	slottedHooks        []service.SlottedConnectHook
 	lockdown            *controllerFleet.Lockdown
 	signingRotationSvc  *service.SigningRotationService
 	stewardMigrationSvc *service.StewardSigningMigrationService
@@ -5027,6 +5052,7 @@ func newControlPlaneStage(in *controlPlaneInputs) (*controlPlaneStage, error) {
 		routingHook:         hooks.routingHook,
 		drainHook:           hooks.drainHook,
 		transportAddrHook:   hooks.transportAddrHook,
+		slottedHooks:        hooks.slotted,
 		lockdown:            lockdown,
 		signingRotationSvc:  hooks.signingRotationSvc,
 		stewardMigrationSvc: hooks.stewardMigrationSvc,
@@ -5037,6 +5063,7 @@ func newControlPlaneStage(in *controlPlaneInputs) (*controlPlaneStage, error) {
 // rest of New wires further.
 type connectHooks struct {
 	composite           *service.CompositeOnConnectHook
+	slotted             []service.SlottedConnectHook // the hooks composite is built from
 	routingStore        business.RoutingStore
 	routingHook         *routingTableConnectHook
 	drainHook           *service.PendingDeliveryDrainHook
@@ -5076,13 +5103,15 @@ func newConnectHooks(in *controlPlaneInputs, connRegistry registry.Registry, ste
 	drainHook := service.NewPendingDeliveryDrainHook(in.storageManager.GetCommandStore(), stewardStore, nil, logger)
 	hooks := &connectHooks{routingStore: routingStore, routingHook: routingHook, drainHook: drainHook}
 	if in.certManager == nil {
-		hooks.composite = service.NewOrderedCompositeOnConnectHook(logger,
-			service.SlottedConnectHook{Slot: service.SlotRegistry, Hook: registryConnectHook},
-			service.SlottedConnectHook{Slot: service.SlotCompletionReconcile, Hook: completionReconciler},
-			service.SlottedConnectHook{Slot: service.SlotRouting, Hook: routingHook},
-			service.SlottedConnectHook{Slot: service.SlotLockdown, Hook: lockdown},
-			service.SlottedConnectHook{Slot: service.SlotRepair, Hook: in.repairConnect},
-			service.SlottedConnectHook{Slot: service.SlotDrain, Hook: drainHook})
+		hooks.slotted = []service.SlottedConnectHook{
+			{Slot: service.SlotRegistry, Hook: registryConnectHook},
+			{Slot: service.SlotCompletionReconcile, Hook: completionReconciler},
+			{Slot: service.SlotRouting, Hook: routingHook},
+			{Slot: service.SlotLockdown, Hook: lockdown},
+			{Slot: service.SlotRepair, Hook: in.repairConnect},
+			{Slot: service.SlotDrain, Hook: drainHook},
+		}
+		hooks.composite = service.NewOrderedCompositeOnConnectHook(logger, hooks.slotted...)
 		return hooks, nil
 	}
 	var svcErr error
@@ -5100,16 +5129,18 @@ func newConnectHooks(in *controlPlaneInputs, connRegistry registry.Registry, ste
 	// The order is service's connectHookOrder: the hooks that do not sign run
 	// first, so a signing hook's bounded wait for the connection's capability
 	// declaration never delays registry, routing, lockdown or repair.
-	hooks.composite = service.NewOrderedCompositeOnConnectHook(logger,
-		service.SlottedConnectHook{Slot: service.SlotRegistry, Hook: registryConnectHook},
-		service.SlottedConnectHook{Slot: service.SlotCompletionReconcile, Hook: completionReconciler},
-		service.SlottedConnectHook{Slot: service.SlotRouting, Hook: routingHook},
-		service.SlottedConnectHook{Slot: service.SlotLockdown, Hook: lockdown},
-		service.SlottedConnectHook{Slot: service.SlotRepair, Hook: in.repairConnect},
-		service.SlottedConnectHook{Slot: service.SlotSigningRotation, Hook: hooks.signingRotationSvc},
-		service.SlottedConnectHook{Slot: service.SlotMigration, Hook: hooks.stewardMigrationSvc},
-		service.SlottedConnectHook{Slot: service.SlotDrain, Hook: drainHook},
-		service.SlottedConnectHook{Slot: service.SlotTransportAddress, Hook: hooks.transportAddrHook})
+	hooks.slotted = []service.SlottedConnectHook{
+		{Slot: service.SlotRegistry, Hook: registryConnectHook},
+		{Slot: service.SlotCompletionReconcile, Hook: completionReconciler},
+		{Slot: service.SlotRouting, Hook: routingHook},
+		{Slot: service.SlotLockdown, Hook: lockdown},
+		{Slot: service.SlotRepair, Hook: in.repairConnect},
+		{Slot: service.SlotSigningRotation, Hook: hooks.signingRotationSvc},
+		{Slot: service.SlotMigration, Hook: hooks.stewardMigrationSvc},
+		{Slot: service.SlotDrain, Hook: drainHook},
+		{Slot: service.SlotTransportAddress, Hook: hooks.transportAddrHook},
+	}
+	hooks.composite = service.NewOrderedCompositeOnConnectHook(logger, hooks.slotted...)
 	return hooks, nil
 }
 
@@ -5135,6 +5166,9 @@ func newGRPCControlPlaneProvider(in *controlPlaneInputs, composite *service.Comp
 		grpcCP.ModeServer,
 		grpcCP.WithCapabilityRecorder(capabilityRecorder),
 		grpcCP.WithOnConnectHook(composite),
+		// Issue #6337: re-run the replay set when a steward declares after the
+		// grace settled it at the floor profile. Bound once the resolver exists.
+		grpcCP.WithOnLateCapabilities(in.lateReplay.OnLateCapabilities),
 		grpcCP.WithApprovalChecker(approvalChecker),
 		grpcCP.WithRevocationChecker(in.certManager),
 		// Issue #3759: the connect/heartbeat gate — deliberately NOT the queue
@@ -5265,6 +5299,16 @@ func newClusterDispatchSender(cfg *config.Config, logger logging.Logger, certMan
 	return sender
 }
 
+// selectDispatchControlPlane returns the control plane the dispatcher and
+// publisher send on: the cluster-aware sender when one was built, otherwise the
+// node-local control plane.
+func selectDispatchControlPlane(local controlplaneInterfaces.ControlPlaneProvider, sender *internaldelivery.ClusterAwareSender) controlplaneInterfaces.ControlPlaneProvider {
+	if sender != nil {
+		return sender
+	}
+	return local
+}
+
 // newDeliveryClientTLSConfig mints a dedicated mTLS CLIENT certificate for
 // outbound delivery forwarding, exactly as pkg/ha mints one for the Raft peer
 // transport, and returns the client TLS config built from it (nil, after a
@@ -5393,11 +5437,15 @@ func newHeartbeatRegistryBridgeHandler(logger logging.Logger, controllerService 
 // pending-delivery drain hook. Issue #6254: the transport-address hook; a nil
 // hook (built only when a signer is configured) ignores it. Issue #4866: the
 // rejection recorder re-sends fence-rejected commands; it may be nil.
-func wireCommandPublisherConsumers(publisher *commands.Publisher, drainHook *service.PendingDeliveryDrainHook, transportAddrHook *service.TransportAddressHook, rejectionRecorder *service.CommandRejectionRecorder) {
+func wireCommandPublisherConsumers(publisher *commands.Publisher, drainHook *service.PendingDeliveryDrainHook, transportAddrHook *service.TransportAddressHook, rejectionRecorder *service.CommandRejectionRecorder, signingVersions *commands.CapabilityResolver) {
 	drainHook.SetPublisher(publisher)
+	// Issue #6337: the drain hook asks the resolver which form to publish in and
+	// tracks the rows it sent in the floor form; the recorder reads that tracker.
+	drainHook.SetSigningResolver(signingVersions)
 	transportAddrHook.SetPublisher(publisher)
 	if rejectionRecorder != nil {
 		rejectionRecorder.SetRetrier(publisher)
+		rejectionRecorder.SetFloorSentTracker(drainHook.FloorSent(), signingVersions)
 	}
 }
 
