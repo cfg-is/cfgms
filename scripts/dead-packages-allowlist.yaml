@@ -86,6 +86,8 @@ packages:
       fleet e2e helper package (test/e2e/fleet/fleetkit), imported only by the
       test/e2e/fleet suite and its compat tests, none of which any main package
       reaches; it is a non-test package only so another test package can import it.
+  - path: test/compat
+    reason: test suite entry point, run via `go test`, never imported.
   - path: test/e2e/compat
     reason: >
       steward compatibility harness (test/e2e/compat): the support manifest

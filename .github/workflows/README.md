@@ -101,7 +101,18 @@ so it can post nothing in the queue, not even a skipped run.
 
 **Jobs**:
 - `fleet-e2e-tests` — runs fleet end-to-end scenario tests; emits the `fleet-e2e-tests` context (required check in develop ruleset via `documentation.yml` stub on docs PRs)
-- `steward-compat-e2e` — builds the support floor's steward from its release tag (`test/compat/steward-support.yaml`) and runs it against the controller built from the merge commit (`make test-e2e-compat`, Issue #6314); no `needs:` on `fleet-e2e-tests`; advisory (not in the ruleset's required contexts). Its PR-side stub is the `steward-compat-e2e` job in `fleet-e2e-pr-stub.yml` (`pull_request` only, never `merge_group`). See [Steward Compatibility Harness](../../docs/testing/steward-compat.md).
+
+**Runtime**: ~10–20 min
+
+---
+
+#### `steward-compat-e2e.yml` — Steward Compat E2E
+
+**Triggers**: Merge Group and manual dispatch (`workflow_dispatch`)
+
+**Jobs**:
+- `steward-compat-e2e` — builds the support floor's steward from its release tag (`test/compat/steward-support.yaml`) and runs it against the controller built from the merge commit (`make test-e2e-compat`, Issue #6314); advisory (not in the ruleset's required contexts). It lives apart from `fleet-e2e.yml` so a dispatch run creates no `fleet-e2e-tests` check run on the PR head. Its PR-side stub is the `steward-compat-e2e` job in `fleet-e2e-pr-stub.yml` (`pull_request` only, never `merge_group`).
+- **Before merge**: run `gh workflow run steward-compat-e2e.yml --ref <branch>` and check the `steward-compat-e2e` job. See [Steward Compatibility Harness](../../docs/testing/steward-compat.md).
 
 **Runtime**: ~10–20 min
 
@@ -309,6 +320,7 @@ See `docs/development/ci-infrastructure-setup.md` → CI Image Mirror.
 | `cross-platform-build-pr.yml` | ❌ | ✅ | ❌ | ❌ | ❌ |
 | `cross-platform-build.yml` | ❌ | ❌ | ✅ | ❌ | ✅ |
 | `fleet-e2e.yml` | ❌ | ❌ | ✅ | ❌ | ❌ |
+| `steward-compat-e2e.yml` | ❌ | ❌ | ✅ | ❌ | ✅ |
 | `security-scan.yml` | ✅ | ✅ | ✅ | Daily 3 AM UTC | ❌ |
 | `codeql-analysis.yml` | ✅ | ✅ (Go/CodeQL/web paths) | ✅ | Weekly | ❌ |
 | `codeql-stub.yml` | ❌ | ✅ (non-Go/non-web) | ❌ | ❌ | ❌ |
