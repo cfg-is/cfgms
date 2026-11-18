@@ -98,4 +98,4 @@ jobs:
       - name: Security audit
         if: steps.changes.outputs.has_changes == 'true'
         working-directory: web
-        run: npm audit --audit-level=high
+        run: bash ../scripts/npm-audit-gate.sh

@@ -476,6 +476,8 @@ test_executable_permissions() {
         "scripts/install-git-hooks_test.sh"
         "scripts/verify-nancy-ignore-scope.sh"
         "scripts/verify-nancy-ignore-scope_test.sh"
+        "scripts/npm-audit-gate.sh"
+        "scripts/npm-audit-gate_test.sh"
         "scripts/lab-datasvc-bootstrap.sh"
         "scripts/lab-datasvc-bootstrap_test.sh"
         "scripts/ha-cluster-node-bootstrap.sh"
@@ -1334,6 +1336,49 @@ test_verify_nancy_ignore_scope() {
         log_pass "verify-nancy-ignore-scope_test.sh: All fixture tests passed"
     else
         log_fail "verify-nancy-ignore-scope_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Fixture suite for scripts/npm-audit-gate.sh — the web/ `npm audit` gate with a
+# time-boxed, exact-ID exception file (Issue #6306). Delegates to
+# scripts/npm-audit-gate_test.sh, which runs the gate offline against fixture
+# `npm audit --json` documents with injected date and published version.
+test_npm_audit_gate() {
+    log_test "Testing npm-audit-gate.sh..."
+
+    local gate_script="scripts/npm-audit-gate.sh"
+    local test_script="scripts/npm-audit-gate_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "npm-audit-gate.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "npm-audit-gate.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "npm-audit-gate_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "npm-audit-gate_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "npm-audit-gate_test.sh: All fixture tests passed"
+    else
+        log_fail "npm-audit-gate_test.sh: Fixture tests failed (exit $rc)"
         sed 's/^/    /' "$out_file" >&2
     fi
     rm -f "$out_file"
@@ -3747,6 +3792,7 @@ DISPATCH_TABLE=(
     "test_codeql_context_present_on_merge_group:core"
     "test_install_git_hooks:core"
     "test_verify_nancy_ignore_scope:core"
+    "test_npm_audit_gate:core"
     "test_security_trivy_init_error:core"
     "test_security_trivy_findings:core"
     "test_security_trivy_clean_scan:core"

@@ -14,7 +14,7 @@
     "lint": "eslint .",
     "typecheck": "tsc -b",
     "test": "vitest run",
-    "audit": "npm audit --audit-level=high",
+    "audit": "bash ../scripts/npm-audit-gate.sh",
     "preview": "vite preview"
   },
   "dependencies": {
