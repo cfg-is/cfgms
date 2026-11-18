@@ -47,6 +47,15 @@ const (
 	DeliveryStatusRejected DeliveryStatus = "rejected"
 )
 
+// DeliveryDetailSigningFormRefusedReissue is the DeliveryDetail of a rejected
+// record whose command was signed in the floor (v1) form for a connection that
+// then declared itself current after the capability grace period: the current
+// steward refuses the stamped v1 form, so the command did not run. Operator text:
+// "command was not run and must be re-issued". It is written by the controller
+// itself, never taken from a steward's report, so it is not one of the steward
+// rejection reason codes.
+const DeliveryDetailSigningFormRefusedReissue = "signing_form_refused_reissue"
+
 // CommandRecord persists the full lifecycle of a command dispatched to a steward.
 // It is the durable state backing the steward command handler so that dispatch
 // state survives a process restart and forms a crash-survivable audit trail.

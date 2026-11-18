@@ -106,6 +106,27 @@ func TestHandleGetCommandRecord_OwnTenantCanRead(t *testing.T) {
 	assert.Equal(t, string(business.DeliveryStatusPending), resp.DeliveryStatus)
 }
 
+// TestHandleGetCommandRecord_ShowsTheReissueDetail: a command signed in the floor
+// form for a steward that then declared current is rejected with its own detail,
+// and the response shows it under delivery_detail.
+func TestHandleGetCommandRecord_ShowsTheReissueDetail(t *testing.T) {
+	server, store := setupCommandTestServer(t)
+	rec := createCommandRecord(t, store, "cmd-floor-form", "steward-a", "tenant-a")
+	ctx := context.Background()
+	require.NoError(t, store.UpdateDeliveryStatus(ctx, rec.ID, business.DeliveryStatusDelivered, ""))
+	require.NoError(t, store.UpdateDeliveryStatus(ctx, rec.ID, business.DeliveryStatusRejected,
+		business.DeliveryDetailSigningFormRefusedReissue))
+
+	w := httptest.NewRecorder()
+	server.handleGetCommandRecord(w, withScopedPrincipal(newGetCommandRequest(t, rec.ID), "tenant-a"))
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &raw))
+	assert.Equal(t, string(business.DeliveryStatusRejected), raw["delivery_status"])
+	assert.Equal(t, "signing_form_refused_reissue", raw["delivery_detail"])
+}
+
 // TestHandleGetCommandRecord_CrossTenantReturn404 is the required cross-tenant
 // isolation test for delivery-record reads by command ID (Issue #3757 AC: "a
 // caller from tenant A cannot read a delivery record belonging to tenant B").
