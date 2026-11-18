@@ -239,42 +239,50 @@ func (m *windowsManager) Install(token, controllerURL, caCertPEM, expectedFinger
 			return m.stageInstall(launcherSrc, caCertPEM, token)
 		},
 		replaceDefinition: func() error {
-			steps := replaceDefinitionSteps{
-				serviceGone: func() bool {
-					s, err := scm.OpenService(windowsServiceName)
-					if err != nil {
-						// ERROR_SERVICE_DOES_NOT_EXIST means gone; any other
-						// open error ends the wait and CreateService decides.
-						return true
-					}
-					_ = s.Close()
-					return false
-				},
-				create: func() error {
-					return registerAndStartService(scm, platformTokenFilePath(), controllerURL)
-				},
-				now:      time.Now,
-				sleep:    time.Sleep,
-				bound:    30 * time.Second,
-				interval: 250 * time.Millisecond,
-			}
-			if existing != nil {
-				steps.deleteExisting = func() error {
-					fmt.Println("Removing existing service definition...")
-					err := existing.Delete()
-					// Close before CreateService: an open handle keeps a
-					// deleted service in the marked-for-delete state.
-					_ = existing.Close()
-					existing = nil
-					if err != nil {
-						return fmt.Errorf("failed to delete existing service: %w", err)
-					}
-					return nil
-				}
-			}
-			return replaceServiceDefinition(steps)
+			return replaceServiceDefinition(newReplaceDefinitionSteps(scm, &existing, controllerURL))
 		},
 	})
+}
+
+// newReplaceDefinitionSteps wires replaceServiceDefinition to the live SCM.
+// existing points at the handle Install holds across staging; it is cleared
+// once the definition is deleted so Install's deferred Close does not
+// double-close it.
+func newReplaceDefinitionSteps(scm *mgr.Mgr, existing **mgr.Service, controllerURL string) replaceDefinitionSteps {
+	steps := replaceDefinitionSteps{
+		serviceGone: func() bool {
+			s, err := scm.OpenService(windowsServiceName)
+			if err != nil {
+				// ERROR_SERVICE_DOES_NOT_EXIST means gone; any other
+				// open error ends the wait and CreateService decides.
+				return true
+			}
+			_ = s.Close()
+			return false
+		},
+		create: func() error {
+			return registerAndStartService(scm, platformTokenFilePath(), controllerURL)
+		},
+		now:      time.Now,
+		sleep:    time.Sleep,
+		bound:    30 * time.Second,
+		interval: 250 * time.Millisecond,
+	}
+	if *existing != nil {
+		steps.deleteExisting = func() error {
+			fmt.Println("Removing existing service definition...")
+			err := (*existing).Delete()
+			// Close before CreateService: an open handle keeps a
+			// deleted service in the marked-for-delete state.
+			_ = (*existing).Close()
+			*existing = nil
+			if err != nil {
+				return fmt.Errorf("failed to delete existing service: %w", err)
+			}
+			return nil
+		}
+	}
+	return steps
 }
 
 // replaceDefinitionSteps are the parameters of replaceServiceDefinition, so
