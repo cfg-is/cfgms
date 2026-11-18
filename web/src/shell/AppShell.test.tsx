@@ -102,6 +102,14 @@ describe('AppShell', () => {
     expect(screen.getByRole('link', { name: /^tenants$/i })).toHaveAttribute('href', '/tenants')
   })
 
+  it('renders the Email delivery entry below Support access as a link to /email-delivery (Issue #6247)', () => {
+    renderShell()
+    const email = screen.getByRole('link', { name: /^email delivery$/i })
+    expect(email).toHaveAttribute('href', '/email-delivery')
+    const links = within(screen.getByRole('navigation')).getAllByRole('link')
+    expect(links.indexOf(email)).toBe(links.indexOf(screen.getByRole('link', { name: /support access/i })) + 1)
+  })
+
   it('renders the Approvals entry as a link to /approvals (Issue #5450)', () => {
     renderShell()
     expect(screen.getByRole('link', { name: /^approvals$/i })).toHaveAttribute('href', '/approvals')

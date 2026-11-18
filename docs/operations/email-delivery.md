@@ -202,3 +202,31 @@ password are never logged.
 | A break-glass notice did not arrive | `sender` is always `platform` (or `none`). Check the platform sender with `GET /api/v1/notifications/email` and the test send. An MSP sender never affects it. See [tenant support access](tenant-support-access.md#email-delivery). |
 | `403 ROOT_SCOPED_CANNOT_EDIT_EMAIL_SENDER` | A root-scoped caller tried to change, remove or test an MSP sender. Only an administrator of that MSP can. |
 | `404 TENANT_NOT_FOUND` for an existing tenant | The tenant is not an MSP (a client tenant has no sender), or it is outside the caller's subtree. |
+
+## 8. In the web console
+
+An administrator of an MSP manages the MSP sender from **Email delivery** in the sidebar (`/email-delivery`),
+below **Support access**. The page needs the same permission and assurance as the API and CLI
+(`notification:configure-msp`, strong assurance), and it asks for a passkey confirmation when it needs one.
+
+| Part of the page | What it does |
+|------------------|--------------|
+| **Sender** | Shows the MSP's own sender (mail server, port and TLS mode, `from` address, username) and a **Password saved** chip, or **No sender: using the platform sender** when the MSP has none or its sender has no stored password. |
+| **Set sender** / **Replace** | Opens the form: mail server, TLS mode, port, `from` address, optional username and password. The port is a choice of `587` or `465` and follows the TLS mode (`587` for STARTTLS, `465` for implicit TLS). Saving replaces every setting and takes a passkey confirmation. |
+| **Remove** | Asks for confirmation, then deletes the settings and the stored password. Mail falls back to the platform sender. |
+| **Send a test** | Sends the one fixed test message to the sender's own `from` address and lists each recipient as **Accepted** or **Not sent**, with the failure reason shown as plain text. A test never uses the platform sender. |
+| **What uses this sender** | Lists which mail uses the MSP sender and which always uses the platform sender (section 2). |
+
+The password field is write-only. It is empty whenever the form opens, it goes to the controller only in the
+save request, and the page clears it as soon as the save finishes, whether the save worked or not. Afterwards the
+page shows **Password saved** and nothing else about it. To change other settings and keep the stored password,
+leave the field empty. A first-time sender needs a password.
+
+If the passkey confirmation is cancelled, nothing is changed and the page says so; type the password again and
+save. A validation error from the controller (for example a port other than `465` or `587`) is shown above the
+save button.
+
+A root-scoped operator sees the standard tenant-access prompt first. With a crossing on the MSP, the page is
+read-only: **Replace**, **Remove** and **Set sender** are hidden and **Send test** is disabled, because the
+controller refuses all three for root (`403 ROOT_SCOPED_CANNOT_EDIT_EMAIL_SENDER`, section 5). A user without
+`notification:configure-msp` sees that the sender cannot be viewed.

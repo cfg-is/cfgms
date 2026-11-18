@@ -53,6 +53,7 @@ const NAV_ITEMS = [
   { label: 'Automation grants', to: '/automation/grants', soon: false },
   { label: 'Tenants', to: '/tenants', soon: false },
   { label: 'Support access', to: '/support-access', soon: false },
+  { label: 'Email delivery', to: '/email-delivery', soon: false },
 ] as const
 
 export default function AppShell() {

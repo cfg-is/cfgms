@@ -30,6 +30,7 @@
  *   /monitoring      → AppShell layout → MonitoringView
  *   /tenants         → AppShell layout → TenantAdminView
  *   /support-access  → AppShell layout → SupportAccessView
+ *   /email-delivery  → AppShell layout → EmailDeliveryView
  *   /installer       → AppShell layout → InstallerPage
  *   /api-keys        → AppShell layout → ApiKeysView (Issue #5441)
  *   /automation/grants → AppShell layout → AutomationGrantsView (Issue #5855)
@@ -91,6 +92,7 @@ import AlertsView from './alerts/AlertsView.tsx'
 import MonitoringView from './monitoring/MonitoringView.tsx'
 import TenantAdminView from './tenants/TenantAdminView.tsx'
 import SupportAccessView from './tenants/SupportAccessView.tsx'
+import EmailDeliveryView from './tenants/EmailDeliveryView.tsx'
 import InstallerPage from './installer/InstallerPage.tsx'
 import ApiKeysView from './apikeys/ApiKeysView.tsx'
 import AutomationGrantsView from './automation/AutomationGrantsView.tsx'
@@ -146,6 +148,7 @@ function App() {
                   <Route path="monitoring" element={<MonitoringView />} />
                   <Route path="tenants" element={<TenantAdminView />} />
                   <Route path="support-access" element={<SupportAccessView />} />
+                  <Route path="email-delivery" element={<EmailDeliveryView />} />
                   <Route path="installer" element={<InstallerPage />} />
                   <Route path="api-keys" element={<ApiKeysView />} />
                   <Route path="automation/grants" element={<AutomationGrantsView />} />
