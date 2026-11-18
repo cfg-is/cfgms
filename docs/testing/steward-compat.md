@@ -103,9 +103,10 @@ the container-side steps are in `test/e2e/compat`.
 
 ## CI
 
-The `steward-compat-e2e` job in `.github/workflows/fleet-e2e.yml` runs
-`make test-e2e-compat` on `merge_group`. It has no `needs:` on `fleet-e2e-tests`,
-a 20-minute job timeout, a 600-second `go test` timeout, and checks out with
+The `steward-compat-e2e` job in `.github/workflows/steward-compat-e2e.yml` runs
+`make test-e2e-compat` on `merge_group` and `workflow_dispatch`. It is a separate
+workflow from `fleet-e2e.yml`, so it has no relationship to `fleet-e2e-tests`, a
+20-minute job timeout, a 600-second `go test` timeout, and checks out with
 `fetch-depth: 0` so the release tags are present. The PR-side stub for the same
 context is the `steward-compat-e2e` job in `fleet-e2e-pr-stub.yml`; it runs on
 `pull_request` only and never on `merge_group`.
@@ -114,3 +115,25 @@ The job is advisory when it lands. It is not in the ruleset's required contexts;
 requiring it is a separate change made after a green merge-queue history. The
 scenario runs for real first in the merge queue — a pull request run shows only
 the stub.
+
+### Proving a harness change before merge
+
+Dispatch the workflow on the branch, then check the `steward-compat-e2e` job:
+
+```bash
+gh workflow run steward-compat-e2e.yml --ref <branch>
+```
+
+The dispatch run executes only the compat job. It creates no `fleet-e2e-tests`
+check run on the branch head, because that job stays in `fleet-e2e.yml`, which
+triggers on `merge_group` only. The job log shows `--- PASS` for
+`TestFloorStewardSharedCommand` and each subtest.
+
+### Controller certificate
+
+`compat-controller` mounts `test/compat/controller.cfg`, not the fleet config.
+The controller auto-generates its public API certificate from
+`certificate.server.dns_names`, and refuses to start when the host of
+`CFGMS_EXTERNAL_URL` is not one of them. `TestCompatControllerCertCoversExternalURL`
+(`test/compat/controller_cfg_test.go`, part of the default suite) fails when the
+compose mount and the config drift apart.

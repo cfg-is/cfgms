@@ -1212,7 +1212,7 @@ services:
     volumes:
       - compat_controller_certs:/app/certs
       - compat_controller_data:/app/data
-      - ./test/e2e/fleet/configs/controller.cfg:/app/controller.cfg:ro
+      - ./test/compat/controller.cfg:/app/controller.cfg:ro
       - ${CFGMS_SECRETS_KEY_FILE:?set CFGMS_SECRETS_KEY_FILE to an ephemeral test key}:/run/secrets/cfgms-secrets-key:ro
     healthcheck:
       test: ["CMD", "sh", "-c", "netstat -ln | grep :4433"]

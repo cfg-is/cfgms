@@ -1,0 +1,72 @@
+name: Steward Compat E2E
+
+on:
+  # merge_group is the authoritative gate. workflow_dispatch lets a harness
+  # change be proven on a PR branch before merge:
+  #   gh workflow run steward-compat-e2e.yml --ref <branch>
+  # This job lives apart from fleet-e2e.yml so a dispatch run creates no
+  # `fleet-e2e-tests` check run (of any conclusion) on the PR head.
+  merge_group:
+  workflow_dispatch:
+
+env:
+  GO_VERSION: '1.27.4'
+
+permissions: {}
+
+jobs:
+  # Steward compat E2E (Issue #6314): builds the support floor's steward from its
+  # release tag (test/compat/steward-support.yaml) and runs it against the
+  # controller built from this merge commit, proving a shared command verifies and
+  # executes. Lives in its own workflow, independent of fleet-e2e-tests, so
+  # neither gates or delays the other. Advisory until the main session makes the
+  # context required after a green merge-queue history. Linux only.
+  steward-compat-e2e:
+    name: steward-compat-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history and tags: scripts/compat/build-tag-steward.sh builds the
+          # floor steward from its release tag with `git archive`.
+          fetch-depth: 0
+          # Do not leave the GITHUB_TOKEN in .git/config — this job only builds
+          # and runs tests, so persisted git credentials are an unnecessary
+          # exposure (flagged by zizmor: credential persistence via artifacts).
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      # Restore-only (Issue #4234): same rationale as fleet-e2e.yml.
+      - name: Restore Go module/build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~/Library/Caches/go-build
+            ~\AppData\Local\go-build
+            ~\go\pkg\mod
+          key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-modules-
+        continue-on-error: true
+
+      - name: Install dependencies
+        run: bash scripts/go-fetch-retry.sh mod download
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Run steward compat E2E tests
+        env:
+          COMPOSE_BAKE: "1"
+        run: make test-e2e-compat
