@@ -3,6 +3,7 @@
 package workflow
 
 import (
+	"runtime"
 	"testing"
 	"time"
 )
@@ -72,6 +73,7 @@ func waitForWorkflowCompletion(t *testing.T, execution *WorkflowExecution, timeo
 		case <-execution.Done:
 			return
 		case <-time.After(timeout):
+			logAllGoroutineStacks(t)
 			t.Fatalf("timeout waiting for workflow completion after %v, status: %s, execution_id: %s",
 				timeout, execution.GetStatus(), execution.ID)
 		}
@@ -89,10 +91,31 @@ func waitForWorkflowCompletion(t *testing.T, execution *WorkflowExecution, timeo
 			return
 		}
 		if time.Now().After(deadline) {
+			logAllGoroutineStacks(t)
 			t.Fatalf("timeout waiting for workflow completion after %v, status: %s, execution_id: %s",
 				timeout, status, execution.ID)
 		}
 	}
+}
+
+// allGoroutineStacks returns a dump of every goroutine's stack. The buffer
+// grows until the whole dump fits, so the output is never truncated.
+func allGoroutineStacks() []byte {
+	buf := make([]byte, 64*1024)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return buf[:n]
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+// logAllGoroutineStacks writes a full all-goroutine stack dump to the test log.
+// Called when a wait times out, so a CI failure shows which call was blocked.
+func logAllGoroutineStacks(t *testing.T) {
+	t.Helper()
+	t.Logf("all goroutine stacks at timeout:\n%s", allGoroutineStacks())
 }
 
 // waitForWorkflowRunning polls until the workflow execution reaches StatusRunning.
