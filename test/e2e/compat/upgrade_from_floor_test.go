@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,6 +26,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -170,15 +173,66 @@ func binaryURLPath(version, arch string) string {
 	return "/api/v1/installer/steward-binaries/" + url.PathEscape(version) + "/linux/" + url.PathEscape(arch)
 }
 
+// newAPIKeyClient builds the HTTPS client for requests that authenticate with
+// the API key header. It trusts the controller CA from the admin bundle but
+// presents no client certificate: the controller refuses a request that carries
+// both an mTLS identity and an API key (CONFLICTING_CREDENTIALS), so exactly one
+// credential may be sent.
+func newAPIKeyClient(bundleYAML string) (*http.Client, error) {
+	var b adminBundle
+	if err := yaml.Unmarshal([]byte(bundleYAML), &b); err != nil {
+		return nil, fmt.Errorf("parse admin bundle: %w", err)
+	}
+	if b.CAPEM == "" {
+		return nil, errors.New("admin bundle has no CA certificate")
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM([]byte(b.CAPEM)) {
+		return nil, errors.New("parse CA cert from admin bundle")
+	}
+	return &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			RootCAs:    pool,
+			MinVersion: tls.VersionTLS13,
+		}},
+	}, nil
+}
+
+var (
+	apiKeyClientOnce sync.Once
+	apiKeyClient     *http.Client
+	apiKeyClientErr  error
+)
+
+// upgradeAPIClient returns the shared certificate-less API-key client, built
+// once from the compat controller's admin bundle (for its CA only).
+func upgradeAPIClient() (*http.Client, error) {
+	apiKeyClientOnce.Do(func() {
+		bundle, err := dockerExec(controllerContainer, "cat", "/app/data/admin.bundle.yaml")
+		if err != nil {
+			apiKeyClientErr = fmt.Errorf("read compat controller admin bundle: %w", err)
+			return
+		}
+		apiKeyClient, apiKeyClientErr = newAPIKeyClient(bundle)
+	})
+	return apiKeyClient, apiKeyClientErr
+}
+
 // upgradeAPI issues a request to the compat controller as the upgrade-test API
 // key and returns status and body. Publishing and dispatching a steward binary
 // accept a machine principal; the admin mTLS client is refused there with a
 // step-up challenge (strong assurance and a fresh presence tap), and the
 // requirement is not weakened here. The key is seeded into the compat controller
 // by CFGMS_API_KEY_UPGRADE_TEST, scoped to the tenant the compat steward
-// registers into, exactly as in the fleet stack. It carries a query string,
-// which harness.api cannot.
+// registers into, exactly as in the fleet stack. The request goes through a
+// client with no client certificate (newAPIKeyClient), so the API key is the
+// only credential. It carries a query string, which harness.api cannot.
 func (h *harness) upgradeAPI(method, pathAndQuery, contentType string, body []byte, timeout time.Duration) (int, []byte, error) {
+	client, err := upgradeAPIClient()
+	if err != nil {
+		return 0, nil, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, h.ControllerURL+pathAndQuery, bytes.NewReader(body))
@@ -189,7 +243,7 @@ func (h *harness) upgradeAPI(method, pathAndQuery, contentType string, body []by
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	resp, err := h.HTTPClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -678,6 +732,30 @@ func TestLauncherScriptsPassTheTokenOnlyInTheFormEachBuildTakes(t *testing.T) {
 	assert.NotContains(t, launcherShim, "--regtoken ")
 	assert.True(t, strings.HasPrefix(floorAdapter, "#!/bin/sh\n"))
 	assert.True(t, strings.HasPrefix(launcherShim, "#!/bin/sh\n"))
+}
+
+func TestNewAPIKeyClientSendsNoClientCertificate(t *testing.T) {
+	client, err := newAPIKeyClient(selfSignedBundle(t))
+	require.NoError(t, err)
+	tr, ok := client.Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.Empty(t, tr.TLSClientConfig.Certificates, "an API-key request must not also present an mTLS identity")
+	assert.NotNil(t, tr.TLSClientConfig.RootCAs, "the controller CA must still be trusted")
+}
+
+func TestNewAPIKeyClientRejectsBadBundles(t *testing.T) {
+	tests := map[string]string{
+		"not yaml": "cert_pem: [",
+		"no CA":    "cert_pem: a\nkey_pem: b\n",
+		"bad CA":   "ca_pem: not-a-pem\n",
+	}
+	for name, bundle := range tests {
+		t.Run(name, func(t *testing.T) {
+			client, err := newAPIKeyClient(bundle)
+			require.Error(t, err)
+			assert.Nil(t, client)
+		})
+	}
 }
 
 func TestBinaryURLPath(t *testing.T) {
