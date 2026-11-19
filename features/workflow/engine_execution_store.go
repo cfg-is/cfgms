@@ -277,27 +277,25 @@ func (e *Engine) ListExecutions(ctx context.Context, tenantID string) ([]*Workfl
 	return executions, nil
 }
 
-// copyExecution returns a copy of execution built from its thread-safe getters.
+// copyExecution returns a copy of execution built from its thread-safe getters; status, end time
+// and error fields come from one locked snapshot so a copy is never torn.
 func copyExecution(execution *WorkflowExecution) *WorkflowExecution {
+	terminal := execution.snapshotTerminal()
 	c := &WorkflowExecution{
 		ID:             execution.ID,
 		WorkflowName:   execution.WorkflowName,
 		TenantID:       execution.TenantID,
-		Status:         execution.GetStatus(),
+		Status:         terminal.Status,
 		StartTime:      execution.StartTime,
-		EndTime:        execution.GetEndTime(),
+		EndTime:        terminal.EndTime,
 		CurrentStep:    execution.GetCurrentStep(),
 		StepResults:    execution.GetStepResults(),
 		Variables:      execution.GetVariables(),
 		ExecutionTrace: execution.GetExecutionTrace(),
-		Error:          execution.GetError(),
-		ErrorDetails:   execution.GetErrorDetails(),
+		Error:          terminal.Error,
+		ErrorDetails:   terminal.ErrorDetails,
 		Context:        execution.Context,
 		Cancel:         execution.Cancel,
-	}
-	if c.EndTime != nil {
-		end := *c.EndTime
-		c.EndTime = &end
 	}
 	return c
 }

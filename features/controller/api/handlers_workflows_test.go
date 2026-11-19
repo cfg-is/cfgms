@@ -2099,7 +2099,9 @@ func (f *publishedRunFixture) execute(t *testing.T, principal *Principal) (*http
 			return false
 		}
 		exec = got
-		return got.EndTime != nil
+		// Status and end time come from one snapshot, so a terminal status is
+		// the completion signal and an end time implies it.
+		return got.Status == workflow.StatusCompleted || got.Status == workflow.StatusFailed || got.Status == workflow.StatusCancelled
 	}, 15*time.Second, 10*time.Millisecond, "the workflow did not finish")
 	return rec, exec
 }
