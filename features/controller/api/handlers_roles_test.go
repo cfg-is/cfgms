@@ -554,6 +554,8 @@ func TestRoleConfigChangeTriggersConfigSyncForMatchingStewards(t *testing.T) {
 		return rec
 	}
 
+	// The handler path is synchronous, so receipts and durable records are
+	// asserted right after ServeHTTP returns.
 	rec := do(http.MethodPost, "/api/v1/roles", validRolePayload("e2e", "tag:e2e-role"))
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	assert.Equal(t, []string{"s-tagged"}, cp.ReceivedIDs())
@@ -565,14 +567,17 @@ func TestRoleConfigChangeTriggersConfigSyncForMatchingStewards(t *testing.T) {
 	rec = do(http.MethodPost, "/api/v1/roles", validRolePayload("e2e", "tag:nobody"))
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	assert.Equal(t, []string{"s-tagged", "s-tagged"}, cp.ReceivedIDs())
+	assert.Len(t, syncConfigRecords(t, store, "s-tagged"), 2)
 
 	rec = do(http.MethodPost, "/api/v1/roles", validRolePayload("e2e", "tag:e2e-role"))
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	assert.Len(t, cp.ReceivedIDs(), 3)
+	assert.Equal(t, []string{"s-tagged", "s-tagged", "s-tagged"}, cp.ReceivedIDs())
+	assert.Len(t, syncConfigRecords(t, store, "s-tagged"), 3)
 
 	rec = do(http.MethodDelete, "/api/v1/roles/e2e", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, []string{"s-tagged", "s-tagged", "s-tagged", "s-tagged"}, cp.ReceivedIDs())
+	assert.Len(t, syncConfigRecords(t, store, "s-tagged"), 4)
 
 	assert.Empty(t, syncConfigRecords(t, store, "s-untagged"))
 	assert.Empty(t, syncConfigRecords(t, store, "s-other-tenant"),

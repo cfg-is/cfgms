@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,4 +65,42 @@ func TestHandleUpdateStewardConfig_PublishesUnderRecordID(t *testing.T) {
 	commandID, _ := resp.Data["command_id"].(string)
 	require.NotEmpty(t, commandID)
 	assert.Contains(t, cp.CommandIDsFor(stewardID), commandID)
+
+	prefix := "cfg-update-" + stewardID + "-"
+	require.True(t, strings.HasPrefix(commandID, prefix), "command_id %q must start with %q", commandID, prefix)
+	_, err := uuid.Parse(strings.TrimPrefix(commandID, prefix))
+	assert.NoError(t, err, "command_id suffix must be a UUID: %q", commandID)
+}
+
+// TestSyncStewardConfig_SameStewardBackToBackIDsUnique proves back-to-back syncs
+// for one steward each get a distinct record ID that does not depend on the wall
+// clock, so a coarse clock can never collide on the command_records primary key
+// and drop a sync.
+func TestSyncStewardConfig_SameStewardBackToBackIDsUnique(t *testing.T) {
+	const (
+		stewardID = "steward-b2b"
+		syncs     = 200
+	)
+	server := setupTagServer(t)
+	cp, store := newSyncRecorder(t, server)
+
+	for i := 0; i < syncs; i++ {
+		server.syncStewardConfig(context.Background(), stewardID, "test-tenant", "tester")
+	}
+
+	recs := syncConfigRecords(t, store, stewardID)
+	require.Len(t, recs, syncs)
+	require.Len(t, cp.ReceivedIDs(), syncs)
+
+	prefix := "cfg-effective-" + stewardID + "-"
+	seen := make(map[string]struct{}, syncs)
+	for _, rec := range recs {
+		_, dup := seen[rec.ID]
+		assert.False(t, dup, "duplicate record ID %q", rec.ID)
+		seen[rec.ID] = struct{}{}
+		require.True(t, strings.HasPrefix(rec.ID, prefix), "record ID %q must start with %q", rec.ID, prefix)
+		_, err := uuid.Parse(strings.TrimPrefix(rec.ID, prefix))
+		assert.NoError(t, err, "record ID suffix must be a UUID: %q", rec.ID)
+	}
+	assert.Len(t, seen, syncs)
 }
