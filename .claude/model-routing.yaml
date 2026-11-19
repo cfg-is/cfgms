@@ -27,3 +27,4 @@ segments:
   fix-agent:          { model: sonnet }
   pr-review:          { model: sonnet }
   acceptance-review:  { model: sonnet }
+  owner:              { model: claude-fable-5-2 }
