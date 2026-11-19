@@ -659,6 +659,10 @@ func TestTamperAlarm_ReasonChangedWhileLinkDown_IsReportedWhenLinkOpens(t *testi
 	}
 
 	storeDir.Store(&e.f.dir)
+	// Opening the link (cert store load, handshake, registration) takes as long as
+	// the host makes it: seconds on a loaded Windows runner. That time is not what
+	// the prompt bound measures, so the bound starts once the link is open.
+	waitConnected(t, e.f.srv)
 	hb := promptHeartbeat(t, e.f.srv, client.ReasonTamperLocked, 10*time.Second)
 	assert.Equal(t, tamperClearedMessage, reasonWithCode(hb, client.ReasonTamperLocked).Message)
 	assert.Equal(t, cpTypes.StatusError, hb.Status)

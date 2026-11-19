@@ -453,6 +453,11 @@ func (a *tamperAlarm) run(ctx context.Context) (bool, error) {
 			}
 			a.reportQuarantined(tc)
 			a.repair.republish(tc)
+			// The reason is sent on the link that has just opened, not on the next
+			// wake: with the periodic re-check an hour apart, that wake can be a
+			// long way off, and a reason that changed while the link was down would
+			// wait for it.
+			a.publishReason(tc)
 			a.repair.confirmOutcome(tc)
 		}
 
