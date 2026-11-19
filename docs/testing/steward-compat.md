@@ -7,7 +7,7 @@ platform supports (Issue #6314).
 
 ## What it proves today
 
-Three scenarios against the support floor. The first, in
+Five scenarios against the support floor. The first, in
 `test/e2e/compat/floor_steward_test.go` (`TestFloorStewardSharedCommand`):
 
 1. The floor steward registers with the controller and reaches the connected state.
@@ -33,10 +33,32 @@ The other two are in `test/e2e/compat/connect_no_rejection_test.go`:
 - `TestSharedTypeAfterConnect` sends a `sync_config` after that point and asserts
   it executes, is delivered, and draws no rejection in the steward log.
 
+The last two are in `test/e2e/compat/upgrade_from_floor_test.go`. They run after
+the scenarios above, because they change the steward:
+
+- `TestUpgradeFromFloor` runs the floor steward under the launcher the floor
+  release shipped, builds the steward from this tree (`make build-steward`, version
+  `v99.0.0-compat-current`, which sorts above the floor), then publishes it,
+  approves the published bytes by SHA-256 and dispatches the upgrade through the
+  controller API. It asserts the upgrade record reaches `committed`, the launcher
+  switches to the new version, the steward restarts and the controller holds the
+  new version for the same steward ID, with no command rejection in the steward log.
+- `TestCommandsVerifyAfterUpgrade` asserts that, after the upgrade, the first
+  on-connect command (`advertise_transport_address`, which the floor steward was
+  never sent) is sent and completed, a `sync_config` executes and is delivered, and
+  the controller's durable capability record for the steward is `declared` with
+  the current signing payload version and the on-connect command type.
+
+The launcher passes the registration token to its child in the form the current
+steward takes (`--regtoken-file`); the floor takes `--regtoken`. The harness bridges
+that for the floor version only, with a two-line adapter in the launcher layout that
+starts the unmodified floor binary. Broken-binary rollback is covered by the fleet
+tests (`test/e2e/fleet/launcher_upgrade_test.go`), not here.
+
 Out of scope here: sending an unsupported command type to the floor steward (no
 operator route does so without an operator-signed envelope, which the harness
 does not have; the controller-side refusal is covered by controller tests),
-upgrade scenarios, and Windows and macOS legs. The harness is Linux only; a Windows or macOS regression in
+and Windows and macOS legs. The harness is Linux only; a Windows or macOS regression in
 compatibility is not caught by it.
 
 ## The support floor
@@ -83,7 +105,8 @@ scripts/compat/build-tag-steward.sh v0.10.5 /tmp/floor
 ```
 
 Under the steward launcher the steward needs `CFGMS_STEWARD_LAUNCHER_MANAGED=1`;
-the launcher sets it itself. The compat scenario runs the steward directly.
+the launcher sets it itself. The floor scenarios run the steward directly; the
+upgrade scenarios run it under the launcher.
 
 ## Running it
 
