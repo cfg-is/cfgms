@@ -12,6 +12,8 @@ The upgrade workflow has five steps:
 4. **Dispatch** — send the upgrade command to matching stewards.
 5. **Monitor or rollback** — check per-steward status, and roll back if needed.
 
+The upgrade from the support floor steward to the current build over this path is exercised by the steward compat job (see [Steward Compatibility Harness](../testing/steward-compat.md)).
+
 ## Step 1: Sign the steward binary
 
 Unsigned uploads are rejected. The publisher signature covers a canonical
