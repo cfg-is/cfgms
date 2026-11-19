@@ -73,9 +73,8 @@ func isRolloutCredential(p *Principal) bool {
 // once. It is minted by the same helper as every other API key, with the kind as the
 // one extra metadata field.
 func (s *Server) handleCreateRolloutCredential(w http.ResponseWriter, r *http.Request) {
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	if principal == nil || principal.ID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 	for _, p := range rolloutCredentialPermissions {
@@ -106,6 +105,7 @@ func (s *Server) handleCreateRolloutCredential(w http.ResponseWriter, r *http.Re
 		TenantID:      tenantID,
 		ExpiresAt:     &expiresAt,
 		ExtraMetadata: map[string]string{metadataKeyCredentialKind: credentialKindRollout},
+		ActorID:       principal.ID,
 	})
 	if err != nil {
 		s.writeMintAPIKeyError(w, err)

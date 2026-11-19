@@ -175,6 +175,10 @@ func (s *Server) handleGetEmailSettings(w http.ResponseWriter, r *http.Request) 
 // handlePutEmailCredential handles PUT /api/v1/notifications/email/credential.
 // The password is stored through the secret store and never returned or logged.
 func (s *Server) handlePutEmailCredential(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	if !emailScopeAllowed(r) {
 		s.writeErrorResponse(w, http.StatusForbidden, "email settings require a root-scoped principal", "FORBIDDEN")
 		return
@@ -203,15 +207,11 @@ func (s *Server) handlePutEmailCredential(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	createdBy := "api-admin"
-	if p, _ := r.Context().Value(principalContextKey).(*Principal); p != nil && p.ID != "" {
-		createdBy = p.ID
-	}
 	err = s.secretStore.StoreSecret(r.Context(), &secretsif.SecretRequest{
 		Key:         ec.CredentialSecretRef,
 		Value:       req.Password,
 		TenantID:    emailCredentialTenantID,
-		CreatedBy:   createdBy,
+		CreatedBy:   principal.ID,
 		Description: "SMTP password for controller email delivery",
 		Tags:        []string{"notification", "smtp"},
 		Metadata:    map[string]string{secretsif.MetadataKeySecretType: string(secretsif.SecretTypePassword)},
@@ -229,7 +229,7 @@ func (s *Server) handlePutEmailCredential(w http.ResponseWriter, r *http.Request
 		s.writeErrorResponse(w, http.StatusInternalServerError, "credential stored but email delivery could not be enabled", "NOTIFIER_ERROR")
 		return
 	}
-	s.logger.Info("Email credential stored", "user", logging.SanitizeLogValue(createdBy))
+	s.logger.Info("Email credential stored", "user", logging.SanitizeLogValue(principal.ID))
 	s.writeSuccessResponse(w, map[string]interface{}{"credential_present": true, "configured": true})
 }
 

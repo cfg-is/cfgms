@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -524,4 +525,51 @@ func TestRolloutCredentialRevocation(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code, "the next request after revocation is refused")
 	rec = f.callWithKey(f.srv.metricsRouter, http.MethodPost, "/api/v1/monitoring/markers", key, "{}")
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestRolloutCredentialRecordNamesActingPrincipal: the secret-store record of a minted
+// rollout credential names the principal that minted it as its creator.
+func TestRolloutCredentialRecordNamesActingPrincipal(t *testing.T) {
+	f := newRolloutCredFixture(t)
+	operator := rolloutCredAdmin()
+	operator.ID = "operator-7"
+
+	rec := f.post(rolloutBody(time.Now().Add(24*time.Hour)), operator, true)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp rolloutCredResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	stored, err := f.srv.readAPIKeyRecord(t.Context(), rolloutCredTestTenant, hashAPIKey(resp.Data.Key))
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, "operator-7", stored.CreatedBy)
+}
+
+// TestCreateRolloutCredential_NoActor_Returns401AndWritesNothing: with no principal, or a
+// principal with an empty ID, the handler refuses with 401 and mints, stores and audits
+// nothing. The request is otherwise complete: the same request from an authenticated
+// principal succeeds.
+func TestCreateRolloutCredential_NoActor_Returns401AndWritesNothing(t *testing.T) {
+	f := newRolloutCredFixture(t)
+
+	post := func(p *Principal) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/rollout-credentials", strings.NewReader(rolloutBody(time.Now().Add(time.Hour))))
+		ctx := context.WithValue(req.Context(), ctxkeys.TenantID, rolloutCredTestTenant)
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(rolloutCredTestTenant))
+		rec := httptest.NewRecorder()
+		f.srv.handleCreateRolloutCredential(rec, req.WithContext(withActor(ctx, p)))
+		return rec
+	}
+
+	for _, tc := range noActorCases(rolloutCredTestTenant) {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, post(tc.principal))
+			assert.Empty(t, apiKeyRecordsFor(t, f.srv, rolloutCredTestTenant), "no API-key record may be stored")
+			assert.Zero(t, keyCacheLen(f.srv), "nothing may be cached")
+			assert.Empty(t, auditEntriesByAction(t, f.srv, rolloutCredentialAuditAction))
+		})
+	}
+
+	rec := post(rolloutCredAdmin())
+	require.Equal(t, http.StatusCreated, rec.Code, "the same request from an authenticated principal succeeds: %s", rec.Body.String())
 }

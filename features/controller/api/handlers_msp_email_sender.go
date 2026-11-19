@@ -203,7 +203,10 @@ func validateMSPEmailSenderUpdate(sender MSPEmailSender, smtpSecret string, pass
 // none is stored and optional afterwards, where leaving it out keeps the stored one.
 // Nothing is stored for an invalid body.
 func (s *Server) handlePutMSPEmailSender(w http.ResponseWriter, r *http.Request) {
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	mspID := s.authorizeMSPEmailSenderAccess(w, r, principal)
 	if mspID == "" || s.refuseRootScopedEmailSenderWrite(w, principal) {
 		return
@@ -228,7 +231,7 @@ func (s *Server) handlePutMSPEmailSender(w http.ResponseWriter, r *http.Request)
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_EMAIL_SENDER")
 		return
 	}
-	saved, err := s.writeMSPEmailSender(r, mspID, sender, req.Password, mspEmailSenderActor(principal))
+	saved, err := s.writeMSPEmailSender(r, mspID, sender, req.Password, principal.ID)
 	if err != nil {
 		s.mspEmailSenderInternal(w, "failed to store email sender", mspID, err)
 		return
@@ -280,13 +283,6 @@ func (s *Server) handleDeleteMSPEmailSender(w http.ResponseWriter, r *http.Reque
 	s.recordMSPEmailSenderAudit(r, mspID, principal, mspEmailSenderAuditRemove, removed)
 	s.logger.Info("Removed MSP email sender", "tenant_id", logging.SanitizeLogValue(mspID))
 	s.writeSuccessResponse(w, newMSPEmailSenderResponse(nil, false))
-}
-
-func mspEmailSenderActor(principal *Principal) string {
-	if principal != nil && principal.ID != "" {
-		return principal.ID
-	}
-	return "api-admin"
 }
 
 // recordMSPEmailSenderAudit writes the tenant-scoped, high-severity audit event for a

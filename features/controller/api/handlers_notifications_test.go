@@ -27,6 +27,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	_ "github.com/cfgis/cfgms/pkg/notification/providers/smtp" // register the smtp provider for the notifier under test
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/session"
 )
 
@@ -362,4 +363,39 @@ func TestEmail_StartupBuildsNotifierWhenCredentialAlreadyStored(t *testing.T) {
 	server.initEmailNotifier(context.Background())
 	require.NotNil(t, server.platformEmailNotifier())
 	assert.Equal(t, "smtp", server.platformEmailNotifier().Name())
+}
+
+// TestEmail_PutCredential_NoActor_Returns401AndStoresNothing: with no principal, or a
+// principal with an empty ID, storing the email credential is refused with 401 and no
+// secret is stored. The request is otherwise complete (root scope, email configured,
+// valid body): the same request from an authenticated principal stores the credential,
+// and the stored secret names that principal as its creator.
+func TestEmail_PutCredential_NoActor_Returns401AndStoresNothing(t *testing.T) {
+	smtp := newEmailTestSMTPServer(t)
+	server := newEmailTestServer(t, smtp)
+
+	put := func(p *Principal) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/notifications/email/credential",
+			strings.NewReader(`{"password":"`+testSMTPPassword+`"}`))
+		ctx := context.WithValue(req.Context(), ctxkeys.TenantID, testRootTenantID)
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+		rec := httptest.NewRecorder()
+		server.handlePutEmailCredential(rec, req.WithContext(withActor(ctx, p)))
+		return rec
+	}
+
+	for _, tc := range noActorCases("") {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, put(tc.principal))
+			_, err := server.readEmailCredential(context.Background(), emailCredentialTenantID, testPasswordKey)
+			assert.ErrorIs(t, err, secretsif.ErrSecretNotFound, "no email credential may be stored")
+			assert.Nil(t, server.platformEmailNotifier())
+		})
+	}
+
+	rec := put(emailStrongPrincipal())
+	require.Equal(t, http.StatusOK, rec.Code, "the same request from an authenticated principal succeeds: %s", rec.Body.String())
+	sec, err := server.readEmailCredential(context.Background(), emailCredentialTenantID, testPasswordKey)
+	require.NoError(t, err)
+	assert.Equal(t, emailStrongPrincipal().ID, sec.CreatedBy)
 }

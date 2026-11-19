@@ -776,3 +776,40 @@ func TestMSPEmailSenderTest_AuditNamesPrincipalAndMSPOnly(t *testing.T) {
 	assert.NotContains(t, logs, testSMTPPassword)
 	assert.NotContains(t, logs, mspTestSendFrom)
 }
+
+// TestMSPEmailSender_PutNoActor_Returns401AndStoresNothing: with no principal, or a
+// principal with an empty ID, setting the MSP sender is refused with 401 and neither the
+// record nor the password is stored, and nothing is audited. The request is otherwise
+// complete (the MSP's own scope, a valid body): the same request from an authenticated
+// principal stores the sender, and the stored password names that principal.
+func TestMSPEmailSender_PutNoActor_Returns401AndStoresNothing(t *testing.T) {
+	env := newMSPSenderEnv(t)
+
+	put := func(p *Principal) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, "/tenants/msp-a/email-sender", strings.NewReader(mspSenderBody(nil)))
+		req.Header.Set("Content-Type", "application/json")
+		req = mux.SetURLVars(req, map[string]string{"id": "msp-a"})
+		ctx := context.WithValue(req.Context(), ctxkeys.TenantID, "msp-a")
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("msp-a"))
+		rec := httptest.NewRecorder()
+		env.server.handlePutMSPEmailSender(rec, req.WithContext(withActor(ctx, p)))
+		return rec
+	}
+
+	for _, tc := range noActorCases("msp-a") {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, put(tc.principal))
+			sender, pw := env.stored(t, "msp-a")
+			assert.Nil(t, sender, "no MSP sender record may be stored")
+			assert.Empty(t, pw, "no MSP sender password may be stored")
+			assert.Empty(t, auditEntriesByAction(t, env.server, "tenant.email_sender_updated"))
+		})
+	}
+
+	admin := mspSenderAdmin("msp-a")
+	rec := put(admin)
+	require.Equal(t, http.StatusOK, rec.Code, "the same request from an authenticated principal succeeds: %s", rec.Body.String())
+	sec, err := env.server.readEmailCredential(context.Background(), "msp-a", mspEmailCredentialRef)
+	require.NoError(t, err)
+	assert.Equal(t, admin.ID, sec.CreatedBy)
+}
