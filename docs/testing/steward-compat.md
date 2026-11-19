@@ -7,8 +7,8 @@ platform supports (Issue #6314).
 
 ## What it proves today
 
-One scenario, in `test/e2e/compat/floor_steward_test.go`
-(`TestFloorStewardSharedCommand`), against the support floor:
+Three scenarios against the support floor. The first, in
+`test/e2e/compat/floor_steward_test.go` (`TestFloorStewardSharedCommand`):
 
 1. The floor steward registers with the controller and reaches the connected state.
 2. The version the controller holds for the steward equals the floor tag, and the
@@ -22,8 +22,21 @@ If the controller signs a command in a payload version the floor steward cannot
 verify (the negotiation added in Issue #6311), the record ends `rejected`, the
 file never appears, and step 3 fails.
 
-Out of scope here: unsupported-command and upgrade scenarios, and Windows and
-macOS legs. The harness is Linux only; a Windows or macOS regression in
+The other two are in `test/e2e/compat/connect_no_rejection_test.go`:
+
+- `TestNoSignatureRejectionAfterConnect` waits for the controller's Info event
+  `command_not_sent_peer_unsupported` (the on-connect hooks skipped a command type
+  the floor steward does not support), then asserts the floor steward's log holds
+  no `signature does not match data` and no `unauthenticated command` entry. This
+  is the observable form of "unsupported is not a signature failure" for a steward
+  that cannot be changed.
+- `TestSharedTypeAfterConnect` sends a `sync_config` after that point and asserts
+  it executes, is delivered, and draws no rejection in the steward log.
+
+Out of scope here: sending an unsupported command type to the floor steward (no
+operator route does so without an operator-signed envelope, which the harness
+does not have; the controller-side refusal is covered by controller tests),
+upgrade scenarios, and Windows and macOS legs. The harness is Linux only; a Windows or macOS regression in
 compatibility is not caught by it.
 
 ## The support floor
