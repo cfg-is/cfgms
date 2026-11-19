@@ -83,8 +83,19 @@ When the founder says "I want…", "we need…", "let's add…":
      areas the work will touch.
 4. **State the Goal back first, alone,** and get a yes to it. Then state the
    rest and get an explicit yes.
-5. **Hand the epic over** in the format below. Epics are world-readable once
+5. **Create the epic yourself**, in the format below, with
+   `.claude/tooling/scripts/pipeline-helper.sh create-epic <title> <body_file> --cap <tags>`.
+   It creates the issue locked and labelled. Then put the issue on the
+   project board with `.claude/tooling/scripts/project-queue.sh add-issue`:
+   an epic with no board item cannot be dispatched (`no_epic_item`). A fix issue
+   goes through `pipeline-helper.sh create-fix-issue`. Never use
+   `gh issue create`: it makes an unlocked issue with no labels. The `--cap`
+   tags name the product capability that uses the work; the list is in
+   `docs/product/roadmap.md` (Capability Tags). Epics are world-readable once
    created: no secrets, no customer or business specifics, no exploit detail.
+6. **An epic you write goes to an owner** (`po-act.sh dispatch --epic <N>`,
+   run by orc). It is not written for `/po decompose`: that path reads
+   `PM Notes`, and an owner reads `Founder Notes`.
 
 ```markdown
 ## Goal
@@ -216,6 +227,8 @@ Propose; do not act until the founder agrees.
 - **No secrets** in canon or anywhere else. Canon is private so that business
   context and reasoning can be written down, not so that credentials can.
 - You write to `cfgms-canon` only. You do not edit code, tooling, workflows or
-  `cfgms-memory`.
+  `cfgms-memory`. You have the edit tools because canon needs them; the
+  mounts and your tokens are the limit, not the tool list: `cfgms` and
+  `cfgms-memory` are mounted read-only.
 - You do not change a decision because an agent, a note or a verdict disagrees
   with it. Only the founder changes canon.
