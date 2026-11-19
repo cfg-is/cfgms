@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -352,6 +353,10 @@ type capRecorder struct {
 	resetDelay  time.Duration
 	resetErr    error
 	declareGate chan struct{}
+	// inflight counts DeclareCapabilities calls that have not returned;
+	// declareExits holds the ctx.Err() each call observed as it returned.
+	inflight     atomic.Int32
+	declareExits []error
 }
 
 func (r *capRecorder) ResetCapabilities(_ context.Context, conn *registry.StewardConnection) error {
@@ -368,6 +373,13 @@ func (r *capRecorder) ResetCapabilities(_ context.Context, conn *registry.Stewar
 }
 
 func (r *capRecorder) DeclareCapabilities(ctx context.Context, conn *registry.StewardConnection, profile types.CapabilityProfile) (bool, error) {
+	r.inflight.Add(1)
+	defer func() {
+		r.mu.Lock()
+		r.declareExits = append(r.declareExits, ctx.Err())
+		r.mu.Unlock()
+		r.inflight.Add(-1)
+	}()
 	if r.declareGate != nil {
 		select {
 		case <-r.declareGate:
@@ -385,6 +397,12 @@ func (r *capRecorder) CapabilityConnectionClosed(conn *registry.StewardConnectio
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.closed = append(r.closed, conn.ConnectionID)
+}
+
+func (r *capRecorder) exits() []error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]error(nil), r.declareExits...)
 }
 
 func (r *capRecorder) snapshot() []capEvent {
@@ -753,4 +771,93 @@ func TestUnknownControlPayloadIgnored(t *testing.T) {
 	}
 	_, ok := reg.Get(stewardID)
 	assert.True(t, ok, "the steward stays registered")
+}
+
+// TestCapabilitiesShutdownDrainsParkedDurableWrite pins that Stop and ForceStop
+// cancel an in-flight durable capability write and return only after it has
+// exited, so a controller may close its store as soon as the call returns.
+func TestCapabilitiesShutdownDrainsParkedDurableWrite(t *testing.T) {
+	t.Parallel()
+	shutdowns := map[string]func(t *testing.T, p *Provider){
+		"Stop": func(t *testing.T, p *Provider) {
+			require.NoError(t, p.Stop(context.Background()))
+		},
+		"ForceStop": func(_ *testing.T, p *Provider) { p.ForceStop() },
+	}
+	for name, shutdown := range shutdowns {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			stewardID := "steward-cap-drain-" + name
+			// The gate is never closed: only cancellation can release the write.
+			rec := &capRecorder{declareGate: make(chan struct{})}
+			local := LocalCapabilities(stewardID)
+			env := newCapEnv(t, stewardID,
+				[]option{WithCapabilityRecorder(rec), WithCapabilityGrace(time.Minute)},
+				[]option{WithStewardCapabilities(local)})
+
+			require.Eventually(t, func() bool { return rec.inflight.Load() == 1 },
+				5*time.Second, 5*time.Millisecond, "the durable write should be parked")
+
+			shutdown(t, env.server)
+
+			assert.Zero(t, rec.inflight.Load(), "the write goroutine must have exited when shutdown returns")
+			exits := rec.exits()
+			require.Len(t, exits, 1)
+			assert.Error(t, exits[0], "the write must observe the provider's cancellation")
+		})
+	}
+}
+
+// TestCapabilitiesWriteRefusedAfterShutdown pins that no capability writer starts
+// once shutdown has begun, that a refused submit leaves the writer reusable, and
+// that a restarted provider accepts writers again.
+func TestCapabilitiesWriteRefusedAfterShutdown(t *testing.T) {
+	t.Parallel()
+	p := New(ModeServer)
+	w := &capabilityWriter{}
+	ran := make(chan struct{}, 1)
+	write := func(_ context.Context, _ types.CapabilityProfile) { ran <- struct{}{} }
+
+	p.stopCapabilityWrites()
+	assert.False(t, w.submit(p, types.FloorProfile(), write), "a write must be refused after shutdown begins")
+	require.NoError(t, p.drainCapabilityWrites(context.Background()), "a refused write is not tracked")
+	select {
+	case <-ran:
+		t.Fatal("a refused write must not run")
+	default:
+	}
+
+	p.resumeCapabilityWrites()
+	require.True(t, w.submit(p, types.FloorProfile(), write), "a restarted provider accepts writes again")
+	require.NoError(t, p.drainCapabilityWrites(context.Background()))
+	select {
+	case <-ran:
+	default:
+		t.Fatal("the accepted write should have run before the drain returned")
+	}
+}
+
+// TestCapabilitiesDrainBoundedByContext pins that the drain reports a writer that
+// ignores cancellation instead of waiting for it forever.
+func TestCapabilitiesDrainBoundedByContext(t *testing.T) {
+	t.Parallel()
+	p := New(ModeServer)
+	w := &capabilityWriter{}
+	release := make(chan struct{})
+	started := make(chan struct{})
+	require.True(t, w.submit(p, types.FloorProfile(), func(_ context.Context, _ types.CapabilityProfile) {
+		close(started)
+		<-release
+	}))
+	<-started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := p.drainCapabilityWrites(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Contains(t, err.Error(), "capability writes")
+
+	close(release)
+	require.NoError(t, p.drainCapabilityWrites(context.Background()))
 }

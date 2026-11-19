@@ -189,6 +189,67 @@ func (s *transportServer) resetConnectionCapabilities(ctx context.Context, conn 
 	return func() { rec.CapabilityConnectionClosed(conn) }
 }
 
+// beginCapabilityWrite registers one capability writer goroutine with the
+// provider and returns the context its writes run under: the provider's lifetime
+// context, which Stop and ForceStop cancel. It refuses (ok=false) once shutdown
+// has begun, so no writer starts after Stop or ForceStop and Add never races the
+// Wait in drainCapabilityWrites. The caller must call endCapabilityWrite when the
+// goroutine exits.
+func (p *Provider) beginCapabilityWrite() (ctx context.Context, ok bool) {
+	p.mu.RLock()
+	ctx = p.ctx
+	p.mu.RUnlock()
+	if ctx == nil {
+		// Never started: nothing can cancel the write, but nothing waits on it either.
+		ctx = context.Background()
+	}
+
+	p.capWriteMu.Lock()
+	defer p.capWriteMu.Unlock()
+	if p.capWriteStopping {
+		return nil, false
+	}
+	p.capWriteWG.Add(1)
+	return ctx, true
+}
+
+func (p *Provider) endCapabilityWrite() {
+	p.capWriteWG.Done()
+}
+
+// stopCapabilityWrites makes the provider refuse new capability writers. Stop and
+// ForceStop call it together with cancelling the provider context.
+func (p *Provider) stopCapabilityWrites() {
+	p.capWriteMu.Lock()
+	p.capWriteStopping = true
+	p.capWriteMu.Unlock()
+}
+
+// resumeCapabilityWrites lets a restarted provider accept capability writers
+// again; Start re-creates the provider context they run under.
+func (p *Provider) resumeCapabilityWrites() {
+	p.capWriteMu.Lock()
+	p.capWriteStopping = false
+	p.capWriteMu.Unlock()
+}
+
+// drainCapabilityWrites waits until every tracked capability writer goroutine has
+// exited, or ctx ends. Shutdown cancels the writers' context first, so the wait is
+// short unless a recorder ignores its context.
+func (p *Provider) drainCapabilityWrites(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		p.capWriteWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("capability writes still running at shutdown: %w", ctx.Err())
+	}
+}
+
 // capabilityWriter serialises one connection's durable capability writes off the
 // receive loop. It keeps only the latest request while a write is running, so a
 // slow store neither blocks the loop nor lets an earlier state overwrite a later
@@ -199,18 +260,27 @@ type capabilityWriter struct {
 	running bool
 }
 
-// submit queues profile and starts the writer goroutine when none is running.
-func (w *capabilityWriter) submit(profile types.CapabilityProfile, write func(types.CapabilityProfile)) {
+// submit queues profile and starts the writer goroutine when none is running. The
+// goroutine is tracked by p and runs write under the provider's lifetime context.
+// It reports false, and drops profile, when shutdown has begun.
+func (w *capabilityWriter) submit(p *Provider, profile types.CapabilityProfile, write func(context.Context, types.CapabilityProfile)) bool {
 	w.mu.Lock()
-	w.next = &profile
 	if w.running {
+		w.next = &profile
 		w.mu.Unlock()
-		return
+		return true
 	}
+	ctx, ok := p.beginCapabilityWrite()
+	if !ok {
+		w.mu.Unlock()
+		return false
+	}
+	w.next = &profile
 	w.running = true
 	w.mu.Unlock()
 
 	go func() {
+		defer p.endCapabilityWrite()
 		for {
 			w.mu.Lock()
 			job := w.next
@@ -221,14 +291,18 @@ func (w *capabilityWriter) submit(profile types.CapabilityProfile, write func(ty
 				return
 			}
 			w.mu.Unlock()
-			write(*job)
+			write(ctx, *job)
 		}
 	}()
+	return true
 }
 
 // persistConnectionCapabilities queues the connection's new profile for the
-// durable record. It never blocks; the write runs on the connection's writer.
-func (s *transportServer) persistConnectionCapabilities(ctx context.Context, conn *registry.StewardConnection, w *capabilityWriter, profile types.CapabilityProfile) {
+// durable record. It never blocks; the write runs on the connection's writer. The
+// write outlives its stream (the compare-and-set on the connection ID keeps a late
+// write harmless) but not the provider: Stop and ForceStop cancel it and wait for
+// it.
+func (s *transportServer) persistConnectionCapabilities(conn *registry.StewardConnection, w *capabilityWriter, profile types.CapabilityProfile) {
 	rec := s.provider.capabilityRecorder
 	if rec == nil {
 		return
@@ -238,8 +312,8 @@ func (s *transportServer) persistConnectionCapabilities(ctx context.Context, con
 			"steward_id", logging.SanitizeLogValue(conn.StewardID))
 		return
 	}
-	w.submit(profile, func(profile types.CapabilityProfile) {
-		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), capabilityWriteTimeout)
+	queued := w.submit(s.provider, profile, func(providerCtx context.Context, profile types.CapabilityProfile) {
+		wctx, cancel := context.WithTimeout(providerCtx, capabilityWriteTimeout)
 		defer cancel()
 		applied, err := rec.DeclareCapabilities(wctx, conn, profile)
 		switch {
@@ -253,6 +327,10 @@ func (s *transportServer) persistConnectionCapabilities(ctx context.Context, con
 				"steward_id", logging.SanitizeLogValue(conn.StewardID), "state", profile.State)
 		}
 	})
+	if !queued {
+		s.provider.logger.Debug("capability write dropped: provider is shutting down",
+			"steward_id", logging.SanitizeLogValue(conn.StewardID), "state", profile.State)
+	}
 }
 
 // runCapabilityGrace settles the connection at the floor profile when its grace
@@ -274,7 +352,7 @@ func (s *transportServer) runCapabilityGrace(ctx context.Context, conn *registry
 	}
 	s.provider.logger.Info("steward declared no capabilities within the grace period; using the floor profile",
 		"steward_id", logging.SanitizeLogValue(conn.StewardID))
-	s.persistConnectionCapabilities(ctx, conn, w, floor)
+	s.persistConnectionCapabilities(conn, w, floor)
 }
 
 // receiveCapabilities handles a steward's declaration on the receive loop. It
@@ -305,7 +383,7 @@ func (s *transportServer) receiveCapabilities(ctx context.Context, pb *transport
 	if !changed {
 		return
 	}
-	s.persistConnectionCapabilities(ctx, conn, w, types.CapabilityProfile{
+	s.persistConnectionCapabilities(conn, w, types.CapabilityProfile{
 		State:                  types.CapabilityDeclared,
 		CommandTypes:           cmds,
 		SigningPayloadVersions: vers,

@@ -74,6 +74,14 @@ func withQUICConfig(cfg *quicgo.Config) option {
 type Provider struct {
 	mu sync.RWMutex
 
+	// Durable capability writes (server mode) are detached from their stream, so
+	// the provider tracks them: capWriteWG counts the writer goroutines, and
+	// capWriteStopping (set with capWriteMu held, as shutdown begins) makes
+	// beginCapabilityWrite refuse new ones so Add never races the drain's Wait.
+	capWriteMu       sync.Mutex
+	capWriteWG       sync.WaitGroup
+	capWriteStopping bool
+
 	name string
 	mode Mode
 
@@ -488,6 +496,7 @@ func (p *Provider) initializeClient(config map[string]interface{}) error {
 func (p *Provider) Start(ctx context.Context) error {
 	p.mu.Lock()
 	p.ctx, p.cancel = context.WithCancel(ctx)
+	p.resumeCapabilityWrites()
 	p.startTime = time.Now()
 	mode := p.mode
 
@@ -1298,6 +1307,7 @@ func (p *Provider) checkClientConnected() error {
 // Stop gracefully shuts down the control plane.
 func (p *Provider) Stop(ctx context.Context) error {
 	p.mu.Lock()
+	p.stopCapabilityWrites()
 	if p.cancel != nil {
 		p.cancel()
 	}
@@ -1309,7 +1319,13 @@ func (p *Provider) Stop(ctx context.Context) error {
 
 	switch mode {
 	case ModeServer:
-		return p.stopServer()
+		stopErr := p.stopServer()
+		// The writers' context was cancelled above, so in-flight capability
+		// writes end promptly; the caller may close the store once Stop returns.
+		if drainErr := p.drainCapabilityWrites(ctx); drainErr != nil {
+			return drainErr
+		}
+		return stopErr
 	case ModeClient:
 		return p.stopClient()
 	default:
@@ -1889,6 +1905,7 @@ func (p *Provider) ForceStop() {
 	// so that concurrent Stop() calls and multiple ForceStop() invocations
 	// are safe (mu also guards p.listener and p.grpcServer against races).
 	p.mu.Lock()
+	p.stopCapabilityWrites()
 	if p.cancel != nil {
 		p.cancel()
 	}
@@ -1907,6 +1924,15 @@ func (p *Provider) ForceStop() {
 		if grpcServer != nil {
 			grpcServer.Stop()
 		}
+	}
+
+	// Capability writes were cancelled above, so the wait is short; the bound keeps
+	// a recorder that ignores its context from hanging shutdown.
+	drainCtx, cancel := context.WithTimeout(context.Background(), capabilityWriteTimeout)
+	defer cancel()
+	if err := p.drainCapabilityWrites(drainCtx); err != nil {
+		p.logger.Error("force stop left capability writes running",
+			"error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 

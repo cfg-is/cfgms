@@ -225,6 +225,11 @@ func TestCapabilitiesSettledSignalRaceOutcomes(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, types.CapabilityDeclared, profile.State)
 		assert.Equal(t, registry.CapabilityDeclared, conn.CapabilitySnapshot().State)
+
+		// The signal is released from memory before the durable write lands; wait
+		// for the write so the test does not end with it still running.
+		rec := f.requireRecordState(t, business.StewardCapabilityDeclared)
+		assert.Equal(t, conn.ConnectionID, rec.ConnectionID)
 	})
 
 	t.Run("a silent steward releases it at the grace and the record becomes floor", func(t *testing.T) {
