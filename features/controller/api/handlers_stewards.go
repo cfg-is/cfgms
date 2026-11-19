@@ -18,6 +18,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"gopkg.in/yaml.v3"
 
@@ -1154,7 +1155,7 @@ func (s *Server) recordConfigUpdateDelivery(r *http.Request, stewardID, tenantID
 		issuedBy = principal.ID
 	}
 	rec := &business.CommandRecord{
-		ID:             fmt.Sprintf("cfg-update-%s-%d", stewardID, time.Now().UnixNano()),
+		ID:             "cfg-update-" + stewardID + "-" + uuid.NewString(),
 		Type:           string(controlplaneTypes.CommandSyncConfig),
 		StewardID:      stewardID,
 		TenantID:       tenantID,

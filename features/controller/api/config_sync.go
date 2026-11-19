@@ -4,8 +4,9 @@ package api
 
 import (
 	"context"
-	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
@@ -30,7 +31,7 @@ func (s *Server) syncStewardConfig(ctx context.Context, stewardID, tenantID, iss
 
 	stewardIDForLog := logging.SanitizeLogValue(stewardID)
 	rec := &business.CommandRecord{
-		ID:             fmt.Sprintf("cfg-effective-%s-%d", stewardID, time.Now().UnixNano()),
+		ID:             "cfg-effective-" + stewardID + "-" + uuid.NewString(),
 		Type:           string(controlplaneTypes.CommandSyncConfig),
 		StewardID:      stewardID,
 		TenantID:       tenantID,
