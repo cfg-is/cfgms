@@ -536,11 +536,7 @@ func (e *Engine) runWorkflowSteps(execution *WorkflowExecution, workflow Workflo
 				fmt.Errorf("%v", r),
 			).WithVariableState(execution.Variables)
 
-			execution.SetError(panicErr.Error())
-			execution.SetErrorDetails(panicErr)
-			endTime := time.Now()
-			execution.SetEndTime(&endTime)
-			execution.SetStatus(StatusFailed)
+			execution.Finish(StatusFailed, time.Now(), panicErr.Error(), panicErr)
 			e.logger.Error("Workflow execution panicked",
 				"execution_id", execution.ID,
 				"error", panicErr.FullError())
@@ -558,8 +554,6 @@ func (e *Engine) runWorkflowSteps(execution *WorkflowExecution, workflow Workflo
 	}
 
 	endTime := time.Now()
-	execution.SetEndTime(&endTime)
-	e.mutex.Lock()
 
 	if err != nil {
 		// If the execution context was explicitly cancelled (via CancelExecution),
@@ -567,10 +561,7 @@ func (e *Engine) runWorkflowSteps(execution *WorkflowExecution, workflow Workflo
 		// async goroutine from overriding StatusCancelled with StatusFailed.
 		// Context timeout (DeadlineExceeded) is still treated as a failure.
 		if execution.Context.Err() == context.Canceled {
-			e.mutex.Unlock()
-			if execution.GetStatus() != StatusCancelled {
-				execution.SetStatus(StatusCancelled)
-			}
+			execution.Finish(StatusCancelled, endTime, "", nil)
 			e.logger.Info("Workflow execution cancelled",
 				"execution_id", execution.ID)
 		} else {
@@ -588,17 +579,13 @@ func (e *Engine) runWorkflowSteps(execution *WorkflowExecution, workflow Workflo
 				).WithVariableState(execution.Variables)
 			}
 
-			execution.SetError(workflowErr.Error())
-			execution.SetErrorDetails(workflowErr)
-			e.mutex.Unlock()
-			execution.SetStatus(StatusFailed)
+			execution.Finish(StatusFailed, endTime, workflowErr.Error(), workflowErr)
 			e.logger.Error("Workflow execution failed",
 				"execution_id", execution.ID,
 				"error", workflowErr.FullError())
 		}
 	} else {
-		e.mutex.Unlock()
-		execution.SetStatus(StatusCompleted)
+		execution.Finish(StatusCompleted, endTime, "", nil)
 		e.logger.Info("Workflow execution completed",
 			"execution_id", execution.ID,
 			"duration", endTime.Sub(execution.StartTime))
@@ -1161,11 +1148,7 @@ func (e *Engine) CancelExecution(executionID string) error {
 
 	if execution.Cancel != nil {
 		execution.Cancel()
-		e.mutex.Lock()
-		endTime := time.Now()
-		execution.SetEndTime(&endTime)
-		e.mutex.Unlock()
-		execution.SetStatus(StatusCancelled)
+		execution.Finish(StatusCancelled, time.Now(), "", nil)
 		e.persistExecution(execution)
 	}
 
@@ -1769,7 +1752,7 @@ func (e *Engine) recordRejectedExecution(ctx context.Context, workflow Workflow,
 		ID:           generateExecutionID(),
 		WorkflowName: workflow.Name,
 		TenantID:     tenantID,
-		Status:       StatusFailed,
+		Status:       StatusPending,
 		StartTime:    time.Now(),
 		StepResults:  make(map[string]StepResult),
 		Variables:    make(map[string]interface{}),
@@ -1777,9 +1760,7 @@ func (e *Engine) recordRejectedExecution(ctx context.Context, workflow Workflow,
 		Cancel:       cancel,
 		Done:         make(chan struct{}),
 	}
-	execution.SetError(cause.Error())
-	endTime := time.Now()
-	execution.SetEndTime(&endTime)
+	execution.Finish(StatusFailed, time.Now(), cause.Error(), nil)
 	cancel()
 	close(execution.Done)
 

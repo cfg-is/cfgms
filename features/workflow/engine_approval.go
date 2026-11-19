@@ -215,11 +215,7 @@ func (e *Engine) persistApprovalGate(execution *WorkflowExecution, workflow Work
 // not attached: checkpoint contents are never surfaced.
 func (e *Engine) failExecution(execution *WorkflowExecution, cause error) {
 	wfErr := NewWorkflowError(ErrorCodeStepExecution, cause.Error(), execution.GetCurrentStep(), StepTypeApproval, nil)
-	execution.SetError(wfErr.Error())
-	execution.SetErrorDetails(wfErr)
-	endTime := time.Now()
-	execution.SetEndTime(&endTime)
-	execution.SetStatus(StatusFailed)
+	execution.Finish(StatusFailed, time.Now(), wfErr.Error(), wfErr)
 	e.persistExecution(execution)
 	e.logger.WithTenant(execution.TenantID).Warn("Workflow execution failed",
 		"execution_id", execution.ID,
@@ -318,32 +314,8 @@ func (e *Engine) ResumeFromApproval(ctx context.Context, tenantID, approvalID st
 	gate := workflow.Steps[cp.GateIndex]
 	tail := workflow.Steps[cp.GateIndex+1:]
 
-	gateResult := execution.StepResults[cp.GateStepID]
-	end := time.Now()
-	gateResult.EndTime = &end
-	if gateResult.Output == nil {
-		gateResult.Output = make(map[string]any)
-	}
-	gateResult.Output["decided_by"] = rec.DecidedBy
-	gateResult.Output["justification"] = rec.Justification
-
 	var failure error
-	if rec.Status == business.ApprovalStatusApproved {
-		gateResult.Status = StatusCompleted
-		gateResult.Output["approved"] = true
-	} else {
-		reason := fmt.Sprintf("approval rejected by %s", rec.DecidedBy)
-		if rec.Justification != "" {
-			reason += ": " + rec.Justification
-		}
-		gateResult.Status = StatusFailed
-		gateResult.Error = reason
-		gateResult.Output["approved"] = false
-		if gate.OnFailure != ActionContinue {
-			failure = errors.New(reason)
-		}
-	}
-	execution.StepResults[cp.GateStepID] = gateResult
+	execution.StepResults[cp.GateStepID], failure = decideGateResult(execution.StepResults[cp.GateStepID], rec, gate)
 
 	e.mutex.Lock()
 	e.executions[execution.ID] = execution
@@ -351,7 +323,6 @@ func (e *Engine) ResumeFromApproval(ctx context.Context, tenantID, approvalID st
 	e.persistExecution(execution)
 
 	if failure != nil {
-		execution.SetStatus(StatusFailed)
 		e.failExecution(execution, failure)
 		close(execution.Done)
 		cancel()
@@ -369,6 +340,36 @@ func (e *Engine) ResumeFromApproval(ctx context.Context, tenantID, approvalID st
 		})
 	}()
 	return execution, nil
+}
+
+// decideGateResult records the approval decision on the gate step's result. It
+// returns the updated result and, when the approval was rejected and the gate
+// does not say on_failure: continue, the error that fails the run.
+func decideGateResult(gateResult StepResult, rec *business.WorkflowApproval, gate Step) (StepResult, error) {
+	end := time.Now()
+	gateResult.EndTime = &end
+	if gateResult.Output == nil {
+		gateResult.Output = make(map[string]any)
+	}
+	gateResult.Output["decided_by"] = rec.DecidedBy
+	gateResult.Output["justification"] = rec.Justification
+
+	if rec.Status == business.ApprovalStatusApproved {
+		gateResult.Status = StatusCompleted
+		gateResult.Output["approved"] = true
+		return gateResult, nil
+	}
+	reason := fmt.Sprintf("approval rejected by %s", rec.DecidedBy)
+	if rec.Justification != "" {
+		reason += ": " + rec.Justification
+	}
+	gateResult.Status = StatusFailed
+	gateResult.Error = reason
+	gateResult.Output["approved"] = false
+	if gate.OnFailure != ActionContinue {
+		return gateResult, errors.New(reason)
+	}
+	return gateResult, nil
 }
 
 // finishResume releases the in-flight marker and, when the run finished, ends the

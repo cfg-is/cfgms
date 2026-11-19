@@ -631,11 +631,56 @@ func (we *WorkflowExecution) GetErrorDetails() *WorkflowError {
 	return we.ErrorDetails
 }
 
-// SetEndTime safely sets the end time
-func (we *WorkflowExecution) SetEndTime(endTime *time.Time) {
+// IsTerminal reports whether the status is one an execution never leaves:
+// completed, failed or cancelled.
+func (s ExecutionStatus) IsTerminal() bool {
+	return s == StatusCompleted || s == StatusFailed || s == StatusCancelled
+}
+
+// Finish moves the execution to a terminal status in one locked write: status,
+// end time and, when given, the error message and details land together, so no
+// reader sees an end time on a non-terminal execution. An execution that is
+// already terminal is left untouched (a cancelled run is never downgraded and
+// its first end time stands); Finish reports whether it applied the change.
+func (we *WorkflowExecution) Finish(status ExecutionStatus, endTime time.Time, errorMsg string, errorDetails *WorkflowError) bool {
+	if !status.IsTerminal() {
+		return false
+	}
 	we.mutex.Lock()
 	defer we.mutex.Unlock()
-	we.EndTime = endTime
+	if we.Status.IsTerminal() {
+		return false
+	}
+	we.Status = status
+	we.EndTime = &endTime
+	if errorMsg != "" {
+		we.Error = errorMsg
+	}
+	if errorDetails != nil {
+		we.ErrorDetails = errorDetails
+	}
+	return true
+}
+
+// terminalSnapshot is a consistent view of the fields Finish writes together.
+type terminalSnapshot struct {
+	Status       ExecutionStatus
+	EndTime      *time.Time
+	Error        string
+	ErrorDetails *WorkflowError
+}
+
+// snapshotTerminal reads status, end time and error fields under one lock
+// acquisition. The returned end time is a copy.
+func (we *WorkflowExecution) snapshotTerminal() terminalSnapshot {
+	we.mutex.RLock()
+	defer we.mutex.RUnlock()
+	snap := terminalSnapshot{Status: we.Status, Error: we.Error, ErrorDetails: we.ErrorDetails}
+	if we.EndTime != nil {
+		end := *we.EndTime
+		snap.EndTime = &end
+	}
+	return snap
 }
 
 // GetEndTime safely gets the end time

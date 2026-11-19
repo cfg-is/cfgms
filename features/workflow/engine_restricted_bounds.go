@@ -318,13 +318,7 @@ func (e *Engine) finishRestrictedStop(execution *WorkflowExecution) bool {
 	}
 	details := NewWorkflowError(ErrorCodeCancellation, reason.Error(), execution.GetCurrentStep(), "", reason).
 		WithVariableState(execution.Variables)
-	endTime := time.Now()
-	e.mutex.Lock()
-	execution.SetEndTime(&endTime)
-	execution.SetError(details.Error())
-	execution.SetErrorDetails(details)
-	e.mutex.Unlock()
-	execution.SetStatus(status)
+	execution.Finish(status, time.Now(), details.Error(), details)
 	e.logger.Warn("Restricted workflow execution stopped",
 		"execution_id", execution.ID,
 		"status", string(status),
