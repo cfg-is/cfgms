@@ -1201,6 +1201,10 @@ services:
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
       CFGMS_SEED_TEST_API_KEYS: "1"
+      # Upgrade-test API key, scoped to the tenant the compat steward registers
+      # into (as fleet-controller): publishing and dispatching a steward binary
+      # admit a machine principal, while the admin mTLS client needs a presence tap.
+      CFGMS_API_KEY_UPGRADE_TEST: "cfgms-upgrade-test-key"
       CFGMS_EXTERNAL_URL: "https://compat-controller:9080"
       # Test Ed25519 publisher key (zero-seed public half), as fleet-controller.
       CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="

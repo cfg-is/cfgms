@@ -165,20 +165,27 @@ func buildCurrentSteward(t *testing.T, version string) []byte {
 	return bin
 }
 
-// binaryURLPath is the publish/approve route prefix for one coordinate.
+// binaryURLPath is the publish route for one coordinate.
 func binaryURLPath(version, arch string) string {
 	return "/api/v1/installer/steward-binaries/" + url.PathEscape(version) + "/linux/" + url.PathEscape(arch)
 }
 
-// apiURL issues a request to the compat controller with a query string, which
-// harness.api cannot carry, and returns status and body.
-func (h *harness) apiURL(method, pathAndQuery, contentType string, body []byte, timeout time.Duration) (int, []byte, error) {
+// upgradeAPI issues a request to the compat controller as the upgrade-test API
+// key and returns status and body. Publishing and dispatching a steward binary
+// accept a machine principal; the admin mTLS client is refused there with a
+// step-up challenge (strong assurance and a fresh presence tap), and the
+// requirement is not weakened here. The key is seeded into the compat controller
+// by CFGMS_API_KEY_UPGRADE_TEST, scoped to the tenant the compat steward
+// registers into, exactly as in the fleet stack. It carries a query string,
+// which harness.api cannot.
+func (h *harness) upgradeAPI(method, pathAndQuery, contentType string, body []byte, timeout time.Duration) (int, []byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, h.ControllerURL+pathAndQuery, bytes.NewReader(body))
 	if err != nil {
 		return 0, nil, err
 	}
+	req.Header.Set("X-API-Key", fleetkit.UpgradeAPIKey)
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -196,7 +203,7 @@ func (h *harness) apiURL(method, pathAndQuery, contentType string, body []byte, 
 func (h *harness) publishBinary(t *testing.T, version, arch string, content []byte) {
 	t.Helper()
 	sig := fleetkit.SignUploadContent(t, content, version, "linux", arch)
-	status, body, err := h.apiURL(http.MethodPost,
+	status, body, err := h.upgradeAPI(http.MethodPost,
 		binaryURLPath(version, arch)+"?force=true&signature="+url.QueryEscape(sig),
 		"application/octet-stream", content, 2*time.Minute)
 	require.NoError(t, err)
@@ -207,16 +214,6 @@ func (h *harness) publishBinary(t *testing.T, version, arch string, content []by
 	got, err := decodePublishedSHA256(body)
 	require.NoError(t, err)
 	require.Equal(t, want, got, "the controller stored different bytes than were published")
-}
-
-// approveBinary records the approval bound to the SHA-256 of the published bytes.
-func (h *harness) approveBinary(t *testing.T, version, arch, sha string) {
-	t.Helper()
-	payload, err := json.Marshal(map[string]string{"sha256": sha})
-	require.NoError(t, err)
-	status, body, err := h.api(http.MethodPost, binaryURLPath(version, arch)+"/approve", "application/json", payload)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, status, "approve %s (%s): %s", version, sha, string(body))
 }
 
 // dispatchUpgrade asks the controller to upgrade the steward and returns the
@@ -230,7 +227,7 @@ func (h *harness) dispatchUpgrade(t *testing.T, stewardID, version, arch string)
 		"arch":     arch,
 	})
 	require.NoError(t, err)
-	status, body, err := h.api(http.MethodPost, "/api/v1/stewards/upgrade", "application/json", payload)
+	status, body, err := h.upgradeAPI(http.MethodPost, "/api/v1/stewards/upgrade", "application/json", payload, 30*time.Second)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusAccepted, status, "dispatch %s: %s", version, string(body))
 	id, err := decodeUpgradeID(body)
@@ -245,7 +242,7 @@ func (h *harness) waitForUpgradeStatus(t *testing.T, upgradeID string, timeout t
 	last := "timeout"
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		status, body, err := h.api(http.MethodGet, "/api/v1/stewards/upgrade/"+url.PathEscape(upgradeID), "", nil)
+		status, body, err := h.upgradeAPI(http.MethodGet, "/api/v1/stewards/upgrade/"+url.PathEscape(upgradeID), "", nil, 30*time.Second)
 		if err == nil && status == http.StatusOK {
 			if s, derr := decodeUpgradeStatus(body); derr == nil {
 				last = s
@@ -470,7 +467,7 @@ func (h *harness) floorDiagnostics(upgradeID string) string {
 	procs, _ := dockerExec(floorContainer, "sh", "-c", "ps -eo pid,args | grep -i steward | grep -v grep; true")
 	status := ""
 	if upgradeID != "" {
-		if code, body, err := h.api(http.MethodGet, "/api/v1/stewards/upgrade/"+url.PathEscape(upgradeID), "", nil); err == nil {
+		if code, body, err := h.upgradeAPI(http.MethodGet, "/api/v1/stewards/upgrade/"+url.PathEscape(upgradeID), "", nil, 30*time.Second); err == nil {
 			status = fmt.Sprintf("upgrade record (HTTP %d): %s", code, string(body))
 		}
 	}
@@ -480,8 +477,8 @@ func (h *harness) floorDiagnostics(upgradeID string) string {
 
 // upgradeFloorToCurrent runs the real upgrade path against the compat stack's
 // floor steward, once: it moves the steward under the launcher, builds the
-// steward from this tree, publishes it, approves the published bytes by SHA-256,
-// dispatches the upgrade and waits until the steward is connected again
+// steward from this tree, publishes it (the compat controller's test mode records
+// the approval bound to its SHA-256), dispatches the upgrade and waits until the steward is connected again
 // reporting the new version. Every step is a require: a failure here is the
 // scenario failing at that step, and later calls fail with it.
 func (h *harness) upgradeFloorToCurrent(t *testing.T) *upgradeEvidence {
@@ -508,8 +505,13 @@ func (h *harness) upgradeFloorToCurrent(t *testing.T) *upgradeEvidence {
 	sum := sha256.Sum256(bin)
 	sha := hex.EncodeToString(sum[:])
 
+	// Approval: the compat controller runs in test mode (CFGMS_SEED_TEST_API_KEYS),
+	// which records the approval, bound to the SHA-256 of the stored bytes, when the
+	// binary is published. The explicit approve route needs a human presence tap
+	// and admits no machine principal, so it is not called. Dispatch refuses a
+	// binary that has no approval for the stored bytes, so a dispatch that is
+	// accepted proves the approval was recorded.
 	h.publishBinary(t, currentVersion, arch, bin)
-	h.approveBinary(t, currentVersion, arch, sha)
 
 	sessionsBefore := h.StewardLogCount(t, floorContainer, fleetkit.StewardSessionMarkers...)
 	upgradeID := h.dispatchUpgrade(t, stewardID, currentVersion, arch)
@@ -551,8 +553,8 @@ func (h *harness) requireReportedVersion(t *testing.T, stewardID, want string, t
 }
 
 // TestUpgradeFromFloor proves SC3: the controller upgrades the launcher-managed
-// floor steward to a binary built from this tree over the real publish, approve
-// and dispatch path. The floor steward receives the push-binary command, stages
+// floor steward to a binary built from this tree over the real publish and
+// dispatch path. The floor steward receives the push-binary command, stages
 // it, restarts under the launcher and reconnects reporting the new version.
 //
 // It changes the compat stack's steward, so it runs after the scenarios that

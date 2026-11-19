@@ -38,9 +38,13 @@ the scenarios above, because they change the steward:
 
 - `TestUpgradeFromFloor` runs the floor steward under the launcher the floor
   release shipped, builds the steward from this tree (`make build-steward`, version
-  `v99.0.0-compat-current`, which sorts above the floor), then publishes it,
-  approves the published bytes by SHA-256 and dispatches the upgrade through the
-  controller API. It asserts the upgrade record reaches `committed`, the launcher
+  `v99.0.0-compat-current`, which sorts above the floor), then publishes it and
+  dispatches the upgrade through the controller API as the upgrade-test API key
+  (the steward-binary publish and dispatch routes accept a machine principal and
+  refuse the admin client without a presence tap). The compat controller's test
+  mode records the approval, bound to the SHA-256 of the stored bytes, at publish;
+  the explicit approve route needs a human presence tap, and dispatch refuses a
+  binary without an approval. It asserts the upgrade record reaches `committed`, the launcher
   switches to the new version, the steward restarts and the controller holds the
   new version for the same steward ID, with no command rejection in the steward log.
 - `TestCommandsVerifyAfterUpgrade` asserts that, after the upgrade, the first
