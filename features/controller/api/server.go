@@ -314,10 +314,10 @@ type APIKey struct {
 
 	// recordRef names the durable secret-store record this cache entry mirrors: the
 	// record's key (the SHA-256 of the API key) within TenantID. Every key minted by
-	// handleCreateAPIKey or generateEphemeralKey, and every key lazy-loaded by
-	// loadKeyEntryFromStore, carries one, and authenticateMiddleware re-validates such
-	// entries against the store (Issue #4574). Empty only for the env-gated test keys
-	// seeded in New, which have no durable record to revoke.
+	// mintAPIKey, and every key lazy-loaded by loadKeyEntryFromStore, carries one, and
+	// authenticateMiddleware re-validates such entries against the store (Issue #4574).
+	// Empty only for the env-gated test keys seeded in New, which have no durable
+	// record to revoke.
 	recordRef string
 	// validatedAt is when this entry was last confirmed present in the secret store.
 	validatedAt time.Time

@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -98,6 +97,11 @@ func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 // handleCreateAPIKey handles POST /api/v1/api-keys
 // M-AUTH-1: Create API key and store in central secret store
 func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+
 	// Parse request body
 	var createReq APIKeyCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&createReq); err != nil {
@@ -143,7 +147,6 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	// privilege-escalation path where a caller holding only api-key:create could
 	// mint a key carrying any permission in the catalogue, including ones the
 	// caller was never granted.
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	for _, p := range createReq.Permissions {
 		if !s.hasPermission(principal, p) {
 			s.writeErrorResponse(w, http.StatusForbidden,
@@ -183,6 +186,7 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		Permissions: createReq.Permissions,
 		TenantID:    tenantID,
 		ExpiresAt:   createReq.ExpiresAt,
+		ActorID:     principal.ID,
 	})
 	if err != nil {
 		s.writeMintAPIKeyError(w, err)
@@ -203,27 +207,7 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		Key: minted.plaintext,
 	}
 
-	// Bind the API key to the requested role via RBAC role assignment so that
-	// the role association is recorded for auditing and management queries.
-	if createReq.RoleID != "" && s.rbacManager != nil {
-		ctx := rbac.WithSensitiveOperationJustification(r.Context(),
-			"api-key creation: binding key "+keyID+" to role "+createReq.RoleID+" in tenant "+tenantID)
-		assignErr := s.rbacManager.AssignRole(ctx, &common.RoleAssignment{
-			Id:         uuid.New().String(),
-			SubjectId:  keyID,
-			RoleId:     createReq.RoleID,
-			TenantId:   tenantID,
-			AssignedBy: "api-admin",
-		})
-		if assignErr != nil {
-			s.logger.Warn("Failed to record RBAC role assignment for API key",
-				"id", keyID,
-				"role_id", logging.SanitizeLogValue(createReq.RoleID),
-				"tenant_id", logging.SanitizeLogValue(tenantID),
-				"error", logging.SanitizeLogValue(assignErr.Error()))
-			// Non-fatal: the key is usable; the role-assignment record is for audit only.
-		}
-	}
+	s.recordAPIKeyRoleAssignment(r.Context(), minted, createReq.RoleID)
 
 	s.logger.Info("Created new API key",
 		"id", keyID,
@@ -238,23 +222,63 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	s.writeResponse(w, http.StatusCreated, result)
 }
 
-// apiKeyMintSpec describes one API key for mintAPIKey. ExtraMetadata is merged into the
-// secret-store record's Metadata beneath the core fields (type, id, permissions), which it
-// can never override. Only a route that owns a durable key attribute passes it:
-// handleCreateAPIKey passes none, so a request body cannot reach the record's metadata.
+// recordAPIKeyRoleAssignment asks the RBAC manager to bind a minted key to roleID in the
+// key's tenant. The assignment names the principal that minted the key as its assigner:
+// the actor is read from minted, never passed separately, so the assignment and the
+// key's own record cannot name different principals. It does nothing when no role was
+// requested or no RBAC manager is wired. The RBAC manager stores the assignment only
+// for a key ID it knows as a subject; a refused or failed assignment is logged and not
+// returned, because the key's permissions live on its own record.
+func (s *Server) recordAPIKeyRoleAssignment(ctx context.Context, minted *mintedAPIKey, roleID string) {
+	if roleID == "" || s.rbacManager == nil {
+		return
+	}
+	keyID, tenantID := minted.apiKey.ID, minted.apiKey.TenantID
+	ctx = rbac.WithSensitiveOperationJustification(ctx,
+		"api-key creation: binding key "+keyID+" to role "+roleID+" in tenant "+tenantID)
+	assignErr := s.rbacManager.AssignRole(ctx, &common.RoleAssignment{
+		Id:         uuid.New().String(),
+		SubjectId:  keyID,
+		RoleId:     roleID,
+		TenantId:   tenantID,
+		AssignedBy: minted.actorID,
+	})
+	if assignErr != nil {
+		s.logger.Warn("Failed to record RBAC role assignment for API key",
+			"id", keyID,
+			"role_id", logging.SanitizeLogValue(roleID),
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", logging.SanitizeLogValue(assignErr.Error()))
+	}
+}
+
+// apiKeyMintSpec describes one API key for mintAPIKey. ActorID is required: mintAPIKey
+// refuses a spec without one. ExtraMetadata is merged into the secret-store record's
+// Metadata beneath the core fields (type, id, permissions), which it can never override.
+// Only a route that owns a durable key attribute passes it: handleCreateAPIKey passes
+// none, so a request body cannot reach the record's metadata.
 type apiKeyMintSpec struct {
 	Name          string
 	Permissions   []string
 	TenantID      string
 	ExpiresAt     *time.Time
 	ExtraMetadata map[string]string
+	// ActorID is the ID of the principal minting the key; it is recorded as the
+	// secret-store record's CreatedBy.
+	ActorID string
 }
 
-// mintedAPIKey is the outcome of mintAPIKey: the cache entry and the plaintext, which
-// exists only here and in the response the caller writes.
+// errMintAPIKeyNoActor is returned by mintAPIKey for a spec with no ActorID: a key is
+// never minted without the principal that minted it on its record.
+var errMintAPIKeyNoActor = errors.New("API key mint refused: no acting principal")
+
+// mintedAPIKey is the outcome of mintAPIKey: the cache entry, the plaintext, which
+// exists only here and in the response the caller writes, and the ID of the principal
+// that minted the key (the spec's ActorID, as written to the key's record).
 type mintedAPIKey struct {
 	apiKey    *APIKey
 	plaintext string
+	actorID   string
 }
 
 // mintAPIKeyError says which step of mintAPIKey failed, so the caller maps it to a
@@ -271,10 +295,15 @@ func (e *mintAPIKeyError) Error() string {
 }
 
 // mintAPIKey generates an API key (256-bit, cryptographically secure), caches it and
-// persists its hash to the secret store. It is the only key-generation and storage path
-// (handleCreateAPIKey and handleCreateRolloutCredential both use it). The caller has
-// already validated the permissions, tenant and expiry.
+// persists its hash to the secret store. It is the only key-generation and storage path:
+// handleCreateAPIKey and handleCreateRolloutCredential are its production callers. The
+// caller has already validated the permissions, tenant and expiry. A spec with no
+// ActorID is refused with errMintAPIKeyNoActor before anything is generated, cached or
+// stored.
 func (s *Server) mintAPIKey(ctx context.Context, spec apiKeyMintSpec) (*mintedAPIKey, error) {
+	if spec.ActorID == "" {
+		return nil, errMintAPIKeyNoActor
+	}
 	keyBytes := make([]byte, 32)
 	if _, err := rand.Read(keyBytes); err != nil {
 		s.logger.Error("Failed to generate API key", "error", logging.SanitizeLogValue(err.Error()))
@@ -316,7 +345,7 @@ func (s *Server) mintAPIKey(ctx context.Context, spec apiKeyMintSpec) (*mintedAP
 		return nil, &mintAPIKeyError{}
 	}
 	s.apiKeyIdx.put(keyHash, apiKeyIndexEntry{TenantID: spec.TenantID, ID: keyID})
-	return &mintedAPIKey{apiKey: apiKey, plaintext: keyString}, nil
+	return &mintedAPIKey{apiKey: apiKey, plaintext: keyString, actorID: spec.ActorID}, nil
 }
 
 // keyRequestRecord builds the secret-store record for a minted key (M-AUTH-1): the
@@ -335,7 +364,7 @@ func keyRequestRecord(spec apiKeyMintSpec, keyID, keyHash string) *secretsif.Sec
 		Key:         keyHash,
 		Value:       keyHash,
 		TenantID:    spec.TenantID,
-		CreatedBy:   "api-admin", // TODO: Get from authenticated user context
+		CreatedBy:   spec.ActorID,
 		Description: spec.Name,
 		Tags:        []string{"api-key"},
 		Metadata:    metadata,
@@ -349,6 +378,10 @@ func keyRequestRecord(spec apiKeyMintSpec, keyID, keyHash string) *secretsif.Sec
 
 // writeMintAPIKeyError writes the response for a mintAPIKey failure.
 func (s *Server) writeMintAPIKeyError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errMintAPIKeyNoActor) {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+		return
+	}
 	var mintErr *mintAPIKeyError
 	if errors.As(err, &mintErr) && mintErr.generate {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to generate API key", "INTERNAL_ERROR")
@@ -402,6 +435,11 @@ func (s *Server) handleGetAPIKey(w http.ResponseWriter, r *http.Request) {
 // whether or not this node has it cached — then evict this node's cache entry. Other
 // nodes drop their cached copy on their next re-validation (apiKeyRevalidateInterval).
 func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+
 	vars := mux.Vars(r)
 	keyID := vars["id"]
 
@@ -462,7 +500,6 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		"name", logging.SanitizeLogValue(name),
 		"tenant_id", logging.SanitizeLogValue(tenantID))
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	s.emitOperatorAudit(r, principal, auditTenantOrSystem(tenantID), business.AuditEventSecurityEvent,
 		"api_key_deleted", "api_key", keyID,
 		business.AuditResultSuccess, business.AuditSeverityHigh,
@@ -605,74 +642,6 @@ func (s *Server) apiKeyNow() time.Time {
 		return s.apiKeyClock()
 	}
 	return time.Now()
-}
-
-// generateEphemeralKey creates an API key with a specified TTL
-// M-AUTH-1: Generate ephemeral API key and store in secret store
-func (s *Server) generateEphemeralKey(name string, permissions []string, ttl time.Duration, tenantID string) (*APIKey, error) {
-	// Generate cryptographically secure API key
-	keyBytes := make([]byte, 32) // 256-bit key
-	if _, err := rand.Read(keyBytes); err != nil {
-		return nil, fmt.Errorf("failed to generate ephemeral API key: %w", err)
-	}
-
-	keyString := base64.URLEncoding.EncodeToString(keyBytes)
-	keyID := uuid.New().String()
-	keyHash := hashAPIKey(keyString)
-	expiresAt := time.Now().UTC().Add(ttl)
-
-	// Create ephemeral API key
-	apiKey := &APIKey{
-		ID:          keyID,
-		Key:         keyString,
-		Name:        name,
-		Permissions: permissions,
-		CreatedAt:   time.Now().UTC(),
-		ExpiresAt:   &expiresAt,
-		TenantID:    tenantID,
-		recordRef:   keyHash,
-		validatedAt: s.apiKeyNow(),
-	}
-
-	// Store in memory cache
-	s.mu.Lock()
-	s.keyCache[keyString] = apiKey
-	s.mu.Unlock()
-
-	// M-AUTH-1: Store in secret store with TTL
-	secretReq := &secretsif.SecretRequest{
-		Key:         keyHash,
-		Value:       keyHash,
-		TenantID:    tenantID,
-		CreatedBy:   "system",
-		Description: name,
-		Tags:        []string{"api-key", "ephemeral"},
-		TTL:         ttl,
-		Metadata: map[string]string{
-			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
-			"id":                            keyID,
-			"permissions":                   serializePermissions(permissions),
-		},
-	}
-
-	ctx := context.Background()
-	if err := s.secretStore.StoreSecret(ctx, secretReq); err != nil {
-		// Remove from memory on storage failure
-		s.mu.Lock()
-		delete(s.keyCache, keyString)
-		s.mu.Unlock()
-		return nil, fmt.Errorf("failed to store ephemeral key: %w", err)
-	}
-	s.apiKeyIdx.put(keyHash, apiKeyIndexEntry{TenantID: tenantID, ID: keyID})
-
-	s.logger.Info("Generated ephemeral API key",
-		"id", apiKey.ID,
-		"name", apiKey.Name,
-		"tenant_id", apiKey.TenantID,
-		"ttl", ttl,
-		"expires_at", expiresAt.Format(time.RFC3339))
-
-	return apiKey, nil
 }
 
 // M-AUTH-1: Helper functions for API key management

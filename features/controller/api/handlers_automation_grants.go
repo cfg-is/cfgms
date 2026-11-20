@@ -46,16 +46,6 @@ type automationGrantRevokeResponse struct {
 	RunsEnded int              `json:"runs_ended"`
 }
 
-// automationGrantActor returns the authenticated human principal, or writes a 401.
-func (s *Server) automationGrantActor(w http.ResponseWriter, r *http.Request) (*Principal, bool) {
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	if principal == nil || principal.ID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
-		return nil, false
-	}
-	return principal, true
-}
-
 // automationGrantStoreOrUnavailable returns the wired store, or writes a 503. Audit is
 // part of the contract of every grant change, so a missing audit manager is a 503 too.
 func (s *Server) automationGrantStoreOrUnavailable(w http.ResponseWriter, needAudit bool) (*AutomationGrantStore, bool) {
@@ -127,7 +117,7 @@ func (s *Server) resolveGrantCreateTenant(w http.ResponseWriter, r *http.Request
 // the response: if it cannot be, the grant is removed again and the credential is
 // never returned, so no unaudited grant survives.
 func (s *Server) handleCreateAutomationGrant(w http.ResponseWriter, r *http.Request) {
-	principal, ok := s.automationGrantActor(w, r)
+	principal, ok := s.requireActingPrincipal(w, r)
 	if !ok {
 		return
 	}
@@ -206,7 +196,7 @@ func (s *Server) decodeAutomationGrantCreate(w http.ResponseWriter, r *http.Requ
 // list can not return it. A root-scoped caller lists one tenant, ?tenant= (default the
 // root tenant), through the tenant-crossing boundary.
 func (s *Server) handleListAutomationGrants(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.automationGrantActor(w, r); !ok {
+	if _, ok := s.requireActingPrincipal(w, r); !ok {
 		return
 	}
 	store, ok := s.automationGrantStoreOrUnavailable(w, false)
@@ -252,7 +242,7 @@ func (s *Server) handleListAutomationGrants(w http.ResponseWriter, r *http.Reque
 // is revoked first and its open runs are ended second, so an interrupted revoke can
 // be repeated: revoking a revoked grant keeps its record and ends any run still open.
 func (s *Server) handleRevokeAutomationGrant(w http.ResponseWriter, r *http.Request) {
-	principal, ok := s.automationGrantActor(w, r)
+	principal, ok := s.requireActingPrincipal(w, r)
 	if !ok {
 		return
 	}

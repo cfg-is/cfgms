@@ -70,10 +70,15 @@ func stewardsStatus(server *Server, apiKey string) int {
 	return rec.Code
 }
 
+// callDeleteAPIKey calls handleDeleteAPIKey as an authenticated admin principal holding
+// scope, as authenticationMiddleware would set them: the handler records the principal
+// as the actor and refuses a request without one.
 func callDeleteAPIKey(server *Server, keyID string, scope ctxkeys.TenantScope) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/api-keys/"+keyID, nil)
 	req = mux.SetURLVars(req, map[string]string{"id": keyID})
-	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, scope))
+	ctx := context.WithValue(req.Context(), ctxkeys.TenantScopeKey, scope)
+	ctx = context.WithValue(ctx, principalContextKey, &Principal{ID: "key-deleter", TenantID: scope.Path(), ImplicitAdmin: true})
+	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 	server.handleDeleteAPIKey(rec, req)
 	return rec
