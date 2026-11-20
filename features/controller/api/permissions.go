@@ -347,8 +347,44 @@ var automationPermissions = []string{
 	"rollout-credential:create",
 }
 
+// routePermissions are permission IDs that routes check through requirePermission but that
+// were missing from knownPermissions (Issue #6383), so no account or API key could be
+// granted them and only an implicit-admin principal could reach the route. Same cross-registry
+// drift as tenant:create (Issue #3195) and cluster:drain-node (Issue #3303). Merged in init for
+// the reason automationPermissions is. The writes with a high-impact sibling carry a
+// permissionAssurance entry (config:rollback, refresh:reject, role:write); the rest, like
+// their sibling reads and plain writes, deliberately do not.
+var routePermissions = []string{
+	"audit:list",
+	"case:create",
+	"case:list",
+	"case:read",
+	"case:update",
+	"config:rollback",
+	"refresh:get-policy",
+	"refresh:list-pending",
+	"refresh:reject",
+	"role:read",
+	"role:write",
+	"steward:tag:read",
+	"steward:tag:write",
+}
+
+// ungrantablePermissions are the permission IDs a route checks through requirePermission
+// that are intentionally absent from knownPermissions. They live in permissionAssurance and
+// are held through the WebAuthn ceremony rather than granted to an account or API key (see
+// root_agent_permissions.go). TestEveryRoutePermissionIsGrantableOrExempt is the only
+// consumer; add an ID here only with the same justification.
+var ungrantablePermissions = map[string]bool{
+	"webauthn:assert-presence": true,
+	"webauthn:elevate":         true,
+}
+
 func init() {
 	for _, p := range automationPermissions {
+		knownPermissions[p] = true
+	}
+	for _, p := range routePermissions {
 		knownPermissions[p] = true
 	}
 }

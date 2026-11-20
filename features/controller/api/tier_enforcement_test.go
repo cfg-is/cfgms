@@ -85,6 +85,9 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"POST", "/api/v1/tenants/test-id/break-glass", "tenant:crossing-break-glass"},                               // ADR-025 Decision 2(b): tenant-crossing break-glass elevation
 	{"POST", "/api/v1/tenants/test-id/break-glass/test-crossing/approve", "tenant:crossing-approve-break-glass"}, // ADR-025: second-approver break-glass approval; RequireUserPresence
 	{"POST", "/api/v1/stewards/refresh/pending-123/approve", "refresh:approve"},
+	{"POST", "/api/v1/stewards/refresh/pending-123/reject", "refresh:reject"},           // Issue #6383: mirrors refresh:approve
+	{"POST", "/api/v1/roles", "role:write"},                                             // Issue #6383: mirrors the rbac:*-role writes
+	{"DELETE", "/api/v1/roles/test-role", "role:write"},                                 // Issue #6383
 	{"GET", "/api/v1/notifications/email", "notification:configure"},                    // Issue #4710: email delivery settings
 	{"PUT", "/api/v1/notifications/email/credential", "notification:configure"},         // Issue #4710: write-only SMTP password
 	{"POST", "/api/v1/notifications/email/test", "notification:configure"},              // Issue #4710: test send

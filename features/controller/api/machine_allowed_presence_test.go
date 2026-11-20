@@ -104,8 +104,9 @@ func TestMachineAllowed_OnlyTheInstallerPermissionsAndConfigPush(t *testing.T) {
 	want := map[string]bool{
 		"installer:upload": true, "installer:delete": true,
 		"installer:publish:steward": true, "installer:dispatch:steward": true,
-		"config:push":    true,                           // Issue #5419: scoped API keys keep pushing config
-		"workflow:write": true, "workflow:execute": true, // Issue #5498: scoped API keys keep running workflows
+		"config:push":     true,                           // Issue #5419: scoped API keys keep pushing config
+		"config:rollback": true,                           // Issue #6383: mirrors config:push
+		"workflow:write":  true, "workflow:execute": true, // Issue #5498: scoped API keys keep running workflows
 		"monitoring:write-markers": true, // Issue #6063: the deploy agent records markers with an API key
 	}
 	for perm, req := range permissionAssurance {
