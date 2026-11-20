@@ -39,11 +39,18 @@ CVE-2026-56860 until=2026-11-15
 # Expiry           : 2026-11-13 — if Sonatype still flags it then, re-check.
 CVE-2026-84445 until=2026-11-13
 
-# CVE-2026-119591 — modernc.org/sqlite
-# Affected package : modernc.org/sqlite v1.61.1 (direct dependency)
-# Reason           : v1.61.1 is the newest release published upstream as of 2026-11-05;
-#                    there is no patched version to upgrade to.  `go list -m -versions
-#                    modernc.org/sqlite` ends at v1.61.1.  Re-check when a newer release
-#                    appears or when this entry lapses on the expiry date below.
-# Expiry           : 2026-11-20 — after this date the scan re-opens automatically.
-CVE-2026-119591 until=2026-11-20
+# CVE-2026-119591 — modernc.org/sqlite (scanner database error, policy case 2)
+# Affected package : modernc.org/sqlite v1.62.0 (direct dependency)
+# Reason           : The CVE affects SQLite before 3.54.0. modernc.org/sqlite v1.62.0
+#                    vendors SQLite 3.54.1: lib/ has SQLITE_VERSION_NUMBER = 3054001 and
+#                    SQLITE_SOURCE_ID "2026-10-16 14:45:20 555e07ef33f6...", and the
+#                    module CHANGELOG states "SQLite stays 3.54.1". The OSV record lists
+#                    the fix commits as sqlite eff50a067c55 and 6932c59ee5c2. GitHub's
+#                    compare <commit>...version-3.54.1 on the sqlite/sqlite mirror reports
+#                    status=ahead, behind_by=0 for both: the 3.54.1 tag contains the fix.
+#                    Sonatype still maps the CVE onto modernc.org/sqlite v1.62.0. OSV
+#                    (query Go/modernc.org/sqlite 1.62.0: 0 vulns) and the Go
+#                    vulnerability database (vuln.go.dev: no entry for
+#                    modernc.org/sqlite) report it clean. Measured 2026-11-20.
+# Expiry           : 2026-12-05 — if Sonatype still flags it then, re-check.
+CVE-2026-119591 until=2026-12-05
