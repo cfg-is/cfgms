@@ -294,7 +294,8 @@ func (s *Server) passkeyLoginClientAllowed(w http.ResponseWriter, r *http.Reques
 	// Per-IP throttle check (fast rejection without account resolution).
 	if ipKey != "" {
 		if blocked, _ := s.checkPasskeyLoginThrottle("ip:" + ipKey); blocked {
-			s.emitWebLoginAudit(r.Context(), "", "", "web.passkey.login.failure", business.AuditResultFailure)
+			s.emitWebLoginAudit(r.Context(), "", "", "web.passkey.login.failure", business.AuditResultFailure,
+				passkeyLoginFailureDetails(auditReasonThrottledIP, ipKey))
 			s.writeErrorResponse(w, http.StatusTooManyRequests,
 				"Too many failed attempts — try again later", "THROTTLED")
 			return false
@@ -304,13 +305,38 @@ func (s *Server) passkeyLoginClientAllowed(w http.ResponseWriter, r *http.Reques
 	// Per-account throttle check using the username hint from begin (if provided).
 	if pending.accountID != "" {
 		if blocked, _ := s.checkPasskeyLoginThrottle("account:" + pending.accountID); blocked {
-			s.emitWebLoginAudit(r.Context(), pending.accountID, "", "web.passkey.login.failure", business.AuditResultFailure)
+			s.emitWebLoginAudit(r.Context(), pending.accountID, "", "web.passkey.login.failure", business.AuditResultFailure,
+				passkeyLoginFailureDetails(auditReasonThrottledAccount, ipKey))
 			s.writeErrorResponse(w, http.StatusTooManyRequests,
 				"Too many failed attempts — try again later", "THROTTLED")
 			return false
 		}
 	}
 	return true
+}
+
+// passkeyLoginFailureDetails returns the audit details of a failed web passkey login that
+// carry no account-specific fields: the failure reason and the sanitised source IP key.
+func passkeyLoginFailureDetails(reason, ipKey string) map[string]interface{} {
+	d := map[string]interface{}{auditKeyReason: reason}
+	if ipKey != "" {
+		d[auditKeySourceIP] = logging.SanitizeLogValue(ipKey)
+	}
+	return d
+}
+
+// mergePasskeyLoginFailureDetails returns details (which may be nil) plus the source IP and,
+// when reason is non-empty and details carries none of its own (softwareAuthenticatorFailedUse
+// sets one on a denial), the failure reason.
+func mergePasskeyLoginFailureDetails(details map[string]interface{}, reason, ipKey string) map[string]interface{} {
+	d := passkeyLoginFailureDetails(reason, ipKey)
+	if reason == "" {
+		delete(d, auditKeyReason)
+	}
+	for k, v := range details {
+		d[k] = v
+	}
+	return d
 }
 
 // passkeyLoginUserResolver returns the FinishDiscoverableLogin user handler. It resolves
@@ -355,6 +381,14 @@ func (s *Server) rejectPasskeyLoginVerification(w http.ResponseWriter, r *http.R
 		auditUsername = acct.Username
 	}
 	result, details, _ := s.softwareAuthenticatorFailedUse(r.Context(), acct, assertedID)
+	// A failure that names no account of ours records why: the credential (or its user
+	// handle) is unknown. A known account's failure keeps its existing attribution, where a
+	// reason marks only a policy refusal.
+	if acct == nil {
+		details = mergePasskeyLoginFailureDetails(details, auditReasonUnknownCredential, ipKey)
+	} else {
+		details = mergePasskeyLoginFailureDetails(details, "", ipKey)
+	}
 	s.emitWebLoginAudit(r.Context(), auditUsername, "", "web.passkey.login.failure", result, details)
 	s.writeErrorResponse(w, http.StatusBadRequest,
 		"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")

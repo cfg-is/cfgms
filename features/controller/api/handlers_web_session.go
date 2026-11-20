@@ -143,8 +143,26 @@ func clearWebSessionCookies(w http.ResponseWriter) {
 	}
 }
 
+// unauthenticatedPrincipalID is the audit user ID recorded for a web-login event that has
+// no resolved account (a throttled client, an unknown credential, a blank user handle).
+// The audit store refuses an empty user ID, so such an event would otherwise be dropped,
+// and these are the failures that matter most for detection. The principal is recorded as
+// business.AuditUserTypeAPI: an unauthenticated API client, not a human account.
+const unauthenticatedPrincipalID = "unauthenticated"
+
+// Audit detail keys and reasons for a failed web passkey login.
+const (
+	auditKeySourceIP = "source_ip"
+
+	auditReasonThrottledIP       = "throttled_ip"
+	auditReasonThrottledAccount  = "throttled_account"
+	auditReasonUnknownCredential = "unknown_credential"
+)
+
 // emitWebLoginAudit records a web-login lifecycle audit event.
 // Fields: sanitized username, tenant, outcome. Credential material is never included.
+// An empty username (no resolved account) is recorded as unauthenticatedPrincipalID so the
+// audit store never sees an empty user ID.
 // details are optional extra fields (a passkey login passes softwareAuthenticatorAuditDetails).
 // No-op when auditManager is nil.
 func (s *Server) emitWebLoginAudit(ctx context.Context, username, tenantID, action string, result business.AuditResult, details ...map[string]interface{}) {
@@ -159,12 +177,18 @@ func (s *Server) emitWebLoginAudit(ctx context.Context, username, tenantID, acti
 	if result == business.AuditResultSuccess {
 		severity = business.AuditSeverityLow
 	}
+	userID := logging.SanitizeLogValue(username)
+	userType := business.AuditUserTypeHuman
+	if userID == "" {
+		userID = unauthenticatedPrincipalID
+		userType = business.AuditUserTypeAPI
+	}
 	b := audit.NewEventBuilder().
 		Tenant(tenantID).
 		Type(business.AuditEventAuthentication).
 		Action(action).
-		User(logging.SanitizeLogValue(username), business.AuditUserTypeHuman).
-		Resource("web-session", logging.SanitizeLogValue(username), "").
+		User(userID, userType).
+		Resource("web-session", userID, "").
 		Result(result).
 		Severity(severity)
 	for _, d := range details {
@@ -173,7 +197,7 @@ func (s *Server) emitWebLoginAudit(ctx context.Context, username, tenantID, acti
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
 		s.logger.Warn("Failed to emit web login audit event",
 			"action", action,
-			"username", logging.SanitizeLogValue(username),
+			"username", userID,
 			"error", logging.SanitizeLogValue(err.Error()))
 	}
 }
