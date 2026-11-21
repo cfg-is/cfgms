@@ -40,6 +40,9 @@ signal carries a tenant, steward, command or path identifier.
 | `cfgms_config_convergence_seconds` | histogram | — | 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600 | Seconds from a config push delivery row being issued to the steward reporting its command completed. |
 | `cfgms_has_leadership` | gauge | — | — | 1 when this controller holds cluster leadership (lease-backed), 0 otherwise. |
 | `cfgms_leadership_changes_total` | counter | — | — | Leadership changes observed on this controller at the sampler interval; a change that reverts within one interval is not counted. |
+| `cfgms_osquery_queries_total` | counter | `outcome` | — | Live fleet osquery requests that reached dispatch, by outcome: ok (every steward answered), partial (some) or failed (none). |
+| `cfgms_osquery_query_duration_seconds` | histogram | — | 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60 | Duration of live fleet osquery fan-outs, from dispatch to the last steward response. |
+| `cfgms_osquery_steward_results_total` | counter | `result` | — | Per-steward results of live fleet osquery requests: steward_ok or steward_failed. |
 | `cfgms_process_start_time_seconds` | gauge | — | — | Start time of the controller process in seconds since the Unix epoch. |
 | `cfgms_storage_connected` | gauge | — | — | Whether the last storage probe reached the database (1) or not (0). |
 | `cfgms_storage_probe_duration_seconds` | histogram | — | 0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5 | Duration of storage probes in seconds, including failed and timed-out probes. |
@@ -60,6 +63,8 @@ A histogram is exported as `<name>_bucket` (with an `le` label, cumulative, plus
 | `command_type` | `cfgms_command_send_total`, `cfgms_command_completion_seconds` | `sync_config`, `sync_dna`, `reconnect`, `execute_script`, `relay_response`, `push_signing_cert`, `push_steward_binary`, `open_terminal`, `steward_action`, `observe_modules`, `advertise_transport_address`, and `other` for any command type outside this set |
 | `outcome` | `cfgms_command_send_total` | `sent`, `send_failed` |
 | `outcome` | `cfgms_command_completion_seconds` | `completed`, `failed`, `timeout` |
+| `outcome` | `cfgms_osquery_queries_total` | `ok`, `partial`, `failed` |
+| `result` | `cfgms_osquery_steward_results_total` | `steward_ok`, `steward_failed` |
 | `route_class` | `cfgms_api_requests_total`, `cfgms_api_request_duration_seconds` | `accounts`, `alerts`, `api-keys`, `audit`, `automation`, `billing`, `cases`, `certificates`, `cli-login`, `cli-presence`, `cluster`, `clusters`, `commands`, `compliance`, `config`, `configs`, `credential-renewal`, `credential-requests`, `directory`, `enrolment-tokens`, `entities`, `fleet`, `ha`, `health`, `hyperv`, `installer`, `jobs`, `modules`, `monitoring`, `notifications`, `operator-payload`, `osquery`, `public`, `rbac`, `ready`, `register`, `registration`, `reports`, `rollback`, `roles`, `rollout`, `rollout-credentials`, `rollout-settings`, `runs`, `scripts`, `sessions`, `signing-credential`, `stewards`, `tenant-crossings`, `tenants`, `terminal`, `triggers`, `web`, `webauthn`, `webhooks`, `workflows`, `static`, `other`. The first segment after `/api/v1` of the matched route when it is in this set (every value but `static` and `other`), `static` for the web application fallback route, and `other` for every route outside the set, an unmatched path and a method mismatch |
 | `status_class` | `cfgms_api_requests_total`, `cfgms_api_request_duration_seconds` | `2xx`, `3xx`, `4xx`, `5xx` |
 | `revision` | `cfgms_build_info` | A hex commit id, optionally suffixed `-dirty`, or `unknown`; any other build value is exported as `unknown` |
@@ -135,9 +140,16 @@ signals are rendered.
   lives as long as the session. The instruments register on the first request a
   controller serves, so a controller that has served none exports no
   `cfgms_api_*` series.
-- **Tenant-scoped rollouts are not markers.** A rollout scoped to a tenant is an
-  audit event under that tenant. Markers are platform signals recorded under
-  the system tenant.
+- **Live-query signals register on the first fan-out.** The three
+  `cfgms_osquery_*` instruments register the first time the controller
+  dispatches a live fleet osquery request, so a controller that has dispatched
+  none exports no `cfgms_osquery_*` series. A request rejected before dispatch
+  records nothing. No catalog identifier, query text or steward identifier is a
+  label value.
+- **Tenant-scoped rollouts write a marker as well as an audit event.** A rollout
+  scoped to a tenant writes its audit event under the owning tenant and a
+  marker under the system tenant, so the marker list shows it. Markers are
+  platform signals recorded under the system tenant.
 
 ## Markers
 
@@ -159,9 +171,28 @@ The response is `201` with `id`, `time`, `kind`, `revision`, `principal`,
 caller. `monitoring:write-markers` requires a strong-assurance session or an
 API key.
 
+The controller itself writes six more marker kinds for rollout and upgrade
+events. `POST /api/v1/monitoring/markers` does not accept them:
+
+| Kind | Written when |
+|---|---|
+| `rollout_started` | A rollout starts |
+| `rollout_completed` | A rollout completes |
+| `rollout_halted` | An operator halts a rollout |
+| `rollout_auto_halted` | The controller halts a rollout on its own |
+| `upgrade_dispatched` | A steward upgrade is dispatched |
+| `upgrade_rolled_back` | A steward upgrade is rolled back |
+
+These are written under the system tenant for every rollout, including a
+tenant-scoped one, which also writes its audit event under the owning tenant.
+A marker carries only the revision, the principal and the rollout or upgrade
+identifier. The audit action name of an upgrade event
+(`steward_upgrade_dispatched`) differs from its marker kind; this page lists
+marker kinds.
+
 `GET /api/v1/monitoring/markers` lists markers oldest first, with optional
 `since` and `until` (RFC 3339, inclusive) and `kind` (lowercase letters, digits
 and underscores) filters. It returns the audit rows whose action is
-`marker_<kind>` or `controller_start`; the controller records `controller_start`
-at each startup. At most 1000 markers are returned; when more match, the newest
+`marker_<kind>` (any of the ten kinds above) or `controller_start`; the
+controller records `controller_start` at each startup. At most 1000 markers are returned; when more match, the newest
 are kept. `resource` is a marker or rollout identifier, never a tenant path.

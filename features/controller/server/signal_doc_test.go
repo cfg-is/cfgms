@@ -203,6 +203,17 @@ func sortedNames[V any](m map[string]V) []string {
 	return names
 }
 
+// lazyLiveQuerySignals are registered on the first live fleet osquery fan-out.
+// That endpoint needs a strong-assurance principal and a presence token, which
+// this package cannot mint, so the registry scrape here never contains them.
+// TestOsqueryQuerySignalsMatchDoc in features/controller/api drives a real
+// fan-out and checks their rows; this test only pins that the rows exist.
+var lazyLiveQuerySignals = []string{
+	"cfgms_osquery_queries_total",
+	"cfgms_osquery_query_duration_seconds",
+	"cfgms_osquery_steward_results_total",
+}
+
 // newSignalDocServer builds a real controller server and attaches the
 // components that are optional in a minimal configuration (heartbeat service,
 // control plane transport, command publisher), so every signal source
@@ -268,6 +279,11 @@ func TestSignalDocMatchesRegistry(t *testing.T) {
 
 	doc := readDoc(t, signalDocPath)
 	documented := parseSignalDoc(t, doc)
+
+	for _, name := range lazyLiveQuerySignals {
+		require.Contains(t, documented, name, "the live-query signal %s must be documented", name)
+		delete(documented, name)
+	}
 
 	assert.Equal(t, sortedNames(scraped), sortedNames(documented),
 		"the registered metric names and the documented metric names must match both ways")
@@ -347,6 +363,8 @@ func expectedBuckets(t *testing.T, name string, got *scrapedSignal) []string {
 // the signal and marker routes.
 func TestSignalDocStatesLimits(t *testing.T) {
 	doc := readDoc(t, signalDocPath)
+	// The document wraps lines, so compare with whitespace collapsed.
+	flat := strings.ToLower(strings.Join(strings.Fields(doc), " "))
 	for _, phrase := range []string{
 		"Per controller node",
 		"summed",
@@ -354,9 +372,17 @@ func TestSignalDocStatesLimits(t *testing.T) {
 		"command-completed event",
 		"on-connect and periodic applies",
 		"dedupe is durable",
-		"Tenant-scoped rollouts are not markers",
+		"Tenant-scoped rollouts write a marker as well as an audit event",
+		"under the owning tenant and a marker under the system tenant",
 	} {
-		assert.Contains(t, strings.ToLower(doc), strings.ToLower(phrase), "limit not stated: %s", phrase)
+		assert.Contains(t, flat, strings.ToLower(phrase), "limit not stated: %s", phrase)
+	}
+	assert.NotContains(t, flat, "tenant-scoped rollouts are not markers")
+	for _, kind := range []string{
+		"rollout_started", "rollout_completed", "rollout_halted",
+		"rollout_auto_halted", "upgrade_dispatched", "upgrade_rolled_back",
+	} {
+		assert.Contains(t, doc, "`"+kind+"`", "marker kind %s must be documented", kind)
 	}
 
 	monitoring := readDoc(t, monitoringDoc)
