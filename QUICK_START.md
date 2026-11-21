@@ -33,8 +33,8 @@ Use [DEVELOPMENT.md](DEVELOPMENT.md) for workstation/build setup and
 Standalone steward execution remains available through `cfgms-steward --config
 PATH`; it is distinct from a managed steward reconnecting with stored identity.
 Consult the [steward operating model](docs/architecture/steward-operating-model.md)
-and current binary help for its lifecycle. Self-hosting product work, standalone
-product expansion and full CLI parity are deferred priorities, not new launch gates.
+and current binary help for its lifecycle. Self-hosting product work and
+standalone product expansion are deferred priorities, not new launch gates.
 
 ## Diagnose or upgrade
 

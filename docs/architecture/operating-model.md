@@ -369,8 +369,8 @@ Single-server and blue/green deployments skip the cluster gate entirely. They us
 
 Operators interact with CFGMS through layered UX surfaces.
 
-**`cfg` CLI.** An operator interface wrapping REST endpoints. Documented commands must match implemented behavior; full CLI parity is deferred under the [product vision](../product/vision.md).
-**Web UI.** The primary operator experience for the API-first SaaS launch. Existing CLI-only flows are implementation coverage to reconcile, not a requirement that web operators install the CLI. See the [product vision](../product/vision.md) for priorities.
+**`cfg` CLI.** An operator interface wrapping REST endpoints. Documented commands must match implemented behavior. Under the [product vision](../product/vision.md), a capability is complete when it works on both `cfg` and the web UI.
+**Web UI.** An operator interface on the same REST endpoints. Existing CLI-only flows are implementation coverage to reconcile, not a requirement that web operators install the CLI.
 
 **REST API — underlying contract.** The wire format the CLI and web UI both use. Stable, versioned, and documented at `docs/api/rest-api.md`. Available to operators and integrators for scripting and third-party tools.
 

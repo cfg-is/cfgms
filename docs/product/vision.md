@@ -58,8 +58,8 @@ Three components:
 - **Outpost.** A planned proxy for networks and devices that cannot host a
   steward. Not built yet.
 
-The platform is API-first. The web interface is the primary launch experience;
-the `cfg` command line remains available, with full interface parity deferred.
+The platform is API-first. Capabilities ship on the web UI and the `cfg`
+command line together: a capability is complete when it works on both.
 
 **DNA.** Modules report observed facts about resources even when their
 configuration is not managed. Stewards collect endpoint facts; controller-side
@@ -185,8 +185,8 @@ investigation, even when those devices no longer match the filter.
 Early beta includes Windows, macOS and Linux endpoints, Microsoft 365 integration,
 the query workspace and agentic cockpit. The [roadmap](roadmap.md) owns detailed
 launch coverage, integration priorities, existing-work pointers and deferred scope.
-Self-hosting product work, standalone steward product work, full CLI parity,
-Outpost and DEX experiences are deferred while SaaS takes priority.
+Self-hosting product work, standalone steward product work, Outpost and DEX
+experiences are deferred while SaaS takes priority.
 
 DEX should establish application/device baselines and guide hardware decisions
 using measured user experience rather than age alone. Estimated productivity
@@ -197,8 +197,9 @@ investigations regardless of DEX sequencing.
 
 - **The threat model is the product.** Design for the compromised host and
   the phished admin. No insecure defaults, in any environment.
-- **API-first, web-prioritized delivery.** Expose capabilities through the API
-  and prioritize cohesive web operator journeys for the SaaS launch.
+- **API-first, complete on both operator surfaces.** Expose capabilities
+  through the API and ship each one on the web UI and `cfg` together. Any `cfg`
+  command named in user documentation exists with the documented behaviour.
 - **Composable operations.** Reuse modules and workflow primitives for
   configuration, investigation and remediation, with explicit authorization.
 - **Evidence before readiness claims.** Distinguish design, implementation,
@@ -206,8 +207,10 @@ investigations regardless of DEX sequencing.
 - **Pluggable by default.** Storage, logging, secrets, directory and
   transport are providers with interchangeable backends, so one codebase
   runs as a self-hosted controller or a hosted cell.
-- **Clean breaks before 1.0.** A breaking change with a clear error beats a
-  migration shim.
+- **`develop` stays deployable.** `develop` is deployable at all times, and
+  every change ships with the path that lets continuous deployment roll it out.
+  Schema and on-disk format changes follow the N/N-1 expand/contract rule in
+  the [storage architecture](../architecture/storage-architecture.md#schema-evolution-n--n-1).
 
 ## Licensing
 

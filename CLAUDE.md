@@ -6,10 +6,11 @@ Guidance for Claude Code when working in this repository.
 
 CFGMS is an MSP-first, multi-tenant management and monitoring platform. Its
 foundation is declarative configuration, extensible modules, workflows and the
-DNA knowledge graph. Hosted SaaS and API-first, web-prioritized delivery are the
-current focus. Windows, macOS and Linux endpoints are early-beta requirements;
-self-hosting product work, standalone steward product work and full CLI parity
-are deferred. Scale goals are not measured capacity claims.
+DNA knowledge graph. Hosted SaaS and API-first delivery are the current focus;
+a capability is complete only when it works on both the web UI and the `cfg`
+CLI. Windows, macOS and Linux endpoints are early-beta requirements;
+self-hosting product work and standalone steward product work are deferred.
+Scale goals are not measured capacity claims.
 
 Read [Product Vision](docs/product/vision.md) for approved intent,
 [Roadmap](docs/product/roadmap.md) for active scope and existing-work coverage,
