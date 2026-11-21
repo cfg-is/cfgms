@@ -824,6 +824,7 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
             edges={rfEdges}
             nodeTypes={nodeTypes}
             fitView
+            forceColorMode="light"
             nodesConnectable
             onConnect={handleConnect}
             onNodeClick={(_, n) => setSelectedId(n.id)}
