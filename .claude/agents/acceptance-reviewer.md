@@ -320,6 +320,7 @@ PASS requires BOTH: the Findings table is empty AND every Code-Reference Verific
 # PR body if missing — dev agents miss this keyword frequently and the issue stays
 # open after the PR merges without it.
 /opt/cfgms-trusted/.claude/tooling/scripts/po-act.sh enqueue <PR_NUM> <STORY_NUM>
+# Slice PR (feature/epic-<N>-slice-<n>): enqueue <PR_NUM> --head <reviewed sha>, no story. See "Slice PRs of an owner-run epic".
 
 ```
 
@@ -383,7 +384,7 @@ Example FAIL row (replace with real verification — every row above is an examp
 All checks passing / Check X failing
 
 ### Verdict
-[Enqueued — paste the literal `ENQUEUED:<PR>` line from `po-act.sh enqueue` here / Fix required — status set to Fix / Blocked — escalated to founder]
+[Enqueued — paste the literal `ENQUEUED:<PR>` line from `po-act.sh enqueue` here / Fix required — status set to Fix / Blocked — escalated to founder] (slice PR: Enqueued, or FAIL with no status change; add the line `Reviewed head: <sha>`)
 REVIEW_EOF
 
 /opt/cfgms-trusted/.claude/tooling/scripts/pipeline-helper.sh comment <PR_NUM> /tmp/review-<PR_NUM>.md
