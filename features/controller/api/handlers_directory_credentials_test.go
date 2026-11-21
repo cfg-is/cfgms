@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/credentials"
 	"github.com/cfgis/cfgms/features/tenant"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops"
 	"github.com/cfgis/cfgms/pkg/session"
@@ -399,4 +401,43 @@ func TestReveal_ExpiredAndUnknownIDs(t *testing.T) {
 	assert.Equal(t, http.StatusGone, f.reveal(admin, rec.ID, false).Code)
 	assert.NotContains(t, f.list(admin).Body.String(), rec.ID, "an expired record is not listed")
 	assert.Equal(t, http.StatusNotFound, f.reveal(admin, "not-a-record-id", false).Code)
+}
+
+// TestHandleRevealDirectoryCredential_NoActor_Returns401: with no principal, or one with
+// an empty ID, a reveal is refused with 401 before the record is read or consumed: the
+// credential stays pending with its password stored and no reveal is audited. The same
+// request from a principal with an ID reveals it once and audits it under that principal.
+func TestHandleRevealDirectoryCredential_NoActor_Returns401(t *testing.T) {
+	f := newCredFixture(t)
+	rec := f.put("tenant-a", "user-noactor")
+
+	reveal := func(p *Principal) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/directory/credentials/"+rec.ID+"/reveal", nil)
+		ctx := context.WithValue(req.Context(), ctxkeys.TenantID, "tenant-a")
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert("tenant-a"))
+		req = withVars(req.WithContext(withActor(ctx, p)), map[string]string{"id": rec.ID})
+		out := httptest.NewRecorder()
+		f.srv.handleRevealDirectoryCredential(out, req)
+		return out
+	}
+
+	for _, tc := range noActorCases("tenant-a") {
+		t.Run(tc.name, func(t *testing.T) {
+			out := reveal(tc.principal)
+			assertAuthenticationRequired(t, out)
+			assert.NotContains(t, out.Body.String(), credTestPassword)
+			cur := f.current(rec)
+			assert.Equal(t, credentials.StatePending, cur.State, "the credential must not be consumed")
+			assert.Equal(t, credTestPassword, cur.Password, "the stored password must stay")
+			assert.Empty(t, auditEntriesByAction(t, f.srv, "credential.reveal"))
+		})
+	}
+
+	admin := credAdmin("admin-a", "tenant-a")
+	out := reveal(admin)
+	require.Equal(t, http.StatusOK, out.Code, "the same request from an authenticated principal succeeds: %s", out.Body.String())
+	assert.Equal(t, credTestPassword, revealedPassword(t, out))
+	entries := auditEntriesByAction(t, f.srv, "credential.reveal")
+	require.Len(t, entries, 1)
+	assert.Equal(t, admin.ID, entries[0].UserID)
 }

@@ -61,10 +61,8 @@ type SigningCredentialResponse struct {
 // requirePermission middleware before this handler ever runs. The Assurance check
 // below is defense-in-depth only, mirroring handleRotateSigningCert.
 func (s *Server) handleRequestSigningCredential(w http.ResponseWriter, r *http.Request) {
-
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 

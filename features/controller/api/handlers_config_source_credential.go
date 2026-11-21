@@ -54,6 +54,13 @@ func validConfigSourceToken(v string) bool {
 // the server's secret store (the store the git router and ValidateMountPoint read), so a
 // binding can never change without a new token. The token is never returned or logged.
 func (s *Server) handlePutTenantConfigSourceCredential(w http.ResponseWriter, r *http.Request) {
+	// The actor is resolved before any check or change, so a stored credential is
+	// never recorded without the operator who bound it.
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+
 	tenantID := mux.Vars(r)["id"]
 	if tenantID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "tenant id is required", "MISSING_TENANT_ID")
@@ -94,31 +101,11 @@ func (s *Server) handlePutTenantConfigSourceCredential(w http.ResponseWriter, r 
 		return
 	}
 
-	var req configSourceCredentialRequest
-	r.Body = http.MaxBytesReader(w, r.Body, configSourceCredentialMaxBodyBytes)
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		s.writeErrorResponse(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
-		return
-	}
-	if req.URL == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "url is required", "INVALID_URL")
-		return
-	}
-	if err := cfgpkg.ValidateSourceURL(req.URL); err != nil {
-		s.writeErrorResponse(w, http.StatusBadRequest, "invalid url: "+err.Error(), "INVALID_URL")
-		return
-	}
-	if !validConfigSourceToken(req.Token) {
-		s.writeErrorResponse(w, http.StatusBadRequest, "token is required", "INVALID_TOKEN")
+	req, ok := s.decodeConfigSourceCredentialRequest(w, r)
+	if !ok {
 		return
 	}
 
-	var actorID string
-	if p, _ := r.Context().Value(principalContextKey).(*Principal); p != nil {
-		actorID = p.ID
-	}
 	bound := cfgpkg.NormalizeRepositoryURL(req.URL)
 	// The secret is stored as key "config-source-git" in the tenant's namespace; the
 	// store resolves the reference "<tenant id>/config-source-git" to it on read.
@@ -127,7 +114,7 @@ func (s *Server) handlePutTenantConfigSourceCredential(w http.ResponseWriter, r 
 		Key:         cfgpkg.ConfigSourceCredentialKeyName,
 		Value:       req.Token,
 		Metadata:    map[string]string{cfgpkg.SecretMetaKeyBoundRepositoryURL: bound},
-		CreatedBy:   actorID,
+		CreatedBy:   principal.ID,
 		TenantID:    td.ID,
 		Description: "git config-source credential",
 	}); err != nil {
@@ -138,8 +125,34 @@ func (s *Server) handlePutTenantConfigSourceCredential(w http.ResponseWriter, r 
 		return
 	}
 
-	s.auditConfigSourceCredential(r, td.ID, actorID, bound)
+	s.auditConfigSourceCredential(r, td.ID, principal.ID, bound)
 	s.writeSuccessResponse(w, configSourceCredentialResponse{CredentialRef: ref, BoundRepositoryURL: bound})
+}
+
+// decodeConfigSourceCredentialRequest reads and validates the request body. It
+// writes the 400 response and reports false when the body is not acceptable.
+func (s *Server) decodeConfigSourceCredentialRequest(w http.ResponseWriter, r *http.Request) (configSourceCredentialRequest, bool) {
+	var req configSourceCredentialRequest
+	r.Body = http.MaxBytesReader(w, r.Body, configSourceCredentialMaxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		return req, false
+	}
+	if req.URL == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "url is required", "INVALID_URL")
+		return req, false
+	}
+	if err := cfgpkg.ValidateSourceURL(req.URL); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "invalid url: "+err.Error(), "INVALID_URL")
+		return req, false
+	}
+	if !validConfigSourceToken(req.Token) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "token is required", "INVALID_TOKEN")
+		return req, false
+	}
+	return req, true
 }
 
 // auditConfigSourceCredential records who bound a credential to which repository for

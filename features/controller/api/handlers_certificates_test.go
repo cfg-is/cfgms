@@ -1260,10 +1260,20 @@ func setupProvisionTestServer(t *testing.T) (*Server, *cert.Manager, string) {
 // tenantID, mirroring scopedRevokeContext for the provision handler (Issue #4334).
 // An empty tenantID models an unscoped (root) caller.
 func scopedProvisionContext(tenantID string) context.Context {
-	if tenantID == "" {
-		return context.WithValue(context.Background(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	return scopedProvisionContextFor(tenantID, &Principal{
+		ID: "provision-caller", Name: "mtls-cert:provision-caller", Assurance: session.AssuranceStrong,
+		TenantID: tenantID, GlobalScope: tenantID == "",
+	})
+}
+
+// scopedProvisionContextFor is scopedProvisionContext with the principal supplied by the
+// caller; a nil principal leaves the context without one.
+func scopedProvisionContextFor(tenantID string, p *Principal) context.Context {
+	scope := ctxkeys.NewRootScope()
+	if tenantID != "" {
+		scope = ctxkeys.NewTenantScope(tenantID)
 	}
-	return context.WithValue(context.Background(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(tenantID))
+	return withActor(context.WithValue(context.Background(), ctxkeys.TenantScopeKey, scope), p)
 }
 
 // newAdminPeerCert issues an mTLS admin certificate from certMgr and returns it parsed,
@@ -1659,6 +1669,8 @@ func TestHandleProvisionCertificate_UnsetScope_Returns403(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
 		strings.NewReader(`{"steward_id":"steward-unset-scope"}`))
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey,
+		&Principal{ID: "provision-caller", Assurance: session.AssuranceStrong}))
 	rec := httptest.NewRecorder()
 	server.handleProvisionCertificate(rec, req)
 
@@ -2740,4 +2752,119 @@ func TestHandleRevokeCertificate_RecordsAuditEvent(t *testing.T) {
 	raw, err := json.Marshal(e)
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), "-----BEGIN")
+}
+
+// TestHandleProvisionCertificate_NoActor_Returns401: with no principal, or one with an
+// empty ID, provisioning is refused with 401 before any certificate is issued: the
+// certificate store is unchanged and nothing is audited. The same request from a
+// principal with an ID issues a certificate and audits it under that principal.
+func TestHandleProvisionCertificate_NoActor_Returns401(t *testing.T) {
+	server, certMgr, _ := setupProvisionTestServer(t)
+	before, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+
+	provision := func(p *Principal) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+			strings.NewReader(`{"steward_id":"steward-noactor-01"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(scopedProvisionContextFor("", p))
+		rec := httptest.NewRecorder()
+		server.handleProvisionCertificate(rec, req)
+		return rec
+	}
+
+	for _, tc := range noActorCases("") {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, provision(tc.principal))
+			after, err := certMgr.ListCertificates()
+			require.NoError(t, err)
+			assert.Len(t, after, len(before), "no certificate may be issued")
+			assert.Empty(t, auditEntriesByAction(t, server, "certificate_provisioned"))
+		})
+	}
+
+	rec := provision(&Principal{ID: "provision-caller", Assurance: session.AssuranceStrong, GlobalScope: true})
+	require.Equal(t, http.StatusCreated, rec.Code, "the same request from an authenticated principal succeeds: %s", rec.Body.String())
+	after, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+	assert.Len(t, after, len(before)+1)
+	events := auditEntriesByAction(t, server, "certificate_provisioned")
+	require.Len(t, events, 1)
+	assert.Equal(t, "provision-caller", events[0].UserID)
+}
+
+// TestHandleRevokeCertificate_NoActor_Returns401: with no principal, or one with an
+// empty ID, a revoke is refused with 401 before the certificate manager is asked to
+// revoke: the certificate stays valid and nothing is audited, so a revocation is never
+// made without a record of who made it. The same request from a principal with an ID
+// revokes the certificate and audits it.
+func TestHandleRevokeCertificate_NoActor_Returns401(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+	ctx := context.Background()
+	require.NoError(t, stewardStore.RegisterSteward(ctx, &business.StewardRecord{
+		ID: "steward-noactor-c1", TenantID: "client-1", Hostname: "h", Platform: "linux", Arch: "amd64",
+	}))
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName: "steward-noactor-c1", Organization: "Test CFGMS", ClientID: "steward-noactor-c1", ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	revoke := func(p *Principal) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+		req = req.WithContext(withActor(withCallerTenant(context.Background(), "client-1"), p))
+		req = mux.SetURLVars(req, map[string]string{"serial": issued.SerialNumber})
+		rec := httptest.NewRecorder()
+		server.handleRevokeCertificate(rec, req)
+		return rec
+	}
+
+	for _, tc := range noActorCases("client-1") {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, revoke(tc.principal))
+			revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+			require.NoError(t, err)
+			assert.False(t, revoked, "the certificate must not be revoked")
+			assert.Empty(t, auditEntriesByAction(t, server, "certificate_revoked"))
+		})
+	}
+
+	require.Equal(t, http.StatusOK, revoke(&Principal{ID: "revoke-caller", Assurance: session.AssuranceStrong, TenantID: "client-1"}).Code,
+		"the same request from an authenticated principal succeeds")
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revoked)
+	events := auditEntriesByAction(t, server, "certificate_revoked")
+	require.Len(t, events, 1)
+	assert.Equal(t, "revoke-caller", events[0].UserID)
+}
+
+// TestRequireSigningAdmin_NoActor_Returns401: with no principal, or one with an empty ID
+// that otherwise holds strong assurance, a root scope and a certificate serial, the
+// signing-CA gate refuses with 401 AUTHENTICATION_REQUIRED before the backing service is
+// asked to act. A principal with an ID passes the same gate.
+func TestRequireSigningAdmin_NoActor_Returns401(t *testing.T) {
+	server, _, _ := setupRotationTestServer(t)
+	gate := func(p *Principal) (*httptest.ResponseRecorder, *Principal, bool) {
+		req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate", nil)
+		ctx := context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+		rec := httptest.NewRecorder()
+		got, ok := server.requireSigningAdmin(rec, req.WithContext(withActor(ctx, p)), true, "unavailable", "rotation")
+		return rec, got, ok
+	}
+
+	for _, tc := range noActorCases("") {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.principal != nil {
+				tc.principal.CertSerial = "serial-1"
+			}
+			rec, got, ok := gate(tc.principal)
+			assert.False(t, ok)
+			assert.Nil(t, got)
+			assertAuthenticationRequired(t, rec)
+		})
+	}
+
+	rec, got, ok := gate(&Principal{ID: "signing-admin", Assurance: session.AssuranceStrong, CertSerial: "serial-1", GlobalScope: true})
+	require.True(t, ok, rec.Body.String())
+	assert.Equal(t, "signing-admin", got.ID)
 }

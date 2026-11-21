@@ -122,7 +122,7 @@ func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request)
 // op names the operation in log lines and denial text ("rotation", "revocation").
 //
 // The gates, in order:
-//   - an authenticated principal;
+//   - an authenticated principal with an ID (requireActingPrincipal);
 //   - AssuranceStrong (mTLS admin cert). Defense-in-depth: requirePermission
 //     skips checks when rbacService is nil (RBAC-nil bypass), and a CA-key
 //     operation must NEVER be reachable by a sub-Strong-assurance principal;
@@ -134,9 +134,8 @@ func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request)
 //   - a certificate-authenticated session (Issue #4665): a root web or Bearer
 //     session, which a phished passkey could yield, may not act on the signing CA.
 func (s *Server) requireSigningAdmin(w http.ResponseWriter, r *http.Request, available bool, unavailableMsg, op string) (*Principal, bool) {
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return nil, false
 	}
 
@@ -804,6 +803,11 @@ func (s *Server) handleGetCertificate(w http.ResponseWriter, r *http.Request) {
 // Tenant-scope check runs BEFORE calling Revoke — an out-of-scope revoke is a
 // denial-of-service against the owning steward's mTLS connectivity.
 func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+
 	if s.certManager == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Certificate manager not available", "SERVICE_UNAVAILABLE")
 		return
@@ -888,10 +892,8 @@ func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request)
 		// a client tenant's steward needs a crossing (Issue #4665).
 		return
 	}
-	if callerTenant == "" && certData.ClientID != "" && s.stewardStore != nil { //architecture:allow-root-scope -- root caller: resolve the owning steward's tenant for the audit event only
-		if record, gerr := s.stewardStore.GetSteward(r.Context(), certData.ClientID); gerr == nil && record != nil {
-			ownerTenant = record.TenantID
-		}
+	if callerTenant == "" { //architecture:allow-root-scope -- root caller: resolve the owning steward's tenant for the audit event only
+		ownerTenant = s.certOwnerTenantForAudit(r.Context(), certData.ClientID)
 	}
 
 	if err := s.certManager.Revoke(serial); err != nil {
@@ -902,7 +904,6 @@ func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	s.emitOperatorAudit(r, principal, auditTenantOrSystem(ownerTenant), business.AuditEventSecurityEvent,
 		"certificate_revoked", "certificate", serial,
 		business.AuditResultSuccess, business.AuditSeverityHigh,
@@ -913,6 +914,19 @@ func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request)
 		IsValid:      false,
 		IsRevoked:    true,
 	})
+}
+
+// certOwnerTenantForAudit returns the tenant of the steward a certificate was issued
+// to, for the audit event only. It is empty when the certificate has no client, no
+// steward store is configured, or the steward has no durable record.
+func (s *Server) certOwnerTenantForAudit(ctx context.Context, clientID string) string {
+	if clientID == "" || s.stewardStore == nil {
+		return ""
+	}
+	if record, err := s.stewardStore.GetSteward(ctx, clientID); err == nil && record != nil {
+		return record.TenantID
+	}
+	return ""
 }
 
 // isClusterNodeIdentity reports whether id is a controller cluster node ID — an
@@ -986,6 +1000,11 @@ func (s *Server) authorizeRootCertIdentities(w http.ResponseWriter, r *http.Requ
 
 // handleProvisionCertificate handles POST /api/v1/certificates/provision
 func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+
 	if s.certProvisioningService == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Certificate provisioning service not available", "SERVICE_UNAVAILABLE")
 		return
@@ -1017,7 +1036,6 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 	// unused steward_id is a free pass through the containment check. New-device
 	// onboarding therefore runs as a root/unscoped operation (or after the steward is
 	// registered to a tenant), not as an unattributable tenant-scoped provision.
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	stewardTenant := ""
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	if scope.IsUnset() {
@@ -1149,19 +1167,7 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 			"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
 			"common_name", logging.SanitizeLogValue(provisionReq.CommonName),
 			"error", logging.SanitizeLogValue(provisionFailureDetail(provisionResp, err)))
-		// Issue #4346: the two service-layer refusals below are client input/
-		// authorization errors, not internal failures — map them to their own
-		// status rather than the generic 500 every other provisioning failure gets.
-		switch {
-		case errors.Is(err, service.ErrValidityCeilingExceeded):
-			s.writeErrorResponse(w, http.StatusBadRequest,
-				fmt.Sprintf("validity_days must not exceed %d", service.MaxCertificateValidityDays),
-				"VALIDITY_DAYS_EXCEEDS_MAXIMUM")
-		case errors.Is(err, service.ErrCrossTenantCertificateAccess):
-			s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
-		default:
-			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to provision certificate", "INTERNAL_ERROR")
-		}
+		s.writeProvisionFailure(w, err)
 		return
 	}
 
@@ -1175,7 +1181,7 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 	}
 
 	auditTenant := stewardTenant
-	if principal != nil && auditTenant == "" {
+	if auditTenant == "" {
 		auditTenant = principal.TenantID
 	}
 	s.emitOperatorAudit(r, principal, auditTenantOrSystem(auditTenant), business.AuditEventSecurityEvent,
@@ -1184,6 +1190,23 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 		map[string]interface{}{"serial_number": provisionResp.SerialNumber})
 
 	s.writeResponse(w, http.StatusCreated, result)
+}
+
+// writeProvisionFailure answers a failed provisioning attempt. Issue #4346: the two
+// service-layer refusals are client input/authorization errors, not internal
+// failures — they map to their own status rather than the generic 500 every other
+// provisioning failure gets.
+func (s *Server) writeProvisionFailure(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, service.ErrValidityCeilingExceeded):
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			fmt.Sprintf("validity_days must not exceed %d", service.MaxCertificateValidityDays),
+			"VALIDITY_DAYS_EXCEEDS_MAXIMUM")
+	case errors.Is(err, service.ErrCrossTenantCertificateAccess):
+		s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
+	default:
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to provision certificate", "INTERNAL_ERROR")
+	}
 }
 
 // provisionFailureDetail renders the log detail for a failed certificate

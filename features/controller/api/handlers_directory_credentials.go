@@ -124,12 +124,15 @@ func findCredentialRecord(ctx context.Context, store credentials.CredentialStore
 
 // handleRevealDirectoryCredential serves POST /api/v1/directory/credentials/{id}/reveal.
 func (s *Server) handleRevealDirectoryCredential(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	store := s.credentialStoreOrUnavailable(w)
 	if store == nil {
 		return
 	}
 	ctx := r.Context()
-	principal, _ := ctx.Value(principalContextKey).(*Principal)
 	callerTenant, _ := callerOwnTenant(ctx)
 	id := mux.Vars(r)["id"]
 

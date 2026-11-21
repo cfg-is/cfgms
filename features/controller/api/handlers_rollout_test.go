@@ -1823,3 +1823,52 @@ func TestRollout_EmptyRingAmongPopulatedRingsStillCompletes(t *testing.T) {
 	assert.Equal(t, business.RolloutStatusCompleted, stored.Status)
 	assert.Equal(t, 2, stored.RingsCompleted)
 }
+
+// TestHandleStartRollout_NoActor_Returns401: with no principal, or one with an empty ID, a
+// rollout start is refused with 401 before any rollout record exists: the store holds no
+// rollout and nothing is audited. The same request from a principal with an ID starts the
+// rollout, records that principal as its initiator and audits it.
+func TestHandleStartRollout_NoActor_Returns401(t *testing.T) {
+	const tenantID = "tenant-a"
+	const targetVersion = "v0.5.21"
+	stewards := []fleet.StewardData{{
+		ID: "steward-ok", TenantID: tenantID, Status: "online",
+		DNAAttributes: map[string]string{"deployment_ring": "pre-release", "steward.version": targetVersion},
+	}}
+	server, rolloutStore, _ := setupRolloutServer(t, tenantID, stewards)
+	auditMgr, err := audit.NewManager(pkgtesting.SetupTestStorage(t).GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+	server.auditManager = auditMgr
+	scope := tenantPrincipal(tenantID)
+
+	start := func(actor *Principal) *httptest.ResponseRecorder {
+		b, err := json.Marshal(startRolloutRequest{TargetVersion: targetVersion, TenantID: tenantID})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/rollout", bytes.NewReader(b))
+		rec := httptest.NewRecorder()
+		server.handleStartRollout(rec, withActorInScopeOf(req, scope, actor))
+		return rec
+	}
+
+	for _, tc := range noActorCases(tenantID) {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, start(tc.principal))
+			records, err := rolloutStore.ListRolloutsByTenant(context.Background(), tenantID)
+			require.NoError(t, err)
+			assert.Empty(t, records, "no rollout may be created")
+			assert.Empty(t, auditEntriesByAction(t, server, auditRolloutStarted))
+		})
+	}
+
+	rec := start(scope)
+	require.Equal(t, http.StatusAccepted, rec.Code, "the same request from an authenticated principal succeeds: %s", rec.Body.String())
+	rolloutID := parseStartRolloutID(t, rec)
+	waitForRolloutStatus(t, rolloutStore, rolloutID, 500*time.Millisecond)
+	record, err := rolloutStore.GetRollout(context.Background(), rolloutID)
+	require.NoError(t, err)
+	assert.Equal(t, scope.ID, record.InitiatedBy)
+	events := auditEntriesByAction(t, server, auditRolloutStarted)
+	require.Len(t, events, 1)
+	assert.Equal(t, scope.ID, events[0].UserID)
+}

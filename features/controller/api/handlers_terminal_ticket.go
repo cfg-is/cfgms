@@ -103,24 +103,33 @@ func (s *Server) handleTerminalPrepare(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleTerminalTicket handles POST /api/v1/terminal/tickets/{steward_id}. It verifies the
-// operator proof over the terminal-open envelope and mints a 30-second single-use ticket.
-func (s *Server) handleTerminalTicket(w http.ResponseWriter, r *http.Request) {
-	stewardID := mux.Vars(r)["steward_id"]
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	if principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "UNAUTHORIZED")
-		return
-	}
-
+// decodeTerminalTicketRequest reads the ticket request and checks its terminal
+// shell. It writes the 400 response and reports false when the body is not acceptable.
+func (s *Server) decodeTerminalTicketRequest(w http.ResponseWriter, r *http.Request) (terminalTicketRequest, bool) {
 	var req terminalTicketRequest
 	r.Body = http.MaxBytesReader(w, r.Body, terminalTicketMaxBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", "INVALID_REQUEST")
-		return
+		return req, false
 	}
 	if req.TerminalShell == "" || !terminal.ValidateShell(req.TerminalShell) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "A supported terminal_shell is required", "INVALID_TERMINAL_SHELL")
+		return req, false
+	}
+	return req, true
+}
+
+// handleTerminalTicket handles POST /api/v1/terminal/tickets/{steward_id}. It verifies the
+// operator proof over the terminal-open envelope and mints a 30-second single-use ticket.
+func (s *Server) handleTerminalTicket(w http.ResponseWriter, r *http.Request) {
+	stewardID := mux.Vars(r)["steward_id"]
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+
+	req, ok := s.decodeTerminalTicketRequest(w, r)
+	if !ok {
 		return
 	}
 

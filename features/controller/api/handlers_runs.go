@@ -350,9 +350,8 @@ func (s *Server) verifyOperatorCertificateBinding(ctx context.Context, operatorC
 //
 // On failure it writes the 401 and returns ok=false (Issue #1990).
 func (s *Server) authRunAccess(w http.ResponseWriter, r *http.Request) (principal *Principal, tenantID string, ok bool) {
-	principal, hasPrincipal := r.Context().Value(principalContextKey).(*Principal)
-	if !hasPrincipal || principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, hasPrincipal := s.requireActingPrincipal(w, r)
+	if !hasPrincipal {
 		return nil, "", false
 	}
 	tenantID = callerTenantFilter(r.Context())

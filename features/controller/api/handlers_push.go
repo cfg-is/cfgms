@@ -537,7 +537,10 @@ func principalAuditUserType(p *Principal) business.AuditUserType {
 
 // emitOperatorAudit records an audit event for an action an authenticated operator
 // took, naming the principal as the actor. It is a no-op when auditManager is nil
-// and never blocks or fails the caller.
+// and never blocks or fails the caller. Callers must resolve the principal first (via
+// requireActingPrincipal or an equivalent check that refuses a nil or empty-ID
+// principal with 401) and make no change before that; a principal that reaches this
+// function without an ID would be recorded as an empty actor.
 func (s *Server) emitOperatorAudit(
 	r *http.Request,
 	principal *Principal,

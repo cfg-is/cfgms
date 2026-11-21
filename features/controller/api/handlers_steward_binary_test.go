@@ -1578,3 +1578,36 @@ func TestAutoApprovalWithoutApprovalStoreLeavesBinaryUnapproved(t *testing.T) {
 	assert.Empty(t, auditEntriesByAction(t, f.srv, auditActionStewardBinaryAutoApproved))
 	assert.Equal(t, http.StatusServiceUnavailable, f.selfFetch(autoApproveVersion).Code)
 }
+
+// TestHandlePublishStewardBinary_NoActor_Returns401: with no principal, or one with an
+// empty ID, a publish is refused with 401 before the body is read: no binary is stored
+// for the release and the same signed request from a principal with an ID stores it.
+func TestHandlePublishStewardBinary_NoActor_Returns401(t *testing.T) {
+	server, fix := setupStewardBinaryServer(t)
+	content := []byte("cfgms-steward binary content")
+	sig := fix.signContent(content, "v0.5.12", "linux", "amd64")
+	scope := &Principal{ID: "api-key:test-tenant", Assurance: session.AssuranceMachine, TenantID: "test-tenant"}
+
+	publish := func(actor *Principal) *httptest.ResponseRecorder {
+		q := url.Values{}
+		q.Set("signature", sig)
+		req := httptest.NewRequest(http.MethodPost,
+			"/api/v1/installer/steward-binaries/v0.5.12/linux/amd64?"+q.Encode(), bytes.NewReader(content))
+		req = mux.SetURLVars(req, map[string]string{"version": "v0.5.12", "platform": "linux", "arch": "amd64"})
+		rec := httptest.NewRecorder()
+		server.handlePublishStewardBinary(rec, withActorInScopeOf(req, scope, actor))
+		return rec
+	}
+
+	for _, tc := range noActorCases("test-tenant") {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, publish(tc.principal))
+			got := doGet(server, "v0.5.12", "linux", "amd64", "test-tenant")
+			assert.Equal(t, http.StatusNotFound, got.Code, "no binary may be stored")
+		})
+	}
+
+	rec := publish(scope)
+	require.Equal(t, http.StatusOK, rec.Code, "the same request from an authenticated principal succeeds: %s", rec.Body.String())
+	assert.Equal(t, http.StatusOK, doGet(server, "v0.5.12", "linux", "amd64", "test-tenant").Code)
+}

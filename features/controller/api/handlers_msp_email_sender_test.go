@@ -813,3 +813,71 @@ func TestMSPEmailSender_PutNoActor_Returns401AndStoresNothing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, admin.ID, sec.CreatedBy)
 }
+
+// mspSenderDirect calls handler directly as principal p (nil: none on the context) with
+// the MSP's own tenant scope, so the actor is the only reason a request is refused.
+func (e *mspSenderEnv) mspSenderDirect(handler http.HandlerFunc, method, path string, p *Principal) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "msp-a"})
+	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, "msp-a")
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("msp-a"))
+	rec := httptest.NewRecorder()
+	handler(rec, req.WithContext(withActor(ctx, p)))
+	return rec
+}
+
+// TestDeleteMSPEmailSender_NoActor_Returns401: with no principal, or one with an empty ID,
+// removing the MSP sender is refused with 401, the record and password stay stored and
+// nothing is audited. The same request from an authenticated principal removes it.
+func TestDeleteMSPEmailSender_NoActor_Returns401(t *testing.T) {
+	env := newMSPSenderEnv(t)
+	admin := mspSenderAdmin("msp-a")
+	require.Equal(t, http.StatusOK, env.do(t, admin, http.MethodPut, "msp-a", mspSenderBody(nil)).Code)
+	before := len(auditEntriesByAction(t, env.server, mspEmailSenderAuditRemove))
+
+	for _, tc := range noActorCases("msp-a") {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := env.mspSenderDirect(env.server.handleDeleteMSPEmailSender, http.MethodDelete, "/tenants/msp-a/email-sender", tc.principal)
+			assertAuthenticationRequired(t, rec)
+			sender, pw := env.stored(t, "msp-a")
+			assert.NotNil(t, sender, "the MSP sender record must not be removed")
+			assert.Equal(t, mspSenderPassword, pw, "the MSP sender password must not be removed")
+			assert.Len(t, auditEntriesByAction(t, env.server, mspEmailSenderAuditRemove), before)
+		})
+	}
+
+	rec := env.mspSenderDirect(env.server.handleDeleteMSPEmailSender, http.MethodDelete, "/tenants/msp-a/email-sender", admin)
+	require.Equal(t, http.StatusOK, rec.Code, "the same request from an authenticated principal succeeds: %s", rec.Body.String())
+	sender, pw := env.stored(t, "msp-a")
+	assert.Nil(t, sender)
+	assert.Empty(t, pw)
+	events := auditEntriesByAction(t, env.server, mspEmailSenderAuditRemove)
+	require.Len(t, events, before+1)
+	assert.Equal(t, admin.ID, events[len(events)-1].UserID)
+}
+
+// TestTestMSPEmailSender_NoActor_Returns401: with no principal, or one with an empty ID,
+// the test send is refused with 401, nothing is sent and nothing is audited. The same
+// request from an authenticated principal sends one message.
+func TestTestMSPEmailSender_NoActor_Returns401(t *testing.T) {
+	f, env := newMSPTestSendEnv(t)
+	attachMSPSender(t, f.server, "msp-a", f.msp, testSMTPPassword)
+
+	for _, tc := range noActorCases("msp-a") {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := env.mspSenderDirect(env.server.handleTestMSPEmailSender, http.MethodPost, "/tenants/msp-a/email-sender/test", tc.principal)
+			assertAuthenticationRequired(t, rec)
+			assert.Empty(t, f.msp.Messages(), "nothing may be sent")
+			assert.Empty(t, f.platform.Messages())
+			assert.Empty(t, auditEntriesByAction(t, f.server, mspEmailSenderAuditTested))
+		})
+	}
+
+	admin := mspSenderAdmin("msp-a")
+	rec := env.mspSenderDirect(env.server.handleTestMSPEmailSender, http.MethodPost, "/tenants/msp-a/email-sender/test", admin)
+	require.Equal(t, http.StatusOK, rec.Code, "the same request from an authenticated principal succeeds: %s", rec.Body.String())
+	assert.Len(t, f.msp.Messages(), 1)
+	events := auditEntriesByAction(t, f.server, mspEmailSenderAuditTested)
+	require.Len(t, events, 1)
+	assert.Equal(t, admin.ID, events[0].UserID)
+}

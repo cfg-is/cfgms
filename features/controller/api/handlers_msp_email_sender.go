@@ -258,7 +258,10 @@ func (s *Server) writeMSPEmailSender(r *http.Request, mspID string, sender MSPEm
 // handleDeleteMSPEmailSender implements DELETE /api/v1/tenants/{id}/email-sender.
 // It removes the password and the record; removing an absent sender succeeds.
 func (s *Server) handleDeleteMSPEmailSender(w http.ResponseWriter, r *http.Request) {
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	mspID := s.authorizeMSPEmailSenderAccess(w, r, principal)
 	if mspID == "" || s.refuseRootScopedEmailSenderWrite(w, principal) {
 		return
@@ -298,17 +301,14 @@ func (s *Server) recordMSPEmailSenderAudit(r *http.Request, mspID string, princi
 }
 
 // newMSPEmailSenderAuditEvent starts the tenant-scoped, high-severity audit event
-// for an action on the MSP's sender, naming the acting principal.
+// for an action on the MSP's sender, naming the acting principal. The caller has
+// resolved principal through requireActingPrincipal, so it is non-nil with an ID.
 func newMSPEmailSenderAuditEvent(mspID string, principal *Principal, action string, result business.AuditResult) *audit.AuditEventBuilder {
-	var actorID string
-	if principal != nil {
-		actorID = principal.ID
-	}
 	return audit.NewEventBuilder().
 		Tenant(mspID).
 		Type(business.AuditEventConfiguration).
 		Action(action).
-		User(actorID, business.AuditUserTypeHuman).
+		User(principal.ID, business.AuditUserTypeHuman).
 		Resource("tenant", mspID, "").
 		Result(result).
 		Severity(business.AuditSeverityHigh)
@@ -360,7 +360,10 @@ func (s *Server) requireEmptyTestBody(w http.ResponseWriter, r *http.Request) bo
 // The notifier is the guarded one, so a host that resolves to a loopback, private or
 // link-local address is refused and reports delivered=false.
 func (s *Server) handleTestMSPEmailSender(w http.ResponseWriter, r *http.Request) {
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	mspID := s.authorizeMSPEmailSenderAccess(w, r, principal)
 	if mspID == "" || s.refuseRootScopedEmailSenderSend(w, principal) {
 		return
