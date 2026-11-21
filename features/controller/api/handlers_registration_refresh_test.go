@@ -909,11 +909,11 @@ func TestHandleRefreshReject_RejectsEntry(t *testing.T) {
 		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
 	})
 
-	apiKey := NewTestKey(t, f.server, []string{"refresh:reject"})
+	apiKey := newStrongBearerHeader(t, f.server, []string{"refresh:reject"}, "test-tenant")
 
 	body, _ := json.Marshal(AdminRefreshRejectRequest{Reason: "unauthorized device"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/reject", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Authorization", apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	f.server.router.ServeHTTP(rec, req)
@@ -1128,10 +1128,10 @@ func TestHandleRejectRefresh_CrossTenantReturns404(t *testing.T) {
 	})
 
 	// API key scoped to a different tenant.
-	apiKey := NewEphemeralTestKey(t, f.server, []string{"refresh:reject"}, "other-tenant", 5*time.Minute)
+	apiKey := newStrongBearerHeader(t, f.server, []string{"refresh:reject"}, "other-tenant")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/reject", nil)
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Authorization", apiKey)
 	rec := httptest.NewRecorder()
 	f.server.router.ServeHTTP(rec, req)
 

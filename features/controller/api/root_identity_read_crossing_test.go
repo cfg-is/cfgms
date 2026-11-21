@@ -134,9 +134,9 @@ func newIdentityReadFixture(t *testing.T) *identityReadFixture {
 	// Role configs, stored under each tenant through its own scoped key.
 	server.SetRoleConfigStore(sm.GetConfigStore())
 	for _, tid := range []string{testRootTenantID, identityMSP} {
-		key := NewEphemeralTestKey(t, server, []string{"role:write"}, tid, 5*time.Minute)
+		auth := newStrongBearerHeader(t, server, []string{"role:write"}, tid)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/roles", bytes.NewReader(validRolePayload("cfg-"+tid, "os:linux")))
-		req.Header.Set("X-API-Key", key)
+		req.Header.Set("Authorization", auth)
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		server.router.ServeHTTP(w, req)

@@ -53,11 +53,11 @@ func validRolePayload(name, sel string) []byte {
 // a role config, and GET /api/v1/roles/{name} returns the same config.
 func TestHandleCreateRoleConfig_HappyPath(t *testing.T) {
 	server := setupRoleConfigServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"role:write", "role:read"}, "test-tenant", 5*time.Minute)
+	apiKey := newStrongBearerHeader(t, server, []string{"role:write", "role:read"}, "test-tenant")
 
 	body := validRolePayload("github-runners", "os:windows tag:github-runner")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/roles", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Authorization", apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -73,7 +73,7 @@ func TestHandleCreateRoleConfig_HappyPath(t *testing.T) {
 
 	// GET returns the same role config.
 	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/roles/github-runners", nil)
-	req2.Header.Set("X-API-Key", apiKey)
+	req2.Header.Set("Authorization", apiKey)
 	rec2 := httptest.NewRecorder()
 	server.router.ServeHTTP(rec2, req2)
 
@@ -91,7 +91,7 @@ func TestHandleCreateRoleConfig_HappyPath(t *testing.T) {
 // returns 400 BAD_REQUEST.
 func TestHandleCreateRoleConfig_InvalidSelector(t *testing.T) {
 	server := setupRoleConfigServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"role:write"}, "test-tenant", 5*time.Minute)
+	apiKey := newStrongBearerHeader(t, server, []string{"role:write"}, "test-tenant")
 
 	body, _ := json.Marshal(createRoleConfigRequest{
 		Name:     "bad-role",
@@ -99,7 +99,7 @@ func TestHandleCreateRoleConfig_InvalidSelector(t *testing.T) {
 		Fragment: minimalFragment(),
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/roles", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Authorization", apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -116,7 +116,7 @@ func TestHandleCreateRoleConfig_InvalidSelector(t *testing.T) {
 // an activedirectory.* resource (Issue #5551).
 func TestHandleCreateRoleConfig_DirectoryResourceRejected(t *testing.T) {
 	server := setupRoleConfigServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"role:write"}, "test-tenant", 5*time.Minute)
+	apiKey := newStrongBearerHeader(t, server, []string{"role:write"}, "test-tenant")
 
 	body, _ := json.Marshal(createRoleConfigRequest{
 		Name:     "dir-role",
@@ -127,7 +127,7 @@ func TestHandleCreateRoleConfig_DirectoryResourceRejected(t *testing.T) {
 		}}},
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/roles", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Authorization", apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -139,7 +139,7 @@ func TestHandleCreateRoleConfig_DirectoryResourceRejected(t *testing.T) {
 // TestHandleCreateRoleConfig_EmptySelector verifies that an empty selector returns 400.
 func TestHandleCreateRoleConfig_EmptySelector(t *testing.T) {
 	server := setupRoleConfigServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"role:write"}, "test-tenant", 5*time.Minute)
+	apiKey := newStrongBearerHeader(t, server, []string{"role:write"}, "test-tenant")
 
 	body, _ := json.Marshal(createRoleConfigRequest{
 		Name:     "bad-role",
@@ -147,7 +147,7 @@ func TestHandleCreateRoleConfig_EmptySelector(t *testing.T) {
 		Fragment: minimalFragment(),
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/roles", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Authorization", apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -159,12 +159,12 @@ func TestHandleCreateRoleConfig_EmptySelector(t *testing.T) {
 // the roles belonging to the authenticated tenant.
 func TestHandleListRoleConfigs_ReturnsTenantRoles(t *testing.T) {
 	server := setupRoleConfigServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"role:write", "role:read"}, "test-tenant", 5*time.Minute)
+	apiKey := newStrongBearerHeader(t, server, []string{"role:write", "role:read"}, "test-tenant")
 
 	for _, name := range []string{"role-alpha", "role-beta"} {
 		body := validRolePayload(name, "all")
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/roles", bytes.NewReader(body))
-		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("Authorization", apiKey)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		server.router.ServeHTTP(rec, req)
@@ -172,7 +172,7 @@ func TestHandleListRoleConfigs_ReturnsTenantRoles(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/roles", nil)
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Authorization", apiKey)
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
@@ -196,10 +196,10 @@ func TestHandleListRoleConfigs_ReturnsTenantRoles(t *testing.T) {
 // config is reported in the errors array instead of being dropped.
 func TestHandleListRoleConfigs_ReportsMalformedEntry(t *testing.T) {
 	server := setupRoleConfigServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"role:write", "role:read"}, "test-tenant", 5*time.Minute)
+	apiKey := newStrongBearerHeader(t, server, []string{"role:write", "role:read"}, "test-tenant")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/roles", bytes.NewReader(validRolePayload("good-role", "all")))
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Authorization", apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -220,7 +220,7 @@ func TestHandleListRoleConfigs_ReportsMalformedEntry(t *testing.T) {
 	}))
 
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/roles", nil)
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Authorization", apiKey)
 	rec = httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -242,12 +242,12 @@ func TestHandleListRoleConfigs_ReportsMalformedEntry(t *testing.T) {
 // the role and subsequent GET returns 404.
 func TestHandleDeleteRoleConfig_RemovesRole(t *testing.T) {
 	server := setupRoleConfigServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"role:write", "role:read"}, "test-tenant", 5*time.Minute)
+	apiKey := newStrongBearerHeader(t, server, []string{"role:write", "role:read"}, "test-tenant")
 
 	// Create role.
 	body := validRolePayload("to-delete", "all")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/roles", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Authorization", apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -255,14 +255,14 @@ func TestHandleDeleteRoleConfig_RemovesRole(t *testing.T) {
 
 	// Delete role.
 	req2 := httptest.NewRequest(http.MethodDelete, "/api/v1/roles/to-delete", nil)
-	req2.Header.Set("X-API-Key", apiKey)
+	req2.Header.Set("Authorization", apiKey)
 	rec2 := httptest.NewRecorder()
 	server.router.ServeHTTP(rec2, req2)
 	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
 
 	// GET now returns 404.
 	req3 := httptest.NewRequest(http.MethodGet, "/api/v1/roles/to-delete", nil)
-	req3.Header.Set("X-API-Key", apiKey)
+	req3.Header.Set("Authorization", apiKey)
 	rec3 := httptest.NewRecorder()
 	server.router.ServeHTTP(rec3, req3)
 	assert.Equal(t, http.StatusNotFound, rec3.Code)
@@ -271,10 +271,10 @@ func TestHandleDeleteRoleConfig_RemovesRole(t *testing.T) {
 // TestHandleDeleteRoleConfig_NotFound verifies DELETE for a non-existent role returns 404.
 func TestHandleDeleteRoleConfig_NotFound(t *testing.T) {
 	server := setupRoleConfigServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"role:write"}, "test-tenant", 5*time.Minute)
+	apiKey := newStrongBearerHeader(t, server, []string{"role:write"}, "test-tenant")
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/roles/nonexistent", nil)
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Authorization", apiKey)
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -286,7 +286,7 @@ func TestHandleRoleConfig_TenantScoping(t *testing.T) {
 	server := setupRoleConfigServer(t)
 
 	// Create API key for tenant-a.
-	keyA := NewEphemeralTestKey(t, server, []string{"role:write", "role:read"}, "tenant-a", 5*time.Minute)
+	keyA := newStrongBearerHeader(t, server, []string{"role:write", "role:read"}, "tenant-a")
 
 	// Seed a role for tenant-b as a root-scoped admin explicitly targeting tenant-b
 	// via ?tenant= (Issue #4336: roleTenantFromRequest now resolves the target tenant
@@ -325,7 +325,7 @@ func TestHandleRoleConfig_TenantScoping(t *testing.T) {
 
 	// GET via tenant-a API key returns 404 (not 200) because tenant-a has no roles.
 	req3 := httptest.NewRequest(http.MethodGet, "/api/v1/roles/tenant-b-role", nil)
-	req3.Header.Set("X-API-Key", keyA)
+	req3.Header.Set("Authorization", keyA)
 	rec3 := httptest.NewRecorder()
 	server.router.ServeHTTP(rec3, req3)
 	assert.Equal(t, http.StatusNotFound, rec3.Code)
@@ -383,7 +383,7 @@ func TestHandleRoleConfig_ServiceUnavailable(t *testing.T) {
 // name return 400.
 func TestHandleCreateRoleConfig_InvalidName(t *testing.T) {
 	server := setupRoleConfigServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"role:write"}, "test-tenant", 5*time.Minute)
+	apiKey := newStrongBearerHeader(t, server, []string{"role:write"}, "test-tenant")
 
 	for _, bad := range []string{"", "has space", "slash/name", "null\x00byte"} {
 		body, _ := json.Marshal(createRoleConfigRequest{
@@ -392,7 +392,7 @@ func TestHandleCreateRoleConfig_InvalidName(t *testing.T) {
 			Fragment: minimalFragment(),
 		})
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/roles", bytes.NewReader(body))
-		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("Authorization", apiKey)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		server.router.ServeHTTP(rec, req)
@@ -404,7 +404,7 @@ func TestHandleCreateRoleConfig_InvalidName(t *testing.T) {
 // fragment round-trips correctly.
 func TestHandleCreateRoleConfig_WithFragment(t *testing.T) {
 	server := setupRoleConfigServer(t)
-	apiKey := NewEphemeralTestKey(t, server, []string{"role:write", "role:read"}, "test-tenant", 5*time.Minute)
+	apiKey := newStrongBearerHeader(t, server, []string{"role:write", "role:read"}, "test-tenant")
 
 	fragment := stewardtypes.StewardConfig{
 		Steward: stewardtypes.StewardSettings{
@@ -417,7 +417,7 @@ func TestHandleCreateRoleConfig_WithFragment(t *testing.T) {
 		Fragment: fragment,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/roles", bytes.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Authorization", apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
@@ -425,7 +425,7 @@ func TestHandleCreateRoleConfig_WithFragment(t *testing.T) {
 
 	// GET and verify the fragment logging level is preserved.
 	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/roles/debug-role", nil)
-	req2.Header.Set("X-API-Key", apiKey)
+	req2.Header.Set("Authorization", apiKey)
 	rec2 := httptest.NewRecorder()
 	server.router.ServeHTTP(rec2, req2)
 	require.Equal(t, http.StatusOK, rec2.Code)
@@ -534,7 +534,7 @@ func TestRoleConfigChangeTriggersConfigSyncForMatchingStewards(t *testing.T) {
 	// Production wires the same tag store into the controller service (server.go).
 	server.controllerService.SetTagStore(server.tagStore)
 	cp, store := newSyncRecorder(t, server)
-	apiKey := NewEphemeralTestKey(t, server, []string{"role:write", "role:read"}, "test-tenant", 5*time.Minute)
+	apiKey := newStrongBearerHeader(t, server, []string{"role:write", "role:read"}, "test-tenant")
 
 	addTagTestSteward(t, server, "s-tagged", "test-tenant")
 	addTagTestSteward(t, server, "s-untagged", "test-tenant")
@@ -547,7 +547,7 @@ func TestRoleConfigChangeTriggersConfigSyncForMatchingStewards(t *testing.T) {
 	}
 	do := func(method, url string, body []byte) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, url, bytes.NewReader(body))
-		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("Authorization", apiKey)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		server.router.ServeHTTP(rec, req)
@@ -589,12 +589,12 @@ func TestRoleConfigChangeTriggersConfigSyncForMatchingStewards(t *testing.T) {
 func TestRoleConfigChangeSyncWithoutPublisherIsNoOp(t *testing.T) {
 	server := setupTagServer(t)
 	server.SetRoleConfigStore(pkgtesting.SetupTestStorage(t).GetConfigStore())
-	apiKey := NewEphemeralTestKey(t, server, []string{"role:write"}, "test-tenant", 5*time.Minute)
+	apiKey := newStrongBearerHeader(t, server, []string{"role:write"}, "test-tenant")
 	addTagTestSteward(t, server, "s-np", "test-tenant")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/roles",
 		bytes.NewReader(validRolePayload("np", "tag:x")))
-	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Authorization", apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)

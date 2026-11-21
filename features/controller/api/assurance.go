@@ -80,6 +80,8 @@ var permissionAssurance = map[string]Requirement{
 	"tenant:crossing-break-glass":         {Min: session.AssuranceStrong},                            // POST /tenants/{id}/break-glass
 	"tenant:crossing-approve-break-glass": {Min: session.AssuranceStrong, RequireUserPresence: true}, // POST /tenants/{id}/break-glass/{crossing_id}/approve
 	"refresh:approve":                     {Min: session.AssuranceStrong},                            // POST /stewards/refresh/{pending_id}/approve
+	"refresh:reject":                      {Min: session.AssuranceStrong},                            // POST /stewards/refresh/{pending_id}/reject (Issue #6383, mirrors refresh:approve)
+	"role:write":                          {Min: session.AssuranceStrong},                            // POST/PUT/DELETE /roles... (Issue #6383, mirrors the rbac:*-role writes)
 	"refresh:set-policy":                  {Min: session.AssuranceStrong, RequireUserPresence: true}, // PUT /tenants/{tenant_path}/refresh-policy
 	"steward:move":                        {Min: session.AssuranceStrong},                            // POST /stewards/{id}/move
 	"steward:decommission":                {Min: session.AssuranceStrong},                            // DELETE /stewards/{id}
@@ -285,6 +287,9 @@ var permissionAssurance = map[string]Requirement{
 	// both routes share the permission, so a human session needs Strong on both. Scoped API
 	// keys keep working for automation (AllowMachine), with no presence tap.
 	"config:push": {Min: session.AssuranceStrong, AllowMachine: true},
+	// config:rollback (Issue #6383) gates the config rollback route, a push of a prior
+	// version; it mirrors config:push, including the machine allowance for automation.
+	"config:rollback": {Min: session.AssuranceStrong, AllowMachine: true},
 
 	// monitoring:write-markers gates POST /api/v1/monitoring/markers on the private metrics
 	// listener. The deploy agent holds an API key and cannot tap a passkey, so the
