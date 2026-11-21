@@ -19,6 +19,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/registration/identity"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // maxAuthenticatorCACertBytes bounds the --ca-cert file read.
@@ -40,15 +41,29 @@ On Windows each key is, by default, a non-exportable per-user key in the
 platform key provider (the TPM through the Platform Crypto Provider when
 present, otherwise the software key provider). Its private bytes never exist
 in cfg or on disk; the encrypted credential store (credential name
-authenticator.<name>) holds only the binding and where the key is. Elsewhere,
-or with --key-provider store, the key itself is kept in the encrypted
-credential store and is never printed or written anywhere else. With
---key-provider tpm (Linux and Windows) the key is created inside the host TPM
-and the store holds only TPM-wrapped blobs that are useless on any other
-machine; only such a key can register on a root agent account.
+authenticator.<name>) holds only the binding and where the key is.
 
-Either way, any process running as the same user on this machine can sign with
-the key, so treat it as a credential of that user.
+On Linux and macOS, with no --key-provider, the key goes to the strongest store
+the host has: a usable TPM 2.0 (Linux; the key is created inside it and is
+non-exportable), otherwise the OS keychain (the macOS login Keychain, or the
+Linux Secret Service on a session bus with an unlocked collection). The record
+holds only a reference to the keychain item. With neither, create refuses and
+creates nothing; it never falls back to the encrypted file store on its own. The
+kernel session keyring is never used, because it is lost at logout and reboot.
+
+--key-provider store is the explicit choice of the encrypted file store: the key
+is inside a record encrypted with values (the machine ID and a salt file beside
+it) that any process of the same user can read, so code running as that user can
+recover the key. Create warns about this on Linux and macOS. It is the way to
+use a host with no TPM and no OS keychain, such as headless Linux, for an
+authenticator on a tenant agent account. With --key-provider tpm (Linux and
+Windows) the key is created inside the host TPM and the store holds only
+TPM-wrapped blobs that are useless on any other machine; only such a key can
+register on a root agent account.
+
+Only a TPM key stops code running as the same user from extracting the key. No
+protection stops a process running as the same user from asking for a signature,
+so treat the authenticator as a credential of that user.
 
 Subcommands:
   create  Create an authenticator bound to a controller
@@ -71,16 +86,28 @@ certificate for later connections. Controller TLS certificates are always verifi
 --key-provider chooses where the key lives:
   platform  a per-user key in the Windows platform key provider whose private
             bytes cannot be read out (Windows only; the Windows default)
-  store     a key kept in the encrypted credential store (the default on other
-            operating systems)
+  store     a key kept in the encrypted credential store, the file store. It is
+            never chosen unless named: any process of the same user can read the
+            values that decrypt it, so code running as that user can recover the
+            key. Create warns about this on Linux and macOS.
   tpm       a key created inside the host TPM 2.0 (Linux /dev/tpmrm0 or Windows
             TBS; not macOS), as the TPM attestation of a root agent account
             requires. It refuses, and creates nothing, when there is no usable
             TPM or the TPM has no endorsement key certificate in NV storage;
             there is no fallback.
-With no --key-provider, Windows falls back to store only when no platform key
-provider is available, and says so. 'cfg authenticator list' shows which
-protection each authenticator has.
+With no --key-provider:
+  Windows  uses platform, and falls back to store only when no platform key
+           provider is available, and says so.
+  Linux    uses the first available of: a usable TPM 2.0 (an endorsement key
+           certificate is not required here; the key cannot be extracted), then
+           the OS keychain (the Secret Service, on a session bus with an
+           unlocked collection; the kernel session keyring is never used).
+  macOS    uses the login Keychain.
+  If none is available, create exits non-zero and creates nothing: enable a TPM
+  or virtual TPM, run a Secret Service, or pass --key-provider store to accept
+  the encrypted file store and its risk. It never falls back to store on its own.
+'cfg authenticator list' shows which protection each authenticator has: tpm,
+keychain, store (the encrypted file store) or platform.
 
 An existing name is refused; delete it first to replace it.
 
@@ -95,7 +122,7 @@ Examples:
 	create.Flags().String("origin", "", "WebAuthn origin, https (default: scheme://host[:port] of --url)")
 	create.Flags().String("ca-cert", "", "PEM file with the CA certificate that signs the controller's TLS certificate")
 	create.Flags().String("label", "", "free-text label for the authenticator")
-	create.Flags().String("key-provider", "", "where the key lives: platform (Windows), store or tpm (default: platform on Windows, store elsewhere)")
+	create.Flags().String("key-provider", "", "where the key lives: platform (Windows), store (encrypted file store), tpm (default: platform on Windows; elsewhere the TPM, else the OS keychain, else refuse)")
 
 	list := &cobra.Command{
 		Use:   "list",
@@ -116,7 +143,8 @@ Examples:
 		Use:   "delete <name>",
 		Short: "Delete a software authenticator",
 		Long: `Deletes the authenticator from the credential store and, for a platform key,
-deletes the key from the platform key provider. The key cannot be recovered.
+deletes the key from the platform key provider and, for a keychain key, deletes
+the item from the OS keychain. The key cannot be recovered.
 This does not touch the controller: it still lists the credential until it is
 revoked (cfg webauthn revoke <credential-id>).
 
@@ -190,7 +218,10 @@ func authenticatorOrigin(override string, u *url.URL) (string, error) {
 
 // authenticatorKeyChoice is where create puts the key.
 type authenticatorKeyChoice struct {
-	protection string // authenticatorProtectionPlatform, authenticatorProtectionStore or authenticatorProtectionTPM
+	// protection is authenticatorProtectionPlatform, authenticatorProtectionStore,
+	// authenticatorProtectionTPM or authenticatorProtectionAuto (Linux and macOS
+	// with no --key-provider: the TPM, else the OS keychain, else a refusal).
+	protection string
 	// fallback allows store when no platform provider is available. It is set
 	// only for the Windows default, never for an explicit --key-provider.
 	fallback bool
@@ -208,11 +239,13 @@ func resolveAuthenticatorKeyProvider(flag string) (authenticatorKeyChoice, error
 		if identity.UserKeysSupported() {
 			return authenticatorKeyChoice{protection: authenticatorProtectionPlatform, fallback: true}, nil
 		}
-		return authenticatorKeyChoice{protection: authenticatorProtectionStore}, nil
+		// Never the file store: that is only ever an explicit --key-provider store.
+		return authenticatorKeyChoice{protection: authenticatorProtectionAuto}, nil
 	case authenticatorProtectionPlatform:
 		if !identity.UserKeysSupported() {
 			return authenticatorKeyChoice{}, fmt.Errorf("--key-provider platform is not supported on %s: "+
-				"platform keys are Windows only; use --key-provider store", runtime.GOOS)
+				"platform keys are Windows only; omit --key-provider to use the TPM or OS keychain, "+
+				"or use --key-provider store for the encrypted file store", runtime.GOOS)
 		}
 		return authenticatorKeyChoice{protection: authenticatorProtectionPlatform}, nil
 	case authenticatorProtectionStore:
@@ -230,25 +263,70 @@ func resolveAuthenticatorKeyProvider(flag string) (authenticatorKeyChoice, error
 	}
 }
 
-// makeTPMKeyFirst creates the TPM key when choice asks for one. A TPM key is only
-// wrapped blobs in the record, with no state left in the TPM, so it is made before
-// the credential store is opened: a host with no usable TPM is refused before the
-// store is touched, and a key made for a name that turns out to exist is dropped.
-func makeTPMKeyFirst(rec *authenticatorRecord, choice authenticatorKeyChoice) error {
-	if choice.protection != authenticatorProtectionTPM {
-		return nil
+// errNoAuthenticatorKeyStore is the refusal when the default selection finds
+// neither a TPM nor an OS keychain. Nothing has been created.
+func errNoAuthenticatorKeyStore(keychainErr error) error {
+	msg := "no TPM and no OS keychain is available on this host, so no authenticator key was created and nothing was stored. " +
+		"Enable a TPM or virtual TPM, run a Secret Service (a session bus with an unlocked collection), " +
+		"or pass --key-provider store to accept the encrypted file store, whose key any process of the same user can recover"
+	if authenticatorHostOS == "darwin" {
+		msg = "the macOS login Keychain is not available, so no authenticator key was created and nothing was stored. " +
+			"Pass --key-provider store to accept the encrypted file store, whose key any process of the same user can recover"
 	}
-	return rec.setTPMKey()
+	if keychainErr != nil {
+		return fmt.Errorf("%s: %w", msg, keychainErr)
+	}
+	return errors.New(msg)
+}
+
+// prepareAuthenticatorKey makes the keys that leave no state in the credential
+// store, before it is opened, so a host with nothing to hold the key is refused
+// before the store is touched and a key made for a name that turns out to exist is
+// dropped. For tpm it creates the TPM key (EK certificate required). For the
+// default selection it tries the TPM (Linux only, no EK certificate required) and
+// otherwise opens the native OS keychain, returning it for setAuthenticatorKey to
+// write to after the existence check; with neither it refuses. It returns a nil
+// store for every other choice and when the TPM key was made.
+func prepareAuthenticatorKey(rec *authenticatorRecord, choice authenticatorKeyChoice) (keychain secretsif.SecretStore, err error) {
+	switch choice.protection {
+	case authenticatorProtectionTPM:
+		return nil, rec.setTPMKey()
+	case authenticatorProtectionAuto:
+		if authenticatorHostOS != "darwin" && rec.setTPMKeyWith(false) == nil {
+			return nil, nil
+		}
+		keychain, err = authenticatorKeychainFn()
+		if err != nil {
+			return nil, errNoAuthenticatorKeyStore(err)
+		}
+		if keychain == nil {
+			return nil, errNoAuthenticatorKeyStore(nil)
+		}
+		return keychain, nil
+	}
+	return nil, nil
 }
 
 // setAuthenticatorKey gives rec its key as choice says. It reports whether the
-// Windows default fell back to the credential store.
-func setAuthenticatorKey(rec *authenticatorRecord, choice authenticatorKeyChoice) (fellBack bool, err error) {
+// Windows default fell back to the credential store. keychain is the store
+// prepareAuthenticatorKey opened for the default selection.
+func setAuthenticatorKey(ctx context.Context, rec *authenticatorRecord, choice authenticatorKeyChoice, keychain secretsif.SecretStore) (fellBack bool, err error) {
 	switch choice.protection {
 	case authenticatorProtectionStore:
 		return false, rec.setStoreKey()
 	case authenticatorProtectionTPM:
 		return false, nil // runAuthenticatorCreate made the key before opening the store
+	case authenticatorProtectionAuto:
+		if rec.Protection == authenticatorProtectionTPM {
+			return false, nil // the TPM held the key; it was made before the store was opened
+		}
+		if keychain == nil {
+			return false, errNoAuthenticatorKeyStore(nil)
+		}
+		if err := rec.setKeychainKey(ctx, keychain); err != nil {
+			return false, errNoAuthenticatorKeyStore(err)
+		}
+		return false, nil
 	}
 	err = rec.setPlatformKey()
 	if err == nil {
@@ -258,6 +336,17 @@ func setAuthenticatorKey(rec *authenticatorRecord, choice authenticatorKeyChoice
 		return true, rec.setStoreKey()
 	}
 	return false, err
+}
+
+// warnAuthenticatorFileStore tells the user what the named file store means on
+// Linux and macOS, where an OS-native store exists to choose instead.
+func warnAuthenticatorFileStore(w io.Writer) {
+	if authenticatorHostOS != "linux" && authenticatorHostOS != "darwin" {
+		return
+	}
+	_, _ = fmt.Fprintln(w, "Warning: --key-provider store keeps the key in a file encrypted with values (the machine ID and a salt file "+
+		"in the same directory) that any process running as your user can read, so code running as your user can recover the key. "+
+		"A TPM key (--key-provider tpm) or an OS keychain key (omit --key-provider) is not kept this way.")
 }
 
 // buildAuthenticatorRecord validates the create flags and returns a new record
@@ -320,7 +409,8 @@ func runAuthenticatorCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := makeTPMKeyFirst(rec, choice); err != nil {
+	keychain, err := prepareAuthenticatorKey(rec, choice)
+	if err != nil {
 		return err
 	}
 
@@ -329,6 +419,25 @@ func runAuthenticatorCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open credential store: %w", err)
 	}
+	if err := requireNoAuthenticator(ctx, store, name); err != nil {
+		return err
+	}
+	fellBack, err := setAuthenticatorKey(ctx, rec, choice, keychain)
+	if err != nil {
+		return err
+	}
+	warnIfNamedFileStore(cmd.ErrOrStderr(), rec, choice)
+	if err := saveAuthenticatorRecord(ctx, store, rec); err != nil {
+		// Do not leave a platform key or keychain item behind that no record points to.
+		return errors.Join(err, rec.deleteHeldKey())
+	}
+
+	printAuthenticatorCreated(cmd.OutOrStdout(), rec, fellBack)
+	return nil
+}
+
+// requireNoAuthenticator refuses when an authenticator named name already exists.
+func requireNoAuthenticator(ctx context.Context, store *CredentialStore, name string) error {
 	exists, err := authenticatorExists(ctx, store, name)
 	if err != nil {
 		return err
@@ -336,17 +445,15 @@ func runAuthenticatorCreate(cmd *cobra.Command, args []string) error {
 	if exists {
 		return fmt.Errorf("authenticator %q already exists; delete it first with 'cfg authenticator delete %s' to replace it", name, name)
 	}
-	fellBack, err := setAuthenticatorKey(rec, choice)
-	if err != nil {
-		return err
-	}
-	if err := saveAuthenticatorRecord(ctx, store, rec); err != nil {
-		// Do not leave a platform key behind that no record points to.
-		return errors.Join(err, rec.deletePlatformKey())
-	}
-
-	printAuthenticatorCreated(cmd.OutOrStdout(), rec, fellBack)
 	return nil
+}
+
+// warnIfNamedFileStore prints the same-user recovery warning when the user
+// explicitly chose the file store, not when it is a Windows fallback.
+func warnIfNamedFileStore(w io.Writer, rec *authenticatorRecord, choice authenticatorKeyChoice) {
+	if rec.Protection == authenticatorProtectionStore && choice.protection == authenticatorProtectionStore {
+		warnAuthenticatorFileStore(w)
+	}
 }
 
 // printAuthenticatorCreated reports a new authenticator. It never prints key material.
@@ -373,8 +480,11 @@ func printAuthenticatorCreated(out io.Writer, rec *authenticatorRecord, fellBack
 	case authenticatorProtectionTPM:
 		_, _ = fmt.Fprintf(out, "Private key:   held inside this machine's TPM; credential %q stores only TPM-wrapped blobs that work on this TPM alone\n",
 			authenticatorCredentialName(rec.Name))
+	case authenticatorProtectionKeychain:
+		_, _ = fmt.Fprintf(out, "Private key:   held in the OS keychain (item %q); credential %q stores only that reference\n",
+			rec.KeychainKey, authenticatorCredentialName(rec.Name))
 	default:
-		_, _ = fmt.Fprintf(out, "Private key:   stored encrypted as credential %q; it is never displayed or exported\n",
+		_, _ = fmt.Fprintf(out, "Private key:   stored encrypted as credential %q (the file store); it is never displayed or exported\n",
 			authenticatorCredentialName(rec.Name))
 	}
 }
@@ -411,29 +521,37 @@ func runAuthenticatorList(cmd *cobra.Command, _ []string) error {
 		if provider == "" {
 			provider = "-"
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\t%s\t%s\n", s.Name, s.RPID, s.Origin, s.CredentialID, s.Registered, s.Protection, provider)
+		protection := s.Protection
+		if protection == authenticatorProtectionStore {
+			protection += " (file store)"
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\t%s\t%s\n", s.Name, s.RPID, s.Origin, s.CredentialID, s.Registered, protection, provider)
 	}
 	return tw.Flush()
 }
 
-// deleteAuthenticatorPlatformKey deletes the platform key the stored record
-// names, if any. A key that cannot be deleted stops the delete, so the record
-// that locates the key is kept; with force the record is deleted anyway and the
-// key is left behind with a warning.
-func deleteAuthenticatorPlatformKey(ctx context.Context, out io.Writer, store *CredentialStore, name string, force bool) error {
+// deleteAuthenticatorKey deletes the platform key or OS keychain item the stored
+// record names, if any. A key that cannot be deleted stops the delete, so the
+// record that locates the key is kept; with force the record is deleted anyway and
+// the key is left behind with a warning.
+func deleteAuthenticatorKey(ctx context.Context, out io.Writer, store *CredentialStore, name string, force bool) error {
 	rec, err := loadAuthenticatorRecord(ctx, store, name)
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "Warning: the stored record could not be read, so any platform key it named was not deleted: %v\n", err)
+		_, _ = fmt.Fprintf(out, "Warning: the stored record could not be read, so any platform key or keychain item it named was not deleted: %v\n", err)
 		return nil
 	}
-	err = rec.deletePlatformKey()
+	err = rec.deleteHeldKey()
 	if err == nil {
 		return nil
 	}
-	if !force {
-		return fmt.Errorf("%w; the record was kept. 'cfg authenticator delete %s --force' deletes the record and leaves the platform key", err, name)
+	what, where := "platform key", "its provider"
+	if rec.Protection == authenticatorProtectionKeychain {
+		what, where = "keychain item", "the OS keychain"
 	}
-	_, _ = fmt.Fprintf(out, "Warning: the platform key could not be deleted and is left in its provider: %v\n", err)
+	if !force {
+		return fmt.Errorf("%w; the record was kept. 'cfg authenticator delete %s --force' deletes the record and leaves the %s", err, name, what)
+	}
+	_, _ = fmt.Fprintf(out, "Warning: the %s could not be deleted and is left in %s: %v\n", what, where, err)
 	return nil
 }
 
@@ -463,11 +581,11 @@ func runAuthenticatorDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	out := cmd.OutOrStdout()
-	// The platform key goes first: if deleting the record then fails, running
+	// The platform key or keychain item goes first: if deleting the record then fails, running
 	// delete again finds the record and finishes, since an absent key is not an
 	// error. A record that cannot be read is still deleted, but its platform key,
 	// if it had one, cannot be located.
-	if err := deleteAuthenticatorPlatformKey(ctx, out, store, name, force); err != nil {
+	if err := deleteAuthenticatorKey(ctx, out, store, name, force); err != nil {
 		return err
 	}
 	if err := store.Delete(ctx, authenticatorCredentialName(name)); err != nil {

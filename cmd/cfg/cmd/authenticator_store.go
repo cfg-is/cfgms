@@ -18,6 +18,8 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/credential"
 	"github.com/cfgis/cfgms/pkg/registration/identity"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/secrets/providers/oskeychain"
 	"github.com/cfgis/cfgms/pkg/softauthn"
 	"github.com/cfgis/cfgms/pkg/softauthn/tpmkey"
 )
@@ -32,8 +34,27 @@ const (
 	authenticatorRecordVersion = 1
 
 	// authenticatorProtectionStore means the key is held in the encrypted
-	// credential store.
+	// credential store: the key's PKCS#8 is inside the record, a file encrypted
+	// with values any process of the same user can read. It is the "file store",
+	// chosen only with an explicit --key-provider store.
 	authenticatorProtectionStore = "store"
+
+	// authenticatorProtectionKeychain means the key is held in the OS keychain
+	// (macOS login Keychain, Linux Secret Service). The record holds only the name
+	// of the keychain item, never key bytes. An older cfg that does not know this
+	// value refuses the record with the unknown-protection error.
+	authenticatorProtectionKeychain = "keychain"
+
+	// authenticatorProtectionAuto is not a record value: it is the choice made
+	// by create with no --key-provider on Linux and macOS, resolved to tpm or
+	// keychain when the key is made.
+	authenticatorProtectionAuto = "auto"
+
+	// authenticatorKeychainKeyPrefix starts the keychain item name of every
+	// authenticator key: <prefix><base64url credential id>. It is derived from the
+	// credential ID, not the authenticator name, so deleting and re-creating a name
+	// never addresses another authenticator's item.
+	authenticatorKeychainKeyPrefix = "cfgms/authenticator/"
 
 	// authenticatorProtectionPlatform means the key is a non-exportable per-user
 	// key in a platform key provider (Windows CNG). The record holds only its
@@ -61,8 +82,11 @@ type authenticatorRecord struct {
 	Name         string `json:"name"`
 	Label        string `json:"label,omitempty"`
 	CredentialID []byte `json:"credential_id"`
-	// KeyPKCS8 is the private key of a "store" record; empty for "platform" and "tpm".
+	// KeyPKCS8 is the private key of a "store" record; empty for every other protection.
 	KeyPKCS8 []byte `json:"key_pkcs8,omitempty"`
+	// KeychainKey names the OS keychain item that holds the PKCS#8 key (base64) of
+	// a "keychain" record. It is a locator, not key material.
+	KeychainKey string `json:"keychain_key,omitempty"`
 	// KeyProvider and KeyName locate the key of a "platform" record.
 	KeyProvider string `json:"key_provider,omitempty"`
 	KeyName     string `json:"key_name,omitempty"`
@@ -166,6 +190,111 @@ func (r *authenticatorRecord) setStoreKey() error {
 	return nil
 }
 
+// authenticatorKeychainFn opens the OS keychain store that holds "keychain"
+// authenticator keys. It returns (nil, nil) when no persistent OS keychain is
+// available. Tests replace it to inject a SecretStore, as they do sessionStoreFn.
+var authenticatorKeychainFn = openAuthenticatorKeychain
+
+// openAuthenticatorKeychain opens the oskeychain store with ConfigNativeOnly, so
+// on Linux the kernel session keyring (lost at logout and reboot) is never used
+// for an authenticator key: with no usable Secret Service the result is
+// (nil, nil), not the keyring.
+func openAuthenticatorKeychain() (secretsif.SecretStore, error) {
+	p, err := secretsif.GetSecretProvider("oskeychain")
+	if err != nil {
+		return nil, nil // provider not registered; treat as unavailable
+	}
+	avail, err := p.Available()
+	if err != nil || !avail {
+		return nil, nil
+	}
+	store, err := p.CreateSecretStore(map[string]interface{}{oskeychain.ConfigNativeOnly: true})
+	if err != nil {
+		// Available() is true for the keyring-only host; native_only then refuses.
+		return nil, nil
+	}
+	return store, nil
+}
+
+// authenticatorKeychainItem returns the keychain item name for a credential ID.
+func authenticatorKeychainItem(credentialID []byte) string {
+	return authenticatorKeychainKeyPrefix + base64.RawURLEncoding.EncodeToString(credentialID)
+}
+
+// setKeychainKey generates a P-256 key, writes its PKCS#8 (base64, since the
+// keychain backends pass the value as text) to store and records only the item
+// name. Nothing is recorded when the write fails.
+func (r *authenticatorRecord) setKeychainKey(ctx context.Context, store secretsif.SecretStore) error {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("failed to generate authenticator key: %w", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return fmt.Errorf("failed to marshal authenticator key: %w", err)
+	}
+	item := authenticatorKeychainItem(r.CredentialID)
+	if err := store.StoreSecret(ctx, &secretsif.SecretRequest{
+		Key:   item,
+		Value: base64.StdEncoding.EncodeToString(der),
+	}); err != nil {
+		return fmt.Errorf("failed to write the authenticator key to the OS keychain: %w", err)
+	}
+	r.KeyPKCS8, r.KeyProvider, r.KeyName = nil, "", ""
+	r.KeychainKey = item
+	r.Protection = authenticatorProtectionKeychain
+	return nil
+}
+
+// keychainSigner returns the signer for a "keychain" record's key, read from the
+// OS keychain.
+func (r *authenticatorRecord) keychainSigner() (crypto.Signer, error) {
+	if r.KeychainKey == "" {
+		return nil, fmt.Errorf("authenticator %q: the stored record names no keychain item; delete it with "+
+			"'cfg authenticator delete %s --force' and create it again", r.Name, r.Name)
+	}
+	store, err := authenticatorKeychainFn()
+	if err != nil {
+		return nil, fmt.Errorf("authenticator %q: open OS keychain: %w", r.Name, err)
+	}
+	if store == nil {
+		return nil, fmt.Errorf("authenticator %q: its key is in the OS keychain, which is not available now "+
+			"(locked, or no session bus)", r.Name)
+	}
+	secret, err := store.GetSecret(context.Background(), r.KeychainKey)
+	if err != nil {
+		if errors.Is(err, secretsif.ErrSecretNotFound) {
+			return nil, fmt.Errorf("authenticator %q: its key is missing from the OS keychain; delete it with "+
+				"'cfg authenticator delete %s --force' and create it again", r.Name, r.Name)
+		}
+		return nil, fmt.Errorf("authenticator %q: read OS keychain: %w", r.Name, err)
+	}
+	der, err := base64.StdEncoding.DecodeString(secret.Value)
+	if err != nil {
+		return nil, fmt.Errorf("authenticator %q: the key in the OS keychain is not valid", r.Name)
+	}
+	return parseAuthenticatorP256(r.Name, der)
+}
+
+// deleteKeychainKey deletes the OS keychain item of a "keychain" record. It does
+// nothing for any other record, and an absent item is not an error.
+func (r *authenticatorRecord) deleteKeychainKey() error {
+	if r.Protection != authenticatorProtectionKeychain || r.KeychainKey == "" {
+		return nil
+	}
+	store, err := authenticatorKeychainFn()
+	if err != nil {
+		return fmt.Errorf("authenticator %q: open OS keychain: %w", r.Name, err)
+	}
+	if store == nil {
+		return fmt.Errorf("authenticator %q: the OS keychain that holds its key is not available now", r.Name)
+	}
+	if err := store.DeleteSecret(context.Background(), r.KeychainKey); err != nil && !errors.Is(err, secretsif.ErrSecretNotFound) {
+		return fmt.Errorf("authenticator %q: delete OS keychain item: %w", r.Name, err)
+	}
+	return nil
+}
+
 // createUserKey creates the platform key. Tests replace it to make the platform
 // providers report ErrUserKeyUnavailable on a host where they work.
 var createUserKey = identity.CreateUserKey
@@ -199,13 +328,23 @@ func errTPMKeyRequirement(cause error) error {
 // wrapped blobs. It refuses, creating nothing, when no TPM can be opened or the
 // TPM has no readable EK certificate (without one it can never attest).
 func (r *authenticatorRecord) setTPMKey() error {
+	return r.setTPMKeyWith(true)
+}
+
+// setTPMKeyWith is setTPMKey with the EK certificate check optional. The default
+// selection (no --key-provider) passes false: the EK certificate is needed only
+// for the attestation a root agent account requires, and a key made without one
+// is still non-exportable. --key-provider tpm always passes true.
+func (r *authenticatorRecord) setTPMKeyWith(requireEKCertificate bool) error {
 	t, err := openAuthenticatorTPM()
 	if err != nil {
 		return errTPMKeyRequirement(err)
 	}
 	defer func() { _ = t.Close() }()
-	if err := tpmkey.HasEKCertificate(t); err != nil {
-		return errTPMKeyRequirement(err)
+	if requireEKCertificate {
+		if err := tpmkey.HasEKCertificate(t); err != nil {
+			return errTPMKeyRequirement(err)
+		}
 	}
 	blobs, _, err := tpmkey.Create(t)
 	if err != nil {
@@ -261,21 +400,38 @@ func (r *authenticatorRecord) deletePlatformKey() error {
 	return nil
 }
 
+// parseAuthenticatorP256 parses a PKCS#8 ECDSA P-256 private key.
+func parseAuthenticatorP256(name string, der []byte) (crypto.Signer, error) {
+	key, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		// Deliberately not wrapping err: parser errors are not key material, but
+		// the message needs no detail beyond which record is unusable.
+		return nil, fmt.Errorf("authenticator %q: stored key is not a valid PKCS#8 private key", name)
+	}
+	signer, ok := key.(*ecdsa.PrivateKey)
+	if !ok || signer.Curve != elliptic.P256() {
+		return nil, fmt.Errorf("authenticator %q: stored key is not an ECDSA P-256 key", name)
+	}
+	return signer, nil
+}
+
+// deleteHeldKey deletes the key a record keeps outside the credential store: the
+// platform key of a "platform" record or the keychain item of a "keychain"
+// record. It does nothing for a "store" or "tpm" record.
+func (r *authenticatorRecord) deleteHeldKey() error {
+	if r.Protection == authenticatorProtectionKeychain {
+		return r.deleteKeychainKey()
+	}
+	return r.deletePlatformKey()
+}
+
 // signer returns the record's credential key as a crypto.Signer.
 func (r *authenticatorRecord) signer() (crypto.Signer, error) {
 	switch r.Protection {
 	case authenticatorProtectionStore:
-		key, err := x509.ParsePKCS8PrivateKey(r.KeyPKCS8)
-		if err != nil {
-			// Deliberately not wrapping err: parser errors are not key material, but
-			// the message needs no detail beyond which record is unusable.
-			return nil, fmt.Errorf("authenticator %q: stored key is not a valid PKCS#8 private key", r.Name)
-		}
-		signer, ok := key.(*ecdsa.PrivateKey)
-		if !ok || signer.Curve != elliptic.P256() {
-			return nil, fmt.Errorf("authenticator %q: stored key is not an ECDSA P-256 key", r.Name)
-		}
-		return signer, nil
+		return parseAuthenticatorP256(r.Name, r.KeyPKCS8)
+	case authenticatorProtectionKeychain:
+		return r.keychainSigner()
 	case authenticatorProtectionPlatform:
 		s, err := identity.OpenUserKey(r.KeyProvider, r.KeyName)
 		if err != nil {

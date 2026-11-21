@@ -1365,6 +1365,22 @@ Founder decisions D1–D3 on epic #6075 (2026-11-10).
 4. **No crossing carve-out (D2).** The first account in a client tenant is created by root break-glass, which stays loud and audited. That account then enrolls the agent authenticator through the public enrollment link. After that, the tenant-scoped agent account works in its own tenant and needs no crossing.
 5. **Credential store skew is an error (D3).** A credential store written by a different `cfg` format version gives a clear versioned-header error. There is no fallback and no migration (consistent with #5200 and #6074).
 
+### Key storage selection on Linux and macOS (Issue #6419)
+
+Founder decision (2026-11-21): where the platform key provider offers no non-exportable key, Decision 1's OS-native secret storage is implemented, and headless Linux keeps working through a named opt-in.
+
+With no `--key-provider`, `cfg authenticator create` on Linux and macOS selects, in order:
+
+1. **TPM (Linux).** A usable TPM 2.0 holds the key, as `--key-provider tpm` does. The key is non-exportable. The endorsement key certificate is not required on this path; it is needed only for the attestation a root agent account requires, and `--key-provider tpm` keeps requiring it.
+2. **OS keychain.** The `oskeychain` provider: the login Keychain on macOS, the Secret Service on Linux when a session bus exposes an unlocked collection. The record has protection `keychain` and holds the keychain item name (derived from the credential ID), never key bytes. The Linux kernel session keyring is excluded (the provider's `native_only` option), because it is lost at logout and reboot.
+3. **Neither.** `create` refuses, creates nothing, and names the ways forward: enable a TPM or virtual TPM, run a Secret Service, or pass `--key-provider store`.
+
+`--key-provider store` is the encrypted file store, chosen only by name. It works on every platform, including headless Linux, and on Linux and macOS `create` warns on stderr that code running as the same user can recover the key. `list` labels it as the file store and its protection value stays `store`. A root agent account still needs `--key-provider tpm` (Amendment 11), so the file store serves tenant agent accounts only. Windows is unchanged.
+
+There is no record migration. The record version stays 1: a record written before this change keeps working as a `store` record, and an older `cfg` refuses a `keychain` record with its existing unknown-protection error (it can delete only the record, not the keychain item). No fallback is added for record versions (Decision 5).
+
+Honest limits: only the TPM path stops code running as the agent's user from extracting the key. A macOS Keychain item written through the `security` command and a Linux Secret Service item do not stop another process of the same user from reading it while the keychain is unlocked; they take the key out of a file whose decryption inputs sit beside it. No path stops a process running as the same user from asking for a signature.
+
 ### Consequences
 
 - An agent session can test continuously deployed cells end to end without any gate being weakened for automation in general.

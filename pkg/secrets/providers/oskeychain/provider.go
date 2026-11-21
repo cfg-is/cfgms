@@ -12,6 +12,10 @@
 //   - Linux:   Secret Service (libsecret) with a kernel session-keyring (keyctl)
 //     fallback for headless hosts with no Secret Service.
 //
+// A caller that stores a long-lived secret (the cfg software authenticator key)
+// passes ConfigNativeOnly to CreateSecretStore so the Linux kernel session
+// keyring, which is lost at logout and reboot, is never used for it.
+//
 // The provider stores only the small session token value. Larger credential
 // bundles use the machine-bound encrypted-file path (a separate story) because
 // a full bundle exceeds Windows Credential Manager's per-entry blob limit.
@@ -83,6 +87,21 @@ type backend interface {
 	name() string
 }
 
+// sessionScopedBackend is implemented by a backend whose entries do not outlive
+// the login session (the Linux kernel session keyring). A caller that holds a
+// long-lived secret asks for ConfigNativeOnly to refuse such a backend.
+type sessionScopedBackend interface {
+	sessionScoped() bool
+}
+
+// ConfigNativeOnly is the CreateSecretStore config key that restricts the store
+// to the OS's persistent native credential store: the Windows Credential Manager,
+// the macOS login Keychain or the Linux Secret Service. A true value makes
+// CreateSecretStore return an error rather than a store backed by the Linux kernel
+// session keyring, which is lost at logout and reboot. The session-token callers
+// leave it unset and keep the keyring fallback.
+const ConfigNativeOnly = "native_only"
+
 // Provider implements interfaces.SecretProvider using the host OS keychain.
 type Provider struct{}
 
@@ -134,16 +153,25 @@ func (p *Provider) Available() (bool, error) {
 	return b.available(), nil
 }
 
-// CreateSecretStore creates an OS-keychain-backed secret store. The config map
-// is accepted for interface conformance but is unused — the backend is selected
-// by platform.
-func (p *Provider) CreateSecretStore(_ map[string]interface{}) (interfaces.SecretStore, error) {
+// CreateSecretStore creates an OS-keychain-backed secret store. The backend is
+// selected by platform. The only config key read is ConfigNativeOnly (a bool).
+func (p *Provider) CreateSecretStore(config map[string]interface{}) (interfaces.SecretStore, error) {
+	nativeOnly := false
+	if v, ok := config[ConfigNativeOnly]; ok {
+		nativeOnly, ok = v.(bool)
+		if !ok {
+			return nil, fmt.Errorf("oskeychain: config %q must be a bool", ConfigNativeOnly)
+		}
+	}
 	b, err := platformNewBackend()
 	if err != nil {
 		return nil, fmt.Errorf("oskeychain: no OS keychain backend available: %w", err)
 	}
 	if !b.available() {
 		return nil, errors.New("oskeychain: no OS keychain backend available on this host")
+	}
+	if ss, ok := b.(sessionScopedBackend); nativeOnly && ok && ss.sessionScoped() {
+		return nil, fmt.Errorf("oskeychain: no persistent OS keychain is available on this host (only the %s, which is lost at logout)", b.name())
 	}
 	return newStore(b), nil
 }

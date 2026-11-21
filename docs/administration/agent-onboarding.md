@@ -60,8 +60,16 @@ cfg authenticator list
 ```
 
 `list` shows the record as not registered. The key is bound to this controller's RP ID
-and origin. On Linux and macOS it is kept in the encrypted credential store; on Windows
-the default is a per-user CNG key (see [Limits](#limits)).
+and origin. On Linux and macOS, with no `--key-provider`, `create` puts the key in the
+first of these the host has: a usable TPM 2.0 (Linux; the key is created inside it),
+then the OS keychain (the login Keychain on macOS, the Secret Service on Linux). The
+record holds only a reference to a keychain item. With neither, `create` refuses and
+creates nothing; enable a TPM or virtual TPM, run a Secret Service, or pass
+`--key-provider store` to accept the encrypted file store, which keeps the key in a
+file that any process of the same user can decrypt. `list` shows the protection of
+each record: `tpm`, `keychain`, `store` (the file store) or `platform`. On Windows the
+default is a per-user CNG key (see [Limits](#limits)). A root agent account needs
+`--key-provider tpm`.
 
 ### 2. Cross into the client tenant once (root break-glass)
 
@@ -218,13 +226,23 @@ has enrollment rights.
   Anyone who can redeem an enrollment link can enroll any authenticator; the policy only
   controls where the CFGMS software authenticator is accepted and labels its use in the
   [audit trail](../security/SECURITY_CONFIGURATION.md#audit-trail-for-software-authenticators).
-- **On Linux and macOS the key is encrypted at rest but not non-exportable.** The
-  encryption key is derived from values any process running as the same user can read, so
-  code running as the agent's user can recover the key. On Windows the default per-user
-  CNG key is non-exportable and, where a TPM is present, never leaves it; neither
-  provider stops a process running as the same user from asking it to sign. Treat the
-  authenticator as a credential of the agent's user and protect the agent host
-  accordingly.
+- **Only a TPM key stops code running as the agent's user from extracting the key.** A
+  TPM key (Linux, the default when a TPM is usable) is created inside the TPM and cannot
+  be read out. A macOS Keychain item or a Linux Secret Service item takes the key out of a
+  file, but another process of the same user can read it while the keychain is unlocked
+  (on macOS the `security` command also receives the value as a process argument for a
+  moment). The named file store (`--key-provider store`) keeps the key encrypted at rest
+  but not non-exportable: the file is encrypted with values any process running as the
+  same user can read, so code running as that user can recover the key; `create` warns
+  about this. On Windows the default per-user
+  CNG key is non-exportable and, where a TPM is present, never leaves it. No path stops a
+  process running as the same user from asking for a signature. Treat the authenticator as
+  a credential of the agent's user and protect the agent host accordingly.
+- **No store is chosen silently.** With no TPM and no OS keychain, `create` refuses
+  rather than falling back to the file store. The Linux kernel session keyring is never
+  used for the key, because it is lost at logout and reboot. A record written by an older
+  `cfg` keeps working as a `store` record; an older `cfg` cannot use a `keychain` record
+  and its `delete` removes only the record, not the keychain item.
 - **The signature counter is always 0.** A software authenticator keeps no counter, so
   the controller cannot use counter regression to detect a cloned key.
 
