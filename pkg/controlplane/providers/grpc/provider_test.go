@@ -868,15 +868,35 @@ func TestUnknownControlPayloadIgnored(t *testing.T) {
 	raw = protowire.AppendBytes(raw, []byte("from a newer steward"))
 	unknown.ProtoReflect().SetUnknown(raw)
 	require.NoError(t, stream.Send(unknown))
-	require.NoError(t, stream.Send(&transportpb.ControlMessage{Payload: &transportpb.ControlMessage_Heartbeat{
-		Heartbeat: &transportpb.Heartbeat{StewardId: stewardID, Version: "after-unknown"},
-	}}))
 
-	select {
-	case hb := <-heartbeats:
-		assert.Equal(t, "after-unknown", hb.Version, "a heartbeat after the unknown payload is still processed")
-	case <-time.After(5 * time.Second):
-		t.Fatal("stream was closed or stalled by an unknown payload")
+	// The receive loop keeps one heartbeat in flight per stream and drops one that
+	// arrives before the previous heartbeat's handlers have all returned. The
+	// opening heartbeat's handler pushes to the channel and then returns, so the
+	// slot may still be held here. A dropped heartbeat never reaches the channel,
+	// so resend until one with the marker version is delivered. Only a stream that
+	// is closed or stalled by the unknown payload can keep that from happening.
+	after := &transportpb.ControlMessage{Payload: &transportpb.ControlMessage_Heartbeat{
+		Heartbeat: &transportpb.Heartbeat{StewardId: stewardID, Version: "after-unknown"},
+	}}
+	var sendErr error
+	delivered := func() bool {
+		if sendErr = stream.Send(after); sendErr != nil {
+			return false
+		}
+		for {
+			select {
+			case hb := <-heartbeats:
+				if hb.Version == "after-unknown" {
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	}
+	if !assert.Eventually(t, delivered, 5*time.Second, 20*time.Millisecond,
+		"stream was closed or stalled by an unknown payload") {
+		require.NoError(t, sendErr, "sending a heartbeat after the unknown payload")
 	}
 	_, ok := reg.Get(stewardID)
 	assert.True(t, ok, "the steward stays registered")
