@@ -444,10 +444,12 @@ func repairReason(t *testing.T, srv *roServer, component, code string) cpTypes.H
 func repairReasonAfterLoss(t *testing.T, srv *roServer, component, code string, lost int, within time.Duration) cpTypes.HealthReason {
 	t.Helper()
 	deadline := time.After(within)
+	var received []string
 	for {
 		select {
 		case hb := <-srv.heartbeats:
 			for _, r := range hb.Reasons {
+				received = append(received, r.Component+"/"+r.Code)
 				if r.Component != component || r.Code != code {
 					continue
 				}
@@ -458,10 +460,30 @@ func repairReasonAfterLoss(t *testing.T, srv *roServer, component, code string, 
 				return r
 			}
 		case <-deadline:
+			t.Logf("heartbeat reasons received while waiting: %s", formatReceivedReasons(received))
+			t.Logf("all goroutine stacks at the deadline:\n%s", allGoroutineStacks())
 			t.Fatalf("no heartbeat carried %s/%s", component, code)
 			return cpTypes.HealthReason{}
 		}
 	}
+}
+
+// formatReceivedReasons renders the component/code of every heartbeat reason
+// seen while waiting, in arrival order, for the deadline diagnostics.
+func formatReceivedReasons(reasons []string) string {
+	if len(reasons) == 0 {
+		return "none"
+	}
+	return strings.Join(reasons, ", ")
+}
+
+func TestFormatReceivedReasons(t *testing.T) {
+	assert.Equal(t, "none", formatReceivedReasons(nil))
+	assert.Equal(t, "none", formatReceivedReasons([]string{}))
+	assert.Equal(t, "repair/repair.failed", formatReceivedReasons([]string{"repair/repair.failed"}))
+	assert.Equal(t,
+		"health/a, repair/repair.failed, health/a, repair/repair.started",
+		formatReceivedReasons([]string{"health/a", "repair/repair.failed", "health/a", "repair/repair.started"}))
 }
 
 func awaitOutcome(t *testing.T, f *repairFixture, code string) cpTypes.HealthReason {
