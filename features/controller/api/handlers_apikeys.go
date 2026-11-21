@@ -17,13 +17,26 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
-	"github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
+
+// metadataKeyRoleID is the secret-store record metadata key that holds the role ID an
+// API key was minted with. It is a recorded label for the fixed permission set copied
+// onto the key; the permission list on the record stays the only input to authorization.
+const metadataKeyRoleID = "role_id"
+
+// roleIDMetadata is the record metadata that labels a key with the role it was minted
+// for, or nil for a key minted with a plain permission list. handleCreateAPIKey passes
+// it only the validated role_id, so no other request field reaches the record's metadata.
+func roleIDMetadata(roleID string) map[string]string {
+	if roleID == "" {
+		return nil
+	}
+	return map[string]string{metadataKeyRoleID: roleID}
+}
 
 // agentDevAPIPermissions is the API-key permission set for the agent.dev role.
 // Corresponds to the RBAC permissions in features/rbac/defaults.go: steward.read,
@@ -94,6 +107,31 @@ func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccessResponse(w, apiKeys)
 }
 
+// resolveAPIKeyRole resolves a request's role_id to the role's permission copy and sets it
+// as the request's permissions. RoleID takes precedence: only agent.dev is supported in
+// this release; future roles extend the switch. It writes the 400 response and returns
+// false for a role_id combined with permissions, or for an unknown role_id. A request
+// without a role_id is left as it is.
+func (s *Server) resolveAPIKeyRole(w http.ResponseWriter, createReq *APIKeyCreateRequest) bool {
+	if createReq.RoleID == "" {
+		return true
+	}
+	switch createReq.RoleID {
+	case "agent.dev":
+		if len(createReq.Permissions) > 0 {
+			s.writeErrorResponse(w, http.StatusBadRequest,
+				"Cannot specify both role_id and permissions", "CONFLICTING_FIELDS")
+			return false
+		}
+		createReq.Permissions = agentDevAPIPermissions
+	default:
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"Unknown role_id: "+createReq.RoleID, "UNKNOWN_ROLE")
+		return false
+	}
+	return true
+}
+
 // handleCreateAPIKey handles POST /api/v1/api-keys
 // M-AUTH-1: Create API key and store in central secret store
 func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
@@ -115,22 +153,8 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// RoleID takes precedence: resolve permissions from the named role.
-	// Only agent.dev is supported in this release; future roles extend this map.
-	if createReq.RoleID != "" {
-		switch createReq.RoleID {
-		case "agent.dev":
-			if len(createReq.Permissions) > 0 {
-				s.writeErrorResponse(w, http.StatusBadRequest,
-					"Cannot specify both role_id and permissions", "CONFLICTING_FIELDS")
-				return
-			}
-			createReq.Permissions = agentDevAPIPermissions
-		default:
-			s.writeErrorResponse(w, http.StatusBadRequest,
-				"Unknown role_id: "+createReq.RoleID, "UNKNOWN_ROLE")
-			return
-		}
+	if !s.resolveAPIKeyRole(w, &createReq) {
+		return
 	}
 
 	// C1: Validate permissions against the known allow-list. "*" and unknown IDs are rejected.
@@ -182,11 +206,12 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	minted, err := s.mintAPIKey(r.Context(), apiKeyMintSpec{
-		Name:        createReq.Name,
-		Permissions: createReq.Permissions,
-		TenantID:    tenantID,
-		ExpiresAt:   createReq.ExpiresAt,
-		ActorID:     principal.ID,
+		Name:          createReq.Name,
+		Permissions:   createReq.Permissions,
+		TenantID:      tenantID,
+		ExpiresAt:     createReq.ExpiresAt,
+		ExtraMetadata: roleIDMetadata(createReq.RoleID),
+		ActorID:       principal.ID,
 	})
 	if err != nil {
 		s.writeMintAPIKeyError(w, err)
@@ -203,11 +228,10 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:   minted.apiKey.CreatedAt,
 			ExpiresAt:   createReq.ExpiresAt,
 			TenantID:    tenantID,
+			RoleID:      createReq.RoleID,
 		},
 		Key: minted.plaintext,
 	}
-
-	s.recordAPIKeyRoleAssignment(r.Context(), minted, createReq.RoleID)
 
 	s.logger.Info("Created new API key",
 		"id", keyID,
@@ -222,41 +246,12 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	s.writeResponse(w, http.StatusCreated, result)
 }
 
-// recordAPIKeyRoleAssignment asks the RBAC manager to bind a minted key to roleID in the
-// key's tenant. The assignment names the principal that minted the key as its assigner:
-// the actor is read from minted, never passed separately, so the assignment and the
-// key's own record cannot name different principals. It does nothing when no role was
-// requested or no RBAC manager is wired. The RBAC manager stores the assignment only
-// for a key ID it knows as a subject; a refused or failed assignment is logged and not
-// returned, because the key's permissions live on its own record.
-func (s *Server) recordAPIKeyRoleAssignment(ctx context.Context, minted *mintedAPIKey, roleID string) {
-	if roleID == "" || s.rbacManager == nil {
-		return
-	}
-	keyID, tenantID := minted.apiKey.ID, minted.apiKey.TenantID
-	ctx = rbac.WithSensitiveOperationJustification(ctx,
-		"api-key creation: binding key "+keyID+" to role "+roleID+" in tenant "+tenantID)
-	assignErr := s.rbacManager.AssignRole(ctx, &common.RoleAssignment{
-		Id:         uuid.New().String(),
-		SubjectId:  keyID,
-		RoleId:     roleID,
-		TenantId:   tenantID,
-		AssignedBy: minted.actorID,
-	})
-	if assignErr != nil {
-		s.logger.Warn("Failed to record RBAC role assignment for API key",
-			"id", keyID,
-			"role_id", logging.SanitizeLogValue(roleID),
-			"tenant_id", logging.SanitizeLogValue(tenantID),
-			"error", logging.SanitizeLogValue(assignErr.Error()))
-	}
-}
-
 // apiKeyMintSpec describes one API key for mintAPIKey. ActorID is required: mintAPIKey
 // refuses a spec without one. ExtraMetadata is merged into the secret-store record's
 // Metadata beneath the core fields (type, id, permissions), which it can never override.
 // Only a route that owns a durable key attribute passes it: handleCreateAPIKey passes
-// none, so a request body cannot reach the record's metadata.
+// the role ID of a validated role_id and nothing else, so no other request field can
+// reach the record's metadata.
 type apiKeyMintSpec struct {
 	Name          string
 	Permissions   []string
@@ -272,13 +267,11 @@ type apiKeyMintSpec struct {
 // never minted without the principal that minted it on its record.
 var errMintAPIKeyNoActor = errors.New("API key mint refused: no acting principal")
 
-// mintedAPIKey is the outcome of mintAPIKey: the cache entry, the plaintext, which
-// exists only here and in the response the caller writes, and the ID of the principal
-// that minted the key (the spec's ActorID, as written to the key's record).
+// mintedAPIKey is the outcome of mintAPIKey: the cache entry and the plaintext, which
+// exists only here and in the response the caller writes.
 type mintedAPIKey struct {
 	apiKey    *APIKey
 	plaintext string
-	actorID   string
 }
 
 // mintAPIKeyError says which step of mintAPIKey failed, so the caller maps it to a
@@ -325,6 +318,7 @@ func (s *Server) mintAPIKey(ctx context.Context, spec apiKeyMintSpec) (*mintedAP
 		ExpiresAt:   spec.ExpiresAt,
 		TenantID:    spec.TenantID,
 		Kind:        spec.ExtraMetadata[metadataKeyCredentialKind],
+		RoleID:      spec.ExtraMetadata[metadataKeyRoleID],
 		recordRef:   keyHash,
 		validatedAt: s.apiKeyNow(),
 	}
@@ -345,7 +339,7 @@ func (s *Server) mintAPIKey(ctx context.Context, spec apiKeyMintSpec) (*mintedAP
 		return nil, &mintAPIKeyError{}
 	}
 	s.apiKeyIdx.put(keyHash, apiKeyIndexEntry{TenantID: spec.TenantID, ID: keyID})
-	return &mintedAPIKey{apiKey: apiKey, plaintext: keyString, actorID: spec.ActorID}, nil
+	return &mintedAPIKey{apiKey: apiKey, plaintext: keyString}, nil
 }
 
 // keyRequestRecord builds the secret-store record for a minted key (M-AUTH-1): the
@@ -605,6 +599,7 @@ func apiKeyInfoFromRecord(rec *secretsif.SecretMetadata) APIKeyInfo {
 		CreatedAt:   rec.CreatedAt,
 		ExpiresAt:   rec.ExpiresAt,
 		TenantID:    rec.TenantID,
+		RoleID:      rec.Metadata[metadataKeyRoleID],
 	}
 }
 
@@ -617,6 +612,7 @@ func apiKeyInfoFromCache(key *APIKey) APIKeyInfo {
 		CreatedAt:   key.CreatedAt,
 		ExpiresAt:   key.ExpiresAt,
 		TenantID:    key.TenantID,
+		RoleID:      key.RoleID,
 	}
 }
 

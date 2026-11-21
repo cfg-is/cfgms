@@ -16,8 +16,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -685,51 +685,159 @@ func TestHandleCreateAPIKey_RecordNamesActingPrincipal(t *testing.T) {
 	assert.Equal(t, "operator-7", stored.CreatedBy)
 }
 
-// TestRecordAPIKeyRoleAssignment_NamesActingPrincipal: the role assignment that binds a
-// minted API key to its role names the principal that minted the key as its assigner.
-// The actor is not an argument: recordAPIKeyRoleAssignment reads it from the mint
-// result, which carries the same ActorID that TestHandleCreateAPIKey_RecordNamesActingPrincipal
-// proves the handler takes from the request's principal. The key's RBAC subject is
-// created here first, because the RBAC manager stores an assignment only for a subject
-// it knows.
-func TestRecordAPIKeyRoleAssignment_NamesActingPrincipal(t *testing.T) {
+// apiKeyInfoFromResponse decodes the data field of a get or create response.
+func apiKeyInfoFromResponse(t *testing.T, rec *httptest.ResponseRecorder) APIKeyInfo {
+	t.Helper()
+	var resp struct {
+		Data APIKeyInfo `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	return resp.Data
+}
+
+// callHandleGetAPIKey calls handleGetAPIKey for keyID with a tenant scope for tenantID.
+func callHandleGetAPIKey(server *Server, keyID, tenantID string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/api-keys/"+keyID, nil)
+	req = mux.SetURLVars(req, map[string]string{"id": keyID})
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(tenantID)))
+	rec := httptest.NewRecorder()
+	server.handleGetAPIKey(rec, req)
+	return rec
+}
+
+// listedAPIKey returns the entry for keyID from handleListAPIKeys, or fails the test.
+func listedAPIKey(t *testing.T, server *Server, keyID, tenantID string) APIKeyInfo {
+	t.Helper()
+	rec := callHandleListAPIKeys(server, tenantID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp struct {
+		Data []APIKeyInfo `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	for _, k := range resp.Data {
+		if k.ID == keyID {
+			return k
+		}
+	}
+	require.Failf(t, "key not listed", "key %s missing from list: %s", keyID, rec.Body.String())
+	return APIKeyInfo{}
+}
+
+// TestHandleCreateAPIKey_RoleID_RecordedOnDurableRecord: a key minted with a role_id
+// carries that role ID on its own secret-store record, read back from the store rather
+// than the cache; the permission list on the record is still the role's permission copy.
+func TestHandleCreateAPIKey_RoleID_RecordedOnDurableRecord(t *testing.T) {
 	server := setupTestServer(t)
-	ctx := context.Background()
-
 	const tenantID = "agent-test/1"
-	expiresAt := time.Now().UTC().Add(time.Hour)
-	minted, err := server.mintAPIKey(ctx, apiKeyMintSpec{
-		Name:        "role-bound-key",
-		Permissions: agentDevAPIPermissions,
-		TenantID:    tenantID,
-		ExpiresAt:   &expiresAt,
-		ActorID:     "operator-7",
-	})
-	require.NoError(t, err)
-	keyID := minted.apiKey.ID
-	require.NoError(t, server.rbacManager.CreateSubject(ctx, &common.Subject{
-		Id: keyID, Type: common.SubjectType_SUBJECT_TYPE_API_CLIENT, DisplayName: minted.apiKey.Name, TenantId: tenantID, IsActive: true,
-	}))
 
-	server.recordAPIKeyRoleAssignment(ctx, minted, "")
-	none, err := server.rbacManager.GetSubjectAssignments(ctx, keyID, tenantID)
-	require.NoError(t, err)
-	assert.Empty(t, none, "no role requested, no assignment")
+	rec := callHandleCreateAPIKey(server, []byte(`{"name":"role-key","role_id":"agent.dev","tenant_id":"`+tenantID+`"}`), tenantID)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	created := decodeCreatedAPIKey(t, rec)
+	assert.Equal(t, "agent.dev", created.RoleID, "the create response shows the role ID")
 
-	server.recordAPIKeyRoleAssignment(ctx, minted, "agent.dev")
-	assignments, err := server.rbacManager.GetSubjectAssignments(ctx, keyID, tenantID)
-	require.NoError(t, err)
-	require.Len(t, assignments, 1, "the key must be bound to its role by one stored assignment")
-	a := assignments[0]
-	assert.Equal(t, keyID, a.SubjectId)
-	assert.Equal(t, "agent.dev", a.RoleId)
-	assert.Equal(t, tenantID, a.TenantId)
-	assert.Equal(t, "operator-7", a.AssignedBy)
+	stored := apiKeyRecordByID(t, server, tenantID, created.ID)
+	require.NotNil(t, stored, "the minted key has a durable record")
+	assert.Equal(t, "agent.dev", stored.Metadata[metadataKeyRoleID])
+	assert.ElementsMatch(t, agentDevAPIPermissions, parsePermissions(stored.Metadata["permissions"]),
+		"the stored permission list is the role's permission copy")
+}
 
-	// The assigner is the same principal the key's own record names.
-	stored := apiKeyRecordByID(t, server, tenantID, keyID)
+// TestHandleCreateAPIKey_PermissionsOnly_HasNoRoleID: a key minted with a plain
+// permission list has no role ID on its record or in any response.
+func TestHandleCreateAPIKey_PermissionsOnly_HasNoRoleID(t *testing.T) {
+	server := setupTestServer(t)
+	const tenantID = "tenant-a"
+
+	rec := callHandleCreateAPIKey(server, []byte(`{"name":"plain-key","permissions":["steward:read"],"tenant_id":"`+tenantID+`"}`), tenantID)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	created := decodeCreatedAPIKey(t, rec)
+	assert.Empty(t, created.RoleID)
+
+	stored := apiKeyRecordByID(t, server, tenantID, created.ID)
 	require.NotNil(t, stored)
-	assert.Equal(t, stored.CreatedBy, a.AssignedBy)
+	_, has := stored.Metadata[metadataKeyRoleID]
+	assert.False(t, has, "no role ID key on the record")
+	assert.Empty(t, listedAPIKey(t, server, created.ID, tenantID).RoleID)
+	get := callHandleGetAPIKey(server, created.ID, tenantID)
+	require.Equal(t, http.StatusOK, get.Code, get.Body.String())
+	assert.Empty(t, apiKeyInfoFromResponse(t, get).RoleID)
+	assert.NotContains(t, get.Body.String(), "role_id", "an absent role ID is omitted from the response")
+}
+
+// TestHandleCreateAPIKey_RoleID_ShownByListAndGet: list and get report the role ID of a
+// role-bound key, and the other key of the same tenant keeps none.
+func TestHandleCreateAPIKey_RoleID_ShownByListAndGet(t *testing.T) {
+	server := setupTestServer(t)
+	const tenantID = "agent-test/1"
+
+	roleRec := callHandleCreateAPIKey(server, []byte(`{"name":"role-key","role_id":"agent.dev","tenant_id":"`+tenantID+`"}`), tenantID)
+	require.Equal(t, http.StatusCreated, roleRec.Code, roleRec.Body.String())
+	roleKey := decodeCreatedAPIKey(t, roleRec)
+	plainRec := callHandleCreateAPIKey(server, []byte(`{"name":"plain-key","permissions":["steward:read"],"tenant_id":"`+tenantID+`"}`), tenantID)
+	require.Equal(t, http.StatusCreated, plainRec.Code, plainRec.Body.String())
+	plainKey := decodeCreatedAPIKey(t, plainRec)
+
+	assert.Equal(t, "agent.dev", listedAPIKey(t, server, roleKey.ID, tenantID).RoleID)
+	assert.Empty(t, listedAPIKey(t, server, plainKey.ID, tenantID).RoleID)
+
+	get := callHandleGetAPIKey(server, roleKey.ID, tenantID)
+	require.Equal(t, http.StatusOK, get.Code, get.Body.String())
+	assert.Equal(t, "agent.dev", apiKeyInfoFromResponse(t, get).RoleID)
+}
+
+// TestHandleCreateAPIKey_RoleID_SurvivesCacheEviction: a role-bound key evicted from the
+// cache and reloaded from the store (the path another controller node takes) still
+// reports its role ID in the get response and in its reloaded cache entry.
+func TestHandleCreateAPIKey_RoleID_SurvivesCacheEviction(t *testing.T) {
+	server := setupTestServer(t)
+	const tenantID = "agent-test/1"
+
+	rec := callHandleCreateAPIKey(server, []byte(`{"name":"role-key","role_id":"agent.dev","tenant_id":"`+tenantID+`"}`), tenantID)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	created := decodeCreatedAPIKey(t, rec)
+
+	dropFromCache(server, created.Key)
+	require.False(t, isCached(server, created.Key))
+	loaded, err := server.loadKeyEntryFromStore(context.Background(), created.Key)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, "agent.dev", loaded.RoleID)
+	assert.ElementsMatch(t, agentDevAPIPermissions, loaded.Permissions)
+
+	get := callHandleGetAPIKey(server, created.ID, tenantID)
+	require.Equal(t, http.StatusOK, get.Code, get.Body.String())
+	assert.Equal(t, "agent.dev", apiKeyInfoFromResponse(t, get).RoleID)
+}
+
+// TestHandleCreateAPIKey_RoleID_DoesNotTouchRBAC: creating a role-bound key adds no RBAC
+// role assignment and no RBAC subject for the key ID, and logs no RBAC warning. An API
+// key is not an RBAC subject; its authority is the permission list on its own record.
+func TestHandleCreateAPIKey_RoleID_DoesNotTouchRBAC(t *testing.T) {
+	capLog := logging.NewCapturingLogger()
+	server := setupTestServerWithLogger(t, capLog)
+	ctx := context.Background()
+	const tenantID = "agent-test/1"
+
+	assignmentsBefore, err := server.rbacManager.ListAssignments(ctx, "", "", tenantID)
+	require.NoError(t, err)
+
+	rec := callHandleCreateAPIKey(server, []byte(`{"name":"role-key","role_id":"agent.dev","tenant_id":"`+tenantID+`"}`), tenantID)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	created := decodeCreatedAPIKey(t, rec)
+
+	assignments, err := server.rbacManager.GetSubjectAssignments(ctx, created.ID, tenantID)
+	require.NoError(t, err)
+	assert.Empty(t, assignments, "the key ID holds no RBAC role assignment")
+	subject, err := server.rbacManager.GetSubject(ctx, created.ID)
+	assert.Error(t, err, "the key ID is not an RBAC subject")
+	assert.Nil(t, subject)
+	assignmentsAfter, err := server.rbacManager.ListAssignments(ctx, "", "", tenantID)
+	require.NoError(t, err)
+	assert.Equal(t, len(assignmentsBefore), len(assignmentsAfter), "no role assignment is added in the tenant")
+
+	_, warned := capLog.FindWarn("Failed to record RBAC role assignment for API key")
+	assert.False(t, warned, "no RBAC assignment warning is logged")
+	assert.Empty(t, capLog.WarnMessages, "key creation logs no warning at all")
 }
 
 // TestHandleCreateAPIKey_NoActor_Returns401AndWritesNothing: with no principal, or a

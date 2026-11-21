@@ -1829,6 +1829,7 @@ func keyFromRecord(apiKey string, rec *secretsif.Secret, validatedAt time.Time) 
 		ExpiresAt:   rec.ExpiresAt,
 		TenantID:    rec.TenantID,
 		Kind:        rec.Metadata[metadataKeyCredentialKind],
+		RoleID:      rec.Metadata[metadataKeyRoleID],
 		recordRef:   rec.Key,
 		validatedAt: validatedAt,
 	}
