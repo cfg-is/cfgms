@@ -752,6 +752,8 @@ func TestMiddlewareRequirePermissionChar_RootBoundary(t *testing.T) {
 		c := middlewarerequirepermissionCharPerm("tenant", "crossing-break-glass")
 		c.principal = operator
 		c.vars = map[string]string{"id": "msp-a"}
+		// break-glass also takes a per-action tap (Issue #6408, ADR-021 Amendment 13).
+		c.header = map[string]string{presenceTokenHeader: middlewarerequirepermissionCharBoundToken(t, srv, operator.ID, c, "tenant:crossing-break-glass")}
 
 		middlewarerequirepermissionCharRequireAdmitted(t, middlewarerequirepermissionCharServe(srv, c))
 	})

@@ -87,6 +87,27 @@ func (e *e2eRootRead) do(token, method, url string, body interface{}) *httptest.
 // for; the token is bound to this request's method, path, body and the
 // break-glass approval permission (Issue #5142).
 func (e *e2eRootRead) doWithPresence(t *testing.T, token, presenceFor, method, url string, body interface{}) *httptest.ResponseRecorder {
+	req := e.newRequest(token, method, url, body)
+	if presenceFor != "" {
+		req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, e.server, presenceFor, req, "tenant:crossing-approve-break-glass"))
+	}
+	rec := httptest.NewRecorder()
+	e.server.router.ServeHTTP(rec, req)
+	return rec
+}
+
+// doTapped is do with a presence token for permissionID, minted for the principal behind
+// the session token: the tap a RequireUserPresence route such as break-glass demands
+// (ADR-021 Amendment 13).
+func (e *e2eRootRead) doTapped(t *testing.T, token, permissionID, method, url string, body interface{}) *httptest.ResponseRecorder {
+	req := e.newRequest(token, method, url, body)
+	withPresenceTap(t, e.server, req, permissionID)
+	rec := httptest.NewRecorder()
+	e.server.router.ServeHTTP(rec, req)
+	return rec
+}
+
+func (e *e2eRootRead) newRequest(token, method, url string, body interface{}) *http.Request {
 	var raw []byte
 	if body != nil {
 		raw, _ = json.Marshal(body)
@@ -94,12 +115,7 @@ func (e *e2eRootRead) doWithPresence(t *testing.T, token, presenceFor, method, u
 	req := httptest.NewRequest(method, url, bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
-	if presenceFor != "" {
-		req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, e.server, presenceFor, req, "tenant:crossing-approve-break-glass"))
-	}
-	rec := httptest.NewRecorder()
-	e.server.router.ServeHTTP(rec, req)
-	return rec
+	return req
 }
 
 // byIDReads are the by-ID reads of the client tenant's steward, account, job and entity.
@@ -170,7 +186,7 @@ func (e *e2eRootRead) grant(t *testing.T, minutes int) *TenantCrossingResponse {
 
 func (e *e2eRootRead) breakGlass(t *testing.T, token, category string) *httptest.ResponseRecorder {
 	t.Helper()
-	return e.do(token, http.MethodPost, "/api/v1/tenants/"+sweepMSP+"/break-glass",
+	return e.doTapped(t, token, "tenant:crossing-break-glass", http.MethodPost, "/api/v1/tenants/"+sweepMSP+"/break-glass",
 		map[string]string{"reason_category": category, "justification": loudJustification})
 }
 
@@ -374,7 +390,7 @@ func TestRootReadPolicy_EndToEnd(t *testing.T) {
 		}
 		require.NoError(t, json.Unmarshal(challenged.Body.Bytes(), &challenge))
 
-		rec := e.do(token, http.MethodPost, challenge.Endpoint,
+		rec := e.doTapped(t, token, "tenant:crossing-break-glass", http.MethodPost, challenge.Endpoint,
 			map[string]string{"reason_category": "security_incident", "justification": loudJustification})
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 		admitted := e.do(token, http.MethodGet, read.url, nil)

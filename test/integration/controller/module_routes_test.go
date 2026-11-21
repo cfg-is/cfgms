@@ -4,7 +4,6 @@ package controller
 
 import (
 	"bytes"
-	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -87,7 +86,7 @@ func TestModuleListAndApprove_EndToEnd(t *testing.T) {
 	var seedCache *cache.ModuleCache
 	var pendingAddr, approvedAddr bundle.ContentAddress
 
-	ctrl, _, base, _, client := startHealthTestControllerWithConfig(t, func(cfg *controllerConfig.Config) {
+	ctrl, cfg, base, _, client := startHealthTestControllerWithConfig(t, func(cfg *controllerConfig.Config) {
 		var err error
 		seedCache, err = cache.New(moduleCacheDirFor(cfg))
 		require.NoError(t, err, "seed module cache")
@@ -211,43 +210,17 @@ func TestModuleListAndApprove_EndToEnd(t *testing.T) {
 
 		approver, approverCert := newAdminMTLSClient(t, ctrl, "presence-relay-approver")
 
-		// Create a real account and bind this test's own admin cert to it, so every
-		// subsequent request from `approver` resolves to this account's principal — the
-		// presence relay's account checks (Desired State 3) require a real, resolvable
-		// account on both ends. The new certificate is unbound until then and authorizes
-		// nothing (ADR-025 Amendment 3), so the system admin (`client`) does the binding.
-		createAcctBody, err := json.Marshal(map[string]interface{}{
-			"username":   "presence-relay-approver",
-			"root_scope": true,
-		})
-		require.NoError(t, err)
-		acctResp, err := client.Post(base+"/api/v1/accounts", "application/json", bytes.NewReader(createAcctBody))
-		require.NoError(t, err)
-		acctBody, err := io.ReadAll(acctResp.Body)
-		require.NoError(t, err)
-		_ = acctResp.Body.Close()
-		require.Equal(t, http.StatusCreated, acctResp.StatusCode, "create account: %s", string(acctBody))
-
-		bindBody, err := json.Marshal(map[string]string{
-			"serial":      approverCert.SerialNumber.String(),
-			"fingerprint": certFingerprint(approverCert),
-			"label":       "presence-relay integration test",
-		})
-		require.NoError(t, err)
-		bindResp, err := client.Post(base+"/api/v1/accounts/presence-relay-approver/certs/bind", "application/json", bytes.NewReader(bindBody))
-		require.NoError(t, err)
-		bindRespBody, err := io.ReadAll(bindResp.Body)
-		require.NoError(t, err)
-		_ = bindResp.Body.Close()
-		require.Equal(t, http.StatusCreated, bindResp.StatusCode, "bind cert: %s", string(bindRespBody))
-
-		// Register a real WebAuthn credential on the account via the real HTTP
-		// registration ceremony (begin + a genuine "none"-format attestation) — no
-		// credential is injected directly; every byte here is what a real
-		// authenticator would produce.
-		priv, _ := webauthntest.NewKey(t)
+		// Seed a real root-scope account bound to this test's own admin cert and holding a
+		// WebAuthn credential, so every subsequent request from `approver` resolves to this
+		// account's principal — the presence relay's account checks (Desired State 3)
+		// require a real, resolvable account on both ends. The new certificate is unbound
+		// until then and authorizes nothing (ADR-025 Amendment 3). The account is written
+		// to the account store: creating an account, binding a certificate and adding a
+		// passkey each need a presence tap (ADR-021 Amendment 13), and the system admin
+		// holds no passkey to tap with. Assertions below use that credential's key.
+		priv, pub := webauthntest.NewKey(t)
 		credID := []byte("presence-relay-virtual-credential-1")
-		registerVirtualCredential(t, approver, base, "presence-relay-approver", "localhost", presenceRelayOrigin(t, base), priv, credID)
+		seedPasskeyOperator(t, cfg, "presence-relay-approver", approverCert, pub, credID)
 
 		// 1. Lodge a presence request bound to the exact pending action.
 		approvePath := "/api/v1/modules/approvals/" + pendingAddress + "/approve"
@@ -445,38 +418,4 @@ func newAdminMTLSClient(t *testing.T, ctrl interface {
 func certFingerprint(c *x509.Certificate) string {
 	sum := sha256.Sum256(c.Raw)
 	return fmt.Sprintf("%x", sum)
-}
-
-// registerVirtualCredential drives the real HTTP WebAuthn registration ceremony
-// (begin + finish) for username against a real running controller, using a genuine
-// "none"-format attestation built by pkg/testutil/webauthntest for credID and priv — no
-// credential is injected directly into any store.
-func registerVirtualCredential(t *testing.T, client *http.Client, base, username, rpID, origin string, priv *ecdsa.PrivateKey, credID []byte) {
-	t.Helper()
-
-	beginResp, err := client.Post(base+"/api/v1/accounts/"+username+"/webauthn/register/begin", "application/json", nil)
-	require.NoError(t, err)
-	beginBody, err := io.ReadAll(beginResp.Body)
-	require.NoError(t, err)
-	_ = beginResp.Body.Close()
-	require.Equal(t, http.StatusOK, beginResp.StatusCode, "register begin: %s", string(beginBody))
-
-	var beginEnvelope struct {
-		Data struct {
-			PublicKey struct {
-				Challenge string `json:"challenge"`
-			} `json:"publicKey"`
-		} `json:"data"`
-	}
-	require.NoError(t, json.Unmarshal(beginBody, &beginEnvelope))
-	require.NotEmpty(t, beginEnvelope.Data.PublicKey.Challenge)
-
-	reg := webauthntest.Register(t, priv, credID, rpID, origin, beginEnvelope.Data.PublicKey.Challenge)
-
-	finishResp, err := client.Post(base+"/api/v1/accounts/"+username+"/webauthn/register/finish", "application/json", reg.Reader())
-	require.NoError(t, err)
-	finishRespBody, err := io.ReadAll(finishResp.Body)
-	require.NoError(t, err)
-	_ = finishResp.Body.Close()
-	require.Equal(t, http.StatusCreated, finishResp.StatusCode, "register finish: %s", string(finishRespBody))
 }

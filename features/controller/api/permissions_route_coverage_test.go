@@ -167,7 +167,10 @@ func TestRoutePermissionsAreGrantableWithSiblingAssurance(t *testing.T) {
 
 	assert.Equal(t, permissionAssurance["config:push"], permissionAssurance["config:rollback"], "config:rollback mirrors config:push")
 	assert.Equal(t, permissionAssurance["refresh:approve"], permissionAssurance["refresh:reject"], "refresh:reject mirrors refresh:approve")
-	assert.Equal(t, permissionAssurance["rbac:update-role"], permissionAssurance["role:write"], "role:write mirrors the rbac:*-role writes")
+	assert.Equal(t, permissionAssurance["rbac:update-role"].Min, permissionAssurance["role:write"].Min, "role:write mirrors the rbac:*-role writes")
+	assert.Equal(t, permissionAssurance["rbac:update-role"].RequireUserPresence, permissionAssurance["role:write"].RequireUserPresence, "role:write mirrors the rbac:*-role writes")
+	// Deleting a role reduces access, so it stays tap-free (Issue #6408, ADR-021 Amendment 13).
+	assert.Equal(t, []string{"DELETE /api/v1/roles/{name}"}, permissionAssurance["role:write"].PresenceExemptRoutes)
 	assert.Equal(t, session.AssuranceStrong, permissionAssurance["role:write"].Min)
 
 	for _, id := range []string{

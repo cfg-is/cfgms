@@ -137,6 +137,7 @@ func newIdentityReadFixture(t *testing.T) *identityReadFixture {
 		auth := newStrongBearerHeader(t, server, []string{"role:write"}, tid)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/roles", bytes.NewReader(validRolePayload("cfg-"+tid, "os:linux")))
 		req.Header.Set("Authorization", auth)
+		withPresenceTap(t, server, req, "role:write")
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		server.router.ServeHTTP(w, req)

@@ -54,12 +54,12 @@ var permissionAssurance = map[string]Requirement{
 	"certificate:provision":               {Min: session.AssuranceStrong},                            // POST /certificates/provision
 	"certificate:rotate":                  {Min: session.AssuranceStrong},                            // POST /certificates/signing/rotate, /signing/revoke and /signing/elect
 	"certificate:revoke":                  {Min: session.AssuranceStrong},                            // POST /certificates/{serial}/revoke (Issue #3129)
-	"rbac:create-role":                    {Min: session.AssuranceStrong},                            // POST /rbac/roles
-	"rbac:update-role":                    {Min: session.AssuranceStrong},                            // PUT  /rbac/roles/{id}
+	"rbac:create-role":                    {Min: session.AssuranceStrong, RequireUserPresence: true}, // POST /rbac/roles
+	"rbac:update-role":                    {Min: session.AssuranceStrong, RequireUserPresence: true}, // PUT  /rbac/roles/{id}
 	"rbac:delete-role":                    {Min: session.AssuranceStrong},                            // DELETE /rbac/roles/{id}
-	"rbac:assign-role":                    {Min: session.AssuranceStrong},                            // POST /rbac/subjects/{id}/roles
+	"rbac:assign-role":                    {Min: session.AssuranceStrong, RequireUserPresence: true}, // POST /rbac/subjects/{id}/roles
 	"rbac:revoke-role":                    {Min: session.AssuranceStrong},                            // DELETE /rbac/subjects/{id}/roles/{role_id}
-	"api-key:create":                      {Min: session.AssuranceStrong},                            // POST /api-keys
+	"api-key:create":                      {Min: session.AssuranceStrong, RequireUserPresence: true}, // POST /api-keys
 	"api-key:delete":                      {Min: session.AssuranceStrong},                            // DELETE /api-keys/{id}
 	"registration:create-token":           {Min: session.AssuranceStrong},                            // POST /registration/tokens
 	"registration:delete-token":           {Min: session.AssuranceStrong},                            // DELETE /registration/tokens/{token}
@@ -77,23 +77,29 @@ var permissionAssurance = map[string]Requirement{
 	"tenant:manage":                       {Min: session.AssuranceStrong},                            // POST /tenants/{id}/suspend, POST /tenants/{id}/config-source/test
 	"tenant:crossing-grant":               {Min: session.AssuranceStrong},                            // POST /tenants/{id}/access-grants
 	"tenant:crossing-end":                 {Min: session.AssuranceStrong},                            // DELETE /tenants/{id}/access-grants/{crossing_id}
-	"tenant:crossing-break-glass":         {Min: session.AssuranceStrong},                            // POST /tenants/{id}/break-glass
+	"tenant:crossing-break-glass":         {Min: session.AssuranceStrong, RequireUserPresence: true}, // POST /tenants/{id}/break-glass
 	"tenant:crossing-approve-break-glass": {Min: session.AssuranceStrong, RequireUserPresence: true}, // POST /tenants/{id}/break-glass/{crossing_id}/approve
 	"refresh:approve":                     {Min: session.AssuranceStrong},                            // POST /stewards/refresh/{pending_id}/approve
 	"refresh:reject":                      {Min: session.AssuranceStrong},                            // POST /stewards/refresh/{pending_id}/reject (Issue #6383, mirrors refresh:approve)
-	"role:write":                          {Min: session.AssuranceStrong},                            // POST/PUT/DELETE /roles... (Issue #6383, mirrors the rbac:*-role writes)
-	"refresh:set-policy":                  {Min: session.AssuranceStrong, RequireUserPresence: true}, // PUT /tenants/{tenant_path}/refresh-policy
-	"steward:move":                        {Min: session.AssuranceStrong},                            // POST /stewards/{id}/move
-	"steward:decommission":                {Min: session.AssuranceStrong},                            // DELETE /stewards/{id}
-	"steward:rotate-credentials":          {Min: session.AssuranceStrong},                            // POST /stewards/{id}/credentials/rotate (ADR-034 §5)
-	"steward:move-identity":               {Min: session.AssuranceStrong},                            // POST /stewards/{id}/identity/move (ADR-034 §5)
-	"steward:tamper-restore":              {Min: session.AssuranceStrong},                            // POST /stewards/{id}/tamper/restore
-	"steward:tamper-ban":                  {Min: session.AssuranceStrong},                            // POST /stewards/{id}/tamper/ban
-	"steward:tamper-repair":               {Min: session.AssuranceStrong},                            // POST, GET /stewards/{id}/tamper/repair
-	"account:create":                      {Min: session.AssuranceStrong},                            // POST /accounts (Issue #3574)
-	"account:update":                      {Min: session.AssuranceStrong},                            // PUT  /accounts/{username} (Issue #3126: can reset password or disable; Issue #3574)
-	"account:delete":                      {Min: session.AssuranceStrong},                            // DELETE /accounts/{username} (Issue #3574)
-	"account:revoke-enrollment-link":      {Min: session.AssuranceStrong},                            // POST /accounts/{username}/enrollment-link/revoke (Issue #3574)
+	// role:write (Issue #6383, mirrors the rbac:*-role writes; presence per ADR-021 Amendment 13):
+	// POST/PUT /roles... are gated. DELETE /roles/{name} removes permissions, so it stays tap-free.
+	"role:write": {
+		Min:                  session.AssuranceStrong,
+		RequireUserPresence:  true,
+		PresenceExemptRoutes: []string{"DELETE /api/v1/roles/{name}"},
+	},
+	"refresh:set-policy":             {Min: session.AssuranceStrong, RequireUserPresence: true}, // PUT /tenants/{tenant_path}/refresh-policy
+	"steward:move":                   {Min: session.AssuranceStrong},                            // POST /stewards/{id}/move
+	"steward:decommission":           {Min: session.AssuranceStrong},                            // DELETE /stewards/{id}
+	"steward:rotate-credentials":     {Min: session.AssuranceStrong},                            // POST /stewards/{id}/credentials/rotate (ADR-034 §5)
+	"steward:move-identity":          {Min: session.AssuranceStrong},                            // POST /stewards/{id}/identity/move (ADR-034 §5)
+	"steward:tamper-restore":         {Min: session.AssuranceStrong},                            // POST /stewards/{id}/tamper/restore
+	"steward:tamper-ban":             {Min: session.AssuranceStrong},                            // POST /stewards/{id}/tamper/ban
+	"steward:tamper-repair":          {Min: session.AssuranceStrong},                            // POST, GET /stewards/{id}/tamper/repair
+	"account:create":                 {Min: session.AssuranceStrong, RequireUserPresence: true}, // POST /accounts (Issue #3574)
+	"account:update":                 {Min: session.AssuranceStrong, RequireUserPresence: true}, // PUT  /accounts/{username} (Issue #3126: can reset password or disable; Issue #3574)
+	"account:delete":                 {Min: session.AssuranceStrong},                            // DELETE /accounts/{username} (Issue #3574)
+	"account:revoke-enrollment-link": {Min: session.AssuranceStrong},                            // POST /accounts/{username}/enrollment-link/revoke (Issue #3574)
 
 	// Cluster node lifecycle permissions — new in Issue #2780.
 	"cluster:drain-node":        {Min: session.AssuranceStrong}, // POST /cluster/nodes/{id}/drain
@@ -113,18 +119,18 @@ var permissionAssurance = map[string]Requirement{
 	// Credential-minting and credential-removal surfaces — both gated at AssuranceStrong,
 	// consistent with session:create and account:create. List (webauthn:list) is read-only
 	// and is intentionally absent from this map (reads are outside the elevated surface).
-	"webauthn:register": {Min: session.AssuranceStrong}, // POST /accounts/{username}/webauthn/register/begin|finish (Issue #3574)
-	"webauthn:revoke":   {Min: session.AssuranceStrong}, // POST /accounts/{username}/webauthn/revoke/{credential_id} (Issue #3574)
-	"webauthn:rename":   {Min: session.AssuranceStrong}, // PATCH /accounts/{username}/webauthn/credentials/{credential_id} (Issue #4626)
+	"webauthn:register": {Min: session.AssuranceStrong, RequireUserPresence: true}, // POST /accounts/{username}/webauthn/register/begin|finish (Issue #3574)
+	"webauthn:revoke":   {Min: session.AssuranceStrong},                            // POST /accounts/{username}/webauthn/revoke/{credential_id} (Issue #3574)
+	"webauthn:rename":   {Min: session.AssuranceStrong},                            // PATCH /accounts/{username}/webauthn/credentials/{credential_id} (Issue #4626)
 
 	// mTLS admin certificate binding management (Issue #3578, #3579).
 	// bind and revoke are credential-mutation surfaces gated at AssuranceStrong, mirroring
 	// webauthn:register and webauthn:revoke. list is read-only and is intentionally absent
 	// from this map (reads are outside the elevated surface, matching webauthn:list).
 	// rotate composes bind + revoke atomically and is gated at AssuranceStrong.
-	"cert-binding:bind":   {Min: session.AssuranceStrong}, // POST /accounts/{username}/certs/bind
-	"cert-binding:revoke": {Min: session.AssuranceStrong}, // POST /accounts/{username}/certs/revoke/{serial}
-	"cert-binding:rotate": {Min: session.AssuranceStrong}, // POST /accounts/{username}/certs/rotate/{old_serial} (Issue #3579)
+	"cert-binding:bind":   {Min: session.AssuranceStrong, RequireUserPresence: true}, // POST /accounts/{username}/certs/bind
+	"cert-binding:revoke": {Min: session.AssuranceStrong},                            // POST /accounts/{username}/certs/revoke/{serial}
+	"cert-binding:rotate": {Min: session.AssuranceStrong, RequireUserPresence: true}, // POST /accounts/{username}/certs/rotate/{old_serial} (Issue #3579)
 
 	// WebAuthn presence-assertion endpoint (Issue #2784).
 	// Mints a short-lived, single-use presence token consumed by RequireUserPresence-gated

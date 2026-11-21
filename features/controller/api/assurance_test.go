@@ -151,8 +151,10 @@ func TestPermissionAssurance_SubjectRoleBindingStrong(t *testing.T) {
 		require.True(t, found, "permission %q must be in permissionAssurance", perm)
 		assert.Equal(t, session.AssuranceStrong, req.Min,
 			"permission %q must require AssuranceStrong", perm)
-		assert.False(t, req.RequireUserPresence,
-			"permission %q must not require user presence (not a catastrophic operation)", perm)
+		// Issue #6408 (ADR-021 Amendment 13): assigning a role widens permissions, so it
+		// takes a per-action tap; revoking one reduces access and stays tap-free.
+		assert.Equal(t, perm == "rbac:assign-role", req.RequireUserPresence,
+			"permission %q presence requirement", perm)
 	}
 }
 
@@ -231,8 +233,10 @@ func TestPermissionAssurance_AccountUpdateStrong(t *testing.T) {
 	require.True(t, found, "account:update must be in permissionAssurance (Issue #3126, #3574)")
 	assert.Equal(t, session.AssuranceStrong, req.Min,
 		"account:update must require AssuranceStrong (same bar as create and delete)")
-	assert.False(t, req.RequireUserPresence,
-		"account:update must not require user presence (not a catastrophic operation)")
+	assert.True(t, req.RequireUserPresence,
+		"account:update must require a presence tap for every update (Issue #6408, ADR-021 Amendment 13)")
+	assert.Empty(t, req.PresenceExemptRoutes,
+		"account:update is all-or-nothing: presence requirements match method and route, not body, so disable is gated too")
 }
 
 // TestPermissionAssurance_CrossRegistryInvariant is a REQUIRED test (Issue #3195).
@@ -398,6 +402,19 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"account:set-software-authenticator":  true, // Issue #6141: a tap to allow a software authenticator for an account
 		"workflow:write":                      true, // Issue #5899: a tap to save a workflow
 		"workflow:execute":                    true, // Issue #5899: a tap to start a workflow
+		// Issue #6408 (ADR-021 Amendment 13): credential creation, authenticator and
+		// certificate binding, permission widening, account changes and break-glass.
+		"account:create":              true,
+		"account:update":              true,
+		"webauthn:register":           true,
+		"cert-binding:bind":           true,
+		"cert-binding:rotate":         true,
+		"api-key:create":              true,
+		"rbac:create-role":            true,
+		"rbac:update-role":            true,
+		"rbac:assign-role":            true,
+		"role:write":                  true,
+		"tenant:crossing-break-glass": true,
 	}
 	for perm, req := range permissionAssurance {
 		if catastrophic[perm] {

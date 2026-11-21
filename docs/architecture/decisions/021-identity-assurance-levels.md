@@ -752,7 +752,9 @@ CAS) is implemented in Story #2966.
   request from a cookie-authenticated session whose `AuthenticatorCount` is ≤ 0 with
   `403 ENROLLMENT_REQUIRED`. mTLS admin and API-key principals are never blocked
   (their `cookieAuth` context key is false).
-- **`webauthn:register` (add-to-existing) stays at `AssuranceStrong`.** The enrollment
+- **`webauthn:register` (add-to-existing) stays at `AssuranceStrong`.** *Superseded by
+  [Amendment 13](#amendment-13-2026-11-21-credential-creation-permission-widening-and-break-glass-need-a-per-action-presence-tap-issue-6408):
+  add-to-existing now also needs a per-action presence tap.* The enrollment
   redemption routes have no entry in `permissionAssurance`; they are fully public.
 
 Revocation is fail-closed: the durable record is written before the in-memory cache is
@@ -1420,3 +1422,40 @@ Founder decision (2026-11-13): the server **requires cryptographic proof that a 
 - **Accepted limitations.** A root agent account cannot run from macOS: no TPM attestation exists for an arbitrary third-party Secure Enclave key. A TPM whose endorsement certificate is not in NV storage (some firmware TPMs publish it only online) is unsupported in this version. Interoperability with real hardware (hardware EK chains, Windows TBS access for a standard user, firmware TPMs) cannot be proven by the automated tests, which use a software TPM and a CA generated at test time, and is measured operationally after release.
 - **Not re-verified at use.** The recorded result is the evidence; the stored attestation is not re-verified at each use and no FIDO metadata service is consulted.
 - **Residual risk.** A TPM-held key cannot be copied to another machine, but whoever controls the agent host can still ask the TPM to sign for every presence-gated action the account holds, within the Amendment 11 allowlist.
+
+## Amendment 13 (2026-11-21): Credential creation, permission widening and break-glass need a per-action presence tap (Issue #6408)
+
+### Context
+
+The controller's threat model assumes an admin session or device can be hijacked, but that a hijacker cannot produce a fresh passkey assertion. The per-action presence tap (`RequireUserPresence`, Decision 4 and Amendment 2) is the control that bounds a hijacked session. Several permissions that create durable access, widen permissions or take over another administrator required only `AssuranceStrong`, which every passkey-established session already holds, so a hijacked session ran them with no tap. A browser session was observed updating two accounts' permission sets, and opening a break-glass crossing to do it, with no tap.
+
+### Decision
+
+Every action that creates a credential, adds an authenticator, binds a certificate, grants or widens permissions, changes an account, or opens a break-glass crossing needs a fresh per-action presence tap. `permissionAssurance` sets `RequireUserPresence: true` next to `Min: AssuranceStrong` on these permissions:
+
+| Permission | Effect |
+|---|---|
+| `account:create` | Creates an account with permissions and returns its enrollment link. |
+| `account:update` | Changes another account's permissions, disables it, or resets its credentials and returns a fresh enrollment link. |
+| `webauthn:register` | Adds a passkey to an existing account (`register/begin` and `register/finish`). |
+| `cert-binding:bind`, `cert-binding:rotate` | Binds an mTLS certificate to an account. |
+| `api-key:create` | Creates a durable bearer credential. |
+| `rbac:create-role`, `rbac:update-role`, `rbac:assign-role`, `role:write` | Creates, widens or assigns permissions. |
+| `tenant:crossing-break-glass` | Opens root reach into a client tenant. |
+
+Access reductions do not need a tap, so fast containment stays available: `account:delete`, `account:revoke-enrollment-link`, `webauthn:revoke`, `cert-binding:revoke`, `rbac:revoke-role`, `rbac:delete-role` and `session:revoke` (which has no `permissionAssurance` entry). `DELETE /api/v1/roles/{name}` is `role:write` and stays tap-free through a `PresenceExemptRoutes` entry on `role:write`.
+
+Two choices follow from how presence requirements are matched:
+
+1. **`account:update` is all-or-nothing.** A presence requirement matches on method and route (`PresenceExemptRoutes`), not on the request body, so disabling an account is gated like every other update. A body-dependent gate would need handler code and is not added. Disabling an account in a hurry goes through `account:delete`, `webauthn:revoke`, `cert-binding:revoke`, `rbac:revoke-role` or `session:revoke`, none of which needs a tap.
+2. **Adding a passkey in the browser takes two taps.** Both `register/begin` and `register/finish` are gated, and a presence token is single use and bound to one request, so the browser flow runs the tap twice.
+
+This **supersedes** Amendment 1's statement that "`webauthn:register` (add-to-existing) stays at `AssuranceStrong`". Redeeming an enrollment token for a first passkey is unchanged: it uses `/api/v1/web/passkey/enroll/begin|finish`, which have no `permissionAssurance` entry and need no tap.
+
+### Consequences
+
+- **Automation keeps working where a `cfg` path exists.** An agent account with a CFGMS software authenticator (Amendment 10) answers a presence challenge headlessly through the `cfg` step-up handler. `cfg account create`, `cfg account update`, `cfg account cert bind` and `rotate`, and `cfg tenant break-glass` use the step-up-aware session client, so `--authenticator` answers presence for them. There is no `cfg api-key` command, so API-key creation is reachable through REST and the web only, and `cfg webauthn register` is unsupported, so adding a passkey is web-only. Amendment 11's root agent allowlist is unchanged: of these permissions only `account:create` is on it, so a root agent still cannot update accounts, bind certificates, create keys or roles, or open break-glass.
+- **A principal needs a passkey to tap.** The gated routes are reachable only by a principal that already holds a registered credential. A newly bootstrapped administrator account that holds only an admin certificate holds none, so its first passkey comes from enrollment-token redemption, which is unchanged.
+- **The web needs no new mechanism.** `apiFetch` already runs the step-up modal on any `CFGMS-StepUp` 401 with `presence="required"`.
+- **Not covered here.** Presence for `terminal:create`, `steward:execute-scripts`, `script:admin` and installer writes stays the separate decision Amendment 8 left open. `tenant:crossing-approve-break-glass` is already presence-gated, and the second-approver rules are unchanged.
+- **Accepted residual risk.** Amendment 9's residual risk applies to the new taps: a compromised page can show the admin one action and bind the tap to another. The server-side action binding (method, path, body hash, permission) still refuses a token minted for a different request.

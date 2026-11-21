@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -40,4 +41,18 @@ func newStrongBearerHeader(t *testing.T, server *Server, permissions []string, t
 	require.NoError(t, err)
 	require.Equal(t, session.AssuranceStrong, elevated.Assurance)
 	return "Bearer " + token
+}
+
+// withPresenceTap sets an X-Presence-Token on req for the session credential
+// newStrongBearerHeader already put on it: a token minted for that session's principal and
+// bound to req's method, path, body and permissionID, the shape a real passkey tap produces
+// (Issue #5142). For routes whose permission sets RequireUserPresence (ADR-021
+// Amendment 13). req must carry its Authorization header and body before the call.
+func withPresenceTap(t *testing.T, server *Server, req *http.Request, permissionID string) {
+	t.Helper()
+	token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+	require.NotEmpty(t, token, "withPresenceTap needs a Bearer session credential on the request")
+	sess, err := server.sessionManager.Validate(session.WithSourceIP(context.Background(), "192.0.2.1"), token)
+	require.NoError(t, err)
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, sess.PrincipalID, req, permissionID))
 }

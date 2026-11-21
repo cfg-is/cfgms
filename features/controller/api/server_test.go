@@ -441,7 +441,7 @@ func TestAPIKeyManagement(t *testing.T) {
 	reqBody, err := json.Marshal(createReq)
 	require.NoError(t, err)
 
-	req := makeAdminRequest(t, "POST", "/api/v1/api-keys", bytes.NewReader(reqBody))
+	req := makeAdminRequestWithPresence(t, server, "POST", "/api/v1/api-keys", bytes.NewReader(reqBody), "api-key:create")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -629,7 +629,7 @@ func TestErrorResponses(t *testing.T) {
 	server := setupTestServer(t)
 
 	// Test invalid JSON on POST /api/v1/api-keys (Tier-3: use admin cert to reach the handler).
-	req := makeAdminRequest(t, "POST", "/api/v1/api-keys", bytes.NewReader([]byte("invalid json")))
+	req := makeAdminRequestWithPresence(t, server, "POST", "/api/v1/api-keys", bytes.NewReader([]byte("invalid json")), "api-key:create")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -746,7 +746,7 @@ func TestActualAPIFunctionality(t *testing.T) {
 		reqBody, err := json.Marshal(createReq)
 		require.NoError(t, err)
 
-		req := makeAdminRequest(t, "POST", "/api/v1/api-keys", bytes.NewReader(reqBody))
+		req := makeAdminRequestWithPresence(t, server, "POST", "/api/v1/api-keys", bytes.NewReader(reqBody), "api-key:create")
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 

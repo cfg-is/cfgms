@@ -17,7 +17,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -788,13 +790,20 @@ func (f *enfFixture) agentPrincipal() *Principal {
 // credential and returns the response; the token is in the body of a 200.
 func (f *enfFixture) presenceFinish(t *testing.T, action presenceActionBinding, soft bool) *httptest.ResponseRecorder {
 	t.Helper()
-	begin := doPresenceBeginWithAction(t, f.server, f.agentPrincipal(), action)
+	return f.presenceFinishAs(t, f.agentPrincipal(), action, soft)
+}
+
+// presenceFinishAs is presenceFinish for the principal p (a tenant account rather than
+// the root agent).
+func (f *enfFixture) presenceFinishAs(t *testing.T, p *Principal, action presenceActionBinding, soft bool) *httptest.ResponseRecorder {
+	t.Helper()
+	begin := doPresenceBeginWithAction(t, f.server, p, action)
 	if begin.Code != http.StatusOK {
 		return begin
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webauthn/presence/finish",
 		f.assertion(t, soft, publicKeyChallenge(t, begin)))
-	req = withPrincipal(req, f.agentPrincipal())
+	req = withPrincipal(req, p)
 	rec := httptest.NewRecorder()
 	f.server.handlePresenceFinish(rec, req)
 	return rec
@@ -828,6 +837,46 @@ func (f *enfFixture) agentRequest(t *testing.T, token, method, path, body string
 	rec := httptest.NewRecorder()
 	f.server.router.ServeHTTP(rec, req)
 	return rec
+}
+
+// tapAs runs the presence ceremony as p with the account's software credential for exactly
+// this request (method, path, body, permission) and returns the presence token it mints,
+// as `cfg --authenticator` does through the step-up handler.
+func (f *enfFixture) tapAs(t *testing.T, p *Principal, method, path, body, permissionID string) string {
+	t.Helper()
+	sum := sha256.Sum256([]byte(body))
+	rec := f.presenceFinishAs(t, p, presenceActionBinding{
+		Method: method, Path: path, BodyHash: hex.EncodeToString(sum[:]), PermissionID: permissionID,
+	}, true)
+	require.Equal(t, http.StatusOK, rec.Code, "presence ceremony: %s", rec.Body.String())
+	var resp struct {
+		Data map[string]interface{} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	token, _ := resp.Data["presence_token"].(string)
+	require.NotEmpty(t, token, "the ceremony returns a presence token")
+	return token
+}
+
+// tappedRequest is agentRequest with a presence token the software authenticator minted
+// as p for exactly this request.
+func (f *enfFixture) tappedRequest(t *testing.T, p *Principal, token, method, path, body, permissionID string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set(presenceTokenHeader, f.tapAs(t, p, method, path, body, permissionID))
+	rec := httptest.NewRecorder()
+	f.server.router.ServeHTTP(rec, req)
+	return rec
+}
+
+// agentTappedRequest is tappedRequest as the root agent.
+func (f *enfFixture) agentTappedRequest(t *testing.T, token, method, path, body, permissionID string) *httptest.ResponseRecorder {
+	t.Helper()
+	return f.tappedRequest(t, f.agentPrincipal(), token, method, path, body, permissionID)
 }
 
 // [REQUIRED TEST] The agent logs in by passkey, completes the presence ceremony and
@@ -1027,17 +1076,24 @@ func TestRootAgentEnforcement_AccountCreateThroughTheRouter(t *testing.T) {
 	f := newAgentFixture(t)
 	bearer := f.agentBearer(t)
 
-	ok := f.agentRequest(t, bearer, http.MethodPost, "/api/v1/accounts",
-		`{"username":"agent-made","tenant_id":"`+testRootTenantID+`","permissions":["steward:list"]}`)
+	// account:create needs a presence tap; the agent's software authenticator answers it.
+	const create = "account:create"
+	untapped := f.agentRequest(t, bearer, http.MethodPost, "/api/v1/accounts",
+		`{"username":"agent-untapped","tenant_id":"`+testRootTenantID+`"}`)
+	require.Equal(t, http.StatusUnauthorized, untapped.Code, untapped.Body.String())
+	assert.Contains(t, untapped.Header().Get("WWW-Authenticate"), `permission="account:create"`)
+
+	ok := f.agentTappedRequest(t, bearer, http.MethodPost, "/api/v1/accounts",
+		`{"username":"agent-made","tenant_id":"`+testRootTenantID+`","permissions":["steward:list"]}`, create)
 	require.Equal(t, http.StatusCreated, ok.Code, ok.Body.String())
 	assert.Contains(t, ok.Body.String(), "enrollment_magic_link")
 
-	below := f.agentRequest(t, bearer, http.MethodPost, "/api/v1/accounts",
-		`{"username":"agent-made-below","tenant_id":"client-1"}`)
+	below := f.agentTappedRequest(t, bearer, http.MethodPost, "/api/v1/accounts",
+		`{"username":"agent-made-below","tenant_id":"client-1"}`, create)
 	assert.Equal(t, http.StatusUnauthorized, below.Code, below.Body.String())
 	assert.Contains(t, below.Body.String(), "tenant_crossing_required")
 
-	minted := f.agentRequest(t, bearer, http.MethodPost, "/api/v1/accounts", `{"username":"agent-root-2","root_scope":true}`)
+	minted := f.agentTappedRequest(t, bearer, http.MethodPost, "/api/v1/accounts", `{"username":"agent-root-2","root_scope":true}`, create)
 	assert.Equal(t, http.StatusForbidden, minted.Code, minted.Body.String())
 	assert.Equal(t, errCodeRootAgentLimited, errCode(t, minted.Body.Bytes()))
 }

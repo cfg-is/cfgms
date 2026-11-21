@@ -124,9 +124,12 @@ describe('crossing requests', () => {
     await expect(fetchActiveCrossings()).rejects.toMatchObject({ status: 500, code: 'LIST_FAILED' })
   })
 
-  it('break-glass retries through the step-up listener keeping the body', async () => {
+  it('break-glass retries through the step-up listener as a presence tap, keeping the body (ADR-021 Amendment 13)', async () => {
     fetchMock.mockResolvedValueOnce(
-      json(401, { error: 'x' }, { 'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms"' }),
+      json(401, { error: 'step_up_required', presence_required: true }, {
+        'WWW-Authenticate':
+          'CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="tenant:crossing-break-glass"',
+      }),
     )
     const listener = vi.fn(async (req: { path: string; init: RequestInit }) =>
       fetch(req.path, req.init),
@@ -135,6 +138,9 @@ describe('crossing requests', () => {
     fetchMock.mockResolvedValueOnce(json(201, { data: crossing() }))
     await requestBreakGlass('msp-a', { reasonCategory: 'account_recovery', justification: 'outage response' })
     expect(listener).toHaveBeenCalledTimes(1)
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({ presenceRequired: true, permission: 'tenant:crossing-break-glass' }),
+    )
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(JSON.parse(String(fetchMock.mock.calls[1]![1]?.body)).justification).toBe('outage response')
   })

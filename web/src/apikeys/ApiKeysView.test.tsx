@@ -166,7 +166,7 @@ describe('ApiKeysView create', () => {
     expect(callsTo('POST')).toHaveLength(0)
   })
 
-  it('ApiKeysView create handles elevation 401 without a presence token', async () => {
+  it('ApiKeysView create runs the presence tap and retries with the token (ADR-021 Amendment 13)', async () => {
     const cred = {
       id: 'cred-id-b64u',
       type: 'public-key',
@@ -182,31 +182,39 @@ describe('ApiKeysView create', () => {
       toJSON: () => ({}),
     }
     vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(cred) } })
-    const beginOptions = {
-      data: {
-        publicKey: {
-          challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
-          timeout: 60000,
-          rpId: 'localhost',
-          allowCredentials: [{ type: 'public-key', id: 'Y3JlZGVudGlhbC1pZA', transports: ['internal'] }],
-          userVerification: 'required',
+    const envelope = (data: unknown) => ({ data, timestamp: new Date().toISOString() })
+    const presenceChallenge = () =>
+      jsonResponse(
+        401,
+        { error: 'step_up_required', required_assurance: 'strong', presence_required: true },
+        {
+          'WWW-Authenticate':
+            'CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="api-key:create"',
         },
-      },
-    }
-    let elevated = false
+      )
     fetchMock.mockImplementation((url, init) => {
       const u = String(url)
-      if (u.includes('elevate/begin')) return Promise.resolve(jsonResponse(200, beginOptions))
-      if (u.includes('elevate/finish')) {
-        elevated = true
-        return Promise.resolve(jsonResponse(200, { assurance: 'strong', elevated_at: '2026-01-01T00:00:00Z' }))
+      if (u.includes('presence/begin')) {
+        return Promise.resolve(
+          jsonResponse(
+            200,
+            envelope({
+              publicKey: {
+                challenge: 'Y2hhbGxlbmdl',
+                timeout: 60000,
+                rpId: 'localhost',
+                allowCredentials: [{ type: 'public-key', id: 'Y3JlZA', transports: ['internal'] }],
+                userVerification: 'required',
+              },
+            }),
+          ),
+        )
+      }
+      if (u.includes('presence/finish')) {
+        return Promise.resolve(jsonResponse(200, envelope({ presence_token: 'tap-token-1', expires_in: 30 })))
       }
       if (init?.method === 'POST') {
-        if (!elevated) {
-          return Promise.resolve(
-            jsonResponse(401, {}, { 'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"' }),
-          )
-        }
+        if (new Headers(init.headers).get('X-Presence-Token') !== 'tap-token-1') return Promise.resolve(presenceChallenge())
         return Promise.resolve(jsonResponse(201, { data: { ...makeKey(), key: SECRET } }))
       }
       return Promise.resolve(jsonResponse(200, { data: [] }))
@@ -219,9 +227,9 @@ describe('ApiKeysView create', () => {
     expect(await screen.findByTestId('api-key-secret-value')).toHaveProperty('value', SECRET)
     const posts = callsTo('POST')
     expect(posts).toHaveLength(2)
-    const retry = posts[1]?.[1]
-    expect(new Headers(retry?.headers).get('X-Presence-Token')).toBeNull()
-    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('presence/'))).toBe(false)
+    expect(new Headers(posts[0]?.[1]?.headers).get('X-Presence-Token')).toBeNull()
+    expect(new Headers(posts[1]?.[1]?.headers).get('X-Presence-Token')).toBe('tap-token-1')
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('presence/finish'))).toBe(true)
   })
 })
 
@@ -249,6 +257,9 @@ describe('ApiKeysView delete', () => {
     fireEvent.click(screen.getByTestId('api-key-confirm-btn'))
     await waitFor(() => expect(callsTo('DELETE')).toHaveLength(1))
     expect(String(callsTo('DELETE')[0]?.[0])).toBe('/api/v1/api-keys/key-abc123')
+    // Deleting a key reduces access: no presence token, no presence ceremony.
+    expect(new Headers(callsTo('DELETE')[0]?.[1]?.headers).get('X-Presence-Token')).toBeNull()
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('presence/'))).toBe(false)
     expect(await screen.findByTestId('api-keys-empty')).toBeInTheDocument()
   })
 

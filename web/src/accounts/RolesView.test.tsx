@@ -6,7 +6,7 @@
  * permission expansion, create, edit, and delete.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
 import RolesView from './RolesView.tsx'
@@ -80,11 +80,81 @@ function fillJustification(
   fireEvent.change(screen.getByTestId(testId), { target: { value } })
 }
 
+// ── Per-action presence tap (Issue #6408, ADR-021 Amendment 13) ───────────────
+//
+// Creating and updating a role need a presence tap (rbac:create-role, rbac:update-role);
+// deleting one does not. The stub answers a write without X-Presence-Token with the
+// presence challenge, so a flow that never runs the tap never succeeds.
+
+const TAP_TOKEN = 'tap-token-1'
+
+function stubWebAuthn() {
+  const buf = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer
+  const credential = {
+    id: 'cred-id-b64u',
+    type: 'public-key',
+    rawId: buf('cred-id-b64u'),
+    response: {
+      clientDataJSON: buf('{"type":"webauthn.get"}'),
+      authenticatorData: buf('authenticator-data'),
+      signature: buf('signature'),
+      userHandle: null,
+    },
+    getClientExtensionResults: () => ({}),
+    authenticatorAttachment: null,
+    toJSON: () => ({}),
+  }
+  vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(credential) } })
+}
+
+function presenceChallenge(permission: string): Response {
+  return new Response(
+    JSON.stringify({ error: 'step_up_required', required_assurance: 'strong', presence_required: true }),
+    {
+      status: 401,
+      headers: {
+        'Content-Type': 'application/json',
+        'WWW-Authenticate': `CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="${permission}"`,
+      },
+    },
+  )
+}
+
+/** The presence ceremony endpoints; undefined for any other URL. */
+function presenceEndpoint(url: string): Response | undefined {
+  const envelope = (data: unknown) =>
+    new Response(JSON.stringify({ data, timestamp: new Date().toISOString() }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  if (url.includes('presence/begin')) {
+    return envelope({
+      publicKey: {
+        challenge: 'Y2hhbGxlbmdl',
+        timeout: 60000,
+        rpId: 'localhost',
+        allowCredentials: [{ type: 'public-key', id: 'Y3JlZA', transports: ['internal'] }],
+        userVerification: 'required',
+      },
+    })
+  }
+  if (url.includes('presence/finish')) return envelope({ presence_token: TAP_TOKEN, expires_in: 30 })
+  return undefined
+}
+
+async function runTap() {
+  await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('step-up-verify-btn'))
+  })
+}
+
 /** Requests recorded by the fetch mock, for header/body assertions. */
 interface RecordedRequest {
   url: string
   method: string
   justification: string | null
+  presenceToken: string | null
   body: unknown
 }
 
@@ -95,6 +165,7 @@ function recordRequest(url: RequestInfo | URL, init?: RequestInit): RecordedRequ
     url: String(url),
     method: ((init as RequestInit | undefined)?.method ?? 'GET').toUpperCase(),
     justification: headers.get('X-Justification'),
+    presenceToken: headers.get('X-Presence-Token'),
     body: typeof raw === 'string' ? JSON.parse(raw) : null,
   }
 }
@@ -244,15 +315,20 @@ describe('RolesView — create role', () => {
     expect(screen.getByTestId('role-save-error')).toHaveTextContent(/role name is required/i)
   })
 
-  it('calls POST /api/v1/rbac/roles with the justification header and refreshes list', async () => {
+  it('[REQUIRED TEST] calls POST /api/v1/rbac/roles after the presence tap, with the justification header, and refreshes list', async () => {
+    stubWebAuthn()
     const rolesAfterCreate = [makeRole(), makeRole({ id: 'role-new', name: 'new-role' })]
     const posts: RecordedRequest[] = []
     let callCount = 0
     fetchMock.mockImplementation((url: RequestInfo | URL, init?: RequestInit) => {
       const u = String(url)
       const method = ((init as RequestInit | undefined)?.method ?? 'GET').toUpperCase()
+      const presence = presenceEndpoint(u)
+      if (presence) return Promise.resolve(presence)
       if (method === 'POST' && u.includes('/rbac/roles')) {
-        posts.push(recordRequest(url, init))
+        const recorded = recordRequest(url, init)
+        posts.push(recorded)
+        if (recorded.presenceToken !== TAP_TOKEN) return Promise.resolve(presenceChallenge('rbac:create-role'))
         return Promise.resolve(new Response(
           JSON.stringify({ data: makeRole({ id: 'role-new', name: 'new-role' }) }),
           { status: 201, headers: { 'Content-Type': 'application/json' } },
@@ -273,17 +349,21 @@ describe('RolesView — create role', () => {
     fireEvent.change(screen.getByTestId('role-name-input'), { target: { value: 'new-role' } })
     fillJustification()
     fireEvent.click(screen.getByTestId('role-save-btn'))
+    await runTap()
     await waitFor(() => {
       expect(screen.queryByTestId('role-form-panel')).not.toBeInTheDocument()
     })
     await waitFor(() => {
       expect(screen.getAllByTestId('role-row')).toHaveLength(2)
     })
-    expect(posts).toHaveLength(1)
-    expect(posts[0]!.justification).toBe(VALID_JUSTIFICATION)
+    // The bare request is challenged; the retry carries the token the tap minted.
+    expect(posts).toHaveLength(2)
+    expect(posts[0]!.presenceToken).toBeNull()
+    expect(posts[1]!.presenceToken).toBe(TAP_TOKEN)
+    expect(posts[1]!.justification).toBe(VALID_JUSTIFICATION)
     // A browser-supplied tenant would be a cross-tenant write vector: the
     // create body carries none.
-    expect(posts[0]!.body).not.toHaveProperty('tenant_id')
+    expect(posts[1]!.body).not.toHaveProperty('tenant_id')
   })
 
   it('blocks create and issues no request when the justification is too short', async () => {
@@ -386,14 +466,19 @@ describe('RolesView — edit role', () => {
     expect(screen.getByTestId('role-permissions-row')).toBeInTheDocument()
   })
 
-  it('calls PUT /api/v1/rbac/roles/{id} with justification and tenant, and refreshes list', async () => {
+  it('[REQUIRED TEST] calls PUT /api/v1/rbac/roles/{id} after the presence tap, with justification, and refreshes list', async () => {
+    stubWebAuthn()
     const puts: RecordedRequest[] = []
     let rolesCallCount = 0
     fetchMock.mockImplementation((url: RequestInfo | URL, init?: RequestInit) => {
       const u = String(url)
       const method = ((init as RequestInit | undefined)?.method ?? 'GET').toUpperCase()
+      const presence = presenceEndpoint(u)
+      if (presence) return Promise.resolve(presence)
       if (method === 'PUT' && u.includes('/rbac/roles/role-1')) {
-        puts.push(recordRequest(url, init))
+        const recorded = recordRequest(url, init)
+        puts.push(recorded)
+        if (recorded.presenceToken !== TAP_TOKEN) return Promise.resolve(presenceChallenge('rbac:update-role'))
         return Promise.resolve(new Response(
           JSON.stringify({ data: makeRole({ name: 'updated-viewer' }) }),
           { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -414,17 +499,20 @@ describe('RolesView — edit role', () => {
     fireEvent.change(screen.getByTestId('role-name-input'), { target: { value: 'updated-viewer' } })
     fillJustification()
     fireEvent.click(screen.getByTestId('role-update-btn'))
+    await runTap()
     await waitFor(() => {
-      expect(puts).toHaveLength(1)
+      expect(puts).toHaveLength(2)
     })
     await waitFor(() => {
       expect(screen.queryByTestId('role-edit-panel')).not.toBeInTheDocument()
     })
-    expect(puts[0]!.justification).toBe(VALID_JUSTIFICATION)
-    expect(puts[0]!.body).toMatchObject({ name: 'updated-viewer' })
+    expect(puts[0]!.presenceToken).toBeNull()
+    expect(puts[1]!.presenceToken).toBe(TAP_TOKEN)
+    expect(puts[1]!.justification).toBe(VALID_JUSTIFICATION)
+    expect(puts[1]!.body).toMatchObject({ name: 'updated-viewer' })
     // A browser-supplied tenant would be a cross-tenant write vector: the edit
     // body carries none, and the server preserves the stored attribution.
-    expect(puts[0]!.body).not.toHaveProperty('tenant_id')
+    expect(puts[1]!.body).not.toHaveProperty('tenant_id')
   })
 
   it('blocks the update and issues no request when the justification is too short', async () => {
@@ -543,7 +631,7 @@ describe('RolesView — delete role', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
-  it('calls DELETE /api/v1/rbac/roles/{id} with the justification header on confirm', async () => {
+  it('[REQUIRED TEST] calls DELETE /api/v1/rbac/roles/{id} with the justification header on confirm, with no presence tap', async () => {
     const deletes: RecordedRequest[] = []
     let rolesCallCount = 0
     fetchMock.mockImplementation((url: RequestInfo | URL, init?: RequestInit) => {
@@ -577,6 +665,10 @@ describe('RolesView — delete role', () => {
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     })
     expect(deletes[0]!.justification).toBe(VALID_JUSTIFICATION)
+    // Deleting a role reduces access: no presence token, no presence ceremony.
+    expect(deletes[0]!.presenceToken).toBeNull()
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('presence/'))).toBe(false)
+    expect(screen.queryByTestId('step-up-overlay')).not.toBeInTheDocument()
   })
 
   it('keeps the modal open and issues no request without a justification', async () => {

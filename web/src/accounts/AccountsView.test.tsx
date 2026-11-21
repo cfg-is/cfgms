@@ -91,6 +91,103 @@ function renderAccountsView() {
   )
 }
 
+// ── Per-action presence tap (Issue #6408, ADR-021 Amendment 13) ───────────────
+//
+// Account create and update, role assignment and certificate bind and rotate need a
+// presence tap; deletes, revokes and enrollment-link revocation do not. The network
+// stub answers a request without X-Presence-Token with the presence challenge, so a
+// flow that never runs the tap never succeeds.
+
+const TAP_TOKEN = 'tap-token-1'
+
+const ASSERTION_OPTIONS = {
+  publicKey: {
+    challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
+    timeout: 60000,
+    rpId: 'localhost',
+    allowCredentials: [{ type: 'public-key', id: 'Y3JlZGVudGlhbC1pZA', transports: ['internal'] }],
+    userVerification: 'required',
+  },
+}
+
+function webauthnCredential() {
+  const buf = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer
+  return {
+    id: 'cred-id-b64u',
+    type: 'public-key',
+    rawId: buf('cred-id-b64u'),
+    response: {
+      clientDataJSON: buf('{"type":"webauthn.get"}'),
+      authenticatorData: buf('authenticator-data'),
+      signature: buf('signature'),
+      userHandle: null,
+    },
+    getClientExtensionResults: () => ({}),
+    authenticatorAttachment: null,
+    toJSON: () => ({}),
+  }
+}
+
+function stubWebAuthn() {
+  vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(webauthnCredential()) } })
+}
+
+function presenceChallenge(permission: string): Response {
+  return new Response(
+    JSON.stringify({ error: 'step_up_required', required_assurance: 'strong', presence_required: true }),
+    {
+      status: 401,
+      headers: {
+        'Content-Type': 'application/json',
+        'WWW-Authenticate': `CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="${permission}"`,
+      },
+    },
+  )
+}
+
+/** The presence ceremony endpoints; undefined for any other URL. */
+function presenceEndpoint(url: string): Response | undefined {
+  const envelope = (data: unknown) =>
+    new Response(JSON.stringify({ data, timestamp: new Date().toISOString() }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  if (url.includes('presence/begin')) return envelope(ASSERTION_OPTIONS)
+  if (url.includes('presence/finish')) return envelope({ presence_token: TAP_TOKEN, expires_in: 30 })
+  return undefined
+}
+
+function presenceToken(init?: RequestInit): string | null {
+  return new Headers(init?.headers).get('X-Presence-Token')
+}
+
+/** Calls to url made with method, in order. */
+function callsTo(method: string, match: (url: string) => boolean) {
+  return fetchMock.mock.calls.filter(([u, init]) => match(String(u)) && (init?.method ?? 'GET').toUpperCase() === method)
+}
+
+async function runTap() {
+  await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('step-up-verify-btn'))
+  })
+}
+
+/** The request went out twice: bare, then retried with the token the tap minted. */
+function expectTapped(calls: ReturnType<typeof callsTo>) {
+  expect(calls).toHaveLength(2)
+  expect(presenceToken(calls[0]?.[1])).toBeNull()
+  expect(presenceToken(calls[1]?.[1])).toBe(TAP_TOKEN)
+}
+
+/** The request went out once, with no presence token, and no tap ran. */
+function expectTapFree(calls: ReturnType<typeof callsTo>) {
+  expect(calls).toHaveLength(1)
+  expect(presenceToken(calls[0]?.[1])).toBeNull()
+  expect(fetchMock.mock.calls.some(([u]) => String(u).includes('presence/'))).toBe(false)
+  expect(screen.queryByTestId('step-up-overlay')).not.toBeInTheDocument()
+}
+
 describe('AccountsView — heading and page structure', () => {
   it('shows the Accounts heading', () => {
     fetchMock.mockReturnValue(new Promise(() => {}))
@@ -210,20 +307,20 @@ describe('AccountsView — create panel (Issue #2974: no password; step-up; link
     expect(screen.getByTestId('account-save-error')).toHaveTextContent(/username is required/i)
   })
 
-  it('[REQUIRED TEST] create call uses apiFetch so step-up is handled automatically — never a dead 403', async () => {
-    // This test verifies the AC: "+ New account" is never a dead 403.
-    // When the server returns 401 + CFGMS-StepUp, the apiFetch interceptor fires
-    // the step-up listener (StepUpModal via AuthProvider) — the operator sees the
-    // passkey prompt, not a raw 403 error. We verify this by checking the create
-    // request goes through the apiFetch path (via fetch mock).
-    fetchMock
-      .mockResolvedValueOnce(makeAccountsResponse([])) // initial list load
-      .mockResolvedValueOnce(
-        new Response('', {
-          status: 401,
-          headers: { 'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"' },
-        }),
-      ) // step-up challenge
+  it('[REQUIRED TEST] create call uses apiFetch so the presence tap is handled automatically — never a dead 403', async () => {
+    // "+ New account" is never a dead 403: the 401 CFGMS-StepUp presence challenge
+    // opens the StepUpModal through the apiFetch interceptor, the operator taps, and the
+    // request is retried with the presence token (ADR-021 Amendment 13).
+    stubWebAuthn()
+    fetchMock.mockImplementation((url, init) => {
+      const u = String(url)
+      const presence = presenceEndpoint(u)
+      if (presence) return Promise.resolve(presence)
+      if (u === '/api/v1/accounts' && init?.method === 'POST') {
+        return Promise.resolve(presenceToken(init) === TAP_TOKEN ? makeCreateResponse() : presenceChallenge('account:create'))
+      }
+      return Promise.resolve(makeAccountsResponse([]))
+    })
     renderAccountsView()
     await waitFor(() => expect(screen.getByTestId('toggle-create-btn')).toBeInTheDocument())
     fireEvent.click(screen.getByTestId('toggle-create-btn'))
@@ -231,13 +328,13 @@ describe('AccountsView — create panel (Issue #2974: no password; step-up; link
     await act(async () => {
       fireEvent.click(screen.getByTestId('account-save-btn'))
     })
-    await waitFor(() => {
-      // The step-up modal appears — the operator is NOT shown a terminal 403.
-      // The modal is rendered by AuthProvider when onStepUpRequired fires.
-      expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument()
-    })
-    // Critically: no 403 error text is shown to the user.
+    // The modal appears; no 403 text is shown to the user.
+    await waitFor(() => expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument())
     expect(screen.queryByText(/403/)).not.toBeInTheDocument()
+
+    await runTap()
+    await waitFor(() => expect(screen.getByTestId('enrollment-link-panel')).toBeInTheDocument())
+    expectTapped(callsTo('POST', (u) => u === '/api/v1/accounts'))
   })
 
   it('shows enrollment link panel after successful create (link shown once)', async () => {
@@ -1539,52 +1636,24 @@ describe('AccountsView — role chips on the collapsed row (Issue #4602)', () =>
 // ── Certificate bindings in the expand panel (Issue #5448) ────────────────────
 
 describe('AccountsView — certificate bindings (Issue #5448)', () => {
-  const OPTIONS = {
-    publicKey: {
-      challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
-      timeout: 60000,
-      rpId: 'localhost',
-      allowCredentials: [{ type: 'public-key', id: 'Y3JlZGVudGlhbC1pZA', transports: ['internal'] }],
-      userVerification: 'required',
-    },
-  }
-
-  function credential() {
-    const buf = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer
-    return {
-      id: 'cred-id-b64u',
-      type: 'public-key',
-      rawId: buf('cred-id-b64u'),
-      response: {
-        clientDataJSON: buf('{"type":"webauthn.get"}'),
-        authenticatorData: buf('authenticator-data'),
-        signature: buf('signature'),
-        userHandle: null,
-      },
-      getClientExtensionResults: () => ({}),
-      authenticatorAttachment: null,
-      toJSON: () => ({}),
-    }
-  }
-
   function json(status: number, body: unknown = {}) {
     return Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }))
   }
 
-  function stubNetwork(bindings: object[], elevate: boolean) {
-    const challenged = new Set<string>()
+  // Bind and rotate answer a request without a presence token with the presence
+  // challenge (cert-binding:bind, cert-binding:rotate); revoke carries no presence
+  // requirement. With gated false nothing is challenged.
+  function stubNetwork(bindings: object[], gated: boolean) {
     fetchMock.mockImplementation((url, init) => {
       const u = String(url)
       const method = (init?.method ?? 'GET').toUpperCase()
-      if (u.includes('elevate/begin')) return json(200, { data: OPTIONS })
-      if (u.includes('elevate/finish')) return json(200, { assurance: 'strong', elevated_at: '2026-01-01T00:00:00Z' })
+      const presence = presenceEndpoint(u)
+      if (presence) return Promise.resolve(presence)
       if (u.includes('/certs')) {
         if (method === 'GET') return json(200, { data: bindings })
-        if (elevate && !challenged.has(u)) {
-          challenged.add(u)
-          return Promise.resolve(
-            new Response('', { status: 401, headers: { 'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong"' } }),
-          )
+        const needsTap = gated && (u.includes('/certs/bind') || u.includes('/certs/rotate/'))
+        if (needsTap && presenceToken(init) !== TAP_TOKEN) {
+          return Promise.resolve(presenceChallenge(u.includes('/certs/bind') ? 'cert-binding:bind' : 'cert-binding:rotate'))
         }
         return json(200, {})
       }
@@ -1601,58 +1670,49 @@ describe('AccountsView — certificate bindings (Issue #5448)', () => {
     await waitFor(() => expect(screen.getByTestId('cert-bindings-section')).toBeInTheDocument())
   }
 
-  function certWrites() {
-    return fetchMock.mock.calls.filter(
-      ([u, init]) => String(u).includes('/certs') && (init?.method ?? 'GET').toUpperCase() === 'POST',
-    )
-  }
+  const certCalls = (match: string) => callsTo('POST', (u) => u.includes('/certs') && u.includes(match))
 
-  async function elevate() {
-    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('step-up-verify-btn'))
-    })
-  }
-
-  function expectNoPresenceToken() {
-    const retried = certWrites()
-    expect(retried.length).toBeGreaterThanOrEqual(2)
-    for (const [, init] of retried) {
-      expect(new Headers(init?.headers).get('X-Presence-Token')).toBeNull()
-    }
-  }
-
-  it('[REQUIRED TEST] AccountsView cert bind, revoke and rotate handle elevation 401 without a presence token', async () => {
-    vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(credential()) } })
+  it('[REQUIRED TEST] AccountsView cert bind runs the presence tap and retries with the token', async () => {
+    stubWebAuthn()
     stubNetwork([{ serial: '3a:2f', fingerprint: 'sha256:abc', bound_at: '2026-01-01T00:00:00Z' }], true)
     await expand()
     await waitFor(() => screen.getByTestId('cert-revoke-btn'))
 
-    // bind
     fireEvent.change(screen.getByTestId('cert-bind-serial-input'), { target: { value: 's9' } })
     fireEvent.change(screen.getByTestId('cert-bind-fingerprint-input'), { target: { value: 'f9' } })
     fireEvent.click(screen.getByTestId('cert-bind-btn'))
-    await elevate()
-    await waitFor(() => expect(certWrites()).toHaveLength(2))
-    expectNoPresenceToken()
-
-    // revoke
-    fireEvent.click(screen.getByTestId('cert-revoke-btn'))
-    fireEvent.click(screen.getByTestId('cert-confirm-btn'))
-    await elevate()
-    await waitFor(() => expect(certWrites()).toHaveLength(4))
+    await runTap()
+    await waitFor(() => expect(certCalls('/certs/bind')).toHaveLength(2))
+    expectTapped(certCalls('/certs/bind'))
     expect(screen.queryByTestId('cert-action-error')).not.toBeInTheDocument()
+  })
 
-    // rotate
+  it('[REQUIRED TEST] AccountsView cert rotate runs the presence tap and retries with the token', async () => {
+    stubWebAuthn()
+    stubNetwork([{ serial: '3a:2f', fingerprint: 'sha256:abc', bound_at: '2026-01-01T00:00:00Z' }], true)
+    await expand()
     await waitFor(() => screen.getByTestId('cert-rotate-btn'))
+
     fireEvent.click(screen.getByTestId('cert-rotate-btn'))
     fireEvent.change(screen.getByTestId('cert-rotate-serial-input'), { target: { value: 'new-1' } })
     fireEvent.click(screen.getByTestId('cert-confirm-btn'))
-    await elevate()
-    await waitFor(() => expect(certWrites()).toHaveLength(6))
-    for (const [, init] of certWrites()) {
-      expect(new Headers(init?.headers).get('X-Presence-Token')).toBeNull()
-    }
+    await runTap()
+    await waitFor(() => expect(certCalls('/certs/rotate/')).toHaveLength(2))
+    expectTapped(certCalls('/certs/rotate/'))
+    expect(screen.queryByTestId('cert-action-error')).not.toBeInTheDocument()
+  })
+
+  it('[REQUIRED TEST] AccountsView cert revoke stays tap-free', async () => {
+    stubNetwork([{ serial: '3a:2f', fingerprint: 'sha256:abc', bound_at: '2026-01-01T00:00:00Z' }], true)
+    await expand()
+    await waitFor(() => screen.getByTestId('cert-revoke-btn'))
+
+    fireEvent.click(screen.getByTestId('cert-revoke-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('cert-confirm-btn'))
+    })
+    await waitFor(() => expect(certCalls('/certs/revoke/')).toHaveLength(1))
+    expectTapFree(certCalls('/certs/revoke/'))
     expect(screen.queryByTestId('cert-action-error')).not.toBeInTheDocument()
   })
 
@@ -1666,5 +1726,124 @@ describe('AccountsView — certificate bindings (Issue #5448)', () => {
     const label = screen.getByTestId('cert-label')
     expect(label).toHaveTextContent('<img src=x onerror=alert(1)><b>hi</b>')
     expect(label.querySelector('img, b')).toBeNull()
+  })
+})
+
+describe('AccountsView — per-action presence tap (Issue #6408, ADR-021 Amendment 13)', () => {
+  const SUBJECT_WHY = 'granting fleet-viewer for the on-call rotation'
+
+  /**
+   * One stub for the whole view: the accounts list, the roles reads, the presence
+   * endpoints, and a write that needs the presence token only when gated.
+   */
+  function stubView(gated: { match: (url: string, method: string) => boolean; permission: string } | null, writeResponse: () => Response) {
+    fetchMock.mockImplementation((url, init) => {
+      const u = String(url)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      const presence = presenceEndpoint(u)
+      if (presence) return Promise.resolve(presence)
+      if (method !== 'GET') {
+        if (gated?.match(u, method) && presenceToken(init) !== TAP_TOKEN) return Promise.resolve(presenceChallenge(gated.permission))
+        return Promise.resolve(writeResponse())
+      }
+      if (u.includes('/rbac/subjects/')) {
+        return Promise.resolve(makeRolesResponse([makeRole({ id: 'role-9', name: 'on-call' })]))
+      }
+      if (u.includes('/rbac/roles')) return Promise.resolve(makeRolesResponse([makeRole({ id: 'role-1', name: 'fleet-viewer' })]))
+      if (u.includes('/rbac/')) return Promise.resolve(makeRolesResponse([]))
+      return Promise.resolve(makeAccountsResponse([makeAccount()]))
+    })
+  }
+
+  const accountUpdate = { match: (u: string, m: string) => m === 'PUT' && u === '/api/v1/accounts/fleet-admin', permission: 'account:update' }
+  const putCalls = () => callsTo('PUT', (u) => u === '/api/v1/accounts/fleet-admin')
+  const updated = () =>
+    new Response(JSON.stringify({ data: makeAccount({ permissions: ['steward:list', 'steward:read'] }) }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  async function open() {
+    renderAccountsView()
+    await waitFor(() => expect(screen.getByTestId('accounts-table')).toBeInTheDocument())
+  }
+
+  it('[REQUIRED TEST] edit save runs the account:update tap and retries with the token', async () => {
+    stubWebAuthn()
+    stubView(accountUpdate, updated)
+    await open()
+    fireEvent.click(screen.getByTestId('account-edit-btn'))
+    fireEvent.change(screen.getByTestId('edit-permissions-input'), { target: { value: 'steward:list, steward:read' } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('edit-save-btn'))
+    })
+    await runTap()
+    await waitFor(() => expect(putCalls()).toHaveLength(2))
+    expectTapped(putCalls())
+  })
+
+  it('[REQUIRED TEST] disable runs the same tap: account:update is all-or-nothing', async () => {
+    stubWebAuthn()
+    stubView(accountUpdate, updated)
+    await open()
+    fireEvent.click(screen.getByTestId('account-toggle-disable-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('disable-confirm-btn'))
+    })
+    await runTap()
+    await waitFor(() => expect(putCalls()).toHaveLength(2))
+    expectTapped(putCalls())
+    expect(JSON.parse(putCalls()[1]![1]!.body as string)).toHaveProperty('disabled', true)
+  })
+
+  it('[REQUIRED TEST] role assignment runs the rbac:assign-role tap and retries with the token', async () => {
+    stubWebAuthn()
+    stubView(
+      { match: (u, m) => m === 'POST' && u.includes('/rbac/subjects/'), permission: 'rbac:assign-role' },
+      () => new Response(JSON.stringify({ data: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    )
+    await open()
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('role-assign-btn')).toBeInTheDocument())
+    fireEvent.change(screen.getByTestId('assign-justification-input'), { target: { value: SUBJECT_WHY } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('role-assign-btn'))
+    })
+    await runTap()
+    const assigns = () => callsTo('POST', (u) => u.includes('/rbac/subjects/'))
+    await waitFor(() => expect(assigns()).toHaveLength(2))
+    expectTapped(assigns())
+  })
+
+  it('[REQUIRED TEST] role revoke stays tap-free', async () => {
+    stubView(
+      { match: () => false, permission: 'rbac:revoke-role' },
+      () => new Response(null, { status: 204 }),
+    )
+    await open()
+    fireEvent.click(screen.getByTestId('account-row'))
+    await waitFor(() => expect(screen.getByTestId('chip-revoke-btn')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('chip-revoke-btn'))
+    fireEvent.change(screen.getByTestId('revoke-role-justification-input'), {
+      target: { value: 'removing on-call now the rotation has ended' },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('revoke-role-confirm-btn'))
+    })
+    const revokes = () => callsTo('DELETE', (u) => u.includes('/rbac/subjects/acc-1/roles/'))
+    await waitFor(() => expect(revokes()).toHaveLength(1))
+    expectTapFree(revokes())
+  })
+
+  it('[REQUIRED TEST] account delete stays tap-free', async () => {
+    stubView({ match: () => false, permission: 'account:delete' }, () => new Response(null, { status: 204 }))
+    await open()
+    fireEvent.click(screen.getByTestId('account-delete-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('delete-confirm-btn'))
+    })
+    const deletes = () => callsTo('DELETE', (u) => u === '/api/v1/accounts/fleet-admin')
+    await waitFor(() => expect(deletes()).toHaveLength(1))
+    expectTapFree(deletes())
   })
 })
