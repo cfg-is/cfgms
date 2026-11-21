@@ -7,6 +7,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -118,4 +122,106 @@ func TestOsqueryQuerySignalsNilCollector(t *testing.T) {
 	rec := postOsqueryQuery(t, server, osqueryQueryRequest{CatalogID: "host_info", Selector: "all"})
 	require.Equal(t, http.StatusOK, rec.Code, "a nil health collector must not affect the request")
 	assert.Len(t, disp.calls, 1)
+}
+
+// docSignalRow returns the cells of the row of the signal document's table whose
+// first cell is the backticked metric name.
+func docSignalRow(t *testing.T, doc, name string) []string {
+	t.Helper()
+	prefix := "| `" + name + "` |"
+	for _, line := range strings.Split(doc, "\n") {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		cells := strings.Split(strings.Trim(strings.TrimSpace(line), "|"), "|")
+		require.Len(t, cells, 5, "%s: the row must have metric, type, labels, buckets and meaning", name)
+		for i := range cells {
+			cells[i] = strings.TrimSpace(cells[i])
+		}
+		return cells
+	}
+	require.Failf(t, "signal row missing", "%s has no row in %s", name, signalDocPath)
+	return nil
+}
+
+// TestOsqueryQuerySignalsMatchDoc drives a real live-query fan-out, so the lazily
+// registered osquery instruments exist, and compares each one's type, labels,
+// buckets and help text with its row in the signal document. The server package's
+// doc test cannot reach this endpoint (it needs a strong-assurance principal), so
+// this test owns the check for these three signals.
+func TestOsqueryQuerySignalsMatchDoc(t *testing.T) {
+	disp := &partialOsqueryDispatcher{
+		failSteward: "steward-2",
+		failErr:     errors.New("steward not connected to osquery stream"),
+		rows:        []*transportpb.OsqueryRow{{Columns: map[string]string{"hostname": "h"}}},
+	}
+	server, collector := osquerySignalsServer(t, disp, true, "steward-1", "steward-2")
+	rec := postOsqueryQuery(t, server, osqueryQueryRequest{CatalogID: "host_info", Selector: "all"})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	text := osquerySignalText(t, collector)
+	b, err := os.ReadFile(filepath.FromSlash(signalDocPath))
+	require.NoError(t, err, "the signal document must exist")
+	doc := string(b)
+
+	labelName := regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)="`)
+	leValue := regexp.MustCompile(`le="([^"]+)"`)
+
+	for _, name := range []string{
+		"cfgms_osquery_query_duration_seconds",
+		"cfgms_osquery_queries_total",
+		"cfgms_osquery_steward_results_total",
+	} {
+		var kind, help string
+		labels := map[string]bool{}
+		var buckets []string
+		for _, line := range strings.Split(text, "\n") {
+			switch {
+			case strings.HasPrefix(line, "# HELP "+name+" "):
+				help = strings.TrimPrefix(line, "# HELP "+name+" ")
+			case strings.HasPrefix(line, "# TYPE "+name+" "):
+				kind = strings.TrimPrefix(line, "# TYPE "+name+" ")
+			case strings.HasPrefix(line, name+"{") || strings.HasPrefix(line, name+"_bucket{"):
+				pairs := line[strings.Index(line, "{"):strings.Index(line, "}")]
+				for _, m := range labelName.FindAllStringSubmatch(pairs, -1) {
+					if m[1] != "le" {
+						labels[m[1]] = true
+					}
+				}
+				if le := leValue.FindStringSubmatch(pairs); le != nil && le[1] != "+Inf" {
+					buckets = append(buckets, le[1])
+				}
+			}
+		}
+		require.NotEmpty(t, kind, "%s must be registered once a fan-out ran", name)
+
+		wantLabels := make([]string, 0, len(labels))
+		for l := range labels {
+			wantLabels = append(wantLabels, l)
+		}
+		sort.Strings(wantLabels)
+
+		cells := docSignalRow(t, doc, name)
+		var docLabels, docBuckets []string
+		for _, m := range regexp.MustCompile("`([^`]+)`").FindAllStringSubmatch(cells[2], -1) {
+			docLabels = append(docLabels, m[1])
+		}
+		sort.Strings(docLabels)
+		if cells[3] != "—" {
+			for _, v := range strings.Split(cells[3], ",") {
+				docBuckets = append(docBuckets, strings.TrimSpace(v))
+			}
+		}
+
+		assert.Equal(t, kind, cells[1], "%s: type", name)
+		assert.Equal(t, help, cells[4], "%s: meaning must be the registry's help text", name)
+		assert.Equal(t, wantLabels, append([]string{}, docLabels...), "%s: labels", name)
+		assert.Equal(t, buckets, docBuckets, "%s: buckets", name)
+	}
+
+	// Both result and outcome values the fan-out produced are listed with their metric.
+	for _, v := range []string{"steward_ok", "steward_failed", "partial"} {
+		assert.Contains(t, text, v)
+		assert.Contains(t, doc, "`"+v+"`", "label value %s must be documented", v)
+	}
 }
