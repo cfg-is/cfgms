@@ -248,9 +248,9 @@ func TestHandlerspasskeyloginChar_DisabledAccountIndistinguishableFromBadAsserti
 	assert.Equal(t, "WEBAUTHN_VERIFY_ERROR", errCode(t, rec.Body.Bytes()))
 	assert.Equal(t, errMessage(t, badRec.Body.Bytes()), errMessage(t, rec.Body.Bytes()))
 	assert.Empty(t, rec.Result().Cookies())
-	// The reference failure has no resolved identity, so only the disabled attempt is
-	// attributed to the account.
-	assert.Equal(t, 1, handlerspasskeyloginCharAuditCount(t, srv, "web.passkey.login.failure"))
+	// The reference failure has no resolved identity: it is audited as the unauthenticated
+	// principal (Issue #6381), and only the disabled attempt is attributed to the account.
+	assert.Equal(t, 2, handlerspasskeyloginCharAuditCount(t, srv, "web.passkey.login.failure"))
 	assert.Zero(t, handlerspasskeyloginCharAuditCount(t, srv, "web.passkey.login.success"))
 }
 
