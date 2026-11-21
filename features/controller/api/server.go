@@ -649,6 +649,7 @@ func (s *Server) seedTestAPIKeys() {
 	s.seedRegionAPIKeys()
 	s.seedInstallerAPIKey()
 	s.seedUpgradeTestAPIKey()
+	s.seedAutomationGrantReaderAPIKey()
 	s.seedTestStewardPublisher()
 }
 
@@ -720,6 +721,25 @@ func (s *Server) seedUpgradeTestAPIKey() {
 		Key:         keyVal,
 		Permissions: []string{"installer:publish:steward", "installer:dispatch:steward", "installer:read"},
 		TenantID:    "fleet-root/fleet-child-a",
+	}
+}
+
+// seedAutomationGrantReaderAPIKey seeds a key that can list automation grants, so a
+// test that builds the controller through its production constructor has a principal
+// for the grant routes (Issue #6394). It is named, because the grant handlers refuse a
+// principal without an ID, and tenant-scoped to CFGMS_API_KEY_GRANT_READER_TENANT.
+// Creating or revoking a grant takes Strong assurance, which no API key holds.
+func (s *Server) seedAutomationGrantReaderAPIKey() {
+	keyVal := os.Getenv("CFGMS_API_KEY_GRANT_READER")
+	tenant := os.Getenv("CFGMS_API_KEY_GRANT_READER_TENANT")
+	if keyVal == "" || tenant == "" {
+		return
+	}
+	s.keyCache[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+		ID:          "seeded-grant-reader-key",
+		Key:         keyVal,
+		Permissions: []string{"automation-grant:read"},
+		TenantID:    tenant,
 	}
 }
 
@@ -1976,6 +1996,12 @@ func (s *Server) SetAutomationGrantStore(st *AutomationGrantStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.automationGrantStore = st
+}
+
+// AutomationGrantStore returns the wired automation grant store, or nil when none is
+// wired.
+func (s *Server) AutomationGrantStore() *AutomationGrantStore {
+	return s.grantStoreOrNil()
 }
 
 // SetRegistry wires the active-steward connection registry so that

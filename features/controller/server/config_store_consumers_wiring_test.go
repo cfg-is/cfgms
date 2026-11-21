@@ -32,6 +32,7 @@ func newBareAPIServer(t *testing.T) *api.Server {
 	require.Nil(t, srv.HypervProfileConfigStore())
 	require.Nil(t, srv.ContentApprovalStore())
 	require.Nil(t, srv.MSPEmailSenderStore())
+	require.Nil(t, srv.AutomationGrantStore())
 	return srv
 }
 
@@ -49,6 +50,7 @@ func TestWireConfigStoreConsumers(t *testing.T) {
 		assert.Nil(t, srv.HypervProfileConfigStore())
 		assert.Nil(t, srv.ContentApprovalStore())
 		assert.Nil(t, srv.MSPEmailSenderStore())
+		assert.Nil(t, srv.AutomationGrantStore())
 	})
 
 	t.Run("durable store wires all four consumers", func(t *testing.T) {
@@ -65,6 +67,8 @@ func TestWireConfigStoreConsumers(t *testing.T) {
 			"script approval routes 503 when the content approval store is unwired")
 		require.NotNil(t, srv.MSPEmailSenderStore(),
 			"the MSP email sender store is unwired when wireHTTPConfigNamespaceStores drops it (Issue #6241)")
+		require.NotNil(t, srv.AutomationGrantStore(),
+			"grant routes 503 and cfgag_ credentials are refused when the grant store is unwired (Issue #6394)")
 	})
 
 	t.Run("MSP email sender store is built on the wired store", func(t *testing.T) {

@@ -675,7 +675,8 @@ func wireHTTPFleetStores(httpServer *api.Server, storageManager *interfaces.Stor
 // wireHTTPConfigNamespaceStores binds the stores that live in namespaces of the
 // controller's config store: role configs and privileges (Issue #2543), hyperv
 // profiles (Issue #3785), library approval modes (Issue #5840), the unattended
-// rollout setting (Issue #6065), the per-MSP email sender (Issue #6241) and steward binary approvals (Issue #6053). Without
+// rollout setting (Issue #6065), the per-MSP email sender (Issue #6241), steward binary approvals (Issue #6053)
+// and automation grants (Issue #6394). Without
 // a config store their endpoints stay at 503 and the approval checks fail closed.
 func wireHTTPConfigNamespaceStores(httpServer *api.Server, cs cfgconfig.ConfigStore) error {
 	if cs == nil {
@@ -704,6 +705,13 @@ func wireHTTPConfigNamespaceStores(httpServer *api.Server, cs cfgconfig.ConfigSt
 		return fmt.Errorf("failed to create steward binary approval store: %w", err)
 	}
 	httpServer.SetStewardBinaryApprovalStore(binaryApprovalStore)
+	// The grant store authenticates cfgag_ credentials and backs the grant routes.
+	// Its secret half is the API server's own durable secret store, not a second one.
+	grantStore, err := api.NewAutomationGrantStore(cs, httpServer.GetSecretStore())
+	if err != nil {
+		return fmt.Errorf("failed to create automation grant store: %w", err)
+	}
+	httpServer.SetAutomationGrantStore(grantStore)
 	return nil
 }
 
