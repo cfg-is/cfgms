@@ -360,6 +360,7 @@ separate call needed.
     - Work finished elsewhere → the run is abandoned (terminal, its lease released if this host holds it), never resumed: `FSM_ABANDONED:<RUN_ID>:<reason>:lease=<released|held_by_other|free|expired|error|none>` (exit 0), `<reason>` one of `item_done`, `story_closed`, `pr_merged`, `pr_closed`.
     - A state that cannot be read, or an issue/item run whose item is no longer `In Progress` → `FSM_RESUME_REFUSED:<RUN_ID>:<x>` (exit 3), `<x>` one of `item_unreadable`, `issue_unreadable`, `pr_unreadable`, `item_status_<S>` (the item's status with non-alphanumerics as `_`), `unknown_run`, `invalid_run_id`.
     - Capacity → `DISPATCH_DEFERRED:<RUN_ID>:resources (…)` (0); stale image → `FSM_RESUME_REFUSED:<RUN_ID>:image_stale` (3).
+    - Epic run whose long-life Claude token file exists but cannot be read → `FSM_RESUME_REFUSED:<RUN_ID>:claude_token_<reason>` (3); a timed-out read → `DISPATCH_DEFERRED:<RUN_ID>:claude_token_timeout` (0). The line carries what to do (group `tss`, `systemd-creds`); do not work around it with the short-life credentials file.
     - Lease: held here, or free/expired and re-acquired here; held by another host → `FSM_RESUME_REFUSED:<RUN_ID>:lease_other` (3). A lease re-acquired here is released again if the resume fails.
     - Then `FSM_RESUMED:<RUN_ID>:<status>` (0) or `FSM_RESUME_FAILED:<RUN_ID>:exit_<rc>` (non-zero). A run that is already finished prints `FSM_RESUME_SKIPPED:<RUN_ID>:done` or `:abandoned` (0); one still in flight prints `FSM_RESUME_SKIPPED:<RUN_ID>:in_flight:<status>` (4).
 
