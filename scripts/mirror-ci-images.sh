@@ -20,7 +20,9 @@
 #   (default)   Copy every list entry to ghcr.io/cfg-is/ci-mirror/<name>:<tag>,
 #               keeping the manifest digest (full multi-arch index, never a
 #               rebuild). An entry whose digest is already in the mirror is
-#               skipped. Needs docker buildx and a ghcr.io login.
+#               skipped. A copy that fails but leaves the destination at the
+#               expected digest (another run wrote it first) counts as done.
+#               Needs docker buildx and a ghcr.io login.
 #   --dry-run   Print one line per copy that would be made. No credentials, no
 #               network.
 #   --only REF  Mirror just REF (a digest that is not yet in the list, e.g. one
@@ -207,7 +209,19 @@ copy_one() {
         return 0
     fi
     echo "copy $ref -> $dest"
-    docker buildx imagetools create --tag "$dest" "$ref"
+    if ! docker buildx imagetools create --tag "$dest" "$ref"; then
+        # Inspect-then-create is check-then-act: another run mirroring the same
+        # ref can write the tag between the two. A destination now at the
+        # expected digest is success; anything else (unreachable upstream, a
+        # different digest) still fails.
+        have="$(docker buildx imagetools inspect "$dest" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+        if [ "$have" != "$digest" ]; then
+            echo "copy failed: $ref -> $dest" >&2
+            return 1
+        fi
+        echo "skip $dest (written concurrently, already at $digest)"
+        return 0
+    fi
     have="$(docker buildx imagetools inspect "$dest" --format '{{.Manifest.Digest}}')"
     if [ "$have" != "$digest" ]; then
         echo "digest changed in copy: $dest is $have, expected $digest" >&2

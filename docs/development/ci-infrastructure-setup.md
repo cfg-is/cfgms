@@ -221,7 +221,7 @@ The S3-compatible test store (`s3-test` in `docker-compose.test.yml`) runs the V
 
 ### Filling and refreshing the mirror
 
-`.github/workflows/ci-image-mirror.yml` runs `scripts/mirror-ci-images.sh`, which copies each `<image>:<tag>@<digest>` with `docker buildx imagetools create`. The copy keeps the manifest digest and the full multi-arch index, so the Trivy image scan stays valid, and an entry whose digest is already in the mirror is skipped. `--dry-run` prints each copy without credentials.
+`.github/workflows/ci-image-mirror.yml` runs `scripts/mirror-ci-images.sh`, which copies each `<image>:<tag>@<digest>` with `docker buildx imagetools create`. The copy keeps the manifest digest and the full multi-arch index, so the Trivy image scan stays valid, and an entry whose digest is already in the mirror is skipped. A copy that fails but leaves the destination at the expected digest (another run mirrored the same ref first) counts as done; an unreachable upstream or a different digest still fails. The workflow has no `concurrency` group: a repository-wide group keeps one running and one pending run, and a newer pending run cancels the older one, so concurrent callers (`docker-security.yml`, `agent-image-build.yml`, `dependency-pin-check.yml`, push to `develop`) could cancel each other. Concurrent mirrors are safe because the copy is idempotent. `--dry-run` prints each copy without credentials.
 
 Triggers: `push` to `develop` touching `.github/ci-images.yml` or the workflow file; `workflow_call`; `workflow_dispatch`. It has no `pull_request` trigger of its own, and `packages: write` is granted to the mirror job only.
 
