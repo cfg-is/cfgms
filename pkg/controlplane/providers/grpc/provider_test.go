@@ -564,6 +564,115 @@ func TestCapabilitiesLateDeclarationMovesFloorToDeclaredOnce(t *testing.T) {
 	assert.Equal(t, []string{"reset:pending", "declare:floor", "declare:declared"}, rec.states())
 }
 
+// TestCapabilitiesLateDeclarationNeverLeavesDurableRecordAtFloor forces the
+// interleaving that used to leave the durable record at floor while memory said
+// declared: the grace goroutine settles floor in memory and is held before it
+// submits; a real declaration then settles and submits declared; only then is the
+// floor submit released. The durable record must end at declared.
+func TestCapabilitiesLateDeclarationNeverLeavesDurableRecordAtFloor(t *testing.T) {
+	t.Parallel()
+	const stewardID = "steward-cap-floor-after-declared"
+	rec := &capRecorder{}
+	atFloor := make(chan struct{})
+	submitted := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFloor := func() { releaseOnce.Do(func() { close(release) }) }
+	afterCapabilitySettleHooks.Store(stewardID, func(stage string) {
+		switch stage {
+		case capabilityHookSettled:
+			close(atFloor)
+			<-release
+		case capabilityHookSubmitted:
+			close(submitted)
+		}
+	})
+	t.Cleanup(func() {
+		releaseFloor()
+		afterCapabilitySettleHooks.Delete(stewardID)
+	})
+
+	env := newCapEnv(t, stewardID,
+		[]option{WithCapabilityRecorder(rec), WithCapabilityGrace(50 * time.Millisecond)}, nil)
+
+	select {
+	case <-atFloor:
+	case <-time.After(10 * time.Second):
+		t.Fatal("grace goroutine never reached the settle/submit gap")
+	}
+	require.Equal(t, registry.CapabilityFloor, env.conn.CapabilitySnapshot().State)
+
+	local := LocalCapabilities(stewardID)
+	require.NoError(t, env.client.SendCapabilities(context.Background(), &local))
+	require.Eventually(t, func() bool {
+		return env.conn.CapabilitySnapshot().State == registry.CapabilityDeclared
+	}, 5*time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool {
+		for _, st := range rec.states() {
+			if st == "declare:declared" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 5*time.Millisecond, "the declared write must reach the recorder while floor is held")
+
+	releaseFloor()
+	select {
+	case <-submitted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("grace goroutine never submitted its floor profile")
+	}
+	// Wait for the writers without cancelling them, so a floor write that was
+	// accepted is allowed to land.
+	drainCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, env.server.drainCapabilityWrites(drainCtx))
+
+	assert.Equal(t, []string{"reset:pending", "declare:declared"}, rec.states(),
+		"a floor write must never land after the declared write")
+}
+
+// TestCapabilityWriterDropsStateOlderThanAccepted pins the writer-level rule: a
+// profile ranking below one already accepted is dropped, in either order of
+// arrival relative to the running write, while the forward move is kept.
+func TestCapabilityWriterDropsStateOlderThanAccepted(t *testing.T) {
+	t.Parallel()
+	p := New(ModeServer)
+	w := &capabilityWriter{}
+	var mu sync.Mutex
+	var written []string
+	started := make(chan struct{})
+	release := make(chan struct{})
+	first := true
+	write := func(_ context.Context, prof types.CapabilityProfile) {
+		mu.Lock()
+		written = append(written, prof.State)
+		isFirst := first
+		first = false
+		mu.Unlock()
+		if isFirst {
+			close(started)
+			<-release
+		}
+	}
+	declared := types.CapabilityProfile{State: types.CapabilityDeclared, CommandTypes: []int32{1}, SigningPayloadVersions: []uint32{1}}
+
+	require.True(t, w.submit(p, types.FloorProfile(), write))
+	<-started
+	require.True(t, w.submit(p, declared, write), "forward move is accepted while a write runs")
+	require.True(t, w.submit(p, types.FloorProfile(), write), "a stale submit is dropped, not an error")
+	close(release)
+	require.NoError(t, p.drainCapabilityWrites(context.Background()))
+
+	// After the writer is idle a stale floor is still dropped.
+	require.True(t, w.submit(p, types.FloorProfile(), write))
+	require.NoError(t, p.drainCapabilityWrites(context.Background()))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{types.CapabilityFloor, types.CapabilityDeclared}, written)
+}
+
 func TestCapabilitiesResetCompletesBeforeReceiveLoopStarts(t *testing.T) {
 	t.Parallel()
 	// The reset takes long enough that the steward's first-message declaration is
