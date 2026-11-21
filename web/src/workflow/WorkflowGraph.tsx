@@ -434,6 +434,7 @@ export default function WorkflowGraph({ steps, execution }: WorkflowGraphProps) 
         edges={edges}
         nodeTypes={nodeTypes}
         fitView
+        forceColorMode="light"
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
