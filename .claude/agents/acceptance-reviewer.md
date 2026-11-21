@@ -320,6 +320,7 @@ PASS requires BOTH: the Findings table is empty AND every Code-Reference Verific
 # PR body if missing — dev agents miss this keyword frequently and the issue stays
 # open after the PR merges without it.
 /opt/cfgms-trusted/.claude/tooling/scripts/po-act.sh enqueue <PR_NUM> <STORY_NUM>
+# Slice PR (feature/epic-<N>-slice-<n>): enqueue <PR_NUM> --head <reviewed sha>, no story. See "Slice PRs of an owner-run epic".
 
 ```
 
@@ -383,7 +384,7 @@ Example FAIL row (replace with real verification — every row above is an examp
 All checks passing / Check X failing
 
 ### Verdict
-[Enqueued — paste the literal `ENQUEUED:<PR>` line from `po-act.sh enqueue` here / Fix required — status set to Fix / Blocked — escalated to founder]
+[Enqueued — paste the literal `ENQUEUED:<PR>` line from `po-act.sh enqueue` here / Fix required — status set to Fix / Blocked — escalated to founder] (slice PR: Enqueued, or FAIL with no status change; add the line `Reviewed head: <sha>`)
 REVIEW_EOF
 
 /opt/cfgms-trusted/.claude/tooling/scripts/pipeline-helper.sh comment <PR_NUM> /tmp/review-<PR_NUM>.md
@@ -391,6 +392,16 @@ rm /tmp/review-<PR_NUM>.md
 ```
 
 If there are zero findings, the Findings table should say "None" and the Acceptance Criteria should all be checked.
+
+## Slice PRs of an owner-run epic
+
+A PR on `feature/epic-<N>-slice-<n>` is a slice of an owner-run epic, not a story. `agent-dispatch.sh review-pr` gives you a slice prompt; where it and this file differ, the prompt wins. In short:
+
+- The spec is the epic's project item and the slice's claim, not a story body. There is no story number.
+- The verdict comment carries a line `Reviewed head: <sha>` naming the commit you reviewed.
+- PASS: post the verdict comment first, then run `po-act.sh enqueue <PR> --head <reviewed sha>` with no story argument.
+- FAIL: post the verdict comment and nothing else. The epic run's supervisor wakes the owner, who repairs the slice.
+- Never write a board field or assignee, and never escalate a round 2 to `Blocked`: round counting and board status do not apply to a slice.
 
 ## Rules
 
