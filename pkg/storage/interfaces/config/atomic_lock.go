@@ -22,6 +22,11 @@ const (
 	atomicLockAcquireTimeout = 5 * time.Second
 	atomicLockPollInterval   = 5 * time.Millisecond
 
+	// atomicLockReleaseTimeout bounds how long a holder keeps retrying a failed
+	// removal of its lock file. It is shorter than atomicLockAcquireTimeout so a
+	// waiter that queued before the failure outlives the retries.
+	atomicLockReleaseTimeout = 2 * time.Second
+
 	// atomicLockStaleAfter is how long an unreleased lock is honoured before a
 	// waiter treats its holder as crashed and steals it.
 	atomicLockStaleAfter = 30 * time.Second
@@ -70,7 +75,7 @@ func acquireAtomicLock(ctx context.Context, dir string, key *ConfigKey) (func(),
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //#nosec G304 -- path derived from the store's own root, hashed key
 		if err == nil {
 			_ = f.Close()
-			return func() { _ = os.Remove(path) }, nil
+			return func() { releaseAtomicLock(path, os.Remove) }, nil
 		}
 		if !isRetryableLockError(err) {
 			return nil, fmt.Errorf("failed to acquire atomic-update lock: %w", err)
@@ -86,5 +91,25 @@ func acquireAtomicLock(ctx context.Context, dir string, key *ConfigKey) (func(),
 			return nil, ctx.Err()
 		case <-time.After(atomicLockPollInterval):
 		}
+	}
+}
+
+// releaseAtomicLock removes the lock file at path with remove. A failed removal
+// must not be dropped: the file would then stay until atomicLockStaleAfter and
+// every waiter would time out at atomicLockAcquireTimeout. On Windows a remove
+// fails while another process (antivirus, indexer) or a racing open holds a handle
+// on the file, which clears within milliseconds, so the removal is retried for up
+// to atomicLockReleaseTimeout. A lock file that is already gone counts as released.
+func releaseAtomicLock(path string, remove func(string) error) {
+	deadline := time.Now().Add(atomicLockReleaseTimeout)
+	for {
+		err := remove(path)
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		if time.Now().After(deadline) {
+			return // a waiter steals the lock once it is atomicLockStaleAfter old
+		}
+		time.Sleep(atomicLockPollInterval)
 	}
 }
