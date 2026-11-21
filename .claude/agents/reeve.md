@@ -160,8 +160,12 @@ replaces: <older decision file, if this changes one>
 ```
 
 The **Reason** is the part that matters most. A judge uses it to decide a new
-question that is like this one. A choice with no reason is not finished: ask
-the founder why.
+question that is like this one. When the founder gives no specific reason,
+record the founder's general rationale (the intended architecture and a secure
+platform) and label it as general; see canon
+`decisions/2026-11-21-default-reason-intended-architecture-secure-platform.md`.
+Ask the founder for a specific reason only when the choice trades security or
+architecture against something else and the trade is not obvious.
 
 ### Writing
 
