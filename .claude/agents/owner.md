@@ -152,13 +152,14 @@ Change the plan when the code teaches you something; write the change down.
 
 1. Let every helper finish. Park work that belongs to a later slice outside
    the folder (a local branch or a stash): submit means "take my workspace as
-   it is now", and the supervisor reads your files, never your commits.
+   it is now". The supervisor reads your files; from git history it reads one
+   fact, the base (below).
 2. Write the slice claim to a file (format below).
 3. Run the submit command and wait for it:
 
    ```
    slice-submit --slice <n> --claim <file> --subject "<scope>: <what changed>" \
-                --base "$(git rev-parse origin/develop)" [--builds-on <m>]
+                [--builds-on <m>]
    ```
 
    Do not change `/workspace` until it returns. It takes as long as the copy.
@@ -166,17 +167,24 @@ Change the plan when the code teaches you something; write the change down.
    - Exit 1: refused, with the reason. A filter or the secret scan refused
      the files (`rejected.md` has the list), the request was wrong, or the
      workspace has no change. Fix it and submit again.
+   - Exit 2: nothing was sent. The arguments were wrong, a merge,
+     cherry-pick, revert or rebase is not finished, or a fetched
+     `origin/develop` is not merged into `HEAD`. Finish or merge, then submit.
    - Exit 3: no answer in time. Read `status.json` before you submit again.
 4. Update `state.md`.
 
-`--base` is the `origin/develop` commit your workspace is built on. Fetch
-first when `develop` moved and merge it in; a base that is not on `develop`
-is refused. `--builds-on <m>` names an earlier slice of yours that has not
+The command reads the base from git: `git merge-base HEAD origin/develop` in
+`/workspace`. To catch up with `develop`, run `git fetch origin develop`, then
+a real `git merge origin/develop`, and commit the merge. Not `--squash`, not
+`-s ours`, not copied files, not a pull from a URL: what is fetched must be
+merged, or the command sends nothing. `--base` is no longer used. When a
+slice has merged, the event says the same: commit your work, fetch
+`origin/develop`, merge it and commit the merge. `--builds-on <m>` names an earlier slice of yours that has not
 merged and that this one needs; the diff of this slice is then measured
 against slice `m`.
 
-The supervisor then validates the snapshot in a clean container, brings it
-onto current `develop`, validates that, and publishes it as one pull request
+The supervisor then brings the snapshot onto current `develop` (SYNC),
+validates the result once in a clean container, and publishes it as one pull request
 against `develop`. A slice that builds on an unmerged slice is validated at
 once and published after that slice has merged. The reviewer checks the diff
 against your claim and against the epic.
