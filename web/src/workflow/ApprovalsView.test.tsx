@@ -45,6 +45,11 @@ function makeApproval(overrides: Partial<Record<string, unknown>> = {}) {
   }
 }
 
+/** The exact body handleListApprovals emits: a raw {approvals, total} object, no data envelope. */
+function approvalsBody(...items: ReturnType<typeof makeApproval>[]) {
+  return { approvals: items, total: items.length }
+}
+
 function renderView() {
   return render(
     <MemoryRouter>
@@ -65,7 +70,8 @@ describe('ApprovalsView', () => {
   it('lists pending approvals in server order', async () => {
     fetchMock.mockResolvedValue(
       jsonResponse(200, {
-        data: [makeApproval(), makeApproval({ approval_id: 'appr-2', workflow_name: 'second' })],
+        approvals: [makeApproval(), makeApproval({ approval_id: 'appr-2', workflow_name: 'second' })],
+        total: 2,
       }),
     )
     renderView()
@@ -77,13 +83,20 @@ describe('ApprovalsView', () => {
   })
 
   it('shows the empty state and a load error', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, { data: [] }))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { approvals: [], total: 0 }))
     const { unmount } = renderView()
     expect(await screen.findByTestId('approvals-empty')).toBeInTheDocument()
     unmount()
     fetchMock.mockResolvedValueOnce(jsonResponse(500, {}))
     renderView()
     expect(await screen.findByText(/500/)).toBeInTheDocument()
+  })
+
+  it('renders the empty state when approvals is null', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { approvals: null, total: 0 }))
+    renderView()
+    expect(await screen.findByTestId('approvals-empty')).toBeInTheDocument()
+    expect(screen.queryByText(/couldn't load approvals/i)).toBeNull()
   })
 
   it('ApprovalsView sends the chosen decision and justification', async () => {
@@ -93,7 +106,7 @@ describe('ApprovalsView', () => {
         decided = true
         return Promise.resolve(jsonResponse(200, { data: {} }))
       }
-      return Promise.resolve(jsonResponse(200, { data: decided ? [] : [makeApproval()] }))
+      return Promise.resolve(jsonResponse(200, decided ? approvalsBody() : approvalsBody(makeApproval())))
     })
     renderView()
     fireEvent.change(await screen.findByTestId('approval-justification'), {
@@ -110,7 +123,7 @@ describe('ApprovalsView', () => {
 
   it('sends approve when Approve is chosen', async () => {
     fetchMock.mockImplementation((_url, init) =>
-      Promise.resolve(jsonResponse(200, { data: init?.method === 'POST' ? {} : [makeApproval()] })),
+      Promise.resolve(jsonResponse(200, init?.method === 'POST' ? {} : approvalsBody(makeApproval()))),
     )
     renderView()
     fireEvent.change(await screen.findByTestId('approval-justification'), { target: { value: 'ok' } })
@@ -123,7 +136,7 @@ describe('ApprovalsView', () => {
   })
 
   it('requires a justification for both decisions and bounds its length', async () => {
-    fetchMock.mockResolvedValue(jsonResponse(200, { data: [makeApproval()] }))
+    fetchMock.mockResolvedValue(jsonResponse(200, approvalsBody(makeApproval())))
     renderView()
     const input = await screen.findByTestId('approval-justification')
     expect(input).toHaveAttribute('maxlength', '4000')
@@ -139,7 +152,7 @@ describe('ApprovalsView', () => {
       Promise.resolve(
         init?.method === 'POST'
           ? jsonResponse(409, { error: { message: 'already decided' } })
-          : jsonResponse(200, { data: [makeApproval()] }),
+          : jsonResponse(200, approvalsBody(makeApproval())),
       ),
     )
     renderView()
@@ -153,7 +166,8 @@ describe('ApprovalsView', () => {
     const payload = '<img src=x onerror="alert(1)"><b>bold</b>'
     fetchMock.mockResolvedValue(
       jsonResponse(200, {
-        data: [makeApproval({ workflow_name: payload, message: payload, requested_by: payload })],
+        approvals: [makeApproval({ workflow_name: payload, message: payload, requested_by: payload })],
+        total: 1,
       }),
     )
     const { container } = renderView()
@@ -206,7 +220,7 @@ describe('ApprovalsView', () => {
         }
         return Promise.resolve(jsonResponse(200, { data: {} }))
       }
-      return Promise.resolve(jsonResponse(200, { data: elevated ? [] : [makeApproval()] }))
+      return Promise.resolve(jsonResponse(200, elevated ? approvalsBody() : approvalsBody(makeApproval())))
     })
 
     renderView()
