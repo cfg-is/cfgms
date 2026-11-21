@@ -562,3 +562,45 @@ func TestHandleRequestSigningCredential_Failure_RecordsNoAuditEvent(t *testing.T
 
 	assert.Empty(t, auditEntriesByAction(t, server, "signing_credential_issued"))
 }
+
+// TestHandleRequestSigningCredential_NoActor_Returns401: with no principal, or one with an
+// empty ID, a signing-credential request is refused with 401 before the body is read or a
+// certificate is issued: the certificate store is unchanged and nothing is audited. The
+// same request from an authenticated admin issues a credential and audits it.
+func TestHandleRequestSigningCredential_NoActor_Returns401(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	adminCert := issueSigningCredentialAdminCert(t, certMgr, "operator-admin")
+	accountID := bindSigningCredentialAdminCert(t, server, adminCert)
+	_, pubPEM := generateSigningCredentialTestKey(t)
+	body, err := json.Marshal(SigningCredentialRequest{PublicKeyPEM: pubPEM})
+	require.NoError(t, err)
+
+	before, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+
+	for _, tc := range noActorCases("") {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
+			ctx := context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+			req = req.WithContext(withActor(ctx, tc.principal))
+			rec := httptest.NewRecorder()
+			server.handleRequestSigningCredential(rec, req)
+
+			assertAuthenticationRequired(t, rec)
+			after, err := certMgr.ListCertificates()
+			require.NoError(t, err)
+			assert.Len(t, after, len(before), "no credential may be issued")
+			assert.Empty(t, auditEntriesByAction(t, server, "signing_credential_issued"))
+		})
+	}
+
+	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{adminCert}}
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, accountID, req, "signing-credential:request"))
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, "the same request from an authenticated principal succeeds: %s", rec.Body.String())
+	entries := auditEntriesByAction(t, server, "signing_credential_issued")
+	require.Len(t, entries, 1)
+	assert.Equal(t, accountID, entries[0].UserID)
+}

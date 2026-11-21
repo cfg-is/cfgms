@@ -117,12 +117,13 @@ func signedInstallerMeta(t *testing.T, content []byte, version, platform, arch s
 	}
 }
 
-// withTenant returns a copy of r with tenantID injected into the context.
+// withTenantScope returns a copy of r with tenantID injected into the context and no
+// principal.
 //
 // An empty tenantID means a root admin caller: the request carries an explicit
 // root TenantScope, as the authentication middleware gives a root principal —
 // an empty tenant alone grants nothing (Issue #4665).
-func withTenant(r *http.Request, tenantID string) *http.Request {
+func withTenantScope(r *http.Request, tenantID string) *http.Request {
 	ctx := context.WithValue(r.Context(), ctxkeys.TenantID, tenantID)
 	scope := ctxkeys.NewRootScope()
 	if tenantID != "" {
@@ -130,6 +131,16 @@ func withTenant(r *http.Request, tenantID string) *http.Request {
 	}
 	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scope)
 	return r.WithContext(ctx)
+}
+
+// withTenant is withTenantScope for a caller the middleware has authenticated: the
+// request also carries a principal with an ID, which the handlers that record an actor
+// require (requireActingPrincipal). A test that sets its own principal afterwards
+// replaces it; a test that needs no principal uses withTenantScope.
+func withTenant(r *http.Request, tenantID string) *http.Request {
+	r = withTenantScope(r, tenantID)
+	return r.WithContext(context.WithValue(r.Context(), principalContextKey,
+		&Principal{ID: "test-operator", TenantID: tenantID, Assurance: session.AssuranceBasic}))
 }
 
 // withVars returns a copy of r with gorilla/mux route variables injected.
@@ -208,6 +219,7 @@ func TestHandleUploadInstallerArtifact_NoTenantScope(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64",
 		bytes.NewBufferString("content"))
+	req = req.WithContext(withActor(req.Context(), &Principal{ID: "test-operator", Assurance: session.AssuranceBasic}))
 	req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
 	rec := httptest.NewRecorder()
 
@@ -353,6 +365,7 @@ func TestHandleDeleteInstallerArtifact_NoTenantScope(t *testing.T) {
 	server, _ := setupTestServerWithBlobStore(t)
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/installer/artifacts/linux/amd64", nil)
+	req = req.WithContext(withActor(req.Context(), &Principal{ID: "test-operator", Assurance: session.AssuranceBasic}))
 	req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
 	rec := httptest.NewRecorder()
 
@@ -1199,4 +1212,92 @@ func TestHandleUploadInstallerArtifact_SignedUploadRecordsPublisher(t *testing.T
 	require.Len(t, entries, 1)
 	assert.Equal(t, business.AuditResultSuccess, entries[0].Result)
 	assert.Equal(t, entries[0].Details["checksum"], up.Data.Checksum)
+}
+
+// TestHandleUploadInstallerArtifact_NoActor_Returns401: with no principal, or one with an
+// empty ID, an installer upload is refused with 401 before the body is read: no blob is
+// stored and nothing is audited. The same signed request from a principal with an ID
+// stores the artifact and audits it under that principal.
+func TestHandleUploadInstallerArtifact_NoActor_Returns401(t *testing.T) {
+	server, store := setupTestServerWithBlobStore(t)
+	auditMgr, err := audit.NewManager(pkgtesting.SetupTestStorage(t).GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+	server.auditManager = auditMgr
+
+	content := []byte("installer-bytes")
+	key := blob.BlobKey{TenantID: "test-tenant", Namespace: "installers", Name: "linux-amd64"}
+	upload := func(p *Principal) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut,
+			signedInstallerPath(t, "/api/v1/installer/artifacts/linux/amd64", content, testInstallerVersion, "linux", "amd64"),
+			bytes.NewReader(content))
+		req = withTenantScope(req, "test-tenant")
+		req = req.WithContext(withActor(req.Context(), p))
+		req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
+		rec := httptest.NewRecorder()
+		server.handleUploadInstallerArtifact(rec, req)
+		return rec
+	}
+
+	for _, tc := range noActorCases("test-tenant") {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, upload(tc.principal))
+			exists, err := store.BlobExists(context.Background(), key)
+			require.NoError(t, err)
+			assert.False(t, exists, "no installer blob may be stored")
+			assert.Empty(t, auditEntriesByAction(t, server, "installer.artifact.uploaded"))
+		})
+	}
+
+	admin := &Principal{ID: "admin-bob", Name: "bob", Assurance: session.AssuranceBasic}
+	rec := upload(admin)
+	require.Equal(t, http.StatusOK, rec.Code, "the same request from an authenticated principal succeeds: %s", rec.Body.String())
+	exists, err := store.BlobExists(context.Background(), key)
+	require.NoError(t, err)
+	assert.True(t, exists)
+	events := auditEntriesByAction(t, server, "installer.artifact.uploaded")
+	require.Len(t, events, 1)
+	assert.Equal(t, admin.ID, events[0].UserID)
+}
+
+// TestHandleDeleteInstallerArtifact_NoActor_Returns401: with no principal, or one with an
+// empty ID, an installer delete is refused with 401: the stored blob stays and nothing
+// is audited. The same request from a principal with an ID deletes it.
+func TestHandleDeleteInstallerArtifact_NoActor_Returns401(t *testing.T) {
+	server, store := setupTestServerWithBlobStore(t)
+	auditMgr, err := audit.NewManager(pkgtesting.SetupTestStorage(t).GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+	server.auditManager = auditMgr
+
+	putInstaller(t, store, "test-tenant", "linux-amd64", []byte("installer-bytes"))
+	key := blob.BlobKey{TenantID: "test-tenant", Namespace: "installers", Name: "linux-amd64"}
+	del := func(p *Principal) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/installer/artifacts/linux/amd64", nil)
+		req = withTenantScope(req, "test-tenant")
+		req = req.WithContext(withActor(req.Context(), p))
+		req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
+		rec := httptest.NewRecorder()
+		server.handleDeleteInstallerArtifact(rec, req)
+		return rec
+	}
+
+	for _, tc := range noActorCases("test-tenant") {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, del(tc.principal))
+			exists, err := store.BlobExists(context.Background(), key)
+			require.NoError(t, err)
+			assert.True(t, exists, "the installer blob must not be deleted")
+			assert.Empty(t, auditEntriesByAction(t, server, "installer.artifact.deleted"))
+		})
+	}
+
+	admin := &Principal{ID: "admin-bob", Name: "bob", Assurance: session.AssuranceBasic}
+	require.Equal(t, http.StatusNoContent, del(admin).Code, "the same request from an authenticated principal succeeds")
+	exists, err := store.BlobExists(context.Background(), key)
+	require.NoError(t, err)
+	assert.False(t, exists)
+	events := auditEntriesByAction(t, server, "installer.artifact.deleted")
+	require.Len(t, events, 1)
+	assert.Equal(t, admin.ID, events[0].UserID)
 }

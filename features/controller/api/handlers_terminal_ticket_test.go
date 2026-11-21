@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -498,4 +499,38 @@ func TestTerminalTicket_CertificateBoundToAnotherPrincipalRefused(t *testing.T) 
 	owner := actionPrincipal("op-a")
 	assert.Equal(t, http.StatusOK, n.do("/terminal/tickets/"+ttSteward, owner, body).Code)
 	assert.Equal(t, 1, ticketCount(n.server))
+}
+
+// TestHandleTerminalTicket_NoActor_Returns401: with no principal, or one
+// with an empty ID, a ticket request is refused with 401 AUTHENTICATION_REQUIRED before
+// the body is read: no ticket is stored and no ticket request is audited. The same signed
+// request from a principal with an ID mints a ticket bound to that principal.
+func TestHandleTerminalTicket_NoActor_Returns401(t *testing.T) {
+	n := newTicketX509Node(t)
+	body, err := json.Marshal(n.signedTicketBody(ttSteward, "bash"))
+	require.NoError(t, err)
+
+	call := func(p *Principal) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/terminal/tickets/"+ttSteward, bytes.NewReader(body))
+		ctx := context.WithValue(req.Context(), ctxkeys.TenantID, saTenant)
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(saTenant))
+		req = withVars(req.WithContext(withActor(ctx, p)), map[string]string{"steward_id": ttSteward})
+		rec := httptest.NewRecorder()
+		n.server.handleTerminalTicket(rec, req)
+		return rec
+	}
+
+	for _, tc := range noActorCases(saTenant) {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, call(tc.principal))
+			assert.Equal(t, 0, ticketCount(n.server), "no ticket may be minted")
+			assert.Empty(t, auditEntriesByAction(t, n.server, "terminal_ticket.request"))
+		})
+	}
+
+	p := actionPrincipal("op-1")
+	ticket := decodeTicket(t, call(p))
+	raw, ok := n.server.terminalTickets.Load(hashTerminalTicket(ticket))
+	require.True(t, ok)
+	assert.Equal(t, "op-1", raw.(*terminalTicketRecord).principalID)
 }

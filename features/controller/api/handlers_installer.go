@@ -193,6 +193,10 @@ type installerArtifactInfo struct {
 // publisher signature (?signature=, URL-safe base64) over the installer message;
 // unsigned or wrongly signed bodies are refused, audited and never stored.
 func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	if s.blobStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Installer storage not available", "SERVICE_UNAVAILABLE")
 		return
@@ -220,7 +224,7 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 	// session must not be able to replace the installer new endpoints run with
 	// administrator rights without a publisher signature.
 	refuse := func(ref *installerRefusal) {
-		s.emitInstallerAudit(r, tenantID, "installer.artifact.uploaded", platform, arch, "", business.AuditResultFailure)
+		s.emitInstallerAudit(r, principal, tenantID, "installer.artifact.uploaded", platform, arch, "", business.AuditResultFailure)
 		s.writeErrorResponse(w, ref.status, ref.message, ref.code)
 	}
 
@@ -263,10 +267,8 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 	}
 	// Audit immediately: a stored artifact must always have an audit record,
 	// independent of the metadata re-read below.
-	s.emitInstallerAudit(r, tenantID, "installer.artifact.uploaded", platform, arch, contentHash, business.AuditResultSuccess)
-	if tenantID == s.rootTenantID(r.Context()) {
-		s.publicDownloadCache.invalidate(installerDownloadCacheKey(platform, arch))
-	}
+	s.emitInstallerAudit(r, principal, tenantID, "installer.artifact.uploaded", platform, arch, contentHash, business.AuditResultSuccess)
+	s.invalidateRootInstallerDownload(r.Context(), tenantID, platform, arch)
 
 	// Retrieve stored metadata (size + checksum computed by provider during PutBlob).
 	rc, storedMeta, err := s.blobStore.GetBlob(r.Context(), key)
@@ -501,6 +503,10 @@ func (s *Server) handleGetInstallerArtifact(w http.ResponseWriter, r *http.Reque
 // handleDeleteInstallerArtifact handles DELETE /api/v1/installer/artifacts/{platform}/{arch}.
 // Removes the installer artifact. Returns 204 on success (including when it did not exist).
 func (s *Server) handleDeleteInstallerArtifact(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	if s.blobStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Installer storage not available", "SERVICE_UNAVAILABLE")
 		return
@@ -531,23 +537,29 @@ func (s *Server) handleDeleteInstallerArtifact(w http.ResponseWriter, r *http.Re
 			"error", logging.SanitizeLogValue(err.Error()),
 			"platform", logging.SanitizeLogValue(platform),
 			"arch", logging.SanitizeLogValue(arch))
-		s.emitInstallerAudit(r, tenantID, "installer.artifact.deleted", platform, arch, "", business.AuditResultFailure)
+		s.emitInstallerAudit(r, principal, tenantID, "installer.artifact.deleted", platform, arch, "", business.AuditResultFailure)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete artifact", "DELETE_ERROR")
 		return
 	}
-	if tenantID == s.rootTenantID(r.Context()) {
-		s.publicDownloadCache.invalidate(installerDownloadCacheKey(platform, arch))
-	}
+	s.invalidateRootInstallerDownload(r.Context(), tenantID, platform, arch)
 
-	s.emitInstallerAudit(r, tenantID, "installer.artifact.deleted", platform, arch, "", business.AuditResultSuccess)
+	s.emitInstallerAudit(r, principal, tenantID, "installer.artifact.deleted", platform, arch, "", business.AuditResultSuccess)
 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// invalidateRootInstallerDownload drops the cached public download of an installer
+// when the changed artifact belongs to the root tenant, the only tenant whose
+// artifacts are served publicly.
+func (s *Server) invalidateRootInstallerDownload(ctx context.Context, tenantID, platform, arch string) {
+	if tenantID == s.rootTenantID(ctx) {
+		s.publicDownloadCache.invalidate(installerDownloadCacheKey(platform, arch))
+	}
+}
+
 // emitInstallerAudit records an installer artifact change naming the authenticated
 // principal. checksum is the stored SHA-256 for uploads and empty for deletes.
-func (s *Server) emitInstallerAudit(r *http.Request, tenantID, action, platform, arch, checksum string, result business.AuditResult) {
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+func (s *Server) emitInstallerAudit(r *http.Request, principal *Principal, tenantID, action, platform, arch, checksum string, result business.AuditResult) {
 	details := map[string]interface{}{
 		"tenant_id": tenantID,
 		"platform":  platform,

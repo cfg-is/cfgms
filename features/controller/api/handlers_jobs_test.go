@@ -1068,3 +1068,51 @@ func TestHandleCreateJob_AuditsCreationOnlyWhenAccepted(t *testing.T) {
 	assert.Equal(t, "all", entries[0].Details["selector"])
 	assert.Equal(t, audit.SystemTenantID, entries[0].TenantID)
 }
+
+// withActorInScopeOf returns req carrying the tenant context scope's tenant gives and
+// actor as the authenticated principal, or no principal when actor is nil. The scope
+// stays that of a complete request, so the actor is the only reason a handler refuses it.
+func withActorInScopeOf(req *http.Request, scope, actor *Principal) *http.Request {
+	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, fixtureCallerTenant(scope.TenantID))
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(scope.TenantID))
+	return req.WithContext(withActor(ctx, actor))
+}
+
+// TestHandleCreateJob_NoActor_Returns401: with no principal, or one with an empty ID, a
+// job request is refused with 401 before any job is created: the store holds no job and
+// nothing is audited. The same request from a principal with an ID creates the job,
+// records that principal as its initiator and audits it.
+func TestHandleCreateJob_NoActor_Returns401(t *testing.T) {
+	server := setupTestServer(t)
+	store := newTestBatchJobStoreForAPI()
+	server.batchJobStore = store
+	scope := tenantPrincipal("tenant-a")
+
+	create := func(actor *Principal) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs", bytes.NewBufferString(`{"selector":"all","batch_size":3}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		server.handleCreateJob(rec, withActorInScopeOf(req, scope, actor))
+		return rec
+	}
+
+	for _, tc := range noActorCases("tenant-a") {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, create(tc.principal))
+			jobs, err := store.ListBatchJobsByTenant(context.Background(), "tenant-a")
+			require.NoError(t, err)
+			assert.Empty(t, jobs, "no job may be created")
+			assert.Empty(t, auditEntriesByAction(t, server, "batch_job.created"))
+		})
+	}
+
+	rec := create(scope)
+	require.Equal(t, http.StatusAccepted, rec.Code, "the same request from an authenticated principal succeeds: %s", rec.Body.String())
+	jobs, err := store.ListBatchJobsByTenant(context.Background(), "tenant-a")
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, scope.ID, jobs[0].InitiatedBy)
+	events := auditEntriesByAction(t, server, "batch_job.created")
+	require.Len(t, events, 1)
+	assert.Equal(t, scope.ID, events[0].UserID)
+}

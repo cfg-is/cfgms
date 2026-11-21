@@ -2354,3 +2354,141 @@ func TestHandleRefreshApprove_SuccessAuditsIssuanceOnce(t *testing.T) {
 	require.NotNil(t, entry)
 	assert.NotEmpty(t, entry.Details["cert_serial"])
 }
+
+// refreshNoActorRequest builds a handler-level request for a refresh admin route inside
+// testTenantID's own scope, carrying principal p or none when p is nil.
+func refreshNoActorRequest(method, path string, vars map[string]string, body string, p *Principal) *http.Request {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req = mux.SetURLVars(req, vars)
+	return req.WithContext(withActor(withCallerTenant(req.Context(), testTenantID), p))
+}
+
+// refreshOperator is a principal with an ID, scoped to testTenantID.
+func refreshOperator() *Principal {
+	return &Principal{ID: "refresh-operator", TenantID: testTenantID, Assurance: session.AssuranceStrong}
+}
+
+// newPendingRefreshFixture returns a refresh fixture holding one active steward and one
+// pending refresh entry for it.
+func newPendingRefreshFixture(t *testing.T, pendingID string) *refreshFixture {
+	t.Helper()
+	pub, _ := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, newTestCertManager(t))
+	f.addSteward(t, &business.StewardRecord{
+		ID: "steward-no-actor", DeviceID: testDeviceID, TenantID: testTenantID,
+		Status: business.StewardStatusActive, IdentityKeyPub: []byte(pub),
+	})
+	f.addPending(t, &business.PendingRefreshEntry{
+		PendingID: pendingID, DeviceID: testDeviceID, TenantID: testTenantID, CSRPEM: testValidCSRPEM,
+		Status:    business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	})
+	return f
+}
+
+// TestHandleApproveRefresh_NoActor_Returns401: with no principal, or one with an empty ID,
+// an approval is refused with 401 before any certificate is issued: the entry stays
+// pending, holds no claim bundle and nothing is audited. The same request from a
+// principal with an ID approves it and audits the approval under that principal.
+func TestHandleApproveRefresh_NoActor_Returns401(t *testing.T) {
+	const pendingID = "refresh-approve-no-actor"
+	f := newPendingRefreshFixture(t, pendingID)
+	approve := func(p *Principal) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		f.server.handleApproveRefresh(rec, refreshNoActorRequest(http.MethodPost,
+			"/api/v1/stewards/refresh/"+pendingID+"/approve", map[string]string{"pending_id": pendingID}, "", p))
+		return rec
+	}
+
+	for _, tc := range noActorCases(testTenantID) {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, approve(tc.principal))
+			entry, err := f.pending.GetPendingRefreshByID(context.Background(), pendingID)
+			require.NoError(t, err)
+			assert.Equal(t, business.PendingRefreshStatusPending, entry.Status, "the entry must stay pending")
+			assert.Empty(t, entry.ClaimBundle, "no certificate may be issued")
+			assert.Nil(t, f.findAuditAction(t, "refresh_admin_approved"))
+			assert.Nil(t, f.findAuditAction(t, "refresh_admin_cert_issued"))
+		})
+	}
+
+	op := refreshOperator()
+	rec := approve(op)
+	require.Equal(t, http.StatusOK, rec.Code, "the same request from an authenticated principal succeeds: %s", rec.Body.String())
+	entry, err := f.pending.GetPendingRefreshByID(context.Background(), pendingID)
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRefreshStatusApproved, entry.Status)
+	audited := f.findAuditAction(t, "refresh_admin_approved")
+	require.NotNil(t, audited)
+	assert.Equal(t, op.ID, audited.UserID)
+}
+
+// TestHandleRejectRefresh_NoActor_Returns401: with no principal, or one with an empty ID,
+// a rejection is refused with 401: the entry stays pending and nothing is audited. The
+// same request from a principal with an ID rejects it and audits the rejection.
+func TestHandleRejectRefresh_NoActor_Returns401(t *testing.T) {
+	const pendingID = "refresh-reject-no-actor"
+	f := newPendingRefreshFixture(t, pendingID)
+	reject := func(p *Principal) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		f.server.handleRejectRefresh(rec, refreshNoActorRequest(http.MethodPost,
+			"/api/v1/stewards/refresh/"+pendingID+"/reject", map[string]string{"pending_id": pendingID},
+			`{"reason":"unauthorized device"}`, p))
+		return rec
+	}
+
+	for _, tc := range noActorCases(testTenantID) {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, reject(tc.principal))
+			entry, err := f.pending.GetPendingRefreshByID(context.Background(), pendingID)
+			require.NoError(t, err)
+			assert.Equal(t, business.PendingRefreshStatusPending, entry.Status, "the entry must stay pending")
+			assert.Nil(t, f.findAuditAction(t, "refresh_admin_rejected"))
+		})
+	}
+
+	op := refreshOperator()
+	require.Equal(t, http.StatusOK, reject(op).Code, "the same request from an authenticated principal succeeds")
+	entry, err := f.pending.GetPendingRefreshByID(context.Background(), pendingID)
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRefreshStatusRejected, entry.Status)
+	audited := f.findAuditAction(t, "refresh_admin_rejected")
+	require.NotNil(t, audited)
+	assert.Equal(t, op.ID, audited.UserID)
+}
+
+// TestHandleSetRefreshPolicy_NoActor_Returns401: with no principal, or one with an empty
+// ID, setting the refresh policy is refused with 401: the stored policy is unchanged and
+// nothing is audited. The same request from a principal with an ID changes the policy and
+// audits the change under that principal.
+func TestHandleSetRefreshPolicy_NoActor_Returns401(t *testing.T) {
+	f := newRefreshFixture(t, newTestCertManager(t))
+	f.setPolicy(t, &business.RefreshPolicy{TenantID: testTenantID, Mode: "require_approval"})
+	set := func(p *Principal) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		f.server.handleSetRefreshPolicy(rec, refreshNoActorRequest(http.MethodPut,
+			"/api/v1/tenants/"+testTenantID+"/refresh-policy", map[string]string{"tenant_path": testTenantID},
+			`{"mode":"auto_accept"}`, p))
+		return rec
+	}
+
+	for _, tc := range noActorCases(testTenantID) {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, set(tc.principal))
+			policy, err := f.policies.GetPolicy(context.Background(), testTenantID)
+			require.NoError(t, err)
+			assert.Equal(t, "require_approval", policy.Mode, "the policy must be unchanged")
+			assert.Nil(t, f.findAuditAction(t, "refresh_policy.changed"))
+		})
+	}
+
+	op := refreshOperator()
+	rec := set(op)
+	require.Equal(t, http.StatusOK, rec.Code, "the same request from an authenticated principal succeeds: %s", rec.Body.String())
+	policy, err := f.policies.GetPolicy(context.Background(), testTenantID)
+	require.NoError(t, err)
+	assert.Equal(t, "auto_accept", policy.Mode)
+	audited := f.findAuditAction(t, "refresh_policy.changed")
+	require.NotNil(t, audited)
+	assert.Equal(t, op.ID, audited.UserID)
+}

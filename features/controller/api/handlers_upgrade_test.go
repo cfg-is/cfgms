@@ -1340,3 +1340,44 @@ func TestUpgradeStatus_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code,
 		"session principal scoped to tenant-b must not read tenant-a's upgrade record (body: %s)", rec.Body.String())
 }
+
+// TestHandleDispatchUpgrade_NoActor_Returns401: with no principal, or one with an empty ID,
+// an upgrade dispatch is refused with 401 before any upgrade record exists: the store holds
+// no record for the tenant and no dispatch is audited. The same request from a principal
+// with an ID dispatches the upgrade and audits it.
+func TestHandleDispatchUpgrade_NoActor_Returns401(t *testing.T) {
+	stewards := []fleet.StewardData{{ID: "steward-1", TenantID: "tenant-a", Status: "online"}}
+	server, upgradeStore := setupUpgradeServer(t, "tenant-a", stewards)
+	publishApprovedBinary(t, server, "tenant-a", "v0.5.12", "linux", "amd64")
+	scope := &Principal{ID: "api-key:tenant-a", Assurance: session.AssuranceMachine, TenantID: "tenant-a"}
+
+	dispatch := func(actor *Principal) *httptest.ResponseRecorder {
+		b, err := json.Marshal(dispatchUpgradeRequest{
+			Selector: "id:steward-1", Version: "v0.5.12", Platform: "linux", Arch: "amd64",
+		})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/upgrade", bytes.NewReader(b))
+		rec := httptest.NewRecorder()
+		server.handleDispatchUpgrade(rec, withActorInScopeOf(req, scope, actor))
+		return rec
+	}
+
+	for _, tc := range noActorCases("tenant-a") {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, dispatch(tc.principal))
+			records, err := upgradeStore.ListUpgradesByTenant(context.Background(), "tenant-a")
+			require.NoError(t, err)
+			assert.Empty(t, records, "no upgrade record may be created")
+			assert.Empty(t, auditEntriesByAction(t, server, auditUpgradeDispatched))
+		})
+	}
+
+	rec := dispatch(scope)
+	require.Equal(t, http.StatusAccepted, rec.Code, "the same request from an authenticated principal succeeds: %s", rec.Body.String())
+	records, err := upgradeStore.ListUpgradesByTenant(context.Background(), "tenant-a")
+	require.NoError(t, err)
+	assert.Len(t, records, 1)
+	events := auditEntriesByAction(t, server, auditUpgradeDispatched)
+	require.Len(t, events, 1)
+	assert.Equal(t, scope.ID, events[0].UserID)
+}

@@ -657,6 +657,9 @@ func (s *Server) seedRegionAPIKeys() {
 	for _, envVar := range []string{"CFGMS_API_KEY_EAST", "CFGMS_API_KEY_CENTRAL", "CFGMS_API_KEY_WEST"} {
 		if keyVal := os.Getenv(envVar); keyVal != "" {
 			s.keyCache[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+				// Named: handlers that record the actor refuse a principal
+				// without an ID (requireActingPrincipal).
+				ID:  "seeded-" + strings.ToLower(strings.TrimPrefix(envVar, "CFGMS_API_KEY_")) + "-key",
 				Key: keyVal,
 				// The ha:read-* grants let test/integration/ha observe the
 				// cluster it just started. Every HA route is permission-gated
@@ -703,6 +706,7 @@ func (s *Server) seedInstallerAPIKey() {
 		return
 	}
 	s.keyCache[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+		ID:          "seeded-installer-key",
 		Key:         keyVal,
 		Permissions: []string{"installer:upload", "installer:read", "installer:delete", "steward:list"},
 		TenantID:    installerTenant,
@@ -718,6 +722,7 @@ func (s *Server) seedUpgradeTestAPIKey() {
 		return
 	}
 	s.keyCache[keyVal] = &APIKey{ //nolint:gosec // test-only seeding, env-gated
+		ID:          "seeded-upgrade-test-key",
 		Key:         keyVal,
 		Permissions: []string{"installer:publish:steward", "installer:dispatch:steward", "installer:read"},
 		TenantID:    "fleet-root/fleet-child-a",

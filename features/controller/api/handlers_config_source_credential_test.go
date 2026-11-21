@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,11 +12,13 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/tenant"
 	cfgpkg "github.com/cfgis/cfgms/pkg/config"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -221,4 +224,45 @@ func TestConfigSourceCredential_TokenNeverLoggedAuditNamesBinding(t *testing.T) 
 		}
 	}
 	assert.True(t, found, "the credential write emits an audit event")
+}
+
+// TestConfigSourceCredential_NoActor_Returns401: with no principal, or one with an empty
+// ID, binding a config-source credential is refused with 401 before the secret store is
+// touched: nothing is stored and nothing is audited. The request is otherwise complete
+// (the admin's scope, a valid body): the same request from a principal with an ID stores
+// the secret, names that principal as its creator and audits the change.
+func TestConfigSourceCredential_NoActor_Returns401(t *testing.T) {
+	env := newM365Env(t)
+	ccUsePublicResolver(t)
+	admin := m365AdminPrincipal()
+	const repo = "https://git.example.com/a/one"
+
+	put := func(actor *Principal) *httptest.ResponseRecorder {
+		body, err := json.Marshal(map[string]interface{}{"url": repo, "token": ccTestToken})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/tenants/client-a1/config-source/credential", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = mux.SetURLVars(req, map[string]string{"id": "client-a1"})
+		ctx := context.WithValue(req.Context(), ctxkeys.TenantID, admin.TenantID)
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(admin.TenantID))
+		rec := httptest.NewRecorder()
+		env.server.handlePutTenantConfigSourceCredential(rec, req.WithContext(withActor(ctx, actor)))
+		return rec
+	}
+
+	for _, tc := range noActorCases(admin.TenantID) {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAuthenticationRequired(t, put(tc.principal))
+			_, err := env.server.secretStore.GetSecret(context.Background(), "client-a1/config-source-git")
+			assert.Error(t, err, "no credential may be stored")
+			assert.Empty(t, auditEntriesByAction(t, env.server, configSourceCredentialAuditAction))
+		})
+	}
+
+	rec := put(admin)
+	require.Equal(t, http.StatusOK, rec.Code, "the same request from an authenticated principal succeeds: %s", rec.Body.String())
+	assert.Equal(t, admin.ID, ccStored(t, env, "client-a1").CreatedBy)
+	events := auditEntriesByAction(t, env.server, configSourceCredentialAuditAction)
+	require.Len(t, events, 1)
+	assert.Equal(t, admin.ID, events[0].UserID)
 }
