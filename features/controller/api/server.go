@@ -311,6 +311,11 @@ type APIKey struct {
 	// Kind is the key's durable credential kind, read from its secret-store record
 	// (Issue #6066). Empty for an ordinary key; see isRolloutCredential.
 	Kind string `json:"-"`
+	// RoleID is the role ID the key was minted with, read from its secret-store record.
+	// It is a label for the fixed permission set copied onto the key, not an RBAC role
+	// assignment, and never an input to authorization. Empty for a key minted with a
+	// plain permission list.
+	RoleID string `json:"-"`
 
 	// recordRef names the durable secret-store record this cache entry mirrors: the
 	// record's key (the SHA-256 of the API key) within TenantID. Every key minted by

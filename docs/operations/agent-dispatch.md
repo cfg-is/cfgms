@@ -33,7 +33,7 @@ agent session sets `CFGMS_AGENT_MODE=true`, plus `CFGMS_API_KEY_FILE`,
 |---|---|---|
 | `CFGMS_TIER1_URL` | `https://ctrl.cfgms.lab:9080` | Base URL of the Tier 1 controller REST API. All `cfg` CLI calls use this as the server endpoint. |
 | `CFGMS_API_KEY_FILE` | `/run/cfgms/agent-cred/api.key` | Path to the scoped API key file inside the container. The key value is **never** in an env var; `docker inspect` shows only the file path. |
-| `CFGMS_TENANT` | `agent-test/42` | The agent's own sub-tenant. The `agent.dev` role assigned to the key is scoped to this tenant only. |
+| `CFGMS_TENANT` | `agent-test/42` | The agent's own sub-tenant. The key is minted with the `agent.dev` role ID, a recorded label for a fixed read-only permission set, and is scoped to this tenant only. |
 | `CFGMS_AGENT_MODE` | `true` | Tells Claude Code to follow the Agent Implementation Workflow (Phase 1–4) rather than entering interactive mode. |
 | `CFGMS_ADMIN_BUNDLE` | _(empty)_ | Explicitly cleared so the container cannot use the host admin mTLS bundle even if the volume were somehow accessible. |
 
@@ -185,16 +185,18 @@ The revoke sequence:
 - Key value never appears in the image.
 - Credentials under `/run/cfgms/agent-cred/` live in RAM only (Linux `/run`
   tmpfs) and are destroyed on host reboot even if cleanup is skipped.
-- The `agent.dev` role is fail-closed: full RBAC and tenant isolation
-  enforcement on every controller request — no admin short-circuit.
+- The key is fail-closed: every controller request is authorized against the
+  permission list on the key's own record, with tenant isolation enforced and no
+  admin short-circuit. The key holds no RBAC role assignment.
 
 ---
 
 ## Tenant-Isolation Model
 
 Each agent container is bound to its own `agent-test/<N>` sub-tenant. The
-`agent.dev` role assigned to the key grants these read-only permissions within
-that tenant only:
+key carries the `agent.dev` role ID as a recorded label for a fixed set of
+read-only permissions, copied onto the key when it is minted. The key's own
+permission list grants these permissions within that tenant only:
 
 | Permission | Description |
 |---|---|

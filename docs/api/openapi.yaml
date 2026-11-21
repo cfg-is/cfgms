@@ -4080,6 +4080,11 @@ components:
             type: string
         role_id:
           type: string
+          description: >-
+            Mints the key with the fixed permission set of the named role (only
+            `agent.dev` is accepted) and records the role ID on the key as a label.
+            The key holds no RBAC role assignment; its permission list is the only
+            input to authorization. Cannot be combined with `permissions`.
         expires_at:
           type: string
           format: date-time
@@ -4108,6 +4113,11 @@ components:
           nullable: true
         tenant_id:
           type: string
+        role_id:
+          type: string
+          description: >-
+            The role ID the key was minted with, a recorded label for its fixed
+            permission set. Omitted for a key minted with a plain permission list.
         key:
           type: string
           description: Returned only when the key is created.

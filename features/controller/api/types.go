@@ -218,6 +218,9 @@ type APIKeyInfo struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	TenantID    string     `json:"tenant_id"`
+	// RoleID is the role the key was minted with, when it was minted with one. It labels
+	// the fixed permission set on the key; the key holds no RBAC role assignment.
+	RoleID string `json:"role_id,omitempty"`
 }
 
 // APIKeyCreateResult represents the result of API key creation
