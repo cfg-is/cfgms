@@ -6,7 +6,7 @@
  *
  * Endpoints covered:
  *   GET    /api/v1/api-keys        → useApiKeyList (api-key:list)
- *   POST   /api/v1/api-keys        → createApiKey (Strong step-up, no presence)
+ *   POST   /api/v1/api-keys        → createApiKey (Strong step-up and a presence tap)
  *   DELETE /api/v1/api-keys/{id}   → deleteApiKey (Strong step-up, no presence)
  *
  * Step-up is handled transparently by the apiFetch interceptor.

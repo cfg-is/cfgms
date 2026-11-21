@@ -25,7 +25,7 @@
 // (handlers_webauthn_test.go).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useEffect } from 'react'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AuthProvider, useAuth } from '../auth/AuthContext.tsx'
 import PasskeysView from './PasskeysView.tsx'
@@ -274,6 +274,11 @@ describe('PasskeysView', () => {
       expect(screen.getAllByTestId('passkey-row')).toHaveLength(1)
     })
     expect(screen.queryByText('MacBook Touch ID')).toBeNull()
+    // Removing a passkey reduces access: no presence token, no presence ceremony.
+    const revokeCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/webauthn/revoke/'))
+    expect(new Headers(revokeCall?.[1]?.headers).get('X-Presence-Token')).toBeNull()
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('presence/'))).toBe(false)
+    expect(screen.queryByTestId('step-up-overlay')).toBeNull()
   })
 
   it('shows anti-lockout alert on 409 LAST_CREDENTIAL (server backstop for a stale list)', async () => {
@@ -378,6 +383,81 @@ describe('PasskeysView', () => {
     for (const btn of screen.getAllByTestId('revoke-btn')) expect(btn).toBeEnabled()
     expect(screen.queryByTestId('backup-nudge')).toBeNull()
     expect((screen.getByTestId('add-label-input') as HTMLInputElement).value).toBe('')
+  })
+
+  // Issue #6408, ADR-021 Amendment 13: webauthn:register needs a per-action presence tap on
+  // register/begin and again on register/finish, so adding a passkey in the browser takes two
+  // taps. The stub issues single-use tokens, as the controller does.
+  it('[REQUIRED TEST] add passkey takes two presence taps: one for register/begin, one for register/finish', async () => {
+    listQueue.push(() => makeListResp([CRED_A]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+
+    const live = new Set<string>()
+    let minted = 0
+    const registerCalls: Array<{ path: string; token: string | null }> = []
+    const envelope = (data: unknown) => jsonResponse(200, { data, timestamp: new Date().toISOString() })
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      if (url.includes('presence/begin')) {
+        return Promise.resolve(
+          envelope({
+            publicKey: {
+              challenge: 'Y2hhbGxlbmdl',
+              timeout: 60000,
+              rpId: 'localhost',
+              allowCredentials: [{ type: 'public-key', id: 'Y3JlZA', transports: ['internal'] }],
+              userVerification: 'required',
+            },
+          }),
+        )
+      }
+      if (url.includes('presence/finish')) {
+        minted++
+        live.add(`tap-token-${minted}`)
+        return Promise.resolve(envelope({ presence_token: `tap-token-${minted}`, expires_in: 30 }))
+      }
+      if (url.includes('/webauthn/register/')) {
+        const token = new Headers(init?.headers).get('X-Presence-Token')
+        registerCalls.push({ path: url.split('?')[0]!.split('/webauthn/')[1]!, token })
+        if (token === null || !live.delete(token)) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ error: 'step_up_required', required_assurance: 'strong', presence_required: true }), {
+              status: 401,
+              headers: {
+                'Content-Type': 'application/json',
+                'WWW-Authenticate': 'CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="webauthn:register"',
+              },
+            }),
+          )
+        }
+      }
+      return Promise.resolve(route(input, init))
+    })
+
+    listQueue.push(() => makeListResp([CRED_A, CRED_B]))
+    await addPasskeyWithLabel(null)
+
+    // First tap: register/begin.
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('step-up-verify-btn'))
+    })
+    // Second tap: register/finish, after the authenticator created the credential.
+    await waitFor(() => expect(registerCalls.some((c) => c.path === 'register/finish')).toBe(true))
+    await waitFor(() => screen.getByTestId('step-up-verify-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('step-up-verify-btn'))
+    })
+
+    await waitFor(() => expect(screen.getAllByTestId('passkey-row')).toHaveLength(2))
+    expect(registerCalls).toEqual([
+      { path: 'register/begin', token: null },
+      { path: 'register/begin', token: 'tap-token-1' },
+      { path: 'register/finish', token: null },
+      { path: 'register/finish', token: 'tap-token-2' },
+    ])
+    expect(minted).toBe(2)
   })
 
   it('sends no label param when the label is empty', async () => {

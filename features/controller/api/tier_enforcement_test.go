@@ -538,6 +538,8 @@ func TestAssuranceGate_StrongAssurance_ReachesHandler(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/api-keys", nil)
 	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, strongPrincipal))
+	// api-key:create also needs a per-action presence tap (Issue #6408, ADR-021 Amendment 13).
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, server, strongPrincipal.ID, req, "api-key:create"))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

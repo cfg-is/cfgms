@@ -2,6 +2,7 @@
 // Copyright 2026 Jordan Ritz
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { AuthProvider } from '../auth/AuthContext.tsx'
 import CrossingPrompt from './CrossingPrompt.tsx'
 import type { TenantInfo } from './useTenants.ts'
 
@@ -303,5 +304,115 @@ describe('CrossingPrompt — visibility rule', () => {
     await screen.findByTestId('crossing-waiting')
     expect(container.querySelector('img')).toBeNull()
     expect(screen.getByTestId('crossing-wait-justification').textContent).toBe(markup)
+  })
+})
+
+// Issue #6408, ADR-021 Amendment 13: opening a break-glass crossing needs a per-action
+// presence tap (tenant:crossing-break-glass). The real AuthProvider and StepUpModal run the
+// tap through the apiFetch interceptor; only fetch and navigator.credentials are stubbed.
+describe('CrossingPrompt — break-glass presence tap', () => {
+  const TAP_TOKEN = 'tap-token-1'
+  const envelope = (data: unknown) => json(200, { data, timestamp: new Date().toISOString() })
+  const presenceChallenge = () =>
+    new Response(JSON.stringify({ error: 'step_up_required', required_assurance: 'strong', presence_required: true }), {
+      status: 401,
+      headers: {
+        'Content-Type': 'application/json',
+        'WWW-Authenticate':
+          'CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="tenant:crossing-break-glass"',
+      },
+    })
+  const presenceEndpoints = (url: string) => {
+    if (url.includes('presence/begin')) {
+      return envelope({
+        publicKey: {
+          challenge: 'Y2hhbGxlbmdl',
+          timeout: 60000,
+          rpId: 'localhost',
+          allowCredentials: [{ type: 'public-key', id: 'Y3JlZA', transports: ['internal'] }],
+          userVerification: 'required',
+        },
+      })
+    }
+    if (url.includes('presence/finish')) return envelope({ presence_token: TAP_TOKEN, expires_in: 30 })
+    return undefined
+  }
+  const breakGlassPosts = () =>
+    fetchMock.mock.calls.filter(([u, init]) => String(u) === '/api/v1/tenants/msp-a/break-glass' && init?.method === 'POST')
+
+  beforeEach(() => {
+    const buf = (v: string) => new TextEncoder().encode(v).buffer as ArrayBuffer
+    const credential = {
+      id: 'cred-id-b64u',
+      type: 'public-key',
+      rawId: buf('cred-id-b64u'),
+      response: {
+        clientDataJSON: buf('{"type":"webauthn.get"}'),
+        authenticatorData: buf('ad'),
+        signature: buf('sig'),
+        userHandle: null,
+      },
+      getClientExtensionResults: () => ({}),
+      authenticatorAttachment: null,
+      toJSON: () => ({}),
+    }
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(credential) } })
+  })
+
+  it('[REQUIRED TEST] break-glass runs the tap and retries with the presence token', async () => {
+    fetchMock.mockImplementation((url, init) => {
+      const u = String(url)
+      const presence = presenceEndpoints(u)
+      if (presence) return Promise.resolve(presence)
+      if (u === '/api/v1/tenants/msp-a/break-glass' && init?.method === 'POST') {
+        if (new Headers(init.headers).get('X-Presence-Token') !== TAP_TOKEN) return Promise.resolve(presenceChallenge())
+        return Promise.resolve(json(201, { data: crossingBody() }))
+      }
+      return Promise.resolve(json(200, { data: [] }))
+    })
+    const onGranted = vi.fn()
+    render(
+      <AuthProvider>
+        <CrossingPrompt tenantId="msp-a" visibleTenants={[msp()]} onGranted={onGranted} onCancel={vi.fn()} pollIntervalMs={15} />
+      </AuthProvider>,
+    )
+    fill('security_incident', goodText)
+    fireEvent.click(screen.getByTestId('crossing-submit-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument())
+    expect(breakGlassPosts()).toHaveLength(1)
+    fireEvent.click(await screen.findByTestId('step-up-verify-btn'))
+
+    await waitFor(() => expect(onGranted).toHaveBeenCalledTimes(1))
+    const posts = breakGlassPosts()
+    expect(posts).toHaveLength(2)
+    expect(new Headers(posts[0]![1]?.headers).get('X-Presence-Token')).toBeNull()
+    expect(new Headers(posts[1]![1]?.headers).get('X-Presence-Token')).toBe(TAP_TOKEN)
+    // The retry keeps the body the operator typed.
+    expect(JSON.parse(String(posts[1]![1]?.body))).toEqual({ reason_category: 'security_incident', justification: goodText })
+  })
+
+  it('a cancelled tap sends no second request and opens no crossing', async () => {
+    fetchMock.mockImplementation((url, init) => {
+      const u = String(url)
+      const presence = presenceEndpoints(u)
+      if (presence) return Promise.resolve(presence)
+      if (u === '/api/v1/tenants/msp-a/break-glass' && init?.method === 'POST') return Promise.resolve(presenceChallenge())
+      return Promise.resolve(json(200, { data: [] }))
+    })
+    const onGranted = vi.fn()
+    render(
+      <AuthProvider>
+        <CrossingPrompt tenantId="msp-a" visibleTenants={[msp()]} onGranted={onGranted} onCancel={vi.fn()} pollIntervalMs={15} />
+      </AuthProvider>,
+    )
+    fill()
+    fireEvent.click(screen.getByTestId('crossing-submit-btn'))
+    await waitFor(() => expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument())
+    fireEvent.click(await screen.findByTestId('step-up-cancel-btn'))
+
+    await waitFor(() => expect(screen.queryByTestId('step-up-overlay')).not.toBeInTheDocument())
+    expect(breakGlassPosts()).toHaveLength(1)
+    expect(onGranted).not.toHaveBeenCalled()
   })
 })

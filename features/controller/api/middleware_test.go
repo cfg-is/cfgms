@@ -669,6 +669,18 @@ func makeAdminRequest(t *testing.T, method, path string, body io.Reader) *http.R
 	return req.WithContext(ctx)
 }
 
+// makeAdminRequestWithPresence is makeAdminRequest plus an X-Presence-Token bound to the
+// request's method, path, body and permissionID and minted for the admin principal: what a
+// passkey tap yields for a RequireUserPresence permission (ADR-021 Amendment 13).
+func makeAdminRequestWithPresence(t *testing.T, s *Server, method, path string, body io.Reader, permissionID string) *http.Request {
+	t.Helper()
+	req := makeAdminRequest(t, method, path, body)
+	principal, ok := req.Context().Value(principalContextKey).(*Principal)
+	require.True(t, ok, "makeAdminRequest must carry a principal")
+	req.Header.Set(presenceTokenHeader, mintPresenceTokenFor(t, s, principal.ID, req, permissionID))
+	return req
+}
+
 // wrapWithAuth wraps handler with authenticationMiddleware then requirePermission.
 func wrapWithAuth(s *Server, resourceType, action string, inner http.HandlerFunc) http.Handler {
 	return s.authenticationMiddleware(

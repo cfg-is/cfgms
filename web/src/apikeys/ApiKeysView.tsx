@@ -8,8 +8,9 @@
  * Layout follows registration/TokensTab.tsx (list table, mint form, show-once
  * banner); the inline confirm follows tenants/SupportAccessView.tsx.
  *
- * Create and delete are Strong-only step-up actions, handled transparently by
- * the apiFetch interceptor (no presence token).
+ * Create needs a per-action presence tap (ADR-021 Amendment 13) and delete is a
+ * Strong-only step-up action; the apiFetch interceptor runs both ceremonies
+ * transparently.
  *
  * Secret handling: the secret lives in component state only, rendered in a
  * read-only field with a copy button, and is discarded when the panel closes.

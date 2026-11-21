@@ -73,7 +73,9 @@ func TestRootSessionCrossingBoundary_EndToEnd(t *testing.T) {
 		require.Equal(t, session.AssuranceStrong, elevated.Assurance)
 		return token
 	}
-	send := func(t *testing.T, token, method, path string, body interface{}) *httptest.ResponseRecorder {
+	// send takes the permission a presence-gated route needs as tapFor: the request then
+	// carries a presence token for it, so the tenant decision stays the one in play.
+	send := func(t *testing.T, token, method, path string, body interface{}, tapFor ...string) *httptest.ResponseRecorder {
 		t.Helper()
 		var raw []byte
 		if body != nil {
@@ -84,6 +86,9 @@ func TestRootSessionCrossingBoundary_EndToEnd(t *testing.T) {
 		req := httptest.NewRequest(method, path, bytes.NewReader(raw))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+token)
+		for _, permissionID := range tapFor {
+			withPresenceTap(t, server, req, permissionID)
+		}
 		rec := httptest.NewRecorder()
 		server.router.ServeHTTP(rec, req)
 		return rec
@@ -156,7 +161,7 @@ func TestRootSessionCrossingBoundary_EndToEnd(t *testing.T) {
 		{
 			name: "cert-binding bind",
 			call: func(t *testing.T, token, suffix string) *httptest.ResponseRecorder {
-				return send(t, token, http.MethodPost, "/api/v1/accounts/e2e-msp-user/certs/bind", map[string]string{"serial": "e2e" + suffix})
+				return send(t, token, http.MethodPost, "/api/v1/accounts/e2e-msp-user/certs/bind", map[string]string{"serial": "e2e" + suffix}, "cert-binding:bind")
 			},
 			allowed: func(t *testing.T, rec *httptest.ResponseRecorder, _ string) {
 				assert.Less(t, rec.Code, 300, rec.Body.String())

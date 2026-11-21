@@ -49,10 +49,12 @@ import (
 
 	cfgapi "github.com/cfgis/cfgms/features/controller/api"
 	controllerConfig "github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/initialization"
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
 	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/softauthn"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	"github.com/cfgis/cfgms/pkg/testutil/webauthntest"
@@ -147,6 +149,7 @@ func swaBodyHash(body []byte) string {
 type swaEnv struct {
 	t      *testing.T
 	ctrl   *server.Server
+	cfg    *controllerConfig.Config
 	api    *cfgapi.Server
 	base   string
 	origin string
@@ -170,12 +173,12 @@ type swaTapper struct {
 func newSWAEnv(t *testing.T) *swaEnv {
 	t.Helper()
 	var pendingAddr bundle.ContentAddress
-	ctrl, _, base, _, admin := startHealthTestControllerWithConfig(t, func(cfg *controllerConfig.Config) {
+	ctrl, cfg, base, _, admin := startHealthTestControllerWithConfig(t, func(cfg *controllerConfig.Config) {
 		c, err := cache.New(moduleCacheDirFor(cfg))
 		require.NoError(t, err, "seed module cache")
 		pendingAddr = seedModuleBundle(t, c, "cfgms", "hyperv", "0.2.1")
 	})
-	e := &swaEnv{t: t, ctrl: ctrl, base: base, origin: presenceRelayOrigin(t, base), admin: admin}
+	e := &swaEnv{t: t, ctrl: ctrl, cfg: cfg, base: base, origin: presenceRelayOrigin(t, base), admin: admin}
 
 	e.api = ctrl.GetAPIServer()
 	require.NotNil(t, e.api, "controller must expose its API server")
@@ -233,39 +236,83 @@ func (e *swaEnv) createChildTenant() {
 }
 
 // newTapper creates the root-scope operator: an account bound to a fresh admin
-// certificate and holding one ordinary (zero-AAGUID) WebAuthn credential.
+// certificate and holding one ordinary (zero-AAGUID) WebAuthn credential. The account is
+// seeded into the account store: creating an account, binding a certificate and adding a
+// passkey each need a presence tap (ADR-021 Amendment 13), and the bootstrap admin
+// certificate holds no passkey to tap with.
 func (e *swaEnv) newTapper() *swaTapper {
 	t := e.t
 	const username = "swa-operator"
 	client, cert := newAdminMTLSClient(t, e.ctrl, username)
 
-	resp := swaDo(t, e.admin, http.MethodPost, e.base+"/api/v1/accounts",
-		swaJSON(t, map[string]interface{}{"username": username, "root_scope": true}), nil)
-	require.Equal(t, http.StatusCreated, resp.Status, "create operator account: %s", resp)
-	e.bindAdminCert(username, cert)
-
-	key, _ := webauthntest.NewKey(t)
+	key, pub := webauthntest.NewKey(t)
 	credID := []byte("swa-operator-hardware-credential")
-	registerVirtualCredential(t, client, e.base, username, swaRPID, e.origin, key, credID)
+	seedPasskeyOperator(t, e.cfg, username, cert, pub, credID)
 	return &swaTapper{client: client, key: key, credID: credID}
 }
 
-// bindAdminCert binds an admin certificate to the account, as the bootstrap admin does.
+// seedPasskeyOperator writes a root-scope account bound to cert and holding one ordinary
+// (zero-AAGUID) WebAuthn credential straight into the controller's account store, the way
+// the bootstrap step binds the first admin certificate. Through the API the account would
+// need a presence tap from an operator that already holds a passkey, and the first
+// operator of a fresh controller holds none.
+func seedPasskeyOperator(t *testing.T, cfg *controllerConfig.Config, username string, cert *x509.Certificate, pub, credID []byte) {
+	t.Helper()
+	ctx := context.Background()
+	store, err := cfgapi.NewSecretStore(cfg)
+	require.NoError(t, err, "open account store")
+	defer func() { require.NoError(t, store.Close()) }()
+
+	require.NoError(t, initialization.BindAdminCertificate(ctx, store, username, cert.SerialNumber.String(), certFingerprint(cert)))
+
+	recs, err := store.ListSecrets(ctx, &secretsinterfaces.SecretFilter{
+		Tags: []string{"account"},
+		Metadata: map[string]string{
+			secretsinterfaces.MetadataKeySecretType: "account",
+			"username":                              username,
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, recs, 1, "the bound account must exist")
+	rec := recs[0]
+
+	creds, err := json.Marshal([]cfgapi.WebAuthnCredential{{
+		ID: credID, PublicKey: pub, Label: "seeded operator passkey",
+		RegisteredAt: time.Now().UTC(), AAGUID: make([]byte, 16),
+	}})
+	require.NoError(t, err)
+	meta := map[string]string{}
+	for k, v := range rec.Metadata {
+		meta[k] = v
+	}
+	meta["credentials"] = string(creds)
+	require.NoError(t, store.StoreSecret(ctx, &secretsinterfaces.SecretRequest{
+		Key: rec.Key, Value: "", TenantID: rec.TenantID, CreatedBy: rec.CreatedBy,
+		Description: rec.Description, Tags: rec.Tags, Metadata: meta,
+	}))
+}
+
+// bindAdminCert binds an admin certificate to the account as the operator, with the
+// presence tap cert-binding:bind needs (ADR-021 Amendment 13).
 func (e *swaEnv) bindAdminCert(username string, cert *x509.Certificate) {
-	resp := swaDo(e.t, e.admin, http.MethodPost, e.base+"/api/v1/accounts/"+username+"/certs/bind",
-		swaJSON(e.t, map[string]string{
-			"serial": cert.SerialNumber.String(), "fingerprint": certFingerprint(cert), "label": "swa test",
-		}), nil)
+	path := "/api/v1/accounts/" + username + "/certs/bind"
+	body := swaJSON(e.t, map[string]string{
+		"serial": cert.SerialNumber.String(), "fingerprint": certFingerprint(cert), "label": "swa test",
+	})
+	token := e.presenceToken(e.tapper, http.MethodPost, path, body, "cert-binding:bind")
+	resp := swaDo(e.t, e.tapper.client, http.MethodPost, e.base+path, body, map[string]string{"X-Presence-Token": token})
 	require.Equal(e.t, http.StatusCreated, resp.Status, "bind certificate to %s: %s", username, resp)
 }
 
 // breakGlassInto opens the crossing the operator needs to act on a tenant below root.
 func (e *swaEnv) breakGlassInto(tenant string) {
-	resp := swaDo(e.t, e.tapper.client, http.MethodPost, e.base+"/api/v1/tenants/"+tenant+"/break-glass",
-		swaJSON(e.t, map[string]string{
-			"reason_category": "account_recovery",
-			"justification":   "integration test creates the first account in the tenant",
-		}), nil)
+	path := "/api/v1/tenants/" + tenant + "/break-glass"
+	body := swaJSON(e.t, map[string]string{
+		"reason_category": "account_recovery",
+		"justification":   "integration test creates the first account in the tenant",
+	})
+	token := e.presenceToken(e.tapper, http.MethodPost, path, body, "tenant:crossing-break-glass")
+	resp := swaDo(e.t, e.tapper.client, http.MethodPost, e.base+path, body, map[string]string{"X-Presence-Token": token})
 	require.Equal(e.t, http.StatusCreated, resp.Status, "break-glass into %s: %s", tenant, resp)
 }
 
@@ -334,7 +381,9 @@ func (e *swaEnv) mustSetFlag(username string, enabled bool) {
 
 // createAccount creates an account as the operator and returns its enrollment token.
 func (e *swaEnv) createAccount(req map[string]interface{}) (token string, resp swaResp) {
-	resp = swaDo(e.t, e.tapper.client, http.MethodPost, e.base+"/api/v1/accounts", swaJSON(e.t, req), nil)
+	body := swaJSON(e.t, req)
+	tap := e.presenceToken(e.tapper, http.MethodPost, "/api/v1/accounts", body, "account:create")
+	resp = swaDo(e.t, e.tapper.client, http.MethodPost, e.base+"/api/v1/accounts", body, map[string]string{"X-Presence-Token": tap})
 	if resp.Status == http.StatusCreated || resp.Status == http.StatusOK { // 200: an existing account re-issued
 		var out struct {
 			Token string `json:"enrollment_magic_link"`
