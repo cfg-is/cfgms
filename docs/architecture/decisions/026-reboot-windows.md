@@ -4,6 +4,12 @@
 
 **Deciders:** Founder + Architecture session (2026-07-22)
 
+**Amended:** 2026-11-16 — [Amendment 1](#amendment-1-2026-11-16--window-scope-and-override):
+the window governs autonomous user-impacting actions (v1 gates OS reboots; an action's author
+may opt other user-impacting actions in), and interactive operator-console actions may
+override it under a distinct permission plus an audit event. Decisions 1 and 6 are rewritten
+in place.
+
 **Related:** [ADR-016](016-steward-module-foundation.md) (module foundation — every module that can reboot a host consults this gate). [ADR-006](006-module-packaging-and-distribution.md) (module packaging — the gate is a steward-side capability, not a per-module reimplementation). [ADR-022](022-entity-graph-model-and-access-contract.md) / [ADR-023](023-entity-graph-storage-shape.md) (entity graph — a guest VM is a first-class device/asset, which this ADR depends on for VM-scoped windows). Epic #2898 (implements this ADR). The `patch` stdlib module (`features/modules/stdlib/patch`) whose fail-open window gate this ADR replaces.
 
 ---
@@ -67,19 +73,19 @@ same gap. Any real reboot policy needs to name *"the nth weekday of the month."*
 Per the CFGMS threat model, rarely-touched settings should *bound the blast radius* of admin
 or controller compromise. A reboot is one of the highest-disruption declarative actions on a
 fleet. The window is exactly such a bound — but only if it fails **closed** and cannot be
-bypassed by a compromised admin through a convenient "emergency override" path.
+bypassed by a compromised admin through a convenient override on the declarative path.
 
 ---
 
 ## Decisions
 
-### Decision 1 — Name and scope: `reboot_window`, OS reboots only
+### Decision 1 — Name and scope: `reboot_window`, autonomous user-impacting actions
 
-The policy is named `reboot_window`. It gates **OS reboots only** — not drift apply, not
-config-push fanout. The module-consult mechanism is general (every module checks the window
-before rebooting); the v1 policy is reboots. Any future widening (maintenance windows for
-non-reboot disruption) is a *separate window type alongside* `reboot_window`, never a
-redefinition of a deployed field. This keeps each window's semantics stable and auditable.
+The policy is named `reboot_window`. It governs **autonomous user-impacting actions**. v1 gates
+**OS reboots** — not drift apply, not config-push fanout. An action's author may opt other
+user-impacting actions (for example restarting a user-facing app during an upgrade) into the
+window. The module-consult mechanism is general (every module checks the window before
+rebooting); the v1 policy is reboots.
 
 ### Decision 2 — Device-scoped; a guest VM is a device
 
@@ -120,18 +126,17 @@ names the day the window opens. No new Go module dependency. Semantics are ancho
 more-legible divergence. A **midnight-wrap** predicate is required (a window may open before
 and close after midnight).
 
-### Decision 6 — No emergency override, by design
+### Decision 6 — No override for declarative policy; interactive operator-console actions may override
 
-There is **no "reboot now, ignore the window" escape hatch** on the declarative path.
-Declarative policies (modules, convergence) **obey** the window. Imperative paths (scripts,
-workflows, `cfg` CLI, remote shell) carry their own operator judgment and are ungated —
-eliminating any admin-compromise bypass surface. The resolved window is exposed as a readable
-value in script/workflow context.
+There is **no override for declarative policy**: declarative policies (modules, convergence)
+**obey** the window. **Interactive operator-console actions may override the window under a
+distinct permission plus an audit event.** The resolved window is exposed as a readable value
+in script/workflow context.
 
-This is a **security decision**, not an ergonomics oversight: an "emergency override" on the
-declarative path is precisely the bypass a compromised or phished admin would reach for. Not
-building it removes that bypass surface entirely, consistent with bounding admin-compromise
-blast radius.
+Having no override on the declarative path is a **security decision**, not an ergonomics
+oversight: such an override is precisely the bypass a compromised or phished admin would reach
+for. Not building it removes that bypass surface from the declarative path, consistent with
+bounding admin-compromise blast radius.
 
 ### Sequencing
 
@@ -203,7 +208,7 @@ else:             inWindow = now.time >= start || now.time <= end   # window wra
 
 ## Out of Scope
 
-- **Gating anything other than reboots** — a future second window type, not this epic.
+- **Gating anything other than reboots** — other user-impacting actions enter by author opt-in (Decision 1), not through this epic.
 - **Cluster-aware reboot concurrency** (min-nodes-up, max-concurrent) — tracked in roadmap as "Cluster-Aware Patching."
 - **`Remove-VMSwitch -Force`** and other non-reboot guest disruption — named known gap.
 - **workflow-trigger scheduler DST/timezone fix** — surfaced during design, tracked separately.
@@ -272,9 +277,70 @@ legitimate tighter-cadence intent. Replaced by permissioned, audited free overri
 ### One "maintenance window" gating reboots, drift apply, and config push together
 
 Rejected: conflates controls with different risk profiles. A general mechanism with a narrow v1
-policy, extended by *additional* window types, keeps each gate's semantics stable.
+policy, widened only by author opt-in (Decision 1), keeps the gate's semantics stable.
 
 ### An emergency "reboot now" override on the declarative path
 
-Rejected: it is the exact bypass an admin-compromise threat would use. Imperative paths already
-provide the escape with their own judgment and audit.
+Rejected: it is the exact bypass an admin-compromise threat would use. Interactive
+operator-console actions provide the escape, under a distinct permission plus an audit event
+(Decision 6).
+
+---
+
+## Amendment 1 (2026-11-16) — Window scope and override
+
+**Status:** Accepted · **Deciders:** Founder · **Amends:** Decisions 1 and 6
+
+The founder decided what the window governs and what may act outside it (statement of
+2026-11-15, decision recorded 2026-11-16). Decisions 1 and 6 above are rewritten in place and
+state the current rule. This section records what changed.
+
+### A1.1 — Decision 1: scope
+
+- **Previously:** `reboot_window` gated "OS reboots only". Any future widening was to be a
+  separate window type alongside `reboot_window`, never a redefinition of a deployed field.
+- **Now:** the window governs autonomous user-impacting actions; v1 gates OS reboots; an
+  action's author may opt other user-impacting actions (for example restarting a user-facing
+  app during an upgrade) into the window.
+
+### A1.2 — Decision 6: override
+
+- **Previously:** "No emergency override, by design". The declarative path had no way to
+  ignore the window, and imperative paths (scripts, workflows, `cfg` CLI, remote shell) were
+  ungated.
+- **Now:** no override for declarative policy; interactive operator-console actions may
+  override under a distinct permission plus an audit event.
+
+"Override" in Decision 6 means acting outside the window. It is a different thing from the
+cascade override of Decision 3, where a child tenant replaces the window it inherits.
+
+### A1.3 — Why
+
+The window exists to govern autonomous user-impacting actions: what configured policy does on
+its own. An app upgrade that forces a user-facing app to restart is such an action, so its
+author can keep it inside the window. An action that an operator runs from the console is not
+autonomous, so it may override the window, under permission and audit.
+
+### A1.4 — What this amendment does not decide
+
+The amendment sets the rule for declarative policy and for interactive operator-console
+actions. It takes no position on whether scripts, workflows, the `cfg` CLI or remote shell
+count as operator-console actions, or on how the window applies to them otherwise.
+
+### A1.5 — Text aligned with the amended decisions
+
+- Context, threat-model framing: the closing sentence now names an override on the
+  declarative path as the bypass to exclude.
+- Out of Scope, first entry: gating beyond reboots comes by author opt-in, where it named a
+  future second window type.
+- Alternatives Considered, the single "maintenance window" entry: the closing sentence now
+  names author opt-in, where it named additional window types.
+- Alternatives Considered, the declarative "reboot now" entry: the closing sentence now names
+  interactive operator-console actions, where it said imperative paths already provide the
+  escape.
+
+### A1.6 — Unchanged
+
+Decisions 2 to 5, the schema, the evaluation semantics and the validation rules: device scope
+(a guest VM is a device), cascade with permissioned override, timezone resolution and the
+structured YAML schedule.

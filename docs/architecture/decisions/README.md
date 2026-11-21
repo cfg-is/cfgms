@@ -73,7 +73,7 @@ What becomes easier or harder by making this decision?
 | [023](023-entity-graph-storage-shape.md) | Entity Graph storage shape — relational observation-log store | 2026-07-21 | Accepted |
 | [024](024-module-observation-vs-convergence.md) | Module Observation vs Convergence — the `observe_when` predicate and the controller-mediated observation loop | 2026-07-22 | Accepted |
 | [025](025-tenant-access-boundary.md) | SaaS-Operator ↔ MSP Tenant Access Boundary (incl. Amendment 1: ancestry-based boundary check, not path-prefix matching) | 2026-07-30 | Accepted |
-| [026](026-reboot-windows.md) | Reboot Windows — device-scoped reboot gating with tenant inheritance and structured schedules | 2026-07-22 | Accepted |
+| [026](026-reboot-windows.md) | Reboot Windows — device-scoped reboot gating with tenant inheritance and structured schedules (incl. Amendment 1: the window governs autonomous user-impacting actions; operator-console override under permission and audit) | 2026-07-22 | Accepted |
 | [027](027-tenant-suspension-archive-and-cascading-deletion.md) | Tenant Suspension, Archive, and Cascading Deletion Lifecycle | 2026-07-31 | Accepted |
 | [029](029-controller-leadership-authority.md) | Controller Leadership Authority — Lease-Backed Authority and Fenced Side Effects | 2026-08-18 | Amended by ADR-031 |
 | [030](030-controller-secret-material-at-rest.md) | Controller Secret Material at Rest — Root of Trust per Deployment Shape | 2026-08-20 | Accepted |

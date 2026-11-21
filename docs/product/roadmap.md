@@ -8,9 +8,10 @@ and implementation is not proof of runtime verification or release readiness.
 
 ## Active SaaS release priorities
 
-No dates or version numbers are assigned here. API-first delivery prioritizes a
-cohesive web experience. Limited shipped module coverage is acceptable; silent
-failures are not. Full CLI parity is deferred.
+No dates or version numbers are assigned here. API-first delivery ships each
+capability on the web UI and `cfg` together; any `cfg` command named in user
+documentation exists with the documented behaviour. Limited shipped module
+coverage is acceptable; silent failures are not.
 
 ### Early beta
 
@@ -82,8 +83,8 @@ ledger here. Fetch current issue scope/status when acting on a reference.
 
 ### Deferred priorities
 
-Outpost, DEX experiences, self-hosting and standalone steward product work, full
-CLI parity and broader M365 coverage are deferred. Existing code and accepted
+Outpost, DEX experiences, self-hosting and standalone steward product work, and
+broader M365 coverage are deferred. Existing code and accepted
 contracts remain reusable. Version/date assignments, numeric quality targets and
 exact lifecycle actions require evidence and explicit scope decisions.
 

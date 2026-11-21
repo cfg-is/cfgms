@@ -7,7 +7,7 @@ the DNA knowledge graph provide its foundation.
 
 The product goal is trustworthy current-state visibility and fast investigation
 across endpoints, SaaS resources, directories, users and groups. The API-first
-platform prioritizes the web operator experience; full CLI parity, self-hosting
+platform is operated through the web UI and the `cfg` command line; self-hosting
 product work and standalone steward product work are deferred.
 
 [![Build Status](https://github.com/cfg-is/cfgms/workflows/Cross-Platform%20Build%20Validation/badge.svg)](https://github.com/cfg-is/cfgms/actions)
