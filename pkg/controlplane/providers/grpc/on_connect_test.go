@@ -38,6 +38,21 @@ func (h *captureHook) CalledWith() []string {
 	return out
 }
 
+// requireHookCalledWith waits for the on-connect hook to be called with
+// stewardID. The hook runs on its own goroutine after the steward is
+// registered, so registration being visible does not mean the hook has run.
+func requireHookCalledWith(t *testing.T, hook *captureHook, stewardID string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		for _, id := range hook.CalledWith() {
+			if id == stewardID {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond, "hook should be called with stewardID")
+}
+
 // newTestEnvWithOnConnectHook creates a server+client pair with the given hook injected.
 func newTestEnvWithOnConnectHook(t *testing.T, stewardID string, hook StewardOnConnectHook) (*Provider, registry.Registry) {
 	t.Helper()
@@ -90,15 +105,7 @@ func TestOnConnectHookCalledOnConnect(t *testing.T) {
 
 	_, _ = newTestEnvWithOnConnectHook(t, stewardID, hook)
 
-	require.Eventually(t, func() bool {
-		called := hook.CalledWith()
-		for _, id := range called {
-			if id == stewardID {
-				return true
-			}
-		}
-		return false
-	}, 5*time.Second, 10*time.Millisecond, "hook should be called with stewardID")
+	requireHookCalledWith(t, hook, stewardID)
 }
 
 // TestOnConnectHookErrorDoesNotTearDownStream verifies that an error returned by
@@ -110,14 +117,14 @@ func TestOnConnectHookErrorDoesNotTearDownStream(t *testing.T) {
 
 	server, reg := newTestEnvWithOnConnectHook(t, stewardID, hook)
 
-	// Steward should still be registered (stream is alive).
+	// Hook was called and returned its error; the hook runs asynchronously, so wait for it.
+	requireHookCalledWith(t, hook, stewardID)
+
+	// Steward should still be registered (stream is alive) after the hook error.
 	require.Eventually(t, func() bool {
 		_, ok := reg.Get(stewardID)
 		return ok
 	}, 5*time.Second, 10*time.Millisecond, "steward should remain registered after hook error")
-
-	// Hook was still called despite returning an error.
-	assert.Contains(t, hook.CalledWith(), stewardID, "hook should have been called")
 
 	// Controller can still send commands on the live stream.
 	sc := &types.SignedCommand{
