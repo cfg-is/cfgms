@@ -481,7 +481,7 @@ jobs:
           done
         }
 
-        pull_with_retry ghcr.io/cfg-is/ci-mirror/golang:1.27.4-alpine3.24@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf
+        pull_with_retry ghcr.io/cfg-is/ci-mirror/golang:1.27.4-alpine3.24@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280
         pull_with_retry ghcr.io/cfg-is/ci-mirror/alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
         pull_with_retry ghcr.io/cfg-is/ci-mirror/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
