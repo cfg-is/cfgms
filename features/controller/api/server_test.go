@@ -1804,6 +1804,42 @@ func TestNew_FanoutCallbackWired(t *testing.T) {
 // privileged keys without going through the admin API, so verifying both the gate and
 // the resulting key/permission shape catches regressions that would otherwise only
 // surface at E2E time.
+// TestSeedAutomationGrantReaderAPIKey covers the Issue #6394 test seed: gated by
+// CFGMS_SEED_TEST_API_KEYS, needs both its key and tenant variables, and holds only
+// automation-grant:read.
+func TestSeedAutomationGrantReaderAPIKey(t *testing.T) {
+	seeded := func(s *Server) *APIKey {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.keyCache["grant-reader-test-key"]
+	}
+
+	t.Run("gate off: not seeded", func(t *testing.T) {
+		t.Setenv("CFGMS_SEED_TEST_API_KEYS", "")
+		t.Setenv("CFGMS_API_KEY_GRANT_READER", "grant-reader-test-key")
+		t.Setenv("CFGMS_API_KEY_GRANT_READER_TENANT", "tenant-a")
+		require.Nil(t, seeded(setupTestServer(t)))
+	})
+
+	t.Run("tenant unset: not seeded", func(t *testing.T) {
+		t.Setenv("CFGMS_SEED_TEST_API_KEYS", "1")
+		t.Setenv("CFGMS_API_KEY_GRANT_READER", "grant-reader-test-key")
+		t.Setenv("CFGMS_API_KEY_GRANT_READER_TENANT", "")
+		require.Nil(t, seeded(setupTestServer(t)))
+	})
+
+	t.Run("gate on: seeded with the read permission only", func(t *testing.T) {
+		t.Setenv("CFGMS_SEED_TEST_API_KEYS", "1")
+		t.Setenv("CFGMS_API_KEY_GRANT_READER", "grant-reader-test-key")
+		t.Setenv("CFGMS_API_KEY_GRANT_READER_TENANT", "tenant-a")
+		key := seeded(setupTestServer(t))
+		require.NotNil(t, key)
+		require.NotEmpty(t, key.ID)
+		require.Equal(t, "tenant-a", key.TenantID)
+		require.Equal(t, []string{"automation-grant:read"}, key.Permissions)
+	})
+}
+
 func TestSeedTestAPIKeys(t *testing.T) {
 	t.Run("gate off: installer key not seeded even when env var is set", func(t *testing.T) {
 		t.Setenv("CFGMS_SEED_TEST_API_KEYS", "")
