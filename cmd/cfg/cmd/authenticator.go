@@ -231,18 +231,23 @@ type authenticatorKeyChoice struct {
 // against. Tests replace it to exercise the macOS refusal on other hosts.
 var authenticatorHostOS = runtime.GOOS
 
+// authenticatorUserKeysSupportedFn reports whether the platform user key (the
+// Windows CNG default) exists on this host. Tests replace it to exercise the
+// Linux and macOS default selection on a host where that key does exist.
+var authenticatorUserKeysSupportedFn = identity.UserKeysSupported
+
 // resolveAuthenticatorKeyProvider turns the --key-provider value into a choice.
 // It is checked before anything is written.
 func resolveAuthenticatorKeyProvider(flag string) (authenticatorKeyChoice, error) {
 	switch flag {
 	case "":
-		if identity.UserKeysSupported() {
+		if authenticatorUserKeysSupportedFn() {
 			return authenticatorKeyChoice{protection: authenticatorProtectionPlatform, fallback: true}, nil
 		}
 		// Never the file store: that is only ever an explicit --key-provider store.
 		return authenticatorKeyChoice{protection: authenticatorProtectionAuto}, nil
 	case authenticatorProtectionPlatform:
-		if !identity.UserKeysSupported() {
+		if !authenticatorUserKeysSupportedFn() {
 			return authenticatorKeyChoice{}, fmt.Errorf("--key-provider platform is not supported on %s: "+
 				"platform keys are Windows only; omit --key-provider to use the TPM or OS keychain, "+
 				"or use --key-provider store for the encrypted file store", runtime.GOOS)

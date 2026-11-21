@@ -51,6 +51,18 @@ func useHostOS(t *testing.T, goos string) {
 	t.Cleanup(func() { authenticatorHostOS = orig })
 }
 
+// useUnixDefaultSelection makes cfg choose the key store as it does on goos
+// (linux or darwin) with no --key-provider, on any host: the platform user key
+// that is the Windows default is reported as absent. Without it the no-flag
+// create on Windows takes the CNG path, which these tests do not cover.
+func useUnixDefaultSelection(t *testing.T, goos string) {
+	t.Helper()
+	useHostOS(t, goos)
+	orig := authenticatorUserKeysSupportedFn
+	authenticatorUserKeysSupportedFn = func() bool { return false }
+	t.Cleanup(func() { authenticatorUserKeysSupportedFn = orig })
+}
+
 // runAuthenticatorSplit is runAuthenticator with stdout and stderr kept apart.
 func runAuthenticatorSplit(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
@@ -91,6 +103,7 @@ func secretCount(s *testSessionStore) int {
 // writes the key to the keychain; the record holds no key bytes; login-style
 // signing works from it; list shows keychain; delete removes the item.
 func TestAuthenticatorCreate_DefaultsToKeychainWithoutTPM(t *testing.T) {
+	useUnixDefaultSelection(t, "linux")
 	useTPMOpener(t, noTPM)
 	kc := newTestSessionStore()
 	useAuthenticatorKeychain(t, kc)
@@ -174,6 +187,7 @@ func assertAuthenticatorAsserts(t *testing.T, rec *authenticatorRecord) {
 
 // Two authenticators have two items; deleting one never touches the other's.
 func TestAuthenticatorKeychain_ItemsAreIndependent(t *testing.T) {
+	useUnixDefaultSelection(t, "linux")
 	useTPMOpener(t, noTPM)
 	kc := newTestSessionStore()
 	useAuthenticatorKeychain(t, kc)
@@ -196,7 +210,7 @@ func TestAuthenticatorKeychain_ItemsAreIndependent(t *testing.T) {
 // Required: with no TPM and no keychain, create with no --key-provider exits
 // non-zero, writes no record and no key, and names the ways forward.
 func TestAuthenticatorCreate_RefusesWithNoTPMAndNoKeychain(t *testing.T) {
-	useHostOS(t, "linux")
+	useUnixDefaultSelection(t, "linux")
 	useTPMOpener(t, noTPM)
 	useAuthenticatorKeychain(t, nil)
 	dir := filepath.Join(t.TempDir(), "creds")
@@ -215,7 +229,7 @@ func TestAuthenticatorCreate_RefusesWithNoTPMAndNoKeychain(t *testing.T) {
 
 // On macOS there is no TPM to suggest: the refusal names the Keychain and store.
 func TestAuthenticatorCreate_RefusesOnMacOSWithoutKeychain(t *testing.T) {
-	useHostOS(t, "darwin")
+	useUnixDefaultSelection(t, "darwin")
 	useTPMOpener(t, func() (transport.TPMCloser, error) {
 		t.Error("macOS has no TPM path; it must not be opened")
 		return nil, errors.New("unreachable")
@@ -234,6 +248,7 @@ func TestAuthenticatorCreate_RefusesOnMacOSWithoutKeychain(t *testing.T) {
 // A keychain that cannot be opened, or whose write fails, refuses and never
 // falls back to the file store.
 func TestAuthenticatorCreate_KeychainFailureNeverFallsBackToFileStore(t *testing.T) {
+	useUnixDefaultSelection(t, "linux")
 	useTPMOpener(t, noTPM)
 
 	t.Run("open fails", func(t *testing.T) {
@@ -269,6 +284,7 @@ func (writeFailStore) StoreSecret(context.Context, *interfaces.SecretRequest) er
 
 // A name that exists is refused before any keychain item is written.
 func TestAuthenticatorCreate_KeychainExistingNameLeavesNoItem(t *testing.T) {
+	useUnixDefaultSelection(t, "linux")
 	useTPMOpener(t, noTPM)
 	kc := newTestSessionStore()
 	useAuthenticatorKeychain(t, kc)
@@ -286,6 +302,7 @@ func TestAuthenticatorCreate_KeychainExistingNameLeavesNoItem(t *testing.T) {
 // Required: when the record cannot be saved after the item was written, the item is
 // deleted again.
 func TestAuthenticatorCreate_SaveFailureRemovesKeychainItem(t *testing.T) {
+	useUnixDefaultSelection(t, "linux")
 	useTPMOpener(t, noTPM)
 	kc := newTestSessionStore()
 	dir, _ := authTestStore(t)
@@ -303,6 +320,7 @@ func TestAuthenticatorCreate_SaveFailureRemovesKeychainItem(t *testing.T) {
 // delete keeps the record when the item cannot be deleted, unless --force; a
 // missing item is not an error.
 func TestAuthenticatorDelete_KeychainItemHandling(t *testing.T) {
+	useUnixDefaultSelection(t, "linux")
 	useTPMOpener(t, noTPM)
 	kc := newTestSessionStore()
 	useAuthenticatorKeychain(t, kc)
@@ -338,6 +356,7 @@ func TestAuthenticatorDelete_KeychainItemHandling(t *testing.T) {
 // Signing from a keychain record fails clearly when the item is gone or the
 // keychain is unavailable, and never invents a key.
 func TestAuthenticatorKeychainRecord_SigningFailures(t *testing.T) {
+	useUnixDefaultSelection(t, "linux")
 	useTPMOpener(t, noTPM)
 	kc := newTestSessionStore()
 	useAuthenticatorKeychain(t, kc)
@@ -421,12 +440,10 @@ func TestAuthenticatorCreate_FileStoreWarningNotOnWindows(t *testing.T) {
 // automatic selection on Linux and macOS, never store.
 func TestResolveAuthenticatorKeyProvider_NoFlagIsNeverStoreOnLinuxOrMacOS(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
-		useHostOS(t, goos)
+		// The Windows default is covered by authenticator_keystore_windows_test.go.
+		useUnixDefaultSelection(t, goos)
 		c, err := resolveAuthenticatorKeyProvider("")
 		require.NoError(t, err)
-		if runtime.GOOS == "windows" {
-			continue // the Windows default is covered by authenticator_keystore_windows_test.go
-		}
 		assert.Equal(t, authenticatorKeyChoice{protection: authenticatorProtectionAuto}, c)
 		assert.NotEqual(t, authenticatorProtectionStore, c.protection)
 	}
