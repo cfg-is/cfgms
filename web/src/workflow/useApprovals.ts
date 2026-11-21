@@ -3,7 +3,7 @@
 
 /*
  * Workflow approvals hook (Issue #5450, Epic #5300). Wraps:
- *   GET  /api/v1/workflows/approvals                       → pending approvals, oldest first
+ *   GET  /api/v1/workflows/approvals                       → {approvals, total}, oldest first
  *   POST /api/v1/workflows/approvals/{approval_id}/decision → {decision, justification}
  *
  * The decision is a Strong-only step-up action handled transparently by the
@@ -60,11 +60,20 @@ export function parseApproval(value: unknown): Approval | null {
   }
 }
 
+/**
+ * Accepts the body handleListApprovals emits, a raw {approvals, total} object
+ * (null or missing approvals is an empty list), or a bare array.
+ */
 export function parseApprovalList(data: unknown): Approval[] {
   if (data === null || data === undefined) return []
-  if (!Array.isArray(data)) throw new Error('unexpected response shape')
+  let items: unknown = data
+  if (!Array.isArray(data) && typeof data === 'object') {
+    items = (data as Record<string, unknown>).approvals
+    if (items === null || items === undefined) return []
+  }
+  if (!Array.isArray(items)) throw new Error('unexpected response shape')
   const list: Approval[] = []
-  for (const item of data) {
+  for (const item of items) {
     const parsed = parseApproval(item)
     if (parsed !== null) list.push(parsed)
   }

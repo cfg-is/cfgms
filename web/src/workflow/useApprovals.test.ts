@@ -30,17 +30,28 @@ describe('parsers', () => {
     })
   })
 
-  it('treats null as empty and rejects non-arrays', () => {
+  it('treats null as empty and rejects unusable shapes', () => {
     expect(parseApprovalList(null)).toEqual([])
-    expect(() => parseApprovalList({})).toThrow()
     expect(parseApprovalList([{ approval_id: 'a' }, 7])).toHaveLength(1)
+    expect(() => parseApprovalList('x')).toThrow()
+    expect(() => parseApprovalList({ approvals: 'x' })).toThrow()
+  })
+
+  it('parses the server {approvals, total} object', () => {
+    expect(parseApprovalList({ approvals: [{ approval_id: 'a' }, 7], total: 2 })).toHaveLength(1)
+    expect(parseApprovalList({ approvals: [], total: 0 })).toEqual([])
+    expect(parseApprovalList({ approvals: null, total: 0 })).toEqual([])
+    expect(parseApprovalList({})).toEqual([])
   })
 })
 
 describe('useApprovals', () => {
   it('loads the list and decide posts the body then reloads', async () => {
+    // GET body is the exact shape handleListApprovals emits: raw {approvals, total}, no data envelope.
     fetchMock.mockImplementation((_u, init) =>
-      Promise.resolve(json(200, { data: init?.method === 'POST' ? {} : [{ approval_id: 'a/1' }] })),
+      Promise.resolve(
+        json(200, init?.method === 'POST' ? {} : { approvals: [{ approval_id: 'a/1' }], total: 1 }),
+      ),
     )
     const { result } = renderHook(() => useApprovals())
     await waitFor(() => expect(result.current.approvals).toHaveLength(1))
@@ -57,7 +68,7 @@ describe('useApprovals', () => {
   it('returns the server message on failure and reports list errors', async () => {
     fetchMock.mockImplementation((_u, init) =>
       Promise.resolve(
-        init?.method === 'POST' ? json(403, { error: { message: 'nope' } }) : json(200, { data: [] }),
+        init?.method === 'POST' ? json(403, { error: { message: 'nope' } }) : json(200, { approvals: [], total: 0 }),
       ),
     )
     const { result } = renderHook(() => useApprovals())
