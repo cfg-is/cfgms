@@ -35,9 +35,15 @@ on:
 # Deny by default; the mirror job re-grants only what it needs.
 permissions: {}
 
-concurrency:
-  group: ci-image-mirror
-  cancel-in-progress: false
+# No workflow-level concurrency group. The group was repository-wide, and GitHub
+# keeps at most one running and one pending run per group: a newer pending run
+# cancels the older pending one even with cancel-in-progress: false. The mirror
+# is called by docker-security.yml, agent-image-build.yml and
+# dependency-pin-check.yml (one call per changed ref each), plus push to develop,
+# so a third queued caller can cancel a waiting mirror. Concurrent mirrors are
+# safe instead: scripts/mirror-ci-images.sh treats a destination already at the
+# expected digest as success, and still fails on an unreachable upstream or a
+# digest mismatch.
 
 jobs:
   mirror:

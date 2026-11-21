@@ -12,7 +12,9 @@
 # ref is missing; --dry-run prints exactly one copy per list entry to
 # ghcr.io/cfg-is/ci-mirror/<name>:<tag> with the digest preserved and needs no
 # credentials or docker; --only maps a new digest to its entry's mirror name and
-# refuses an unlisted image.
+# refuses an unlisted image; copy treats a destination already at the expected
+# digest as success (also when it appears between the inspect and the create)
+# and still fails on a failed copy or a digest mismatch.
 #
 # Usage: bash scripts/mirror-ci-images_test.sh
 
@@ -200,6 +202,51 @@ out="$("$SCRIPT" --root "$fx" --changed-refs "$fx/absent" 2>&1)"; rc=$?
 if [ "$rc" -eq 0 ] && [ "$(wc -l <<<"$out")" -eq 3 ]; then pass "--changed-refs: a missing base yields every entry"; else fail "--changed-refs missing base ($rc: $out)"; fi
 rm -f "$base"
 
+
+echo "copy (concurrent mirrors of one ref)"
+# ghcr.io needs credentials, so a directory-backed stand-in for the docker CLI
+# plays the registry: one file per destination tag holds its manifest digest.
+# FAKE_MODE shapes `imagetools create`:
+#   ok        write the ref's digest
+#   race      another run writes the ref's digest first; this create fails
+#   fail      write nothing and fail (unreachable upstream)
+#   mismatch  another run writes a different digest first; this create fails
+fake="$(mktemp -d)"
+mkdir -p "$fake/bin" "$fake/reg"
+cat > "$fake/bin/docker" <<'FAKE'
+#!/bin/bash
+[ "$1 $2" = "buildx imagetools" ] || exit 2
+case "$3" in
+    inspect) f="$FAKE_REG/${4//\//_}"; [ -f "$f" ] || exit 1; cat "$f" ;;
+    create)
+        dest="$5"; ref="$6"; f="$FAKE_REG/${dest//\//_}"
+        case "$FAKE_MODE" in
+            ok) printf '%s\n' "${ref#*@}" > "$f" ;;
+            race) printf '%s\n' "${ref#*@}" > "$f"; echo "tag write conflict" >&2; exit 1 ;;
+            mismatch) printf 'sha256:%s\n' "$FAKE_OTHER" > "$f"; echo "tag write conflict" >&2; exit 1 ;;
+            fail) echo "upstream unreachable" >&2; exit 1 ;;
+        esac ;;
+esac
+FAKE
+chmod +x "$fake/bin/docker"
+fx="$(make_fixture)"
+ref="redis:7-alpine@sha256:$D1"
+dest_file="$fake/reg/${M//\//_}_redis:7-alpine"
+fake_copy() { # fake_copy <mode>: fresh registry, one --only copy
+    rm -f "$fake"/reg/*
+    FAKE_REG="$fake/reg" FAKE_MODE="$1" FAKE_OTHER="$D2" PATH="$fake/bin:$PATH" "$SCRIPT" --root "$fx" --only "$ref" 2>&1
+}
+out="$(fake_copy ok)"; rc=$?
+if [ "$rc" -eq 0 ] && [ "$(cat "$dest_file")" = "sha256:$D1" ]; then pass "copy writes a missing destination"; else fail "copy writes a missing destination ($rc: $out)"; fi
+out="$(FAKE_REG="$fake/reg" FAKE_MODE=fail PATH="$fake/bin:$PATH" "$SCRIPT" --root "$fx" --only "$ref" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && grep -q '^skip .* (already at' <<<"$out"; then pass "a destination already at the digest is skipped without a create"; else fail "already-present skip ($rc: $out)"; fi
+out="$(fake_copy race)"; rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'written concurrently' <<<"$out"; then pass "a destination written between inspect and create counts as success"; else fail "concurrent write succeeds ($rc: $out)"; fi
+out="$(fake_copy fail)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'copy failed' <<<"$out"; then pass "a failed copy with nothing at the destination still fails"; else fail "failed copy fails closed ($rc: $out)"; fi
+out="$(fake_copy mismatch)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'copy failed' <<<"$out"; then pass "a destination at a different digest still fails"; else fail "digest mismatch fails closed ($rc: $out)"; fi
+rm -rf "$fake"
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
