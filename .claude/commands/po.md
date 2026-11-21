@@ -31,7 +31,7 @@ If `$ARGUMENTS` starts with `cycle`, `decompose`, or `plan`, do **NOT** spawn a 
 |------|--------|
 | `cycle` | Pipeline Cycle (§4) — **including Step 7 (Planning Team)**. Manual; full cycle on demand. |
 | `work` | Self-Dispatch Mode (§7) — **no docker**. The local session claims and works this host's tagged stories one at a time, in-process, for a host (e.g. Windows) whose `CFGMS_PO_HOST_CAPS` names a non-default execution environment. **Drain-then-stop, not a timer:** works every currently-claimable story back-to-back in ONE invocation — re-running a FRESH preflight after each completed story (the orchestrator on another host drains the pipeline concurrently) — then stops when nothing is claimable. Do NOT wrap in `/loop`/cron; re-invoke on demand or when a blocker clears. |
-| `decompose [<epic#>]` | Run §4.1 Step 7 (Planning Team) only — for the named epic, or every `epic` with no sub-issues if no number is given. |
+| `decompose [<epic#>]` | Run §4.1 Step 7 (Planning Team) only — for the named epic, or every epic in the preflight's `epics_undecomposed` if no number is given. Never an epic in `epics_owner_run` (an owner-run epic has no sub-issues by design). |
 | `plan [<epic#>]` | Alias for `decompose`. |
 
 **How (Path A):**

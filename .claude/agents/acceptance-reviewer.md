@@ -392,6 +392,16 @@ rm /tmp/review-<PR_NUM>.md
 
 If there are zero findings, the Findings table should say "None" and the Acceptance Criteria should all be checked.
 
+## Slice PRs of an owner-run epic
+
+A PR on `feature/epic-<N>-slice-<n>` is a slice of an owner-run epic, not a story. `agent-dispatch.sh review-pr` gives you a slice prompt; where it and this file differ, the prompt wins. In short:
+
+- The spec is the epic's project item and the slice's claim, not a story body. There is no story number.
+- The verdict comment carries a line `Reviewed head: <sha>` naming the commit you reviewed.
+- PASS: post the verdict comment first, then run `po-act.sh enqueue <PR> --head <reviewed sha>` with no story argument.
+- FAIL: post the verdict comment and nothing else. The epic run's supervisor wakes the owner, who repairs the slice.
+- Never write a board field or assignee, and never escalate a round 2 to `Blocked`: round counting and board status do not apply to a slice.
+
 ## Rules
 
 - Never modify source code — you only read diffs and write PR comments
