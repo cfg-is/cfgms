@@ -250,22 +250,51 @@ func (p *Provider) drainCapabilityWrites(ctx context.Context) error {
 	}
 }
 
+// capabilityStateRank orders the states a connection moves through. In-memory
+// moves are monotonic (pending, then floor or declared; floor to declared only),
+// so a higher rank is always a later state.
+func capabilityStateRank(state string) int {
+	switch state {
+	case types.CapabilityFloor:
+		return 1
+	case types.CapabilityDeclared:
+		return 2
+	default:
+		return 0
+	}
+}
+
 // capabilityWriter serialises one connection's durable capability writes off the
 // receive loop. It keeps only the latest request while a write is running, so a
 // slow store neither blocks the loop nor lets an earlier state overwrite a later
 // one for the connection.
+//
+// "Latest submitted" is not "latest settled": the grace timer and the receive
+// loop settle and then submit on different goroutines, so a floor submit can
+// arrive after a declared one. The writer therefore ranks profiles by state and
+// drops one that ranks below a profile it already accepted; the durable record
+// can then only move in the direction the in-memory state moves.
 type capabilityWriter struct {
-	mu      sync.Mutex
-	next    *types.CapabilityProfile
-	running bool
+	mu       sync.Mutex
+	next     *types.CapabilityProfile
+	running  bool
+	accepted int // highest state rank accepted so far
 }
 
 // submit queues profile and starts the writer goroutine when none is running. The
 // goroutine is tracked by p and runs write under the provider's lifetime context.
 // It reports false, and drops profile, when shutdown has begun.
+// A profile that ranks below one already accepted is stale and is dropped; that
+// still reports true because nothing is shutting down.
 func (w *capabilityWriter) submit(p *Provider, profile types.CapabilityProfile, write func(context.Context, types.CapabilityProfile)) bool {
+	rank := capabilityStateRank(profile.State)
 	w.mu.Lock()
+	if rank < w.accepted {
+		w.mu.Unlock()
+		return true
+	}
 	if w.running {
+		w.accepted = rank
 		w.next = &profile
 		w.mu.Unlock()
 		return true
@@ -275,6 +304,7 @@ func (w *capabilityWriter) submit(p *Provider, profile types.CapabilityProfile, 
 		w.mu.Unlock()
 		return false
 	}
+	w.accepted = rank
 	w.next = &profile
 	w.running = true
 	w.mu.Unlock()
@@ -333,6 +363,24 @@ func (s *transportServer) persistConnectionCapabilities(conn *registry.StewardCo
 	}
 }
 
+// afterCapabilitySettleHooks maps a steward ID to a func(state string) that
+// runCapabilityGrace calls with capabilityHookSettled between the in-memory
+// settle and the durable submit, and with capabilityHookSubmitted right after the
+// submit. Tests use it to hold the grace goroutine at that point; production
+// leaves it empty.
+var afterCapabilitySettleHooks sync.Map
+
+const (
+	capabilityHookSettled   = "floor-settled"
+	capabilityHookSubmitted = "floor-submitted"
+)
+
+func runAfterCapabilitySettleHook(stewardID, stage string) {
+	if h, ok := afterCapabilitySettleHooks.Load(stewardID); ok {
+		h.(func(string))(stage)
+	}
+}
+
 // runCapabilityGrace settles the connection at the floor profile when its grace
 // period ends with no declaration. It ends with the stream, or as soon as the
 // connection settles.
@@ -352,7 +400,9 @@ func (s *transportServer) runCapabilityGrace(ctx context.Context, conn *registry
 	}
 	s.provider.logger.Info("steward declared no capabilities within the grace period; using the floor profile",
 		"steward_id", logging.SanitizeLogValue(conn.StewardID))
+	runAfterCapabilitySettleHook(conn.StewardID, capabilityHookSettled)
 	s.persistConnectionCapabilities(conn, w, floor)
+	runAfterCapabilitySettleHook(conn.StewardID, capabilityHookSubmitted)
 }
 
 // receiveCapabilities handles a steward's declaration on the receive loop. It
