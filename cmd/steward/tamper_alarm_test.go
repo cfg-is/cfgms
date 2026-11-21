@@ -6,8 +6,10 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -311,9 +313,43 @@ func TestTamperAlarm_BadTokenFileAndTamperedDir_TamperPath(t *testing.T) {
 }
 
 // waitConnected waits until the steward's alarm link is registered at the controller.
+// On timeout it logs an all-goroutine stack dump and the observable link state
+// before failing; a passing wait logs nothing.
 func waitConnected(t *testing.T, srv *roServer) {
 	t.Helper()
-	require.Eventually(t, func() bool { _, ok := srv.reg.Get(roStewardID); return ok }, 20*time.Second, 20*time.Millisecond)
+	connected := func() bool { _, ok := srv.reg.Get(roStewardID); return ok }
+	if !assert.Eventually(t, connected, 20*time.Second, 20*time.Millisecond) {
+		t.Logf("alarm link never registered:\n%s", linkTimeoutReport(srv))
+		t.FailNow()
+	}
+}
+
+// allGoroutineStacks returns a dump of every goroutine's stack. The buffer
+// grows until the whole dump fits, so the output is never truncated.
+//
+//duplication:justified features/workflow/test_helpers_test.go -- _test.go helpers cannot be imported across packages
+func allGoroutineStacks() []byte {
+	buf := make([]byte, 64*1024)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return buf[:n]
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+// linkTimeoutReport describes what the test server can observe about the
+// alarm link (registry contents, admission attempts, last admission error)
+// followed by an all-goroutine stack dump.
+func linkTimeoutReport(srv *roServer) string {
+	lastErr := "none"
+	if err := srv.lastAdmissionError(); err != nil {
+		lastErr = err.Error()
+	}
+	serials := srv.handshakeSerials()
+	return fmt.Sprintf("registered stewards: %d\nadmission attempts: %d (client serials %v)\nlast admission error: %s\nall goroutine stacks:\n%s",
+		srv.reg.Count(), len(serials), serials, lastErr, allGoroutineStacks())
 }
 
 func TestTamperAlarm_Latch_ReleasesOnlyWithBothConditions(t *testing.T) {

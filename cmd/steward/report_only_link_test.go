@@ -69,6 +69,26 @@ type roServer struct {
 	revoked     sync.Map
 	handshakeMu sync.Mutex
 	handshakes  []string
+	// lastAdmitErr is the most recent admission refusal, for timeout diagnostics.
+	lastAdmitErr error
+}
+
+// lastAdmissionError returns the most recent admission refusal, or nil.
+func (s *roServer) lastAdmissionError() error {
+	s.handshakeMu.Lock()
+	defer s.handshakeMu.Unlock()
+	return s.lastAdmitErr
+}
+
+// recordAdmission records one handshake's client serial and, when it was
+// refused, the refusal.
+func (s *roServer) recordAdmission(serial string, err error) {
+	s.handshakeMu.Lock()
+	defer s.handshakeMu.Unlock()
+	s.handshakes = append(s.handshakes, serial)
+	if err != nil {
+		s.lastAdmitErr = err
+	}
 }
 
 // handshakeSerials returns the client certificate serial of every handshake so far.
@@ -89,12 +109,12 @@ func (s *roServer) admit(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		return err
 	}
 	serial := c.SerialNumber.String()
-	s.handshakeMu.Lock()
-	s.handshakes = append(s.handshakes, serial)
-	s.handshakeMu.Unlock()
 	if _, revoked := s.revoked.Load(serial); revoked {
-		return fmt.Errorf("client certificate %s is revoked", serial)
+		err := fmt.Errorf("client certificate %s is revoked", serial)
+		s.recordAdmission(serial, err)
+		return err
 	}
+	s.recordAdmission(serial, nil)
 	return nil
 }
 
