@@ -430,7 +430,7 @@ func TestAuthenticatorCreate_ExistingNameRefusedAndUntouched(t *testing.T) {
 	before, err := os.ReadFile(path)
 	require.NoError(t, err)
 
-	out, err := runAuthenticator(t, "", "create", "agent-1", "--url", "https://other.example.test")
+	out, err := runAuthenticator(t, "", "create", "agent-1", "--url", "https://other.example.test", "--key-provider", "store")
 	require.Error(t, err, out)
 	assert.Contains(t, err.Error(), "already exists")
 
@@ -621,16 +621,29 @@ func TestAuthenticatorCreate_KeyProviderWithoutPlatformSupport(t *testing.T) {
 	assert.Contains(t, err.Error(), "--key-provider store")
 	assert.NoDirExists(t, dir, "a refused create must not create the credentials directory")
 
+	// With no flag the default elsewhere is no longer the credential store: with no
+	// TPM and no OS keychain, create refuses and writes nothing.
+	useTPMOpener(t, noTPM)
+	useAuthenticatorKeychain(t, nil)
+	dir = filepath.Join(t.TempDir(), "creds-b")
+	overrideCredentialsDir(t, dir)
+	_, err = runAuthenticator(t, "", "create", "b", "--url", testAuthURL)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--key-provider store")
+	assert.NoDirExists(t, dir)
+
+	// With an OS keychain the default is a keychain record.
+	kc := newTestSessionStore()
+	useAuthenticatorKeychain(t, kc)
 	out, err := runAuthenticator(t, "", "create", "b", "--url", testAuthURL)
 	require.NoError(t, err, out)
 	store, err := newCredentialStore()
 	require.NoError(t, err)
 	rec, err := loadAuthenticatorRecord(context.Background(), store, "b")
 	require.NoError(t, err)
-	assert.Equal(t, authenticatorProtectionStore, rec.Protection, "the default elsewhere is the credential store")
-	assert.NotEmpty(t, rec.KeyPKCS8)
-	assert.Empty(t, rec.KeyName)
-	assert.Contains(t, out, "Protection:    store")
+	assert.Equal(t, authenticatorProtectionKeychain, rec.Protection)
+	assert.Empty(t, rec.KeyPKCS8)
+	assert.Contains(t, out, "Protection:    keychain")
 }
 
 // A record whose protection is not one this cfg knows is refused with the remedy.
@@ -725,7 +738,9 @@ func TestResolveAuthenticatorKeyProvider_TPMAndUnchangedChoices(t *testing.T) {
 		assert.Equal(t, authenticatorKeyChoice{protection: authenticatorProtectionPlatform, fallback: true}, c,
 			"the Windows default is unchanged")
 	} else {
-		assert.Equal(t, authenticatorKeyChoice{protection: authenticatorProtectionStore}, c)
+		assert.Equal(t, authenticatorKeyChoice{protection: authenticatorProtectionAuto}, c,
+			"the old silent default of store is gone: Linux and macOS pick the TPM or OS keychain, or refuse")
+		assert.NotEqual(t, authenticatorProtectionStore, c.protection)
 	}
 
 	_, err = resolveAuthenticatorKeyProvider("platform")

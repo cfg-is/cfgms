@@ -18,6 +18,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 // TestUnavailableBackendRejectsOperations exercises the backend
@@ -89,6 +90,68 @@ func TestLinuxKeyringFallback(t *testing.T) {
 	require.NoError(t, store.DeleteSecret(ctx, key))
 	_, err = store.GetSecret(ctx, key)
 	assert.Error(t, err, "secret must be gone after delete")
+}
+
+// sessionKeyringContents returns the raw key-ID listing of the kernel session
+// keyring, and false when the keyring cannot be read on this host.
+func sessionKeyringContents(t *testing.T) ([]byte, bool) {
+	t.Helper()
+	id, err := unix.KeyctlGetKeyringID(unix.KEY_SPEC_SESSION_KEYRING, true)
+	if err != nil {
+		return nil, false
+	}
+	size, err := unix.KeyctlBuffer(unix.KEYCTL_READ, id, nil, 0)
+	if err != nil || size == 0 {
+		return nil, err == nil
+	}
+	buf := make([]byte, size)
+	n, err := unix.KeyctlBuffer(unix.KEYCTL_READ, id, buf, 0)
+	if err != nil {
+		return nil, false
+	}
+	return buf[:n], true
+}
+
+// TestNativeOnlyNeverUsesKernelKeyring is the [REQUIRED TEST] that an
+// authenticator key (which asks for native_only) is never written to the kernel
+// session keyring: with the Secret Service unavailable, the provider returns an
+// error and no store, and the keyring is unchanged. It needs no Secret Service.
+func TestNativeOnlyNeverUsesKernelKeyring(t *testing.T) {
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+	require.False(t, newSecretServiceBackend().available())
+
+	before, readable := sessionKeyringContents(t)
+	p := &Provider{}
+
+	store, err := p.CreateSecretStore(map[string]interface{}{ConfigNativeOnly: true})
+	require.Error(t, err, "native_only must refuse when only the kernel keyring remains")
+	assert.Contains(t, err.Error(), "oskeychain: no ", "no keyring-backed store is handed out")
+	assert.Nil(t, store)
+
+	if readable {
+		after, _ := sessionKeyringContents(t)
+		assert.Equal(t, before, after, "the kernel session keyring must be unchanged")
+	}
+}
+
+// TestSessionCallersKeepKeyringFallback pins that a config without native_only
+// (what openSessionStore passes) still gets the kernel keyring when the Secret
+// Service is unavailable, so session-token behaviour is unchanged.
+func TestSessionCallersKeepKeyringFallback(t *testing.T) {
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+	p := &Provider{}
+	store, err := p.CreateSecretStore(map[string]interface{}{})
+	if !newKeyringBackend().available() {
+		// With no kernel keyring either, there is no fallback to pin: the
+		// provider reports no backend, as TestUnavailableBackendRejectsOperations
+		// expects.
+		require.Error(t, err)
+		return
+	}
+	require.NoError(t, err)
+	s, ok := store.(*Store)
+	require.True(t, ok)
+	assert.Equal(t, "linux-kernel-keyring", s.backend.name())
 }
 
 // helperEnv switches the re-executed test binary into the never-exiting

@@ -186,7 +186,7 @@ func (b *secretServiceBackend) set(key string, value []byte) error {
 	if value == nil {
 		value = []byte{}
 	}
-	_, err := b.runTool("store", value, "store", "--label=CFGMS session token",
+	_, err := b.runTool("store", value, "store", "--label=CFGMS secret",
 		"service", serviceName, "account", key)
 	return err
 }
@@ -221,6 +221,9 @@ type keyringBackend struct{}
 func newKeyringBackend() *keyringBackend { return &keyringBackend{} }
 
 func (b *keyringBackend) name() string { return "linux-kernel-keyring" }
+
+// sessionScoped reports that the session keyring is lost at logout and reboot.
+func (b *keyringBackend) sessionScoped() bool { return true }
 
 // available probes whether the kernel keyring is usable by materializing the
 // session keyring. Returns false on kernels without keyctl support (ENOSYS) or

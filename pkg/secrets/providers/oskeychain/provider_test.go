@@ -132,6 +132,40 @@ func TestAvailableTracksPlatformBackend(t *testing.T) {
 	assert.Nil(t, store)
 }
 
+// TestNativeOnlyConfig covers the ConfigNativeOnly option on every host: a
+// non-bool value is refused, and native_only gives a store exactly when the
+// platform backend is available and is not scoped to the login session. A
+// config without the key behaves as before.
+func TestNativeOnlyConfig(t *testing.T) {
+	p := &Provider{}
+
+	store, err := p.CreateSecretStore(map[string]interface{}{ConfigNativeOnly: "yes"})
+	require.Error(t, err, "a non-bool native_only is refused")
+	assert.Contains(t, err.Error(), ConfigNativeOnly)
+	assert.Nil(t, store)
+
+	b := platformBackend(t)
+	scoped := false
+	if ss, ok := b.(sessionScopedBackend); ok {
+		scoped = ss.sessionScoped()
+	}
+
+	store, err = p.CreateSecretStore(map[string]interface{}{ConfigNativeOnly: true})
+	if b.available() && !scoped {
+		require.NoError(t, err)
+		assert.NotNil(t, store)
+	} else {
+		require.Error(t, err, "native_only never yields the %s backend", b.name())
+		assert.Nil(t, store)
+	}
+
+	// native_only=false is the same as the key being absent.
+	plain, plainErr := p.CreateSecretStore(map[string]interface{}{})
+	off, offErr := p.CreateSecretStore(map[string]interface{}{ConfigNativeOnly: false})
+	assert.Equal(t, plainErr == nil, offErr == nil)
+	assert.Equal(t, plain == nil, off == nil)
+}
+
 // TestRealBackendRoundTrip is the core store/get/delete test. It exercises the
 // actual OS keychain on the build platform (live Credential Manager on Windows,
 // Keychain on macOS, Secret Service / keyring on Linux). Skips when no backend

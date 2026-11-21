@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -29,6 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/softauthn"
 	"github.com/cfgis/cfgms/pkg/softauthn/tpmkey/tpmkeytest"
 )
@@ -93,6 +95,68 @@ func TestAuthenticatorCreate_TPMKeyHoldsBlobsAndNoKeyBytes(t *testing.T) {
 	out, err = runAuthenticator(t, "", "delete", "agent-1", "--force")
 	require.NoError(t, err, out)
 	assert.NoFileExists(t, filepath.Join(dir, "authenticator.agent-1.enc"))
+}
+
+// Required: with a usable TPM and no --key-provider, create makes a tpm record and
+// never touches the OS keychain. The TPM here has no EK certificate: the default
+// path does not need one (only the attestation of a root agent account does).
+func TestAuthenticatorCreate_DefaultUsesTPMWhenUsable(t *testing.T) {
+	for name, opts := range map[string]tpmkeytest.Options{
+		"with EK certificate":    {},
+		"without EK certificate": {NoEKCertificate: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			startSimTPM(t, opts)
+			origKC := authenticatorKeychainFn
+			authenticatorKeychainFn = func() (interfaces.SecretStore, error) {
+				t.Error("the keychain must not be used when the TPM holds the key")
+				return nil, nil
+			}
+			t.Cleanup(func() { authenticatorKeychainFn = origKC })
+			_, store := authTestStore(t)
+
+			out, err := runAuthenticator(t, "", "create", "agent-1", "--url", testAuthURL)
+			require.NoError(t, err, out)
+			assert.Contains(t, out, "Protection:    tpm")
+
+			rec, err := loadAuthenticatorRecord(context.Background(), store, "agent-1")
+			require.NoError(t, err)
+			assert.Equal(t, authenticatorProtectionTPM, rec.Protection)
+			assert.NotEmpty(t, rec.KeyPublicBlob)
+			assert.Empty(t, rec.KeyPKCS8, "the record holds no key bytes")
+			assert.Empty(t, rec.KeychainKey)
+			raw, err := store.Load(context.Background(), authenticatorCredentialName("agent-1"))
+			require.NoError(t, err)
+			assert.NotContains(t, string(raw), "key_pkcs8")
+
+			assertAuthenticatorAsserts(t, rec)
+			listed, err := runAuthenticator(t, "", "list")
+			require.NoError(t, err)
+			assert.Contains(t, listed, "tpm")
+		})
+	}
+}
+
+// brokenTPM opens but fails every command, as a TPM in lockout or a dead device does.
+type brokenTPM struct{}
+
+func (brokenTPM) Send([]byte) ([]byte, error) { return nil, errors.New("TPM is not responding") }
+func (brokenTPM) Close() error                { return nil }
+
+// A TPM that opens but cannot make the key falls through to the keychain; a TPM
+// that is absent does the same. The file store is never the result.
+func TestAuthenticatorCreate_DefaultFallsThroughToKeychainWhenTPMUnusable(t *testing.T) {
+	useTPMOpener(t, func() (transport.TPMCloser, error) { return brokenTPM{}, nil })
+	kc := newTestSessionStore()
+	useAuthenticatorKeychain(t, kc)
+	_, store := authTestStore(t)
+
+	out, err := runAuthenticator(t, "", "create", "agent-1", "--url", testAuthURL)
+	require.NoError(t, err, out)
+	rec, err := loadAuthenticatorRecord(context.Background(), store, "agent-1")
+	require.NoError(t, err)
+	assert.Equal(t, authenticatorProtectionKeychain, rec.Protection)
+	assert.Equal(t, 1, secretCount(kc))
 }
 
 // A TPM with no EK certificate in NV is refused, and nothing is created.

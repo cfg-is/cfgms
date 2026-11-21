@@ -1137,7 +1137,7 @@ to the controller, so a new authenticator is listed as not registered.
 | `--origin` | `scheme://host[:port]` of `--url` | WebAuthn origin; must be `https`, with a host that is the RP ID or a subdomain of it |
 | `--ca-cert` | — | PEM file with the CA certificate that signs the controller's TLS certificate; stored in the record |
 | `--label` | — | Free-text label |
-| `--key-provider` | `platform` on Windows, `store` elsewhere | `platform`: a non-exportable per-user key in the Windows platform key provider (Windows only; refused elsewhere). `store`: the key is kept in the encrypted credential store. `tpm`: the key is created inside the host TPM 2.0 (Linux with `/dev/tpmrm0`, Windows with a TPM 2.0; refused on macOS), see [`tpm`](#where-the-key-lives) |
+| `--key-provider` | `platform` on Windows; on Linux and macOS the TPM, else the OS keychain, else a refusal | `platform`: a non-exportable per-user key in the Windows platform key provider (Windows only; refused elsewhere). `store`: the key is kept in the encrypted credential store, the file store; it is never chosen unless named, and on Linux and macOS `create` warns about it. `tpm`: the key is created inside the host TPM 2.0 (Linux with `/dev/tpmrm0`, Windows with a TPM 2.0; refused on macOS), see [`tpm`](#where-the-key-lives). With no value on Linux and macOS, see [Default selection on Linux and macOS](#where-the-key-lives) |
 
 Names are 1-64 letters, digits, `.`, `_` or `-`, starting with a letter or digit.
 `create` refuses a name that already exists and leaves the existing record
@@ -1147,9 +1147,11 @@ and no way to export the key.
 
 **`list`** shows name, RP ID, origin, credential ID (base64url), whether the
 authenticator is registered, and its protection level (`platform`: a
-non-exportable key in the Windows platform key provider; `store`: the key is in
-the encrypted credential store; `tpm`: the key is inside the host TPM). `--json` prints the same fields, plus the label and
-controller URL, as a JSON array. Key material is never printed by any command.
+non-exportable key in the Windows platform key provider; `keychain`: the key is
+in the OS keychain; `tpm`: the key is inside the host TPM; `store`: the key is in
+the encrypted credential store, shown as `store (file store)`). `--json` prints
+the same fields, plus the label and controller URL, as a JSON array; the
+protection value there is `store` for the file store. Key material is never printed by any command.
 
 **Root agent accounts.** The controller can also allow a software authenticator for
 one dedicated root-scope agent account, so an agent can use presence-gated actions
@@ -1256,8 +1258,38 @@ What non-exportable protects, and what it does not:
   from asking the provider to sign with the key. Treat the authenticator as a
   credential of that user, as with `store`.
 
-**`store` (Linux, macOS, or `--key-provider store`).** The key is kept,
-PKCS#8-encoded, inside the encrypted record.
+**Default selection on Linux and macOS (no `--key-provider`).** `create` puts the
+key in the strongest store the host has, in this order, and `list` shows which one
+it used:
+
+1. **TPM (Linux).** When the host has a usable TPM 2.0 the key is created inside
+   it, as for `tpm` below. The key is non-exportable. The endorsement key
+   certificate is not required here: it is needed only for the attestation a root
+   agent account requires, and `--key-provider tpm` keeps requiring it.
+2. **OS keychain.** Otherwise the key is stored through the OS keychain: the login
+   Keychain on macOS, or the Secret Service on Linux when a session bus exposes an
+   unlocked collection. The record holds the protection `keychain` and the name
+   of the keychain item (`cfgms/authenticator/<credential ID>`), never key bytes.
+   The Linux kernel session keyring is never used for an authenticator key: it is
+   lost at logout and reboot, so a key kept there would disappear.
+3. **Neither available** (for example headless Linux with no TPM and no Secret
+   Service). `create` exits non-zero, creates nothing, and says that no TPM and no
+   OS keychain is available. Enable a TPM or virtual TPM, run a Secret Service, or
+   pass `--key-provider store` to accept the file store and its risk. It never
+   falls back to the file store on its own.
+
+An older `cfg` cannot use a `keychain` record: it refuses it as an unknown
+protection, and its `delete` removes only the record, not the keychain item.
+
+**`store` (`--key-provider store`; named on every platform, the Windows fallback).**
+The key is kept, PKCS#8-encoded, inside the encrypted record: the file store. On
+Linux and macOS it is never chosen silently; `create` prints a warning on stderr
+that the key is encrypted with values any process running as the same user can
+read, so code running as that user can recover it. It exists so a host with no TPM
+and no OS keychain, such as headless Linux, can still hold an authenticator for a
+tenant agent account. A root agent account cannot use it: the controller requires
+TPM attestation, which only `--key-provider tpm` produces. A record written by an
+older `cfg` with protection `store` keeps loading, signing, listing and deleting.
 
 **`tpm` (`--key-provider tpm`; Linux and Windows).** `create` makes the P-256
 credential key inside the host TPM 2.0, through `/dev/tpmrm0` on Linux or the TPM
@@ -1281,10 +1313,18 @@ and limits:
   same machine can ask the TPM to sign with the key, so treat it as a credential of
   that user.
 
+**What each store protects on Linux and macOS.** Only the TPM path stops code
+running as the agent's user from extracting the key. The macOS Keychain item
+(written through the `security` command, which receives the value as a process
+argument for a moment) and the Linux Secret Service item do not stop another
+process of the same user from reading the key while the keychain is unlocked; they
+do take the key out of a file whose decryption inputs sit beside it. No path stops
+a process running as the same user from asking for a signature.
+
 **The record:** `<user config dir>/cfgms/credentials/authenticator.<name>.enc`,
 a versioned JSON record (version, name, credential ID, the PKCS#8 key for `store`,
-the provider and key name for `platform`, or the wrapped public and private key
-blobs for `tpm`, RP ID, origin, controller URL,
+the provider and key name for `platform`, the keychain item name for `keychain`,
+or the wrapped public and private key blobs for `tpm`, RP ID, origin, controller URL,
 optional CA certificate, user handle, registered flag, protection) encrypted by
 the same credential store as the signing key above. The directory is
 private to the current user: mode 0700 on Linux and macOS, and an ACL for the
@@ -1310,8 +1350,8 @@ of the key itself):
   encryption protects against a copied file, a backup or a synced config directory,
   not against code running as the operator. Treat the authenticator as a credential
   of that user.
-- On Linux and macOS the key is not moved to the TPM, Secure Enclave or OS
-  keychain, so it works on headless hosts.
+- A `store` key is not moved to the TPM, Secure Enclave or OS keychain, so it
+  works on headless hosts; that is why `--key-provider store` must be named.
 - A record decrypts only for the same user on the same machine; copy it elsewhere
   and `list` fails with the credential store's different-user-or-machine error;
   delete the authenticator and create it again there.
