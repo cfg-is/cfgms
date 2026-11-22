@@ -750,6 +750,96 @@ Body fields: `target` (fleet selector), `script_id` (required), `script_version`
 | 400 | `MISSING_SCRIPT_ID` | `script_id` is empty |
 | 400 | `UNSUPPORTED_SHELL` | `shell` is outside the allowlist |
 
+### Fleet Query
+
+#### GET /api/v1/osquery/catalog
+
+Lists the catalog queries a fleet query may run, sorted by `id`, each with its parameter
+schema sorted by name. The query text is never returned.
+
+**Required permission:** `osquery:list-catalog`
+
+Response (excerpt):
+
+```json
+{"data": [{"id": "host_info", "params": []},
+          {"id": "listening_ports", "params": [{"name": "protocol_num", "type": "enum", "allowed_values": ["6", "17"]}]}],
+ "timestamp": "2026-11-22T14:03:05Z"}
+```
+
+A parameter's `type` is `enum` or `charset`; `allowed_values` is present for `enum` parameters only.
+
+#### POST /api/v1/osquery/query
+
+Runs one catalog query on every steward the `selector` matches and waits for all of them
+before responding. The query is dispatched from the controller node that serves the request.
+After dispatch the controller records an audit event with the catalog id and the targeted stewards.
+
+**Required permission:** `osquery:execute` (strong assurance with a presence tap: an
+`X-Presence-Token` header is required)
+
+Body fields: `catalog_id` (required; an `id` from the catalog), `params` (parameter values,
+validated against the catalog entry's schema) and `selector` (required fleet selector; a
+tenant prefix must lie within the caller's tenant subtree, and without one the caller's own
+subtree is used).
+
+```json
+{"data": {
+  "summary": {"matched": 3, "answered": 1, "not_connected": 1, "failed": 1, "queried_at": "2026-11-22T14:03:05.123Z"},
+  "results": [
+    {"steward_id": "s-1", "rows": [{"hostname": "h"}], "outcome": "answered"},
+    {"steward_id": "s-2", "error": "osquery: steward not connected to osquery stream", "outcome": "not_connected", "last_seen": "2026-11-22T13:40:00Z"},
+    {"steward_id": "s-3", "error": "...", "outcome": "failed"}
+  ]},
+ "timestamp": "2026-11-22T14:03:06Z"}
+```
+
+`summary` fields:
+
+| Field | Meaning |
+|-------|---------|
+| `matched` | Number of stewards the selector matched; equals the number of entries in `results` |
+| `answered` | Number of results with outcome `answered` |
+| `not_connected` | Number of results with outcome `not_connected` |
+| `failed` | Number of results with outcome `failed` |
+| `queried_at` | UTC time the controller dispatched the query |
+
+`answered + not_connected + failed == matched` always holds. A selector that matches no
+steward returns 200 with all counts `0`, `queried_at` set, and `results` an empty array.
+
+Result fields (one entry per matched steward):
+
+| Field | Meaning |
+|-------|---------|
+| `steward_id` | The steward |
+| `rows` | Result rows, each a map of column name to value; omitted when there are none |
+| `error` | Error text; set on `not_connected` and `failed` results, omitted on `answered` |
+| `outcome` | Always present: `answered`, `not_connected` or `failed` |
+| `last_seen` | UTC time of the steward's last heartbeat in the fleet record. Present on a `not_connected` result when a check-in is on record; absent when the steward has never checked in, and absent on `answered` and `failed` results |
+
+`outcome` values:
+
+| Value | Set when |
+|-------|----------|
+| `answered` | The steward returned a result; `rows` may be empty |
+| `not_connected` | The steward has no open query stream on the controller node that served the request, so nothing was sent to it. `error` is set. `last_seen` is the time of its last heartbeat in the fleet record; it is absent when the steward has never checked in |
+| `failed` | Any other dispatch error: the controller refused to send the query to the steward (for example a locked-down steward), could not send it, or the query ended in an error. `error` has the text |
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `INVALID_JSON` | Body is not valid JSON |
+| 400 | `MISSING_CATALOG_ID` | `catalog_id` is empty |
+| 400 | `INVALID_CATALOG_ID` | `catalog_id` is not in the catalog |
+| 400 | `INVALID_PARAMS` | `params` do not match the catalog entry's schema |
+| 400 | `MISSING_SELECTOR` | `selector` is empty |
+| 400 | `INVALID_SELECTOR` | `selector` does not parse |
+| 401 | `AUTHENTICATION_REQUIRED` | No authenticated acting principal |
+| 401 | | Below strong assurance or missing presence token (step-up challenge), or tenant-crossing challenge |
+| 403 | `CROSS_TENANT` | The selector's tenant prefix is outside the caller's tenant subtree |
+| 404 | `STEWARD_NOT_FOUND` | A matched steward is in a tenant the caller may not act on, or has no tenant |
+| 500 | `INTERNAL_ERROR` | The fleet selector could not be resolved |
+| 503 | `SERVICE_UNAVAILABLE` | Query dispatch or the fleet query is not configured on this node |
+
 ### Steward Service and Process Actions
 
 An operator can start, stop or restart a service, or end, suspend or resume a process, on
