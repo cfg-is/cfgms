@@ -16,7 +16,6 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/pkg/audit"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -1275,16 +1274,11 @@ func (s *Server) handleAssertEdge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerID, _ := r.Context().Value(ctxkeys.UserIDKey).(string)
-	if callerID == "" {
-		if p, _ := r.Context().Value(principalContextKey).(*Principal); p != nil {
-			callerID = p.ID
-		}
-	}
-	if callerID == "" {
-		http.Error(w, "authentication required", http.StatusUnauthorized)
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
+	callerID := principal.ID
 
 	// Resolve both endpoints inside the caller's tenant cut (ADR-022 §7): a
 	// missing or out-of-cut endpoint is 404, and both must be found before any

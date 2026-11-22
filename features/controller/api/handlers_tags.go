@@ -58,26 +58,11 @@ func (s *Server) handleListStewardTags(w http.ResponseWriter, r *http.Request) {
 // handleAddStewardTags handles POST /api/v1/stewards/{id}/tags.
 // Merges the provided tags into the steward's existing tag set (idempotent).
 func (s *Server) handleAddStewardTags(w http.ResponseWriter, r *http.Request) {
-	stewardID, ok := s.resolveStewardForTags(w, r)
+	change, ok := s.beginTagChange(w, r)
 	if !ok {
 		return
 	}
-
-	s.mu.RLock()
-	ts := s.tagStore
-	s.mu.RUnlock()
-	if ts == nil {
-		s.writeErrorResponse(w, http.StatusServiceUnavailable, "tag store not available", "TAG_STORE_UNAVAILABLE")
-		return
-	}
-
-	var req tagsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", "INVALID_BODY")
-		return
-	}
-
-	incoming := req.Tags
+	stewardID, ts, incoming := change.stewardID, change.store, change.tags
 	var changed bool
 	merged, err := ts.Update(r.Context(), stewardID, func(current []string) ([]string, error) {
 		next := mergeTags(current, incoming)
@@ -100,7 +85,7 @@ func (s *Server) handleAddStewardTags(w http.ResponseWriter, r *http.Request) {
 		"steward_id", logging.SanitizeLogValue(stewardID),
 		"count", len(merged))
 	if changed {
-		s.syncStewardAfterTagChange(r, stewardID)
+		s.syncStewardAfterTagChange(r, stewardID, change.principal.ID)
 	}
 	s.writeSuccessResponse(w, tagsResponse{Tags: merged})
 }
@@ -108,26 +93,11 @@ func (s *Server) handleAddStewardTags(w http.ResponseWriter, r *http.Request) {
 // handleDeleteStewardTags handles DELETE /api/v1/stewards/{id}/tags.
 // Removes the provided tags from the steward's tag set (idempotent).
 func (s *Server) handleDeleteStewardTags(w http.ResponseWriter, r *http.Request) {
-	stewardID, ok := s.resolveStewardForTags(w, r)
+	change, ok := s.beginTagChange(w, r)
 	if !ok {
 		return
 	}
-
-	s.mu.RLock()
-	ts := s.tagStore
-	s.mu.RUnlock()
-	if ts == nil {
-		s.writeErrorResponse(w, http.StatusServiceUnavailable, "tag store not available", "TAG_STORE_UNAVAILABLE")
-		return
-	}
-
-	var req tagsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", "INVALID_BODY")
-		return
-	}
-
-	toRemove := req.Tags
+	stewardID, ts, toRemove := change.stewardID, change.store, change.tags
 	var changed bool
 	remaining, err := ts.Update(r.Context(), stewardID, func(current []string) ([]string, error) {
 		next := removeTags(current, toRemove)
@@ -147,19 +117,15 @@ func (s *Server) handleDeleteStewardTags(w http.ResponseWriter, r *http.Request)
 		"removed", len(toRemove),
 		"remaining", len(remaining))
 	if changed {
-		s.syncStewardAfterTagChange(r, stewardID)
+		s.syncStewardAfterTagChange(r, stewardID, change.principal.ID)
 	}
 	s.writeSuccessResponse(w, tagsResponse{Tags: remaining})
 }
 
 // syncStewardAfterTagChange pushes the steward's new effective configuration after
 // its tag set changed (role fragments are selected by tag).
-func (s *Server) syncStewardAfterTagChange(r *http.Request, stewardID string) {
+func (s *Server) syncStewardAfterTagChange(r *http.Request, stewardID, issuedBy string) {
 	tenantID, _ := s.stewardOwnerTenant(r.Context(), stewardID)
-	var issuedBy string
-	if principal, ok := r.Context().Value(principalContextKey).(*Principal); ok && principal != nil {
-		issuedBy = principal.ID
-	}
 	s.syncStewardConfig(r.Context(), stewardID, tenantID, issuedBy)
 }
 
@@ -199,6 +165,46 @@ func (s *Server) resolveStewardForTags(w http.ResponseWriter, r *http.Request) (
 	}
 
 	return stewardID, true
+}
+
+// tagChange is what a handler that changes a steward's tags has resolved before it
+// changes anything: the in-scope steward, the principal the change and its config sync
+// are recorded under, the tag store and the tags from the request body.
+type tagChange struct {
+	stewardID string
+	principal *Principal
+	store     *tagstore.Store
+	tags      []string
+}
+
+// beginTagChange resolves a tag-changing request, in order: the steward in the
+// caller's scope, the acting principal (401 AUTHENTICATION_REQUIRED when there is
+// none), the tag store and the request body. It writes the refusal and returns false
+// when any of them is missing or invalid.
+func (s *Server) beginTagChange(w http.ResponseWriter, r *http.Request) (*tagChange, bool) {
+	stewardID, ok := s.resolveStewardForTags(w, r)
+	if !ok {
+		return nil, false
+	}
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return nil, false
+	}
+
+	s.mu.RLock()
+	ts := s.tagStore
+	s.mu.RUnlock()
+	if ts == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "tag store not available", "TAG_STORE_UNAVAILABLE")
+		return nil, false
+	}
+
+	var req tagsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", "INVALID_BODY")
+		return nil, false
+	}
+	return &tagChange{stewardID: stewardID, principal: principal, store: ts, tags: req.Tags}, true
 }
 
 // callerTenantID returns the caller's tenant restriction (callerTenantFilter):

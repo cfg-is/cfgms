@@ -35,9 +35,8 @@ type sessionCreateResponse struct {
 // which requires AssuranceStrong (ADR-021, Issue #2780). No in-handler assurance
 // re-check is needed — the router gate is the sole authority.
 func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 	if s.sessionManager == nil {

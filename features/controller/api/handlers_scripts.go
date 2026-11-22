@@ -163,9 +163,8 @@ func (s *Server) handlePutScriptPrivilege(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 
