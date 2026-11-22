@@ -59,9 +59,8 @@ func (s *Server) handlePutTenantRebootWindow(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 
@@ -240,9 +239,8 @@ func (s *Server) handlePutStewardRebootWindow(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 
