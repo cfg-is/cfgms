@@ -290,17 +290,18 @@ describe('OsqueryView results', () => {
     renderView()
     await run()
     const cards = await screen.findAllByTestId('osq-card')
-    expect(cards.map((c) => c.getAttribute('data-kind'))).toEqual(['rows', 'err', 'none', 'rows'])
+    // Answered cards keep server order; failed cards follow them.
+    expect(cards.map((c) => c.getAttribute('data-kind'))).toEqual(['rows', 'none', 'rows', 'err'])
     expect(cards.map((c) => within(c).getByTestId('osq-steward-id').textContent)).toEqual([
       'steward-a',
-      'steward-b',
       'steward-c',
       'steward-d',
+      'steward-b',
     ])
-    expect(within(cards[1]!).getByTestId('osq-error-text')).toHaveTextContent('steward did not respond')
+    expect(within(cards[3]!).getByTestId('osq-error-text')).toHaveTextContent('steward did not respond')
+    expect(within(cards[3]!).queryByRole('table')).toBeNull()
+    expect(within(cards[1]!).getByTestId('osq-none-text')).toHaveTextContent(/returned nothing/i)
     expect(within(cards[1]!).queryByRole('table')).toBeNull()
-    expect(within(cards[2]!).getByTestId('osq-none-text')).toHaveTextContent(/returned nothing/i)
-    expect(within(cards[2]!).queryByRole('table')).toBeNull()
     expect(within(cards[0]!).getByRole('table')).toBeInTheDocument()
     // The API returns no hostname; the view never shows one.
     expect(screen.queryByText(/hostname/i)).toBeNull()
@@ -327,7 +328,7 @@ describe('OsqueryView results', () => {
     expect(tally).toHaveTextContent('4 stewards')
     expect(tally).toHaveTextContent('1 with rows')
     expect(tally).toHaveTextContent('2 no rows')
-    expect(tally).toHaveTextContent('1 error')
+    expect(tally).toHaveTextContent('1 failed')
 
     const ids = () => screen.getAllByTestId('osq-steward-id').map((n) => n.textContent)
     fireEvent.click(screen.getByTestId('osq-filter-rows'))
@@ -377,6 +378,280 @@ describe('OsqueryView results', () => {
     expect(screen.getByTestId('osq-collapse')).toHaveAttribute('aria-expanded', 'false')
     fireEvent.click(screen.getByTestId('osq-collapse'))
     expect(screen.getByRole('table')).toBeInTheDocument()
+  })
+})
+
+describe('OsqueryView outcomes and summary', () => {
+  // A server time three hours back, so its hour:minute differs from the test clock.
+  const queriedAtMs = Math.floor((Date.now() - 3 * 3_600_000) / 1000) * 1000
+  const queriedAt = new Date(queriedAtMs).toISOString()
+  const seen23mBefore = new Date(queriedAtMs - 23 * 60_000).toISOString()
+  const notConnectedError = 'osquery: steward not connected to osquery stream'
+
+  const mixed = () => ({
+    summary: { matched: 5, answered: 2, not_connected: 2, failed: 1, queried_at: queriedAt },
+    results: [
+      { steward_id: 'steward-off-1', error: notConnectedError, outcome: 'not_connected', last_seen: seen23mBefore },
+      { steward_id: 'steward-rows', rows: rowsFor(2), outcome: 'answered' },
+      { steward_id: 'steward-failed', error: 'osquery execution failed', outcome: 'failed' },
+      { steward_id: 'steward-off-2', error: notConnectedError, outcome: 'not_connected' },
+      { steward_id: 'steward-empty', outcome: 'answered' },
+    ],
+  })
+
+  it('the tally shows the summary the API returned', async () => {
+    serve(() => jsonResponse(200, envelope(mixed())))
+    renderView()
+    await run()
+    await screen.findAllByTestId('osq-card')
+    expect(screen.getByTestId('osq-tally-matched')).toHaveTextContent('5 stewards matched ·')
+    expect(screen.getByTestId('osq-tally-answered')).toHaveTextContent('2 answered')
+    expect(screen.getByTestId('osq-tally-unreached')).toHaveTextContent('2 not reached')
+    expect(screen.getByTestId('osq-tally-failed')).toHaveTextContent('1 failed')
+    expect(screen.getByTestId('osq-tally-breakdown')).toHaveTextContent('1 with rows · 1 no rows')
+  })
+
+  it('the tally numbers are the API numbers, not a recount of the results', async () => {
+    const body = mixed()
+    body.summary = { matched: 9, answered: 4, not_connected: 3, failed: 2, queried_at: queriedAt }
+    serve(() => jsonResponse(200, envelope(body)))
+    renderView()
+    await run()
+    await screen.findAllByTestId('osq-card')
+    expect(screen.getByTestId('osq-tally-matched')).toHaveTextContent('9 stewards matched ·')
+    expect(screen.getByTestId('osq-tally-answered')).toHaveTextContent('4 answered')
+    expect(screen.getByTestId('osq-tally-unreached')).toHaveTextContent('3 not reached')
+    expect(screen.getByTestId('osq-tally-failed')).toHaveTextContent('2 failed')
+  })
+
+  it('lists not-reached stewards as one group, apart from the failed card', async () => {
+    serve(() => jsonResponse(200, envelope(mixed())))
+    renderView()
+    await run()
+    await screen.findAllByTestId('osq-card')
+
+    const groups = screen.getAllByTestId('osq-unreached-group')
+    expect(groups).toHaveLength(1)
+    const group = groups[0]!
+    expect(group).toHaveAttribute('data-kind', 'unreached')
+    expect(group).toHaveTextContent(
+      '2 stewards had no connection to the controller node that ran the query. Nothing was sent to them.',
+    )
+    expect(screen.getByRole('region', { name: 'Not reached' })).toBe(group)
+    const items = within(group).getAllByTestId('osq-unreached-item')
+    expect(items.map((li) => within(li).getByTestId('osq-steward-id').textContent)).toEqual([
+      'steward-off-1',
+      'steward-off-2',
+    ])
+    const first = within(items[0]!).getByTestId('osq-last-seen')
+    expect(first).toHaveTextContent('last seen 23m ago')
+    expect(first.querySelector('time')).toHaveAttribute('dateTime', new Date(seen23mBefore).toISOString())
+    expect(within(items[1]!).getByTestId('osq-last-seen')).toHaveTextContent('no check-in recorded')
+    expect(items[1]!.querySelector('time')).toBeNull()
+
+    // The failed steward keeps the Error card and is not in the group.
+    expect(within(group).queryByText('steward-failed')).toBeNull()
+    const cards = screen.getAllByTestId('osq-card')
+    expect(cards.map((c) => c.getAttribute('data-kind'))).toEqual(['rows', 'none', 'err'])
+    expect(within(cards[2]!).getByTestId('osq-steward-id')).toHaveTextContent('steward-failed')
+    expect(within(cards[2]!).getByTestId('osq-error-text')).toHaveTextContent('osquery execution failed')
+    // The not-reached stewards' error text is not shown.
+    expect(screen.queryByText(notConnectedError, { exact: false })).toBeNull()
+
+    // Answered cards, then the group, then the failed card.
+    const follows = (a: Element, b: Element) =>
+      (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+    expect(follows(cards[0]!, cards[1]!)).toBe(true)
+    expect(follows(cards[1]!, group)).toBe(true)
+    expect(follows(group, cards[2]!)).toBe(true)
+  })
+
+  it('the Not reached filter shows only the group and Failed only the failed card', async () => {
+    serve(() => jsonResponse(200, envelope(mixed())))
+    renderView()
+    await run()
+    await screen.findAllByTestId('osq-card')
+    expect(screen.getByTestId('osq-filter-unreached')).toHaveTextContent('Not reached')
+    expect(screen.getByTestId('osq-filter-err')).toHaveTextContent('Failed')
+
+    fireEvent.click(screen.getByTestId('osq-filter-unreached'))
+    expect(screen.getByTestId('osq-unreached-group')).toBeInTheDocument()
+    expect(screen.queryAllByTestId('osq-card')).toHaveLength(0)
+    expect(screen.getAllByTestId('osq-steward-id').map((n) => n.textContent)).toEqual([
+      'steward-off-1',
+      'steward-off-2',
+    ])
+
+    fireEvent.click(screen.getByTestId('osq-filter-err'))
+    expect(screen.queryByTestId('osq-unreached-group')).toBeNull()
+    const cards = screen.getAllByTestId('osq-card')
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toHaveAttribute('data-kind', 'err')
+    expect(within(cards[0]!).getByTestId('osq-steward-id')).toHaveTextContent('steward-failed')
+  })
+
+  it('the header shows the server queried_at as the ran time', async () => {
+    serve(() => jsonResponse(200, envelope(mixed())))
+    renderView()
+    await run()
+    await screen.findAllByTestId('osq-card')
+    const expected = new Date(queriedAtMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    expect(screen.getByTestId('osq-ran-time')).toHaveTextContent(`· ran ${expected}`)
+  })
+
+  it('an older response without summary or outcome derives the tally and shows no group', async () => {
+    serve(() =>
+      jsonResponse(
+        200,
+        envelope({
+          results: [
+            { steward_id: 'steward-a', rows: rowsFor(1) },
+            { steward_id: 'steward-b', error: 'boom' },
+            { steward_id: 'steward-c' },
+          ],
+        }),
+      ),
+    )
+    renderView()
+    await run()
+    await screen.findAllByTestId('osq-card')
+    expect(screen.getByTestId('osq-tally-matched')).toHaveTextContent('3 stewards matched ·')
+    expect(screen.getByTestId('osq-tally-answered')).toHaveTextContent('2 answered')
+    expect(screen.getByTestId('osq-tally-unreached')).toHaveTextContent('0 not reached')
+    expect(screen.getByTestId('osq-tally-failed')).toHaveTextContent('1 failed')
+    expect(screen.queryByTestId('osq-unreached-group')).toBeNull()
+    expect(screen.getAllByTestId('osq-card').map((c) => c.getAttribute('data-kind'))).toEqual([
+      'rows',
+      'none',
+      'err',
+    ])
+  })
+
+  it('renders a hostile not-reached steward id as text', async () => {
+    const hostile = '<img src=x onerror=alert(1)>'
+    serve(() =>
+      jsonResponse(
+        200,
+        envelope({
+          summary: { matched: 1, answered: 0, not_connected: 1, failed: 0, queried_at: queriedAt },
+          results: [{ steward_id: hostile, error: notConnectedError, outcome: 'not_connected', last_seen: seen23mBefore }],
+        }),
+      ),
+    )
+    const { container } = renderView()
+    await run()
+    const group = await screen.findByTestId('osq-unreached-group')
+    expect(within(group).getByTestId('osq-steward-id').textContent).toBe(hostile)
+    expect(group.querySelector('img')).toBeNull()
+    expect(container.querySelector('img')).toBeNull()
+  })
+
+  it('the time dateTime is the normalised ISO form, not the wire string', async () => {
+    serve(() =>
+      jsonResponse(
+        200,
+        envelope({
+          summary: { matched: 1, answered: 0, not_connected: 1, failed: 0, queried_at: queriedAt },
+          results: [
+            { steward_id: 'steward-off', error: notConnectedError, outcome: 'not_connected', last_seen: '2026-11-22T13:40:00Z' },
+          ],
+        }),
+      ),
+    )
+    renderView()
+    await run()
+    const group = await screen.findByTestId('osq-unreached-group')
+    expect(group).toHaveTextContent(
+      '1 steward had no connection to the controller node that ran the query. Nothing was sent to them.',
+    )
+    expect(group.querySelector('time')).toHaveAttribute('dateTime', '2026-11-22T13:40:00.000Z')
+  })
+
+  it('a leniently parsed hostile last_seen never reaches an attribute or text verbatim', async () => {
+    const hostileSeen = '2026-01-01 (<b>x</b>)'
+    serve(() =>
+      jsonResponse(
+        200,
+        envelope({
+          summary: { matched: 1, answered: 0, not_connected: 1, failed: 0, queried_at: queriedAt },
+          results: [{ steward_id: 'steward-off', error: notConnectedError, outcome: 'not_connected', last_seen: hostileSeen }],
+        }),
+      ),
+    )
+    const { container } = renderView()
+    await run()
+    const group = await screen.findByTestId('osq-unreached-group')
+    expect(group.textContent).not.toContain(hostileSeen)
+    expect(group.textContent).not.toContain('<b>')
+    for (const el of [group, ...Array.from(group.querySelectorAll('*'))]) {
+      for (const attr of Array.from(el.attributes)) {
+        expect(attr.value).not.toContain(hostileSeen)
+        expect(attr.value).not.toContain('<b>')
+      }
+    }
+    expect(container.querySelector('b')).toBeNull()
+    const seen = within(group).getByTestId('osq-last-seen')
+    const time = seen.querySelector('time')
+    if (time === null) {
+      expect(seen).toHaveTextContent('no check-in recorded')
+    } else {
+      const dt = time.getAttribute('dateTime') ?? ''
+      expect(dt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+      expect(new Date(dt).toISOString()).toBe(dt)
+      expect(seen.textContent).toMatch(/^last seen \d+[smhd] ago$/)
+    }
+  })
+
+  it('an answered result that carries an error renders as an Error card with its error text', async () => {
+    serve(() =>
+      jsonResponse(
+        200,
+        envelope({
+          summary: { matched: 2, answered: 1, not_connected: 0, failed: 1, queried_at: queriedAt },
+          results: [
+            { steward_id: 'steward-ok', rows: rowsFor(1), outcome: 'answered' },
+            { steward_id: 'steward-bad', rows: rowsFor(1), error: 'osquery returned an error', outcome: 'answered' },
+          ],
+        }),
+      ),
+    )
+    renderView()
+    await run()
+    const cards = await screen.findAllByTestId('osq-card')
+    expect(cards.map((c) => c.getAttribute('data-kind'))).toEqual(['rows', 'err'])
+    expect(within(cards[1]!).getByTestId('osq-steward-id')).toHaveTextContent('steward-bad')
+    expect(within(cards[1]!).getByText('Error')).toBeInTheDocument()
+    expect(within(cards[1]!).getByTestId('osq-error-text')).toHaveTextContent('osquery returned an error')
+    expect(within(cards[1]!).queryByRole('table')).toBeNull()
+  })
+
+  it('a zero-match response shows the zero tally, the ran time and the No stewards matched notice', async () => {
+    serve(() =>
+      jsonResponse(
+        200,
+        envelope({
+          summary: { matched: 0, answered: 0, not_connected: 0, failed: 0, queried_at: queriedAt },
+          results: [],
+        }),
+      ),
+    )
+    renderView()
+    await run('acme-corp/tag:edge')
+    const empty = await screen.findByTestId('osq-state-empty')
+    expect(empty).toHaveTextContent(/no stewards matched/i)
+    expect(within(empty).getByTestId('osq-open-fleet')).toBeInTheDocument()
+    expect(screen.getByTestId('osq-tally-matched')).toHaveTextContent('0 stewards matched ·')
+    expect(screen.getByTestId('osq-tally-answered')).toHaveTextContent('0 answered')
+    expect(screen.getByTestId('osq-tally-unreached')).toHaveTextContent('0 not reached')
+    expect(screen.getByTestId('osq-tally-failed')).toHaveTextContent('0 failed')
+    expect(screen.getByTestId('osq-tally-breakdown')).toHaveTextContent('0 with rows · 0 no rows')
+    // The tally sits above the notice and there are no filter buttons.
+    expect(
+      (screen.getByTestId('osq-tally').compareDocumentPosition(empty) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+    ).toBe(true)
+    expect(screen.queryByTestId('osq-filter-all')).toBeNull()
+    const expected = new Date(queriedAtMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    expect(screen.getByTestId('osq-ran-time')).toHaveTextContent(`· ran ${expected}`)
   })
 })
 
