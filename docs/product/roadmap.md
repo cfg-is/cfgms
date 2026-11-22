@@ -21,6 +21,7 @@ coverage is acceptable; silent failures are not.
 | Interactive stored-DNA and live-query workspace | Fleet search/DNA views and catalog OSquery dispatch exist. [#5460](https://github.com/cfg-is/cfgms/issues/5460) defines the web catalog screen under #5300. Refine the full fleet-wide query journey, freshness and partial results without duplicating that story. |
 | General read-only investigation agent | Reuse cockpit #2854, evidence cards and case updates. Define hypothesis/tool iteration, a shared operator input and open-question cards; existing findings rendering does not establish those capabilities. |
 | Microsoft 365 integration | Reuse directory inventory/convergence and read surfaces under [#5497](https://github.com/cfg-is/cfgms/issues/5497). Exact beta operations remain a product scope decision. |
+| Tenant baselines, read and compare | Per-tenant software baselines with client and device exceptions; Microsoft 365 tenant security settings and Intune policies read and compared across tenants with drift reported, without enforcement yet. |
 
 #### Early-beta delivery enablers
 
@@ -46,8 +47,18 @@ both.
 |---------|---------------------------------------|
 | Reliable updates, queries and shipped operations | Preserve steward identity/connectivity through controller/steward updates. Agree measured quality targets for live queries and shipped modules/workflows. Verify failed/missed operations are visible with optional alerts; retry/error handling is composable. Advanced recovery is not a blanket V1 gate. |
 | M365 onboarding/offboarding and licensing | User/group lifecycle, details, licensing and basic membership. Existing directory write story #5563 excludes licenses, deletion and password reset; define complete launch scenarios without silently enlarging that story. |
+| New-computer setup on Windows, macOS and Linux | CFGMS stands on its own: the steward enrolls a new device and converges it to its tenant baseline (applications, settings, users, security) with live per-step progress and a completion report, faster and with more visibility than MDM provisioning. Autopilot or another MDM may deploy the steward; Intune keeps the MDM functions, and everything an agent can do on the device is done by the steward. CFGMS is not an MDM. |
+| Application install and configuration | Native package managers only: winget, Chocolatey (opt-in, never the community feed by default), Homebrew, apt, dnf, yum and pacman, which the stdlib `package` module already selects. Verify install, removal, version and drift on each platform; Homebrew refuses to run as root, so verify the macOS path runs as the Homebrew owner. A CFGMS package repository and per-application management are not launch scope. |
+| Patch management | OS and third-party patching through approval rings with a per-client compliance report. |
+| Microsoft 365 and Intune baselines enforced | Declared Microsoft 365 tenant security settings and Intune policy baselines applied across tenants with drift detection and remediation through approved policy change. |
+| Starter monitoring and alerts | A small built-in alert set (disk, services, endpoint protection health, offline devices) feeding alert lifecycle, PSA sync and the cockpit. Full threshold-monitoring parity with an RMM is not a launch gate. |
+| Prebuilt MSP workflows | Onboard user, offboard user and new computer, adaptable by MSPs, on the existing workflow engine. |
+| Prebuilt reports | Patch, asset and compliance reports across all authorized tenants, filterable by tenant, with scheduling. |
+| Remote control | Launch a ScreenConnect session from the asset view. On Windows, a just-in-time Remote Desktop tunnel from the technician's localhost to the device over the steward's existing mutual-TLS connection: per-session authorization with a presence tap, short-lived, audited, no inbound port on the device. The tunnel is the remote-shell execution path, so it follows that path's authorization contract. CFGMS does not build a remote-desktop protocol. |
+| SaaS onboarding and metering | MSP sign-up, steward deployment through the MSP's existing RMM, and usage metering by endpoint and tenant. |
 | PAX8 | Subscription visibility/audit and procurement/quantity changes as onboarding/offboarding workflow steps, subject to API capabilities and subscription terms. Establish connector ownership against existing work before filing more. |
 | HaloPSA | Ticket/client/asset context for the cockpit, license-count reconciliation and configurable bidirectional alert lifecycle workflows. Halo embedding is exploratory, not a launch gate. |
+| Second PSA connector | Autotask or ConnectWise Manage with the same alert lifecycle and context scope as HaloPSA; which one is a scope decision. |
 | Authorized automation and investigation | Trigger/schedule scope, caller-bounded manual runs, revocation, delegated reuse and authorized MSP-wide workflows. Reconcile [#5421](https://github.com/cfg-is/cfgms/issues/5421) with [ADR-036](../architecture/decisions/036-scoped-automation-grants-and-pre-approved-content.md) and [ADR-025](../architecture/decisions/025-tenant-access-boundary.md); the epic covers approval foundations, not the triage agent or PSA connector. The vision owns incident/problem escalation, evergreen filters, read-only investigation and additive ticket-update rules. |
 
 Halo knowledge base and Notion are the initial knowledge sources; exact release
@@ -81,9 +92,21 @@ ledger here. Fetch current issue scope/status when acting on a reference.
   excludes per-resource overrides. Reconcile that remaining granularity with the
   vision instead of claiming the full control model is delivered.
 
+### Launch stretch
+
+Network management (Outpost) and a network-experience slice of DEX share equal
+priority. Neither is a launch gate; both are built opportunistically when the
+main pipeline has capacity (for example during bug hunting or manual testing),
+and otherwise follow shortly after launch.
+
+| Outcome | Scope boundary |
+|---------|----------------|
+| Network management | Cloud-managed network equipment through vendor APIs as workflow modules (declared state and drift). On-premises discovery, topology in the entity graph, configuration backup and change detection through `outpost` modules running on a steward host (ADR-006); this needs an ADR for the outpost runtime and per-job, device-scoped credential release. SNMP collection reuses permissively licensed open-source components embedded, or copyleft components only as separate processes, so the commercial embedding licence stays possible. Polled metrics need a storage decision. |
+| Network experience: call quality and DNS | Answer whether poor call or application quality is caused inside the client's network, using Microsoft 365 call records, steward per-segment probes (device, gateway, ISP edge, service edge), Wi-Fi and adapter state, and network-device counters, correlated in the cockpit. End-user DNS health: per-resolver latency, timeouts, failures and misconfigured resolver sets on all three platforms. Collection overhead is measured before it is committed. |
+
 ### Deferred priorities
 
-Outpost, DEX experiences, self-hosting and standalone steward product work, and
+DEX experiences beyond the network-experience slice, self-hosting and standalone steward product work, and
 broader M365 coverage are deferred. Existing code and accepted
 contracts remain reusable. Version/date assignments, numeric quality targets and
 exact lifecycle actions require evidence and explicit scope decisions.
@@ -105,10 +128,12 @@ These remain relevant to current queries and investigations; deferring DEX does
 not defer existing graph contracts. Future simulation and expanded discovery
 must build on those contracts rather than introduce a parallel model.
 
-Outpost provides future network observation and proxy/cache capabilities.
+Outpost provides network observation and management (see Launch stretch) and
+future proxy/cache capabilities.
 Additional SaaS, PSA, RMM and knowledge connectors follow demand and beta feedback.
-Candidates include broader M365 services, other cloud suites, ConnectWise Manage,
-Autotask, SyncroMSP, ScreenConnect, Datto RMM, IT Glue and Hudu. These are actual
+Candidates include broader M365 services, other cloud suites, Zoom call-quality
+reporting, whichever of ConnectWise Manage and Autotask is not the second launch
+PSA connector, SyncroMSP, ScreenConnect, Datto RMM, IT Glue and Hudu. These are actual
 integration candidates, not launch commitments or examples of fictional clients.
 
 ## Unscheduled candidates requiring reconciliation
