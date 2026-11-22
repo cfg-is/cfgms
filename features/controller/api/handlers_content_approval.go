@@ -157,9 +157,8 @@ func (s *Server) approvalDeps(w http.ResponseWriter, r *http.Request) (*ContentA
 // or withdraw: an API key, a relay or a grant principal never does, whatever the
 // assurance gate in front of the route decided.
 func (s *Server) humanApprover(w http.ResponseWriter, r *http.Request) (*Principal, bool) {
-	p, _ := r.Context().Value(principalContextKey).(*Principal)
-	if p == nil || p.ID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	p, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return nil, false
 	}
 	switch p.Channel {

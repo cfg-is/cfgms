@@ -327,8 +327,11 @@ func (s *Server) handleRenewCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil || principal.CertSerial == "" {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+	if principal.CertSerial == "" {
 		// Renewal is authorised exclusively by presenting the expiring certificate
 		// itself over mutual TLS (Issue #3724) — no API key or session credential can
 		// stand in for it. principal.CertSerial is set only by extractAdminPrincipal

@@ -781,34 +781,33 @@ func (s *Server) refuseRootAgentAccountWrite(w http.ResponseWriter, r *http.Requ
 
 // --- handlers (Tier-3: admin mTLS only; wired in setupRouter) ---
 
-// handleCreateAccount handles POST /api/v1/accounts (Tier-3). It creates a
-// web-admin account, or resets an existing one (upsert): on reset, omitted
-// tenant_id/permissions are retained. Passkeys are registered separately via the
-// WebAuthn registration endpoints (Issue #2993).
-func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
+// decodeAccountCreateRequest reads and validates the create-account body, writing the 400
+// and returning false for a malformed body, an invalid username or scope, or an unknown
+// permission. Identifier fields come back with CR/LF stripped.
+func (s *Server) decodeAccountCreateRequest(w http.ResponseWriter, r *http.Request) (AccountRequest, bool) {
 	var req AccountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
-		return
+		return req, false
 	}
 
 	if err := validateUsername(req.Username); err != nil {
 		// Error text describes the rule only — never echoes the submitted value.
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_USERNAME")
-		return
+		return req, false
 	}
 	// root_scope and tenant_id are mutually exclusive (Issue #2919).
 	if req.RootScope && req.TenantID != "" {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"root_scope and tenant_id are mutually exclusive", "INVALID_SCOPE")
-		return
+		return req, false
 	}
 	// Same permission allow-list discipline as API keys ("*" and unknown IDs rejected):
 	// accounts are RBAC-equivalent to API-key principals, not implicit admins.
 	if p, unknown := firstUnknownPermission(req.Permissions); unknown {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"Unknown or reserved permission ID: "+p, "INVALID_PERMISSION")
-		return
+		return req, false
 	}
 	// go/log-injection (CWE-117) + storage-key safety: strip CR/LF from json.Decoded
 	// identifier fields at the source using strings.ReplaceAll — the form CodeQL's
@@ -816,12 +815,24 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	// cannot pass the regex); TenantID has no charset guard, so this is its guard.
 	req.Username = strings.ReplaceAll(strings.ReplaceAll(req.Username, "\n", ""), "\r", "")
 	req.TenantID = strings.ReplaceAll(strings.ReplaceAll(req.TenantID, "\n", ""), "\r", "")
+	return req, true
+}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	actingPrincipalID := ""
-	if principal != nil {
-		actingPrincipalID = principal.ID
+// handleCreateAccount handles POST /api/v1/accounts (Tier-3). It creates a
+// web-admin account, or resets an existing one (upsert): on reset, omitted
+// tenant_id/permissions are retained. Passkeys are registered separately via the
+// WebAuthn registration endpoints (Issue #2993).
+func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
+	req, ok := s.decodeAccountCreateRequest(w, r)
+	if !ok {
+		return
 	}
+
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+	actingPrincipalID := principal.ID
 
 	existing, ok := s.lookupAccountForWrite(w, r, principal, &req)
 	if !ok {
@@ -1153,11 +1164,11 @@ func (s *Server) handleRevokeEnrollmentLink(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	actingPrincipalID := ""
-	if principal != nil {
-		actingPrincipalID = principal.ID
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
 	}
+	actingPrincipalID := principal.ID
 
 	// Persist a copy first, then mutate the cache — never the other way round.
 	// getAccount hands back the pointer held in s.accounts, so revoking on
@@ -1472,6 +1483,35 @@ func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// accountInCallerScope loads the account named by username for a mutation and enforces
+// the caller's tenant-subtree scope before anything is changed, through the fail-closed
+// tenantAccessForScope (Issue #3126/#4334/#4316). A cross-tenant caller gets 404 — not
+// 403 — to avoid disclosing account existence, and an unset scope is refused outright:
+// holding the account permission does not by itself prove a valid caller scope was
+// established. It writes the refusal (500 on a store error, 404 otherwise) and returns
+// false when the account may not be changed.
+func (s *Server) accountInCallerScope(w http.ResponseWriter, r *http.Request, username, route string) (*account, bool) {
+	acct, err := s.getAccount(r.Context(), username)
+	if err != nil {
+		s.logger.Error("Failed to look up account", "error", logging.SanitizeLogValue(err.Error()),
+			"username", logging.SanitizeLogValue(username))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
+		return nil, false
+	}
+	if acct == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+		return nil, false
+	}
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if access := s.tenantAccessForScope(r.Context(), scope, acct.TenantID, route); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+		}
+		return nil, false
+	}
+	return acct, true
+}
+
 // handleUpdateAccount handles PUT /api/v1/accounts/{username} (Issue #3126, Tier-3).
 // All request fields are optional — omitted fields retain existing values.
 // A cross-tenant caller gets 404 to avoid disclosing account existence.
@@ -1499,36 +1539,16 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	acct, err := s.getAccount(r.Context(), username)
-	if err != nil {
-		s.logger.Error("Failed to look up account", "error", logging.SanitizeLogValue(err.Error()),
-			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
-		return
-	}
-	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+	acct, ok := s.accountInCallerScope(w, r, username, "PUT /api/v1/accounts/{username}")
+	if !ok {
 		return
 	}
 
-	// Issue #3126/#4334: enforce tenant-subtree scope before mutating anything, via
-	// the fail-closed isAuthorizedForTenant (Issue #4316). A cross-tenant caller gets
-	// 404 — not 403 — to avoid disclosing account existence. An unset scope is
-	// refused outright — holding account:update does not by itself prove a valid
-	// caller scope was established.
-	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if access := s.tenantAccessForScope(r.Context(), scope, acct.TenantID, "PUT /api/v1/accounts/{username}"); access != tenantAuthAllowed {
-		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
-			s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
-		}
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
-
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	actingPrincipalID := ""
-	if principal != nil {
-		actingPrincipalID = principal.ID
-	}
+	actingPrincipalID := principal.ID
 
 	// Issue #4334: a caller may not grant a permission it does not itself hold — the
 	// catalogue check above only proves the permission exists, not that this caller
@@ -1743,35 +1763,16 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	acct, err := s.getAccount(r.Context(), username)
-	if err != nil {
-		s.logger.Error("Failed to look up account", "error", logging.SanitizeLogValue(err.Error()),
-			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
-		return
-	}
-	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+	acct, ok := s.accountInCallerScope(w, r, username, "DELETE /api/v1/accounts/{username}")
+	if !ok {
 		return
 	}
 
-	// Issue #4334: enforce tenant-subtree scope before offboarding anything. A
-	// cross-tenant caller gets 404 — not 403 — to avoid disclosing account existence,
-	// matching handleGetAccount/handleUpdateAccount. An unset scope is refused
-	// outright (Issue #4316 fail-closed contract).
-	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if access := s.tenantAccessForScope(r.Context(), scope, acct.TenantID, "DELETE /api/v1/accounts/{username}"); access != tenantAuthAllowed {
-		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
-			s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
-		}
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
-
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	actingPrincipalID := ""
-	if principal != nil {
-		actingPrincipalID = principal.ID
-	}
+	actingPrincipalID := principal.ID
 
 	// Step 1: disable the account first (fail-closed — the safety property, not an
 	// implementation detail). A bound certificate or live session is rejected on its
@@ -1789,6 +1790,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	disableCommitted := false
 	for attempt := 0; attempt < maxDisableAttempts; attempt++ {
 		if attempt > 0 {
+			var err error
 			acct, err = s.loadAccountFromStore(r.Context(), username, accountStorageTenant(acct.TenantID))
 			if err != nil {
 				s.logger.Error("Failed to reload account before offboarding",

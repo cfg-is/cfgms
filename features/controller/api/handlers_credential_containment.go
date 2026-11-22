@@ -317,39 +317,16 @@ func (s *Server) getCollectedCredentialRequestBySerial(ctx context.Context, seri
 // already issued from the token and blocks every still-pending/approved request under it
 // from ever producing one, reporting a per-request outcome (Issue #3725 AC).
 func (s *Server) handleRevokeCredentialsByEnrolmentToken(w http.ResponseWriter, r *http.Request) {
-	if s.secretStore == nil {
-		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
+	tok, ok := s.enrolmentTokenInCallerScope(w, r, "POST /api/v1/enrolment-tokens/{id}/revoke-issued-credentials")
+	if !ok {
 		return
 	}
 
-	id := mux.Vars(r)["id"]
-	if id == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "id is required", "MISSING_ID")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
-
-	tok, err := s.getEnrolmentTokenByID(r.Context(), id)
-	if err != nil {
-		s.logger.Error("Failed to look up enrolment token for revoke-by-token", "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up enrolment token", "STORE_ERROR")
-		return
-	}
-	if tok == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Enrolment token not found", "TOKEN_NOT_FOUND")
-		return
-	}
-	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), tok.TenantID, "POST /api/v1/enrolment-tokens/{id}/revoke-issued-credentials"); access != tenantAuthAllowed {
-		if !s.writeTenantCrossingIfNeeded(w, access, tok.TenantID) {
-			s.writeErrorResponse(w, http.StatusNotFound, "Enrolment token not found", "TOKEN_NOT_FOUND")
-		}
-		return
-	}
-
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	actingID := ""
-	if principal != nil {
-		actingID = principal.ID
-	}
+	actingID := principal.ID
 
 	reqs, err := s.findCredentialRequestsByEnrolmentToken(r.Context(), tok.ID)
 	if err != nil {
@@ -379,46 +356,23 @@ func (s *Server) handleRevokeCredentialsByEnrolmentToken(w http.ResponseWriter, 
 // not a certificate revocation, since collect (not approval) mints the certificate
 // (Issue #3725 AC).
 func (s *Server) handleCancelCredentialRequest(w http.ResponseWriter, r *http.Request) {
-	if s.secretStore == nil {
-		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
-		return
-	}
-
-	id := mux.Vars(r)["id"]
-	if id == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "id is required", "MISSING_ID")
-		return
-	}
-
 	// Tenant-scope and existence checks happen against a plain read first (mirroring
 	// handleDenyCredentialRequest / handleApproveCredentialRequest) so a caller outside
 	// the request's tenant subtree gets the same 404 whether or not the request exists.
 	// cancelApprovedCredentialRequest re-reads the record under the lock for the actual
 	// compare-and-set.
-	reqRecord, err := s.getPendingCredentialRequestByID(r.Context(), id)
-	if err != nil {
-		s.logger.Error("Failed to look up credential request for cancel", "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up credential request", "STORE_ERROR")
-		return
-	}
-	if reqRecord == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Credential request not found", "REQUEST_NOT_FOUND")
-		return
-	}
-	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), reqRecord.TenantID, "POST /api/v1/credential-requests/{id}/cancel"); access != tenantAuthAllowed {
-		if !s.writeTenantCrossingIfNeeded(w, access, reqRecord.TenantID) {
-			s.writeErrorResponse(w, http.StatusNotFound, "Credential request not found", "REQUEST_NOT_FOUND")
-		}
+	reqRecord, ok := s.credentialRequestInCallerScope(w, r, "POST /api/v1/credential-requests/{id}/cancel")
+	if !ok {
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	actingID := ""
-	if principal != nil {
-		actingID = principal.ID
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
 	}
+	actingID := principal.ID
 
-	cancelled, err := s.cancelApprovedCredentialRequest(r.Context(), id, actingID)
+	cancelled, err := s.cancelApprovedCredentialRequest(r.Context(), reqRecord.ID, actingID)
 	if err != nil {
 		switch {
 		case errors.Is(err, errCredentialRequestNotFound):
@@ -504,16 +458,7 @@ func (s *Server) handleListOrphanedCredentials(w http.ResponseWriter, r *http.Re
 				"error", logging.SanitizeLogValue(err.Error()))
 			continue
 		}
-		bound := false
-		if acct != nil {
-			for _, b := range acct.CertBindings {
-				if b.Serial == req.CollectedSerial {
-					bound = true
-					break
-				}
-			}
-		}
-		if bound {
+		if accountBindsSerial(acct, req.CollectedSerial) {
 			continue
 		}
 		collectedAt := ""
@@ -529,6 +474,41 @@ func (s *Server) handleListOrphanedCredentials(w http.ResponseWriter, r *http.Re
 		})
 	}
 	s.writeSuccessResponse(w, result)
+}
+
+// accountBindsSerial reports whether acct (nil when the account no longer exists) holds a
+// CertBinding for serial.
+func accountBindsSerial(acct *account, serial string) bool {
+	if acct == nil {
+		return false
+	}
+	for _, b := range acct.CertBindings {
+		if b.Serial == serial {
+			return true
+		}
+	}
+	return false
+}
+
+// refuseBoundCertificate re-verifies serial is orphaned: when the request's bound account
+// still carries a binding for it, or the account lookup fails, it writes the refusal and
+// returns true.
+func (s *Server) refuseBoundCertificate(w http.ResponseWriter, r *http.Request, boundAccountID, serial string) bool {
+	if boundAccountID == "" {
+		return false
+	}
+	acct, err := s.getAccountByID(r.Context(), boundAccountID)
+	if err != nil {
+		s.logger.Error("Failed to look up bound account for orphan revoke", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up bound account", "STORE_ERROR")
+		return true
+	}
+	if accountBindsSerial(acct, serial) {
+		s.writeErrorResponse(w, http.StatusConflict,
+			"Certificate is bound to an account; it is not orphaned", "NOT_ORPHANED")
+		return true
+	}
+	return false
 }
 
 // handleRevokeOrphanedCredential handles
@@ -570,6 +550,12 @@ func (s *Server) handleRevokeOrphanedCredential(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+	actingID := principal.ID
+
 	alreadyRevoked, err := s.certManager.IsRevoked(serial)
 	if err != nil {
 		s.logger.Error("Revocation check failed for orphan revoke",
@@ -583,26 +569,7 @@ func (s *Server) handleRevokeOrphanedCredential(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	orphaned := true
-	if req.BoundAccountID != "" {
-		acct, err := s.getAccountByID(r.Context(), req.BoundAccountID)
-		if err != nil {
-			s.logger.Error("Failed to look up bound account for orphan revoke", "error", logging.SanitizeLogValue(err.Error()))
-			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up bound account", "STORE_ERROR")
-			return
-		}
-		if acct != nil {
-			for _, b := range acct.CertBindings {
-				if b.Serial == serial {
-					orphaned = false
-					break
-				}
-			}
-		}
-	}
-	if !orphaned {
-		s.writeErrorResponse(w, http.StatusConflict,
-			"Certificate is bound to an account; it is not orphaned", "NOT_ORPHANED")
+	if s.refuseBoundCertificate(w, r, req.BoundAccountID, serial) {
 		return
 	}
 
@@ -612,11 +579,6 @@ func (s *Server) handleRevokeOrphanedCredential(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	actingID := ""
-	if principal != nil {
-		actingID = principal.ID
-	}
 	s.logger.Info("Orphaned enrolment-flow certificate revoked",
 		"request_id", logging.SanitizeLogValue(req.ID),
 		"serial", logging.SanitizeLogValue(serial))
